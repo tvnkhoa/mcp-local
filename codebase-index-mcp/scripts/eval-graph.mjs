@@ -166,13 +166,29 @@ console.log(`\n  ${badge(crossStatus)} cross-repo links (WARN=0 rows, expected i
 
 // ── 8. Resolved edge sample ──────────────────────────────────
 section("8. Resolved Edge Sample (get_file_context simulation)");
-const sampleFile = db.prepare(`
-  SELECT file_path FROM symbols
-  WHERE repo_id = ? AND kind != 'module'
-  GROUP BY file_path
-  ORDER BY count(*) DESC
+
+// Prefer a file that has intra-repo resolved edges (to_id exists in symbols)
+let sampleFile = db.prepare(`
+  SELECT s.file_path, count(st.symbol_id) as resolved_cnt
+  FROM symbols s
+  INNER JOIN edges e ON e.repo_id = s.repo_id AND e.from_id = s.symbol_id
+  INNER JOIN symbols st ON st.repo_id = e.repo_id AND st.symbol_id = e.to_id
+  WHERE s.repo_id = ?
+  GROUP BY s.file_path
+  ORDER BY resolved_cnt DESC
   LIMIT 1
 `).get(repoId);
+
+// Fallback: any file with non-module symbols
+if (!sampleFile) {
+  sampleFile = db.prepare(`
+    SELECT file_path FROM symbols
+    WHERE repo_id = ? AND kind != 'module'
+    GROUP BY file_path
+    ORDER BY count(*) DESC
+    LIMIT 1
+  `).get(repoId);
+}
 
 if (sampleFile) {
   const sampleEdges = db.prepare(`

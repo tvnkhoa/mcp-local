@@ -200,15 +200,55 @@ function extractJavaScriptSymbols(
     }
   }
 
-  for (const node of root.descendantsOfType(["function_declaration", "class_declaration"])) {
+  for (const node of root.descendantsOfType([
+    "function_declaration",
+    "class_declaration",
+    "interface_declaration",
+    "type_alias_declaration",
+    "enum_declaration",
+    "method_definition",
+    "abstract_class_declaration"
+  ])) {
     const nameNode = node.childForFieldName("name");
-    if (nameNode) {
+    if (!nameNode) continue;
+
+    let kind: SymbolRecord["kind"] = "unknown";
+    if (node.type === "function_declaration") kind = "function";
+    else if (node.type === "class_declaration" || node.type === "abstract_class_declaration") kind = "class";
+    else if (node.type === "interface_declaration") kind = "interface";
+    else if (node.type === "type_alias_declaration") kind = "type";
+    else if (node.type === "enum_declaration") kind = "type";
+    else if (node.type === "method_definition") kind = "method";
+
+    symbols.push({
+      repoId: input.repoId,
+      symbolId: stableId(`${input.repoId}:${input.filePath}:${kind}:${nameNode.text}:${node.startPosition.row}`),
+      filePath: input.filePath,
+      name: nameNode.text,
+      kind,
+      line: node.startPosition.row + 1
+    });
+  }
+
+  // Exported arrow functions: export const fn = () => ...
+  for (const node of root.descendantsOfType(["lexical_declaration"])) {
+    // Only care about top-level exported const
+    const parent = node.parent;
+    if (parent?.type !== "export_statement" && node.parent?.type !== "program") continue;
+
+    for (const declarator of node.descendantsOfType(["variable_declarator"])) {
+      const nameNode = declarator.childForFieldName("name");
+      const valueNode = declarator.childForFieldName("value");
+      if (!nameNode) continue;
+      if (!valueNode) continue;
+      if (valueNode.type !== "arrow_function" && valueNode.type !== "function") continue;
+
       symbols.push({
         repoId: input.repoId,
-        symbolId: stableId(`${input.repoId}:${input.filePath}:${node.type}:${nameNode.text}:${node.startPosition.row}`),
+        symbolId: stableId(`${input.repoId}:${input.filePath}:function:${nameNode.text}:${node.startPosition.row}`),
         filePath: input.filePath,
         name: nameNode.text,
-        kind: node.type === "function_declaration" ? "function" : "class",
+        kind: "function",
         line: node.startPosition.row + 1
       });
     }
