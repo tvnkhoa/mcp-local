@@ -31,6 +31,7 @@ export type IndexRunSummary = {
 export type GraphHealth = {
   unresolvedCalls: number;
   unresolvedImports: number;
+  unresolvedTypeRefs: number;
   note: string;
 };
 
@@ -87,7 +88,7 @@ export type EdgeRecord = {
   repoId: string;
   fromId: string;
   toId: string;
-  type: "IMPORTS" | "CALLS" | "DEPENDS_ON" | "IMPLEMENTS";
+  type: "IMPORTS" | "CALLS" | "DEPENDS_ON" | "IMPLEMENTS" | "TYPE_REF";
 };
 
 export type ResolvedEdge = {

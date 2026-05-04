@@ -43,5 +43,11 @@ const multi = store.searchSymbols("index pipeline", "mcp-local", null, null, nul
 console.log(`results: ${multi.length}`);
 multi.forEach(s => console.log(`  ${s.name} (${s.kind}) @ ${s.filePath}:${s.line}`));
 
+// Test intent strategy for natural-language-like prompt
+console.log("\n=== search_symbols intent 'class handles assigned to ai conversation' ===");
+const intent = store.searchSymbols("class handles assigned to ai conversation", "mcp-local", null, null, null, 10, "intent");
+console.log(`results: ${intent.length}`);
+intent.forEach(s => console.log(`  ${s.name} (${s.kind}) @ ${s.filePath}:${s.line}`));
+
 store.close?.();
 console.log("\n[DONE]");

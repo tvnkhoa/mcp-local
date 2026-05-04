@@ -125,6 +125,7 @@ const searchSymbolsSchema = z
     language: z.string().max(50).optional(),
     kind: z.string().max(50).optional(),
     filePath: z.string().max(500).optional(),
+    strategy: z.enum(["name", "intent"]).default("name"),
     limit: z.number().int().min(1).max(MAX_RESULT_LIMIT).default(50),
     compact: z.boolean().default(false),
     profile: responseProfileSchema.default("standard")
@@ -406,7 +407,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: "search_symbols",
-        description: "Fuzzy search symbols by name across all repos or a specific repo. Use profile=compact for token-saving output, standard for balanced output, verbose for debug-rich output. compact=true is still supported for backward compatibility.",
+        description: "Search symbols across all repos or a specific repo. strategy=name is strict name/signature matching; strategy=intent uses broader tokenized matching for natural-language-like prompts.",
         inputSchema: {
           type: "object",
           additionalProperties: false,
@@ -417,6 +418,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             language: { type: "string" },
             kind: { type: "string" },
             filePath: { type: "string" },
+            strategy: { type: "string", enum: ["name", "intent"] },
             limit: { type: "integer", minimum: 1, maximum: MAX_RESULT_LIMIT },
             compact: { type: "boolean" },
             profile: { type: "string", enum: ["compact", "standard", "verbose"] }
@@ -769,15 +771,21 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           args.language ?? null,
           args.kind ?? null,
           args.filePath ?? null,
-          args.limit
+          args.limit,
+          args.strategy
         );
         if (profile === "compact") {
-          return asText({ query: args.query, count: results.length,
-            symbols: results.map((s) => ({ name: s.name, kind: s.kind, filePath: s.filePath, line: s.line })) }, profile);
+          return asText({
+            query: args.query,
+            strategy: args.strategy,
+            count: results.length,
+            symbols: results.map((s) => ({ name: s.name, kind: s.kind, filePath: s.filePath, line: s.line }))
+          }, profile);
         }
         if (profile === "verbose") {
           return asText({
             query: args.query,
+            strategy: args.strategy,
             count: results.length,
             symbols: results,
             summary: {
@@ -788,7 +796,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             }
           }, profile);
         }
-        return asText({ query: args.query, count: results.length, symbols: results }, profile);
+        return asText({ query: args.query, strategy: args.strategy, count: results.length, symbols: results }, profile);
       }
       case "get_file_context": {
         const args = getFileContextSchema.parse(request.params.arguments ?? {});
@@ -909,7 +917,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             callers: [],
             callees: [],
             typeDeps: [],
-            graphHealth: { unresolvedCalls: 0, unresolvedImports: 0, note: "symbol not found" },
+            graphHealth: { unresolvedCalls: 0, unresolvedImports: 0, unresolvedTypeRefs: 0, note: "symbol not found" },
             queryName: args.name
           }, profile);
         }
@@ -965,7 +973,14 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
       case "find_entry_points": {
         const args = findEntryPointsSchema.parse(request.params.arguments ?? {});
-        return asText(store.findEntryPoints(args.repoId, args.filePathPrefix ?? null, args.kind ?? null, args.limit));
+        const entries = store.findEntryPoints(args.repoId, args.filePathPrefix ?? null, args.kind ?? null, args.limit);
+        return asText({
+          repoId: args.repoId,
+          total: entries.length,
+          runtimeEntryPoints: entries.filter((e) => e.entryReason === "bootstrap_file"),
+          graphEntryPoints: entries.filter((e) => e.entryReason === "uncalled_symbol"),
+          entryPoints: entries
+        });
       }
       case "find_implementations": {
         const args = findImplementationsSchema.parse(request.params.arguments ?? {});
@@ -1285,6 +1300,7 @@ async function runIndexAndResolve(
   const crossStats = safeCrossRepoResolve(repoId);
   const callEdgesResolved = (() => { try { return store.resolveCallEdges(repoId); } catch { return 0; } })();
   const importEdgesResolved = (() => { try { return store.resolveImportEdges(repoId); } catch { return 0; } })();
+  (() => { try { store.resolveTypeRefEdges(repoId); } catch { /* non-fatal */ } })();
   try { store.resolveImplementsEdges(repoId); } catch { /* non-fatal */ }
   const mentionsResolved = docsEnabled
     ? (() => { try { return store.resolveMentions(repoId); } catch { return 0; } })()

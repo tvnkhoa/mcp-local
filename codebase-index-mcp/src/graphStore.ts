@@ -498,7 +498,15 @@ export class GraphStore {
     this.db.exec(`insert into symbols_fts(symbols_fts) values('rebuild')`);
   }
 
-  searchSymbols(query: string, repoId: string | null, language: string | null, kind: string | null, filePath: string | null, limit: number): (SymbolRecord & { repoPath: string | null })[] {
+  searchSymbols(
+    query: string,
+    repoId: string | null,
+    language: string | null,
+    kind: string | null,
+    filePath: string | null,
+    limit: number,
+    strategy: "name" | "intent" = "name"
+  ): (SymbolRecord & { repoPath: string | null })[] {
     const langJoin = language
       ? `inner join files f on f.repo_id = s.repo_id and f.path = s.file_path and f.language = '${language.replace(/'/g, "''")}'`
       : "left join files f on f.repo_id = s.repo_id and f.path = s.file_path";
@@ -530,6 +538,7 @@ export class GraphStore {
 
     if (useFts) {
       const ftsWhere = conditions.length > 0 ? `and ${conditions.join(" and ")}` : "";
+      const ftsQuery = strategy === "intent" ? this.buildIntentFtsQuery(query) : this.buildFtsQuery(query);
       return this.db
         .prepare(
           `
@@ -552,11 +561,27 @@ export class GraphStore {
           limit ?
           `
         )
-        .all(this.buildFtsQuery(query), ...params, limit) as (SymbolRecord & { repoPath: string | null })[];
+        .all(ftsQuery, ...params, limit) as (SymbolRecord & { repoPath: string | null })[];
     }
 
-    conditions.unshift("(s.name like ? or s.signature like ?)");
-    params.unshift(`%${query}%`, `%${query}%`);
+    if (strategy === "intent") {
+      const tokens = this.extractIntentTokens(query);
+      if (tokens.length > 0) {
+        const tokenClauses = tokens.map(() => "(s.name like ? or s.signature like ?)");
+        conditions.unshift(`(${tokenClauses.join(" or ")})`);
+        const tokenParams: string[] = [];
+        for (const token of tokens) {
+          tokenParams.push(`%${token}%`, `%${token}%`);
+        }
+        params.unshift(...tokenParams);
+      } else {
+        conditions.unshift("(s.name like ? or s.signature like ?)");
+        params.unshift(`%${query}%`, `%${query}%`);
+      }
+    } else {
+      conditions.unshift("(s.name like ? or s.signature like ?)");
+      params.unshift(`%${query}%`, `%${query}%`);
+    }
     const where = conditions.join(" and ");
     return this.db
       .prepare(
@@ -949,6 +974,62 @@ export class GraphStore {
     return count;
   }
 
+  resolveTypeRefEdges(repoId: string): number {
+    const unresolved = this.db
+      .prepare(
+        `
+        select distinct e.from_id as fromId, e.to_id as toId, s.file_path as fromFile
+        from edges e
+        inner join symbols s on s.repo_id = e.repo_id and s.symbol_id = e.from_id
+        where e.repo_id = ? and e.type = 'TYPE_REF' and e.to_id like 'type:%'
+        `
+      )
+      .all(repoId) as { fromId: string; toId: string; fromFile: string }[];
+
+    if (unresolved.length === 0) return 0;
+
+    const updateStmt = this.db.prepare(
+      `update edges set to_id = ? where repo_id = ? and from_id = ? and to_id = ? and type = 'TYPE_REF'`
+    );
+
+    let count = 0;
+    const tx = this.db.transaction(() => {
+      for (const row of unresolved) {
+        const rawTypeName = row.toId.slice(5);
+        const typeName = rawTypeName.split(".").pop() ?? rawTypeName;
+        const match = this.db
+          .prepare(
+            `
+            select symbol_id as symbolId
+            from symbols
+            where repo_id = ?
+              and name = ?
+              and kind in ('class', 'interface', 'struct', 'type')
+            order by
+              case when file_path = ? then 0 else 1 end,
+              case kind
+                when 'class' then 0
+                when 'interface' then 1
+                when 'struct' then 2
+                when 'type' then 3
+                else 4
+              end
+            limit 1
+            `
+          )
+          .get(repoId, typeName, row.fromFile) as { symbolId: string } | undefined;
+
+        if (match) {
+          updateStmt.run(match.symbolId, repoId, row.fromId, row.toId);
+          count += 1;
+        }
+      }
+    });
+    tx();
+
+    return count;
+  }
+
   getImpactSurface(repoId: string, filePath: string, limit: number): {
     callerName: string;
     callerFile: string;
@@ -973,6 +1054,7 @@ export class GraphStore {
           and (
             e.to_id = s.symbol_id
             or (e.type = 'CALLS' and e.to_id = ('callee:' || s.name))
+            or (e.type = 'TYPE_REF' and e.to_id = ('type:' || s.name))
           )
         inner join symbols sf on sf.repo_id = e.repo_id and sf.symbol_id = e.from_id
         where s.repo_id = ? and s.file_path = ? and sf.file_path != s.file_path
@@ -995,6 +1077,36 @@ export class GraphStore {
   } {
     const canonicalFilePath = this.resolveCanonicalFilePath(repoId, filePath);
 
+    // Phase 1: get DISTINCT impacted file paths (limit applies to files, not rows)
+    const distinctFiles = this.db
+      .prepare(
+        `
+        select distinct sf.file_path as callerFile
+        from symbols s
+        inner join edges e
+          on e.repo_id = s.repo_id
+          and (
+            e.to_id = s.symbol_id
+            or (e.type = 'CALLS' and e.to_id = ('callee:' || s.name))
+            or (e.type = 'TYPE_REF' and e.to_id = ('type:' || s.name))
+          )
+        inner join symbols sf on sf.repo_id = e.repo_id and sf.symbol_id = e.from_id
+        where s.repo_id = ? and s.file_path = ? and sf.file_path != s.file_path
+        order by sf.file_path
+        limit ?
+        `
+      )
+      .all(repoId, canonicalFilePath, limit) as { callerFile: string }[];
+
+    if (distinctFiles.length === 0) {
+      return {
+        impactedFiles: [],
+        graphHealth: this.countUnresolvedEdgesForFile(repoId, canonicalFilePath)
+      };
+    }
+
+    // Phase 2: for each impacted file, collect symbolsAffected (uncapped)
+    const ph = distinctFiles.map(() => "?").join(", ");
     const rows = this.db
       .prepare(
         `
@@ -1008,14 +1120,16 @@ export class GraphStore {
           and (
             e.to_id = s.symbol_id
             or (e.type = 'CALLS' and e.to_id = ('callee:' || s.name))
+            or (e.type = 'TYPE_REF' and e.to_id = ('type:' || s.name))
           )
         inner join symbols sf on sf.repo_id = e.repo_id and sf.symbol_id = e.from_id
-        where s.repo_id = ? and s.file_path = ? and sf.file_path != s.file_path
+        where s.repo_id = ? and s.file_path = ?
+          and sf.file_path in (${ph})
+          and sf.file_path != s.file_path
         order by sf.file_path
-        limit ?
         `
       )
-      .all(repoId, canonicalFilePath, limit) as {
+      .all(repoId, canonicalFilePath, ...distinctFiles.map((r) => r.callerFile)) as {
         callerFile: string;
         edgeType: string;
         symbolAffected: string;
@@ -1142,7 +1256,7 @@ export class GraphStore {
       )
       .get(repoId, symbolId) as SymbolRecord | undefined;
 
-    if (!symbol) return { symbol: null, callers: [], callees: [], typeDeps: [], graphHealth: { unresolvedCalls: 0, unresolvedImports: 0, note: "symbol not found" } };
+    if (!symbol) return { symbol: null, callers: [], callees: [], typeDeps: [], graphHealth: { unresolvedCalls: 0, unresolvedImports: 0, unresolvedTypeRefs: 0, note: "symbol not found" } };
 
     // BFS callers up to callerDepth
     const callers: (ResolvedEdge & { distance: number })[] = [];
@@ -1216,7 +1330,7 @@ export class GraphStore {
       callers,
       callees,
       typeDeps,
-      graphHealth: symbol ? this.countUnresolvedEdgesForFile(repoId, symbol.filePath) : { unresolvedCalls: 0, unresolvedImports: 0, note: "symbol not found" }
+      graphHealth: symbol ? this.countUnresolvedEdgesForFile(repoId, symbol.filePath) : { unresolvedCalls: 0, unresolvedImports: 0, unresolvedTypeRefs: 0, note: "symbol not found" }
     };
   }
 
@@ -1530,6 +1644,8 @@ export class GraphStore {
   ): {
     folderPath: string;
     totalFiles: number;
+    directFiles: number;
+    subfolders: string[];
     files: {
       filePath: string;
       language: string | null;
@@ -1539,7 +1655,9 @@ export class GraphStore {
     }[];
   } {
     const normalized = folderPath.replace(/\\/g, "/").replace(/\/$/, "");
-    const prefix = `${normalized}/`;
+    // Match both forward and back slash variants stored on Windows
+    const prefixFwd = `${normalized}/`;
+    const prefixBwd = `${normalized.replace(/\//g, "\\")}\\`;
 
     const files = this.db
       .prepare(
@@ -1551,21 +1669,57 @@ export class GraphStore {
           sum(case when s.kind in ('function','method','class','interface','struct','property') then 1 else 0 end) as exportedCount
         from files f
         left join symbols s on s.repo_id = f.repo_id and s.file_path = f.path and s.kind != 'module'
-        where f.repo_id = ? and (f.path like ? or f.path like ?)
+        where f.repo_id = ?
+          and (
+            replace(f.path, char(92), '/') like ?
+            or replace(f.path, char(92), '/') = ?
+          )
         group by f.path, f.language
         order by f.path
         limit ?
         `
       )
-      .all(repoId, `${prefix}%`, `${normalized}%`, maxFiles) as {
+      .all(repoId, `${prefixFwd}%`, normalized, maxFiles) as {
         filePath: string;
         language: string | null;
         symbolCount: number;
         exportedCount: number;
       }[];
 
-    // Add caller count per file (files that import/call symbols in each file)
-    const result = files.map((f) => {
+    // Fallback for repos where files table can be sparse/out-of-sync but symbols exist.
+    const fallbackFiles = files.length === 0
+      ? this.db
+          .prepare(
+            `
+            select
+              s.file_path as filePath,
+              null as language,
+              count(distinct s.symbol_id) as symbolCount,
+              sum(case when s.kind in ('function','method','class','interface','struct','property') then 1 else 0 end) as exportedCount
+            from symbols s
+            where s.repo_id = ?
+              and (
+                replace(s.file_path, char(92), '/') like ?
+                or replace(s.file_path, char(92), '/') = ?
+              )
+              and s.kind != 'module'
+            group by s.file_path
+            order by s.file_path
+            limit ?
+            `
+          )
+          .all(repoId, `${prefixFwd}%`, normalized, maxFiles) as {
+            filePath: string;
+            language: string | null;
+            symbolCount: number;
+            exportedCount: number;
+          }[]
+      : [];
+
+    const effectiveFiles = files.length > 0 ? files : fallbackFiles;
+
+    // Add caller count per file
+    const result = effectiveFiles.map((f) => {
       const callerCount = (this.db
         .prepare(
           `
@@ -1581,24 +1735,86 @@ export class GraphStore {
       return { ...f, callerCount };
     });
 
-    return { folderPath: normalized, totalFiles: result.length, files: result };
+    // Derive immediate subfolders from the matched file paths
+    const subfolderSet = new Set<string>();
+    for (const f of result) {
+      const rel = f.filePath.replace(/\\/g, "/");
+      const rest = rel.startsWith(prefixFwd) ? rel.slice(prefixFwd.length) : rel.slice(normalized.length + 1);
+      const slashIdx = rest.indexOf("/");
+      if (slashIdx > 0) {
+        subfolderSet.add(`${normalized}/${rest.slice(0, slashIdx)}`);
+      }
+    }
+
+    const directFiles = result.filter((f) => {
+      const rel = f.filePath.replace(/\\/g, "/");
+      const rest = rel.startsWith(prefixFwd) ? rel.slice(prefixFwd.length) : rel.slice(normalized.length + 1);
+      return !rest.includes("/");
+    }).length;
+
+    return {
+      folderPath: normalized,
+      totalFiles: result.length,
+      directFiles,
+      subfolders: [...subfolderSet].sort(),
+      files: result
+    };
   }
 
   /**
-   * Find entry points — symbols with 0 incoming CALLS edges.
-   * These are publicly callable symbols no other code in the repo calls internally.
+   * Find entry points in priority order:
+   * 1. Runtime bootstrap files: Program.cs, Startup.cs, main.ts/js, index.ts (top-level)
+   * 2. Public symbols with 0 incoming CALLS edges (not called internally)
+   * Excludes modules, properties, constructors from the uncalled-symbol scan to reduce noise.
    */
   findEntryPoints(
     repoId: string,
     filePathPrefix: string | null,
     kind: string | null,
     limit: number
-  ): { symbolId: string; name: string; kind: string; filePath: string; line: number; signature: string | null }[] {
-    const conditions: string[] = ["s.repo_id = ?", "s.kind != 'module'", "s.kind != 'property'"];
+  ): { symbolId: string; name: string; kind: string; filePath: string; line: number; signature: string | null; entryReason: string }[] {
+    // Tier 1: runtime bootstrap files — match regardless of path separator (Windows stores backslash)
+    const bootstrapFileNames = [
+      "Program.cs", "Startup.cs", "main.ts", "main.js", "index.ts", "index.js",
+      "App.tsx", "App.ts", "server.ts", "server.js"
+    ];
+    const bootstrapOrClauses = bootstrapFileNames
+      .map(() => "(replace(s.file_path, char(92), '/') like ? or replace(s.file_path, char(92), '/') = ?)")
+      .join(" or ");
+    const bootstrapParams = bootstrapFileNames.flatMap((f) => [`%/${f}`, f]);
+
+    const bootstrapRows = this.db
+      .prepare(
+        `
+        select distinct s.symbol_id as symbolId, s.name, s.kind, s.file_path as filePath, s.line, s.signature
+        from symbols s
+        where s.repo_id = ?
+          and s.kind in ('module', 'function', 'method', 'class')
+          and (${bootstrapOrClauses})
+        order by s.file_path, s.line
+        limit ?
+        `
+      )
+      .all(repoId, ...bootstrapParams, Math.min(limit, 20)) as {
+        symbolId: string; name: string; kind: string; filePath: string; line: number; signature: string | null;
+      }[];
+
+    const bootstrapResults = bootstrapRows.map((r) => ({ ...r, entryReason: "bootstrap_file" }));
+    const remaining = limit - bootstrapResults.length;
+
+    if (remaining <= 0) {
+      return bootstrapResults;
+    }
+
+    // Tier 2: uncalled public symbols (no incoming CALLS edges)
+    const conditions: string[] = [
+      "s.repo_id = ?",
+      "s.kind not in ('module', 'property', 'constructor', 'type')"
+    ];
     const params: unknown[] = [repoId];
 
     if (filePathPrefix) {
-      conditions.push("s.file_path like ?");
+      conditions.push("replace(s.file_path, char(92), '/') like ?");
       params.push(`${filePathPrefix.replace(/\\/g, "/")}%`);
     }
     if (kind) {
@@ -1606,10 +1822,18 @@ export class GraphStore {
       params.push(kind);
     }
 
-    const where = conditions.join(" and ");
-    params.push(repoId, limit);
+    // Exclude symbols already in bootstrap results
+    const bootstrapIds = bootstrapResults.map((r) => r.symbolId);
+    if (bootstrapIds.length > 0) {
+      const bph = bootstrapIds.map(() => "?").join(", ");
+      conditions.push(`s.symbol_id not in (${bph})`);
+      params.push(...bootstrapIds);
+    }
 
-    return this.db
+    const where = conditions.join(" and ");
+    params.push(repoId, remaining);
+
+    const uncalledRows = this.db
       .prepare(
         `
         select s.symbol_id as symbolId, s.name, s.kind, s.file_path as filePath, s.line, s.signature
@@ -1624,6 +1848,10 @@ export class GraphStore {
         `
       )
       .all(...params) as { symbolId: string; name: string; kind: string; filePath: string; line: number; signature: string | null }[];
+
+    const uncalledResults = uncalledRows.map((r) => ({ ...r, entryReason: "uncalled_symbol" }));
+
+    return [...bootstrapResults, ...uncalledResults];
   }
 
   /**
@@ -2020,11 +2248,72 @@ export class GraphStore {
   }
 
   private buildFtsQuery(query: string): string {
-    const tokens = query.trim().split(/\s+/).filter((t) => t.length >= 2);
-    if (tokens.length <= 1) {
-      const q = (tokens[0] ?? query.trim()).replace(/"/g, '""');
+    const raw = query.trim();
+
+    // Split on whitespace for multi-word queries
+    const spaceTokens = raw.split(/\s+/).filter((t) => t.length >= 2);
+
+    if (spaceTokens.length === 1) {
+      // Single token: also expand PascalCase/camelCase into constituent words
+      // e.g. "ConversationAssignedToAI" → ["Conversation", "Assigned", "To", "AI"]
+      const pascal = raw.replace(/([A-Z][a-z]+|[A-Z]{2,}(?=[A-Z][a-z]|$)|[A-Z]{2,})/g, " $1").trim().split(/\s+/).filter((t) => t.length >= 2);
+      if (pascal.length > 1) {
+        // Use AND strategy for PascalCase expansion (all parts must be present)
+        const andClause = pascal.map((t) => `"${t.replace(/"/g, '""')}"*`).join(" ");
+        // Also add the original as OR fallback
+        return `(${andClause}) OR "${raw.replace(/"/g, '""')}"*`;
+      }
+      const q = raw.replace(/"/g, '""');
       return `"${q}"*`;
     }
+
+    // Multi-word: try AND first (all tokens), OR as fallback via UNION in SQL is not possible,
+    // so emit the AND form — this is stricter but more precise for phrases like "ConversationAssignedAI handler"
+    const andClause = spaceTokens.map((t) => `"${t.replace(/"/g, '""')}"*`).join(" ");
+
+    // Also expand each space-token that looks like PascalCase
+    const expandedTokens = new Set<string>(spaceTokens);
+    for (const tok of spaceTokens) {
+      const pascal = tok.replace(/([A-Z][a-z]+|[A-Z]{2,}(?=[A-Z][a-z]|$)|[A-Z]{2,})/g, " $1").trim().split(/\s+/).filter((t) => t.length >= 2);
+      for (const p of pascal) expandedTokens.add(p);
+    }
+
+    if (expandedTokens.size > spaceTokens.length) {
+      const orClause = [...expandedTokens].map((t) => `"${t.replace(/"/g, '""')}"*`).join(" OR ");
+      return `(${andClause}) OR (${orClause})`;
+    }
+
+    return andClause;
+  }
+
+  private extractIntentTokens(query: string): string[] {
+    const rawTokens = query
+      .split(/[^\p{L}\p{N}_]+/u)
+      .map((t) => t.trim())
+      .filter((t) => t.length >= 2);
+
+    const expanded = new Set<string>();
+    for (const token of rawTokens) {
+      expanded.add(token);
+      const pascalParts = token
+        .replace(/([A-Z][a-z]+|[A-Z]{2,}(?=[A-Z][a-z]|$)|[A-Z]{2,})/g, " $1")
+        .trim()
+        .split(/\s+/)
+        .filter((t) => t.length >= 2);
+      for (const part of pascalParts) {
+        expanded.add(part);
+      }
+    }
+
+    return [...expanded].slice(0, 12);
+  }
+
+  private buildIntentFtsQuery(query: string): string {
+    const tokens = this.extractIntentTokens(query);
+    if (tokens.length === 0) {
+      return this.buildFtsQuery(query);
+    }
+
     return tokens.map((t) => `"${t.replace(/"/g, '""')}"*`).join(" OR ");
   }
 
@@ -2211,26 +2500,28 @@ export class GraphStore {
         `
         select
           count(case when e.to_id like 'callee:%' then 1 end) as unresolvedCalls,
-          count(case when e.to_id like 'import:%' then 1 end) as unresolvedImports
+          count(case when e.to_id like 'import:%' then 1 end) as unresolvedImports,
+          count(case when e.to_id like 'type:%' then 1 end) as unresolvedTypeRefs
         from edges e
         inner join symbols s on s.repo_id = e.repo_id and s.symbol_id = e.from_id
         where e.repo_id = ? and replace(s.file_path, char(92), '/') = replace(?, char(92), '/')
         `
       )
-      .get(repoId, canonicalFilePath) as { unresolvedCalls: number; unresolvedImports: number };
+      .get(repoId, canonicalFilePath) as { unresolvedCalls: number; unresolvedImports: number; unresolvedTypeRefs: number };
 
-    const { unresolvedCalls, unresolvedImports } = row ?? { unresolvedCalls: 0, unresolvedImports: 0 };
+    const { unresolvedCalls, unresolvedImports, unresolvedTypeRefs } = row ?? { unresolvedCalls: 0, unresolvedImports: 0, unresolvedTypeRefs: 0 };
     let note: string;
-    if (unresolvedCalls === 0 && unresolvedImports === 0) {
+    if (unresolvedCalls === 0 && unresolvedImports === 0 && unresolvedTypeRefs === 0) {
       note = "graph data complete";
     } else {
       const parts: string[] = [];
       if (unresolvedCalls > 0) parts.push(`${unresolvedCalls} call edge${unresolvedCalls > 1 ? "s" : ""} unresolved`);
       if (unresolvedImports > 0) parts.push(`${unresolvedImports} import edge${unresolvedImports > 1 ? "s" : ""} unresolved`);
+      if (unresolvedTypeRefs > 0) parts.push(`${unresolvedTypeRefs} type reference${unresolvedTypeRefs > 1 ? "s" : ""} unresolved`);
       note = `${parts.join(", ")} — results may be incomplete`;
     }
 
-    return { unresolvedCalls, unresolvedImports, note };
+    return { unresolvedCalls, unresolvedImports, unresolvedTypeRefs, note };
   }
 
   private initSchema(): void {

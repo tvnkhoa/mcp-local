@@ -29,7 +29,7 @@ Current integration:
 - `get_module_flow`
 - `find_impact_surface`
 - `list_repositories`
-- `search_symbols` (`compact` mode supported)
+- `search_symbols` (`compact` mode supported; `strategy: "name" | "intent"`)
 - `get_file_context` (`compact` mode supported)
 - `get_batch_context` (`compact` mode supported)
 - `get_symbol_detail`
@@ -46,7 +46,7 @@ Current integration:
 - `get_change_context_by_name`
 - `get_symbol_candidates`
 - `get_folder_summary`
-- `find_entry_points`
+- `find_entry_points` (returns `runtimeEntryPoints` + `graphEntryPoints` groups)
 - `find_implementations`
 - Batch commit indexing (partial progress persisted per batch)
 - Progress output in terminal (`[index-progress] ...`)
@@ -201,7 +201,7 @@ Use `docsMode` per run:
 ### 3) Plan mode retrieval pipeline (token-saving)
 
 Suggested call sequence:
-1. `search_symbols` with `profile: "compact"` to locate candidate symbols.
+1. `search_symbols` with `profile: "compact"` to locate candidate symbols (`strategy: "intent"` for natural-language-like queries).
 2. `get_context_by_name` with `profile: "compact"` for single-symbol package.
 3. `get_change_context_by_name` with `profile: "compact"` for callers/callees impact.
 4. `get_file_context` only for selected files that need deeper context.
@@ -354,6 +354,7 @@ Behavior:
 
 Backward compatibility:
 - `search_symbols`, `get_file_context`, and `get_batch_context` still accept `compact: true`.
+- `search_symbols` supports `strategy: "name" | "intent"` (`name` default for backward compatibility).
 - If both `compact: true` and `profile` are provided, `compact` takes precedence.
 
 ## Runbook

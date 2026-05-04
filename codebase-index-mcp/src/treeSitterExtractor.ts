@@ -308,6 +308,33 @@ function findEnclosingCSharpSymbolId(node: Parser.SyntaxNode, input: ExtractInpu
   return null;
 }
 
+function normalizeCSharpTypeName(raw: string): string {
+  const withoutNullable = raw.replace(/\?/g, "").trim();
+  const withoutArrays = withoutNullable.replace(/\[\]/g, "");
+  const withoutGenericArgs = withoutArrays.replace(/<.*>/g, "");
+  const simplified = withoutGenericArgs.split(".").pop() ?? withoutGenericArgs;
+  return simplified.trim();
+}
+
+function emitTypeRefEdge(
+  input: ExtractInput,
+  edges: EdgeRecord[],
+  fromId: string,
+  rawTypeName: string
+): void {
+  const normalized = normalizeCSharpTypeName(rawTypeName);
+  if (!normalized || normalized.length < 2) {
+    return;
+  }
+
+  edges.push({
+    repoId: input.repoId,
+    fromId,
+    toId: `type:${normalized}`,
+    type: "TYPE_REF"
+  });
+}
+
 function extractCSharpSymbols(
   input: ExtractInput,
   root: Parser.SyntaxNode,
@@ -354,6 +381,47 @@ function extractCSharpSymbols(
     }
   }
 
+  // Extract field declarations for TYPE_REF edges.
+  // Catches patterns like: private readonly DbSet<Conversation> _conversations;
+  for (const node of root.descendantsOfType(["field_declaration"])) {
+    const fromId = findEnclosingCSharpSymbolId(node, input) ?? moduleSymbolId;
+    const varDecl = node.children.find((c) => c.type === "variable_declaration");
+    if (varDecl) {
+      const typeNode = varDecl.childForFieldName("type");
+      if (typeNode?.text) {
+        emitTypeRefEdge(input, edges, fromId, typeNode.text);
+      }
+    }
+  }
+
+  // Extract local variable declarations for TYPE_REF edges.
+  // Catches patterns like: Conversation conv = ...; IList<Message> messages = ...;
+  for (const node of root.descendantsOfType(["local_declaration_statement"])) {
+    const fromId = findEnclosingCSharpSymbolId(node, input) ?? moduleSymbolId;
+    const varDecl = node.children.find((c) => c.type === "variable_declaration");
+    if (varDecl) {
+      const typeNode = varDecl.childForFieldName("type");
+      if (typeNode?.text && typeNode.text !== "var") {
+        emitTypeRefEdge(input, edges, fromId, typeNode.text);
+      }
+    }
+  }
+
+  // Extract typeof(...) references commonly used in DI registration.
+  for (const node of root.descendantsOfType(["typeof_expression"])) {
+    const fromId = findEnclosingCSharpSymbolId(node, input) ?? moduleSymbolId;
+    const typeNode = node.childForFieldName("type");
+    if (typeNode?.text) {
+      emitTypeRefEdge(input, edges, fromId, typeNode.text);
+      continue;
+    }
+
+    const match = node.text.match(/typeof\s*\(([^)]+)\)/);
+    if (match?.[1]) {
+      emitTypeRefEdge(input, edges, fromId, match[1]);
+    }
+  }
+
   // Extract object creation expressions (constructor calls)
   for (const node of root.descendantsOfType(["object_creation_expression"])) {
     const typeNode = node.childForFieldName("type");
@@ -361,6 +429,7 @@ function extractCSharpSymbols(
       const typeName = typeNode.text;
       if (typeName) {
         const fromId = findEnclosingCSharpSymbolId(node, input) ?? moduleSymbolId;
+        emitTypeRefEdge(input, edges, fromId, typeName);
         edges.push({
           repoId: input.repoId,
           fromId,
@@ -408,6 +477,18 @@ function extractCSharpSymbols(
         signature: extractSignature(node)
       });
 
+      const declarationTypeNode = node.childForFieldName("type");
+      if (declarationTypeNode?.text) {
+        emitTypeRefEdge(input, edges, symbolId, declarationTypeNode.text);
+      }
+
+      for (const parameterNode of node.descendantsOfType(["parameter"])) {
+        const parameterTypeNode = parameterNode.childForFieldName("type");
+        if (parameterTypeNode?.text) {
+          emitTypeRefEdge(input, edges, symbolId, parameterTypeNode.text);
+        }
+      }
+
       // Emit IMPLEMENTS edges for class/struct/record base_list entries
       if (node.type === "class_declaration" || node.type === "struct_declaration" || node.type === "record_declaration") {
         const baseList = node.childForFieldName("bases");
@@ -419,6 +500,7 @@ function extractCSharpSymbols(
             // Strip generic type args: IRepository<User> → IRepository
             const cleanName = baseName.replace(/<.*>$/, "").trim();
             if (cleanName) {
+              emitTypeRefEdge(input, edges, symbolId, cleanName);
               edges.push({
                 repoId: input.repoId,
                 fromId: symbolId,
