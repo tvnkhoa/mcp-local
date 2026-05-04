@@ -16,8 +16,9 @@ See `ENHANCEMENTS_IMPLEMENTED.md` for technical details and `QUICK_START.md` for
 ---
 
 Current integration:
-- Real content classification via `magika` (portable runtime)
+- Binary sniff + extension-based file filtering (fast, zero overhead)
 - Real AST extraction via `tree-sitter` for: JavaScript, TypeScript, C#, Python, Go, Java, Ruby, Rust, PHP
+- .NET project parser for `.csproj` / `.sln` (NuGet + ProjectReference edges)
 
 ## Features
 
@@ -114,20 +115,9 @@ Smoke test now validates more than startup:
 
 ## Notes
 
-This is v1 integration scope. JS/TS AST extraction is implemented; other languages currently remain fallback/no-op for parser-level symbol extraction.
+AST extraction implemented for 9 languages via tree-sitter. .csproj/.sln files are parsed with a dedicated regex-based parser to extract NuGet and ProjectReference dependencies.
 
-Magika is loaded lazily. If classifier runtime fails to initialize in a target environment, the server stays up and falls back to extension-based filtering for supported source types.
-
-## Local HTTP API (read-only bridge)
-
-This package now includes a localhost API bridge for UI visualization use-cases.
-
-- `GET /health?repoId=<id>`
-- `POST /index` (supports `batchSize`)
-- `GET /index/progress?repoId=<id>`
-- `POST /index/cancel` with body `{ "repoId": "..." }`
-- `GET /graph/module-flow?repoId=<id>&filePath=<path>&limit=<n>`
-- `GET /graph/view?repoId=<id>&view=module-flow|dependency|call-chain&...`
+Binary files are rejected via null-byte sniff on the first 512 bytes — no external classifier needed.
 - `GET /graph/dependency?repoId=<id>&symbolId=<id>&depth=<n>&limit=<n>`
 - `GET /graph/call-chain?repoId=<id>&symbolId=<id>&direction=callers|callees&depth=<n>&limit=<n>`
 - `GET /graph/impact?repoId=<id>&filePath=<path>&limit=<n>`

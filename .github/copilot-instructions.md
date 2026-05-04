@@ -59,7 +59,6 @@
 - `.github/skills/mcp-host-integration-security/SKILL.md`: Checklist hardening khi tích hợp MCP host/client (token, scope, transport).
 - `.github/skills/codebase-index-scaffold/SKILL.md`: Scaffold MCP mới cho indexing + graph query.
 - `.github/skills/tree-sitter-extraction/SKILL.md`: Quy trình extract AST/symbol/import/call edges bằng tree-sitter.
-- `.github/skills/magika-file-filtering/SKILL.md`: Lọc file bằng Magika để nâng chất lượng index.
 - `.github/skills/graph-schema-design/SKILL.md`: Thiết kế schema đồ thị cho dependencies/call-chain/flow.
 - `.github/skills/incremental-indexing/SKILL.md`: Quy trình re-index tăng dần theo hash/commit.
 - `.github/skills/index-security-review/SKILL.md`: Checklist bảo mật riêng cho MCP index nội bộ.

@@ -6,7 +6,7 @@ applyTo: "codebase-index-mcp/**/*.{ts,tsx,mts,cts,md,json}"
 
 - Design for **incremental indexing** first; avoid full re-index on every run.
 - Prefer parser-based extraction (`tree-sitter`) over regex for symbols/imports/call edges.
-- Use file classification/filtering (`magika`) to skip binary/noisy/non-source files before parse.
+- Use binary sniff (null-byte check) + extension allowlist to skip binary/noisy/non-source files before parse.
 - Keep index schema explicit: nodes (repo/file/symbol/module) and edges (imports/calls/contains/depends_on).
 - Record index run metadata (version, commit SHA, startedAt, finishedAt, status, counters).
 

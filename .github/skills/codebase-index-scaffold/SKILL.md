@@ -14,7 +14,7 @@ description: "Scaffold an internal MCP server for intelligent codebase indexing 
 2. Define core tool schemas with strict limits and clear errors.
 3. Add index pipeline phases:
    - file discovery
-   - magika filtering
+   - binary sniff + extension allowlist filtering
    - parser extraction (tree-sitter)
    - graph persistence
 4. Add query layer for dependency/call chain/impact analysis.

@@ -89,4 +89,4 @@ All notable changes to this project will be documented in this file.
 - Support for module-flow, dependency, and call-chain views
 - Impact surface analysis
 - Incremental indexing with content hash checking
-- Magika-based file filtering
+- Extension-based file filtering with binary sniff
