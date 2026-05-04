@@ -1,0 +1,206 @@
+:root {
+  color-scheme: dark;
+  font-family: Segoe UI, Arial, sans-serif;
+}
+
+body {
+  margin: 0;
+  background: #0b1020;
+  color: #e6ebff;
+}
+
+.app {
+  display: grid;
+  grid-template-rows: auto auto 1fr;
+  gap: 12px;
+  height: 100vh;
+  padding: 12px;
+  box-sizing: border-box;
+}
+
+header h1 {
+  margin: 0;
+  font-size: 20px;
+}
+
+header p {
+  margin: 4px 0 0;
+  opacity: 0.8;
+}
+
+.controls {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(240px, 1fr));
+  gap: 8px 12px;
+  padding: 12px;
+  border: 1px solid #2a3768;
+  border-radius: 10px;
+  background: #111936;
+}
+
+.controls label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+}
+
+.controls input {
+  border: 1px solid #334172;
+  background: #0f1734;
+  color: #e6ebff;
+  border-radius: 8px;
+  padding: 8px;
+}
+
+.controls select {
+  border: 1px solid #334172;
+  background: #0f1734;
+  color: #e6ebff;
+  border-radius: 8px;
+  padding: 8px;
+}
+
+.actions {
+  display: flex;
+  align-items: end;
+  gap: 8px;
+}
+
+button {
+  border: 1px solid #4860b4;
+  background: #1d2d62;
+  color: #fff;
+  border-radius: 8px;
+  padding: 8px 12px;
+  cursor: pointer;
+}
+
+button:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.linkButton {
+  background: transparent;
+  border: 1px solid #4860b4;
+  padding: 2px 8px;
+  margin-right: 8px;
+}
+
+.status {
+  grid-column: 1 / -1;
+  margin: 0;
+  font-size: 13px;
+  opacity: 0.9;
+}
+
+.progressPanel {
+  grid-column: 1 / -1;
+  border: 1px solid #334172;
+  border-radius: 8px;
+  padding: 8px;
+  background: #0f1734;
+}
+
+.progressHeader {
+  display: flex;
+  justify-content: space-between;
+  font-size: 12px;
+  margin-bottom: 6px;
+  opacity: 0.95;
+}
+
+.progressTrack {
+  height: 10px;
+  border-radius: 999px;
+  background: #16224a;
+  overflow: hidden;
+  position: relative;
+}
+
+.progressFill {
+  height: 100%;
+  background: linear-gradient(90deg, #4d7cff, #59e0ff);
+  transition: width 0.25s ease;
+  position: relative;
+  overflow: hidden;
+}
+
+.progressFill::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  bottom: 0;
+  right: 0;
+  background: linear-gradient(
+    90deg,
+    transparent,
+    rgba(255, 255, 255, 0.3),
+    transparent
+  );
+  animation: shimmer 1.5s infinite;
+}
+
+@keyframes shimmer {
+  0% {
+    transform: translateX(-100%);
+  }
+  100% {
+    transform: translateX(100%);
+  }
+}
+
+.progressMeta {
+  margin: 8px 0 0;
+  font-size: 12px;
+  opacity: 0.85;
+}
+
+.languageBreakdown {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid #334172;
+}
+
+.langStat {
+  font-size: 11px;
+  padding: 4px 8px;
+  background: #1d2d62;
+  border: 1px solid #4860b4;
+  border-radius: 6px;
+  opacity: 0.9;
+}
+
+.canvas {
+  border: 1px solid #2a3768;
+  border-radius: 10px;
+  overflow: hidden;
+  min-height: 400px;
+}
+
+.impact {
+  border: 1px solid #2a3768;
+  border-radius: 10px;
+  padding: 10px 12px;
+  background: #111936;
+  max-height: 220px;
+  overflow: auto;
+}
+
+.impact h3 {
+  margin: 0 0 10px;
+}
+
+.impact ul {
+  margin: 0;
+  padding-left: 18px;
+}
+
+.impact li {
+  margin: 4px 0;
+}
