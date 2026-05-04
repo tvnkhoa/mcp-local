@@ -34,7 +34,7 @@ export async function runIndexPipeline(store: GraphStore, input: RunIndexInput):
   const runId = randomUUID();
   const startedAt = new Date().toISOString();
   const started = Date.now();
-  const indexVersion = "v1-tree-sitter-magika";
+  const indexVersion = "v1-tree-sitter";
   const commitSha = resolveCommitSha(input.repoPath);
 
   store.ensureRepository(input.repoId, input.repoPath);
@@ -43,7 +43,7 @@ export async function runIndexPipeline(store: GraphStore, input: RunIndexInput):
   const batchSize = clamp(input.batchSize ?? 200, 1, 2_000);
   const concurrencyLimit = 50; // Limit parallel file reads
   
-  process.stdout.write(`[index-start] repoId=${input.repoId} mode=${input.mode} scanning files...\n`);
+  process.stderr.write(`[index-start] repoId=${input.repoId} mode=${input.mode} scanning files...\n`);
   
   const files = await glob("**/*", {
     cwd: input.repoPath,
@@ -64,7 +64,7 @@ export async function runIndexPipeline(store: GraphStore, input: RunIndexInput):
     ]
   });
 
-  process.stdout.write(`[index-scan-complete] found ${String(files.length)} files, will process up to ${String(maxFiles)}\n`);
+  process.stderr.write(`[index-scan-complete] found ${String(files.length)} files, will process up to ${String(maxFiles)}\n`);
 
   let filesScanned = 0;
   let filesIndexed = 0;
@@ -79,7 +79,7 @@ export async function runIndexPipeline(store: GraphStore, input: RunIndexInput):
   const totalBatches = Math.max(1, Math.ceil(totalFiles / batchSize));
   let completedBatches = 0;
 
-  process.stdout.write(`[index-ready] processing ${String(totalFiles)} files in ${String(totalBatches)} batches (batchSize=${String(batchSize)})\n`);
+  process.stderr.write(`[index-ready] processing ${String(totalFiles)} files in ${String(totalBatches)} batches (batchSize=${String(batchSize)})\n`);
 
   emitProgress("running");
 
@@ -87,7 +87,7 @@ export async function runIndexPipeline(store: GraphStore, input: RunIndexInput):
     for (let offset = 0; offset < selectedFiles.length; offset += batchSize) {
       if (input.abortSignal?.aborted) {
         // Don't throw immediately - let current batch finish and commit
-        process.stdout.write(`[index-cancelled] Finishing current batch before stopping...\n`);
+        process.stderr.write(`\n[index-cancelled] Finishing current batch before stopping...\n`);
         break;
       }
 
@@ -108,13 +108,13 @@ export async function runIndexPipeline(store: GraphStore, input: RunIndexInput):
         filePath: string;
         relativePath: string;
         bytes: Buffer;
-        decision: Awaited<ReturnType<typeof shouldIndexFile>>;
+        decision: FilterDecision;
       }>> = [];
 
       for (let i = 0; i < batchFiles.length; i += concurrencyLimit) {
         if (input.abortSignal?.aborted) {
           // Stop reading more files, but process what we have
-          process.stdout.write(`[index-cancelled] Stopping file reads, processing ${String(fileResults.length)} files already read...\n`);
+        process.stderr.write(`\n[index-cancelled] Stopping file reads, processing ${String(fileResults.length)} files already read...\n`);
           break;
         }
 
@@ -130,7 +130,7 @@ export async function runIndexPipeline(store: GraphStore, input: RunIndexInput):
                 const quickHash = `${stats.size}-${stats.mtimeMs}`;
                 const previousHash = store.getFileHash(input.repoId, relativePath);
                 if (previousHash && previousHash.startsWith(quickHash)) {
-                  return { filePath, relativePath, bytes: Buffer.from([]), decision: { include: false, reason: "unchanged_quick_check", language: null, classifierLabel: null } as FilterDecision };
+                  return { filePath, relativePath, bytes: Buffer.from([]), decision: { include: false, reason: "unchanged_quick_check", language: null } as FilterDecision };
                 }
               } catch {
                 // Continue with normal flow
@@ -138,7 +138,7 @@ export async function runIndexPipeline(store: GraphStore, input: RunIndexInput):
             }
 
             const bytes = await readFile(filePath);
-            const decision = await shouldIndexFile(filePath, bytes);
+            const decision = shouldIndexFile(filePath, bytes);
             
             return { filePath, relativePath, bytes, decision };
           })
@@ -149,7 +149,7 @@ export async function runIndexPipeline(store: GraphStore, input: RunIndexInput):
       for (const result of fileResults) {
         if (input.abortSignal?.aborted) {
           // Stop processing more results, but commit what we have
-          process.stdout.write(`[index-cancelled] Stopping result processing, committing ${String(pendingWrites.length)} files...\n`);
+          process.stderr.write(`\n[index-cancelled] Stopping result processing, committing ${String(pendingWrites.length)} files...\n`);
           break;
         }
 
@@ -220,6 +220,7 @@ export async function runIndexPipeline(store: GraphStore, input: RunIndexInput):
         // Emit progress every 10 files for smoother updates
         if (filesScanned % 10 === 0) {
           emitProgress("running");
+          writeTerminalProgress();
         }
       }
 
@@ -236,17 +237,10 @@ export async function runIndexPipeline(store: GraphStore, input: RunIndexInput):
       completedBatches += 1;
       emitProgress("running");
       writeTerminalProgress();
-      
-      // Log batch completion for debugging
-      if (pendingWrites.length > 0) {
-        process.stdout.write(
-          `[batch-complete] batch=${String(completedBatches)} wrote=${String(pendingWrites.length)} files, total indexed=${String(filesIndexed)}\n`
-        );
-      }
 
       // Check if cancelled after batch commit
       if (input.abortSignal?.aborted) {
-        process.stdout.write(`[index-cancelled] Batch committed, stopping index run.\n`);
+        process.stderr.write(`\n[index-cancelled] Batch committed, stopping index run.\n`);
         break;
       }
     }
@@ -275,6 +269,9 @@ export async function runIndexPipeline(store: GraphStore, input: RunIndexInput):
 
     store.recordRun(summary);
     emitProgress(wasCancelled ? "cancelled" : "ok", finishedAt);
+    writeTerminalProgress(true);
+    const elapsedSec = (Date.now() - started) / 1000;
+    process.stderr.write(`[index-done] status=${wasCancelled ? "cancelled" : "ok"} indexed=${String(filesIndexed)} skipped=${String(filesSkipped)} failures=${String(parseFailures)} symbols=${String(symbolsUpserted)} elapsed=${elapsedSec.toFixed(1)}s\n`);
     return summary;
   } catch (error) {
     const finishedAt = new Date().toISOString();
@@ -301,6 +298,10 @@ export async function runIndexPipeline(store: GraphStore, input: RunIndexInput):
 
     store.recordRun(summary);
     emitProgress(isCancelled ? "cancelled" : "failed", finishedAt, error instanceof Error ? error.message : "Unknown index failure");
+    writeTerminalProgress(true);
+    if (!isCancelled) {
+      process.stderr.write(`[index-error] ${error instanceof Error ? error.message : "Unknown index failure"}\n`);
+    }
     throw error;
   }
 
@@ -354,11 +355,34 @@ export async function runIndexPipeline(store: GraphStore, input: RunIndexInput):
     });
   }
 
-  function writeTerminalProgress(): void {
+  function writeTerminalProgress(final = false): void {
     const percent = totalFiles === 0 ? 100 : Math.round((filesScanned / totalFiles) * 100);
-    process.stdout.write(
-      `[index-progress] repo=${input.repoId} run=${runId} percent=${String(percent)} scanned=${String(filesScanned)}/${String(totalFiles)} batch=${String(completedBatches)}/${String(totalBatches)} indexed=${String(filesIndexed)} skipped=${String(filesSkipped)} parseFailures=${String(parseFailures)}\n`
-    );
+    const filled = Math.round(percent / 5);
+    const bar = "█".repeat(filled) + "░".repeat(20 - filled);
+
+    const elapsedMs = Date.now() - started;
+    const elapsedSeconds = elapsedMs / 1000;
+    let eta = "";
+    if (!final && filesScanned > 0 && totalFiles > filesScanned) {
+      const fps = filesScanned / elapsedSeconds;
+      const remaining = Math.round((totalFiles - filesScanned) / fps);
+      eta = ` | ETA ${remaining}s`;
+    }
+
+    const topLangs = [...languageStats.entries()]
+      .sort((a, b) => b[1].indexed - a[1].indexed)
+      .slice(0, 3)
+      .map(([lang, s]) => `${lang}=${String(s.indexed)}`)
+      .join(" ");
+    const langSuffix = topLangs ? ` | ${topLangs}` : "";
+
+    const line = `[${bar}] ${String(percent).padStart(3)}% | ${String(filesScanned)}/${String(totalFiles)} files | ${String(symbolsUpserted)} symbols${eta}${langSuffix}`;
+
+    if (final) {
+      process.stderr.write(`\r${line}\n`);
+    } else {
+      process.stderr.write(`\r${line}`);
+    }
   }
 }
 

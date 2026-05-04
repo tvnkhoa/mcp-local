@@ -4,7 +4,6 @@ export type FilterDecision = {
   include: boolean;
   reason: string;
   language: string | null;
-  classifierLabel: string | null;
 };
 
 const EXCLUDED_PATH_SEGMENTS = new Set([
@@ -83,6 +82,7 @@ const EXCLUDED_FILENAMES = new Set([
 ]);
 
 const LANGUAGE_BY_EXTENSION: Record<string, string> = {
+  // Web / scripting
   ".ts": "typescript",
   ".tsx": "typescript",
   ".js": "javascript",
@@ -92,146 +92,80 @@ const LANGUAGE_BY_EXTENSION: Record<string, string> = {
   ".py": "python",
   ".go": "go",
   ".java": "java",
-  ".cs": "csharp",
   ".rb": "ruby",
   ".rs": "rust",
-  ".php": "php"
+  ".php": "php",
+  // .NET / C#
+  ".cs": "csharp",
+  ".razor": "razor",
+  ".cshtml": "razor",
+  ".csproj": "csproj",
+  ".sln": "sln",
+  ".props": "xml",
+  ".targets": "xml",
+  // Config / data
+  ".xml": "xml",
+  ".config": "xml",
+  ".json": "json",
+  ".yaml": "yaml",
+  ".yml": "yaml",
+  ".toml": "toml",
+  ".sql": "sql"
 };
 
-const LANGUAGE_BY_MAGIKA_LABEL: Record<string, string> = {
-  javascript: "javascript",
-  jsx: "javascript",
-  typescript: "typescript",
-  tsx: "typescript",
-  python: "python",
-  go: "go",
-  java: "java",
-  cs: "csharp",
-  csharp: "csharp",
-  ruby: "ruby",
-  rust: "rust",
-  php: "php",
-  json: "json",
-  markdown: "markdown",
-  yaml: "yaml",
-  toml: "toml"
-};
+/** Returns true if the first 512 bytes contain a null byte — reliable binary file indicator. */
+function isBinary(bytes: Uint8Array): boolean {
+  const limit = Math.min(bytes.length, 512);
+  for (let i = 0; i < limit; i++) {
+    if (bytes[i] === 0) return true;
+  }
+  return false;
+}
 
-type MagikaLike = {
-  identifyBytes(bytes: Uint8Array): Promise<{ prediction: { output: { label: string; is_text: boolean } } }>;
-};
-
-let magikaInstancePromise: Promise<MagikaLike> | null = null;
-const classificationCache = new Map<string, FilterDecision>();
-
-export async function shouldIndexFile(filePath: string, bytes: Uint8Array): Promise<FilterDecision> {
+export function shouldIndexFile(filePath: string, bytes: Uint8Array): FilterDecision {
   const normalized = filePath.replace(/\\/g, "/");
   const segments = normalized.split("/");
 
-  if (segments.some((segment) => EXCLUDED_PATH_SEGMENTS.has(segment))) {
-    return { include: false, reason: "excluded_path", language: null, classifierLabel: null };
+  if (segments.some((seg) => EXCLUDED_PATH_SEGMENTS.has(seg))) {
+    return { include: false, reason: "excluded_path", language: null };
   }
 
   const extension = extname(filePath).toLowerCase();
   const basename = segments[segments.length - 1] || "";
-  const basenameNoExt = basename.replace(extension, "");
+  const basenameNoExt = basename.slice(0, basename.length - extension.length);
 
-  // Exclude by extension
   if (EXCLUDED_EXTENSIONS.has(extension)) {
-    return { include: false, reason: "excluded_extension", language: null, classifierLabel: null };
+    return { include: false, reason: "excluded_extension", language: null };
   }
 
-  // Exclude by filename
   if (EXCLUDED_FILENAMES.has(basename) || EXCLUDED_FILENAMES.has(basenameNoExt)) {
-    return { include: false, reason: "excluded_filename", language: null, classifierLabel: null };
+    return { include: false, reason: "excluded_filename", language: null };
   }
 
-  // Skip files too large (likely minified or generated)
   const MAX_FILE_SIZE = 500_000; // 500KB
   if (bytes.length > MAX_FILE_SIZE) {
-    return { include: false, reason: "file_too_large", language: null, classifierLabel: null };
+    return { include: false, reason: "file_too_large", language: null };
   }
 
-  // Detect minified files (long lines without breaks)
+  if (isBinary(bytes)) {
+    return { include: false, reason: "binary_file", language: null };
+  }
+
+  // Detect minified files (very long lines)
   if (bytes.length > 10_000) {
     const sample = bytes.slice(0, 10_000);
     const text = new TextDecoder().decode(sample);
     const lines = text.split("\n");
     const avgLineLength = text.length / lines.length;
     if (avgLineLength > 500) {
-      return { include: false, reason: "likely_minified", language: null, classifierLabel: null };
+      return { include: false, reason: "likely_minified", language: null };
     }
   }
-  
-  // Fast path: check extension first
+
   const knownLanguage = LANGUAGE_BY_EXTENSION[extension];
   if (knownLanguage) {
-    return { include: true, reason: "extension_match", language: knownLanguage, classifierLabel: null };
+    return { include: true, reason: "extension_match", language: knownLanguage };
   }
 
-  // TEMPORARY: Skip Magika for now, just reject unknown extensions
-  return { include: false, reason: "unknown_extension", language: null, classifierLabel: null };
-
-  /* MAGIKA DISABLED FOR TESTING
-  // Cache check
-  const cacheKey = `${extension}:${bytes.length}`;
-  const cached = classificationCache.get(cacheKey);
-  if (cached) {
-    return cached;
-  }
-
-  try {
-    const classifier = await getMagika();
-    const result = await classifier.identifyBytes(bytes);
-    const label = String(result.prediction.output.label);
-
-    const isText = result.prediction.output.is_text;
-    const fromClassifier = LANGUAGE_BY_MAGIKA_LABEL[label] ?? null;
-    const fromExtension = LANGUAGE_BY_EXTENSION[extension] ?? null;
-    const language = fromClassifier ?? fromExtension;
-
-    if (!isText && !language) {
-      const decision = { include: false, reason: "classifier_denied", language: null, classifierLabel: label };
-      classificationCache.set(cacheKey, decision);
-      return decision;
-    }
-
-    if (!language) {
-      const decision = { include: false, reason: "unsupported_language", language: null, classifierLabel: label };
-      classificationCache.set(cacheKey, decision);
-      return decision;
-    }
-
-    const decision = { include: true, reason: "allowed", language, classifierLabel: label };
-    classificationCache.set(cacheKey, decision);
-    return decision;
-  } catch {
-    const fallbackLanguage = LANGUAGE_BY_EXTENSION[extension] ?? null;
-    if (!fallbackLanguage) {
-      return { include: false, reason: "classifier_error_unsupported_extension", language: null, classifierLabel: null };
-    }
-
-    return {
-      include: true,
-      reason: "classifier_error_extension_fallback",
-      language: fallbackLanguage,
-      classifierLabel: null
-    };
-  }
-  */
-}
-
-async function getMagika(): Promise<MagikaLike> {
-  if (!magikaInstancePromise) {
-    magikaInstancePromise = (async () => {
-      process.stdout.write("[Magika] Loading file classifier module...\n");
-      const module = await import("magika");
-      process.stdout.write("[Magika] Creating classifier instance (downloading model if needed)...\n");
-      const instance = await module.Magika.create();
-      process.stdout.write("[Magika] Classifier ready!\n");
-      return instance;
-    })();
-  }
-
-  return await magikaInstancePromise;
+  return { include: false, reason: "unknown_extension", language: null };
 }
