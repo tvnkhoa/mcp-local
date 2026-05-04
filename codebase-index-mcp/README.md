@@ -17,7 +17,7 @@ See `ENHANCEMENTS_IMPLEMENTED.md` for technical details and `QUICK_START.md` for
 
 Current integration:
 - Real content classification via `magika` (portable runtime)
-- Real AST extraction for JS/TS via `tree-sitter`
+- Real AST extraction via `tree-sitter` for: JavaScript, TypeScript, C#, Python, Go, Java, Ruby, Rust, PHP
 
 ## Features
 

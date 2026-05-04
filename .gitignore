@@ -5,6 +5,16 @@
 **/dist/
 **/build/
 **/.vite/
+**/out/
+**/coverage/
+**/.cache/
+**/.parcel-cache/
+**/.next/
+**/.nuxt/
+**/.svelte-kit/
+**/storybook-static/
+**/tmp/
+**/temp/
 
 # TypeScript incremental artifacts
 **/*.tsbuildinfo

@@ -1,3 +1,4 @@
+import { execSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
@@ -21,11 +22,20 @@ export type RunIndexInput = {
   abortSignal?: AbortSignal;
 };
 
+function resolveCommitSha(repoPath: string): string | null {
+  try {
+    return execSync("git rev-parse HEAD", { cwd: repoPath, encoding: "utf8" }).trim();
+  } catch {
+    return null;
+  }
+}
+
 export async function runIndexPipeline(store: GraphStore, input: RunIndexInput): Promise<IndexRunSummary> {
   const runId = randomUUID();
   const startedAt = new Date().toISOString();
   const started = Date.now();
   const indexVersion = "v1-tree-sitter-magika";
+  const commitSha = resolveCommitSha(input.repoPath);
 
   store.ensureRepository(input.repoId, input.repoPath);
 
@@ -248,7 +258,7 @@ export async function runIndexPipeline(store: GraphStore, input: RunIndexInput):
     const summary: IndexRunSummary = {
       runId,
       repoId: input.repoId,
-      commitSha: null,
+      commitSha,
       indexVersion,
       mode: input.mode,
       status: wasCancelled ? "cancelled" : "ok",
@@ -274,7 +284,7 @@ export async function runIndexPipeline(store: GraphStore, input: RunIndexInput):
     const summary: IndexRunSummary = {
       runId,
       repoId: input.repoId,
-      commitSha: null,
+      commitSha,
       indexVersion,
       mode: input.mode,
       status: isCancelled ? "cancelled" : "failed",

@@ -288,7 +288,7 @@ function extractCSharpSymbols(
   ])) {
     const nameNode = node.childForFieldName("name");
     if (nameNode) {
-      let kind = "unknown";
+      let kind: SymbolRecord["kind"] = "unknown";
       if (node.type === "method_declaration") kind = "method";
       else if (node.type === "interface_declaration") kind = "interface";
       else if (node.type === "class_declaration") kind = "class";
@@ -441,12 +441,16 @@ function extractRubySymbols(
   for (const node of root.descendantsOfType(["method", "class", "module"])) {
     const nameNode = node.childForFieldName("name");
     if (nameNode) {
+      const rubyKind: SymbolRecord["kind"] =
+        node.type === "method" ? "method" :
+        node.type === "class" ? "class" :
+        node.type === "module" ? "module" : "unknown";
       symbols.push({
         repoId: input.repoId,
         symbolId: stableId(`${input.repoId}:${input.filePath}:${node.type}:${nameNode.text}:${node.startPosition.row}`),
         filePath: input.filePath,
         name: nameNode.text,
-        kind: node.type,
+        kind: rubyKind,
         line: node.startPosition.row + 1
       });
     }
