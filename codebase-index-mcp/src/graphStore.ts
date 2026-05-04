@@ -260,6 +260,176 @@ export class GraphStore {
     return row ?? null;
   }
 
+  upsertCrossRepoDep(fromRepoId: string, fromSymbolId: string, toRepoId: string, toSymbolId: string, type: string): void {
+    this.db
+      .prepare(
+        `
+        insert into cross_repo_deps (from_repo_id, from_symbol_id, to_repo_id, to_symbol_id, type)
+        values (?, ?, ?, ?, ?)
+        on conflict do nothing
+        `
+      )
+      .run(fromRepoId, fromSymbolId, toRepoId, toSymbolId, type);
+  }
+
+  getCrossRepoDeps(fromRepoId: string, fromSymbolId: string, limit: number): {
+    toRepoId: string;
+    toSymbolId: string;
+    type: string;
+  }[] {
+    return this.db
+      .prepare(
+        `
+        select to_repo_id as toRepoId, to_symbol_id as toSymbolId, type
+        from cross_repo_deps
+        where from_repo_id = ? and from_symbol_id = ?
+        limit ?
+        `
+      )
+      .all(fromRepoId, fromSymbolId, limit) as { toRepoId: string; toSymbolId: string; type: string }[];
+  }
+
+  listRepositories(): { repoId: string; repoPath: string; updatedAt: string; filesIndexed: number; symbolCount: number; lastRunStatus: string | null; lastRunAt: string | null }[] {
+    return this.db
+      .prepare(
+        `
+        select
+          r.repo_id as repoId,
+          r.repo_path as repoPath,
+          r.updated_at as updatedAt,
+          coalesce(f.file_count, 0) as filesIndexed,
+          coalesce(s.sym_count, 0) as symbolCount,
+          lr.status as lastRunStatus,
+          lr.finished_at as lastRunAt
+        from repositories r
+        left join (
+          select repo_id, count(*) as file_count from files group by repo_id
+        ) f on f.repo_id = r.repo_id
+        left join (
+          select repo_id, count(*) as sym_count from symbols group by repo_id
+        ) s on s.repo_id = r.repo_id
+        left join (
+          select repo_id, status, finished_at,
+                 row_number() over (partition by repo_id order by started_at desc) as rn
+          from index_runs
+        ) lr on lr.repo_id = r.repo_id and lr.rn = 1
+        order by r.updated_at desc
+        `
+      )
+      .all() as { repoId: string; repoPath: string; updatedAt: string; filesIndexed: number; symbolCount: number; lastRunStatus: string | null; lastRunAt: string | null }[];
+  }
+
+  searchSymbols(query: string, repoId: string | null, language: string | null, kind: string | null, limit: number): (SymbolRecord & { repoPath: string | null })[] {
+    const conditions: string[] = ["s.name like ?"];
+    const params: unknown[] = [`%${query}%`];
+
+    if (repoId) {
+      conditions.push("s.repo_id = ?");
+      params.push(repoId);
+    }
+    if (kind) {
+      conditions.push("s.kind = ?");
+      params.push(kind);
+    }
+    if (language) {
+      conditions.push("f.language = ?");
+    }
+
+    const where = conditions.join(" and ");
+    const langJoin = language
+      ? `inner join files f on f.repo_id = s.repo_id and f.path = s.file_path and f.language = '${language.replace(/'/g, "''")}'`
+      : "left join files f on f.repo_id = s.repo_id and f.path = s.file_path";
+
+    return this.db
+      .prepare(
+        `
+        select
+          s.repo_id as repoId,
+          s.symbol_id as symbolId,
+          s.file_path as filePath,
+          s.name,
+          s.kind,
+          s.line,
+          r.repo_path as repoPath
+        from symbols s
+        ${langJoin}
+        inner join repositories r on r.repo_id = s.repo_id
+        where ${where}
+        order by s.name
+        limit ?
+        `
+      )
+      .all(...params, limit) as (SymbolRecord & { repoPath: string | null })[];
+  }
+
+  getFileContext(repoId: string, filePath: string, limit: number): { symbols: SymbolRecord[]; edges: EdgeRecord[] } {
+    const symbols = this.db
+      .prepare(
+        `
+        select repo_id as repoId, symbol_id as symbolId, file_path as filePath, name, kind, line
+        from symbols
+        where repo_id = ? and file_path = ?
+        limit ?
+        `
+      )
+      .all(repoId, filePath, limit) as SymbolRecord[];
+
+    if (symbols.length === 0) {
+      return { symbols: [], edges: [] };
+    }
+
+    const symbolIds = symbols.map((s) => s.symbolId);
+    const placeholders = symbolIds.map(() => "?").join(", ");
+    const edges = this.db
+      .prepare(
+        `
+        select repo_id as repoId, from_id as fromId, to_id as toId, type
+        from edges
+        where repo_id = ? and (from_id in (${placeholders}) or to_id in (${placeholders}))
+        limit ?
+        `
+      )
+      .all(repoId, ...symbolIds, ...symbolIds, limit) as EdgeRecord[];
+
+    return { symbols, edges };
+  }
+
+  getBatchContext(repoId: string, filePaths: string[], limit: number): { symbols: SymbolRecord[]; edges: EdgeRecord[] } {
+    if (filePaths.length === 0) {
+      return { symbols: [], edges: [] };
+    }
+    const placeholders = filePaths.map(() => "?").join(", ");
+    const symbols = this.db
+      .prepare(
+        `
+        select repo_id as repoId, symbol_id as symbolId, file_path as filePath, name, kind, line
+        from symbols
+        where repo_id = ? and file_path in (${placeholders})
+        limit ?
+        `
+      )
+      .all(repoId, ...filePaths, limit) as SymbolRecord[];
+
+    if (symbols.length === 0) {
+      return { symbols: [], edges: [] };
+    }
+
+    const symbolIds = symbols.map((s) => s.symbolId);
+    const symPlaceholders = symbolIds.map(() => "?").join(", ");
+    const edges = this.db
+      .prepare(
+        `
+        select repo_id as repoId, from_id as fromId, to_id as toId, type
+        from edges
+        where repo_id = ? and (from_id in (${symPlaceholders}) or to_id in (${symPlaceholders}))
+        limit ?
+        `
+      )
+      .all(repoId, ...symbolIds, ...symbolIds, limit) as EdgeRecord[];
+
+    return { symbols, edges };
+  }
+
   private initSchema(): void {
     this.db.exec(`
       create table if not exists repositories (
@@ -315,6 +485,18 @@ export class GraphStore {
       create index if not exists idx_symbols_repo_file on symbols(repo_id, file_path);
       create index if not exists idx_runs_repo_started on index_runs(repo_id, started_at desc);
       create index if not exists idx_files_repo_path on files(repo_id, path);
+
+      create table if not exists cross_repo_deps (
+        from_repo_id text not null,
+        from_symbol_id text not null,
+        to_repo_id text not null,
+        to_symbol_id text not null,
+        type text not null,
+        primary key (from_repo_id, from_symbol_id, to_repo_id, to_symbol_id, type)
+      );
+
+      create index if not exists idx_cross_repo_from on cross_repo_deps(from_repo_id, from_symbol_id);
+      create index if not exists idx_cross_repo_to on cross_repo_deps(to_repo_id, to_symbol_id);
     `);
   }
 }

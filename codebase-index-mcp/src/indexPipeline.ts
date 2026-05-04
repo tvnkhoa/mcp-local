@@ -10,6 +10,7 @@ import { shouldIndexFile, type FilterDecision } from "./fileFilter.js";
 import { GraphStore } from "./graphStore.js";
 import { clamp, redactSensitive } from "./indexGuardrails.js";
 import { extractGraphData } from "./treeSitterExtractor.js";
+import { extractDotnetProjectData } from "./dotnetProjectParser.js";
 import type { IndexMode, IndexProgressSnapshot, IndexRunSummary } from "./types.js";
 
 export type RunIndexInput = {
@@ -100,7 +101,7 @@ export async function runIndexPipeline(store: GraphStore, input: RunIndexInput):
           language: string | null;
           updatedAt: string;
         };
-        extracted: ReturnType<typeof extractGraphData>;
+        extracted: { symbols: import("./types.js").SymbolRecord[]; edges: import("./types.js").EdgeRecord[] };
       }> = [];
 
       // Parallel file reading with concurrency limit
@@ -188,12 +189,20 @@ export async function runIndexPipeline(store: GraphStore, input: RunIndexInput):
             }
           }
 
-          const extracted = extractGraphData({
-            repoId: input.repoId,
-            filePath: relativePath,
-            language: decision.language,
-            source: safeContent
-          });
+          const isDotnetProject = decision.language === "csproj" || decision.language === "sln";
+          const extracted = isDotnetProject
+            ? extractDotnetProjectData({
+                repoId: input.repoId,
+                filePath: relativePath,
+                language: decision.language as "csproj" | "sln",
+                source: safeContent
+              })
+            : extractGraphData({
+                repoId: input.repoId,
+                filePath: relativePath,
+                language: decision.language,
+                source: safeContent
+              });
 
           pendingWrites.push({
             file: {

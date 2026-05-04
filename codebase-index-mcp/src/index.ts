@@ -75,6 +75,34 @@ const findImpactSurfaceSchema = z
   })
   .strict();
 
+const listRepositoriesSchema = z.object({}).strict();
+
+const searchSymbolsSchema = z
+  .object({
+    query: z.string().min(1).max(200),
+    repoId: z.string().min(1).max(200).optional(),
+    language: z.string().max(50).optional(),
+    kind: z.string().max(50).optional(),
+    limit: z.number().int().min(1).max(MAX_RESULT_LIMIT).default(50)
+  })
+  .strict();
+
+const getFileContextSchema = z
+  .object({
+    repoId: z.string().min(1).max(200),
+    filePath: z.string().min(1),
+    limit: z.number().int().min(1).max(MAX_RESULT_LIMIT).default(200)
+  })
+  .strict();
+
+const getBatchContextSchema = z
+  .object({
+    repoId: z.string().min(1).max(200),
+    filePaths: z.array(z.string().min(1)).min(1).max(50),
+    limit: z.number().int().min(1).max(MAX_RESULT_LIMIT).default(500)
+  })
+  .strict();
+
 const server = new Server(
   {
     name: "codebase-index-mcp",
@@ -177,6 +205,55 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             limit: { type: "integer", minimum: 1, maximum: MAX_RESULT_LIMIT }
           }
         }
+      },
+      {
+        name: "list_repositories",
+        description: "List all indexed repositories with file counts, symbol counts, and last index run status.",
+        inputSchema: { type: "object", additionalProperties: false, properties: {} }
+      },
+      {
+        name: "search_symbols",
+        description: "Fuzzy search symbols by name across all repos or a specific repo. Useful for AI context lookup.",
+        inputSchema: {
+          type: "object",
+          additionalProperties: false,
+          required: ["query"],
+          properties: {
+            query: { type: "string" },
+            repoId: { type: "string" },
+            language: { type: "string" },
+            kind: { type: "string" },
+            limit: { type: "integer", minimum: 1, maximum: MAX_RESULT_LIMIT }
+          }
+        }
+      },
+      {
+        name: "get_file_context",
+        description: "Get all symbols and edges for a file — use when AI needs context for a single file before review.",
+        inputSchema: {
+          type: "object",
+          additionalProperties: false,
+          required: ["repoId", "filePath"],
+          properties: {
+            repoId: { type: "string" },
+            filePath: { type: "string" },
+            limit: { type: "integer", minimum: 1, maximum: MAX_RESULT_LIMIT }
+          }
+        }
+      },
+      {
+        name: "get_batch_context",
+        description: "Get aggregate symbols and edges for a list of file paths — use with PR diff file lists for AI impact analysis.",
+        inputSchema: {
+          type: "object",
+          additionalProperties: false,
+          required: ["repoId", "filePaths"],
+          properties: {
+            repoId: { type: "string" },
+            filePaths: { type: "array", items: { type: "string" }, minItems: 1, maxItems: 50 },
+            limit: { type: "integer", minimum: 1, maximum: MAX_RESULT_LIMIT }
+          }
+        }
       }
     ]
   };
@@ -222,6 +299,29 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const args = findImpactSurfaceSchema.parse(request.params.arguments ?? {});
         const rows = store.getImpactSurface(args.repoId, args.filePath, args.limit);
         return asText({ repoId: args.repoId, filePath: args.filePath, symbols: rows });
+      }
+      case "list_repositories": {
+        listRepositoriesSchema.parse(request.params.arguments ?? {});
+        return asText(store.listRepositories());
+      }
+      case "search_symbols": {
+        const args = searchSymbolsSchema.parse(request.params.arguments ?? {});
+        const results = store.searchSymbols(
+          args.query,
+          args.repoId ?? null,
+          args.language ?? null,
+          args.kind ?? null,
+          args.limit
+        );
+        return asText({ query: args.query, count: results.length, symbols: results });
+      }
+      case "get_file_context": {
+        const args = getFileContextSchema.parse(request.params.arguments ?? {});
+        return asText(store.getFileContext(args.repoId, args.filePath, args.limit));
+      }
+      case "get_batch_context": {
+        const args = getBatchContextSchema.parse(request.params.arguments ?? {});
+        return asText(store.getBatchContext(args.repoId, args.filePaths, args.limit));
       }
       default:
         throw new McpError(ErrorCode.MethodNotFound, `Unknown tool: ${request.params.name}`);

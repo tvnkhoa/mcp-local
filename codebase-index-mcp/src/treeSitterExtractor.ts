@@ -278,13 +278,17 @@ function extractCSharpSymbols(
     }
   }
 
-  // Extract class, interface, method, property declarations
+  // Extract class, interface, method, property, struct, namespace declarations
   for (const node of root.descendantsOfType([
     "class_declaration",
     "interface_declaration",
     "method_declaration",
     "property_declaration",
-    "constructor_declaration"
+    "constructor_declaration",
+    "struct_declaration",
+    "enum_declaration",
+    "namespace_declaration",
+    "record_declaration"
   ])) {
     const nameNode = node.childForFieldName("name");
     if (nameNode) {
@@ -294,6 +298,10 @@ function extractCSharpSymbols(
       else if (node.type === "class_declaration") kind = "class";
       else if (node.type === "property_declaration") kind = "property";
       else if (node.type === "constructor_declaration") kind = "constructor";
+      else if (node.type === "struct_declaration") kind = "struct";
+      else if (node.type === "namespace_declaration") kind = "module";
+      else if (node.type === "enum_declaration") kind = "type";
+      else if (node.type === "record_declaration") kind = "class";
 
       symbols.push({
         repoId: input.repoId,
