@@ -103,6 +103,14 @@ const getBatchContextSchema = z
   })
   .strict();
 
+const getSymbolDetailSchema = z
+  .object({
+    repoId: z.string().min(1).max(200),
+    symbolId: z.string().min(1).max(200),
+    limit: z.number().int().min(1).max(MAX_RESULT_LIMIT).default(100)
+  })
+  .strict();
+
 const server = new Server(
   {
     name: "codebase-index-mcp",
@@ -254,6 +262,20 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             limit: { type: "integer", minimum: 1, maximum: MAX_RESULT_LIMIT }
           }
         }
+      },
+      {
+        name: "get_symbol_detail",
+        description: "Get full detail for a symbol by ID — returns the symbol record plus all outgoing and incoming edges with resolved names. Use after search_symbols to drill into a specific symbol.",
+        inputSchema: {
+          type: "object",
+          additionalProperties: false,
+          required: ["repoId", "symbolId"],
+          properties: {
+            repoId: { type: "string" },
+            symbolId: { type: "string" },
+            limit: { type: "integer", minimum: 1, maximum: MAX_RESULT_LIMIT }
+          }
+        }
       }
     ]
   };
@@ -277,7 +299,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           batchSize: clamp(args.batchSize, 1, 2_000)
         });
 
-        return asText(summary);
+        // Post-index: rebuild FTS index and resolve cross-repo deps
+        try { store.rebuildFts(); } catch { /* non-fatal */ }
+        const crossRepoLinked = store.resolveUnlinkedEdges(args.repoId);
+
+        return asText({ ...summary, crossRepoLinked });
       }
       case "get_dependency_graph": {
         const args = getDependencyGraphSchema.parse(request.params.arguments ?? {});
@@ -322,6 +348,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       case "get_batch_context": {
         const args = getBatchContextSchema.parse(request.params.arguments ?? {});
         return asText(store.getBatchContext(args.repoId, args.filePaths, args.limit));
+      }
+      case "get_symbol_detail": {
+        const args = getSymbolDetailSchema.parse(request.params.arguments ?? {});
+        return asText(store.getSymbolDetail(args.repoId, args.symbolId, args.limit));
       }
       default:
         throw new McpError(ErrorCode.MethodNotFound, `Unknown tool: ${request.params.name}`);

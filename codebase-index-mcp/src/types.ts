@@ -67,6 +67,16 @@ export type EdgeRecord = {
   type: "IMPORTS" | "CALLS" | "DEPENDS_ON";
 };
 
+export type ResolvedEdge = {
+  fromId: string;
+  fromName: string | null;
+  fromFilePath: string | null;
+  toId: string;
+  toName: string | null;
+  toFilePath: string | null;
+  type: string;
+};
+
 export type CallChainDirection = "callers" | "callees";
 
 export type QueryResult<T> = {
