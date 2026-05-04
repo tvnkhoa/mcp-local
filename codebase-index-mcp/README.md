@@ -2,22 +2,22 @@
 
 Internal MCP server for repository indexing and lightweight graph queries.
 
-## ✨ What's New in v0.2.0 (2026-04-23)
+## ✨ What's New in v0.3.0 (2026-05-04)
 
-**Performance & UX Enhancements:**
-- ⚡ **30-50% faster** file discovery with smart glob ignore patterns
-- ⚡ **2-3x faster** database writes with SQLite WAL mode
-- 🎯 **ETA display** - Real-time estimated time remaining
-- 📊 **Language breakdown** - See top 5 languages being indexed
-- 🔄 **Auto-refresh** - Graph loads automatically after indexing
+**Plan/Agent pipeline enhancements:**
+- ✅ **Docs lane isolation**: code-first by default with `CODEBASE_INDEX_DOCS_INDEXING_ENABLED=false` and `CODEBASE_INDEX_DOCS_TOOLS_ENABLED=false`.
+- ✅ **Per-run docs control**: `index_repository` now supports `docsMode` = `auto | on | off`.
+- ✅ **Benchmark quality gate**: `benchmark:plan:check` enforces compact-mode savings thresholds and per-scenario checks.
+- ✅ **Expanded smoke coverage**: validates by-name tools and profile behavior (`compact <= standard <= verbose`).
+- ✅ **Integration playbook**: README now includes concrete setup and call flows for Plan mode and Agent mode.
 
-See `ENHANCEMENTS_IMPLEMENTED.md` for technical details and `QUICK_START.md` for usage guide.
+See `../ENHANCEMENTS_IMPLEMENTED.md` for technical details and `../QUICK_START.md` for usage guide.
 
 ---
 
 Current integration:
 - Binary sniff + extension-based file filtering (fast, zero overhead)
-- Real AST extraction via `tree-sitter` for: JavaScript, TypeScript, C#, Python, Go, Java, Ruby, Rust, PHP
+- Real AST extraction via `tree-sitter` for: JavaScript, TypeScript, C#
 - .NET project parser for `.csproj` / `.sln` (NuGet + ProjectReference edges)
 
 ## Features
@@ -28,9 +28,28 @@ Current integration:
 - `get_call_chain`
 - `get_module_flow`
 - `find_impact_surface`
+- `list_repositories`
+- `search_symbols` (`compact` mode supported)
+- `get_file_context` (`compact` mode supported)
+- `get_batch_context` (`compact` mode supported)
+- `get_symbol_detail`
+- `find_impact_files`
+- `get_change_context`
+- `get_file_summary`
+- `search_docs` (requires `CODEBASE_INDEX_DOCS_TOOLS_ENABLED=true`)
+- `find_stale_docs` (requires `CODEBASE_INDEX_DOCS_TOOLS_ENABLED=true`)
+- `find_doc_coverage` (requires `CODEBASE_INDEX_DOCS_TOOLS_ENABLED=true`)
+- `watch_repo` (`action`: `start` | `stop` | `status`)
+- `find_symbol_at_line`
+- `find_references`
+- `get_context_by_name`
+- `get_change_context_by_name`
+- `get_symbol_candidates`
+- `get_folder_summary`
+- `find_entry_points`
+- `find_implementations`
 - Batch commit indexing (partial progress persisted per batch)
 - Progress output in terminal (`[index-progress] ...`)
-- **NEW**: Real-time progress with ETA and language breakdown via WebSocket
 
 ## Security defaults
 
@@ -44,12 +63,20 @@ Current integration:
 
 - `CODEBASE_INDEX_ALLOWED_ROOTS` (required): comma-separated absolute paths allowed for indexing.
 - `CODEBASE_INDEX_DB_PATH` (optional): defaults to `./codebase-index.db`.
-- `CODEBASE_INDEX_HTTP_HOST` (optional): defaults to `127.0.0.1`.
-- `CODEBASE_INDEX_HTTP_PORT` (optional): defaults to `4310`.
-- `CODEBASE_INDEX_HTTP_API_KEY` (optional): if set, clients must send matching `x-api-key`.
 - `CODEBASE_INDEX_MAX_FILES_PER_RUN` (optional): defaults to `20000`.
 - `CODEBASE_INDEX_MAX_RESULT_LIMIT` (optional): defaults to `500`.
 - `CODEBASE_INDEX_MAX_DEPTH` (optional): defaults to `5`.
+- `CODEBASE_INDEX_TELEMETRY_ENABLED` (optional): defaults to `false`; enables per-tool telemetry logs to stderr.
+- `CODEBASE_INDEX_TELEMETRY_SAMPLE_RATE` (optional): defaults to `1`; range `0..1` for telemetry sampling.
+- `CODEBASE_INDEX_DOCS_INDEXING_ENABLED` (optional): defaults to `false`; controls whether docs lane is indexed by default.
+- `CODEBASE_INDEX_DOCS_TOOLS_ENABLED` (optional): defaults to `false`; controls whether docs tools (`search_docs`, `find_stale_docs`, `find_doc_coverage`) are callable.
+- `CODEBASE_INDEX_WATCH_AUTO_START` (optional): defaults to `true`.
+- `CODEBASE_INDEX_WATCH_DISABLE` (optional): defaults to `false`; emergency kill-switch.
+- `CODEBASE_INDEX_AUTO_WATCH_REPOS` (optional): explicit startup watch targets formatted as `repoId=absPath,repo2=absPath2`.
+- `CODEBASE_INDEX_WATCH_DEBOUNCE_MS` (optional): defaults to `1200`.
+- `CODEBASE_INDEX_WATCH_MAX_QUEUED_EVENTS` (optional): defaults to `2000`.
+- `CODEBASE_INDEX_WATCH_MAX_FILES_PER_RUN` (optional): defaults to `4000`.
+- `CODEBASE_INDEX_WATCH_BATCH_SIZE` (optional): defaults to `200`. 
 
 > If `better-sqlite3` native build fails on Windows environments without build tools, install Visual Studio C++ Build Tools or switch temporarily to a JS-only SQLite backend in a follow-up patch.
 
@@ -60,14 +87,13 @@ npm install
 npm run typecheck
 npm run build
 npm run dev
-npm run dev:http
+npm run benchmark:plan
+npm run benchmark:plan:check
 ```
 
-Run HTTP bridge (for local UI):
-
-```bash
-npm run start:http
-```
+Benchmark gate environment knobs:
+- `BENCH_MIN_COMPACT_SAVINGS_PERCENT` (optional): minimum compact saving percentage required for `benchmark:plan:check` (default `40`).
+- `BENCH_REQUIRE_COMPACT_LOWER_PER_SCENARIO` (optional): when `true`, each scenario must satisfy `compact <= standard` response bytes (default `true`).
 
 ## Smoke test
 
@@ -80,6 +106,192 @@ Smoke test now validates more than startup:
 - `health_check`
 - `index_repository` on current workspace (bounded sample)
 - `get_module_flow` for `src/index.ts` in the indexed repo
+- `get_context_by_name` profile matrix (`compact`, `standard`, `verbose`) and payload ordering
+- `get_change_context_by_name` output validity
+- `get_symbol_candidates` output validity
+
+## Integrate MCP into Plan/Agent pipeline
+
+This server is designed for **code-first reasoning** in Plan mode and Agent mode, with docs lane isolated by default.
+
+### 1) Register MCP server in host
+
+Choose one config profile depending on your usage.
+
+Profile A - workspace-local (portable, isolated per workspace):
+
+```json
+{
+	"servers": {
+		"codebase-index-local": {
+			"command": "node",
+			"args": [
+				"${workspaceFolder}/codebase-index-mcp/dist/index.js"
+			],
+			"env": {
+				"CODEBASE_INDEX_ALLOWED_ROOTS": "${workspaceFolder}",
+				"CODEBASE_INDEX_DB_PATH": "${workspaceFolder}/mcp-local-index.db",
+				"CODEBASE_INDEX_DOCS_INDEXING_ENABLED": "false",
+				"CODEBASE_INDEX_DOCS_TOOLS_ENABLED": "false",
+				"CODEBASE_INDEX_TELEMETRY_ENABLED": "true",
+				"CODEBASE_INDEX_TELEMETRY_SAMPLE_RATE": "1"
+			}
+		}
+	}
+}
+```
+
+Profile B - central cross-repo (recommended for bridge package impact across many repos):
+
+```json
+{
+	"servers": {
+		"codebase-index-central": {
+			"command": "node",
+			"args": [
+				"D:/1.SourceCode/mcp-local/codebase-index-mcp/dist/index.js"
+			],
+			"env": {
+				"CODEBASE_INDEX_ALLOWED_ROOTS": "D:/1.SourceCode/crm",
+				"CODEBASE_INDEX_DB_PATH": "D:/1.SourceCode/mcp-local/mcp-local-index-central.db",
+				"CODEBASE_INDEX_DOCS_INDEXING_ENABLED": "false",
+				"CODEBASE_INDEX_DOCS_TOOLS_ENABLED": "false",
+				"CODEBASE_INDEX_TELEMETRY_ENABLED": "true",
+				"CODEBASE_INDEX_TELEMETRY_SAMPLE_RATE": "1"
+			}
+		}
+	}
+}
+```
+
+Notes:
+- Profile A avoids manual path edits and is best for per-repo development.
+- Profile B is better for cross-repo class in/out mapping and impact tracing.
+- For multi-root workspace, use `${workspaceFolder:<folderName>}` to target a specific root.
+- If you use central DB, keep it out of git and back it up periodically.
+
+Recommended default for token efficiency:
+- Keep `CODEBASE_INDEX_DOCS_INDEXING_ENABLED=false`
+- Keep `CODEBASE_INDEX_DOCS_TOOLS_ENABLED=false`
+- Use `profile: "compact"` on read tools in Plan flow
+
+### 2) Warm-up indexing stage
+
+Run this once before planning loop (or on file changes):
+
+```json
+{
+	"name": "index_repository",
+	"arguments": {
+		"repoId": "wec.be",
+		"repoPath": "d:/1.SourceCode/crm/wec.be",
+		"mode": "incremental",
+		"docsMode": "off",
+		"maxFiles": 5000,
+		"batchSize": 200
+	}
+}
+```
+
+Use `docsMode` per run:
+- `off`: fastest code-only lane (recommended for Plan/Agent by default)
+- `on`: include docs extraction for docs maintenance tasks
+- `auto`: follow `CODEBASE_INDEX_DOCS_INDEXING_ENABLED`
+
+### 3) Plan mode retrieval pipeline (token-saving)
+
+Suggested call sequence:
+1. `search_symbols` with `profile: "compact"` to locate candidate symbols.
+2. `get_context_by_name` with `profile: "compact"` for single-symbol package.
+3. `get_change_context_by_name` with `profile: "compact"` for callers/callees impact.
+4. `get_file_context` only for selected files that need deeper context.
+
+Why this order works:
+- Early calls keep payload small.
+- By-name tools reduce multi-hop lookups.
+- Deep context is requested only when needed.
+
+### 4) Agent mode execution pipeline (implement safely)
+
+Suggested execution loop:
+1. Discover target symbol/file: `search_symbols` or `get_symbol_candidates`.
+2. Build impact map: `get_change_context_by_name`.
+3. Inspect exact files: `get_file_context` / `get_batch_context`.
+4. Apply code edits.
+5. Re-index incrementally: `index_repository` with `mode: "incremental"`.
+6. Re-check impact/refs with `get_change_context_by_name`.
+
+Optional docs sync stage:
+- Enable docs lane (`docsMode: "on"` or env flags), then call:
+	- `find_doc_coverage`
+	- `find_stale_docs`
+	- `search_docs`
+
+### 5) Guardrails and quality gates
+
+For CI or pre-merge checks:
+- `npm run build`
+- `node scripts/smoke-test.mjs`
+- `npm run benchmark:plan:check`
+
+The benchmark gate fails with non-zero exit code when compact-mode savings regress below threshold.
+
+### 6) Quick Start Cross-Repo (central DB)
+
+Use this when you need cross-repo impact analysis between a large monorepo and a smaller bridge repo.
+
+Step 1: index the first repo.
+
+```json
+{
+	"name": "index_repository",
+	"arguments": {
+		"repoId": "crm-mono",
+		"repoPath": "d:/1.SourceCode/crm/wec.be",
+		"mode": "incremental",
+		"docsMode": "off",
+		"maxFiles": 12000,
+		"batchSize": 300
+	}
+}
+```
+
+Step 2: index the second repo (bridge/adapter).
+
+```json
+{
+	"name": "index_repository",
+	"arguments": {
+		"repoId": "crm-bridge",
+		"repoPath": "d:/1.SourceCode/crm/wec.communication-hub",
+		"mode": "incremental",
+		"docsMode": "off",
+		"maxFiles": 5000,
+		"batchSize": 200
+	}
+}
+```
+
+Step 3: run a fast impact check by symbol name.
+
+```json
+{
+	"name": "get_change_context_by_name",
+	"arguments": {
+		"repoId": "crm-bridge",
+		"name": "YourBridgeClassName",
+		"callerDepth": 2,
+		"calleeDepth": 1,
+		"limit": 30,
+		"profile": "compact"
+	}
+}
+```
+
+Tips:
+- Keep `repoId` stable across runs so historical context stays consistent.
+- Use `profile: "compact"` first, then escalate to `standard` only when needed.
+- Re-run `index_repository` incrementally after each bridge change before re-checking impact.
 
 ## Sample tool inputs
 
@@ -87,13 +299,19 @@ Smoke test now validates more than startup:
 
 ```json
 {
-	"repoId": "mcp-local",
-	"repoPath": "d:/1.SourceCode/mcp-local",
+	"repoId": "<repo-id>",
+	"repoPath": "<absolute-path-under-allowed-roots>",
 	"mode": "incremental",
+	"docsMode": "auto",
 	"maxFiles": 5000,
 	"batchSize": 200
 }
 ```
+
+`docsMode` options:
+- `auto`: follow server default from `CODEBASE_INDEX_DOCS_INDEXING_ENABLED`
+- `on`: force docs indexing for this run
+- `off`: skip docs indexing for this run
 
 `get_call_chain`
 
@@ -107,20 +325,52 @@ Smoke test now validates more than startup:
 }
 ```
 
+`get_context_by_name` (token-friendly)
+
+```json
+{
+	"repoId": "mcp-local",
+	"name": "GraphStore",
+	"limit": 20,
+	"profile": "compact"
+}
+```
+
+## Response Profiles
+
+These read tools support `profile` with values `compact`, `standard`, `verbose`:
+- `search_symbols`
+- `get_file_context`
+- `get_batch_context`
+- `get_change_context`
+- `get_context_by_name`
+- `get_change_context_by_name`
+- `get_symbol_candidates`
+
+Behavior:
+- `compact`: smallest payload for Plan mode (also serialized as minified JSON)
+- `standard`: default balanced payload
+- `verbose`: includes extra summary/debug fields
+
+Backward compatibility:
+- `search_symbols`, `get_file_context`, and `get_batch_context` still accept `compact: true`.
+- If both `compact: true` and `profile` are provided, `compact` takes precedence.
+
 ## Runbook
 
 - Full re-index: call `index_repository` with `mode: "full"`.
 - Incremental re-index: call `index_repository` with `mode: "incremental"` (unchanged files are skipped by hash).
 - Recovery from partial failures: re-run `index_repository` for same `repoId`; upserts make reruns idempotent.
+- Auto watch startup: set `CODEBASE_INDEX_AUTO_WATCH_REPOS` and keep `CODEBASE_INDEX_WATCH_AUTO_START=true`.
+- Runtime watch control: use `watch_repo`.
+	- Start: `{ "action": "start", "repoId": "<id>", "repoPath": "<abs-path>" }`
+	- Stop: `{ "action": "stop", "repoId": "<id>" }`
+	- Status (one repo): `{ "action": "status", "repoId": "<id>" }`
+	- Status (all repos): `{ "action": "status" }`
+- Emergency fallback: set `CODEBASE_INDEX_WATCH_DISABLE=true` and restart server to keep manual indexing only.
 
 ## Notes
 
-AST extraction implemented for 9 languages via tree-sitter. .csproj/.sln files are parsed with a dedicated regex-based parser to extract NuGet and ProjectReference dependencies.
+AST extraction is implemented for JavaScript/TypeScript/C# via tree-sitter. `.csproj`/`.sln` files are parsed with a dedicated parser to extract NuGet and ProjectReference dependencies.
 
 Binary files are rejected via null-byte sniff on the first 512 bytes — no external classifier needed.
-- `GET /graph/dependency?repoId=<id>&symbolId=<id>&depth=<n>&limit=<n>`
-- `GET /graph/call-chain?repoId=<id>&symbolId=<id>&direction=callers|callees&depth=<n>&limit=<n>`
-- `GET /graph/impact?repoId=<id>&filePath=<path>&limit=<n>`
-- `POST /graph/resolve-nodes`
-
-The HTTP server binds to loopback by default and reuses existing guardrails and bounds.

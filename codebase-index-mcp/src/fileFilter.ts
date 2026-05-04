@@ -18,19 +18,19 @@ const EXCLUDED_PATH_SEGMENTS = new Set([
   "target",
   "bin",
   "obj",
+  "artifacts",
   ".vscode",
+  ".vs",
   ".idea",
   "__pycache__",
-  ".pytest_cache",
-  ".mypy_cache",
-  "vendor",
+  "wwwroot",
   "public",
   "static",
-  "assets"
+  "assets",
+  "logs"
 ]);
 
 const EXCLUDED_EXTENSIONS = new Set([
-  ".md",
   ".txt",
   ".pdf",
   ".doc",
@@ -68,49 +68,33 @@ const EXCLUDED_FILENAMES = new Set([
   "package-lock.json",
   "yarn.lock",
   "pnpm-lock.yaml",
-  "Cargo.lock",
-  "Gemfile.lock",
-  "poetry.lock",
-  "composer.lock",
   "LICENSE",
   "CHANGELOG",
   "README",
   "CONTRIBUTING",
   "CODE_OF_CONDUCT",
   ".DS_Store",
-  "Thumbs.db"
+  "Thumbs.db",
+  "global.json",
+  "NuGet.config"
 ]);
 
 const LANGUAGE_BY_EXTENSION: Record<string, string> = {
-  // Web / scripting
+  // Documentation
+  ".md": "markdown",
+  ".mdx": "markdown",
+  // JavaScript / TypeScript (codebase-index-mcp)
   ".ts": "typescript",
   ".tsx": "typescript",
   ".js": "javascript",
   ".jsx": "javascript",
   ".mjs": "javascript",
   ".cjs": "javascript",
-  ".py": "python",
-  ".go": "go",
-  ".java": "java",
-  ".rb": "ruby",
-  ".rs": "rust",
-  ".php": "php",
-  // .NET / C#
+  // .NET / C# (wec.communication-hub)
   ".cs": "csharp",
-  ".razor": "razor",
-  ".cshtml": "razor",
   ".csproj": "csproj",
   ".sln": "sln",
-  ".props": "xml",
-  ".targets": "xml",
-  // Config / data
-  ".xml": "xml",
-  ".config": "xml",
-  ".json": "json",
-  ".yaml": "yaml",
-  ".yml": "yaml",
-  ".toml": "toml",
-  ".sql": "sql"
+  ".slnx": "sln"
 };
 
 /** Returns true if the first 512 bytes contain a null byte — reliable binary file indicator. */
@@ -138,7 +122,14 @@ export function shouldIndexFile(filePath: string, bytes: Uint8Array): FilterDeci
     return { include: false, reason: "excluded_extension", language: null };
   }
 
-  if (EXCLUDED_FILENAMES.has(basename) || EXCLUDED_FILENAMES.has(basenameNoExt)) {
+  // Detect language early to make filename exclusion language-aware
+  const knownLanguage = LANGUAGE_BY_EXTENSION[extension];
+
+  // Only exclude README/CHANGELOG/etc for non-markdown files (allow markdown docs)
+  if (
+    knownLanguage !== "markdown" &&
+    (EXCLUDED_FILENAMES.has(basename) || EXCLUDED_FILENAMES.has(basenameNoExt))
+  ) {
     return { include: false, reason: "excluded_filename", language: null };
   }
 
@@ -162,7 +153,6 @@ export function shouldIndexFile(filePath: string, bytes: Uint8Array): FilterDeci
     }
   }
 
-  const knownLanguage = LANGUAGE_BY_EXTENSION[extension];
   if (knownLanguage) {
     return { include: true, reason: "extension_match", language: knownLanguage };
   }

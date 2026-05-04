@@ -20,6 +20,8 @@ export type DotnetExtractInput = {
 export type DotnetExtractResult = {
   symbols: SymbolRecord[];
   edges: EdgeRecord[];
+  docs?: never;
+  mentions?: never;
 };
 
 function stableId(input: string): string {

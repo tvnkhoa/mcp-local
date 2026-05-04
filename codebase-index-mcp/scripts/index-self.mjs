@@ -86,8 +86,13 @@ async function main() {
     console.log(`  filesSkipped   : ${r.filesSkipped}`);
     console.log(`  symbolsUpserted: ${r.symbolsUpserted}`);
     console.log(`  edgesUpserted  : ${r.edgesUpserted}`);
+    console.log(`  docsUpserted   : ${r.docsUpserted ?? 0}`);
+    console.log(`  mentionsUpserted: ${r.mentionsUpserted ?? 0}`);
     console.log(`  parseFailures  : ${r.parseFailures}`);
     console.log(`  crossRepoLinked: ${r.crossRepoLinked ?? 0}`);
+    console.log(`  callEdgesResolved: ${r.callEdgesResolved ?? 0}`);
+    console.log(`  importEdgesResolved: ${r.importEdgesResolved ?? 0}`);
+    console.log(`  mentionsResolved: ${r.mentionsResolved ?? 0}`);
     console.log(`  elapsedMs      : ${r.elapsedMs}`);
   } else {
     console.log(indexResult.text);
@@ -121,6 +126,32 @@ async function main() {
     }
   } else {
     console.log(searchResults.text);
+  }
+
+  // --- find_callers_by_name ---
+  const callers = readJson(
+    await client.callTool({ name: "find_callers_by_name", arguments: { repoId, symbolName: "runIndexPipeline", limit: 10 } })
+  );
+  console.log("\n[find_callers_by_name] symbolName=runIndexPipeline:");
+  if (callers.json?.callers?.length) {
+    for (const c of callers.json.callers) {
+      console.log(`  ${c.callerName} (${c.kind}) @ ${c.callerFile}:${c.callerLine}`);
+    }
+  } else {
+    console.log("  (no callers found — may need re-index)");
+  }
+
+  // --- find_impact_files ---
+  const impact = readJson(
+    await client.callTool({ name: "find_impact_files", arguments: { repoId, filePath: "codebase-index-mcp\\src\\graphStore.ts", limit: 20 } })
+  );
+  console.log("\n[find_impact_files] filePath=graphStore.ts:");
+  if (impact.json?.impactedFiles?.length) {
+    for (const f of impact.json.impactedFiles) {
+      console.log(`  ${f.filePath} (${f.reason}) → [${f.symbolsAffected.join(", ")}]`);
+    }
+  } else {
+    console.log("  (no impacted files — CALLS edges may need re-index with fixed scheme)");
   }
 
   await client.close();

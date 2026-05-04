@@ -17,6 +17,7 @@ export type RunIndexInput = {
   repoId: string;
   repoPath: string;
   mode: IndexMode;
+  includeDocs?: boolean;
   maxFiles: number;
   batchSize?: number;
   onProgress?: (progress: IndexProgressSnapshot) => void;
@@ -41,6 +42,7 @@ export async function runIndexPipeline(store: GraphStore, input: RunIndexInput):
   store.ensureRepository(input.repoId, input.repoPath);
 
   const maxFiles = clamp(input.maxFiles, 1, 200_000);
+  const includeDocs = input.includeDocs ?? true;
   const batchSize = clamp(input.batchSize ?? 200, 1, 2_000);
   const concurrencyLimit = 50; // Limit parallel file reads
   
@@ -67,11 +69,23 @@ export async function runIndexPipeline(store: GraphStore, input: RunIndexInput):
 
   process.stderr.write(`[index-scan-complete] found ${String(files.length)} files, will process up to ${String(maxFiles)}\n`);
 
+  if (includeDocs) {
+    // Count markdown files for user feedback
+    const markdownFiles = files.filter((f) => f.endsWith(".md") || f.endsWith(".mdx"));
+    if (markdownFiles.length > 0) {
+      process.stderr.write(`[index-scan] found ${String(markdownFiles.length)} markdown files for doc indexing\n`);
+    }
+  } else {
+    process.stderr.write("[index-scan] docs lane disabled for this run (markdown/docs indexing skipped)\n");
+  }
+
   let filesScanned = 0;
   let filesIndexed = 0;
   let filesSkipped = 0;
   let symbolsUpserted = 0;
   let edgesUpserted = 0;
+  let docsUpserted = 0;
+  let mentionsUpserted = 0;
   let parseFailures = 0;
   const languageStats = new Map<string, { scanned: number; indexed: number }>();
 
@@ -101,7 +115,7 @@ export async function runIndexPipeline(store: GraphStore, input: RunIndexInput):
           language: string | null;
           updatedAt: string;
         };
-        extracted: { symbols: import("./types.js").SymbolRecord[]; edges: import("./types.js").EdgeRecord[] };
+        extracted: { symbols: import("./types.js").SymbolRecord[]; edges: import("./types.js").EdgeRecord[]; docs?: import("./types.js").DocRecord[]; mentions?: import("./types.js").DocMentionRecord[] };
       }> = [];
 
       // Parallel file reading with concurrency limit
@@ -169,6 +183,11 @@ export async function runIndexPipeline(store: GraphStore, input: RunIndexInput):
             continue;
           }
 
+          if (!includeDocs && decision.language === "markdown") {
+            filesSkipped += 1;
+            continue;
+          }
+
           // Track language stats
           const lang = decision.language;
           if (!languageStats.has(lang)) {
@@ -218,12 +237,19 @@ export async function runIndexPipeline(store: GraphStore, input: RunIndexInput):
           filesIndexed += 1;
           symbolsUpserted += extracted.symbols.length;
           edgesUpserted += extracted.edges.length;
+          if (includeDocs && extracted.docs) {
+            docsUpserted += extracted.docs.length;
+          }
+          if (includeDocs && extracted.mentions) {
+            mentionsUpserted += extracted.mentions.length;
+          }
           
           // Update language indexed count
           const langStats = languageStats.get(decision.language)!;
           langStats.indexed += 1;
-        } catch {
+        } catch (err) {
           parseFailures += 1;
+          process.stderr.write(`[index-parse-failure] ${relativePath}: ${err instanceof Error ? err.message : String(err)}\n`);
         }
 
         // Emit progress every 10 files for smoother updates
@@ -240,6 +266,17 @@ export async function runIndexPipeline(store: GraphStore, input: RunIndexInput):
           if (item.extracted.symbols.length > 0) {
             store.replaceEdgesForFile(input.repoId, item.extracted.symbols[0].symbolId, item.extracted.edges);
           }
+          // Upsert docs and mentions if present (e.g., from markdown files)
+          if (item.extracted.docs && item.extracted.docs.length > 0) {
+            if (includeDocs) {
+              store.upsertDocs(item.extracted.docs);
+            }
+          }
+          if (item.extracted.mentions && item.extracted.mentions.length > 0) {
+            if (includeDocs) {
+              store.upsertDocMentions(item.extracted.mentions);
+            }
+          }
         }
       });
 
@@ -251,6 +288,15 @@ export async function runIndexPipeline(store: GraphStore, input: RunIndexInput):
       if (input.abortSignal?.aborted) {
         process.stderr.write(`\n[index-cancelled] Batch committed, stopping index run.\n`);
         break;
+      }
+    }
+
+    // On full mode, remove stale files no longer present on disk
+    if (input.mode === "full" && !input.abortSignal?.aborted) {
+      const currentPaths = selectedFiles.map((f) => path.relative(input.repoPath, f));
+      const pruned = store.pruneStaleFiles(input.repoId, currentPaths);
+      if (pruned > 0) {
+        process.stderr.write(`[index-prune] removed ${String(pruned)} stale file(s) from index\n`);
       }
     }
 
@@ -272,11 +318,13 @@ export async function runIndexPipeline(store: GraphStore, input: RunIndexInput):
       filesSkipped,
       symbolsUpserted,
       edgesUpserted,
+      docsUpserted,
+      mentionsUpserted,
       parseFailures,
       elapsedMs
     };
 
-    store.recordRun(summary);
+    // Note: recordRun is called by the caller (index.ts) after computing resolution metrics
     emitProgress(wasCancelled ? "cancelled" : "ok", finishedAt);
     writeTerminalProgress(true);
     const elapsedSec = (Date.now() - started) / 1000;
@@ -301,6 +349,8 @@ export async function runIndexPipeline(store: GraphStore, input: RunIndexInput):
       filesSkipped,
       symbolsUpserted,
       edgesUpserted,
+      docsUpserted,
+      mentionsUpserted,
       parseFailures,
       elapsedMs
     };

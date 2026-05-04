@@ -4,14 +4,10 @@ import Parser from "tree-sitter";
 import JavaScript from "tree-sitter-javascript";
 import TypeScript from "tree-sitter-typescript";
 import CSharp from "tree-sitter-c-sharp";
-import Python from "tree-sitter-python";
-import Go from "tree-sitter-go";
-import Java from "tree-sitter-java";
-import Ruby from "tree-sitter-ruby";
-import Rust from "tree-sitter-rust";
-import PHP from "tree-sitter-php";
 
-import type { EdgeRecord, SymbolRecord } from "./types.js";
+import type { DocMentionRecord, DocRecord, EdgeRecord, SymbolRecord } from "./types.js";
+
+import { parseMarkdownFile } from "./markdownParser.js";
 
 export type ExtractInput = {
   repoId: string;
@@ -23,9 +19,14 @@ export type ExtractInput = {
 export type ExtractOutput = {
   symbols: SymbolRecord[];
   edges: EdgeRecord[];
+  docs?: DocRecord[];
+  mentions?: DocMentionRecord[];
 };
 
-export function extractGraphData(input: ExtractInput): ExtractOutput {
+export function extractGraphData(input: ExtractInput): ExtractOutput {  // Handle markdown separately
+  if (input.language === "markdown") {
+    return extractMarkdownFile(input);
+  }
   const moduleSymbolId = stableId(`${input.repoId}:${input.filePath}:module`);
 
   const symbols: SymbolRecord[] = [
@@ -44,7 +45,7 @@ export function extractGraphData(input: ExtractInput): ExtractOutput {
     return { symbols, edges: [] };
   }
 
-  const tree = parser.parse(input.source);
+  const tree = parser.parse(input.source, undefined, { bufferSize: 1024 * 1024 });
   const root = tree.rootNode;
 
   const edges: EdgeRecord[] = [];
@@ -54,18 +55,6 @@ export function extractGraphData(input: ExtractInput): ExtractOutput {
     extractJavaScriptSymbols(input, root, symbols, edges, moduleSymbolId);
   } else if (input.language === "csharp") {
     extractCSharpSymbols(input, root, symbols, edges, moduleSymbolId);
-  } else if (input.language === "python") {
-    extractPythonSymbols(input, root, symbols, edges, moduleSymbolId);
-  } else if (input.language === "go") {
-    extractGoSymbols(input, root, symbols, edges, moduleSymbolId);
-  } else if (input.language === "java") {
-    extractJavaSymbols(input, root, symbols, edges, moduleSymbolId);
-  } else if (input.language === "ruby") {
-    extractRubySymbols(input, root, symbols, edges, moduleSymbolId);
-  } else if (input.language === "rust") {
-    extractRustSymbols(input, root, symbols, edges, moduleSymbolId);
-  } else if (input.language === "php") {
-    extractPHPSymbols(input, root, symbols, edges, moduleSymbolId);
   }
 
   return { symbols: dedupeSymbols(symbols), edges: dedupeEdges(edges) };
@@ -90,36 +79,6 @@ function createParserForLanguage(language: string): Parser | null {
 
   if (language === "csharp") {
     parser.setLanguage(CSharp);
-    return parser;
-  }
-
-  if (language === "python") {
-    parser.setLanguage(Python);
-    return parser;
-  }
-
-  if (language === "go") {
-    parser.setLanguage(Go);
-    return parser;
-  }
-
-  if (language === "java") {
-    parser.setLanguage(Java);
-    return parser;
-  }
-
-  if (language === "ruby") {
-    parser.setLanguage(Ruby);
-    return parser;
-  }
-
-  if (language === "rust") {
-    parser.setLanguage(Rust);
-    return parser;
-  }
-
-  if (language === "php") {
-    parser.setLanguage((PHP as any).php || PHP);
     return parser;
   }
 
@@ -162,7 +121,47 @@ function dedupeSymbols(symbols: SymbolRecord[]): SymbolRecord[] {
   return output;
 }
 
+/**
+ * Walk up AST to find the nearest enclosing function/method node.
+ * Returns the stable symbolId if found, otherwise null.
+ */
+function findEnclosingSymbolId(node: Parser.SyntaxNode, input: ExtractInput): string | null {
+  const FUNCTION_TYPES = new Set([
+    "function_declaration",
+    "function_expression",
+    "arrow_function",
+    "method_definition"
+  ]);
+  let current: Parser.SyntaxNode | null = node.parent;
+  while (current) {
+    if (FUNCTION_TYPES.has(current.type)) {
+      const nameNode =
+        current.childForFieldName("name") ??
+        current.parent?.childForFieldName("name") ?? // arrow assigned to variable
+        null;
+      if (nameNode) {
+        const kind = current.type === "method_definition" ? "method" : "function";
+        return stableId(`${input.repoId}:${input.filePath}:${kind}:${nameNode.text}:${current.startPosition.row}`);
+      }
+    }
+    current = current.parent;
+  }
+  return null;
+}
+
 // JavaScript/TypeScript extractor
+
+/**
+ * Extract a compact signature string from a declaration node.
+ * Returns text up to the opening brace (or full first line for short nodes).
+ */
+function extractSignature(node: Parser.SyntaxNode, maxLen = 300): string {
+  const text = node.text;
+  const braceIdx = text.indexOf("{");
+  const raw = braceIdx > 0 ? text.slice(0, braceIdx).trim() : text.split("\n")[0].trim();
+  return raw.replace(/\s+/g, " ").slice(0, maxLen);
+}
+
 function extractJavaScriptSymbols(
   input: ExtractInput,
   root: Parser.SyntaxNode,
@@ -179,23 +178,31 @@ function extractJavaScriptSymbols(
           edges.push({
             repoId: input.repoId,
             fromId: moduleSymbolId,
-            toId: stableId(`${input.repoId}:dep:${dependency}`),
+            toId: `import:${dependency}`,
             type: "IMPORTS"
           });
         }
       }
     } else if (node.type === "call_expression") {
       const functionNode = node.childForFieldName("function");
+      let callee = "";
       if (functionNode?.type === "identifier") {
-        const callee = functionNode.text.trim();
-        if (callee) {
-          edges.push({
-            repoId: input.repoId,
-            fromId: moduleSymbolId,
-            toId: stableId(`${input.repoId}:callee:${callee}`),
-            type: "CALLS"
-          });
+        callee = functionNode.text.trim();
+      } else if (functionNode?.type === "member_expression") {
+        // e.g. this.store.run() → property = "run"
+        const prop = functionNode.childForFieldName("property");
+        if (prop?.type === "property_identifier") {
+          callee = prop.text.trim();
         }
+      }
+      if (callee) {
+        const fromId = findEnclosingSymbolId(node, input) ?? moduleSymbolId;
+        edges.push({
+          repoId: input.repoId,
+          fromId,
+          toId: `callee:${callee}`,
+          type: "CALLS"
+        });
       }
     }
   }
@@ -226,36 +233,81 @@ function extractJavaScriptSymbols(
       filePath: input.filePath,
       name: nameNode.text,
       kind,
-      line: node.startPosition.row + 1
+      line: node.startPosition.row + 1,
+      signature: extractSignature(node)
     });
   }
 
-  // Exported arrow functions: export const fn = () => ...
+  // Exported arrow functions / functions and exported constants
   for (const node of root.descendantsOfType(["lexical_declaration"])) {
-    // Only care about top-level exported const
     const parent = node.parent;
-    if (parent?.type !== "export_statement" && node.parent?.type !== "program") continue;
+    const isExported = parent?.type === "export_statement";
+    // Only process exported declarations or top-level (for arrow fns)
+    if (!isExported && parent?.type !== "program") continue;
 
     for (const declarator of node.descendantsOfType(["variable_declarator"])) {
       const nameNode = declarator.childForFieldName("name");
       const valueNode = declarator.childForFieldName("value");
-      if (!nameNode) continue;
+      if (!nameNode || nameNode.type !== "identifier") continue;
       if (!valueNode) continue;
-      if (valueNode.type !== "arrow_function" && valueNode.type !== "function") continue;
 
-      symbols.push({
-        repoId: input.repoId,
-        symbolId: stableId(`${input.repoId}:${input.filePath}:function:${nameNode.text}:${node.startPosition.row}`),
-        filePath: input.filePath,
-        name: nameNode.text,
-        kind: "function",
-        line: node.startPosition.row + 1
-      });
+      const isFunction = valueNode.type === "arrow_function" || valueNode.type === "function";
+
+      if (isFunction) {
+        // arrow function / function expression
+        const sig = extractSignature(declarator).replace(/^(const|let|var)\s+/, "");
+        symbols.push({
+          repoId: input.repoId,
+          symbolId: stableId(`${input.repoId}:${input.filePath}:function:${nameNode.text}:${node.startPosition.row}`),
+          filePath: input.filePath,
+          name: nameNode.text,
+          kind: "function",
+          line: node.startPosition.row + 1,
+          signature: sig
+        });
+      } else if (isExported) {
+        // exported constant / variable (non-function)
+        const valPreview = valueNode.text.split("\n")[0].slice(0, 80);
+        symbols.push({
+          repoId: input.repoId,
+          symbolId: stableId(`${input.repoId}:${input.filePath}:variable:${nameNode.text}:${node.startPosition.row}`),
+          filePath: input.filePath,
+          name: nameNode.text,
+          kind: "variable",
+          line: node.startPosition.row + 1,
+          signature: `const ${nameNode.text} = ${valPreview}`
+        });
+      }
     }
   }
 }
 
 // C# extractor
+/**
+ * Walk up AST to find the nearest enclosing method/constructor node for C#.
+ * Returns the stable symbolId if found, otherwise null.
+ */
+function findEnclosingCSharpSymbolId(node: Parser.SyntaxNode, input: ExtractInput): string | null {
+  const ENCLOSING_TYPES = new Set([
+    "method_declaration",
+    "constructor_declaration",
+    "operator_declaration",
+    "accessor_declaration"
+  ]);
+  let current: Parser.SyntaxNode | null = node.parent;
+  while (current) {
+    if (ENCLOSING_TYPES.has(current.type)) {
+      const nameNode = current.childForFieldName("name");
+      if (nameNode) {
+        const kind = current.type === "constructor_declaration" ? "constructor" : "method";
+        return stableId(`${input.repoId}:${input.filePath}:${kind}:${nameNode.text}:${current.startPosition.row}`);
+      }
+    }
+    current = current.parent;
+  }
+  return null;
+}
+
 function extractCSharpSymbols(
   input: ExtractInput,
   root: Parser.SyntaxNode,
@@ -270,7 +322,7 @@ function extractCSharpSymbols(
       edges.push({
         repoId: input.repoId,
         fromId: moduleSymbolId,
-        toId: stableId(`${input.repoId}:dep:${nameNode.text}`),
+        toId: `import:${nameNode.text}`,
         type: "IMPORTS"
       });
     }
@@ -280,7 +332,6 @@ function extractCSharpSymbols(
   for (const node of root.descendantsOfType(["invocation_expression"])) {
     const functionNode = node.childForFieldName("function");
     if (functionNode) {
-      // Handle simple identifiers and member access
       let calleeName = "";
       if (functionNode.type === "identifier") {
         calleeName = functionNode.text;
@@ -290,12 +341,13 @@ function extractCSharpSymbols(
           calleeName = nameNode.text;
         }
       }
-      
+
       if (calleeName) {
+        const fromId = findEnclosingCSharpSymbolId(node, input) ?? moduleSymbolId;
         edges.push({
           repoId: input.repoId,
-          fromId: moduleSymbolId,
-          toId: stableId(`${input.repoId}:callee:${calleeName}`),
+          fromId,
+          toId: `callee:${calleeName}`,
           type: "CALLS"
         });
       }
@@ -308,10 +360,11 @@ function extractCSharpSymbols(
     if (typeNode) {
       const typeName = typeNode.text;
       if (typeName) {
+        const fromId = findEnclosingCSharpSymbolId(node, input) ?? moduleSymbolId;
         edges.push({
           repoId: input.repoId,
-          fromId: moduleSymbolId,
-          toId: stableId(`${input.repoId}:type:${typeName}`),
+          fromId,
+          toId: `callee:${typeName}`,
           type: "CALLS"
         });
       }
@@ -343,238 +396,46 @@ function extractCSharpSymbols(
       else if (node.type === "enum_declaration") kind = "type";
       else if (node.type === "record_declaration") kind = "class";
 
+      const symbolId = stableId(`${input.repoId}:${input.filePath}:${kind}:${nameNode.text}:${node.startPosition.row}`);
+
       symbols.push({
         repoId: input.repoId,
-        symbolId: stableId(`${input.repoId}:${input.filePath}:${kind}:${nameNode.text}:${node.startPosition.row}`),
+        symbolId,
         filePath: input.filePath,
         name: nameNode.text,
         kind,
-        line: node.startPosition.row + 1
+        line: node.startPosition.row + 1,
+        signature: extractSignature(node)
       });
-    }
-  }
-}
 
-// Python extractor
-function extractPythonSymbols(
-  input: ExtractInput,
-  root: Parser.SyntaxNode,
-  symbols: SymbolRecord[],
-  edges: EdgeRecord[],
-  moduleSymbolId: string
-): void {
-  for (const node of root.descendantsOfType(["import_statement", "import_from_statement"])) {
-    const nameNode = node.childForFieldName("name") || node.child(1);
-    if (nameNode) {
-      edges.push({
-        repoId: input.repoId,
-        fromId: moduleSymbolId,
-        toId: stableId(`${input.repoId}:dep:${nameNode.text}`),
-        type: "IMPORTS"
-      });
-    }
-  }
-
-  for (const node of root.descendantsOfType(["function_definition", "class_definition"])) {
-    const nameNode = node.childForFieldName("name");
-    if (nameNode) {
-      symbols.push({
-        repoId: input.repoId,
-        symbolId: stableId(`${input.repoId}:${input.filePath}:${node.type}:${nameNode.text}:${node.startPosition.row}`),
-        filePath: input.filePath,
-        name: nameNode.text,
-        kind: node.type === "function_definition" ? "function" : "class",
-        line: node.startPosition.row + 1
-      });
-    }
-  }
-}
-
-// Go extractor
-function extractGoSymbols(
-  input: ExtractInput,
-  root: Parser.SyntaxNode,
-  symbols: SymbolRecord[],
-  edges: EdgeRecord[],
-  moduleSymbolId: string
-): void {
-  for (const node of root.descendantsOfType(["import_declaration"])) {
-    for (const spec of node.descendantsOfType(["import_spec"])) {
-      const pathNode = spec.childForFieldName("path");
-      if (pathNode) {
-        edges.push({
-          repoId: input.repoId,
-          fromId: moduleSymbolId,
-          toId: stableId(`${input.repoId}:dep:${stripQuotes(pathNode.text)}`),
-          type: "IMPORTS"
-        });
+      // Emit IMPLEMENTS edges for class/struct/record base_list entries
+      if (node.type === "class_declaration" || node.type === "struct_declaration" || node.type === "record_declaration") {
+        const baseList = node.childForFieldName("bases");
+        if (baseList) {
+          for (const baseNode of baseList.children) {
+            const baseName = baseNode.text.trim();
+            // Skip punctuation and whitespace nodes
+            if (!baseName || baseName === "," || baseName === ":" || baseName.length < 2) continue;
+            // Strip generic type args: IRepository<User> → IRepository
+            const cleanName = baseName.replace(/<.*>$/, "").trim();
+            if (cleanName) {
+              edges.push({
+                repoId: input.repoId,
+                fromId: symbolId,
+                toId: `iface:${cleanName}`,
+                type: "IMPLEMENTS"
+              });
+            }
+          }
+        }
       }
     }
   }
-
-  for (const node of root.descendantsOfType(["function_declaration", "type_declaration"])) {
-    const nameNode = node.childForFieldName("name");
-    if (nameNode) {
-      symbols.push({
-        repoId: input.repoId,
-        symbolId: stableId(`${input.repoId}:${input.filePath}:${node.type}:${nameNode.text}:${node.startPosition.row}`),
-        filePath: input.filePath,
-        name: nameNode.text,
-        kind: node.type === "function_declaration" ? "function" : "type",
-        line: node.startPosition.row + 1
-      });
-    }
-  }
 }
 
-// Java extractor
-function extractJavaSymbols(
-  input: ExtractInput,
-  root: Parser.SyntaxNode,
-  symbols: SymbolRecord[],
-  edges: EdgeRecord[],
-  moduleSymbolId: string
-): void {
-  for (const node of root.descendantsOfType(["import_declaration"])) {
-    const nameNode = node.child(1);
-    if (nameNode) {
-      edges.push({
-        repoId: input.repoId,
-        fromId: moduleSymbolId,
-        toId: stableId(`${input.repoId}:dep:${nameNode.text}`),
-        type: "IMPORTS"
-      });
-    }
-  }
-
-  for (const node of root.descendantsOfType(["class_declaration", "interface_declaration", "method_declaration"])) {
-    const nameNode = node.childForFieldName("name");
-    if (nameNode) {
-      const kind = node.type === "method_declaration" ? "method" : node.type === "interface_declaration" ? "interface" : "class";
-      symbols.push({
-        repoId: input.repoId,
-        symbolId: stableId(`${input.repoId}:${input.filePath}:${kind}:${nameNode.text}:${node.startPosition.row}`),
-        filePath: input.filePath,
-        name: nameNode.text,
-        kind,
-        line: node.startPosition.row + 1
-      });
-    }
-  }
-}
-
-// Ruby extractor
-function extractRubySymbols(
-  input: ExtractInput,
-  root: Parser.SyntaxNode,
-  symbols: SymbolRecord[],
-  edges: EdgeRecord[],
-  moduleSymbolId: string
-): void {
-  for (const node of root.descendantsOfType(["call"])) {
-    const methodNode = node.childForFieldName("method");
-    if (methodNode?.text === "require" || methodNode?.text === "require_relative") {
-      const argNode = node.descendantsOfType(["string"])[0];
-      if (argNode) {
-        edges.push({
-          repoId: input.repoId,
-          fromId: moduleSymbolId,
-          toId: stableId(`${input.repoId}:dep:${stripQuotes(argNode.text)}`),
-          type: "IMPORTS"
-        });
-      }
-    }
-  }
-
-  for (const node of root.descendantsOfType(["method", "class", "module"])) {
-    const nameNode = node.childForFieldName("name");
-    if (nameNode) {
-      const rubyKind: SymbolRecord["kind"] =
-        node.type === "method" ? "method" :
-        node.type === "class" ? "class" :
-        node.type === "module" ? "module" : "unknown";
-      symbols.push({
-        repoId: input.repoId,
-        symbolId: stableId(`${input.repoId}:${input.filePath}:${node.type}:${nameNode.text}:${node.startPosition.row}`),
-        filePath: input.filePath,
-        name: nameNode.text,
-        kind: rubyKind,
-        line: node.startPosition.row + 1
-      });
-    }
-  }
-}
-
-// Rust extractor
-function extractRustSymbols(
-  input: ExtractInput,
-  root: Parser.SyntaxNode,
-  symbols: SymbolRecord[],
-  edges: EdgeRecord[],
-  moduleSymbolId: string
-): void {
-  for (const node of root.descendantsOfType(["use_declaration"])) {
-    const argNode = node.childForFieldName("argument");
-    if (argNode) {
-      edges.push({
-        repoId: input.repoId,
-        fromId: moduleSymbolId,
-        toId: stableId(`${input.repoId}:dep:${argNode.text}`),
-        type: "IMPORTS"
-      });
-    }
-  }
-
-  for (const node of root.descendantsOfType(["function_item", "struct_item", "impl_item"])) {
-    const nameNode = node.childForFieldName("name");
-    if (nameNode) {
-      const kind = node.type === "function_item" ? "function" : node.type === "struct_item" ? "struct" : "impl";
-      symbols.push({
-        repoId: input.repoId,
-        symbolId: stableId(`${input.repoId}:${input.filePath}:${kind}:${nameNode.text}:${node.startPosition.row}`),
-        filePath: input.filePath,
-        name: nameNode.text,
-        kind,
-        line: node.startPosition.row + 1
-      });
-    }
-  }
-}
-
-// PHP extractor
-function extractPHPSymbols(
-  input: ExtractInput,
-  root: Parser.SyntaxNode,
-  symbols: SymbolRecord[],
-  edges: EdgeRecord[],
-  moduleSymbolId: string
-): void {
-  for (const node of root.descendantsOfType(["namespace_use_declaration"])) {
-    for (const clause of node.descendantsOfType(["namespace_use_clause"])) {
-      const nameNode = clause.childForFieldName("name");
-      if (nameNode) {
-        edges.push({
-          repoId: input.repoId,
-          fromId: moduleSymbolId,
-          toId: stableId(`${input.repoId}:dep:${nameNode.text}`),
-          type: "IMPORTS"
-        });
-      }
-    }
-  }
-
-  for (const node of root.descendantsOfType(["function_definition", "class_declaration", "method_declaration"])) {
-    const nameNode = node.childForFieldName("name");
-    if (nameNode) {
-      const kind = node.type === "function_definition" ? "function" : node.type === "method_declaration" ? "method" : "class";
-      symbols.push({
-        repoId: input.repoId,
-        symbolId: stableId(`${input.repoId}:${input.filePath}:${kind}:${nameNode.text}:${node.startPosition.row}`),
-        filePath: input.filePath,
-        name: nameNode.text,
-        kind,
-        line: node.startPosition.row + 1
-      });
-    }
-  }
+// Markdown extractor — parses headings, code blocks, and mentions
+function extractMarkdownFile(input: ExtractInput): ExtractOutput {
+  const { docs, mentions } = parseMarkdownFile(input);
+  // Markdown files don't have traditional symbols, just docs and mentions
+  return { symbols: [], edges: [], docs, mentions };
 }

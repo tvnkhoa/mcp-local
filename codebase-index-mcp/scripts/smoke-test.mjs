@@ -16,6 +16,10 @@ function readJsonTextContent(result) {
   }
 }
 
+function bytesOf(text) {
+  return Buffer.byteLength(text, "utf8");
+}
+
 async function main() {
   const repoPath = process.cwd();
   const repoId = "smoke-test-repo";
@@ -42,7 +46,20 @@ async function main() {
   await client.connect(transport);
 
   const tools = await client.listTools();
-  console.log("TOOLS:", tools.tools.map((t) => t.name));
+  const toolNames = tools.tools.map((t) => t.name);
+  console.log("TOOLS:", toolNames);
+
+  const requiredTools = [
+    "get_context_by_name",
+    "get_change_context_by_name",
+    "get_symbol_candidates",
+    "watch_repo"
+  ];
+  for (const required of requiredTools) {
+    if (!toolNames.includes(required)) {
+      throw new Error(`Missing required tool in listTools: ${required}`);
+    }
+  }
 
   const health = await client.callTool({
     name: "health_check",
@@ -82,6 +99,90 @@ async function main() {
   const flowPayload = readJsonTextContent(flowResult);
   console.log("MODULE_FLOW_RESULT:");
   console.log(flowPayload.text);
+
+  const contextByNameStandard = await client.callTool({
+    name: "get_context_by_name",
+    arguments: {
+      repoId,
+      name: "runIndexAndResolve",
+      limit: 20,
+      profile: "standard"
+    }
+  });
+
+  const contextByNameCompact = await client.callTool({
+    name: "get_context_by_name",
+    arguments: {
+      repoId,
+      name: "runIndexAndResolve",
+      limit: 20,
+      profile: "compact"
+    }
+  });
+
+  const contextByNameVerbose = await client.callTool({
+    name: "get_context_by_name",
+    arguments: {
+      repoId,
+      name: "runIndexAndResolve",
+      limit: 20,
+      profile: "verbose"
+    }
+  });
+
+  const contextStdText = readTextContent(contextByNameStandard);
+  const contextCmpText = readTextContent(contextByNameCompact);
+  const contextVrbText = readTextContent(contextByNameVerbose);
+  const contextCmpJson = readJsonTextContent(contextByNameCompact).json;
+  if (!contextCmpJson || !contextCmpJson.symbol) {
+    throw new Error("get_context_by_name(compact) did not return a symbol");
+  }
+
+  const standardBytes = bytesOf(contextStdText);
+  const compactBytes = bytesOf(contextCmpText);
+  const verboseBytes = bytesOf(contextVrbText);
+  if (compactBytes > standardBytes) {
+    throw new Error(`Expected compact payload <= standard payload (compact=${compactBytes}, standard=${standardBytes})`);
+  }
+  if (verboseBytes < standardBytes) {
+    throw new Error(`Expected verbose payload >= standard payload (verbose=${verboseBytes}, standard=${standardBytes})`);
+  }
+
+  console.log("CONTEXT_PROFILE_BYTES:", {
+    standardBytes,
+    compactBytes,
+    verboseBytes
+  });
+
+  const changeByName = await client.callTool({
+    name: "get_change_context_by_name",
+    arguments: {
+      repoId,
+      name: "runIndexAndResolve",
+      callerDepth: 2,
+      calleeDepth: 1,
+      limit: 20,
+      profile: "compact"
+    }
+  });
+  const changeByNameJson = readJsonTextContent(changeByName).json;
+  if (!changeByNameJson || !changeByNameJson.symbol) {
+    throw new Error("get_change_context_by_name(compact) returned no symbol");
+  }
+
+  const symbolCandidates = await client.callTool({
+    name: "get_symbol_candidates",
+    arguments: {
+      repoId,
+      name: "GraphStore",
+      limit: 10,
+      profile: "compact"
+    }
+  });
+  const symbolCandidatesJson = readJsonTextContent(symbolCandidates).json;
+  if (!symbolCandidatesJson || !Array.isArray(symbolCandidatesJson.candidates) || symbolCandidatesJson.candidates.length === 0) {
+    throw new Error("get_symbol_candidates(compact) returned empty candidates");
+  }
 
   if (!indexPayload.json || !flowPayload.json) {
     throw new Error("Smoke test received non-JSON text output from tool call.");

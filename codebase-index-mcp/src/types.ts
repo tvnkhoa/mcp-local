@@ -16,8 +16,30 @@ export type IndexRunSummary = {
   filesSkipped: number;
   symbolsUpserted: number;
   edgesUpserted: number;
+  docsUpserted: number;
+  mentionsUpserted: number;
   parseFailures: number;
   elapsedMs: number;
+  crossRepoAttempts?: number;
+  crossRepoResolved?: number;
+  unresolvedNoCandidate?: number;
+  unresolvedAmbiguous?: number;
+  unresolvedBoundaryBlocked?: number;
+  unresolvedLowConfidence?: number;
+};
+
+export type GraphHealth = {
+  unresolvedCalls: number;
+  unresolvedImports: number;
+  note: string;
+};
+
+export type UnresolvedReason = "no_candidate" | "ambiguous_candidates" | "boundary_blocked" | "low_confidence";
+
+export type ResolutionStats = {
+  attempts: number;
+  resolved: number;
+  unresolvedByReason: Record<UnresolvedReason, number>;
 };
 
 export type IndexProgressSnapshot = {
@@ -58,13 +80,14 @@ export type SymbolRecord = {
   name: string;
   kind: "function" | "class" | "method" | "variable" | "module" | "interface" | "property" | "constructor" | "type" | "struct" | "impl" | "unknown";
   line: number;
+  signature?: string;
 };
 
 export type EdgeRecord = {
   repoId: string;
   fromId: string;
   toId: string;
-  type: "IMPORTS" | "CALLS" | "DEPENDS_ON";
+  type: "IMPORTS" | "CALLS" | "DEPENDS_ON" | "IMPLEMENTS";
 };
 
 export type ResolvedEdge = {
@@ -77,9 +100,51 @@ export type ResolvedEdge = {
   type: string;
 };
 
+export type DocRecord = {
+  repoId: string;
+  docId: string;
+  filePath: string;
+  headingPath: string; // e.g., "README.md#API" or "README.md" for file-level
+  contentType: "heading" | "code_block" | "paragraph";
+  text: string;
+  level?: number; // heading level (1-6) if contentType="heading"
+};
+
+export type DocMentionRecord = {
+  repoId: string;
+  docId: string;
+  symbolId: string | null; // null if unresolved
+  mentionType: "backtick" | "heading" | "filepath";
+  confidence: number; // 1.0, 0.7, 0.5
+  mentionText: string; // the actual text matched, e.g., "GraphStore"
+};
+
 export type CallChainDirection = "callers" | "callees";
 
 export type QueryResult<T> = {
   requestId: string;
   data: T;
+};
+
+export type WatchConfig = {
+  debounceMs: number;
+  maxQueuedEvents: number;
+  maxFilesPerRun: number;
+  batchSize: number;
+};
+
+export type RepoWatchStatus = {
+  repoId: string;
+  repoPath: string;
+  running: boolean;
+  startedAt: string;
+  lastRunAt: string | null;
+  lastError: string | null;
+  eventsReceived: number;
+  eventsDeduped: number;
+  batchesProcessed: number;
+  filesPruned: number;
+  runFailures: number;
+  queuedChanged: number;
+  queuedDeleted: number;
 };
