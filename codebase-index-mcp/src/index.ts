@@ -728,8 +728,13 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
       case "get_module_flow": {
         const args = getModuleFlowSchema.parse(request.params.arguments ?? {});
-        const rows = store.getModuleFlow(args.repoId, args.filePath, args.limit);
-        return asText({ repoId: args.repoId, filePath: args.filePath, edges: rows });
+        const result = store.getModuleFlow(args.repoId, args.filePath, args.limit);
+        return asText({
+          repoId: args.repoId,
+          filePath: args.filePath,
+          edges: result.edges,
+          unresolvedCalls: result.unresolvedCalls
+        });
       }
       case "find_impact_surface": {
         const args = findImpactSurfaceSchema.parse(request.params.arguments ?? {});

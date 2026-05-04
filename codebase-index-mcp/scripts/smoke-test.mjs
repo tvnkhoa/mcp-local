@@ -86,6 +86,25 @@ async function main() {
   const indexPayload = readJsonTextContent(indexResult);
   console.log("INDEX_REPOSITORY_RESULT:");
   console.log(indexPayload.text);
+  if (!indexPayload.json?.runId) {
+    throw new Error("index_repository result missing runId");
+  }
+
+  const healthAfterIndex = await client.callTool({
+    name: "health_check",
+    arguments: {
+      repoId
+    }
+  });
+  const healthAfterIndexJson = readJsonTextContent(healthAfterIndex).json;
+  if (!healthAfterIndexJson?.latestRun?.runId) {
+    throw new Error("health_check did not return latestRun after indexing");
+  }
+  if (healthAfterIndexJson.latestRun.runId !== indexPayload.json.runId) {
+    throw new Error(
+      `Expected health_check.latestRun.runId to match index runId (${indexPayload.json.runId}), got ${healthAfterIndexJson.latestRun.runId}`
+    );
+  }
 
   const flowResult = await client.callTool({
     name: "get_module_flow",
@@ -99,6 +118,27 @@ async function main() {
   const flowPayload = readJsonTextContent(flowResult);
   console.log("MODULE_FLOW_RESULT:");
   console.log(flowPayload.text);
+  if (!Array.isArray(flowPayload.json?.edges) || flowPayload.json.edges.length === 0) {
+    throw new Error("get_module_flow returned no edges for src/index.ts");
+  }
+  if (typeof flowPayload.json?.unresolvedCalls?.count !== "number") {
+    throw new Error("get_module_flow missing unresolvedCalls.count field");
+  }
+
+  const fileSummary = await client.callTool({
+    name: "get_file_summary",
+    arguments: {
+      repoId,
+      filePath: "src/index.ts"
+    }
+  });
+  const fileSummaryJson = readJsonTextContent(fileSummary).json;
+  if (fileSummaryJson?.file?.language !== "typescript") {
+    throw new Error(`Expected get_file_summary language=typescript, got ${String(fileSummaryJson?.file?.language)}`);
+  }
+  if (!Array.isArray(fileSummaryJson?.exports) || fileSummaryJson.exports.length === 0) {
+    throw new Error("Expected get_file_summary exports to be non-empty for src/index.ts");
+  }
 
   const contextByNameStandard = await client.callTool({
     name: "get_context_by_name",

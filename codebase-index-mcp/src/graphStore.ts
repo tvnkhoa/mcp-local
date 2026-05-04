@@ -19,6 +19,48 @@ export class GraphStore {
   private readonly db: Database.Database;
   private readonly runInTransactionInternal: (fn: () => void) => void;
 
+  private normalizePath(filePath: string): string {
+    return filePath.replace(/\\/g, "/");
+  }
+
+  private resolveCanonicalFilePath(repoId: string, filePath: string): string {
+    const normalized = this.normalizePath(filePath);
+
+    const fileRow = this.db
+      .prepare(
+        `
+        select path as filePath
+        from files
+        where repo_id = ? and replace(path, char(92), '/') = ?
+        order by case when path = ? then 0 else 1 end
+        limit 1
+        `
+      )
+      .get(repoId, normalized, filePath) as { filePath: string } | undefined;
+
+    if (fileRow?.filePath) {
+      return fileRow.filePath;
+    }
+
+    const symbolRow = this.db
+      .prepare(
+        `
+        select file_path as filePath
+        from symbols
+        where repo_id = ? and replace(file_path, char(92), '/') = ?
+        order by case when file_path = ? then 0 else 1 end
+        limit 1
+        `
+      )
+      .get(repoId, normalized, filePath) as { filePath: string } | undefined;
+
+    if (symbolRow?.filePath) {
+      return symbolRow.filePath;
+    }
+
+    return normalized;
+  }
+
   constructor(dbPath: string) {
     this.db = new Database(dbPath);
     this.db.pragma("journal_mode = WAL");
@@ -239,7 +281,7 @@ export class GraphStore {
           unresolved_low_confidence as unresolvedLowConfidence
         from index_runs
         where repo_id = ?
-        order by started_at desc
+        order by finished_at desc, started_at desc, rowid desc
         limit 1
         `
       )
@@ -287,10 +329,20 @@ export class GraphStore {
       .all(repoId, symbolId, limit) as EdgeRecord[];
   }
 
-  getModuleFlow(repoId: string, filePath: string, limit: number): ResolvedEdge[] {
-    return this.db
+  getModuleFlow(repoId: string, filePath: string, limit: number): {
+    edges: ResolvedEdge[];
+    unresolvedCalls: { count: number; samples: string[] };
+  } {
+    const canonicalFilePath = this.resolveCanonicalFilePath(repoId, filePath);
+
+    const all = this.db
       .prepare(
         `
+        with target_symbols as (
+          select symbol_id
+          from symbols
+          where repo_id = ? and file_path = ?
+        )
         select
           e.from_id as fromId,
           sf.name as fromName,
@@ -299,20 +351,49 @@ export class GraphStore {
           st.name as toName,
           st.file_path as toFilePath,
           e.type
-        from symbols s
-        inner join edges e
-          on e.repo_id = s.repo_id
-         and e.from_id = s.symbol_id
+        from edges e
         left join symbols sf
           on sf.repo_id = e.repo_id and sf.symbol_id = e.from_id
         left join symbols st
           on st.repo_id = e.repo_id and st.symbol_id = e.to_id
-        where s.repo_id = ?
-          and s.file_path = ?
+        where e.repo_id = ?
+          and (
+            e.from_id in (select symbol_id from target_symbols)
+            or e.to_id in (select symbol_id from target_symbols)
+          )
+        order by
+          case
+            when sf.file_path = ? and st.file_path = ? then 0
+            when sf.file_path = ? then 1
+            when st.file_path = ? then 2
+            else 3
+          end,
+          e.type
         limit ?
         `
       )
-      .all(repoId, filePath, limit) as ResolvedEdge[];
+      .all(repoId, canonicalFilePath, repoId, canonicalFilePath, canonicalFilePath, canonicalFilePath, canonicalFilePath, limit) as ResolvedEdge[];
+
+    const edges: ResolvedEdge[] = [];
+    const unresolvedNames: string[] = [];
+
+    for (const row of all) {
+      if (row.toId.startsWith("callee:")) {
+        unresolvedNames.push(row.toId.slice(7));
+      } else {
+        edges.push(row);
+      }
+    }
+
+    // Dedupe and cap samples
+    const uniqueNames = [...new Set(unresolvedNames)];
+    return {
+      edges,
+      unresolvedCalls: {
+        count: unresolvedNames.length,
+        samples: uniqueNames.slice(0, 20)
+      }
+    };
   }
 
   getSymbolsByIds(repoId: string, symbolIds: string[]): SymbolRecord[] {
@@ -848,8 +929,9 @@ export class GraphStore {
               case kind
                 when 'function' then 0
                 when 'method' then 1
-                when 'class' then 2
-                else 3
+                when 'constructor' then 2
+                when 'class' then 3
+                else 4
               end
             limit 1
             `
@@ -874,6 +956,8 @@ export class GraphStore {
     symbolAffected: string;
     edgeType: string;
   }[] {
+    const canonicalFilePath = this.resolveCanonicalFilePath(repoId, filePath);
+
     return this.db
       .prepare(
         `
@@ -884,14 +968,19 @@ export class GraphStore {
           s.name as symbolAffected,
           e.type as edgeType
         from symbols s
-        inner join edges e on e.repo_id = s.repo_id and e.to_id = s.symbol_id
+        inner join edges e
+          on e.repo_id = s.repo_id
+          and (
+            e.to_id = s.symbol_id
+            or (e.type = 'CALLS' and e.to_id = ('callee:' || s.name))
+          )
         inner join symbols sf on sf.repo_id = e.repo_id and sf.symbol_id = e.from_id
         where s.repo_id = ? and s.file_path = ? and sf.file_path != s.file_path
         order by sf.file_path, e.type
         limit ?
         `
       )
-      .all(repoId, filePath, limit) as {
+      .all(repoId, canonicalFilePath, limit) as {
         callerName: string;
         callerFile: string;
         callerLine: number;
@@ -904,6 +993,8 @@ export class GraphStore {
     impactedFiles: { filePath: string; reason: string; symbolsAffected: string[] }[];
     graphHealth: GraphHealth;
   } {
+    const canonicalFilePath = this.resolveCanonicalFilePath(repoId, filePath);
+
     const rows = this.db
       .prepare(
         `
@@ -912,14 +1003,19 @@ export class GraphStore {
           e.type as edgeType,
           s.name as symbolAffected
         from symbols s
-        inner join edges e on e.repo_id = s.repo_id and e.to_id = s.symbol_id
+        inner join edges e
+          on e.repo_id = s.repo_id
+          and (
+            e.to_id = s.symbol_id
+            or (e.type = 'CALLS' and e.to_id = ('callee:' || s.name))
+          )
         inner join symbols sf on sf.repo_id = e.repo_id and sf.symbol_id = e.from_id
         where s.repo_id = ? and s.file_path = ? and sf.file_path != s.file_path
         order by sf.file_path
         limit ?
         `
       )
-      .all(repoId, filePath, limit) as {
+      .all(repoId, canonicalFilePath, limit) as {
         callerFile: string;
         edgeType: string;
         symbolAffected: string;
@@ -944,7 +1040,7 @@ export class GraphStore {
 
     return {
       impactedFiles,
-      graphHealth: this.countUnresolvedEdgesForFile(repoId, filePath)
+      graphHealth: this.countUnresolvedEdgesForFile(repoId, canonicalFilePath)
     };
   }
 
@@ -955,9 +1051,19 @@ export class GraphStore {
     importedBy: { fromFilePath: string; edgeType: string }[];
     graphHealth: GraphHealth;
   } {
+    const canonicalFilePath = this.resolveCanonicalFilePath(repoId, filePath);
+
     const fileRow = this.db
-      .prepare(`select path as filePath, language from files where repo_id = ? and path = ? limit 1`)
-      .get(repoId, filePath) as { filePath: string; language: string | null } | undefined;
+      .prepare(
+        `
+        select path as filePath, language
+        from files
+        where repo_id = ? and replace(path, char(92), '/') = ?
+        order by case when path = ? then 0 else 1 end
+        limit 1
+        `
+      )
+      .get(repoId, this.normalizePath(filePath), filePath) as { filePath: string; language: string | null } | undefined;
 
     const exports = this.db
       .prepare(
@@ -965,11 +1071,11 @@ export class GraphStore {
          from symbols where repo_id = ? and file_path = ? and kind != 'module'
          order by line limit 50`
       )
-      .all(repoId, filePath) as SymbolRecord[];
+      .all(repoId, canonicalFilePath) as SymbolRecord[];
 
     const moduleSymbol = this.db
       .prepare(`select symbol_id as symbolId from symbols where repo_id = ? and file_path = ? and kind = 'module' limit 1`)
-      .get(repoId, filePath) as { symbolId: string } | undefined;
+      .get(repoId, canonicalFilePath) as { symbolId: string } | undefined;
 
     const symbolIds = exports.map((s) => s.symbolId);
     if (moduleSymbol) symbolIds.unshift(moduleSymbol.symbolId);
@@ -1004,15 +1110,15 @@ export class GraphStore {
             limit 20
             `
           )
-          .all(repoId, ...symbolIds, filePath) as { fromFilePath: string; edgeType: string }[])
+          .all(repoId, ...symbolIds, canonicalFilePath) as { fromFilePath: string; edgeType: string }[])
       : [];
 
     return {
-      file: fileRow ?? { filePath, language: null },
+      file: fileRow ?? { filePath: canonicalFilePath, language: null },
       exports,
       imports,
       importedBy,
-      graphHealth: this.countUnresolvedEdgesForFile(repoId, filePath)
+      graphHealth: this.countUnresolvedEdgesForFile(repoId, canonicalFilePath)
     };
   }
 
@@ -2098,6 +2204,8 @@ export class GraphStore {
   }
 
   private countUnresolvedEdgesForFile(repoId: string, filePath: string): GraphHealth {
+    const canonicalFilePath = this.resolveCanonicalFilePath(repoId, filePath);
+
     const row = this.db
       .prepare(
         `
@@ -2106,10 +2214,10 @@ export class GraphStore {
           count(case when e.to_id like 'import:%' then 1 end) as unresolvedImports
         from edges e
         inner join symbols s on s.repo_id = e.repo_id and s.symbol_id = e.from_id
-        where e.repo_id = ? and s.file_path = ?
+        where e.repo_id = ? and replace(s.file_path, char(92), '/') = replace(?, char(92), '/')
         `
       )
-      .get(repoId, filePath) as { unresolvedCalls: number; unresolvedImports: number };
+      .get(repoId, canonicalFilePath) as { unresolvedCalls: number; unresolvedImports: number };
 
     const { unresolvedCalls, unresolvedImports } = row ?? { unresolvedCalls: 0, unresolvedImports: 0 };
     let note: string;
