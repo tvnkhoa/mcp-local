@@ -309,6 +309,11 @@ export async function runIndexPipeline(store: GraphStore, input: RunIndexInput):
       if (prunedEdges > 0) {
         process.stderr.write(`[index-prune] removed ${String(prunedEdges)} orphaned edge(s) from index\n`);
       }
+      // Resolve iface: placeholders → real symbolIds after all C# files have been indexed.
+      const resolvedImpl = store.resolveImplementsEdges(input.repoId);
+      if (resolvedImpl > 0) {
+        process.stderr.write(`[index-resolve] resolved ${String(resolvedImpl)} IMPLEMENTS edge(s)\n`);
+      }
     }
 
     const finishedAt = new Date().toISOString();

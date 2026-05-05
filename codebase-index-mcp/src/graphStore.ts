@@ -2288,6 +2288,8 @@ export class GraphStore {
    * Useful for mapping stack-trace file+line → symbolId without an extra search hop.
    */
   findSymbolAtLine(repoId: string, filePath: string, line: number): SymbolRecord | null {
+    const canonicalFilePath = this.resolveCanonicalFilePath(repoId, filePath);
+
     const row = this.db
       .prepare(
         `
@@ -2299,7 +2301,7 @@ export class GraphStore {
         limit 1
         `
       )
-      .get(repoId, filePath, line) as SymbolRecord | undefined;
+      .get(repoId, canonicalFilePath, line) as SymbolRecord | undefined;
 
     return row ?? null;
   }

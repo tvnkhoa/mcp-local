@@ -810,7 +810,8 @@ function extractCSharpSymbols(
 
       // Emit IMPLEMENTS edges for class/struct/record base_list entries
       if (node.type === "class_declaration" || node.type === "struct_declaration" || node.type === "record_declaration") {
-        const baseList = node.childForFieldName("bases");
+        // tree-sitter C# grammar: base_list is a child node, not a named field
+        const baseList = node.children.find((c) => c.type === "base_list");
         if (baseList) {
           for (const baseNode of baseList.children) {
             const baseName = baseNode.text.trim();
@@ -884,7 +885,153 @@ function extractCSharpRoutes(input: ExtractInput, root: Parser.SyntaxNode, symbo
     }
   }
 
+  // Minimal API pattern: groupBuilder.MapGet("/path", HandlerMethod) or app.MapGet(...)
+  // Handles IEndpointGroup.Map() body and Program.cs-style registration.
+  extractMinimalApiRoutes(input, root, symbols, routes);
+
   return dedupeRoutes(routes);
+}
+
+/**
+ * Extract ASP.NET Minimal API routes from patterns like:
+ *   groupBuilder.MapGet("/conversations", ListConversations)
+ *   app.MapPost("/endpoint", Handler)
+ *   endpoints.MapPut("{id}", UpdateMethod)
+ */
+function extractMinimalApiRoutes(
+  input: ExtractInput,
+  root: Parser.SyntaxNode,
+  symbols: SymbolRecord[],
+  routes: RouteRecord[]
+): void {
+  const HTTP_METHOD_MAP: Record<string, RouteRecord["httpMethod"]> = {
+    mapget: "GET",
+    mappost: "POST",
+    mapput: "PUT",
+    mapdelete: "DELETE",
+    mappatch: "PATCH"
+  };
+
+  // Walk all invocation_expression nodes and find receiver.MapXxx(route, handler) calls
+  for (const invokeNode of root.descendantsOfType(["invocation_expression"])) {
+    const funcNode = invokeNode.childForFieldName("function");
+    if (!funcNode || funcNode.type !== "member_access_expression") {
+      continue;
+    }
+
+    const receiverNode = funcNode.childForFieldName("expression");
+    if (!isLikelyMinimalApiReceiver(receiverNode)) {
+      continue;
+    }
+
+    const methodNameNode = funcNode.childForFieldName("name");
+    const methodName = methodNameNode?.text?.toLowerCase() ?? "";
+    const httpMethod = HTTP_METHOD_MAP[methodName];
+    if (!httpMethod) {
+      continue;
+    }
+
+    const argsNode = invokeNode.childForFieldName("arguments");
+    if (!argsNode) {
+      continue;
+    }
+
+    // Collect argument nodes (skip commas/punctuation)
+    const argNodes = argsNode.children.filter(
+      (c) => c.type === "argument" || c.type === "string_literal" || c.type === "verbatim_string_literal"
+    );
+
+    // First arg should be the route template string
+    const firstArg = argNodes[0];
+    if (!firstArg) {
+      continue;
+    }
+
+    // argument node wraps the value
+    const templateLiteral = firstArg.type === "argument"
+      ? firstArg.children.find((c) => c.type === "string_literal" || c.type === "verbatim_string_literal")?.text ?? ""
+      : firstArg.text;
+    const routeTemplate = templateLiteral
+      .replace(/^@?"/, "")
+      .replace(/"$/, "")
+      .trim();
+
+    if (!routeTemplate || routeTemplate.length === 0) {
+      continue;
+    }
+
+    // Second arg: handler reference (identifier or member_access_expression)
+    const secondArg = argNodes[1];
+    const handlerName = secondArg
+      ? (secondArg.type === "argument"
+          ? (secondArg.children.find((c) => c.type === "identifier")?.text ?? "")
+          : (secondArg.type === "identifier" ? secondArg.text : ""))
+      : "";
+
+    const line = invokeNode.startPosition.row + 1;
+
+    // Find enclosing class to use as controller
+    let enclosingClassSymbolId: string | null = null;
+    let cur: Parser.SyntaxNode | null = invokeNode.parent;
+    while (cur) {
+      if (cur.type === "class_declaration") {
+        const name = cur.childForFieldName("name")?.text ?? "";
+        enclosingClassSymbolId = findSymbolIdByNode(symbols, "class", name, cur.startPosition.row + 1);
+        break;
+      }
+      cur = cur.parent;
+    }
+
+    // Resolve handler symbolId
+    const handlerSymbolId = handlerName
+      ? (findSymbolIdByName(symbols, handlerName) ?? enclosingClassSymbolId ?? `module:${input.filePath}`)
+      : (enclosingClassSymbolId ?? `module:${input.filePath}`);
+
+    const controllerSymbolId = enclosingClassSymbolId ?? `module:${input.filePath}`;
+
+    // Normalize route template
+    const normalized = routeTemplate.startsWith("/") ? routeTemplate : `/${routeTemplate}`;
+
+    routes.push({
+      repoId: input.repoId,
+      filePath: input.filePath,
+      controllerSymbolId,
+      handlerSymbolId,
+      httpMethod,
+      routeTemplate: normalized,
+      line
+    });
+  }
+}
+
+function isLikelyMinimalApiReceiver(node: Parser.SyntaxNode | null): boolean {
+  if (!node) {
+    return false;
+  }
+
+  if (node.type === "identifier") {
+    return /^(app|endpoints|endpoint|groupbuilder|routegroupbuilder|group|routes)$/i.test(node.text);
+  }
+
+  if (node.type === "invocation_expression") {
+    const callee = node.childForFieldName("function");
+    if (callee?.type === "member_access_expression") {
+      const methodName = callee.childForFieldName("name")?.text?.toLowerCase() ?? "";
+      if (methodName === "mapgroup") {
+        return true;
+      }
+      const parentExpr = callee.childForFieldName("expression");
+      return isLikelyMinimalApiReceiver(parentExpr);
+    }
+    return false;
+  }
+
+  if (node.type === "member_access_expression") {
+    const parentExpr = node.childForFieldName("expression");
+    return isLikelyMinimalApiReceiver(parentExpr);
+  }
+
+  return false;
 }
 
 function dedupeRoutes(routes: RouteRecord[]): RouteRecord[] {

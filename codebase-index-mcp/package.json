@@ -9,6 +9,7 @@
     "start": "node dist/index.js",
     "dev": "tsx src/index.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test:minimal-api-guard": "node scripts/test-minimal-api-guard.mjs",
     "benchmark:plan": "node scripts/benchmark-plan-mode.mjs",
     "benchmark:plan:check": "node scripts/benchmark-plan-mode.mjs"
   },
