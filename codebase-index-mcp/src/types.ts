@@ -35,6 +35,21 @@ export type GraphHealth = {
   note: string;
 };
 
+export type ReliabilitySummary = {
+  edgeCount: number;
+  medianConfidence: number;
+  lowConfidenceEdgeCount: number;
+  unresolvedRatio: number;
+  warning: string | null;
+};
+
+export type ModuleImpactGroup = {
+  module: string;
+  fileCount: number;
+  topRiskLevel: string;
+  topFiles: string[];
+};
+
 export type UnresolvedReason = "no_candidate" | "ambiguous_candidates" | "boundary_blocked" | "low_confidence";
 
 export type ResolutionStats = {
@@ -89,6 +104,18 @@ export type EdgeRecord = {
   fromId: string;
   toId: string;
   type: "IMPORTS" | "CALLS" | "DEPENDS_ON" | "IMPLEMENTS" | "TYPE_REF";
+  confidence?: number;
+  reason?: string;
+};
+
+export type RouteRecord = {
+  repoId: string;
+  filePath: string;
+  controllerSymbolId: string;
+  handlerSymbolId: string;
+  httpMethod: "GET" | "POST" | "PUT" | "DELETE" | "PATCH";
+  routeTemplate: string;
+  line: number;
 };
 
 export type ResolvedEdge = {
@@ -99,6 +126,8 @@ export type ResolvedEdge = {
   toName: string | null;
   toFilePath: string | null;
   type: string;
+  confidence?: number;
+  reason?: string | null;
 };
 
 export type DocRecord = {

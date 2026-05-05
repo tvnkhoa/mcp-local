@@ -26,12 +26,11 @@ Current integration:
 - `index_repository` - **Enhanced with ETA & language tracking**
 - `get_dependency_graph`
 - `get_call_chain`
-- `get_module_flow`
-- `find_impact_surface`
+- `find_impact_files`
 - `list_repositories`
-- `search_symbols` (`compact` mode supported; `strategy: "name" | "intent"`)
-- `get_file_context` (`compact` mode supported)
-- `get_batch_context` (`compact` mode supported)
+- `search_symbols` (`profile: nano|compact|standard|verbose`; `strategy: "name" | "intent"`)
+- `get_file_context` (`profile: nano|compact|standard|verbose`)
+- `get_batch_context` (`profile: nano|compact|standard|verbose`)
 - `get_symbol_detail`
 - `find_impact_files`
 - `get_change_context`
@@ -45,6 +44,8 @@ Current integration:
 - `get_context_by_name`
 - `get_change_context_by_name`
 - `get_symbol_candidates`
+- `get_symbol_context_pack`
+- `detect_changes` (includes deterministic `riskScore`/`riskLevel`, supports filter knobs `minRiskScore`/`riskLevels`/`maxResults`/`sortBy`, and policy presets: `quick-triage`, `strict-review`, `release-gate`, `custom`)
 - `get_folder_summary`
 - `find_entry_points` (returns `runtimeEntryPoints` + `graphEntryPoints` groups)
 - `find_implementations`
@@ -105,7 +106,7 @@ Smoke test now validates more than startup:
 - MCP handshake + tool listing
 - `health_check`
 - `index_repository` on current workspace (bounded sample)
-- `get_module_flow` for `src/index.ts` in the indexed repo
+- `get_dependency_graph` / `find_impact_files` for `src/index.ts` in the indexed repo
 - `get_context_by_name` profile matrix (`compact`, `standard`, `verbose`) and payload ordering
 - `get_change_context_by_name` output validity
 - `get_symbol_candidates` output validity
@@ -173,7 +174,8 @@ Notes:
 Recommended default for token efficiency:
 - Keep `CODEBASE_INDEX_DOCS_INDEXING_ENABLED=false`
 - Keep `CODEBASE_INDEX_DOCS_TOOLS_ENABLED=false`
-- Use `profile: "compact"` on read tools in Plan flow
+- Use `profile: "nano"` on read tools in Plan flow when you only need quick routing context.
+- Use `profile: "compact"` when you still need lightweight field-level details.
 
 ### 2) Warm-up indexing stage
 
@@ -201,9 +203,9 @@ Use `docsMode` per run:
 ### 3) Plan mode retrieval pipeline (token-saving)
 
 Suggested call sequence:
-1. `search_symbols` with `profile: "compact"` to locate candidate symbols (`strategy: "intent"` for natural-language-like queries).
-2. `get_context_by_name` with `profile: "compact"` for single-symbol package.
-3. `get_change_context_by_name` with `profile: "compact"` for callers/callees impact.
+1. `search_symbols` with `profile: "nano"` to locate candidate symbols (`strategy: "intent"` for natural-language-like queries).
+2. `get_context_by_name` with `profile: "nano"` for single-symbol package.
+3. `get_change_context_by_name` with `profile: "nano"` for callers/callees impact.
 4. `get_file_context` only for selected files that need deeper context.
 
 Why this order works:

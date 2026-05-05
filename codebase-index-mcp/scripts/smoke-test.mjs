@@ -50,10 +50,19 @@ async function main() {
   console.log("TOOLS:", toolNames);
 
   const requiredTools = [
-    "get_context_by_name",
-    "get_change_context_by_name",
-    "get_symbol_candidates",
-    "watch_repo"
+    "get_symbol_context_pack",
+    "dead_code_scan",
+    "detect_circular_dependencies",
+    "get_cross_repo_impact",
+    "get_symbol_blame",
+    "link_tests_to_source",
+    "detect_changes",
+    "watch_repo",
+    "route_map",
+    "query_graph",
+    "rename_assist",
+    "trace_execution_flow",
+    "query_docs"
   ];
   for (const required of requiredTools) {
     if (!toolNames.includes(required)) {
@@ -107,7 +116,7 @@ async function main() {
   }
 
   const flowResult = await client.callTool({
-    name: "get_module_flow",
+    name: "get_dependency_graph",
     arguments: {
       repoId,
       filePath: "src/index.ts",
@@ -119,10 +128,10 @@ async function main() {
   console.log("MODULE_FLOW_RESULT:");
   console.log(flowPayload.text);
   if (!Array.isArray(flowPayload.json?.edges) || flowPayload.json.edges.length === 0) {
-    throw new Error("get_module_flow returned no edges for src/index.ts");
+    throw new Error("get_dependency_graph(filePath) returned no edges for src/index.ts");
   }
   if (typeof flowPayload.json?.unresolvedCalls?.count !== "number") {
-    throw new Error("get_module_flow missing unresolvedCalls.count field");
+    throw new Error("get_dependency_graph(filePath) missing unresolvedCalls.count field");
   }
 
   const fileSummary = await client.callTool({
@@ -141,7 +150,7 @@ async function main() {
   }
 
   const contextByNameStandard = await client.callTool({
-    name: "get_context_by_name",
+    name: "get_symbol_context_pack",
     arguments: {
       repoId,
       name: "runIndexAndResolve",
@@ -150,8 +159,18 @@ async function main() {
     }
   });
 
+  const contextByNameNano = await client.callTool({
+    name: "get_symbol_context_pack",
+    arguments: {
+      repoId,
+      name: "runIndexAndResolve",
+      limit: 20,
+      profile: "nano"
+    }
+  });
+
   const contextByNameCompact = await client.callTool({
-    name: "get_context_by_name",
+    name: "get_symbol_context_pack",
     arguments: {
       repoId,
       name: "runIndexAndResolve",
@@ -161,7 +180,7 @@ async function main() {
   });
 
   const contextByNameVerbose = await client.callTool({
-    name: "get_context_by_name",
+    name: "get_symbol_context_pack",
     arguments: {
       repoId,
       name: "runIndexAndResolve",
@@ -171,16 +190,25 @@ async function main() {
   });
 
   const contextStdText = readTextContent(contextByNameStandard);
+  const contextNanoText = readTextContent(contextByNameNano);
   const contextCmpText = readTextContent(contextByNameCompact);
   const contextVrbText = readTextContent(contextByNameVerbose);
+  const contextNanoJson = readJsonTextContent(contextByNameNano).json;
   const contextCmpJson = readJsonTextContent(contextByNameCompact).json;
-  if (!contextCmpJson || !contextCmpJson.symbol) {
-    throw new Error("get_context_by_name(compact) did not return a symbol");
+  if (!contextNanoJson || !contextNanoJson.selectedSymbol) {
+    throw new Error("get_symbol_context_pack(nano) did not return a selectedSymbol");
+  }
+  if (!contextCmpJson || !contextCmpJson.selectedSymbol) {
+    throw new Error("get_symbol_context_pack(compact) returned no selectedSymbol");
   }
 
+  const nanoBytes = bytesOf(contextNanoText);
   const standardBytes = bytesOf(contextStdText);
   const compactBytes = bytesOf(contextCmpText);
   const verboseBytes = bytesOf(contextVrbText);
+  if (nanoBytes > compactBytes) {
+    throw new Error(`Expected nano payload <= compact payload (nano=${nanoBytes}, compact=${compactBytes})`);
+  }
   if (compactBytes > standardBytes) {
     throw new Error(`Expected compact payload <= standard payload (compact=${compactBytes}, standard=${standardBytes})`);
   }
@@ -189,13 +217,14 @@ async function main() {
   }
 
   console.log("CONTEXT_PROFILE_BYTES:", {
+    nanoBytes,
     standardBytes,
     compactBytes,
     verboseBytes
   });
 
   const changeByName = await client.callTool({
-    name: "get_change_context_by_name",
+    name: "get_change_context",
     arguments: {
       repoId,
       name: "runIndexAndResolve",
@@ -207,21 +236,257 @@ async function main() {
   });
   const changeByNameJson = readJsonTextContent(changeByName).json;
   if (!changeByNameJson || !changeByNameJson.symbol) {
-    throw new Error("get_change_context_by_name(compact) returned no symbol");
+    throw new Error("get_change_context(name, compact) returned no symbol");
   }
 
   const symbolCandidates = await client.callTool({
-    name: "get_symbol_candidates",
+    name: "search_symbols",
     arguments: {
       repoId,
-      name: "GraphStore",
+      query: "GraphStore",
       limit: 10,
-      profile: "compact"
+      ranked: true
     }
   });
   const symbolCandidatesJson = readJsonTextContent(symbolCandidates).json;
   if (!symbolCandidatesJson || !Array.isArray(symbolCandidatesJson.candidates) || symbolCandidatesJson.candidates.length === 0) {
-    throw new Error("get_symbol_candidates(compact) returned empty candidates");
+    throw new Error("search_symbols(ranked=true) returned empty candidates");
+  }
+
+  const symbolContextPack = await client.callTool({
+    name: "get_symbol_context_pack",
+    arguments: {
+      repoId,
+      name: "runIndexAndResolve",
+      callerDepth: 2,
+      calleeDepth: 1,
+      limit: 20,
+      profile: "compact"
+    }
+  });
+  const symbolContextPackJson = readJsonTextContent(symbolContextPack).json;
+  if (!symbolContextPackJson || !symbolContextPackJson.selectedSymbol) {
+    throw new Error("get_symbol_context_pack(compact) returned no selectedSymbol");
+  }
+
+  const detectChanges = await client.callTool({
+    name: "detect_changes",
+    arguments: {
+      repoId,
+      profile: "nano",
+      maxFiles: 30,
+      impactLimit: 20,
+      policy: "release-gate",
+      maxResults: 5
+    }
+  });
+  const detectChangesJson = readJsonTextContent(detectChanges).json;
+  if (!detectChangesJson || typeof detectChangesJson.changedFileCount !== "number") {
+    throw new Error("detect_changes(nano) missing changedFileCount");
+  }
+  if (!detectChangesJson.riskSummary || typeof detectChangesJson.riskSummary.highRiskCount !== "number") {
+    throw new Error("detect_changes(nano) missing riskSummary.highRiskCount");
+  }
+  if (!Array.isArray(detectChangesJson.topRiskChanges)) {
+    throw new Error("detect_changes(nano) missing topRiskChanges array");
+  }
+  if (!detectChangesJson.filter || detectChangesJson.filter.maxResults !== 5) {
+    throw new Error("detect_changes(nano) missing filter.maxResults");
+  }
+  if (detectChangesJson.filter.policyUsed !== "release-gate") {
+    throw new Error("detect_changes(nano) did not report policyUsed=release-gate");
+  }
+  if (detectChangesJson.topRiskChanges.length > 5) {
+    throw new Error("detect_changes(nano) did not respect maxResults filter");
+  }
+  if (!detectChangesJson.topRiskChanges.every((x) => typeof x.riskScore === "number" && x.riskScore >= 67)) {
+    throw new Error("detect_changes(nano) returned item below release-gate threshold");
+  }
+  if (!detectChangesJson.topRiskChanges.every((x) => x.riskLevel === "high")) {
+    throw new Error("detect_changes(nano) returned non-high risk item for release-gate policy");
+  }
+
+  // Phase 7A: groupBy=module
+  const detectChangesGrouped = await client.callTool({
+    name: "detect_changes",
+    arguments: {
+      repoId,
+      profile: "compact",
+      maxFiles: 30,
+      impactLimit: 20,
+      groupBy: "module"
+    }
+  });
+  const detectChangesGroupedJson = readJsonTextContent(detectChangesGrouped).json;
+  if (!detectChangesGroupedJson || !Array.isArray(detectChangesGroupedJson.moduleGroups)) {
+    throw new Error("detect_changes(groupBy=module) did not return moduleGroups array");
+  }
+  console.log("DETECT_CHANGES_MODULE_GROUPS:", detectChangesGroupedJson.moduleGroups.length, "modules");
+
+  const routeMap = await client.callTool({
+    name: "route_map",
+    arguments: {
+      repoId,
+      profile: "compact",
+      limit: 20
+    }
+  });
+  const routeMapJson = readJsonTextContent(routeMap).json;
+  if (!routeMapJson || !Array.isArray(routeMapJson.routes)) {
+    throw new Error("route_map(compact) missing routes array");
+  }
+  console.log("ROUTE_MAP_COUNT:", routeMapJson.count);
+
+  const queryGraph = await client.callTool({
+    name: "query_graph",
+    arguments: {
+      repoId,
+      sql: "select file_path, name from symbols where repo_id = :repoId order by name limit 5",
+      limit: 5,
+      profile: "compact"
+    }
+  });
+  const queryGraphJson = readJsonTextContent(queryGraph).json;
+  if (!queryGraphJson || !Array.isArray(queryGraphJson.rows) || !Array.isArray(queryGraphJson.columns)) {
+    throw new Error("query_graph(compact) missing rows/columns");
+  }
+  console.log("QUERY_GRAPH_ROW_COUNT:", queryGraphJson.rowCount);
+
+  const deadCodeScan = await client.callTool({
+    name: "dead_code_scan",
+    arguments: {
+      repoId,
+      profile: "compact",
+      limit: 20
+    }
+  });
+  const deadCodeScanJson = readJsonTextContent(deadCodeScan).json;
+  if (!deadCodeScanJson || !Array.isArray(deadCodeScanJson.symbols)) {
+    throw new Error("dead_code_scan(compact) missing symbols array");
+  }
+  console.log("DEAD_CODE_COUNT:", deadCodeScanJson.count);
+
+  const circularDeps = await client.callTool({
+    name: "detect_circular_dependencies",
+    arguments: {
+      repoId,
+      mode: "module",
+      maxDepth: 4,
+      maxCycles: 20,
+      profile: "compact"
+    }
+  });
+  const circularDepsJson = readJsonTextContent(circularDeps).json;
+  if (!circularDepsJson || !Array.isArray(circularDepsJson.cycles) || typeof circularDepsJson.cycleCount !== "number") {
+    throw new Error("detect_circular_dependencies(compact) missing cycles/cycleCount");
+  }
+  console.log("CIRCULAR_DEP_COUNT:", circularDepsJson.cycleCount);
+
+  const testSourceLinks = await client.callTool({
+    name: "link_tests_to_source",
+    arguments: {
+      repoId,
+      limit: 20,
+      maxCandidates: 3,
+      minScore: 0.4,
+      profile: "compact"
+    }
+  });
+  const testSourceLinksJson = readJsonTextContent(testSourceLinks).json;
+  if (!testSourceLinksJson || !Array.isArray(testSourceLinksJson.links)) {
+    throw new Error("link_tests_to_source(compact) missing links array");
+  }
+  console.log("TEST_SOURCE_LINK_COUNT:", testSourceLinksJson.count);
+
+  const resources = await client.listResources();
+  if (!Array.isArray(resources.resources) || resources.resources.length === 0) {
+    throw new Error("listResources returned no resources");
+  }
+  const contextResource = resources.resources.find((r) => typeof r.uri === "string" && r.uri.endsWith("/context"));
+  if (!contextResource?.uri) {
+    throw new Error("listResources missing /context resource URI");
+  }
+  const readResource = await client.readResource({ uri: contextResource.uri });
+  if (!Array.isArray(readResource.contents) || readResource.contents.length === 0) {
+    throw new Error("readResource returned empty contents");
+  }
+  console.log("RESOURCES_COUNT:", resources.resources.length);
+
+  // Phase 7B-2: rename_assist — pick first symbol from ranked search
+  const symbolsForRename = await client.callTool({
+    name: "search_symbols",
+    arguments: {
+      repoId,
+      query: "GraphStore",
+      limit: 1,
+      ranked: true
+    }
+  });
+  const symbolsForRenameJson = readJsonTextContent(symbolsForRename).json;
+  const firstSymbol = symbolsForRenameJson?.candidates?.[0];
+  if (firstSymbol?.symbolId) {
+    const crossRepoImpact = await client.callTool({
+      name: "get_cross_repo_impact",
+      arguments: {
+        repoId,
+        symbolId: firstSymbol.symbolId,
+        direction: "outbound",
+        profile: "compact"
+      }
+    });
+    const crossRepoImpactJson = readJsonTextContent(crossRepoImpact).json;
+    if (!crossRepoImpactJson || !Array.isArray(crossRepoImpactJson.impacts)) {
+      throw new Error("get_cross_repo_impact(compact) missing impacts array");
+    }
+    console.log("CROSS_REPO_IMPACT_COUNT:", crossRepoImpactJson.impactCount);
+
+    const symbolBlame = await client.callTool({
+      name: "get_symbol_blame",
+      arguments: {
+        repoId,
+        symbolId: firstSymbol.symbolId,
+        profile: "compact"
+      }
+    });
+    const symbolBlameJson = readJsonTextContent(symbolBlame).json;
+    if (!symbolBlameJson || !symbolBlameJson.blame || typeof symbolBlameJson.blame.commit !== "string") {
+      throw new Error("get_symbol_blame(compact) missing blame.commit");
+    }
+    console.log("SYMBOL_BLAME_COMMIT:", symbolBlameJson.blame.commit);
+
+    const renameAssist = await client.callTool({
+      name: "rename_assist",
+      arguments: {
+        repoId,
+        symbolId: firstSymbol.symbolId,
+        newName: "GraphStoreV2",
+        profile: "compact"
+      }
+    });
+    const renameAssistJson = readJsonTextContent(renameAssist).json;
+    if (!renameAssistJson || typeof renameAssistJson.affectedFileCount !== "number" || !Array.isArray(renameAssistJson.affectedFiles)) {
+      throw new Error("rename_assist(compact) missing affectedFileCount or affectedFiles");
+    }
+    console.log("RENAME_ASSIST:", { symbol: renameAssistJson.symbol?.name, affectedFileCount: renameAssistJson.affectedFileCount });
+
+    // Phase 7C: trace_execution_flow
+    const traceFlow = await client.callTool({
+      name: "trace_execution_flow",
+      arguments: {
+        repoId,
+        entrySymbolId: firstSymbol.symbolId,
+        maxDepth: 2,
+        maxNodes: 15,
+        profile: "compact"
+      }
+    });
+    const traceFlowJson = readJsonTextContent(traceFlow).json;
+    if (!traceFlowJson || !Array.isArray(traceFlowJson.nodes)) {
+      throw new Error("trace_execution_flow(compact) missing nodes array");
+    }
+    console.log("TRACE_EXECUTION_FLOW:", { nodeCount: traceFlowJson.nodeCount, edgeCount: traceFlowJson.edgeCount, depthReached: traceFlowJson.depthReached });
+  } else {
+    console.log("SKIP: rename_assist + trace_execution_flow (no symbolId from search)");
   }
 
   if (!indexPayload.json || !flowPayload.json) {

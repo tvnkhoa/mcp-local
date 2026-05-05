@@ -49,5 +49,11 @@ const intent = store.searchSymbols("class handles assigned to ai conversation", 
 console.log(`results: ${intent.length}`);
 intent.forEach(s => console.log(`  ${s.name} (${s.kind}) @ ${s.filePath}:${s.line}`));
 
+// Test suggestions for empty/weak queries
+console.log("\n=== search suggestions for weak query ===");
+const suggestions = store.getSearchSuggestions("conversation ai assignment handler", "mcp-local", 5);
+console.log(`suggestions: ${suggestions.length}`);
+suggestions.forEach((name) => console.log(`  ${name}`));
+
 store.close?.();
 console.log("\n[DONE]");

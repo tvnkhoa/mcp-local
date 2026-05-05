@@ -90,6 +90,8 @@ const LANGUAGE_BY_EXTENSION: Record<string, string> = {
   ".jsx": "javascript",
   ".mjs": "javascript",
   ".cjs": "javascript",
+  // Python (FastAPI route extraction)
+  ".py": "python",
   // .NET / C# (wec.communication-hub)
   ".cs": "csharp",
   ".csproj": "csproj",

@@ -2,30 +2,40 @@
 tools:
   - codebase-index-central
 description: >
-  Đánh giá hiệu quả khi sử dụng MCP codebase-index so với không sử dụng.
-  Agent thực hiện cùng 1 tập câu hỏi phân tích code bằng 2 cách:
-  (A) chỉ dùng file search/grep thông thường, (B) dùng MCP tools.
-  Sau đó tổng hợp kết quả so sánh về độ chính xác, số bước, token estimate.
-  Phiên bản này phản ánh index engine v0.3.1 với TYPE_REF edges, bootstrap entry point
-  detection, path normalization fix, và intent search strategy.
+  Portable evaluation prompt for any workspace to compare code analysis without MCP vs with MCP.
+  Designed for deterministic environments with no LLM model available.
+  Uses only file search/read and MCP graph tools, then reports accuracy, effort, and token estimate.
 ---
 
-# Đánh giá hiệu quả MCP codebase-index
+# MCP Codebase-Index Effectiveness Evaluation (No LLM Mode)
 
-## Mục tiêu
+## Scope
 
-So sánh 2 workflow khi phân tích codebase **${repoId}** tại path **${repoPath}**:
+This prompt is workspace-agnostic and can run on any repository.
 
-- **Baseline (không MCP):** dùng `file_search`, `grep_search`, `read_file` để trả lời từng câu hỏi.
-- **With MCP:** dùng các tool của `codebase-index-central` để trả lời cùng câu hỏi đó.
+- Baseline track: only structural tools (`file_search`, `grep_search`, `list_dir`, `read_file`).
+- MCP track: only `codebase-index-central` deterministic tools.
+- No semantic inference from LLM is allowed in either track.
 
-Cuối cùng tổng hợp bảng so sánh.
+Inputs:
+
+- `${repoId}`: repository id in index DB.
+- `${repoPath}`: absolute path of repository root.
 
 ---
 
-## Chuẩn bị
+## Rules For No-LLM Execution
 
-Trước khi bắt đầu, kiểm tra repo đã được index chưa:
+1. Do not guess symbols by meaning.
+2. Do not use natural-language semantic expansion outside MCP `strategy: "intent"`.
+3. Every claim must come from tool output.
+4. If evidence is insufficient, mark `unknown` instead of inferring.
+
+---
+
+## Preflight
+
+Run health first:
 
 ```json
 {
@@ -34,7 +44,7 @@ Trước khi bắt đầu, kiểm tra repo đã được index chưa:
 }
 ```
 
-Nếu chưa, chạy index:
+If repo is stale or missing, run full re-index before Q1-Q5:
 
 ```json
 {
@@ -42,187 +52,267 @@ Nếu chưa, chạy index:
   "arguments": {
     "repoId": "${repoId}",
     "repoPath": "${repoPath}",
-    "mode": "incremental",
+    "mode": "full",
     "docsMode": "off",
-    "maxFiles": 5000,
-    "batchSize": 200
+    "maxFiles": 10000,
+    "batchSize": 300
   }
+}
+```
+
+Confirm freshness again:
+
+```json
+{
+  "tool": "health_check",
+  "arguments": { "repoId": "${repoId}" }
 }
 ```
 
 ---
 
-## Tập câu hỏi đánh giá (Q1–Q5)
+## Evaluation Questions (Q1-Q5)
 
-Thực hiện **từng câu hỏi** theo đúng thứ tự:
+Run in order. For each question, execute Baseline first, then MCP.
 
-### Q1 — Tìm entry point chính của repo
+### Q1 - Identify Main Entry Points
 
-**Baseline:** dùng `file_search` với pattern `**/Program.cs`, `**/Startup.cs`, `**/index.ts`, `**/main.ts`.
+Baseline:
 
-**With MCP:**
-```json
-{ "tool": "find_entry_points", "arguments": { "repoId": "${repoId}", "limit": 10 } }
-```
+- `file_search` with patterns: `**/Program.cs`, `**/Startup.cs`, `**/main.*`, `**/index.*`, `**/app.*`.
+- `read_file` only for top candidates to validate true bootstrap role.
 
-Ghi nhận: số bước thực hiện, số file đọc, độ chính xác kết quả.
+MCP:
 
-> **v0.3.1+:** Response giờ tách 2 nhóm:
-> - `runtimeEntryPoints`: bootstrap files (`Program.cs`, `Startup.cs`, `main.ts`, v.v.) — luôn hiện dù không có caller nào.
-> - `graphEntryPoints`: symbols có 0 caller trong call graph.
-> Kiểm tra xem `Program.cs` có xuất hiện trong `runtimeEntryPoints` không.
-
----
-
-### Q2 — Tìm tất cả callers của 1 symbol quan trọng
-
-Chọn 1 class/method tiêu biểu (ví dụ: class service chính hoặc handler đầu tiên tìm được ở Q1).
-
-**Baseline:** dùng `grep_search` tìm theo tên class, sau đó đọc từng file match để xác nhận caller thực sự.
-
-**With MCP:**
 ```json
 {
-  "tool": "find_impact_surface",
+  "tool": "find_entry_points",
   "arguments": {
     "repoId": "${repoId}",
-    "filePath": "<file-path-from-Q1>",
     "limit": 20
   }
 }
 ```
 
-Ghi nhận: số file grep phải đọc (Baseline) vs số bước MCP.
+Record:
 
-> **v0.3.1+:** Impact surface giờ bao gồm cả callers qua `TYPE_REF` edges (ví dụ: DI registration dùng `typeof(ClassName<,>)`). Nếu repo dùng generic DI pattern (MediatR `typeof(T<,>)`), kết quả MCP sẽ bao gồm file DI setup — trước đây bỏ sót.
+- step count
+- files opened
+- correctness (`correct`, `partial`, `incorrect`, `unknown`)
+
+Notes:
+
+- Prefer `runtimeEntryPoints` for bootstrap files.
+- Use `graphEntryPoints` as supplemental signal.
 
 ---
 
-### Q3 — Blast radius khi thay đổi 1 file
+### Q2 - Find Callers/Impact Surface Of A Key Symbol
 
-Chọn 1 file model/DTO quan trọng trong repo.
+Pick one key symbol discovered in Q1 or a top-level handler/service in the same layer.
 
-**Baseline:** đọc file để biết tên class → `grep_search` tìm import/usage → tổng hợp thủ công.
+Baseline:
 
-**With MCP:**
+- `grep_search` by symbol name.
+- `read_file` each hit to confirm actual caller/reference, not just mention.
+
+MCP:
+
 ```json
 {
   "tool": "find_impact_files",
   "arguments": {
     "repoId": "${repoId}",
-    "filePath": "<model-file>",
+    "filePath": "<key-file-path>",
+    "view": "surface",
     "limit": 30
   }
 }
 ```
 
-Ghi nhận: thời gian ước tính, độ bao phủ (có bỏ sót file nào không).
+Optional MCP cross-check:
 
-> **v0.3.1+:** TYPE_REF edges từ field declarations (`private DbSet<T>`) và local variable declarations (`Conversation conv = ...`) giờ được capture. Infrastructure files dùng entity qua EF typed fields sẽ xuất hiện trong kết quả. Gap còn lại: access thuần qua member access expression chưa được capture.
+```json
+{
+  "tool": "get_change_context",
+  "arguments": {
+    "repoId": "${repoId}",
+    "name": "<key-symbol-name>",
+    "callerDepth": 2,
+    "calleeDepth": 1,
+    "profile": "compact",
+    "limit": 100
+  }
+}
+```
+
+Record baseline false positives and MCP unresolved warnings.
 
 ---
 
-### Q4 — Hiểu nhanh 1 module chưa quen
+### Q3 - Blast Radius Of One Important File
 
-Chọn 1 folder/layer chưa từng đọc (ví dụ: `src/Application/Conversations/`).
+Choose one domain model/DTO/config file that is reused broadly.
 
-**Baseline:** `list_dir` → đọc lần lượt từng file chính → tự tổng hợp.
+Baseline:
 
-**With MCP:**
+- `read_file` to extract exported symbols.
+- `grep_search` usages/imports.
+- manually deduplicate file list.
+
+MCP:
+
+```json
+{
+  "tool": "find_impact_files",
+  "arguments": {
+    "repoId": "${repoId}",
+    "filePath": "<target-file>",
+    "view": "files",
+    "groupBy": "module",
+    "limit": 50
+  }
+}
+```
+
+Record coverage and effort.
+
+---
+
+### Q4 - Understand An Unfamiliar Module Quickly
+
+Choose one folder not previously explored.
+
+Baseline:
+
+- `list_dir` recursively at that folder.
+- open key files with `read_file` and summarize manually.
+
+MCP:
+
 ```json
 {
   "tool": "get_folder_summary",
   "arguments": {
     "repoId": "${repoId}",
     "folderPath": "<folder-path>",
-    "maxFiles": 50
+    "maxFiles": 80
   }
 }
 ```
 
-Sau đó dùng thêm:
+Then inspect one key file:
+
 ```json
 {
   "tool": "get_file_summary",
   "arguments": {
     "repoId": "${repoId}",
-    "filePath": "<key-file-in-folder>"
+    "filePath": "<key-file-path>"
   }
 }
 ```
 
-Ghi nhận: số file phải mở (Baseline) vs số tool call (MCP).
+Record number of files opened vs tool calls.
 
 ---
 
-### Q5 — Tìm symbol theo mô tả nghiệp vụ
+### Q5 - Find Symbol From Business-Like Description
 
-Ví dụ: *"Tìm class xử lý khi cuộc hội thoại được giao cho AI"*
+Example query (English-like tokens): `ConversationAssignedAI handler`.
 
-**Baseline:** brainstorm tên → `grep_search` với nhiều keyword khác nhau → đọc kết quả.
+Baseline:
 
-**With MCP — bước 1:** Thử `strategy: "name"` trước (tìm theo tên xấp xỉ):
+- brainstorm 2-4 likely identifiers.
+- run multiple `grep_search` attempts.
+- verify by opening matches.
+
+MCP step 1 (`name`):
+
 ```json
 {
   "tool": "search_symbols",
   "arguments": {
     "repoId": "${repoId}",
-    "query": "ConversationAssignedAI handler",
+    "query": "<query>",
     "strategy": "name",
     "profile": "compact",
+    "ranked": true,
     "limit": 10
   }
 }
 ```
 
-**With MCP — bước 2:** Nếu bước 1 không tìm được, dùng `strategy: "intent"` (OR-based token expansion):
+MCP step 2 (`intent`) only if step 1 is empty/low confidence:
+
 ```json
 {
   "tool": "search_symbols",
   "arguments": {
     "repoId": "${repoId}",
-    "query": "ConversationAssignedAI handler",
+    "query": "<query>",
     "strategy": "intent",
     "profile": "compact",
+    "ranked": true,
     "limit": 10
   }
 }
 ```
 
-> **Giải thích:** `strategy: "intent"` tách query thành tokens (camelCase/PascalCase aware) và dùng OR-match — phù hợp khi không biết tên chính xác. Lưu ý: query tiếng Việt thuần (ví dụ: *"cuộc hội thoại giao cho AI"*) vẫn không hiệu quả do FTS5 không có semantic embedding; nên dùng tên class/method tiếng Anh xấp xỉ.
+MCP step 3 retry once with top suggestion if still empty.
 
-Ghi nhận: số grep attempt (Baseline) vs số tool call MCP (1 lần name / 2 lần nếu cần intent).
+No-LLM note:
 
----
-
-## Bảng tổng hợp (điền sau khi hoàn tất Q1–Q5)
-
-| # | Câu hỏi | Baseline: số bước | MCP: số bước | Baseline: chính xác? | MCP: chính xác? | Nhận xét |
-|---|---------|-------------------|--------------|----------------------|-----------------|----------|
-| Q1 | Entry point | | | | | |
-| Q2 | Callers của symbol | | | | | |
-| Q3 | Blast radius | | | | | |
-| Q4 | Hiểu module mới | | | | | |
-| Q5 | Tìm theo mô tả | | | | | |
-| **Tổng** | | | | | | |
+- prefer English identifier tokens
+- Vietnamese free-text queries are expected to perform weaker
 
 ---
 
-## Kết luận
+## Scoring Table
 
-Sau khi điền bảng, hãy viết:
+| # | Question | Baseline Steps | MCP Steps | Baseline Files Opened | MCP Files Opened | Baseline Accuracy | MCP Accuracy | Notes |
+|---|----------|----------------|----------|-----------------------|------------------|-------------------|--------------|-------|
+| Q1 | Entry points | | | | | | | |
+| Q2 | Caller / surface | | | | | | | |
+| Q3 | Blast radius | | | | | | | |
+| Q4 | Module understanding | | | | | | | |
+| Q5 | Symbol by description | | | | | | | |
+| Total | | | | | | | | |
 
-1. **Token saving estimate:** ước tính % token tiết kiệm khi dùng MCP so với Baseline.
-2. **Accuracy delta:** MCP có bỏ sót hoặc trả sai kết quả nào không (do index chưa đầy đủ)?
-3. **Trường hợp MCP phát huy tốt nhất:** loại câu hỏi nào hưởng lợi nhiều nhất?
-4. **Trường hợp Baseline vẫn cần thiết:** khi nào nên đọc file trực tiếp thay vì dùng MCP?
-5. **Đề xuất workflow kết hợp:** thứ tự tool call lý tưởng cho Plan mode và Agent mode.
+Accuracy legend:
+
+- `correct`: no critical miss
+- `partial`: at least one important miss
+- `incorrect`: mostly wrong mapping
+- `unknown`: insufficient evidence
 
 ---
 
-## Lưu ý kỹ thuật (v0.3.1)
+## Final Report Template
 
-- **Re-index bắt buộc** sau khi upgrade engine để populate TYPE_REF edges. Dùng `mode: "full"` để flush edge data cũ.
-- **TYPE_REF coverage:** `typeof(T<,>)` (DI), field declarations (`DbSet<T>`), local variable declarations, constructor calls, parameter types, base class list.
-- **Gap còn lại:** usage thuần qua member access expression (`obj.Property`) chưa được capture nếu không có explicit type annotation trong cùng method.
-- **`strategy: "intent"`** chỉ hiệu quả với English terms — Vietnamese NL queries không được hỗ trợ ở mức semantic.
+After Q1-Q5, write:
+
+1. Token saving estimate (%):
+2. Step reduction (%):
+3. Accuracy delta (Baseline vs MCP):
+4. Best-fit question types for MCP:
+5. Cases where direct file reading is still required:
+6. Recommended hybrid workflow:
+
+Suggested hybrid workflow (no LLM):
+
+1. `health_check`
+2. `find_entry_points` or `get_folder_summary`
+3. `search_symbols` (`name` then `intent` if needed)
+4. `get_file_summary` / `get_change_context`
+5. `find_impact_files`
+6. targeted `read_file` for final verification
+
+---
+
+## Known Constraints
+
+1. Graph quality depends on fresh index.
+2. Some dynamic runtime patterns may not be fully captured.
+3. `strategy: "intent"` is lexical/token-based, not semantic understanding.
+4. If result confidence is low, verify with direct file reads.

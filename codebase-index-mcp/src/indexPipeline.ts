@@ -1,4 +1,4 @@
-import { execSync } from "node:child_process";
+import { execFileSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
@@ -26,7 +26,7 @@ export type RunIndexInput = {
 
 function resolveCommitSha(repoPath: string): string | null {
   try {
-    return execSync("git rev-parse HEAD", { cwd: repoPath, encoding: "utf8" }).trim();
+    return execFileSync("git", ["rev-parse", "HEAD"], { cwd: repoPath, encoding: "utf8" }).trim();
   } catch {
     return null;
   }
@@ -115,7 +115,13 @@ export async function runIndexPipeline(store: GraphStore, input: RunIndexInput):
           language: string | null;
           updatedAt: string;
         };
-        extracted: { symbols: import("./types.js").SymbolRecord[]; edges: import("./types.js").EdgeRecord[]; docs?: import("./types.js").DocRecord[]; mentions?: import("./types.js").DocMentionRecord[] };
+        extracted: {
+          symbols: import("./types.js").SymbolRecord[];
+          edges: import("./types.js").EdgeRecord[];
+          routes?: import("./types.js").RouteRecord[];
+          docs?: import("./types.js").DocRecord[];
+          mentions?: import("./types.js").DocMentionRecord[];
+        };
       }> = [];
 
       // Parallel file reading with concurrency limit
@@ -266,6 +272,7 @@ export async function runIndexPipeline(store: GraphStore, input: RunIndexInput):
           if (item.extracted.symbols.length > 0) {
             store.replaceEdgesForFile(input.repoId, item.extracted.symbols[0].symbolId, item.extracted.edges);
           }
+          store.replaceRoutesForFile(input.repoId, item.file.path, item.extracted.routes ?? []);
           // Upsert docs and mentions if present (e.g., from markdown files)
           if (item.extracted.docs && item.extracted.docs.length > 0) {
             if (includeDocs) {
@@ -297,6 +304,10 @@ export async function runIndexPipeline(store: GraphStore, input: RunIndexInput):
       const pruned = store.pruneStaleFiles(input.repoId, currentPaths);
       if (pruned > 0) {
         process.stderr.write(`[index-prune] removed ${String(pruned)} stale file(s) from index\n`);
+      }
+      const prunedEdges = store.pruneOrphanedEdges(input.repoId);
+      if (prunedEdges > 0) {
+        process.stderr.write(`[index-prune] removed ${String(prunedEdges)} orphaned edge(s) from index\n`);
       }
     }
 
