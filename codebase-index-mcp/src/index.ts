@@ -2,6 +2,7 @@ import process from "node:process";
 import { randomUUID } from "node:crypto";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { execFileSync } from "node:child_process";
+import os from "node:os";
 
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
@@ -17,7 +18,7 @@ import {
 import { z } from "zod";
 
 import { GraphStore } from "./graphStore.js";
-import { runIndexPipeline } from "./indexPipeline.js";
+import { runIndexPipeline, type PerformanceProfile } from "./indexPipeline.js";
 import {
   assertPathAllowed,
   clamp,
@@ -36,6 +37,14 @@ const allowedRoots = parseAllowedRoots(process.env.CODEBASE_INDEX_ALLOWED_ROOTS)
 const MAX_FILES_PER_RUN = numberFromEnv("CODEBASE_INDEX_MAX_FILES_PER_RUN", 20_000);
 const MAX_RESULT_LIMIT = numberFromEnv("CODEBASE_INDEX_MAX_RESULT_LIMIT", 500);
 const MAX_DEPTH = numberFromEnv("CODEBASE_INDEX_MAX_DEPTH", 5);
+/** Files per sub-transaction inside a batch. Lower = shorter lock windows; higher = fewer transactions. Default 20. */
+const SUBTX_SIZE = numberFromEnv("CODEBASE_INDEX_SUBTX_SIZE", 20);
+/** Run WAL checkpoint after every N completed batches. Default 1 = every batch. Increase for very large repos. */
+const CHECKPOINT_EVERY_N_BATCHES = numberFromEnv("CODEBASE_INDEX_CHECKPOINT_EVERY_N_BATCHES", 1);
+const LARGE_FILE_THRESHOLD_BYTES = numberFromEnv("CODEBASE_INDEX_LARGE_FILE_THRESHOLD_BYTES", 512 * 1024);
+const DEFAULT_PARSE_WORKERS = Math.max(1, Math.floor(os.cpus().length / 2));
+const PARSE_WORKERS = numberFromEnv("CODEBASE_INDEX_PARSE_WORKERS", DEFAULT_PARSE_WORKERS);
+const PARSE_JOB_TIMEOUT_MS = numberFromEnv("CODEBASE_INDEX_PARSE_JOB_TIMEOUT_MS", 20_000);
 const WATCH_AUTO_START = parseBooleanEnv(process.env.CODEBASE_INDEX_WATCH_AUTO_START, true);
 const WATCH_DISABLED = parseBooleanEnv(process.env.CODEBASE_INDEX_WATCH_DISABLE, false);
 const AUTO_WATCH_REPOS = parseAutoWatchRepos(process.env.CODEBASE_INDEX_AUTO_WATCH_REPOS);
@@ -80,7 +89,7 @@ const indexRepositorySchema = z
     repoPath: z.string().min(1),
     mode: z.enum(["full", "incremental"]).default("incremental"),
     docsMode: z.enum(["auto", "on", "off"]).default("auto"),
-    maxFiles: z.number().int().min(1).max(MAX_FILES_PER_RUN).default(5_000),
+    maxFiles: z.number().int().min(1).max(MAX_FILES_PER_RUN).default(MAX_FILES_PER_RUN),
     batchSize: z.number().int().min(1).max(2_000).default(200)
   })
   .strict();
@@ -2445,28 +2454,76 @@ async function runIndexAndResolve(
   maxFiles: number,
   batchSize: number
 ): Promise<IndexRunSummary & { crossRepoLinked?: number; callEdgesResolved?: number; importEdgesResolved?: number; mentionsResolved?: number }> {
+  const yieldToEventLoop = async (): Promise<void> => {
+    await new Promise<void>((resolve) => setImmediate(resolve));
+  };
+
+  const profileDecision = resolvePerformanceProfileDecision(repoId, mode, maxFiles);
+  const performanceProfile = profileDecision.profile;
+  const postPolicy = resolvePostPhasePolicy(performanceProfile);
+  const effectiveResolveImplementsInPost = mode !== "full" && postPolicy.resolveImplementsInPost;
+  process.stderr.write(
+    `[index-policy] repoId=${repoId} profile=${performanceProfile} source=${profileDecision.source} reason=${profileDecision.reason} fileCount=${String(profileDecision.fileCount)} symbolCount=${String(profileDecision.symbolCount)} maxUnresolvedRows=${String(postPolicy.maxUnresolvedRows)} resolveTypeRefs=${String(postPolicy.resolveTypeRefs)} resolveImplementsInPost=${String(postPolicy.resolveImplementsInPost)} effectiveResolveImplementsInPost=${String(effectiveResolveImplementsInPost)}\n`
+  );
+
   const summary = await runIndexPipeline(store, {
     repoId,
     repoPath,
     mode,
+    performanceProfile,
     includeDocs: docsEnabled,
     maxFiles,
-    batchSize
+    batchSize,
+    subtxSize: SUBTX_SIZE,
+    checkpointEveryNBatches: CHECKPOINT_EVERY_N_BATCHES,
+    largeFileThresholdBytes: LARGE_FILE_THRESHOLD_BYTES,
+    parseWorkers: PARSE_WORKERS,
+    parseJobTimeoutMs: PARSE_JOB_TIMEOUT_MS
   });
 
+  process.stderr.write(`[index-post] repoId=${repoId} rebuilding FTS indexes...\n`);
   try { store.rebuildFts(); } catch { /* non-fatal */ }
+  await yieldToEventLoop();
   if (docsEnabled) {
+    process.stderr.write(`[index-post] repoId=${repoId} rebuilding docs FTS...\n`);
     try { store.rebuildDocsFts(); } catch { /* non-fatal */ }
+    await yieldToEventLoop();
   }
 
+  process.stderr.write(`[index-post] repoId=${repoId} resolving cross-repo links...\n`);
   const crossStats = safeCrossRepoResolve(repoId);
-  const callEdgesResolved = (() => { try { return store.resolveCallEdges(repoId); } catch { return 0; } })();
-  const importEdgesResolved = (() => { try { return store.resolveImportEdges(repoId); } catch { return 0; } })();
-  (() => { try { store.resolveTypeRefEdges(repoId); } catch { /* non-fatal */ } })();
-  try { store.resolveImplementsEdges(repoId); } catch { /* non-fatal */ }
+  await yieldToEventLoop();
+
+  process.stderr.write(`[index-post] repoId=${repoId} resolving call edges...\n`);
+  const callEdgesResolved = (() => { try { return store.resolveCallEdges(repoId, postPolicy.maxUnresolvedRows); } catch { return 0; } })();
+  await yieldToEventLoop();
+
+  process.stderr.write(`[index-post] repoId=${repoId} resolving import edges...\n`);
+  const importEdgesResolved = (() => { try { return store.resolveImportEdges(repoId, postPolicy.maxUnresolvedRows); } catch { return 0; } })();
+  await yieldToEventLoop();
+
+  if (postPolicy.resolveTypeRefs) {
+    process.stderr.write(`[index-post] repoId=${repoId} resolving type references...\n`);
+    (() => { try { store.resolveTypeRefEdges(repoId, postPolicy.maxUnresolvedRows); } catch { /* non-fatal */ } })();
+  } else {
+    process.stderr.write(`[index-post-skip] repoId=${repoId} skipping type reference resolution by policy\n`);
+  }
+  await yieldToEventLoop();
+
+  const shouldResolveImplementsInPost = effectiveResolveImplementsInPost;
+  if (shouldResolveImplementsInPost) {
+    process.stderr.write(`[index-post] repoId=${repoId} resolving interface implementations...\n`);
+    try { store.resolveImplementsEdges(repoId); } catch { /* non-fatal */ }
+  } else {
+    process.stderr.write(`[index-post-skip] repoId=${repoId} skipping interface implementation resolution in post-phase\n`);
+  }
+  await yieldToEventLoop();
+
   const mentionsResolved = docsEnabled
     ? (() => { try { return store.resolveMentions(repoId); } catch { return 0; } })()
     : 0;
+
+  process.stderr.write(`[index-post] repoId=${repoId} recording run metadata...\n`);
 
   const fullSummary = {
     ...summary,
@@ -2482,6 +2539,7 @@ async function runIndexAndResolve(
     unresolvedLowConfidence: crossStats.unresolvedByReason.low_confidence
   };
   store.recordRun(fullSummary);
+  process.stderr.write(`[index-post-done] repoId=${repoId} crossRepo=${String(crossStats.resolved)} calls=${String(callEdgesResolved)} imports=${String(importEdgesResolved)} mentions=${String(mentionsResolved)}\n`);
 
   return fullSummary;
 }
@@ -2501,6 +2559,145 @@ function safeCrossRepoResolve(repoId: string): ResolutionStats {
       }
     };
   }
+}
+
+function resolvePerformanceProfileDecision(
+  repoId: string,
+  mode: "full" | "incremental",
+  maxFiles: number
+): {
+  profile: PerformanceProfile;
+  source: "env" | "auto";
+  reason: string;
+  fileCount: number;
+  symbolCount: number;
+} {
+  const configured = parsePerformanceProfileEnv(process.env.CODEBASE_INDEX_LARGE_REPO_PROFILE);
+  if (configured !== "auto") {
+    const snap = store.getRepoSchemaSnapshot(repoId);
+    return {
+      profile: configured,
+      source: "env",
+      reason: "explicit override",
+      fileCount: snap.fileCount,
+      symbolCount: snap.symbolCount
+    };
+  }
+
+  const snapshot = store.getRepoSchemaSnapshot(repoId);
+  const estimatedFileCount = snapshot.fileCount;
+  const estimatedSymbolCount = snapshot.symbolCount;
+
+  if (estimatedFileCount === 0 && estimatedSymbolCount === 0) {
+    if (mode === "full" && maxFiles >= 8000) {
+      return {
+        profile: "large",
+        source: "auto",
+        reason: "cold-start full index with high maxFiles",
+        fileCount: estimatedFileCount,
+        symbolCount: estimatedSymbolCount
+      };
+    }
+    return {
+      profile: "standard",
+      source: "auto",
+      reason: "cold-start fallback",
+      fileCount: estimatedFileCount,
+      symbolCount: estimatedSymbolCount
+    };
+  }
+
+  if (estimatedFileCount >= 8000 || estimatedSymbolCount >= 60000) {
+    return {
+      profile: "very-large",
+      source: "auto",
+      reason: "snapshot scale threshold",
+      fileCount: estimatedFileCount,
+      symbolCount: estimatedSymbolCount
+    };
+  }
+  if (estimatedFileCount >= 3000 || estimatedSymbolCount >= 20000) {
+    return {
+      profile: "large",
+      source: "auto",
+      reason: "snapshot scale threshold",
+      fileCount: estimatedFileCount,
+      symbolCount: estimatedSymbolCount
+    };
+  }
+  return {
+    profile: "standard",
+    source: "auto",
+    reason: "snapshot scale threshold",
+    fileCount: estimatedFileCount,
+    symbolCount: estimatedSymbolCount
+  };
+}
+
+function parsePerformanceProfileEnv(raw: string | undefined): PerformanceProfile | "auto" {
+  const value = (raw ?? "auto").trim().toLowerCase();
+  if (value === "standard" || value === "off") {
+    return "standard";
+  }
+  if (value === "large" || value === "balanced") {
+    return "large";
+  }
+  if (value === "very-large" || value === "aggressive") {
+    return "very-large";
+  }
+  return "auto";
+}
+
+function resolvePostPhasePolicy(profile: PerformanceProfile): {
+  maxUnresolvedRows: number;
+  resolveTypeRefs: boolean;
+  resolveImplementsInPost: boolean;
+} {
+  const configuredMaxRows = nonNegativeNumberFromEnv("CODEBASE_INDEX_MAX_UNRESOLVED_RESOLVE_ROWS");
+  const configuredResolveTypeRefs = parseOptionalBooleanEnv(process.env.CODEBASE_INDEX_POST_RESOLVE_TYPE_REFS);
+
+  if (profile === "very-large") {
+    return {
+      maxUnresolvedRows: configuredMaxRows ?? 50_000,
+      resolveTypeRefs: configuredResolveTypeRefs ?? false,
+      resolveImplementsInPost: false
+    };
+  }
+
+  if (profile === "large") {
+    return {
+      maxUnresolvedRows: configuredMaxRows ?? 120_000,
+      resolveTypeRefs: configuredResolveTypeRefs ?? true,
+      resolveImplementsInPost: true
+    };
+  }
+
+  return {
+    maxUnresolvedRows: configuredMaxRows ?? 0,
+    resolveTypeRefs: configuredResolveTypeRefs ?? true,
+    resolveImplementsInPost: true
+  };
+}
+
+function nonNegativeNumberFromEnv(name: string): number | undefined {
+  const raw = process.env[name];
+  if (!raw) {
+    return undefined;
+  }
+
+  const value = Number(raw);
+  if (!Number.isFinite(value) || value < 0) {
+    return undefined;
+  }
+
+  return Math.floor(value);
+}
+
+function parseOptionalBooleanEnv(raw: string | undefined): boolean | undefined {
+  if (raw === undefined) {
+    return undefined;
+  }
+  return parseBooleanEnv(raw, false);
 }
 
 function resolveAutoWatchTargets(): { repoId: string; repoPath: string }[] {

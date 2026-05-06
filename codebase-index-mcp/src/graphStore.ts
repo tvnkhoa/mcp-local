@@ -48,6 +48,113 @@ export class GraphStore {
   private readonly db: Database.Database;
   private readonly runInTransactionInternal: (fn: () => void) => void;
 
+  // Cached prepared statements for the hot indexing write path.
+  private stmtUpsertFile!: Database.Statement;
+  private stmtDeleteEdgesForFile!: Database.Statement;
+  private stmtDeleteSymbolsForFile!: Database.Statement;
+  private stmtInsertSymbol!: Database.Statement;
+  private stmtDeleteRoutesForFile!: Database.Statement;
+  private stmtInsertEdge!: Database.Statement;
+  private stmtInsertRoute!: Database.Statement;
+
+  private buildNamedCandidateMap(repoId: string, allowedKinds?: readonly string[]): Map<string, { symbolId: string; filePath: string; kind: string }[]> {
+    const rows = allowedKinds && allowedKinds.length > 0
+      ? this.db
+          .prepare(
+            `
+            select symbol_id as symbolId, name, file_path as filePath, kind
+            from symbols
+            where repo_id = ? and kind in (${allowedKinds.map(() => "?").join(", ")})
+            `
+          )
+          .all(repoId, ...allowedKinds) as { symbolId: string; name: string; filePath: string; kind: string }[]
+      : this.db
+          .prepare(
+            `
+            select symbol_id as symbolId, name, file_path as filePath, kind
+            from symbols
+            where repo_id = ?
+            `
+          )
+          .all(repoId) as { symbolId: string; name: string; filePath: string; kind: string }[];
+
+    const byName = new Map<string, { symbolId: string; filePath: string; kind: string }[]>();
+    for (const row of rows) {
+      const list = byName.get(row.name) ?? [];
+      list.push({ symbolId: row.symbolId, filePath: row.filePath, kind: row.kind });
+      byName.set(row.name, list);
+    }
+
+    return byName;
+  }
+
+  private pickBestNamedCandidate(
+    candidates: { symbolId: string; filePath: string; kind: string }[],
+    fromFile: string,
+    kindPriority: readonly string[]
+  ): { symbolId: string; filePath: string; kind: string } | undefined {
+    if (candidates.length === 0) {
+      return undefined;
+    }
+
+    const rank = new Map(kindPriority.map((kind, index) => [kind, index]));
+    let best = candidates[0];
+    let bestScore = Number.POSITIVE_INFINITY;
+
+    for (const candidate of candidates) {
+      const sameFilePenalty = candidate.filePath === fromFile ? 0 : 100;
+      const kindPenalty = rank.get(candidate.kind) ?? 999;
+      const score = sameFilePenalty + kindPenalty;
+      if (score < bestScore) {
+        best = candidate;
+        bestScore = score;
+      }
+    }
+
+    return best;
+  }
+
+  private isSqliteUniqueConstraintError(error: unknown): boolean {
+    if (!error || typeof error !== "object") {
+      return false;
+    }
+
+    const sqliteCode = (error as { code?: string }).code;
+    if (typeof sqliteCode === "string" && sqliteCode.startsWith("SQLITE_CONSTRAINT")) {
+      return true;
+    }
+
+    const message = (error as { message?: string }).message;
+    if (typeof message === "string" && /UNIQUE constraint failed/i.test(message)) {
+      return true;
+    }
+
+    return false;
+  }
+
+  private buildSymbolCollisionError(row: SymbolRecord, error: unknown): Error {
+    const existing = this.db
+      .prepare(
+        `
+        select file_path as filePath, name, kind
+        from symbols
+        where repo_id = ? and symbol_id = ?
+        limit 1
+        `
+      )
+      .get(row.repoId, row.symbolId) as { filePath: string; name: string; kind: string } | undefined;
+
+    const existingDetails = existing
+      ? `existingFile=${existing.filePath} existingName=${existing.name} existingKind=${existing.kind}`
+      : "existingSymbol=unknown";
+    const incomingDetails = `incomingFile=${row.filePath} incomingName=${row.name} incomingKind=${row.kind}`;
+    const causeMessage = error instanceof Error ? error.message : String(error);
+
+    return new Error(
+      `[index-collision] symbol_id collision repoId=${row.repoId} symbolId=${row.symbolId} ${incomingDetails} ${existingDetails} cause=${causeMessage}`
+    );
+  }
+
   private getEdgeDefaults(edge: EdgeRecord): { confidence: number; reason: string } {
     if (edge.toId.startsWith("callee:")) {
       return { confidence: 0.4, reason: "unresolved callee token" };
@@ -157,9 +264,60 @@ export class GraphStore {
     this.db.pragma("synchronous = NORMAL");
     this.db.pragma("cache_size = -64000"); // 64MB cache
     this.db.pragma("temp_store = MEMORY");
+    this.db.pragma("page_size = 4096"); // Standard 4KB page size
+    this.db.pragma("busy_timeout = 5000"); // 5s timeout for locks
     this.runInTransactionInternal = this.db.transaction((fn: () => void) => fn());
     this.initSchema();
     this.runMigrations();
+    this.initCachedStatements();
+  }
+
+  private initCachedStatements(): void {
+    this.stmtUpsertFile = this.db.prepare(
+      `
+      insert into files (repo_id, path, content_hash, language, updated_at)
+      values (@repoId, @path, @contentHash, @language, @updatedAt)
+      on conflict(repo_id, path) do update set
+        content_hash = excluded.content_hash,
+        language = excluded.language,
+        updated_at = excluded.updated_at
+      `
+    );
+    this.stmtDeleteEdgesForFile = this.db.prepare(
+      `
+      delete from edges
+      where repo_id = ?
+        and from_id in (
+          select symbol_id
+          from symbols
+          where repo_id = ? and file_path = ?
+        )
+      `
+    );
+    this.stmtDeleteSymbolsForFile = this.db.prepare(
+      `delete from symbols where repo_id = ? and file_path = ?`
+    );
+    this.stmtInsertSymbol = this.db.prepare(
+      `
+      insert into symbols (repo_id, symbol_id, file_path, name, kind, line, signature)
+      values (@repoId, @symbolId, @filePath, @name, @kind, @line, @signature)
+      `
+    );
+    this.stmtDeleteRoutesForFile = this.db.prepare(
+      `delete from routes where repo_id = ? and file_path = ?`
+    );
+    this.stmtInsertEdge = this.db.prepare(
+      `
+      insert into edges (repo_id, from_id, to_id, type, confidence, reason)
+      values (@repoId, @fromId, @toId, @type, @confidence, @reason)
+      `
+    );
+    this.stmtInsertRoute = this.db.prepare(
+      `
+      insert into routes (repo_id, file_path, controller_symbol_id, handler_symbol_id, http_method, route_template, line)
+      values (@repoId, @filePath, @controllerSymbolId, @handlerSymbolId, @httpMethod, @routeTemplate, @line)
+      `
+    );
   }
 
   close(): void {
@@ -170,19 +328,17 @@ export class GraphStore {
     this.runInTransactionInternal(fn);
   }
 
+  /** Flush WAL contents into main database file (GitNexus pattern for batch indexing). */
+  checkpoint(): void {
+    try {
+      this.db.pragma("wal_checkpoint(PASSIVE)");
+    } catch {
+      // Ignore checkpoint errors to avoid interrupting indexing flow.
+    }
+  }
+
   upsertFile(record: FileRecord): void {
-    this.db
-      .prepare(
-        `
-        insert into files (repo_id, path, content_hash, language, updated_at)
-        values (@repoId, @path, @contentHash, @language, @updatedAt)
-        on conflict(repo_id, path) do update set
-          content_hash = excluded.content_hash,
-          language = excluded.language,
-          updated_at = excluded.updated_at
-        `
-      )
-      .run(record);
+    this.stmtUpsertFile.run(record);
   }
 
   ensureRepository(repoId: string, repoPath: string): void {
@@ -216,36 +372,30 @@ export class GraphStore {
 
   replaceSymbolsForFile(repoId: string, filePath: string, symbols: SymbolRecord[]): void {
     // Remove previous edges emitted by symbols in this file before replacing symbols.
-    this.db
-      .prepare(
-        `
-        delete from edges
-        where repo_id = ?
-          and from_id in (
-            select symbol_id
-            from symbols
-            where repo_id = ? and file_path = ?
-          )
-        `
-      )
-      .run(repoId, repoId, filePath);
+    this.stmtDeleteEdgesForFile.run(repoId, repoId, filePath);
+    this.stmtDeleteSymbolsForFile.run(repoId, filePath);
 
-    this.db.prepare(`delete from symbols where repo_id = ? and file_path = ?`).run(repoId, filePath);
-
-    const stmt = this.db.prepare(
-      `
-      insert into symbols (repo_id, symbol_id, file_path, name, kind, line, signature)
-      values (@repoId, @symbolId, @filePath, @name, @kind, @line, @signature)
-      `
-    );
-
-    const tx = this.db.transaction((rows: SymbolRecord[]) => {
+    const writeRows = (rows: SymbolRecord[]) => {
       for (const row of rows) {
-        stmt.run({ ...row, signature: row.signature ?? null });
+        try {
+          this.stmtInsertSymbol.run({ ...row, signature: row.signature ?? null });
+        } catch (error) {
+          if (this.isSqliteUniqueConstraintError(error)) {
+            throw this.buildSymbolCollisionError(row, error);
+          }
+          throw error;
+        }
       }
-    });
+    };
 
-    tx(symbols);
+    if (this.db.inTransaction) {
+      writeRows(symbols);
+      return;
+    }
+
+    this.db.transaction((rows: SymbolRecord[]) => {
+      writeRows(rows);
+    })(symbols);
   }
 
   /**
@@ -309,75 +459,53 @@ export class GraphStore {
     return result.changes;
   }
 
-  replaceEdgesForFile(repoId: string, fromId: string, edges: EdgeRecord[]): void {
-    // fromId passed by pipeline is module symbol id. A file can emit edges from many symbols
-    // (functions/methods), so deleting only module-origin edges leaves stale rows after re-index.
-    // Resolve filePath from fromId, then clear all edges whose from_id belongs to that file.
-    const fileRow = this.db
-      .prepare(`select file_path as filePath from symbols where repo_id = ? and symbol_id = ? limit 1`)
-      .get(repoId, fromId) as { filePath: string } | undefined;
+  replaceEdgesForFile(repoId: string, filePath: string, edges: EdgeRecord[]): void {
+    // replaceSymbolsForFile already cleared edges for this file, but we delete again here as a
+    // safety net for callers that invoke replaceEdgesForFile independently.
+    this.stmtDeleteEdgesForFile.run(repoId, repoId, filePath);
 
-    if (fileRow?.filePath) {
-      this.db
-        .prepare(
-          `
-          delete from edges
-          where repo_id = ?
-            and from_id in (
-              select symbol_id
-              from symbols
-              where repo_id = ? and file_path = ?
-            )
-          `
-        )
-        .run(repoId, repoId, fileRow.filePath);
-    } else {
-      // Fallback safety if fromId cannot be resolved.
-      this.db.prepare(`delete from edges where repo_id = ? and from_id = ?`).run(repoId, fromId);
-    }
-
-    const stmt = this.db.prepare(
-      `
-      insert into edges (repo_id, from_id, to_id, type, confidence, reason)
-      values (@repoId, @fromId, @toId, @type, @confidence, @reason)
-      `
-    );
-
-    const tx = this.db.transaction((rows: EdgeRecord[]) => {
+    const writeRows = (rows: EdgeRecord[]) => {
       for (const row of rows) {
         const defaults = this.getEdgeDefaults(row);
-        stmt.run({
+        this.stmtInsertEdge.run({
           ...row,
           confidence: row.confidence ?? defaults.confidence,
           reason: row.reason ?? defaults.reason
         });
       }
-    });
+    };
 
-    tx(edges);
+    if (this.db.inTransaction) {
+      writeRows(edges);
+      return;
+    }
+
+    this.db.transaction((rows: EdgeRecord[]) => {
+      writeRows(rows);
+    })(edges);
   }
 
   replaceRoutesForFile(repoId: string, filePath: string, routes: RouteRecord[]): void {
-    this.db.prepare(`delete from routes where repo_id = ? and file_path = ?`).run(repoId, filePath);
+    this.stmtDeleteRoutesForFile.run(repoId, filePath);
 
     if (routes.length === 0) {
       return;
     }
 
-    const stmt = this.db.prepare(
-      `
-      insert into routes (repo_id, file_path, controller_symbol_id, handler_symbol_id, http_method, route_template, line)
-      values (@repoId, @filePath, @controllerSymbolId, @handlerSymbolId, @httpMethod, @routeTemplate, @line)
-      `
-    );
-
-    const tx = this.db.transaction((rows: RouteRecord[]) => {
+    const writeRows = (rows: RouteRecord[]) => {
       for (const row of rows) {
-        stmt.run(row);
+        this.stmtInsertRoute.run(row);
       }
-    });
+    };
 
-    tx(routes);
+    if (this.db.inTransaction) {
+      writeRows(routes);
+      return;
+    }
+
+    this.db.transaction((rows: RouteRecord[]) => {
+      writeRows(rows);
+    })(routes);
   }
 
   recordRun(summary: IndexRunSummary & { crossRepoLinked?: number; callEdgesResolved?: number; importEdgesResolved?: number; mentionsResolved?: number }): void {
@@ -1679,18 +1807,22 @@ export class GraphStore {
     return stats;
   }
 
-  resolveImportEdges(repoId: string): number {
+  resolveImportEdges(repoId: string, maxUnresolvedRows = 0): number {
     // Find all IMPORTS edges with unresolved plain-text toId ("import:<path>")
+    const unresolvedSql = `
+      select distinct e.from_id as fromId, e.to_id as toId, sf.file_path as fromFile
+      from edges e
+      inner join symbols sf on sf.repo_id = e.repo_id and sf.symbol_id = e.from_id
+      where e.repo_id = ? and e.type = 'IMPORTS' and e.to_id like 'import:%'
+      ${maxUnresolvedRows > 0 ? "limit ?" : ""}
+    `;
     const unresolved = this.db
-      .prepare(
-        `
-        select distinct e.from_id as fromId, e.to_id as toId, sf.file_path as fromFile
-        from edges e
-        inner join symbols sf on sf.repo_id = e.repo_id and sf.symbol_id = e.from_id
-        where e.repo_id = ? and e.type = 'IMPORTS' and e.to_id like 'import:%'
-        `
-      )
-      .all(repoId) as { fromId: string; toId: string; fromFile: string }[];
+      .prepare(unresolvedSql)
+      .all(...(maxUnresolvedRows > 0 ? [repoId, maxUnresolvedRows] : [repoId])) as {
+      fromId: string;
+      toId: string;
+      fromFile: string;
+    }[];
 
     if (unresolved.length === 0) return 0;
 
@@ -1708,6 +1840,8 @@ export class GraphStore {
       const normalizedPath = row.filePath.replace(/\\/g, "/");
       fileToModuleId.set(normalizedPath, row.symbolId);
     }
+
+    const importResolveCache = new Map<string, string | null>();
 
     let count = 0;
     const tx = this.db.transaction(() => {
@@ -1727,6 +1861,16 @@ export class GraphStore {
         }
         const resolvedBase = resolved.join("/");
 
+        const cacheKey = `${fromDir}|${importPath}`;
+        if (importResolveCache.has(cacheKey)) {
+          const cachedModuleId = importResolveCache.get(cacheKey);
+          if (cachedModuleId) {
+            updateStmt.run(cachedModuleId, 0.95, "resolved relative import", repoId, row.fromId, row.toId);
+            count += 1;
+          }
+          continue;
+        }
+
         // Try with various extensions and index files
         const candidates = [
           resolvedBase,
@@ -1741,17 +1885,19 @@ export class GraphStore {
           resolvedBase.replace(/\.mjs$/, ".ts"),
         ];
 
-        let matched: string | undefined;
+        let matchedModuleId: string | undefined;
         for (const candidate of candidates) {
-          if (fileToModuleId.has(candidate)) {
-            matched = candidate;
+          const moduleId = fileToModuleId.get(candidate);
+          if (moduleId) {
+            matchedModuleId = moduleId;
             break;
           }
         }
 
-        if (matched) {
-          const actualId = fileToModuleId.get(matched)!;
-          updateStmt.run(actualId, 0.95, "resolved relative import", repoId, row.fromId, row.toId);
+        importResolveCache.set(cacheKey, matchedModuleId ?? null);
+
+        if (matchedModuleId) {
+          updateStmt.run(matchedModuleId, 0.95, "resolved relative import", repoId, row.fromId, row.toId);
           count += 1;
         }
       }
@@ -1761,19 +1907,23 @@ export class GraphStore {
     return count;
   }
 
-  resolveCallEdges(repoId: string): number {
+  resolveCallEdges(repoId: string, maxUnresolvedRows = 0): number {
     // Find all CALLS edges with unresolved plain-text toId ("callee:<name>")
     // Join symbols to get the caller's file for same-file resolution priority
+    const unresolvedSql = `
+      select distinct e.from_id as fromId, e.to_id as toId, s.file_path as fromFile
+      from edges e
+      inner join symbols s on s.repo_id = e.repo_id and s.symbol_id = e.from_id
+      where e.repo_id = ? and e.type = 'CALLS' and e.to_id like 'callee:%'
+      ${maxUnresolvedRows > 0 ? "limit ?" : ""}
+    `;
     const unresolved = this.db
-      .prepare(
-        `
-        select distinct e.from_id as fromId, e.to_id as toId, s.file_path as fromFile
-        from edges e
-        inner join symbols s on s.repo_id = e.repo_id and s.symbol_id = e.from_id
-        where e.repo_id = ? and e.type = 'CALLS' and e.to_id like 'callee:%'
-        `
-      )
-      .all(repoId) as { fromId: string; toId: string; fromFile: string }[];
+      .prepare(unresolvedSql)
+      .all(...(maxUnresolvedRows > 0 ? [repoId, maxUnresolvedRows] : [repoId])) as {
+      fromId: string;
+      toId: string;
+      fromFile: string;
+    }[];
 
     if (unresolved.length === 0) return 0;
 
@@ -1781,29 +1931,17 @@ export class GraphStore {
       `update edges set to_id = ?, confidence = ?, reason = ? where repo_id = ? and from_id = ? and to_id = ?`
     );
 
+    const candidateMap = this.buildNamedCandidateMap(repoId, ["function", "method", "constructor", "class"]);
+
     let count = 0;
     const tx = this.db.transaction(() => {
       for (const row of unresolved) {
         const calleeName = row.toId.slice(7); // strip "callee:"
-        // Prefer same-file symbols, then by kind priority
-        const match = this.db
-          .prepare(
-            `
-            select symbol_id as symbolId, file_path as filePath from symbols
-            where repo_id = ? and name = ?
-            order by
-              case when file_path = ? then 0 else 1 end,
-              case kind
-                when 'function' then 0
-                when 'method' then 1
-                when 'constructor' then 2
-                when 'class' then 3
-                else 4
-              end
-            limit 1
-            `
-          )
-          .get(repoId, calleeName, row.fromFile) as { symbolId: string; filePath: string } | undefined;
+        const match = this.pickBestNamedCandidate(
+          candidateMap.get(calleeName) ?? [],
+          row.fromFile,
+          ["function", "method", "constructor", "class"]
+        );
 
         if (match) {
           const confidence = match.filePath === row.fromFile ? 0.9 : 0.75;
@@ -1818,17 +1956,21 @@ export class GraphStore {
     return count;
   }
 
-  resolveTypeRefEdges(repoId: string): number {
+  resolveTypeRefEdges(repoId: string, maxUnresolvedRows = 0): number {
+    const unresolvedSql = `
+      select distinct e.from_id as fromId, e.to_id as toId, s.file_path as fromFile
+      from edges e
+      inner join symbols s on s.repo_id = e.repo_id and s.symbol_id = e.from_id
+      where e.repo_id = ? and e.type = 'TYPE_REF' and e.to_id like 'type:%'
+      ${maxUnresolvedRows > 0 ? "limit ?" : ""}
+    `;
     const unresolved = this.db
-      .prepare(
-        `
-        select distinct e.from_id as fromId, e.to_id as toId, s.file_path as fromFile
-        from edges e
-        inner join symbols s on s.repo_id = e.repo_id and s.symbol_id = e.from_id
-        where e.repo_id = ? and e.type = 'TYPE_REF' and e.to_id like 'type:%'
-        `
-      )
-      .all(repoId) as { fromId: string; toId: string; fromFile: string }[];
+      .prepare(unresolvedSql)
+      .all(...(maxUnresolvedRows > 0 ? [repoId, maxUnresolvedRows] : [repoId])) as {
+      fromId: string;
+      toId: string;
+      fromFile: string;
+    }[];
 
     if (unresolved.length === 0) return 0;
 
@@ -1836,33 +1978,18 @@ export class GraphStore {
       `update edges set to_id = ?, confidence = ?, reason = ? where repo_id = ? and from_id = ? and to_id = ? and type = 'TYPE_REF'`
     );
 
+    const candidateMap = this.buildNamedCandidateMap(repoId, ["class", "interface", "struct", "type"]);
+
     let count = 0;
     const tx = this.db.transaction(() => {
       for (const row of unresolved) {
         const rawTypeName = row.toId.slice(5);
         const typeName = rawTypeName.split(".").pop() ?? rawTypeName;
-        const match = this.db
-          .prepare(
-            `
-            select symbol_id as symbolId
-                 , file_path as filePath
-            from symbols
-            where repo_id = ?
-              and name = ?
-              and kind in ('class', 'interface', 'struct', 'type')
-            order by
-              case when file_path = ? then 0 else 1 end,
-              case kind
-                when 'class' then 0
-                when 'interface' then 1
-                when 'struct' then 2
-                when 'type' then 3
-                else 4
-              end
-            limit 1
-            `
-          )
-          .get(repoId, typeName, row.fromFile) as { symbolId: string; filePath: string } | undefined;
+        const match = this.pickBestNamedCandidate(
+          candidateMap.get(typeName) ?? [],
+          row.fromFile,
+          ["class", "interface", "struct", "type"]
+        );
 
         if (match) {
           const confidence = match.filePath === row.fromFile ? 0.9 : 0.75;
@@ -2891,20 +3018,35 @@ export class GraphStore {
       `update edges set to_id = ? where repo_id = ? and from_id = ? and to_id = ? and type = 'IMPLEMENTS'`
     );
 
+    const interfaceNames = [...new Set(unresolved.map((row) => row.toId.slice(6)))];
+    const namePlaceholders = interfaceNames.map(() => "?").join(",");
+    const interfaceRows = interfaceNames.length === 0
+      ? []
+      : this.db
+          .prepare(
+            `
+            select name, symbol_id as symbolId
+            from symbols
+            where repo_id = ? and kind = 'interface' and name in (${namePlaceholders})
+            `
+          )
+          .all(repoId, ...interfaceNames) as { name: string; symbolId: string }[];
+
+    const interfaceByName = new Map<string, string>();
+    for (const row of interfaceRows) {
+      if (!interfaceByName.has(row.name)) {
+        interfaceByName.set(row.name, row.symbolId);
+      }
+    }
+
     let count = 0;
     const tx = this.db.transaction(() => {
       for (const row of unresolved) {
         const ifaceName = row.toId.slice(6); // strip "iface:"
-        const match = this.db
-          .prepare(
-            `select symbol_id as symbolId from symbols
-             where repo_id = ? and name = ? and kind = 'interface'
-             limit 1`
-          )
-          .get(repoId, ifaceName) as { symbolId: string } | undefined;
+        const matchId = interfaceByName.get(ifaceName);
 
-        if (match) {
-          updateStmt.run(match.symbolId, repoId, row.fromId, row.toId);
+        if (matchId) {
+          updateStmt.run(matchId, repoId, row.fromId, row.toId);
           count += 1;
         }
       }
@@ -2925,15 +3067,22 @@ export class GraphStore {
       `
     );
 
-    const tx = this.db.transaction((rows: import("./types.js").DocRecord[]) => {
+    const writeRows = (rows: import("./types.js").DocRecord[]) => {
       for (const row of rows) {
         // Ensure level is present (as undefined which will bind as NULL)
         const normalized = { ...row, level: row.level ?? undefined };
         stmt.run(normalized);
       }
-    });
+    };
 
-    tx(docs);
+    if (this.db.inTransaction) {
+      writeRows(docs);
+      return;
+    }
+
+    this.db.transaction((rows: import("./types.js").DocRecord[]) => {
+      writeRows(rows);
+    })(docs);
   }
 
   upsertDocMentions(mentions: import("./types.js").DocMentionRecord[]): void {
@@ -2946,13 +3095,20 @@ export class GraphStore {
       `
     );
 
-    const tx = this.db.transaction((rows: import("./types.js").DocMentionRecord[]) => {
+    const writeRows = (rows: import("./types.js").DocMentionRecord[]) => {
       for (const row of rows) {
         stmt.run(row);
       }
-    });
+    };
 
-    tx(mentions);
+    if (this.db.inTransaction) {
+      writeRows(mentions);
+      return;
+    }
+
+    this.db.transaction((rows: import("./types.js").DocMentionRecord[]) => {
+      writeRows(rows);
+    })(mentions);
   }
 
   rebuildDocsFts(): void {

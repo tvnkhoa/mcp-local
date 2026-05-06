@@ -19,6 +19,7 @@ export type IndexRunSummary = {
   docsUpserted: number;
   mentionsUpserted: number;
   parseFailures: number;
+  parseTimeouts: number;
   elapsedMs: number;
   crossRepoAttempts?: number;
   crossRepoResolved?: number;
@@ -72,11 +73,15 @@ export type IndexProgressSnapshot = {
   symbolsUpserted: number;
   edgesUpserted: number;
   parseFailures: number;
+  parseTimeouts: number;
   batchSize: number;
   completedBatches: number;
   totalBatches: number;
   elapsedMs: number;
   etaSeconds?: number;
+  filesPerSecond?: number;
+  symbolsPerSecond?: number;
+  edgesPerSecond?: number;
   byLanguage?: Record<string, { scanned: number; indexed: number }>;
   errorMessage?: string;
 };

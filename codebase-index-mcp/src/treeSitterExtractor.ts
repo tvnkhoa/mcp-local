@@ -14,6 +14,7 @@ export type ExtractInput = {
   filePath: string;
   language: string;
   source: string;
+  performanceProfile?: "standard" | "large" | "very-large";
 };
 
 export type ExtractOutput = {
@@ -24,7 +25,34 @@ export type ExtractOutput = {
   mentions?: DocMentionRecord[];
 };
 
+export class ParseTimeoutError extends Error {
+  readonly filePath: string;
+  readonly timeoutMs: number;
+
+  constructor(filePath: string, timeoutMs: number) {
+    super(`parse timeout after ${String(timeoutMs)}ms`);
+    this.name = "ParseTimeoutError";
+    this.filePath = filePath;
+    this.timeoutMs = timeoutMs;
+  }
+}
+
+export function isParseTimeoutError(error: unknown): error is ParseTimeoutError {
+  return error instanceof ParseTimeoutError;
+}
+
+const TREE_SITTER_MIN_BUFFER = 512 * 1024;
+const TREE_SITTER_MAX_BUFFER = 32 * 1024 * 1024;
+const parserCache = new Map<string, Parser>();
+const OVERRIDE_MAX_CALL_EDGES_PER_FILE = optionalNumberFromEnv("CODEBASE_INDEX_MAX_CALL_EDGES_PER_FILE");
+const OVERRIDE_MIN_EDGE_CONFIDENCE = optionalRatioFromEnv("CODEBASE_INDEX_MIN_EDGE_CONFIDENCE");
+
+/** Per-file parse timeout in milliseconds. Files exceeding this are skipped (module symbol only). */
+const PARSE_TIMEOUT_MS = optionalNumberFromEnv("CODEBASE_INDEX_PARSE_TIMEOUT_MS") ?? 5_000;
+
 export function extractGraphData(input: ExtractInput): ExtractOutput {  // Handle markdown separately
+  const edgePolicy = resolveEdgePolicy(input.performanceProfile ?? "standard");
+
   if (input.language === "markdown") {
     return extractMarkdownFile(input);
   }
@@ -41,20 +69,40 @@ export function extractGraphData(input: ExtractInput): ExtractOutput {  // Handl
     }
   ];
 
-  const parser = createParserForLanguage(input.language);
+  const parser = getOrCreateParserForLanguage(input.language);
   if (!parser) {
     return { symbols, edges: [] };
   }
 
-  const tree = parser.parse(input.source, undefined, { bufferSize: 1024 * 1024 });
-  const root = tree.rootNode;
+  const sourceBytes = Buffer.byteLength(input.source, "utf8");
+  if (sourceBytes > TREE_SITTER_MAX_BUFFER) {
+    return { symbols, edges: [] };
+  }
 
+  parser.setTimeoutMicros(PARSE_TIMEOUT_MS * 1000);
+  const tree = parser.parse(input.source, undefined, {
+    bufferSize: getTreeSitterBufferSize(sourceBytes)
+  });
+  parser.setTimeoutMicros(0);
+
+  if (!tree) {
+    // Parser timed out — reset so the cached parser is ready for the next file.
+    parser.reset();
+    throw new ParseTimeoutError(input.filePath, PARSE_TIMEOUT_MS);
+  }
+
+  const root = tree.rootNode;
   const edges: EdgeRecord[] = [];
   const routes: RouteRecord[] = [];
 
   if (input.language === "python") {
     extractPythonSymbolsAndRoutes(input, symbols, edges, routes, moduleSymbolId);
-    return { symbols: dedupeSymbols(symbols), edges: dedupeEdges(edges), routes: dedupeRoutes(routes) };
+    const resolvedEdges = resolveIntraFileEdges(edges, symbols);
+    return {
+      symbols: dedupeSymbols(symbols),
+      edges: applyEdgeConfidenceFilter(applyCallEdgeCap(dedupeEdges(resolvedEdges), edgePolicy.maxCallEdgesPerFile), edgePolicy.minEdgeConfidence),
+      routes: dedupeRoutes(routes)
+    };
   }
 
   // Extract based on language
@@ -66,32 +114,50 @@ export function extractGraphData(input: ExtractInput): ExtractOutput {  // Handl
     routes.push(...extractCSharpRoutes(input, root, symbols));
   }
 
-  return { symbols: dedupeSymbols(symbols), edges: dedupeEdges(edges), routes };
+  const resolvedEdges = resolveIntraFileEdges(edges, symbols);
+
+  return {
+    symbols: dedupeSymbols(symbols),
+    edges: applyEdgeConfidenceFilter(applyCallEdgeCap(dedupeEdges(resolvedEdges), edgePolicy.maxCallEdgesPerFile), edgePolicy.minEdgeConfidence),
+    routes
+  };
 }
 
 function stableId(input: string): string {
   return createHash("sha256").update(input).digest("hex").slice(0, 24);
 }
 
-function createParserForLanguage(language: string): Parser | null {
-  const parser = new Parser();
+function getOrCreateParserForLanguage(language: string): Parser | null {
+  const cached = parserCache.get(language);
+  if (cached) {
+    return cached;
+  }
 
+  const parser = new Parser();
   if (language === "javascript") {
     parser.setLanguage(JavaScript);
+    parserCache.set(language, parser);
     return parser;
   }
 
   if (language === "typescript") {
     parser.setLanguage(TypeScript.typescript);
+    parserCache.set(language, parser);
     return parser;
   }
 
   if (language === "csharp") {
     parser.setLanguage(CSharp);
+    parserCache.set(language, parser);
     return parser;
   }
 
   return null;
+}
+
+function getTreeSitterBufferSize(sourceBytes: number): number {
+  const adaptive = sourceBytes * 2;
+  return Math.min(TREE_SITTER_MAX_BUFFER, Math.max(TREE_SITTER_MIN_BUFFER, adaptive));
 }
 
 function stripQuotes(value: string): string {
@@ -254,6 +320,180 @@ function dedupeEdges(edges: EdgeRecord[]): EdgeRecord[] {
   }
 
   return output;
+}
+
+function resolveIntraFileEdges(edges: EdgeRecord[], symbols: SymbolRecord[]): EdgeRecord[] {
+  if (edges.length === 0 || symbols.length === 0) {
+    return edges;
+  }
+
+  const callTargetByName = new Map<string, SymbolRecord>();
+  const typeTargetByName = new Map<string, SymbolRecord>();
+  const interfaceByName = new Map<string, SymbolRecord>();
+
+  for (const symbol of symbols) {
+    if ((symbol.kind === "function" || symbol.kind === "method" || symbol.kind === "constructor" || symbol.kind === "class") && !callTargetByName.has(symbol.name)) {
+      callTargetByName.set(symbol.name, symbol);
+    }
+    if ((symbol.kind === "class" || symbol.kind === "interface" || symbol.kind === "struct" || symbol.kind === "type") && !typeTargetByName.has(symbol.name)) {
+      typeTargetByName.set(symbol.name, symbol);
+    }
+    if (symbol.kind === "interface" && !interfaceByName.has(symbol.name)) {
+      interfaceByName.set(symbol.name, symbol);
+    }
+  }
+
+  return edges.map((edge) => {
+    if (edge.type === "CALLS" && edge.toId.startsWith("callee:")) {
+      const calleeName = edge.toId.slice(7);
+      const target = callTargetByName.get(calleeName);
+      if (target) {
+        return {
+          ...edge,
+          toId: target.symbolId,
+          confidence: edge.confidence ?? 0.9,
+          reason: edge.reason ?? "resolved callee same-file"
+        };
+      }
+    }
+
+    if (edge.type === "TYPE_REF" && edge.toId.startsWith("type:")) {
+      const rawTypeName = edge.toId.slice(5);
+      const typeName = rawTypeName.split(".").pop() ?? rawTypeName;
+      const target = typeTargetByName.get(typeName);
+      if (target) {
+        return {
+          ...edge,
+          toId: target.symbolId,
+          confidence: edge.confidence ?? 0.9,
+          reason: edge.reason ?? "resolved type reference same-file"
+        };
+      }
+    }
+
+    if (edge.type === "IMPLEMENTS" && edge.toId.startsWith("iface:")) {
+      const ifaceName = edge.toId.slice(6);
+      const target = interfaceByName.get(ifaceName);
+      if (target) {
+        return {
+          ...edge,
+          toId: target.symbolId,
+          confidence: edge.confidence ?? 0.95,
+          reason: edge.reason ?? "resolved interface same-file"
+        };
+      }
+    }
+
+    return edge;
+  });
+}
+
+function applyCallEdgeCap(edges: EdgeRecord[], maxCallEdgesPerFile: number): EdgeRecord[] {
+  if (maxCallEdgesPerFile <= 0) {
+    return edges;
+  }
+
+  const output: EdgeRecord[] = [];
+  let callCount = 0;
+  for (const edge of edges) {
+    if (edge.type !== "CALLS") {
+      output.push(edge);
+      continue;
+    }
+    if (callCount >= maxCallEdgesPerFile) {
+      continue;
+    }
+    callCount += 1;
+    output.push(edge);
+  }
+  return output;
+}
+
+function applyEdgeConfidenceFilter(edges: EdgeRecord[], minEdgeConfidence: number): EdgeRecord[] {
+  if (minEdgeConfidence <= 0) {
+    return edges;
+  }
+
+  return edges.filter((edge) => {
+    const confidence = getEffectiveEdgeConfidence(edge);
+    return confidence >= minEdgeConfidence;
+  });
+}
+
+function getEffectiveEdgeConfidence(edge: EdgeRecord): number {
+  if (typeof edge.confidence === "number") {
+    return edge.confidence;
+  }
+
+  if (edge.toId.startsWith("callee:")) {
+    return 0.4;
+  }
+  if (edge.toId.startsWith("import:")) {
+    return 0.5;
+  }
+  if (edge.toId.startsWith("type:")) {
+    return 0.45;
+  }
+
+  if (edge.type === "CALLS") {
+    return 1.0;
+  }
+  if (edge.type === "IMPORTS") {
+    return 0.95;
+  }
+  if (edge.type === "TYPE_REF") {
+    return 0.9;
+  }
+
+  return 1.0;
+}
+
+function optionalNumberFromEnv(name: string): number | undefined {
+  const raw = process.env[name];
+  if (!raw) {
+    return undefined;
+  }
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed < 0) {
+    return undefined;
+  }
+  return Math.floor(parsed);
+}
+
+function optionalRatioFromEnv(name: string): number | undefined {
+  const raw = process.env[name];
+  if (!raw) {
+    return undefined;
+  }
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed)) {
+    return undefined;
+  }
+  return Math.min(1, Math.max(0, parsed));
+}
+
+function resolveEdgePolicy(profile: "standard" | "large" | "very-large"): {
+  maxCallEdgesPerFile: number;
+  minEdgeConfidence: number;
+} {
+  const defaults = defaultEdgePolicy(profile);
+  return {
+    maxCallEdgesPerFile: OVERRIDE_MAX_CALL_EDGES_PER_FILE ?? defaults.maxCallEdgesPerFile,
+    minEdgeConfidence: OVERRIDE_MIN_EDGE_CONFIDENCE ?? defaults.minEdgeConfidence
+  };
+}
+
+function defaultEdgePolicy(profile: "standard" | "large" | "very-large"): {
+  maxCallEdgesPerFile: number;
+  minEdgeConfidence: number;
+} {
+  if (profile === "large") {
+    return { maxCallEdgesPerFile: 2500, minEdgeConfidence: 0.4 };
+  }
+  if (profile === "very-large") {
+    return { maxCallEdgesPerFile: 1200, minEdgeConfidence: 0.5 };
+  }
+  return { maxCallEdgesPerFile: 0, minEdgeConfidence: 0 };
 }
 
 function dedupeSymbols(symbols: SymbolRecord[]): SymbolRecord[] {

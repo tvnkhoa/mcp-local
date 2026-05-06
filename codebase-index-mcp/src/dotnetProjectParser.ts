@@ -113,12 +113,14 @@ function extractSln(input: DotnetExtractInput): DotnetExtractResult {
     const projPath = match[2].replace(/\\/g, "/");
     if (!projName || !projPath) continue;
 
-    const projSymbolId = stableId(`${input.repoId}:project:${projPath.toLowerCase()}`);
+    // Use a sln-scoped symbolId so two .sln files referencing the same .csproj
+    // don't emit conflicting symbols with the same symbolId.
+    const projSymbolId = stableId(`${input.repoId}:${input.filePath}:project:${projPath.toLowerCase()}`);
 
     symbols.push({
       repoId: input.repoId,
       symbolId: projSymbolId,
-      filePath: projPath,
+      filePath: input.filePath,  // owned by this .sln, not the .csproj path
       name: projName,
       kind: "module",
       line: 1

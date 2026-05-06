@@ -26,29 +26,30 @@ Current integration:
 - `index_repository` - **Enhanced with ETA & language tracking**
 - `get_dependency_graph`
 - `get_call_chain`
-- `find_impact_files`
 - `list_repositories`
 - `search_symbols` (`profile: nano|compact|standard|verbose`; `strategy: "name" | "intent"`)
 - `get_file_context` (`profile: nano|compact|standard|verbose`)
-- `get_batch_context` (`profile: nano|compact|standard|verbose`)
 - `get_symbol_detail`
 - `find_impact_files`
 - `get_change_context`
 - `get_file_summary`
-- `search_docs` (requires `CODEBASE_INDEX_DOCS_TOOLS_ENABLED=true`)
-- `find_stale_docs` (requires `CODEBASE_INDEX_DOCS_TOOLS_ENABLED=true`)
-- `find_doc_coverage` (requires `CODEBASE_INDEX_DOCS_TOOLS_ENABLED=true`)
+- `get_symbol_context_pack`
+- `query_docs` (requires `CODEBASE_INDEX_DOCS_TOOLS_ENABLED=true`)
 - `watch_repo` (`action`: `start` | `stop` | `status`)
 - `find_symbol_at_line`
-- `find_references`
-- `get_context_by_name`
-- `get_change_context_by_name`
-- `get_symbol_candidates`
-- `get_symbol_context_pack`
 - `detect_changes` (includes deterministic `riskScore`/`riskLevel`, supports filter knobs `minRiskScore`/`riskLevels`/`maxResults`/`sortBy`, and policy presets: `quick-triage`, `strict-review`, `release-gate`, `custom`)
 - `get_folder_summary`
 - `find_entry_points` (returns `runtimeEntryPoints` + `graphEntryPoints` groups)
 - `find_implementations`
+- `route_map`
+- `query_graph`
+- `rename_assist`
+- `trace_execution_flow`
+- `dead_code_scan`
+- `detect_circular_dependencies`
+- `get_cross_repo_impact`
+- `get_symbol_blame`
+- `link_tests_to_source`
 - Batch commit indexing (partial progress persisted per batch)
 - Progress output in terminal (`[index-progress] ...`)
 
@@ -65,6 +66,7 @@ Current integration:
 - `CODEBASE_INDEX_ALLOWED_ROOTS` (required): comma-separated absolute paths allowed for indexing.
 - `CODEBASE_INDEX_DB_PATH` (optional): defaults to `./codebase-index.db`.
 - `CODEBASE_INDEX_MAX_FILES_PER_RUN` (optional): defaults to `20000`.
+- `CODEBASE_INDEX_LARGE_REPO_PROFILE` (optional): `auto | standard | large | very-large` (also accepts legacy `off | balanced | aggressive`). Defaults to `auto`.
 - `CODEBASE_INDEX_MAX_RESULT_LIMIT` (optional): defaults to `500`.
 - `CODEBASE_INDEX_MAX_DEPTH` (optional): defaults to `5`.
 - `CODEBASE_INDEX_TELEMETRY_ENABLED` (optional): defaults to `false`; enables per-tool telemetry logs to stderr.
@@ -78,6 +80,18 @@ Current integration:
 - `CODEBASE_INDEX_WATCH_MAX_QUEUED_EVENTS` (optional): defaults to `2000`.
 - `CODEBASE_INDEX_WATCH_MAX_FILES_PER_RUN` (optional): defaults to `4000`.
 - `CODEBASE_INDEX_WATCH_BATCH_SIZE` (optional): defaults to `200`. 
+
+No-config defaults:
+- Keep only required config (`CODEBASE_INDEX_ALLOWED_ROOTS`) for normal usage.
+- Performance profile is selected automatically from repo scale (`standard` / `large` / `very-large`).
+- Post-phase resolver budget and edge extraction policies are derived from profile by default.
+
+Advanced tuning (optional overrides):
+- `CODEBASE_INDEX_BATCH_BYTE_BUDGET`: override per-batch byte budget in pipeline.
+- `CODEBASE_INDEX_MAX_CALL_EDGES_PER_FILE`: override CALLS edge cap per file.
+- `CODEBASE_INDEX_MIN_EDGE_CONFIDENCE`: override minimum edge confidence filter in extractor.
+- `CODEBASE_INDEX_MAX_UNRESOLVED_RESOLVE_ROWS`: override unresolved rows processed per resolver pass.
+- `CODEBASE_INDEX_POST_RESOLVE_TYPE_REFS`: force enable/disable post-phase type-ref resolution.
 
 > If `better-sqlite3` native build fails on Windows environments without build tools, install Visual Studio C++ Build Tools or switch temporarily to a JS-only SQLite backend in a follow-up patch.
 
@@ -107,9 +121,8 @@ Smoke test now validates more than startup:
 - `health_check`
 - `index_repository` on current workspace (bounded sample)
 - `get_dependency_graph` / `find_impact_files` for `src/index.ts` in the indexed repo
-- `get_context_by_name` profile matrix (`compact`, `standard`, `verbose`) and payload ordering
-- `get_change_context_by_name` output validity
-- `get_symbol_candidates` output validity
+- `get_symbol_context_pack` output validity
+- `detect_changes` output validity
 
 ## Integrate MCP into Plan/Agent pipeline
 
@@ -131,11 +144,7 @@ Profile A - workspace-local (portable, isolated per workspace):
 			],
 			"env": {
 				"CODEBASE_INDEX_ALLOWED_ROOTS": "${workspaceFolder}",
-				"CODEBASE_INDEX_DB_PATH": "${workspaceFolder}/mcp-local-index.db",
-				"CODEBASE_INDEX_DOCS_INDEXING_ENABLED": "false",
-				"CODEBASE_INDEX_DOCS_TOOLS_ENABLED": "false",
-				"CODEBASE_INDEX_TELEMETRY_ENABLED": "true",
-				"CODEBASE_INDEX_TELEMETRY_SAMPLE_RATE": "1"
+				"CODEBASE_INDEX_DB_PATH": "${workspaceFolder}/mcp-local-index.db"
 			}
 		}
 	}
@@ -154,11 +163,7 @@ Profile B - central cross-repo (recommended for bridge package impact across man
 			],
 			"env": {
 				"CODEBASE_INDEX_ALLOWED_ROOTS": "D:/1.SourceCode/crm",
-				"CODEBASE_INDEX_DB_PATH": "D:/1.SourceCode/mcp-local/mcp-local-index-central.db",
-				"CODEBASE_INDEX_DOCS_INDEXING_ENABLED": "false",
-				"CODEBASE_INDEX_DOCS_TOOLS_ENABLED": "false",
-				"CODEBASE_INDEX_TELEMETRY_ENABLED": "true",
-				"CODEBASE_INDEX_TELEMETRY_SAMPLE_RATE": "1"
+				"CODEBASE_INDEX_DB_PATH": "D:/1.SourceCode/mcp-local/mcp-local-index-central.db"
 			}
 		}
 	}
@@ -172,8 +177,7 @@ Notes:
 - If you use central DB, keep it out of git and back it up periodically.
 
 Recommended default for token efficiency:
-- Keep `CODEBASE_INDEX_DOCS_INDEXING_ENABLED=false`
-- Keep `CODEBASE_INDEX_DOCS_TOOLS_ENABLED=false`
+- Keep no-config defaults unless you need docs lane.
 - Use `profile: "nano"` on read tools in Plan flow when you only need quick routing context.
 - Use `profile: "compact"` when you still need lightweight field-level details.
 
@@ -189,11 +193,14 @@ Run this once before planning loop (or on file changes):
 		"repoPath": "d:/1.SourceCode/crm/wec.be",
 		"mode": "incremental",
 		"docsMode": "off",
-		"maxFiles": 5000,
 		"batchSize": 200
 	}
 }
 ```
+
+Notes:
+- If `maxFiles` is omitted, the tool now uses the current hard cap from `CODEBASE_INDEX_MAX_FILES_PER_RUN`.
+- If a repo exceeds that cap, stderr will print an explicit `[index-cap] ...` message instead of silently stopping at the limit.
 
 Use `docsMode` per run:
 - `off`: fastest code-only lane (recommended for Plan/Agent by default)
