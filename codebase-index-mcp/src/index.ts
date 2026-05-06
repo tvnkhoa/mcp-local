@@ -45,8 +45,9 @@ const LARGE_FILE_THRESHOLD_BYTES = numberFromEnv("CODEBASE_INDEX_LARGE_FILE_THRE
 const DEFAULT_PARSE_WORKERS = Math.max(1, Math.floor(os.cpus().length / 2));
 const PARSE_WORKERS = numberFromEnv("CODEBASE_INDEX_PARSE_WORKERS", DEFAULT_PARSE_WORKERS);
 const PARSE_JOB_TIMEOUT_MS = numberFromEnv("CODEBASE_INDEX_PARSE_JOB_TIMEOUT_MS", 20_000);
-const WATCH_AUTO_START = parseBooleanEnv(process.env.CODEBASE_INDEX_WATCH_AUTO_START, true);
-const WATCH_DISABLED = parseBooleanEnv(process.env.CODEBASE_INDEX_WATCH_DISABLE, false);
+const WATCH_AUTO_START = parseBooleanEnv(process.env.CODEBASE_INDEX_WATCH_AUTO_START, false);
+const WATCH_ACTIVE_ONLY = parseBooleanEnv(process.env.CODEBASE_INDEX_WATCH_ACTIVE_ONLY, true);
+const WATCH_ACTIVE_TTL_MS = clamp(numberFromEnv("CODEBASE_INDEX_WATCH_ACTIVE_TTL_MS", 15 * 60 * 1000), 5_000, 24 * 60 * 60 * 1000);
 const AUTO_WATCH_REPOS = parseAutoWatchRepos(process.env.CODEBASE_INDEX_AUTO_WATCH_REPOS);
 const watchConfig = parseWatchConfigFromEnv(process.env);
 const TELEMETRY_ENABLED = parseBooleanEnv(process.env.CODEBASE_INDEX_TELEMETRY_ENABLED, false);
@@ -413,6 +414,9 @@ const watchManager = new WatchManager(
   },
   (repoId, deletedRelativePaths) => store.pruneFiles(repoId, deletedRelativePaths)
 );
+
+let activeWatchRepoId: string | null = null;
+const watchInactivityTimers = new Map<string, NodeJS.Timeout>();
 
 server.setRequestHandler(ListToolsRequestSchema, async () => {
   return {
@@ -952,6 +956,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
   return toolContextStorage.run({ toolName, startedAt, args }, async () => {
     try {
+      await maybeAutoActivateWatchFromArgs(toolName, args);
+
       switch (request.params.name) {
       case "health_check": {
         const args = healthCheckSchema.parse(request.params.arguments ?? {});
@@ -961,6 +967,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const args = indexRepositorySchema.parse(request.params.arguments ?? {});
         assertPathAllowed(args.repoPath, allowedRoots);
         const docsEnabled = resolveDocsMode(args.docsMode);
+        store.ensureRepository(args.repoId, args.repoPath);
         const summary = await runIndexAndResolve(
           args.repoId,
           args.repoPath,
@@ -1166,9 +1173,6 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       case "watch_repo": {
         const args = watchRepoSchema.parse(request.params.arguments ?? {});
         if (args.action === "start") {
-          if (WATCH_DISABLED) {
-            return asText({ started: false, message: "watch mode is disabled by CODEBASE_INDEX_WATCH_DISABLE" });
-          }
           if (!args.repoId) {
             throw new McpError(ErrorCode.InvalidParams, "watch_repo: repoId is required for action=start");
           }
@@ -1177,16 +1181,25 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           }
           assertPathAllowed(args.repoPath, allowedRoots);
           store.ensureRepository(args.repoId, args.repoPath);
-          return asText(watchManager.start(args.repoId, args.repoPath));
+          const startResult = await activateWatchForRepo(args.repoId, args.repoPath, "watch_repo:start");
+          return asText(startResult);
         } else if (args.action === "stop") {
           if (!args.repoId) {
             throw new McpError(ErrorCode.InvalidParams, "watch_repo: repoId is required for action=stop");
           }
+          if (activeWatchRepoId === args.repoId) {
+            activeWatchRepoId = null;
+          }
+          clearWatchInactivityTimer(args.repoId);
           return asText(await watchManager.stop(args.repoId));
         } else {
           return asText({
-            watchDisabled: WATCH_DISABLED,
             autoStartEnabled: WATCH_AUTO_START,
+            manualWatchSupported: true,
+            activeOnly: WATCH_ACTIVE_ONLY,
+            activeWatchRepoId,
+            watchActiveTtlMs: WATCH_ACTIVE_TTL_MS,
+            recommendation: "Use watch_repo start only for short debug sessions; stop after diagnostics.",
             config: watchConfig,
             watchers: watchManager.getStatus(args.repoId)
           });
@@ -2113,24 +2126,44 @@ function getRepoStaleness(repoId: string): {
   const repo = store.getRepository(repoId);
   const latestRun = store.getLatestRun(repoId);
 
-  if (!repo || !latestRun) {
+  if (!repo) {
     return {
       repoId,
       indexedCommitSha: latestRun?.commitSha ?? null,
       headCommitSha: null,
       isStale: null,
-      note: "repository or index run not found"
+      note: "repository not found"
+    };
+  }
+
+  if (!latestRun) {
+    return {
+      repoId,
+      indexedCommitSha: null,
+      headCommitSha: resolveHeadCommitSha(repo.repoPath),
+      isStale: null,
+      note: "no indexed run yet"
     };
   }
 
   const headCommitSha = resolveHeadCommitSha(repo.repoPath);
-  if (!latestRun.commitSha || !headCommitSha) {
+  if (!headCommitSha) {
     return {
       repoId,
       indexedCommitSha: latestRun.commitSha,
       headCommitSha,
       isStale: null,
-      note: "commit comparison unavailable"
+      note: "non-git repo or unable to resolve HEAD"
+    };
+  }
+
+  if (!latestRun.commitSha) {
+    return {
+      repoId,
+      indexedCommitSha: latestRun.commitSha,
+      headCommitSha,
+      isStale: null,
+      note: "indexed commit unavailable"
     };
   }
 
@@ -2453,10 +2486,57 @@ async function runIndexAndResolve(
   docsEnabled: boolean,
   maxFiles: number,
   batchSize: number
-): Promise<IndexRunSummary & { crossRepoLinked?: number; callEdgesResolved?: number; importEdgesResolved?: number; mentionsResolved?: number }> {
+): Promise<IndexRunSummary & { crossRepoLinked?: number; callEdgesResolved?: number; importEdgesResolved?: number; mentionsResolved?: number; skipReason?: string }> {
   const yieldToEventLoop = async (): Promise<void> => {
     await new Promise<void>((resolve) => setImmediate(resolve));
   };
+
+  if (mode === "incremental") {
+    const skipDecision = evaluateIncrementalSkip(repoId, repoPath);
+    if (skipDecision.shouldSkip) {
+      const now = new Date().toISOString();
+      const skippedSummary: IndexRunSummary & {
+        crossRepoLinked?: number;
+        callEdgesResolved?: number;
+        importEdgesResolved?: number;
+        mentionsResolved?: number;
+        skipReason?: string;
+      } = {
+        runId: randomUUID(),
+        repoId,
+        commitSha: skipDecision.headCommitSha,
+        indexVersion: skipDecision.indexVersion,
+        mode,
+        status: "ok",
+        startedAt: now,
+        finishedAt: now,
+        filesScanned: 0,
+        filesIndexed: 0,
+        filesSkipped: 0,
+        symbolsUpserted: 0,
+        edgesUpserted: 0,
+        docsUpserted: 0,
+        mentionsUpserted: 0,
+        parseFailures: 0,
+        parseTimeouts: 0,
+        elapsedMs: 0,
+        crossRepoLinked: 0,
+        callEdgesResolved: 0,
+        importEdgesResolved: 0,
+        mentionsResolved: 0,
+        crossRepoAttempts: 0,
+        crossRepoResolved: 0,
+        unresolvedNoCandidate: 0,
+        unresolvedAmbiguous: 0,
+        unresolvedBoundaryBlocked: 0,
+        unresolvedLowConfidence: 0,
+        skipReason: skipDecision.reason
+      };
+      store.recordRun(skippedSummary);
+      process.stderr.write(`[index-skip] repoId=${repoId} reason=${skipDecision.reason}\n`);
+      return skippedSummary;
+    }
+  }
 
   const profileDecision = resolvePerformanceProfileDecision(repoId, mode, maxFiles);
   const performanceProfile = profileDecision.profile;
@@ -2542,6 +2622,80 @@ async function runIndexAndResolve(
   process.stderr.write(`[index-post-done] repoId=${repoId} crossRepo=${String(crossStats.resolved)} calls=${String(callEdgesResolved)} imports=${String(importEdgesResolved)} mentions=${String(mentionsResolved)}\n`);
 
   return fullSummary;
+}
+
+function evaluateIncrementalSkip(
+  repoId: string,
+  repoPath: string
+): {
+  shouldSkip: boolean;
+  reason: string;
+  headCommitSha: string | null;
+  indexVersion: string;
+} {
+  const latestRun = store.getLatestRun(repoId);
+  if (!latestRun?.commitSha) {
+    return {
+      shouldSkip: false,
+      reason: "no previous indexed commit",
+      headCommitSha: null,
+      indexVersion: latestRun?.indexVersion ?? "v1-tree-sitter"
+    };
+  }
+
+  const headCommitSha = resolveHeadCommitSha(repoPath);
+  if (!headCommitSha) {
+    return {
+      shouldSkip: false,
+      reason: "unable to resolve HEAD",
+      headCommitSha,
+      indexVersion: latestRun.indexVersion
+    };
+  }
+
+  if (latestRun.commitSha !== headCommitSha) {
+    return {
+      shouldSkip: false,
+      reason: "index commit differs from HEAD",
+      headCommitSha,
+      indexVersion: latestRun.indexVersion
+    };
+  }
+
+  const dirtyState = hasWorkingTreeChanges(repoPath);
+  if (dirtyState === true) {
+    return {
+      shouldSkip: false,
+      reason: "working tree has uncommitted changes",
+      headCommitSha,
+      indexVersion: latestRun.indexVersion
+    };
+  }
+
+  if (dirtyState === null) {
+    return {
+      shouldSkip: false,
+      reason: "unable to resolve working tree state",
+      headCommitSha,
+      indexVersion: latestRun.indexVersion
+    };
+  }
+
+  return {
+    shouldSkip: true,
+    reason: "head unchanged and working tree clean",
+    headCommitSha,
+    indexVersion: latestRun.indexVersion
+  };
+}
+
+function hasWorkingTreeChanges(repoPath: string): boolean | null {
+  try {
+    const lines = runGitLines(repoPath, ["status", "--porcelain", "--untracked-files=all"]);
+    return lines.length > 0;
+  } catch {
+    return null;
+  }
 }
 
 function safeCrossRepoResolve(repoId: string): ResolutionStats {
@@ -2707,16 +2861,17 @@ function resolveAutoWatchTargets(): { repoId: string; repoPath: string }[] {
   return store.listRepositories().map((r) => ({ repoId: r.repoId, repoPath: r.repoPath }));
 }
 
-function startAutoWatchers(): void {
-  if (WATCH_DISABLED || !WATCH_AUTO_START) {
+async function startAutoWatchers(): Promise<void> {
+  if (!WATCH_AUTO_START) {
     return;
   }
 
   const targets = resolveAutoWatchTargets();
-  for (const target of targets) {
+  const selectedTargets = WATCH_ACTIVE_ONLY ? targets.slice(0, 1) : targets;
+  for (const target of selectedTargets) {
     try {
       assertPathAllowed(target.repoPath, allowedRoots);
-      const started = watchManager.start(target.repoId, target.repoPath);
+      const started = await activateWatchForRepo(target.repoId, target.repoPath, "auto-start");
       if (started.started) {
         process.stderr.write(`[watch-start] repoId=${target.repoId} path=${target.repoPath}\n`);
       }
@@ -2730,6 +2885,10 @@ let shuttingDown = false;
 async function shutdown(): Promise<void> {
   if (shuttingDown) return;
   shuttingDown = true;
+  for (const timer of watchInactivityTimers.values()) {
+    clearTimeout(timer);
+  }
+  watchInactivityTimers.clear();
   try {
     await watchManager.stopAll();
   } catch {
@@ -2745,7 +2904,7 @@ async function shutdown(): Promise<void> {
 async function main(): Promise<void> {
   const transport = new StdioServerTransport();
   await server.connect(transport);
-  startAutoWatchers();
+  await startAutoWatchers();
 
   process.once("SIGINT", () => {
     void shutdown().finally(() => process.exit(0));
@@ -2753,6 +2912,80 @@ async function main(): Promise<void> {
   process.once("SIGTERM", () => {
     void shutdown().finally(() => process.exit(0));
   });
+}
+
+async function maybeAutoActivateWatchFromArgs(toolName: string, args: Record<string, unknown>): Promise<void> {
+  if (!WATCH_AUTO_START) {
+    return;
+  }
+
+  if (toolName === "watch_repo" || toolName === "list_repositories") {
+    return;
+  }
+
+  const rawRepoId = args.repoId;
+  if (typeof rawRepoId !== "string" || rawRepoId.trim().length === 0) {
+    return;
+  }
+
+  const repoId = rawRepoId.trim();
+  const rawRepoPath = args.repoPath;
+  const repoPath = typeof rawRepoPath === "string" && rawRepoPath.trim().length > 0
+    ? rawRepoPath.trim()
+    : store.getRepository(repoId)?.repoPath;
+
+  if (!repoPath) {
+    return;
+  }
+
+  await activateWatchForRepo(repoId, repoPath, `interaction:${toolName}`);
+}
+
+async function activateWatchForRepo(repoId: string, repoPath: string, reason: string): Promise<{ started: boolean; message: string }> {
+  assertPathAllowed(repoPath, allowedRoots);
+
+  if (WATCH_ACTIVE_ONLY && activeWatchRepoId && activeWatchRepoId !== repoId) {
+    clearWatchInactivityTimer(activeWatchRepoId);
+    await watchManager.stop(activeWatchRepoId);
+  }
+
+  const currentStatus = watchManager.getStatus(repoId);
+  let result: { started: boolean; message: string };
+  if (currentStatus.length === 0) {
+    result = watchManager.start(repoId, repoPath);
+  } else {
+    result = { started: false, message: `watch already active for repoId '${repoId}'` };
+  }
+
+  activeWatchRepoId = repoId;
+  armWatchInactivityTimer(repoId);
+  if (result.started) {
+    process.stderr.write(`[watch-activate] repoId=${repoId} reason=${reason}\n`);
+  }
+  return result;
+}
+
+function armWatchInactivityTimer(repoId: string): void {
+  clearWatchInactivityTimer(repoId);
+  const timer = setTimeout(() => {
+    const current = activeWatchRepoId;
+    if (WATCH_ACTIVE_ONLY && current === repoId) {
+      activeWatchRepoId = null;
+    }
+    void watchManager.stop(repoId);
+    watchInactivityTimers.delete(repoId);
+    process.stderr.write(`[watch-idle-stop] repoId=${repoId} ttlMs=${String(WATCH_ACTIVE_TTL_MS)}\n`);
+  }, WATCH_ACTIVE_TTL_MS);
+  watchInactivityTimers.set(repoId, timer);
+}
+
+function clearWatchInactivityTimer(repoId: string): void {
+  const timer = watchInactivityTimers.get(repoId);
+  if (!timer) {
+    return;
+  }
+  clearTimeout(timer);
+  watchInactivityTimers.delete(repoId);
 }
 
 main().catch((error) => {

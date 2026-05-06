@@ -5,6 +5,45 @@ applyTo: "**"
 ---
 # MCP Hard Mode (Workspace Level)
 
+## Workspace Repo Profiles
+
+Primary target in this workspace:
+
+1. `codebase-index-mcp`
+
+Operational defaults (current implementation baseline):
+
+1. Watch policy is active-repo oriented (`WATCH_ACTIVE_ONLY=true` by default).
+2. Idle watcher is stopped by TTL (`WATCH_ACTIVE_TTL_MS`).
+3. Watchless by default: `CODEBASE_INDEX_WATCH_AUTO_START=false` for normal operation.
+4. Incremental re-index may fast-skip when indexed commit equals `HEAD` and working tree is clean.
+5. `watch_repo` manual start is allowed for short debug sessions and should be stopped immediately after diagnostics.
+
+## Watch Usage Playbook (Feature Lifecycle)
+
+Use watch only as a short-lived accelerator while implementing or debugging a feature. Do not keep watchers running by default.
+
+1. Before coding: run `index_repository` once to establish a clean baseline.
+2. During active feature work: run `watch_repo` start for the target repo to capture rapid local edits.
+3. During verification: use normal MCP analysis tools (`detect_changes`, `find_impact_files`, `get_symbol_context_pack`) while watch is active.
+4. After feature is done (PR-ready or context switch): run `watch_repo` stop immediately.
+5. If no active implementation/debug session exists: keep watch disabled and rely on on-demand `index_repository`.
+
+Practical intent:
+1. Watch ON = short implementation/debug window.
+2. Watch OFF = normal operation, review, and release flow.
+
+Anti-pattern (avoid):
+1. Starting watch and leaving it running after feature work is done.
+2. Keeping watch active during PR review, release checklist, or non-coding analysis sessions.
+3. Starting watch without a clear implementation/debug objective for the current repo.
+4. Using watch as a substitute for explicit `index_repository` baseline checkpoints.
+
+Cross-repo naming convention for MCP calls:
+
+1. `repoId=codebase-index-mcp`, `repoPath=d:/1.SourceCode/mcp-local/codebase-index-mcp`
+2. `repoId=wec.commnunication-hub`, `repoPath=d:/1.SourceCode/crm/wec.commnunication-hub`
+
 ## Hard Rules
 1. For codebase analysis tasks, use MCP codebase-index tools first.
 2. Do not start with baseline tools (`grep_search`, `file_search`, `read_file`) unless one of the fallback conditions is met.
@@ -211,3 +250,4 @@ Include in final summary:
 - If fallback occurred: issue ID updated in registry
 - Gate status: Discovery/Scope/Confidence passed or failed
 - Evidence sufficiency statement and residual uncertainty (if any)
+- Target repoId(s): must explicitly state whether result applies to `codebase-index-mcp`, `wec.commnunication-hub`, or both.

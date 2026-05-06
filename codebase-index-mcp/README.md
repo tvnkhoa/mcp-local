@@ -73,9 +73,10 @@ Current integration:
 - `CODEBASE_INDEX_TELEMETRY_SAMPLE_RATE` (optional): defaults to `1`; range `0..1` for telemetry sampling.
 - `CODEBASE_INDEX_DOCS_INDEXING_ENABLED` (optional): defaults to `false`; controls whether docs lane is indexed by default.
 - `CODEBASE_INDEX_DOCS_TOOLS_ENABLED` (optional): defaults to `false`; controls whether docs tools (`search_docs`, `find_stale_docs`, `find_doc_coverage`) are callable.
-- `CODEBASE_INDEX_WATCH_AUTO_START` (optional): defaults to `true`.
-- `CODEBASE_INDEX_WATCH_DISABLE` (optional): defaults to `false`; emergency kill-switch.
+- `CODEBASE_INDEX_WATCH_AUTO_START` (optional): defaults to `false`; when `true`, the server may auto-start/auto-activate watchers.
 - `CODEBASE_INDEX_AUTO_WATCH_REPOS` (optional): explicit startup watch targets formatted as `repoId=absPath,repo2=absPath2`.
+- `CODEBASE_INDEX_WATCH_ACTIVE_ONLY` (optional): defaults to `true`; keeps one active watcher at a time and rotates by last interaction.
+- `CODEBASE_INDEX_WATCH_ACTIVE_TTL_MS` (optional): defaults to `900000` (15 minutes); idle active watcher is auto-stopped after TTL.
 - `CODEBASE_INDEX_WATCH_DEBOUNCE_MS` (optional): defaults to `1200`.
 - `CODEBASE_INDEX_WATCH_MAX_QUEUED_EVENTS` (optional): defaults to `2000`.
 - `CODEBASE_INDEX_WATCH_MAX_FILES_PER_RUN` (optional): defaults to `4000`.
@@ -92,6 +93,11 @@ Advanced tuning (optional overrides):
 - `CODEBASE_INDEX_MIN_EDGE_CONFIDENCE`: override minimum edge confidence filter in extractor.
 - `CODEBASE_INDEX_MAX_UNRESOLVED_RESOLVE_ROWS`: override unresolved rows processed per resolver pass.
 - `CODEBASE_INDEX_POST_RESOLVE_TYPE_REFS`: force enable/disable post-phase type-ref resolution.
+
+GitNexus-style staleness behavior:
+- Incremental index now fast-skips when indexed commit equals `HEAD` and git working tree is clean.
+- The skip run is still recorded in `index_runs` with zero counters and `skipReason` in tool output.
+- Watchless by default: keep auto-watch disabled for normal operation, and use `watch_repo` only for short manual debug sessions.
 
 > If `better-sqlite3` native build fails on Windows environments without build tools, install Visual Studio C++ Build Tools or switch temporarily to a JS-only SQLite backend in a follow-up patch.
 
@@ -371,13 +377,14 @@ Backward compatibility:
 - Full re-index: call `index_repository` with `mode: "full"`.
 - Incremental re-index: call `index_repository` with `mode: "incremental"` (unchanged files are skipped by hash).
 - Recovery from partial failures: re-run `index_repository` for same `repoId`; upserts make reruns idempotent.
-- Auto watch startup: set `CODEBASE_INDEX_AUTO_WATCH_REPOS` and keep `CODEBASE_INDEX_WATCH_AUTO_START=true`.
+- Default operation: keep `CODEBASE_INDEX_WATCH_AUTO_START=false` and refresh index via `index_repository` + staleness checks.
+- Optional auto watch startup: set `CODEBASE_INDEX_AUTO_WATCH_REPOS` and `CODEBASE_INDEX_WATCH_AUTO_START=true` when continuous watching is explicitly required.
 - Runtime watch control: use `watch_repo`.
 	- Start: `{ "action": "start", "repoId": "<id>", "repoPath": "<abs-path>" }`
 	- Stop: `{ "action": "stop", "repoId": "<id>" }`
 	- Status (one repo): `{ "action": "status", "repoId": "<id>" }`
 	- Status (all repos): `{ "action": "status" }`
-- Emergency fallback: set `CODEBASE_INDEX_WATCH_DISABLE=true` and restart server to keep manual indexing only.
+- Manual-watch practice: start only during debug, then stop immediately after diagnostics to avoid background contention.
 
 ## Notes
 
