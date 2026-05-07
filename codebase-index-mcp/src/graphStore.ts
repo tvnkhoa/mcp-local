@@ -997,18 +997,28 @@ export class GraphStore {
     includePrivate: boolean,
     limit: number
   ): {
-    symbolId: string;
-    name: string;
-    kind: string;
-    filePath: string;
-    line: number;
-    signature: string | null;
-    language: string | null;
-    incomingCalls: number;
-    incomingTypeRefs: number;
-    incomingImports: number;
-    deadReason: string;
-  }[] {
+    candidates: {
+      symbolId: string;
+      name: string;
+      kind: string;
+      filePath: string;
+      line: number;
+      signature: string | null;
+      language: string | null;
+      incomingCalls: number;
+      incomingTypeRefs: number;
+      incomingImports: number;
+      deadReason: string;
+    }[];
+    suppressed: {
+      total: number;
+      reasons: Record<string, number>;
+    };
+    scanPolicy: {
+      mode: "skip_low_confidence";
+      note: string;
+    };
+  } {
     const conditions: string[] = [
       "s.repo_id = ?",
       "s.kind not in ('module', 'property', 'constructor', 'type', 'interface')"
@@ -1033,43 +1043,53 @@ export class GraphStore {
     }
 
     const where = conditions.join(" and ");
-    const rows = this.db
-      .prepare(
-        `
-        select
-          s.symbol_id as symbolId,
-          s.name as name,
-          s.kind as kind,
-          s.file_path as filePath,
-          s.line as line,
-          s.signature as signature,
-          f.language as language,
-          (select count(*)
-             from edges e
-            where e.repo_id = s.repo_id
-              and e.type = 'CALLS'
-              and (
-                e.to_id = s.symbol_id
-                or e.to_id = ('callee:' || s.name)
-              )) as incomingCalls,
-          (select count(*)
-             from edges e
-            where e.repo_id = s.repo_id
-              and e.type = 'TYPE_REF'
-              and (
-                e.to_id = s.symbol_id
-                or e.to_id = ('type:' || s.name)
-              )) as incomingTypeRefs,
-          (select count(*) from edges e where e.repo_id = s.repo_id and e.to_id = s.symbol_id and e.type = 'IMPORTS') as incomingImports
-          ,(select count(*) from edges e where e.repo_id = s.repo_id and e.from_id = s.symbol_id and e.type = 'CALLS') as outgoingCalls
-        from symbols s
-        left join files f on f.repo_id = s.repo_id and f.path = s.file_path
-        where ${where}
-        order by s.file_path, s.line
-        limit ?
-        `
-      )
-      .all(...params, Math.max(limit * 3, limit)) as {
+    const stmt = this.db.prepare(
+      `
+      select
+        s.symbol_id as symbolId,
+        s.name as name,
+        s.kind as kind,
+        s.file_path as filePath,
+        s.line as line,
+        s.signature as signature,
+        f.language as language,
+        (select count(*)
+           from edges e
+          where e.repo_id = s.repo_id
+            and e.type = 'CALLS'
+            and (
+              e.to_id = s.symbol_id
+              or e.to_id = ('callee:' || s.name)
+            )) as incomingCalls,
+        (select count(*)
+           from edges e
+          where e.repo_id = s.repo_id
+            and e.type = 'TYPE_REF'
+            and (
+              e.to_id = s.symbol_id
+              or e.to_id = ('type:' || s.name)
+            )) as incomingTypeRefs,
+        (select count(*) from edges e where e.repo_id = s.repo_id and e.to_id = s.symbol_id and e.type = 'IMPORTS') as incomingImports,
+        (select count(*) from edges e where e.repo_id = s.repo_id and e.from_id = s.symbol_id and e.type = 'CALLS') as outgoingCalls,
+        (
+          select count(*)
+          from edges e
+          inner join symbols sf on sf.repo_id = e.repo_id and sf.symbol_id = e.from_id
+          inner join symbols st on st.repo_id = e.repo_id and st.symbol_id = e.to_id
+          where e.repo_id = s.repo_id
+            and st.file_path = s.file_path
+            and sf.file_path != st.file_path
+            and e.type in ('CALLS', 'IMPORTS', 'TYPE_REF')
+        ) as fileIncomingUsages
+      from symbols s
+      left join files f on f.repo_id = s.repo_id and f.path = s.file_path
+      where ${where}
+      order by s.file_path, s.line
+      limit ? offset ?
+      `
+    );
+    const chunkSize = Math.max(limit * 3, 100);
+    const rows: {
       symbolId: string;
       name: string;
       kind: string;
@@ -1081,7 +1101,31 @@ export class GraphStore {
       incomingTypeRefs: number;
       incomingImports: number;
       outgoingCalls: number;
-    }[];
+      fileIncomingUsages: number;
+    }[] = [];
+    for (let offset = 0; ; offset += chunkSize) {
+      const batch = stmt.all(...params, chunkSize, offset) as {
+        symbolId: string;
+        name: string;
+        kind: string;
+        filePath: string;
+        line: number;
+        signature: string | null;
+        language: string | null;
+        incomingCalls: number;
+        incomingTypeRefs: number;
+        incomingImports: number;
+        outgoingCalls: number;
+        fileIncomingUsages: number;
+      }[];
+      if (batch.length === 0) {
+        break;
+      }
+      rows.push(...batch);
+      if (batch.length < chunkSize) {
+        break;
+      }
+    }
 
     const bootstrapFileNames = [
       "Program.cs", "Startup.cs", "main.ts", "main.js", "index.ts", "index.js",
@@ -1101,11 +1145,89 @@ export class GraphStore {
       incomingImports: number;
       deadReason: string;
     }[] = [];
+    const suppressedReasons = new Map<string, number>();
+    const recordSuppressed = (reason: string) => {
+      suppressedReasons.set(reason, (suppressedReasons.get(reason) ?? 0) + 1);
+    };
 
     const utilityNamePattern = /^(to|from|get|set|map|parse|format|build|create|validate|convert|helper|util)/i;
     const entryNamePattern = /^(main|init|initialize|bootstrap|start|run|handle|on|process|execute|dispatch|trigger)/i;
+    const csharpUtilityClassNamePattern = /(extractor|helper|extensions|codec|composer|factory|builder|parser|formatter|normalizer|provider)$/i;
+    const csharpConstantContainerNamePattern = /(constants?|errorcodes|statuscodes|codes|types|keys|outcomes|reasons|roles|policies|claimtypes|headernames|items)$/i;
+    const csharpUtilityMethodNamePattern = /^(create|build|compose|format|normalize|parse|tryparse|failure|success|from|to)/i;
+    const csharpValidatorHelperMethodNamePattern = /^(be|have|is|can|should|must|tryparse|normalize|format|supports?)/i;
+
+    const fileContexts = new Map<string, {
+      hasValidatorClass: boolean;
+      hasInterfaceImplementationClass: boolean;
+      hasAttributeClass: boolean;
+      hasStaticUtilityClass: boolean;
+      hasServiceLikeClass: boolean;
+      isConstantContainerFile: boolean;
+    }>();
+
+    for (const row of rows) {
+      if ((row.language ?? "").toLowerCase() !== "csharp" || row.kind !== "class") {
+        continue;
+      }
+
+      const signatureLower = (row.signature ?? "").toLowerCase();
+      const fileContext = fileContexts.get(row.filePath) ?? {
+        hasValidatorClass: false,
+        hasInterfaceImplementationClass: false,
+        hasAttributeClass: false,
+        hasStaticUtilityClass: false,
+        hasServiceLikeClass: false,
+        isConstantContainerFile: false
+      };
+      const normalizedPath = row.filePath.replace(/\\/g, "/").toLowerCase();
+
+      if (
+        /validator$/i.test(row.name) ||
+        signatureLower.includes("abstractvalidator<") ||
+        signatureLower.includes("ivalidator<")
+      ) {
+        fileContext.hasValidatorClass = true;
+      }
+
+      if (
+        /(?:public|internal)(?:\s+(?:sealed|abstract|partial|static))*\s+class\s+/i.test(row.signature ?? "") &&
+        /\s:\s*i[a-z]/.test(signatureLower) &&
+        !/\s:\s*attribute\b/.test(signatureLower)
+      ) {
+        fileContext.hasInterfaceImplementationClass = true;
+      }
+
+      if (/attribute$/i.test(row.name) || /\s:\s*attribute\b/.test(signatureLower)) {
+        fileContext.hasAttributeClass = true;
+      }
+
+      if (
+        /(public|internal|file) static class /i.test(row.signature ?? "") &&
+        (
+          csharpUtilityClassNamePattern.test(row.name) ||
+          csharpConstantContainerNamePattern.test(row.name)
+        )
+      ) {
+        fileContext.hasStaticUtilityClass = true;
+      }
+
+      if (
+        /(service|resolver|worker)$/i.test(row.name) ||
+        /:\s*backgroundservice\b/.test(signatureLower)
+      ) {
+        fileContext.hasServiceLikeClass = true;
+      }
+
+      if (normalizedPath.includes("/constants/")) {
+        fileContext.isConstantContainerFile = true;
+      }
+
+      fileContexts.set(row.filePath, fileContext);
+    }
 
     const isLikelyEntryPoint = (row: {
+      kind: string;
       name: string;
       filePath: string;
       signature: string | null;
@@ -1124,6 +1246,14 @@ export class GraphStore {
       const normalizedPath = row.filePath.replace(/\\/g, "/").toLowerCase();
       const signatureLower = (row.signature ?? "").toLowerCase();
       const name = row.name;
+      const fileContext = fileContexts.get(row.filePath) ?? {
+        hasValidatorClass: false,
+        hasInterfaceImplementationClass: false,
+        hasAttributeClass: false,
+        hasStaticUtilityClass: false,
+        hasServiceLikeClass: false,
+        isConstantContainerFile: false
+      };
 
       const hasEntryName = entryNamePattern.test(name);
       const hasUtilityName = utilityNamePattern.test(name);
@@ -1150,14 +1280,282 @@ export class GraphStore {
       return score >= 2 && (hasEntryName || inEntryPath);
     };
 
+    const getCSharpSuppressionReason = (row: {
+      kind: string;
+      name: string;
+      filePath: string;
+      signature: string | null;
+      language: string | null;
+      outgoingCalls: number;
+      fileIncomingUsages: number;
+    }): string | null => {
+      if ((row.language ?? "").toLowerCase() !== "csharp") {
+        return null;
+      }
+
+      const normalizedPath = row.filePath.replace(/\\/g, "/").toLowerCase();
+      const signatureLower = (row.signature ?? "").toLowerCase();
+      const name = row.name;
+      const fileContext = fileContexts.get(row.filePath) ?? {
+        hasValidatorClass: false,
+        hasInterfaceImplementationClass: false,
+        hasAttributeClass: false,
+        hasStaticUtilityClass: false,
+        hasServiceLikeClass: false,
+        isConstantContainerFile: false
+      };
+
+      const isExtensionMethod =
+        row.kind === "method" && /\(\s*this\s+/i.test(row.signature ?? "");
+      if (isExtensionMethod) {
+        return "heuristic_runtime_or_convention_usage";
+      }
+
+      const isMigrationOrDesignerArtifact =
+        normalizedPath.includes("/migrations/") ||
+        normalizedPath.endsWith(".designer.cs");
+      if (isMigrationOrDesignerArtifact) {
+        return "heuristic_runtime_or_convention_usage";
+      }
+
+      const isValidatorClass =
+        row.kind === "class" && (
+          normalizedPath.includes("/validators/") ||
+          /validator$/i.test(name) ||
+          signatureLower.includes("abstractvalidator<") ||
+          signatureLower.includes("ivalidator<")
+        );
+      if (isValidatorClass) {
+        return "heuristic_runtime_or_convention_usage";
+      }
+
+      const isValidatorHelperMethod =
+        row.kind === "method" &&
+        fileContext.hasValidatorClass &&
+        signatureLower.startsWith("private ") &&
+        csharpValidatorHelperMethodNamePattern.test(name);
+      if (isValidatorHelperMethod) {
+        return "heuristic_runtime_or_convention_usage";
+      }
+
+      const fileName = normalizedPath.split("/").pop() ?? "";
+      const isInterfaceContractMethod =
+        row.kind === "method" && (
+          normalizedPath.includes("/interfaces/") ||
+          normalizedPath.includes("/contracts/") ||
+          normalizedPath.includes("/abstractions/") ||
+          /^i[a-z].*\.cs$/.test(fileName)
+        );
+      if (isInterfaceContractMethod) {
+        return "heuristic_contract_declaration";
+      }
+
+      const isAbstractContractMethod =
+        row.kind === "method" && (
+          signatureLower.startsWith("public abstract ") ||
+          signatureLower.startsWith("protected abstract ") ||
+          /abstractions?\.cs$/.test(fileName)
+        );
+      if (isAbstractContractMethod) {
+        return "heuristic_contract_declaration";
+      }
+
+      const isInterfaceImplementationClass =
+        row.kind === "class" &&
+        fileContext.hasInterfaceImplementationClass &&
+        /(?:public|internal)(?:\s+(?:sealed|abstract|partial|static))*\s+class\s+/i.test(row.signature ?? "");
+      if (isInterfaceImplementationClass) {
+        return "heuristic_runtime_or_convention_usage";
+      }
+
+      const isInterfaceImplementationMethod =
+        row.kind === "method" &&
+        fileContext.hasInterfaceImplementationClass &&
+        signatureLower.startsWith("public ") &&
+        !signatureLower.includes(" static ");
+      if (isInterfaceImplementationMethod) {
+        return "heuristic_runtime_or_convention_usage";
+      }
+
+      const isReflectionTargetInInterfaceImplementationFile =
+        row.kind === "method" &&
+        fileContext.hasInterfaceImplementationClass &&
+        signatureLower.startsWith("private ") &&
+        /(internal|handle|resolve|publish|send|map|serialize|execute|observe)/i.test(name);
+      if (isReflectionTargetInInterfaceImplementationFile) {
+        return "heuristic_runtime_or_convention_usage";
+      }
+
+      const isAttributeClass =
+        row.kind === "class" &&
+        fileContext.hasAttributeClass &&
+        (/attribute$/i.test(name) || /\s:\s*attribute\b/.test(signatureLower));
+      if (isAttributeClass) {
+        return "heuristic_runtime_or_convention_usage";
+      }
+
+      const isServiceLikeClass =
+        row.kind === "class" &&
+        fileContext.hasServiceLikeClass &&
+        /(service|resolver|worker)$/i.test(name);
+      if (isServiceLikeClass) {
+        return "heuristic_runtime_or_convention_usage";
+      }
+
+      const isFrameworkRegisteredClass =
+        row.kind === "class" &&
+        (
+          /(interceptor|authorizationhandler|initiali[sz]er|hostoptions|options)$/i.test(name) ||
+          normalizedPath.includes("/interceptors/")
+        );
+      if (isFrameworkRegisteredClass) {
+        return "heuristic_runtime_or_convention_usage";
+      }
+
+      const isServiceLikeMethod =
+        row.kind === "method" &&
+        fileContext.hasServiceLikeClass &&
+        (
+          signatureLower.startsWith("public ") ||
+          signatureLower.startsWith("protected override ") ||
+          signatureLower.startsWith("private ")
+        ) &&
+        /(apply|get|resolve|execute|purge|map|serialize|handle|send|publish)/i.test(name);
+      if (isServiceLikeMethod) {
+        return "heuristic_runtime_or_convention_usage";
+      }
+
+      const isFrameworkRegisteredMethod =
+        row.kind === "method" &&
+        (
+          /(interceptor|authorizationhandler|initiali[sz]er|hostoptions|options)/i.test(fileName) ||
+          normalizedPath.includes("/interceptors/")
+        );
+      if (isFrameworkRegisteredMethod) {
+        return "heuristic_runtime_or_convention_usage";
+      }
+
+      // Minimal API endpoints, middleware, and OpenAPI transformers are
+      // registered via convention/framework and never have direct inbound call edges.
+      const isMinimalApiEndpointMethod =
+        row.kind === "method" &&
+        (
+          normalizedPath.includes("/endpoints/") ||
+          normalizedPath.includes("/middleware/")
+        );
+      if (isMinimalApiEndpointMethod) {
+        return "heuristic_runtime_or_convention_usage";
+      }
+
+      const isMinimalApiEndpointClass =
+        row.kind === "class" &&
+        (
+          normalizedPath.includes("/endpoints/") ||
+          normalizedPath.includes("/middleware/") ||
+          /(middleware|transformer|operationtransformer)$/i.test(name)
+        );
+      if (isMinimalApiEndpointClass) {
+        return "heuristic_runtime_or_convention_usage";
+      }
+
+      const isRegistrationExtensionsClass =
+        row.kind === "class" &&
+        (/extensions$/i.test(name) || name === "DependencyInjection") &&
+        signatureLower.startsWith("public static class ");
+      if (isRegistrationExtensionsClass) {
+        return "heuristic_runtime_or_convention_usage";
+      }
+
+      const isInternalStaticHelperContainerClass =
+        row.kind === "class" &&
+        signatureLower.includes("static class") &&
+        (
+          signatureLower.startsWith("public static class ") ||
+          signatureLower.startsWith("internal static class ") ||
+          signatureLower.startsWith("file static class ")
+        ) &&
+        (
+          normalizedPath.includes("/extensions/") ||
+          normalizedPath.includes("/helpers/") ||
+          /(extractor|helper|extensions|codec|composer)$/i.test(name)
+        );
+      if (isInternalStaticHelperContainerClass) {
+        return "heuristic_helper_container";
+      }
+
+      const isConstantContainerClass =
+        row.kind === "class" &&
+        (
+          csharpConstantContainerNamePattern.test(name) ||
+          fileContext.isConstantContainerFile
+        ) &&
+        signatureLower.includes("class ");
+
+      if (isConstantContainerClass) {
+        return "heuristic_runtime_or_convention_usage";
+      }
+
+      const isConstantContainerMethod =
+        row.kind === "method" &&
+        fileContext.isConstantContainerFile &&
+        signatureLower.includes("static ");
+      if (isConstantContainerMethod) {
+        return "heuristic_runtime_or_convention_usage";
+      }
+
+      const isPublicStaticUtilityContainerClass =
+        row.kind === "class" &&
+        fileContext.hasStaticUtilityClass &&
+        signatureLower.includes("static class") &&
+        csharpUtilityClassNamePattern.test(name);
+      if (isPublicStaticUtilityContainerClass) {
+        return "heuristic_helper_container";
+      }
+
+      const isPublicStaticUtilityMethod =
+        row.kind === "method" &&
+        signatureLower.startsWith("public static ") &&
+        csharpUtilityMethodNamePattern.test(name) &&
+        (
+          fileContext.hasStaticUtilityClass ||
+          normalizedPath.includes("/common/") ||
+          normalizedPath.includes("/models/")
+        );
+      if (isPublicStaticUtilityMethod) {
+        return "heuristic_runtime_or_convention_usage";
+      }
+
+      const isPrivateStaticFactoryHelperMethod =
+        row.kind === "method" &&
+        row.outgoingCalls > 0 &&
+        signatureLower.startsWith("private static ") &&
+        /^(create|build|compose|resolve|map|convert|deserialize)/i.test(name) &&
+        (
+          /<t>/i.test(row.signature ?? "") ||
+          signatureLower.includes("result<") ||
+          signatureLower.includes("task<") ||
+          /failure|factory|builder/i.test(name)
+        );
+
+      return isPrivateStaticFactoryHelperMethod ? "heuristic_runtime_or_convention_usage" : null;
+    };
+
     for (const row of rows) {
       const normalizedPath = row.filePath.replace(/\\/g, "/");
       const isBootstrap = bootstrapFileNames.some((f) => normalizedPath.endsWith(`/${f}`) || normalizedPath === f);
       if (isBootstrap) {
+        recordSuppressed("bootstrap_file");
         continue;
       }
 
       if (isLikelyEntryPoint(row)) {
+        recordSuppressed("heuristic_entry_point");
+        continue;
+      }
+
+      const csharpSuppressionReason = getCSharpSuppressionReason(row);
+      if (csharpSuppressionReason) {
+        recordSuppressed(csharpSuppressionReason);
         continue;
       }
 
@@ -1175,7 +1573,17 @@ export class GraphStore {
       }
     }
 
-    return results;
+    return {
+      candidates: results,
+      suppressed: {
+        total: [...suppressedReasons.values()].reduce((sum, count) => sum + count, 0),
+        reasons: Object.fromEntries([...suppressedReasons.entries()].sort((a, b) => a[0].localeCompare(b[0])))
+      },
+      scanPolicy: {
+        mode: "skip_low_confidence",
+        note: "Suppressed symbols are excluded from dead-code candidates because they match low-confidence runtime/convention heuristics; exclusion does not prove the symbol is live."
+      }
+    };
   }
 
   detectCircularDependencies(

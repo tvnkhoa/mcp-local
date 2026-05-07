@@ -1278,7 +1278,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       case "dead_code_scan": {
         const args = deadCodeScanSchema.parse(request.params.arguments ?? {});
         const profile = resolveResponseProfile(args.profile);
-        const rows = store.getDeadCodeCandidates(
+        const scan = store.getDeadCodeCandidates(
           args.repoId,
           args.filePathPrefix ?? null,
           args.language ?? null,
@@ -1286,16 +1286,26 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           args.includePrivate,
           args.limit
         );
+        const rows = scan.candidates;
 
         if (profile === "nano") {
           const topSymbols = rows.slice(0, 10).map((x) => ({ name: x.name, kind: x.kind, filePath: x.filePath, line: x.line }));
-          return asText({ repoId: args.repoId, count: rows.length, topSymbols, hasMore: rows.length > topSymbols.length }, profile);
+          return asText({
+            repoId: args.repoId,
+            count: rows.length,
+            topSymbols,
+            hasMore: rows.length > topSymbols.length,
+            suppressed: scan.suppressed,
+            scanPolicy: scan.scanPolicy
+          }, profile);
         }
 
         if (profile === "compact") {
           return asText({
             repoId: args.repoId,
             count: rows.length,
+            suppressed: scan.suppressed,
+            scanPolicy: scan.scanPolicy,
             symbols: rows.map((x) => ({
               symbolId: x.symbolId,
               name: x.name,
@@ -1307,7 +1317,13 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           }, profile);
         }
 
-        return asText({ repoId: args.repoId, count: rows.length, symbols: rows }, profile);
+        return asText({
+          repoId: args.repoId,
+          count: rows.length,
+          suppressed: scan.suppressed,
+          scanPolicy: scan.scanPolicy,
+          symbols: rows
+        }, profile);
       }
       case "detect_circular_dependencies": {
         const args = detectCircularDependenciesSchema.parse(request.params.arguments ?? {});
