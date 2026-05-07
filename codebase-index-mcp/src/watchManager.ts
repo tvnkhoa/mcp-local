@@ -6,6 +6,14 @@ import type { RepoWatchStatus, WatchConfig } from "./types.js";
 
 type RunIndexer = (repoId: string, repoPath: string, config: WatchConfig) => Promise<void>;
 type PruneDeleted = (repoId: string, deletedRelativePaths: string[]) => number;
+type WatchActivityMode = "changed" | "deleted";
+type WatchActivity = {
+  repoId: string;
+  repoPath: string;
+  relativePath: string;
+  mode: WatchActivityMode;
+};
+type OnWatchActivity = (activity: WatchActivity) => void;
 
 type RepoWatchState = {
   watcher: FSWatcher;
@@ -21,12 +29,14 @@ export class WatchManager {
   private readonly config: WatchConfig;
   private readonly runIndexer: RunIndexer;
   private readonly pruneDeleted: PruneDeleted;
+  private readonly onActivity?: OnWatchActivity;
   private readonly states = new Map<string, RepoWatchState>();
 
-  constructor(config: WatchConfig, runIndexer: RunIndexer, pruneDeleted: PruneDeleted) {
+  constructor(config: WatchConfig, runIndexer: RunIndexer, pruneDeleted: PruneDeleted, onActivity?: OnWatchActivity) {
     this.config = config;
     this.runIndexer = runIndexer;
     this.pruneDeleted = pruneDeleted;
+    this.onActivity = onActivity;
   }
 
   start(repoId: string, repoPath: string): { started: boolean; message: string } {
@@ -155,6 +165,7 @@ export class WatchManager {
 
     state.status.queuedChanged = state.changed.size;
     state.status.queuedDeleted = state.deleted.size;
+    this.onActivity?.({ repoId, repoPath, relativePath, mode });
     this.scheduleFlush(repoId, repoPath);
   }
 

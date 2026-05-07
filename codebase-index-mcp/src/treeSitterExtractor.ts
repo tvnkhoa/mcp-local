@@ -330,6 +330,7 @@ function resolveIntraFileEdges(edges: EdgeRecord[], symbols: SymbolRecord[]): Ed
   const callTargetByName = new Map<string, SymbolRecord>();
   const typeTargetByName = new Map<string, SymbolRecord>();
   const interfaceByName = new Map<string, SymbolRecord>();
+  const propertyTargetByName = new Map<string, SymbolRecord>();
 
   for (const symbol of symbols) {
     if ((symbol.kind === "function" || symbol.kind === "method" || symbol.kind === "constructor" || symbol.kind === "class") && !callTargetByName.has(symbol.name)) {
@@ -340,6 +341,9 @@ function resolveIntraFileEdges(edges: EdgeRecord[], symbols: SymbolRecord[]): Ed
     }
     if (symbol.kind === "interface" && !interfaceByName.has(symbol.name)) {
       interfaceByName.set(symbol.name, symbol);
+    }
+    if (symbol.kind === "property" && !propertyTargetByName.has(symbol.name)) {
+      propertyTargetByName.set(symbol.name, symbol);
     }
   }
 
@@ -380,6 +384,20 @@ function resolveIntraFileEdges(edges: EdgeRecord[], symbols: SymbolRecord[]): Ed
           toId: target.symbolId,
           confidence: edge.confidence ?? 0.95,
           reason: edge.reason ?? "resolved interface same-file"
+        };
+      }
+    }
+
+    if ((edge.type === "PROPERTY_REF" || edge.type === "PROPERTY_WRITE") && edge.toId.startsWith("property:")) {
+      const token = edge.toId.slice("property:".length);
+      const memberName = token.split(".").pop() ?? token;
+      const target = propertyTargetByName.get(memberName);
+      if (target) {
+        return {
+          ...edge,
+          toId: target.symbolId,
+          confidence: edge.confidence ?? 0.85,
+          reason: edge.reason ?? "resolved property same-file"
         };
       }
     }
@@ -434,6 +452,9 @@ function getEffectiveEdgeConfidence(edge: EdgeRecord): number {
   if (edge.toId.startsWith("type:")) {
     return 0.45;
   }
+  if (edge.toId.startsWith("property:")) {
+    return 0.5;
+  }
 
   if (edge.type === "CALLS") {
     return 1.0;
@@ -443,6 +464,12 @@ function getEffectiveEdgeConfidence(edge: EdgeRecord): number {
   }
   if (edge.type === "TYPE_REF") {
     return 0.9;
+  }
+  if (edge.type === "PROPERTY_REF") {
+    return 0.85;
+  }
+  if (edge.type === "PROPERTY_WRITE") {
+    return 0.82;
   }
 
   return 1.0;
@@ -852,8 +879,94 @@ function emitTypeRefEdge(
   });
 }
 
-function collectCSharpLocalTypeMap(scopeNode: Parser.SyntaxNode): Map<string, string> {
-  const localTypes = new Map<string, string>();
+function emitPropertyAccessEdge(
+  input: ExtractInput,
+  edges: EdgeRecord[],
+  fromId: string,
+  rawTypeName: string,
+  rawMemberName: string,
+  edgeType: "PROPERTY_REF" | "PROPERTY_WRITE",
+  confidence: number
+): void {
+  const normalizedType = normalizeCSharpTypeName(rawTypeName);
+  const memberName = rawMemberName.trim();
+  if (!normalizedType || !memberName) {
+    return;
+  }
+
+  edges.push({
+    repoId: input.repoId,
+    fromId,
+    toId: `property:${normalizedType}.${memberName}`,
+    type: edgeType,
+    confidence,
+    reason: "unresolved property token"
+  });
+}
+
+function findEnclosingCSharpTypeName(node: Parser.SyntaxNode): string | undefined {
+  let current: Parser.SyntaxNode | null = node;
+  while (current) {
+    if (current.type === "class_declaration" || current.type === "record_declaration" || current.type === "struct_declaration") {
+      const nameNode = current.childForFieldName("name");
+      if (nameNode?.text) {
+        return nameNode.text;
+      }
+    }
+    current = current.parent;
+  }
+  return undefined;
+}
+
+function collectCSharpEnclosingMemberTypeMap(scopeNode: Parser.SyntaxNode): Map<string, string> {
+  const memberTypes = new Map<string, string>();
+  let current: Parser.SyntaxNode | null = scopeNode;
+  while (current) {
+    if (current.type === "class_declaration" || current.type === "record_declaration" || current.type === "struct_declaration") {
+      for (const propertyNode of current.descendantsOfType(["property_declaration"])) {
+        const nameNode = propertyNode.childForFieldName("name");
+        const typeNode = propertyNode.childForFieldName("type");
+        if (nameNode?.text && typeNode?.text && !memberTypes.has(nameNode.text)) {
+          memberTypes.set(nameNode.text, typeNode.text);
+        }
+      }
+
+      for (const fieldNode of current.descendantsOfType(["field_declaration"])) {
+        const varDecl = fieldNode.children.find((c) => c.type === "variable_declaration");
+        if (!varDecl) {
+          continue;
+        }
+        const typeNode = varDecl?.childForFieldName("type");
+        if (!typeNode?.text) {
+          continue;
+        }
+
+        for (const declarator of varDecl.descendantsOfType(["variable_declarator"])) {
+          const nameNode = declarator.childForFieldName("name");
+          if (nameNode?.text && !memberTypes.has(nameNode.text)) {
+            memberTypes.set(nameNode.text, typeNode.text);
+          }
+        }
+      }
+
+      break;
+    }
+    current = current.parent;
+  }
+
+  return memberTypes;
+}
+
+function collectCSharpScopeTypeMap(scopeNode: Parser.SyntaxNode): Map<string, string> {
+  const scopeTypes = collectCSharpEnclosingMemberTypeMap(scopeNode);
+
+  for (const parameterNode of scopeNode.descendantsOfType(["parameter"])) {
+    const nameNode = parameterNode.childForFieldName("name");
+    const typeNode = parameterNode.childForFieldName("type");
+    if (nameNode?.text && typeNode?.text) {
+      scopeTypes.set(nameNode.text, typeNode.text);
+    }
+  }
 
   for (const node of scopeNode.descendantsOfType(["local_declaration_statement"])) {
     const varDecl = node.children.find((c) => c.type === "variable_declaration");
@@ -865,12 +978,12 @@ function collectCSharpLocalTypeMap(scopeNode: Parser.SyntaxNode): Map<string, st
     for (const declarator of varDecl.descendantsOfType(["variable_declarator"])) {
       const nameNode = declarator.childForFieldName("name");
       if (nameNode?.text) {
-        localTypes.set(nameNode.text, typeNode.text);
+        scopeTypes.set(nameNode.text, typeNode.text);
       }
     }
   }
 
-  return localTypes;
+  return scopeTypes;
 }
 
 function extractCSharpSymbols(
@@ -961,24 +1074,64 @@ function extractCSharpSymbols(
     }
   }
 
-  // Conservative member-access type propagation.
-  // Emits TYPE_REF when receiver variable has an explicit local type annotation.
+  // Conservative member-access propagation.
+  // Emits TYPE_REF and property access edges when receiver type is deterministic.
   for (const scopeNode of root.descendantsOfType(["method_declaration", "constructor_declaration", "accessor_declaration"])) {
     const fromId = findEnclosingCSharpSymbolId(scopeNode, input) ?? moduleSymbolId;
-    const localTypes = collectCSharpLocalTypeMap(scopeNode);
-    if (localTypes.size === 0) {
-      continue;
-    }
+    const scopeTypes = collectCSharpScopeTypeMap(scopeNode);
+    const enclosingTypeName = findEnclosingCSharpTypeName(scopeNode);
+    const writeAccessKeys = new Set<string>();
 
-    for (const accessNode of scopeNode.descendantsOfType(["member_access_expression"])) {
-      const receiverNode = accessNode.childForFieldName("expression");
-      if (!receiverNode || receiverNode.type !== "identifier") {
+    for (const assignmentNode of scopeNode.descendantsOfType(["assignment_expression"])) {
+      const leftNode = assignmentNode.childForFieldName("left") ?? assignmentNode.children[0];
+      if (!leftNode || leftNode.type !== "member_access_expression") {
         continue;
       }
 
-      const receiverType = localTypes.get(receiverNode.text);
+      const receiverNode = leftNode.childForFieldName("expression");
+      const memberNode = leftNode.childForFieldName("name");
+      if (!receiverNode || !memberNode || receiverNode.type !== "identifier") {
+        continue;
+      }
+
+      const receiverText = receiverNode.text;
+      const receiverType = receiverText === "this" || receiverText === "base"
+        ? enclosingTypeName
+        : scopeTypes.get(receiverText);
+      if (!receiverType) {
+        continue;
+      }
+
+      emitTypeRefEdge(input, edges, fromId, receiverType);
+      emitPropertyAccessEdge(input, edges, fromId, receiverType, memberNode.text, "PROPERTY_WRITE", 0.8);
+      const key = `${leftNode.startPosition.row}:${leftNode.startPosition.column}:${leftNode.endPosition.row}:${leftNode.endPosition.column}`;
+      writeAccessKeys.add(key);
+    }
+
+    for (const accessNode of scopeNode.descendantsOfType(["member_access_expression"])) {
+      if (accessNode.parent?.type === "invocation_expression") {
+        continue;
+      }
+
+      const accessKey = `${accessNode.startPosition.row}:${accessNode.startPosition.column}:${accessNode.endPosition.row}:${accessNode.endPosition.column}`;
+      if (writeAccessKeys.has(accessKey)) {
+        continue;
+      }
+
+      const receiverNode = accessNode.childForFieldName("expression");
+      const memberNode = accessNode.childForFieldName("name");
+      if (!receiverNode || !memberNode || receiverNode.type !== "identifier") {
+        continue;
+      }
+
+      const receiverText = receiverNode.text;
+      const receiverType = receiverText === "this" || receiverText === "base"
+        ? enclosingTypeName
+        : scopeTypes.get(receiverText);
       if (receiverType) {
         emitTypeRefEdge(input, edges, fromId, receiverType);
+        const confidence = receiverText === "this" || receiverText === "base" ? 0.85 : 0.82;
+        emitPropertyAccessEdge(input, edges, fromId, receiverType, memberNode.text, "PROPERTY_REF", confidence);
       }
     }
   }

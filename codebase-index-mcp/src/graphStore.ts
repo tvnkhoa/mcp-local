@@ -165,6 +165,9 @@ export class GraphStore {
     if (edge.toId.startsWith("type:")) {
       return { confidence: 0.45, reason: "unresolved type token" };
     }
+    if (edge.toId.startsWith("property:")) {
+      return { confidence: 0.5, reason: "unresolved property token" };
+    }
 
     if (edge.type === "CALLS") {
       return { confidence: 1.0, reason: "resolved call edge" };
@@ -174,6 +177,12 @@ export class GraphStore {
     }
     if (edge.type === "TYPE_REF") {
       return { confidence: 0.9, reason: "resolved type reference" };
+    }
+    if (edge.type === "PROPERTY_REF") {
+      return { confidence: 0.85, reason: "resolved property read" };
+    }
+    if (edge.type === "PROPERTY_WRITE") {
+      return { confidence: 0.82, reason: "resolved property write" };
     }
 
     return { confidence: 1.0, reason: "direct edge" };
@@ -2591,6 +2600,94 @@ export class GraphStore {
     return count;
   }
 
+  resolvePropertyEdges(repoId: string, maxUnresolvedRows = 0): number {
+    const unresolvedSql = `
+      select distinct e.from_id as fromId, e.to_id as toId, s.file_path as fromFile, e.type as edgeType
+      from edges e
+      inner join symbols s on s.repo_id = e.repo_id and s.symbol_id = e.from_id
+      where e.repo_id = ? and e.type in ('PROPERTY_REF', 'PROPERTY_WRITE') and e.to_id like 'property:%'
+      ${maxUnresolvedRows > 0 ? "limit ?" : ""}
+    `;
+    const unresolved = this.db
+      .prepare(unresolvedSql)
+      .all(...(maxUnresolvedRows > 0 ? [repoId, maxUnresolvedRows] : [repoId])) as {
+      fromId: string;
+      toId: string;
+      fromFile: string;
+      edgeType: "PROPERTY_REF" | "PROPERTY_WRITE";
+    }[];
+
+    if (unresolved.length === 0) return 0;
+
+    const updateStmt = this.db.prepare(
+      `update edges set to_id = ?, confidence = ?, reason = ? where repo_id = ? and from_id = ? and to_id = ? and type = ?`
+    );
+
+    const propertyCandidates = this.buildNamedCandidateMap(repoId, ["property"]);
+    const typeRows = this.db
+      .prepare(
+        `
+        select name, file_path as filePath
+        from symbols
+        where repo_id = ? and kind in ('class', 'interface', 'struct', 'type')
+        `
+      )
+      .all(repoId) as { name: string; filePath: string }[];
+
+    const typeFilesByName = new Map<string, Set<string>>();
+    for (const row of typeRows) {
+      const list = typeFilesByName.get(row.name) ?? new Set<string>();
+      list.add(row.filePath);
+      typeFilesByName.set(row.name, list);
+    }
+
+    let count = 0;
+    const tx = this.db.transaction(() => {
+      for (const row of unresolved) {
+        const token = row.toId.slice("property:".length);
+        const memberName = token.split(".").pop() ?? "";
+        if (!memberName) {
+          continue;
+        }
+
+        const rawTypeName = token.slice(0, Math.max(0, token.length - memberName.length - 1));
+        const typeName = rawTypeName.split(".").pop() ?? rawTypeName;
+        const namedCandidates = propertyCandidates.get(memberName) ?? [];
+        if (namedCandidates.length === 0) {
+          continue;
+        }
+
+        const constrainedCandidates = (() => {
+          if (!typeName) {
+            return namedCandidates;
+          }
+          const files = typeFilesByName.get(typeName);
+          if (!files || files.size === 0) {
+            return namedCandidates;
+          }
+          const filtered = namedCandidates.filter((candidate) => files.has(candidate.filePath));
+          return filtered.length > 0 ? filtered : namedCandidates;
+        })();
+
+        const match = this.pickBestNamedCandidate(constrainedCandidates, row.fromFile, ["property"]);
+        if (!match) {
+          continue;
+        }
+
+        const sameFile = match.filePath === row.fromFile;
+        const confidence = row.edgeType === "PROPERTY_WRITE"
+          ? (sameFile ? 0.84 : 0.72)
+          : (sameFile ? 0.88 : 0.75);
+        const reason = sameFile ? "resolved property same-file" : "resolved property by name";
+        updateStmt.run(match.symbolId, confidence, reason, repoId, row.fromId, row.toId, row.edgeType);
+        count += 1;
+      }
+    });
+    tx();
+
+    return count;
+  }
+
   getImpactSurface(repoId: string, filePath: string, limit: number): {
     callers: {
       callerName: string;
@@ -2872,8 +2969,33 @@ export class GraphStore {
     const callers: (ResolvedEdge & { distance: number })[] = [];
     const visitedCallers = new Set<string>([symbolId]);
     let frontier = [symbolId];
+    const declaringType = symbol.kind === "property"
+      ? (this.db
+          .prepare(
+            `
+            select name
+            from symbols
+            where repo_id = ? and file_path = ? and kind in ('class', 'struct') and line < ?
+            order by line desc
+            limit 1
+            `
+          )
+          .get(repoId, symbol.filePath, symbol.line) as { name: string } | undefined)
+      : undefined;
+    const propertyTokenFallback = symbol.kind === "property" && declaringType?.name
+      ? `property:${declaringType.name}.${symbol.name}`
+      : null;
+    const initialCallerEdgeTypes = symbol.kind === "property"
+      ? ["CALLS", "PROPERTY_REF", "PROPERTY_WRITE"]
+      : ["CALLS"];
     for (let depth = 1; depth <= callerDepth && frontier.length > 0 && callers.length < limit; depth++) {
       const ph = frontier.map(() => "?").join(",");
+      const callerEdgeTypes = depth === 1 ? initialCallerEdgeTypes : ["CALLS"];
+      const edgeTypePh = callerEdgeTypes.map(() => "?").join(",");
+      const includePropertyFallback = depth === 1 && propertyTokenFallback !== null;
+      const fallbackClause = includePropertyFallback
+        ? "or (e.type in ('PROPERTY_REF', 'PROPERTY_WRITE') and e.to_id = ?)"
+        : "";
       const rows = this.db
         .prepare(
           `
@@ -2883,11 +3005,20 @@ export class GraphStore {
           from edges e
           left join symbols sf on sf.repo_id = e.repo_id and sf.symbol_id = e.from_id
           left join symbols st on st.repo_id = e.repo_id and st.symbol_id = e.to_id
-          where e.repo_id = ? and e.type = 'CALLS' and e.to_id in (${ph})
+          where e.repo_id = ?
+            and ((e.type in (${edgeTypePh}) and e.to_id in (${ph})) ${fallbackClause})
           limit ?
           `
         )
-        .all(repoId, ...frontier, limit - callers.length) as ResolvedEdge[];
+        .all(
+          ...[
+            repoId,
+            ...callerEdgeTypes,
+            ...frontier,
+            ...(includePropertyFallback && propertyTokenFallback ? [propertyTokenFallback] : []),
+            limit - callers.length
+          ]
+        ) as ResolvedEdge[];
 
       const nextFrontier: string[] = [];
       for (const row of rows) {
@@ -4040,16 +4171,22 @@ export class GraphStore {
           when to_id like 'callee:%' then 0.4
           when to_id like 'import:%' then 0.5
           when to_id like 'type:%' then 0.45
+          when to_id like 'property:%' then 0.5
           when type = 'IMPORTS' then 0.95
           when type = 'TYPE_REF' then 0.9
+          when type = 'PROPERTY_REF' then 0.85
+          when type = 'PROPERTY_WRITE' then 0.82
           else 1.0
         end,
         reason = case
           when to_id like 'callee:%' then 'unresolved callee token'
           when to_id like 'import:%' then 'unresolved import token'
           when to_id like 'type:%' then 'unresolved type token'
+          when to_id like 'property:%' then 'unresolved property token'
           when type = 'IMPORTS' then 'resolved import edge'
           when type = 'TYPE_REF' then 'resolved type reference'
+          when type = 'PROPERTY_REF' then 'resolved property read'
+          when type = 'PROPERTY_WRITE' then 'resolved property write'
           when type = 'CALLS' then 'resolved call edge'
           else coalesce(reason, 'direct edge')
         end

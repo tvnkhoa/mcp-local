@@ -50,7 +50,7 @@ export async function runIndexPipeline(store: GraphStore, input: RunIndexInput):
   const runId = randomUUID();
   const startedAt = new Date().toISOString();
   const started = Date.now();
-  const indexVersion = "v1-tree-sitter";
+  const indexVersion = "v1-tree-sitter-property-edges";
   const commitSha = resolveCommitSha(input.repoPath);
 
   store.ensureRepository(input.repoId, input.repoPath);

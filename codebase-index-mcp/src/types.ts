@@ -108,7 +108,7 @@ export type EdgeRecord = {
   repoId: string;
   fromId: string;
   toId: string;
-  type: "IMPORTS" | "CALLS" | "DEPENDS_ON" | "IMPLEMENTS" | "TYPE_REF";
+  type: "IMPORTS" | "CALLS" | "DEPENDS_ON" | "IMPLEMENTS" | "TYPE_REF" | "PROPERTY_REF" | "PROPERTY_WRITE";
   confidence?: number;
   reason?: string;
 };

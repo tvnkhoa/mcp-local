@@ -414,7 +414,12 @@ const watchManager = new WatchManager(
     assertPathAllowed(repoPath, allowedRoots);
     await runIndexAndResolve(repoId, repoPath, "incremental", DOCS_INDEXING_ENABLED, config.maxFilesPerRun, config.batchSize);
   },
-  (repoId, deletedRelativePaths) => store.pruneFiles(repoId, deletedRelativePaths)
+  (repoId, deletedRelativePaths) => store.pruneFiles(repoId, deletedRelativePaths),
+  ({ repoId }) => {
+    if (WATCH_ACTIVE_ONLY && activeWatchRepoId === repoId) {
+      armWatchInactivityTimer(repoId);
+    }
+  }
 );
 
 let activeWatchRepoId: string | null = null;
@@ -2608,6 +2613,14 @@ async function runIndexAndResolve(
   }
   await yieldToEventLoop();
 
+  if (postPolicy.resolveTypeRefs) {
+    process.stderr.write(`[index-post] repoId=${repoId} resolving property references...\n`);
+    (() => { try { store.resolvePropertyEdges(repoId, postPolicy.maxUnresolvedRows); } catch { /* non-fatal */ } })();
+  } else {
+    process.stderr.write(`[index-post-skip] repoId=${repoId} skipping property reference resolution by policy\n`);
+  }
+  await yieldToEventLoop();
+
   const shouldResolveImplementsInPost = effectiveResolveImplementsInPost;
   if (shouldResolveImplementsInPost) {
     process.stderr.write(`[index-post] repoId=${repoId} resolving interface implementations...\n`);
@@ -2664,7 +2677,7 @@ function evaluateIncrementalSkip(
       shouldSkip: false,
       reason: "no previous indexed commit",
       headCommitSha: null,
-      indexVersion: latestRun?.indexVersion ?? "v1-tree-sitter"
+      indexVersion: latestRun?.indexVersion ?? "v1-tree-sitter-property-edges"
     };
   }
 
