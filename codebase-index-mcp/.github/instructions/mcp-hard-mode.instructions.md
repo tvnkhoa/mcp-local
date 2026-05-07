@@ -5,11 +5,35 @@ applyTo: "**"
 ---
 # MCP Hard Mode (Workspace Level)
 
+This file is the single source of truth for MCP-first operating rules in this workspace.
+
+Enforcement posture:
+1. Use the default rules here for normal coding, analysis, and review sessions.
+2. For risky refactor, release, or incident-debug work, tighten behavior within this file's existing hard gates and fallback rules instead of switching to a separate profile document.
+3. Do not maintain parallel profile documents with duplicated policy content.
+
 ## Workspace Repo Profiles
 
-Primary target in this workspace:
+Primary targets in this workspace:
 
 1. `codebase-index-mcp`
+2. `postgres-mcp`
+
+Reference and benchmark target (optional):
+
+1. `wec.commnunication-hub`
+
+Recommended MCP target binding:
+
+1. `repoId=codebase-index-mcp`, `repoPath=D:/1.SourceCode/mcp-local/codebase-index-mcp`
+2. `repoId=mcp-local`, `repoPath=D:/1.SourceCode/mcp-local`
+3. `repoId=wec.commnunication-hub`, `repoPath=D:/1.SourceCode/crm/wec.commnunication-hub`
+
+Path normalization rule (critical):
+
+1. Before `index_repository`, run `list_repositories` and reuse the exact registered `repoPath` string for the target `repoId`.
+2. Do not manually rewrite drive-letter casing or slash style when submitting `repoPath`.
+3. If `index_repository` fails with allowed-root/path mismatch, rerun with the exact `repoPath` returned by `list_repositories`.
 
 Operational defaults (current implementation baseline):
 
@@ -18,6 +42,26 @@ Operational defaults (current implementation baseline):
 3. Watchless by default: `CODEBASE_INDEX_WATCH_AUTO_START=false` for normal operation.
 4. Incremental re-index may fast-skip when indexed commit equals `HEAD` and working tree is clean.
 5. `watch_repo` manual start is allowed for short debug sessions and should be stopped immediately after diagnostics.
+
+## Re-index Request Flow (Explicit User Ask)
+
+When user asks to re-index, run this flow:
+
+1. `health_check(repoId)`
+2. `list_repositories`
+3. `index_repository`
+   - use exact registered `repoPath`
+   - default: `mode: "full"`, `docsMode: "on"`
+4. `health_check(repoId)`
+   - confirm latest run status is `ok`
+
+Output minimums for re-index response:
+1. runId
+2. mode
+3. filesScanned/filesIndexed
+4. symbolsUpserted/edgesUpserted
+5. parseFailures
+6. fallback/error handling notes (if any)
 
 ## Watch Usage Playbook (Feature Lifecycle)
 
@@ -39,10 +83,26 @@ Anti-pattern (avoid):
 3. Starting watch without a clear implementation/debug objective for the current repo.
 4. Using watch as a substitute for explicit `index_repository` baseline checkpoints.
 
-Cross-repo naming convention for MCP calls:
+## MCP Naming Convention (Policy vs Runtime)
 
-1. `repoId=codebase-index-mcp`, `repoPath=d:/1.SourceCode/mcp-local/codebase-index-mcp`
-2. `repoId=wec.commnunication-hub`, `repoPath=d:/1.SourceCode/crm/wec.commnunication-hub`
+Policy in this file uses short aliases. Tool execution must use concrete runtime MCP names.
+
+1. Codebase index aliases:
+   - `health_check` -> `mcp_codebase-inde_health_check`
+   - `list_repositories` -> `mcp_codebase-inde_list_repositories`
+   - `index_repository` -> `mcp_codebase-inde_index_repository`
+   - `watch_repo` -> `mcp_codebase-inde_watch_repo`
+   - `search_symbols` -> `mcp_codebase-inde_search_symbols`
+   - `get_symbol_context_pack` -> `mcp_codebase-inde_get_symbol_context_pack`
+   - `find_impact_files` -> `mcp_codebase-inde_find_impact_files`
+   - `get_file_summary` -> `mcp_codebase-inde_get_file_summary`
+   - `get_file_context` -> `mcp_codebase-inde_get_file_context`
+   - `detect_changes` -> `mcp_codebase-inde_detect_changes`
+2. PostgreSQL aliases:
+   - `mcp_health_check` -> `mcp_postgres-mcp_health_check`
+   - `mcp_run_read_query` -> `mcp_postgres-mcp_run_read_query`
+
+Reference: execution playbooks live in `.github/skills/mcp-first-codebase-operations/SKILL.md`.
 
 ## Hard Rules
 1. For codebase analysis tasks, use MCP codebase-index tools first.
@@ -52,6 +112,20 @@ Cross-repo naming convention for MCP calls:
 5. For each user question, complete MCP discovery and impact steps before any code read, except when editing a file explicitly provided by the user.
 6. If fallback is used, issue logging is mandatory in the same turn before continuing deeper baseline exploration.
 7. For documentation-only change review, baseline review is allowed by default because MCP (no-LLM mode) is not reliable for semantic risk detection in docs.
+8. If previous turn had MCP-policy violation, next turn must start with explicit recovery: `health_check` -> required MCP-first flow for the new ask.
+9. Apply the correct flow by task type:
+   - Analysis/refactor/debug -> Enforcement Gates.
+   - Operational request (re-index/health/watch) -> Re-index Flow or Watch Usage.
+
+## Per-Turn Compliance Self-Check (Mandatory)
+
+Before any baseline tool call, verify and satisfy:
+1. Discovery gate already passed.
+2. Scope gate already passed.
+3. Confidence gate already passed, or fallback condition is explicitly met.
+4. If fallback is used, issue entry update is prepared in the same turn.
+5. No duplicate MCP query with equivalent intent beyond rewrite limit.
+6. Tool names in execution plan map to concrete MCP runtime names.
 
 ## Tool Selection Guide
 
@@ -59,33 +133,35 @@ Cross-repo naming convention for MCP calls:
 |--------|---------------|-------|
 | Bootstrap / entry points | `find_entry_points` | `kind: "route_handler"` for HTTP routes |
 | Orient new module | `get_folder_summary` | Returns per-file symbolCount/callerCount without reading |
-| Look up exact symbol name | `search_symbols` strategy `"name"` | Must use C# identifier token, NOT natural language |
-| Look up by token fragment | `search_symbols` strategy `"intent"` | Still identifier-like tokens; no Vietnamese prose |
+| Look up exact symbol name | `search_symbols` strategy `"name"` | Use source-level identifier token, not prose |
+| Look up by token fragment | `search_symbols` strategy `"intent"` | Keep query short and identifier-like |
 | Full context for one symbol | `get_symbol_context_pack` | Single call: candidates + callers + callees + change-context |
 | Callers/callees drill-down | `get_change_context` | Use `profile: "compact"`, callerDepth ≤ 2 |
-| Call chain traversal | `get_call_chain` | Must use METHOD-level symbolId, NOT class-level |
-| Execution sub-graph | `trace_execution_flow` | Must use METHOD-level symbolId; class-level returns empty |
+| Call chain traversal | `get_call_chain` | Must use callable symbolId (function/method), not container symbol |
+| Execution sub-graph | `trace_execution_flow` | Use callable symbolId from `search_symbols` or `find_symbol_at_line` |
 | Who uses this file | `find_impact_files` view `"files"` | Blast radius grouped by module |
 | What calls into this file | `find_impact_files` view `"surface"` | Caller surface per symbol |
 | File structure + exports | `get_file_summary` | Shows exports, imports, importedBy |
-| Dead public symbols | `dead_code_scan` | DI-registered classes appear "dead" — manual verify required |
+| Dead public symbols | `dead_code_scan` | Entry points wired by runtime/DI may appear dead; manual verify required |
 | Circular deps check | `detect_circular_dependencies` | Fast gate before implementing new dependency |
 | Test ↔ source mapping | `link_tests_to_source` | Use `minScore: 0.7` for reliable results |
 | Docs search | `query_docs` mode `"search"` | Full-text across indexed markdown/docs |
-| Stack trace line → symbolId | `find_symbol_at_line` | Accepts both `/` and `\`; resolves class/method/record declarations, not inner-block lines |
+| Stack trace line → symbolId | `find_symbol_at_line` | Best for declaration lines; inner-block lines may not resolve |
 | Multi-file symbol map | `get_file_context` | Use `filePaths` array (up to 50 files); profile=compact; richer than `get_file_summary` — returns all symbols + edges |
 | Cross-repo shared contracts | `get_cross_repo_impact` | direction: `"outbound"`/`"inbound"`; only useful when repos share interface/symbol names |
 | Pre-release risk triage | `detect_changes` | policy: `"quick-triage"`/`"strict-review"`/`"release-gate"`; sortBy: `"risk"`; compares working tree vs last indexed commit |
+| DB connectivity check | `mcp_health_check` | Fast validation before DB read query |
+| DB read validation | `mcp_run_read_query` | Read-only verification for Postgres tooling |
 
 ## Symbol Lookup Rules (Critical)
 
 `search_symbols` is **NOT a semantic search engine**. It is a token-based identifier matcher.
 
 Rules:
-1. Always use C# identifier tokens (PascalCase): `ProcessInboundMessageCommandHandler`, not `"handler for inbound message"`.
+1. Use exact identifier tokens from the target language/module: `indexRepository`, `detect_changes`, `SqlGuardrails`, not narrative prose.
 2. If you only have a business description (Vietnamese or English), extract the likely identifier token first via one of:
-   - A quick `grep_search` on `**/*.cs` to discover the exact class/method name.
-   - Infer from naming convention: `{Verb}{Noun}Command`, `{Noun}CommandHandler`, `{Entity}EventHandler`.
+   - A quick narrow `grep_search` on scoped source paths to discover exact symbol names.
+   - Infer from project naming convention (`verbNoun`, `PascalCase`, or known tool name).
 3. After finding the identifier, use `search_symbols` strategy `"name"` for exact match (score ≥ 0.9).
 4. Fall back to strategy `"intent"` only if `"name"` returns 0 results; rewrite with shorter token fragment.
 5. Max 2 rewrite attempts. If still empty, use `grep_search` as fallback and log issue.
@@ -95,6 +171,10 @@ No-LLM acceptance note:
 - Success criteria in no-LLM mode is: discover identifier token, then resolve correct symbol via `search_symbols` strategy `"name"`.
 
 ## Enforcement Gates (Hard)
+Applicability note:
+1. These gates are mandatory for code analysis/change-impact tasks.
+2. For explicit operational requests (`re-index`, `health_check`, `watch_repo`), use the dedicated operational flow instead of symbol-oriented gates.
+
 Baseline tools are blocked until ALL gates pass:
 1. Discovery gate:
    - Run at least one of: `find_entry_points` or `get_folder_summary`
@@ -107,6 +187,10 @@ Baseline tools are blocked until ALL gates pass:
    - If MCP evidence is sufficient, continue MCP-only or minimal decisive `read_file`
    - If MCP evidence is insufficient, fallback is allowed only under Fallback Conditions below
 
+Confidence interpretation standard:
+1. Consider MCP evidence low-confidence when confidence < 0.7 on critical impact links, or when only TYPE_REF exists where direct CALLS evidence is required.
+2. Prefer one additional focused MCP query before baseline fallback.
+
 ## Blocked Behaviors
 1. Starting with `grep_search`, `file_search`, or large `read_file` ranges before MCP gates complete.
 2. Using natural-language phrases as `search_symbols` query (will always return 0 results).
@@ -114,6 +198,8 @@ Baseline tools are blocked until ALL gates pass:
 4. Repeating equivalent MCP queries more than 2 rewrites for the same symbol intent.
 5. Collecting extra context after evidence is already sufficient.
 6. Performing fallback without creating/updating an issue entry.
+7. Repo-wide “safety scan” phrasing/actions are prohibited unless fallback conditions are met.
+8. After edits, do NOT broad-scan repository for remaining references. Use MCP impact narrowing first (`search_symbols` -> `get_symbol_context_pack` or `find_impact_files` -> targeted `get_file_summary`/`read_file`).
 
 ## Required MCP-First Flow
 
@@ -140,15 +226,15 @@ Baseline tools are blocked until ALL gates pass:
 
 ### Execution trace flow (understand how a method propagates)
 ```
-1. search_symbols (strategy: "name") → get METHOD-level symbolId
-2. trace_execution_flow (entrySymbolId: "<method symbolId>", maxDepth: 4)
-3. get_call_chain (symbolId: "<method symbolId>", direction: "callees")
+1. search_symbols (strategy: "name") → get callable symbolId
+2. trace_execution_flow (entrySymbolId: "<callable symbolId>", maxDepth: 4)
+3. get_call_chain (symbolId: "<callable symbolId>", direction: "callees")
 ```
 
 ### Stack trace debug flow (crash line → symbol → call graph)
 ```
-1. find_symbol_at_line (filePath: "path\\or/path/to/file.cs", line: <N>)
-   → get METHOD-level symbolId from the crash line
+1. find_symbol_at_line (filePath: "path\\or/path/to/file", line: <N>)
+   → get callable symbolId from the crash line
    NOTE: separator is normalized; forward and backslash should both resolve.
 2. trace_execution_flow (entrySymbolId: "<symbolId>", maxDepth: 3)
    → full execution sub-graph from the crash point
@@ -164,11 +250,10 @@ Baseline tools are blocked until ALL gates pass:
    - test A: filePath with forward slash
    - test B: filePath with backslash
    - PASS if both resolve the same symbolId
-3. route_map (limit: 50) and find_implementations for core interfaces
-   - IEndpointGroup
-   - IRequestContextAccessor
-   - ICrmQueueDispatcher
-   - PASS if each query returns non-empty results on sample repo
+3. Run sample capability checks by language/domain in scope
+   - TypeScript package: `search_symbols` + `get_file_summary`
+   - C# sample repo (if used): `route_map` + `find_implementations`
+   - PASS if representative queries return non-empty results on target repos
    NOTE: this is a release/upgrade safeguard, not a per-task mandatory step.
 ```
 
@@ -176,8 +261,17 @@ Baseline tools are blocked until ALL gates pass:
 ```
 1. detect_circular_dependencies (mode: "module") → confirm 0 cycles
 2. dead_code_scan (filePathPrefix: "<src path>") → find orphaned publics
-   NOTE: DI-registered classes (IPipelineBehavior, IHostedService) will appear
-   as "dead" — always cross-check with DependencyInjection.cs before reporting.
+   NOTE: runtime-wired symbols may appear "dead"; cross-check bootstrap/registration files before reporting.
+```
+
+### Postgres tool check flow (when task touches `postgres-mcp`)
+```
+1. mcp_health_check
+   → confirm MCP server + PostgreSQL connectivity
+2. mcp_run_read_query (targeted read-only SQL, bounded limit)
+   → validate behavior without write impact
+3. detect_changes (policy: "quick-triage")
+   → prioritize follow-up impact checks when source has changed
 ```
 
 ### Pre-release risk scan flow (before merge / release)
@@ -226,13 +320,13 @@ Operational rule:
 
 | Tool | Limitation | Correct Usage |
 |------|-----------|---------------|
-| `search_symbols` | Natural-language query returns 0 results | Use PascalCase identifier tokens only |
-| `trace_execution_flow` | Class-level symbolId returns empty graph | Always resolve to METHOD-level symbolId first |
-| `get_call_chain` | Same as above | Use METHOD symbolId, not class |
-| `dead_code_scan` | DI-registered services appear dead (no graph call edges) | Cross-check DI registration files before reporting |
+| `search_symbols` | Natural-language query returns weak/empty results | Use exact identifier tokens |
+| `trace_execution_flow` | Container-level symbolId can return sparse graph | Resolve callable symbolId first |
+| `get_call_chain` | Same as above | Use callable symbolId |
+| `dead_code_scan` | Runtime-wired symbols may appear dead | Cross-check bootstrap/registration paths before reporting |
 | `link_tests_to_source` | Score 0.55 links are `name_similarity` only — unreliable | Filter with `minScore: 0.7` |
 | `find_impact_files` view `"surface"` | Confidence 0.75 is TYPE_REF, not direct call | Note confidence and edgeType in output |
-| `find_symbol_at_line` | Only resolves symbol-level declarations (class/method/record), NOT inner-block lines | Only effective at lines that start a class, method, or record definition |
+| `find_symbol_at_line` | Often resolves declaration-level positions, not inner-block lines | Prefer declaration line or pair with one focused search |
 | `get_cross_repo_impact` | Returns empty when repos have no shared symbols (normal for isolated systems) | Only useful when repos share interface/contract symbol names (e.g., shared library pattern) |
 
 ## Efficiency Limits
@@ -250,4 +344,4 @@ Include in final summary:
 - If fallback occurred: issue ID updated in registry
 - Gate status: Discovery/Scope/Confidence passed or failed
 - Evidence sufficiency statement and residual uncertainty (if any)
-- Target repoId(s): must explicitly state whether result applies to `codebase-index-mcp`, `wec.commnunication-hub`, or both.
+- Target repoId(s): must explicitly state whether result applies to `codebase-index-mcp`, `postgres-mcp`, `mcp-local`, `wec.commnunication-hub`, or a subset.

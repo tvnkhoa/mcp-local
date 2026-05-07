@@ -803,16 +803,17 @@ function lineFromOffset(source: string, offset: number): number {
  * Walk up AST to find the nearest enclosing method/constructor node for C#.
  * Returns the stable symbolId if found, otherwise null.
  */
+const CSHARP_ENCLOSING_TYPES = new Set([
+  "method_declaration",
+  "constructor_declaration",
+  "operator_declaration",
+  "accessor_declaration"
+]);
+
 function findEnclosingCSharpSymbolId(node: Parser.SyntaxNode, input: ExtractInput): string | null {
-  const ENCLOSING_TYPES = new Set([
-    "method_declaration",
-    "constructor_declaration",
-    "operator_declaration",
-    "accessor_declaration"
-  ]);
   let current: Parser.SyntaxNode | null = node.parent;
   while (current) {
-    if (ENCLOSING_TYPES.has(current.type)) {
+    if (CSHARP_ENCLOSING_TYPES.has(current.type)) {
       const nameNode = current.childForFieldName("name");
       if (nameNode) {
         const kind = current.type === "constructor_declaration" ? "constructor" : "method";
@@ -897,12 +898,17 @@ function extractCSharpSymbols(
     const functionNode = node.childForFieldName("function");
     if (functionNode) {
       let calleeName = "";
+      let receiverName = "";
       if (functionNode.type === "identifier") {
         calleeName = functionNode.text;
       } else if (functionNode.type === "member_access_expression") {
         const nameNode = functionNode.childForFieldName("name");
+        const expressionNode = functionNode.childForFieldName("expression");
         if (nameNode) {
           calleeName = nameNode.text;
+        }
+        if (expressionNode && expressionNode.type === "identifier") {
+          receiverName = expressionNode.text;
         }
       }
 
@@ -914,6 +920,17 @@ function extractCSharpSymbols(
           toId: `callee:${calleeName}`,
           type: "CALLS"
         });
+
+        // Preserve static/member receiver context for better post-resolution:
+        // e.g. Animal.Classify() => callee:Animal.Classify
+        if (receiverName && /^[A-Z]/.test(receiverName)) {
+          edges.push({
+            repoId: input.repoId,
+            fromId,
+            toId: `callee:${receiverName}.${calleeName}`,
+            type: "CALLS"
+          });
+        }
       }
     }
   }

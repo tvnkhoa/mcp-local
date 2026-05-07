@@ -17,12 +17,12 @@ type WorkerState = {
 };
 
 type WorkerExtractMessage =
-  | { id: string; status: "ok"; output: ExtractOutput }
+  | { id: string; status: "ok"; output: ExtractOutput; parseMs: number }
   | { id: string; status: "timeout"; reason: "parse-timeout"; error: string }
   | { id: string; status: "error"; error: string };
 
 export type WorkerExtractResult =
-  | { status: "ok"; output: ExtractOutput }
+  | { status: "ok"; output: ExtractOutput; parseMs: number }
   | { status: "timeout"; reason: "parse-timeout" | "job-timeout"; error?: string }
   | { status: "error"; error: string };
 
@@ -109,7 +109,7 @@ export class ExtractionWorkerPool {
 
     this.pendingTasks.delete(task.id);
     if (message.status === "ok") {
-      task.resolve({ status: "ok", output: message.output });
+      task.resolve({ status: "ok", output: message.output, parseMs: message.parseMs });
     } else if (message.status === "timeout") {
       task.resolve({ status: "timeout", reason: message.reason, error: message.error });
     } else {

@@ -130,6 +130,7 @@ export async function runIndexPipeline(store: GraphStore, input: RunIndexInput):
       }
 
       const batchFiles = selectedFiles.slice(offset, offset + batchSize);
+      const extractStart = Date.now();
       const pendingWrites: Array<{
         file: {
           repoId: string;
@@ -348,6 +349,9 @@ export async function runIndexPipeline(store: GraphStore, input: RunIndexInput):
         const largeResults = await Promise.all(largeExtractionJobs);
         for (const largeResult of largeResults) {
           if (largeResult.result.status === "ok") {
+            if (largeResult.result.parseMs > 1500) {
+              process.stderr.write(`[index-slow-parse] ${largeResult.relativePath}: ${String(largeResult.result.parseMs)}ms\n`);
+            }
             pushPendingWrite(
               largeResult.relativePath,
               largeResult.language,
@@ -374,6 +378,7 @@ export async function runIndexPipeline(store: GraphStore, input: RunIndexInput):
 
       // Split write workload into smaller transactions to reduce lock duration and WAL growth.
       const batchNum = completedBatches + 1;
+      const extractMs = Date.now() - extractStart;
       const writeStart = Date.now();
       let subtxCount = 0;
       for (let writeOffset = 0; writeOffset < pendingWrites.length; writeOffset += subtxSize) {
@@ -411,7 +416,7 @@ export async function runIndexPipeline(store: GraphStore, input: RunIndexInput):
       }
 
       process.stderr.write(
-        `[index-write] batch=${String(batchNum)}/${String(totalBatches)} files=${String(pendingWrites.length)} subtx=${String(subtxCount)} writeMs=${String(writeMs)} checkpointMs=${String(checkpointMs)} symbols=${String(symbolsUpserted)} edges=${String(edgesUpserted)}
+        `[index-write] batch=${String(batchNum)}/${String(totalBatches)} files=${String(pendingWrites.length)} subtx=${String(subtxCount)} extractMs=${String(extractMs)} writeMs=${String(writeMs)} checkpointMs=${String(checkpointMs)} symbols=${String(symbolsUpserted)} edges=${String(edgesUpserted)}
 `
       );
       emitProgress("running");

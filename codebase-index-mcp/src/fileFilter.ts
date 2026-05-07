@@ -110,10 +110,16 @@ function isBinary(bytes: Uint8Array): boolean {
 
 export function shouldIndexFile(filePath: string, bytes: Uint8Array): FilterDecision {
   const normalized = filePath.replace(/\\/g, "/");
+  const normalizedLower = normalized.toLowerCase();
   const segments = normalized.split("/");
 
   if (segments.some((seg) => EXCLUDED_PATH_SEGMENTS.has(seg))) {
     return { include: false, reason: "excluded_path", language: null };
+  }
+
+  // Skip EF Core migration Designer.cs snapshots — auto-generated, large, slow to parse
+  if (normalizedLower.includes("/migrations/") && normalizedLower.endsWith(".designer.cs")) {
+    return { include: false, reason: "excluded_generated", language: null };
   }
 
   const extension = extname(filePath).toLowerCase();

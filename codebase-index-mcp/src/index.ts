@@ -41,7 +41,9 @@ const MAX_DEPTH = numberFromEnv("CODEBASE_INDEX_MAX_DEPTH", 5);
 const SUBTX_SIZE = numberFromEnv("CODEBASE_INDEX_SUBTX_SIZE", 20);
 /** Run WAL checkpoint after every N completed batches. Default 1 = every batch. Increase for very large repos. */
 const CHECKPOINT_EVERY_N_BATCHES = numberFromEnv("CODEBASE_INDEX_CHECKPOINT_EVERY_N_BATCHES", 1);
-const LARGE_FILE_THRESHOLD_BYTES = numberFromEnv("CODEBASE_INDEX_LARGE_FILE_THRESHOLD_BYTES", 512 * 1024);
+// Route ALL non-markdown files to the worker pool (threshold=0).
+// The old default of 512KB exceeded the 500KB fileFilter cap, meaning workers were never used.
+const LARGE_FILE_THRESHOLD_BYTES = numberFromEnv("CODEBASE_INDEX_LARGE_FILE_THRESHOLD_BYTES", 0);
 const DEFAULT_PARSE_WORKERS = Math.max(1, Math.floor(os.cpus().length / 2));
 const PARSE_WORKERS = numberFromEnv("CODEBASE_INDEX_PARSE_WORKERS", DEFAULT_PARSE_WORKERS);
 const PARSE_JOB_TIMEOUT_MS = numberFromEnv("CODEBASE_INDEX_PARSE_JOB_TIMEOUT_MS", 20_000);
@@ -2599,10 +2601,15 @@ async function runIndexAndResolve(
   }
   await yieldToEventLoop();
 
+  const mentionsStart = Date.now();
+  process.stderr.write(`[index-post] repoId=${repoId} resolving mentions...\n`);
   const mentionsResolved = docsEnabled
     ? (() => { try { return store.resolveMentions(repoId); } catch { return 0; } })()
     : 0;
+  const mentionsElapsed = Date.now() - mentionsStart;
+  process.stderr.write(`[index-post] repoId=${repoId} resolved ${mentionsResolved} mentions in ${mentionsElapsed}ms\n`);
 
+  const recordStart = Date.now();
   process.stderr.write(`[index-post] repoId=${repoId} recording run metadata...\n`);
 
   const fullSummary = {
@@ -2619,6 +2626,8 @@ async function runIndexAndResolve(
     unresolvedLowConfidence: crossStats.unresolvedByReason.low_confidence
   };
   store.recordRun(fullSummary);
+  const recordElapsed = Date.now() - recordStart;
+  process.stderr.write(`[index-post] repoId=${repoId} recorded run metadata in ${recordElapsed}ms\n`);
   process.stderr.write(`[index-post-done] repoId=${repoId} crossRepo=${String(crossStats.resolved)} calls=${String(callEdgesResolved)} imports=${String(importEdgesResolved)} mentions=${String(mentionsResolved)}\n`);
 
   return fullSummary;

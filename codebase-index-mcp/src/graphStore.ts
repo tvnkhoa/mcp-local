@@ -228,8 +228,8 @@ export class GraphStore {
         `
         select path as filePath
         from files
-        where repo_id = ? and replace(path, char(92), '/') = ?
-        order by case when path = ? then 0 else 1 end
+        where repo_id = ? and lower(replace(path, char(92), '/')) = lower(?)
+        order by case when lower(path) = lower(?) then 0 else 1 end
         limit 1
         `
       )
@@ -244,8 +244,8 @@ export class GraphStore {
         `
         select file_path as filePath
         from symbols
-        where repo_id = ? and replace(file_path, char(92), '/') = ?
-        order by case when file_path = ? then 0 else 1 end
+        where repo_id = ? and lower(replace(file_path, char(92), '/')) = lower(?)
+        order by case when lower(file_path) = lower(?) then 0 else 1 end
         limit 1
         `
       )
@@ -1011,7 +1011,7 @@ export class GraphStore {
   }[] {
     const conditions: string[] = [
       "s.repo_id = ?",
-      "s.kind not in ('module', 'property', 'constructor', 'type')"
+      "s.kind not in ('module', 'property', 'constructor', 'type', 'interface')"
     ];
     const params: unknown[] = [repoId];
 
@@ -1044,8 +1044,22 @@ export class GraphStore {
           s.line as line,
           s.signature as signature,
           f.language as language,
-          (select count(*) from edges e where e.repo_id = s.repo_id and e.to_id = s.symbol_id and e.type = 'CALLS') as incomingCalls,
-          (select count(*) from edges e where e.repo_id = s.repo_id and e.to_id = s.symbol_id and e.type = 'TYPE_REF') as incomingTypeRefs,
+          (select count(*)
+             from edges e
+            where e.repo_id = s.repo_id
+              and e.type = 'CALLS'
+              and (
+                e.to_id = s.symbol_id
+                or e.to_id = ('callee:' || s.name)
+              )) as incomingCalls,
+          (select count(*)
+             from edges e
+            where e.repo_id = s.repo_id
+              and e.type = 'TYPE_REF'
+              and (
+                e.to_id = s.symbol_id
+                or e.to_id = ('type:' || s.name)
+              )) as incomingTypeRefs,
           (select count(*) from edges e where e.repo_id = s.repo_id and e.to_id = s.symbol_id and e.type = 'IMPORTS') as incomingImports
         from symbols s
         left join files f on f.repo_id = s.repo_id and f.path = s.file_path
@@ -1421,7 +1435,20 @@ export class GraphStore {
   }
 
   rebuildFts(): void {
-    this.db.exec(`insert into symbols_fts(symbols_fts) values('rebuild')`);
+    const start = Date.now();
+    try {
+      // FTS5 incremental rebuild — rebuilds inverted index for all symbols
+      this.db.exec(`insert into symbols_fts(symbols_fts) values('rebuild')`);
+      
+      // FTS5 optimize pragma: compacts the index and removes deleted entries
+      // This typically reduces index size by 10-30% and improves query speed
+      this.db.exec(`insert into symbols_fts(symbols_fts) values('optimize')`);
+      
+      const elapsed = Date.now() - start;
+      process.stderr.write(`[index-fts] rebuilt symbols_fts in ${elapsed}ms\n`);
+    } catch (e) {
+      process.stderr.write(`[index-fts-error] symbols_fts rebuild failed: ${e instanceof Error ? e.message : String(e)}\n`);
+    }
   }
 
   searchSymbols(
@@ -1930,6 +1957,41 @@ export class GraphStore {
     const updateStmt = this.db.prepare(
       `update edges set to_id = ?, confidence = ?, reason = ? where repo_id = ? and from_id = ? and to_id = ?`
     );
+    const insertDispatchStmt = this.db.prepare(
+      `
+      insert into edges (repo_id, from_id, to_id, type, confidence, reason)
+      select ?, ?, ?, 'CALLS', ?, ?
+      where not exists (
+        select 1 from edges
+        where repo_id = ? and from_id = ? and to_id = ? and type = 'CALLS'
+      )
+      `
+    );
+
+    // Pre-build interface lookup map: name → { symbolId, filePath }
+    const interfaceRows = this.db
+      .prepare(`select symbol_id as symbolId, name, file_path as filePath from symbols where repo_id = ? and kind = 'interface'`)
+      .all(repoId) as { symbolId: string; name: string; filePath: string }[];
+    const interfaceByName = new Map<string, { symbolId: string; filePath: string }>();
+    for (const r of interfaceRows) {
+      if (!interfaceByName.has(r.name)) interfaceByName.set(r.name, { symbolId: r.symbolId, filePath: r.filePath });
+    }
+
+    // Pre-build implementor files map: interfaceSymbolId → filePath[]
+    const implEdgeRows = this.db
+      .prepare(
+        `select distinct e.to_id as ifaceId, s.file_path as filePath
+         from edges e
+         inner join symbols s on s.repo_id = e.repo_id and s.symbol_id = e.from_id
+         where e.repo_id = ? and e.type = 'IMPLEMENTS' and s.kind in ('class', 'struct')`
+      )
+      .all(repoId) as { ifaceId: string; filePath: string }[];
+    const implementorFilesByIfaceId = new Map<string, string[]>();
+    for (const r of implEdgeRows) {
+      const list = implementorFilesByIfaceId.get(r.ifaceId) ?? [];
+      list.push(r.filePath);
+      implementorFilesByIfaceId.set(r.ifaceId, list);
+    }
 
     const candidateMap = this.buildNamedCandidateMap(repoId, ["function", "method", "constructor", "class"]);
 
@@ -1937,17 +1999,80 @@ export class GraphStore {
     const tx = this.db.transaction(() => {
       for (const row of unresolved) {
         const calleeName = row.toId.slice(7); // strip "callee:"
-        const match = this.pickBestNamedCandidate(
+        let dispatchMethodName: string | null = null;
+        let dispatchInterfaceId: string | null = null;
+        let match = this.pickBestNamedCandidate(
           candidateMap.get(calleeName) ?? [],
           row.fromFile,
           ["function", "method", "constructor", "class"]
         );
 
+        // For qualified calls like "IRepository.Save", resolve primary target to the
+        // interface method first, then fan out lower-confidence edges to implementing methods.
+        if (calleeName.includes(".")) {
+          const parts = calleeName.split(".").filter((x) => x.length > 0);
+          const receiverType = parts.length > 1 ? parts.slice(0, -1).join(".") : "";
+          const memberName = parts[parts.length - 1] ?? "";
+          if (receiverType && memberName) {
+            const iface = interfaceByName.get(receiverType);
+            if (iface) {
+              // Find the interface method via the candidateMap (already in memory)
+              const ifaceMethod = (candidateMap.get(memberName) ?? []).find(
+                (c) => c.filePath === iface.filePath && c.kind === "method"
+              );
+              if (ifaceMethod) {
+                match = { symbolId: ifaceMethod.symbolId, filePath: iface.filePath, kind: "method" };
+                dispatchMethodName = memberName;
+                dispatchInterfaceId = iface.symbolId;
+              }
+            }
+          }
+        }
+
+        // Retry qualified placeholders like "TypeName.methodName" using terminal symbol name.
+        if (!match && calleeName.includes(".")) {
+          const baseName = calleeName.split(".").pop() ?? calleeName;
+          match = this.pickBestNamedCandidate(
+            candidateMap.get(baseName) ?? [],
+            row.fromFile,
+            ["function", "method", "constructor", "class"]
+          );
+        }
+
         if (match) {
-          const confidence = match.filePath === row.fromFile ? 0.9 : 0.75;
-          const reason = confidence >= 0.9 ? "resolved callee same-file" : "resolved callee by name";
+          const confidence = dispatchMethodName
+            ? (match.filePath === row.fromFile ? 0.9 : 0.8)
+            : (match.filePath === row.fromFile ? 0.9 : 0.75);
+          const reason = dispatchMethodName
+            ? "resolved interface method"
+            : (confidence >= 0.9 ? "resolved callee same-file" : "resolved callee by name");
           updateStmt.run(match.symbolId, confidence, reason, repoId, row.fromId, row.toId);
           count += 1;
+
+          if (dispatchMethodName && dispatchInterfaceId) {
+            const implementorFiles = implementorFilesByIfaceId.get(dispatchInterfaceId) ?? [];
+            for (const implFilePath of implementorFiles) {
+              const implMethod = (candidateMap.get(dispatchMethodName) ?? []).find(
+                (c) => c.filePath === implFilePath && c.kind === "method"
+              );
+              if (!implMethod || implMethod.symbolId === match.symbolId) {
+                continue;
+              }
+              const insertResult = insertDispatchStmt.run(
+                repoId,
+                row.fromId,
+                implMethod.symbolId,
+                0.65,
+                "interface-dispatch",
+                repoId,
+                row.fromId,
+                implMethod.symbolId
+              );
+              if (insertResult.changes > 0) {
+                count += 1;
+              }
+            }
+          }
         }
       }
     });
@@ -3112,20 +3237,65 @@ export class GraphStore {
   }
 
   rebuildDocsFts(): void {
+    const start = Date.now();
     try {
-      // FTS5 content table: `rebuild` only re-indexes text but does NOT repopulate
-      // unindexed columns (doc_id, repo_id) — those become NULL, breaking the JOIN
-      // in searchDocs. Use explicit INSERT...SELECT with the actual docs.rowid so
-      // the FTS rowid mapping and unindexed column values are both correct.
-      this.db.prepare(`DELETE FROM docs_fts`).run();
-      this.db
-        .prepare(
-          `INSERT INTO docs_fts(rowid, text, doc_id, repo_id)
-           SELECT rowid, text, doc_id, repo_id FROM docs WHERE text IS NOT NULL`
-        )
-        .run();
-    } catch {
+      // Get total doc count for progress tracking
+      const countStmt = this.db.prepare(`SELECT COUNT(*) as cnt FROM docs WHERE text IS NOT NULL`);
+      const { cnt: totalDocs } = countStmt.get() as { cnt: number };
+      
+      if (totalDocs === 0) {
+        process.stderr.write(`[index-docs-fts] no docs to index\n`);
+        return;
+      }
+
+      // Try to clear old FTS index; if malformed, drop and recreate
+      try {
+        this.db.prepare(`DELETE FROM docs_fts`).run();
+      } catch (e) {
+        process.stderr.write(`[index-docs-fts] docs_fts malformed, recreating table...\n`);
+        this.db.exec(`DROP TABLE IF EXISTS docs_fts`);
+        this.db.exec(`
+          CREATE VIRTUAL TABLE IF NOT EXISTS docs_fts USING fts5(
+            text,
+            doc_id UNINDEXED,
+            repo_id UNINDEXED,
+            content='docs',
+            content_rowid='rowid'
+          )
+        `);
+      }
+
+      // Rebuild in chunks (5000 docs per chunk) to allow SQLite to commit progress
+      const chunkSize = 5000;
+      const chunks = Math.ceil(totalDocs / chunkSize);
+      
+      for (let chunk = 0; chunk < chunks; chunk += 1) {
+        const offset = chunk * chunkSize;
+        this.db
+          .prepare(
+            `INSERT INTO docs_fts(rowid, text, doc_id, repo_id)
+             SELECT rowid, text, doc_id, repo_id FROM docs 
+             WHERE text IS NOT NULL
+             ORDER BY rowid
+             LIMIT ? OFFSET ?`
+          )
+          .run(chunkSize, offset);
+        
+        if ((chunk + 1) % 2 === 0 || chunk === chunks - 1) {
+          const pct = Math.round(((chunk + 1) / chunks) * 100);
+          const elapsed = Date.now() - start;
+          process.stderr.write(`[index-docs-fts] ${pct}% | ${Math.min((chunk + 1) * chunkSize, totalDocs)}/${totalDocs} docs | ${elapsed}ms\n`);
+        }
+      }
+
+      // Optimize FTS index to compact and improve search performance
+      this.db.prepare(`INSERT INTO docs_fts(docs_fts) VALUES('optimize')`).run();
+
+      const elapsed = Date.now() - start;
+      process.stderr.write(`[index-docs-fts] completed ${totalDocs} docs in ${elapsed}ms\n`);
+    } catch (e) {
       // Non-fatal: FTS rebuild failure shouldn't stop indexing
+      process.stderr.write(`[index-docs-fts-error] rebuild failed: ${e instanceof Error ? e.message : String(e)}\n`);
     }
   }
 
@@ -3155,130 +3325,141 @@ export class GraphStore {
 
     if (unresolved.length === 0) return 0;
 
+    // --- Pre-build lookup maps (1 bulk query each, not per-mention) ---
+
+    // Exact name → best symbol_id (class > interface > function > method > variable > other)
+    const kindRank = (kind: string): number => {
+      switch (kind) {
+        case "class": return 0;
+        case "interface": return 1;
+        case "function": return 2;
+        case "method": return 3;
+        case "variable": return 4;
+        default: return 5;
+      }
+    };
+
+    const allSymbols = this.db
+      .prepare(`select symbol_id, name, kind, file_path from symbols where repo_id = ?`)
+      .all(repoId) as { symbol_id: string; name: string; kind: string; file_path: string }[];
+
+    // Exact name map: name → best symbol_id (O(1) lookup, O(n) build)
+    const nameMap = new Map<string, string>();
+    // Track best kind rank per name to avoid allSymbols.find() per conflict
+    const nameMapRank = new Map<string, number>();
+    // Lowercase exact map: lowercase name → symbol_id
+    const nameLowerMap = new Map<string, string>();
+    const nameLowerMapRank = new Map<string, number>();
+    // Suffix map: last segment after last dot (lowercase) → symbol_id
+    // handles: symLower.endsWith(`.${lower}`) i.e. mention="GetUser", sym="UserService.GetUser"
+    const nameSuffixMap = new Map<string, string>();
+    // Prefix map: first segment before first dot (lowercase) → symbol_id
+    // handles: symLower.startsWith(`${lower}.`) i.e. mention="UserService", sym="UserService.GetUser"
+    const namePrefixMap = new Map<string, string>();
+
+    // File path map: normalized path → symbol_id (O(1) exact lookup)
+    const filePathMap = new Map<string, string>();
+    // Suffix segment map: each path segment → symbol_id (for suffix match fallback)
+    const filePathSuffixMap = new Map<string, string>();
+
+    // Single pass over allSymbols: build all 6 lookup maps at once
+    for (const sym of allSymbols) {
+      const rank = kindRank(sym.kind);
+
+      // Exact name map (case-sensitive)
+      const existingRank = nameMapRank.get(sym.name) ?? Infinity;
+      if (rank < existingRank) {
+        nameMap.set(sym.name, sym.symbol_id);
+        nameMapRank.set(sym.name, rank);
+      }
+
+      // Lowercase exact map + suffix/prefix maps from dotted names
+      const nameLower = sym.name.toLowerCase();
+      const existingLowerRank = nameLowerMapRank.get(nameLower) ?? Infinity;
+      if (rank < existingLowerRank) {
+        nameLowerMap.set(nameLower, sym.symbol_id);
+        nameLowerMapRank.set(nameLower, rank);
+      }
+      const dotIdx = nameLower.lastIndexOf(".");
+      if (dotIdx >= 0) {
+        const suffix = nameLower.slice(dotIdx + 1);
+        if (!nameSuffixMap.has(suffix)) nameSuffixMap.set(suffix, sym.symbol_id);
+        const prefix = nameLower.slice(0, dotIdx);
+        if (!namePrefixMap.has(prefix)) namePrefixMap.set(prefix, sym.symbol_id);
+      }
+
+      // File path maps
+      const normalizedPath = sym.file_path
+        .replace(/\\/g, "/")
+        .replace(/\.(ts|js|tsx|jsx|cs)$/, "")
+        .toLowerCase();
+      if (!filePathMap.has(normalizedPath) || sym.kind === "module") {
+        filePathMap.set(normalizedPath, sym.symbol_id);
+      }
+      // Store trailing path segments: "a/b/c" → keys "c", "b/c", "a/b/c" (max 3 deep)
+      const parts = normalizedPath.split("/");
+      for (let i = parts.length - 1; i >= 0; i--) {
+        const key = parts.slice(i).join("/");
+        if (!filePathSuffixMap.has(key)) filePathSuffixMap.set(key, sym.symbol_id);
+        if (parts.length - i >= 3) break;
+      }
+    }
+
     // Use REPLACE to handle conflicts (DELETE + INSERT)
     const updateStmt = this.db.prepare(
       `update or replace doc_mentions set symbol_id = ? where repo_id = ? and doc_id = ? and mention_type = ? and mention_text = ? and symbol_id is null`
     );
 
     let count = 0;
-    const tx = this.db.transaction(() => {
-      for (const mention of unresolved) {
-        let resolvedSymbolId: string | undefined;
+    const updates: Array<[string, string, string, string, string]> = [];
 
-        if (mention.mention_type === "backtick") {
-          // Try exact match first (priority: class > interface > function > method > variable)
-          const exactMatch = this.db
-            .prepare(
-              `
-              select symbol_id from symbols
-              where repo_id = ? and name = ?
-              order by case kind
-                when 'class' then 0
-                when 'interface' then 1
-                when 'function' then 2
-                when 'method' then 3
-                when 'variable' then 4
-                else 5
-              end
-              limit 1
-              `
-            )
-            .get(repoId, mention.mention_text) as { symbol_id: string } | undefined;
+    for (const mention of unresolved) {
+      let resolvedSymbolId: string | undefined;
 
-          if (exactMatch) {
-            resolvedSymbolId = exactMatch.symbol_id;
-          }
+      if (mention.mention_type === "backtick") {
+        // O(1) lookups: exact → lowercase exact → suffix → prefix
+        const lower = mention.mention_text.toLowerCase();
+        resolvedSymbolId =
+          nameMap.get(mention.mention_text) ??
+          nameLowerMap.get(lower) ??
+          nameSuffixMap.get(lower) ??
+          namePrefixMap.get(lower);
+      } else if (mention.mention_type === "filepath") {
+        const normalizedMention = mention.mention_text
+          .replace(/\\/g, "/")
+          .replace(/\.(ts|js|tsx|jsx|cs)$/, "")
+          .replace(/^src\//, "")
+          .toLowerCase();
 
-          // If no exact match, try fuzzy matching
-          if (!resolvedSymbolId) {
-            const candidates = this.db
-              .prepare(
-                `
-                select symbol_id, name from symbols
-                where repo_id = ?
-                order by case kind
-                  when 'class' then 0
-                  when 'interface' then 1
-                  when 'function' then 2
-                  when 'method' then 3
-                  when 'variable' then 4
-                  else 5
-                end
-                limit 100
-                `
-              )
-              .all(repoId) as { symbol_id: string; name: string }[];
+        // Try exact map lookup first
+        resolvedSymbolId = filePathMap.get(normalizedMention);
 
-            // Simple fuzzy matching: check if mention is substring or similarity > 0.8
-            for (const candidate of candidates) {
-              if (
-                candidate.name.includes(mention.mention_text) ||
-                mention.mention_text.includes(candidate.name) ||
-                this.stringSimilarity(mention.mention_text, candidate.name) > 0.8
-              ) {
-                resolvedSymbolId = candidate.symbol_id;
-                break;
-              }
-            }
-          }
-        } else if (mention.mention_type === "filepath") {
-          // Extract file path and find symbols from that file
-          // mention_text e.g., "src/graphStore.ts" or "src/graphStore"
-          const normalizedPath = mention.mention_text
-            .replace(/^src\//, "")
-            .replace(/\.(ts|js|tsx|jsx)$/, "");
-
-          // Find module symbol from that file
-          const moduleResult = this.db
-            .prepare(
-              `
-              select symbol_id from symbols
-              where repo_id = ? and file_path like ?
-              and kind = 'module'
-              limit 1
-              `
-            )
-            .get(repoId, `%${normalizedPath}%`) as { symbol_id: string } | undefined;
-
-          if (moduleResult) {
-            resolvedSymbolId = moduleResult.symbol_id;
-          }
-
-          // Fallback: just take first symbol from file
-          if (!resolvedSymbolId) {
-            const fallbackResult = this.db
-              .prepare(
-                `
-                select symbol_id from symbols
-                where repo_id = ? and file_path like ?
-                order by line asc
-                limit 1
-                `
-              )
-              .get(repoId, `%${normalizedPath}%`) as { symbol_id: string } | undefined;
-
-            if (fallbackResult) {
-              resolvedSymbolId = fallbackResult.symbol_id;
-            }
-          }
-        }
-        // Heading mentions are low priority, skip for now
-
-        if (resolvedSymbolId) {
-          updateStmt.run(resolvedSymbolId, repoId, mention.doc_id, mention.mention_type, mention.mention_text);
-          count += 1;
+        // Fallback: O(1) suffix map lookup
+        if (!resolvedSymbolId) {
+          resolvedSymbolId = filePathSuffixMap.get(normalizedMention);
         }
       }
-    });
-    tx();
+      // Heading mentions are low priority, skip for now
+
+      if (resolvedSymbolId) {
+        updates.push([resolvedSymbolId, repoId, mention.doc_id, mention.mention_type, mention.mention_text]);
+      }
+    }
+
+    // Bulk update in a single transaction
+    if (updates.length > 0) {
+      const tx = this.db.transaction(() => {
+        for (const args of updates) {
+          updateStmt.run(...args);
+          count += 1;
+        }
+      });
+      tx();
+    }
 
     return count;
   }
 
-  /**
-   * Simple string similarity calculation (0.0 to 1.0)
-   * Based on longest common subsequence
-   */
   private stringSimilarity(a: string, b: string): number {
     const aLower = a.toLowerCase();
     const bLower = b.toLowerCase();

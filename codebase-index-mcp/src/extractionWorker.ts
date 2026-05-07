@@ -13,7 +13,7 @@ type WorkerExtractRequest = {
 };
 
 type WorkerExtractResponse =
-  | { id: string; status: "ok"; output: ExtractOutput }
+  | { id: string; status: "ok"; output: ExtractOutput; parseMs: number }
   | { id: string; status: "timeout"; reason: "parse-timeout"; error: string }
   | { id: string; status: "error"; error: string };
 
@@ -23,11 +23,14 @@ if (!parentPort) {
 
 parentPort.on("message", (message: WorkerExtractRequest) => {
   try {
+    const parseStart = Date.now();
     const output = extractGraphData(message.input);
+    const parseMs = Date.now() - parseStart;
     const response: WorkerExtractResponse = {
       id: message.id,
       status: "ok",
-      output
+      output,
+      parseMs
     };
     parentPort!.postMessage(response);
   } catch (error) {
