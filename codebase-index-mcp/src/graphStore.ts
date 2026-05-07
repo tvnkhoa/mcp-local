@@ -1061,6 +1061,7 @@ export class GraphStore {
                 or e.to_id = ('type:' || s.name)
               )) as incomingTypeRefs,
           (select count(*) from edges e where e.repo_id = s.repo_id and e.to_id = s.symbol_id and e.type = 'IMPORTS') as incomingImports
+          ,(select count(*) from edges e where e.repo_id = s.repo_id and e.from_id = s.symbol_id and e.type = 'CALLS') as outgoingCalls
         from symbols s
         left join files f on f.repo_id = s.repo_id and f.path = s.file_path
         where ${where}
@@ -1079,6 +1080,7 @@ export class GraphStore {
       incomingCalls: number;
       incomingTypeRefs: number;
       incomingImports: number;
+      outgoingCalls: number;
     }[];
 
     const bootstrapFileNames = [
@@ -1100,10 +1102,62 @@ export class GraphStore {
       deadReason: string;
     }[] = [];
 
+    const utilityNamePattern = /^(to|from|get|set|map|parse|format|build|create|validate|convert|helper|util)/i;
+    const entryNamePattern = /^(main|init|initialize|bootstrap|start|run|handle|on|process|execute|dispatch|trigger)/i;
+
+    const isLikelyEntryPoint = (row: {
+      name: string;
+      filePath: string;
+      signature: string | null;
+      language: string | null;
+      outgoingCalls: number;
+    }): boolean => {
+      // Keep the heuristic narrow to reduce cross-language false negatives.
+      if ((row.language ?? "").toLowerCase() !== "csharp") {
+        return false;
+      }
+
+      if (row.outgoingCalls < 2) {
+        return false;
+      }
+
+      const normalizedPath = row.filePath.replace(/\\/g, "/").toLowerCase();
+      const signatureLower = (row.signature ?? "").toLowerCase();
+      const name = row.name;
+
+      const hasEntryName = entryNamePattern.test(name);
+      const hasUtilityName = utilityNamePattern.test(name);
+      const inEntryPath =
+        normalizedPath.endsWith("/program.cs") ||
+        normalizedPath.endsWith("/startup.cs") ||
+        normalizedPath.includes("/controllers/") ||
+        normalizedPath.includes("/handlers/") ||
+        normalizedPath.includes("/hubs/") ||
+        normalizedPath.includes("/backgroundservices/") ||
+        normalizedPath.includes("/hostedservices/") ||
+        normalizedPath.includes("/api/");
+      const isPublicLike = signatureLower.startsWith("public ") || signatureLower.includes(" public ");
+
+      // Lightweight score inspired by GitNexus entry-point scoring:
+      // require outgoing calls, then combine path/name/visibility hints.
+      let score = 0;
+      if (isPublicLike) score += 1;
+      if (hasEntryName) score += 1;
+      if (inEntryPath) score += 1;
+      if (row.outgoingCalls >= 3) score += 1;
+      if (hasUtilityName) score -= 1;
+
+      return score >= 2 && (hasEntryName || inEntryPath);
+    };
+
     for (const row of rows) {
       const normalizedPath = row.filePath.replace(/\\/g, "/");
       const isBootstrap = bootstrapFileNames.some((f) => normalizedPath.endsWith(`/${f}`) || normalizedPath === f);
       if (isBootstrap) {
+        continue;
+      }
+
+      if (isLikelyEntryPoint(row)) {
         continue;
       }
 
