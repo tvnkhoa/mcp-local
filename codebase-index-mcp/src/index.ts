@@ -1047,7 +1047,17 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
                   fromSymbol: { type: "string" },
                   toSymbol: { type: "string" },
                   requiredOwnerType: { type: "string" },
-                  forbiddenOwnerTypes: { type: "array", items: { type: "string" }, maxItems: 200 }
+                  forbiddenOwnerTypes: { type: "array", items: { type: "string" }, maxItems: 200 },
+                  initializerRewrite: {
+                    type: "object",
+                    additionalProperties: false,
+                    properties: {
+                      objectProperty: { type: "string" },
+                      objectType: { type: "string" },
+                      targetMember: { type: "string" }
+                    },
+                    required: ["objectProperty", "objectType"]
+                  }
                 }
               }
             },
