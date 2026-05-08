@@ -438,6 +438,14 @@ const refactorGuardsSchema = z
   .strict()
   .default({ symbolKinds: [], allowOwnerTypes: [], disallowOwnerTypes: [], disallowTypeList: [] });
 
+const refactorInitializerRewriteSchema = z
+  .object({
+    objectProperty: z.string().min(1).max(200),
+    objectType: z.string().min(1).max(200),
+    targetMember: z.string().min(1).max(200).optional()
+  })
+  .strict();
+
 const refactorReplacePreviewSchema = z
   .object({
     repoId: z.string().min(1).max(200),
@@ -476,7 +484,8 @@ const refactorSymbolMigrationSchema = z
             fromSymbol: z.string().min(1).max(500),
             toSymbol: z.string().min(1).max(500),
             requiredOwnerType: z.string().min(1).max(200),
-            forbiddenOwnerTypes: z.array(z.string().min(1).max(200)).max(200).default([])
+            forbiddenOwnerTypes: z.array(z.string().min(1).max(200)).max(200).default([]),
+            initializerRewrite: refactorInitializerRewriteSchema.optional()
           })
           .strict()
       )
@@ -2345,25 +2354,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const suggestedFollowUpFiles = new Set<string>();
 
         for (const migration of args.migrations) {
-          const previewResult = buildRefactorPreview(
-            repo.repoPath,
-            args.repoId,
-            migration.fromSymbol,
-            migration.toSymbol,
-            {
-              includePaths: args.scopePaths,
-              excludePaths: [],
-              fileGlobs: []
-            },
-            {
-              language: undefined,
-              symbolKinds: ["property", "field"],
-              allowOwnerTypes: [migration.requiredOwnerType],
-              disallowOwnerTypes: migration.forbiddenOwnerTypes,
-              disallowTypeList: migration.forbiddenOwnerTypes
-            },
-            "symbol-aware"
-          );
+          const previewResult = buildSymbolMigrationPreview(repo.repoPath, args.repoId, migration, args.scopePaths);
 
           const now = new Date();
           const expiresAt = new Date(now.getTime() + REFACTOR_PREVIEW_TTL_MS).toISOString();
@@ -2380,7 +2371,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             endOffset: hunk.endOffset,
             beforeText: hunk.beforeText,
             afterText: hunk.afterText,
-            replacementText: migration.toSymbol,
+            replacementText: hunk.afterText,
             ownerType: hunk.ownerType,
             symbolKind: hunk.symbolKind,
             confidence: hunk.confidence,
@@ -2415,6 +2406,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             previewId: string;
             totalMatches: number;
             unresolvedOccurrences: number;
+            previewSummary: ReturnType<typeof groupPreviewHunks>;
             applyId?: string;
             rollbackId?: string;
           } = {
@@ -2423,7 +2415,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             requiredOwnerType: migration.requiredOwnerType,
             previewId,
             totalMatches: hunkRecords.length,
-            unresolvedOccurrences: hunkRecords.filter((x) => x.riskFlags.includes("ambiguous_target")).length
+            unresolvedOccurrences: hunkRecords.filter((x) => x.riskFlags.includes("ambiguous_target")).length,
+            previewSummary: groupPreviewHunks(hunkRecords)
           };
 
           for (const hunk of hunkRecords) {
@@ -3052,6 +3045,7 @@ class PolicyViolationError extends Error {
 type RefactorScopeInput = z.infer<typeof refactorScopeSchema>;
 type RefactorGuardsInput = z.infer<typeof refactorGuardsSchema>;
 type RefactorModeInput = z.infer<typeof refactorReplacePreviewSchema>["mode"];
+type RefactorSymbolMigrationInput = z.infer<typeof refactorSymbolMigrationSchema>["migrations"][number];
 
 type PreviewCandidateHunk = {
   filePath: string;
@@ -3065,6 +3059,25 @@ type PreviewCandidateHunk = {
   confidence: number;
   riskFlags: RefactorRiskFlag[];
   fileHashBefore: string;
+};
+
+type ObjectInitializerContext = {
+  typeName: string;
+  openBraceOffset: number;
+  endOffset: number;
+};
+
+type InitializerAssignmentContext = {
+  initializer: ObjectInitializerContext;
+  assignmentStart: number;
+  assignmentEnd: number;
+  assignmentText: string;
+  indent: string;
+  expressionText: string;
+  trailingComma: boolean;
+  hasSiblingAssignments: boolean;
+  line: number;
+  lineEnding: string;
 };
 
 function normalizeRelativePath(filePath: string): string {
@@ -3127,6 +3140,65 @@ function offsetToLine(content: string, offset: number): number {
   return content.slice(0, Math.max(0, offset)).split(/\r?\n/).length;
 }
 
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function normalizeTypeToken(typeName: string): string {
+  const withoutNamespace = typeName.split(".").pop() ?? typeName;
+  return withoutNamespace.replace(/<.*>/g, "").trim();
+}
+
+function findMatchingBraceEnd(content: string, openBraceOffset: number): number {
+  let depth = 0;
+  for (let i = openBraceOffset; i < content.length; i += 1) {
+    const ch = content[i];
+    if (ch === "{") {
+      depth += 1;
+      continue;
+    }
+    if (ch === "}") {
+      depth -= 1;
+      if (depth === 0) {
+        return i;
+      }
+    }
+  }
+  return -1;
+}
+
+function findEnclosingObjectInitializer(content: string, offset: number): ObjectInitializerContext | null {
+  const prefix = content.slice(0, Math.max(0, offset));
+  const matches = [...prefix.matchAll(/new\s+([A-Za-z_][A-Za-z0-9_.<>?,]*)\s*\{/g)];
+
+  for (let i = matches.length - 1; i >= 0; i -= 1) {
+    const match = matches[i];
+    const openBraceOffset = (match.index ?? 0) + match[0].lastIndexOf("{");
+    const endOffset = findMatchingBraceEnd(content, openBraceOffset);
+    if (endOffset < 0) {
+      continue;
+    }
+    if (offset >= openBraceOffset && offset <= endOffset) {
+      return {
+        typeName: normalizeTypeToken(match[1] ?? ""),
+        openBraceOffset,
+        endOffset
+      };
+    }
+  }
+
+  return null;
+}
+
+function findEnclosingClassName(content: string, offset: number): string | null {
+  const prefix = content.slice(0, Math.max(0, offset));
+  const classMatches = [...prefix.matchAll(/\bclass\s+([A-Za-z_][A-Za-z0-9_]*)/g)];
+  if (classMatches.length > 0) {
+    return classMatches[classMatches.length - 1][1] ?? null;
+  }
+  return null;
+}
+
 // Heuristic: scans all `class Foo` occurrences before `offset` and returns the last match.
 // This is a best-effort regex approximation — it does not parse AST scope boundaries, so it
 // can misidentify owner type when the pattern appears inside string literals, comments, or
@@ -3135,12 +3207,11 @@ function offsetToLine(content: string, offset: number): number {
 // ambiguous_target or cross_type flag. Acceptable as a lightweight heuristic; replace with
 // a tree-sitter scope query if higher precision is required.
 function findOwnerType(content: string, offset: number): string | null {
-  const prefix = content.slice(0, Math.max(0, offset));
-  const classMatches = [...prefix.matchAll(/\bclass\s+([A-Za-z_][A-Za-z0-9_]*)/g)];
-  if (classMatches.length > 0) {
-    return classMatches[classMatches.length - 1][1] ?? null;
+  const initializer = findEnclosingObjectInitializer(content, offset);
+  if (initializer) {
+    return initializer.typeName;
   }
-  return null;
+  return findEnclosingClassName(content, offset);
 }
 
 function inferSymbolKind(lineText: string): "class" | "property" | "field" | "method" | null {
@@ -3158,6 +3229,101 @@ function pathStartsWithAny(filePath: string, prefixes: string[]): boolean {
   }
   const normalized = normalizeRelativePath(filePath).toLowerCase();
   return prefixes.some((prefix) => normalized.startsWith(normalizeRelativePath(prefix).toLowerCase()));
+}
+
+function findInitializerMemberAssignment(
+  content: string,
+  offset: number,
+  symbolName: string
+): InitializerAssignmentContext | null {
+  const initializer = findEnclosingObjectInitializer(content, offset);
+  if (!initializer) {
+    return null;
+  }
+
+  const lineStart = content.lastIndexOf("\n", Math.max(0, offset - 1)) + 1;
+  const rawLineEnd = content.indexOf("\n", offset);
+  const lineEnd = rawLineEnd >= 0 ? rawLineEnd : content.length;
+  const lineText = content.slice(lineStart, lineEnd);
+  const lineEnding = rawLineEnd >= 0 ? (content[lineEnd - 1] === "\r" ? "\r\n" : "\n") : "";
+  const assignmentEnd = rawLineEnd >= 0 ? lineEnd + lineEnding.length : lineEnd;
+
+  const headPattern = new RegExp(`^(\\s*)${escapeRegExp(symbolName)}\\s*=\\s*`);
+  const match = lineText.match(headPattern);
+  if (!match) {
+    return null;
+  }
+
+  const indent = match[1] ?? "";
+  const rhs = lineText.slice(match[0].length);
+  if (rhs.length === 0) {
+    return null;
+  }
+
+  let depthParen = 0;
+  let depthBracket = 0;
+  let depthBrace = 0;
+  let inSingleQuote = false;
+  let inDoubleQuote = false;
+  let escaped = false;
+  let splitIndex = -1;
+
+  for (let i = 0; i < rhs.length; i += 1) {
+    const ch = rhs[i];
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+
+    if (ch === "\\") {
+      escaped = true;
+      continue;
+    }
+
+    if (!inDoubleQuote && ch === "'") {
+      inSingleQuote = !inSingleQuote;
+      continue;
+    }
+    if (!inSingleQuote && ch === '"') {
+      inDoubleQuote = !inDoubleQuote;
+      continue;
+    }
+    if (inSingleQuote || inDoubleQuote) {
+      continue;
+    }
+
+    if (ch === "(") depthParen += 1;
+    else if (ch === ")") depthParen = Math.max(0, depthParen - 1);
+    else if (ch === "[") depthBracket += 1;
+    else if (ch === "]") depthBracket = Math.max(0, depthBracket - 1);
+    else if (ch === "{") depthBrace += 1;
+    else if (ch === "}") depthBrace = Math.max(0, depthBrace - 1);
+    else if (ch === "," && depthParen === 0 && depthBracket === 0 && depthBrace === 0) {
+      splitIndex = i;
+      break;
+    }
+  }
+
+  const expressionText = (splitIndex >= 0 ? rhs.slice(0, splitIndex) : rhs).trim();
+  if (expressionText.length === 0) {
+    return null;
+  }
+
+  const remainder = splitIndex >= 0 ? rhs.slice(splitIndex + 1).trim() : "";
+  const hasSiblingAssignments = splitIndex >= 0 && /[A-Za-z_][A-Za-z0-9_]*\s*=/.test(remainder);
+
+  return {
+    initializer,
+    assignmentStart: lineStart,
+    assignmentEnd,
+    assignmentText: content.slice(lineStart, assignmentEnd),
+    indent,
+    expressionText,
+    trailingComma: splitIndex >= 0,
+    hasSiblingAssignments,
+    line: offsetToLine(content, lineStart),
+    lineEnding
+  };
 }
 
 function buildRefactorPreview(
@@ -3277,6 +3443,161 @@ function buildRefactorPreview(
   return {
     hunks,
     affectedFiles: [...affected].sort((a, b) => a.localeCompare(b))
+  };
+}
+
+function buildSymbolMigrationPreview(
+  repoPath: string,
+  repoId: string,
+  migration: RefactorSymbolMigrationInput,
+  scopePaths: string[]
+): {
+  hunks: PreviewCandidateHunk[];
+  affectedFiles: string[];
+} {
+  const preview = buildRefactorPreview(
+    repoPath,
+    repoId,
+    migration.fromSymbol,
+    migration.toSymbol,
+    {
+      includePaths: scopePaths,
+      excludePaths: [],
+      fileGlobs: []
+    },
+    {
+      language: undefined,
+      symbolKinds: ["property", "field"],
+      allowOwnerTypes: [migration.requiredOwnerType],
+      disallowOwnerTypes: migration.forbiddenOwnerTypes,
+      disallowTypeList: migration.forbiddenOwnerTypes
+    },
+    "symbol-aware"
+  );
+
+  if (!migration.initializerRewrite) {
+    return preview;
+  }
+
+  const retainedHunks: PreviewCandidateHunk[] = [];
+  const rewrittenHunks: PreviewCandidateHunk[] = [];
+  const groupedAssignments = new Map<string, Array<{ hunk: PreviewCandidateHunk; assignment: InitializerAssignmentContext }>>();
+  const fileCache = new Map<string, string>();
+  const targetMember = migration.initializerRewrite.targetMember
+    ?? migration.toSymbol.split(".").filter((x) => x.length > 0).at(-1)
+    ?? migration.fromSymbol;
+
+  for (const hunk of preview.hunks) {
+    if (inferLanguageFromPath(hunk.filePath) !== "csharp") {
+      retainedHunks.push(hunk);
+      continue;
+    }
+
+    let content = fileCache.get(hunk.filePath);
+    if (!content) {
+      content = safeReadText(assertSafeRepoFilePath(repoPath, hunk.filePath));
+      fileCache.set(hunk.filePath, content);
+    }
+
+    const assignment = findInitializerMemberAssignment(content, hunk.startOffset, migration.fromSymbol);
+    if (!assignment || assignment.initializer.typeName.toLowerCase() !== migration.requiredOwnerType.toLowerCase()) {
+      retainedHunks.push(hunk);
+      continue;
+    }
+
+    if (assignment.hasSiblingAssignments) {
+      const blockedRiskFlags: RefactorRiskFlag[] = [...new Set([...hunk.riskFlags, "ambiguous_target"] as RefactorRiskFlag[])];
+      rewrittenHunks.push({
+        ...hunk,
+        line: assignment.line,
+        startOffset: assignment.assignmentStart,
+        endOffset: assignment.assignmentEnd,
+        beforeText: assignment.assignmentText,
+        afterText: assignment.assignmentText,
+        confidence: Math.min(hunk.confidence, 0.5),
+        riskFlags: blockedRiskFlags
+      });
+      continue;
+    }
+
+    const groupKey = [
+      hunk.filePath,
+      String(assignment.initializer.openBraceOffset),
+      migration.initializerRewrite.objectProperty,
+      migration.initializerRewrite.objectType
+    ].join(":");
+    const list = groupedAssignments.get(groupKey) ?? [];
+    list.push({ hunk, assignment });
+    groupedAssignments.set(groupKey, list);
+  }
+
+  for (const entries of groupedAssignments.values()) {
+    const ordered = [...entries].sort((a, b) => a.assignment.assignmentStart - b.assignment.assignmentStart);
+    const first = ordered[0];
+    let content = fileCache.get(first.hunk.filePath);
+    if (!content) {
+      content = safeReadText(assertSafeRepoFilePath(repoPath, first.hunk.filePath));
+      fileCache.set(first.hunk.filePath, content);
+    }
+
+    const initializerBody = content.slice(first.assignment.initializer.openBraceOffset + 1, first.assignment.initializer.endOffset);
+    const existingOwnedPropertyPattern = new RegExp(`\\b${escapeRegExp(migration.initializerRewrite.objectProperty)}\\s*=`);
+    const combinedRiskFlags = [...new Set(ordered.flatMap((x) => x.hunk.riskFlags))];
+    const baseConfidence = Math.min(...ordered.map((x) => x.hunk.confidence));
+
+    if (existingOwnedPropertyPattern.test(initializerBody)) {
+      const blockedRiskFlags: RefactorRiskFlag[] = [...new Set([...combinedRiskFlags, "ambiguous_target"] as RefactorRiskFlag[])];
+      rewrittenHunks.push({
+        ...first.hunk,
+        line: first.assignment.line,
+        startOffset: first.assignment.assignmentStart,
+        endOffset: first.assignment.assignmentEnd,
+        beforeText: first.assignment.assignmentText,
+        afterText: first.assignment.assignmentText,
+        confidence: Math.min(baseConfidence, 0.5),
+        riskFlags: blockedRiskFlags
+      });
+      continue;
+    }
+
+    const memberAssignments = ordered.map(({ assignment }) => `${targetMember} = ${assignment.expressionText}`);
+    const replacementText = `${first.assignment.indent}${migration.initializerRewrite.objectProperty} = new ${migration.initializerRewrite.objectType} { ${memberAssignments.join(", ")} }${first.assignment.trailingComma ? "," : ""}${first.assignment.lineEnding}`;
+
+    rewrittenHunks.push({
+      ...first.hunk,
+      line: first.assignment.line,
+      startOffset: first.assignment.assignmentStart,
+      endOffset: first.assignment.assignmentEnd,
+      beforeText: first.assignment.assignmentText,
+      afterText: replacementText,
+      confidence: Math.max(baseConfidence, 0.97),
+      ownerType: migration.requiredOwnerType,
+      symbolKind: "property",
+      riskFlags: combinedRiskFlags
+    });
+
+    for (const entry of ordered.slice(1)) {
+      rewrittenHunks.push({
+        ...entry.hunk,
+        line: entry.assignment.line,
+        startOffset: entry.assignment.assignmentStart,
+        endOffset: entry.assignment.assignmentEnd,
+        beforeText: entry.assignment.assignmentText,
+        afterText: "",
+        confidence: Math.max(baseConfidence, 0.97),
+        ownerType: migration.requiredOwnerType,
+        symbolKind: "property",
+        riskFlags: combinedRiskFlags
+      });
+    }
+  }
+
+  const hunks = [...retainedHunks, ...rewrittenHunks]
+    .sort((a, b) => a.filePath.localeCompare(b.filePath) || a.startOffset - b.startOffset || a.beforeText.localeCompare(b.beforeText));
+
+  return {
+    hunks,
+    affectedFiles: [...new Set(hunks.map((x) => x.filePath))].sort((a, b) => a.localeCompare(b))
   };
 }
 

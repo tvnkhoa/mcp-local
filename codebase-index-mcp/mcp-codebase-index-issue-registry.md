@@ -42,3 +42,52 @@
 ### Residual Risk
 - Some property edges remain unresolved by design (confidence-lower fallback path).
 - Caller evidence can include module-level caller context for shim access patterns; this is sufficient for impact triage but not yet exact callsite-level precision in all cases.
+
+## MCP-ISSUE-002
+- Scenario: C# owned-state refactor needed deterministic rewrite of remaining object initializers in test setup after shim removal.
+- MCP tool/query attempted: refactor_symbol_migration(dryRun=true) followed by preview-guided migration workflow for Conversation-owned state fields.
+- Expected: dry-run should detect and propose rewrites for object initializer members that still assign legacy shim-backed properties inside test fixtures.
+- Actual: migration dry-run did not surface object initializer assignments in the remaining test case, so no safe preview/apply path was available for that slice.
+- Impact: refactor flow falls back to manual edits for initializer-heavy test code, slowing migration and weakening confidence that all setup variants are covered.
+- Workaround: manually patch the remaining initializer block in the affected unit test file, then validate immediately with a narrow test/build check.
+- Enhancement proposal: extend refactor migration/preview tooling to recognize C# object initializer assignments, including nested owned-type mapping patterns and test-fixture construction code.
+
+### Reproduction Notes (2026-05-08)
+- Repo: wec.commnunication-hub
+- Context: Conversation flat-field to owned-state refactor.
+- Affected pattern: `new Conversation { LegacyProperty = ..., AnotherLegacyProperty = ... }` in test setup.
+- Desired behavior: preview should emit a deterministic rewrite such as `Identity = new ConversationIdentityState { ... }` or equivalent target expression based on provided mapping/owner guards.
+
+### Suggested Acceptance Criteria
+- Dry-run finds object initializer member assignments for the targeted owner type.
+- Preview output shows old initializer member -> new nested/owned expression mapping before apply.
+- Apply updates only guarded matches and returns conflicts for ambiguous initializer shapes.
+- Rollback can restore preview-backed initializer rewrites.
+
+### Implementation Update (2026-05-08)
+- Extended `refactor_symbol_migration` schema with optional `initializerRewrite` metadata:
+	- `objectProperty`
+	- `objectType`
+	- `targetMember` (optional; defaults to the last segment of `toSymbol`)
+- Upgraded owner-type inference for preview matching so C# object initializer members are attributed to the initializer target type (for example `new Conversation { ... }`) before falling back to the enclosing class heuristic.
+- Added a specialized symbol-migration preview builder for C# object initializer members:
+	- detects `LegacyProperty = value,` inside `new OwnerType { ... }`
+	- rewrites the full assignment into `OwnedState = new OwnedStateType { TargetMember = value },`
+	- returns blocked preview hunks with `ambiguous_target` when the target owned-state property already exists inside the same initializer block
+- `refactor_symbol_migration` dry-run output now includes `previewSummary` so callers can inspect exact before/after rewrite text before apply.
+
+### Verification Result (2026-05-08)
+- Reproduced the gap with a new regression in `codebase-index-mcp/scripts/test-refactor-engine.mjs` using a minimal C# fixture:
+	- before fix: `VALIDATION_ERROR` because `initializerRewrite` was unsupported and no preview/apply path existed for the owned-state rewrite
+	- after fix: dry-run finds the object initializer assignment and preview shows `IdentityState = new ConversationIdentityState { CrmCustomerId = 1 },`
+- Apply path now persists a normal preview/apply record and rewrites the fixture successfully.
+- Full regression suite after implementation: `28 passed, 0 failed`.
+
+### Verification Date: 2026-05-08
+- Workspace: `mcp-local/codebase-index-mcp`
+- Regression command: `node scripts/test-refactor-engine.mjs`
+- Outcome: ✅ RESOLVED in MCP server. CommunicationHub manual workaround is no longer required for this initializer shape when callers provide `initializerRewrite` metadata.
+
+### Residual Risk
+- The initializer rewrite path is currently heuristic and line-oriented; it is designed for deterministic test/setup initializers, not arbitrary multi-line expression trees.
+- When the target owned-state property is already present in the same initializer, preview is intentionally blocked as ambiguous instead of attempting a merge.

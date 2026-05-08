@@ -5,6 +5,7 @@
  *   3. Conflict branch: replacementCount === 0
  *   4. Full integration: preview → apply (no-match) → APPLY_PARTIAL_OR_CONFLICT
  *   5. Full integration: preview → mutate file → apply → conflict change
+ *   6. C# object initializer owned-state rewrite is previewed and applied by symbol migration
  */
 
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -133,6 +134,27 @@ try {
   // File B: will be used for conflict test
   const fileBPath = join(tmpDir, "src", "serviceB.ts");
   writeFileSync(fileBPath, `export const MARKER_TOKEN_XYZ = "original";\n`, "utf8");
+
+    // File C: C# object initializer that should be rewritten into owned-state assignment
+    const fileCPath = join(tmpDir, "src", "ConversationFixture.cs");
+    writeFileSync(
+    fileCPath,
+    `public class Conversation {}
+  public class ConversationIdentityState {}
+  public sealed class Fixture
+  {
+    public void Seed()
+    {
+      var conversation = new Conversation
+      {
+        CrmCustomerId = 1,
+        TenantId = 101
+      };
+    }
+  }
+  `,
+    "utf8"
+    );
 
   const repoPath = tmpDir;
 
@@ -271,6 +293,84 @@ try {
   // Should be parseable JSON (valid result)
   const qgJson = readJson(qgResult);
   assert(Array.isArray(qgJson?.rows), "query_graph returns rows array", qgText.slice(0, 200));
+
+  // ── 3.5  symbol migration rewrites C# object initializer members into owned-state assignment ──
+  console.log("\n  [3.5] symbol migration rewrites object initializer members...");
+  const migrationDryRun = await client.callTool({
+    name: "refactor_symbol_migration",
+    arguments: {
+      repoId: testRepoId,
+      migrations: [
+        {
+          fromSymbol: "CrmCustomerId",
+          toSymbol: "IdentityState.CrmCustomerId",
+          requiredOwnerType: "Conversation",
+          forbiddenOwnerTypes: [],
+          initializerRewrite: {
+            objectProperty: "IdentityState",
+            objectType: "ConversationIdentityState"
+          }
+        }
+      ],
+      scopePaths: ["src"],
+      dryRun: true
+    }
+  });
+  const migrationDryRunText = readTextContent(migrationDryRun);
+  const migrationDryRunJson = readJson(migrationDryRun);
+  assert(
+    migrationDryRunJson?.migrationMap?.[0]?.totalMatches > 0,
+    "object initializer dry-run finds owned-state rewrite match",
+    migrationDryRunText.slice(0, 300)
+  );
+  assert(
+    migrationDryRunJson?.migrationMap?.[0]?.previewSummary?.some((fileGroup) =>
+      Array.isArray(fileGroup?.hunks)
+      && fileGroup.hunks.some((hunk) => hunk?.afterText?.includes("IdentityState = new ConversationIdentityState"))
+    ),
+    "dry-run preview exposes owned-state replacement text",
+    JSON.stringify(migrationDryRunJson?.migrationMap?.[0] ?? null).slice(0, 300)
+  );
+
+  const migrationApply = await client.callTool({
+    name: "refactor_symbol_migration",
+    arguments: {
+      repoId: testRepoId,
+      migrations: [
+        {
+          fromSymbol: "CrmCustomerId",
+          toSymbol: "IdentityState.CrmCustomerId",
+          requiredOwnerType: "Conversation",
+          forbiddenOwnerTypes: [],
+          initializerRewrite: {
+            objectProperty: "IdentityState",
+            objectType: "ConversationIdentityState"
+          }
+        }
+      ],
+      scopePaths: ["src"],
+      dryRun: false
+    }
+  });
+  const migrationApplyText = readTextContent(migrationApply);
+  const migrationApplyJson = readJson(migrationApply);
+  assert(
+    migrationApplyJson?.migrationMap?.[0]?.applyId != null,
+    "object initializer migration apply creates apply record",
+    migrationApplyText.slice(0, 300)
+  );
+
+  const fileCAfter = await import("fs").then(({ readFileSync }) => readFileSync(fileCPath, "utf8"));
+  assert(
+    fileCAfter.includes("IdentityState = new ConversationIdentityState { CrmCustomerId = 1 },"),
+    "apply rewrites flat initializer member to owned-state initializer",
+    fileCAfter
+  );
+  assert(
+    !/^\s*CrmCustomerId\s*=\s*1\s*,\s*$/m.test(fileCAfter),
+    "apply removes legacy top-level initializer assignment",
+    fileCAfter
+  );
 
   await client.close();
 

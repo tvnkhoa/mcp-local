@@ -78,7 +78,7 @@ Current integration:
 - `CODEBASE_INDEX_TELEMETRY_SAMPLE_RATE` (optional): defaults to `1`; range `0..1` for telemetry sampling.
 - `CODEBASE_INDEX_DOCS_INDEXING_ENABLED` (optional): defaults to `false`; controls whether docs lane is indexed by default.
 - `CODEBASE_INDEX_DOCS_TOOLS_ENABLED` (optional): defaults to `false`; controls whether docs tools (`search_docs`, `find_stale_docs`, `find_doc_coverage`) are callable.
-- `CODEBASE_INDEX_LLM_ENABLED` (optional): defaults to `false`; when `true` in `NODE_ENV=production`, server startup is rejected.
+- `CODEBASE_INDEX_LLM_ENABLED` (optional): defaults to `false`; when `true`, server startup is rejected because runtime LLM invocation is prohibited by policy.
 - `CODEBASE_INDEX_REFACTOR_APPROVAL_SECRET` (optional but recommended): HMAC secret used to sign/verify `refactor_replace_apply` approval tokens.
 - `CODEBASE_INDEX_REFACTOR_STRICT_APPROVAL` (optional): defaults to `false`; when `true`, startup is rejected unless `CODEBASE_INDEX_REFACTOR_APPROVAL_SECRET` is set.
 - `CODEBASE_INDEX_REFACTOR_PREVIEW_TTL_MS` (optional): defaults to `1800000` (30 minutes); expiration window for preview/apply approval.
@@ -98,6 +98,24 @@ Refactor apply notes:
 - If newly changed files after apply drift beyond expected preview scope threshold (5%), diagnostics code is `SCOPE_DRIFT_DETECTED`.
 - Refactor tool outputs include `executionPolicy` with `decisionSource=rule_engine`, `llmInvolved=false`, and `approvalMode` (`strict` | `local-fallback`).
 - Preview lifecycle status reflects apply outcome (`applied`, `apply_partial`, `apply_failed`) instead of always using a single applied state.
+- `refactor_symbol_migration` supports optional `initializerRewrite` per migration for C# owned-state/object-initializer rewrites:
+
+```json
+{
+	"fromSymbol": "CrmCustomerId",
+	"toSymbol": "IdentityState.CrmCustomerId",
+	"requiredOwnerType": "Conversation",
+	"forbiddenOwnerTypes": [],
+	"initializerRewrite": {
+		"objectProperty": "IdentityState",
+		"objectType": "ConversationIdentityState",
+		"targetMember": "CrmCustomerId"
+	}
+}
+```
+
+- When `initializerRewrite` is set and the match is a C# object-initializer member assignment, preview/apply rewrites the full assignment to a guarded owned-state expression such as `IdentityState = new ConversationIdentityState { CrmCustomerId = 1 },` instead of producing an invalid dotted initializer member.
+- `refactor_symbol_migration` dry-run output now includes `previewSummary` so callers can inspect the exact before/after initializer rewrite before apply.
 
 No-config defaults:
 - Keep only required config (`CODEBASE_INDEX_ALLOWED_ROOTS`) for normal usage.
