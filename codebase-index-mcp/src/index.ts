@@ -3326,6 +3326,51 @@ function findInitializerMemberAssignment(
   };
 }
 
+function isDottedMemberPath(value: string): boolean {
+  return /^[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)+$/.test(value.trim());
+}
+
+function isSimpleIdentifier(value: string): boolean {
+  return /^[A-Za-z_][A-Za-z0-9_]*$/.test(value.trim());
+}
+
+function isInvalidCsharpInitializerReplacement(replacementText: string): boolean {
+  const trimmed = replacementText.trim();
+  return /^[A-Za-z_][A-Za-z0-9_]*\.[A-Za-z_][A-Za-z0-9_]*\s*=/.test(trimmed);
+}
+
+function resolveInitializerRewriteTargetMember(migration: RefactorSymbolMigrationInput): string {
+  const targetMember = migration.initializerRewrite?.targetMember
+    ?? migration.toSymbol.split(".").filter((x) => x.length > 0).at(-1)
+    ?? migration.fromSymbol;
+
+  const objectProperty = migration.initializerRewrite?.objectProperty;
+  const objectType = migration.initializerRewrite?.objectType;
+
+  if (objectProperty && !isSimpleIdentifier(objectProperty)) {
+    throw new PolicyViolationError(
+      "INVALID_INITIALIZER_REWRITE",
+      `initializerRewrite.objectProperty must be a simple identifier (received '${objectProperty}').`
+    );
+  }
+
+  if (!isSimpleIdentifier(targetMember)) {
+    throw new PolicyViolationError(
+      "INVALID_INITIALIZER_REWRITE",
+      `initializerRewrite.targetMember must be a simple identifier (received '${targetMember}').`
+    );
+  }
+
+  if (objectType && /[=;{}]/.test(objectType)) {
+    throw new PolicyViolationError(
+      "INVALID_INITIALIZER_REWRITE",
+      `initializerRewrite.objectType contains invalid characters (received '${objectType}').`
+    );
+  }
+
+  return targetMember;
+}
+
 function buildRefactorPreview(
   repoPath: string,
   repoId: string,
@@ -3475,6 +3520,44 @@ function buildSymbolMigrationPreview(
     "symbol-aware"
   );
 
+  const fileCache = new Map<string, string>();
+
+  if (!migration.initializerRewrite && isDottedMemberPath(migration.toSymbol)) {
+    const guardedHunks = preview.hunks.map((hunk) => {
+      if (inferLanguageFromPath(hunk.filePath) !== "csharp") {
+        return hunk;
+      }
+
+      let content = fileCache.get(hunk.filePath);
+      if (!content) {
+        content = safeReadText(assertSafeRepoFilePath(repoPath, hunk.filePath));
+        fileCache.set(hunk.filePath, content);
+      }
+
+      const assignment = findInitializerMemberAssignment(content, hunk.startOffset, migration.fromSymbol);
+      if (!assignment || assignment.initializer.typeName.toLowerCase() !== migration.requiredOwnerType.toLowerCase()) {
+        return hunk;
+      }
+
+      const blockedRiskFlags: RefactorRiskFlag[] = [...new Set([...hunk.riskFlags, "ambiguous_target"] as RefactorRiskFlag[])];
+      return {
+        ...hunk,
+        line: assignment.line,
+        startOffset: assignment.assignmentStart,
+        endOffset: assignment.assignmentEnd,
+        beforeText: assignment.assignmentText,
+        afterText: assignment.assignmentText,
+        confidence: Math.min(hunk.confidence, 0.5),
+        riskFlags: blockedRiskFlags
+      };
+    });
+
+    return {
+      hunks: guardedHunks.sort((a, b) => a.filePath.localeCompare(b.filePath) || a.startOffset - b.startOffset || a.beforeText.localeCompare(b.beforeText)),
+      affectedFiles: [...new Set(guardedHunks.map((x) => x.filePath))].sort((a, b) => a.localeCompare(b))
+    };
+  }
+
   if (!migration.initializerRewrite) {
     return preview;
   }
@@ -3482,10 +3565,7 @@ function buildSymbolMigrationPreview(
   const retainedHunks: PreviewCandidateHunk[] = [];
   const rewrittenHunks: PreviewCandidateHunk[] = [];
   const groupedAssignments = new Map<string, Array<{ hunk: PreviewCandidateHunk; assignment: InitializerAssignmentContext }>>();
-  const fileCache = new Map<string, string>();
-  const targetMember = migration.initializerRewrite.targetMember
-    ?? migration.toSymbol.split(".").filter((x) => x.length > 0).at(-1)
-    ?? migration.fromSymbol;
+  const targetMember = resolveInitializerRewriteTargetMember(migration);
 
   for (const hunk of preview.hunks) {
     if (inferLanguageFromPath(hunk.filePath) !== "csharp") {
@@ -3807,6 +3887,13 @@ function executeRefactorApplyPlan(
         if (target !== hunk.beforeText) {
           conflictReason = "OFFSET_MISMATCH_DURING_APPLY";
           break;
+        }
+        if (inferLanguageFromPath(filePath) === "csharp" && isInvalidCsharpInitializerReplacement(hunk.replacementText)) {
+          const enclosingInitializer = findEnclosingObjectInitializer(updated, hunk.startOffset);
+          if (enclosingInitializer && /\s*=/.test(hunk.beforeText)) {
+            conflictReason = "INVALID_CSHARP_INITIALIZER_REWRITE";
+            break;
+          }
         }
         updated = `${updated.slice(0, hunk.startOffset)}${hunk.replacementText}${updated.slice(hunk.endOffset)}`;
         appliedCount += 1;

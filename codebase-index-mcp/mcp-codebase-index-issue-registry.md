@@ -64,6 +64,12 @@
 - Apply updates only guarded matches and returns conflicts for ambiguous initializer shapes.
 - Rollback can restore preview-backed initializer rewrites.
 
+### Verification Result (2026-05-08)
+- MCP call: refactor_symbol_migration(dryRun=true) with migration `CrmCustomerId -> IdentityState.CrmCustomerId`, owner type `Conversation`, scope `backend/CommunicationHub/tests/Application.UnitTests`.
+- Outcome: preview returned `totalMatches: 135` and non-empty `previewSummary` across multiple test files.
+- Object initializer proof point: `ConversationNotesCommandHandlerTests.cs` line 40 contains `new Conversation { CrmCustomerId = 1001, ... }` and was included in preview hunks.
+- Status: ✅ RESOLVED for this scenario (object initializer detection now works for the tested migration pattern).
+
 ### Implementation Update (2026-05-08)
 - Extended `refactor_symbol_migration` schema with optional `initializerRewrite` metadata:
 	- `objectProperty`
@@ -91,3 +97,61 @@
 ### Residual Risk
 - The initializer rewrite path is currently heuristic and line-oriented; it is designed for deterministic test/setup initializers, not arbitrary multi-line expression trees.
 - When the target owned-state property is already present in the same initializer, preview is intentionally blocked as ambiguous instead of attempting a merge.
+
+## MCP-ISSUE-003
+- Scenario: C# refactor migration rewrote object initializer members into invalid dotted assignments during owned-state migration in CommunicationHub.
+- MCP tool/query attempted: `refactor_symbol_migration` with mappings such as `CrmCampaignId -> DispatchContext.CrmCampaignId`, `CrmVehicleId -> VehicleContext.CrmVehicleId`, `CrmVin -> VehicleContext.CrmVin`, `Rego -> VehicleContext.Rego`, `CrmCustomerId -> IdentityState.CrmCustomerId`.
+- Expected: inside `new Conversation { ... }`, generated members stay valid for initializer scope (for example `DispatchContext = { CrmCampaignId = ... }` or another valid deterministic form).
+- Actual: tool produced invalid forms like `DispatchContext.CrmCampaignId = ...`, `VehicleContext.CrmVin = ...`, and `IdentityState.CrmCustomerId = ...` inside nested initializer blocks.
+- Impact: large compile break (dozens of C# errors), failed build pipeline, and forced manual recovery/patching.
+- Workaround: manually normalize generated object initializer members to valid forms and rerun build/tests.
+- Enhancement proposal: enforce C# initializer-aware rewrite validation that forbids dotted left-hand assignments inside initializer member entries unless transformed into valid assignment targets.
+
+### Reproduction Notes (2026-05-08)
+- Repo: `wec.commnunication-hub`
+- Scope used during migration: `backend/CommunicationHub/src/Application/Conversations/Commands/*` and `backend/CommunicationHub/tests/**`.
+- Example broken outputs observed:
+	- `DispatchContext = { DispatchContext.CrmCampaignId = request.CrmCampaignId, ... }`
+	- `VehicleContext = { VehicleContext.CrmVin = request.CrmVin, ... }`
+	- `IdentityState = { IdentityState.CrmCustomerId = 1001, ... }`
+- Symptom: C# compiler errors such as `CS0747 Invalid initializer member declarator`, `CS0103 name does not exist in the current context`, and `CS1922 cannot initialize type ... with a collection initializer`.
+
+### Suggested Acceptance Criteria
+- Migration/apply output never emits dotted member assignments as initializer entries when target context is an object initializer.
+- For nested owned-state targets, rewrite emits one of the valid C# forms only:
+	- nested object initializer member assignment (`IdentityState = { CrmCustomerId = ... }`), or
+	- explicit owned-object construction (`IdentityState = new ConversationIdentityState { CrmCustomerId = ... }`).
+- Apply pipeline runs a syntax sanity check on generated hunks and blocks invalid C# initializer rewrites before writing files.
+- Rollback fully restores all touched files when apply introduces invalid hunks (no partial-conflict leftovers for this class of deterministic rewrites).
+
+### Verification Target
+- Re-run the same migration commands on CommunicationHub fixture and confirm:
+	- `dotnet build backend/CommunicationHub/CommunicationHub.slnx -c Release --no-restore` succeeds.
+	- No generated code contains patterns like `IdentityState.CrmCustomerId =` inside object initializer member lists.
+
+### Implementation Update (2026-05-08)
+- Added preview-stage safety gate in `buildSymbolMigrationPreview`:
+	- when migration target is dotted (for example `DispatchContext.CrmCampaignId`) and `initializerRewrite` is absent,
+	- C# object-initializer member matches are converted to blocked hunks (`ambiguous_target`) instead of generating dotted initializer assignments.
+- Added apply-stage safety guard in `executeRefactorApplyPlan`:
+	- detects dotted left-hand assignment rewrites inside C# object initializer context,
+	- rejects the hunk before write with conflict reason `INVALID_CSHARP_INITIALIZER_REWRITE`.
+- Strengthened initializer line parsing to avoid sibling-assignment capture drift and improve CRLF/LF newline handling.
+
+### Verification Result (2026-05-08)
+- Added regression coverage in `codebase-index-mcp/scripts/test-refactor-engine.mjs` (suite 3.6).
+- Scenario: `CrmCampaignId -> DispatchContext.CrmCampaignId` on `new Conversation { CrmCampaignId = 9, ... }` without `initializerRewrite`.
+- Outcome:
+	- dry-run marks the initializer hunk as blocked (`ambiguous_target`),
+	- apply attempt records run but does not rewrite file,
+	- no emitted dotted initializer member assignment.
+- Full regression suite: `32 passed, 0 failed`.
+
+### Verification Date: 2026-05-08
+- Workspace: `mcp-local/codebase-index-mcp`
+- Regression command: `node scripts/test-refactor-engine.mjs`
+- Outcome: ✅ RESOLVED for the reported invalid dotted-initializer rewrite class.
+
+### Residual Risk
+- The safety checks are heuristic (line/context based) rather than full C# AST validation; they intentionally favor blocking ambiguous rewrites over forcing transformations.
+- Users should provide `initializerRewrite` metadata for dotted target migrations in object initializer contexts to enable deterministic rewrite output.

@@ -156,6 +156,26 @@ try {
     "utf8"
     );
 
+  // File D: dotted target migration without initializerRewrite should be blocked in object initializer context
+  const fileDPath = join(tmpDir, "src", "ConversationFixtureNoRewrite.cs");
+  writeFileSync(
+    fileDPath,
+    `public class Conversation {}
+public sealed class FixtureNoRewrite
+{
+    public void Seed()
+    {
+        var conversation = new Conversation
+        {
+            CrmCampaignId = 9,
+            TenantId = 101
+        };
+    }
+}
+`,
+    "utf8"
+  );
+
   const repoPath = tmpDir;
 
   const transport = new StdioClientTransport({
@@ -370,6 +390,96 @@ try {
     !/^\s*CrmCustomerId\s*=\s*1\s*,\s*$/m.test(fileCAfter),
     "apply removes legacy top-level initializer assignment",
     fileCAfter
+  );
+
+  // ── 3.6  dotted toSymbol without initializerRewrite is blocked for C# object initializer ──
+  console.log("\n  [3.6] dotted toSymbol without initializerRewrite is blocked...");
+  const blockedDryRun = await client.callTool({
+    name: "refactor_symbol_migration",
+    arguments: {
+      repoId: testRepoId,
+      migrations: [
+        {
+          fromSymbol: "CrmCampaignId",
+          toSymbol: "DispatchContext.CrmCampaignId",
+          requiredOwnerType: "Conversation",
+          forbiddenOwnerTypes: []
+        }
+      ],
+      scopePaths: ["src"],
+      dryRun: true
+    }
+  });
+  const blockedDryRunJson = readJson(blockedDryRun);
+  const blockedHunks = blockedDryRunJson?.migrationMap?.[0]?.previewSummary?.flatMap((f) => f?.hunks ?? []) ?? [];
+  assert(
+    blockedHunks.some((h) => Array.isArray(h?.riskFlags) && h.riskFlags.includes("ambiguous_target")),
+    "dotted migration without initializerRewrite is blocked as ambiguous",
+    JSON.stringify(blockedDryRunJson?.migrationMap?.[0] ?? null).slice(0, 300)
+  );
+
+  const blockedApply = await client.callTool({
+    name: "refactor_symbol_migration",
+    arguments: {
+      repoId: testRepoId,
+      migrations: [
+        {
+          fromSymbol: "CrmCampaignId",
+          toSymbol: "DispatchContext.CrmCampaignId",
+          requiredOwnerType: "Conversation",
+          forbiddenOwnerTypes: []
+        }
+      ],
+      scopePaths: ["src"],
+      dryRun: false
+    }
+  });
+  const blockedApplyJson = readJson(blockedApply);
+  assert(
+    blockedApplyJson?.migrationMap?.[0]?.applyId != null,
+    "blocked migration still records apply attempt",
+    JSON.stringify(blockedApplyJson?.migrationMap?.[0] ?? null).slice(0, 300)
+  );
+  const fileDAfter = await import("fs").then(({ readFileSync }) => readFileSync(fileDPath, "utf8"));
+  assert(
+    !fileDAfter.includes("DispatchContext.CrmCampaignId ="),
+    "blocked migration does not emit dotted initializer member assignment",
+    fileDAfter
+  );
+  assert(
+    /^\s*CrmCampaignId\s*=\s*9\s*,\s*$/m.test(fileDAfter),
+    "blocked migration keeps original initializer member",
+    fileDAfter
+  );
+
+  // ── 3.7  initializerRewrite metadata with dotted targetMember is rejected ──
+  console.log("\n  [3.7] invalid initializerRewrite targetMember is rejected...");
+  const invalidRewrite = await client.callTool({
+    name: "refactor_symbol_migration",
+    arguments: {
+      repoId: testRepoId,
+      migrations: [
+        {
+          fromSymbol: "CrmCampaignId",
+          toSymbol: "DispatchContext.CrmCampaignId",
+          requiredOwnerType: "Conversation",
+          forbiddenOwnerTypes: [],
+          initializerRewrite: {
+            objectProperty: "DispatchContext",
+            objectType: "DispatchContextState",
+            targetMember: "DispatchContext.CrmCampaignId"
+          }
+        }
+      ],
+      scopePaths: ["src"],
+      dryRun: true
+    }
+  });
+  const invalidRewriteJson = readJson(invalidRewrite);
+  assert(
+    invalidRewriteJson?.code === "INVALID_INITIALIZER_REWRITE",
+    "invalid dotted targetMember is rejected by policy",
+    JSON.stringify(invalidRewriteJson ?? null).slice(0, 300)
   );
 
   await client.close();

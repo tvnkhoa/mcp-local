@@ -116,6 +116,8 @@ Refactor apply notes:
 
 - When `initializerRewrite` is set and the match is a C# object-initializer member assignment, preview/apply rewrites the full assignment to a guarded owned-state expression such as `IdentityState = new ConversationIdentityState { CrmCustomerId = 1 },` instead of producing an invalid dotted initializer member.
 - `refactor_symbol_migration` dry-run output now includes `previewSummary` so callers can inspect the exact before/after initializer rewrite before apply.
+- When `toSymbol` is a dotted member path (for example `DispatchContext.CrmCampaignId`) and `initializerRewrite` is not provided, C# object-initializer matches are blocked as `ambiguous_target` to prevent invalid generated entries like `DispatchContext.CrmCampaignId = ...` inside initializer bodies.
+- Apply-time C# sanity guard rejects invalid dotted initializer-member rewrites with conflict reason `INVALID_CSHARP_INITIALIZER_REWRITE` before writing files.
 
 No-config defaults:
 - Keep only required config (`CODEBASE_INDEX_ALLOWED_ROOTS`) for normal usage.
