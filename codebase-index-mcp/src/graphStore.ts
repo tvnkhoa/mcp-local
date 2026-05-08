@@ -1,6 +1,22 @@
 import Database from "better-sqlite3";
 
-import type { EdgeRecord, FileRecord, GraphHealth, IndexRunSummary, ReliabilitySummary, ResolvedEdge, ResolutionStats, RouteRecord, SymbolRecord } from "./types.js";
+import type {
+  RefactorApplyHunkRecord,
+  EdgeRecord,
+  FileRecord,
+  GraphHealth,
+  IndexRunSummary,
+  RefactorApplyChangeRecord,
+  RefactorApplyRecord,
+  RefactorPreviewHunkRecord,
+  RefactorPreviewRecord,
+  RefactorRollbackRecord,
+  ReliabilitySummary,
+  ResolvedEdge,
+  ResolutionStats,
+  RouteRecord,
+  SymbolRecord
+} from "./types.js";
 
 // Trivial single-word callee tokens that are standard JS/TS prototype or runtime methods.
 // These are never resolvable to user-defined symbols and should not count as graph gaps.
@@ -42,6 +58,20 @@ function createEmptyResolutionStats(): ResolutionStats {
       low_confidence: 0
     }
   };
+}
+
+function parseRiskFlags(raw: string): ("ambiguous_target" | "cross_type" | "generated_file")[] {
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (!Array.isArray(parsed)) {
+      return [];
+    }
+    return parsed.filter((item): item is "ambiguous_target" | "cross_type" | "generated_file" => {
+      return item === "ambiguous_target" || item === "cross_type" || item === "generated_file";
+    });
+  } catch {
+    return [];
+  }
 }
 
 export class GraphStore {
@@ -4683,6 +4713,352 @@ export class GraphStore {
     return { unresolvedCalls, unresolvedImports, unresolvedTypeRefs, note };
   }
 
+  listIndexedFiles(repoId: string): { path: string; language: string | null }[] {
+    return this.db
+      .prepare(
+        `
+        select path, language
+        from files
+        where repo_id = ?
+        order by path asc
+        `
+      )
+      .all(repoId) as { path: string; language: string | null }[];
+  }
+
+  saveRefactorPreview(preview: RefactorPreviewRecord, hunks: RefactorPreviewHunkRecord[]): void {
+    const tx = this.db.transaction((previewRow: RefactorPreviewRecord, hunkRows: RefactorPreviewHunkRecord[]) => {
+      this.db
+        .prepare(
+          `
+          insert into refactor_previews (
+            preview_id, repo_id, find_pattern, replace_expression, mode,
+            ambiguity_threshold_percent, created_at, expires_at, digest, status,
+            total_matches, affected_file_count, risk_ambiguous_count, risk_cross_type_count, risk_generated_count
+          ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          on conflict(preview_id) do update set
+            repo_id = excluded.repo_id,
+            find_pattern = excluded.find_pattern,
+            replace_expression = excluded.replace_expression,
+            mode = excluded.mode,
+            ambiguity_threshold_percent = excluded.ambiguity_threshold_percent,
+            created_at = excluded.created_at,
+            expires_at = excluded.expires_at,
+            digest = excluded.digest,
+            status = excluded.status,
+            total_matches = excluded.total_matches,
+            affected_file_count = excluded.affected_file_count,
+            risk_ambiguous_count = excluded.risk_ambiguous_count,
+            risk_cross_type_count = excluded.risk_cross_type_count,
+            risk_generated_count = excluded.risk_generated_count
+          `
+        )
+        .run(
+          previewRow.previewId,
+          previewRow.repoId,
+          previewRow.findPattern,
+          previewRow.replaceExpression,
+          previewRow.mode,
+          previewRow.ambiguityThresholdPercent,
+          previewRow.createdAt,
+          previewRow.expiresAt,
+          previewRow.digest,
+          previewRow.status,
+          previewRow.totalMatches,
+          previewRow.affectedFileCount,
+          previewRow.riskAmbiguousCount,
+          previewRow.riskCrossTypeCount,
+          previewRow.riskGeneratedCount
+        );
+
+      this.db.prepare(`delete from refactor_preview_hunks where preview_id = ?`).run(previewRow.previewId);
+
+      const insertHunk = this.db.prepare(
+        `
+        insert into refactor_preview_hunks (
+          preview_id, hunk_id, file_path, line, start_offset, end_offset,
+          before_text, after_text, replacement_text, owner_type, symbol_kind,
+          confidence, risk_flags, file_hash_before
+        ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `
+      );
+
+      for (const hunk of hunkRows) {
+        insertHunk.run(
+          hunk.previewId,
+          hunk.hunkId,
+          hunk.filePath,
+          hunk.line,
+          hunk.startOffset,
+          hunk.endOffset,
+          hunk.beforeText,
+          hunk.afterText,
+          hunk.replacementText,
+          hunk.ownerType,
+          hunk.symbolKind,
+          hunk.confidence,
+          JSON.stringify(hunk.riskFlags),
+          hunk.fileHashBefore
+        );
+      }
+    });
+
+    tx(preview, hunks);
+  }
+
+  getRefactorPreview(previewId: string): { preview: RefactorPreviewRecord; hunks: RefactorPreviewHunkRecord[] } | null {
+    const preview = this.db
+      .prepare(
+        `
+        select
+          preview_id as previewId,
+          repo_id as repoId,
+          find_pattern as findPattern,
+          replace_expression as replaceExpression,
+          mode,
+          ambiguity_threshold_percent as ambiguityThresholdPercent,
+          created_at as createdAt,
+          expires_at as expiresAt,
+          digest,
+          status,
+          total_matches as totalMatches,
+          affected_file_count as affectedFileCount,
+          risk_ambiguous_count as riskAmbiguousCount,
+          risk_cross_type_count as riskCrossTypeCount,
+          risk_generated_count as riskGeneratedCount
+        from refactor_previews
+        where preview_id = ?
+        limit 1
+        `
+      )
+      .get(previewId) as RefactorPreviewRecord | undefined;
+
+    if (!preview) {
+      return null;
+    }
+
+    const rows = this.db
+      .prepare(
+        `
+        select
+          preview_id as previewId,
+          hunk_id as hunkId,
+          file_path as filePath,
+          line,
+          start_offset as startOffset,
+          end_offset as endOffset,
+          before_text as beforeText,
+          after_text as afterText,
+          replacement_text as replacementText,
+          owner_type as ownerType,
+          symbol_kind as symbolKind,
+          confidence,
+          risk_flags as riskFlags,
+          file_hash_before as fileHashBefore
+        from refactor_preview_hunks
+        where preview_id = ?
+        order by file_path asc, start_offset asc, hunk_id asc
+        `
+      )
+      .all(previewId) as Array<Omit<RefactorPreviewHunkRecord, "riskFlags"> & { riskFlags: string }>;
+
+    const hunks: RefactorPreviewHunkRecord[] = rows.map((row) => ({
+      ...row,
+      riskFlags: parseRiskFlags(row.riskFlags)
+    }));
+
+    return { preview, hunks };
+  }
+
+  markRefactorPreviewStatus(previewId: string, status: RefactorPreviewRecord["status"]): void {
+    this.db
+      .prepare(
+        `
+        update refactor_previews
+        set status = ?
+        where preview_id = ?
+        `
+      )
+      .run(status, previewId);
+  }
+
+  recordRefactorApply(
+    apply: RefactorApplyRecord,
+    changes: RefactorApplyChangeRecord[],
+    hunks: RefactorApplyHunkRecord[]
+  ): void {
+    const tx = this.db.transaction((applyRow: RefactorApplyRecord, changeRows: RefactorApplyChangeRecord[], hunkRows: RefactorApplyHunkRecord[]) => {
+      this.db
+        .prepare(
+          `
+          insert into refactor_applies (
+            apply_id, rollback_id, preview_id, repo_id, status,
+            created_at, completed_at, total_files, total_replacements, conflict_count
+          ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          `
+        )
+        .run(
+          applyRow.applyId,
+          applyRow.rollbackId,
+          applyRow.previewId,
+          applyRow.repoId,
+          applyRow.status,
+          applyRow.createdAt,
+          applyRow.completedAt,
+          applyRow.totalFiles,
+          applyRow.totalReplacements,
+          applyRow.conflictCount
+        );
+
+      const insertChange = this.db.prepare(
+        `
+        insert into refactor_apply_changes (
+          apply_id, file_path, replacement_count, status, reason,
+          file_hash_before, file_hash_after, before_content, after_content
+        ) values (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `
+      );
+
+      for (const row of changeRows) {
+        // Cap stored content to APPLY_CONTENT_STORE_MAX_BYTES (256 KB) to prevent unbounded
+        // DB growth for large source files. Rollback will use hunk-level records in that case.
+        const APPLY_CONTENT_STORE_MAX_BYTES = 256 * 1024;
+        const beforeContentStored =
+          row.beforeContent != null && Buffer.byteLength(row.beforeContent, "utf8") <= APPLY_CONTENT_STORE_MAX_BYTES
+            ? row.beforeContent
+            : null;
+        const afterContentStored =
+          row.afterContent != null && Buffer.byteLength(row.afterContent, "utf8") <= APPLY_CONTENT_STORE_MAX_BYTES
+            ? row.afterContent
+            : null;
+        insertChange.run(
+          row.applyId,
+          row.filePath,
+          row.replacementCount,
+          row.status,
+          row.reason,
+          row.fileHashBefore,
+          row.fileHashAfter,
+          beforeContentStored,
+          afterContentStored
+        );
+      }
+
+      const insertHunk = this.db.prepare(
+        `
+        insert into refactor_apply_hunks (
+          apply_id, file_path, hunk_id, start_offset_applied, end_offset_applied, before_text, after_text
+        ) values (?, ?, ?, ?, ?, ?, ?)
+        `
+      );
+
+      for (const hunk of hunkRows) {
+        insertHunk.run(
+          hunk.applyId,
+          hunk.filePath,
+          hunk.hunkId,
+          hunk.startOffsetApplied,
+          hunk.endOffsetApplied,
+          hunk.beforeText,
+          hunk.afterText
+        );
+      }
+    });
+
+    tx(apply, changes, hunks);
+  }
+
+  getApplyByRollbackId(rollbackId: string): {
+    apply: RefactorApplyRecord;
+    changes: RefactorApplyChangeRecord[];
+    hunks: RefactorApplyHunkRecord[];
+  } | null {
+    const apply = this.db
+      .prepare(
+        `
+        select
+          apply_id as applyId,
+          rollback_id as rollbackId,
+          preview_id as previewId,
+          repo_id as repoId,
+          status,
+          created_at as createdAt,
+          completed_at as completedAt,
+          total_files as totalFiles,
+          total_replacements as totalReplacements,
+          conflict_count as conflictCount
+        from refactor_applies
+        where rollback_id = ?
+        limit 1
+        `
+      )
+      .get(rollbackId) as RefactorApplyRecord | undefined;
+
+    if (!apply) {
+      return null;
+    }
+
+    const changes = this.db
+      .prepare(
+        `
+        select
+          apply_id as applyId,
+          file_path as filePath,
+          replacement_count as replacementCount,
+          status,
+          reason,
+          file_hash_before as fileHashBefore,
+          file_hash_after as fileHashAfter,
+          before_content as beforeContent,
+          after_content as afterContent
+        from refactor_apply_changes
+        where apply_id = ?
+        order by file_path asc
+        `
+      )
+      .all(apply.applyId) as RefactorApplyChangeRecord[];
+
+    const hunks = this.db
+      .prepare(
+        `
+        select
+          apply_id as applyId,
+          file_path as filePath,
+          hunk_id as hunkId,
+          start_offset_applied as startOffsetApplied,
+          end_offset_applied as endOffsetApplied,
+          before_text as beforeText,
+          after_text as afterText
+        from refactor_apply_hunks
+        where apply_id = ?
+        order by file_path asc, start_offset_applied desc, hunk_id asc
+        `
+      )
+      .all(apply.applyId) as RefactorApplyHunkRecord[];
+
+    return { apply, changes, hunks };
+  }
+
+  recordRefactorRollback(rollback: RefactorRollbackRecord): void {
+    this.db
+      .prepare(
+        `
+        insert into refactor_rollbacks (
+          rollback_id, apply_id, status, created_at, completed_at, restored_files, conflict_count
+        ) values (?, ?, ?, ?, ?, ?, ?)
+        `
+      )
+      .run(
+        rollback.rollbackId,
+        rollback.applyId,
+        rollback.status,
+        rollback.createdAt,
+        rollback.completedAt,
+        rollback.restoredFiles,
+        rollback.conflictCount
+      );
+  }
+
   private initSchema(): void {
     this.db.exec(`
       create table if not exists repositories (
@@ -4822,6 +5198,103 @@ export class GraphStore {
       create index if not exists idx_routes_repo_file on routes(repo_id, file_path);
       create index if not exists idx_routes_repo_method on routes(repo_id, http_method);
       create index if not exists idx_routes_repo_handler on routes(repo_id, handler_symbol_id);
+
+      create table if not exists refactor_previews (
+        preview_id text primary key,
+        repo_id text not null,
+        find_pattern text not null,
+        replace_expression text not null,
+        mode text not null,
+        ambiguity_threshold_percent real not null,
+        created_at text not null,
+        expires_at text not null,
+        digest text not null,
+        status text not null,
+        total_matches integer not null,
+        affected_file_count integer not null,
+        risk_ambiguous_count integer not null,
+        risk_cross_type_count integer not null,
+        risk_generated_count integer not null
+      );
+
+      create index if not exists idx_refactor_previews_repo_created on refactor_previews(repo_id, created_at desc);
+
+      create table if not exists refactor_preview_hunks (
+        preview_id text not null,
+        hunk_id text not null,
+        file_path text not null,
+        line integer not null,
+        start_offset integer not null,
+        end_offset integer not null,
+        before_text text not null,
+        after_text text not null,
+        replacement_text text not null,
+        owner_type text,
+        symbol_kind text,
+        confidence real not null,
+        risk_flags text not null,
+        file_hash_before text not null,
+        primary key (preview_id, hunk_id)
+      );
+
+      create index if not exists idx_refactor_hunks_preview_file on refactor_preview_hunks(preview_id, file_path, start_offset);
+
+      create table if not exists refactor_applies (
+        apply_id text primary key,
+        rollback_id text not null unique,
+        preview_id text not null,
+        repo_id text not null,
+        status text not null,
+        created_at text not null,
+        completed_at text not null,
+        total_files integer not null,
+        total_replacements integer not null,
+        conflict_count integer not null
+      );
+
+      create index if not exists idx_refactor_applies_preview on refactor_applies(preview_id);
+      create index if not exists idx_refactor_applies_repo_created on refactor_applies(repo_id, created_at desc);
+
+      create table if not exists refactor_apply_changes (
+        apply_id text not null,
+        file_path text not null,
+        replacement_count integer not null,
+        status text not null,
+        reason text,
+        file_hash_before text not null,
+        file_hash_after text,
+        -- before_content / after_content are capped to APPLY_CONTENT_STORE_MAX_BYTES and stored
+        -- as NULL when the file exceeds that threshold. Rollback falls back to refactor_apply_hunks
+        -- in that case. The PK assumes at most one change record per file per apply run; if
+        -- multi-pass batching is introduced this constraint must be revisited.
+        before_content text,
+        after_content text,
+        primary key (apply_id, file_path)
+      );
+
+      create table if not exists refactor_apply_hunks (
+        apply_id text not null,
+        file_path text not null,
+        hunk_id text not null,
+        start_offset_applied integer not null,
+        end_offset_applied integer not null,
+        before_text text not null,
+        after_text text not null,
+        primary key (apply_id, hunk_id)
+      );
+
+      create index if not exists idx_refactor_apply_hunks_apply_file_offset
+      on refactor_apply_hunks(apply_id, file_path, start_offset_applied desc);
+
+      create table if not exists refactor_rollbacks (
+        rollback_id text primary key,
+        apply_id text not null,
+        status text not null,
+        created_at text not null,
+        completed_at text not null,
+        restored_files integer not null,
+        conflict_count integer not null
+      );
     `);
   }
 }

@@ -1,8 +1,11 @@
 import process from "node:process";
-import { randomUUID } from "node:crypto";
+import { createHash, createHmac, randomUUID } from "node:crypto";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { execFileSync } from "node:child_process";
+import fs from "node:fs";
+import path from "node:path";
 import os from "node:os";
+import { fileURLToPath } from "node:url";
 
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
@@ -15,6 +18,7 @@ import {
   ErrorCode,
   type CallToolResult
 } from "@modelcontextprotocol/sdk/types.js";
+import { globSync } from "glob";
 import { z } from "zod";
 
 import { GraphStore } from "./graphStore.js";
@@ -29,10 +33,22 @@ import {
 } from "./indexGuardrails.js";
 import { validateAllowedTables, validateReadOnlyGraphSql } from "./sqliteGuardrails.js";
 import { WatchManager } from "./watchManager.js";
-import type { CallChainDirection, IndexRunSummary, ResolutionStats } from "./types.js";
+import type {
+  CallChainDirection,
+  RefactorApplyHunkRecord,
+  IndexRunSummary,
+  RefactorApplyChangeRecord,
+  RefactorApplyRecord,
+  RefactorPreviewHunkRecord,
+  RefactorPreviewRecord,
+  RefactorRiskFlag,
+  RefactorRollbackRecord,
+  ResolutionStats
+} from "./types.js";
 
 const dbPath = process.env.CODEBASE_INDEX_DB_PATH ?? "./codebase-index.db";
 const allowedRoots = parseAllowedRoots(process.env.CODEBASE_INDEX_ALLOWED_ROOTS);
+const MODULE_DIR = path.dirname(fileURLToPath(import.meta.url));
 
 const MAX_FILES_PER_RUN = numberFromEnv("CODEBASE_INDEX_MAX_FILES_PER_RUN", 20_000);
 const MAX_RESULT_LIMIT = numberFromEnv("CODEBASE_INDEX_MAX_RESULT_LIMIT", 500);
@@ -56,6 +72,13 @@ const TELEMETRY_ENABLED = parseBooleanEnv(process.env.CODEBASE_INDEX_TELEMETRY_E
 const TELEMETRY_SAMPLE_RATE = ratioFromEnv(process.env.CODEBASE_INDEX_TELEMETRY_SAMPLE_RATE, 1);
 const DOCS_INDEXING_ENABLED = parseBooleanEnv(process.env.CODEBASE_INDEX_DOCS_INDEXING_ENABLED, false);
 const DOCS_TOOLS_ENABLED = parseBooleanEnv(process.env.CODEBASE_INDEX_DOCS_TOOLS_ENABLED, false);
+const LLM_ENABLED = parseBooleanEnv(process.env.CODEBASE_INDEX_LLM_ENABLED, false);
+const REFACTOR_STRICT_APPROVAL = parseBooleanEnv(process.env.CODEBASE_INDEX_REFACTOR_STRICT_APPROVAL, false);
+const NODE_ENV = (process.env.NODE_ENV ?? "development").toLowerCase();
+const REFACTOR_APPROVAL_SECRET = process.env.CODEBASE_INDEX_REFACTOR_APPROVAL_SECRET ?? "";
+const REFACTOR_PREVIEW_TTL_MS = numberFromEnv("CODEBASE_INDEX_REFACTOR_PREVIEW_TTL_MS", 30 * 60 * 1000);
+const REFACTOR_LOW_CONFIDENCE_THRESHOLD = 0.8;
+const SERVER_VERSION = resolveServerVersion();
 type ResponseProfile = "nano" | "compact" | "standard" | "verbose";
 const responseProfileSchema = z.enum(["nano", "compact", "standard", "verbose"]);
 
@@ -393,6 +416,80 @@ const queryGraphSchema = z
   })
   .strict();
 
+const refactorSymbolKindSchema = z.enum(["class", "property", "field", "method"]);
+
+const refactorScopeSchema = z
+  .object({
+    includePaths: z.array(z.string().min(1).max(500)).max(200).default([]),
+    excludePaths: z.array(z.string().min(1).max(500)).max(200).default([]),
+    fileGlobs: z.array(z.string().min(1).max(500)).max(200).default([])
+  })
+  .strict()
+  .default({ includePaths: [], excludePaths: [], fileGlobs: [] });
+
+const refactorGuardsSchema = z
+  .object({
+    language: z.string().min(1).max(50).optional(),
+    symbolKinds: z.array(refactorSymbolKindSchema).max(10).default([]),
+    allowOwnerTypes: z.array(z.string().min(1).max(200)).max(200).default([]),
+    disallowOwnerTypes: z.array(z.string().min(1).max(200)).max(200).default([]),
+    disallowTypeList: z.array(z.string().min(1).max(200)).max(200).default([])
+  })
+  .strict()
+  .default({ symbolKinds: [], allowOwnerTypes: [], disallowOwnerTypes: [], disallowTypeList: [] });
+
+const refactorReplacePreviewSchema = z
+  .object({
+    repoId: z.string().min(1).max(200),
+    find: z.string().min(1).max(2_000),
+    replaceExpression: z.string().max(2_000),
+    scope: refactorScopeSchema,
+    guards: refactorGuardsSchema,
+    mode: z.enum(["text", "syntax-aware", "symbol-aware"]).default("symbol-aware"),
+    ambiguityThresholdPercent: z.number().min(0).max(100).default(1)
+  })
+  .strict();
+
+const refactorReplaceApplySchema = z
+  .object({
+    previewId: z.string().min(1).max(200),
+    approvalToken: z.string().min(1).max(2_000),
+    maxFilesPerBatch: z.number().int().min(1).max(500).default(50),
+    stopOnFirstConflict: z.boolean().default(true),
+    includeLowConfidence: z.boolean().default(false)
+  })
+  .strict();
+
+const refactorReplaceRollbackSchema = z
+  .object({
+    rollbackId: z.string().min(1).max(200)
+  })
+  .strict();
+
+const refactorSymbolMigrationSchema = z
+  .object({
+    repoId: z.string().min(1).max(200),
+    migrations: z
+      .array(
+        z
+          .object({
+            fromSymbol: z.string().min(1).max(500),
+            toSymbol: z.string().min(1).max(500),
+            requiredOwnerType: z.string().min(1).max(200),
+            forbiddenOwnerTypes: z.array(z.string().min(1).max(200)).max(200).default([])
+          })
+          .strict()
+      )
+      .min(1)
+      .max(200),
+    scopePaths: z.array(z.string().min(1).max(500)).max(200).default([]),
+    dryRun: z.boolean().default(true)
+  })
+  .strict();
+
+assertNoLlmRuntimePolicy();
+assertRefactorApprovalPolicy();
+
 const server = new Server(
   {
     name: "codebase-index-mcp",
@@ -430,7 +527,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
     tools: [
       {
         name: "health_check",
-        description: "Check server availability and latest indexing run metadata.",
+        description: "Check server availability plus codebase readiness (staleness, working tree, watch state) with action hints for re-index/watch.",
         inputSchema: {
           type: "object",
           additionalProperties: false,
@@ -853,6 +950,100 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             newName: { type: "string" },
             limit: { type: "integer", minimum: 1, maximum: MAX_RESULT_LIMIT },
             profile: { type: "string", enum: ["nano", "compact", "standard", "verbose"] }
+          }
+        }
+      },
+      {
+        name: "refactor_replace_preview",
+        description: "Preview deterministic bulk replacements with scope and type-ownership guards before applying any change.",
+        inputSchema: {
+          type: "object",
+          additionalProperties: false,
+          required: ["repoId", "find", "replaceExpression"],
+          properties: {
+            repoId: { type: "string" },
+            find: { type: "string" },
+            replaceExpression: { type: "string" },
+            scope: {
+              type: "object",
+              additionalProperties: false,
+              properties: {
+                includePaths: { type: "array", items: { type: "string" }, maxItems: 200 },
+                excludePaths: { type: "array", items: { type: "string" }, maxItems: 200 },
+                fileGlobs: { type: "array", items: { type: "string" }, maxItems: 200 }
+              }
+            },
+            guards: {
+              type: "object",
+              additionalProperties: false,
+              properties: {
+                language: { type: "string" },
+                symbolKinds: { type: "array", items: { type: "string", enum: ["class", "property", "field", "method"] }, maxItems: 10 },
+                allowOwnerTypes: { type: "array", items: { type: "string" }, maxItems: 200 },
+                disallowOwnerTypes: { type: "array", items: { type: "string" }, maxItems: 200 },
+                disallowTypeList: { type: "array", items: { type: "string" }, maxItems: 200 }
+              }
+            },
+            mode: { type: "string", enum: ["text", "syntax-aware", "symbol-aware"] },
+            ambiguityThresholdPercent: { type: "number", minimum: 0, maximum: 100 }
+          }
+        }
+      },
+      {
+        name: "refactor_replace_apply",
+        description: "Apply an approved replacement plan exactly as previewed using previewId and approval token.",
+        inputSchema: {
+          type: "object",
+          additionalProperties: false,
+          required: ["previewId", "approvalToken"],
+          properties: {
+            previewId: { type: "string" },
+            approvalToken: { type: "string" },
+            maxFilesPerBatch: { type: "integer", minimum: 1, maximum: 500 },
+            stopOnFirstConflict: { type: "boolean" },
+            includeLowConfidence: { type: "boolean" }
+          }
+        }
+      },
+      {
+        name: "refactor_replace_rollback",
+        description: "Rollback one previous apply operation by rollbackId.",
+        inputSchema: {
+          type: "object",
+          additionalProperties: false,
+          required: ["rollbackId"],
+          properties: {
+            rollbackId: { type: "string" }
+          }
+        }
+      },
+      {
+        name: "refactor_symbol_migration",
+        description: "Run owner-type constrained symbol migrations (dry-run by default) using the same preview/apply engine.",
+        inputSchema: {
+          type: "object",
+          additionalProperties: false,
+          required: ["repoId", "migrations"],
+          properties: {
+            repoId: { type: "string" },
+            migrations: {
+              type: "array",
+              minItems: 1,
+              maxItems: 200,
+              items: {
+                type: "object",
+                additionalProperties: false,
+                required: ["fromSymbol", "toSymbol", "requiredOwnerType"],
+                properties: {
+                  fromSymbol: { type: "string" },
+                  toSymbol: { type: "string" },
+                  requiredOwnerType: { type: "string" },
+                  forbiddenOwnerTypes: { type: "array", items: { type: "string" }, maxItems: 200 }
+                }
+              }
+            },
+            scopePaths: { type: "array", items: { type: "string" }, maxItems: 200 },
+            dryRun: { type: "boolean" }
           }
         }
       },
@@ -1732,7 +1923,24 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           throw new McpError(ErrorCode.InvalidParams, readOnlyCheck.message);
         }
 
-        const allowlistCheck = validateAllowedTables(readOnlyCheck.sanitizedSql, new Set(["repositories", "files", "symbols", "edges", "index_runs", "routes", "cross_repo_deps"]));
+        const allowlistCheck = validateAllowedTables(
+          readOnlyCheck.sanitizedSql,
+          new Set([
+            "repositories",
+            "files",
+            "symbols",
+            "edges",
+            "index_runs",
+            "routes",
+            "cross_repo_deps",
+            "refactor_previews",
+            "refactor_preview_hunks",
+            "refactor_applies",
+            "refactor_apply_changes",
+            "refactor_apply_hunks",
+            "refactor_rollbacks"
+          ])
+        );
         if (!allowlistCheck.ok) {
           throw new McpError(ErrorCode.InvalidParams, allowlistCheck.message);
         }
@@ -1822,6 +2030,453 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           hints
         };
         return asText(payload, profile);
+      }
+      case "refactor_replace_preview": {
+        const args = refactorReplacePreviewSchema.parse(request.params.arguments ?? {});
+        const repo = store.getRepository(args.repoId);
+        if (!repo) {
+          throw new McpError(ErrorCode.InvalidParams, `refactor_replace_preview: repo '${args.repoId}' not found. Run index_repository first.`);
+        }
+
+        const previewResult = buildRefactorPreview(repo.repoPath, args.repoId, args.find, args.replaceExpression, args.scope, args.guards, args.mode);
+        const riskCounts = countPreviewRisks(previewResult.hunks);
+        const ambiguousRatio = previewResult.hunks.length > 0
+          ? (riskCounts.ambiguous / previewResult.hunks.length) * 100
+          : 0;
+        const blockedByAmbiguity = ambiguousRatio > args.ambiguityThresholdPercent;
+
+        const now = new Date();
+        const expiresAt = new Date(now.getTime() + REFACTOR_PREVIEW_TTL_MS).toISOString();
+        const digest = createPreviewDigest(args.repoId, args.find, args.replaceExpression, previewResult.hunks);
+        const previewId = `preview_${randomUUID()}`;
+
+        const previewRecord: RefactorPreviewRecord = {
+          previewId,
+          repoId: args.repoId,
+          findPattern: args.find,
+          replaceExpression: args.replaceExpression,
+          mode: args.mode,
+          ambiguityThresholdPercent: args.ambiguityThresholdPercent,
+          createdAt: now.toISOString(),
+          expiresAt,
+          digest,
+          status: "ready",
+          totalMatches: previewResult.hunks.length,
+          affectedFileCount: previewResult.affectedFiles.length,
+          riskAmbiguousCount: riskCounts.ambiguous,
+          riskCrossTypeCount: riskCounts.crossType,
+          riskGeneratedCount: riskCounts.generated
+        };
+
+        const hunkRecords: RefactorPreviewHunkRecord[] = previewResult.hunks.map((hunk, index) => ({
+          previewId,
+          hunkId: `${previewId}_${String(index + 1).padStart(6, "0")}`,
+          filePath: hunk.filePath,
+          line: hunk.line,
+          startOffset: hunk.startOffset,
+          endOffset: hunk.endOffset,
+          beforeText: hunk.beforeText,
+          afterText: hunk.afterText,
+          replacementText: args.replaceExpression,
+          ownerType: hunk.ownerType,
+          symbolKind: hunk.symbolKind,
+          confidence: hunk.confidence,
+          riskFlags: hunk.riskFlags,
+          fileHashBefore: hunk.fileHashBefore
+        }));
+
+        store.saveRefactorPreview(previewRecord, hunkRecords);
+
+        const approvalToken = issueApprovalToken(previewId, digest, expiresAt);
+
+        return asText({
+          previewId,
+          mode: args.mode,
+          totalMatches: previewResult.hunks.length,
+          affectedFiles: previewResult.affectedFiles,
+          groupedPreviewHunks: groupPreviewHunks(hunkRecords),
+          riskFlags: {
+            ambiguousTargets: riskCounts.ambiguous,
+            crossTypeReplacements: riskCounts.crossType,
+            generatedFiles: riskCounts.generated
+          },
+          ambiguity: {
+            ratioPercent: Number(ambiguousRatio.toFixed(2)),
+            thresholdPercent: args.ambiguityThresholdPercent,
+            blockedByPolicy: blockedByAmbiguity
+          },
+          diagnostics: {
+            code: blockedByAmbiguity ? "PREVIEW_BLOCKED_BY_AMBIGUITY" : "PREVIEW_READY",
+            machineReadable: true
+          },
+          executionPolicy: noLlmAudit(),
+          approvalToken,
+          expiresAt
+        });
+      }
+      case "refactor_replace_apply": {
+        const args = refactorReplaceApplySchema.parse(request.params.arguments ?? {});
+        const preview = store.getRefactorPreview(args.previewId);
+        if (!preview) {
+          throw new McpError(ErrorCode.InvalidParams, `refactor_replace_apply: preview '${args.previewId}' not found.`);
+        }
+
+        if (Date.parse(preview.preview.expiresAt) < Date.now()) {
+          throw new PolicyViolationError("PREVIEW_EXPIRED", "refactor_replace_apply: preview expired. Create a fresh preview before apply.");
+        }
+
+        const ambiguousRatio = preview.preview.totalMatches > 0
+          ? (preview.preview.riskAmbiguousCount / preview.preview.totalMatches) * 100
+          : 0;
+        if (ambiguousRatio > preview.preview.ambiguityThresholdPercent) {
+          throw new PolicyViolationError(
+            "AMBIGUITY_THRESHOLD_EXCEEDED",
+            `refactor_replace_apply: ambiguous ratio ${ambiguousRatio.toFixed(2)}% exceeds threshold ${preview.preview.ambiguityThresholdPercent}%.`
+          );
+        }
+
+        verifyApprovalToken(args.approvalToken, preview.preview.previewId, preview.preview.digest, preview.preview.expiresAt);
+
+        const repo = store.getRepository(preview.preview.repoId);
+        if (!repo) {
+          throw new McpError(ErrorCode.InvalidParams, `refactor_replace_apply: repo '${preview.preview.repoId}' not found.`);
+        }
+
+        const applyId = `apply_${randomUUID()}`;
+        const rollbackId = `rollback_${randomUUID()}`;
+        const expectedApplyFiles = collectExpectedApplyFiles(preview.hunks, args.includeLowConfidence);
+        const beforeChangedFiles = collectGitChangedFiles(repo.repoPath);
+        const applyOutcome = executeRefactorApplyPlan(
+          repo.repoPath,
+          applyId,
+          preview.hunks,
+          args.maxFilesPerBatch,
+          args.stopOnFirstConflict,
+          args.includeLowConfidence
+        );
+        const afterChangedFiles = collectGitChangedFiles(repo.repoPath);
+        const newlyChangedFiles = [...afterChangedFiles].filter((x) => !beforeChangedFiles.has(x));
+        const unexpectedChangedFiles = newlyChangedFiles.filter((x) => !expectedApplyFiles.has(x));
+        const scopeDriftPercent = expectedApplyFiles.size > 0
+          ? (unexpectedChangedFiles.length / expectedApplyFiles.size) * 100
+          : 0;
+        const scopeDriftDetected = scopeDriftPercent > 5;
+        const changes = applyOutcome.changes;
+
+        const appliedFiles = changes.filter((x) => x.status === "applied");
+        const conflicted = changes.filter((x) => x.status === "conflict");
+        const totalReplacements = appliedFiles.reduce((sum, item) => sum + item.replacementCount, 0);
+        const applyStatus = deriveApplyStatus(changes);
+
+        const applyRecord: RefactorApplyRecord = {
+          applyId,
+          rollbackId,
+          previewId: preview.preview.previewId,
+          repoId: preview.preview.repoId,
+          status: applyStatus,
+          createdAt: new Date().toISOString(),
+          completedAt: new Date().toISOString(),
+          totalFiles: appliedFiles.length,
+          totalReplacements,
+          conflictCount: conflicted.length
+        };
+
+        store.recordRefactorApply(applyRecord, changes, applyOutcome.appliedHunks);
+        store.markRefactorPreviewStatus(preview.preview.previewId, mapPreviewStatusFromApplyStatus(applyRecord.status));
+
+        return asText({
+          applyId,
+          rollbackId,
+          appliedFiles: appliedFiles.map((x) => x.filePath),
+          appliedReplacementsCount: totalReplacements,
+          skippedReplacements: changes
+            .filter((x) => x.status !== "applied")
+            .map((x) => ({ filePath: x.filePath, status: x.status, reason: x.reason })),
+          laneBreakdown: {
+            highConfidenceEdits: applyOutcome.lane.highConfidenceEdits,
+            lowConfidenceEdits: applyOutcome.lane.lowConfidenceEdits,
+            lowConfidenceSkipped: applyOutcome.lane.lowConfidenceSkipped,
+            lowConfidenceThreshold: REFACTOR_LOW_CONFIDENCE_THRESHOLD,
+            includeLowConfidence: args.includeLowConfidence
+          },
+          scopeCheck: {
+            expectedFiles: [...expectedApplyFiles].sort((a, b) => a.localeCompare(b)),
+            newlyChangedFiles: newlyChangedFiles.sort((a, b) => a.localeCompare(b)),
+            unexpectedFiles: unexpectedChangedFiles.sort((a, b) => a.localeCompare(b)),
+            driftPercent: Number(scopeDriftPercent.toFixed(2)),
+            driftThresholdPercent: 5
+          },
+          patchSummary: appliedFiles.map((x) => ({ filePath: x.filePath, replacementCount: x.replacementCount })),
+          diagnostics: {
+            code: scopeDriftDetected
+              ? "SCOPE_DRIFT_DETECTED"
+              : applyStatus !== "applied"
+                ? "APPLY_PARTIAL_OR_CONFLICT"
+                : "APPLY_OK",
+            machineReadable: true
+          },
+          executionPolicy: noLlmAudit()
+        });
+      }
+      case "refactor_replace_rollback": {
+        const args = refactorReplaceRollbackSchema.parse(request.params.arguments ?? {});
+        const payload = store.getApplyByRollbackId(args.rollbackId);
+        if (!payload) {
+          throw new McpError(ErrorCode.InvalidParams, `refactor_replace_rollback: rollbackId '${args.rollbackId}' not found.`);
+        }
+
+        const repo = store.getRepository(payload.apply.repoId);
+        if (!repo) {
+          throw new McpError(ErrorCode.InvalidParams, `refactor_replace_rollback: repo '${payload.apply.repoId}' not found.`);
+        }
+
+        let restored = 0;
+        let conflicts = 0;
+        const touchedFiles = new Set<string>();
+
+        if (payload.hunks.length > 0) {
+          const hunkByFile = new Map<string, RefactorApplyHunkRecord[]>();
+          for (const hunk of payload.hunks) {
+            const list = hunkByFile.get(hunk.filePath) ?? [];
+            list.push(hunk);
+            hunkByFile.set(hunk.filePath, list);
+          }
+
+          for (const [filePath, hunks] of hunkByFile.entries()) {
+            const absolute = assertSafeRepoFilePath(repo.repoPath, filePath);
+            if (!fs.existsSync(absolute)) {
+              conflicts += 1;
+              continue;
+            }
+
+            let content = safeReadText(absolute);
+            let fileRestoredSegments = 0;
+
+            try {
+              for (const hunk of [...hunks].sort((a, b) => b.startOffsetApplied - a.startOffsetApplied || b.hunkId.localeCompare(a.hunkId))) {
+                const expectedCurrent = content.slice(hunk.startOffsetApplied, hunk.endOffsetApplied);
+                if (expectedCurrent !== hunk.afterText) {
+                  conflicts += 1;
+                  continue;
+                }
+
+                content = `${content.slice(0, hunk.startOffsetApplied)}${hunk.beforeText}${content.slice(hunk.endOffsetApplied)}`;
+                fileRestoredSegments += 1;
+              }
+
+              if (fileRestoredSegments > 0) {
+                fs.writeFileSync(absolute, content, "utf8");
+                touchedFiles.add(filePath);
+              }
+            } catch {
+              conflicts += 1;
+            }
+          }
+        } else {
+          for (const change of payload.changes) {
+            if (change.status !== "applied") {
+              continue;
+            }
+            if (change.beforeContent == null) {
+              // Content was not stored (exceeded size cap). Hunk-level restore was unavailable
+              // too (no hunks), so we cannot safely restore this file — count as conflict.
+              conflicts += 1;
+              continue;
+            }
+            const absolute = assertSafeRepoFilePath(repo.repoPath, change.filePath);
+            if (!fs.existsSync(absolute)) {
+              conflicts += 1;
+              continue;
+            }
+            try {
+              fs.writeFileSync(absolute, change.beforeContent, "utf8");
+              touchedFiles.add(change.filePath);
+            } catch {
+              conflicts += 1;
+            }
+          }
+        }
+
+        restored = touchedFiles.size;
+
+        const status: RefactorRollbackRecord["status"] = conflicts > 0 ? (restored > 0 ? "partial" : "failed") : "restored";
+        store.recordRefactorRollback({
+          rollbackId: args.rollbackId,
+          applyId: payload.apply.applyId,
+          status,
+          createdAt: new Date().toISOString(),
+          completedAt: new Date().toISOString(),
+          restoredFiles: restored,
+          conflictCount: conflicts
+        });
+
+        if (status === "restored") {
+          store.markRefactorPreviewStatus(payload.apply.previewId, "rolled_back");
+        }
+
+        return asText({
+          rollbackId: args.rollbackId,
+          restoredFilesCount: restored,
+          conflicts,
+          diagnostics: {
+            code: conflicts > 0 ? "ROLLBACK_PARTIAL" : "ROLLBACK_OK",
+            machineReadable: true
+          },
+          executionPolicy: noLlmAudit()
+        });
+      }
+      case "refactor_symbol_migration": {
+        const args = refactorSymbolMigrationSchema.parse(request.params.arguments ?? {});
+        const repo = store.getRepository(args.repoId);
+        if (!repo) {
+          throw new McpError(ErrorCode.InvalidParams, `refactor_symbol_migration: repo '${args.repoId}' not found.`);
+        }
+
+        const migrationResults: Array<{
+          fromSymbol: string;
+          toSymbol: string;
+          requiredOwnerType: string;
+          previewId: string;
+          totalMatches: number;
+          unresolvedOccurrences: number;
+          applyId?: string;
+          rollbackId?: string;
+        }> = [];
+        const suggestedFollowUpFiles = new Set<string>();
+
+        for (const migration of args.migrations) {
+          const previewResult = buildRefactorPreview(
+            repo.repoPath,
+            args.repoId,
+            migration.fromSymbol,
+            migration.toSymbol,
+            {
+              includePaths: args.scopePaths,
+              excludePaths: [],
+              fileGlobs: []
+            },
+            {
+              language: undefined,
+              symbolKinds: ["property", "field"],
+              allowOwnerTypes: [migration.requiredOwnerType],
+              disallowOwnerTypes: migration.forbiddenOwnerTypes,
+              disallowTypeList: migration.forbiddenOwnerTypes
+            },
+            "symbol-aware"
+          );
+
+          const now = new Date();
+          const expiresAt = new Date(now.getTime() + REFACTOR_PREVIEW_TTL_MS).toISOString();
+          const digest = createPreviewDigest(args.repoId, migration.fromSymbol, migration.toSymbol, previewResult.hunks);
+          const previewId = `preview_${randomUUID()}`;
+          const riskCounts = countPreviewRisks(previewResult.hunks);
+
+          const hunkRecords: RefactorPreviewHunkRecord[] = previewResult.hunks.map((hunk, index) => ({
+            previewId,
+            hunkId: `${previewId}_${String(index + 1).padStart(6, "0")}`,
+            filePath: hunk.filePath,
+            line: hunk.line,
+            startOffset: hunk.startOffset,
+            endOffset: hunk.endOffset,
+            beforeText: hunk.beforeText,
+            afterText: hunk.afterText,
+            replacementText: migration.toSymbol,
+            ownerType: hunk.ownerType,
+            symbolKind: hunk.symbolKind,
+            confidence: hunk.confidence,
+            riskFlags: hunk.riskFlags,
+            fileHashBefore: hunk.fileHashBefore
+          }));
+
+          const previewRecord: RefactorPreviewRecord = {
+            previewId,
+            repoId: args.repoId,
+            findPattern: migration.fromSymbol,
+            replaceExpression: migration.toSymbol,
+            mode: "symbol-aware",
+            ambiguityThresholdPercent: 1,
+            createdAt: now.toISOString(),
+            expiresAt,
+            digest,
+            status: "ready",
+            totalMatches: previewResult.hunks.length,
+            affectedFileCount: previewResult.affectedFiles.length,
+            riskAmbiguousCount: riskCounts.ambiguous,
+            riskCrossTypeCount: riskCounts.crossType,
+            riskGeneratedCount: riskCounts.generated
+          };
+
+          store.saveRefactorPreview(previewRecord, hunkRecords);
+
+          const resultRow: {
+            fromSymbol: string;
+            toSymbol: string;
+            requiredOwnerType: string;
+            previewId: string;
+            totalMatches: number;
+            unresolvedOccurrences: number;
+            applyId?: string;
+            rollbackId?: string;
+          } = {
+            fromSymbol: migration.fromSymbol,
+            toSymbol: migration.toSymbol,
+            requiredOwnerType: migration.requiredOwnerType,
+            previewId,
+            totalMatches: hunkRecords.length,
+            unresolvedOccurrences: hunkRecords.filter((x) => x.riskFlags.includes("ambiguous_target")).length
+          };
+
+          for (const hunk of hunkRecords) {
+            suggestedFollowUpFiles.add(hunk.filePath);
+          }
+
+          if (!args.dryRun) {
+            // NOTE: refactor_symbol_migration with dryRun:false applies changes without a separate
+            // approval-token gate. This is intentional for trusted automated migration pipelines
+            // (e.g. symbol renames driven by a schema diff). Do NOT expose this path to untrusted
+            // callers. If interactive approval is needed, use refactor_replace_preview +
+            // refactor_replace_apply instead.
+            const applyId = `apply_${randomUUID()}`;
+            const rollbackId = `rollback_${randomUUID()}`;
+            const applyOutcome = executeRefactorApplyPlan(repo.repoPath, applyId, hunkRecords, 50, true, false);
+            const appliedFiles = applyOutcome.changes.filter((x) => x.status === "applied");
+            const conflicted = applyOutcome.changes.filter((x) => x.status === "conflict");
+            const totalReplacements = appliedFiles.reduce((sum, item) => sum + item.replacementCount, 0);
+            const applyStatus = deriveApplyStatus(applyOutcome.changes);
+
+            store.recordRefactorApply(
+              {
+                applyId,
+                rollbackId,
+                previewId,
+                repoId: args.repoId,
+                status: applyStatus,
+                createdAt: new Date().toISOString(),
+                completedAt: new Date().toISOString(),
+                totalFiles: appliedFiles.length,
+                totalReplacements,
+                conflictCount: conflicted.length
+              },
+              applyOutcome.changes,
+              applyOutcome.appliedHunks
+            );
+            store.markRefactorPreviewStatus(previewId, mapPreviewStatusFromApplyStatus(applyStatus));
+            resultRow.applyId = applyId;
+            resultRow.rollbackId = rollbackId;
+          }
+
+          migrationResults.push(resultRow);
+        }
+
+        return asText({
+          repoId: args.repoId,
+          dryRun: args.dryRun,
+          migrationMap: migrationResults,
+          exactSymbolOccurrencesChanged: migrationResults.reduce((sum, x) => sum + x.totalMatches, 0),
+          unresolvedOccurrences: migrationResults.reduce((sum, x) => sum + x.unresolvedOccurrences, 0),
+          suggestedFollowUpFiles: [...suggestedFollowUpFiles].sort((a, b) => a.localeCompare(b)),
+          executionPolicy: noLlmAudit()
+        });
       }
       case "trace_execution_flow": {
         const args = traceExecutionFlowSchema.parse(request.params.arguments ?? {});
@@ -1954,19 +2609,181 @@ function buildRiskSnapshot(repoId: string, policy: "quick-triage" | "strict-revi
 }
 
 function handleHealthCheck(repoId?: string): CallToolResult {
+  const latestRun = repoId ? store.getLatestRun(repoId) : null;
   const staleness = repoId ? getRepoStaleness(repoId) : null;
+  const repo = repoId ? store.getRepository(repoId) : null;
+  const watchStatuses = repoId ? watchManager.getStatus(repoId) : [];
+  const watchRunning = watchStatuses.length > 0;
+  const workingTree = repo ? getRepoWorkingTreeState(repo.repoPath) : null;
+
+  const reasons: string[] = [];
+  if (repoId && !repo) {
+    reasons.push("repository not registered; run index_repository first");
+  }
+  if (repoId && repo && !latestRun) {
+    reasons.push("repository has no indexed run yet");
+  }
+  if (staleness?.isStale === true) {
+    reasons.push("indexed commit differs from HEAD");
+  }
+  if (workingTree?.isDirty === true) {
+    reasons.push("working tree has uncommitted changes");
+  }
+
+  let codebaseStatus: "unknown" | "needs_index" | "stale" | "dirty" | "ready" = "unknown";
+  if (!repoId || !repo) {
+    codebaseStatus = "unknown";
+  } else if (!latestRun) {
+    codebaseStatus = "needs_index";
+  } else if (staleness?.isStale === true) {
+    codebaseStatus = "stale";
+  } else if (workingTree?.isDirty === true) {
+    codebaseStatus = "dirty";
+  } else if (staleness?.isStale === false) {
+    codebaseStatus = "ready";
+  }
+
+  const shouldReindex = codebaseStatus === "needs_index" || codebaseStatus === "stale" || codebaseStatus === "dirty";
+  const shouldEnableWatch = Boolean(repoId && repo && workingTree?.isDirty === true && !watchRunning);
+  const actionHints = repoId && repo
+    ? [
+      {
+        action: "index_repository",
+        recommended: shouldReindex,
+        urgency: codebaseStatus === "stale" || codebaseStatus === "needs_index" ? "high" : codebaseStatus === "dirty" ? "medium" : "low",
+        reason:
+            codebaseStatus === "needs_index"
+              ? "No successful index run exists for this repo."
+              : codebaseStatus === "stale"
+                ? "Indexed commit does not match HEAD."
+                : codebaseStatus === "dirty"
+                  ? "Working tree changed after latest index run."
+                  : "Index appears up-to-date.",
+        arguments: {
+          repoId,
+          repoPath: repo.repoPath,
+          mode: "incremental"
+        }
+      },
+      {
+        action: "watch_repo_start",
+        recommended: shouldEnableWatch,
+        urgency: shouldEnableWatch ? "medium" : "low",
+        reason: shouldEnableWatch
+          ? "Uncommitted edits detected and no active watcher for this repo."
+          : watchRunning
+            ? "Watcher is already active for this repo."
+            : "Use watch only for active edit sessions that need continuous indexing.",
+        arguments: {
+          action: "start",
+          repoId,
+          repoPath: repo.repoPath
+        }
+      }
+    ]
+    : [];
+
   return asText({
     status: "ok",
-    serverVersion: process.env.npm_package_version ?? "unknown",
+    serverVersion: SERVER_VERSION,
     dbPath,
     allowedRootCount: allowedRoots.length,
     docsLane: {
       docsIndexingEnabled: DOCS_INDEXING_ENABLED,
       docsToolsEnabled: DOCS_TOOLS_ENABLED
     },
-    latestRun: repoId ? store.getLatestRun(repoId) : null,
-    staleness
+    latestRun,
+    staleness,
+    watch: {
+      autoStartEnabled: WATCH_AUTO_START,
+      activeOnly: WATCH_ACTIVE_ONLY,
+      activeWatchRepoId,
+      running: watchRunning,
+      watcherCount: watchStatuses.length,
+      watchers: watchStatuses
+    },
+    codebaseState: {
+      repoId: repoId ?? null,
+      status: codebaseStatus,
+      shouldReindex,
+      shouldEnableWatch,
+      workingTree,
+      reasons
+    },
+    actionHints
   });
+}
+
+function resolveServerVersion(): string {
+  const npmVersion = (process.env.npm_package_version ?? "").trim();
+  if (npmVersion.length > 0) {
+    return npmVersion;
+  }
+
+  try {
+    const packageJsonPath = path.resolve(MODULE_DIR, "..", "package.json");
+    const text = fs.readFileSync(packageJsonPath, "utf8");
+    const parsed = JSON.parse(text) as { version?: unknown };
+    if (typeof parsed.version === "string" && parsed.version.trim().length > 0) {
+      return parsed.version.trim();
+    }
+  } catch {
+    // Keep a deterministic fallback for environments where package.json is unavailable.
+  }
+
+  return "unknown";
+}
+
+function getRepoWorkingTreeState(repoPath: string): {
+  isDirty: boolean | null;
+  hasTrackedChanges: boolean | null;
+  hasUntrackedChanges: boolean | null;
+  changedEntries: number;
+  note: string;
+} {
+  const lines = runGitStatusPorcelain(repoPath);
+  if (!lines) {
+    return {
+      isDirty: null,
+      hasTrackedChanges: null,
+      hasUntrackedChanges: null,
+      changedEntries: 0,
+      note: "non-git repo or unable to read working tree status"
+    };
+  }
+
+  let hasTrackedChanges = false;
+  let hasUntrackedChanges = false;
+  for (const line of lines) {
+    if (line.startsWith("??")) {
+      hasUntrackedChanges = true;
+      continue;
+    }
+    if (!line.startsWith("!!")) {
+      hasTrackedChanges = true;
+    }
+  }
+
+  const isDirty = hasTrackedChanges || hasUntrackedChanges;
+  return {
+    isDirty,
+    hasTrackedChanges,
+    hasUntrackedChanges,
+    changedEntries: lines.length,
+    note: isDirty ? "working tree has pending changes" : "working tree is clean"
+  };
+}
+
+function runGitStatusPorcelain(repoPath: string): string[] | null {
+  try {
+    const text = runGit(repoPath, ["status", "--porcelain"]);
+    if (!text) {
+      return [];
+    }
+    return text.split(/\r?\n/).map((x) => x.trim()).filter((x) => x.length > 0);
+  } catch {
+    return null;
+  }
 }
 
 function resolveHeadCommitSha(repoPath: string): string | null {
@@ -2223,6 +3040,551 @@ function resolveResponseProfile(profile: ResponseProfile, compact?: boolean): Re
   return compact ? "compact" : profile;
 }
 
+class PolicyViolationError extends Error {
+  readonly code: string;
+
+  constructor(code: string, message: string) {
+    super(message);
+    this.code = code;
+  }
+}
+
+type RefactorScopeInput = z.infer<typeof refactorScopeSchema>;
+type RefactorGuardsInput = z.infer<typeof refactorGuardsSchema>;
+type RefactorModeInput = z.infer<typeof refactorReplacePreviewSchema>["mode"];
+
+type PreviewCandidateHunk = {
+  filePath: string;
+  line: number;
+  startOffset: number;
+  endOffset: number;
+  beforeText: string;
+  afterText: string;
+  ownerType: string | null;
+  symbolKind: string | null;
+  confidence: number;
+  riskFlags: RefactorRiskFlag[];
+  fileHashBefore: string;
+};
+
+function normalizeRelativePath(filePath: string): string {
+  return filePath.replace(/\\/g, "/").replace(/^\.\//, "");
+}
+
+function sha256(text: string): string {
+  return createHash("sha256").update(text).digest("hex");
+}
+
+function safeReadText(absolutePath: string): string {
+  return fs.existsSync(absolutePath) ? fs.readFileSync(absolutePath, "utf8") : "";
+}
+
+function assertSafeRepoFilePath(repoPath: string, relativePath: string): string {
+  const fullPath = path.resolve(repoPath, relativePath);
+  const normalizedRepo = path.resolve(repoPath);
+  if (!fullPath.startsWith(normalizedRepo + path.sep) && fullPath !== normalizedRepo) {
+    throw new PolicyViolationError("PATH_TRAVERSAL_BLOCKED", `Blocked path outside repo root: ${relativePath}`);
+  }
+  return fullPath;
+}
+
+function collectGitChangedFiles(repoPath: string): Set<string> {
+  const files = runGitLines(repoPath, ["diff", "--name-only", "HEAD"])
+    .map((x) => x.replace(/\\/g, "/"));
+  return new Set(files);
+}
+
+function isApplyRunnableHunk(hunk: RefactorPreviewHunkRecord, includeLowConfidence: boolean): boolean {
+  if (hunk.riskFlags.length > 0) {
+    return false;
+  }
+  if (!includeLowConfidence && hunk.confidence < REFACTOR_LOW_CONFIDENCE_THRESHOLD) {
+    return false;
+  }
+  return true;
+}
+
+function collectExpectedApplyFiles(hunks: RefactorPreviewHunkRecord[], includeLowConfidence: boolean): Set<string> {
+  return new Set(hunks.filter((h) => isApplyRunnableHunk(h, includeLowConfidence)).map((h) => h.filePath));
+}
+
+function inferLanguageFromPath(filePath: string): string {
+  const ext = path.extname(filePath).toLowerCase();
+  if (ext === ".ts" || ext === ".tsx") return "typescript";
+  if (ext === ".js" || ext === ".jsx" || ext === ".mjs" || ext === ".cjs") return "javascript";
+  if (ext === ".cs") return "csharp";
+  if (ext === ".py") return "python";
+  if (ext === ".java") return "java";
+  return ext.replace(/^\./, "") || "unknown";
+}
+
+function isGeneratedFilePath(filePath: string): boolean {
+  const lower = filePath.toLowerCase();
+  return lower.includes("/generated/") || lower.endsWith(".g.ts") || lower.endsWith(".g.cs") || lower.endsWith(".generated.ts") || lower.endsWith(".generated.cs");
+}
+
+function offsetToLine(content: string, offset: number): number {
+  return content.slice(0, Math.max(0, offset)).split(/\r?\n/).length;
+}
+
+// Heuristic: scans all `class Foo` occurrences before `offset` and returns the last match.
+// This is a best-effort regex approximation — it does not parse AST scope boundaries, so it
+// can misidentify owner type when the pattern appears inside string literals, comments, or
+// across nested class / function boundaries. For mode:"text" this has no effect (no owner
+// check is performed). For mode:"symbol-aware" / "syntax-aware" it may produce a false
+// ambiguous_target or cross_type flag. Acceptable as a lightweight heuristic; replace with
+// a tree-sitter scope query if higher precision is required.
+function findOwnerType(content: string, offset: number): string | null {
+  const prefix = content.slice(0, Math.max(0, offset));
+  const classMatches = [...prefix.matchAll(/\bclass\s+([A-Za-z_][A-Za-z0-9_]*)/g)];
+  if (classMatches.length > 0) {
+    return classMatches[classMatches.length - 1][1] ?? null;
+  }
+  return null;
+}
+
+function inferSymbolKind(lineText: string): "class" | "property" | "field" | "method" | null {
+  const text = lineText.trim();
+  if (/\bclass\b/.test(text)) return "class";
+  if (/\b(get|set)\b/.test(text) || /\b[A-Za-z_][A-Za-z0-9_]*\s*\(/.test(text)) return "method";
+  if (/\b[A-Za-z_][A-Za-z0-9_]*\s*[:=]/.test(text)) return "property";
+  if (/\b(private|public|protected)\s+[A-Za-z_][A-Za-z0-9_]*\s*[:=]/.test(text)) return "field";
+  return null;
+}
+
+function pathStartsWithAny(filePath: string, prefixes: string[]): boolean {
+  if (prefixes.length === 0) {
+    return true;
+  }
+  const normalized = normalizeRelativePath(filePath).toLowerCase();
+  return prefixes.some((prefix) => normalized.startsWith(normalizeRelativePath(prefix).toLowerCase()));
+}
+
+function buildRefactorPreview(
+  repoPath: string,
+  repoId: string,
+  findText: string,
+  replaceText: string,
+  scope: RefactorScopeInput,
+  guards: RefactorGuardsInput,
+  mode: RefactorModeInput
+): {
+  hunks: PreviewCandidateHunk[];
+  affectedFiles: string[];
+} {
+  const indexedFiles = store.listIndexedFiles(repoId).map((x) => normalizeRelativePath(x.path));
+  const includePaths = (scope.includePaths ?? []).map((x) => normalizeRelativePath(x));
+  const excludePaths = (scope.excludePaths ?? []).map((x) => normalizeRelativePath(x));
+  const globPaths = (scope.fileGlobs ?? []).map((x) => normalizeRelativePath(x));
+
+  let allowedByGlob: Set<string> | null = null;
+  if (globPaths.length > 0) {
+    allowedByGlob = new Set<string>();
+    for (const pattern of globPaths) {
+      const matches = globSync(pattern, { cwd: repoPath, nodir: true, dot: false, windowsPathsNoEscape: true });
+      for (const match of matches) {
+        allowedByGlob.add(normalizeRelativePath(match));
+      }
+    }
+  }
+
+  const selectedFiles = indexedFiles
+    .filter((filePath) => pathStartsWithAny(filePath, includePaths))
+    .filter((filePath) => !excludePaths.some((prefix) => normalizeRelativePath(filePath).toLowerCase().startsWith(prefix.toLowerCase())))
+    .filter((filePath) => (allowedByGlob ? allowedByGlob.has(normalizeRelativePath(filePath)) : true))
+    .sort((a, b) => a.localeCompare(b));
+
+  const hunks: PreviewCandidateHunk[] = [];
+  const affected = new Set<string>();
+
+  for (const filePath of selectedFiles) {
+    const language = inferLanguageFromPath(filePath);
+    if (guards.language && language !== guards.language) {
+      continue;
+    }
+
+    const safeAbsolute = assertSafeRepoFilePath(repoPath, filePath);
+    if (!fs.existsSync(safeAbsolute)) {
+      continue;
+    }
+
+    const content = fs.readFileSync(safeAbsolute, "utf8");
+    const fileHashBefore = sha256(content);
+    let cursor = 0;
+
+    while (true) {
+      const start = content.indexOf(findText, cursor);
+      if (start < 0) {
+        break;
+      }
+      const end = start + findText.length;
+      const line = offsetToLine(content, start);
+      const lineText = content.split(/\r?\n/)[line - 1] ?? "";
+      const ownerType = findOwnerType(content, start);
+      const symbolKind = inferSymbolKind(lineText);
+
+      if (guards.symbolKinds.length > 0) {
+        if (!symbolKind || !guards.symbolKinds.includes(symbolKind)) {
+          cursor = end;
+          continue;
+        }
+      }
+
+      if (guards.allowOwnerTypes.length > 0) {
+        if (!ownerType || !guards.allowOwnerTypes.some((x) => x.toLowerCase() === ownerType.toLowerCase())) {
+          cursor = end;
+          continue;
+        }
+      }
+
+      const riskFlags: RefactorRiskFlag[] = [];
+      if ((mode === "symbol-aware" || mode === "syntax-aware") && !ownerType) {
+        riskFlags.push("ambiguous_target");
+      }
+      const disallowNames = new Set([...guards.disallowOwnerTypes, ...guards.disallowTypeList].map((x) => x.toLowerCase()));
+      if (ownerType && disallowNames.has(ownerType.toLowerCase())) {
+        riskFlags.push("cross_type");
+      }
+      if (isGeneratedFilePath(filePath)) {
+        riskFlags.push("generated_file");
+      }
+
+      let confidence = mode === "text" ? 0.85 : 0.95;
+      if (!ownerType) confidence -= 0.25;
+      if (riskFlags.includes("cross_type")) confidence -= 0.4;
+      if (riskFlags.includes("generated_file")) confidence -= 0.2;
+      confidence = Math.max(0, Math.min(1, Number(confidence.toFixed(2))));
+
+      hunks.push({
+        filePath,
+        line,
+        startOffset: start,
+        endOffset: end,
+        beforeText: content.slice(start, end),
+        afterText: replaceText,
+        ownerType,
+        symbolKind,
+        confidence,
+        riskFlags,
+        fileHashBefore
+      });
+      affected.add(filePath);
+      cursor = end;
+    }
+  }
+
+  hunks.sort((a, b) => a.filePath.localeCompare(b.filePath) || a.startOffset - b.startOffset);
+  return {
+    hunks,
+    affectedFiles: [...affected].sort((a, b) => a.localeCompare(b))
+  };
+}
+
+function countPreviewRisks(hunks: Array<{ riskFlags: RefactorRiskFlag[] }>): { ambiguous: number; crossType: number; generated: number } {
+  let ambiguous = 0;
+  let crossType = 0;
+  let generated = 0;
+  for (const hunk of hunks) {
+    if (hunk.riskFlags.includes("ambiguous_target")) ambiguous += 1;
+    if (hunk.riskFlags.includes("cross_type")) crossType += 1;
+    if (hunk.riskFlags.includes("generated_file")) generated += 1;
+  }
+  return { ambiguous, crossType, generated };
+}
+
+function createPreviewDigest(repoId: string, findText: string, replaceText: string, hunks: PreviewCandidateHunk[]): string {
+  const stable = JSON.stringify({
+    repoId,
+    findText,
+    replaceText,
+    hunks: hunks.map((h) => ({
+      filePath: h.filePath,
+      startOffset: h.startOffset,
+      endOffset: h.endOffset,
+      beforeText: h.beforeText,
+      afterText: h.afterText,
+      ownerType: h.ownerType,
+      symbolKind: h.symbolKind,
+      confidence: h.confidence,
+      riskFlags: [...h.riskFlags].sort((a, b) => a.localeCompare(b)),
+      fileHashBefore: h.fileHashBefore
+    }))
+  });
+  return sha256(stable);
+}
+
+function issueApprovalToken(previewId: string, digest: string, expiresAt: string): string {
+  const payload = Buffer.from(JSON.stringify({ previewId, digest, expiresAt })).toString("base64url");
+  const secret = resolveApprovalSecret();
+  const signature = createHmac("sha256", secret).update(payload).digest("base64url");
+  return `${payload}.${signature}`;
+}
+
+function verifyApprovalToken(token: string, previewId: string, digest: string, expiresAt: string): void {
+  // Use lastIndexOf to split on the final '.' only — guards against any future format that
+  // embeds dots inside the base64url payload section.
+  const dotIdx = token.lastIndexOf(".");
+  const payload = dotIdx > 0 ? token.slice(0, dotIdx) : "";
+  const signature = dotIdx > 0 ? token.slice(dotIdx + 1) : "";
+  if (!payload || !signature) {
+    throw new PolicyViolationError("INVALID_APPROVAL_TOKEN", "Approval token format is invalid.");
+  }
+  const secret = resolveApprovalSecret();
+  const expected = createHmac("sha256", secret).update(payload).digest("base64url");
+  if (expected !== signature) {
+    throw new PolicyViolationError("INVALID_APPROVAL_TOKEN", "Approval token signature is invalid.");
+  }
+
+  let decoded: { previewId: string; digest: string; expiresAt: string };
+  try {
+    decoded = JSON.parse(Buffer.from(payload, "base64url").toString("utf8")) as { previewId: string; digest: string; expiresAt: string };
+  } catch {
+    throw new PolicyViolationError("INVALID_APPROVAL_TOKEN", "Approval token payload is invalid.");
+  }
+
+  if (decoded.previewId !== previewId || decoded.digest !== digest || decoded.expiresAt !== expiresAt) {
+    throw new PolicyViolationError("APPROVAL_TOKEN_MISMATCH", "Approval token does not match the approved preview plan.");
+  }
+
+  if (Date.parse(decoded.expiresAt) < Date.now()) {
+    throw new PolicyViolationError("APPROVAL_TOKEN_EXPIRED", "Approval token has expired.");
+  }
+}
+
+function groupPreviewHunks(hunks: RefactorPreviewHunkRecord[]): Array<{
+  filePath: string;
+  hunkCount: number;
+  hunks: Array<{
+    hunkId: string;
+    line: number;
+    beforeText: string;
+    afterText: string;
+    confidence: number;
+    riskFlags: RefactorRiskFlag[];
+    ownerType: string | null;
+    symbolKind: string | null;
+  }>;
+}> {
+  const byFile = new Map<string, RefactorPreviewHunkRecord[]>();
+  for (const hunk of hunks) {
+    const list = byFile.get(hunk.filePath) ?? [];
+    list.push(hunk);
+    byFile.set(hunk.filePath, list);
+  }
+
+  return [...byFile.entries()]
+    .sort((a, b) => a[0].localeCompare(b[0]))
+    .map(([filePath, items]) => ({
+      filePath,
+      hunkCount: items.length,
+      hunks: items.map((item) => ({
+        hunkId: item.hunkId,
+        line: item.line,
+        beforeText: item.beforeText,
+        afterText: item.afterText,
+        confidence: item.confidence,
+        riskFlags: item.riskFlags,
+        ownerType: item.ownerType,
+        symbolKind: item.symbolKind
+      }))
+    }));
+}
+
+function executeRefactorApplyPlan(
+  repoPath: string,
+  applyId: string,
+  hunks: RefactorPreviewHunkRecord[],
+  maxFilesPerBatch: number,
+  stopOnFirstConflict: boolean,
+  includeLowConfidence: boolean
+): {
+  changes: RefactorApplyChangeRecord[];
+  appliedHunks: RefactorApplyHunkRecord[];
+  lane: { highConfidenceEdits: number; lowConfidenceEdits: number; lowConfidenceSkipped: number };
+} {
+  const groupedByFile = new Map<string, RefactorPreviewHunkRecord[]>();
+  for (const hunk of hunks) {
+    const list = groupedByFile.get(hunk.filePath) ?? [];
+    list.push(hunk);
+    groupedByFile.set(hunk.filePath, list);
+  }
+
+  const changes: RefactorApplyChangeRecord[] = [];
+  const appliedHunks: RefactorApplyHunkRecord[] = [];
+  const fileEntries = [...groupedByFile.entries()].sort((a, b) => a[0].localeCompare(b[0]));
+  let stop = false;
+  let highConfidenceEdits = 0;
+  let lowConfidenceEdits = 0;
+  let lowConfidenceSkipped = 0;
+
+  for (let i = 0; i < fileEntries.length; i += Math.max(1, maxFilesPerBatch)) {
+    if (stop) {
+      break;
+    }
+    const chunk = fileEntries.slice(i, i + Math.max(1, maxFilesPerBatch));
+    for (const [filePath, allHunks] of chunk) {
+      if (stop) {
+        break;
+      }
+
+      const absolute = assertSafeRepoFilePath(repoPath, filePath);
+      const beforeContent = safeReadText(absolute);
+      const beforeHash = sha256(beforeContent);
+
+      const blockedHunks = allHunks.filter((h) => h.riskFlags.length > 0);
+      const lowConfidenceHunks = allHunks.filter((h) => h.riskFlags.length === 0 && h.confidence < REFACTOR_LOW_CONFIDENCE_THRESHOLD);
+      lowConfidenceSkipped += includeLowConfidence ? 0 : lowConfidenceHunks.length;
+      const runnableHunks = allHunks.filter((h) => isApplyRunnableHunk(h, includeLowConfidence));
+
+      if (runnableHunks.length === 0) {
+        changes.push({
+          applyId,
+          filePath,
+          replacementCount: 0,
+          status: "skipped",
+          reason: blockedHunks.length > 0
+            ? "RISK_FLAG_BLOCKED"
+            : lowConfidenceHunks.length > 0 && !includeLowConfidence
+              ? "LOW_CONFIDENCE_BLOCKED"
+              : "NO_EFFECTIVE_CHANGES",
+          fileHashBefore: beforeHash,
+          fileHashAfter: beforeHash,
+          beforeContent,
+          afterContent: beforeContent
+        });
+        continue;
+      }
+
+      if (beforeHash !== runnableHunks[0].fileHashBefore) {
+        changes.push({
+          applyId,
+          filePath,
+          replacementCount: 0,
+          status: "conflict",
+          reason: "FILE_CHANGED_AFTER_PREVIEW",
+          fileHashBefore: beforeHash,
+          fileHashAfter: null,
+          beforeContent,
+          afterContent: null
+        });
+        if (stopOnFirstConflict) {
+          stop = true;
+        }
+        continue;
+      }
+
+      const sortedHunks = [...runnableHunks].sort((a, b) => b.startOffset - a.startOffset || b.hunkId.localeCompare(a.hunkId));
+      const finalOffsetByHunkId = buildFinalOffsetMap(sortedHunks);
+      let updated = beforeContent;
+      let appliedCount = 0;
+      let fileHighConfidenceEdits = 0;
+      let fileLowConfidenceEdits = 0;
+      let conflictReason: string | null = null;
+
+      for (const hunk of sortedHunks) {
+        const target = updated.slice(hunk.startOffset, hunk.endOffset);
+        if (target !== hunk.beforeText) {
+          conflictReason = "OFFSET_MISMATCH_DURING_APPLY";
+          break;
+        }
+        updated = `${updated.slice(0, hunk.startOffset)}${hunk.replacementText}${updated.slice(hunk.endOffset)}`;
+        appliedCount += 1;
+        if (hunk.confidence < REFACTOR_LOW_CONFIDENCE_THRESHOLD) {
+          fileLowConfidenceEdits += 1;
+        } else {
+          fileHighConfidenceEdits += 1;
+        }
+      }
+
+      if (conflictReason) {
+        changes.push({
+          applyId,
+          filePath,
+          replacementCount: 0,
+          status: "conflict",
+          reason: conflictReason,
+          fileHashBefore: beforeHash,
+          fileHashAfter: null,
+          beforeContent,
+          afterContent: null
+        });
+        if (stopOnFirstConflict) {
+          stop = true;
+        }
+        continue;
+      }
+
+      if (appliedCount > 0) {
+        fs.writeFileSync(absolute, updated, "utf8");
+        for (const hunk of sortedHunks) {
+          const startOffsetApplied = finalOffsetByHunkId.get(hunk.hunkId);
+          if (startOffsetApplied === undefined) {
+            continue;
+          }
+          appliedHunks.push({
+            applyId,
+            filePath,
+            hunkId: hunk.hunkId,
+            startOffsetApplied,
+            endOffsetApplied: startOffsetApplied + hunk.replacementText.length,
+            beforeText: hunk.beforeText,
+            afterText: hunk.replacementText
+          });
+        }
+        highConfidenceEdits += fileHighConfidenceEdits;
+        lowConfidenceEdits += fileLowConfidenceEdits;
+        changes.push({
+          applyId,
+          filePath,
+          replacementCount: appliedCount,
+          status: "applied",
+          reason: null,
+          fileHashBefore: beforeHash,
+          fileHashAfter: sha256(updated),
+          beforeContent,
+          afterContent: updated
+        });
+      } else {
+        changes.push({
+          applyId,
+          filePath,
+          replacementCount: 0,
+          status: "skipped",
+          reason: "NO_EFFECTIVE_CHANGES",
+          fileHashBefore: beforeHash,
+          fileHashAfter: beforeHash,
+          beforeContent,
+          afterContent: beforeContent
+        });
+      }
+    }
+  }
+
+  return {
+    changes,
+    appliedHunks,
+    lane: {
+      highConfidenceEdits,
+      lowConfidenceEdits,
+      lowConfidenceSkipped
+    }
+  };
+}
+
+function buildFinalOffsetMap(hunks: RefactorPreviewHunkRecord[]): Map<string, number> {
+  const sortedAsc = [...hunks].sort((a, b) => a.startOffset - b.startOffset || a.hunkId.localeCompare(b.hunkId));
+  const offsetMap = new Map<string, number>();
+  let cumulativeDelta = 0;
+
+  for (const hunk of sortedAsc) {
+    const adjustedStart = hunk.startOffset + cumulativeDelta;
+    offsetMap.set(hunk.hunkId, adjustedStart);
+    cumulativeDelta += hunk.replacementText.length - hunk.beforeText.length;
+  }
+
+  return offsetMap;
+}
+
 function formatChangeContextPayload(
   result: ReturnType<GraphStore["getChangeContext"]>,
   profile: ResponseProfile
@@ -2341,6 +3703,14 @@ function mapError(error: unknown, toolName: string): { code: string; message: st
     };
   }
 
+  if (error instanceof PolicyViolationError) {
+    return {
+      code: error.code,
+      message: `${toolName}: ${error.message}`,
+      requestId
+    };
+  }
+
   if (error instanceof McpError) {
     return {
       code: "MCP_ERROR",
@@ -2353,6 +3723,61 @@ function mapError(error: unknown, toolName: string): { code: string; message: st
     code: "INTERNAL_ERROR",
     message: `${toolName}: ${error instanceof Error ? error.message : "Unknown error"}`,
     requestId
+  };
+}
+
+function assertNoLlmRuntimePolicy(): void {
+  if (LLM_ENABLED) {
+    throw new Error("Startup blocked: CODEBASE_INDEX_LLM_ENABLED must be false. LLM runtime invocation is prohibited by policy.");
+  }
+}
+
+function assertRefactorApprovalPolicy(): void {
+  if (REFACTOR_STRICT_APPROVAL && REFACTOR_APPROVAL_SECRET.trim().length === 0) {
+    throw new Error("Startup blocked: CODEBASE_INDEX_REFACTOR_APPROVAL_SECRET is required when CODEBASE_INDEX_REFACTOR_STRICT_APPROVAL=true.");
+  }
+}
+
+function resolveApprovalSecret(): string {
+  if (REFACTOR_APPROVAL_SECRET.trim().length > 0) {
+    return REFACTOR_APPROVAL_SECRET;
+  }
+  if (REFACTOR_STRICT_APPROVAL) {
+    throw new PolicyViolationError(
+      "APPROVAL_SECRET_REQUIRED",
+      "Approval secret is required in strict approval mode. Set CODEBASE_INDEX_REFACTOR_APPROVAL_SECRET."
+    );
+  }
+  return "dev-insecure-secret";
+}
+
+function mapPreviewStatusFromApplyStatus(status: RefactorApplyRecord["status"]): RefactorPreviewRecord["status"] {
+  if (status === "applied") {
+    return "applied";
+  }
+  if (status === "partial") {
+    return "apply_partial";
+  }
+  return "apply_failed";
+}
+
+function deriveApplyStatus(changes: RefactorApplyChangeRecord[]): RefactorApplyRecord["status"] {
+  const hasApplied = changes.some((x) => x.status === "applied");
+  if (!hasApplied) {
+    return "failed";
+  }
+  const hasNonApplied = changes.some((x) => x.status !== "applied");
+  if (hasNonApplied) {
+    return "partial";
+  }
+  return "applied";
+}
+
+function noLlmAudit(): { decisionSource: "rule_engine"; llmInvolved: false; approvalMode: "strict" | "local-fallback" } {
+  return {
+    decisionSource: "rule_engine",
+    llmInvolved: false,
+    approvalMode: REFACTOR_STRICT_APPROVAL ? "strict" : "local-fallback"
   };
 }
 

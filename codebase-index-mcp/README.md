@@ -44,6 +44,10 @@ Current integration:
 - `route_map`
 - `query_graph`
 - `rename_assist`
+- `refactor_replace_preview`
+- `refactor_replace_apply`
+- `refactor_replace_rollback`
+- `refactor_symbol_migration`
 - `trace_execution_flow`
 - `dead_code_scan`
 - `detect_circular_dependencies`
@@ -60,6 +64,7 @@ Current integration:
 - Bounded input params (`maxFiles`, `limit`)
 - Basic sensitive pattern redaction before storage
 - Classifier+path layered filtering to reduce binary/noisy ingestion
+- Deterministic no-LLM runtime policy for refactor engine (`decisionSource=rule_engine`, `llmInvolved=false`)
 
 ## Environment variables
 
@@ -73,6 +78,10 @@ Current integration:
 - `CODEBASE_INDEX_TELEMETRY_SAMPLE_RATE` (optional): defaults to `1`; range `0..1` for telemetry sampling.
 - `CODEBASE_INDEX_DOCS_INDEXING_ENABLED` (optional): defaults to `false`; controls whether docs lane is indexed by default.
 - `CODEBASE_INDEX_DOCS_TOOLS_ENABLED` (optional): defaults to `false`; controls whether docs tools (`search_docs`, `find_stale_docs`, `find_doc_coverage`) are callable.
+- `CODEBASE_INDEX_LLM_ENABLED` (optional): defaults to `false`; when `true` in `NODE_ENV=production`, server startup is rejected.
+- `CODEBASE_INDEX_REFACTOR_APPROVAL_SECRET` (optional but recommended): HMAC secret used to sign/verify `refactor_replace_apply` approval tokens.
+- `CODEBASE_INDEX_REFACTOR_STRICT_APPROVAL` (optional): defaults to `false`; when `true`, startup is rejected unless `CODEBASE_INDEX_REFACTOR_APPROVAL_SECRET` is set.
+- `CODEBASE_INDEX_REFACTOR_PREVIEW_TTL_MS` (optional): defaults to `1800000` (30 minutes); expiration window for preview/apply approval.
 - `CODEBASE_INDEX_WATCH_AUTO_START` (optional): defaults to `false`; when `true`, the server may auto-start/auto-activate watchers.
 - `CODEBASE_INDEX_AUTO_WATCH_REPOS` (optional): explicit startup watch targets formatted as `repoId=absPath,repo2=absPath2`.
 - `CODEBASE_INDEX_WATCH_ACTIVE_ONLY` (optional): defaults to `true`; keeps one active watcher at a time and rotates by last interaction.
@@ -81,6 +90,14 @@ Current integration:
 - `CODEBASE_INDEX_WATCH_MAX_QUEUED_EVENTS` (optional): defaults to `2000`.
 - `CODEBASE_INDEX_WATCH_MAX_FILES_PER_RUN` (optional): defaults to `4000`.
 - `CODEBASE_INDEX_WATCH_BATCH_SIZE` (optional): defaults to `200`. 
+
+Refactor apply notes:
+- `refactor_replace_apply` supports `includeLowConfidence` (default `false`).
+- With default settings, low-confidence candidates are reported but not applied.
+- Apply output includes `laneBreakdown` (`highConfidenceEdits`, `lowConfidenceEdits`, `lowConfidenceSkipped`) and `scopeCheck`.
+- If newly changed files after apply drift beyond expected preview scope threshold (5%), diagnostics code is `SCOPE_DRIFT_DETECTED`.
+- Refactor tool outputs include `executionPolicy` with `decisionSource=rule_engine`, `llmInvolved=false`, and `approvalMode` (`strict` | `local-fallback`).
+- Preview lifecycle status reflects apply outcome (`applied`, `apply_partial`, `apply_failed`) instead of always using a single applied state.
 
 No-config defaults:
 - Keep only required config (`CODEBASE_INDEX_ALLOWED_ROOTS`) for normal usage.
@@ -99,6 +116,14 @@ GitNexus-style staleness behavior:
 - The skip run is still recorded in `index_runs` with zero counters and `skipReason` in tool output.
 - Watchless by default: keep auto-watch disabled for normal operation, and use `watch_repo` only for short manual debug sessions.
 
+`health_check` now reports actionable codebase readiness:
+- `serverVersion` resolves from npm runtime env or falls back to package version.
+- `codebaseState.status`: `unknown | needs_index | stale | dirty | ready`.
+- `codebaseState.shouldReindex`: true when first index is missing, commit is stale, or working tree is dirty.
+- `codebaseState.shouldEnableWatch`: true when local edits are pending and no watcher is active for the repo.
+- `watch`: includes watcher runtime status and counters for the requested repo.
+- `actionHints`: machine-readable suggestions for `index_repository` and `watch_repo start` with urgency + reason.
+
 > If `better-sqlite3` native build fails on Windows environments without build tools, install Visual Studio C++ Build Tools or switch temporarily to a JS-only SQLite backend in a follow-up patch.
 
 ## Development
@@ -107,6 +132,7 @@ GitNexus-style staleness behavior:
 npm install
 npm run typecheck
 npm run build
+npm run guard:no-llm-runtime
 npm run dev
 npm run benchmark:plan
 npm run benchmark:plan:check

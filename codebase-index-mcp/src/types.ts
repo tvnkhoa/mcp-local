@@ -183,3 +183,87 @@ export type RepoWatchStatus = {
   queuedChanged: number;
   queuedDeleted: number;
 };
+
+export type RefactorRiskFlag = "ambiguous_target" | "cross_type" | "generated_file";
+
+export type RefactorPreviewRecord = {
+  previewId: string;
+  repoId: string;
+  findPattern: string;
+  replaceExpression: string;
+  mode: "text" | "syntax-aware" | "symbol-aware";
+  ambiguityThresholdPercent: number;
+  createdAt: string;
+  expiresAt: string;
+  digest: string;
+  status: "ready" | "applied" | "apply_partial" | "apply_failed" | "rolled_back" | "expired";
+  totalMatches: number;
+  affectedFileCount: number;
+  riskAmbiguousCount: number;
+  riskCrossTypeCount: number;
+  riskGeneratedCount: number;
+};
+
+export type RefactorPreviewHunkRecord = {
+  previewId: string;
+  hunkId: string;
+  filePath: string;
+  line: number;
+  startOffset: number;
+  endOffset: number;
+  beforeText: string;
+  afterText: string;
+  replacementText: string;
+  ownerType: string | null;
+  symbolKind: string | null;
+  confidence: number;
+  riskFlags: RefactorRiskFlag[];
+  fileHashBefore: string;
+};
+
+export type RefactorApplyRecord = {
+  applyId: string;
+  rollbackId: string;
+  previewId: string;
+  repoId: string;
+  status: "applied" | "partial" | "failed";
+  createdAt: string;
+  completedAt: string;
+  totalFiles: number;
+  totalReplacements: number;
+  conflictCount: number;
+};
+
+export type RefactorApplyChangeRecord = {
+  applyId: string;
+  filePath: string;
+  replacementCount: number;
+  status: "applied" | "skipped" | "conflict";
+  reason: string | null;
+  fileHashBefore: string;
+  fileHashAfter: string | null;
+  // null when file exceeded APPLY_CONTENT_STORE_MAX_BYTES at time of apply — hunk-level rollback
+  // is used in that case; content-based fallback rollback is unavailable.
+  beforeContent: string | null;
+  afterContent: string | null;
+};
+
+export type RefactorApplyHunkRecord = {
+  applyId: string;
+  filePath: string;
+  hunkId: string;
+  startOffsetApplied: number;
+  endOffsetApplied: number;
+  beforeText: string;
+  afterText: string;
+};
+
+export type RefactorRollbackRecord = {
+  rollbackId: string;
+  applyId: string;
+  status: "restored" | "partial" | "failed";
+  createdAt: string;
+  completedAt: string;
+  restoredFiles: number;
+  conflictCount: number;
+};
