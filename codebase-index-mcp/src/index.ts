@@ -446,6 +446,26 @@ const refactorInitializerRewriteSchema = z
   })
   .strict();
 
+const refactorCompilerDiagnosticSchema = z
+  .object({
+    code: z.string().min(1).max(20),
+    filePath: z.string().min(1).max(500),
+    line: z.number().int().min(1).max(2_000_000),
+    message: z.string().max(1_000).optional(),
+    expectedType: z.string().min(1).max(300).optional(),
+    actualType: z.string().min(1).max(300).optional()
+  })
+  .strict();
+
+const refactorCompilerAssistSchema = z
+  .object({
+    diagnostics: z.array(refactorCompilerDiagnosticSchema).max(1_000).default([]),
+    codes: z.array(z.string().min(1).max(20)).max(20).default(["CS0029", "CS1503"]),
+    lineWindow: z.number().int().min(0).max(20).default(2),
+    filePathPrefix: z.string().min(1).max(500).optional()
+  })
+  .strict();
+
 const refactorReplacePreviewSchema = z
   .object({
     repoId: z.string().min(1).max(200),
@@ -453,6 +473,7 @@ const refactorReplacePreviewSchema = z
     replaceExpression: z.string().max(2_000),
     scope: refactorScopeSchema,
     guards: refactorGuardsSchema,
+    compilerAssist: refactorCompilerAssistSchema.optional(),
     mode: z.enum(["text", "syntax-aware", "symbol-aware"]).default("symbol-aware"),
     ambiguityThresholdPercent: z.number().min(0).max(100).default(1)
   })
@@ -991,6 +1012,32 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
                 allowOwnerTypes: { type: "array", items: { type: "string" }, maxItems: 200 },
                 disallowOwnerTypes: { type: "array", items: { type: "string" }, maxItems: 200 },
                 disallowTypeList: { type: "array", items: { type: "string" }, maxItems: 200 }
+              }
+            },
+            compilerAssist: {
+              type: "object",
+              additionalProperties: false,
+              properties: {
+                diagnostics: {
+                  type: "array",
+                  maxItems: 1000,
+                  items: {
+                    type: "object",
+                    additionalProperties: false,
+                    required: ["code", "filePath", "line"],
+                    properties: {
+                      code: { type: "string" },
+                      filePath: { type: "string" },
+                      line: { type: "integer", minimum: 1 },
+                      message: { type: "string" },
+                      expectedType: { type: "string" },
+                      actualType: { type: "string" }
+                    }
+                  }
+                },
+                codes: { type: "array", items: { type: "string" }, maxItems: 20 },
+                lineWindow: { type: "integer", minimum: 0, maximum: 20 },
+                filePathPrefix: { type: "string" }
               }
             },
             mode: { type: "string", enum: ["text", "syntax-aware", "symbol-aware"] },
@@ -2058,15 +2105,26 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         }
 
         const previewResult = buildRefactorPreview(repo.repoPath, args.repoId, args.find, args.replaceExpression, args.scope, args.guards, args.mode);
-        const riskCounts = countPreviewRisks(previewResult.hunks);
-        const ambiguousRatio = previewResult.hunks.length > 0
-          ? (riskCounts.ambiguous / previewResult.hunks.length) * 100
+        const compilerAssistOutcome = args.compilerAssist
+          ? applyCompilerAssistToPreview(previewResult.hunks, args.compilerAssist)
+          : null;
+        const effectiveHunks = compilerAssistOutcome?.hunks ?? previewResult.hunks;
+        const effectiveAffectedFiles = [...new Set(effectiveHunks.map((x) => x.filePath))].sort((a, b) => a.localeCompare(b));
+
+        const riskCounts = countPreviewRisks(effectiveHunks);
+        const ambiguousRatio = effectiveHunks.length > 0
+          ? (riskCounts.ambiguous / effectiveHunks.length) * 100
           : 0;
         const blockedByAmbiguity = ambiguousRatio > args.ambiguityThresholdPercent;
+        const compilerAssistNoMatch = Boolean(
+          compilerAssistOutcome
+          && compilerAssistOutcome.acceptedDiagnostics > 0
+          && compilerAssistOutcome.matchedDiagnostics === 0
+        );
 
         const now = new Date();
         const expiresAt = new Date(now.getTime() + REFACTOR_PREVIEW_TTL_MS).toISOString();
-        const digest = createPreviewDigest(args.repoId, args.find, args.replaceExpression, previewResult.hunks);
+        const digest = createPreviewDigest(args.repoId, args.find, args.replaceExpression, effectiveHunks);
         const previewId = `preview_${randomUUID()}`;
 
         const previewRecord: RefactorPreviewRecord = {
@@ -2080,14 +2138,14 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           expiresAt,
           digest,
           status: "ready",
-          totalMatches: previewResult.hunks.length,
-          affectedFileCount: previewResult.affectedFiles.length,
+          totalMatches: effectiveHunks.length,
+          affectedFileCount: effectiveAffectedFiles.length,
           riskAmbiguousCount: riskCounts.ambiguous,
           riskCrossTypeCount: riskCounts.crossType,
           riskGeneratedCount: riskCounts.generated
         };
 
-        const hunkRecords: RefactorPreviewHunkRecord[] = previewResult.hunks.map((hunk, index) => ({
+        const hunkRecords: RefactorPreviewHunkRecord[] = effectiveHunks.map((hunk, index) => ({
           previewId,
           hunkId: `${previewId}_${String(index + 1).padStart(6, "0")}`,
           filePath: hunk.filePath,
@@ -2111,21 +2169,36 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         return asText({
           previewId,
           mode: args.mode,
-          totalMatches: previewResult.hunks.length,
-          affectedFiles: previewResult.affectedFiles,
+          totalMatches: effectiveHunks.length,
+          affectedFiles: effectiveAffectedFiles,
           groupedPreviewHunks: groupPreviewHunks(hunkRecords),
           riskFlags: {
             ambiguousTargets: riskCounts.ambiguous,
             crossTypeReplacements: riskCounts.crossType,
             generatedFiles: riskCounts.generated
           },
+          compilerAssist: compilerAssistOutcome
+            ? {
+              enabled: true,
+              totalDiagnostics: compilerAssistOutcome.totalDiagnostics,
+              acceptedDiagnostics: compilerAssistOutcome.acceptedDiagnostics,
+              matchedDiagnostics: compilerAssistOutcome.matchedDiagnostics,
+              filteredOutHunks: compilerAssistOutcome.filteredOutHunks,
+              lineWindow: compilerAssistOutcome.lineWindow,
+              codes: compilerAssistOutcome.codes
+            }
+            : { enabled: false },
           ambiguity: {
             ratioPercent: Number(ambiguousRatio.toFixed(2)),
             thresholdPercent: args.ambiguityThresholdPercent,
             blockedByPolicy: blockedByAmbiguity
           },
           diagnostics: {
-            code: blockedByAmbiguity ? "PREVIEW_BLOCKED_BY_AMBIGUITY" : "PREVIEW_READY",
+            code: blockedByAmbiguity
+              ? "PREVIEW_BLOCKED_BY_AMBIGUITY"
+              : compilerAssistNoMatch
+                ? "PREVIEW_NO_DIAGNOSTIC_MATCH"
+                : "PREVIEW_READY",
             machineReadable: true
           },
           executionPolicy: noLlmAudit(),
@@ -3056,6 +3129,7 @@ type RefactorScopeInput = z.infer<typeof refactorScopeSchema>;
 type RefactorGuardsInput = z.infer<typeof refactorGuardsSchema>;
 type RefactorModeInput = z.infer<typeof refactorReplacePreviewSchema>["mode"];
 type RefactorSymbolMigrationInput = z.infer<typeof refactorSymbolMigrationSchema>["migrations"][number];
+type RefactorCompilerAssistInput = z.infer<typeof refactorCompilerAssistSchema>;
 
 type PreviewCandidateHunk = {
   filePath: string;
@@ -3069,6 +3143,16 @@ type PreviewCandidateHunk = {
   confidence: number;
   riskFlags: RefactorRiskFlag[];
   fileHashBefore: string;
+};
+
+type CompilerAssistOutcome = {
+  hunks: PreviewCandidateHunk[];
+  totalDiagnostics: number;
+  acceptedDiagnostics: number;
+  matchedDiagnostics: number;
+  filteredOutHunks: number;
+  lineWindow: number;
+  codes: string[];
 };
 
 type ObjectInitializerContext = {
@@ -3239,6 +3323,45 @@ function pathStartsWithAny(filePath: string, prefixes: string[]): boolean {
   }
   const normalized = normalizeRelativePath(filePath).toLowerCase();
   return prefixes.some((prefix) => normalized.startsWith(normalizeRelativePath(prefix).toLowerCase()));
+}
+
+function hasNormalizedPathPrefix(normalizedPath: string, normalizedPrefix: string): boolean {
+  return normalizedPath === normalizedPrefix || normalizedPath.startsWith(`${normalizedPrefix}/`);
+}
+
+function resolveDiagnosticPathToHunkPath(
+  diagnosticPath: string,
+  hunkPathByLower: Map<string, string>
+): string | null {
+  const normalizedDiagPath = normalizeRelativePath(diagnosticPath).toLowerCase();
+  const exact = hunkPathByLower.get(normalizedDiagPath);
+  if (exact) {
+    return exact;
+  }
+
+  // Compiler diagnostics often emit absolute paths while preview hunks store repo-relative paths.
+  // Resolve by suffix against known hunk paths and prefer the longest match when multiple candidates exist.
+  let bestMatch: string | null = null;
+  for (const [lowerPath, canonical] of hunkPathByLower.entries()) {
+    if (normalizedDiagPath.endsWith(`/${lowerPath}`) || normalizedDiagPath === lowerPath) {
+      if (!bestMatch || lowerPath.length > bestMatch.length) {
+        bestMatch = lowerPath;
+      }
+      if (normalizedDiagPath === lowerPath) {
+        break;
+      }
+    }
+    if (normalizedDiagPath.endsWith(`\\${lowerPath}`)) {
+      if (!bestMatch || lowerPath.length > bestMatch.length) {
+        bestMatch = lowerPath;
+      }
+    }
+  }
+
+  if (!bestMatch) {
+    return null;
+  }
+  return hunkPathByLower.get(bestMatch) ?? null;
 }
 
 function findInitializerMemberAssignment(
@@ -3498,6 +3621,91 @@ function buildRefactorPreview(
   return {
     hunks,
     affectedFiles: [...affected].sort((a, b) => a.localeCompare(b))
+  };
+}
+
+function applyCompilerAssistToPreview(
+  hunks: PreviewCandidateHunk[],
+  compilerAssist: RefactorCompilerAssistInput
+): CompilerAssistOutcome {
+  const normalizedCodes = new Set(compilerAssist.codes.map((x) => x.trim().toUpperCase()).filter(Boolean));
+  const lineWindow = compilerAssist.lineWindow;
+  const pathPrefix = compilerAssist.filePathPrefix ? normalizeRelativePath(compilerAssist.filePathPrefix).toLowerCase() : null;
+  const hunkPathByLower = new Map<string, string>();
+  for (const hunk of hunks) {
+    const normalizedHunkPath = normalizeRelativePath(hunk.filePath).toLowerCase();
+    if (!hunkPathByLower.has(normalizedHunkPath)) {
+      hunkPathByLower.set(normalizedHunkPath, hunk.filePath);
+    }
+  }
+
+  const acceptedDiagnostics = compilerAssist.diagnostics.flatMap((diag) => {
+    const code = diag.code.trim().toUpperCase();
+    if (normalizedCodes.size > 0 && !normalizedCodes.has(code)) {
+      return [];
+    }
+
+    const resolvedPath = resolveDiagnosticPathToHunkPath(diag.filePath, hunkPathByLower);
+    const diagPathForPrefix = resolvedPath
+      ? normalizeRelativePath(resolvedPath).toLowerCase()
+      : normalizeRelativePath(diag.filePath).toLowerCase();
+
+    if (pathPrefix && !hasNormalizedPathPrefix(diagPathForPrefix, pathPrefix)) {
+      return [];
+    }
+
+    return [{ ...diag, resolvedPath }];
+  });
+
+  if (acceptedDiagnostics.length === 0) {
+    return {
+      hunks,
+      totalDiagnostics: compilerAssist.diagnostics.length,
+      acceptedDiagnostics: 0,
+      matchedDiagnostics: 0,
+      filteredOutHunks: 0,
+      lineWindow,
+      codes: [...normalizedCodes].sort((a, b) => a.localeCompare(b))
+    };
+  }
+
+  const diagnosticsByFile = new Map<string, Array<{ line: number; key: string }>>();
+  for (const diag of acceptedDiagnostics) {
+    if (!diag.resolvedPath) {
+      continue;
+    }
+    const normalizedPath = normalizeRelativePath(diag.resolvedPath).toLowerCase();
+    const list = diagnosticsByFile.get(normalizedPath) ?? [];
+    list.push({ line: diag.line, key: `${normalizedPath}:${diag.line}:${diag.code.trim().toUpperCase()}` });
+    diagnosticsByFile.set(normalizedPath, list);
+  }
+
+  const matchedDiagnosticKeys = new Set<string>();
+  const selectedHunks = hunks.filter((hunk) => {
+    const normalizedPath = normalizeRelativePath(hunk.filePath).toLowerCase();
+    const candidates = diagnosticsByFile.get(normalizedPath);
+    if (!candidates || candidates.length === 0) {
+      return false;
+    }
+    for (const candidate of candidates) {
+      if (Math.abs(candidate.line - hunk.line) <= lineWindow) {
+        matchedDiagnosticKeys.add(candidate.key);
+        return true;
+      }
+    }
+    return false;
+  });
+
+  const effectiveHunks = selectedHunks;
+
+  return {
+    hunks: effectiveHunks,
+    totalDiagnostics: compilerAssist.diagnostics.length,
+    acceptedDiagnostics: acceptedDiagnostics.length,
+    matchedDiagnostics: matchedDiagnosticKeys.size,
+    filteredOutHunks: Math.max(0, hunks.length - effectiveHunks.length),
+    lineWindow,
+    codes: [...normalizedCodes].sort((a, b) => a.localeCompare(b))
   };
 }
 

@@ -13,7 +13,7 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 import { validateAllowedTables } from "../dist/sqliteGuardrails.js";
 import { mkdtempSync, writeFileSync, rmSync, mkdirSync } from "fs";
 import { tmpdir } from "os";
-import { join } from "path";
+import { join, resolve } from "path";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -480,6 +480,121 @@ public sealed class FixtureNoRewrite
     invalidRewriteJson?.code === "INVALID_INITIALIZER_REWRITE",
     "invalid dotted targetMember is rejected by policy",
     JSON.stringify(invalidRewriteJson ?? null).slice(0, 300)
+  );
+
+  // ── 3.8  compilerAssist narrows preview hunks to compile-failing lines ──
+  console.log("\n  [3.8] compilerAssist narrows preview to diagnostic lines...");
+  const compilerAssistPreview = await client.callTool({
+    name: "refactor_replace_preview",
+    arguments: {
+      repoId: testRepoId,
+      find: "Crm",
+      replaceExpression: "Crm",
+      scope: { includePaths: ["src"] },
+      guards: { language: "csharp" },
+      compilerAssist: {
+        diagnostics: [
+          {
+            code: "CS0029",
+            filePath: "src/ConversationFixture.cs",
+            line: 9,
+            message: "Cannot implicitly convert type"
+          }
+        ],
+        codes: ["CS0029", "CS1503"],
+        lineWindow: 0
+      }
+    }
+  });
+  const compilerAssistJson = readJson(compilerAssistPreview);
+  const compilerAssistGroups = compilerAssistJson?.groupedPreviewHunks ?? [];
+  const compilerAssistHunks = compilerAssistGroups.flatMap((g) => g?.hunks ?? []);
+  assert(
+    compilerAssistJson?.compilerAssist?.enabled === true,
+    "compilerAssist mode is enabled in preview response",
+    JSON.stringify(compilerAssistJson?.compilerAssist ?? null).slice(0, 300)
+  );
+  assert(
+    compilerAssistHunks.length > 0,
+    "compilerAssist returns at least one narrowed hunk",
+    JSON.stringify(compilerAssistJson ?? null).slice(0, 300)
+  );
+  assert(
+    compilerAssistGroups.length === 1
+      && compilerAssistGroups[0]?.filePath === "src/ConversationFixture.cs"
+      && compilerAssistHunks.every((h) => h?.line === 9),
+    "compilerAssist keeps only diagnostic-matching file/line hunks",
+    JSON.stringify(compilerAssistGroups).slice(0, 300)
+  );
+
+  // ── 3.9  compilerAssist accepts absolute diagnostic file paths ──
+  console.log("\n  [3.9] compilerAssist supports absolute diagnostic file paths...");
+  const compilerAssistAbsolutePath = await client.callTool({
+    name: "refactor_replace_preview",
+    arguments: {
+      repoId: testRepoId,
+      find: "Crm",
+      replaceExpression: "Crm",
+      scope: { includePaths: ["src"] },
+      guards: { language: "csharp" },
+      compilerAssist: {
+        diagnostics: [
+          {
+            code: "CS0029",
+            filePath: resolve(tmpDir, "src", "ConversationFixture.cs"),
+            line: 9
+          }
+        ],
+        codes: ["CS0029"],
+        lineWindow: 0,
+        filePathPrefix: "src"
+      }
+    }
+  });
+  const compilerAssistAbsolutePathJson = readJson(compilerAssistAbsolutePath);
+  const absoluteGroups = compilerAssistAbsolutePathJson?.groupedPreviewHunks ?? [];
+  const absoluteHunks = absoluteGroups.flatMap((g) => g?.hunks ?? []);
+  assert(
+    absoluteGroups.length === 1
+      && absoluteGroups[0]?.filePath === "src/ConversationFixture.cs"
+      && absoluteHunks.every((h) => h?.line === 9),
+    "absolute diagnostic path narrows preview correctly",
+    JSON.stringify(absoluteGroups).slice(0, 300)
+  );
+
+  // ── 3.10 compilerAssist no-match does not fall back to full preview ──
+  console.log("\n  [3.10] compilerAssist no-match stays narrowed (no broad fallback)...");
+  const compilerAssistNoMatch = await client.callTool({
+    name: "refactor_replace_preview",
+    arguments: {
+      repoId: testRepoId,
+      find: "Crm",
+      replaceExpression: "Crm",
+      scope: { includePaths: ["src"] },
+      guards: { language: "csharp" },
+      compilerAssist: {
+        diagnostics: [
+          {
+            code: "CS0029",
+            filePath: "src/ConversationFixture.cs",
+            line: 999
+          }
+        ],
+        codes: ["CS0029"],
+        lineWindow: 0
+      }
+    }
+  });
+  const compilerAssistNoMatchJson = readJson(compilerAssistNoMatch);
+  assert(
+    compilerAssistNoMatchJson?.totalMatches === 0,
+    "no diagnostic match returns zero hunks (no full-preview fallback)",
+    JSON.stringify(compilerAssistNoMatchJson ?? null).slice(0, 300)
+  );
+  assert(
+    compilerAssistNoMatchJson?.diagnostics?.code === "PREVIEW_NO_DIAGNOSTIC_MATCH",
+    "no diagnostic match emits PREVIEW_NO_DIAGNOSTIC_MATCH",
+    JSON.stringify(compilerAssistNoMatchJson?.diagnostics ?? null).slice(0, 300)
   );
 
   await client.close();

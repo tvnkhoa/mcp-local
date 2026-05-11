@@ -169,27 +169,104 @@
 - Additional interoperability gap observed:
 	- Copilot MCP tool schema currently rejects `initializerRewrite` (`must NOT have additional properties`), so clients cannot pass the metadata required by the documented deterministic initializer rewrite path.
 
-### Current Status (Partially Resolved → Moving to Full Resolution)
-- ✅ **Engine core is safe**: Invalid dotted-initializer rewrite pattern is blocked at both preview-stage (`ambiguous_target` flag) and apply-stage (`INVALID_CSHARP_INITIALIZER_REWRITE` conflict).
-- ✅ **Integration gap FIXED**: Tool schema now properly exposes `initializerRewrite` metadata to Copilot client (added `initializerRewrite` object property with `objectProperty`, `objectType`, `targetMember` fields).
-- ✅ **Server accepts metadata**: Full validation chain from client → server works end-to-end.
-- ✅ **Regression suite**: All 33 tests pass including safety gates and deterministic rewrite paths.
+### Current Status (Resolved)
+- ✅ **Engine core is safe**: Invalid dotted-initializer rewrite pattern is blocked at both preview-stage (`ambiguous_target`) and apply-stage (`INVALID_CSHARP_INITIALIZER_REWRITE`).
+- ✅ **Copilot tooling path recovered**: after restarting MCP host/client session, `refactor_symbol_migration` accepts `initializerRewrite` and returns valid preview output.
+- ✅ **End-to-end path confirmed**: dry-run with `initializerRewrite` now executes successfully on CommunicationHub test scope.
 
-### Resolution Status
-The issue is now **ready for end-to-end validation**:
-1. Copilot client now receives correct tool schema with `initializerRewrite` support
-2. Users can provide `initializerRewrite` metadata in `refactor_symbol_migration` calls
-3. Server correctly processes and validates the metadata
-4. Invalid dotted targets are blocked; valid ones are deterministically rewritten
+### Re-Check (2026-05-08, Copilot Tooling Path After Restart)
+- Root cause confirmed:
+	- prior failures were caused by stale tool/schema cache in Copilot session (`must NOT have additional properties`).
+- Recovery action:
+	- stop MCP processes and restart host/client session.
+- Verification after restart:
+	1. `mcp_codebase-inde_health_check` (repoId: `wec.commnunication-hub`) → `status: ok`, `serverVersion: 0.3.0`
+	2. `mcp_codebase-inde_refactor_symbol_migration` (`dryRun=true`, with `initializerRewrite`) → success with non-empty `previewSummary`
+	3. control call without `initializerRewrite` also succeeds (expected `ambiguous_target` safety behavior for dotted targets)
 
-### Final Validation Step (Pending)
-- Re-run `refactor_symbol_migration` on CommunicationHub test fixtures with `initializerRewrite` metadata
-- Verify: dotted targets rewrite deterministically (e.g., `IdentityState = { CrmCustomerId = ... }`)
-- Verify: no invalid dotted initializer entries in generated code
-- Verify: `dotnet build backend/CommunicationHub/CommunicationHub.slnx` succeeds
+### Gate Status (Post-Restart)
+1. Discovery: passed
+2. Scope: passed
+3. Confidence: passed
 
-### Summary for Team
-**Integration path is now complete.** 
-- Engine safety: ✅ implemented and verified
-- Client integration: ✅ fixed (schema exposed)
-- End-to-end workflow: ✅ ready for validation
+### Team Conclusion
+**MCP-ISSUE-003 is resolved.** Engine fix is valid and Copilot path works after cache/session refresh.
+
+### Operational Note
+- If `must NOT have additional properties` reappears for `initializerRewrite`, perform MCP session restart (cache refresh) before triage.
+
+### Latest Re-Validation (2026-05-08, Live Apply)
+- Repo: `wec.commnunication-hub`
+- MCP apply executed with `initializerRewrite` (not dry-run):
+	- Tool: `mcp_codebase-inde_refactor_symbol_migration`
+	- Scope: `backend/CommunicationHub/tests/Application.UnitTests/Conversations/Commands/ConversationNotesCommandHandlerTests.cs`
+	- Mapping: `CrmCustomerId -> IdentityState.CrmCustomerId`
+	- Result: `totalMatches: 4`, `unresolvedOccurrences: 0`, `applyId: apply_82225bb9-986c-4bc8-b986-e241a1b98730`
+	- Generated rewrite form: `IdentityState = new ConversationIdentityState { CrmCustomerId = ... },` (valid C# object initializer assignment)
+- Post-apply validation:
+	- Command: `dotnet test backend/CommunicationHub/tests/Application.UnitTests/Application.UnitTests.csproj --filter FullyQualifiedName~ConversationNotesCommandHandlerTests`
+	- Result: `5 passed, 0 failed`
+- Outcome: ✅ Confirms end-to-end `initializerRewrite` path works in live CommunicationHub workspace (not only MCP local fixture tests).
+
+## MCP-ISSUE-004
+- Scenario: Remove `NotMapped` annotation usage from Conversation while keeping owned-state migration stable.
+- MCP tool/query attempted: `get_folder_summary` + `search_symbols(CrmCustomerId)` + `get_file_summary(Conversation.cs)` + `find_impact_files(Conversation.cs)`.
+- Expected: complete impact coverage for safe refactor planning without baseline tools.
+- Actual: impact result was partial (`unresolvedRatio` around 0.375), only a small test subset surfaced while real compile impact was much broader.
+- Impact: MCP-only evidence was insufficient to safely execute this refactor end-to-end.
+- Workaround: controlled fallback to build-driven validation (`dotnet test CommunicationHub.slnx`) and targeted edits.
+- Enhancement proposal: improve impact completeness for compatibility-shim and owned-state refactors (especially references originating from object initializers and test fixtures) so `find_impact_files` reflects near-complete call/usage surface.
+
+### Verification Result (2026-05-08)
+- Final implementation removed DataAnnotation usage (`NotMapped`) and replaced it with Fluent API ignores in EF configuration.
+- Validation:
+	- `dotnet test .\CommunicationHub.slnx -v minimal` => 552 passed, 0 failed.
+	- `dotnet ef migrations has-pending-model-changes --project .\src\Infrastructure\Infrastructure.csproj --startup-project .\src\Web\Web.csproj` => no pending model changes.
+## MCP-ISSUE-2026-05-08-JSONKEY-SCAN
+- Scenario: Need to detect remaining JSON literal key usage after refactor of n8n outbound memory payload fields.
+- MCP query attempted: get_symbol_context_pack(N8nOutboundMemoryEntry), find_impact_files(N8nContextSharedModels.cs), search_symbols(CampaignType, CrmCampaignId).
+- Expected: Surface all runtime references including JSON key literals impacted by payload rename.
+- Actual: Symbol graph identifies constructor/type usages but misses string literal keys and serialized property-name impacts.
+- Impact: Required targeted baseline grep to confirm consistency of payload fields and call-site mappings.
+- Workaround: Use narrow grep on Application paths for constructor args and key tokens (SourceCategory/SourceInterval etc.).
+- Enhancement proposal: Add literal-key lane or tokenized string-literal index for payload contract impact checks in MCP.
+
+
+## MCP-ISSUE-005
+- Scenario: Rapid enum-channel refactor in test code required identifying only compile-failing callsites after mixed MCP bulk replacements.
+- MCP tool/query attempted: refactor_replace_preview/apply (text and symbol-aware with owner guards) for `CommunicationChannels.*` <-> `CommunicationChannel.*` patterns.
+- Expected: owner-guarded MCP replacements would fully isolate Conversation/CustomerActivity enum targets without touching string-based request/assert contexts.
+- Actual: residual mixed-context lines remained; MCP evidence was insufficient to isolate all failing callsites deterministically in one pass.
+- Impact: had to use narrow baseline inspection (`grep_search` + targeted `read_file`) to map compiler line errors to exact contexts and finish stabilization.
+- Workaround: compiler-driven line-level replacements plus targeted manual edits in affected test files, then full build validation.
+- Enhancement proposal: add compiler-assisted mode in refactor workflow to ingest CS0029/CS1503 diagnostics and auto-suggest scoped replacements by symbol owner + expected target type.
+
+### Implementation Update (2026-05-11)
+- Added `compilerAssist` option to `refactor_replace_preview` input schema:
+	- `diagnostics[]`: `{ code, filePath, line, message?, expectedType?, actualType? }`
+	- `codes[]`: compiler codes to consider (default `CS0029`, `CS1503`)
+	- `lineWindow`: line tolerance around compiler diagnostics (default `2`)
+	- `filePathPrefix` (optional): narrow diagnostics to a specific sub-tree
+- Added deterministic compiler-assisted filter in preview pipeline:
+	- maps compiler diagnostics by normalized file path + line
+	- keeps only hunks near failing diagnostics (file+line window)
+	- returns assist metadata in preview response (`acceptedDiagnostics`, `matchedDiagnostics`, `filteredOutHunks`)
+- Added defensive fallback:
+	- if diagnostics are stale and no hunk matches, preview falls back to original hunks to avoid false-empty plans.
+
+### Verification Result (2026-05-11)
+- Type safety/build:
+	- `npm run typecheck` ✅
+	- `npm run build` ✅
+- Regression suite:
+	- `node scripts/test-refactor-engine.mjs` => `36 passed, 0 failed`
+	- Added new integration test `[3.8] compilerAssist narrows preview to diagnostic lines` ✅
+
+### Usage Example
+- `refactor_replace_preview` with compiler-assisted narrowing:
+	- Provide compile diagnostics (for example `CS0029` / `CS1503`) from failing build output
+	- Keep existing owner guards/scope
+	- Receive narrowed `groupedPreviewHunks` aligned to compile-failing callsites first
+
+### Current Status
+- ✅ RESOLVED for MCP server workflow: compile-diagnostic-guided narrowing is available in `refactor_replace_preview`.
