@@ -845,6 +845,7 @@ export class GraphStore {
     relatedName: string | null;
     relatedKind: string | null;
     relatedFilePath: string | null;
+    relatedSignature: string | null;
   }[] {
     if (direction === "outbound") {
       return this.db
@@ -858,7 +859,8 @@ export class GraphStore {
             c.type as type,
             s.name as relatedName,
             s.kind as relatedKind,
-            s.file_path as relatedFilePath
+            s.file_path as relatedFilePath,
+            s.signature as relatedSignature
           from cross_repo_deps c
           left join symbols s
             on s.repo_id = c.to_repo_id and s.symbol_id = c.to_symbol_id
@@ -876,6 +878,7 @@ export class GraphStore {
         relatedName: string | null;
         relatedKind: string | null;
         relatedFilePath: string | null;
+        relatedSignature: string | null;
       }[];
     }
 
@@ -890,7 +893,8 @@ export class GraphStore {
           c.type as type,
           s.name as relatedName,
           s.kind as relatedKind,
-          s.file_path as relatedFilePath
+          s.file_path as relatedFilePath,
+          s.signature as relatedSignature
         from cross_repo_deps c
         left join symbols s
           on s.repo_id = c.from_repo_id and s.symbol_id = c.from_symbol_id
@@ -908,7 +912,166 @@ export class GraphStore {
       relatedName: string | null;
       relatedKind: string | null;
       relatedFilePath: string | null;
+      relatedSignature: string | null;
     }[];
+  }
+
+  findPackageConsumers(
+    packageContractId: string,
+    repoId: string | null,
+    limit: number
+  ): {
+    consumerRepoId: string;
+    consumerSymbolId: string;
+    consumerName: string | null;
+    consumerKind: string | null;
+    consumerFilePath: string | null;
+    packageContractId: string;
+    dependencyReason: string | null;
+    providerRepoId: string | null;
+    providerSymbolId: string | null;
+  }[] {
+    if (repoId) {
+      return this.db
+        .prepare(
+          `
+          select
+            e.repo_id as consumerRepoId,
+            e.from_id as consumerSymbolId,
+            s.name as consumerName,
+            s.kind as consumerKind,
+            s.file_path as consumerFilePath,
+            e.to_id as packageContractId,
+            e.reason as dependencyReason,
+            c.to_repo_id as providerRepoId,
+            c.to_symbol_id as providerSymbolId
+          from edges e
+          left join symbols s
+            on s.repo_id = e.repo_id and s.symbol_id = e.from_id
+          left join cross_repo_deps c
+            on c.from_repo_id = e.repo_id
+            and c.from_symbol_id = e.from_id
+            and c.type = e.type
+            and exists (
+              select 1
+              from symbols ps
+              where ps.repo_id = c.to_repo_id
+                and ps.symbol_id = c.to_symbol_id
+                and ps.signature = e.to_id
+            )
+          where e.type = 'DEPENDS_ON'
+            and e.to_id = ?
+            and e.repo_id = ?
+          order by e.repo_id, s.file_path, s.name
+          limit ?
+          `
+        )
+        .all(packageContractId, repoId, limit) as {
+        consumerRepoId: string;
+        consumerSymbolId: string;
+        consumerName: string | null;
+        consumerKind: string | null;
+        consumerFilePath: string | null;
+        packageContractId: string;
+        dependencyReason: string | null;
+        providerRepoId: string | null;
+        providerSymbolId: string | null;
+      }[];
+    }
+
+    return this.db
+      .prepare(
+        `
+        select
+          e.repo_id as consumerRepoId,
+          e.from_id as consumerSymbolId,
+          s.name as consumerName,
+          s.kind as consumerKind,
+          s.file_path as consumerFilePath,
+          e.to_id as packageContractId,
+          e.reason as dependencyReason,
+          c.to_repo_id as providerRepoId,
+          c.to_symbol_id as providerSymbolId
+        from edges e
+        left join symbols s
+          on s.repo_id = e.repo_id and s.symbol_id = e.from_id
+        left join cross_repo_deps c
+          on c.from_repo_id = e.repo_id
+          and c.from_symbol_id = e.from_id
+          and c.type = e.type
+          and exists (
+            select 1
+            from symbols ps
+            where ps.repo_id = c.to_repo_id
+              and ps.symbol_id = c.to_symbol_id
+              and ps.signature = e.to_id
+          )
+        where e.type = 'DEPENDS_ON'
+          and e.to_id = ?
+        order by e.repo_id, s.file_path, s.name
+        limit ?
+        `
+      )
+      .all(packageContractId, limit) as {
+      consumerRepoId: string;
+      consumerSymbolId: string;
+      consumerName: string | null;
+      consumerKind: string | null;
+      consumerFilePath: string | null;
+      packageContractId: string;
+      dependencyReason: string | null;
+      providerRepoId: string | null;
+      providerSymbolId: string | null;
+    }[];
+  }
+
+  getPackageBridgeStats(repoId: string): {
+    packageAttempts: number;
+    packageResolved: number;
+    packageNoCandidate: number;
+  } {
+    const attemptsRow = this.db
+      .prepare(
+        `
+        select count(distinct e.from_id || '|' || e.to_id) as packageAttempts
+        from edges e
+        where e.repo_id = ?
+          and e.type = 'DEPENDS_ON'
+          and e.to_id like 'nuget:%'
+        `
+      )
+      .get(repoId) as { packageAttempts: number } | undefined;
+
+    const resolvedRow = this.db
+      .prepare(
+        `
+        select count(distinct e.from_id || '|' || e.to_id) as packageResolved
+        from edges e
+        where e.repo_id = ?
+          and e.type = 'DEPENDS_ON'
+          and e.to_id like 'nuget:%'
+          and exists (
+            select 1
+            from cross_repo_deps c
+            inner join symbols ps
+              on ps.repo_id = c.to_repo_id
+              and ps.symbol_id = c.to_symbol_id
+            where c.from_repo_id = e.repo_id
+              and c.from_symbol_id = e.from_id
+              and c.type = e.type
+              and ps.signature = e.to_id
+          )
+        `
+      )
+      .get(repoId) as { packageResolved: number } | undefined;
+
+    const packageAttempts = attemptsRow?.packageAttempts ?? 0;
+    const packageResolved = resolvedRow?.packageResolved ?? 0;
+    return {
+      packageAttempts,
+      packageResolved,
+      packageNoCandidate: Math.max(0, packageAttempts - packageResolved)
+    };
   }
 
   linkTestsToSource(
@@ -2286,23 +2449,48 @@ export class GraphStore {
       return stats;
     }
 
-    const toIds = [...new Set(unlinked.map((r) => r.toId))];
-    const placeholders = toIds.map(() => "?").join(", ");
-    const matches = this.db
-      .prepare(
-        `
-        select repo_id as toRepoId, symbol_id as toSymbolId
-        from symbols
-        where repo_id != ? and symbol_id in (${placeholders})
-        `
-      )
-      .all(repoId, ...toIds) as { toRepoId: string; toSymbolId: string }[];
+    const contractPrefixPattern = /^(nuget|endpoint):/;
+    const symbolToIds = [...new Set(unlinked.map((r) => r.toId).filter((toId) => !contractPrefixPattern.test(toId)))];
+    const contractIds = [...new Set(unlinked.map((r) => r.toId).filter((toId) => contractPrefixPattern.test(toId)))];
 
-    const candidatesBySymbolId = new Map<string, string[]>();
-    for (const row of matches) {
-      const list = candidatesBySymbolId.get(row.toSymbolId) ?? [];
-      list.push(row.toRepoId);
-      candidatesBySymbolId.set(row.toSymbolId, list);
+    const candidatesByToId = new Map<string, { toRepoId: string; toSymbolId: string }[]>();
+
+    if (symbolToIds.length > 0) {
+      const symbolPlaceholders = symbolToIds.map(() => "?").join(", ");
+      const symbolMatches = this.db
+        .prepare(
+          `
+          select repo_id as toRepoId, symbol_id as toSymbolId
+          from symbols
+          where repo_id != ? and symbol_id in (${symbolPlaceholders})
+          `
+        )
+        .all(repoId, ...symbolToIds) as { toRepoId: string; toSymbolId: string }[];
+
+      for (const row of symbolMatches) {
+        const list = candidatesByToId.get(row.toSymbolId) ?? [];
+        list.push({ toRepoId: row.toRepoId, toSymbolId: row.toSymbolId });
+        candidatesByToId.set(row.toSymbolId, list);
+      }
+    }
+
+    if (contractIds.length > 0) {
+      const contractPlaceholders = contractIds.map(() => "?").join(", ");
+      const contractMatches = this.db
+        .prepare(
+          `
+          select repo_id as toRepoId, symbol_id as toSymbolId, signature as contractId
+          from symbols
+          where repo_id != ? and signature in (${contractPlaceholders})
+          `
+        )
+        .all(repoId, ...contractIds) as { toRepoId: string; toSymbolId: string; contractId: string }[];
+
+      for (const row of contractMatches) {
+        const list = candidatesByToId.get(row.contractId) ?? [];
+        list.push({ toRepoId: row.toRepoId, toSymbolId: row.toSymbolId });
+        candidatesByToId.set(row.contractId, list);
+      }
     }
 
     const upsertStmt = this.db.prepare(
@@ -2316,7 +2504,7 @@ export class GraphStore {
     const tx = this.db.transaction(() => {
       for (const row of unlinked) {
         stats.attempts += 1;
-        const candidates = candidatesBySymbolId.get(row.toId) ?? [];
+        const candidates = candidatesByToId.get(row.toId) ?? [];
         if (candidates.length === 0) {
           stats.unresolvedByReason.no_candidate += 1;
           continue;
@@ -2326,7 +2514,7 @@ export class GraphStore {
           continue;
         }
 
-        upsertStmt.run(repoId, row.fromId, candidates[0], row.toId, row.type);
+        upsertStmt.run(repoId, row.fromId, candidates[0].toRepoId, candidates[0].toSymbolId, row.type);
         stats.resolved += 1;
       }
     });

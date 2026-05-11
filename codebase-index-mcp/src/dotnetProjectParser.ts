@@ -24,6 +24,17 @@ export type DotnetExtractResult = {
   mentions?: never;
 };
 
+function normalizeNugetContractId(value: string): string {
+  return `nuget:${value.trim().toLowerCase()}`;
+}
+
+function extractTagValue(source: string, tagName: string): string | null {
+  const re = new RegExp(`<${tagName}>([^<]+)</${tagName}>`, "i");
+  const match = re.exec(source);
+  const value = match?.[1]?.trim();
+  return value && value.length > 0 ? value : null;
+}
+
 function stableId(input: string): string {
   return createHash("sha256").update(input).digest("hex").slice(0, 24);
 }
@@ -54,19 +65,38 @@ function extractCsproj(input: DotnetExtractInput): DotnetExtractResult {
     line: 1
   });
 
+  // Provider-side bridge symbol: when PackageId is declared, emit a synthetic
+  // module symbol tagged with signature=nuget:<package>. Cross-repo resolver
+  // can map consumer PackageReference contracts to this provider symbol.
+  const packageId = extractTagValue(input.source, "PackageId");
+  if (packageId) {
+    const contractId = normalizeNugetContractId(packageId);
+    symbols.push({
+      repoId: input.repoId,
+      symbolId: stableId(`${input.repoId}:${input.filePath}:nuget-export:${contractId}`),
+      filePath: input.filePath,
+      name: packageId,
+      kind: "module",
+      line: 1,
+      signature: contractId
+    });
+  }
+
   // Extract <PackageReference Include="..." Version="..." />
   const pkgRefRe = /<PackageReference\s+Include="([^"]+)"(?:[^>]*Version="([^"]*)")?/gi;
   let match: RegExpExecArray | null;
 
   while ((match = pkgRefRe.exec(input.source)) !== null) {
     const packageName = match[1];
+    const packageVersion = match[2]?.trim() || null;
     if (!packageName) continue;
 
     edges.push({
       repoId: input.repoId,
       fromId: projectSymbolId,
-      toId: stableId(`${input.repoId}:nuget:${packageName.toLowerCase()}`),
-      type: "DEPENDS_ON"
+      toId: normalizeNugetContractId(packageName),
+      type: "DEPENDS_ON",
+      reason: packageVersion ? `nuget package reference (${packageVersion})` : "nuget package reference"
     });
   }
 

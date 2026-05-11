@@ -112,6 +112,8 @@ export function extractGraphData(input: ExtractInput): ExtractOutput {  // Handl
   } else if (input.language === "csharp") {
     extractCSharpSymbols(input, root, symbols, edges, moduleSymbolId);
     routes.push(...extractCSharpRoutes(input, root, symbols));
+    emitEndpointContractSymbols(input, symbols, routes);
+    emitEndpointContractSymbolsFromCSharpSignatures(input, symbols);
   }
 
   const resolvedEdges = resolveIntraFileEdges(edges, symbols);
@@ -162,6 +164,58 @@ function getTreeSitterBufferSize(sourceBytes: number): number {
 
 function stripQuotes(value: string): string {
   return value.replace(/^['\"]|['\"]$/g, "").trim();
+}
+
+function normalizeEndpointPath(raw: string): string {
+  const trimmed = stripQuotes(raw).trim();
+  if (!trimmed) {
+    return "/";
+  }
+
+  let candidate = trimmed;
+  if (/^https?:\/\//i.test(candidate)) {
+    try {
+      const parsed = new URL(candidate);
+      candidate = parsed.pathname || "/";
+    } catch {
+      // Keep raw candidate when URL parsing fails.
+    }
+  }
+
+  const noQuery = candidate.split("?")[0]?.split("#")[0] ?? candidate;
+  const normalized = noQuery.replace(/\\/g, "/").replace(/\/{2,}/g, "/").trim();
+  const withLeadingSlash = normalized.startsWith("/") ? normalized : `/${normalized}`;
+  return withLeadingSlash.toLowerCase();
+}
+
+function toEndpointContractId(httpMethod: RouteRecord["httpMethod"], routeTemplate: string): string {
+  return `endpoint:${httpMethod.toUpperCase()}:${normalizeEndpointPath(routeTemplate)}`;
+}
+
+function extractCSharpUsingNamespace(node: Parser.SyntaxNode): string | null {
+  const nameNode = node.childForFieldName("name");
+  const raw = (nameNode?.text ?? node.text)
+    .replace(/^\s*global\s+using\s+/i, "")
+    .replace(/^\s*using\s+/i, "")
+    .replace(/\s*=\s*.+$/, "")
+    .replace(/;\s*$/, "")
+    .trim();
+
+  if (!raw || raw.length < 2 || !raw.includes(".")) {
+    return null;
+  }
+
+  return raw;
+}
+
+function mapUsingNamespaceToNugetContract(namespaceImport: string): string | null {
+  const normalized = namespaceImport.trim();
+  // Contract bridge lane for CommunicationHub package family.
+  if (/^SSNet\.CommunicationHub\.Messaging(\.|$)/i.test(normalized)) {
+    return "nuget:ssnet.communicationhub.messaging";
+  }
+
+  return null;
 }
 
 /**
@@ -860,6 +914,12 @@ function normalizeCSharpTypeName(raw: string): string {
   return simplified.trim();
 }
 
+function isLikelyCSharpInterfaceName(rawTypeName: string): boolean {
+  const normalized = normalizeCSharpTypeName(rawTypeName);
+  // Conventional C# interface naming: I + PascalCase token
+  return /^I[A-Z][A-Za-z0-9_]*$/.test(normalized);
+}
+
 function emitTypeRefEdge(
   input: ExtractInput,
   edges: EdgeRecord[],
@@ -986,6 +1046,49 @@ function collectCSharpScopeTypeMap(scopeNode: Parser.SyntaxNode): Map<string, st
   return scopeTypes;
 }
 
+function extractCSharpHttpDependencyContract(invocationNode: Parser.SyntaxNode): {
+  method: RouteRecord["httpMethod"];
+  routeTemplate: string;
+} | null {
+  const functionNode = invocationNode.childForFieldName("function");
+  if (!functionNode || functionNode.type !== "member_access_expression") {
+    return null;
+  }
+
+  const nameNode = functionNode.childForFieldName("name");
+  const methodName = nameNode?.text?.toLowerCase() ?? "";
+  const methodByName: Record<string, RouteRecord["httpMethod"]> = {
+    getasync: "GET",
+    getfromjsonasync: "GET",
+    postasync: "POST",
+    postasjsonasync: "POST",
+    putasync: "PUT",
+    putasjsonasync: "PUT",
+    patchasync: "PATCH",
+    deleteasync: "DELETE"
+  };
+
+  const httpMethod = methodByName[methodName];
+  if (!httpMethod) {
+    return null;
+  }
+
+  const argsNode = invocationNode.childForFieldName("arguments");
+  if (!argsNode) {
+    return null;
+  }
+
+  const firstLiteral = extractFirstStringLiteral(argsNode.text);
+  if (!firstLiteral) {
+    return null;
+  }
+
+  return {
+    method: httpMethod,
+    routeTemplate: normalizeEndpointPath(firstLiteral)
+  };
+}
+
 function extractCSharpSymbols(
   input: ExtractInput,
   root: Parser.SyntaxNode,
@@ -995,13 +1098,27 @@ function extractCSharpSymbols(
 ): void {
   // Extract using directives (imports)
   for (const node of root.descendantsOfType(["using_directive"])) {
-    const nameNode = node.childForFieldName("name");
-    if (nameNode) {
+    const usingNamespace = extractCSharpUsingNamespace(node);
+    if (!usingNamespace) {
+      continue;
+    }
+
+    edges.push({
+      repoId: input.repoId,
+      fromId: moduleSymbolId,
+      toId: `import:${usingNamespace}`,
+      type: "IMPORTS"
+    });
+
+    const packageContractId = mapUsingNamespaceToNugetContract(usingNamespace);
+    if (packageContractId) {
       edges.push({
         repoId: input.repoId,
         fromId: moduleSymbolId,
-        toId: `import:${nameNode.text}`,
-        type: "IMPORTS"
+        toId: packageContractId,
+        type: "DEPENDS_ON",
+        confidence: 0.9,
+        reason: "namespace package contract bridge"
       });
     }
   }
@@ -1033,6 +1150,18 @@ function extractCSharpSymbols(
           toId: `callee:${calleeName}`,
           type: "CALLS"
         });
+
+        const endpointContract = extractCSharpHttpDependencyContract(node);
+        if (endpointContract) {
+          edges.push({
+            repoId: input.repoId,
+            fromId,
+            toId: toEndpointContractId(endpointContract.method, endpointContract.routeTemplate),
+            type: "DEPENDS_ON",
+            confidence: 0.92,
+            reason: "http endpoint contract"
+          });
+        }
 
         // Preserve static/member receiver context for better post-resolution:
         // e.g. Animal.Classify() => callee:Animal.Classify
@@ -1231,12 +1360,14 @@ function extractCSharpSymbols(
             const cleanName = baseName.replace(/<.*>$/, "").trim();
             if (cleanName) {
               emitTypeRefEdge(input, edges, symbolId, cleanName);
-              edges.push({
-                repoId: input.repoId,
-                fromId: symbolId,
-                toId: `iface:${cleanName}`,
-                type: "IMPLEMENTS"
-              });
+              if (isLikelyCSharpInterfaceName(cleanName)) {
+                edges.push({
+                  repoId: input.repoId,
+                  fromId: symbolId,
+                  toId: `iface:${cleanName}`,
+                  type: "IMPLEMENTS"
+                });
+              }
             }
           }
         }
@@ -1458,6 +1589,95 @@ function dedupeRoutes(routes: RouteRecord[]): RouteRecord[] {
   }
 
   return output;
+}
+
+function emitEndpointContractSymbols(
+  input: ExtractInput,
+  symbols: SymbolRecord[],
+  routes: RouteRecord[]
+): void {
+  for (const route of routes) {
+    const contractId = toEndpointContractId(route.httpMethod, route.routeTemplate);
+    symbols.push({
+      repoId: input.repoId,
+      symbolId: stableId(`${input.repoId}:${input.filePath}:endpoint:${route.httpMethod}:${route.routeTemplate}:${route.line}`),
+      filePath: input.filePath,
+      name: `${route.httpMethod} ${normalizeEndpointPath(route.routeTemplate)}`,
+      kind: "module",
+      line: route.line,
+      signature: contractId
+    });
+  }
+}
+
+function emitEndpointContractSymbolsFromCSharpSignatures(
+  input: ExtractInput,
+  symbols: SymbolRecord[]
+): void {
+  const classSymbols = symbols.filter((s) => s.kind === "class");
+  const extractClassRoutePrefix = (classSignature: string | undefined): string => {
+    const sig = classSignature ?? "";
+    const routeMatch = sig.match(/\[\s*Route(?:Attribute)?\s*\(([^\)]*)\)\s*\]/i);
+    if (!routeMatch?.[1]) {
+      return "";
+    }
+
+    return extractFirstStringLiteral(routeMatch[1]) ?? "";
+  };
+
+  const resolveMethodClassContext = (methodLine: number): { className: string; classRoutePrefix: string } => {
+    if (classSymbols.length === 0) {
+      return { className: "Controller", classRoutePrefix: "" };
+    }
+
+    const ordered = [...classSymbols].sort((a, b) => a.line - b.line);
+    let selected = ordered[0];
+    for (const classSymbol of ordered) {
+      if (classSymbol.line <= methodLine) {
+        selected = classSymbol;
+      } else {
+        break;
+      }
+    }
+
+    return {
+      className: selected.name,
+      classRoutePrefix: extractClassRoutePrefix(selected.signature)
+    };
+  };
+
+  for (const methodSymbol of symbols.filter((s) => s.kind === "method")) {
+    const sig = methodSymbol.signature ?? "";
+    const httpMatch = sig.match(/\[\s*Http(Get|Post|Put|Delete|Patch)(?:Attribute)?\s*(?:\(([^\)]*)\))?\s*\]/i);
+    if (!httpMatch) {
+      continue;
+    }
+
+    const method = (httpMatch[1] ?? "").toUpperCase() as RouteRecord["httpMethod"];
+    const methodTemplate = extractFirstStringLiteral(httpMatch[2] ?? "");
+    const methodClassContext = resolveMethodClassContext(methodSymbol.line);
+    const routeTemplate = combineRouteTemplate(
+      methodClassContext.classRoutePrefix,
+      methodTemplate,
+      methodClassContext.className,
+      methodSymbol.name
+    );
+    const contractId = toEndpointContractId(method, routeTemplate);
+
+    if (symbols.some((s) => s.signature === contractId)) {
+      continue;
+    }
+
+    symbols.push({
+      repoId: input.repoId,
+      symbolId: stableId(`${input.repoId}:${input.filePath}:endpoint-fallback:${contractId}:${methodSymbol.line}`),
+      filePath: input.filePath,
+      name: `${method} ${normalizeEndpointPath(routeTemplate)}`,
+      kind: "module",
+      line: methodSymbol.line,
+      signature: contractId
+    });
+  }
 }
 
 function findSymbolIdByNode(symbols: SymbolRecord[], kind: SymbolRecord["kind"], name: string, line: number): string | null {

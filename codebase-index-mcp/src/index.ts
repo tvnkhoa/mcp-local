@@ -316,6 +316,15 @@ const crossRepoImpactSchema = z
     path: ["symbolId"]
   });
 
+const findPackageConsumersSchema = z
+  .object({
+    packageName: z.string().min(1).max(200),
+    repoId: z.string().min(1).max(200).optional(),
+    limit: z.number().int().min(1).max(MAX_RESULT_LIMIT).default(100),
+    profile: responseProfileSchema.default("compact")
+  })
+  .strict();
+
 const symbolBlameSchema = z
   .object({
     repoId: z.string().min(1).max(200),
@@ -829,6 +838,21 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             symbolId: { type: "string" },
             name: { type: "string" },
             direction: { type: "string", enum: ["outbound", "inbound"] },
+            limit: { type: "integer", minimum: 1, maximum: MAX_RESULT_LIMIT },
+            profile: { type: "string", enum: ["nano", "compact", "standard", "verbose"] }
+          }
+        }
+      },
+      {
+        name: "find_package_consumers",
+        description: "Find repositories/symbols that depend on a NuGet package contract (nuget:<name>) without requiring a symbolId.",
+        inputSchema: {
+          type: "object",
+          additionalProperties: false,
+          required: ["packageName"],
+          properties: {
+            packageName: { type: "string" },
+            repoId: { type: "string" },
             limit: { type: "integer", minimum: 1, maximum: MAX_RESULT_LIMIT },
             profile: { type: "string", enum: ["nano", "compact", "standard", "verbose"] }
           }
@@ -1633,7 +1657,20 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           throw new McpError(ErrorCode.InvalidParams, `get_cross_repo_impact: symbol '${symbolId}' not found in repo '${args.repoId}'.`);
         }
 
-        const impactRows = store.getCrossRepoImpact(args.repoId, symbolId, args.direction, args.limit);
+        const impactRows = store.getCrossRepoImpact(args.repoId, symbolId, args.direction, args.limit).map((row) => {
+          const signature = row.relatedSignature ?? "";
+          const isNugetContract = signature.startsWith("nuget:");
+          const isEndpointContract = signature.startsWith("endpoint:");
+          return {
+            ...row,
+            contractType: isNugetContract ? "nuget" : isEndpointContract ? "endpoint" : "symbol",
+            resolutionReason: isNugetContract
+              ? "nuget_contract_signature_match"
+              : isEndpointContract
+                ? "endpoint_contract_signature_match"
+                : "symbol_id_exact_match"
+          };
+        });
 
         if (profile === "nano") {
           return asText({
@@ -1651,6 +1688,32 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           direction: args.direction,
           impactCount: impactRows.length,
           impacts: impactRows
+        }, profile);
+      }
+      case "find_package_consumers": {
+        const args = findPackageConsumersSchema.parse(request.params.arguments ?? {});
+        const profile = resolveResponseProfile(args.profile);
+        const packageContractId = toNugetContractId(args.packageName);
+        const rows = store.findPackageConsumers(packageContractId, args.repoId ?? null, args.limit).map((row) => ({
+          ...row,
+          resolved: Boolean(row.providerRepoId && row.providerSymbolId)
+        }));
+
+        if (profile === "nano") {
+          return asText({
+            packageName: args.packageName,
+            packageContractId,
+            consumerCount: rows.length,
+            consumerRepos: [...new Set(rows.map((x) => x.consumerRepoId))].slice(0, 10),
+            resolvedCount: rows.filter((x) => x.resolved).length
+          }, profile);
+        }
+
+        return asText({
+          packageName: args.packageName,
+          packageContractId,
+          consumerCount: rows.length,
+          consumers: rows
         }, profile);
       }
       case "get_symbol_blame": {
@@ -2691,6 +2754,7 @@ function handleHealthCheck(repoId?: string): CallToolResult {
   const watchStatuses = repoId ? watchManager.getStatus(repoId) : [];
   const watchRunning = watchStatuses.length > 0;
   const workingTree = repo ? getRepoWorkingTreeState(repo.repoPath) : null;
+  const packageBridge = repoId ? store.getPackageBridgeStats(repoId) : null;
 
   const reasons: string[] = [];
   if (repoId && !repo) {
@@ -2786,6 +2850,7 @@ function handleHealthCheck(repoId?: string): CallToolResult {
       workingTree,
       reasons
     },
+    packageBridge,
     actionHints
   });
 }
@@ -4432,6 +4497,10 @@ function ratioFromEnv(raw: string | undefined, fallback: number): number {
   }
 
   return Math.max(0, Math.min(1, value));
+}
+
+function toNugetContractId(packageName: string): string {
+  return `nuget:${packageName.trim().toLowerCase()}`;
 }
 
 function asArgsRecord(value: unknown): Record<string, unknown> {
