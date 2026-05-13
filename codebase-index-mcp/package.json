@@ -5,11 +5,13 @@
   "type": "module",
   "description": "Internal MCP server for codebase indexing and graph analysis",
   "scripts": {
+    "setup": "node scripts/setup.mjs",
     "build": "tsc -p tsconfig.json",
     "start": "node dist/index.js",
     "dev": "tsx src/index.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "guard:no-llm-runtime": "node scripts/guard-no-llm-runtime.mjs",
+    "test:setup-config": "node scripts/test-setup-config.mjs",
     "test:endpoint-bridge": "node scripts/test-endpoint-bridge.mjs",
     "test:endpoint-fallback-context": "node scripts/test-endpoint-fallback-context.mjs",
     "test:csharp-inheritance-bridge": "node scripts/test-csharp-inheritance-bridge.mjs",

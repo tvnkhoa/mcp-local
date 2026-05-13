@@ -2,6 +2,26 @@
 
 Internal MCP server for repository indexing and lightweight graph queries.
 
+## 🚀 Quick Start - One Command Setup
+
+```bash
+npm run setup
+```
+
+This will automatically:
+- ✅ Install dependencies and build the project
+- ✅ Detect installed code agents (Claude Desktop, VS Code, OpenCode)
+- ✅ Configure MCP server for all detected agents
+- ✅ Run verification tests
+
+**Supported Agents:** Claude Desktop, VS Code (Copilot), OpenCode
+
+📖 **Full Setup Guide:** [QUICK_START.md](./QUICK_START.md)  
+📋 **Configuration Templates:** [CONFIG_TEMPLATES.md](./CONFIG_TEMPLATES.md)  
+🎯 **Skill Guide:** [SKILL.md](./SKILL.md)
+
+---
+
 ## ✨ What's New in v0.3.0 (2026-05-04)
 
 **Plan/Agent pipeline enhancements:**
@@ -147,6 +167,14 @@ GitNexus-style staleness behavior:
 > If `better-sqlite3` native build fails on Windows environments without build tools, install Visual Studio C++ Build Tools or switch temporarily to a JS-only SQLite backend in a follow-up patch.
 
 ## Development
+
+### Quick Setup (Recommended)
+
+```bash
+npm run setup
+```
+
+### Manual Setup
 
 ```bash
 npm install
