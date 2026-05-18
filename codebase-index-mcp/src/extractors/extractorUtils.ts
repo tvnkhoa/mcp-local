@@ -288,7 +288,22 @@ export function collectCSharpEnclosingMemberTypeMap(scopeNode: Parser.SyntaxNode
               const typeName = normalizeCSharpTypeName(typeNode.text.trim());
               const memberName = nameNode.text.trim();
               if (typeName && memberName) {
+                // P1.1: Map the field name as-is (e.g. _scopedContext → IScopedContext)
                 typeMap.set(memberName, typeName);
+                // Also map without leading underscores so both _repo and repo resolve
+                // e.g. _scopedContext.TenantId → property:IScopedContext.TenantId
+                const stripped = memberName.replace(/^_+/, "");
+                if (stripped && stripped !== memberName) {
+                  typeMap.set(stripped, typeName);
+                }
+                // Also map camelCase → PascalCase variant for common injection patterns
+                // e.g. scopedContext → IScopedContext (when accessed as this.ScopedContext)
+                if (stripped.length > 0) {
+                  const pascal = stripped.charAt(0).toUpperCase() + stripped.slice(1);
+                  if (!typeMap.has(pascal)) {
+                    typeMap.set(pascal, typeName);
+                  }
+                }
               }
             }
           }
@@ -569,6 +584,104 @@ export function emitTypeRefEdge(
   });
 }
 
+// ============================================================================
+// C# Property Edge Utilities
+// ============================================================================
+
+/**
+ * P1.4: Property/member names that are BCL/framework statics, LINQ methods, or
+ * enum-like constants that will never resolve to a user-defined property symbol.
+ * Skipping these reduces noise in unresolvedRatio without losing real impact data.
+ */
+export const TRIVIAL_PROPERTY_TOKENS = new Set<string>([
+  // System.String statics
+  "Empty", "IsNullOrEmpty", "IsNullOrWhiteSpace", "Format", "Concat", "Join",
+  // System.DateTime / DateTimeOffset
+  "UtcNow", "Now", "Today", "MinValue", "MaxValue", "Zero",
+  // System.Guid
+  "NewGuid", "Parse", "TryParse",
+  // System.Array / Enumerable
+  "Length", "Rank",
+  // LINQ extension methods (emitted as member_access but are method calls)
+  "Select", "Where", "OrderBy", "OrderByDescending", "ThenBy", "ThenByDescending",
+  "GroupBy", "GroupJoin", "Join", "SelectMany", "Distinct", "DistinctBy",
+  "ToList", "ToArray", "ToHashSet", "ToDictionary", "ToLookup",
+  "ToListAsync", "ToArrayAsync", "ToDictionaryAsync", "ToHashSetAsync",
+  "FirstOrDefault", "LastOrDefault", "SingleOrDefault", "First", "Last", "Single",
+  "FirstOrDefaultAsync", "LastOrDefaultAsync", "SingleOrDefaultAsync",
+  "FirstAsync", "LastAsync", "SingleAsync",
+  "Any", "All", "Count", "LongCount", "CountAsync", "AnyAsync", "AllAsync",
+  "Sum", "Min", "Max", "Average", "SumAsync", "MinAsync", "MaxAsync", "AverageAsync",
+  "Contains", "ContainsAsync", "Except", "Intersect", "Union",
+  "Skip", "Take", "SkipWhile", "TakeWhile", "SkipLast", "TakeLast",
+  "Aggregate", "Zip", "Append", "Prepend", "Reverse", "DefaultIfEmpty",
+  "AsEnumerable", "AsQueryable", "Cast", "OfType", "Flatten",
+  // EF Core async
+  "FindAsync", "AddAsync", "AddRangeAsync", "SaveChangesAsync", "SaveChanges",
+  "ExecuteDeleteAsync", "ExecuteUpdateAsync", "ExecuteNonQueryAsync",
+  "FromSqlRaw", "FromSqlInterpolated", "Include", "ThenInclude",
+  "AsNoTracking", "AsTracking", "AsSplitQuery", "AsSingleQuery",
+  // ASP.NET StatusCodes static properties
+  "Status200OK", "Status201Created", "Status204NoContent",
+  "Status400BadRequest", "Status401Unauthorized", "Status403Forbidden",
+  "Status404NotFound", "Status409Conflict", "Status422UnprocessableEntity",
+  "Status500InternalServerError", "Status503ServiceUnavailable",
+  // gRPC / Protobuf status codes
+  "NOT_FOUND", "OK", "CANCELLED", "UNKNOWN", "INVALID_ARGUMENT",
+  "ALREADY_EXISTS", "PERMISSION_DENIED", "UNAUTHENTICATED", "UNAVAILABLE",
+  // StringComparison / CultureInfo
+  "Ordinal", "OrdinalIgnoreCase", "InvariantCulture", "InvariantCultureIgnoreCase",
+  "CurrentCulture", "CurrentCultureIgnoreCase",
+  // Nullable / Optional
+  "HasValue", "GetValueOrDefault",
+  // Task / async
+  "Result", "IsCompleted", "IsFaulted", "IsCanceled", "CompletedTask",
+  "FromResult", "FromException", "FromCanceled", "WhenAll", "WhenAny", "Delay", "Run",
+  // IEnumerable / ICollection
+  "IsReadOnly", "IsFixedSize", "IsSynchronized", "SyncRoot",
+  // Reflection
+  "Assembly", "FullName", "Namespace", "DeclaringType", "BaseType",
+  "GetType", "GetMethod", "GetProperty", "GetField", "GetMethods",
+  // Exception
+  "Message", "StackTrace", "InnerException", "HResult", "Source", "Data",
+  // ConfigurationProvider / IConfiguration
+  "ConfigurationProvider",
+  // Validation
+  "IsValid", "Errors", "ErrorMessage",
+]);
+
+/**
+ * P1.2: Check if a node has an ancestor invocation_expression that uses it as
+ * the function (callee) position — meaning this member access is a method call,
+ * not a property read. Used to avoid emitting false PROPERTY_REF edges for
+ * LINQ/repository method chains.
+ */
+export function isAncestorInvocation(node: Parser.SyntaxNode): boolean {
+  let current: Parser.SyntaxNode | null = node.parent;
+  while (current) {
+    if (current.type === "invocation_expression") {
+      const fn = current.childForFieldName("function");
+      // If this node or any ancestor is the function of an invocation → it's a call
+      if (fn === node || fn?.descendantsOfType(node.type).some(d => d === node)) {
+        return true;
+      }
+      // Walk up — stop at statement boundaries
+      return false;
+    }
+    // Stop at statement-level nodes to avoid false positives
+    if (
+      current.type === "expression_statement" ||
+      current.type === "local_declaration_statement" ||
+      current.type === "return_statement" ||
+      current.type === "assignment_expression"
+    ) {
+      break;
+    }
+    current = current.parent;
+  }
+  return false;
+}
+
 export function emitPropertyAccessEdge(
   input: ExtractInput,
   fromSymbolId: string,
@@ -577,6 +690,12 @@ export function emitPropertyAccessEdge(
   edges: EdgeRecord[]
 ): void {
   if (!propertyToken || propertyToken.length < 2) {
+    return;
+  }
+
+  // P1.4: Skip trivial/framework property tokens that will never resolve to user symbols.
+  const memberName = propertyToken.split(".").pop() ?? propertyToken;
+  if (TRIVIAL_PROPERTY_TOKENS.has(memberName)) {
     return;
   }
 

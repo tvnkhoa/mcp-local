@@ -239,7 +239,7 @@ export function handleQueryGraph(
   }
   const allowlistCheck = validateAllowedTables(
     readOnlyCheck.sanitizedSql,
-    new Set(["repositories", "files", "symbols", "edges", "index_runs", "routes", "cross_repo_deps", "refactor_previews", "refactor_preview_hunks", "refactor_applies", "refactor_apply_changes", "refactor_apply_hunks", "refactor_rollbacks"])
+    new Set(["repositories", "files", "symbols", "edges", "index_runs", "routes", "cross_repo_deps", "refactor_previews", "refactor_preview_hunks", "refactor_applies", "refactor_apply_changes", "refactor_apply_hunks", "refactor_rollbacks", "vec_symbol_map"])
   );
   if (!allowlistCheck.ok) {
     throw new McpError(ErrorCode.InvalidParams, allowlistCheck.message);

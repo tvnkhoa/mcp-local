@@ -27,6 +27,8 @@ export function handleHealthCheck(
   const watchRunning = watchStatuses.length > 0;
   const workingTree = repo ? getRepoWorkingTreeState(repo.repoPath) : null;
   const packageBridge = repoId ? store.getPackageBridgeStats(repoId) : null;
+  const vectorStats = repoId ? store.getVectorStats(repoId) : null;
+  const unresolvedStats = repoId ? store.getUnresolvedStats(repoId) : null;
 
   const reasons: string[] = [];
   if (repoId && !repo) reasons.push("repository not registered; run index_repository first");
@@ -113,6 +115,19 @@ export function handleHealthCheck(
       reasons
     },
     packageBridge,
+    vectorIndex: {
+      enabled: store.isVectorEnabled,
+      symbolsIndexed: vectorStats?.symbolsIndexed ?? 0,
+      lastRebuildAt: vectorStats?.lastRebuildAt ?? null,
+    },
+    unresolvedStats: unresolvedStats
+      ? {
+          noCandidates: unresolvedStats.noCandidates,
+          ambiguous: unresolvedStats.ambiguous,
+          externalBoundary: unresolvedStats.externalBoundary,
+          trulyUnresolved: unresolvedStats.trulyUnresolved,
+        }
+      : null,
     actionHints
   });
 }

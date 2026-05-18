@@ -27,6 +27,7 @@ export type IndexRunSummary = {
   unresolvedAmbiguous?: number;
   unresolvedBoundaryBlocked?: number;
   unresolvedLowConfidence?: number;
+  vectorSymbolsIndexed?: number;
 };
 
 export type GraphHealth = {

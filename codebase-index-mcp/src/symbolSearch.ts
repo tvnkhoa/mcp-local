@@ -1,5 +1,6 @@
 import type Database from "better-sqlite3";
 import type { ResolvedEdge, SymbolRecord } from "./types.js";
+import { vectorSearchSymbols, isVectorEnabled } from "./vectorStore.js";
 
 // ── FTS query builders ─────────────────────────────────────────────────
 
@@ -128,7 +129,7 @@ export function searchSymbolsImpl(
   if (useFts) {
     const ftsWhere = conditions.length > 0 ? `and ${conditions.join(" and ")}` : "";
     const ftsQuery = strategy === "intent" ? buildIntentFtsQuery(query) : buildFtsQuery(query);
-    return db
+    const ftsResults = db
       .prepare(
         `
         select
@@ -151,6 +152,37 @@ export function searchSymbolsImpl(
         `
       )
       .all(ftsQuery, ...params, limit) as (SymbolRecord & { repoPath: string | null })[];
+
+    // Hybrid: if FTS returns few results and vector is available, augment with vector search
+    if (ftsResults.length < 3 && isVectorEnabled() && repoId) {
+      const vecResults = vectorSearchSymbols(db, repoId, query, limit);
+      const seen = new Set(ftsResults.map((r) => r.symbolId));
+      for (const vr of vecResults) {
+        if (ftsResults.length >= limit) break;
+        if (seen.has(vr.symbolId)) continue;
+        const sym = db.prepare(`
+          select
+            s.repo_id as repoId,
+            s.symbol_id as symbolId,
+            s.file_path as filePath,
+            s.name,
+            s.kind,
+            s.line,
+            s.signature,
+            r.repo_path as repoPath
+          from symbols s
+          inner join repositories r on r.repo_id = s.repo_id
+          where s.repo_id = ? and s.symbol_id = ?
+          limit 1
+        `).get(repoId, vr.symbolId) as (SymbolRecord & { repoPath: string | null }) | undefined;
+        if (sym) {
+          ftsResults.push(sym);
+          seen.add(vr.symbolId);
+        }
+      }
+    }
+
+    return ftsResults;
   }
 
   if (strategy === "intent") {

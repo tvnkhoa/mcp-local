@@ -18,7 +18,8 @@ import {
   emitPropertyAccessEdge,
   collectCSharpScopeTypeMap,
   findEnclosingCSharpTypeName,
-  emitTypeRefEdge
+  emitTypeRefEdge,
+  isAncestorInvocation
 } from "./extractorUtils.js";
 
 // JSON attribute names that carry a serialized key literal
@@ -183,8 +184,13 @@ function extractPropertyAccessEdges(
     const propertyName = nameNode.text.trim();
     if (!propertyName || propertyName.length < 2) continue;
 
-    // Skip if this is a method call (parent is invocation_expression)
+    // P1.2: Skip if this member_access is used as a method call at any ancestor level.
+    // Covers both direct parent invocation and chained LINQ patterns like
+    // query.Where(...).Select(...).ToListAsync()
     if (node.parent?.type === "invocation_expression" && node.parent.childForFieldName("function") === node) {
+      continue;
+    }
+    if (isAncestorInvocation(node)) {
       continue;
     }
 

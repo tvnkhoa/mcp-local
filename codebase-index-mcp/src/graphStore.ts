@@ -1,4 +1,5 @@
 ﻿import Database from "better-sqlite3";
+import { createRequire } from "node:module";
 
 import type {
   RefactorApplyHunkRecord,
@@ -96,6 +97,17 @@ import {
   listIndexedFilesImpl,
   listRepositoriesImpl
 } from "./impactAnalyzer.js";
+import {
+  initVectorStore,
+  ensureVectorSchema,
+  upsertSymbolVector,
+  batchUpsertSymbolVectors,
+  vectorSearchSymbols,
+  rebuildVectorIndexForRepo,
+  deleteVectorsByRepo,
+  getVectorStats,
+  isVectorEnabled,
+} from "./vectorStore.js";
 
 // TRIVIAL_CALLEE_TOKENS, TRIVIAL_CALLEE_IN_CLAUSE → impactAnalyzer.ts
 // parseRiskFlags → refactorStore.ts
@@ -104,6 +116,7 @@ import {
 export class GraphStore {
   private readonly db: Database.Database;
   private readonly runInTransactionInternal: (fn: () => void) => void;
+  private _vectorEnabled = false;
 
   // Cached prepared statements for the hot indexing write path.
   private stmtUpsertFile!: Database.Statement;
@@ -173,9 +186,23 @@ export class GraphStore {
     this.db.pragma("page_size = 4096"); // Standard 4KB page size
     this.db.pragma("busy_timeout = 5000"); // 5s timeout for locks
     this.runInTransactionInternal = this.db.transaction((fn: () => void) => fn());
+
+    // Load sqlite-vec synchronously via createRequire
+    try {
+      const require = createRequire(import.meta.url);
+      this._vectorEnabled = initVectorStore(this.db, require);
+    } catch (e) {
+      process.stderr.write(`[vector] sqlite-vec load error: ${e}\n`);
+      this._vectorEnabled = false;
+    }
+
     this.initSchema();
     this.runMigrations();
     this.initCachedStatements();
+  }
+
+  get isVectorEnabled(): boolean {
+    return this._vectorEnabled && isVectorEnabled();
   }
 
   private initCachedStatements(): void {
@@ -1001,10 +1028,25 @@ export class GraphStore {
     ensureRunColumn("unresolved_ambiguous");
     ensureRunColumn("unresolved_boundary_blocked");
     ensureRunColumn("unresolved_low_confidence");
+    ensureRunColumn("vector_symbols_indexed");
 
     // Add commit_sha for staleness detection.
     if (!runCols.some((c) => c.name === "commit_sha")) {
       this.db.exec(`alter table index_runs add column commit_sha text`);
+    }
+
+    // Migrate vec_symbol_map to new schema if needed (old schema had rowid PK, new has vec_rowid column)
+    try {
+      const vecMapCols = this.db.prepare("pragma table_info(vec_symbol_map)").all() as { name: string }[];
+      if (vecMapCols.length > 0 && !vecMapCols.some((c) => c.name === "vec_rowid")) {
+        // Old schema — drop and recreate with new schema
+        process.stderr.write("[vector] migrating vec_symbol_map to new schema...\n");
+        this.db.exec(`DROP TABLE IF EXISTS vec_symbol_map`);
+        try { this.db.exec(`DROP TABLE IF EXISTS vec_symbols`); } catch { /* ignore */ }
+        process.stderr.write("[vector] vec_symbol_map migrated — vector index will be rebuilt on next index run\n");
+      }
+    } catch {
+      // Ignore if table doesn't exist yet
     }
 
     const edgeCols = this.db.prepare("pragma table_info(edges)").all() as { name: string }[];
@@ -1060,6 +1102,9 @@ export class GraphStore {
         end
       where reason is null or confidence is null
     `);
+
+    // Vector schema — vec_symbol_map always, vec_symbols only if sqlite-vec loaded
+    ensureVectorSchema(this.db, this._vectorEnabled);
   }
 
   // --- Phase 7A: module grouping helper ---
@@ -1411,5 +1456,66 @@ export class GraphStore {
         conflict_count integer not null
       );
     `);
+  }
+
+  // ── Vector store methods ────────────────────────────────────────────────────
+
+  upsertSymbolVector(repoId: string, symbolId: string, name: string, signature?: string): void {
+    upsertSymbolVector(this.db, repoId, symbolId, name, signature);
+  }
+
+  batchUpsertSymbolVectors(repoId: string, symbols: { symbolId: string; name: string; signature?: string }[]): number {
+    return batchUpsertSymbolVectors(this.db, repoId, symbols);
+  }
+
+  vectorSearchSymbols(repoId: string, queryText: string, k: number): { symbolId: string; distance: number }[] {
+    return vectorSearchSymbols(this.db, repoId, queryText, k);
+  }
+
+  rebuildVectorIndex(repoId: string): number {
+    return rebuildVectorIndexForRepo(this.db, repoId);
+  }
+
+  deleteVectorsByRepo(repoId: string): void {
+    deleteVectorsByRepo(this.db, repoId);
+  }
+
+  getVectorStats(repoId: string): { symbolsIndexed: number; lastRebuildAt: string | null } {
+    return getVectorStats(this.db, repoId);
+  }
+
+  getUnresolvedStats(repoId: string): {
+    noCandidates: number;
+    ambiguous: number;
+    externalBoundary: number;
+    trulyUnresolved: number;
+  } {
+    const row = this.db.prepare(`
+      SELECT
+        SUM(CASE WHEN reason = 'unresolved callee token' OR reason = 'unresolved import token'
+                      OR reason = 'unresolved type token' OR reason = 'unresolved property token'
+                 THEN 1 ELSE 0 END) as trulyUnresolved,
+        SUM(CASE WHEN reason = 'external boundary' THEN 1 ELSE 0 END) as externalBoundary
+      FROM edges
+      WHERE repo_id = ?
+        AND (to_id LIKE 'callee:%' OR to_id LIKE 'import:%'
+             OR to_id LIKE 'type:%' OR to_id LIKE 'property:%')
+    `).get(repoId) as { trulyUnresolved: number | null; externalBoundary: number | null } | undefined;
+
+    const latestRun = this.db.prepare(`
+      SELECT unresolved_no_candidate as noCandidates,
+             unresolved_ambiguous as ambiguous
+      FROM index_runs
+      WHERE repo_id = ?
+      ORDER BY finished_at DESC
+      LIMIT 1
+    `).get(repoId) as { noCandidates: number | null; ambiguous: number | null } | undefined;
+
+    return {
+      noCandidates: latestRun?.noCandidates ?? 0,
+      ambiguous: latestRun?.ambiguous ?? 0,
+      externalBoundary: row?.externalBoundary ?? 0,
+      trulyUnresolved: row?.trulyUnresolved ?? 0,
+    };
   }
 }

@@ -1,6 +1,13 @@
 import type Database from "better-sqlite3";
 import type { ResolutionStats } from "./types.js";
 import { findProviderSymbolByName } from "./crossRepoStore.js";
+import {
+  isKnownExternalToken,
+  isKnownExternalNamespace,
+  stripGenerics,
+  vectorSearchSymbols,
+  isVectorEnabled,
+} from "./vectorStore.js";
 
 function createEmptyResolutionStats(): ResolutionStats {
   return {
@@ -201,6 +208,30 @@ export function resolveImportEdges(db: Database.Database, repoId: string, maxUnr
     fileToModuleId.set(normalizedPath, row.symbolId);
   }
 
+  // P2.1: Build a map of C# namespace → module symbolId for internal namespace resolution.
+  // Scans namespace_declaration symbols (kind='module') whose name looks like a dotted namespace.
+  // e.g. "CRM.Marketing.Model" → symbolId of the file that declares that namespace.
+  const namespaceToModuleId = new Map<string, string>();
+  const nsRows = db
+    .prepare(
+      `select name, symbol_id as symbolId, file_path as filePath
+       from symbols
+       where repo_id = ? and kind = 'module' and name like '%.%'`
+    )
+    .all(repoId) as { name: string; symbolId: string; filePath: string }[];
+  for (const row of nsRows) {
+    // Map full namespace name → symbolId (first occurrence wins)
+    if (!namespaceToModuleId.has(row.name)) {
+      namespaceToModuleId.set(row.name, row.symbolId);
+    }
+    // Also map the file's module symbol for the namespace's file
+    const normalizedPath = row.filePath.replace(/\\/g, "/");
+    const fileModuleId = fileToModuleId.get(normalizedPath);
+    if (fileModuleId && !namespaceToModuleId.has(row.name)) {
+      namespaceToModuleId.set(row.name, fileModuleId);
+    }
+  }
+
   const importResolveCache = new Map<string, string | null>();
 
   let count = 0;
@@ -209,7 +240,51 @@ export function resolveImportEdges(db: Database.Database, repoId: string, maxUnr
       const importPath = row.toId.slice(7); // strip "import:"
       const fromDir = row.fromFile.replace(/\\/g, "/").split("/").slice(0, -1).join("/");
 
-      // Only attempt resolution for relative imports
+      // P2.1: Try C# namespace resolution first for dotted namespace imports
+      // e.g. import:CRM.Marketing.Model → find module symbol for that namespace
+      if (!importPath.startsWith(".") && importPath.includes(".")) {
+        // Check if top-level namespace is a known external — tag and skip
+        const topNs = importPath.split(".")[0];
+        if (topNs && isKnownExternalNamespace(topNs)) {
+          updateStmt.run(row.toId, 0.1, "external boundary", repoId, row.fromId, row.toId);
+          continue;
+        }
+
+        const cacheKey = `ns|${importPath}`;
+        if (importResolveCache.has(cacheKey)) {
+          const cachedModuleId = importResolveCache.get(cacheKey);
+          if (cachedModuleId) {
+            updateStmt.run(cachedModuleId, 0.8, "resolved csharp namespace", repoId, row.fromId, row.toId);
+            count += 1;
+          }
+          continue;
+        }
+
+        // Try exact namespace match first, then prefix match (longest prefix wins)
+        let matchedModuleId: string | undefined;
+        if (namespaceToModuleId.has(importPath)) {
+          matchedModuleId = namespaceToModuleId.get(importPath);
+        } else {
+          // Try progressively shorter namespace prefixes
+          const parts = importPath.split(".");
+          for (let len = parts.length - 1; len >= 2; len--) {
+            const prefix = parts.slice(0, len).join(".");
+            if (namespaceToModuleId.has(prefix)) {
+              matchedModuleId = namespaceToModuleId.get(prefix);
+              break;
+            }
+          }
+        }
+
+        importResolveCache.set(cacheKey, matchedModuleId ?? null);
+        if (matchedModuleId) {
+          updateStmt.run(matchedModuleId, 0.8, "resolved csharp namespace", repoId, row.fromId, row.toId);
+          count += 1;
+        }
+        continue;
+      }
+
+      // Only attempt resolution for relative imports (JS/TS)
       if (!importPath.startsWith(".")) continue;
 
       // Resolve relative path
@@ -406,6 +481,22 @@ export function resolveCallEdges(db: Database.Database, repoId: string, maxUnres
             }
           }
         }
+      } else {
+        // No exact match — try external tagging then vector fallback
+        const rawName = calleeName.split(".").pop() ?? calleeName;
+        const normalized = stripGenerics(rawName);
+
+        if (isKnownExternalToken(normalized)) {
+          // Tag as external boundary — reduces unresolved noise
+          updateStmt.run(row.toId, 0.1, "external boundary", repoId, row.fromId, row.toId);
+        } else if (isVectorEnabled()) {
+          // Vector fallback for internal symbols that didn't match exactly
+          const vecResults = vectorSearchSymbols(db, repoId, normalized, 3);
+          if (vecResults.length > 0 && vecResults[0].distance < 0.35) {
+            updateStmt.run(vecResults[0].symbolId, 0.52, "resolved callee vector-fallback", repoId, row.fromId, row.toId);
+            count += 1;
+          }
+        }
       }
     }
   });
@@ -460,6 +551,13 @@ export function resolveTypeRefEdges(db: Database.Database, repoId: string, maxUn
         if (crossRepoMatch) {
           updateStmt.run(crossRepoMatch.symbolId, 0.65, "resolved type cross-repo", repoId, row.fromId, row.toId);
           count += 1;
+        } else if (isVectorEnabled()) {
+          // Vector fallback for internal types that didn't match exactly
+          const vecResults = vectorSearchSymbols(db, repoId, typeName, 3);
+          if (vecResults.length > 0 && vecResults[0].distance < 0.30) {
+            updateStmt.run(vecResults[0].symbolId, 0.50, "resolved type vector-fallback", repoId, row.fromId, row.toId);
+            count += 1;
+          }
         }
       }
     }
@@ -526,6 +624,7 @@ export function resolvePropertyEdges(db: Database.Database, repoId: string, maxU
         continue;
       }
 
+      // P1.3: Type-constrained candidates first
       const constrainedCandidates = (() => {
         if (!typeName) {
           return namedCandidates;
@@ -539,17 +638,51 @@ export function resolvePropertyEdges(db: Database.Database, repoId: string, maxU
       })();
 
       const match = pickBestNamedCandidate(constrainedCandidates, row.fromFile, ["property"]);
-      if (!match) {
+      if (match) {
+        const sameFile = match.filePath === row.fromFile;
+        const confidence = row.edgeType === "PROPERTY_WRITE"
+          ? (sameFile ? 0.84 : 0.72)
+          : (sameFile ? 0.88 : 0.75);
+        const reason = sameFile ? "resolved property same-file" : "resolved property by name";
+        updateStmt.run(match.symbolId, confidence, reason, repoId, row.fromId, row.toId, row.edgeType);
+        count += 1;
         continue;
       }
 
-      const sameFile = match.filePath === row.fromFile;
-      const confidence = row.edgeType === "PROPERTY_WRITE"
-        ? (sameFile ? 0.84 : 0.72)
-        : (sameFile ? 0.88 : 0.75);
-      const reason = sameFile ? "resolved property same-file" : "resolved property by name";
-      updateStmt.run(match.symbolId, confidence, reason, repoId, row.fromId, row.toId, row.edgeType);
-      count += 1;
+      // P1.3: Ambiguity fallback — when pickBestNamedCandidate returns null (too many
+      // candidates, no proximity winner), resolve with low confidence using folder proximity.
+      // This avoids leaving high-volume tokens like property:Id permanently unresolved.
+      if (constrainedCandidates.length > 0) {
+        // Pick candidate whose file path shares the longest common prefix with fromFile
+        const fromDir = row.fromFile.replace(/\\/g, "/").split("/").slice(0, -1).join("/");
+        let bestCandidate = constrainedCandidates[0];
+        let bestScore = 0;
+        for (const candidate of constrainedCandidates) {
+          const candDir = candidate.filePath.replace(/\\/g, "/").split("/").slice(0, -1).join("/");
+          // Count shared path segments
+          const fromParts = fromDir.split("/");
+          const candParts = candDir.split("/");
+          let shared = 0;
+          for (let i = 0; i < Math.min(fromParts.length, candParts.length); i++) {
+            if (fromParts[i] === candParts[i]) shared++;
+            else break;
+          }
+          if (shared > bestScore) {
+            bestScore = shared;
+            bestCandidate = candidate;
+          }
+        }
+        // Only emit ambiguous resolution when there's at least some folder proximity
+        // or when type-constrained to a single candidate
+        if (bestScore > 0 || constrainedCandidates.length === 1) {
+          const confidence = constrainedCandidates.length === 1 ? 0.6 : 0.5;
+          const reason = constrainedCandidates.length === 1
+            ? "resolved property single-candidate"
+            : "resolved property ambiguous";
+          updateStmt.run(bestCandidate.symbolId, confidence, reason, repoId, row.fromId, row.toId, row.edgeType);
+          count += 1;
+        }
+      }
     }
   });
   tx();

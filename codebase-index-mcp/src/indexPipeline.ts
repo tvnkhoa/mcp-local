@@ -472,6 +472,20 @@ export async function runIndexPipeline(store: GraphStore, input: RunIndexInput):
       }
     }
 
+    // Post-index: rebuild vector index (async step, does not block pipeline result)
+    let vectorSymbolsIndexed = 0;
+    if (store.isVectorEnabled) {
+      const vecStart = Date.now();
+      process.stderr.write("[index-vector] rebuilding vector index...\n");
+      try {
+        vectorSymbolsIndexed = store.rebuildVectorIndex(input.repoId);
+        const vecMs = Date.now() - vecStart;
+        process.stderr.write(`[index-vector] indexed ${String(vectorSymbolsIndexed)} symbols in ${String(vecMs)}ms\n`);
+      } catch (vecErr) {
+        process.stderr.write(`[index-vector] rebuild failed (non-fatal): ${vecErr instanceof Error ? vecErr.message : String(vecErr)}\n`);
+      }
+    }
+
     const finishedAt = new Date().toISOString();
     const elapsedMs = Date.now() - started;
     const wasCancelled = input.abortSignal?.aborted ?? false;
@@ -494,7 +508,8 @@ export async function runIndexPipeline(store: GraphStore, input: RunIndexInput):
       mentionsUpserted,
       parseFailures,
       parseTimeouts,
-      elapsedMs
+      elapsedMs,
+      vectorSymbolsIndexed,
     };
 
     // Note: recordRun is called by the caller (index.ts) after computing resolution metrics
