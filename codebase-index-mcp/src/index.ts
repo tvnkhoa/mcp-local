@@ -1,7 +1,6 @@
 import process from "node:process";
-import { createHash, createHmac, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import { AsyncLocalStorage } from "node:async_hooks";
-import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
@@ -18,7 +17,6 @@ import {
   ErrorCode,
   type CallToolResult
 } from "@modelcontextprotocol/sdk/types.js";
-import { globSync } from "glob";
 import { z } from "zod";
 
 import { GraphStore } from "./graphStore.js";
@@ -45,6 +43,108 @@ import type {
   RefactorRollbackRecord,
   ResolutionStats
 } from "./types.js";
+import { numberFromEnv, ratioFromEnv, nonNegativeNumberFromEnv, parseOptionalBooleanEnv } from "./envConfig.js";
+import {
+  runGit,
+  runGitLines,
+  resolveHeadCommitSha,
+  parseGitBlamePorcelain,
+  redactEmail,
+  getRepoWorkingTreeState,
+  hasWorkingTreeChanges,
+  collectGitChangedFiles,
+  getRepoStaleness
+} from "./gitHelpers.js";
+import {
+  type ResponseProfile,
+  type ToolRequestContext,
+  type ToolTelemetryEvent,
+  resolveResponseProfile,
+  estimateResultCount,
+  emitTelemetry,
+  asText as asTextCore,
+  asArgsRecord,
+  toNugetContractId
+} from "./responseFormatter.js";
+import {
+  PolicyViolationError,
+  normalizeRelativePath,
+  sha256,
+  safeReadText,
+  assertSafeRepoFilePath,
+  inferLanguageFromPath,
+  isGeneratedFilePath,
+  findEnclosingObjectInitializer,
+  isApplyRunnableHunk,
+  collectExpectedApplyFiles,
+  countPreviewRisks,
+  createPreviewDigest,
+  issueApprovalToken,
+  verifyApprovalToken,
+  groupPreviewHunks,
+  mapPreviewStatusFromApplyStatus,
+  deriveApplyStatus,
+  noLlmAudit,
+  resolveApprovalSecret
+} from "./refactorUtils.js";
+import {
+  buildRefactorPreview,
+  applyCompilerAssistToPreview,
+  buildSymbolMigrationPreview,
+  executeRefactorApplyPlan
+} from "./refactorEngine.js";
+
+import {
+  handleHealthCheck,
+  handleIndexRepository,
+  handleWatchRepo,
+  handleDetectChanges,
+  resolveDocsMode,
+  activateWatchForRepo as activateWatchForRepoFn,
+  armWatchInactivityTimer as armWatchInactivityTimerFn,
+  clearWatchInactivityTimer as clearWatchInactivityTimerFn
+} from "./handlers/indexHandler.js";
+import type { HandlerContext } from "./handlers/handlerContext.js";
+import {
+  handleSearchSymbols,
+  handleFindSymbolAtLine,
+  handleGetSymbolDetail,
+  handleGetSymbolContextPack,
+  handleGetSymbolBlame
+} from "./handlers/searchHandler.js";
+import {
+  handleGetDependencyGraph,
+  handleGetCallChain,
+  handleFindImpactFiles,
+  handleGetChangeContext,
+  handleGetFileSummary,
+  handleListRepositories,
+  handleGetFileContext,
+  handleGetFolderSummary,
+  handleRouteMap,
+  handleQueryGraph,
+  handleQueryDocs,
+  formatChangeContextPayload
+} from "./handlers/impactHandler.js";
+import {
+  handleDeadCodeScan,
+  handleDetectCircularDependencies,
+  handleFindEntryPoints,
+  handleFindImplementations,
+  handleLinkTestsToSource
+} from "./handlers/analysisHandler.js";
+import {
+  handleGetCrossRepoImpact,
+  handleFindPackageConsumers
+} from "./handlers/crossRepoHandler.js";
+import {
+  handleRenameAssist,
+  handleRefactorReplacePreview,
+  handleRefactorReplaceApply,
+  handleRefactorReplaceRollback,
+  handleRefactorSymbolMigration,
+  handleTraceExecutionFlow
+} from "./handlers/refactorHandler.js";
 
 const dbPath = process.env.CODEBASE_INDEX_DB_PATH ?? "./codebase-index.db";
 const allowedRoots = parseAllowedRoots(process.env.CODEBASE_INDEX_ALLOWED_ROOTS);
@@ -79,27 +179,8 @@ const REFACTOR_APPROVAL_SECRET = process.env.CODEBASE_INDEX_REFACTOR_APPROVAL_SE
 const REFACTOR_PREVIEW_TTL_MS = numberFromEnv("CODEBASE_INDEX_REFACTOR_PREVIEW_TTL_MS", 30 * 60 * 1000);
 const REFACTOR_LOW_CONFIDENCE_THRESHOLD = 0.8;
 const SERVER_VERSION = resolveServerVersion();
-type ResponseProfile = "nano" | "compact" | "standard" | "verbose";
+// ResponseProfile, ToolRequestContext, ToolTelemetryEvent → responseFormatter.ts
 const responseProfileSchema = z.enum(["nano", "compact", "standard", "verbose"]);
-
-type ToolRequestContext = {
-  toolName: string;
-  startedAt: number;
-  args: Record<string, unknown>;
-};
-
-type ToolTelemetryEvent = {
-  ts: string;
-  toolName: string;
-  elapsedMs: number;
-  responseBytes: number;
-  resultCount: number | null;
-  profile: ResponseProfile | "none";
-  requestedProfile: string | null;
-  compactRequested: boolean;
-  isError: boolean;
-  errorCode?: string;
-};
 
 const toolContextStorage = new AsyncLocalStorage<ToolRequestContext>();
 
@@ -552,14 +633,43 @@ const watchManager = new WatchManager(
   },
   (repoId, deletedRelativePaths) => store.pruneFiles(repoId, deletedRelativePaths),
   ({ repoId }) => {
-    if (WATCH_ACTIVE_ONLY && activeWatchRepoId === repoId) {
+    if (WATCH_ACTIVE_ONLY && activeWatchRef.current === repoId) {
       armWatchInactivityTimer(repoId);
     }
   }
 );
 
-let activeWatchRepoId: string | null = null;
+const activeWatchRef = { current: null as string | null };
 const watchInactivityTimers = new Map<string, NodeJS.Timeout>();
+
+function buildHandlerContext(): HandlerContext {
+  return {
+    store,
+    watchManager,
+    activeWatchRef,
+    watchInactivityTimers,
+    runIndexAndResolve,
+    asText,
+    constants: {
+      MAX_FILES_PER_RUN,
+      MAX_RESULT_LIMIT,
+      MAX_DEPTH,
+      WATCH_AUTO_START,
+      WATCH_ACTIVE_ONLY,
+      WATCH_ACTIVE_TTL_MS,
+      DOCS_INDEXING_ENABLED,
+      DOCS_TOOLS_ENABLED,
+      LLM_ENABLED,
+      REFACTOR_STRICT_APPROVAL,
+      REFACTOR_APPROVAL_SECRET,
+      REFACTOR_PREVIEW_TTL_MS,
+      REFACTOR_LOW_CONFIDENCE_THRESHOLD,
+      SERVER_VERSION,
+      dbPath,
+      allowedRoots
+    }
+  };
+}
 
 server.setRequestHandler(ListToolsRequestSchema, async () => {
   return {
@@ -1210,7 +1320,7 @@ server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
     payload = {
       repo: store.getRepository(parsed.repoId),
       latestRun: store.getLatestRun(parsed.repoId),
-      staleness: getRepoStaleness(parsed.repoId)
+      staleness: getRepoStaleness(parsed.repoId, store)
     };
   } else if (parsed.resource === "schema") {
     payload = store.getRepoSchemaSnapshot(parsed.repoId);
@@ -1246,1414 +1356,140 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     try {
       await maybeAutoActivateWatchFromArgs(toolName, args);
 
+      const ctx = buildHandlerContext();
+
       switch (request.params.name) {
       case "health_check": {
-        const args = healthCheckSchema.parse(request.params.arguments ?? {});
-        return handleHealthCheck(args.repoId);
+        const hArgs = healthCheckSchema.parse(request.params.arguments ?? {});
+        return handleHealthCheck(hArgs, ctx);
       }
       case "index_repository": {
-        const args = indexRepositorySchema.parse(request.params.arguments ?? {});
-        assertPathAllowed(args.repoPath, allowedRoots);
-        const docsEnabled = resolveDocsMode(args.docsMode);
-        store.ensureRepository(args.repoId, args.repoPath);
-        const summary = await runIndexAndResolve(
-          args.repoId,
-          args.repoPath,
-          args.mode,
-          docsEnabled,
-          clamp(args.maxFiles, 1, MAX_FILES_PER_RUN),
-          clamp(args.batchSize, 1, 2_000)
-        );
-        return asText(summary);
+        const hArgs = indexRepositorySchema.parse(request.params.arguments ?? {});
+        return handleIndexRepository(hArgs, ctx);
       }
       case "get_dependency_graph": {
-        const args = getDependencyGraphSchema.parse(request.params.arguments ?? {});
-        if (args.filePath) {
-          const result = store.getModuleFlow(args.repoId, args.filePath, args.limit);
-          return asText({
-            repoId: args.repoId,
-            filePath: args.filePath,
-            edges: result.edges,
-            unresolvedCalls: result.unresolvedCalls
-          });
-        }
-        let rows = traverseDependencyGraph(args.repoId, args.symbolId!, args.depth, args.limit);
-        // Fallback: class/function symbols have no direct IMPORTS edges — use their file's module symbol
-        if (rows.length === 0) {
-          const detail = store.getSymbolDetail(args.repoId, args.symbolId!, 1);
-          if (detail.symbol) {
-            const moduleSymbolId = store.findModuleSymbolId(args.repoId, detail.symbol.filePath);
-            if (moduleSymbolId) {
-              rows = traverseDependencyGraph(args.repoId, moduleSymbolId, args.depth, args.limit);
-            }
-          }
-        }
-        return asText({ repoId: args.repoId, symbolId: args.symbolId, depth: args.depth, edges: rows });
+        const hArgs = getDependencyGraphSchema.parse(request.params.arguments ?? {});
+        return handleGetDependencyGraph(hArgs, ctx);
       }
       case "get_call_chain": {
-        const args = getCallChainSchema.parse(request.params.arguments ?? {});
-        const direction: CallChainDirection = args.direction;
-        const rows = traverseCallGraph(args.repoId, args.symbolId, direction, args.depth, args.limit);
-        return asText({ repoId: args.repoId, symbolId: args.symbolId, direction, depth: args.depth, edges: rows });
+        const hArgs = getCallChainSchema.parse(request.params.arguments ?? {});
+        return handleGetCallChain(hArgs, ctx);
       }
       case "find_impact_files": {
-        const args = findImpactFilesSchema.parse(request.params.arguments ?? {});
-        if (args.view === "surface") {
-          const result = store.getImpactSurface(args.repoId, args.filePath, args.limit);
-          return asText({ repoId: args.repoId, filePath: args.filePath, ...result });
-        }
-        const result = store.getImpactFiles(args.repoId, args.filePath, args.limit);
-        if (args.groupBy === "module") {
-          const filePaths = result.impactedFiles.map((f) => f.filePath);
-          const grouped = store.groupFilesByModule(filePaths);
-          const moduleGroups = Object.entries(grouped).map(([module, files]) => ({
-            module,
-            fileCount: files.length,
-            topFiles: files.slice(0, 5)
-          }));
-          return asText({ repoId: args.repoId, filePath: args.filePath, moduleGroups, graphHealth: result.graphHealth, reliabilitySummary: result.reliabilitySummary });
-        }
-        return asText({ repoId: args.repoId, filePath: args.filePath, ...result });
+        const hArgs = findImpactFilesSchema.parse(request.params.arguments ?? {});
+        return handleFindImpactFiles(hArgs, ctx);
       }
       case "get_change_context": {
-        const args = getChangeContextSchema.parse(request.params.arguments ?? {});
-        const profile = resolveResponseProfile(args.profile);
-        let resolvedSymbolId = args.symbolId;
-        if (!resolvedSymbolId && args.name) {
-          const context = store.getContextByName(args.repoId, args.name, args.limit);
-          if (!context.symbol) {
-            return asText({
-              symbol: null,
-              callers: [],
-              callees: [],
-              typeDeps: [],
-              graphHealth: { unresolvedCalls: 0, unresolvedImports: 0, unresolvedTypeRefs: 0, note: "symbol not found" },
-              queryName: args.name
-            }, profile);
-          }
-          resolvedSymbolId = context.symbol.symbolId;
-        }
-        const result = store.getChangeContext(args.repoId, resolvedSymbolId!, args.callerDepth, args.calleeDepth, args.limit);
-        return asText(formatChangeContextPayload(result, profile), profile);
+        const hArgs = getChangeContextSchema.parse(request.params.arguments ?? {});
+        return handleGetChangeContext(hArgs, ctx);
       }
       case "get_file_summary": {
-        const args = getFileSummarySchema.parse(request.params.arguments ?? {});
-        return asText(store.getFileSummary(args.repoId, args.filePath));
+        const hArgs = getFileSummarySchema.parse(request.params.arguments ?? {});
+        return handleGetFileSummary(hArgs, ctx);
       }
       case "list_repositories": {
         listRepositoriesSchema.parse(request.params.arguments ?? {});
-        return asText(store.listRepositories());
+        return handleListRepositories(null, ctx);
       }
       case "search_symbols": {
-        const args = searchSymbolsSchema.parse(request.params.arguments ?? {});
-        const profile = resolveResponseProfile(args.profile, args.compact);
-        if (args.ranked) {
-          const candidates = store.getSymbolCandidates(args.repoId ?? "", args.query, args.limit);
-          return asText({ query: args.query, count: candidates.length, candidates }, profile);
-        }
-        const results = store.searchSymbols(
-          args.query,
-          args.repoId ?? null,
-          args.language ?? null,
-          args.kind ?? null,
-          args.filePath ?? null,
-          args.limit,
-          args.strategy
-        );
-        const suggestions = results.length === 0 ? store.getSearchSuggestions(args.query, args.repoId ?? null, 5) : [];
-        const staleness = args.repoId ? getRepoStaleness(args.repoId) : null;
-        if (profile === "nano") {
-          const topSymbols = results.slice(0, 10).map((s) => ({ name: s.name, kind: s.kind, filePath: s.filePath, line: s.line }));
-          return asText({
-            query: args.query,
-            strategy: args.strategy,
-            count: results.length,
-            topSymbols,
-            hasMore: results.length > topSymbols.length,
-            suggestions: suggestions.slice(0, 3),
-            isStale: staleness?.isStale ?? null
-          }, profile);
-        }
-        if (profile === "compact") {
-          return asText({
-            query: args.query,
-            strategy: args.strategy,
-            count: results.length,
-            symbols: results.map((s) => ({ name: s.name, kind: s.kind, filePath: s.filePath, line: s.line })),
-            suggestions,
-            staleness
-          }, profile);
-        }
-        if (profile === "verbose") {
-          return asText({
-            query: args.query,
-            strategy: args.strategy,
-            count: results.length,
-            symbols: results,
-            suggestions,
-            staleness,
-            summary: {
-              repoFilter: args.repoId ?? null,
-              languageFilter: args.language ?? null,
-              kindFilter: args.kind ?? null,
-              filePathFilter: args.filePath ?? null
-            }
-          }, profile);
-        }
-        return asText({ query: args.query, strategy: args.strategy, count: results.length, symbols: results, suggestions, staleness }, profile);
+        const hArgs = searchSymbolsSchema.parse(request.params.arguments ?? {});
+        return handleSearchSymbols(hArgs, ctx);
       }
       case "get_file_context": {
-        const args = getFileContextSchema.parse(request.params.arguments ?? {});
-        const profile = resolveResponseProfile(args.profile, args.compact);
-        if (args.filePaths) {
-          const result = store.getBatchContext(args.repoId, args.filePaths, args.limit, profile === "compact" || profile === "nano");
-          if (profile === "nano") {
-            const symbols = (result.symbols as { name: string; kind: string; filePath: string; line: number }[]).slice(0, 20);
-            return asText({
-              fileCount: args.filePaths.length,
-              symbolCount: result.symbols.length,
-              topSymbols: symbols,
-              hasMoreSymbols: result.symbols.length > symbols.length
-            }, profile);
-          }
-          if (profile === "verbose") {
-            return asText({
-              ...result,
-              summary: {
-                fileCount: args.filePaths.length,
-                symbolCount: result.symbols.length,
-                edgeCount: result.edges.length
-              }
-            }, profile);
-          }
-          return asText(result, profile);
-        }
-        const result = store.getFileContext(args.repoId, args.filePath!, args.limit, profile === "compact" || profile === "nano");
-        if (profile === "nano") {
-          const symbols = (result.symbols as { name: string; kind: string; line: number }[]).slice(0, 12);
-          return asText({
-            filePath: args.filePath,
-            symbolCount: result.symbols.length,
-            topSymbols: symbols,
-            hasMoreSymbols: result.symbols.length > symbols.length
-          }, profile);
-        }
-        if (profile === "verbose") {
-          return asText({ ...result, summary: { symbolCount: result.symbols.length, edgeCount: result.edges.length } }, profile);
-        }
-        return asText(result, profile);
+        const hArgs = getFileContextSchema.parse(request.params.arguments ?? {});
+        return handleGetFileContext(hArgs, ctx);
       }
       case "get_symbol_detail": {
-        const args = getSymbolDetailSchema.parse(request.params.arguments ?? {});
-        return asText(store.getSymbolDetail(args.repoId, args.symbolId, args.limit));
+        const hArgs = getSymbolDetailSchema.parse(request.params.arguments ?? {});
+        return handleGetSymbolDetail(hArgs, ctx);
       }
       case "query_docs": {
-        assertDocsLaneEnabled("query_docs");
-        const args = queryDocsSchema.parse(request.params.arguments ?? {});
-        if (args.mode === "search") {
-          return asText(store.searchDocs(args.repoId, args.query!, args.limit));
-        }
-        if (args.mode === "stale") {
-          return asText(store.findStaleDocs(args.repoId, args.symbolIds!));
-        }
-        return asText(store.findDocCoverage(args.repoId, args.filePath!));
+        const hArgs = queryDocsSchema.parse(request.params.arguments ?? {});
+        return handleQueryDocs(hArgs, ctx);
       }
       case "watch_repo": {
-        const args = watchRepoSchema.parse(request.params.arguments ?? {});
-        if (args.action === "start") {
-          if (!args.repoId) {
-            throw new McpError(ErrorCode.InvalidParams, "watch_repo: repoId is required for action=start");
-          }
-          if (!args.repoPath) {
-            throw new McpError(ErrorCode.InvalidParams, "watch_repo: repoPath is required for action=start");
-          }
-          assertPathAllowed(args.repoPath, allowedRoots);
-          store.ensureRepository(args.repoId, args.repoPath);
-          const startResult = await activateWatchForRepo(args.repoId, args.repoPath, "watch_repo:start");
-          return asText(startResult);
-        } else if (args.action === "stop") {
-          if (!args.repoId) {
-            throw new McpError(ErrorCode.InvalidParams, "watch_repo: repoId is required for action=stop");
-          }
-          if (activeWatchRepoId === args.repoId) {
-            activeWatchRepoId = null;
-          }
-          clearWatchInactivityTimer(args.repoId);
-          return asText(await watchManager.stop(args.repoId));
-        } else {
-          return asText({
-            autoStartEnabled: WATCH_AUTO_START,
-            manualWatchSupported: true,
-            activeOnly: WATCH_ACTIVE_ONLY,
-            activeWatchRepoId,
-            watchActiveTtlMs: WATCH_ACTIVE_TTL_MS,
-            recommendation: "Use watch_repo start only for short debug sessions; stop after diagnostics.",
-            config: watchConfig,
-            watchers: watchManager.getStatus(args.repoId)
-          });
-        }
+        const hArgs = watchRepoSchema.parse(request.params.arguments ?? {});
+        return handleWatchRepo(hArgs, ctx);
       }
       case "find_symbol_at_line": {
-        const args = findSymbolAtLineSchema.parse(request.params.arguments ?? {});
-        const symbol = store.findSymbolAtLine(args.repoId, args.filePath, args.line);
-        return asText({ repoId: args.repoId, filePath: args.filePath, line: args.line, symbol });
+        const hArgs = findSymbolAtLineSchema.parse(request.params.arguments ?? {});
+        return handleFindSymbolAtLine(hArgs, ctx);
       }
       case "get_symbol_context_pack": {
-        const args = getSymbolContextPackSchema.parse(request.params.arguments ?? {});
-        const profile = resolveResponseProfile(args.profile);
-        const candidates = store.getSymbolCandidates(args.repoId, args.name, args.limit);
-        const context = store.getContextByName(args.repoId, args.name, args.limit);
-        const selectedSymbolId = context.symbol?.symbolId ?? candidates[0]?.symbolId ?? null;
-        const change = selectedSymbolId
-          ? store.getChangeContext(args.repoId, selectedSymbolId, args.callerDepth, args.calleeDepth, args.limit)
-          : null;
-
-        if (profile === "nano") {
-          const topCandidates = candidates.slice(0, 5).map((x) => ({ name: x.name, kind: x.kind, filePath: x.filePath, score: x.score }));
-          return asText({
-            queryName: args.name,
-            selectedSymbol: context.symbol ? { name: context.symbol.name, kind: context.symbol.kind, filePath: context.symbol.filePath } : null,
-            candidateCount: candidates.length,
-            topCandidates,
-            callerCount: context.callers.length,
-            calleeCount: context.callees.length,
-            importerCount: context.importedByFiles.length,
-            change: change ? formatChangeContextPayload(change, "nano") : null
-          }, profile);
-        }
-
-        if (profile === "compact") {
-          return asText({
-            queryName: args.name,
-            selectedSymbol: context.symbol
-              ? { symbolId: context.symbol.symbolId, name: context.symbol.name, kind: context.symbol.kind, filePath: context.symbol.filePath, line: context.symbol.line }
-              : null,
-            candidates: candidates.map((x) => ({ symbolId: x.symbolId, name: x.name, kind: x.kind, filePath: x.filePath, line: x.line, score: x.score, confidence: x.confidence })),
-            context: {
-              callers: context.callers.map((x) => ({ callerName: x.callerName, callerFile: x.callerFile, callerLine: x.callerLine })),
-              callees: context.callees.map((x) => ({ calleeName: x.calleeName, calleeFile: x.calleeFile, calleeLine: x.calleeLine })),
-              importedByFiles: context.importedByFiles
-            },
-            change: change ? formatChangeContextPayload(change, "compact") : null
-          }, profile);
-        }
-
-        if (profile === "verbose") {
-          return asText({
-            queryName: args.name,
-            selectedSymbolId,
-            candidates,
-            context,
-            change,
-            summary: {
-              candidateCount: candidates.length,
-              contextMatchedCount: context.allMatchedSymbols.length,
-              hasChangeContext: change != null
-            }
-          }, profile);
-        }
-
-        return asText({
-          queryName: args.name,
-          selectedSymbolId,
-          candidates,
-          context,
-          change
-        }, profile);
+        const hArgs = getSymbolContextPackSchema.parse(request.params.arguments ?? {});
+        return handleGetSymbolContextPack(hArgs, ctx);
       }
       case "dead_code_scan": {
-        const args = deadCodeScanSchema.parse(request.params.arguments ?? {});
-        const profile = resolveResponseProfile(args.profile);
-        const scan = store.getDeadCodeCandidates(
-          args.repoId,
-          args.filePathPrefix ?? null,
-          args.language ?? null,
-          args.kind ?? null,
-          args.includePrivate,
-          args.limit
-        );
-        const rows = scan.candidates;
-
-        if (profile === "nano") {
-          const topSymbols = rows.slice(0, 10).map((x) => ({ name: x.name, kind: x.kind, filePath: x.filePath, line: x.line }));
-          return asText({
-            repoId: args.repoId,
-            count: rows.length,
-            topSymbols,
-            hasMore: rows.length > topSymbols.length,
-            suppressed: scan.suppressed,
-            scanPolicy: scan.scanPolicy
-          }, profile);
-        }
-
-        if (profile === "compact") {
-          return asText({
-            repoId: args.repoId,
-            count: rows.length,
-            suppressed: scan.suppressed,
-            scanPolicy: scan.scanPolicy,
-            symbols: rows.map((x) => ({
-              symbolId: x.symbolId,
-              name: x.name,
-              kind: x.kind,
-              filePath: x.filePath,
-              line: x.line,
-              deadReason: x.deadReason
-            }))
-          }, profile);
-        }
-
-        return asText({
-          repoId: args.repoId,
-          count: rows.length,
-          suppressed: scan.suppressed,
-          scanPolicy: scan.scanPolicy,
-          symbols: rows
-        }, profile);
+        const hArgs = deadCodeScanSchema.parse(request.params.arguments ?? {});
+        return handleDeadCodeScan(hArgs, ctx);
       }
       case "detect_circular_dependencies": {
-        const args = detectCircularDependenciesSchema.parse(request.params.arguments ?? {});
-        const profile = resolveResponseProfile(args.profile);
-        const result = store.detectCircularDependencies(
-          args.repoId,
-          args.filePathPrefix ?? null,
-          args.mode,
-          args.includeCalls,
-          args.maxDepth,
-          args.maxCycles
-        );
-
-        if (profile === "nano") {
-          const topCycles = result.cycles.slice(0, 5).map((c) => ({ path: c.path, length: c.length }));
-          return asText({ repoId: args.repoId, mode: result.mode, cycleCount: result.cycleCount, topCycles }, profile);
-        }
-
-        if (profile === "compact") {
-          return asText({
-            repoId: args.repoId,
-            mode: result.mode,
-            cycleCount: result.cycleCount,
-            cycles: result.cycles.map((c) => ({ path: c.path, edgeTypes: c.edgeTypes, length: c.length }))
-          }, profile);
-        }
-
-        return asText({ repoId: args.repoId, ...result }, profile);
+        const hArgs = detectCircularDependenciesSchema.parse(request.params.arguments ?? {});
+        return handleDetectCircularDependencies(hArgs, ctx);
       }
       case "get_cross_repo_impact": {
-        const args = crossRepoImpactSchema.parse(request.params.arguments ?? {});
-        const profile = resolveResponseProfile(args.profile);
-
-        let symbolId = args.symbolId;
-        if (!symbolId && args.name) {
-          const candidates = store.searchSymbols(args.name, args.repoId, null, null, null, 1, "name");
-          symbolId = candidates[0]?.symbolId;
-        }
-        if (!symbolId) {
-          throw new McpError(ErrorCode.InvalidParams, "get_cross_repo_impact: symbol not found. Provide symbolId or a resolvable name.");
-        }
-
-        const symbol = store.getSymbolDetail(args.repoId, symbolId, 1).symbol;
-        if (!symbol) {
-          throw new McpError(ErrorCode.InvalidParams, `get_cross_repo_impact: symbol '${symbolId}' not found in repo '${args.repoId}'.`);
-        }
-
-        const impactRows = store.getCrossRepoImpact(args.repoId, symbolId, args.direction, args.limit).map((row) => {
-          const signature = row.relatedSignature ?? "";
-          const isNugetContract = signature.startsWith("nuget:");
-          const isEndpointContract = signature.startsWith("endpoint:");
-          return {
-            ...row,
-            contractType: isNugetContract ? "nuget" : isEndpointContract ? "endpoint" : "symbol",
-            resolutionReason: isNugetContract
-              ? "nuget_contract_signature_match"
-              : isEndpointContract
-                ? "endpoint_contract_signature_match"
-                : "symbol_id_exact_match"
-          };
-        });
-
-        if (profile === "nano") {
-          return asText({
-            repoId: args.repoId,
-            symbol: { symbolId: symbol.symbolId, name: symbol.name, kind: symbol.kind },
-            direction: args.direction,
-            impactCount: impactRows.length,
-            relatedRepos: [...new Set(impactRows.map((x) => (args.direction === "outbound" ? x.toRepoId : x.fromRepoId)))].slice(0, 10)
-          }, profile);
-        }
-
-        return asText({
-          repoId: args.repoId,
-          symbol,
-          direction: args.direction,
-          impactCount: impactRows.length,
-          impacts: impactRows
-        }, profile);
+        const hArgs = crossRepoImpactSchema.parse(request.params.arguments ?? {});
+        return handleGetCrossRepoImpact(hArgs, ctx);
       }
       case "find_package_consumers": {
-        const args = findPackageConsumersSchema.parse(request.params.arguments ?? {});
-        const profile = resolveResponseProfile(args.profile);
-        const packageContractId = toNugetContractId(args.packageName);
-        const rows = store.findPackageConsumers(packageContractId, args.repoId ?? null, args.limit).map((row) => ({
-          ...row,
-          resolved: Boolean(row.providerRepoId && row.providerSymbolId)
-        }));
-
-        if (profile === "nano") {
-          return asText({
-            packageName: args.packageName,
-            packageContractId,
-            consumerCount: rows.length,
-            consumerRepos: [...new Set(rows.map((x) => x.consumerRepoId))].slice(0, 10),
-            resolvedCount: rows.filter((x) => x.resolved).length
-          }, profile);
-        }
-
-        return asText({
-          packageName: args.packageName,
-          packageContractId,
-          consumerCount: rows.length,
-          consumers: rows
-        }, profile);
+        const hArgs = findPackageConsumersSchema.parse(request.params.arguments ?? {});
+        return handleFindPackageConsumers(hArgs, ctx);
       }
       case "get_symbol_blame": {
-        const args = symbolBlameSchema.parse(request.params.arguments ?? {});
-        const profile = resolveResponseProfile(args.profile);
-
-        let symbolId = args.symbolId;
-        if (!symbolId && args.name) {
-          const candidates = store.searchSymbols(args.name, args.repoId, null, null, null, 1, "name");
-          symbolId = candidates[0]?.symbolId;
-        }
-        if (!symbolId) {
-          throw new McpError(ErrorCode.InvalidParams, "get_symbol_blame: symbol not found. Provide symbolId or a resolvable name.");
-        }
-
-        const symbol = store.getSymbolDetail(args.repoId, symbolId, 1).symbol;
-        if (!symbol) {
-          throw new McpError(ErrorCode.InvalidParams, `get_symbol_blame: symbol '${symbolId}' not found in repo '${args.repoId}'.`);
-        }
-
-        const repo = store.getRepository(args.repoId);
-        if (!repo) {
-          throw new McpError(ErrorCode.InvalidParams, `get_symbol_blame: unknown repoId '${args.repoId}'. Run index_repository first.`);
-        }
-
-        let blameRaw: string;
-        try {
-          blameRaw = runGit(repo.repoPath, ["blame", "-L", `${symbol.line},${symbol.line}`, "--porcelain", "--", symbol.filePath.replace(/\\/g, "/")]);
-        } catch {
-          throw new McpError(ErrorCode.InvalidRequest, `get_symbol_blame: unable to run git blame for ${symbol.filePath}:${symbol.line}`);
-        }
-
-        const parsed = parseGitBlamePorcelain(blameRaw);
-        const authorMail = args.redactEmail ? redactEmail(parsed.authorMail) : parsed.authorMail;
-
-        if (profile === "nano") {
-          return asText({
-            repoId: args.repoId,
-            symbol: { symbolId: symbol.symbolId, name: symbol.name, filePath: symbol.filePath, line: symbol.line },
-            commit: parsed.commit,
-            author: parsed.author,
-            summary: parsed.summary
-          }, profile);
-        }
-
-        return asText({
-          repoId: args.repoId,
-          symbol,
-          blame: {
-            commit: parsed.commit,
-            author: parsed.author,
-            authorMail,
-            authorTime: parsed.authorTime,
-            summary: parsed.summary
-          }
-        }, profile);
+        const hArgs = symbolBlameSchema.parse(request.params.arguments ?? {});
+        return handleGetSymbolBlame(hArgs, ctx);
       }
       case "link_tests_to_source": {
-        const args = linkTestsToSourceSchema.parse(request.params.arguments ?? {});
-        const profile = resolveResponseProfile(args.profile);
-        const links = store.linkTestsToSource(
-          args.repoId,
-          args.filePath ?? null,
-          args.limit,
-          args.maxCandidates,
-          args.minScore
-        );
-
-        if (profile === "nano") {
-          const topLinks = links.slice(0, 10).map((x) => ({ testFile: x.testFile, sourceFile: x.sourceFile, score: x.score }));
-          return asText({ repoId: args.repoId, count: links.length, topLinks, hasMore: links.length > topLinks.length }, profile);
-        }
-
-        if (profile === "compact") {
-          return asText({
-            repoId: args.repoId,
-            count: links.length,
-            links: links.map((x) => ({
-              testFile: x.testFile,
-              sourceFile: x.sourceFile,
-              score: x.score,
-              reasons: x.reasons
-            }))
-          }, profile);
-        }
-
-        return asText({ repoId: args.repoId, count: links.length, links }, profile);
+        const hArgs = linkTestsToSourceSchema.parse(request.params.arguments ?? {});
+        return handleLinkTestsToSource(hArgs, ctx);
       }
       case "detect_changes": {
-        const args = detectChangesSchema.parse(request.params.arguments ?? {});
-        const profile = resolveResponseProfile(args.profile);
-        const repo = store.getRepository(args.repoId);
-        if (!repo) {
-          throw new McpError(ErrorCode.InvalidParams, `detect_changes: unknown repoId '${args.repoId}'. Run index_repository first.`);
-        }
-
-        const latestRun = store.getLatestRun(args.repoId);
-        const indexedCommitSha = latestRun?.commitSha ?? null;
-        const headRef = args.headRef;
-        const baseRef = args.baseRef ?? indexedCommitSha;
-        const policyDefaults = resolveDetectChangesPolicy(args.policy);
-        const minRiskScore = args.minRiskScore ?? policyDefaults.minRiskScore;
-        const riskLevels = args.riskLevels ?? policyDefaults.riskLevels;
-        const maxResults = args.maxResults ?? policyDefaults.maxResults;
-        const sortBy = args.sortBy ?? policyDefaults.sortBy;
-
-        // Detect working-tree mode: when base === HEAD, there are no new commits since last index.
-        // Fall back to working-tree diff (unstaged + staged) to capture uncommitted changes.
-        const headCommitSha = resolveHeadCommitSha(repo.repoPath);
-        const isWorkingTreeMode = !baseRef || (headCommitSha != null && baseRef === headCommitSha);
-
-        let trackedChanged: string[];
-        let note: string;
-        if (isWorkingTreeMode) {
-          const unstaged = runGitLines(repo.repoPath, ["diff", "--name-only", "HEAD"]);
-          const staged = runGitLines(repo.repoPath, ["diff", "--cached", "--name-only"]);
-          trackedChanged = [...new Set([...unstaged, ...staged])];
-          note = baseRef
-            ? "using working-tree diff (no new commits since last index; showing staged + unstaged changes)"
-            : "baseRef unavailable; using working-tree diff against HEAD";
-        } else {
-          trackedChanged = runGitLines(repo.repoPath, ["diff", "--name-only", `${baseRef}..${headRef}`]);
-          note = "using git range diff";
-        }
-
-        const untracked = args.includeUntracked
-          ? runGitLines(repo.repoPath, ["ls-files", "--others", "--exclude-standard"])
-          : [];
-
-        const changedFiles = [...new Set([...trackedChanged, ...untracked].map((x) => x.replace(/\\/g, "/").trim()).filter((x) => x.length > 0))]
-          .slice(0, args.maxFiles);
-
-        const impacts = changedFiles.map((filePath) => {
-          const impact = store.getImpactFiles(args.repoId, filePath, args.impactLimit);
-          const risk = scoreChangeRisk(impact.impactedFiles.length, impact.reliabilitySummary, args.impactLimit);
-          return {
-            filePath,
-            impactedFilesCount: impact.impactedFiles.length,
-            reliabilitySummary: impact.reliabilitySummary,
-            riskScore: risk.riskScore,
-            riskLevel: risk.riskLevel,
-            riskSignals: risk.signals,
-            topImpactedFiles: impact.impactedFiles.slice(0, 5)
-          };
-        });
-
-        const sortedImpacts = [...impacts].sort((a, b) => {
-          if (sortBy === "impact") {
-            return b.impactedFilesCount - a.impactedFilesCount || b.riskScore - a.riskScore || a.filePath.localeCompare(b.filePath);
-          }
-          if (sortBy === "path") {
-            return a.filePath.localeCompare(b.filePath);
-          }
-          return b.riskScore - a.riskScore || b.impactedFilesCount - a.impactedFilesCount || a.filePath.localeCompare(b.filePath);
-        });
-
-        const allowedRiskLevels = new Set(riskLevels);
-        const filteredImpacts = sortedImpacts.filter((x) => x.riskScore >= minRiskScore && allowedRiskLevels.has(x.riskLevel));
-        const selectedImpacts = filteredImpacts.slice(0, maxResults);
-
-        const riskSummary = {
-          highRiskCount: selectedImpacts.filter((x) => x.riskLevel === "high").length,
-          mediumRiskCount: selectedImpacts.filter((x) => x.riskLevel === "medium").length,
-          lowRiskCount: selectedImpacts.filter((x) => x.riskLevel === "low").length,
-          maxRiskScore: selectedImpacts[0]?.riskScore ?? 0,
-          avgRiskScore: selectedImpacts.length > 0
-            ? Math.round((selectedImpacts.reduce((sum, x) => sum + x.riskScore, 0) / selectedImpacts.length) * 100) / 100
-            : 0
-        };
-
-        const impactedFileSet = new Set<string>();
-        for (const row of selectedImpacts) {
-          for (const impacted of row.topImpactedFiles) {
-            impactedFileSet.add(impacted.filePath);
-          }
-        }
-
-        // Phase 7A: module grouping
-        const moduleGroups = args.groupBy === "module"
-          ? (() => {
-              const allImpactedFiles = selectedImpacts.flatMap((x) => x.topImpactedFiles.map((f) => f.filePath));
-              const grouped = store.groupFilesByModule(allImpactedFiles);
-              return Object.entries(grouped).map(([module, files]) => ({
-                module,
-                fileCount: files.length,
-                topFiles: files.slice(0, 5)
-              })).sort((a, b) => b.fileCount - a.fileCount);
-            })()
-          : undefined;
-
-        const filterInfo = {
-          policyUsed: args.policy,
-          minRiskScore,
-          riskLevels: Array.from(allowedRiskLevels),
-          maxResults,
-          sortBy,
-          matchedCount: filteredImpacts.length,
-          returnedCount: selectedImpacts.length,
-          droppedByLimit: Math.max(0, filteredImpacts.length - selectedImpacts.length)
-        };
-
-        if (profile === "nano") {
-          const topRiskChanges = selectedImpacts.slice(0, 5).map((x) => ({ filePath: x.filePath, riskScore: x.riskScore, riskLevel: x.riskLevel }));
-          return asText({
-            repoId: args.repoId,
-            baseRef,
-            headRef,
-            changedFileCount: changedFiles.length,
-            topChangedFiles: changedFiles.slice(0, 20),
-            topRiskChanges,
-            riskSummary,
-            filter: filterInfo,
-            impactedFileCount: impactedFileSet.size,
-            ...(moduleGroups ? { moduleGroups } : {}),
-            note
-          }, profile);
-        }
-
-        if (profile === "compact") {
-          return asText({
-            repoId: args.repoId,
-            indexedCommitSha,
-            baseRef,
-            headRef,
-            changedFileCount: changedFiles.length,
-            changedFiles,
-            impacts: selectedImpacts,
-            riskSummary,
-            filter: filterInfo,
-            impactedFileCount: impactedFileSet.size,
-            ...(moduleGroups ? { moduleGroups } : {}),
-            note
-          }, profile);
-        }
-
-        if (profile === "verbose") {
-          return asText({
-            repoId: args.repoId,
-            indexedCommitSha,
-            latestRun,
-            baseRef,
-            headRef,
-            includeUntracked: args.includeUntracked,
-            changedFileCount: changedFiles.length,
-            changedFiles,
-            impacts: selectedImpacts,
-            riskSummary,
-            filter: filterInfo,
-            impactedFileCount: impactedFileSet.size,
-            ...(moduleGroups ? { moduleGroups } : {}),
-            note,
-            summary: {
-              filesCapped: changedFiles.length === args.maxFiles,
-              maxFiles: args.maxFiles,
-              impactLimit: args.impactLimit,
-              resultsLimited: filterInfo.droppedByLimit > 0
-            }
-          }, profile);
-        }
-
-        return asText({
-          repoId: args.repoId,
-          indexedCommitSha,
-          baseRef,
-          headRef,
-          changedFileCount: changedFiles.length,
-          changedFiles,
-          impacts: selectedImpacts,
-          riskSummary,
-          filter: filterInfo,
-          impactedFileCount: impactedFileSet.size,
-          ...(moduleGroups ? { moduleGroups } : {}),
-          note
-        }, profile);
+        const hArgs = detectChangesSchema.parse(request.params.arguments ?? {});
+        return handleDetectChanges(hArgs, ctx);
       }
       case "get_folder_summary": {
-        const args = getFolderSummarySchema.parse(request.params.arguments ?? {});
-        return asText(store.getFolderSummary(args.repoId, args.folderPath, args.maxFiles));
+        const hArgs = getFolderSummarySchema.parse(request.params.arguments ?? {});
+        return handleGetFolderSummary(hArgs, ctx);
       }
       case "find_entry_points": {
-        const args = findEntryPointsSchema.parse(request.params.arguments ?? {});
-        const entries = store.findEntryPoints(args.repoId, args.filePathPrefix ?? null, args.kind ?? null, args.limit);
-        return asText({
-          repoId: args.repoId,
-          total: entries.length,
-          runtimeEntryPoints: entries.filter((e) => e.entryReason === "bootstrap_file"),
-          graphEntryPoints: entries.filter((e) => e.entryReason === "uncalled_symbol"),
-          entryPoints: entries
-        });
+        const hArgs = findEntryPointsSchema.parse(request.params.arguments ?? {});
+        return handleFindEntryPoints(hArgs, ctx);
       }
       case "find_implementations": {
-        const args = findImplementationsSchema.parse(request.params.arguments ?? {});
-        return asText(store.findImplementations(args.repoId, args.interfaceName, args.limit));
+        const hArgs = findImplementationsSchema.parse(request.params.arguments ?? {});
+        return handleFindImplementations(hArgs, ctx);
       }
       case "route_map": {
-        const args = routeMapSchema.parse(request.params.arguments ?? {});
-        const profile = resolveResponseProfile(args.profile);
-        const routes = store.getRouteMap(args.repoId, args.filePathPrefix ?? null, args.httpMethod ?? null, args.limit);
-
-        if (profile === "nano") {
-          const topRoutes = routes.slice(0, 10).map((r) => ({ method: r.httpMethod, route: r.routeTemplate, handlerName: r.handlerName, filePath: r.filePath }));
-          return asText({ repoId: args.repoId, count: routes.length, topRoutes, hasMore: routes.length > topRoutes.length }, profile);
-        }
-
-        if (profile === "compact") {
-          return asText({
-            repoId: args.repoId,
-            count: routes.length,
-            routes: routes.map((r) => ({
-              filePath: r.filePath,
-              controllerName: r.controllerName,
-              handlerName: r.handlerName,
-              httpMethod: r.httpMethod,
-              routeTemplate: r.routeTemplate,
-              line: r.line
-            }))
-          }, profile);
-        }
-
-        if (profile === "verbose") {
-          const byMethod = routes.reduce<Record<string, number>>((acc, row) => {
-            acc[row.httpMethod] = (acc[row.httpMethod] ?? 0) + 1;
-            return acc;
-          }, {});
-          return asText({ repoId: args.repoId, count: routes.length, routes, summary: { byMethod } }, profile);
-        }
-
-        return asText({ repoId: args.repoId, count: routes.length, routes }, profile);
+        const hArgs = routeMapSchema.parse(request.params.arguments ?? {});
+        return handleRouteMap(hArgs, ctx);
       }
       case "query_graph": {
-        const args = queryGraphSchema.parse(request.params.arguments ?? {});
-        const profile = resolveResponseProfile(args.profile);
-
-        const readOnlyCheck = validateReadOnlyGraphSql(args.sql);
-        if (!readOnlyCheck.ok) {
-          throw new McpError(ErrorCode.InvalidParams, readOnlyCheck.message);
-        }
-
-        const allowlistCheck = validateAllowedTables(
-          readOnlyCheck.sanitizedSql,
-          new Set([
-            "repositories",
-            "files",
-            "symbols",
-            "edges",
-            "index_runs",
-            "routes",
-            "cross_repo_deps",
-            "refactor_previews",
-            "refactor_preview_hunks",
-            "refactor_applies",
-            "refactor_apply_changes",
-            "refactor_apply_hunks",
-            "refactor_rollbacks"
-          ])
-        );
-        if (!allowlistCheck.ok) {
-          throw new McpError(ErrorCode.InvalidParams, allowlistCheck.message);
-        }
-
-        let result: ReturnType<typeof store.runReadOnlyGraphQuery>;
-        try {
-          result = store.runReadOnlyGraphQuery(
-            allowlistCheck.sanitizedSql,
-            { ...args.params, repoId: args.repoId },
-            args.limit,
-            args.timeoutMs
-          );
-        } catch (err: unknown) {
-          const raw = err instanceof Error ? err.message : String(err);
-          // Redact quoted literals that may contain user data from SQLite error messages
-          const safe = raw.replace(/['"][^'"]{0,200}['"]/g, "'...'").slice(0, 300);
-          throw new McpError(ErrorCode.InternalError, `query_graph: query failed — ${safe}. Check SQL syntax and allowed tables.`);
-        }
-        const elapsedMs = result.elapsedMs;
-        const timeoutExceeded = result.timedOut;
-
-        if (timeoutExceeded) {
-          throw new McpError(ErrorCode.InvalidRequest, `query_graph: query exceeded timeout of ${args.timeoutMs}ms (took ${elapsedMs}ms). Simplify the query or increase timeoutMs.`);
-        }
-
-        if (profile === "nano") {
-          return asText({ columns: result.columns, rowCount: result.rowCount, truncated: result.truncated, elapsedMs, timeoutExceeded }, profile);
-        }
-
-        if (profile === "compact") {
-          return asText({
-            columns: result.columns,
-            rowCount: result.rowCount,
-            truncated: result.truncated,
-            elapsedMs,
-            timeoutExceeded,
-            rows: result.rows
-          }, profile);
-        }
-
-        return asText({
-          repoId: args.repoId,
-          sql: allowlistCheck.sanitizedSql,
-          params: { ...args.params, repoId: args.repoId },
-          limit: args.limit,
-          elapsedMs,
-          timeoutMs: args.timeoutMs,
-          timeoutExceeded,
-          columns: result.columns,
-          rows: result.rows,
-          rowCount: result.rowCount,
-          truncated: result.truncated
-        }, profile);
+        const hArgs = queryGraphSchema.parse(request.params.arguments ?? {});
+        return handleQueryGraph(hArgs, ctx);
       }
       case "rename_assist": {
-        const args = renameAssistSchema.parse(request.params.arguments ?? {});
-        const profile = resolveResponseProfile(args.profile);
-        const result = store.getRenameImpact(args.repoId, args.symbolId, args.limit);
-        if (!result.symbol) {
-          throw new McpError(ErrorCode.InvalidParams, `rename_assist: symbol '${args.symbolId}' not found in repo '${args.repoId}'.`);
-        }
-        const affectedFiles = [
-          ...new Set([
-            ...result.callers.map((c) => c.fromFilePath).filter(Boolean),
-            ...result.importers.map((i) => i.fromFilePath).filter(Boolean)
-          ])
-        ] as string[];
-        const hints = affectedFiles.map((fp) => `In ${fp}: rename '${result.symbol!.name}' → '${args.newName}'`);
-        if (profile === "nano") {
-          return asText({
-            oldName: result.symbol.name,
-            newName: args.newName,
-            symbolId: args.symbolId,
-            affectedFileCount: result.affectedFileCount,
-            affectedFiles
-          }, profile);
-        }
-        const payload = {
-          symbol: { symbolId: result.symbol.symbolId, name: result.symbol.name, kind: result.symbol.kind, filePath: result.symbol.filePath, line: result.symbol.line },
-          newName: args.newName,
-          affectedFileCount: result.affectedFileCount,
-          affectedFiles,
-          callerCount: result.callers.length,
-          importerCount: result.importers.length,
-          callers: profile === "verbose" ? result.callers : result.callers.map((c) => ({ fromId: c.fromId, fromName: c.fromName, fromFilePath: c.fromFilePath, confidence: c.confidence ?? null })),
-          importers: profile === "verbose" ? result.importers : result.importers.map((i) => ({ fromId: i.fromId, fromName: i.fromName, fromFilePath: i.fromFilePath, confidence: i.confidence ?? null })),
-          hints
-        };
-        return asText(payload, profile);
+        const hArgs = renameAssistSchema.parse(request.params.arguments ?? {});
+        return handleRenameAssist(hArgs, ctx);
       }
       case "refactor_replace_preview": {
-        const args = refactorReplacePreviewSchema.parse(request.params.arguments ?? {});
-        const repo = store.getRepository(args.repoId);
-        if (!repo) {
-          throw new McpError(ErrorCode.InvalidParams, `refactor_replace_preview: repo '${args.repoId}' not found. Run index_repository first.`);
-        }
-
-        const previewResult = buildRefactorPreview(repo.repoPath, args.repoId, args.find, args.replaceExpression, args.scope, args.guards, args.mode);
-        const compilerAssistOutcome = args.compilerAssist
-          ? applyCompilerAssistToPreview(previewResult.hunks, args.compilerAssist)
-          : null;
-        const effectiveHunks = compilerAssistOutcome?.hunks ?? previewResult.hunks;
-        const effectiveAffectedFiles = [...new Set(effectiveHunks.map((x) => x.filePath))].sort((a, b) => a.localeCompare(b));
-
-        const riskCounts = countPreviewRisks(effectiveHunks);
-        const ambiguousRatio = effectiveHunks.length > 0
-          ? (riskCounts.ambiguous / effectiveHunks.length) * 100
-          : 0;
-        const blockedByAmbiguity = ambiguousRatio > args.ambiguityThresholdPercent;
-        const compilerAssistNoMatch = Boolean(
-          compilerAssistOutcome
-          && compilerAssistOutcome.acceptedDiagnostics > 0
-          && compilerAssistOutcome.matchedDiagnostics === 0
-        );
-
-        const now = new Date();
-        const expiresAt = new Date(now.getTime() + REFACTOR_PREVIEW_TTL_MS).toISOString();
-        const digest = createPreviewDigest(args.repoId, args.find, args.replaceExpression, effectiveHunks);
-        const previewId = `preview_${randomUUID()}`;
-
-        const previewRecord: RefactorPreviewRecord = {
-          previewId,
-          repoId: args.repoId,
-          findPattern: args.find,
-          replaceExpression: args.replaceExpression,
-          mode: args.mode,
-          ambiguityThresholdPercent: args.ambiguityThresholdPercent,
-          createdAt: now.toISOString(),
-          expiresAt,
-          digest,
-          status: "ready",
-          totalMatches: effectiveHunks.length,
-          affectedFileCount: effectiveAffectedFiles.length,
-          riskAmbiguousCount: riskCounts.ambiguous,
-          riskCrossTypeCount: riskCounts.crossType,
-          riskGeneratedCount: riskCounts.generated
-        };
-
-        const hunkRecords: RefactorPreviewHunkRecord[] = effectiveHunks.map((hunk, index) => ({
-          previewId,
-          hunkId: `${previewId}_${String(index + 1).padStart(6, "0")}`,
-          filePath: hunk.filePath,
-          line: hunk.line,
-          startOffset: hunk.startOffset,
-          endOffset: hunk.endOffset,
-          beforeText: hunk.beforeText,
-          afterText: hunk.afterText,
-          replacementText: args.replaceExpression,
-          ownerType: hunk.ownerType,
-          symbolKind: hunk.symbolKind,
-          confidence: hunk.confidence,
-          riskFlags: hunk.riskFlags,
-          fileHashBefore: hunk.fileHashBefore
-        }));
-
-        store.saveRefactorPreview(previewRecord, hunkRecords);
-
-        const approvalToken = issueApprovalToken(previewId, digest, expiresAt);
-
-        return asText({
-          previewId,
-          mode: args.mode,
-          totalMatches: effectiveHunks.length,
-          affectedFiles: effectiveAffectedFiles,
-          groupedPreviewHunks: groupPreviewHunks(hunkRecords),
-          riskFlags: {
-            ambiguousTargets: riskCounts.ambiguous,
-            crossTypeReplacements: riskCounts.crossType,
-            generatedFiles: riskCounts.generated
-          },
-          compilerAssist: compilerAssistOutcome
-            ? {
-              enabled: true,
-              totalDiagnostics: compilerAssistOutcome.totalDiagnostics,
-              acceptedDiagnostics: compilerAssistOutcome.acceptedDiagnostics,
-              matchedDiagnostics: compilerAssistOutcome.matchedDiagnostics,
-              filteredOutHunks: compilerAssistOutcome.filteredOutHunks,
-              lineWindow: compilerAssistOutcome.lineWindow,
-              codes: compilerAssistOutcome.codes
-            }
-            : { enabled: false },
-          ambiguity: {
-            ratioPercent: Number(ambiguousRatio.toFixed(2)),
-            thresholdPercent: args.ambiguityThresholdPercent,
-            blockedByPolicy: blockedByAmbiguity
-          },
-          diagnostics: {
-            code: blockedByAmbiguity
-              ? "PREVIEW_BLOCKED_BY_AMBIGUITY"
-              : compilerAssistNoMatch
-                ? "PREVIEW_NO_DIAGNOSTIC_MATCH"
-                : "PREVIEW_READY",
-            machineReadable: true
-          },
-          executionPolicy: noLlmAudit(),
-          approvalToken,
-          expiresAt
-        });
+        const hArgs = refactorReplacePreviewSchema.parse(request.params.arguments ?? {});
+        return handleRefactorReplacePreview(hArgs, ctx);
       }
       case "refactor_replace_apply": {
-        const args = refactorReplaceApplySchema.parse(request.params.arguments ?? {});
-        const preview = store.getRefactorPreview(args.previewId);
-        if (!preview) {
-          throw new McpError(ErrorCode.InvalidParams, `refactor_replace_apply: preview '${args.previewId}' not found.`);
-        }
-
-        if (Date.parse(preview.preview.expiresAt) < Date.now()) {
-          throw new PolicyViolationError("PREVIEW_EXPIRED", "refactor_replace_apply: preview expired. Create a fresh preview before apply.");
-        }
-
-        const ambiguousRatio = preview.preview.totalMatches > 0
-          ? (preview.preview.riskAmbiguousCount / preview.preview.totalMatches) * 100
-          : 0;
-        if (ambiguousRatio > preview.preview.ambiguityThresholdPercent) {
-          throw new PolicyViolationError(
-            "AMBIGUITY_THRESHOLD_EXCEEDED",
-            `refactor_replace_apply: ambiguous ratio ${ambiguousRatio.toFixed(2)}% exceeds threshold ${preview.preview.ambiguityThresholdPercent}%.`
-          );
-        }
-
-        verifyApprovalToken(args.approvalToken, preview.preview.previewId, preview.preview.digest, preview.preview.expiresAt);
-
-        const repo = store.getRepository(preview.preview.repoId);
-        if (!repo) {
-          throw new McpError(ErrorCode.InvalidParams, `refactor_replace_apply: repo '${preview.preview.repoId}' not found.`);
-        }
-
-        const applyId = `apply_${randomUUID()}`;
-        const rollbackId = `rollback_${randomUUID()}`;
-        const expectedApplyFiles = collectExpectedApplyFiles(preview.hunks, args.includeLowConfidence);
-        const beforeChangedFiles = collectGitChangedFiles(repo.repoPath);
-        const applyOutcome = executeRefactorApplyPlan(
-          repo.repoPath,
-          applyId,
-          preview.hunks,
-          args.maxFilesPerBatch,
-          args.stopOnFirstConflict,
-          args.includeLowConfidence
-        );
-        const afterChangedFiles = collectGitChangedFiles(repo.repoPath);
-        const newlyChangedFiles = [...afterChangedFiles].filter((x) => !beforeChangedFiles.has(x));
-        const unexpectedChangedFiles = newlyChangedFiles.filter((x) => !expectedApplyFiles.has(x));
-        const scopeDriftPercent = expectedApplyFiles.size > 0
-          ? (unexpectedChangedFiles.length / expectedApplyFiles.size) * 100
-          : 0;
-        const scopeDriftDetected = scopeDriftPercent > 5;
-        const changes = applyOutcome.changes;
-
-        const appliedFiles = changes.filter((x) => x.status === "applied");
-        const conflicted = changes.filter((x) => x.status === "conflict");
-        const totalReplacements = appliedFiles.reduce((sum, item) => sum + item.replacementCount, 0);
-        const applyStatus = deriveApplyStatus(changes);
-
-        const applyRecord: RefactorApplyRecord = {
-          applyId,
-          rollbackId,
-          previewId: preview.preview.previewId,
-          repoId: preview.preview.repoId,
-          status: applyStatus,
-          createdAt: new Date().toISOString(),
-          completedAt: new Date().toISOString(),
-          totalFiles: appliedFiles.length,
-          totalReplacements,
-          conflictCount: conflicted.length
-        };
-
-        store.recordRefactorApply(applyRecord, changes, applyOutcome.appliedHunks);
-        store.markRefactorPreviewStatus(preview.preview.previewId, mapPreviewStatusFromApplyStatus(applyRecord.status));
-
-        return asText({
-          applyId,
-          rollbackId,
-          appliedFiles: appliedFiles.map((x) => x.filePath),
-          appliedReplacementsCount: totalReplacements,
-          skippedReplacements: changes
-            .filter((x) => x.status !== "applied")
-            .map((x) => ({ filePath: x.filePath, status: x.status, reason: x.reason })),
-          laneBreakdown: {
-            highConfidenceEdits: applyOutcome.lane.highConfidenceEdits,
-            lowConfidenceEdits: applyOutcome.lane.lowConfidenceEdits,
-            lowConfidenceSkipped: applyOutcome.lane.lowConfidenceSkipped,
-            lowConfidenceThreshold: REFACTOR_LOW_CONFIDENCE_THRESHOLD,
-            includeLowConfidence: args.includeLowConfidence
-          },
-          scopeCheck: {
-            expectedFiles: [...expectedApplyFiles].sort((a, b) => a.localeCompare(b)),
-            newlyChangedFiles: newlyChangedFiles.sort((a, b) => a.localeCompare(b)),
-            unexpectedFiles: unexpectedChangedFiles.sort((a, b) => a.localeCompare(b)),
-            driftPercent: Number(scopeDriftPercent.toFixed(2)),
-            driftThresholdPercent: 5
-          },
-          patchSummary: appliedFiles.map((x) => ({ filePath: x.filePath, replacementCount: x.replacementCount })),
-          diagnostics: {
-            code: scopeDriftDetected
-              ? "SCOPE_DRIFT_DETECTED"
-              : applyStatus !== "applied"
-                ? "APPLY_PARTIAL_OR_CONFLICT"
-                : "APPLY_OK",
-            machineReadable: true
-          },
-          executionPolicy: noLlmAudit()
-        });
+        const hArgs = refactorReplaceApplySchema.parse(request.params.arguments ?? {});
+        return handleRefactorReplaceApply(hArgs, ctx);
       }
       case "refactor_replace_rollback": {
-        const args = refactorReplaceRollbackSchema.parse(request.params.arguments ?? {});
-        const payload = store.getApplyByRollbackId(args.rollbackId);
-        if (!payload) {
-          throw new McpError(ErrorCode.InvalidParams, `refactor_replace_rollback: rollbackId '${args.rollbackId}' not found.`);
-        }
-
-        const repo = store.getRepository(payload.apply.repoId);
-        if (!repo) {
-          throw new McpError(ErrorCode.InvalidParams, `refactor_replace_rollback: repo '${payload.apply.repoId}' not found.`);
-        }
-
-        let restored = 0;
-        let conflicts = 0;
-        const touchedFiles = new Set<string>();
-
-        if (payload.hunks.length > 0) {
-          const hunkByFile = new Map<string, RefactorApplyHunkRecord[]>();
-          for (const hunk of payload.hunks) {
-            const list = hunkByFile.get(hunk.filePath) ?? [];
-            list.push(hunk);
-            hunkByFile.set(hunk.filePath, list);
-          }
-
-          for (const [filePath, hunks] of hunkByFile.entries()) {
-            const absolute = assertSafeRepoFilePath(repo.repoPath, filePath);
-            if (!fs.existsSync(absolute)) {
-              conflicts += 1;
-              continue;
-            }
-
-            let content = safeReadText(absolute);
-            let fileRestoredSegments = 0;
-
-            try {
-              for (const hunk of [...hunks].sort((a, b) => b.startOffsetApplied - a.startOffsetApplied || b.hunkId.localeCompare(a.hunkId))) {
-                const expectedCurrent = content.slice(hunk.startOffsetApplied, hunk.endOffsetApplied);
-                if (expectedCurrent !== hunk.afterText) {
-                  conflicts += 1;
-                  continue;
-                }
-
-                content = `${content.slice(0, hunk.startOffsetApplied)}${hunk.beforeText}${content.slice(hunk.endOffsetApplied)}`;
-                fileRestoredSegments += 1;
-              }
-
-              if (fileRestoredSegments > 0) {
-                fs.writeFileSync(absolute, content, "utf8");
-                touchedFiles.add(filePath);
-              }
-            } catch {
-              conflicts += 1;
-            }
-          }
-        } else {
-          for (const change of payload.changes) {
-            if (change.status !== "applied") {
-              continue;
-            }
-            if (change.beforeContent == null) {
-              // Content was not stored (exceeded size cap). Hunk-level restore was unavailable
-              // too (no hunks), so we cannot safely restore this file — count as conflict.
-              conflicts += 1;
-              continue;
-            }
-            const absolute = assertSafeRepoFilePath(repo.repoPath, change.filePath);
-            if (!fs.existsSync(absolute)) {
-              conflicts += 1;
-              continue;
-            }
-            try {
-              fs.writeFileSync(absolute, change.beforeContent, "utf8");
-              touchedFiles.add(change.filePath);
-            } catch {
-              conflicts += 1;
-            }
-          }
-        }
-
-        restored = touchedFiles.size;
-
-        const status: RefactorRollbackRecord["status"] = conflicts > 0 ? (restored > 0 ? "partial" : "failed") : "restored";
-        store.recordRefactorRollback({
-          rollbackId: args.rollbackId,
-          applyId: payload.apply.applyId,
-          status,
-          createdAt: new Date().toISOString(),
-          completedAt: new Date().toISOString(),
-          restoredFiles: restored,
-          conflictCount: conflicts
-        });
-
-        if (status === "restored") {
-          store.markRefactorPreviewStatus(payload.apply.previewId, "rolled_back");
-        }
-
-        return asText({
-          rollbackId: args.rollbackId,
-          restoredFilesCount: restored,
-          conflicts,
-          diagnostics: {
-            code: conflicts > 0 ? "ROLLBACK_PARTIAL" : "ROLLBACK_OK",
-            machineReadable: true
-          },
-          executionPolicy: noLlmAudit()
-        });
+        const hArgs = refactorReplaceRollbackSchema.parse(request.params.arguments ?? {});
+        return handleRefactorReplaceRollback(hArgs, ctx);
       }
       case "refactor_symbol_migration": {
-        const args = refactorSymbolMigrationSchema.parse(request.params.arguments ?? {});
-        const repo = store.getRepository(args.repoId);
-        if (!repo) {
-          throw new McpError(ErrorCode.InvalidParams, `refactor_symbol_migration: repo '${args.repoId}' not found.`);
-        }
-
-        const migrationResults: Array<{
-          fromSymbol: string;
-          toSymbol: string;
-          requiredOwnerType: string;
-          previewId: string;
-          totalMatches: number;
-          unresolvedOccurrences: number;
-          applyId?: string;
-          rollbackId?: string;
-        }> = [];
-        const suggestedFollowUpFiles = new Set<string>();
-
-        for (const migration of args.migrations) {
-          const previewResult = buildSymbolMigrationPreview(repo.repoPath, args.repoId, migration, args.scopePaths);
-
-          const now = new Date();
-          const expiresAt = new Date(now.getTime() + REFACTOR_PREVIEW_TTL_MS).toISOString();
-          const digest = createPreviewDigest(args.repoId, migration.fromSymbol, migration.toSymbol, previewResult.hunks);
-          const previewId = `preview_${randomUUID()}`;
-          const riskCounts = countPreviewRisks(previewResult.hunks);
-
-          const hunkRecords: RefactorPreviewHunkRecord[] = previewResult.hunks.map((hunk, index) => ({
-            previewId,
-            hunkId: `${previewId}_${String(index + 1).padStart(6, "0")}`,
-            filePath: hunk.filePath,
-            line: hunk.line,
-            startOffset: hunk.startOffset,
-            endOffset: hunk.endOffset,
-            beforeText: hunk.beforeText,
-            afterText: hunk.afterText,
-            replacementText: hunk.afterText,
-            ownerType: hunk.ownerType,
-            symbolKind: hunk.symbolKind,
-            confidence: hunk.confidence,
-            riskFlags: hunk.riskFlags,
-            fileHashBefore: hunk.fileHashBefore
-          }));
-
-          const previewRecord: RefactorPreviewRecord = {
-            previewId,
-            repoId: args.repoId,
-            findPattern: migration.fromSymbol,
-            replaceExpression: migration.toSymbol,
-            mode: "symbol-aware",
-            ambiguityThresholdPercent: 1,
-            createdAt: now.toISOString(),
-            expiresAt,
-            digest,
-            status: "ready",
-            totalMatches: previewResult.hunks.length,
-            affectedFileCount: previewResult.affectedFiles.length,
-            riskAmbiguousCount: riskCounts.ambiguous,
-            riskCrossTypeCount: riskCounts.crossType,
-            riskGeneratedCount: riskCounts.generated
-          };
-
-          store.saveRefactorPreview(previewRecord, hunkRecords);
-
-          const resultRow: {
-            fromSymbol: string;
-            toSymbol: string;
-            requiredOwnerType: string;
-            previewId: string;
-            totalMatches: number;
-            unresolvedOccurrences: number;
-            previewSummary: ReturnType<typeof groupPreviewHunks>;
-            applyId?: string;
-            rollbackId?: string;
-          } = {
-            fromSymbol: migration.fromSymbol,
-            toSymbol: migration.toSymbol,
-            requiredOwnerType: migration.requiredOwnerType,
-            previewId,
-            totalMatches: hunkRecords.length,
-            unresolvedOccurrences: hunkRecords.filter((x) => x.riskFlags.includes("ambiguous_target")).length,
-            previewSummary: groupPreviewHunks(hunkRecords)
-          };
-
-          for (const hunk of hunkRecords) {
-            suggestedFollowUpFiles.add(hunk.filePath);
-          }
-
-          if (!args.dryRun) {
-            // NOTE: refactor_symbol_migration with dryRun:false applies changes without a separate
-            // approval-token gate. This is intentional for trusted automated migration pipelines
-            // (e.g. symbol renames driven by a schema diff). Do NOT expose this path to untrusted
-            // callers. If interactive approval is needed, use refactor_replace_preview +
-            // refactor_replace_apply instead.
-            const applyId = `apply_${randomUUID()}`;
-            const rollbackId = `rollback_${randomUUID()}`;
-            const applyOutcome = executeRefactorApplyPlan(repo.repoPath, applyId, hunkRecords, 50, true, false);
-            const appliedFiles = applyOutcome.changes.filter((x) => x.status === "applied");
-            const conflicted = applyOutcome.changes.filter((x) => x.status === "conflict");
-            const totalReplacements = appliedFiles.reduce((sum, item) => sum + item.replacementCount, 0);
-            const applyStatus = deriveApplyStatus(applyOutcome.changes);
-
-            store.recordRefactorApply(
-              {
-                applyId,
-                rollbackId,
-                previewId,
-                repoId: args.repoId,
-                status: applyStatus,
-                createdAt: new Date().toISOString(),
-                completedAt: new Date().toISOString(),
-                totalFiles: appliedFiles.length,
-                totalReplacements,
-                conflictCount: conflicted.length
-              },
-              applyOutcome.changes,
-              applyOutcome.appliedHunks
-            );
-            store.markRefactorPreviewStatus(previewId, mapPreviewStatusFromApplyStatus(applyStatus));
-            resultRow.applyId = applyId;
-            resultRow.rollbackId = rollbackId;
-          }
-
-          migrationResults.push(resultRow);
-        }
-
-        return asText({
-          repoId: args.repoId,
-          dryRun: args.dryRun,
-          migrationMap: migrationResults,
-          exactSymbolOccurrencesChanged: migrationResults.reduce((sum, x) => sum + x.totalMatches, 0),
-          unresolvedOccurrences: migrationResults.reduce((sum, x) => sum + x.unresolvedOccurrences, 0),
-          suggestedFollowUpFiles: [...suggestedFollowUpFiles].sort((a, b) => a.localeCompare(b)),
-          executionPolicy: noLlmAudit()
-        });
+        const hArgs = refactorSymbolMigrationSchema.parse(request.params.arguments ?? {});
+        return handleRefactorSymbolMigration(hArgs, ctx);
       }
       case "trace_execution_flow": {
-        const args = traceExecutionFlowSchema.parse(request.params.arguments ?? {});
-        const profile = resolveResponseProfile(args.profile);
-        const result = store.traceExecutionFlow(args.repoId, args.entrySymbolId, args.maxDepth, args.maxNodes);
-        if (!result.entrySymbol) {
-          throw new McpError(ErrorCode.InvalidParams, `trace_execution_flow: entry symbol '${args.entrySymbolId}' not found in repo '${args.repoId}'.`);
-        }
-        if (profile === "nano") {
-          return asText({
-            entrySymbol: { name: result.entrySymbol.name, filePath: result.entrySymbol.filePath },
-            nodeCount: result.nodes.length,
-            edgeCount: result.edges.length,
-            depthReached: result.depthReached,
-            truncated: result.truncated,
-            topCallees: result.edges.slice(0, 10).map((e) => e.toName)
-          }, profile);
-        }
-        if (profile === "compact") {
-          return asText({
-            entrySymbol: { symbolId: result.entrySymbol.symbolId, name: result.entrySymbol.name, kind: result.entrySymbol.kind, filePath: result.entrySymbol.filePath },
-            nodeCount: result.nodes.length,
-            edgeCount: result.edges.length,
-            depthReached: result.depthReached,
-            truncated: result.truncated,
-            nodes: result.nodes.map((n) => ({ symbolId: n.symbolId, name: n.name, kind: n.kind, filePath: n.filePath })),
-            edges: result.edges.map((e) => ({ fromId: e.fromId, toId: e.toId, fromName: e.fromName, toName: e.toName, confidence: e.confidence }))
-          }, profile);
-        }
-        return asText({
-          entrySymbol: result.entrySymbol,
-          nodeCount: result.nodes.length,
-          edgeCount: result.edges.length,
-          depthReached: result.depthReached,
-          truncated: result.truncated,
-          nodes: result.nodes,
-          edges: result.edges
-        }, profile);
+        const hArgs = traceExecutionFlowSchema.parse(request.params.arguments ?? {});
+        return handleTraceExecutionFlow(hArgs, ctx);
       }
       default:
         throw new McpError(ErrorCode.MethodNotFound, `Unknown tool: ${request.params.name}`);
@@ -2672,7 +1508,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         compactRequested: args.compact === true,
         isError: true,
         errorCode: mapped.code
-      });
+      }, TELEMETRY_ENABLED, TELEMETRY_SAMPLE_RATE);
       return {
         content: [{ type: "text", text }],
         isError: true
@@ -2747,9 +1583,9 @@ function buildRiskSnapshot(repoId: string, policy: "quick-triage" | "strict-revi
   };
 }
 
-function handleHealthCheck(repoId?: string): CallToolResult {
+function handleHealthCheckLocal(repoId?: string): CallToolResult {
   const latestRun = repoId ? store.getLatestRun(repoId) : null;
-  const staleness = repoId ? getRepoStaleness(repoId) : null;
+  const staleness = repoId ? getRepoStaleness(repoId, store) : null;
   const repo = repoId ? store.getRepository(repoId) : null;
   const watchStatuses = repoId ? watchManager.getStatus(repoId) : [];
   const watchRunning = watchStatuses.length > 0;
@@ -2837,7 +1673,7 @@ function handleHealthCheck(repoId?: string): CallToolResult {
     watch: {
       autoStartEnabled: WATCH_AUTO_START,
       activeOnly: WATCH_ACTIVE_ONLY,
-      activeWatchRepoId,
+      activeWatchRepoId: activeWatchRef.current,
       running: watchRunning,
       watcherCount: watchStatuses.length,
       watchers: watchStatuses
@@ -2875,137 +1711,8 @@ function resolveServerVersion(): string {
   return "unknown";
 }
 
-function getRepoWorkingTreeState(repoPath: string): {
-  isDirty: boolean | null;
-  hasTrackedChanges: boolean | null;
-  hasUntrackedChanges: boolean | null;
-  changedEntries: number;
-  note: string;
-} {
-  const lines = runGitStatusPorcelain(repoPath);
-  if (!lines) {
-    return {
-      isDirty: null,
-      hasTrackedChanges: null,
-      hasUntrackedChanges: null,
-      changedEntries: 0,
-      note: "non-git repo or unable to read working tree status"
-    };
-  }
-
-  let hasTrackedChanges = false;
-  let hasUntrackedChanges = false;
-  for (const line of lines) {
-    if (line.startsWith("??")) {
-      hasUntrackedChanges = true;
-      continue;
-    }
-    if (!line.startsWith("!!")) {
-      hasTrackedChanges = true;
-    }
-  }
-
-  const isDirty = hasTrackedChanges || hasUntrackedChanges;
-  return {
-    isDirty,
-    hasTrackedChanges,
-    hasUntrackedChanges,
-    changedEntries: lines.length,
-    note: isDirty ? "working tree has pending changes" : "working tree is clean"
-  };
-}
-
-function runGitStatusPorcelain(repoPath: string): string[] | null {
-  try {
-    const text = runGit(repoPath, ["status", "--porcelain"]);
-    if (!text) {
-      return [];
-    }
-    return text.split(/\r?\n/).map((x) => x.trim()).filter((x) => x.length > 0);
-  } catch {
-    return null;
-  }
-}
-
-function resolveHeadCommitSha(repoPath: string): string | null {
-  try {
-    return runGit(repoPath, ["rev-parse", "HEAD"]).trim();
-  } catch {
-    return null;
-  }
-}
-
-function runGit(repoPath: string, args: string[]): string {
-  return execFileSync("git", args, { cwd: repoPath, encoding: "utf8" }).trim();
-}
-
-function runGitLines(repoPath: string, args: string[]): string[] {
-  try {
-    const text = runGit(repoPath, args);
-    if (!text) {
-      return [];
-    }
-    return text.split(/\r?\n/).map((x) => x.trim()).filter((x) => x.length > 0);
-  } catch {
-    return [];
-  }
-}
-
-function parseGitBlamePorcelain(text: string): {
-  commit: string;
-  author: string | null;
-  authorMail: string | null;
-  authorTime: number | null;
-  summary: string | null;
-} {
-  const lines = text.split(/\r?\n/);
-  const first = lines[0]?.trim() ?? "";
-  const commit = first.split(" ")[0] ?? "";
-
-  let author: string | null = null;
-  let authorMail: string | null = null;
-  let authorTime: number | null = null;
-  let summary: string | null = null;
-
-  for (const line of lines) {
-    if (line.startsWith("author ")) {
-      author = line.slice("author ".length).trim() || null;
-      continue;
-    }
-    if (line.startsWith("author-mail ")) {
-      authorMail = line.slice("author-mail ".length).trim().replace(/^<|>$/g, "") || null;
-      continue;
-    }
-    if (line.startsWith("author-time ")) {
-      const value = Number(line.slice("author-time ".length).trim());
-      authorTime = Number.isFinite(value) ? value : null;
-      continue;
-    }
-    if (line.startsWith("summary ")) {
-      summary = line.slice("summary ".length).trim() || null;
-    }
-  }
-
-  return {
-    commit,
-    author,
-    authorMail,
-    authorTime,
-    summary
-  };
-}
-
-function redactEmail(email: string | null): string | null {
-  if (!email) {
-    return null;
-  }
-  const [localPart, domain] = email.split("@");
-  if (!domain || !localPart) {
-    return "***";
-  }
-  const safeLocal = localPart.length <= 2 ? "**" : `${localPart.slice(0, 1)}***${localPart.slice(-1)}`;
-  return `${safeLocal}@${domain}`;
-}
+// getRepoWorkingTreeState, runGitStatusPorcelain, resolveHeadCommitSha,
+// runGit, runGitLines, parseGitBlamePorcelain, redactEmail → gitHelpers.ts
 
 function scoreChangeRisk(
   impactedFilesCount: number,
@@ -3097,68 +1804,9 @@ function resolveDetectChangesPolicy(policy: "quick-triage" | "strict-review" | "
   };
 }
 
-function getRepoStaleness(repoId: string): {
-  repoId: string;
-  indexedCommitSha: string | null;
-  headCommitSha: string | null;
-  isStale: boolean | null;
-  note: string;
-} {
-  const repo = store.getRepository(repoId);
-  const latestRun = store.getLatestRun(repoId);
+// getRepoStaleness → gitHelpers.ts (now takes store as parameter)
 
-  if (!repo) {
-    return {
-      repoId,
-      indexedCommitSha: latestRun?.commitSha ?? null,
-      headCommitSha: null,
-      isStale: null,
-      note: "repository not found"
-    };
-  }
-
-  if (!latestRun) {
-    return {
-      repoId,
-      indexedCommitSha: null,
-      headCommitSha: resolveHeadCommitSha(repo.repoPath),
-      isStale: null,
-      note: "no indexed run yet"
-    };
-  }
-
-  const headCommitSha = resolveHeadCommitSha(repo.repoPath);
-  if (!headCommitSha) {
-    return {
-      repoId,
-      indexedCommitSha: latestRun.commitSha,
-      headCommitSha,
-      isStale: null,
-      note: "non-git repo or unable to resolve HEAD"
-    };
-  }
-
-  if (!latestRun.commitSha) {
-    return {
-      repoId,
-      indexedCommitSha: latestRun.commitSha,
-      headCommitSha,
-      isStale: null,
-      note: "indexed commit unavailable"
-    };
-  }
-
-  const isStale = latestRun.commitSha !== headCommitSha;
-  return {
-    repoId,
-    indexedCommitSha: latestRun.commitSha,
-    headCommitSha,
-    isStale,
-    note: isStale ? "index commit differs from repo HEAD" : "index is up-to-date"
-  };
-}
-
-function resolveDocsMode(mode: "auto" | "on" | "off"): boolean {
+function resolveDocsModeLocal(mode: "auto" | "on" | "off"): boolean {
   if (mode === "on") {
     return true;
   }
@@ -3177,1106 +1825,24 @@ function assertDocsLaneEnabled(toolName: string): void {
   }
 }
 
-function resolveResponseProfile(profile: ResponseProfile, compact?: boolean): ResponseProfile {
-  return compact ? "compact" : profile;
-}
+// resolveResponseProfile → responseFormatter.ts
 
-class PolicyViolationError extends Error {
-  readonly code: string;
+// PolicyViolationError → refactorUtils.ts
 
-  constructor(code: string, message: string) {
-    super(message);
-    this.code = code;
-  }
-}
+// Refactor types → refactorTypes.ts
 
-type RefactorScopeInput = z.infer<typeof refactorScopeSchema>;
-type RefactorGuardsInput = z.infer<typeof refactorGuardsSchema>;
-type RefactorModeInput = z.infer<typeof refactorReplacePreviewSchema>["mode"];
-type RefactorSymbolMigrationInput = z.infer<typeof refactorSymbolMigrationSchema>["migrations"][number];
-type RefactorCompilerAssistInput = z.infer<typeof refactorCompilerAssistSchema>;
+// Refactor utility functions → refactorUtils.ts
 
-type PreviewCandidateHunk = {
-  filePath: string;
-  line: number;
-  startOffset: number;
-  endOffset: number;
-  beforeText: string;
-  afterText: string;
-  ownerType: string | null;
-  symbolKind: string | null;
-  confidence: number;
-  riskFlags: RefactorRiskFlag[];
-  fileHashBefore: string;
-};
+// findInitializerMemberAssignment, isDottedMemberPath, isSimpleIdentifier,
+// isInvalidCsharpInitializerReplacement, resolveInitializerRewriteTargetMember → refactorUtils.ts
 
-type CompilerAssistOutcome = {
-  hunks: PreviewCandidateHunk[];
-  totalDiagnostics: number;
-  acceptedDiagnostics: number;
-  matchedDiagnostics: number;
-  filteredOutHunks: number;
-  lineWindow: number;
-  codes: string[];
-};
+// buildRefactorPreview → refactorEngine.ts
 
-type ObjectInitializerContext = {
-  typeName: string;
-  openBraceOffset: number;
-  endOffset: number;
-};
+// applyCompilerAssistToPreview, buildSymbolMigrationPreview, countPreviewRisks,
+// createPreviewDigest, issueApprovalToken, verifyApprovalToken, groupPreviewHunks,
+// executeRefactorApplyPlan, buildFinalOffsetMap → refactorEngine.ts / refactorUtils.ts
 
-type InitializerAssignmentContext = {
-  initializer: ObjectInitializerContext;
-  assignmentStart: number;
-  assignmentEnd: number;
-  assignmentText: string;
-  indent: string;
-  expressionText: string;
-  trailingComma: boolean;
-  hasSiblingAssignments: boolean;
-  line: number;
-  lineEnding: string;
-};
-
-function normalizeRelativePath(filePath: string): string {
-  return filePath.replace(/\\/g, "/").replace(/^\.\//, "");
-}
-
-function sha256(text: string): string {
-  return createHash("sha256").update(text).digest("hex");
-}
-
-function safeReadText(absolutePath: string): string {
-  return fs.existsSync(absolutePath) ? fs.readFileSync(absolutePath, "utf8") : "";
-}
-
-function assertSafeRepoFilePath(repoPath: string, relativePath: string): string {
-  const fullPath = path.resolve(repoPath, relativePath);
-  const normalizedRepo = path.resolve(repoPath);
-  if (!fullPath.startsWith(normalizedRepo + path.sep) && fullPath !== normalizedRepo) {
-    throw new PolicyViolationError("PATH_TRAVERSAL_BLOCKED", `Blocked path outside repo root: ${relativePath}`);
-  }
-  return fullPath;
-}
-
-function collectGitChangedFiles(repoPath: string): Set<string> {
-  const files = runGitLines(repoPath, ["diff", "--name-only", "HEAD"])
-    .map((x) => x.replace(/\\/g, "/"));
-  return new Set(files);
-}
-
-function isApplyRunnableHunk(hunk: RefactorPreviewHunkRecord, includeLowConfidence: boolean): boolean {
-  if (hunk.riskFlags.length > 0) {
-    return false;
-  }
-  if (!includeLowConfidence && hunk.confidence < REFACTOR_LOW_CONFIDENCE_THRESHOLD) {
-    return false;
-  }
-  return true;
-}
-
-function collectExpectedApplyFiles(hunks: RefactorPreviewHunkRecord[], includeLowConfidence: boolean): Set<string> {
-  return new Set(hunks.filter((h) => isApplyRunnableHunk(h, includeLowConfidence)).map((h) => h.filePath));
-}
-
-function inferLanguageFromPath(filePath: string): string {
-  const ext = path.extname(filePath).toLowerCase();
-  if (ext === ".ts" || ext === ".tsx") return "typescript";
-  if (ext === ".js" || ext === ".jsx" || ext === ".mjs" || ext === ".cjs") return "javascript";
-  if (ext === ".cs") return "csharp";
-  if (ext === ".py") return "python";
-  if (ext === ".java") return "java";
-  return ext.replace(/^\./, "") || "unknown";
-}
-
-function isGeneratedFilePath(filePath: string): boolean {
-  const lower = filePath.toLowerCase();
-  return lower.includes("/generated/") || lower.endsWith(".g.ts") || lower.endsWith(".g.cs") || lower.endsWith(".generated.ts") || lower.endsWith(".generated.cs");
-}
-
-function offsetToLine(content: string, offset: number): number {
-  return content.slice(0, Math.max(0, offset)).split(/\r?\n/).length;
-}
-
-function escapeRegExp(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
-function normalizeTypeToken(typeName: string): string {
-  const withoutNamespace = typeName.split(".").pop() ?? typeName;
-  return withoutNamespace.replace(/<.*>/g, "").trim();
-}
-
-function findMatchingBraceEnd(content: string, openBraceOffset: number): number {
-  let depth = 0;
-  for (let i = openBraceOffset; i < content.length; i += 1) {
-    const ch = content[i];
-    if (ch === "{") {
-      depth += 1;
-      continue;
-    }
-    if (ch === "}") {
-      depth -= 1;
-      if (depth === 0) {
-        return i;
-      }
-    }
-  }
-  return -1;
-}
-
-function findEnclosingObjectInitializer(content: string, offset: number): ObjectInitializerContext | null {
-  const prefix = content.slice(0, Math.max(0, offset));
-  const matches = [...prefix.matchAll(/new\s+([A-Za-z_][A-Za-z0-9_.<>?,]*)\s*\{/g)];
-
-  for (let i = matches.length - 1; i >= 0; i -= 1) {
-    const match = matches[i];
-    const openBraceOffset = (match.index ?? 0) + match[0].lastIndexOf("{");
-    const endOffset = findMatchingBraceEnd(content, openBraceOffset);
-    if (endOffset < 0) {
-      continue;
-    }
-    if (offset >= openBraceOffset && offset <= endOffset) {
-      return {
-        typeName: normalizeTypeToken(match[1] ?? ""),
-        openBraceOffset,
-        endOffset
-      };
-    }
-  }
-
-  return null;
-}
-
-function findEnclosingClassName(content: string, offset: number): string | null {
-  const prefix = content.slice(0, Math.max(0, offset));
-  const classMatches = [...prefix.matchAll(/\bclass\s+([A-Za-z_][A-Za-z0-9_]*)/g)];
-  if (classMatches.length > 0) {
-    return classMatches[classMatches.length - 1][1] ?? null;
-  }
-  return null;
-}
-
-// Heuristic: scans all `class Foo` occurrences before `offset` and returns the last match.
-// This is a best-effort regex approximation — it does not parse AST scope boundaries, so it
-// can misidentify owner type when the pattern appears inside string literals, comments, or
-// across nested class / function boundaries. For mode:"text" this has no effect (no owner
-// check is performed). For mode:"symbol-aware" / "syntax-aware" it may produce a false
-// ambiguous_target or cross_type flag. Acceptable as a lightweight heuristic; replace with
-// a tree-sitter scope query if higher precision is required.
-function findOwnerType(content: string, offset: number): string | null {
-  const initializer = findEnclosingObjectInitializer(content, offset);
-  if (initializer) {
-    return initializer.typeName;
-  }
-  return findEnclosingClassName(content, offset);
-}
-
-function inferSymbolKind(lineText: string): "class" | "property" | "field" | "method" | null {
-  const text = lineText.trim();
-  if (/\bclass\b/.test(text)) return "class";
-  if (/\b(get|set)\b/.test(text) || /\b[A-Za-z_][A-Za-z0-9_]*\s*\(/.test(text)) return "method";
-  if (/\b[A-Za-z_][A-Za-z0-9_]*\s*[:=]/.test(text)) return "property";
-  if (/\b(private|public|protected)\s+[A-Za-z_][A-Za-z0-9_]*\s*[:=]/.test(text)) return "field";
-  return null;
-}
-
-function pathStartsWithAny(filePath: string, prefixes: string[]): boolean {
-  if (prefixes.length === 0) {
-    return true;
-  }
-  const normalized = normalizeRelativePath(filePath).toLowerCase();
-  return prefixes.some((prefix) => normalized.startsWith(normalizeRelativePath(prefix).toLowerCase()));
-}
-
-function hasNormalizedPathPrefix(normalizedPath: string, normalizedPrefix: string): boolean {
-  return normalizedPath === normalizedPrefix || normalizedPath.startsWith(`${normalizedPrefix}/`);
-}
-
-function resolveDiagnosticPathToHunkPath(
-  diagnosticPath: string,
-  hunkPathByLower: Map<string, string>
-): string | null {
-  const normalizedDiagPath = normalizeRelativePath(diagnosticPath).toLowerCase();
-  const exact = hunkPathByLower.get(normalizedDiagPath);
-  if (exact) {
-    return exact;
-  }
-
-  // Compiler diagnostics often emit absolute paths while preview hunks store repo-relative paths.
-  // Resolve by suffix against known hunk paths and prefer the longest match when multiple candidates exist.
-  let bestMatch: string | null = null;
-  for (const [lowerPath, canonical] of hunkPathByLower.entries()) {
-    if (normalizedDiagPath.endsWith(`/${lowerPath}`) || normalizedDiagPath === lowerPath) {
-      if (!bestMatch || lowerPath.length > bestMatch.length) {
-        bestMatch = lowerPath;
-      }
-      if (normalizedDiagPath === lowerPath) {
-        break;
-      }
-    }
-    if (normalizedDiagPath.endsWith(`\\${lowerPath}`)) {
-      if (!bestMatch || lowerPath.length > bestMatch.length) {
-        bestMatch = lowerPath;
-      }
-    }
-  }
-
-  if (!bestMatch) {
-    return null;
-  }
-  return hunkPathByLower.get(bestMatch) ?? null;
-}
-
-function findInitializerMemberAssignment(
-  content: string,
-  offset: number,
-  symbolName: string
-): InitializerAssignmentContext | null {
-  const initializer = findEnclosingObjectInitializer(content, offset);
-  if (!initializer) {
-    return null;
-  }
-
-  const lineStart = content.lastIndexOf("\n", Math.max(0, offset - 1)) + 1;
-  const rawLineEnd = content.indexOf("\n", offset);
-  const lineEnd = rawLineEnd >= 0 ? rawLineEnd : content.length;
-  const lineText = content.slice(lineStart, lineEnd);
-  const lineEnding = rawLineEnd >= 0 ? (content[lineEnd - 1] === "\r" ? "\r\n" : "\n") : "";
-  const assignmentEnd = rawLineEnd >= 0 ? lineEnd + lineEnding.length : lineEnd;
-
-  const headPattern = new RegExp(`^(\\s*)${escapeRegExp(symbolName)}\\s*=\\s*`);
-  const match = lineText.match(headPattern);
-  if (!match) {
-    return null;
-  }
-
-  const indent = match[1] ?? "";
-  const rhs = lineText.slice(match[0].length);
-  if (rhs.length === 0) {
-    return null;
-  }
-
-  let depthParen = 0;
-  let depthBracket = 0;
-  let depthBrace = 0;
-  let inSingleQuote = false;
-  let inDoubleQuote = false;
-  let escaped = false;
-  let splitIndex = -1;
-
-  for (let i = 0; i < rhs.length; i += 1) {
-    const ch = rhs[i];
-    if (escaped) {
-      escaped = false;
-      continue;
-    }
-
-    if (ch === "\\") {
-      escaped = true;
-      continue;
-    }
-
-    if (!inDoubleQuote && ch === "'") {
-      inSingleQuote = !inSingleQuote;
-      continue;
-    }
-    if (!inSingleQuote && ch === '"') {
-      inDoubleQuote = !inDoubleQuote;
-      continue;
-    }
-    if (inSingleQuote || inDoubleQuote) {
-      continue;
-    }
-
-    if (ch === "(") depthParen += 1;
-    else if (ch === ")") depthParen = Math.max(0, depthParen - 1);
-    else if (ch === "[") depthBracket += 1;
-    else if (ch === "]") depthBracket = Math.max(0, depthBracket - 1);
-    else if (ch === "{") depthBrace += 1;
-    else if (ch === "}") depthBrace = Math.max(0, depthBrace - 1);
-    else if (ch === "," && depthParen === 0 && depthBracket === 0 && depthBrace === 0) {
-      splitIndex = i;
-      break;
-    }
-  }
-
-  const expressionText = (splitIndex >= 0 ? rhs.slice(0, splitIndex) : rhs).trim();
-  if (expressionText.length === 0) {
-    return null;
-  }
-
-  const remainder = splitIndex >= 0 ? rhs.slice(splitIndex + 1).trim() : "";
-  const hasSiblingAssignments = splitIndex >= 0 && /[A-Za-z_][A-Za-z0-9_]*\s*=/.test(remainder);
-
-  return {
-    initializer,
-    assignmentStart: lineStart,
-    assignmentEnd,
-    assignmentText: content.slice(lineStart, assignmentEnd),
-    indent,
-    expressionText,
-    trailingComma: splitIndex >= 0,
-    hasSiblingAssignments,
-    line: offsetToLine(content, lineStart),
-    lineEnding
-  };
-}
-
-function isDottedMemberPath(value: string): boolean {
-  return /^[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)+$/.test(value.trim());
-}
-
-function isSimpleIdentifier(value: string): boolean {
-  return /^[A-Za-z_][A-Za-z0-9_]*$/.test(value.trim());
-}
-
-function isInvalidCsharpInitializerReplacement(replacementText: string): boolean {
-  const trimmed = replacementText.trim();
-  return /^[A-Za-z_][A-Za-z0-9_]*\.[A-Za-z_][A-Za-z0-9_]*\s*=/.test(trimmed);
-}
-
-function resolveInitializerRewriteTargetMember(migration: RefactorSymbolMigrationInput): string {
-  const targetMember = migration.initializerRewrite?.targetMember
-    ?? migration.toSymbol.split(".").filter((x) => x.length > 0).at(-1)
-    ?? migration.fromSymbol;
-
-  const objectProperty = migration.initializerRewrite?.objectProperty;
-  const objectType = migration.initializerRewrite?.objectType;
-
-  if (objectProperty && !isSimpleIdentifier(objectProperty)) {
-    throw new PolicyViolationError(
-      "INVALID_INITIALIZER_REWRITE",
-      `initializerRewrite.objectProperty must be a simple identifier (received '${objectProperty}').`
-    );
-  }
-
-  if (!isSimpleIdentifier(targetMember)) {
-    throw new PolicyViolationError(
-      "INVALID_INITIALIZER_REWRITE",
-      `initializerRewrite.targetMember must be a simple identifier (received '${targetMember}').`
-    );
-  }
-
-  if (objectType && /[=;{}]/.test(objectType)) {
-    throw new PolicyViolationError(
-      "INVALID_INITIALIZER_REWRITE",
-      `initializerRewrite.objectType contains invalid characters (received '${objectType}').`
-    );
-  }
-
-  return targetMember;
-}
-
-function buildRefactorPreview(
-  repoPath: string,
-  repoId: string,
-  findText: string,
-  replaceText: string,
-  scope: RefactorScopeInput,
-  guards: RefactorGuardsInput,
-  mode: RefactorModeInput
-): {
-  hunks: PreviewCandidateHunk[];
-  affectedFiles: string[];
-} {
-  const indexedFiles = store.listIndexedFiles(repoId).map((x) => normalizeRelativePath(x.path));
-  const includePaths = (scope.includePaths ?? []).map((x) => normalizeRelativePath(x));
-  const excludePaths = (scope.excludePaths ?? []).map((x) => normalizeRelativePath(x));
-  const globPaths = (scope.fileGlobs ?? []).map((x) => normalizeRelativePath(x));
-
-  let allowedByGlob: Set<string> | null = null;
-  if (globPaths.length > 0) {
-    allowedByGlob = new Set<string>();
-    for (const pattern of globPaths) {
-      const matches = globSync(pattern, { cwd: repoPath, nodir: true, dot: false, windowsPathsNoEscape: true });
-      for (const match of matches) {
-        allowedByGlob.add(normalizeRelativePath(match));
-      }
-    }
-  }
-
-  const selectedFiles = indexedFiles
-    .filter((filePath) => pathStartsWithAny(filePath, includePaths))
-    .filter((filePath) => !excludePaths.some((prefix) => normalizeRelativePath(filePath).toLowerCase().startsWith(prefix.toLowerCase())))
-    .filter((filePath) => (allowedByGlob ? allowedByGlob.has(normalizeRelativePath(filePath)) : true))
-    .sort((a, b) => a.localeCompare(b));
-
-  const hunks: PreviewCandidateHunk[] = [];
-  const affected = new Set<string>();
-
-  for (const filePath of selectedFiles) {
-    const language = inferLanguageFromPath(filePath);
-    if (guards.language && language !== guards.language) {
-      continue;
-    }
-
-    const safeAbsolute = assertSafeRepoFilePath(repoPath, filePath);
-    if (!fs.existsSync(safeAbsolute)) {
-      continue;
-    }
-
-    const content = fs.readFileSync(safeAbsolute, "utf8");
-    const fileHashBefore = sha256(content);
-    let cursor = 0;
-
-    while (true) {
-      const start = content.indexOf(findText, cursor);
-      if (start < 0) {
-        break;
-      }
-      const end = start + findText.length;
-      const line = offsetToLine(content, start);
-      const lineText = content.split(/\r?\n/)[line - 1] ?? "";
-      const ownerType = findOwnerType(content, start);
-      const symbolKind = inferSymbolKind(lineText);
-
-      if (guards.symbolKinds.length > 0) {
-        if (!symbolKind || !guards.symbolKinds.includes(symbolKind)) {
-          cursor = end;
-          continue;
-        }
-      }
-
-      if (guards.allowOwnerTypes.length > 0) {
-        if (!ownerType || !guards.allowOwnerTypes.some((x) => x.toLowerCase() === ownerType.toLowerCase())) {
-          cursor = end;
-          continue;
-        }
-      }
-
-      const riskFlags: RefactorRiskFlag[] = [];
-      if ((mode === "symbol-aware" || mode === "syntax-aware") && !ownerType) {
-        riskFlags.push("ambiguous_target");
-      }
-      const disallowNames = new Set([...guards.disallowOwnerTypes, ...guards.disallowTypeList].map((x) => x.toLowerCase()));
-      if (ownerType && disallowNames.has(ownerType.toLowerCase())) {
-        riskFlags.push("cross_type");
-      }
-      if (isGeneratedFilePath(filePath)) {
-        riskFlags.push("generated_file");
-      }
-
-      let confidence = mode === "text" ? 0.85 : 0.95;
-      if (!ownerType) confidence -= 0.25;
-      if (riskFlags.includes("cross_type")) confidence -= 0.4;
-      if (riskFlags.includes("generated_file")) confidence -= 0.2;
-      confidence = Math.max(0, Math.min(1, Number(confidence.toFixed(2))));
-
-      hunks.push({
-        filePath,
-        line,
-        startOffset: start,
-        endOffset: end,
-        beforeText: content.slice(start, end),
-        afterText: replaceText,
-        ownerType,
-        symbolKind,
-        confidence,
-        riskFlags,
-        fileHashBefore
-      });
-      affected.add(filePath);
-      cursor = end;
-    }
-  }
-
-  hunks.sort((a, b) => a.filePath.localeCompare(b.filePath) || a.startOffset - b.startOffset);
-  return {
-    hunks,
-    affectedFiles: [...affected].sort((a, b) => a.localeCompare(b))
-  };
-}
-
-function applyCompilerAssistToPreview(
-  hunks: PreviewCandidateHunk[],
-  compilerAssist: RefactorCompilerAssistInput
-): CompilerAssistOutcome {
-  const normalizedCodes = new Set(compilerAssist.codes.map((x) => x.trim().toUpperCase()).filter(Boolean));
-  const lineWindow = compilerAssist.lineWindow;
-  const pathPrefix = compilerAssist.filePathPrefix ? normalizeRelativePath(compilerAssist.filePathPrefix).toLowerCase() : null;
-  const hunkPathByLower = new Map<string, string>();
-  for (const hunk of hunks) {
-    const normalizedHunkPath = normalizeRelativePath(hunk.filePath).toLowerCase();
-    if (!hunkPathByLower.has(normalizedHunkPath)) {
-      hunkPathByLower.set(normalizedHunkPath, hunk.filePath);
-    }
-  }
-
-  const acceptedDiagnostics = compilerAssist.diagnostics.flatMap((diag) => {
-    const code = diag.code.trim().toUpperCase();
-    if (normalizedCodes.size > 0 && !normalizedCodes.has(code)) {
-      return [];
-    }
-
-    const resolvedPath = resolveDiagnosticPathToHunkPath(diag.filePath, hunkPathByLower);
-    const diagPathForPrefix = resolvedPath
-      ? normalizeRelativePath(resolvedPath).toLowerCase()
-      : normalizeRelativePath(diag.filePath).toLowerCase();
-
-    if (pathPrefix && !hasNormalizedPathPrefix(diagPathForPrefix, pathPrefix)) {
-      return [];
-    }
-
-    return [{ ...diag, resolvedPath }];
-  });
-
-  if (acceptedDiagnostics.length === 0) {
-    return {
-      hunks,
-      totalDiagnostics: compilerAssist.diagnostics.length,
-      acceptedDiagnostics: 0,
-      matchedDiagnostics: 0,
-      filteredOutHunks: 0,
-      lineWindow,
-      codes: [...normalizedCodes].sort((a, b) => a.localeCompare(b))
-    };
-  }
-
-  const diagnosticsByFile = new Map<string, Array<{ line: number; key: string }>>();
-  for (const diag of acceptedDiagnostics) {
-    if (!diag.resolvedPath) {
-      continue;
-    }
-    const normalizedPath = normalizeRelativePath(diag.resolvedPath).toLowerCase();
-    const list = diagnosticsByFile.get(normalizedPath) ?? [];
-    list.push({ line: diag.line, key: `${normalizedPath}:${diag.line}:${diag.code.trim().toUpperCase()}` });
-    diagnosticsByFile.set(normalizedPath, list);
-  }
-
-  const matchedDiagnosticKeys = new Set<string>();
-  const selectedHunks = hunks.filter((hunk) => {
-    const normalizedPath = normalizeRelativePath(hunk.filePath).toLowerCase();
-    const candidates = diagnosticsByFile.get(normalizedPath);
-    if (!candidates || candidates.length === 0) {
-      return false;
-    }
-    for (const candidate of candidates) {
-      if (Math.abs(candidate.line - hunk.line) <= lineWindow) {
-        matchedDiagnosticKeys.add(candidate.key);
-        return true;
-      }
-    }
-    return false;
-  });
-
-  const effectiveHunks = selectedHunks;
-
-  return {
-    hunks: effectiveHunks,
-    totalDiagnostics: compilerAssist.diagnostics.length,
-    acceptedDiagnostics: acceptedDiagnostics.length,
-    matchedDiagnostics: matchedDiagnosticKeys.size,
-    filteredOutHunks: Math.max(0, hunks.length - effectiveHunks.length),
-    lineWindow,
-    codes: [...normalizedCodes].sort((a, b) => a.localeCompare(b))
-  };
-}
-
-function buildSymbolMigrationPreview(
-  repoPath: string,
-  repoId: string,
-  migration: RefactorSymbolMigrationInput,
-  scopePaths: string[]
-): {
-  hunks: PreviewCandidateHunk[];
-  affectedFiles: string[];
-} {
-  const preview = buildRefactorPreview(
-    repoPath,
-    repoId,
-    migration.fromSymbol,
-    migration.toSymbol,
-    {
-      includePaths: scopePaths,
-      excludePaths: [],
-      fileGlobs: []
-    },
-    {
-      language: undefined,
-      symbolKinds: ["property", "field"],
-      allowOwnerTypes: [migration.requiredOwnerType],
-      disallowOwnerTypes: migration.forbiddenOwnerTypes,
-      disallowTypeList: migration.forbiddenOwnerTypes
-    },
-    "symbol-aware"
-  );
-
-  const fileCache = new Map<string, string>();
-
-  if (!migration.initializerRewrite && isDottedMemberPath(migration.toSymbol)) {
-    const guardedHunks = preview.hunks.map((hunk) => {
-      if (inferLanguageFromPath(hunk.filePath) !== "csharp") {
-        return hunk;
-      }
-
-      let content = fileCache.get(hunk.filePath);
-      if (!content) {
-        content = safeReadText(assertSafeRepoFilePath(repoPath, hunk.filePath));
-        fileCache.set(hunk.filePath, content);
-      }
-
-      const assignment = findInitializerMemberAssignment(content, hunk.startOffset, migration.fromSymbol);
-      if (!assignment || assignment.initializer.typeName.toLowerCase() !== migration.requiredOwnerType.toLowerCase()) {
-        return hunk;
-      }
-
-      const blockedRiskFlags: RefactorRiskFlag[] = [...new Set([...hunk.riskFlags, "ambiguous_target"] as RefactorRiskFlag[])];
-      return {
-        ...hunk,
-        line: assignment.line,
-        startOffset: assignment.assignmentStart,
-        endOffset: assignment.assignmentEnd,
-        beforeText: assignment.assignmentText,
-        afterText: assignment.assignmentText,
-        confidence: Math.min(hunk.confidence, 0.5),
-        riskFlags: blockedRiskFlags
-      };
-    });
-
-    return {
-      hunks: guardedHunks.sort((a, b) => a.filePath.localeCompare(b.filePath) || a.startOffset - b.startOffset || a.beforeText.localeCompare(b.beforeText)),
-      affectedFiles: [...new Set(guardedHunks.map((x) => x.filePath))].sort((a, b) => a.localeCompare(b))
-    };
-  }
-
-  if (!migration.initializerRewrite) {
-    return preview;
-  }
-
-  const retainedHunks: PreviewCandidateHunk[] = [];
-  const rewrittenHunks: PreviewCandidateHunk[] = [];
-  const groupedAssignments = new Map<string, Array<{ hunk: PreviewCandidateHunk; assignment: InitializerAssignmentContext }>>();
-  const targetMember = resolveInitializerRewriteTargetMember(migration);
-
-  for (const hunk of preview.hunks) {
-    if (inferLanguageFromPath(hunk.filePath) !== "csharp") {
-      retainedHunks.push(hunk);
-      continue;
-    }
-
-    let content = fileCache.get(hunk.filePath);
-    if (!content) {
-      content = safeReadText(assertSafeRepoFilePath(repoPath, hunk.filePath));
-      fileCache.set(hunk.filePath, content);
-    }
-
-    const assignment = findInitializerMemberAssignment(content, hunk.startOffset, migration.fromSymbol);
-    if (!assignment || assignment.initializer.typeName.toLowerCase() !== migration.requiredOwnerType.toLowerCase()) {
-      retainedHunks.push(hunk);
-      continue;
-    }
-
-    if (assignment.hasSiblingAssignments) {
-      const blockedRiskFlags: RefactorRiskFlag[] = [...new Set([...hunk.riskFlags, "ambiguous_target"] as RefactorRiskFlag[])];
-      rewrittenHunks.push({
-        ...hunk,
-        line: assignment.line,
-        startOffset: assignment.assignmentStart,
-        endOffset: assignment.assignmentEnd,
-        beforeText: assignment.assignmentText,
-        afterText: assignment.assignmentText,
-        confidence: Math.min(hunk.confidence, 0.5),
-        riskFlags: blockedRiskFlags
-      });
-      continue;
-    }
-
-    const groupKey = [
-      hunk.filePath,
-      String(assignment.initializer.openBraceOffset),
-      migration.initializerRewrite.objectProperty,
-      migration.initializerRewrite.objectType
-    ].join(":");
-    const list = groupedAssignments.get(groupKey) ?? [];
-    list.push({ hunk, assignment });
-    groupedAssignments.set(groupKey, list);
-  }
-
-  for (const entries of groupedAssignments.values()) {
-    const ordered = [...entries].sort((a, b) => a.assignment.assignmentStart - b.assignment.assignmentStart);
-    const first = ordered[0];
-    let content = fileCache.get(first.hunk.filePath);
-    if (!content) {
-      content = safeReadText(assertSafeRepoFilePath(repoPath, first.hunk.filePath));
-      fileCache.set(first.hunk.filePath, content);
-    }
-
-    const initializerBody = content.slice(first.assignment.initializer.openBraceOffset + 1, first.assignment.initializer.endOffset);
-    const existingOwnedPropertyPattern = new RegExp(`\\b${escapeRegExp(migration.initializerRewrite.objectProperty)}\\s*=`);
-    const combinedRiskFlags = [...new Set(ordered.flatMap((x) => x.hunk.riskFlags))];
-    const baseConfidence = Math.min(...ordered.map((x) => x.hunk.confidence));
-
-    if (existingOwnedPropertyPattern.test(initializerBody)) {
-      const blockedRiskFlags: RefactorRiskFlag[] = [...new Set([...combinedRiskFlags, "ambiguous_target"] as RefactorRiskFlag[])];
-      rewrittenHunks.push({
-        ...first.hunk,
-        line: first.assignment.line,
-        startOffset: first.assignment.assignmentStart,
-        endOffset: first.assignment.assignmentEnd,
-        beforeText: first.assignment.assignmentText,
-        afterText: first.assignment.assignmentText,
-        confidence: Math.min(baseConfidence, 0.5),
-        riskFlags: blockedRiskFlags
-      });
-      continue;
-    }
-
-    const memberAssignments = ordered.map(({ assignment }) => `${targetMember} = ${assignment.expressionText}`);
-    const replacementText = `${first.assignment.indent}${migration.initializerRewrite.objectProperty} = new ${migration.initializerRewrite.objectType} { ${memberAssignments.join(", ")} }${first.assignment.trailingComma ? "," : ""}${first.assignment.lineEnding}`;
-
-    rewrittenHunks.push({
-      ...first.hunk,
-      line: first.assignment.line,
-      startOffset: first.assignment.assignmentStart,
-      endOffset: first.assignment.assignmentEnd,
-      beforeText: first.assignment.assignmentText,
-      afterText: replacementText,
-      confidence: Math.max(baseConfidence, 0.97),
-      ownerType: migration.requiredOwnerType,
-      symbolKind: "property",
-      riskFlags: combinedRiskFlags
-    });
-
-    for (const entry of ordered.slice(1)) {
-      rewrittenHunks.push({
-        ...entry.hunk,
-        line: entry.assignment.line,
-        startOffset: entry.assignment.assignmentStart,
-        endOffset: entry.assignment.assignmentEnd,
-        beforeText: entry.assignment.assignmentText,
-        afterText: "",
-        confidence: Math.max(baseConfidence, 0.97),
-        ownerType: migration.requiredOwnerType,
-        symbolKind: "property",
-        riskFlags: combinedRiskFlags
-      });
-    }
-  }
-
-  const hunks = [...retainedHunks, ...rewrittenHunks]
-    .sort((a, b) => a.filePath.localeCompare(b.filePath) || a.startOffset - b.startOffset || a.beforeText.localeCompare(b.beforeText));
-
-  return {
-    hunks,
-    affectedFiles: [...new Set(hunks.map((x) => x.filePath))].sort((a, b) => a.localeCompare(b))
-  };
-}
-
-function countPreviewRisks(hunks: Array<{ riskFlags: RefactorRiskFlag[] }>): { ambiguous: number; crossType: number; generated: number } {
-  let ambiguous = 0;
-  let crossType = 0;
-  let generated = 0;
-  for (const hunk of hunks) {
-    if (hunk.riskFlags.includes("ambiguous_target")) ambiguous += 1;
-    if (hunk.riskFlags.includes("cross_type")) crossType += 1;
-    if (hunk.riskFlags.includes("generated_file")) generated += 1;
-  }
-  return { ambiguous, crossType, generated };
-}
-
-function createPreviewDigest(repoId: string, findText: string, replaceText: string, hunks: PreviewCandidateHunk[]): string {
-  const stable = JSON.stringify({
-    repoId,
-    findText,
-    replaceText,
-    hunks: hunks.map((h) => ({
-      filePath: h.filePath,
-      startOffset: h.startOffset,
-      endOffset: h.endOffset,
-      beforeText: h.beforeText,
-      afterText: h.afterText,
-      ownerType: h.ownerType,
-      symbolKind: h.symbolKind,
-      confidence: h.confidence,
-      riskFlags: [...h.riskFlags].sort((a, b) => a.localeCompare(b)),
-      fileHashBefore: h.fileHashBefore
-    }))
-  });
-  return sha256(stable);
-}
-
-function issueApprovalToken(previewId: string, digest: string, expiresAt: string): string {
-  const payload = Buffer.from(JSON.stringify({ previewId, digest, expiresAt })).toString("base64url");
-  const secret = resolveApprovalSecret();
-  const signature = createHmac("sha256", secret).update(payload).digest("base64url");
-  return `${payload}.${signature}`;
-}
-
-function verifyApprovalToken(token: string, previewId: string, digest: string, expiresAt: string): void {
-  // Use lastIndexOf to split on the final '.' only — guards against any future format that
-  // embeds dots inside the base64url payload section.
-  const dotIdx = token.lastIndexOf(".");
-  const payload = dotIdx > 0 ? token.slice(0, dotIdx) : "";
-  const signature = dotIdx > 0 ? token.slice(dotIdx + 1) : "";
-  if (!payload || !signature) {
-    throw new PolicyViolationError("INVALID_APPROVAL_TOKEN", "Approval token format is invalid.");
-  }
-  const secret = resolveApprovalSecret();
-  const expected = createHmac("sha256", secret).update(payload).digest("base64url");
-  if (expected !== signature) {
-    throw new PolicyViolationError("INVALID_APPROVAL_TOKEN", "Approval token signature is invalid.");
-  }
-
-  let decoded: { previewId: string; digest: string; expiresAt: string };
-  try {
-    decoded = JSON.parse(Buffer.from(payload, "base64url").toString("utf8")) as { previewId: string; digest: string; expiresAt: string };
-  } catch {
-    throw new PolicyViolationError("INVALID_APPROVAL_TOKEN", "Approval token payload is invalid.");
-  }
-
-  if (decoded.previewId !== previewId || decoded.digest !== digest || decoded.expiresAt !== expiresAt) {
-    throw new PolicyViolationError("APPROVAL_TOKEN_MISMATCH", "Approval token does not match the approved preview plan.");
-  }
-
-  if (Date.parse(decoded.expiresAt) < Date.now()) {
-    throw new PolicyViolationError("APPROVAL_TOKEN_EXPIRED", "Approval token has expired.");
-  }
-}
-
-function groupPreviewHunks(hunks: RefactorPreviewHunkRecord[]): Array<{
-  filePath: string;
-  hunkCount: number;
-  hunks: Array<{
-    hunkId: string;
-    line: number;
-    beforeText: string;
-    afterText: string;
-    confidence: number;
-    riskFlags: RefactorRiskFlag[];
-    ownerType: string | null;
-    symbolKind: string | null;
-  }>;
-}> {
-  const byFile = new Map<string, RefactorPreviewHunkRecord[]>();
-  for (const hunk of hunks) {
-    const list = byFile.get(hunk.filePath) ?? [];
-    list.push(hunk);
-    byFile.set(hunk.filePath, list);
-  }
-
-  return [...byFile.entries()]
-    .sort((a, b) => a[0].localeCompare(b[0]))
-    .map(([filePath, items]) => ({
-      filePath,
-      hunkCount: items.length,
-      hunks: items.map((item) => ({
-        hunkId: item.hunkId,
-        line: item.line,
-        beforeText: item.beforeText,
-        afterText: item.afterText,
-        confidence: item.confidence,
-        riskFlags: item.riskFlags,
-        ownerType: item.ownerType,
-        symbolKind: item.symbolKind
-      }))
-    }));
-}
-
-function executeRefactorApplyPlan(
-  repoPath: string,
-  applyId: string,
-  hunks: RefactorPreviewHunkRecord[],
-  maxFilesPerBatch: number,
-  stopOnFirstConflict: boolean,
-  includeLowConfidence: boolean
-): {
-  changes: RefactorApplyChangeRecord[];
-  appliedHunks: RefactorApplyHunkRecord[];
-  lane: { highConfidenceEdits: number; lowConfidenceEdits: number; lowConfidenceSkipped: number };
-} {
-  const groupedByFile = new Map<string, RefactorPreviewHunkRecord[]>();
-  for (const hunk of hunks) {
-    const list = groupedByFile.get(hunk.filePath) ?? [];
-    list.push(hunk);
-    groupedByFile.set(hunk.filePath, list);
-  }
-
-  const changes: RefactorApplyChangeRecord[] = [];
-  const appliedHunks: RefactorApplyHunkRecord[] = [];
-  const fileEntries = [...groupedByFile.entries()].sort((a, b) => a[0].localeCompare(b[0]));
-  let stop = false;
-  let highConfidenceEdits = 0;
-  let lowConfidenceEdits = 0;
-  let lowConfidenceSkipped = 0;
-
-  for (let i = 0; i < fileEntries.length; i += Math.max(1, maxFilesPerBatch)) {
-    if (stop) {
-      break;
-    }
-    const chunk = fileEntries.slice(i, i + Math.max(1, maxFilesPerBatch));
-    for (const [filePath, allHunks] of chunk) {
-      if (stop) {
-        break;
-      }
-
-      const absolute = assertSafeRepoFilePath(repoPath, filePath);
-      const beforeContent = safeReadText(absolute);
-      const beforeHash = sha256(beforeContent);
-
-      const blockedHunks = allHunks.filter((h) => h.riskFlags.length > 0);
-      const lowConfidenceHunks = allHunks.filter((h) => h.riskFlags.length === 0 && h.confidence < REFACTOR_LOW_CONFIDENCE_THRESHOLD);
-      lowConfidenceSkipped += includeLowConfidence ? 0 : lowConfidenceHunks.length;
-      const runnableHunks = allHunks.filter((h) => isApplyRunnableHunk(h, includeLowConfidence));
-
-      if (runnableHunks.length === 0) {
-        changes.push({
-          applyId,
-          filePath,
-          replacementCount: 0,
-          status: "skipped",
-          reason: blockedHunks.length > 0
-            ? "RISK_FLAG_BLOCKED"
-            : lowConfidenceHunks.length > 0 && !includeLowConfidence
-              ? "LOW_CONFIDENCE_BLOCKED"
-              : "NO_EFFECTIVE_CHANGES",
-          fileHashBefore: beforeHash,
-          fileHashAfter: beforeHash,
-          beforeContent,
-          afterContent: beforeContent
-        });
-        continue;
-      }
-
-      if (beforeHash !== runnableHunks[0].fileHashBefore) {
-        changes.push({
-          applyId,
-          filePath,
-          replacementCount: 0,
-          status: "conflict",
-          reason: "FILE_CHANGED_AFTER_PREVIEW",
-          fileHashBefore: beforeHash,
-          fileHashAfter: null,
-          beforeContent,
-          afterContent: null
-        });
-        if (stopOnFirstConflict) {
-          stop = true;
-        }
-        continue;
-      }
-
-      const sortedHunks = [...runnableHunks].sort((a, b) => b.startOffset - a.startOffset || b.hunkId.localeCompare(a.hunkId));
-      const finalOffsetByHunkId = buildFinalOffsetMap(sortedHunks);
-      let updated = beforeContent;
-      let appliedCount = 0;
-      let fileHighConfidenceEdits = 0;
-      let fileLowConfidenceEdits = 0;
-      let conflictReason: string | null = null;
-
-      for (const hunk of sortedHunks) {
-        const target = updated.slice(hunk.startOffset, hunk.endOffset);
-        if (target !== hunk.beforeText) {
-          conflictReason = "OFFSET_MISMATCH_DURING_APPLY";
-          break;
-        }
-        if (inferLanguageFromPath(filePath) === "csharp" && isInvalidCsharpInitializerReplacement(hunk.replacementText)) {
-          const enclosingInitializer = findEnclosingObjectInitializer(updated, hunk.startOffset);
-          if (enclosingInitializer && /\s*=/.test(hunk.beforeText)) {
-            conflictReason = "INVALID_CSHARP_INITIALIZER_REWRITE";
-            break;
-          }
-        }
-        updated = `${updated.slice(0, hunk.startOffset)}${hunk.replacementText}${updated.slice(hunk.endOffset)}`;
-        appliedCount += 1;
-        if (hunk.confidence < REFACTOR_LOW_CONFIDENCE_THRESHOLD) {
-          fileLowConfidenceEdits += 1;
-        } else {
-          fileHighConfidenceEdits += 1;
-        }
-      }
-
-      if (conflictReason) {
-        changes.push({
-          applyId,
-          filePath,
-          replacementCount: 0,
-          status: "conflict",
-          reason: conflictReason,
-          fileHashBefore: beforeHash,
-          fileHashAfter: null,
-          beforeContent,
-          afterContent: null
-        });
-        if (stopOnFirstConflict) {
-          stop = true;
-        }
-        continue;
-      }
-
-      if (appliedCount > 0) {
-        fs.writeFileSync(absolute, updated, "utf8");
-        for (const hunk of sortedHunks) {
-          const startOffsetApplied = finalOffsetByHunkId.get(hunk.hunkId);
-          if (startOffsetApplied === undefined) {
-            continue;
-          }
-          appliedHunks.push({
-            applyId,
-            filePath,
-            hunkId: hunk.hunkId,
-            startOffsetApplied,
-            endOffsetApplied: startOffsetApplied + hunk.replacementText.length,
-            beforeText: hunk.beforeText,
-            afterText: hunk.replacementText
-          });
-        }
-        highConfidenceEdits += fileHighConfidenceEdits;
-        lowConfidenceEdits += fileLowConfidenceEdits;
-        changes.push({
-          applyId,
-          filePath,
-          replacementCount: appliedCount,
-          status: "applied",
-          reason: null,
-          fileHashBefore: beforeHash,
-          fileHashAfter: sha256(updated),
-          beforeContent,
-          afterContent: updated
-        });
-      } else {
-        changes.push({
-          applyId,
-          filePath,
-          replacementCount: 0,
-          status: "skipped",
-          reason: "NO_EFFECTIVE_CHANGES",
-          fileHashBefore: beforeHash,
-          fileHashAfter: beforeHash,
-          beforeContent,
-          afterContent: beforeContent
-        });
-      }
-    }
-  }
-
-  return {
-    changes,
-    appliedHunks,
-    lane: {
-      highConfidenceEdits,
-      lowConfidenceEdits,
-      lowConfidenceSkipped
-    }
-  };
-}
-
-function buildFinalOffsetMap(hunks: RefactorPreviewHunkRecord[]): Map<string, number> {
-  const sortedAsc = [...hunks].sort((a, b) => a.startOffset - b.startOffset || a.hunkId.localeCompare(b.hunkId));
-  const offsetMap = new Map<string, number>();
-  let cumulativeDelta = 0;
-
-  for (const hunk of sortedAsc) {
-    const adjustedStart = hunk.startOffset + cumulativeDelta;
-    offsetMap.set(hunk.hunkId, adjustedStart);
-    cumulativeDelta += hunk.replacementText.length - hunk.beforeText.length;
-  }
-
-  return offsetMap;
-}
-
-function formatChangeContextPayload(
+function formatChangeContextPayloadLocal(
   result: ReturnType<GraphStore["getChangeContext"]>,
   profile: ResponseProfile
 ): unknown {
@@ -4359,28 +1925,7 @@ function formatChangeContextPayload(
 }
 
 function asText(payload: unknown, profile: ResponseProfile = "standard"): CallToolResult {
-  const text = profile === "compact" || profile === "nano"
-    ? JSON.stringify(payload)
-    : JSON.stringify(payload, null, 2);
-
-  const ctx = toolContextStorage.getStore();
-  if (ctx) {
-    emitTelemetry({
-      ts: new Date().toISOString(),
-      toolName: ctx.toolName,
-      elapsedMs: Date.now() - ctx.startedAt,
-      responseBytes: Buffer.byteLength(text, "utf8"),
-      resultCount: estimateResultCount(payload),
-      profile,
-      requestedProfile: typeof ctx.args.profile === "string" ? ctx.args.profile : null,
-      compactRequested: ctx.args.compact === true,
-      isError: false
-    });
-  }
-
-  return {
-    content: [{ type: "text", text }]
-  };
+  return asTextCore(payload, profile, toolContextStorage.getStore(), TELEMETRY_ENABLED, TELEMETRY_SAMPLE_RATE);
 }
 
 function mapError(error: unknown, toolName: string): { code: string; message: string; requestId: string } {
@@ -4429,134 +1974,14 @@ function assertRefactorApprovalPolicy(): void {
   }
 }
 
-function resolveApprovalSecret(): string {
-  if (REFACTOR_APPROVAL_SECRET.trim().length > 0) {
-    return REFACTOR_APPROVAL_SECRET;
-  }
-  if (REFACTOR_STRICT_APPROVAL) {
-    throw new PolicyViolationError(
-      "APPROVAL_SECRET_REQUIRED",
-      "Approval secret is required in strict approval mode. Set CODEBASE_INDEX_REFACTOR_APPROVAL_SECRET."
-    );
-  }
-  return "dev-insecure-secret";
-}
+// resolveApprovalSecret → refactorUtils.ts (now takes secret + strictApproval as params)
 
-function mapPreviewStatusFromApplyStatus(status: RefactorApplyRecord["status"]): RefactorPreviewRecord["status"] {
-  if (status === "applied") {
-    return "applied";
-  }
-  if (status === "partial") {
-    return "apply_partial";
-  }
-  return "apply_failed";
-}
+// mapPreviewStatusFromApplyStatus, deriveApplyStatus, noLlmAudit → refactorUtils.ts
 
-function deriveApplyStatus(changes: RefactorApplyChangeRecord[]): RefactorApplyRecord["status"] {
-  const hasApplied = changes.some((x) => x.status === "applied");
-  if (!hasApplied) {
-    return "failed";
-  }
-  const hasNonApplied = changes.some((x) => x.status !== "applied");
-  if (hasNonApplied) {
-    return "partial";
-  }
-  return "applied";
-}
+// numberFromEnv, ratioFromEnv → envConfig.ts
+// toNugetContractId, asArgsRecord → responseFormatter.ts
 
-function noLlmAudit(): { decisionSource: "rule_engine"; llmInvolved: false; approvalMode: "strict" | "local-fallback" } {
-  return {
-    decisionSource: "rule_engine",
-    llmInvolved: false,
-    approvalMode: REFACTOR_STRICT_APPROVAL ? "strict" : "local-fallback"
-  };
-}
-
-function numberFromEnv(name: string, fallback: number): number {
-  const raw = process.env[name];
-  if (!raw) {
-    return fallback;
-  }
-
-  const value = Number(raw);
-  if (!Number.isFinite(value) || value <= 0) {
-    return fallback;
-  }
-
-  return Math.floor(value);
-}
-
-function ratioFromEnv(raw: string | undefined, fallback: number): number {
-  if (!raw) {
-    return fallback;
-  }
-
-  const value = Number(raw);
-  if (!Number.isFinite(value)) {
-    return fallback;
-  }
-
-  return Math.max(0, Math.min(1, value));
-}
-
-function toNugetContractId(packageName: string): string {
-  return `nuget:${packageName.trim().toLowerCase()}`;
-}
-
-function asArgsRecord(value: unknown): Record<string, unknown> {
-  return value && typeof value === "object" && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : {};
-}
-
-function estimateResultCount(payload: unknown): number | null {
-  if (Array.isArray(payload)) {
-    return payload.length;
-  }
-
-  if (!payload || typeof payload !== "object") {
-    return null;
-  }
-
-  const obj = payload as Record<string, unknown>;
-  if (typeof obj.count === "number") {
-    return obj.count;
-  }
-
-  const arrayKeys = [
-    "symbols",
-    "candidates",
-    "files",
-    "edges",
-    "callers",
-    "callees",
-    "imports",
-    "importsBy",
-    "importedByFiles",
-    "matchedSymbols"
-  ];
-
-  for (const key of arrayKeys) {
-    const value = obj[key];
-    if (Array.isArray(value)) {
-      return value.length;
-    }
-  }
-
-  return null;
-}
-
-function emitTelemetry(event: ToolTelemetryEvent): void {
-  if (!TELEMETRY_ENABLED) {
-    return;
-  }
-
-  if (Math.random() > TELEMETRY_SAMPLE_RATE) {
-    return;
-  }
-
-  process.stderr.write(`[tool-telemetry] ${JSON.stringify(event)}\n`);
-}
+// estimateResultCount, emitTelemetry → responseFormatter.ts
 
 function traverseDependencyGraph(repoId: string, symbolId: string, depth: number, limit: number) {
   const all: ReturnType<GraphStore["getDependencies"]> = [];
@@ -4847,14 +2272,7 @@ function evaluateIncrementalSkip(
   };
 }
 
-function hasWorkingTreeChanges(repoPath: string): boolean | null {
-  try {
-    const lines = runGitLines(repoPath, ["status", "--porcelain", "--untracked-files=all"]);
-    return lines.length > 0;
-  } catch {
-    return null;
-  }
-}
+// hasWorkingTreeChanges → gitHelpers.ts
 
 function safeCrossRepoResolve(repoId: string): ResolutionStats {
   try {
@@ -4991,26 +2409,7 @@ function resolvePostPhasePolicy(profile: PerformanceProfile): {
   };
 }
 
-function nonNegativeNumberFromEnv(name: string): number | undefined {
-  const raw = process.env[name];
-  if (!raw) {
-    return undefined;
-  }
-
-  const value = Number(raw);
-  if (!Number.isFinite(value) || value < 0) {
-    return undefined;
-  }
-
-  return Math.floor(value);
-}
-
-function parseOptionalBooleanEnv(raw: string | undefined): boolean | undefined {
-  if (raw === undefined) {
-    return undefined;
-  }
-  return parseBooleanEnv(raw, false);
-}
+// nonNegativeNumberFromEnv, parseOptionalBooleanEnv → envConfig.ts
 
 function resolveAutoWatchTargets(): { repoId: string; repoPath: string }[] {
   if (AUTO_WATCH_REPOS.length > 0) {
@@ -5102,9 +2501,9 @@ async function maybeAutoActivateWatchFromArgs(toolName: string, args: Record<str
 async function activateWatchForRepo(repoId: string, repoPath: string, reason: string): Promise<{ started: boolean; message: string }> {
   assertPathAllowed(repoPath, allowedRoots);
 
-  if (WATCH_ACTIVE_ONLY && activeWatchRepoId && activeWatchRepoId !== repoId) {
-    clearWatchInactivityTimer(activeWatchRepoId);
-    await watchManager.stop(activeWatchRepoId);
+  if (WATCH_ACTIVE_ONLY && activeWatchRef.current && activeWatchRef.current !== repoId) {
+    clearWatchInactivityTimer(activeWatchRef.current);
+    await watchManager.stop(activeWatchRef.current);
   }
 
   const currentStatus = watchManager.getStatus(repoId);
@@ -5115,7 +2514,7 @@ async function activateWatchForRepo(repoId: string, repoPath: string, reason: st
     result = { started: false, message: `watch already active for repoId '${repoId}'` };
   }
 
-  activeWatchRepoId = repoId;
+  activeWatchRef.current = repoId;
   armWatchInactivityTimer(repoId);
   if (result.started) {
     process.stderr.write(`[watch-activate] repoId=${repoId} reason=${reason}\n`);
@@ -5126,9 +2525,9 @@ async function activateWatchForRepo(repoId: string, repoPath: string, reason: st
 function armWatchInactivityTimer(repoId: string): void {
   clearWatchInactivityTimer(repoId);
   const timer = setTimeout(() => {
-    const current = activeWatchRepoId;
+    const current = activeWatchRef.current;
     if (WATCH_ACTIVE_ONLY && current === repoId) {
-      activeWatchRepoId = null;
+      activeWatchRef.current = null;
     }
     void watchManager.stop(repoId);
     watchInactivityTimers.delete(repoId);

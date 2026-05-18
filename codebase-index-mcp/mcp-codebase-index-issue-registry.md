@@ -217,6 +217,15 @@
 - Workaround: controlled fallback to build-driven validation (`dotnet test CommunicationHub.slnx`) and targeted edits.
 - Enhancement proposal: improve impact completeness for compatibility-shim and owned-state refactors (especially references originating from object initializers and test fixtures) so `find_impact_files` reflects near-complete call/usage surface.
 
+## MCP-ISSUE-005
+- Scenario: Inspect new `callLog` inbound flow impact on customer timeline after adding `ManualCallLogInboundMessageContract` support in `InboundMessageConsumer`.
+- MCP tool/query attempted: `search_symbols(ManualCallLogInboundMessageContract)` + `get_file_summary(InboundMessageConsumer.cs)` + `find_impact_files(InboundMessageConsumer.cs)`.
+- Expected: MCP should resolve the external contract-backed consumer path and show downstream impact into `ProcessInboundMessage` / timeline handling.
+- Actual: symbol search returned 0 candidates for the external contract, and impact analysis returned no impacted files with `unresolvedRatio: 1` despite the file clearly implementing the new callLog consumer path.
+- Impact: cannot rely on MCP-only evidence to assess whether callLog data shape is correctly surfaced in timeline; requires narrow fallback reads on the touched consumer and query files.
+- Workaround: targeted fallback inspection limited to `InboundMessageConsumer.cs`, `ProcessInboundMessage.cs`, and `GetCustomerConversationTimeline.cs` plus focused tests/search around `callId`/`titleCall` metadata.
+- Enhancement proposal: improve external package contract linking and downstream impact inference for files that implement interfaces from unresolved imports, especially MassTransit consumer entry points.
+
 ### Verification Result (2026-05-08)
 - Final implementation removed DataAnnotation usage (`NotMapped`) and replaced it with Fluent API ignores in EF configuration.
 - Validation:
@@ -270,3 +279,34 @@
 
 ### Current Status
 - ✅ RESOLVED for MCP server workflow: compile-diagnostic-guided narrowing is available in `refactor_replace_preview`.
+
+## MCP-ISSUE-006
+- Scenario: Need to assess package update impact for `SSNet.CommunicationHub.Messaging` and adapt integration mapping in `CRCProtoService.cs`.
+- MCP tool/query attempted: `search_symbols(SSNet.CommunicationHub.Messaging)`, `search_symbols(CRCProtoService)`, `search_symbols(ProtoService|CRC)` plus `find_impact_files(InboundMessageConsumer.cs)`.
+- Expected: MCP should resolve package-linked symbols/classes and show impact surface to target mapper adjustments.
+- Actual: symbol queries returned 0 results for package/class tokens; impact graph showed high unresolved ratio and no impacted files for the integration entry file.
+- Impact: MCP-only path cannot identify the exact mapper file/contracts for this package upgrade task.
+- Workaround: narrow baseline lookup limited to messaging integration files and package reference diffs (`Directory.Packages.props`, `NuGet.config`, `*CRCProtoService*.cs`).
+- Enhancement proposal: improve external NuGet package symbol bridge so package IDs and imported contract types can be discovered and traced from project references.
+
+### Recurrence Update (2026-05-13)
+- Scenario: package-level constant alignment check after re-index (`MessageTypes.CallLog` vs strict manual inbound validator tokens).
+- MCP attempts: `get_file_summary`, `find_impact_files`, `get_file_context` on `Contracts/MessageTypes.cs`, `Publishers/CrmInboundPublisher.cs`, `Publishers/ChannelNormalization.cs`.
+- Expected: resolved impact/references and file context rich enough to perform deterministic patch planning without baseline reads.
+- Actual: symbol-only context with unresolved edges and no decisive content payload for call-site verification.
+- Additional workaround: targeted baseline `read_file` on only the three affected package files.
+- Status: recurring pattern for external package repos; mark as enhancement candidate.
+
+### Recurrence Update (2026-05-13, wec.be verification)
+- Scenario: post-package-update verification in `wec.be` to locate all manual call-log publisher call-sites and ensure `MessageType/Channel` tokens are contract-aligned.
+- MCP attempts: `search_symbols(PublishManualCallLogInboundAsync|CrmManualCallLogInput|MessageTypes.CallLog|ChannelNormalization.Channel.CallLog)` on repo `wec.be`.
+- Expected: discover call-site symbols referencing external package types for impact verification.
+- Actual: 0 candidates returned for all four focused queries.
+- Workaround: narrow baseline grep limited to `src/services/crc/**` for manual publisher call and token usage.
+
+### Recurrence Update (2026-05-13, package vs consumer reconciliation)
+- Scenario: reconcile latest `SSNet.CommunicationHub.Messaging` contract changes against `wec.be` `CRCProtoService.cs` call-site.
+- MCP attempts: `get_file_summary` + `find_impact_files` on `MessageTypes.cs` and `CRCProtoService.cs`.
+- Expected: direct impact/context links sufficient to confirm whether consumer code requires additional edits.
+- Actual: unresolved import ratio remains high for `CRCProtoService.cs` and summary payload is not decisive for argument-level mapping verification.
+- Workaround: narrow baseline `read_file` on `Contracts/MessageTypes.cs` and `src/services/crc/CRM.CRC.Service/ServiceProtos/CRCProtoService.cs`.

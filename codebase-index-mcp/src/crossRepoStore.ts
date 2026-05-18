@@ -1,0 +1,298 @@
+import type Database from "better-sqlite3";
+
+// ── Upsert cross-repo dependency ───────────────────────────────────────
+
+export function upsertCrossRepoDepImpl(
+  db: Database.Database,
+  fromRepoId: string,
+  fromSymbolId: string,
+  toRepoId: string,
+  toSymbolId: string,
+  type: string
+): void {
+  db.prepare(
+    `
+    insert into cross_repo_deps (from_repo_id, from_symbol_id, to_repo_id, to_symbol_id, type)
+    values (?, ?, ?, ?, ?)
+    on conflict do nothing
+    `
+  ).run(fromRepoId, fromSymbolId, toRepoId, toSymbolId, type);
+}
+
+// ── Get cross-repo deps ────────────────────────────────────────────────
+
+export function getCrossRepoDepsImpl(
+  db: Database.Database,
+  fromRepoId: string,
+  fromSymbolId: string,
+  limit: number
+): {
+  toRepoId: string;
+  toSymbolId: string;
+  type: string;
+}[] {
+  return db
+    .prepare(
+      `
+      select to_repo_id as toRepoId, to_symbol_id as toSymbolId, type
+      from cross_repo_deps
+      where from_repo_id = ? and from_symbol_id = ?
+      limit ?
+      `
+    )
+    .all(fromRepoId, fromSymbolId, limit) as { toRepoId: string; toSymbolId: string; type: string }[];
+}
+
+// ── Get cross-repo impact ──────────────────────────────────────────────
+
+export function getCrossRepoImpactImpl(
+  db: Database.Database,
+  repoId: string,
+  symbolId: string,
+  direction: "outbound" | "inbound",
+  limit: number
+): {
+  fromRepoId: string;
+  fromSymbolId: string;
+  toRepoId: string;
+  toSymbolId: string;
+  type: string;
+  relatedName: string | null;
+  relatedKind: string | null;
+  relatedFilePath: string | null;
+  relatedSignature: string | null;
+}[] {
+  if (direction === "outbound") {
+    return db
+      .prepare(
+        `
+        select
+          c.from_repo_id as fromRepoId,
+          c.from_symbol_id as fromSymbolId,
+          c.to_repo_id as toRepoId,
+          c.to_symbol_id as toSymbolId,
+          c.type as type,
+          s.name as relatedName,
+          s.kind as relatedKind,
+          s.file_path as relatedFilePath,
+          s.signature as relatedSignature
+        from cross_repo_deps c
+        left join symbols s
+          on s.repo_id = c.to_repo_id and s.symbol_id = c.to_symbol_id
+        where c.from_repo_id = ? and c.from_symbol_id = ?
+        order by c.to_repo_id, c.to_symbol_id
+        limit ?
+        `
+      )
+      .all(repoId, symbolId, limit) as {
+      fromRepoId: string;
+      fromSymbolId: string;
+      toRepoId: string;
+      toSymbolId: string;
+      type: string;
+      relatedName: string | null;
+      relatedKind: string | null;
+      relatedFilePath: string | null;
+      relatedSignature: string | null;
+    }[];
+  }
+
+  return db
+    .prepare(
+      `
+      select
+        c.from_repo_id as fromRepoId,
+        c.from_symbol_id as fromSymbolId,
+        c.to_repo_id as toRepoId,
+        c.to_symbol_id as toSymbolId,
+        c.type as type,
+        s.name as relatedName,
+        s.kind as relatedKind,
+        s.file_path as relatedFilePath,
+        s.signature as relatedSignature
+      from cross_repo_deps c
+      left join symbols s
+        on s.repo_id = c.from_repo_id and s.symbol_id = c.from_symbol_id
+      where c.to_repo_id = ? and c.to_symbol_id = ?
+      order by c.from_repo_id, c.from_symbol_id
+      limit ?
+      `
+    )
+    .all(repoId, symbolId, limit) as {
+    fromRepoId: string;
+    fromSymbolId: string;
+    toRepoId: string;
+    toSymbolId: string;
+    type: string;
+    relatedName: string | null;
+    relatedKind: string | null;
+    relatedFilePath: string | null;
+    relatedSignature: string | null;
+  }[];
+}
+
+// ── Find package consumers ─────────────────────────────────────────────
+
+export function findPackageConsumersImpl(
+  db: Database.Database,
+  packageContractId: string,
+  repoId: string | null,
+  limit: number
+): {
+  consumerRepoId: string;
+  consumerSymbolId: string;
+  consumerName: string | null;
+  consumerKind: string | null;
+  consumerFilePath: string | null;
+  packageContractId: string;
+  dependencyReason: string | null;
+  providerRepoId: string | null;
+  providerSymbolId: string | null;
+}[] {
+  if (repoId) {
+    return db
+      .prepare(
+        `
+        select
+          e.repo_id as consumerRepoId,
+          e.from_id as consumerSymbolId,
+          s.name as consumerName,
+          s.kind as consumerKind,
+          s.file_path as consumerFilePath,
+          e.to_id as packageContractId,
+          e.reason as dependencyReason,
+          c.to_repo_id as providerRepoId,
+          c.to_symbol_id as providerSymbolId
+        from edges e
+        left join symbols s
+          on s.repo_id = e.repo_id and s.symbol_id = e.from_id
+        left join cross_repo_deps c
+          on c.from_repo_id = e.repo_id
+          and c.from_symbol_id = e.from_id
+          and c.type = e.type
+          and exists (
+            select 1
+            from symbols ps
+            where ps.repo_id = c.to_repo_id
+              and ps.symbol_id = c.to_symbol_id
+              and ps.signature = e.to_id
+          )
+        where e.type = 'DEPENDS_ON'
+          and e.to_id = ?
+          and e.repo_id = ?
+        order by e.repo_id, s.file_path, s.name
+        limit ?
+        `
+      )
+      .all(packageContractId, repoId, limit) as {
+      consumerRepoId: string;
+      consumerSymbolId: string;
+      consumerName: string | null;
+      consumerKind: string | null;
+      consumerFilePath: string | null;
+      packageContractId: string;
+      dependencyReason: string | null;
+      providerRepoId: string | null;
+      providerSymbolId: string | null;
+    }[];
+  }
+
+  return db
+    .prepare(
+      `
+      select
+        e.repo_id as consumerRepoId,
+        e.from_id as consumerSymbolId,
+        s.name as consumerName,
+        s.kind as consumerKind,
+        s.file_path as consumerFilePath,
+        e.to_id as packageContractId,
+        e.reason as dependencyReason,
+        c.to_repo_id as providerRepoId,
+        c.to_symbol_id as providerSymbolId
+      from edges e
+      left join symbols s
+        on s.repo_id = e.repo_id and s.symbol_id = e.from_id
+      left join cross_repo_deps c
+        on c.from_repo_id = e.repo_id
+        and c.from_symbol_id = e.from_id
+        and c.type = e.type
+        and exists (
+          select 1
+          from symbols ps
+          where ps.repo_id = c.to_repo_id
+            and ps.symbol_id = c.to_symbol_id
+            and ps.signature = e.to_id
+        )
+      where e.type = 'DEPENDS_ON'
+        and e.to_id = ?
+      order by e.repo_id, s.file_path, s.name
+      limit ?
+      `
+    )
+    .all(packageContractId, limit) as {
+    consumerRepoId: string;
+    consumerSymbolId: string;
+    consumerName: string | null;
+    consumerKind: string | null;
+    consumerFilePath: string | null;
+    packageContractId: string;
+    dependencyReason: string | null;
+    providerRepoId: string | null;
+    providerSymbolId: string | null;
+  }[];
+}
+
+// ── Get package bridge stats ───────────────────────────────────────────
+
+export function getPackageBridgeStatsImpl(
+  db: Database.Database,
+  repoId: string
+): {
+  packageAttempts: number;
+  packageResolved: number;
+  packageNoCandidate: number;
+} {
+  const attemptsRow = db
+    .prepare(
+      `
+      select count(distinct e.from_id || '|' || e.to_id) as packageAttempts
+      from edges e
+      where e.repo_id = ?
+        and e.type = 'DEPENDS_ON'
+        and e.to_id like 'nuget:%'
+      `
+    )
+    .get(repoId) as { packageAttempts: number } | undefined;
+
+  const resolvedRow = db
+    .prepare(
+      `
+      select count(distinct e.from_id || '|' || e.to_id) as packageResolved
+      from edges e
+      where e.repo_id = ?
+        and e.type = 'DEPENDS_ON'
+        and e.to_id like 'nuget:%'
+        and exists (
+          select 1
+          from cross_repo_deps c
+          inner join symbols ps
+            on ps.repo_id = c.to_repo_id
+            and ps.symbol_id = c.to_symbol_id
+          where c.from_repo_id = e.repo_id
+            and c.from_symbol_id = e.from_id
+            and c.type = e.type
+            and ps.signature = e.to_id
+        )
+      `
+    )
+    .get(repoId) as { packageResolved: number } | undefined;
+
+  const packageAttempts = attemptsRow?.packageAttempts ?? 0;
+  const packageResolved = resolvedRow?.packageResolved ?? 0;
+  return {
+    packageAttempts,
+    packageResolved,
+    packageNoCandidate: Math.max(0, packageAttempts - packageResolved)
+  };
+}
