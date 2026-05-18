@@ -99,6 +99,8 @@ import { resolveDocsMode as resolveDocsModeUtil, assertDocsLaneEnabled as assert
 import { mapError, assertNoLlmRuntimePolicy, assertRefactorApprovalPolicy } from "./errorHandler.js";
 import * as schemas from "./schemas/toolSchemas.js";
 import { handleListResources, handleReadResource } from "./handlers/resourceHandler.js";
+import { traverseDependencyGraph, traverseCallGraph } from "./graphTraversal.js";
+import { parsePerformanceProfileEnv, resolvePostPhasePolicy } from "./performanceConfig.js";
 
 import {
   handleHealthCheck,
@@ -1284,77 +1286,11 @@ function asText(payload: unknown, profile: ResponseProfile = "standard"): CallTo
 
 // mapError, assertNoLlmRuntimePolicy, assertRefactorApprovalPolicy → errorHandler.ts
 // resolveApprovalSecret → refactorUtils.ts (now takes secret + strictApproval as params)
-
 // mapPreviewStatusFromApplyStatus, deriveApplyStatus, noLlmAudit → refactorUtils.ts
-
 // numberFromEnv, ratioFromEnv → envConfig.ts
 // toNugetContractId, asArgsRecord → responseFormatter.ts
-
 // estimateResultCount, emitTelemetry → responseFormatter.ts
-
-function traverseDependencyGraph(repoId: string, symbolId: string, depth: number, limit: number) {
-  const all: ReturnType<GraphStore["getDependencies"]> = [];
-  const visited = new Set<string>();
-  let frontier = [symbolId];
-
-  for (let level = 0; level < depth && all.length < limit && frontier.length > 0; level += 1) {
-    const nextFrontier: string[] = [];
-    for (const current of frontier) {
-      if (all.length >= limit) {
-        break;
-      }
-
-      const edges = store.getDependencies(repoId, current, limit - all.length);
-      for (const edge of edges) {
-        const key = `${edge.fromId}:${edge.toId}:${edge.type}`;
-        if (visited.has(key)) {
-          continue;
-        }
-        visited.add(key);
-        all.push(edge);
-        nextFrontier.push(edge.toId);
-      }
-    }
-    frontier = nextFrontier;
-  }
-
-  return all;
-}
-
-function traverseCallGraph(
-  repoId: string,
-  symbolId: string,
-  direction: CallChainDirection,
-  depth: number,
-  limit: number
-) {
-  const all: ReturnType<GraphStore["getCallEdges"]> = [];
-  const visited = new Set<string>();
-  let frontier = [symbolId];
-
-  for (let level = 0; level < depth && all.length < limit && frontier.length > 0; level += 1) {
-    const nextFrontier: string[] = [];
-    for (const current of frontier) {
-      if (all.length >= limit) {
-        break;
-      }
-
-      const edges = store.getCallEdges(repoId, current, direction, limit - all.length);
-      for (const edge of edges) {
-        const key = `${edge.fromId}:${edge.toId}:${edge.type}`;
-        if (visited.has(key)) {
-          continue;
-        }
-        visited.add(key);
-        all.push(edge);
-        nextFrontier.push(direction === "callees" ? edge.toId : edge.fromId);
-      }
-    }
-    frontier = nextFrontier;
-  }
-
-  return all;
-}
+// traverseDependencyGraph, traverseCallGraph → graphTraversal.ts
 
 async function runIndexAndResolve(
   repoId: string,
@@ -1582,23 +1518,7 @@ function evaluateIncrementalSkip(
 }
 
 // hasWorkingTreeChanges → gitHelpers.ts
-
-function safeCrossRepoResolve(repoId: string): ResolutionStats {
-  try {
-    return store.resolveUnlinkedEdges(repoId);
-  } catch {
-    return {
-      attempts: 0,
-      resolved: 0,
-      unresolvedByReason: {
-        no_candidate: 0,
-        ambiguous_candidates: 0,
-        boundary_blocked: 0,
-        low_confidence: 0
-      }
-    };
-  }
-}
+// parsePerformanceProfileEnv, resolvePostPhasePolicy → performanceConfig.ts
 
 function resolvePerformanceProfileDecision(
   repoId: string,
@@ -1673,49 +1593,21 @@ function resolvePerformanceProfileDecision(
   };
 }
 
-function parsePerformanceProfileEnv(raw: string | undefined): PerformanceProfile | "auto" {
-  const value = (raw ?? "auto").trim().toLowerCase();
-  if (value === "standard" || value === "off") {
-    return "standard";
-  }
-  if (value === "large" || value === "balanced") {
-    return "large";
-  }
-  if (value === "very-large" || value === "aggressive") {
-    return "very-large";
-  }
-  return "auto";
-}
-
-function resolvePostPhasePolicy(profile: PerformanceProfile): {
-  maxUnresolvedRows: number;
-  resolveTypeRefs: boolean;
-  resolveImplementsInPost: boolean;
-} {
-  const configuredMaxRows = nonNegativeNumberFromEnv("CODEBASE_INDEX_MAX_UNRESOLVED_RESOLVE_ROWS");
-  const configuredResolveTypeRefs = parseOptionalBooleanEnv(process.env.CODEBASE_INDEX_POST_RESOLVE_TYPE_REFS);
-
-  if (profile === "very-large") {
+function safeCrossRepoResolve(repoId: string): ResolutionStats {
+  try {
+    return store.resolveUnlinkedEdges(repoId);
+  } catch {
     return {
-      maxUnresolvedRows: configuredMaxRows ?? 50_000,
-      resolveTypeRefs: configuredResolveTypeRefs ?? false,
-      resolveImplementsInPost: false
+      attempts: 0,
+      resolved: 0,
+      unresolvedByReason: {
+        no_candidate: 0,
+        ambiguous_candidates: 0,
+        boundary_blocked: 0,
+        low_confidence: 0
+      }
     };
   }
-
-  if (profile === "large") {
-    return {
-      maxUnresolvedRows: configuredMaxRows ?? 120_000,
-      resolveTypeRefs: configuredResolveTypeRefs ?? true,
-      resolveImplementsInPost: true
-    };
-  }
-
-  return {
-    maxUnresolvedRows: configuredMaxRows ?? 0,
-    resolveTypeRefs: configuredResolveTypeRefs ?? true,
-    resolveImplementsInPost: true
-  };
 }
 
 // nonNegativeNumberFromEnv, parseOptionalBooleanEnv → envConfig.ts
