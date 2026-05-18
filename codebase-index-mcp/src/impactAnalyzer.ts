@@ -125,6 +125,7 @@ export function getEdgeDefaults(edge: EdgeRecord): { confidence: number; reason:
 }
 
 export function buildReliabilitySummaryImpl(confidences: number[], graphHealth: GraphHealth): ReliabilitySummary {
+  // Filter out external/builtin edges (confidence = 0.8) for internal reliability calculation
   const internalConf = confidences.filter((c) => c !== 0.8);
   const sorted = [...internalConf].sort((a, b) => a - b);
   const edgeCount = sorted.length;
@@ -135,17 +136,43 @@ export function buildReliabilitySummaryImpl(confidences: number[], graphHealth: 
         : sorted[Math.floor(edgeCount / 2)]);
 
   const lowConfidenceEdgeCount = sorted.filter((c) => c < 0.75).length;
-  const internalUnresolved = graphHealth.unresolvedCalls + graphHealth.unresolvedImports + graphHealth.unresolvedTypeRefs;
+  
+  // Calculate unresolved edges with better categorization
+  const unresolvedCalls = graphHealth.unresolvedCalls || 0;
+  const unresolvedImports = graphHealth.unresolvedImports || 0;
+  const unresolvedTypeRefs = graphHealth.unresolvedTypeRefs || 0;
+  const unresolvedProperties = graphHealth.unresolvedProperties || 0;
+  
+  // Total unresolved (excluding external/builtin imports which are expected)
+  const internalUnresolved = unresolvedCalls + unresolvedImports + unresolvedTypeRefs + unresolvedProperties;
   const unresolvedTotal = internalUnresolved;
+  
+  // Calculate unresolved ratio: unresolved / (resolved + unresolved)
   const unresolvedRatio = edgeCount + unresolvedTotal > 0
     ? unresolvedTotal / (edgeCount + unresolvedTotal)
     : 0;
 
-  const warning = (medianConfidence < 0.75 || (internalUnresolved > 0 && unresolvedRatio > 0.5))
-    ? internalUnresolved > 0
-      ? `${internalUnresolved} internal edge${internalUnresolved > 1 ? "s" : ""} unresolved — results may be incomplete`
-      : "low confidence edges — verify critical results"
-    : null;
+  // Improved warning logic with more granular thresholds
+  let warning: string | null = null;
+  if (unresolvedRatio > 0.3) {
+    // High unresolved ratio - results likely incomplete
+    const breakdown: string[] = [];
+    if (unresolvedCalls > 0) breakdown.push(`${unresolvedCalls} call${unresolvedCalls > 1 ? "s" : ""}`);
+    if (unresolvedProperties > 0) breakdown.push(`${unresolvedProperties} property ref${unresolvedProperties > 1 ? "s" : ""}`);
+    if (unresolvedTypeRefs > 0) breakdown.push(`${unresolvedTypeRefs} type ref${unresolvedTypeRefs > 1 ? "s" : ""}`);
+    if (unresolvedImports > 0) breakdown.push(`${unresolvedImports} import${unresolvedImports > 1 ? "s" : ""}`);
+    
+    warning = `High unresolved ratio (${Math.round(unresolvedRatio * 100)}%): ${breakdown.join(", ")} unresolved — results may be incomplete. Consider re-indexing.`;
+  } else if (unresolvedRatio > 0.15) {
+    // Medium unresolved ratio - results partially incomplete
+    warning = `${internalUnresolved} edge${internalUnresolved > 1 ? "s" : ""} unresolved (${Math.round(unresolvedRatio * 100)}%) — results may be partially incomplete`;
+  } else if (medianConfidence < 0.75 && lowConfidenceEdgeCount > 5) {
+    // Low confidence edges
+    warning = `${lowConfidenceEdgeCount} low-confidence edge${lowConfidenceEdgeCount > 1 ? "s" : ""} — verify critical results`;
+  } else if (unresolvedRatio > 0.05 && internalUnresolved > 0) {
+    // Low unresolved ratio - acceptable but worth noting
+    warning = `${internalUnresolved} edge${internalUnresolved > 1 ? "s" : ""} unresolved (${Math.round(unresolvedRatio * 100)}%) — impact coverage is good`;
+  }
 
   return {
     edgeCount,
@@ -168,28 +195,41 @@ export function countUnresolvedEdgesForFileImpl(db: Database.Database, repoId: s
           and e.to_id not in (${TRIVIAL_CALLEE_IN_CLAUSE}) then 1 end) as unresolvedCalls,
         count(case when e.to_id like 'import:%'
           and coalesce(e.reason, '') not in ('node_builtin', 'npm_package') then 1 end) as unresolvedImports,
-        count(case when e.to_id like 'type:%' then 1 end) as unresolvedTypeRefs
+        count(case when e.to_id like 'type:%' then 1 end) as unresolvedTypeRefs,
+        count(case when e.to_id like 'property:%' then 1 end) as unresolvedProperties
       from edges e
       inner join symbols s on s.repo_id = e.repo_id and s.symbol_id = e.from_id
       where e.repo_id = ? and replace(s.file_path, char(92), '/') = replace(?, char(92), '/')
       ${symbolFilter}
       `
     )
-    .get(...([repoId, canonicalFilePath, ...(symbolId ? [symbolId] : [])] as [string, string, ...string[]])) as { unresolvedCalls: number; unresolvedImports: number; unresolvedTypeRefs: number };
+    .get(...([repoId, canonicalFilePath, ...(symbolId ? [symbolId] : [])] as [string, string, ...string[]])) as { 
+      unresolvedCalls: number; 
+      unresolvedImports: number; 
+      unresolvedTypeRefs: number;
+      unresolvedProperties: number;
+    };
 
-  const { unresolvedCalls, unresolvedImports, unresolvedTypeRefs } = row ?? { unresolvedCalls: 0, unresolvedImports: 0, unresolvedTypeRefs: 0 };
+  const { unresolvedCalls, unresolvedImports, unresolvedTypeRefs, unresolvedProperties } = row ?? { 
+    unresolvedCalls: 0, 
+    unresolvedImports: 0, 
+    unresolvedTypeRefs: 0,
+    unresolvedProperties: 0
+  };
+  
   let note: string;
-  if (unresolvedCalls === 0 && unresolvedImports === 0 && unresolvedTypeRefs === 0) {
+  if (unresolvedCalls === 0 && unresolvedImports === 0 && unresolvedTypeRefs === 0 && unresolvedProperties === 0) {
     note = "graph data complete";
   } else {
     const parts: string[] = [];
     if (unresolvedCalls > 0) parts.push(`${unresolvedCalls} call edge${unresolvedCalls > 1 ? "s" : ""} unresolved`);
+    if (unresolvedProperties > 0) parts.push(`${unresolvedProperties} property ref${unresolvedProperties > 1 ? "s" : ""} unresolved`);
     if (unresolvedImports > 0) parts.push(`${unresolvedImports} import edge${unresolvedImports > 1 ? "s" : ""} unresolved`);
     if (unresolvedTypeRefs > 0) parts.push(`${unresolvedTypeRefs} type reference${unresolvedTypeRefs > 1 ? "s" : ""} unresolved`);
     note = `${parts.join(", ")} — results may be incomplete`;
   }
 
-  return { unresolvedCalls, unresolvedImports, unresolvedTypeRefs, note };
+  return { unresolvedCalls, unresolvedImports, unresolvedTypeRefs, unresolvedProperties, note };
 }
 // ── getImpactSurface ───────────────────────────────────────────────────
 
@@ -466,7 +506,7 @@ export function getFileContextImpl(
     .all(repoId, canonicalPath, limit) as SymbolRecord[];
 
   if (symbols.length === 0) {
-    return { symbols: [], edges: [], graphHealth: { unresolvedCalls: 0, unresolvedImports: 0, unresolvedTypeRefs: 0, note: "no symbols found" } };
+    return { symbols: [], edges: [], graphHealth: { unresolvedCalls: 0, unresolvedImports: 0, unresolvedTypeRefs: 0, unresolvedProperties: 0, note: "no symbols found" } };
   }
 
   if (compact) {
@@ -582,7 +622,7 @@ export function getChangeContextImpl(
     .get(repoId, symbolId) as SymbolRecord | undefined;
 
   if (!symbol) {
-    const graphHealth = { unresolvedCalls: 0, unresolvedImports: 0, unresolvedTypeRefs: 0, note: "symbol not found" };
+    const graphHealth = { unresolvedCalls: 0, unresolvedImports: 0, unresolvedTypeRefs: 0, unresolvedProperties: 0, note: "symbol not found" };
     return {
       symbol: null,
       callers: [],

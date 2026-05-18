@@ -33,6 +33,7 @@ export type GraphHealth = {
   unresolvedCalls: number;
   unresolvedImports: number;
   unresolvedTypeRefs: number;
+  unresolvedProperties: number;
   note: string;
 };
 
