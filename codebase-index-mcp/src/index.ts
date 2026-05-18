@@ -93,6 +93,11 @@ import {
   buildSymbolMigrationPreview,
   executeRefactorApplyPlan
 } from "./refactorEngine.js";
+import { scoreChangeRisk, resolveDetectChangesPolicy } from "./policyResolver.js";
+import { resolveServerVersion, parseRepoResourceUri } from "./serverUtils.js";
+import { resolveDocsMode as resolveDocsModeUtil, assertDocsLaneEnabled as assertDocsLaneEnabledUtil } from "./docsUtils.js";
+import { mapError, assertNoLlmRuntimePolicy, assertRefactorApprovalPolicy } from "./errorHandler.js";
+import * as schemas from "./schemas/toolSchemas.js";
 
 import {
   handleHealthCheck,
@@ -178,437 +183,47 @@ const NODE_ENV = (process.env.NODE_ENV ?? "development").toLowerCase();
 const REFACTOR_APPROVAL_SECRET = process.env.CODEBASE_INDEX_REFACTOR_APPROVAL_SECRET ?? "";
 const REFACTOR_PREVIEW_TTL_MS = numberFromEnv("CODEBASE_INDEX_REFACTOR_PREVIEW_TTL_MS", 30 * 60 * 1000);
 const REFACTOR_LOW_CONFIDENCE_THRESHOLD = 0.8;
-const SERVER_VERSION = resolveServerVersion();
-// ResponseProfile, ToolRequestContext, ToolTelemetryEvent → responseFormatter.ts
-const responseProfileSchema = z.enum(["nano", "compact", "standard", "verbose"]);
+const SERVER_VERSION = resolveServerVersion(MODULE_DIR);
 
 const toolContextStorage = new AsyncLocalStorage<ToolRequestContext>();
 
-const healthCheckSchema = z
-  .object({
-    repoId: z.string().min(1).max(200).optional()
-  })
-  .strict();
+// Create schema instances with constants
+const healthCheckSchema = schemas.healthCheckSchema;
+const indexRepositorySchema = schemas.indexRepositorySchema(MAX_FILES_PER_RUN);
+const getDependencyGraphSchema = schemas.getDependencyGraphSchema(MAX_DEPTH, MAX_RESULT_LIMIT);
+const getCallChainSchema = schemas.getCallChainSchema(MAX_DEPTH, MAX_RESULT_LIMIT);
+const listRepositoriesSchema = schemas.listRepositoriesSchema;
+const searchSymbolsSchema = schemas.searchSymbolsSchema(MAX_RESULT_LIMIT);
+const getFileContextSchema = schemas.getFileContextSchema(MAX_RESULT_LIMIT);
+const getSymbolDetailSchema = schemas.getSymbolDetailSchema(MAX_RESULT_LIMIT);
+const findImpactFilesSchema = schemas.findImpactFilesSchema(MAX_RESULT_LIMIT);
+const getChangeContextSchema = schemas.getChangeContextSchema(MAX_DEPTH, MAX_RESULT_LIMIT);
+const getFileSummarySchema = schemas.getFileSummarySchema;
+const findSymbolAtLineSchema = schemas.findSymbolAtLineSchema;
+const queryDocsSchema = schemas.queryDocsSchema(MAX_RESULT_LIMIT);
+const getSymbolContextPackSchema = schemas.getSymbolContextPackSchema(MAX_DEPTH, MAX_RESULT_LIMIT);
+const detectChangesSchema = schemas.detectChangesSchema(MAX_RESULT_LIMIT);
+const deadCodeScanSchema = schemas.deadCodeScanSchema(MAX_RESULT_LIMIT);
+const detectCircularDependenciesSchema = schemas.detectCircularDependenciesSchema(MAX_DEPTH, MAX_RESULT_LIMIT);
+const crossRepoImpactSchema = schemas.crossRepoImpactSchema(MAX_RESULT_LIMIT);
+const findPackageConsumersSchema = schemas.findPackageConsumersSchema(MAX_RESULT_LIMIT);
+const symbolBlameSchema = schemas.symbolBlameSchema;
+const linkTestsToSourceSchema = schemas.linkTestsToSourceSchema(MAX_RESULT_LIMIT);
+const getFolderSummarySchema = schemas.getFolderSummarySchema(MAX_RESULT_LIMIT);
+const findEntryPointsSchema = schemas.findEntryPointsSchema(MAX_RESULT_LIMIT);
+const findImplementationsSchema = schemas.findImplementationsSchema(MAX_RESULT_LIMIT);
+const watchRepoSchema = schemas.watchRepoSchema;
+const renameAssistSchema = schemas.renameAssistSchema(MAX_RESULT_LIMIT);
+const traceExecutionFlowSchema = schemas.traceExecutionFlowSchema;
+const routeMapSchema = schemas.routeMapSchema(MAX_RESULT_LIMIT);
+const queryGraphSchema = schemas.queryGraphSchema(MAX_RESULT_LIMIT);
+const refactorReplacePreviewSchema = schemas.refactorReplacePreviewSchema;
+const refactorReplaceApplySchema = schemas.refactorReplaceApplySchema;
+const refactorReplaceRollbackSchema = schemas.refactorReplaceRollbackSchema;
+const refactorSymbolMigrationSchema = schemas.refactorSymbolMigrationSchema;
 
-const indexRepositorySchema = z
-  .object({
-    repoId: z.string().min(1).max(200),
-    repoPath: z.string().min(1),
-    mode: z.enum(["full", "incremental"]).default("incremental"),
-    docsMode: z.enum(["auto", "on", "off"]).default("auto"),
-    maxFiles: z.number().int().min(1).max(MAX_FILES_PER_RUN).default(MAX_FILES_PER_RUN),
-    batchSize: z.number().int().min(1).max(2_000).default(200)
-  })
-  .strict();
-
-const getDependencyGraphSchema = z
-  .object({
-    repoId: z.string().min(1).max(200),
-    symbolId: z.string().min(1).max(200).optional(),
-    filePath: z.string().min(1).optional(),
-    depth: z.number().int().min(1).max(MAX_DEPTH).default(1),
-    limit: z.number().int().min(1).max(MAX_RESULT_LIMIT).default(100)
-  })
-  .strict()
-  .refine((v) => Boolean(v.symbolId || v.filePath), {
-    message: "symbolId or filePath is required",
-    path: ["symbolId"]
-  });
-
-const getCallChainSchema = z
-  .object({
-    repoId: z.string().min(1).max(200),
-    symbolId: z.string().min(1).max(200),
-    direction: z.enum(["callers", "callees"]).default("callees"),
-    depth: z.number().int().min(1).max(MAX_DEPTH).default(1),
-    limit: z.number().int().min(1).max(MAX_RESULT_LIMIT).default(100)
-  })
-  .strict();
-
-const listRepositoriesSchema = z.object({}).strict();
-
-const searchSymbolsSchema = z
-  .object({
-    query: z.string().min(1).max(200),
-    repoId: z.string().min(1).max(200).optional(),
-    language: z.string().max(50).optional(),
-    kind: z.string().max(50).optional(),
-    filePath: z.string().max(500).optional(),
-    strategy: z.enum(["name", "intent"]).default("name"),
-    limit: z.number().int().min(1).max(MAX_RESULT_LIMIT).default(50),
-    compact: z.boolean().default(false),
-    profile: responseProfileSchema.default("compact"),
-    ranked: z.boolean().default(false)
-  })
-  .strict();
-
-const getFileContextSchema = z
-  .object({
-    repoId: z.string().min(1).max(200),
-    filePath: z.string().min(1).optional(),
-    filePaths: z.array(z.string().min(1)).min(1).max(50).optional(),
-    limit: z.number().int().min(1).max(MAX_RESULT_LIMIT).default(200),
-    compact: z.boolean().default(false),
-    profile: responseProfileSchema.default("standard")
-  })
-  .strict()
-  .refine((v) => Boolean(v.filePath || v.filePaths), {
-    message: "filePath or filePaths is required",
-    path: ["filePath"]
-  });
-
-const getSymbolDetailSchema = z
-  .object({
-    repoId: z.string().min(1).max(200),
-    symbolId: z.string().min(1).max(200),
-    limit: z.number().int().min(1).max(MAX_RESULT_LIMIT).default(100)
-  })
-  .strict();
-
-const findImpactFilesSchema = z
-  .object({
-    repoId: z.string().min(1).max(200),
-    filePath: z.string().min(1),
-    limit: z.number().int().min(1).max(MAX_RESULT_LIMIT).default(50),
-    groupBy: z.enum(["file", "module"]).default("file"),
-    view: z.enum(["files", "surface"]).default("files")
-  })
-  .strict();
-
-const getChangeContextSchema = z
-  .object({
-    repoId: z.string().min(1).max(200),
-    symbolId: z.string().min(1).max(200).optional(),
-    name: z.string().min(1).max(200).optional(),
-    callerDepth: z.number().int().min(1).max(MAX_DEPTH).default(2),
-    calleeDepth: z.number().int().min(1).max(MAX_DEPTH).default(1),
-    limit: z.number().int().min(1).max(MAX_RESULT_LIMIT).default(20),
-    profile: responseProfileSchema.default("standard")
-  })
-  .strict()
-  .refine((v) => Boolean(v.symbolId || v.name), {
-    message: "symbolId or name is required",
-    path: ["symbolId"]
-  });
-
-const getFileSummarySchema = z
-  .object({
-    repoId: z.string().min(1).max(200),
-    filePath: z.string().min(1)
-  })
-  .strict();
-
-const findSymbolAtLineSchema = z
-  .object({
-    repoId: z.string().min(1).max(200),
-    filePath: z.string().min(1),
-    line: z.number().int().min(1)
-  })
-  .strict();
-
-const queryDocsSchema = z
-  .object({
-    repoId: z.string().min(1).max(200),
-    mode: z.enum(["search", "stale", "coverage"]),
-    query: z.string().min(1).max(200).optional(),
-    symbolIds: z.array(z.string().min(1).max(200)).min(1).max(100).optional(),
-    filePath: z.string().min(1).optional(),
-    limit: z.number().int().min(1).max(MAX_RESULT_LIMIT).default(20)
-  })
-  .strict()
-  .refine(
-    (v) => {
-      if (v.mode === "search") return Boolean(v.query);
-      if (v.mode === "stale") return Boolean(v.symbolIds);
-      if (v.mode === "coverage") return Boolean(v.filePath);
-      return true;
-    },
-    (v) => ({
-      message: v.mode === "search" ? "query is required for mode=search" : v.mode === "stale" ? "symbolIds is required for mode=stale" : "filePath is required for mode=coverage",
-      path: ["query"]
-    })
-  );
-
-const getSymbolContextPackSchema = z
-  .object({
-    repoId: z.string().min(1).max(200),
-    name: z.string().min(1).max(200),
-    callerDepth: z.number().int().min(1).max(MAX_DEPTH).default(2),
-    calleeDepth: z.number().int().min(1).max(MAX_DEPTH).default(1),
-    limit: z.number().int().min(1).max(MAX_RESULT_LIMIT).default(20),
-    profile: responseProfileSchema.default("compact")
-  })
-  .strict();
-
-const detectChangesSchema = z
-  .object({
-    repoId: z.string().min(1).max(200),
-    baseRef: z.string().min(1).max(100).optional(),
-    headRef: z.string().min(1).max(100).default("HEAD"),
-    includeUntracked: z.boolean().default(true),
-    maxFiles: z.number().int().min(1).max(500).default(100),
-    impactLimit: z.number().int().min(1).max(MAX_RESULT_LIMIT).default(20),
-    policy: z.enum(["quick-triage", "strict-review", "release-gate", "custom"]).default("custom"),
-    minRiskScore: z.number().int().min(0).max(100).optional(),
-    riskLevels: z.array(z.enum(["high", "medium", "low"])).min(1).max(3).optional(),
-    maxResults: z.number().int().min(1).max(500).optional(),
-    sortBy: z.enum(["risk", "impact", "path"]).optional(),
-    groupBy: z.enum(["file", "module"]).default("file"),
-    profile: responseProfileSchema.default("compact")
-  })
-  .strict();
-
-const deadCodeScanSchema = z
-  .object({
-    repoId: z.string().min(1).max(200),
-    filePathPrefix: z.string().max(500).optional(),
-    language: z.string().max(50).optional(),
-    kind: z.string().max(50).optional(),
-    includePrivate: z.boolean().default(false),
-    limit: z.number().int().min(1).max(MAX_RESULT_LIMIT).default(100),
-    profile: responseProfileSchema.default("compact")
-  })
-  .strict();
-
-const detectCircularDependenciesSchema = z
-  .object({
-    repoId: z.string().min(1).max(200),
-    filePathPrefix: z.string().max(500).optional(),
-    mode: z.enum(["module", "symbol"]).default("module"),
-    includeCalls: z.boolean().default(false),
-    maxDepth: z.number().int().min(2).max(MAX_DEPTH).default(Math.min(4, MAX_DEPTH)),
-    maxCycles: z.number().int().min(1).max(200).default(50),
-    profile: responseProfileSchema.default("compact")
-  })
-  .strict();
-
-const crossRepoImpactSchema = z
-  .object({
-    repoId: z.string().min(1).max(200),
-    symbolId: z.string().min(1).max(200).optional(),
-    name: z.string().min(1).max(200).optional(),
-    direction: z.enum(["outbound", "inbound"]).default("outbound"),
-    limit: z.number().int().min(1).max(MAX_RESULT_LIMIT).default(50),
-    profile: responseProfileSchema.default("compact")
-  })
-  .strict()
-  .refine((v) => Boolean(v.symbolId || v.name), {
-    message: "symbolId or name is required",
-    path: ["symbolId"]
-  });
-
-const findPackageConsumersSchema = z
-  .object({
-    packageName: z.string().min(1).max(200),
-    repoId: z.string().min(1).max(200).optional(),
-    limit: z.number().int().min(1).max(MAX_RESULT_LIMIT).default(100),
-    profile: responseProfileSchema.default("compact")
-  })
-  .strict();
-
-const symbolBlameSchema = z
-  .object({
-    repoId: z.string().min(1).max(200),
-    symbolId: z.string().min(1).max(200).optional(),
-    name: z.string().min(1).max(200).optional(),
-    redactEmail: z.boolean().default(true),
-    profile: responseProfileSchema.default("compact")
-  })
-  .strict()
-  .refine((v) => Boolean(v.symbolId || v.name), {
-    message: "symbolId or name is required",
-    path: ["symbolId"]
-  });
-
-const linkTestsToSourceSchema = z
-  .object({
-    repoId: z.string().min(1).max(200),
-    filePath: z.string().max(500).optional(),
-    limit: z.number().int().min(1).max(MAX_RESULT_LIMIT).default(100),
-    maxCandidates: z.number().int().min(1).max(20).default(3),
-    minScore: z.number().min(0).max(1).default(0.4),
-    profile: responseProfileSchema.default("compact")
-  })
-  .strict();
-
-const getFolderSummarySchema = z
-  .object({
-    repoId: z.string().min(1).max(200),
-    folderPath: z.string().min(1),
-    maxFiles: z.number().int().min(1).max(MAX_RESULT_LIMIT).default(100)
-  })
-  .strict();
-
-const findEntryPointsSchema = z
-  .object({
-    repoId: z.string().min(1).max(200),
-    filePathPrefix: z.string().max(500).optional(),
-    kind: z.string().max(50).optional(),
-    limit: z.number().int().min(1).max(MAX_RESULT_LIMIT).default(50)
-  })
-  .strict();
-
-const findImplementationsSchema = z
-  .object({
-    repoId: z.string().min(1).max(200),
-    interfaceName: z.string().min(1).max(200),
-    limit: z.number().int().min(1).max(MAX_RESULT_LIMIT).default(50)
-  })
-  .strict();
-
-const watchRepoSchema = z
-  .object({
-    action: z.enum(["start", "stop", "status"]),
-    repoId: z.string().min(1).max(200).optional(),
-    repoPath: z.string().min(1).optional()
-  })
-  .strict();
-
-const renameAssistSchema = z
-  .object({
-    repoId: z.string().min(1).max(200),
-    symbolId: z.string().min(1).max(200),
-    newName: z.string().min(1).max(200),
-    limit: z.number().int().min(1).max(MAX_RESULT_LIMIT).default(50),
-    profile: responseProfileSchema.default("compact")
-  })
-  .strict();
-
-const traceExecutionFlowSchema = z
-  .object({
-    repoId: z.string().min(1).max(200),
-    entrySymbolId: z.string().min(1).max(200),
-    maxDepth: z.number().int().min(1).max(8).default(4),
-    maxNodes: z.number().int().min(1).max(100).default(30),
-    profile: responseProfileSchema.default("compact")
-  })
-  .strict();
-
-const routeMapSchema = z
-  .object({
-    repoId: z.string().min(1).max(200),
-    filePathPrefix: z.string().max(500).optional(),
-    httpMethod: z.enum(["GET", "POST", "PUT", "DELETE", "PATCH"]).optional(),
-    limit: z.number().int().min(1).max(MAX_RESULT_LIMIT).default(100),
-    profile: responseProfileSchema.default("compact")
-  })
-  .strict();
-
-const queryGraphParamsValueSchema = z.union([z.string(), z.number(), z.boolean(), z.null()]);
-const queryGraphSchema = z
-  .object({
-    repoId: z.string().min(1).max(200),
-    sql: z.string().min(1).max(10_000),
-    params: z.record(queryGraphParamsValueSchema).default({}),
-    limit: z.number().int().min(1).max(MAX_RESULT_LIMIT).default(100),
-    timeoutMs: z.number().int().min(1).max(30_000).default(5_000),
-    profile: responseProfileSchema.default("compact")
-  })
-  .strict();
-
-const refactorSymbolKindSchema = z.enum(["class", "property", "field", "method"]);
-
-const refactorScopeSchema = z
-  .object({
-    includePaths: z.array(z.string().min(1).max(500)).max(200).default([]),
-    excludePaths: z.array(z.string().min(1).max(500)).max(200).default([]),
-    fileGlobs: z.array(z.string().min(1).max(500)).max(200).default([])
-  })
-  .strict()
-  .default({ includePaths: [], excludePaths: [], fileGlobs: [] });
-
-const refactorGuardsSchema = z
-  .object({
-    language: z.string().min(1).max(50).optional(),
-    symbolKinds: z.array(refactorSymbolKindSchema).max(10).default([]),
-    allowOwnerTypes: z.array(z.string().min(1).max(200)).max(200).default([]),
-    disallowOwnerTypes: z.array(z.string().min(1).max(200)).max(200).default([]),
-    disallowTypeList: z.array(z.string().min(1).max(200)).max(200).default([])
-  })
-  .strict()
-  .default({ symbolKinds: [], allowOwnerTypes: [], disallowOwnerTypes: [], disallowTypeList: [] });
-
-const refactorInitializerRewriteSchema = z
-  .object({
-    objectProperty: z.string().min(1).max(200),
-    objectType: z.string().min(1).max(200),
-    targetMember: z.string().min(1).max(200).optional()
-  })
-  .strict();
-
-const refactorCompilerDiagnosticSchema = z
-  .object({
-    code: z.string().min(1).max(20),
-    filePath: z.string().min(1).max(500),
-    line: z.number().int().min(1).max(2_000_000),
-    message: z.string().max(1_000).optional(),
-    expectedType: z.string().min(1).max(300).optional(),
-    actualType: z.string().min(1).max(300).optional()
-  })
-  .strict();
-
-const refactorCompilerAssistSchema = z
-  .object({
-    diagnostics: z.array(refactorCompilerDiagnosticSchema).max(1_000).default([]),
-    codes: z.array(z.string().min(1).max(20)).max(20).default(["CS0029", "CS1503"]),
-    lineWindow: z.number().int().min(0).max(20).default(2),
-    filePathPrefix: z.string().min(1).max(500).optional()
-  })
-  .strict();
-
-const refactorReplacePreviewSchema = z
-  .object({
-    repoId: z.string().min(1).max(200),
-    find: z.string().min(1).max(2_000),
-    replaceExpression: z.string().max(2_000),
-    scope: refactorScopeSchema,
-    guards: refactorGuardsSchema,
-    compilerAssist: refactorCompilerAssistSchema.optional(),
-    mode: z.enum(["text", "syntax-aware", "symbol-aware"]).default("symbol-aware"),
-    ambiguityThresholdPercent: z.number().min(0).max(100).default(1)
-  })
-  .strict();
-
-const refactorReplaceApplySchema = z
-  .object({
-    previewId: z.string().min(1).max(200),
-    approvalToken: z.string().min(1).max(2_000),
-    maxFilesPerBatch: z.number().int().min(1).max(500).default(50),
-    stopOnFirstConflict: z.boolean().default(true),
-    includeLowConfidence: z.boolean().default(false)
-  })
-  .strict();
-
-const refactorReplaceRollbackSchema = z
-  .object({
-    rollbackId: z.string().min(1).max(200)
-  })
-  .strict();
-
-const refactorSymbolMigrationSchema = z
-  .object({
-    repoId: z.string().min(1).max(200),
-    migrations: z
-      .array(
-        z
-          .object({
-            fromSymbol: z.string().min(1).max(500),
-            toSymbol: z.string().min(1).max(500),
-            requiredOwnerType: z.string().min(1).max(200),
-            forbiddenOwnerTypes: z.array(z.string().min(1).max(200)).max(200).default([]),
-            initializerRewrite: refactorInitializerRewriteSchema.optional()
-          })
-          .strict()
-      )
-      .min(1)
-      .max(200),
-    scopePaths: z.array(z.string().min(1).max(500)).max(200).default([]),
-    dryRun: z.boolean().default(true)
-  })
-  .strict();
-
-assertNoLlmRuntimePolicy();
-assertRefactorApprovalPolicy();
+assertNoLlmRuntimePolicy(LLM_ENABLED);
+assertRefactorApprovalPolicy(REFACTOR_STRICT_APPROVAL, REFACTOR_APPROVAL_SECRET);
 
 const server = new Server(
   {
@@ -1305,7 +920,7 @@ server.setRequestHandler(ListResourcesRequestSchema, async (request) => {
 
 server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
   const uri = request.params.uri;
-  const parsed = parseRepoResourceUri(uri);
+  const parsed = parseRepoResourceUri(uri, MAX_RESULT_LIMIT);
   if (!parsed) {
     throw new McpError(ErrorCode.InvalidParams, "resources/read: unsupported uri. Use repo://{repoId}/{context|schema|routes|risk}");
   }
@@ -1517,24 +1132,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   });
 });
 
-function parseRepoResourceUri(uri: string): { repoId: string; resource: "context" | "schema" | "routes" | "risk"; limit?: number } | null {
-  const match = uri.match(/^repo:\/\/([^/]+)\/(context|schema|routes|risk)(?:\?(.*))?$/i);
-  if (!match) {
-    return null;
-  }
-
-  const repoId = decodeURIComponent(match[1]);
-  const resource = match[2].toLowerCase() as "context" | "schema" | "routes" | "risk";
-  const query = match[3] ?? "";
-  const params = new URLSearchParams(query);
-  const rawLimit = params.get("limit");
-
-  return {
-    repoId,
-    resource,
-    limit: rawLimit ? clamp(Number(rawLimit), 1, MAX_RESULT_LIMIT) : undefined
-  };
-}
+// parseRepoResourceUri → serverUtils.ts
 
 function buildRiskSnapshot(repoId: string, policy: "quick-triage" | "strict-review" | "release-gate" | "custom", maxResults: number): {
   repoId: string;
@@ -1691,139 +1289,12 @@ function handleHealthCheckLocal(repoId?: string): CallToolResult {
   });
 }
 
-function resolveServerVersion(): string {
-  const npmVersion = (process.env.npm_package_version ?? "").trim();
-  if (npmVersion.length > 0) {
-    return npmVersion;
-  }
-
-  try {
-    const packageJsonPath = path.resolve(MODULE_DIR, "..", "package.json");
-    const text = fs.readFileSync(packageJsonPath, "utf8");
-    const parsed = JSON.parse(text) as { version?: unknown };
-    if (typeof parsed.version === "string" && parsed.version.trim().length > 0) {
-      return parsed.version.trim();
-    }
-  } catch {
-    // Keep a deterministic fallback for environments where package.json is unavailable.
-  }
-
-  return "unknown";
-}
-
+// resolveServerVersion → serverUtils.ts
 // getRepoWorkingTreeState, runGitStatusPorcelain, resolveHeadCommitSha,
 // runGit, runGitLines, parseGitBlamePorcelain, redactEmail → gitHelpers.ts
-
-function scoreChangeRisk(
-  impactedFilesCount: number,
-  reliabilitySummary: {
-    edgeCount: number;
-    medianConfidence: number;
-    lowConfidenceEdgeCount: number;
-    unresolvedRatio: number;
-  },
-  impactLimit: number
-): {
-  riskScore: number;
-  riskLevel: "high" | "medium" | "low";
-  signals: {
-    impactBreadth: number;
-    unresolvedPenalty: number;
-    confidencePenalty: number;
-    lowConfidencePenalty: number;
-  };
-} {
-  const clampRisk = (value: number) => Math.max(0, Math.min(1, value));
-
-  const impactBreadth = clampRisk(impactedFilesCount / Math.max(1, impactLimit));
-  const unresolvedPenalty = clampRisk(reliabilitySummary.unresolvedRatio);
-  const confidencePenalty = clampRisk(1 - reliabilitySummary.medianConfidence);
-  const lowConfidencePenalty = reliabilitySummary.edgeCount > 0
-    ? clampRisk(reliabilitySummary.lowConfidenceEdgeCount / reliabilitySummary.edgeCount)
-    : 0;
-
-  const score01 =
-    impactBreadth * 0.5 +
-    unresolvedPenalty * 0.25 +
-    confidencePenalty * 0.2 +
-    lowConfidencePenalty * 0.05;
-
-  const riskScore = Math.round(score01 * 100);
-  const riskLevel = riskScore >= 67 ? "high" : riskScore >= 34 ? "medium" : "low";
-
-  return {
-    riskScore,
-    riskLevel,
-    signals: {
-      impactBreadth,
-      unresolvedPenalty,
-      confidencePenalty,
-      lowConfidencePenalty
-    }
-  };
-}
-
-function resolveDetectChangesPolicy(policy: "quick-triage" | "strict-review" | "release-gate" | "custom"): {
-  minRiskScore: number;
-  riskLevels: ("high" | "medium" | "low")[];
-  maxResults: number;
-  sortBy: "risk" | "impact" | "path";
-} {
-  if (policy === "quick-triage") {
-    return {
-      minRiskScore: 20,
-      riskLevels: ["high", "medium"],
-      maxResults: 20,
-      sortBy: "risk"
-    };
-  }
-
-  if (policy === "strict-review") {
-    return {
-      minRiskScore: 40,
-      riskLevels: ["high", "medium"],
-      maxResults: 50,
-      sortBy: "impact"
-    };
-  }
-
-  if (policy === "release-gate") {
-    return {
-      minRiskScore: 67,
-      riskLevels: ["high"],
-      maxResults: 100,
-      sortBy: "risk"
-    };
-  }
-
-  return {
-    minRiskScore: 0,
-    riskLevels: ["high", "medium", "low"],
-    maxResults: 100,
-    sortBy: "risk"
-  };
-}
-
+// scoreChangeRisk, resolveDetectChangesPolicy → policyResolver.ts
 // getRepoStaleness → gitHelpers.ts (now takes store as parameter)
-
-function resolveDocsModeLocal(mode: "auto" | "on" | "off"): boolean {
-  if (mode === "on") {
-    return true;
-  }
-  if (mode === "off") {
-    return false;
-  }
-  return DOCS_INDEXING_ENABLED;
-}
-
-function assertDocsLaneEnabled(toolName: string): void {
-  if (!DOCS_TOOLS_ENABLED) {
-    throw new McpError(
-      ErrorCode.InvalidParams,
-      `${toolName}: docs lane is disabled. Set CODEBASE_INDEX_DOCS_TOOLS_ENABLED=true to enable docs tools.`
-    );
-  }
-}
+// resolveDocsModeLocal, assertDocsLaneEnabled → docsUtils.ts
 
 // resolveResponseProfile → responseFormatter.ts
 
@@ -1928,52 +1399,7 @@ function asText(payload: unknown, profile: ResponseProfile = "standard"): CallTo
   return asTextCore(payload, profile, toolContextStorage.getStore(), TELEMETRY_ENABLED, TELEMETRY_SAMPLE_RATE);
 }
 
-function mapError(error: unknown, toolName: string): { code: string; message: string; requestId: string } {
-  const requestId = randomUUID();
-
-  if (error instanceof z.ZodError) {
-    return {
-      code: "VALIDATION_ERROR",
-      message: `${toolName}: ${error.issues.map((x) => `${x.path.join(".") || "input"}: ${x.message}`).join("; ")}`,
-      requestId
-    };
-  }
-
-  if (error instanceof PolicyViolationError) {
-    return {
-      code: error.code,
-      message: `${toolName}: ${error.message}`,
-      requestId
-    };
-  }
-
-  if (error instanceof McpError) {
-    return {
-      code: "MCP_ERROR",
-      message: `${toolName}: ${error.message}`,
-      requestId
-    };
-  }
-
-  return {
-    code: "INTERNAL_ERROR",
-    message: `${toolName}: ${error instanceof Error ? error.message : "Unknown error"}`,
-    requestId
-  };
-}
-
-function assertNoLlmRuntimePolicy(): void {
-  if (LLM_ENABLED) {
-    throw new Error("Startup blocked: CODEBASE_INDEX_LLM_ENABLED must be false. LLM runtime invocation is prohibited by policy.");
-  }
-}
-
-function assertRefactorApprovalPolicy(): void {
-  if (REFACTOR_STRICT_APPROVAL && REFACTOR_APPROVAL_SECRET.trim().length === 0) {
-    throw new Error("Startup blocked: CODEBASE_INDEX_REFACTOR_APPROVAL_SECRET is required when CODEBASE_INDEX_REFACTOR_STRICT_APPROVAL=true.");
-  }
-}
-
+// mapError, assertNoLlmRuntimePolicy, assertRefactorApprovalPolicy → errorHandler.ts
 // resolveApprovalSecret → refactorUtils.ts (now takes secret + strictApproval as params)
 
 // mapPreviewStatusFromApplyStatus, deriveApplyStatus, noLlmAudit → refactorUtils.ts
