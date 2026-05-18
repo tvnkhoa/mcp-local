@@ -103,6 +103,8 @@ export type SymbolRecord = {
   kind: "function" | "class" | "method" | "variable" | "module" | "interface" | "property" | "constructor" | "type" | "struct" | "impl" | "unknown";
   line: number;
   signature?: string;
+  /** ID of the enclosing class/struct/interface symbol. Used for qualified property edge resolution. */
+  parentSymbolId?: string;
 };
 
 export type EdgeRecord = {

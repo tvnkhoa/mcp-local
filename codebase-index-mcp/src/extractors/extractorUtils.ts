@@ -106,11 +106,48 @@ export function extractCSharpUsingNamespace(node: Parser.SyntaxNode): string | n
   return raw;
 }
 
-export function mapUsingNamespaceToNugetContract(namespaceImport: string): string | null {
+export function mapUsingNamespaceToNugetContract(namespaceImport: string, knownPackageNames?: Set<string>): string | null {
   const normalized = namespaceImport.trim();
-  // Contract bridge lane for CommunicationHub package family.
+
+  // Hardcoded contract bridge for CommunicationHub package family.
   if (/^SSNet\.CommunicationHub\.Messaging(\.|$)/i.test(normalized)) {
     return "nuget:ssnet.communicationhub.messaging";
+  }
+
+  // Config-driven overrides via NUGET_NAMESPACE_MAP env var.
+  // Format: JSON array of { "prefix": "My.Namespace", "contractId": "nuget:my.package" }
+  const envMap = process.env["NUGET_NAMESPACE_MAP"];
+  if (envMap) {
+    try {
+      const entries = JSON.parse(envMap) as { prefix: string; contractId: string }[];
+      for (const entry of entries) {
+        if (entry.prefix && entry.contractId) {
+          const re = new RegExp(`^${entry.prefix.replace(/\./g, "\\.")}(\\.|$)`, "i");
+          if (re.test(normalized)) {
+            return entry.contractId.startsWith("nuget:") ? entry.contractId : `nuget:${entry.contractId.toLowerCase()}`;
+          }
+        }
+      }
+    } catch {
+      // Malformed env var — ignore silently
+    }
+  }
+
+  // Heuristic: if the root namespace segment matches a known PackageReference name
+  // (case-insensitive), emit a nuget: contract edge for it.
+  // Example: using MassTransit.X → knownPackageNames has "MassTransit" → nuget:masstransit
+  if (knownPackageNames && knownPackageNames.size > 0) {
+    const rootSegment = normalized.split(".")[0] ?? "";
+    for (const pkg of knownPackageNames) {
+      if (pkg.toLowerCase() === rootSegment.toLowerCase()) {
+        return `nuget:${pkg.toLowerCase()}`;
+      }
+      // Also match multi-segment package names where namespace starts with the package name
+      if (normalized.toLowerCase().startsWith(pkg.toLowerCase() + ".") ||
+          normalized.toLowerCase() === pkg.toLowerCase()) {
+        return `nuget:${pkg.toLowerCase()}`;
+      }
+    }
   }
 
   return null;
@@ -159,7 +196,15 @@ export function findEnclosingCSharpSymbolId(node: Parser.SyntaxNode, input: Extr
     if (FUNCTION_TYPES.has(current.type)) {
       const nameNode = current.childForFieldName("name");
       if (nameNode) {
-        return stableId(`${input.repoId}:${input.filePath}:${nameNode.text}:${current.startPosition.row + 1}`);
+        // kind must match the format used in csharpExtractor symbol insertion:
+        // stableId(`${repoId}:${filePath}:${kind}:${name}:${node.startPosition.row}`)
+        // NOTE: symbol insertion uses row (0-indexed), NOT row+1
+        const kind = current.type === "method_declaration" ? "method"
+          : current.type === "constructor_declaration" ? "constructor"
+          : current.type === "property_declaration" ? "property"
+          : current.type === "class_declaration" ? "class"
+          : "struct";
+        return stableId(`${input.repoId}:${input.filePath}:${kind}:${nameNode.text}:${current.startPosition.row}`);
       }
     }
     current = current.parent;

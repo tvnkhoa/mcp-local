@@ -39,6 +39,7 @@ function buildEdgeToSymbolJoinClause(): string {
     or (e.type = 'TYPE_REF' and e.to_id = ('type:' || s.name))
     or (e.type in ('PROPERTY_REF', 'PROPERTY_WRITE') and e.to_id = ('property:' || s.name))
     or (e.type in ('PROPERTY_REF', 'PROPERTY_WRITE') and e.to_id = ('property:' || coalesce(st.name || '.', '') || s.name))
+    or (e.type in ('PROPERTY_REF', 'PROPERTY_WRITE') and s.kind = 'property' and e.to_id like ('property:%.' || s.name))
   )`;
 }
 

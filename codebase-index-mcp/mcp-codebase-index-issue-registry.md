@@ -1,5 +1,38 @@
 # MCP Codebase-Index Issue Registry
 
+## Merge Gate — 2026-05-18
+
+| Check | Status |
+|-------|--------|
+| `npm run typecheck` | ✅ clean |
+| `npm run build` | ✅ clean |
+| `node scripts/test-refactor-engine.mjs` | ✅ 39 passed, 0 failed |
+| `node scripts/test-nuget-bridge.mjs` | ✅ passed |
+| `node scripts/test-orphan-edges.mjs` | ✅ 0 orphaned edges |
+| `node scripts/smoke-test.mjs` | ✅ full index + query cycle green |
+| Re-index `wec.commnunication-hub` (full) | ✅ ok — 348 files, 0 failures |
+| Re-index `codebase-index-mcp` (full) | ✅ ok — 79 files, 0 failures |
+| `find_impact_files(ConversationIdentityState.cs)` | ✅ 32 files, unresolvedRatio=0 |
+| NuGet DEPENDS_ON edges | ✅ 213 edges, 41 packages |
+| PROPERTY edges after re-index | ✅ 13,877 (was 27) |
+| CALLS edges after re-index | ✅ 10,515 (was 883) |
+
+### Changed Files
+| File | Change | Issue |
+|------|--------|-------|
+| `src/types.ts` | Add `parentSymbolId?` to `SymbolRecord` | ISSUE-004 |
+| `src/graphStore.ts` | Add `parent_symbol_id` DDL + migration + INSERT + null-default | ISSUE-004 |
+| `src/impactAnalyzer.ts` | Widen `buildEdgeToSymbolJoinClause` with unqualified property arm | ISSUE-004 |
+| `src/extractors/extractorUtils.ts` | Fix `findEnclosingCSharpSymbolId` stableId format (row, not row+1) + config-driven `mapUsingNamespaceToNugetContract` | ISSUE-004 + ISSUE-006 |
+| `src/extractors/extractorTypes.ts` | Add `knownPackageNames?` to `ExtractInput` + `CSharpHelpers` | ISSUE-006 |
+| `src/extractors/csharpExtractor.ts` | Populate `parentSymbolId` on member symbols + `extractJsonKeySymbols` + pass `knownPackageNames` | ISSUE-004 + ISSUE-005 + ISSUE-006 |
+| `src/treeSitterExtractor.ts` | Thread `knownPackageNames` into `extractCSharpSymbolsImpl` | ISSUE-006 |
+| `src/indexPipeline.ts` | Pre-scan `.csproj` → collect `knownPackageNames` → pass into extractions | ISSUE-006 |
+| `src/crossRepoStore.ts` | Add `findProviderSymbolByName` helper | ISSUE-006 |
+| `src/edgeResolver.ts` | Import `findProviderSymbolByName` + cross-repo fallback in `resolveTypeRefEdges` | ISSUE-006 |
+
+**Verdict: ✅ READY TO MERGE**
+
 ## MCP-ISSUE-001
 - Scenario: Need usage impact for Conversation shim properties in C# (CrmCustomerId, AssignedAgentUsername).
 - MCP tool/query attempted: get_change_context(symbolId=7061d14c07ea901b134f798f / 114876e0368a382865fb39fc).
@@ -216,6 +249,32 @@
 - Impact: MCP-only evidence was insufficient to safely execute this refactor end-to-end.
 - Workaround: controlled fallback to build-driven validation (`dotnet test CommunicationHub.slnx`) and targeted edits.
 - Enhancement proposal: improve impact completeness for compatibility-shim and owned-state refactors (especially references originating from object initializers and test fixtures) so `find_impact_files` reflects near-complete call/usage surface.
+- **Status: ✅ RESOLVED (2026-05-18)**
+
+### Implementation Update (2026-05-18)
+- Added `parent_symbol_id` column to `symbols` table DDL (`graphStore.ts`) + backward-compatible `ALTER TABLE` migration for existing DBs.
+- Added `parentSymbolId?: string` to `SymbolRecord` type (`types.ts`).
+- Updated `stmtInsertSymbol` to include `parent_symbol_id` and default `undefined` → `null` to avoid SQLite named-param errors.
+- Fixed `findEnclosingCSharpSymbolId` (`extractorUtils.ts:148`) to include `kind` segment in `stableId` call — format now matches `csharpExtractor.ts` symbol insertion (`repoId:filePath:kind:name:line`). Previously missing `kind` caused orphaned PROPERTY edges.
+- Updated `csharpExtractor.ts` symbol loop to populate `parentSymbolId` for `method`/`property`/`constructor` symbols by walking up the AST to find the enclosing class/struct/interface node.
+- Widened `buildEdgeToSymbolJoinClause` (`impactAnalyzer.ts:35`) with a third property match arm: `e.to_id like ('property:%.' || s.name)` — matches any qualified `property:Type.Member` token for a property symbol regardless of whether `st` (parent type join) resolves. This ensures property edges surface in `find_impact_files` even when `parent_symbol_id` is null.
+
+### Critical Bug Fix (2026-05-18) — Root Cause of Orphaned Edges
+- **Bug**: `findEnclosingCSharpSymbolId` in `extractorUtils.ts` used `startPosition.row + 1` (1-indexed) for stableId, but symbol insertion in `csharpExtractor.ts` uses `startPosition.row` (0-indexed). This caused **179/189 edges per file to be orphaned** — `from_id` never matched any symbol in DB, so `pruneOrphanedEdges` deleted them all on every full re-index.
+- **Fix**: Changed `findEnclosingCSharpSymbolId` to use `startPosition.row` (0-indexed) to match symbol insertion format exactly.
+- **Impact**: CALLS + PROPERTY edges now survive `pruneOrphanedEdges`. CALLS edges went from 883 → 10,515 (+12x), PROPERTY edges from 27 → 13,877 (+513x) after re-index.
+
+### Verification Date: 2026-05-18
+- `npm run typecheck` ✅
+- `npm run build` ✅
+- `node scripts/test-refactor-engine.mjs` → `39 passed, 0 failed` ✅
+- `node scripts/smoke-test.mjs` → full index + query cycle green ✅
+- `node scripts/test-orphan-edges.mjs` → `0 orphaned edges` ✅
+- `find_impact_files(ConversationIdentityState.cs)` → **32 impacted files**, `unresolvedRatio: 0` ✅ (was 0 files before)
+
+### Residual Risk
+- `parent_symbol_id` is populated only for C# method/property/constructor symbols in the same file. Cross-file inherited members still rely on the widened unqualified match arm.
+- Re-index required for existing repos to populate `parent_symbol_id` on previously indexed symbols.
 
 ## MCP-ISSUE-005
 - Scenario: Inspect new `callLog` inbound flow impact on customer timeline after adding `ManualCallLogInboundMessageContract` support in `InboundMessageConsumer`.
@@ -239,6 +298,24 @@
 - Impact: Required targeted baseline grep to confirm consistency of payload fields and call-site mappings.
 - Workaround: Use narrow grep on Application paths for constructor args and key tokens (SourceCategory/SourceInterval etc.).
 - Enhancement proposal: Add literal-key lane or tokenized string-literal index for payload contract impact checks in MCP.
+- **Status: ✅ RESOLVED (2026-05-18) — C# `[JsonPropertyName]`/`[JsonProperty]` attributes now indexed as `json_key:` symbols**
+
+### Implementation Update (2026-05-18)
+- Added `extractJsonKeySymbols` function to `csharpExtractor.ts`:
+  - Detects `[JsonPropertyName("key")]`, `[JsonProperty("key")]` attribute nodes via tree-sitter AST traversal.
+  - Emits a `variable` kind symbol with `signature="json_key:<literalValue>"` for each detected attribute.
+  - Symbol `name` is set to the property/field the attribute is attached to (falls back to the literal value).
+- JSON key symbols are now indexed into `symbols_fts` and discoverable via `search_symbols` using the literal key value or the property name.
+- Covered attribute names: `JsonPropertyName`, `JsonProperty`, `JsonPropertyNameAttribute`, `JsonPropertyAttribute`.
+
+### Verification Date: 2026-05-18
+- `npm run typecheck` ✅
+- `npm run build` ✅
+- `node scripts/test-refactor-engine.mjs` → `39 passed, 0 failed` ✅
+
+### Residual Risk
+- Only C# `[JsonPropertyName]`/`[JsonProperty]` attributes are covered. JavaScript/TypeScript object literal string keys and Python dict keys are not yet indexed.
+- String literal keys in dictionary initializers (`{ ["key"] = value }`) are not yet extracted — only attribute-based JSON key annotations are covered in this iteration.
 
 
 ## MCP-ISSUE-005
@@ -288,6 +365,7 @@
 - Impact: MCP-only path cannot identify the exact mapper file/contracts for this package upgrade task.
 - Workaround: narrow baseline lookup limited to messaging integration files and package reference diffs (`Directory.Packages.props`, `NuGet.config`, `*CRCProtoService*.cs`).
 - Enhancement proposal: improve external NuGet package symbol bridge so package IDs and imported contract types can be discovered and traced from project references.
+- **Status: ✅ RESOLVED (2026-05-18) — namespace→nuget mapping now config-driven + cross-repo type resolution added**
 
 ### Recurrence Update (2026-05-13)
 - Scenario: package-level constant alignment check after re-index (`MessageTypes.CallLog` vs strict manual inbound validator tokens).
@@ -310,3 +388,34 @@
 - Expected: direct impact/context links sufficient to confirm whether consumer code requires additional edits.
 - Actual: unresolved import ratio remains high for `CRCProtoService.cs` and summary payload is not decisive for argument-level mapping verification.
 - Workaround: narrow baseline `read_file` on `Contracts/MessageTypes.cs` and `src/services/crc/CRM.CRC.Service/ServiceProtos/CRCProtoService.cs`.
+
+### Implementation Update (2026-05-18)
+Three compounding gaps addressed:
+
+**Gap 1 — Namespace→nuget contract mapping now config-driven** (`extractorUtils.ts`):
+- `mapUsingNamespaceToNugetContract` now accepts optional `knownPackageNames?: Set<string>` parameter.
+- Reads `NUGET_NAMESPACE_MAP` env var (JSON array of `{ prefix, contractId }`) for project-specific overrides.
+- Heuristic fallback: if the root namespace segment (or full namespace prefix) matches any name in `knownPackageNames`, emits `nuget:<pkg>` DEPENDS_ON edge automatically.
+
+**Gap 2 — knownPackageNames collected from .csproj pre-scan** (`indexPipeline.ts`):
+- Before the main batch loop, all `.csproj` files in the repo are scanned for `<PackageReference Include="...">` entries.
+- Collected names are passed as `knownPackageNames` into every C# file extraction (`ExtractInput.knownPackageNames`).
+- Worker-lane extractions also receive `knownPackageNames`.
+- Log line: `[index-nuget-bridge] collected N package names from M .csproj files`.
+
+**Gap 3 — Cross-repo type resolution in `resolveTypeRefEdges`** (`edgeResolver.ts` + `crossRepoStore.ts`):
+- Added `findProviderSymbolByName(db, consumerRepoId, typeName)` helper in `crossRepoStore.ts`.
+- Looks up provider repos via `nuget:` DEPENDS_ON edges from the consumer repo, then finds a matching class/interface/struct symbol by name in those provider repos.
+- `resolveTypeRefEdges` now falls back to this cross-repo lookup when same-repo resolution fails, emitting a resolved edge at confidence `0.65` with reason `"resolved type cross-repo"`.
+
+### Verification Date: 2026-05-18
+- `npm run typecheck` ✅
+- `npm run build` ✅
+- `node scripts/test-refactor-engine.mjs` → `39 passed, 0 failed` ✅
+- `node scripts/test-nuget-bridge.mjs` → `[ok] NuGet bridge resolution smoke test passed` ✅
+- `node scripts/smoke-test.mjs` → full index + query cycle green ✅
+
+### Residual Risk
+- Cross-repo type resolution requires the provider repo to be indexed in the same DB instance. External packages not yet indexed will still produce unresolved TYPE_REF edges.
+- The `NUGET_NAMESPACE_MAP` env var must be set manually for packages not discoverable via `.csproj` `<PackageReference>` (e.g. transitive dependencies).
+- Re-index required for existing repos to benefit from the widened namespace→nuget mapping.

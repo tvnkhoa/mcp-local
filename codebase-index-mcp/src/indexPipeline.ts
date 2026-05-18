@@ -89,6 +89,29 @@ export async function runIndexPipeline(store: GraphStore, input: RunIndexInput):
 
   process.stderr.write(`[index-scan-complete] found ${String(files.length)} files, will process up to ${String(maxFiles)}\n`);
 
+  // Pre-scan: collect all PackageReference names from .csproj files so C# extractors
+  // can widen namespace→nuget contract mapping beyond the hardcoded set. (ISSUE-006)
+  const knownPackageNames = new Set<string>();
+  const csprojFiles = files.filter((f) => f.endsWith(".csproj"));
+  if (csprojFiles.length > 0) {
+    const pkgRefRe = /<PackageReference\s+Include="([^"]+)"/gi;
+    for (const csprojPath of csprojFiles) {
+      try {
+        const src = await readFile(csprojPath, "utf8");
+        let m: RegExpExecArray | null;
+        pkgRefRe.lastIndex = 0;
+        while ((m = pkgRefRe.exec(src)) !== null) {
+          if (m[1]) knownPackageNames.add(m[1].trim());
+        }
+      } catch {
+        // Non-critical — skip unreadable csproj
+      }
+    }
+    if (knownPackageNames.size > 0) {
+      process.stderr.write(`[index-nuget-bridge] collected ${String(knownPackageNames.size)} package names from ${String(csprojFiles.length)} .csproj files\n`);
+    }
+  }
+
   if (includeDocs) {
     // Count markdown files for user feedback
     const markdownFiles = files.filter((f) => f.endsWith(".md") || f.endsWith(".mdx"));
@@ -308,7 +331,8 @@ export async function runIndexPipeline(store: GraphStore, input: RunIndexInput):
                 filePath: relativePath,
                 language,
                 source: safeContent,
-                performanceProfile: input.performanceProfile
+                performanceProfile: input.performanceProfile,
+                knownPackageNames: knownPackageNames.size > 0 ? knownPackageNames : undefined
               }).then((result) => ({
                 relativePath,
                 language,
@@ -324,7 +348,8 @@ export async function runIndexPipeline(store: GraphStore, input: RunIndexInput):
             filePath: relativePath,
             language,
             source: safeContent,
-            performanceProfile: input.performanceProfile
+            performanceProfile: input.performanceProfile,
+            knownPackageNames: knownPackageNames.size > 0 ? knownPackageNames : undefined
           });
           pushPendingWrite(relativePath, language, contentHash, extracted);
         } catch (err) {

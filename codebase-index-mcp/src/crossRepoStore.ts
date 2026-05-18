@@ -1,6 +1,71 @@
 import type Database from "better-sqlite3";
 
-// ── Upsert cross-repo dependency ───────────────────────────────────────
+// ── Find provider symbol by name across repos (ISSUE-006) ─────────────
+//
+// Given a type name and the consuming repo's known nuget contract IDs,
+// look up a matching symbol in any provider repo whose module symbol
+// has a matching nuget: signature. Returns the best candidate.
+
+export function findProviderSymbolByName(
+  db: Database.Database,
+  consumerRepoId: string,
+  typeName: string
+): { symbolId: string; repoId: string; filePath: string } | null {
+  // Step 1: find nuget: contract IDs that the consumer repo depends on
+  const contractRows = db
+    .prepare(
+      `
+      select distinct e.to_id as contractId
+      from edges e
+      where e.repo_id = ?
+        and e.type = 'DEPENDS_ON'
+        and e.to_id like 'nuget:%'
+      `
+    )
+    .all(consumerRepoId) as { contractId: string }[];
+
+  if (contractRows.length === 0) return null;
+
+  const contractIds = contractRows.map((r) => r.contractId);
+  const ph = contractIds.map(() => "?").join(", ");
+
+  // Step 2: find provider repos that export one of those contracts
+  const providerRepos = db
+    .prepare(
+      `
+      select distinct s.repo_id as repoId
+      from symbols s
+      where s.kind = 'module'
+        and s.signature in (${ph})
+        and s.repo_id != ?
+      `
+    )
+    .all(...contractIds, consumerRepoId) as { repoId: string }[];
+
+  if (providerRepos.length === 0) return null;
+
+  const providerRepoIds = providerRepos.map((r) => r.repoId);
+  const ph2 = providerRepoIds.map(() => "?").join(", ");
+
+  // Step 3: find a symbol with matching name in those provider repos
+  const match = db
+    .prepare(
+      `
+      select s.symbol_id as symbolId, s.repo_id as repoId, s.file_path as filePath
+      from symbols s
+      where s.repo_id in (${ph2})
+        and s.name = ?
+        and s.kind in ('class', 'interface', 'struct', 'type')
+      order by s.repo_id
+      limit 1
+      `
+    )
+    .get(...providerRepoIds, typeName) as { symbolId: string; repoId: string; filePath: string } | undefined;
+
+  return match ?? null;
+}
+
+
 
 export function upsertCrossRepoDepImpl(
   db: Database.Database,

@@ -1,5 +1,6 @@
 import type Database from "better-sqlite3";
 import type { ResolutionStats } from "./types.js";
+import { findProviderSymbolByName } from "./crossRepoStore.js";
 
 function createEmptyResolutionStats(): ResolutionStats {
   return {
@@ -453,6 +454,13 @@ export function resolveTypeRefEdges(db: Database.Database, repoId: string, maxUn
         const reason = confidence >= 0.9 ? "resolved type same-file" : "resolved type by name";
         updateStmt.run(match.symbolId, confidence, reason, repoId, row.fromId, row.toId);
         count += 1;
+      } else {
+        // Cross-repo fallback: look for the type in provider repos linked via nuget: DEPENDS_ON (ISSUE-006)
+        const crossRepoMatch = findProviderSymbolByName(db, repoId, typeName);
+        if (crossRepoMatch) {
+          updateStmt.run(crossRepoMatch.symbolId, 0.65, "resolved type cross-repo", repoId, row.fromId, row.toId);
+          count += 1;
+        }
       }
     }
   });

@@ -114,7 +114,7 @@ export function extractGraphData(input: ExtractInput): ExtractOutput {
     extractJavaScriptSymbolsImpl(input, root, symbols, edges, moduleSymbolId);
     routes.push(...extractJavaScriptRoutesImpl(input, symbols, moduleSymbolId));
   } else if (input.language === "csharp") {
-    extractCSharpSymbolsImpl(input, root, symbols, edges, moduleSymbolId);
+    extractCSharpSymbolsImpl(input, root, symbols, edges, moduleSymbolId, input.knownPackageNames);
     routes.push(...extractCSharpRoutesImpl(input, root, symbols));
     emitEndpointContractSymbolsImpl(input, symbols, routes);
     emitEndpointContractSymbolsFromCSharpSignaturesImpl(input, symbols);

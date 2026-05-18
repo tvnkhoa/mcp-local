@@ -205,8 +205,8 @@ export class GraphStore {
     );
     this.stmtInsertSymbol = this.db.prepare(
       `
-      insert into symbols (repo_id, symbol_id, file_path, name, kind, line, signature)
-      values (@repoId, @symbolId, @filePath, @name, @kind, @line, @signature)
+      insert into symbols (repo_id, symbol_id, file_path, name, kind, line, signature, parent_symbol_id)
+      values (@repoId, @symbolId, @filePath, @name, @kind, @line, @signature, @parentSymbolId)
       `
     );
     this.stmtDeleteRoutesForFile = this.db.prepare(
@@ -284,7 +284,11 @@ export class GraphStore {
     const writeRows = (rows: SymbolRecord[]) => {
       for (const row of rows) {
         try {
-          this.stmtInsertSymbol.run({ ...row, signature: row.signature ?? null });
+          this.stmtInsertSymbol.run({
+            ...row,
+            signature: row.signature ?? null,
+            parentSymbolId: row.parentSymbolId ?? null
+          });
         } catch (error) {
           if (this.isSqliteUniqueConstraintError(error)) {
             throw this.buildSymbolCollisionError(row, error);
@@ -961,6 +965,10 @@ export class GraphStore {
     if (!symbolsCols.some((c) => c.name === "signature")) {
       this.db.exec("alter table symbols add column signature text");
     }
+    // Add parent_symbol_id column to symbols if missing (ISSUE-004: qualified property edge resolution)
+    if (!symbolsCols.some((c) => c.name === "parent_symbol_id")) {
+      this.db.exec("alter table symbols add column parent_symbol_id text");
+    }
 
     // Refresh symbols_fts if it doesn't have the signature column yet
     try {
@@ -1190,6 +1198,7 @@ export class GraphStore {
         kind text not null,
         line integer not null,
         signature text,
+        parent_symbol_id text,
         primary key (repo_id, symbol_id)
       );
 

@@ -21,18 +21,66 @@ import {
   emitTypeRefEdge
 } from "./extractorUtils.js";
 
+// JSON attribute names that carry a serialized key literal
+const JSON_KEY_ATTRIBUTE_NAMES = new Set([
+  "JsonPropertyName",
+  "JsonProperty",
+  "JsonPropertyNameAttribute",
+  "JsonPropertyAttribute"
+]);
+
+/**
+ * Extract [JsonPropertyName("key")] / [JsonProperty("key")] attribute usages
+ * and emit them as variable symbols with signature="json_key:<literalValue>".
+ * This makes JSON payload contract keys discoverable via search_symbols.
+ */
+function extractJsonKeySymbols(
+  input: ExtractInput,
+  root: Parser.SyntaxNode,
+  symbols: SymbolRecord[]
+): void {
+  for (const attrNode of root.descendantsOfType(["attribute"])) {
+    const nameNode = attrNode.childForFieldName("name");
+    if (!nameNode) continue;
+    const attrName = nameNode.text.trim().replace(/Attribute$/, "");
+    if (!JSON_KEY_ATTRIBUTE_NAMES.has(attrName) && !JSON_KEY_ATTRIBUTE_NAMES.has(attrName + "Attribute")) continue;
+
+    // Find the first string literal argument
+    const argList = attrNode.childForFieldName("arguments");
+    if (!argList) continue;
+    const literal = extractFirstStringLiteral(argList.text);
+    if (!literal) continue;
+
+    // Find the property/field this attribute is attached to
+    const attrList = attrNode.parent; // attribute_list
+    const target = attrList?.nextNamedSibling;
+    const targetName = target?.childForFieldName("name")?.text ?? literal;
+
+    symbols.push({
+      repoId: input.repoId,
+      symbolId: stableId(`${input.repoId}:${input.filePath}:json_key:${literal}:${attrNode.startPosition.row}`),
+      filePath: input.filePath,
+      name: targetName,
+      kind: "variable",
+      line: attrNode.startPosition.row + 1,
+      signature: `json_key:${literal}`
+    });
+  }
+}
+
 export function extractCSharpSymbolsImpl(
   input: ExtractInput,
   root: Parser.SyntaxNode,
   symbols: SymbolRecord[],
   edges: EdgeRecord[],
-  moduleSymbolId: string
+  moduleSymbolId: string,
+  knownPackageNames?: Set<string>
 ): void {
   for (const node of root.descendantsOfType(["using_directive"])) {
     const usingNamespace = extractCSharpUsingNamespace(node);
     if (!usingNamespace) continue;
     edges.push({ repoId: input.repoId, fromId: moduleSymbolId, toId: `import:${usingNamespace}`, type: "IMPORTS" });
-    const packageContractId = mapUsingNamespaceToNugetContract(usingNamespace);
+    const packageContractId = mapUsingNamespaceToNugetContract(usingNamespace, knownPackageNames);
     if (packageContractId) {
       edges.push({ repoId: input.repoId, fromId: moduleSymbolId, toId: packageContractId, type: "DEPENDS_ON", confidence: 0.9, reason: "namespace package contract bridge" });
     }
@@ -62,6 +110,9 @@ export function extractCSharpSymbolsImpl(
     }
   }
 
+  // Build a map of class/struct/interface symbolId by line for parentSymbolId resolution
+  const typeSymbolByLine = new Map<number, string>();
+
   for (const node of root.descendantsOfType(["class_declaration", "interface_declaration", "method_declaration", "property_declaration", "constructor_declaration", "struct_declaration", "enum_declaration", "namespace_declaration", "record_declaration"])) {
     const nameNode = node.childForFieldName("name");
     if (!nameNode) continue;
@@ -76,8 +127,41 @@ export function extractCSharpSymbolsImpl(
     else if (node.type === "enum_declaration") kind = "type";
     else if (node.type === "record_declaration") kind = "class";
     const symbolId = stableId(`${input.repoId}:${input.filePath}:${kind}:${nameNode.text}:${node.startPosition.row}`);
-    symbols.push({ repoId: input.repoId, symbolId, filePath: input.filePath, name: nameNode.text, kind, line: node.startPosition.row + 1, signature: extractSignature(node) });
+
+    // Resolve parentSymbolId for members (method/property/constructor) by finding enclosing type
+    let parentSymbolId: string | undefined;
+    if (kind === "method" || kind === "property" || kind === "constructor") {
+      const enclosingTypeName = findEnclosingCSharpTypeName(node);
+      if (enclosingTypeName) {
+        // Find the enclosing type symbol already registered in typeSymbolByLine
+        // Walk up to find the enclosing class/struct/interface node
+        let parent: Parser.SyntaxNode | null = node.parent;
+        while (parent) {
+          if (parent.type === "class_declaration" || parent.type === "struct_declaration" || parent.type === "interface_declaration" || parent.type === "record_declaration") {
+            const parentNameNode = parent.childForFieldName("name");
+            if (parentNameNode) {
+              const parentKind = parent.type === "interface_declaration" ? "interface"
+                : parent.type === "struct_declaration" ? "struct"
+                : "class";
+              parentSymbolId = stableId(`${input.repoId}:${input.filePath}:${parentKind}:${parentNameNode.text}:${parent.startPosition.row}`);
+            }
+            break;
+          }
+          parent = parent.parent;
+        }
+      }
+    }
+
+    // Track type symbols for later member resolution
+    if (kind === "class" || kind === "struct" || kind === "interface") {
+      typeSymbolByLine.set(node.startPosition.row, symbolId);
+    }
+
+    symbols.push({ repoId: input.repoId, symbolId, filePath: input.filePath, name: nameNode.text, kind, line: node.startPosition.row + 1, signature: extractSignature(node), parentSymbolId });
   }
+
+  // Extract json_key symbols from [JsonPropertyName("...")] attributes (ISSUE-005)
+  extractJsonKeySymbols(input, root, symbols);
 
   // Extract property access edges (PROPERTY_REF and PROPERTY_WRITE)
   // This includes object initializers, member access expressions, and assignments

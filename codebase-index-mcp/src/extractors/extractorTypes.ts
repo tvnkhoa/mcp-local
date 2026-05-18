@@ -11,6 +11,8 @@ export type ExtractInput = {
   language: string;
   source: string;
   performanceProfile?: "standard" | "large" | "very-large";
+  /** Package names from <PackageReference> in .csproj files — used to widen namespace→nuget contract mapping. */
+  knownPackageNames?: Set<string>;
 };
 
 export type ExtractOutput = {
@@ -52,6 +54,9 @@ export type CSharpHelpers = {
   collectCSharpScopeTypeMap: (scopeNode: Parser.SyntaxNode) => Map<string, string>;
   findEnclosingCSharpTypeName: (node: Parser.SyntaxNode) => string | undefined;
   isLikelyCSharpInterfaceName: (rawTypeName: string) => boolean;
+  /** Package names collected from <PackageReference> in .csproj files in the same repo.
+   *  Used to widen namespace→nuget contract mapping beyond the hardcoded set. */
+  knownPackageNames?: Set<string>;
 };
 
 export type RouteHelpers = {
