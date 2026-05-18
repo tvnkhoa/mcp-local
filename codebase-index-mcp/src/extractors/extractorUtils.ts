@@ -648,6 +648,24 @@ export const TRIVIAL_PROPERTY_TOKENS = new Set<string>([
   "ConfigurationProvider",
   // Validation
   "IsValid", "Errors", "ErrorMessage",
+  // ConfigurationProvider / IConfiguration
+  "ConfigurationProvider",
+  // Generic CRUD / lifecycle method names too common to be meaningful as property refs
+  "Create", "CreateAsync", "Cancel", "CancelAsync",
+  "Submit", "SubmitAsync", "Execute", "ExecuteAsync",
+  "Start", "Stop", "Reset", "ResetAsync",
+  "Get", "GetAsync", "Set", "SetAsync",
+  "Add", "AddAsync", "Remove", "RemoveAsync",
+  "Update", "UpdateAsync", "Delete", "DeleteAsync",
+  "Save", "SaveAsync", "Load", "LoadAsync",
+  "Send", "SendAsync", "Receive", "ReceiveAsync",
+  "Process", "ProcessAsync", "Handle", "HandleAsync",
+  "Build", "BuildAsync", "Publish", "PublishAsync",
+  "Dispatch", "DispatchAsync", "Notify", "NotifyAsync",
+  "Validate", "ValidateAsync", "Initialize", "InitializeAsync",
+  "Open", "OpenAsync", "Close", "CloseAsync",
+  "Read", "ReadAsync", "Write", "WriteAsync",
+  "Flush", "FlushAsync", "Dispose", "DisposeAsync",
 ]);
 
 /**

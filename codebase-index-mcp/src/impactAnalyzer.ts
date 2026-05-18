@@ -289,10 +289,17 @@ export function getImpactSurfaceImpl(
 
   const moduleSymbolId = findModuleSymbolId(db, repoId, canonicalFilePath) ?? undefined;
   const graphHealth = countUnresolvedEdgesForFileImpl(db, repoId, canonicalFilePath, moduleSymbolId);
+
+  // P2.1: Filter out low-confidence PROPERTY_REF edges (common generic tokens like Create/Cancel/Submit)
+  // that produce false positives. Users can still see them via query_graph if needed.
+  const filteredCallers = callers.filter((c) =>
+    c.edgeType !== "PROPERTY_REF" || c.confidence >= 0.7
+  );
+
   return {
-    callers,
+    callers: filteredCallers,
     graphHealth,
-    reliabilitySummary: buildReliabilitySummaryImpl(callers.map((x) => x.confidence), graphHealth)
+    reliabilitySummary: buildReliabilitySummaryImpl(filteredCallers.map((x) => x.confidence), graphHealth)
   };
 }
 

@@ -1,4 +1,5 @@
 import type Database from "better-sqlite3";
+import type { Statement } from "better-sqlite3";
 import type { ResolutionStats } from "./types.js";
 import { findProviderSymbolByName } from "./crossRepoStore.js";
 import {
@@ -338,6 +339,236 @@ export function resolveImportEdges(db: Database.Database, repoId: string, maxUnr
     }
   });
   tx();
+
+  return count;
+}
+
+// ── Call edge resolution context (pre-built once, reused across batches) ──────
+
+export interface CallResolutionContext {
+  candidateMap: Map<string, { symbolId: string; filePath: string; kind: string }[]>;
+  interfaceByName: Map<string, { symbolId: string; filePath: string }>;
+  implementorFilesByIfaceId: Map<string, string[]>;
+  updateStmt: Statement;
+  insertDispatchStmt: Statement;
+  /** All unresolved rows pre-fetched once — sliced per batch in memory */
+  unresolvedRows: { fromId: string; toId: string; fromFile: string }[];
+  /** Current offset into unresolvedRows for batching */
+  offset: number;
+}
+
+/**
+ * Pre-build all lookup maps needed for call edge resolution.
+ * Call this ONCE before batched resolveCallEdgesBatch() calls.
+ */
+export function buildCallResolutionContext(db: Database.Database, repoId: string): CallResolutionContext {
+  const interfaceRows = db
+    .prepare(`select symbol_id as symbolId, name, file_path as filePath from symbols where repo_id = ? and kind = 'interface'`)
+    .all(repoId) as { symbolId: string; name: string; filePath: string }[];
+  const interfaceByName = new Map<string, { symbolId: string; filePath: string }>();
+  for (const r of interfaceRows) {
+    if (!interfaceByName.has(r.name)) interfaceByName.set(r.name, { symbolId: r.symbolId, filePath: r.filePath });
+  }
+
+  const implEdgeRows = db
+    .prepare(
+      `select distinct e.to_id as ifaceId, s.file_path as filePath
+       from edges e
+       inner join symbols s on s.repo_id = e.repo_id and s.symbol_id = e.from_id
+       where e.repo_id = ? and e.type = 'IMPLEMENTS' and s.kind in ('class', 'struct')`
+    )
+    .all(repoId) as { ifaceId: string; filePath: string }[];
+  const implementorFilesByIfaceId = new Map<string, string[]>();
+  for (const r of implEdgeRows) {
+    const list = implementorFilesByIfaceId.get(r.ifaceId) ?? [];
+    list.push(r.filePath);
+    implementorFilesByIfaceId.set(r.ifaceId, list);
+  }
+
+  const candidateMap = buildNamedCandidateMap(db, repoId, ["function", "method", "constructor", "class"]);
+
+  const updateStmt = db.prepare(
+    `update edges set to_id = ?, confidence = ?, reason = ? where repo_id = ? and from_id = ? and to_id = ?`
+  );
+  const insertDispatchStmt = db.prepare(
+    `
+    insert into edges (repo_id, from_id, to_id, type, confidence, reason)
+    select ?, ?, ?, 'CALLS', ?, ?
+    where not exists (
+      select 1 from edges
+      where repo_id = ? and from_id = ? and to_id = ? and type = 'CALLS'
+    )
+    `
+  );
+
+  // Pre-fetch ALL unresolved rows once — avoids re-scanning edges table per batch
+  const unresolvedRows = db
+    .prepare(
+      `select distinct e.from_id as fromId, e.to_id as toId, s.file_path as fromFile
+       from edges e
+       inner join symbols s on s.repo_id = e.repo_id and s.symbol_id = e.from_id
+       where e.repo_id = ? and e.type = 'CALLS' and e.to_id like 'callee:%'`
+    )
+    .all(repoId) as { fromId: string; toId: string; fromFile: string }[];
+
+  return { candidateMap, interfaceByName, implementorFilesByIfaceId, updateStmt, insertDispatchStmt, unresolvedRows, offset: 0 };
+}
+
+/**
+ * Resolve one batch of unresolved CALLS edges using a pre-built context.
+ * Slices from pre-fetched in-memory rows — no DB re-scan per batch.
+ * Returns number of edges resolved in this batch.
+ */
+export function resolveCallEdgesBatch(
+  db: Database.Database,
+  repoId: string,
+  ctx: CallResolutionContext,
+  batchSize: number
+): number {
+  const batch = ctx.unresolvedRows.slice(ctx.offset, ctx.offset + batchSize);
+  ctx.offset += batchSize;
+
+  if (batch.length === 0) return 0;
+
+  const { candidateMap, interfaceByName, implementorFilesByIfaceId } = ctx;
+
+  // Phase 1: resolve all rows in memory → collect updates and inserts
+  type UpdateRow = { fromId: string; oldToId: string; newToId: string; confidence: number; reason: string };
+  type InsertRow = { fromId: string; toId: string; confidence: number; reason: string };
+  const updates: UpdateRow[] = [];
+  const inserts: InsertRow[] = [];
+
+  for (const row of batch) {
+    const calleeName = row.toId.slice(7);
+    let dispatchMethodName: string | null = null;
+    let dispatchInterfaceId: string | null = null;
+    let match = pickBestNamedCandidate(
+      candidateMap.get(calleeName) ?? [],
+      row.fromFile,
+      ["function", "method", "constructor", "class"]
+    );
+
+    if (calleeName.includes(".")) {
+      const parts = calleeName.split(".").filter((x) => x.length > 0);
+      const receiverType = parts.length > 1 ? parts.slice(0, -1).join(".") : "";
+      const memberName = parts[parts.length - 1] ?? "";
+      if (receiverType && memberName) {
+        const iface = interfaceByName.get(receiverType);
+        if (iface) {
+          const ifaceMethod = (candidateMap.get(memberName) ?? []).find(
+            (c) => c.filePath === iface.filePath && c.kind === "method"
+          );
+          if (ifaceMethod) {
+            match = { symbolId: ifaceMethod.symbolId, filePath: iface.filePath, kind: "method" };
+            dispatchMethodName = memberName;
+            dispatchInterfaceId = iface.symbolId;
+          }
+        }
+      }
+    }
+
+    if (!match && calleeName.includes(".")) {
+      const baseName = calleeName.split(".").pop() ?? calleeName;
+      match = pickBestNamedCandidate(
+        candidateMap.get(baseName) ?? [],
+        row.fromFile,
+        ["function", "method", "constructor", "class"]
+      );
+    }
+
+    if (match) {
+      const confidence = dispatchMethodName
+        ? (match.filePath === row.fromFile ? 0.9 : 0.8)
+        : (match.filePath === row.fromFile ? 0.9 : 0.75);
+      const reason = dispatchMethodName
+        ? "resolved interface method"
+        : (confidence >= 0.9 ? "resolved callee same-file" : "resolved callee by name");
+      updates.push({ fromId: row.fromId, oldToId: row.toId, newToId: match.symbolId, confidence, reason });
+
+      if (dispatchMethodName && dispatchInterfaceId) {
+        const implementorFiles = implementorFilesByIfaceId.get(dispatchInterfaceId) ?? [];
+        for (const implFilePath of implementorFiles) {
+          const implMethod = (candidateMap.get(dispatchMethodName) ?? []).find(
+            (c) => c.filePath === implFilePath && c.kind === "method"
+          );
+          if (!implMethod || implMethod.symbolId === match.symbolId) continue;
+          inserts.push({ fromId: row.fromId, toId: implMethod.symbolId, confidence: 0.65, reason: "interface-dispatch" });
+        }
+      }
+    } else {
+      const rawName = calleeName.split(".").pop() ?? calleeName;
+      const normalized = stripGenerics(rawName);
+      if (isKnownExternalToken(normalized)) {
+        updates.push({ fromId: row.fromId, oldToId: row.toId, newToId: row.toId, confidence: 0.1, reason: "external boundary" });
+      } else if (isVectorEnabled()) {
+        const vecResults = vectorSearchSymbols(db, repoId, normalized, 3);
+        if (vecResults.length > 0 && vecResults[0].distance < 0.35) {
+          updates.push({ fromId: row.fromId, oldToId: row.toId, newToId: vecResults[0].symbolId, confidence: 0.52, reason: "resolved callee vector-fallback" });
+        }
+      }
+    }
+  }
+
+  if (updates.length === 0 && inserts.length === 0) return 0;
+
+  // Phase 2: use temp table + single UPDATE JOIN for bulk resolution
+  // This is dramatically faster than N individual UPDATE statements on large repos
+  let count = 0;
+  const { insertDispatchStmt } = ctx;
+
+  db.exec(`
+    create temp table if not exists _resolve_batch (
+      from_id text not null,
+      old_to_id text not null,
+      new_to_id text not null,
+      confidence real not null,
+      reason text not null
+    )
+  `);
+  db.exec(`delete from _resolve_batch`);
+
+  const insertBatch = db.prepare(
+    `insert into _resolve_batch (from_id, old_to_id, new_to_id, confidence, reason) values (?, ?, ?, ?, ?)`
+  );
+
+  // Insert all updates into temp table in one transaction
+  const fillTx = db.transaction(() => {
+    for (const u of updates) {
+      insertBatch.run(u.fromId, u.oldToId, u.newToId, u.confidence, u.reason);
+    }
+  });
+  fillTx();
+
+  // Single UPDATE JOIN — resolves all rows in one statement
+  const result = db.prepare(`
+    update edges
+    set
+      to_id = b.new_to_id,
+      confidence = b.confidence,
+      reason = b.reason
+    from _resolve_batch b
+    where edges.repo_id = ?
+      and edges.from_id = b.from_id
+      and edges.to_id = b.old_to_id
+      and edges.type = 'CALLS'
+  `).run(repoId);
+  count += result.changes;
+
+  // Handle dispatch inserts separately
+  if (inserts.length > 0) {
+    const insertTx = db.transaction(() => {
+      for (const ins of inserts) {
+        const r = insertDispatchStmt.run(
+          repoId, ins.fromId, ins.toId, ins.confidence, ins.reason,
+          repoId, ins.fromId, ins.toId
+        );
+        if (r.changes > 0) count += 1;
+      }
+    });
+    insertTx();
+  }
+
+  db.exec(`delete from _resolve_batch`);
 
   return count;
 }

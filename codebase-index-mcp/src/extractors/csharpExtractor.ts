@@ -19,7 +19,8 @@ import {
   collectCSharpScopeTypeMap,
   findEnclosingCSharpTypeName,
   emitTypeRefEdge,
-  isAncestorInvocation
+  isAncestorInvocation,
+  isLikelyCSharpInterfaceName
 } from "./extractorUtils.js";
 
 // JSON attribute names that carry a serialized key literal
@@ -92,22 +93,37 @@ export function extractCSharpSymbolsImpl(
     if (!functionNode) continue;
     let calleeName = "";
     let receiverName = "";
-    if (functionNode.type === "identifier") calleeName = functionNode.text;
-    else if (functionNode.type === "member_access_expression") {
+    if (functionNode.type === "identifier") {
+      calleeName = functionNode.text;
+    } else if (functionNode.type === "member_access_expression") {
       const nameNode = functionNode.childForFieldName("name");
       const expressionNode = functionNode.childForFieldName("expression");
       if (nameNode) calleeName = nameNode.text;
-      if (expressionNode && expressionNode.type === "identifier") receiverName = expressionNode.text;
+      if (expressionNode) {
+        if (expressionNode.type === "identifier") {
+          receiverName = expressionNode.text;
+        } else if (expressionNode.type === "this_expression") {
+          // this.Method() → use enclosing class type as receiver
+          receiverName = findEnclosingCSharpTypeName(node) ?? "";
+        }
+      }
     }
     if (!calleeName) continue;
     const fromId = findEnclosingCSharpSymbolId(node, input) ?? moduleSymbolId;
+    // Always emit simple callee edge
     edges.push({ repoId: input.repoId, fromId, toId: `callee:${calleeName}`, type: "CALLS" });
+    // Emit qualified edge only for receivers that are resolvable:
+    // - Uppercase start: static/type calls (e.g. MyService.DoWork)
+    // - Underscore prefix: DI field convention (e.g. _campaignService.Execute)
+    // - this_expression: resolved to enclosing class name
+    // Skipping plain camelCase locals (e.g. result.Value, list.Add) avoids
+    // edge explosion on large repos without losing meaningful call graph data.
+    if (receiverName && (/^[A-Z]/.test(receiverName) || receiverName.startsWith("_") || receiverName.length > 0 && functionNode.childForFieldName("expression")?.type === "this_expression")) {
+      edges.push({ repoId: input.repoId, fromId, toId: `callee:${receiverName}.${calleeName}`, type: "CALLS", confidence: 0.75, reason: "qualified call" });
+    }
     const endpointContract = extractCSharpHttpDependencyContract(node);
     if (endpointContract) {
       edges.push({ repoId: input.repoId, fromId, toId: toEndpointContractId(endpointContract.httpMethod, endpointContract.endpoint), type: "DEPENDS_ON", confidence: 0.92, reason: "http endpoint contract" });
-    }
-    if (receiverName && /^[A-Z]/.test(receiverName)) {
-      edges.push({ repoId: input.repoId, fromId, toId: `callee:${receiverName}.${calleeName}`, type: "CALLS" });
     }
   }
 
@@ -156,6 +172,38 @@ export function extractCSharpSymbolsImpl(
     // Track type symbols for later member resolution
     if (kind === "class" || kind === "struct" || kind === "interface") {
       typeSymbolByLine.set(node.startPosition.row, symbolId);
+    }
+
+    // P1.1: Emit IMPLEMENTS edges for interfaces in base_list
+    // AST layout: base_list is a named child of class/struct (not a field),
+    // and its children are identifier or generic_name nodes directly.
+    if (node.type === "class_declaration" || node.type === "struct_declaration") {
+      const baseListNodes = node.descendantsOfType(["base_list"]);
+      for (const baseList of baseListNodes) {
+        // Only process direct base_list (not nested classes)
+        if (baseList.parent !== node) continue;
+        for (const baseNode of baseList.namedChildren) {
+          // Children are identifier, generic_name, or qualified_name
+          const typeName = baseNode.text?.trim();
+          if (!typeName) continue;
+          // Strip generic args: IRepository<T> → IRepository
+          const baseName = typeName.replace(/<[^>]*>$/, "").trim();
+          if (!baseName) continue;
+          if (isLikelyCSharpInterfaceName(baseName)) {
+            edges.push({
+              repoId: input.repoId,
+              fromId: symbolId,
+              toId: `iface:${baseName}`,
+              type: "IMPLEMENTS",
+              confidence: 0.95,
+              reason: "base_list interface"
+            });
+          } else {
+            // Base class → TYPE_REF
+            emitTypeRefEdge(input, symbolId, baseName, edges);
+          }
+        }
+      }
     }
 
     symbols.push({ repoId: input.repoId, symbolId, filePath: input.filePath, name: nameNode.text, kind, line: node.startPosition.row + 1, signature: extractSignature(node), parentSymbolId });
@@ -533,10 +581,38 @@ function findSymbolIdByNode(symbols: SymbolRecord[], kind: SymbolRecord["kind"],
 
 function collectAttachedAttributeTexts(node: Parser.SyntaxNode): string[] {
   const attrs: string[] = [];
+
+  // Strategy 1: previousNamedSibling chain (some tree-sitter C# layouts)
   let current = node.previousNamedSibling;
   while (current && current.type === "attribute_list") {
     attrs.unshift(current.text);
     current = current.previousNamedSibling;
+  }
+  if (attrs.length > 0) return attrs;
+
+  // Strategy 2: attribute_list as first named children of the node itself
+  // This is the actual layout in tree-sitter-c-sharp where [HttpGet] appears
+  // as a named child of method_declaration / class_declaration before the body
+  for (const child of node.namedChildren) {
+    if (child.type === "attribute_list") {
+      attrs.push(child.text);
+    } else if (attrs.length > 0) {
+      // Stop at first non-attribute child after we found some
+      break;
+    } else if (child.type !== "modifier") {
+      // Stop if we hit a non-modifier, non-attribute child before finding any attributes
+      break;
+    }
+  }
+  if (attrs.length > 0) return attrs;
+
+  // Strategy 3: walk parent's named children before this node
+  // Handles declaration_list wrapper and other AST layout variants
+  const parent = node.parent;
+  if (!parent) return attrs;
+  for (const child of parent.namedChildren) {
+    if (child === node) break;
+    if (child.type === "attribute_list") attrs.push(child.text);
   }
   return attrs;
 }

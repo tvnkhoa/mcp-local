@@ -503,7 +503,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: "query_docs",
-        description: "Unified docs tool. mode=search: full-text search across indexed documentation sections; mode=stale: find docs that mention changed symbols; mode=coverage: show which exported symbols are documented. Requires docs lane enabled.",
+        description: "Unified docs tool. mode=search: full-text search across indexed documentation sections (requires query); mode=stale: find docs that mention changed symbols (requires symbolIds); mode=coverage: show which exported symbols are documented (requires filePath). Requires docs lane enabled.",
         inputSchema: {
           type: "object",
           additionalProperties: false,
@@ -1304,6 +1304,46 @@ async function runIndexAndResolve(
     await new Promise<void>((resolve) => setImmediate(resolve));
   };
 
+  /**
+   * Run a synchronous resolve function in batches to avoid blocking the event loop.
+   * Each batch processes BATCH_SIZE rows, then yields before the next batch.
+   * If maxRows=0 (unlimited), uses BATCH_SIZE per iteration until no more rows resolved.
+   */
+  const resolveInBatches = async (
+    _repoId: string,
+    label: string,
+    resolveFn: (batchSize: number) => number,
+    maxRows: number
+  ): Promise<number> => {
+    const BATCH_SIZE = 5_000;
+    let totalResolved = 0;
+    let remaining = maxRows > 0 ? maxRows : Infinity;
+    let iteration = 0;
+    const maxIterations = 200; // safety cap: 200 * 5000 = 1M rows max
+
+    while (remaining > 0 && iteration < maxIterations) {
+      const batchLimit = Math.min(BATCH_SIZE, remaining === Infinity ? BATCH_SIZE : remaining);
+      const resolved = resolveFn(batchLimit);
+      totalResolved += resolved;
+      iteration += 1;
+
+      process.stderr.write(
+        `[index-post-batch] repoId=${_repoId} type=${label} batch=${String(iteration)} resolved=${String(resolved)} total=${String(totalResolved)}\n`
+      );
+
+      // If nothing resolved in this batch, we're done
+      if (resolved === 0) break;
+
+      if (maxRows > 0) {
+        remaining -= batchLimit;
+      }
+
+      await yieldToEventLoop();
+    }
+
+    return totalResolved;
+  };
+
   if (mode === "incremental") {
     const skipDecision = evaluateIncrementalSkip(repoId, repoPath);
     if (skipDecision.shouldSkip) {
@@ -1359,6 +1399,10 @@ async function runIndexAndResolve(
     `[index-policy] repoId=${repoId} profile=${performanceProfile} source=${profileDecision.source} reason=${profileDecision.reason} fileCount=${String(profileDecision.fileCount)} symbolCount=${String(profileDecision.symbolCount)} maxUnresolvedRows=${String(postPolicy.maxUnresolvedRows)} resolveTypeRefs=${String(postPolicy.resolveTypeRefs)} resolveImplementsInPost=${String(postPolicy.resolveImplementsInPost)} effectiveResolveImplementsInPost=${String(effectiveResolveImplementsInPost)}\n`
   );
 
+  // Disable WAL auto-checkpoint during indexing to prevent lock contention
+  // with concurrent readers. Will be re-enabled in endIndexSession().
+  store.beginIndexSession();
+
   const summary = await runIndexPipeline(store, {
     repoId,
     repoPath,
@@ -1388,11 +1432,39 @@ async function runIndexAndResolve(
   await yieldToEventLoop();
 
   process.stderr.write(`[index-post] repoId=${repoId} resolving call edges...\n`);
-  const callEdgesResolved = (() => { try { return store.resolveCallEdges(repoId, postPolicy.maxUnresolvedRows); } catch { return 0; } })();
+  const callEdgesResolved = await (async () => {
+    try {
+      // Build lookup maps ONCE, then process in batches to avoid blocking event loop
+      process.stderr.write(`[index-post] repoId=${repoId} building call resolution context...\n`);
+      const ctx = store.buildCallResolutionContext(repoId);
+      process.stderr.write(`[index-post] repoId=${repoId} pre-fetched ${String(ctx.unresolvedRows.length)} unresolved call edges\n`);
+      if (ctx.unresolvedRows.length === 0) return 0;
+      const BATCH_SIZE = 10_000;
+      let total = 0;
+      let iteration = 0;
+      const maxIterations = 500;
+      while (iteration < maxIterations) {
+        const resolved = store.resolveCallEdgesBatch(repoId, ctx, BATCH_SIZE);
+        total += resolved;
+        iteration += 1;
+        process.stderr.write(
+          `[index-post-batch] repoId=${repoId} type=call batch=${String(iteration)} resolved=${String(resolved)} total=${String(total)}\n`
+        );
+        if (resolved === 0) break;
+        await yieldToEventLoop();
+      }
+      return total;
+    } catch { return 0; }
+  })();
   await yieldToEventLoop();
 
   process.stderr.write(`[index-post] repoId=${repoId} resolving import edges...\n`);
-  const importEdgesResolved = (() => { try { return store.resolveImportEdges(repoId, postPolicy.maxUnresolvedRows); } catch { return 0; } })();
+  const importEdgesResolved = await resolveInBatches(
+    repoId,
+    "import",
+    (batchSize) => { try { return store.resolveImportEdges(repoId, batchSize); } catch { return 0; } },
+    postPolicy.maxUnresolvedRows
+  );
   await yieldToEventLoop();
 
   if (postPolicy.resolveTypeRefs) {
@@ -1447,6 +1519,10 @@ async function runIndexAndResolve(
   store.recordRun(fullSummary);
   const recordElapsed = Date.now() - recordStart;
   process.stderr.write(`[index-post] repoId=${repoId} recorded run metadata in ${recordElapsed}ms\n`);
+
+  // Re-enable WAL auto-checkpoint and force a full checkpoint to shrink WAL file
+  store.endIndexSession();
+
   process.stderr.write(`[index-post-done] repoId=${repoId} crossRepo=${String(crossStats.resolved)} calls=${String(callEdgesResolved)} imports=${String(importEdgesResolved)} mentions=${String(mentionsResolved)}\n`);
 
   return fullSummary;

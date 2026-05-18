@@ -22,6 +22,8 @@ import {
   resolveUnlinkedEdges as resolveUnlinkedEdgesImpl,
   resolveImportEdges as resolveImportEdgesImpl,
   resolveCallEdges as resolveCallEdgesImpl,
+  resolveCallEdgesBatch as resolveCallEdgesBatchImpl,
+  buildCallResolutionContext as buildCallResolutionContextImpl,
   resolveTypeRefEdges as resolveTypeRefEdgesImpl,
   resolvePropertyEdges as resolvePropertyEdgesImpl,
   resolveImplementsEdges as resolveImplementsEdgesImpl
@@ -177,14 +179,17 @@ export class GraphStore {
   // normalizePath → impactAnalyzer.ts (normalizePath)
   // resolveCanonicalFilePath → impactAnalyzer.ts (resolveCanonicalFilePath)
 
-  constructor(dbPath: string) {
+   constructor(dbPath: string) {
     this.db = new Database(dbPath);
     this.db.pragma("journal_mode = WAL");
     this.db.pragma("synchronous = NORMAL");
     this.db.pragma("cache_size = -64000"); // 64MB cache
     this.db.pragma("temp_store = MEMORY");
     this.db.pragma("page_size = 4096"); // Standard 4KB page size
-    this.db.pragma("busy_timeout = 5000"); // 5s timeout for locks
+    this.db.pragma("busy_timeout = 30000"); // 30s timeout — handles checkpoint contention on large repos
+    this.db.pragma("wal_autocheckpoint = 8000"); // Raise WAL checkpoint threshold (default 1000 pages)
+    // Increase mmap size to reduce I/O contention during large batch writes
+    this.db.pragma("mmap_size = 268435456"); // 256MB mmap
     this.runInTransactionInternal = this.db.transaction((fn: () => void) => fn());
 
     // Load sqlite-vec synchronously via createRequire
@@ -267,6 +272,60 @@ export class GraphStore {
       this.db.pragma("wal_checkpoint(PASSIVE)");
     } catch {
       // Ignore checkpoint errors to avoid interrupting indexing flow.
+    }
+  }
+
+  /**
+   * Disable auto-checkpoint before a large index run to prevent WAL checkpoint
+   * contention with concurrent readers. Call endIndexSession() when done.
+   */
+  beginIndexSession(): void {
+    try {
+      this.db.pragma("wal_autocheckpoint = 0"); // Disable auto-checkpoint during indexing
+    } catch {
+      // Non-fatal — indexing continues without this optimization
+    }
+  }
+
+  endIndexSession(): void {
+    try {
+      this.db.pragma("wal_autocheckpoint = 8000"); // Restore threshold
+      this.db.pragma("wal_checkpoint(TRUNCATE)"); // Force full checkpoint to shrink WAL file
+    } catch {
+      // Non-fatal
+    }
+  }
+
+  /**
+   * Drop secondary edge indexes before bulk resolve to speed up writes.
+   * Call rebuildEdgeIndexes() after bulk write is done.
+   */
+  dropEdgeIndexesForBulkWrite(): void {
+    try {
+      this.db.exec(`
+        drop index if exists idx_edges_repo_to;
+        drop index if exists idx_edges_repo_type_to;
+        drop index if exists idx_edges_repo_from_to;
+        drop index if exists idx_edges_repo_type_to_from;
+      `);
+    } catch {
+      // Non-fatal
+    }
+  }
+
+  /**
+   * Rebuild edge indexes after bulk resolve completes.
+   */
+  rebuildEdgeIndexes(): void {
+    try {
+      this.db.exec(`
+        create index if not exists idx_edges_repo_to on edges(repo_id, to_id);
+        create index if not exists idx_edges_repo_type_to on edges(repo_id, type, to_id);
+        create index if not exists idx_edges_repo_from_to on edges(repo_id, from_id, to_id);
+        create index if not exists idx_edges_repo_type_to_from on edges(repo_id, type, to_id, from_id);
+      `);
+    } catch {
+      // Non-fatal
     }
   }
 
@@ -866,6 +925,14 @@ export class GraphStore {
     return resolveCallEdgesImpl(this.db, repoId, maxUnresolvedRows);
   }
 
+  buildCallResolutionContext(repoId: string): ReturnType<typeof buildCallResolutionContextImpl> {
+    return buildCallResolutionContextImpl(this.db, repoId);
+  }
+
+  resolveCallEdgesBatch(repoId: string, ctx: ReturnType<typeof buildCallResolutionContextImpl>, batchSize: number): number {
+    return resolveCallEdgesBatchImpl(this.db, repoId, ctx, batchSize);
+  }
+
   resolveTypeRefEdges(repoId: string, maxUnresolvedRows = 0): number {
     return resolveTypeRefEdgesImpl(this.db, repoId, maxUnresolvedRows);
   }
@@ -1105,6 +1172,15 @@ export class GraphStore {
 
     // Vector schema — vec_symbol_map always, vec_symbols only if sqlite-vec loaded
     ensureVectorSchema(this.db, this._vectorEnabled);
+
+    // Performance indexes — idempotent, safe to run on existing DBs
+    this.db.exec(`
+      create index if not exists idx_edges_repo_type_to on edges(repo_id, type, to_id);
+      create index if not exists idx_symbols_repo_kind on symbols(repo_id, kind);
+      create index if not exists idx_symbols_repo_kind_name on symbols(repo_id, kind, name);
+      create index if not exists idx_edges_repo_from_to on edges(repo_id, from_id, to_id);
+      create index if not exists idx_edges_repo_type_to_from on edges(repo_id, type, to_id, from_id);
+    `);
   }
 
   // --- Phase 7A: module grouping helper ---
@@ -1286,7 +1362,12 @@ export class GraphStore {
 
       create index if not exists idx_edges_repo_from on edges(repo_id, from_id);
       create index if not exists idx_edges_repo_to on edges(repo_id, to_id);
+      create index if not exists idx_edges_repo_type_to on edges(repo_id, type, to_id);
+      create index if not exists idx_edges_repo_from_to on edges(repo_id, from_id, to_id);
+      create index if not exists idx_edges_repo_type_to_from on edges(repo_id, type, to_id, from_id);
       create index if not exists idx_symbols_repo_file on symbols(repo_id, file_path);
+      create index if not exists idx_symbols_repo_kind on symbols(repo_id, kind);
+      create index if not exists idx_symbols_repo_kind_name on symbols(repo_id, kind, name);
       create index if not exists idx_runs_repo_started on index_runs(repo_id, started_at desc);
       create index if not exists idx_files_repo_path on files(repo_id, path);
 
