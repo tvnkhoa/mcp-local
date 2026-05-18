@@ -260,6 +260,7 @@ export function collectCSharpEnclosingMemberTypeMap(scopeNode: Parser.SyntaxNode
 export function collectCSharpScopeTypeMap(scopeNode: Parser.SyntaxNode): Map<string, string> {
   const typeMap = new Map<string, string>();
 
+  // Collect local variable declarations
   const localDeclarations = scopeNode.descendantsOfType("local_declaration_statement");
   for (const decl of localDeclarations) {
     const typeNode = decl.childForFieldName("type");
@@ -275,20 +276,36 @@ export function collectCSharpScopeTypeMap(scopeNode: Parser.SyntaxNode): Map<str
     }
   }
 
-  const parameters = scopeNode.descendantsOfType("parameter");
-  for (const param of parameters) {
-    const typeNode = param.childForFieldName("type");
-    const nameNode = param.childForFieldName("name");
+  // Collect parameters from enclosing method/constructor
+  // Walk up to find method_declaration or constructor_declaration
+  let current: Parser.SyntaxNode | null = scopeNode;
+  while (current) {
+    if (current.type === "method_declaration" || 
+        current.type === "constructor_declaration" ||
+        current.type === "local_function_statement") {
+      const paramListNode = current.childForFieldName("parameters");
+      if (paramListNode) {
+        for (const param of paramListNode.namedChildren) {
+          if (param.type === "parameter") {
+            const typeNode = param.childForFieldName("type");
+            const nameNode = param.childForFieldName("name");
 
-    if (typeNode && nameNode) {
-      const typeName = normalizeCSharpTypeName(typeNode.text.trim());
-      const paramName = nameNode.text.trim();
-      if (typeName && paramName) {
-        typeMap.set(paramName, typeName);
+            if (typeNode && nameNode) {
+              const typeName = normalizeCSharpTypeName(typeNode.text.trim());
+              const paramName = nameNode.text.trim();
+              if (typeName && paramName) {
+                typeMap.set(paramName, typeName);
+              }
+            }
+          }
+        }
       }
+      break; // Stop at first enclosing method
     }
+    current = current.parent;
   }
 
+  // Collect field/property types from enclosing class
   const enclosingMemberTypes = collectCSharpEnclosingMemberTypeMap(scopeNode);
   for (const [name, type] of enclosingMemberTypes) {
     if (!typeMap.has(name)) {

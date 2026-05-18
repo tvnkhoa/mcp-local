@@ -10,39 +10,19 @@
       },
       "models": {
         "cx/gpt-5.3-codex": {
-          "name": "GPT-5.3 Codex",
-          "limit": {
-            "context": 200000,
-            "output": 65536
-          }
+          "name": "GPT-5.3 Codex"
         },
         "cx/gpt-5.5": {
-          "name": "GPT-5.5",
-          "limit": {
-            "context": 200000,
-            "output": 65536
-          }
+          "name": "GPT-5.5"
         },
         "cc/claude-opus-4-6": {
-          "name": "cc - Claude Opus 4-6",
-          "limit": {
-            "context": 200000,
-            "output": 65536
-          }
+          "name": "cc - Claude Opus 4-6"
         },
         "kr/claude-opus-4-7": {
-          "name": "kr - Claude Opus 4-7",
-          "limit": {
-            "context": 200000,
-            "output": 65536
-          }
+          "name": "kr - Claude Opus 4-7"
         },
         "kr/claude-sonnet-4.5": {
-          "name": "Kiro Claude Sonnet 4.5",
-          "limit": {
-            "context": 200000,
-            "output": 65536
-          }
+          "name": "Kiro Claude Sonnet 4.5"
         }
       }
     }
