@@ -8,6 +8,7 @@ import type { ExtractInput, ExtractOutput } from "./extractors/extractorTypes.js
 
 import { parseMarkdownFile } from "./markdownParser.js";
 import { extractPythonSymbolsAndRoutesImpl } from "./extractors/pythonExtractor.js";
+import { extractProtoSymbolsImpl } from "./extractors/protoExtractor.js";
 import { extractJavaScriptRoutesImpl, extractJavaScriptSymbolsImpl } from "./extractors/jsExtractor.js";
 import {
   emitEndpointContractSymbolsFromCSharpSignaturesImpl,
@@ -73,6 +74,28 @@ export function extractGraphData(input: ExtractInput): ExtractOutput {
     }
   ];
 
+  const edges: EdgeRecord[] = [];
+  const routes: RouteRecord[] = [];
+
+  if (input.language === "python") {
+    extractPythonSymbolsAndRoutesImpl(input, symbols, edges, routes, moduleSymbolId);
+    const resolvedEdges = resolveIntraFileEdges(edges, symbols);
+    return {
+      symbols: dedupeSymbols(symbols),
+      edges: applyEdgeConfidenceFilter(applyCallEdgeCap(dedupeEdges(resolvedEdges), edgePolicy.maxCallEdgesPerFile), edgePolicy.minEdgeConfidence),
+      routes: dedupeRoutes(routes)
+    };
+  }
+
+  if (input.language === "proto") {
+    extractProtoSymbolsImpl(input, symbols, edges, moduleSymbolId);
+    const resolvedEdges = resolveIntraFileEdges(edges, symbols);
+    return {
+      symbols: dedupeSymbols(symbols),
+      edges: applyEdgeConfidenceFilter(applyCallEdgeCap(dedupeEdges(resolvedEdges), edgePolicy.maxCallEdgesPerFile), edgePolicy.minEdgeConfidence)
+    };
+  }
+
   const parser = getOrCreateParserForLanguage(input.language);
   if (!parser) {
     return { symbols, edges: [] };
@@ -96,18 +119,6 @@ export function extractGraphData(input: ExtractInput): ExtractOutput {
   }
 
   const root = tree.rootNode;
-  const edges: EdgeRecord[] = [];
-  const routes: RouteRecord[] = [];
-
-  if (input.language === "python") {
-    extractPythonSymbolsAndRoutesImpl(input, symbols, edges, routes, moduleSymbolId);
-    const resolvedEdges = resolveIntraFileEdges(edges, symbols);
-    return {
-      symbols: dedupeSymbols(symbols),
-      edges: applyEdgeConfidenceFilter(applyCallEdgeCap(dedupeEdges(resolvedEdges), edgePolicy.maxCallEdgesPerFile), edgePolicy.minEdgeConfidence),
-      routes: dedupeRoutes(routes)
-    };
-  }
 
   // Extract based on language
   if (input.language === "javascript" || input.language === "typescript") {

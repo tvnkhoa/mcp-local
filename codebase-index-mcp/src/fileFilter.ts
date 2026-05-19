@@ -96,7 +96,9 @@ const LANGUAGE_BY_EXTENSION: Record<string, string> = {
   ".cs": "csharp",
   ".csproj": "csproj",
   ".sln": "sln",
-  ".slnx": "sln"
+  ".slnx": "sln",
+  // Protocol Buffers / gRPC
+  ".proto": "proto"
 };
 
 /** Returns true if the first 512 bytes contain a null byte — reliable binary file indicator. */
