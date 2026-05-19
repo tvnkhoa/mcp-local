@@ -125,6 +125,9 @@ export function handleHealthCheck(
           noCandidates: unresolvedStats.noCandidates,
           ambiguous: unresolvedStats.ambiguous,
           externalBoundary: unresolvedStats.externalBoundary,
+          importsTotal: unresolvedStats.importsTotal,
+          importsClassified: unresolvedStats.importsClassified,
+          importClassificationRatio: unresolvedStats.importClassificationRatio,
           trulyUnresolved: unresolvedStats.trulyUnresolved,
         }
       : null,

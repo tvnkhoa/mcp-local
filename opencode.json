@@ -18,11 +18,14 @@
         "cc/claude-opus-4-6": {
           "name": "cc - Claude Opus 4-6"
         },
-        "kr/claude-opus-4-7": {
-          "name": "kr - Claude Opus 4-7"
+         "cc/claude-sonnet-4.6": {
+          "name": "cc - Claude Sonnet 4.6"
+        },
+        "kr/claude-opus-4.7": {
+          "name": "kr - Claude Opus 4.7"
         },
         "kr/claude-sonnet-4.6": {
-          "name": "Kiro Claude Sonnet 4.6"
+          "name": "kr - Claude Sonnet 4.6"
         }
       }
     }

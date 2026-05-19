@@ -168,6 +168,8 @@ const CHECKPOINT_EVERY_N_BATCHES = numberFromEnv("CODEBASE_INDEX_CHECKPOINT_EVER
 // Route ALL non-markdown files to the worker pool (threshold=0).
 // The old default of 512KB exceeded the 500KB fileFilter cap, meaning workers were never used.
 const LARGE_FILE_THRESHOLD_BYTES = numberFromEnv("CODEBASE_INDEX_LARGE_FILE_THRESHOLD_BYTES", 0);
+/** Hard cap on file size. Default 500KB. Raise (e.g. 2_000_000) for repos with large generated files worth indexing. */
+const MAX_FILE_SIZE_BYTES = numberFromEnv("CODEBASE_INDEX_MAX_FILE_SIZE_BYTES", 500_000);
 const DEFAULT_PARSE_WORKERS = Math.max(1, Math.floor(os.cpus().length / 2));
 const PARSE_WORKERS = numberFromEnv("CODEBASE_INDEX_PARSE_WORKERS", DEFAULT_PARSE_WORKERS);
 const PARSE_JOB_TIMEOUT_MS = numberFromEnv("CODEBASE_INDEX_PARSE_JOB_TIMEOUT_MS", 20_000);
@@ -1396,7 +1398,7 @@ async function runIndexAndResolve(
   const postPolicy = resolvePostPhasePolicy(performanceProfile);
   const effectiveResolveImplementsInPost = mode !== "full" && postPolicy.resolveImplementsInPost;
   process.stderr.write(
-    `[index-policy] repoId=${repoId} profile=${performanceProfile} source=${profileDecision.source} reason=${profileDecision.reason} fileCount=${String(profileDecision.fileCount)} symbolCount=${String(profileDecision.symbolCount)} maxUnresolvedRows=${String(postPolicy.maxUnresolvedRows)} resolveTypeRefs=${String(postPolicy.resolveTypeRefs)} resolveImplementsInPost=${String(postPolicy.resolveImplementsInPost)} effectiveResolveImplementsInPost=${String(effectiveResolveImplementsInPost)}\n`
+    `[index-policy] repoId=${repoId} profile=${performanceProfile} source=${profileDecision.source} reason=${profileDecision.reason} fileCount=${String(profileDecision.fileCount)} symbolCount=${String(profileDecision.symbolCount)} maxUnresolvedRows=${String(postPolicy.maxUnresolvedRows)} resolveTypeRefs=${String(postPolicy.resolveTypeRefs)} resolvePropertyRefs=${String(postPolicy.resolvePropertyRefs)} resolveImplementsInPost=${String(postPolicy.resolveImplementsInPost)} effectiveResolveImplementsInPost=${String(effectiveResolveImplementsInPost)}\n`
   );
 
   // Disable WAL auto-checkpoint during indexing to prevent lock contention
@@ -1414,11 +1416,22 @@ async function runIndexAndResolve(
     subtxSize: SUBTX_SIZE,
     checkpointEveryNBatches: CHECKPOINT_EVERY_N_BATCHES,
     largeFileThresholdBytes: LARGE_FILE_THRESHOLD_BYTES,
+    maxFileSizeBytes: MAX_FILE_SIZE_BYTES,
     parseWorkers: PARSE_WORKERS,
     parseJobTimeoutMs: PARSE_JOB_TIMEOUT_MS
   });
+  const resolvePhaseStart = Date.now();
+  let ftsRebuildMs = 0;
+  let buildContextMs = 0;
+  let unresolvedCallsTotal = 0;
+  let callResolveMs = 0;
+  let importResolveMs = 0;
+  let typeResolveMs = 0;
+  let propertyResolveMs = 0;
+  let implementsResolveMs = 0;
 
   process.stderr.write(`[index-post] repoId=${repoId} rebuilding FTS indexes...\n`);
+  const ftsStart = Date.now();
   try { store.rebuildFts(); } catch { /* non-fatal */ }
   await yieldToEventLoop();
   if (docsEnabled) {
@@ -1426,6 +1439,7 @@ async function runIndexAndResolve(
     try { store.rebuildDocsFts(); } catch { /* non-fatal */ }
     await yieldToEventLoop();
   }
+  ftsRebuildMs = Date.now() - ftsStart;
 
   process.stderr.write(`[index-post] repoId=${repoId} resolving cross-repo links...\n`);
   const crossStats = safeCrossRepoResolve(repoId);
@@ -1433,16 +1447,26 @@ async function runIndexAndResolve(
 
   process.stderr.write(`[index-post] repoId=${repoId} resolving call edges...\n`);
   const callEdgesResolved = await (async () => {
+    const callStart = Date.now();
     try {
       // Build lookup maps ONCE, then process in batches to avoid blocking event loop
       process.stderr.write(`[index-post] repoId=${repoId} building call resolution context...\n`);
+      const ctxStart = Date.now();
       const ctx = store.buildCallResolutionContext(repoId);
+      buildContextMs = Date.now() - ctxStart;
+      unresolvedCallsTotal = ctx.unresolvedRows.length;
       process.stderr.write(`[index-post] repoId=${repoId} pre-fetched ${String(ctx.unresolvedRows.length)} unresolved call edges\n`);
       if (ctx.unresolvedRows.length === 0) return 0;
-      const BATCH_SIZE = 10_000;
+
+      // Optimization: drop secondary edge indexes before bulk resolve to speed up UPDATEs.
+      // Each UPDATE otherwise must maintain 4 secondary indexes on the edges table.
+      process.stderr.write(`[index-post] repoId=${repoId} dropping edge indexes for bulk resolve...\n`);
+      store.dropEdgeIndexesForBulkWrite();
+
+      const BATCH_SIZE = 5_000;
       let total = 0;
       let iteration = 0;
-      const maxIterations = 500;
+      const maxIterations = 1000;
       while (iteration < maxIterations) {
         const resolved = store.resolveCallEdgesBatch(repoId, ctx, BATCH_SIZE);
         total += resolved;
@@ -1455,29 +1479,41 @@ async function runIndexAndResolve(
       }
       return total;
     } catch { return 0; }
+    finally {
+      // Always rebuild indexes after resolve, even on error
+      process.stderr.write(`[index-post] repoId=${repoId} rebuilding edge indexes after resolve...\n`);
+      try { store.rebuildEdgeIndexes(); } catch { /* non-fatal */ }
+      callResolveMs = Date.now() - callStart;
+    }
   })();
   await yieldToEventLoop();
 
   process.stderr.write(`[index-post] repoId=${repoId} resolving import edges...\n`);
+  const importStart = Date.now();
   const importEdgesResolved = await resolveInBatches(
     repoId,
     "import",
     (batchSize) => { try { return store.resolveImportEdges(repoId, batchSize); } catch { return 0; } },
     postPolicy.maxUnresolvedRows
   );
+  importResolveMs = Date.now() - importStart;
   await yieldToEventLoop();
 
   if (postPolicy.resolveTypeRefs) {
     process.stderr.write(`[index-post] repoId=${repoId} resolving type references...\n`);
+    const typeStart = Date.now();
     (() => { try { store.resolveTypeRefEdges(repoId, postPolicy.maxUnresolvedRows); } catch { /* non-fatal */ } })();
+    typeResolveMs = Date.now() - typeStart;
   } else {
     process.stderr.write(`[index-post-skip] repoId=${repoId} skipping type reference resolution by policy\n`);
   }
   await yieldToEventLoop();
 
-  if (postPolicy.resolveTypeRefs) {
+  if (postPolicy.resolvePropertyRefs) {
     process.stderr.write(`[index-post] repoId=${repoId} resolving property references...\n`);
+    const propertyStart = Date.now();
     (() => { try { store.resolvePropertyEdges(repoId, postPolicy.maxUnresolvedRows); } catch { /* non-fatal */ } })();
+    propertyResolveMs = Date.now() - propertyStart;
   } else {
     process.stderr.write(`[index-post-skip] repoId=${repoId} skipping property reference resolution by policy\n`);
   }
@@ -1486,7 +1522,9 @@ async function runIndexAndResolve(
   const shouldResolveImplementsInPost = effectiveResolveImplementsInPost;
   if (shouldResolveImplementsInPost) {
     process.stderr.write(`[index-post] repoId=${repoId} resolving interface implementations...\n`);
+    const implementsStart = Date.now();
     try { store.resolveImplementsEdges(repoId); } catch { /* non-fatal */ }
+    implementsResolveMs = Date.now() - implementsStart;
   } else {
     process.stderr.write(`[index-post-skip] repoId=${repoId} skipping interface implementation resolution in post-phase\n`);
   }
@@ -1514,7 +1552,19 @@ async function runIndexAndResolve(
     unresolvedNoCandidate: crossStats.unresolvedByReason.no_candidate,
     unresolvedAmbiguous: crossStats.unresolvedByReason.ambiguous_candidates,
     unresolvedBoundaryBlocked: crossStats.unresolvedByReason.boundary_blocked,
-    unresolvedLowConfidence: crossStats.unresolvedByReason.low_confidence
+    unresolvedLowConfidence: crossStats.unresolvedByReason.low_confidence,
+    resolvePhaseMs: Date.now() - resolvePhaseStart,
+    buildContextMs,
+    callResolveMs,
+    importResolveMs,
+    typeResolveMs,
+    propertyResolveMs,
+    implementsResolveMs,
+    ftsRebuildMs,
+    unresolvedCallsTotal,
+    unresolvedRowsCappedByPolicy: postPolicy.maxUnresolvedRows > 0,
+    resolveCallsCoverage: unresolvedCallsTotal > 0 ? callEdgesResolved / unresolvedCallsTotal : 1,
+    performanceProfile
   };
   store.recordRun(fullSummary);
   const recordElapsed = Date.now() - recordStart;

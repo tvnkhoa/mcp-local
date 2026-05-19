@@ -317,7 +317,29 @@ export function collectCSharpEnclosingMemberTypeMap(scopeNode: Parser.SyntaxNode
   return typeMap;
 }
 
-export function collectCSharpScopeTypeMap(scopeNode: Parser.SyntaxNode): Map<string, string> {
+function addCSharpTypeAliases(typeMap: Map<string, string>, memberName: string, typeName: string): void {
+  if (!memberName || !typeName) {
+    return;
+  }
+
+  if (!typeMap.has(memberName)) {
+    typeMap.set(memberName, typeName);
+  }
+
+  const stripped = memberName.replace(/^_+/, "");
+  if (stripped && !typeMap.has(stripped)) {
+    typeMap.set(stripped, typeName);
+  }
+
+  if (stripped.length > 0) {
+    const pascal = stripped.charAt(0).toUpperCase() + stripped.slice(1);
+    if (!typeMap.has(pascal)) {
+      typeMap.set(pascal, typeName);
+    }
+  }
+}
+
+export function collectCSharpScopeTypeMap(scopeNode: Parser.SyntaxNode, includeDiAliases = true): Map<string, string> {
   const typeMap = new Map<string, string>();
 
   // Collect local variable declarations
@@ -371,6 +393,45 @@ export function collectCSharpScopeTypeMap(scopeNode: Parser.SyntaxNode): Map<str
     if (!typeMap.has(name)) {
       typeMap.set(name, type);
     }
+  }
+
+  // Infer DI field types from constructor injection assignments.
+  // Only when includeDiAliases=true (CALLS path). Property path skips this
+  // to avoid emitting property:InterfaceType.Prop tokens that can't resolve.
+  if (!includeDiAliases) {
+    return typeMap;
+  }
+
+  let ctorCurrent: Parser.SyntaxNode | null = scopeNode;
+  while (ctorCurrent) {
+    if (ctorCurrent.type === "constructor_declaration") {
+      for (const assignment of ctorCurrent.descendantsOfType("assignment_expression")) {
+        const leftNode = assignment.childForFieldName("left");
+        const rightNode = assignment.childForFieldName("right");
+        if (!leftNode || !rightNode || rightNode.type !== "identifier") {
+          continue;
+        }
+
+        const rhsType = typeMap.get(rightNode.text.trim());
+        if (!rhsType) {
+          continue;
+        }
+
+        let leftName = "";
+        if (leftNode.type === "identifier") {
+          leftName = leftNode.text.trim();
+        } else if (leftNode.type === "member_access_expression") {
+          const leftNameNode = leftNode.childForFieldName("name");
+          leftName = leftNameNode?.text.trim() ?? "";
+        }
+
+        if (leftName) {
+          addCSharpTypeAliases(typeMap, leftName, rhsType);
+        }
+      }
+      break;
+    }
+    ctorCurrent = ctorCurrent.parent;
   }
 
   return typeMap;

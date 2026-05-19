@@ -28,6 +28,18 @@ export type IndexRunSummary = {
   unresolvedBoundaryBlocked?: number;
   unresolvedLowConfidence?: number;
   vectorSymbolsIndexed?: number;
+  resolvePhaseMs?: number;
+  buildContextMs?: number;
+  callResolveMs?: number;
+  importResolveMs?: number;
+  typeResolveMs?: number;
+  propertyResolveMs?: number;
+  implementsResolveMs?: number;
+  ftsRebuildMs?: number;
+  unresolvedCallsTotal?: number;
+  unresolvedRowsCappedByPolicy?: boolean;
+  resolveCallsCoverage?: number;
+  performanceProfile?: "standard" | "large" | "very-large";
 };
 
 export type GraphHealth = {
@@ -35,6 +47,9 @@ export type GraphHealth = {
   unresolvedImports: number;
   unresolvedTypeRefs: number;
   unresolvedProperties: number;
+  importsTotal?: number;
+  importsClassified?: number;
+  importClassificationRatio?: number;
   note: string;
 };
 

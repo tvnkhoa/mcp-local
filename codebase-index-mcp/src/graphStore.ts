@@ -517,7 +517,11 @@ export class GraphStore {
           cross_repo_attempts, cross_repo_resolved,
           unresolved_no_candidate, unresolved_ambiguous,
           unresolved_boundary_blocked, unresolved_low_confidence,
-          commit_sha
+          commit_sha,
+          resolve_phase_ms, build_context_ms, call_resolve_ms, import_resolve_ms,
+          type_resolve_ms, property_resolve_ms, implements_resolve_ms, fts_rebuild_ms,
+          unresolved_calls_total, unresolved_rows_capped_by_policy, resolve_calls_coverage,
+          performance_profile
         ) values (
           ?, ?, ?, ?, ?, ?,
           ?, ?, ?, ?,
@@ -527,6 +531,10 @@ export class GraphStore {
           ?, ?,
           ?, ?,
           ?, ?,
+          ?,
+          ?, ?, ?, ?,
+          ?, ?, ?, ?,
+          ?, ?, ?,
           ?
         )
         `
@@ -557,7 +565,19 @@ export class GraphStore {
         summary.unresolvedAmbiguous ?? 0,
         summary.unresolvedBoundaryBlocked ?? 0,
         summary.unresolvedLowConfidence ?? 0,
-        summary.commitSha ?? null
+        summary.commitSha ?? null,
+        summary.resolvePhaseMs ?? 0,
+        summary.buildContextMs ?? 0,
+        summary.callResolveMs ?? 0,
+        summary.importResolveMs ?? 0,
+        summary.typeResolveMs ?? 0,
+        summary.propertyResolveMs ?? 0,
+        summary.implementsResolveMs ?? 0,
+        summary.ftsRebuildMs ?? 0,
+        summary.unresolvedCallsTotal ?? 0,
+        summary.unresolvedRowsCappedByPolicy ? 1 : 0,
+        summary.resolveCallsCoverage ?? 0,
+        summary.performanceProfile ?? null
       );
   }
 
@@ -591,7 +611,19 @@ export class GraphStore {
           unresolved_ambiguous as unresolvedAmbiguous,
           unresolved_boundary_blocked as unresolvedBoundaryBlocked,
           unresolved_low_confidence as unresolvedLowConfidence,
-          commit_sha as commitSha
+          commit_sha as commitSha,
+          resolve_phase_ms as resolvePhaseMs,
+          build_context_ms as buildContextMs,
+          call_resolve_ms as callResolveMs,
+          import_resolve_ms as importResolveMs,
+          type_resolve_ms as typeResolveMs,
+          property_resolve_ms as propertyResolveMs,
+          implements_resolve_ms as implementsResolveMs,
+          fts_rebuild_ms as ftsRebuildMs,
+          unresolved_calls_total as unresolvedCallsTotal,
+          unresolved_rows_capped_by_policy as unresolvedRowsCappedByPolicy,
+          resolve_calls_coverage as resolveCallsCoverage,
+          performance_profile as performanceProfile
         from index_runs
         where repo_id = ?
         order by finished_at desc, started_at desc, rowid desc
@@ -1088,6 +1120,16 @@ export class GraphStore {
         this.db.exec(`alter table index_runs add column ${name} integer not null default 0`);
       }
     };
+    const ensureRunColumnReal = (name: string) => {
+      if (!runCols.some((c) => c.name === name)) {
+        this.db.exec(`alter table index_runs add column ${name} real not null default 0`);
+      }
+    };
+    const ensureRunColumnText = (name: string) => {
+      if (!runCols.some((c) => c.name === name)) {
+        this.db.exec(`alter table index_runs add column ${name} text`);
+      }
+    };
 
     ensureRunColumn("cross_repo_attempts");
     ensureRunColumn("cross_repo_resolved");
@@ -1096,6 +1138,18 @@ export class GraphStore {
     ensureRunColumn("unresolved_boundary_blocked");
     ensureRunColumn("unresolved_low_confidence");
     ensureRunColumn("vector_symbols_indexed");
+    ensureRunColumn("resolve_phase_ms");
+    ensureRunColumn("build_context_ms");
+    ensureRunColumn("call_resolve_ms");
+    ensureRunColumn("import_resolve_ms");
+    ensureRunColumn("type_resolve_ms");
+    ensureRunColumn("property_resolve_ms");
+    ensureRunColumn("implements_resolve_ms");
+    ensureRunColumn("fts_rebuild_ms");
+    ensureRunColumn("unresolved_calls_total");
+    ensureRunColumn("unresolved_rows_capped_by_policy");
+    ensureRunColumnReal("resolve_calls_coverage");
+    ensureRunColumnText("performance_profile");
 
     // Add commit_sha for staleness detection.
     if (!runCols.some((c) => c.name === "commit_sha")) {
@@ -1569,6 +1623,9 @@ export class GraphStore {
     noCandidates: number;
     ambiguous: number;
     externalBoundary: number;
+    importsTotal: number;
+    importsClassified: number;
+    importClassificationRatio: number;
     trulyUnresolved: number;
   } {
     const row = this.db.prepare(`
@@ -1577,11 +1634,19 @@ export class GraphStore {
                       OR reason = 'unresolved type token' OR reason = 'unresolved property token'
                  THEN 1 ELSE 0 END) as trulyUnresolved,
         SUM(CASE WHEN reason = 'external boundary' THEN 1 ELSE 0 END) as externalBoundary
+        ,SUM(CASE WHEN type = 'IMPORTS' THEN 1 ELSE 0 END) as importsTotal
+        ,SUM(CASE WHEN type = 'IMPORTS' AND coalesce(reason, '') != 'unresolved import token' THEN 1 ELSE 0 END) as importsClassified
       FROM edges
       WHERE repo_id = ?
         AND (to_id LIKE 'callee:%' OR to_id LIKE 'import:%'
              OR to_id LIKE 'type:%' OR to_id LIKE 'property:%')
-    `).get(repoId) as { trulyUnresolved: number | null; externalBoundary: number | null } | undefined;
+    `).get(repoId) as { trulyUnresolved: number | null; externalBoundary: number | null; importsTotal: number | null; importsClassified: number | null } | undefined;
+
+    const bridgeRow = this.db.prepare(`
+      SELECT SUM(CASE WHEN reason = 'namespace package contract bridge' THEN 1 ELSE 0 END) as packageBridgeImports
+      FROM edges
+      WHERE repo_id = ? AND type = 'DEPENDS_ON'
+    `).get(repoId) as { packageBridgeImports: number | null } | undefined;
 
     const latestRun = this.db.prepare(`
       SELECT unresolved_no_candidate as noCandidates,
@@ -1596,6 +1661,9 @@ export class GraphStore {
       noCandidates: latestRun?.noCandidates ?? 0,
       ambiguous: latestRun?.ambiguous ?? 0,
       externalBoundary: row?.externalBoundary ?? 0,
+      importsTotal: row?.importsTotal ?? 0,
+      importsClassified: (row?.importsClassified ?? 0) + (bridgeRow?.packageBridgeImports ?? 0),
+      importClassificationRatio: (row?.importsTotal ?? 0) > 0 ? Math.min(1, ((row?.importsClassified ?? 0) + (bridgeRow?.packageBridgeImports ?? 0)) / (row?.importsTotal ?? 1)) : 1,
       trulyUnresolved: row?.trulyUnresolved ?? 0,
     };
   }

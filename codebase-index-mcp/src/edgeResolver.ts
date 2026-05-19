@@ -5,10 +5,72 @@ import { findProviderSymbolByName } from "./crossRepoStore.js";
 import {
   isKnownExternalToken,
   isKnownExternalNamespace,
+  isKnownCrossRepoNamespace,
   stripGenerics,
   vectorSearchSymbols,
   isVectorEnabled,
 } from "./vectorStore.js";
+
+/**
+ * Bulk-tag all import edges whose namespace belongs to a known external namespace (System, Microsoft, etc.)
+ * as "external boundary" with confidence 0.1. Runs without row LIMIT so external imports are always tagged
+ * regardless of batch size or maxUnresolvedRows policy.
+ */
+function tagExternalNamespaceImports(db: Database.Database, repoId: string): number {
+  // Collect all distinct unresolved import namespaces
+  const rows = db
+    .prepare(
+      `SELECT DISTINCT to_id as toId
+       FROM edges
+       WHERE repo_id = ? AND type = 'IMPORTS' AND to_id LIKE 'import:%'
+         AND reason = 'unresolved import token'`
+    )
+    .all(repoId) as { toId: string }[];
+
+  if (rows.length === 0) return 0;
+
+  // Build set of known NuGet package top-level namespaces from DEPENDS_ON edges
+  // e.g. nuget:Newtonsoft.Json → "Newtonsoft", nuget:MassTransit → "MassTransit"
+  const nugetTopNamespaces = new Set<string>();
+  const nugetRows = db
+    .prepare(
+      `SELECT DISTINCT to_id as toId FROM edges
+       WHERE repo_id = ? AND type = 'DEPENDS_ON' AND to_id LIKE 'nuget:%'`
+    )
+    .all(repoId) as { toId: string }[];
+  for (const nr of nugetRows) {
+    const pkgName = nr.toId.slice(6); // strip "nuget:"
+    const topNs = pkgName.split(".")[0];
+    // Store lowercase for case-insensitive matching against PascalCase namespace tokens
+    if (topNs) nugetTopNamespaces.add(topNs.toLowerCase());
+  }
+
+  const updateStmt = db.prepare(
+    `UPDATE edges SET confidence = 0.1, reason = 'external boundary'
+     WHERE repo_id = ? AND type = 'IMPORTS' AND to_id = ? AND reason = 'unresolved import token'`
+  );
+
+  let count = 0;
+  const tx = db.transaction(() => {
+    for (const row of rows) {
+      let importPath = row.toId.slice(7); // strip "import:"
+      // Strip "static " prefix from "using static" directives (e.g. "static System.Net.WebRequestMethods")
+      if (importPath.startsWith("static ")) importPath = importPath.slice(7);
+      if (!importPath.includes(".")) continue;
+      const topNs = importPath.split(".")[0];
+      if (!topNs) continue;
+      // Check known external namespaces (System, Microsoft, etc.)
+      // OR NuGet package top-level namespaces — use case-insensitive match (nuget ids are lowercase)
+      if (isKnownExternalNamespace(topNs) || nugetTopNamespaces.has(topNs.toLowerCase())) {
+        const result = updateStmt.run(repoId, row.toId);
+        count += result.changes;
+      }
+    }
+  });
+  tx();
+
+  return count;
+}
 
 function createEmptyResolutionStats(): ResolutionStats {
   return {
@@ -176,12 +238,17 @@ export function resolveUnlinkedEdges(db: Database.Database, repoId: string): Res
 }
 
 export function resolveImportEdges(db: Database.Database, repoId: string, maxUnresolvedRows = 0): number {
+  // Phase 0: Bulk-tag all external namespace imports BEFORE row-limited resolution.
+  // This runs without LIMIT so System.*/Microsoft.*/etc. are always tagged regardless of batch size.
+  const externalTagged = tagExternalNamespaceImports(db, repoId);
+
   // Find all IMPORTS edges with unresolved plain-text toId ("import:<path>")
   const unresolvedSql = `
     select distinct e.from_id as fromId, e.to_id as toId, sf.file_path as fromFile
     from edges e
     inner join symbols sf on sf.repo_id = e.repo_id and sf.symbol_id = e.from_id
     where e.repo_id = ? and e.type = 'IMPORTS' and e.to_id like 'import:%'
+      and e.reason = 'unresolved import token'
     ${maxUnresolvedRows > 0 ? "limit ?" : ""}
   `;
   const unresolved = db
@@ -192,7 +259,7 @@ export function resolveImportEdges(db: Database.Database, repoId: string, maxUnr
     fromFile: string;
   }[];
 
-  if (unresolved.length === 0) return 0;
+  if (unresolved.length === 0) return externalTagged;
 
   const updateStmt = db.prepare(
     `update edges set to_id = ?, confidence = ?, reason = ? where repo_id = ? and from_id = ? and to_id = ?`
@@ -207,6 +274,25 @@ export function resolveImportEdges(db: Database.Database, repoId: string, maxUnr
     // Normalize path separators
     const normalizedPath = row.filePath.replace(/\\/g, "/");
     fileToModuleId.set(normalizedPath, row.symbolId);
+  }
+
+  const namespacePathToModuleId = new Map<string, string>();
+  const commonRootFolders = new Set(["src", "app", "lib", "test", "tests", "spec", "specs", "packages", "shared", "services", "server", "client"]);
+  for (const [filePath, symbolId] of fileToModuleId) {
+    const parts = filePath.split("/").filter((part) => part.length > 0);
+    if (parts.length < 2) continue;
+
+    const withoutFile = parts.slice(0, -1);
+    const startIndex = commonRootFolders.has((withoutFile[0] ?? "").toLowerCase()) ? 1 : 0;
+    const candidateParts = withoutFile.slice(startIndex);
+    if (candidateParts.length < 2) continue;
+
+    for (let length = 2; length <= Math.min(6, candidateParts.length); length += 1) {
+      const alias = candidateParts.slice(candidateParts.length - length).join(".");
+      if (alias && !namespacePathToModuleId.has(alias)) {
+        namespacePathToModuleId.set(alias, symbolId);
+      }
+    }
   }
 
   // P2.1: Build a map of C# namespace → module symbolId for internal namespace resolution.
@@ -238,7 +324,9 @@ export function resolveImportEdges(db: Database.Database, repoId: string, maxUnr
   let count = 0;
   const tx = db.transaction(() => {
     for (const row of unresolved) {
-      const importPath = row.toId.slice(7); // strip "import:"
+      let importPath = row.toId.slice(7); // strip "import:"
+      // Strip "static " prefix from "using static" directives before namespace resolution
+      if (importPath.startsWith("static ")) importPath = importPath.slice(7);
       const fromDir = row.fromFile.replace(/\\/g, "/").split("/").slice(0, -1).join("/");
 
       // P2.1: Try C# namespace resolution first for dotted namespace imports
@@ -277,9 +365,16 @@ export function resolveImportEdges(db: Database.Database, repoId: string, maxUnr
           }
         }
 
+        // Fallback: match namespace against folder-derived aliases from C# file paths.
+        // This helps when a file does not declare a dotted namespace symbol but lives
+        // under a namespace-shaped directory tree (e.g. CRM/Marketing/Model/Foo.cs).
+        if (!matchedModuleId) {
+          matchedModuleId = namespacePathToModuleId.get(importPath);
+        }
+
         importResolveCache.set(cacheKey, matchedModuleId ?? null);
         if (matchedModuleId) {
-          updateStmt.run(matchedModuleId, 0.8, "resolved csharp namespace", repoId, row.fromId, row.toId);
+          updateStmt.run(matchedModuleId, 0.78, namespacePathToModuleId.has(importPath) ? "resolved csharp namespace (path fallback)" : "resolved csharp namespace", repoId, row.fromId, row.toId);
           count += 1;
         }
         continue;
@@ -340,7 +435,137 @@ export function resolveImportEdges(db: Database.Database, repoId: string, maxUnr
   });
   tx();
 
-  return count;
+  // Phase 3: Resolve cross-repo namespace imports (e.g. CRM.*, SSNet.*)
+  // These were intentionally left unresolved by tagExternalNamespaceImports and the main loop.
+  const crossRepoResolved = resolveImportsCrossRepo(db, repoId);
+
+  return count + externalTagged + crossRepoResolved;
+}
+
+/**
+ * Resolve IMPORTS edges whose namespace belongs to a known cross-repo namespace (e.g. CRM.*, SSNet.*).
+ * If another indexed repo in the same DB declares a matching namespace module, the edge is resolved
+ * to that module's symbolId and a cross_repo_deps entry is created.
+ * If no provider repo is found, the edge is tagged "external boundary" as fallback
+ * (provider repo not yet indexed).
+ *
+ * Also re-attempts resolution for edges previously tagged "external boundary" with a cross-repo
+ * namespace prefix — this handles the case where a provider repo is newly indexed after consumer.
+ */
+function resolveImportsCrossRepo(db: Database.Database, repoId: string): number {
+  // Find all IMPORTS edges that are either unresolved OR previously tagged external boundary
+  // for cross-repo namespace prefixes. Excludes edges already resolved to real symbols.
+  const rows = db
+    .prepare(
+      `SELECT e.from_id as fromId, e.to_id as toId, e.reason as reason
+       FROM edges e
+       WHERE e.repo_id = ? AND e.type = 'IMPORTS' AND e.to_id LIKE 'import:%'
+         AND e.reason IN ('unresolved import token', 'external boundary')`
+    )
+    .all(repoId) as { fromId: string; toId: string; reason: string }[];
+
+  if (rows.length === 0) return 0;
+
+  // Filter: only cross-repo namespace prefixes (e.g. CRM.*, SSNet.*)
+  const crossRepoRows = rows.filter((row) => {
+    let importPath = row.toId.slice(7);
+    if (importPath.startsWith("static ")) importPath = importPath.slice(7);
+    const topNs = importPath.split(".")[0];
+    return topNs ? isKnownCrossRepoNamespace(topNs) : false;
+  });
+
+  if (crossRepoRows.length === 0) return 0;
+
+  // Build namespace → module candidates from all other repos indexed in this DB.
+  // For disambiguation: if multiple repos share the same namespace, prefer the one
+  // with the most symbols (largest provider repo = most complete index).
+  const repoSymbolCounts = new Map<string, number>();
+  const repoCountRows = db
+    .prepare(`SELECT repo_id as repoId, COUNT(*) as cnt FROM symbols WHERE repo_id != ? GROUP BY repo_id`)
+    .all(repoId) as { repoId: string; cnt: number }[];
+  for (const r of repoCountRows) repoSymbolCounts.set(r.repoId, r.cnt);
+
+  const otherModules = db
+    .prepare(
+      `SELECT repo_id as repoId, symbol_id as symbolId, name
+       FROM symbols
+       WHERE repo_id != ? AND kind = 'module' AND name LIKE '%.%'`
+    )
+    .all(repoId) as { repoId: string; symbolId: string; name: string }[];
+
+  const nsToModules = new Map<string, { symbolId: string; repoId: string }[]>();
+  for (const m of otherModules) {
+    const list = nsToModules.get(m.name) ?? [];
+    list.push({ symbolId: m.symbolId, repoId: m.repoId });
+    nsToModules.set(m.name, list);
+  }
+
+  // UPDATE without reason restriction — handles both fresh unresolved and re-attempt of external boundary
+  const updateStmt = db.prepare(
+    `UPDATE edges SET to_id = ?, confidence = ?, reason = ?
+     WHERE repo_id = ? AND type = 'IMPORTS' AND from_id = ? AND to_id = ?`
+  );
+  // Tag external only for edges that were 'unresolved import token' (not already external boundary)
+  const tagExternalStmt = db.prepare(
+    `UPDATE edges SET confidence = 0.1, reason = 'external boundary'
+     WHERE repo_id = ? AND type = 'IMPORTS' AND from_id = ? AND to_id = ? AND reason = 'unresolved import token'`
+  );
+  const insertCrossRepoDep = db.prepare(
+    `INSERT INTO cross_repo_deps (from_repo_id, from_symbol_id, to_repo_id, to_symbol_id, type)
+     VALUES (?, ?, ?, ?, ?)
+     ON CONFLICT DO NOTHING`
+  );
+
+  // Pick repo with most symbols — largest = most complete provider when multiple repos share namespace.
+  function pickBestModule(candidates: { symbolId: string; repoId: string }[]): { symbolId: string; repoId: string } | undefined {
+    if (candidates.length === 0) return undefined;
+    if (candidates.length === 1) return candidates[0];
+    return candidates.reduce((best, c) => {
+      const bestCount = repoSymbolCounts.get(best.repoId) ?? 0;
+      const cCount = repoSymbolCounts.get(c.repoId) ?? 0;
+      return cCount > bestCount ? c : best;
+    });
+  }
+
+  let resolved = 0;
+  const tx = db.transaction(() => {
+    for (const row of crossRepoRows) {
+      let importPath = row.toId.slice(7);
+      if (importPath.startsWith("static ")) importPath = importPath.slice(7);
+
+      // Try exact namespace match, then progressively shorter prefix (longest wins).
+      // When multiple repos share the same namespace, prefer the largest (most symbols).
+      let match: { symbolId: string; repoId: string } | undefined;
+
+      const exactCandidates = nsToModules.get(importPath);
+      if (exactCandidates && exactCandidates.length >= 1) {
+        match = pickBestModule(exactCandidates);
+      } else {
+        const parts = importPath.split(".");
+        for (let len = parts.length - 1; len >= 2; len--) {
+          const prefix = parts.slice(0, len).join(".");
+          const prefixCandidates = nsToModules.get(prefix);
+          if (prefixCandidates && prefixCandidates.length >= 1) {
+            match = pickBestModule(prefixCandidates);
+            break;
+          }
+        }
+      }
+
+      if (match) {
+        updateStmt.run(match.symbolId, 0.70, "resolved cross-repo import", repoId, row.fromId, row.toId);
+        insertCrossRepoDep.run(repoId, row.fromId, match.repoId, match.symbolId, "IMPORTS");
+        resolved++;
+      } else if (row.reason === "unresolved import token") {
+        // Provider repo not yet indexed — tag as external boundary (not an error)
+        tagExternalStmt.run(repoId, row.fromId, row.toId);
+      }
+      // If already 'external boundary' and still no provider found — leave as-is
+    }
+  });
+  tx();
+
+  return resolved;
 }
 
 // ── Call edge resolution context (pre-built once, reused across batches) ──────
@@ -401,7 +626,9 @@ export function buildCallResolutionContext(db: Database.Database, repoId: string
     `
   );
 
-  // Pre-fetch ALL unresolved rows once — avoids re-scanning edges table per batch
+  // Pre-fetch ALL unresolved rows once — avoids re-scanning edges table per batch.
+  // Filter only on to_id prefix — do NOT filter by reason, because 'qualified call'
+  // reason is set at extraction time while to_id is still a callee: placeholder.
   const unresolvedRows = db
     .prepare(
       `select distinct e.from_id as fromId, e.to_id as toId, s.file_path as fromFile
@@ -435,8 +662,10 @@ export function resolveCallEdgesBatch(
   // Phase 1: resolve all rows in memory → collect updates and inserts
   type UpdateRow = { fromId: string; oldToId: string; newToId: string; confidence: number; reason: string };
   type InsertRow = { fromId: string; toId: string; confidence: number; reason: string };
+  type PendingVectorLookup = { fromId: string; oldToId: string; normalized: string };
   const updates: UpdateRow[] = [];
   const inserts: InsertRow[] = [];
+  const pendingVectorLookups: PendingVectorLookup[] = [];
 
   for (const row of batch) {
     const calleeName = row.toId.slice(7);
@@ -498,14 +727,53 @@ export function resolveCallEdgesBatch(
     } else {
       const rawName = calleeName.split(".").pop() ?? calleeName;
       const normalized = stripGenerics(rawName);
-      if (isKnownExternalToken(normalized)) {
+      // Check both terminal name and full qualified name for external detection
+      const strippedCallee = stripGenerics(calleeName);
+      if (isKnownExternalToken(normalized) || isKnownExternalToken(strippedCallee)) {
         updates.push({ fromId: row.fromId, oldToId: row.toId, newToId: row.toId, confidence: 0.1, reason: "external boundary" });
-      } else if (isVectorEnabled()) {
-        const vecResults = vectorSearchSymbols(db, repoId, normalized, 3);
-        if (vecResults.length > 0 && vecResults[0].distance < 0.35) {
-          updates.push({ fromId: row.fromId, oldToId: row.toId, newToId: vecResults[0].symbolId, confidence: 0.52, reason: "resolved callee vector-fallback" });
-        }
+      } else if (calleeName.includes(".") && calleeName.startsWith("_")) {
+        // DI field pattern: _fieldName.Method — likely injected external dependency
+        // Tag as external boundary with slightly higher confidence than pure external
+        updates.push({ fromId: row.fromId, oldToId: row.toId, newToId: row.toId, confidence: 0.15, reason: "external boundary (DI field)" });
+      } else {
+        // Collect unresolved tokens for deferred batch vector fallback (after main loop).
+        // Calling vectorSearchSymbols per-row is extremely slow on large repos (~40ms/call).
+        pendingVectorLookups.push({ fromId: row.fromId, oldToId: row.toId, normalized });
       }
+    }
+  }
+
+  // Deferred batch vector fallback: resolve remaining unmatched edges via vector search.
+  // This runs once per batch instead of per-row, dramatically reducing SQLite vec0 queries.
+  if (pendingVectorLookups.length > 0 && isVectorEnabled()) {
+    // Build a dedup map to avoid searching the same token multiple times
+    const tokenToResult = new Map<string, { symbolId: string; distance: number } | null>();
+    for (const pending of pendingVectorLookups) {
+      if (!tokenToResult.has(pending.normalized)) {
+        tokenToResult.set(pending.normalized, null); // placeholder
+      }
+    }
+    // Single pass: one vector search per unique token (not per edge)
+    for (const token of tokenToResult.keys()) {
+      const vecResults = vectorSearchSymbols(db, repoId, token, 3);
+      if (vecResults.length > 0 && vecResults[0].distance < 0.35) {
+        tokenToResult.set(token, vecResults[0]);
+      }
+    }
+    // Apply results back to edges
+    for (const pending of pendingVectorLookups) {
+      const result = tokenToResult.get(pending.normalized);
+      if (result) {
+        updates.push({ fromId: pending.fromId, oldToId: pending.oldToId, newToId: result.symbolId, confidence: 0.52, reason: "resolved callee vector-fallback" });
+      } else {
+        // No user-defined candidate AND no vector match — tag as external boundary
+        updates.push({ fromId: pending.fromId, oldToId: pending.oldToId, newToId: pending.oldToId, confidence: 0.1, reason: "external boundary" });
+      }
+    }
+  } else if (pendingVectorLookups.length > 0) {
+    // Vector not enabled — tag all pending (no-candidate) items as external boundary
+    for (const pending of pendingVectorLookups) {
+      updates.push({ fromId: pending.fromId, oldToId: pending.oldToId, newToId: pending.oldToId, confidence: 0.1, reason: "external boundary" });
     }
   }
 
@@ -525,38 +793,38 @@ export function resolveCallEdgesBatch(
       reason text not null
     )
   `);
+  // Ensure composite index on temp table for fast UPDATE JOIN matching
+  db.exec(`create index if not exists _idx_resolve_batch on _resolve_batch(from_id, old_to_id)`);
   db.exec(`delete from _resolve_batch`);
 
   const insertBatch = db.prepare(
     `insert into _resolve_batch (from_id, old_to_id, new_to_id, confidence, reason) values (?, ?, ?, ?, ?)`
   );
 
-  // Insert all updates into temp table in one transaction
-  const fillTx = db.transaction(() => {
+  // Single transaction: fill temp table + UPDATE JOIN + dispatch inserts
+  // Avoids multiple transaction open/close overhead on large batches
+  const batchTx = db.transaction(() => {
     for (const u of updates) {
       insertBatch.run(u.fromId, u.oldToId, u.newToId, u.confidence, u.reason);
     }
-  });
-  fillTx();
 
-  // Single UPDATE JOIN — resolves all rows in one statement
-  const result = db.prepare(`
-    update edges
-    set
-      to_id = b.new_to_id,
-      confidence = b.confidence,
-      reason = b.reason
-    from _resolve_batch b
-    where edges.repo_id = ?
-      and edges.from_id = b.from_id
-      and edges.to_id = b.old_to_id
-      and edges.type = 'CALLS'
-  `).run(repoId);
-  count += result.changes;
+    // Single UPDATE JOIN — resolves all rows in one statement
+    const result = db.prepare(`
+      update edges
+      set
+        to_id = b.new_to_id,
+        confidence = b.confidence,
+        reason = b.reason
+      from _resolve_batch b
+      where edges.repo_id = ?
+        and edges.from_id = b.from_id
+        and edges.to_id = b.old_to_id
+        and edges.type = 'CALLS'
+    `).run(repoId);
+    count += result.changes;
 
-  // Handle dispatch inserts separately
-  if (inserts.length > 0) {
-    const insertTx = db.transaction(() => {
+    // Handle dispatch inserts in same transaction
+    if (inserts.length > 0) {
       for (const ins of inserts) {
         const r = insertDispatchStmt.run(
           repoId, ins.fromId, ins.toId, ins.confidence, ins.reason,
@@ -564,11 +832,11 @@ export function resolveCallEdgesBatch(
         );
         if (r.changes > 0) count += 1;
       }
-    });
-    insertTx();
-  }
+    }
 
-  db.exec(`delete from _resolve_batch`);
+    db.exec(`delete from _resolve_batch`);
+  });
+  batchTx();
 
   return count;
 }
@@ -576,6 +844,8 @@ export function resolveCallEdgesBatch(
 export function resolveCallEdges(db: Database.Database, repoId: string, maxUnresolvedRows = 0): number {
   // Find all CALLS edges with unresolved plain-text toId ("callee:<name>")
   // Join symbols to get the caller's file for same-file resolution priority
+  // Filter only on to_id prefix — do NOT filter by reason.
+  // 'qualified call' reason is set at extraction time while to_id is still a callee: placeholder.
   const unresolvedSql = `
     select distinct e.from_id as fromId, e.to_id as toId, s.file_path as fromFile
     from edges e
@@ -804,6 +1074,7 @@ export function resolvePropertyEdges(db: Database.Database, repoId: string, maxU
     from edges e
     inner join symbols s on s.repo_id = e.repo_id and s.symbol_id = e.from_id
     where e.repo_id = ? and e.type in ('PROPERTY_REF', 'PROPERTY_WRITE') and e.to_id like 'property:%'
+      and (e.reason is null or e.reason = 'unresolved property token')
     ${maxUnresolvedRows > 0 ? "limit ?" : ""}
   `;
   const unresolved = db
@@ -822,6 +1093,9 @@ export function resolvePropertyEdges(db: Database.Database, repoId: string, maxU
   );
 
   const propertyCandidates = buildNamedCandidateMap(db, repoId, ["property"]);
+  // Method candidates: fallback for method-group references (e.g. _repo.FindByCondition used
+  // without () — accessed as delegate/expression). Only used for PROPERTY_REF, not PROPERTY_WRITE.
+  const methodCandidates = buildNamedCandidateMap(db, repoId, ["method", "function"]);
   const typeRows = db
     .prepare(
       `
@@ -852,6 +1126,32 @@ export function resolvePropertyEdges(db: Database.Database, repoId: string, maxU
       const typeName = rawTypeName.split(".").pop() ?? rawTypeName;
       const namedCandidates = propertyCandidates.get(memberName) ?? [];
       if (namedCandidates.length === 0) {
+        // No property symbol — try method candidates (method-group references like _repo.FindByCondition)
+        // Only applicable to PROPERTY_REF (method groups), not PROPERTY_WRITE (assignment targets).
+        if (row.edgeType === "PROPERTY_REF") {
+          const methodCands = methodCandidates.get(memberName) ?? [];
+          if (methodCands.length > 0) {
+            // Apply type-constraint if available
+            const constrained = (() => {
+              if (!typeName) return methodCands;
+              const files = typeFilesByName.get(typeName);
+              if (!files || files.size === 0) return methodCands;
+              const filtered = methodCands.filter((c) => files.has(c.filePath));
+              return filtered.length > 0 ? filtered : methodCands;
+            })();
+            const match = pickBestNamedCandidate(constrained, row.fromFile, ["method", "function"]);
+            if (match) {
+              const sameFile = match.filePath === row.fromFile;
+              updateStmt.run(match.symbolId, sameFile ? 0.80 : 0.68, "resolved method group", repoId, row.fromId, row.toId, row.edgeType);
+              count += 1;
+              continue;
+            }
+          }
+        }
+        // No user-defined property with this name — tag as external boundary
+        // (framework/BCL token: Utc, UTF8, StoredProcedure, FindByCondition method groups, etc.)
+        updateStmt.run(row.toId, 0.1, "external boundary", repoId, row.fromId, row.toId, row.edgeType);
+        count += 1;
         continue;
       }
 

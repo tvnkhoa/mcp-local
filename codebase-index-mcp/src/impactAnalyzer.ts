@@ -196,6 +196,8 @@ export function countUnresolvedEdgesForFileImpl(db: Database.Database, repoId: s
           and e.to_id not in (${TRIVIAL_CALLEE_IN_CLAUSE}) then 1 end) as unresolvedCalls,
         count(case when e.to_id like 'import:%'
           and coalesce(e.reason, '') not in ('node_builtin', 'npm_package') then 1 end) as unresolvedImports,
+        count(case when e.type = 'IMPORTS' then 1 end) as importsTotal,
+        count(case when e.type = 'IMPORTS' and coalesce(e.reason, '') != 'unresolved import token' then 1 end) as importsClassified,
         count(case when e.to_id like 'type:%' then 1 end) as unresolvedTypeRefs,
         count(case when e.to_id like 'property:%' then 1 end) as unresolvedProperties
       from edges e
@@ -207,30 +209,55 @@ export function countUnresolvedEdgesForFileImpl(db: Database.Database, repoId: s
     .get(...([repoId, canonicalFilePath, ...(symbolId ? [symbolId] : [])] as [string, string, ...string[]])) as { 
       unresolvedCalls: number; 
       unresolvedImports: number; 
+      importsTotal: number;
+      importsClassified: number;
       unresolvedTypeRefs: number;
       unresolvedProperties: number;
     };
 
-  const { unresolvedCalls, unresolvedImports, unresolvedTypeRefs, unresolvedProperties } = row ?? { 
+  const bridgeRow = db
+    .prepare(
+      `
+      select count(case when e.reason = 'namespace package contract bridge' then 1 end) as packageBridgeImports
+      from edges e
+      inner join symbols s on s.repo_id = e.repo_id and s.symbol_id = e.from_id
+      where e.repo_id = ? and e.type = 'DEPENDS_ON'
+        and replace(s.file_path, char(92), '/') = replace(?, char(92), '/')
+      ${symbolFilter}
+      `
+    )
+    .get(...([repoId, canonicalFilePath, ...(symbolId ? [symbolId] : [])] as [string, string, ...string[]])) as { packageBridgeImports: number } | undefined;
+
+  const { unresolvedCalls, unresolvedImports, importsTotal, importsClassified, unresolvedTypeRefs, unresolvedProperties } = row ?? { 
     unresolvedCalls: 0, 
     unresolvedImports: 0, 
+    importsTotal: 0,
+    importsClassified: 0,
     unresolvedTypeRefs: 0,
     unresolvedProperties: 0
   };
+
+  const classifiedImports = importsClassified + (bridgeRow?.packageBridgeImports ?? 0);
+  const importClassificationRatio = importsTotal > 0 ? Math.min(1, classifiedImports / importsTotal) : 1;
   
   let note: string;
   if (unresolvedCalls === 0 && unresolvedImports === 0 && unresolvedTypeRefs === 0 && unresolvedProperties === 0) {
-    note = "graph data complete";
+    note = importsTotal > 0
+      ? `graph data complete; imports classified ${classifiedImports}/${importsTotal} (${Math.round(importClassificationRatio * 100)}%)`
+      : "graph data complete";
   } else {
     const parts: string[] = [];
     if (unresolvedCalls > 0) parts.push(`${unresolvedCalls} call edge${unresolvedCalls > 1 ? "s" : ""} unresolved`);
     if (unresolvedProperties > 0) parts.push(`${unresolvedProperties} property ref${unresolvedProperties > 1 ? "s" : ""} unresolved`);
     if (unresolvedImports > 0) parts.push(`${unresolvedImports} import edge${unresolvedImports > 1 ? "s" : ""} unresolved`);
     if (unresolvedTypeRefs > 0) parts.push(`${unresolvedTypeRefs} type reference${unresolvedTypeRefs > 1 ? "s" : ""} unresolved`);
-    note = `${parts.join(", ")} — results may be incomplete`;
+    const importNote = importsTotal > 0
+      ? ` imports classified ${classifiedImports}/${importsTotal} (${Math.round(importClassificationRatio * 100)}%)`
+      : "";
+    note = `${parts.join(", ")} — results may be incomplete${importNote}`;
   }
 
-  return { unresolvedCalls, unresolvedImports, unresolvedTypeRefs, unresolvedProperties, note };
+  return { unresolvedCalls, unresolvedImports, unresolvedTypeRefs, unresolvedProperties, importsTotal, importsClassified: classifiedImports, importClassificationRatio, note };
 }
 // ── getImpactSurface ───────────────────────────────────────────────────
 

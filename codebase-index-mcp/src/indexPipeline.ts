@@ -30,6 +30,8 @@ export type RunIndexInput = {
   checkpointEveryNBatches?: number;
   /** Route files >= this size (bytes) to worker-lane extraction. Default 512KB. */
   largeFileThresholdBytes?: number;
+  /** Hard cap on file size (bytes) — files larger than this are skipped. Default 500KB. Env: CODEBASE_INDEX_MAX_FILE_SIZE_BYTES. */
+  maxFileSizeBytes?: number;
   /** Number of extraction workers for large-file lane. Default 2. */
   parseWorkers?: number;
   /** Per-job timeout for worker-lane extraction in milliseconds. Default 20s. */
@@ -61,6 +63,7 @@ export async function runIndexPipeline(store: GraphStore, input: RunIndexInput):
   const subtxSize = clamp(input.subtxSize ?? 20, 1, 500);
   const checkpointEveryNBatches = Math.max(1, input.checkpointEveryNBatches ?? 1);
   const largeFileThresholdBytes = Math.max(0, input.largeFileThresholdBytes ?? 512 * 1024);
+  const maxFileSizeBytes = Math.max(10_000, input.maxFileSizeBytes ?? 500_000);
   const parseWorkers = clamp(input.parseWorkers ?? 2, 0, 32);
   const parseJobTimeoutMs = clamp(input.parseJobTimeoutMs ?? 20_000, 1_000, 120_000);
   const concurrencyLimit = 50; // Limit parallel file reads
@@ -251,7 +254,7 @@ export async function runIndexPipeline(store: GraphStore, input: RunIndexInput):
             }
 
             const bytes = await readFile(filePath);
-            const decision = shouldIndexFile(filePath, bytes);
+            const decision = shouldIndexFile(filePath, bytes, maxFileSizeBytes);
             
             return { filePath, relativePath, bytes, decision };
           })

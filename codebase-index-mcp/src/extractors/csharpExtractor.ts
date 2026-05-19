@@ -93,6 +93,8 @@ export function extractCSharpSymbolsImpl(
     if (!functionNode) continue;
     let calleeName = "";
     let receiverName = "";
+    let receiverTypeName = "";
+    const scopeTypeMap = collectCSharpScopeTypeMap(node, /* includeDiAliases */ true);
     if (functionNode.type === "identifier") {
       calleeName = functionNode.text;
     } else if (functionNode.type === "member_access_expression") {
@@ -102,9 +104,11 @@ export function extractCSharpSymbolsImpl(
       if (expressionNode) {
         if (expressionNode.type === "identifier") {
           receiverName = expressionNode.text;
+          receiverTypeName = scopeTypeMap.get(receiverName) ?? "";
         } else if (expressionNode.type === "this_expression") {
           // this.Method() → use enclosing class type as receiver
           receiverName = findEnclosingCSharpTypeName(node) ?? "";
+          receiverTypeName = receiverName;
         }
       }
     }
@@ -118,8 +122,9 @@ export function extractCSharpSymbolsImpl(
     // - this_expression: resolved to enclosing class name
     // Skipping plain camelCase locals (e.g. result.Value, list.Add) avoids
     // edge explosion on large repos without losing meaningful call graph data.
-    if (receiverName && (/^[A-Z]/.test(receiverName) || receiverName.startsWith("_") || receiverName.length > 0 && functionNode.childForFieldName("expression")?.type === "this_expression")) {
-      edges.push({ repoId: input.repoId, fromId, toId: `callee:${receiverName}.${calleeName}`, type: "CALLS", confidence: 0.75, reason: "qualified call" });
+    if (receiverName && (/^[A-Z]/.test(receiverName) || receiverName.startsWith("_") || functionNode.childForFieldName("expression")?.type === "this_expression")) {
+      const qualifiedReceiverName = receiverTypeName || receiverName;
+      edges.push({ repoId: input.repoId, fromId, toId: `callee:${qualifiedReceiverName}.${calleeName}`, type: "CALLS", confidence: 0.75, reason: "qualified call" });
     }
     const endpointContract = extractCSharpHttpDependencyContract(node);
     if (endpointContract) {
@@ -252,7 +257,7 @@ function extractPropertyAccessEdges(
     // 2. IdentityState.CrmCustomerId
     // 3. CrmCustomerId (fallback)
     const memberChain = extractMemberAccessChain(node);
-    const scopeTypeMap = collectCSharpScopeTypeMap(node);
+    const scopeTypeMap = collectCSharpScopeTypeMap(node, /* includeDiAliases */ false);
     const fromId = findEnclosingCSharpSymbolId(node, input) ?? moduleSymbolId;
     
     // Emit edges for each level of the chain

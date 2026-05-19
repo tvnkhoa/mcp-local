@@ -38,8 +38,17 @@ const KNOWN_EXTERNAL_NAMESPACES = new Set([
   "Ardalis",
 ]);
 
-// Cross-repo internal namespaces — handled by cross-repo resolver, skip vector
-const KNOWN_CROSS_REPO_NAMESPACES = new Set(["SSNet", "CRM"]);
+// Cross-repo internal namespaces — may be resolvable if those repos are indexed in the same DB.
+// Configurable via CODEBASE_INDEX_CROSS_REPO_NAMESPACES (comma-separated top-level namespaces).
+// Default: ["SSNet", "CRM"]. These are NOT treated as external; the cross-repo resolver handles them.
+function buildCrossRepoNamespaces(): Set<string> {
+  const raw = process.env["CODEBASE_INDEX_CROSS_REPO_NAMESPACES"];
+  if (raw && raw.trim()) {
+    return new Set(raw.split(",").map((s) => s.trim()).filter(Boolean));
+  }
+  return new Set(["SSNet", "CRM"]);
+}
+const KNOWN_CROSS_REPO_NAMESPACES = buildCrossRepoNamespaces();
 
 // LINQ extension methods
 const KNOWN_LINQ_METHODS = new Set([
@@ -177,16 +186,56 @@ function djb2Hash(s: string): number {
 // ── External token checks ──────────────────────────────────────────────────────
 
 export function isKnownExternalNamespace(ns: string): boolean {
-  return KNOWN_EXTERNAL_NAMESPACES.has(ns) || KNOWN_CROSS_REPO_NAMESPACES.has(ns);
+  // Only pure external (BCL/framework) namespaces. Cross-repo namespaces are intentionally
+  // excluded — they are handled by the cross-repo import resolver, not tagged as external.
+  return KNOWN_EXTERNAL_NAMESPACES.has(ns);
 }
 
+export function isKnownCrossRepoNamespace(ns: string): boolean {
+  return KNOWN_CROSS_REPO_NAMESPACES.has(ns);
+}
+
+// Known BCL/framework type receivers — qualified calls like Guid.NewGuid, Task.FromResult
+const KNOWN_EXTERNAL_TYPE_RECEIVERS = new Set([
+  "Guid", "Task", "Path", "File", "Directory", "Environment", "Regex",
+  "Convert", "Math", "Console", "Enum", "Activator", "Type", "Array",
+  "String", "Int32", "Int64", "Double", "Decimal", "Boolean", "DateTime", "DateTimeOffset", "TimeSpan",
+  "JsonConvert", "JsonSerializer", "JObject", "JArray", "JToken",
+  "HttpUtility", "WebUtility", "Uri", "Encoding",
+  "Assert", "Is", "Has", "Does", "Throws", // NUnit/xUnit assertion
+  "Mock", "It", "Times", // Moq
+  "Log", "LogContext", // Serilog statics
+  "HostBuilder", "Host", "WebApplication",
+  "ILogger", "IServiceProvider", "IConfiguration", "IHostEnvironment", "IHostApplicationLifetime",
+  "IOptions", "IOptionsSnapshot", "IOptionsMonitor", "HttpClient", "IMemoryCache", "IDistributedCache",
+  "IMediator", "IMapper", "IServiceCollection", "IApplicationBuilder", "IEndpointRouteBuilder",
+  "CancellationToken", "CancellationTokenSource", "IAsyncEnumerable", "IQueryable",
+]);
+
 export function isKnownExternalToken(token: string): boolean {
-  return (
+  // Check simple token first (terminal method name)
+  if (
     KNOWN_LINQ_METHODS.has(token) ||
     KNOWN_BCL_METHODS.has(token) ||
     KNOWN_LOGGER_METHODS.has(token) ||
     KNOWN_MIGRATION_METHODS.has(token)
-  );
+  ) {
+    return true;
+  }
+
+  // Check qualified form: Receiver.Method — if receiver is a known external type
+  if (token.includes(".")) {
+    const receiver = token.split(".")[0];
+    if (receiver && KNOWN_EXTERNAL_TYPE_RECEIVERS.has(receiver)) {
+      return true;
+    }
+    // Check if top-level namespace is external (e.g. System.IO.Path.Combine)
+    if (receiver && isKnownExternalNamespace(receiver)) {
+      return true;
+    }
+  }
+
+  return false;
 }
 
 // ── sqlite-vec initialization ──────────────────────────────────────────────────

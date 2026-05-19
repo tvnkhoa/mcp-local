@@ -108,7 +108,7 @@ function isBinary(bytes: Uint8Array): boolean {
   return false;
 }
 
-export function shouldIndexFile(filePath: string, bytes: Uint8Array): FilterDecision {
+export function shouldIndexFile(filePath: string, bytes: Uint8Array, maxFileSizeBytes = 500_000): FilterDecision {
   const normalized = filePath.replace(/\\/g, "/");
   const normalizedLower = normalized.toLowerCase();
   const segments = normalized.split("/");
@@ -141,7 +141,7 @@ export function shouldIndexFile(filePath: string, bytes: Uint8Array): FilterDeci
     return { include: false, reason: "excluded_filename", language: null };
   }
 
-  const MAX_FILE_SIZE = 500_000; // 500KB
+  const MAX_FILE_SIZE = maxFileSizeBytes;
   if (bytes.length > MAX_FILE_SIZE) {
     return { include: false, reason: "file_too_large", language: null };
   }
