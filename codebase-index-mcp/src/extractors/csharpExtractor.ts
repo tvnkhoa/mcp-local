@@ -488,9 +488,13 @@ const ASPNET_BUILDER_TYPE_NAMES = new Set([
  * Tracks:
  *   1. Parameters with type WebApplication / IEndpointRouteBuilder / RouteGroupBuilder
  *   2. Local variables assigned from .MapGroup(...) invocations
+ *   3. Local variables assigned from WebApplication.Create(...)
+ *   4. WebApplicationBuilder vars (from WebApplication.CreateBuilder(...)) used in builder.Build()
  */
 function collectRouteBuilderVars(root: Parser.SyntaxNode): Set<string> {
   const builderVars = new Set<string>();
+  // Tracks vars that are WebApplicationBuilder (so we can resolve .Build() → WebApplication)
+  const webAppBuilderVars = new Set<string>();
 
   // 1. Collect params with known ASP.NET builder types
   for (const paramNode of root.descendantsOfType(["parameter"])) {
@@ -503,7 +507,7 @@ function collectRouteBuilderVars(root: Parser.SyntaxNode): Set<string> {
     }
   }
 
-  // 2. Collect local vars assigned from .MapGroup(...)
+  // Pass A: resolve WebApplication factory methods and MapGroup assignments
   // tree-sitter C# parses: variable_declarator → identifier, '=', invocation_expression (no named "value" field)
   for (const declNode of root.descendantsOfType(["variable_declarator"])) {
     const nameNode = declNode.childForFieldName("name");
@@ -513,7 +517,31 @@ function collectRouteBuilderVars(root: Parser.SyntaxNode): Set<string> {
     const fnNode = invNode.childForFieldName("function");
     if (!fnNode || fnNode.type !== "member_access_expression") continue;
     const callName = fnNode.childForFieldName("name")?.text ?? "";
+    const receiverText = fnNode.childForFieldName("expression")?.text?.trim() ?? "";
     if (callName === "MapGroup") {
+      // 2. var group = app.MapGroup("/prefix") → group is a route builder
+      builderVars.add(nameNode.text.trim());
+    } else if (receiverText === "WebApplication" && callName === "Create") {
+      // 3. var app = WebApplication.Create(...) → app is a WebApplication
+      builderVars.add(nameNode.text.trim());
+    } else if (receiverText === "WebApplication" && callName === "CreateBuilder") {
+      // 4a. var builder = WebApplication.CreateBuilder(...) → track as WebApplicationBuilder
+      webAppBuilderVars.add(nameNode.text.trim());
+    }
+  }
+
+  // Pass B: resolve builder.Build() → WebApplication
+  for (const declNode of root.descendantsOfType(["variable_declarator"])) {
+    const nameNode = declNode.childForFieldName("name");
+    if (!nameNode) continue;
+    const invNode = declNode.children.find((c) => c.type === "invocation_expression");
+    if (!invNode) continue;
+    const fnNode = invNode.childForFieldName("function");
+    if (!fnNode || fnNode.type !== "member_access_expression") continue;
+    const callName = fnNode.childForFieldName("name")?.text ?? "";
+    const receiverText = fnNode.childForFieldName("expression")?.text?.trim() ?? "";
+    if (callName === "Build" && webAppBuilderVars.has(receiverText)) {
+      // 4b. var app = builder.Build() → app is a WebApplication
       builderVars.add(nameNode.text.trim());
     }
   }

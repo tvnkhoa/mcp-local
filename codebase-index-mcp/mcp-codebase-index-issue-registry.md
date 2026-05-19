@@ -430,6 +430,24 @@ Three compounding gaps addressed:
 - Resolution: Added Minimal API route extraction to `extractCSharpRoutesImpl` in `src/extractors/csharpExtractor.ts`. Tracks `WebApplication`/`IEndpointRouteBuilder`/`RouteGroupBuilder` params and `MapGroup` return vars; extracts `MapGet/MapPost/MapPut/MapDelete/MapPatch` with group prefix combining. Rejects non-ASP.NET receivers (e.g. `FakeClient`). Test `scripts/test-minimal-api-guard.mjs` passes: `GET /health`, `POST /v1/items`.
 - Tracking URL: `D:/1.SourceCode/mcp-local/codebase-index-mcp/mcp-codebase-index-issue-registry.md#mcp-issue-007`
 
+### Re-Check (2026-05-19, CommunicationHub Runtime Validation)
+- `node scripts/test-minimal-api-guard.mjs` in `codebase-index-mcp` still passes (`routeCount: 2`).
+- Full re-index on `wec.commnunication-hub` succeeded (`runId: dcb45441-0195-4ab7-9263-4454c69a6dff`, `status: ok`).
+- Direct SQL via `query_graph` confirms Minimal API routes exist in `routes` table for `backend\\CommunicationHub\\src\\Web\\Endpoints\\Conversations.cs` (8 rows).
+- However, `mcp_codebase-inde_route_map` still returns `count: 0` for both scoped and unscoped calls.
+- Conclusion: extraction fix is present, but `route_map` runtime/read path is still mismatched with persisted route rows. Keep ISSUE-007 in monitor state until route_map query layer returns those rows.
+
+### Root Cause Analysis & Final Fix (2026-05-19)
+- Root cause: `collectRouteBuilderVars` only recognized builder vars from **method parameters** (e.g. `WebApplication app`) or **`.MapGroup(...)` return vars**. It did NOT handle two common top-level Program.cs patterns:
+  1. `var app = WebApplication.Create(...)` — direct factory
+  2. `var builder = WebApplication.CreateBuilder(...); var app = builder.Build();` — builder pattern
+- The IEndpointGroup class test (`test-minimal-api-guard.mjs`) used a method parameter so it always passed, masking the top-level gap.
+- Fix: Extended `collectRouteBuilderVars` with two-pass scan:
+  - Pass A: also tracks `WebApplication.Create(...)` → builderVars; `WebApplication.CreateBuilder(...)` → webAppBuilderVars
+  - Pass B: tracks `<webAppBuilderVar>.Build()` → builderVars
+- New test `scripts/test-route-map-roundtrip.mjs` covers full pipeline (extract → DB store → `getRouteMap` read-back) for all three patterns: IEndpointGroup class, `WebApplication.Create()`, and `builder.Build()`.
+- All tests pass: `test-minimal-api-guard` ✅, `test-route-map-roundtrip` ✅ (4/4), `test-refactor-engine` ✅ (39/39).
+
 ## MCP-ISSUE-008 ✅ RESOLVED
 - Scenario: Package-consumer audit for external dependencies showed inconsistent coverage depending on exact package token.
 - MCP tool/query attempted: `mcp_codebase-inde_find_package_consumers` for `MediatR`, `FluentValidation`, `RabbitMQ.Client`, compared with `FluentValidation.DependencyInjectionExtensions`, `MassTransit`, and `Microsoft.EntityFrameworkCore`.
