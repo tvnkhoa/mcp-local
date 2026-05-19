@@ -40,7 +40,7 @@ const result = extractGraphData({
 const routes = result.routes.map((r) => `${r.httpMethod} ${r.routeTemplate}`);
 
 assert(routes.includes("GET /health"), "Expected route GET /health");
-assert(routes.includes("POST /items"), "Expected route POST /items from MapGroup receiver");
+assert(routes.includes("POST /v1/items"), "Expected route POST /v1/items from MapGroup receiver");
 assert(!routes.includes("GET /should-not-be-route"), "Unexpected non-ASP.NET receiver route was extracted");
 
 console.log("test-minimal-api-guard: OK", { routeCount: result.routes.length, routes });

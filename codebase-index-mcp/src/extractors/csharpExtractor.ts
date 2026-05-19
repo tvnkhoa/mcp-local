@@ -466,6 +466,61 @@ function isPropertyWrite(node: Parser.SyntaxNode): boolean {
   return false;
 }
 
+// HTTP method names supported by ASP.NET Minimal API MapXxx conventions
+const MINIMAL_API_HTTP_METHODS: Record<string, RouteRecord["httpMethod"]> = {
+  MapGet: "GET",
+  MapPost: "POST",
+  MapPut: "PUT",
+  MapDelete: "DELETE",
+  MapPatch: "PATCH",
+};
+
+// Known ASP.NET endpoint builder type names (from parameter declarations or type annotations)
+const ASPNET_BUILDER_TYPE_NAMES = new Set([
+  "WebApplication",
+  "IEndpointRouteBuilder",
+  "RouteGroupBuilder",
+  "IEndpointConventionBuilder",
+]);
+
+/**
+ * Collect variable names that are ASP.NET endpoint route builders in a given scope subtree.
+ * Tracks:
+ *   1. Parameters with type WebApplication / IEndpointRouteBuilder / RouteGroupBuilder
+ *   2. Local variables assigned from .MapGroup(...) invocations
+ */
+function collectRouteBuilderVars(root: Parser.SyntaxNode): Set<string> {
+  const builderVars = new Set<string>();
+
+  // 1. Collect params with known ASP.NET builder types
+  for (const paramNode of root.descendantsOfType(["parameter"])) {
+    const typeNode = paramNode.childForFieldName("type");
+    const nameNode = paramNode.childForFieldName("name");
+    if (!typeNode || !nameNode) continue;
+    const typeName = typeNode.text.trim().replace(/<.*>/, "").trim();
+    if (ASPNET_BUILDER_TYPE_NAMES.has(typeName)) {
+      builderVars.add(nameNode.text.trim());
+    }
+  }
+
+  // 2. Collect local vars assigned from .MapGroup(...)
+  // tree-sitter C# parses: variable_declarator → identifier, '=', invocation_expression (no named "value" field)
+  for (const declNode of root.descendantsOfType(["variable_declarator"])) {
+    const nameNode = declNode.childForFieldName("name");
+    if (!nameNode) continue;
+    const invNode = declNode.children.find((c) => c.type === "invocation_expression");
+    if (!invNode) continue;
+    const fnNode = invNode.childForFieldName("function");
+    if (!fnNode || fnNode.type !== "member_access_expression") continue;
+    const callName = fnNode.childForFieldName("name")?.text ?? "";
+    if (callName === "MapGroup") {
+      builderVars.add(nameNode.text.trim());
+    }
+  }
+
+  return builderVars;
+}
+
 export function extractCSharpRoutesImpl(
   input: ExtractInput,
   root: Parser.SyntaxNode,
@@ -508,9 +563,100 @@ export function extractCSharpRoutesImpl(
         });
       }
     }
+
+    // Minimal API inside class methods (e.g. static void MapEndpoints(WebApplication app))
+    const builderVarsInClass = collectRouteBuilderVars(classNode);
+    if (builderVarsInClass.size > 0) {
+      for (const invNode of classNode.descendantsOfType(["invocation_expression"])) {
+        const fnNode = invNode.childForFieldName("function");
+        if (!fnNode || fnNode.type !== "member_access_expression") continue;
+        const callName = fnNode.childForFieldName("name")?.text ?? "";
+        const httpMethod = MINIMAL_API_HTTP_METHODS[callName];
+        if (!httpMethod) continue;
+        const receiverNode = fnNode.childForFieldName("expression");
+        const receiverName = receiverNode?.type === "identifier" ? receiverNode.text.trim() : "";
+        if (!receiverName || !builderVarsInClass.has(receiverName)) continue;
+        // Resolve group prefix: if receiver is a MapGroup var, look up its path arg
+        const groupPrefix = resolveMapGroupPrefix(classNode, receiverName);
+        const argList = invNode.childForFieldName("arguments");
+        const rawTemplate = argList ? extractFirstStringLiteral(argList.text) : null;
+        if (!rawTemplate) continue;
+        const routeTemplate = groupPrefix ? `${groupPrefix.replace(/\/$/, "")}/${rawTemplate.replace(/^\//, "")}` : rawTemplate;
+        routes.push({
+          repoId: input.repoId,
+          filePath: input.filePath,
+          controllerSymbolId: classSymbolId,
+          handlerSymbolId: classSymbolId,
+          httpMethod,
+          routeTemplate,
+          line: invNode.startPosition.row + 1
+        });
+      }
+    }
+  }
+
+  // Also extract Minimal API routes at top-level (outside class, e.g. Program.cs / top-level statements)
+  const builderVarsTopLevel = collectRouteBuilderVars(root);
+  if (builderVarsTopLevel.size > 0) {
+    for (const invNode of root.descendantsOfType(["invocation_expression"])) {
+      // Skip invocations inside class declarations (already handled above)
+      if (invNode.parent && isInsideClassDeclaration(invNode)) continue;
+      const fnNode = invNode.childForFieldName("function");
+      if (!fnNode || fnNode.type !== "member_access_expression") continue;
+      const callName = fnNode.childForFieldName("name")?.text ?? "";
+      const httpMethod = MINIMAL_API_HTTP_METHODS[callName];
+      if (!httpMethod) continue;
+      const receiverNode = fnNode.childForFieldName("expression");
+      const receiverName = receiverNode?.type === "identifier" ? receiverNode.text.trim() : "";
+      if (!receiverName || !builderVarsTopLevel.has(receiverName)) continue;
+      const groupPrefix = resolveMapGroupPrefix(root, receiverName);
+      const argList = invNode.childForFieldName("arguments");
+      const rawTemplate = argList ? extractFirstStringLiteral(argList.text) : null;
+      if (!rawTemplate) continue;
+      const routeTemplate = groupPrefix ? `${groupPrefix.replace(/\/$/, "")}/${rawTemplate.replace(/^\//, "")}` : rawTemplate;
+      routes.push({
+        repoId: input.repoId,
+        filePath: input.filePath,
+        controllerSymbolId: "",
+        handlerSymbolId: `module:${input.filePath}`,
+        httpMethod,
+        routeTemplate,
+        line: invNode.startPosition.row + 1
+      });
+    }
   }
 
   return dedupeRoutes(routes);
+}
+
+/** Check if a node is nested inside any class_declaration */
+function isInsideClassDeclaration(node: Parser.SyntaxNode): boolean {
+  let cur: Parser.SyntaxNode | null = node.parent;
+  while (cur) {
+    if (cur.type === "class_declaration") return true;
+    cur = cur.parent;
+  }
+  return false;
+}
+
+/**
+ * For a variable assigned from MapGroup, resolve the route prefix string arg.
+ * e.g. var groupBuilder = app.MapGroup("/v1"); → "/v1"
+ */
+function resolveMapGroupPrefix(root: Parser.SyntaxNode, varName: string): string | null {
+  for (const declNode of root.descendantsOfType(["variable_declarator"])) {
+    const nameNode = declNode.childForFieldName("name");
+    if (!nameNode || nameNode.text.trim() !== varName) continue;
+    // tree-sitter C#: invocation_expression is a direct child, no named "value" field
+    const invNode = declNode.children.find((c) => c.type === "invocation_expression");
+    if (!invNode) continue;
+    const fnNode = invNode.childForFieldName("function");
+    if (!fnNode || fnNode.type !== "member_access_expression") continue;
+    if ((fnNode.childForFieldName("name")?.text ?? "") !== "MapGroup") continue;
+    const argList = invNode.childForFieldName("arguments");
+    return argList ? extractFirstStringLiteral(argList.text) : null;
+  }
+  return null;
 }
 
 export function emitEndpointContractSymbolsImpl(

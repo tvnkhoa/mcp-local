@@ -226,6 +226,8 @@ export function handleRouteMap(
 
 // ── query_graph ───────────────────────────────────────────────────────────────
 
+const ALLOWED_QUERY_GRAPH_TABLES = new Set(["repositories", "files", "symbols", "edges", "index_runs", "routes", "cross_repo_deps", "refactor_previews", "refactor_preview_hunks", "refactor_applies", "refactor_apply_changes", "refactor_apply_hunks", "refactor_rollbacks", "vec_symbol_map"]);
+
 export function handleQueryGraph(
   args: { repoId: string; sql: string; params?: Record<string, unknown>; limit: number; timeoutMs: number; profile: string },
   ctx: HandlerContext
@@ -239,10 +241,13 @@ export function handleQueryGraph(
   }
   const allowlistCheck = validateAllowedTables(
     readOnlyCheck.sanitizedSql,
-    new Set(["repositories", "files", "symbols", "edges", "index_runs", "routes", "cross_repo_deps", "refactor_previews", "refactor_preview_hunks", "refactor_applies", "refactor_apply_changes", "refactor_apply_hunks", "refactor_rollbacks", "vec_symbol_map"])
+    ALLOWED_QUERY_GRAPH_TABLES
   );
   if (!allowlistCheck.ok) {
-    throw new McpError(ErrorCode.InvalidParams, allowlistCheck.message);
+    throw new McpError(
+      ErrorCode.InvalidParams,
+      `${allowlistCheck.message} Allowed tables: ${[...ALLOWED_QUERY_GRAPH_TABLES].join(", ")}.`
+    );
   }
 
   let result: ReturnType<typeof store.runReadOnlyGraphQuery>;

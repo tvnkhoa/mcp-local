@@ -308,6 +308,45 @@ export function findPackageConsumersImpl(
   }[];
 }
 
+// ── Find similar package contract IDs (did-you-mean support) ────────────
+//
+// When an exact packageContractId returns 0 consumers, look up all indexed
+// nuget: contract IDs that share a common prefix with the queried name.
+// Returns up to `limit` distinct contract IDs (excluding the exact match).
+
+export function findSimilarPackageContractIdsImpl(
+  db: Database.Database,
+  packageContractId: string,
+  repoId: string | null,
+  limit: number
+): string[] {
+  // LIKE pattern: nuget:fluentvalidation% — matches all sub-packages and variants
+  const basePrefix = packageContractId.replace(/:$/, "") + "%";
+
+  const query = repoId
+    ? `select distinct e.to_id as contractId
+       from edges e
+       where e.repo_id = ?
+         and e.type = 'DEPENDS_ON'
+         and e.to_id like ?
+         and e.to_id != ?
+       order by e.to_id
+       limit ?`
+    : `select distinct e.to_id as contractId
+       from edges e
+       where e.type = 'DEPENDS_ON'
+         and e.to_id like ?
+         and e.to_id != ?
+       order by e.to_id
+       limit ?`;
+
+  const params = repoId
+    ? [repoId, basePrefix, packageContractId, limit]
+    : [basePrefix, packageContractId, limit];
+
+  return (db.prepare(query).all(...params) as { contractId: string }[]).map((r) => r.contractId);
+}
+
 // ── Get package bridge stats ───────────────────────────────────────────
 
 export function getPackageBridgeStatsImpl(

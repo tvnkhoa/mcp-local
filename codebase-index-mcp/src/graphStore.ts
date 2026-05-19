@@ -58,6 +58,7 @@ import {
   getCrossRepoDepsImpl,
   getCrossRepoImpactImpl,
   findPackageConsumersImpl,
+  findSimilarPackageContractIdsImpl,
   getPackageBridgeStatsImpl
 } from "./crossRepoStore.js";
 import {
@@ -831,6 +832,10 @@ export class GraphStore {
     providerSymbolId: string | null;
   }[] {
     return findPackageConsumersImpl(this.db, packageContractId, repoId, limit);
+  }
+
+  findSimilarPackageContractIds(packageContractId: string, repoId: string | null, limit: number): string[] {
+    return findSimilarPackageContractIdsImpl(this.db, packageContractId, repoId, limit);
   }
 
   getPackageBridgeStats(repoId: string): {

@@ -419,3 +419,33 @@ Three compounding gaps addressed:
 - Cross-repo type resolution requires the provider repo to be indexed in the same DB instance. External packages not yet indexed will still produce unresolved TYPE_REF edges.
 - The `NUGET_NAMESPACE_MAP` env var must be set manually for packages not discoverable via `.csproj` `<PackageReference>` (e.g. transitive dependencies).
 - Re-index required for existing repos to benefit from the widened namespace→nuget mapping.
+
+## MCP-ISSUE-007 ✅ RESOLVED
+- Scenario: Endpoint discovery on Minimal API layout (`IEndpointGroup` + `Map(...)`) where route mapping is not attribute-controller based.
+- MCP tool/query attempted: `mcp_codebase-inde_route_map` with `filePathPrefix=backend/CommunicationHub/src/Web` in `wec.commnunication-hub`.
+- Expected vs actual: expected mapped HTTP routes/handlers for discovery; actual result returned `count: 0` despite active endpoints in `Conversations.cs` and `Customers.cs`.
+- Impact: route-surface discovery can be misleading if `route_map` is treated as the primary endpoint-discovery tool in Minimal API projects.
+- Workaround used: switched to MCP-only fallback path `search_symbols` + `get_file_summary` + `query_docs(mode=coverage)` for endpoint inventory.
+- Enhancement proposal: extend `route_map` extraction for Minimal API endpoint-group patterns (`MapGet/MapPost` inside endpoint-group mapping methods) and expose confidence flags by routing style.
+- Resolution: Added Minimal API route extraction to `extractCSharpRoutesImpl` in `src/extractors/csharpExtractor.ts`. Tracks `WebApplication`/`IEndpointRouteBuilder`/`RouteGroupBuilder` params and `MapGroup` return vars; extracts `MapGet/MapPost/MapPut/MapDelete/MapPatch` with group prefix combining. Rejects non-ASP.NET receivers (e.g. `FakeClient`). Test `scripts/test-minimal-api-guard.mjs` passes: `GET /health`, `POST /v1/items`.
+- Tracking URL: `D:/1.SourceCode/mcp-local/codebase-index-mcp/mcp-codebase-index-issue-registry.md#mcp-issue-007`
+
+## MCP-ISSUE-008 ✅ RESOLVED
+- Scenario: Package-consumer audit for external dependencies showed inconsistent coverage depending on exact package token.
+- MCP tool/query attempted: `mcp_codebase-inde_find_package_consumers` for `MediatR`, `FluentValidation`, `RabbitMQ.Client`, compared with `FluentValidation.DependencyInjectionExtensions`, `MassTransit`, and `Microsoft.EntityFrameworkCore`.
+- Expected vs actual: expected consistent consumers across direct/bridge package names; actual had false-empty responses for some package names while others returned consumers normally.
+- Impact: package-audit workflows may incorrectly conclude `not used` when query token does not match indexed contract-id semantics.
+- Workaround used: retry with exact package IDs from `Directory.Packages.props`, then cross-check with representative known packages.
+- Enhancement proposal: add alias/related-package expansion and `did-you-mean` hints in `find_package_consumers` when `consumerCount=0` for likely-known ecosystem packages.
+- Resolution: Added `findSimilarPackageContractIdsImpl` in `src/crossRepoStore.ts` — when exact match returns 0 consumers, runs a LIKE prefix query (`nuget:fluentvalidation%`) against indexed `edges.to_id`. Results exposed as `hint` + `didYouMean` array in response (both `nano` and `standard/verbose` profiles). Exposed via `findSimilarPackageContractIds` method in `GraphStore` and called in `handleFindPackageConsumers` when `rows.length === 0`. Non-breaking: `hint`/`didYouMean` fields only present when count=0 and similar packages exist.
+- Tracking URL: `D:/1.SourceCode/mcp-local/codebase-index-mcp/mcp-codebase-index-issue-registry.md#mcp-issue-008`
+
+## MCP-ISSUE-009 ✅ RESOLVED
+- Scenario: SQL exploration for package-consumer summary via `query_graph` failed due table allowlist restrictions.
+- MCP tool/query attempted: `mcp_codebase-inde_query_graph` on `package_consumers` table in `wec.commnunication-hub`.
+- Expected vs actual: expected read-only aggregate query for package coverage; actual returned `table 'package_consumers' is not allowed`.
+- Impact: limits advanced aggregate diagnostics in one query and forces multiple tool calls for package-coverage overview.
+- Workaround used: used repeated `find_package_consumers` calls for a targeted package set.
+- Enhancement proposal: expose a safe aggregate endpoint for package coverage or allowlist read-only package-contract tables in `query_graph`.
+- Resolution: Two-pronged fix. (1) Error message in `handleQueryGraph` (`src/handlers/impactHandler.ts`) now includes the full list of allowed tables: `table 'X' is not allowed. Allowed tables: repositories, files, symbols, edges, ...`. (2) `query_graph` tool description in `src/index.ts` updated to enumerate allowed tables, key column names per table, and explicit note that `package_consumers` is not a table — use `edges WHERE type='DEPENDS_ON' AND to_id LIKE 'nuget:%'` instead. No new tool added — allowed tables are static and embed cleanly in the description.
+- Tracking URL: `D:/1.SourceCode/mcp-local/codebase-index-mcp/mcp-codebase-index-issue-registry.md#mcp-issue-009`

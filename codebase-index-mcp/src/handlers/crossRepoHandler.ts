@@ -75,15 +75,30 @@ export function handleFindPackageConsumers(
     resolved: Boolean(row.providerRepoId && row.providerSymbolId)
   }));
 
+  // When no consumers found, surface similar indexed package contract IDs as hints.
+  // This covers cases like querying "FluentValidation" when only
+  // "FluentValidation.DependencyInjectionExtensions" is indexed.
+  const didYouMean: string[] =
+    rows.length === 0
+      ? store.findSimilarPackageContractIds(packageContractId, args.repoId ?? null, 10)
+      : [];
+
   if (profile === "nano") {
     return ctx.asText({
       packageName: args.packageName,
       packageContractId,
       consumerCount: rows.length,
       consumerRepos: [...new Set(rows.map((x) => x.consumerRepoId))].slice(0, 10),
-      resolvedCount: rows.filter((x) => x.resolved).length
+      resolvedCount: rows.filter((x) => x.resolved).length,
+      ...(didYouMean.length > 0 && { hint: "no consumers found for exact package name — did you mean one of these indexed packages?", didYouMean })
     }, profile);
   }
 
-  return ctx.asText({ packageName: args.packageName, packageContractId, consumerCount: rows.length, consumers: rows }, profile);
+  return ctx.asText({
+    packageName: args.packageName,
+    packageContractId,
+    consumerCount: rows.length,
+    consumers: rows,
+    ...(didYouMean.length > 0 && { hint: "no consumers found for exact package name — did you mean one of these indexed packages?", didYouMean })
+  }, profile);
 }
