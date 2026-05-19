@@ -298,6 +298,33 @@ export class GraphStore {
   }
 
   /**
+   * Remove duplicate resolved edges after the full resolve phase.
+   * Keeps the row with the highest rowid (last written = typically highest confidence after resolve).
+   * Only targets resolved edges (non-placeholder to_id) to avoid touching unresolved placeholders.
+   * Returns the number of duplicate rows deleted.
+   */
+  deduplicateResolvedEdges(repoId: string): number {
+    const PLACEHOLDERS = `(
+      to_id LIKE 'callee:%' OR to_id LIKE 'import:%' OR
+      to_id LIKE 'property:%' OR to_id LIKE 'iface:%' OR to_id LIKE 'type:%'
+    )`;
+    const result = this.db
+      .prepare(
+        `DELETE FROM edges
+         WHERE repo_id = ?
+           AND NOT ${PLACEHOLDERS}
+           AND rowid NOT IN (
+             SELECT MAX(rowid) FROM edges
+             WHERE repo_id = ?
+               AND NOT ${PLACEHOLDERS}
+             GROUP BY repo_id, from_id, to_id, type
+           )`
+      )
+      .run(repoId, repoId);
+    return result.changes;
+  }
+
+  /**
    * Drop secondary edge indexes before bulk resolve to speed up writes.
    * Call rebuildEdgeIndexes() after bulk write is done.
    */
@@ -521,7 +548,7 @@ export class GraphStore {
           commit_sha,
           resolve_phase_ms, build_context_ms, call_resolve_ms, import_resolve_ms,
           type_resolve_ms, property_resolve_ms, implements_resolve_ms, fts_rebuild_ms,
-          unresolved_calls_total, unresolved_rows_capped_by_policy, resolve_calls_coverage,
+          unresolved_calls_total, unresolved_rows_capped_by_policy, unresolved_imports_capped_by_policy, resolve_calls_coverage,
           performance_profile
         ) values (
           ?, ?, ?, ?, ?, ?,
@@ -535,7 +562,7 @@ export class GraphStore {
           ?,
           ?, ?, ?, ?,
           ?, ?, ?, ?,
-          ?, ?, ?,
+          ?, ?, ?, ?,
           ?
         )
         `
@@ -576,7 +603,8 @@ export class GraphStore {
         summary.implementsResolveMs ?? 0,
         summary.ftsRebuildMs ?? 0,
         summary.unresolvedCallsTotal ?? 0,
-        summary.unresolvedRowsCappedByPolicy ? 1 : 0,
+        0, // unresolved_rows_capped_by_policy — kept for backward compat, always 0 (use unresolvedImportsCappedByPolicy)
+        summary.unresolvedImportsCappedByPolicy ? 1 : 0,
         summary.resolveCallsCoverage ?? 0,
         summary.performanceProfile ?? null
       );
@@ -622,7 +650,7 @@ export class GraphStore {
           implements_resolve_ms as implementsResolveMs,
           fts_rebuild_ms as ftsRebuildMs,
           unresolved_calls_total as unresolvedCallsTotal,
-          unresolved_rows_capped_by_policy as unresolvedRowsCappedByPolicy,
+          unresolved_imports_capped_by_policy as unresolvedImportsCappedByPolicy,
           resolve_calls_coverage as resolveCallsCoverage,
           performance_profile as performanceProfile
         from index_runs
@@ -1152,7 +1180,24 @@ export class GraphStore {
     ensureRunColumn("implements_resolve_ms");
     ensureRunColumn("fts_rebuild_ms");
     ensureRunColumn("unresolved_calls_total");
-    ensureRunColumn("unresolved_rows_capped_by_policy");
+    ensureRunColumn("build_context_ms"); // latent gap: was missing from migrations, added here
+    ensureRunColumn("unresolved_rows_capped_by_policy"); // kept for backward compat with old DBs
+    ensureRunColumn("unresolved_imports_capped_by_policy");
+
+    // Dedup guard: remove duplicate (repo_id, from_id, to_id, type) rows.
+    // NOTE: We intentionally do NOT add a UNIQUE INDEX on edges because the resolve phase
+    // uses UPDATE SET to_id = ? in-place, which would conflict with a UNIQUE constraint
+    // when the target to_id already exists in another row (e.g. same-file resolved edge).
+    // Deduplication is handled at application level via dedupeEdges() before DB write.
+    // Drop the UNIQUE INDEX if it was previously created (migration rollback).
+    const hasUniqueEdgeIdx = (
+      this.db
+        .prepare(`SELECT name FROM sqlite_master WHERE type='index' AND name='idx_edges_unique'`)
+        .get() as { name: string } | undefined
+    )?.name;
+    if (hasUniqueEdgeIdx) {
+      this.db.exec(`DROP INDEX IF EXISTS idx_edges_unique`);
+    }
     ensureRunColumnReal("resolve_calls_coverage");
     ensureRunColumnText("performance_profile");
 

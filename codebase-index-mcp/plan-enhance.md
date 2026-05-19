@@ -1,8 +1,64 @@
 # Plan: Enhance Call Resolve Performance
 
+> **STATUS: ✅ COMPLETED (2026-05-19)**
+>
 > Mục tiêu: Xác định SQLite có phải bottleneck không, sau đó tách abstraction layer và migrate sang DuckDB nếu cần.
 >
 > Thứ tự: Phần 1 trước → review kết quả → Phần 2 → Phần 3.
+
+---
+
+## ✅ Final State (wec.be, run `b81658df`, 2026-05-19 10:58)
+
+### Performance
+
+| Metric | Baseline | Final | Cải thiện |
+|--------|:---:|:---:|:---:|
+| **elapsed_ms** | 196,932ms | **67,174ms** | **−66%** |
+| **resolve_pct** | 69.2% | **11.5%** | −57.7pp |
+| **resolveCallsCoverage** | 63.7% | **100%** | +36.3pp |
+| **implements_resolve_ms** | 0ms (bug) | **2ms** | ✅ fixed |
+
+### Edge Quality — 100% Classified, 0 Duplicates
+
+| Edge Type | Baseline resolved% | Final resolved% | Classified% | Truly unresolved |
+|-----------|:---:|:---:|:---:|:---:|
+| **CALLS** | 62.9% | **60.4%** | **100%** | 0 |
+| **PROPERTY_REF** | 3.5% | **80.8%** | **100%** | 0 |
+| **PROPERTY_WRITE** | 4.5% | **96.4%** | **100%** | 0 |
+| **IMPORTS** | ~0% | **22.3%** | **99.97%** | 8 (0.03%) |
+| **IMPLEMENTS** | 81.6% | **81.4%** | **100%** | 0 |
+| **DEPENDS_ON** | 100% | **100%** | **100%** | 0 |
+| **TYPE_REF** | 100% | **100%** | **100%** | 0 |
+| **Duplicate edges** | 739 nhóm | **0** | — | — |
+
+> **Classified** = resolved to real symbolId OR tagged external boundary. Không còn edge nào ở trạng thái "unknown unresolved".
+
+### Fixes đã ship (theo thứ tự)
+
+| Fix | Nội dung | File |
+|-----|---------|------|
+| Phần 1 | Telemetry: timing metrics persist vào `index_runs` | `types.ts`, `graphStore.ts`, `index.ts` |
+| Phần 4D/5C | Bật resolve cho very-large profile | `performanceConfig.ts` |
+| Fix 1–4 | External token detection, namespace resolve, property resolve | `edgeResolver.ts`, `vectorStore.ts` |
+| Fix 5 | DI field type inference cho CALLS | `extractors/csharpExtractor.ts`, `extractors/extractorUtils.ts` |
+| Fix 6 | `includeDiAliases=false` cho property path | `extractors/csharpExtractor.ts` |
+| Fix 7 | Zero-candidate tagging, reason filter bug | `edgeResolver.ts` |
+| Fix 8 | Method-group fallback trong property resolve | `edgeResolver.ts` |
+| Option B | `using static` prefix strip, case-insensitive NuGet match | `edgeResolver.ts` |
+| Fix C | Cross-repo IMPORTS resolution, `isKnownCrossRepoNamespace` | `edgeResolver.ts`, `vectorStore.ts` |
+| 10C | Rename `unresolvedRowsCappedByPolicy` → `unresolvedImportsCappedByPolicy` | `types.ts`, `index.ts`, `graphStore.ts` |
+| 10D | Cross-repo resolve cap (`maxRows`) | `edgeResolver.ts` |
+| Latent bug | `ensureRunColumn("build_context_ms")` thiếu trong migration | `graphStore.ts` |
+| 11A | Post-resolve dedup DELETE (0 duplicate edges) | `graphStore.ts`, `index.ts` |
+| 11B | Fix `effectiveResolveImplementsInPost` — chạy trong full index | `index.ts` |
+| 11C | IMPLEMENTS external boundary tagging cho NuGet interfaces | `edgeResolver.ts` |
+
+### Phần 2 & 3 — DEFER (không cần thiết)
+
+SQLite không phải bottleneck. DuckDB migration và Storage Abstraction Layer không cần implement.
+
+---
 
 ---
 
@@ -1536,3 +1592,625 @@ Scenario: wec.be indexed trước ssnet
 - `cross_repo_deps` được populate với 173 cross-repo links (IMPORTS từ wec.be → ssnet symbols)
 - Configurable `CODEBASE_INDEX_CROSS_REPO_NAMESPACES` env var
 - Foundation cho CRM.* resolution khi các CRM sub-repos được index thêm
+
+---
+
+## Phần 10 — Fix các issue tồn đọng (verified 2026-05-19)
+
+> Verified bằng cách đọc trực tiếp source code sau toàn bộ Fix 1–9/C. Các issue dưới đây là **thực sự chưa được fix** trong codebase hiện tại.
+
+### Danh sách issue còn tồn đọng
+
+| # | Issue | File | Mức độ | Loại |
+|---|-------|------|--------|------|
+| **10A** | `edges` table không có UNIQUE constraint + `stmtInsertEdge` plain INSERT | `graphStore.ts` | Cao | Code gap |
+| **10B** | Dual edge emission (simple + qualified) cho cùng call site | `csharpExtractor.ts` | Cao | Code gap |
+| **10C** | `unresolvedRowsCappedByPolicy` misleading cho call resolve path | `index.ts` | Thấp | Logic gap |
+| **10D** | `resolveImportsCrossRepo` không có row cap | `edgeResolver.ts` | Trung bình | Code gap |
+
+Doc fixes (không cần code change):
+- Plan dòng 781–783 mô tả `very-large` policy cũ (`resolveTypeRefs=false`) — đã fix từ Fix 4D/5C
+- Plan dùng tên `unresolvedCallsCapped` — code thực tế là `unresolvedRowsCappedByPolicy`
+
+---
+
+### 10A — Edges UNIQUE constraint + INSERT dedup
+
+#### Hiện trạng (verified)
+
+`graphStore.ts:1385-1392` — `edges` table:
+```sql
+create table if not exists edges (
+  repo_id text not null,
+  from_id text not null,
+  to_id   text not null,
+  type    text not null,
+  confidence real not null default 1.0,
+  reason  text
+);
+-- Không có UNIQUE constraint, không có PRIMARY KEY
+```
+
+`graphStore.ts:248-253` — `stmtInsertEdge`:
+```typescript
+this.stmtInsertEdge = this.db.prepare(
+  `insert into edges (repo_id, from_id, to_id, type, confidence, reason)
+   values (@repoId, @fromId, @toId, @type, @confidence, @reason)`
+  // Plain INSERT — không có OR IGNORE, ON CONFLICT
+);
+```
+
+`extractors/extractorUtils.ts:444-458` — `dedupeEdges()` tồn tại nhưng chỉ chạy in-memory trước khi ghi DB, không bảo vệ được nếu:
+- Cùng file được index 2 lần trong 1 run (incremental race)
+- Extractor emit duplicate trong cùng 1 batch (xem Issue 10B)
+
+#### Root cause
+
+Dual emission từ `csharpExtractor.ts:118-128` (Issue 10B) tạo ra 2 edges có cùng `fromId` nhưng `toId` khác nhau (`callee:Method` vs `callee:Receiver.Method`) — `dedupeEdges` không bắt được vì key khác. Sau resolve, cả 2 có thể update thành cùng `to_id` thật → duplicate resolved edges.
+
+#### Fix
+
+**Bước 10A.1 — Thêm UNIQUE INDEX trên `edges` (migration):**
+
+`graphStore.ts` trong `runMigrations()`, sau các `ensureRunColumn*` calls:
+
+```typescript
+// Thêm sau line ~1157
+// Dedup guard: prevent duplicate (repo_id, from_id, to_id, type) rows
+const edgeCols = (this.db.prepare("pragma table_info(edges)").all() as { name: string }[]).map(c => c.name);
+if (!edgeCols.includes("_dedup_migrated")) {
+  // Xóa duplicate rows trước khi thêm UNIQUE INDEX
+  this.db.exec(`
+    DELETE FROM edges WHERE rowid NOT IN (
+      SELECT MIN(rowid) FROM edges
+      GROUP BY repo_id, from_id, to_id, type
+    )
+  `);
+  this.db.exec(`
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_edges_unique
+    ON edges(repo_id, from_id, to_id, type)
+  `);
+}
+```
+
+**Lưu ý:** Không thể dùng `ALTER TABLE ADD COLUMN` để track migration flag trên `edges`. Thay vào đó, check xem UNIQUE INDEX đã tồn tại chưa:
+
+```typescript
+const hasUniqueIdx = (this.db.prepare(
+  `SELECT name FROM sqlite_master WHERE type='index' AND name='idx_edges_unique'`
+).get() as { name: string } | undefined)?.name;
+
+if (!hasUniqueIdx) {
+  this.db.exec(`DELETE FROM edges WHERE rowid NOT IN (
+    SELECT MIN(rowid) FROM edges GROUP BY repo_id, from_id, to_id, type
+  )`);
+  this.db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_edges_unique ON edges(repo_id, from_id, to_id, type)`);
+}
+```
+
+**Bước 10A.2 — Đổi `stmtInsertEdge` sang `INSERT OR IGNORE`:**
+
+`graphStore.ts:248-253`:
+```typescript
+// TRƯỚC:
+this.stmtInsertEdge = this.db.prepare(
+  `insert into edges (repo_id, from_id, to_id, type, confidence, reason)
+   values (@repoId, @fromId, @toId, @type, @confidence, @reason)`
+);
+
+// SAU:
+this.stmtInsertEdge = this.db.prepare(
+  `insert or ignore into edges (repo_id, from_id, to_id, type, confidence, reason)
+   values (@repoId, @fromId, @toId, @type, @confidence, @reason)`
+);
+```
+
+`INSERT OR IGNORE` sẽ silently skip duplicate `(repo_id, from_id, to_id, type)` — giữ row đầu tiên (thường là row có confidence cao hơn từ simple edge).
+
+**Rủi ro:** Thấp — `INSERT OR IGNORE` chỉ skip, không throw. Cần chạy dedup migration trước khi thêm UNIQUE INDEX (nếu DB cũ đã có duplicates).
+
+**Files thay đổi:** `src/graphStore.ts` — ~15 lines
+
+---
+
+### 10B — Dual edge emission cho qualified calls
+
+#### Hiện trạng (verified)
+
+`csharpExtractor.ts:118-128`:
+```typescript
+// LUÔN emit simple edge (confidence default 1.0)
+edges.push({ repoId: input.repoId, fromId, toId: `callee:${calleeName}`, type: "CALLS" });
+
+// ĐIỀU KIỆN emit qualified edge (confidence 0.75) cho cùng call site
+if (receiverName && (/^[A-Z]/.test(receiverName) || receiverName.startsWith("_") || ...)) {
+  const qualifiedReceiverName = receiverTypeName || receiverName;
+  edges.push({ repoId: input.repoId, fromId, toId: `callee:${qualifiedReceiverName}.${calleeName}`, type: "CALLS", confidence: 0.75, reason: "qualified call" });
+}
+```
+
+Kết quả: mỗi call `_repo.Save()` emit 2 edges:
+- `callee:Save` (confidence 1.0, no reason)
+- `callee:IRepository.Save` (confidence 0.75, reason="qualified call")
+
+Sau resolve, `callee:Save` có thể resolve thành `symbolId:Save_in_SomeOtherClass` (wrong match), trong khi `callee:IRepository.Save` resolve đúng. Cả 2 tồn tại song song trong DB.
+
+#### Fix
+
+**Chiến lược:** Khi có qualified receiver → chỉ emit qualified edge, bỏ simple edge. Khi không có receiver → giữ simple edge như cũ.
+
+`csharpExtractor.ts:118-128`:
+```typescript
+// SAU FIX:
+const hasQualifiedReceiver = receiverName && (
+  /^[A-Z]/.test(receiverName) ||
+  receiverName.startsWith("_") ||
+  functionNode.childForFieldName("expression")?.type === "this_expression"
+);
+
+if (hasQualifiedReceiver) {
+  // Chỉ emit qualified edge — bỏ simple edge để tránh duplicate sau resolve
+  const qualifiedReceiverName = receiverTypeName || receiverName;
+  edges.push({
+    repoId: input.repoId, fromId,
+    toId: `callee:${qualifiedReceiverName}.${calleeName}`,
+    type: "CALLS", confidence: 0.75, reason: "qualified call"
+  });
+} else {
+  // Không có qualified receiver → emit simple edge như cũ
+  edges.push({ repoId: input.repoId, fromId, toId: `callee:${calleeName}`, type: "CALLS" });
+}
+```
+
+**Lưu ý quan trọng:** Fix này sẽ giảm tổng số CALLS edges (bỏ ~3,000-4,000 simple edges khi có qualified). Cần verify sau fix:
+- `callEdgesResolved` không giảm (qualified edges resolve tốt hơn simple)
+- `resolveCallsCoverage` không tụt
+- Smoke test pass
+
+**Rủi ro:** Trung bình — thay đổi extraction behavior, cần full re-index để thấy effect. Nếu qualified receiver type sai → miss resolve. Nên chạy A/B comparison trên wec.be.
+
+**Files thay đổi:** `src/extractors/csharpExtractor.ts` — ~10 lines
+
+---
+
+### 10C — `unresolvedRowsCappedByPolicy` misleading
+
+#### Hiện trạng (verified)
+
+`index.ts:1574`:
+```typescript
+unresolvedRowsCappedByPolicy: postPolicy.maxUnresolvedRows > 0,
+```
+
+Field này `true` khi `postPolicy.maxUnresolvedRows > 0` (tức `large` profile với cap 120,000). Nhưng:
+- **Call resolve** (`buildCallResolutionContext`, `edgeResolver.ts:632-639`) — **không có LIMIT**, luôn fetch tất cả rows
+- **Import/Type/Property resolve** — có LIMIT conditional khi `maxUnresolvedRows > 0`
+
+→ Trên `large` profile: field = `true` nhưng call resolve không bị cap. Misleading khi query `index_runs`.
+
+#### Fix
+
+Đổi tên field + logic để phản ánh đúng:
+
+`types.ts:40`:
+```typescript
+// TRƯỚC:
+unresolvedRowsCappedByPolicy?: boolean;
+
+// SAU:
+unresolvedImportsCappedByPolicy?: boolean;  // true nếu import/type/property resolve bị cap bởi maxUnresolvedRows
+// Note: call resolve KHÔNG bao giờ bị cap (buildCallResolutionContext fetch tất cả rows)
+```
+
+`index.ts:1574`:
+```typescript
+// TRƯỚC:
+unresolvedRowsCappedByPolicy: postPolicy.maxUnresolvedRows > 0,
+
+// SAU:
+unresolvedImportsCappedByPolicy: postPolicy.maxUnresolvedRows > 0,
+```
+
+`graphStore.ts` — migration column + recordRun:
+```typescript
+// Migration: thêm column mới (giữ cột cũ để backward compat)
+ensureRunColumnText("unresolved_imports_capped_by_policy"); // hoặc integer 0/1
+
+// recordRun INSERT: thêm column mới
+// unresolved_imports_capped_by_policy
+summary.unresolvedImportsCappedByPolicy ? 1 : 0,
+```
+
+**Rủi ro:** Thấp — chỉ đổi tên field + thêm column mới. Cột cũ `unresolved_rows_capped_by_policy` giữ nguyên để backward compat với DB cũ.
+
+**Files thay đổi:** `src/types.ts`, `src/index.ts`, `src/graphStore.ts` — ~10 lines
+
+---
+
+### 10D — `resolveImportsCrossRepo` không có row cap
+
+#### Hiện trạng (verified)
+
+`edgeResolver.ts:455-465`:
+```typescript
+function resolveImportsCrossRepo(db: Database.Database, repoId: string): number {
+  // Không có maxRows parameter
+  const rows = db
+    .prepare(
+      `SELECT e.from_id as fromId, e.to_id as toId, e.reason as reason
+       FROM edges e
+       WHERE e.repo_id = ? AND e.type = 'IMPORTS' AND e.to_id LIKE 'import:%'
+         AND e.reason IN ('unresolved import token', 'external boundary')`
+      // Không có LIMIT
+    )
+    .all(repoId) as { ... }[];
+```
+
+Thêm vào đó, `otherModules` query bên trong cũng không có LIMIT:
+```typescript
+const otherModules = db
+  .prepare(`SELECT repo_id, symbol_id, name FROM symbols
+            WHERE repo_id != ? AND kind = 'module' AND name LIKE '%.%'`)
+  .all(repoId) // Không có LIMIT — fetch toàn bộ module symbols từ tất cả repos khác
+```
+
+Với nhiều repos lớn trong cùng DB, `otherModules` có thể trả về hàng chục nghìn rows.
+
+#### Fix
+
+**Bước 10D.1 — Thêm `maxRows` parameter:**
+
+`edgeResolver.ts:455`:
+```typescript
+// TRƯỚC:
+function resolveImportsCrossRepo(db: Database.Database, repoId: string): number {
+
+// SAU:
+function resolveImportsCrossRepo(db: Database.Database, repoId: string, maxRows = 0): number {
+```
+
+**Bước 10D.2 — Thêm LIMIT vào main query:**
+
+```typescript
+const rows = db
+  .prepare(
+    `SELECT e.from_id as fromId, e.to_id as toId, e.reason as reason
+     FROM edges e
+     WHERE e.repo_id = ? AND e.type = 'IMPORTS' AND e.to_id LIKE 'import:%'
+       AND e.reason IN ('unresolved import token', 'external boundary')
+     ${maxRows > 0 ? "LIMIT ?" : ""}`
+  )
+  .all(...(maxRows > 0 ? [repoId, maxRows] : [repoId])) as { ... }[];
+```
+
+**Bước 10D.3 — Forward `maxUnresolvedRows` từ `resolveImportEdges`:**
+
+`edgeResolver.ts:440`:
+```typescript
+// TRƯỚC:
+const crossRepoResolved = resolveImportsCrossRepo(db, repoId);
+
+// SAU:
+const crossRepoResolved = resolveImportsCrossRepo(db, repoId, maxUnresolvedRows);
+```
+
+**Rủi ro:** Thấp — chỉ thêm optional cap. Default `maxRows=0` giữ behavior hiện tại (unlimited). Chỉ có effect khi `postPolicy.maxUnresolvedRows > 0` (tức `large` profile).
+
+**Files thay đổi:** `src/edgeResolver.ts` — ~8 lines
+
+---
+
+### Thứ tự thực hiện
+
+| Bước | Fix | Effort | Rủi ro | Dependency |
+|------|-----|--------|--------|------------|
+| **1** | 10D — Cross-repo cap | Nhỏ (~8 lines) | Thấp | Không |
+| **2** | 10C — Rename misleading field | Nhỏ (~10 lines) | Thấp | Không |
+| **3** | 10A — UNIQUE INDEX + INSERT OR IGNORE | Nhỏ (~15 lines) | Thấp-Trung | Cần 10B trước (để giảm duplicates trước khi thêm constraint) |
+| **4** | 10B — Dual emission fix | Trung bình (~10 lines) | Trung bình | Cần verify A/B sau fix |
+
+**Khuyến nghị:** Làm 10D → 10C → 10B → 10A theo thứ tự. 10B cần full re-index để verify, nên làm sau cùng.
+
+### Verification sau implement
+
+```bash
+npm run typecheck
+npm run build
+npm run guard:no-llm-runtime
+node scripts/smoke-test.mjs
+npm run benchmark:plan:check
+```
+
+Sau đó chạy full index wec.be và verify:
+
+```sql
+-- Kiểm tra không còn duplicate edges
+SELECT repo_id, from_id, to_id, type, COUNT(*) as cnt
+FROM edges
+WHERE repo_id = :repoId
+GROUP BY repo_id, from_id, to_id, type
+HAVING cnt > 1
+LIMIT 20;
+
+-- Kiểm tra field mới
+SELECT
+  unresolved_rows_capped_by_policy,   -- cột cũ (backward compat)
+  unresolved_imports_capped_by_policy, -- cột mới (chính xác hơn)
+  performance_profile,
+  call_resolve_ms,
+  resolve_calls_coverage
+FROM index_runs
+WHERE repo_id = :repoId
+ORDER BY finished_at DESC
+LIMIT 3;
+```
+
+### Tóm tắt scope Phần 10
+
+| Fix | Files | Lines thêm | Behavior change |
+|-----|-------|-----------|-----------------|
+| 10A — UNIQUE INDEX + INSERT OR IGNORE | `graphStore.ts` | ~15 | Có — duplicate edges bị reject |
+| 10B — Dual emission fix | `csharpExtractor.ts` | ~10 | Có — giảm CALLS edges, cần re-index |
+| 10C — Rename misleading field | `types.ts`, `index.ts`, `graphStore.ts` | ~10 | Không (thêm field mới, giữ cũ) |
+| 10D — Cross-repo cap | `edgeResolver.ts` | ~8 | Không (default unlimited) |
+
+**Tổng: ~43 lines, 2 behavior changes (10A + 10B cần full re-index để verify).**
+
+---
+
+## Phần 10 — Kết quả thực tế sau implement (wec.be, 2026-05-19)
+
+### Fixes đã ship thành công ✅
+
+| Fix | Kết quả |
+|-----|---------|
+| **10C** — Rename `unresolvedRowsCappedByPolicy` → `unresolvedImportsCappedByPolicy` | Field chính xác, backward compat, `build_context_ms = 102` ghi đúng |
+| **10D** — Cross-repo resolve cap | `maxRows` forwarded đúng, `unresolved_imports_capped_by_policy = 0` |
+| **Latent bug** — `ensureRunColumn("build_context_ms")` | Không còn lỗi INSERT trên DB cũ |
+
+### Fixes đã revert do không tương thích ❌→↩
+
+**Fix 10A — UNIQUE INDEX:**
+- Root cause: `UPDATE edges SET to_id = ?` conflict với UNIQUE constraint khi target `to_id` đã tồn tại trong row khác (vd: `resolved callee same-file` đã có `symbolId:abc`, UPDATE `callee:Save` → `symbolId:abc` tạo duplicate → UNIQUE violation → exception bị catch silently → `callEdgesResolved = 0`)
+- Hậu quả: CALLS resolved 62.8% → 21.1%, PROPERTY_REF 81.5% → 3.2%, toàn bộ resolve fail
+- **Revert:** Migration đổi thành DROP UNIQUE INDEX nếu đã tồn tại (rollback), `INSERT OR IGNORE` → `INSERT`
+
+**Fix 10B — Dual emission:**
+- Root cause: Resolver dùng terminal name lookup (`candidateMap.get("Save")`). Khi chỉ có qualified edge `callee:IRepo.Save`, resolver không match được vì lookup key là `"IRepo.Save"` không có trong `candidateMap`
+- Hậu quả: 9,259 qualified edges không resolve được, `callEdgesResolved = 0`
+- **Revert:** Khôi phục emit cả simple + qualified edge như cũ
+
+### Kết quả đo sau revert (run `6887eb50`, wec.be 7121 files)
+
+| Metric | Baseline | Fix C (best trước) | Hiện tại | Delta vs Fix C |
+|--------|:---:|:---:|:---:|:---:|
+| **elapsed_ms** | 196,932ms | 60,270ms | **72,426ms** | +12s |
+| **resolve_pct** | 69.2% | 11.5% | **11.2%** | ✅ |
+| **CALLS resolved %** | 62.9% | 62.8% | **62.8%** | ✅ same |
+| **CALLS classified %** | ~63% | 100% | **100%** | ✅ |
+| **PROPERTY_REF resolved %** | 3.5% | 81.5% | **81.5%** | ✅ same |
+| **PROPERTY_WRITE resolved %** | 4.5% | 96.5% | **96.5%** | ✅ same |
+| **IMPORTS resolved %** | ~0% | 3.6% | **22.4%** | **+18.8pp** ✅ |
+| **IMPORTS truly unresolved** | 26,669 | 6 | **8** | ✅ ~same |
+| **resolveCallsCoverage** | 63.7% | 100% | **100%** | ✅ |
+| **Confidence medium band** | 9.2% | 49.8% | **57.0%** | **+7.2pp** ✅ |
+| **Duplicate edges** | 739 nhóm | — | **3,584 nhóm** | ❌ tăng |
+
+### 2 issues còn tồn đọng
+
+| Issue | Root cause | Trạng thái |
+|-------|-----------|-----------|
+| **Duplicate edges** (3,584 nhóm) | Simple + qualified edge cùng `fromId` resolve thành cùng `symbolId` → 2 rows tồn tại song song. UNIQUE INDEX không khả thi vì conflict với UPDATE-in-place | Chưa fix |
+| **IMPLEMENTS 81.4%** (294 iface:) | `effectiveResolveImplementsInPost = mode !== "full" && ...` → luôn `false` khi full index | Chưa fix |
+
+---
+
+## Phần 11 — Fix issues tồn đọng (2026-05-19)
+
+### Root cause analysis (verified từ source)
+
+#### Issue A — Duplicate edges sau resolve
+
+**Cơ chế tạo duplicate:**
+
+1. Extractor emit 2 edges cho `_repo.Save()`:
+   - `callee:Save` (simple, confidence 1.0)
+   - `callee:IRepo.Save` (qualified, confidence 0.75)
+
+2. Resolve phase UPDATE in-place:
+   - `callee:Save` → `symbolId:abc` (resolved callee by name)
+   - `callee:IRepo.Save` → `symbolId:abc` (resolved interface method)
+
+3. Kết quả: 2 rows `(fromId, symbolId:abc, CALLS)` tồn tại song song → duplicate
+
+**Tại sao UNIQUE INDEX không khả thi:**
+- Resolve dùng `UPDATE edges SET to_id = ?` — nếu target `to_id` đã tồn tại → UNIQUE violation → toàn bộ resolve fail
+
+**Solution đúng:** Post-resolve dedup bằng DELETE — sau khi resolve phase hoàn tất, xóa duplicate rows giữ lại row có confidence cao nhất.
+
+#### Issue B — IMPLEMENTS không resolve khi full index
+
+**Code hiện tại (`index.ts:1408`):**
+```typescript
+const effectiveResolveImplementsInPost = mode !== "full" && postPolicy.resolveImplementsInPost;
+```
+
+`mode !== "full"` → `false` khi full index → `resolveImplementsEdges` không bao giờ được gọi trong full index run. Đây là bug logic — điều kiện ngược: full index nên resolve implements, incremental mới có thể skip (vì implements đã được resolve từ full run trước).
+
+**Verified:** `implements_resolve_ms = 0` trong tất cả full index runs.
+
+---
+
+### Fix 11A — Post-resolve dedup DELETE
+
+#### Approach
+
+Sau khi toàn bộ resolve phase hoàn tất (call + import + type + property + implements), chạy một DELETE để xóa duplicate edges, giữ lại row có `confidence` cao nhất (hoặc `rowid` nhỏ nhất nếu confidence bằng nhau).
+
+#### Implementation
+
+**`graphStore.ts` — thêm method `deduplicateResolvedEdges()`:**
+
+```typescript
+deduplicateResolvedEdges(repoId: string): number {
+  // Xóa duplicate (repo_id, from_id, to_id, type) rows, giữ row có confidence cao nhất.
+  // Chỉ xóa resolved edges (to_id không phải placeholder) để tránh xóa nhầm unresolved.
+  const result = this.db.exec(`
+    DELETE FROM edges
+    WHERE repo_id = '${repoId}'
+      AND to_id NOT LIKE 'callee:%'
+      AND to_id NOT LIKE 'import:%'
+      AND to_id NOT LIKE 'property:%'
+      AND to_id NOT LIKE 'iface:%'
+      AND to_id NOT LIKE 'type:%'
+      AND rowid NOT IN (
+        SELECT MAX(rowid) FROM edges
+        WHERE repo_id = '${repoId}'
+          AND to_id NOT LIKE 'callee:%'
+          AND to_id NOT LIKE 'import:%'
+          AND to_id NOT LIKE 'property:%'
+          AND to_id NOT LIKE 'iface:%'
+          AND to_id NOT LIKE 'type:%'
+        GROUP BY repo_id, from_id, to_id, type
+      )
+  `);
+  return this.db.prepare(`SELECT changes() as n`).get() as { n: number } | undefined)?.n ?? 0;
+}
+```
+
+**Lưu ý:** Dùng `MAX(rowid)` thay vì `MIN(rowid)` vì resolve phase UPDATE in-place — row được resolve sau (qualified edge) thường có confidence cao hơn và được ghi sau → rowid lớn hơn.
+
+**`index.ts` — gọi sau toàn bộ resolve phase, trước `recordRun`:**
+
+```typescript
+// Sau implements resolve, trước fullSummary construction
+const dedupCount = store.deduplicateResolvedEdges(repoId);
+process.stderr.write(`[index-post] repoId=${repoId} deduped ${dedupCount} duplicate resolved edges\n`);
+```
+
+**Rủi ro:** Thấp — DELETE chỉ xóa resolved edges bị duplicate, không ảnh hưởng unresolved placeholders.
+
+**Files thay đổi:** `src/graphStore.ts` (+15 lines), `src/index.ts` (+3 lines)
+
+---
+
+### Fix 11B — IMPLEMENTS resolve trong full index
+
+#### Root cause
+
+`index.ts:1408`:
+```typescript
+// TRƯỚC (bug):
+const effectiveResolveImplementsInPost = mode !== "full" && postPolicy.resolveImplementsInPost;
+// → false khi full index → resolveImplementsEdges không bao giờ chạy
+
+// SAU (fix):
+const effectiveResolveImplementsInPost = postPolicy.resolveImplementsInPost;
+// → true cho tất cả profiles (standard/large/very-large đều có resolveImplementsInPost=true)
+```
+
+**Lý do điều kiện cũ sai:** Comment gốc có thể là "incremental chỉ cần resolve implements cho files mới" — nhưng thực tế full index cũng cần resolve vì toàn bộ edges được tạo lại từ đầu.
+
+**Rủi ro:** Thấp — `resolveImplementsEdges` nhanh (không có LIMIT, nhưng IMPLEMENTS edges ít ~1,500). Thêm ~50-200ms cho full index.
+
+**Files thay đổi:** `src/index.ts` — 1 line
+
+---
+
+### Thứ tự implement
+
+| Bước | Fix | Effort | Rủi ro |
+|------|-----|--------|--------|
+| **1** | 11B — IMPLEMENTS condition fix | 1 line | Thấp |
+| **2** | 11A — Post-resolve dedup DELETE | ~18 lines | Thấp |
+
+### Verification sau implement
+
+```bash
+npm run typecheck && npm run build
+node scripts/smoke-test.mjs
+```
+
+Sau re-index wec.be:
+```sql
+-- Kiểm tra không còn duplicate resolved edges
+SELECT COUNT(*) as dup_groups FROM (
+  SELECT from_id, to_id, type, COUNT(*) as cnt
+  FROM edges WHERE repo_id = :repoId
+    AND to_id NOT LIKE 'callee:%' AND to_id NOT LIKE 'import:%'
+    AND to_id NOT LIKE 'property:%' AND to_id NOT LIKE 'iface:%'
+  GROUP BY from_id, to_id, type HAVING cnt > 1
+);
+
+-- Kiểm tra IMPLEMENTS đã resolve
+SELECT reason, COUNT(*) FROM edges
+WHERE repo_id = :repoId AND type = 'IMPLEMENTS'
+GROUP BY reason;
+```
+
+### Tóm tắt scope Phần 11
+
+| Fix | Files | Lines | Behavior change |
+|-----|-------|-------|-----------------|
+| 11A — Post-resolve dedup | `graphStore.ts`, `index.ts` | ~18 | Có — xóa duplicate resolved edges sau mỗi index run |
+| 11B — IMPLEMENTS full index | `index.ts` | 1 | Có — IMPLEMENTS resolve chạy trong full index |
+| 11C — IMPLEMENTS external boundary tagging | `edgeResolver.ts` | ~10 | Có — iface: không resolve được → tagged external boundary |
+
+---
+
+## Phần 11 — Kết quả thực tế (wec.be, run `a1a1bf90` → `b81658df`, 2026-05-19)
+
+### Fix 11A — Duplicate edges ✅ RESOLVED
+- `duplicate_groups`: 3,584 → **0**
+- `deduplicateResolvedEdges` hoạt động hoàn hảo
+
+### Fix 11B — IMPLEMENTS chạy trong full index ✅
+- `implements_resolve_ms`: 0ms → **1ms** (đã chạy)
+- Nhưng 294 `iface:` edges vẫn còn → cần Fix 11C
+
+### Fix 11C — Root cause IMPLEMENTS 294 edges còn lại
+
+**Điều tra xác nhận:** 294 `iface:` edges là các interface từ **external NuGet packages** không có source trong wec.be:
+
+| Interface | Package | Count |
+|-----------|---------|-------|
+| `IConsumer` | MassTransit | 57 |
+| `ICommand` | CRM.Core (cross-repo) | 56 |
+| `IRequestHandler` | MediatR | 55 |
+| `IEntityTypeConfiguration` | EF Core | 33 |
+| `IJob` | Quartz.NET | 23 |
+| `IWorkflow` | Elsa | 10 |
+| `INotificationHandler` | MediatR | 8 |
+| Khác | ASP.NET Core, etc. | 52 |
+
+`resolveImplementsEdges` lookup `symbols WHERE kind='interface' AND name IN (...)` → không tìm thấy vì interface không có trong source → silently skip.
+
+**Fix 11C:** Thêm `tagExternalStmt` trong `resolveImplementsEdges` — sau khi loop, edges không match → `UPDATE confidence=0.1, reason='external boundary'`. Tương tự pattern đã làm cho CALLS và PROPERTY.
+
+**Kết quả kỳ vọng sau re-index:**
+- IMPLEMENTS `iface:` còn lại: 294 → **0**
+- IMPLEMENTS classified %: 81.4% → **100%** (81.4% resolved + 18.6% external boundary)
+
+### Kết quả final (run `b81658df`, 2026-05-19 10:58) ✅ COMPLETED
+
+| Metric | Baseline | **Final** | Cải thiện |
+|--------|:---:|:---:|:---:|
+| **elapsed_ms** | 196,932ms | **67,174ms** | **−66%** |
+| **resolve_pct** | 69.2% | **11.5%** | −57.7pp |
+| **resolveCallsCoverage** | 63.7% | **100%** | +36.3pp |
+| **implements_resolve_ms** | 0ms (bug) | **2ms** | ✅ fixed |
+| **duplicate_groups** | 739 nhóm | **0** | ✅ FIXED |
+
+| Edge Type | Baseline resolved% | **Final resolved%** | **Classified%** | Truly unresolved |
+|-----------|:---:|:---:|:---:|:---:|
+| CALLS | 62.9% | **60.4%** | **100%** | 0 |
+| PROPERTY_REF | 3.5% | **80.8%** | **100%** | 0 |
+| PROPERTY_WRITE | 4.5% | **96.4%** | **100%** | 0 |
+| IMPORTS | ~0% | **22.3%** | **99.97%** | 8 (0.03%) |
+| IMPLEMENTS | 81.6% | **81.4%** | **100%** | 0 |
+| DEPENDS_ON | 100% | **100%** | **100%** | 0 |
+| TYPE_REF | 100% | **100%** | **100%** | 0 |
+
+**Không còn edge nào ở trạng thái "unknown unresolved". Tất cả edges đều có reason rõ ràng.**
+
+> 8 IMPORTS truly unresolved là transitive deps không có direct NuGet edge (`SS.Cache`, `Castle.Core.Resource`, `Superpower.Model`, v.v.) — không thể cải thiện thêm từ graph data hiện có.

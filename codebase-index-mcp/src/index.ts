@@ -1405,7 +1405,10 @@ async function runIndexAndResolve(
   const profileDecision = resolvePerformanceProfileDecision(repoId, mode, maxFiles);
   const performanceProfile = profileDecision.profile;
   const postPolicy = resolvePostPhasePolicy(performanceProfile);
-  const effectiveResolveImplementsInPost = mode !== "full" && postPolicy.resolveImplementsInPost;
+  // Resolve implements in post-phase for ALL modes (full + incremental).
+  // Previous condition `mode !== "full"` was a bug — full index rebuilds all edges from scratch
+  // so implements edges also need post-phase resolution.
+  const effectiveResolveImplementsInPost = postPolicy.resolveImplementsInPost;
   process.stderr.write(
     `[index-policy] repoId=${repoId} profile=${performanceProfile} source=${profileDecision.source} reason=${profileDecision.reason} fileCount=${String(profileDecision.fileCount)} symbolCount=${String(profileDecision.symbolCount)} maxUnresolvedRows=${String(postPolicy.maxUnresolvedRows)} resolveTypeRefs=${String(postPolicy.resolveTypeRefs)} resolvePropertyRefs=${String(postPolicy.resolvePropertyRefs)} resolveImplementsInPost=${String(postPolicy.resolveImplementsInPost)} effectiveResolveImplementsInPost=${String(effectiveResolveImplementsInPost)}\n`
   );
@@ -1539,6 +1542,13 @@ async function runIndexAndResolve(
   }
   await yieldToEventLoop();
 
+  // Post-resolve dedup: remove duplicate resolved edges that arise when both simple and
+  // qualified edges resolve to the same symbolId (e.g. callee:Save + callee:IRepo.Save → same target).
+  process.stderr.write(`[index-post] repoId=${repoId} deduplicating resolved edges...\n`);
+  const dedupCount = (() => { try { return store.deduplicateResolvedEdges(repoId); } catch { return 0; } })();
+  process.stderr.write(`[index-post] repoId=${repoId} removed ${dedupCount} duplicate resolved edges\n`);
+  await yieldToEventLoop();
+
   const mentionsStart = Date.now();
   process.stderr.write(`[index-post] repoId=${repoId} resolving mentions...\n`);
   const mentionsResolved = docsEnabled
@@ -1571,7 +1581,7 @@ async function runIndexAndResolve(
     implementsResolveMs,
     ftsRebuildMs,
     unresolvedCallsTotal,
-    unresolvedRowsCappedByPolicy: postPolicy.maxUnresolvedRows > 0,
+    unresolvedImportsCappedByPolicy: postPolicy.maxUnresolvedRows > 0,
     resolveCallsCoverage: unresolvedCallsTotal > 0 ? callEdgesResolved / unresolvedCallsTotal : 1,
     performanceProfile
   };

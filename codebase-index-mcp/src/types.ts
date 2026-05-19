@@ -37,7 +37,9 @@ export type IndexRunSummary = {
   implementsResolveMs?: number;
   ftsRebuildMs?: number;
   unresolvedCallsTotal?: number;
-  unresolvedRowsCappedByPolicy?: boolean;
+  /** true khi import/type/property resolve bị cap bởi maxUnresolvedRows policy.
+   * NOTE: call resolve (buildCallResolutionContext) KHÔNG bao giờ bị cap — luôn fetch tất cả rows. */
+  unresolvedImportsCappedByPolicy?: boolean;
   resolveCallsCoverage?: number;
   performanceProfile?: "standard" | "large" | "very-large";
 };

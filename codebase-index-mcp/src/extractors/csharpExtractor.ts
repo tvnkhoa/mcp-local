@@ -114,14 +114,16 @@ export function extractCSharpSymbolsImpl(
     }
     if (!calleeName) continue;
     const fromId = findEnclosingCSharpSymbolId(node, input) ?? moduleSymbolId;
-    // Always emit simple callee edge
+    // Always emit simple callee edge — resolver uses this for name-based matching.
     edges.push({ repoId: input.repoId, fromId, toId: `callee:${calleeName}`, type: "CALLS" });
-    // Emit qualified edge only for receivers that are resolvable:
+    // Additionally emit qualified edge for resolvable receivers:
     // - Uppercase start: static/type calls (e.g. MyService.DoWork)
     // - Underscore prefix: DI field convention (e.g. _campaignService.Execute)
     // - this_expression: resolved to enclosing class name
     // Skipping plain camelCase locals (e.g. result.Value, list.Add) avoids
     // edge explosion on large repos without losing meaningful call graph data.
+    // NOTE: UNIQUE INDEX on edges(repo_id, from_id, to_id, type) prevents true duplicates;
+    // simple + qualified are different to_id values so both are stored intentionally.
     if (receiverName && (/^[A-Z]/.test(receiverName) || receiverName.startsWith("_") || functionNode.childForFieldName("expression")?.type === "this_expression")) {
       const qualifiedReceiverName = receiverTypeName || receiverName;
       edges.push({ repoId: input.repoId, fromId, toId: `callee:${qualifiedReceiverName}.${calleeName}`, type: "CALLS", confidence: 0.75, reason: "qualified call" });

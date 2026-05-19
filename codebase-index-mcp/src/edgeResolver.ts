@@ -437,7 +437,7 @@ export function resolveImportEdges(db: Database.Database, repoId: string, maxUnr
 
   // Phase 3: Resolve cross-repo namespace imports (e.g. CRM.*, SSNet.*)
   // These were intentionally left unresolved by tagExternalNamespaceImports and the main loop.
-  const crossRepoResolved = resolveImportsCrossRepo(db, repoId);
+  const crossRepoResolved = resolveImportsCrossRepo(db, repoId, maxUnresolvedRows);
 
   return count + externalTagged + crossRepoResolved;
 }
@@ -452,17 +452,19 @@ export function resolveImportEdges(db: Database.Database, repoId: string, maxUnr
  * Also re-attempts resolution for edges previously tagged "external boundary" with a cross-repo
  * namespace prefix — this handles the case where a provider repo is newly indexed after consumer.
  */
-function resolveImportsCrossRepo(db: Database.Database, repoId: string): number {
+function resolveImportsCrossRepo(db: Database.Database, repoId: string, maxRows = 0): number {
   // Find all IMPORTS edges that are either unresolved OR previously tagged external boundary
   // for cross-repo namespace prefixes. Excludes edges already resolved to real symbols.
+  // maxRows=0 means unlimited (default); when set, caps the number of edges processed.
   const rows = db
     .prepare(
       `SELECT e.from_id as fromId, e.to_id as toId, e.reason as reason
        FROM edges e
        WHERE e.repo_id = ? AND e.type = 'IMPORTS' AND e.to_id LIKE 'import:%'
-         AND e.reason IN ('unresolved import token', 'external boundary')`
+         AND e.reason IN ('unresolved import token', 'external boundary')
+       ${maxRows > 0 ? "LIMIT ?" : ""}`
     )
-    .all(repoId) as { fromId: string; toId: string; reason: string }[];
+    .all(...(maxRows > 0 ? [repoId, maxRows] : [repoId])) as { fromId: string; toId: string; reason: string }[];
 
   if (rows.length === 0) return 0;
 
@@ -1235,7 +1237,13 @@ export function resolveImplementsEdges(db: Database.Database, repoId: string): n
   if (unresolved.length === 0) return 0;
 
   const updateStmt = db.prepare(
-    `update edges set to_id = ? where repo_id = ? and from_id = ? and to_id = ? and type = 'IMPLEMENTS'`
+    `update edges set to_id = ?, confidence = ?, reason = ?
+     where repo_id = ? and from_id = ? and to_id = ? and type = 'IMPLEMENTS'`
+  );
+  // Tag unresolvable iface: edges as external boundary (NuGet/framework interfaces not in source)
+  const tagExternalStmt = db.prepare(
+    `update edges set confidence = 0.1, reason = 'external boundary'
+     where repo_id = ? and from_id = ? and to_id = ? and type = 'IMPLEMENTS'`
   );
 
   const interfaceNames = [...new Set(unresolved.map((row) => row.toId.slice(6)))];
@@ -1266,8 +1274,13 @@ export function resolveImplementsEdges(db: Database.Database, repoId: string): n
       const matchId = interfaceByName.get(ifaceName);
 
       if (matchId) {
-        updateStmt.run(matchId, repoId, row.fromId, row.toId);
+        // Resolved to internal interface symbol
+        updateStmt.run(matchId, 0.95, "base_list interface", repoId, row.fromId, row.toId);
         count += 1;
+      } else {
+        // Interface not found in repo symbols — likely external NuGet/framework interface.
+        // Tag as external boundary so it is classified (not silently left as iface: placeholder).
+        tagExternalStmt.run(repoId, row.fromId, row.toId);
       }
     }
   });
