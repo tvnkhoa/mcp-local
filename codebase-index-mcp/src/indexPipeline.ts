@@ -1,4 +1,3 @@
-import { execFileSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
@@ -8,6 +7,7 @@ import { glob } from "glob";
 
 import { shouldIndexFile, type FilterDecision } from "./fileFilter.js";
 import { GraphStore } from "./graphStore.js";
+import { resolveHeadCommitSha, resolveCurrentBranch } from "./gitHelpers.js";
 import { clamp, redactSensitive } from "./indexGuardrails.js";
 import { extractGraphData, isParseTimeoutError } from "./treeSitterExtractor.js";
 import { ExtractionWorkerPool } from "./extractionWorkerPool.js";
@@ -40,20 +40,13 @@ export type RunIndexInput = {
   abortSignal?: AbortSignal;
 };
 
-function resolveCommitSha(repoPath: string): string | null {
-  try {
-    return execFileSync("git", ["rev-parse", "HEAD"], { cwd: repoPath, encoding: "utf8" }).trim();
-  } catch {
-    return null;
-  }
-}
-
 export async function runIndexPipeline(store: GraphStore, input: RunIndexInput): Promise<IndexRunSummary> {
   const runId = randomUUID();
   const startedAt = new Date().toISOString();
   const started = Date.now();
   const indexVersion = "v1-tree-sitter-property-edges";
-  const commitSha = resolveCommitSha(input.repoPath);
+  const commitSha = resolveHeadCommitSha(input.repoPath);
+  const branch = resolveCurrentBranch(input.repoPath);
 
   store.ensureRepository(input.repoId, input.repoPath);
 
@@ -457,21 +450,33 @@ export async function runIndexPipeline(store: GraphStore, input: RunIndexInput):
       }
     }
 
-    // On full mode, remove stale files no longer present on disk
-    if (input.mode === "full" && !input.abortSignal?.aborted) {
-      const currentPaths = selectedFiles.map((f) => path.relative(input.repoPath, f));
-      const pruned = store.pruneStaleFiles(input.repoId, currentPaths);
-      if (pruned > 0) {
-        process.stderr.write(`[index-prune] removed ${String(pruned)} stale file(s) from index\n`);
-      }
-      const prunedEdges = store.pruneOrphanedEdges(input.repoId);
-      if (prunedEdges > 0) {
-        process.stderr.write(`[index-prune] removed ${String(prunedEdges)} orphaned edge(s) from index\n`);
+    // Prune stale files (both full and incremental) only when the glob returned every file on disk.
+    // A capped scan (files.length > maxFiles) cannot safely prune: the missing tail would look
+    // like deletions. resolveImplementsEdges is also skipped in that case to avoid resolving
+    // placeholder edges against stale symbols that prune would have removed.
+    const scanWasComplete = files.length <= maxFiles;
+    if (!input.abortSignal?.aborted) {
+      if (scanWasComplete) {
+        const currentPaths = selectedFiles.map((f) => path.relative(input.repoPath, f));
+        const pruned = store.pruneStaleFiles(input.repoId, currentPaths);
+        if (pruned > 0) {
+          process.stderr.write(`[index-prune] removed ${String(pruned)} stale file(s) from index\n`);
+        }
+        const prunedEdges = store.pruneOrphanedEdges(input.repoId);
+        if (prunedEdges > 0) {
+          process.stderr.write(`[index-prune] removed ${String(prunedEdges)} orphaned edge(s) from index\n`);
+        }
+      } else {
+        process.stderr.write(`[index-prune-skipped] repo has ${String(files.length)} files, exceeds cap of ${String(maxFiles)} — stale-file cleanup and IMPLEMENTS resolution skipped to avoid false deletions\n`);
       }
       // Resolve iface: placeholders → real symbolIds after all C# files have been indexed.
-      const resolvedImpl = store.resolveImplementsEdges(input.repoId);
-      if (resolvedImpl > 0) {
-        process.stderr.write(`[index-resolve] resolved ${String(resolvedImpl)} IMPLEMENTS edge(s)\n`);
+      // Skipped when scan was capped: prune didn't run so stale symbols may still be present,
+      // and resolving against them would create dangling IMPLEMENTS edges.
+      if (input.mode === "full" && scanWasComplete) {
+        const resolvedImpl = store.resolveImplementsEdges(input.repoId);
+        if (resolvedImpl > 0) {
+          process.stderr.write(`[index-resolve] resolved ${String(resolvedImpl)} IMPLEMENTS edge(s)\n`);
+        }
       }
     }
 
@@ -497,6 +502,7 @@ export async function runIndexPipeline(store: GraphStore, input: RunIndexInput):
       runId,
       repoId: input.repoId,
       commitSha,
+      branch,
       indexVersion,
       mode: input.mode,
       status: wasCancelled ? "cancelled" : "ok",
@@ -530,6 +536,7 @@ export async function runIndexPipeline(store: GraphStore, input: RunIndexInput):
       runId,
       repoId: input.repoId,
       commitSha,
+      branch,
       indexVersion,
       mode: input.mode,
       status: isCancelled ? "cancelled" : "failed",

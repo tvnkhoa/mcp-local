@@ -3,7 +3,7 @@ import { McpError, ErrorCode } from "@modelcontextprotocol/sdk/types.js";
 import { resolveResponseProfile } from "../responseFormatter.js";
 import { validateReadOnlyGraphSql, validateAllowedTables } from "../sqliteGuardrails.js";
 import { getRepoStaleness } from "../gitHelpers.js";
-import type { GraphStore } from "../graphStore.js";
+import { GraphStore } from "../graphStore.js";
 import type { HandlerContext } from "./handlerContext.js";
 
 // ── Staleness Gate ────────────────────────────────────────────────────────────
@@ -190,7 +190,7 @@ export function handleGetFileSummary(
     const topSymbols = result.exports.slice(0, 5).map((s) => ({ name: s.name, kind: s.kind }));
     return ctx.asText({ filePath: result.file.filePath, language: result.file.language, symbolCount: result.exports.length, topSymbols }, profile);
   }
-  return ctx.asText(result, profile);
+  return ctx.asText({ ...result, indexMeta: buildIndexMeta(ctx.store, args.repoId) }, profile);
 }
 
 // ── list_repositories ─────────────────────────────────────────────────────────
@@ -240,13 +240,27 @@ export function handleGetFileContext(
   return ctx.asText(result, profile);
 }
 
+// ── index meta helper ─────────────────────────────────────────────────────────
+
+function buildIndexMeta(store: GraphStore, repoId: string): { branch: string | null; commitSha: string | null; indexedAt: string; note: string } | null {
+  const latestRun = store.getLatestRun(repoId);
+  if (!latestRun) return null;
+  return {
+    branch: latestRun.branch,
+    commitSha: latestRun.commitSha,
+    indexedAt: latestRun.finishedAt,
+    note: "Data reflects the last indexed branch/commit. Run index_repository(mode='full') after switching branches."
+  };
+}
+
 // ── get_folder_summary ────────────────────────────────────────────────────────
 
 export function handleGetFolderSummary(
   args: { repoId: string; folderPath: string; maxFiles: number },
   ctx: HandlerContext
 ): CallToolResult {
-  return ctx.asText(ctx.store.getFolderSummary(args.repoId, args.folderPath, args.maxFiles));
+  const result = ctx.store.getFolderSummary(args.repoId, args.folderPath, args.maxFiles);
+  return ctx.asText({ ...result, indexMeta: buildIndexMeta(ctx.store, args.repoId) });
 }
 
 // ── route_map ────────────────────────────────────────────────────────────────

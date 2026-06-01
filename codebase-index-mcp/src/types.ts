@@ -6,6 +6,7 @@ export type IndexRunSummary = {
   runId: string;
   repoId: string;
   commitSha: string | null;
+  branch: string | null;
   indexVersion: string;
   mode: IndexMode;
   status: Exclude<IndexRunStatus, "running">;

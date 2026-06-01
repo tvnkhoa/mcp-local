@@ -48,6 +48,7 @@ import {
   runGit,
   runGitLines,
   resolveHeadCommitSha,
+  resolveCurrentBranch,
   parseGitBlamePorcelain,
   redactEmail,
   getRepoWorkingTreeState,
@@ -651,7 +652,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: "get_folder_summary",
-        description: "List all files under a folder path with per-file stats (language, symbol count, caller count). Use at session start to orient — cheaper than get_file_context on individual files. Prefer this over reading file contents when you just need to find the right files.",
+        description: "List all files under a folder path with per-file stats (language, symbol count, caller count). Use at session start to orient — cheaper than get_file_context on individual files. Prefer this over reading file contents when you just need to find the right files. Response includes indexMeta with branch and commitSha from the last index run — verify these match your current branch before trusting file listings. After a branch switch, run index_repository(mode='full') to purge stale entries.",
         inputSchema: {
           type: "object",
           additionalProperties: false,
@@ -1375,6 +1376,7 @@ async function runIndexAndResolve(
         runId: randomUUID(),
         repoId,
         commitSha: skipDecision.headCommitSha,
+        branch: resolveCurrentBranch(repoPath),
         indexVersion: skipDecision.indexVersion,
         mode,
         status: "ok",

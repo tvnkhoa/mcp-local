@@ -26,6 +26,16 @@ export function resolveHeadCommitSha(repoPath: string): string | null {
   }
 }
 
+export function resolveCurrentBranch(repoPath: string): string | null {
+  try {
+    const name = runGit(repoPath, ["rev-parse", "--abbrev-ref", "HEAD"]).trim();
+    // "HEAD" means detached HEAD — no branch name available
+    return name === "HEAD" ? null : name;
+  } catch {
+    return null;
+  }
+}
+
 export function runGitStatusPorcelain(repoPath: string): string[] | null {
   try {
     const text = runGit(repoPath, ["status", "--porcelain"]);

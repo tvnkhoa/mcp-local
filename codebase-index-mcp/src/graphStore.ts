@@ -545,7 +545,7 @@ export class GraphStore {
           cross_repo_attempts, cross_repo_resolved,
           unresolved_no_candidate, unresolved_ambiguous,
           unresolved_boundary_blocked, unresolved_low_confidence,
-          commit_sha,
+          commit_sha, branch,
           resolve_phase_ms, build_context_ms, call_resolve_ms, import_resolve_ms,
           type_resolve_ms, property_resolve_ms, implements_resolve_ms, fts_rebuild_ms,
           unresolved_calls_total, unresolved_rows_capped_by_policy, unresolved_imports_capped_by_policy, resolve_calls_coverage,
@@ -559,7 +559,7 @@ export class GraphStore {
           ?, ?,
           ?, ?,
           ?, ?,
-          ?,
+          ?, ?,
           ?, ?, ?, ?,
           ?, ?, ?, ?,
           ?, ?, ?, ?,
@@ -594,6 +594,7 @@ export class GraphStore {
         summary.unresolvedBoundaryBlocked ?? 0,
         summary.unresolvedLowConfidence ?? 0,
         summary.commitSha ?? null,
+        summary.branch ?? null,
         summary.resolvePhaseMs ?? 0,
         summary.buildContextMs ?? 0,
         summary.callResolveMs ?? 0,
@@ -641,6 +642,7 @@ export class GraphStore {
           unresolved_boundary_blocked as unresolvedBoundaryBlocked,
           unresolved_low_confidence as unresolvedLowConfidence,
           commit_sha as commitSha,
+          branch,
           resolve_phase_ms as resolvePhaseMs,
           build_context_ms as buildContextMs,
           call_resolve_ms as callResolveMs,
@@ -1206,6 +1208,15 @@ export class GraphStore {
       this.db.exec(`alter table index_runs add column commit_sha text`);
     }
 
+    // Add branch for branch-aware staleness display.
+    ensureRunColumnText("branch");
+
+    // Add index for getLatestRun ORDER BY finished_at on existing DBs.
+    const existingIndexes = this.db.prepare(`SELECT name FROM sqlite_master WHERE type='index' AND name='idx_runs_repo_finished'`).get();
+    if (!existingIndexes) {
+      this.db.exec(`create index if not exists idx_runs_repo_finished on index_runs(repo_id, finished_at desc)`);
+    }
+
     // Migrate vec_symbol_map to new schema if needed (old schema had rowid PK, new has vec_rowid column)
     try {
       const vecMapCols = this.db.prepare("pragma table_info(vec_symbol_map)").all() as { name: string }[];
@@ -1461,7 +1472,8 @@ export class GraphStore {
         unresolved_no_candidate integer not null default 0,
         unresolved_ambiguous integer not null default 0,
         unresolved_boundary_blocked integer not null default 0,
-        unresolved_low_confidence integer not null default 0
+        unresolved_low_confidence integer not null default 0,
+        branch text
       );
 
       create index if not exists idx_edges_repo_from on edges(repo_id, from_id);
@@ -1473,6 +1485,7 @@ export class GraphStore {
       create index if not exists idx_symbols_repo_kind on symbols(repo_id, kind);
       create index if not exists idx_symbols_repo_kind_name on symbols(repo_id, kind, name);
       create index if not exists idx_runs_repo_started on index_runs(repo_id, started_at desc);
+      create index if not exists idx_runs_repo_finished on index_runs(repo_id, finished_at desc);
       create index if not exists idx_files_repo_path on files(repo_id, path);
 
       create table if not exists cross_repo_deps (
