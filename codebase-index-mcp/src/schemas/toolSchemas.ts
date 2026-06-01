@@ -56,7 +56,7 @@ export const getCallChainSchema = (MAX_DEPTH: number, MAX_RESULT_LIMIT: number) 
   .strict();
 
 // List repositories
-export const listRepositoriesSchema = z.object({ profile: responseProfileSchema.default("standard").optional() }).strict();
+export const listRepositoriesSchema = z.object({ profile: responseProfileSchema.default("compact").optional() }).strict();
 
 // Search symbols
 export const searchSymbolsSchema = (MAX_RESULT_LIMIT: number) => z
@@ -82,7 +82,7 @@ export const getFileContextSchema = (MAX_RESULT_LIMIT: number) => z
     filePaths: z.array(z.string().min(1)).min(1).max(50).optional(),
     limit: z.number().int().min(1).max(MAX_RESULT_LIMIT).default(200),
     compact: z.boolean().default(false),
-    profile: responseProfileSchema.default("standard")
+    profile: responseProfileSchema.default("compact")
   })
   .strict()
   .refine((v) => Boolean(v.filePath || v.filePaths), {
@@ -95,7 +95,8 @@ export const getSymbolDetailSchema = (MAX_RESULT_LIMIT: number) => z
   .object({
     repoId: z.string().min(1).max(200),
     symbolId: z.string().min(1).max(200),
-    limit: z.number().int().min(1).max(MAX_RESULT_LIMIT).default(100)
+    limit: z.number().int().min(1).max(MAX_RESULT_LIMIT).default(100),
+    profile: responseProfileSchema.default("compact")
   })
   .strict();
 
@@ -120,7 +121,7 @@ export const getChangeContextSchema = (MAX_DEPTH: number, MAX_RESULT_LIMIT: numb
     callerDepth: z.number().int().min(1).max(MAX_DEPTH).default(2),
     calleeDepth: z.number().int().min(1).max(MAX_DEPTH).default(1),
     limit: z.number().int().min(1).max(MAX_RESULT_LIMIT).default(20),
-    profile: responseProfileSchema.default("standard")
+    profile: responseProfileSchema.default("compact")
   })
   .strict()
   .refine((v) => Boolean(v.symbolId || v.name), {
@@ -142,7 +143,8 @@ export const findSymbolAtLineSchema = z
   .object({
     repoId: z.string().min(1).max(200),
     filePath: z.string().min(1),
-    line: z.number().int().min(1)
+    line: z.number().int().min(1),
+    profile: responseProfileSchema.default("compact")
   })
   .strict();
 
@@ -154,7 +156,8 @@ export const queryDocsSchema = (MAX_RESULT_LIMIT: number) => z
     query: z.string().min(1).max(200).optional(),
     symbolIds: z.array(z.string().min(1).max(200)).min(1).max(100).optional(),
     filePath: z.string().min(1).optional(),
-    limit: z.number().int().min(1).max(MAX_RESULT_LIMIT).default(20)
+    limit: z.number().int().min(1).max(MAX_RESULT_LIMIT).default(20),
+    profile: responseProfileSchema.default("compact")
   })
   .strict()
   .refine(
@@ -285,7 +288,8 @@ export const getFolderSummarySchema = (MAX_RESULT_LIMIT: number) => z
   .object({
     repoId: z.string().min(1).max(200),
     folderPath: z.string().min(1),
-    maxFiles: z.number().int().min(1).max(MAX_RESULT_LIMIT).default(100)
+    maxFiles: z.number().int().min(1).max(MAX_RESULT_LIMIT).default(100),
+    profile: responseProfileSchema.default("compact")
   })
   .strict();
 
@@ -295,7 +299,8 @@ export const findEntryPointsSchema = (MAX_RESULT_LIMIT: number) => z
     repoId: z.string().min(1).max(200),
     filePathPrefix: z.string().max(500).optional(),
     kind: z.string().max(50).optional(),
-    limit: z.number().int().min(1).max(MAX_RESULT_LIMIT).default(50)
+    limit: z.number().int().min(1).max(MAX_RESULT_LIMIT).default(50),
+    profile: responseProfileSchema.default("compact")
   })
   .strict();
 
@@ -304,7 +309,8 @@ export const findImplementationsSchema = (MAX_RESULT_LIMIT: number) => z
   .object({
     repoId: z.string().min(1).max(200),
     interfaceName: z.string().min(1).max(200),
-    limit: z.number().int().min(1).max(MAX_RESULT_LIMIT).default(50)
+    limit: z.number().int().min(1).max(MAX_RESULT_LIMIT).default(50),
+    profile: responseProfileSchema.default("compact")
   })
   .strict();
 

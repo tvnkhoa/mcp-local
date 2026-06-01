@@ -73,7 +73,7 @@ src/index.ts           # MCP tool dispatch
 - HMAC-signed approval token (TTL: 30 min, env: `CODEBASE_INDEX_REFACTOR_APPROVAL_SECRET`)
 - C# object-initializer dotted targets require `initializerRewrite` metadata or preview blocks as `ambiguous_target`
 
-**Response profiles:** `nano | compact | standard | verbose` — use `compact` for token efficiency in Plan mode.
+**Response profiles:** `nano | compact | standard | verbose` — `compact` is the default for all read tools. Only `verbose` is pretty-printed; the rest emit minified JSON with `null` fields dropped. All response paths are normalized to forward slashes.
 
 ## Critical Constraints
 

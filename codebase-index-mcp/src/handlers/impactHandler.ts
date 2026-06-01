@@ -26,6 +26,25 @@ function checkStaleness(repoId: string, store: GraphStore): void {
   }
 }
 
+// ── graph-health collapse ─────────────────────────────────────────────────────
+// When the graph is fully resolved, a single flag replaces the all-zero detail object.
+
+function collapseGraphHealth(gh: {
+  unresolvedCalls: number;
+  unresolvedImports: number;
+  unresolvedTypeRefs: number;
+  unresolvedProperties?: number;
+  importClassificationRatio?: number;
+}): unknown {
+  const healthy =
+    gh.unresolvedCalls === 0 &&
+    gh.unresolvedImports === 0 &&
+    gh.unresolvedTypeRefs === 0 &&
+    (gh.unresolvedProperties ?? 0) === 0 &&
+    (gh.importClassificationRatio ?? 1) === 1;
+  return healthy ? { complete: true } : gh;
+}
+
 // ── formatChangeContextPayload ────────────────────────────────────────────────
 // Shared by impactHandler and searchHandler (get_symbol_context_pack)
 
@@ -47,12 +66,13 @@ export function formatChangeContextPayload(
     };
   }
   if (profile === "compact") {
+    // Drop opaque edge ids (fromId/toId) and free-text `reason` — not needed for discovery.
     return {
       symbol: result.symbol ? { symbolId: result.symbol.symbolId, name: result.symbol.name, kind: result.symbol.kind, filePath: result.symbol.filePath, line: result.symbol.line } : null,
-      callers: result.callers.map((x) => ({ fromId: x.fromId, fromName: x.fromName, fromFilePath: x.fromFilePath, distance: x.distance, confidence: x.confidence ?? null, reason: x.reason ?? null })),
-      callees: result.callees.map((x) => ({ toId: x.toId, toName: x.toName, toFilePath: x.toFilePath, confidence: x.confidence ?? null, reason: x.reason ?? null })),
-      typeDeps: result.typeDeps.map((x) => ({ toId: x.toId, toName: x.toName, toFilePath: x.toFilePath, confidence: x.confidence ?? null, reason: x.reason ?? null })),
-      graphHealth: result.graphHealth, reliabilitySummary: result.reliabilitySummary
+      callers: result.callers.map((x) => ({ fromName: x.fromName, fromFilePath: x.fromFilePath, distance: x.distance, confidence: x.confidence ?? null })),
+      callees: result.callees.map((x) => ({ toName: x.toName, toFilePath: x.toFilePath, confidence: x.confidence ?? null })),
+      typeDeps: result.typeDeps.map((x) => ({ toName: x.toName, toFilePath: x.toFilePath, confidence: x.confidence ?? null })),
+      graphHealth: collapseGraphHealth(result.graphHealth), reliabilitySummary: result.reliabilitySummary
     };
   }
   if (profile === "verbose") {
@@ -170,7 +190,9 @@ export function handleGetChangeContext(
   if (!resolvedSymbolId && args.name) {
     const context = store.getContextByName(args.repoId, args.name, args.limit);
     if (!context.symbol) {
-      return ctx.asText({ symbol: null, callers: [], callees: [], typeDeps: [], graphHealth: { unresolvedCalls: 0, unresolvedImports: 0, unresolvedTypeRefs: 0, note: "symbol not found" }, queryName: args.name }, profile);
+      // `found: false` is an explicit not-found signal that survives compact null-stripping
+      // (the `symbol: null` sentinel is dropped under the now-default compact profile).
+      return ctx.asText({ found: false, symbol: null, callers: [], callees: [], typeDeps: [], graphHealth: { unresolvedCalls: 0, unresolvedImports: 0, unresolvedTypeRefs: 0, note: "symbol not found" }, queryName: args.name }, profile);
     }
     resolvedSymbolId = context.symbol.symbolId;
   }
@@ -190,7 +212,20 @@ export function handleGetFileSummary(
     const topSymbols = result.exports.slice(0, 5).map((s) => ({ name: s.name, kind: s.kind }));
     return ctx.asText({ filePath: result.file.filePath, language: result.file.language, symbolCount: result.exports.length, topSymbols }, profile);
   }
-  return ctx.asText({ ...result, indexMeta: buildIndexMeta(ctx.store, args.repoId) }, profile);
+  if (profile === "verbose") {
+    return ctx.asText({ ...result, indexMeta: buildIndexMeta(ctx.store, args.repoId) }, profile);
+  }
+  // compact/standard: drop redundant per-entry repoId+filePath from exports (constant = this file),
+  // drop redundant import `from*` (always this file's own module), collapse healthy graphHealth.
+  return ctx.asText({
+    file: result.file,
+    symbolCount: result.exports.length,
+    exports: result.exports.map((s) => ({ symbolId: s.symbolId, name: s.name, kind: s.kind, line: s.line, signature: s.signature })),
+    imports: result.imports.map((i) => ({ toName: i.toName, toFilePath: i.toFilePath, type: i.type })),
+    importedBy: result.importedBy,
+    graphHealth: collapseGraphHealth(result.graphHealth),
+    indexMeta: buildIndexMeta(ctx.store, args.repoId)
+  }, profile);
 }
 
 // ── list_repositories ─────────────────────────────────────────────────────────
@@ -242,25 +277,28 @@ export function handleGetFileContext(
 
 // ── index meta helper ─────────────────────────────────────────────────────────
 
-function buildIndexMeta(store: GraphStore, repoId: string): { branch: string | null; commitSha: string | null; indexedAt: string; note: string } | null {
+function buildIndexMeta(store: GraphStore, repoId: string): { branch: string | null; commitSha: string | null; indexedAt: string } | null {
   const latestRun = store.getLatestRun(repoId);
   if (!latestRun) return null;
+  // Pure DB read — no git subprocess. Boilerplate `note` removed (repeated every call).
+  // Staleness is surfaced by tools that gate on it (search_symbols, health_check, impact tools);
+  // callers compare branch/commitSha against their current branch.
   return {
     branch: latestRun.branch,
     commitSha: latestRun.commitSha,
-    indexedAt: latestRun.finishedAt,
-    note: "Data reflects the last indexed branch/commit. Run index_repository(mode='full') after switching branches."
+    indexedAt: latestRun.finishedAt
   };
 }
 
 // ── get_folder_summary ────────────────────────────────────────────────────────
 
 export function handleGetFolderSummary(
-  args: { repoId: string; folderPath: string; maxFiles: number },
+  args: { repoId: string; folderPath: string; maxFiles: number; profile: string },
   ctx: HandlerContext
 ): CallToolResult {
+  const profile = resolveResponseProfile(args.profile as Parameters<typeof resolveResponseProfile>[0]);
   const result = ctx.store.getFolderSummary(args.repoId, args.folderPath, args.maxFiles);
-  return ctx.asText({ ...result, indexMeta: buildIndexMeta(ctx.store, args.repoId) });
+  return ctx.asText({ ...result, indexMeta: buildIndexMeta(ctx.store, args.repoId) }, profile);
 }
 
 // ── route_map ────────────────────────────────────────────────────────────────
@@ -338,16 +376,17 @@ export function handleQueryGraph(
 // ── query_docs ────────────────────────────────────────────────────────────────
 
 export function handleQueryDocs(
-  args: { repoId: string; mode: "search" | "stale" | "coverage"; query?: string; symbolIds?: string[]; filePath?: string; limit: number },
+  args: { repoId: string; mode: "search" | "stale" | "coverage"; query?: string; symbolIds?: string[]; filePath?: string; limit: number; profile: string },
   ctx: HandlerContext
 ): CallToolResult {
   if (!ctx.constants.DOCS_TOOLS_ENABLED) {
     throw new McpError(ErrorCode.InvalidParams, "query_docs: docs lane is disabled. Set CODEBASE_INDEX_DOCS_TOOLS_ENABLED=true to enable docs tools.");
   }
   const { store } = ctx;
-  if (args.mode === "search") return ctx.asText(store.searchDocs(args.repoId, args.query!, args.limit));
-  if (args.mode === "stale") return ctx.asText(store.findStaleDocs(args.repoId, args.symbolIds!));
-  return ctx.asText(store.findDocCoverage(args.repoId, args.filePath!));
+  const profile = resolveResponseProfile(args.profile as Parameters<typeof resolveResponseProfile>[0]);
+  if (args.mode === "search") return ctx.asText(store.searchDocs(args.repoId, args.query!, args.limit), profile);
+  if (args.mode === "stale") return ctx.asText(store.findStaleDocs(args.repoId, args.symbolIds!), profile);
+  return ctx.asText(store.findDocCoverage(args.repoId, args.filePath!), profile);
 }
 
 // ── internal graph traversal helpers ─────────────────────────────────────────

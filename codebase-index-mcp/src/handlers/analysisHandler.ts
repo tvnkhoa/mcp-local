@@ -75,9 +75,10 @@ export function handleDetectCircularDependencies(
 // ── find_entry_points ─────────────────────────────────────────────────────────
 
 export function handleFindEntryPoints(
-  args: { repoId: string; filePathPrefix?: string; kind?: string; limit: number },
+  args: { repoId: string; filePathPrefix?: string; kind?: string; limit: number; profile: string },
   ctx: HandlerContext
 ): CallToolResult {
+  const profile = resolveResponseProfile(args.profile as Parameters<typeof resolveResponseProfile>[0]);
   const entries = ctx.store.findEntryPoints(args.repoId, args.filePathPrefix ?? null, args.kind ?? null, args.limit);
   return ctx.asText({
     repoId: args.repoId,
@@ -85,16 +86,17 @@ export function handleFindEntryPoints(
     runtimeEntryPoints: entries.filter((e) => e.entryReason === "bootstrap_file"),
     graphEntryPoints: entries.filter((e) => e.entryReason === "uncalled_symbol"),
     entryPoints: entries
-  });
+  }, profile);
 }
 
 // ── find_implementations ──────────────────────────────────────────────────────
 
 export function handleFindImplementations(
-  args: { repoId: string; interfaceName: string; limit: number },
+  args: { repoId: string; interfaceName: string; limit: number; profile: string },
   ctx: HandlerContext
 ): CallToolResult {
-  return ctx.asText(ctx.store.findImplementations(args.repoId, args.interfaceName, args.limit));
+  const profile = resolveResponseProfile(args.profile as Parameters<typeof resolveResponseProfile>[0]);
+  return ctx.asText(ctx.store.findImplementations(args.repoId, args.interfaceName, args.limit), profile);
 }
 
 // ── link_tests_to_source ──────────────────────────────────────────────────────

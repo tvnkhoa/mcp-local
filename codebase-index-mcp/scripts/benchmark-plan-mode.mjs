@@ -1,4 +1,7 @@
 import { performance } from "node:perf_hooks";
+import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
@@ -28,6 +31,8 @@ function booleanFromEnv(name, fallback) {
   if (["0", "false", "no", "off"].includes(normalized)) return false;
   return fallback;
 }
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 async function main() {
   const repoPath = process.cwd();
@@ -77,6 +82,8 @@ async function main() {
   const probeText = readTextContent(probe);
   const probeJson = JSON.parse(probeText);
   const contextFilePath = probeJson.symbols?.[0]?.filePath ?? "src/index.ts";
+  const probeSymbolId = probeJson.symbols?.[0]?.symbolId ?? null;
+  const folderPath = contextFilePath.replace(/\\/g, "/").split("/").slice(0, -1).join("/") || "src";
 
   const scenarios = [
     {
@@ -153,7 +160,25 @@ async function main() {
         name: "link_tests_to_source",
         arguments: { repoId, limit: 20, maxCandidates: 3, minScore: 0.4, profile }
       })
-    }
+    },
+    {
+      name: "file-summary",
+      makeArgs: (profile) => ({ name: "get_file_summary", arguments: { repoId, filePath: contextFilePath, profile } })
+    },
+    {
+      name: "folder-summary",
+      makeArgs: (profile) => ({ name: "get_folder_summary", arguments: { repoId, folderPath, maxFiles: 50, profile } })
+    },
+    {
+      name: "symbol-context-pack",
+      makeArgs: (profile) => ({ name: "get_symbol_context_pack", arguments: { repoId, name: "GraphStore", limit: 20, profile } })
+    },
+    ...(probeSymbolId
+      ? [{
+          name: "symbol-detail",
+          makeArgs: (profile) => ({ name: "get_symbol_detail", arguments: { repoId, symbolId: probeSymbolId, limit: 50, profile } })
+        }]
+      : [])
   ];
 
   async function runProfile(profile) {
@@ -184,8 +209,11 @@ async function main() {
   const compact = await runProfile("compact");
   const verbose = await runProfile("verbose");
 
+  // Savings baseline = verbose (full fields + pretty-print). `standard` is now minified,
+  // so verbose is the only "fullest" output to measure reduction against.
+  const baselineBytes = Math.max(verbose.totalResponseBytes, 1);
   const nanoSavingsPercent = Number(
-    ((1 - nano.totalResponseBytes / Math.max(standard.totalResponseBytes, 1)) * 100).toFixed(2)
+    ((1 - nano.totalResponseBytes / baselineBytes) * 100).toFixed(2)
   );
 
   // Graph accuracy gate: measure resolved CALLS edge percentage via query_graph
@@ -228,21 +256,54 @@ async function main() {
   }
 
   const compactSavingsPercent = Number(
-    ((1 - compact.totalResponseBytes / Math.max(standard.totalResponseBytes, 1)) * 100).toFixed(2)
+    ((1 - compact.totalResponseBytes / baselineBytes) * 100).toFixed(2)
   );
 
   const perScenarioComparison = scenarios.map((scenario) => {
-    const std = standard.details.find((x) => x.scenario === scenario.name)?.responseBytes ?? 0;
+    const base = verbose.details.find((x) => x.scenario === scenario.name)?.responseBytes ?? 0;
     const cmp = compact.details.find((x) => x.scenario === scenario.name)?.responseBytes ?? 0;
     return {
       scenario: scenario.name,
-      standardBytes: std,
+      verboseBytes: base,
       compactBytes: cmp,
-      compactIsLowerOrEqual: cmp <= std
+      compactIsLowerOrEqual: cmp <= base
     };
   });
 
   const failedScenarios = perScenarioComparison.filter((x) => !x.compactIsLowerOrEqual).map((x) => x.scenario);
+
+  // ── Savings-ratio snapshot regression ────────────────────────────────────────
+  // Tracks compactBytes/verboseBytes per scenario. Absolute byte counts drift with indexed
+  // repo content (e.g. editing src/index.ts changes file-context size), which would make an
+  // absolute-bytes gate fail on unrelated commits. The savings RATIO is content-independent
+  // (both compact and verbose scale with content), so it is the stable regression signal:
+  // a regression means compact got relatively bigger, i.e. lost savings.
+  const snapshotPath = path.join(__dirname, "__snapshots__", "token-baseline.json");
+  const ratioTolerance = numberFromEnv("BENCH_SNAPSHOT_RATIO_TOLERANCE", 0.05);
+  const verboseByScenario = Object.fromEntries(verbose.details.map((d) => [d.scenario, d.responseBytes]));
+  const currentSnapshot = Object.fromEntries(
+    compact.details.map((d) => {
+      const v = verboseByScenario[d.scenario] ?? 0;
+      return [d.scenario, Number((v > 0 ? d.responseBytes / v : 1).toFixed(4))];
+    })
+  );
+  let snapshotRegressions = [];
+  let snapshotStatus = "compared";
+  if (booleanFromEnv("BENCH_UPDATE_SNAPSHOT", false) || !fs.existsSync(snapshotPath)) {
+    fs.mkdirSync(path.dirname(snapshotPath), { recursive: true });
+    fs.writeFileSync(snapshotPath, JSON.stringify(currentSnapshot, null, 2) + "\n");
+    snapshotStatus = "written";
+  } else {
+    const baseline = JSON.parse(fs.readFileSync(snapshotPath, "utf8"));
+    snapshotRegressions = Object.entries(currentSnapshot)
+      .filter(([name, ratio]) => {
+        const prev = baseline[name];
+        return typeof prev === "number" && ratio > prev + ratioTolerance;
+      })
+      .map(([name, ratio]) => ({ scenario: name, baselineRatio: baseline[name], currentRatio: ratio }));
+  }
+  const snapshotGatePassed = snapshotRegressions.length === 0;
+
   const gatePassed =
     compactSavingsPercent >= minCompactSavingsPercent &&
     (!requireCompactLowerPerScenario || failedScenarios.length === 0);
@@ -267,10 +328,19 @@ async function main() {
     },
     qualityGate: {
       minCompactSavingsPercent,
+      savingsBaseline: "verbose",
       requireCompactLowerPerScenario,
       perScenarioComparison,
       failedScenarios,
       passed: gatePassed
+    },
+    snapshotRegression: {
+      snapshotPath: path.relative(repoPath, snapshotPath),
+      status: snapshotStatus,
+      metric: "compactBytes/verboseBytes ratio",
+      ratioTolerance,
+      regressions: snapshotRegressions,
+      passed: snapshotGatePassed
     }
   };
 
@@ -283,6 +353,9 @@ async function main() {
   }
   if (!graphAccuracyGatePassed) {
     process.exitCode = 3;
+  }
+  if (!snapshotGatePassed) {
+    process.exitCode = 4;
   }
 }
 

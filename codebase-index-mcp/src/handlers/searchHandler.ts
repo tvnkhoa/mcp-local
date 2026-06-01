@@ -66,20 +66,22 @@ export function handleSearchSymbols(
 // ── find_symbol_at_line ───────────────────────────────────────────────────────
 
 export function handleFindSymbolAtLine(
-  args: { repoId: string; filePath: string; line: number },
+  args: { repoId: string; filePath: string; line: number; profile: string },
   ctx: HandlerContext
 ): CallToolResult {
+  const profile = resolveResponseProfile(args.profile as Parameters<typeof resolveResponseProfile>[0]);
   const symbol = ctx.store.findSymbolAtLine(args.repoId, args.filePath, args.line);
-  return ctx.asText({ repoId: args.repoId, filePath: args.filePath, line: args.line, symbol });
+  return ctx.asText({ repoId: args.repoId, filePath: args.filePath, line: args.line, symbol }, profile);
 }
 
 // ── get_symbol_detail ─────────────────────────────────────────────────────────
 
 export function handleGetSymbolDetail(
-  args: { repoId: string; symbolId: string; limit: number },
+  args: { repoId: string; symbolId: string; limit: number; profile: string },
   ctx: HandlerContext
 ): CallToolResult {
-  return ctx.asText(ctx.store.getSymbolDetail(args.repoId, args.symbolId, args.limit));
+  const profile = resolveResponseProfile(args.profile as Parameters<typeof resolveResponseProfile>[0]);
+  return ctx.asText(ctx.store.getSymbolDetail(args.repoId, args.symbolId, args.limit), profile);
 }
 
 // ── get_symbol_context_pack ───────────────────────────────────────────────────

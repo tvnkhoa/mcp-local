@@ -104,11 +104,13 @@ All read tools that return symbol or edge lists support `profile`:
 | Profile | Payload | When to use |
 |---------|---------|-------------|
 | `nano` | Top-N (10) items, minimal fields, minified JSON | >15 MCP calls per session, Plan mode orientation, quick routing |
-| `compact` | All items, reduced fields, minified JSON | **Default for most tasks** |
-| `standard` | All items, full fields, pretty-printed | Single deep query, need full field detail |
-| `verbose` | All items + debug/summary fields, pretty-printed | Debugging, edge case inspection |
+| `compact` | All items, reduced fields, minified JSON, `null` fields dropped | **Default for all read tools** |
+| `standard` | All items, full fields, minified JSON | Single deep query, need full field detail |
+| `verbose` | All items + debug/summary fields, **pretty-printed** | Debugging, edge case inspection (only profile that is indented) |
 
-Tools with profile support: `search_symbols`, `get_file_context`, `get_change_context`, `get_symbol_context_pack`, `get_file_summary`, `find_impact_files`, `get_dependency_graph`, `get_call_chain`, `list_repositories`, `dead_code_scan`, `detect_circular_dependencies`, `detect_changes`, `link_tests_to_source`, `trace_execution_flow`, `rename_assist`, `route_map`.
+All paths in responses are normalized to forward slashes (`src/foo.ts`) regardless of host OS. `compact` is now the default for every read tool, including `get_symbol_detail`, `get_folder_summary`, `query_docs`, `find_entry_points`, `find_implementations`, and `find_symbol_at_line` (previously fixed-format). Only `verbose` is pretty-printed; all other profiles emit minified JSON.
+
+Tools with profile support: `search_symbols`, `get_file_context`, `get_change_context`, `get_symbol_context_pack`, `get_file_summary`, `get_symbol_detail`, `find_symbol_at_line`, `find_impact_files`, `get_dependency_graph`, `get_call_chain`, `list_repositories`, `dead_code_scan`, `detect_circular_dependencies`, `detect_changes`, `link_tests_to_source`, `trace_execution_flow`, `rename_assist`, `route_map`, `get_folder_summary`, `query_docs`, `find_entry_points`, `find_implementations`.
 
 Refactor tools: `refactor_replace_preview` and `refactor_replace_apply` support `nano` (summary only, no hunk content) and `compact` (hunks without before/after text). Use `nano` to check match count and affected files before requesting hunk detail.
 
@@ -219,7 +221,7 @@ npm run guard:no-llm-runtime       # verify no LLM imports in src/ (policy enfor
 node scripts/smoke-test.mjs        # full integration test (requires build first)
 npm run test:profile-responses     # verify profile behavior for impact/list tools
 npm run test:refactor-profiles     # verify refactor preview/apply profile behavior
-npm run benchmark:plan:check       # quality gate: compact savings must be ≥ 40%
+npm run benchmark:plan:check       # quality gate: compact savings ≥ 40% (vs verbose) + per-tool byte-snapshot regression
 ```
 
 **Pre-commit sequence:**
