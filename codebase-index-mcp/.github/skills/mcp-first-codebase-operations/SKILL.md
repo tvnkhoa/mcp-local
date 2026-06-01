@@ -21,37 +21,51 @@ argument-hint: "Provide repoId, target symbol/file intent, and expected output (
 3. Treat `.github/instructions/mcp-hard-mode.instructions.md` as policy source-of-truth for gates, blocked behaviors, and fallback rules.
 4. Use this skill as execution playbook; do not duplicate full policy blocks in task output.
 
+## Top 5 Starter Tools
+
+For any new analysis session, these 5 tools cover most tasks:
+
+1. `search_symbols` — find any symbol by name or intent
+2. `get_symbol_context_pack` — full context for a symbol in one call
+3. `find_impact_files` — blast radius for a change
+4. `get_change_context` — callers/callees for deep traversal
+5. `health_check` + `index_repository` — ensure index is fresh
+
+## Tool Selection by Intent
+
+| Intent | Use this tool | Instead of | Why |
+|--------|--------------|------------|-----|
+| Find symbol by name | `search_symbols` (name) | `get_symbol_context_pack` | Search first to get symbolId; pack needs symbolId |
+| Quick symbol + context | `get_symbol_context_pack` | `get_change_context` | Pack is one call; `get_change_context` needs BFS depth |
+| Get callers (deep) | `get_change_context` | `get_call_chain` | `get_call_chain` shows path, not caller list |
+| Understand a file | `get_file_summary` | `get_file_context` | Summary is lighter; use context only when you need all symbols+edges |
+| Orient in module | `get_folder_summary` | Reading individual files | Returns per-file stats without reading content |
+| Pre-refactor scoping | `find_impact_files` | `get_dependency_graph` | Impact is scoped by symbol; graph is broader and unfiltered |
+| HTTP routes | `route_map` | `find_entry_points` | `route_map` returns HTTP verbs+paths; entry_points returns all graph entries |
+| Raw SQL graph query | `query_graph` | structured tools | Use only when structured tools can't express the query |
+
+## Profile Selection
+
+All read tools support `profile`. Pick by session load:
+
+| Profile | Use when |
+|---------|----------|
+| `nano` | >15 MCP calls per session, Plan mode orientation, quick routing only |
+| `compact` | Default — most analysis tasks |
+| `standard` | Single deep query where you need all fields |
+| `verbose` | Debugging unexpected results |
+
+For refactor tools: use `nano` first (no hunk content, just match count + affected files), then escalate to `compact` or `standard` to see hunk detail.
+
 ## Minimal Tool Set
 
 Use the smallest MCP set needed for the task and prefer focused calls with explicit limits.
 
-1. Health and indexing:
-   - `health_check`
-   - `list_repositories`
-   - `index_repository`
-   - `watch_repo`
-2. Symbol and graph analysis:
-   - `search_symbols`
-   - `get_symbol_context_pack`
-   - `get_change_context`
-   - `trace_execution_flow`
-   - `get_call_chain`
-   - `find_symbol_at_line`
-3. Impact and scope:
-   - `find_impact_files`
-   - `get_file_summary`
-   - `get_file_context`
-   - `detect_changes`
-   - `detect_circular_dependencies`
-   - `dead_code_scan`
-4. Supplemental:
-   - `query_docs`
-   - `route_map`
-   - `find_implementations`
-   - `link_tests_to_source`
-5. Database validation (read-only):
-   - `mcp_health_check`
-   - `mcp_run_read_query`
+1. Health and indexing: `health_check`, `list_repositories`, `index_repository`, `watch_repo`
+2. Symbol and graph analysis: `search_symbols`, `get_symbol_context_pack`, `get_change_context`, `get_call_chain`, `find_symbol_at_line`
+3. Impact and scope: `find_impact_files`, `get_file_summary`, `get_file_context`, `detect_changes`, `dead_code_scan`
+4. Supplemental: `route_map`, `find_implementations`, `link_tests_to_source`
+5. Database validation (read-only): `mcp_health_check`, `mcp_run_read_query`
 
 ## Execution Runbooks
 

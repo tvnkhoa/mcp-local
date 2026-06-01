@@ -467,3 +467,12 @@ Three compounding gaps addressed:
 - Enhancement proposal: expose a safe aggregate endpoint for package coverage or allowlist read-only package-contract tables in `query_graph`.
 - Resolution: Two-pronged fix. (1) Error message in `handleQueryGraph` (`src/handlers/impactHandler.ts`) now includes the full list of allowed tables: `table 'X' is not allowed. Allowed tables: repositories, files, symbols, edges, ...`. (2) `query_graph` tool description in `src/index.ts` updated to enumerate allowed tables, key column names per table, and explicit note that `package_consumers` is not a table — use `edges WHERE type='DEPENDS_ON' AND to_id LIKE 'nuget:%'` instead. No new tool added — allowed tables are static and embed cleanly in the description.
 - Tracking URL: `D:/1.SourceCode/mcp-local/codebase-index-mcp/mcp-codebase-index-issue-registry.md#mcp-issue-009`
+
+## MCP-ISSUE-010
+- Scenario: `get_folder_summary` for migrations after incremental re-index on `wec.commnunication-hub` returned deleted historical migration files that are not present in current branch `staging`.
+- MCP tool/query attempted: `mcp_codebase-inde_get_folder_summary(repoId=wec.commnunication-hub, folderPath=backend/CommunicationHub/src/Infrastructure/Migrations)` after successful `index_repository(mode=incremental, commitSha=f114555...)`.
+- Expected vs actual: expected folder summary to list current files (single consolidated migration + snapshot); actual returned 34 migration files including deleted ones from develop history.
+- Impact: reduces trust for migration-audit tasks and forces targeted baseline file reads to confirm current state.
+- Workaround used: narrowed verification to explicit file paths via symbol/file-summary + direct targeted reads and DB read-only checks.
+- Enhancement proposal: ensure folder summary respects repository HEAD snapshot and branch-specific deletions after incremental index runs; add stale-cache guard for deleted file entries.
+- Status: Open (first occurrence for this pattern in current session).

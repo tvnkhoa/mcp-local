@@ -1,467 +1,261 @@
 # codebase-index-mcp
 
-Internal MCP server for repository indexing and lightweight graph queries.
+MCP server for repository indexing and code graph queries. Provides symbol search, dependency analysis, impact tracing, and rule-based refactoring — no LLM at runtime.
 
-## 🚀 Quick Start - One Command Setup
-
-```bash
-npm run setup
-```
-
-This will automatically:
-- ✅ Install dependencies and build the project
-- ✅ Detect installed code agents (Claude Desktop, VS Code, OpenCode)
-- ✅ Configure MCP server for all detected agents
-- ✅ Run verification tests
-
-**Supported Agents:** Claude Desktop, VS Code (Copilot), OpenCode
-
-📖 **Full Setup Guide:** [QUICK_START.md](./QUICK_START.md)  
-📋 **Configuration Templates:** [CONFIG_TEMPLATES.md](./CONFIG_TEMPLATES.md)  
-🎯 **Skill Guide:** [SKILL.md](./SKILL.md)
-
----
-
-## ✨ What's New in v0.3.0 (2026-05-04)
-
-**Plan/Agent pipeline enhancements:**
-- ✅ **Docs lane isolation**: code-first by default with `CODEBASE_INDEX_DOCS_INDEXING_ENABLED=false` and `CODEBASE_INDEX_DOCS_TOOLS_ENABLED=false`.
-- ✅ **Per-run docs control**: `index_repository` now supports `docsMode` = `auto | on | off`.
-- ✅ **Benchmark quality gate**: `benchmark:plan:check` enforces compact-mode savings thresholds and per-scenario checks.
-- ✅ **Expanded smoke coverage**: validates by-name tools and profile behavior (`compact <= standard <= verbose`).
-- ✅ **Integration playbook**: README now includes concrete setup and call flows for Plan mode and Agent mode.
-
-See `../ENHANCEMENTS_IMPLEMENTED.md` for technical details and `../QUICK_START.md` for usage guide.
-
----
-
-Current integration:
-- Binary sniff + extension-based file filtering (fast, zero overhead)
-- Real AST extraction via `tree-sitter` for: JavaScript, TypeScript, C#
-- .NET project parser for `.csproj` / `.sln` (NuGet + ProjectReference edges)
-
-## Features
-
-- `health_check`
-- `index_repository` - **Enhanced with ETA & language tracking**
-- `get_dependency_graph`
-- `get_call_chain`
-- `list_repositories`
-- `search_symbols` (`profile: nano|compact|standard|verbose`; `strategy: "name" | "intent"`)
-- `get_file_context` (`profile: nano|compact|standard|verbose`)
-- `get_symbol_detail`
-- `find_impact_files`
-- `get_change_context`
-- `get_file_summary`
-- `get_symbol_context_pack`
-- `query_docs` (requires `CODEBASE_INDEX_DOCS_TOOLS_ENABLED=true`)
-- `watch_repo` (`action`: `start` | `stop` | `status`)
-- `find_symbol_at_line`
-- `detect_changes` (includes deterministic `riskScore`/`riskLevel`, supports filter knobs `minRiskScore`/`riskLevels`/`maxResults`/`sortBy`, and policy presets: `quick-triage`, `strict-review`, `release-gate`, `custom`)
-- `get_folder_summary`
-- `find_entry_points` (returns `runtimeEntryPoints` + `graphEntryPoints` groups)
-- `find_implementations`
-- `route_map`
-- `query_graph`
-- `rename_assist`
-- `refactor_replace_preview`
-- `refactor_replace_apply`
-- `refactor_replace_rollback`
-- `refactor_symbol_migration`
-- `trace_execution_flow`
-- `dead_code_scan`
-- `detect_circular_dependencies`
-- `get_cross_repo_impact`
-- `get_symbol_blame`
-- `link_tests_to_source`
-- Batch commit indexing (partial progress persisted per batch)
-- Progress output in terminal (`[index-progress] ...`)
-
-## Security defaults
-
-- Internal storage only (SQLite via `better-sqlite3`)
-- Path allowlist required by `CODEBASE_INDEX_ALLOWED_ROOTS`
-- Bounded input params (`maxFiles`, `limit`)
-- Basic sensitive pattern redaction before storage
-- Classifier+path layered filtering to reduce binary/noisy ingestion
-- Deterministic no-LLM runtime policy for refactor engine (`decisionSource=rule_engine`, `llmInvolved=false`)
-
-## Environment variables
-
-- `CODEBASE_INDEX_ALLOWED_ROOTS` (required): comma-separated absolute paths allowed for indexing.
-- `CODEBASE_INDEX_DB_PATH` (optional): defaults to `./codebase-index.db`.
-- `CODEBASE_INDEX_MAX_FILES_PER_RUN` (optional): defaults to `20000`.
-- `CODEBASE_INDEX_LARGE_REPO_PROFILE` (optional): `auto | standard | large | very-large` (also accepts legacy `off | balanced | aggressive`). Defaults to `auto`.
-- `CODEBASE_INDEX_MAX_RESULT_LIMIT` (optional): defaults to `500`.
-- `CODEBASE_INDEX_MAX_DEPTH` (optional): defaults to `5`.
-- `CODEBASE_INDEX_TELEMETRY_ENABLED` (optional): defaults to `false`; enables per-tool telemetry logs to stderr.
-- `CODEBASE_INDEX_TELEMETRY_SAMPLE_RATE` (optional): defaults to `1`; range `0..1` for telemetry sampling.
-- `CODEBASE_INDEX_DOCS_INDEXING_ENABLED` (optional): defaults to `false`; controls whether docs lane is indexed by default.
-- `CODEBASE_INDEX_DOCS_TOOLS_ENABLED` (optional): defaults to `false`; controls whether docs tools (`search_docs`, `find_stale_docs`, `find_doc_coverage`) are callable.
-- `CODEBASE_INDEX_LLM_ENABLED` (optional): defaults to `false`; when `true`, server startup is rejected because runtime LLM invocation is prohibited by policy.
-- `CODEBASE_INDEX_REFACTOR_APPROVAL_SECRET` (optional but recommended): HMAC secret used to sign/verify `refactor_replace_apply` approval tokens.
-- `CODEBASE_INDEX_REFACTOR_STRICT_APPROVAL` (optional): defaults to `false`; when `true`, startup is rejected unless `CODEBASE_INDEX_REFACTOR_APPROVAL_SECRET` is set.
-- `CODEBASE_INDEX_REFACTOR_PREVIEW_TTL_MS` (optional): defaults to `1800000` (30 minutes); expiration window for preview/apply approval.
-- `CODEBASE_INDEX_WATCH_AUTO_START` (optional): defaults to `false`; when `true`, the server may auto-start/auto-activate watchers.
-- `CODEBASE_INDEX_AUTO_WATCH_REPOS` (optional): explicit startup watch targets formatted as `repoId=absPath,repo2=absPath2`.
-- `CODEBASE_INDEX_WATCH_ACTIVE_ONLY` (optional): defaults to `true`; keeps one active watcher at a time and rotates by last interaction.
-- `CODEBASE_INDEX_WATCH_ACTIVE_TTL_MS` (optional): defaults to `900000` (15 minutes); idle active watcher is auto-stopped after TTL.
-- `CODEBASE_INDEX_WATCH_DEBOUNCE_MS` (optional): defaults to `1200`.
-- `CODEBASE_INDEX_WATCH_MAX_QUEUED_EVENTS` (optional): defaults to `2000`.
-- `CODEBASE_INDEX_WATCH_MAX_FILES_PER_RUN` (optional): defaults to `4000`.
-- `CODEBASE_INDEX_WATCH_BATCH_SIZE` (optional): defaults to `200`. 
-
-Refactor apply notes:
-- `refactor_replace_apply` supports `includeLowConfidence` (default `false`).
-- With default settings, low-confidence candidates are reported but not applied.
-- Apply output includes `laneBreakdown` (`highConfidenceEdits`, `lowConfidenceEdits`, `lowConfidenceSkipped`) and `scopeCheck`.
-- If newly changed files after apply drift beyond expected preview scope threshold (5%), diagnostics code is `SCOPE_DRIFT_DETECTED`.
-- Refactor tool outputs include `executionPolicy` with `decisionSource=rule_engine`, `llmInvolved=false`, and `approvalMode` (`strict` | `local-fallback`).
-- Preview lifecycle status reflects apply outcome (`applied`, `apply_partial`, `apply_failed`) instead of always using a single applied state.
-- `refactor_symbol_migration` supports optional `initializerRewrite` per migration for C# owned-state/object-initializer rewrites:
-
-```json
-{
-	"fromSymbol": "CrmCustomerId",
-	"toSymbol": "IdentityState.CrmCustomerId",
-	"requiredOwnerType": "Conversation",
-	"forbiddenOwnerTypes": [],
-	"initializerRewrite": {
-		"objectProperty": "IdentityState",
-		"objectType": "ConversationIdentityState",
-		"targetMember": "CrmCustomerId"
-	}
-}
-```
-
-- When `initializerRewrite` is set and the match is a C# object-initializer member assignment, preview/apply rewrites the full assignment to a guarded owned-state expression such as `IdentityState = new ConversationIdentityState { CrmCustomerId = 1 },` instead of producing an invalid dotted initializer member.
-- `refactor_symbol_migration` dry-run output now includes `previewSummary` so callers can inspect the exact before/after initializer rewrite before apply.
-- When `toSymbol` is a dotted member path (for example `DispatchContext.CrmCampaignId`) and `initializerRewrite` is not provided, C# object-initializer matches are blocked as `ambiguous_target` to prevent invalid generated entries like `DispatchContext.CrmCampaignId = ...` inside initializer bodies.
-- Apply-time C# sanity guard rejects invalid dotted initializer-member rewrites with conflict reason `INVALID_CSHARP_INITIALIZER_REWRITE` before writing files.
-
-No-config defaults:
-- Keep only required config (`CODEBASE_INDEX_ALLOWED_ROOTS`) for normal usage.
-- Performance profile is selected automatically from repo scale (`standard` / `large` / `very-large`).
-- Post-phase resolver budget and edge extraction policies are derived from profile by default.
-
-Advanced tuning (optional overrides):
-- `CODEBASE_INDEX_BATCH_BYTE_BUDGET`: override per-batch byte budget in pipeline.
-- `CODEBASE_INDEX_MAX_CALL_EDGES_PER_FILE`: override CALLS edge cap per file.
-- `CODEBASE_INDEX_MIN_EDGE_CONFIDENCE`: override minimum edge confidence filter in extractor.
-- `CODEBASE_INDEX_MAX_UNRESOLVED_RESOLVE_ROWS`: override unresolved rows processed per resolver pass.
-- `CODEBASE_INDEX_POST_RESOLVE_TYPE_REFS`: force enable/disable post-phase type-ref resolution.
-
-GitNexus-style staleness behavior:
-- Incremental index now fast-skips when indexed commit equals `HEAD` and git working tree is clean.
-- The skip run is still recorded in `index_runs` with zero counters and `skipReason` in tool output.
-- Watchless by default: keep auto-watch disabled for normal operation, and use `watch_repo` only for short manual debug sessions.
-
-`health_check` now reports actionable codebase readiness:
-- `serverVersion` resolves from npm runtime env or falls back to package version.
-- `codebaseState.status`: `unknown | needs_index | stale | dirty | ready`.
-- `codebaseState.shouldReindex`: true when first index is missing, commit is stale, or working tree is dirty.
-- `codebaseState.shouldEnableWatch`: true when local edits are pending and no watcher is active for the repo.
-- `watch`: includes watcher runtime status and counters for the requested repo.
-- `actionHints`: machine-readable suggestions for `index_repository` and `watch_repo start` with urgency + reason.
-
-> If `better-sqlite3` native build fails on Windows environments without build tools, install Visual Studio C++ Build Tools or switch temporarily to a JS-only SQLite backend in a follow-up patch.
-
-## Development
-
-### Quick Setup (Recommended)
+## Quick Start
 
 ```bash
-npm run setup
+cd codebase-index-mcp
+npm run setup        # install, build, detect agents, configure, smoke-test
 ```
 
-### Manual Setup
-
+Or manually:
 ```bash
-npm install
-npm run typecheck
-npm run build
-npm run guard:no-llm-runtime
-npm run dev
-npm run benchmark:plan
-npm run benchmark:plan:check
+npm install && npm run build
+# Set CODEBASE_INDEX_ALLOWED_ROOTS in your agent config, then restart the agent
 ```
 
-Benchmark gate environment knobs:
-- `BENCH_MIN_COMPACT_SAVINGS_PERCENT` (optional): minimum compact saving percentage required for `benchmark:plan:check` (default `40`).
-- `BENCH_REQUIRE_COMPACT_LOWER_PER_SCENARIO` (optional): when `true`, each scenario must satisfy `compact <= standard` response bytes (default `true`).
+## Tool Catalog
 
-## Smoke test
+### Indexing & Health
+| Tool | Description |
+|------|-------------|
+| `health_check` | Check server state, staleness, and actionable `shouldReindex`/`shouldEnableWatch` hints |
+| `index_repository` | Index or re-index a repo (`mode: full\|incremental`, `docsMode: auto\|on\|off`) |
+| `list_repositories` | List all indexed repos with file/symbol counts and last-run status |
+| `watch_repo` | Manage real-time file watching (`action: start\|stop\|status`) |
 
-```bash
-node scripts/smoke-test.mjs
-```
+### Symbol Search & Navigation
+| Tool | Description |
+|------|-------------|
+| `search_symbols` | Find symbols by name or intent (`strategy: name\|intent`). Start here. |
+| `get_symbol_detail` | Full detail for a known symbolId |
+| `get_symbol_context_pack` | Symbol + neighbors + callers/callees in one call. Prefer over `get_change_context` when not doing deep caller traversal. |
+| `get_symbol_blame` | Git blame metadata for a symbol |
+| `find_symbol_at_line` | Resolve symbol at a specific file/line |
+| `find_implementations` | Find classes that implement a given interface/type |
+| `rename_assist` | Suggest all sites requiring a rename and flag risks |
 
-Smoke test now validates more than startup:
-- MCP handshake + tool listing
-- `health_check`
-- `index_repository` on current workspace (bounded sample)
-- `get_dependency_graph` / `find_impact_files` for `src/index.ts` in the indexed repo
-- `get_symbol_context_pack` output validity
-- `detect_changes` output validity
+### File & Folder Context
+| Tool | Description |
+|------|-------------|
+| `get_folder_summary` | List files under a folder with per-file stats. Use at session start to orient — cheaper than reading individual files. |
+| `get_file_summary` | Symbol count, top symbols, language for a file |
+| `get_file_context` | All symbols + edges for one file. Use after `get_file_summary` when deeper context is needed. |
+| `find_entry_points` | Locate runtime and graph entry points in a repo |
+| `route_map` | Map HTTP routes for web API projects |
 
-## Integrate MCP into Plan/Agent pipeline
+### Dependency & Impact Analysis
+| Tool | Description |
+|------|-------------|
+| `get_change_context` | Callers and callees for a symbol (BFS). Use when you need deep caller traversal; otherwise prefer `get_symbol_context_pack`. |
+| `find_impact_files` | Files impacted by changing a symbol. Use before `refactor_replace_preview` to scope blast radius. |
+| `get_dependency_graph` | Graph edges for a file or symbol |
+| `get_call_chain` | Call path between two symbols. Shows path, not caller list. |
+| `get_cross_repo_impact` | Impact across multiple indexed repos |
+| `trace_execution_flow` | Trace execution path through entry points |
 
-This server is designed for **code-first reasoning** in Plan mode and Agent mode, with docs lane isolated by default.
+### Code Quality
+| Tool | Description |
+|------|-------------|
+| `dead_code_scan` | Find symbols with no callers. Note: runtime-wired symbols may appear dead. |
+| `detect_circular_dependencies` | Find import cycles |
+| `detect_changes` | Risk-scored change analysis with policy presets (`quick-triage`, `strict-review`, `release-gate`) |
+| `link_tests_to_source` | Map test files to source symbols (use `minScore >= 0.7`) |
 
-### 1) Register MCP server in host
+### Refactoring
+| Tool | Description |
+|------|-------------|
+| `refactor_replace_preview` | Preview bulk symbol replacement with HMAC-signed approval token |
+| `refactor_replace_apply` | Apply a previewed replacement (requires token from preview) |
+| `refactor_replace_rollback` | Roll back an applied replacement |
+| `refactor_symbol_migration` | Migrate symbol references with optional C# initializer rewrite |
 
-Choose one config profile depending on your usage.
+### Docs & Advanced
+| Tool | Description |
+|------|-------------|
+| `query_docs` | Search indexed docs (requires `CODEBASE_INDEX_DOCS_TOOLS_ENABLED=true`) |
+| `query_graph` | Raw SQL against the graph database. For advanced use only; prefer structured tools. |
 
-Profile A - workspace-local (portable, isolated per workspace):
+## Graph Model
 
-```json
-{
-	"servers": {
-		"codebase-index-local": {
-			"command": "node",
-			"args": [
-				"${workspaceFolder}/codebase-index-mcp/dist/index.js"
-			],
-			"env": {
-				"CODEBASE_INDEX_ALLOWED_ROOTS": "${workspaceFolder}",
-				"CODEBASE_INDEX_DB_PATH": "${workspaceFolder}/mcp-local-index.db"
-			}
-		}
-	}
-}
-```
+**Symbol kinds**: `function`, `class`, `method`, `variable`, `module`, `interface`, `property`, `constructor`, `type`, `struct`
 
-Profile B - central cross-repo (recommended for bridge package impact across many repos):
+**Edge types and semantics**:
 
-```json
-{
-	"servers": {
-		"codebase-index-central": {
-			"command": "node",
-			"args": [
-				"D:/1.SourceCode/mcp-local/codebase-index-mcp/dist/index.js"
-			],
-			"env": {
-				"CODEBASE_INDEX_ALLOWED_ROOTS": "D:/1.SourceCode/crm",
-				"CODEBASE_INDEX_DB_PATH": "D:/1.SourceCode/mcp-local/mcp-local-index-central.db"
-			}
-		}
-	}
-}
-```
+| Edge | Meaning | Note |
+|------|---------|------|
+| `CALLS` | Direct function invocation | Highest confidence |
+| `IMPORTS` | File-level import / using statement | |
+| `TYPE_REF` | Usage as a type annotation | Does NOT mean direct call |
+| `PROPERTY_REF` | Read of a property or field | |
+| `PROPERTY_WRITE` | Assignment to a property or field | |
+| `DEPENDS_ON` | Project-level dependency (NuGet, npm) | |
+| `IMPLEMENTS` | Class implements interface | |
 
-Notes:
-- Profile A avoids manual path edits and is best for per-repo development.
-- Profile B is better for cross-repo class in/out mapping and impact tracing.
-- For multi-root workspace, use `${workspaceFolder:<folderName>}` to target a specific root.
-- If you use central DB, keep it out of git and back it up periodically.
+**Confidence scores**: Values are `0.0–1.0`. Below `0.7` means low confidence — verify with a file read before acting on it.
 
-Recommended default for token efficiency:
-- Keep no-config defaults unless you need docs lane.
-- Use `profile: "nano"` on read tools in Plan flow when you only need quick routing context.
-- Use `profile: "compact"` when you still need lightweight field-level details.
-
-### 2) Warm-up indexing stage
-
-Run this once before planning loop (or on file changes):
-
-```json
-{
-	"name": "index_repository",
-	"arguments": {
-		"repoId": "wec.be",
-		"repoPath": "d:/1.SourceCode/crm/wec.be",
-		"mode": "incremental",
-		"docsMode": "off",
-		"batchSize": 200
-	}
-}
-```
-
-Notes:
-- If `maxFiles` is omitted, the tool now uses the current hard cap from `CODEBASE_INDEX_MAX_FILES_PER_RUN`.
-- If a repo exceeds that cap, stderr will print an explicit `[index-cap] ...` message instead of silently stopping at the limit.
-
-Use `docsMode` per run:
-- `off`: fastest code-only lane (recommended for Plan/Agent by default)
-- `on`: include docs extraction for docs maintenance tasks
-- `auto`: follow `CODEBASE_INDEX_DOCS_INDEXING_ENABLED`
-
-### 3) Plan mode retrieval pipeline (token-saving)
-
-Suggested call sequence:
-1. `search_symbols` with `profile: "nano"` to locate candidate symbols (`strategy: "intent"` for natural-language-like queries).
-2. `get_context_by_name` with `profile: "nano"` for single-symbol package.
-3. `get_change_context_by_name` with `profile: "nano"` for callers/callees impact.
-4. `get_file_context` only for selected files that need deeper context.
-
-Why this order works:
-- Early calls keep payload small.
-- By-name tools reduce multi-hop lookups.
-- Deep context is requested only when needed.
-
-### 4) Agent mode execution pipeline (implement safely)
-
-Suggested execution loop:
-1. Discover target symbol/file: `search_symbols` or `get_symbol_candidates`.
-2. Build impact map: `get_change_context_by_name`.
-3. Inspect exact files: `get_file_context` / `get_batch_context`.
-4. Apply code edits.
-5. Re-index incrementally: `index_repository` with `mode: "incremental"`.
-6. Re-check impact/refs with `get_change_context_by_name`.
-
-Optional docs sync stage:
-- Enable docs lane (`docsMode: "on"` or env flags), then call:
-	- `find_doc_coverage`
-	- `find_stale_docs`
-	- `search_docs`
-
-### 5) Guardrails and quality gates
-
-For CI or pre-merge checks:
-- `npm run build`
-- `node scripts/smoke-test.mjs`
-- `npm run benchmark:plan:check`
-
-The benchmark gate fails with non-zero exit code when compact-mode savings regress below threshold.
-
-### 6) Quick Start Cross-Repo (central DB)
-
-Use this when you need cross-repo impact analysis between a large monorepo and a smaller bridge repo.
-
-Step 1: index the first repo.
-
-```json
-{
-	"name": "index_repository",
-	"arguments": {
-		"repoId": "crm-mono",
-		"repoPath": "d:/1.SourceCode/crm/wec.be",
-		"mode": "incremental",
-		"docsMode": "off",
-		"maxFiles": 12000,
-		"batchSize": 300
-	}
-}
-```
-
-Step 2: index the second repo (bridge/adapter).
-
-```json
-{
-	"name": "index_repository",
-	"arguments": {
-		"repoId": "crm-bridge",
-		"repoPath": "d:/1.SourceCode/crm/wec.communication-hub",
-		"mode": "incremental",
-		"docsMode": "off",
-		"maxFiles": 5000,
-		"batchSize": 200
-	}
-}
-```
-
-Step 3: run a fast impact check by symbol name.
-
-```json
-{
-	"name": "get_change_context_by_name",
-	"arguments": {
-		"repoId": "crm-bridge",
-		"name": "YourBridgeClassName",
-		"callerDepth": 2,
-		"calleeDepth": 1,
-		"limit": 30,
-		"profile": "compact"
-	}
-}
-```
-
-Tips:
-- Keep `repoId` stable across runs so historical context stays consistent.
-- Use `profile: "compact"` first, then escalate to `standard` only when needed.
-- Re-run `index_repository` incrementally after each bridge change before re-checking impact.
-
-## Sample tool inputs
-
-`index_repository`
-
-```json
-{
-	"repoId": "<repo-id>",
-	"repoPath": "<absolute-path-under-allowed-roots>",
-	"mode": "incremental",
-	"docsMode": "auto",
-	"maxFiles": 5000,
-	"batchSize": 200
-}
-```
-
-`docsMode` options:
-- `auto`: follow server default from `CODEBASE_INDEX_DOCS_INDEXING_ENABLED`
-- `on`: force docs indexing for this run
-- `off`: skip docs indexing for this run
-
-`get_call_chain`
-
-```json
-{
-	"repoId": "mcp-local",
-	"symbolId": "<symbol-id>",
-	"direction": "callees",
-	"depth": 2,
-	"limit": 100
-}
-```
-
-`get_context_by_name` (token-friendly)
-
-```json
-{
-	"repoId": "mcp-local",
-	"name": "GraphStore",
-	"limit": 20,
-	"profile": "compact"
-}
-```
+**Stable IDs**: SHA-256 of `repoId:filePath:symbolName` truncated to 24 hex chars. All tables scoped by `repoId`.
 
 ## Response Profiles
 
-These read tools support `profile` with values `compact`, `standard`, `verbose`:
-- `search_symbols`
-- `get_file_context`
-- `get_batch_context`
-- `get_change_context`
-- `get_context_by_name`
-- `get_change_context_by_name`
-- `get_symbol_candidates`
+All read tools that return symbol or edge lists support `profile`:
 
-Behavior:
-- `compact`: smallest payload for Plan mode (also serialized as minified JSON)
-- `standard`: default balanced payload
-- `verbose`: includes extra summary/debug fields
+| Profile | Payload | When to use |
+|---------|---------|-------------|
+| `nano` | Top-N (10) items, minimal fields, minified JSON | >15 MCP calls per session, Plan mode orientation, quick routing |
+| `compact` | All items, reduced fields, minified JSON | **Default for most tasks** |
+| `standard` | All items, full fields, pretty-printed | Single deep query, need full field detail |
+| `verbose` | All items + debug/summary fields, pretty-printed | Debugging, edge case inspection |
 
-Backward compatibility:
-- `search_symbols`, `get_file_context`, and `get_batch_context` still accept `compact: true`.
-- `search_symbols` supports `strategy: "name" | "intent"` (`name` default for backward compatibility).
-- If both `compact: true` and `profile` are provided, `compact` takes precedence.
+Tools with profile support: `search_symbols`, `get_file_context`, `get_change_context`, `get_symbol_context_pack`, `get_file_summary`, `find_impact_files`, `get_dependency_graph`, `get_call_chain`, `list_repositories`, `dead_code_scan`, `detect_circular_dependencies`, `detect_changes`, `link_tests_to_source`, `trace_execution_flow`, `rename_assist`, `route_map`.
 
-## Runbook
+Refactor tools: `refactor_replace_preview` and `refactor_replace_apply` support `nano` (summary only, no hunk content) and `compact` (hunks without before/after text). Use `nano` to check match count and affected files before requesting hunk detail.
 
-- Full re-index: call `index_repository` with `mode: "full"`.
-- Incremental re-index: call `index_repository` with `mode: "incremental"` (unchanged files are skipped by hash).
-- Recovery from partial failures: re-run `index_repository` for same `repoId`; upserts make reruns idempotent.
-- Default operation: keep `CODEBASE_INDEX_WATCH_AUTO_START=false` and refresh index via `index_repository` + staleness checks.
-- Optional auto watch startup: set `CODEBASE_INDEX_AUTO_WATCH_REPOS` and `CODEBASE_INDEX_WATCH_AUTO_START=true` when continuous watching is explicitly required.
-- Runtime watch control: use `watch_repo`.
-	- Start: `{ "action": "start", "repoId": "<id>", "repoPath": "<abs-path>" }`
-	- Stop: `{ "action": "stop", "repoId": "<id>" }`
-	- Status (one repo): `{ "action": "status", "repoId": "<id>" }`
-	- Status (all repos): `{ "action": "status" }`
-- Manual-watch practice: start only during debug, then stop immediately after diagnostics to avoid background contention.
+## Environment Variables
+
+### Required
+
+| Variable | Description |
+|----------|-------------|
+| `CODEBASE_INDEX_ALLOWED_ROOTS` | Comma-separated absolute paths allowed for indexing |
+
+### Recommended
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `CODEBASE_INDEX_DB_PATH` | `./codebase-index.db` | SQLite database path. Use an absolute path outside the project. |
+| `CODEBASE_INDEX_REFACTOR_APPROVAL_SECRET` | — | HMAC secret for refactor approval tokens. Generate: `node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"` |
+| `CODEBASE_INDEX_TELEMETRY_ENABLED` | `false` | Enable per-tool telemetry to stderr |
+
+### Common Optional
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `CODEBASE_INDEX_DOCS_INDEXING_ENABLED` | `false` | Index markdown/docs lane |
+| `CODEBASE_INDEX_DOCS_TOOLS_ENABLED` | `false` | Enable `query_docs`, `find_stale_docs`, `find_doc_coverage` |
+| `CODEBASE_INDEX_MAX_FILES_PER_RUN` | `20000` | Hard cap per index run |
+| `CODEBASE_INDEX_LARGE_REPO_PROFILE` | `auto` | `auto\|standard\|large\|very-large` |
+| `CODEBASE_INDEX_WATCH_AUTO_START` | `false` | Auto-start watchers on startup. Keep `false`; use `watch_repo` manually. |
+| `CODEBASE_INDEX_LLM_ENABLED` | `false` | When `true`, startup is rejected — LLM runtime is prohibited by policy. |
+
+### Refactor Optional
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `CODEBASE_INDEX_REFACTOR_STRICT_APPROVAL` | `false` | Reject startup if approval secret is not set |
+| `CODEBASE_INDEX_REFACTOR_PREVIEW_TTL_MS` | `1800000` | Preview token TTL (30 min) |
+
+### Watch Optional
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `CODEBASE_INDEX_WATCH_DEBOUNCE_MS` | `1200` | File change debounce |
+| `CODEBASE_INDEX_WATCH_MAX_FILES_PER_RUN` | `4000` | Max files per incremental watch run |
+| `CODEBASE_INDEX_WATCH_ACTIVE_TTL_MS` | `900000` | Idle watcher auto-stop TTL (15 min) |
+
+### Advanced Tuning
+
+| Variable | Description |
+|----------|-------------|
+| `CODEBASE_INDEX_BATCH_BYTE_BUDGET` | Per-batch byte budget in pipeline |
+| `CODEBASE_INDEX_MAX_CALL_EDGES_PER_FILE` | CALLS edge cap per file |
+| `CODEBASE_INDEX_MIN_EDGE_CONFIDENCE` | Minimum edge confidence filter in extractor |
+| `CODEBASE_INDEX_POST_RESOLVE_TYPE_REFS` | Force enable/disable post-phase type-ref resolution |
+
+## MCP Host Configuration
+
+### Profile A — Workspace-local (portable)
+
+```json
+{
+  "mcpServers": {
+    "codebase-index-local": {
+      "command": "node",
+      "args": ["${workspaceFolder}/codebase-index-mcp/dist/index.js"],
+      "env": {
+        "CODEBASE_INDEX_ALLOWED_ROOTS": "${workspaceFolder}",
+        "CODEBASE_INDEX_DB_PATH": "${workspaceFolder}/mcp-local-index.db"
+      }
+    }
+  }
+}
+```
+
+### Profile B — Central cross-repo
+
+```json
+{
+  "mcpServers": {
+    "codebase-index-central": {
+      "command": "node",
+      "args": ["D:/1.SourceCode/mcp-local/codebase-index-mcp/dist/index.js"],
+      "env": {
+        "CODEBASE_INDEX_ALLOWED_ROOTS": "D:/1.SourceCode/crm,D:/1.SourceCode/mcp-local",
+        "CODEBASE_INDEX_DB_PATH": "D:/1.SourceCode/mcp-local/mcp-local-index-central.db"
+      }
+    }
+  }
+}
+```
+
+### Agent-Specific Formats
+
+**Claude Desktop** (`%APPDATA%\Claude\claude_desktop_config.json`): use `mcpServers` key with `command`/`args`/`env` (see Profile A above).
+
+**VS Code / Cursor / Windsurf** (`settings.json`): use `mcp.servers` key with same `command`/`args`/`env` structure.
+
+**OpenCode** (`~/.config/opencode/opencode.json`): use `mcp` key; `command` must be an **array** (`["node", "path/to/dist/index.js"]`); use `environment` (not `env`); add `"type": "local"` and `"enabled": true`.
+
+**Claude Code** (project-scoped): place `.mcp.json` at the workspace root with `mcpServers` key (see `../.mcp.json`).
+
+## Development Workflow
+
+```bash
+npm run typecheck                  # type check only
+npm run build                      # compile TypeScript → dist/
+npm run dev                        # run with tsx (no build needed)
+npm run guard:no-llm-runtime       # verify no LLM imports in src/ (policy enforcement)
+node scripts/smoke-test.mjs        # full integration test (requires build first)
+npm run test:profile-responses     # verify profile behavior for impact/list tools
+npm run test:refactor-profiles     # verify refactor preview/apply profile behavior
+npm run benchmark:plan:check       # quality gate: compact savings must be ≥ 40%
+```
+
+**Pre-commit sequence:**
+```bash
+npm run typecheck && npm run build && npm run guard:no-llm-runtime && node scripts/smoke-test.mjs && npm run benchmark:plan:check
+```
+
+## Refactor Engine
+
+The refactor flow is: `refactor_replace_preview` → `refactor_replace_apply` → `refactor_replace_rollback`.
+
+- Rule-based only (`decisionSource=rule_engine`, `llmInvolved=false`). Never invokes an LLM.
+- Preview generates an HMAC-signed approval token (TTL: 30 min via `CODEBASE_INDEX_REFACTOR_APPROVAL_SECRET`).
+- Apply requires the exact `previewId` and `approvalToken` from the preview response.
+- Rollback requires the `applyId` from the apply response.
+- Low-confidence candidates: reported but not applied by default (`includeLowConfidence: false`).
+- Scope drift: if newly changed files after apply exceed 5% of preview scope, diagnostics code is `SCOPE_DRIFT_DETECTED`.
+
+**C# object initializer rewrites** (`refactor_symbol_migration`): when `toSymbol` is a dotted path (e.g., `IdentityState.CrmCustomerId`) inside an initializer body, provide `initializerRewrite` metadata or the preview blocks as `ambiguous_target`:
+
+```json
+{
+  "fromSymbol": "CrmCustomerId",
+  "toSymbol": "IdentityState.CrmCustomerId",
+  "initializerRewrite": {
+    "objectProperty": "IdentityState",
+    "objectType": "ConversationIdentityState",
+    "targetMember": "CrmCustomerId"
+  }
+}
+```
 
 ## Notes
 
-AST extraction is implemented for JavaScript/TypeScript/C# via tree-sitter. `.csproj`/`.sln` files are parsed with a dedicated parser to extract NuGet and ProjectReference dependencies.
-
-Binary files are rejected via null-byte sniff on the first 512 bytes — no external classifier needed.
+- **No-LLM policy**: `CODEBASE_INDEX_LLM_ENABLED=true` causes startup rejection. `npm run guard:no-llm-runtime` statically enforces this.
+- **Staleness**: incremental index fast-skips when indexed commit equals `HEAD` and working tree is clean.
+- **Windows native build**: `better-sqlite3` requires Visual Studio C++ Build Tools. If build fails, install VS Build Tools.
+- **Docs lane**: disabled by default (`CODEBASE_INDEX_DOCS_INDEXING_ENABLED=false`). Use `docsMode: "off"` per run for fastest indexing.
+- **Watch**: keep `CODEBASE_INDEX_WATCH_AUTO_START=false`. Start watchers manually only during active debug sessions, stop immediately after.

@@ -493,6 +493,24 @@ async function main() {
     throw new Error("Smoke test received non-JSON text output from tool call.");
   }
 
+  // ── Nano profile sanity check (verify new profile support works) ──────────
+  const nanoFindImpact = await client.callTool({
+    name: "find_impact_files",
+    arguments: { repoId, filePath: "src/graphStore.ts", profile: "nano" }
+  });
+  const nanoFindImpactJson = readJsonTextContent(nanoFindImpact).json;
+  if (!nanoFindImpactJson || typeof nanoFindImpactJson.totalFiles !== "number") {
+    throw new Error("find_impact_files(profile=nano) missing totalFiles — profile support may be broken");
+  }
+  if (!Array.isArray(nanoFindImpactJson.topFiles)) {
+    throw new Error("find_impact_files(profile=nano) missing topFiles array");
+  }
+  const nanoProfileBytes = bytesOf(readTextContent(nanoFindImpact));
+  if (nanoProfileBytes > 8_000) {
+    throw new Error(`find_impact_files(nano) response too large (${nanoProfileBytes} bytes) — expected < 8KB for nano mode`);
+  }
+  console.log("NANO_PROFILE_SANITY:", { tool: "find_impact_files", totalFiles: nanoFindImpactJson.totalFiles, nanoBytes: nanoProfileBytes });
+
   await client.close();
 }
 

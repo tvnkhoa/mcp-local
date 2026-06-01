@@ -83,10 +83,12 @@ export function handleRefactorReplacePreview(
     mode: RefactorModeInput;
     ambiguityThresholdPercent: number;
     compilerAssist?: RefactorCompilerAssistInput;
+    profile?: string;
   },
   ctx: HandlerContext
 ): CallToolResult {
   const { store, constants } = ctx;
+  const profile = resolveResponseProfile((args.profile ?? "standard") as Parameters<typeof resolveResponseProfile>[0]);
   const repo = store.getRepository(args.repoId);
   if (!repo) {
     throw new McpError(ErrorCode.InvalidParams, `refactor_replace_preview: repo '${args.repoId}' not found. Run index_repository first.`);
@@ -126,17 +128,36 @@ export function handleRefactorReplacePreview(
   store.saveRefactorPreview(previewRecord, hunkRecords);
   const approvalToken = issueApprovalToken(previewId, digest, expiresAt, resolveApprovalSecret(constants.REFACTOR_APPROVAL_SECRET, constants.REFACTOR_STRICT_APPROVAL));
 
+  const riskFlags = { ambiguousTargets: riskCounts.ambiguous, crossTypeReplacements: riskCounts.crossType, generatedFiles: riskCounts.generated };
+  const diagnostics = { code: blockedByAmbiguity ? "PREVIEW_BLOCKED_BY_AMBIGUITY" : compilerAssistNoMatch ? "PREVIEW_NO_DIAGNOSTIC_MATCH" : "PREVIEW_READY", machineReadable: true };
+  const executionPolicy = noLlmAudit(constants.REFACTOR_STRICT_APPROVAL);
+
+  const ambiguity = { ratioPercent: Number(ambiguousRatio.toFixed(2)), thresholdPercent: args.ambiguityThresholdPercent, blockedByPolicy: blockedByAmbiguity };
+
+  // nano: summary only — no hunk content (best for checking blast radius before requesting detail)
+  if (profile === "nano") {
+    return ctx.asText({ previewId, approvalToken, totalMatches: effectiveHunks.length, affectedFileCount: effectiveAffectedFiles.length, affectedFiles: effectiveAffectedFiles, riskFlags, ambiguity, diagnostics, executionPolicy, expiresAt }, profile);
+  }
+
+  // compact: hunks without before/after text (saves 50-80% tokens on large refactors)
+  if (profile === "compact") {
+    const byFile = new Map<string, typeof hunkRecords>();
+    for (const h of hunkRecords) { const list = byFile.get(h.filePath) ?? []; list.push(h); byFile.set(h.filePath, list); }
+    const compactHunks = [...byFile.entries()].sort((a, b) => a[0].localeCompare(b[0])).map(([filePath, items]) => ({
+      filePath, hunkCount: items.length,
+      hunks: items.map((h) => ({ hunkId: h.hunkId, line: h.line, replacementText: h.replacementText, symbolKind: h.symbolKind, confidence: h.confidence, riskFlags: h.riskFlags }))
+    }));
+    return ctx.asText({ previewId, mode: args.mode, totalMatches: effectiveHunks.length, affectedFiles: effectiveAffectedFiles, groupedPreviewHunks: compactHunks, riskFlags, ambiguity, diagnostics, executionPolicy, approvalToken, expiresAt }, profile);
+  }
+
   return ctx.asText({
     previewId, mode: args.mode, totalMatches: effectiveHunks.length, affectedFiles: effectiveAffectedFiles,
     groupedPreviewHunks: groupPreviewHunks(hunkRecords),
-    riskFlags: { ambiguousTargets: riskCounts.ambiguous, crossTypeReplacements: riskCounts.crossType, generatedFiles: riskCounts.generated },
+    riskFlags,
     compilerAssist: compilerAssistOutcome
       ? { enabled: true, totalDiagnostics: compilerAssistOutcome.totalDiagnostics, acceptedDiagnostics: compilerAssistOutcome.acceptedDiagnostics, matchedDiagnostics: compilerAssistOutcome.matchedDiagnostics, filteredOutHunks: compilerAssistOutcome.filteredOutHunks, lineWindow: compilerAssistOutcome.lineWindow, codes: compilerAssistOutcome.codes }
       : { enabled: false },
-    ambiguity: { ratioPercent: Number(ambiguousRatio.toFixed(2)), thresholdPercent: args.ambiguityThresholdPercent, blockedByPolicy: blockedByAmbiguity },
-    diagnostics: { code: blockedByAmbiguity ? "PREVIEW_BLOCKED_BY_AMBIGUITY" : compilerAssistNoMatch ? "PREVIEW_NO_DIAGNOSTIC_MATCH" : "PREVIEW_READY", machineReadable: true },
-    executionPolicy: noLlmAudit(constants.REFACTOR_STRICT_APPROVAL),
-    approvalToken, expiresAt
+    ambiguity, diagnostics, executionPolicy, approvalToken, expiresAt
   });
 }
 
@@ -149,10 +170,12 @@ export async function handleRefactorReplaceApply(
     maxFilesPerBatch: number;
     stopOnFirstConflict: boolean;
     includeLowConfidence: boolean;
+    profile?: string;
   },
   ctx: HandlerContext
 ): Promise<CallToolResult> {
   const { store, constants } = ctx;
+  const profile = resolveResponseProfile((args.profile ?? "standard") as Parameters<typeof resolveResponseProfile>[0]);
   const preview = store.getRefactorPreview(args.previewId);
   if (!preview) {
     throw new McpError(ErrorCode.InvalidParams, `refactor_replace_apply: preview '${args.previewId}' not found.`);
@@ -196,6 +219,27 @@ export async function handleRefactorReplaceApply(
   store.recordRefactorApply(applyRecord, changes, applyOutcome.appliedHunks);
   store.markRefactorPreviewStatus(preview.preview.previewId, mapPreviewStatusFromApplyStatus(applyRecord.status));
 
+  const diagnostics = { code: scopeDriftDetected ? "SCOPE_DRIFT_DETECTED" : applyStatus !== "applied" ? "APPLY_PARTIAL_OR_CONFLICT" : "APPLY_OK", machineReadable: true };
+  const executionPolicy = noLlmAudit(constants.REFACTOR_STRICT_APPROVAL);
+
+  // nano: just the outcome summary — fastest confirmation that apply worked
+  if (profile === "nano") {
+    return ctx.asText({ applyId, rollbackId, filesChanged: appliedFiles.length, totalHunksApplied: totalReplacements, success: applyStatus === "applied", diagnostics }, profile);
+  }
+
+  // compact: no scopeCheck.expectedFiles (can be hundreds of entries)
+  if (profile === "compact") {
+    return ctx.asText({
+      applyId, rollbackId,
+      appliedFiles: appliedFiles.map((x) => x.filePath),
+      appliedReplacementsCount: totalReplacements,
+      skippedReplacements: changes.filter((x) => x.status !== "applied").map((x) => ({ filePath: x.filePath, status: x.status, reason: x.reason })),
+      patchSummary: appliedFiles.map((x) => ({ filePath: x.filePath, replacementCount: x.replacementCount })),
+      scopeCheck: { driftPercent: Number(scopeDriftPercent.toFixed(2)), driftThresholdPercent: 5, unexpectedFiles: unexpectedChangedFiles.sort((a, b) => a.localeCompare(b)) },
+      diagnostics, executionPolicy
+    }, profile);
+  }
+
   return ctx.asText({
     applyId, rollbackId,
     appliedFiles: appliedFiles.map((x) => x.filePath),
@@ -213,8 +257,7 @@ export async function handleRefactorReplaceApply(
       driftPercent: Number(scopeDriftPercent.toFixed(2)), driftThresholdPercent: 5
     },
     patchSummary: appliedFiles.map((x) => ({ filePath: x.filePath, replacementCount: x.replacementCount })),
-    diagnostics: { code: scopeDriftDetected ? "SCOPE_DRIFT_DETECTED" : applyStatus !== "applied" ? "APPLY_PARTIAL_OR_CONFLICT" : "APPLY_OK", machineReadable: true },
-    executionPolicy: noLlmAudit(constants.REFACTOR_STRICT_APPROVAL)
+    diagnostics, executionPolicy
   });
 }
 

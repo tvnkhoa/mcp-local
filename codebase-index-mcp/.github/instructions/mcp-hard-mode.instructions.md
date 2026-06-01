@@ -129,6 +129,8 @@ Before any baseline tool call, verify and satisfy:
 
 ## Tool Selection Guide
 
+> Quick reference: see `DECISION-TREE.md` for a task-oriented flowchart with profile heuristics and fallback escalation steps.
+
 | Intent | Preferred tool | Notes |
 |--------|---------------|-------|
 | Bootstrap / entry points | `find_entry_points` | `kind: "route_handler"` for HTTP routes |

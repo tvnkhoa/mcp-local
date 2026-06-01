@@ -34,7 +34,8 @@ export const getDependencyGraphSchema = (MAX_DEPTH: number, MAX_RESULT_LIMIT: nu
     symbolId: z.string().min(1).max(200).optional(),
     filePath: z.string().min(1).optional(),
     depth: z.number().int().min(1).max(MAX_DEPTH).default(1),
-    limit: z.number().int().min(1).max(MAX_RESULT_LIMIT).default(100)
+    limit: z.number().int().min(1).max(MAX_RESULT_LIMIT).default(100),
+    profile: responseProfileSchema.default("compact")
   })
   .strict()
   .refine((v) => Boolean(v.symbolId || v.filePath), {
@@ -49,12 +50,13 @@ export const getCallChainSchema = (MAX_DEPTH: number, MAX_RESULT_LIMIT: number) 
     symbolId: z.string().min(1).max(200),
     direction: z.enum(["callers", "callees"]).default("callees"),
     depth: z.number().int().min(1).max(MAX_DEPTH).default(1),
-    limit: z.number().int().min(1).max(MAX_RESULT_LIMIT).default(100)
+    limit: z.number().int().min(1).max(MAX_RESULT_LIMIT).default(100),
+    profile: responseProfileSchema.default("compact")
   })
   .strict();
 
 // List repositories
-export const listRepositoriesSchema = z.object({}).strict();
+export const listRepositoriesSchema = z.object({ profile: responseProfileSchema.default("standard").optional() }).strict();
 
 // Search symbols
 export const searchSymbolsSchema = (MAX_RESULT_LIMIT: number) => z
@@ -104,7 +106,8 @@ export const findImpactFilesSchema = (MAX_RESULT_LIMIT: number) => z
     filePath: z.string().min(1),
     limit: z.number().int().min(1).max(MAX_RESULT_LIMIT).default(50),
     groupBy: z.enum(["file", "module"]).default("file"),
-    view: z.enum(["files", "surface"]).default("files")
+    view: z.enum(["files", "surface"]).default("files"),
+    profile: responseProfileSchema.default("compact")
   })
   .strict();
 
@@ -129,7 +132,8 @@ export const getChangeContextSchema = (MAX_DEPTH: number, MAX_RESULT_LIMIT: numb
 export const getFileSummarySchema = z
   .object({
     repoId: z.string().min(1).max(200),
-    filePath: z.string().min(1)
+    filePath: z.string().min(1),
+    profile: responseProfileSchema.default("compact")
   })
   .strict();
 
@@ -419,7 +423,8 @@ export const refactorReplacePreviewSchema = z
     guards: refactorGuardsSchema,
     compilerAssist: refactorCompilerAssistSchema.optional(),
     mode: z.enum(["text", "syntax-aware", "symbol-aware"]).default("symbol-aware"),
-    ambiguityThresholdPercent: z.number().min(0).max(100).default(1)
+    ambiguityThresholdPercent: z.number().min(0).max(100).default(1),
+    profile: responseProfileSchema.default("standard")
   })
   .strict();
 
@@ -429,7 +434,8 @@ export const refactorReplaceApplySchema = z
     approvalToken: z.string().min(1).max(2_000),
     maxFilesPerBatch: z.number().int().min(1).max(500).default(50),
     stopOnFirstConflict: z.boolean().default(true),
-    includeLowConfidence: z.boolean().default(false)
+    includeLowConfidence: z.boolean().default(false),
+    profile: responseProfileSchema.default("standard")
   })
   .strict();
 

@@ -64,13 +64,18 @@ export function formatChangeContextPayload(
 // ── get_dependency_graph ──────────────────────────────────────────────────────
 
 export function handleGetDependencyGraph(
-  args: { repoId: string; symbolId?: string; filePath?: string; depth: number; limit: number },
+  args: { repoId: string; symbolId?: string; filePath?: string; depth: number; limit: number; profile: string },
   ctx: HandlerContext
 ): CallToolResult {
   const { store } = ctx;
+  const profile = resolveResponseProfile(args.profile as Parameters<typeof resolveResponseProfile>[0]);
   if (args.filePath) {
     const result = store.getModuleFlow(args.repoId, args.filePath, args.limit);
-    return ctx.asText({ repoId: args.repoId, filePath: args.filePath, edges: result.edges, unresolvedCalls: result.unresolvedCalls });
+    if (profile === "nano") {
+      const topEdges = result.edges.slice(0, 10).map((e) => ({ fromName: (e as { fromName?: string }).fromName ?? null, toName: (e as { toName?: string }).toName ?? null, type: (e as { type?: string }).type ?? null }));
+      return ctx.asText({ repoId: args.repoId, filePath: args.filePath, edgeCount: result.edges.length, topEdges, hasMore: result.edges.length > topEdges.length }, profile);
+    }
+    return ctx.asText({ repoId: args.repoId, filePath: args.filePath, edges: result.edges, unresolvedCalls: result.unresolvedCalls }, profile);
   }
   let rows = traverseDependencyGraph(store, args.repoId, args.symbolId!, args.depth, args.limit);
   if (rows.length === 0) {
@@ -82,45 +87,71 @@ export function handleGetDependencyGraph(
       }
     }
   }
-  return ctx.asText({ repoId: args.repoId, symbolId: args.symbolId, depth: args.depth, edges: rows });
+  if (profile === "nano") {
+    const topEdges = rows.slice(0, 10).map((e) => ({ fromName: (e as { fromName?: string }).fromName ?? null, toName: (e as { toName?: string }).toName ?? null, type: e.type, confidence: e.confidence ?? null }));
+    return ctx.asText({ repoId: args.repoId, symbolId: args.symbolId, edgeCount: rows.length, topEdges, hasMore: rows.length > topEdges.length }, profile);
+  }
+  return ctx.asText({ repoId: args.repoId, symbolId: args.symbolId, depth: args.depth, edges: rows }, profile);
 }
 
 // ── get_call_chain ────────────────────────────────────────────────────────────
 
 export function handleGetCallChain(
-  args: { repoId: string; symbolId: string; direction: "callers" | "callees"; depth: number; limit: number },
+  args: { repoId: string; symbolId: string; direction: "callers" | "callees"; depth: number; limit: number; profile: string },
   ctx: HandlerContext
 ): CallToolResult {
   const { store } = ctx;
+  const profile = resolveResponseProfile(args.profile as Parameters<typeof resolveResponseProfile>[0]);
   type CallChainDirection = "callers" | "callees";
   const direction: CallChainDirection = args.direction;
   const rows = traverseCallGraph(store, args.repoId, args.symbolId, direction, args.depth, args.limit);
-  return ctx.asText({ repoId: args.repoId, symbolId: args.symbolId, direction, depth: args.depth, edges: rows });
+  if (profile === "nano") {
+    const pathNodes = rows.slice(0, 10).map((e) => ({
+      name: direction === "callees" ? (e as { toName?: string }).toName ?? null : (e as { fromName?: string }).fromName ?? null,
+      filePath: direction === "callees" ? (e as { toFilePath?: string }).toFilePath ?? null : (e as { fromFilePath?: string }).fromFilePath ?? null,
+      confidence: e.confidence ?? null
+    }));
+    return ctx.asText({ repoId: args.repoId, symbolId: args.symbolId, direction, chainLength: rows.length, path: pathNodes, truncated: rows.length > pathNodes.length }, profile);
+  }
+  return ctx.asText({ repoId: args.repoId, symbolId: args.symbolId, direction, depth: args.depth, edges: rows }, profile);
 }
 
 // ── find_impact_files ─────────────────────────────────────────────────────────
 
 export function handleFindImpactFiles(
-  args: { repoId: string; filePath: string; limit: number; view: "files" | "surface"; groupBy: "file" | "module" },
+  args: { repoId: string; filePath: string; limit: number; view: "files" | "surface"; groupBy: "file" | "module"; profile: string },
   ctx: HandlerContext
 ): CallToolResult {
   const { store } = ctx;
-  
+  const profile = resolveResponseProfile(args.profile as Parameters<typeof resolveResponseProfile>[0]);
+
   // Staleness gate: check if index is stale before impact analysis
   checkStaleness(args.repoId, store);
-  
+
   if (args.view === "surface") {
     const result = store.getImpactSurface(args.repoId, args.filePath, args.limit);
-    return ctx.asText({ repoId: args.repoId, filePath: args.filePath, ...result });
+    if (profile === "nano") {
+      const callers = result.callers;
+      const topItems = callers.slice(0, 10).map((x) => ({ callerName: x.callerName, callerFile: x.callerFile, edgeType: x.edgeType }));
+      return ctx.asText({ repoId: args.repoId, filePath: args.filePath, totalCallers: callers.length, topItems, hasMore: callers.length > topItems.length }, profile);
+    }
+    return ctx.asText({ repoId: args.repoId, filePath: args.filePath, ...result }, profile);
   }
   const result = store.getImpactFiles(args.repoId, args.filePath, args.limit);
   if (args.groupBy === "module") {
     const filePaths = result.impactedFiles.map((f) => f.filePath);
     const grouped = store.groupFilesByModule(filePaths);
     const moduleGroups = Object.entries(grouped).map(([module, files]) => ({ module, fileCount: files.length, topFiles: files.slice(0, 5) }));
-    return ctx.asText({ repoId: args.repoId, filePath: args.filePath, moduleGroups, graphHealth: result.graphHealth, reliabilitySummary: result.reliabilitySummary });
+    if (profile === "nano") {
+      return ctx.asText({ repoId: args.repoId, filePath: args.filePath, totalModules: moduleGroups.length, topModules: moduleGroups.slice(0, 5), hasMore: moduleGroups.length > 5 }, profile);
+    }
+    return ctx.asText({ repoId: args.repoId, filePath: args.filePath, moduleGroups, graphHealth: result.graphHealth, reliabilitySummary: result.reliabilitySummary }, profile);
   }
-  return ctx.asText({ repoId: args.repoId, filePath: args.filePath, ...result });
+  if (profile === "nano") {
+    const topFiles = result.impactedFiles.slice(0, 10).map((f) => ({ filePath: f.filePath, symbolCount: (f as { symbolCount?: number }).symbolCount ?? null }));
+    return ctx.asText({ repoId: args.repoId, filePath: args.filePath, totalFiles: result.impactedFiles.length, topFiles, hasMore: result.impactedFiles.length > topFiles.length }, profile);
+  }
+  return ctx.asText({ repoId: args.repoId, filePath: args.filePath, ...result }, profile);
 }
 
 // ── get_change_context ────────────────────────────────────────────────────────
@@ -150,16 +181,33 @@ export function handleGetChangeContext(
 // ── get_file_summary ──────────────────────────────────────────────────────────
 
 export function handleGetFileSummary(
-  args: { repoId: string; filePath: string },
+  args: { repoId: string; filePath: string; profile: string },
   ctx: HandlerContext
 ): CallToolResult {
-  return ctx.asText(ctx.store.getFileSummary(args.repoId, args.filePath));
+  const profile = resolveResponseProfile(args.profile as Parameters<typeof resolveResponseProfile>[0]);
+  const result = ctx.store.getFileSummary(args.repoId, args.filePath);
+  if (profile === "nano") {
+    const topSymbols = result.exports.slice(0, 5).map((s) => ({ name: s.name, kind: s.kind }));
+    return ctx.asText({ filePath: result.file.filePath, language: result.file.language, symbolCount: result.exports.length, topSymbols }, profile);
+  }
+  return ctx.asText(result, profile);
 }
 
 // ── list_repositories ─────────────────────────────────────────────────────────
 
-export function handleListRepositories(_args: unknown, ctx: HandlerContext): CallToolResult {
-  return ctx.asText(ctx.store.listRepositories());
+export function handleListRepositories(args: { profile?: string }, ctx: HandlerContext): CallToolResult {
+  const profile = resolveResponseProfile((args.profile ?? "standard") as Parameters<typeof resolveResponseProfile>[0]);
+  const repos = ctx.store.listRepositories();
+  if (profile === "nano") {
+    return ctx.asText({
+      count: repos.length,
+      repos: repos.map((r) => {
+        const repo = r as { repoId?: string; filesIndexed?: number; lastRunStatus?: string };
+        return { repoId: repo.repoId, filesIndexed: repo.filesIndexed ?? null, lastRunStatus: repo.lastRunStatus ?? null };
+      })
+    }, profile);
+  }
+  return ctx.asText(repos, profile);
 }
 
 // ── get_file_context ──────────────────────────────────────────────────────────

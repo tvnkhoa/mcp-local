@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "codebase-index-local": {
+      "command": "node",
+      "args": ["./codebase-index-mcp/dist/index.js"],
+      "env": {
+        "CODEBASE_INDEX_ALLOWED_ROOTS": "D:/1.SourceCode/mcp-local,D:/1.SourceCode/crm",
+        "CODEBASE_INDEX_DB_PATH": "./mcp-local-index-central.db"
+      }
+    }
+  }
+}

@@ -324,7 +324,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: "get_dependency_graph",
-        description: "Get the IMPORTS/DEPENDS_ON dependency tree for a symbol (provide symbolId), or get module-level flow edges for a file (provide filePath). One of symbolId or filePath is required.",
+        description: "Get IMPORTS/DEPENDS_ON dependency edges for a symbol (symbolId) or module-level flow edges for a file (filePath). One required. Use profile='nano' for top-10 edge count, 'compact' (default) for all edges with minimal fields.",
         inputSchema: {
           type: "object",
           additionalProperties: false,
@@ -334,13 +334,14 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             symbolId: { type: "string" },
             filePath: { type: "string" },
             depth: { type: "integer", minimum: 1, maximum: MAX_DEPTH },
-            limit: { type: "integer", minimum: 1, maximum: MAX_RESULT_LIMIT }
+            limit: { type: "integer", minimum: 1, maximum: MAX_RESULT_LIMIT },
+            profile: { type: "string", enum: ["nano", "compact", "standard", "verbose"] }
           }
         }
       },
       {
         name: "get_call_chain",
-        description: "Get the full caller or callee chain from a symbolId. Use direction=callers to trace who calls this symbol, or direction=callees to see what it calls. Prefer get_context_by_name for quick single-symbol lookup.",
+        description: "Trace a call path from a symbolId (direction=callers or callees). Shows the path, not a caller list — use get_change_context for caller lists. Requires a callable symbolId (function/method), not a class. Use profile='nano' for path summary, 'compact' (default) for full edge list.",
         inputSchema: {
           type: "object",
           additionalProperties: false,
@@ -350,14 +351,15 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             symbolId: { type: "string" },
             direction: { type: "string", enum: ["callers", "callees"] },
             depth: { type: "integer", minimum: 1, maximum: MAX_DEPTH },
-            limit: { type: "integer", minimum: 1, maximum: MAX_RESULT_LIMIT }
+            limit: { type: "integer", minimum: 1, maximum: MAX_RESULT_LIMIT },
+            profile: { type: "string", enum: ["nano", "compact", "standard", "verbose"] }
           }
         }
       },
       {
         name: "list_repositories",
-        description: "List all indexed repositories with file counts, symbol counts, and last index run status.",
-        inputSchema: { type: "object", additionalProperties: false, properties: {} }
+        description: "List all indexed repositories. Use profile='nano' for a brief count+status list, omit for full metadata.",
+        inputSchema: { type: "object", additionalProperties: false, properties: { profile: { type: "string", enum: ["nano", "compact", "standard", "verbose"] } } }
       },
       {
         name: "search_symbols",
@@ -413,7 +415,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: "find_impact_files",
-        description: "Given a file path, return which other files import or call symbols defined in it (view=files, default), or list external symbols that call into the file grouped by caller symbol (view=surface). Use groupBy='module' to group results by top-level folder.",
+        description: "Scope blast radius for a file change. view='files' (default): which files import/call symbols in this file. view='surface': which external symbols call into this file. Use before refactor_replace_preview to scope the change. profile='nano' for top-10 count, 'compact' (default) for full list.",
         inputSchema: {
           type: "object",
           additionalProperties: false,
@@ -423,7 +425,8 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             filePath: { type: "string" },
             limit: { type: "integer", minimum: 1, maximum: MAX_RESULT_LIMIT },
             groupBy: { type: "string", enum: ["file", "module"] },
-            view: { type: "string", enum: ["files", "surface"] }
+            view: { type: "string", enum: ["files", "surface"] },
+            profile: { type: "string", enum: ["nano", "compact", "standard", "verbose"] }
           }
         }
       },
@@ -447,14 +450,15 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: "get_file_summary",
-        description: "Summarise a file: its exported symbols, outgoing imports, and which files import it. Use to understand module boundaries before editing.",
+        description: "File overview: exported symbols, outgoing imports, and which files import it. Use before get_file_context — lighter payload. profile='nano' for symbol count + top-5, 'compact' (default) for full summary.",
         inputSchema: {
           type: "object",
           additionalProperties: false,
           required: ["repoId", "filePath"],
           properties: {
             repoId: { type: "string" },
-            filePath: { type: "string" }
+            filePath: { type: "string" },
+            profile: { type: "string", enum: ["nano", "compact", "standard", "verbose"] }
           }
         }
       },
@@ -488,7 +492,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: "get_symbol_context_pack",
-        description: "Single-call planning pack for a symbol name: ranked candidates + callers + callees + importers + change-context. Use to replace multi-hop lookups (previously get_context_by_name, find_references, get_symbol_candidates) in Plan mode.",
+        description: "Single-call planning pack for a symbol name: ranked candidates + callers + callees + importers + change-context. Use this instead of get_change_context when you need symbol detail without deep caller traversal. Use profile='compact' (default) or 'nano' in Plan mode.",
         inputSchema: {
           type: "object",
           additionalProperties: false,
@@ -647,7 +651,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: "get_folder_summary",
-        description: "List all files under a folder path with per-file stats (language, symbol count, caller count). Use at the start of a Plan mode session to orient in a codebase layer (e.g. src/Application/) without reading file contents.",
+        description: "List all files under a folder path with per-file stats (language, symbol count, caller count). Use at session start to orient — cheaper than get_file_context on individual files. Prefer this over reading file contents when you just need to find the right files.",
         inputSchema: {
           type: "object",
           additionalProperties: false,
@@ -748,7 +752,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: "refactor_replace_preview",
-        description: "Preview deterministic bulk replacements with scope and type-ownership guards before applying any change.",
+        description: "Preview bulk replacements with scope and type-ownership guards. profile='nano' returns only match count + affected files (no hunk content — fastest for blast-radius check). profile='compact' includes hunks without before/after text. profile='standard' (default) returns full hunk content.",
         inputSchema: {
           type: "object",
           additionalProperties: false,
@@ -757,6 +761,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             repoId: { type: "string" },
             find: { type: "string" },
             replaceExpression: { type: "string" },
+            profile: { type: "string", enum: ["nano", "compact", "standard", "verbose"] },
             scope: {
               type: "object",
               additionalProperties: false,
@@ -810,7 +815,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: "refactor_replace_apply",
-        description: "Apply an approved replacement plan exactly as previewed using previewId and approval token.",
+        description: "Apply an approved replacement plan using previewId and approvalToken from preview. profile='nano' returns only success status + file count. profile='compact' omits expectedFiles list. profile='standard' (default) returns full scope check.",
         inputSchema: {
           type: "object",
           additionalProperties: false,
@@ -820,7 +825,8 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             approvalToken: { type: "string" },
             maxFilesPerBatch: { type: "integer", minimum: 1, maximum: 500 },
             stopOnFirstConflict: { type: "boolean" },
-            includeLowConfidence: { type: "boolean" }
+            includeLowConfidence: { type: "boolean" },
+            profile: { type: "string", enum: ["nano", "compact", "standard", "verbose"] }
           }
         }
       },
@@ -945,8 +951,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         return handleGetFileSummary(hArgs, ctx);
       }
       case "list_repositories": {
-        listRepositoriesSchema.parse(request.params.arguments ?? {});
-        return handleListRepositories(null, ctx);
+        const hArgs = listRepositoriesSchema.parse(request.params.arguments ?? {});
+        return handleListRepositories(hArgs, ctx);
       }
       case "search_symbols": {
         const hArgs = searchSymbolsSchema.parse(request.params.arguments ?? {});
