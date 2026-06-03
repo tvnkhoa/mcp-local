@@ -1053,8 +1053,8 @@ export class GraphStore {
     return getContextByNameImpl(this.db, repoId, name, limit);
   }
 
-  getSymbolCandidates(repoId: string, name: string, limit: number): { symbolId: string; name: string; kind: string; filePath: string; line: number; signature: string | null; matchType: "exact" | "prefix" | "contains"; score: number; confidence: number }[] {
-    return getSymbolCandidatesImpl(this.db, repoId, name, limit);
+  getSymbolCandidates(repoId: string, name: string, limit: number, strategy: "name" | "intent" = "name", filters: { kind?: string | null; language?: string | null; filePath?: string | null } = {}): { symbolId: string; name: string; kind: string; filePath: string; line: number; signature: string | null; matchType: "exact" | "prefix" | "contains"; score: number; confidence: number }[] {
+    return getSymbolCandidatesImpl(this.db, repoId, name, limit, strategy, filters);
   }
 
   getFolderSummary(repoId: string, folderPath: string, maxFiles: number): { folderPath: string; totalFiles: number; directFiles: number; subfolders: string[]; files: { filePath: string; language: string | null; symbolCount: number; exportedCount: number; callerCount: number }[] } {

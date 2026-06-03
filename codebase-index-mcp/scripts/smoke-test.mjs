@@ -253,6 +253,24 @@ async function main() {
     throw new Error("search_symbols(ranked=true) returned empty candidates");
   }
 
+  // Finding A regression: ranked + intent on a MULTI-WORD query must tokenize, not
+  // substring-match the whole phrase. Before the fix this silently returned 0.
+  const rankedIntent = await client.callTool({
+    name: "search_symbols",
+    arguments: {
+      repoId,
+      query: "search symbols",
+      strategy: "intent",
+      ranked: true,
+      limit: 10
+    }
+  });
+  const rankedIntentJson = readJsonTextContent(rankedIntent).json;
+  if (!rankedIntentJson || !Array.isArray(rankedIntentJson.candidates) || rankedIntentJson.candidates.length === 0) {
+    throw new Error("search_symbols(ranked=true, strategy=intent, multi-word) returned 0 — intent tokenization not honored on ranked path");
+  }
+  console.log("RANKED_INTENT_OK:", { count: rankedIntentJson.candidates.length, top: rankedIntentJson.candidates[0]?.name });
+
   const symbolContextPack = await client.callTool({
     name: "get_symbol_context_pack",
     arguments: {
@@ -268,6 +286,26 @@ async function main() {
   if (!symbolContextPackJson || !symbolContextPackJson.selectedSymbol) {
     throw new Error("get_symbol_context_pack(compact) returned no selectedSymbol");
   }
+
+  // Finding B regression: for a class with a same-named constructor, the pack must
+  // select the class (which carries edges), not the edgeless constructor. The selected
+  // symbol must also agree with the top-ranked candidate.
+  const classPack = await client.callTool({
+    name: "get_symbol_context_pack",
+    arguments: { repoId, name: "GraphStore", limit: 20, profile: "compact" }
+  });
+  const classPackJson = readJsonTextContent(classPack).json;
+  if (!classPackJson || !classPackJson.selectedSymbol) {
+    throw new Error("get_symbol_context_pack('GraphStore') returned no selectedSymbol");
+  }
+  if (classPackJson.selectedSymbol.kind === "constructor") {
+    throw new Error("get_symbol_context_pack('GraphStore') selected the constructor over the class");
+  }
+  if (Array.isArray(classPackJson.candidates) && classPackJson.candidates[0] &&
+      classPackJson.candidates[0].symbolId !== classPackJson.selectedSymbol.symbolId) {
+    throw new Error("get_symbol_context_pack selectedSymbol disagrees with top-ranked candidate");
+  }
+  console.log("CONTEXT_PACK_KIND_OK:", { selected: classPackJson.selectedSymbol.kind });
 
   const detectChanges = await client.callTool({
     name: "detect_changes",
@@ -502,6 +540,12 @@ async function main() {
     name: "find_impact_files",
     arguments: { repoId, filePath: "src/graphStore.ts", profile: "nano" }
   });
+  // Finding C: impact tools must never hard-fail. A stale index becomes an embedded
+  // `staleWarning`, not an McpError. (The fresh smoke index isn't stale, so the stale
+  // branch is verified live on a stale repo; here we just guard against regressing to throw.)
+  if (nanoFindImpact.isError) {
+    throw new Error("find_impact_files should not return an error result (stale index must warn, not throw)");
+  }
   const nanoFindImpactJson = readJsonTextContent(nanoFindImpact).json;
   if (!nanoFindImpactJson || typeof nanoFindImpactJson.totalFiles !== "number") {
     throw new Error("find_impact_files(profile=nano) missing totalFiles — profile support may be broken");

@@ -7,23 +7,23 @@ import { GraphStore } from "../graphStore.js";
 import type { HandlerContext } from "./handlerContext.js";
 
 // ── Staleness Gate ────────────────────────────────────────────────────────────
+// Stale index is a warning, not a fatal — every other read tool (search_symbols,
+// route_map, ...) returns data with a staleness note. Impact tools follow suit:
+// return the warning so callers degrade gracefully instead of getting nothing.
 
-function checkStaleness(repoId: string, store: GraphStore): void {
+function staleWarningFor(repoId: string, store: GraphStore): { note: string; hint: string } | null {
   try {
     const staleness = getRepoStaleness(repoId, store);
     if (staleness.isStale) {
-      throw new McpError(
-        ErrorCode.InvalidRequest,
-        `Index is stale for repo '${repoId}'. ${staleness.note}. Please run index_repository with mode='incremental' before querying impact.`
-      );
+      return {
+        note: `index is stale: ${staleness.note}`,
+        hint: `results reflect the indexed commit, not current HEAD — run index_repository(repoId='${repoId}', mode='incremental') for accurate impact.`
+      };
     }
-  } catch (error) {
-    // If we can't determine staleness (e.g., not a git repo), allow the query
-    if (error instanceof McpError) {
-      throw error;
-    }
-    // Silently allow if staleness check fails for other reasons
+  } catch {
+    // Can't determine staleness (e.g. non-git repo) — no warning.
   }
+  return null;
 }
 
 // ── graph-health collapse ─────────────────────────────────────────────────────
@@ -145,17 +145,18 @@ export function handleFindImpactFiles(
   const { store } = ctx;
   const profile = resolveResponseProfile(args.profile as Parameters<typeof resolveResponseProfile>[0]);
 
-  // Staleness gate: check if index is stale before impact analysis
-  checkStaleness(args.repoId, store);
+  // Stale index → warn (embedded in payload), don't block.
+  const staleWarning = staleWarningFor(args.repoId, store);
+  const warn = staleWarning ? { staleWarning } : {};
 
   if (args.view === "surface") {
     const result = store.getImpactSurface(args.repoId, args.filePath, args.limit);
     if (profile === "nano") {
       const callers = result.callers;
       const topItems = callers.slice(0, 10).map((x) => ({ callerName: x.callerName, callerFile: x.callerFile, edgeType: x.edgeType }));
-      return ctx.asText({ repoId: args.repoId, filePath: args.filePath, totalCallers: callers.length, topItems, hasMore: callers.length > topItems.length }, profile);
+      return ctx.asText({ repoId: args.repoId, filePath: args.filePath, totalCallers: callers.length, topItems, hasMore: callers.length > topItems.length, ...warn }, profile);
     }
-    return ctx.asText({ repoId: args.repoId, filePath: args.filePath, ...result }, profile);
+    return ctx.asText({ repoId: args.repoId, filePath: args.filePath, ...result, ...warn }, profile);
   }
   const result = store.getImpactFiles(args.repoId, args.filePath, args.limit);
   if (args.groupBy === "module") {
@@ -163,15 +164,15 @@ export function handleFindImpactFiles(
     const grouped = store.groupFilesByModule(filePaths);
     const moduleGroups = Object.entries(grouped).map(([module, files]) => ({ module, fileCount: files.length, topFiles: files.slice(0, 5) }));
     if (profile === "nano") {
-      return ctx.asText({ repoId: args.repoId, filePath: args.filePath, totalModules: moduleGroups.length, topModules: moduleGroups.slice(0, 5), hasMore: moduleGroups.length > 5 }, profile);
+      return ctx.asText({ repoId: args.repoId, filePath: args.filePath, totalModules: moduleGroups.length, topModules: moduleGroups.slice(0, 5), hasMore: moduleGroups.length > 5, ...warn }, profile);
     }
-    return ctx.asText({ repoId: args.repoId, filePath: args.filePath, moduleGroups, graphHealth: result.graphHealth, reliabilitySummary: result.reliabilitySummary }, profile);
+    return ctx.asText({ repoId: args.repoId, filePath: args.filePath, moduleGroups, graphHealth: result.graphHealth, reliabilitySummary: result.reliabilitySummary, ...warn }, profile);
   }
   if (profile === "nano") {
     const topFiles = result.impactedFiles.slice(0, 10).map((f) => ({ filePath: f.filePath, symbolCount: (f as { symbolCount?: number }).symbolCount ?? null }));
-    return ctx.asText({ repoId: args.repoId, filePath: args.filePath, totalFiles: result.impactedFiles.length, topFiles, hasMore: result.impactedFiles.length > topFiles.length }, profile);
+    return ctx.asText({ repoId: args.repoId, filePath: args.filePath, totalFiles: result.impactedFiles.length, topFiles, hasMore: result.impactedFiles.length > topFiles.length, ...warn }, profile);
   }
-  return ctx.asText({ repoId: args.repoId, filePath: args.filePath, ...result }, profile);
+  return ctx.asText({ repoId: args.repoId, filePath: args.filePath, ...result, ...warn }, profile);
 }
 
 // ── get_change_context ────────────────────────────────────────────────────────
@@ -181,10 +182,11 @@ export function handleGetChangeContext(
   ctx: HandlerContext
 ): CallToolResult {
   const { store } = ctx;
-  
-  // Staleness gate: check if index is stale before impact analysis
-  checkStaleness(args.repoId, store);
-  
+
+  // Stale index → warn (embedded in payload), don't block.
+  const staleWarning = staleWarningFor(args.repoId, store);
+  const warn = staleWarning ? { staleWarning } : {};
+
   const profile = resolveResponseProfile(args.profile as Parameters<typeof resolveResponseProfile>[0]);
   let resolvedSymbolId = args.symbolId;
   if (!resolvedSymbolId && args.name) {
@@ -192,12 +194,12 @@ export function handleGetChangeContext(
     if (!context.symbol) {
       // `found: false` is an explicit not-found signal that survives compact null-stripping
       // (the `symbol: null` sentinel is dropped under the now-default compact profile).
-      return ctx.asText({ found: false, symbol: null, callers: [], callees: [], typeDeps: [], graphHealth: { unresolvedCalls: 0, unresolvedImports: 0, unresolvedTypeRefs: 0, note: "symbol not found" }, queryName: args.name }, profile);
+      return ctx.asText({ found: false, symbol: null, callers: [], callees: [], typeDeps: [], graphHealth: { unresolvedCalls: 0, unresolvedImports: 0, unresolvedTypeRefs: 0, note: "symbol not found" }, queryName: args.name, ...warn }, profile);
     }
     resolvedSymbolId = context.symbol.symbolId;
   }
   const result = store.getChangeContext(args.repoId, resolvedSymbolId!, args.callerDepth, args.calleeDepth, args.limit);
-  return ctx.asText(formatChangeContextPayload(result, profile), profile);
+  return ctx.asText({ ...(formatChangeContextPayload(result, profile) as Record<string, unknown>), ...warn }, profile);
 }
 
 // ── get_file_summary ──────────────────────────────────────────────────────────

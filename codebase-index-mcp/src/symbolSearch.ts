@@ -2,6 +2,20 @@ import type Database from "better-sqlite3";
 import type { ResolvedEdge, SymbolRecord } from "./types.js";
 import { vectorSearchSymbols, isVectorEnabled } from "./vectorStore.js";
 
+// Kinds that carry graph edges / are usually what a developer means; ranked above
+// edgeless namesakes (constructor shares the class name, module shares the file name).
+const RANKED_KIND_BONUS = ["method", "function", "class", "interface", "struct"];
+
+// SQL ORDER-BY fragment: prefer substantive kinds over their edgeless namesakes when
+// names tie (e.g. class before its same-named constructor). `col` is the qualified column.
+const kindPriorityOrder = (col: string): string =>
+  `case ${col}
+     when 'class' then 0 when 'interface' then 1 when 'struct' then 2
+     when 'method' then 3 when 'function' then 4
+     when 'constructor' then 8 when 'module' then 9
+     else 5
+   end`;
+
 // ── FTS query builders ─────────────────────────────────────────────────
 
 export function buildFtsQuery(query: string): string {
@@ -512,7 +526,7 @@ export function getContextByNameImpl(
         from symbols_fts
         inner join symbols s on s.rowid = symbols_fts.rowid
         where s.repo_id = ? and symbols_fts match ?
-        order by case when s.name = ? then 0 else 1 end, rank
+        order by case when s.name = ? then 0 else 1 end, ${kindPriorityOrder("s.kind")}, rank
         limit ?
         `
       )
@@ -523,7 +537,7 @@ export function getContextByNameImpl(
         `select repo_id as repoId, symbol_id as symbolId, file_path as filePath,
                 name, kind, line, signature
          from symbols where repo_id = ? and (name = ? or name like ?)
-         order by case when name = ? then 0 else 1 end, name
+         order by case when name = ? then 0 else 1 end, ${kindPriorityOrder("kind")}, name
          limit ?`
       )
       .all(repoId, name, `%${name}%`, name, limit) as SymbolRecord[];
@@ -594,7 +608,9 @@ export function getSymbolCandidatesImpl(
   db: Database.Database,
   repoId: string,
   name: string,
-  limit: number
+  limit: number,
+  strategy: "name" | "intent" = "name",
+  filters: { kind?: string | null; language?: string | null; filePath?: string | null } = {}
 ): {
   symbolId: string;
   name: string;
@@ -606,26 +622,105 @@ export function getSymbolCandidatesImpl(
   score: number;
   confidence: number;
 }[] {
+  // Filter clauses (kind/language/filePath) — previously dropped on the ranked path.
+  const filterConds: string[] = [];
+  const filterParams: unknown[] = [];
+  const langJoin = filters.language
+    ? "inner join files f on f.repo_id = s.repo_id and f.path = s.file_path"
+    : "";
+  if (filters.language) {
+    filterConds.push("f.language = ?");
+    filterParams.push(filters.language);
+  }
+  if (filters.kind) {
+    filterConds.push("s.kind = ?");
+    filterParams.push(filters.kind);
+  }
+  if (filters.filePath) {
+    filterConds.push("s.file_path like ?");
+    filterParams.push(`%${filters.filePath}%`);
+  }
+  const filterWhere = filterConds.length > 0 ? `and ${filterConds.join(" and ")}` : "";
+
+  const tokens = strategy === "intent" ? extractIntentTokens(name) : [];
+
+  // Intent: OR the tokens across name+signature (mirrors searchSymbolsImpl's intent branch),
+  // then rank by token coverage. Without this, a multi-word query falls to the substring
+  // path below and matches nothing (no symbol name contains the whole phrase) → 0 results.
+  if (strategy === "intent" && tokens.length > 0) {
+    const tokenClauses = tokens.map(() => "(s.name like ? or s.signature like ?)").join(" or ");
+    const tokenParams: string[] = [];
+    for (const t of tokens) tokenParams.push(`%${t}%`, `%${t}%`);
+    const fetchLimit = Math.min(Math.max(limit * 4, 50), 500);
+    const rows = db
+      .prepare(
+        `
+        select s.repo_id as repoId, s.symbol_id as symbolId, s.file_path as filePath,
+               s.name, s.kind, s.line, s.signature
+        from symbols s
+        ${langJoin}
+        where s.repo_id = ? and (${tokenClauses}) ${filterWhere}
+        order by length(s.name)
+        limit ?
+        `
+      )
+      .all(repoId, ...tokenParams, ...filterParams, fetchLimit) as SymbolRecord[];
+
+    const lowerTokens = tokens.map((t) => t.toLowerCase());
+    const scored = rows.map((row) => {
+      const hay = `${row.name} ${row.signature ?? ""}`.toLowerCase();
+      const matched = lowerTokens.filter((t) => hay.includes(t)).length;
+      const coverage = matched / lowerTokens.length;
+      const kindBonus = RANKED_KIND_BONUS.includes(row.kind) ? 0.03 : 0;
+      const confidenceRaw = Math.max(0, Math.min(1, 0.5 + 0.45 * coverage + kindBonus));
+      const matchType: "exact" | "prefix" | "contains" = coverage >= 1 ? "exact" : "contains";
+      return { row, matched, matchType, confidenceRaw };
+    });
+    scored.sort(
+      (a, b) =>
+        b.matched - a.matched ||
+        b.confidenceRaw - a.confidenceRaw ||
+        a.row.name.length - b.row.name.length ||
+        a.row.name.localeCompare(b.row.name)
+    );
+    return scored.slice(0, limit).map(({ row, matchType, confidenceRaw }, index) => {
+      const confidence = Math.max(0, Math.min(1, confidenceRaw - Math.min(index * 0.01, 0.2)));
+      return {
+        symbolId: row.symbolId,
+        name: row.name,
+        kind: row.kind,
+        filePath: row.filePath,
+        line: row.line,
+        signature: row.signature ?? null,
+        matchType,
+        score: Math.round(confidence * 100),
+        confidence
+      };
+    });
+  }
+
+  // strategy === "name" (default) — substring/exact ranking, behavior preserved.
   const rows = db
     .prepare(
       `
-      select repo_id as repoId, symbol_id as symbolId, file_path as filePath,
-             name, kind, line, signature
-      from symbols
-      where repo_id = ? and (name = ? or name like ?)
+      select s.repo_id as repoId, s.symbol_id as symbolId, s.file_path as filePath,
+             s.name, s.kind, s.line, s.signature
+      from symbols s
+      ${langJoin}
+      where s.repo_id = ? and (s.name = ? or s.name like ?) ${filterWhere}
       order by
         case
-          when lower(name) = lower(?) then 0
-          when lower(name) like lower(?) then 1
+          when lower(s.name) = lower(?) then 0
+          when lower(s.name) like lower(?) then 1
           else 2
         end,
-        length(name),
-        file_path,
-        line
+        length(s.name),
+        s.file_path,
+        s.line
       limit ?
       `
     )
-    .all(repoId, name, `%${name}%`, name, `${name}%`, limit) as SymbolRecord[];
+    .all(repoId, name, `%${name}%`, ...filterParams, name, `${name}%`, limit) as SymbolRecord[];
 
   const normalizedQuery = name.toLowerCase();
   return rows.map((row, index) => {
@@ -638,7 +733,7 @@ export function getSymbolCandidatesImpl(
           : "contains";
 
     const base = matchType === "exact" ? 0.96 : matchType === "prefix" ? 0.88 : 0.72;
-    const kindBonus = ["method", "function", "class", "interface", "struct"].includes(row.kind) ? 0.03 : 0;
+    const kindBonus = RANKED_KIND_BONUS.includes(row.kind) ? 0.03 : 0;
     const positionPenalty = Math.min(index * 0.01, 0.2);
     const confidence = Math.max(0, Math.min(1, base + kindBonus - positionPenalty));
 

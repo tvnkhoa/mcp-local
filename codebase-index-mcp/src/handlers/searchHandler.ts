@@ -31,8 +31,12 @@ export function handleSearchSymbols(
   const profile = resolveResponseProfile(args.profile as Parameters<typeof resolveResponseProfile>[0], args.compact);
 
   if (args.ranked) {
-    const candidates = store.getSymbolCandidates(args.repoId ?? "", args.query, args.limit);
-    return ctx.asText({ query: args.query, count: candidates.length, candidates }, profile);
+    const candidates = store.getSymbolCandidates(args.repoId ?? "", args.query, args.limit, args.strategy, {
+      kind: args.kind ?? null,
+      language: args.language ?? null,
+      filePath: args.filePath ?? null
+    });
+    return ctx.asText({ query: args.query, strategy: args.strategy, count: candidates.length, candidates }, profile);
   }
 
   const results = store.searchSymbols(
