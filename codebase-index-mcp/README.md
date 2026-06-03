@@ -28,7 +28,7 @@ npm install && npm run build
 ### Symbol Search & Navigation
 | Tool | Description |
 |------|-------------|
-| `search_symbols` | Find symbols by name or intent (`strategy: name\|intent`). Start here. |
+| `search_symbols` | Find symbols by name or intent (`strategy: name\|intent`). `ranked=true` scores candidates and honors `strategy` (intent tokenizes multi-word queries) + filters. Start here. |
 | `get_symbol_detail` | Full detail for a known symbolId |
 | `get_symbol_context_pack` | Symbol + neighbors + callers/callees in one call. Prefer over `get_change_context` when not doing deep caller traversal. |
 | `get_symbol_blame` | Git blame metadata for a symbol |
@@ -49,7 +49,7 @@ npm install && npm run build
 | Tool | Description |
 |------|-------------|
 | `get_change_context` | Callers and callees for a symbol (BFS). Use when you need deep caller traversal; otherwise prefer `get_symbol_context_pack`. |
-| `find_impact_files` | Files impacted by changing a symbol. Use before `refactor_replace_preview` to scope blast radius. |
+| `find_impact_files` | Files impacted by changing a symbol. Use before `refactor_replace_preview` to scope blast radius. A stale index returns a non-fatal `staleWarning` field, not an error. |
 | `get_dependency_graph` | Graph edges for a file or symbol |
 | `get_call_chain` | Call path between two symbols. Shows path, not caller list. |
 | `get_cross_repo_impact` | Impact across multiple indexed repos |
@@ -257,7 +257,7 @@ The refactor flow is: `refactor_replace_preview` → `refactor_replace_apply` �
 ## Notes
 
 - **No-LLM policy**: `CODEBASE_INDEX_LLM_ENABLED=true` causes startup rejection. `npm run guard:no-llm-runtime` statically enforces this.
-- **Staleness**: incremental index fast-skips when indexed commit equals `HEAD` and working tree is clean.
+- **Staleness**: incremental index fast-skips when indexed commit equals `HEAD` and working tree is clean. Read tools degrade gracefully on a stale index — `find_impact_files`/`get_change_context` embed a non-fatal `staleWarning` rather than erroring.
 - **Windows native build**: `better-sqlite3` requires Visual Studio C++ Build Tools. If build fails, install VS Build Tools.
 - **Docs lane**: disabled by default (`CODEBASE_INDEX_DOCS_INDEXING_ENABLED=false`). Use `docsMode: "off"` per run for fastest indexing.
 - **Watch**: keep `CODEBASE_INDEX_WATCH_AUTO_START=false`. Start watchers manually only during active debug sessions, stop immediately after.

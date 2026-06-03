@@ -475,3 +475,30 @@ Three compounding gaps addressed:
 - Impact: reduces trust for migration-audit tasks and forces targeted baseline file reads to confirm current state.
 - Workaround used: narrowed verification to explicit file paths via symbol/file-summary + direct targeted reads and DB read-only checks.
 - Resolution: Three-pronged fix. (1) `indexPipeline.ts`: `pruneStaleFiles()` + `pruneOrphanedEdges()` now run for both full AND incremental modes (guarded by `files.length <= maxFiles` to avoid pruning when the file cap truncated the disk scan); `resolveImplementsEdges()` remains full-mode only. (2) Branch tracking: added `resolveBranch()` helper (`git rev-parse --abbrev-ref HEAD`), stored as `branch` column in `index_runs` via `ensureRunColumnText("branch")` migration, propagated through `IndexRunSummary` type, `recordRun()`, and `getLatestRun()`. (3) `get_folder_summary` response now includes `indexMeta: { branch, commitSha, indexedAt, note }` sourced from `getLatestRun()` — callers can verify index was built from their expected branch before trusting file listings. Tool description in `src/index.ts` updated to document `indexMeta` and the branch-switch workflow.
+
+## MCP-ISSUE-011 ✅ RESOLVED
+- Scenario: Scale dogfooding on `wec.be` (7,371 files / 66,223 symbols, C# CRM monorepo) to evaluate the most-used navigation tools. Three reproducible weaknesses surfaced that small (TS, 84-file) repos never exposed.
+- MCP tool/query attempted:
+  - `search_symbols(query="send notification email", strategy=intent, ranked=true)`
+  - `get_symbol_context_pack(name="CommunicationHubController")`
+  - `find_impact_files(filePath="src/services/email/CRM.Email/Implements/SESEmailService.cs")` on a stale index.
+- Expected vs actual:
+  - **A** — expected ranked intent results; got `count:0`. Dropping `ranked` returned 8 correct hits (`SendNotificationAsync`, `SendMailAsync`, …) — so the ranked path silently broke intent.
+  - **B** — expected the class context; `selectedSymbol` was the same-named **constructor** (edgeless) while `candidates[0]` was the class (score 99) → empty `callers/callees/importers`.
+  - **C** — expected impact list (other read tools degrade with a `staleness` note); `find_impact_files` threw `McpError "Index is stale…"` and returned nothing.
+- Impact: ranked+intent is the documented "scored candidates" path yet returned 0 for any multi-word query; context pack gave useless empty packs for controllers; impact analysis was blocked for the normal "haven't re-indexed today" state.
+- Root cause:
+  - **A** — `searchHandler.ts` ranked branch called `getSymbolCandidates(repoId, query, limit)`, whose impl (`symbolSearch.ts`) did a single `name = ? OR name LIKE '%<whole query>%'` — no tokenization, ignored `strategy`, dropped `kind/language/filePath`.
+  - **B** — `getContextByNameImpl` ordered by `case when name = ? then 0 else 1, rank`; class and constructor share the name → tie broken by FTS `rank`, which picked the constructor. `selectedSymbolId` followed `context.symbol`, disagreeing with the top-ranked candidate.
+  - **C** — `impactHandler.ts` `checkStaleness()` threw `McpError` instead of warning, unlike every other read tool.
+- Resolution: Three-pronged fix.
+  1. **(A)** Extended `getSymbolCandidatesImpl(db, repoId, name, limit, strategy='name', filters)` (`symbolSearch.ts`): intent strategy tokenizes via the shared `extractIntentTokens` and ranks by token coverage; `kind/language/filePath` filters threaded through; `strategy=name` behavior preserved. `graphStore.getSymbolCandidates` + `searchHandler.ts` ranked branch pass `strategy` and filters.
+  2. **(B)** Added a kind-priority ORDER-BY tiebreak (`kindPriorityOrder`) to both FTS and non-FTS branches of `getContextByNameImpl` so `class/interface/struct/method/function` win name ties over `constructor/module/property/variable`. `selectedSymbol` now agrees with `candidates[0]`.
+  3. **(C)** `checkStaleness()` → `staleWarningFor()` returns a `{ note, hint }` object (or null); `find_impact_files` and `get_change_context` embed it as a non-fatal `staleWarning` field instead of throwing. Tool descriptions in `src/index.ts` updated for all three.
+- Verification (2026-06-03):
+  - `npm run typecheck` ✅ · `npm run build` ✅ · `npm run guard:no-llm-runtime` ✅
+  - `node scripts/smoke-test.mjs` ✅ — new regression assertions `RANKED_INTENT_OK` (count 10), `CONTEXT_PACK_KIND_OK` (selected `class`), find_impact_files non-error.
+  - `npm run benchmark:plan:check` ✅ — qualityGate 69.x%, `snapshotRegression` clean.
+  - Live on `wec.be` (stale): **A** → `count:8`; **B** → `selectedSymbol.kind="class"` (line 13); **C** → returns `impactedFiles` + `staleWarning` instead of `McpError`.
+- Residual: controller classes can still show empty `callers/callees` when they are entry points reached via routing/DI rather than CALLS edges — that is a graph-coverage characteristic, not the selection bug (which is fixed).
+- Tracking URL: `D:/1.SourceCode/mcp-local/codebase-index-mcp/mcp-codebase-index-issue-registry.md#mcp-issue-011`

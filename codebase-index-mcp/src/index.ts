@@ -364,7 +364,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: "search_symbols",
-        description: "Search symbols across all repos or a specific repo. strategy=name is strict name/signature matching; strategy=intent uses broader tokenized matching. Use ranked=true to get scored/ranked candidates when a name may map to multiple symbols.",
+        description: "Search symbols across all repos or a specific repo. strategy=name is strict name/signature matching; strategy=intent uses broader tokenized matching (multi-word natural-language queries work, e.g. 'send notification email'). ranked=true returns scored/ranked candidates and honors strategy (intent tokenizes the query) plus the kind/language/filePath filters.",
         inputSchema: {
           type: "object",
           additionalProperties: false,
@@ -416,7 +416,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: "find_impact_files",
-        description: "Scope blast radius for a file change. view='files' (default): which files import/call symbols in this file. view='surface': which external symbols call into this file. Use before refactor_replace_preview to scope the change. profile='nano' for top-10 count, 'compact' (default) for full list.",
+        description: "Scope blast radius for a file change. view='files' (default): which files import/call symbols in this file. view='surface': which external symbols call into this file. Use before refactor_replace_preview to scope the change. profile='nano' for top-10 count, 'compact' (default) for full list. A stale index (indexed commit ≠ HEAD) is reported as a non-fatal `staleWarning` field in the response, not an error — re-index for exact results.",
         inputSchema: {
           type: "object",
           additionalProperties: false,
@@ -433,7 +433,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: "get_change_context",
-        description: "Get callers (BFS up to depth), callees, and type deps for a symbol. Accepts symbolId or name (one required). Use profile=nano for ultra-compact, compact to reduce payload during planning, standard for balanced, verbose for debugging.",
+        description: "Get callers (BFS up to depth), callees, and type deps for a symbol. Accepts symbolId or name (one required). Use profile=nano for ultra-compact, compact to reduce payload during planning, standard for balanced, verbose for debugging. A stale index (indexed commit ≠ HEAD) is reported as a non-fatal `staleWarning` field in the response, not an error.",
         inputSchema: {
           type: "object",
           additionalProperties: false,
@@ -493,7 +493,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: "get_symbol_context_pack",
-        description: "Single-call planning pack for a symbol name: ranked candidates + callers + callees + importers + change-context. Use this instead of get_change_context when you need symbol detail without deep caller traversal. Use profile='compact' (default) or 'nano' in Plan mode.",
+        description: "Single-call planning pack for a symbol name: ranked candidates + callers + callees + importers + change-context. When a name resolves to several symbols (e.g. a class and its same-named constructor), the substantive symbol (class/interface/method) is selected for the context, so callers/importers are meaningful. Use this instead of get_change_context when you need symbol detail without deep caller traversal. Use profile='compact' (default) or 'nano' in Plan mode.",
         inputSchema: {
           type: "object",
           additionalProperties: false,
