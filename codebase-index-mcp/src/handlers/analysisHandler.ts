@@ -28,14 +28,20 @@ export function handleDeadCodeScan(
   );
   const rows = scan.candidates;
 
+  // No candidates and nothing suppressed → likely thin graph coverage, not a clean bill of health.
+  const emptyHint =
+    rows.length === 0 && scan.suppressed.total === 0
+      ? { hint: "no dead-code candidates and nothing suppressed — this can also mean call/import edges are unresolved; cross-check a suspect symbol with get_call_chain or find_entry_points before assuming all code is live." }
+      : {};
+
   if (profile === "nano") {
     const topSymbols = rows.slice(0, 10).map((x) => ({ name: x.name, kind: x.kind, filePath: x.filePath, line: x.line }));
-    return ctx.asText({ repoId: args.repoId, count: rows.length, topSymbols, hasMore: rows.length > topSymbols.length, suppressed: scan.suppressed, scanPolicy: scan.scanPolicy }, profile);
+    return ctx.asText({ repoId: args.repoId, count: rows.length, topSymbols, hasMore: rows.length > topSymbols.length, suppressed: scan.suppressed, scanPolicy: scan.scanPolicy, ...emptyHint }, profile);
   }
   if (profile === "compact") {
-    return ctx.asText({ repoId: args.repoId, count: rows.length, suppressed: scan.suppressed, scanPolicy: scan.scanPolicy, symbols: rows.map((x) => ({ symbolId: x.symbolId, name: x.name, kind: x.kind, filePath: x.filePath, line: x.line, deadReason: x.deadReason })) }, profile);
+    return ctx.asText({ repoId: args.repoId, count: rows.length, suppressed: scan.suppressed, scanPolicy: scan.scanPolicy, symbols: rows.map((x) => ({ symbolId: x.symbolId, name: x.name, kind: x.kind, filePath: x.filePath, line: x.line, deadReason: x.deadReason })), ...emptyHint }, profile);
   }
-  return ctx.asText({ repoId: args.repoId, count: rows.length, suppressed: scan.suppressed, scanPolicy: scan.scanPolicy, symbols: rows }, profile);
+  return ctx.asText({ repoId: args.repoId, count: rows.length, suppressed: scan.suppressed, scanPolicy: scan.scanPolicy, symbols: rows, ...emptyHint }, profile);
 }
 
 // ── detect_circular_dependencies ─────────────────────────────────────────────
@@ -80,12 +86,17 @@ export function handleFindEntryPoints(
 ): CallToolResult {
   const profile = resolveResponseProfile(args.profile as Parameters<typeof resolveResponseProfile>[0]);
   const entries = ctx.store.findEntryPoints(args.repoId, args.filePathPrefix ?? null, args.kind ?? null, args.limit);
+  const runtimeEntryPoints = entries.filter((e) => e.entryReason === "bootstrap_file");
+  const graphEntryPoints = entries.filter((e) => e.entryReason === "uncalled_symbol");
+  // `entryPoints` is just runtime+graph concatenated; drop the duplicate in token-lean profiles
+  // (nano/compact) and keep it only in standard/verbose for backward compatibility.
+  const includeFlat = profile === "standard" || profile === "verbose";
   return ctx.asText({
     repoId: args.repoId,
     total: entries.length,
-    runtimeEntryPoints: entries.filter((e) => e.entryReason === "bootstrap_file"),
-    graphEntryPoints: entries.filter((e) => e.entryReason === "uncalled_symbol"),
-    entryPoints: entries
+    runtimeEntryPoints,
+    graphEntryPoints,
+    ...(includeFlat && { entryPoints: entries })
   }, profile);
 }
 
@@ -96,7 +107,31 @@ export function handleFindImplementations(
   ctx: HandlerContext
 ): CallToolResult {
   const profile = resolveResponseProfile(args.profile as Parameters<typeof resolveResponseProfile>[0]);
-  return ctx.asText(ctx.store.findImplementations(args.repoId, args.interfaceName, args.limit), profile);
+  const rows = ctx.store.findImplementations(args.repoId, args.interfaceName, args.limit);
+
+  // When no implementations resolve, surface similar indexed interface names as hints.
+  // Covers typos and C#-only gating (e.g. querying a TS type, or "IUserRepo" vs "IUserRepository").
+  const didYouMean: string[] =
+    rows.length === 0 ? ctx.store.findSimilarInterfaceNames(args.repoId, args.interfaceName, 10) : [];
+  const emptyHint =
+    rows.length === 0
+      ? {
+          hint: "no implementations found — IMPLEMENTS edges require C# indexing; verify the interface name (see didYouMean) or that the repo contains C# implementations.",
+          didYouMean
+        }
+      : {};
+
+  if (profile === "nano") {
+    const top = rows.slice(0, 10).map((x) => ({ name: x.name, kind: x.kind, filePath: x.filePath, line: x.line }));
+    return ctx.asText(
+      { repoId: args.repoId, interfaceName: args.interfaceName, count: rows.length, top, hasMore: rows.length > top.length, ...emptyHint },
+      profile
+    );
+  }
+  return ctx.asText(
+    { repoId: args.repoId, interfaceName: args.interfaceName, count: rows.length, implementations: rows, ...emptyHint },
+    profile
+  );
 }
 
 // ── link_tests_to_source ──────────────────────────────────────────────────────
@@ -108,12 +143,18 @@ export function handleLinkTestsToSource(
   const { store } = ctx;
   const profile = resolveResponseProfile(args.profile as Parameters<typeof resolveResponseProfile>[0]);
   const links = store.linkTestsToSource(args.repoId, args.filePath ?? null, args.limit, args.maxCandidates, args.minScore);
+
+  const emptyHint =
+    links.length === 0
+      ? { hint: "no test→source links found — the repo may have no indexed test files, tests may use a naming/folder convention the heuristics miss, or scores fell below minScore; try lowering minScore or passing an explicit test filePath." }
+      : {};
+
   if (profile === "nano") {
     const topLinks = links.slice(0, 10).map((x) => ({ testFile: x.testFile, sourceFile: x.sourceFile, score: x.score }));
-    return ctx.asText({ repoId: args.repoId, count: links.length, topLinks, hasMore: links.length > topLinks.length }, profile);
+    return ctx.asText({ repoId: args.repoId, count: links.length, topLinks, hasMore: links.length > topLinks.length, ...emptyHint }, profile);
   }
   if (profile === "compact") {
-    return ctx.asText({ repoId: args.repoId, count: links.length, links: links.map((x) => ({ testFile: x.testFile, sourceFile: x.sourceFile, score: x.score, reasons: x.reasons })) }, profile);
+    return ctx.asText({ repoId: args.repoId, count: links.length, links: links.map((x) => ({ testFile: x.testFile, sourceFile: x.sourceFile, score: x.score, reasons: x.reasons })), ...emptyHint }, profile);
   }
-  return ctx.asText({ repoId: args.repoId, count: links.length, links }, profile);
+  return ctx.asText({ repoId: args.repoId, count: links.length, links, ...emptyHint }, profile);
 }

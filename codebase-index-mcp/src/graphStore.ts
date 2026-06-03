@@ -33,7 +33,8 @@ import {
   getDeadCodeCandidates as getDeadCodeCandidatesImpl,
   detectCircularDependencies as detectCircularDependenciesImpl,
   findEntryPoints as findEntryPointsImpl,
-  findImplementations as findImplementationsImpl
+  findImplementations as findImplementationsImpl,
+  findSimilarInterfaceNames as findSimilarInterfaceNamesImpl
 } from "./staticAnalyzer.js";
 import {
   upsertDocsImpl,
@@ -1085,6 +1086,14 @@ export class GraphStore {
     limit: number
   ): { symbolId: string; name: string; kind: string; filePath: string; line: number; signature: string | null }[] {
     return findImplementationsImpl(this.db, repoId, interfaceName, limit);
+  }
+
+  /**
+   * Suggest indexed interface names similar to a given name (for find_implementations
+   * "did you mean" hints when an exact lookup returns no implementations).
+   */
+  findSimilarInterfaceNames(repoId: string, interfaceName: string, limit: number): string[] {
+    return findSimilarInterfaceNamesImpl(this.db, repoId, interfaceName, limit);
   }
 
   /**

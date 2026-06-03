@@ -302,6 +302,30 @@ export function findImplementations(
   return rows.slice(0, limit);
 }
 
+/**
+ * Suggest indexed interface names similar to a (likely mistyped or unindexed) name.
+ * Used by find_implementations to surface a "did you mean" list when an exact match
+ * yields zero implementations — mirrors findSimilarPackageContractIds for packages.
+ * Matches case-insensitively on substring (covers prefix/suffix/typo-adjacent names).
+ */
+export function findSimilarInterfaceNames(
+  db: Database.Database,
+  repoId: string,
+  interfaceName: string,
+  limit: number
+): string[] {
+  const needle = `%${interfaceName.trim()}%`;
+  const rows = db
+    .prepare(
+      `select distinct name from symbols
+       where repo_id = ? and kind = 'interface' and name like ? collate nocase and name != ?
+       order by length(name), name
+       limit ?`
+    )
+    .all(repoId, needle, interfaceName, limit) as { name: string }[];
+  return rows.map((r) => r.name);
+}
+
 export function detectCircularDependencies(
   db: Database.Database,
   repoId: string,

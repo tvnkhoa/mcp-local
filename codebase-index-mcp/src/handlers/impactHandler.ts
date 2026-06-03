@@ -310,18 +310,24 @@ export function handleRouteMap(
   const { store } = ctx;
   const profile = resolveResponseProfile(args.profile as Parameters<typeof resolveResponseProfile>[0]);
   const routes = store.getRouteMap(args.repoId, args.filePathPrefix ?? null, args.httpMethod ?? null, args.limit);
+
+  const emptyHint =
+    routes.length === 0
+      ? { hint: "no routes found — route_map only extracts ASP.NET C# attribute routing ([Route]/[HttpGet]/...); non-C# repos and convention/Minimal-API routing won't appear here. Try search_symbols or find_entry_points(kind='route_handler')." }
+      : {};
+
   if (profile === "nano") {
     const topRoutes = routes.slice(0, 10).map((r) => ({ method: r.httpMethod, route: r.routeTemplate, handlerName: r.handlerName, filePath: r.filePath }));
-    return ctx.asText({ repoId: args.repoId, count: routes.length, topRoutes, hasMore: routes.length > topRoutes.length }, profile);
+    return ctx.asText({ repoId: args.repoId, count: routes.length, topRoutes, hasMore: routes.length > topRoutes.length, ...emptyHint }, profile);
   }
   if (profile === "compact") {
-    return ctx.asText({ repoId: args.repoId, count: routes.length, routes: routes.map((r) => ({ filePath: r.filePath, controllerName: r.controllerName, handlerName: r.handlerName, httpMethod: r.httpMethod, routeTemplate: r.routeTemplate, line: r.line })) }, profile);
+    return ctx.asText({ repoId: args.repoId, count: routes.length, routes: routes.map((r) => ({ filePath: r.filePath, controllerName: r.controllerName, handlerName: r.handlerName, httpMethod: r.httpMethod, routeTemplate: r.routeTemplate, line: r.line })), ...emptyHint }, profile);
   }
   if (profile === "verbose") {
     const byMethod = routes.reduce<Record<string, number>>((acc, row) => { acc[row.httpMethod] = (acc[row.httpMethod] ?? 0) + 1; return acc; }, {});
-    return ctx.asText({ repoId: args.repoId, count: routes.length, routes, summary: { byMethod } }, profile);
+    return ctx.asText({ repoId: args.repoId, count: routes.length, routes, summary: { byMethod }, ...emptyHint }, profile);
   }
-  return ctx.asText({ repoId: args.repoId, count: routes.length, routes }, profile);
+  return ctx.asText({ repoId: args.repoId, count: routes.length, routes, ...emptyHint }, profile);
 }
 
 // ── query_graph ───────────────────────────────────────────────────────────────
@@ -384,7 +390,22 @@ export function handleQueryDocs(
   }
   const { store } = ctx;
   const profile = resolveResponseProfile(args.profile as Parameters<typeof resolveResponseProfile>[0]);
-  if (args.mode === "search") return ctx.asText(store.searchDocs(args.repoId, args.query!, args.limit), profile);
+  if (args.mode === "search") {
+    // Always return a keyed object (stable shape regardless of result count), attaching a
+    // docs-lane hint only when empty — mirrors the find_implementations wrapper convention.
+    const results = store.searchDocs(args.repoId, args.query!, args.limit);
+    return ctx.asText(
+      {
+        repoId: args.repoId,
+        mode: "search",
+        query: args.query,
+        count: results.length,
+        results,
+        ...(results.length === 0 && { hint: "no documentation matched — ensure the docs lane was indexed for this repo (index_repository with docsMode='on') and try broader query terms." })
+      },
+      profile
+    );
+  }
   if (args.mode === "stale") return ctx.asText(store.findStaleDocs(args.repoId, args.symbolIds!), profile);
   return ctx.asText(store.findDocCoverage(args.repoId, args.filePath!), profile);
 }

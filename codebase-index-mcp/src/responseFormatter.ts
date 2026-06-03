@@ -12,7 +12,7 @@ export function resolveResponseProfile(profile: ResponseProfile, compact?: boole
 // Scalar string fields that hold a filesystem path → backslashes normalized to POSIX "/".
 const PATH_KEYS = new Set([
   "filePath", "fromFilePath", "toFilePath", "callerFile", "calleeFile",
-  "sourceFile", "testFile", "repoPath", "dbPath", "folderPath"
+  "sourceFile", "testFile", "repoPath", "dbPath", "folderPath", "headingPath"
 ]);
 
 // Array fields whose string elements are paths → each element normalized.

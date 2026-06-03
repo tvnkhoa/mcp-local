@@ -335,6 +335,10 @@ async function main() {
   if (!routeMapJson || !Array.isArray(routeMapJson.routes)) {
     throw new Error("route_map(compact) missing routes array");
   }
+  // This TS repo has no ASP.NET routes → empty result must carry an actionable hint.
+  if (routeMapJson.count === 0 && typeof routeMapJson.hint !== "string") {
+    throw new Error("route_map(compact) returned 0 routes without an actionable hint");
+  }
   console.log("ROUTE_MAP_COUNT:", routeMapJson.count);
 
   const queryGraph = await client.callTool({
@@ -510,6 +514,71 @@ async function main() {
     throw new Error(`find_impact_files(nano) response too large (${nanoProfileBytes} bytes) — expected < 8KB for nano mode`);
   }
   console.log("NANO_PROFILE_SANITY:", { tool: "find_impact_files", totalFiles: nanoFindImpactJson.totalFiles, nanoBytes: nanoProfileBytes });
+
+  // ── Enhanced empty-result / shape contracts ──────────────────────────────
+  // find_implementations: unknown interface → wrapped object (not bare array) + hint + didYouMean.
+  const findImpl = await client.callTool({
+    name: "find_implementations",
+    arguments: { repoId, interfaceName: "IDefinitelyDoesNotExist__SmokeTest", profile: "compact" }
+  });
+  const findImplJson = readJsonTextContent(findImpl).json;
+  if (!findImplJson || Array.isArray(findImplJson)) {
+    throw new Error("find_implementations should return a wrapped object, not a bare array");
+  }
+  if (findImplJson.count !== 0 || !Array.isArray(findImplJson.implementations)) {
+    throw new Error("find_implementations(unknown) missing count:0 / implementations array");
+  }
+  if (typeof findImplJson.hint !== "string" || !Array.isArray(findImplJson.didYouMean)) {
+    throw new Error("find_implementations(unknown) missing hint / didYouMean on empty result");
+  }
+  console.log("FIND_IMPL_EMPTY_HINT_OK:", { interfaceName: findImplJson.interfaceName, count: findImplJson.count });
+
+  // link_tests_to_source: when no links resolve, must carry a hint.
+  if (testSourceLinksJson.count === 0 && typeof testSourceLinksJson.hint !== "string") {
+    throw new Error("link_tests_to_source returned 0 links without an actionable hint");
+  }
+
+  // find_entry_points: compact profile drops the redundant flat `entryPoints` field.
+  const entryPointsCompact = await client.callTool({
+    name: "find_entry_points",
+    arguments: { repoId, limit: 20, profile: "compact" }
+  });
+  const entryPointsCompactJson = readJsonTextContent(entryPointsCompact).json;
+  if (!entryPointsCompactJson || !Array.isArray(entryPointsCompactJson.runtimeEntryPoints)) {
+    throw new Error("find_entry_points(compact) missing runtimeEntryPoints array");
+  }
+  if ("entryPoints" in entryPointsCompactJson) {
+    throw new Error("find_entry_points(compact) should omit the redundant flat entryPoints field");
+  }
+  const entryPointsStandard = await client.callTool({
+    name: "find_entry_points",
+    arguments: { repoId, limit: 20, profile: "standard" }
+  });
+  const entryPointsStandardJson = readJsonTextContent(entryPointsStandard).json;
+  if (!entryPointsStandardJson || !Array.isArray(entryPointsStandardJson.entryPoints)) {
+    throw new Error("find_entry_points(standard) should retain the flat entryPoints field for back-compat");
+  }
+  console.log("ENTRY_POINTS_DEDUP_OK:", { total: entryPointsCompactJson.total });
+
+  // query_docs: docs lane may be disabled in this env (returns an isError result, not a throw).
+  // When enabled, search must return a stable keyed object whose headingPaths are POSIX-normalized.
+  const queryDocs = await client.callTool({
+    name: "query_docs",
+    arguments: { repoId, mode: "search", query: "refactor", limit: 10 }
+  });
+  const { text: queryDocsText, json: queryDocsJson } = readJsonTextContent(queryDocs);
+  if (queryDocs.isError || queryDocsText.includes("docs lane is disabled")) {
+    console.log("SKIP: query_docs path assertion (docs lane disabled)");
+  } else {
+    if (!queryDocsJson || !Array.isArray(queryDocsJson.results) || typeof queryDocsJson.count !== "number") {
+      throw new Error("query_docs(search) should return a keyed object with count + results array");
+    }
+    const offending = queryDocsJson.results.find((d) => typeof d?.headingPath === "string" && d.headingPath.includes("\\"));
+    if (offending) {
+      throw new Error(`query_docs headingPath not POSIX-normalized: ${offending.headingPath}`);
+    }
+    console.log("QUERY_DOCS_PATH_OK:", { rows: queryDocsJson.results.length });
+  }
 
   await client.close();
 }
