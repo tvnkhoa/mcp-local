@@ -239,8 +239,8 @@ export class GraphStore {
     );
     this.stmtInsertSymbol = this.db.prepare(
       `
-      insert into symbols (repo_id, symbol_id, file_path, name, kind, line, signature, parent_symbol_id)
-      values (@repoId, @symbolId, @filePath, @name, @kind, @line, @signature, @parentSymbolId)
+      insert into symbols (repo_id, symbol_id, file_path, name, kind, line, end_line, signature, parent_symbol_id)
+      values (@repoId, @symbolId, @filePath, @name, @kind, @line, @endLine, @signature, @parentSymbolId)
       `
     );
     this.stmtDeleteRoutesForFile = this.db.prepare(
@@ -401,6 +401,7 @@ export class GraphStore {
         try {
           this.stmtInsertSymbol.run({
             ...row,
+            endLine: row.endLine ?? null,
             signature: row.signature ?? null,
             parentSymbolId: row.parentSymbolId ?? null
           });
@@ -1057,6 +1058,14 @@ export class GraphStore {
     return getSymbolCandidatesImpl(this.db, repoId, name, limit, strategy, filters);
   }
 
+  /** Start line of the next symbol in the same file after `afterLine` — used to estimate a symbol's end when `end_line` is absent (pre-end-line indexes). */
+  getNextSymbolStartLine(repoId: string, filePath: string, afterLine: number): number | null {
+    const row = this.db
+      .prepare(`select min(line) as nextLine from symbols where repo_id = ? and file_path = ? and line > ?`)
+      .get(repoId, filePath, afterLine) as { nextLine: number | null } | undefined;
+    return row?.nextLine ?? null;
+  }
+
   getFolderSummary(repoId: string, folderPath: string, maxFiles: number): { folderPath: string; totalFiles: number; directFiles: number; subfolders: string[]; files: { filePath: string; language: string | null; symbolCount: number; exportedCount: number; callerCount: number }[] } {
     return getFolderSummaryImpl(this.db, repoId, folderPath, maxFiles);
   }
@@ -1138,6 +1147,10 @@ export class GraphStore {
     // Add parent_symbol_id column to symbols if missing (ISSUE-004: qualified property edge resolution)
     if (!symbolsCols.some((c) => c.name === "parent_symbol_id")) {
       this.db.exec("alter table symbols add column parent_symbol_id text");
+    }
+    // Add end_line column to symbols if missing (MCP-ISSUE-012: source-span retrieval via get_symbol_source)
+    if (!symbolsCols.some((c) => c.name === "end_line")) {
+      this.db.exec("alter table symbols add column end_line integer");
     }
 
     // Refresh symbols_fts if it doesn't have the signature column yet
@@ -1442,6 +1455,7 @@ export class GraphStore {
         name text not null,
         kind text not null,
         line integer not null,
+        end_line integer,
         signature text,
         parent_symbol_id text,
         primary key (repo_id, symbol_id)

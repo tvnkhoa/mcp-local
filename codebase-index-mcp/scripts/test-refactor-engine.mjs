@@ -11,7 +11,7 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { validateAllowedTables } from "../dist/sqliteGuardrails.js";
-import { mkdtempSync, writeFileSync, rmSync, mkdirSync } from "fs";
+import { mkdtempSync, writeFileSync, readFileSync, rmSync, mkdirSync } from "fs";
 import { tmpdir } from "os";
 import { join, resolve } from "path";
 
@@ -597,7 +597,78 @@ public sealed class FixtureNoRewrite
     JSON.stringify(compilerAssistNoMatchJson?.diagnostics ?? null).slice(0, 300)
   );
 
-  await client.close();
+  // ── 3.11 regex findMode with capture-group substitution ──
+  console.log("\n  [3.11] regex findMode substitutes capture groups...");
+  const regexPreview = await client.callTool({
+    name: "refactor_replace_preview",
+    arguments: {
+      repoId: testRepoId,
+      find: "old(\\w+)Name",
+      replaceExpression: "renamed$1",
+      findMode: "regex",
+      scope: { includePaths: ["src"] },
+      guards: {},
+      mode: "text",
+      ambiguityThresholdPercent: 100
+    }
+  });
+  const regexPreviewJson = readJson(regexPreview);
+  assert(regexPreviewJson?.totalMatches > 0, "regex preview finds matches", JSON.stringify(regexPreviewJson ?? null).slice(0, 200));
+  const regexHunks = (regexPreviewJson?.groupedPreviewHunks ?? []).flatMap((g) => g.hunks ?? []);
+  assert(
+    regexHunks.some((h) => (h.afterText ?? "").includes("renamedFunction")),
+    "regex capture-group substitution → renamedFunction",
+    JSON.stringify(regexHunks).slice(0, 300)
+  );
+
+  const badRegex = await client.callTool({
+    name: "refactor_replace_preview",
+    arguments: { repoId: testRepoId, find: "ab(c", replaceExpression: "x", findMode: "regex", scope: {}, guards: {} }
+  });
+  assert(readTextContent(badRegex).includes("invalid regex"), "invalid regex pattern → clean error", readTextContent(badRegex).slice(0, 200));
+
+  // ── 3.12 rename_assist emitPreview → apply → rollback (executable rename) ──
+  console.log("\n  [3.12] rename_assist emitPreview executable round-trip...");
+  const symSearch = await client.callTool({
+    name: "search_symbols",
+    arguments: { repoId: testRepoId, query: "oldFunctionName", ranked: true, limit: 1 }
+  });
+  const symId = readJson(symSearch)?.candidates?.[0]?.symbolId;
+  assert(symId, "resolved symbolId for rename target", readTextContent(symSearch).slice(0, 200));
+
+  if (symId) {
+    const renamePreview = await client.callTool({
+      name: "rename_assist",
+      arguments: { repoId: testRepoId, symbolId: symId, newName: "freshFunctionName", emitPreview: true, profile: "standard" }
+    });
+    const renamePreviewJson = readJson(renamePreview);
+    assert(
+      renamePreviewJson?.previewId && renamePreviewJson?.approvalToken,
+      "rename emitPreview returns an applyable preview",
+      JSON.stringify(renamePreviewJson ?? null).slice(0, 200)
+    );
+    assert(renamePreviewJson?.totalMatches > 0, "rename preview matches the identifier");
+
+    if (renamePreviewJson?.previewId && renamePreviewJson?.approvalToken) {
+      const renameApply = await client.callTool({
+        name: "refactor_replace_apply",
+        // top-level identifiers have no enclosing owner type → confidence < 0.8, so opt in to low-confidence
+        arguments: { previewId: renamePreviewJson.previewId, approvalToken: renamePreviewJson.approvalToken, includeLowConfidence: true }
+      });
+      const renameApplyJson = readJson(renameApply);
+      const afterApply = readFileSync(fileAPath, "utf8");
+      assert(afterApply.includes("freshFunctionName"), "rename apply rewrote the identifier on disk", afterApply.slice(0, 120));
+
+      if (renameApplyJson?.rollbackId) {
+        await client.callTool({ name: "refactor_replace_rollback", arguments: { rollbackId: renameApplyJson.rollbackId } });
+        const afterRollback = readFileSync(fileAPath, "utf8");
+        assert(afterRollback.includes("oldFunctionName"), "rollback restored the original identifier");
+      }
+    }
+  }
+
+  // Best-effort close; don't let a lingering child stdio handle block the summary/exit.
+  await Promise.race([client.close().catch(() => {}), new Promise((r) => setTimeout(r, 3000))]);
 
 } finally {
   // Cleanup temp dir
@@ -611,6 +682,4 @@ public sealed class FixtureNoRewrite
 console.log(`\n${"─".repeat(50)}`);
 console.log(`Results: ${passed} passed, ${failed} failed`);
 
-if (failed > 0) {
-  process.exit(1);
-}
+process.exit(failed > 0 ? 1 : 0);

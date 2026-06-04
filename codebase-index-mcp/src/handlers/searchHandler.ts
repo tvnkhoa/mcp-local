@@ -3,11 +3,13 @@ import { McpError, ErrorCode } from "@modelcontextprotocol/sdk/types.js";
 import {
   parseGitBlamePorcelain,
   redactEmail,
-  getRepoStaleness
+  getRepoStaleness,
+  buildStaleWarning
 } from "../gitHelpers.js";
 import { runGit } from "../gitHelpers.js";
 import { resolveResponseProfile } from "../responseFormatter.js";
 import { formatChangeContextPayload } from "./impactHandler.js";
+import { assertSafeRepoFilePath, safeReadText } from "../refactorUtils.js";
 import type { HandlerContext } from "./handlerContext.js";
 
 // ── search_symbols ────────────────────────────────────────────────────────────
@@ -162,4 +164,71 @@ export function handleGetSymbolBlame(
   }
 
   return ctx.asText({ repoId: args.repoId, symbol, blame: { commit: parsed.commit, author: parsed.author, authorMail, authorTime: parsed.authorTime, summary: parsed.summary } }, profile);
+}
+
+// ── get_symbol_source ───────────────────────────────────────────────────────────
+
+export function handleGetSymbolSource(
+  args: { repoId: string; symbolId?: string; name?: string; contextLines: number; maxLines: number; profile: string },
+  ctx: HandlerContext
+): CallToolResult {
+  const { store } = ctx;
+  const profile = resolveResponseProfile(args.profile as Parameters<typeof resolveResponseProfile>[0]);
+
+  let symbolId = args.symbolId;
+  if (!symbolId && args.name) {
+    symbolId = store.getSymbolCandidates(args.repoId, args.name, 1)[0]?.symbolId;
+  }
+  if (!symbolId) throw new McpError(ErrorCode.InvalidParams, "get_symbol_source: provide symbolId or a resolvable name.");
+
+  const symbol = store.getSymbolDetail(args.repoId, symbolId, 1).symbol;
+  if (!symbol) throw new McpError(ErrorCode.InvalidParams, `get_symbol_source: symbol '${symbolId}' not found in repo '${args.repoId}'.`);
+
+  const repo = store.getRepository(args.repoId);
+  if (!repo) throw new McpError(ErrorCode.InvalidParams, `get_symbol_source: unknown repoId '${args.repoId}'. Run index_repository first.`);
+
+  const absolute = assertSafeRepoFilePath(repo.repoPath, symbol.filePath.replace(/\\/g, "/"));
+  const content = safeReadText(absolute);
+  if (!content) throw new McpError(ErrorCode.InvalidRequest, `get_symbol_source: unable to read ${symbol.filePath} (file missing or empty on disk).`);
+  const lines = content.split(/\r?\n/);
+
+  const symbolStartLine = symbol.line;
+  // Prefer the persisted end_line; fall back to the next symbol's start line, then a bounded window.
+  let symbolEndLine = symbol.endLine ?? null;
+  let endLineEstimated = false;
+  if (!symbolEndLine || symbolEndLine < symbolStartLine) {
+    endLineEstimated = true;
+    const next = store.getNextSymbolStartLine(args.repoId, symbol.filePath, symbolStartLine);
+    symbolEndLine = next && next - 1 >= symbolStartLine ? next - 1 : Math.min(lines.length, symbolStartLine + 200);
+  }
+
+  const from = Math.max(1, symbolStartLine - args.contextLines);
+  let to = Math.min(lines.length, symbolEndLine + args.contextLines);
+  let truncated = false;
+  if (to - from + 1 > args.maxLines) {
+    to = from + args.maxLines - 1;
+    truncated = true;
+  }
+  const source = lines.slice(from - 1, to).join("\n");
+
+  const staleWarning = buildStaleWarning(args.repoId, store, "line numbers may be off vs current HEAD — re-index for an exact span.");
+
+  return ctx.asText(
+    {
+      symbolId: symbol.symbolId,
+      name: symbol.name,
+      kind: symbol.kind,
+      filePath: symbol.filePath,
+      symbolStartLine,
+      symbolEndLine,
+      endLineEstimated,
+      startLine: from,
+      endLine: to,
+      lineCount: to - from + 1,
+      truncated,
+      source,
+      ...(staleWarning && { staleWarning })
+    },
+    profile
+  );
 }

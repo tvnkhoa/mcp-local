@@ -113,7 +113,7 @@ npm run build
 node scripts/test-refactor-engine.mjs
 ```
 
-Regression suite must show `N passed, 0 failed`. Current baseline: 36 tests.
+Regression suite must show `N passed, 0 failed`. Current baseline: 47 tests.
 
 ### Adding new tree-sitter language support
 
@@ -231,8 +231,15 @@ Default: watchless operation (`CODEBASE_INDEX_WATCH_AUTO_START=false`)
 - MCP-ISSUE-001: C# property edge extraction (✅ resolved)
 - MCP-ISSUE-002: Object initializer migration (✅ resolved)
 - MCP-ISSUE-003: Invalid dotted initializer rewrites (✅ resolved)
-- MCP-ISSUE-004: Partial impact coverage for owned-state refactors
+- MCP-ISSUE-004: Partial impact coverage for owned-state refactors (✅ resolved)
 - MCP-ISSUE-005: Compiler-assisted refactor narrowing (✅ resolved)
+- MCP-ISSUE-006: NuGet/cross-repo type resolution (✅ resolved)
+- MCP-ISSUE-007: Minimal API route extraction (✅ resolved)
+- MCP-ISSUE-008: find_package_consumers did-you-mean hints (✅ resolved)
+- MCP-ISSUE-009: query_graph allowed-table guidance (✅ resolved)
+- MCP-ISSUE-010: incremental prune + branch tracking (✅ resolved)
+- MCP-ISSUE-011: ranked-intent search, context-pack selection, find_impact_files staleWarning (✅ resolved)
+- MCP-ISSUE-012: get_symbol_source + regex refactor mode + executable rename_assist (✅ resolved)
 
 When MCP tools fail to provide sufficient evidence, log new issues with:
 - Scenario, tool attempted, expected vs actual, impact, workaround, enhancement proposal
@@ -276,6 +283,11 @@ When MCP tools fail to provide sufficient evidence, log new issues with:
 2. `index_repository(mode: "incremental", docsMode: "off")` - Code-first indexing
 3. Use `profile: "compact"` on read tools for token efficiency
 4. Re-index incrementally after code changes
+
+**Recommended read/refactor flow (stay in MCP, avoid baseline fallback):**
+1. Read a symbol's code with `get_symbol_source` (by symbolId or name) instead of `read_file` — returns the exact source span from disk. Re-index (full) once so `end_line` is populated for precise spans; otherwise the span is estimated.
+2. Rename: `rename_assist(emitPreview: true)` → `refactor_replace_apply` (add `includeLowConfidence: true` for top-level identifiers) → `refactor_replace_rollback` if needed.
+3. Pattern/signature edits: `refactor_replace_preview(findMode: "regex", ...)` with capture-group substitution (`$1`, `$&`), scoped via `includePaths`.
 
 ## References
 

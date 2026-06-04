@@ -307,6 +307,20 @@ async function main() {
   }
   console.log("CONTEXT_PACK_KIND_OK:", { selected: classPackJson.selectedSymbol.kind });
 
+  // get_symbol_source: raw source span read from disk (end_line persisted via re-index in this run).
+  const symbolSource = await client.callTool({
+    name: "get_symbol_source",
+    arguments: { repoId, name: "GraphStore", profile: "compact" }
+  });
+  const symbolSourceJson = readJsonTextContent(symbolSource).json;
+  if (!symbolSourceJson || typeof symbolSourceJson.source !== "string" || !symbolSourceJson.source.includes("class GraphStore")) {
+    throw new Error("get_symbol_source('GraphStore') did not return source containing 'class GraphStore'");
+  }
+  if (typeof symbolSourceJson.symbolStartLine !== "number" || typeof symbolSourceJson.symbolEndLine !== "number" || symbolSourceJson.symbolEndLine < symbolSourceJson.symbolStartLine) {
+    throw new Error("get_symbol_source returned invalid start/end lines");
+  }
+  console.log("GET_SYMBOL_SOURCE_OK:", { start: symbolSourceJson.symbolStartLine, end: symbolSourceJson.symbolEndLine, estimated: symbolSourceJson.endLineEstimated, lines: symbolSourceJson.lineCount });
+
   const detectChanges = await client.callTool({
     name: "detect_changes",
     arguments: {

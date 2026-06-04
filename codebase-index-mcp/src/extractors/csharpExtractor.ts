@@ -65,6 +65,7 @@ function extractJsonKeySymbols(
       name: targetName,
       kind: "variable",
       line: attrNode.startPosition.row + 1,
+      endLine: (target ?? attrNode).endPosition.row + 1,
       signature: `json_key:${literal}`
     });
   }
@@ -213,7 +214,7 @@ export function extractCSharpSymbolsImpl(
       }
     }
 
-    symbols.push({ repoId: input.repoId, symbolId, filePath: input.filePath, name: nameNode.text, kind, line: node.startPosition.row + 1, signature: extractSignature(node), parentSymbolId });
+    symbols.push({ repoId: input.repoId, symbolId, filePath: input.filePath, name: nameNode.text, kind, line: node.startPosition.row + 1, endLine: node.endPosition.row + 1, signature: extractSignature(node), parentSymbolId });
   }
 
   // Extract json_key symbols from [JsonPropertyName("...")] attributes (ISSUE-005)

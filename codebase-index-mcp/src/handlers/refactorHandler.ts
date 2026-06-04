@@ -21,7 +21,8 @@ import {
   deriveApplyStatus,
   mapPreviewStatusFromApplyStatus,
   assertSafeRepoFilePath,
-  safeReadText
+  safeReadText,
+  escapeRegExp
 } from "../refactorUtils.js";
 import type {
   RefactorScopeInput,
@@ -44,7 +45,7 @@ import type { HandlerContext } from "./handlerContext.js";
 // ── rename_assist ─────────────────────────────────────────────────────────────
 
 export function handleRenameAssist(
-  args: { repoId: string; symbolId: string; newName: string; limit: number; profile: string },
+  args: { repoId: string; symbolId: string; newName: string; limit: number; emitPreview?: boolean; wholeWord?: boolean; profile: string },
   ctx: HandlerContext
 ): CallToolResult {
   const { store } = ctx;
@@ -54,6 +55,32 @@ export function handleRenameAssist(
     throw new McpError(ErrorCode.InvalidParams, `rename_assist: symbol '${args.symbolId}' not found in repo '${args.repoId}'.`);
   }
   const affectedFiles = [...new Set([...result.callers.map((c) => c.fromFilePath).filter(Boolean), ...result.importers.map((i) => i.fromFilePath).filter(Boolean)])] as string[];
+
+  // emitPreview: turn the advisory rename into an applyable refactor preview (previewId + approvalToken)
+  // scoped to the symbol's own file + affected files, matching the identifier on word boundaries.
+  if (args.emitPreview) {
+    const repo = store.getRepository(args.repoId);
+    if (!repo) throw new McpError(ErrorCode.InvalidParams, `rename_assist: unknown repoId '${args.repoId}'. Run index_repository first.`);
+    const wholeWord = args.wholeWord !== false;
+    const includePaths = [...new Set([result.symbol.filePath, ...affectedFiles])];
+    return createReplacePreview(
+      ctx,
+      repo.repoPath,
+      {
+        repoId: args.repoId,
+        find: wholeWord ? `\\b${escapeRegExp(result.symbol.name)}\\b` : result.symbol.name,
+        // escape `$` so an identifier with `$` isn't mistaken for a regex replacement token
+        replaceExpression: args.newName.replace(/\$/g, "$$$$"),
+        findMode: wholeWord ? "regex" : "literal",
+        scope: { includePaths, excludePaths: [], fileGlobs: [] },
+        guards: { symbolKinds: [], allowOwnerTypes: [], disallowOwnerTypes: [], disallowTypeList: [] },
+        mode: "text",
+        ambiguityThresholdPercent: 100
+      },
+      profile
+    );
+  }
+
   const hints = affectedFiles.map((fp) => `In ${fp}: rename '${result.symbol!.name}' → '${args.newName}'`);
   if (profile === "nano") {
     return ctx.asText({ oldName: result.symbol.name, newName: args.newName, symbolId: args.symbolId, affectedFileCount: result.affectedFileCount, affectedFiles }, profile);
@@ -73,28 +100,53 @@ export function handleRenameAssist(
 
 // ── refactor_replace_preview ──────────────────────────────────────────────────
 
+type CreateReplacePreviewArgs = {
+  repoId: string;
+  find: string;
+  replaceExpression: string;
+  findMode: "literal" | "regex";
+  regexFlags?: string;
+  scope: RefactorScopeInput;
+  guards: RefactorGuardsInput;
+  mode: RefactorModeInput;
+  ambiguityThresholdPercent: number;
+  compilerAssist?: RefactorCompilerAssistInput;
+};
+
+/** Validate a regex find pattern in the handler layer (where McpError is available) before engine use. */
+function assertValidRegexMode(findMode: "literal" | "regex", find: string, regexFlags: string | undefined, tool: string): void {
+  if (findMode !== "regex") return;
+  try {
+    new RegExp(find, `g${(regexFlags ?? "").replace(/[^ims]/g, "")}`);
+  } catch (e) {
+    throw new McpError(ErrorCode.InvalidParams, `${tool}: invalid regex pattern — ${(e as Error).message}`);
+  }
+}
+
 export function handleRefactorReplacePreview(
-  args: {
-    repoId: string;
-    find: string;
-    replaceExpression: string;
-    scope: RefactorScopeInput;
-    guards: RefactorGuardsInput;
-    mode: RefactorModeInput;
-    ambiguityThresholdPercent: number;
-    compilerAssist?: RefactorCompilerAssistInput;
-    profile?: string;
-  },
+  args: CreateReplacePreviewArgs & { profile?: string },
   ctx: HandlerContext
 ): CallToolResult {
-  const { store, constants } = ctx;
+  const { store } = ctx;
   const profile = resolveResponseProfile((args.profile ?? "standard") as Parameters<typeof resolveResponseProfile>[0]);
   const repo = store.getRepository(args.repoId);
   if (!repo) {
     throw new McpError(ErrorCode.InvalidParams, `refactor_replace_preview: repo '${args.repoId}' not found. Run index_repository first.`);
   }
+  assertValidRegexMode(args.findMode, args.find, args.regexFlags, "refactor_replace_preview");
+  return createReplacePreview(ctx, repo.repoPath, args, profile);
+}
 
-  const previewResult = buildRefactorPreview(store, repo.repoPath, args.repoId, args.find, args.replaceExpression, args.scope, args.guards, args.mode);
+// Shared preview builder: buildPreview → (optional) compilerAssist → records → save → token → profile-shaped
+// response. Used by refactor_replace_preview and rename_assist(emitPreview=true).
+function createReplacePreview(
+  ctx: HandlerContext,
+  repoPath: string,
+  args: CreateReplacePreviewArgs,
+  profile: ReturnType<typeof resolveResponseProfile>
+): CallToolResult {
+  const { store, constants } = ctx;
+  const previewResult = buildRefactorPreview(store, repoPath, args.repoId, args.find, args.replaceExpression, args.scope, args.guards, args.mode, args.findMode, args.regexFlags);
   const compilerAssistOutcome = args.compilerAssist ? applyCompilerAssistToPreview(previewResult.hunks, args.compilerAssist) : null;
   const effectiveHunks = compilerAssistOutcome?.hunks ?? previewResult.hunks;
   const effectiveAffectedFiles = [...new Set(effectiveHunks.map((x) => x.filePath))].sort((a, b) => a.localeCompare(b));

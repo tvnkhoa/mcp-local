@@ -30,11 +30,12 @@ npm install && npm run build
 |------|-------------|
 | `search_symbols` | Find symbols by name or intent (`strategy: name\|intent`). `ranked=true` scores candidates and honors `strategy` (intent tokenizes multi-word queries) + filters. Start here. |
 | `get_symbol_detail` | Full detail for a known symbolId |
+| `get_symbol_source` | Raw source text span of a symbol read from disk (by symbolId or name) — read exact code without a separate file read. Uses persisted end-line (re-index to populate) or estimates it. |
 | `get_symbol_context_pack` | Symbol + neighbors + callers/callees in one call. Prefer over `get_change_context` when not doing deep caller traversal. |
 | `get_symbol_blame` | Git blame metadata for a symbol |
 | `find_symbol_at_line` | Resolve symbol at a specific file/line |
 | `find_implementations` | Find classes that implement a given interface/type |
-| `rename_assist` | Suggest all sites requiring a rename and flag risks |
+| `rename_assist` | Suggest all sites requiring a rename and flag risks. `emitPreview=true` returns an applyable refactor preview (previewId + approvalToken) to execute the rename directly. |
 
 ### File & Folder Context
 | Tool | Description |
@@ -66,7 +67,7 @@ npm install && npm run build
 ### Refactoring
 | Tool | Description |
 |------|-------------|
-| `refactor_replace_preview` | Preview bulk symbol replacement with HMAC-signed approval token |
+| `refactor_replace_preview` | Preview bulk symbol replacement with HMAC-signed approval token. `findMode='regex'` enables pattern matching + capture-group substitution ($1, $&). |
 | `refactor_replace_apply` | Apply a previewed replacement (requires token from preview) |
 | `refactor_replace_rollback` | Roll back an applied replacement |
 | `refactor_symbol_migration` | Migrate symbol references with optional C# initializer rewrite |
@@ -110,7 +111,7 @@ All read tools that return symbol or edge lists support `profile`:
 
 All paths in responses are normalized to forward slashes (`src/foo.ts`) regardless of host OS. `compact` is now the default for every read tool, including `get_symbol_detail`, `get_folder_summary`, `query_docs`, `find_entry_points`, `find_implementations`, and `find_symbol_at_line` (previously fixed-format). Only `verbose` is pretty-printed; all other profiles emit minified JSON.
 
-Tools with profile support: `search_symbols`, `get_file_context`, `get_change_context`, `get_symbol_context_pack`, `get_file_summary`, `get_symbol_detail`, `find_symbol_at_line`, `find_impact_files`, `get_dependency_graph`, `get_call_chain`, `list_repositories`, `dead_code_scan`, `detect_circular_dependencies`, `detect_changes`, `link_tests_to_source`, `trace_execution_flow`, `rename_assist`, `route_map`, `get_folder_summary`, `query_docs`, `find_entry_points`, `find_implementations`.
+Tools with profile support: `search_symbols`, `get_file_context`, `get_change_context`, `get_symbol_context_pack`, `get_file_summary`, `get_symbol_detail`, `get_symbol_source`, `find_symbol_at_line`, `find_impact_files`, `get_dependency_graph`, `get_call_chain`, `list_repositories`, `dead_code_scan`, `detect_circular_dependencies`, `detect_changes`, `link_tests_to_source`, `trace_execution_flow`, `rename_assist`, `route_map`, `get_folder_summary`, `query_docs`, `find_entry_points`, `find_implementations`.
 
 Refactor tools: `refactor_replace_preview` and `refactor_replace_apply` support `nano` (summary only, no hunk content) and `compact` (hunks without before/after text). Use `nano` to check match count and affected files before requesting hunk detail.
 

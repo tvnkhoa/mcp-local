@@ -119,7 +119,8 @@ import {
   handleFindSymbolAtLine,
   handleGetSymbolDetail,
   handleGetSymbolContextPack,
-  handleGetSymbolBlame
+  handleGetSymbolBlame,
+  handleGetSymbolSource
 } from "./handlers/searchHandler.js";
 import {
   handleGetDependencyGraph,
@@ -214,6 +215,7 @@ const detectCircularDependenciesSchema = schemas.detectCircularDependenciesSchem
 const crossRepoImpactSchema = schemas.crossRepoImpactSchema(MAX_RESULT_LIMIT);
 const findPackageConsumersSchema = schemas.findPackageConsumersSchema(MAX_RESULT_LIMIT);
 const symbolBlameSchema = schemas.symbolBlameSchema;
+const getSymbolSourceSchema = schemas.getSymbolSourceSchema;
 const linkTestsToSourceSchema = schemas.linkTestsToSourceSchema(MAX_RESULT_LIMIT);
 const getFolderSummarySchema = schemas.getFolderSummarySchema(MAX_RESULT_LIMIT);
 const findEntryPointsSchema = schemas.findEntryPointsSchema(MAX_RESULT_LIMIT);
@@ -610,6 +612,23 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
         }
       },
       {
+        name: "get_symbol_source",
+        description: "Return the raw source text span of a symbol (by symbolId or name) read from disk — so you can read the exact code without a separate file read. Uses the persisted end-line when available (re-index to populate), else estimates the span from the next symbol. `contextLines` adds surrounding lines; `maxLines` caps output. A stale index is reported as a non-fatal `staleWarning` (line numbers may differ from HEAD).",
+        inputSchema: {
+          type: "object",
+          additionalProperties: false,
+          required: ["repoId"],
+          properties: {
+            repoId: { type: "string" },
+            symbolId: { type: "string" },
+            name: { type: "string" },
+            contextLines: { type: "integer", minimum: 0, maximum: 50 },
+            maxLines: { type: "integer", minimum: 1, maximum: 2000 },
+            profile: { type: "string", enum: ["nano", "compact", "standard", "verbose"] }
+          }
+        }
+      },
+      {
         name: "link_tests_to_source",
         description: "Link tests to likely source files using deterministic naming heuristics plus IMPORTS/CALLS tracing.",
         inputSchema: {
@@ -737,7 +756,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: "rename_assist",
-        description: "Preview deterministic rename impact for a symbol: returns all callers and importers that will need updating. Read-only — does NOT modify any files. Use before refactoring to understand blast radius.",
+        description: "Rename impact for a symbol: returns all callers and importers that need updating. Default (emitPreview=false) is read-only advisory (hints). Set emitPreview=true to get an applyable refactor preview (previewId + approvalToken) that renames the identifier on word boundaries across the affected files — then call refactor_replace_apply (use includeLowConfidence=true for top-level identifiers, which have no enclosing owner type). Use before refactoring to understand blast radius, or to execute the rename directly.",
         inputSchema: {
           type: "object",
           additionalProperties: false,
@@ -747,13 +766,15 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             symbolId: { type: "string" },
             newName: { type: "string" },
             limit: { type: "integer", minimum: 1, maximum: MAX_RESULT_LIMIT },
+            emitPreview: { type: "boolean", description: "Return an applyable refactor preview instead of read-only hints." },
+            wholeWord: { type: "boolean", description: "Match the identifier on word boundaries (default true)." },
             profile: { type: "string", enum: ["nano", "compact", "standard", "verbose"] }
           }
         }
       },
       {
         name: "refactor_replace_preview",
-        description: "Preview bulk replacements with scope and type-ownership guards. profile='nano' returns only match count + affected files (no hunk content — fastest for blast-radius check). profile='compact' includes hunks without before/after text. profile='standard' (default) returns full hunk content.",
+        description: "Preview bulk replacements with scope and type-ownership guards. findMode='literal' (default) matches `find` as plain text; findMode='regex' treats `find` as a regular expression and supports capture-group substitution ($1, $&) in `replaceExpression` — ideal for signature/param-pattern edits in one pass. profile='nano' returns only match count + affected files (fastest blast-radius check); 'compact' omits before/after text; 'standard' (default) returns full hunk content.",
         inputSchema: {
           type: "object",
           additionalProperties: false,
@@ -762,6 +783,8 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             repoId: { type: "string" },
             find: { type: "string" },
             replaceExpression: { type: "string" },
+            findMode: { type: "string", enum: ["literal", "regex"] },
+            regexFlags: { type: "string", description: "Optional regex flags, subset of i|m|s (g is always applied)." },
             profile: { type: "string", enum: ["nano", "compact", "standard", "verbose"] },
             scope: {
               type: "object",
@@ -1002,6 +1025,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       case "get_symbol_blame": {
         const hArgs = symbolBlameSchema.parse(request.params.arguments ?? {});
         return handleGetSymbolBlame(hArgs, ctx);
+      }
+      case "get_symbol_source": {
+        const hArgs = getSymbolSourceSchema.parse(request.params.arguments ?? {});
+        return handleGetSymbolSource(hArgs, ctx);
       }
       case "link_tests_to_source": {
         const hArgs = linkTestsToSourceSchema.parse(request.params.arguments ?? {});

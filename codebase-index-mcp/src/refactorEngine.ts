@@ -36,6 +36,19 @@ import {
   buildFinalOffsetMap
 } from "./refactorUtils.js";
 
+// Match caps for regex find mode — bound work on pathological patterns / huge repos.
+const REGEX_PER_FILE_MATCH_CAP = 2000;
+const REGEX_GLOBAL_MATCH_CAP = 5000;
+
+/** Expand `$&`, `$1`..`$99`, and `$$` in a regex replacement template against a match. */
+function expandRegexReplacement(template: string, match: RegExpExecArray): string {
+  return template.replace(/\$(\$|&|\d{1,2})/g, (_full, token: string) => {
+    if (token === "$") return "$";
+    if (token === "&") return match[0];
+    return match[Number(token)] ?? "";
+  });
+}
+
 export function buildRefactorPreview(
   store: GraphStore,
   repoPath: string,
@@ -44,7 +57,9 @@ export function buildRefactorPreview(
   replaceText: string,
   scope: RefactorScopeInput,
   guards: RefactorGuardsInput,
-  mode: RefactorModeInput
+  mode: RefactorModeInput,
+  findMode: "literal" | "regex" = "literal",
+  regexFlags?: string
 ): {
   hunks: PreviewCandidateHunk[];
   affectedFiles: string[];
@@ -74,7 +89,13 @@ export function buildRefactorPreview(
   const hunks: PreviewCandidateHunk[] = [];
   const affected = new Set<string>();
 
+  // Compile the regex once when in regex mode (only i/m/s flags honored; `g` is forced).
+  const compiledRegex =
+    findMode === "regex" ? new RegExp(findText, `g${(regexFlags ?? "").replace(/[^ims]/g, "")}`) : null;
+  let totalMatchCount = 0;
+
   for (const filePath of selectedFiles) {
+    if (totalMatchCount >= REGEX_GLOBAL_MATCH_CAP) break;
     const language = inferLanguageFromPath(filePath);
     if (guards.language && language !== guards.language) {
       continue;
@@ -87,31 +108,40 @@ export function buildRefactorPreview(
 
     const content = fs.readFileSync(safeAbsolute, "utf8");
     const fileHashBefore = sha256(content);
-    let cursor = 0;
 
-    while (true) {
-      const start = content.indexOf(findText, cursor);
-      if (start < 0) {
-        break;
+    // Collect raw matches (literal substring, or regex with capture-group substitution).
+    const rawMatches: { start: number; end: number; replacement: string }[] = [];
+    if (compiledRegex) {
+      compiledRegex.lastIndex = 0;
+      let m: RegExpExecArray | null;
+      while ((m = compiledRegex.exec(content)) !== null) {
+        rawMatches.push({ start: m.index, end: m.index + m[0].length, replacement: expandRegexReplacement(replaceText, m) });
+        if (m[0].length === 0) compiledRegex.lastIndex++; // avoid infinite loop on zero-length matches
+        if (rawMatches.length >= REGEX_PER_FILE_MATCH_CAP) break;
       }
-      const end = start + findText.length;
+    } else {
+      let cursor = 0;
+      while (true) {
+        const start = content.indexOf(findText, cursor);
+        if (start < 0) break;
+        rawMatches.push({ start, end: start + findText.length, replacement: replaceText });
+        cursor = start + findText.length;
+      }
+    }
+
+    const fileLines = content.split(/\r?\n/);
+    for (const { start, end, replacement } of rawMatches) {
+      if (totalMatchCount >= REGEX_GLOBAL_MATCH_CAP) break;
       const line = offsetToLine(content, start);
-      const lineText = content.split(/\r?\n/)[line - 1] ?? "";
+      const lineText = fileLines[line - 1] ?? "";
       const ownerType = findOwnerType(content, start);
       const symbolKind = inferSymbolKind(lineText);
 
       if (guards.symbolKinds.length > 0) {
-        if (!symbolKind || !guards.symbolKinds.includes(symbolKind)) {
-          cursor = end;
-          continue;
-        }
+        if (!symbolKind || !guards.symbolKinds.includes(symbolKind)) continue;
       }
-
       if (guards.allowOwnerTypes.length > 0) {
-        if (!ownerType || !guards.allowOwnerTypes.some((x) => x.toLowerCase() === ownerType.toLowerCase())) {
-          cursor = end;
-          continue;
-        }
+        if (!ownerType || !guards.allowOwnerTypes.some((x) => x.toLowerCase() === ownerType.toLowerCase())) continue;
       }
 
       const riskFlags: RefactorRiskFlag[] = [];
@@ -138,7 +168,7 @@ export function buildRefactorPreview(
         startOffset: start,
         endOffset: end,
         beforeText: content.slice(start, end),
-        afterText: replaceText,
+        afterText: replacement,
         ownerType,
         symbolKind,
         confidence,
@@ -146,7 +176,7 @@ export function buildRefactorPreview(
         fileHashBefore
       });
       affected.add(filePath);
-      cursor = end;
+      totalMatchCount++;
     }
   }
 

@@ -303,7 +303,7 @@ export function getSymbolDetailImpl(
   const symbol = db
     .prepare(
       `
-      select repo_id as repoId, symbol_id as symbolId, file_path as filePath, name, kind, line, signature
+      select repo_id as repoId, symbol_id as symbolId, file_path as filePath, name, kind, line, end_line as endLine, signature
       from symbols
       where repo_id = ? and symbol_id = ?
       limit 1

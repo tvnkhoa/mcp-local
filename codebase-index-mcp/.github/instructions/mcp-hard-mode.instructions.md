@@ -94,7 +94,11 @@ Policy in this file uses short aliases. Tool execution must use concrete runtime
    - `watch_repo` -> `mcp_codebase-inde_watch_repo`
    - `search_symbols` -> `mcp_codebase-inde_search_symbols`
    - `get_symbol_context_pack` -> `mcp_codebase-inde_get_symbol_context_pack`
+   - `get_symbol_source` -> `mcp_codebase-inde_get_symbol_source`
    - `find_impact_files` -> `mcp_codebase-inde_find_impact_files`
+   - `rename_assist` -> `mcp_codebase-inde_rename_assist`
+   - `refactor_replace_preview` -> `mcp_codebase-inde_refactor_replace_preview`
+   - `refactor_replace_apply` -> `mcp_codebase-inde_refactor_replace_apply`
    - `get_file_summary` -> `mcp_codebase-inde_get_file_summary`
    - `get_file_context` -> `mcp_codebase-inde_get_file_context`
    - `detect_changes` -> `mcp_codebase-inde_detect_changes`
@@ -144,6 +148,9 @@ Before any baseline tool call, verify and satisfy:
 | Who uses this file | `find_impact_files` view `"files"` | Blast radius grouped by module |
 | What calls into this file | `find_impact_files` view `"surface"` | Caller surface per symbol |
 | File structure + exports | `get_file_summary` | Shows exports, imports, importedBy |
+| Read a symbol's exact code | `get_symbol_source` | Source span from disk by symbolId/name — use INSTEAD of baseline `read_file`; `contextLines` to widen |
+| Bulk pattern / signature edit | `refactor_replace_preview` findMode `"regex"` | Capture-group substitution ($1, $&) in `replaceExpression`; then apply → rollback |
+| Execute a rename | `rename_assist` emitPreview `true` | Returns applyable preview (previewId + token); apply with `includeLowConfidence: true` for top-level identifiers |
 | Dead public symbols | `dead_code_scan` | Entry points wired by runtime/DI may appear dead; manual verify required |
 | Circular deps check | `detect_circular_dependencies` | Fast gate before implementing new dependency |
 | Test ↔ source mapping | `link_tests_to_source` | Use `minScore: 0.7` for reliable results |
@@ -213,7 +220,10 @@ Confidence interpretation standard:
    → one call: candidates + callers + callees + change context
 3. find_impact_files (view: "files", groupBy: "module")
    → blast radius scoped to target file
-4. read_file (targeted, decisive sections only)
+4. get_symbol_source (symbolId or name)
+   → exact source span of the symbol, read from disk via MCP (NOT a baseline read_file).
+     Prefer this to read the code you are about to change; use contextLines to widen.
+5. read_file ONLY for non-symbol regions (config, plain text) get_symbol_source can't target
 ```
 
 ### Orientation flow (new module / unknown codebase area)
@@ -264,6 +274,25 @@ Confidence interpretation standard:
 1. detect_circular_dependencies (mode: "module") → confirm 0 cycles
 2. dead_code_scan (filePathPrefix: "<src path>") → find orphaned publics
    NOTE: runtime-wired symbols may appear "dead"; cross-check bootstrap/registration files before reporting.
+```
+
+### Refactor / rename flow (execute changes inside MCP — do not hand-edit each file)
+```
+Rename a symbol/param:
+1. search_symbols (strategy: "name") → get symbolId
+2. rename_assist (symbolId, newName, emitPreview: true)
+   → returns previewId + approvalToken (word-boundary match across affected files)
+3. refactor_replace_apply (previewId, approvalToken, includeLowConfidence: true)
+   → includeLowConfidence is needed for top-level identifiers (no enclosing owner type)
+4. refactor_replace_rollback (rollbackId)  → if the change must be undone
+
+Pattern / signature edit across many sites:
+1. refactor_replace_preview (findMode: "regex", find: "<pattern>", replaceExpression: "<$1 template>")
+   → regex with capture-group substitution ($1, $&); scope with includePaths to bound it
+2. refactor_replace_apply (previewId, approvalToken)
+3. refactor_replace_rollback (rollbackId) if needed
+
+Prefer this over baseline multi-file find/replace: it is preview-gated, HMAC-approved, and reversible.
 ```
 
 ### Postgres tool check flow (when task touches `postgres-mcp`)
@@ -322,7 +351,8 @@ Operational rule:
 
 | Tool | Limitation | Correct Usage |
 |------|-----------|---------------|
-| `search_symbols` | Natural-language query returns weak/empty results | Use exact identifier tokens |
+| `search_symbols` | Single-token name match is best; long prose still weak | Use identifier tokens. For multi-word intent, `strategy: "intent"` now also works WITH `ranked: true` (returns scored candidates) — previously that combo returned 0 |
+| `find_impact_files` / `get_change_context` | Stale index no longer blocks — returns data + `staleWarning` instead of erroring | No need to pre-re-index; re-index only when the warning matters for accuracy |
 | `trace_execution_flow` | Container-level symbolId can return sparse graph | Resolve callable symbolId first |
 | `get_call_chain` | Same as above | Use callable symbolId |
 | `dead_code_scan` | Runtime-wired symbols may appear dead | Cross-check bootstrap/registration paths before reporting |

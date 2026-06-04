@@ -95,6 +95,8 @@ Only `CODEBASE_INDEX_ALLOWED_ROOTS` (comma-separated absolute paths) is required
 This workspace has `.github/instructions/mcp-hard-mode.instructions.md` as the policy source for how Claude should use its own MCP tools when working in this repo. Key rules:
 
 - **MCP-first**: use `search_symbols` / `get_symbol_context_pack` / `find_impact_files` before baseline grep/read tools for any codebase analysis task
+- **Read code via MCP**: use `get_symbol_source` (by symbolId or name) to read a symbol's exact source span instead of `read_file`; fall back to `read_file` only for non-symbol regions
+- **Refactor via MCP**: `rename_assist(emitPreview:true)` → `refactor_replace_apply` (`includeLowConfidence:true` for top-level identifiers) for renames; `refactor_replace_preview(findMode:"regex")` with capture groups for pattern edits — all preview-gated and reversible via `refactor_replace_rollback`
 - **Registered repoIds**: `codebase-index-mcp` (this repo) and `mcp-local` (parent workspace)
 - **Path normalization**: run `list_repositories` and reuse the exact registered `repoPath` — do not rewrite drive-letter casing or slash style
 - **Watch policy**: keep `watch_repo` off except during active implementation/debug sessions; stop immediately after

@@ -271,6 +271,22 @@ export const symbolBlameSchema = z
     path: ["symbolId"]
   });
 
+// Symbol source span
+export const getSymbolSourceSchema = z
+  .object({
+    repoId: z.string().min(1).max(200),
+    symbolId: z.string().min(1).max(200).optional(),
+    name: z.string().min(1).max(200).optional(),
+    contextLines: z.number().int().min(0).max(50).default(0),
+    maxLines: z.number().int().min(1).max(2000).default(400),
+    profile: responseProfileSchema.default("compact")
+  })
+  .strict()
+  .refine((v) => Boolean(v.symbolId || v.name), {
+    message: "symbolId or name is required",
+    path: ["symbolId"]
+  });
+
 // Link tests to source
 export const linkTestsToSourceSchema = (MAX_RESULT_LIMIT: number) => z
   .object({
@@ -330,6 +346,8 @@ export const renameAssistSchema = (MAX_RESULT_LIMIT: number) => z
     symbolId: z.string().min(1).max(200),
     newName: z.string().min(1).max(200),
     limit: z.number().int().min(1).max(MAX_RESULT_LIMIT).default(50),
+    emitPreview: z.boolean().default(false),
+    wholeWord: z.boolean().default(true),
     profile: responseProfileSchema.default("compact")
   })
   .strict();
@@ -425,6 +443,8 @@ export const refactorReplacePreviewSchema = z
     repoId: z.string().min(1).max(200),
     find: z.string().min(1).max(2_000),
     replaceExpression: z.string().max(2_000),
+    findMode: z.enum(["literal", "regex"]).default("literal"),
+    regexFlags: z.string().max(8).regex(/^[ims]*$/, "regexFlags may only contain i, m, s").optional(),
     scope: refactorScopeSchema,
     guards: refactorGuardsSchema,
     compilerAssist: refactorCompilerAssistSchema.optional(),

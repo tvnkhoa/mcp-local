@@ -222,3 +222,24 @@ export function getRepoStaleness(
     note: isStale ? "index commit differs from repo HEAD" : "index is up-to-date"
   };
 }
+
+/**
+ * Non-fatal staleness warning for read tools that degrade gracefully on a stale index.
+ * Returns `{ note, hint }` when the index is stale (or null otherwise / when staleness
+ * can't be determined). `hint` is caller-specific guidance on what the staleness affects.
+ */
+export function buildStaleWarning(
+  repoId: string,
+  store: GraphStore,
+  hint: string
+): { note: string; hint: string } | null {
+  try {
+    const staleness = getRepoStaleness(repoId, store);
+    if (staleness.isStale) {
+      return { note: `index is stale: ${staleness.note}`, hint };
+    }
+  } catch {
+    // Can't determine staleness (e.g. non-git repo) — no warning.
+  }
+  return null;
+}

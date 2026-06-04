@@ -85,6 +85,7 @@ export function extractJavaScriptSymbolsImpl(
       name: nameNode.text,
       kind,
       line: node.startPosition.row + 1,
+      endLine: node.endPosition.row + 1,
       signature: extractSignature(node)
     });
   }
@@ -109,6 +110,7 @@ export function extractJavaScriptSymbolsImpl(
           name: nameNode.text,
           kind: "function",
           line: node.startPosition.row + 1,
+          endLine: node.endPosition.row + 1,
           signature: sig
         });
       } else if (isExported) {
@@ -120,6 +122,7 @@ export function extractJavaScriptSymbolsImpl(
           name: nameNode.text,
           kind: "variable",
           line: node.startPosition.row + 1,
+          endLine: node.endPosition.row + 1,
           signature: `const ${nameNode.text} = ${valPreview}`
         });
       }

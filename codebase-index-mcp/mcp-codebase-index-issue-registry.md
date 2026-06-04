@@ -502,3 +502,18 @@ Three compounding gaps addressed:
   - Live on `wec.be` (stale): **A** → `count:8`; **B** → `selectedSymbol.kind="class"` (line 13); **C** → returns `impactedFiles` + `staleWarning` instead of `McpError`.
 - Residual: controller classes can still show empty `callers/callees` when they are entry points reached via routing/DI rather than CALLS edges — that is a graph-coverage characteristic, not the selection bug (which is fixed).
 - Tracking URL: `D:/1.SourceCode/mcp-local/codebase-index-mcp/mcp-codebase-index-issue-registry.md#mcp-issue-011`
+
+## MCP-ISSUE-012 ✅ RESOLVED (enhancement)
+- Scenario: Dogfooding feedback — the agent falls back to baseline `Read`/manual edits instead of MCP because (1) MCP returns a semantic map but no raw source to edit against, (2) `refactor_replace_*` matches literal text only, and (3) `rename_assist` is read-only (returns hints, the agent still hand-edits each file).
+- Enhancement proposal: close the "MCP can map but can't help edit" gap with three additions.
+- Resolution:
+  1. **`get_symbol_source` (new tool)** — returns the raw source text span of a symbol (by symbolId or name), read from disk via the existing `assertSafeRepoFilePath`/`safeReadText` guards. Symbols now persist `end_line` (`SymbolRecord.endLine`, `symbols.end_line` column + backward-compatible migration; tree-sitter `endPosition` captured in `csharpExtractor`/`jsExtractor`); when absent (pre-end-line index or regex-based Python extraction) the span is estimated from the next symbol's start line. Reports a non-fatal `staleWarning` when the index is stale.
+  2. **Regex find mode for `refactor_replace_preview/apply`** — `findMode='regex'` compiles `find` as a RegExp (i/m/s flags; `g` forced) with capture-group substitution (`$1`, `$&`, `$$`) in `replaceExpression`. Bounded by per-file (2000) and global (5000) match caps + zero-length-match guard; invalid patterns return a clean `McpError`. `findMode='literal'` (default) preserves prior behavior. Apply/rollback unchanged (offset + beforeText verified).
+  3. **`rename_assist(emitPreview=true)`** — turns the advisory rename into an applyable refactor preview (previewId + approvalToken) by reusing the extracted `createReplacePreview` helper with a word-boundary regex (`\bName\b`) scoped to the symbol's file + affected files; the agent then calls `refactor_replace_apply` (with `includeLowConfidence=true` for top-level identifiers, which have no enclosing owner type). `emitPreview=false` (default) keeps the read-only hints output.
+- Verification (2026-06-03):
+  - `npm run typecheck` ✅ · `npm run build` ✅ · `npm run guard:no-llm-runtime` ✅
+  - `node scripts/test-refactor-engine.mjs` → **47 passed, 0 failed** ✅ (adds suite 3.11 regex capture-group + invalid-regex, 3.12 rename emitPreview→apply→rollback round-trip).
+  - `node scripts/smoke-test.mjs` ✅ — `GET_SYMBOL_SOURCE_OK { estimated:false }` (end_line persisted via re-index).
+  - `npm run benchmark:plan:check` ✅ — compactSavings 69.85%, no snapshot regressions.
+- Residual: `end_line` is exact only for C#/JS/TS symbols re-indexed after this change; Python (regex-based extraction) and pre-existing indexes use the estimated span. Regex matching has no execution timeout (bounded by match caps + pattern length); patterns are user-supplied in a local dev tool. Re-index required to populate `end_line` on existing repos.
+- Tracking URL: `D:/1.SourceCode/mcp-local/codebase-index-mcp/mcp-codebase-index-issue-registry.md#mcp-issue-012`

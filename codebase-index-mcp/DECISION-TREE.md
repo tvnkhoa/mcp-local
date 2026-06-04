@@ -25,6 +25,17 @@ search_symbols(query: "<identifier>", strategy: "name", profile: "nano")
       → get_change_context(symbolId, callerDepth: 2, profile: "compact")  ← use for deep caller list
 ```
 
+### Goal: Read a symbol's exact code
+
+```
+search_symbols(query: "<identifier>", strategy: "name", profile: "nano")
+  → got symbolId (or pass name directly)
+      → get_symbol_source(symbolId or name, profile: "compact")   ← exact source span from disk via MCP
+          → use contextLines to widen; maxLines to cap large symbols
+NOTE: prefer this over read_file for symbol bodies. Re-index (full) once so end_line is precise;
+      otherwise the span is estimated from the next symbol. read_file only for non-symbol regions.
+```
+
 ### Goal: Orient in an unfamiliar module or file
 
 ```
@@ -48,12 +59,24 @@ search_symbols(query: "<symbol>", strategy: "name", profile: "nano")
 ```
 find_impact_files(symbolId, view: "files", profile: "nano")  ← scope check
   → affectedFileCount acceptable?
-      YES → refactor_replace_preview(searchPattern, replacePattern, profile: "nano")
+      YES → refactor_replace_preview(find, replaceExpression, profile: "nano")
+              → findMode: "regex" for pattern/signature edits (capture groups $1, $& in replaceExpression)
               → check totalMatches + affectedFileCount
               → if acceptable → refactor_replace_preview(..., profile: "compact")  ← get hunk detail
               → review hunks → refactor_replace_apply(previewId, approvalToken)
-              → if rollback needed → refactor_replace_rollback(applyId)
+              → if rollback needed → refactor_replace_rollback(rollbackId)
       NO  → narrow scope before proceeding
+```
+
+### Goal: Rename a symbol or parameter
+
+```
+search_symbols(query: "<identifier>", strategy: "name", profile: "nano") → symbolId
+  → rename_assist(symbolId, newName, emitPreview: true)   ← applyable preview (previewId + approvalToken)
+      → refactor_replace_apply(previewId, approvalToken, includeLowConfidence: true)
+          (includeLowConfidence needed for top-level identifiers — no enclosing owner type)
+      → refactor_replace_rollback(rollbackId) if the rename must be undone
+NOTE: emitPreview omitted/false → read-only advisory (hints only, no preview).
 ```
 
 ### Goal: Risk triage before commit/merge
@@ -111,6 +134,7 @@ list_repositories(profile: "nano")
 | You have a partial token or camelCase fragment | `strategy: "name"` (still works with tokens) |
 | You have a business description or prose | Extract the identifier token first, then use `"name"` |
 | `"name"` returns 0 results after 1 retry | `strategy: "intent"` with shorter token |
+| Multi-word / natural-phrase lookup | `strategy: "intent"` — now also works WITH `ranked: true` for scored candidates |
 | Both return 0 results after 2 attempts | Log issue in issue registry, fall back to grep |
 
 ---

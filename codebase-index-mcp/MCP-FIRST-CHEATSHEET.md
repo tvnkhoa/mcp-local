@@ -17,7 +17,7 @@ Always reuse exact `repoPath` from `list_repositories` before `index_repository`
 1. `search_symbols(strategy: "name")`
 2. `get_symbol_context_pack(name: "<identifier>")`
 3. `find_impact_files(view: "files", groupBy: "module")`
-4. `read_file` only targeted sections
+4. `get_symbol_source(name or symbolId)` — exact code via MCP; `read_file` only for non-symbol regions
 
 ### B) Orient a new area
 
@@ -44,6 +44,18 @@ Report: runId, mode, filesIndexed, symbolsUpserted, edgesUpserted, parseFailures
 
 1. `mcp_health_check`
 2. `mcp_run_read_query` with bounded `limit`
+
+### F) Refactor / rename inside MCP (preview-gated, reversible)
+
+Rename a symbol/param:
+1. `search_symbols(strategy: "name")` → symbolId
+2. `rename_assist(symbolId, newName, emitPreview: true)` → previewId + approvalToken
+3. `refactor_replace_apply(previewId, approvalToken, includeLowConfidence: true)`
+4. `refactor_replace_rollback(rollbackId)` if needed
+
+Pattern/signature edit across sites:
+1. `refactor_replace_preview(findMode: "regex", find, replaceExpression with $1)` (scope with `includePaths`)
+2. `refactor_replace_apply` → `refactor_replace_rollback` if needed
 
 ## Do / Do Not
 

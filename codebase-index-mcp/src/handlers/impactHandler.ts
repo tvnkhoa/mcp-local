@@ -2,7 +2,7 @@ import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { McpError, ErrorCode } from "@modelcontextprotocol/sdk/types.js";
 import { resolveResponseProfile } from "../responseFormatter.js";
 import { validateReadOnlyGraphSql, validateAllowedTables } from "../sqliteGuardrails.js";
-import { getRepoStaleness } from "../gitHelpers.js";
+import { buildStaleWarning } from "../gitHelpers.js";
 import { GraphStore } from "../graphStore.js";
 import type { HandlerContext } from "./handlerContext.js";
 
@@ -12,18 +12,11 @@ import type { HandlerContext } from "./handlerContext.js";
 // return the warning so callers degrade gracefully instead of getting nothing.
 
 function staleWarningFor(repoId: string, store: GraphStore): { note: string; hint: string } | null {
-  try {
-    const staleness = getRepoStaleness(repoId, store);
-    if (staleness.isStale) {
-      return {
-        note: `index is stale: ${staleness.note}`,
-        hint: `results reflect the indexed commit, not current HEAD — run index_repository(repoId='${repoId}', mode='incremental') for accurate impact.`
-      };
-    }
-  } catch {
-    // Can't determine staleness (e.g. non-git repo) — no warning.
-  }
-  return null;
+  return buildStaleWarning(
+    repoId,
+    store,
+    `results reflect the indexed commit, not current HEAD — run index_repository(repoId='${repoId}', mode='incremental') for accurate impact.`
+  );
 }
 
 // ── graph-health collapse ─────────────────────────────────────────────────────

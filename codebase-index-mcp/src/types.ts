@@ -121,6 +121,8 @@ export type SymbolRecord = {
   name: string;
   kind: "function" | "class" | "method" | "variable" | "module" | "interface" | "property" | "constructor" | "type" | "struct" | "impl" | "unknown";
   line: number;
+  /** Last line of the symbol's source span (1-indexed). Optional: null on indexes built before end-line tracking. */
+  endLine?: number;
   signature?: string;
   /** ID of the enclosing class/struct/interface symbol. Used for qualified property edge resolution. */
   parentSymbolId?: string;
