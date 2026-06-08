@@ -183,9 +183,12 @@ export function extractCSharpSymbolsImpl(
     }
 
     // P1.1: Emit IMPLEMENTS edges for interfaces in base_list
-    // AST layout: base_list is a named child of class/struct (not a field),
+    // AST layout: base_list is a named child of class/struct/record (not a field),
     // and its children are identifier or generic_name nodes directly.
-    if (node.type === "class_declaration" || node.type === "struct_declaration") {
+    // record_declaration covers both `record X : ...` and `record struct X : ...`
+    // (tree-sitter emits the latter as record_declaration with a `struct` modifier),
+    // so CQRS/MediatR request records implementing marker interfaces are captured. (ISSUE-013)
+    if (node.type === "class_declaration" || node.type === "struct_declaration" || node.type === "record_declaration") {
       const baseListNodes = node.descendantsOfType(["base_list"]);
       for (const baseList of baseListNodes) {
         // Only process direct base_list (not nested classes)
@@ -194,8 +197,10 @@ export function extractCSharpSymbolsImpl(
           // Children are identifier, generic_name, or qualified_name
           const typeName = baseNode.text?.trim();
           if (!typeName) continue;
-          // Strip generic args: IRepository<T> → IRepository
-          const baseName = typeName.replace(/<[^>]*>$/, "").trim();
+          // Strip generic args: IRepository<T> → IRepository.
+          // Greedy `<.*>` spans nested generics (IRequest<Result<ThingDto>> → IRequest),
+          // which the non-nested `<[^>]*>` form could not handle. (ISSUE-013)
+          const baseName = typeName.replace(/<.*>$/, "").trim();
           if (!baseName) continue;
           if (isLikelyCSharpInterfaceName(baseName)) {
             edges.push({

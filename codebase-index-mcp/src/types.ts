@@ -1,4 +1,4 @@
-export type IndexMode = "full" | "incremental";
+export type IndexMode = "full" | "incremental" | "dirty";
 
 export type IndexRunStatus = "running" | "ok" | "failed" | "cancelled";
 

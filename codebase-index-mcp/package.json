@@ -18,6 +18,8 @@
     "test:csharp-using-bridge": "node scripts/test-csharp-using-bridge.mjs",
     "test:nuget-bridge": "node scripts/test-nuget-bridge.mjs",
     "test:minimal-api-guard": "node scripts/test-minimal-api-guard.mjs",
+    "test:wiring-note": "node scripts/test-wiring-note.mjs",
+    "verify:enhancements": "node scripts/verify-enhancements.mjs",
     "test:profile-responses": "node scripts/test-profile-responses.mjs",
     "test:refactor-profiles": "node scripts/test-refactor-preview-profiles.mjs",
     "benchmark:plan": "node scripts/benchmark-plan-mode.mjs",

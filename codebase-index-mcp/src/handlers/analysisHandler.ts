@@ -1,5 +1,6 @@
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { resolveResponseProfile } from "../responseFormatter.js";
+import { buildCoverageBlock } from "../coverage.js";
 import type { HandlerContext } from "./handlerContext.js";
 
 // ── dead_code_scan ────────────────────────────────────────────────────────────
@@ -121,15 +122,22 @@ export function handleFindImplementations(
         }
       : {};
 
+  const coverage = buildCoverageBlock({
+    resultCount: rows.length,
+    expectedNonZero: true,
+    kind: "implementations",
+    query: args.interfaceName
+  });
+
   if (profile === "nano") {
     const top = rows.slice(0, 10).map((x) => ({ name: x.name, kind: x.kind, filePath: x.filePath, line: x.line }));
     return ctx.asText(
-      { repoId: args.repoId, interfaceName: args.interfaceName, count: rows.length, top, hasMore: rows.length > top.length, ...emptyHint },
+      { repoId: args.repoId, interfaceName: args.interfaceName, count: rows.length, top, hasMore: rows.length > top.length, coverage: coverage.confidence, ...emptyHint },
       profile
     );
   }
   return ctx.asText(
-    { repoId: args.repoId, interfaceName: args.interfaceName, count: rows.length, implementations: rows, ...emptyHint },
+    { repoId: args.repoId, interfaceName: args.interfaceName, count: rows.length, implementations: rows, coverage, ...emptyHint },
     profile
   );
 }

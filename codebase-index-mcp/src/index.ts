@@ -33,6 +33,7 @@ import { validateAllowedTables, validateReadOnlyGraphSql } from "./sqliteGuardra
 import { WatchManager } from "./watchManager.js";
 import type {
   CallChainDirection,
+  IndexMode,
   RefactorApplyHunkRecord,
   IndexRunSummary,
   RefactorApplyChangeRecord,
@@ -54,6 +55,7 @@ import {
   getRepoWorkingTreeState,
   hasWorkingTreeChanges,
   collectGitChangedFiles,
+  collectDirtyFiles,
   getRepoStaleness
 } from "./gitHelpers.js";
 import {
@@ -108,6 +110,7 @@ import {
   handleIndexRepository,
   handleWatchRepo,
   handleDetectChanges,
+  handleChangeImpact,
   resolveDocsMode,
   activateWatchForRepo as activateWatchForRepoFn,
   armWatchInactivityTimer as armWatchInactivityTimerFn,
@@ -122,6 +125,8 @@ import {
   handleGetSymbolBlame,
   handleGetSymbolSource
 } from "./handlers/searchHandler.js";
+import { handleGetFeatureBundle } from "./handlers/bundleHandler.js";
+import { handleOrient } from "./handlers/orientHandler.js";
 import {
   handleGetDependencyGraph,
   handleGetCallChain,
@@ -210,6 +215,9 @@ const findSymbolAtLineSchema = schemas.findSymbolAtLineSchema;
 const queryDocsSchema = schemas.queryDocsSchema(MAX_RESULT_LIMIT);
 const getSymbolContextPackSchema = schemas.getSymbolContextPackSchema(MAX_DEPTH, MAX_RESULT_LIMIT);
 const detectChangesSchema = schemas.detectChangesSchema(MAX_RESULT_LIMIT);
+const changeImpactSchema = schemas.changeImpactSchema(MAX_RESULT_LIMIT);
+const getFeatureBundleSchema = schemas.getFeatureBundleSchema;
+const orientSchema = schemas.orientSchema;
 const deadCodeScanSchema = schemas.deadCodeScanSchema(MAX_RESULT_LIMIT);
 const detectCircularDependenciesSchema = schemas.detectCircularDependenciesSchema(MAX_DEPTH, MAX_RESULT_LIMIT);
 const crossRepoImpactSchema = schemas.crossRepoImpactSchema(MAX_RESULT_LIMIT);
@@ -310,7 +318,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: "index_repository",
-        description: "Index repository files into internal graph storage (incremental by default). docsMode controls docs lane isolation: auto uses server default, on forces docs indexing, off disables docs indexing for this run.",
+        description: "Index repository files into internal graph storage (incremental by default). mode='dirty' re-indexes ONLY git working-tree-changed files (unstaged+staged+untracked) — a fast refresh of just-edited files (extraction is scoped to the changed set; edge resolution still runs repo-wide). Pruning is suppressed (subset scan). docsMode controls docs lane isolation: auto uses server default, on forces docs indexing, off disables docs indexing for this run.",
         inputSchema: {
           type: "object",
           additionalProperties: false,
@@ -318,7 +326,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
           properties: {
             repoId: { type: "string" },
             repoPath: { type: "string" },
-            mode: { type: "string", enum: ["full", "incremental"] },
+            mode: { type: "string", enum: ["full", "incremental", "dirty"] },
             docsMode: { type: "string", enum: ["auto", "on", "off"] },
             maxFiles: { type: "integer", minimum: 1, maximum: MAX_FILES_PER_RUN },
             batchSize: { type: "integer", minimum: 1, maximum: 2000 }
@@ -665,6 +673,61 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             maxResults: { type: "integer", minimum: 1, maximum: 500 },
             sortBy: { type: "string", enum: ["risk", "impact", "path"] },
             groupBy: { type: "string", enum: ["file", "module"] },
+            profile: { type: "string", enum: ["nano", "compact", "standard", "verbose"] }
+          }
+        }
+      },
+      {
+        name: "change_impact",
+        description: "Composite 'what did my change affect and which tests cover it' for the working-tree diff (or a commit range): maps changed files → static dependents → covering tests, returning a ranked testsToRun list (by source risk × link score) plus a residualRisk note for changed files with no linked test. Use after editing to run a trusted targeted test subset instead of the whole suite. Defaults baseRef to the indexed commit (working-tree diff when no new commits).",
+        inputSchema: {
+          type: "object",
+          additionalProperties: false,
+          required: ["repoId"],
+          properties: {
+            repoId: { type: "string" },
+            baseRef: { type: "string" },
+            headRef: { type: "string" },
+            includeUntracked: { type: "boolean" },
+            maxFiles: { type: "integer", minimum: 1, maximum: 500 },
+            impactLimit: { type: "integer", minimum: 1, maximum: MAX_RESULT_LIMIT },
+            testLinkMinScore: { type: "number", minimum: 0, maximum: 1 },
+            testLinkMaxCandidates: { type: "integer", minimum: 1, maximum: 20 },
+            maxTestsToRun: { type: "integer", minimum: 1, maximum: 500 },
+            profile: { type: "string", enum: ["nano", "compact", "standard", "verbose"] }
+          }
+        }
+      },
+      {
+        name: "get_feature_bundle",
+        description: "Gather a whole vertical-slice feature from one seed: given an entity (seedSymbol e.g. 'ConversationNote', or seedFile) it walks the C# convention (entity → {E}Configuration → Create/Update/Delete{E}Command + handlers + validators → Get{E}Query + handlers → {E}Endpoints) and returns the related symbols with source in one call. Use for 'implement X by mirroring Y' tasks instead of reading 6+ files separately. Heuristic, name-pattern based; unresolvedRoles lists roles not found by name.",
+        inputSchema: {
+          type: "object",
+          additionalProperties: false,
+          required: ["repoId"],
+          properties: {
+            repoId: { type: "string" },
+            seedSymbol: { type: "string" },
+            seedFile: { type: "string" },
+            convention: { type: "string", enum: ["csharp-vertical-slice"] },
+            maxFiles: { type: "integer", minimum: 1, maximum: 60 },
+            maxBytesPerFile: { type: "integer", minimum: 1, maximum: 20000 },
+            includeSource: { type: "boolean" },
+            profile: { type: "string", enum: ["nano", "compact", "standard", "verbose"] }
+          }
+        }
+      },
+      {
+        name: "orient",
+        description: "Task router: given a free-text intent (e.g. 'implement a feature like ConversationNote', 'rename X', 'what breaks if I change Y', 'which tests to run') returns the recommended MCP tool(s) + caveats, and resolves an optional seed to seedSymbols. Deterministic keyword classification (no LLM). Use first when unsure which tool to start with.",
+        inputSchema: {
+          type: "object",
+          additionalProperties: false,
+          required: ["intent"],
+          properties: {
+            repoId: { type: "string" },
+            intent: { type: "string" },
+            seed: { type: "string" },
             profile: { type: "string", enum: ["nano", "compact", "standard", "verbose"] }
           }
         }
@@ -1038,6 +1101,18 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const hArgs = detectChangesSchema.parse(request.params.arguments ?? {});
         return handleDetectChanges(hArgs, ctx);
       }
+      case "change_impact": {
+        const hArgs = changeImpactSchema.parse(request.params.arguments ?? {});
+        return handleChangeImpact(hArgs, ctx);
+      }
+      case "get_feature_bundle": {
+        const hArgs = getFeatureBundleSchema.parse(request.params.arguments ?? {});
+        return handleGetFeatureBundle(hArgs, ctx);
+      }
+      case "orient": {
+        const hArgs = orientSchema.parse(request.params.arguments ?? {});
+        return handleOrient(hArgs, ctx);
+      }
       case "get_folder_summary": {
         const hArgs = getFolderSummarySchema.parse(request.params.arguments ?? {});
         return handleGetFolderSummary(hArgs, ctx);
@@ -1230,10 +1305,58 @@ function asText(payload: unknown, profile: ResponseProfile = "standard"): CallTo
 // estimateResultCount, emitTelemetry → responseFormatter.ts
 // traverseDependencyGraph, traverseCallGraph → graphTraversal.ts
 
+/**
+ * Zero-metric IndexRunSummary for a run that did no work (dirty mode with a clean tree,
+ * or an incremental run that skipped). Shared so the two skip paths can't drift as the
+ * summary schema evolves.
+ */
+function buildSkippedRunSummary(opts: {
+  repoId: string;
+  mode: IndexMode;
+  commitSha: string | null;
+  branch: string | null;
+  indexVersion: string;
+  skipReason: string;
+}): IndexRunSummary & { crossRepoLinked?: number; callEdgesResolved?: number; importEdgesResolved?: number; mentionsResolved?: number; skipReason?: string } {
+  const now = new Date().toISOString();
+  return {
+    runId: randomUUID(),
+    repoId: opts.repoId,
+    commitSha: opts.commitSha,
+    branch: opts.branch,
+    indexVersion: opts.indexVersion,
+    mode: opts.mode,
+    status: "ok",
+    startedAt: now,
+    finishedAt: now,
+    filesScanned: 0,
+    filesIndexed: 0,
+    filesSkipped: 0,
+    symbolsUpserted: 0,
+    edgesUpserted: 0,
+    docsUpserted: 0,
+    mentionsUpserted: 0,
+    parseFailures: 0,
+    parseTimeouts: 0,
+    elapsedMs: 0,
+    crossRepoLinked: 0,
+    callEdgesResolved: 0,
+    importEdgesResolved: 0,
+    mentionsResolved: 0,
+    crossRepoAttempts: 0,
+    crossRepoResolved: 0,
+    unresolvedNoCandidate: 0,
+    unresolvedAmbiguous: 0,
+    unresolvedBoundaryBlocked: 0,
+    unresolvedLowConfidence: 0,
+    skipReason: opts.skipReason
+  };
+}
+
 async function runIndexAndResolve(
   repoId: string,
   repoPath: string,
-  mode: "full" | "incremental",
+  mode: IndexMode,
   docsEnabled: boolean,
   maxFiles: number,
   batchSize: number
@@ -1282,48 +1405,38 @@ async function runIndexAndResolve(
     return totalResolved;
   };
 
+  // Dirty mode (ENH-A): re-index only the git working-tree delta (unstaged + staged +
+  // untracked). Sub-second refresh for "what I just edited" without a full/incremental scan.
+  let dirtyFileSet: Set<string> | undefined;
+  if (mode === "dirty") {
+    dirtyFileSet = collectDirtyFiles(repoPath);
+    if (dirtyFileSet.size === 0) {
+      const noOp = buildSkippedRunSummary({
+        repoId,
+        mode,
+        commitSha: resolveHeadCommitSha(repoPath),
+        branch: resolveCurrentBranch(repoPath),
+        indexVersion: "v1-tree-sitter-property-edges",
+        skipReason: "no dirty files"
+      });
+      store.recordRun(noOp);
+      process.stderr.write(`[index-dirty] repoId=${repoId} no working-tree changes — nothing to re-index\n`);
+      return noOp;
+    }
+    process.stderr.write(`[index-dirty] repoId=${repoId} re-indexing ${String(dirtyFileSet.size)} working-tree-changed file(s)\n`);
+  }
+
   if (mode === "incremental") {
     const skipDecision = evaluateIncrementalSkip(repoId, repoPath);
     if (skipDecision.shouldSkip) {
-      const now = new Date().toISOString();
-      const skippedSummary: IndexRunSummary & {
-        crossRepoLinked?: number;
-        callEdgesResolved?: number;
-        importEdgesResolved?: number;
-        mentionsResolved?: number;
-        skipReason?: string;
-      } = {
-        runId: randomUUID(),
+      const skippedSummary = buildSkippedRunSummary({
         repoId,
+        mode,
         commitSha: skipDecision.headCommitSha,
         branch: resolveCurrentBranch(repoPath),
         indexVersion: skipDecision.indexVersion,
-        mode,
-        status: "ok",
-        startedAt: now,
-        finishedAt: now,
-        filesScanned: 0,
-        filesIndexed: 0,
-        filesSkipped: 0,
-        symbolsUpserted: 0,
-        edgesUpserted: 0,
-        docsUpserted: 0,
-        mentionsUpserted: 0,
-        parseFailures: 0,
-        parseTimeouts: 0,
-        elapsedMs: 0,
-        crossRepoLinked: 0,
-        callEdgesResolved: 0,
-        importEdgesResolved: 0,
-        mentionsResolved: 0,
-        crossRepoAttempts: 0,
-        crossRepoResolved: 0,
-        unresolvedNoCandidate: 0,
-        unresolvedAmbiguous: 0,
-        unresolvedBoundaryBlocked: 0,
-        unresolvedLowConfidence: 0,
         skipReason: skipDecision.reason
-      };
+      });
       store.recordRun(skippedSummary);
       process.stderr.write(`[index-skip] repoId=${repoId} reason=${skipDecision.reason}\n`);
       return skippedSummary;
@@ -1358,7 +1471,8 @@ async function runIndexAndResolve(
     largeFileThresholdBytes: LARGE_FILE_THRESHOLD_BYTES,
     maxFileSizeBytes: MAX_FILE_SIZE_BYTES,
     parseWorkers: PARSE_WORKERS,
-    parseJobTimeoutMs: PARSE_JOB_TIMEOUT_MS
+    parseJobTimeoutMs: PARSE_JOB_TIMEOUT_MS,
+    onlyRelativePaths: dirtyFileSet
   });
   const resolvePhaseStart = Date.now();
   let ftsRebuildMs = 0;
@@ -1595,7 +1709,7 @@ function evaluateIncrementalSkip(
 
 function resolvePerformanceProfileDecision(
   repoId: string,
-  mode: "full" | "incremental",
+  mode: IndexMode,
   maxFiles: number
 ): {
   profile: PerformanceProfile;

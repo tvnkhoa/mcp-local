@@ -517,3 +517,110 @@ Three compounding gaps addressed:
   - `npm run benchmark:plan:check` ✅ — compactSavings 69.85%, no snapshot regressions.
 - Residual: `end_line` is exact only for C#/JS/TS symbols re-indexed after this change; Python (regex-based extraction) and pre-existing indexes use the estimated span. Regex matching has no execution timeout (bounded by match caps + pattern length); patterns are user-supplied in a local dev tool. Re-index required to populate `end_line` on existing repos.
 - Tracking URL: `D:/1.SourceCode/mcp-local/codebase-index-mcp/mcp-codebase-index-issue-registry.md#mcp-issue-012`
+
+## MCP-ISSUE-013 ✅ RESOLVED (2026-06-04)
+- Reported: 2026-06-04 · Repo: `wec.commnunication-hub` · Branch: `develop` · Commit: `5a4a4c6` · indexVersion: `v1-tree-sitter-property-edges`
+- Scenario: While implementing the CH-150 EmailSignature CQRS slice, used `find_implementations` to enumerate implementers of marker interfaces on request types (`ITenantScopedRequest`, new `IAgentScopedRequest`). These are implemented by C# **`record`** types of the form `record X : IRequest<Result<...>>, ITenantScopedRequest, IAgentScopedRequest`.
+- MCP tool/query attempted (after BOTH incremental and full re-index):
+  - `find_implementations(interfaceName="IUser")`
+  - `find_implementations(interfaceName="ITenantScopedRequest")`
+  - `find_implementations(interfaceName="IAgentScopedRequest")`
+- Expected vs actual:
+  - **`IUser`** (implemented only by `class`es) → **5/5 correct** ✅ — `CurrentUser` + 4 test stubs, every hit `kind:"class"`.
+  - **`ITenantScopedRequest`** (1 test-helper `class` + **dozens** of `record` command/query types) → returned **only 1** — the single `class` (`PlaybookAlignmentIntegrationTests.TenantScopedRequest`). Every `record` implementer (CreateConversationNoteCommand, ReplyConversationCommand, all 5 EmailSignature requests, …) was **missing**.
+  - **`IAgentScopedRequest`** (implemented only by 5 `record`s) → **count 0**.
+  - Smoking gun: across all three queries **every returned hit is `kind:"class"`; not a single `record` ever appears**.
+- Impact: in CQRS/MediatR codebases (requests are records implementing marker interfaces), `find_implementations` is effectively blind to request types and returns a **misleadingly low count** (e.g. "1 implementer" when there are dozens), or 0. Forces a `Grep` fallback and can cause an agent to conclude an interface is unused/has one implementer.
+- Mode independence: reproduces identically on `mode=incremental` (filesIndexed 11) and `mode=full` (filesIndexed 391, `implementsResolveMs:2`). NOT an incremental-pruning artifact — verified by running full re-index then re-querying.
+- Workaround used: `Grep` for `: .*ITenantScopedRequest` / `IAgentScopedRequest` across `**/*.cs`.
+- Enhancement proposal: extend the C# IMPLEMENTS-edge extraction to (1) handle `record` and `record struct` declarations, and (2) capture **all** interfaces in a multi-item base list, not just a leading `class`/first entry (base lists like `record X : IRequest<T>, IMarker1, IMarker2`). Add a regression fixture covering `record X : IRequest<...>, ITenantScopedRequest`.
+- Tracking URL: `D:/1.SourceCode/mcp-local/codebase-index-mcp/mcp-codebase-index-issue-registry.md#mcp-issue-013`
+
+### Resolution (2026-06-04)
+- Root cause confirmed exactly as reported: `src/extractors/csharpExtractor.ts` guarded IMPLEMENTS-edge emission with `if (node.type === "class_declaration" || node.type === "struct_declaration")`, excluding `record_declaration`. Records were already indexed as symbols (kind `class`) and the base-list walk already iterated **all** interfaces — the node-type guard was the sole blocker.
+- Fix 1: added `|| node.type === "record_declaration"` to the guard. One `record_declaration` clause covers both `record` and `record struct` (tree-sitter emits the latter as `record_declaration` + `struct` modifier).
+- Fix 2 (latent, surfaced by the new fixture): the generic-arg strip `/<[^>]*>$/` could not span nested generics (`IRequest<Result<ThingDto>>` → left untouched). Changed to greedy `/<.*>$/` so the IMPLEMENTS token is `iface:IRequest`, not a partial.
+- Regression: `scripts/test-csharp-inheritance-bridge.mjs` gains a `record` + `record struct` multi-marker fixture asserting IMPLEMENTS edges for all markers and clean generic stripping.
+- Verification (live, full re-index of `wec.commnunication-hub`, 370 files):
+  - `find_implementations("ITenantScopedRequest")` → **count 21** (was 1).
+  - `find_implementations("IAgentScopedRequest")` → **count 6** (was 0).
+  - `find_implementations("IUser")` → 5 (control, unchanged). Record implementers report `kind:"class"` (records are indexed as `class`).
+- No DB migration; existing C# repos need a re-index to gain record IMPLEMENTS edges.
+
+### Live MCP Re-Verification (2026-06-08)
+- Reproduced against the central MCP index (pre-fix extractor build): `find_implementations(ITenantScopedRequest)` → **count 1** (only the test-helper `class`), `find_implementations(IAgentScopedRequest)` → **count 0**.
+- Re-indexed via `index_repository(mode="full")` (server's fixed build, runId `6de54023`), then re-queried:
+  - `ITenantScopedRequest` → **count 21** — all CQRS `record` commands/queries (CreateConversationNoteCommand, the 5 EmailSignature requests, …) plus the explicit `record EntityScopedRequest : ITenantScopedRequest`.
+  - `IAgentScopedRequest` → **count 6** (5 EmailSignature requests + `record AgentScopedRequest`).
+  - Every response carries an ENH-C `coverage: { confidence: "high", knownGaps: [] }` block.
+- Confirms the fix end-to-end through the live MCP tool, not just the unit fixture.
+
+## MCP-ISSUE-014 ✅ RESOLVED (2026-06-04, Stage 1)
+- Reported: 2026-06-04 · Repo: `wec.commnunication-hub` · Branch: `develop` · Commit: `5a4a4c6`
+- Scenario: Modified shared infra `AuthorizationBehaviour` (a MediatR `IPipelineBehavior<TRequest,TResponse>`) during CH-150 and wanted the blast radius of the change before relying on the test suite.
+- MCP tool/query attempted (index fresh, full re-index): `find_impact_files(filePath="backend/CommunicationHub/src/Application/Common/Behaviours/AuthorizationBehaviour.cs", view="surface", profile="compact")`.
+- Expected vs actual: expected the set of types/requests whose authorization flows through this behaviour (or at least a degraded note); actual returned `callers: []` with `reliabilitySummary.unresolvedRatio: 1.0` (`graphHealth`: importsTotal 5, classified 2/5). No `staleWarning` (index was fresh) — the result is genuinely empty.
+- Root cause: MediatR pipeline behaviours are never called statically — MediatR resolves and invokes `IPipelineBehavior` implementations via DI/reflection at request time. There is no `CALLS` edge into the behaviour, so the static impact graph has nothing to surface. The same applies to endpoint auto-registration via `IEndpointGroup` (reflection-discovered) and other DI/reflection-wired types.
+- Impact: `find_impact_files` returns a **false-empty** blast radius for exactly the "shared cross-cutting infra" changes where impact analysis is most valuable. A reviewer/agent could wrongly conclude "no dependents" and skip regression scope. (Here the correct safety net was running the full 421-test Application.UnitTests suite, not the impact tool.)
+- Workaround used: full test-suite run + `Grep` for the interface and DI registration site.
+- Enhancement proposal: when a target file/symbol is a known DI/reflection-wired shape (MediatR `IPipelineBehavior`, `IEndpointGroup`, `IRequestHandler`, types registered via `AddScoped/AddTransient/AddSingleton` or `typeof(IPipelineBehavior<,>)`), emit an explicit note in `find_impact_files` (e.g. `wiringNote: "type is DI/reflection-wired; static impact graph is incomplete — N requests flow through the MediatR pipeline"`) instead of a bare empty `callers`. Optionally synthesize impact from DI registration sites / pipeline membership.
+- Related: same class of graph-coverage gap noted in MCP-ISSUE-011 residual (controllers reached via routing/DI rather than CALLS edges).
+- Tracking URL: `D:/1.SourceCode/mcp-local/codebase-index-mcp/mcp-codebase-index-issue-registry.md#mcp-issue-014`
+
+### Resolution (2026-06-04, Stage 1 — heuristic note, no migration)
+- Added `detectWiringShapeImpl` in `src/impactAnalyzer.ts`: detects DI/reflection-wired shapes from IMPLEMENTS edges (record-aware after ISSUE-013) to `iface:IPipelineBehavior%`/`IRequestHandler%`/`INotificationHandler%`/`IEndpointGroup%`, plus a name-suffix fallback (`*Behaviour`/`*Behavior`/`*Endpoints`). For pipeline behaviours it counts the repo's `IRequest` implementers.
+- `getImpactFilesImpl` / `getImpactSurfaceImpl` now attach an optional `wiringNote` **only when `callers`/`impactedFiles` is empty AND the target is wired**, so `find_impact_files` explains the empty blast radius instead of implying "no dependents". Threaded through `handleFindImpactFiles` (all profiles + groupBy=module). No new edge type, no DB migration, no re-index required.
+- Regression: `scripts/test-wiring-note.mjs` (also `npm run test:wiring-note`).
+- Verification (live, `wec.commnunication-hub`): `find_impact_files(AuthorizationBehaviour.cs, view=surface)` → `callers: 0` + `wiringNote: "type is DI/reflection-wired (IPipelineBehavior); static impact graph is incomplete — 73 requests flow through the MediatR pipeline. Run the full test suite to scope shared-infra changes."`
+- Stage 2 (deferred, gated by demand): a full `WIRED_BY` edge class extracting `AddScoped/Transient/Singleton`/`typeof(IPipelineBehavior<,>)` registration sites to materialize composition-root files as callers. Carries a DB migration + full re-index; build only if users need the registration sites themselves, not just the explanatory note.
+
+### Live MCP Re-Verification (2026-06-08)
+- `find_impact_files(filePath="backend/CommunicationHub/src/Application/Common/Behaviours/AuthorizationBehaviour.cs", view="surface")` → `callers: []` **with** `wiringNote: "type is DI/reflection-wired (IPipelineBehavior); static impact graph is incomplete — 83 requests flow through the MediatR pipeline. Run the full test suite to scope shared-infra changes."` (request count rose to 83 now that record requests are captured — ISSUE-013 synergy). No more bare false-empty.
+
+## Agent Adoption Enhancements (2026-06-04)
+
+Context: post-mortem of a full CH-150 feature build (plan → implement → simplify → code-review → docs) in `wec.commnunication-hub`. Honest finding — in the **main thread** the agent used `watch_repo` only and otherwise fell back to `Read`/`Grep`/`Bash`; the codebase-index discovery/impact tools were under-used. These ideas target the specific friction that caused the fallback, so the agent reaches for MCP more often and trusts it more. Each item: **Friction observed → Proposal → Adoption impact**.
+
+### ENH-A — Dirty/uncommitted-aware freshness (highest-leverage)
+- Friction: The single biggest reason MCP was avoided mid-implementation. After editing files, the index lags HEAD; with `watch` stopped, new symbols (e.g. `IAgentScopedRequest`) and edits were invisible, so `find_implementations`/`find_impact_files` returned stale/false-empty results — strictly worse than `Grep`. Re-indexing after every edit is too heavy a ritual mid-task.
+- Proposal: (1) On every graph-read, diff the git working tree and return a `dirtyFiles: [...]` + `indexLag: { commitsBehind, dirtyCount }` header so the agent knows exactly which results to distrust. (2) Add a fast `index_repository(mode="dirty")` that re-indexes only `git status` changed files (sub-second) — a cheaper, explicit "refresh what I just touched" than incremental. (3) Optionally auto-run the dirty refresh when a read tool is called and the working tree changed since last index.
+- Adoption impact: removes the "is this answer stale?" doubt that pushes the agent to Grep; makes MCP usable *during* editing, not just on committed code.
+
+### ENH-B — Vertical-slice / template bundle fetch
+- Friction: The task was "implement EmailSignature by mirroring the ConversationNote slice." The agent read **6+ files separately** (entity, EF config, Create command, Get query, endpoint group, DbContext) to absorb one convention. `get_symbol_context_pack` returns callers/callees, not "the whole pattern to copy."
+- Proposal: A `get_feature_bundle(seedSymbol | seedFile, convention="csharp-vertical-slice")` that walks naming/folder conventions (Domain entity → `*Configuration` → `Commands/*`/`Queries/*` handlers+validators → `Web/Endpoints/*` group → DbSet registration) and returns the full source of the related set in one call. Generalize via a configurable convention map per repo.
+- Adoption impact: turns "implement like X" (the most common feature task) into one MCP call instead of 6 Reads — the biggest token + latency win, and exactly the task type where the agent currently bypasses MCP entirely.
+
+### ENH-C — Universal coverage/confidence signal on every graph-read
+- Friction: `find_implementations(ITenantScopedRequest)` returned `count:1` with **no signal** it was incomplete (it silently dropped all `record` implementers — see ISSUE-013). A bare low/zero count reads as authoritative and is more dangerous than an error.
+- Proposal: Every graph-read returns a small `coverage` block: `{ confidence, knownGaps: ["records not captured for IMPLEMENTS", ...], suggestFallback: "grep '\\: .*ITenantScopedRequest'" }`. `find_impact_files` already has `graphHealth`/`reliabilitySummary`; extend the same contract to `find_implementations`, `get_call_chain`, `trace_execution_flow`.
+- Adoption impact: lets the agent *trust-but-verify* — proceed on MCP when confidence is high, fall back deliberately (not blindly) when a known gap is flagged. Directly counters false-empty-driven distrust.
+
+### ENH-D — DI / reflection wiring awareness
+- Friction: `find_impact_files(AuthorizationBehaviour, surface)` returned empty because MediatR `IPipelineBehavior` is reflection/DI-invoked (see ISSUE-014). The cross-cutting changes the agent most wants to scope (pipeline behaviours, `IEndpointGroup`, handlers) are precisely the ones with no static CALLS edge.
+- Proposal: Index DI registration sites (`AddScoped/Transient/Singleton`, `typeof(IPipelineBehavior<,>)`, MediatR/minimal-API conventions) as a `WIRED_BY`/`PIPELINE_MEMBER` edge class; surface them in impact results with a `wiringNote`. Even a heuristic "this type is pipeline-wired; N requests flow through it" beats an empty list.
+- Adoption impact: makes impact analysis trustworthy for shared-infra edits — the case where the agent currently resorts to "run the whole test suite" as a blunt safety net.
+
+### ENH-E — `change_impact(diff)` → dependents + covering tests in one call
+- Friction: After editing shared infra the agent ran the **entire** 421-test Application.UnitTests suite because there was no quick, trusted way to scope "what did my change affect and which tests cover it."
+- Proposal: A composite `change_impact` that takes the working-tree diff (or a commit range), maps changed symbols → dependents (`find_impact_files`) → covering tests (`link_tests_to_source`), and returns a ranked "tests to run" list + residual-risk note. Essentially fuse `detect_changes` + `find_impact_files` + `link_tests_to_source` behind one intent.
+- Adoption impact: enables targeted test runs the agent can trust, replacing whole-suite runs; gives the agent a reason to call MCP *after* editing, closing the loop.
+
+### ENH-F — Intent router / `orient(task)` entry tool
+- Friction: The repo's "MCP-first" gate is task-agnostic, but the right first move differs by task: "implement like X" → read full template (ENH-B); "where/blast-radius" → symbol/impact tools; "endpoint inventory" → `route_map`. The agent has to self-route and sometimes mis-routes (or over-applies the gate to tasks where reading full source is genuinely correct).
+- Proposal: A single `orient(intent: string, seed?: string)` tool that classifies the task and returns `{ recommendedTools, seedSymbols, caveats }` (e.g. intent="add a CRUD feature mirroring ConversationNote" → `get_feature_bundle` + the seed slice; intent="rename X safely" → `rename_assist`). Pairs with a CLAUDE.md note that reading full templates is an *approved* MCP-first path for "implement-by-pattern," not a violation.
+- Adoption impact: lowers the activation cost of "which MCP tool do I even start with," which is part of why the agent defaults to familiar `Grep`/`Read`.
+
+### Priority for adoption lift
+1. **ENH-A** (freshness) and **ENH-C** (coverage signal) remove the two trust-killers that caused fallback this session.
+2. **ENH-B** (feature bundle) is the biggest single token/latency win for the most common task type.
+3. **ENH-D/E** make MCP useful for the *edit → verify* half of the workflow, not just the *explore* half.
+4. **ENH-F** is the cheap meta-fix so the agent picks the right tool per task.
+
+### Resolution (2026-06-04) — all ENH-A→F shipped
+- **ENH-A — dirty/freshness.** New `index_repository(mode="dirty")` re-indexes only the git working-tree delta (unstaged+staged+untracked via `collectDirtyFiles`); pruning is suppressed for the subset scan to prevent false deletions (`src/indexPipeline.ts` `onlyRelativePaths`). Freshness header `indexLag {commitsBehind, dirtyCount}` + capped `dirtyFiles[]` added to `find_impact_files` and `change_impact` (the edit-verification tools) via `buildIndexMeta(..., withFreshness:true)`. **Deliberately NOT** added to the navigation tools the token benchmark snapshots (file/folder summary, context pack, change_context) — git-derived fields are non-deterministic and would bloat the compact default; provenance-only `indexMeta` stays pure there. New git helpers `collectDirtyFiles`/`countCommitsBehind` in `src/gitHelpers.ts`.
+- **ENH-C — coverage signal.** New `src/coverage.ts` `buildCoverageBlock` → `{ confidence, knownGaps, suggestFallback }`, wired into `find_implementations`, `get_call_chain`, `trace_execution_flow` (full block in compact+, `confidence` scalar in nano). For `find_implementations` the low/zero-count gap names the C#-indexing limitation and suggests a grep fallback.
+- **ENH-B — `get_feature_bundle`.** New tool (`src/handlers/bundleHandler.ts` + `src/conventions.ts`): resolves an entity from `seedSymbol`/`seedFile`, walks the `csharp-vertical-slice` name convention (entity → `{E}Configuration` → `Create/Update/Delete{E}Command` + handlers/validators → `Get{E}Query` + handlers → `{E}Endpoints`), and returns the related symbols with source in one call. `readSymbolSourceSpan` extracted into `src/refactorUtils.ts` and shared with `get_symbol_source`. Reports `unresolvedRoles` + bundle-specific coverage.
+- **ENH-E — `change_impact`.** New composite tool fusing changed-files → dependents → covering tests. Shared `computeChangedFileImpacts` extracted into `src/changeAnalysis.ts` (and the duplicate `scoreChangeRisk`/`resolveDetectChangesPolicy` in `indexHandler.ts` collapsed onto the canonical `src/policyResolver.ts`). Returns a risk-ranked `testsToRun` list + `residualRisk` note for changed files with no linked test.
+- **ENH-F — `orient`.** New deterministic intent router (`src/orient.ts` + `src/handlers/orientHandler.ts`): keyword-classifies a free-text intent → recommended tool(s) + caveats, resolves an optional seed to `seedSymbols`. **No-LLM**: pure static rule table; `npm run guard:no-llm-runtime` re-verified clean.
+- Verification: full pre-commit green (`typecheck`, `build`, `guard:no-llm-runtime`, `smoke-test`, `benchmark:plan:check` — compactSavings 69.96%, no snapshot regression); `test-refactor-engine` 47/0, new `test-wiring-note`, record fixture in `test-csharp-inheritance-bridge`. Live `scripts/verify-enhancements.mjs` exercises all new tools end-to-end (orient/change_impact/get_feature_bundle/dirty-mode/freshness/coverage).

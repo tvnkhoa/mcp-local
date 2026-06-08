@@ -8,8 +8,8 @@ import {
 } from "../gitHelpers.js";
 import { runGit } from "../gitHelpers.js";
 import { resolveResponseProfile } from "../responseFormatter.js";
-import { formatChangeContextPayload } from "./impactHandler.js";
-import { assertSafeRepoFilePath, safeReadText } from "../refactorUtils.js";
+import { formatChangeContextPayload, buildIndexMeta } from "./impactHandler.js";
+import { readSymbolSourceSpan } from "../refactorUtils.js";
 import type { HandlerContext } from "./handlerContext.js";
 
 // ── search_symbols ────────────────────────────────────────────────────────────
@@ -117,14 +117,14 @@ export function handleGetSymbolContextPack(
   }
 
   if (profile === "compact") {
-    return ctx.asText({ queryName: args.name, selectedSymbol: context.symbol ? { symbolId: context.symbol.symbolId, name: context.symbol.name, kind: context.symbol.kind, filePath: context.symbol.filePath, line: context.symbol.line } : null, candidates: candidates.map((x) => ({ symbolId: x.symbolId, name: x.name, kind: x.kind, filePath: x.filePath, line: x.line, score: x.score, confidence: x.confidence })), context: { callers: context.callers.map((x) => ({ callerName: x.callerName, callerFile: x.callerFile, callerLine: x.callerLine })), callees: context.callees.map((x) => ({ calleeName: x.calleeName, calleeFile: x.calleeFile, calleeLine: x.calleeLine })), importedByFiles: context.importedByFiles }, change: change ? formatChangeContextPayload(change, "compact") : null }, profile);
+    return ctx.asText({ queryName: args.name, selectedSymbol: context.symbol ? { symbolId: context.symbol.symbolId, name: context.symbol.name, kind: context.symbol.kind, filePath: context.symbol.filePath, line: context.symbol.line } : null, candidates: candidates.map((x) => ({ symbolId: x.symbolId, name: x.name, kind: x.kind, filePath: x.filePath, line: x.line, score: x.score, confidence: x.confidence })), context: { callers: context.callers.map((x) => ({ callerName: x.callerName, callerFile: x.callerFile, callerLine: x.callerLine })), callees: context.callees.map((x) => ({ calleeName: x.calleeName, calleeFile: x.calleeFile, calleeLine: x.calleeLine })), importedByFiles: context.importedByFiles }, change: change ? formatChangeContextPayload(change, "compact") : null, indexMeta: buildIndexMeta(store, args.repoId) }, profile);
   }
 
   if (profile === "verbose") {
-    return ctx.asText({ queryName: args.name, selectedSymbolId, candidates, context, change, summary: { candidateCount: candidates.length, contextMatchedCount: context.allMatchedSymbols.length, hasChangeContext: change != null } }, profile);
+    return ctx.asText({ queryName: args.name, selectedSymbolId, candidates, context, change, summary: { candidateCount: candidates.length, contextMatchedCount: context.allMatchedSymbols.length, hasChangeContext: change != null }, indexMeta: buildIndexMeta(store, args.repoId) }, profile);
   }
 
-  return ctx.asText({ queryName: args.name, selectedSymbolId, candidates, context, change }, profile);
+  return ctx.asText({ queryName: args.name, selectedSymbolId, candidates, context, change, indexMeta: buildIndexMeta(store, args.repoId) }, profile);
 }
 
 // ── get_symbol_blame ──────────────────────────────────────────────────────────
@@ -187,29 +187,16 @@ export function handleGetSymbolSource(
   const repo = store.getRepository(args.repoId);
   if (!repo) throw new McpError(ErrorCode.InvalidParams, `get_symbol_source: unknown repoId '${args.repoId}'. Run index_repository first.`);
 
-  const absolute = assertSafeRepoFilePath(repo.repoPath, symbol.filePath.replace(/\\/g, "/"));
-  const content = safeReadText(absolute);
-  if (!content) throw new McpError(ErrorCode.InvalidRequest, `get_symbol_source: unable to read ${symbol.filePath} (file missing or empty on disk).`);
-  const lines = content.split(/\r?\n/);
-
-  const symbolStartLine = symbol.line;
-  // Prefer the persisted end_line; fall back to the next symbol's start line, then a bounded window.
-  let symbolEndLine = symbol.endLine ?? null;
-  let endLineEstimated = false;
-  if (!symbolEndLine || symbolEndLine < symbolStartLine) {
-    endLineEstimated = true;
-    const next = store.getNextSymbolStartLine(args.repoId, symbol.filePath, symbolStartLine);
-    symbolEndLine = next && next - 1 >= symbolStartLine ? next - 1 : Math.min(lines.length, symbolStartLine + 200);
-  }
-
-  const from = Math.max(1, symbolStartLine - args.contextLines);
-  let to = Math.min(lines.length, symbolEndLine + args.contextLines);
-  let truncated = false;
-  if (to - from + 1 > args.maxLines) {
-    to = from + args.maxLines - 1;
-    truncated = true;
-  }
-  const source = lines.slice(from - 1, to).join("\n");
+  const fallbackNextStartLine =
+    symbol.endLine && symbol.endLine >= symbol.line
+      ? null
+      : store.getNextSymbolStartLine(args.repoId, symbol.filePath, symbol.line);
+  const span = readSymbolSourceSpan(repo.repoPath, symbol.filePath, symbol.line, symbol.endLine ?? null, {
+    contextLines: args.contextLines,
+    maxLines: args.maxLines,
+    fallbackNextStartLine
+  });
+  if (!span) throw new McpError(ErrorCode.InvalidRequest, `get_symbol_source: unable to read ${symbol.filePath} (file missing or empty on disk).`);
 
   const staleWarning = buildStaleWarning(args.repoId, store, "line numbers may be off vs current HEAD — re-index for an exact span.");
 
@@ -219,14 +206,14 @@ export function handleGetSymbolSource(
       name: symbol.name,
       kind: symbol.kind,
       filePath: symbol.filePath,
-      symbolStartLine,
-      symbolEndLine,
-      endLineEstimated,
-      startLine: from,
-      endLine: to,
-      lineCount: to - from + 1,
-      truncated,
-      source,
+      symbolStartLine: span.symbolStartLine,
+      symbolEndLine: span.symbolEndLine,
+      endLineEstimated: span.endLineEstimated,
+      startLine: span.startLine,
+      endLine: span.endLine,
+      lineCount: span.lineCount,
+      truncated: span.truncated,
+      source: span.source,
       ...(staleWarning && { staleWarning })
     },
     profile

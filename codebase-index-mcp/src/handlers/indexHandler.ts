@@ -9,6 +9,11 @@ import {
 } from "../gitHelpers.js";
 import { assertPathAllowed, clamp } from "../indexGuardrails.js";
 import { resolveResponseProfile } from "../responseFormatter.js";
+import { resolveDetectChangesPolicy } from "../policyResolver.js";
+import { computeChangedFileImpacts } from "../changeAnalysis.js";
+import { buildCoverageBlock } from "../coverage.js";
+import { buildIndexMeta } from "./impactHandler.js";
+import type { IndexMode } from "../types.js";
 import type { HandlerContext } from "./handlerContext.js";
 
 // ── health_check ─────────────────────────────────────────────────────────────
@@ -141,7 +146,7 @@ export async function handleIndexRepository(
   args: {
     repoId: string;
     repoPath: string;
-    mode: "full" | "incremental";
+    mode: IndexMode;
     docsMode: "auto" | "on" | "off";
     maxFiles: number;
     batchSize: number;
@@ -228,56 +233,23 @@ export function handleDetectChanges(
 
   const latestRun = store.getLatestRun(args.repoId);
   const indexedCommitSha = latestRun?.commitSha ?? null;
-  const headRef = args.headRef;
-  const baseRef = args.baseRef ?? indexedCommitSha;
   const policyDefaults = resolveDetectChangesPolicy(args.policy);
   const minRiskScore = args.minRiskScore ?? policyDefaults.minRiskScore;
   const riskLevels = args.riskLevels ?? policyDefaults.riskLevels;
   const maxResults = args.maxResults ?? policyDefaults.maxResults;
   const sortBy = args.sortBy ?? policyDefaults.sortBy;
 
-  const headCommitSha = resolveHeadCommitSha(repo.repoPath);
-  const isWorkingTreeMode = !baseRef || (headCommitSha != null && baseRef === headCommitSha);
-
-  let trackedChanged: string[];
-  let note: string;
-  if (isWorkingTreeMode) {
-    const unstaged = runGitLines(repo.repoPath, ["diff", "--name-only", "HEAD"]);
-    const staged = runGitLines(repo.repoPath, ["diff", "--cached", "--name-only"]);
-    trackedChanged = [...new Set([...unstaged, ...staged])];
-    note = baseRef
-      ? "using working-tree diff (no new commits since last index; showing staged + unstaged changes)"
-      : "baseRef unavailable; using working-tree diff against HEAD";
-  } else {
-    trackedChanged = runGitLines(repo.repoPath, ["diff", "--name-only", `${baseRef}..${headRef}`]);
-    note = "using git range diff";
-  }
-
-  const untracked = args.includeUntracked
-    ? runGitLines(repo.repoPath, ["ls-files", "--others", "--exclude-standard"])
-    : [];
-
-  const changedFiles = [
-    ...new Set(
-      [...trackedChanged, ...untracked]
-        .map((x) => x.replace(/\\/g, "/").trim())
-        .filter((x) => x.length > 0)
-    )
-  ].slice(0, args.maxFiles);
-
-  const impacts = changedFiles.map((filePath) => {
-    const impact = store.getImpactFiles(args.repoId, filePath, args.impactLimit);
-    const risk = scoreChangeRisk(impact.impactedFiles.length, impact.reliabilitySummary, args.impactLimit);
-    return {
-      filePath,
-      impactedFilesCount: impact.impactedFiles.length,
-      reliabilitySummary: impact.reliabilitySummary,
-      riskScore: risk.riskScore,
-      riskLevel: risk.riskLevel,
-      riskSignals: risk.signals,
-      topImpactedFiles: impact.impactedFiles.slice(0, 5)
-    };
+  const core = computeChangedFileImpacts(store, {
+    repoId: args.repoId,
+    repoPath: repo.repoPath,
+    baseRef: args.baseRef,
+    headRef: args.headRef,
+    includeUntracked: args.includeUntracked,
+    maxFiles: args.maxFiles,
+    impactLimit: args.impactLimit,
+    indexedCommitSha
   });
+  const { baseRef, headRef, changedFiles, note, impacts } = core;
 
   const sortedImpacts = [...impacts].sort((a, b) => {
     if (sortBy === "impact") return b.impactedFilesCount - a.impactedFilesCount || b.riskScore - a.riskScore || a.filePath.localeCompare(b.filePath);
@@ -348,35 +320,186 @@ export function handleDetectChanges(
   return ctx.asText({ repoId: args.repoId, indexedCommitSha, baseRef, headRef, changedFileCount: changedFiles.length, changedFiles, impacts: selectedImpacts, riskSummary, filter: filterInfo, impactedFileCount: impactedFileSet.size, ...(moduleGroups ? { moduleGroups } : {}), note }, profile);
 }
 
+// ── change_impact (ENH-E) ──────────────────────────────────────────────────────
+// One intent — "what did my change affect and which tests cover it" — fusing
+// detect_changes (changed files + risk) → find_impact_files (dependents) →
+// link_tests_to_source (covering tests) into a ranked "tests to run" list plus a
+// residual-risk note. Lets the agent run a trusted targeted test subset instead of the
+// whole suite after editing.
+
+const CHANGE_IMPACT_SOURCE_PROBE_CAP = 100;
+
+export function handleChangeImpact(
+  args: {
+    repoId: string;
+    baseRef?: string;
+    headRef: string;
+    includeUntracked: boolean;
+    maxFiles: number;
+    impactLimit: number;
+    testLinkMinScore: number;
+    testLinkMaxCandidates: number;
+    maxTestsToRun: number;
+    profile: string;
+  },
+  ctx: HandlerContext
+): CallToolResult {
+  const { store } = ctx;
+  const profile = resolveResponseProfile(args.profile as Parameters<typeof resolveResponseProfile>[0]);
+
+  const repo = store.getRepository(args.repoId);
+  if (!repo) {
+    throw new McpError(ErrorCode.InvalidParams, `change_impact: unknown repoId '${args.repoId}'. Run index_repository first.`);
+  }
+
+  const indexedCommitSha = store.getLatestRun(args.repoId)?.commitSha ?? null;
+  const core = computeChangedFileImpacts(store, {
+    repoId: args.repoId,
+    repoPath: repo.repoPath,
+    baseRef: args.baseRef,
+    headRef: args.headRef,
+    includeUntracked: args.includeUntracked,
+    maxFiles: args.maxFiles,
+    impactLimit: args.impactLimit,
+    indexedCommitSha
+  });
+
+  // Dependent set = changed files ∪ their static dependents. Carry per-file risk for ranking.
+  const riskByFile = new Map<string, number>();
+  for (const imp of core.impacts) riskByFile.set(imp.filePath, imp.riskScore);
+  const dependentFiles = new Set<string>(core.changedFiles);
+  for (const imp of core.impacts) {
+    for (const t of imp.topImpactedFiles) {
+      dependentFiles.add(t.filePath);
+      if (!riskByFile.has(t.filePath)) riskByFile.set(t.filePath, imp.riskScore); // inherit caller risk
+    }
+  }
+
+  // Probe covering tests per dependent source file (capped), highest-risk files first.
+  const probeOrder = [...dependentFiles].sort((a, b) => (riskByFile.get(b) ?? 0) - (riskByFile.get(a) ?? 0));
+  const probed = probeOrder.slice(0, CHANGE_IMPACT_SOURCE_PROBE_CAP);
+  const sourceProbeTruncated = probeOrder.length > probed.length;
+
+  const testMap = new Map<string, { testFile: string; coveredSources: Set<string>; score: number; reasons: Set<string> }>();
+  const coveredSources = new Set<string>();
+  for (const sourceFile of probed) {
+    // `limit` (3rd arg) caps total links AND triggers an early loop break in linkTestsToSource,
+    // so it must be the per-source budget (maxTestsToRun), NOT testLinkMaxCandidates (the
+    // per-test candidate cap, 4th arg) — passing the small value there truncated each probe to ~3.
+    const links = store.linkTestsToSource(args.repoId, sourceFile, args.maxTestsToRun, args.testLinkMaxCandidates, args.testLinkMinScore);
+    const srcRisk = (riskByFile.get(sourceFile) ?? 0) / 100; // 0..1
+    for (const link of links) {
+      coveredSources.add(link.sourceFile);
+      const weighted = Math.max(srcRisk, 0.01) * link.score; // keep zero-risk-but-linked tests rankable
+      const existing = testMap.get(link.testFile);
+      if (existing) {
+        existing.coveredSources.add(link.sourceFile);
+        existing.score = Math.max(existing.score, weighted);
+        for (const r of link.reasons ?? []) existing.reasons.add(r);
+      } else {
+        testMap.set(link.testFile, { testFile: link.testFile, coveredSources: new Set([link.sourceFile]), score: weighted, reasons: new Set(link.reasons ?? []) });
+      }
+    }
+  }
+
+  const testsToRun = [...testMap.values()]
+    .map((t) => ({ testFile: t.testFile, coveredSources: [...t.coveredSources], score: Math.round(t.score * 1000) / 1000, reasons: [...t.reasons] }))
+    .sort((a, b) => b.score - a.score || b.coveredSources.length - a.coveredSources.length || a.testFile.localeCompare(b.testFile))
+    .slice(0, args.maxTestsToRun);
+
+  const untestedChangedFiles = core.changedFiles.filter((f) => !coveredSources.has(f));
+  const dependentCount = dependentFiles.size;
+  const covered = [...dependentFiles].filter((f) => coveredSources.has(f)).length;
+
+  const riskSummary = {
+    high: core.impacts.filter((x) => x.riskLevel === "high").length,
+    medium: core.impacts.filter((x) => x.riskLevel === "medium").length,
+    low: core.impacts.filter((x) => x.riskLevel === "low").length,
+    maxRiskScore: core.impacts.reduce((m, x) => Math.max(m, x.riskScore), 0)
+  };
+
+  const maxUnresolvedRatio = core.impacts.reduce((m, x) => Math.max(m, x.reliabilitySummary.unresolvedRatio), 0);
+  const coverage = buildCoverageBlock({
+    resultCount: testsToRun.length,
+    // Tests are expected only when there ARE dependent files to cover; an empty result then
+    // is a low-confidence "no tests found" signal (emits a fallback), not a clean bill.
+    expectedNonZero: dependentCount > 0,
+    truncated: sourceProbeTruncated,
+    reliabilitySummary: { unresolvedRatio: maxUnresolvedRatio },
+    kind: "change_impact"
+  });
+
+  const residualRisk = {
+    untestedChangedFiles,
+    note:
+      untestedChangedFiles.length > 0
+        ? `${String(untestedChangedFiles.length)} changed file(s) have no linked test — run the broader suite for these.`
+        : "all changed files have at least one linked test."
+  };
+  const testCoverage = { dependentFiles: dependentCount, covered, uncovered: dependentCount - covered, ...(sourceProbeTruncated ? { probeTruncatedAt: CHANGE_IMPACT_SOURCE_PROBE_CAP } : {}) };
+
+  if (profile === "nano") {
+    return ctx.asText(
+      {
+        repoId: args.repoId,
+        changedFileCount: core.changedFiles.length,
+        topTestsToRun: testsToRun.slice(0, 10).map((t) => ({ testFile: t.testFile, score: t.score })),
+        riskSummary,
+        residualRisk: residualRisk.note,
+        coverage: coverage.confidence,
+        note: core.note
+      },
+      profile
+    );
+  }
+
+  if (profile === "compact") {
+    return ctx.asText(
+      {
+        repoId: args.repoId,
+        baseRef: core.baseRef,
+        headRef: core.headRef,
+        changedFileCount: core.changedFiles.length,
+        changedFiles: core.changedFiles,
+        riskSummary,
+        testsToRun: testsToRun.map((t) => ({ testFile: t.testFile, coveredSources: t.coveredSources, score: t.score })),
+        testCoverage,
+        residualRisk,
+        coverage,
+        indexMeta: buildIndexMeta(store, args.repoId),
+        note: core.note
+      },
+      profile
+    );
+  }
+
+  return ctx.asText(
+    {
+      repoId: args.repoId,
+      indexedCommitSha,
+      baseRef: core.baseRef,
+      headRef: core.headRef,
+      changedFileCount: core.changedFiles.length,
+      changedFiles: core.changedFiles,
+      impacts: core.impacts,
+      riskSummary,
+      testsToRun,
+      testCoverage,
+      residualRisk,
+      coverage,
+      indexMeta: buildIndexMeta(store, args.repoId),
+      note: core.note
+    },
+    profile
+  );
+}
+
 // ── local helpers (used only by this handler group) ──────────────────────────
 
 export function resolveDocsMode(mode: "auto" | "on" | "off", docsEnabled: boolean): boolean {
   if (mode === "on") return true;
   if (mode === "off") return false;
   return docsEnabled;
-}
-
-function scoreChangeRisk(
-  impactedFilesCount: number,
-  reliabilitySummary: { edgeCount: number; medianConfidence: number; lowConfidenceEdgeCount: number; unresolvedRatio: number },
-  impactLimit: number
-): { riskScore: number; riskLevel: "high" | "medium" | "low"; signals: { impactBreadth: number; unresolvedPenalty: number; confidencePenalty: number; lowConfidencePenalty: number } } {
-  const clampRisk = (v: number) => Math.max(0, Math.min(1, v));
-  const impactBreadth = clampRisk(impactedFilesCount / Math.max(1, impactLimit));
-  const unresolvedPenalty = clampRisk(reliabilitySummary.unresolvedRatio);
-  const confidencePenalty = clampRisk(1 - reliabilitySummary.medianConfidence);
-  const lowConfidencePenalty = reliabilitySummary.edgeCount > 0 ? clampRisk(reliabilitySummary.lowConfidenceEdgeCount / reliabilitySummary.edgeCount) : 0;
-  const score01 = impactBreadth * 0.5 + unresolvedPenalty * 0.25 + confidencePenalty * 0.2 + lowConfidencePenalty * 0.05;
-  const riskScore = Math.round(score01 * 100);
-  const riskLevel = riskScore >= 67 ? "high" : riskScore >= 34 ? "medium" : "low";
-  return { riskScore, riskLevel, signals: { impactBreadth, unresolvedPenalty, confidencePenalty, lowConfidencePenalty } };
-}
-
-function resolveDetectChangesPolicy(policy: "quick-triage" | "strict-review" | "release-gate" | "custom"): { minRiskScore: number; riskLevels: ("high" | "medium" | "low")[]; maxResults: number; sortBy: "risk" | "impact" | "path" } {
-  if (policy === "quick-triage") return { minRiskScore: 20, riskLevels: ["high", "medium"], maxResults: 20, sortBy: "risk" };
-  if (policy === "strict-review") return { minRiskScore: 40, riskLevels: ["high", "medium"], maxResults: 50, sortBy: "impact" };
-  if (policy === "release-gate") return { minRiskScore: 67, riskLevels: ["high"], maxResults: 100, sortBy: "risk" };
-  return { minRiskScore: 0, riskLevels: ["high", "medium", "low"], maxResults: 100, sortBy: "risk" };
 }
 
 export async function activateWatchForRepo(

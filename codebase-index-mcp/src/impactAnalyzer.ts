@@ -49,6 +49,124 @@ export function normalizePath(filePath: string): string {
   return filePath.replace(/\\/g, "/");
 }
 
+// ── DI / reflection wiring detection (ENH-D / ISSUE-014) ────────────────
+// MediatR pipeline behaviours, request/notification handlers, and endpoint groups
+// are never called statically — they are resolved and invoked via DI/reflection at
+// request time, so there is no CALLS edge into them and find_impact_files returns a
+// false-empty blast radius. We detect these shapes from IMPLEMENTS edges (record-aware
+// after ISSUE-013) so impact responses can explain the empty result instead of implying
+// "no dependents". Matched by interface-name PREFIX (generics are already stripped in
+// the IMPLEMENTS token, e.g. `iface:IPipelineBehavior`).
+
+const WIRING_INTERFACES: { prefix: string; kind: "mediatr_pipeline" | "mediatr_handler" | "endpoint_group" }[] = [
+  { prefix: "IPipelineBehavior", kind: "mediatr_pipeline" },
+  { prefix: "IRequestHandler", kind: "mediatr_handler" },
+  { prefix: "INotificationHandler", kind: "mediatr_handler" },
+  { prefix: "IEndpointGroup", kind: "endpoint_group" }
+];
+
+const WIRING_NAME_SUFFIXES = ["Behaviour", "Behavior", "Endpoints", "EndpointGroup"];
+
+export type WiringShape = {
+  wired: boolean;
+  kind: "mediatr_pipeline" | "mediatr_handler" | "endpoint_group" | null;
+  matchedInterface: string | null;
+  /** Distinct MediatR request types in the repo (impl of IRequest), for the pipeline note. */
+  requestCount: number;
+};
+
+/** Strip a possible `iface:` prefix and generic args from an IMPLEMENTS target token. */
+function ifaceNameFromToken(token: string): string {
+  return token.replace(/^iface:/, "").replace(/<.*>$/, "").trim();
+}
+
+export function detectWiringShapeImpl(
+  db: Database.Database,
+  repoId: string,
+  filePath: string
+): WiringShape {
+  const canonicalFilePath = resolveCanonicalFilePath(db, repoId, filePath);
+
+  // Interfaces implemented by any type declared in this file (resolved name OR iface: placeholder).
+  const rows = db
+    .prepare(
+      `
+      select e.to_id as toId, si.name as ifaceName, s.name as symName, s.kind as symKind
+      from symbols s
+      inner join edges e
+        on e.repo_id = s.repo_id and e.from_id = s.symbol_id and e.type = 'IMPLEMENTS'
+      left join symbols si on si.repo_id = e.repo_id and si.symbol_id = e.to_id
+      where s.repo_id = ? and s.file_path = ?
+      `
+    )
+    .all(repoId, canonicalFilePath) as { toId: string; ifaceName: string | null; symName: string; symKind: string }[];
+
+  let matched: { kind: WiringShape["kind"]; matchedInterface: string } | null = null;
+  for (const r of rows) {
+    const name = r.ifaceName ?? ifaceNameFromToken(r.toId);
+    const hit = WIRING_INTERFACES.find((w) => name === w.prefix || name.startsWith(w.prefix));
+    if (hit) {
+      matched = { kind: hit.kind, matchedInterface: name };
+      break;
+    }
+  }
+
+  // Fallback: name-suffix heuristic over the file's own type symbols.
+  if (!matched) {
+    const suffixHit = rows.find(
+      (r) =>
+        (r.symKind === "class" || r.symKind === "struct" || r.symKind === "interface") &&
+        WIRING_NAME_SUFFIXES.some((suf) => r.symName.endsWith(suf))
+    );
+    if (suffixHit) {
+      const kind = /Endpoint/.test(suffixHit.symName) ? "endpoint_group" : "mediatr_pipeline";
+      matched = { kind, matchedInterface: suffixHit.symName };
+    }
+  }
+
+  if (!matched) {
+    return { wired: false, kind: null, matchedInterface: null, requestCount: 0 };
+  }
+
+  // For pipeline behaviours, count distinct request types (impl of IRequest) for the note.
+  let requestCount = 0;
+  if (matched.kind === "mediatr_pipeline") {
+    const countRow = db
+      .prepare(
+        `
+        select count(distinct e.from_id) as n
+        from edges e
+        left join symbols si on si.repo_id = e.repo_id and si.symbol_id = e.to_id
+        where e.repo_id = ? and e.type = 'IMPLEMENTS'
+          and (e.to_id like 'iface:IRequest%' or si.name like 'IRequest%')
+        `
+      )
+      .get(repoId) as { n: number } | undefined;
+    requestCount = countRow?.n ?? 0;
+  }
+
+  return { wired: true, kind: matched.kind, matchedInterface: matched.matchedInterface, requestCount };
+}
+
+/** Human-readable note explaining why a wired type has an empty static blast radius. */
+export function buildWiringNote(shape: WiringShape): string {
+  const label = shape.matchedInterface ?? shape.kind ?? "DI-wired type";
+  if (shape.kind === "mediatr_pipeline") {
+    const flow = shape.requestCount > 0 ? ` — ${String(shape.requestCount)} requests flow through the MediatR pipeline` : " — requests are dispatched through the MediatR pipeline at runtime";
+    return `type is DI/reflection-wired (${label}); static impact graph is incomplete${flow}. Run the full test suite to scope shared-infra changes.`;
+  }
+  if (shape.kind === "endpoint_group") {
+    return `type is reflection-registered (${label}); endpoints are auto-discovered, so static callers are empty. Use route_map for the endpoint surface.`;
+  }
+  return `type is DI/reflection-wired (${label}); callers are resolved at runtime via the DI container, so the static impact graph is incomplete.`;
+}
+
+/** Wiring note for a file, or undefined if it isn't a recognized DI/reflection-wired shape. */
+function wiringNoteFor(db: Database.Database, repoId: string, canonicalFilePath: string): string | undefined {
+  const shape = detectWiringShapeImpl(db, repoId, canonicalFilePath);
+  return shape.wired ? buildWiringNote(shape) : undefined;
+}
+
 export function resolveCanonicalFilePath(db: Database.Database, repoId: string, filePath: string): string {
   const normalized = normalizePath(filePath);
 
@@ -278,6 +396,7 @@ export function getImpactSurfaceImpl(
   }[];
   graphHealth: GraphHealth;
   reliabilitySummary: ReliabilitySummary;
+  wiringNote?: string;
 } {
   const canonicalFilePath = resolveCanonicalFilePath(db, repoId, filePath);
   const edgeJoin = buildEdgeToSymbolJoinClause();
@@ -323,10 +442,15 @@ export function getImpactSurfaceImpl(
     c.edgeType !== "PROPERTY_REF" || c.confidence >= 0.7
   );
 
+  // When no external callers surface, the file may be a DI/reflection-wired shape whose
+  // callers are invoked at runtime — explain that instead of implying "no dependents".
+  const wiringNote = filteredCallers.length === 0 ? wiringNoteFor(db, repoId, canonicalFilePath) : undefined;
+
   return {
     callers: filteredCallers,
     graphHealth,
-    reliabilitySummary: buildReliabilitySummaryImpl(filteredCallers.map((x) => x.confidence), graphHealth)
+    reliabilitySummary: buildReliabilitySummaryImpl(filteredCallers.map((x) => x.confidence), graphHealth),
+    ...(wiringNote ? { wiringNote } : {})
   };
 }
 
@@ -341,6 +465,7 @@ export function getImpactFilesImpl(
   impactedFiles: { filePath: string; reason: string; confidence: number; symbolsAffected: string[] }[];
   graphHealth: GraphHealth;
   reliabilitySummary: ReliabilitySummary;
+  wiringNote?: string;
 } {
   const canonicalFilePath = resolveCanonicalFilePath(db, repoId, filePath);
   const edgeJoin = buildEdgeToSymbolJoinClause();
@@ -365,10 +490,12 @@ export function getImpactFilesImpl(
   if (distinctFiles.length === 0) {
     const moduleSymbolId = findModuleSymbolId(db, repoId, canonicalFilePath) ?? undefined;
     const graphHealth = countUnresolvedEdgesForFileImpl(db, repoId, canonicalFilePath, moduleSymbolId);
+    const wiringNote = wiringNoteFor(db, repoId, canonicalFilePath);
     return {
       impactedFiles: [],
       graphHealth,
-      reliabilitySummary: buildReliabilitySummaryImpl([], graphHealth)
+      reliabilitySummary: buildReliabilitySummaryImpl([], graphHealth),
+      ...(wiringNote ? { wiringNote } : {})
     };
   }
 

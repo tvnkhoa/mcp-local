@@ -40,6 +40,7 @@ import type {
 } from "../types.js";
 import { collectGitChangedFiles } from "../gitHelpers.js";
 import { resolveResponseProfile } from "../responseFormatter.js";
+import { buildCoverageBlock } from "../coverage.js";
 import type { HandlerContext } from "./handlerContext.js";
 
 // ── rename_assist ─────────────────────────────────────────────────────────────
@@ -474,16 +475,18 @@ export function handleTraceExecutionFlow(
   if (!result.entrySymbol) {
     throw new McpError(ErrorCode.InvalidParams, `trace_execution_flow: entry symbol '${args.entrySymbolId}' not found in repo '${args.repoId}'.`);
   }
+  const coverage = buildCoverageBlock({ resultCount: result.nodes.length, truncated: result.truncated, kind: "execution_flow", query: result.entrySymbol.name });
   if (profile === "nano") {
-    return ctx.asText({ entrySymbol: { name: result.entrySymbol.name, filePath: result.entrySymbol.filePath }, nodeCount: result.nodes.length, edgeCount: result.edges.length, depthReached: result.depthReached, truncated: result.truncated, topCallees: result.edges.slice(0, 10).map((e) => e.toName) }, profile);
+    return ctx.asText({ entrySymbol: { name: result.entrySymbol.name, filePath: result.entrySymbol.filePath }, nodeCount: result.nodes.length, edgeCount: result.edges.length, depthReached: result.depthReached, truncated: result.truncated, topCallees: result.edges.slice(0, 10).map((e) => e.toName), coverage: coverage.confidence }, profile);
   }
   if (profile === "compact") {
     return ctx.asText({
       entrySymbol: { symbolId: result.entrySymbol.symbolId, name: result.entrySymbol.name, kind: result.entrySymbol.kind, filePath: result.entrySymbol.filePath },
       nodeCount: result.nodes.length, edgeCount: result.edges.length, depthReached: result.depthReached, truncated: result.truncated,
       nodes: result.nodes.map((n) => ({ symbolId: n.symbolId, name: n.name, kind: n.kind, filePath: n.filePath })),
-      edges: result.edges.map((e) => ({ fromId: e.fromId, toId: e.toId, fromName: e.fromName, toName: e.toName, confidence: e.confidence }))
+      edges: result.edges.map((e) => ({ fromId: e.fromId, toId: e.toId, fromName: e.fromName, toName: e.toName, confidence: e.confidence })),
+      coverage
     }, profile);
   }
-  return ctx.asText({ entrySymbol: result.entrySymbol, nodeCount: result.nodes.length, edgeCount: result.edges.length, depthReached: result.depthReached, truncated: result.truncated, nodes: result.nodes, edges: result.edges }, profile);
+  return ctx.asText({ entrySymbol: result.entrySymbol, nodeCount: result.nodes.length, edgeCount: result.edges.length, depthReached: result.depthReached, truncated: result.truncated, nodes: result.nodes, edges: result.edges, coverage }, profile);
 }

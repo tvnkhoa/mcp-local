@@ -159,6 +159,40 @@ export function collectGitChangedFiles(repoPath: string): Set<string> {
   return new Set(files);
 }
 
+/**
+ * Full working-tree delta as repo-relative POSIX paths: unstaged + staged + untracked.
+ * Unlike `collectGitChangedFiles` (unstaged-vs-HEAD only) this is the complete set of
+ * files `index_repository(mode="dirty")` must re-index. Returns an empty set on a
+ * non-git repo or clean tree.
+ */
+export function collectDirtyFiles(repoPath: string): Set<string> {
+  // `-c core.quotePath=false` so non-ASCII paths come back verbatim (not C-quoted/octal-escaped);
+  // otherwise dirty-mode's onlyRelativePaths filter never matches them and the edited file is
+  // silently skipped from re-index.
+  const noQuote = ["-c", "core.quotePath=false"];
+  const unstaged = runGitLines(repoPath, [...noQuote, "diff", "--name-only", "HEAD"]);
+  const staged = runGitLines(repoPath, [...noQuote, "diff", "--cached", "--name-only"]);
+  const untracked = runGitLines(repoPath, [...noQuote, "ls-files", "--others", "--exclude-standard"]);
+  return new Set([...unstaged, ...staged, ...untracked].map((x) => x.replace(/\\/g, "/")));
+}
+
+/**
+ * Number of commits HEAD is ahead of the indexed commit (`indexedSha..HEAD`).
+ * Best-effort: returns null on a non-git repo, detached/unknown sha, or git error.
+ */
+export function countCommitsBehind(repoPath: string, indexedSha: string | null): number | null {
+  if (!indexedSha) {
+    return null;
+  }
+  try {
+    const out = runGit(repoPath, ["rev-list", "--count", `${indexedSha}..HEAD`]).trim();
+    const n = Number(out);
+    return Number.isFinite(n) ? n : null;
+  } catch {
+    return null;
+  }
+}
+
 export function getRepoStaleness(
   repoId: string,
   store: GraphStore

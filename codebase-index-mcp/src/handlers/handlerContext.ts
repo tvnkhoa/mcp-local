@@ -2,7 +2,7 @@ import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import type { GraphStore } from "../graphStore.js";
 import type { WatchManager } from "../watchManager.js";
 import type { ResponseProfile } from "../responseFormatter.js";
-import type { IndexRunSummary } from "../types.js";
+import type { IndexMode, IndexRunSummary } from "../types.js";
 
 export interface HandlerConstants {
   MAX_FILES_PER_RUN: number;
@@ -31,7 +31,7 @@ export interface HandlerContext {
   runIndexAndResolve: (
     repoId: string,
     repoPath: string,
-    mode: "full" | "incremental",
+    mode: IndexMode,
     docsEnabled: boolean,
     maxFiles: number,
     batchSize: number

@@ -38,6 +38,13 @@ export type RunIndexInput = {
   parseJobTimeoutMs?: number;
   onProgress?: (progress: IndexProgressSnapshot) => void;
   abortSignal?: AbortSignal;
+  /**
+   * Dirty mode (ENH-A): when set, only files whose repo-relative POSIX path is in this
+   * set are indexed, and stale-file/orphaned-edge pruning is suppressed (the restricted
+   * scan is a subset of disk, so pruning would delete every unlisted file). Used by
+   * index_repository(mode="dirty") to re-index just the git working-tree delta.
+   */
+  onlyRelativePaths?: Set<string>;
 };
 
 export async function runIndexPipeline(store: GraphStore, input: RunIndexInput): Promise<IndexRunSummary> {
@@ -64,7 +71,7 @@ export async function runIndexPipeline(store: GraphStore, input: RunIndexInput):
   
   process.stderr.write(`[index-start] repoId=${input.repoId} mode=${input.mode} scanning files...\n`);
   
-  const files = await glob("**/*", {
+  const globbed = await glob("**/*", {
     cwd: input.repoPath,
     nodir: true,
     absolute: true,
@@ -83,7 +90,16 @@ export async function runIndexPipeline(store: GraphStore, input: RunIndexInput):
     ]
   });
 
-  process.stderr.write(`[index-scan-complete] found ${String(files.length)} files, will process up to ${String(maxFiles)}\n`);
+  // Dirty mode (ENH-A): restrict the scan to an explicit set of repo-relative POSIX
+  // paths (the git working-tree delta). When set, pruning is suppressed below so the
+  // restricted set is never mistaken for "all files on disk".
+  const files = input.onlyRelativePaths
+    ? globbed.filter((abs) =>
+        input.onlyRelativePaths!.has(path.relative(input.repoPath, abs).replace(/\\/g, "/"))
+      )
+    : globbed;
+
+  process.stderr.write(`[index-scan-complete] found ${String(files.length)} files${input.onlyRelativePaths ? ` (restricted from ${String(globbed.length)} by dirty file set)` : ""}, will process up to ${String(maxFiles)}\n`);
 
   // Pre-scan: collect all PackageReference names from .csproj files so C# extractors
   // can widen namespace→nuget contract mapping beyond the hardcoded set. (ISSUE-006)
@@ -454,7 +470,9 @@ export async function runIndexPipeline(store: GraphStore, input: RunIndexInput):
     // A capped scan (files.length > maxFiles) cannot safely prune: the missing tail would look
     // like deletions. resolveImplementsEdges is also skipped in that case to avoid resolving
     // placeholder edges against stale symbols that prune would have removed.
-    const scanWasComplete = files.length <= maxFiles;
+    // Dirty mode (ENH-A) restricts `files` to a subset of disk, so it is NEVER a complete
+    // scan — pruning would delete every file not in the dirty set. Force-suppress here.
+    const scanWasComplete = files.length <= maxFiles && !input.onlyRelativePaths;
     if (!input.abortSignal?.aborted) {
       if (scanWasComplete) {
         const currentPaths = selectedFiles.map((f) => path.relative(input.repoPath, f));
@@ -466,6 +484,8 @@ export async function runIndexPipeline(store: GraphStore, input: RunIndexInput):
         if (prunedEdges > 0) {
           process.stderr.write(`[index-prune] removed ${String(prunedEdges)} orphaned edge(s) from index\n`);
         }
+      } else if (input.onlyRelativePaths) {
+        process.stderr.write(`[index-prune-skipped] dirty mode re-indexed ${String(files.length)} changed file(s) — pruning and IMPLEMENTS resolution skipped (subset scan)\n`);
       } else {
         process.stderr.write(`[index-prune-skipped] repo has ${String(files.length)} files, exceeds cap of ${String(maxFiles)} — stale-file cleanup and IMPLEMENTS resolution skipped to avoid false deletions\n`);
       }

@@ -2,7 +2,8 @@ import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { McpError, ErrorCode } from "@modelcontextprotocol/sdk/types.js";
 import { resolveResponseProfile } from "../responseFormatter.js";
 import { validateReadOnlyGraphSql, validateAllowedTables } from "../sqliteGuardrails.js";
-import { buildStaleWarning } from "../gitHelpers.js";
+import { buildStaleWarning, getRepoStaleness, collectDirtyFiles, countCommitsBehind } from "../gitHelpers.js";
+import { buildCoverageBlock } from "../coverage.js";
 import { GraphStore } from "../graphStore.js";
 import type { HandlerContext } from "./handlerContext.js";
 
@@ -124,9 +125,11 @@ export function handleGetCallChain(
       filePath: direction === "callees" ? (e as { toFilePath?: string }).toFilePath ?? null : (e as { fromFilePath?: string }).fromFilePath ?? null,
       confidence: e.confidence ?? null
     }));
-    return ctx.asText({ repoId: args.repoId, symbolId: args.symbolId, direction, chainLength: rows.length, path: pathNodes, truncated: rows.length > pathNodes.length }, profile);
+    const coverageNano = buildCoverageBlock({ resultCount: rows.length, truncated: rows.length >= args.limit, kind: "call_chain", query: args.symbolId });
+    return ctx.asText({ repoId: args.repoId, symbolId: args.symbolId, direction, chainLength: rows.length, path: pathNodes, truncated: rows.length > pathNodes.length, coverage: coverageNano.confidence }, profile);
   }
-  return ctx.asText({ repoId: args.repoId, symbolId: args.symbolId, direction, depth: args.depth, edges: rows }, profile);
+  const coverage = buildCoverageBlock({ resultCount: rows.length, truncated: rows.length >= args.limit, kind: "call_chain", query: args.symbolId });
+  return ctx.asText({ repoId: args.repoId, symbolId: args.symbolId, direction, depth: args.depth, edges: rows, coverage }, profile);
 }
 
 // ── find_impact_files ─────────────────────────────────────────────────────────
@@ -144,28 +147,30 @@ export function handleFindImpactFiles(
 
   if (args.view === "surface") {
     const result = store.getImpactSurface(args.repoId, args.filePath, args.limit);
+    const surfaceWiring = result.wiringNote ? { wiringNote: result.wiringNote } : {};
     if (profile === "nano") {
       const callers = result.callers;
       const topItems = callers.slice(0, 10).map((x) => ({ callerName: x.callerName, callerFile: x.callerFile, edgeType: x.edgeType }));
-      return ctx.asText({ repoId: args.repoId, filePath: args.filePath, totalCallers: callers.length, topItems, hasMore: callers.length > topItems.length, ...warn }, profile);
+      return ctx.asText({ repoId: args.repoId, filePath: args.filePath, totalCallers: callers.length, topItems, hasMore: callers.length > topItems.length, ...surfaceWiring, ...warn }, profile);
     }
-    return ctx.asText({ repoId: args.repoId, filePath: args.filePath, ...result, ...warn }, profile);
+    return ctx.asText({ repoId: args.repoId, filePath: args.filePath, ...result, indexMeta: buildIndexMeta(store, args.repoId, true), ...warn }, profile);
   }
   const result = store.getImpactFiles(args.repoId, args.filePath, args.limit);
+  const filesWiring = result.wiringNote ? { wiringNote: result.wiringNote } : {};
   if (args.groupBy === "module") {
     const filePaths = result.impactedFiles.map((f) => f.filePath);
     const grouped = store.groupFilesByModule(filePaths);
     const moduleGroups = Object.entries(grouped).map(([module, files]) => ({ module, fileCount: files.length, topFiles: files.slice(0, 5) }));
     if (profile === "nano") {
-      return ctx.asText({ repoId: args.repoId, filePath: args.filePath, totalModules: moduleGroups.length, topModules: moduleGroups.slice(0, 5), hasMore: moduleGroups.length > 5, ...warn }, profile);
+      return ctx.asText({ repoId: args.repoId, filePath: args.filePath, totalModules: moduleGroups.length, topModules: moduleGroups.slice(0, 5), hasMore: moduleGroups.length > 5, ...filesWiring, ...warn }, profile);
     }
-    return ctx.asText({ repoId: args.repoId, filePath: args.filePath, moduleGroups, graphHealth: result.graphHealth, reliabilitySummary: result.reliabilitySummary, ...warn }, profile);
+    return ctx.asText({ repoId: args.repoId, filePath: args.filePath, moduleGroups, graphHealth: result.graphHealth, reliabilitySummary: result.reliabilitySummary, ...filesWiring, indexMeta: buildIndexMeta(store, args.repoId, true), ...warn }, profile);
   }
   if (profile === "nano") {
     const topFiles = result.impactedFiles.slice(0, 10).map((f) => ({ filePath: f.filePath, symbolCount: (f as { symbolCount?: number }).symbolCount ?? null }));
-    return ctx.asText({ repoId: args.repoId, filePath: args.filePath, totalFiles: result.impactedFiles.length, topFiles, hasMore: result.impactedFiles.length > topFiles.length, ...warn }, profile);
+    return ctx.asText({ repoId: args.repoId, filePath: args.filePath, totalFiles: result.impactedFiles.length, topFiles, hasMore: result.impactedFiles.length > topFiles.length, ...filesWiring, ...warn }, profile);
   }
-  return ctx.asText({ repoId: args.repoId, filePath: args.filePath, ...result, ...warn }, profile);
+  return ctx.asText({ repoId: args.repoId, filePath: args.filePath, ...result, indexMeta: buildIndexMeta(store, args.repoId, true), ...warn }, profile);
 }
 
 // ── get_change_context ────────────────────────────────────────────────────────
@@ -272,17 +277,64 @@ export function handleGetFileContext(
 
 // ── index meta helper ─────────────────────────────────────────────────────────
 
-function buildIndexMeta(store: GraphStore, repoId: string): { branch: string | null; commitSha: string | null; indexedAt: string } | null {
+type IndexMeta = {
+  branch: string | null;
+  commitSha: string | null;
+  indexedAt: string;
+  indexLag?: { commitsBehind?: number; dirtyCount: number };
+  dirtyFiles?: string[];
+};
+
+const DIRTY_FILES_CAP = 20;
+
+/**
+ * Index provenance for graph-read responses: branch/commitSha/indexedAt. Pure DB read —
+ * deterministic, no git subprocess. `withFreshness:true` (ENH-A) additionally probes the
+ * git working tree for `indexLag`/`dirtyFiles` so the agent knows which results to distrust
+ * mid-edit; both are omitted when the tree is clean and HEAD matches the indexed commit.
+ *
+ * Freshness is git-derived and therefore NON-deterministic, so it is attached ONLY by
+ * edit-verification tools (find_impact_files, change_impact) — never by the navigation
+ * tools the token benchmark snapshots (file/folder summary, context pack), which must stay
+ * deterministic and lean. Attach per-handler only — NOT in asText (cost; repo-less tools).
+ */
+export function buildIndexMeta(store: GraphStore, repoId: string, withFreshness = false): IndexMeta | null {
   const latestRun = store.getLatestRun(repoId);
   if (!latestRun) return null;
-  // Pure DB read — no git subprocess. Boilerplate `note` removed (repeated every call).
-  // Staleness is surfaced by tools that gate on it (search_symbols, health_check, impact tools);
-  // callers compare branch/commitSha against their current branch.
-  return {
+
+  const meta: IndexMeta = {
     branch: latestRun.branch,
     commitSha: latestRun.commitSha,
     indexedAt: latestRun.finishedAt
   };
+
+  if (withFreshness) {
+    const repo = store.getRepository(repoId);
+    if (repo) {
+      let dirtyCount = 0;
+      try {
+        const dirty = collectDirtyFiles(repo.repoPath);
+        dirtyCount = dirty.size;
+        if (dirtyCount > 0) {
+          meta.dirtyFiles = [...dirty].slice(0, DIRTY_FILES_CAP);
+        }
+      } catch {
+        // non-git repo / git error — leave dirty info off
+      }
+      const staleness = getRepoStaleness(repoId, store);
+      const commitsBehind = staleness.isStale
+        ? countCommitsBehind(repo.repoPath, latestRun.commitSha) ?? undefined
+        : undefined;
+      // Surface indexLag whenever the tree is dirty OR the index is stale — gate on isStale,
+      // not on commitsBehind, which is falsy-zero for a diverged/rewound HEAD and would
+      // otherwise drop the staleness signal on a clean tree.
+      if (dirtyCount > 0 || staleness.isStale) {
+        meta.indexLag = { dirtyCount, ...(commitsBehind !== undefined ? { commitsBehind } : {}) };
+      }
+    }
+  }
+
+  return meta;
 }
 
 // ── get_folder_summary ────────────────────────────────────────────────────────

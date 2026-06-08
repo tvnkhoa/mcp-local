@@ -40,6 +40,64 @@ export function assertSafeRepoFilePath(repoPath: string, relativePath: string): 
   return fullPath;
 }
 
+export type SymbolSourceSpan = {
+  source: string;
+  symbolStartLine: number;
+  symbolEndLine: number;
+  endLineEstimated: boolean;
+  startLine: number;
+  endLine: number;
+  lineCount: number;
+  truncated: boolean;
+};
+
+/**
+ * Read a symbol's source span from disk (path-guarded). Shared by get_symbol_source and
+ * get_feature_bundle so both read spans identically. The caller resolves the end line:
+ * prefer the persisted `symbolEndLine`; when absent, pass `fallbackNextStartLine` (the next
+ * symbol's start line) so the span ends just before it, else a bounded window is used.
+ * Returns null when the file is missing/empty on disk.
+ */
+export function readSymbolSourceSpan(
+  repoPath: string,
+  filePath: string,
+  symbolStartLine: number,
+  symbolEndLine: number | null,
+  opts: { contextLines: number; maxLines: number; fallbackNextStartLine?: number | null }
+): SymbolSourceSpan | null {
+  const absolute = assertSafeRepoFilePath(repoPath, filePath.replace(/\\/g, "/"));
+  const content = safeReadText(absolute);
+  if (!content) return null;
+  const lines = content.split(/\r?\n/);
+
+  let endLine = symbolEndLine ?? null;
+  let endLineEstimated = false;
+  if (!endLine || endLine < symbolStartLine) {
+    endLineEstimated = true;
+    const next = opts.fallbackNextStartLine ?? null;
+    endLine = next && next - 1 >= symbolStartLine ? next - 1 : Math.min(lines.length, symbolStartLine + 200);
+  }
+
+  const from = Math.max(1, symbolStartLine - opts.contextLines);
+  let to = Math.min(lines.length, endLine + opts.contextLines);
+  let truncated = false;
+  if (to - from + 1 > opts.maxLines) {
+    to = from + opts.maxLines - 1;
+    truncated = true;
+  }
+
+  return {
+    source: lines.slice(from - 1, to).join("\n"),
+    symbolStartLine,
+    symbolEndLine: endLine,
+    endLineEstimated,
+    startLine: from,
+    endLine: to,
+    lineCount: to - from + 1,
+    truncated
+  };
+}
+
 export function inferLanguageFromPath(filePath: string): string {
   const ext = path.extname(filePath).toLowerCase();
   if (ext === ".ts" || ext === ".tsx") return "typescript";

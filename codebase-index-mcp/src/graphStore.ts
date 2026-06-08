@@ -1010,11 +1010,11 @@ export class GraphStore {
     return resolvePropertyEdgesImpl(this.db, repoId, maxUnresolvedRows);
   }
 
-  getImpactSurface(repoId: string, filePath: string, limit: number): { callers: { callerName: string; callerFile: string; callerLine: number; symbolAffected: string; edgeType: string; confidence: number; reason: string | null }[]; graphHealth: GraphHealth; reliabilitySummary: ReliabilitySummary } {
+  getImpactSurface(repoId: string, filePath: string, limit: number): { callers: { callerName: string; callerFile: string; callerLine: number; symbolAffected: string; edgeType: string; confidence: number; reason: string | null }[]; graphHealth: GraphHealth; reliabilitySummary: ReliabilitySummary; wiringNote?: string } {
     return getImpactSurfaceImpl(this.db, repoId, filePath, limit);
   }
 
-  getImpactFiles(repoId: string, filePath: string, limit: number): { impactedFiles: { filePath: string; reason: string; confidence: number; symbolsAffected: string[] }[]; graphHealth: GraphHealth; reliabilitySummary: ReliabilitySummary } {
+  getImpactFiles(repoId: string, filePath: string, limit: number): { impactedFiles: { filePath: string; reason: string; confidence: number; symbolsAffected: string[] }[]; graphHealth: GraphHealth; reliabilitySummary: ReliabilitySummary; wiringNote?: string } {
     return getImpactFilesImpl(this.db, repoId, filePath, limit);
   }
 
@@ -1171,20 +1171,26 @@ export class GraphStore {
     }
 
     // Add detailed cross-repo resolution metrics to index_runs for rollout diagnostics.
+    // `runCols` is a mutable snapshot: each helper pushes the column it adds so a
+    // duplicate ensureRunColumn(name) call (e.g. build_context_ms below) is a no-op
+    // instead of re-issuing ALTER and failing with "duplicate column name" on a fresh DB.
     const runCols = this.db.prepare("pragma table_info(index_runs)").all() as { name: string }[];
     const ensureRunColumn = (name: string) => {
       if (!runCols.some((c) => c.name === name)) {
         this.db.exec(`alter table index_runs add column ${name} integer not null default 0`);
+        runCols.push({ name });
       }
     };
     const ensureRunColumnReal = (name: string) => {
       if (!runCols.some((c) => c.name === name)) {
         this.db.exec(`alter table index_runs add column ${name} real not null default 0`);
+        runCols.push({ name });
       }
     };
     const ensureRunColumnText = (name: string) => {
       if (!runCols.some((c) => c.name === name)) {
         this.db.exec(`alter table index_runs add column ${name} text`);
+        runCols.push({ name });
       }
     };
 
@@ -1204,7 +1210,6 @@ export class GraphStore {
     ensureRunColumn("implements_resolve_ms");
     ensureRunColumn("fts_rebuild_ms");
     ensureRunColumn("unresolved_calls_total");
-    ensureRunColumn("build_context_ms"); // latent gap: was missing from migrations, added here
     ensureRunColumn("unresolved_rows_capped_by_policy"); // kept for backward compat with old DBs
     ensureRunColumn("unresolved_imports_capped_by_policy");
 

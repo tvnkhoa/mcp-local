@@ -20,7 +20,7 @@ export const indexRepositorySchema = (MAX_FILES_PER_RUN: number) => z
   .object({
     repoId: z.string().min(1).max(200),
     repoPath: z.string().min(1),
-    mode: z.enum(["full", "incremental"]).default("incremental"),
+    mode: z.enum(["full", "incremental", "dirty"]).default("incremental"),
     docsMode: z.enum(["auto", "on", "off"]).default("auto"),
     maxFiles: z.number().int().min(1).max(MAX_FILES_PER_RUN).default(MAX_FILES_PER_RUN),
     batchSize: z.number().int().min(1).max(2_000).default(200)
@@ -203,6 +203,50 @@ export const detectChangesSchema = (MAX_RESULT_LIMIT: number) => z
     profile: responseProfileSchema.default("compact")
   })
   .strict();
+
+// Change impact (ENH-E): changed files → dependents → covering tests → tests-to-run + residual risk
+export const changeImpactSchema = (MAX_RESULT_LIMIT: number) => z
+  .object({
+    repoId: z.string().min(1).max(200),
+    baseRef: z.string().min(1).max(100).optional(),
+    headRef: z.string().min(1).max(100).default("HEAD"),
+    includeUntracked: z.boolean().default(true),
+    maxFiles: z.number().int().min(1).max(500).default(100),
+    impactLimit: z.number().int().min(1).max(MAX_RESULT_LIMIT).default(20),
+    testLinkMinScore: z.number().min(0).max(1).default(0.4),
+    testLinkMaxCandidates: z.number().int().min(1).max(20).default(3),
+    maxTestsToRun: z.number().int().min(1).max(500).default(50),
+    profile: responseProfileSchema.default("compact")
+  })
+  .strict();
+
+// Orient (ENH-F): deterministic intent router → recommended tools + seed symbols (NO LLM)
+export const orientSchema = z
+  .object({
+    repoId: z.string().min(1).max(200).optional(),
+    intent: z.string().min(1).max(500),
+    seed: z.string().min(1).max(200).optional(),
+    profile: responseProfileSchema.default("compact")
+  })
+  .strict();
+
+// Feature bundle (ENH-B): gather a vertical-slice feature (entity → config → commands/queries → endpoints) from one seed
+export const getFeatureBundleSchema = z
+  .object({
+    repoId: z.string().min(1).max(200),
+    seedSymbol: z.string().min(1).max(200).optional(),
+    seedFile: z.string().min(1).max(500).optional(),
+    convention: z.enum(["csharp-vertical-slice"]).default("csharp-vertical-slice"),
+    maxFiles: z.number().int().min(1).max(60).default(25),
+    maxBytesPerFile: z.number().int().min(1).max(20000).default(8000),
+    includeSource: z.boolean().default(true),
+    profile: responseProfileSchema.default("compact")
+  })
+  .strict()
+  .refine((v) => Boolean(v.seedSymbol || v.seedFile), {
+    message: "seedSymbol or seedFile is required",
+    path: ["seedSymbol"]
+  });
 
 // Dead code scan
 export const deadCodeScanSchema = (MAX_RESULT_LIMIT: number) => z
