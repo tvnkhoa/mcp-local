@@ -119,7 +119,7 @@ export type SymbolRecord = {
   symbolId: string;
   filePath: string;
   name: string;
-  kind: "function" | "class" | "method" | "variable" | "module" | "interface" | "property" | "constructor" | "type" | "struct" | "impl" | "unknown";
+  kind: "function" | "class" | "method" | "variable" | "module" | "interface" | "property" | "constructor" | "type" | "struct" | "record" | "record struct" | "impl" | "unknown";
   line: number;
   /** Last line of the symbol's source span (1-indexed). Optional: null on indexes built before end-line tracking. */
   endLine?: number;

@@ -484,10 +484,10 @@ export function resolveIntraFileEdges(edges: EdgeRecord[], symbols: SymbolRecord
   const propertyTargetByName = new Map<string, SymbolRecord>();
 
   for (const symbol of symbols) {
-    if ((symbol.kind === "function" || symbol.kind === "method" || symbol.kind === "constructor" || symbol.kind === "class") && !callTargetByName.has(symbol.name)) {
+    if ((symbol.kind === "function" || symbol.kind === "method" || symbol.kind === "constructor" || symbol.kind === "class" || symbol.kind === "record" || symbol.kind === "record struct") && !callTargetByName.has(symbol.name)) {
       callTargetByName.set(symbol.name, symbol);
     }
-    if ((symbol.kind === "class" || symbol.kind === "interface" || symbol.kind === "struct" || symbol.kind === "type") && !typeTargetByName.has(symbol.name)) {
+    if ((symbol.kind === "class" || symbol.kind === "interface" || symbol.kind === "struct" || symbol.kind === "type" || symbol.kind === "record" || symbol.kind === "record struct") && !typeTargetByName.has(symbol.name)) {
       typeTargetByName.set(symbol.name, symbol);
     }
     if (symbol.kind === "interface" && !interfaceByName.has(symbol.name)) {

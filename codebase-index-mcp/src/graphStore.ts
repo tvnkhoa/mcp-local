@@ -883,14 +883,15 @@ export class GraphStore {
     filePath: string | null,
     limit: number,
     maxCandidates: number,
-    minScore: number
+    minScore: number,
+    sourceTokensCache?: Map<string, Set<string>>
   ): {
     testFile: string;
     sourceFile: string;
     score: number;
     reasons: string[];
   }[] {
-    return linkTestsToSourceImpl(this.db, repoId, filePath, limit, maxCandidates, minScore);
+    return linkTestsToSourceImpl(this.db, repoId, filePath, limit, maxCandidates, minScore, sourceTokensCache);
   }
 
   getDeadCodeCandidates(

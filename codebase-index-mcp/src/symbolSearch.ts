@@ -4,13 +4,16 @@ import { vectorSearchSymbols, isVectorEnabled } from "./vectorStore.js";
 
 // Kinds that carry graph edges / are usually what a developer means; ranked above
 // edgeless namesakes (constructor shares the class name, module shares the file name).
-const RANKED_KIND_BONUS = ["method", "function", "class", "interface", "struct"];
+// `record` / `record struct` are class-like (CQRS commands/queries are records) — they were
+// indexed as `class` before ISSUE-015, so list them here to keep the same ranking parity.
+const RANKED_KIND_BONUS = ["method", "function", "class", "interface", "struct", "record", "record struct"];
 
 // SQL ORDER-BY fragment: prefer substantive kinds over their edgeless namesakes when
 // names tie (e.g. class before its same-named constructor). `col` is the qualified column.
 const kindPriorityOrder = (col: string): string =>
   `case ${col}
-     when 'class' then 0 when 'interface' then 1 when 'struct' then 2
+     when 'class' then 0 when 'record' then 0 when 'interface' then 1
+     when 'struct' then 2 when 'record struct' then 2
      when 'method' then 3 when 'function' then 4
      when 'constructor' then 8 when 'module' then 9
      else 5

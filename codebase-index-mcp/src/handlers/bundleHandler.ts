@@ -7,10 +7,18 @@ import {
   CONVENTIONS,
   entityNameFromSeed,
   expandPatterns,
+  pluralize,
   type ConventionName,
   type ConventionRole
 } from "../conventions.js";
 import type { HandlerContext } from "./handlerContext.js";
+
+// Type-like kinds a slice member can be (records included for post-ISSUE-015 labeling).
+const BUNDLE_TYPE_KINDS = new Set(["class", "struct", "record", "record struct", "interface"]);
+// Marker interfaces a minimal-API endpoint group implements (CH uses IEndpointGroup).
+const ENDPOINT_MARKER_INTERFACES = ["IEndpointGroup", "IEndpointGroupBase"];
+// Suffixes that mark a Commands-folder type as a DTO/projection, not the command request itself.
+const NON_COMMAND_SUFFIXES = ["dto", "response", "result", "vm", "viewmodel", "model"];
 
 // ── get_feature_bundle (ENH-B) ──────────────────────────────────────────────────
 // "Implement EmailSignature by mirroring the ConversationNote slice" is the most common
@@ -60,7 +68,7 @@ export function handleGetFeatureBundle(
   } else if (args.seedFile) {
     const summary = store.getFileSummary(args.repoId, args.seedFile);
     const dominant =
-      summary.exports.find((s) => s.kind === "class" || s.kind === "struct" || s.kind === "interface") ??
+      summary.exports.find((s) => BUNDLE_TYPE_KINDS.has(s.kind)) ??
       summary.exports[0];
     if (dominant) entity = entityNameFromSeed(dominant.name, convention);
   }
@@ -71,57 +79,94 @@ export function handleGetFeatureBundle(
   // 2. Resolve each role's name patterns to indexed symbols (exact name match preferred).
   const seen = new Set<string>();
   const members: BundleMember[] = [];
-  const unresolvedRoles: ConventionRole[] = [];
+  const rolesMatched = new Set<ConventionRole>();
   let sourceIncluded = 0;
 
-  for (const rule of convention.rules) {
-    const patterns = expandPatterns(rule, entity);
-    let roleMatched = false;
-    for (const pattern of patterns) {
-      const candidates = store.getSymbolCandidates(args.repoId, pattern, 3);
-      for (const c of candidates) {
-        // Only accept an exact (case-insensitive) name hit — patterns are precise.
-        if (c.name.toLowerCase() !== pattern.toLowerCase()) continue;
-        if (seen.has(c.symbolId)) continue;
-        seen.add(c.symbolId);
-        roleMatched = true;
+  type Candidate = { symbolId: string; name: string; kind: string; filePath: string; line: number };
+  const addMember = (role: ConventionRole, c: Candidate): boolean => {
+    if (seen.has(c.symbolId)) return false;
+    seen.add(c.symbolId);
+    rolesMatched.add(role);
 
-        const member: BundleMember = {
-          role: rule.role,
-          symbolId: c.symbolId,
-          name: c.name,
-          kind: c.kind,
-          filePath: c.filePath,
-          line: c.line
-        };
+    const member: BundleMember = {
+      role,
+      symbolId: c.symbolId,
+      name: c.name,
+      kind: c.kind,
+      filePath: c.filePath,
+      line: c.line
+    };
 
-        if (args.includeSource && members.length < args.maxFiles) {
-          const detail = store.getSymbolDetail(args.repoId, c.symbolId, 1).symbol;
-          const endLine = detail?.endLine ?? null;
-          const fallbackNextStartLine = endLine && endLine >= c.line ? null : store.getNextSymbolStartLine(args.repoId, c.filePath, c.line);
-          const span = readSymbolSourceSpan(repo.repoPath, c.filePath, c.line, endLine, {
-            contextLines: 0,
-            maxLines: 4000,
-            fallbackNextStartLine
-          });
-          if (span) {
-            let src = span.source;
-            if (Buffer.byteLength(src, "utf8") > args.maxBytesPerFile) {
-              // Truncate by BYTES (not UTF-16 code units) so the cap is honored for multibyte
-              // source; toString may drop a trailing partial char, which is fine for a preview.
-              src = Buffer.from(src, "utf8").subarray(0, args.maxBytesPerFile).toString("utf8");
-              member.truncated = true;
-            }
-            member.source = src;
-            member.endLineEstimated = span.endLineEstimated;
-            sourceIncluded += 1;
-          }
+    if (args.includeSource && members.length < args.maxFiles) {
+      const detail = store.getSymbolDetail(args.repoId, c.symbolId, 1).symbol;
+      const endLine = detail?.endLine ?? null;
+      const fallbackNextStartLine = endLine && endLine >= c.line ? null : store.getNextSymbolStartLine(args.repoId, c.filePath, c.line);
+      const span = readSymbolSourceSpan(repo.repoPath, c.filePath, c.line, endLine, {
+        contextLines: 0,
+        maxLines: 4000,
+        fallbackNextStartLine
+      });
+      if (span) {
+        let src = span.source;
+        if (Buffer.byteLength(src, "utf8") > args.maxBytesPerFile) {
+          // Truncate by BYTES (not UTF-16 code units) so the cap is honored for multibyte
+          // source; toString may drop a trailing partial char, which is fine for a preview.
+          src = Buffer.from(src, "utf8").subarray(0, args.maxBytesPerFile).toString("utf8");
+          member.truncated = true;
         }
-        members.push(member);
+        member.source = src;
+        member.endLineEstimated = span.endLineEstimated;
+        sourceIncluded += 1;
       }
     }
-    if (!roleMatched) unresolvedRoles.push(rule.role);
+    members.push(member);
+    return true;
+  };
+
+  // 2a. Exact name-pattern resolution per role (CRUD verbs, {E}Configuration, Get/List queries…).
+  for (const rule of convention.rules) {
+    for (const pattern of expandPatterns(rule, entity)) {
+      for (const c of store.getSymbolCandidates(args.repoId, pattern, 3)) {
+        // Only accept an exact (case-insensitive) name hit — patterns are precise.
+        if (c.name.toLowerCase() !== pattern.toLowerCase()) continue;
+        addMember(rule.role, c);
+      }
+    }
   }
+
+  // 2b. ISSUE-016(a): folder-walk the Commands tree for non-CRUD verb commands the fixed
+  // prefix patterns miss (Set/Apply/Toggle/Archive…, e.g. SetEmailSignatureApplied). Classify
+  // by suffix so the request/handler/validator land in the right role; `seen` skips the
+  // Create/Update/Delete already matched in 2a.
+  const entityLc = entity.toLowerCase();
+  for (const c of store.getSymbolCandidates(args.repoId, entity, 40, "name", { filePath: "Commands" })) {
+    if (!BUNDLE_TYPE_KINDS.has(c.kind)) continue;
+    const normPath = c.filePath.replace(/\\/g, "/").toLowerCase();
+    if (!normPath.includes("/commands/")) continue;
+    const nameLc = c.name.toLowerCase();
+    if (!nameLc.includes(entityLc)) continue;
+    if (nameLc.endsWith("handler")) addMember("commandHandler", c);
+    else if (nameLc.endsWith("validator")) addMember("commandValidator", c);
+    else if (!NON_COMMAND_SUFFIXES.some((suf) => nameLc.endsWith(suf))) addMember("command", c);
+  }
+
+  // 2c. ISSUE-016(b): the endpoint group is often the *plural* entity with no suffix
+  // (class EmailSignatures : IEndpointGroup), which the {E}Endpoints patterns miss. If the
+  // endpoint role is still unresolved, match it among IEndpointGroup implementers by name.
+  if (!rolesMatched.has("endpoint")) {
+    const pluralLc = pluralize(entity).toLowerCase();
+    for (const marker of ENDPOINT_MARKER_INTERFACES) {
+      for (const impl of store.findImplementations(args.repoId, marker, 50)) {
+        const nameLc = impl.name.toLowerCase();
+        if (nameLc === entityLc || nameLc === pluralLc || nameLc.includes(entityLc)) {
+          addMember("endpoint", impl);
+        }
+      }
+      if (rolesMatched.has("endpoint")) break;
+    }
+  }
+
+  const unresolvedRoles: ConventionRole[] = convention.rules.map((r) => r.role).filter((role) => !rolesMatched.has(role));
 
   // DbSet registration site: the *DbContext that references the entity (best-effort).
   const dbContext = store

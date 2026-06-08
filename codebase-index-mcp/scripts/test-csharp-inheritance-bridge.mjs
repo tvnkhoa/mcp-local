@@ -115,6 +115,20 @@ public record struct GetThingStruct(int Id)
     "Expected `record struct` to also emit IMPLEMENTS for ITenantScopedRequest"
   );
 
+  // ISSUE-015: records must be labeled `record` / `record struct`, not collapsed to `class`.
+  const getThing = result.symbols.find((s) => s.name === "GetThing");
+  assert(getThing, "Expected symbol GetThing");
+  assert(
+    getThing.kind === "record",
+    `Expected GetThing kind 'record', got '${getThing.kind}'`
+  );
+  const getThingStruct = result.symbols.find((s) => s.name === "GetThingStruct");
+  assert(getThingStruct, "Expected symbol GetThingStruct");
+  assert(
+    getThingStruct.kind === "record struct",
+    `Expected GetThingStruct kind 'record struct', got '${getThingStruct.kind}'`
+  );
+
   console.log("[ok] C# record inheritance bridge smoke test passed");
 }
 

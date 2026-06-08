@@ -382,11 +382,15 @@ export function handleChangeImpact(
 
   const testMap = new Map<string, { testFile: string; coveredSources: Set<string>; score: number; reasons: Set<string> }>();
   const coveredSources = new Set<string>();
+  // Shared across every probe so each source file's distinctive tokens (name-affinity, ISSUE-017)
+  // are computed at most once for the whole request, not re-tokenized over the full source set on
+  // each of up to CHANGE_IMPACT_SOURCE_PROBE_CAP calls. (review)
+  const sourceTokensCache = new Map<string, Set<string>>();
   for (const sourceFile of probed) {
     // `limit` (3rd arg) caps total links AND triggers an early loop break in linkTestsToSource,
     // so it must be the per-source budget (maxTestsToRun), NOT testLinkMaxCandidates (the
     // per-test candidate cap, 4th arg) — passing the small value there truncated each probe to ~3.
-    const links = store.linkTestsToSource(args.repoId, sourceFile, args.maxTestsToRun, args.testLinkMaxCandidates, args.testLinkMinScore);
+    const links = store.linkTestsToSource(args.repoId, sourceFile, args.maxTestsToRun, args.testLinkMaxCandidates, args.testLinkMinScore, sourceTokensCache);
     const srcRisk = (riskByFile.get(sourceFile) ?? 0) / 100; // 0..1
     for (const link of links) {
       coveredSources.add(link.sourceFile);

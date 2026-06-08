@@ -23,6 +23,29 @@ import {
   isLikelyCSharpInterfaceName
 } from "./extractorUtils.js";
 
+/**
+ * Map a C# type-declaration node to a SymbolRecord kind. (ISSUE-015)
+ * `record_declaration` covers both `record X` and `record struct X` (the latter carries a
+ * `struct` modifier child); they are labeled `record` / `record struct` rather than collapsed
+ * to `class`, so tools keying on `kind` (codegen, template selection, get_feature_bundle) see
+ * the real type. Used for both symbol emission and parentSymbolId resolution so IDs stay aligned.
+ */
+function csharpTypeKindForNode(node: Parser.SyntaxNode): SymbolRecord["kind"] {
+  switch (node.type) {
+    case "interface_declaration":
+      return "interface";
+    case "struct_declaration":
+      return "struct";
+    case "record_declaration":
+      return node.children.some((ch) => ch.type === "struct") ? "record struct" : "record";
+    default:
+      return "class";
+  }
+}
+
+/** C# type-like kinds that anchor members and act as type/call resolution targets. */
+const CSHARP_TYPE_KINDS = new Set<SymbolRecord["kind"]>(["class", "struct", "interface", "record", "record struct"]);
+
 // JSON attribute names that carry a serialized key literal
 const JSON_KEY_ATTRIBUTE_NAMES = new Set([
   "JsonPropertyName",
@@ -143,14 +166,11 @@ export function extractCSharpSymbolsImpl(
     if (!nameNode) continue;
     let kind: SymbolRecord["kind"] = "unknown";
     if (node.type === "method_declaration") kind = "method";
-    else if (node.type === "interface_declaration") kind = "interface";
-    else if (node.type === "class_declaration") kind = "class";
     else if (node.type === "property_declaration") kind = "property";
     else if (node.type === "constructor_declaration") kind = "constructor";
-    else if (node.type === "struct_declaration") kind = "struct";
     else if (node.type === "namespace_declaration") kind = "module";
     else if (node.type === "enum_declaration") kind = "type";
-    else if (node.type === "record_declaration") kind = "class";
+    else kind = csharpTypeKindForNode(node); // class / struct / interface / record / record struct
     const symbolId = stableId(`${input.repoId}:${input.filePath}:${kind}:${nameNode.text}:${node.startPosition.row}`);
 
     // Resolve parentSymbolId for members (method/property/constructor) by finding enclosing type
@@ -165,9 +185,9 @@ export function extractCSharpSymbolsImpl(
           if (parent.type === "class_declaration" || parent.type === "struct_declaration" || parent.type === "interface_declaration" || parent.type === "record_declaration") {
             const parentNameNode = parent.childForFieldName("name");
             if (parentNameNode) {
-              const parentKind = parent.type === "interface_declaration" ? "interface"
-                : parent.type === "struct_declaration" ? "struct"
-                : "class";
+              // Must mirror csharpTypeKindForNode so the parent's stableId matches the kind it
+              // was registered under (records now use record / record struct, not class). (ISSUE-015)
+              const parentKind = csharpTypeKindForNode(parent);
               parentSymbolId = stableId(`${input.repoId}:${input.filePath}:${parentKind}:${parentNameNode.text}:${parent.startPosition.row}`);
             }
             break;
@@ -177,8 +197,8 @@ export function extractCSharpSymbolsImpl(
       }
     }
 
-    // Track type symbols for later member resolution
-    if (kind === "class" || kind === "struct" || kind === "interface") {
+    // Track type symbols for later member resolution (records included — ISSUE-015)
+    if (CSHARP_TYPE_KINDS.has(kind)) {
       typeSymbolByLine.set(node.startPosition.row, symbolId);
     }
 

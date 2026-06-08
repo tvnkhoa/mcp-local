@@ -115,7 +115,7 @@ export function detectWiringShapeImpl(
   if (!matched) {
     const suffixHit = rows.find(
       (r) =>
-        (r.symKind === "class" || r.symKind === "struct" || r.symKind === "interface") &&
+        (r.symKind === "class" || r.symKind === "struct" || r.symKind === "interface" || r.symKind === "record" || r.symKind === "record struct") &&
         WIRING_NAME_SUFFIXES.some((suf) => r.symName.endsWith(suf))
     );
     if (suffixHit) {
