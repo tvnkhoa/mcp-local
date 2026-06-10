@@ -185,6 +185,22 @@ export const getSymbolContextPackSchema = (MAX_DEPTH: number, MAX_RESULT_LIMIT: 
   })
   .strict();
 
+// Field accesses (ISSUE-018) — read/write callsites of a property
+export const findFieldAccessesSchema = (MAX_RESULT_LIMIT: number) => z
+  .object({
+    repoId: z.string().min(1).max(200),
+    symbolId: z.string().min(1).max(200).optional(),
+    name: z.string().min(1).max(200).optional(),
+    mode: z.enum(["read", "write", "all"]).default("all"),
+    limit: z.number().int().min(1).max(MAX_RESULT_LIMIT).default(100),
+    profile: responseProfileSchema.default("compact")
+  })
+  .strict()
+  .refine((v) => Boolean(v.symbolId || v.name), {
+    message: "symbolId or name is required",
+    path: ["symbolId"]
+  });
+
 // Detect changes
 export const detectChangesSchema = (MAX_RESULT_LIMIT: number) => z
   .object({

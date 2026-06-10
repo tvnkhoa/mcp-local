@@ -132,10 +132,21 @@ export type EdgeRecord = {
   repoId: string;
   fromId: string;
   toId: string;
-  type: "IMPORTS" | "CALLS" | "DEPENDS_ON" | "IMPLEMENTS" | "TYPE_REF" | "PROPERTY_REF" | "PROPERTY_WRITE";
+  type: "IMPORTS" | "CALLS" | "DEPENDS_ON" | "IMPLEMENTS" | "TYPE_REF" | "PROPERTY_REF" | "PROPERTY_WRITE" | "PUBLISHES" | "CONSUMES";
   confidence?: number;
   reason?: string;
 };
+
+/**
+ * Edge types followed when traversing the call graph: CALLS (static invocation) plus PUBLISHES
+ * (a resolved message-bus producer→consumer hop, ISSUE-020). Every traversal/impact query that
+ * crosses the call graph references this single source so the surface stays consistent — adding
+ * a future flow edge here updates trace_execution_flow, get_call_chain, and get_change_context
+ * at once instead of needing the literal duplicated across queries.
+ */
+export const CALL_TRAVERSAL_EDGE_TYPES = ["CALLS", "PUBLISHES"] as const;
+/** SQL `in (...)` value list form of CALL_TRAVERSAL_EDGE_TYPES (constant literals, safe to inline). */
+export const CALL_TRAVERSAL_EDGE_SQL_LIST = CALL_TRAVERSAL_EDGE_TYPES.map((t) => `'${t}'`).join(", ");
 
 export type RouteRecord = {
   repoId: string;

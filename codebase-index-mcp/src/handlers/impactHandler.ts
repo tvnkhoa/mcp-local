@@ -123,6 +123,8 @@ export function handleGetCallChain(
     const pathNodes = rows.slice(0, 10).map((e) => ({
       name: direction === "callees" ? (e as { toName?: string }).toName ?? null : (e as { fromName?: string }).fromName ?? null,
       filePath: direction === "callees" ? (e as { toFilePath?: string }).toFilePath ?? null : (e as { fromFilePath?: string }).fromFilePath ?? null,
+      // Mark bus hops (PUBLISHES) so nano output distinguishes them from static calls, matching trace_execution_flow.
+      ...(e.type === "PUBLISHES" && { via: "bus" }),
       confidence: e.confidence ?? null
     }));
     const coverageNano = buildCoverageBlock({ resultCount: rows.length, truncated: rows.length >= args.limit, kind: "call_chain", query: args.symbolId });
@@ -130,6 +132,47 @@ export function handleGetCallChain(
   }
   const coverage = buildCoverageBlock({ resultCount: rows.length, truncated: rows.length >= args.limit, kind: "call_chain", query: args.symbolId });
   return ctx.asText({ repoId: args.repoId, symbolId: args.symbolId, direction, depth: args.depth, edges: rows, coverage }, profile);
+}
+
+// ── find_field_accesses ───────────────────────────────────────────────────────
+// ISSUE-018 — semantic "who reads / writes this field" over the existing
+// PROPERTY_REF/PROPERTY_WRITE edges, so wrong-level-resolution audits stay in MCP
+// instead of falling back to grep. Accepts a property symbolId or a resolvable name.
+
+export function handleFindFieldAccesses(
+  args: { repoId: string; symbolId?: string; name?: string; mode: "read" | "write" | "all"; limit: number; profile: string },
+  ctx: HandlerContext
+): CallToolResult {
+  const { store } = ctx;
+  const profile = resolveResponseProfile(args.profile as Parameters<typeof resolveResponseProfile>[0]);
+
+  let symbolId = args.symbolId;
+  if (!symbolId && args.name) {
+    // Prefer an actual property symbol when several share the name.
+    const candidates = store.getSymbolCandidates(args.repoId, args.name, 10);
+    symbolId = (candidates.find((c) => c.kind === "property") ?? candidates[0])?.symbolId;
+  }
+  if (!symbolId) throw new McpError(ErrorCode.InvalidParams, "find_field_accesses: provide symbolId or a resolvable name.");
+
+  const result = store.getFieldAccesses(args.repoId, symbolId, args.mode, args.limit);
+  if (!result.property) throw new McpError(ErrorCode.InvalidParams, `find_field_accesses: symbol '${symbolId}' not found in repo '${args.repoId}'.`);
+
+  const reads = result.accesses.filter((a) => a.mode === "read");
+  const writes = result.accesses.filter((a) => a.mode === "write");
+  const coverage = buildCoverageBlock({ resultCount: result.accesses.length, kind: "field_accesses", query: result.property.name });
+  const staleWarning = staleWarningFor(args.repoId, store);
+
+  if (profile === "nano") {
+    const top = result.accesses.slice(0, 10).map((a) => ({ mode: a.mode, enclosingName: a.enclosingName, filePath: a.filePath, line: a.line }));
+    return ctx.asText({ property: { name: result.property.name, filePath: result.property.filePath }, readCount: reads.length, writeCount: writes.length, top, hasMore: result.accesses.length > top.length, coverage: coverage.confidence, ...(staleWarning && { staleWarning }) }, profile);
+  }
+
+  const compactAccess = (a: typeof result.accesses[number]) => ({ mode: a.mode, enclosingName: a.enclosingName, enclosingKind: a.enclosingKind, filePath: a.filePath, line: a.line, confidence: a.confidence });
+  if (profile === "compact") {
+    return ctx.asText({ property: { symbolId: result.property.symbolId, name: result.property.name, kind: result.property.kind, filePath: result.property.filePath, line: result.property.line, declaringType: result.property.declaringType }, mode: args.mode, readCount: reads.length, writeCount: writes.length, reads: reads.map(compactAccess), writes: writes.map(compactAccess), coverage, indexMeta: buildIndexMeta(store, args.repoId), ...(staleWarning && { staleWarning }) }, profile);
+  }
+
+  return ctx.asText({ property: result.property, mode: args.mode, readCount: reads.length, writeCount: writes.length, accesses: result.accesses, coverage, indexMeta: buildIndexMeta(store, args.repoId), ...(staleWarning && { staleWarning }) }, profile);
 }
 
 // ── find_impact_files ─────────────────────────────────────────────────────────

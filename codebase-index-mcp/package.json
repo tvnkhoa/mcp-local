@@ -19,6 +19,7 @@
     "test:nuget-bridge": "node scripts/test-nuget-bridge.mjs",
     "test:minimal-api-guard": "node scripts/test-minimal-api-guard.mjs",
     "test:wiring-note": "node scripts/test-wiring-note.mjs",
+    "test:bus-edges": "node scripts/test-bus-edges.mjs",
     "test:issue-refinements": "node scripts/test-issue-refinements.mjs",
     "verify:enhancements": "node scripts/verify-enhancements.mjs",
     "test:profile-responses": "node scripts/test-profile-responses.mjs",

@@ -497,6 +497,11 @@ export async function runIndexPipeline(store: GraphStore, input: RunIndexInput):
         if (resolvedImpl > 0) {
           process.stderr.write(`[index-resolve] resolved ${String(resolvedImpl)} IMPLEMENTS edge(s)\n`);
         }
+        // ISSUE-020: match message-bus PUBLISHES/CONSUMES contract tokens producer→consumer.
+        const resolvedBus = store.resolvePublishesConsumesEdges(input.repoId);
+        if (resolvedBus > 0) {
+          process.stderr.write(`[index-resolve] resolved ${String(resolvedBus)} PUBLISHES bus edge(s)\n`);
+        }
       }
     }
 

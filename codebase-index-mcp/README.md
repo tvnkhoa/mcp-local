@@ -49,12 +49,13 @@ npm install && npm run build
 ### Dependency & Impact Analysis
 | Tool | Description |
 |------|-------------|
-| `get_change_context` | Callers and callees for a symbol (BFS). Use when you need deep caller traversal; otherwise prefer `get_symbol_context_pack`. |
+| `get_change_context` | Callers and callees for a symbol (BFS); crosses MassTransit-style message-bus hops (`PUBLISHES`). Use when you need deep caller traversal; otherwise prefer `get_symbol_context_pack`. |
 | `find_impact_files` | Files impacted by changing a symbol. Use before `refactor_replace_preview` to scope blast radius. A stale index returns a non-fatal `staleWarning` field, not an error. |
+| `find_field_accesses` | Read/write callsites of a property (field) with their enclosing symbol — the "who reads vs writes this field" audit. Partitions `reads`/`writes`, `mode=read\|write\|all`. Accepts a property `symbolId` or resolvable `name`. Prefer over grepping a field name. |
 | `get_dependency_graph` | Graph edges for a file or symbol |
-| `get_call_chain` | Call path between two symbols. Shows path, not caller list. |
+| `get_call_chain` | Call path between two symbols. Shows path, not caller list. Crosses MassTransit-style message-bus hops (`PUBLISHES`). |
 | `get_cross_repo_impact` | Impact across multiple indexed repos |
-| `trace_execution_flow` | Trace execution path through entry points |
+| `trace_execution_flow` | Trace execution path through entry points. Follows `CALLS` and crosses message-bus `PUBLISHES` hops into the matched consumer. |
 
 ### Code Quality
 | Tool | Description |
@@ -93,6 +94,8 @@ npm install && npm run build
 | `PROPERTY_WRITE` | Assignment to a property or field | |
 | `DEPENDS_ON` | Project-level dependency (NuGet, npm) | |
 | `IMPLEMENTS` | Class implements interface | |
+| `PUBLISHES` | A `Publish<T>`/`Send<T>` callsite for message contract T | Resolved to the consumer of T (heuristic, by contract name); crosses the bus in trace/call-chain |
+| `CONSUMES` | An `IConsumer<T>`/handler of message contract T | Resolved to the in-repo contract type when present |
 
 **Confidence scores**: Values are `0.0–1.0`. Below `0.7` means low confidence — verify with a file read before acting on it.
 

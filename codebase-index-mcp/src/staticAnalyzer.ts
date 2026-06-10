@@ -680,6 +680,7 @@ export function getDeadCodeCandidates(
             or e.to_id = ('type:' || s.name)
           )) as incomingTypeRefs,
       (select count(*) from edges e where e.repo_id = s.repo_id and e.to_id = s.symbol_id and e.type = 'IMPORTS') as incomingImports,
+      (select count(*) from edges e where e.repo_id = s.repo_id and e.to_id = s.symbol_id and e.type = 'PUBLISHES') as incomingPublishes,
       (select count(*) from edges e where e.repo_id = s.repo_id and e.from_id = s.symbol_id and e.type = 'CALLS') as outgoingCalls,
       (
         select count(*)
@@ -710,6 +711,7 @@ export function getDeadCodeCandidates(
     incomingCalls: number;
     incomingTypeRefs: number;
     incomingImports: number;
+    incomingPublishes: number;
     outgoingCalls: number;
     fileIncomingUsages: number;
   }[] = [];
@@ -725,6 +727,7 @@ export function getDeadCodeCandidates(
       incomingCalls: number;
       incomingTypeRefs: number;
       incomingImports: number;
+      incomingPublishes: number;
       outgoingCalls: number;
       fileIncomingUsages: number;
     }[];
@@ -1169,7 +1172,9 @@ export function getDeadCodeCandidates(
       continue;
     }
 
-    if ((row.incomingCalls + row.incomingTypeRefs + row.incomingImports) > 0) {
+    // incomingPublishes: a consumer reached over the message bus (ISSUE-020) is live even with
+    // no static CALLS edge — counting it prevents a false dead-code flag for IConsumer<T> types.
+    if ((row.incomingCalls + row.incomingTypeRefs + row.incomingImports + row.incomingPublishes) > 0) {
       continue;
     }
 

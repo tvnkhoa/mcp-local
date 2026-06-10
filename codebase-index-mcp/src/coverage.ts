@@ -20,7 +20,14 @@ export type CoverageBlock = {
   suggestFallback: string | null;
 };
 
-export type CoverageKind = "implementations" | "call_chain" | "execution_flow" | "change_impact";
+export type CoverageKind =
+  | "implementations"
+  | "call_chain"
+  | "execution_flow"
+  | "change_impact"
+  | "search"
+  | "context_pack"
+  | "field_accesses";
 
 export type CoverageInput = {
   /** Number of results the tool is about to return. */
@@ -72,18 +79,39 @@ function gapsFor(kind: CoverageKind, lowOrEmpty: boolean, query: string | undefi
       };
     case "call_chain":
       return {
-        gaps: ["call edges may be unresolved, or callers reach the target via DI/reflection (no static CALLS edge)."],
+        gaps: [
+          "call edges may be unresolved, or callers reach the target via DI/reflection (no static CALLS edge).",
+          "message-bus hops (PUBLISHES/CONSUMES) are matched heuristically by contract name and may be incomplete."
+        ],
         fallback: `widen depth/limit, or find_impact_files('${q}') for the file-level blast radius.`
       };
     case "execution_flow":
       return {
-        gaps: ["flow stops at unresolved call edges; reflection/DI-dispatched hops are not traced."],
+        gaps: [
+          "flow stops at unresolved call edges; reflection/DI-dispatched hops are not traced.",
+          "producer→consumer bus hops are heuristic contract-name matches; a missing consumer leaves the flow short."
+        ],
         fallback: "check find_impact_files / get_call_chain for edges the static trace can't follow."
       };
     case "change_impact":
       return {
         gaps: ["dependents/tests are derived from static edges; DI/reflection-wired or untested code is under-counted."],
         fallback: "run the broader test suite for shared-infra changes flagged with low confidence."
+      };
+    case "search":
+      return {
+        gaps: ["0 results may mean the wrong search strategy, a too-narrow filter, or a stale index."],
+        fallback: `retry search_symbols('${q}', strategy='intent', ranked=true) for multi-word/natural-language queries, or re-index if the symbol was added recently.`
+      };
+    case "context_pack":
+      return {
+        gaps: ["empty callers/callees can mean the symbol is an entry point reached via routing/DI rather than static CALLS edges."],
+        fallback: `find_impact_files / get_change_context for '${q}', or re-index if the symbol was added since the last index.`
+      };
+    case "field_accesses":
+      return {
+        gaps: ["accesses are derived from PROPERTY_REF/PROPERTY_WRITE edges; dynamic/reflective access and unindexed languages are not captured."],
+        fallback: `grep the field (rg '\\.${q}\\b') to confirm, or re-index if the property was added recently.`
       };
   }
 }

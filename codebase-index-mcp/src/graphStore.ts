@@ -26,7 +26,8 @@ import {
   buildCallResolutionContext as buildCallResolutionContextImpl,
   resolveTypeRefEdges as resolveTypeRefEdgesImpl,
   resolvePropertyEdges as resolvePropertyEdgesImpl,
-  resolveImplementsEdges as resolveImplementsEdgesImpl
+  resolveImplementsEdges as resolveImplementsEdgesImpl,
+  resolvePublishesConsumesEdges as resolvePublishesConsumesEdgesImpl
 } from "./edgeResolver.js";
 import {
   linkTestsToSource as linkTestsToSourceImpl,
@@ -99,8 +100,10 @@ import {
   getRepoSchemaSnapshotImpl,
   runReadOnlyGraphQueryImpl,
   listIndexedFilesImpl,
-  listRepositoriesImpl
+  listRepositoriesImpl,
+  buildEdgeToSymbolJoinClause
 } from "./impactAnalyzer.js";
+import { CALL_TRAVERSAL_EDGE_SQL_LIST } from "./types.js";
 import {
   initVectorStore,
   ensureVectorSchema,
@@ -686,13 +689,15 @@ export class GraphStore {
   }
 
   getCallEdges(repoId: string, symbolId: string, direction: "callers" | "callees", limit: number): EdgeRecord[] {
+    // CALLS for the static call graph; PUBLISHES (ISSUE-020) so callers/callees cross the message
+    // bus — a publisher counts as a "caller" of the consumer it was matched to, and vice versa.
     if (direction === "callees") {
       return this.db
         .prepare(
           `
           select repo_id as repoId, from_id as fromId, to_id as toId, type
           from edges
-          where repo_id = ? and from_id = ? and type = 'CALLS'
+          where repo_id = ? and from_id = ? and type in (${CALL_TRAVERSAL_EDGE_SQL_LIST})
           limit ?
           `
         )
@@ -704,11 +709,88 @@ export class GraphStore {
         `
         select repo_id as repoId, from_id as fromId, to_id as toId, type
         from edges
-        where repo_id = ? and to_id = ? and type = 'CALLS'
+        where repo_id = ? and to_id = ? and type in (${CALL_TRAVERSAL_EDGE_SQL_LIST})
         limit ?
         `
       )
       .all(repoId, symbolId, limit) as EdgeRecord[];
+  }
+
+  /**
+   * ISSUE-018 — list read/write callsites of a property symbol. Surfaces the existing
+   * PROPERTY_REF (read) / PROPERTY_WRITE (write) edges, resolving each `from_id` back to its
+   * enclosing symbol. The property-token match (resolved id, qualified `Type.Member`,
+   * any-owner `%.Member`, bare `Member`) is shared with impact analysis via
+   * buildEdgeToSymbolJoinClause, so the token grammar lives in exactly one place.
+   */
+  getFieldAccesses(
+    repoId: string,
+    symbolId: string,
+    mode: "read" | "write" | "all",
+    limit: number
+  ): {
+    property: { symbolId: string; name: string; kind: string; filePath: string; line: number; declaringType: string | null } | null;
+    accesses: {
+      mode: "read" | "write";
+      enclosingSymbolId: string;
+      enclosingName: string | null;
+      enclosingKind: string | null;
+      filePath: string | null;
+      line: number | null;
+      toId: string;
+      confidence: number | null;
+    }[];
+  } {
+    const symbol = this.db
+      .prepare(
+        `select symbol_id as symbolId, file_path as filePath, name, kind, line
+         from symbols where repo_id = ? and symbol_id = ? limit 1`
+      )
+      .get(repoId, symbolId) as { symbolId: string; filePath: string; name: string; kind: string; line: number } | undefined;
+    if (!symbol) return { property: null, accesses: [] };
+
+    // Nearest enclosing type declaration above the property — display-only, for the response.
+    const declaringType = (this.db
+      .prepare(
+        `select name from symbols
+         where repo_id = ? and file_path = ? and kind in ('class','struct','interface','record','record struct') and line <= ?
+         order by line desc limit 1`
+      )
+      .get(repoId, symbol.filePath, symbol.line) as { name: string } | undefined)?.name ?? null;
+
+    const edgeTypes = mode === "read" ? ["PROPERTY_REF"] : mode === "write" ? ["PROPERTY_WRITE"] : ["PROPERTY_REF", "PROPERTY_WRITE"];
+    const typePh = edgeTypes.map(() => "?").join(",");
+    const edgeJoin = buildEdgeToSymbolJoinClause();
+
+    const rows = this.db
+      .prepare(
+        `
+        select e.from_id as enclosingSymbolId, sf.name as enclosingName, sf.kind as enclosingKind,
+               sf.file_path as filePath, sf.line as line, e.to_id as toId, e.type as type, e.confidence as confidence
+        from symbols s
+        inner join edges e on e.repo_id = s.repo_id and ${edgeJoin}
+        left join symbols sf on sf.repo_id = e.repo_id and sf.symbol_id = e.from_id
+        left join symbols st on st.repo_id = s.repo_id and st.symbol_id = s.parent_symbol_id
+        where s.repo_id = ? and s.symbol_id = ? and e.type in (${typePh})
+        order by sf.file_path, sf.line
+        limit ?
+        `
+      )
+      .all(repoId, symbolId, ...edgeTypes, limit) as { enclosingSymbolId: string; enclosingName: string | null; enclosingKind: string | null; filePath: string | null; line: number | null; toId: string; type: string; confidence: number | null }[];
+
+    return {
+      property: { symbolId: symbol.symbolId, name: symbol.name, kind: symbol.kind, filePath: symbol.filePath, line: symbol.line, declaringType },
+      accesses: rows.map((r) => ({
+        mode: r.type === "PROPERTY_WRITE" ? "write" : "read",
+        enclosingSymbolId: r.enclosingSymbolId,
+        enclosingName: r.enclosingName,
+        enclosingKind: r.enclosingKind,
+        filePath: r.filePath,
+        line: r.line,
+        toId: r.toId,
+        confidence: r.confidence
+      }))
+    };
   }
 
   getModuleFlow(repoId: string, filePath: string, limit: number): {
@@ -1112,6 +1194,11 @@ export class GraphStore {
    */
   resolveImplementsEdges(repoId: string): number {
     return resolveImplementsEdgesImpl(this.db, repoId);
+  }
+
+  /** ISSUE-020: match PUBLISHES/CONSUMES `contract:` tokens across the producer→consumer bus. */
+  resolvePublishesConsumesEdges(repoId: string): number {
+    return resolvePublishesConsumesEdgesImpl(this.db, repoId);
   }
 
   upsertDocs(docs: import("./types.js").DocRecord[]): void {

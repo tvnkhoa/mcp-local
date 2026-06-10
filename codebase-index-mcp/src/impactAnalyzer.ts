@@ -1,5 +1,6 @@
 import type Database from "better-sqlite3";
 import type { EdgeRecord, GraphHealth, ReliabilitySummary, ResolvedEdge, SymbolRecord } from "./types.js";
+import { CALL_TRAVERSAL_EDGE_SQL_LIST, CALL_TRAVERSAL_EDGE_TYPES } from "./types.js";
 
 // ── Trivial callee tokens ──────────────────────────────────────────────
 // Shared with graphStore.ts — standard JS/TS prototype/runtime methods
@@ -32,7 +33,7 @@ export const TRIVIAL_CALLEE_IN_CLAUSE = [...TRIVIAL_CALLEE_TOKENS]
   .map((t) => `'callee:${t}'`)
   .join(", ");
 
-function buildEdgeToSymbolJoinClause(): string {
+export function buildEdgeToSymbolJoinClause(): string {
   return `(
     e.to_id = s.symbol_id
     or (e.type = 'CALLS' and e.to_id = ('callee:' || s.name))
@@ -815,12 +816,14 @@ export function getChangeContextImpl(
   const propertyTokenFallback = symbol.kind === "property" && declaringType?.name
     ? `property:${declaringType.name}.${symbol.name}`
     : null;
+  // Callers cross the bus too: a publisher is a "caller" of the consumer it was matched to
+  // (PUBLISHES edge), so include it alongside CALLS — consistent with getCallEdges / trace.
   const initialCallerEdgeTypes = symbol.kind === "property"
-    ? ["CALLS", "PROPERTY_REF", "PROPERTY_WRITE"]
-    : ["CALLS"];
+    ? [...CALL_TRAVERSAL_EDGE_TYPES, "PROPERTY_REF", "PROPERTY_WRITE"]
+    : [...CALL_TRAVERSAL_EDGE_TYPES];
   for (let depth = 1; depth <= callerDepth && frontier.length > 0 && callers.length < limit; depth++) {
     const ph = frontier.map(() => "?").join(",");
-    const callerEdgeTypes = depth === 1 ? initialCallerEdgeTypes : ["CALLS"];
+    const callerEdgeTypes = depth === 1 ? initialCallerEdgeTypes : [...CALL_TRAVERSAL_EDGE_TYPES];
     const edgeTypePh = callerEdgeTypes.map(() => "?").join(",");
     const includePropertyFallback = depth === 1 && propertyTokenFallback !== null;
     const fallbackClause = includePropertyFallback
@@ -871,12 +874,17 @@ export function getChangeContextImpl(
       from edges e
       left join symbols sf on sf.repo_id = e.repo_id and sf.symbol_id = e.from_id
       left join symbols st on st.repo_id = e.repo_id and st.symbol_id = e.to_id
-      where e.repo_id = ? and e.from_id = ? and e.type = 'CALLS'
+      where e.repo_id = ? and e.from_id = ? and e.type in (${CALL_TRAVERSAL_EDGE_SQL_LIST})
       limit 20
       `
     )
     .all(repoId, symbolId) as ResolvedEdge[];
   const callees = allCallees.filter((edge) => {
+    // Drop unresolved external bus hops (PUBLISHES still carrying a `contract:` token) — they
+    // have no target symbol, mirroring how trace_execution_flow's inner join excludes them.
+    if (edge.toId.startsWith("contract:")) {
+      return false;
+    }
     if (!edge.toId.startsWith("callee:")) {
       return true;
     }
@@ -1000,7 +1008,7 @@ export function traceExecutionFlowImpl(
 ): {
   entrySymbol: SymbolRecord | null;
   nodes: SymbolRecord[];
-  edges: { fromId: string; toId: string; fromName: string; toName: string; confidence: number | null }[];
+  edges: { fromId: string; toId: string; fromName: string; toName: string; confidence: number | null; via?: string }[];
   depthReached: number;
   truncated: boolean;
 } {
@@ -1018,7 +1026,7 @@ export function traceExecutionFlowImpl(
   const visitedSymbols = new Set<string>([entrySymbolId]);
   const visitedEdges = new Set<string>();
   const resultNodes: SymbolRecord[] = [entrySymbol];
-  const resultEdges: { fromId: string; toId: string; fromName: string; toName: string; confidence: number | null }[] = [];
+  const resultEdges: { fromId: string; toId: string; fromName: string; toName: string; confidence: number | null; via?: string }[] = [];
   let frontier = [entrySymbolId];
   let depthReached = 0;
   let truncated = false;
@@ -1027,25 +1035,28 @@ export function traceExecutionFlowImpl(
     const nextFrontier: string[] = [];
     for (const currentId of frontier) {
       if (resultNodes.length >= maxNodes) { truncated = true; break; }
+      // CALLS for normal control flow; PUBLISHES (ISSUE-020) to cross the message bus into the
+      // resolved consumer. Unresolved (external) bus edges keep a `contract:` to_id and are
+      // excluded by the inner join, so only matched producer→consumer hops are followed.
       const calleeRows = db
         .prepare(
-          `select e.from_id as fromId, e.to_id as toId, e.confidence,
+          `select e.from_id as fromId, e.to_id as toId, e.confidence, e.type as edgeType,
                   sf.name as fromName, st.name as toName,
                   st.repo_id as repoId, st.symbol_id as symbolId, st.file_path as filePath,
                   st.kind, st.line, st.signature
            from edges e
            inner join symbols sf on sf.repo_id = e.repo_id and sf.symbol_id = e.from_id
            inner join symbols st on st.repo_id = e.repo_id and st.symbol_id = e.to_id
-           where e.repo_id = ? and e.from_id = ? and e.type = 'CALLS'
+           where e.repo_id = ? and e.from_id = ? and e.type in (${CALL_TRAVERSAL_EDGE_SQL_LIST})
            limit 50`
         )
-        .all(repoId, currentId) as (SymbolRecord & { fromId: string; toId: string; fromName: string; toName: string; confidence: number | null })[];
+        .all(repoId, currentId) as (SymbolRecord & { fromId: string; toId: string; fromName: string; toName: string; confidence: number | null; edgeType: string })[];
 
       for (const row of calleeRows) {
         const edgeKey = `${row.fromId}:${row.toId}`;
         if (!visitedEdges.has(edgeKey)) {
           visitedEdges.add(edgeKey);
-          resultEdges.push({ fromId: row.fromId, toId: row.toId, fromName: row.fromName, toName: row.toName, confidence: row.confidence ?? null });
+          resultEdges.push({ fromId: row.fromId, toId: row.toId, fromName: row.fromName, toName: row.toName, confidence: row.confidence ?? null, ...(row.edgeType === "PUBLISHES" && { via: "bus" }) });
         }
         if (!visitedSymbols.has(row.toId) && resultNodes.length < maxNodes) {
           visitedSymbols.add(row.toId);

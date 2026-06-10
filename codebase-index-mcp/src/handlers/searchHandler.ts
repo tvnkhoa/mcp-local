@@ -10,7 +10,18 @@ import { runGit } from "../gitHelpers.js";
 import { resolveResponseProfile } from "../responseFormatter.js";
 import { formatChangeContextPayload, buildIndexMeta } from "./impactHandler.js";
 import { readSymbolSourceSpan } from "../refactorUtils.js";
+import { buildCoverageBlock } from "../coverage.js";
 import type { HandlerContext } from "./handlerContext.js";
+
+/**
+ * ISSUE-019 — A multi-word / natural-language query under strategy='name' returns 0
+ * (name-search matches the whole string, not tokens). Auto-route such queries to
+ * 'intent' so the agent doesn't waste a call rediscovering the right strategy.
+ * Single-token identifier searches (no whitespace) keep strategy='name' exactly.
+ */
+function isMultiWordQuery(query: string): boolean {
+  return query.trim().split(/\s+/).filter(Boolean).length > 1;
+}
 
 // ── search_symbols ────────────────────────────────────────────────────────────
 
@@ -32,13 +43,19 @@ export function handleSearchSymbols(
   const { store } = ctx;
   const profile = resolveResponseProfile(args.profile as Parameters<typeof resolveResponseProfile>[0], args.compact);
 
+  // ISSUE-019: auto-route a multi-word query issued under strategy='name' to 'intent'.
+  const autoRouted = args.strategy === "name" && isMultiWordQuery(args.query);
+  const strategyUsed: "name" | "intent" = autoRouted ? "intent" : args.strategy;
+
   if (args.ranked) {
-    const candidates = store.getSymbolCandidates(args.repoId ?? "", args.query, args.limit, args.strategy, {
+    const candidates = store.getSymbolCandidates(args.repoId ?? "", args.query, args.limit, strategyUsed, {
       kind: args.kind ?? null,
       language: args.language ?? null,
       filePath: args.filePath ?? null
     });
-    return ctx.asText({ query: args.query, strategy: args.strategy, count: candidates.length, candidates }, profile);
+    const coverage = buildCoverageBlock({ resultCount: candidates.length, kind: "search", query: args.query });
+    const base = { query: args.query, strategy: strategyUsed, autoRouted: autoRouted || undefined, count: candidates.length, candidates };
+    return ctx.asText(profile === "nano" ? { ...base, coverage: coverage.confidence } : { ...base, coverage }, profile);
   }
 
   const results = store.searchSymbols(
@@ -48,25 +65,31 @@ export function handleSearchSymbols(
     args.kind ?? null,
     args.filePath ?? null,
     args.limit,
-    args.strategy
+    strategyUsed
   );
   const suggestions = results.length === 0 ? store.getSearchSuggestions(args.query, args.repoId ?? null, 5) : [];
+  // When name-search still comes back empty, point the agent at the intent path explicitly.
+  const suggestion =
+    results.length === 0 && strategyUsed === "name"
+      ? "no results under strategy='name'; retry with strategy='intent' (multi-word/natural-language queries) or check filters."
+      : undefined;
   const staleness = args.repoId ? getRepoStaleness(args.repoId, store) : null;
+  const coverage = buildCoverageBlock({ resultCount: results.length, kind: "search", query: args.query });
 
   if (profile === "nano") {
     const topSymbols = results.slice(0, 10).map((s) => ({ name: s.name, kind: s.kind, filePath: s.filePath, line: s.line }));
-    return ctx.asText({ query: args.query, strategy: args.strategy, count: results.length, topSymbols, hasMore: results.length > topSymbols.length, suggestions: suggestions.slice(0, 3), isStale: staleness?.isStale ?? null }, profile);
+    return ctx.asText({ query: args.query, strategy: strategyUsed, autoRouted: autoRouted || undefined, count: results.length, topSymbols, hasMore: results.length > topSymbols.length, suggestions: suggestions.slice(0, 3), suggestion, isStale: staleness?.isStale ?? null, coverage: coverage.confidence }, profile);
   }
 
   if (profile === "compact") {
-    return ctx.asText({ query: args.query, strategy: args.strategy, count: results.length, symbols: results.map((s) => ({ name: s.name, kind: s.kind, filePath: s.filePath, line: s.line })), suggestions, staleness }, profile);
+    return ctx.asText({ query: args.query, strategy: strategyUsed, autoRouted: autoRouted || undefined, count: results.length, symbols: results.map((s) => ({ name: s.name, kind: s.kind, filePath: s.filePath, line: s.line })), suggestions, suggestion, staleness, coverage }, profile);
   }
 
   if (profile === "verbose") {
-    return ctx.asText({ query: args.query, strategy: args.strategy, count: results.length, symbols: results, suggestions, staleness, summary: { repoFilter: args.repoId ?? null, languageFilter: args.language ?? null, kindFilter: args.kind ?? null, filePathFilter: args.filePath ?? null } }, profile);
+    return ctx.asText({ query: args.query, strategy: strategyUsed, autoRouted: autoRouted || undefined, count: results.length, symbols: results, suggestions, suggestion, staleness, coverage, summary: { repoFilter: args.repoId ?? null, languageFilter: args.language ?? null, kindFilter: args.kind ?? null, filePathFilter: args.filePath ?? null } }, profile);
   }
 
-  return ctx.asText({ query: args.query, strategy: args.strategy, count: results.length, symbols: results, suggestions, staleness }, profile);
+  return ctx.asText({ query: args.query, strategy: strategyUsed, autoRouted: autoRouted || undefined, count: results.length, symbols: results, suggestions, suggestion, staleness, coverage }, profile);
 }
 
 // ── find_symbol_at_line ───────────────────────────────────────────────────────
@@ -111,20 +134,30 @@ export function handleGetSymbolContextPack(
   const selectedSymbolId = context.symbol?.symbolId ?? candidates[0]?.symbolId ?? null;
   const change = selectedSymbolId ? store.getChangeContext(args.repoId, selectedSymbolId, args.callerDepth, args.calleeDepth, args.limit) : null;
 
+  // ISSUE-021: uniform coverage signal so the CLAUDE.md fallback gate applies here too.
+  const coverage = buildCoverageBlock({
+    resultCount: candidates.length,
+    expectedNonZero: true,
+    kind: "context_pack",
+    query: args.name,
+    graphHealth: change?.graphHealth,
+    reliabilitySummary: change?.reliabilitySummary
+  });
+
   if (profile === "nano") {
     const topCandidates = candidates.slice(0, 5).map((x) => ({ name: x.name, kind: x.kind, filePath: x.filePath, score: x.score }));
-    return ctx.asText({ queryName: args.name, selectedSymbol: context.symbol ? { name: context.symbol.name, kind: context.symbol.kind, filePath: context.symbol.filePath } : null, candidateCount: candidates.length, topCandidates, callerCount: context.callers.length, calleeCount: context.callees.length, importerCount: context.importedByFiles.length, change: change ? formatChangeContextPayload(change, "nano") : null }, profile);
+    return ctx.asText({ queryName: args.name, selectedSymbol: context.symbol ? { name: context.symbol.name, kind: context.symbol.kind, filePath: context.symbol.filePath } : null, candidateCount: candidates.length, topCandidates, callerCount: context.callers.length, calleeCount: context.callees.length, importerCount: context.importedByFiles.length, change: change ? formatChangeContextPayload(change, "nano") : null, coverage: coverage.confidence }, profile);
   }
 
   if (profile === "compact") {
-    return ctx.asText({ queryName: args.name, selectedSymbol: context.symbol ? { symbolId: context.symbol.symbolId, name: context.symbol.name, kind: context.symbol.kind, filePath: context.symbol.filePath, line: context.symbol.line } : null, candidates: candidates.map((x) => ({ symbolId: x.symbolId, name: x.name, kind: x.kind, filePath: x.filePath, line: x.line, score: x.score, confidence: x.confidence })), context: { callers: context.callers.map((x) => ({ callerName: x.callerName, callerFile: x.callerFile, callerLine: x.callerLine })), callees: context.callees.map((x) => ({ calleeName: x.calleeName, calleeFile: x.calleeFile, calleeLine: x.calleeLine })), importedByFiles: context.importedByFiles }, change: change ? formatChangeContextPayload(change, "compact") : null, indexMeta: buildIndexMeta(store, args.repoId) }, profile);
+    return ctx.asText({ queryName: args.name, selectedSymbol: context.symbol ? { symbolId: context.symbol.symbolId, name: context.symbol.name, kind: context.symbol.kind, filePath: context.symbol.filePath, line: context.symbol.line } : null, candidates: candidates.map((x) => ({ symbolId: x.symbolId, name: x.name, kind: x.kind, filePath: x.filePath, line: x.line, score: x.score, confidence: x.confidence })), context: { callers: context.callers.map((x) => ({ callerName: x.callerName, callerFile: x.callerFile, callerLine: x.callerLine })), callees: context.callees.map((x) => ({ calleeName: x.calleeName, calleeFile: x.calleeFile, calleeLine: x.calleeLine })), importedByFiles: context.importedByFiles }, change: change ? formatChangeContextPayload(change, "compact") : null, coverage, indexMeta: buildIndexMeta(store, args.repoId) }, profile);
   }
 
   if (profile === "verbose") {
-    return ctx.asText({ queryName: args.name, selectedSymbolId, candidates, context, change, summary: { candidateCount: candidates.length, contextMatchedCount: context.allMatchedSymbols.length, hasChangeContext: change != null }, indexMeta: buildIndexMeta(store, args.repoId) }, profile);
+    return ctx.asText({ queryName: args.name, selectedSymbolId, candidates, context, change, coverage, summary: { candidateCount: candidates.length, contextMatchedCount: context.allMatchedSymbols.length, hasChangeContext: change != null }, indexMeta: buildIndexMeta(store, args.repoId) }, profile);
   }
 
-  return ctx.asText({ queryName: args.name, selectedSymbolId, candidates, context, change, indexMeta: buildIndexMeta(store, args.repoId) }, profile);
+  return ctx.asText({ queryName: args.name, selectedSymbolId, candidates, context, change, coverage, indexMeta: buildIndexMeta(store, args.repoId) }, profile);
 }
 
 // ── get_symbol_blame ──────────────────────────────────────────────────────────

@@ -46,6 +46,60 @@ function csharpTypeKindForNode(node: Parser.SyntaxNode): SymbolRecord["kind"] {
 /** C# type-like kinds that anchor members and act as type/call resolution targets. */
 const CSHARP_TYPE_KINDS = new Set<SymbolRecord["kind"]>(["class", "struct", "interface", "record", "record struct"]);
 
+// ── ISSUE-020: message-bus producer/consumer edge extraction ──────────────────
+// MassTransit/MediatR handlers are reached via DI/reflection, so there is no static CALLS
+// edge from a `Publish<T>`/`Send<T>` callsite to the `IConsumer<T>`/handler of the same T.
+// We emit unresolved `contract:<T>` tokens on both sides (PUBLISHES from the publish callsite,
+// CONSUMES from the handler type) and match them by contract name in a second pass
+// (resolvePublishesConsumesEdges) so trace_execution_flow / get_call_chain can cross the bus.
+
+// Handler base interfaces whose FIRST generic arg is the message/request contract.
+const BUS_CONSUMER_INTERFACES = new Set(["IConsumer", "IRequestHandler", "INotificationHandler"]);
+// Methods that publish/send a contract onto the bus (explicit generic or `new T(...)` arg).
+const BUS_PUBLISH_METHODS = /^(Publish|Send)(Async)?$/;
+
+/**
+ * Strip namespace qualifier + nested generics from a type token: `Foo.Bar<Baz>` → `Bar`.
+ * Returns null for tokens too short to be a real contract name (the bar both callers want).
+ */
+function normalizeContractName(raw: string): string | null {
+  let t = raw.trim().replace(/<.*>$/, "").trim();
+  const dot = t.lastIndexOf(".");
+  if (dot >= 0) t = t.slice(dot + 1);
+  t = t.trim();
+  return t.length >= 2 ? t : null;
+}
+
+/** The bare method name of a call target, dropping any generic arg list. */
+function methodNameOf(node: Parser.SyntaxNode): string {
+  if (node.type === "generic_name") {
+    const id = node.namedChildren.find((c) => c.type === "identifier");
+    return id?.text ?? node.text.replace(/<.*>$/, "");
+  }
+  return node.text;
+}
+
+/** First generic type argument of a `generic_name` node (the message/request contract). */
+function genericFirstTypeArg(node: Parser.SyntaxNode | null | undefined): string | null {
+  if (!node || node.type !== "generic_name") return null;
+  const targs = node.childForFieldName("type_arguments") ?? node.namedChildren.find((c) => c.type === "type_argument_list");
+  const first = targs?.namedChildren[0];
+  if (!first) return null;
+  return normalizeContractName(first.text);
+}
+
+/** When a publish has no explicit generic, infer the contract from a `new T(...)`/`new T{...}` first arg. */
+function inferContractFromFirstArg(invocation: Parser.SyntaxNode): string | null {
+  const args = invocation.childForFieldName("arguments");
+  if (!args) return null;
+  const firstArg = args.namedChildren.find((c) => c.type === "argument") ?? args.namedChildren[0];
+  const expr = firstArg?.namedChildren[0] ?? firstArg;
+  if (expr?.type !== "object_creation_expression") return null;
+  const typeNode = expr.childForFieldName("type");
+  if (!typeNode) return null;
+  return normalizeContractName(typeNode.text);
+}
+
 // JSON attribute names that carry a serialized key literal
 const JSON_KEY_ATTRIBUTE_NAMES = new Set([
   "JsonPropertyName",
@@ -134,6 +188,17 @@ export function extractCSharpSymbolsImpl(
           receiverName = findEnclosingCSharpTypeName(node) ?? "";
           receiverTypeName = receiverName;
         }
+      }
+    }
+    // ISSUE-020: producer side — Publish<T>/Send<T>(...) or Publish(new T(...)) → PUBLISHES contract edge.
+    // Done before the `!calleeName` guard so bare generic calls (no member receiver) are still captured.
+    const nameContainer =
+      functionNode.type === "member_access_expression" ? functionNode.childForFieldName("name") : functionNode;
+    if (nameContainer && BUS_PUBLISH_METHODS.test(methodNameOf(nameContainer))) {
+      const contract = genericFirstTypeArg(nameContainer) ?? inferContractFromFirstArg(node);
+      if (contract) {
+        const pubFromId = findEnclosingCSharpSymbolId(node, input) ?? moduleSymbolId;
+        edges.push({ repoId: input.repoId, fromId: pubFromId, toId: `contract:${contract}`, type: "PUBLISHES", confidence: 0.9, reason: "message bus publish" });
       }
     }
     if (!calleeName) continue;
@@ -231,6 +296,15 @@ export function extractCSharpSymbolsImpl(
               confidence: 0.95,
               reason: "base_list interface"
             });
+            // ISSUE-020: consumer side — IConsumer<T>/IRequestHandler<T,_>/INotificationHandler<T>
+            // → CONSUMES the first generic arg (the message/request contract). Emitted in addition
+            // to the IMPLEMENTS edge; matched to publishers by contract name in resolution.
+            if (BUS_CONSUMER_INTERFACES.has(baseName)) {
+              const contract = genericFirstTypeArg(baseNode);
+              if (contract) {
+                edges.push({ repoId: input.repoId, fromId: symbolId, toId: `contract:${contract}`, type: "CONSUMES", confidence: 0.95, reason: "message consumer" });
+              }
+            }
           } else {
             // Base class → TYPE_REF
             emitTypeRefEdge(input, symbolId, baseName, edges);

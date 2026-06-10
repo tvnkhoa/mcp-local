@@ -130,6 +130,7 @@ import { handleOrient } from "./handlers/orientHandler.js";
 import {
   handleGetDependencyGraph,
   handleGetCallChain,
+  handleFindFieldAccesses,
   handleFindImpactFiles,
   handleGetChangeContext,
   handleGetFileSummary,
@@ -209,6 +210,7 @@ const searchSymbolsSchema = schemas.searchSymbolsSchema(MAX_RESULT_LIMIT);
 const getFileContextSchema = schemas.getFileContextSchema(MAX_RESULT_LIMIT);
 const getSymbolDetailSchema = schemas.getSymbolDetailSchema(MAX_RESULT_LIMIT);
 const findImpactFilesSchema = schemas.findImpactFilesSchema(MAX_RESULT_LIMIT);
+const findFieldAccessesSchema = schemas.findFieldAccessesSchema(MAX_RESULT_LIMIT);
 const getChangeContextSchema = schemas.getChangeContextSchema(MAX_DEPTH, MAX_RESULT_LIMIT);
 const getFileSummarySchema = schemas.getFileSummarySchema;
 const findSymbolAtLineSchema = schemas.findSymbolAtLineSchema;
@@ -362,6 +364,23 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             symbolId: { type: "string" },
             direction: { type: "string", enum: ["callers", "callees"] },
             depth: { type: "integer", minimum: 1, maximum: MAX_DEPTH },
+            limit: { type: "integer", minimum: 1, maximum: MAX_RESULT_LIMIT },
+            profile: { type: "string", enum: ["nano", "compact", "standard", "verbose"] }
+          }
+        }
+      },
+      {
+        name: "find_field_accesses",
+        description: "List every read/write callsite of a property (field) with its enclosing symbol — the 'who reads vs who writes this field' audit for wrong-level-resolution checks. Reads the PROPERTY_REF (read) / PROPERTY_WRITE (write) edges. Provide a property symbolId or a resolvable name. mode=read|write|all (default all). Returns reads/writes partitioned, each with enclosingName/filePath/line, plus a coverage block. Use this instead of grepping a field name across the repo.",
+        inputSchema: {
+          type: "object",
+          additionalProperties: false,
+          required: ["repoId"],
+          properties: {
+            repoId: { type: "string" },
+            symbolId: { type: "string" },
+            name: { type: "string" },
+            mode: { type: "string", enum: ["read", "write", "all"] },
             limit: { type: "integer", minimum: 1, maximum: MAX_RESULT_LIMIT },
             profile: { type: "string", enum: ["nano", "compact", "standard", "verbose"] }
           }
@@ -1029,6 +1048,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const hArgs = findImpactFilesSchema.parse(request.params.arguments ?? {});
         return handleFindImpactFiles(hArgs, ctx);
       }
+      case "find_field_accesses": {
+        const hArgs = findFieldAccessesSchema.parse(request.params.arguments ?? {});
+        return handleFindFieldAccesses(hArgs, ctx);
+      }
       case "get_change_context": {
         const hArgs = getChangeContextSchema.parse(request.params.arguments ?? {});
         return handleGetChangeContext(hArgs, ctx);
@@ -1578,6 +1601,8 @@ async function runIndexAndResolve(
     process.stderr.write(`[index-post] repoId=${repoId} resolving interface implementations...\n`);
     const implementsStart = Date.now();
     try { store.resolveImplementsEdges(repoId); } catch { /* non-fatal */ }
+    // ISSUE-020: match message-bus PUBLISHES/CONSUMES tokens (depends on consumer IMPLEMENTS being resolved).
+    try { store.resolvePublishesConsumesEdges(repoId); } catch { /* non-fatal */ }
     implementsResolveMs = Date.now() - implementsStart;
   } else {
     process.stderr.write(`[index-post-skip] repoId=${repoId} skipping interface implementation resolution in post-phase\n`);
