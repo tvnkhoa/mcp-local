@@ -70,7 +70,8 @@ export const searchSymbolsSchema = (MAX_RESULT_LIMIT: number) => z
     limit: z.number().int().min(1).max(MAX_RESULT_LIMIT).default(50),
     compact: z.boolean().default(false),
     profile: responseProfileSchema.default("compact"),
-    ranked: z.boolean().default(false)
+    ranked: z.boolean().default(false),
+    excludeTests: z.boolean().default(false)
   })
   .strict();
 

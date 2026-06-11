@@ -1,4 +1,5 @@
 import type Database from "better-sqlite3";
+import { isTestPath } from "./fileFilter.js";
 
 // ISSUE-017: name-affinity fallback. Static CALLS/IMPORTS edges miss tests that exercise a
 // handler via `new XHandler(ctx).Handle(...)` or a MediatR stub (no resolvable edge), and the
@@ -77,8 +78,6 @@ export function linkTestsToSource(
   reasons: string[];
 }[] {
   const normalizePath = (v: string) => v.replace(/\\/g, "/");
-  const testPathRegex = /(^|\/)(__tests__|tests?)\/|\.(test|spec)\.[^.]+$|(^|\/)test_[^/]+\.py$|_test\.py$|Tests\.cs$/i;
-  const isTestPath = (v: string) => testPathRegex.test(normalizePath(v));
   const normalizeBase = (v: string) => {
     const base = normalizePath(v).split("/").pop() ?? v;
     return base

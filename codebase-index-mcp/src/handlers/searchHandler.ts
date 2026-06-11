@@ -11,6 +11,7 @@ import { resolveResponseProfile } from "../responseFormatter.js";
 import { formatChangeContextPayload, buildIndexMeta } from "./impactHandler.js";
 import { readSymbolSourceSpan } from "../refactorUtils.js";
 import { buildCoverageBlock } from "../coverage.js";
+import { isTestPath } from "../fileFilter.js";
 import type { HandlerContext } from "./handlerContext.js";
 
 /**
@@ -37,6 +38,7 @@ export function handleSearchSymbols(
     compact: boolean;
     profile: string;
     ranked: boolean;
+    excludeTests: boolean;
   },
   ctx: HandlerContext
 ): CallToolResult {
@@ -51,14 +53,15 @@ export function handleSearchSymbols(
     const candidates = store.getSymbolCandidates(args.repoId ?? "", args.query, args.limit, strategyUsed, {
       kind: args.kind ?? null,
       language: args.language ?? null,
-      filePath: args.filePath ?? null
+      filePath: args.filePath ?? null,
+      excludeTests: args.excludeTests
     });
     const coverage = buildCoverageBlock({ resultCount: candidates.length, kind: "search", query: args.query });
     const base = { query: args.query, strategy: strategyUsed, autoRouted: autoRouted || undefined, count: candidates.length, candidates };
     return ctx.asText(profile === "nano" ? { ...base, coverage: coverage.confidence } : { ...base, coverage }, profile);
   }
 
-  const results = store.searchSymbols(
+  const resultsRaw = store.searchSymbols(
     args.query,
     args.repoId ?? null,
     args.language ?? null,
@@ -67,6 +70,7 @@ export function handleSearchSymbols(
     args.limit,
     strategyUsed
   );
+  const results = args.excludeTests ? resultsRaw.filter((s) => !isTestPath(s.filePath)) : resultsRaw;
   const suggestions = results.length === 0 ? store.getSearchSuggestions(args.query, args.repoId ?? null, 5) : [];
   // When name-search still comes back empty, point the agent at the intent path explicitly.
   const suggestion =

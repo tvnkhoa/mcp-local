@@ -101,6 +101,14 @@ const LANGUAGE_BY_EXTENSION: Record<string, string> = {
   ".proto": "proto"
 };
 
+// ISSUE-024: shared test-path classifier — dùng chung cho link_tests_to_source và
+// search_symbols (rank penalty / excludeTests). Giữ một regex duy nhất để 2 nơi không drift.
+const TEST_PATH_REGEX = /(^|\/)(__tests__|tests?)\/|\.(test|spec)\.[^.]+$|(^|\/)test_[^/]+\.py$|_test\.py$|Tests\.cs$/i;
+
+export function isTestPath(filePath: string): boolean {
+  return TEST_PATH_REGEX.test(filePath.replace(/\\/g, "/"));
+}
+
 /** Returns true if the first 512 bytes contain a null byte — reliable binary file indicator. */
 function isBinary(bytes: Uint8Array): boolean {
   const limit = Math.min(bytes.length, 512);

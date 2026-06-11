@@ -1143,7 +1143,7 @@ export class GraphStore {
     return getContextByNameImpl(this.db, repoId, name, limit);
   }
 
-  getSymbolCandidates(repoId: string, name: string, limit: number, strategy: "name" | "intent" = "name", filters: { kind?: string | null; language?: string | null; filePath?: string | null } = {}): { symbolId: string; name: string; kind: string; filePath: string; line: number; signature: string | null; matchType: "exact" | "prefix" | "contains"; score: number; confidence: number }[] {
+  getSymbolCandidates(repoId: string, name: string, limit: number, strategy: "name" | "intent" = "name", filters: { kind?: string | null; language?: string | null; filePath?: string | null; excludeTests?: boolean } = {}): { symbolId: string; name: string; kind: string; filePath: string; line: number; signature: string | null; qualifiedName?: string; matchType: "exact" | "prefix" | "contains"; score: number; confidence: number }[] {
     return getSymbolCandidatesImpl(this.db, repoId, name, limit, strategy, filters);
   }
 

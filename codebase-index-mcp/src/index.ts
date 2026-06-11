@@ -393,7 +393,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: "search_symbols",
-        description: "Search symbols across all repos or a specific repo. strategy=name is strict name/signature matching; strategy=intent uses broader tokenized matching (multi-word natural-language queries work, e.g. 'send notification email'). ranked=true returns scored/ranked candidates and honors strategy (intent tokenizes the query) plus the kind/language/filePath filters.",
+        description: "Search symbols across all repos or a specific repo. strategy=name is strict name/signature matching; strategy=intent uses broader tokenized matching (multi-word natural-language queries work, e.g. 'send notification email'). ranked=true returns scored/ranked candidates (with qualifiedName 'EnclosingType.Member' for class members; enclosing-type names participate in intent matching; test files get a rank penalty) and honors strategy plus the kind/language/filePath filters. excludeTests=true drops test-path results entirely.",
         inputSchema: {
           type: "object",
           additionalProperties: false,
@@ -408,7 +408,8 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             limit: { type: "integer", minimum: 1, maximum: MAX_RESULT_LIMIT },
             compact: { type: "boolean" },
             profile: { type: "string", enum: ["nano", "compact", "standard", "verbose"] },
-            ranked: { type: "boolean" }
+            ranked: { type: "boolean" },
+            excludeTests: { type: "boolean" }
           }
         }
       },
