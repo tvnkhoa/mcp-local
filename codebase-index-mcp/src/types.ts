@@ -173,6 +173,8 @@ export type ResolvedEdge = {
   type: string;
   confidence?: number;
   reason?: string | null;
+  /** ISSUE-022: cách edge được merge vào kết quả — "interface" (DI-dispatch), "bus" (PUBLISHES), "member" (class → own method). */
+  via?: "interface" | "bus" | "member";
 };
 
 export type DocRecord = {

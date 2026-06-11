@@ -209,11 +209,14 @@ export function extractCSharpSymbolsImpl(
     // - Uppercase start: static/type calls (e.g. MyService.DoWork)
     // - Underscore prefix: DI field convention (e.g. _campaignService.Execute)
     // - this_expression: resolved to enclosing class name
-    // Skipping plain camelCase locals (e.g. result.Value, list.Add) avoids
+    // - ISSUE-022: any receiver whose TYPE resolved from the scope map (camelCase primary-ctor
+    //   params / locals with known types) — the type name makes the token resolvable, so the
+    //   edge-explosion concern (unknown camelCase locals) doesn't apply.
+    // Skipping camelCase locals with UNKNOWN types (e.g. result.Value, list.Add) avoids
     // edge explosion on large repos without losing meaningful call graph data.
     // NOTE: UNIQUE INDEX on edges(repo_id, from_id, to_id, type) prevents true duplicates;
     // simple + qualified are different to_id values so both are stored intentionally.
-    if (receiverName && (/^[A-Z]/.test(receiverName) || receiverName.startsWith("_") || functionNode.childForFieldName("expression")?.type === "this_expression")) {
+    if (receiverName && (receiverTypeName || /^[A-Z]/.test(receiverName) || receiverName.startsWith("_") || functionNode.childForFieldName("expression")?.type === "this_expression")) {
       const qualifiedReceiverName = receiverTypeName || receiverName;
       edges.push({ repoId: input.repoId, fromId, toId: `callee:${qualifiedReceiverName}.${calleeName}`, type: "CALLS", confidence: 0.75, reason: "qualified call" });
     }

@@ -89,37 +89,37 @@ function buildNamedCandidateMap(
   db: Database.Database,
   repoId: string,
   allowedKinds?: readonly string[]
-): Map<string, { symbolId: string; filePath: string; kind: string }[]> {
+): Map<string, { symbolId: string; filePath: string; kind: string; parentSymbolId: string | null }[]> {
   const rows = allowedKinds && allowedKinds.length > 0
     ? db
         .prepare(
-          `select symbol_id as symbolId, name, file_path as filePath, kind
+          `select symbol_id as symbolId, name, file_path as filePath, kind, parent_symbol_id as parentSymbolId
            from symbols
            where repo_id = ? and kind in (${allowedKinds.map(() => "?").join(", ")})`
         )
-        .all(repoId, ...allowedKinds) as { symbolId: string; name: string; filePath: string; kind: string }[]
+        .all(repoId, ...allowedKinds) as { symbolId: string; name: string; filePath: string; kind: string; parentSymbolId: string | null }[]
     : db
         .prepare(
-          `select symbol_id as symbolId, name, file_path as filePath, kind
+          `select symbol_id as symbolId, name, file_path as filePath, kind, parent_symbol_id as parentSymbolId
            from symbols
            where repo_id = ?`
         )
-        .all(repoId) as { symbolId: string; name: string; filePath: string; kind: string }[];
+        .all(repoId) as { symbolId: string; name: string; filePath: string; kind: string; parentSymbolId: string | null }[];
 
-  const byName = new Map<string, { symbolId: string; filePath: string; kind: string }[]>();
+  const byName = new Map<string, { symbolId: string; filePath: string; kind: string; parentSymbolId: string | null }[]>();
   for (const row of rows) {
     const list = byName.get(row.name) ?? [];
-    list.push({ symbolId: row.symbolId, filePath: row.filePath, kind: row.kind });
+    list.push({ symbolId: row.symbolId, filePath: row.filePath, kind: row.kind, parentSymbolId: row.parentSymbolId ?? null });
     byName.set(row.name, list);
   }
   return byName;
 }
 
-function pickBestNamedCandidate(
-  candidates: { symbolId: string; filePath: string; kind: string }[],
+function pickBestNamedCandidate<T extends { symbolId: string; filePath: string; kind: string }>(
+  candidates: T[],
   fromFile: string,
   kindPriority: readonly string[]
-): { symbolId: string; filePath: string; kind: string } | undefined {
+): T | undefined {
   if (candidates.length === 0) {
     return undefined;
   }
@@ -573,8 +573,10 @@ function resolveImportsCrossRepo(db: Database.Database, repoId: string, maxRows 
 // ── Call edge resolution context (pre-built once, reused across batches) ──────
 
 export interface CallResolutionContext {
-  candidateMap: Map<string, { symbolId: string; filePath: string; kind: string }[]>;
+  candidateMap: Map<string, { symbolId: string; filePath: string; kind: string; parentSymbolId: string | null }[]>;
   interfaceByName: Map<string, { symbolId: string; filePath: string }>;
+  /** ISSUE-022: symbolIds của mọi interface — detect bare-name match trúng interface method để fan-out. */
+  interfaceIdSet: Set<string>;
   implementorFilesByIfaceId: Map<string, string[]>;
   updateStmt: Statement;
   insertDispatchStmt: Statement;
@@ -593,16 +595,19 @@ export function buildCallResolutionContext(db: Database.Database, repoId: string
     .prepare(`select symbol_id as symbolId, name, file_path as filePath from symbols where repo_id = ? and kind = 'interface'`)
     .all(repoId) as { symbolId: string; name: string; filePath: string }[];
   const interfaceByName = new Map<string, { symbolId: string; filePath: string }>();
+  const interfaceIdSet = new Set<string>();
   for (const r of interfaceRows) {
     if (!interfaceByName.has(r.name)) interfaceByName.set(r.name, { symbolId: r.symbolId, filePath: r.filePath });
+    interfaceIdSet.add(r.symbolId);
   }
 
+  // record / record struct are class-like implementors too (ISSUE-013/ISSUE-022).
   const implEdgeRows = db
     .prepare(
       `select distinct e.to_id as ifaceId, s.file_path as filePath
        from edges e
        inner join symbols s on s.repo_id = e.repo_id and s.symbol_id = e.from_id
-       where e.repo_id = ? and e.type = 'IMPLEMENTS' and s.kind in ('class', 'struct')`
+       where e.repo_id = ? and e.type = 'IMPLEMENTS' and s.kind in ('class', 'struct', 'record', 'record struct')`
     )
     .all(repoId) as { ifaceId: string; filePath: string }[];
   const implementorFilesByIfaceId = new Map<string, string[]>();
@@ -640,7 +645,7 @@ export function buildCallResolutionContext(db: Database.Database, repoId: string
     )
     .all(repoId) as { fromId: string; toId: string; fromFile: string }[];
 
-  return { candidateMap, interfaceByName, implementorFilesByIfaceId, updateStmt, insertDispatchStmt, unresolvedRows, offset: 0 };
+  return { candidateMap, interfaceByName, interfaceIdSet, implementorFilesByIfaceId, updateStmt, insertDispatchStmt, unresolvedRows, offset: 0 };
 }
 
 /**
@@ -659,7 +664,10 @@ export function resolveCallEdgesBatch(
 
   if (batch.length === 0) return 0;
 
-  const { candidateMap, interfaceByName, implementorFilesByIfaceId } = ctx;
+  const { candidateMap, interfaceByName, interfaceIdSet, implementorFilesByIfaceId } = ctx;
+  // ISSUE-022: cap fan-out per call-site — MediatR-style interfaces can have hundreds of
+  // implementors; beyond this the dispatch edges are noise, not signal.
+  const MAX_INTERFACE_DISPATCH_FANOUT = 10;
 
   // Phase 1: resolve all rows in memory → collect updates and inserts
   type UpdateRow = { fromId: string; oldToId: string; newToId: string; confidence: number; reason: string };
@@ -690,7 +698,7 @@ export function resolveCallEdgesBatch(
             (c) => c.filePath === iface.filePath && c.kind === "method"
           );
           if (ifaceMethod) {
-            match = { symbolId: ifaceMethod.symbolId, filePath: iface.filePath, kind: "method" };
+            match = ifaceMethod;
             dispatchMethodName = memberName;
             dispatchInterfaceId = iface.symbolId;
           }
@@ -707,6 +715,14 @@ export function resolveCallEdgesBatch(
       );
     }
 
+    // ISSUE-022 (Bug D): a bare-name token that resolved straight to an interface's own method
+    // must fan out to implementations too — the qualified path above only fires when extraction
+    // knew the receiver type. Detected via parent_symbol_id ∈ interface set.
+    if (match && !dispatchMethodName && match.kind === "method" && match.parentSymbolId && interfaceIdSet.has(match.parentSymbolId)) {
+      dispatchMethodName = calleeName.split(".").pop() ?? calleeName;
+      dispatchInterfaceId = match.parentSymbolId;
+    }
+
     if (match) {
       const confidence = dispatchMethodName
         ? (match.filePath === row.fromFile ? 0.9 : 0.8)
@@ -717,13 +733,13 @@ export function resolveCallEdgesBatch(
       updates.push({ fromId: row.fromId, oldToId: row.toId, newToId: match.symbolId, confidence, reason });
 
       if (dispatchMethodName && dispatchInterfaceId) {
-        const implementorFiles = implementorFilesByIfaceId.get(dispatchInterfaceId) ?? [];
+        const implementorFiles = (implementorFilesByIfaceId.get(dispatchInterfaceId) ?? []).slice(0, MAX_INTERFACE_DISPATCH_FANOUT);
         for (const implFilePath of implementorFiles) {
           const implMethod = (candidateMap.get(dispatchMethodName) ?? []).find(
             (c) => c.filePath === implFilePath && c.kind === "method"
           );
           if (!implMethod || implMethod.symbolId === match.symbolId) continue;
-          inserts.push({ fromId: row.fromId, toId: implMethod.symbolId, confidence: 0.65, reason: "interface-dispatch" });
+          inserts.push({ fromId: row.fromId, toId: implMethod.symbolId, confidence: 0.7, reason: "interface-dispatch" });
         }
       }
     } else {
@@ -884,17 +900,20 @@ export function resolveCallEdges(db: Database.Database, repoId: string, maxUnres
     .prepare(`select symbol_id as symbolId, name, file_path as filePath from symbols where repo_id = ? and kind = 'interface'`)
     .all(repoId) as { symbolId: string; name: string; filePath: string }[];
   const interfaceByName = new Map<string, { symbolId: string; filePath: string }>();
+  const interfaceIdSet = new Set<string>();
   for (const r of interfaceRows) {
     if (!interfaceByName.has(r.name)) interfaceByName.set(r.name, { symbolId: r.symbolId, filePath: r.filePath });
+    interfaceIdSet.add(r.symbolId);
   }
 
   // Pre-build implementor files map: interfaceSymbolId → filePath[]
+  // record / record struct are class-like implementors too (ISSUE-013/ISSUE-022).
   const implEdgeRows = db
     .prepare(
       `select distinct e.to_id as ifaceId, s.file_path as filePath
        from edges e
        inner join symbols s on s.repo_id = e.repo_id and s.symbol_id = e.from_id
-       where e.repo_id = ? and e.type = 'IMPLEMENTS' and s.kind in ('class', 'struct')`
+       where e.repo_id = ? and e.type = 'IMPLEMENTS' and s.kind in ('class', 'struct', 'record', 'record struct')`
     )
     .all(repoId) as { ifaceId: string; filePath: string }[];
   const implementorFilesByIfaceId = new Map<string, string[]>();
@@ -932,7 +951,7 @@ export function resolveCallEdges(db: Database.Database, repoId: string, maxUnres
               (c) => c.filePath === iface.filePath && c.kind === "method"
             );
             if (ifaceMethod) {
-              match = { symbolId: ifaceMethod.symbolId, filePath: iface.filePath, kind: "method" };
+              match = ifaceMethod;
               dispatchMethodName = memberName;
               dispatchInterfaceId = iface.symbolId;
             }
@@ -950,6 +969,12 @@ export function resolveCallEdges(db: Database.Database, repoId: string, maxUnres
         );
       }
 
+      // ISSUE-022 (Bug D): bare-name match landing on an interface's own method → fan out too.
+      if (match && !dispatchMethodName && match.kind === "method" && match.parentSymbolId && interfaceIdSet.has(match.parentSymbolId)) {
+        dispatchMethodName = calleeName.split(".").pop() ?? calleeName;
+        dispatchInterfaceId = match.parentSymbolId;
+      }
+
       if (match) {
         const confidence = dispatchMethodName
           ? (match.filePath === row.fromFile ? 0.9 : 0.8)
@@ -961,7 +986,7 @@ export function resolveCallEdges(db: Database.Database, repoId: string, maxUnres
         count += 1;
 
         if (dispatchMethodName && dispatchInterfaceId) {
-          const implementorFiles = implementorFilesByIfaceId.get(dispatchInterfaceId) ?? [];
+          const implementorFiles = (implementorFilesByIfaceId.get(dispatchInterfaceId) ?? []).slice(0, 10);
           for (const implFilePath of implementorFiles) {
             const implMethod = (candidateMap.get(dispatchMethodName) ?? []).find(
               (c) => c.filePath === implFilePath && c.kind === "method"
@@ -973,7 +998,7 @@ export function resolveCallEdges(db: Database.Database, repoId: string, maxUnres
               repoId,
               row.fromId,
               implMethod.symbolId,
-              0.65,
+              0.7,
               "interface-dispatch",
               repoId,
               row.fromId,

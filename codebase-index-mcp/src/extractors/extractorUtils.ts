@@ -276,11 +276,33 @@ export function collectCSharpEnclosingMemberTypeMap(scopeNode: Parser.SyntaxNode
   let current: Parser.SyntaxNode | null = scopeNode.parent;
   while (current) {
     if (CLASS_TYPES.has(current.type)) {
+      // ISSUE-022 (Bug B): C# 12 primary-constructor params are a bare `parameter_list` named
+      // child of the type declaration (no field name) — map them like DI fields so
+      // `class Handler(INotificationPublisher publisher)` resolves `publisher.Method()` calls.
+      for (const child of current.namedChildren) {
+        if (child.type !== "parameter_list") continue;
+        for (const param of child.namedChildren) {
+          if (param.type !== "parameter") continue;
+          const pTypeNode = param.childForFieldName("type");
+          const pNameNode = param.childForFieldName("name");
+          if (pTypeNode && pNameNode) {
+            const pType = normalizeCSharpTypeName(pTypeNode.text.trim());
+            const pName = pNameNode.text.trim();
+            if (pType && pName) addCSharpTypeAliases(typeMap, pName, pType);
+          }
+        }
+      }
       const bodyNode = current.childForFieldName("body");
       if (bodyNode) {
         for (const member of bodyNode.namedChildren) {
           if (member.type === "field_declaration" || member.type === "property_declaration") {
-            const typeNode = member.childForFieldName("type");
+            // ISSUE-022 (Bug A): tree-sitter-c-sharp đặt `type` của field_declaration trên child
+            // `variable_declaration`, không trực tiếp — childForFieldName("type") trả null nên
+            // DI field types không bao giờ vào scope map. Fallback xuống variable_declaration.
+            const typeNode =
+              member.childForFieldName("type") ??
+              member.descendantsOfType("variable_declaration")[0]?.childForFieldName("type") ??
+              null;
             const declaratorNode = member.descendantsOfType("variable_declarator")[0];
             const nameNode = declaratorNode?.childForFieldName("name") ?? member.childForFieldName("name");
 

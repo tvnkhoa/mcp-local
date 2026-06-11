@@ -51,7 +51,12 @@ export function traverseCallGraph(
 ) {
   const all: ReturnType<GraphStore["getCallEdges"]> = [];
   const visited = new Set<string>();
-  let frontier = [symbolId];
+  // ISSUE-022: hướng callers nhìn xuyên DI — seed thêm interface siblings (interface method ↔
+  // impl method, class → members) để get_call_chain thấy caller gọi qua interface.
+  let frontier =
+    direction === "callers"
+      ? [symbolId, ...store.expandInterfaceSiblings(repoId, [symbolId]).map((s) => s.symbolId)]
+      : [symbolId];
 
   for (let level = 0; level < depth && all.length < limit && frontier.length > 0; level += 1) {
     const nextFrontier: string[] = [];

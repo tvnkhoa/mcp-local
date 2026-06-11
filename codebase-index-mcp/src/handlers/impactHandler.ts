@@ -47,7 +47,8 @@ export function formatChangeContextPayload(
   profile: ReturnType<typeof resolveResponseProfile>
 ): unknown {
   if (profile === "nano") {
-    const topCallers = result.callers.slice(0, 10).map((x) => ({ fromName: x.fromName, fromFilePath: x.fromFilePath, distance: x.distance, confidence: x.confidence ?? null }));
+    // ISSUE-022: `via` ("interface"/"bus"/"member") chỉ spread khi có — nano/compact giữ lean.
+    const topCallers = result.callers.slice(0, 10).map((x) => ({ fromName: x.fromName, fromFilePath: x.fromFilePath, distance: x.distance, ...(x.via ? { via: x.via } : {}), confidence: x.confidence ?? null }));
     const topCallees = result.callees.slice(0, 10).map((x) => ({ toName: x.toName, toFilePath: x.toFilePath, confidence: x.confidence ?? null }));
     const topTypeDeps = result.typeDeps.slice(0, 10).map((x) => ({ toName: x.toName, toFilePath: x.toFilePath, confidence: x.confidence ?? null }));
     return {
@@ -63,7 +64,7 @@ export function formatChangeContextPayload(
     // Drop opaque edge ids (fromId/toId) and free-text `reason` — not needed for discovery.
     return {
       symbol: result.symbol ? { symbolId: result.symbol.symbolId, name: result.symbol.name, kind: result.symbol.kind, filePath: result.symbol.filePath, line: result.symbol.line } : null,
-      callers: result.callers.map((x) => ({ fromName: x.fromName, fromFilePath: x.fromFilePath, distance: x.distance, confidence: x.confidence ?? null })),
+      callers: result.callers.map((x) => ({ fromName: x.fromName, fromFilePath: x.fromFilePath, distance: x.distance, ...(x.via ? { via: x.via } : {}), confidence: x.confidence ?? null })),
       callees: result.callees.map((x) => ({ toName: x.toName, toFilePath: x.toFilePath, confidence: x.confidence ?? null })),
       typeDeps: result.typeDeps.map((x) => ({ toName: x.toName, toFilePath: x.toFilePath, confidence: x.confidence ?? null })),
       graphHealth: collapseGraphHealth(result.graphHealth), reliabilitySummary: result.reliabilitySummary
@@ -123,8 +124,9 @@ export function handleGetCallChain(
     const pathNodes = rows.slice(0, 10).map((e) => ({
       name: direction === "callees" ? (e as { toName?: string }).toName ?? null : (e as { fromName?: string }).fromName ?? null,
       filePath: direction === "callees" ? (e as { toFilePath?: string }).toFilePath ?? null : (e as { fromFilePath?: string }).fromFilePath ?? null,
-      // Mark bus hops (PUBLISHES) so nano output distinguishes them from static calls, matching trace_execution_flow.
-      ...(e.type === "PUBLISHES" && { via: "bus" }),
+      // Mark bus hops (PUBLISHES) and interface-dispatch hops so nano output distinguishes
+      // them from direct static calls, matching trace_execution_flow. (ISSUE-020/022)
+      ...(e.type === "PUBLISHES" ? { via: "bus" } : e.reason === "interface-dispatch" ? { via: "interface" } : {}),
       confidence: e.confidence ?? null
     }));
     const coverageNano = buildCoverageBlock({ resultCount: rows.length, truncated: rows.length >= args.limit, kind: "call_chain", query: args.symbolId });

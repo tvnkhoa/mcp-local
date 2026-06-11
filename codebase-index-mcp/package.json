@@ -21,6 +21,7 @@
     "test:wiring-note": "node scripts/test-wiring-note.mjs",
     "test:bus-edges": "node scripts/test-bus-edges.mjs",
     "test:search-ranking": "node scripts/test-search-ranking.mjs",
+    "test:interface-dispatch": "node scripts/test-interface-dispatch.mjs",
     "test:issue-refinements": "node scripts/test-issue-refinements.mjs",
     "verify:enhancements": "node scripts/verify-enhancements.mjs",
     "test:profile-responses": "node scripts/test-profile-responses.mjs",

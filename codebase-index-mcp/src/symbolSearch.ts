@@ -2,6 +2,7 @@ import type Database from "better-sqlite3";
 import type { ResolvedEdge, SymbolRecord } from "./types.js";
 import { vectorSearchSymbols, isVectorEnabled } from "./vectorStore.js";
 import { isTestPath } from "./fileFilter.js";
+import { expandInterfaceSiblingsImpl } from "./interfaceSiblings.js";
 
 // Kinds that carry graph edges / are usually what a developer means; ranked above
 // edgeless namesakes (constructor shares the class name, module shares the file name).
@@ -514,7 +515,7 @@ export function getContextByNameImpl(
   limit: number
 ): {
   symbol: SymbolRecord | null;
-  callers: { callerName: string; callerFile: string; callerLine: number; kind: string }[];
+  callers: { callerName: string; callerFile: string; callerLine: number; kind: string; via?: "interface" | "member" }[];
   callees: { calleeName: string; calleeFile: string | null; calleeLine: number | null; kind: string | null }[];
   importedByFiles: string[];
   allMatchedSymbols: SymbolRecord[];
@@ -560,18 +561,38 @@ export function getContextByNameImpl(
   const targetIds = candidates.map((c) => c.symbolId);
   const ph = targetIds.map(() => "?").join(",");
 
-  const callers = db
+  // ISSUE-022: mở rộng targets sang interface siblings (class → members, impl method ↔
+  // interface method) để caller gọi qua DI interface không vô hình với context pack.
+  const siblings = expandInterfaceSiblingsImpl(db, repoId, targetIds.slice(0, 10));
+  const viaBySiblingId = new Map(siblings.map((s) => [s.symbolId, s.via]));
+  const allTargetIds = [...targetIds, ...siblings.map((s) => s.symbolId)];
+  const allPh = allTargetIds.map(() => "?").join(",");
+
+  const callerRows = db
     .prepare(
       `
-      select distinct sf.name as callerName, sf.file_path as callerFile, sf.line as callerLine, sf.kind
+      select sf.name as callerName, sf.file_path as callerFile, sf.line as callerLine, sf.kind,
+             e.to_id as toId, e.reason as reason
       from edges e
       inner join symbols sf on sf.repo_id = e.repo_id and sf.symbol_id = e.from_id
-      where e.repo_id = ? and e.type = 'CALLS' and e.to_id in (${ph})
+      where e.repo_id = ? and e.type = 'CALLS' and e.to_id in (${allPh})
       order by sf.file_path, sf.line
       limit ?
       `
     )
-    .all(repoId, ...targetIds, limit) as { callerName: string; callerFile: string; callerLine: number; kind: string }[];
+    .all(repoId, ...allTargetIds, limit) as { callerName: string; callerFile: string; callerLine: number; kind: string; toId: string; reason: string | null }[];
+
+  // Dedup theo caller identity; ưu tiên row direct (không via) khi caller xuất hiện cả 2 đường.
+  const callersByKey = new Map<string, { callerName: string; callerFile: string; callerLine: number; kind: string; via?: "interface" | "member" }>();
+  for (const row of callerRows) {
+    const via = viaBySiblingId.get(row.toId) ?? (row.reason === "interface-dispatch" ? ("interface" as const) : undefined);
+    const key = `${row.callerFile}:${row.callerLine}:${row.callerName}`;
+    const existing = callersByKey.get(key);
+    if (existing && !existing.via) continue;
+    if (existing && via) continue;
+    callersByKey.set(key, { callerName: row.callerName, callerFile: row.callerFile, callerLine: row.callerLine, kind: row.kind, ...(via ? { via } : {}) });
+  }
+  const callers = [...callersByKey.values()].slice(0, limit);
 
   const calleeRows = db
     .prepare(

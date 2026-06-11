@@ -1,6 +1,7 @@
 import type Database from "better-sqlite3";
 import type { EdgeRecord, GraphHealth, ReliabilitySummary, ResolvedEdge, SymbolRecord } from "./types.js";
 import { CALL_TRAVERSAL_EDGE_SQL_LIST, CALL_TRAVERSAL_EDGE_TYPES } from "./types.js";
+import { expandInterfaceSiblingsImpl } from "./interfaceSiblings.js";
 
 // ── Trivial callee tokens ──────────────────────────────────────────────
 // Shared with graphStore.ts — standard JS/TS prototype/runtime methods
@@ -799,7 +800,13 @@ export function getChangeContextImpl(
   // BFS callers up to callerDepth
   const callers: (ResolvedEdge & { distance: number })[] = [];
   const visitedCallers = new Set<string>([symbolId]);
-  let frontier = [symbolId];
+  // ISSUE-022: mở rộng frontier depth-1 sang interface siblings (interface method ↔ impl
+  // method, class → own members) để caller gọi qua DI interface vẫn hiện ra — kể cả trên
+  // index cũ chưa có interface-dispatch edges. Row đến từ sibling được tag `via`.
+  const interfaceSiblings = expandInterfaceSiblingsImpl(db, repoId, [symbolId]);
+  const viaBySiblingId = new Map(interfaceSiblings.map((s) => [s.symbolId, s.via]));
+  for (const s of interfaceSiblings) visitedCallers.add(s.symbolId);
+  let frontier = [symbolId, ...interfaceSiblings.map((s) => s.symbolId)];
   const declaringType = symbol.kind === "property"
     ? (db
         .prepare(
@@ -857,7 +864,12 @@ export function getChangeContextImpl(
     for (const row of rows) {
       if (!visitedCallers.has(row.fromId)) {
         visitedCallers.add(row.fromId);
-        callers.push({ ...row, distance: depth });
+        // ISSUE-022: tag nguồn gốc merge — sibling frontier hoặc edge interface-dispatch đã
+        // resolve sẵn trong DB; bus edges giữ via:"bus" (mirror trace_execution_flow).
+        const siblingVia = depth === 1 ? viaBySiblingId.get(row.toId) : undefined;
+        const via = siblingVia ?? (row.reason === "interface-dispatch" ? "interface" : row.type === "PUBLISHES" ? "bus" : undefined);
+        const confidence = via === "interface" ? Math.min(row.confidence ?? 1, 0.7) : row.confidence;
+        callers.push({ ...row, ...(via ? { via } : {}), confidence, distance: depth });
         nextFrontier.push(row.fromId);
       }
     }
@@ -1040,7 +1052,7 @@ export function traceExecutionFlowImpl(
       // excluded by the inner join, so only matched producer→consumer hops are followed.
       const calleeRows = db
         .prepare(
-          `select e.from_id as fromId, e.to_id as toId, e.confidence, e.type as edgeType,
+          `select e.from_id as fromId, e.to_id as toId, e.confidence, e.type as edgeType, e.reason as edgeReason,
                   sf.name as fromName, st.name as toName,
                   st.repo_id as repoId, st.symbol_id as symbolId, st.file_path as filePath,
                   st.kind, st.line, st.signature
@@ -1050,13 +1062,15 @@ export function traceExecutionFlowImpl(
            where e.repo_id = ? and e.from_id = ? and e.type in (${CALL_TRAVERSAL_EDGE_SQL_LIST})
            limit 50`
         )
-        .all(repoId, currentId) as (SymbolRecord & { fromId: string; toId: string; fromName: string; toName: string; confidence: number | null; edgeType: string })[];
+        .all(repoId, currentId) as (SymbolRecord & { fromId: string; toId: string; fromName: string; toName: string; confidence: number | null; edgeType: string; edgeReason: string | null })[];
 
       for (const row of calleeRows) {
         const edgeKey = `${row.fromId}:${row.toId}`;
         if (!visitedEdges.has(edgeKey)) {
           visitedEdges.add(edgeKey);
-          resultEdges.push({ fromId: row.fromId, toId: row.toId, fromName: row.fromName, toName: row.toName, confidence: row.confidence ?? null, ...(row.edgeType === "PUBLISHES" && { via: "bus" }) });
+          // ISSUE-020/022: tag bus hops and interface-dispatch hops so the flow distinguishes them.
+          const via = row.edgeType === "PUBLISHES" ? "bus" : row.edgeReason === "interface-dispatch" ? "interface" : undefined;
+          resultEdges.push({ fromId: row.fromId, toId: row.toId, fromName: row.fromName, toName: row.toName, confidence: row.confidence ?? null, ...(via && { via }) });
         }
         if (!visitedSymbols.has(row.toId) && resultNodes.length < maxNodes) {
           visitedSymbols.add(row.toId);

@@ -77,6 +77,7 @@ import {
   getContextByNameImpl,
   getSymbolCandidatesImpl
 } from "./symbolSearch.js";
+import { expandInterfaceSiblingsImpl } from "./interfaceSiblings.js";
 import {
   TRIVIAL_CALLEE_TOKENS,
   TRIVIAL_CALLEE_IN_CLAUSE,
@@ -697,11 +698,12 @@ export class GraphStore {
   getCallEdges(repoId: string, symbolId: string, direction: "callers" | "callees", limit: number): EdgeRecord[] {
     // CALLS for the static call graph; PUBLISHES (ISSUE-020) so callers/callees cross the message
     // bus — a publisher counts as a "caller" of the consumer it was matched to, and vice versa.
+    // confidence/reason selected so consumers can tag via:"interface" (ISSUE-022) / via:"bus".
     if (direction === "callees") {
       return this.db
         .prepare(
           `
-          select repo_id as repoId, from_id as fromId, to_id as toId, type
+          select repo_id as repoId, from_id as fromId, to_id as toId, type, confidence, reason
           from edges
           where repo_id = ? and from_id = ? and type in (${CALL_TRAVERSAL_EDGE_SQL_LIST})
           limit ?
@@ -713,13 +715,18 @@ export class GraphStore {
     return this.db
       .prepare(
         `
-        select repo_id as repoId, from_id as fromId, to_id as toId, type
+        select repo_id as repoId, from_id as fromId, to_id as toId, type, confidence, reason
         from edges
         where repo_id = ? and to_id = ? and type in (${CALL_TRAVERSAL_EDGE_SQL_LIST})
         limit ?
         `
       )
       .all(repoId, symbolId, limit) as EdgeRecord[];
+  }
+
+  /** ISSUE-022: interface siblings (interface method ↔ impl method, class → members) cho caller expansion. */
+  expandInterfaceSiblings(repoId: string, symbolIds: string[]): { symbolId: string; via: "interface" | "member" }[] {
+    return expandInterfaceSiblingsImpl(this.db, repoId, symbolIds);
   }
 
   /**
@@ -1139,7 +1146,7 @@ export class GraphStore {
    * Single-call context lookup by symbol name — avoids the 2-hop search_symbols → get_symbol_detail pattern.
    * Returns the best-matching symbol plus its callers, callees, and importing files.
    */
-  getContextByName(repoId: string, name: string, limit: number): { symbol: SymbolRecord | null; callers: { callerName: string; callerFile: string; callerLine: number; kind: string }[]; callees: { calleeName: string; calleeFile: string | null; calleeLine: number | null; kind: string | null }[]; importedByFiles: string[]; allMatchedSymbols: SymbolRecord[] } {
+  getContextByName(repoId: string, name: string, limit: number): { symbol: SymbolRecord | null; callers: { callerName: string; callerFile: string; callerLine: number; kind: string; via?: "interface" | "member" }[]; callees: { calleeName: string; calleeFile: string | null; calleeLine: number | null; kind: string | null }[]; importedByFiles: string[]; allMatchedSymbols: SymbolRecord[] } {
     return getContextByNameImpl(this.db, repoId, name, limit);
   }
 
