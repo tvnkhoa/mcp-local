@@ -37,6 +37,11 @@ export type IndexRunSummary = {
   propertyResolveMs?: number;
   implementsResolveMs?: number;
   ftsRebuildMs?: number;
+  /** ISSUE-025: số call edge chưa resolve TRƯỚC resolve phase (population được attempt). */
+  callEdgesAttempted?: number;
+  /** ISSUE-025: attempted − resolved; cùng callEdgesResolved partition đúng population. */
+  callEdgesUnresolved?: number;
+  /** @deprecated alias của callEdgesAttempted — tên cũ gây hiểu nhầm là "còn lại sau resolve". */
   unresolvedCallsTotal?: number;
   /** true khi import/type/property resolve bị cap bởi maxUnresolvedRows policy.
    * NOTE: call resolve (buildCallResolutionContext) KHÔNG bao giờ bị cap — luôn fetch tất cả rows. */

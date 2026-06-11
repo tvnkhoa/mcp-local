@@ -99,6 +99,43 @@ async function main() {
     throw new Error("index_repository result missing runId");
   }
 
+  // ISSUE-025: run-summary counter invariants — resolved + unresolved phải partition attempted,
+  // coverage = resolved/attempted, alias deprecated khớp tên mới, cross-repo bucket sum khớp attempts.
+  {
+    const s = indexPayload.json;
+    const attempted = s.callEdgesAttempted ?? 0;
+    const resolved = s.callEdgesResolved ?? 0;
+    const unresolved = s.callEdgesUnresolved ?? 0;
+    if (resolved + unresolved !== attempted) {
+      throw new Error(
+        `call-edge partition mismatch: resolved(${resolved}) + unresolved(${unresolved}) != attempted(${attempted})`
+      );
+    }
+    const expectedCoverage = attempted > 0 ? resolved / attempted : 1;
+    const coverage = s.resolveCallsCoverage ?? 1;
+    if (Math.abs(coverage - expectedCoverage) > 1e-9) {
+      throw new Error(`resolveCallsCoverage(${coverage}) != resolved/attempted(${expectedCoverage})`);
+    }
+    if ((s.unresolvedCallsTotal ?? 0) !== attempted) {
+      throw new Error(
+        `deprecated alias unresolvedCallsTotal(${s.unresolvedCallsTotal}) != callEdgesAttempted(${attempted})`
+      );
+    }
+    const crossAttempts = s.crossRepoAttempts ?? 0;
+    const crossSum =
+      (s.crossRepoResolved ?? 0) +
+      (s.unresolvedNoCandidate ?? 0) +
+      (s.unresolvedAmbiguous ?? 0) +
+      (s.unresolvedBoundaryBlocked ?? 0) +
+      (s.unresolvedLowConfidence ?? 0);
+    if (crossSum !== crossAttempts) {
+      throw new Error(
+        `cross-repo partition mismatch: bucket sum(${crossSum}) != crossRepoAttempts(${crossAttempts})`
+      );
+    }
+    console.log("RUN_SUMMARY_INVARIANTS: ok");
+  }
+
   const healthAfterIndex = await client.callTool({
     name: "health_check",
     arguments: {

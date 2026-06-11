@@ -608,7 +608,7 @@ export class GraphStore {
         summary.propertyResolveMs ?? 0,
         summary.implementsResolveMs ?? 0,
         summary.ftsRebuildMs ?? 0,
-        summary.unresolvedCallsTotal ?? 0,
+        summary.callEdgesAttempted ?? summary.unresolvedCallsTotal ?? 0, // ISSUE-025: cột giữ tên cũ, nghĩa là "attempted"
         0, // unresolved_rows_capped_by_policy — kept for backward compat, always 0 (use unresolvedImportsCappedByPolicy)
         summary.unresolvedImportsCappedByPolicy ? 1 : 0,
         summary.resolveCallsCoverage ?? 0,
@@ -656,6 +656,7 @@ export class GraphStore {
           property_resolve_ms as propertyResolveMs,
           implements_resolve_ms as implementsResolveMs,
           fts_rebuild_ms as ftsRebuildMs,
+          unresolved_calls_total as callEdgesAttempted,
           unresolved_calls_total as unresolvedCallsTotal,
           unresolved_imports_capped_by_policy as unresolvedImportsCappedByPolicy,
           resolve_calls_coverage as resolveCallsCoverage,
@@ -668,6 +669,11 @@ export class GraphStore {
       )
       .get(repoId) as IndexRunSummary | undefined;
 
+    if (row && typeof row.callEdgesAttempted === "number") {
+      // ISSUE-025: derive unresolved từ partition attempted − resolved (không có cột riêng).
+      const resolved = (row as IndexRunSummary & { callEdgesResolved?: number }).callEdgesResolved ?? 0;
+      row.callEdgesUnresolved = Math.max(0, row.callEdgesAttempted - resolved);
+    }
     return row ?? null;
   }
 

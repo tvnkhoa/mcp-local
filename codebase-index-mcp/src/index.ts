@@ -1364,6 +1364,10 @@ function buildSkippedRunSummary(opts: {
     elapsedMs: 0,
     crossRepoLinked: 0,
     callEdgesResolved: 0,
+    callEdgesAttempted: 0,
+    callEdgesUnresolved: 0,
+    unresolvedCallsTotal: 0,
+    resolveCallsCoverage: 1,
     importEdgesResolved: 0,
     mentionsResolved: 0,
     crossRepoAttempts: 0,
@@ -1500,7 +1504,7 @@ async function runIndexAndResolve(
   const resolvePhaseStart = Date.now();
   let ftsRebuildMs = 0;
   let buildContextMs = 0;
-  let unresolvedCallsTotal = 0;
+  let callEdgesAttempted = 0;
   let callResolveMs = 0;
   let importResolveMs = 0;
   let typeResolveMs = 0;
@@ -1531,7 +1535,7 @@ async function runIndexAndResolve(
       const ctxStart = Date.now();
       const ctx = store.buildCallResolutionContext(repoId);
       buildContextMs = Date.now() - ctxStart;
-      unresolvedCallsTotal = ctx.unresolvedRows.length;
+      callEdgesAttempted = ctx.unresolvedRows.length;
       process.stderr.write(`[index-post] repoId=${repoId} pre-fetched ${String(ctx.unresolvedRows.length)} unresolved call edges\n`);
       if (ctx.unresolvedRows.length === 0) return 0;
 
@@ -1647,9 +1651,13 @@ async function runIndexAndResolve(
     propertyResolveMs,
     implementsResolveMs,
     ftsRebuildMs,
-    unresolvedCallsTotal,
+    // ISSUE-025: self-describing call-resolution counters. `unresolvedCallsTotal` is a
+    // deprecated alias of `callEdgesAttempted` (the pre-resolve unresolved-edge count).
+    callEdgesAttempted,
+    callEdgesUnresolved: Math.max(0, callEdgesAttempted - callEdgesResolved),
+    unresolvedCallsTotal: callEdgesAttempted,
     unresolvedImportsCappedByPolicy: postPolicy.maxUnresolvedRows > 0,
-    resolveCallsCoverage: unresolvedCallsTotal > 0 ? callEdgesResolved / unresolvedCallsTotal : 1,
+    resolveCallsCoverage: callEdgesAttempted > 0 ? callEdgesResolved / callEdgesAttempted : 1,
     performanceProfile
   };
   store.recordRun(fullSummary);
