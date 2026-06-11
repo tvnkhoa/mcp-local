@@ -20,7 +20,7 @@ import {
 import { z } from "zod";
 
 import { GraphStore } from "./graphStore.js";
-import { runIndexPipeline, type PerformanceProfile } from "./indexPipeline.js";
+import { runIndexPipeline, INDEX_VERSION, type PerformanceProfile } from "./indexPipeline.js";
 import {
   assertPathAllowed,
   clamp,
@@ -119,6 +119,7 @@ import {
 import type { HandlerContext } from "./handlers/handlerContext.js";
 import {
   handleSearchSymbols,
+  handleSearchLiterals,
   handleFindSymbolAtLine,
   handleGetSymbolDetail,
   handleGetSymbolContextPack,
@@ -207,6 +208,7 @@ const getDependencyGraphSchema = schemas.getDependencyGraphSchema(MAX_DEPTH, MAX
 const getCallChainSchema = schemas.getCallChainSchema(MAX_DEPTH, MAX_RESULT_LIMIT);
 const listRepositoriesSchema = schemas.listRepositoriesSchema;
 const searchSymbolsSchema = schemas.searchSymbolsSchema(MAX_RESULT_LIMIT);
+const searchLiteralsSchema = schemas.searchLiteralsSchema(MAX_RESULT_LIMIT);
 const getFileContextSchema = schemas.getFileContextSchema(MAX_RESULT_LIMIT);
 const getSymbolDetailSchema = schemas.getSymbolDetailSchema(MAX_RESULT_LIMIT);
 const findImpactFilesSchema = schemas.findImpactFilesSchema(MAX_RESULT_LIMIT);
@@ -410,6 +412,22 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             profile: { type: "string", enum: ["nano", "compact", "standard", "verbose"] },
             ranked: { type: "boolean" },
             excludeTests: { type: "boolean" }
+          }
+        }
+      },
+      {
+        name: "search_literals",
+        description: "Search string-literal CONTENT (notification titles, error messages, log templates, user-facing text) across a repo's indexed code. Returns each literal with file, line, and enclosing symbol — use for 'what text does this repo emit' audits (notification catalogs, error-message inventories, i18n sweeps) instead of grep. Interpolated/template strings are indexed with {…} placeholders.",
+        inputSchema: {
+          type: "object",
+          additionalProperties: false,
+          required: ["repoId", "query"],
+          properties: {
+            repoId: { type: "string" },
+            query: { type: "string" },
+            filePath: { type: "string" },
+            limit: { type: "integer", minimum: 1, maximum: MAX_RESULT_LIMIT },
+            profile: { type: "string", enum: ["nano", "compact", "standard", "verbose"] }
           }
         }
       },
@@ -1069,6 +1087,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const hArgs = searchSymbolsSchema.parse(request.params.arguments ?? {});
         return handleSearchSymbols(hArgs, ctx);
       }
+      case "search_literals": {
+        const hArgs = searchLiteralsSchema.parse(request.params.arguments ?? {});
+        return handleSearchLiterals(hArgs, ctx);
+      }
       case "get_file_context": {
         const hArgs = getFileContextSchema.parse(request.params.arguments ?? {});
         return handleGetFileContext(hArgs, ctx);
@@ -1444,7 +1466,7 @@ async function runIndexAndResolve(
         mode,
         commitSha: resolveHeadCommitSha(repoPath),
         branch: resolveCurrentBranch(repoPath),
-        indexVersion: "v1-tree-sitter-property-edges",
+        indexVersion: INDEX_VERSION,
         skipReason: "no dirty files"
       });
       store.recordRun(noOp);
@@ -1515,6 +1537,8 @@ async function runIndexAndResolve(
   process.stderr.write(`[index-post] repoId=${repoId} rebuilding FTS indexes...\n`);
   const ftsStart = Date.now();
   try { store.rebuildFts(); } catch { /* non-fatal */ }
+  await yieldToEventLoop();
+  try { store.rebuildLiteralsFts(); } catch { /* non-fatal */ }
   await yieldToEventLoop();
   if (docsEnabled) {
     process.stderr.write(`[index-post] repoId=${repoId} rebuilding docs FTS...\n`);
@@ -1688,7 +1712,18 @@ function evaluateIncrementalSkip(
       shouldSkip: false,
       reason: "no previous indexed commit",
       headCommitSha: null,
-      indexVersion: latestRun?.indexVersion ?? "v1-tree-sitter-property-edges"
+      indexVersion: latestRun?.indexVersion ?? INDEX_VERSION
+    };
+  }
+
+  // ISSUE-023: schema/lane version bump (vd. v1 → v2-string-literals) phải vô hiệu skip,
+  // nếu không repo đã index sẽ không bao giờ populate lane mới dù HEAD không đổi.
+  if (latestRun.indexVersion !== INDEX_VERSION) {
+    return {
+      shouldSkip: false,
+      reason: `index version changed (${latestRun.indexVersion} → ${INDEX_VERSION})`,
+      headCommitSha: resolveHeadCommitSha(repoPath),
+      indexVersion: INDEX_VERSION
     };
   }
 

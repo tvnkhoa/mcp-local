@@ -47,11 +47,14 @@ export type RunIndexInput = {
   onlyRelativePaths?: Set<string>;
 };
 
+// v2: ISSUE-023 string-literal lane — bump buộc evaluateIncrementalSkip không skip để repo cũ repopulate lane.
+export const INDEX_VERSION = "v2-string-literals";
+
 export async function runIndexPipeline(store: GraphStore, input: RunIndexInput): Promise<IndexRunSummary> {
   const runId = randomUUID();
   const startedAt = new Date().toISOString();
   const started = Date.now();
-  const indexVersion = "v1-tree-sitter-property-edges";
+  const indexVersion = INDEX_VERSION;
   const commitSha = resolveHeadCommitSha(input.repoPath);
   const branch = resolveCurrentBranch(input.repoPath);
 
@@ -180,6 +183,7 @@ export async function runIndexPipeline(store: GraphStore, input: RunIndexInput):
           routes?: import("./types.js").RouteRecord[];
           docs?: import("./types.js").DocRecord[];
           mentions?: import("./types.js").DocMentionRecord[];
+          literals?: import("./types.js").StringLiteralRecord[];
         };
       }> = [];
       const largeExtractionJobs: Array<Promise<{
@@ -199,6 +203,7 @@ export async function runIndexPipeline(store: GraphStore, input: RunIndexInput):
           routes?: import("./types.js").RouteRecord[];
           docs?: import("./types.js").DocRecord[];
           mentions?: import("./types.js").DocMentionRecord[];
+          literals?: import("./types.js").StringLiteralRecord[];
         }
       ): void => {
         pendingWrites.push({
@@ -426,6 +431,7 @@ export async function runIndexPipeline(store: GraphStore, input: RunIndexInput):
             store.replaceSymbolsForFile(input.repoId, item.file.path, item.extracted.symbols);
             store.replaceEdgesForFile(input.repoId, item.file.path, item.extracted.edges);
             store.replaceRoutesForFile(input.repoId, item.file.path, item.extracted.routes ?? []);
+            store.replaceLiteralsForFile(input.repoId, item.file.path, item.extracted.literals ?? []);
             // Upsert docs and mentions if present (e.g., from markdown files)
             if (item.extracted.docs && item.extracted.docs.length > 0) {
               if (includeDocs) {

@@ -177,6 +177,19 @@ export type ResolvedEdge = {
   via?: "interface" | "bus" | "member";
 };
 
+/** ISSUE-023: string literal được index làm lane riêng (KHÔNG vào symbols — tránh phá ranking + dead_code_scan). */
+export type StringLiteralRecord = {
+  repoId: string;
+  literalId: string;
+  filePath: string;
+  line: number;
+  /** Nội dung literal; interpolation/template hole chuẩn hoá thành {…}. */
+  value: string;
+  enclosingSymbolId: string | null;
+  language: string;
+  kind: "string" | "interpolated" | "template";
+};
+
 export type DocRecord = {
   repoId: string;
   docId: string;

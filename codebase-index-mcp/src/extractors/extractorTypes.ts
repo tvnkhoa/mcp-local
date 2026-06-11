@@ -1,5 +1,5 @@
 import type Parser from "tree-sitter";
-import type { DocMentionRecord, DocRecord, EdgeRecord, RouteRecord, SymbolRecord } from "../types.js";
+import type { DocMentionRecord, DocRecord, EdgeRecord, RouteRecord, StringLiteralRecord, SymbolRecord } from "../types.js";
 
 // ============================================================================
 // Extract Input/Output Types
@@ -21,6 +21,8 @@ export type ExtractOutput = {
   routes?: RouteRecord[];
   docs?: DocRecord[];
   mentions?: DocMentionRecord[];
+  /** ISSUE-023: string-literal lane (C# + JS/TS). Worker pool serialize nguyên ExtractOutput nên field này đi qua không cần sửa worker. */
+  literals?: StringLiteralRecord[];
 };
 
 // ============================================================================

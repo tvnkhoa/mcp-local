@@ -22,6 +22,7 @@
     "test:bus-edges": "node scripts/test-bus-edges.mjs",
     "test:search-ranking": "node scripts/test-search-ranking.mjs",
     "test:interface-dispatch": "node scripts/test-interface-dispatch.mjs",
+    "test:string-literals": "node scripts/test-string-literals.mjs",
     "test:issue-refinements": "node scripts/test-issue-refinements.mjs",
     "verify:enhancements": "node scripts/verify-enhancements.mjs",
     "test:profile-responses": "node scripts/test-profile-responses.mjs",

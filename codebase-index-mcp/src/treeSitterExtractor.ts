@@ -26,6 +26,7 @@ import {
   applyCallEdgeCap,
   applyEdgeConfidenceFilter
 } from "./extractors/extractorUtils.js";
+import { extractStringLiteralsImpl } from "./extractors/literalExtractor.js";
 
 // Re-export types for backward compatibility
 export type { ExtractInput, ExtractOutput };
@@ -51,6 +52,10 @@ const TREE_SITTER_MAX_BUFFER = 32 * 1024 * 1024;
 const parserCache = new Map<string, Parser>();
 const OVERRIDE_MAX_CALL_EDGES_PER_FILE = optionalNumberFromEnv("CODEBASE_INDEX_MAX_CALL_EDGES_PER_FILE");
 const OVERRIDE_MIN_EDGE_CONFIDENCE = optionalRatioFromEnv("CODEBASE_INDEX_MIN_EDGE_CONFIDENCE");
+// ISSUE-023: string-literal lane policy — min length lọc token ngắn ("GET", "utf8"),
+// cap per file chặn locale/generated-string blowup; override qua env.
+const OVERRIDE_MIN_STRING_LITERAL_LENGTH = optionalNumberFromEnv("CODEBASE_INDEX_MIN_STRING_LITERAL_LENGTH");
+const OVERRIDE_MAX_STRING_LITERALS_PER_FILE = optionalNumberFromEnv("CODEBASE_INDEX_MAX_STRING_LITERALS_PER_FILE");
 
 /** Per-file parse timeout in milliseconds. Files exceeding this are skipped (module symbol only). */
 const PARSE_TIMEOUT_MS = optionalNumberFromEnv("CODEBASE_INDEX_PARSE_TIMEOUT_MS") ?? 5_000;
@@ -121,14 +126,17 @@ export function extractGraphData(input: ExtractInput): ExtractOutput {
   const root = tree.rootNode;
 
   // Extract based on language
+  let literals: ExtractOutput["literals"];
   if (input.language === "javascript" || input.language === "typescript") {
     extractJavaScriptSymbolsImpl(input, root, symbols, edges, moduleSymbolId);
     routes.push(...extractJavaScriptRoutesImpl(input, symbols, moduleSymbolId));
+    literals = extractStringLiteralsImpl(input, root, resolveLiteralPolicy(input.performanceProfile ?? "standard"));
   } else if (input.language === "csharp") {
     extractCSharpSymbolsImpl(input, root, symbols, edges, moduleSymbolId, input.knownPackageNames);
     routes.push(...extractCSharpRoutesImpl(input, root, symbols));
     emitEndpointContractSymbolsImpl(input, symbols, routes);
     emitEndpointContractSymbolsFromCSharpSignaturesImpl(input, symbols);
+    literals = extractStringLiteralsImpl(input, root, resolveLiteralPolicy(input.performanceProfile ?? "standard"));
   }
 
   const resolvedEdges = resolveIntraFileEdges(edges, symbols);
@@ -136,7 +144,17 @@ export function extractGraphData(input: ExtractInput): ExtractOutput {
   return {
     symbols: dedupeSymbols(symbols),
     edges: applyEdgeConfidenceFilter(applyCallEdgeCap(dedupeEdges(resolvedEdges), edgePolicy.maxCallEdgesPerFile), edgePolicy.minEdgeConfidence),
-    routes
+    routes,
+    literals
+  };
+}
+
+/** ISSUE-023: literal-lane policy per performance profile (mirror defaultEdgePolicy). */
+function resolveLiteralPolicy(profile: "standard" | "large" | "very-large"): { minLength: number; maxPerFile: number } {
+  const maxPerFile = profile === "very-large" ? 50 : profile === "large" ? 100 : 200;
+  return {
+    minLength: OVERRIDE_MIN_STRING_LITERAL_LENGTH ?? 6,
+    maxPerFile: OVERRIDE_MAX_STRING_LITERALS_PER_FILE ?? maxPerFile
   };
 }
 

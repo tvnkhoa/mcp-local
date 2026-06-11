@@ -75,6 +75,17 @@ export const searchSymbolsSchema = (MAX_RESULT_LIMIT: number) => z
   })
   .strict();
 
+// Search string literals (ISSUE-023)
+export const searchLiteralsSchema = (MAX_RESULT_LIMIT: number) => z
+  .object({
+    repoId: z.string().min(1).max(200),
+    query: z.string().min(1).max(200),
+    filePath: z.string().max(500).optional(),
+    limit: z.number().int().min(1).max(MAX_RESULT_LIMIT).default(50),
+    profile: responseProfileSchema.default("compact")
+  })
+  .strict();
+
 // File context
 export const getFileContextSchema = (MAX_RESULT_LIMIT: number) => z
   .object({

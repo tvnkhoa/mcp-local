@@ -62,7 +62,8 @@ async function main() {
     "query_graph",
     "rename_assist",
     "trace_execution_flow",
-    "query_docs"
+    "query_docs",
+    "search_literals"
   ];
   for (const required of requiredTools) {
     if (!toolNames.includes(required)) {
@@ -135,6 +136,20 @@ async function main() {
     }
     console.log("RUN_SUMMARY_INVARIANTS: ok");
   }
+
+  // ISSUE-023: string-literal lane — search literal content from src/index.ts stderr templates.
+  const literalsResult = await client.callTool({
+    name: "search_literals",
+    arguments: { repoId, query: "rebuilding FTS indexes", limit: 10 }
+  });
+  const literalsPayload = readJsonTextContent(literalsResult);
+  if (typeof literalsPayload.json?.count !== "number" || !Array.isArray(literalsPayload.json?.literals)) {
+    throw new Error("search_literals response missing count/literals fields");
+  }
+  if (literalsPayload.json.count < 1) {
+    throw new Error("search_literals returned no hits for a literal known to exist in src/index.ts");
+  }
+  console.log("SEARCH_LITERALS_OK:", { count: literalsPayload.json.count, top: literalsPayload.json.literals[0]?.value });
 
   const healthAfterIndex = await client.callTool({
     name: "health_check",

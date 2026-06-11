@@ -16,6 +16,7 @@ import type {
   ResolvedEdge,
   ResolutionStats,
   RouteRecord,
+  StringLiteralRecord,
   SymbolRecord
 } from "./types.js";
 import {
@@ -78,6 +79,12 @@ import {
   getSymbolCandidatesImpl
 } from "./symbolSearch.js";
 import { expandInterfaceSiblingsImpl } from "./interfaceSiblings.js";
+import {
+  replaceLiteralsForFileImpl,
+  rebuildLiteralsFtsImpl,
+  searchLiteralsImpl,
+  type LiteralSearchResult
+} from "./literalsStore.js";
 import {
   TRIVIAL_CALLEE_TOKENS,
   TRIVIAL_CALLEE_IN_CLAUSE,
@@ -467,6 +474,7 @@ export class GraphStore {
         this.db.prepare(`delete from symbols where repo_id = ? and file_path = ?`).run(repoId, filePath);
         this.db.prepare(`delete from docs where repo_id = ? and file_path = ?`).run(repoId, filePath);
         this.db.prepare(`delete from routes where repo_id = ? and file_path = ?`).run(repoId, filePath);
+        this.db.prepare(`delete from string_literals where repo_id = ? and file_path = ?`).run(repoId, filePath);
         this.db.prepare(`delete from files where repo_id = ? and path = ?`).run(repoId, filePath);
       }
     });
@@ -536,6 +544,19 @@ export class GraphStore {
     this.db.transaction((rows: RouteRecord[]) => {
       writeRows(rows);
     })(routes);
+  }
+
+  /** ISSUE-023: string-literal lane — delete-then-insert per file (mirror replaceRoutesForFile). */
+  replaceLiteralsForFile(repoId: string, filePath: string, literals: StringLiteralRecord[]): void {
+    replaceLiteralsForFileImpl(this.db, repoId, filePath, literals);
+  }
+
+  rebuildLiteralsFts(): void {
+    rebuildLiteralsFtsImpl(this.db);
+  }
+
+  searchLiterals(repoId: string, query: string, limit: number, filePathFilter: string | null = null): LiteralSearchResult[] {
+    return searchLiteralsImpl(this.db, repoId, query, limit, filePathFilter);
   }
 
   recordRun(summary: IndexRunSummary & { crossRepoLinked?: number; callEdgesResolved?: number; importEdgesResolved?: number; mentionsResolved?: number }): void {
@@ -1685,6 +1706,28 @@ export class GraphStore {
       create index if not exists idx_routes_repo_file on routes(repo_id, file_path);
       create index if not exists idx_routes_repo_method on routes(repo_id, http_method);
       create index if not exists idx_routes_repo_handler on routes(repo_id, handler_symbol_id);
+
+      create table if not exists string_literals (
+        repo_id text not null,
+        literal_id text not null,
+        file_path text not null,
+        line integer not null,
+        value text not null,
+        enclosing_symbol_id text,
+        language text,
+        kind text not null,
+        primary key (repo_id, literal_id)
+      );
+
+      create index if not exists idx_literals_repo_file on string_literals(repo_id, file_path);
+
+      create virtual table if not exists literals_fts using fts5(
+        value,
+        literal_id unindexed,
+        repo_id unindexed,
+        content='string_literals',
+        content_rowid='rowid'
+      );
 
       create table if not exists refactor_previews (
         preview_id text primary key,

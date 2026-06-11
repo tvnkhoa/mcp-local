@@ -96,6 +96,44 @@ export function handleSearchSymbols(
   return ctx.asText({ query: args.query, strategy: strategyUsed, autoRouted: autoRouted || undefined, count: results.length, symbols: results, suggestions, suggestion, staleness, coverage }, profile);
 }
 
+// ── search_literals ───────────────────────────────────────────────────────────
+// ISSUE-023 — search string-literal content ({ value, file, line, enclosingSymbol })
+// so user-facing-text audits (notification titles, error messages, log templates,
+// i18n sweeps) are one MCP call instead of grep + full-file reads.
+
+export function handleSearchLiterals(
+  args: { repoId: string; query: string; filePath?: string; limit: number; profile: string },
+  ctx: HandlerContext
+): CallToolResult {
+  const { store } = ctx;
+  const profile = resolveResponseProfile(args.profile as Parameters<typeof resolveResponseProfile>[0]);
+  const results = store.searchLiterals(args.repoId, args.query, args.limit, args.filePath ?? null);
+  const staleWarning = buildStaleWarning(args.repoId, store, "literal lines may be off vs current HEAD — re-index for exact positions.");
+  const coverage = buildCoverageBlock({ resultCount: results.length, kind: "search", query: args.query });
+
+  if (profile === "nano") {
+    const top = results.slice(0, 10).map((r) => ({ value: r.value, filePath: r.filePath, line: r.line }));
+    return ctx.asText({ query: args.query, count: results.length, literals: top, hasMore: results.length > top.length, coverage: coverage.confidence }, profile);
+  }
+
+  return ctx.asText(
+    {
+      query: args.query,
+      count: results.length,
+      literals: results.map((r) => ({
+        value: r.value,
+        filePath: r.filePath,
+        line: r.line,
+        kind: r.kind,
+        enclosingSymbol: r.enclosingSymbol
+      })),
+      coverage,
+      ...(staleWarning && { staleWarning })
+    },
+    profile
+  );
+}
+
 // ── find_symbol_at_line ───────────────────────────────────────────────────────
 
 export function handleFindSymbolAtLine(
