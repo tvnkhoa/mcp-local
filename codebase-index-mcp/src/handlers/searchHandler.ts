@@ -145,7 +145,8 @@ export function handleSearchRegex(
     repoId: string;
     pattern: string;
     regexFlags?: string;
-    filePathPrefix?: string;
+    filePathPrefix?: string | string[];
+    pathExclude?: string | string[];
     language?: string;
     excludeTests: boolean;
     scanAll: boolean;
@@ -164,6 +165,7 @@ export function handleSearchRegex(
       pattern: args.pattern,
       regexFlags: args.regexFlags,
       filePathPrefix: args.filePathPrefix,
+      pathExclude: args.pathExclude,
       language: args.language,
       excludeTests: args.excludeTests,
       scanAll: args.scanAll,
@@ -179,7 +181,7 @@ export function handleSearchRegex(
   }
 
   const { matches, filesScanned, truncated, truncationReason } = result;
-  const staleWarning = buildStaleWarning(args.repoId, store, "match lines may be off vs current HEAD — re-index for exact positions.");
+  const staleWarning = buildStaleWarning(args.repoId, store, "match lines/text are read live from disk and are current; only enclosingSymbol is resolved from the index and may be off — re-index for accurate enclosing symbols.");
   const coverage = buildCoverageBlock({ resultCount: matches.length, kind: "search", query: args.pattern });
   const truncation = truncated ? { truncated, truncationReason } : {};
 
@@ -201,6 +203,9 @@ export function handleSearchRegex(
           filePath: m.filePath,
           line: m.line,
           matchText: m.matchText,
+          // ISSUE-027: honor contextLines in compact too — the window is already computed,
+          // so triage no longer needs a follow-up get_symbol_source per hit.
+          ...(args.contextLines > 0 && { beforeContext: m.beforeContext, afterContext: m.afterContext }),
           enclosingSymbol: m.enclosingSymbol
         })),
         ...truncation,

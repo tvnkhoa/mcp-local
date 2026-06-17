@@ -3,6 +3,7 @@ import { McpError, ErrorCode } from "@modelcontextprotocol/sdk/types.js";
 import { resolveResponseProfile } from "../responseFormatter.js";
 import { validateReadOnlyGraphSql, validateAllowedTables } from "../sqliteGuardrails.js";
 import { buildStaleWarning, getRepoStaleness, collectDirtyFiles, countCommitsBehind } from "../gitHelpers.js";
+import type { StaleWarning } from "../gitHelpers.js";
 import { buildCoverageBlock } from "../coverage.js";
 import { GraphStore } from "../graphStore.js";
 import type { HandlerContext } from "./handlerContext.js";
@@ -12,7 +13,7 @@ import type { HandlerContext } from "./handlerContext.js";
 // route_map, ...) returns data with a staleness note. Impact tools follow suit:
 // return the warning so callers degrade gracefully instead of getting nothing.
 
-function staleWarningFor(repoId: string, store: GraphStore): { note: string; hint: string } | null {
+function staleWarningFor(repoId: string, store: GraphStore): StaleWarning | null {
   return buildStaleWarning(
     repoId,
     store,

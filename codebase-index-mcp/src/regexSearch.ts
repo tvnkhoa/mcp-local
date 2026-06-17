@@ -1,6 +1,7 @@
 import fs from "node:fs";
 
 import { glob } from "glob";
+import { minimatch } from "minimatch";
 
 import type { GraphStore } from "./graphStore.js";
 import type { SymbolRecord } from "./types.js";
@@ -27,7 +28,10 @@ const MAX_FILE_SIZE_BYTES = numberFromEnv("CODEBASE_INDEX_MAX_FILE_SIZE_BYTES", 
 export type RegexSearchOptions = {
   pattern: string;
   regexFlags?: string;
-  filePathPrefix?: string;
+  /** One or more path prefixes (OR-semantics): a file is in scope if it starts with ANY of them. */
+  filePathPrefix?: string | string[];
+  /** One or more minimatch globs (e.g. `**\/Tests\/**`): a file is dropped if it matches ANY of them. */
+  pathExclude?: string | string[];
   language?: string;
   excludeTests?: boolean;
   scanAll?: boolean;
@@ -62,6 +66,12 @@ export class RegexSearchError extends Error {
     super(message);
     this.code = code;
   }
+}
+
+/** Normalize a string | string[] | undefined option to a clean string[] (drops empties). */
+function toArray(value: string | string[] | undefined): string[] {
+  if (value == null) return [];
+  return (Array.isArray(value) ? value : [value]).map((s) => s.trim()).filter((s) => s.length > 0);
 }
 
 /** Char offsets where each line begins, so a match offset maps back to a 1-based line + column. */
@@ -119,7 +129,10 @@ export function searchRegexImpl(
     throw new RegexSearchError("INVALID_PATTERN", `invalid regex pattern: ${(err as Error).message}`);
   }
 
-  const prefix = opts.filePathPrefix ? normalizeRelativePath(opts.filePathPrefix).toLowerCase() : null;
+  // ISSUE-028: filePathPrefix accepts a string OR string[] (OR-semantics across prefixes), and
+  // pathExclude subtracts minimatch globs — so a cross-layer sweep stays one scoped call.
+  const prefixes = toArray(opts.filePathPrefix).map((p) => normalizeRelativePath(p).toLowerCase());
+  const excludeGlobs = toArray(opts.pathExclude).map((g) => g.replace(/\\/g, "/"));
   const contextLines = opts.contextLines ?? 2;
   const maxFileSize = opts.maxFileSizeBytes ?? MAX_FILE_SIZE_BYTES;
 
@@ -143,9 +156,12 @@ export function searchRegexImpl(
   }
 
   const selected = candidates
-    .filter((f) => (prefix ? f.path.toLowerCase().startsWith(prefix) : true))
+    // Cheap filters (string compare / equality / regex) run before the costlier minimatch
+    // glob match, so the exclude globs only evaluate files that survived the rest.
+    .filter((f) => (prefixes.length ? prefixes.some((p) => f.path.toLowerCase().startsWith(p)) : true))
     .filter((f) => (opts.language ? f.language === opts.language : true))
     .filter((f) => (opts.excludeTests ? !isTestPath(f.path) : true))
+    .filter((f) => (excludeGlobs.length ? !excludeGlobs.some((g) => minimatch(f.path, g, { nocase: true, dot: true })) : true))
     .sort((a, b) => a.path.localeCompare(b.path));
 
   const matches: RegexSearchMatch[] = [];
