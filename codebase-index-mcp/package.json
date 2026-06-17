@@ -23,6 +23,7 @@
     "test:search-ranking": "node scripts/test-search-ranking.mjs",
     "test:interface-dispatch": "node scripts/test-interface-dispatch.mjs",
     "test:string-literals": "node scripts/test-string-literals.mjs",
+    "test:search-regex": "node scripts/test-search-regex.mjs",
     "test:issue-refinements": "node scripts/test-issue-refinements.mjs",
     "verify:enhancements": "node scripts/verify-enhancements.mjs",
     "test:profile-responses": "node scripts/test-profile-responses.mjs",

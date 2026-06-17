@@ -141,6 +141,7 @@ Before any baseline tool call, verify and satisfy:
 | Orient new module | `get_folder_summary` | Returns per-file symbolCount/callerCount without reading |
 | Look up exact symbol name | `search_symbols` strategy `"name"` | Use source-level identifier token, not prose |
 | Look up by token fragment | `search_symbols` strategy `"intent"` | Keep query short and identifier-like |
+| Grep source by pattern / discover an identifier token | `search_regex` | MCP-native replacement for `grep_search`: returns matches with context + enclosing symbol. `scanAll=true` for non-code text (json/yaml). Use to find exact symbol names before `search_symbols`. |
 | Full context for one symbol | `get_symbol_context_pack` | Single call: candidates + callers + callees + change-context |
 | Callers/callees drill-down | `get_change_context` | Use `profile: "compact"`, callerDepth ≤ 2 |
 | Call chain traversal | `get_call_chain` | Must use callable symbolId (function/method), not container symbol |
@@ -169,7 +170,7 @@ Before any baseline tool call, verify and satisfy:
 Rules:
 1. Use exact identifier tokens from the target language/module: `indexRepository`, `detect_changes`, `SqlGuardrails`, not narrative prose.
 2. If you only have a business description (Vietnamese or English), extract the likely identifier token first via one of:
-   - A quick narrow `grep_search` on scoped source paths to discover exact symbol names.
+   - A narrow `search_regex` (MCP-native, preferred) scoped with `filePathPrefix`/`language` to discover exact symbol names; fall back to baseline `grep_search` only if MCP is unavailable.
    - Infer from project naming convention (`verbNoun`, `PascalCase`, or known tool name).
 3. After finding the identifier, use `search_symbols` strategy `"name"` for exact match (score ≥ 0.9).
 4. Fall back to strategy `"intent"` only if `"name"` returns 0 results; rewrite with shorter token fragment.

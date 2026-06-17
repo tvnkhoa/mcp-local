@@ -85,6 +85,7 @@ import {
   searchLiteralsImpl,
   type LiteralSearchResult
 } from "./literalsStore.js";
+import { searchRegexImpl, type RegexSearchOptions, type RegexSearchResult } from "./regexSearch.js";
 import {
   TRIVIAL_CALLEE_TOKENS,
   TRIVIAL_CALLEE_IN_CLAUSE,
@@ -557,6 +558,10 @@ export class GraphStore {
 
   searchLiterals(repoId: string, query: string, limit: number, filePathFilter: string | null = null): LiteralSearchResult[] {
     return searchLiteralsImpl(this.db, repoId, query, limit, filePathFilter);
+  }
+
+  searchRegex(repoId: string, opts: RegexSearchOptions): RegexSearchResult {
+    return searchRegexImpl(this, repoId, opts);
   }
 
   recordRun(summary: IndexRunSummary & { crossRepoLinked?: number; callEdgesResolved?: number; importEdgesResolved?: number; mentionsResolved?: number }): void {

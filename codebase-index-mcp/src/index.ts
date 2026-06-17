@@ -120,6 +120,7 @@ import type { HandlerContext } from "./handlers/handlerContext.js";
 import {
   handleSearchSymbols,
   handleSearchLiterals,
+  handleSearchRegex,
   handleFindSymbolAtLine,
   handleGetSymbolDetail,
   handleGetSymbolContextPack,
@@ -209,6 +210,7 @@ const getCallChainSchema = schemas.getCallChainSchema(MAX_DEPTH, MAX_RESULT_LIMI
 const listRepositoriesSchema = schemas.listRepositoriesSchema;
 const searchSymbolsSchema = schemas.searchSymbolsSchema(MAX_RESULT_LIMIT);
 const searchLiteralsSchema = schemas.searchLiteralsSchema(MAX_RESULT_LIMIT);
+const searchRegexSchema = schemas.searchRegexSchema(MAX_RESULT_LIMIT);
 const getFileContextSchema = schemas.getFileContextSchema(MAX_RESULT_LIMIT);
 const getSymbolDetailSchema = schemas.getSymbolDetailSchema(MAX_RESULT_LIMIT);
 const findImpactFilesSchema = schemas.findImpactFilesSchema(MAX_RESULT_LIMIT);
@@ -426,6 +428,27 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             repoId: { type: "string" },
             query: { type: "string" },
             filePath: { type: "string" },
+            limit: { type: "integer", minimum: 1, maximum: MAX_RESULT_LIMIT },
+            profile: { type: "string", enum: ["nano", "compact", "standard", "verbose"] }
+          }
+        }
+      },
+      {
+        name: "search_regex",
+        description: "Search repo source by REGEX and get matches with context lines + the enclosing symbol. Use this instead of baseline grep for arbitrary pattern searches (TODO/FIXME sweeps, API-usage hunts, call-site patterns, config keys). Scans indexed files by default; set scanAll=true to also walk non-code text files (json/yaml/etc). Flags limited to [ims] (g is implicit). filePathPrefix/language/excludeTests narrow scope; contextLines controls surrounding lines. Results cap at `limit` and a per-file cap — `truncated`/`truncationReason` flag when capped.",
+        inputSchema: {
+          type: "object",
+          additionalProperties: false,
+          required: ["repoId", "pattern"],
+          properties: {
+            repoId: { type: "string" },
+            pattern: { type: "string" },
+            regexFlags: { type: "string", description: "Subset of i, m, s (g is always applied)." },
+            filePathPrefix: { type: "string" },
+            language: { type: "string" },
+            excludeTests: { type: "boolean" },
+            scanAll: { type: "boolean" },
+            contextLines: { type: "integer", minimum: 0, maximum: 10 },
             limit: { type: "integer", minimum: 1, maximum: MAX_RESULT_LIMIT },
             profile: { type: "string", enum: ["nano", "compact", "standard", "verbose"] }
           }
@@ -1090,6 +1113,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       case "search_literals": {
         const hArgs = searchLiteralsSchema.parse(request.params.arguments ?? {});
         return handleSearchLiterals(hArgs, ctx);
+      }
+      case "search_regex": {
+        const hArgs = searchRegexSchema.parse(request.params.arguments ?? {});
+        return handleSearchRegex(hArgs, ctx);
       }
       case "get_file_context": {
         const hArgs = getFileContextSchema.parse(request.params.arguments ?? {});

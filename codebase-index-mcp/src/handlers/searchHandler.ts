@@ -12,6 +12,7 @@ import { formatChangeContextPayload, buildIndexMeta } from "./impactHandler.js";
 import { readSymbolSourceSpan } from "../refactorUtils.js";
 import { buildCoverageBlock } from "../coverage.js";
 import { isTestPath } from "../fileFilter.js";
+import { RegexSearchError } from "../regexSearch.js";
 import type { HandlerContext } from "./handlerContext.js";
 
 /**
@@ -127,6 +128,97 @@ export function handleSearchLiterals(
         kind: r.kind,
         enclosingSymbol: r.enclosingSymbol
       })),
+      coverage,
+      ...(staleWarning && { staleWarning })
+    },
+    profile
+  );
+}
+
+// ── search_regex ──────────────────────────────────────────────────────────────
+// Run a regex over repo source (read from disk) and return matches with context lines +
+// the enclosing symbol. A first-class grep-by-pattern lane so agents stay MCP-first
+// instead of falling back to baseline grep/read for arbitrary text searches.
+
+export function handleSearchRegex(
+  args: {
+    repoId: string;
+    pattern: string;
+    regexFlags?: string;
+    filePathPrefix?: string;
+    language?: string;
+    excludeTests: boolean;
+    scanAll: boolean;
+    contextLines: number;
+    limit: number;
+    profile: string;
+  },
+  ctx: HandlerContext
+): CallToolResult {
+  const { store } = ctx;
+  const profile = resolveResponseProfile(args.profile as Parameters<typeof resolveResponseProfile>[0]);
+
+  let result;
+  try {
+    result = store.searchRegex(args.repoId, {
+      pattern: args.pattern,
+      regexFlags: args.regexFlags,
+      filePathPrefix: args.filePathPrefix,
+      language: args.language,
+      excludeTests: args.excludeTests,
+      scanAll: args.scanAll,
+      contextLines: args.contextLines,
+      limit: args.limit
+    });
+  } catch (err) {
+    const e = err as RegexSearchError;
+    if (e?.code === "INVALID_PATTERN" || e?.code === "UNKNOWN_REPO") {
+      throw new McpError(ErrorCode.InvalidParams, `search_regex: ${e.message}`);
+    }
+    throw err;
+  }
+
+  const { matches, filesScanned, truncated, truncationReason } = result;
+  const staleWarning = buildStaleWarning(args.repoId, store, "match lines may be off vs current HEAD — re-index for exact positions.");
+  const coverage = buildCoverageBlock({ resultCount: matches.length, kind: "search", query: args.pattern });
+  const truncation = truncated ? { truncated, truncationReason } : {};
+
+  if (profile === "nano") {
+    const top = matches.slice(0, 10).map((m) => ({ filePath: m.filePath, line: m.line, matchText: m.matchText }));
+    return ctx.asText(
+      { pattern: args.pattern, count: matches.length, filesScanned, matches: top, hasMore: matches.length > top.length, ...truncation, coverage: coverage.confidence },
+      profile
+    );
+  }
+
+  if (profile === "compact") {
+    return ctx.asText(
+      {
+        pattern: args.pattern,
+        count: matches.length,
+        filesScanned,
+        matches: matches.map((m) => ({
+          filePath: m.filePath,
+          line: m.line,
+          matchText: m.matchText,
+          enclosingSymbol: m.enclosingSymbol
+        })),
+        ...truncation,
+        coverage,
+        ...(staleWarning && { staleWarning })
+      },
+      profile
+    );
+  }
+
+  // standard / verbose: full context lines, column, language
+  return ctx.asText(
+    {
+      pattern: args.pattern,
+      count: matches.length,
+      filesScanned,
+      matches,
+      ...truncation,
       coverage,
       ...(staleWarning && { staleWarning })
     },

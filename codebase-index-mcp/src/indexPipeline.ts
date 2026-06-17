@@ -5,7 +5,7 @@ import process from "node:process";
 
 import { glob } from "glob";
 
-import { shouldIndexFile, type FilterDecision } from "./fileFilter.js";
+import { shouldIndexFile, INDEX_IGNORE_GLOBS, type FilterDecision } from "./fileFilter.js";
 import { GraphStore } from "./graphStore.js";
 import { resolveHeadCommitSha, resolveCurrentBranch } from "./gitHelpers.js";
 import { clamp, redactSensitive } from "./indexGuardrails.js";
@@ -79,18 +79,7 @@ export async function runIndexPipeline(store: GraphStore, input: RunIndexInput):
     nodir: true,
     absolute: true,
     windowsPathsNoEscape: true,
-    ignore: [
-      "**/node_modules/**",
-      "**/dist/**",
-      "**/build/**",
-      "**/.git/**",
-      "**/coverage/**",
-      "**/*.log",
-      "**/*.lock",
-      "**/package-lock.json",
-      "**/yarn.lock",
-      "**/pnpm-lock.yaml"
-    ]
+    ignore: INDEX_IGNORE_GLOBS
   });
 
   // Dirty mode (ENH-A): restrict the scan to an explicit set of repo-relative POSIX

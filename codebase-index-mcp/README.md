@@ -29,6 +29,7 @@ npm install && npm run build
 | Tool | Description |
 |------|-------------|
 | `search_symbols` | Find symbols by name or intent (`strategy: name\|intent`). `ranked=true` scores candidates and honors `strategy` (intent tokenizes multi-word queries) + filters. Start here. |
+| `search_regex` | Grep repo source by **regex**, returning matches with context lines + the enclosing symbol. Use instead of baseline grep for pattern searches (TODO/FIXME sweeps, API-usage hunts, config keys). Scans indexed files by default; `scanAll=true` also walks non-code text files (json/yaml). Flags limited to `[ims]` (`g` implicit); `filePathPrefix`/`language`/`excludeTests` narrow scope. Caps at `limit` + per-file cap with `truncated`/`truncationReason`. |
 | `get_symbol_detail` | Full detail for a known symbolId |
 | `get_symbol_source` | Raw source text span of a symbol read from disk (by symbolId or name) — read exact code without a separate file read. Uses persisted end-line (re-index to populate) or estimates it. |
 | `get_symbol_context_pack` | Symbol + neighbors + callers/callees in one call. Prefer over `get_change_context` when not doing deep caller traversal. |

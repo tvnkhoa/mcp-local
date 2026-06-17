@@ -86,6 +86,22 @@ export const searchLiteralsSchema = (MAX_RESULT_LIMIT: number) => z
   })
   .strict();
 
+// Regex source search
+export const searchRegexSchema = (MAX_RESULT_LIMIT: number) => z
+  .object({
+    repoId: z.string().min(1).max(200),
+    pattern: z.string().min(1).max(500),
+    regexFlags: z.string().max(8).regex(/^[ims]*$/).optional(),
+    filePathPrefix: z.string().max(500).optional(),
+    language: z.string().max(50).optional(),
+    excludeTests: z.boolean().default(false),
+    scanAll: z.boolean().default(false),
+    contextLines: z.number().int().min(0).max(10).default(2),
+    limit: z.number().int().min(1).max(MAX_RESULT_LIMIT).default(50),
+    profile: responseProfileSchema.default("compact")
+  })
+  .strict();
+
 // File context
 export const getFileContextSchema = (MAX_RESULT_LIMIT: number) => z
   .object({

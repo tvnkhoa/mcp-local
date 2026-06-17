@@ -106,6 +106,7 @@ When analyzing this codebase, use the `codebase-index-local` MCP tools **before*
 
 - Registered repoIds: `codebase-index-mcp` (the sub-project) and `mcp-local` (this workspace)
 - Prefer `search_symbols` → `get_symbol_context_pack` → `find_impact_files` for code navigation
+- **For regex/pattern searches use `search_regex`** (matches + context + enclosing symbol; `scanAll:true` to include non-code text like json/yaml) instead of baseline grep
 - **To read a symbol's code, use `get_symbol_source` (by symbolId or name) instead of `read_file`** — it returns the exact source span from disk via MCP; fall back to `read_file` only for non-symbol regions
 - **To refactor/rename, stay in MCP:** `rename_assist(emitPreview:true)` → `refactor_replace_apply` (use `includeLowConfidence:true` for top-level identifiers); for pattern edits use `refactor_replace_preview(findMode:"regex")` with capture groups. Preview-gated, HMAC-approved, reversible via `refactor_replace_rollback`
 - `search_symbols(ranked:true)` now honors `strategy:"intent"` (multi-word scored candidates); `find_impact_files`/`get_change_context` warn via `staleWarning` instead of erroring on a stale index

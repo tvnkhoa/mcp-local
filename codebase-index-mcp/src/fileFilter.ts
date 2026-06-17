@@ -6,6 +6,22 @@ export type FilterDecision = {
   language: string | null;
 };
 
+// Glob ignore set shared by the indexer (indexPipeline.ts) and the scanAll path of
+// search_regex (regexSearch.ts) so both agree on what "the repo" excludes. Keep this the
+// single source — do not re-declare the array elsewhere.
+export const INDEX_IGNORE_GLOBS = [
+  "**/node_modules/**",
+  "**/dist/**",
+  "**/build/**",
+  "**/.git/**",
+  "**/coverage/**",
+  "**/*.log",
+  "**/*.lock",
+  "**/package-lock.json",
+  "**/yarn.lock",
+  "**/pnpm-lock.yaml"
+];
+
 const EXCLUDED_PATH_SEGMENTS = new Set([
   "node_modules",
   "dist",
@@ -110,7 +126,7 @@ export function isTestPath(filePath: string): boolean {
 }
 
 /** Returns true if the first 512 bytes contain a null byte — reliable binary file indicator. */
-function isBinary(bytes: Uint8Array): boolean {
+export function isBinary(bytes: Uint8Array): boolean {
   const limit = Math.min(bytes.length, 512);
   for (let i = 0; i < limit; i++) {
     if (bytes[i] === 0) return true;
@@ -118,12 +134,26 @@ function isBinary(bytes: Uint8Array): boolean {
   return false;
 }
 
+/** Returns true if any path segment is an excluded build/tooling directory (bin, obj, .vs, …). */
+export function hasExcludedPathSegment(filePath: string): boolean {
+  return filePath.replace(/\\/g, "/").split("/").some((seg) => EXCLUDED_PATH_SEGMENTS.has(seg));
+}
+
+/** Returns true if the file looks minified (avg line length > 500 over the first 10KB). */
+export function isLikelyMinified(bytes: Uint8Array): boolean {
+  if (bytes.length <= 10_000) return false;
+  const sample = bytes.slice(0, 10_000);
+  const text = new TextDecoder().decode(sample);
+  const lines = text.split("\n");
+  return text.length / lines.length > 500;
+}
+
 export function shouldIndexFile(filePath: string, bytes: Uint8Array, maxFileSizeBytes = 500_000): FilterDecision {
   const normalized = filePath.replace(/\\/g, "/");
   const normalizedLower = normalized.toLowerCase();
   const segments = normalized.split("/");
 
-  if (segments.some((seg) => EXCLUDED_PATH_SEGMENTS.has(seg))) {
+  if (hasExcludedPathSegment(normalized)) {
     return { include: false, reason: "excluded_path", language: null };
   }
 
@@ -161,14 +191,8 @@ export function shouldIndexFile(filePath: string, bytes: Uint8Array, maxFileSize
   }
 
   // Detect minified files (very long lines)
-  if (bytes.length > 10_000) {
-    const sample = bytes.slice(0, 10_000);
-    const text = new TextDecoder().decode(sample);
-    const lines = text.split("\n");
-    const avgLineLength = text.length / lines.length;
-    if (avgLineLength > 500) {
-      return { include: false, reason: "likely_minified", language: null };
-    }
+  if (isLikelyMinified(bytes)) {
+    return { include: false, reason: "likely_minified", language: null };
   }
 
   if (knownLanguage) {
