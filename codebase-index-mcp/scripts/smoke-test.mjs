@@ -63,7 +63,8 @@ async function main() {
     "rename_assist",
     "trace_execution_flow",
     "query_docs",
-    "search_literals"
+    "search_literals",
+    "search_regex"
   ];
   for (const required of requiredTools) {
     if (!toolNames.includes(required)) {
@@ -150,6 +151,54 @@ async function main() {
     throw new Error("search_literals returned no hits for a literal known to exist in src/index.ts");
   }
   console.log("SEARCH_LITERALS_OK:", { count: literalsPayload.json.count, top: literalsPayload.json.literals[0]?.value });
+
+  // ISSUE-027: compact (default) profile must return the contextLines window per match.
+  const regexCompact = readJsonTextContent(
+    await client.callTool({
+      name: "search_regex",
+      arguments: { repoId, pattern: "searchRegexImpl", contextLines: 2, limit: 10 }
+    })
+  ).json;
+  if (!regexCompact || regexCompact.count < 1) {
+    throw new Error("search_regex('searchRegexImpl') returned 0 hits in smoke index");
+  }
+  if (!regexCompact.matches.some((m) => Array.isArray(m.beforeContext) || Array.isArray(m.afterContext))) {
+    throw new Error("ISSUE-027 regression: compact search_regex dropped the contextLines window (no before/afterContext)");
+  }
+  // contextLines:0 must omit the window entirely.
+  const regexNoCtx = readJsonTextContent(
+    await client.callTool({
+      name: "search_regex",
+      arguments: { repoId, pattern: "searchRegexImpl", contextLines: 0, limit: 10 }
+    })
+  ).json;
+  if (regexNoCtx.matches.some((m) => "beforeContext" in m || "afterContext" in m)) {
+    throw new Error("search_regex(contextLines:0) should omit before/afterContext");
+  }
+  console.log("SEARCH_REGEX_CONTEXT_OK:", { count: regexCompact.count });
+
+  // ISSUE-028: filePathPrefix as an array (OR-semantics) + pathExclude glob.
+  const regexMultiPrefix = readJsonTextContent(
+    await client.callTool({
+      name: "search_regex",
+      arguments: { repoId, pattern: "import", filePathPrefix: ["src/", "scripts/"], limit: 200 }
+    })
+  ).json;
+  const hasSrc = regexMultiPrefix.matches.some((m) => m.filePath.startsWith("src/"));
+  const hasScripts = regexMultiPrefix.matches.some((m) => m.filePath.startsWith("scripts/"));
+  if (!hasSrc || !hasScripts) {
+    throw new Error(`ISSUE-028 regression: filePathPrefix array did not OR across subtrees (src=${hasSrc}, scripts=${hasScripts})`);
+  }
+  const regexExcluded = readJsonTextContent(
+    await client.callTool({
+      name: "search_regex",
+      arguments: { repoId, pattern: "import", filePathPrefix: ["src/", "scripts/"], pathExclude: "scripts/**", limit: 200 }
+    })
+  ).json;
+  if (regexExcluded.matches.some((m) => m.filePath.startsWith("scripts/"))) {
+    throw new Error("ISSUE-028 regression: pathExclude 'scripts/**' did not subtract the scripts subtree");
+  }
+  console.log("SEARCH_REGEX_SCOPE_OK:", { withScripts: regexMultiPrefix.matches.length, withoutScripts: regexExcluded.matches.length });
 
   const healthAfterIndex = await client.callTool({
     name: "health_check",

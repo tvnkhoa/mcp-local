@@ -435,7 +435,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: "search_regex",
-        description: "Search repo source by REGEX and get matches with context lines + the enclosing symbol. Use this instead of baseline grep for arbitrary pattern searches (TODO/FIXME sweeps, API-usage hunts, call-site patterns, config keys). Scans indexed files by default; set scanAll=true to also walk non-code text files (json/yaml/etc). Flags limited to [ims] (g is implicit). filePathPrefix/language/excludeTests narrow scope; contextLines controls surrounding lines. Results cap at `limit` and a per-file cap — `truncated`/`truncationReason` flag when capped.",
+        description: "Search repo source by REGEX and get matches with context lines + the enclosing symbol. Use this instead of baseline grep for arbitrary pattern searches (TODO/FIXME sweeps, API-usage hunts, call-site patterns, config keys). Scans indexed files by default; set scanAll=true to also walk non-code text files (json/yaml/etc). Flags limited to [ims] (g is implicit). filePathPrefix (string OR array of prefixes, OR-semantics) / language / excludeTests narrow scope; pathExclude (minimatch glob or array, e.g. \"**/Tests/**\") subtracts subtrees; contextLines controls surrounding lines (returned in every profile except nano). Results cap at `limit` and a per-file cap — `truncated`/`truncationReason` flag when capped.",
         inputSchema: {
           type: "object",
           additionalProperties: false,
@@ -444,7 +444,14 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             repoId: { type: "string" },
             pattern: { type: "string" },
             regexFlags: { type: "string", description: "Subset of i, m, s (g is always applied)." },
-            filePathPrefix: { type: "string" },
+            filePathPrefix: {
+              description: "Path prefix, or array of prefixes (a file is in scope if it starts with ANY).",
+              oneOf: [{ type: "string" }, { type: "array", items: { type: "string" }, maxItems: 20 }]
+            },
+            pathExclude: {
+              description: "Minimatch glob, or array of globs, matched against the full repo-relative path, to subtract from scope (e.g. \"**/Tests/**\", \"**/*.generated.cs\"). A leading \"*\" does not cross \"/\", so use \"**/*.ext\" to match nested files.",
+              oneOf: [{ type: "string" }, { type: "array", items: { type: "string" }, maxItems: 20 }]
+            },
             language: { type: "string" },
             excludeTests: { type: "boolean" },
             scanAll: { type: "boolean" },

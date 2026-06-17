@@ -257,21 +257,60 @@ export function getRepoStaleness(
   };
 }
 
+/** Actionable staleness signal — lets a caller size the drift instead of just being told it exists (ISSUE-026). */
+export type StaleWarning = {
+  note: string;
+  hint: string;
+  /** Indexed commit (short sha) the line numbers/symbol ranges were built against. */
+  lastIndexedCommit: string | null;
+  /** Current repo HEAD (short sha). */
+  headCommit: string | null;
+  /** Commits HEAD is ahead of the indexed commit, or null when not computable. */
+  commitsBehind: number | null;
+  /** Working-tree files changed since the indexed commit (staged + unstaged + untracked). */
+  dirtyCount: number;
+};
+
+function shortSha(sha: string | null): string | null {
+  return sha ? sha.slice(0, 12) : null;
+}
+
 /**
  * Non-fatal staleness warning for read tools that degrade gracefully on a stale index.
- * Returns `{ note, hint }` when the index is stale (or null otherwise / when staleness
- * can't be determined). `hint` is caller-specific guidance on what the staleness affects.
+ * Returns an actionable {@link StaleWarning} when the index is stale (or null otherwise /
+ * when staleness can't be determined). `hint` is caller-specific guidance on what the
+ * staleness affects. The extra git lookups (commits-behind, dirty count) run at most once
+ * per response (only on the stale path), never per match.
  */
 export function buildStaleWarning(
   repoId: string,
   store: GraphStore,
   hint: string
-): { note: string; hint: string } | null {
+): StaleWarning | null {
   try {
     const staleness = getRepoStaleness(repoId, store);
-    if (staleness.isStale) {
-      return { note: `index is stale: ${staleness.note}`, hint };
+    if (!staleness.isStale) {
+      return null;
     }
+    const repo = store.getRepository(repoId);
+    let commitsBehind: number | null = null;
+    let dirtyCount = 0;
+    if (repo) {
+      commitsBehind = countCommitsBehind(repo.repoPath, staleness.indexedCommitSha);
+      try {
+        dirtyCount = collectDirtyFiles(repo.repoPath).size;
+      } catch {
+        // non-git repo / git error — leave dirtyCount at 0
+      }
+    }
+    return {
+      note: `index is stale: ${staleness.note}`,
+      hint,
+      lastIndexedCommit: shortSha(staleness.indexedCommitSha),
+      headCommit: shortSha(staleness.headCommitSha),
+      commitsBehind,
+      dirtyCount
+    };
   } catch {
     // Can't determine staleness (e.g. non-git repo) — no warning.
   }

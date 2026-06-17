@@ -123,6 +123,51 @@ async function main() {
   }
   console.log("TRUNCATION_OK:", { count: truncated.matches.length, reason: truncated.truncationReason });
 
+  // 6. ISSUE-027: compact (default) profile returns the contextLines window per match.
+  const ctxCompact = readJsonTextContent(
+    await client.callTool({ name: "search_regex", arguments: { repoId, pattern: "searchRegexImpl", contextLines: 2, limit: 10 } })
+  ).json;
+  if (!ctxCompact.matches.some((m) => Array.isArray(m.beforeContext) && Array.isArray(m.afterContext))) {
+    throw new Error("ISSUE-027: compact profile did not return beforeContext/afterContext when contextLines=2");
+  }
+  const ctxZero = readJsonTextContent(
+    await client.callTool({ name: "search_regex", arguments: { repoId, pattern: "searchRegexImpl", contextLines: 0, limit: 10 } })
+  ).json;
+  if (ctxZero.matches.some((m) => "beforeContext" in m || "afterContext" in m)) {
+    throw new Error("ISSUE-027: contextLines=0 should omit before/afterContext in compact");
+  }
+  console.log("COMPACT_CONTEXT_OK:", { withCtx: ctxCompact.matches[0]?.beforeContext?.length ?? 0 });
+
+  // 7. ISSUE-028: filePathPrefix array (OR-semantics) returns hits from multiple subtrees.
+  const multiPrefix = readJsonTextContent(
+    await client.callTool({ name: "search_regex", arguments: { repoId, pattern: "import", filePathPrefix: ["src/", "scripts/"], limit: 500 } })
+  ).json;
+  const fromSrc = multiPrefix.matches.some((m) => m.filePath.startsWith("src/"));
+  const fromScripts = multiPrefix.matches.some((m) => m.filePath.startsWith("scripts/"));
+  if (!fromSrc || !fromScripts) {
+    throw new Error(`ISSUE-028: filePathPrefix array did not OR across subtrees (src=${fromSrc}, scripts=${fromScripts})`);
+  }
+  // single-string form unchanged
+  const singlePrefix = readJsonTextContent(
+    await client.callTool({ name: "search_regex", arguments: { repoId, pattern: "import", filePathPrefix: "scripts/", limit: 500 } })
+  ).json;
+  if (singlePrefix.matches.some((m) => !m.filePath.startsWith("scripts/"))) {
+    throw new Error("ISSUE-028: single-string filePathPrefix leaked matches outside the prefix");
+  }
+  console.log("MULTI_PREFIX_OK:", { multi: multiPrefix.matches.length, single: singlePrefix.matches.length });
+
+  // 8. ISSUE-028: pathExclude glob subtracts a subtree that the include set otherwise covers.
+  const excluded = readJsonTextContent(
+    await client.callTool({ name: "search_regex", arguments: { repoId, pattern: "import", filePathPrefix: ["src/", "scripts/"], pathExclude: "scripts/**", limit: 500 } })
+  ).json;
+  if (excluded.matches.some((m) => m.filePath.startsWith("scripts/"))) {
+    throw new Error("ISSUE-028: pathExclude 'scripts/**' did not remove the scripts subtree");
+  }
+  if (!excluded.matches.some((m) => m.filePath.startsWith("src/"))) {
+    throw new Error("ISSUE-028: pathExclude over-removed — expected src/ hits to remain");
+  }
+  console.log("PATH_EXCLUDE_OK:", { remaining: excluded.matches.length });
+
   await client.close();
   console.log("SEARCH_REGEX_TEST_PASSED");
 }
