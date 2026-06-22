@@ -69,10 +69,13 @@ npm install && npm run build
 ### Refactoring
 | Tool | Description |
 |------|-------------|
-| `refactor_replace_preview` | Preview bulk symbol replacement with HMAC-signed approval token. `findMode='regex'` enables pattern matching + capture-group substitution ($1, $&). |
+| `refactor_replace_preview` | Preview bulk symbol replacement with HMAC-signed approval token. `findMode='regex'` enables pattern matching + backreference substitution in `replaceExpression`: numbered (`$1`..`$99`), whole-match (`$&`), named (`$<name>`/`${name}`), and literal `$` via `$$`. A backreference to a group that did not match is flagged `unsubstituted_backreference` and blocked at apply (never silently written). |
 | `refactor_replace_apply` | Apply a previewed replacement (requires token from preview) |
 | `refactor_replace_rollback` | Roll back an applied replacement |
 | `refactor_symbol_migration` | Migrate symbol references with optional C# initializer rewrite |
+| `change_value_representation` | Promote a property's string literals to enum members (C# AST, no regex backreference) across assignments, initializers, `==`/`!=` comparisons, and assertion arguments; preview-gated, cross-type sites skipped |
+| `get_persistence_mapping` | EF mapping for a property (column, converter, max length, CHECK) + `DB_TRANSLATED_PROJECTION` warning when a converted property is projected in an un-materialized `.Select()`/`.Where()` |
+| `get_value_contract_impact` | Trace a stored/wire value across all registered repos; groups exact-value hits per repo and classifies producer (write) vs consumer (read) — the data-contract gate for a storage-format migration |
 
 ### Docs & Advanced
 | Tool | Description |

@@ -54,6 +54,7 @@ import {
   markRefactorPreviewStatusImpl,
   recordRefactorApplyImpl,
   getApplyByRollbackIdImpl,
+  getRecentAppliedFileHashesImpl,
   recordRefactorRollbackImpl
 } from "./refactorStore.js";
 import {
@@ -260,8 +261,8 @@ export class GraphStore {
     );
     this.stmtInsertEdge = this.db.prepare(
       `
-      insert into edges (repo_id, from_id, to_id, type, confidence, reason)
-      values (@repoId, @fromId, @toId, @type, @confidence, @reason)
+      insert into edges (repo_id, from_id, to_id, type, confidence, reason, assigned_expression)
+      values (@repoId, @fromId, @toId, @type, @confidence, @reason, @assignedExpression)
       `
     );
     this.stmtInsertRoute = this.db.prepare(
@@ -330,7 +331,7 @@ export class GraphStore {
              SELECT MAX(rowid) FROM edges
              WHERE repo_id = ?
                AND NOT ${PLACEHOLDERS}
-             GROUP BY repo_id, from_id, to_id, type
+             GROUP BY repo_id, from_id, to_id, type, assigned_expression
            )`
       )
       .run(repoId, repoId);
@@ -509,7 +510,8 @@ export class GraphStore {
         this.stmtInsertEdge.run({
           ...row,
           confidence: row.confidence ?? defaults.confidence,
-          reason: row.reason ?? defaults.reason
+          reason: row.reason ?? defaults.reason,
+          assignedExpression: row.assignedExpression ?? null
         });
       }
     };
@@ -778,6 +780,7 @@ export class GraphStore {
       line: number | null;
       toId: string;
       confidence: number | null;
+      assignedExpression: string | null;
     }[];
   } {
     const symbol = this.db
@@ -805,7 +808,8 @@ export class GraphStore {
       .prepare(
         `
         select e.from_id as enclosingSymbolId, sf.name as enclosingName, sf.kind as enclosingKind,
-               sf.file_path as filePath, sf.line as line, e.to_id as toId, e.type as type, e.confidence as confidence
+               sf.file_path as filePath, sf.line as line, e.to_id as toId, e.type as type, e.confidence as confidence,
+               e.assigned_expression as assignedExpression
         from symbols s
         inner join edges e on e.repo_id = s.repo_id and ${edgeJoin}
         left join symbols sf on sf.repo_id = e.repo_id and sf.symbol_id = e.from_id
@@ -815,7 +819,7 @@ export class GraphStore {
         limit ?
         `
       )
-      .all(repoId, symbolId, ...edgeTypes, limit) as { enclosingSymbolId: string; enclosingName: string | null; enclosingKind: string | null; filePath: string | null; line: number | null; toId: string; type: string; confidence: number | null }[];
+      .all(repoId, symbolId, ...edgeTypes, limit) as { enclosingSymbolId: string; enclosingName: string | null; enclosingKind: string | null; filePath: string | null; line: number | null; toId: string; type: string; confidence: number | null; assignedExpression: string | null }[];
 
     return {
       property: { symbolId: symbol.symbolId, name: symbol.name, kind: symbol.kind, filePath: symbol.filePath, line: symbol.line, declaringType },
@@ -827,7 +831,8 @@ export class GraphStore {
         filePath: r.filePath,
         line: r.line,
         toId: r.toId,
-        confidence: r.confidence
+        confidence: r.confidence,
+        assignedExpression: r.assignedExpression ?? null
       }))
     };
   }
@@ -1395,6 +1400,9 @@ export class GraphStore {
 
     ensureEdgeColumn("confidence", "real", "1.0");
     ensureEdgeColumn("reason", "text");
+    // ENH-029-B: RHS captured at PROPERTY_WRITE sites (assigned literal/expression). Survives edge
+    // resolution because resolvePropertyEdges only rewrites to_id/confidence/reason, never this column.
+    ensureEdgeColumn("assigned_expression", "text");
 
     this.db.exec(`
       create table if not exists routes (
@@ -1559,6 +1567,10 @@ export class GraphStore {
     return getApplyByRollbackIdImpl(this.db, rollbackId);
   }
 
+  getRecentAppliedFileHashes(repoId: string, filePaths: string[]): Map<string, string> {
+    return getRecentAppliedFileHashesImpl(this.db, repoId, filePaths);
+  }
+
   recordRefactorRollback(rollback: RefactorRollbackRecord): void {
     recordRefactorRollbackImpl(this.db, rollback);
   }
@@ -1599,7 +1611,8 @@ export class GraphStore {
         to_id text not null,
         type text not null,
         confidence real not null default 1.0,
-        reason text
+        reason text,
+        assigned_expression text
       );
 
       create table if not exists index_runs (

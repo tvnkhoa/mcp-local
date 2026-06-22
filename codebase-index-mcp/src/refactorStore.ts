@@ -5,20 +5,26 @@ import type {
   RefactorApplyRecord,
   RefactorPreviewHunkRecord,
   RefactorPreviewRecord,
+  RefactorRiskFlag,
   RefactorRollbackRecord
 } from "./types.js";
 
 // ── parseRiskFlags ─────────────────────────────────────────────────────
 
-export function parseRiskFlags(raw: string): ("ambiguous_target" | "cross_type" | "generated_file")[] {
+const KNOWN_RISK_FLAGS: ReadonlySet<RefactorRiskFlag> = new Set<RefactorRiskFlag>([
+  "ambiguous_target",
+  "cross_type",
+  "generated_file",
+  "unsubstituted_backreference"
+]);
+
+export function parseRiskFlags(raw: string): RefactorRiskFlag[] {
   try {
     const parsed = JSON.parse(raw) as unknown;
     if (!Array.isArray(parsed)) {
       return [];
     }
-    return parsed.filter((item): item is "ambiguous_target" | "cross_type" | "generated_file" => {
-      return item === "ambiguous_target" || item === "cross_type" || item === "generated_file";
-    });
+    return parsed.filter((item): item is RefactorRiskFlag => KNOWN_RISK_FLAGS.has(item as RefactorRiskFlag));
   } catch {
     return [];
   }
@@ -276,6 +282,44 @@ export function recordRefactorApplyImpl(
   });
 
   tx(apply, changes, hunks);
+}
+
+// ── Recent applied file hashes (concurrent-apply detection) ────────────
+
+/**
+ * For each given file path, the `fileHashAfter` of the most recent successful apply that touched it.
+ * Used to distinguish a concurrent/overlapping apply (current on-disk content matches a prior
+ * apply's output) from an arbitrary external edit when a preview goes stale.
+ */
+export function getRecentAppliedFileHashesImpl(
+  db: Database.Database,
+  repoId: string,
+  filePaths: string[]
+): Map<string, string> {
+  const result = new Map<string, string>();
+  if (filePaths.length === 0) {
+    return result;
+  }
+  const wanted = new Set(filePaths);
+  const rows = db
+    .prepare(
+      `
+      select c.file_path as filePath, c.file_hash_after as fileHashAfter
+      from refactor_apply_changes c
+      join refactor_applies a on a.apply_id = c.apply_id
+      where a.repo_id = ? and c.status = 'applied' and c.file_hash_after is not null
+      -- rowid is the deterministic insertion order; it tie-breaks applies that share a
+      -- completed_at millisecond (apply_id is a random UUID and would order arbitrarily).
+      order by a.completed_at desc, a.rowid desc
+      `
+    )
+    .all(repoId) as Array<{ filePath: string; fileHashAfter: string }>;
+  for (const row of rows) {
+    if (wanted.has(row.filePath) && !result.has(row.filePath)) {
+      result.set(row.filePath, row.fileHashAfter);
+    }
+  }
+  return result;
 }
 
 // ── Get apply by rollback ID ───────────────────────────────────────────

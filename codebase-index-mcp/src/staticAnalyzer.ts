@@ -1,6 +1,22 @@
 import type Database from "better-sqlite3";
 import { isTestPath } from "./fileFilter.js";
 
+// ENH-029-D: EF/persistence changes (value converters, CHECK constraints, migrations) are only
+// proven by the round-trip integration test, but name-affinity linkage favors the same-named unit
+// test. When the changed file lives in the persistence layer, admit + boost integration tests.
+const INFRA_PERSISTENCE_PATH = /\/(migrations|data\/configurations|configurations|persistence|dbcontext|infrastructure\/data)\//i;
+const INTEGRATION_TEST_PATH = /(integration|systemtests?|\/system\/|e2e|endtoend|roundtrip)/i;
+
+/** True for a changed source file in the EF/persistence layer (converter/CHECK/migration). */
+export function isInfraPersistencePath(filePath: string): boolean {
+  return INFRA_PERSISTENCE_PATH.test(filePath.replace(/\\/g, "/"));
+}
+
+/** True for an integration/system/e2e test (proves the persistence round-trip), not a unit test. */
+export function isIntegrationTestPath(filePath: string): boolean {
+  return INTEGRATION_TEST_PATH.test(filePath.replace(/\\/g, "/"));
+}
+
 // ISSUE-017: name-affinity fallback. Static CALLS/IMPORTS edges miss tests that exercise a
 // handler via `new XHandler(ctx).Handle(...)` or a MediatR stub (no resolvable edge), and the
 // exact-base name_similarity check below only fires when the normalized base names are *equal*.
@@ -124,6 +140,9 @@ export function linkTestsToSource(
   };
 
   const targetTokens = targetNormalized && !targetIsTest ? distinctiveNameTokens(targetNormalized) : new Set<string>();
+  // ENH-029-D: a persistence-layer change must run the integration tests even when their names
+  // don't share the changed file's tokens — admit them on path so the boost below can rank them.
+  const targetIsInfraPersistence = Boolean(targetNormalized) && !targetIsTest && isInfraPersistencePath(targetNormalized!);
   const selectedTests = targetNormalized
     ? (targetIsTest
         ? testFiles.filter((x) => x === targetNormalized)
@@ -132,7 +151,8 @@ export function linkTestsToSource(
               (x) =>
                 normalizeBase(x) === normalizeBase(targetNormalized) ||
                 x.includes(normalizeBase(targetNormalized)) ||
-                sharedTokenCoverage(testTokensOf(x), targetTokens) >= 0.5
+                sharedTokenCoverage(testTokensOf(x), targetTokens) >= 0.5 ||
+                (targetIsInfraPersistence && isIntegrationTestPath(x))
             )
             .slice(0, Math.max(limit * 2, 20)))
     : testFiles.slice(0, Math.max(limit * 3, 100));
@@ -206,6 +226,13 @@ export function linkTestsToSource(
 
     for (const row of calledSourceFiles) {
       addScore(normalizePath(row.sourceFile), 0.25, "call_trace");
+    }
+
+    // ENH-029-D: boost the integration test ↔ changed-persistence-file link so the round-trip test
+    // (the only layer that proves a converter/CHECK/migration) ranks into testsToRun. Scored 0.6 so
+    // it clears minScore and outranks a same-named unit test's name-affinity link.
+    if (targetIsInfraPersistence && targetNormalized && isIntegrationTestPath(testFile)) {
+      addScore(targetNormalized, 0.6, "infrastructure_integration_priority");
     }
 
     const ranked = [...sourceScoreMap.entries()]

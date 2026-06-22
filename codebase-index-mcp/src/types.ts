@@ -140,6 +140,8 @@ export type EdgeRecord = {
   type: "IMPORTS" | "CALLS" | "DEPENDS_ON" | "IMPLEMENTS" | "TYPE_REF" | "PROPERTY_REF" | "PROPERTY_WRITE" | "PUBLISHES" | "CONSUMES";
   confidence?: number;
   reason?: string;
+  /** ENH-029-B: RHS source text captured at PROPERTY_WRITE sites (assigned literal/expression). */
+  assignedExpression?: string;
 };
 
 /**
@@ -239,7 +241,7 @@ export type RepoWatchStatus = {
   queuedDeleted: number;
 };
 
-export type RefactorRiskFlag = "ambiguous_target" | "cross_type" | "generated_file";
+export type RefactorRiskFlag = "ambiguous_target" | "cross_type" | "generated_file" | "unsubstituted_backreference";
 
 export type RefactorPreviewRecord = {
   previewId: string;

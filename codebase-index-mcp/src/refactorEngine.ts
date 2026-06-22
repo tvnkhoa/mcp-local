@@ -40,13 +40,50 @@ import {
 const REGEX_PER_FILE_MATCH_CAP = 2000;
 const REGEX_GLOBAL_MATCH_CAP = 5000;
 
-/** Expand `$&`, `$1`..`$99`, and `$$` in a regex replacement template against a match. */
+// Recognizes regex replacement backreference tokens: `$$`, `$&`, `$1`..`$99`, `$<name>`, `${name}`.
+const BACKREFERENCE_TOKEN = /\$(\$|&|\d{1,2}|<([^>]+)>|\{([^}]+)\})/g;
+
+/** Expand `$&`, `$$`, `$1`..`$99`, and named groups (`$<name>`/`${name}`) in a regex replacement template against a match. */
 function expandRegexReplacement(template: string, match: RegExpExecArray): string {
-  return template.replace(/\$(\$|&|\d{1,2})/g, (_full, token: string) => {
+  return template.replace(BACKREFERENCE_TOKEN, (_full, token: string, angleName?: string, braceName?: string) => {
     if (token === "$") return "$";
     if (token === "&") return match[0];
+    const name = angleName ?? braceName;
+    if (name !== undefined) return match.groups?.[name] ?? "";
     return match[Number(token)] ?? "";
   });
+}
+
+/**
+ * True if `template` references a capture group — numbered or named — that the pattern does not
+ * declare at all (a typo like `$1` against a group-less pattern, or `$<typo>`). Such a reference is
+ * silently substituted with an empty string (data loss) or risks landing a stray backreference
+ * token, so the preview should flag it rather than apply silently (defense-in-depth for MCP-ISSUE-029).
+ *
+ * A reference to a group that the pattern *does* declare but which did not participate in this match
+ * (an optional group like `(x)?` → `match[n] === undefined`) is NOT missing: substituting empty is
+ * the correct, standard `String.replace` behavior, so flagging it would wrongly block valid refactors.
+ * We distinguish the two by group existence: `n < match.length` for numbered groups, and `name in
+ * match.groups` for named groups (JS populates `match.groups` with every declared name, even if its
+ * value is undefined because the group did not participate).
+ */
+function hasMissingBackreference(template: string, match: RegExpExecArray): boolean {
+  let missing = false;
+  template.replace(BACKREFERENCE_TOKEN, (_full, token: string, angleName?: string, braceName?: string) => {
+    if (token === "$" || token === "&") return "";
+    const name = angleName ?? braceName;
+    if (name !== undefined) {
+      // Missing only when the pattern declares no group of this name (typo), not when an existing
+      // optional group simply didn't participate (then `name` is still a key of match.groups).
+      if (!match.groups || !(name in match.groups)) missing = true;
+    } else if (Number(token) >= match.length) {
+      // Missing only when the index exceeds the declared group count. An in-range index whose value
+      // is undefined is a non-participating optional group → legitimate empty substitution.
+      missing = true;
+    }
+    return "";
+  });
+  return missing;
 }
 
 export function buildRefactorPreview(
@@ -110,12 +147,12 @@ export function buildRefactorPreview(
     const fileHashBefore = sha256(content);
 
     // Collect raw matches (literal substring, or regex with capture-group substitution).
-    const rawMatches: { start: number; end: number; replacement: string }[] = [];
+    const rawMatches: { start: number; end: number; replacement: string; unsubstituted: boolean }[] = [];
     if (compiledRegex) {
       compiledRegex.lastIndex = 0;
       let m: RegExpExecArray | null;
       while ((m = compiledRegex.exec(content)) !== null) {
-        rawMatches.push({ start: m.index, end: m.index + m[0].length, replacement: expandRegexReplacement(replaceText, m) });
+        rawMatches.push({ start: m.index, end: m.index + m[0].length, replacement: expandRegexReplacement(replaceText, m), unsubstituted: hasMissingBackreference(replaceText, m) });
         if (m[0].length === 0) compiledRegex.lastIndex++; // avoid infinite loop on zero-length matches
         if (rawMatches.length >= REGEX_PER_FILE_MATCH_CAP) break;
       }
@@ -124,13 +161,13 @@ export function buildRefactorPreview(
       while (true) {
         const start = content.indexOf(findText, cursor);
         if (start < 0) break;
-        rawMatches.push({ start, end: start + findText.length, replacement: replaceText });
+        rawMatches.push({ start, end: start + findText.length, replacement: replaceText, unsubstituted: false });
         cursor = start + findText.length;
       }
     }
 
     const fileLines = content.split(/\r?\n/);
-    for (const { start, end, replacement } of rawMatches) {
+    for (const { start, end, replacement, unsubstituted } of rawMatches) {
       if (totalMatchCount >= REGEX_GLOBAL_MATCH_CAP) break;
       const line = offsetToLine(content, start);
       const lineText = fileLines[line - 1] ?? "";
@@ -154,6 +191,9 @@ export function buildRefactorPreview(
       }
       if (isGeneratedFilePath(filePath)) {
         riskFlags.push("generated_file");
+      }
+      if (unsubstituted) {
+        riskFlags.push("unsubstituted_backreference");
       }
 
       let confidence = mode === "text" ? 0.85 : 0.95;
@@ -471,7 +511,8 @@ export function executeRefactorApplyPlan(
   maxFilesPerBatch: number,
   stopOnFirstConflict: boolean,
   includeLowConfidence: boolean,
-  lowConfidenceThreshold: number
+  lowConfidenceThreshold: number,
+  recentAppliedHashByFile: Map<string, string> = new Map()
 ): {
   changes: RefactorApplyChangeRecord[];
   appliedHunks: RefactorApplyHunkRecord[];
@@ -531,12 +572,18 @@ export function executeRefactorApplyPlan(
       }
 
       if (beforeHash !== runnableHunks[0].fileHashBefore) {
+        // If the file's current content is exactly what a prior apply produced, this preview was
+        // invalidated by a concurrent/overlapping apply of the same file — not an external edit.
+        const staleReason =
+          recentAppliedHashByFile.get(filePath) === beforeHash
+            ? "FILE_CHANGED_BY_CONCURRENT_APPLY"
+            : "FILE_CHANGED_AFTER_PREVIEW";
         changes.push({
           applyId,
           filePath,
           replacementCount: 0,
           status: "conflict",
-          reason: "FILE_CHANGED_AFTER_PREVIEW",
+          reason: staleReason,
           fileHashBefore: beforeHash,
           fileHashAfter: null,
           beforeContent,

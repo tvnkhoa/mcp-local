@@ -8,6 +8,7 @@ import {
   buildSymbolMigrationPreview,
   executeRefactorApplyPlan
 } from "../refactorEngine.js";
+import { buildValueRepresentationPreview, type ValueRepresentationInput } from "../valueRepresentation.js";
 import {
   resolveApprovalSecret,
   PolicyViolationError,
@@ -42,6 +43,67 @@ import { collectGitChangedFiles } from "../gitHelpers.js";
 import { resolveResponseProfile } from "../responseFormatter.js";
 import { buildCoverageBlock } from "../coverage.js";
 import type { HandlerContext } from "./handlerContext.js";
+
+// Serializes the read-modify-write phase of refactor applies. Two concurrent applies that touch the
+// same file would otherwise interleave: the first write shifts offsets / changes the file hash, so
+// the second sees a stale preview and fails. Serializing makes the ordering deterministic (and lets
+// the second apply report FILE_CHANGED_BY_CONCURRENT_APPLY rather than corrupting the file).
+let applyMutex: Promise<unknown> = Promise.resolve();
+function runExclusiveApply<T>(fn: () => T): Promise<T> {
+  const run = applyMutex.then(fn, fn);
+  applyMutex = run.then(() => undefined, () => undefined);
+  return run;
+}
+
+type ExclusiveApplyResult = {
+  applyId: string;
+  rollbackId: string;
+  applyOutcome: ReturnType<typeof executeRefactorApplyPlan>;
+  applyRecord: RefactorApplyRecord;
+  beforeChangedFiles: Set<string>;
+  afterChangedFiles: Set<string>;
+};
+
+/**
+ * Apply a saved preview's hunks under the shared apply mutex, recording the apply and updating the
+ * preview status inside the same critical section. Centralizing the read-modify-write here means
+ * every apply entry point (refactor_replace, refactor_symbol_migration, change_value_representation)
+ * gets identical concurrency handling — serialized writes plus concurrent-apply detection via
+ * `recentAppliedHashByFile` (it was the earlier copy-paste of this block that let symbol_migration
+ * silently drift out of that guarantee).
+ */
+function applyPreviewExclusively(
+  store: HandlerContext["store"],
+  repoPath: string,
+  repoId: string,
+  previewId: string,
+  hunks: RefactorPreviewHunkRecord[],
+  expectedApplyFiles: Set<string>,
+  opts: { maxFilesPerBatch: number; stopOnFirstConflict: boolean; includeLowConfidence: boolean; lowConfidenceThreshold: number }
+): Promise<ExclusiveApplyResult> {
+  return runExclusiveApply(() => {
+    const applyId = `apply_${randomUUID()}`;
+    const rollbackId = `rollback_${randomUUID()}`;
+    const beforeChangedFiles = collectGitChangedFiles(repoPath);
+    const recentAppliedHashByFile = store.getRecentAppliedFileHashes(repoId, [...expectedApplyFiles]);
+    const applyOutcome = executeRefactorApplyPlan(
+      repoPath, applyId, hunks,
+      opts.maxFilesPerBatch, opts.stopOnFirstConflict, opts.includeLowConfidence, opts.lowConfidenceThreshold,
+      recentAppliedHashByFile
+    );
+    const afterChangedFiles = collectGitChangedFiles(repoPath);
+    const appliedFiles = applyOutcome.changes.filter((x) => x.status === "applied");
+    const conflictCount = applyOutcome.changes.filter((x) => x.status === "conflict").length;
+    const applyRecord: RefactorApplyRecord = {
+      applyId, rollbackId, previewId, repoId,
+      status: deriveApplyStatus(applyOutcome.changes), createdAt: new Date().toISOString(), completedAt: new Date().toISOString(),
+      totalFiles: appliedFiles.length, totalReplacements: appliedFiles.reduce((sum, item) => sum + item.replacementCount, 0), conflictCount
+    };
+    store.recordRefactorApply(applyRecord, applyOutcome.changes, applyOutcome.appliedHunks);
+    store.markRefactorPreviewStatus(previewId, mapPreviewStatusFromApplyStatus(applyRecord.status));
+    return { applyId, rollbackId, applyOutcome, applyRecord, beforeChangedFiles, afterChangedFiles };
+  });
+}
 
 // ── rename_assist ─────────────────────────────────────────────────────────────
 
@@ -173,7 +235,7 @@ function createReplacePreview(
   const hunkRecords: RefactorPreviewHunkRecord[] = effectiveHunks.map((hunk, index) => ({
     previewId, hunkId: `${previewId}_${String(index + 1).padStart(6, "0")}`,
     filePath: hunk.filePath, line: hunk.line, startOffset: hunk.startOffset, endOffset: hunk.endOffset,
-    beforeText: hunk.beforeText, afterText: hunk.afterText, replacementText: args.replaceExpression,
+    beforeText: hunk.beforeText, afterText: hunk.afterText, replacementText: hunk.afterText,
     ownerType: hunk.ownerType, symbolKind: hunk.symbolKind, confidence: hunk.confidence,
     riskFlags: hunk.riskFlags, fileHashBefore: hunk.fileHashBefore
   }));
@@ -181,8 +243,9 @@ function createReplacePreview(
   store.saveRefactorPreview(previewRecord, hunkRecords);
   const approvalToken = issueApprovalToken(previewId, digest, expiresAt, resolveApprovalSecret(constants.REFACTOR_APPROVAL_SECRET, constants.REFACTOR_STRICT_APPROVAL));
 
-  const riskFlags = { ambiguousTargets: riskCounts.ambiguous, crossTypeReplacements: riskCounts.crossType, generatedFiles: riskCounts.generated };
-  const diagnostics = { code: blockedByAmbiguity ? "PREVIEW_BLOCKED_BY_AMBIGUITY" : compilerAssistNoMatch ? "PREVIEW_NO_DIAGNOSTIC_MATCH" : "PREVIEW_READY", machineReadable: true };
+  const unsubstitutedBackreferences = effectiveHunks.filter((h) => h.riskFlags.includes("unsubstituted_backreference")).length;
+  const riskFlags = { ambiguousTargets: riskCounts.ambiguous, crossTypeReplacements: riskCounts.crossType, generatedFiles: riskCounts.generated, unsubstitutedBackreferences };
+  const diagnostics = { code: unsubstitutedBackreferences > 0 ? "PREVIEW_HAS_UNSUBSTITUTED_BACKREFERENCE" : blockedByAmbiguity ? "PREVIEW_BLOCKED_BY_AMBIGUITY" : compilerAssistNoMatch ? "PREVIEW_NO_DIAGNOSTIC_MATCH" : "PREVIEW_READY", machineReadable: true };
   const executionPolicy = noLlmAudit(constants.REFACTOR_STRICT_APPROVAL);
 
   const ambiguity = { ratioPercent: Number(ambiguousRatio.toFixed(2)), thresholdPercent: args.ambiguityThresholdPercent, blockedByPolicy: blockedByAmbiguity };
@@ -247,12 +310,13 @@ export async function handleRefactorReplaceApply(
     throw new McpError(ErrorCode.InvalidParams, `refactor_replace_apply: repo '${preview.preview.repoId}' not found.`);
   }
 
-  const applyId = `apply_${randomUUID()}`;
-  const rollbackId = `rollback_${randomUUID()}`;
   const expectedApplyFiles = collectExpectedApplyFiles(preview.hunks, args.includeLowConfidence, constants.REFACTOR_LOW_CONFIDENCE_THRESHOLD);
-  const beforeChangedFiles = collectGitChangedFiles(repo.repoPath);
-  const applyOutcome = executeRefactorApplyPlan(repo.repoPath, applyId, preview.hunks, args.maxFilesPerBatch, args.stopOnFirstConflict, args.includeLowConfidence, constants.REFACTOR_LOW_CONFIDENCE_THRESHOLD);
-  const afterChangedFiles = collectGitChangedFiles(repo.repoPath);
+  // Run the read-modify-write AND its persistence under one mutex so a following apply both sees the
+  // committed change and detects it (FILE_CHANGED_BY_CONCURRENT_APPLY) instead of interleaving.
+  const { applyId, rollbackId, applyOutcome, applyRecord, beforeChangedFiles, afterChangedFiles } = await applyPreviewExclusively(
+    store, repo.repoPath, preview.preview.repoId, preview.preview.previewId, preview.hunks, expectedApplyFiles,
+    { maxFilesPerBatch: args.maxFilesPerBatch, stopOnFirstConflict: args.stopOnFirstConflict, includeLowConfidence: args.includeLowConfidence, lowConfidenceThreshold: constants.REFACTOR_LOW_CONFIDENCE_THRESHOLD }
+  );
   const newlyChangedFiles = [...afterChangedFiles].filter((x) => !beforeChangedFiles.has(x));
   const unexpectedChangedFiles = newlyChangedFiles.filter((x) => !expectedApplyFiles.has(x));
   const scopeDriftPercent = expectedApplyFiles.size > 0 ? (unexpectedChangedFiles.length / expectedApplyFiles.size) * 100 : 0;
@@ -262,15 +326,7 @@ export async function handleRefactorReplaceApply(
   const appliedFiles = changes.filter((x) => x.status === "applied");
   const conflicted = changes.filter((x) => x.status === "conflict");
   const totalReplacements = appliedFiles.reduce((sum, item) => sum + item.replacementCount, 0);
-  const applyStatus = deriveApplyStatus(changes);
-
-  const applyRecord: RefactorApplyRecord = {
-    applyId, rollbackId, previewId: preview.preview.previewId, repoId: preview.preview.repoId,
-    status: applyStatus, createdAt: new Date().toISOString(), completedAt: new Date().toISOString(),
-    totalFiles: appliedFiles.length, totalReplacements, conflictCount: conflicted.length
-  };
-  store.recordRefactorApply(applyRecord, changes, applyOutcome.appliedHunks);
-  store.markRefactorPreviewStatus(preview.preview.previewId, mapPreviewStatusFromApplyStatus(applyRecord.status));
+  const applyStatus = applyRecord.status;
 
   const diagnostics = { code: scopeDriftDetected ? "SCOPE_DRIFT_DETECTED" : applyStatus !== "applied" ? "APPLY_PARTIAL_OR_CONFLICT" : "APPLY_OK", machineReadable: true };
   const executionPolicy = noLlmAudit(constants.REFACTOR_STRICT_APPROVAL);
@@ -383,7 +439,7 @@ export function handleRefactorReplaceRollback(
 
 // ── refactor_symbol_migration ─────────────────────────────────────────────────
 
-export function handleRefactorSymbolMigration(
+export async function handleRefactorSymbolMigration(
   args: {
     repoId: string;
     migrations: RefactorSymbolMigrationInput[];
@@ -391,7 +447,7 @@ export function handleRefactorSymbolMigration(
     dryRun: boolean;
   },
   ctx: HandlerContext
-): CallToolResult {
+): Promise<CallToolResult> {
   const { store, constants } = ctx;
   const repo = store.getRepository(args.repoId);
   if (!repo) {
@@ -439,17 +495,13 @@ export function handleRefactorSymbolMigration(
     for (const hunk of hunkRecords) suggestedFollowUpFiles.add(hunk.filePath);
 
     if (!args.dryRun) {
-      const applyId = `apply_${randomUUID()}`;
-      const rollbackId = `rollback_${randomUUID()}`;
-      const applyOutcome = executeRefactorApplyPlan(repo.repoPath, applyId, hunkRecords, 50, true, false, constants.REFACTOR_LOW_CONFIDENCE_THRESHOLD);
-      const appliedFiles = applyOutcome.changes.filter((x) => x.status === "applied");
-      const conflicted = applyOutcome.changes.filter((x) => x.status === "conflict");
-      const totalReplacements = appliedFiles.reduce((sum, item) => sum + item.replacementCount, 0);
-      const applyStatus = deriveApplyStatus(applyOutcome.changes);
-      store.recordRefactorApply({ applyId, rollbackId, previewId, repoId: args.repoId, status: applyStatus, createdAt: new Date().toISOString(), completedAt: new Date().toISOString(), totalFiles: appliedFiles.length, totalReplacements, conflictCount: conflicted.length }, applyOutcome.changes, applyOutcome.appliedHunks);
-      store.markRefactorPreviewStatus(previewId, mapPreviewStatusFromApplyStatus(applyStatus));
-      resultRow.applyId = applyId;
-      resultRow.rollbackId = rollbackId;
+      const expectedApplyFiles = collectExpectedApplyFiles(hunkRecords, false, constants.REFACTOR_LOW_CONFIDENCE_THRESHOLD);
+      const applied = await applyPreviewExclusively(
+        store, repo.repoPath, args.repoId, previewId, hunkRecords, expectedApplyFiles,
+        { maxFilesPerBatch: 50, stopOnFirstConflict: true, includeLowConfidence: false, lowConfidenceThreshold: constants.REFACTOR_LOW_CONFIDENCE_THRESHOLD }
+      );
+      resultRow.applyId = applied.applyId;
+      resultRow.rollbackId = applied.rollbackId;
     }
     migrationResults.push(resultRow);
   }
@@ -461,6 +513,94 @@ export function handleRefactorSymbolMigration(
     suggestedFollowUpFiles: [...suggestedFollowUpFiles].sort((a, b) => a.localeCompare(b)),
     executionPolicy: noLlmAudit(constants.REFACTOR_STRICT_APPROVAL)
   });
+}
+
+// ── change_value_representation ─────────────────────────────────────────────────
+
+/**
+ * ENH-029-A — promote a property's literal values to enum members across assignments, object
+ * initializers, equality comparisons, and assertion arguments. Sites are located via the C# AST
+ * (no user-authored backreference, so it sidesteps the MCP-ISSUE-029 capture-group failure mode)
+ * and rewritten through the existing preview → apply → rollback pipeline.
+ */
+export async function handleChangeValueRepresentation(
+  args: {
+    repoId: string;
+    property: string;
+    requiredOwnerType: string;
+    valueMap: Record<string, string>;
+    includeComparisons?: boolean;
+    scopePaths?: string[];
+    dryRun: boolean;
+    profile?: string;
+  },
+  ctx: HandlerContext
+): Promise<CallToolResult> {
+  const { store, constants } = ctx;
+  const profile = resolveResponseProfile((args.profile ?? "standard") as Parameters<typeof resolveResponseProfile>[0]);
+  const repo = store.getRepository(args.repoId);
+  if (!repo) {
+    throw new McpError(ErrorCode.InvalidParams, `change_value_representation: repo '${args.repoId}' not found.`);
+  }
+
+  const input: ValueRepresentationInput = {
+    property: args.property,
+    requiredOwnerType: args.requiredOwnerType,
+    valueMap: args.valueMap,
+    includeComparisons: args.includeComparisons
+  };
+
+  const previewResult = buildValueRepresentationPreview(store, repo.repoPath, args.repoId, input, args.scopePaths ?? []);
+  const now = new Date();
+  const expiresAt = new Date(now.getTime() + constants.REFACTOR_PREVIEW_TTL_MS).toISOString();
+  const findLabel = `${args.requiredOwnerType}.${args.property}`;
+  const replaceLabel = Object.entries(args.valueMap).map(([k, v]) => `${k}=>${v}`).join(", ");
+  const digest = createPreviewDigest(args.repoId, findLabel, replaceLabel, previewResult.hunks);
+  const previewId = `preview_${randomUUID()}`;
+  const riskCounts = countPreviewRisks(previewResult.hunks);
+
+  const hunkRecords: RefactorPreviewHunkRecord[] = previewResult.hunks.map((hunk, index) => ({
+    previewId, hunkId: `${previewId}_${String(index + 1).padStart(6, "0")}`,
+    filePath: hunk.filePath, line: hunk.line, startOffset: hunk.startOffset, endOffset: hunk.endOffset,
+    beforeText: hunk.beforeText, afterText: hunk.afterText, replacementText: hunk.afterText,
+    ownerType: hunk.ownerType, symbolKind: hunk.symbolKind, confidence: hunk.confidence,
+    riskFlags: hunk.riskFlags, fileHashBefore: hunk.fileHashBefore
+  }));
+
+  const previewRecord: RefactorPreviewRecord = {
+    previewId, repoId: args.repoId, findPattern: findLabel, replaceExpression: replaceLabel,
+    mode: "symbol-aware", ambiguityThresholdPercent: 1, createdAt: now.toISOString(), expiresAt, digest, status: "ready",
+    totalMatches: hunkRecords.length, affectedFileCount: previewResult.affectedFiles.length,
+    riskAmbiguousCount: riskCounts.ambiguous, riskCrossTypeCount: riskCounts.crossType, riskGeneratedCount: riskCounts.generated
+  };
+  store.saveRefactorPreview(previewRecord, hunkRecords);
+
+  const result: {
+    repoId: string; dryRun: boolean; property: string; requiredOwnerType: string;
+    previewId: string; totalMatches: number; ambiguousOccurrences: number;
+    affectedFiles: string[]; previewSummary: ReturnType<typeof groupPreviewHunks>;
+    applyId?: string; rollbackId?: string; applyStatus?: string;
+    executionPolicy: ReturnType<typeof noLlmAudit>;
+  } = {
+    repoId: args.repoId, dryRun: args.dryRun, property: args.property, requiredOwnerType: args.requiredOwnerType,
+    previewId, totalMatches: hunkRecords.length,
+    ambiguousOccurrences: hunkRecords.filter((x) => x.riskFlags.includes("ambiguous_target")).length,
+    affectedFiles: previewResult.affectedFiles, previewSummary: groupPreviewHunks(hunkRecords),
+    executionPolicy: noLlmAudit(constants.REFACTOR_STRICT_APPROVAL)
+  };
+
+  if (!args.dryRun) {
+    const expectedApplyFiles = collectExpectedApplyFiles(hunkRecords, false, constants.REFACTOR_LOW_CONFIDENCE_THRESHOLD);
+    const applied = await applyPreviewExclusively(
+      store, repo.repoPath, args.repoId, previewId, hunkRecords, expectedApplyFiles,
+      { maxFilesPerBatch: 50, stopOnFirstConflict: true, includeLowConfidence: false, lowConfidenceThreshold: constants.REFACTOR_LOW_CONFIDENCE_THRESHOLD }
+    );
+    result.applyId = applied.applyId;
+    result.rollbackId = applied.rollbackId;
+    result.applyStatus = applied.applyRecord.status;
+  }
+
+  return ctx.asText(result, profile);
 }
 
 // ── trace_execution_flow ──────────────────────────────────────────────────────
