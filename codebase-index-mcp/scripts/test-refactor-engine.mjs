@@ -176,6 +176,36 @@ public sealed class FixtureNoRewrite
     "utf8"
   );
 
+  // File E: capture-group / named-group / guard cases for MCP-ISSUE-029
+  const fileEPath = join(tmpDir, "src", "HandledByAssertions.cs");
+  const fileEOriginal = `public class HandledByAssertions
+{
+    public void Check()
+    {
+        Assert.Equal("ai", conv.AssignmentState.HandledBy);
+        Assert.Equal("human", result.Conversation.AssignmentState.HandledBy);
+        Assert.Equal("guard", probe.HandledBy);
+    }
+}
+`;
+  writeFileSync(fileEPath, fileEOriginal, "utf8");
+
+  // File F: optional capture group that does not participate — must substitute empty, NOT be blocked.
+  const fileFPath = join(tmpDir, "src", "OptionalGroup.cs");
+  const fileFOriginal = `public class OptionalGroup
+{
+    public void Check()
+    {
+        Assert.Equal("opt", probe.HandledBy);
+    }
+}
+`;
+  writeFileSync(fileFPath, fileFOriginal, "utf8");
+
+  // File G: two overlapping previews → serialized applies → concurrent-apply diagnostic (PR2)
+  const fileGPath = join(tmpDir, "src", "ConcurrentTarget.ts");
+  writeFileSync(fileGPath, `export const LABEL = "MARKER_ONE";\n`, "utf8");
+
   const repoPath = tmpDir;
 
   const transport = new StdioClientTransport({
@@ -193,6 +223,10 @@ public sealed class FixtureNoRewrite
 
   const client = new Client({ name: "refactor-regression-test", version: "0.1.0" });
   await client.connect(transport);
+  // Drain the server's stderr. With stderr:"pipe" and no reader, a chatty server (index logs,
+  // progress bars) fills the ~64KB OS pipe buffer; its next synchronous console.error then blocks
+  // the server event loop and every request times out. Consuming the pipe keeps the server alive.
+  transport.stderr?.resume();
 
   // ── 3.1  Index the temp repo ─────────────────────────────────────────────
   console.log("\n  [3.1] Indexing temp repo...");
@@ -664,6 +698,215 @@ public sealed class FixtureNoRewrite
         const afterRollback = readFileSync(fileAPath, "utf8");
         assert(afterRollback.includes("oldFunctionName"), "rollback restored the original identifier");
       }
+    }
+  }
+
+  // ── 3.13 regex capture-group apply substitutes $1 on disk (MCP-ISSUE-029) ──
+  console.log("\n  [3.13] regex capture-group apply substitutes $1 on disk (MCP-ISSUE-029)...");
+  const cgPreview = await client.callTool({
+    name: "refactor_replace_preview",
+    arguments: {
+      repoId: testRepoId,
+      find: 'Equal\\("ai", ([^)]+\\.AssignmentState\\.HandledBy)\\)',
+      replaceExpression: "Equal(ConversationHandledByValues.Ai, $1)",
+      findMode: "regex",
+      profile: "compact",
+      scope: { includePaths: ["src"] },
+      guards: {},
+      mode: "text",
+      ambiguityThresholdPercent: 100
+    }
+  });
+  const cgPreviewJson = readJson(cgPreview);
+  const cgHunks = (cgPreviewJson?.groupedPreviewHunks ?? []).flatMap((g) => g.hunks ?? []);
+  assert(cgPreviewJson?.totalMatches > 0, "capture-group preview finds matches", JSON.stringify(cgPreviewJson ?? null).slice(0, 200));
+  assert(
+    cgHunks.some((h) => (h.replacementText ?? "").includes("conv.AssignmentState.HandledBy")) && cgHunks.every((h) => !(h.replacementText ?? "").includes("$1")),
+    "preview replacementText has $1 expanded, not literal",
+    JSON.stringify(cgHunks).slice(0, 300)
+  );
+  if (cgPreviewJson?.previewId && cgPreviewJson?.approvalToken) {
+    const cgApply = await client.callTool({
+      name: "refactor_replace_apply",
+      arguments: { previewId: cgPreviewJson.previewId, approvalToken: cgPreviewJson.approvalToken, includeLowConfidence: true }
+    });
+    const cgApplyJson = readJson(cgApply);
+    const fileEAfter = readFileSync(fileEPath, "utf8");
+    assert(
+      fileEAfter.includes("Assert.Equal(ConversationHandledByValues.Ai, conv.AssignmentState.HandledBy);"),
+      "apply wrote substituted capture group to disk",
+      fileEAfter
+    );
+    assert(!fileEAfter.includes("$1"), "apply did NOT write literal $1 to disk", fileEAfter);
+    if (cgApplyJson?.rollbackId) {
+      await client.callTool({ name: "refactor_replace_rollback", arguments: { rollbackId: cgApplyJson.rollbackId } });
+      assert(readFileSync(fileEPath, "utf8") === fileEOriginal, "rollback restored File E after capture-group apply");
+    }
+  }
+
+  // ── 3.14 regex named-group apply substitutes $<name> on disk ──
+  console.log("\n  [3.14] regex named-group apply substitutes $<name> on disk...");
+  const ngPreview = await client.callTool({
+    name: "refactor_replace_preview",
+    arguments: {
+      repoId: testRepoId,
+      find: 'Equal\\("human", (?<recv>[^)]+\\.HandledBy)\\)',
+      replaceExpression: "Equal(ConversationHandledByValues.Human, $<recv>)",
+      findMode: "regex",
+      scope: { includePaths: ["src"] },
+      guards: {},
+      mode: "text",
+      ambiguityThresholdPercent: 100
+    }
+  });
+  const ngPreviewJson = readJson(ngPreview);
+  assert(ngPreviewJson?.totalMatches > 0, "named-group preview finds matches", JSON.stringify(ngPreviewJson ?? null).slice(0, 200));
+  if (ngPreviewJson?.previewId && ngPreviewJson?.approvalToken) {
+    const ngApply = await client.callTool({
+      name: "refactor_replace_apply",
+      arguments: { previewId: ngPreviewJson.previewId, approvalToken: ngPreviewJson.approvalToken, includeLowConfidence: true }
+    });
+    const ngApplyJson = readJson(ngApply);
+    const fileEAfter = readFileSync(fileEPath, "utf8");
+    assert(
+      fileEAfter.includes("Assert.Equal(ConversationHandledByValues.Human, result.Conversation.AssignmentState.HandledBy);"),
+      "apply wrote substituted named group to disk",
+      fileEAfter
+    );
+    assert(!fileEAfter.includes("$<recv>"), "apply did NOT write literal $<recv> to disk", fileEAfter);
+    if (ngApplyJson?.rollbackId) {
+      await client.callTool({ name: "refactor_replace_rollback", arguments: { rollbackId: ngApplyJson.rollbackId } });
+    }
+  }
+
+  // ── 3.15 backreference to a non-existent group is flagged and blocked at apply ──
+  console.log("\n  [3.15] unsubstituted backreference is flagged + blocked (no silent write)...");
+  const guardPreview = await client.callTool({
+    name: "refactor_replace_preview",
+    arguments: {
+      repoId: testRepoId,
+      find: 'Equal\\("guard", probe\\.HandledBy\\)',   // no capture group
+      replaceExpression: "Equal(X, $1)",               // $1 references a group that does not exist
+      findMode: "regex",
+      profile: "compact",
+      scope: { includePaths: ["src"] },
+      guards: {},
+      mode: "text",
+      ambiguityThresholdPercent: 100
+    }
+  });
+  const guardPreviewJson = readJson(guardPreview);
+  const guardHunks = (guardPreviewJson?.groupedPreviewHunks ?? []).flatMap((g) => g.hunks ?? []);
+  assert(guardPreviewJson?.totalMatches > 0, "guard preview finds the match", JSON.stringify(guardPreviewJson ?? null).slice(0, 200));
+  assert(
+    guardPreviewJson?.diagnostics?.code === "PREVIEW_HAS_UNSUBSTITUTED_BACKREFERENCE",
+    "preview diagnostics flags unsubstituted backreference",
+    JSON.stringify(guardPreviewJson?.diagnostics ?? null).slice(0, 200)
+  );
+  assert(
+    guardHunks.some((h) => Array.isArray(h.riskFlags) && h.riskFlags.includes("unsubstituted_backreference")),
+    "hunk carries unsubstituted_backreference risk flag",
+    JSON.stringify(guardHunks).slice(0, 300)
+  );
+  if (guardPreviewJson?.previewId && guardPreviewJson?.approvalToken) {
+    const guardApply = await client.callTool({
+      name: "refactor_replace_apply",
+      arguments: { previewId: guardPreviewJson.previewId, approvalToken: guardPreviewJson.approvalToken, includeLowConfidence: true }
+    });
+    const guardApplyJson = readJson(guardApply);
+    assert(guardApplyJson?.appliedFiles?.length === 0, "blocked backreference apply writes nothing");
+    const guardSkipped = guardApplyJson?.skippedReplacements ?? [];
+    assert(
+      guardSkipped.some((x) => x.reason === "RISK_FLAG_BLOCKED"),
+      "blocked backreference apply reports RISK_FLAG_BLOCKED",
+      JSON.stringify(guardSkipped).slice(0, 200)
+    );
+    assert(readFileSync(fileEPath, "utf8") === fileEOriginal, "File E unchanged after blocked backreference apply");
+  }
+
+  // ── 3.16 overlapping previews → second apply reports FILE_CHANGED_BY_CONCURRENT_APPLY (PR2) ──
+  console.log("\n  [3.16] overlapping previews → concurrent-apply diagnostic...");
+  const mkConcurrentPreview = () => client.callTool({
+    name: "refactor_replace_preview",
+    arguments: {
+      repoId: testRepoId,
+      find: "MARKER_ONE",
+      replaceExpression: "MARKER_TWO",
+      scope: { includePaths: ["src"] },
+      guards: {},
+      mode: "text",
+      ambiguityThresholdPercent: 100
+    }
+  });
+  // Both previews captured against the original file content.
+  const concPreview1Json = readJson(await mkConcurrentPreview());
+  const concPreview2Json = readJson(await mkConcurrentPreview());
+  assert(concPreview1Json?.previewId && concPreview2Json?.previewId, "two overlapping previews created");
+
+  if (concPreview1Json?.approvalToken && concPreview2Json?.approvalToken) {
+    const concApply1 = readJson(await client.callTool({
+      name: "refactor_replace_apply",
+      arguments: { previewId: concPreview1Json.previewId, approvalToken: concPreview1Json.approvalToken, includeLowConfidence: true }
+    }));
+    assert(concApply1?.appliedFiles?.length === 1, "first concurrent apply succeeds", JSON.stringify(concApply1?.skippedReplacements ?? []).slice(0, 200));
+
+    const concApply2 = readJson(await client.callTool({
+      name: "refactor_replace_apply",
+      arguments: { previewId: concPreview2Json.previewId, approvalToken: concPreview2Json.approvalToken, includeLowConfidence: true }
+    }));
+    const conc2Skipped = concApply2?.skippedReplacements ?? [];
+    assert(
+      conc2Skipped.some((x) => x.reason === "FILE_CHANGED_BY_CONCURRENT_APPLY"),
+      "second apply reports FILE_CHANGED_BY_CONCURRENT_APPLY (not bare FILE_CHANGED_AFTER_PREVIEW)",
+      JSON.stringify(conc2Skipped).slice(0, 200)
+    );
+    assert(concApply2?.appliedFiles?.length === 0, "second concurrent apply writes nothing");
+  }
+
+  // ── 3.17 optional capture group that did not participate is NOT flagged (substitutes empty) ──
+  console.log("\n  [3.17] non-participating optional group substitutes empty, not blocked...");
+  const optPreview = await client.callTool({
+    name: "refactor_replace_preview",
+    arguments: {
+      repoId: testRepoId,
+      // (?<pre>obsolete\.)? is an OPTIONAL group that won't match here; (probe\.HandledBy) is group 2.
+      find: 'Equal\\("opt", (?<pre>obsolete\\.)?(probe\\.HandledBy)\\)',
+      replaceExpression: "Equal(ConversationHandledByValues.Opt, $<pre>$2)",
+      findMode: "regex",
+      profile: "compact",
+      scope: { includePaths: ["src"] },
+      guards: {},
+      mode: "text",
+      ambiguityThresholdPercent: 100
+    }
+  });
+  const optPreviewJson = readJson(optPreview);
+  const optHunks = (optPreviewJson?.groupedPreviewHunks ?? []).flatMap((g) => g.hunks ?? []);
+  assert(optPreviewJson?.totalMatches > 0, "optional-group preview finds the match", JSON.stringify(optPreviewJson ?? null).slice(0, 200));
+  assert(
+    optPreviewJson?.diagnostics?.code !== "PREVIEW_HAS_UNSUBSTITUTED_BACKREFERENCE",
+    "non-participating optional group is NOT flagged as unsubstituted backreference",
+    JSON.stringify(optPreviewJson?.diagnostics ?? null).slice(0, 200)
+  );
+  assert(
+    optHunks.every((h) => !(Array.isArray(h.riskFlags) && h.riskFlags.includes("unsubstituted_backreference"))),
+    "optional-group hunk carries no unsubstituted_backreference flag",
+    JSON.stringify(optHunks).slice(0, 300)
+  );
+  if (optPreviewJson?.previewId && optPreviewJson?.approvalToken) {
+    const optApply = await client.callTool({
+      name: "refactor_replace_apply",
+      arguments: { previewId: optPreviewJson.previewId, approvalToken: optPreviewJson.approvalToken, includeLowConfidence: true }
+    });
+    const optApplyJson = readJson(optApply);
+    const fileFAfter = readFileSync(fileFPath, "utf8");
+    assert(
+      fileFAfter.includes("Assert.Equal(ConversationHandledByValues.Opt, probe.HandledBy);"),
+      "apply substituted empty optional group + group 2 to disk",
+      fileFAfter
+    );
+    if (optApplyJson?.rollbackId) {
+      await client.callTool({ name: "refactor_replace_rollback", arguments: { rollbackId: optApplyJson.rollbackId } });
     }
   }
 

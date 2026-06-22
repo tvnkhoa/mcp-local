@@ -161,8 +161,10 @@ import {
   handleRefactorReplaceApply,
   handleRefactorReplaceRollback,
   handleRefactorSymbolMigration,
+  handleChangeValueRepresentation,
   handleTraceExecutionFlow
 } from "./handlers/refactorHandler.js";
+import { handleGetPersistenceMapping, handleGetValueContractImpact } from "./handlers/persistenceHandler.js";
 
 const dbPath = process.env.CODEBASE_INDEX_DB_PATH ?? "./codebase-index.db";
 const allowedRoots = parseAllowedRoots(process.env.CODEBASE_INDEX_ALLOWED_ROOTS);
@@ -243,6 +245,9 @@ const refactorReplacePreviewSchema = schemas.refactorReplacePreviewSchema;
 const refactorReplaceApplySchema = schemas.refactorReplaceApplySchema;
 const refactorReplaceRollbackSchema = schemas.refactorReplaceRollbackSchema;
 const refactorSymbolMigrationSchema = schemas.refactorSymbolMigrationSchema;
+const changeValueRepresentationSchema = schemas.changeValueRepresentationSchema;
+const getPersistenceMappingSchema = schemas.getPersistenceMappingSchema;
+const getValueContractImpactSchema = schemas.getValueContractImpactSchema;
 
 assertNoLlmRuntimePolicy(LLM_ENABLED);
 assertRefactorApprovalPolicy(REFACTOR_STRICT_APPROVAL, REFACTOR_APPROVAL_SECRET);
@@ -905,7 +910,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: "refactor_replace_preview",
-        description: "Preview bulk replacements with scope and type-ownership guards. findMode='literal' (default) matches `find` as plain text; findMode='regex' treats `find` as a regular expression and supports capture-group substitution ($1, $&) in `replaceExpression` — ideal for signature/param-pattern edits in one pass. profile='nano' returns only match count + affected files (fastest blast-radius check); 'compact' omits before/after text; 'standard' (default) returns full hunk content.",
+        description: "Preview bulk replacements with scope and type-ownership guards. findMode='literal' (default) matches `find` as plain text; findMode='regex' treats `find` as a regular expression and substitutes capture-group backreferences in `replaceExpression` — numbered ($1..$99), whole-match ($&), named ($<name> or ${name}), and a literal `$` via $$ — ideal for context-preserving bulk edits in one pass. A backreference to a group that did not match is flagged `unsubstituted_backreference` and blocked at apply (it is never silently written). profile='nano' returns only match count + affected files (fastest blast-radius check); 'compact' omits before/after text; 'standard' (default) returns full hunk content.",
         inputSchema: {
           type: "object",
           additionalProperties: false,
@@ -1034,6 +1039,60 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             },
             scopePaths: { type: "array", items: { type: "string" }, maxItems: 200 },
             dryRun: { type: "boolean" }
+          }
+        }
+      },
+      {
+        name: "change_value_representation",
+        description: "Promote a property's literal values to enum members (e.g. HandledBy = \"ai\" → ConversationHandledBy.Ai) across assignments, object initializers, ==/!= comparisons, and assertion arguments. Sites are located via the C# AST (no user-authored regex/backreference) and rewritten through the preview/apply/rollback engine — dry-run by default. Cross-type sites (a same-named property on a different owner type) are skipped; sites where the owner type can't be proven are flagged ambiguous_target.",
+        inputSchema: {
+          type: "object",
+          additionalProperties: false,
+          required: ["repoId", "property", "requiredOwnerType", "valueMap"],
+          properties: {
+            repoId: { type: "string" },
+            property: { type: "string", description: "Property identifier whose literals are promoted, e.g. \"HandledBy\"." },
+            requiredOwnerType: { type: "string", description: "Owner type scoping the rewrite, e.g. \"Conversation\"." },
+            valueMap: {
+              type: "object",
+              minProperties: 1,
+              additionalProperties: { type: "string" },
+              description: "Literal value (unquoted) → replacement expression, e.g. { \"ai\": \"ConversationHandledBy.Ai\" }."
+            },
+            includeComparisons: { type: "boolean", description: "Also rewrite ==/!= and assertion-argument sites (default true); false = assignments/initializers only." },
+            scopePaths: { type: "array", items: { type: "string" }, maxItems: 200 },
+            dryRun: { type: "boolean" },
+            profile: { type: "string", enum: ["nano", "compact", "standard", "verbose"] }
+          }
+        }
+      },
+      {
+        name: "get_persistence_mapping",
+        description: "Return the EF persistence mapping for a property — column name, value converter, max length, CHECK constraints — plus DB_TRANSLATED_PROJECTION warnings when a value-converted property is used inside an EF-translated .Select()/.Where() with no preceding materialization (.ToListAsync()/.AsEnumerable()). Surfaces the persistence-layer facts a symbol graph can't see (rule/AST-based, no LLM).",
+        inputSchema: {
+          type: "object",
+          additionalProperties: false,
+          required: ["repoId", "property"],
+          properties: {
+            repoId: { type: "string" },
+            property: { type: "string", description: "Property name, e.g. \"HandledBy\"." },
+            ownerType: { type: "string", description: "Optional owner/entity type to scope the mapping, e.g. \"Conversation\"." },
+            profile: { type: "string", enum: ["nano", "compact", "standard", "verbose"] }
+          }
+        }
+      },
+      {
+        name: "get_value_contract_impact",
+        description: "Trace a stored/wire VALUE (e.g. a status string \"resolved\" or magic code) across ALL registered repos by fanning search_literals, grouping exact-value hits by repo and classifying each as producer (assigned/written) or consumer (compared/read) where inferable. This is the data-contract gate for a storage-format migration — what get_cross_repo_impact (symbol-oriented) can't answer. Rule-based, no LLM.",
+        inputSchema: {
+          type: "object",
+          additionalProperties: false,
+          required: ["value"],
+          properties: {
+            value: { type: "string", description: "The exact stored/wire literal to trace, e.g. \"resolved\"." },
+            column: { type: "string", description: "Optional DB column/field name to sharpen producer/consumer classification, e.g. \"status\"." },
+            repoIds: { type: "array", items: { type: "string" }, maxItems: 50, description: "Optional subset of registered repoIds; defaults to all." },
+            profile: { type: "string", enum: ["nano", "compact", "standard", "verbose"] }
           }
         }
       },
@@ -1231,7 +1290,21 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
       case "refactor_symbol_migration": {
         const hArgs = refactorSymbolMigrationSchema.parse(request.params.arguments ?? {});
-        return handleRefactorSymbolMigration(hArgs, ctx);
+        // await so a rejection (e.g. INVALID_INITIALIZER_REWRITE policy error) is caught by the
+        // try/catch below and mapped to an isError result, not surfaced as a raw JSON-RPC error.
+        return await handleRefactorSymbolMigration(hArgs, ctx);
+      }
+      case "change_value_representation": {
+        const hArgs = changeValueRepresentationSchema.parse(request.params.arguments ?? {});
+        return await handleChangeValueRepresentation(hArgs, ctx);
+      }
+      case "get_persistence_mapping": {
+        const hArgs = getPersistenceMappingSchema.parse(request.params.arguments ?? {});
+        return handleGetPersistenceMapping(hArgs, ctx);
+      }
+      case "get_value_contract_impact": {
+        const hArgs = getValueContractImpactSchema.parse(request.params.arguments ?? {});
+        return handleGetValueContractImpact(hArgs, ctx);
       }
       case "trace_execution_flow": {
         const hArgs = traceExecutionFlowSchema.parse(request.params.arguments ?? {});

@@ -581,3 +581,35 @@ export const refactorSymbolMigrationSchema = z
     dryRun: z.boolean().default(true)
   })
   .strict();
+
+export const changeValueRepresentationSchema = z
+  .object({
+    repoId: z.string().min(1).max(200),
+    property: z.string().min(1).max(200),
+    requiredOwnerType: z.string().min(1).max(200),
+    valueMap: z.record(z.string().min(1).max(500), z.string().min(1).max(500)),
+    includeComparisons: z.boolean().default(true),
+    scopePaths: z.array(z.string().min(1).max(500)).max(200).default([]),
+    dryRun: z.boolean().default(true),
+    profile: responseProfileSchema.default("standard")
+  })
+  .strict()
+  .refine((v) => Object.keys(v.valueMap).length >= 1, { message: "valueMap must have at least one entry", path: ["valueMap"] });
+
+export const getPersistenceMappingSchema = z
+  .object({
+    repoId: z.string().min(1).max(200),
+    property: z.string().min(1).max(200),
+    ownerType: z.string().min(1).max(200).optional(),
+    profile: responseProfileSchema.default("compact")
+  })
+  .strict();
+
+export const getValueContractImpactSchema = z
+  .object({
+    value: z.string().min(1).max(500),
+    column: z.string().min(1).max(200).optional(),
+    repoIds: z.array(z.string().min(1).max(200)).max(50).optional(),
+    profile: responseProfileSchema.default("compact")
+  })
+  .strict();

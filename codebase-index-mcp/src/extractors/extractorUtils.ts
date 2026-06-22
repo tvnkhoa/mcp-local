@@ -468,7 +468,10 @@ export function dedupeEdges(edges: EdgeRecord[]): EdgeRecord[] {
   const output: EdgeRecord[] = [];
 
   for (const edge of edges) {
-    const key = `${edge.repoId}:${edge.fromId}:${edge.toId}:${edge.type}`;
+    // Distinct write-sites with distinct RHS values (ENH-029-B) must survive dedup so the
+    // value-domain (e.g. "ai" vs "human") is preserved. assignedExpression is undefined for
+    // every non-write edge, so this is a no-op for all existing edge types.
+    const key = `${edge.repoId}:${edge.fromId}:${edge.toId}:${edge.type}:${edge.assignedExpression ?? ""}`;
     if (seen.has(key)) {
       continue;
     }
@@ -788,7 +791,10 @@ export function emitPropertyAccessEdge(
   fromSymbolId: string,
   propertyToken: string,
   isWrite: boolean,
-  edges: EdgeRecord[]
+  edges: EdgeRecord[],
+  // ENH-029-B: RHS source text for write sites (assigned literal/expression). Attached only to
+  // PROPERTY_WRITE edges; ignored for reads.
+  assignedExpression?: string
 ): void {
   if (!propertyToken || propertyToken.length < 2) {
     return;
@@ -804,7 +810,8 @@ export function emitPropertyAccessEdge(
     repoId: input.repoId,
     fromId: fromSymbolId,
     toId: `property:${propertyToken}`,
-    type: isWrite ? "PROPERTY_WRITE" : "PROPERTY_REF"
+    type: isWrite ? "PROPERTY_WRITE" : "PROPERTY_REF",
+    ...(isWrite && assignedExpression ? { assignedExpression } : {})
   });
 }
 

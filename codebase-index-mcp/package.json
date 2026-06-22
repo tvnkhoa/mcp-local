@@ -28,6 +28,12 @@
     "verify:enhancements": "node scripts/verify-enhancements.mjs",
     "test:profile-responses": "node scripts/test-profile-responses.mjs",
     "test:refactor-profiles": "node scripts/test-refactor-preview-profiles.mjs",
+    "test:refactor-engine": "node scripts/test-refactor-engine.mjs",
+    "test:link-tests-boost": "node scripts/test-link-tests-boost.mjs",
+    "test:field-access-rhs": "node scripts/test-field-access-rhs.mjs",
+    "test:change-value-representation": "node scripts/test-change-value-representation.mjs",
+    "test:persistence-mapping": "node scripts/test-persistence-mapping.mjs",
+    "test:value-contract-impact": "node scripts/test-value-contract-impact.mjs",
     "benchmark:plan": "node scripts/benchmark-plan-mode.mjs",
     "benchmark:plan:check": "node scripts/benchmark-plan-mode.mjs"
   },

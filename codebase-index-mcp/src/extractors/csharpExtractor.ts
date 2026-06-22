@@ -354,7 +354,9 @@ function extractPropertyAccessEdges(
 
     // Determine if this is a write or read
     const isWrite = isPropertyWrite(node);
-    
+    // ENH-029-B: capture the assigned RHS so find_field_accesses can report the value-domain.
+    const assignedExpression = isWrite ? getAssignedExpressionText(node) : undefined;
+
     // Extract the full member access chain for nested properties
     // Example: conv.IdentityState.CrmCustomerId
     // Emit edges for:
@@ -364,9 +366,9 @@ function extractPropertyAccessEdges(
     const memberChain = extractMemberAccessChain(node);
     const scopeTypeMap = collectCSharpScopeTypeMap(node, /* includeDiAliases */ false);
     const fromId = findEnclosingCSharpSymbolId(node, input) ?? moduleSymbolId;
-    
+
     // Emit edges for each level of the chain
-    emitNestedPropertyEdges(input, fromId, node, memberChain, scopeTypeMap, isWrite, edges);
+    emitNestedPropertyEdges(input, fromId, node, memberChain, scopeTypeMap, isWrite, edges, assignedExpression);
   }
 
   // Extract property assignments from object initializers
@@ -386,11 +388,41 @@ function extractPropertyAccessEdges(
 
       const propertyToken = `${typeName}.${propertyName}`;
       const fromId = findEnclosingCSharpSymbolId(initNode, input) ?? moduleSymbolId;
-      
-      // Object initializer assignments are writes
-      emitPropertyAccessEdge(input, fromId, propertyToken, true, edges);
+
+      // Object initializer assignments are writes; capture the RHS (ENH-029-B).
+      const rightNode = assignment.childForFieldName("right");
+      const assignedExpression = rightNode ? truncateAssignedExpression(rightNode.text) : undefined;
+      emitPropertyAccessEdge(input, fromId, propertyToken, true, edges, assignedExpression);
     }
   }
+}
+
+/** Max stored length for a captured RHS — keeps the edge row compact for long initializers. */
+const MAX_ASSIGNED_EXPRESSION_LEN = 200;
+
+function truncateAssignedExpression(text: string): string | undefined {
+  const trimmed = text.replace(/\s+/g, " ").trim();
+  if (!trimmed) return undefined;
+  return trimmed.length > MAX_ASSIGNED_EXPRESSION_LEN ? `${trimmed.slice(0, MAX_ASSIGNED_EXPRESSION_LEN)}…` : trimmed;
+}
+
+/**
+ * RHS source text of a `member.prop = <expr>` (or compound-assignment) write, for ENH-029-B.
+ * Returns undefined when the node is not the left side of an assignment.
+ */
+function getAssignedExpressionText(node: Parser.SyntaxNode): string | undefined {
+  const parent = node.parent;
+  if (!parent) return undefined;
+  const ASSIGN_TYPES = new Set([
+    "assignment_expression",
+    "add_assignment_expression",
+    "subtract_assignment_expression",
+    "multiply_assignment_expression",
+    "divide_assignment_expression"
+  ]);
+  if (!ASSIGN_TYPES.has(parent.type)) return undefined;
+  const right = parent.childForFieldName("right");
+  return right ? truncateAssignedExpression(right.text) : undefined;
 }
 
 /**
@@ -435,7 +467,8 @@ function emitNestedPropertyEdges(
   memberChain: string[],
   scopeTypeMap: Map<string, string>,
   isWrite: boolean,
-  edges: EdgeRecord[]
+  edges: EdgeRecord[],
+  assignedExpression?: string
 ): void {
   if (memberChain.length === 0) return;
 
@@ -451,7 +484,7 @@ function emitNestedPropertyEdges(
     }
 
     const propertyToken = declaringType ? `${declaringType}.${property}` : property;
-    emitPropertyAccessEdge(input, fromId, propertyToken, isWrite, edges);
+    emitPropertyAccessEdge(input, fromId, propertyToken, isWrite, edges, assignedExpression);
     return;
   }
 
@@ -470,24 +503,26 @@ function emitNestedPropertyEdges(
         baseType = scopeTypeMap.get(left);
       }
 
+      const writeHere = i === memberChain.length - 2 && isWrite;
       if (baseType) {
         // Emit: BaseType.Property
-        emitPropertyAccessEdge(input, fromId, `${baseType}.${right}`, i === memberChain.length - 2 && isWrite, edges);
+        emitPropertyAccessEdge(input, fromId, `${baseType}.${right}`, writeHere, edges, writeHere ? assignedExpression : undefined);
       } else {
         // Fallback: emit unqualified
-        emitPropertyAccessEdge(input, fromId, right, i === memberChain.length - 2 && isWrite, edges);
+        emitPropertyAccessEdge(input, fromId, right, writeHere, edges, writeHere ? assignedExpression : undefined);
       }
     } else {
       // Subsequent levels: emit as Type.Property pairs
       // Example: IdentityState.CrmCustomerId
-      emitPropertyAccessEdge(input, fromId, `${left}.${right}`, i === memberChain.length - 2 && isWrite, edges);
+      const writeHere = i === memberChain.length - 2 && isWrite;
+      emitPropertyAccessEdge(input, fromId, `${left}.${right}`, writeHere, edges, writeHere ? assignedExpression : undefined);
     }
   }
 
   // Also emit the final property name as fallback
   const finalProperty = memberChain[memberChain.length - 1];
   if (finalProperty) {
-    emitPropertyAccessEdge(input, fromId, finalProperty, isWrite, edges);
+    emitPropertyAccessEdge(input, fromId, finalProperty, isWrite, edges, isWrite ? assignedExpression : undefined);
   }
 }
 
