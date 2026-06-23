@@ -3,12 +3,17 @@
  * members across assignment, object-initializer, ==/!= comparison, and assertion-argument sites,
  * via the C# AST (no user-authored backreference — the MCP-ISSUE-029 failure mode). Cross-type
  * sites (a same-named property on a different owner type) must be skipped, not rewritten.
+ *
+ * The source file is padded past 32KB so the AST parse path uses the bufferSize fix. node-tree-sitter
+ * throws "Invalid argument" on any source >32768 bytes parsed without an explicit bufferSize, so without
+ * the fix every rewrite assertion below fails (the scan never gets past parsing the file).
  */
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { mkdtempSync, writeFileSync, mkdirSync, readFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
+import { bufferOverflowPad } from "./_fixtures.mjs";
 
 let passed = 0, failed = 0;
 function assert(cond, label, detail = "") {
@@ -17,6 +22,9 @@ function assert(cond, label, detail = "") {
 }
 const txt = (r) => Array.isArray(r?.content) ? (r.content.find((x) => x.type === "text")?.text ?? "") : "";
 const js = (r) => { try { return JSON.parse(txt(r)); } catch { return null; } };
+
+// >32KB pad that exercises the bufferSize fix without tripping the minified-file filter (see helper).
+const PAD = bufferOverflowPad();
 
 const tmpDir = mkdtempSync(join(tmpdir(), "cvr-test-"));
 const repoId = `cvr-${Date.now()}`;
@@ -45,7 +53,7 @@ public class Handler
         Assert.Equal("human", conv.HandledBy);
     }
 }
-`, "utf8");
+${PAD}`, "utf8");
 
 const transport = new StdioClientTransport({
   command: "node",
@@ -69,7 +77,8 @@ try {
   }));
   assert(preview?.dryRun === true, "preview is dry-run", JSON.stringify(preview)?.slice(0, 300));
   // 4 Conversation sites: assignment, object-init, comparison, argument. The Other.HandledBy = "ai" is cross-type → skipped.
-  assert(preview?.totalMatches === 4, "rewrites exactly the 4 Conversation sites (skips cross-type Other)", `totalMatches=${preview?.totalMatches}`);
+  // This also proves the >32KB file parsed without "Invalid argument" (bufferSize fix).
+  assert(preview?.totalMatches === 4, "rewrites exactly the 4 Conversation sites in a >32KB file (bufferSize fix; skips cross-type Other)", `totalMatches=${preview?.totalMatches}`);
   assert(preview?.ambiguousOccurrences === 0, "all matched sites have a proven owner type", `ambiguous=${preview?.ambiguousOccurrences}`);
 
   // 2. Apply.
@@ -80,11 +89,11 @@ try {
   assert(applied?.applyId && applied?.applyStatus, "apply returns applyId + status", JSON.stringify(applied)?.slice(0, 300));
 
   const after = readFileSync(sourcePath, "utf8");
-  assert(after.includes('conv.HandledBy = ConversationHandledBy.Ai;'), "assignment literal rewritten", after);
-  assert(after.includes('new Conversation { HandledBy = ConversationHandledBy.Human }'), "object-initializer literal rewritten", after);
-  assert(after.includes('conv.HandledBy == ConversationHandledBy.Ai'), "comparison literal rewritten", after);
-  assert(after.includes('Assert.Equal(ConversationHandledBy.Human, conv.HandledBy)'), "assertion-argument literal rewritten", after);
-  assert(after.includes('other.HandledBy = "ai";'), "cross-type Other.HandledBy left untouched", after);
+  assert(after.includes('conv.HandledBy = ConversationHandledBy.Ai;'), "assignment literal rewritten", after.slice(0, 600));
+  assert(after.includes('new Conversation { HandledBy = ConversationHandledBy.Human }'), "object-initializer literal rewritten", after.slice(0, 600));
+  assert(after.includes('conv.HandledBy == ConversationHandledBy.Ai'), "comparison literal rewritten", after.slice(0, 600));
+  assert(after.includes('Assert.Equal(ConversationHandledBy.Human, conv.HandledBy)'), "assertion-argument literal rewritten", after.slice(0, 600));
+  assert(after.includes('other.HandledBy = "ai";'), "cross-type Other.HandledBy left untouched", after.slice(0, 600));
 
   // 3. Rollback restores the original source.
   const rollback = js(await client.callTool({

@@ -1,9 +1,9 @@
 import fs from "node:fs";
 
 import Parser from "tree-sitter";
-import CSharp from "tree-sitter-c-sharp";
 
 import type { GraphStore } from "./graphStore.js";
+import { parseCSharpOnDemand } from "./treeSitterExtractor.js";
 import {
   normalizeRelativePath,
   assertSafeRepoFilePath,
@@ -58,15 +58,6 @@ const MATERIALIZERS = new Set([
 ]);
 const PROJECTION_OPERATORS = new Set(["Select", "Where"]);
 const MAX_FILES_SCANNED = 800;
-
-let cachedParser: Parser | null = null;
-function getParser(): Parser {
-  if (!cachedParser) {
-    cachedParser = new Parser();
-    cachedParser.setLanguage(CSharp);
-  }
-  return cachedParser;
-}
 
 function isEfConfigCandidate(filePath: string): boolean {
   const p = filePath.toLowerCase();
@@ -138,11 +129,12 @@ function buildClassOwnerMap(root: Parser.SyntaxNode): Map<number, string> {
 
 /** Extract per-property EF mappings + CHECK constraints from one parsed config file. */
 function extractMappingsFromFile(content: string, filePath: string): { mappings: EfPropertyMapping[]; checks: EfCheckConstraint[] } {
-  const tree = getParser().parse(content);
-  const root = tree.rootNode;
-  const classOwnerMap = buildClassOwnerMap(root);
   const mappings: EfPropertyMapping[] = [];
   const checks: EfCheckConstraint[] = [];
+  const tree = parseCSharpOnDemand(content, filePath);
+  if (!tree) return { mappings, checks }; // too large / parse timeout → skip this file
+  const root = tree.rootNode;
+  const classOwnerMap = buildClassOwnerMap(root);
 
   for (const invocation of root.descendantsOfType("invocation_expression")) {
     if (invocationMethodName(invocation) !== "Property") continue;
@@ -262,8 +254,9 @@ function receiverIsMaterialized(invocation: Parser.SyntaxNode): boolean {
 
 /** Find EF-translated `.Select()`/`.Where()` projections that reference `property` without prior materialization. */
 function findProjectionTrapsInFile(content: string, filePath: string, property: string): EfProjectionWarning[] {
-  const tree = getParser().parse(content);
   const warnings: EfProjectionWarning[] = [];
+  const tree = parseCSharpOnDemand(content, filePath);
+  if (!tree) return warnings; // too large / parse timeout → skip this file
 
   for (const invocation of tree.rootNode.descendantsOfType("invocation_expression")) {
     const method = invocationMethodName(invocation);

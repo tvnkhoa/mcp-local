@@ -1,9 +1,9 @@
 import fs from "node:fs";
 
 import Parser from "tree-sitter";
-import CSharp from "tree-sitter-c-sharp";
 
 import type { GraphStore } from "./graphStore.js";
+import { parseCSharpOnDemand } from "./treeSitterExtractor.js";
 import type { PreviewCandidateHunk } from "./refactorTypes.js";
 import type { RefactorRiskFlag } from "./types.js";
 import {
@@ -44,15 +44,6 @@ const CSHARP_STRING_NODE_TYPES = new Set(["string_literal", "verbatim_string_lit
 const COMPARISON_OPERATORS = new Set(["==", "!="]);
 const PER_FILE_MATCH_CAP = 2000;
 const GLOBAL_MATCH_CAP = 5000;
-
-let cachedParser: Parser | null = null;
-function getCSharpParser(): Parser {
-  if (!cachedParser) {
-    cachedParser = new Parser();
-    cachedParser.setLanguage(CSharp);
-  }
-  return cachedParser;
-}
 
 /** Unquoted inner text of a regular/verbatim C# string literal, or null if not a plain string literal. */
 function stringLiteralValue(node: Parser.SyntaxNode): string | null {
@@ -247,7 +238,6 @@ export function buildValueRepresentationPreview(
 ): { hunks: PreviewCandidateHunk[]; affectedFiles: string[] } {
   const includeComparisons = input.includeComparisons !== false;
   const includePaths = (scopePaths ?? []).map((x) => normalizeRelativePath(x));
-  const parser = getCSharpParser();
 
   const selectedFiles = store
     .listIndexedFiles(repoId)
@@ -267,7 +257,8 @@ export function buildValueRepresentationPreview(
 
     const content = fs.readFileSync(safeAbsolute, "utf8");
     const fileHashBefore = sha256(content);
-    const tree = parser.parse(content);
+    const tree = parseCSharpOnDemand(content, filePath);
+    if (!tree) continue; // too large / parse timeout → skip this file
     const generated = isGeneratedFilePath(filePath);
 
     // Memoize the scope type map per enclosing method node — reused across literals in that method.

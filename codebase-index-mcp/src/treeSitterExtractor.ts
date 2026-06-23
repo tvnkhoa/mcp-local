@@ -191,6 +191,42 @@ function getTreeSitterBufferSize(sourceBytes: number): number {
   return Math.min(TREE_SITTER_MAX_BUFFER, Math.max(TREE_SITTER_MIN_BUFFER, adaptive));
 }
 
+/**
+ * Parse C# source on demand (outside the index pipeline) with the same four protections the
+ * pipeline applies inline: the large-file guard (`> TREE_SITTER_MAX_BUFFER`), an adaptive
+ * `bufferSize` (the fix for the 32 KB native-buffer "Invalid argument" crash, MCP-ISSUE-030),
+ * a parse timeout, and a null-tree (timeout) check. Reuses the shared cached C# parser.
+ *
+ * Returns `null` when the file is unparseable for any of those reasons (too large, or the parse
+ * timed out) so callers can skip that one file instead of aborting — or hanging — the whole tool
+ * call. Every on-demand parse site MUST route through this helper rather than calling
+ * `parser.parse(...)` directly, so a future lane can't silently regress on any of the four.
+ */
+export function parseCSharpOnDemand(content: string, filePath: string): Parser.Tree | null {
+  const sourceBytes = Buffer.byteLength(content, "utf8");
+  if (sourceBytes > TREE_SITTER_MAX_BUFFER) {
+    return null;
+  }
+  const parser = getOrCreateParserForLanguage("csharp");
+  if (!parser) {
+    return null;
+  }
+  parser.setTimeoutMicros(PARSE_TIMEOUT_MS * 1000);
+  let tree: Parser.Tree | null;
+  try {
+    tree = parser.parse(content, undefined, { bufferSize: getTreeSitterBufferSize(sourceBytes) });
+  } finally {
+    parser.setTimeoutMicros(0);
+  }
+  if (!tree) {
+    // Parser timed out — reset so the shared cached parser is clean for the next file, then
+    // signal "skip" rather than propagate (read/preview tools degrade per-file, never abort).
+    parser.reset();
+    return null;
+  }
+  return tree;
+}
+
 function optionalNumberFromEnv(name: string): number | undefined {
   const raw = process.env[name];
   if (!raw) {
