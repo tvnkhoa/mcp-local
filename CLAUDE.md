@@ -7,7 +7,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 Two independent MCP servers — **not** a monorepo with shared packages. Each has its own `package.json`, `tsconfig.json`, and `dist/`. Both use TypeScript 5.7+ with ESM (`"type": "module"`) and `@modelcontextprotocol/sdk`.
 
 - `codebase-index-mcp/` — Code graph indexing and analysis server. Most development work happens here.
-- `postgres-mcp/` — Read-only PostgreSQL query server with SQL guardrails.
+- `postgres-mcp/` — PostgreSQL MCP server. Read-only by default (SQL guardrails); optional multi-environment access, reviewed/confirmed data writes, and EF Core migration tooling, each gated behind explicit env flags.
 
 ## Commands
 
@@ -81,7 +81,7 @@ src/index.ts           # MCP tool dispatch
 
 **Path allowlist (codebase-index-mcp):** `CODEBASE_INDEX_ALLOWED_ROOTS` (comma-separated absolute paths) is the only required env var. Always use the exact `repoPath` from `list_repositories` output — do not change drive-letter casing or slash style, as mismatches cause allowlist rejection.
 
-**postgres-mcp read-only:** Only `SELECT` and `WITH ... SELECT` are permitted. `CH_DB_CONNECTION` env var is required. No secrets in code.
+**postgres-mcp default-safe:** Read path permits only `SELECT` and `WITH ... SELECT`. A connection source is required (`CH_DB_CONNECTION`, or `PG_ENV_*`, or `CH_APPSETTINGS_ROOTS`). Data writes are OFF unless `PG_WRITE_ENABLED=true` (preview→apply→rollback, HMAC-approved, mandatory WHERE); migrations OFF unless `PG_MIGRATION_ENABLED=true`. The approval token is signed/verified in-process, so `PG_WRITE_APPROVAL_SECRET` is auto-generated per process when unset (set it only to keep tokens valid across restarts). **`prod` is force read-only** regardless of config. No secrets in code.
 
 **Smoke test requires build:** `node scripts/smoke-test.mjs` runs `dist/index.js`, not source. Always `npm run build` first.
 

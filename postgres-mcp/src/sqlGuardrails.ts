@@ -34,7 +34,7 @@ export type GuardrailResult = {
 
 const SELECT_LIKE = /^\s*(with\b[\s\S]*?\bselect\b|select\b)/i;
 
-function stripStringsAndComments(sql: string): string {
+export function stripStringsAndComments(sql: string): string {
   let out = "";
   let i = 0;
 
@@ -90,7 +90,7 @@ function stripStringsAndComments(sql: string): string {
   return out;
 }
 
-function hasMultipleStatements(sql: string): boolean {
+export function hasMultipleStatements(sql: string): boolean {
   const cleaned = stripStringsAndComments(sql);
   const trimmed = cleaned.trim();
   if (trimmed.length === 0) {
