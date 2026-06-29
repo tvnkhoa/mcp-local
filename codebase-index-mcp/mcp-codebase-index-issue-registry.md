@@ -11,7 +11,9 @@ Workaround · Enhancement proposal. Filed here so the MCP server team can triage
 
 ## ISSUE-CR-001 — Package bridge resolves 0/257 (cross-repo provider linkage)
 
-- **Status:** open (workaround documented; root-cause investigation pending)
+- **Status:** fixed 2026-06-29 (`src/dotnetProjectParser.ts`) — provider bridge symbol now emitted for implicit PackageId. Consumer-side `edges`/`find_package_consumers` workaround remains valid as a fallback.
+- **Root cause (confirmed):** the provider-side `nuget-export` module symbol (signature `nuget:<id>`) was only emitted when the `.csproj` declared an explicit `<PackageId>`. Real provider projects (e.g. `SSNet.CommunicationHub.Messaging`) rarely set it — NuGet defaults `PackageId` to `AssemblyName`, then to the project file name — so no provider symbol existed for `resolveUnlinkedEdges` to bridge against, leaving `packageResolved: 0`.
+- **Fix:** `extractCsproj` now derives the contract id as `PackageId ?? AssemblyName ?? <project file name>`. Non-packable projects emit no bridge symbol — `isProjectPackable` detects `<IsPackable…>false`, `<IsTestProject>true`, and a `Microsoft.NET.Test.Sdk` reference (attribute-tolerant). Because the broadened emission raises the chance of two repos exporting the same `nuget:<id>`, `resolveUnlinkedEdges` no longer drops a colliding contract as `ambiguous_candidates`: for `nuget:`/`endpoint:` toIds it now resolves to the most complete provider repo (same `pickBestModule` heuristic as `resolveImportsCrossRepo`); genuine symbol-id collisions still stay ambiguous. Covered by `scripts/test-nuget-bridge.mjs` (implicit-PackageId, non-packable, and contract-collision-tiebreak scenarios).
 - **First observed:** 2026-06-29 (live `health_check` on `wec.communication-hub`)
 - **Scenario:** Cross-repo "who consumes the messaging contract" / provider-side symbol resolution.
 - **Tool/query attempted:**
@@ -32,8 +34,9 @@ Workaround · Enhancement proposal. Filed here so the MCP server team can triage
 
 ## ISSUE-CR-002 — `find_package_consumers` double-prefixes `nuget:`
 
-- **Status:** documented (usage gotcha; not a defect to fix on our side)
+- **Status:** fixed 2026-06-29 (`src/responseFormatter.ts`) — `toNugetContractId` is now idempotent.
 - **First observed:** 2026-06-29
 - **Scenario:** Passing a fully-qualified `nuget:<name>` to `find_package_consumers`.
-- **Expected vs actual:** Expected the tool to accept the contract id as-is. Actual: it re-prepends `nuget:`, producing `packageContractId: "nuget:nuget:<name>"` → `consumerCount: 0` (false negative).
-- **Workaround:** Always pass the **bare** package name; the tool adds the `nuget:` prefix. Captured in the param tables of all three docs.
+- **Expected vs actual:** Expected the tool to accept the contract id as-is. Actual: it re-prepended `nuget:`, producing `packageContractId: "nuget:nuget:<name>"` → `consumerCount: 0` (false negative).
+- **Fix:** `toNugetContractId` strips a leading `nuget:` prefix (any case/whitespace) before re-prefixing, so both a bare name and a fully-qualified id normalize to the same `nuget:<lowercase>` contract id. Covered by `scripts/test-nuget-bridge.mjs` (idempotency scenario).
+- **Note:** Passing the bare package name still works exactly as before; both forms are now accepted.

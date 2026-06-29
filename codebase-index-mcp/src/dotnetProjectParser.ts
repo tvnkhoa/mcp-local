@@ -28,6 +28,22 @@ function normalizeNugetContractId(value: string): string {
   return `nuget:${value.trim().toLowerCase()}`;
 }
 
+/**
+ * Whether a .csproj should emit a provider-side nuget-export bridge symbol.
+ * Returns false for projects that NuGet would never pack, so they don't add
+ * phantom provider symbols that collide with real package contract ids (ISSUE-CR-001).
+ * Detected without MSBuild evaluation, tolerant of tag attributes:
+ *   - <IsPackable ...>false</IsPackable>
+ *   - <IsTestProject ...>true</IsTestProject>
+ *   - a Microsoft.NET.Test.Sdk PackageReference (test SDK defaults IsPackable to false)
+ */
+function isProjectPackable(source: string): boolean {
+  if (/<IsPackable[^>]*>\s*false\s*<\/IsPackable>/i.test(source)) return false;
+  if (/<IsTestProject[^>]*>\s*true\s*<\/IsTestProject>/i.test(source)) return false;
+  if (/<PackageReference\s+Include="Microsoft\.NET\.Test\.Sdk"/i.test(source)) return false;
+  return true;
+}
+
 function extractTagValue(source: string, tagName: string): string | null {
   const re = new RegExp(`<${tagName}>([^<]+)</${tagName}>`, "i");
   const match = re.exec(source);
@@ -65,11 +81,22 @@ function extractCsproj(input: DotnetExtractInput): DotnetExtractResult {
     line: 1
   });
 
-  // Provider-side bridge symbol: when PackageId is declared, emit a synthetic
-  // module symbol tagged with signature=nuget:<package>. Cross-repo resolver
-  // can map consumer PackageReference contracts to this provider symbol.
-  const packageId = extractTagValue(input.source, "PackageId");
-  if (packageId) {
+  // Provider-side bridge symbol: emit a synthetic module symbol tagged with
+  // signature=nuget:<package> so the cross-repo resolver can map consumer
+  // PackageReference contracts to this provider symbol.
+  //
+  // PackageId is only set explicitly in a minority of .csproj files. NuGet falls
+  // back to AssemblyName, then to the project file name, when <PackageId> is absent
+  // (https://learn.microsoft.com/en-us/nuget/reference/msbuild-targets#pack-target).
+  // Mirroring that default is what makes the bridge resolve for real provider repos
+  // (e.g. SSNet.CommunicationHub.Messaging) that never declare <PackageId> (ISSUE-CR-001).
+  // Skips non-packable projects (test projects, IsPackable=false) so they don't emit a
+  // phantom provider symbol that collides with real package contract ids — see
+  // isProjectPackable.
+  if (isProjectPackable(input.source)) {
+    const packageId = extractTagValue(input.source, "PackageId")
+      ?? extractTagValue(input.source, "AssemblyName")
+      ?? projectName;
     const contractId = normalizeNugetContractId(packageId);
     symbols.push({
       repoId: input.repoId,

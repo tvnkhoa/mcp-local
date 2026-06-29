@@ -215,6 +215,24 @@ export function resolveUnlinkedEdges(db: Database.Database, repoId: string): Res
     `
   );
 
+  // Lazily-built per-repo symbol counts, used only to break ties when several provider
+  // repos export the same contract id. Broadened nuget-export emission (PackageId ??
+  // AssemblyName ?? project name, ISSUE-CR-001) makes such collisions more likely; rather
+  // than dropping the link as ambiguous, prefer the most complete provider repo — the same
+  // heuristic resolveImportsCrossRepo uses (pickBestModule). Only contract (nuget:/endpoint:)
+  // toIds get this treatment; genuine symbol-id collisions stay ambiguous.
+  let repoSymbolCounts: Map<string, number> | null = null;
+  const getRepoSymbolCounts = (): Map<string, number> => {
+    if (!repoSymbolCounts) {
+      repoSymbolCounts = new Map();
+      const rows = db
+        .prepare(`select repo_id as repoId, count(*) as cnt from symbols where repo_id != ? group by repo_id`)
+        .all(repoId) as { repoId: string; cnt: number }[];
+      for (const r of rows) repoSymbolCounts.set(r.repoId, r.cnt);
+    }
+    return repoSymbolCounts;
+  };
+
   const tx = db.transaction(() => {
     for (const row of unlinked) {
       stats.attempts += 1;
@@ -224,7 +242,16 @@ export function resolveUnlinkedEdges(db: Database.Database, repoId: string): Res
         continue;
       }
       if (candidates.length > 1) {
-        stats.unresolvedByReason.ambiguous_candidates += 1;
+        if (!contractPrefixPattern.test(row.toId)) {
+          stats.unresolvedByReason.ambiguous_candidates += 1;
+          continue;
+        }
+        const counts = getRepoSymbolCounts();
+        const best = candidates.reduce((b, c) =>
+          (counts.get(c.toRepoId) ?? 0) > (counts.get(b.toRepoId) ?? 0) ? c : b
+        );
+        upsertStmt.run(repoId, row.fromId, best.toRepoId, best.toSymbolId, row.type);
+        stats.resolved += 1;
         continue;
       }
 

@@ -178,5 +178,10 @@ export function asArgsRecord(value: unknown): Record<string, unknown> {
 }
 
 export function toNugetContractId(packageName: string): string {
-  return `nuget:${packageName.trim().toLowerCase()}`;
+  // Idempotent: accept either a bare package name ("SSNet.CommunicationHub.Messaging")
+  // or an already-qualified contract id ("nuget:ssnet.communicationhub.messaging").
+  // Strip a leading nuget: prefix (any case/whitespace) before re-prefixing so callers
+  // that pass the fully-qualified id don't get double-prefixed to nuget:nuget:... (ISSUE-CR-002).
+  const stripped = packageName.trim().replace(/^nuget:\s*/i, "");
+  return `nuget:${stripped.trim().toLowerCase()}`;
 }
