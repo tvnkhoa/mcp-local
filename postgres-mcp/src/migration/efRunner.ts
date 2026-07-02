@@ -100,9 +100,15 @@ export function efMigrationsList(config: MigrationConfig, connectionString: stri
   return runEf(config, ["migrations", "list", "--no-connect"], connectionString);
 }
 
-/** Connected variant — reports which migrations are applied vs pending on the target DB. */
+/**
+ * Connected variant — reports which migrations are applied vs pending on the target DB.
+ * `--json` (available on `dotnet ef` since EF Core tools 3.0) returns structured
+ * `{id, name, safeName, applied}` entries instead of human/locale-oriented text with an
+ * `applied`/`(Pending)` marker — avoids scraping stdout with a regex that can misclassify
+ * migrations under a non-English CLI locale or if the marker text/position ever changes.
+ */
 export function efMigrationsListConnected(config: MigrationConfig, connectionString: string): Promise<EfResult> {
-  return runEf(config, ["migrations", "list"], connectionString);
+  return runEf(config, ["migrations", "list", "--json"], connectionString);
 }
 
 export function efMigrationsAdd(config: MigrationConfig, name: string, connectionString: string): Promise<EfResult> {

@@ -9,12 +9,52 @@ export interface ColumnInfo {
   default: string | null;
 }
 
+export interface ConstraintInfo {
+  name: string;
+  type: string;
+  definition: string;
+}
+
 export interface TableSnapshot {
   schema: string;
   table: string;
   columns: ColumnInfo[];
   indexes: string[];
-  constraints: string[];
+  constraints: ConstraintInfo[];
+}
+
+/** Postgres pg_constraint.contype codes → the readable labels information_schema used to give us. */
+const CONSTRAINT_TYPE_LABELS: Record<string, string> = {
+  p: "PRIMARY KEY",
+  f: "FOREIGN KEY",
+  u: "UNIQUE",
+  c: "CHECK",
+  x: "EXCLUDE"
+};
+
+/** Collapse whitespace so formatting differences don't register as semantic drift. */
+function normalizeConstraintDef(def: string): string {
+  return def.replace(/\s+/g, " ").trim();
+}
+
+/** Identity used for equality/diffing — by semantic content, never by (server-specific) name. */
+function constraintKey(c: ConstraintInfo): string {
+  return `${c.type}:${normalizeConstraintDef(c.definition)}`;
+}
+
+/**
+ * Count occurrences per semantic key. Postgres allows multiple constraints with the same
+ * definition under different names, so a plain Set (membership only) would collapse e.g.
+ * two identical CHECK constraints into one entry — dropping one of them would then be
+ * invisible to the diff. Comparing counts instead preserves multiplicity.
+ */
+function constraintMultiset(constraints: ConstraintInfo[]): Map<string, number> {
+  const counts = new Map<string, number>();
+  for (const c of constraints) {
+    const key = constraintKey(c);
+    counts.set(key, (counts.get(key) ?? 0) + 1);
+  }
+  return counts;
 }
 
 export interface SchemaSnapshot {
@@ -69,17 +109,34 @@ export async function captureSchema(pool: Pool, schemas?: string[]): Promise<Sch
     [targetSchemas]
   );
 
+  // pg_constraint (not information_schema.table_constraints) — the latter synthesizes a
+  // pseudo constraint row per NOT NULL column named "{schema_oid}_{table_oid}_{col}_not_null",
+  // which embeds the table's OID and therefore differs between any two independently-created
+  // databases even when schemas are byte-identical. pg_get_constraintdef gives the real,
+  // semantic definition instead of a server-specific auto-generated name.
+  // contype is restricted to the five constraint kinds CONSTRAINT_TYPE_LABELS knows about:
+  // PostgreSQL 18 added catalogued NOT NULL rows (contype 'n') to pg_constraint, and 't'
+  // marks constraint triggers — including either would report spurious drift when comparing
+  // a PG18 server against an older one (NOT NULL is already tracked via ColumnInfo.isNullable).
+  // pretty=false (not true): pg_get_constraintdef's docs note the pretty-printed form isn't
+  // guaranteed stable/comparable across versions (pg_dump uses pretty=false for this reason);
+  // whitespace normalization alone can't bridge parenthesization/cast-rendering differences.
   const constraints = await pool.query<{
     table_schema: string;
     table_name: string;
     constraint_name: string;
     constraint_type: string;
+    definition: string;
   }>(
     `
-    select table_schema, table_name, constraint_name, constraint_type
-    from information_schema.table_constraints
-    where table_schema = any($1)
-    order by table_schema, table_name, constraint_name
+    select n.nspname as table_schema, c.relname as table_name,
+           con.conname as constraint_name, con.contype as constraint_type,
+           pg_get_constraintdef(con.oid, false) as definition
+    from pg_constraint con
+    join pg_class c on c.oid = con.conrelid
+    join pg_namespace n on n.oid = c.relnamespace
+    where n.nspname = any($1) and con.contype = any(array['p','f','u','c','x'])
+    order by n.nspname, c.relname, con.conname
     `,
     [targetSchemas]
   );
@@ -108,7 +165,11 @@ export async function captureSchema(pool: Pool, schemas?: string[]): Promise<Sch
     ensure(row.schemaname, row.tablename).indexes.push(row.indexdef);
   }
   for (const row of constraints.rows) {
-    ensure(row.table_schema, row.table_name).constraints.push(`${row.constraint_type}:${row.constraint_name}`);
+    ensure(row.table_schema, row.table_name).constraints.push({
+      name: row.constraint_name,
+      type: CONSTRAINT_TYPE_LABELS[row.constraint_type] ?? row.constraint_type,
+      definition: row.definition
+    });
   }
 
   const tables = [...tableMap.values()].sort((a, b) =>
@@ -116,7 +177,7 @@ export async function captureSchema(pool: Pool, schemas?: string[]): Promise<Sch
   );
   for (const t of tables) {
     t.indexes.sort();
-    t.constraints.sort();
+    t.constraints.sort((a, b) => constraintKey(a).localeCompare(constraintKey(b)));
   }
 
   const snapshotId = createHash("sha256")
@@ -138,6 +199,8 @@ export interface SchemaDiff {
     changedColumns: string[];
     indexChanged: boolean;
     constraintChanged: boolean;
+    addedConstraints: string[];
+    removedConstraints: string[];
   }>;
 }
 
@@ -167,10 +230,43 @@ export function diffSnapshots(a: SchemaSnapshot, b: SchemaSnapshot): SchemaDiff 
       }
     }
     const indexChanged = JSON.stringify(at.indexes) !== JSON.stringify(bt.indexes);
-    const constraintChanged = JSON.stringify(at.constraints) !== JSON.stringify(bt.constraints);
 
-    if (addedColumns.length || removedColumns.length || changedColumns.length || indexChanged || constraintChanged) {
-      changedTables.push({ table: key, addedColumns, removedColumns, changedColumns, indexChanged, constraintChanged });
+    // Compare constraints by semantic content (type + normalized definition), never by name —
+    // constraint names can be auto-generated per-server and aren't a stable identity. Compared
+    // as multisets (not sets) so dropping one of two identically-defined constraints registers.
+    const aMultiset = constraintMultiset(at.constraints);
+    const bMultiset = constraintMultiset(bt.constraints);
+    const addedConstraints: string[] = [];
+    const removedConstraints: string[] = [];
+    for (const key of new Set([...aMultiset.keys(), ...bMultiset.keys()])) {
+      const delta = (bMultiset.get(key) ?? 0) - (aMultiset.get(key) ?? 0);
+      if (delta > 0) {
+        addedConstraints.push(...Array(delta).fill(key));
+      } else if (delta < 0) {
+        removedConstraints.push(...Array(-delta).fill(key));
+      }
+    }
+    addedConstraints.sort();
+    removedConstraints.sort();
+    const constraintChanged = addedConstraints.length > 0 || removedConstraints.length > 0;
+
+    if (
+      addedColumns.length ||
+      removedColumns.length ||
+      changedColumns.length ||
+      indexChanged ||
+      constraintChanged
+    ) {
+      changedTables.push({
+        table: key,
+        addedColumns,
+        removedColumns,
+        changedColumns,
+        indexChanged,
+        constraintChanged,
+        addedConstraints,
+        removedConstraints
+      });
     }
   }
 

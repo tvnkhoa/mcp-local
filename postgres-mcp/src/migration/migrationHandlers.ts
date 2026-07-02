@@ -72,6 +72,13 @@ function efOk(result: EfResult, action: string): EfResult {
 
 // ── migration_status ──────────────────────────────────────────────────────────
 
+interface EfMigrationListEntry {
+  id: string;
+  name: string;
+  safeName: string;
+  applied: boolean | null;
+}
+
 export async function handleMigrationStatus(
   args: { environment?: string; profile?: ResponseProfile },
   connections: ConnectionManager,
@@ -80,10 +87,23 @@ export async function handleMigrationStatus(
   assertMigrationEnabled(config);
   const env = connections.getEnvironment(args.environment);
   const result = efOk(await efMigrationsListConnected(config, env.connectionString), "migrations list");
-  // EF prints one migration id per line; a "(Pending)" suffix marks not-yet-applied ones.
-  const lines = result.stdout.split(/\r?\n/).map((l) => l.trim()).filter((l) => /^\d{14}_/.test(l));
-  const applied = lines.filter((l) => !/pending/i.test(l)).map((l) => l.replace(/\s*\(.*\)\s*$/, ""));
-  const pending = lines.filter((l) => /pending/i.test(l)).map((l) => l.replace(/\s*\(.*\)\s*$/, ""));
+
+  let entries: EfMigrationListEntry[];
+  try {
+    entries = JSON.parse(result.stdout);
+  } catch (error) {
+    throw new PolicyViolationError(
+      "EF_OUTPUT_UNPARSEABLE",
+      `Failed to parse 'dotnet ef migrations list --json' output as JSON: ${String(error)}`
+    );
+  }
+
+  // Structured `applied` (true/false/null) replaces scraping a "(Pending)" text marker —
+  // immune to CLI locale translation and to any future reformatting of the human-readable
+  // output. Treat anything other than `applied === true` (including an unexpected `null`)
+  // as pending: safer to flag a migration for attention than to silently assume it's applied.
+  const applied = entries.filter((m) => m.applied === true).map((m) => m.id);
+  const pending = entries.filter((m) => m.applied !== true).map((m) => m.id);
 
   return asText(
     {
@@ -236,7 +256,12 @@ export async function handleMigrationApply(
       status: "applied",
       preSnapshotId: preSnapshot.snapshotId,
       postSnapshotId: postSnapshot.snapshotId,
-      schemaChanged: !diff.identical,
+      // Derived from the snapshot IDs themselves (not `!diff.identical`) so this flag can
+      // never disagree with the two IDs shown right next to it — snapshotId is name-sensitive
+      // (it hashes the raw captured constraints) while `diff` is deliberately name-insensitive,
+      // so a rename-only change (e.g. a constraint recreated under a different name) would
+      // otherwise report schemaChanged:false alongside two different snapshot IDs.
+      schemaChanged: preSnapshot.snapshotId !== postSnapshot.snapshotId,
       diff,
       raw: updateResult.stdout.trim()
     },

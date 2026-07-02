@@ -537,7 +537,7 @@ async function restoreUpdatedRow(
   return res.rowCount ?? 0;
 }
 
-async function safeRollback(client: PoolClient): Promise<void> {
+export async function safeRollback(client: PoolClient): Promise<void> {
   try {
     await client.query("rollback");
   } catch {

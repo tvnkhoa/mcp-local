@@ -25,6 +25,7 @@ import {
   handleWritePreview,
   handleWriteApply,
   handleWriteRollback,
+  safeRollback,
   type WriteConfig
 } from "./write/writeHandlers.js";
 import { type MigrationConfig } from "./migration/efRunner.js";
@@ -128,7 +129,6 @@ const dataDiffSchema = z.object({
   target: z.string().min(1).max(64),
   schema: z.string().min(1).max(128).optional(),
   table: z.string().min(1).max(128),
-  keyColumns: z.array(z.string().min(1).max(128)).optional(),
   columns: z.array(z.string().min(1).max(128)).optional(),
   profile: profileArg
 }).strict();
@@ -321,7 +321,6 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             target: { type: "string" },
             schema: { type: "string", default: "public" },
             table: { type: "string" },
-            keyColumns: { type: "array", items: { type: "string" } },
             columns: { type: "array", items: { type: "string" } },
             profile: { type: "string", enum: ["nano", "compact", "standard", "verbose"] }
           }
@@ -846,14 +845,6 @@ function logInfo(event: string, payload: Record<string, unknown>): void {
 
 function logError(event: string, payload: Record<string, unknown>): void {
   console.error(JSON.stringify({ level: "error", event, ...payload }));
-}
-
-async function safeRollback(client: { query: (sql: string) => Promise<unknown> }): Promise<void> {
-  try {
-    await client.query("rollback");
-  } catch {
-    // swallow rollback failure to avoid masking original error
-  }
 }
 
 async function main(): Promise<void> {

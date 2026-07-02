@@ -5,6 +5,7 @@ import type { ConnectionManager } from "./connectionManager.js";
 import { PolicyViolationError } from "../errors.js";
 import { asText, type ResponseProfile } from "../response/responseFormatter.js";
 import { quoteIdent } from "../sql/ident.js";
+import { safeRollback } from "../write/writeHandlers.js";
 
 // ── get_table_relationships ─────────────────────────────────────────────────────
 
@@ -120,28 +121,132 @@ export async function handleProfileTable(
 
 // ── data_diff ───────────────────────────────────────────────────────────────────
 
-/** count + order-independent checksum of a table (optionally a column subset). */
+/**
+ * Resolve which columns to include in the row checksum. Always an explicit, sorted
+ * list — never the bare table alias (`t::text`) — so the checksum depends only on the
+ * *logical* column set, not physical storage order (attnum), which can silently shift
+ * across environments (e.g. a column dropped and re-added gets a new attnum even
+ * though the logical schema is unchanged, which would otherwise read as a false diff).
+ * When `requestedColumns` is omitted, falls back to the intersection of columns present
+ * on both sides so a caller isn't misled by columns that only exist on one side.
+ *
+ * A table absent from *both* environments would otherwise fall through to the generic
+ * "no common columns" error (every real table has at least one column, so zero columns
+ * on a side unambiguously means the table doesn't exist there) — checked explicitly so
+ * the caller gets an accurate TABLE_NOT_FOUND instead of a misleading column-mismatch
+ * message. Explicitly `requestedColumns` are validated against both sides up front too,
+ * so a typo surfaces as a clear error instead of a raw Postgres "column does not exist"
+ * from inside the checksum query.
+ */
+async function resolveDiffColumns(
+  sourcePool: Pool,
+  targetPool: Pool,
+  schema: string,
+  table: string,
+  requestedColumns?: string[]
+): Promise<{ columns: string[]; onlySource: string[]; onlyTarget: string[] }> {
+  const columnQuery = `select column_name from information_schema.columns where table_schema = $1 and table_name = $2`;
+  const [sourceCols, targetCols] = await Promise.all([
+    sourcePool.query<{ column_name: string }>(columnQuery, [schema, table]),
+    targetPool.query<{ column_name: string }>(columnQuery, [schema, table])
+  ]);
+
+  if (sourceCols.rowCount === 0 || targetCols.rowCount === 0) {
+    const missingFrom = [
+      sourceCols.rowCount === 0 ? "source" : null,
+      targetCols.rowCount === 0 ? "target" : null
+    ].filter((side): side is string => side !== null);
+    throw new PolicyViolationError(
+      "TABLE_NOT_FOUND",
+      `Table '${schema}.${table}' not found on: ${missingFrom.join(", ")}.`
+    );
+  }
+
+  const sourceSet = new Set(sourceCols.rows.map((r) => r.column_name));
+  const targetSet = new Set(targetCols.rows.map((r) => r.column_name));
+
+  if (requestedColumns && requestedColumns.length > 0) {
+    const unknown = requestedColumns.filter((c) => !sourceSet.has(c) || !targetSet.has(c));
+    if (unknown.length > 0) {
+      throw new PolicyViolationError(
+        "UNKNOWN_COLUMN",
+        `Column(s) not present on both sides of '${schema}.${table}': ${unknown.join(", ")}.`
+      );
+    }
+    return { columns: [...requestedColumns].sort(), onlySource: [], onlyTarget: [] };
+  }
+
+  const columns = [...sourceSet].filter((c) => targetSet.has(c)).sort();
+  const onlySource = [...sourceSet].filter((c) => !targetSet.has(c)).sort();
+  const onlyTarget = [...targetSet].filter((c) => !sourceSet.has(c)).sort();
+
+  if (columns.length === 0) {
+    throw new PolicyViolationError(
+      "NO_COMPARABLE_COLUMNS",
+      `No common columns to diff for '${schema}.${table}' between the two environments.`
+    );
+  }
+
+  return { columns, onlySource, onlyTarget };
+}
+
+/**
+ * count + order-independent checksum of a table over an explicit, fixed column list.
+ * Uses sum() of each row's hash (split into two 64-bit halves so the full 128-bit MD5
+ * digest contributes) rather than string_agg(... order by ...): sum is commutative, so
+ * no ORDER BY / sort is needed to make it order-independent, and it keeps only two
+ * numeric accumulators in memory regardless of table size — unlike string_agg, which
+ * concatenates every row's hash into one in-memory string (multi-GB / OOM risk on large
+ * tables). Sum was chosen over XOR because XOR cancels to zero for any value repeated an
+ * even number of times, which would mask real duplicate-row drift; casting to numeric
+ * before summing avoids bigint overflow regardless of row count. The per-row hash is
+ * computed once in a derived table (`s`) and reused for both halves, instead of calling
+ * md5(row(...)::text) twice per row.
+ */
 async function tableFingerprint(
   pool: Pool,
   schema: string,
   table: string,
-  columns?: string[]
+  columns: string[]
 ): Promise<{ count: number; checksum: string }> {
-  const rowExpr = columns && columns.length > 0
-    ? `row(${columns.map(quoteIdent).join(", ")})`
-    : "t";
-  // Order by the per-row hash itself so the aggregate is deterministic regardless of
-  // whether a key was supplied or whether key values are unique — two byte-identical
-  // tables always produce the same checksum. (Ordering by key columns alone left rows
-  // with tied keys in unspecified order, yielding spurious "differs" results.)
+  const rowExpr = `row(${columns.map(quoteIdent).join(", ")})`;
   const q = `
     select
       count(*)::bigint as c,
-      coalesce(md5(string_agg(md5(${rowExpr}::text), '' order by md5(${rowExpr}::text))), '') as checksum
-    from ${quoteIdent(schema)}.${quoteIdent(table)} t
+      coalesce(
+        md5(
+          sum(('x' || substr(h, 1, 16))::bit(64)::bigint::numeric)::text
+          || ':' ||
+          sum(('x' || substr(h, 17, 16))::bit(64)::bigint::numeric)::text
+        ),
+        ''
+      ) as checksum
+    from (
+      select md5(${rowExpr}::text) as h
+      from ${quoteIdent(schema)}.${quoteIdent(table)} t
+    ) s
   `;
-  const res = await pool.query<{ c: string; checksum: string }>(q);
-  return { count: Number(res.rows[0]?.c ?? 0), checksum: res.rows[0]?.checksum ?? "" };
+  const client = await pool.connect();
+  try {
+    // Canonicalize every session GUC that affects row(...)::text rendering — TimeZone /
+    // extra_float_digits (timestamptz / float precision), DateStyle / IntervalStyle (date
+    // and interval formatting), bytea_output (hex vs. escape), lc_monetary (currency
+    // symbol/decimal formatting) — so byte-identical data never produces different
+    // checksums just because the two servers have different session defaults. Sent as one
+    // multi-statement round trip (no bind params, so the simple query protocol accepts
+    // it) instead of one round trip per statement; SET LOCAL is scoped to this transaction.
+    await client.query(
+      "begin; set transaction read only; set local time zone 'UTC'; " +
+        "set local extra_float_digits = 3; set local datestyle = 'ISO, MDY'; " +
+        "set local intervalstyle = 'postgres'; set local bytea_output = 'hex'; " +
+        "set local lc_monetary = 'C';"
+    );
+    const res = await client.query<{ c: string; checksum: string }>(q);
+    return { count: Number(res.rows[0]?.c ?? 0), checksum: res.rows[0]?.checksum ?? "" };
+  } finally {
+    await safeRollback(client);
+    client.release();
+  }
 }
 
 export async function handleDataDiff(
@@ -150,7 +255,6 @@ export async function handleDataDiff(
     target: string;
     schema?: string;
     table: string;
-    keyColumns?: string[];
     columns?: string[];
     profile?: ResponseProfile;
   },
@@ -160,10 +264,25 @@ export async function handleDataDiff(
   const sourcePool = connections.getPool(args.source);
   const targetPool = connections.getPool(args.target);
 
+  const { columns, onlySource, onlyTarget } = await resolveDiffColumns(
+    sourcePool,
+    targetPool,
+    schema,
+    args.table,
+    args.columns
+  );
+
   const [source, target] = await Promise.all([
-    tableFingerprint(sourcePool, schema, args.table, args.columns),
-    tableFingerprint(targetPool, schema, args.table, args.columns)
+    tableFingerprint(sourcePool, schema, args.table, columns),
+    tableFingerprint(targetPool, schema, args.table, columns)
   ]);
+
+  // When the caller didn't pin an explicit column list and the two sides' column sets
+  // differ, the checksum only covers the shared columns — a side-only column full of
+  // divergent data would otherwise slip through as identical:true. Surface that as a
+  // hard non-match rather than a footnote, since "identical" is the field a go/no-go
+  // decision is likely to key off.
+  const columnsMismatch = onlySource.length > 0 || onlyTarget.length > 0;
 
   return asText(
     {
@@ -171,8 +290,11 @@ export async function handleDataDiff(
       target: connections.resolveEnvName(args.target),
       schema,
       table: args.table,
-      columns: args.columns ?? null,
-      identical: source.count === target.count && source.checksum === target.checksum,
+      columns,
+      columnsOnlySource: onlySource.length > 0 ? onlySource : undefined,
+      columnsOnlyTarget: onlyTarget.length > 0 ? onlyTarget : undefined,
+      columnsMismatch,
+      identical: !columnsMismatch && source.count === target.count && source.checksum === target.checksum,
       sourceCount: source.count,
       targetCount: target.count,
       sourceChecksum: source.checksum,
