@@ -1,6 +1,10 @@
 import process from "node:process";
 
 import { PolicyViolationError } from "./errors.js";
+import type { ResponseProfile } from "./response/responseFormatter.js";
+
+/** Per-profile character caps for the long `message`/`exception` fields. Infinity = no cap; exception 0 = drop. */
+export type FieldCaps = { message: number; exception: number };
 
 export type ObserveConfig = {
   baseUrl: string;
@@ -16,6 +20,12 @@ export type ObserveConfig = {
   defaultLookbackMs: number;
   maxLookbackMs: number;
   timeoutMs: number;
+  /** Retry attempts for transient HTTP failures (network / 5xx / 429). 0 disables retries. */
+  maxRetries: number;
+  /** Explicit column projection for log/trace queries; empty = SELECT * (schema-safe default). */
+  logColumns: string[];
+  /** Per-profile caps applied to normalized log fields before serialization. */
+  fieldCaps: Record<ResponseProfile, FieldCaps>;
 };
 
 function numberFromEnv(key: string, fallback: number): number {
@@ -36,6 +46,41 @@ function stringFromEnv(key: string, fallback: string): string {
     return fallback;
   }
   return raw.trim();
+}
+
+/** Like numberFromEnv but permits 0 (unlike lookback/size which must be positive). */
+function nonNegFromEnv(key: string, fallback: number): number {
+  const raw = process.env[key];
+  if (raw === undefined || raw.trim() === "") {
+    return fallback;
+  }
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed < 0) {
+    return fallback;
+  }
+  return Math.floor(parsed);
+}
+
+/** Parse a comma-separated identifier list; drops blanks. Empty result = no projection. */
+function csvFromEnv(key: string): string[] {
+  const raw = process.env[key];
+  if (raw === undefined || raw.trim() === "") {
+    return [];
+  }
+  return raw
+    .split(",")
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0);
+}
+
+function buildFieldCaps(): Record<ResponseProfile, FieldCaps> {
+  const INF = Number.POSITIVE_INFINITY;
+  return {
+    nano: { message: nonNegFromEnv("OBSERVE_MSG_MAX_NANO", 200), exception: nonNegFromEnv("OBSERVE_EXC_MAX_NANO", 0) },
+    compact: { message: nonNegFromEnv("OBSERVE_MSG_MAX_COMPACT", 400), exception: nonNegFromEnv("OBSERVE_EXC_MAX_COMPACT", 800) },
+    standard: { message: nonNegFromEnv("OBSERVE_MSG_MAX_STANDARD", 2000), exception: nonNegFromEnv("OBSERVE_EXC_MAX_STANDARD", 6000) },
+    verbose: { message: nonNegFromEnv("OBSERVE_MSG_MAX_VERBOSE", INF), exception: nonNegFromEnv("OBSERVE_EXC_MAX_VERBOSE", INF) }
+  };
 }
 
 /**
@@ -76,6 +121,9 @@ export function loadConfig(): ObserveConfig {
   const defaultLookbackMs = numberFromEnv("OBSERVE_DEFAULT_LOOKBACK_MS", 3_600_000);
   const maxLookbackMs = Math.max(defaultLookbackMs, numberFromEnv("OBSERVE_MAX_LOOKBACK_MS", 604_800_000));
   const timeoutMs = numberFromEnv("OBSERVE_TIMEOUT_MS", 30_000);
+  const maxRetries = nonNegFromEnv("OBSERVE_MAX_RETRIES", 2);
+  const logColumns = csvFromEnv("OBSERVE_LOG_COLUMNS");
+  const fieldCaps = buildFieldCaps();
 
   return {
     baseUrl,
@@ -88,7 +136,10 @@ export function loadConfig(): ObserveConfig {
     maxSize,
     defaultLookbackMs,
     maxLookbackMs,
-    timeoutMs
+    timeoutMs,
+    maxRetries,
+    logColumns,
+    fieldCaps
   };
 }
 
@@ -104,7 +155,9 @@ export function describeConfig(config: ObserveConfig): Record<string, unknown> {
     maxSize: config.maxSize,
     defaultLookbackMs: config.defaultLookbackMs,
     maxLookbackMs: config.maxLookbackMs,
-    timeoutMs: config.timeoutMs
+    timeoutMs: config.timeoutMs,
+    maxRetries: config.maxRetries,
+    logColumns: config.logColumns.length > 0 ? config.logColumns : "*"
   };
 }
 

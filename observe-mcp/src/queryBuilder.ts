@@ -162,17 +162,35 @@ function buildLogWhere(filters: LogFilters): string {
   return clauses.join(" AND ");
 }
 
-export function buildSearchLogsSql(stream: string, filters: LogFilters, size: number): string {
-  const where = buildLogWhere(filters);
-  const whereClause = where ? ` WHERE ${where}` : "";
-  return `SELECT * FROM ${sqlIdent(stream)}${whereClause} ORDER BY _timestamp DESC LIMIT ${size}`;
+/** Validate a bare column identifier for a projection list (reject anything unsafe). */
+function sqlColumn(name: string): string {
+  if (!/^[A-Za-z0-9_.]+$/.test(name)) {
+    throw new PolicyViolationError("validation_error", `Unsafe column name: "${name}".`);
+  }
+  return name;
 }
 
-export function buildTraceLogsSql(stream: string, traceId: string, size: number): string {
+/** Build the SELECT projection: an explicit column list when configured, else "*". */
+function selectList(columns?: string[]): string {
+  return columns && columns.length > 0 ? columns.map(sqlColumn).join(", ") : "*";
+}
+
+export function buildSearchLogsSql(stream: string, filters: LogFilters, size: number, columns?: string[]): string {
+  const where = buildLogWhere(filters);
+  const whereClause = where ? ` WHERE ${where}` : "";
+  return `SELECT ${selectList(columns)} FROM ${sqlIdent(stream)}${whereClause} ORDER BY _timestamp DESC LIMIT ${size}`;
+}
+
+export function buildTraceLogsSql(stream: string, traceId: string, size: number, columns?: string[]): string {
   const id = assertTraceId(traceId);
   // Some rows populate `traceid` but leave `trace_id` empty (and vice versa) — match either.
   const match = `(trace_id = ${sqlString(id)} OR traceid = ${sqlString(id)})`;
-  return `SELECT * FROM ${sqlIdent(stream)} WHERE ${match} ORDER BY _timestamp ASC LIMIT ${size}`;
+  return `SELECT ${selectList(columns)} FROM ${sqlIdent(stream)} WHERE ${match} ORDER BY _timestamp ASC LIMIT ${size}`;
+}
+
+/** Plain recent-rows sample used for field/schema discovery (describe_stream). */
+export function buildSampleSql(stream: string, size: number): string {
+  return `SELECT * FROM ${sqlIdent(stream)} ORDER BY _timestamp DESC LIMIT ${size}`;
 }
 
 export function buildTraceSpansSql(stream: string, traceId: string, size: number): string {

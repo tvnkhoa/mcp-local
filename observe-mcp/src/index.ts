@@ -14,7 +14,7 @@ import { z } from "zod";
 import { loadConfig, describeConfig, type ObserveConfig } from "./config.js";
 import { mapError } from "./errors.js";
 import { ObserveClient, type StreamType } from "./observeClient.js";
-import { normalizeLog, normalizeSpan } from "./logParser.js";
+import { normalizeLog, normalizeSpan, capLog } from "./logParser.js";
 import {
   asText as asTextProfiled,
   asError as asErrorProfiled,
@@ -26,7 +26,8 @@ import {
   buildSearchLogsSql,
   buildTraceLogsSql,
   buildTraceSpansSql,
-  buildLogStatsSql
+  buildLogStatsSql,
+  buildSampleSql
 } from "./queryBuilder.js";
 import { validateReadOnlySql } from "./sqlGuardrails.js";
 
@@ -35,6 +36,7 @@ const client = new ObserveClient(config);
 
 // --- shared zod fragments -------------------------------------------------
 const profileArg = responseProfileSchema.optional();
+const offsetArg = z.number().int().min(0).optional();
 const timeArg = z.string().min(1).max(32).optional();
 const instantArg = z.string().min(1).max(64).optional();
 const traceIdArg = z.string().min(8).max(64);
@@ -55,6 +57,7 @@ const searchLogsSchema = z.object({
   start: instantArg,
   end: instantArg,
   limit: z.number().int().positive().optional(),
+  offset: offsetArg,
   stream: z.string().min(1).max(256).optional(),
   profile: profileArg
 }).strict();
@@ -105,6 +108,17 @@ const runQuerySchema = z.object({
   start: instantArg,
   end: instantArg,
   size: z.number().int().positive().optional(),
+  offset: offsetArg,
+  profile: profileArg
+}).strict();
+
+const describeStreamSchema = z.object({
+  stream: z.string().min(1).max(256).optional(),
+  type: streamTypeArg.optional(),
+  sample: z.number().int().positive().max(50).optional(),
+  time: timeArg,
+  start: instantArg,
+  end: instantArg,
   profile: profileArg
 }).strict();
 
@@ -145,6 +159,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
           start: { type: "string", description: "Absolute start (ISO 8601 or epoch ms)" },
           end: { type: "string", description: "Absolute end (ISO 8601 or epoch ms)" },
           limit: { type: "number" },
+          offset: { type: "number", description: "Row offset for pagination (default 0); use the returned nextOffset to page" },
           stream: { type: "string", description: "Override the configured logs stream" },
           profile: { type: "string", enum: ["nano", "compact", "standard", "verbose"] }
         }
@@ -236,6 +251,25 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
           start: { type: "string" },
           end: { type: "string" },
           size: { type: "number" },
+          offset: { type: "number", description: "Row offset for pagination (default 0); use the returned nextOffset to page" },
+          profile: { type: "string", enum: ["nano", "compact", "standard", "verbose"] }
+        }
+      }
+    },
+    {
+      name: "describe_stream",
+      description:
+        "Discover the fields of a stream by sampling recent rows (no fixed schema assumptions). Returns each field with its observed JSON types and how many sampled rows had a non-null value.",
+      inputSchema: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          stream: { type: "string", description: "Stream to inspect (default: the configured logs stream)" },
+          type: { type: "string", enum: ["logs", "traces", "metrics"] },
+          sample: { type: "number", description: "Rows to sample for field discovery (default 5, max 50)" },
+          time: { type: "string", description: "Relative window to sample from (default 1h)" },
+          start: { type: "string" },
+          end: { type: "string" },
           profile: { type: "string", enum: ["nano", "compact", "standard", "verbose"] }
         }
       }
@@ -266,15 +300,19 @@ server.setRequestHandler(CallToolRequestSchema, async (request): Promise<CallToo
         const stream = args.stream ?? config.logStream;
         const window = resolveWindow(args, config, nowMs);
         const size = clampSize(args.limit, config);
-        const sql = buildSearchLogsSql(stream, args, size);
-        const res = await client.search({ sql, startUs: window.startUs, endUs: window.endUs, size, type: "logs" });
+        const offset = args.offset ?? 0;
+        const sql = buildSearchLogsSql(stream, args, size, config.logColumns);
+        const res = await client.search({ sql, startUs: window.startUs, endUs: window.endUs, from: offset, size, type: "logs", fallbackSelectAll: config.logColumns.length > 0 });
+        const caps = config.fieldCaps[args.profile ?? "compact"];
         return asTextProfiled(
           {
             stream,
             total: res.total ?? res.hits.length,
             count: res.hits.length,
+            offset,
+            nextOffset: res.hits.length === size ? offset + size : null,
             tookMs: res.took ?? null,
-            logs: res.hits.map(normalizeLog)
+            logs: res.hits.map((h) => capLog(normalizeLog(h), caps))
           },
           args.profile
         );
@@ -285,15 +323,16 @@ server.setRequestHandler(CallToolRequestSchema, async (request): Promise<CallToo
         const stream = args.stream ?? config.logStream;
         const window = resolveWindow(args, config, nowMs);
         const size = clampSize(args.limit, config);
-        const sql = buildTraceLogsSql(stream, args.traceId, size);
-        const res = await client.search({ sql, startUs: window.startUs, endUs: window.endUs, size, type: "logs" });
+        const sql = buildTraceLogsSql(stream, args.traceId, size, config.logColumns);
+        const res = await client.search({ sql, startUs: window.startUs, endUs: window.endUs, size, type: "logs", fallbackSelectAll: config.logColumns.length > 0 });
+        const caps = config.fieldCaps[args.profile ?? "compact"];
         return asTextProfiled(
           {
             stream,
             traceId: args.traceId,
             count: res.hits.length,
             tookMs: res.took ?? null,
-            timeline: res.hits.map(normalizeLog)
+            timeline: res.hits.map((h) => capLog(normalizeLog(h), caps))
           },
           args.profile
         );
@@ -331,14 +370,15 @@ server.setRequestHandler(CallToolRequestSchema, async (request): Promise<CallToo
         const minutes = args.minutes ?? 15;
         const window = resolveWindow({ time: `${minutes}m` }, config, nowMs);
         const size = clampSize(args.limit, config);
-        const sql = buildSearchLogsSql(stream, { service: args.service, level: args.level }, size);
-        const res = await client.search({ sql, startUs: window.startUs, endUs: window.endUs, size, type: "logs" });
+        const sql = buildSearchLogsSql(stream, { service: args.service, level: args.level }, size, config.logColumns);
+        const res = await client.search({ sql, startUs: window.startUs, endUs: window.endUs, size, type: "logs", fallbackSelectAll: config.logColumns.length > 0 });
+        const caps = config.fieldCaps[args.profile ?? "compact"];
         return asTextProfiled(
           {
             stream,
             minutes,
             count: res.hits.length,
-            logs: res.hits.map(normalizeLog)
+            logs: res.hits.map((h) => capLog(normalizeLog(h), caps))
           },
           args.profile
         );
@@ -375,10 +415,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request): Promise<CallToo
         }
         const window = resolveWindow(args, config, nowMs);
         const size = clampSize(args.size, config);
+        const offset = args.offset ?? 0;
         const res = await client.search({
           sql: guard.sanitizedSql,
           startUs: window.startUs,
           endUs: window.endUs,
+          from: offset,
           size,
           type: args.type
         });
@@ -386,9 +428,31 @@ server.setRequestHandler(CallToolRequestSchema, async (request): Promise<CallToo
           {
             total: res.total ?? res.hits.length,
             count: res.hits.length,
+            offset,
+            nextOffset: res.hits.length === size ? offset + size : null,
             tookMs: res.took ?? null,
             scanSize: res.scan_size ?? null,
             hits: res.hits
+          },
+          args.profile
+        );
+      }
+
+      case "describe_stream": {
+        const args = describeStreamSchema.parse(request.params.arguments ?? {});
+        const stream = args.stream ?? config.logStream;
+        const window = resolveWindow(args, config, nowMs);
+        const sample = args.sample ?? 5;
+        const sql = buildSampleSql(stream, sample);
+        const res = await client.search({ sql, startUs: window.startUs, endUs: window.endUs, size: sample, type: args.type });
+        const fields = describeFields(res.hits);
+        return asTextProfiled(
+          {
+            stream,
+            type: args.type ?? null,
+            sampled: res.hits.length,
+            fieldCount: fields.length,
+            fields
           },
           args.profile
         );
@@ -401,6 +465,31 @@ server.setRequestHandler(CallToolRequestSchema, async (request): Promise<CallToo
     return asErrorProfiled(mapError(error), "verbose");
   }
 });
+
+/** Summarize the fields present across sampled rows: observed JSON types + non-null count. */
+function describeFields(
+  hits: Array<Record<string, unknown>>
+): Array<{ name: string; types: string[]; nonNull: number }> {
+  const acc = new Map<string, { types: Set<string>; nonNull: number }>();
+  for (const hit of hits) {
+    for (const [key, value] of Object.entries(hit)) {
+      let entry = acc.get(key);
+      if (!entry) {
+        entry = { types: new Set<string>(), nonNull: 0 };
+        acc.set(key, entry);
+      }
+      if (value === null || value === undefined) {
+        entry.types.add("null");
+      } else {
+        entry.nonNull += 1;
+        entry.types.add(Array.isArray(value) ? "array" : typeof value);
+      }
+    }
+  }
+  return [...acc.entries()]
+    .map(([name, e]) => ({ name, types: [...e.types].sort(), nonNull: e.nonNull }))
+    .sort((a, b) => a.name.localeCompare(b.name));
+}
 
 function logInfo(event: string, detail: Record<string, unknown>): void {
   console.error(JSON.stringify({ level: "info", event, ...detail }));

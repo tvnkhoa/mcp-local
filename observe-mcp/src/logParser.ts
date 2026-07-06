@@ -86,6 +86,45 @@ export function normalizeLog(hit: Hit): NormalizedLog {
   };
 }
 
+/** Truncate a field to `max` chars, appending a marker so a reader knows it was cut. */
+function truncateField(value: string | null, max: number): string | null {
+  if (value === null || !Number.isFinite(max) || value.length <= max) {
+    return value;
+  }
+  const cut = Math.max(0, max);
+  return `${value.slice(0, cut)}…[+${value.length - cut} chars]`;
+}
+
+/**
+ * Apply per-profile caps to a normalized log's long fields. Two steps:
+ *  1. Dedup — Serilog often emits the same rendered text in both `message` and the
+ *     head of `exception`; when `exception` fully contains `message`, drop the
+ *     redundant `message` (exception is the superset).
+ *  2. Truncate — cap `message`/`exception` to the profile's character budget
+ *     (Infinity = keep full, as verbose does). An exception cap of 0 drops it.
+ * Callers select caps via `config.fieldCaps[profile]`; keeping this pure makes it testable.
+ */
+export function capLog(log: NormalizedLog, caps: { message: number; exception: number }): NormalizedLog {
+  let message = log.message;
+
+  // Resolve the exception first (0 = drop). Dedup against the FULL exception below.
+  const redundantMessage =
+    message !== null &&
+    log.exception !== null &&
+    message.trim().length > 0 &&
+    log.exception.includes(message.trim());
+  const exception = caps.exception <= 0 ? null : truncateField(log.exception, caps.exception);
+
+  // Drop the message only when it duplicates a RETAINED exception — otherwise (e.g.
+  // nano drops the exception) the message is the only remaining error text, so keep it.
+  if (redundantMessage && exception !== null) {
+    message = null;
+  }
+  message = truncateField(message, caps.message);
+
+  return { ...log, message, exception };
+}
+
 export function normalizeSpan(hit: Hit): NormalizedSpan {
   const rawDuration = pick(hit, DURATION_KEYS);
   let durationMs: number | null = null;

@@ -16,6 +16,7 @@ npm install
 npm run build       # tsc -> dist/
 npm run typecheck   # type check only
 npm run dev         # run with tsx (no build)
+npm test            # unit tests (node:test via tsx; no credentials needed)
 
 # End-to-end smoke test (build first; needs real credentials in env)
 npm run build && node scripts/smoke-test.mjs
@@ -33,7 +34,10 @@ npm run build && node scripts/smoke-test.mjs
 | `OBSERVE_USERNAME` / `OBSERVE_PASSWORD` | — | Basic-auth credentials, encoded at startup |
 | `OBSERVE_DEFAULT_SIZE` / `OBSERVE_MAX_SIZE` | 100 / 1000 | Result caps |
 | `OBSERVE_DEFAULT_LOOKBACK_MS` / `OBSERVE_MAX_LOOKBACK_MS` | 1h / 7d | Time-window caps |
-| `OBSERVE_TIMEOUT_MS` | 30000 | HTTP request timeout |
+| `OBSERVE_TIMEOUT_MS` | 30000 | HTTP request timeout (per attempt) |
+| `OBSERVE_MAX_RETRIES` | 2 | Retry transient failures (network / 5xx / 429) with backoff; 0 disables |
+| `OBSERVE_LOG_COLUMNS` | — | Optional CSV column projection for log/trace queries (else `SELECT *`); auto-falls back to `SELECT *` on a missing-column error |
+| `OBSERVE_MSG_MAX_*` / `OBSERVE_EXC_MAX_*` | see below | Per-profile char caps for `message`/`exception` |
 | `NODE_TLS_REJECT_UNAUTHORIZED` | — | Set `0` only for self-signed TLS (last resort) |
 
 Provide exactly one of `OBSERVE_AUTH_BASIC` **or** `OBSERVE_USERNAME`+`OBSERVE_PASSWORD`.
@@ -49,12 +53,36 @@ Provide exactly one of `OBSERVE_AUTH_BASIC` **or** `OBSERVE_USERNAME`+`OBSERVE_P
 | `tail_logs` | Most recent logs over the last N minutes |
 | `log_stats` | Count logs grouped by level / service / sourceContext (error summary) |
 | `run_observe_query` | Raw read-only OpenObserve SQL against a stream + mandatory time window |
+| `describe_stream` | Discover a stream's fields by sampling recent rows (observed JSON types + non-null counts) |
 
 ### Time windows
 
 All read tools accept either a relative `time` (`15m`, `1h`, `24h`, `7d`) ending now,
 or an absolute `start`/`end` (ISO 8601 or epoch ms). The window is capped at
 `OBSERVE_MAX_LOOKBACK_MS`.
+
+### Response profiles & field caps
+
+Every tool accepts `profile` (`nano` | `compact` | `standard` | `verbose`, default
+`compact`). Beyond dropping `null` fields, profiles cap the long `message`/`exception`
+fields so a page of error logs (stack traces) stays token-efficient — truncated text
+is marked `…[+N chars]`. Defaults (chars):
+
+| profile | message | exception |
+| --- | --- | --- |
+| nano | 200 | dropped |
+| compact | 400 | 800 |
+| standard | 2000 | 6000 |
+| verbose | full | full |
+
+When `message` is fully contained in `exception` (common with Serilog) the redundant
+`message` is dropped. Use `verbose` (or raise `OBSERVE_*_MAX_*`) to see full text.
+
+### Pagination
+
+`search_logs` and `run_observe_query` accept `offset` (default 0) and return
+`nextOffset` (non-null when the page filled `limit`/`size`) so you can page through
+large result sets.
 
 ### Tracing a request
 

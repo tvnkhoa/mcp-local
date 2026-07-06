@@ -11,6 +11,12 @@ export type SearchParams = {
   size?: number;
   /** Stream type routing hint for OpenObserve (`logs` | `traces` | `metrics`). */
   type?: StreamType;
+  /**
+   * When true, a projected query (`SELECT col, ...`) that fails with a missing-column
+   * error is retried once with `SELECT *` — keeps results correct on streams whose
+   * schema differs from the configured OBSERVE_LOG_COLUMNS.
+   */
+  fallbackSelectAll?: boolean;
 };
 
 export type SearchResponse = {
@@ -44,18 +50,33 @@ export class ObserveClient {
 
   /** POST /api/{org}/_search — run a SQL query over a stream within a time window. */
   async search(params: SearchParams): Promise<SearchResponse> {
-    const query: Record<string, unknown> = {
-      sql: params.sql,
-      start_time: params.startUs,
-      end_time: params.endUs,
-      from: params.from ?? 0,
-      size: params.size ?? this.config.defaultSize
-    };
     const path = params.type
       ? `/api/${enc(this.config.org)}/_search?type=${encodeURIComponent(params.type)}`
       : `/api/${enc(this.config.org)}/_search`;
 
-    const body = await this.request<SearchResponse>("POST", path, { query });
+    const runOnce = (sql: string): Promise<SearchResponse> =>
+      this.request<SearchResponse>("POST", path, {
+        query: {
+          sql,
+          start_time: params.startUs,
+          end_time: params.endUs,
+          from: params.from ?? 0,
+          size: params.size ?? this.config.defaultSize
+        }
+      });
+
+    let body: SearchResponse;
+    try {
+      body = await runOnce(params.sql);
+    } catch (error) {
+      // Projected query hit a column the stream doesn't have → retry with SELECT *.
+      if (params.fallbackSelectAll && isMissingColumnError(error)) {
+        body = await runOnce(toSelectAll(params.sql));
+      } else {
+        throw error;
+      }
+    }
+
     return {
       took: body.took,
       hits: Array.isArray(body.hits) ? body.hits : [],
@@ -76,6 +97,26 @@ export class ObserveClient {
   }
 
   private async request<T>(method: "GET" | "POST", path: string, jsonBody?: unknown): Promise<T> {
+    // Retry transient failures (network / 5xx / 429) with exponential backoff. A
+    // timeout (AbortError) and any other 4xx are not retried — they will not fix
+    // themselves and retrying would just burn the caller's time budget.
+    const maxRetries = this.config.maxRetries;
+    let lastError: unknown;
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+      try {
+        return await this.attempt<T>(method, path, jsonBody);
+      } catch (error) {
+        lastError = error;
+        if (attempt >= maxRetries || !isRetryable(error)) {
+          throw error;
+        }
+        await sleep(BACKOFF_MS[Math.min(attempt, BACKOFF_MS.length - 1)]);
+      }
+    }
+    throw lastError;
+  }
+
+  private async attempt<T>(method: "GET" | "POST", path: string, jsonBody?: unknown): Promise<T> {
     const url = `${this.config.baseUrl}${path}`;
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), this.config.timeoutMs);
@@ -123,6 +164,34 @@ export class ObserveClient {
       clearTimeout(timer);
     }
   }
+}
+
+const BACKOFF_MS = [250, 750];
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** Transient failures worth retrying: network unreachable (status 0), 429, and any 5xx. */
+function isRetryable(error: unknown): boolean {
+  if (!(error instanceof ObserveHttpError)) {
+    return false;
+  }
+  return error.status === 0 || error.status === 429 || error.status >= 500;
+}
+
+/** A projected SELECT that references a column the stream lacks. */
+function isMissingColumnError(error: unknown): boolean {
+  if (!(error instanceof ObserveHttpError) || error.status !== 400) {
+    return false;
+  }
+  const text = `${error.message} ${error.detail ?? ""}`.toLowerCase();
+  return text.includes("column") || text.includes("field") || text.includes("schema");
+}
+
+/** Rewrite a simple `SELECT <cols> FROM ...` into `SELECT * FROM ...` (no subqueries). */
+function toSelectAll(sql: string): string {
+  return sql.replace(/^SELECT\s+[\s\S]*?\s+FROM\s+/i, "SELECT * FROM ");
 }
 
 function enc(segment: string): string {
