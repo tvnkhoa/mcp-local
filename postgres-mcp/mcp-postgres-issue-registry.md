@@ -440,6 +440,136 @@ Resolution. Mirrors the format of `codebase-index-mcp/mcp-codebase-index-issue-r
   `uat`) still reports the same 4 genuinely-changed tables with `constraintChanged:false` (no new
   noise from the `contype` filter or `pretty=false` switch — non-regression).
 
+## PG-PRV-001 — `migration_preview` response too large (~50 KB), ignores `profile`, forces file-dump + manual token extraction
+
+- **Status:** fixed 2026-07-06 — reported same day from `wec.communication-hub` (consumer-side observation).
+- **First observed:** 2026-07-06, applying a single-column migration (`migration_deploy_Uat_202607061454`,
+  adds `outbox_outbound_message.trace_parent varchar(55) NULL`) to `uat`.
+- **Scenario:** normal `dry_run → preview → apply` flow; preview is called only to obtain the
+  `previewId`/`approvalToken` needed by `migration_apply`.
+- **Tool/query:** `migration_preview(environment:"uat", profile:"standard")`, then retried with
+  `profile:"compact"`.
+- **Expected vs actual:** expected a compact payload (ids/token/expiry + the *pending* SQL delta).
+  Actual: **50,277 characters on a single line, both times** — the MCP client rejected it
+  (`exceeds maximum allowed tokens`) and dumped it to a tool-results file. `profile:"compact"` produced
+  the **identical 50,277-char size** as `standard`, i.e. `profile` has no effect on preview size.
+- **Root cause (high confidence, from inspecting the dumped payload):** the response embeds the full
+  **idempotent** migration script in `script` — every migration regenerated and guarded with
+  `IF NOT EXISTS(SELECT 1 FROM "__EFMigrationsHistory" WHERE "migration_id"='…')`, including the large
+  `DeployUatBaseline` `CREATE TABLE`/index statements — even though only one tiny column is actually
+  pending. The pending delta was ~2 lines; the other ~50 KB is already-applied baseline DDL that will
+  be skipped by its own guards at apply time. Keys present: `previewId`, `approvalToken`,
+  `preSnapshotId`, `script`, `expiresAt`.
+- **Impact:** every migration preview on a project with a non-trivial baseline overflows the token
+  budget and can't be read inline; the consumer must shell out (python/jq on the dumped file) just to
+  extract `previewId`+`approvalToken`. Turns a one-call step into a file-parse workaround on every apply.
+- **Suggested fix:** (a) make `profile:"compact"/"nano"` return only `{previewId, approvalToken,
+  expiresAt, preSnapshotId}` plus the **net pending SQL** (the delta that isn't already guarded-out),
+  omitting the full idempotent `script`; (b) or expose the full script via the `preSnapshotId`/a
+  separate fetch (or the `schema://<env>` resource pattern) instead of inlining it; (c) at minimum,
+  emit the SQL multi-line rather than one 50 KB line so partial reads are chunkable.
+- **Fix (2026-07-06, followed suggestion (a)):** `handleMigrationPreview`
+  (`src/migration/migrationHandlers.ts`) now runs `migrations list --json` (shared `listMigrations`
+  helper, also used by `migration_status`) to find the last-applied migration, then generates a
+  **non-idempotent delta** via new `efMigrationsScriptDelta` (`dotnet ef migrations script
+  <lastApplied>`, `src/migration/efRunner.ts`) — only the truly-pending SQL. The response returns
+  `{previewId, approvalToken, environment, preSnapshotId, pendingCount, pendingMigrations,
+  pendingScript, expiresAt}` at all profiles; the full idempotent `script` is generated + included
+  **only at `profile:"verbose"`** (omitted elsewhere via `undefined`, dropped by `JSON.stringify`).
+  Default profile changed `standard` → `compact` (aligns with every other read tool). The approval
+  digest now binds the **pending delta** instead of the full idempotent script — more accurate, since
+  `migration_apply` runs `dotnet ef database update` (exactly the pending set) and the real
+  correctness check is the `preSnapshotId` drift guard. When nothing is pending, preview short-circuits
+  to `{status:"no_pending"}` and mints no token (mirrors `migration_dry_run`). `fromMigration` is
+  validated (`sanitizeMigrationId`, `^\d+_[A-Za-z0-9_]+$`) as arg-injection defense-in-depth even
+  though it comes from EF's own JSON. Suggestion (c) is moot — a JSON string can't carry literal
+  newlines, and the delta is now small enough to read inline. `migration_apply`/`migration_dry_run`
+  unchanged. Typecheck + build pass. PG-PRV-002 (token TTL vs human-approval race) is a separate,
+  still-open issue.
+
+## PG-PRV-002 — Approval-token TTL (~15 min, in-memory) races against the human-approval gate on `migration_apply`
+
+- **Status:** fixed 2026-07-06 — reported same day; design/UX suggestion, interacts with PG-DOC-001 token semantics.
+- **Scenario:** `migration_apply` against the shared, prod-like `uat` RDS is (correctly) gated behind an
+  explicit human confirmation — in this session the Claude Code auto-mode classifier blocked the first
+  `migration_apply` as a "production deploy" and required the user to approve before it could run.
+- **Tool/query:** `migration_preview(uat)` → [blocked `migration_apply`, wait for human "apply đi"] →
+  `migration_apply(uat, previewId, approvalToken)`.
+- **Expected vs actual:** expected the previewed plan to still be applyable after the human approves.
+  Actual: the approval token TTL is ~15 min and per-process (see PG-DOC-001 / Verified-working notes),
+  so a preview generated *before* asking the human can expire *during* the wait — forcing a second
+  `migration_preview` (which, per PG-PRV-001, re-dumps ~50 KB) purely to mint a fresh token. Observed
+  here: preview `expiresAt` 08:24:10Z / 08:25:51Z; had to regenerate the preview after user confirmation.
+- **Impact:** the two safety mechanisms compound into friction — a flow that is *designed* to pause for
+  human review uses a token that assumes no pause. Every human-gated apply risks a wasted
+  preview→expire→re-preview cycle (each re-preview being the 50 KB PG-PRV-001 payload).
+- **Suggested fix:** for migration previews specifically, either (a) lengthen the TTL (or make it
+  configurable) to accommodate a human-in-the-loop approval, or (b) let `migration_apply` re-validate
+  against the `preSnapshotId` digest / re-run the drift guard instead of a hard time-boxed token, so an
+  expired token can be transparently refreshed as long as the schema hasn't drifted since preview. The
+  drift guard already exists and is the real correctness check; the TTL is the redundant blocker here.
+- **Fix (2026-07-06, both (a) and (b)):** `migration_apply` now makes the **drift guard the
+  authoritative freshness check** and no longer hard-fails on the token's time-box. `verifyApprovalToken`
+  (`src/write/approval.ts`) gained an `options.ignoreExpiry` flag; `handleMigrationApply` passes
+  `{ignoreExpiry:true}` and the redundant `PREVIEW_EXPIRED` (`preview.expiresAt < now`) throw was
+  removed. So within the preview record's in-memory lifetime, a human-gated approval can pause as long
+  as needed and apply still succeeds **iff** the live schema still matches `preSnapshotId` (else
+  `MIGRATION_DRIFT` → re-preview). No security loss: the token is still HMAC-signed and bound to
+  `previewId + digest` (digest = env+preSnapshotId+pendingScript), so an old token can only apply the
+  exact previewed plan against an unchanged schema — the TTL was a redundant staleness lever, not a
+  security control. **`write_apply` is untouched** — it calls `verifyApprovalToken` with no options
+  (strict expiry preserved), because data writes have no drift guard and their digest binds
+  `rowsAffected`. Fix (a) too: migration record lifetime is now a **separate, longer, configurable**
+  `PG_MIGRATION_PREVIEW_TTL_MS` (default 3_600_000 = 1h) instead of sharing the 15-min
+  `PG_WRITE_PREVIEW_TTL_MS`; this bounds how long the record survives (memory) — freshness is the drift
+  guard's job. `PREVIEW_NOT_FOUND` (record swept after the TTL, or server restart) still forces a fresh
+  preview. Typecheck + build pass.
+- **Post-review hardening (2026-07-06, high-effort code review of the PRV-001/002 diff):**
+  1. **Non-contiguous pending set (correctness):** `applied.at(-1)` assumed applied migrations are a
+     contiguous chronological prefix. With out-of-order application (branch merges: a pending migration
+     whose id sorts *before* an already-applied one), `dotnet ef migrations script <lastApplied>` would
+     omit that earlier-id pending migration from `pendingScript` while `database update` still applied it.
+     `handleMigrationPreview` now detects contiguity from the EF-ordered `entries` (`listMigrations` now
+     returns them) and **falls back to the idempotent full script** when non-contiguous — the only correct
+     representation of a non-contiguous subset (no `script <from>` range can express it).
+  2. **Stale-record leak (correctness):** `sweepExpiredMigrationPreviews()` ran *after* the `no_pending`
+     early return, and apply no longer evicts on expiry, so on an env with nothing pending the only sweep
+     site was skipped and records leaked (and, with `ignoreExpiry`, stayed applicable indefinitely). Sweep
+     now runs at the top of `handleMigrationPreview`, before any early return.
+  3. **Pending-set drift (correctness):** the snapshot drift guard only catches *schema* changes; a
+     migration `migration_add`-ed between preview and apply leaves the schema untouched, so `database
+     update` would apply un-previewed migrations. `handleMigrationApply` now stores `pendingMigrations` in
+     the preview record and re-checks it at apply (alongside the schema guard) → `MIGRATION_DRIFT` if the
+     set changed.
+  4. **Cleanups:** dropped the never-read `script` field from `MigrationPreviewRecord`; parallelized the
+     independent `captureSchema` + `listMigrations` calls (both preview and apply) and the delta + verbose
+     full-script invocations via `Promise.all`. Typecheck + build pass.
+
+## PG-STA-001 — `migration_status.raw` duplicates parsed arrays as an escaped JSON blob even at `profile:"compact"`
+
+- **Status:** fixed 2026-07-06 — reported same day; low priority / nice-to-have.
+- **Scenario:** routine `migration_status` before a deploy.
+- **Tool/query:** `migration_status(environment:"uat", profile:"compact")`.
+- **Expected vs actual:** expected compact profile to trim redundant fields. Actual: the response
+  returns `appliedCount`/`pendingCount`/`applied[]`/`pending[]` **and** a `raw` field that is the
+  escaped-JSON `dotnet ef … --json` output (post PG-MIG-004) carrying the same id/applied data again —
+  even under `profile:"compact"`. For a 4-migration project it's a few hundred wasted bytes; scales with
+  migration count.
+- **Impact:** minor token waste; the parsed arrays already carry everything a caller needs.
+- **Suggested fix:** gate `raw` behind `profile:"verbose"` (drop it at `nano`/`compact`/`standard`);
+  keep it available for debugging the parse.
+- **Correction to the original report:** `raw` is the `dotnet ef migrations list --json` stdout, which
+  lists **every migration in the project (working tree)** with `{id, name, safeName, applied}` per entry
+  — so its weight scales with the **total migration-file count**, not the DB. On a squashed branch (~4
+  migrations) it's only ~700 bytes; on a granular/un-squashed branch (~40) it's ~5 KB of pure duplication
+  (`applied[]`/`pending[]` already carry every id). Worth trimming on the heavy branches.
+- **Fix (2026-07-06):** added a `verboseOnly(value, profile)` helper (`src/migration/migrationHandlers.ts`)
+  that returns the value only at `profile:"verbose"` and `undefined` elsewhere (dropped by
+  `JSON.stringify` — same idiom as `migration_preview`'s full `script`). Applied to **all three** `raw`
+  fields for tool-wide consistency: `migration_status`, `migration_add` (`ef migrations add` stdout), and
+  `migration_apply` (`database update` stdout). `raw` is kept available at `verbose` for debugging the
+  parse. Typecheck + build pass.
+
 ---
 
 ## Verified-working behaviors (confirmed against the live server / source, 2026-06-29)

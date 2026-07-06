@@ -120,6 +120,33 @@ export function efMigrationsScript(config: MigrationConfig, connectionString: st
   return runEf(config, ["migrations", "script", "--idempotent"], connectionString);
 }
 
+/** EF migration ids look like `20240131120000_AddFoo` — validate before using as a CLI arg. */
+export function sanitizeMigrationId(id: string): string {
+  if (!/^\d+_[A-Za-z0-9_]+$/.test(id)) {
+    throw new PolicyViolationError(
+      "INVALID_MIGRATION_ID",
+      `Migration id '${id}' does not match ^\\d+_[A-Za-z0-9_]+$.`
+    );
+  }
+  return id;
+}
+
+/**
+ * Non-idempotent delta script: SQL for migrations AFTER `fromMigration` (the last one
+ * already applied on the target DB) through latest — i.e. only the pending delta.
+ * Omit `fromMigration` (fresh DB, nothing applied) to script from scratch. The positional
+ * `<from>` lands before runEf's `--project/...` options, which is valid for `dotnet ef`.
+ */
+export function efMigrationsScriptDelta(
+  config: MigrationConfig,
+  connectionString: string,
+  fromMigration?: string
+): Promise<EfResult> {
+  const efArgs = ["migrations", "script"];
+  if (fromMigration) efArgs.push(sanitizeMigrationId(fromMigration));
+  return runEf(config, efArgs, connectionString);
+}
+
 export function efDatabaseUpdate(config: MigrationConfig, connectionString: string): Promise<EfResult> {
   return runEf(config, ["database", "update"], connectionString);
 }

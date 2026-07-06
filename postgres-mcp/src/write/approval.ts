@@ -39,7 +39,8 @@ export function verifyApprovalToken(
   previewId: string,
   digest: string,
   expiresAt: string,
-  secret: string
+  secret: string,
+  options: { ignoreExpiry?: boolean } = {}
 ): void {
   const dotIdx = token.lastIndexOf(".");
   const payload = dotIdx > 0 ? token.slice(0, dotIdx) : "";
@@ -66,7 +67,12 @@ export function verifyApprovalToken(
     throw new PolicyViolationError("APPROVAL_TOKEN_MISMATCH", "Approval token does not match the approved preview plan.");
   }
 
-  if (Date.parse(decoded.expiresAt) < Date.now()) {
+  // Migrations pass `ignoreExpiry:true`: for a schema migration the real staleness check is the
+  // preSnapshotId drift guard re-run at apply time (the live schema must still match what was
+  // previewed), not this time-box — a human-approval pause can legitimately outlast the TTL, and
+  // an old token can still only apply the exact previewed plan against an unchanged schema. Data
+  // writes (write_apply) have no such drift guard, so they keep the strict expiry (default).
+  if (!options.ignoreExpiry && Date.parse(decoded.expiresAt) < Date.now()) {
     throw new PolicyViolationError("APPROVAL_TOKEN_EXPIRED", "Approval token has expired.");
   }
 }

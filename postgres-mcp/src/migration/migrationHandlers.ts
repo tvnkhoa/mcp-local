@@ -14,6 +14,7 @@ import {
   efMigrationsAdd,
   efMigrationsListConnected,
   efMigrationsScript,
+  efMigrationsScriptDelta,
   listMigrationFiles,
   type EfResult,
   type MigrationConfig
@@ -24,7 +25,9 @@ interface MigrationPreviewRecord {
   previewId: string;
   environment: string;
   preSnapshotId: string;
-  script: string;
+  /** Pending migration ids at preview time — re-checked at apply so a migration added between
+   *  preview and apply (schema unchanged, so the snapshot drift guard misses it) is caught. */
+  pendingMigrations: string[];
   digest: string;
   expiresAt: string;
 }
@@ -70,6 +73,16 @@ function efOk(result: EfResult, action: string): EfResult {
   return result;
 }
 
+/**
+ * Gate a large debug-only field (raw `dotnet ef` stdout, full scripts) to `profile:"verbose"`.
+ * Returns `undefined` at every other profile, which `JSON.stringify` drops from the payload —
+ * the same idiom used for `migration_preview`'s full `script`. Keeps the field for debugging the
+ * parse without paying its bytes on every call (the parsed arrays already carry the data).
+ */
+function verboseOnly<T>(value: T, profile: ResponseProfile): T | undefined {
+  return profile === "verbose" ? value : undefined;
+}
+
 // ── migration_status ──────────────────────────────────────────────────────────
 
 interface EfMigrationListEntry {
@@ -79,15 +92,18 @@ interface EfMigrationListEntry {
   applied: boolean | null;
 }
 
-export async function handleMigrationStatus(
-  args: { environment?: string; profile?: ResponseProfile },
-  connections: ConnectionManager,
-  config: MigrationConfig
-): Promise<CallToolResult> {
-  assertMigrationEnabled(config);
-  const env = connections.getEnvironment(args.environment);
-  const result = efOk(await efMigrationsListConnected(config, env.connectionString), "migrations list");
-
+/**
+ * Run `migrations list --json` and split ids into applied vs pending. Structured `applied`
+ * (true/false/null) replaces scraping a "(Pending)" text marker — immune to CLI locale
+ * translation and to any future reformatting of the human-readable output. Anything other than
+ * `applied === true` (including an unexpected `null`) counts as pending: safer to flag a
+ * migration for attention than to silently assume it's applied.
+ */
+async function listMigrations(
+  config: MigrationConfig,
+  connectionString: string
+): Promise<{ raw: string; entries: EfMigrationListEntry[]; applied: string[]; pending: string[] }> {
+  const result = efOk(await efMigrationsListConnected(config, connectionString), "migrations list");
   let entries: EfMigrationListEntry[];
   try {
     entries = JSON.parse(result.stdout);
@@ -97,13 +113,22 @@ export async function handleMigrationStatus(
       `Failed to parse 'dotnet ef migrations list --json' output as JSON: ${String(error)}`
     );
   }
+  return {
+    raw: result.stdout.trim(),
+    entries, // EF returns migrations in apply order — callers rely on this to detect a contiguous pending suffix
+    applied: entries.filter((m) => m.applied === true).map((m) => m.id),
+    pending: entries.filter((m) => m.applied !== true).map((m) => m.id)
+  };
+}
 
-  // Structured `applied` (true/false/null) replaces scraping a "(Pending)" text marker —
-  // immune to CLI locale translation and to any future reformatting of the human-readable
-  // output. Treat anything other than `applied === true` (including an unexpected `null`)
-  // as pending: safer to flag a migration for attention than to silently assume it's applied.
-  const applied = entries.filter((m) => m.applied === true).map((m) => m.id);
-  const pending = entries.filter((m) => m.applied !== true).map((m) => m.id);
+export async function handleMigrationStatus(
+  args: { environment?: string; profile?: ResponseProfile },
+  connections: ConnectionManager,
+  config: MigrationConfig
+): Promise<CallToolResult> {
+  assertMigrationEnabled(config);
+  const env = connections.getEnvironment(args.environment);
+  const { raw, applied, pending } = await listMigrations(config, env.connectionString);
 
   return asText(
     {
@@ -112,7 +137,9 @@ export async function handleMigrationStatus(
       pendingCount: pending.length,
       applied,
       pending,
-      raw: result.stdout.trim()
+      // Redundant with applied[]/pending[] (same ids + name/safeName/applied per entry); scales with
+      // total migration files, so gate it to verbose (PG-STA-001).
+      raw: verboseOnly(raw, args.profile ?? "compact")
     },
     args.profile ?? "compact"
   );
@@ -137,7 +164,7 @@ export async function handleMigrationAdd(
       name: args.name,
       generatedFiles: files,
       note: "Migration generated. You may edit the generated .cs file before previewing/applying.",
-      raw: result.stdout.trim()
+      raw: verboseOnly(result.stdout.trim(), args.profile ?? "compact")
     },
     args.profile ?? "compact"
   );
@@ -151,23 +178,72 @@ export async function handleMigrationPreview(
   config: MigrationConfig
 ): Promise<CallToolResult> {
   assertMigrationEnabled(config);
+  const profile = args.profile ?? "compact";
   const env = connections.getEnvironment(args.environment, true); // migrations are writes → require writable env
   const pool = connections.getPool(args.environment, true);
 
-  const preSnapshot = await captureSchema(pool);
-  const script = efOk(await efMigrationsScript(config, env.connectionString), "migrations script").stdout;
-
+  // Sweep before anything else so expired records are evicted on every preview call — even the
+  // `no_pending` path below returns early, so leaving the sweep after it would strand records
+  // whenever the target env has nothing pending.
   sweepExpiredMigrationPreviews();
+
+  // captureSchema (a DB round-trip) and listMigrations (a dotnet subprocess) are independent —
+  // run them together. `entries` is in EF apply order; the connected list is what tells us which
+  // migrations are actually pending on THIS DB (the idempotent script's IF NOT EXISTS guards
+  // only decide that at runtime).
+  const [preSnapshot, listing] = await Promise.all([
+    captureSchema(pool),
+    listMigrations(config, env.connectionString)
+  ]);
+  const { entries, pending } = listing;
+  if (pending.length === 0) {
+    return asText({ environment: env.name, status: "no_pending", note: "No pending migrations." }, profile);
+  }
+
+  // Is the pending set a contiguous suffix (the normal linear case)? If so we can script just the
+  // delta from the migration right before the first pending one. If NOT — a pending migration has
+  // an id ordered before an already-applied one (branch merges apply migrations out of id order) —
+  // no `script <from>` range can represent a non-contiguous subset, so fall back to the idempotent
+  // full script, which guards each migration individually and is correct at any migration point.
+  const firstPendingIdx = entries.findIndex((m) => m.applied !== true);
+  const contiguous = entries.slice(firstPendingIdx + 1).every((m) => m.applied !== true);
+  const fromId = firstPendingIdx > 0 ? entries[firstPendingIdx - 1].id : undefined;
+
+  let pendingScript: string;
+  let fullScript: string | undefined;
+  if (contiguous) {
+    // Net pending SQL only — scripting from the last applied migration yields just the delta,
+    // not the whole guarded baseline (the ~50 KB PG-PRV-001 problem). Delta and (verbose-only)
+    // full idempotent script are independent dotnet invocations → run them together.
+    const [delta, full] = await Promise.all([
+      efMigrationsScriptDelta(config, env.connectionString, fromId),
+      profile === "verbose"
+        ? efMigrationsScript(config, env.connectionString)
+        : Promise.resolve(undefined)
+    ]);
+    pendingScript = efOk(delta, "migrations script").stdout.trim();
+    fullScript = full ? efOk(full, "migrations script").stdout : undefined;
+  } else {
+    // Non-contiguous: the idempotent full script IS the correct pending representation, so it
+    // doubles as both `pendingScript` and the verbose `script` (one invocation, no delta call).
+    const full = efOk(await efMigrationsScript(config, env.connectionString), "migrations script").stdout;
+    pendingScript = full.trim();
+    fullScript = profile === "verbose" ? full : undefined;
+  }
+
   const previewId = randomUUID();
   const expiresAt = new Date(Date.now() + config.previewTtlMs).toISOString();
-  const digest = migrationDigest(env.name, preSnapshot.snapshotId, script);
+  // Digest binds the previewed SQL — the plan migration_apply will run. `apply` uses
+  // `dotnet ef database update` (applies exactly the pending set) + the preSnapshotId drift guard
+  // and the pending-set re-check, never a stored script, so binding to what we showed is stable.
+  const digest = migrationDigest(env.name, preSnapshot.snapshotId, pendingScript);
   const approvalToken = issueApprovalToken(previewId, digest, expiresAt, config.approvalSecret);
 
   migrationPreviews.set(previewId, {
     previewId,
     environment: env.name,
     preSnapshotId: preSnapshot.snapshotId,
-    script,
+    pendingMigrations: pending,
     digest,
     expiresAt
   });
@@ -178,10 +254,13 @@ export async function handleMigrationPreview(
       approvalToken,
       environment: env.name,
       preSnapshotId: preSnapshot.snapshotId,
-      script,
+      pendingCount: pending.length,
+      pendingMigrations: pending,
+      pendingScript,
+      script: fullScript, // undefined unless verbose — JSON.stringify drops it
       expiresAt
     },
-    args.profile ?? "standard"
+    profile
   );
 }
 
@@ -195,23 +274,40 @@ export async function handleMigrationApply(
   assertMigrationEnabled(config);
   const preview = migrationPreviews.get(args.previewId);
   if (!preview) {
+    // Record is swept only after PG_MIGRATION_PREVIEW_TTL_MS (default 1h) or on server restart;
+    // within that window a human-gated approval can pause freely — the token's own expiry no
+    // longer blocks apply (PG-PRV-002), the drift guard below is the real staleness check.
     throw new PolicyViolationError("PREVIEW_NOT_FOUND", `Migration preview '${args.previewId}' not found or expired.`);
   }
-  if (Date.parse(preview.expiresAt) < Date.now()) {
-    migrationPreviews.delete(args.previewId);
-    throw new PolicyViolationError("PREVIEW_EXPIRED", "Migration preview expired. Create a fresh migration_preview.");
-  }
-  verifyApprovalToken(args.approvalToken, preview.previewId, preview.digest, preview.expiresAt, config.approvalSecret);
+  // ignoreExpiry: freshness for a schema migration is proven by the drift guard (below), not the
+  // time-box — see verifyApprovalToken. The record-existence check above still bounds how stale a
+  // preview can be, and the HMAC still proves this token was issued for this exact plan.
+  verifyApprovalToken(args.approvalToken, preview.previewId, preview.digest, preview.expiresAt, config.approvalSecret, {
+    ignoreExpiry: true
+  });
 
   const env = connections.getEnvironment(preview.environment, true);
   const pool = connections.getPool(preview.environment, true);
 
-  // Drift guard: schema must still match what was previewed.
-  const preSnapshot = await captureSchema(pool);
+  // Two independent freshness checks, run together (schema round-trip + dotnet subprocess):
+  //  1. Schema drift — the live schema must still match what was previewed.
+  //  2. Pending-set drift — the set of pending migrations must be unchanged. Adding a migration
+  //     between preview and apply leaves the schema untouched, so the snapshot guard alone would
+  //     miss it and `dotnet ef database update` would apply migrations that were never previewed.
+  const [preSnapshot, current] = await Promise.all([
+    captureSchema(pool),
+    listMigrations(config, env.connectionString)
+  ]);
   if (preSnapshot.snapshotId !== preview.preSnapshotId) {
     throw new PolicyViolationError(
       "MIGRATION_DRIFT",
       "Schema changed since migration_preview. Re-run migration_preview before applying."
+    );
+  }
+  if (current.pending.join(",") !== preview.pendingMigrations.join(",")) {
+    throw new PolicyViolationError(
+      "MIGRATION_DRIFT",
+      "Pending migration set changed since migration_preview. Re-run migration_preview before applying."
     );
   }
 
@@ -263,7 +359,7 @@ export async function handleMigrationApply(
       // otherwise report schemaChanged:false alongside two different snapshot IDs.
       schemaChanged: preSnapshot.snapshotId !== postSnapshot.snapshotId,
       diff,
-      raw: updateResult.stdout.trim()
+      raw: verboseOnly(updateResult.stdout.trim(), args.profile ?? "compact")
     },
     args.profile ?? "compact"
   );

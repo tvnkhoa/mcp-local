@@ -77,7 +77,11 @@ const migrationConfig: MigrationConfig = {
   startupProject: (process.env.CH_DOTNET_STARTUP_PROJECT ?? "").trim(),
   timeoutMs: numberFromEnv("PG_DOTNET_TIMEOUT_MS", 120_000),
   approvalSecret: APPROVAL_SECRET,
-  previewTtlMs: numberFromEnv("PG_WRITE_PREVIEW_TTL_MS", 900_000)
+  // Longer default (1h) than write previews: migration_apply against a prod-like env is
+  // human-gated, so the preview→approve pause can outlast the 15-min write TTL. This bounds
+  // how long the in-memory preview record survives; freshness is enforced by the drift guard
+  // at apply time, not this window (see handleMigrationApply / PG-PRV-002).
+  previewTtlMs: numberFromEnv("PG_MIGRATION_PREVIEW_TTL_MS", 3_600_000)
 };
 
 const environmentArg = z.string().min(1).max(64).optional();
@@ -401,7 +405,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: "migration_preview",
-        description: "Snapshot current schema + produce the idempotent migration SQL that WILL run, and return an approval token.",
+        description: "Snapshot current schema + return the pending migration SQL delta and an approval token. Full idempotent script available at profile:verbose.",
         inputSchema: {
           type: "object",
           additionalProperties: false,
