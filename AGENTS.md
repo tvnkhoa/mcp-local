@@ -4,11 +4,13 @@ Agent guidance for the `mcp-local` workspace containing two MCP servers: `codeba
 
 ## Workspace Structure
 
-Multi-project workspace with two independent MCP servers:
+Multi-project workspace with four independent MCP servers:
 - `codebase-index-mcp/` - TypeScript/Node.js codebase indexing and graph analysis server
 - `postgres-mcp/` - Read-only PostgreSQL query server with SQL guardrails
+- `observe-mcp/` - Read-only OpenObserve log/trace query server for the CommunicationHub backend
+- `bitbucket-mcp/` - Bitbucket Cloud server: read repositories/PRs and create pull requests (write-gated)
 
-Both use `type: "module"` (ES modules), TypeScript 5.7+, and `@modelcontextprotocol/sdk`.
+All use `type: "module"` (ES modules), TypeScript 5.7+, and `@modelcontextprotocol/sdk`.
 
 ## Essential Commands
 
@@ -187,6 +189,20 @@ Default: watchless operation (`CODEBASE_INDEX_WATCH_AUTO_START=false`)
 - `MCP_DB_MAX_LIMIT` - Maximum row limit (default: 2000)
 - `MCP_DB_DEFAULT_TIMEOUT_MS` - Default query timeout (default: 30000)
 - `MCP_DB_MAX_TIMEOUT_MS` - Maximum query timeout (default: 60000)
+
+### bitbucket-mcp (required)
+
+- `BITBUCKET_ACCESS_TOKEN` - Repository/Workspace Access Token (sent as `Bearer`). Alternative: `BITBUCKET_EMAIL` + `BITBUCKET_API_TOKEN` (Atlassian API token, Basic auth)
+- `BITBUCKET_WORKSPACE` - Workspace slug
+
+### bitbucket-mcp (optional)
+
+- `BITBUCKET_DEFAULT_REPO` - Default repo slug (omit `repoSlug` per call)
+- `BITBUCKET_BASE_URL` - API base URL (default: `https://api.bitbucket.org/2.0`)
+- `BITBUCKET_WRITE_ENABLED` - Allow `create_pull_request` (default: `false`; ON only for `true`/`1`)
+- `BITBUCKET_TIMEOUT_MS` - Per-request timeout (default: 30000)
+- `BITBUCKET_MAX_RETRIES` - Retries for network/429/5xx (default: 2)
+- `BITBUCKET_DEFAULT_PAGELEN` / `BITBUCKET_MAX_PAGELEN` - List page size (default: 25 / 100)
 
 ## Architecture Notes
 

@@ -4,11 +4,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Workspace Overview
 
-Three independent MCP servers — **not** a monorepo with shared packages. Each has its own `package.json`, `tsconfig.json`, and `dist/`. All use TypeScript 5.7+ with ESM (`"type": "module"`) and `@modelcontextprotocol/sdk`.
+Four independent MCP servers — **not** a monorepo with shared packages. Each has its own `package.json`, `tsconfig.json`, and `dist/`. All use TypeScript 5.7+ with ESM (`"type": "module"`) and `@modelcontextprotocol/sdk`.
 
 - `codebase-index-mcp/` — Code graph indexing and analysis server. Most development work happens here.
 - `postgres-mcp/` — PostgreSQL MCP server. Read-only by default (SQL guardrails); optional multi-environment access, reviewed/confirmed data writes, and EF Core migration tooling, each gated behind explicit env flags.
 - `observe-mcp/` — OpenObserve log/trace MCP server for the CommunicationHub backend. Read-only; queries the self-hosted OpenObserve `_search` API to search logs and trace a request end-to-end by trace id (`search_logs`, `trace_logs`, `get_trace_spans`, `log_stats`, ...). Credentials via env only. Registered as `observe-mcp` in `~/.claude.json`.
+- `bitbucket-mcp/` — Bitbucket Cloud MCP server. Reads repositories/pull requests and **creates pull requests** (`list_repositories`, `get_repository`, `list_branches`, `list_pull_requests`, `get_pull_request`, `get_pull_request_diff`, `create_pull_request`). Uses scopes `read:repository` / `read:pullrequest` / `write:pullrequest`. Auth via env (`BITBUCKET_ACCESS_TOKEN` Bearer, or `BITBUCKET_EMAIL`+`BITBUCKET_API_TOKEN` Basic). **PR creation is OFF unless `BITBUCKET_WRITE_ENABLED=true`**; `create_pull_request` supports `dryRun`. Registered as `bitbucket-mcp` in `~/.claude.json`.
 
 ## Commands
 
