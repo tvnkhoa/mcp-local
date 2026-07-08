@@ -5,9 +5,9 @@
  */
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
-import { mkdtempSync, writeFileSync, mkdirSync } from "fs";
-import { tmpdir } from "os";
+import { writeFileSync, mkdirSync } from "fs";
 import { join } from "path";
+import { makeTempDir } from "./_fixtures.mjs";
 
 let passed = 0, failed = 0;
 function assert(cond, label, detail = "") {
@@ -17,7 +17,7 @@ function assert(cond, label, detail = "") {
 const txt = (r) => Array.isArray(r?.content) ? (r.content.find((x) => x.type === "text")?.text ?? "") : "";
 const js = (r) => { try { return JSON.parse(txt(r)); } catch { return null; } };
 
-const root = mkdtempSync(join(tmpdir(), "vcontract-test-"));
+const root = makeTempDir("vcontract-test-");
 const dbPath = join(root, "vc.db");
 const repoAPath = join(root, "service-a");
 const repoBPath = join(root, "service-b");

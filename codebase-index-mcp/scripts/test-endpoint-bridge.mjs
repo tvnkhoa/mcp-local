@@ -1,19 +1,13 @@
 import assert from "node:assert";
-import fs from "node:fs";
-import os from "node:os";
-import path from "node:path";
 
 import { GraphStore } from "../dist/graphStore.js";
 import { extractGraphData } from "../dist/treeSitterExtractor.js";
-
-function createTempDbPath() {
-  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "cbi-endpoint-bridge-"));
-  return path.join(tempDir, "test.db");
-}
+import { makeTempDbPath } from "./_fixtures.mjs";
 
 function run() {
-  const dbPath = createTempDbPath();
+  const dbPath = makeTempDbPath("cbi-endpoint-bridge-");
   const store = new GraphStore(dbPath);
+  try {
 
   const providerRepoId = "repo-provider-api";
   const consumerRepoId = "repo-consumer-client";
@@ -120,7 +114,10 @@ public class MessageClient
   const endpointLink = crossDeps.find((d) => d.toRepoId === providerRepoId && d.type === "DEPENDS_ON");
   assert(endpointLink, "Expected cross-repo endpoint link from consumer method to provider endpoint symbol");
 
-  console.log("[ok] Endpoint bridge resolution smoke test passed");
+    console.log("[ok] Endpoint bridge resolution smoke test passed");
+  } finally {
+    store.close();
+  }
 }
 
 run();

@@ -2,16 +2,30 @@
 // Extracted from codebase-index-mcp/scripts/setup.mjs, generalized over entry + env.
 
 import { spawn } from "node:child_process";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 
 // A healthy stdio MCP server answers `initialize` regardless of backend
 // credentials (creds only matter on tool calls), so we treat a valid response
 // as the authoritative health signal. Resolves to { ok:boolean, message:string }.
 export function verifyServer(entryPath, env = {}) {
   return new Promise((resolve) => {
+    // The handshake opens the server's persistence layer on startup — for codebase-index that
+    // creates a SQLite DB. Confine any such side effect to a throwaway temp dir (cwd + an
+    // isolated CODEBASE_INDEX_DB_PATH) so a health/install probe never drops a stray *.db into
+    // the workspace root. The DB path is irrelevant to `initialize` (creds/paths only matter on
+    // tool calls), so overriding it does not weaken the health signal.
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-verify-"));
+    const cleanup = () => { try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch { /* best-effort */ } };
+
     const proc = spawn("node", [entryPath], {
-      env: { ...process.env, ...env },
+      cwd: tmpDir,
+      env: { ...process.env, ...env, CODEBASE_INDEX_DB_PATH: path.join(tmpDir, "verify.db") },
       stdio: ["pipe", "pipe", "pipe"],
     });
+    let closed = false;
+    proc.on("close", () => { closed = true; });
 
     let settled = false;
     let stdout = "";
@@ -21,8 +35,22 @@ export function verifyServer(entryPath, env = {}) {
       settled = true;
       clearTimeout(aliveTimer);
       clearTimeout(writeTimer);
-      try { proc.kill(); } catch {}
-      resolve({ ok: okFlag, message });
+      // On the success path the child is still alive and holds verify.db (an immediate rmSync
+      // would EBUSY on Windows). Wait for it to exit — releasing the file handle — before
+      // cleaning up and resolving, with a fallback so a wedged child can't hang the probe.
+      let finished = false;
+      const finish = () => {
+        if (finished) return;
+        finished = true;
+        clearTimeout(fallback);
+        cleanup();
+        resolve({ ok: okFlag, message });
+      };
+      const fallback = setTimeout(finish, 2000);
+      if (typeof fallback.unref === "function") fallback.unref();
+      if (closed) finish();
+      else proc.once("close", finish);
+      try { proc.kill(); } catch { finish(); }
     }
 
     // No `initialize` response within 10s → not healthy (e.g. hung on a bad

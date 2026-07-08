@@ -214,6 +214,7 @@ public sealed class FixtureNoRewrite
     env: {
       ...process.env,
       CODEBASE_INDEX_ALLOWED_ROOTS: repoPath,
+      CODEBASE_INDEX_DB_PATH: join(repoPath, "index.db"),
       CODEBASE_INDEX_LLM_ENABLED: "false",
       // Use a deterministic secret so approval tokens can be generated
       CODEBASE_INDEX_REFACTOR_APPROVAL_SECRET: "test-secret-for-regression-suite"

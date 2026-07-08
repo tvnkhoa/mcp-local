@@ -1,15 +1,12 @@
 import assert from "node:assert";
-import fs from "node:fs";
-import os from "node:os";
-import path from "node:path";
 
 import { extractDotnetProjectData } from "../dist/dotnetProjectParser.js";
 import { GraphStore } from "../dist/graphStore.js";
 import { toNugetContractId } from "../dist/responseFormatter.js";
+import { makeTempDbPath } from "./_fixtures.mjs";
 
 function createTempDbPath() {
-  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "cbi-nuget-bridge-"));
-  return path.join(tempDir, "test.db");
+  return makeTempDbPath("cbi-nuget-bridge-");
 }
 
 function run() {
@@ -96,6 +93,7 @@ function run() {
   assert.equal(packageBridgeStats.packageResolved, 1, "Expected one package bridge resolution");
   assert.equal(packageBridgeStats.packageNoCandidate, 1, "Expected one unresolved package bridge candidate");
 
+  store.close();
   console.log("[ok] NuGet bridge resolution smoke test passed");
 }
 
@@ -152,6 +150,7 @@ function runImplicitPackageIdScenario() {
   const stats = store.getPackageBridgeStats(consumerRepoId);
   assert.equal(stats.packageResolved, 1, "Expected bridge to resolve against implicit (project-name) PackageId");
 
+  store.close();
   console.log("[ok] NuGet bridge implicit-PackageId scenario passed");
 }
 
@@ -226,6 +225,7 @@ function runContractCollisionTiebreakScenario() {
   const consumers = store.findPackageConsumers("nuget:acme.common", null, 10);
   assert.equal(consumers.length, 1, "Expected the colliding contract to resolve (not be dropped as ambiguous)");
   assert.equal(consumers[0].providerRepoId, realProviderRepoId, "Expected resolution to prefer the most complete provider repo");
+  store.close();
   console.log("[ok] NuGet bridge contract-collision tiebreak scenario passed");
 }
 

@@ -10,10 +10,9 @@
  */
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
-import { mkdtempSync, writeFileSync, mkdirSync, readFileSync } from "fs";
-import { tmpdir } from "os";
+import { writeFileSync, mkdirSync, readFileSync } from "fs";
 import { join } from "path";
-import { bufferOverflowPad } from "./_fixtures.mjs";
+import { bufferOverflowPad, makeTempDir } from "./_fixtures.mjs";
 
 let passed = 0, failed = 0;
 function assert(cond, label, detail = "") {
@@ -26,7 +25,7 @@ const js = (r) => { try { return JSON.parse(txt(r)); } catch { return null; } };
 // >32KB pad that exercises the bufferSize fix without tripping the minified-file filter (see helper).
 const PAD = bufferOverflowPad();
 
-const tmpDir = mkdtempSync(join(tmpdir(), "cvr-test-"));
+const tmpDir = makeTempDir("cvr-test-");
 const repoId = `cvr-${Date.now()}`;
 mkdirSync(join(tmpDir, "src"), { recursive: true });
 const sourcePath = join(tmpDir, "src", "Conversation.cs");
@@ -58,7 +57,7 @@ ${PAD}`, "utf8");
 const transport = new StdioClientTransport({
   command: "node",
   args: ["dist/index.js"],
-  env: { ...process.env, CODEBASE_INDEX_ALLOWED_ROOTS: tmpDir, CODEBASE_INDEX_LLM_ENABLED: "false" },
+  env: { ...process.env, CODEBASE_INDEX_ALLOWED_ROOTS: tmpDir, CODEBASE_INDEX_DB_PATH: join(tmpDir, "index.db"), CODEBASE_INDEX_LLM_ENABLED: "false" },
   stderr: "pipe"
 });
 const client = new Client({ name: "cvr-test", version: "0.1.0" });

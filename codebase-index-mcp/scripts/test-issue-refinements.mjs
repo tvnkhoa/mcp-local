@@ -121,7 +121,7 @@ async function main() {
   const transport = new StdioClientTransport({
     command: "node",
     args: ["dist/index.js"],
-    env: { ...process.env, CODEBASE_INDEX_ALLOWED_ROOTS: root },
+    env: { ...process.env, CODEBASE_INDEX_ALLOWED_ROOTS: root, CODEBASE_INDEX_DB_PATH: path.join(root, "index.db") },
     stderr: "pipe"
   });
   const client = new Client({ name: "test-refinements", version: "0.1.0" });

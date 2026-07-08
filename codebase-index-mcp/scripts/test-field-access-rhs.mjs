@@ -5,9 +5,9 @@
  */
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
-import { mkdtempSync, writeFileSync, mkdirSync } from "fs";
-import { tmpdir } from "os";
+import { writeFileSync, mkdirSync } from "fs";
 import { join } from "path";
+import { makeTempDir } from "./_fixtures.mjs";
 
 let passed = 0, failed = 0;
 function assert(cond, label, detail = "") {
@@ -17,7 +17,7 @@ function assert(cond, label, detail = "") {
 const txt = (r) => Array.isArray(r?.content) ? (r.content.find((x) => x.type === "text")?.text ?? "") : "";
 const js = (r) => { try { return JSON.parse(txt(r)); } catch { return null; } };
 
-const tmpDir = mkdtempSync(join(tmpdir(), "rhs-test-"));
+const tmpDir = makeTempDir("rhs-test-");
 const repoId = `rhs-${Date.now()}`;
 mkdirSync(join(tmpDir, "src"), { recursive: true });
 writeFileSync(join(tmpDir, "src", "Conversation.cs"), `public class Conversation
@@ -39,7 +39,7 @@ public class Handler
 const transport = new StdioClientTransport({
   command: "node",
   args: ["dist/index.js"],
-  env: { ...process.env, CODEBASE_INDEX_ALLOWED_ROOTS: tmpDir, CODEBASE_INDEX_LLM_ENABLED: "false" },
+  env: { ...process.env, CODEBASE_INDEX_ALLOWED_ROOTS: tmpDir, CODEBASE_INDEX_DB_PATH: join(tmpDir, "index.db"), CODEBASE_INDEX_LLM_ENABLED: "false" },
   stderr: "pipe"
 });
 const client = new Client({ name: "rhs-test", version: "0.1.0" });
