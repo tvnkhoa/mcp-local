@@ -1,5 +1,6 @@
 import type Database from "better-sqlite3";
 import type { StringLiteralRecord } from "./types.js";
+import { indexLog, indexWarn } from "./indexProgress.js";
 
 // ISSUE-023 — string-literal lane storage. Bảng riêng + FTS5 external-content
 // (mirror docs_fts): KHÔNG nhét vào symbols để không phá ranking search_symbols
@@ -39,7 +40,7 @@ export function rebuildLiteralsFtsImpl(db: Database.Database): void {
       // External-content FTS5 không cho DELETE FROM thường — dùng lệnh 'delete-all'.
       db.prepare(`insert into literals_fts(literals_fts) values('delete-all')`).run();
     } catch {
-      process.stderr.write(`[index-literals-fts] literals_fts malformed, recreating...\n`);
+      indexLog(`[index-literals-fts] literals_fts malformed, recreating...`);
       db.exec(`drop table if exists literals_fts`);
       db.exec(`
         create virtual table if not exists literals_fts using fts5(
@@ -61,9 +62,9 @@ export function rebuildLiteralsFtsImpl(db: Database.Database): void {
       ).run(chunkSize, offset);
     }
     db.prepare(`insert into literals_fts(literals_fts) values('optimize')`).run();
-    process.stderr.write(`[index-literals-fts] indexed ${cnt} literals in ${Date.now() - start}ms\n`);
+    indexLog(`[index-literals-fts] indexed ${cnt} literals in ${Date.now() - start}ms`);
   } catch (e) {
-    process.stderr.write(`[index-literals-fts-error] ${e instanceof Error ? e.message : String(e)}\n`);
+    indexWarn(`[index-literals-fts-error] ${e instanceof Error ? e.message : String(e)}`);
   }
 }
 

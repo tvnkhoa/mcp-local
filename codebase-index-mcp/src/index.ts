@@ -21,6 +21,7 @@ import { z } from "zod";
 
 import { GraphStore } from "./graphStore.js";
 import { runIndexPipeline, INDEX_VERSION, type PerformanceProfile } from "./indexPipeline.js";
+import { createIndexProgress, indexLog } from "./indexProgress.js";
 import {
   assertPathAllowed,
   clamp,
@@ -1124,12 +1125,27 @@ server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
   return handleReadResource(request.params.uri, store, MAX_RESULT_LIMIT);
 });
 
-server.setRequestHandler(CallToolRequestSchema, async (request) => {
+server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
   const toolName = request.params.name;
   const startedAt = Date.now();
   const args = asArgsRecord(request.params.arguments);
 
-  return toolContextStorage.run({ toolName, startedAt, args }, async () => {
+  // If the host requested progress (supplied a progressToken), build a sink that
+  // streams notifications/progress back for the duration of this tool call.
+  const progressToken = (request.params._meta as { progressToken?: string | number } | undefined)?.progressToken;
+  const progressNotifier =
+    progressToken !== undefined
+      ? (progress: number, total: number | undefined, message: string): void => {
+          void extra
+            .sendNotification({
+              method: "notifications/progress",
+              params: { progressToken, progress, ...(total !== undefined ? { total } : {}), message },
+            })
+            .catch(() => { /* progress is best-effort; never fail the tool over it */ });
+        }
+      : undefined;
+
+  return toolContextStorage.run({ toolName, startedAt, args, progressNotifier }, async () => {
     try {
       await maybeAutoActivateWatchFromArgs(toolName, args);
 
@@ -1545,8 +1561,8 @@ async function runIndexAndResolve(
       totalResolved += resolved;
       iteration += 1;
 
-      process.stderr.write(
-        `[index-post-batch] repoId=${_repoId} type=${label} batch=${String(iteration)} resolved=${String(resolved)} total=${String(totalResolved)}\n`
+      indexLog(
+        `[index-post-batch] repoId=${_repoId} type=${label} batch=${String(iteration)} resolved=${String(resolved)} total=${String(totalResolved)}`
       );
 
       // If nothing resolved in this batch, we're done
@@ -1577,10 +1593,10 @@ async function runIndexAndResolve(
         skipReason: "no dirty files"
       });
       store.recordRun(noOp);
-      process.stderr.write(`[index-dirty] repoId=${repoId} no working-tree changes — nothing to re-index\n`);
+      indexLog(`[index-dirty] repoId=${repoId} no working-tree changes — nothing to re-index`);
       return noOp;
     }
-    process.stderr.write(`[index-dirty] repoId=${repoId} re-indexing ${String(dirtyFileSet.size)} working-tree-changed file(s)\n`);
+    indexLog(`[index-dirty] repoId=${repoId} re-indexing ${String(dirtyFileSet.size)} working-tree-changed file(s)`);
   }
 
   if (mode === "incremental") {
@@ -1595,7 +1611,7 @@ async function runIndexAndResolve(
         skipReason: skipDecision.reason
       });
       store.recordRun(skippedSummary);
-      process.stderr.write(`[index-skip] repoId=${repoId} reason=${skipDecision.reason}\n`);
+      indexLog(`[index-skip] repoId=${repoId} reason=${skipDecision.reason}`);
       return skippedSummary;
     }
   }
@@ -1607,14 +1623,22 @@ async function runIndexAndResolve(
   // Previous condition `mode !== "full"` was a bug — full index rebuilds all edges from scratch
   // so implements edges also need post-phase resolution.
   const effectiveResolveImplementsInPost = postPolicy.resolveImplementsInPost;
-  process.stderr.write(
-    `[index-policy] repoId=${repoId} profile=${performanceProfile} source=${profileDecision.source} reason=${profileDecision.reason} fileCount=${String(profileDecision.fileCount)} symbolCount=${String(profileDecision.symbolCount)} maxUnresolvedRows=${String(postPolicy.maxUnresolvedRows)} resolveTypeRefs=${String(postPolicy.resolveTypeRefs)} resolvePropertyRefs=${String(postPolicy.resolvePropertyRefs)} resolveImplementsInPost=${String(postPolicy.resolveImplementsInPost)} effectiveResolveImplementsInPost=${String(effectiveResolveImplementsInPost)}\n`
+  indexLog(
+    `[index-policy] repoId=${repoId} profile=${performanceProfile} source=${profileDecision.source} reason=${profileDecision.reason} fileCount=${String(profileDecision.fileCount)} symbolCount=${String(profileDecision.symbolCount)} maxUnresolvedRows=${String(postPolicy.maxUnresolvedRows)} resolveTypeRefs=${String(postPolicy.resolveTypeRefs)} resolvePropertyRefs=${String(postPolicy.resolvePropertyRefs)} resolveImplementsInPost=${String(postPolicy.resolveImplementsInPost)} effectiveResolveImplementsInPost=${String(effectiveResolveImplementsInPost)}`
   );
+
+  // One progress reporter drives the whole run: the pipeline advances it through
+  // scan → index, then we keep it going across the edge-resolution post-phase below
+  // and stop() it with a summary. When the host supplied a progressToken, its
+  // update()s stream `notifications/progress` so Claude Code shows live % + phase.
+  const progress = createIndexProgress(repoId, toolContextStorage.getStore()?.progressNotifier);
+  const runStartedMs = Date.now();
 
   // Disable WAL auto-checkpoint during indexing to prevent lock contention
   // with concurrent readers. Will be re-enabled in endIndexSession().
   store.beginIndexSession();
 
+  // On throw the pipeline stops the reporter itself (failure line) before rethrowing.
   const summary = await runIndexPipeline(store, {
     repoId,
     repoPath,
@@ -1629,7 +1653,8 @@ async function runIndexAndResolve(
     maxFileSizeBytes: MAX_FILE_SIZE_BYTES,
     parseWorkers: PARSE_WORKERS,
     parseJobTimeoutMs: PARSE_JOB_TIMEOUT_MS,
-    onlyRelativePaths: dirtyFileSet
+    onlyRelativePaths: dirtyFileSet,
+    progress
   });
   const resolvePhaseStart = Date.now();
   let ftsRebuildMs = 0;
@@ -1641,39 +1666,41 @@ async function runIndexAndResolve(
   let propertyResolveMs = 0;
   let implementsResolveMs = 0;
 
-  process.stderr.write(`[index-post] repoId=${repoId} rebuilding FTS indexes...\n`);
+  progress.phase("finalizing");
+  indexLog(`[index-post] repoId=${repoId} rebuilding FTS indexes...`);
   const ftsStart = Date.now();
   try { store.rebuildFts(); } catch { /* non-fatal */ }
   await yieldToEventLoop();
   try { store.rebuildLiteralsFts(); } catch { /* non-fatal */ }
   await yieldToEventLoop();
   if (docsEnabled) {
-    process.stderr.write(`[index-post] repoId=${repoId} rebuilding docs FTS...\n`);
+    indexLog(`[index-post] repoId=${repoId} rebuilding docs FTS...`);
     try { store.rebuildDocsFts(); } catch { /* non-fatal */ }
     await yieldToEventLoop();
   }
   ftsRebuildMs = Date.now() - ftsStart;
 
-  process.stderr.write(`[index-post] repoId=${repoId} resolving cross-repo links...\n`);
+  indexLog(`[index-post] repoId=${repoId} resolving cross-repo links...`);
   const crossStats = safeCrossRepoResolve(repoId);
   await yieldToEventLoop();
 
-  process.stderr.write(`[index-post] repoId=${repoId} resolving call edges...\n`);
+  progress.phase("resolving calls");
+  indexLog(`[index-post] repoId=${repoId} resolving call edges...`);
   const callEdgesResolved = await (async () => {
     const callStart = Date.now();
     try {
       // Build lookup maps ONCE, then process in batches to avoid blocking event loop
-      process.stderr.write(`[index-post] repoId=${repoId} building call resolution context...\n`);
+      indexLog(`[index-post] repoId=${repoId} building call resolution context...`);
       const ctxStart = Date.now();
       const ctx = store.buildCallResolutionContext(repoId);
       buildContextMs = Date.now() - ctxStart;
       callEdgesAttempted = ctx.unresolvedRows.length;
-      process.stderr.write(`[index-post] repoId=${repoId} pre-fetched ${String(ctx.unresolvedRows.length)} unresolved call edges\n`);
+      indexLog(`[index-post] repoId=${repoId} pre-fetched ${String(ctx.unresolvedRows.length)} unresolved call edges`);
       if (ctx.unresolvedRows.length === 0) return 0;
 
       // Optimization: drop secondary edge indexes before bulk resolve to speed up UPDATEs.
       // Each UPDATE otherwise must maintain 4 secondary indexes on the edges table.
-      process.stderr.write(`[index-post] repoId=${repoId} dropping edge indexes for bulk resolve...\n`);
+      indexLog(`[index-post] repoId=${repoId} dropping edge indexes for bulk resolve...`);
       store.dropEdgeIndexesForBulkWrite();
 
       const BATCH_SIZE = 5_000;
@@ -1684,8 +1711,11 @@ async function runIndexAndResolve(
         const resolved = store.resolveCallEdgesBatch(repoId, ctx, BATCH_SIZE);
         total += resolved;
         iteration += 1;
-        process.stderr.write(
-          `[index-post-batch] repoId=${repoId} type=call batch=${String(iteration)} resolved=${String(resolved)} total=${String(total)}\n`
+        // Heartbeat only — keep the real symbol count in the message rather than
+        // overwriting it with the resolved-call-edge total.
+        progress.update({});
+        indexLog(
+          `[index-post-batch] repoId=${repoId} type=call batch=${String(iteration)} resolved=${String(resolved)} total=${String(total)}`
         );
         if (resolved === 0) break;
         await yieldToEventLoop();
@@ -1694,14 +1724,15 @@ async function runIndexAndResolve(
     } catch { return 0; }
     finally {
       // Always rebuild indexes after resolve, even on error
-      process.stderr.write(`[index-post] repoId=${repoId} rebuilding edge indexes after resolve...\n`);
+      indexLog(`[index-post] repoId=${repoId} rebuilding edge indexes after resolve...`);
       try { store.rebuildEdgeIndexes(); } catch { /* non-fatal */ }
       callResolveMs = Date.now() - callStart;
     }
   })();
   await yieldToEventLoop();
 
-  process.stderr.write(`[index-post] repoId=${repoId} resolving import edges...\n`);
+  progress.phase("resolving imports");
+  indexLog(`[index-post] repoId=${repoId} resolving import edges...`);
   const importStart = Date.now();
   const importEdgesResolved = await resolveInBatches(
     repoId,
@@ -1713,55 +1744,56 @@ async function runIndexAndResolve(
   await yieldToEventLoop();
 
   if (postPolicy.resolveTypeRefs) {
-    process.stderr.write(`[index-post] repoId=${repoId} resolving type references...\n`);
+    progress.phase("resolving types");
+    indexLog(`[index-post] repoId=${repoId} resolving type references...`);
     const typeStart = Date.now();
     (() => { try { store.resolveTypeRefEdges(repoId, postPolicy.maxUnresolvedRows); } catch { /* non-fatal */ } })();
     typeResolveMs = Date.now() - typeStart;
   } else {
-    process.stderr.write(`[index-post-skip] repoId=${repoId} skipping type reference resolution by policy\n`);
+    indexLog(`[index-post-skip] repoId=${repoId} skipping type reference resolution by policy`);
   }
   await yieldToEventLoop();
 
   if (postPolicy.resolvePropertyRefs) {
-    process.stderr.write(`[index-post] repoId=${repoId} resolving property references...\n`);
+    indexLog(`[index-post] repoId=${repoId} resolving property references...`);
     const propertyStart = Date.now();
     (() => { try { store.resolvePropertyEdges(repoId, postPolicy.maxUnresolvedRows); } catch { /* non-fatal */ } })();
     propertyResolveMs = Date.now() - propertyStart;
   } else {
-    process.stderr.write(`[index-post-skip] repoId=${repoId} skipping property reference resolution by policy\n`);
+    indexLog(`[index-post-skip] repoId=${repoId} skipping property reference resolution by policy`);
   }
   await yieldToEventLoop();
 
   const shouldResolveImplementsInPost = effectiveResolveImplementsInPost;
   if (shouldResolveImplementsInPost) {
-    process.stderr.write(`[index-post] repoId=${repoId} resolving interface implementations...\n`);
+    indexLog(`[index-post] repoId=${repoId} resolving interface implementations...`);
     const implementsStart = Date.now();
     try { store.resolveImplementsEdges(repoId); } catch { /* non-fatal */ }
     // ISSUE-020: match message-bus PUBLISHES/CONSUMES tokens (depends on consumer IMPLEMENTS being resolved).
     try { store.resolvePublishesConsumesEdges(repoId); } catch { /* non-fatal */ }
     implementsResolveMs = Date.now() - implementsStart;
   } else {
-    process.stderr.write(`[index-post-skip] repoId=${repoId} skipping interface implementation resolution in post-phase\n`);
+    indexLog(`[index-post-skip] repoId=${repoId} skipping interface implementation resolution in post-phase`);
   }
   await yieldToEventLoop();
 
   // Post-resolve dedup: remove duplicate resolved edges that arise when both simple and
   // qualified edges resolve to the same symbolId (e.g. callee:Save + callee:IRepo.Save → same target).
-  process.stderr.write(`[index-post] repoId=${repoId} deduplicating resolved edges...\n`);
+  indexLog(`[index-post] repoId=${repoId} deduplicating resolved edges...`);
   const dedupCount = (() => { try { return store.deduplicateResolvedEdges(repoId); } catch { return 0; } })();
-  process.stderr.write(`[index-post] repoId=${repoId} removed ${dedupCount} duplicate resolved edges\n`);
+  indexLog(`[index-post] repoId=${repoId} removed ${dedupCount} duplicate resolved edges`);
   await yieldToEventLoop();
 
   const mentionsStart = Date.now();
-  process.stderr.write(`[index-post] repoId=${repoId} resolving mentions...\n`);
+  indexLog(`[index-post] repoId=${repoId} resolving mentions...`);
   const mentionsResolved = docsEnabled
     ? (() => { try { return store.resolveMentions(repoId); } catch { return 0; } })()
     : 0;
   const mentionsElapsed = Date.now() - mentionsStart;
-  process.stderr.write(`[index-post] repoId=${repoId} resolved ${mentionsResolved} mentions in ${mentionsElapsed}ms\n`);
+  indexLog(`[index-post] repoId=${repoId} resolved ${mentionsResolved} mentions in ${mentionsElapsed}ms`);
 
   const recordStart = Date.now();
-  process.stderr.write(`[index-post] repoId=${repoId} recording run metadata...\n`);
+  indexLog(`[index-post] repoId=${repoId} recording run metadata...`);
 
   const fullSummary = {
     ...summary,
@@ -1794,12 +1826,19 @@ async function runIndexAndResolve(
   };
   store.recordRun(fullSummary);
   const recordElapsed = Date.now() - recordStart;
-  process.stderr.write(`[index-post] repoId=${repoId} recorded run metadata in ${recordElapsed}ms\n`);
+  indexLog(`[index-post] repoId=${repoId} recorded run metadata in ${recordElapsed}ms`);
 
   // Re-enable WAL auto-checkpoint and force a full checkpoint to shrink WAL file
   store.endIndexSession();
 
-  process.stderr.write(`[index-post-done] repoId=${repoId} crossRepo=${String(crossStats.resolved)} calls=${String(callEdgesResolved)} imports=${String(importEdgesResolved)} mentions=${String(mentionsResolved)}\n`);
+  indexLog(`[index-post-done] repoId=${repoId} crossRepo=${String(crossStats.resolved)} calls=${String(callEdgesResolved)} imports=${String(importEdgesResolved)} mentions=${String(mentionsResolved)}`);
+
+  // Finish the reporter with one concise summary line (the only stderr line the
+  // host sees for the whole run when logs are quiet).
+  const totalSec = ((Date.now() - runStartedMs) / 1000).toFixed(1);
+  progress.stop(
+    `✓ index ${repoId} · ${String(fullSummary.filesIndexed)} files · ${String(fullSummary.symbolsUpserted)} symbols · ${String(callEdgesResolved)} calls · ${totalSec}s`
+  );
 
   return fullSummary;
 }

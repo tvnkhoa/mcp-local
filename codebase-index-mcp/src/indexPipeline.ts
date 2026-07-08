@@ -12,6 +12,7 @@ import { clamp, redactSensitive } from "./indexGuardrails.js";
 import { extractGraphData, isParseTimeoutError } from "./treeSitterExtractor.js";
 import { ExtractionWorkerPool } from "./extractionWorkerPool.js";
 import { extractDotnetProjectData } from "./dotnetProjectParser.js";
+import { createIndexProgress, indexLog, indexWarn, type IndexProgress } from "./indexProgress.js";
 import type { IndexMode, IndexProgressSnapshot, IndexRunSummary } from "./types.js";
 
 export type PerformanceProfile = "standard" | "large" | "very-large";
@@ -37,6 +38,13 @@ export type RunIndexInput = {
   /** Per-job timeout for worker-lane extraction in milliseconds. Default 20s. */
   parseJobTimeoutMs?: number;
   onProgress?: (progress: IndexProgressSnapshot) => void;
+  /**
+   * Progress reporter (log gating + MCP notifications/progress). When supplied
+   * by the caller it is driven across scan → index → resolve so updates stay
+   * continuous and the caller owns stop(). When omitted the pipeline creates
+   * and stops its own.
+   */
+  progress?: IndexProgress;
   abortSignal?: AbortSignal;
   /**
    * Dirty mode (ENH-A): when set, only files whose repo-relative POSIX path is in this
@@ -71,9 +79,14 @@ export async function runIndexPipeline(store: GraphStore, input: RunIndexInput):
   const parseJobTimeoutMs = clamp(input.parseJobTimeoutMs ?? 20_000, 1_000, 120_000);
   const concurrencyLimit = 50; // Limit parallel file reads
   const workerPool = parseWorkers > 0 ? new ExtractionWorkerPool(parseWorkers, parseJobTimeoutMs) : null;
-  
-  process.stderr.write(`[index-start] repoId=${input.repoId} mode=${input.mode} scanning files...\n`);
-  
+
+  // When the caller passes a progress controller it keeps ownership (stops it after
+  // its own post-phase). Otherwise we own the one we create and stop it here.
+  const ownsProgress = !input.progress;
+  const progress = input.progress ?? createIndexProgress(input.repoId);
+  progress.phase("scanning");
+  indexLog(`[index-start] repoId=${input.repoId} mode=${input.mode} scanning files...`);
+
   const globbed = await glob("**/*", {
     cwd: input.repoPath,
     nodir: true,
@@ -91,7 +104,7 @@ export async function runIndexPipeline(store: GraphStore, input: RunIndexInput):
       )
     : globbed;
 
-  process.stderr.write(`[index-scan-complete] found ${String(files.length)} files${input.onlyRelativePaths ? ` (restricted from ${String(globbed.length)} by dirty file set)` : ""}, will process up to ${String(maxFiles)}\n`);
+  indexLog(`[index-scan-complete] found ${String(files.length)} files${input.onlyRelativePaths ? ` (restricted from ${String(globbed.length)} by dirty file set)` : ""}, will process up to ${String(maxFiles)}`);
 
   // Pre-scan: collect all PackageReference names from .csproj files so C# extractors
   // can widen namespace→nuget contract mapping beyond the hardcoded set. (ISSUE-006)
@@ -112,7 +125,7 @@ export async function runIndexPipeline(store: GraphStore, input: RunIndexInput):
       }
     }
     if (knownPackageNames.size > 0) {
-      process.stderr.write(`[index-nuget-bridge] collected ${String(knownPackageNames.size)} package names from ${String(csprojFiles.length)} .csproj files\n`);
+      indexLog(`[index-nuget-bridge] collected ${String(knownPackageNames.size)} package names from ${String(csprojFiles.length)} .csproj files`);
     }
   }
 
@@ -120,10 +133,10 @@ export async function runIndexPipeline(store: GraphStore, input: RunIndexInput):
     // Count markdown files for user feedback
     const markdownFiles = files.filter((f) => f.endsWith(".md") || f.endsWith(".mdx"));
     if (markdownFiles.length > 0) {
-      process.stderr.write(`[index-scan] found ${String(markdownFiles.length)} markdown files for doc indexing\n`);
+      indexLog(`[index-scan] found ${String(markdownFiles.length)} markdown files for doc indexing`);
     }
   } else {
-    process.stderr.write("[index-scan] docs lane disabled for this run (markdown/docs indexing skipped)\n");
+    indexLog("[index-scan] docs lane disabled for this run (markdown/docs indexing skipped)");
   }
 
   let filesScanned = 0;
@@ -141,10 +154,10 @@ export async function runIndexPipeline(store: GraphStore, input: RunIndexInput):
   const totalFiles = selectedFiles.length;
   const totalBatches = Math.max(1, Math.ceil(totalFiles / batchSize));
   let completedBatches = 0;
-  let lastProgressLogAt = 0;
-  let lastProgressLogFiles = -1;
 
-  process.stderr.write(`[index-ready] processing ${String(totalFiles)} files in ${String(totalBatches)} batches (batchSize=${String(batchSize)})\n`);
+  indexLog(`[index-ready] processing ${String(totalFiles)} files in ${String(totalBatches)} batches (batchSize=${String(batchSize)})`);
+  progress.phase("indexing");
+  progress.update({ totalFiles, filesScanned: 0, symbols: 0 });
 
   emitProgress("running");
 
@@ -152,7 +165,7 @@ export async function runIndexPipeline(store: GraphStore, input: RunIndexInput):
     for (let offset = 0; offset < selectedFiles.length; offset += batchSize) {
       if (input.abortSignal?.aborted) {
         // Don't throw immediately - let current batch finish and commit
-        process.stderr.write(`\n[index-cancelled] Finishing current batch before stopping...\n`);
+        progress.note("[index-cancelled] Finishing current batch before stopping...");
         break;
       }
 
@@ -233,7 +246,7 @@ export async function runIndexPipeline(store: GraphStore, input: RunIndexInput):
       for (let i = 0; i < batchFiles.length; i += concurrencyLimit) {
         if (input.abortSignal?.aborted) {
           // Stop reading more files, but process what we have
-        process.stderr.write(`\n[index-cancelled] Stopping file reads, processing ${String(fileResults.length)} files already read...\n`);
+          progress.note(`[index-cancelled] Stopping file reads, processing ${String(fileResults.length)} files already read...`);
           break;
         }
 
@@ -268,7 +281,7 @@ export async function runIndexPipeline(store: GraphStore, input: RunIndexInput):
       for (const result of fileResults) {
         if (input.abortSignal?.aborted) {
           // Stop processing more results, but commit what we have
-          process.stderr.write(`\n[index-cancelled] Stopping result processing, committing ${String(pendingWrites.length)} files...\n`);
+          progress.note(`[index-cancelled] Stopping result processing, committing ${String(pendingWrites.length)} files...`);
           break;
         }
 
@@ -361,18 +374,20 @@ export async function runIndexPipeline(store: GraphStore, input: RunIndexInput):
         } catch (err) {
           if (isParseTimeoutError(err)) {
             parseTimeouts += 1;
-            process.stderr.write(`[index-parse-timeout] ${relativePath}: ${err.message}\n`);
+            indexLog(`[index-parse-timeout] ${relativePath}: ${err.message}`);
             continue;
           }
 
           parseFailures += 1;
-          process.stderr.write(`[index-parse-failure] ${relativePath}: ${err instanceof Error ? err.message : String(err)}\n`);
+          // A dropped file means missing symbols/edges in the graph — surface it
+          // even in the default quiet mode, unlike routine narration.
+          indexWarn(`[index-parse-failure] ${relativePath}: ${err instanceof Error ? err.message : String(err)}`);
         }
 
         // Emit progress every 10 files for smoother updates
         if (filesScanned % 10 === 0) {
           emitProgress("running");
-          writeTerminalProgress();
+          syncProgressBar();
         }
       }
 
@@ -381,7 +396,7 @@ export async function runIndexPipeline(store: GraphStore, input: RunIndexInput):
         for (const largeResult of largeResults) {
           if (largeResult.result.status === "ok") {
             if (largeResult.result.parseMs > 1500) {
-              process.stderr.write(`[index-slow-parse] ${largeResult.relativePath}: ${String(largeResult.result.parseMs)}ms\n`);
+              indexLog(`[index-slow-parse] ${largeResult.relativePath}: ${String(largeResult.result.parseMs)}ms`);
             }
             pushPendingWrite(
               largeResult.relativePath,
@@ -395,15 +410,15 @@ export async function runIndexPipeline(store: GraphStore, input: RunIndexInput):
           if (largeResult.result.status === "timeout") {
             parseTimeouts += 1;
             if (largeResult.result.reason === "job-timeout") {
-              process.stderr.write(`[index-parse-timeout] ${largeResult.relativePath}: worker job timed out after ${String(parseJobTimeoutMs)}ms\n`);
+              indexLog(`[index-parse-timeout] ${largeResult.relativePath}: worker job timed out after ${String(parseJobTimeoutMs)}ms`);
             } else {
-              process.stderr.write(`[index-parse-timeout] ${largeResult.relativePath}: ${largeResult.result.error ?? "parse timed out"}\n`);
+              indexLog(`[index-parse-timeout] ${largeResult.relativePath}: ${largeResult.result.error ?? "parse timed out"}`);
             }
             continue;
           }
 
           parseFailures += 1;
-          process.stderr.write(`[index-parse-failure] ${largeResult.relativePath}: ${largeResult.result.error}\n`);
+          indexWarn(`[index-parse-failure] ${largeResult.relativePath}: ${largeResult.result.error}`);
         }
       }
 
@@ -447,16 +462,15 @@ export async function runIndexPipeline(store: GraphStore, input: RunIndexInput):
         checkpointMs = Date.now() - cpStart;
       }
 
-      process.stderr.write(
-        `[index-write] batch=${String(batchNum)}/${String(totalBatches)} files=${String(pendingWrites.length)} subtx=${String(subtxCount)} extractMs=${String(extractMs)} writeMs=${String(writeMs)} checkpointMs=${String(checkpointMs)} symbols=${String(symbolsUpserted)} edges=${String(edgesUpserted)}
-`
+      indexLog(
+        `[index-write] batch=${String(batchNum)}/${String(totalBatches)} files=${String(pendingWrites.length)} subtx=${String(subtxCount)} extractMs=${String(extractMs)} writeMs=${String(writeMs)} checkpointMs=${String(checkpointMs)} symbols=${String(symbolsUpserted)} edges=${String(edgesUpserted)}`
       );
       emitProgress("running");
-      writeTerminalProgress();
+      syncProgressBar();
 
       // Check if cancelled after batch commit
       if (input.abortSignal?.aborted) {
-        process.stderr.write(`\n[index-cancelled] Batch committed, stopping index run.\n`);
+        progress.note("[index-cancelled] Batch committed, stopping index run.");
         break;
       }
     }
@@ -469,20 +483,21 @@ export async function runIndexPipeline(store: GraphStore, input: RunIndexInput):
     // scan — pruning would delete every file not in the dirty set. Force-suppress here.
     const scanWasComplete = files.length <= maxFiles && !input.onlyRelativePaths;
     if (!input.abortSignal?.aborted) {
+      progress.phase("pruning");
       if (scanWasComplete) {
         const currentPaths = selectedFiles.map((f) => path.relative(input.repoPath, f));
         const pruned = store.pruneStaleFiles(input.repoId, currentPaths);
         if (pruned > 0) {
-          process.stderr.write(`[index-prune] removed ${String(pruned)} stale file(s) from index\n`);
+          indexLog(`[index-prune] removed ${String(pruned)} stale file(s) from index`);
         }
         const prunedEdges = store.pruneOrphanedEdges(input.repoId);
         if (prunedEdges > 0) {
-          process.stderr.write(`[index-prune] removed ${String(prunedEdges)} orphaned edge(s) from index\n`);
+          indexLog(`[index-prune] removed ${String(prunedEdges)} orphaned edge(s) from index`);
         }
       } else if (input.onlyRelativePaths) {
-        process.stderr.write(`[index-prune-skipped] dirty mode re-indexed ${String(files.length)} changed file(s) — pruning and IMPLEMENTS resolution skipped (subset scan)\n`);
+        indexLog(`[index-prune-skipped] dirty mode re-indexed ${String(files.length)} changed file(s) — pruning and IMPLEMENTS resolution skipped (subset scan)`);
       } else {
-        process.stderr.write(`[index-prune-skipped] repo has ${String(files.length)} files, exceeds cap of ${String(maxFiles)} — stale-file cleanup and IMPLEMENTS resolution skipped to avoid false deletions\n`);
+        indexLog(`[index-prune-skipped] repo has ${String(files.length)} files, exceeds cap of ${String(maxFiles)} — stale-file cleanup and IMPLEMENTS resolution skipped to avoid false deletions`);
       }
       // Resolve iface: placeholders → real symbolIds after all C# files have been indexed.
       // Skipped when scan was capped: prune didn't run so stale symbols may still be present,
@@ -490,12 +505,12 @@ export async function runIndexPipeline(store: GraphStore, input: RunIndexInput):
       if (input.mode === "full" && scanWasComplete) {
         const resolvedImpl = store.resolveImplementsEdges(input.repoId);
         if (resolvedImpl > 0) {
-          process.stderr.write(`[index-resolve] resolved ${String(resolvedImpl)} IMPLEMENTS edge(s)\n`);
+          indexLog(`[index-resolve] resolved ${String(resolvedImpl)} IMPLEMENTS edge(s)`);
         }
         // ISSUE-020: match message-bus PUBLISHES/CONSUMES contract tokens producer→consumer.
         const resolvedBus = store.resolvePublishesConsumesEdges(input.repoId);
         if (resolvedBus > 0) {
-          process.stderr.write(`[index-resolve] resolved ${String(resolvedBus)} PUBLISHES bus edge(s)\n`);
+          indexLog(`[index-resolve] resolved ${String(resolvedBus)} PUBLISHES bus edge(s)`);
         }
       }
     }
@@ -504,13 +519,14 @@ export async function runIndexPipeline(store: GraphStore, input: RunIndexInput):
     let vectorSymbolsIndexed = 0;
     if (store.isVectorEnabled) {
       const vecStart = Date.now();
-      process.stderr.write("[index-vector] rebuilding vector index...\n");
+      progress.phase("vector index");
+      indexLog("[index-vector] rebuilding vector index...");
       try {
         vectorSymbolsIndexed = store.rebuildVectorIndex(input.repoId);
         const vecMs = Date.now() - vecStart;
-        process.stderr.write(`[index-vector] indexed ${String(vectorSymbolsIndexed)} symbols in ${String(vecMs)}ms\n`);
+        indexLog(`[index-vector] indexed ${String(vectorSymbolsIndexed)} symbols in ${String(vecMs)}ms`);
       } catch (vecErr) {
-        process.stderr.write(`[index-vector] rebuild failed (non-fatal): ${vecErr instanceof Error ? vecErr.message : String(vecErr)}\n`);
+        indexWarn(`[index-vector] rebuild failed (non-fatal): ${vecErr instanceof Error ? vecErr.message : String(vecErr)}`);
       }
     }
 
@@ -543,9 +559,18 @@ export async function runIndexPipeline(store: GraphStore, input: RunIndexInput):
 
     // Note: recordRun is called by the caller (index.ts) after computing resolution metrics
     emitProgress(wasCancelled ? "cancelled" : "ok", finishedAt);
-    writeTerminalProgress(true);
+    syncProgressBar();
     const elapsedSec = (Date.now() - started) / 1000;
-    process.stderr.write(`[index-done] status=${wasCancelled ? "cancelled" : "ok"} indexed=${String(filesIndexed)} skipped=${String(filesSkipped)} failures=${String(parseFailures)} timeouts=${String(parseTimeouts)} symbols=${String(symbolsUpserted)} elapsed=${elapsedSec.toFixed(1)}s\n`);
+    const doneLine = `[index-done] status=${wasCancelled ? "cancelled" : "ok"} indexed=${String(filesIndexed)} skipped=${String(filesSkipped)} failures=${String(parseFailures)} timeouts=${String(parseTimeouts)} symbols=${String(symbolsUpserted)} elapsed=${elapsedSec.toFixed(1)}s`;
+    indexLog(doneLine);
+    if (ownsProgress) {
+      // No caller post-phase — finish the reporter with a concise summary here.
+      const mark = wasCancelled ? "⚠" : "✓";
+      progress.stop(`${mark} index ${input.repoId} · ${wasCancelled ? "cancelled" : "done"} · ${String(filesIndexed)} files · ${String(symbolsUpserted)} symbols · ${elapsedSec.toFixed(1)}s`);
+    } else {
+      // Caller continues into its edge-resolution post-phase; keep reporting.
+      progress.phase("resolving edges");
+    }
     return summary;
   } catch (error) {
     const finishedAt = new Date().toISOString();
@@ -576,9 +601,12 @@ export async function runIndexPipeline(store: GraphStore, input: RunIndexInput):
 
     store.recordRun(summary);
     emitProgress(isCancelled ? "cancelled" : "failed", finishedAt, error instanceof Error ? error.message : "Unknown index failure");
-    writeTerminalProgress(true);
-    if (!isCancelled) {
-      process.stderr.write(`[index-error] ${error instanceof Error ? error.message : "Unknown index failure"}\n`);
+    // The run ended here (post-phase will not run), so always finish reporting.
+    if (isCancelled) {
+      progress.stop(`⚠ index ${input.repoId} · cancelled · ${String(filesIndexed)} files · ${String(symbolsUpserted)} symbols`);
+    } else {
+      const msg = error instanceof Error ? error.message : "Unknown index failure";
+      progress.stop(`✗ index ${input.repoId} · failed · ${msg}`);
     }
     throw error;
   } finally {
@@ -638,44 +666,14 @@ export async function runIndexPipeline(store: GraphStore, input: RunIndexInput):
     });
   }
 
-  function writeTerminalProgress(final = false): void {
-    const percent = totalFiles === 0 ? 100 : Math.round((filesScanned / totalFiles) * 100);
-    const filled = Math.round(percent / 5);
-    const bar = "█".repeat(filled) + "░".repeat(20 - filled);
-
-    const elapsedMs = Date.now() - started;
-    const elapsedSeconds = elapsedMs / 1000;
-    let eta = "";
-    if (!final && filesScanned > 0 && totalFiles > filesScanned) {
-      const fps = filesScanned / elapsedSeconds;
-      const remaining = Math.round((totalFiles - filesScanned) / fps);
-      eta = ` | ETA ${remaining}s`;
-    }
-
-    const topLangs = [...languageStats.entries()]
-      .sort((a, b) => b[1].indexed - a[1].indexed)
-      .slice(0, 3)
-      .map(([lang, s]) => `${lang}=${String(s.indexed)}`)
-      .join(" ");
-    const langSuffix = topLangs ? ` | ${topLangs}` : "";
-
-    const line = `[${bar}] ${String(percent).padStart(3)}% | ${String(filesScanned)}/${String(totalFiles)} files | ${String(symbolsUpserted)} symbols${eta}${langSuffix}`;
-
-    const now = Date.now();
-    const enoughTimeElapsed = now - lastProgressLogAt >= 2000;
-    const enoughFilesAdvanced = filesScanned - lastProgressLogFiles >= 200;
-    const shouldLogLine = final || enoughTimeElapsed || enoughFilesAdvanced || filesScanned === 0 || filesScanned === totalFiles;
-
-    if (!shouldLogLine) {
-      return;
-    }
-
-    lastProgressLogAt = now;
-    lastProgressLogFiles = filesScanned;
-
-    const filesPerSecond = elapsedSeconds > 0 ? (filesScanned / elapsedSeconds).toFixed(1) : "0.0";
-    const symbolsPerSecond = elapsedSeconds > 0 ? (symbolsUpserted / elapsedSeconds).toFixed(1) : "0.0";
-    process.stderr.write(`[index-progress] ${line} | ${filesPerSecond} files/s | ${symbolsPerSecond} symbols/s\n`);
+  // Push the current counters into the progress reporter. Cheap and throttled
+  // downstream, so it is safe to call every batch / every 10 files.
+  function syncProgressBar(): void {
+    progress.update({
+      filesScanned,
+      totalFiles,
+      symbols: symbolsUpserted,
+    });
   }
 }
 

@@ -70,6 +70,12 @@ export type ToolRequestContext = {
   toolName: string;
   startedAt: number;
   args: Record<string, unknown>;
+  /**
+   * Per-request MCP progress sink, present only when the host supplied a
+   * progressToken. Long-running tools (index_repository) call it to stream
+   * `notifications/progress` updates. Fire-and-forget.
+   */
+  progressNotifier?: (progress: number, total: number | undefined, message: string) => void;
 };
 
 export type ToolTelemetryEvent = {

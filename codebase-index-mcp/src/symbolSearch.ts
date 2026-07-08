@@ -1,5 +1,6 @@
 import type Database from "better-sqlite3";
 import type { ResolvedEdge, SymbolRecord } from "./types.js";
+import { indexLog, indexWarn } from "./indexProgress.js";
 import { vectorSearchSymbols, isVectorEnabled } from "./vectorStore.js";
 import { isTestPath } from "./fileFilter.js";
 import { expandInterfaceSiblingsImpl } from "./interfaceSiblings.js";
@@ -104,9 +105,9 @@ export function rebuildFtsImpl(db: Database.Database): void {
     db.exec(`insert into symbols_fts(symbols_fts) values('rebuild')`);
     db.exec(`insert into symbols_fts(symbols_fts) values('optimize')`);
     const elapsed = Date.now() - start;
-    process.stderr.write(`[index-fts] rebuilt symbols_fts in ${elapsed}ms\n`);
+    indexLog(`[index-fts] rebuilt symbols_fts in ${elapsed}ms`);
   } catch (e) {
-    process.stderr.write(`[index-fts-error] symbols_fts rebuild failed: ${e instanceof Error ? e.message : String(e)}\n`);
+    indexWarn(`[index-fts-error] symbols_fts rebuild failed: ${e instanceof Error ? e.message : String(e)}`);
   }
 }
 

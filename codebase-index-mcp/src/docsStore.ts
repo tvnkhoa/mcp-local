@@ -1,5 +1,6 @@
 import type Database from "better-sqlite3";
 import type { DocRecord, DocMentionRecord } from "./types.js";
+import { indexLog, indexWarn } from "./indexProgress.js";
 
 // ── Docs CRUD ──────────────────────────────────────────────────────────
 
@@ -66,14 +67,14 @@ export function rebuildDocsFtsImpl(db: Database.Database): void {
     const { cnt: totalDocs } = countStmt.get() as { cnt: number };
 
     if (totalDocs === 0) {
-      process.stderr.write(`[index-docs-fts] no docs to index\n`);
+      indexLog(`[index-docs-fts] no docs to index`);
       return;
     }
 
     try {
       db.prepare(`DELETE FROM docs_fts`).run();
     } catch (e) {
-      process.stderr.write(`[index-docs-fts] docs_fts malformed, recreating table...\n`);
+      indexLog(`[index-docs-fts] docs_fts malformed, recreating table...`);
       db.exec(`DROP TABLE IF EXISTS docs_fts`);
       db.exec(`
         CREATE VIRTUAL TABLE IF NOT EXISTS docs_fts USING fts5(
@@ -102,16 +103,16 @@ export function rebuildDocsFtsImpl(db: Database.Database): void {
       if ((chunk + 1) % 2 === 0 || chunk === chunks - 1) {
         const pct = Math.round(((chunk + 1) / chunks) * 100);
         const elapsed = Date.now() - start;
-        process.stderr.write(`[index-docs-fts] ${pct}% | ${Math.min((chunk + 1) * chunkSize, totalDocs)}/${totalDocs} docs | ${elapsed}ms\n`);
+        indexLog(`[index-docs-fts] ${pct}% | ${Math.min((chunk + 1) * chunkSize, totalDocs)}/${totalDocs} docs | ${elapsed}ms`);
       }
     }
 
     db.prepare(`INSERT INTO docs_fts(docs_fts) VALUES('optimize')`).run();
 
     const elapsed = Date.now() - start;
-    process.stderr.write(`[index-docs-fts] completed ${totalDocs} docs in ${elapsed}ms\n`);
+    indexLog(`[index-docs-fts] completed ${totalDocs} docs in ${elapsed}ms`);
   } catch (e) {
-    process.stderr.write(`[index-docs-fts-error] rebuild failed: ${e instanceof Error ? e.message : String(e)}\n`);
+    indexWarn(`[index-docs-fts-error] rebuild failed: ${e instanceof Error ? e.message : String(e)}`);
   }
 }
 

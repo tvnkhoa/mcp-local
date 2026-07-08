@@ -137,6 +137,7 @@ Refactor tools: `refactor_replace_preview` and `refactor_replace_apply` support 
 | `CODEBASE_INDEX_DB_PATH` | `./codebase-index.db` | SQLite database path. Use an absolute path outside the project. |
 | `CODEBASE_INDEX_REFACTOR_APPROVAL_SECRET` | — | HMAC secret for refactor approval tokens. Generate: `node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"` |
 | `CODEBASE_INDEX_TELEMETRY_ENABLED` | `false` | Enable per-tool telemetry to stderr |
+| `CODEBASE_INDEX_INDEX_LOG` | — | Indexing stderr verbosity. Unset: quiet — only warnings + one final summary line (live progress is streamed to the MCP host via `notifications/progress`). `verbose`: full line-by-line `[index-*]` logs (CI / debugging a hang). `quiet`: suppress even the summary line. |
 
 ### Common Optional
 

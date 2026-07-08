@@ -9,6 +9,7 @@
  */
 
 import type Database from "better-sqlite3";
+import { indexLog, indexWarn } from "./indexProgress.js";
 
 // ── Constants ──────────────────────────────────────────────────────────────────
 
@@ -251,10 +252,10 @@ export function initVectorStore(db: Database.Database, requireFn: NodeRequire): 
     const sqliteVec = requireFn("sqlite-vec") as any;
     sqliteVec.load(db);
     _vectorEnabled = true;
-    process.stderr.write("[vector] sqlite-vec loaded OK\n");
+    indexLog("[vector] sqlite-vec loaded OK");
     return true;
   } catch (e) {
-    process.stderr.write(`[vector] sqlite-vec unavailable, using in-memory fallback: ${e}\n`);
+    indexWarn(`[vector] sqlite-vec unavailable, using in-memory fallback: ${e}`);
     _vectorEnabled = false;
     return false;
   }
@@ -281,7 +282,7 @@ export function ensureVectorSchema(db: Database.Database, vectorEnabled: boolean
         )
       `);
     } catch (e) {
-      process.stderr.write(`[vector] vec0 table creation failed, disabling: ${e}\n`);
+      indexWarn(`[vector] vec0 table creation failed, disabling: ${e}`);
       _vectorEnabled = false;
     }
   }

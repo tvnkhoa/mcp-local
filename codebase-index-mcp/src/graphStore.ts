@@ -1,5 +1,6 @@
 ﻿import Database from "better-sqlite3";
 import { createRequire } from "node:module";
+import { indexLog, indexWarn } from "./indexProgress.js";
 
 import type {
   RefactorApplyHunkRecord,
@@ -212,7 +213,7 @@ export class GraphStore {
       const require = createRequire(import.meta.url);
       this._vectorEnabled = initVectorStore(this.db, require);
     } catch (e) {
-      process.stderr.write(`[vector] sqlite-vec load error: ${e}\n`);
+      indexWarn(`[vector] sqlite-vec load error: ${e}`);
       this._vectorEnabled = false;
     }
 
@@ -1381,10 +1382,10 @@ export class GraphStore {
       const vecMapCols = this.db.prepare("pragma table_info(vec_symbol_map)").all() as { name: string }[];
       if (vecMapCols.length > 0 && !vecMapCols.some((c) => c.name === "vec_rowid")) {
         // Old schema — drop and recreate with new schema
-        process.stderr.write("[vector] migrating vec_symbol_map to new schema...\n");
+        indexLog("[vector] migrating vec_symbol_map to new schema...");
         this.db.exec(`DROP TABLE IF EXISTS vec_symbol_map`);
         try { this.db.exec(`DROP TABLE IF EXISTS vec_symbols`); } catch { /* ignore */ }
-        process.stderr.write("[vector] vec_symbol_map migrated — vector index will be rebuilt on next index run\n");
+        indexLog("[vector] vec_symbol_map migrated — vector index will be rebuilt on next index run");
       }
     } catch {
       // Ignore if table doesn't exist yet
