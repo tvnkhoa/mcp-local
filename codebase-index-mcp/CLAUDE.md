@@ -92,7 +92,7 @@ Only `CODEBASE_INDEX_ALLOWED_ROOTS` (comma-separated absolute paths) is required
 
 ## MCP Workspace Operating Rules
 
-This workspace has `.github/instructions/mcp-hard-mode.instructions.md` as the policy source for how Claude should use its own MCP tools when working in this repo. Key rules:
+This workspace has `.claude/rules/mcp-hard-mode.md` as the policy source for how Claude should use its own MCP tools when working in this repo. Key rules:
 
 - **MCP-first**: use `search_symbols` / `get_symbol_context_pack` / `find_impact_files` before baseline grep/read tools for any codebase analysis task
 - **Regex/pattern search via MCP**: use `search_regex` (matches with context lines + enclosing symbol; `scanAll:true` also walks non-code text like json/yaml) instead of baseline grep for arbitrary pattern searches

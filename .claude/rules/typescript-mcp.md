@@ -1,7 +1,8 @@
 ---
 description: "Use when implementing or refactoring TypeScript Node.js MCP servers in this workspace. Covers ESM imports, schema validation, MCP tool contract clarity, and script compatibility."
-applyTo: "{codebase-index-mcp,postgres-mcp}/**/*.{ts,tsx,mts,cts}"
 ---
+> Scope: TypeScript sources across all MCP packages.
+
 # TypeScript MCP Implementation Rules
 
 - Keep ESM style imports/exports and include `.js` in local import paths when required by build output.

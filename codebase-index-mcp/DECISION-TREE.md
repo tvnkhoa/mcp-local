@@ -169,4 +169,4 @@ Max rewrites: 2 per symbol intent. After that, mandatory fallback + issue log.
 4. `find_impact_files` → scope any change
 5. `detect_changes` → risk triage before commit
 
-For docs: see `README.md` for full tool catalog and edge type semantics. For enforcement rules: see `.github/instructions/mcp-hard-mode.instructions.md`.
+For docs: see `README.md` for full tool catalog and edge type semantics. For enforcement rules: see `.claude/rules/mcp-hard-mode.md` (workspace root).

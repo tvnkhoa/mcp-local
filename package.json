@@ -1,0 +1,14 @@
+{
+  "name": "mcp-local",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Workspace of local MCP servers with a unified installer, doctor, and auto-generated native skills.",
+  "scripts": {
+    "setup": "node scripts/install-mcp.mjs",
+    "mcp:install": "node scripts/install-mcp.mjs",
+    "mcp:doctor": "node scripts/mcp-doctor.mjs",
+    "mcp:uninstall": "node scripts/uninstall-mcp.mjs",
+    "mcp:update": "node scripts/update-mcp.mjs"
+  }
+}

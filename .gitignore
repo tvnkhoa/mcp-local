@@ -29,6 +29,14 @@ pnpm-debug.log*
 # Environment files
 .env
 .env.*
+!**/.env.example
+
+# Generated operational MCP skills (machine-specific absolute paths).
+# Source of truth is <server>/skill/SKILL.md; these are produced by the installer.
+.claude/skills/codebase-index-local/
+.claude/skills/postgres-mcp/
+.claude/skills/observe-mcp/
+.claude/skills/bitbucket-mcp/
 
 # Local databases and runtime files
 *.db

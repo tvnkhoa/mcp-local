@@ -89,9 +89,32 @@ src/index.ts           # MCP tool dispatch
 
 **better-sqlite3 on Windows:** Requires Visual Studio C++ Build Tools. If native build fails, install VS Build Tools or switch to the JS-only SQLite backend.
 
+## Installation, Skills & Doctor
+
+All servers are installed and managed from the **workspace root** via a single data-driven
+installer (source of truth: `scripts/lib/manifest.mjs`).
+
+```bash
+npm run setup                              # install/build/configure + skills for ALL servers
+node scripts/install-mcp.mjs --server postgres-mcp   # just one server
+npm run mcp:doctor                         # health report (build/config/env/skill/start) — never prints secrets
+npm run mcp:uninstall -- --server <key>    # remove config + skill (config backed up)
+npm run mcp:update -- --all                # rebuild + regenerate skills + verify
+```
+
+On install, each server gets a **native Claude Code skill** rendered from its
+`<server>/skill/SKILL.md` template and written to `~/.claude/skills/<key>/` (global) and
+`.claude/skills/<key>/` (project). Those generated dirs are gitignored (machine-specific paths);
+the committed source of truth is the template. Registration writes to `~/.claude.json` (per-agent
+config, secrets kept there per the workspace convention).
+
+Adding a new MCP server: append it to `scripts/lib/manifest.mjs` and add `<dir>/skill/SKILL.md` —
+the installer, doctor, and skill generator pick it up automatically. See the `mcp-skill-authoring`
+skill.
+
 ## Local Dev MCP Test Cycle
 
-The workspace root has `.mcp.json` pointing to the local dev build of `codebase-index-mcp/dist/index.js`. After each code change, use this cycle to test immediately via MCP:
+After each code change, use this cycle to test immediately via MCP:
 
 ```bash
 cd codebase-index-mcp
@@ -115,6 +138,18 @@ When analyzing this codebase, use the `codebase-index-local` MCP tools **before*
 - Soft cap: 5 MCP calls per question; hard cap: 8 before falling back to baseline tools
 - Keep `watch_repo` off unless actively debugging; stop watchers immediately after
 - If MCP returns empty or low-confidence results after 2 attempts, log to `codebase-index-mcp/mcp-codebase-index-issue-registry.md` before continuing with grep/read
+
+## Workspace Rules & Skills (`.claude/`)
+
+- `.claude/rules/` — always-on policy docs (migrated from the old `.github/instructions/`):
+  `mcp-hard-mode` (MCP-first enforcement), `mcp-base`, `typescript-mcp`, `db-guardrails`, `codebase-index`.
+- `.claude/skills/` — MCP **authoring** skills (scaffold, security-review, release-checklist,
+  tool-annotations, error-taxonomy, contract-conformance, observability, host-integration-security,
+  db-parameterization-audit, db-query-budgeting) plus `mcp-skill-authoring`. Operational
+  "how to use server X" skills are generated per server (gitignored).
+- `codebase-index-mcp/.claude/skills/` — indexing-internals skills (tree-sitter, graph-schema,
+  incremental-indexing, conformance, metadata-governance, unresolved-symbol-policy, etc.).
+- `.claude/commands/mcp-effectiveness-eval.md` — slash command benchmarking baseline vs MCP.
 
 ## References
 

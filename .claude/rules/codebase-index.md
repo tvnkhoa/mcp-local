@@ -1,7 +1,8 @@
 ---
 description: "Use when building or updating MCP tools for codebase indexing, dependency analysis, call-chain tracing, or architecture flow mapping. Covers parser strategy, graph modeling, and internal-storage guardrails."
-applyTo: "codebase-index-mcp/**/*.{ts,tsx,mts,cts,md,json}"
 ---
+> Scope: `codebase-index-mcp/**` (TS + docs + config).
+
 # Codebase Index MCP Rules
 
 - Design for **incremental indexing** first; avoid full re-index on every run.

@@ -1,7 +1,8 @@
 ---
 description: "Base instruction layer for all local MCP packages in this workspace. Apply before domain-specific instructions."
-applyTo: "{codebase-index-mcp,postgres-mcp}/**/*.{ts,tsx,mts,cts,md,json}"
 ---
+> Scope: all MCP packages (`codebase-index-mcp`, `postgres-mcp`, `observe-mcp`, `bitbucket-mcp`). Domain rules override these on conflict.
+
 # MCP Base Rules
 
 - Treat this as the default rule set for all MCP packages.

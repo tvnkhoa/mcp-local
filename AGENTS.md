@@ -14,6 +14,21 @@ All use `type: "module"` (ES modules), TypeScript 5.7+, and `@modelcontextprotoc
 
 ## Essential Commands
 
+### Workspace root — install & manage all servers
+
+```bash
+npm run setup                              # build + configure + install skills for ALL servers
+node scripts/install-mcp.mjs --server <key> [--yes] [--skip-smoke]   # one server
+npm run mcp:doctor                         # health report per server (never prints secrets)
+npm run mcp:uninstall -- --server <key>    # remove config + skill (config backed up)
+npm run mcp:update -- --all                # rebuild + regenerate skills + verify
+```
+
+Server keys: `codebase-index-local`, `postgres-mcp`, `observe-mcp`, `bitbucket-mcp`.
+Source of truth for every server (entry path, env schema, tools, skill source) is
+`scripts/lib/manifest.mjs`. The installer writes MCP config into each detected agent
+(`~/.claude.json` for Claude Code) and renders a native skill per server.
+
 ### codebase-index-mcp
 
 ```bash
@@ -309,6 +324,6 @@ When MCP tools fail to provide sufficient evidence, log new issues with:
 
 - `codebase-index-mcp/README.md` - Full tool catalog and usage examples
 - `codebase-index-mcp/MCP-FIRST-CHEATSHEET.md` - Quick operator guide
-- `codebase-index-mcp/.github/instructions/mcp-hard-mode.instructions.md` - MCP-first enforcement policy
+- `.claude/rules/mcp-hard-mode.md` - MCP-first enforcement policy (workspace root)
 - `codebase-index-mcp/mcp-codebase-index-issue-registry.md` - Known gaps and resolutions
 - `postgres-mcp/README.md` - PostgreSQL MCP setup and guardrails

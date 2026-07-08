@@ -1,11 +1,9 @@
 ---
-tools:
-  - codebase-index-central
-description: >
-  Portable evaluation prompt for any workspace to compare code analysis without MCP vs with MCP.
-  Designed for deterministic environments with no LLM model available.
-  Uses only file search/read and MCP graph tools, then reports accuracy, effort, and token estimate.
+description: "Compare code analysis WITHOUT MCP vs WITH the codebase-index MCP over Q1-Q5, then report accuracy, effort, and token savings. Deterministic — uses only file search/read and MCP graph tools."
+argument-hint: "[repoId] [repoPath]"
 ---
+
+Use `$1` as `repoId` and `$2` as `repoPath` below (falling back to `list_repositories` if omitted). MCP tools are namespaced `mcp__codebase-index-local__<tool>`.
 
 # MCP Codebase-Index Effectiveness Evaluation (No LLM Mode)
 
@@ -14,7 +12,7 @@ description: >
 This prompt is workspace-agnostic and can run on any repository.
 
 - Baseline track: only structural tools (`file_search`, `grep_search`, `list_dir`, `read_file`).
-- MCP track: only `codebase-index-central` deterministic tools.
+- MCP track: only `codebase-index-local` deterministic tools (`mcp__codebase-index-local__*`).
 - No semantic inference from LLM is allowed in either track.
 
 Inputs:

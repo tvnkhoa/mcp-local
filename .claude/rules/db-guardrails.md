@@ -1,7 +1,8 @@
 ---
 description: "Use when adding or changing database-related MCP tools, SQL validation, or query execution flow. Enforces least privilege and read-only-by-default posture."
-applyTo: "postgres-mcp/**/*.{ts,tsx,mts,cts,md,json}"
 ---
+> Scope: `postgres-mcp/**` (TS + docs + config).
+
 # Database Guardrails Rules
 
 - Default DB tools to **read-only** unless the task explicitly requires mutation.

@@ -1,17 +1,26 @@
 #!/usr/bin/env node
 
 /**
- * Tests that setup.mjs generates correct MCP configurations for each agent type.
+ * Tests that the SHIPPING config-merge logic (scripts/lib/agents.mjs
+ * `configureAgent`) generates correct MCP configurations for each agent type.
+ *
+ * This imports and exercises the real function against throwaway temp config
+ * files — it does NOT re-implement the merge logic, so a regression in
+ * `configureAgent` fails this test instead of silently passing.
  */
 
+import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { configureAgent } from "../../scripts/lib/agents.mjs";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const SERVER_PATH = path.join(__dirname, "..", "dist", "index.js");
+const KEY = "codebase-index-local";
 
-console.log("Testing setup script configuration generation...\n");
+console.log("Testing setup script configuration generation (real configureAgent)...\n");
 
 const MOCK_ENV = {
   CODEBASE_INDEX_ALLOWED_ROOTS: "/test/repo",
@@ -22,44 +31,29 @@ const MOCK_ENV = {
   CODEBASE_INDEX_WATCH_AUTO_START: "false",
 };
 
-const BASE_SERVER = {
-  command: "node",
-  args: [SERVER_PATH],
-  env: MOCK_ENV,
-};
+const BASE_SERVER = { command: "node", args: [SERVER_PATH], env: MOCK_ENV };
 
-/**
- * Mirrors the config generation logic in setup.mjs configureAgents().
- */
+// Run configureAgent against a temp file seeded with `existing`, return the
+// merged config it wrote. Cleans up temp + backup files afterward.
+let counter = 0;
 function buildConfig(agentType, existingConfig = {}) {
-  const merged = { ...existingConfig };
-
-  if (agentType === "claude" || agentType === "claude-code") {
-    merged.mcpServers = { ...(merged.mcpServers ?? {}), "codebase-index-local": BASE_SERVER };
-  } else if (agentType === "opencode") {
-    merged.mcp = {
-      ...(merged.mcp ?? {}),
-      "codebase-index-local": {
-        type: "local",
-        command: [BASE_SERVER.command, ...BASE_SERVER.args],
-        enabled: true,
-        environment: BASE_SERVER.env,
-      },
-    };
-    if (!merged.$schema) {
-      merged.$schema = "https://opencode.ai/config.json";
+  const tmp = path.join(os.tmpdir(), `mcp-setup-test-${process.pid}-${counter++}.json`);
+  const created = [tmp];
+  try {
+    if (existingConfig && Object.keys(existingConfig).length) {
+      fs.writeFileSync(tmp, JSON.stringify(existingConfig, null, 2), "utf-8");
     }
-  } else if (agentType === "vscode") {
-    const flatServers = merged["mcp.servers"] ?? {};
-    const nestedServers = merged.mcp?.servers ?? {};
-    delete merged["mcp.servers"];
-    merged.mcp = {
-      ...(merged.mcp ?? {}),
-      servers: { ...flatServers, ...nestedServers, "codebase-index-local": BASE_SERVER },
-    };
+    const agent = { name: `test-${agentType}`, type: agentType, configPath: tmp };
+    const okFlag = configureAgent(agent, KEY, BASE_SERVER);
+    if (!okFlag) throw new Error(`configureAgent returned false for type '${agentType}'`);
+    // Track the backup configureAgent may have created so we can clean it up.
+    for (const f of fs.readdirSync(os.tmpdir())) {
+      if (f.startsWith(path.basename(tmp) + ".backup.")) created.push(path.join(os.tmpdir(), f));
+    }
+    return JSON.parse(fs.readFileSync(tmp, "utf-8"));
+  } finally {
+    for (const f of created) { try { fs.rmSync(f, { force: true }); } catch {} }
   }
-
-  return merged;
 }
 
 // ---------------------------------------------------------------------------
@@ -70,7 +64,7 @@ const tests = [
     name: "Claude Code — correct shape",
     agentType: "claude-code",
     check(config) {
-      const server = config?.mcpServers?.["codebase-index-local"];
+      const server = config?.mcpServers?.[KEY];
       assert(server, "mcpServers[codebase-index-local] should exist");
       assert(server.command === "node", 'command should be "node"');
       assert(Array.isArray(server.args), "args should be an array");
@@ -83,7 +77,7 @@ const tests = [
     name: "Claude Desktop — correct shape",
     agentType: "claude",
     check(config) {
-      const server = config?.mcpServers?.["codebase-index-local"];
+      const server = config?.mcpServers?.[KEY];
       assert(server, "mcpServers[codebase-index-local] should exist");
       assert(server.command === "node", 'command should be "node"');
       assert(Array.isArray(server.args), "args should be an array");
@@ -95,8 +89,8 @@ const tests = [
     agentType: "vscode",
     check(config) {
       assert(!config["mcp.servers"], 'flat "mcp.servers" key must not exist (VS Code needs nested format)');
-      const server = config?.mcp?.servers?.["codebase-index-local"];
-      assert(server, 'mcp.servers[codebase-index-local] should exist');
+      const server = config?.mcp?.servers?.[KEY];
+      assert(server, "mcp.servers[codebase-index-local] should exist");
       assert(server.command === "node", 'command should be "node"');
       assert(Array.isArray(server.args), "args should be an array");
       assert(server.env?.CODEBASE_INDEX_ALLOWED_ROOTS, "env should be set");
@@ -106,7 +100,7 @@ const tests = [
     name: "OpenCode — correct shape",
     agentType: "opencode",
     check(config) {
-      const server = config?.mcp?.["codebase-index-local"];
+      const server = config?.mcp?.[KEY];
       assert(server, "mcp[codebase-index-local] should exist");
       assert(server.type === "local", 'type should be "local"');
       assert(Array.isArray(server.command), "command should be an array");
@@ -126,7 +120,7 @@ const tests = [
     check(config) {
       assert(config["editor.fontSize"] === 14, "existing settings should be preserved");
       assert(config.mcpServers["other-server"], "existing mcpServers entries should be preserved");
-      assert(config.mcpServers["codebase-index-local"], "new server should be added");
+      assert(config.mcpServers[KEY], "new server should be added");
     },
   },
   {
@@ -137,7 +131,7 @@ const tests = [
       assert(config["editor.tabSize"] === 2, "existing settings should be preserved");
       assert(!config["mcp.servers"], 'flat "mcp.servers" key should be removed after migration');
       assert(config.mcp?.servers?.["old-server"], "old server should be migrated to nested format");
-      assert(config.mcp?.servers?.["codebase-index-local"], "new server should be added");
+      assert(config.mcp?.servers?.[KEY], "new server should be added");
     },
   },
   {
@@ -147,7 +141,7 @@ const tests = [
     check(config) {
       assert(config["editor.tabSize"] === 2, "existing settings should be preserved");
       assert(config.mcp?.servers?.["existing-server"], "existing nested server should be preserved");
-      assert(config.mcp?.servers?.["codebase-index-local"], "new server should be added");
+      assert(config.mcp?.servers?.[KEY], "new server should be added");
     },
   },
   {
@@ -156,7 +150,7 @@ const tests = [
     existing: { mcp: { "other-server": { type: "local", command: ["other"], enabled: true, environment: {} } } },
     check(config) {
       assert(config.mcp["other-server"], "existing mcp entries should be preserved");
-      assert(config.mcp["codebase-index-local"], "new server should be added");
+      assert(config.mcp[KEY], "new server should be added");
     },
   },
 ];
@@ -194,9 +188,7 @@ console.log("=".repeat(60));
 
 if (failed > 0) {
   console.log("\nFailed tests:");
-  for (const f of failures) {
-    console.log(`  ✗ ${f.name}: ${f.error}`);
-  }
+  for (const f of failures) console.log(`  ✗ ${f.name}: ${f.error}`);
   process.exit(1);
 } else {
   console.log("\n✅ All tests passed!");

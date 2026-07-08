@@ -1,8 +1,9 @@
 ---
 description: "Always-on MCP-first hard mode for codebase analysis in this workspace. Enforce codebase-index MCP usage before baseline tools, and log fallback issues for future enhancements."
 name: "MCP Hard Mode"
-applyTo: "**"
 ---
+> Scope: applies workspace-wide (all files). Referenced from `CLAUDE.md`.
+
 # MCP Hard Mode (Workspace Level)
 
 This file is the single source of truth for MCP-first operating rules in this workspace.
@@ -85,28 +86,16 @@ Anti-pattern (avoid):
 
 ## MCP Naming Convention (Policy vs Runtime)
 
-Policy in this file uses short aliases. Tool execution must use concrete runtime MCP names.
+Policy in this file uses short tool names. At execution time, Claude Code namespaces
+every MCP tool as `mcp__<serverKey>__<toolName>`:
 
-1. Codebase index aliases:
-   - `health_check` -> `mcp_codebase-inde_health_check`
-   - `list_repositories` -> `mcp_codebase-inde_list_repositories`
-   - `index_repository` -> `mcp_codebase-inde_index_repository`
-   - `watch_repo` -> `mcp_codebase-inde_watch_repo`
-   - `search_symbols` -> `mcp_codebase-inde_search_symbols`
-   - `get_symbol_context_pack` -> `mcp_codebase-inde_get_symbol_context_pack`
-   - `get_symbol_source` -> `mcp_codebase-inde_get_symbol_source`
-   - `find_impact_files` -> `mcp_codebase-inde_find_impact_files`
-   - `rename_assist` -> `mcp_codebase-inde_rename_assist`
-   - `refactor_replace_preview` -> `mcp_codebase-inde_refactor_replace_preview`
-   - `refactor_replace_apply` -> `mcp_codebase-inde_refactor_replace_apply`
-   - `get_file_summary` -> `mcp_codebase-inde_get_file_summary`
-   - `get_file_context` -> `mcp_codebase-inde_get_file_context`
-   - `detect_changes` -> `mcp_codebase-inde_detect_changes`
-2. PostgreSQL aliases:
-   - `mcp_health_check` -> `mcp_postgres-mcp_health_check`
-   - `mcp_run_read_query` -> `mcp_postgres-mcp_run_read_query`
+- Codebase index tools → `mcp__codebase-index-local__<tool>` (e.g. `mcp__codebase-index-local__search_symbols`).
+- PostgreSQL tools → `mcp__postgres-mcp__<tool>` (e.g. `mcp__postgres-mcp__run_read_query`, `mcp__postgres-mcp__health_check`).
 
-Reference: execution playbooks live in `.github/skills/mcp-first-codebase-operations/SKILL.md`.
+So a short name like `search_symbols` in this document means the runtime tool
+`mcp__codebase-index-local__search_symbols`.
+
+Reference: execution playbooks live in `codebase-index-mcp/.claude/skills/mcp-first-codebase-operations/SKILL.md`.
 
 ## Hard Rules
 1. For codebase analysis tasks, use MCP codebase-index tools first.
@@ -160,8 +149,8 @@ Before any baseline tool call, verify and satisfy:
 | Multi-file symbol map | `get_file_context` | Use `filePaths` array (up to 50 files); profile=compact; richer than `get_file_summary` — returns all symbols + edges |
 | Cross-repo shared contracts | `get_cross_repo_impact` | direction: `"outbound"`/`"inbound"`; only useful when repos share interface/symbol names |
 | Pre-release risk triage | `detect_changes` | policy: `"quick-triage"`/`"strict-review"`/`"release-gate"`; sortBy: `"risk"`; compares working tree vs last indexed commit |
-| DB connectivity check | `mcp_health_check` | Fast validation before DB read query |
-| DB read validation | `mcp_run_read_query` | Read-only verification for Postgres tooling |
+| DB connectivity check | `mcp__postgres-mcp__health_check` | Fast validation before DB read query |
+| DB read validation | `mcp__postgres-mcp__run_read_query` | Read-only verification for Postgres tooling |
 
 ## Symbol Lookup Rules (Critical)
 
@@ -298,9 +287,9 @@ Prefer this over baseline multi-file find/replace: it is preview-gated, HMAC-app
 
 ### Postgres tool check flow (when task touches `postgres-mcp`)
 ```
-1. mcp_health_check
+1. mcp__postgres-mcp__health_check
    → confirm MCP server + PostgreSQL connectivity
-2. mcp_run_read_query (targeted read-only SQL, bounded limit)
+2. mcp__postgres-mcp__run_read_query (targeted read-only SQL, bounded limit)
    → validate behavior without write impact
 3. detect_changes (policy: "quick-triage")
    → prioritize follow-up impact checks when source has changed

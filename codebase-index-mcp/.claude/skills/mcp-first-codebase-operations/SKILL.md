@@ -18,7 +18,7 @@ argument-hint: "Provide repoId, target symbol/file intent, and expected output (
 
 1. Use `repoId=codebase-index-mcp` or `repoId=mcp-local` by default for this workspace.
 2. Use `repoId=wec.commnunication-hub` only for benchmark/reference comparisons.
-3. Treat `.github/instructions/mcp-hard-mode.instructions.md` as policy source-of-truth for gates, blocked behaviors, and fallback rules.
+3. Treat `.claude/rules/mcp-hard-mode.md` as policy source-of-truth for gates, blocked behaviors, and fallback rules.
 4. Use this skill as execution playbook; do not duplicate full policy blocks in task output.
 
 ## Top 5 Starter Tools
@@ -65,7 +65,7 @@ Use the smallest MCP set needed for the task and prefer focused calls with expli
 2. Symbol and graph analysis: `search_symbols`, `get_symbol_context_pack`, `get_change_context`, `get_call_chain`, `find_symbol_at_line`
 3. Impact and scope: `find_impact_files`, `get_file_summary`, `get_file_context`, `detect_changes`, `dead_code_scan`
 4. Supplemental: `route_map`, `find_implementations`, `link_tests_to_source`
-5. Database validation (read-only): `mcp_health_check`, `mcp_run_read_query`
+5. Database validation (read-only): `mcp__postgres-mcp__health_check`, `mcp__postgres-mcp__run_read_query`
 
 ## Execution Runbooks
 
@@ -97,8 +97,8 @@ Use the smallest MCP set needed for the task and prefer focused calls with expli
 
 ### 5. Postgres Read-Check Runbook
 
-1. Run `mcp_health_check`.
-2. Run `mcp_run_read_query` with bounded `limit` and targeted SQL.
+1. Run `mcp__postgres-mcp__health_check`.
+2. Run `mcp__postgres-mcp__run_read_query` with bounded `limit` and targeted SQL.
 3. If source changed, run `detect_changes` to prioritize impact follow-up.
 
 ## Response Contract (Skill Output)

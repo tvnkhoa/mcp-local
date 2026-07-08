@@ -2,6 +2,30 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased] - 2026-07-08
+
+### 🧰 Workspace Tooling
+
+- **Unified MCP installer** — one command from the workspace root installs/builds/configures any
+  or all servers, data-driven from `scripts/lib/manifest.mjs` (single source of truth for entry
+  path, env schema, tools, and skill source).
+  - `npm run setup`, `scripts/install-mcp.mjs --server <key>`, `--yes`, `--skip-smoke`
+  - `codebase-index-mcp/scripts/setup.mjs` is now a thin wrapper delegating to the root installer
+  - **Files**: `scripts/install-mcp.mjs`, `scripts/lib/{manifest,log,jsonc,agents,skills,verify}.mjs`, `package.json`
+- **Auto-generated native skills** — each server ships a `<server>/skill/SKILL.md` template with
+  embedded guardrails; the installer renders it (env table, tool list, entry path) into
+  `~/.claude/skills/<key>/` and `.claude/skills/<key>/` so the AI can use the server immediately.
+- **Doctor / uninstall / update** — `npm run mcp:doctor` (build/config/env/skill/start, never prints
+  secrets), `mcp:uninstall`, `mcp:update`.
+  - **Files**: `scripts/mcp-doctor.mjs`, `scripts/uninstall-mcp.mjs`, `scripts/update-mcp.mjs`
+- **`.github` → `.claude` migration** — Copilot skills/instructions/prompt moved to
+  `.claude/skills/`, `.claude/rules/`, `.claude/commands/` (tool names updated to `mcp__<key>__*`);
+  indexing-internals skills scoped under `codebase-index-mcp/.claude/skills/`; new
+  `mcp-skill-authoring` skill; `.github/` removed.
+- **Docs & config** — added `codebase-index-mcp/.env.example`; refreshed `CLAUDE.md`/`AGENTS.md`
+  (removed stale `.mcp.json` reference, documented install/skills/doctor); `.gitignore` now keeps
+  `.env.example` files and ignores generated operational skill dirs.
+
 ## [0.2.0] - 2026-04-23
 
 ### 🚀 Performance Enhancements
