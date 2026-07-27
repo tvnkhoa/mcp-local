@@ -516,3 +516,80 @@ test("responses: structures the servers rely on are preserved exactly", () => {
   const windowsPath = `D:${backslash}src`;
   assert.equal(asText({ p: windowsPath }, "compact").content[0]?.text, JSON.stringify({ p: windowsPath }));
 });
+
+// --- Regression: formatError, the server-owned error envelope (S-23) ---------
+// Without this hook, adopting the SDK silently rewrites every error response a
+// server's clients already depend on — a change tools/list cannot reveal.
+
+const failingTool = defineTool({
+  name: "boom",
+  description: "Throws a domain error.",
+  input: z.object({ id: z.number().int().positive() }).strict(),
+  inputSchema: schema.object({ id: schema.integer(undefined, { minimum: 1 }) }, { required: ["id"] }),
+  annotations: annotations.read(),
+  handler: () => {
+    const error = new Error("domain failure");
+    error.name = "DomainError";
+    throw error;
+  }
+});
+
+/** A stand-in for a server's own mapper: a shape PlatformError never produces. */
+const serverEnvelope = (error: unknown) => ({
+  content: [{ type: "text" as const, text: JSON.stringify({ mine: true, kind: (error as Error)?.name ?? typeof error }) }],
+  isError: true
+});
+
+test("dispatch: formatError owns the envelope for a handler throw", () => {
+  const registry = createToolRegistry([failingTool]);
+  return dispatchToolCall(registry, "boom", { id: 1 }, { logger, formatError: serverEnvelope }).then((result) => {
+    assert.equal(result.isError, true);
+    assert.deepEqual(JSON.parse(result.content[0]?.text ?? "{}"), { mine: true, kind: "DomainError" });
+  });
+});
+
+test("dispatch: formatError receives the raw ZodError on a validation failure", async () => {
+  const registry = createToolRegistry([failingTool]);
+  let seen: unknown;
+  const result = await dispatchToolCall(registry, "boom", { id: "nope" }, {
+    logger,
+    formatError: (error) => {
+      seen = error;
+      return serverEnvelope(error);
+    }
+  });
+  assert.equal(result.isError, true);
+  // The issues array is what a server's own zod renderer needs — not a summary.
+  const issues = (seen as { issues?: unknown[] }).issues;
+  assert.ok(Array.isArray(issues) && issues.length > 0, "expected the ZodError itself");
+});
+
+test("dispatch: formatError also covers unknown tools", async () => {
+  const registry = createToolRegistry([failingTool]);
+  const result = await dispatchToolCall(registry, "nope", {}, { logger, formatError: serverEnvelope });
+  assert.equal(result.isError, true);
+  assert.equal(JSON.parse(result.content[0]?.text ?? "{}").mine, true);
+});
+
+test("dispatch: a formatError that throws degrades instead of rejecting", async () => {
+  const registry = createToolRegistry([failingTool]);
+  const result = await dispatchToolCall(registry, "boom", { id: 1 }, {
+    logger,
+    formatError: () => {
+      throw new Error("mapper is broken");
+    }
+  });
+  // Still a well-formed tool error, not a protocol-level rejection.
+  assert.equal(result.isError, true);
+  assert.equal(typeof result.content[0]?.text, "string");
+  assert.equal(JSON.parse(result.content[0]?.text ?? "{}").code, "internal_error");
+});
+
+test("dispatch: omitting formatError keeps the platform envelope unchanged", async () => {
+  const registry = createToolRegistry([failingTool]);
+  const result = await dispatchToolCall(registry, "boom", { id: 1 }, { logger });
+  assert.equal(result.isError, true);
+  const payload = JSON.parse(result.content[0]?.text ?? "{}");
+  assert.equal(payload.code, "internal_error");
+  assert.equal(typeof payload.audience, "string");
+});

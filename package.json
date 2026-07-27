@@ -21,6 +21,9 @@
     "guard:deps": "node packages/cli/dist/bin/mcp-platform.js guard deps --servers codebase-index-mcp,postgres-mcp,observe-mcp,bitbucket-mcp",
     "guard:convention": "node packages/cli/dist/bin/mcp-platform.js guard convention",
     "guard:all": "node packages/cli/dist/bin/mcp-platform.js guard all --servers codebase-index-mcp,postgres-mcp,observe-mcp,bitbucket-mcp",
-    "verify:packages": "npm run build:packages && npm run typecheck:tests && npm run test:packages && npm run guard:all"
+    "verify:packages": "npm run build:packages && npm run typecheck:tests && npm run test:packages && npm run guard:all",
+    "contracts:update": "node scripts/contract-snapshot.mjs",
+    "contracts:check": "node scripts/contract-snapshot.mjs --check",
+    "verify:all": "npm run verify:packages && npm run contracts:check"
   }
 }

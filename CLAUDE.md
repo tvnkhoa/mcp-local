@@ -153,6 +153,22 @@ When analyzing this codebase, use the `codebase-index-local` MCP tools **before*
 
 ## References
 
+**Architecture & migration** (read in this order for the full picture):
+
+- `docs/architecture/audit-report.md` — Phase 0 audit of the pre-restructuring repository (`01c532e`): dependency map, duplication, technical-debt register, risks
+- `docs/architecture/target-architecture.md` — the tier model, dependency rules, and the naming / coding / server / package conventions. §9 reconciles design against what is actually built
+- `docs/migration/migration-plan.md` — 44 reversible steps (S-01…S-44) across phases A–K
+- `docs/migration/foundation-notes.md` — what the `packages/` foundation contains and why
+- `docs/migration/normalization-report.md` — the 48-file in-place folder normalization
+- `docs/refactor/duplication-extraction-report.md` — the shared-component extraction, its measured behaviour deltas, and the one cluster deliberately left alone
+- `docs/migration/s06-s23-notes.md` — contract snapshots + the `bitbucket-mcp` SDK pilot; read this before migrating another server
+- `contracts/README.md` — what the golden `tools/list` snapshots are and how to update them
+
+**Per-server:**
+
 - `codebase-index-mcp/CLAUDE.md` — full sub-project guide (key files, env vars, refactor engine details)
 - `AGENTS.md` — env var reference, common pitfalls, integration config examples
 - `codebase-index-mcp/README.md` — complete MCP tool catalog with usage examples
+
+> **Build order:** servers consume `packages/*/dist` through `file:` dependencies, so on a fresh
+> clone run `npm run build:packages` **before** building any server.

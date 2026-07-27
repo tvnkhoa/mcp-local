@@ -1,0 +1,349 @@
+{
+  "server": "observe-mcp",
+  "toolCount": 8,
+  "tools": [
+    {
+      "description": "Discover the fields of a stream by sampling recent rows (no fixed schema assumptions). Returns each field with its observed JSON types and how many sampled rows had a non-null value.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "end": {
+            "type": "string"
+          },
+          "profile": {
+            "enum": [
+              "nano",
+              "compact",
+              "standard",
+              "verbose"
+            ],
+            "type": "string"
+          },
+          "sample": {
+            "description": "Rows to sample for field discovery (default 5, max 50)",
+            "type": "number"
+          },
+          "start": {
+            "type": "string"
+          },
+          "stream": {
+            "description": "Stream to inspect (default: the configured logs stream)",
+            "type": "string"
+          },
+          "time": {
+            "description": "Relative window to sample from (default 1h)",
+            "type": "string"
+          },
+          "type": {
+            "enum": [
+              "logs",
+              "traces",
+              "metrics"
+            ],
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "describe_stream"
+    },
+    {
+      "description": "Return the distributed-trace spans for a trace id from the traces stream (operation, service, duration, status), ordered by start time.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "end": {
+            "type": "string"
+          },
+          "limit": {
+            "type": "number"
+          },
+          "profile": {
+            "enum": [
+              "nano",
+              "compact",
+              "standard",
+              "verbose"
+            ],
+            "type": "string"
+          },
+          "start": {
+            "type": "string"
+          },
+          "stream": {
+            "description": "Override the configured traces stream",
+            "type": "string"
+          },
+          "time": {
+            "description": "Relative window to search (default 1h)",
+            "type": "string"
+          },
+          "traceId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "traceId"
+        ],
+        "type": "object"
+      },
+      "name": "get_trace_spans"
+    },
+    {
+      "description": "List OpenObserve streams (log/trace/metric datasets) for the configured org. Doubles as a connectivity + auth check.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "profile": {
+            "enum": [
+              "nano",
+              "compact",
+              "standard",
+              "verbose"
+            ],
+            "type": "string"
+          },
+          "type": {
+            "enum": [
+              "logs",
+              "traces",
+              "metrics"
+            ],
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "list_streams"
+    },
+    {
+      "description": "Aggregate log counts grouped by level (default), service, or sourceContext over a time window — an error/warning summary.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "end": {
+            "type": "string"
+          },
+          "groupBy": {
+            "enum": [
+              "level",
+              "service",
+              "sourceContext"
+            ],
+            "type": "string"
+          },
+          "limit": {
+            "type": "number"
+          },
+          "profile": {
+            "enum": [
+              "nano",
+              "compact",
+              "standard",
+              "verbose"
+            ],
+            "type": "string"
+          },
+          "start": {
+            "type": "string"
+          },
+          "stream": {
+            "type": "string"
+          },
+          "time": {
+            "description": "Relative window (default 1h)",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "log_stats"
+    },
+    {
+      "description": "Escape hatch: run a raw read-only OpenObserve SQL query (SELECT/WITH only) against a stream within a mandatory time window.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "end": {
+            "type": "string"
+          },
+          "offset": {
+            "description": "Row offset for pagination (default 0); use the returned nextOffset to page",
+            "type": "number"
+          },
+          "profile": {
+            "enum": [
+              "nano",
+              "compact",
+              "standard",
+              "verbose"
+            ],
+            "type": "string"
+          },
+          "size": {
+            "type": "number"
+          },
+          "sql": {
+            "description": "e.g. SELECT * FROM \"wecrm_dev\" WHERE severity_text = 'ERROR'",
+            "type": "string"
+          },
+          "start": {
+            "type": "string"
+          },
+          "time": {
+            "description": "Relative window (default 1h)",
+            "type": "string"
+          },
+          "type": {
+            "enum": [
+              "logs",
+              "traces",
+              "metrics"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "sql"
+        ],
+        "type": "object"
+      },
+      "name": "run_observe_query"
+    },
+    {
+      "description": "Search recent logs with optional filters (service, level, sourceContext, free-text contains) over a time window. Returns newest-first.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "contains": {
+            "description": "Substring to match in the message body",
+            "type": "string"
+          },
+          "end": {
+            "description": "Absolute end (ISO 8601 or epoch ms)",
+            "type": "string"
+          },
+          "level": {
+            "description": "Log level; prefix-matched on `severity`, so INFO/WARN/ERROR/FATAL all work (Information/Warning/...)",
+            "type": "string"
+          },
+          "limit": {
+            "type": "number"
+          },
+          "offset": {
+            "description": "Row offset for pagination (default 0); use the returned nextOffset to page",
+            "type": "number"
+          },
+          "profile": {
+            "enum": [
+              "nano",
+              "compact",
+              "standard",
+              "verbose"
+            ],
+            "type": "string"
+          },
+          "service": {
+            "description": "service_name, e.g. CommunicationHub.Web",
+            "type": "string"
+          },
+          "sourceContext": {
+            "description": "Serilog SourceContext (emitting class)",
+            "type": "string"
+          },
+          "start": {
+            "description": "Absolute start (ISO 8601 or epoch ms)",
+            "type": "string"
+          },
+          "stream": {
+            "description": "Override the configured logs stream",
+            "type": "string"
+          },
+          "time": {
+            "description": "Relative window ending now, e.g. 15m, 1h, 24h, 7d (default 1h)",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "search_logs"
+    },
+    {
+      "description": "Convenience: the most recent logs over the last N minutes (default 15), optionally filtered by level/service.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "level": {
+            "type": "string"
+          },
+          "limit": {
+            "type": "number"
+          },
+          "minutes": {
+            "description": "Lookback minutes (default 15, max 1440)",
+            "type": "number"
+          },
+          "profile": {
+            "enum": [
+              "nano",
+              "compact",
+              "standard",
+              "verbose"
+            ],
+            "type": "string"
+          },
+          "service": {
+            "type": "string"
+          },
+          "stream": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "tail_logs"
+    },
+    {
+      "description": "Trace a single request: return ALL log records for a trace id (the X-Correlation-ID / OtelTraceId), ordered chronologically.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "end": {
+            "type": "string"
+          },
+          "limit": {
+            "type": "number"
+          },
+          "profile": {
+            "enum": [
+              "nano",
+              "compact",
+              "standard",
+              "verbose"
+            ],
+            "type": "string"
+          },
+          "start": {
+            "type": "string"
+          },
+          "stream": {
+            "type": "string"
+          },
+          "time": {
+            "description": "Relative window to search (default 1h)",
+            "type": "string"
+          },
+          "traceId": {
+            "description": "32-hex OtelTraceId / X-Correlation-ID",
+            "type": "string"
+          }
+        },
+        "required": [
+          "traceId"
+        ],
+        "type": "object"
+      },
+      "name": "trace_logs"
+    }
+  ]
+}

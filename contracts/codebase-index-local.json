@@ -1,0 +1,1933 @@
+{
+  "server": "codebase-index-local",
+  "toolCount": 43,
+  "tools": [
+    {
+      "description": "Composite 'what did my change affect and which tests cover it' for the working-tree diff (or a commit range): maps changed files → static dependents → covering tests, returning a ranked testsToRun list (by source risk × link score) plus a residualRisk note for changed files with no linked test. Use after editing to run a trusted targeted test subset instead of the whole suite. Defaults baseRef to the indexed commit (working-tree diff when no new commits).",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "baseRef": {
+            "type": "string"
+          },
+          "headRef": {
+            "type": "string"
+          },
+          "impactLimit": {
+            "maximum": 500,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "includeUntracked": {
+            "type": "boolean"
+          },
+          "maxFiles": {
+            "maximum": 500,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "maxTestsToRun": {
+            "maximum": 500,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "profile": {
+            "enum": [
+              "nano",
+              "compact",
+              "standard",
+              "verbose"
+            ],
+            "type": "string"
+          },
+          "repoId": {
+            "type": "string"
+          },
+          "testLinkMaxCandidates": {
+            "maximum": 20,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "testLinkMinScore": {
+            "maximum": 1,
+            "minimum": 0,
+            "type": "number"
+          }
+        },
+        "required": [
+          "repoId"
+        ],
+        "type": "object"
+      },
+      "name": "change_impact"
+    },
+    {
+      "description": "Promote a property's literal values to enum members (e.g. HandledBy = \"ai\" → ConversationHandledBy.Ai) across assignments, object initializers, ==/!= comparisons, and assertion arguments. Sites are located via the C# AST (no user-authored regex/backreference) and rewritten through the preview/apply/rollback engine — dry-run by default. Cross-type sites (a same-named property on a different owner type) are skipped; sites where the owner type can't be proven are flagged ambiguous_target.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "dryRun": {
+            "type": "boolean"
+          },
+          "includeComparisons": {
+            "description": "Also rewrite ==/!= and assertion-argument sites (default true); false = assignments/initializers only.",
+            "type": "boolean"
+          },
+          "profile": {
+            "enum": [
+              "nano",
+              "compact",
+              "standard",
+              "verbose"
+            ],
+            "type": "string"
+          },
+          "property": {
+            "description": "Property identifier whose literals are promoted, e.g. \"HandledBy\".",
+            "type": "string"
+          },
+          "repoId": {
+            "type": "string"
+          },
+          "requiredOwnerType": {
+            "description": "Owner type scoping the rewrite, e.g. \"Conversation\".",
+            "type": "string"
+          },
+          "scopePaths": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 200,
+            "type": "array"
+          },
+          "valueMap": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "description": "Literal value (unquoted) → replacement expression, e.g. { \"ai\": \"ConversationHandledBy.Ai\" }.",
+            "minProperties": 1,
+            "type": "object"
+          }
+        },
+        "required": [
+          "repoId",
+          "property",
+          "requiredOwnerType",
+          "valueMap"
+        ],
+        "type": "object"
+      },
+      "name": "change_value_representation"
+    },
+    {
+      "description": "Find likely dead symbols using deterministic graph rules: symbols with no incoming CALLS/TYPE_REF/IMPORTS edges (excluding bootstrap entry files).",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "filePathPrefix": {
+            "type": "string"
+          },
+          "includePrivate": {
+            "type": "boolean"
+          },
+          "kind": {
+            "type": "string"
+          },
+          "language": {
+            "type": "string"
+          },
+          "limit": {
+            "maximum": 500,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "profile": {
+            "enum": [
+              "nano",
+              "compact",
+              "standard",
+              "verbose"
+            ],
+            "type": "string"
+          },
+          "repoId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "repoId"
+        ],
+        "type": "object"
+      },
+      "name": "dead_code_scan"
+    },
+    {
+      "description": "Detect changed files from git, estimate graph impact, and compute deterministic risk scores (high/medium/low) for review prioritization. Supports policy presets (quick-triage|strict-review|release-gate|custom). Defaults baseRef to latest indexed commit when available.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "baseRef": {
+            "type": "string"
+          },
+          "groupBy": {
+            "enum": [
+              "file",
+              "module"
+            ],
+            "type": "string"
+          },
+          "headRef": {
+            "type": "string"
+          },
+          "impactLimit": {
+            "maximum": 500,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "includeUntracked": {
+            "type": "boolean"
+          },
+          "maxFiles": {
+            "maximum": 500,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "maxResults": {
+            "maximum": 500,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "minRiskScore": {
+            "maximum": 100,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "policy": {
+            "enum": [
+              "quick-triage",
+              "strict-review",
+              "release-gate",
+              "custom"
+            ],
+            "type": "string"
+          },
+          "profile": {
+            "enum": [
+              "nano",
+              "compact",
+              "standard",
+              "verbose"
+            ],
+            "type": "string"
+          },
+          "repoId": {
+            "type": "string"
+          },
+          "riskLevels": {
+            "items": {
+              "enum": [
+                "high",
+                "medium",
+                "low"
+              ],
+              "type": "string"
+            },
+            "maxItems": 3,
+            "minItems": 1,
+            "type": "array"
+          },
+          "sortBy": {
+            "enum": [
+              "risk",
+              "impact",
+              "path"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "repoId"
+        ],
+        "type": "object"
+      },
+      "name": "detect_changes"
+    },
+    {
+      "description": "Detect circular dependencies via DFS on graph edges. Supports mode='module' or mode='symbol' and returns explicit cycle paths.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "filePathPrefix": {
+            "type": "string"
+          },
+          "includeCalls": {
+            "type": "boolean"
+          },
+          "maxCycles": {
+            "maximum": 200,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "maxDepth": {
+            "maximum": 5,
+            "minimum": 2,
+            "type": "integer"
+          },
+          "mode": {
+            "enum": [
+              "module",
+              "symbol"
+            ],
+            "type": "string"
+          },
+          "profile": {
+            "enum": [
+              "nano",
+              "compact",
+              "standard",
+              "verbose"
+            ],
+            "type": "string"
+          },
+          "repoId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "repoId"
+        ],
+        "type": "object"
+      },
+      "name": "detect_circular_dependencies"
+    },
+    {
+      "description": "Find symbols with 0 incoming CALLS edges — these are publicly callable entry points not called by other code in the repo. Use to discover public API surface, HTTP endpoints, or top-level service methods. Filter by kind='method' for controllers, kind='class' for services, kind='route_handler' to surface C# ASP.NET route handlers from the routes table (fast-path, does not require call-graph analysis).",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "filePathPrefix": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string"
+          },
+          "limit": {
+            "maximum": 500,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "repoId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "repoId"
+        ],
+        "type": "object"
+      },
+      "name": "find_entry_points"
+    },
+    {
+      "description": "List every read/write callsite of a property (field) with its enclosing symbol — the 'who reads vs who writes this field' audit for wrong-level-resolution checks. Reads the PROPERTY_REF (read) / PROPERTY_WRITE (write) edges. Provide a property symbolId or a resolvable name. mode=read|write|all (default all). Returns reads/writes partitioned, each with enclosingName/filePath/line, plus a coverage block. Use this instead of grepping a field name across the repo.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "limit": {
+            "maximum": 500,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "mode": {
+            "enum": [
+              "read",
+              "write",
+              "all"
+            ],
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "profile": {
+            "enum": [
+              "nano",
+              "compact",
+              "standard",
+              "verbose"
+            ],
+            "type": "string"
+          },
+          "repoId": {
+            "type": "string"
+          },
+          "symbolId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "repoId"
+        ],
+        "type": "object"
+      },
+      "name": "find_field_accesses"
+    },
+    {
+      "description": "Scope blast radius for a file change. view='files' (default): which files import/call symbols in this file. view='surface': which external symbols call into this file. Use before refactor_replace_preview to scope the change. profile='nano' for top-10 count, 'compact' (default) for full list. A stale index (indexed commit ≠ HEAD) is reported as a non-fatal `staleWarning` field in the response, not an error — re-index for exact results.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "filePath": {
+            "type": "string"
+          },
+          "groupBy": {
+            "enum": [
+              "file",
+              "module"
+            ],
+            "type": "string"
+          },
+          "limit": {
+            "maximum": 500,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "profile": {
+            "enum": [
+              "nano",
+              "compact",
+              "standard",
+              "verbose"
+            ],
+            "type": "string"
+          },
+          "repoId": {
+            "type": "string"
+          },
+          "view": {
+            "enum": [
+              "files",
+              "surface"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "repoId",
+          "filePath"
+        ],
+        "type": "object"
+      },
+      "name": "find_impact_files"
+    },
+    {
+      "description": "Find all classes or structs that implement a named interface (via IMPLEMENTS edges). Useful for .NET/C# DI tracing — e.g. find_implementations('IUserRepository') to locate concrete implementations. Requires C# indexing.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "interfaceName": {
+            "type": "string"
+          },
+          "limit": {
+            "maximum": 500,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "repoId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "repoId",
+          "interfaceName"
+        ],
+        "type": "object"
+      },
+      "name": "find_implementations"
+    },
+    {
+      "description": "Find repositories/symbols that depend on a NuGet package contract (nuget:<name>) without requiring a symbolId.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "limit": {
+            "maximum": 500,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "packageName": {
+            "type": "string"
+          },
+          "profile": {
+            "enum": [
+              "nano",
+              "compact",
+              "standard",
+              "verbose"
+            ],
+            "type": "string"
+          },
+          "repoId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "packageName"
+        ],
+        "type": "object"
+      },
+      "name": "find_package_consumers"
+    },
+    {
+      "description": "Find the symbol enclosing a given line number in a file. Use when you have a file path and line from a stack trace, error message, or diff hunk to get the symbolId for further graph queries — avoids a manual search hop.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "filePath": {
+            "type": "string"
+          },
+          "line": {
+            "minimum": 1,
+            "type": "integer"
+          },
+          "repoId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "repoId",
+          "filePath",
+          "line"
+        ],
+        "type": "object"
+      },
+      "name": "find_symbol_at_line"
+    },
+    {
+      "description": "Trace a call path from a symbolId (direction=callers or callees). Shows the path, not a caller list — use get_change_context for caller lists. Requires a callable symbolId (function/method), not a class. Use profile='nano' for path summary, 'compact' (default) for full edge list.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "depth": {
+            "maximum": 5,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "direction": {
+            "enum": [
+              "callers",
+              "callees"
+            ],
+            "type": "string"
+          },
+          "limit": {
+            "maximum": 500,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "profile": {
+            "enum": [
+              "nano",
+              "compact",
+              "standard",
+              "verbose"
+            ],
+            "type": "string"
+          },
+          "repoId": {
+            "type": "string"
+          },
+          "symbolId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "repoId",
+          "symbolId"
+        ],
+        "type": "object"
+      },
+      "name": "get_call_chain"
+    },
+    {
+      "description": "Get callers (BFS up to depth), callees, and type deps for a symbol. Accepts symbolId or name (one required). Use profile=nano for ultra-compact, compact to reduce payload during planning, standard for balanced, verbose for debugging. A stale index (indexed commit ≠ HEAD) is reported as a non-fatal `staleWarning` field in the response, not an error.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "calleeDepth": {
+            "maximum": 5,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "callerDepth": {
+            "maximum": 5,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "limit": {
+            "maximum": 500,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "name": {
+            "type": "string"
+          },
+          "profile": {
+            "enum": [
+              "nano",
+              "compact",
+              "standard",
+              "verbose"
+            ],
+            "type": "string"
+          },
+          "repoId": {
+            "type": "string"
+          },
+          "symbolId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "repoId"
+        ],
+        "type": "object"
+      },
+      "name": "get_change_context"
+    },
+    {
+      "description": "Expose cross-repo dependencies for a symbol from cross_repo_deps. Supports outbound or inbound direction.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "direction": {
+            "enum": [
+              "outbound",
+              "inbound"
+            ],
+            "type": "string"
+          },
+          "limit": {
+            "maximum": 500,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "name": {
+            "type": "string"
+          },
+          "profile": {
+            "enum": [
+              "nano",
+              "compact",
+              "standard",
+              "verbose"
+            ],
+            "type": "string"
+          },
+          "repoId": {
+            "type": "string"
+          },
+          "symbolId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "repoId"
+        ],
+        "type": "object"
+      },
+      "name": "get_cross_repo_impact"
+    },
+    {
+      "description": "Get IMPORTS/DEPENDS_ON dependency edges for a symbol (symbolId) or module-level flow edges for a file (filePath). One required. Use profile='nano' for top-10 edge count, 'compact' (default) for all edges with minimal fields.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "depth": {
+            "maximum": 5,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "filePath": {
+            "type": "string"
+          },
+          "limit": {
+            "maximum": 500,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "profile": {
+            "enum": [
+              "nano",
+              "compact",
+              "standard",
+              "verbose"
+            ],
+            "type": "string"
+          },
+          "repoId": {
+            "type": "string"
+          },
+          "symbolId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "repoId"
+        ],
+        "type": "object"
+      },
+      "name": "get_dependency_graph"
+    },
+    {
+      "description": "Gather a whole vertical-slice feature from one seed: given an entity (seedSymbol e.g. 'ConversationNote', or seedFile) it walks the C# convention (entity → {E}Configuration → Create/Update/Delete{E}Command + handlers + validators → Get{E}Query + handlers → {E}Endpoints) and returns the related symbols with source in one call. Use for 'implement X by mirroring Y' tasks instead of reading 6+ files separately. Heuristic, name-pattern based; unresolvedRoles lists roles not found by name.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "convention": {
+            "enum": [
+              "csharp-vertical-slice"
+            ],
+            "type": "string"
+          },
+          "includeSource": {
+            "type": "boolean"
+          },
+          "maxBytesPerFile": {
+            "maximum": 20000,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "maxFiles": {
+            "maximum": 60,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "profile": {
+            "enum": [
+              "nano",
+              "compact",
+              "standard",
+              "verbose"
+            ],
+            "type": "string"
+          },
+          "repoId": {
+            "type": "string"
+          },
+          "seedFile": {
+            "type": "string"
+          },
+          "seedSymbol": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "repoId"
+        ],
+        "type": "object"
+      },
+      "name": "get_feature_bundle"
+    },
+    {
+      "description": "Get symbols and graph edges for a file (provide filePath) or multiple files (provide filePaths array). One of filePath or filePaths is required. Use profile=nano for ultra-compact planning output, compact for token-saving, standard for balanced, verbose for debug-rich.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "compact": {
+            "type": "boolean"
+          },
+          "filePath": {
+            "type": "string"
+          },
+          "filePaths": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 50,
+            "minItems": 1,
+            "type": "array"
+          },
+          "limit": {
+            "maximum": 500,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "profile": {
+            "enum": [
+              "nano",
+              "compact",
+              "standard",
+              "verbose"
+            ],
+            "type": "string"
+          },
+          "repoId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "repoId"
+        ],
+        "type": "object"
+      },
+      "name": "get_file_context"
+    },
+    {
+      "description": "File overview: exported symbols, outgoing imports, and which files import it. Use before get_file_context — lighter payload. profile='nano' for symbol count + top-5, 'compact' (default) for full summary.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "filePath": {
+            "type": "string"
+          },
+          "profile": {
+            "enum": [
+              "nano",
+              "compact",
+              "standard",
+              "verbose"
+            ],
+            "type": "string"
+          },
+          "repoId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "repoId",
+          "filePath"
+        ],
+        "type": "object"
+      },
+      "name": "get_file_summary"
+    },
+    {
+      "description": "List all files under a folder path with per-file stats (language, symbol count, caller count). Use at session start to orient — cheaper than get_file_context on individual files. Prefer this over reading file contents when you just need to find the right files. Response includes indexMeta with branch and commitSha from the last index run — verify these match your current branch before trusting file listings. After a branch switch, run index_repository(mode='full') to purge stale entries.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "folderPath": {
+            "type": "string"
+          },
+          "maxFiles": {
+            "maximum": 500,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "repoId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "repoId",
+          "folderPath"
+        ],
+        "type": "object"
+      },
+      "name": "get_folder_summary"
+    },
+    {
+      "description": "Return the EF persistence mapping for a property — column name, value converter, max length, CHECK constraints — plus DB_TRANSLATED_PROJECTION warnings when a value-converted property is used inside an EF-translated .Select()/.Where() with no preceding materialization (.ToListAsync()/.AsEnumerable()). Surfaces the persistence-layer facts a symbol graph can't see (rule/AST-based, no LLM).",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "ownerType": {
+            "description": "Optional owner/entity type to scope the mapping, e.g. \"Conversation\".",
+            "type": "string"
+          },
+          "profile": {
+            "enum": [
+              "nano",
+              "compact",
+              "standard",
+              "verbose"
+            ],
+            "type": "string"
+          },
+          "property": {
+            "description": "Property name, e.g. \"HandledBy\".",
+            "type": "string"
+          },
+          "repoId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "repoId",
+          "property"
+        ],
+        "type": "object"
+      },
+      "name": "get_persistence_mapping"
+    },
+    {
+      "description": "Return git blame metadata for a symbol line by joining symbol location with `git blame -L line,line --porcelain`.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "profile": {
+            "enum": [
+              "nano",
+              "compact",
+              "standard",
+              "verbose"
+            ],
+            "type": "string"
+          },
+          "redactEmail": {
+            "type": "boolean"
+          },
+          "repoId": {
+            "type": "string"
+          },
+          "symbolId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "repoId"
+        ],
+        "type": "object"
+      },
+      "name": "get_symbol_blame"
+    },
+    {
+      "description": "Single-call planning pack for a symbol name: ranked candidates + callers + callees + importers + change-context. When a name resolves to several symbols (e.g. a class and its same-named constructor), the substantive symbol (class/interface/method) is selected for the context, so callers/importers are meaningful. Use this instead of get_change_context when you need symbol detail without deep caller traversal. Use profile='compact' (default) or 'nano' in Plan mode.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "calleeDepth": {
+            "maximum": 5,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "callerDepth": {
+            "maximum": 5,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "limit": {
+            "maximum": 500,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "name": {
+            "type": "string"
+          },
+          "profile": {
+            "enum": [
+              "nano",
+              "compact",
+              "standard",
+              "verbose"
+            ],
+            "type": "string"
+          },
+          "repoId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "repoId",
+          "name"
+        ],
+        "type": "object"
+      },
+      "name": "get_symbol_context_pack"
+    },
+    {
+      "description": "Get full detail for a symbol by ID — returns the symbol record plus all outgoing and incoming edges with resolved names. Use after search_symbols to drill into a specific symbol.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "limit": {
+            "maximum": 500,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "repoId": {
+            "type": "string"
+          },
+          "symbolId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "repoId",
+          "symbolId"
+        ],
+        "type": "object"
+      },
+      "name": "get_symbol_detail"
+    },
+    {
+      "description": "Return the raw source text span of a symbol (by symbolId or name) read from disk — so you can read the exact code without a separate file read. Uses the persisted end-line when available (re-index to populate), else estimates the span from the next symbol. `contextLines` adds surrounding lines; `maxLines` caps output. A stale index is reported as a non-fatal `staleWarning` (line numbers may differ from HEAD).",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "contextLines": {
+            "maximum": 50,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "maxLines": {
+            "maximum": 2000,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "name": {
+            "type": "string"
+          },
+          "profile": {
+            "enum": [
+              "nano",
+              "compact",
+              "standard",
+              "verbose"
+            ],
+            "type": "string"
+          },
+          "repoId": {
+            "type": "string"
+          },
+          "symbolId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "repoId"
+        ],
+        "type": "object"
+      },
+      "name": "get_symbol_source"
+    },
+    {
+      "description": "Trace a stored/wire VALUE (e.g. a status string \"resolved\" or magic code) across ALL registered repos by fanning search_literals, grouping exact-value hits by repo and classifying each as producer (assigned/written) or consumer (compared/read) where inferable. This is the data-contract gate for a storage-format migration — what get_cross_repo_impact (symbol-oriented) can't answer. Rule-based, no LLM.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "column": {
+            "description": "Optional DB column/field name to sharpen producer/consumer classification, e.g. \"status\".",
+            "type": "string"
+          },
+          "profile": {
+            "enum": [
+              "nano",
+              "compact",
+              "standard",
+              "verbose"
+            ],
+            "type": "string"
+          },
+          "repoIds": {
+            "description": "Optional subset of registered repoIds; defaults to all.",
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 50,
+            "type": "array"
+          },
+          "value": {
+            "description": "The exact stored/wire literal to trace, e.g. \"resolved\".",
+            "type": "string"
+          }
+        },
+        "required": [
+          "value"
+        ],
+        "type": "object"
+      },
+      "name": "get_value_contract_impact"
+    },
+    {
+      "description": "Check server availability plus codebase readiness (staleness, working tree, watch state) with action hints for re-index/watch.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "repoId": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "health_check"
+    },
+    {
+      "description": "Index repository files into internal graph storage (incremental by default). mode='dirty' re-indexes ONLY git working-tree-changed files (unstaged+staged+untracked) — a fast refresh of just-edited files (extraction is scoped to the changed set; edge resolution still runs repo-wide). Pruning is suppressed (subset scan). docsMode controls docs lane isolation: auto uses server default, on forces docs indexing, off disables docs indexing for this run.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "batchSize": {
+            "maximum": 2000,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "docsMode": {
+            "enum": [
+              "auto",
+              "on",
+              "off"
+            ],
+            "type": "string"
+          },
+          "maxFiles": {
+            "maximum": 20000,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "mode": {
+            "enum": [
+              "full",
+              "incremental",
+              "dirty"
+            ],
+            "type": "string"
+          },
+          "repoId": {
+            "type": "string"
+          },
+          "repoPath": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "repoId",
+          "repoPath"
+        ],
+        "type": "object"
+      },
+      "name": "index_repository"
+    },
+    {
+      "description": "Link tests to likely source files using deterministic naming heuristics plus IMPORTS/CALLS tracing.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "filePath": {
+            "type": "string"
+          },
+          "limit": {
+            "maximum": 500,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "maxCandidates": {
+            "maximum": 20,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "minScore": {
+            "maximum": 1,
+            "minimum": 0,
+            "type": "number"
+          },
+          "profile": {
+            "enum": [
+              "nano",
+              "compact",
+              "standard",
+              "verbose"
+            ],
+            "type": "string"
+          },
+          "repoId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "repoId"
+        ],
+        "type": "object"
+      },
+      "name": "link_tests_to_source"
+    },
+    {
+      "description": "List all indexed repositories. Use profile='nano' for a brief count+status list, omit for full metadata.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "profile": {
+            "enum": [
+              "nano",
+              "compact",
+              "standard",
+              "verbose"
+            ],
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "list_repositories"
+    },
+    {
+      "description": "Task router: given a free-text intent (e.g. 'implement a feature like ConversationNote', 'rename X', 'what breaks if I change Y', 'which tests to run') returns the recommended MCP tool(s) + caveats, and resolves an optional seed to seedSymbols. Deterministic keyword classification (no LLM). Use first when unsure which tool to start with.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "intent": {
+            "type": "string"
+          },
+          "profile": {
+            "enum": [
+              "nano",
+              "compact",
+              "standard",
+              "verbose"
+            ],
+            "type": "string"
+          },
+          "repoId": {
+            "type": "string"
+          },
+          "seed": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "intent"
+        ],
+        "type": "object"
+      },
+      "name": "orient"
+    },
+    {
+      "description": "Unified docs tool. mode=search: full-text search across indexed documentation sections (requires query); mode=stale: find docs that mention changed symbols (requires symbolIds); mode=coverage: show which exported symbols are documented (requires filePath). Requires docs lane enabled.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "filePath": {
+            "type": "string"
+          },
+          "limit": {
+            "maximum": 500,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "mode": {
+            "enum": [
+              "search",
+              "stale",
+              "coverage"
+            ],
+            "type": "string"
+          },
+          "query": {
+            "type": "string"
+          },
+          "repoId": {
+            "type": "string"
+          },
+          "symbolIds": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 100,
+            "minItems": 1,
+            "type": "array"
+          }
+        },
+        "required": [
+          "repoId",
+          "mode"
+        ],
+        "type": "object"
+      },
+      "name": "query_docs"
+    },
+    {
+      "description": "Run a read-only SQL query against graph tables in a sandboxed mode. Requires :repoId named parameter in SQL and blocks write/admin statements. Allowed tables: repositories, files, symbols, edges, index_runs, routes, cross_repo_deps, refactor_previews, refactor_preview_hunks, refactor_applies, refactor_apply_changes, refactor_apply_hunks, refactor_rollbacks, vec_symbol_map. Key columns — symbols: (repo_id, symbol_id, name, kind, file_path, line, signature); edges: (repo_id, from_id, to_id, type, confidence, reason) — type values: CALLS, IMPORTS, TYPE_REF, DEPENDS_ON, PROPERTY_REF, PROPERTY_WRITE; cross_repo_deps: (from_repo_id, from_symbol_id, to_repo_id, to_symbol_id, type); routes: (repo_id, file_path, controller_symbol_id, handler_symbol_id, http_method, route_template, line). Note: 'package_consumers' is not a table — query edges WHERE type='DEPENDS_ON' AND to_id LIKE 'nuget:%' instead.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "limit": {
+            "maximum": 500,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "params": {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          "profile": {
+            "enum": [
+              "nano",
+              "compact",
+              "standard",
+              "verbose"
+            ],
+            "type": "string"
+          },
+          "repoId": {
+            "type": "string"
+          },
+          "sql": {
+            "type": "string"
+          },
+          "timeoutMs": {
+            "maximum": 30000,
+            "minimum": 1,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "repoId",
+          "sql"
+        ],
+        "type": "object"
+      },
+      "name": "query_graph"
+    },
+    {
+      "description": "Apply an approved replacement plan using previewId and approvalToken from preview. profile='nano' returns only success status + file count. profile='compact' omits expectedFiles list. profile='standard' (default) returns full scope check.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "approvalToken": {
+            "type": "string"
+          },
+          "includeLowConfidence": {
+            "type": "boolean"
+          },
+          "maxFilesPerBatch": {
+            "maximum": 500,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "previewId": {
+            "type": "string"
+          },
+          "profile": {
+            "enum": [
+              "nano",
+              "compact",
+              "standard",
+              "verbose"
+            ],
+            "type": "string"
+          },
+          "stopOnFirstConflict": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "previewId",
+          "approvalToken"
+        ],
+        "type": "object"
+      },
+      "name": "refactor_replace_apply"
+    },
+    {
+      "description": "Preview bulk replacements with scope and type-ownership guards. findMode='literal' (default) matches `find` as plain text; findMode='regex' treats `find` as a regular expression and substitutes capture-group backreferences in `replaceExpression` — numbered ($1..$99), whole-match ($&), named ($<name> or ${name}), and a literal `$` via $$ — ideal for context-preserving bulk edits in one pass. A backreference to a group that did not match is flagged `unsubstituted_backreference` and blocked at apply (it is never silently written). profile='nano' returns only match count + affected files (fastest blast-radius check); 'compact' omits before/after text; 'standard' (default) returns full hunk content.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "ambiguityThresholdPercent": {
+            "maximum": 100,
+            "minimum": 0,
+            "type": "number"
+          },
+          "compilerAssist": {
+            "additionalProperties": false,
+            "properties": {
+              "codes": {
+                "items": {
+                  "type": "string"
+                },
+                "maxItems": 20,
+                "type": "array"
+              },
+              "diagnostics": {
+                "items": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "actualType": {
+                      "type": "string"
+                    },
+                    "code": {
+                      "type": "string"
+                    },
+                    "expectedType": {
+                      "type": "string"
+                    },
+                    "filePath": {
+                      "type": "string"
+                    },
+                    "line": {
+                      "minimum": 1,
+                      "type": "integer"
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "code",
+                    "filePath",
+                    "line"
+                  ],
+                  "type": "object"
+                },
+                "maxItems": 1000,
+                "type": "array"
+              },
+              "filePathPrefix": {
+                "type": "string"
+              },
+              "lineWindow": {
+                "maximum": 20,
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "type": "object"
+          },
+          "find": {
+            "type": "string"
+          },
+          "findMode": {
+            "enum": [
+              "literal",
+              "regex"
+            ],
+            "type": "string"
+          },
+          "guards": {
+            "additionalProperties": false,
+            "properties": {
+              "allowOwnerTypes": {
+                "items": {
+                  "type": "string"
+                },
+                "maxItems": 200,
+                "type": "array"
+              },
+              "disallowOwnerTypes": {
+                "items": {
+                  "type": "string"
+                },
+                "maxItems": 200,
+                "type": "array"
+              },
+              "disallowTypeList": {
+                "items": {
+                  "type": "string"
+                },
+                "maxItems": 200,
+                "type": "array"
+              },
+              "language": {
+                "type": "string"
+              },
+              "symbolKinds": {
+                "items": {
+                  "enum": [
+                    "class",
+                    "property",
+                    "field",
+                    "method"
+                  ],
+                  "type": "string"
+                },
+                "maxItems": 10,
+                "type": "array"
+              }
+            },
+            "type": "object"
+          },
+          "mode": {
+            "enum": [
+              "text",
+              "syntax-aware",
+              "symbol-aware"
+            ],
+            "type": "string"
+          },
+          "profile": {
+            "enum": [
+              "nano",
+              "compact",
+              "standard",
+              "verbose"
+            ],
+            "type": "string"
+          },
+          "regexFlags": {
+            "description": "Optional regex flags, subset of i|m|s (g is always applied).",
+            "type": "string"
+          },
+          "replaceExpression": {
+            "type": "string"
+          },
+          "repoId": {
+            "type": "string"
+          },
+          "scope": {
+            "additionalProperties": false,
+            "properties": {
+              "excludePaths": {
+                "items": {
+                  "type": "string"
+                },
+                "maxItems": 200,
+                "type": "array"
+              },
+              "fileGlobs": {
+                "items": {
+                  "type": "string"
+                },
+                "maxItems": 200,
+                "type": "array"
+              },
+              "includePaths": {
+                "items": {
+                  "type": "string"
+                },
+                "maxItems": 200,
+                "type": "array"
+              }
+            },
+            "type": "object"
+          }
+        },
+        "required": [
+          "repoId",
+          "find",
+          "replaceExpression"
+        ],
+        "type": "object"
+      },
+      "name": "refactor_replace_preview"
+    },
+    {
+      "description": "Rollback one previous apply operation by rollbackId.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "rollbackId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "rollbackId"
+        ],
+        "type": "object"
+      },
+      "name": "refactor_replace_rollback"
+    },
+    {
+      "description": "Run owner-type constrained symbol migrations (dry-run by default) using the same preview/apply engine.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "dryRun": {
+            "type": "boolean"
+          },
+          "migrations": {
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "forbiddenOwnerTypes": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "maxItems": 200,
+                  "type": "array"
+                },
+                "fromSymbol": {
+                  "type": "string"
+                },
+                "initializerRewrite": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "objectProperty": {
+                      "type": "string"
+                    },
+                    "objectType": {
+                      "type": "string"
+                    },
+                    "targetMember": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "objectProperty",
+                    "objectType"
+                  ],
+                  "type": "object"
+                },
+                "requiredOwnerType": {
+                  "type": "string"
+                },
+                "toSymbol": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "fromSymbol",
+                "toSymbol",
+                "requiredOwnerType"
+              ],
+              "type": "object"
+            },
+            "maxItems": 200,
+            "minItems": 1,
+            "type": "array"
+          },
+          "repoId": {
+            "type": "string"
+          },
+          "scopePaths": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 200,
+            "type": "array"
+          }
+        },
+        "required": [
+          "repoId",
+          "migrations"
+        ],
+        "type": "object"
+      },
+      "name": "refactor_symbol_migration"
+    },
+    {
+      "description": "Rename impact for a symbol: returns all callers and importers that need updating. Default (emitPreview=false) is read-only advisory (hints). Set emitPreview=true to get an applyable refactor preview (previewId + approvalToken) that renames the identifier on word boundaries across the affected files — then call refactor_replace_apply (use includeLowConfidence=true for top-level identifiers, which have no enclosing owner type). Use before refactoring to understand blast radius, or to execute the rename directly.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "emitPreview": {
+            "description": "Return an applyable refactor preview instead of read-only hints.",
+            "type": "boolean"
+          },
+          "limit": {
+            "maximum": 500,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "newName": {
+            "type": "string"
+          },
+          "profile": {
+            "enum": [
+              "nano",
+              "compact",
+              "standard",
+              "verbose"
+            ],
+            "type": "string"
+          },
+          "repoId": {
+            "type": "string"
+          },
+          "symbolId": {
+            "type": "string"
+          },
+          "wholeWord": {
+            "description": "Match the identifier on word boundaries (default true).",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "repoId",
+          "symbolId",
+          "newName"
+        ],
+        "type": "object"
+      },
+      "name": "rename_assist"
+    },
+    {
+      "description": "Map ASP.NET C# routes to handler methods using extracted route attributes ([Route], [HttpGet], [HttpPost], ...). Use to inspect API surface deterministically.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "filePathPrefix": {
+            "type": "string"
+          },
+          "httpMethod": {
+            "enum": [
+              "GET",
+              "POST",
+              "PUT",
+              "DELETE",
+              "PATCH"
+            ],
+            "type": "string"
+          },
+          "limit": {
+            "maximum": 500,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "profile": {
+            "enum": [
+              "nano",
+              "compact",
+              "standard",
+              "verbose"
+            ],
+            "type": "string"
+          },
+          "repoId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "repoId"
+        ],
+        "type": "object"
+      },
+      "name": "route_map"
+    },
+    {
+      "description": "Search string-literal CONTENT (notification titles, error messages, log templates, user-facing text) across a repo's indexed code. Returns each literal with file, line, and enclosing symbol — use for 'what text does this repo emit' audits (notification catalogs, error-message inventories, i18n sweeps) instead of grep. Interpolated/template strings are indexed with {…} placeholders.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "filePath": {
+            "type": "string"
+          },
+          "limit": {
+            "maximum": 500,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "profile": {
+            "enum": [
+              "nano",
+              "compact",
+              "standard",
+              "verbose"
+            ],
+            "type": "string"
+          },
+          "query": {
+            "type": "string"
+          },
+          "repoId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "repoId",
+          "query"
+        ],
+        "type": "object"
+      },
+      "name": "search_literals"
+    },
+    {
+      "description": "Search repo source by REGEX and get matches with context lines + the enclosing symbol. Use this instead of baseline grep for arbitrary pattern searches (TODO/FIXME sweeps, API-usage hunts, call-site patterns, config keys). Scans indexed files by default; set scanAll=true to also walk non-code text files (json/yaml/etc). Flags limited to [ims] (g is implicit). filePathPrefix (string OR array of prefixes, OR-semantics) / language / excludeTests narrow scope; pathExclude (minimatch glob or array, e.g. \"**/Tests/**\") subtracts subtrees; contextLines controls surrounding lines (returned in every profile except nano). Results cap at `limit` and a per-file cap — `truncated`/`truncationReason` flag when capped.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "contextLines": {
+            "maximum": 10,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "excludeTests": {
+            "type": "boolean"
+          },
+          "filePathPrefix": {
+            "description": "Path prefix, or array of prefixes (a file is in scope if it starts with ANY).",
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "items": {
+                  "type": "string"
+                },
+                "maxItems": 20,
+                "type": "array"
+              }
+            ]
+          },
+          "language": {
+            "type": "string"
+          },
+          "limit": {
+            "maximum": 500,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "pathExclude": {
+            "description": "Minimatch glob, or array of globs, matched against the full repo-relative path, to subtract from scope (e.g. \"**/Tests/**\", \"**/*.generated.cs\"). A leading \"*\" does not cross \"/\", so use \"**/*.ext\" to match nested files.",
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "items": {
+                  "type": "string"
+                },
+                "maxItems": 20,
+                "type": "array"
+              }
+            ]
+          },
+          "pattern": {
+            "type": "string"
+          },
+          "profile": {
+            "enum": [
+              "nano",
+              "compact",
+              "standard",
+              "verbose"
+            ],
+            "type": "string"
+          },
+          "regexFlags": {
+            "description": "Subset of i, m, s (g is always applied).",
+            "type": "string"
+          },
+          "repoId": {
+            "type": "string"
+          },
+          "scanAll": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "repoId",
+          "pattern"
+        ],
+        "type": "object"
+      },
+      "name": "search_regex"
+    },
+    {
+      "description": "Search symbols across all repos or a specific repo. strategy=name is strict name/signature matching; strategy=intent uses broader tokenized matching (multi-word natural-language queries work, e.g. 'send notification email'). ranked=true returns scored/ranked candidates (with qualifiedName 'EnclosingType.Member' for class members; enclosing-type names participate in intent matching; test files get a rank penalty) and honors strategy plus the kind/language/filePath filters. excludeTests=true drops test-path results entirely.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "compact": {
+            "type": "boolean"
+          },
+          "excludeTests": {
+            "type": "boolean"
+          },
+          "filePath": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string"
+          },
+          "language": {
+            "type": "string"
+          },
+          "limit": {
+            "maximum": 500,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "profile": {
+            "enum": [
+              "nano",
+              "compact",
+              "standard",
+              "verbose"
+            ],
+            "type": "string"
+          },
+          "query": {
+            "type": "string"
+          },
+          "ranked": {
+            "type": "boolean"
+          },
+          "repoId": {
+            "type": "string"
+          },
+          "strategy": {
+            "enum": [
+              "name",
+              "intent"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "query"
+        ],
+        "type": "object"
+      },
+      "name": "search_symbols"
+    },
+    {
+      "description": "BFS-trace the call graph starting from an entry symbol, following CALLS edges outbound up to maxDepth levels. Returns nodes and edges forming the execution sub-graph. Use to understand how a method propagates through the codebase.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "entrySymbolId": {
+            "type": "string"
+          },
+          "maxDepth": {
+            "maximum": 8,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "maxNodes": {
+            "maximum": 100,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "profile": {
+            "enum": [
+              "nano",
+              "compact",
+              "standard",
+              "verbose"
+            ],
+            "type": "string"
+          },
+          "repoId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "repoId",
+          "entrySymbolId"
+        ],
+        "type": "object"
+      },
+      "name": "trace_execution_flow"
+    },
+    {
+      "description": "Manage real-time file watching for a repository. action=start begins debounced incremental re-index on file changes; action=stop halts watching; action=status returns current watch state and counters.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "enum": [
+              "start",
+              "stop",
+              "status"
+            ],
+            "type": "string"
+          },
+          "repoId": {
+            "type": "string"
+          },
+          "repoPath": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "action"
+        ],
+        "type": "object"
+      },
+      "name": "watch_repo"
+    }
+  ]
+}

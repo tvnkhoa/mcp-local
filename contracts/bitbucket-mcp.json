@@ -1,0 +1,351 @@
+{
+  "server": "bitbucket-mcp",
+  "toolCount": 8,
+  "tools": [
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": true,
+        "readOnlyHint": false
+      },
+      "description": "Create a pull request. Disabled unless BITBUCKET_WRITE_ENABLED=true. Pass dryRun:true to preview the request payload without calling the API.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "closeSourceBranch": {
+            "description": "Delete source branch on merge",
+            "type": "boolean"
+          },
+          "description": {
+            "description": "PR description (Markdown)",
+            "type": "string"
+          },
+          "destinationBranch": {
+            "description": "Destination branch (default: repo main branch)",
+            "type": "string"
+          },
+          "dryRun": {
+            "description": "Preview the payload without creating the PR",
+            "type": "boolean"
+          },
+          "profile": {
+            "enum": [
+              "nano",
+              "compact",
+              "standard",
+              "verbose"
+            ],
+            "type": "string"
+          },
+          "repoSlug": {
+            "description": "Repo slug (default: BITBUCKET_DEFAULT_REPO)",
+            "type": "string"
+          },
+          "reviewers": {
+            "description": "Reviewer UUIDs (with or without braces) or account_ids",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "sourceBranch": {
+            "description": "Source branch name (the branch with your changes)",
+            "type": "string"
+          },
+          "title": {
+            "description": "PR title",
+            "type": "string"
+          }
+        },
+        "required": [
+          "title",
+          "sourceBranch"
+        ],
+        "type": "object"
+      },
+      "name": "create_pull_request"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": true,
+        "readOnlyHint": true
+      },
+      "description": "Get a single pull request by id (title, state, branches, author, reviewers, links, counts).",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "description": "Pull request id",
+            "minimum": 1,
+            "type": "integer"
+          },
+          "profile": {
+            "enum": [
+              "nano",
+              "compact",
+              "standard",
+              "verbose"
+            ],
+            "type": "string"
+          },
+          "repoSlug": {
+            "description": "Repo slug (default: BITBUCKET_DEFAULT_REPO)",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "type": "object"
+      },
+      "name": "get_pull_request"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": true,
+        "readOnlyHint": true
+      },
+      "description": "Get the raw unified diff for a pull request as text. The full diff is always returned and may be large (see diffLength) — there is no profile-based truncation.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "description": "Pull request id",
+            "minimum": 1,
+            "type": "integer"
+          },
+          "profile": {
+            "enum": [
+              "nano",
+              "compact",
+              "standard",
+              "verbose"
+            ],
+            "type": "string"
+          },
+          "repoSlug": {
+            "description": "Repo slug (default: BITBUCKET_DEFAULT_REPO)",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "type": "object"
+      },
+      "name": "get_pull_request_diff"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": true,
+        "readOnlyHint": true
+      },
+      "description": "Get metadata for one repository (name, main branch, visibility, language, links).",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "profile": {
+            "enum": [
+              "nano",
+              "compact",
+              "standard",
+              "verbose"
+            ],
+            "type": "string"
+          },
+          "repoSlug": {
+            "description": "Repo slug (default: BITBUCKET_DEFAULT_REPO)",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "get_repository"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": true,
+        "readOnlyHint": true
+      },
+      "description": "Verify connectivity + auth to Bitbucket and echo the (non-secret) server config. Probes the default repo if set, else lists one repository.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "profile": {
+            "enum": [
+              "nano",
+              "compact",
+              "standard",
+              "verbose"
+            ],
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "health_check"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": true,
+        "readOnlyHint": true
+      },
+      "description": "List branches of a repository (useful for picking a source/destination branch before creating a PR).",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "page": {
+            "minimum": 1,
+            "type": "integer"
+          },
+          "pagelen": {
+            "description": "Page size (default 25, max 100)",
+            "maximum": 100,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "profile": {
+            "enum": [
+              "nano",
+              "compact",
+              "standard",
+              "verbose"
+            ],
+            "type": "string"
+          },
+          "q": {
+            "description": "e.g. name ~ \"feature\"",
+            "type": "string"
+          },
+          "repoSlug": {
+            "description": "Repo slug (default: BITBUCKET_DEFAULT_REPO)",
+            "type": "string"
+          },
+          "sort": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "list_branches"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": true,
+        "readOnlyHint": true
+      },
+      "description": "List pull requests of a repository. Defaults to OPEN; pass state to filter (OPEN/MERGED/DECLINED/SUPERSEDED).",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "page": {
+            "minimum": 1,
+            "type": "integer"
+          },
+          "pagelen": {
+            "description": "Page size (default 25, max 100)",
+            "maximum": 100,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "profile": {
+            "enum": [
+              "nano",
+              "compact",
+              "standard",
+              "verbose"
+            ],
+            "type": "string"
+          },
+          "q": {
+            "type": "string"
+          },
+          "repoSlug": {
+            "description": "Repo slug (default: BITBUCKET_DEFAULT_REPO)",
+            "type": "string"
+          },
+          "sort": {
+            "description": "e.g. -updated_on",
+            "type": "string"
+          },
+          "state": {
+            "enum": [
+              "OPEN",
+              "MERGED",
+              "DECLINED",
+              "SUPERSEDED"
+            ],
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "list_pull_requests"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": true,
+        "readOnlyHint": true
+      },
+      "description": "List repositories in the configured workspace. Optional role filter (owner/admin/contributor/member), free-text `q` (BBQL), and `sort`.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "page": {
+            "minimum": 1,
+            "type": "integer"
+          },
+          "pagelen": {
+            "description": "Page size (default 25, max 100)",
+            "maximum": 100,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "profile": {
+            "enum": [
+              "nano",
+              "compact",
+              "standard",
+              "verbose"
+            ],
+            "type": "string"
+          },
+          "q": {
+            "description": "Bitbucket query, e.g. name ~ \"api\"",
+            "type": "string"
+          },
+          "role": {
+            "enum": [
+              "owner",
+              "admin",
+              "contributor",
+              "member"
+            ],
+            "type": "string"
+          },
+          "sort": {
+            "description": "e.g. -updated_on",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "list_repositories"
+    }
+  ]
+}

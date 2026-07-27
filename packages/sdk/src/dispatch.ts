@@ -8,7 +8,7 @@
  * handler becomes an `internal_error` with the detail logged, never returned.
  */
 
-import type { Logger, ResponseProfile } from "@mcp/core";
+import type { Logger, PlatformError, ResponseProfile } from "@mcp/core";
 import {
   DEFAULT_RESPONSE_PROFILE,
   notFound,
@@ -30,6 +30,23 @@ export interface DispatchDeps {
   /** Injectable so request ids are deterministic in tests. */
   readonly requestId?: () => string;
   readonly signal?: AbortSignal;
+  /**
+   * Render a failure using the server's own error contract.
+   *
+   * Dispatch decides *that* a call failed; the server decides how that failure
+   * looks on the wire. Without this hook, adopting the SDK would force every
+   * server onto `PlatformError`'s payload shape and closed code vocabulary —
+   * silently rewriting every error response its clients already depend on, in a
+   * way `tools/list` cannot reveal.
+   *
+   * Receives the most informative value available: the raw `ZodError` for a
+   * validation failure, the original thrown value for a handler crash, and a
+   * `PlatformError` for refusals dispatch itself raises. Defaults to
+   * {@link asError}.
+   *
+   * Must not throw. If it does, the caller still gets {@link asFatalError}.
+   */
+  readonly formatError?: (error: unknown, profile: ResponseProfile) => ToolCallResult;
 }
 
 let requestCounter = 0;
@@ -69,10 +86,34 @@ export async function dispatchToolCall(
     const error = toPlatformError(cause, `Tool "${name}" failed unexpectedly.`);
     deps.logger.error("dispatch_failed", { tool: name, code: error.code, detail: String(cause) });
     try {
-      return asError(error, profile);
+      return renderError(deps, cause, error, profile);
     } catch {
       return asFatalError();
     }
+  }
+}
+
+/**
+ * Render a failure, preferring the server's own envelope.
+ *
+ * `raw` is the most informative original value; `fallback` is the PlatformError
+ * dispatch would otherwise return. A `formatError` that throws must not become a
+ * protocol-level failure, so it degrades to the default rendering.
+ */
+function renderError(
+  deps: DispatchDeps,
+  raw: unknown,
+  fallback: PlatformError,
+  profile: ResponseProfile
+): ToolCallResult {
+  if (deps.formatError === undefined) {
+    return asError(fallback, profile);
+  }
+  try {
+    return deps.formatError(raw, profile);
+  } catch (cause) {
+    deps.logger.error("format_error_failed", { detail: String(cause) });
+    return asError(fallback, profile);
   }
 }
 
@@ -96,10 +137,11 @@ async function dispatchInner(
       } catch (cause) {
         const error = toPlatformError(cause, `Legacy tool "${name}" failed.`);
         deps.logger.error("legacy_tool_failed", { tool: name, code: error.code });
-        return asError(error, profile);
+        return renderError(deps, cause, error, profile);
       }
     }
-    return asError(notFound(`Unknown tool: ${name}.`, { tool: name }), profile);
+    const unknown = notFound(`Unknown tool: ${name}.`, { tool: name });
+    return renderError(deps, unknown, unknown, profile);
   }
 
   const requestId = (deps.requestId ?? nextRequestId)();
@@ -112,7 +154,11 @@ async function dispatchInner(
 
   const parsed = tool.input.safeParse(rawArgs);
   if (!parsed.success) {
-    return asError(
+    // The raw ZodError is handed to formatError: a server that already renders
+    // zod issues its own way needs the issues, not a summary of them.
+    return renderError(
+      deps,
+      parsed.error,
       validationError(`Invalid arguments for ${name}.`, { tool: name, ...formatZodIssues(parsed.error) }),
       profile
     );
@@ -121,19 +167,19 @@ async function dispatchInner(
   const guardOutcome = await runGuards(tool.guards, { toolName: name, input: parsed.data, ctx });
   if (!guardOutcome.ok) {
     ctx.logger.warn("tool_refused", { code: guardOutcome.error.code });
-    return asError(guardOutcome.error, profile);
+    return renderError(deps, guardOutcome.error, guardOutcome.error, profile);
   }
 
   try {
     const outcome = await tool.handler(parsed.data, ctx);
     if (!outcome.ok) {
       ctx.logger.warn("tool_error", { code: outcome.error.code });
-      return asError(outcome.error, profile);
+      return renderError(deps, outcome.error, outcome.error, profile);
     }
     return asText(outcome.value, profile, serialize);
   } catch (cause) {
     const error = toPlatformError(cause, `Tool "${name}" failed unexpectedly.`);
     ctx.logger.error("tool_threw", { code: error.code, detail: String(cause) });
-    return asError(error, profile);
+    return renderError(deps, cause, error, profile);
   }
 }

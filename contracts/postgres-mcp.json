@@ -1,0 +1,541 @@
+{
+  "server": "postgres-mcp",
+  "toolCount": 17,
+  "tools": [
+    {
+      "description": "Diff schema (and optionally row counts) between two environments — schema-drift / deploy check.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "includeRowCounts": {
+            "type": "boolean"
+          },
+          "profile": {
+            "enum": [
+              "nano",
+              "compact",
+              "standard",
+              "verbose"
+            ],
+            "type": "string"
+          },
+          "source": {
+            "type": "string"
+          },
+          "target": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "source",
+          "target"
+        ],
+        "type": "object"
+      },
+      "name": "compare_environments"
+    },
+    {
+      "description": "Compare a table's data between two environments via row count + order-independent checksum (deploy/seed verification).",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "columns": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "profile": {
+            "enum": [
+              "nano",
+              "compact",
+              "standard",
+              "verbose"
+            ],
+            "type": "string"
+          },
+          "schema": {
+            "default": "public",
+            "type": "string"
+          },
+          "source": {
+            "type": "string"
+          },
+          "table": {
+            "type": "string"
+          },
+          "target": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "source",
+          "target",
+          "table"
+        ],
+        "type": "object"
+      },
+      "name": "data_diff"
+    },
+    {
+      "description": "Describe columns for a table.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "environment": {
+            "type": "string"
+          },
+          "profile": {
+            "enum": [
+              "nano",
+              "compact",
+              "standard",
+              "verbose"
+            ],
+            "type": "string"
+          },
+          "schema": {
+            "default": "public",
+            "type": "string"
+          },
+          "table": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "table"
+        ],
+        "type": "object"
+      },
+      "name": "describe_table"
+    },
+    {
+      "description": "List foreign-key relationships (optionally for one table) — useful for JOINs and write/migration impact.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "environment": {
+            "type": "string"
+          },
+          "profile": {
+            "enum": [
+              "nano",
+              "compact",
+              "standard",
+              "verbose"
+            ],
+            "type": "string"
+          },
+          "table": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "get_table_relationships"
+    },
+    {
+      "description": "Check MCP server and PostgreSQL connectivity for an environment.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "environment": {
+            "description": "Target environment (default: configured default).",
+            "type": "string"
+          },
+          "profile": {
+            "enum": [
+              "nano",
+              "compact",
+              "standard",
+              "verbose"
+            ],
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "health_check"
+    },
+    {
+      "description": "List configured database environments, their write capability, and masked connection info.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "profile": {
+            "enum": [
+              "nano",
+              "compact",
+              "standard",
+              "verbose"
+            ],
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "list_environments"
+    },
+    {
+      "description": "List tables in a schema (default: public).",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "environment": {
+            "type": "string"
+          },
+          "profile": {
+            "enum": [
+              "nano",
+              "compact",
+              "standard",
+              "verbose"
+            ],
+            "type": "string"
+          },
+          "schema": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "list_tables"
+    },
+    {
+      "description": "Generate a new EF Core migration (dotnet ef migrations add). Does NOT touch the database; returns generated file paths to edit.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "environment": {
+            "type": "string"
+          },
+          "name": {
+            "description": "Migration name (letters/digits/underscore only).",
+            "type": "string"
+          },
+          "profile": {
+            "enum": [
+              "nano",
+              "compact",
+              "standard",
+              "verbose"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "type": "object"
+      },
+      "name": "migration_add"
+    },
+    {
+      "description": "Apply pending migrations (dotnet ef database update) after a migration_preview. Drift-guarded + verifies post-schema.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "approvalToken": {
+            "type": "string"
+          },
+          "environment": {
+            "type": "string"
+          },
+          "previewId": {
+            "type": "string"
+          },
+          "profile": {
+            "enum": [
+              "nano",
+              "compact",
+              "standard",
+              "verbose"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "previewId",
+          "approvalToken"
+        ],
+        "type": "object"
+      },
+      "name": "migration_apply"
+    },
+    {
+      "description": "Run the idempotent migration script inside a rolled-back transaction to catch SQL errors before applying.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "environment": {
+            "type": "string"
+          },
+          "profile": {
+            "enum": [
+              "nano",
+              "compact",
+              "standard",
+              "verbose"
+            ],
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "migration_dry_run"
+    },
+    {
+      "description": "Snapshot current schema + return the pending migration SQL delta and an approval token. Full idempotent script available at profile:verbose.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "environment": {
+            "type": "string"
+          },
+          "profile": {
+            "enum": [
+              "nano",
+              "compact",
+              "standard",
+              "verbose"
+            ],
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "migration_preview"
+    },
+    {
+      "description": "Show applied vs pending EF Core migrations for an environment. Requires PG_MIGRATION_ENABLED.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "environment": {
+            "type": "string"
+          },
+          "profile": {
+            "enum": [
+              "nano",
+              "compact",
+              "standard",
+              "verbose"
+            ],
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "migration_status"
+    },
+    {
+      "description": "Quick table profile: estimated row count, per-column stats (distinct/null), and a small sample.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "environment": {
+            "type": "string"
+          },
+          "profile": {
+            "enum": [
+              "nano",
+              "compact",
+              "standard",
+              "verbose"
+            ],
+            "type": "string"
+          },
+          "sampleLimit": {
+            "maximum": 100,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "schema": {
+            "default": "public",
+            "type": "string"
+          },
+          "table": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "table"
+        ],
+        "type": "object"
+      },
+      "name": "profile_table"
+    },
+    {
+      "description": "Run a read-only SQL query with guardrails.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "environment": {
+            "type": "string"
+          },
+          "explain": {
+            "description": "Return the EXPLAIN plan + estimated cost instead of executing.",
+            "type": "boolean"
+          },
+          "limit": {
+            "maximum": 2000,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "params": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "type": "array"
+          },
+          "profile": {
+            "enum": [
+              "nano",
+              "compact",
+              "standard",
+              "verbose"
+            ],
+            "type": "string"
+          },
+          "requestId": {
+            "type": "string"
+          },
+          "sql": {
+            "type": "string"
+          },
+          "timeoutMs": {
+            "maximum": 60000,
+            "minimum": 1,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "sql"
+        ],
+        "type": "object"
+      },
+      "name": "run_read_query"
+    },
+    {
+      "description": "Apply a previously previewed write using its previewId + approvalToken. Commits the change and returns a rollbackId.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "approvalToken": {
+            "type": "string"
+          },
+          "environment": {
+            "type": "string"
+          },
+          "previewId": {
+            "type": "string"
+          },
+          "profile": {
+            "enum": [
+              "nano",
+              "compact",
+              "standard",
+              "verbose"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "previewId",
+          "approvalToken"
+        ],
+        "type": "object"
+      },
+      "name": "write_apply"
+    },
+    {
+      "description": "Preview an INSERT/UPDATE/DELETE (dry-run, rolled back) and get an approval token. Requires PG_WRITE_ENABLED. UPDATE/DELETE must have WHERE unless allowFullTable.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "allowFullTable": {
+            "description": "Permit UPDATE/DELETE without WHERE (whole table).",
+            "type": "boolean"
+          },
+          "environment": {
+            "type": "string"
+          },
+          "params": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "type": "array"
+          },
+          "profile": {
+            "enum": [
+              "nano",
+              "compact",
+              "standard",
+              "verbose"
+            ],
+            "type": "string"
+          },
+          "sql": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "sql"
+        ],
+        "type": "object"
+      },
+      "name": "write_preview"
+    },
+    {
+      "description": "Roll back a previously applied write using its rollbackId (restores captured rows).",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "profile": {
+            "enum": [
+              "nano",
+              "compact",
+              "standard",
+              "verbose"
+            ],
+            "type": "string"
+          },
+          "rollbackId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "rollbackId"
+        ],
+        "type": "object"
+      },
+      "name": "write_rollback"
+    }
+  ]
+}

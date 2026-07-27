@@ -15,6 +15,7 @@ import type { Logger, ResponseProfile } from "@mcp/core";
 import { DEFAULT_RESPONSE_PROFILE, createLogger } from "@mcp/core";
 
 import { redirectConsoleToStderr } from "./console.js";
+import type { DispatchDeps } from "./dispatch.js";
 import { dispatchToolCall } from "./dispatch.js";
 import type { Lifecycle } from "./lifecycle.js";
 import { createLifecycle } from "./lifecycle.js";
@@ -36,6 +37,13 @@ export interface McpServerOptions {
   readonly protectStdout?: boolean;
   /** Attach SIGINT/SIGTERM handlers on start. Default true. */
   readonly handleSignals?: boolean;
+  /**
+   * Render failures using this server's own error envelope instead of the
+   * platform default. See {@link DispatchDeps.formatError} — a server with an
+   * established error contract passes its existing mapper here so adopting the
+   * SDK does not rewrite every error response.
+   */
+  readonly formatError?: DispatchDeps["formatError"];
 }
 
 export interface McpServerHandle {
@@ -68,7 +76,8 @@ export function createMcpServer(options: McpServerOptions): McpServerHandle {
     const result = await dispatchToolCall(registry, request.params.name, args, {
       logger,
       defaultProfile: options.defaultProfile ?? DEFAULT_RESPONSE_PROFILE,
-      ...(options.serialize === undefined ? {} : { serialize: options.serialize })
+      ...(options.serialize === undefined ? {} : { serialize: options.serialize }),
+      ...(options.formatError === undefined ? {} : { formatError: options.formatError })
     });
     return { ...result };
   });
