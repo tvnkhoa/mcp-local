@@ -4,7 +4,7 @@ import type { Pool } from "pg";
 import type { ConnectionManager } from "./connectionManager.js";
 import { PolicyViolationError } from "../errors.js";
 import { asText, type ResponseProfile } from "../response/responseFormatter.js";
-import { quoteIdent } from "../sql/ident.js";
+import { quoteIdent } from "../guardrails/ident.js";
 import { safeRollback } from "../write/writeHandlers.js";
 
 // ── get_table_relationships ─────────────────────────────────────────────────────

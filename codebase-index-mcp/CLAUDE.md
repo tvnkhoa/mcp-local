@@ -62,8 +62,8 @@ Files on disk
 | `src/extractionWorkerPool.ts` | Worker-thread pool for large-file parse isolation |
 | `src/dotnetProjectParser.ts` | Regex-based .csproj/.sln parser (NuGet + ProjectReference edges) |
 | `src/fileFilter.ts` | File include/exclude rules; binary sniff; language detection |
-| `src/indexGuardrails.ts` | Path allowlist enforcement; sensitive-pattern redaction; env parsing helpers |
-| `src/sqliteGuardrails.ts` | Blocks mutation SQL tokens in `query_graph` tool to prevent injection |
+| `src/guardrails/indexGuardrails.ts` | Path allowlist enforcement; sensitive-pattern redaction; env parsing helpers |
+| `src/guardrails/sqliteGuardrails.ts` | Blocks mutation SQL tokens in `query_graph` tool to prevent injection |
 | `src/watchManager.ts` | chokidar watcher; debounced incremental re-index |
 | `src/markdownParser.ts` | Docs-lane extraction for `.md` files |
 | `src/types.ts` | Shared types: `SymbolRecord`, `EdgeRecord`, `RefactorPreviewRecord`, etc. |
@@ -102,4 +102,4 @@ This workspace has `.claude/rules/mcp-hard-mode.md` as the policy source for how
 - **Path normalization**: run `list_repositories` and reuse the exact registered `repoPath` — do not rewrite drive-letter casing or slash style
 - **Watch policy**: keep `watch_repo` off except during active implementation/debug sessions; stop immediately after
 - **Tool budget**: soft cap 5 MCP calls per question; hard cap 8 with fallback; max 2 query rewrites
-- **Fallback logging**: if MCP returns empty/low-confidence after 2 attempts, log to `mcp-codebase-index-issue-registry.md` before continuing with baseline tools
+- **Fallback logging**: if MCP returns empty/low-confidence after 2 attempts, log to `docs/mcp-codebase-index-issue-registry.md` before continuing with baseline tools

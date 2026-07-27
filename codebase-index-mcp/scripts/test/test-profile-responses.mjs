@@ -2,7 +2,7 @@
  * Tests profile behavior for impact and list tools that newly support nano/compact/standard/verbose.
  * Tools covered: find_impact_files, get_dependency_graph, get_call_chain, get_file_summary, list_repositories
  *
- * Usage: node scripts/test-profile-responses.mjs
+ * Usage: node scripts/test/test-profile-responses.mjs
  * Requires: npm run build first, and an indexed repo (uses the smoke-test-repo from the current working dir)
  */
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";

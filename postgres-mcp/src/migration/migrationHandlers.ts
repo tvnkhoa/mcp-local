@@ -5,7 +5,7 @@ import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import type { ConnectionManager } from "../db/connectionManager.js";
 import { PolicyViolationError } from "../errors.js";
 import { asText, type ResponseProfile } from "../response/responseFormatter.js";
-import { quoteIdent } from "../sql/ident.js";
+import { quoteIdent } from "../guardrails/ident.js";
 import { issueApprovalToken, verifyApprovalToken } from "../write/approval.js";
 import { recordAudit } from "../write/auditLog.js";
 import {

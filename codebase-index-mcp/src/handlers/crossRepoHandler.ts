@@ -1,6 +1,6 @@
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { McpError, ErrorCode } from "@modelcontextprotocol/sdk/types.js";
-import { toNugetContractId, resolveResponseProfile } from "../responseFormatter.js";
+import { toNugetContractId, resolveResponseProfile } from "../response/responseFormatter.js";
 import type { HandlerContext } from "./handlerContext.js";
 
 // ── get_cross_repo_impact ─────────────────────────────────────────────────────

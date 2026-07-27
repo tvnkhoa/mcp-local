@@ -18,7 +18,7 @@ import { z } from "zod";
 import { ConnectionManager } from "./db/connectionManager.js";
 import { PolicyViolationError } from "./errors.js";
 import { asText as asTextProfiled, asError as asErrorProfiled, responseProfileSchema } from "./response/responseFormatter.js";
-import { validateReadOnlySql } from "./sqlGuardrails.js";
+import { validateReadOnlySql } from "./guardrails/sqlGuardrails.js";
 import { resolveApprovalSecret } from "./write/approval.js";
 import { WritePreviewStore } from "./write/previewStore.js";
 import {

@@ -7,8 +7,8 @@ import {
   runGitLines,
   collectGitChangedFiles
 } from "../gitHelpers.js";
-import { assertPathAllowed, clamp } from "../indexGuardrails.js";
-import { resolveResponseProfile } from "../responseFormatter.js";
+import { assertPathAllowed, clamp } from "../guardrails/indexGuardrails.js";
+import { resolveResponseProfile } from "../response/responseFormatter.js";
 import { resolveDetectChangesPolicy } from "../policyResolver.js";
 import { computeChangedFileImpacts } from "../changeAnalysis.js";
 import { buildCoverageBlock } from "../coverage.js";

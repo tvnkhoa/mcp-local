@@ -1,4 +1,4 @@
-import { parseBooleanEnv } from "./indexGuardrails.js";
+import { parseBooleanEnv } from "../guardrails/indexGuardrails.js";
 
 export function numberFromEnv(name: string, fallback: number): number {
   const raw = process.env[name];

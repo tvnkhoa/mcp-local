@@ -8,7 +8,7 @@ import { glob } from "glob";
 import { shouldIndexFile, INDEX_IGNORE_GLOBS, type FilterDecision } from "./fileFilter.js";
 import { GraphStore } from "./graphStore.js";
 import { resolveHeadCommitSha, resolveCurrentBranch } from "./gitHelpers.js";
-import { clamp, redactSensitive } from "./indexGuardrails.js";
+import { clamp, redactSensitive } from "./guardrails/indexGuardrails.js";
 import { extractGraphData, isParseTimeoutError } from "./treeSitterExtractor.js";
 import { ExtractionWorkerPool } from "./extractionWorkerPool.js";
 import { extractDotnetProjectData } from "./dotnetProjectParser.js";

@@ -1,4 +1,4 @@
-import type { BitbucketConfig } from "./config.js";
+import type { BitbucketConfig } from "./config/index.js";
 import { BitbucketHttpError } from "./errors.js";
 
 /** A Bitbucket Cloud paginated collection response. */

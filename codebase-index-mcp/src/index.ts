@@ -29,8 +29,8 @@ import {
   parseAutoWatchRepos,
   parseBooleanEnv,
   parseWatchConfigFromEnv
-} from "./indexGuardrails.js";
-import { validateAllowedTables, validateReadOnlyGraphSql } from "./sqliteGuardrails.js";
+} from "./guardrails/indexGuardrails.js";
+import { validateAllowedTables, validateReadOnlyGraphSql } from "./guardrails/sqliteGuardrails.js";
 import { WatchManager } from "./watchManager.js";
 import type {
   CallChainDirection,
@@ -45,7 +45,7 @@ import type {
   RefactorRollbackRecord,
   ResolutionStats
 } from "./types.js";
-import { numberFromEnv, ratioFromEnv, nonNegativeNumberFromEnv, parseOptionalBooleanEnv } from "./envConfig.js";
+import { numberFromEnv, ratioFromEnv, nonNegativeNumberFromEnv, parseOptionalBooleanEnv } from "./config/envConfig.js";
 import {
   runGit,
   runGitLines,
@@ -69,7 +69,7 @@ import {
   asText as asTextCore,
   asArgsRecord,
   toNugetContractId
-} from "./responseFormatter.js";
+} from "./response/responseFormatter.js";
 import {
   PolicyViolationError,
   normalizeRelativePath,
@@ -104,7 +104,7 @@ import { mapError, assertNoLlmRuntimePolicy, assertRefactorApprovalPolicy } from
 import * as schemas from "./schemas/toolSchemas.js";
 import { handleListResources, handleReadResource } from "./handlers/resourceHandler.js";
 import { traverseDependencyGraph, traverseCallGraph } from "./graphTraversal.js";
-import { parsePerformanceProfileEnv, resolvePostPhasePolicy } from "./performanceConfig.js";
+import { parsePerformanceProfileEnv, resolvePostPhasePolicy } from "./config/performanceConfig.js";
 
 import {
   handleHealthCheck,

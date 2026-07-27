@@ -13,7 +13,7 @@ import {
   INDEX_IGNORE_GLOBS
 } from "./fileFilter.js";
 import { assertSafeRepoFilePath, normalizeRelativePath } from "./refactorUtils.js";
-import { numberFromEnv } from "./envConfig.js";
+import { numberFromEnv } from "./config/envConfig.js";
 
 // Bound cost per query. PER_FILE_MATCH_CAP is deliberately tighter than refactorEngine's
 // REGEX_PER_FILE_MATCH_CAP (2000): this is an interactive search lane, not a bulk rewrite, so

@@ -96,7 +96,7 @@ npm run dev
 - `refactor_symbol_migration` supports `initializerRewrite` metadata for owned-state migrations
 - Without `initializerRewrite`, dotted targets (e.g., `DispatchContext.CrmCampaignId`) in object initializers are blocked as `ambiguous_target`
 - Apply-stage guard rejects invalid dotted initializer rewrites with `INVALID_CSHARP_INITIALIZER_REWRITE`
-- See `mcp-codebase-index-issue-registry.md` MCP-ISSUE-003 for context
+- See `codebase-index-mcp/docs/mcp-codebase-index-issue-registry.md` MCP-ISSUE-003 for context
 
 ### postgres-mcp
 
@@ -258,7 +258,7 @@ Default: watchless operation (`CODEBASE_INDEX_WATCH_AUTO_START=false`)
 
 ## Issue Registry
 
-`codebase-index-mcp/mcp-codebase-index-issue-registry.md` tracks MCP tool gaps and workarounds:
+`codebase-index-mcp/docs/mcp-codebase-index-issue-registry.md` tracks MCP tool gaps and workarounds:
 - MCP-ISSUE-001: C# property edge extraction (✅ resolved)
 - MCP-ISSUE-002: Object initializer migration (✅ resolved)
 - MCP-ISSUE-003: Invalid dotted initializer rewrites (✅ resolved)
@@ -323,7 +323,7 @@ When MCP tools fail to provide sufficient evidence, log new issues with:
 ## References
 
 - `codebase-index-mcp/README.md` - Full tool catalog and usage examples
-- `codebase-index-mcp/MCP-FIRST-CHEATSHEET.md` - Quick operator guide
+- `codebase-index-mcp/docs/MCP-FIRST-CHEATSHEET.md` - Quick operator guide
 - `.claude/rules/mcp-hard-mode.md` - MCP-first enforcement policy (workspace root)
-- `codebase-index-mcp/mcp-codebase-index-issue-registry.md` - Known gaps and resolutions
+- `codebase-index-mcp/docs/mcp-codebase-index-issue-registry.md` - Known gaps and resolutions
 - `postgres-mcp/README.md` - PostgreSQL MCP setup and guardrails

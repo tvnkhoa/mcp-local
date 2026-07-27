@@ -1,7 +1,7 @@
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { McpError, ErrorCode } from "@modelcontextprotocol/sdk/types.js";
-import { resolveResponseProfile } from "../responseFormatter.js";
-import { validateReadOnlyGraphSql, validateAllowedTables } from "../sqliteGuardrails.js";
+import { resolveResponseProfile } from "../response/responseFormatter.js";
+import { validateReadOnlyGraphSql, validateAllowedTables } from "../guardrails/sqliteGuardrails.js";
 import { buildStaleWarning, getRepoStaleness, collectDirtyFiles, countCommitsBehind } from "../gitHelpers.js";
 import type { StaleWarning } from "../gitHelpers.js";
 import { buildCoverageBlock } from "../coverage.js";

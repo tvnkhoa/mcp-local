@@ -84,7 +84,7 @@ detect_circular_dependencies(repoId, mode: "module")
 2. Use `profile: "compact"` for most calls; `profile: "nano"` for high-volume queries
 3. Soft cap: 5 MCP calls per question; hard cap: 8 with fallback
 4. Baseline tools (`grep`, `read_file`) allowed only after 2 failed MCP attempts
-5. If fallback is used, log the gap to `mcp-codebase-index-issue-registry.md`
+5. If fallback is used, log the gap to `docs/mcp-codebase-index-issue-registry.md`
 
 ## Tool Reference
 

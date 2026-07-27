@@ -11,7 +11,7 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 
-import { loadConfig, describeConfig, type ObserveConfig } from "./config.js";
+import { loadConfig, describeConfig, type ObserveConfig } from "./config/index.js";
 import { mapError } from "./errors.js";
 import { ObserveClient, type StreamType } from "./observeClient.js";
 import { normalizeLog, normalizeSpan, capLog } from "./logParser.js";
@@ -29,7 +29,7 @@ import {
   buildLogStatsSql,
   buildSampleSql
 } from "./queryBuilder.js";
-import { validateReadOnlySql } from "./sqlGuardrails.js";
+import { validateReadOnlySql } from "./guardrails/sqlGuardrails.js";
 
 const config: ObserveConfig = loadConfig();
 const client = new ObserveClient(config);

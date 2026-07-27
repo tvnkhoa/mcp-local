@@ -1,4 +1,4 @@
-import { extractGraphData } from "../dist/treeSitterExtractor.js";
+import { extractGraphData } from "../../dist/treeSitterExtractor.js";
 
 function assert(condition, message) {
   if (!condition) {

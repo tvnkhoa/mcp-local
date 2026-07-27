@@ -11,7 +11,7 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 
-import { loadConfig, describeConfig, type BitbucketConfig } from "./config.js";
+import { loadConfig, describeConfig, type BitbucketConfig } from "./config/index.js";
 import { mapError, PolicyViolationError } from "./errors.js";
 import { BitbucketClient, type CreatePullRequestBody } from "./bitbucketClient.js";
 import {

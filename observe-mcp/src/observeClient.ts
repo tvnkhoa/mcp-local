@@ -1,4 +1,4 @@
-import type { ObserveConfig } from "./config.js";
+import type { ObserveConfig } from "./config/index.js";
 import { ObserveHttpError } from "./errors.js";
 
 export type SearchParams = {

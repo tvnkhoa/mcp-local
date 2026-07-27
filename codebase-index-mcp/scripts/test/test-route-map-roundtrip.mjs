@@ -8,8 +8,8 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-import { GraphStore } from "../dist/graphStore.js";
-import { extractGraphData } from "../dist/treeSitterExtractor.js";
+import { GraphStore } from "../../dist/graphStore.js";
+import { extractGraphData } from "../../dist/treeSitterExtractor.js";
 
 function createTempDbPath() {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "cbi-route-map-rtrip-"));

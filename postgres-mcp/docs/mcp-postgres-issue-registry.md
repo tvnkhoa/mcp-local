@@ -3,7 +3,7 @@
 Findings, defects, and verified behaviors for the `postgres-mcp` server
 (`D:\1.SourceCode\mcp-local\postgres-mcp`), raised from consuming repos (primarily
 `wec.communication-hub`). Each entry: Scenario · Tool/query · Expected vs actual · Impact ·
-Resolution. Mirrors the format of `codebase-index-mcp/mcp-codebase-index-issue-registry.md`.
+Resolution. Mirrors the format of `codebase-index-mcp/docs/mcp-codebase-index-issue-registry.md`.
 
 > Consuming repos document day-to-day usage in `CLAUDE.md` (PostgreSQL MCP Operations section) and
 > the `postgres-mcp-operations` skill. This file tracks server behavior/config truth and gaps.

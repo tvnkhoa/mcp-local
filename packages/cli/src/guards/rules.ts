@@ -69,8 +69,10 @@ export const ENV_ACCESS_ALLOWLIST: readonly string[] = [
   // The guard itself names the pattern it searches for.
   "packages/cli/src/guards/dependencyGuard.ts",
   "packages/cli/src/guards/rules.ts",
-  // Each server's config module is the other permitted reader.
-  "/src/config.ts",
+  // Each server's config module is the other permitted reader. Every server
+  // keeps its config under src/config/ — the filename differs because
+  // postgres-mcp resolves multiple environments.
+  "/src/config/index.ts",
   "/src/config/environments.ts"
 ];
 

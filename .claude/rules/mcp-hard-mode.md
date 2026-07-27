@@ -122,7 +122,7 @@ Before any baseline tool call, verify and satisfy:
 
 ## Tool Selection Guide
 
-> Quick reference: see `DECISION-TREE.md` for a task-oriented flowchart with profile heuristics and fallback escalation steps.
+> Quick reference: see `codebase-index-mcp/docs/DECISION-TREE.md` for a task-oriented flowchart with profile heuristics and fallback escalation steps.
 
 | Intent | Preferred tool | Notes |
 |--------|---------------|-------|
@@ -322,7 +322,7 @@ When fallback is used:
 
 ## Mandatory Issue Logging on Fallback
 When fallback is used, add or update an entry in:
-- `mcp-codebase-index-issue-registry.md`
+- `codebase-index-mcp/docs/mcp-codebase-index-issue-registry.md`
 
 Record minimum fields:
 - Scenario

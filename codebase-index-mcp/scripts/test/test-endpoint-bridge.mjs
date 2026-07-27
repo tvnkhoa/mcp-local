@@ -1,7 +1,7 @@
 import assert from "node:assert";
 
-import { GraphStore } from "../dist/graphStore.js";
-import { extractGraphData } from "../dist/treeSitterExtractor.js";
+import { GraphStore } from "../../dist/graphStore.js";
+import { extractGraphData } from "../../dist/treeSitterExtractor.js";
 import { makeTempDbPath } from "./_fixtures.mjs";
 
 function run() {

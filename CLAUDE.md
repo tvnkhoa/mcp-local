@@ -137,7 +137,7 @@ When analyzing this codebase, use the `codebase-index-local` MCP tools **before*
 - `search_symbols(ranked:true)` now honors `strategy:"intent"` (multi-word scored candidates); `find_impact_files`/`get_change_context` warn via `staleWarning` instead of erroring on a stale index
 - Soft cap: 5 MCP calls per question; hard cap: 8 before falling back to baseline tools
 - Keep `watch_repo` off unless actively debugging; stop watchers immediately after
-- If MCP returns empty or low-confidence results after 2 attempts, log to `codebase-index-mcp/mcp-codebase-index-issue-registry.md` before continuing with grep/read
+- If MCP returns empty or low-confidence results after 2 attempts, log to `codebase-index-mcp/docs/mcp-codebase-index-issue-registry.md` before continuing with grep/read
 
 ## Workspace Rules & Skills (`.claude/`)
 

@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import type { ObserveConfig } from "./config.js";
+import type { ObserveConfig } from "./config/index.js";
 import { PolicyViolationError } from "./errors.js";
 import {
   resolveWindow,

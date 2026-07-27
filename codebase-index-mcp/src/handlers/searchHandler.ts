@@ -7,7 +7,7 @@ import {
   buildStaleWarning
 } from "../gitHelpers.js";
 import { runGit } from "../gitHelpers.js";
-import { resolveResponseProfile } from "../responseFormatter.js";
+import { resolveResponseProfile } from "../response/responseFormatter.js";
 import { formatChangeContextPayload, buildIndexMeta } from "./impactHandler.js";
 import { readSymbolSourceSpan } from "../refactorUtils.js";
 import { buildCoverageBlock } from "../coverage.js";

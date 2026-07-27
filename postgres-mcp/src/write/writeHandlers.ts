@@ -6,8 +6,8 @@ import type { Pool, PoolClient } from "pg";
 import type { ConnectionManager } from "../db/connectionManager.js";
 import { PolicyViolationError } from "../errors.js";
 import { asText, type ResponseProfile } from "../response/responseFormatter.js";
-import { quoteIdent } from "../sql/ident.js";
-import { validateWriteSql, type WriteTarget } from "../sql/writeGuardrails.js";
+import { quoteIdent } from "../guardrails/ident.js";
+import { validateWriteSql, type WriteTarget } from "../guardrails/writeGuardrails.js";
 import { recordAudit } from "./auditLog.js";
 import {
   createWriteDigest,

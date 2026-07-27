@@ -1,7 +1,7 @@
 import process from "node:process";
 
-import { PolicyViolationError } from "./errors.js";
-import type { ResponseProfile } from "./response/responseFormatter.js";
+import { PolicyViolationError } from "../errors.js";
+import type { ResponseProfile } from "../response/responseFormatter.js";
 
 /** Per-profile character caps for the long `message`/`exception` fields. Infinity = no cap; exception 0 = drop. */
 export type FieldCaps = { message: number; exception: number };

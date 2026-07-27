@@ -3,7 +3,7 @@ import { McpError, ErrorCode } from "@modelcontextprotocol/sdk/types.js";
 
 import { getPersistenceMapping } from "../efPersistence.js";
 import { getValueContractImpact } from "../valueContract.js";
-import { resolveResponseProfile } from "../responseFormatter.js";
+import { resolveResponseProfile } from "../response/responseFormatter.js";
 import type { HandlerContext } from "./handlerContext.js";
 
 /**

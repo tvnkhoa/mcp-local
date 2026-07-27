@@ -1,4 +1,4 @@
-import { hasMultipleStatements, stripStringsAndComments } from "../sqlGuardrails.js";
+import { hasMultipleStatements, stripStringsAndComments } from "./sqlGuardrails.js";
 
 export type WriteStatementType = "insert" | "update" | "delete";
 

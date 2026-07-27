@@ -1,6 +1,6 @@
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { McpError, ErrorCode } from "@modelcontextprotocol/sdk/types.js";
-import { resolveResponseProfile } from "../responseFormatter.js";
+import { resolveResponseProfile } from "../response/responseFormatter.js";
 import { readSymbolSourceSpan } from "../refactorUtils.js";
 import { buildIndexMeta } from "./impactHandler.js";
 import {

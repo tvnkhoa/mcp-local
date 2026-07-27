@@ -3,7 +3,7 @@
  * Verifies: nano omits groupedPreviewHunks, compact strips before/after text, standard has full content.
  * Also verifies: bytesOf(nano) <= bytesOf(compact) <= bytesOf(standard).
  *
- * Usage: node scripts/test-refactor-preview-profiles.mjs
+ * Usage: node scripts/test/test-refactor-preview-profiles.mjs
  * Requires: npm run build first
  */
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";

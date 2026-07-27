@@ -1,5 +1,5 @@
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
-import { resolveResponseProfile } from "../responseFormatter.js";
+import { resolveResponseProfile } from "../response/responseFormatter.js";
 import { buildCoverageBlock } from "../coverage.js";
 import type { HandlerContext } from "./handlerContext.js";
 
