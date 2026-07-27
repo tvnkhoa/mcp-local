@@ -26,9 +26,17 @@ export function shouldPrettyPrint(profile: ResponseProfile): boolean {
   return profile === "verbose";
 }
 
-/** Every profile except `verbose` drops null/undefined fields. */
+/**
+ * Only `nano` and `compact` drop null/undefined fields.
+ *
+ * `standard` keeps them: it is the profile you pick when you want the full
+ * response shape including explicit nulls, without paying for pretty-printing.
+ * All four servers implement exactly this rule (`compact || nano`), so it is the
+ * behaviour shared code has to match — an earlier `profile !== "verbose"` here
+ * silently stripped nulls on `standard` too.
+ */
 export function shouldDropNullish(profile: ResponseProfile): boolean {
-  return profile !== "verbose";
+  return profile === "nano" || profile === "compact";
 }
 
 /** Relative payload budget hint, for tools that trim their own output. */

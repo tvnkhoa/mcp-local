@@ -1,13 +1,8 @@
 /**
- * Policy / guardrail violation. Carries a stable machine-readable `code` so tool
- * responses can surface a consistent error taxonomy (ported from codebase-index-mcp).
+ * Re-exported from @mcp/core, where the three servers' byte-identical copies now
+ * live. Kept as a named export from this module so every existing import site is
+ * unchanged.
  */
-export class PolicyViolationError extends Error {
-  readonly code: string;
+import { PolicyViolationError } from "@mcp/core";
 
-  constructor(code: string, message: string) {
-    super(message);
-    this.code = code;
-    this.name = "PolicyViolationError";
-  }
-}
+export { PolicyViolationError };

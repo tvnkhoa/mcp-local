@@ -14,11 +14,25 @@ export type {
   ApprovalToken,
   ResolvedApprovalSecret
 } from "./approval/index.js";
+export type {
+  PreviewTokenClaims,
+  PreviewTokenRejection,
+  PreviewTokenRejectionDetail,
+  PreviewTokenVerification,
+  VerifyPreviewTokenOptions
+} from "./approval/previewToken.js";
+export {
+  describePreviewTokenRejection,
+  issuePreviewToken,
+  verifyPreviewToken
+} from "./approval/previewToken.js";
 export { createApprovalService, generateApprovalSecret, resolveApprovalSecret } from "./approval/index.js";
 
 export type {
   ReadOnlySqlValidator,
   SqlDialectPolicy,
+  SqlScan,
+  SqlScanOptions,
   SqlValidation,
   SqlValidationSuccess
 } from "./sql/index.js";
@@ -26,6 +40,8 @@ export {
   createReadOnlySqlValidator,
   findForbiddenToken,
   hasMultipleStatements,
+  isSelectLike,
+  scanSql,
   startsWithAllowedKeyword,
   stripStringsAndComments
 } from "./sql/index.js";
@@ -38,7 +54,17 @@ export type {
   HttpResponse,
   QueryValue
 } from "./http/index.js";
-export { computeBackoffMs, createHttpClient, defaultSleep, isRetryableStatus } from "./http/index.js";
+export {
+  DEFAULT_UPSTREAM_BACKOFF_MS,
+  backoffFromSchedule,
+  computeBackoffMs,
+  createHttpClient,
+  defaultSleep,
+  encodePathSegment,
+  isRetryableStatus,
+  isTransientUpstreamStatus,
+  truncateForLog
+} from "./http/index.js";
 
 export type { PathAllowlist, PathAllowlistOptions } from "./fs/index.js";
 export { createPathAllowlist } from "./fs/index.js";

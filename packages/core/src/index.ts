@@ -12,6 +12,7 @@ export type { ErrorAudience, ErrorCode, PlatformErrorOptions, PlatformErrorPaylo
 export {
   ERROR_CODES,
   PlatformError,
+  PolicyViolationError,
   configError,
   conflictError,
   internalError,
@@ -40,8 +41,8 @@ export {
 export type { EnvReader, EnvSource, NumberOptions } from "./env.js";
 export { createEnvReader, defaultEnvSource } from "./env.js";
 
-export type { LogFields, LogLevel, LogSink, Logger, LoggerOptions } from "./logging.js";
-export { LOG_LEVELS, createLogger, createNullLogger, isLogLevel, parseLogLevel } from "./logging.js";
+export type { EventLogger, LogFields, LogLevel, LogSink, Logger, LoggerOptions } from "./logging.js";
+export { LOG_LEVELS, createEventLogger, createLogger, createNullLogger, isLogLevel, parseLogLevel } from "./logging.js";
 
 export type { ResponseProfile } from "./profiles.js";
 export {

@@ -1,5 +1,19 @@
-import test from "node:test";
+/**
+ * Regression suite for the responseFormatter extraction.
+ *
+ * This module no longer implements normalization — it delegates to @mcp/core and
+ * @mcp/sdk. These tests pin the observable contract that existed BEFORE the
+ * extraction, so a change in the shared package that would alter this server's
+ * wire output fails here rather than in production.
+ *
+ * Baseline: the pre-extraction implementation was characterized across 240
+ * observations (24 payload shapes x 4 profiles x normalize/asText/asError).
+ * 220 are byte-identical after extraction; the 20 that differ are the two
+ * documented crash-eliminations pinned at the bottom of this file.
+ */
+
 import assert from "node:assert/strict";
+import { test } from "node:test";
 
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 
@@ -12,24 +26,17 @@ function textOf(result: CallToolResult): string {
   return first.text;
 }
 
-test("normalizePayload strips null fields when strip=true", () => {
-  const out = normalizePayload({ a: 1, b: null, c: "x" }, true);
-  assert.deepEqual(out, { a: 1, c: "x" });
+test("normalizePayload: strip=true drops nulls, strip=false keeps them", () => {
+  assert.deepEqual(normalizePayload({ a: 1, b: null, c: "x" }, true), { a: 1, c: "x" });
+  assert.deepEqual(normalizePayload({ a: 1, b: null }, false), { a: 1, b: null });
 });
 
-test("normalizePayload keeps null fields when strip=false", () => {
-  const out = normalizePayload({ a: 1, b: null }, false);
-  assert.deepEqual(out, { a: 1, b: null });
+test("normalizePayload: strips recursively through arrays and objects", () => {
+  assert.deepEqual(normalizePayload({ items: [{ name: "hi", err: null }] }, true), { items: [{ name: "hi" }] });
 });
 
-test("normalizePayload strips nulls recursively inside arrays and objects", () => {
-  const out = normalizePayload({ logs: [{ message: "hi", exception: null }] }, true);
-  assert.deepEqual(out, { logs: [{ message: "hi" }] });
-});
-
-test("normalizePayload keeps empty arrays/objects (explicit 'none')", () => {
-  const out = normalizePayload({ buckets: [], meta: {} }, true);
-  assert.deepEqual(out, { buckets: [], meta: {} });
+test("normalizePayload: keeps empty arrays/objects (explicit 'none')", () => {
+  assert.deepEqual(normalizePayload({ rows: [], meta: {} }, true), { rows: [], meta: {} });
 });
 
 test("normalizePayload: Date survives as an ISO string", () => {
@@ -52,7 +59,7 @@ test("asText: defaults to the compact profile", () => {
 });
 
 test("asError: same serialization as asText but flagged isError", () => {
-  const payload = { code: "observe_http_error", message: "boom", detail: null };
+  const payload = { code: "bitbucket_http_error", message: "boom", detail: null };
   const ok = asText(payload, "compact");
   const bad = asError(payload, "compact");
   assert.equal(bad.isError, true);

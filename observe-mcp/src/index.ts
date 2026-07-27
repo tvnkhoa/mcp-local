@@ -11,6 +11,8 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 
+import { createEventLogger } from "@mcp/core";
+
 import { loadConfig, describeConfig, type ObserveConfig } from "./config/index.js";
 import { mapError } from "./errors.js";
 import { ObserveClient, type StreamType } from "./observeClient.js";
@@ -491,11 +493,18 @@ function describeFields(
     .sort((a, b) => a.name.localeCompare(b.name));
 }
 
+/**
+ * stderr event logger. Emits `{"level":..,"event":..,...detail}` — the exact
+ * shape these three servers each hand-rolled. stdout is the MCP transport, so
+ * nothing may be written there.
+ */
+const eventLog = createEventLogger();
+
 function logInfo(event: string, detail: Record<string, unknown>): void {
-  console.error(JSON.stringify({ level: "info", event, ...detail }));
+  eventLog.info(event, detail);
 }
 function logError(event: string, detail: Record<string, unknown>): void {
-  console.error(JSON.stringify({ level: "error", event, ...detail }));
+  eventLog.error(event, detail);
 }
 
 async function main(): Promise<void> {

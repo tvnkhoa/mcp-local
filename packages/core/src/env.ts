@@ -35,7 +35,26 @@ export interface EnvReader {
   optionalString(name: string): string | undefined;
   requireString(name: string): Result<string, PlatformError>;
   number(name: string, fallback: number, options?: NumberOptions): number;
+  /**
+   * Strictly positive finite number, or `fallback`.
+   *
+   * Unlike {@link EnvReader.number}, an out-of-range value falls back instead of
+   * clamping: a `0` or negative timeout is an operator mistake, and silently
+   * turning it into the minimum hides the mistake. Zero is rejected.
+   */
+  positiveNumber(name: string, fallback: number): number;
+  /** Non-negative integer (floored), or `fallback`. Negatives fall back, not clamp. */
+  nonNegativeInteger(name: string, fallback: number): number;
   boolean(name: string, fallback: boolean): boolean;
+  /**
+   * Exact `"true"` or `"1"` — no trimming, no case folding, default `false`.
+   *
+   * For feature gates that unlock writes (`PG_WRITE_ENABLED`,
+   * `BITBUCKET_WRITE_ENABLED`). {@link EnvReader.boolean} also accepts `yes`,
+   * `on`, `y` and any casing; widening a write gate is not a thing to do by
+   * accident, so these two are kept separate on purpose.
+   */
+  strictFlag(name: string): boolean;
   /** Comma-separated list; empty entries dropped. */
   list(name: string, fallback?: readonly string[]): string[];
   /** Names of all set, non-empty variables matching an optional prefix. */
@@ -99,6 +118,36 @@ export function createEnvReader(source: EnvSource): EnvReader {
         return clamp(fallback, options);
       }
       return clamp(parsed, options);
+    },
+
+    positiveNumber(name, fallback) {
+      const value = raw(name);
+      if (value === undefined) {
+        return fallback;
+      }
+      const parsed = Number(value);
+      if (!Number.isFinite(parsed) || parsed <= 0) {
+        return fallback;
+      }
+      return parsed;
+    },
+
+    nonNegativeInteger(name, fallback) {
+      const value = raw(name);
+      if (value === undefined) {
+        return fallback;
+      }
+      const parsed = Number(value);
+      if (!Number.isFinite(parsed) || parsed < 0) {
+        return fallback;
+      }
+      return Math.floor(parsed);
+    },
+
+    strictFlag(name) {
+      // Deliberately reads the source directly: no trim, no lowercase.
+      const value = source[name];
+      return value === "true" || value === "1";
     },
 
     boolean(name, fallback) {

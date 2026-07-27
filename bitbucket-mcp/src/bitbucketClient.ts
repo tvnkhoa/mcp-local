@@ -1,6 +1,14 @@
 import type { BitbucketConfig } from "./config/index.js";
 import { BitbucketHttpError } from "./errors.js";
 
+import {
+  backoffFromSchedule,
+  defaultSleep as sleep,
+  encodePathSegment as enc,
+  isTransientUpstreamStatus,
+  truncateForLog as truncate
+} from "@mcp/shared";
+
 /** A Bitbucket Cloud paginated collection response. */
 export type Paginated<T = Record<string, unknown>> = {
   values?: T[];
@@ -178,7 +186,7 @@ export class BitbucketClient {
         if (attempt >= maxRetries || !isRetryable(error, method)) {
           throw error;
         }
-        await sleep(BACKOFF_MS[Math.min(attempt, BACKOFF_MS.length - 1)]);
+        await sleep(backoffFromSchedule(attempt));
       }
     }
     throw lastError;
@@ -231,11 +239,7 @@ export class BitbucketClient {
   }
 }
 
-const BACKOFF_MS = [250, 750];
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
 
 /**
  * Transient failures worth retrying. For idempotent GETs: network unreachable
@@ -244,6 +248,12 @@ function sleep(ms: number): Promise<void> {
  * duplicate the write, whereas a 5xx or a dropped connection may mean the PR was
  * already created server-side.
  */
+/**
+ * Method-aware on purpose: a POST here can create a pull request, so replaying it
+ * after a 5xx risks a duplicate. Only 429 (definitively "not processed") is
+ * replayed for non-GET. Deliberately stricter than observe-mcp, whose POST is a
+ * search.
+ */
 function isRetryable(error: unknown, method: "GET" | "POST"): boolean {
   if (!(error instanceof BitbucketHttpError)) {
     return false;
@@ -251,7 +261,7 @@ function isRetryable(error: unknown, method: "GET" | "POST"): boolean {
   if (method !== "GET") {
     return error.status === 429;
   }
-  return error.status === 0 || error.status === 429 || error.status >= 500;
+  return isTransientUpstreamStatus(error.status);
 }
 
 function clampPagelen(value: number | undefined, config: BitbucketConfig): number {
@@ -261,9 +271,6 @@ function clampPagelen(value: number | undefined, config: BitbucketConfig): numbe
   return Math.min(Math.max(1, Math.floor(value)), config.maxPagelen);
 }
 
-function enc(segment: string): string {
-  return encodeURIComponent(segment);
-}
 
 /** Render a query string with a leading `?` (empty string when there are no params). */
 function qs(query: URLSearchParams): string {
@@ -271,6 +278,3 @@ function qs(query: URLSearchParams): string {
   return s ? `?${s}` : "";
 }
 
-function truncate(value: string, max: number): string {
-  return value.length > max ? `${value.slice(0, max)}…` : value;
-}

@@ -101,6 +101,55 @@ export function computeBackoffMs(attempt: number, baseMs: number, maxMs: number,
   return Math.floor(exponential * (0.5 + random() * 0.5));
 }
 
+/**
+ * Transience rule used by the hand-rolled upstream clients (observe-mcp,
+ * bitbucket-mcp).
+ *
+ * Deliberately NOT {@link isRetryableStatus}, which enumerates a specific set
+ * (`408, 425, 429, 500, 502, 503, 504`). This one is broader in two ways the
+ * clients depend on:
+ *   - `0` means the request never completed (DNS failure, abort, socket error),
+ *     which is the most retryable condition there is.
+ *   - any `5xx` counts, not just the four common ones — a 501 or 599 from a
+ *     proxy is still a server-side failure.
+ * Both predicates are kept because they encode different policies, and changing
+ * either would change how often a real upstream gets hit.
+ */
+export function isTransientUpstreamStatus(status: number): boolean {
+  return status === 0 || status === 429 || status >= 500;
+}
+
+/** Fixed retry schedule shared by the upstream clients: two retries, then give up. */
+export const DEFAULT_UPSTREAM_BACKOFF_MS: readonly number[] = [250, 750];
+
+/**
+ * Delay for `attempt` from a fixed schedule, clamping to the last entry.
+ *
+ * A schedule rather than exponential jitter because these clients front
+ * interactive MCP tool calls: a predictable, short total wait matters more than
+ * spreading load across many callers.
+ */
+export function backoffFromSchedule(
+  attempt: number,
+  schedule: readonly number[] = DEFAULT_UPSTREAM_BACKOFF_MS
+): number {
+  if (schedule.length === 0) {
+    return 0;
+  }
+  const index = Math.min(Math.max(attempt, 0), schedule.length - 1);
+  return schedule[index] as number;
+}
+
+/** `encodeURIComponent`, named so its use as a path-segment escape is explicit. */
+export function encodePathSegment(segment: string): string {
+  return encodeURIComponent(segment);
+}
+
+/** Clip a value for log/error output, marking that it was clipped. */
+export function truncateForLog(value: string, max: number): string {
+  return value.length > max ? `${value.slice(0, max)}…` : value;
+}
+
 function buildUrl(baseUrl: string, path: string, query?: Readonly<Record<string, QueryValue>>): string {
   const base = baseUrl.endsWith("/") ? baseUrl.slice(0, -1) : baseUrl;
   const suffix = path.startsWith("/") ? path : `/${path}`;

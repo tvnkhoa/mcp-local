@@ -19,6 +19,8 @@ import { ConnectionManager } from "./db/connectionManager.js";
 import { PolicyViolationError } from "./errors.js";
 import { asText as asTextProfiled, asError as asErrorProfiled, responseProfileSchema } from "./response/responseFormatter.js";
 import { validateReadOnlySql } from "./guardrails/sqlGuardrails.js";
+import { createEnvReader, createEventLogger, defaultEnvSource } from "@mcp/core";
+
 import { resolveApprovalSecret } from "./write/approval.js";
 import { WritePreviewStore } from "./write/previewStore.js";
 import {
@@ -55,6 +57,11 @@ const connections = new ConnectionManager({
   statementTimeoutMs: DEFAULT_TIMEOUT_MS,
   applicationName: "communicationhub-postgres-mcp"
 });
+
+// Declared before the first parseBoolEnv() call below: these are top-level
+// `const` initialisers, so a later declaration would be in its temporal dead
+// zone and the module would fail to load.
+const envReader = createEnvReader(defaultEnvSource());
 
 const WRITE_ENABLED = parseBoolEnv("PG_WRITE_ENABLED");
 const MIGRATION_ENABLED = parseBoolEnv("PG_MIGRATION_ENABLED");
@@ -776,8 +783,9 @@ function numberFromEnv(key: string, fallbackValue: number): number {
 }
 
 function parseBoolEnv(key: string): boolean {
-  const raw = process.env[key];
-  return raw === "true" || raw === "1";
+  // Strict on purpose: PG_WRITE_ENABLED / PG_MIGRATION_ENABLED are write gates,
+  // and `strictFlag` accepts only exact "true" or "1" — no casing, no trimming.
+  return envReader.strictFlag(key);
 }
 
 function mapError(error: unknown): {
@@ -843,12 +851,19 @@ function normalizeUnknown(error: unknown): string {
   return String(error);
 }
 
+/**
+ * stderr event logger. Emits `{"level":..,"event":..,...detail}` — the exact
+ * shape these three servers each hand-rolled. stdout is the MCP transport, so
+ * nothing may be written there.
+ */
+const eventLog = createEventLogger();
+
 function logInfo(event: string, payload: Record<string, unknown>): void {
-  console.error(JSON.stringify({ level: "info", event, ...payload }));
+  eventLog.info(event, payload);
 }
 
 function logError(event: string, payload: Record<string, unknown>): void {
-  console.error(JSON.stringify({ level: "error", event, ...payload }));
+  eventLog.error(event, payload);
 }
 
 async function main(): Promise<void> {

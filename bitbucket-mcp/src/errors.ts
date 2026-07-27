@@ -2,18 +2,13 @@ import { McpError } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 
 /**
- * Policy / guardrail violation. Carries a stable machine-readable `code` so tool
- * responses can surface a consistent error taxonomy (ported from postgres-mcp).
+ * Re-exported from @mcp/core, where the three servers' byte-identical copies now
+ * live. Kept as a named export from this module so every existing import site is
+ * unchanged.
  */
-export class PolicyViolationError extends Error {
-  readonly code: string;
+import { PolicyViolationError } from "@mcp/core";
 
-  constructor(code: string, message: string) {
-    super(message);
-    this.code = code;
-    this.name = "PolicyViolationError";
-  }
-}
+export { PolicyViolationError };
 
 /** HTTP-level failure talking to the Bitbucket Cloud REST API. */
 export class BitbucketHttpError extends Error {
@@ -35,7 +30,22 @@ export type MappedError = {
   detail?: string;
 };
 
-/** Normalize any thrown value into a stable { code, message, detail? } shape. */
+/**
+ * Normalize any thrown value into a stable { code, message, detail? } shape.
+ *
+ * NOT extracted to a shared package, despite being near-identical to
+ * bitbucket-mcp's / observe-mcp's copy. The `z.ZodError` and `McpError` branches
+ * are `instanceof` checks, and each server carries its OWN copy of `zod` and
+ * `@modelcontextprotocol/sdk` (servers are intentionally not npm workspace
+ * members, so those deps are not hoisted or deduplicated). A shared
+ * implementation would compare against a DIFFERENT class object and both
+ * branches would silently fall through — turning every validation error into
+ * `internal_error` with a raw Zod JSON dump as its message. Verified empirically:
+ * an error from a server's zod is not `instanceof` the hoisted zod's ZodError.
+ *
+ * Safe to share once the servers deduplicate those two dependencies
+ * (migration-plan step S-09), and not before.
+ */
 export function mapError(error: unknown): MappedError {
   if (error instanceof z.ZodError) {
     return {

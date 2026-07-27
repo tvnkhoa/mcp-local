@@ -152,3 +152,32 @@ export const timeoutError = make("timeout");
 export const configError = make("config_error");
 export const unsupportedError = make("unsupported");
 export const internalError = make("internal_error");
+
+
+/**
+ * Policy / guardrail violation raised by a server tool.
+ *
+ * Carries a stable machine-readable `code` so responses can surface a consistent
+ * error taxonomy. postgres-mcp, observe-mcp and bitbucket-mcp each had a
+ * byte-identical copy of this class; they now re-export this one.
+ *
+ * Distinct from {@link PlatformError}: this is the servers' pre-existing
+ * contract type with a free-form string code (`APPROVAL_TOKEN_EXPIRED`,
+ * `config_error`, ...), whereas PlatformError carries the platform's own closed
+ * `ERROR_CODES` taxonomy plus audience/retryable metadata. Converging them would
+ * change every server's error payload, so both exist.
+ *
+ * Safe to share despite `instanceof`: @mcp/core is resolved through a single
+ * symlink, so every importer sees the same class object. That is NOT true of
+ * `zod` or `@modelcontextprotocol/sdk`, which each server carries its own copy
+ * of — which is why `mapError` stays inside each server.
+ */
+export class PolicyViolationError extends Error {
+  readonly code: string;
+
+  constructor(code: string, message: string) {
+    super(message);
+    this.code = code;
+    this.name = "PolicyViolationError";
+  }
+}

@@ -1,6 +1,14 @@
 import type { ObserveConfig } from "./config/index.js";
 import { ObserveHttpError } from "./errors.js";
 
+import {
+  backoffFromSchedule,
+  defaultSleep as sleep,
+  encodePathSegment as enc,
+  isTransientUpstreamStatus,
+  truncateForLog as truncate
+} from "@mcp/shared";
+
 export type SearchParams = {
   sql: string;
   /** Inclusive window start, microseconds since epoch. */
@@ -110,7 +118,7 @@ export class ObserveClient {
         if (attempt >= maxRetries || !isRetryable(error)) {
           throw error;
         }
-        await sleep(BACKOFF_MS[Math.min(attempt, BACKOFF_MS.length - 1)]);
+        await sleep(backoffFromSchedule(attempt));
       }
     }
     throw lastError;
@@ -166,18 +174,19 @@ export class ObserveClient {
   }
 }
 
-const BACKOFF_MS = [250, 750];
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
 
 /** Transient failures worth retrying: network unreachable (status 0), 429, and any 5xx. */
+/**
+ * Every OpenObserve call is a read (`_search` is a POST only because the query
+ * goes in the body), so a transient failure is safe to replay regardless of
+ * method — unlike bitbucket-mcp, which must not replay a mutating POST.
+ */
 function isRetryable(error: unknown): boolean {
   if (!(error instanceof ObserveHttpError)) {
     return false;
   }
-  return error.status === 0 || error.status === 429 || error.status >= 500;
+  return isTransientUpstreamStatus(error.status);
 }
 
 /** A projected SELECT that references a column the stream lacks. */
@@ -194,10 +203,4 @@ function toSelectAll(sql: string): string {
   return sql.replace(/^SELECT\s+[\s\S]*?\s+FROM\s+/i, "SELECT * FROM ");
 }
 
-function enc(segment: string): string {
-  return encodeURIComponent(segment);
-}
 
-function truncate(value: string, max: number): string {
-  return value.length > max ? `${value.slice(0, max)}…` : value;
-}

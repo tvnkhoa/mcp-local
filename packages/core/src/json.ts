@@ -25,7 +25,17 @@ export interface NormalizeOptions {
   readonly maxDepth?: number;
 }
 
-const DEFAULT_MAX_DEPTH = 32;
+/**
+ * Unbounded by default.
+ *
+ * A finite default silently rewrites real data as `"[depth-limit]"`, and the
+ * servers this replaces have no depth bound at all — codebase-index-mcp emits
+ * deeply nested graph payloads that a cap of 32 would truncate mid-response.
+ * Runaway recursion is already prevented by the cycle check below, which is the
+ * actual failure mode a depth cap was standing in for. Callers that genuinely
+ * want a bound pass `maxDepth` explicitly.
+ */
+const DEFAULT_MAX_DEPTH = Number.POSITIVE_INFINITY;
 
 function toPosix(value: string): string {
   return value.replace(/\\/g, "/");

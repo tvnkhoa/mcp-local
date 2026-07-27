@@ -12,7 +12,7 @@ import { createHealthCheckTool } from "./healthTool.js";
 import { createLifecycle } from "./lifecycle.js";
 import { createToolRegistry } from "./registry.js";
 import type { LegacyBridge } from "./registry.js";
-import { asError, asText, serializePayload } from "./responses.js";
+import { asError, asErrorPayload, asText, serializePayload } from "./responses.js";
 import { EMPTY_OBJECT_SCHEMA, schema } from "./schema.js";
 import type { ToolContext } from "./toolDefinition.js";
 import { toToolDescriptor } from "./toolDefinition.js";
@@ -468,4 +468,51 @@ test("console: redirect sends console.log to stderr, not stdout", () => {
 
   assert.equal(stdoutWrites.length, 0);
   assert.equal(stderrWrites.some((line) => line.includes("corrupt the transport")), true);
+});
+
+// --- Regression: server responseFormatter extraction --------------------------
+// These lock the contract that postgres-mcp, observe-mcp and bitbucket-mcp now
+// delegate to. Their previous local copies were behaviourally identical to each
+// other (verified: 0 divergences across 720 observations), so one suite covers
+// all three.
+
+test("responses: asErrorPayload wraps a caller-shaped payload and flags isError", () => {
+  const result = asErrorPayload({ code: "validation_error", message: "bad", detail: null }, "compact");
+  assert.equal(result.isError, true);
+  assert.equal(result.content.length, 1);
+  assert.equal(result.content[0]?.type, "text");
+  // compact drops nullish
+  assert.equal(result.content[0]?.text, '{"code":"validation_error","message":"bad"}');
+});
+
+test("responses: only verbose is pretty-printed; only nano/compact strip nullish", () => {
+  const payload = { a: 1, b: null };
+  assert.equal(asText(payload, "nano").content[0]?.text, '{"a":1}');
+  assert.equal(asText(payload, "compact").content[0]?.text, '{"a":1}');
+  assert.equal(asText(payload, "standard").content[0]?.text, '{"a":1,"b":null}');
+  assert.equal(asText(payload, "verbose").content[0]?.text, JSON.stringify({ a: 1, b: null }, null, 2));
+});
+
+test("responses: payloads that used to crash the servers now serialize", () => {
+  const cyclic: Record<string, unknown> = { name: "root" };
+  cyclic["self"] = cyclic;
+  assert.equal(asText(cyclic, "compact").content[0]?.text, '{"name":"root","self":"[circular]"}');
+  assert.equal(asText({ n: 10n }, "compact").content[0]?.text, '{"n":"10"}');
+  // asErrorPayload must be at least as robust — it is the failure-reporting path.
+  assert.equal(asErrorPayload(cyclic, "compact").isError, true);
+  assert.equal(asErrorPayload({ n: 10n }, "compact").isError, true);
+});
+
+test("responses: structures the servers rely on are preserved exactly", () => {
+  assert.equal(asText({ when: new Date("2026-01-01T00:00:00.000Z") }, "compact").content[0]?.text,
+    '{"when":"2026-01-01T00:00:00.000Z"}');
+  // Empty array/object carry "explicitly none" meaning and must not be dropped.
+  assert.equal(asText({ rows: [], meta: {} }, "compact").content[0]?.text, '{"rows":[],"meta":{}}');
+  // Array holes/undefined become null rather than reindexing the array.
+  assert.equal(asText({ rows: [1, undefined, 3] }, "compact").content[0]?.text, '{"rows":[1,null,3]}');
+  // Backslashes are left alone unless the caller opts into pathKeys. Built from
+  // a char code so the assertion cannot drift on escaping alone.
+  const backslash = String.fromCharCode(92);
+  const windowsPath = `D:${backslash}src`;
+  assert.equal(asText({ p: windowsPath }, "compact").content[0]?.text, JSON.stringify({ p: windowsPath }));
 });

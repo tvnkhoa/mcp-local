@@ -114,3 +114,36 @@ export function createLogger(options: LoggerOptions): Logger {
 export function createNullLogger(name = "null"): Logger {
   return createLogger({ name, level: "silent", sink: () => undefined });
 }
+
+
+/**
+ * Minimal stderr event logger: `{"level":"info","event":"...", ...detail}`.
+ *
+ * This is the exact shape postgres-mcp, observe-mcp and bitbucket-mcp each
+ * emitted from their own byte-identical `logInfo`/`logError` pair. It is NOT
+ * {@link createLogger}, which adds a logger name and timestamp — adopting that
+ * richer shape would change every existing log line, so the two coexist.
+ *
+ * `detail` is spread AFTER `event`, so a detail key named `event` or `level`
+ * overrides it. That was true of the original implementations and some callers
+ * may rely on it.
+ */
+export interface EventLogger {
+  info(event: string, detail?: Record<string, unknown>): void;
+  error(event: string, detail?: Record<string, unknown>): void;
+}
+
+export function createEventLogger(sink: (line: string) => void = (line) => process.stderr.write(`${line}
+`)): EventLogger {
+  const emit = (level: "info" | "error", event: string, detail: Record<string, unknown> = {}): void => {
+    sink(JSON.stringify({ level, event, ...detail }));
+  };
+  return {
+    info(event, detail) {
+      emit("info", event, detail);
+    },
+    error(event, detail) {
+      emit("error", event, detail);
+    }
+  };
+}

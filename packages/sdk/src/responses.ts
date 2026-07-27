@@ -66,6 +66,26 @@ export function asError(error: PlatformError, profile: ResponseProfile): ToolCal
 }
 
 /**
+ * Error result built from a caller-shaped payload rather than a `PlatformError`.
+ *
+ * The servers construct their own error envelopes (`{ requestId, environment,
+ * code, message }`) and flag them `isError`. That is the shape `asError` above
+ * cannot express, and it is the exact function three servers each carried a copy
+ * of. Serialization goes through `serializePayload` for the same reason `asError`
+ * does: an error path must not be the thing that throws.
+ */
+export function asErrorPayload(
+  payload: unknown,
+  profile: ResponseProfile,
+  options: SerializeOptions = {}
+): ToolCallResult {
+  return {
+    content: [{ type: "text", text: serializePayload(payload, profile, options) }],
+    isError: true
+  };
+}
+
+/**
  * Last-resort result for when even error serialization fails. Hand-written so
  * it cannot itself throw.
  */

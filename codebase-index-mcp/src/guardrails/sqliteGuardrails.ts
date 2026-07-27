@@ -1,3 +1,31 @@
+/**
+ * Read-only SQL guardrail for the `query_graph` tool.
+ *
+ * The scanner, statement splitter, token matcher and SELECT predicate are shared
+ * with postgres-mcp and observe-mcp via `@mcp/shared`. What stays local is this
+ * server's own policy: the SQLite token list, the `:repoId` repo-isolation
+ * requirement, the table allowlist, and the `query_graph:` error vocabulary.
+ */
+
+import {
+  findForbiddenToken,
+  hasMultipleStatements as cleanedHasMultipleStatements,
+  isSelectLike,
+  stripStringsAndComments as scanAndStrip,
+  type SqlScanOptions
+} from "@mcp/shared";
+
+/**
+ * SQLite has neither dollar-quoted strings nor `E'…'` escape strings, so both
+ * scanner modes are off: treating `$` or a leading `E` as string syntax would
+ * blank out real statement text and could mask a forbidden token rather than
+ * reveal it. Keeps this guard byte-identical to its pre-extraction behaviour.
+ */
+const SQLITE_SCAN: SqlScanOptions = {
+  dollarQuotedStrings: false,
+  escapeStrings: false
+};
+
 const FORBIDDEN_TOKENS = [
   "insert",
   "update",
@@ -22,86 +50,11 @@ export type SqlGuardrailResult =
   | { ok: false; message: string };
 
 function stripStringsAndComments(sql: string): string {
-  let out = "";
-  let i = 0;
-
-  while (i < sql.length) {
-    const c = sql[i];
-    const next = sql[i + 1];
-
-    if (c === "'" || c === '"') {
-      const quote = c;
-      out += " ";
-      i += 1;
-      while (i < sql.length) {
-        if (sql[i] === quote) {
-          if (sql[i + 1] === quote) {
-            i += 2;
-            continue;
-          }
-          i += 1;
-          break;
-        }
-        i += 1;
-      }
-      continue;
-    }
-
-    if (c === "-" && next === "-") {
-      i += 2;
-      while (i < sql.length && sql[i] !== "\n") {
-        i += 1;
-      }
-      out += " ";
-      continue;
-    }
-
-    if (c === "/" && next === "*") {
-      i += 2;
-      while (i < sql.length - 1) {
-        if (sql[i] === "*" && sql[i + 1] === "/") {
-          i += 2;
-          break;
-        }
-        i += 1;
-      }
-      out += " ";
-      continue;
-    }
-
-    out += c;
-    i += 1;
-  }
-
-  return out;
+  return scanAndStrip(sql, SQLITE_SCAN);
 }
 
 function hasMultipleStatements(sql: string): boolean {
-  const cleaned = stripStringsAndComments(sql).trim();
-  if (!cleaned) {
-    return false;
-  }
-
-  const semicolonCount = (cleaned.match(/;/g) || []).length;
-  if (semicolonCount === 0) {
-    return false;
-  }
-
-  if (semicolonCount === 1 && cleaned.endsWith(";")) {
-    return cleaned.slice(0, -1).includes(";");
-  }
-
-  return true;
-}
-
-function findForbiddenToken(sql: string): string | null {
-  const cleaned = stripStringsAndComments(sql).toLowerCase();
-  for (const token of FORBIDDEN_TOKENS) {
-    if (new RegExp(`\\b${token}\\b`, "i").test(cleaned)) {
-      return token;
-    }
-  }
-  return null;
+  return cleanedHasMultipleStatements(stripStringsAndComments(sql));
 }
 
 export function validateReadOnlyGraphSql(sql: string): SqlGuardrailResult {
@@ -115,12 +68,14 @@ export function validateReadOnlyGraphSql(sql: string): SqlGuardrailResult {
     return { ok: false, message: "query_graph: multiple SQL statements are not allowed" };
   }
 
-  if (!/^\s*(with\b[\s\S]*?\bselect\b|select\b)/i.test(cleaned)) {
+  // Tested on the stripped statement, unlike the other two servers: a leading
+  // comment must not decide whether this looks like a SELECT.
+  if (!isSelectLike(cleaned)) {
     return { ok: false, message: "query_graph: only SELECT queries are allowed" };
   }
 
-  const forbidden = findForbiddenToken(trimmed);
-  if (forbidden) {
+  const forbidden = findForbiddenToken(stripStringsAndComments(trimmed), FORBIDDEN_TOKENS);
+  if (forbidden !== undefined) {
     return { ok: false, message: `query_graph: forbidden token '${forbidden}'` };
   }
 
@@ -137,7 +92,7 @@ export function validateAllowedTables(sql: string, allowedTables: Set<string>): 
   const tableRefs = [...cleaned.matchAll(/\b(?:from|join)\s+([a-z_][a-z0-9_]*)\b/g)].map((m) => m[1]);
 
   for (const tableName of tableRefs) {
-    if (!allowedTables.has(tableName)) {
+    if (tableName !== undefined && !allowedTables.has(tableName)) {
       return { ok: false, message: `query_graph: table '${tableName}' is not allowed` };
     }
   }

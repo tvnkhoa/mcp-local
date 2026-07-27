@@ -1,4 +1,10 @@
-import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
+
+import {
+  describePreviewTokenRejection,
+  issuePreviewToken,
+  verifyPreviewToken
+} from "@mcp/shared";
 
 import { PolicyViolationError } from "../errors.js";
 
@@ -28,10 +34,16 @@ export function createWriteDigest(input: {
   return sha256(stable);
 }
 
+/**
+ * Issue / verify the preview approval token.
+ *
+ * The HMAC construction and token format are shared with codebase-index-mcp via
+ * `@mcp/shared` — the two copies produced byte-identical tokens and identical
+ * verdicts on every case. Raising `PolicyViolationError` stays here because the
+ * exception type is this server's contract.
+ */
 export function issueApprovalToken(previewId: string, digest: string, expiresAt: string, secret: string): string {
-  const payload = Buffer.from(JSON.stringify({ previewId, digest, expiresAt })).toString("base64url");
-  const signature = createHmac("sha256", secret).update(payload).digest("base64url");
-  return `${payload}.${signature}`;
+  return issuePreviewToken({ previewId, digest, expiresAt }, secret);
 }
 
 export function verifyApprovalToken(
@@ -42,38 +54,20 @@ export function verifyApprovalToken(
   secret: string,
   options: { ignoreExpiry?: boolean } = {}
 ): void {
-  const dotIdx = token.lastIndexOf(".");
-  const payload = dotIdx > 0 ? token.slice(0, dotIdx) : "";
-  const signature = dotIdx > 0 ? token.slice(dotIdx + 1) : "";
-  if (!payload || !signature) {
-    throw new PolicyViolationError("INVALID_APPROVAL_TOKEN", "Approval token format is invalid.");
-  }
-  const expected = createHmac("sha256", secret).update(payload).digest("base64url");
-  // Constant-time comparison: never short-circuit on the first differing byte.
-  const expectedBuf = Buffer.from(expected);
-  const signatureBuf = Buffer.from(signature);
-  if (expectedBuf.length !== signatureBuf.length || !timingSafeEqual(expectedBuf, signatureBuf)) {
-    throw new PolicyViolationError("INVALID_APPROVAL_TOKEN", "Approval token signature is invalid.");
-  }
-
-  let decoded: { previewId: string; digest: string; expiresAt: string };
-  try {
-    decoded = JSON.parse(Buffer.from(payload, "base64url").toString("utf8"));
-  } catch {
-    throw new PolicyViolationError("INVALID_APPROVAL_TOKEN", "Approval token payload is invalid.");
-  }
-
-  if (decoded.previewId !== previewId || decoded.digest !== digest || decoded.expiresAt !== expiresAt) {
-    throw new PolicyViolationError("APPROVAL_TOKEN_MISMATCH", "Approval token does not match the approved preview plan.");
-  }
-
   // Migrations pass `ignoreExpiry:true`: for a schema migration the real staleness check is the
   // preSnapshotId drift guard re-run at apply time (the live schema must still match what was
   // previewed), not this time-box — a human-approval pause can legitimately outlast the TTL, and
   // an old token can still only apply the exact previewed plan against an unchanged schema. Data
   // writes (write_apply) have no such drift guard, so they keep the strict expiry (default).
-  if (!options.ignoreExpiry && Date.parse(decoded.expiresAt) < Date.now()) {
-    throw new PolicyViolationError("APPROVAL_TOKEN_EXPIRED", "Approval token has expired.");
+  const verdict = verifyPreviewToken(
+    token,
+    { previewId, digest, expiresAt },
+    secret,
+    options.ignoreExpiry === undefined ? {} : { ignoreExpiry: options.ignoreExpiry }
+  );
+  if (!verdict.ok) {
+    const { code, message } = describePreviewTokenRejection(verdict.reason);
+    throw new PolicyViolationError(code, message);
   }
 }
 
@@ -89,6 +83,11 @@ export function verifyApprovalToken(
  *
  * An explicit PG_WRITE_APPROVAL_SECRET is still honored (e.g. if an operator wants
  * tokens to stay valid across restarts), but it is no longer required.
+ *
+ * NOTE: deliberately NOT the `resolveApprovalSecret` exported by `@mcp/shared`, and
+ * not shared with codebase-index-mcp either. All three have the same name and
+ * different policy — codebase-index-mcp throws in strict mode and otherwise falls
+ * back to a fixed development secret. Unifying them would change behaviour.
  */
 export function resolveApprovalSecret(secret: string): string {
   const trimmed = secret.trim();

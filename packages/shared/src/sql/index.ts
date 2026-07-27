@@ -59,7 +59,24 @@ const DOLLAR_TAG = /^\$([A-Za-z_][A-Za-z0-9_]*)?\$/;
  * `$1`-style parameter placeholders are left alone: the tag pattern requires a
  * closing `$`, which a placeholder does not have.
  */
-export function scanSql(sql: string): SqlScan {
+export interface SqlScanOptions {
+  /**
+   * Treat `$$…$$` / `$tag$…$tag$` as string literals. Postgres only — SQLite and
+   * DataFusion have no such syntax, and pretending they do would blank out real
+   * statement text. Defaults to `true`: over-scanning fails safe, under-scanning
+   * does not.
+   */
+  readonly dollarQuotedStrings?: boolean;
+  /**
+   * Treat `E'…\'…'` as an escape string, where a backslash escapes the closing
+   * quote. Postgres only, same reasoning as above. Defaults to `true`.
+   */
+  readonly escapeStrings?: boolean;
+}
+
+export function scanSql(sql: string, options: SqlScanOptions = {}): SqlScan {
+  const allowDollarQuoted = options.dollarQuotedStrings ?? true;
+  const allowEscapeStrings = options.escapeStrings ?? true;
   let output = "";
   let index = 0;
   let unterminated = false;
@@ -96,7 +113,7 @@ export function scanSql(sql: string): SqlScan {
     }
 
     // Dollar-quoted string: $$ ... $$ or $tag$ ... $tag$
-    if (char === "$") {
+    if (allowDollarQuoted && char === "$") {
       const match = DOLLAR_TAG.exec(sql.slice(index));
       if (match !== null) {
         const tag = match[0];
@@ -116,7 +133,10 @@ export function scanSql(sql: string): SqlScan {
       const quote = char;
       // E'...' enables backslash escapes for the delimiter.
       const isEscapeString =
-        quote === "'" && index > 0 && (sql[index - 1] === "E" || sql[index - 1] === "e");
+        allowEscapeStrings &&
+        quote === "'" &&
+        index > 0 &&
+        (sql[index - 1] === "E" || sql[index - 1] === "e");
       let closed = false;
 
       output += " ";
@@ -160,8 +180,22 @@ export function scanSql(sql: string): SqlScan {
 }
 
 /** Convenience wrapper around {@link scanSql} returning only the cleaned text. */
-export function stripStringsAndComments(sql: string): string {
-  return scanSql(sql).cleaned;
+export function stripStringsAndComments(sql: string, options: SqlScanOptions = {}): string {
+  return scanSql(sql, options).cleaned;
+}
+
+/**
+ * True when the statement is a `SELECT`, or a `WITH …` that reaches a `SELECT`.
+ *
+ * Deliberately stricter than {@link startsWithAllowedKeyword}: a leading `with`
+ * alone is not enough, because `with t as (delete … returning *) select * from t`
+ * starts with an allowed keyword while being a write. All three servers use
+ * exactly this predicate, so it is shared verbatim rather than approximated.
+ */
+const SELECT_LIKE = /^\s*(with\b[\s\S]*?\bselect\b|select\b)/i;
+
+export function isSelectLike(sql: string): boolean {
+  return SELECT_LIKE.test(sql);
 }
 
 /** True when the statement contains more than one statement separator. */

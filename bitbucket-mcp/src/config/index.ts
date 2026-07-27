@@ -2,6 +2,16 @@ import process from "node:process";
 
 import { PolicyViolationError } from "../errors.js";
 
+import { createEnvReader, defaultEnvSource } from "@mcp/core";
+
+/**
+ * The one env reader for this server. The four `*FromEnv` helpers below used to
+ * be hand-copied here and in the sibling servers; they now delegate to
+ * @mcp/core, which is the only module in the platform permitted to touch
+ * `process.env`.
+ */
+const env = createEnvReader(defaultEnvSource());
+
 export type BitbucketConfig = {
   baseUrl: string;
   /** Workspace slug (required). All repo paths are scoped under this by default. */
@@ -20,42 +30,21 @@ export type BitbucketConfig = {
 };
 
 function numberFromEnv(key: string, fallback: number): number {
-  const raw = process.env[key];
-  if (raw === undefined || raw.trim() === "") {
-    return fallback;
-  }
-  const parsed = Number(raw);
-  if (!Number.isFinite(parsed) || parsed <= 0) {
-    return fallback;
-  }
-  return parsed;
+  return env.positiveNumber(key, fallback);
 }
 
 function stringFromEnv(key: string, fallback: string): string {
-  const raw = process.env[key];
-  if (raw === undefined || raw.trim() === "") {
-    return fallback;
-  }
-  return raw.trim();
+  return env.string(key, fallback);
 }
 
 /** Like numberFromEnv but permits 0 (unlike sizes which must be positive). */
 function nonNegFromEnv(key: string, fallback: number): number {
-  const raw = process.env[key];
-  if (raw === undefined || raw.trim() === "") {
-    return fallback;
-  }
-  const parsed = Number(raw);
-  if (!Number.isFinite(parsed) || parsed < 0) {
-    return fallback;
-  }
-  return Math.floor(parsed);
+  return env.nonNegativeInteger(key, fallback);
 }
 
 /** Feature flag: ON only when the value is exactly "true" or "1". */
 function parseBoolEnv(key: string): boolean {
-  const raw = process.env[key];
-  return raw === "true" || raw === "1";
+  return env.strictFlag(key);
 }
 
 /**

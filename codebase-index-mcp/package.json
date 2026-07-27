@@ -35,9 +35,13 @@
     "test:persistence-mapping": "node scripts/test/test-persistence-mapping.mjs",
     "test:value-contract-impact": "node scripts/test/test-value-contract-impact.mjs",
     "benchmark:plan": "node scripts/benchmark-plan-mode.mjs",
-    "benchmark:plan:check": "node scripts/benchmark-plan-mode.mjs"
+    "benchmark:plan:check": "node scripts/benchmark-plan-mode.mjs",
+    "test:sqlite-guardrails": "node scripts/test/test-sqlite-guardrails.mjs",
+    "test:approval-token": "node scripts/test/test-approval-token.mjs"
   },
   "dependencies": {
+    "@mcp/core": "file:../packages/core",
+    "@mcp/shared": "file:../packages/shared",
     "@modelcontextprotocol/sdk": "^1.12.0",
     "better-sqlite3": "^11.8.1",
     "chokidar": "^4.0.3",

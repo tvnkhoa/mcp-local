@@ -3,6 +3,16 @@ import process from "node:process";
 import { PolicyViolationError } from "../errors.js";
 import type { ResponseProfile } from "../response/responseFormatter.js";
 
+import { createEnvReader, defaultEnvSource } from "@mcp/core";
+
+/**
+ * The one env reader for this server. The four `*FromEnv` helpers below used to
+ * be hand-copied here and in the sibling servers; they now delegate to
+ * @mcp/core, which is the only module in the platform permitted to touch
+ * `process.env`.
+ */
+const env = createEnvReader(defaultEnvSource());
+
 /** Per-profile character caps for the long `message`/`exception` fields. Infinity = no cap; exception 0 = drop. */
 export type FieldCaps = { message: number; exception: number };
 
@@ -29,36 +39,16 @@ export type ObserveConfig = {
 };
 
 function numberFromEnv(key: string, fallback: number): number {
-  const raw = process.env[key];
-  if (raw === undefined || raw.trim() === "") {
-    return fallback;
-  }
-  const parsed = Number(raw);
-  if (!Number.isFinite(parsed) || parsed <= 0) {
-    return fallback;
-  }
-  return parsed;
+  return env.positiveNumber(key, fallback);
 }
 
 function stringFromEnv(key: string, fallback: string): string {
-  const raw = process.env[key];
-  if (raw === undefined || raw.trim() === "") {
-    return fallback;
-  }
-  return raw.trim();
+  return env.string(key, fallback);
 }
 
 /** Like numberFromEnv but permits 0 (unlike lookback/size which must be positive). */
 function nonNegFromEnv(key: string, fallback: number): number {
-  const raw = process.env[key];
-  if (raw === undefined || raw.trim() === "") {
-    return fallback;
-  }
-  const parsed = Number(raw);
-  if (!Number.isFinite(parsed) || parsed < 0) {
-    return fallback;
-  }
-  return Math.floor(parsed);
+  return env.nonNegativeInteger(key, fallback);
 }
 
 /** Parse a comma-separated identifier list; drops blanks. Empty result = no projection. */

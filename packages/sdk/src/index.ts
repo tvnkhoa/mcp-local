@@ -27,7 +27,7 @@ export { annotations, defineTool } from "./defineTool.js";
 export { defineGuard, featureFlagGuard, immutableTargetGuard, runGuards } from "./guards.js";
 
 export type { SerializeOptions, ToolCallResult } from "./responses.js";
-export { asError, asFatalError, asText, serializePayload } from "./responses.js";
+export { asError, asErrorPayload, asFatalError, asText, serializePayload } from "./responses.js";
 
 export type { LegacyBridge, RegistryOptions, ToolRegistry } from "./registry.js";
 export { createToolRegistry } from "./registry.js";
