@@ -1,0 +1,35 @@
+{
+  "name": "@mcp/sdk",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Tier-1 platform runtime: the reusable tool builder, tool registry, dispatch pipeline, stdio transport, lifecycle, and the standard health_check. The only package permitted to import @modelcontextprotocol/sdk.",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "sideEffects": false,
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -b",
+    "typecheck": "tsc -b",
+    "clean": "tsc -b --clean",
+    "test": "node --import tsx --test \"src/**/*.test.ts\""
+  },
+  "dependencies": {
+    "@mcp/core": "*",
+    "@modelcontextprotocol/sdk": "^1.12.0",
+    "zod": "^3.24.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.5",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  }
+}

@@ -1,0 +1,36 @@
+{
+  "name": "@mcp/cli",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Workspace tooling: architecture guards (dependency tiers, conventions) and the mcp-platform command. Never imported by a server or a shared package.",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "bin": {
+    "mcp-platform": "./dist/bin/mcp-platform.js"
+  },
+  "sideEffects": false,
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -b",
+    "typecheck": "tsc -b",
+    "clean": "tsc -b --clean",
+    "test": "node --import tsx --test \"src/**/*.test.ts\""
+  },
+  "dependencies": {
+    "@mcp/core": "*"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.5",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  }
+}

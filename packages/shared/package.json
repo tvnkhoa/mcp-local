@@ -1,0 +1,49 @@
+{
+  "name": "@mcp/shared",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Tier-2 capabilities: HMAC approval tokens, dialect-parameterized SQL guardrails, retrying HTTP client, filesystem path allowlist. Mechanism only - never policy.",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./approval": {
+      "types": "./dist/approval/index.d.ts",
+      "default": "./dist/approval/index.js"
+    },
+    "./sql": {
+      "types": "./dist/sql/index.d.ts",
+      "default": "./dist/sql/index.js"
+    },
+    "./http": {
+      "types": "./dist/http/index.d.ts",
+      "default": "./dist/http/index.js"
+    },
+    "./fs": {
+      "types": "./dist/fs/index.d.ts",
+      "default": "./dist/fs/index.js"
+    }
+  },
+  "sideEffects": false,
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -b",
+    "typecheck": "tsc -b",
+    "clean": "tsc -b --clean",
+    "test": "node --import tsx --test \"src/**/*.test.ts\""
+  },
+  "dependencies": {
+    "@mcp/core": "*"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.5",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  }
+}

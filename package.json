@@ -4,11 +4,23 @@
   "private": true,
   "type": "module",
   "description": "Workspace of local MCP servers with a unified installer, doctor, and auto-generated native skills.",
+  "workspaces": [
+    "packages/*"
+  ],
   "scripts": {
     "setup": "node scripts/install-mcp.mjs",
     "mcp:install": "node scripts/install-mcp.mjs",
     "mcp:doctor": "node scripts/mcp-doctor.mjs",
     "mcp:uninstall": "node scripts/uninstall-mcp.mjs",
-    "mcp:update": "node scripts/update-mcp.mjs"
+    "mcp:update": "node scripts/update-mcp.mjs",
+    "build:packages": "tsc -b",
+    "typecheck:packages": "tsc -b",
+    "typecheck:tests": "tsc -p tsconfig.test.json",
+    "clean:packages": "tsc -b --clean",
+    "test:packages": "npm run test --workspaces --if-present",
+    "guard:deps": "node packages/cli/dist/bin/mcp-platform.js guard deps --servers codebase-index-mcp,postgres-mcp,observe-mcp,bitbucket-mcp",
+    "guard:convention": "node packages/cli/dist/bin/mcp-platform.js guard convention",
+    "guard:all": "node packages/cli/dist/bin/mcp-platform.js guard all --servers codebase-index-mcp,postgres-mcp,observe-mcp,bitbucket-mcp",
+    "verify:packages": "npm run build:packages && npm run typecheck:tests && npm run test:packages && npm run guard:all"
   }
 }

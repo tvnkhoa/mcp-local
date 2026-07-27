@@ -1,0 +1,12 @@
+{
+  "//": "Solution file for packages/* only. Build with `npm run build:packages` (tsc -b).",
+  "//2": "MCP servers are NOT referenced here yet - they still build via their own tsconfig.",
+  "files": [],
+  "references": [
+    { "path": "packages/core" },
+    { "path": "packages/shared" },
+    { "path": "packages/sdk" },
+    { "path": "packages/testing" },
+    { "path": "packages/cli" }
+  ]
+}

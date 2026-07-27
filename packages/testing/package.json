@@ -1,0 +1,35 @@
+{
+  "name": "@mcp/testing",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Test harness for platform tools: invoke a ToolDefinition without starting a server, capture logs, assert on outcomes, and snapshot the tool contract.",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "sideEffects": false,
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -b",
+    "typecheck": "tsc -b",
+    "clean": "tsc -b --clean",
+    "test": "node --import tsx --test \"src/**/*.test.ts\""
+  },
+  "dependencies": {
+    "@mcp/core": "*",
+    "@mcp/sdk": "*"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.5",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2",
+    "zod": "^3.24.1"
+  }
+}

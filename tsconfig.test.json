@@ -1,0 +1,17 @@
+{
+  "//": "Type-checks the test files that every package tsconfig excludes from its build.",
+  "//2": "`node --import tsx --test` strips types without checking them, so without this",
+  "//3": "roughly a thousand lines of contract-asserting test code was never verified.",
+  "//4": "Run AFTER build:packages — cross-package imports resolve via each package's dist types.",
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "composite": false,
+    "declaration": false,
+    "declarationMap": false,
+    "sourceMap": false,
+    "noEmit": true,
+    "rootDir": ".",
+    "outDir": "dist-typecheck"
+  },
+  "include": ["packages/*/src/**/*.ts"]
+}
