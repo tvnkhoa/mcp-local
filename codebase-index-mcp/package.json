@@ -10,6 +10,8 @@
     "start": "node dist/index.js",
     "dev": "tsx src/index.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "node scripts/run-tests.mjs",
+    "smoke": "node scripts/smoke-test.mjs",
     "guard:no-llm-runtime": "node scripts/guard-no-llm-runtime.mjs",
     "test:setup-config": "node scripts/test/test-setup-config.mjs",
     "test:endpoint-bridge": "node scripts/test/test-endpoint-bridge.mjs",

@@ -1,0 +1,87 @@
+name: CI
+
+# Migration-plan step S-05. Makes the gate automatic: what used to be a chain of
+# commands typed by hand, covering one server, now runs on every push.
+#
+# Everything here is credential-free. See docs/migration/ci.md for what that
+# does and does not cover.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# A new push to the same branch makes the previous run's answer irrelevant.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    # windows-latest to match the development environment: better-sqlite3 and
+    # tree-sitter build natively, and the path handling this workspace normalizes
+    # is Windows-specific. A Linux matrix entry is deliberately not part of S-05.
+    runs-on: windows-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          # The servers are not workspace members, so their lockfiles are not
+          # covered by the root one and each needs its own cache key input.
+          cache-dependency-path: |
+            package-lock.json
+            codebase-index-mcp/package-lock.json
+            postgres-mcp/package-lock.json
+            observe-mcp/package-lock.json
+            bitbucket-mcp/package-lock.json
+
+      - name: Install workspace packages
+        run: npm ci
+
+      # Must precede the server install: servers consume packages/*/dist through
+      # `file:` dependencies, so the dist output has to exist first.
+      - name: Build packages
+        run: npm run build:packages
+
+      - name: Install servers
+        run: npm run install:servers
+
+      - name: Typecheck tests
+        run: npm run typecheck:tests
+
+      - name: Test packages
+        run: npm run test:packages
+
+      - name: Platform guards
+        run: npm run guard:all
+
+      - name: Build servers
+        run: npm run build:servers
+
+      - name: Typecheck servers
+        run: npm run typecheck:servers
+
+      - name: Test servers
+        run: npm run test:servers
+
+      # Boots all four servers over a real stdio handshake with placeholder env
+      # and diffs tools/list against the committed snapshots. This is both the
+      # contract gate and the credential-free boot check — it is what catches a
+      # module that compiles but cannot load.
+      - name: Check tool contracts
+        run: npm run contracts:check
+
+      # A performance gate rather than a correctness test, so it is its own step:
+      # compact-mode token savings must stay at or above 40%.
+      - name: Benchmark gate (codebase-index-mcp)
+        run: npm run benchmark:plan:check
+        working-directory: codebase-index-mcp

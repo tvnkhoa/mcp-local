@@ -37,10 +37,10 @@ npm run test:csharp-inheritance-bridge
 npm run test:refactor-engine
 ```
 
-**Pre-commit sequence:**
-```bash
-npm run typecheck && npm run build && npm run guard:no-llm-runtime && node scripts/smoke-test.mjs && npm run benchmark:plan:check
-```
+**Pre-commit sequence:** run the workspace gate from the repo root instead — see
+*Verification* below. Within this package, `npm run test` now runs the whole
+suite (it discovers every `test:*` script from `package.json`, so the list cannot
+fall behind).
 
 ### postgres-mcp
 
@@ -50,6 +50,28 @@ npm run build
 npm run typecheck
 npm run dev
 ```
+
+### Verification (run from the workspace root)
+
+All four servers answer to the same four scripts — `build`, `typecheck`, `test`, `smoke` — so the
+root aggregates work uniformly. They are driven by `scripts/lib/manifest.mjs`, so a newly
+registered server is covered automatically.
+
+```bash
+npm run verify:all     # the gate: packages + servers + tool contracts. Credential-free.
+npm run verify:live    # the four live smoke tests. NEEDS REAL CREDENTIALS.
+```
+
+`verify:all` is what CI runs (`.github/workflows/ci.yml`, Windows + Node 22) and is deliberately
+credential-free, so it means the same thing on a fresh clone as it does in CI. `contracts:check`
+inside it boots all four servers over a real stdio handshake with placeholder env — that is the
+credential-free boot check, and it is what catches a module that compiles but cannot load.
+
+The live smoke tests reach real Postgres / OpenObserve / Bitbucket and are **not** in CI. Run
+`verify:live` before a release. See `docs/migration/ci.md`.
+
+Narrower targets: `verify:packages`, `verify:servers`, `test:servers`, `contracts:check`, and
+`node scripts/run-servers.mjs <script> [--server <key>]`.
 
 ## Architecture (codebase-index-mcp)
 
@@ -163,6 +185,7 @@ When analyzing this codebase, use the `codebase-index-local` MCP tools **before*
 - `docs/refactor/duplication-extraction-report.md` — the shared-component extraction, its measured behaviour deltas, and the one cluster deliberately left alone
 - `docs/migration/s06-s23-notes.md` — contract snapshots + the `bitbucket-mcp` SDK pilot; read this before migrating another server
 - `docs/migration/s24-notes.md` — the `postgres-mcp` SDK migration: the call-replay method, and why the SDK gained `resources` and `rawResult`
+- `docs/migration/ci.md` — what CI covers, what it deliberately does not (no live backends, no secrets), and the script vocabulary that makes the root aggregates work
 - `contracts/README.md` — what the golden `tools/list` snapshots are and how to update them
 
 **Per-server:**

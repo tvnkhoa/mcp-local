@@ -49,6 +49,15 @@ async function main() {
   const client = new Client({ name: "profile-test", version: "0.1.0" });
   await client.connect(transport);
 
+  // The SDK's default request timeout is 60s, and find_impact_files over
+  // src/graphStore.ts (~1,900 lines, many callers) sits close enough to that on a
+  // cold index to fail intermittently — which reads as a broken build rather
+  // than a slow one. Give every call in this script the same generous budget;
+  // an explicit per-call timeout still wins.
+  const callTool = client.callTool.bind(client);
+  client.callTool = (params, schema, options) =>
+    callTool(params, schema, { timeout: 180_000, ...options });
+
   // Index current directory (bounded sample)
   console.log("\n[setup] Indexing current repo...");
   const indexResult = await client.callTool({
