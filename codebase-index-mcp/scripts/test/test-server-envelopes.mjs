@@ -86,15 +86,26 @@ try {
   // none, and `defineTool` requires them, so a tool gains them exactly when S-32 moves it.
   // Registry-vs-switch is otherwise invisible from out here, which is the point.
   const MIGRATED = [
+    "dead_code_scan",
+    "detect_changes",
+    "detect_circular_dependencies",
     "find_entry_points",
+    "find_impact_files",
     "find_implementations",
+    "find_package_consumers",
     "find_symbol_at_line",
+    "get_call_chain",
+    "get_change_context",
+    "get_cross_repo_impact",
+    "get_dependency_graph",
     "get_file_context",
     "get_file_summary",
     "get_folder_summary",
+    "get_symbol_context_pack",
     "get_symbol_detail",
     "get_symbol_source",
     "health_check",
+    "link_tests_to_source",
     "list_repositories",
     "orient",
     "query_docs",
@@ -102,7 +113,8 @@ try {
     "route_map",
     "search_literals",
     "search_regex",
-    "search_symbols"
+    "search_symbols",
+    "trace_execution_flow"
   ];
   const annotated = listed.filter((t) => t.annotations !== undefined).map((t) => t.name).sort();
   assert(

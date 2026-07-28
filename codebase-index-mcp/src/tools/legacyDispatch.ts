@@ -26,38 +26,22 @@ import type { DescriptorLimits } from "./descriptors/limits.js";
 import {
   handleIndexRepository,
   handleWatchRepo,
-  handleDetectChanges,
   handleChangeImpact
 } from "../handlers/indexHandler.js";
 import {
-  handleGetSymbolContextPack,
   handleGetSymbolBlame
 } from "../handlers/searchHandler.js";
 import { handleGetFeatureBundle } from "../handlers/bundleHandler.js";
 import {
-  handleGetDependencyGraph,
-  handleGetCallChain,
-  handleFindFieldAccesses,
-  handleFindImpactFiles,
-  handleGetChangeContext
+  handleFindFieldAccesses
 } from "../handlers/impactHandler.js";
-import {
-  handleDeadCodeScan,
-  handleDetectCircularDependencies,
-  handleLinkTestsToSource
-} from "../handlers/analysisHandler.js";
-import {
-  handleGetCrossRepoImpact,
-  handleFindPackageConsumers
-} from "../handlers/crossRepoHandler.js";
 import {
   handleRenameAssist,
   handleRefactorReplacePreview,
   handleRefactorReplaceApply,
   handleRefactorReplaceRollback,
   handleRefactorSymbolMigration,
-  handleChangeValueRepresentation,
-  handleTraceExecutionFlow
+  handleChangeValueRepresentation
 } from "../handlers/refactorHandler.js";
 import { handleGetPersistenceMapping, handleGetValueContractImpact } from "../handlers/persistenceHandler.js";
 
@@ -75,24 +59,12 @@ export function createLegacyDispatcher(options: LegacyDispatchOptions): LegacyDi
 
   // Built once at startup, exactly as these were module-level constants before.
   const indexRepositorySchema = schemas.indexRepositorySchema(maxFilesPerRun);
-  const getDependencyGraphSchema = schemas.getDependencyGraphSchema(maxDepth, maxResultLimit);
-  const getCallChainSchema = schemas.getCallChainSchema(maxDepth, maxResultLimit);
-  const findImpactFilesSchema = schemas.findImpactFilesSchema(maxResultLimit);
   const findFieldAccessesSchema = schemas.findFieldAccessesSchema(maxResultLimit);
-  const getChangeContextSchema = schemas.getChangeContextSchema(maxDepth, maxResultLimit);
-  const getSymbolContextPackSchema = schemas.getSymbolContextPackSchema(maxDepth, maxResultLimit);
-  const detectChangesSchema = schemas.detectChangesSchema(maxResultLimit);
   const changeImpactSchema = schemas.changeImpactSchema(maxResultLimit);
   const getFeatureBundleSchema = schemas.getFeatureBundleSchema;
-  const deadCodeScanSchema = schemas.deadCodeScanSchema(maxResultLimit);
-  const detectCircularDependenciesSchema = schemas.detectCircularDependenciesSchema(maxDepth, maxResultLimit);
-  const crossRepoImpactSchema = schemas.crossRepoImpactSchema(maxResultLimit);
-  const findPackageConsumersSchema = schemas.findPackageConsumersSchema(maxResultLimit);
   const symbolBlameSchema = schemas.symbolBlameSchema;
-  const linkTestsToSourceSchema = schemas.linkTestsToSourceSchema(maxResultLimit);
   const watchRepoSchema = schemas.watchRepoSchema;
   const renameAssistSchema = schemas.renameAssistSchema(maxResultLimit);
-  const traceExecutionFlowSchema = schemas.traceExecutionFlowSchema;
   const refactorReplacePreviewSchema = schemas.refactorReplacePreviewSchema;
   const refactorReplaceApplySchema = schemas.refactorReplaceApplySchema;
   const refactorReplaceRollbackSchema = schemas.refactorReplaceRollbackSchema;
@@ -109,61 +81,17 @@ export function createLegacyDispatcher(options: LegacyDispatchOptions): LegacyDi
         const hArgs = indexRepositorySchema.parse(args);
         return handleIndexRepository(hArgs, ctx);
       }
-      case "get_dependency_graph": {
-        const hArgs = getDependencyGraphSchema.parse(args);
-        return handleGetDependencyGraph(hArgs, ctx);
-      }
-      case "get_call_chain": {
-        const hArgs = getCallChainSchema.parse(args);
-        return handleGetCallChain(hArgs, ctx);
-      }
-      case "find_impact_files": {
-        const hArgs = findImpactFilesSchema.parse(args);
-        return handleFindImpactFiles(hArgs, ctx);
-      }
       case "find_field_accesses": {
         const hArgs = findFieldAccessesSchema.parse(args);
         return handleFindFieldAccesses(hArgs, ctx);
-      }
-      case "get_change_context": {
-        const hArgs = getChangeContextSchema.parse(args);
-        return handleGetChangeContext(hArgs, ctx);
       }
       case "watch_repo": {
         const hArgs = watchRepoSchema.parse(args);
         return handleWatchRepo(hArgs, ctx);
       }
-      case "get_symbol_context_pack": {
-        const hArgs = getSymbolContextPackSchema.parse(args);
-        return handleGetSymbolContextPack(hArgs, ctx);
-      }
-      case "dead_code_scan": {
-        const hArgs = deadCodeScanSchema.parse(args);
-        return handleDeadCodeScan(hArgs, ctx);
-      }
-      case "detect_circular_dependencies": {
-        const hArgs = detectCircularDependenciesSchema.parse(args);
-        return handleDetectCircularDependencies(hArgs, ctx);
-      }
-      case "get_cross_repo_impact": {
-        const hArgs = crossRepoImpactSchema.parse(args);
-        return handleGetCrossRepoImpact(hArgs, ctx);
-      }
-      case "find_package_consumers": {
-        const hArgs = findPackageConsumersSchema.parse(args);
-        return handleFindPackageConsumers(hArgs, ctx);
-      }
       case "get_symbol_blame": {
         const hArgs = symbolBlameSchema.parse(args);
         return handleGetSymbolBlame(hArgs, ctx);
-      }
-      case "link_tests_to_source": {
-        const hArgs = linkTestsToSourceSchema.parse(args);
-        return handleLinkTestsToSource(hArgs, ctx);
-      }
-      case "detect_changes": {
-        const hArgs = detectChangesSchema.parse(args);
-        return handleDetectChanges(hArgs, ctx);
       }
       case "change_impact": {
         const hArgs = changeImpactSchema.parse(args);
@@ -207,10 +135,6 @@ export function createLegacyDispatcher(options: LegacyDispatchOptions): LegacyDi
       case "get_value_contract_impact": {
         const hArgs = getValueContractImpactSchema.parse(args);
         return handleGetValueContractImpact(hArgs, ctx);
-      }
-      case "trace_execution_flow": {
-        const hArgs = traceExecutionFlowSchema.parse(args);
-        return handleTraceExecutionFlow(hArgs, ctx);
       }
       default:
         throw new McpError(ErrorCode.MethodNotFound, `Unknown tool: ${name}`);

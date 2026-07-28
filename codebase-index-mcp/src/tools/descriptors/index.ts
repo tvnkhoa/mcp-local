@@ -1,19 +1,18 @@
 /**
- * The `tools/list` descriptors still owned by the legacy `switch` — 26 of the original 43.
+ * The `tools/list` descriptors still owned by the legacy `switch` — 14 of the original 43.
  *
  * Order is preserved for reviewability, not correctness: `contracts:check` sorts by name before
  * diffing, and the SDK registry lists migrated tools ahead of legacy ones — so this order can
  * change as S-32 proceeds without the contract moving.
  *
- * Shrinks batch by batch through S-32 and disappears at S-33. Read/metadata (8) has moved to
- * `tools/readMetadata.ts` and search (9) to `tools/search.ts`; their descriptors now live inside
- * those tool definitions.
+ * Shrinks batch by batch through S-32 and disappears at S-33. Read/metadata, search and
+ * graph/impact (29 tools) have moved to `tools/`; their descriptors now live inside those tool
+ * definitions. Only indexing/watch and refactor are left.
  */
 
 import type { ListedToolDescriptor } from "@mcp/sdk";
 
 import type { DescriptorLimits } from "./limits.js";
-import { graphImpactDescriptors } from "./graphImpact.js";
 import { indexingWatchDescriptors } from "./indexingWatch.js";
 import { refactorDescriptors } from "./refactor.js";
 
@@ -21,20 +20,9 @@ export type { DescriptorLimits } from "./limits.js";
 
 const DECLARATION_ORDER: readonly string[] = [
   "index_repository",
-  "get_dependency_graph",
-  "get_call_chain",
   "find_field_accesses",
-  "find_impact_files",
-  "get_change_context",
   "watch_repo",
-  "get_symbol_context_pack",
-  "dead_code_scan",
-  "detect_circular_dependencies",
-  "get_cross_repo_impact",
-  "find_package_consumers",
   "get_symbol_blame",
-  "link_tests_to_source",
-  "detect_changes",
   "change_impact",
   "get_feature_bundle",
   "rename_assist",
@@ -45,7 +33,6 @@ const DECLARATION_ORDER: readonly string[] = [
   "change_value_representation",
   "get_persistence_mapping",
   "get_value_contract_impact",
-  "trace_execution_flow",
 ];
 
 /**
@@ -57,7 +44,6 @@ const DECLARATION_ORDER: readonly string[] = [
  */
 export function legacyToolDescriptors(limits: DescriptorLimits): readonly ListedToolDescriptor[] {
   const all = [
-    ...graphImpactDescriptors(limits),
     ...indexingWatchDescriptors(limits),
     ...refactorDescriptors(limits)
   ];
