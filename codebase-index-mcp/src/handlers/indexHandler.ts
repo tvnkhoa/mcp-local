@@ -1,12 +1,6 @@
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { McpError, ErrorCode } from "@modelcontextprotocol/sdk/types.js";
-import {
-  resolveHeadCommitSha,
-  getRepoStaleness,
-  getRepoWorkingTreeState,
-  runGitLines,
-  collectGitChangedFiles
-} from "../gitHelpers.js";
+import { getRepoStaleness, getRepoWorkingTreeState } from "../gitHelpers.js";
 import { assertPathAllowed, clamp } from "../guardrails/indexGuardrails.js";
 import { resolveResponseProfile } from "../response/responseFormatter.js";
 import { resolveDetectChangesPolicy } from "../policyResolver.js";
@@ -14,6 +8,7 @@ import { computeChangedFileImpacts } from "../changeAnalysis.js";
 import { buildCoverageBlock } from "../coverage.js";
 import { buildIndexMeta } from "./impactHandler.js";
 import type { IndexMode } from "../types.js";
+import { activateWatchForRepo, clearWatchInactivityTimer } from "../watch/watchLifecycle.js";
 import type { HandlerContext } from "./handlerContext.js";
 
 // ── health_check ─────────────────────────────────────────────────────────────
@@ -505,57 +500,3 @@ export function resolveDocsMode(mode: "auto" | "on" | "off", docsEnabled: boolea
   if (mode === "off") return false;
   return docsEnabled;
 }
-
-export async function activateWatchForRepo(
-  repoId: string,
-  repoPath: string,
-  reason: string,
-  ctx: HandlerContext
-): Promise<{ started: boolean; message: string }> {
-  const { watchManager, activeWatchRef, watchInactivityTimers, constants } = ctx;
-  assertPathAllowed(repoPath, constants.allowedRoots);
-
-  if (constants.WATCH_ACTIVE_ONLY && activeWatchRef.current && activeWatchRef.current !== repoId) {
-    clearWatchInactivityTimer(activeWatchRef.current, watchInactivityTimers);
-    await watchManager.stop(activeWatchRef.current);
-  }
-
-  const currentStatus = watchManager.getStatus(repoId);
-  let result: { started: boolean; message: string };
-  if (currentStatus.length === 0) {
-    result = watchManager.start(repoId, repoPath);
-  } else {
-    result = { started: false, message: `watch already active for repoId '${repoId}'` };
-  }
-
-  activeWatchRef.current = repoId;
-  armWatchInactivityTimer(repoId, ctx);
-  if (result.started) {
-    process.stderr.write(`[watch-activate] repoId=${repoId} reason=${reason}\n`);
-  }
-  return result;
-}
-
-export function armWatchInactivityTimer(repoId: string, ctx: HandlerContext): void {
-  const { watchManager, activeWatchRef, watchInactivityTimers, constants } = ctx;
-  clearWatchInactivityTimer(repoId, watchInactivityTimers);
-  const timer = setTimeout(() => {
-    if (constants.WATCH_ACTIVE_ONLY && activeWatchRef.current === repoId) {
-      activeWatchRef.current = null;
-    }
-    void watchManager.stop(repoId);
-    watchInactivityTimers.delete(repoId);
-    process.stderr.write(`[watch-idle-stop] repoId=${repoId} ttlMs=${String(constants.WATCH_ACTIVE_TTL_MS)}\n`);
-  }, constants.WATCH_ACTIVE_TTL_MS);
-  watchInactivityTimers.set(repoId, timer);
-}
-
-export function clearWatchInactivityTimer(repoId: string, timers: Map<string, NodeJS.Timeout>): void {
-  const timer = timers.get(repoId);
-  if (!timer) return;
-  clearTimeout(timer);
-  timers.delete(repoId);
-}
-
-// re-export for use by index.ts maybeAutoActivateWatchFromArgs
-export { activateWatchForRepo as _activateWatchForRepo };

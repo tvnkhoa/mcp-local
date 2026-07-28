@@ -5,7 +5,7 @@ Phase H's row updated after the S-28 SDK work landed. Every
 row cites the artifact that proves it. Where no artifact was found, the row says so
 rather than guessing.
 
-**24 of 44 done · 1 partial · 1 skipped by decision · 18 open.** Phase H is no longer
+**25 of 44 done · 1 partial · 1 skipped by decision · 17 open.** Phase H is no longer
 blocked: its SDK prerequisite (`renderResult` + `wrapCall`) shipped 2026-07-28.
 
 ---
@@ -68,7 +68,7 @@ that the plan folded into S-31. **This document's numbering is authoritative.**
 | S-12 Dependency-rule guard | ✅ | same |
 | S-13 Contract guard + platform no-LLM guard | ✅ | same; `guard:no-llm-runtime` also runs per-server |
 
-Current output: **0 errors, 34 warnings across 332 files.** Warn mode is correct until
+Current output: **0 errors, 34 warnings across 334 files.** Warn mode is correct until
 S-41 — flipping now would turn 34 warnings into 34 build failures.
 
 ## Phase E — Shared Core Extraction · 7/7 ✅
@@ -96,12 +96,23 @@ S-41 — flipping now would turn 34 warnings into 34 build failures.
 | S-24 Migrate `observe-mcp` | ✅ | `e5feaf3` (labelled S-25) — `s25-notes.md` |
 | S-25 Migrate `postgres-mcp` | ✅ | `0eccb10` (labelled S-24) — `s24-notes.md` |
 
-## Phase G — codebase-index Internal Cleanup · 2/5
+## Phase G — codebase-index Internal Cleanup · 3/5
+
+> **Correction.** An earlier revision of this file marked S-26 done on the strength of
+> checking approval and the SQL guardrails. That check missed a third shadow: the watch
+> lifecycle existed **twice** — `activateWatchForRepo`, `armWatchInactivityTimer` and
+> `clearWatchInactivityTimer` in both `index.ts` and `handlers/indexHandler.ts` — with
+> which copy ran depending on how the watcher was triggered (`watch_repo` used the
+> handler's; boot auto-start, per-call auto-activation and the idle callback used the
+> entry point's). The two had not drifted, but they shared mutable state while being
+> separately editable. S-27 merged them, so the row is now accurate for a different
+> reason than it originally claimed.
+
 
 | Step | Status | Evidence |
 |---|---|---|
-| S-26 Delete shadow implementations | ✅ | verified: approval and SQL guards in all servers delegate to `@mcp/shared`; no shadow copies remain |
-| S-27 Extract the watch lifecycle | ❌ | still ~138 lines in `src/index.ts` |
+| S-26 Delete shadow implementations | ✅ | approval and SQL guards delegate to `@mcp/shared` everywhere; the last shadow — a duplicated watch lifecycle — was removed by S-27 |
+| S-27 Extract the watch lifecycle | ✅ | `src/watch/watchLifecycle.ts`; the duplicate copies in `index.ts` and `handlers/indexHandler.ts` are gone |
 | S-28 Extract indexing orchestration | ✅ | `9ccae95` (labelled S-26) — `src/indexing/{indexRunner,runPolicy}.ts` |
 | S-29 Break the `graphStore`→`regexSearch` cycle | ❌ | cycle confirmed present |
 | S-30 Split `graphStore.ts` | ❌ | still one file; guard warns at hard cap |

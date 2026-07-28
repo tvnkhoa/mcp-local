@@ -27,6 +27,11 @@ import {
 } from "./guardrails/indexGuardrails.js";
 import { WatchManager } from "./watchManager.js";
 import { createIndexRunner } from "./indexing/indexRunner.js";
+import {
+  armWatchInactivityTimer,
+  maybeAutoActivateWatchFromArgs,
+  startAutoWatchers
+} from "./watch/watchLifecycle.js";
 import { parsePerformanceProfileEnv } from "./config/performanceConfig.js";
 import { numberFromEnv, ratioFromEnv } from "./config/envConfig.js";
 import {
@@ -228,7 +233,7 @@ const watchManager = new WatchManager(
   (repoId, deletedRelativePaths) => store.pruneFiles(repoId, deletedRelativePaths),
   ({ repoId }) => {
     if (WATCH_ACTIVE_ONLY && activeWatchRef.current === repoId) {
-      armWatchInactivityTimer(repoId);
+      armWatchInactivityTimer(repoId, buildHandlerContext());
     }
   }
 );
@@ -1098,7 +1103,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
 
   return toolContextStorage.run({ toolName, startedAt, args, progressNotifier }, async () => {
     try {
-      await maybeAutoActivateWatchFromArgs(toolName, args);
+      await maybeAutoActivateWatchFromArgs(toolName, args, buildHandlerContext());
 
       const ctx = buildHandlerContext();
 
@@ -1307,33 +1312,6 @@ function asText(payload: unknown, profile: ResponseProfile = "standard"): CallTo
   return asTextCore(payload, profile, toolContextStorage.getStore(), TELEMETRY_ENABLED, TELEMETRY_SAMPLE_RATE);
 }
 
-function resolveAutoWatchTargets(): { repoId: string; repoPath: string }[] {
-  if (AUTO_WATCH_REPOS.length > 0) {
-    return AUTO_WATCH_REPOS;
-  }
-  return store.listRepositories().map((r) => ({ repoId: r.repoId, repoPath: r.repoPath }));
-}
-
-async function startAutoWatchers(): Promise<void> {
-  if (!WATCH_AUTO_START) {
-    return;
-  }
-
-  const targets = resolveAutoWatchTargets();
-  const selectedTargets = WATCH_ACTIVE_ONLY ? targets.slice(0, 1) : targets;
-  for (const target of selectedTargets) {
-    try {
-      assertPathAllowed(target.repoPath, allowedRoots);
-      const started = await activateWatchForRepo(target.repoId, target.repoPath, "auto-start");
-      if (started.started) {
-        process.stderr.write(`[watch-start] repoId=${target.repoId} path=${target.repoPath}\n`);
-      }
-    } catch (error) {
-      process.stderr.write(`[watch-start-error] repoId=${target.repoId}: ${error instanceof Error ? error.message : String(error)}\n`);
-    }
-  }
-}
-
 let shuttingDown = false;
 async function shutdown(): Promise<void> {
   if (shuttingDown) return;
@@ -1357,7 +1335,7 @@ async function shutdown(): Promise<void> {
 async function main(): Promise<void> {
   const transport = new StdioServerTransport();
   await server.connect(transport);
-  await startAutoWatchers();
+  await startAutoWatchers(buildHandlerContext(), AUTO_WATCH_REPOS);
 
   process.once("SIGINT", () => {
     void shutdown().finally(() => process.exit(0));
@@ -1365,80 +1343,6 @@ async function main(): Promise<void> {
   process.once("SIGTERM", () => {
     void shutdown().finally(() => process.exit(0));
   });
-}
-
-async function maybeAutoActivateWatchFromArgs(toolName: string, args: Record<string, unknown>): Promise<void> {
-  if (!WATCH_AUTO_START) {
-    return;
-  }
-
-  if (toolName === "watch_repo" || toolName === "list_repositories") {
-    return;
-  }
-
-  const rawRepoId = args.repoId;
-  if (typeof rawRepoId !== "string" || rawRepoId.trim().length === 0) {
-    return;
-  }
-
-  const repoId = rawRepoId.trim();
-  const rawRepoPath = args.repoPath;
-  const repoPath = typeof rawRepoPath === "string" && rawRepoPath.trim().length > 0
-    ? rawRepoPath.trim()
-    : store.getRepository(repoId)?.repoPath;
-
-  if (!repoPath) {
-    return;
-  }
-
-  await activateWatchForRepo(repoId, repoPath, `interaction:${toolName}`);
-}
-
-async function activateWatchForRepo(repoId: string, repoPath: string, reason: string): Promise<{ started: boolean; message: string }> {
-  assertPathAllowed(repoPath, allowedRoots);
-
-  if (WATCH_ACTIVE_ONLY && activeWatchRef.current && activeWatchRef.current !== repoId) {
-    clearWatchInactivityTimer(activeWatchRef.current);
-    await watchManager.stop(activeWatchRef.current);
-  }
-
-  const currentStatus = watchManager.getStatus(repoId);
-  let result: { started: boolean; message: string };
-  if (currentStatus.length === 0) {
-    result = watchManager.start(repoId, repoPath);
-  } else {
-    result = { started: false, message: `watch already active for repoId '${repoId}'` };
-  }
-
-  activeWatchRef.current = repoId;
-  armWatchInactivityTimer(repoId);
-  if (result.started) {
-    process.stderr.write(`[watch-activate] repoId=${repoId} reason=${reason}\n`);
-  }
-  return result;
-}
-
-function armWatchInactivityTimer(repoId: string): void {
-  clearWatchInactivityTimer(repoId);
-  const timer = setTimeout(() => {
-    const current = activeWatchRef.current;
-    if (WATCH_ACTIVE_ONLY && current === repoId) {
-      activeWatchRef.current = null;
-    }
-    void watchManager.stop(repoId);
-    watchInactivityTimers.delete(repoId);
-    process.stderr.write(`[watch-idle-stop] repoId=${repoId} ttlMs=${String(WATCH_ACTIVE_TTL_MS)}\n`);
-  }, WATCH_ACTIVE_TTL_MS);
-  watchInactivityTimers.set(repoId, timer);
-}
-
-function clearWatchInactivityTimer(repoId: string): void {
-  const timer = watchInactivityTimers.get(repoId);
-  if (!timer) {
-    return;
-  }
-  clearTimeout(timer);
-  watchInactivityTimers.delete(repoId);
 }
 
 main().catch((error) => {
