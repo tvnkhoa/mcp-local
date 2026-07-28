@@ -87,13 +87,22 @@ try {
   // Registry-vs-switch is otherwise invisible from out here, which is the point.
   const MIGRATED = [
     "find_entry_points",
+    "find_implementations",
+    "find_symbol_at_line",
     "get_file_context",
     "get_file_summary",
     "get_folder_summary",
+    "get_symbol_detail",
+    "get_symbol_source",
     "health_check",
     "list_repositories",
     "orient",
-    "query_docs"
+    "query_docs",
+    "query_graph",
+    "route_map",
+    "search_literals",
+    "search_regex",
+    "search_symbols"
   ];
   const annotated = listed.filter((t) => t.annotations !== undefined).map((t) => t.name).sort();
   assert(

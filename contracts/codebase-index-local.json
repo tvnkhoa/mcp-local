@@ -426,6 +426,12 @@
       "name": "find_impact_files"
     },
     {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
       "description": "Find all classes or structs that implement a named interface (via IMPLEMENTS edges). Useful for .NET/C# DI tracing — e.g. find_implementations('IUserRepository') to locate concrete implementations. Requires C# indexing.",
       "inputSchema": {
         "additionalProperties": false,
@@ -484,6 +490,12 @@
       "name": "find_package_consumers"
     },
     {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
       "description": "Find the symbol enclosing a given line number in a file. Use when you have a file path and line from a stack trace, error message, or diff hunk to get the symbolId for further graph queries — avoids a manual search hop.",
       "inputSchema": {
         "additionalProperties": false,
@@ -963,6 +975,12 @@
       "name": "get_symbol_context_pack"
     },
     {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
       "description": "Get full detail for a symbol by ID — returns the symbol record plus all outgoing and incoming edges with resolved names. Use after search_symbols to drill into a specific symbol.",
       "inputSchema": {
         "additionalProperties": false,
@@ -988,6 +1006,12 @@
       "name": "get_symbol_detail"
     },
     {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
       "description": "Return the raw source text span of a symbol (by symbolId or name) read from disk — so you can read the exact code without a separate file read. Uses the persisted end-line when available (re-index to populate), else estimates the span from the next symbol. `contextLines` adds surrounding lines; `maxLines` caps output. A stale index is reported as a non-fatal `staleWarning` (line numbers may differ from HEAD).",
       "inputSchema": {
         "additionalProperties": false,
@@ -1287,6 +1311,12 @@
       "name": "query_docs"
     },
     {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
       "description": "Run a read-only SQL query against graph tables in a sandboxed mode. Requires :repoId named parameter in SQL and blocks write/admin statements. Allowed tables: repositories, files, symbols, edges, index_runs, routes, cross_repo_deps, refactor_previews, refactor_preview_hunks, refactor_applies, refactor_apply_changes, refactor_apply_hunks, refactor_rollbacks, vec_symbol_map. Key columns — symbols: (repo_id, symbol_id, name, kind, file_path, line, signature); edges: (repo_id, from_id, to_id, type, confidence, reason) — type values: CALLS, IMPORTS, TYPE_REF, DEPENDS_ON, PROPERTY_REF, PROPERTY_WRITE; cross_repo_deps: (from_repo_id, from_symbol_id, to_repo_id, to_symbol_id, type); routes: (repo_id, file_path, controller_symbol_id, handler_symbol_id, http_method, route_template, line). Note: 'package_consumers' is not a table — query edges WHERE type='DEPENDS_ON' AND to_id LIKE 'nuget:%' instead.",
       "inputSchema": {
         "additionalProperties": false,
@@ -1692,6 +1722,12 @@
       "name": "rename_assist"
     },
     {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
       "description": "Map ASP.NET C# routes to handler methods using extracted route attributes ([Route], [HttpGet], [HttpPost], ...). Use to inspect API surface deterministically.",
       "inputSchema": {
         "additionalProperties": false,
@@ -1735,6 +1771,12 @@
       "name": "route_map"
     },
     {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
       "description": "Search string-literal CONTENT (notification titles, error messages, log templates, user-facing text) across a repo's indexed code. Returns each literal with file, line, and enclosing symbol — use for 'what text does this repo emit' audits (notification catalogs, error-message inventories, i18n sweeps) instead of grep. Interpolated/template strings are indexed with {…} placeholders.",
       "inputSchema": {
         "additionalProperties": false,
@@ -1772,6 +1814,12 @@
       "name": "search_literals"
     },
     {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
       "description": "Search repo source by REGEX and get matches with context lines + the enclosing symbol. Use this instead of baseline grep for arbitrary pattern searches (TODO/FIXME sweeps, API-usage hunts, call-site patterns, config keys). Scans indexed files by default; set scanAll=true to also walk non-code text files (json/yaml/etc). Flags limited to [ims] (g is implicit). filePathPrefix (string OR array of prefixes, OR-semantics) / language / excludeTests narrow scope; pathExclude (minimatch glob or array, e.g. \"**/Tests/**\") subtracts subtrees; contextLines controls surrounding lines (returned in every profile except nano). Results cap at `limit` and a per-file cap — `truncated`/`truncationReason` flag when capped.",
       "inputSchema": {
         "additionalProperties": false,
@@ -1854,6 +1902,12 @@
       "name": "search_regex"
     },
     {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
       "description": "Search symbols across all repos or a specific repo. strategy=name is strict name/signature matching; strategy=intent uses broader tokenized matching (multi-word natural-language queries work, e.g. 'send notification email'). ranked=true returns scored/ranked candidates (with qualifiedName 'EnclosingType.Member' for class members; enclosing-type names participate in intent matching; test files get a rank penalty) and honors strategy plus the kind/language/filePath filters. excludeTests=true drops test-path results entirely.",
       "inputSchema": {
         "additionalProperties": false,

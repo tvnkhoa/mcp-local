@@ -30,14 +30,8 @@ import {
   handleChangeImpact
 } from "../handlers/indexHandler.js";
 import {
-  handleSearchSymbols,
-  handleSearchLiterals,
-  handleSearchRegex,
-  handleFindSymbolAtLine,
-  handleGetSymbolDetail,
   handleGetSymbolContextPack,
-  handleGetSymbolBlame,
-  handleGetSymbolSource
+  handleGetSymbolBlame
 } from "../handlers/searchHandler.js";
 import { handleGetFeatureBundle } from "../handlers/bundleHandler.js";
 import {
@@ -45,14 +39,11 @@ import {
   handleGetCallChain,
   handleFindFieldAccesses,
   handleFindImpactFiles,
-  handleGetChangeContext,
-  handleRouteMap,
-  handleQueryGraph
+  handleGetChangeContext
 } from "../handlers/impactHandler.js";
 import {
   handleDeadCodeScan,
   handleDetectCircularDependencies,
-  handleFindImplementations,
   handleLinkTestsToSource
 } from "../handlers/analysisHandler.js";
 import {
@@ -86,14 +77,9 @@ export function createLegacyDispatcher(options: LegacyDispatchOptions): LegacyDi
   const indexRepositorySchema = schemas.indexRepositorySchema(maxFilesPerRun);
   const getDependencyGraphSchema = schemas.getDependencyGraphSchema(maxDepth, maxResultLimit);
   const getCallChainSchema = schemas.getCallChainSchema(maxDepth, maxResultLimit);
-  const searchSymbolsSchema = schemas.searchSymbolsSchema(maxResultLimit);
-  const searchLiteralsSchema = schemas.searchLiteralsSchema(maxResultLimit);
-  const searchRegexSchema = schemas.searchRegexSchema(maxResultLimit);
-  const getSymbolDetailSchema = schemas.getSymbolDetailSchema(maxResultLimit);
   const findImpactFilesSchema = schemas.findImpactFilesSchema(maxResultLimit);
   const findFieldAccessesSchema = schemas.findFieldAccessesSchema(maxResultLimit);
   const getChangeContextSchema = schemas.getChangeContextSchema(maxDepth, maxResultLimit);
-  const findSymbolAtLineSchema = schemas.findSymbolAtLineSchema;
   const getSymbolContextPackSchema = schemas.getSymbolContextPackSchema(maxDepth, maxResultLimit);
   const detectChangesSchema = schemas.detectChangesSchema(maxResultLimit);
   const changeImpactSchema = schemas.changeImpactSchema(maxResultLimit);
@@ -103,14 +89,10 @@ export function createLegacyDispatcher(options: LegacyDispatchOptions): LegacyDi
   const crossRepoImpactSchema = schemas.crossRepoImpactSchema(maxResultLimit);
   const findPackageConsumersSchema = schemas.findPackageConsumersSchema(maxResultLimit);
   const symbolBlameSchema = schemas.symbolBlameSchema;
-  const getSymbolSourceSchema = schemas.getSymbolSourceSchema;
   const linkTestsToSourceSchema = schemas.linkTestsToSourceSchema(maxResultLimit);
-  const findImplementationsSchema = schemas.findImplementationsSchema(maxResultLimit);
   const watchRepoSchema = schemas.watchRepoSchema;
   const renameAssistSchema = schemas.renameAssistSchema(maxResultLimit);
   const traceExecutionFlowSchema = schemas.traceExecutionFlowSchema;
-  const routeMapSchema = schemas.routeMapSchema(maxResultLimit);
-  const queryGraphSchema = schemas.queryGraphSchema(maxResultLimit);
   const refactorReplacePreviewSchema = schemas.refactorReplacePreviewSchema;
   const refactorReplaceApplySchema = schemas.refactorReplaceApplySchema;
   const refactorReplaceRollbackSchema = schemas.refactorReplaceRollbackSchema;
@@ -147,29 +129,9 @@ export function createLegacyDispatcher(options: LegacyDispatchOptions): LegacyDi
         const hArgs = getChangeContextSchema.parse(args);
         return handleGetChangeContext(hArgs, ctx);
       }
-      case "search_symbols": {
-        const hArgs = searchSymbolsSchema.parse(args);
-        return handleSearchSymbols(hArgs, ctx);
-      }
-      case "search_literals": {
-        const hArgs = searchLiteralsSchema.parse(args);
-        return handleSearchLiterals(hArgs, ctx);
-      }
-      case "search_regex": {
-        const hArgs = searchRegexSchema.parse(args);
-        return handleSearchRegex(hArgs, ctx);
-      }
-      case "get_symbol_detail": {
-        const hArgs = getSymbolDetailSchema.parse(args);
-        return handleGetSymbolDetail(hArgs, ctx);
-      }
       case "watch_repo": {
         const hArgs = watchRepoSchema.parse(args);
         return handleWatchRepo(hArgs, ctx);
-      }
-      case "find_symbol_at_line": {
-        const hArgs = findSymbolAtLineSchema.parse(args);
-        return handleFindSymbolAtLine(hArgs, ctx);
       }
       case "get_symbol_context_pack": {
         const hArgs = getSymbolContextPackSchema.parse(args);
@@ -195,10 +157,6 @@ export function createLegacyDispatcher(options: LegacyDispatchOptions): LegacyDi
         const hArgs = symbolBlameSchema.parse(args);
         return handleGetSymbolBlame(hArgs, ctx);
       }
-      case "get_symbol_source": {
-        const hArgs = getSymbolSourceSchema.parse(args);
-        return handleGetSymbolSource(hArgs, ctx);
-      }
       case "link_tests_to_source": {
         const hArgs = linkTestsToSourceSchema.parse(args);
         return handleLinkTestsToSource(hArgs, ctx);
@@ -214,18 +172,6 @@ export function createLegacyDispatcher(options: LegacyDispatchOptions): LegacyDi
       case "get_feature_bundle": {
         const hArgs = getFeatureBundleSchema.parse(args);
         return handleGetFeatureBundle(hArgs, ctx);
-      }
-      case "find_implementations": {
-        const hArgs = findImplementationsSchema.parse(args);
-        return handleFindImplementations(hArgs, ctx);
-      }
-      case "route_map": {
-        const hArgs = routeMapSchema.parse(args);
-        return handleRouteMap(hArgs, ctx);
-      }
-      case "query_graph": {
-        const hArgs = queryGraphSchema.parse(args);
-        return handleQueryGraph(hArgs, ctx);
       }
       case "rename_assist": {
         const hArgs = renameAssistSchema.parse(args);
