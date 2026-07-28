@@ -5,7 +5,7 @@ Phase H's row updated after the S-28 SDK work landed. Every
 row cites the artifact that proves it. Where no artifact was found, the row says so
 rather than guessing.
 
-**25 of 44 done · 1 partial · 1 skipped by decision · 17 open.** Phase H is no longer
+**26 of 44 done · 1 partial · 1 skipped by decision · 16 open.** Phase H is no longer
 blocked: its SDK prerequisite (`renderResult` + `wrapCall`) shipped 2026-07-28.
 
 ---
@@ -96,7 +96,7 @@ S-41 — flipping now would turn 34 warnings into 34 build failures.
 | S-24 Migrate `observe-mcp` | ✅ | `e5feaf3` (labelled S-25) — `s25-notes.md` |
 | S-25 Migrate `postgres-mcp` | ✅ | `0eccb10` (labelled S-24) — `s24-notes.md` |
 
-## Phase G — codebase-index Internal Cleanup · 3/5
+## Phase G — codebase-index Internal Cleanup · 4/5
 
 > **Correction.** An earlier revision of this file marked S-26 done on the strength of
 > checking approval and the SQL guardrails. That check missed a third shadow: the watch
@@ -114,8 +114,8 @@ S-41 — flipping now would turn 34 warnings into 34 build failures.
 | S-26 Delete shadow implementations | ✅ | approval and SQL guards delegate to `@mcp/shared` everywhere; the last shadow — a duplicated watch lifecycle — was removed by S-27 |
 | S-27 Extract the watch lifecycle | ✅ | `src/watch/watchLifecycle.ts`; the duplicate copies in `index.ts` and `handlers/indexHandler.ts` are gone |
 | S-28 Extract indexing orchestration | ✅ | `9ccae95` (labelled S-26) — `src/indexing/{indexRunner,runPolicy}.ts` |
-| S-29 Break the `graphStore`→`regexSearch` cycle | ❌ | cycle confirmed present |
-| S-30 Split `graphStore.ts` | ❌ | still one file; guard warns at hard cap |
+| S-29 Break the `graphStore`→`regexSearch` cycle | ✅ | `RegexSearchStore` interface in `src/regexSearch.ts`; static scan reports **0 cycles** across 66 modules |
+| S-30 Split `graphStore.ts` | ❌ | still one file; guard warns at hard cap. **Now also owns the `find_impact_files` fix** — see below |
 
 ## Phase H — codebase-index SDK Migration · 0/3
 
@@ -181,8 +181,10 @@ in `~/.claude.json`. They were placed last on purpose and should stay there.
 
 ## Open defect — `find_impact_files(view:"files")` does not scale with the DB
 
-Not a migration step; found while diagnosing a gate failure, and worth fixing before
-S-30 because it is the same area.
+**Folded into S-30.** Found while diagnosing a gate failure. It belongs with the
+`graphStore.ts` split rather than as its own step: same area, and the split is what makes
+the predicate rewrite reviewable. A timeout increase was tried twice and held neither
+time — this is the actual fix.
 
 Measured on one file, `src/graphStore.ts`, same index, same profile:
 

@@ -3,7 +3,6 @@ import fs from "node:fs";
 import { glob } from "glob";
 import { minimatch } from "minimatch";
 
-import type { GraphStore } from "./graphStore.js";
 import type { SymbolRecord } from "./types.js";
 import {
   isTestPath,
@@ -24,6 +23,26 @@ const MAX_FILES_SCANNED = 5_000;
 // Honor the same env knob the indexer uses (index.ts) so search and index agree on which
 // files are in scope — a file the indexer kept must not be silently skipped here.
 const MAX_FILE_SIZE_BYTES = numberFromEnv("CODEBASE_INDEX_MAX_FILE_SIZE_BYTES", 500_000);
+
+/**
+ * The three reads this module makes against the graph (S-29).
+ *
+ * Declared structurally instead of importing `GraphStore`, because that import was
+ * the back-edge of a module cycle: `graphStore.ts` imports `searchRegexImpl` as a
+ * value, and this file imported `GraphStore` back as a type. `import type` is
+ * erased, so nothing ever cycled at runtime — but every tool that reads the module
+ * graph reported one, including this server's own
+ * `detect_circular_dependencies`, and a reader had no way to tell a harmless type
+ * edge from a load-order hazard without checking the emitted JS.
+ *
+ * `GraphStore` satisfies this without referencing it, so the dependency now points
+ * one way and the cycle is gone from the graph as well as from the emit.
+ */
+export interface RegexSearchStore {
+  getRepository(repoId: string): { repoPath: string } | null;
+  listIndexedFiles(repoId: string): { path: string; language: string | null }[];
+  findSymbolAtLine(repoId: string, filePath: string, line: number): SymbolRecord | null;
+}
 
 export type RegexSearchOptions = {
   pattern: string;
@@ -110,7 +129,7 @@ function lineIndexForOffset(lineStarts: number[], offset: number): number {
  * multi-line patterns behave as written — a pattern spanning a newline matches.
  */
 export function searchRegexImpl(
-  store: GraphStore,
+  store: RegexSearchStore,
   repoId: string,
   opts: RegexSearchOptions
 ): RegexSearchResult {
