@@ -44,6 +44,7 @@
   },
   "dependencies": {
     "@mcp/core": "file:../packages/core",
+    "@mcp/sdk": "file:../packages/sdk",
     "@mcp/shared": "file:../packages/shared",
     "@modelcontextprotocol/sdk": "^1.12.0",
     "better-sqlite3": "^11.8.1",

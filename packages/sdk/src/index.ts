@@ -33,7 +33,7 @@ export { defineGuard, featureFlagGuard, immutableTargetGuard, runGuards } from "
 export type { SerializeOptions, ToolCallResult } from "./responses.js";
 export { asError, asErrorPayload, asFatalError, asText, serializePayload } from "./responses.js";
 
-export type { LegacyBridge, RegistryOptions, ToolRegistry } from "./registry.js";
+export type { LegacyBridge, ListedToolDescriptor, RegistryOptions, ToolRegistry } from "./registry.js";
 export { createToolRegistry } from "./registry.js";
 
 export type { DispatchDeps } from "./dispatch.js";

@@ -14,16 +14,31 @@ export interface JsonSchemaNode {
   readonly enum?: readonly (string | number | boolean)[];
   /** Union of permitted shapes. A node with `anyOf` normally carries no `type`. */
   readonly anyOf?: readonly JsonSchemaNode[];
+  /**
+   * Exactly-one-of. Distinct from `anyOf` on the wire, and in use: codebase-index-mcp publishes
+   * it on parameters that accept either a scalar or an array of that scalar. `schema.*` has no
+   * builder for it — this exists so an already-published descriptor can be typed rather than
+   * cast, which is how S-31 found it.
+   */
+  readonly oneOf?: readonly JsonSchemaNode[];
   readonly items?: JsonSchemaNode;
   readonly properties?: Readonly<Record<string, JsonSchemaNode>>;
   readonly required?: readonly string[];
-  readonly additionalProperties?: boolean;
+  /**
+   * `false` to forbid extra keys, `true` to allow anything, or a node to constrain them — the
+   * last being how a free-form map of a known value type is expressed (`params` on `query_graph`
+   * is `additionalProperties: { type: "string" }`).
+   */
+  readonly additionalProperties?: boolean | JsonSchemaNode;
   readonly minimum?: number;
   readonly maximum?: number;
   readonly minLength?: number;
   readonly maxLength?: number;
   readonly minItems?: number;
   readonly maxItems?: number;
+  /** Object-cardinality bounds. `minProperties: 1` is how "a map, but not an empty one" is said. */
+  readonly minProperties?: number;
+  readonly maxProperties?: number;
   readonly default?: unknown;
 }
 

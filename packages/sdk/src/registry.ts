@@ -13,19 +13,36 @@ import { toToolDescriptor } from "./toolDefinition.js";
 import type { ToolCallResult } from "./responses.js";
 
 /**
+ * A descriptor as it goes out over `tools/list`.
+ *
+ * `annotations` is optional here, and that is the whole point. `defineTool` requires them, so
+ * every *migrated* tool has them — but a legacy tool predates the requirement, and its
+ * descriptor is whatever the server has been publishing. Demanding annotations from the
+ * un-migrated side would force a server to add a key to every tool at the moment it installs
+ * the bridge, which is a public contract change disguised as a refactor. codebase-index-mcp
+ * publishes 43 tools with no annotations at all; its committed contract snapshot has none.
+ *
+ * So the bridge passes legacy descriptors through untouched, and annotations appear per tool
+ * exactly when that tool migrates — a visible, intentional, one-tool-at-a-time contract edit.
+ */
+export type ListedToolDescriptor = Omit<ToolDescriptor, "annotations"> & {
+  readonly annotations?: ToolDescriptor["annotations"];
+};
+
+/**
  * Adapter onto a pre-existing dispatcher. Lets a server migrate incrementally
  * without ever being half-broken.
  */
 export interface LegacyBridge {
-  /** Descriptors for tools the legacy dispatcher still owns. */
-  listTools(): readonly ToolDescriptor[];
+  /** Descriptors for tools the legacy dispatcher still owns, exactly as it publishes them. */
+  listTools(): readonly ListedToolDescriptor[];
   has(name: string): boolean;
   call(name: string, args: Record<string, unknown>): Promise<ToolCallResult>;
 }
 
 export interface ToolRegistry {
   /** Registered tools first, then any legacy tools, de-duplicated by name. */
-  list(): readonly ToolDescriptor[];
+  list(): readonly ListedToolDescriptor[];
   get(name: string): AnyToolDefinition | undefined;
   has(name: string): boolean;
   names(): readonly string[];
@@ -57,7 +74,7 @@ export function createToolRegistry(
     legacy,
 
     list() {
-      const descriptors: ToolDescriptor[] = [];
+      const descriptors: ListedToolDescriptor[] = [];
       for (const tool of byName.values()) {
         descriptors.push(toToolDescriptor(tool));
       }
