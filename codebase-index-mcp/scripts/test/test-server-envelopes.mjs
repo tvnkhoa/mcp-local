@@ -81,8 +81,39 @@ try {
   // ── tools/list ───────────────────────────────────────────────────────────────
   const listed = (await client.listTools()).tools;
   assert(listed.length === 43, "publishes 43 tools", `got ${listed.length}`);
-  const annotated = listed.filter((t) => t.annotations !== undefined).map((t) => t.name);
-  assert(annotated.length === 0, "no tool carries annotations yet", annotated.join(", "));
+
+  // Annotations are the one wire-visible marker of migration progress: a legacy descriptor has
+  // none, and `defineTool` requires them, so a tool gains them exactly when S-32 moves it.
+  // Registry-vs-switch is otherwise invisible from out here, which is the point.
+  const MIGRATED = [
+    "find_entry_points",
+    "get_file_context",
+    "get_file_summary",
+    "get_folder_summary",
+    "health_check",
+    "list_repositories",
+    "orient",
+    "query_docs"
+  ];
+  const annotated = listed.filter((t) => t.annotations !== undefined).map((t) => t.name).sort();
+  assert(
+    annotated.join(",") === MIGRATED.join(","),
+    `exactly the ${MIGRATED.length} migrated tools carry annotations`,
+    `got: ${annotated.join(",")}`
+  );
+  assert(
+    listed
+      .filter((t) => MIGRATED.includes(t.name))
+      .every(
+        (t) =>
+          t.annotations.readOnlyHint === true &&
+          t.annotations.idempotentHint === true &&
+          t.annotations.destructiveHint === false &&
+          t.annotations.openWorldHint === false
+      ),
+    "every migrated read tool is annotated readOnly + idempotent + local",
+    JSON.stringify(listed.find((t) => t.name === "health_check")?.annotations)
+  );
 
   // ── Unknown tool: an isError RESULT, not a JSON-RPC error ────────────────────
   // The switch's `default:` throws McpError(MethodNotFound) and the entry point's
@@ -202,6 +233,21 @@ try {
     telemetry.some((line) => line.includes("\"toolName\":\"list_repositories\"")),
     "telemetry names the tool that ran",
     telemetry.slice(-3).join(" | ").slice(0, 400)
+  );
+
+  // The profile a tool actually answered at, which is only observable here.
+  //
+  // list_repositories declares `profile: responseProfileSchema.default("compact").optional()`.
+  // `.optional()` short-circuits an absent value BEFORE `.default()` runs, so `profile` reaches
+  // the handler as undefined and the handler falls back to "standard". S-32 migrated this tool
+  // as `rawResult` precisely to keep that: letting dispatch serialize would resolve the profile
+  // from the raw arguments and answer at "compact" instead — same tool, smaller response, and
+  // nothing in tools/list or a response replay would show which one was intended.
+  const listRepoLine = telemetry.find((line) => line.includes("\"toolName\":\"list_repositories\""));
+  assert(
+    (listRepoLine ?? "").includes("\"profile\":\"standard\""),
+    "list_repositories with no profile argument answers at standard, not compact",
+    String(listRepoLine)
   );
 } finally {
   await Promise.race([client.close().catch(() => {}), new Promise((r) => setTimeout(r, 3000))]);

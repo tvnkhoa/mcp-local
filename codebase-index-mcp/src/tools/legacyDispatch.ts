@@ -24,7 +24,6 @@ import type { HandlerContext } from "../handlers/handlerContext.js";
 import type { DescriptorLimits } from "./descriptors/limits.js";
 
 import {
-  handleHealthCheck,
   handleIndexRepository,
   handleWatchRepo,
   handleDetectChanges,
@@ -41,25 +40,18 @@ import {
   handleGetSymbolSource
 } from "../handlers/searchHandler.js";
 import { handleGetFeatureBundle } from "../handlers/bundleHandler.js";
-import { handleOrient } from "../handlers/orientHandler.js";
 import {
   handleGetDependencyGraph,
   handleGetCallChain,
   handleFindFieldAccesses,
   handleFindImpactFiles,
   handleGetChangeContext,
-  handleGetFileSummary,
-  handleListRepositories,
-  handleGetFileContext,
-  handleGetFolderSummary,
   handleRouteMap,
-  handleQueryGraph,
-  handleQueryDocs
+  handleQueryGraph
 } from "../handlers/impactHandler.js";
 import {
   handleDeadCodeScan,
   handleDetectCircularDependencies,
-  handleFindEntryPoints,
   handleFindImplementations,
   handleLinkTestsToSource
 } from "../handlers/analysisHandler.js";
@@ -91,27 +83,21 @@ export function createLegacyDispatcher(options: LegacyDispatchOptions): LegacyDi
   const { maxResultLimit, maxDepth, maxFilesPerRun } = options.limits;
 
   // Built once at startup, exactly as these were module-level constants before.
-  const healthCheckSchema = schemas.healthCheckSchema;
   const indexRepositorySchema = schemas.indexRepositorySchema(maxFilesPerRun);
   const getDependencyGraphSchema = schemas.getDependencyGraphSchema(maxDepth, maxResultLimit);
   const getCallChainSchema = schemas.getCallChainSchema(maxDepth, maxResultLimit);
-  const listRepositoriesSchema = schemas.listRepositoriesSchema;
   const searchSymbolsSchema = schemas.searchSymbolsSchema(maxResultLimit);
   const searchLiteralsSchema = schemas.searchLiteralsSchema(maxResultLimit);
   const searchRegexSchema = schemas.searchRegexSchema(maxResultLimit);
-  const getFileContextSchema = schemas.getFileContextSchema(maxResultLimit);
   const getSymbolDetailSchema = schemas.getSymbolDetailSchema(maxResultLimit);
   const findImpactFilesSchema = schemas.findImpactFilesSchema(maxResultLimit);
   const findFieldAccessesSchema = schemas.findFieldAccessesSchema(maxResultLimit);
   const getChangeContextSchema = schemas.getChangeContextSchema(maxDepth, maxResultLimit);
-  const getFileSummarySchema = schemas.getFileSummarySchema;
   const findSymbolAtLineSchema = schemas.findSymbolAtLineSchema;
-  const queryDocsSchema = schemas.queryDocsSchema(maxResultLimit);
   const getSymbolContextPackSchema = schemas.getSymbolContextPackSchema(maxDepth, maxResultLimit);
   const detectChangesSchema = schemas.detectChangesSchema(maxResultLimit);
   const changeImpactSchema = schemas.changeImpactSchema(maxResultLimit);
   const getFeatureBundleSchema = schemas.getFeatureBundleSchema;
-  const orientSchema = schemas.orientSchema;
   const deadCodeScanSchema = schemas.deadCodeScanSchema(maxResultLimit);
   const detectCircularDependenciesSchema = schemas.detectCircularDependenciesSchema(maxDepth, maxResultLimit);
   const crossRepoImpactSchema = schemas.crossRepoImpactSchema(maxResultLimit);
@@ -119,8 +105,6 @@ export function createLegacyDispatcher(options: LegacyDispatchOptions): LegacyDi
   const symbolBlameSchema = schemas.symbolBlameSchema;
   const getSymbolSourceSchema = schemas.getSymbolSourceSchema;
   const linkTestsToSourceSchema = schemas.linkTestsToSourceSchema(maxResultLimit);
-  const getFolderSummarySchema = schemas.getFolderSummarySchema(maxResultLimit);
-  const findEntryPointsSchema = schemas.findEntryPointsSchema(maxResultLimit);
   const findImplementationsSchema = schemas.findImplementationsSchema(maxResultLimit);
   const watchRepoSchema = schemas.watchRepoSchema;
   const renameAssistSchema = schemas.renameAssistSchema(maxResultLimit);
@@ -139,10 +123,6 @@ export function createLegacyDispatcher(options: LegacyDispatchOptions): LegacyDi
     const ctx = options.buildContext();
 
     switch (name) {
-      case "health_check": {
-        const hArgs = healthCheckSchema.parse(args);
-        return handleHealthCheck(hArgs, ctx);
-      }
       case "index_repository": {
         const hArgs = indexRepositorySchema.parse(args);
         return handleIndexRepository(hArgs, ctx);
@@ -167,14 +147,6 @@ export function createLegacyDispatcher(options: LegacyDispatchOptions): LegacyDi
         const hArgs = getChangeContextSchema.parse(args);
         return handleGetChangeContext(hArgs, ctx);
       }
-      case "get_file_summary": {
-        const hArgs = getFileSummarySchema.parse(args);
-        return handleGetFileSummary(hArgs, ctx);
-      }
-      case "list_repositories": {
-        const hArgs = listRepositoriesSchema.parse(args);
-        return handleListRepositories(hArgs, ctx);
-      }
       case "search_symbols": {
         const hArgs = searchSymbolsSchema.parse(args);
         return handleSearchSymbols(hArgs, ctx);
@@ -187,17 +159,9 @@ export function createLegacyDispatcher(options: LegacyDispatchOptions): LegacyDi
         const hArgs = searchRegexSchema.parse(args);
         return handleSearchRegex(hArgs, ctx);
       }
-      case "get_file_context": {
-        const hArgs = getFileContextSchema.parse(args);
-        return handleGetFileContext(hArgs, ctx);
-      }
       case "get_symbol_detail": {
         const hArgs = getSymbolDetailSchema.parse(args);
         return handleGetSymbolDetail(hArgs, ctx);
-      }
-      case "query_docs": {
-        const hArgs = queryDocsSchema.parse(args);
-        return handleQueryDocs(hArgs, ctx);
       }
       case "watch_repo": {
         const hArgs = watchRepoSchema.parse(args);
@@ -250,18 +214,6 @@ export function createLegacyDispatcher(options: LegacyDispatchOptions): LegacyDi
       case "get_feature_bundle": {
         const hArgs = getFeatureBundleSchema.parse(args);
         return handleGetFeatureBundle(hArgs, ctx);
-      }
-      case "orient": {
-        const hArgs = orientSchema.parse(args);
-        return handleOrient(hArgs, ctx);
-      }
-      case "get_folder_summary": {
-        const hArgs = getFolderSummarySchema.parse(args);
-        return handleGetFolderSummary(hArgs, ctx);
-      }
-      case "find_entry_points": {
-        const hArgs = findEntryPointsSchema.parse(args);
-        return handleFindEntryPoints(hArgs, ctx);
       }
       case "find_implementations": {
         const hArgs = findImplementationsSchema.parse(args);

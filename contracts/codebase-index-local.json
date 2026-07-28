@@ -301,6 +301,12 @@
       "name": "detect_circular_dependencies"
     },
     {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
       "description": "Find symbols with 0 incoming CALLS edges — these are publicly callable entry points not called by other code in the repo. Use to discover public API surface, HTTP endpoints, or top-level service methods. Filter by kind='method' for controllers, kind='class' for services, kind='route_handler' to surface C# ASP.NET route handlers from the routes table (fast-path, does not require call-graph analysis).",
       "inputSchema": {
         "additionalProperties": false,
@@ -729,6 +735,12 @@
       "name": "get_feature_bundle"
     },
     {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
       "description": "Get symbols and graph edges for a file (provide filePath) or multiple files (provide filePaths array). One of filePath or filePaths is required. Use profile=nano for ultra-compact planning output, compact for token-saving, standard for balanced, verbose for debug-rich.",
       "inputSchema": {
         "additionalProperties": false,
@@ -773,6 +785,12 @@
       "name": "get_file_context"
     },
     {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
       "description": "File overview: exported symbols, outgoing imports, and which files import it. Use before get_file_context — lighter payload. profile='nano' for symbol count + top-5, 'compact' (default) for full summary.",
       "inputSchema": {
         "additionalProperties": false,
@@ -802,6 +820,12 @@
       "name": "get_file_summary"
     },
     {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
       "description": "List all files under a folder path with per-file stats (language, symbol count, caller count). Use at session start to orient — cheaper than get_file_context on individual files. Prefer this over reading file contents when you just need to find the right files. Response includes indexMeta with branch and commitSha from the last index run — verify these match your current branch before trusting file listings. After a branch switch, run index_repository(mode='full') to purge stale entries.",
       "inputSchema": {
         "additionalProperties": false,
@@ -1043,6 +1067,12 @@
       "name": "get_value_contract_impact"
     },
     {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
       "description": "Check server availability plus codebase readiness (staleness, working tree, watch state) with action hints for re-index/watch.",
       "inputSchema": {
         "additionalProperties": false,
@@ -1145,6 +1175,12 @@
       "name": "link_tests_to_source"
     },
     {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
       "description": "List all indexed repositories. Use profile='nano' for a brief count+status list, omit for full metadata.",
       "inputSchema": {
         "additionalProperties": false,
@@ -1164,6 +1200,12 @@
       "name": "list_repositories"
     },
     {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
       "description": "Task router: given a free-text intent (e.g. 'implement a feature like ConversationNote', 'rename X', 'what breaks if I change Y', 'which tests to run') returns the recommended MCP tool(s) + caveats, and resolves an optional seed to seedSymbols. Deterministic keyword classification (no LLM). Use first when unsure which tool to start with.",
       "inputSchema": {
         "additionalProperties": false,
@@ -1195,6 +1237,12 @@
       "name": "orient"
     },
     {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
       "description": "Unified docs tool. mode=search: full-text search across indexed documentation sections (requires query); mode=stale: find docs that mention changed symbols (requires symbolIds); mode=coverage: show which exported symbols are documented (requires filePath). Requires docs lane enabled.",
       "inputSchema": {
         "additionalProperties": false,

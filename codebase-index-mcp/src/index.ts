@@ -42,6 +42,7 @@ import { assertNoLlmRuntimePolicy, assertRefactorApprovalPolicy } from "./errorH
 import type { HandlerContext } from "./handlers/handlerContext.js";
 import { createCodebaseIndexServer } from "./server.js";
 import { createLegacyDispatcher } from "./tools/legacyDispatch.js";
+import { buildTools } from "./tools/index.js";
 
 const dbPath = process.env.CODEBASE_INDEX_DB_PATH ?? "./codebase-index.db";
 const allowedRoots = parseAllowedRoots(process.env.CODEBASE_INDEX_ALLOWED_ROOTS);
@@ -173,6 +174,7 @@ const handle = createCodebaseIndexServer({
   version: "0.1.0",
   limits,
   store,
+  tools: buildTools({ limits, buildContext: buildHandlerContext }),
   dispatchLegacyTool: createLegacyDispatcher({ limits, buildContext: buildHandlerContext }),
   buildHandlerContext,
   toolContextStorage,

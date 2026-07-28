@@ -1,10 +1,9 @@
 /**
  * Server bootstrap — this server's contract, expressed as hooks into `@mcp/sdk` (S-31).
  *
- * The registry starts empty and a `LegacyBridge` sits behind it, so every tool is still
- * served by the pre-SDK `switch` (see `tools/legacyDispatch.ts`) and behaviour is provably
- * unchanged. S-32 registers real tool definitions a batch at a time; each one it registers
- * stops falling through, because the registry wins over the bridge by name.
+ * A `LegacyBridge` sits behind the registry, so a tool is served by whichever side owns it:
+ * the registry if S-32 has migrated it, the pre-SDK `switch` (`tools/legacyDispatch.ts`)
+ * otherwise. The registry wins by name, so a tool moves the instant it is registered.
  *
  * What this file exists to preserve — none of it visible in a `tools/list` snapshot:
  *
@@ -27,7 +26,14 @@
 import type { AsyncLocalStorage } from "node:async_hooks";
 
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
-import type { CallWrapper, LegacyBridge, McpServerHandle, ResourceProvider, ToolCallResult } from "@mcp/sdk";
+import type {
+  AnyToolDefinition,
+  CallWrapper,
+  LegacyBridge,
+  McpServerHandle,
+  ResourceProvider,
+  ToolCallResult
+} from "@mcp/sdk";
 import { createMcpServer } from "@mcp/sdk";
 
 import { mapError } from "./errorHandler.js";
@@ -59,6 +65,11 @@ export interface CodebaseIndexServerOptions {
   readonly version: string;
   readonly limits: DescriptorLimits;
   readonly store: GraphStore;
+  /**
+   * Tools migrated onto the registry (S-32). These win over their legacy twin by name, so a
+   * tool moves the moment it appears here and the `switch` branch can then be deleted.
+   */
+  readonly tools: readonly AnyToolDefinition[];
   readonly dispatchLegacyTool: LegacyDispatch;
   readonly buildHandlerContext: () => HandlerContext;
   readonly toolContextStorage: AsyncLocalStorage<ToolRequestContext>;
@@ -193,14 +204,15 @@ export function createCodebaseIndexServer(options: CodebaseIndexServerOptions): 
   return createMcpServer({
     name: "codebase-index-mcp",
     version: options.version,
-    // Empty until S-32. Every name falls through to `legacy` above.
-    tools: [],
+    // Batch by batch through S-32. Whatever is not here falls through to `legacy` below.
+    tools: options.tools,
     legacy,
     resources,
     formatError: (error) => asWireResult(renderToolError(error)),
-    // Unreachable while the registry is empty — the legacy handlers build their own wire
-    // result. Wired now because the first tool S-32 migrates would otherwise lose the
-    // telemetry emit without any test or snapshot being able to show it.
+    // Still not exercised: every tool migrated so far is `rawResult`, so its handler builds
+    // the wire result (and emits the telemetry line) itself. This is the seam for the first
+    // handler converted to return a plain payload, which would otherwise lose that emit with
+    // no test or snapshot able to show it.
     renderResult: (payload, profile) => asWireResult(options.renderResult(payload, profile as ResponseProfile)),
     wrapCall
   });
