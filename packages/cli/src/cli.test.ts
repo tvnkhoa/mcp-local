@@ -3,7 +3,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 
-import { runConventionGuard } from "./guards/conventionGuard.js";
+import { EXEMPTABLE_RULES, parseExemptions, runConventionGuard } from "./guards/conventionGuard.js";
 import { runDependencyGuard } from "./guards/dependencyGuard.js";
 import { TIER_RULES, isNodeBuiltin, ruleFor } from "./guards/rules.js";
 import { countBySeverity } from "./guards/types.js";
@@ -109,6 +109,88 @@ test("convention guard: the platform foundation has zero errors", () => {
     0,
     `expected no convention errors, got:\n${renderReport(report)}`
   );
+});
+
+// --- convention exemptions ------------------------------------------------
+
+test("exemptions: parsed from a line comment and from a JSDoc continuation", () => {
+  // Both fixtures are single-line string literals rather than a multi-line template, so that
+  // no line of THIS file begins with a comment marker followed by the pragma. Written as a
+  // template, the JSDoc form below is a live exemption of cli.test.ts — which is how the
+  // stale-exemption warning first fired.
+  const lineCommentForm = "// @convention-exempt size/hard-cap: it is a façade";
+  const jsdocForm = " * @convention-exempt size/soft-cap: generated";
+  const found = parseExemptions([lineCommentForm, jsdocForm].join("\n"));
+  assert.deepEqual(
+    found.map((e) => [e.rule, e.reason, e.line]),
+    [
+      ["size/hard-cap", "it is a façade", 1],
+      ["size/soft-cap", "generated", 2]
+    ]
+  );
+});
+
+test("exemptions: a pragma quoted inside a string is not an exemption", () => {
+  // This is not hypothetical — the guard's own hint text quotes the syntax, and on the first
+  // run it exempted conventionGuard.ts from its own hard cap.
+  const source = `const hint = "Write: // @convention-exempt size/hard-cap: reason";
+const x = 1;`;
+  assert.deepEqual(parseExemptions(source), []);
+});
+
+test("exemptions: a reason-less pragma is parsed, so it can be reported rather than ignored", () => {
+  const found = parseExemptions("// @convention-exempt size/hard-cap");
+  assert.equal(found.length, 1);
+  assert.equal(found[0]?.reason, "");
+});
+
+test("exemptions: only the size caps are exemptable", () => {
+  // A line count is a proxy for complexity and can measure the wrong thing. The other rules
+  // catch actual defects — console.log writes to the MCP transport — and must not be waivable.
+  assert.deepEqual([...EXEMPTABLE_RULES].sort(), ["size/hard-cap", "size/soft-cap"]);
+  assert.equal(EXEMPTABLE_RULES.includes("logging/console-log"), false);
+  assert.equal(EXEMPTABLE_RULES.includes("package/required-file"), false);
+});
+
+test("convention guard: an accepted exemption is reported as info, not silence", () => {
+  const report = runConventionGuard({ workspaceRoot, extraDirs: ["codebase-index-mcp/src"] });
+  const exempted = report.findings.filter((f) => f.rule.startsWith("exemption/size/"));
+  assert.equal(exempted.length > 0, true, "expected at least the graphStore.ts façade exemption");
+  for (const finding of exempted) {
+    assert.equal(finding.severity, "info", `${finding.file} exemption must not be blocking`);
+    // The reason travels with the finding, so a reader never has to open the file to see it.
+    assert.equal(finding.message.includes(" — "), true, `${finding.file} exemption lost its reason`);
+    assert.equal(typeof finding.line, "number");
+  }
+  // And the exempted file no longer reports the underlying violation.
+  const stillFlagged = report.findings.filter(
+    (f) => f.rule === "size/hard-cap" && exempted.some((e) => e.file === f.file)
+  );
+  assert.deepEqual(stillFlagged, []);
+});
+
+test("convention guard: no stale or malformed exemptions anywhere in the workspace", () => {
+  const report = runConventionGuard({ workspaceRoot, extraDirs: ["codebase-index-mcp/src"] });
+  const bad = report.findings.filter(
+    (f) => f.rule === "exemption/stale" || f.rule === "exemption/no-reason" || f.rule === "exemption/not-exemptable"
+  );
+  assert.deepEqual(bad, [], `unexpected exemption findings:
+${renderReport(report)}`);
+});
+
+test("report: info findings never block, even under --strict", () => {
+  // The whole point of the severity: an accepted exemption must survive S-41 flipping guards
+  // to enforce. If info counted as a warning, --strict would fail on it.
+  const report = {
+    guard: "demo",
+    filesScanned: 1,
+    findings: [{ rule: "exemption/size/hard-cap", severity: "info" as const, file: "a.ts", message: "m — why" }]
+  };
+  const { errors, warnings, infos } = countBySeverity(report.findings);
+  assert.deepEqual({ errors, warnings, infos }, { errors: 0, warnings: 0, infos: 1 });
+  assert.equal(exitCodeFor([report]), 0);
+  assert.equal(exitCodeFor([report], { strict: true }), 0);
+  assert.equal(renderSummary([report]).includes("1 accepted exemption(s)"), true);
 });
 
 // --- reporting ------------------------------------------------------------

@@ -16,13 +16,13 @@ export interface RenderOptions {
 
 function renderFinding(finding: GuardFinding): string {
   const location = finding.line === undefined ? finding.file : `${finding.file}:${finding.line}`;
-  const marker = finding.severity === "error" ? "ERROR" : "warn ";
+  const marker = finding.severity === "error" ? "ERROR" : finding.severity === "warning" ? "warn " : "info ";
   const hint = finding.hint === undefined ? "" : `\n        hint: ${finding.hint}`;
   return `  ${marker}  ${location}\n        [${finding.rule}] ${finding.message}${hint}`;
 }
 
 export function renderReport(report: GuardReport, options: RenderOptions = {}): string {
-  const { errors, warnings } = countBySeverity(report.findings);
+  const { errors, warnings, infos } = countBySeverity(report.findings);
   const max = options.maxFindings ?? 100;
   const lines: string[] = [];
 
@@ -40,7 +40,8 @@ export function renderReport(report: GuardReport, options: RenderOptions = {}): 
   if (report.findings.length > shown.length) {
     lines.push(`  … and ${report.findings.length - shown.length} more`);
   }
-  lines.push(`  ${errors} error(s), ${warnings} warning(s)`);
+  const infoNote = infos === 0 ? "" : `, ${infos} accepted exemption(s)`;
+  lines.push(`  ${errors} error(s), ${warnings} warning(s)${infoNote}`);
 
   return lines.join("\n");
 }
@@ -62,14 +63,16 @@ export function exitCodeFor(reports: readonly GuardReport[], options: RenderOpti
 export function renderSummary(reports: readonly GuardReport[]): string {
   const totals = reports.reduce(
     (accumulator, report) => {
-      const { errors, warnings } = countBySeverity(report.findings);
+      const { errors, warnings, infos } = countBySeverity(report.findings);
       return {
         errors: accumulator.errors + errors,
         warnings: accumulator.warnings + warnings,
+        infos: accumulator.infos + infos,
         files: accumulator.files + report.filesScanned
       };
     },
-    { errors: 0, warnings: 0, files: 0 }
+    { errors: 0, warnings: 0, infos: 0, files: 0 }
   );
-  return `guards: ${totals.errors} error(s), ${totals.warnings} warning(s) across ${totals.files} file(s)`;
+  const infoNote = totals.infos === 0 ? "" : `, ${totals.infos} accepted exemption(s)`;
+  return `guards: ${totals.errors} error(s), ${totals.warnings} warning(s)${infoNote} across ${totals.files} file(s)`;
 }

@@ -1,4 +1,24 @@
-﻿import Database from "better-sqlite3";
+﻿/**
+ * `GraphStore` — the single entry point every caller uses to reach the graph.
+ *
+ * The SQL lives in the modules under `store/` and in the lane modules (`impactAnalyzer`,
+ * `symbolSearch`, `docsStore`, `refactorStore`, `crossRepoStore`, `edgeResolver`,
+ * `vectorStore`, `literalsStore`, `regexSearch`). What is left here is a façade: one method
+ * per operation, forwarding to the module that owns it, so that 158 call sites across the
+ * server never need to know which module moved where.
+ *
+ * S-30 brought this from 1,928 lines to ~810 by extracting four cohesive modules. It does not
+ * go materially lower while it stays a façade — see the exemption below.
+ *
+ * @convention-exempt size/hard-cap: A delegation façade's length is its method count (~100
+ * forwarding methods, 4 lines each with a blank), not its complexity. Splitting further does
+ * not remove those lines, it only decides which file they sit in, and the alternatives are
+ * worse: sub-facades (store.docs.x) change 158 call sites for no behavioural gain, and mixins
+ * hide the class shape. Cohesion is enforced here by every method being a one-line forward —
+ * if a body grows past that, it belongs in a store module, and that is the rule to police.
+ */
+
+import Database from "better-sqlite3";
 import { createRequire } from "node:module";
 import { indexWarn } from "./indexProgress.js";
 

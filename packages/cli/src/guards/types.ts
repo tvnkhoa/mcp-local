@@ -6,7 +6,12 @@
  * blocking once that number is zero.
  */
 
-export type FindingSeverity = "error" | "warning";
+/**
+ * `error` blocks always. `warning` blocks under `--strict`. `info` never blocks — it exists so
+ * a guard can report something it deliberately is not failing on, such as an accepted
+ * exemption, without that report becoming a blocker the moment `--strict` flips (S-41).
+ */
+export type FindingSeverity = "error" | "warning" | "info";
 
 export interface GuardFinding {
   readonly rule: string;
@@ -27,15 +32,21 @@ export interface GuardReport {
 export function countBySeverity(findings: readonly GuardFinding[]): {
   readonly errors: number;
   readonly warnings: number;
+  readonly infos: number;
 } {
   let errors = 0;
   let warnings = 0;
+  let infos = 0;
   for (const finding of findings) {
+    // Explicit per-severity branches, not `else`. An `else` here would silently fold any
+    // future severity into `warnings`, and warnings block under --strict.
     if (finding.severity === "error") {
       errors += 1;
-    } else {
+    } else if (finding.severity === "warning") {
       warnings += 1;
+    } else {
+      infos += 1;
     }
   }
-  return { errors, warnings };
+  return { errors, warnings, infos };
 }

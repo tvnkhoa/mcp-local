@@ -15,4 +15,4 @@ export type { DependencyGuardOptions } from "./dependencyGuard.js";
 export { runDependencyGuard } from "./dependencyGuard.js";
 
 export type { ConventionGuardOptions } from "./conventionGuard.js";
-export { FILE_LOC_HARD_CAP, FILE_LOC_SOFT_CAP, runConventionGuard } from "./conventionGuard.js";
+export { EXEMPTABLE_RULES, FILE_LOC_HARD_CAP, FILE_LOC_SOFT_CAP, parseExemptions, runConventionGuard } from "./conventionGuard.js";

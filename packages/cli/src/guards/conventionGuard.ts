@@ -16,6 +16,56 @@ import { listSourceFiles, readWorkspacePackages } from "../scan.js";
 export const FILE_LOC_SOFT_CAP = 400;
 export const FILE_LOC_HARD_CAP = 600;
 
+/**
+ * Rules a file may exempt itself from, with a stated reason:
+ *
+ *     // @convention-exempt size/hard-cap: <why this file is allowed to be long>
+ *
+ * Only the size caps are exemptable, and that restriction is the point. A line count is a
+ * proxy for complexity, and a proxy sometimes measures the wrong thing — a pure delegation
+ * façade is long without being complex. The other rules are not proxies: `logging/console-log`
+ * catches a write to the MCP transport itself, and no reason makes that acceptable. Attempting
+ * to exempt a non-exemptable rule is an error, not a silent no-op.
+ */
+export const EXEMPTABLE_RULES: readonly string[] = ["size/hard-cap", "size/soft-cap"];
+
+/**
+ * Anchored to the start of a line, and accepting either a `//` comment or a `*` JSDoc
+ * continuation. Both details are load-bearing:
+ *
+ * - Without the anchor, this guard's own hint strings — which quote the pragma syntax — parse
+ *   as live exemptions of `conventionGuard.ts`. It did, on the first run.
+ * - Without `*`, a pragma written inside the file-header JSDoc where it belongs is silently
+ *   ignored, which is the one failure mode this whole feature exists to prevent.
+ *
+ * The colon stays optional so a reason-less pragma is still *parsed* — and then reported as an
+ * error, rather than vanishing.
+ */
+const EXEMPTION_PATTERN = /^[ \t]*(?:\/\/|\*)[ \t]*@convention-exempt[ \t]+([\w/-]+)[ \t]*:?[ \t]*(.*)$/gm;
+
+export interface Exemption {
+  readonly rule: string;
+  readonly reason: string;
+  readonly line: number;
+}
+
+/** Parse `@convention-exempt` pragmas out of a source file. */
+export function parseExemptions(content: string): Exemption[] {
+  const found: Exemption[] = [];
+  EXEMPTION_PATTERN.lastIndex = 0;
+  let match = EXEMPTION_PATTERN.exec(content);
+  while (match !== null) {
+    const rule = match[1] ?? "";
+    found.push({
+      rule,
+      reason: (match[2] ?? "").trim(),
+      line: content.slice(0, match.index).split(/\r?\n/).length
+    });
+    match = EXEMPTION_PATTERN.exec(content);
+  }
+  return found;
+}
+
 const REQUIRED_PACKAGE_FILES: readonly string[] = ["package.json", "tsconfig.json", "README.md", "src/index.ts"];
 const REQUIRED_SCRIPTS: readonly string[] = ["build", "typecheck", "test"];
 
@@ -95,8 +145,53 @@ export function runConventionGuard(options: ConventionGuardOptions): GuardReport
     for (const file of listSourceFiles(directory.path, options.workspaceRoot)) {
       filesScanned += 1;
 
-      if (file.lineCount > hardCap) {
+      const exemptions = parseExemptions(file.content);
+      const claimed = new Set<string>();
+
+      for (const exemption of exemptions) {
+        if (!EXEMPTABLE_RULES.includes(exemption.rule)) {
+          findings.push({
+            rule: "exemption/not-exemptable",
+            severity: "error",
+            file: file.relativePath,
+            line: exemption.line,
+            message: `"${exemption.rule}" cannot be exempted.`,
+            hint: `Exemptable rules: ${EXEMPTABLE_RULES.join(", ")}. The others catch defects, not proxies for them.`
+          });
+          continue;
+        }
+        if (exemption.reason === "") {
+          findings.push({
+            rule: "exemption/no-reason",
+            severity: "error",
+            file: file.relativePath,
+            line: exemption.line,
+            message: `Exemption from "${exemption.rule}" states no reason, so it does not apply.`,
+            hint: "Write: // @convention-exempt size/hard-cap: <why this file is the exception>"
+          });
+          continue;
+        }
+        claimed.add(exemption.rule);
+      }
+
+      /** Suppress an exempted finding, reporting the exemption in its place. */
+      const record = (finding: GuardFinding): void => {
+        const exemption = exemptions.find((e) => e.rule === finding.rule && claimed.has(e.rule));
+        if (exemption === undefined) {
+          findings.push(finding);
+          return;
+        }
         findings.push({
+          rule: `exemption/${finding.rule}`,
+          severity: "info",
+          file: finding.file,
+          line: exemption.line,
+          message: `Exempted: ${finding.message} — ${exemption.reason}`
+        });
+      };
+
+      if (file.lineCount > hardCap) {
+        record({
           rule: "size/hard-cap",
           severity: severityOf("error"),
           file: file.relativePath,
@@ -106,12 +201,30 @@ export function runConventionGuard(options: ConventionGuardOptions): GuardReport
         // Test files are exempt from the soft cap: length there reflects case
         // count, not production complexity. The hard cap above still applies.
       } else if (!file.isTest && file.lineCount > softCap) {
-        findings.push({
+        record({
           rule: "size/soft-cap",
           severity: "warning",
           file: file.relativePath,
           message: `${file.lineCount} lines exceeds the soft cap of ${softCap}.`
         });
+      }
+
+      // An exemption that suppresses nothing has outlived its reason. Report it, so the pragma
+      // gets deleted when the file is finally split, instead of sitting there implying a
+      // constraint that no longer binds.
+      for (const rule of claimed) {
+        const applied = findings.some(
+          (f) => f.file === file.relativePath && f.rule === `exemption/${rule}` && f.severity === "info"
+        );
+        if (!applied) {
+          findings.push({
+            rule: "exemption/stale",
+            severity: "warning",
+            file: file.relativePath,
+            message: `Exemption from "${rule}" is unused — the file no longer violates it.`,
+            hint: "Delete the pragma."
+          });
+        }
       }
 
       if (!file.isTest && /^\s*export\s+default\b/m.test(file.content)) {

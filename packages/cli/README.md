@@ -59,6 +59,37 @@ exports, and no `console.log` — which would corrupt the MCP transport.
 Test files are exempt from the **soft** cap: length there tracks case count, not
 production complexity. The hard cap still applies.
 
+### Exempting a file from a size cap
+
+A line count is a proxy for complexity, and a proxy sometimes measures the wrong
+thing — a pure delegation façade is long without being complex. A file can waive
+a size cap by stating why, in a `//` comment or a `*` JSDoc line:
+
+```ts
+// @convention-exempt size/hard-cap: <why this file is the exception>
+```
+
+The exemption is **reported, not silent**: the finding comes back as `info` with
+the reason attached, so `guard convention` output shows what was waived and on
+what grounds. `info` never affects the exit code, including under `--strict` —
+that is the point of the severity, so an accepted exemption survives S-41.
+
+Three things are deliberately not permitted:
+
+- **Only `size/hard-cap` and `size/soft-cap` are exemptable.** The other rules
+  catch defects rather than proxies for them: `logging/console-log` catches a
+  write to the MCP transport itself, and no reason makes that acceptable.
+  Exempting a non-exemptable rule is an **error**.
+- **A pragma with no reason does not apply**, and is reported as an error. An
+  unexplained waiver is indistinguishable from an accident.
+- **An exemption that suppresses nothing is a warning** (`exemption/stale`), so
+  the pragma gets deleted when the file is finally split instead of lingering and
+  implying a constraint that no longer binds.
+
+The pattern is anchored to the start of a line, which is what keeps quoted
+examples — including the ones in this guard's own hint strings and tests — from
+registering as live exemptions. Both did, on the first run.
+
 ## Implementation note
 
 The import scanner is regex-based and dependency-free. A parser would be more
