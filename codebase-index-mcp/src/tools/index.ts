@@ -1,12 +1,12 @@
 /**
  * codebase-index-mcp's tool table (S-32).
  *
- * S-32 grew this one batch at a time while `descriptors/` shrank by the same batch. The
- * descriptor barrel is now gone entirely; `legacyDispatch.ts` is down to the unknown-tool
- * rejection, which S-33 has to decide about explicitly rather than delete.
+ * S-32 grew this one batch at a time while `descriptors/` shrank by the same batch. Both the
+ * descriptor barrel and `legacyDispatch.ts` are gone — S-33 removed the last of it.
  *
  * All 43 tools are here: read/metadata (8), search (9), graph/impact (12),
- * indexing/watch (4), refactor (10). Nothing is left on the switch.
+ * indexing/watch (4), refactor (10). This list IS the server's tool surface: a name absent
+ * from it is an unknown tool, answered by dispatch's not-found path.
  */
 
 import type { AnyToolDefinition } from "@mcp/sdk";

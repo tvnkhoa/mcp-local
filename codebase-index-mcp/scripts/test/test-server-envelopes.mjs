@@ -1,15 +1,17 @@
 /**
- * The entry point's own contract — the parts no `tools/list` snapshot can see (S-31).
+ * The entry point's own contract — the parts no `tools/list` snapshot can see (S-31…S-33).
  *
- * S-31 moves this server onto `createMcpServer` with a legacy bridge in front of the
- * 43-branch switch. Everything the switch itself does is covered by the other suites;
- * what is NOT covered anywhere is the wiring *around* it, and every one of those pieces
- * has a plausible SDK default that differs:
+ * S-31 moved this server onto `createMcpServer` with a legacy bridge in front of the
+ * 43-branch switch; S-32 migrated all 43 tools; S-33 removed the bridge. Everything the
+ * tools themselves do is covered by the other suites; what is NOT covered anywhere is the
+ * wiring *around* them, and every one of those pieces has a plausible SDK default that
+ * differs:
  *
  *   - the error envelope `{ code, message, requestId }`, pretty-printed regardless of
  *     profile (the platform default is a different shape, minified)
- *   - the unknown-tool rejection, which is an `isError` RESULT carrying `MCP_ERROR`, not
- *     a JSON-RPC error (the platform default is a `not_found` PlatformError)
+ *   - the unknown-tool rejection, which is an `isError` RESULT rather than a JSON-RPC
+ *     error, and which S-33 deliberately moved from `MCP_ERROR` to `not_found` — see the
+ *     DELTA note below
  *   - `resources/read` on an unroutable URI, which IS a JSON-RPC error, with this
  *     server's message (the platform default substitutes its own)
  *   - `resources/list` with a cursor, which returns nothing
@@ -140,21 +142,48 @@ try {
   );
 
   // ── Unknown tool: an isError RESULT, not a JSON-RPC error ────────────────────
-  // The switch's `default:` throws McpError(MethodNotFound) and the entry point's
-  // catch turns it into a result. A client that only handles JSON-RPC errors would
-  // see a *successful* call with isError set, and that is the established contract.
+  // Unchanged by S-33, and the part that actually matters to a client: a name this
+  // server does not serve comes back as a *successful* call with isError set, so a
+  // client that only handles JSON-RPC errors still sees it.
   const unknown = await client.callTool({ name: "no_such_tool_at_all", arguments: {} });
   assert(unknown.isError === true, "unknown tool → isError result");
   const unknownBody = js(unknown);
-  assert(unknownBody?.code === "MCP_ERROR", "unknown tool → code MCP_ERROR", JSON.stringify(unknownBody));
   assert(
     typeof unknownBody?.message === "string" && unknownBody.message.includes("no_such_tool_at_all"),
     "unknown tool → message names the tool",
     JSON.stringify(unknownBody)
   );
   assert(
-    typeof unknownBody?.message === "string" && unknownBody.message.includes("-32601"),
-    "unknown tool → message carries the MethodNotFound code",
+    Object.keys(unknownBody ?? {}).sort().join(",") === "code,message,requestId",
+    "unknown tool → still this server's { code, message, requestId } envelope",
+    Object.keys(unknownBody ?? {}).join(",")
+  );
+
+  // DELTA (S-33): an unknown tool now reports not_found instead of MCP_ERROR.
+  //
+  // Before: { code: "MCP_ERROR", message: "<tool>: MCP error -32601: Unknown tool: <tool>" }
+  //  After: { code: "not_found",  message: "<tool>: Unknown tool: <tool>." }
+  //
+  // The pre-SDK switch's `default:` threw McpError(MethodNotFound); dispatch now raises a
+  // PlatformError instead. `not_found` describes the condition, and the old string leaked a
+  // JSON-RPC error number into a tool payload. The same delta bitbucket-mcp, observe-mcp and
+  // postgres-mcp each accepted in their own migration, so all four servers now agree.
+  //
+  // Lowercase on purpose: `not_found` is the platform's published vocabulary, not a new
+  // spelling invented here.
+  assert(unknownBody?.code === "not_found", "unknown tool → code not_found", JSON.stringify(unknownBody));
+  // The trap this pins: `formatError` intercepts the PlatformError before the platform can
+  // render it, so deleting the legacy bridge WITHOUT teaching mapError about PlatformError
+  // yields INTERNAL_ERROR — neither the old code nor the intended one, and it relabels a
+  // caller's mistake as a defect in this server.
+  assert(
+    unknownBody?.code !== "INTERNAL_ERROR",
+    "unknown tool must not degrade to INTERNAL_ERROR (mapError needs its isPlatformError branch)",
+    JSON.stringify(unknownBody)
+  );
+  assert(
+    typeof unknownBody?.message === "string" && !unknownBody.message.includes("-32601"),
+    "unknown tool → the JSON-RPC error number no longer leaks into the payload",
     JSON.stringify(unknownBody)
   );
 

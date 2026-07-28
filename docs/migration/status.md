@@ -5,9 +5,10 @@ Phase H's row updated after the S-28 SDK work landed. Every
 row cites the artifact that proves it. Where no artifact was found, the row says so
 rather than guessing.
 
-**29 of 44 done · 1 partial · 1 skipped by decision · 13 open.** Phase H is nearly done:
-S-31 and S-32 both landed 2026-07-28. All 43 codebase-index tools are on the SDK registry and
-the `switch` is down to its unknown-tool branch; only S-33 is left.
+**30 of 44 done · 1 partial · 1 skipped by decision · 12 open.** **Phase H is complete** —
+S-31, S-32 and S-33 all landed 2026-07-28. All 43 codebase-index tools are on the SDK registry,
+the legacy bridge is gone, and **all four servers now run on `@mcp/sdk`**. S-33 carried one
+intended contract change (unknown tool → `not_found`); see [the S-33 section](#s-33--the-decision-and-the-one-contract-change).
 
 S-31 also found `benchmark:plan:check` — a hard CI step — **already failing on `main`**, for
 two reasons that had nothing to do with the migration. Both fixed; see
@@ -122,13 +123,13 @@ S-41 — flipping now would turn 34 warnings into 34 build failures.
 | S-29 Break the `graphStore`→`regexSearch` cycle | ✅ | `RegexSearchStore` interface in `src/regexSearch.ts`; static scan reports **0 cycles** across 66 modules |
 | S-30 Split `graphStore.ts` | ✅ | `find_impact_files` fix + split (1,928 → 831 across 4 modules) + a declared, reported guard exemption for the façade — see below |
 
-## Phase H — codebase-index SDK Migration · 2/3
+## Phase H — codebase-index SDK Migration · 3/3 ✅
 
 | Step | Status | Notes |
 |---|---|---|
 | S-31 Install the coexistence adapter | ✅ | `a441500` (descriptor table) + `a281358` (`createMcpServer` + bridge). Contract byte-identical; **one behaviour change found later, see the S-32 note** |
-| S-32 Migrate 43 tools in 5 batches | ✅ | `5b8faeb` · `37c2c3e` · `ed145f1` · `ef20f67` + this commit. All 43 on the registry; `switch` reduced to the unknown-tool branch |
-| S-33 Delete the legacy dispatch switch | ❌ | the switch is already empty — what is left is a **decision**, see below |
+| S-32 Migrate 43 tools in 5 batches | ✅ | `5b8faeb` · `37c2c3e` · `ed145f1` · `ef20f67` · `b3454e1`. All 43 on the registry; `switch` reduced to the unknown-tool branch |
+| S-33 Delete the legacy dispatch switch | ✅ | bridge and `legacyDispatch.ts` both gone; unknown tool now answers `not_found`. **One intended contract change** — see below |
 
 **Prerequisite done.** The three capabilities `@mcp/sdk` was missing shipped as two hooks
 — `renderResult` and `wrapCall` — with 15 tests (sdk 50 → 65). See `s26-s29-plan.md` §S-28.
@@ -154,6 +155,9 @@ with a different payload. **bitbucket-mcp accepted exactly that delta in its own
 (`sdk.test`: "DELTA: an unknown tool now reports not_found instead of mcp_error"), so the
 precedent for changing it exists — but 43 tools in daily use is a different risk, and S-33
 has to make that call deliberately rather than inherit it from a deleted `switch`.
+
+> S-33 made that call: **adopt `not_found`.** The bridge and the file are gone. Kept here
+> because it is the reason the bridge looked over-engineered for three commits.
 
 Four behaviours carried by the hooks, none of them visible in a `tools/list` snapshot:
 `formatError` (the `{code, message, requestId}` envelope, pretty-printed at *every* profile,
@@ -271,12 +275,14 @@ siblings; the missing `await` reads as an oversight, not a decision. Pinned by a
 
 ## What actually blocks progress
 
-Everything left splits into three groups, and only one is hard.
+**Phase H is done, so the hard group is empty.** What remains is mechanical work plus two
+deliberately deferred decisions.
 
-**Hard — Phase H.** Needs the three SDK capabilities built first (S-31's real prerequisite),
-and Phase G's remaining structural work is what makes the 43-tool migration reviewable.
-Order: S-27 → S-29 → SDK capabilities → S-31…S-33. S-30 (splitting `graphStore.ts`, 8 PRs)
-can run in parallel and is what unblocks S-41.
+**S-34 is unblocked, and by S-32 rather than S-33.** The plan blocks S-34 on S-33 "since
+deriving tool lists requires every server to expose a registry" — but the registry held all 43
+from the moment S-32's last batch landed, and `legacy.listTools()` was already returning `[]`.
+The remaining blocker for S-41 is unchanged: eleven files in `codebase-index-mcp/src` are still
+over 600 lines.
 
 **Mechanical — Phase I and S-38.** Generators over `scripts/lib/manifest.mjs`, which is
 already the single source of truth. Low risk, no behaviour change, independently
@@ -446,28 +452,99 @@ runs' worth of evidence.
 ## Gate status at time of writing
 
 ```
-verify:all            exit 0 — 4/4 servers, test phase 65.9s
-guards                0 errors, 34 warnings, 1 accepted exemption, 364 files
-                      (index.ts 556 → 214 lines, no size warning; its
-                       env/direct-access warning is pre-existing and unchanged)
+verify:all            exit 0 — 4/4 servers, test phase 68.3s
+guards                0 errors, 34 warnings, 1 accepted exemption, 362 files
+                      (warning count unchanged by S-33; index.ts 556 → 211
+                       lines, no size warning; its env/direct-access warning
+                       is pre-existing)
 4/4 servers           build · typecheck · test
-codebase-index tests  28/28 — test:server-envelopes grew 31 → 44 assertions
-contracts:check       4/4 — 43 / 17 / 8 / 8 tools. codebase-index now carries
-                      annotations on all 43; descriptions + schemas unchanged
+codebase-index tests  28/28 — test:server-envelopes grew 31 → 44 → 46 assertions
+contracts:check       4/4 — 43 / 17 / 8 / 8 tools, no drift. codebase-index
+                      carries annotations on all 43; descriptions + schemas
+                      unchanged
 smoke                 exit 0
 benchmark:plan:check  exit 0 — savings 66.89% (floor 40), snapshot clean,
                       graph accuracy 100% (floor 60). Was exit 4 at a441500.
+guard:no-llm-runtime  passed — no model provider imports in runtime source
 ```
 
-### What S-33 actually has to do
+## S-33 · the decision, and the one contract change
 
-The switch is already empty — S-32 removed every `case`. `tools/legacyDispatch.ts` is 34 lines
-holding one `throw`, and it exists for one reason: it is this server's unknown-tool answer, an
-`isError` result carrying `MCP_ERROR` and `-32601`. The SDK's own path returns a `not_found`
-`PlatformError` instead — different payload, different code. bitbucket-mcp accepted exactly that
-delta in its migration (`sdk.test`: *"DELTA: an unknown tool now reports not_found instead of
-mcp_error"*), so the precedent exists.
+S-32 left the `switch` empty, so S-33 was never a deletion — it was a choice between keeping
+`tools/legacyDispatch.ts` as this server's unknown-tool envelope keeper, or adopting the
+platform's `not_found`. **Decision: adopt `not_found`.** The bridge, the
+`dispatchLegacyTool` option and the 34-line file are all gone; the registry is now the only
+source of tools and an unregistered name reaches dispatch's own not-found path.
 
-So S-33 is a decision, not a deletion: keep the file as the envelope keeper, or adopt
-`not_found` and record the contract change. Deleting it without choosing is the one wrong
-option — and the reason `LegacyBridge.has()` still answers `true` unconditionally.
+### The recorded delta
+
+Captured from a real stdio call against the built server, before and after:
+
+| | before | after |
+|---|---|---|
+| `code` | `MCP_ERROR` | `not_found` |
+| `message` | `no_such_tool_at_all: MCP error -32601: Unknown tool: no_such_tool_at_all` | `no_such_tool_at_all: Unknown tool: no_such_tool_at_all.` |
+| `requestId` | uuid | uuid (unchanged) |
+| `isError` | `true` | `true` (unchanged) |
+
+Still an `isError` **result**, not a JSON-RPC error — that was the part worth protecting, and it
+did not move. Rationale for the change itself: `not_found` names the condition, whereas the old
+message leaked a JSON-RPC error number into a tool *payload*. All four servers now agree, and
+each pins it with the same `DELTA:` test.
+
+`contracts:check` stays green at 43 tools: `tools/list` does not describe error payloads, which
+is exactly why this delta needed a test and a doc entry rather than a snapshot diff.
+
+### The trap that made this more than a deletion
+
+Deleting the file alone does **not** produce `not_found`. Dispatch raises a `PlatformError`, but
+this server supplies `formatError`, so the error is handed to `mapError` *before* the platform
+can render it — and `mapError` knew only `ZodError`, `PolicyViolationError` and `McpError`. A
+`PlatformError` fell through to the final branch, giving:
+
+```
+{ "code": "INTERNAL_ERROR", "message": "<tool>: Unknown tool: <tool>.", ... }
+```
+
+The worst of the three outcomes: it drops the old code, never produces the intended one, and
+relabels a caller's mistake as a defect in this server. The fix is the `isPlatformError` branch
+`mapError` now has — the same unwrap postgres-mcp's `toWireError` already did. Pinned by an
+assertion that the code is *not* `INTERNAL_ERROR`, because that failure mode is silent: it is a
+plausible-looking envelope with a plausible-looking message.
+
+### What did not change
+
+`MCP_ERROR` is **not** retired. It is the code for any `McpError` a handler throws, and those
+paths are untouched — verified on the same probe run:
+
+```
+refactor_replace_apply, bad previewId
+  { "code": "MCP_ERROR", "message": "refactor_replace_apply: MCP error -32602: ... not found." }
+```
+
+The delta is narrowly the unknown-tool case, not a vocabulary change.
+
+Before committing, the workspace was searched for anything else depending on the old envelope.
+Only the test and this document did; the remaining `-32601` hits are the other three servers'
+own `DELTA:` comments and migration notes — historical record, not dependants. No skill, client
+config or manifest referenced it.
+
+### One cosmetic consequence, left alone
+
+The message now names the tool twice — `no_such_tool_at_all: Unknown tool: no_such_tool_at_all.`
+— because `mapError` prefixes every message with the tool name and the platform's own text
+already includes it. Removing the prefix for just this code path would make the unknown-tool
+envelope the only one shaped differently, which is a worse trade than the repetition.
+
+### Where the plan and reality diverge
+
+The plan lists two more validation items for S-33 that it cannot deliver:
+
+- **`index.ts` < 60 LOC.** It is 211. The 2,051 → 214 reduction already happened in S-31; the
+  remaining 211 lines are env constants, `buildHandlerContext`, and the shutdown hooks. Getting
+  under 60 means relocating config to another module — motion with real risk (env read timing,
+  and two callbacks that are lazy *on purpose*) for no benefit beyond hitting a number no guard
+  enforces. The convention guard's cap is 600 and reports no finding.
+- **`guard:convention` reports zero oversized files in `codebase-index-mcp`.** Not achievable
+  here and never was: `impactAnalyzer` (~1,457), `edgeResolver` (~1,423), `staticAnalyzer`
+  (~1,228) and eight others predate this phase. That is S-41's blocker, not S-33's work.

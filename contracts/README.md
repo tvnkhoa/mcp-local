@@ -52,11 +52,11 @@ Reproducibility is the whole value; a snapshot that varies per machine is noise.
 
 | Server | Tools | Advertises annotations |
 |---|---|---|
-| `codebase-index-local` | 43 | no |
-| `postgres-mcp` | 17 | **yes** — migrated to `@mcp/sdk` (S-24) |
-| `observe-mcp` | 8 | **yes** — migrated to `@mcp/sdk` (S-25) |
+| `codebase-index-local` | 43 | **yes** — migrated to `@mcp/sdk` (S-31…S-33) |
+| `postgres-mcp` | 17 | **yes** — migrated to `@mcp/sdk` (S-25) |
+| `observe-mcp` | 8 | **yes** — migrated to `@mcp/sdk` (S-24) |
 | `bitbucket-mcp` | 8 | **yes** — migrated to `@mcp/sdk` (S-23) |
-| **Total** | **76** | |
+| **Total** | **76** | all four |
 
 Servers on `@mcp/sdk` advertise MCP annotation hints (`readOnlyHint` / `idempotentHint` /
 `destructiveHint` / `openWorldHint`), which the SDK derives from each tool's declared annotations.
@@ -64,10 +64,20 @@ In every migration so far this was an **additive** contract change, reviewed via
 descriptions and input schemas stayed byte-identical.
 
 Clients use these hints to decide what may be auto-approved. Across the workspace the tools marked
-**not read-only** are `create_pull_request`, `write_apply`, `write_rollback`, `migration_apply` and
-`migration_add` — of which all but `create_pull_request` and `migration_add` are also destructive.
+**not read-only** are `create_pull_request`, `write_apply`, `write_rollback`, `migration_apply`,
+`migration_add`, `index_repository`, `watch_repo`, `refactor_replace_apply` and
+`refactor_replace_rollback` — of which all but `create_pull_request`, `migration_add` and
+`watch_repo` are also destructive.
 
-`codebase-index-mcp` is the last server without them and will gain the same field when it migrates.
+Two of those deserve the note, because a reviewer will read them as too strict or too loose:
+
+- `index_repository` is destructive but touches **only derived state** — it replaces the SQLite
+  graph and prunes entries for deleted files, and cannot alter a line of the repository it reads.
+- The four preview/dry-run refactor tools (`refactor_replace_preview`, `rename_assist`,
+  `refactor_symbol_migration`, `change_value_representation`) are read-only yet **not idempotent**:
+  they write nothing to the working tree, but each call mints a new previewId and approval token.
+
+No tool in any server is `openWorldHint: true`.
 
 Tool advertisement is **not** env-dependent in any server: write-gated tools such as
 `create_pull_request`, `write_preview` and `migration_apply` are always listed, and the gate is

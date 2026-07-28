@@ -1,9 +1,11 @@
 /**
- * Server bootstrap — this server's contract, expressed as hooks into `@mcp/sdk` (S-31).
+ * Server bootstrap — this server's contract, expressed as hooks into `@mcp/sdk`.
  *
- * A `LegacyBridge` sits behind the registry, so a tool is served by whichever side owns it:
- * the registry if S-32 has migrated it, the pre-SDK `switch` (`tools/legacyDispatch.ts`)
- * otherwise. The registry wins by name, so a tool moves the instant it is registered.
+ * S-31 installed a `LegacyBridge` behind the registry so tools could migrate one batch at a
+ * time; S-32 moved all 43; S-33 removed the bridge. The registry is now the only source of
+ * tools, and an unregistered name is answered by dispatch itself — see the note on
+ * `formatError` below, which is what makes that answer this server's rather than the
+ * platform's default.
  *
  * What this file exists to preserve — none of it visible in a `tools/list` snapshot:
  *
@@ -29,7 +31,6 @@ import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import type {
   AnyToolDefinition,
   CallWrapper,
-  LegacyBridge,
   McpServerHandle,
   ResourceProvider,
   ToolCallResult
@@ -47,7 +48,6 @@ import {
   emitTelemetry
 } from "./response/responseFormatter.js";
 import type { DescriptorLimits } from "./tools/limits.js";
-import type { LegacyDispatch } from "./tools/legacyDispatch.js";
 import { maybeAutoActivateWatchFromArgs } from "./watch/watchLifecycle.js";
 
 export interface TelemetryConfig {
@@ -64,12 +64,8 @@ export interface CodebaseIndexServerOptions {
   readonly version: string;
   readonly limits: DescriptorLimits;
   readonly store: GraphStore;
-  /**
-   * Tools migrated onto the registry (S-32). These win over their legacy twin by name, so a
-   * tool moves the moment it appears here and the `switch` branch can then be deleted.
-   */
+  /** Every tool this server serves. Anything not here is an unknown tool. */
   readonly tools: readonly AnyToolDefinition[];
-  readonly dispatchLegacyTool: LegacyDispatch;
   readonly buildHandlerContext: () => HandlerContext;
   readonly toolContextStorage: AsyncLocalStorage<ToolRequestContext>;
   /** The entry point's own serializer — it emits telemetry as a side effect. */
@@ -99,7 +95,11 @@ export function createCodebaseIndexServer(options: CodebaseIndexServerOptions): 
 
   /**
    * This server's failure envelope, for every failure: zod, a PolicyViolationError from
-   * the refactor engine, an McpError, or anything a handler throws.
+   * the refactor engine, an McpError, anything a handler throws — and, since S-33, the
+   * `PlatformError` dispatch raises for an unregistered tool name. That last one is why
+   * `mapError` has an `isPlatformError` branch: this hook intercepts the error *before* the
+   * platform renders it, so without that branch the unknown-tool answer would be
+   * `INTERNAL_ERROR` rather than the `not_found` S-33 adopted.
    *
    * `mapError` needs the tool name and the telemetry event needs the request's start time
    * and arguments, none of which the hook receives — they come from the per-request scope
@@ -134,28 +134,6 @@ export function createCodebaseIndexServer(options: CodebaseIndexServerOptions): 
 
     return { content: [{ type: "text", text }], isError: true };
   }
-
-  /**
-   * Everything not in the registry, including names that exist nowhere.
-   *
-   * `has` answering `true` unconditionally is the point: during coexistence the switch is
-   * the terminal handler, and its `default:` branch IS this server's unknown-tool
-   * rejection — an `isError` result carrying `MCP_ERROR` and the MethodNotFound code.
-   * Routing unknown names to the platform's `not_found` instead would change that
-   * response, which is why it is not left to the default. Registered tools are resolved
-   * before the bridge is consulted, so this stays correct as tools migrate.
-   *
-   * S-33 deletes the switch, and with it this branch. Reproducing the same envelope for
-   * unknown tools is a decision that step has to make explicitly.
-   */
-  const legacy: LegacyBridge = {
-    // Nothing left to advertise: S-32 moved all 43 descriptors into their tool definitions.
-    listTools: () => [],
-    has: () => true,
-    // `.then` rather than `await`: a rejection must stay a rejection so the bridge reports
-    // it and `formatError` renders the envelope.
-    call: (name, args) => options.dispatchLegacyTool(name, args).then(asWireResult)
-  };
 
   /**
    * The `repo://{repoId}/{context|schema|routes|risk}` resources.
@@ -204,9 +182,9 @@ export function createCodebaseIndexServer(options: CodebaseIndexServerOptions): 
   return createMcpServer({
     name: "codebase-index-mcp",
     version: options.version,
-    // Batch by batch through S-32. Whatever is not here falls through to `legacy` below.
+    // All 43. No `legacy` bridge: an unregistered name reaches dispatch's own not-found path,
+    // which `formatError` above turns into this server's envelope.
     tools: options.tools,
-    legacy,
     resources,
     formatError: (error) => asWireResult(renderToolError(error)),
     // Still not exercised: every tool migrated so far is `rawResult`, so its handler builds
