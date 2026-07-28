@@ -47,7 +47,7 @@ gate fail for anyone without production access.
 ### What covers the gap
 
 `contracts:check` is the credential-free boot check. It starts **all four servers over a real stdio
-MCP handshake** with placeholder environment values synthesized from `scripts/lib/manifest.mjs`,
+MCP handshake** with placeholder environment values synthesized from `@mcp/manifest`,
 completes `initialize`, and calls `tools/list`. A server that compiles but cannot load fails here.
 
 That is not a hypothetical: two bugs in this migration were temporal-dead-zone `const` errors that
@@ -89,7 +89,7 @@ recorded in the script, and runs as its own CI step.
 
 The servers are deliberately **not** npm workspace members — their native dependencies must not be
 hoisted or deduplicated — so `npm run --workspaces` cannot reach them. `scripts/run-servers.mjs` is
-the equivalent, driven by the same `scripts/lib/manifest.mjs` the installer and doctor use, so a
+the equivalent, driven by the same `@mcp/manifest` the installer and doctor use, so a
 newly registered server is covered without editing the runner or the workflow.
 
 It reports a missing script rather than skipping quietly, and `--continue` runs every server before

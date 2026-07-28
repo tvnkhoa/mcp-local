@@ -45,6 +45,7 @@ The tier matrix in `src/guards/rules.ts`, as data:
 | `imports/undeclared-dependency` | Every import is declared in `package.json` |
 | `env/direct-access` | Only `@mcp/core/env` and a server `config.ts` read `process.env` |
 | `servers/cross-import` | No server imports another server (`--servers`) |
+| `servers/tooling-import` | No server imports `@mcp/manifest` or `@mcp/cli` |
 
 Adding a package means adding a row to the matrix — which forces an explicit
 decision about what it may import, at review time.

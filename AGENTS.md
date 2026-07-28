@@ -26,7 +26,7 @@ npm run mcp:update -- --all                # rebuild + regenerate skills + verif
 
 Server keys: `codebase-index-local`, `postgres-mcp`, `observe-mcp`, `bitbucket-mcp`.
 Source of truth for every server (entry path, env schema, tools, skill source) is
-`scripts/lib/manifest.mjs`. The installer writes MCP config into each detected agent
+`packages/manifest` (`@mcp/manifest`). The installer writes MCP config into each detected agent
 (`~/.claude.json` for Claude Code) and renders a native skill per server.
 
 ### codebase-index-mcp

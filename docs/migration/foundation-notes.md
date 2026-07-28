@@ -113,7 +113,7 @@ The mapping:
 | `@mcp/sql-guardrails` | `@mcp/shared/sql` | Subpath export |
 | `@mcp/http-client` | `@mcp/shared/http` | Subpath export |
 | `@mcp/fs-safety` | `@mcp/shared/fs` | Subpath export |
-| `@mcp/manifest` | **not created** | Converting `scripts/lib/manifest.mjs` is step S-34 and touches the installer, doctor, uninstaller, updater, and skill renderer. Out of scope for "infrastructure only" |
+| `@mcp/manifest` | **created later, in S-34** | Converting `scripts/lib/manifest.mjs` touches the installer, doctor, uninstaller, updater, and skill renderer — out of scope for "infrastructure only". Landed in S-34 as tier 5, with `scripts/lib/manifest.mjs` reduced to a re-export shim |
 | — | `@mcp/testing` | New; Phase 1 assumed it, the brief named it |
 | — | `@mcp/cli` | Phase 1 had `tools/`; the brief named it as a package |
 
@@ -257,7 +257,7 @@ documented in `packages/cli/README.md`.
 
 **Cause:** `observe-mcp` is registered in `~/.claude.json` as
 `observe-mcp-ssdev_au` and `observe-mcp-wecrm_au_prod` — two instances under
-different keys — but `scripts/lib/manifest.mjs` declares the key `observe-mcp`.
+different keys — but the manifest declares the key `observe-mcp`.
 The doctor finds no config under that key, so it passes no environment, and the
 server correctly fails fast:
 

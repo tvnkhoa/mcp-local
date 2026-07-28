@@ -8,8 +8,8 @@
     "packages/*"
   ],
   "scripts": {
-    "setup": "node scripts/install-mcp.mjs",
-    "mcp:install": "node scripts/install-mcp.mjs",
+    "setup": "npm run build:packages && node scripts/install-mcp.mjs",
+    "mcp:install": "npm run build:packages && node scripts/install-mcp.mjs",
     "mcp:doctor": "node scripts/mcp-doctor.mjs",
     "mcp:uninstall": "node scripts/uninstall-mcp.mjs",
     "mcp:update": "node scripts/update-mcp.mjs",

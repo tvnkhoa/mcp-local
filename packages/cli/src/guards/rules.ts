@@ -52,8 +52,30 @@ export const TIER_RULES: readonly TierRule[] = [
     tier: 4,
     mayImport: ["@mcp/core"],
     allowedExternal: []
+  },
+  {
+    // Workspace tooling data, not a runtime capability: which servers exist, where their entry
+    // points are, and what env each needs. Tier 5 so it may reach `@mcp/core` for path helpers
+    // while nothing in the platform can reach *it* — see TOOLING_PACKAGES below for the half of
+    // that rule the tier matrix cannot express.
+    name: "@mcp/manifest",
+    tier: 5,
+    mayImport: ["@mcp/core"],
+    allowedExternal: []
   }
 ];
+
+/**
+ * Packages that exist to describe or operate the workspace, which a server must never import
+ * (dependency rule 5).
+ *
+ * The tier matrix cannot express this on its own: it governs imports *between packages*, and a
+ * server is not a package in that matrix. Without this list a server could import
+ * `@mcp/manifest`, learn its siblings' directories and env contracts, and quietly become
+ * coupled to the workspace layout — defeating the isolation the tiers exist to provide. A
+ * server needs its own config and nothing about anyone else's.
+ */
+export const TOOLING_PACKAGES: readonly string[] = ["@mcp/manifest", "@mcp/cli"];
 
 /** Only this package may import the MCP protocol SDK (dependency rule 8). */
 export const MCP_PROTOCOL_PACKAGE = "@modelcontextprotocol/sdk";

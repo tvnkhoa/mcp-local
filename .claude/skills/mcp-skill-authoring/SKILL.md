@@ -1,6 +1,6 @@
 ---
 name: mcp-skill-authoring
-description: "Register a new MCP server in this workspace so it auto-gets an installer + native skill, and write a strong operational SKILL.md the AI will actually invoke. Use when adding a server to scripts/lib/manifest.mjs, authoring <server>/skill/SKILL.md, or improving an existing operational skill's trigger/guardrails."
+description: "Register a new MCP server in this workspace so it auto-gets an installer + native skill, and write a strong operational SKILL.md the AI will actually invoke. Use when adding a server to packages/manifest/src/servers.ts, authoring <server>/skill/SKILL.md, or improving an existing operational skill's trigger/guardrails."
 ---
 
 # MCP Skill Authoring
@@ -11,11 +11,15 @@ when writing/improving an operational skill so the model reliably auto-invokes i
 The workspace has a closed loop: **one manifest entry + one template ⇒ installer, doctor,
 uninstall/update, and a generated native skill all work for the new server.**
 
-## 1. Register the server (`scripts/lib/manifest.mjs`)
+## 1. Register the server (`packages/manifest/src/servers.ts`)
 
-Append an object to `SERVERS`:
+Append an object to `SERVERS`. It is typed (`ServerDescriptor`), so a missing field is a
+compile error rather than a runtime surprise in the installer.
 
-```js
+> Moved here from `scripts/lib/manifest.mjs` in S-34. That file is now a re-export shim awaiting
+> deletion — edit the package. After editing, run `npm run build:packages` so `scripts/` sees it.
+
+```ts
 {
   key: "my-mcp",                 // key in ~/.claude.json AND the skill dir name
   displayName: "My MCP",

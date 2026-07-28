@@ -7,6 +7,7 @@
     { "path": "packages/shared" },
     { "path": "packages/sdk" },
     { "path": "packages/testing" },
-    { "path": "packages/cli" }
+    { "path": "packages/cli" },
+    { "path": "packages/manifest" }
   ]
 }

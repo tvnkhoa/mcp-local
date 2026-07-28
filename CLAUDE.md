@@ -54,7 +54,7 @@ npm run dev
 ### Verification (run from the workspace root)
 
 All four servers answer to the same four scripts — `build`, `typecheck`, `test`, `smoke` — so the
-root aggregates work uniformly. They are driven by `scripts/lib/manifest.mjs`, so a newly
+root aggregates work uniformly. They are driven by `@mcp/manifest`, so a newly
 registered server is covered automatically.
 
 ```bash
@@ -114,7 +114,7 @@ src/index.ts           # MCP tool dispatch
 ## Installation, Skills & Doctor
 
 All servers are installed and managed from the **workspace root** via a single data-driven
-installer (source of truth: `scripts/lib/manifest.mjs`).
+installer (source of truth: `packages/manifest/src/servers.ts`).
 
 ```bash
 npm run setup                              # install/build/configure + skills for ALL servers
@@ -130,9 +130,14 @@ On install, each server gets a **native Claude Code skill** rendered from its
 the committed source of truth is the template. Registration writes to `~/.claude.json` (per-agent
 config, secrets kept there per the workspace convention).
 
-Adding a new MCP server: append it to `scripts/lib/manifest.mjs` and add `<dir>/skill/SKILL.md` —
-the installer, doctor, and skill generator pick it up automatically. See the `mcp-skill-authoring`
-skill.
+Adding a new MCP server: append it to `packages/manifest/src/servers.ts` and add
+`<dir>/skill/SKILL.md` — the installer, doctor, and skill generator pick it up automatically. See
+the `mcp-skill-authoring` skill.
+
+> `scripts/lib/manifest.mjs` still exists as a re-export shim (S-34) and is scheduled for
+> deletion. Edit the package, not the shim. Because packages compile to gitignored `dist/`, every
+> `scripts/` entry point needs `npm run build:packages` once on a fresh clone — `setup` and
+> `mcp:install` now do it for you.
 
 ## Local Dev MCP Test Cycle
 

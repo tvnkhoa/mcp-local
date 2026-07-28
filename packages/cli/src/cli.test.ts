@@ -61,7 +61,16 @@ test("scan: deep imports into a platform package are detected", () => {
 test("scan: the workspace root and its packages are discoverable", () => {
   const packages = readWorkspacePackages(workspaceRoot);
   const names = packages.map((pkg) => pkg.name).sort();
-  assert.deepEqual(names, ["@mcp/cli", "@mcp/core", "@mcp/sdk", "@mcp/shared", "@mcp/testing"]);
+  // Pinned exactly, so adding a package is a deliberate edit here as well as a row in
+  // TIER_RULES — the two must not drift, or `tier/unknown-package` starts firing.
+  assert.deepEqual(names, [
+    "@mcp/cli",
+    "@mcp/core",
+    "@mcp/manifest",
+    "@mcp/sdk",
+    "@mcp/shared",
+    "@mcp/testing"
+  ]);
 });
 
 // --- rules ----------------------------------------------------------------

@@ -11,6 +11,7 @@ import {
   ENV_ACCESS_ALLOWLIST,
   MCP_PROTOCOL_OWNER,
   MCP_PROTOCOL_PACKAGE,
+  TOOLING_PACKAGES,
   isNodeBuiltin,
   ruleFor
 } from "./rules.js";
@@ -219,6 +220,26 @@ export function runDependencyGuard(options: DependencyGuardOptions): GuardReport
             line: ref.line,
             message: `Server "${serverDir}" imports from server "${crossed}".`,
             hint: "Promote the shared need into packages/shared."
+          });
+        }
+
+        // Rule 5 - a server must not import the workspace's tooling packages.
+        //
+        // An error, not a warning: unlike the env rule above there is no migration in
+        // progress that legitimately violates it, so the first occurrence is a defect.
+        // Importing @mcp/manifest would hand a server its siblings' directories and env
+        // contracts, which is cross-server coupling laundered through a package.
+        const tooling = TOOLING_PACKAGES.find(
+          (name) => ref.specifier === name || ref.specifier.startsWith(`${name}/`)
+        );
+        if (tooling !== undefined) {
+          findings.push({
+            rule: "servers/tooling-import",
+            severity: "error",
+            file: file.relativePath,
+            line: ref.line,
+            message: `Server "${serverDir}" imports the workspace tooling package "${tooling}".`,
+            hint: "Tooling data belongs to scripts/. A server should know only its own config."
           });
         }
       }

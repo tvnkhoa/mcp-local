@@ -68,7 +68,9 @@ mcp-local/
 │   │   └── src/  approval/  sql/  http/  fs/
 │   │
 │   ├── testing/                     L3  harness, golden contracts, leak assertions
-│   └── cli/                         L4  dependency + convention guards
+│   ├── cli/                         L4  dependency + convention guards
+│   └── manifest/                    L5  which servers exist, their entry points and env
+│                                        — tooling data; a server may NOT import it
 │
 ├── codebase-index-mcp/              independent server (NOT a workspace member)
 │   ├── src/
@@ -90,7 +92,7 @@ mcp-local/
 │
 ├── contracts/                       golden tools/list snapshots, one per server
 ├── scripts/                         installer / doctor / skill generator
-│   └── lib/manifest.mjs             single source of truth for "what servers exist"
+│   └── lib/manifest.mjs             re-export shim for @mcp/manifest (S-34; to be deleted)
 ├── docs/
 │   ├── architecture/                this document + the audit
 │   ├── migration/                   plan + per-phase notes
@@ -215,7 +217,7 @@ Every server, without exception:
 | S10 | Tools are declared through `@mcp/sdk`, never by hand-writing protocol plumbing |
 | S11 | `tools/list` output is snapshotted in `contracts/`; a change to it is a reviewed diff |
 | S12 | `README.md` and `CLAUDE.md` at the server root; all other docs in `docs/` |
-| S13 | Registered via `scripts/lib/manifest.mjs` — adding a server means adding a manifest entry, not editing the installer |
+| S13 | Registered via `@mcp/manifest` — adding a server means adding a manifest entry, not editing the installer |
 
 ---
 
@@ -242,7 +244,7 @@ The measure of whether this architecture achieved "easy scalability":
 1. `mkdir <domain>-mcp`, copy the conventional skeleton (§1).
 2. Add `"@mcp/core": "file:../packages/core"` and `"@mcp/sdk": "file:../packages/sdk"`.
 3. Declare tools with `defineTool` and register them with `createToolRegistry`.
-4. Add one entry to `scripts/lib/manifest.mjs`, and a `skill/SKILL.md`.
+4. Add one entry to `packages/manifest/src/servers.ts`, and a `skill/SKILL.md`.
 5. `npm run setup`.
 
 The installer, doctor, and skill generator pick it up with no further change. No protocol plumbing,
@@ -252,23 +254,26 @@ no response formatter, no guardrail scanner, no env parser is written by hand.
 
 ## 9. Reconciliation — built vs. still target
 
-As of `829ecd9`:
+Refreshed at `61b1782` (S-34). Rows that moved since the original `829ecd9` snapshot are marked
+**↑**, because a reader consulting this table to find remaining work was being told three things
+that had already shipped.
 
 | Element | Status |
 |---|---|
 | `tsconfig.base.json`, solution file, project references, `tsconfig.test.json` | **Built** |
 | `packages/{core,sdk,shared,testing,cli}` with the tier model | **Built** |
-| Dependency guard (tiers, zero-dep, protocol ownership, deep imports, env access, cross-server) | **Built and enforcing** — 0 errors |
+| `packages/manifest` (L5 tooling data) | **↑ Built** (`61b1782`, S-34) — `scripts/lib/manifest.mjs` is now a re-export shim |
+| Dependency guard (tiers, zero-dep, protocol ownership, deep imports, env access, cross-server, tooling-import) | **Built and enforcing** — 0 errors |
 | Convention guard (required files/scripts, size caps, no default export, no `console.log`) | **Built and enforcing** |
 | Consistent `src/{config,guardrails,response}/` in all four servers | **Built** (`3f5b702`) |
 | Servers consuming `packages/*` via `file:` deps | **Built** — all four |
 | Shared: response formatting, SQL guardrails, approval tokens, HTTP helpers, env parsing, logging, `PolicyViolationError` | **Built** (`829ecd9`) — 6 of 7 clusters |
-| Servers declaring tools via `defineTool` / `createToolRegistry` (S10) | **Not yet** — all four still hand-register. Largest remaining block (plan steps S-23…S-33) |
-| `contracts/` golden `tools/list` snapshots (S11) | **Not yet** — prerequisite for S10 |
-| Uniform script vocabulary (S4) | **Partial** — `codebase-index-mcp` lacks `test`; only `bitbucket-mcp` has `smoke-test` |
-| CI | **Not yet** |
+| Servers declaring tools via `defineTool` / `createToolRegistry` (S10) | **↑ Built** — all four migrated (S-23…S-33); `codebase-index-mcp` last, at `b3454e1` |
+| `contracts/` golden `tools/list` snapshots (S11) | **↑ Built** — `contracts/`, 76 tools across four servers |
+| Uniform script vocabulary (S4) | **↑ Built** — all four answer `build` / `typecheck` / `test` / `smoke` (S-03) |
+| CI | **↑ Built** — `.github/workflows/ci.yml`, Windows + Node 22, credential-free (S-05) |
 | Config loaded once per server (S3) | **Partial** — `postgres-mcp/src/migration/efRunner.ts` still reads `process.env` directly |
-| File size caps met by servers | **Not yet** — 24 warnings; `postgres-mcp/src/index.ts` and `codebase-index-mcp/src/index.ts` exceed the hard cap |
+| File size caps met by servers | **Not yet** — 34 warnings, 1 accepted exemption; eleven files in `codebase-index-mcp/src` exceed the hard cap. Blocks S-41 |
 | `zod` / protocol SDK deduplicated across servers | **Not planned before S-09.** Measured consequence: `mapError` cannot be shared, because `instanceof` compares class identity across copies |
 | `servers/` directory move | **Deliberately skipped** (S-42) |
 

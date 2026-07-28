@@ -15,7 +15,8 @@ All are TypeScript 5.7+ ESM built on `@modelcontextprotocol/sdk`.
 | `bitbucket-mcp` | `bitbucket-mcp/` | Read repositories / pull requests and **create PRs** on Bitbucket Cloud (write gated). |
 
 The source of truth for every server (dir, entry point, tools, env vars, skill template) is
-`scripts/lib/manifest.mjs`. The installer, doctor, updater, and skill generator all read from it.
+`packages/manifest` (`@mcp/manifest`). The installer, doctor, updater, and skill generator all
+read from it.
 
 ## Workspace commands
 
@@ -103,12 +104,13 @@ and `npm run benchmark:plan:check` (compact-mode token-savings gate). See its `C
 
 ## Adding a new server
 
-Append an entry to `scripts/lib/manifest.mjs` and add `<dir>/skill/SKILL.md` — the installer,
-doctor, updater, and skill generator pick it up automatically. See the `mcp-skill-authoring` skill.
+Append an entry to `packages/manifest/src/servers.ts` and add `<dir>/skill/SKILL.md` — the
+installer, doctor, updater, and skill generator pick it up automatically. See the
+`mcp-skill-authoring` skill.
 
 ## References
 
 - `CLAUDE.md` — workspace guidance, critical constraints, MCP-first operating rules
 - `AGENTS.md` — env var reference, common pitfalls, integration config examples
-- `scripts/lib/manifest.mjs` — single source of truth for all servers and their env vars
+- `packages/manifest/README.md` — single source of truth for all servers and their env vars
 - `<server>/README.md` — per-server tool catalog and usage

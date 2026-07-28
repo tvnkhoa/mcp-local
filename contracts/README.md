@@ -46,7 +46,7 @@ Reproducibility is the whole value; a snapshot that varies per machine is noise.
   and the server refuses to start.
 - Tools are sorted by name and every object key is sorted, so a diff shows semantic change rather
   than serialization order.
-- The server list comes from `scripts/lib/manifest.mjs`, so a new server is picked up automatically.
+- The server list comes from `@mcp/manifest`, so a new server is picked up automatically.
 
 ## Current contracts
 

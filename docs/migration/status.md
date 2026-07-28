@@ -5,7 +5,7 @@ Phase H's row updated after the S-28 SDK work landed. Every
 row cites the artifact that proves it. Where no artifact was found, the row says so
 rather than guessing.
 
-**30 of 44 done · 1 partial · 1 skipped by decision · 12 open.** **Phase H is complete** —
+**31 of 44 done · 1 partial · 1 skipped by decision · 11 open.** **Phase H is complete** —
 S-31, S-32 and S-33 all landed 2026-07-28. All 43 codebase-index tools are on the SDK registry,
 the legacy bridge is gone, and **all four servers now run on `@mcp/sdk`**. S-33 carried one
 intended contract change (unknown tool → `not_found`); see [the S-33 section](#s-33--the-decision-and-the-one-contract-change).
@@ -60,7 +60,7 @@ that the plan folded into S-31. **This document's numbering is authoritative.**
 |---|---|---|
 | S-08 Shared TypeScript base configuration | ✅ | `tsconfig.base.json` |
 | S-09 Adopt npm workspaces | ✅ | `workspaces: ["packages/*"]` — servers excluded **by decision**, ADR 0001 |
-| S-10 TypeScript project references | ✅ | `composite: true` in the base; root references all five packages |
+| S-10 TypeScript project references | ✅ | `composite: true` in the base; root references all six packages (`manifest` added in S-34) |
 
 > S-09 is complete as designed, not half-done. The four duplicate `zod` /
 > `@modelcontextprotocol/sdk` installs are the accepted cost recorded in ADR 0001, and
@@ -74,8 +74,8 @@ that the plan folded into S-31. **This document's numbering is authoritative.**
 | S-12 Dependency-rule guard | ✅ | same |
 | S-13 Contract guard + platform no-LLM guard | ✅ | same; `guard:no-llm-runtime` also runs per-server |
 
-Current output: **0 errors, 34 warnings across 334 files.** Warn mode is correct until
-S-41 — flipping now would turn 34 warnings into 34 build failures.
+Current output: **0 errors, 34 warnings, 1 accepted exemption across 374 files.** Warn mode is
+correct until S-41 — flipping now would turn 34 warnings into 34 build failures.
 
 ## Phase E — Shared Core Extraction · 7/7 ✅
 
@@ -245,13 +245,89 @@ report the envelope. **Kept, as a fix.** The old behaviour lost the `PolicyViola
 into an opaque protocol error and was inconsistent with the other 42 tools *and* with its own two
 siblings; the missing `await` reads as an oversight, not a decision. Pinned by a test now.
 
-## Phase I — Manifest Generation · 0/3
+## Phase I — Manifest Generation · 1/3
 
 | Step | Status | Evidence |
 |---|---|---|
-| S-34 Convert manifest to `@mcp/manifest` | ❌ | still `scripts/lib/manifest.mjs`; no `packages/manifest` |
+| S-34 Convert manifest to `@mcp/manifest` | ✅ | `packages/manifest` (tier 5); `scripts/lib/manifest.mjs` is now a shim. Equivalence proved before the switch — see below |
 | S-35 Generate `.env.example` | ❌ | four `.env.example` files exist but are hand-written — no generator |
 | S-36 Generate README/skill tables + tool lists | ❌ | no generator found |
+
+### S-34 · the port, and the two things the plan did not account for
+
+`packages/manifest` (tier 5, depends on `@mcp/core`) now holds `SERVERS`, `getServer`,
+`serverKeys`, `evaluateEnv`, `WORKSPACE_ROOT`, `serverEntryPath`, `serverDirPath` and the four
+types that were a single JSDoc `@type` comment. `scripts/lib/manifest.mjs` is a re-export shim,
+as the plan specified.
+
+**Equivalence was proved, not reviewed.** This data is what `~/.claude.json` gets written from,
+so a silent change rewrites working agent configuration on the next install. A throwaway script
+compared old and new side by side before the shim went in: identical export surface, identical
+`WORKSPACE_ROOT`, `SERVERS` deep-equal, identical derived paths for all four servers, and
+`evaluateEnv` identical across **73 observations** (nothing set, everything set, each var alone,
+and four prefix-family variations per server). Then `mcp:doctor` output was diffed against a
+baseline captured beforehand — **byte-identical**, same exit code.
+
+#### The plan undercounted the consumers
+
+It lists five (`install-mcp`, `mcp-doctor`, `uninstall-mcp`, `update-mcp`, `lib/skills`). There
+are **seven**: `contract-snapshot.mjs`, `lib/cli.mjs` and `run-servers.mjs` also import it, and
+`uninstall-mcp` reaches it through `lib/cli.mjs` rather than directly. The shim is why that
+undercount cost nothing.
+
+It also omits `WORKSPACE_ROOT` from the export list, which is the one export with a real hazard
+attached — see below.
+
+#### `guard:deps` did not enforce the rule the plan validates against
+
+The plan's validation reads "`guard:deps` confirms **no server imports `@mcp/manifest`**
+(dependency rule 5)". Nothing enforced that: the tier matrix governs imports *between packages*,
+and a server is not a row in it. The server-scoped rules only covered `process.env` access and
+cross-server imports.
+
+So the rule was added — `servers/tooling-import`, an **error**, covering `@mcp/manifest` and
+`@mcp/cli`. Unlike the env rule there is no migration legitimately violating it, so the first
+occurrence is a defect rather than a countdown. Verified by injecting an import into
+`observe-mcp` and confirming the guard reported it, then removing it and confirming the count
+returned — a guard rule that has never failed is a guess.
+
+#### `WORKSPACE_ROOT` is the fragile export
+
+It counts `..` segments from its own module, so it depends on where that module sits at runtime.
+Three levels is right for both layouts — `dist/` when `scripts/` loads it, `src/` when the tests
+do — and it breaks *silently* if `dist` ever nests or the package moves. Type-checking cannot
+see it, so the suite asserts the resolved directory really is the workspace root by looking for
+`tsconfig.base.json` and the root `package.json` name.
+
+#### A pre-existing fresh-clone break, fixed in passing
+
+`npm run setup` was `node scripts/install-mcp.mjs` with no build step, while the per-server
+builds it runs need `packages/*/dist` — which is gitignored. So `setup` could never have worked
+on a fresh clone. It now runs `build:packages` first (`tsc -b`, ~1.3s incremental), as does
+`mcp:install`.
+
+The other entry points were left alone deliberately, `mcp:doctor` above all: a doctor that
+refuses to run because something does not compile is the wrong tool. Instead the shim catches
+`ERR_MODULE_NOT_FOUND` and re-throws with the actionable message, keeping the original as
+`cause`:
+
+```
+@mcp/manifest is not built yet. Run `npm run build:packages` from the workspace root
+(about 1s), then retry. Packages compile to gitignored dist/, so a fresh clone always
+needs this once.
+```
+
+#### Found while porting, left for S-36
+
+`tools` is a hand-maintained subset for the generated skill, not a real `tools/list`:
+`codebase-index-local` names **12 of 43**, `postgres-mcp` **16 of 17**. Deriving it is exactly
+what S-36 does, so the data was ported unchanged and the drift recorded in the package's README
+instead of being quietly patched here.
+
+Two guards and one test caught omissions during the work, each doing its job: the convention
+guard required the package README, `tier/unknown-package` required the TIER_RULES row, and
+`cli.test.ts` pins the package list exactly — so adding a package is a deliberate edit in three
+places rather than an accident in one.
 
 ## Phase J — Conventions and Housekeeping · 2/5
 
@@ -269,7 +345,7 @@ siblings; the missing `await` reads as an oversight, not a decision. Pinned by a
 |---|---|---|
 | S-42 Move servers into `servers/` | ⏭ skipped by decision | recorded in the plan |
 | S-43 Unify env prefixes | ❌ | still mixed: `CODEBASE_INDEX_*`, `PG_*`, `OBSERVE_*`, `BITBUCKET_*`, and `CH_*` shared by two servers |
-| S-44 Rename the `codebase-index-local` key | ❌ | key still in `scripts/lib/manifest.mjs` |
+| S-44 Rename the `codebase-index-local` key | ❌ | key still in `packages/manifest/src/servers.ts` |
 
 ---
 
@@ -284,8 +360,8 @@ from the moment S-32's last batch landed, and `legacy.listTools()` was already r
 The remaining blocker for S-41 is unchanged: eleven files in `codebase-index-mcp/src` are still
 over 600 lines.
 
-**Mechanical — Phase I and S-38.** Generators over `scripts/lib/manifest.mjs`, which is
-already the single source of truth. Low risk, no behaviour change, independently
+**Mechanical — S-35, S-36 and S-38.** Generators over `@mcp/manifest`, which is already the
+single source of truth and, since S-34, typed. Low risk, no behaviour change, independently
 verifiable by diffing generated output against the committed files.
 
 **Deferred by decision — Phase K.** S-43 and S-44 both break existing user configuration
