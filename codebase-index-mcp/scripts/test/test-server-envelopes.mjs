@@ -82,82 +82,62 @@ try {
   const listed = (await client.listTools()).tools;
   assert(listed.length === 43, "publishes 43 tools", `got ${listed.length}`);
 
-  // Annotations are the one wire-visible marker of migration progress: a legacy descriptor has
-  // none, and `defineTool` requires them, so a tool gains them exactly when S-32 moves it.
-  // Registry-vs-switch is otherwise invisible from out here, which is the point.
-  // Annotations are the one wire-visible marker of migration progress: a legacy descriptor has
-  // none, and `defineTool` requires them, so a tool gains them exactly when S-32 moves it.
-  // Registry-vs-switch is otherwise invisible from out here, which is the point.
-  const READ_ONLY_MIGRATED = [
-    "dead_code_scan",
-    "detect_changes",
-    "detect_circular_dependencies",
-    "find_entry_points",
-    "find_impact_files",
-    "find_implementations",
-    "find_package_consumers",
-    "find_symbol_at_line",
-    "get_call_chain",
-    "get_change_context",
-    "get_cross_repo_impact",
-    "get_dependency_graph",
-    "get_feature_bundle",
-    "get_file_context",
-    "get_file_summary",
-    "get_folder_summary",
-    "get_persistence_mapping",
-    "get_symbol_context_pack",
-    "get_symbol_detail",
-    "get_symbol_source",
-    "health_check",
-    "link_tests_to_source",
-    "list_repositories",
-    "orient",
-    "query_docs",
-    "query_graph",
-    "route_map",
-    "search_literals",
-    "search_regex",
-    "search_symbols",
-    "trace_execution_flow"
-  ];
-  // Not read-only, and the values are asserted exactly rather than loosely: these two are the
-  // first tools whose annotations are a judgement call, so a silent flip either way should fail.
-  // index_repository replaces symbols/edges and prunes on mode='full' — a replace, not an
-  // additive write — but only of derived state it can rebuild from source.
-  const WRITE_MIGRATED = {
+  // Every tool now carries annotations: S-32 finished, so all 43 are registry-served and
+  // `defineTool` requires them. The legacy descriptors had none, which made their arrival the
+  // one wire-visible marker of migration progress — registry-vs-switch is otherwise invisible
+  // from out here, which is the point.
+  //
+  // The tools whose annotations are NOT the plain read-only default are asserted field by field.
+  // Those are the judgement calls, and a silent flip in either direction should fail here rather
+  // than change what a host prompts the user to confirm.
+  const NON_DEFAULT = {
+    // Replaces symbols/edges and prunes on mode='full' — a replace, not an additive write — but
+    // only of derived state it can rebuild from source.
     index_repository: { readOnlyHint: false, idempotentHint: true, destructiveHint: true, openWorldHint: false },
-    watch_repo: { readOnlyHint: false, idempotentHint: true, destructiveHint: false, openWorldHint: false }
+    // Starts/stops a watcher: server state, but removes nothing.
+    watch_repo: { readOnlyHint: false, idempotentHint: true, destructiveHint: false, openWorldHint: false },
+    // The only tool that edits the user's source files.
+    refactor_replace_apply: { readOnlyHint: false, idempotentHint: false, destructiveHint: true, openWorldHint: false },
+    // Destructive because it overwrites working-tree files too — being the undo does not make it
+    // safe to invoke unprompted.
+    refactor_replace_rollback: { readOnlyHint: false, idempotentHint: true, destructiveHint: true, openWorldHint: false },
+    // Preview/dry-run: writes no source, but mints a previewId + approval token per call.
+    refactor_replace_preview: { readOnlyHint: true, idempotentHint: false, destructiveHint: false, openWorldHint: false },
+    rename_assist: { readOnlyHint: true, idempotentHint: false, destructiveHint: false, openWorldHint: false },
+    refactor_symbol_migration: { readOnlyHint: true, idempotentHint: false, destructiveHint: false, openWorldHint: false },
+    change_value_representation: { readOnlyHint: true, idempotentHint: false, destructiveHint: false, openWorldHint: false }
   };
-  const MIGRATED = [...READ_ONLY_MIGRATED, ...Object.keys(WRITE_MIGRATED)].sort();
 
-  const annotated = listed.filter((t) => t.annotations !== undefined).map((t) => t.name).sort();
-  assert(
-    annotated.join(",") === MIGRATED.join(","),
-    `exactly the ${MIGRATED.length} migrated tools carry annotations`,
-    `got: ${annotated.join(",")}`
-  );
-  assert(
-    listed
-      .filter((t) => READ_ONLY_MIGRATED.includes(t.name))
-      .every(
-        (t) =>
-          t.annotations.readOnlyHint === true &&
-          t.annotations.idempotentHint === true &&
-          t.annotations.destructiveHint === false &&
-          t.annotations.openWorldHint === false
-      ),
-    "every migrated read tool is annotated readOnly + idempotent + local",
-    JSON.stringify(listed.find((t) => t.name === "health_check")?.annotations)
-  );
-  for (const [name, expected] of Object.entries(WRITE_MIGRATED)) {
+  const unannotated = listed.filter((t) => t.annotations === undefined).map((t) => t.name);
+  assert(unannotated.length === 0, "all 43 tools carry annotations", unannotated.join(","));
+
+  for (const [name, expected] of Object.entries(NON_DEFAULT)) {
     const actual = listed.find((t) => t.name === name)?.annotations;
+    const keys = Object.keys(expected).sort();
     assert(
-      JSON.stringify(actual, Object.keys(expected).sort()) === JSON.stringify(expected, Object.keys(expected).sort()),
+      JSON.stringify(actual, keys) === JSON.stringify(expected, keys),
       `${name} annotations are exactly as declared`,
       `got ${JSON.stringify(actual)}`
     );
   }
+
+  const defaults = listed.filter((t) => !(t.name in NON_DEFAULT));
+  assert(
+    defaults.length === 43 - Object.keys(NON_DEFAULT).length,
+    `${43 - Object.keys(NON_DEFAULT).length} tools use the plain read-only annotation`,
+    `got ${defaults.length}`
+  );
+  assert(
+    defaults.every(
+      (t) =>
+        t.annotations.readOnlyHint === true &&
+        t.annotations.idempotentHint === true &&
+        t.annotations.destructiveHint === false &&
+        t.annotations.openWorldHint === false
+    ),
+    "every remaining tool is annotated readOnly + idempotent + local",
+    JSON.stringify(defaults.find((t) => t.annotations.readOnlyHint !== true)?.name)
+  );
 
   // ── Unknown tool: an isError RESULT, not a JSON-RPC error ────────────────────
   // The switch's `default:` throws McpError(MethodNotFound) and the entry point's
@@ -201,6 +181,25 @@ try {
     txt(invalidCompact).includes("\n  \"code\""),
     "error stays pretty-printed even at profile=nano",
     JSON.stringify(txt(invalidCompact))
+  );
+
+  // A failed apply reports the envelope — S-31 changed this, deliberately.
+  //
+  // The pre-SDK switch used a plain `return handleRefactorReplaceApply(...)` inside its try, and
+  // inside a try a plain return does NOT route a rejection to the catch. Measured against the
+  // build at a441500, a bad previewId came back as a raw JSON-RPC error, while its two siblings
+  // (which used `return await`) returned the normal envelope. The PolicyViolationError code —
+  // PREVIEW_EXPIRED, AMBIGUITY_THRESHOLD_EXCEEDED — was lost with it. All three now await.
+  const badApply = await client.callTool({
+    name: "refactor_replace_apply",
+    arguments: { previewId: "does-not-exist", approvalToken: "x" }
+  });
+  assert(badApply.isError === true, "a failed apply is an isError result, not a JSON-RPC error");
+  const badApplyBody = js(badApply);
+  assert(
+    badApplyBody?.code === "MCP_ERROR" && UUID_RE.test(badApplyBody?.requestId ?? ""),
+    "a failed apply carries the standard { code, message, requestId } envelope",
+    JSON.stringify(badApplyBody)
   );
 
   // ── notifications/progress ───────────────────────────────────────────────────

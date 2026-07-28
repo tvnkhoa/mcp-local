@@ -46,8 +46,7 @@ import {
   asArgsRecord,
   emitTelemetry
 } from "./response/responseFormatter.js";
-import type { DescriptorLimits } from "./tools/descriptors/limits.js";
-import { legacyToolDescriptors } from "./tools/descriptors/index.js";
+import type { DescriptorLimits } from "./tools/limits.js";
 import type { LegacyDispatch } from "./tools/legacyDispatch.js";
 import { maybeAutoActivateWatchFromArgs } from "./watch/watchLifecycle.js";
 
@@ -150,7 +149,8 @@ export function createCodebaseIndexServer(options: CodebaseIndexServerOptions): 
    * unknown tools is a decision that step has to make explicitly.
    */
   const legacy: LegacyBridge = {
-    listTools: () => legacyToolDescriptors(options.limits),
+    // Nothing left to advertise: S-32 moved all 43 descriptors into their tool definitions.
+    listTools: () => [],
     has: () => true,
     // `.then` rather than `await`: a rejection must stay a rejection so the bridge reports
     // it and `formatError` renders the envelope.

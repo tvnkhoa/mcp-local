@@ -2,8 +2,8 @@
  * codebase-index-mcp entry point.
  *
  * Configuration, construction, and start-up — nothing else. The protocol wiring lives in
- * `server.ts`, the pre-SDK tool `switch` in `tools/legacyDispatch.ts`, and the published
- * `tools/list` table in `tools/descriptors/`.
+ * `server.ts`, the unknown-tool envelope in `tools/legacyDispatch.ts`, and the published
+ * `tools/list` table in `tools/` (one file per S-32 migration batch).
  *
  * This file owns the env, and that is why the pieces below are injected rather than
  * imported by the modules that need them: `server.ts` must not reach back for the store or
@@ -175,7 +175,8 @@ const handle = createCodebaseIndexServer({
   limits,
   store,
   tools: buildTools({ limits, buildContext: buildHandlerContext }),
-  dispatchLegacyTool: createLegacyDispatcher({ limits, buildContext: buildHandlerContext }),
+  // Serves no tools any more — only the unknown-tool envelope. See tools/legacyDispatch.ts.
+  dispatchLegacyTool: createLegacyDispatcher(),
   buildHandlerContext,
   toolContextStorage,
   renderResult: asText,

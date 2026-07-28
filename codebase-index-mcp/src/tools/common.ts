@@ -1,22 +1,23 @@
 /**
  * Shared vocabulary for codebase-index-mcp's tool declarations (S-32).
  *
- * The tool table is split one file per migration batch, mirroring `descriptors/`, so each
- * batch is a symmetric diff: add `tools/<batch>.ts`, delete `descriptors/<batch>.ts`, delete
- * that batch's branches from `legacyDispatch.ts`. The migration plan wrote this step as 43
- * separate files; postgres-mcp — the only already-migrated multi-tool server here — grouped
- * its 17 along the boundary its handler modules already used, and that reads better than 43
- * files each re-importing the same dependency bundle.
+ * The tool table is one file per S-32 migration batch. While the migration ran, each batch was
+ * a symmetric diff — add `tools/<batch>.ts`, delete `descriptors/<batch>.ts`, delete that
+ * batch's `switch` branches — which is why the grouping follows the batches rather than the
+ * domains. The migration plan wrote this step as 43 separate files; postgres-mcp, the only
+ * other migrated multi-tool server here, grouped its 17 along the boundary its handler modules
+ * already used, and that reads better than 43 files each re-importing the same dependency
+ * bundle.
  */
 
 import type { ToolAnnotations, ToolCallResult, JsonSchemaNode } from "@mcp/sdk";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 
 import type { HandlerContext } from "../handlers/handlerContext.js";
-import type { DescriptorLimits } from "./descriptors/limits.js";
+import type { DescriptorLimits } from "./limits.js";
 
 export interface CodebaseIndexDeps {
-  /** The env-derived bounds the JSON Schemas advertise. Same object the descriptors get. */
+  /** The env-derived bounds the JSON Schemas advertise. */
   readonly limits: DescriptorLimits;
   /**
    * Rebuilt per call, as the pre-SDK dispatcher did. The handlers reach the store, the watch
@@ -46,8 +47,8 @@ export function raw(result: CallToolResult): ToolCallResult {
  *
  * Note these are NEW on the wire. The pre-SDK descriptors carried no annotations at all, so a
  * migrated tool gains an `annotations` object in `tools/list` — a real, deliberate, spec-shaped
- * contract addition, one tool at a time, and the reason `contracts/codebase-index-local.json`
- * changes in this commit.
+ * contract addition, made one batch at a time, and the reason
+ * `contracts/codebase-index-local.json` gained annotations across S-32.
  */
 export const readsGraph: ToolAnnotations = {
   readOnly: true,
@@ -93,6 +94,50 @@ export const controlsWatcher: ToolAnnotations = {
   readOnly: false,
   idempotent: true,
   destructive: false,
+  openWorld: false
+};
+
+/**
+ * A refactor step that computes a plan and writes nothing to the working tree.
+ *
+ * `refactor_replace_preview`, `rename_assist`, and the two dry-run-by-default rewriters. Not
+ * `readsGraph`, because these are not free of effect: each one persists a preview row plus an
+ * HMAC approval token that a later `refactor_replace_apply` will accept. Nothing in the repo
+ * changes, so `readOnly: true` is still the honest hint for a host deciding whether to
+ * confirm — but `idempotent: false`, because every call mints a new previewId.
+ */
+export const previewsChange: ToolAnnotations = {
+  readOnly: true,
+  idempotent: false,
+  destructive: false,
+  openWorld: false
+};
+
+/**
+ * `refactor_replace_apply` — the one tool here that edits source files on disk.
+ *
+ * Destructive without qualification: unlike `index_repository`, what it overwrites is the
+ * user's code, not derived state. Not idempotent — a second apply of the same previewId is
+ * rejected, and the preview is consumed.
+ */
+export const appliesChange: ToolAnnotations = {
+  readOnly: false,
+  idempotent: false,
+  destructive: true,
+  openWorld: false
+};
+
+/**
+ * `refactor_replace_rollback` — restores the files an apply changed.
+ *
+ * Destructive for the same reason apply is: it overwrites working-tree files. That it is the
+ * *undo* does not make it safe to invoke unprompted, since anything written after the apply is
+ * overwritten too. Idempotent: rolling the same rollbackId back twice lands on the same state.
+ */
+export const revertsChange: ToolAnnotations = {
+  readOnly: false,
+  idempotent: true,
+  destructive: true,
   openWorld: false
 };
 

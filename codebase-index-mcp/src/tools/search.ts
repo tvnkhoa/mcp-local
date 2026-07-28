@@ -3,7 +3,7 @@
  * suites pin (S-32).
  *
  * Same construction as batch 1 and for the same reasons: zod schemas imported from
- * `schemas/toolSchemas.ts`, JSON Schemas moved from `descriptors/search.ts` unedited, handlers
+ * `schemas/toolSchemas.ts`, JSON Schemas moved from the descriptor table unedited, handlers
  * called unchanged, `rawResult: true` so each keeps resolving its own profile and emitting its
  * own telemetry. See `readMetadata.ts` for why that last point is load-bearing rather than
  * merely convenient.

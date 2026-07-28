@@ -5,8 +5,9 @@ Phase H's row updated after the S-28 SDK work landed. Every
 row cites the artifact that proves it. Where no artifact was found, the row says so
 rather than guessing.
 
-**28 of 44 done · 1 partial · 1 skipped by decision · 14 open.** Phase H is under way:
-S-31 landed 2026-07-28 on top of its SDK prerequisite (`renderResult` + `wrapCall`).
+**29 of 44 done · 1 partial · 1 skipped by decision · 13 open.** Phase H is nearly done:
+S-31 and S-32 both landed 2026-07-28. All 43 codebase-index tools are on the SDK registry and
+the `switch` is down to its unknown-tool branch; only S-33 is left.
 
 S-31 also found `benchmark:plan:check` — a hard CI step — **already failing on `main`**, for
 two reasons that had nothing to do with the migration. Both fixed; see
@@ -121,13 +122,13 @@ S-41 — flipping now would turn 34 warnings into 34 build failures.
 | S-29 Break the `graphStore`→`regexSearch` cycle | ✅ | `RegexSearchStore` interface in `src/regexSearch.ts`; static scan reports **0 cycles** across 66 modules |
 | S-30 Split `graphStore.ts` | ✅ | `find_impact_files` fix + split (1,928 → 831 across 4 modules) + a declared, reported guard exemption for the façade — see below |
 
-## Phase H — codebase-index SDK Migration · 1/3
+## Phase H — codebase-index SDK Migration · 2/3
 
 | Step | Status | Notes |
 |---|---|---|
-| S-31 Install the coexistence adapter | ✅ | `a441500` (descriptor table) + this commit (`createMcpServer` + bridge). Contract byte-identical, 43 tools |
-| S-32 Migrate 43 tools in 5 batches | ❌ | batches already encoded in `src/tools/descriptors/` |
-| S-33 Delete the legacy dispatch switch | ❌ | must decide the unknown-tool envelope explicitly — see below |
+| S-31 Install the coexistence adapter | ✅ | `a441500` (descriptor table) + `a281358` (`createMcpServer` + bridge). Contract byte-identical; **one behaviour change found later, see the S-32 note** |
+| S-32 Migrate 43 tools in 5 batches | ✅ | `5b8faeb` · `37c2c3e` · `ed145f1` · `ef20f67` + this commit. All 43 on the registry; `switch` reduced to the unknown-tool branch |
+| S-33 Delete the legacy dispatch switch | ❌ | the switch is already empty — what is left is a **decision**, see below |
 
 **Prerequisite done.** The three capabilities `@mcp/sdk` was missing shipped as two hooks
 — `renderResult` and `wrapCall` — with 15 tests (sdk 50 → 65). See `s26-s29-plan.md` §S-28.
@@ -176,6 +177,69 @@ was reverted — registering it for real is S-32 batch 1.
 One SDK gap this found: `ResourceProvider.list()` took no cursor, so migrating would have
 silently dropped this server's "any cursor → empty page" behaviour. The parameter is now
 optional, which keeps postgres-mcp's zero-argument provider valid.
+
+### S-32 · all 43 tools, in five batches
+
+Five commits, in the plan's risk order: read/metadata (8) `5b8faeb`, search (9) `37c2c3e`,
+graph/impact (12) `ed145f1`, indexing/watch (4) `ef20f67`, refactor (10) last.
+
+Nothing was rewritten. Each tool pairs the zod schema it always had — **imported** from
+`schemas/toolSchemas.ts`, so validation, `.strict()` rejection, defaults and the `.refine()`
+cross-field rules are the same objects — with the JSON Schema moved out of the descriptor table
+unedited. Every batch's contract diff was checked tool by tool, not just by count: 43 → 43,
+names identical, only the migrated tools changed, and their only change was gaining
+`annotations`.
+
+**Every tool is `rawResult: true`, and that is a finding rather than a shortcut.** The handlers
+resolve their own profile through `resolveResponseProfile(profile, compact)`; dispatch resolves
+it from the raw arguments. Those disagree. `list_repositories` declares
+`profile: …default("compact").optional()`, and `.optional()` short-circuits an absent value
+*before* the default applies — so `profile` reaches the handler as `undefined` and it answers at
+**standard**. Letting dispatch serialize would have answered at `compact`: same tool, smaller
+response, and neither `tools/list` nor a response replay could show which was intended.
+`get_file_context` has the same exposure via the legacy `compact: true` boolean. There is now a
+test asserting `list_repositories` reports `profile=standard` in its telemetry line — the only
+place the resolved profile is observable at all. Converting a handler to return a plain payload
+is a separate, per-handler change; `renderResult` is the seam waiting for it.
+
+**Annotations are a real contract addition.** Legacy descriptors carried none and `defineTool`
+requires them, so all 43 tools gained an `annotations` object across S-32. Deliberate, and the
+same outcome postgres-mcp's migration had. Most are `readOnly + idempotent + local`;
+`openWorld: false` throughout, because this server touches only the local filesystem and a local
+SQLite file — the one field where copying postgres-mcp's presets would have been wrong. The
+judgement calls are documented on the presets in `tools/common.ts` and asserted field-by-field:
+
+| tool | readOnly | idempotent | destructive | why |
+|---|---|---|---|---|
+| `index_repository` | no | yes | **yes** | replaces symbols/edges, prunes on `mode:"full"` — but only derived state, rebuildable from source |
+| `watch_repo` | no | yes | no | starts/stops a watcher; removes nothing. A running watcher later triggers re-indexes, but the hint describes the *call* |
+| `refactor_replace_apply` | no | no | **yes** | the only tool that edits the user's source files |
+| `refactor_replace_rollback` | no | yes | **yes** | overwrites working-tree files too; being the undo does not make it safe unprompted |
+| `refactor_replace_preview`, `rename_assist`, `refactor_symbol_migration`, `change_value_representation` | yes | **no** | no | write no source, but mint a previewId + approval token per call |
+
+#### Correction: S-31 did change one behaviour
+
+The S-31 commit claimed the migration was provably behaviour-preserving. That held for the
+contract and for everything the 31 assertions covered, but it missed one path, found while
+migrating the refactor batch.
+
+The pre-SDK `switch` used `return await` for `refactor_symbol_migration` and
+`change_value_representation` — with a comment explaining why — but a plain `return` for
+`refactor_replace_apply`. Inside a `try`, a plain `return` of a promise does **not** route its
+rejection to the `catch`. `handleRefactorReplaceApply` rejects on four reachable paths (unknown
+previewId, `PREVIEW_EXPIRED`, `AMBIGUITY_THRESHOLD_EXCEEDED`, unknown repo).
+
+Measured, not reasoned — the same call against a build of `a441500` and against current:
+
+| build | `refactor_replace_apply`, bad previewId | `refactor_symbol_migration` (used `return await`) |
+|---|---|---|
+| `a441500` (pre-S-31) | raw **JSON-RPC error** | `isError` envelope |
+| current | `isError` envelope | `isError` envelope |
+
+S-31 moved the try/catch into the SDK's dispatch, which awaits the bridge — so all three now
+report the envelope. **Kept, as a fix.** The old behaviour lost the `PolicyViolationError` code
+into an opaque protocol error and was inconsistent with the other 42 tools *and* with its own two
+siblings; the missing `await` reads as an oversight, not a decision. Pinned by a test now.
 
 ## Phase I — Manifest Generation · 0/3
 
@@ -382,14 +446,28 @@ runs' worth of evidence.
 ## Gate status at time of writing
 
 ```
-verify:all            exit 0 — 4/4 servers, test phase 60.1s
-guards                0 errors, 34 warnings, 1 accepted exemption, 362 files
-                      (index.ts lost its size warning: 556 → 211 lines. Its
-                       env/direct-access warning is unchanged and pre-existing)
+verify:all            exit 0 — 4/4 servers, test phase 65.9s
+guards                0 errors, 34 warnings, 1 accepted exemption, 364 files
+                      (index.ts 556 → 214 lines, no size warning; its
+                       env/direct-access warning is pre-existing and unchanged)
 4/4 servers           build · typecheck · test
-codebase-index tests  28/28 (was 27 — test:server-envelopes added)
-contracts:check       4/4 — 43 / 17 / 8 / 8 tools, byte-identical
-smoke                 ok
+codebase-index tests  28/28 — test:server-envelopes grew 31 → 44 assertions
+contracts:check       4/4 — 43 / 17 / 8 / 8 tools. codebase-index now carries
+                      annotations on all 43; descriptions + schemas unchanged
+smoke                 exit 0
 benchmark:plan:check  exit 0 — savings 66.89% (floor 40), snapshot clean,
                       graph accuracy 100% (floor 60). Was exit 4 at a441500.
 ```
+
+### What S-33 actually has to do
+
+The switch is already empty — S-32 removed every `case`. `tools/legacyDispatch.ts` is 34 lines
+holding one `throw`, and it exists for one reason: it is this server's unknown-tool answer, an
+`isError` result carrying `MCP_ERROR` and `-32601`. The SDK's own path returns a `not_found`
+`PlatformError` instead — different payload, different code. bitbucket-mcp accepted exactly that
+delta in its migration (`sdk.test`: *"DELTA: an unknown tool now reports not_found instead of
+mcp_error"*), so the precedent exists.
+
+So S-33 is a decision, not a deletion: keep the file as the envelope keeper, or adopt
+`not_found` and record the contract change. Deleting it without choosing is the one wrong
+option — and the reason `LegacyBridge.has()` still answers `true` unconditionally.

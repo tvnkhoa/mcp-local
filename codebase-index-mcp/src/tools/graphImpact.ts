@@ -3,7 +3,7 @@
  * (S-32).
  *
  * Same construction as batches 1 and 2: zod schemas imported from `schemas/toolSchemas.ts`,
- * JSON Schemas moved from `descriptors/graphImpact.ts` unedited, handlers called unchanged,
+ * JSON Schemas moved from the descriptor table unedited, handlers called unchanged,
  * `rawResult: true` so each keeps resolving its own profile and emitting its own telemetry.
  *
  * All twelve are read-only. `detect_changes` shells out to git and `find_impact_files` runs the
