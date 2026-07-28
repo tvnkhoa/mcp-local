@@ -9,7 +9,14 @@
 
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
+import {
+  CallToolRequestSchema,
+  ErrorCode,
+  ListResourcesRequestSchema,
+  ListToolsRequestSchema,
+  McpError,
+  ReadResourceRequestSchema
+} from "@modelcontextprotocol/sdk/types.js";
 
 import type { Logger, ResponseProfile } from "@mcp/core";
 import { DEFAULT_RESPONSE_PROFILE, createLogger } from "@mcp/core";
@@ -21,6 +28,7 @@ import type { Lifecycle } from "./lifecycle.js";
 import { createLifecycle } from "./lifecycle.js";
 import type { LegacyBridge, ToolRegistry } from "./registry.js";
 import { createToolRegistry } from "./registry.js";
+import type { ResourceProvider } from "./resources.js";
 import type { SerializeOptions } from "./responses.js";
 import type { AnyToolDefinition } from "./toolDefinition.js";
 
@@ -44,6 +52,12 @@ export interface McpServerOptions {
    * SDK does not rewrite every error response.
    */
   readonly formatError?: DispatchDeps["formatError"];
+  /**
+   * Read-addressable state served over `resources/list` and `resources/read`.
+   * Supplying one is what declares the `resources` capability — a server that
+   * has none must not advertise it.
+   */
+  readonly resources?: ResourceProvider;
 }
 
 export interface McpServerHandle {
@@ -62,9 +76,11 @@ export function createMcpServer(options: McpServerOptions): McpServerHandle {
   });
   const lifecycle = createLifecycle(logger);
 
+  const resources = options.resources;
+
   const server = new Server(
     { name: options.name, version: options.version },
-    { capabilities: { tools: {} } }
+    { capabilities: { tools: {}, ...(resources === undefined ? {} : { resources: {} }) } }
   );
 
   server.setRequestHandler(ListToolsRequestSchema, async () => ({
@@ -81,6 +97,24 @@ export function createMcpServer(options: McpServerOptions): McpServerHandle {
     });
     return { ...result };
   });
+
+  if (resources !== undefined) {
+    server.setRequestHandler(ListResourcesRequestSchema, async () => ({
+      resources: (await resources.list()).map((descriptor) => ({ ...descriptor }))
+    }));
+
+    server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
+      const uri = request.params.uri;
+      const contents = await resources.read(uri);
+      if (contents === undefined) {
+        // Distinct from a read that failed: the URI is not one this server
+        // routes at all, which is an invalid parameter rather than an internal
+        // fault. Anything the provider throws propagates instead.
+        throw new McpError(ErrorCode.InvalidParams, `Unsupported resource URI: ${uri}`);
+      }
+      return { contents: contents.map((content) => ({ ...content })) };
+    });
+  }
 
   let restoreConsole: (() => void) | undefined;
   let detachSignals: (() => void) | undefined;

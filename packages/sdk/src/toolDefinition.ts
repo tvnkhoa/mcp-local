@@ -62,6 +62,24 @@ export interface ToolDefinition<I = unknown, O = unknown> {
   readonly annotations: ToolAnnotations;
   readonly guards: readonly Guard[];
   readonly limits: LimitPolicy | undefined;
+  /**
+   * The handler returns a finished `ToolCallResult` and dispatch must not
+   * serialize it.
+   *
+   * The pipeline's last step assumes the handler yields a *payload*. A server
+   * arriving with handlers that already build their own envelope — a custom
+   * error shape carrying `requestId` and `environment`, say, which a
+   * `PlatformError` cannot express — would otherwise have to rewrite every one
+   * of them to adopt the SDK, which is precisely the behaviour change a
+   * migration must not make.
+   *
+   * So the escape hatch is explicit rather than inferred from the return shape:
+   * a payload that happens to have a `content` array must not be silently
+   * treated as a wire result. It also reads as migration debt — each `true` here
+   * marks a handler that still owns its own serialization and can be converted
+   * later, one at a time, without touching the tool table.
+   */
+  readonly rawResult: boolean;
   readonly handler: ToolHandler<I, O>;
 }
 

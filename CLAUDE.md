@@ -162,6 +162,7 @@ When analyzing this codebase, use the `codebase-index-local` MCP tools **before*
 - `docs/migration/normalization-report.md` — the 48-file in-place folder normalization
 - `docs/refactor/duplication-extraction-report.md` — the shared-component extraction, its measured behaviour deltas, and the one cluster deliberately left alone
 - `docs/migration/s06-s23-notes.md` — contract snapshots + the `bitbucket-mcp` SDK pilot; read this before migrating another server
+- `docs/migration/s24-notes.md` — the `postgres-mcp` SDK migration: the call-replay method, and why the SDK gained `resources` and `rawResult`
 - `contracts/README.md` — what the golden `tools/list` snapshots are and how to update them
 
 **Per-server:**

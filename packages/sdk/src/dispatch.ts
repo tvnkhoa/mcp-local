@@ -176,7 +176,11 @@ async function dispatchInner(
       ctx.logger.warn("tool_error", { code: outcome.error.code });
       return renderError(deps, outcome.error, outcome.error, profile);
     }
-    return asText(outcome.value, profile, serialize);
+    // A rawResult tool has already built its envelope — serializing again would
+    // wrap a CallToolResult inside another one.
+    return tool.rawResult
+      ? (outcome.value as ToolCallResult)
+      : asText(outcome.value, profile, serialize);
   } catch (cause) {
     const error = toPlatformError(cause, `Tool "${name}" failed unexpectedly.`);
     ctx.logger.error("tool_threw", { code: error.code, detail: String(cause) });

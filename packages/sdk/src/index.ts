@@ -21,8 +21,10 @@ export type {
 } from "./toolDefinition.js";
 export { toToolDescriptor } from "./toolDefinition.js";
 
-export type { ToolSpec } from "./defineTool.js";
+export type { RawToolSpec, ToolSpec } from "./defineTool.js";
 export { annotations, defineTool } from "./defineTool.js";
+
+export type { ResourceContent, ResourceDescriptor, ResourceProvider } from "./resources.js";
 
 export { defineGuard, featureFlagGuard, immutableTargetGuard, runGuards } from "./guards.js";
 

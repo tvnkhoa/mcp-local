@@ -10,13 +10,14 @@
 import type { LimitPolicy } from "@mcp/core";
 import type { ZodType, infer as ZodInfer } from "zod";
 
+import type { ToolCallResult } from "./responses.js";
 import type { JsonSchemaObject } from "./schema.js";
 import type { Guard, ToolAnnotations, ToolDefinition, ToolHandler } from "./toolDefinition.js";
 
 /** snake_case, must start with a letter. Matches every existing platform tool. */
 const TOOL_NAME_PATTERN = /^[a-z][a-z0-9]*(_[a-z0-9]+)*$/;
 
-export interface ToolSpec<S extends ZodType, O> {
+interface ToolSpecBase<S extends ZodType> {
   readonly name: string;
   readonly title?: string;
   readonly description: string;
@@ -25,10 +26,30 @@ export interface ToolSpec<S extends ZodType, O> {
   readonly annotations: ToolAnnotations;
   readonly guards?: readonly Guard[];
   readonly limits?: LimitPolicy;
+}
+
+export interface ToolSpec<S extends ZodType, O> extends ToolSpecBase<S> {
+  /** Omitted or false: the handler returns a payload for dispatch to serialize. */
+  readonly rawResult?: false;
   readonly handler: ToolHandler<ZodInfer<S>, O>;
 }
 
-export function defineTool<S extends ZodType, O>(spec: ToolSpec<S, O>): ToolDefinition<ZodInfer<S>, O> {
+/**
+ * A tool whose handler builds the wire result itself. See
+ * {@link ToolDefinition.rawResult} for why this exists and when to retire it.
+ */
+export interface RawToolSpec<S extends ZodType> extends ToolSpecBase<S> {
+  readonly rawResult: true;
+  readonly handler: ToolHandler<ZodInfer<S>, ToolCallResult>;
+}
+
+export function defineTool<S extends ZodType>(
+  spec: RawToolSpec<S>
+): ToolDefinition<ZodInfer<S>, ToolCallResult>;
+export function defineTool<S extends ZodType, O>(spec: ToolSpec<S, O>): ToolDefinition<ZodInfer<S>, O>;
+export function defineTool<S extends ZodType, O>(
+  spec: ToolSpec<S, O> | RawToolSpec<S>
+): ToolDefinition<ZodInfer<S>, O> {
   if (!TOOL_NAME_PATTERN.test(spec.name)) {
     throw new Error(
       `defineTool: tool name "${spec.name}" must be snake_case (e.g. "run_read_query")`
@@ -62,7 +83,8 @@ export function defineTool<S extends ZodType, O>(spec: ToolSpec<S, O>): ToolDefi
     annotations: Object.freeze({ ...spec.annotations }),
     guards: Object.freeze([...(spec.guards ?? [])]),
     limits: spec.limits,
-    handler: spec.handler
+    rawResult: spec.rawResult === true,
+    handler: spec.handler as ToolHandler<ZodInfer<S>, O>
   };
 
   return Object.freeze(definition);

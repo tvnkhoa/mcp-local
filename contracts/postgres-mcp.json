@@ -3,6 +3,12 @@
   "toolCount": 17,
   "tools": [
     {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": true,
+        "readOnlyHint": true
+      },
       "description": "Diff schema (and optionally row counts) between two environments — schema-drift / deploy check.",
       "inputSchema": {
         "additionalProperties": false,
@@ -35,6 +41,12 @@
       "name": "compare_environments"
     },
     {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": true,
+        "readOnlyHint": true
+      },
       "description": "Compare a table's data between two environments via row count + order-independent checksum (deploy/seed verification).",
       "inputSchema": {
         "additionalProperties": false,
@@ -78,6 +90,12 @@
       "name": "data_diff"
     },
     {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": true,
+        "readOnlyHint": true
+      },
       "description": "Describe columns for a table.",
       "inputSchema": {
         "additionalProperties": false,
@@ -110,6 +128,12 @@
       "name": "describe_table"
     },
     {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": true,
+        "readOnlyHint": true
+      },
       "description": "List foreign-key relationships (optionally for one table) — useful for JOINs and write/migration impact.",
       "inputSchema": {
         "additionalProperties": false,
@@ -135,6 +159,12 @@
       "name": "get_table_relationships"
     },
     {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": true,
+        "readOnlyHint": true
+      },
       "description": "Check MCP server and PostgreSQL connectivity for an environment.",
       "inputSchema": {
         "additionalProperties": false,
@@ -158,6 +188,12 @@
       "name": "health_check"
     },
     {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
       "description": "List configured database environments, their write capability, and masked connection info.",
       "inputSchema": {
         "additionalProperties": false,
@@ -177,6 +213,12 @@
       "name": "list_environments"
     },
     {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": true,
+        "readOnlyHint": true
+      },
       "description": "List tables in a schema (default: public).",
       "inputSchema": {
         "additionalProperties": false,
@@ -202,6 +244,12 @@
       "name": "list_tables"
     },
     {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": false
+      },
       "description": "Generate a new EF Core migration (dotnet ef migrations add). Does NOT touch the database; returns generated file paths to edit.",
       "inputSchema": {
         "additionalProperties": false,
@@ -231,6 +279,12 @@
       "name": "migration_add"
     },
     {
+      "annotations": {
+        "destructiveHint": true,
+        "idempotentHint": false,
+        "openWorldHint": true,
+        "readOnlyHint": false
+      },
       "description": "Apply pending migrations (dotnet ef database update) after a migration_preview. Drift-guarded + verifies post-schema.",
       "inputSchema": {
         "additionalProperties": false,
@@ -263,6 +317,12 @@
       "name": "migration_apply"
     },
     {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": true,
+        "readOnlyHint": true
+      },
       "description": "Run the idempotent migration script inside a rolled-back transaction to catch SQL errors before applying.",
       "inputSchema": {
         "additionalProperties": false,
@@ -285,6 +345,12 @@
       "name": "migration_dry_run"
     },
     {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": true,
+        "readOnlyHint": true
+      },
       "description": "Snapshot current schema + return the pending migration SQL delta and an approval token. Full idempotent script available at profile:verbose.",
       "inputSchema": {
         "additionalProperties": false,
@@ -307,6 +373,12 @@
       "name": "migration_preview"
     },
     {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": true,
+        "readOnlyHint": true
+      },
       "description": "Show applied vs pending EF Core migrations for an environment. Requires PG_MIGRATION_ENABLED.",
       "inputSchema": {
         "additionalProperties": false,
@@ -329,6 +401,12 @@
       "name": "migration_status"
     },
     {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": true,
+        "readOnlyHint": true
+      },
       "description": "Quick table profile: estimated row count, per-column stats (distinct/null), and a small sample.",
       "inputSchema": {
         "additionalProperties": false,
@@ -366,6 +444,12 @@
       "name": "profile_table"
     },
     {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": true,
+        "readOnlyHint": true
+      },
       "description": "Run a read-only SQL query with guardrails.",
       "inputSchema": {
         "additionalProperties": false,
@@ -430,6 +514,12 @@
       "name": "run_read_query"
     },
     {
+      "annotations": {
+        "destructiveHint": true,
+        "idempotentHint": false,
+        "openWorldHint": true,
+        "readOnlyHint": false
+      },
       "description": "Apply a previously previewed write using its previewId + approvalToken. Commits the change and returns a rollbackId.",
       "inputSchema": {
         "additionalProperties": false,
@@ -462,6 +552,12 @@
       "name": "write_apply"
     },
     {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": true,
+        "readOnlyHint": true
+      },
       "description": "Preview an INSERT/UPDATE/DELETE (dry-run, rolled back) and get an approval token. Requires PG_WRITE_ENABLED. UPDATE/DELETE must have WHERE unless allowFullTable.",
       "inputSchema": {
         "additionalProperties": false,
@@ -513,6 +609,12 @@
       "name": "write_preview"
     },
     {
+      "annotations": {
+        "destructiveHint": true,
+        "idempotentHint": false,
+        "openWorldHint": true,
+        "readOnlyHint": false
+      },
       "description": "Roll back a previously applied write using its rollbackId (restores captured rows).",
       "inputSchema": {
         "additionalProperties": false,

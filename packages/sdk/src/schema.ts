@@ -12,6 +12,8 @@ export interface JsonSchemaNode {
   readonly type?: string | readonly string[];
   readonly description?: string;
   readonly enum?: readonly (string | number | boolean)[];
+  /** Union of permitted shapes. A node with `anyOf` normally carries no `type`. */
+  readonly anyOf?: readonly JsonSchemaNode[];
   readonly items?: JsonSchemaNode;
   readonly properties?: Readonly<Record<string, JsonSchemaNode>>;
   readonly required?: readonly string[];
@@ -92,6 +94,19 @@ export const schema = {
 
   array(items: JsonSchemaNode, description?: string, extra: Pick<JsonSchemaNode, "minItems" | "maxItems"> = {}): JsonSchemaNode {
     return compact({ type: "array", items, description, ...extra });
+  },
+
+  /**
+   * A union of permitted shapes, e.g. a scalar SQL parameter. Emits no `type`:
+   * the members carry their own, and a sibling `type` would narrow the union.
+   */
+  anyOf(members: readonly JsonSchemaNode[], description?: string): JsonSchemaNode {
+    return compact({ anyOf: members, description });
+  },
+
+  /** The JSON `null` literal — only meaningful inside an {@link schema.anyOf}. */
+  null(): JsonSchemaNode {
+    return { type: "null" };
   },
 
   /** The standard `profile` argument every read tool accepts. */
