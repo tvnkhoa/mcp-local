@@ -85,7 +85,10 @@ try {
   // Annotations are the one wire-visible marker of migration progress: a legacy descriptor has
   // none, and `defineTool` requires them, so a tool gains them exactly when S-32 moves it.
   // Registry-vs-switch is otherwise invisible from out here, which is the point.
-  const MIGRATED = [
+  // Annotations are the one wire-visible marker of migration progress: a legacy descriptor has
+  // none, and `defineTool` requires them, so a tool gains them exactly when S-32 moves it.
+  // Registry-vs-switch is otherwise invisible from out here, which is the point.
+  const READ_ONLY_MIGRATED = [
     "dead_code_scan",
     "detect_changes",
     "detect_circular_dependencies",
@@ -98,9 +101,11 @@ try {
     "get_change_context",
     "get_cross_repo_impact",
     "get_dependency_graph",
+    "get_feature_bundle",
     "get_file_context",
     "get_file_summary",
     "get_folder_summary",
+    "get_persistence_mapping",
     "get_symbol_context_pack",
     "get_symbol_detail",
     "get_symbol_source",
@@ -116,6 +121,16 @@ try {
     "search_symbols",
     "trace_execution_flow"
   ];
+  // Not read-only, and the values are asserted exactly rather than loosely: these two are the
+  // first tools whose annotations are a judgement call, so a silent flip either way should fail.
+  // index_repository replaces symbols/edges and prunes on mode='full' — a replace, not an
+  // additive write — but only of derived state it can rebuild from source.
+  const WRITE_MIGRATED = {
+    index_repository: { readOnlyHint: false, idempotentHint: true, destructiveHint: true, openWorldHint: false },
+    watch_repo: { readOnlyHint: false, idempotentHint: true, destructiveHint: false, openWorldHint: false }
+  };
+  const MIGRATED = [...READ_ONLY_MIGRATED, ...Object.keys(WRITE_MIGRATED)].sort();
+
   const annotated = listed.filter((t) => t.annotations !== undefined).map((t) => t.name).sort();
   assert(
     annotated.join(",") === MIGRATED.join(","),
@@ -124,7 +139,7 @@ try {
   );
   assert(
     listed
-      .filter((t) => MIGRATED.includes(t.name))
+      .filter((t) => READ_ONLY_MIGRATED.includes(t.name))
       .every(
         (t) =>
           t.annotations.readOnlyHint === true &&
@@ -135,6 +150,14 @@ try {
     "every migrated read tool is annotated readOnly + idempotent + local",
     JSON.stringify(listed.find((t) => t.name === "health_check")?.annotations)
   );
+  for (const [name, expected] of Object.entries(WRITE_MIGRATED)) {
+    const actual = listed.find((t) => t.name === name)?.annotations;
+    assert(
+      JSON.stringify(actual, Object.keys(expected).sort()) === JSON.stringify(expected, Object.keys(expected).sort()),
+      `${name} annotations are exactly as declared`,
+      `got ${JSON.stringify(actual)}`
+    );
+  }
 
   // ── Unknown tool: an isError RESULT, not a JSON-RPC error ────────────────────
   // The switch's `default:` throws McpError(MethodNotFound) and the entry point's

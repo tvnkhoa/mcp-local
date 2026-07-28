@@ -24,14 +24,11 @@ import type { HandlerContext } from "../handlers/handlerContext.js";
 import type { DescriptorLimits } from "./descriptors/limits.js";
 
 import {
-  handleIndexRepository,
-  handleWatchRepo,
   handleChangeImpact
 } from "../handlers/indexHandler.js";
 import {
   handleGetSymbolBlame
 } from "../handlers/searchHandler.js";
-import { handleGetFeatureBundle } from "../handlers/bundleHandler.js";
 import {
   handleFindFieldAccesses
 } from "../handlers/impactHandler.js";
@@ -43,7 +40,7 @@ import {
   handleRefactorSymbolMigration,
   handleChangeValueRepresentation
 } from "../handlers/refactorHandler.js";
-import { handleGetPersistenceMapping, handleGetValueContractImpact } from "../handlers/persistenceHandler.js";
+import { handleGetValueContractImpact } from "../handlers/persistenceHandler.js";
 
 export interface LegacyDispatchOptions {
   /** The same env-derived bounds the descriptor table advertises. */
@@ -58,36 +55,24 @@ export function createLegacyDispatcher(options: LegacyDispatchOptions): LegacyDi
   const { maxResultLimit, maxDepth, maxFilesPerRun } = options.limits;
 
   // Built once at startup, exactly as these were module-level constants before.
-  const indexRepositorySchema = schemas.indexRepositorySchema(maxFilesPerRun);
   const findFieldAccessesSchema = schemas.findFieldAccessesSchema(maxResultLimit);
   const changeImpactSchema = schemas.changeImpactSchema(maxResultLimit);
-  const getFeatureBundleSchema = schemas.getFeatureBundleSchema;
   const symbolBlameSchema = schemas.symbolBlameSchema;
-  const watchRepoSchema = schemas.watchRepoSchema;
   const renameAssistSchema = schemas.renameAssistSchema(maxResultLimit);
   const refactorReplacePreviewSchema = schemas.refactorReplacePreviewSchema;
   const refactorReplaceApplySchema = schemas.refactorReplaceApplySchema;
   const refactorReplaceRollbackSchema = schemas.refactorReplaceRollbackSchema;
   const refactorSymbolMigrationSchema = schemas.refactorSymbolMigrationSchema;
   const changeValueRepresentationSchema = schemas.changeValueRepresentationSchema;
-  const getPersistenceMappingSchema = schemas.getPersistenceMappingSchema;
   const getValueContractImpactSchema = schemas.getValueContractImpactSchema;
 
   return async function dispatchLegacyTool(name, args) {
     const ctx = options.buildContext();
 
     switch (name) {
-      case "index_repository": {
-        const hArgs = indexRepositorySchema.parse(args);
-        return handleIndexRepository(hArgs, ctx);
-      }
       case "find_field_accesses": {
         const hArgs = findFieldAccessesSchema.parse(args);
         return handleFindFieldAccesses(hArgs, ctx);
-      }
-      case "watch_repo": {
-        const hArgs = watchRepoSchema.parse(args);
-        return handleWatchRepo(hArgs, ctx);
       }
       case "get_symbol_blame": {
         const hArgs = symbolBlameSchema.parse(args);
@@ -96,10 +81,6 @@ export function createLegacyDispatcher(options: LegacyDispatchOptions): LegacyDi
       case "change_impact": {
         const hArgs = changeImpactSchema.parse(args);
         return handleChangeImpact(hArgs, ctx);
-      }
-      case "get_feature_bundle": {
-        const hArgs = getFeatureBundleSchema.parse(args);
-        return handleGetFeatureBundle(hArgs, ctx);
       }
       case "rename_assist": {
         const hArgs = renameAssistSchema.parse(args);
@@ -127,10 +108,6 @@ export function createLegacyDispatcher(options: LegacyDispatchOptions): LegacyDi
       case "change_value_representation": {
         const hArgs = changeValueRepresentationSchema.parse(args);
         return await handleChangeValueRepresentation(hArgs, ctx);
-      }
-      case "get_persistence_mapping": {
-        const hArgs = getPersistenceMappingSchema.parse(args);
-        return handleGetPersistenceMapping(hArgs, ctx);
       }
       case "get_value_contract_impact": {
         const hArgs = getValueContractImpactSchema.parse(args);

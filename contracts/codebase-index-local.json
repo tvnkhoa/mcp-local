@@ -751,6 +751,12 @@
       "name": "get_dependency_graph"
     },
     {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
       "description": "Gather a whole vertical-slice feature from one seed: given an entity (seedSymbol e.g. 'ConversationNote', or seedFile) it walks the C# convention (entity → {E}Configuration → Create/Update/Delete{E}Command + handlers + validators → Get{E}Query + handlers → {E}Endpoints) and returns the related symbols with source in one call. Use for 'implement X by mirroring Y' tasks instead of reading 6+ files separately. Heuristic, name-pattern based; unresolvedRoles lists roles not found by name.",
       "inputSchema": {
         "additionalProperties": false,
@@ -917,6 +923,12 @@
       "name": "get_folder_summary"
     },
     {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
       "description": "Return the EF persistence mapping for a property — column name, value converter, max length, CHECK constraints — plus DB_TRANSLATED_PROJECTION warnings when a value-converted property is used inside an EF-translated .Select()/.Where() with no preceding materialization (.ToListAsync()/.AsEnumerable()). Surfaces the persistence-layer facts a symbol graph can't see (rule/AST-based, no LLM).",
       "inputSchema": {
         "additionalProperties": false,
@@ -1170,6 +1182,12 @@
       "name": "health_check"
     },
     {
+      "annotations": {
+        "destructiveHint": true,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": false
+      },
       "description": "Index repository files into internal graph storage (incremental by default). mode='dirty' re-indexes ONLY git working-tree-changed files (unstaged+staged+untracked) — a fast refresh of just-edited files (extraction is scoped to the changed set; edge resolution still runs repo-wide). Pruning is suppressed (subset scan). docsMode controls docs lane isolation: auto uses server default, on forces docs indexing, off disables docs indexing for this run.",
       "inputSchema": {
         "additionalProperties": false,
@@ -2077,6 +2095,12 @@
       "name": "trace_execution_flow"
     },
     {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": false
+      },
       "description": "Manage real-time file watching for a repository. action=start begins debounced incremental re-index on file changes; action=stop halts watching; action=status returns current watch state and counters.",
       "inputSchema": {
         "additionalProperties": false,

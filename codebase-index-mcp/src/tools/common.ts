@@ -57,6 +57,46 @@ export const readsGraph: ToolAnnotations = {
 };
 
 /**
+ * `index_repository`.
+ *
+ * `destructive: true` is a deliberate call, not carelessness. The tool overwrites the symbols
+ * and edges of every file it scans, and `mode: "full"` prunes entries for files that no longer
+ * exist — so it is a replace, not an additive write, which is exactly what the MCP hint
+ * distinguishes. What it overwrites is DERIVED state: the SQLite graph, rebuildable from source
+ * at any time. It cannot modify or delete a single line of the repository it reads.
+ *
+ * `idempotent: true` for the same reason a PUT is: two runs with the same arguments converge on
+ * the same index.
+ *
+ * A reviewer who thinks a re-index should not make a host prompt for confirmation is arguing
+ * with `destructive`, and this is the paragraph to argue with.
+ */
+export const rebuildsIndex: ToolAnnotations = {
+  readOnly: false,
+  idempotent: true,
+  destructive: true,
+  openWorld: false
+};
+
+/**
+ * `watch_repo`.
+ *
+ * Not read-only — it starts and stops a filesystem watcher, which is server state. Not
+ * destructive: starting or stopping a watcher removes nothing by itself. A running watcher does
+ * go on to trigger incremental re-indexes, but an annotation describes what the CALL does, not
+ * what the state it establishes may later cause.
+ *
+ * Idempotent because the actions are declarative: two `start`s leave one watcher, two `stop`s
+ * leave none, and `status` never changes anything.
+ */
+export const controlsWatcher: ToolAnnotations = {
+  readOnly: false,
+  idempotent: true,
+  destructive: false,
+  openWorld: false
+};
+
+/**
  * The `profile` property, verbatim as this server has always advertised it.
  *
  * Deliberately NOT `schema.profile()`: that helper attaches a description this server has
