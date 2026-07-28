@@ -34,14 +34,68 @@ export const TRIVIAL_CALLEE_IN_CLAUSE = [...TRIVIAL_CALLEE_TOKENS]
   .map((t) => `'callee:${t}'`)
   .join(", ");
 
-export function buildEdgeToSymbolJoinClause(): string {
-  return `(
-    e.to_id = s.symbol_id
-    or (e.type = 'CALLS' and e.to_id = ('callee:' || s.name))
-    or (e.type = 'TYPE_REF' and e.to_id = ('type:' || s.name))
-    or (e.type in ('PROPERTY_REF', 'PROPERTY_WRITE') and e.to_id = ('property:' || s.name))
-    or (e.type in ('PROPERTY_REF', 'PROPERTY_WRITE') and e.to_id = ('property:' || coalesce(st.name || '.', '') || s.name))
-    or (e.type in ('PROPERTY_REF', 'PROPERTY_WRITE') and s.kind = 'property' and e.to_id like ('property:%.' || s.name))
+/**
+ * The token grammar for "this edge points at this symbol", as a `pairs` CTE.
+ *
+ * An edge's `to_id` is either a resolved `symbol_id` or an unresolved token — `callee:Name`,
+ * `type:Name`, `property:Name`, `property:Owner.Name` — so matching an edge to a symbol takes
+ * six alternatives. They live here so the grammar has exactly one definition, shared by
+ * `getImpactSurfaceImpl`, `getImpactFilesImpl` and `GraphStore.getFieldAccesses`.
+ *
+ * This used to be one `(a or b or c …)` join predicate. A disjunction over concatenated
+ * expressions is not indexable, so SQLite could only constrain `e.repo_id` and then test every
+ * edge in the repo against every candidate symbol — and it chose the *caller* symbol as the
+ * outermost loop, making the join effectively
+ * `|symbols in repo| × |symbols in file| × |edges in repo|`. `find_impact_files` on a
+ * 107-symbol file measured 14.9 s against a 5.1 k-edge index and 216 s against a larger one.
+ *
+ * Splitting the disjunction into a `union` of one branch per alternative lets SQLite pick an
+ * index per branch (`idx_edges_repo_to` for the resolved case, `idx_edges_repo_type_to` for the
+ * token cases) and drive from the small `symbols` side. Measured 448× faster across all 229
+ * files of a workspace index, with byte-identical results — see `test:impact-join-parity`.
+ *
+ * `union` (not `union all`) dedupes on the `(symbol, edge)` pair, which is what the single
+ * predicate produced: one join tuple per pair, however many alternatives matched it.
+ *
+ * @param symbolFilter SQL selecting the target symbols, e.g.
+ *   `s.repo_id = @repoId and s.file_path = @filePath`. Referenced once per branch, so any
+ *   bound parameters in it must be named (`@x`), not positional.
+ */
+export function buildEdgeToSymbolPairsCte(symbolFilter: string): string {
+  // `cross join` is SQLite's join-order pin, not a cartesian product: it means the same thing
+  // as `inner join` but stops the planner reordering. Needed because there are no ANALYZE
+  // stats, so the planner cannot tell that `symbolFilter` selects few rows — left to guess it
+  // drove the resolved-id branch from `edges`, scanning every edge in the repo once per query.
+  // Driving from `symbols` turns each branch into one index seek per target symbol.
+  const branch = (edgeOn: string): string =>
+    `select s.symbol_id as sid, e.rowid as eid
+       from symbols s
+       cross join edges e on e.repo_id = s.repo_id and ${edgeOn}
+       where ${symbolFilter}`;
+
+  return `pairs as (
+    ${branch(`e.to_id = s.symbol_id`)}
+    union
+    ${branch(`e.type = 'CALLS' and e.to_id = ('callee:' || s.name)`)}
+    union
+    ${branch(`e.type = 'TYPE_REF' and e.to_id = ('type:' || s.name)`)}
+    union
+    ${branch(`e.type in ('PROPERTY_REF', 'PROPERTY_WRITE') and e.to_id = ('property:' || s.name)`)}
+    union
+    -- Qualified 'property:Owner.Member'. The join to the parent stays a LEFT join: a symbol
+    -- with no parent yields '' from the coalesce, which is the bare-token branch above.
+    select s.symbol_id as sid, e.rowid as eid
+      from symbols s
+      left join symbols st on st.repo_id = s.repo_id and st.symbol_id = s.parent_symbol_id
+      cross join edges e on e.repo_id = s.repo_id
+        and e.type in ('PROPERTY_REF', 'PROPERTY_WRITE')
+        and e.to_id = ('property:' || coalesce(st.name || '.', '') || s.name)
+      where ${symbolFilter}
+    union
+    -- Any-owner 'property:%.Member'. The only branch a LIKE keeps unindexable on the edge
+    -- side, so it is gated on s.kind = 'property' — usually no rows, and never more than
+    -- the property symbols the filter selects.
+    ${branch(`e.type in ('PROPERTY_REF', 'PROPERTY_WRITE') and s.kind = 'property' and e.to_id like ('property:%.' || s.name)`)}
   )`;
 }
 
@@ -401,11 +455,11 @@ export function getImpactSurfaceImpl(
   wiringNote?: string;
 } {
   const canonicalFilePath = resolveCanonicalFilePath(db, repoId, filePath);
-  const edgeJoin = buildEdgeToSymbolJoinClause();
 
   const callers = db
     .prepare(
       `
+      with ${buildEdgeToSymbolPairsCte("s.repo_id = @repoId and s.file_path = @filePath")}
       select
         sf.name as callerName,
         sf.file_path as callerFile,
@@ -414,18 +468,16 @@ export function getImpactSurfaceImpl(
         e.type as edgeType,
         e.confidence as confidence,
         e.reason as reason
-      from symbols s
-      inner join edges e
-        on e.repo_id = s.repo_id
-        and ${edgeJoin}
+      from pairs p
+      inner join symbols s on s.repo_id = @repoId and s.symbol_id = p.sid
+      inner join edges e on e.rowid = p.eid
       inner join symbols sf on sf.repo_id = e.repo_id and sf.symbol_id = e.from_id
-      left join symbols st on st.repo_id = s.repo_id and st.symbol_id = s.parent_symbol_id
-      where s.repo_id = ? and s.file_path = ? and sf.file_path != s.file_path
+      where sf.file_path != s.file_path
       order by sf.file_path, e.type
-      limit ?
+      limit @limit
       `
     )
-    .all(repoId, canonicalFilePath, limit) as {
+    .all({ repoId, filePath: canonicalFilePath, limit }) as {
       callerName: string;
       callerFile: string;
       callerLine: number;
@@ -470,24 +522,23 @@ export function getImpactFilesImpl(
   wiringNote?: string;
 } {
   const canonicalFilePath = resolveCanonicalFilePath(db, repoId, filePath);
-  const edgeJoin = buildEdgeToSymbolJoinClause();
+  const pairs = buildEdgeToSymbolPairsCte("s.repo_id = @repoId and s.file_path = @filePath");
 
   const distinctFiles = db
     .prepare(
       `
+      with ${pairs}
       select distinct sf.file_path as callerFile
-      from symbols s
-      inner join edges e
-        on e.repo_id = s.repo_id
-        and ${edgeJoin}
+      from pairs p
+      inner join symbols s on s.repo_id = @repoId and s.symbol_id = p.sid
+      inner join edges e on e.rowid = p.eid
       inner join symbols sf on sf.repo_id = e.repo_id and sf.symbol_id = e.from_id
-      left join symbols st on st.repo_id = s.repo_id and st.symbol_id = s.parent_symbol_id
-      where s.repo_id = ? and s.file_path = ? and sf.file_path != s.file_path
+      where sf.file_path != s.file_path
       order by sf.file_path
-      limit ?
+      limit @limit
       `
     )
-    .all(repoId, canonicalFilePath, limit) as { callerFile: string }[];
+    .all({ repoId, filePath: canonicalFilePath, limit }) as { callerFile: string }[];
 
   if (distinctFiles.length === 0) {
     const moduleSymbolId = findModuleSymbolId(db, repoId, canonicalFilePath) ?? undefined;
@@ -501,29 +552,32 @@ export function getImpactFilesImpl(
     };
   }
 
-  const ph = distinctFiles.map(() => "?").join(", ");
+  // Named parameters, because the CTE repeats `symbolFilter` once per branch.
+  const fileParams: Record<string, string> = { repoId, filePath: canonicalFilePath };
+  distinctFiles.forEach((r, i) => {
+    fileParams[`f${String(i)}`] = r.callerFile;
+  });
+  const ph = distinctFiles.map((_, i) => `@f${String(i)}`).join(", ");
   const rows = db
     .prepare(
       `
+      with ${pairs}
       select
         sf.file_path as callerFile,
         e.type as edgeType,
         e.confidence as confidence,
         e.reason as reason,
         s.name as symbolAffected
-      from symbols s
-      inner join edges e
-        on e.repo_id = s.repo_id
-        and ${edgeJoin}
+      from pairs p
+      inner join symbols s on s.repo_id = @repoId and s.symbol_id = p.sid
+      inner join edges e on e.rowid = p.eid
       inner join symbols sf on sf.repo_id = e.repo_id and sf.symbol_id = e.from_id
-      left join symbols st on st.repo_id = s.repo_id and st.symbol_id = s.parent_symbol_id
-      where s.repo_id = ? and s.file_path = ?
-        and sf.file_path in (${ph})
+      where sf.file_path in (${ph})
         and sf.file_path != s.file_path
       order by sf.file_path
       `
     )
-    .all(repoId, canonicalFilePath, ...distinctFiles.map((r) => r.callerFile)) as {
+    .all(fileParams) as {
       callerFile: string;
       edgeType: string;
       confidence: number;

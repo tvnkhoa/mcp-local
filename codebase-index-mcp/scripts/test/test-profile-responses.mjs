@@ -54,14 +54,12 @@ async function main() {
   const client = new Client({ name: "profile-test", version: "0.1.0" });
   await client.connect(transport);
 
-  // The SDK's default request timeout is 60s, and find_impact_files over
-  // src/graphStore.ts (~1,900 lines, many callers) sits close enough to that on a
-  // cold index to fail intermittently — which reads as a broken build rather
-  // than a slow one. Give every call in this script the same generous budget;
-  // an explicit per-call timeout still wins.
-  const callTool = client.callTool.bind(client);
-  client.callTool = (params, schema, options) =>
-    callTool(params, schema, { timeout: 180_000, ...options });
+  // This script used to raise every call's timeout to 180s, because find_impact_files over
+  // src/graphStore.ts flirted with — and sometimes blew past — the SDK's 60s default. That was
+  // masking the S-30 defect: an unindexable join predicate that made the query cost
+  // |symbols in repo| × |symbols in file| × |edges in repo|. It is now an index seek per
+  // branch, so the default timeout is honest again. If this script ever needs a raised
+  // timeout, treat it as a query-plan regression, not a slow machine.
 
   // Index current directory (bounded sample)
   console.log("\n[setup] Indexing current repo...");
@@ -140,9 +138,15 @@ async function main() {
   // ── get_call_chain ────────────────────────────────────────────────────────
   console.log("\n[get_call_chain] profile tests");
   // Find a callable symbol first
-  const searchResult = await client.callTool({ name: "search_symbols", arguments: { repoId, query: "runIndexAndResolve", strategy: "name", profile: "nano", limit: 1 } });
+  // profile:"standard" is required, not incidental: nano and compact both project
+  // search_symbols down to {name,kind,filePath,line} with no symbolId, so this lookup used to
+  // resolve null and skip every assertion below. Only standard/verbose return full records.
+  const searchResult = await client.callTool({ name: "search_symbols", arguments: { repoId, query: "getImpactFilesImpl", strategy: "name", profile: "standard", limit: 1 } });
   const searchJson = readJson(searchResult).json;
   const symbolId = searchJson?.symbols?.[0]?.symbolId ?? searchJson?.candidates?.[0]?.symbolId ?? null;
+
+  // Assert rather than skip. A silent skip here hid a broken lookup indefinitely.
+  assert(typeof symbolId === "string", "resolved a callable symbolId for get_call_chain");
 
   if (symbolId) {
     const chainNano = await client.callTool({ name: "get_call_chain", arguments: { repoId, symbolId, direction: "callers", profile: "nano" } });

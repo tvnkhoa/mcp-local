@@ -112,7 +112,7 @@ import {
   runReadOnlyGraphQueryImpl,
   listIndexedFilesImpl,
   listRepositoriesImpl,
-  buildEdgeToSymbolJoinClause
+  buildEdgeToSymbolPairsCte
 } from "./impactAnalyzer.js";
 import { CALL_TRAVERSAL_EDGE_SQL_LIST } from "./types.js";
 import {
@@ -763,7 +763,7 @@ export class GraphStore {
    * PROPERTY_REF (read) / PROPERTY_WRITE (write) edges, resolving each `from_id` back to its
    * enclosing symbol. The property-token match (resolved id, qualified `Type.Member`,
    * any-owner `%.Member`, bare `Member`) is shared with impact analysis via
-   * buildEdgeToSymbolJoinClause, so the token grammar lives in exactly one place.
+   * buildEdgeToSymbolPairsCte, so the token grammar lives in exactly one place.
    */
   getFieldAccesses(
     repoId: string,
@@ -802,25 +802,29 @@ export class GraphStore {
       .get(repoId, symbol.filePath, symbol.line) as { name: string } | undefined)?.name ?? null;
 
     const edgeTypes = mode === "read" ? ["PROPERTY_REF"] : mode === "write" ? ["PROPERTY_WRITE"] : ["PROPERTY_REF", "PROPERTY_WRITE"];
-    const typePh = edgeTypes.map(() => "?").join(",");
-    const edgeJoin = buildEdgeToSymbolJoinClause();
+    const typeParams: Record<string, string> = {};
+    edgeTypes.forEach((t, i) => {
+      typeParams[`t${String(i)}`] = t;
+    });
+    const typePh = edgeTypes.map((_, i) => `@t${String(i)}`).join(",");
 
     const rows = this.db
       .prepare(
         `
+        with ${buildEdgeToSymbolPairsCte("s.repo_id = @repoId and s.symbol_id = @symbolId")}
         select e.from_id as enclosingSymbolId, sf.name as enclosingName, sf.kind as enclosingKind,
                sf.file_path as filePath, sf.line as line, e.to_id as toId, e.type as type, e.confidence as confidence,
                e.assigned_expression as assignedExpression
-        from symbols s
-        inner join edges e on e.repo_id = s.repo_id and ${edgeJoin}
+        from pairs p
+        inner join symbols s on s.repo_id = @repoId and s.symbol_id = p.sid
+        inner join edges e on e.rowid = p.eid
         left join symbols sf on sf.repo_id = e.repo_id and sf.symbol_id = e.from_id
-        left join symbols st on st.repo_id = s.repo_id and st.symbol_id = s.parent_symbol_id
-        where s.repo_id = ? and s.symbol_id = ? and e.type in (${typePh})
+        where e.type in (${typePh})
         order by sf.file_path, sf.line
-        limit ?
+        limit @limit
         `
       )
-      .all(repoId, symbolId, ...edgeTypes, limit) as { enclosingSymbolId: string; enclosingName: string | null; enclosingKind: string | null; filePath: string | null; line: number | null; toId: string; type: string; confidence: number | null; assignedExpression: string | null }[];
+      .all({ repoId, symbolId, ...typeParams, limit }) as { enclosingSymbolId: string; enclosingName: string | null; enclosingKind: string | null; filePath: string | null; line: number | null; toId: string; type: string; confidence: number | null; assignedExpression: string | null }[];
 
     return {
       property: { symbolId: symbol.symbolId, name: symbol.name, kind: symbol.kind, filePath: symbol.filePath, line: symbol.line, declaringType },
