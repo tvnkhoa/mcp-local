@@ -5,7 +5,7 @@ Phase H's row updated after the S-28 SDK work landed. Every
 row cites the artifact that proves it. Where no artifact was found, the row says so
 rather than guessing.
 
-**26 of 44 done · 1 partial · 1 skipped by decision · 16 open.** Phase H is no longer
+**26 of 44 done · 2 partial · 1 skipped by decision · 15 open.** Phase H is no longer
 blocked: its SDK prerequisite (`renderResult` + `wrapCall`) shipped 2026-07-28.
 
 ---
@@ -96,7 +96,7 @@ S-41 — flipping now would turn 34 warnings into 34 build failures.
 | S-24 Migrate `observe-mcp` | ✅ | `e5feaf3` (labelled S-25) — `s25-notes.md` |
 | S-25 Migrate `postgres-mcp` | ✅ | `0eccb10` (labelled S-24) — `s24-notes.md` |
 
-## Phase G — codebase-index Internal Cleanup · 4/5
+## Phase G — codebase-index Internal Cleanup · 4.5/5
 
 > **Correction.** An earlier revision of this file marked S-26 done on the strength of
 > checking approval and the SQL guardrails. That check missed a third shadow: the watch
@@ -115,7 +115,7 @@ S-41 — flipping now would turn 34 warnings into 34 build failures.
 | S-27 Extract the watch lifecycle | ✅ | `src/watch/watchLifecycle.ts`; the duplicate copies in `index.ts` and `handlers/indexHandler.ts` are gone |
 | S-28 Extract indexing orchestration | ✅ | `9ccae95` (labelled S-26) — `src/indexing/{indexRunner,runPolicy}.ts` |
 | S-29 Break the `graphStore`→`regexSearch` cycle | ✅ | `RegexSearchStore` interface in `src/regexSearch.ts`; static scan reports **0 cycles** across 66 modules |
-| S-30 Split `graphStore.ts` | ❌ | still one file; guard warns at hard cap. **Now also owns the `find_impact_files` fix** — see below |
+| S-30 Split `graphStore.ts` | 🟡 | `find_impact_files` fix **done**; split done, 1,928 → 810 across 4 modules, but 810 > the 600 cap and cannot go lower as a façade — see below |
 
 ## Phase H — codebase-index SDK Migration · 0/3
 
@@ -151,7 +151,7 @@ wires it up.
 | S-38 Server scaffold generator | ❌ | no scaffold script |
 | S-39 Consolidate the test strategy | 🟡 partial | script vocabulary is uniform and `run-tests.mjs` discovers `test:*` so the list cannot fall behind — but no strategy document exists |
 | S-40 Index registry + workspace hygiene | ✅ | `*.db`, `*.db-shm`, `*.db-wal` gitignored; central DB at the root is untracked |
-| S-41 Flip guards to enforce; finalize docs | ❌ | would fail on the 34 current warnings; needs S-30 and the file splits first |
+| S-41 Flip guards to enforce; finalize docs | ❌ | would fail on the 36 current warnings; needs the graphStore cap decision above, plus 11 other files over 600 lines |
 
 ## Phase K — Deferred Decisions · 0/3 (1 skipped)
 
@@ -179,14 +179,12 @@ verifiable by diffing generated output against the committed files.
 **Deferred by decision — Phase K.** S-43 and S-44 both break existing user configuration
 in `~/.claude.json`. They were placed last on purpose and should stay there.
 
-## Open defect — `find_impact_files(view:"files")` does not scale with the DB
+## Resolved — `find_impact_files(view:"files")` did not scale (was: open defect)
 
-**Folded into S-30.** Found while diagnosing a gate failure. It belongs with the
-`graphStore.ts` split rather than as its own step: same area, and the split is what makes
-the predicate rewrite reviewable. A timeout increase was tried twice and held neither
-time — this is the actual fix.
+**Fixed in S-30.** Commit `896a968`. Recorded here because the original diagnosis in this
+document was partly wrong, and the corrected mechanism is worth keeping.
 
-Measured on one file, `src/graphStore.ts`, same index, same profile:
+Measured before the fix, on one file, same index, same profile:
 
 | Call | Time |
 |---|---|
@@ -195,28 +193,96 @@ Measured on one file, `src/graphStore.ts`, same index, same profile:
 | `find_impact_files` `view:"surface"` | 1,462 ms |
 | `get_file_summary` | 2,520 ms |
 
-148× between two views of the same file. The cause is the join predicate built by
-`buildEdgeToSymbolJoinClause()` in `src/impactAnalyzer.ts`: a chain of `OR`s, one branch
-using `LIKE ('property:%.' || s.name)` — a leading wildcard — and one correlated with a
-third, `LEFT JOIN`ed table. SQLite cannot use an index for any of it, so `edges` is
-scanned once per symbol in the target file.
+### What this document previously claimed, and what was actually true
 
-The consequence that matters: `e.repo_id = s.repo_id` is written, but it does not filter
-before the scan, so **repos that have nothing to do with the query still cost time**. In a
-DB holding six repos the call took 216s; in a DB holding one it is instant. Both
-`CLAUDE.md` ("one SQLite DB can hold multiple repos") and this workspace's own central DB
-are multi-repo, so this is reachable in normal use, and
-`.claude/rules/codebase-index.md` asks for exactly the isolation that is not happening
-here.
+It said `e.repo_id = s.repo_id` "does not filter before the scan, so repos that have
+nothing to do with the query still cost time". That is **not** what happens. `EXPLAIN QUERY
+PLAN` shows SQLite did constrain `edges` by `repo_id` through
+`idx_edges_repo_type_to_from` — cross-repo rows were excluded.
 
-A fix is a rewrite of the predicate into a `UNION` of individually indexable branches.
-Out of scope for the step that found it.
+The real cause was the join *order*. With the six-way `OR` predicate unindexable beyond the
+`repo_id` prefix, SQLite chose the **caller** symbol table as the outermost loop, making the
+query approximately
+
+```
+|symbols in repo| × |symbols in target file| × |edges in repo|
+```
+
+For `src/graphStore.ts` — 107 symbols, in a repo with 1,752 symbols and 5,089 edges — that
+is ~950 M predicate evaluations, each doing string concatenation and in one branch a `LIKE`.
+Measured 15.5 s on that index; the 216 s figure came from a larger one. The 148× gap against
+`view:"surface"` was the same predicate under a `limit` that let it stop early.
+
+So the multi-repo framing was a red herring: a **single** large repo was always enough to
+trigger this. That is worse than what was originally written, not better.
+
+### The fix
+
+`buildEdgeToSymbolJoinClause()` became `buildEdgeToSymbolPairsCte(symbolFilter)`: the same
+six alternatives as a `union` of one branch each, so the planner picks an index per branch,
+plus `cross join` to pin the driver to the small `symbols` side (without `ANALYZE` stats it
+cannot tell that the symbol filter selects few rows).
+
+Verified by diffing old against new over all 229 files of a workspace index, through the
+full `getImpactFilesImpl` path including its aggregation:
+
+```
+files compared: 229    mismatches: 0    aggregate speedup: 650x
+src/graphStore.ts      15,487 ms → 3.5 ms
+```
+
+Pinned by `test:impact-join-parity`, which checks results against the frozen old predicate
+**and** asserts the plan shape — six index seeks into `edges`, no full scan, no branch
+constrained by `repo_id` alone. The plan is what regressed, and a results-only test cannot
+see it.
+
+Two things this also removed: the 180 s timeout override in `test-profile-responses.mjs`
+(added during S-25, masking rather than fixing), and a silent skip in that script's
+`get_call_chain` block, which asked `search_symbols` for a `symbolId` under a profile that
+projects it away.
+
+## S-30 second half — the `graphStore.ts` split
+
+`graphStore.ts` 1,928 → **810** lines across four new modules, each extraction verified by
+typecheck + `--noUnusedLocals` + build + smoke + the full 27-script suite:
+
+| Module | Lines | What |
+|---|---|---|
+| `src/store/schema.ts` | 486 | `initGraphSchema`, `runGraphMigrations` |
+| `src/store/writeStore.ts` | 409 | per-file writes, WAL session, bulk index maintenance |
+| `src/store/graphQueries.ts` | 300 | the seven reads that were still inline SQL |
+| `src/store/runStore.ts` | 154 | `index_runs` write + latest-run read |
+
+**Still 810, not under the 600-line hard cap — and it cannot get there as a façade.** What
+remains is 155 lines of imports plus 100 delegating methods averaging 6.4 lines. Even
+compressed to a bare 3-line body plus a blank each, the floor is ~590 before comments or the
+constructor. The plan's Phase G exit gate asks for two things that cannot both hold:
+
+- "the façade keeps every existing call site unchanged" — 158 call sites across ~100 methods
+- "no class exceeds 25 methods" — prose only; nothing measures method count, the guard
+  measures file lines
+
+A façade over N stores *is* N groups of delegating methods. Three ways out, none of them
+free:
+
+1. **Exempt the file, explicitly.** The guard has no exemption facility today. Adding a
+   pragma it honours and reports (`// @convention-exempt size/hard-cap: <reason>`) makes
+   "we decided this file may be long, here is why" reviewable instead of invisible — and
+   S-41 needs an answer for the other 11 oversized files regardless.
+2. **Split the façade into sub-facades** — `store.docs.searchDocs(...)`, `store.write.…`.
+   Gets every file well under the cap, changes ~158 call sites.
+3. **Mixins** — `class GraphStore extends DocsMixin(WriteMixin(Base))`. Keeps call sites,
+   splits files, and makes the class harder to read than either alternative.
+
+Unresolved; needs a decision before S-41 can flip guards to enforce.
 
 ## Gate status at time of writing
 
 ```
-verify:all            exit 0 — 4/4 servers, test phase 101s (was 398s and failing)
-guards                0 errors, 34 warnings, 328 files
+verify:all            exit 0 — 4/4 servers, test phase 60.9s (was 398s and failing)
+guards                0 errors, 36 warnings, 342 files
+                      (+2 vs S-29: the split traded one hard-cap file for two
+                       soft-cap ones, and graphStore.ts is still over the hard cap)
 4/4 servers           build · typecheck · test
 contracts:check       4/4 — 43 / 17 / 8 / 8 tools
 ```
