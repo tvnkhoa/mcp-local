@@ -2,7 +2,7 @@ import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import type { GraphStore } from "../graphStore.js";
 import type { WatchManager } from "../watchManager.js";
 import type { ResponseProfile } from "../response/responseFormatter.js";
-import type { IndexMode, IndexRunSummary } from "../types.js";
+import type { IndexMode, IndexRunResult } from "../types.js";
 
 export interface HandlerConstants {
   MAX_FILES_PER_RUN: number;
@@ -35,13 +35,7 @@ export interface HandlerContext {
     docsEnabled: boolean,
     maxFiles: number,
     batchSize: number
-  ) => Promise<IndexRunSummary & {
-    crossRepoLinked?: number;
-    callEdgesResolved?: number;
-    importEdgesResolved?: number;
-    mentionsResolved?: number;
-    skipReason?: string;
-  }>;
+  ) => Promise<IndexRunResult>;
   asText: (payload: unknown, profile?: ResponseProfile) => CallToolResult;
   constants: HandlerConstants;
 }

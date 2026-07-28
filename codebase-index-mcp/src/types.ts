@@ -50,6 +50,22 @@ export type IndexRunSummary = {
   performanceProfile?: "standard" | "large" | "very-large";
 };
 
+/**
+ * What an index run actually returns: the persisted summary plus the counters the
+ * post-resolve phase produces, and `skipReason` for a run that did no work.
+ *
+ * These fields are additive on purpose — `recordRun` writes the whole object, but
+ * the extras are absent from a summary read back out of storage, so they cannot be
+ * folded into `IndexRunSummary` without lying about what a stored row contains.
+ */
+export type IndexRunResult = IndexRunSummary & {
+  crossRepoLinked?: number;
+  callEdgesResolved?: number;
+  importEdgesResolved?: number;
+  mentionsResolved?: number;
+  skipReason?: string;
+};
+
 export type GraphHealth = {
   unresolvedCalls: number;
   unresolvedImports: number;

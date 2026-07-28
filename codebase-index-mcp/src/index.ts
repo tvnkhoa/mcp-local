@@ -1,7 +1,5 @@
 import process from "node:process";
-import { randomUUID } from "node:crypto";
 import { AsyncLocalStorage } from "node:async_hooks";
-import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import { fileURLToPath } from "node:url";
@@ -17,11 +15,8 @@ import {
   ErrorCode,
   type CallToolResult
 } from "@modelcontextprotocol/sdk/types.js";
-import { z } from "zod";
 
 import { GraphStore } from "./graphStore.js";
-import { runIndexPipeline, INDEX_VERSION, type PerformanceProfile } from "./indexPipeline.js";
-import { createIndexProgress, indexLog } from "./indexProgress.js";
 import {
   assertPathAllowed,
   clamp,
@@ -30,92 +25,28 @@ import {
   parseBooleanEnv,
   parseWatchConfigFromEnv
 } from "./guardrails/indexGuardrails.js";
-import { validateAllowedTables, validateReadOnlyGraphSql } from "./guardrails/sqliteGuardrails.js";
 import { WatchManager } from "./watchManager.js";
-import type {
-  CallChainDirection,
-  IndexMode,
-  RefactorApplyHunkRecord,
-  IndexRunSummary,
-  RefactorApplyChangeRecord,
-  RefactorApplyRecord,
-  RefactorPreviewHunkRecord,
-  RefactorPreviewRecord,
-  RefactorRiskFlag,
-  RefactorRollbackRecord,
-  ResolutionStats
-} from "./types.js";
-import { numberFromEnv, ratioFromEnv, nonNegativeNumberFromEnv, parseOptionalBooleanEnv } from "./config/envConfig.js";
-import {
-  runGit,
-  runGitLines,
-  resolveHeadCommitSha,
-  resolveCurrentBranch,
-  parseGitBlamePorcelain,
-  redactEmail,
-  getRepoWorkingTreeState,
-  hasWorkingTreeChanges,
-  collectGitChangedFiles,
-  collectDirtyFiles,
-  getRepoStaleness
-} from "./gitHelpers.js";
+import { createIndexRunner } from "./indexing/indexRunner.js";
+import { parsePerformanceProfileEnv } from "./config/performanceConfig.js";
+import { numberFromEnv, ratioFromEnv } from "./config/envConfig.js";
 import {
   type ResponseProfile,
   type ToolRequestContext,
-  type ToolTelemetryEvent,
-  resolveResponseProfile,
-  estimateResultCount,
   emitTelemetry,
   asText as asTextCore,
-  asArgsRecord,
-  toNugetContractId
+  asArgsRecord
 } from "./response/responseFormatter.js";
-import {
-  PolicyViolationError,
-  normalizeRelativePath,
-  sha256,
-  safeReadText,
-  assertSafeRepoFilePath,
-  inferLanguageFromPath,
-  isGeneratedFilePath,
-  findEnclosingObjectInitializer,
-  isApplyRunnableHunk,
-  collectExpectedApplyFiles,
-  countPreviewRisks,
-  createPreviewDigest,
-  issueApprovalToken,
-  verifyApprovalToken,
-  groupPreviewHunks,
-  mapPreviewStatusFromApplyStatus,
-  deriveApplyStatus,
-  noLlmAudit,
-  resolveApprovalSecret
-} from "./refactorUtils.js";
-import {
-  buildRefactorPreview,
-  applyCompilerAssistToPreview,
-  buildSymbolMigrationPreview,
-  executeRefactorApplyPlan
-} from "./refactorEngine.js";
-import { scoreChangeRisk, resolveDetectChangesPolicy } from "./policyResolver.js";
-import { resolveServerVersion, parseRepoResourceUri } from "./serverUtils.js";
-import { resolveDocsMode as resolveDocsModeUtil, assertDocsLaneEnabled as assertDocsLaneEnabledUtil } from "./docsUtils.js";
+import { resolveServerVersion } from "./serverUtils.js";
 import { mapError, assertNoLlmRuntimePolicy, assertRefactorApprovalPolicy } from "./errorHandler.js";
 import * as schemas from "./schemas/toolSchemas.js";
 import { handleListResources, handleReadResource } from "./handlers/resourceHandler.js";
-import { traverseDependencyGraph, traverseCallGraph } from "./graphTraversal.js";
-import { parsePerformanceProfileEnv, resolvePostPhasePolicy } from "./config/performanceConfig.js";
 
 import {
   handleHealthCheck,
   handleIndexRepository,
   handleWatchRepo,
   handleDetectChanges,
-  handleChangeImpact,
-  resolveDocsMode,
-  activateWatchForRepo as activateWatchForRepoFn,
-  armWatchInactivityTimer as armWatchInactivityTimerFn,
-  clearWatchInactivityTimer as clearWatchInactivityTimerFn
+  handleChangeImpact
 } from "./handlers/indexHandler.js";
 import type { HandlerContext } from "./handlers/handlerContext.js";
 import {
@@ -142,8 +73,7 @@ import {
   handleGetFolderSummary,
   handleRouteMap,
   handleQueryGraph,
-  handleQueryDocs,
-  formatChangeContextPayload
+  handleQueryDocs
 } from "./handlers/impactHandler.js";
 import {
   handleDeadCodeScan,
@@ -197,7 +127,6 @@ const DOCS_INDEXING_ENABLED = parseBooleanEnv(process.env.CODEBASE_INDEX_DOCS_IN
 const DOCS_TOOLS_ENABLED = parseBooleanEnv(process.env.CODEBASE_INDEX_DOCS_TOOLS_ENABLED, false);
 const LLM_ENABLED = parseBooleanEnv(process.env.CODEBASE_INDEX_LLM_ENABLED, false);
 const REFACTOR_STRICT_APPROVAL = parseBooleanEnv(process.env.CODEBASE_INDEX_REFACTOR_STRICT_APPROVAL, false);
-const NODE_ENV = (process.env.NODE_ENV ?? "development").toLowerCase();
 const REFACTOR_APPROVAL_SECRET = process.env.CODEBASE_INDEX_REFACTOR_APPROVAL_SECRET ?? "";
 const REFACTOR_PREVIEW_TTL_MS = numberFromEnv("CODEBASE_INDEX_REFACTOR_PREVIEW_TTL_MS", 30 * 60 * 1000);
 const REFACTOR_LOW_CONFIDENCE_THRESHOLD = 0.8;
@@ -267,6 +196,28 @@ const server = new Server(
 );
 
 const store = new GraphStore(dbPath);
+
+/**
+ * The index run orchestrator (S-26: extracted to `indexing/indexRunner.ts`).
+ *
+ * Built once here because it needs `store` and the env-derived tuning limits, both
+ * of which only the entry point owns. The two callbacks stay lazy on purpose: the
+ * progress sink is per-request, and the profile override was read from the env on
+ * every run before the extraction. Resolving either eagerly would change behaviour.
+ */
+const runIndexAndResolve = createIndexRunner({
+  store,
+  limits: {
+    subtxSize: SUBTX_SIZE,
+    checkpointEveryNBatches: CHECKPOINT_EVERY_N_BATCHES,
+    largeFileThresholdBytes: LARGE_FILE_THRESHOLD_BYTES,
+    maxFileSizeBytes: MAX_FILE_SIZE_BYTES,
+    parseWorkers: PARSE_WORKERS,
+    parseJobTimeoutMs: PARSE_JOB_TIMEOUT_MS
+  },
+  resolveProgressNotifier: () => toolContextStorage.getStore()?.progressNotifier,
+  resolvePerformanceProfileOverride: () => parsePerformanceProfileEnv(process.env.CODEBASE_INDEX_LARGE_REPO_PROFILE)
+});
 
 const watchManager = new WatchManager(
   watchConfig,
@@ -1352,667 +1303,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
   });
 });
 
-// parseRepoResourceUri → serverUtils.ts
-// buildRiskSnapshot → handlers/resourceHandler.ts
-
-
-// resolveServerVersion → serverUtils.ts
-// getRepoWorkingTreeState, runGitStatusPorcelain, resolveHeadCommitSha,
-// runGit, runGitLines, parseGitBlamePorcelain, redactEmail → gitHelpers.ts
-// scoreChangeRisk, resolveDetectChangesPolicy → policyResolver.ts
-// getRepoStaleness → gitHelpers.ts (now takes store as parameter)
-// resolveDocsModeLocal, assertDocsLaneEnabled → docsUtils.ts
-
-// resolveResponseProfile → responseFormatter.ts
-
-// PolicyViolationError → refactorUtils.ts
-
-// Refactor types → refactorTypes.ts
-
-// Refactor utility functions → refactorUtils.ts
-
-// findInitializerMemberAssignment, isDottedMemberPath, isSimpleIdentifier,
-// isInvalidCsharpInitializerReplacement, resolveInitializerRewriteTargetMember → refactorUtils.ts
-
-// buildRefactorPreview → refactorEngine.ts
-
-// applyCompilerAssistToPreview, buildSymbolMigrationPreview, countPreviewRisks,
-// createPreviewDigest, issueApprovalToken, verifyApprovalToken, groupPreviewHunks,
-// executeRefactorApplyPlan, buildFinalOffsetMap → refactorEngine.ts / refactorUtils.ts
-
-function formatChangeContextPayloadLocal(
-  result: ReturnType<GraphStore["getChangeContext"]>,
-  profile: ResponseProfile
-): unknown {
-  if (profile === "nano") {
-    const topCallers = result.callers.slice(0, 10).map((x) => ({
-      fromName: x.fromName,
-      fromFilePath: x.fromFilePath,
-      distance: x.distance,
-      confidence: x.confidence ?? null
-    }));
-    const topCallees = result.callees.slice(0, 10).map((x) => ({
-      toName: x.toName,
-      toFilePath: x.toFilePath,
-      confidence: x.confidence ?? null
-    }));
-    const topTypeDeps = result.typeDeps.slice(0, 10).map((x) => ({
-      toName: x.toName,
-      toFilePath: x.toFilePath,
-      confidence: x.confidence ?? null
-    }));
-
-    return {
-      symbol: result.symbol
-        ? { symbolId: result.symbol.symbolId, name: result.symbol.name, kind: result.symbol.kind, filePath: result.symbol.filePath, line: result.symbol.line }
-        : null,
-      callerCount: result.callers.length,
-      calleeCount: result.callees.length,
-      typeDepCount: result.typeDeps.length,
-      topCallers,
-      topCallees,
-      topTypeDeps,
-      hasMoreCallers: result.callers.length > topCallers.length,
-      hasMoreCallees: result.callees.length > topCallees.length,
-      hasMoreTypeDeps: result.typeDeps.length > topTypeDeps.length,
-      unresolved: {
-        calls: result.graphHealth.unresolvedCalls,
-        imports: result.graphHealth.unresolvedImports,
-        typeRefs: result.graphHealth.unresolvedTypeRefs
-      },
-      reliability: {
-        medianConfidence: result.reliabilitySummary.medianConfidence,
-        unresolvedRatio: result.reliabilitySummary.unresolvedRatio,
-        warning: result.reliabilitySummary.warning
-      }
-    };
-  }
-
-  if (profile === "compact") {
-    return {
-      symbol: result.symbol
-        ? { symbolId: result.symbol.symbolId, name: result.symbol.name, kind: result.symbol.kind, filePath: result.symbol.filePath, line: result.symbol.line }
-        : null,
-      callers: result.callers.map((x) => ({
-        fromId: x.fromId,
-        fromName: x.fromName,
-        fromFilePath: x.fromFilePath,
-        distance: x.distance,
-        confidence: x.confidence ?? null,
-        reason: x.reason ?? null
-      })),
-      callees: result.callees.map((x) => ({ toId: x.toId, toName: x.toName, toFilePath: x.toFilePath, confidence: x.confidence ?? null, reason: x.reason ?? null })),
-      typeDeps: result.typeDeps.map((x) => ({ toId: x.toId, toName: x.toName, toFilePath: x.toFilePath, confidence: x.confidence ?? null, reason: x.reason ?? null })),
-      graphHealth: result.graphHealth,
-      reliabilitySummary: result.reliabilitySummary
-    };
-  }
-
-  if (profile === "verbose") {
-    return {
-      ...result,
-      summary: {
-        callerCount: result.callers.length,
-        calleeCount: result.callees.length,
-        typeDepCount: result.typeDeps.length
-      }
-    };
-  }
-
-  return result;
-}
-
 function asText(payload: unknown, profile: ResponseProfile = "standard"): CallToolResult {
   return asTextCore(payload, profile, toolContextStorage.getStore(), TELEMETRY_ENABLED, TELEMETRY_SAMPLE_RATE);
 }
-
-// mapError, assertNoLlmRuntimePolicy, assertRefactorApprovalPolicy → errorHandler.ts
-// resolveApprovalSecret → refactorUtils.ts (now takes secret + strictApproval as params)
-// mapPreviewStatusFromApplyStatus, deriveApplyStatus, noLlmAudit → refactorUtils.ts
-// numberFromEnv, ratioFromEnv → envConfig.ts
-// toNugetContractId, asArgsRecord → responseFormatter.ts
-// estimateResultCount, emitTelemetry → responseFormatter.ts
-// traverseDependencyGraph, traverseCallGraph → graphTraversal.ts
-
-/**
- * Zero-metric IndexRunSummary for a run that did no work (dirty mode with a clean tree,
- * or an incremental run that skipped). Shared so the two skip paths can't drift as the
- * summary schema evolves.
- */
-function buildSkippedRunSummary(opts: {
-  repoId: string;
-  mode: IndexMode;
-  commitSha: string | null;
-  branch: string | null;
-  indexVersion: string;
-  skipReason: string;
-}): IndexRunSummary & { crossRepoLinked?: number; callEdgesResolved?: number; importEdgesResolved?: number; mentionsResolved?: number; skipReason?: string } {
-  const now = new Date().toISOString();
-  return {
-    runId: randomUUID(),
-    repoId: opts.repoId,
-    commitSha: opts.commitSha,
-    branch: opts.branch,
-    indexVersion: opts.indexVersion,
-    mode: opts.mode,
-    status: "ok",
-    startedAt: now,
-    finishedAt: now,
-    filesScanned: 0,
-    filesIndexed: 0,
-    filesSkipped: 0,
-    symbolsUpserted: 0,
-    edgesUpserted: 0,
-    docsUpserted: 0,
-    mentionsUpserted: 0,
-    parseFailures: 0,
-    parseTimeouts: 0,
-    elapsedMs: 0,
-    crossRepoLinked: 0,
-    callEdgesResolved: 0,
-    callEdgesAttempted: 0,
-    callEdgesUnresolved: 0,
-    unresolvedCallsTotal: 0,
-    resolveCallsCoverage: 1,
-    importEdgesResolved: 0,
-    mentionsResolved: 0,
-    crossRepoAttempts: 0,
-    crossRepoResolved: 0,
-    unresolvedNoCandidate: 0,
-    unresolvedAmbiguous: 0,
-    unresolvedBoundaryBlocked: 0,
-    unresolvedLowConfidence: 0,
-    skipReason: opts.skipReason
-  };
-}
-
-async function runIndexAndResolve(
-  repoId: string,
-  repoPath: string,
-  mode: IndexMode,
-  docsEnabled: boolean,
-  maxFiles: number,
-  batchSize: number
-): Promise<IndexRunSummary & { crossRepoLinked?: number; callEdgesResolved?: number; importEdgesResolved?: number; mentionsResolved?: number; skipReason?: string }> {
-  const yieldToEventLoop = async (): Promise<void> => {
-    await new Promise<void>((resolve) => setImmediate(resolve));
-  };
-
-  /**
-   * Run a synchronous resolve function in batches to avoid blocking the event loop.
-   * Each batch processes BATCH_SIZE rows, then yields before the next batch.
-   * If maxRows=0 (unlimited), uses BATCH_SIZE per iteration until no more rows resolved.
-   */
-  const resolveInBatches = async (
-    _repoId: string,
-    label: string,
-    resolveFn: (batchSize: number) => number,
-    maxRows: number
-  ): Promise<number> => {
-    const BATCH_SIZE = 5_000;
-    let totalResolved = 0;
-    let remaining = maxRows > 0 ? maxRows : Infinity;
-    let iteration = 0;
-    const maxIterations = 200; // safety cap: 200 * 5000 = 1M rows max
-
-    while (remaining > 0 && iteration < maxIterations) {
-      const batchLimit = Math.min(BATCH_SIZE, remaining === Infinity ? BATCH_SIZE : remaining);
-      const resolved = resolveFn(batchLimit);
-      totalResolved += resolved;
-      iteration += 1;
-
-      indexLog(
-        `[index-post-batch] repoId=${_repoId} type=${label} batch=${String(iteration)} resolved=${String(resolved)} total=${String(totalResolved)}`
-      );
-
-      // If nothing resolved in this batch, we're done
-      if (resolved === 0) break;
-
-      if (maxRows > 0) {
-        remaining -= batchLimit;
-      }
-
-      await yieldToEventLoop();
-    }
-
-    return totalResolved;
-  };
-
-  // Dirty mode (ENH-A): re-index only the git working-tree delta (unstaged + staged +
-  // untracked). Sub-second refresh for "what I just edited" without a full/incremental scan.
-  let dirtyFileSet: Set<string> | undefined;
-  if (mode === "dirty") {
-    dirtyFileSet = collectDirtyFiles(repoPath);
-    if (dirtyFileSet.size === 0) {
-      const noOp = buildSkippedRunSummary({
-        repoId,
-        mode,
-        commitSha: resolveHeadCommitSha(repoPath),
-        branch: resolveCurrentBranch(repoPath),
-        indexVersion: INDEX_VERSION,
-        skipReason: "no dirty files"
-      });
-      store.recordRun(noOp);
-      indexLog(`[index-dirty] repoId=${repoId} no working-tree changes — nothing to re-index`);
-      return noOp;
-    }
-    indexLog(`[index-dirty] repoId=${repoId} re-indexing ${String(dirtyFileSet.size)} working-tree-changed file(s)`);
-  }
-
-  if (mode === "incremental") {
-    const skipDecision = evaluateIncrementalSkip(repoId, repoPath);
-    if (skipDecision.shouldSkip) {
-      const skippedSummary = buildSkippedRunSummary({
-        repoId,
-        mode,
-        commitSha: skipDecision.headCommitSha,
-        branch: resolveCurrentBranch(repoPath),
-        indexVersion: skipDecision.indexVersion,
-        skipReason: skipDecision.reason
-      });
-      store.recordRun(skippedSummary);
-      indexLog(`[index-skip] repoId=${repoId} reason=${skipDecision.reason}`);
-      return skippedSummary;
-    }
-  }
-
-  const profileDecision = resolvePerformanceProfileDecision(repoId, mode, maxFiles);
-  const performanceProfile = profileDecision.profile;
-  const postPolicy = resolvePostPhasePolicy(performanceProfile);
-  // Resolve implements in post-phase for ALL modes (full + incremental).
-  // Previous condition `mode !== "full"` was a bug — full index rebuilds all edges from scratch
-  // so implements edges also need post-phase resolution.
-  const effectiveResolveImplementsInPost = postPolicy.resolveImplementsInPost;
-  indexLog(
-    `[index-policy] repoId=${repoId} profile=${performanceProfile} source=${profileDecision.source} reason=${profileDecision.reason} fileCount=${String(profileDecision.fileCount)} symbolCount=${String(profileDecision.symbolCount)} maxUnresolvedRows=${String(postPolicy.maxUnresolvedRows)} resolveTypeRefs=${String(postPolicy.resolveTypeRefs)} resolvePropertyRefs=${String(postPolicy.resolvePropertyRefs)} resolveImplementsInPost=${String(postPolicy.resolveImplementsInPost)} effectiveResolveImplementsInPost=${String(effectiveResolveImplementsInPost)}`
-  );
-
-  // One progress reporter drives the whole run: the pipeline advances it through
-  // scan → index, then we keep it going across the edge-resolution post-phase below
-  // and stop() it with a summary. When the host supplied a progressToken, its
-  // update()s stream `notifications/progress` so Claude Code shows live % + phase.
-  const progress = createIndexProgress(repoId, toolContextStorage.getStore()?.progressNotifier);
-  const runStartedMs = Date.now();
-
-  // Disable WAL auto-checkpoint during indexing to prevent lock contention
-  // with concurrent readers. Will be re-enabled in endIndexSession().
-  store.beginIndexSession();
-
-  // On throw the pipeline stops the reporter itself (failure line) before rethrowing.
-  const summary = await runIndexPipeline(store, {
-    repoId,
-    repoPath,
-    mode,
-    performanceProfile,
-    includeDocs: docsEnabled,
-    maxFiles,
-    batchSize,
-    subtxSize: SUBTX_SIZE,
-    checkpointEveryNBatches: CHECKPOINT_EVERY_N_BATCHES,
-    largeFileThresholdBytes: LARGE_FILE_THRESHOLD_BYTES,
-    maxFileSizeBytes: MAX_FILE_SIZE_BYTES,
-    parseWorkers: PARSE_WORKERS,
-    parseJobTimeoutMs: PARSE_JOB_TIMEOUT_MS,
-    onlyRelativePaths: dirtyFileSet,
-    progress
-  });
-  const resolvePhaseStart = Date.now();
-  let ftsRebuildMs = 0;
-  let buildContextMs = 0;
-  let callEdgesAttempted = 0;
-  let callResolveMs = 0;
-  let importResolveMs = 0;
-  let typeResolveMs = 0;
-  let propertyResolveMs = 0;
-  let implementsResolveMs = 0;
-
-  progress.phase("finalizing");
-  indexLog(`[index-post] repoId=${repoId} rebuilding FTS indexes...`);
-  const ftsStart = Date.now();
-  try { store.rebuildFts(); } catch { /* non-fatal */ }
-  await yieldToEventLoop();
-  try { store.rebuildLiteralsFts(); } catch { /* non-fatal */ }
-  await yieldToEventLoop();
-  if (docsEnabled) {
-    indexLog(`[index-post] repoId=${repoId} rebuilding docs FTS...`);
-    try { store.rebuildDocsFts(); } catch { /* non-fatal */ }
-    await yieldToEventLoop();
-  }
-  ftsRebuildMs = Date.now() - ftsStart;
-
-  indexLog(`[index-post] repoId=${repoId} resolving cross-repo links...`);
-  const crossStats = safeCrossRepoResolve(repoId);
-  await yieldToEventLoop();
-
-  progress.phase("resolving calls");
-  indexLog(`[index-post] repoId=${repoId} resolving call edges...`);
-  const callEdgesResolved = await (async () => {
-    const callStart = Date.now();
-    try {
-      // Build lookup maps ONCE, then process in batches to avoid blocking event loop
-      indexLog(`[index-post] repoId=${repoId} building call resolution context...`);
-      const ctxStart = Date.now();
-      const ctx = store.buildCallResolutionContext(repoId);
-      buildContextMs = Date.now() - ctxStart;
-      callEdgesAttempted = ctx.unresolvedRows.length;
-      indexLog(`[index-post] repoId=${repoId} pre-fetched ${String(ctx.unresolvedRows.length)} unresolved call edges`);
-      if (ctx.unresolvedRows.length === 0) return 0;
-
-      // Optimization: drop secondary edge indexes before bulk resolve to speed up UPDATEs.
-      // Each UPDATE otherwise must maintain 4 secondary indexes on the edges table.
-      indexLog(`[index-post] repoId=${repoId} dropping edge indexes for bulk resolve...`);
-      store.dropEdgeIndexesForBulkWrite();
-
-      const BATCH_SIZE = 5_000;
-      let total = 0;
-      let iteration = 0;
-      const maxIterations = 1000;
-      while (iteration < maxIterations) {
-        const resolved = store.resolveCallEdgesBatch(repoId, ctx, BATCH_SIZE);
-        total += resolved;
-        iteration += 1;
-        // Heartbeat only — keep the real symbol count in the message rather than
-        // overwriting it with the resolved-call-edge total.
-        progress.update({});
-        indexLog(
-          `[index-post-batch] repoId=${repoId} type=call batch=${String(iteration)} resolved=${String(resolved)} total=${String(total)}`
-        );
-        if (resolved === 0) break;
-        await yieldToEventLoop();
-      }
-      return total;
-    } catch { return 0; }
-    finally {
-      // Always rebuild indexes after resolve, even on error
-      indexLog(`[index-post] repoId=${repoId} rebuilding edge indexes after resolve...`);
-      try { store.rebuildEdgeIndexes(); } catch { /* non-fatal */ }
-      callResolveMs = Date.now() - callStart;
-    }
-  })();
-  await yieldToEventLoop();
-
-  progress.phase("resolving imports");
-  indexLog(`[index-post] repoId=${repoId} resolving import edges...`);
-  const importStart = Date.now();
-  const importEdgesResolved = await resolveInBatches(
-    repoId,
-    "import",
-    (batchSize) => { try { return store.resolveImportEdges(repoId, batchSize); } catch { return 0; } },
-    postPolicy.maxUnresolvedRows
-  );
-  importResolveMs = Date.now() - importStart;
-  await yieldToEventLoop();
-
-  if (postPolicy.resolveTypeRefs) {
-    progress.phase("resolving types");
-    indexLog(`[index-post] repoId=${repoId} resolving type references...`);
-    const typeStart = Date.now();
-    (() => { try { store.resolveTypeRefEdges(repoId, postPolicy.maxUnresolvedRows); } catch { /* non-fatal */ } })();
-    typeResolveMs = Date.now() - typeStart;
-  } else {
-    indexLog(`[index-post-skip] repoId=${repoId} skipping type reference resolution by policy`);
-  }
-  await yieldToEventLoop();
-
-  if (postPolicy.resolvePropertyRefs) {
-    indexLog(`[index-post] repoId=${repoId} resolving property references...`);
-    const propertyStart = Date.now();
-    (() => { try { store.resolvePropertyEdges(repoId, postPolicy.maxUnresolvedRows); } catch { /* non-fatal */ } })();
-    propertyResolveMs = Date.now() - propertyStart;
-  } else {
-    indexLog(`[index-post-skip] repoId=${repoId} skipping property reference resolution by policy`);
-  }
-  await yieldToEventLoop();
-
-  const shouldResolveImplementsInPost = effectiveResolveImplementsInPost;
-  if (shouldResolveImplementsInPost) {
-    indexLog(`[index-post] repoId=${repoId} resolving interface implementations...`);
-    const implementsStart = Date.now();
-    try { store.resolveImplementsEdges(repoId); } catch { /* non-fatal */ }
-    // ISSUE-020: match message-bus PUBLISHES/CONSUMES tokens (depends on consumer IMPLEMENTS being resolved).
-    try { store.resolvePublishesConsumesEdges(repoId); } catch { /* non-fatal */ }
-    implementsResolveMs = Date.now() - implementsStart;
-  } else {
-    indexLog(`[index-post-skip] repoId=${repoId} skipping interface implementation resolution in post-phase`);
-  }
-  await yieldToEventLoop();
-
-  // Post-resolve dedup: remove duplicate resolved edges that arise when both simple and
-  // qualified edges resolve to the same symbolId (e.g. callee:Save + callee:IRepo.Save → same target).
-  indexLog(`[index-post] repoId=${repoId} deduplicating resolved edges...`);
-  const dedupCount = (() => { try { return store.deduplicateResolvedEdges(repoId); } catch { return 0; } })();
-  indexLog(`[index-post] repoId=${repoId} removed ${dedupCount} duplicate resolved edges`);
-  await yieldToEventLoop();
-
-  const mentionsStart = Date.now();
-  indexLog(`[index-post] repoId=${repoId} resolving mentions...`);
-  const mentionsResolved = docsEnabled
-    ? (() => { try { return store.resolveMentions(repoId); } catch { return 0; } })()
-    : 0;
-  const mentionsElapsed = Date.now() - mentionsStart;
-  indexLog(`[index-post] repoId=${repoId} resolved ${mentionsResolved} mentions in ${mentionsElapsed}ms`);
-
-  const recordStart = Date.now();
-  indexLog(`[index-post] repoId=${repoId} recording run metadata...`);
-
-  const fullSummary = {
-    ...summary,
-    crossRepoLinked: crossStats.resolved,
-    callEdgesResolved,
-    importEdgesResolved,
-    mentionsResolved,
-    crossRepoAttempts: crossStats.attempts,
-    crossRepoResolved: crossStats.resolved,
-    unresolvedNoCandidate: crossStats.unresolvedByReason.no_candidate,
-    unresolvedAmbiguous: crossStats.unresolvedByReason.ambiguous_candidates,
-    unresolvedBoundaryBlocked: crossStats.unresolvedByReason.boundary_blocked,
-    unresolvedLowConfidence: crossStats.unresolvedByReason.low_confidence,
-    resolvePhaseMs: Date.now() - resolvePhaseStart,
-    buildContextMs,
-    callResolveMs,
-    importResolveMs,
-    typeResolveMs,
-    propertyResolveMs,
-    implementsResolveMs,
-    ftsRebuildMs,
-    // ISSUE-025: self-describing call-resolution counters. `unresolvedCallsTotal` is a
-    // deprecated alias of `callEdgesAttempted` (the pre-resolve unresolved-edge count).
-    callEdgesAttempted,
-    callEdgesUnresolved: Math.max(0, callEdgesAttempted - callEdgesResolved),
-    unresolvedCallsTotal: callEdgesAttempted,
-    unresolvedImportsCappedByPolicy: postPolicy.maxUnresolvedRows > 0,
-    resolveCallsCoverage: callEdgesAttempted > 0 ? callEdgesResolved / callEdgesAttempted : 1,
-    performanceProfile
-  };
-  store.recordRun(fullSummary);
-  const recordElapsed = Date.now() - recordStart;
-  indexLog(`[index-post] repoId=${repoId} recorded run metadata in ${recordElapsed}ms`);
-
-  // Re-enable WAL auto-checkpoint and force a full checkpoint to shrink WAL file
-  store.endIndexSession();
-
-  indexLog(`[index-post-done] repoId=${repoId} crossRepo=${String(crossStats.resolved)} calls=${String(callEdgesResolved)} imports=${String(importEdgesResolved)} mentions=${String(mentionsResolved)}`);
-
-  // Finish the reporter with one concise summary line (the only stderr line the
-  // host sees for the whole run when logs are quiet).
-  const totalSec = ((Date.now() - runStartedMs) / 1000).toFixed(1);
-  progress.stop(
-    `✓ index ${repoId} · ${String(fullSummary.filesIndexed)} files · ${String(fullSummary.symbolsUpserted)} symbols · ${String(callEdgesResolved)} calls · ${totalSec}s`
-  );
-
-  return fullSummary;
-}
-
-function evaluateIncrementalSkip(
-  repoId: string,
-  repoPath: string
-): {
-  shouldSkip: boolean;
-  reason: string;
-  headCommitSha: string | null;
-  indexVersion: string;
-} {
-  const latestRun = store.getLatestRun(repoId);
-  if (!latestRun?.commitSha) {
-    return {
-      shouldSkip: false,
-      reason: "no previous indexed commit",
-      headCommitSha: null,
-      indexVersion: latestRun?.indexVersion ?? INDEX_VERSION
-    };
-  }
-
-  // ISSUE-023: schema/lane version bump (vd. v1 → v2-string-literals) phải vô hiệu skip,
-  // nếu không repo đã index sẽ không bao giờ populate lane mới dù HEAD không đổi.
-  if (latestRun.indexVersion !== INDEX_VERSION) {
-    return {
-      shouldSkip: false,
-      reason: `index version changed (${latestRun.indexVersion} → ${INDEX_VERSION})`,
-      headCommitSha: resolveHeadCommitSha(repoPath),
-      indexVersion: INDEX_VERSION
-    };
-  }
-
-  const headCommitSha = resolveHeadCommitSha(repoPath);
-  if (!headCommitSha) {
-    return {
-      shouldSkip: false,
-      reason: "unable to resolve HEAD",
-      headCommitSha,
-      indexVersion: latestRun.indexVersion
-    };
-  }
-
-  if (latestRun.commitSha !== headCommitSha) {
-    return {
-      shouldSkip: false,
-      reason: "index commit differs from HEAD",
-      headCommitSha,
-      indexVersion: latestRun.indexVersion
-    };
-  }
-
-  const dirtyState = hasWorkingTreeChanges(repoPath);
-  if (dirtyState === true) {
-    return {
-      shouldSkip: false,
-      reason: "working tree has uncommitted changes",
-      headCommitSha,
-      indexVersion: latestRun.indexVersion
-    };
-  }
-
-  if (dirtyState === null) {
-    return {
-      shouldSkip: false,
-      reason: "unable to resolve working tree state",
-      headCommitSha,
-      indexVersion: latestRun.indexVersion
-    };
-  }
-
-  return {
-    shouldSkip: true,
-    reason: "head unchanged and working tree clean",
-    headCommitSha,
-    indexVersion: latestRun.indexVersion
-  };
-}
-
-// hasWorkingTreeChanges → gitHelpers.ts
-// parsePerformanceProfileEnv, resolvePostPhasePolicy → performanceConfig.ts
-
-function resolvePerformanceProfileDecision(
-  repoId: string,
-  mode: IndexMode,
-  maxFiles: number
-): {
-  profile: PerformanceProfile;
-  source: "env" | "auto";
-  reason: string;
-  fileCount: number;
-  symbolCount: number;
-} {
-  const configured = parsePerformanceProfileEnv(process.env.CODEBASE_INDEX_LARGE_REPO_PROFILE);
-  if (configured !== "auto") {
-    const snap = store.getRepoSchemaSnapshot(repoId);
-    return {
-      profile: configured,
-      source: "env",
-      reason: "explicit override",
-      fileCount: snap.fileCount,
-      symbolCount: snap.symbolCount
-    };
-  }
-
-  const snapshot = store.getRepoSchemaSnapshot(repoId);
-  const estimatedFileCount = snapshot.fileCount;
-  const estimatedSymbolCount = snapshot.symbolCount;
-
-  if (estimatedFileCount === 0 && estimatedSymbolCount === 0) {
-    if (mode === "full" && maxFiles >= 8000) {
-      return {
-        profile: "large",
-        source: "auto",
-        reason: "cold-start full index with high maxFiles",
-        fileCount: estimatedFileCount,
-        symbolCount: estimatedSymbolCount
-      };
-    }
-    return {
-      profile: "standard",
-      source: "auto",
-      reason: "cold-start fallback",
-      fileCount: estimatedFileCount,
-      symbolCount: estimatedSymbolCount
-    };
-  }
-
-  if (estimatedFileCount >= 8000 || estimatedSymbolCount >= 60000) {
-    return {
-      profile: "very-large",
-      source: "auto",
-      reason: "snapshot scale threshold",
-      fileCount: estimatedFileCount,
-      symbolCount: estimatedSymbolCount
-    };
-  }
-  if (estimatedFileCount >= 3000 || estimatedSymbolCount >= 20000) {
-    return {
-      profile: "large",
-      source: "auto",
-      reason: "snapshot scale threshold",
-      fileCount: estimatedFileCount,
-      symbolCount: estimatedSymbolCount
-    };
-  }
-  return {
-    profile: "standard",
-    source: "auto",
-    reason: "snapshot scale threshold",
-    fileCount: estimatedFileCount,
-    symbolCount: estimatedSymbolCount
-  };
-}
-
-function safeCrossRepoResolve(repoId: string): ResolutionStats {
-  try {
-    return store.resolveUnlinkedEdges(repoId);
-  } catch {
-    return {
-      attempts: 0,
-      resolved: 0,
-      unresolvedByReason: {
-        no_candidate: 0,
-        ambiguous_candidates: 0,
-        boundary_blocked: 0,
-        low_confidence: 0
-      }
-    };
-  }
-}
-
-// nonNegativeNumberFromEnv, parseOptionalBooleanEnv → envConfig.ts
 
 function resolveAutoWatchTargets(): { repoId: string; repoPath: string }[] {
   if (AUTO_WATCH_REPOS.length > 0) {
