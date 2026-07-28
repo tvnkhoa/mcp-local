@@ -1,10 +1,12 @@
 # Migration status — all 44 steps
 
-**Verified** 2026-07-28 against the working tree at `9ccae95`, not from memory. Every
+**Verified** 2026-07-28 against the working tree, not from memory. Baseline `9ccae95`;
+Phase H's row updated after the S-28 SDK work landed. Every
 row cites the artifact that proves it. Where no artifact was found, the row says so
 rather than guessing.
 
-**24 of 44 done · 1 partial · 1 skipped by decision · 18 open.**
+**24 of 44 done · 1 partial · 1 skipped by decision · 18 open.** Phase H is no longer
+blocked: its SDK prerequisite (`renderResult` + `wrapCall`) shipped 2026-07-28.
 
 ---
 
@@ -66,7 +68,7 @@ that the plan folded into S-31. **This document's numbering is authoritative.**
 | S-12 Dependency-rule guard | ✅ | same |
 | S-13 Contract guard + platform no-LLM guard | ✅ | same; `guard:no-llm-runtime` also runs per-server |
 
-Current output: **0 errors, 34 warnings across 328 files.** Warn mode is correct until
+Current output: **0 errors, 34 warnings across 332 files.** Warn mode is correct until
 S-41 — flipping now would turn 34 warnings into 34 build failures.
 
 ## Phase E — Shared Core Extraction · 7/7 ✅
@@ -108,17 +110,19 @@ S-41 — flipping now would turn 34 warnings into 34 build failures.
 
 | Step | Status | Notes |
 |---|---|---|
-| S-31 Install the coexistence adapter | ❌ | **blocked** — see below |
+| S-31 Install the coexistence adapter | ❌ | **unblocked** — the SDK prerequisite is built |
 | S-32 Migrate 43 tools in 5 batches | ❌ | |
 | S-33 Delete the legacy dispatch switch | ❌ | |
 
-Blocked on three capabilities `@mcp/sdk` does not have, documented in
-`s26-s29-plan.md`: serialization is where telemetry is emitted and there is no hook for
-it; `defineTool` handlers cannot reach `extra` for progress notifications; and there is no
-server-wide pre-dispatch hook for `maybeAutoActivateWatchFromArgs`.
+**Prerequisite done.** The three capabilities `@mcp/sdk` was missing shipped as two hooks
+— `renderResult` and `wrapCall` — with 15 tests (sdk 50 → 65). See `s26-s29-plan.md` §S-28.
 
-The first is the dangerous one — a naive migration silently stops all success-path
-telemetry, and neither the contract snapshot nor a response replay would reveal it.
+The dangerous one was serialization: telemetry is emitted inside `asTextCore`, so a naive
+migration would silently stop all success-path telemetry while producing byte-identical
+responses. Neither the contract snapshot nor a response replay would have revealed it.
+`renderResult` is the seam that prevents it, and S-32's verification must still assert
+that telemetry is actually emitted — the tests prove the hook works, not that the server
+wires it up.
 
 ## Phase I — Manifest Generation · 0/3
 

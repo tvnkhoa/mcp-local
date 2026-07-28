@@ -47,6 +47,24 @@ export interface DispatchDeps {
    * Must not throw. If it does, the caller still gets {@link asFatalError}.
    */
   readonly formatError?: (error: unknown, profile: ResponseProfile) => ToolCallResult;
+  /**
+   * Turn a successful payload into a wire result using the server's own
+   * serializer, instead of {@link asText}.
+   *
+   * The mirror of {@link formatError}, and needed for the same reason: a server
+   * whose serialization step does more than serialize. Emitting telemetry,
+   * stamping a request id, or normalizing paths at render time are all decisions
+   * that live in the payload-to-text hop, and a pipeline that owns that hop
+   * silently removes them. The loss is invisible to a `tools/list` snapshot and
+   * invisible to a response replay, because the bytes can be identical while the
+   * side effect is gone.
+   *
+   * When supplied, {@link serialize} is not consulted — the server owns the whole
+   * hop, options included.
+   *
+   * Must not throw. If it does, the call is reported as a handler failure.
+   */
+  readonly renderResult?: (payload: unknown, profile: ResponseProfile) => ToolCallResult;
 }
 
 let requestCounter = 0;
@@ -177,10 +195,14 @@ async function dispatchInner(
       return renderError(deps, outcome.error, outcome.error, profile);
     }
     // A rawResult tool has already built its envelope — serializing again would
-    // wrap a CallToolResult inside another one.
-    return tool.rawResult
-      ? (outcome.value as ToolCallResult)
-      : asText(outcome.value, profile, serialize);
+    // wrap a CallToolResult inside another one. That also means renderResult is
+    // deliberately skipped for it: the tool has already made the decision.
+    if (tool.rawResult) {
+      return outcome.value as ToolCallResult;
+    }
+    return deps.renderResult === undefined
+      ? asText(outcome.value, profile, serialize)
+      : deps.renderResult(outcome.value, profile);
   } catch (cause) {
     const error = toPlatformError(cause, `Tool "${name}" failed unexpectedly.`);
     ctx.logger.error("tool_threw", { code: error.code, detail: String(cause) });

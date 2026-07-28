@@ -26,6 +26,8 @@ export { annotations, defineTool } from "./defineTool.js";
 
 export type { ResourceContent, ResourceDescriptor, ResourceProvider } from "./resources.js";
 
+export type { CallContext, CallWrapper } from "./callContext.js";
+
 export { defineGuard, featureFlagGuard, immutableTargetGuard, runGuards } from "./guards.js";
 
 export type { SerializeOptions, ToolCallResult } from "./responses.js";

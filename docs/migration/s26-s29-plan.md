@@ -39,9 +39,10 @@ Two findings drive the split.
 helpers sat in `index.ts` only because both `WatchManager` and `HandlerContext` need
 them, and the entry point was the one place that already had `store` in scope.
 
-## The three SDK gaps
+## The three SDK gaps — closed by two capabilities ✅
 
-These are the reason the migration itself (S-29) cannot be attempted yet.
+These were the reason the migration itself (S-29) could not be attempted. They are now
+built; see *S-28* below for what shipped and why three gaps needed only two hooks.
 
 | Gap | Where it lives today | Why the pipeline breaks it |
 |---|---|---|
@@ -146,10 +147,57 @@ handler module each descriptor dispatches to:
 Still no `defineTool`, and the existing switch still dispatches. `contracts:check` proves
 byte-identity, so the risk is close to zero. Expected: `index.ts` ≈ 700.
 
-## S-28 — close the three SDK gaps
+## S-28 — close the SDK gaps ✅
 
-With tests in `packages/sdk`. Unlike S-23/S-24/S-25, where each capability was discovered
-mid-migration, here the requirement is known up front — so build it first.
+Unlike S-23/S-24/S-25, where each capability was discovered mid-migration, the requirement
+was known up front and built first.
+
+**Three gaps needed two hooks**, because two of them turn out to be the same need — a
+scope that spans the whole call, which is also the only place the request's progress token
+and notification channel are reachable.
+
+### `renderResult(payload, profile) → ToolCallResult`
+
+`packages/sdk/src/dispatch.ts`. The mirror of `formatError`: the server owns the
+payload-to-text hop for successes as it already did for failures.
+
+Deliberate boundaries:
+
+- **`serialize` is not consulted when it is supplied.** Half-owning a hop is worse than
+  not owning it — a server that renders its own output should not also have platform
+  options silently applied underneath.
+- **`rawResult` tools bypass it.** Such a tool has already built its envelope; running it
+  through a renderer would be the same double-wrapping `rawResult` exists to prevent.
+- **Failures do not go through it.** `formatError` owns that half, and keeping them
+  separate means a server can adopt one without the other.
+- **A throwing renderer degrades to a tool error**, never a rejection.
+
+### `wrapCall(context, next)`
+
+`packages/sdk/src/callContext.ts` + `createServer.ts`. Runs around every `tools/call`.
+
+`CallContext` carries `toolName`, the raw (pre-validation) `args`, an optional
+`progressToken`, and `reportProgress`. Progress is handed over **already bound** rather
+than exposing the raw notification sender: the wire shape — the method name, the token
+echo, the monotonic `progress` requirement — is exactly the protocol detail this package
+exists to keep out of servers.
+
+`progressToken` is *absent* rather than undefined-valued when the host did not ask, so a
+server can branch on it and skip building a sink that goes nowhere. `reportProgress` is a
+no-op in that case rather than an error.
+
+A wrapper that throws is caught and reported as a fatal tool result. Letting it escape
+would turn a server-side bug into a protocol error the client cannot interpret — the one
+thing this layer guarantees against.
+
+### Verification
+
+15 new tests (`packages/sdk/src/callHooks.test.ts`), sdk **50 → 65**, packages **157 →
+172**. Covers each boundary above plus: `wrapCall` runs even for an unknown tool; it can
+establish `AsyncLocalStorage` a handler reads; `reportProgress` reaches a real client over
+an in-memory transport; and a regression case pinning that behaviour is unchanged when
+neither hook is supplied. `typecheck:tests` clean; guards unchanged at 0 errors / 34
+warnings.
 
 ## S-29 — the migration
 
