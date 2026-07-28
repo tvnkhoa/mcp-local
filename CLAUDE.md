@@ -185,6 +185,7 @@ When analyzing this codebase, use the `codebase-index-local` MCP tools **before*
 - `docs/refactor/duplication-extraction-report.md` — the shared-component extraction, its measured behaviour deltas, and the one cluster deliberately left alone
 - `docs/migration/s06-s23-notes.md` — contract snapshots + the `bitbucket-mcp` SDK pilot; read this before migrating another server
 - `docs/migration/s24-notes.md` — the `postgres-mcp` SDK migration: the call-replay method, and why the SDK gained `resources` and `rawResult`
+- `docs/migration/s25-notes.md` — the `observe-mcp` SDK migration; the first needing no new SDK capability, and a profile-dependent serialization finding no schema could reveal
 - `docs/migration/ci.md` — what CI covers, what it deliberately does not (no live backends, no secrets), and the script vocabulary that makes the root aggregates work
 - `contracts/README.md` — what the golden `tools/list` snapshots are and how to update them
 

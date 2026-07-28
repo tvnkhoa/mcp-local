@@ -6,7 +6,7 @@ import { z } from "zod";
  * live. Kept as a named export from this module so every existing import site is
  * unchanged.
  */
-import { PolicyViolationError } from "@mcp/core";
+import { PolicyViolationError, isPlatformError } from "@mcp/core";
 
 export { PolicyViolationError };
 
@@ -70,4 +70,19 @@ export function mapError(error: unknown): MappedError {
     return { code: "internal_error", message: error.message };
   }
   return { code: "internal_error", message: String(error) };
+}
+
+/**
+ * `mapError`, plus the refusals dispatch itself raises.
+ *
+ * A `PlatformError` reaching `mapError` would fall into its `instanceof Error`
+ * branch and be reported as `internal_error` — actively misleading for something
+ * like an unknown tool name. Unwrapping it first preserves the code dispatch
+ * chose.
+ */
+export function toWireError(error: unknown): MappedError {
+  if (isPlatformError(error)) {
+    return { code: error.code, message: error.message };
+  }
+  return mapError(error);
 }

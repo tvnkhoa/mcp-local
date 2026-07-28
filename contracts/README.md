@@ -54,20 +54,20 @@ Reproducibility is the whole value; a snapshot that varies per machine is noise.
 |---|---|---|
 | `codebase-index-local` | 43 | no |
 | `postgres-mcp` | 17 | **yes** — migrated to `@mcp/sdk` (S-24) |
-| `observe-mcp` | 8 | no |
+| `observe-mcp` | 8 | **yes** — migrated to `@mcp/sdk` (S-25) |
 | `bitbucket-mcp` | 8 | **yes** — migrated to `@mcp/sdk` (S-23) |
 | **Total** | **76** | |
 
 Servers on `@mcp/sdk` advertise MCP annotation hints (`readOnlyHint` / `idempotentHint` /
 `destructiveHint` / `openWorldHint`), which the SDK derives from each tool's declared annotations.
-In both migrations this was an **additive** contract change, reviewed via the snapshot diff: names,
+In every migration so far this was an **additive** contract change, reviewed via the snapshot diff: names,
 descriptions and input schemas stayed byte-identical.
 
 Clients use these hints to decide what may be auto-approved. Across the workspace the tools marked
 **not read-only** are `create_pull_request`, `write_apply`, `write_rollback`, `migration_apply` and
 `migration_add` — of which all but `create_pull_request` and `migration_add` are also destructive.
 
-The remaining two servers will gain the same field as they migrate.
+`codebase-index-mcp` is the last server without them and will gain the same field when it migrates.
 
 Tool advertisement is **not** env-dependent in any server: write-gated tools such as
 `create_pull_request`, `write_preview` and `migration_apply` are always listed, and the gate is

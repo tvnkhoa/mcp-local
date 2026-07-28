@@ -3,6 +3,12 @@
   "toolCount": 8,
   "tools": [
     {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": true,
+        "readOnlyHint": true
+      },
       "description": "Discover the fields of a stream by sampling recent rows (no fixed schema assumptions). Returns each field with its observed JSON types and how many sampled rows had a non-null value.",
       "inputSchema": {
         "additionalProperties": false,
@@ -48,6 +54,12 @@
       "name": "describe_stream"
     },
     {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": true,
+        "readOnlyHint": true
+      },
       "description": "Return the distributed-trace spans for a trace id from the traces stream (operation, service, duration, status), ordered by start time.",
       "inputSchema": {
         "additionalProperties": false,
@@ -90,6 +102,12 @@
       "name": "get_trace_spans"
     },
     {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": true,
+        "readOnlyHint": true
+      },
       "description": "List OpenObserve streams (log/trace/metric datasets) for the configured org. Doubles as a connectivity + auth check.",
       "inputSchema": {
         "additionalProperties": false,
@@ -117,6 +135,12 @@
       "name": "list_streams"
     },
     {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": true,
+        "readOnlyHint": true
+      },
       "description": "Aggregate log counts grouped by level (default), service, or sourceContext over a time window — an error/warning summary.",
       "inputSchema": {
         "additionalProperties": false,
@@ -160,6 +184,12 @@
       "name": "log_stats"
     },
     {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": true,
+        "readOnlyHint": true
+      },
       "description": "Escape hatch: run a raw read-only OpenObserve SQL query (SELECT/WITH only) against a stream within a mandatory time window.",
       "inputSchema": {
         "additionalProperties": false,
@@ -211,6 +241,12 @@
       "name": "run_observe_query"
     },
     {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": true,
+        "readOnlyHint": true
+      },
       "description": "Search recent logs with optional filters (service, level, sourceContext, free-text contains) over a time window. Returns newest-first.",
       "inputSchema": {
         "additionalProperties": false,
@@ -269,6 +305,12 @@
       "name": "search_logs"
     },
     {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": true,
+        "readOnlyHint": true
+      },
       "description": "Convenience: the most recent logs over the last N minutes (default 15), optionally filtered by level/service.",
       "inputSchema": {
         "additionalProperties": false,
@@ -304,6 +346,12 @@
       "name": "tail_logs"
     },
     {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": true,
+        "readOnlyHint": true
+      },
       "description": "Trace a single request: return ALL log records for a trace id (the X-Correlation-ID / OtelTraceId), ordered chronologically.",
       "inputSchema": {
         "additionalProperties": false,
