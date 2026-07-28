@@ -88,3 +88,31 @@ test("DataFusion dialect: `$` is an ordinary character, not a string delimiter",
   // from the check instead of revealing one. Verified in @mcp/shared's suite.
   assert.equal(rejected("select 1 from t where a = $x$ drop $x$"), "Forbidden SQL token detected: drop.");
 });
+
+// --- S-18: the five omissions are a decision, not drift ----------------------
+
+test("S-18: the five tokens postgres-mcp blocks stay OUT of this list", () => {
+  // ADR docs/adr/0002-sql-guardrail-token-lists.md. DataFusion executes none of
+  // these, so blocking them guards nothing — while every token added also rejects
+  // any column with that name, and OpenObserve streams are schemaless. Do not
+  // "reconcile" the three lists by unioning them; that is the change this pins.
+  for (const token of ["comment", "do", "analyze", "reindex", "refresh"]) {
+    assert.equal(
+      ok(`select ${token} from t`),
+      `select ${token} from t`,
+      `${token} must remain queryable as a column name`
+    );
+  }
+});
+
+test("S-18: the tokens that DO belong are still blocked", () => {
+  // The other half of the decision: DataFusion can execute these, so they stay.
+  for (const token of ["insert", "update", "delete", "truncate", "alter", "drop",
+                       "create", "grant", "revoke", "copy", "call", "vacuum", "merge"]) {
+    assert.equal(
+      rejected(`select ${token} from t`),
+      `Forbidden SQL token detected: ${token}.`,
+      `${token} must stay on the list`
+    );
+  }
+});

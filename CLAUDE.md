@@ -175,6 +175,15 @@ When analyzing this codebase, use the `codebase-index-local` MCP tools **before*
 
 ## References
 
+**Start here:** `docs/migration/status.md` — all 44 steps verified against the working
+tree, what blocks what, and the step-number reconciliation for three commits whose labels
+drifted from the plan.
+
+**Decision records:** `docs/adr/0001-workspace-native-deps.md` (why servers stay outside
+the npm workspace, and why `instanceof` fails across packages) ·
+`docs/adr/0002-sql-guardrail-token-lists.md` (why the three SQL token lists stay
+different, and the two-part rule for adding one).
+
 **Architecture & migration** (read in this order for the full picture):
 
 - `docs/architecture/audit-report.md` — Phase 0 audit of the pre-restructuring repository (`01c532e`): dependency map, duplication, technical-debt register, risks

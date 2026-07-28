@@ -4,9 +4,18 @@
 **Created:** 2026-07-27
 **Baseline commit:** `01c532e` (main, clean working tree)
 **Inputs:** Phase 0 Repository Audit · Phase 1 Target Architecture
-**Status:** Proposed — not started
+**Status:** In progress — 24 of 44 steps done. **Live status lives in
+[`status.md`](./status.md)**, which is verified against the working tree; this document
+stays as the plan of record and is not edited to reflect progress.
 
-> This document is a plan only. No source code has been modified in producing it.
+> This document was a plan only when written; no source code was modified in producing it.
+
+> **Step numbers in three commit messages do not match this plan.** `0eccb10` is labelled
+> S-24 but is this plan's **S-25** (postgres), `e5feaf3` is labelled S-25 but is **S-24**
+> (observe), and `9ccae95` is labelled S-26 but is **S-28** (extract indexing
+> orchestration). `docs/migration/s26-s29-plan.md` uses the commit-side numbering
+> throughout. The commits are immutable, so the mapping is recorded in `status.md` rather
+> than rewritten; **this plan's numbering is authoritative.**
 
 ---
 

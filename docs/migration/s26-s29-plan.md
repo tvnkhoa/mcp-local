@@ -4,6 +4,11 @@
 because a survey of the entry point showed it is two unrelated problems plus three
 capabilities the SDK does not yet have.
 
+> **Numbering caveat.** The S-numbers in this file are the ones used in commit messages,
+> not `migration-plan.md`'s. What this file calls S-26 is the plan's **S-28**; S-27…S-29
+> here correspond to the plan's **S-31…S-33** plus the SDK work. See the reconciliation
+> table in [`status.md`](./status.md), which is authoritative.
+
 ---
 
 ## Why this is four steps and not one
