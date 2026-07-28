@@ -179,10 +179,41 @@ verifiable by diffing generated output against the committed files.
 **Deferred by decision — Phase K.** S-43 and S-44 both break existing user configuration
 in `~/.claude.json`. They were placed last on purpose and should stay there.
 
+## Open defect — `find_impact_files(view:"files")` does not scale with the DB
+
+Not a migration step; found while diagnosing a gate failure, and worth fixing before
+S-30 because it is the same area.
+
+Measured on one file, `src/graphStore.ts`, same index, same profile:
+
+| Call | Time |
+|---|---|
+| `find_impact_files` `view:"files"` | **216,216 ms** |
+| the same call again | 216,039 ms — deterministic, nothing is cached |
+| `find_impact_files` `view:"surface"` | 1,462 ms |
+| `get_file_summary` | 2,520 ms |
+
+148× between two views of the same file. The cause is the join predicate built by
+`buildEdgeToSymbolJoinClause()` in `src/impactAnalyzer.ts`: a chain of `OR`s, one branch
+using `LIKE ('property:%.' || s.name)` — a leading wildcard — and one correlated with a
+third, `LEFT JOIN`ed table. SQLite cannot use an index for any of it, so `edges` is
+scanned once per symbol in the target file.
+
+The consequence that matters: `e.repo_id = s.repo_id` is written, but it does not filter
+before the scan, so **repos that have nothing to do with the query still cost time**. In a
+DB holding six repos the call took 216s; in a DB holding one it is instant. Both
+`CLAUDE.md` ("one SQLite DB can hold multiple repos") and this workspace's own central DB
+are multi-repo, so this is reachable in normal use, and
+`.claude/rules/codebase-index.md` asks for exactly the isolation that is not happening
+here.
+
+A fix is a rewrite of the predicate into a `UNION` of individually indexable branches.
+Out of scope for the step that found it.
+
 ## Gate status at time of writing
 
 ```
-verify:all            exit 0
+verify:all            exit 0 — 4/4 servers, test phase 101s (was 398s and failing)
 guards                0 errors, 34 warnings, 328 files
 4/4 servers           build · typecheck · test
 contracts:check       4/4 — 43 / 17 / 8 / 8 tools

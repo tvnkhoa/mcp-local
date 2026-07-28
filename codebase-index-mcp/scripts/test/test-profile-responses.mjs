@@ -7,6 +7,7 @@
  */
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import { makeTempDbPath } from "./_fixtures.mjs";
 
 function readTextContent(result) {
   return Array.isArray(result?.content)
@@ -41,7 +42,11 @@ async function main() {
   const transport = new StdioClientTransport({
     command: "node",
     args: ["dist/index.js"],
-    env: { ...process.env, CODEBASE_INDEX_ALLOWED_ROOTS: process.env.CODEBASE_INDEX_ALLOWED_ROOTS ?? repoPath },
+    env: {
+      ...process.env,
+      CODEBASE_INDEX_ALLOWED_ROOTS: process.env.CODEBASE_INDEX_ALLOWED_ROOTS ?? repoPath,
+      CODEBASE_INDEX_DB_PATH: process.env.CODEBASE_INDEX_DB_PATH ?? makeTempDbPath("cbi-profile-")
+    },
     stderr: "pipe"
   });
   transport.onerror = (e) => console.error("[transport-error]", e);

@@ -47,6 +47,13 @@ export function makeTempDir(prefix = "cbi-test-") {
   return dir;
 }
 
+// Each server-spawning script gets its own DB. Sharing the default
+// ./codebase-index.db meant six scripts accumulated repos into one file that was
+// never cleaned: it reached 54 MB and 6 repos over the same repoPath, and
+// find_impact_files degraded from seconds to 216s because its join predicate
+// cannot use an index and so scans every edge in the file, including other
+// repos'. Isolation keeps each run deterministic and independent of run order.
+
 /** A tracked temp dir plus an isolated DB path inside it (for GraphStore / CODEBASE_INDEX_DB_PATH). */
 export function makeTempDbPath(prefix = "cbi-test-", dbName = "test.db") {
   return path.join(makeTempDir(prefix), dbName);

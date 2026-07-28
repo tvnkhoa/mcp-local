@@ -6,6 +6,7 @@
  */
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import { makeTempDbPath } from "./test/_fixtures.mjs";
 import process from "node:process";
 
 function text(res) {
@@ -19,7 +20,11 @@ async function main() {
   const transport = new StdioClientTransport({
     command: "node",
     args: ["dist/index.js"],
-    env: { ...process.env, CODEBASE_INDEX_ALLOWED_ROOTS: repoPath },
+    env: {
+      ...process.env,
+      CODEBASE_INDEX_ALLOWED_ROOTS: repoPath,
+      CODEBASE_INDEX_DB_PATH: process.env.CODEBASE_INDEX_DB_PATH ?? makeTempDbPath("cbi-verify-")
+    },
     stderr: "pipe"
   });
   const client = new Client({ name: "verify", version: "0.1.0" });
