@@ -86,15 +86,31 @@ for (const [index, name] of selected.entries()) {
     continue;
   }
 
-  console.error(`FAIL ${label} (${elapsed})`);
+  // A process that never started is a different failure from a test that ran and
+  // failed, and it is the one this runner used to hide: on a spawn error stdout
+  // and stderr are both null, so printing them produced `FAIL … (0.0s)` followed
+  // by a blank line. That reads as a silent test failure when it is actually the
+  // system refusing to fork — which, once it starts happening, happens to every
+  // remaining script and makes the whole run look like a mass regression.
+  if (result.error !== undefined) {
+    console.error(`FAIL ${label} (${elapsed}) — could not start: ${result.error.message}`);
+    failures.push(name);
+    if (BAIL) break;
+    continue;
+  }
+
+  const how = result.status === null ? `killed by ${String(result.signal)}` : `exit ${String(result.status)}`;
+  console.error(`FAIL ${label} (${elapsed}) — ${how}`);
   // Only the tail: these scripts are chatty, and the failure is at the end.
   const output = `${result.stdout ?? ""}${result.stderr ?? ""}`.trimEnd();
   console.error(
-    output
-      .split("\n")
-      .slice(-25)
-      .map((line) => `       ${line}`)
-      .join("\n")
+    output === ""
+      ? "       (no output)"
+      : output
+          .split("\n")
+          .slice(-25)
+          .map((line) => `       ${line}`)
+          .join("\n")
   );
   failures.push(name);
   if (BAIL) break;

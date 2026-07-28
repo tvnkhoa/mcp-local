@@ -89,7 +89,16 @@ for (const server of targets) {
     console.log(`--- ${server.key}: ${script} ok (${elapsed})`);
     continue;
   }
-  console.error(`--- ${server.key}: ${script} FAILED (${elapsed})`);
+  // stdio is inherited, so a script that ran and failed has already printed why.
+  // A spawn failure prints nothing at all — `result.error` is the only evidence,
+  // and without it the line below is indistinguishable from a real test failure.
+  const why =
+    result.error !== undefined
+      ? ` — could not start: ${result.error.message}`
+      : result.status === null
+        ? ` — killed by ${String(result.signal)}`
+        : ` — exit ${String(result.status)}`;
+  console.error(`--- ${server.key}: ${script} FAILED (${elapsed})${why}`);
   failures.push(server.key);
   if (!CONTINUE) break;
 }
