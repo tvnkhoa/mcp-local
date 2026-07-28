@@ -26,7 +26,19 @@ export interface ResourceContent {
 }
 
 export interface ResourceProvider {
-  list(): readonly ResourceDescriptor[] | Promise<readonly ResourceDescriptor[]>;
+  /**
+   * List what this server serves.
+   *
+   * `cursor` is the client's opaque page marker, forwarded verbatim from
+   * `resources/list`. A provider that returns every descriptor in one page ignores
+   * it — declaring the parameter is optional, so an existing zero-argument
+   * provider stays valid. It exists because the alternative is worse than an
+   * unused parameter: an interface with no cursor at all silently discards
+   * whatever the server used to do with one, and codebase-index-mcp answers a
+   * cursored request with an empty page. That behaviour survives only if the
+   * value reaches the provider.
+   */
+  list(cursor?: string): readonly ResourceDescriptor[] | Promise<readonly ResourceDescriptor[]>;
   /**
    * Read one resource.
    *

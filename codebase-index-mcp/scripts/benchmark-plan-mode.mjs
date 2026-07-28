@@ -83,8 +83,21 @@ async function main() {
   });
   const probeText = readTextContent(probe);
   const probeJson = JSON.parse(probeText);
-  const contextFilePath = probeJson.symbols?.[0]?.filePath ?? "src/index.ts";
   const probeSymbolId = probeJson.symbols?.[0]?.symbolId ?? null;
+
+  /**
+   * The file the file-scoped scenarios measure. FIXED, not derived from the probe above.
+   *
+   * It used to be `probeJson.symbols[0].filePath`, which made the snapshot gate compare a
+   * ratio against whatever file search ranked first that day. S-31 moved code out of
+   * `src/index.ts`, the top hit became `src/indexing/indexRunner.ts`, and the gate reported a
+   * savings regression for a scenario whose savings had actually improved (0.0511 → 0.0439 on
+   * the same file) — it was reading two different files as one series. The ratio is
+   * content-independent, so a file that changes size is fine; a file that changes IDENTITY is
+   * not. Pinning it also makes the gate fail loudly if the path ever disappears, instead of
+   * silently retargeting.
+   */
+  const contextFilePath = process.env.BENCH_CONTEXT_FILE ?? "src/graphStore.ts";
   const folderPath = contextFilePath.replace(/\\/g, "/").split("/").slice(0, -1).join("/") || "src";
 
   const scenarios = [
@@ -218,7 +231,22 @@ async function main() {
     ((1 - nano.totalResponseBytes / baselineBytes) * 100).toFixed(2)
   );
 
-  // Graph accuracy gate: measure resolved CALLS edge percentage via query_graph
+  // Graph accuracy gate: of the calls the extractor COULD have linked, how many did it link?
+  //
+  // The denominator is restricted to in-repo-resolvable calls: an edge counts only if it is
+  // already resolved, or its unresolved token names a symbol that actually exists in this repo.
+  // A call into a dependency — `z.string()`, `client.callTool()`, `process.exit()` — has no
+  // symbol to point at and says nothing about extractor quality, so it is excluded.
+  //
+  // It used to count every CALLS edge in the repo, which made the number a function of how
+  // much library-calling code the repo happened to contain. Two consequences, both observed:
+  // adding ONE test script in S-31 moved it 61.61% -> 55.35% and failed a gate about the
+  // extractor on a commit that touched no extractor code; and the top "unresolved" tokens were
+  // `exit`, `fileURLToPath`, `callTool`, `resume` — every one of them a dependency call that
+  // was never resolvable. Narrowing to src/ did not fix it either: src/ is full of zod builder
+  // chains (`string`, `optional`, `strict`, `refine`), which are the same thing.
+  const RESOLVABLE =
+    "(e.to_id not like 'callee:%' or exists (select 1 from symbols s where s.repo_id = e.repo_id and s.name = substr(e.to_id, 8)))";
   let resolvedCallEdgePct = null;
   let unresolvedCalls = null;
   let totalCalls = null;
@@ -229,7 +257,7 @@ async function main() {
       name: "query_graph",
       arguments: {
         repoId,
-        sql: "select round(sum(case when confidence >= 0.75 then 1.0 else 0.0 end) * 100.0 / max(count(*), 1), 2) as resolved_pct, round(avg(confidence), 3) as avg_conf, count(*) as total, sum(case when to_id like 'callee:%' then 1 else 0 end) as unresolved_calls from edges where repo_id = :repoId and type = 'CALLS'",
+        sql: `select round(sum(case when e.to_id not like 'callee:%' then 1.0 else 0.0 end) * 100.0 / max(count(*), 1), 2) as resolved_pct, round(avg(e.confidence), 3) as avg_conf, count(*) as total, sum(case when e.to_id like 'callee:%' then 1 else 0 end) as unresolved_calls from edges e where e.repo_id = :repoId and e.type = 'CALLS' and ${RESOLVABLE}`,
         limit: 1,
         profile: "compact"
       }
@@ -246,7 +274,9 @@ async function main() {
       name: "query_graph",
       arguments: {
         repoId,
-        sql: "select substr(to_id, 8) as callee_token, count(*) as cnt from edges where repo_id = :repoId and type = 'CALLS' and to_id like 'callee:%' group by substr(to_id, 8) order by cnt desc limit 10",
+        // Only resolvable misses are listed: these are the actionable ones, the tokens that
+        // name a real symbol in this repo yet were still left as `callee:<token>`.
+        sql: `select substr(e.to_id, 8) as callee_token, count(*) as cnt from edges e where e.repo_id = :repoId and e.type = 'CALLS' and e.to_id like 'callee:%' and ${RESOLVABLE} group by substr(e.to_id, 8) order by cnt desc limit 10`,
         limit: 10,
         profile: "compact"
       }

@@ -201,6 +201,31 @@ test("resources/list returns the provider's descriptors", async () => {
   }
 });
 
+test("resources/list forwards the client's cursor to the provider", async () => {
+  // S-31: codebase-index-mcp answers any cursored request with an empty page, and
+  // that only survives the migration if the cursor actually reaches the provider.
+  // A zero-argument `list` (postgres-mcp's) must keep compiling and working, which
+  // is why the parameter is optional rather than required.
+  const seen: (string | undefined)[] = [];
+  const paged: ResourceProvider = {
+    list: (cursor) => {
+      seen.push(cursor);
+      return cursor === undefined ? [{ uri: "page://1", name: "first" }] : [];
+    },
+    read: () => undefined
+  };
+
+  const handle = createMcpServer({ ...noTools, resources: paged });
+  const client = await connect(handle);
+  try {
+    assert.deepEqual((await client.listResources()).resources, [{ uri: "page://1", name: "first" }]);
+    assert.deepEqual((await client.listResources({ cursor: "page-2" })).resources, []);
+    assert.deepEqual(seen, [undefined, "page-2"]);
+  } finally {
+    await client.close();
+  }
+});
+
 test("resources/read returns contents for a known uri", async () => {
   const handle = createMcpServer({ ...noTools, resources: provider });
   const client = await connect(handle);

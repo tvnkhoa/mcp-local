@@ -39,6 +39,7 @@
     "benchmark:plan": "node scripts/benchmark-plan-mode.mjs",
     "benchmark:plan:check": "node scripts/benchmark-plan-mode.mjs",
     "test:impact-join-parity": "node scripts/test/test-impact-join-parity.mjs",
+    "test:server-envelopes": "node scripts/test/test-server-envelopes.mjs",
     "test:sqlite-guardrails": "node scripts/test/test-sqlite-guardrails.mjs",
     "test:approval-token": "node scripts/test/test-approval-token.mjs"
   },

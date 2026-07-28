@@ -180,27 +180,42 @@ async function main() {
   console.log("SEARCH_REGEX_CONTEXT_OK:", { count: regexCompact.count });
 
   // ISSUE-028: filePathPrefix as an array (OR-semantics) + pathExclude glob.
+  //
+  // Scoped to two SMALL subtrees rather than all of src/ and scripts/. Matches come back
+  // ordered by path, so a broad pattern lets the alphabetically-earlier prefix consume the
+  // whole `limit` and starve the other one — which looks exactly like the OR being broken.
+  // That is not hypothetical: with `["src/", "scripts/"]` and `limit: 200`, scripts/ alone
+  // crossed 200 matches of "import" in S-31 and this assertion failed on a server whose
+  // behaviour was unchanged. Two subtrees whose combined match count stays far below the
+  // limit test the same semantics without the volume coupling.
+  const OR_PREFIXES = ["src/store/", "src/tools/"];
   const regexMultiPrefix = readJsonTextContent(
     await client.callTool({
       name: "search_regex",
-      arguments: { repoId, pattern: "import", filePathPrefix: ["src/", "scripts/"], limit: 200 }
+      arguments: { repoId, pattern: "import", filePathPrefix: OR_PREFIXES, limit: 200 }
     })
   ).json;
-  const hasSrc = regexMultiPrefix.matches.some((m) => m.filePath.startsWith("src/"));
-  const hasScripts = regexMultiPrefix.matches.some((m) => m.filePath.startsWith("scripts/"));
-  if (!hasSrc || !hasScripts) {
-    throw new Error(`ISSUE-028 regression: filePathPrefix array did not OR across subtrees (src=${hasSrc}, scripts=${hasScripts})`);
+  if (regexMultiPrefix.matches.length >= 200) {
+    throw new Error("smoke-test: OR-semantics probe hit its own limit — narrow the prefixes or the pattern");
+  }
+  const hasStore = regexMultiPrefix.matches.some((m) => m.filePath.startsWith("src/store/"));
+  const hasTools = regexMultiPrefix.matches.some((m) => m.filePath.startsWith("src/tools/"));
+  if (!hasStore || !hasTools) {
+    throw new Error(`ISSUE-028 regression: filePathPrefix array did not OR across subtrees (store=${hasStore}, tools=${hasTools})`);
   }
   const regexExcluded = readJsonTextContent(
     await client.callTool({
       name: "search_regex",
-      arguments: { repoId, pattern: "import", filePathPrefix: ["src/", "scripts/"], pathExclude: "scripts/**", limit: 200 }
+      arguments: { repoId, pattern: "import", filePathPrefix: OR_PREFIXES, pathExclude: "src/tools/**", limit: 200 }
     })
   ).json;
-  if (regexExcluded.matches.some((m) => m.filePath.startsWith("scripts/"))) {
-    throw new Error("ISSUE-028 regression: pathExclude 'scripts/**' did not subtract the scripts subtree");
+  if (regexExcluded.matches.some((m) => m.filePath.startsWith("src/tools/"))) {
+    throw new Error("ISSUE-028 regression: pathExclude 'src/tools/**' did not subtract the excluded subtree");
   }
-  console.log("SEARCH_REGEX_SCOPE_OK:", { withScripts: regexMultiPrefix.matches.length, withoutScripts: regexExcluded.matches.length });
+  if (regexExcluded.matches.length === 0) {
+    throw new Error("ISSUE-028 regression: pathExclude subtracted everything, not just the excluded subtree");
+  }
+  console.log("SEARCH_REGEX_SCOPE_OK:", { bothSubtrees: regexMultiPrefix.matches.length, oneExcluded: regexExcluded.matches.length });
 
   const healthAfterIndex = await client.callTool({
     name: "health_check",

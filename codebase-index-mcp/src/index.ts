@@ -1,20 +1,22 @@
+/**
+ * codebase-index-mcp entry point.
+ *
+ * Configuration, construction, and start-up — nothing else. The protocol wiring lives in
+ * `server.ts`, the pre-SDK tool `switch` in `tools/legacyDispatch.ts`, and the published
+ * `tools/list` table in `tools/descriptors/`.
+ *
+ * This file owns the env, and that is why the pieces below are injected rather than
+ * imported by the modules that need them: `server.ts` must not reach back for the store or
+ * the tuning constants.
+ */
+
 import process from "node:process";
 import { AsyncLocalStorage } from "node:async_hooks";
 import path from "node:path";
 import os from "node:os";
 import { fileURLToPath } from "node:url";
 
-import { Server } from "@modelcontextprotocol/sdk/server/index.js";
-import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import {
-  CallToolRequestSchema,
-  ListToolsRequestSchema,
-  ListResourcesRequestSchema,
-  ReadResourceRequestSchema,
-  McpError,
-  ErrorCode,
-  type CallToolResult
-} from "@modelcontextprotocol/sdk/types.js";
+import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 
 import { GraphStore } from "./graphStore.js";
 import {
@@ -27,81 +29,19 @@ import {
 } from "./guardrails/indexGuardrails.js";
 import { WatchManager } from "./watchManager.js";
 import { createIndexRunner } from "./indexing/indexRunner.js";
-import {
-  armWatchInactivityTimer,
-  maybeAutoActivateWatchFromArgs,
-  startAutoWatchers
-} from "./watch/watchLifecycle.js";
+import { armWatchInactivityTimer, startAutoWatchers } from "./watch/watchLifecycle.js";
 import { parsePerformanceProfileEnv } from "./config/performanceConfig.js";
 import { numberFromEnv, ratioFromEnv } from "./config/envConfig.js";
 import {
   type ResponseProfile,
   type ToolRequestContext,
-  emitTelemetry,
-  asText as asTextCore,
-  asArgsRecord
+  asText as asTextCore
 } from "./response/responseFormatter.js";
 import { resolveServerVersion } from "./serverUtils.js";
-import { mapError, assertNoLlmRuntimePolicy, assertRefactorApprovalPolicy } from "./errorHandler.js";
-import { legacyToolDescriptors } from "./tools/descriptors/index.js";
-import * as schemas from "./schemas/toolSchemas.js";
-import { handleListResources, handleReadResource } from "./handlers/resourceHandler.js";
-
-import {
-  handleHealthCheck,
-  handleIndexRepository,
-  handleWatchRepo,
-  handleDetectChanges,
-  handleChangeImpact
-} from "./handlers/indexHandler.js";
+import { assertNoLlmRuntimePolicy, assertRefactorApprovalPolicy } from "./errorHandler.js";
 import type { HandlerContext } from "./handlers/handlerContext.js";
-import {
-  handleSearchSymbols,
-  handleSearchLiterals,
-  handleSearchRegex,
-  handleFindSymbolAtLine,
-  handleGetSymbolDetail,
-  handleGetSymbolContextPack,
-  handleGetSymbolBlame,
-  handleGetSymbolSource
-} from "./handlers/searchHandler.js";
-import { handleGetFeatureBundle } from "./handlers/bundleHandler.js";
-import { handleOrient } from "./handlers/orientHandler.js";
-import {
-  handleGetDependencyGraph,
-  handleGetCallChain,
-  handleFindFieldAccesses,
-  handleFindImpactFiles,
-  handleGetChangeContext,
-  handleGetFileSummary,
-  handleListRepositories,
-  handleGetFileContext,
-  handleGetFolderSummary,
-  handleRouteMap,
-  handleQueryGraph,
-  handleQueryDocs
-} from "./handlers/impactHandler.js";
-import {
-  handleDeadCodeScan,
-  handleDetectCircularDependencies,
-  handleFindEntryPoints,
-  handleFindImplementations,
-  handleLinkTestsToSource
-} from "./handlers/analysisHandler.js";
-import {
-  handleGetCrossRepoImpact,
-  handleFindPackageConsumers
-} from "./handlers/crossRepoHandler.js";
-import {
-  handleRenameAssist,
-  handleRefactorReplacePreview,
-  handleRefactorReplaceApply,
-  handleRefactorReplaceRollback,
-  handleRefactorSymbolMigration,
-  handleChangeValueRepresentation,
-  handleTraceExecutionFlow
-} from "./handlers/refactorHandler.js";
-import { handleGetPersistenceMapping, handleGetValueContractImpact } from "./handlers/persistenceHandler.js";
+import { createCodebaseIndexServer } from "./server.js";
+import { createLegacyDispatcher } from "./tools/legacyDispatch.js";
 
 const dbPath = process.env.CODEBASE_INDEX_DB_PATH ?? "./codebase-index.db";
 const allowedRoots = parseAllowedRoots(process.env.CODEBASE_INDEX_ALLOWED_ROOTS);
@@ -140,66 +80,8 @@ const SERVER_VERSION = resolveServerVersion(MODULE_DIR);
 
 const toolContextStorage = new AsyncLocalStorage<ToolRequestContext>();
 
-// Create schema instances with constants
-const healthCheckSchema = schemas.healthCheckSchema;
-const indexRepositorySchema = schemas.indexRepositorySchema(MAX_FILES_PER_RUN);
-const getDependencyGraphSchema = schemas.getDependencyGraphSchema(MAX_DEPTH, MAX_RESULT_LIMIT);
-const getCallChainSchema = schemas.getCallChainSchema(MAX_DEPTH, MAX_RESULT_LIMIT);
-const listRepositoriesSchema = schemas.listRepositoriesSchema;
-const searchSymbolsSchema = schemas.searchSymbolsSchema(MAX_RESULT_LIMIT);
-const searchLiteralsSchema = schemas.searchLiteralsSchema(MAX_RESULT_LIMIT);
-const searchRegexSchema = schemas.searchRegexSchema(MAX_RESULT_LIMIT);
-const getFileContextSchema = schemas.getFileContextSchema(MAX_RESULT_LIMIT);
-const getSymbolDetailSchema = schemas.getSymbolDetailSchema(MAX_RESULT_LIMIT);
-const findImpactFilesSchema = schemas.findImpactFilesSchema(MAX_RESULT_LIMIT);
-const findFieldAccessesSchema = schemas.findFieldAccessesSchema(MAX_RESULT_LIMIT);
-const getChangeContextSchema = schemas.getChangeContextSchema(MAX_DEPTH, MAX_RESULT_LIMIT);
-const getFileSummarySchema = schemas.getFileSummarySchema;
-const findSymbolAtLineSchema = schemas.findSymbolAtLineSchema;
-const queryDocsSchema = schemas.queryDocsSchema(MAX_RESULT_LIMIT);
-const getSymbolContextPackSchema = schemas.getSymbolContextPackSchema(MAX_DEPTH, MAX_RESULT_LIMIT);
-const detectChangesSchema = schemas.detectChangesSchema(MAX_RESULT_LIMIT);
-const changeImpactSchema = schemas.changeImpactSchema(MAX_RESULT_LIMIT);
-const getFeatureBundleSchema = schemas.getFeatureBundleSchema;
-const orientSchema = schemas.orientSchema;
-const deadCodeScanSchema = schemas.deadCodeScanSchema(MAX_RESULT_LIMIT);
-const detectCircularDependenciesSchema = schemas.detectCircularDependenciesSchema(MAX_DEPTH, MAX_RESULT_LIMIT);
-const crossRepoImpactSchema = schemas.crossRepoImpactSchema(MAX_RESULT_LIMIT);
-const findPackageConsumersSchema = schemas.findPackageConsumersSchema(MAX_RESULT_LIMIT);
-const symbolBlameSchema = schemas.symbolBlameSchema;
-const getSymbolSourceSchema = schemas.getSymbolSourceSchema;
-const linkTestsToSourceSchema = schemas.linkTestsToSourceSchema(MAX_RESULT_LIMIT);
-const getFolderSummarySchema = schemas.getFolderSummarySchema(MAX_RESULT_LIMIT);
-const findEntryPointsSchema = schemas.findEntryPointsSchema(MAX_RESULT_LIMIT);
-const findImplementationsSchema = schemas.findImplementationsSchema(MAX_RESULT_LIMIT);
-const watchRepoSchema = schemas.watchRepoSchema;
-const renameAssistSchema = schemas.renameAssistSchema(MAX_RESULT_LIMIT);
-const traceExecutionFlowSchema = schemas.traceExecutionFlowSchema;
-const routeMapSchema = schemas.routeMapSchema(MAX_RESULT_LIMIT);
-const queryGraphSchema = schemas.queryGraphSchema(MAX_RESULT_LIMIT);
-const refactorReplacePreviewSchema = schemas.refactorReplacePreviewSchema;
-const refactorReplaceApplySchema = schemas.refactorReplaceApplySchema;
-const refactorReplaceRollbackSchema = schemas.refactorReplaceRollbackSchema;
-const refactorSymbolMigrationSchema = schemas.refactorSymbolMigrationSchema;
-const changeValueRepresentationSchema = schemas.changeValueRepresentationSchema;
-const getPersistenceMappingSchema = schemas.getPersistenceMappingSchema;
-const getValueContractImpactSchema = schemas.getValueContractImpactSchema;
-
 assertNoLlmRuntimePolicy(LLM_ENABLED);
 assertRefactorApprovalPolicy(REFACTOR_STRICT_APPROVAL, REFACTOR_APPROVAL_SECRET);
-
-const server = new Server(
-  {
-    name: "codebase-index-mcp",
-    version: "0.1.0"
-  },
-  {
-    capabilities: {
-      tools: {},
-      resources: {}
-    }
-  }
-);
 
 const store = new GraphStore(dbPath);
 
@@ -242,6 +124,16 @@ const watchManager = new WatchManager(
 const activeWatchRef = { current: null as string | null };
 const watchInactivityTimers = new Map<string, NodeJS.Timeout>();
 
+/**
+ * Serialize a successful payload, and emit the telemetry line while doing it.
+ *
+ * Handed to the handlers as `ctx.asText` and to `server.ts` as its `renderResult`, so the
+ * emit happens exactly once per response whichever side produced it.
+ */
+function asText(payload: unknown, profile: ResponseProfile = "standard"): CallToolResult {
+  return asTextCore(payload, profile, toolContextStorage.getStore(), TELEMETRY_ENABLED, TELEMETRY_SAMPLE_RATE);
+}
+
 function buildHandlerContext(): HandlerContext {
   return {
     store,
@@ -271,286 +163,49 @@ function buildHandlerContext(): HandlerContext {
   };
 }
 
-// The descriptor table now lives under tools/descriptors/, grouped by S-32 migration batch.
-// It is also what the SDK registry's legacy bridge publishes, so there is one source of truth
-// for the wire contract whether a tool is served by the registry or the switch below.
-server.setRequestHandler(ListToolsRequestSchema, async () => {
-  return { tools: legacyToolDescriptors({ maxResultLimit: MAX_RESULT_LIMIT, maxDepth: MAX_DEPTH, maxFilesPerRun: MAX_FILES_PER_RUN }) };
+/** Advertised bounds. Env-derived, so two differently-configured deployments publish different schemas. */
+const limits = { maxResultLimit: MAX_RESULT_LIMIT, maxDepth: MAX_DEPTH, maxFilesPerRun: MAX_FILES_PER_RUN };
+
+const handle = createCodebaseIndexServer({
+  // Not SERVER_VERSION: the version on the wire has been "0.1.0" since before the package
+  // reached 0.3.0, and health_check reports the package one. Changing either is visible to
+  // clients, so they stay as they are.
+  version: "0.1.0",
+  limits,
+  store,
+  dispatchLegacyTool: createLegacyDispatcher({ limits, buildContext: buildHandlerContext }),
+  buildHandlerContext,
+  toolContextStorage,
+  renderResult: asText,
+  telemetry: { enabled: TELEMETRY_ENABLED, sampleRate: TELEMETRY_SAMPLE_RATE }
 });
 
-server.setRequestHandler(ListResourcesRequestSchema, async (request) => {
-  return handleListResources(store, request.params?.cursor);
-});
-
-server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
-  return handleReadResource(request.params.uri, store, MAX_RESULT_LIMIT);
-});
-
-server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
-  const toolName = request.params.name;
-  const startedAt = Date.now();
-  const args = asArgsRecord(request.params.arguments);
-
-  // If the host requested progress (supplied a progressToken), build a sink that
-  // streams notifications/progress back for the duration of this tool call.
-  const progressToken = (request.params._meta as { progressToken?: string | number } | undefined)?.progressToken;
-  const progressNotifier =
-    progressToken !== undefined
-      ? (progress: number, total: number | undefined, message: string): void => {
-          void extra
-            .sendNotification({
-              method: "notifications/progress",
-              params: { progressToken, progress, ...(total !== undefined ? { total } : {}), message },
-            })
-            .catch(() => { /* progress is best-effort; never fail the tool over it */ });
-        }
-      : undefined;
-
-  return toolContextStorage.run({ toolName, startedAt, args, progressNotifier }, async () => {
-    try {
-      await maybeAutoActivateWatchFromArgs(toolName, args, buildHandlerContext());
-
-      const ctx = buildHandlerContext();
-
-      switch (request.params.name) {
-      case "health_check": {
-        const hArgs = healthCheckSchema.parse(request.params.arguments ?? {});
-        return handleHealthCheck(hArgs, ctx);
-      }
-      case "index_repository": {
-        const hArgs = indexRepositorySchema.parse(request.params.arguments ?? {});
-        return handleIndexRepository(hArgs, ctx);
-      }
-      case "get_dependency_graph": {
-        const hArgs = getDependencyGraphSchema.parse(request.params.arguments ?? {});
-        return handleGetDependencyGraph(hArgs, ctx);
-      }
-      case "get_call_chain": {
-        const hArgs = getCallChainSchema.parse(request.params.arguments ?? {});
-        return handleGetCallChain(hArgs, ctx);
-      }
-      case "find_impact_files": {
-        const hArgs = findImpactFilesSchema.parse(request.params.arguments ?? {});
-        return handleFindImpactFiles(hArgs, ctx);
-      }
-      case "find_field_accesses": {
-        const hArgs = findFieldAccessesSchema.parse(request.params.arguments ?? {});
-        return handleFindFieldAccesses(hArgs, ctx);
-      }
-      case "get_change_context": {
-        const hArgs = getChangeContextSchema.parse(request.params.arguments ?? {});
-        return handleGetChangeContext(hArgs, ctx);
-      }
-      case "get_file_summary": {
-        const hArgs = getFileSummarySchema.parse(request.params.arguments ?? {});
-        return handleGetFileSummary(hArgs, ctx);
-      }
-      case "list_repositories": {
-        const hArgs = listRepositoriesSchema.parse(request.params.arguments ?? {});
-        return handleListRepositories(hArgs, ctx);
-      }
-      case "search_symbols": {
-        const hArgs = searchSymbolsSchema.parse(request.params.arguments ?? {});
-        return handleSearchSymbols(hArgs, ctx);
-      }
-      case "search_literals": {
-        const hArgs = searchLiteralsSchema.parse(request.params.arguments ?? {});
-        return handleSearchLiterals(hArgs, ctx);
-      }
-      case "search_regex": {
-        const hArgs = searchRegexSchema.parse(request.params.arguments ?? {});
-        return handleSearchRegex(hArgs, ctx);
-      }
-      case "get_file_context": {
-        const hArgs = getFileContextSchema.parse(request.params.arguments ?? {});
-        return handleGetFileContext(hArgs, ctx);
-      }
-      case "get_symbol_detail": {
-        const hArgs = getSymbolDetailSchema.parse(request.params.arguments ?? {});
-        return handleGetSymbolDetail(hArgs, ctx);
-      }
-      case "query_docs": {
-        const hArgs = queryDocsSchema.parse(request.params.arguments ?? {});
-        return handleQueryDocs(hArgs, ctx);
-      }
-      case "watch_repo": {
-        const hArgs = watchRepoSchema.parse(request.params.arguments ?? {});
-        return handleWatchRepo(hArgs, ctx);
-      }
-      case "find_symbol_at_line": {
-        const hArgs = findSymbolAtLineSchema.parse(request.params.arguments ?? {});
-        return handleFindSymbolAtLine(hArgs, ctx);
-      }
-      case "get_symbol_context_pack": {
-        const hArgs = getSymbolContextPackSchema.parse(request.params.arguments ?? {});
-        return handleGetSymbolContextPack(hArgs, ctx);
-      }
-      case "dead_code_scan": {
-        const hArgs = deadCodeScanSchema.parse(request.params.arguments ?? {});
-        return handleDeadCodeScan(hArgs, ctx);
-      }
-      case "detect_circular_dependencies": {
-        const hArgs = detectCircularDependenciesSchema.parse(request.params.arguments ?? {});
-        return handleDetectCircularDependencies(hArgs, ctx);
-      }
-      case "get_cross_repo_impact": {
-        const hArgs = crossRepoImpactSchema.parse(request.params.arguments ?? {});
-        return handleGetCrossRepoImpact(hArgs, ctx);
-      }
-      case "find_package_consumers": {
-        const hArgs = findPackageConsumersSchema.parse(request.params.arguments ?? {});
-        return handleFindPackageConsumers(hArgs, ctx);
-      }
-      case "get_symbol_blame": {
-        const hArgs = symbolBlameSchema.parse(request.params.arguments ?? {});
-        return handleGetSymbolBlame(hArgs, ctx);
-      }
-      case "get_symbol_source": {
-        const hArgs = getSymbolSourceSchema.parse(request.params.arguments ?? {});
-        return handleGetSymbolSource(hArgs, ctx);
-      }
-      case "link_tests_to_source": {
-        const hArgs = linkTestsToSourceSchema.parse(request.params.arguments ?? {});
-        return handleLinkTestsToSource(hArgs, ctx);
-      }
-      case "detect_changes": {
-        const hArgs = detectChangesSchema.parse(request.params.arguments ?? {});
-        return handleDetectChanges(hArgs, ctx);
-      }
-      case "change_impact": {
-        const hArgs = changeImpactSchema.parse(request.params.arguments ?? {});
-        return handleChangeImpact(hArgs, ctx);
-      }
-      case "get_feature_bundle": {
-        const hArgs = getFeatureBundleSchema.parse(request.params.arguments ?? {});
-        return handleGetFeatureBundle(hArgs, ctx);
-      }
-      case "orient": {
-        const hArgs = orientSchema.parse(request.params.arguments ?? {});
-        return handleOrient(hArgs, ctx);
-      }
-      case "get_folder_summary": {
-        const hArgs = getFolderSummarySchema.parse(request.params.arguments ?? {});
-        return handleGetFolderSummary(hArgs, ctx);
-      }
-      case "find_entry_points": {
-        const hArgs = findEntryPointsSchema.parse(request.params.arguments ?? {});
-        return handleFindEntryPoints(hArgs, ctx);
-      }
-      case "find_implementations": {
-        const hArgs = findImplementationsSchema.parse(request.params.arguments ?? {});
-        return handleFindImplementations(hArgs, ctx);
-      }
-      case "route_map": {
-        const hArgs = routeMapSchema.parse(request.params.arguments ?? {});
-        return handleRouteMap(hArgs, ctx);
-      }
-      case "query_graph": {
-        const hArgs = queryGraphSchema.parse(request.params.arguments ?? {});
-        return handleQueryGraph(hArgs, ctx);
-      }
-      case "rename_assist": {
-        const hArgs = renameAssistSchema.parse(request.params.arguments ?? {});
-        return handleRenameAssist(hArgs, ctx);
-      }
-      case "refactor_replace_preview": {
-        const hArgs = refactorReplacePreviewSchema.parse(request.params.arguments ?? {});
-        return handleRefactorReplacePreview(hArgs, ctx);
-      }
-      case "refactor_replace_apply": {
-        const hArgs = refactorReplaceApplySchema.parse(request.params.arguments ?? {});
-        return handleRefactorReplaceApply(hArgs, ctx);
-      }
-      case "refactor_replace_rollback": {
-        const hArgs = refactorReplaceRollbackSchema.parse(request.params.arguments ?? {});
-        return handleRefactorReplaceRollback(hArgs, ctx);
-      }
-      case "refactor_symbol_migration": {
-        const hArgs = refactorSymbolMigrationSchema.parse(request.params.arguments ?? {});
-        // await so a rejection (e.g. INVALID_INITIALIZER_REWRITE policy error) is caught by the
-        // try/catch below and mapped to an isError result, not surfaced as a raw JSON-RPC error.
-        return await handleRefactorSymbolMigration(hArgs, ctx);
-      }
-      case "change_value_representation": {
-        const hArgs = changeValueRepresentationSchema.parse(request.params.arguments ?? {});
-        return await handleChangeValueRepresentation(hArgs, ctx);
-      }
-      case "get_persistence_mapping": {
-        const hArgs = getPersistenceMappingSchema.parse(request.params.arguments ?? {});
-        return handleGetPersistenceMapping(hArgs, ctx);
-      }
-      case "get_value_contract_impact": {
-        const hArgs = getValueContractImpactSchema.parse(request.params.arguments ?? {});
-        return handleGetValueContractImpact(hArgs, ctx);
-      }
-      case "trace_execution_flow": {
-        const hArgs = traceExecutionFlowSchema.parse(request.params.arguments ?? {});
-        return handleTraceExecutionFlow(hArgs, ctx);
-      }
-      default:
-        throw new McpError(ErrorCode.MethodNotFound, `Unknown tool: ${request.params.name}`);
-      }
-    } catch (error) {
-      const mapped = mapError(error, request.params.name);
-      const text = JSON.stringify(mapped, null, 2);
-      emitTelemetry({
-        ts: new Date().toISOString(),
-        toolName,
-        elapsedMs: Date.now() - startedAt,
-        responseBytes: Buffer.byteLength(text, "utf8"),
-        resultCount: 0,
-        profile: "none",
-        requestedProfile: typeof args.profile === "string" ? args.profile : null,
-        compactRequested: args.compact === true,
-        isError: true,
-        errorCode: mapped.code
-      }, TELEMETRY_ENABLED, TELEMETRY_SAMPLE_RATE);
-      return {
-        content: [{ type: "text", text }],
-        isError: true
-      } satisfies CallToolResult;
-    }
-  });
-});
-
-function asText(payload: unknown, profile: ResponseProfile = "standard"): CallToolResult {
-  return asTextCore(payload, profile, toolContextStorage.getStore(), TELEMETRY_ENABLED, TELEMETRY_SAMPLE_RATE);
-}
-
-let shuttingDown = false;
-async function shutdown(): Promise<void> {
-  if (shuttingDown) return;
-  shuttingDown = true;
-  for (const timer of watchInactivityTimers.values()) {
-    clearTimeout(timer);
-  }
-  watchInactivityTimers.clear();
-  try {
-    await watchManager.stopAll();
-  } catch {
-    // best-effort
-  }
-  try {
+// Registered before start(), and store-before-watchers on purpose: hooks run in reverse, so
+// the order at shutdown is transport, then watchers, then the database. A watcher that fires
+// after the store is closed would throw on a closed handle.
+handle.lifecycle.onShutdown({
+  name: "store",
+  run: () => {
     store.close();
-  } catch {
-    // best-effort
   }
-}
+});
+handle.lifecycle.onShutdown({
+  name: "watchers",
+  run: async () => {
+    for (const timer of watchInactivityTimers.values()) {
+      clearTimeout(timer);
+    }
+    watchInactivityTimers.clear();
+    await watchManager.stopAll();
+  }
+});
 
 async function main(): Promise<void> {
-  const transport = new StdioServerTransport();
-  await server.connect(transport);
+  await handle.start();
   await startAutoWatchers(buildHandlerContext(), AUTO_WATCH_REPOS);
-
-  process.once("SIGINT", () => {
-    void shutdown().finally(() => process.exit(0));
-  });
-  process.once("SIGTERM", () => {
-    void shutdown().finally(() => process.exit(0));
-  });
 }
 
 main().catch((error) => {
   process.stderr.write(`${error instanceof Error ? error.stack ?? error.message : String(error)}\n`);
-  void shutdown().finally(() => process.exit(1));
+  void handle.stop("startup_failed").finally(() => process.exit(1));
 });

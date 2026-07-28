@@ -5,8 +5,12 @@ Phase H's row updated after the S-28 SDK work landed. Every
 row cites the artifact that proves it. Where no artifact was found, the row says so
 rather than guessing.
 
-**27 of 44 done · 1 partial · 1 skipped by decision · 15 open.** Phase H is no longer
-blocked: its SDK prerequisite (`renderResult` + `wrapCall`) shipped 2026-07-28.
+**28 of 44 done · 1 partial · 1 skipped by decision · 14 open.** Phase H is under way:
+S-31 landed 2026-07-28 on top of its SDK prerequisite (`renderResult` + `wrapCall`).
+
+S-31 also found `benchmark:plan:check` — a hard CI step — **already failing on `main`**, for
+two reasons that had nothing to do with the migration. Both fixed; see
+[the benchmark gate](#the-benchmark-gate-was-red-before-s-31) below.
 
 ---
 
@@ -117,13 +121,13 @@ S-41 — flipping now would turn 34 warnings into 34 build failures.
 | S-29 Break the `graphStore`→`regexSearch` cycle | ✅ | `RegexSearchStore` interface in `src/regexSearch.ts`; static scan reports **0 cycles** across 66 modules |
 | S-30 Split `graphStore.ts` | ✅ | `find_impact_files` fix + split (1,928 → 831 across 4 modules) + a declared, reported guard exemption for the façade — see below |
 
-## Phase H — codebase-index SDK Migration · 0/3
+## Phase H — codebase-index SDK Migration · 1/3
 
 | Step | Status | Notes |
 |---|---|---|
-| S-31 Install the coexistence adapter | ❌ | **unblocked** — the SDK prerequisite is built |
-| S-32 Migrate 43 tools in 5 batches | ❌ | |
-| S-33 Delete the legacy dispatch switch | ❌ | |
+| S-31 Install the coexistence adapter | ✅ | `a441500` (descriptor table) + this commit (`createMcpServer` + bridge). Contract byte-identical, 43 tools |
+| S-32 Migrate 43 tools in 5 batches | ❌ | batches already encoded in `src/tools/descriptors/` |
+| S-33 Delete the legacy dispatch switch | ❌ | must decide the unknown-tool envelope explicitly — see below |
 
 **Prerequisite done.** The three capabilities `@mcp/sdk` was missing shipped as two hooks
 — `renderResult` and `wrapCall` — with 15 tests (sdk 50 → 65). See `s26-s29-plan.md` §S-28.
@@ -134,6 +138,44 @@ responses. Neither the contract snapshot nor a response replay would have reveal
 `renderResult` is the seam that prevents it, and S-32's verification must still assert
 that telemetry is actually emitted — the tests prove the hook works, not that the server
 wires it up.
+
+### S-31 · what the server actually keeps
+
+`src/index.ts` is now configuration and construction only (556 → 211 lines). `src/server.ts`
+holds the `createMcpServer` call; `src/tools/legacyDispatch.ts` holds the 43-branch `switch`
+verbatim, so S-32 deletes branches from one file and S-33 deletes that file.
+
+The registry is empty and `LegacyBridge.has()` answers `true` unconditionally. That is
+deliberate: during coexistence the switch is the **terminal** handler, and its `default:`
+branch is this server's unknown-tool rejection — an `isError` result carrying `MCP_ERROR` and
+`-32601`, not a JSON-RPC error. Left to the platform default it would have become `not_found`
+with a different payload. **bitbucket-mcp accepted exactly that delta in its own migration**
+(`sdk.test`: "DELTA: an unknown tool now reports not_found instead of mcp_error"), so the
+precedent for changing it exists — but 43 tools in daily use is a different risk, and S-33
+has to make that call deliberately rather than inherit it from a deleted `switch`.
+
+Four behaviours carried by the hooks, none of them visible in a `tools/list` snapshot:
+`formatError` (the `{code, message, requestId}` envelope, pretty-printed at *every* profile,
+including `nano`), `renderResult` (wired now though unreachable while the registry is empty —
+the first migrated tool would otherwise silently lose telemetry), `wrapCall` (the
+`AsyncLocalStorage` scope, plus `maybeAutoActivateWatchFromArgs` guarded so a failure there
+still renders the normal envelope), and `resources` (the four `repo://` URIs and the
+capability declaration).
+
+`progressNotifier` is set **only** when the host supplied a progress token. `CallContext`
+always offers `reportProgress`, but passing it unconditionally would make the indexer believe
+someone is listening and compute a progress snapshot per batch that goes nowhere.
+
+Proven by `test:server-envelopes` (31 assertions), **written against the pre-migration server
+and passing there first** — a test authored after a refactor only proves the refactor agrees
+with itself. The plan's own last check was run too: with `list_repositories` alone registered,
+it was served by the registry (`{"servedBy":"registry"}`, annotations present, still 43 tools)
+while the other 42 went to the switch and the unknown-tool envelope was unchanged. That probe
+was reverted — registering it for real is S-32 batch 1.
+
+One SDK gap this found: `ResourceProvider.list()` took no cursor, so migrating would have
+silently dropped this server's "any cursor → empty page" behaviour. The parameter is now
+optional, which keeps postgres-mcp's zero-argument provider valid.
 
 ## Phase I — Manifest Generation · 0/3
 
@@ -299,13 +341,55 @@ indexPipeline 682 · refactorHandler 632 · toolSchemas 615
 ```
 
 
+## The benchmark gate was red before S-31
+
+`benchmark:plan:check` is a hard CI step (`.github/workflows/ci.yml`, no `continue-on-error`).
+Measured at `a441500` it exited **4**. Neither cause was the migration; S-31 found them because
+adding one test file moved a second one over its threshold.
+
+**1 · The savings snapshot was comparing two different files.** The file-scoped scenarios took
+their target from `search_symbols("runIndexAndResolve")[0].filePath`. The committed baseline
+(`file-context: 0.0511`) was recorded when that resolved to `src/index.ts`; by `a441500` the
+top hit had become `src/indexing/indexRunner.ts`, so the gate compared one file's ratio against
+another's and reported a savings regression. On the *same* file savings had in fact **improved**
+(0.0511 → 0.0439). The target is now pinned (`BENCH_CONTEXT_FILE`, default `src/graphStore.ts`).
+Re-baselining was done by diffing every entry, not by blanket overwrite: only `file-context`
+and `file-summary` moved beyond tolerance, both being the retargeted scenarios; everything else
+was unchanged or better (`link-tests-to-source` 0.9435 → 0.7051).
+
+**2 · The graph-accuracy gate could not tell a missed link from a dependency call.** It scored
+every `CALLS` edge in the repo, so the metric was a function of how much library-calling code
+the repo contained. The top "unresolved" tokens were `exit`, `fileURLToPath`, `callTool`,
+`resume` — every one a call into a dependency with no symbol to resolve to. At 61.61% against a
+floor of 60, adding one test script dropped it to 55.35% and failed a gate about the extractor
+on a commit that touched no extractor code. Narrowing to `src/` does **not** fix it: `src/` is
+full of zod builder chains (`string`, `optional`, `strict`, `refine`), which are the same thing.
+
+The denominator is now **in-repo-resolvable** calls only — an edge counts if it is resolved, or
+its unresolved token names a symbol that actually exists in the repo. That measures what the
+gate claims: of the calls the extractor could have linked, how many did it link?
+
+Result: **119 resolvable calls, 0 missed, 100%.** Verified non-vacuous rather than assumed —
+the `exists` clause was confirmed to fire for a token that *is* a repo symbol
+(`callee:asText` → match), and all 102 excluded edges were confirmed to name no repo symbol.
+So the old 61.61% was reporting dependency calls as extractor failures.
+
+**Follow-up, deliberately not done here:** `minResolvedCallEdgePct` is still 60 while the true
+value is 100. A floor 40 points below observed is nearly inert, but raising a CI threshold off
+a single measurement is how surprise failures get created. Tighten it once there are a few
+runs' worth of evidence.
+
 ## Gate status at time of writing
 
 ```
-verify:all            exit 0 — 4/4 servers, test phase 60.9s (was 398s and failing)
-guards                0 errors, 35 warnings, 1 accepted exemption, 342 files
-                      (vs 34 at S-29: the split traded one hard-cap file for two
-                       soft-cap ones; graphStore.ts moved to a declared exemption)
+verify:all            exit 0 — 4/4 servers, test phase 60.1s
+guards                0 errors, 34 warnings, 1 accepted exemption, 362 files
+                      (index.ts lost its size warning: 556 → 211 lines. Its
+                       env/direct-access warning is unchanged and pre-existing)
 4/4 servers           build · typecheck · test
-contracts:check       4/4 — 43 / 17 / 8 / 8 tools
+codebase-index tests  28/28 (was 27 — test:server-envelopes added)
+contracts:check       4/4 — 43 / 17 / 8 / 8 tools, byte-identical
+smoke                 ok
+benchmark:plan:check  exit 0 — savings 66.89% (floor 40), snapshot clean,
+                      graph accuracy 100% (floor 60). Was exit 4 at a441500.
 ```

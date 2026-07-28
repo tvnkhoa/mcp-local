@@ -157,8 +157,9 @@ export function createMcpServer(options: McpServerOptions): McpServerHandle {
   });
 
   if (resources !== undefined) {
-    server.setRequestHandler(ListResourcesRequestSchema, async () => ({
-      resources: (await resources.list()).map((descriptor) => ({ ...descriptor }))
+    server.setRequestHandler(ListResourcesRequestSchema, async (request) => ({
+      // The cursor is forwarded, not interpreted: paging is the provider's business.
+      resources: (await resources.list(request.params?.cursor)).map((descriptor) => ({ ...descriptor }))
     }));
 
     server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
