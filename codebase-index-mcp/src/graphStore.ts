@@ -89,7 +89,6 @@ import { searchRegexImpl, type RegexSearchOptions, type RegexSearchResult } from
 import {
   resolveCanonicalFilePath,
   findModuleSymbolId,
-  getEdgeDefaults,
   getImpactSurfaceImpl,
   getImpactFilesImpl,
   getFileSummaryImpl,
@@ -109,6 +108,26 @@ import {
 } from "./impactAnalyzer.js";
 import { CALL_TRAVERSAL_EDGE_SQL_LIST } from "./types.js";
 import { initGraphSchema, runGraphMigrations } from "./store/schema.js";
+import { recordRun as recordRunImpl, getLatestRun as getLatestRunImpl } from "./store/runStore.js";
+import {
+  type WriteContext,
+  prepareWriteStatements,
+  checkpoint as checkpointImpl,
+  beginIndexSession as beginIndexSessionImpl,
+  endIndexSession as endIndexSessionImpl,
+  deduplicateResolvedEdges as deduplicateResolvedEdgesImpl,
+  dropEdgeIndexesForBulkWrite as dropEdgeIndexesForBulkWriteImpl,
+  rebuildEdgeIndexes as rebuildEdgeIndexesImpl,
+  upsertFile as upsertFileImpl,
+  ensureRepository as ensureRepositoryImpl,
+  getFileHash as getFileHashImpl,
+  replaceSymbolsForFile as replaceSymbolsForFileImpl,
+  pruneStaleFiles as pruneStaleFilesImpl,
+  pruneFiles as pruneFilesImpl,
+  pruneOrphanedEdges as pruneOrphanedEdgesImpl,
+  replaceEdgesForFile as replaceEdgesForFileImpl,
+  replaceRoutesForFile as replaceRoutesForFileImpl
+} from "./store/writeStore.js";
 import {
   initVectorStore,
   upsertSymbolVector,
@@ -129,66 +148,14 @@ export class GraphStore {
   private readonly runInTransactionInternal: (fn: () => void) => void;
   private _vectorEnabled = false;
 
-  // Cached prepared statements for the hot indexing write path.
-  private stmtUpsertFile!: Database.Statement;
-  private stmtDeleteEdgesForFile!: Database.Statement;
-  private stmtDeleteSymbolsForFile!: Database.Statement;
-  private stmtInsertSymbol!: Database.Statement;
-  private stmtDeleteRoutesForFile!: Database.Statement;
-  private stmtInsertEdge!: Database.Statement;
-  private stmtInsertRoute!: Database.Statement;
+  /** Connection + the write path's cached prepared statements. @see store/writeStore.ts */
+  private readonly writeCtx: WriteContext;
 
   // buildNamedCandidateMap, pickBestNamedCandidate → edgeResolver.ts
 
   // getEdgeDefaults, buildReliabilitySummary, normalizePath, resolveCanonicalFilePath → impactAnalyzer.ts
 
-  private isSqliteUniqueConstraintError(error: unknown): boolean {
-    if (!error || typeof error !== "object") {
-      return false;
-    }
-
-    const sqliteCode = (error as { code?: string }).code;
-    if (typeof sqliteCode === "string" && sqliteCode.startsWith("SQLITE_CONSTRAINT")) {
-      return true;
-    }
-
-    const message = (error as { message?: string }).message;
-    if (typeof message === "string" && /UNIQUE constraint failed/i.test(message)) {
-      return true;
-    }
-
-    return false;
-  }
-
-  private buildSymbolCollisionError(row: SymbolRecord, error: unknown): Error {
-    const existing = this.db
-      .prepare(
-        `
-        select file_path as filePath, name, kind
-        from symbols
-        where repo_id = ? and symbol_id = ?
-        limit 1
-        `
-      )
-      .get(row.repoId, row.symbolId) as { filePath: string; name: string; kind: string } | undefined;
-
-    const existingDetails = existing
-      ? `existingFile=${existing.filePath} existingName=${existing.name} existingKind=${existing.kind}`
-      : "existingSymbol=unknown";
-    const incomingDetails = `incomingFile=${row.filePath} incomingName=${row.name} incomingKind=${row.kind}`;
-    const causeMessage = error instanceof Error ? error.message : String(error);
-
-    return new Error(
-      `[index-collision] symbol_id collision repoId=${row.repoId} symbolId=${row.symbolId} ${incomingDetails} ${existingDetails} cause=${causeMessage}`
-    );
-  }
-
-  // getEdgeDefaults → impactAnalyzer.ts (getEdgeDefaults)
-  // buildReliabilitySummary → impactAnalyzer.ts (buildReliabilitySummaryImpl)
-  // normalizePath → impactAnalyzer.ts (normalizePath)
-  // resolveCanonicalFilePath → impactAnalyzer.ts (resolveCanonicalFilePath)
-
-   constructor(dbPath: string) {
+  constructor(dbPath: string) {
     this.db = new Database(dbPath);
     this.db.pragma("journal_mode = WAL");
     this.db.pragma("synchronous = NORMAL");
@@ -212,59 +179,13 @@ export class GraphStore {
 
     initGraphSchema(this.db);
     runGraphMigrations(this.db, this._vectorEnabled);
-    this.initCachedStatements();
+    // Statements are prepared last: they reference tables and columns the two calls above
+    // create, so preparing earlier fails on a fresh or older database.
+    this.writeCtx = { db: this.db, stmts: prepareWriteStatements(this.db) };
   }
 
   get isVectorEnabled(): boolean {
     return this._vectorEnabled && isVectorEnabled();
-  }
-
-  private initCachedStatements(): void {
-    this.stmtUpsertFile = this.db.prepare(
-      `
-      insert into files (repo_id, path, content_hash, language, updated_at)
-      values (@repoId, @path, @contentHash, @language, @updatedAt)
-      on conflict(repo_id, path) do update set
-        content_hash = excluded.content_hash,
-        language = excluded.language,
-        updated_at = excluded.updated_at
-      `
-    );
-    this.stmtDeleteEdgesForFile = this.db.prepare(
-      `
-      delete from edges
-      where repo_id = ?
-        and from_id in (
-          select symbol_id
-          from symbols
-          where repo_id = ? and file_path = ?
-        )
-      `
-    );
-    this.stmtDeleteSymbolsForFile = this.db.prepare(
-      `delete from symbols where repo_id = ? and file_path = ?`
-    );
-    this.stmtInsertSymbol = this.db.prepare(
-      `
-      insert into symbols (repo_id, symbol_id, file_path, name, kind, line, end_line, signature, parent_symbol_id)
-      values (@repoId, @symbolId, @filePath, @name, @kind, @line, @endLine, @signature, @parentSymbolId)
-      `
-    );
-    this.stmtDeleteRoutesForFile = this.db.prepare(
-      `delete from routes where repo_id = ? and file_path = ?`
-    );
-    this.stmtInsertEdge = this.db.prepare(
-      `
-      insert into edges (repo_id, from_id, to_id, type, confidence, reason, assigned_expression)
-      values (@repoId, @fromId, @toId, @type, @confidence, @reason, @assignedExpression)
-      `
-    );
-    this.stmtInsertRoute = this.db.prepare(
-      `
-      insert into routes (repo_id, file_path, controller_symbol_id, handler_symbol_id, http_method, route_template, line)
-      values (@repoId, @filePath, @controllerSymbolId, @handlerSymbolId, @httpMethod, @routeTemplate, @line)
-      `
-    );
   }
 
   close(): void {
@@ -275,272 +196,65 @@ export class GraphStore {
     this.runInTransactionInternal(fn);
   }
 
-  /** Flush WAL contents into main database file (GitNexus pattern for batch indexing). */
+  /** @see store/writeStore.ts — WAL session, bulk maintenance, and per-file writes. */
   checkpoint(): void {
-    try {
-      this.db.pragma("wal_checkpoint(PASSIVE)");
-    } catch {
-      // Ignore checkpoint errors to avoid interrupting indexing flow.
-    }
+    checkpointImpl(this.db);
   }
 
-  /**
-   * Disable auto-checkpoint before a large index run to prevent WAL checkpoint
-   * contention with concurrent readers. Call endIndexSession() when done.
-   */
   beginIndexSession(): void {
-    try {
-      this.db.pragma("wal_autocheckpoint = 0"); // Disable auto-checkpoint during indexing
-    } catch {
-      // Non-fatal — indexing continues without this optimization
-    }
+    beginIndexSessionImpl(this.db);
   }
 
   endIndexSession(): void {
-    try {
-      this.db.pragma("wal_autocheckpoint = 8000"); // Restore threshold
-      this.db.pragma("wal_checkpoint(TRUNCATE)"); // Force full checkpoint to shrink WAL file
-    } catch {
-      // Non-fatal
-    }
+    endIndexSessionImpl(this.db);
   }
 
-  /**
-   * Remove duplicate resolved edges after the full resolve phase.
-   * Keeps the row with the highest rowid (last written = typically highest confidence after resolve).
-   * Only targets resolved edges (non-placeholder to_id) to avoid touching unresolved placeholders.
-   * Returns the number of duplicate rows deleted.
-   */
   deduplicateResolvedEdges(repoId: string): number {
-    const PLACEHOLDERS = `(
-      to_id LIKE 'callee:%' OR to_id LIKE 'import:%' OR
-      to_id LIKE 'property:%' OR to_id LIKE 'iface:%' OR to_id LIKE 'type:%'
-    )`;
-    const result = this.db
-      .prepare(
-        `DELETE FROM edges
-         WHERE repo_id = ?
-           AND NOT ${PLACEHOLDERS}
-           AND rowid NOT IN (
-             SELECT MAX(rowid) FROM edges
-             WHERE repo_id = ?
-               AND NOT ${PLACEHOLDERS}
-             GROUP BY repo_id, from_id, to_id, type, assigned_expression
-           )`
-      )
-      .run(repoId, repoId);
-    return result.changes;
+    return deduplicateResolvedEdgesImpl(this.db, repoId);
   }
 
-  /**
-   * Drop secondary edge indexes before bulk resolve to speed up writes.
-   * Call rebuildEdgeIndexes() after bulk write is done.
-   */
   dropEdgeIndexesForBulkWrite(): void {
-    try {
-      this.db.exec(`
-        drop index if exists idx_edges_repo_to;
-        drop index if exists idx_edges_repo_type_to;
-        drop index if exists idx_edges_repo_from_to;
-        drop index if exists idx_edges_repo_type_to_from;
-      `);
-    } catch {
-      // Non-fatal
-    }
+    dropEdgeIndexesForBulkWriteImpl(this.db);
   }
 
-  /**
-   * Rebuild edge indexes after bulk resolve completes.
-   */
   rebuildEdgeIndexes(): void {
-    try {
-      this.db.exec(`
-        create index if not exists idx_edges_repo_to on edges(repo_id, to_id);
-        create index if not exists idx_edges_repo_type_to on edges(repo_id, type, to_id);
-        create index if not exists idx_edges_repo_from_to on edges(repo_id, from_id, to_id);
-        create index if not exists idx_edges_repo_type_to_from on edges(repo_id, type, to_id, from_id);
-      `);
-    } catch {
-      // Non-fatal
-    }
+    rebuildEdgeIndexesImpl(this.db);
   }
 
   upsertFile(record: FileRecord): void {
-    this.stmtUpsertFile.run(record);
+    upsertFileImpl(this.writeCtx, record);
   }
 
   ensureRepository(repoId: string, repoPath: string): void {
-    this.db
-      .prepare(
-        `
-        insert into repositories (repo_id, repo_path, updated_at)
-        values (?, ?, ?)
-        on conflict(repo_id) do update set
-          repo_path = excluded.repo_path,
-          updated_at = excluded.updated_at
-        `
-      )
-      .run(repoId, repoPath, new Date().toISOString());
+    ensureRepositoryImpl(this.db, repoId, repoPath);
   }
 
   getFileHash(repoId: string, filePath: string): string | null {
-    const row = this.db
-      .prepare(
-        `
-        select content_hash as contentHash
-        from files
-        where repo_id = ? and path = ?
-        limit 1
-        `
-      )
-      .get(repoId, filePath) as { contentHash: string } | undefined;
-
-    return row?.contentHash ?? null;
+    return getFileHashImpl(this.db, repoId, filePath);
   }
 
   replaceSymbolsForFile(repoId: string, filePath: string, symbols: SymbolRecord[]): void {
-    // Remove previous edges emitted by symbols in this file before replacing symbols.
-    this.stmtDeleteEdgesForFile.run(repoId, repoId, filePath);
-    this.stmtDeleteSymbolsForFile.run(repoId, filePath);
-
-    const writeRows = (rows: SymbolRecord[]) => {
-      for (const row of rows) {
-        try {
-          this.stmtInsertSymbol.run({
-            ...row,
-            endLine: row.endLine ?? null,
-            signature: row.signature ?? null,
-            parentSymbolId: row.parentSymbolId ?? null
-          });
-        } catch (error) {
-          if (this.isSqliteUniqueConstraintError(error)) {
-            throw this.buildSymbolCollisionError(row, error);
-          }
-          throw error;
-        }
-      }
-    };
-
-    if (this.db.inTransaction) {
-      writeRows(symbols);
-      return;
-    }
-
-    this.db.transaction((rows: SymbolRecord[]) => {
-      writeRows(rows);
-    })(symbols);
+    replaceSymbolsForFileImpl(this.writeCtx, repoId, filePath, symbols);
   }
 
-  /**
-   * Remove files (and their symbols/edges) for a repo that are no longer in the current file set.
-   * Used after a full-mode index to clean up deleted files.
-   * Returns the number of stale files removed.
-   */
   pruneStaleFiles(repoId: string, currentRelativePaths: string[]): number {
-    const existing = this.db
-      .prepare(`select path from files where repo_id = ?`)
-      .all(repoId) as { path: string }[];
-
-    const currentSet = new Set(currentRelativePaths);
-    const stale = existing.filter((r) => !currentSet.has(r.path)).map((r) => r.path);
-    return this.pruneFiles(repoId, stale);
+    return pruneStaleFilesImpl(this.db, repoId, currentRelativePaths);
   }
 
   pruneFiles(repoId: string, relativePaths: string[]): number {
-    if (relativePaths.length === 0) {
-      return 0;
-    }
-
-    const uniquePaths = [...new Set(relativePaths)];
-    const deleteTx = this.db.transaction((paths: string[]) => {
-      for (const filePath of paths) {
-        this.db
-          .prepare(
-            `
-            delete from edges
-            where repo_id = ?
-              and from_id in (
-                select symbol_id
-                from symbols
-                where repo_id = ? and file_path = ?
-              )
-            `
-          )
-          .run(repoId, repoId, filePath);
-        this.db.prepare(`delete from symbols where repo_id = ? and file_path = ?`).run(repoId, filePath);
-        this.db.prepare(`delete from docs where repo_id = ? and file_path = ?`).run(repoId, filePath);
-        this.db.prepare(`delete from routes where repo_id = ? and file_path = ?`).run(repoId, filePath);
-        this.db.prepare(`delete from string_literals where repo_id = ? and file_path = ?`).run(repoId, filePath);
-        this.db.prepare(`delete from files where repo_id = ? and path = ?`).run(repoId, filePath);
-      }
-    });
-    deleteTx(uniquePaths);
-
-    return uniquePaths.length;
+    return pruneFilesImpl(this.db, repoId, relativePaths);
   }
 
   pruneOrphanedEdges(repoId: string): number {
-    const result = this.db
-      .prepare(
-        `
-        DELETE FROM edges
-        WHERE repo_id = ?
-          AND from_id NOT LIKE 'callee:%'
-          AND from_id NOT IN (SELECT symbol_id FROM symbols WHERE repo_id = ?)
-        `
-      )
-      .run(repoId, repoId);
-    return result.changes;
+    return pruneOrphanedEdgesImpl(this.db, repoId);
   }
 
   replaceEdgesForFile(repoId: string, filePath: string, edges: EdgeRecord[]): void {
-    // replaceSymbolsForFile already cleared edges for this file, but we delete again here as a
-    // safety net for callers that invoke replaceEdgesForFile independently.
-    this.stmtDeleteEdgesForFile.run(repoId, repoId, filePath);
-
-    const writeRows = (rows: EdgeRecord[]) => {
-      for (const row of rows) {
-        const defaults = getEdgeDefaults(row);
-        this.stmtInsertEdge.run({
-          ...row,
-          confidence: row.confidence ?? defaults.confidence,
-          reason: row.reason ?? defaults.reason,
-          assignedExpression: row.assignedExpression ?? null
-        });
-      }
-    };
-
-    if (this.db.inTransaction) {
-      writeRows(edges);
-      return;
-    }
-
-    this.db.transaction((rows: EdgeRecord[]) => {
-      writeRows(rows);
-    })(edges);
+    replaceEdgesForFileImpl(this.writeCtx, repoId, filePath, edges);
   }
 
   replaceRoutesForFile(repoId: string, filePath: string, routes: RouteRecord[]): void {
-    this.stmtDeleteRoutesForFile.run(repoId, filePath);
-
-    if (routes.length === 0) {
-      return;
-    }
-
-    const writeRows = (rows: RouteRecord[]) => {
-      for (const row of rows) {
-        this.stmtInsertRoute.run(row);
-      }
-    };
-
-    if (this.db.inTransaction) {
-      writeRows(routes);
-      return;
-    }
-
-    this.db.transaction((rows: RouteRecord[]) => {
-      writeRows(rows);
-    })(routes);
+    replaceRoutesForFileImpl(this.writeCtx, repoId, filePath, routes);
   }
 
   /** ISSUE-023: string-literal lane — delete-then-insert per file (mirror replaceRoutesForFile). */
@@ -560,144 +274,13 @@ export class GraphStore {
     return searchRegexImpl(this, repoId, opts);
   }
 
+  /** @see store/runStore.ts */
   recordRun(summary: IndexRunSummary & { crossRepoLinked?: number; callEdgesResolved?: number; importEdgesResolved?: number; mentionsResolved?: number }): void {
-    this.db
-      .prepare(
-        `
-        insert into index_runs (
-          run_id, repo_id, mode, status, started_at, finished_at,
-          files_scanned, files_indexed, files_skipped, symbols_upserted,
-          edges_upserted, docs_upserted, mentions_upserted, parse_failures,
-          cross_repo_linked, call_edges_resolved, import_edges_resolved, mentions_resolved,
-          elapsed_ms,
-          cross_repo_attempts, cross_repo_resolved,
-          unresolved_no_candidate, unresolved_ambiguous,
-          unresolved_boundary_blocked, unresolved_low_confidence,
-          commit_sha, branch,
-          resolve_phase_ms, build_context_ms, call_resolve_ms, import_resolve_ms,
-          type_resolve_ms, property_resolve_ms, implements_resolve_ms, fts_rebuild_ms,
-          unresolved_calls_total, unresolved_rows_capped_by_policy, unresolved_imports_capped_by_policy, resolve_calls_coverage,
-          performance_profile
-        ) values (
-          ?, ?, ?, ?, ?, ?,
-          ?, ?, ?, ?,
-          ?, ?, ?, ?,
-          ?, ?, ?, ?,
-          ?,
-          ?, ?,
-          ?, ?,
-          ?, ?,
-          ?, ?,
-          ?, ?, ?, ?,
-          ?, ?, ?, ?,
-          ?, ?, ?, ?,
-          ?
-        )
-        `
-      )
-      .run(
-        summary.runId,
-        summary.repoId,
-        summary.mode,
-        summary.status,
-        summary.startedAt,
-        summary.finishedAt,
-        summary.filesScanned,
-        summary.filesIndexed,
-        summary.filesSkipped,
-        summary.symbolsUpserted,
-        summary.edgesUpserted,
-        summary.docsUpserted,
-        summary.mentionsUpserted,
-        summary.parseFailures,
-        summary.crossRepoLinked ?? 0,
-        summary.callEdgesResolved ?? 0,
-        summary.importEdgesResolved ?? 0,
-        summary.mentionsResolved ?? 0,
-        summary.elapsedMs,
-        summary.crossRepoAttempts ?? 0,
-        summary.crossRepoResolved ?? 0,
-        summary.unresolvedNoCandidate ?? 0,
-        summary.unresolvedAmbiguous ?? 0,
-        summary.unresolvedBoundaryBlocked ?? 0,
-        summary.unresolvedLowConfidence ?? 0,
-        summary.commitSha ?? null,
-        summary.branch ?? null,
-        summary.resolvePhaseMs ?? 0,
-        summary.buildContextMs ?? 0,
-        summary.callResolveMs ?? 0,
-        summary.importResolveMs ?? 0,
-        summary.typeResolveMs ?? 0,
-        summary.propertyResolveMs ?? 0,
-        summary.implementsResolveMs ?? 0,
-        summary.ftsRebuildMs ?? 0,
-        summary.callEdgesAttempted ?? summary.unresolvedCallsTotal ?? 0, // ISSUE-025: cột giữ tên cũ, nghĩa là "attempted"
-        0, // unresolved_rows_capped_by_policy — kept for backward compat, always 0 (use unresolvedImportsCappedByPolicy)
-        summary.unresolvedImportsCappedByPolicy ? 1 : 0,
-        summary.resolveCallsCoverage ?? 0,
-        summary.performanceProfile ?? null
-      );
+    recordRunImpl(this.db, summary);
   }
 
   getLatestRun(repoId: string): IndexRunSummary | null {
-    const row = this.db
-      .prepare(
-        `
-        select
-          run_id as runId,
-          repo_id as repoId,
-          mode,
-          status,
-          started_at as startedAt,
-          finished_at as finishedAt,
-          files_scanned as filesScanned,
-          files_indexed as filesIndexed,
-          files_skipped as filesSkipped,
-          symbols_upserted as symbolsUpserted,
-          edges_upserted as edgesUpserted,
-          docs_upserted as docsUpserted,
-          mentions_upserted as mentionsUpserted,
-          parse_failures as parseFailures,
-          cross_repo_linked as crossRepoLinked,
-          call_edges_resolved as callEdgesResolved,
-          import_edges_resolved as importEdgesResolved,
-          mentions_resolved as mentionsResolved,
-          elapsed_ms as elapsedMs,
-          cross_repo_attempts as crossRepoAttempts,
-          cross_repo_resolved as crossRepoResolved,
-          unresolved_no_candidate as unresolvedNoCandidate,
-          unresolved_ambiguous as unresolvedAmbiguous,
-          unresolved_boundary_blocked as unresolvedBoundaryBlocked,
-          unresolved_low_confidence as unresolvedLowConfidence,
-          commit_sha as commitSha,
-          branch,
-          resolve_phase_ms as resolvePhaseMs,
-          build_context_ms as buildContextMs,
-          call_resolve_ms as callResolveMs,
-          import_resolve_ms as importResolveMs,
-          type_resolve_ms as typeResolveMs,
-          property_resolve_ms as propertyResolveMs,
-          implements_resolve_ms as implementsResolveMs,
-          fts_rebuild_ms as ftsRebuildMs,
-          unresolved_calls_total as callEdgesAttempted,
-          unresolved_calls_total as unresolvedCallsTotal,
-          unresolved_imports_capped_by_policy as unresolvedImportsCappedByPolicy,
-          resolve_calls_coverage as resolveCallsCoverage,
-          performance_profile as performanceProfile
-        from index_runs
-        where repo_id = ?
-        order by finished_at desc, started_at desc, rowid desc
-        limit 1
-        `
-      )
-      .get(repoId) as IndexRunSummary | undefined;
-
-    if (row && typeof row.callEdgesAttempted === "number") {
-      // ISSUE-025: derive unresolved từ partition attempted − resolved (không có cột riêng).
-      const resolved = (row as IndexRunSummary & { callEdgesResolved?: number }).callEdgesResolved ?? 0;
-      row.callEdgesUnresolved = Math.max(0, row.callEdgesAttempted - resolved);
-    }
-    return row ?? null;
+    return getLatestRunImpl(this.db, repoId);
   }
 
   getDependencies(repoId: string, fromId: string, limit: number): EdgeRecord[] {
