@@ -27,7 +27,7 @@
 import Database from "better-sqlite3";
 import process from "node:process";
 
-import { buildEdgeToSymbolPairsCte } from "../../dist/impactAnalyzer.js";
+import { buildEdgeToSymbolPairsCte } from "../../dist/impact/impactAnalyzer.js";
 
 /** The pre-S-30 predicate, frozen. Referenced `st` from an outer LEFT JOIN. */
 const OLD_JOIN = `(

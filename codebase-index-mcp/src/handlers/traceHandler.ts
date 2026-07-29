@@ -10,7 +10,7 @@
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { McpError, ErrorCode } from "@modelcontextprotocol/sdk/types.js";
 import { resolveResponseProfile } from "../response/responseFormatter.js";
-import { buildCoverageBlock } from "../coverage.js";
+import { buildCoverageBlock } from "../response/coverage.js";
 import type { HandlerContext } from "./handlerContext.js";
 
 export function handleTraceExecutionFlow(

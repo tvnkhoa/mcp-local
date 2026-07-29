@@ -16,7 +16,7 @@ import {
   noLlmAudit,
   assertSafeRepoFilePath,
   safeReadText
-} from "../refactorUtils.js";
+} from "../refactor/refactorUtils.js";
 import type { RefactorApplyHunkRecord, RefactorRollbackRecord } from "../types.js";
 import { resolveResponseProfile } from "../response/responseFormatter.js";
 import type { HandlerContext } from "./handlerContext.js";

@@ -1,6 +1,6 @@
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
-import type { GraphStore } from "../graphStore.js";
-import type { WatchManager } from "../watchManager.js";
+import type { GraphStore } from "../store/graphStore.js";
+import type { WatchManager } from "../watch/watchManager.js";
 import type { ResponseProfile } from "../response/responseFormatter.js";
 import type { IndexMode, IndexRunResult } from "../types.js";
 

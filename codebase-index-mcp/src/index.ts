@@ -18,9 +18,9 @@ import { fileURLToPath } from "node:url";
 
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 
-import { GraphStore } from "./graphStore.js";
+import { GraphStore } from "./store/graphStore.js";
 import { assertPathAllowed, clamp } from "./guardrails/indexGuardrails.js";
-import { WatchManager } from "./watchManager.js";
+import { WatchManager } from "./watch/watchManager.js";
 import { createIndexRunner } from "./indexing/indexRunner.js";
 import { armWatchInactivityTimer, startAutoWatchers } from "./watch/watchLifecycle.js";
 import {

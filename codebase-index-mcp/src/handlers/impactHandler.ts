@@ -4,8 +4,8 @@ import { resolveResponseProfile } from "../response/responseFormatter.js";
 import { validateReadOnlyGraphSql, validateAllowedTables } from "../guardrails/sqliteGuardrails.js";
 import { buildStaleWarning, getRepoStaleness, collectDirtyFiles, countCommitsBehind } from "../gitHelpers.js";
 import type { StaleWarning } from "../gitHelpers.js";
-import { buildCoverageBlock } from "../coverage.js";
-import { GraphStore } from "../graphStore.js";
+import { buildCoverageBlock } from "../response/coverage.js";
+import { GraphStore } from "../store/graphStore.js";
 import type { HandlerContext } from "./handlerContext.js";
 
 // ── Staleness Gate ────────────────────────────────────────────────────────────

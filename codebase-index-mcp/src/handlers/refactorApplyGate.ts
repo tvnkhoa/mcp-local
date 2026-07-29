@@ -7,8 +7,8 @@
  */
 
 import { randomUUID } from "node:crypto";
-import { executeRefactorApplyPlan } from "../refactorEngine.js";
-import { deriveApplyStatus, mapPreviewStatusFromApplyStatus } from "../refactorUtils.js";
+import { executeRefactorApplyPlan } from "../refactor/refactorEngine.js";
+import { deriveApplyStatus, mapPreviewStatusFromApplyStatus } from "../refactor/refactorUtils.js";
 import type { RefactorPreviewHunkRecord, RefactorApplyRecord } from "../types.js";
 import { collectGitChangedFiles } from "../gitHelpers.js";
 import type { HandlerContext } from "./handlerContext.js";

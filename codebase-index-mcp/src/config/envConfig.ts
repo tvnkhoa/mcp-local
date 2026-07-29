@@ -15,7 +15,7 @@ import {
   parseWatchConfigFromEnv
 } from "../guardrails/indexGuardrails.js";
 import { parsePerformanceProfileEnv } from "./performanceConfig.js";
-import type { PerformanceProfile } from "../indexPipeline.js";
+import type { PerformanceProfile } from "../indexing/indexPipeline.js";
 
 export function numberFromEnv(name: string, fallback: number): number {
   const raw = process.env[name];

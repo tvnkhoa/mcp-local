@@ -14,8 +14,8 @@
 
 import type Database from "better-sqlite3";
 
-import { indexLog } from "../indexProgress.js";
-import { ensureVectorSchema } from "../vectorStore.js";
+import { indexLog } from "../indexing/indexProgress.js";
+import { ensureVectorSchema } from "./vectorStore.js";
 
 /** Create every table, index and FTS view the graph needs, if absent. */
 export function initGraphSchema(db: Database.Database): void {

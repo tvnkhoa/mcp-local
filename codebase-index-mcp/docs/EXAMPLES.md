@@ -23,7 +23,7 @@ health_check({ repoId: "mcp-local" })
 
 ```
 search_symbols({ repoId: "mcp-local", query: "GraphStore", strategy: "name", profile: "compact" })
-→ { symbols: [{ id: "abc123", name: "GraphStore", kind: "class", filePath: "src/graphStore.ts", line: 45 }] }
+→ { symbols: [{ id: "abc123", name: "GraphStore", kind: "class", filePath: "src/store/graphStore.ts", line: 45 }] }
 
 get_symbol_context_pack({ repoId: "mcp-local", symbolId: "abc123", profile: "compact" })
 → { symbol: { ... }, callers: [...], callees: [...], typeRefs: [...] }
@@ -37,13 +37,13 @@ Use `strategy: "intent"` for natural-language-like queries, but prefer exact ide
 
 ```
 find_impact_files({ repoId: "mcp-local", symbolId: "abc123", view: "files", profile: "nano" })
-→ { totalFiles: 12, topFiles: [{ filePath: "src/indexPipeline.ts", symbolCount: 8 }, ...], hasMore: true }
+→ { totalFiles: 12, topFiles: [{ filePath: "src/indexing/indexPipeline.ts", symbolCount: 8 }, ...], hasMore: true }
 
 find_impact_files({ repoId: "mcp-local", symbolId: "abc123", view: "surface", profile: "compact" })
-→ { files: [{ filePath: "src/indexPipeline.ts", callerSymbols: [...] }] }
+→ { files: [{ filePath: "src/indexing/indexPipeline.ts", callerSymbols: [...] }] }
 
 detect_changes({ repoId: "mcp-local", policyPreset: "strict-review", profile: "compact" })
-→ { changes: [{ filePath: "src/graphStore.ts", riskLevel: "high", riskScore: 0.85 }] }
+→ { changes: [{ filePath: "src/store/graphStore.ts", riskLevel: "high", riskScore: 0.85 }] }
 ```
 
 ---

@@ -38,7 +38,7 @@ import type {
 import { createMcpServer } from "@mcp/sdk";
 
 import { mapError } from "./errorHandler.js";
-import type { GraphStore } from "./graphStore.js";
+import type { GraphStore } from "./store/graphStore.js";
 import { handleListResources, handleReadResource } from "./handlers/resourceHandler.js";
 import type { HandlerContext } from "./handlers/handlerContext.js";
 import {

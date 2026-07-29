@@ -1,4 +1,4 @@
-import { extractGraphData } from "../../dist/treeSitterExtractor.js";
+import { extractGraphData } from "../../dist/extractors/treeSitterExtractor.js";
 
 const src = `
 using System;

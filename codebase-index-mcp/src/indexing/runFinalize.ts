@@ -12,8 +12,8 @@
 
 import path from "node:path";
 
-import type { GraphStore } from "../graphStore.js";
-import { indexLog, indexWarn, type IndexProgress } from "../indexProgress.js";
+import type { GraphStore } from "../store/graphStore.js";
+import { indexLog, indexWarn, type IndexProgress } from "./indexProgress.js";
 import type { IndexMode, IndexRunSummary } from "../types.js";
 
 export interface FinalizeInput {

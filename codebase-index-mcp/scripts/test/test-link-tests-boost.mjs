@@ -4,7 +4,7 @@
  * whereas the same-named unit test alone would otherwise dominate name-affinity linkage.
  */
 import Database from "better-sqlite3";
-import { linkTestsToSource } from "../../dist/staticAnalyzer.js";
+import { linkTestsToSource } from "../../dist/analysis/staticAnalyzer.js";
 
 let passed = 0;
 let failed = 0;

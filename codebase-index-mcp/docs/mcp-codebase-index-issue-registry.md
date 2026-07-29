@@ -60,7 +60,7 @@ Workaround · Enhancement proposal. Filed here so the MCP server team can triage
   with `I` followed by a letter — `ItemService.cs`, `IndexController.cs`, `InvoiceRepository.cs` —
   is dropped from the candidate list under `suppressed.reasons.heuristic_contract_declaration`.
 - **Root cause (confirmed):** in `getCSharpSuppressionReason`
-  (`src/staticAnalyzerDeadCodeCSharp.ts`), `normalizedPath` is lowercased before the filename is
+  (`src/analysis/staticAnalyzerDeadCodeCSharp.ts`), `normalizedPath` is lowercased before the filename is
   taken, and the interface-file test is then `/^i[a-z].*\.cs$/`. The pattern was written for the
   `IThing.cs` convention, where the discriminator is the *capital* `I` followed by a capital letter
   — but the casing is already gone by the time the test runs, so it matches any `i`-initial
@@ -79,7 +79,7 @@ Workaround · Enhancement proposal. Filed here so the MCP server team can triage
   the `/interfaces/`-style path checks, and match the interface convention against a
   non-lowercased basename as `/^I[A-Z]/`. That is a visible change to tool output (more candidates
   reported), so it needs its own step rather than riding along with a file split.
-- **Covered by:** `src/staticAnalyzerDeadCodeCSharp.test.ts`, test
+- **Covered by:** `src/analysis/staticAnalyzerDeadCodeCSharp.test.ts`, test
   `"KNOWN DEFECT (MCP-ISSUE-031)"` — pins the current behaviour, and names which of its two
   assertions must flip when the fix lands.
 

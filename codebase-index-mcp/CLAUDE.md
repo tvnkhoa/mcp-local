@@ -41,32 +41,67 @@ This is an **MCP (Model Context Protocol) server** that builds a code graph over
 
 ```
 Files on disk
-  → fileFilter.ts         # extension/binary sniff → include/exclude + language tag
-  → indexPipeline.ts      # glob, hash, batch, dispatch
-      ├─ treeSitterExtractor.ts   # JS/TS/C# → symbols + edges (CALLS, IMPORTS, TYPE_REF, PROPERTY_REF, PROPERTY_WRITE)
-      ├─ extractionWorkerPool.ts  # worker threads for files > 512 KB
-      ├─ dotnetProjectParser.ts   # .csproj/.sln → NuGet + ProjectReference edges
-      └─ markdownParser.ts        # headings + code blocks + backtick mentions
-  → graphStore.ts          # upsert into SQLite (better-sqlite3)
-  → index.ts               # MCP tool handlers (query + refactor + watch)
+  → indexing/fileFilter.ts     # extension/binary sniff → include/exclude + language tag
+  → indexing/indexPipeline.ts  # batch, hash, dispatch  (scan/limits/finalize in sibling files)
+      ├─ extractors/treeSitterExtractor.ts   # JS/TS/C# → symbols + edges (CALLS, IMPORTS, TYPE_REF, PROPERTY_REF, PROPERTY_WRITE)
+      ├─ extractors/extractionWorkerPool.ts  # worker threads (threshold is env-tuned; 0 = always)
+      ├─ extractors/dotnetProjectParser.ts   # .csproj/.sln → NuGet + ProjectReference edges
+      └─ extractors/markdownParser.ts        # headings + code blocks + backtick mentions
+  → store/graphStore.ts        # upsert into SQLite (better-sqlite3)
+  → graph/edgeResolver.ts      # resolve cross-file edges after all files are seen
+  → index.ts                   # entry: env, construction, start-up
 ```
+
+### Layout
+
+`src/` follows target-architecture rule S2 — `{config,guardrails,response,<domain>}/`. S-41 re-homed
+59 loose files into domain folders; only the entry point and the contracts every domain needs stay at
+the root.
+
+| Folder | Owns |
+|--------|------|
+| `analysis/` | static analysis over the built graph: dead code, cycles, test linkage, value contracts |
+| `config/` | the only modules permitted to read `process.env` (dependency rule 10) |
+| `extractors/` | source → symbols/edges, per language, plus the worker lane |
+| `graph/` | edge resolution and traversal |
+| `guardrails/` | path allowlist, redaction, SQL token blocking |
+| `handlers/` | one function per tool, called by `tools/` |
+| `impact/` | blast radius: who calls, who is affected, what changed |
+| `indexing/` | the index run — scan, limits, batches, progress, finalize |
+| `refactor/` | preview → apply → rollback, and the HMAC approval path |
+| `response/` | profile-aware serialization and the coverage block |
+| `schemas/` | zod input schemas, one file per tool group |
+| `search/` | symbol search, FTS, regex search, candidate resolution |
+| `store/` | every SQLite read and write |
+| `tools/` | `tools/list` declarations via `@mcp/sdk` |
+| `watch/` | chokidar watcher and its lifecycle |
+
+Root: `index.ts` (S1 — the only entry point), `server.ts`, `types.ts`, `vendor.d.ts`,
+`errorHandler.ts`, `serverUtils.ts`, `gitHelpers.ts`.
 
 ### Key source files
 
 | File | Role |
 |------|------|
-| `src/index.ts` | MCP server entry; all tool definitions, request dispatch, env parsing |
-| `src/graphStore.ts` | All SQLite reads/writes; schema migrations; refactor preview/apply/rollback tables |
-| `src/indexPipeline.ts` | Core batch indexing loop; progress snapshots; commit-SHA staleness check |
-| `src/treeSitterExtractor.ts` | AST extraction per language; edge policy by performance profile |
-| `src/extractionWorkerPool.ts` | Worker-thread pool for large-file parse isolation |
-| `src/dotnetProjectParser.ts` | Regex-based .csproj/.sln parser (NuGet + ProjectReference edges) |
-| `src/fileFilter.ts` | File include/exclude rules; binary sniff; language detection |
+| `src/index.ts` | Entry: env parsing, construction, start-up |
+| `src/server.ts` | Protocol wiring; `tools/list` table lives in `src/tools/` |
+| `src/store/graphStore.ts` | All SQLite reads/writes; schema migrations; refactor tables |
+| `src/indexing/indexPipeline.ts` | Core batch indexing loop; progress snapshots; commit-SHA staleness check |
+| `src/indexing/fileFilter.ts` | File include/exclude rules; binary sniff; language detection |
+| `src/extractors/treeSitterExtractor.ts` | AST extraction per language; edge policy by performance profile |
+| `src/extractors/extractionWorkerPool.ts` | Worker-thread pool for large-file parse isolation |
+| `src/extractors/dotnetProjectParser.ts` | Regex-based .csproj/.sln parser (NuGet + ProjectReference edges) |
+| `src/extractors/markdownParser.ts` | Docs-lane extraction for `.md` files |
 | `src/guardrails/indexGuardrails.ts` | Path allowlist enforcement; sensitive-pattern redaction; env parsing helpers |
 | `src/guardrails/sqliteGuardrails.ts` | Blocks mutation SQL tokens in `query_graph` tool to prevent injection |
-| `src/watchManager.ts` | chokidar watcher; debounced incremental re-index |
-| `src/markdownParser.ts` | Docs-lane extraction for `.md` files |
+| `src/watch/watchManager.ts` | chokidar watcher; debounced incremental re-index |
 | `src/types.ts` | Shared types: `SymbolRecord`, `EdgeRecord`, `RefactorPreviewRecord`, etc. |
+
+> `extractionWorkerPool.ts` spawns its worker with `new URL("./extractionWorker.js",
+> import.meta.url)`, so those two files must stay in the same folder.
+
+> `dist/` is not pruned by `tsc`. After renaming or moving a source file, `rm -rf dist` before
+> trusting a run — a stale module at the old path will still load and can mask a broken import.
 
 ### Graph model
 

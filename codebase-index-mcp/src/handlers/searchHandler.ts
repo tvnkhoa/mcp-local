@@ -9,10 +9,10 @@ import {
 import { runGit } from "../gitHelpers.js";
 import { resolveResponseProfile } from "../response/responseFormatter.js";
 import { formatChangeContextPayload, buildIndexMeta } from "./impactHandler.js";
-import { readSymbolSourceSpan } from "../refactorUtils.js";
-import { buildCoverageBlock } from "../coverage.js";
-import { isTestPath } from "../fileFilter.js";
-import { RegexSearchError } from "../regexSearch.js";
+import { readSymbolSourceSpan } from "../refactor/refactorUtils.js";
+import { buildCoverageBlock } from "../response/coverage.js";
+import { isTestPath } from "../indexing/fileFilter.js";
+import { RegexSearchError } from "../search/regexSearch.js";
 import type { HandlerContext } from "./handlerContext.js";
 
 /**

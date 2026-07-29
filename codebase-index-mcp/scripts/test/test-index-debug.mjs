@@ -1,5 +1,5 @@
 import { readFileSync } from "node:fs";
-import { extractGraphData } from "../../dist/treeSitterExtractor.js";
+import { extractGraphData } from "../../dist/extractors/treeSitterExtractor.js";
 
 const files = [
   "D:/1.SourceCode/crm/wec.commnunication-hub/backend/CommunicationHub/tests/Application.UnitTests/Conversations/Commands/ConversationNotesCommandHandlerTests.cs",

@@ -4,10 +4,10 @@
  */
 
 import { McpError, ErrorCode } from "@modelcontextprotocol/sdk/types.js";
-import type { GraphStore } from "../graphStore.js";
+import type { GraphStore } from "../store/graphStore.js";
 import { parseRepoResourceUri } from "../serverUtils.js";
 import { getRepoStaleness, runGitLines } from "../gitHelpers.js";
-import { resolveDetectChangesPolicy, scoreChangeRisk } from "../policyResolver.js";
+import { resolveDetectChangesPolicy, scoreChangeRisk } from "../analysis/policyResolver.js";
 
 export function handleListResources(store: GraphStore, cursor?: string) {
   if (cursor) {

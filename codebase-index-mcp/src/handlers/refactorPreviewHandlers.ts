@@ -9,7 +9,7 @@
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { McpError, ErrorCode } from "@modelcontextprotocol/sdk/types.js";
 import { randomUUID } from "node:crypto";
-import { buildRefactorPreview, applyCompilerAssistToPreview } from "../refactorEngine.js";
+import { buildRefactorPreview, applyCompilerAssistToPreview } from "../refactor/refactorEngine.js";
 import {
   resolveApprovalSecret,
   countPreviewRisks,
@@ -18,13 +18,13 @@ import {
   groupPreviewHunks,
   noLlmAudit,
   escapeRegExp
-} from "../refactorUtils.js";
+} from "../refactor/refactorUtils.js";
 import type {
   RefactorScopeInput,
   RefactorGuardsInput,
   RefactorModeInput,
   RefactorCompilerAssistInput
-} from "../refactorTypes.js";
+} from "../refactor/refactorTypes.js";
 import type { RefactorPreviewRecord, RefactorPreviewHunkRecord } from "../types.js";
 import { resolveResponseProfile } from "../response/responseFormatter.js";
 import type { HandlerContext } from "./handlerContext.js";

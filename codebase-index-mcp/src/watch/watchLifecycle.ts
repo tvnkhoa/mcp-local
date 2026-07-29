@@ -22,8 +22,8 @@
 import process from "node:process";
 
 import { assertPathAllowed } from "../guardrails/indexGuardrails.js";
-import type { GraphStore } from "../graphStore.js";
-import type { WatchManager } from "../watchManager.js";
+import type { GraphStore } from "../store/graphStore.js";
+import type { WatchManager } from "./watchManager.js";
 
 export interface WatchTarget {
   repoId: string;

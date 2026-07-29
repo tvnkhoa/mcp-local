@@ -16,8 +16,8 @@ import path from "node:path";
 
 import { glob } from "glob";
 
-import { INDEX_IGNORE_GLOBS } from "../fileFilter.js";
-import { indexLog } from "../indexProgress.js";
+import { INDEX_IGNORE_GLOBS } from "./fileFilter.js";
+import { indexLog } from "./indexProgress.js";
 
 export interface FileScanInput {
   readonly repoId: string;

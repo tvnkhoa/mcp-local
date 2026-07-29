@@ -8,16 +8,16 @@
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { McpError, ErrorCode } from "@modelcontextprotocol/sdk/types.js";
 import { randomUUID } from "node:crypto";
-import { buildSymbolMigrationPreview } from "../refactorEngine.js";
-import { buildValueRepresentationPreview, type ValueRepresentationInput } from "../valueRepresentation.js";
+import { buildSymbolMigrationPreview } from "../refactor/refactorEngine.js";
+import { buildValueRepresentationPreview, type ValueRepresentationInput } from "../analysis/valueRepresentation.js";
 import {
   collectExpectedApplyFiles,
   countPreviewRisks,
   createPreviewDigest,
   groupPreviewHunks,
   noLlmAudit
-} from "../refactorUtils.js";
-import type { RefactorSymbolMigrationInput } from "../refactorTypes.js";
+} from "../refactor/refactorUtils.js";
+import type { RefactorSymbolMigrationInput } from "../refactor/refactorTypes.js";
 import type { RefactorPreviewRecord, RefactorPreviewHunkRecord } from "../types.js";
 import { resolveResponseProfile } from "../response/responseFormatter.js";
 import type { HandlerContext } from "./handlerContext.js";

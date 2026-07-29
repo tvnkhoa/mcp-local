@@ -14,11 +14,11 @@
  * The decision functions it calls (skip? which profile?) live in `runPolicy.ts`.
  */
 
-import { createIndexProgress, indexLog, type ProgressNotifier } from "../indexProgress.js";
+import { createIndexProgress, indexLog, type ProgressNotifier } from "./indexProgress.js";
 import { resolvePostPhasePolicy } from "../config/performanceConfig.js";
 import { collectDirtyFiles, resolveCurrentBranch, resolveHeadCommitSha } from "../gitHelpers.js";
-import type { GraphStore } from "../graphStore.js";
-import { runIndexPipeline, INDEX_VERSION, type PerformanceProfile } from "../indexPipeline.js";
+import type { GraphStore } from "../store/graphStore.js";
+import { runIndexPipeline, INDEX_VERSION, type PerformanceProfile } from "./indexPipeline.js";
 import type { IndexMode, IndexRunResult } from "../types.js";
 import {
   buildSkippedRunSummary,

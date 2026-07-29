@@ -16,8 +16,8 @@
 import { randomUUID } from "node:crypto";
 
 import { hasWorkingTreeChanges, resolveHeadCommitSha } from "../gitHelpers.js";
-import type { GraphStore } from "../graphStore.js";
-import { INDEX_VERSION, type PerformanceProfile } from "../indexPipeline.js";
+import type { GraphStore } from "../store/graphStore.js";
+import { INDEX_VERSION, type PerformanceProfile } from "./indexPipeline.js";
 import type { IndexMode, IndexRunResult, ResolutionStats } from "../types.js";
 
 export interface IncrementalSkipDecision {
