@@ -9,6 +9,39 @@ Workaround · Enhancement proposal. Filed here so the MCP server team can triage
 
 ---
 
+## MCP-ISSUE-031 — `dead_code_scan` suppresses every method in an `i`-prefixed C# file
+
+- **Status:** open. Found 2026-07-29 while splitting `staticAnalyzer.ts` (S-41); the defect itself
+  predates the split and is unchanged by it.
+- **Scenario:** `dead_code_scan` on a .NET repo. Any method declared in a file whose name begins
+  with `I` followed by a letter — `ItemService.cs`, `IndexController.cs`, `InvoiceRepository.cs` —
+  is dropped from the candidate list under `suppressed.reasons.heuristic_contract_declaration`.
+- **Root cause (confirmed):** in `getCSharpSuppressionReason`
+  (`src/staticAnalyzerDeadCodeCSharp.ts`), `normalizedPath` is lowercased before the filename is
+  taken, and the interface-file test is then `/^i[a-z].*\.cs$/`. The pattern was written for the
+  `IThing.cs` convention, where the discriminator is the *capital* `I` followed by a capital letter
+  — but the casing is already gone by the time the test runs, so it matches any `i`-initial
+  filename. The three sibling checks on the same branch (`/interfaces/`, `/contracts/`,
+  `/abstractions/`) are path-based and unaffected.
+- **Expected vs actual:** expected only interface declarations (`IOrderService.cs`) to be reported
+  as `heuristic_contract_declaration`. Actual: ordinary implementation files match too, so the scan
+  silently under-reports. Because a suppressed symbol is *excluded*, this is a false negative — the
+  tool looks clean while hiding candidates, which is the failure mode hardest to notice.
+- **Impact:** `dead_code_scan` under-reports on any .NET repo with `I`-initial type names. Scale
+  depends on naming; on `wec.communication-hub` it covers every `Invoice*`/`Item*`/`Identity*` file.
+  No effect on non-C# rows, which exit the function before this check.
+- **Workaround:** none from the tool side. Cross-check an `I`-initial file by hand
+  (`find_impact_files` view `"surface"` on it) before trusting a clean scan.
+- **Enhancement proposal:** test the filename with its original casing — keep `normalizedPath` for
+  the `/interfaces/`-style path checks, and match the interface convention against a
+  non-lowercased basename as `/^I[A-Z]/`. That is a visible change to tool output (more candidates
+  reported), so it needs its own step rather than riding along with a file split.
+- **Covered by:** `src/staticAnalyzerDeadCodeCSharp.test.ts`, test
+  `"KNOWN DEFECT (MCP-ISSUE-031)"` — pins the current behaviour, and names which of its two
+  assertions must flip when the fix lands.
+
+---
+
 ## ISSUE-CR-001 — Package bridge resolves 0/257 (cross-repo provider linkage)
 
 - **Status:** fixed 2026-06-29 (`src/dotnetProjectParser.ts`) — provider bridge symbol now emitted for implicit PackageId. Consumer-side `edges`/`find_package_consumers` workaround remains valid as a fallback.
