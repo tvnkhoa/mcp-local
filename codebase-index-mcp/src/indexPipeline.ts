@@ -1,18 +1,40 @@
+/**
+ * The index run: scan, extract in batches, write, finalize.
+ *
+ * S-41 moved three phases out to `indexing/` -- limit resolution (`runLimits.ts`), the scan
+ * (`fileScan.ts`), and pruning/resolution/vector/summary (`runFinalize.ts`). What stays is the
+ * batch loop, and that is deliberate: it is one unit of work whose parts share a mutable
+ * accumulator and an abort signal checked at four points. Splitting it further would mean
+ * inventing a context object to pass the same state around, which adds indirection without
+ * making any failure easier to diagnose.
+ *
+ * The counters now live on a single `c` object rather than as nine separate `let` bindings, so
+ * `buildRunSummary` can read them from one place instead of the field list being written out
+ * twice (once on the success path, once in the catch).
+ */
+
 import { createHash, randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import process from "node:process";
 
-import { glob } from "glob";
-
-import { shouldIndexFile, INDEX_IGNORE_GLOBS, type FilterDecision } from "./fileFilter.js";
+import { shouldIndexFile, type FilterDecision } from "./fileFilter.js";
 import { GraphStore } from "./graphStore.js";
 import { resolveHeadCommitSha, resolveCurrentBranch } from "./gitHelpers.js";
-import { clamp, redactSensitive } from "./guardrails/indexGuardrails.js";
+import { redactSensitive } from "./guardrails/indexGuardrails.js";
 import { extractGraphData, isParseTimeoutError } from "./treeSitterExtractor.js";
 import { ExtractionWorkerPool } from "./extractionWorkerPool.js";
 import { extractDotnetProjectData } from "./dotnetProjectParser.js";
 import { createIndexProgress, indexLog, indexWarn, type IndexProgress } from "./indexProgress.js";
+import { resolveIndexRunLimits } from "./indexing/runLimits.js";
+import { scanRepoFiles } from "./indexing/fileScan.js";
+import {
+  buildRunSummary,
+  pruneAndResolve,
+  rebuildVectorIndex,
+  type RunCounters,
+  type RunIdentity
+} from "./indexing/runFinalize.js";
 import type { IndexMode, IndexProgressSnapshot, IndexRunSummary } from "./types.js";
 
 export type PerformanceProfile = "standard" | "large" | "very-large";
@@ -59,25 +81,24 @@ export type RunIndexInput = {
 export const INDEX_VERSION = "v2-string-literals";
 
 export async function runIndexPipeline(store: GraphStore, input: RunIndexInput): Promise<IndexRunSummary> {
-  const runId = randomUUID();
-  const startedAt = new Date().toISOString();
+  const identity: RunIdentity = {
+    runId: randomUUID(),
+    repoId: input.repoId,
+    commitSha: resolveHeadCommitSha(input.repoPath),
+    branch: resolveCurrentBranch(input.repoPath),
+    indexVersion: INDEX_VERSION,
+    mode: input.mode,
+    startedAt: new Date().toISOString()
+  };
+  const { runId, startedAt } = identity;
   const started = Date.now();
-  const indexVersion = INDEX_VERSION;
-  const commitSha = resolveHeadCommitSha(input.repoPath);
-  const branch = resolveCurrentBranch(input.repoPath);
 
   store.ensureRepository(input.repoId, input.repoPath);
 
-  const maxFiles = clamp(input.maxFiles, 1, 200_000);
-  const includeDocs = input.includeDocs ?? true;
-  const batchSize = clamp(input.batchSize ?? 200, 1, 2_000);
-  const subtxSize = clamp(input.subtxSize ?? 20, 1, 500);
-  const checkpointEveryNBatches = Math.max(1, input.checkpointEveryNBatches ?? 1);
-  const largeFileThresholdBytes = Math.max(0, input.largeFileThresholdBytes ?? 512 * 1024);
-  const maxFileSizeBytes = Math.max(10_000, input.maxFileSizeBytes ?? 500_000);
-  const parseWorkers = clamp(input.parseWorkers ?? 2, 0, 32);
-  const parseJobTimeoutMs = clamp(input.parseJobTimeoutMs ?? 20_000, 1_000, 120_000);
-  const concurrencyLimit = 50; // Limit parallel file reads
+  const {
+    maxFiles, includeDocs, batchSize, subtxSize, checkpointEveryNBatches,
+    largeFileThresholdBytes, maxFileSizeBytes, parseWorkers, parseJobTimeoutMs, concurrencyLimit
+  } = resolveIndexRunLimits(input);
   const workerPool = parseWorkers > 0 ? new ExtractionWorkerPool(parseWorkers, parseJobTimeoutMs) : null;
 
   // When the caller passes a progress controller it keeps ownership (stops it after
@@ -85,69 +106,13 @@ export async function runIndexPipeline(store: GraphStore, input: RunIndexInput):
   const ownsProgress = !input.progress;
   const progress = input.progress ?? createIndexProgress(input.repoId);
   progress.phase("scanning");
-  indexLog(`[index-start] repoId=${input.repoId} mode=${input.mode} scanning files...`);
 
-  const globbed = await glob("**/*", {
-    cwd: input.repoPath,
-    nodir: true,
-    absolute: true,
-    windowsPathsNoEscape: true,
-    ignore: INDEX_IGNORE_GLOBS
-  });
+  const { files, knownPackageNames } = await scanRepoFiles(input, maxFiles, includeDocs);
 
-  // Dirty mode (ENH-A): restrict the scan to an explicit set of repo-relative POSIX
-  // paths (the git working-tree delta). When set, pruning is suppressed below so the
-  // restricted set is never mistaken for "all files on disk".
-  const files = input.onlyRelativePaths
-    ? globbed.filter((abs) =>
-        input.onlyRelativePaths!.has(path.relative(input.repoPath, abs).replace(/\\/g, "/"))
-      )
-    : globbed;
-
-  indexLog(`[index-scan-complete] found ${String(files.length)} files${input.onlyRelativePaths ? ` (restricted from ${String(globbed.length)} by dirty file set)` : ""}, will process up to ${String(maxFiles)}`);
-
-  // Pre-scan: collect all PackageReference names from .csproj files so C# extractors
-  // can widen namespace→nuget contract mapping beyond the hardcoded set. (ISSUE-006)
-  const knownPackageNames = new Set<string>();
-  const csprojFiles = files.filter((f) => f.endsWith(".csproj"));
-  if (csprojFiles.length > 0) {
-    const pkgRefRe = /<PackageReference\s+Include="([^"]+)"/gi;
-    for (const csprojPath of csprojFiles) {
-      try {
-        const src = await readFile(csprojPath, "utf8");
-        let m: RegExpExecArray | null;
-        pkgRefRe.lastIndex = 0;
-        while ((m = pkgRefRe.exec(src)) !== null) {
-          if (m[1]) knownPackageNames.add(m[1].trim());
-        }
-      } catch {
-        // Non-critical — skip unreadable csproj
-      }
-    }
-    if (knownPackageNames.size > 0) {
-      indexLog(`[index-nuget-bridge] collected ${String(knownPackageNames.size)} package names from ${String(csprojFiles.length)} .csproj files`);
-    }
-  }
-
-  if (includeDocs) {
-    // Count markdown files for user feedback
-    const markdownFiles = files.filter((f) => f.endsWith(".md") || f.endsWith(".mdx"));
-    if (markdownFiles.length > 0) {
-      indexLog(`[index-scan] found ${String(markdownFiles.length)} markdown files for doc indexing`);
-    }
-  } else {
-    indexLog("[index-scan] docs lane disabled for this run (markdown/docs indexing skipped)");
-  }
-
-  let filesScanned = 0;
-  let filesIndexed = 0;
-  let filesSkipped = 0;
-  let symbolsUpserted = 0;
-  let edgesUpserted = 0;
-  let docsUpserted = 0;
-  let mentionsUpserted = 0;
-  let parseFailures = 0;
-  let parseTimeouts = 0;
+  const c: RunCounters = {
+    filesScanned: 0, filesIndexed: 0, filesSkipped: 0, symbolsUpserted: 0, edgesUpserted: 0,
+    docsUpserted: 0, mentionsUpserted: 0, parseFailures: 0, parseTimeouts: 0
+  };
   const languageStats = new Map<string, { scanned: number; indexed: number }>();
 
   const selectedFiles = files.slice(0, maxFiles);
@@ -219,14 +184,14 @@ export async function runIndexPipeline(store: GraphStore, input: RunIndexInput):
           extracted
         });
 
-        filesIndexed += 1;
-        symbolsUpserted += extracted.symbols.length;
-        edgesUpserted += extracted.edges.length;
+        c.filesIndexed += 1;
+        c.symbolsUpserted += extracted.symbols.length;
+        c.edgesUpserted += extracted.edges.length;
         if (includeDocs && extracted.docs) {
-          docsUpserted += extracted.docs.length;
+          c.docsUpserted += extracted.docs.length;
         }
         if (includeDocs && extracted.mentions) {
-          mentionsUpserted += extracted.mentions.length;
+          c.mentionsUpserted += extracted.mentions.length;
         }
 
         const langStats = languageStats.get(language);
@@ -285,10 +250,10 @@ export async function runIndexPipeline(store: GraphStore, input: RunIndexInput):
           break;
         }
 
-        filesScanned += 1;
+        c.filesScanned += 1;
 
         if (result.status === "rejected") {
-          parseFailures += 1;
+          c.parseFailures += 1;
           continue;
         }
 
@@ -297,12 +262,12 @@ export async function runIndexPipeline(store: GraphStore, input: RunIndexInput):
         try {
           const language = decision.language;
           if (!decision.include || !language) {
-            filesSkipped += 1;
+            c.filesSkipped += 1;
             continue;
           }
 
           if (!includeDocs && language === "markdown") {
-            filesSkipped += 1;
+            c.filesSkipped += 1;
             continue;
           }
 
@@ -321,7 +286,7 @@ export async function runIndexPipeline(store: GraphStore, input: RunIndexInput):
           if (input.mode === "incremental") {
             const previousHash = store.getFileHash(input.repoId, relativePath);
             if (previousHash === contentHash) {
-              filesSkipped += 1;
+              c.filesSkipped += 1;
               continue;
             }
           }
@@ -373,19 +338,19 @@ export async function runIndexPipeline(store: GraphStore, input: RunIndexInput):
           pushPendingWrite(relativePath, language, contentHash, extracted);
         } catch (err) {
           if (isParseTimeoutError(err)) {
-            parseTimeouts += 1;
+            c.parseTimeouts += 1;
             indexLog(`[index-parse-timeout] ${relativePath}: ${err.message}`);
             continue;
           }
 
-          parseFailures += 1;
+          c.parseFailures += 1;
           // A dropped file means missing symbols/edges in the graph — surface it
           // even in the default quiet mode, unlike routine narration.
           indexWarn(`[index-parse-failure] ${relativePath}: ${err instanceof Error ? err.message : String(err)}`);
         }
 
         // Emit progress every 10 files for smoother updates
-        if (filesScanned % 10 === 0) {
+        if (c.filesScanned % 10 === 0) {
           emitProgress("running");
           syncProgressBar();
         }
@@ -408,7 +373,7 @@ export async function runIndexPipeline(store: GraphStore, input: RunIndexInput):
           }
 
           if (largeResult.result.status === "timeout") {
-            parseTimeouts += 1;
+            c.parseTimeouts += 1;
             if (largeResult.result.reason === "job-timeout") {
               indexLog(`[index-parse-timeout] ${largeResult.relativePath}: worker job timed out after ${String(parseJobTimeoutMs)}ms`);
             } else {
@@ -417,7 +382,7 @@ export async function runIndexPipeline(store: GraphStore, input: RunIndexInput):
             continue;
           }
 
-          parseFailures += 1;
+          c.parseFailures += 1;
           indexWarn(`[index-parse-failure] ${largeResult.relativePath}: ${largeResult.result.error}`);
         }
       }
@@ -463,7 +428,7 @@ export async function runIndexPipeline(store: GraphStore, input: RunIndexInput):
       }
 
       indexLog(
-        `[index-write] batch=${String(batchNum)}/${String(totalBatches)} files=${String(pendingWrites.length)} subtx=${String(subtxCount)} extractMs=${String(extractMs)} writeMs=${String(writeMs)} checkpointMs=${String(checkpointMs)} symbols=${String(symbolsUpserted)} edges=${String(edgesUpserted)}`
+        `[index-write] batch=${String(batchNum)}/${String(totalBatches)} files=${String(pendingWrites.length)} subtx=${String(subtxCount)} extractMs=${String(extractMs)} writeMs=${String(writeMs)} checkpointMs=${String(checkpointMs)} symbols=${String(c.symbolsUpserted)} edges=${String(c.edgesUpserted)}`
       );
       emitProgress("running");
       syncProgressBar();
@@ -475,98 +440,27 @@ export async function runIndexPipeline(store: GraphStore, input: RunIndexInput):
       }
     }
 
-    // Prune stale files (both full and incremental) only when the glob returned every file on disk.
-    // A capped scan (files.length > maxFiles) cannot safely prune: the missing tail would look
-    // like deletions. resolveImplementsEdges is also skipped in that case to avoid resolving
-    // placeholder edges against stale symbols that prune would have removed.
-    // Dirty mode (ENH-A) restricts `files` to a subset of disk, so it is NEVER a complete
-    // scan — pruning would delete every file not in the dirty set. Force-suppress here.
-    const scanWasComplete = files.length <= maxFiles && !input.onlyRelativePaths;
-    if (!input.abortSignal?.aborted) {
-      progress.phase("pruning");
-      if (scanWasComplete) {
-        const currentPaths = selectedFiles.map((f) => path.relative(input.repoPath, f));
-        const pruned = store.pruneStaleFiles(input.repoId, currentPaths);
-        if (pruned > 0) {
-          indexLog(`[index-prune] removed ${String(pruned)} stale file(s) from index`);
-        }
-        const prunedEdges = store.pruneOrphanedEdges(input.repoId);
-        if (prunedEdges > 0) {
-          indexLog(`[index-prune] removed ${String(prunedEdges)} orphaned edge(s) from index`);
-        }
-      } else if (input.onlyRelativePaths) {
-        indexLog(`[index-prune-skipped] dirty mode re-indexed ${String(files.length)} changed file(s) — pruning and IMPLEMENTS resolution skipped (subset scan)`);
-      } else {
-        indexLog(`[index-prune-skipped] repo has ${String(files.length)} files, exceeds cap of ${String(maxFiles)} — stale-file cleanup and IMPLEMENTS resolution skipped to avoid false deletions`);
-      }
-      // Resolve iface: placeholders → real symbolIds after all C# files have been indexed.
-      // Skipped when scan was capped: prune didn't run so stale symbols may still be present,
-      // and resolving against them would create dangling IMPLEMENTS edges.
-      if (input.mode === "full" && scanWasComplete) {
-        const resolvedImpl = store.resolveImplementsEdges(input.repoId);
-        if (resolvedImpl > 0) {
-          indexLog(`[index-resolve] resolved ${String(resolvedImpl)} IMPLEMENTS edge(s)`);
-        }
-        // ISSUE-020: match message-bus PUBLISHES/CONSUMES contract tokens producer→consumer.
-        const resolvedBus = store.resolvePublishesConsumesEdges(input.repoId);
-        if (resolvedBus > 0) {
-          indexLog(`[index-resolve] resolved ${String(resolvedBus)} PUBLISHES bus edge(s)`);
-        }
-      }
-    }
-
-    // Post-index: rebuild vector index (async step, does not block pipeline result)
-    let vectorSymbolsIndexed = 0;
-    if (store.isVectorEnabled) {
-      const vecStart = Date.now();
-      progress.phase("vector index");
-      indexLog("[index-vector] rebuilding vector index...");
-      try {
-        vectorSymbolsIndexed = store.rebuildVectorIndex(input.repoId);
-        const vecMs = Date.now() - vecStart;
-        indexLog(`[index-vector] indexed ${String(vectorSymbolsIndexed)} symbols in ${String(vecMs)}ms`);
-      } catch (vecErr) {
-        indexWarn(`[index-vector] rebuild failed (non-fatal): ${vecErr instanceof Error ? vecErr.message : String(vecErr)}`);
-      }
-    }
+    pruneAndResolve(store, input, progress, files, selectedFiles, maxFiles);
+    const vectorSymbolsIndexed = rebuildVectorIndex(store, input.repoId, progress);
 
     const finishedAt = new Date().toISOString();
     const elapsedMs = Date.now() - started;
     const wasCancelled = input.abortSignal?.aborted ?? false;
 
-    const summary: IndexRunSummary = {
-      runId,
-      repoId: input.repoId,
-      commitSha,
-      branch,
-      indexVersion,
-      mode: input.mode,
-      status: wasCancelled ? "cancelled" : "ok",
-      startedAt,
-      finishedAt,
-      filesScanned,
-      filesIndexed,
-      filesSkipped,
-      symbolsUpserted,
-      edgesUpserted,
-      docsUpserted,
-      mentionsUpserted,
-      parseFailures,
-      parseTimeouts,
-      elapsedMs,
-      vectorSymbolsIndexed,
-    };
+    const summary = buildRunSummary(
+      identity, c, wasCancelled ? "cancelled" : "ok", finishedAt, elapsedMs, vectorSymbolsIndexed
+    );
 
     // Note: recordRun is called by the caller (index.ts) after computing resolution metrics
     emitProgress(wasCancelled ? "cancelled" : "ok", finishedAt);
     syncProgressBar();
     const elapsedSec = (Date.now() - started) / 1000;
-    const doneLine = `[index-done] status=${wasCancelled ? "cancelled" : "ok"} indexed=${String(filesIndexed)} skipped=${String(filesSkipped)} failures=${String(parseFailures)} timeouts=${String(parseTimeouts)} symbols=${String(symbolsUpserted)} elapsed=${elapsedSec.toFixed(1)}s`;
+    const doneLine = `[index-done] status=${wasCancelled ? "cancelled" : "ok"} indexed=${String(c.filesIndexed)} skipped=${String(c.filesSkipped)} failures=${String(c.parseFailures)} timeouts=${String(c.parseTimeouts)} symbols=${String(c.symbolsUpserted)} elapsed=${elapsedSec.toFixed(1)}s`;
     indexLog(doneLine);
     if (ownsProgress) {
       // No caller post-phase — finish the reporter with a concise summary here.
       const mark = wasCancelled ? "⚠" : "✓";
-      progress.stop(`${mark} index ${input.repoId} · ${wasCancelled ? "cancelled" : "done"} · ${String(filesIndexed)} files · ${String(symbolsUpserted)} symbols · ${elapsedSec.toFixed(1)}s`);
+      progress.stop(`${mark} index ${input.repoId} · ${wasCancelled ? "cancelled" : "done"} · ${String(c.filesIndexed)} files · ${String(c.symbolsUpserted)} symbols · ${elapsedSec.toFixed(1)}s`);
     } else {
       // Caller continues into its edge-resolution post-phase; keep reporting.
       progress.phase("resolving edges");
@@ -577,33 +471,15 @@ export async function runIndexPipeline(store: GraphStore, input: RunIndexInput):
     const elapsedMs = Date.now() - started;
     const isCancelled = error instanceof Error && error.message === "INDEX_CANCELLED";
 
-    const summary: IndexRunSummary = {
-      runId,
-      repoId: input.repoId,
-      commitSha,
-      branch,
-      indexVersion,
-      mode: input.mode,
-      status: isCancelled ? "cancelled" : "failed",
-      startedAt,
-      finishedAt,
-      filesScanned,
-      filesIndexed,
-      filesSkipped,
-      symbolsUpserted,
-      edgesUpserted,
-      docsUpserted,
-      mentionsUpserted,
-      parseFailures,
-      parseTimeouts,
-      elapsedMs
-    };
+    const summary = buildRunSummary(
+      identity, c, isCancelled ? "cancelled" : "failed", finishedAt, elapsedMs
+    );
 
     store.recordRun(summary);
     emitProgress(isCancelled ? "cancelled" : "failed", finishedAt, error instanceof Error ? error.message : "Unknown index failure");
     // The run ended here (post-phase will not run), so always finish reporting.
     if (isCancelled) {
-      progress.stop(`⚠ index ${input.repoId} · cancelled · ${String(filesIndexed)} files · ${String(symbolsUpserted)} symbols`);
+      progress.stop(`⚠ index ${input.repoId} · cancelled · ${String(c.filesIndexed)} files · ${String(c.symbolsUpserted)} symbols`);
     } else {
       const msg = error instanceof Error ? error.message : "Unknown index failure";
       progress.stop(`✗ index ${input.repoId} · failed · ${msg}`);
@@ -629,9 +505,9 @@ export async function runIndexPipeline(store: GraphStore, input: RunIndexInput):
     
     // Calculate ETA
     let etaSeconds: number | undefined;
-    if (status === "running" && filesScanned > 0 && totalFiles > filesScanned) {
-      const filesPerSecond = filesScanned / elapsedSeconds;
-      const remainingFiles = totalFiles - filesScanned;
+    if (status === "running" && c.filesScanned > 0 && totalFiles > c.filesScanned) {
+      const filesPerSecond = c.filesScanned / elapsedSeconds;
+      const remainingFiles = totalFiles - c.filesScanned;
       etaSeconds = Math.round(remainingFiles / filesPerSecond);
     }
 
@@ -649,13 +525,13 @@ export async function runIndexPipeline(store: GraphStore, input: RunIndexInput):
       startedAt,
       finishedAt: finishedAtArg,
       totalFiles,
-      filesScanned,
-      filesIndexed,
-      filesSkipped,
-      symbolsUpserted,
-      edgesUpserted,
-      parseFailures,
-      parseTimeouts,
+      filesScanned: c.filesScanned,
+      filesIndexed: c.filesIndexed,
+      filesSkipped: c.filesSkipped,
+      symbolsUpserted: c.symbolsUpserted,
+      edgesUpserted: c.edgesUpserted,
+      parseFailures: c.parseFailures,
+      parseTimeouts: c.parseTimeouts,
       batchSize,
       completedBatches,
       totalBatches,
@@ -670,9 +546,9 @@ export async function runIndexPipeline(store: GraphStore, input: RunIndexInput):
   // downstream, so it is safe to call every batch / every 10 files.
   function syncProgressBar(): void {
     progress.update({
-      filesScanned,
+      filesScanned: c.filesScanned,
       totalFiles,
-      symbols: symbolsUpserted,
+      symbols: c.symbolsUpserted,
     });
   }
 }

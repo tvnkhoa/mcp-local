@@ -9,6 +9,49 @@ Workaround · Enhancement proposal. Filed here so the MCP server team can triage
 
 ---
 
+## MCP-ISSUE-032 — an index run is not reproducible: edge counts vary between identical runs
+
+- **Status:** open. Found 2026-07-29 while validating the S-41 `indexPipeline` split; pre-existing
+  and unrelated to that change.
+- **Scenario:** index the same repository twice, same build, same input, nothing changed on disk.
+- **Evidence:** on `wec.communication-hub` (521 files), two runs of the **same** build:
+
+  | | run 1 | run 2 | delta |
+  |---|---|---|---|
+  | symbols | 4457 | 4457 | 0 |
+  | CALLS / IMPORTS / PROPERTY_WRITE / DEPENDS_ON / PUBLISHES | — | — | 0 |
+  | PROPERTY_REF | 10895 | 11397 | **+502** |
+  | IMPLEMENTS | 308 | 300 | −8 |
+  | CONSUMES | 58 | 60 | +2 |
+  | TYPE_REF | 154 | 156 | +2 |
+
+  Total `edgesUpserted` moved 34921 → 35419 (1.4%). Reproduced with `parseWorkers: 2` **and**
+  `parseWorkers: 0`, so it is not worker-lane concurrency.
+- **Root cause (confirmed for the first half):** `glob("**/*")` in the scan phase returns the same
+  1422 paths in a **different order** on each call — verified directly over three consecutive
+  calls, first divergence at index 11. Nothing sorts the result before it becomes the processing
+  order.
+- **Root cause (hypothesis for the second half, NOT verified):** the edge types that move are the
+  ones needing a type resolved from elsewhere in the repo, while the per-file, order-independent
+  ones (symbols, CALLS, IMPORTS, PROPERTY_WRITE) are stable. That is consistent with C# type/DI
+  resolution seeing a different set of already-indexed files depending on order. Confirming this
+  needs a run where the file order is fixed and only that varies — not yet done.
+- **Impact:** `health_check` edge counts differ between identical runs, so a change in them is not
+  evidence of a change in the code. Any test asserting an exact edge total on a C# repo is
+  latently flaky. It also means a before/after edge count cannot validate a refactor — which is how
+  this was found: the first comparison appeared to show a 237-edge regression that turned out to be
+  noise, and only a same-build control run distinguished the two.
+- **Workaround:** compare symbol counts, not edge counts. For edges, run the same build twice to
+  establish the noise band before reading any delta as signal.
+- **Enhancement proposal:** sort the glob result in `indexing/fileScan.ts` (`scanRepoFiles`) so
+  processing order is deterministic. One line, and it makes runs comparable. Deliberately NOT done
+  as part of S-41: it changes the edge counts a run produces, which is tool output, and it should
+  land as its own change with the second root cause confirmed first — sorting may make runs
+  reproducible without making them *correct*, since whichever order is fixed still decides which
+  cross-file references resolve.
+
+---
+
 ## MCP-ISSUE-031 — `dead_code_scan` suppresses every method in an `i`-prefixed C# file
 
 - **Status:** open. Found 2026-07-29 while splitting `staticAnalyzer.ts` (S-41); the defect itself
