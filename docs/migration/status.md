@@ -70,7 +70,7 @@ that the plan folded into S-31. **This document's numbering is authoritative.**
 > `@modelcontextprotocol/sdk` installs are the accepted cost recorded in ADR 0001, and
 > they are why `instanceof` cannot be used across the package boundary.
 
-## Phase D — Guard Rails · 3/3 ✅ (warn mode, as planned)
+## Phase D — Guard Rails · 3/3 ✅ (built in warn mode; enforcing since S-41)
 
 | Step | Status | Evidence |
 |---|---|---|
@@ -78,7 +78,9 @@ that the plan folded into S-31. **This document's numbering is authoritative.**
 | S-12 Dependency-rule guard | ✅ | same |
 | S-13 Contract guard + platform no-LLM guard | ✅ | same; `guard:no-llm-runtime` also runs per-server |
 
-Current output: **0 errors, 34 warnings, 1 accepted exemption across 384 files.** Warn mode is
+Output when Phase D landed: **0 errors, 34 warnings, 1 accepted exemption across 384 files.**
+Now **0 errors, 17 warnings, 1 accepted exemption across 482 files** — all 17 are `size/soft-cap`,
+which stays advisory by decision. Warn mode was
 correct until S-41 — flipping then would have turned 34 warnings into 34 build failures. S-41 part 1 drove them to zero, and the rule is now an error.
 
 ## Phase E — Shared Core Extraction · 7/7 ✅
