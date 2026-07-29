@@ -316,6 +316,11 @@ export function resolveCallEdges(db: Database.Database, repoId: string, maxUnres
     from edges e
     inner join symbols s on s.repo_id = e.repo_id and s.symbol_id = e.from_id
     where e.repo_id = ? and e.type = 'CALLS' and e.to_id like 'callee:%'
+    -- ORDER BY is load-bearing, not cosmetic: with a LIMIT and no ordering, SQLite may return any
+    -- N of the qualifying rows, so resolution ran over an arbitrary sample and two identical runs
+    -- resolved different edges. The key must fully disambiguate, or the sort is arbitrary again.
+    -- MCP-ISSUE-032.
+    order by e.from_id, e.to_id, s.file_path
     ${maxUnresolvedRows > 0 ? "limit ?" : ""}
   `;
   const unresolved = db

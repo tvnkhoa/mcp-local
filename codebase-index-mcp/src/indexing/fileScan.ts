@@ -47,13 +47,28 @@ export async function scanRepoFiles(
 ): Promise<FileScanResult> {
   indexLog(`[index-start] repoId=${input.repoId} mode=${input.mode} scanning files...`);
 
-  const globbed = await glob("**/*", {
-    cwd: input.repoPath,
-    nodir: true,
-    absolute: true,
-    windowsPathsNoEscape: true,
-    ignore: INDEX_IGNORE_GLOBS
-  });
+  const globbed = (
+    await glob("**/*", {
+      cwd: input.repoPath,
+      nodir: true,
+      absolute: true,
+      windowsPathsNoEscape: true,
+      ignore: INDEX_IGNORE_GLOBS
+    })
+  ).sort();
+  // `glob` returns directory-order results, which differ between calls on the same unchanged tree —
+  // verified over three consecutive calls, first divergence at index 11. Processing order then
+  // decided which cross-file C# type references were already resolvable, so two identical runs
+  // produced edge counts differing by ~1.4% (PROPERTY_REF moved by 502). That made a before/after
+  // edge count useless as evidence, which is how MCP-ISSUE-032 was found.
+  //
+  // Plain `.sort()`, deliberately not `localeCompare`: the default UTF-16 code-unit order is
+  // identical on every platform and locale, which is the property being bought here. A
+  // locale-sensitive comparison would reintroduce the same class of bug across machines.
+  //
+  // This makes runs reproducible. It does NOT make resolution order-independent — see
+  // MCP-ISSUE-033, which records the measurement showing that a different fixed order still yields
+  // different edge counts.
 
   // Dirty mode (ENH-A): restrict the scan to an explicit set of repo-relative POSIX
   // paths (the git working-tree delta). When set, pruning is suppressed by the caller so the

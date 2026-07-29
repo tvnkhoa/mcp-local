@@ -11,8 +11,9 @@ Workaround · Enhancement proposal. Filed here so the MCP server team can triage
 
 ## MCP-ISSUE-032 — an index run is not reproducible: edge counts vary between identical runs
 
-- **Status:** open. Found 2026-07-29 while validating the S-41 `indexPipeline` split; pre-existing
-  and unrelated to that change.
+- **Status:** open — **root cause relocated 2026-07-29**, see the update below. Two contributing
+  bugs fixed; the main one is narrowed to the extraction phase and not yet fixed. Found while
+  validating the S-41 `indexPipeline` split; pre-existing and unrelated to that change.
 - **Scenario:** index the same repository twice, same build, same input, nothing changed on disk.
 - **Evidence:** on `wec.communication-hub` (521 files), two runs of the **same** build:
 
@@ -43,19 +44,68 @@ Workaround · Enhancement proposal. Filed here so the MCP server team can triage
   noise, and only a same-build control run distinguished the two.
 - **Workaround:** compare symbol counts, not edge counts. For edges, run the same build twice to
   establish the noise band before reading any delta as signal.
-- **Enhancement proposal:** sort the glob result in `indexing/fileScan.ts` (`scanRepoFiles`) so
-  processing order is deterministic. One line, and it makes runs comparable. Deliberately NOT done
-  as part of S-41: it changes the edge counts a run produces, which is tool output, and it should
-  land as its own change with the second root cause confirmed first — sorting may make runs
-  reproducible without making them *correct*, since whichever order is fixed still decides which
-  cross-file references resolve.
+- **Update 2026-07-29 — the proposed fix was attempted and is NOT sufficient. Root cause relocated.**
+
+  The sort landed (`indexing/fileScan.ts` now `.sort()`s the glob, plain UTF-16 order rather than
+  `localeCompare`, so it is platform- and locale-stable). It did **not** make runs reproducible.
+  Nine runs on `wec.communication-hub` (475 files), same build:
+
+  | | sorted ×2 | workers off ×2 | + ORDER BY ×3 |
+  |---|---|---|---|
+  | symbolsUpserted | 4411 / 4411 | 4411 / 4411 | 4411 / 4411 / 4411 |
+  | edgesUpserted | 35167 / 35566 | 35379 / 35579 | 35552 / 35765 / 35586 |
+
+  Three things are now ruled out, each by measurement rather than reasoning:
+
+  1. **Glob order** — sorted runs still vary.
+  2. **Worker concurrency** — `CODEBASE_INDEX_PARSE_WORKERS=0` genuinely disables the pool
+     (`parseWorkers > 0 ? new ExtractionWorkerPool(...) : null`), and single-threaded runs still vary.
+  3. **Unordered `LIMIT` in the resolvers** — six queries in `src/graph/` had a `LIMIT` with no
+     `ORDER BY`, so they sampled unresolved rows arbitrarily. Real latent bug, **fixed** (see below),
+     but not this one: variance survives the fix.
+
+- **Root cause (relocated, confirmed):** the divergence happens in the **extraction/write phase**, not
+  in resolution. Verbose logs from two runs, normalized for timing, differ at the same batch:
+
+  ```
+  [index-write] batch=5/8 files=176 subtx=9 symbols=1316 edges=6377   <- run 1
+  [index-write] batch=5/8 files=176 subtx=9 symbols=1316 edges=6480   <- run 2
+  ```
+
+  Identical batch composition, identical symbol count, **103 more edges**. Since the scan is now
+  sorted and the read loop preserves order (`Promise.allSettled` over fixed chunks, results pushed in
+  input order), the file processing order is deterministic — so the nondeterminism is *inside*
+  extracting one file's edges. The most likely remaining mechanism is an extraction-time DB lookup
+  that resolves a type/member name with a `LIMIT` and no `ORDER BY`, returning an arbitrary candidate:
+  there are ~175 such candidate sites across `src/store/` and `src/search/`. **Not yet confirmed to
+  that line**, and auditing 175 queries is its own change — adding `ORDER BY` blindly would broaden
+  tool-output changes and risk sort costs on the hot path.
+
+- **Why the edge-type split now makes sense:** the stable types (`PROPERTY_WRITE`, `IMPORTS`,
+  `DEPENDS_ON`) are derived purely from the one file being parsed. The varying ones (`CALLS`,
+  `PROPERTY_REF`, `TYPE_REF`, `IMPLEMENTS`, `CONSUMES`, `PUBLISHES`) all need a name resolved against
+  symbols from elsewhere. The original note guessed this was *post-hoc* cross-file resolution; the
+  logs show it happens during extraction.
+
+- **What landed:**
+  - `indexing/fileScan.ts` — glob result sorted. Independently worth keeping: when `maxFiles`
+    truncates a scan, *which* files get indexed was previously arbitrary.
+  - Six `ORDER BY` clauses in `src/graph/` — `edgeResolverCalls.ts`, `edgeResolverImports.ts`,
+    `edgeResolverRefs.ts` (×2), `edgeResolverShared.ts` (the hard-coded `limit 5000`), and
+    `interfaceSiblings.ts` (before `IMPLEMENTOR_CAP`, so which implementors survive the cap is no
+    longer arbitrary).
+  - 30/30 harnesses pass; `contracts:check` 4/4 — no schema change.
+
+- **Status:** still **open**, with the root cause corrected and narrowed to extraction. The workaround
+  is unchanged and still necessary: compare symbol counts, not edge counts; for edges, run the same
+  build twice to establish the noise band before reading any delta as signal.
 
 ---
 
 ## MCP-ISSUE-031 — `dead_code_scan` suppresses every method in an `i`-prefixed C# file
 
-- **Status:** open. Found 2026-07-29 while splitting `staticAnalyzer.ts` (S-41); the defect itself
-  predates the split and is unchanged by it.
+- **Status:** **fixed** 2026-07-29 (`src/analysis/staticAnalyzerDeadCodeCSharp.ts`). Found the same
+  day while splitting `staticAnalyzer.ts` (S-41); the defect predated the split.
 - **Scenario:** `dead_code_scan` on a .NET repo. Any method declared in a file whose name begins
   with `I` followed by a letter — `ItemService.cs`, `IndexController.cs`, `InvoiceRepository.cs` —
   is dropped from the candidate list under `suppressed.reasons.heuristic_contract_declaration`.
@@ -75,13 +125,35 @@ Workaround · Enhancement proposal. Filed here so the MCP server team can triage
   No effect on non-C# rows, which exit the function before this check.
 - **Workaround:** none from the tool side. Cross-check an `I`-initial file by hand
   (`find_impact_files` view `"surface"` on it) before trusting a clean scan.
-- **Enhancement proposal:** test the filename with its original casing — keep `normalizedPath` for
-  the `/interfaces/`-style path checks, and match the interface convention against a
-  non-lowercased basename as `/^I[A-Z]/`. That is a visible change to tool output (more candidates
-  reported), so it needs its own step rather than riding along with a file split.
-- **Covered by:** `src/analysis/staticAnalyzerDeadCodeCSharp.test.ts`, test
-  `"KNOWN DEFECT (MCP-ISSUE-031)"` — pins the current behaviour, and names which of its two
-  assertions must flip when the fix lands.
+- **Fix:** the filename test now reads the basename from the **original** path and matches
+  `/^I[A-Z]/` (plus a case-insensitive `.cs$`). The three sibling checks stay on `normalizedPath`
+  because they are path-based and case-insensitive by intent — a repo naming the folder `Interfaces/`
+  or `INTERFACES/` must still match, and a test pins that. `fileName` (lowercased) is retained
+  alongside the new `originalFileName`, since the later `/abstractions?\.cs$/` check genuinely wants
+  the case-folded form; removing it broke three unrelated tests before typecheck caught the
+  undefined reference.
+- **Measured on the repo the issue named** (`wec.communication-hub`, 2021 C# methods), running both
+  predicates over the real indexed symbols:
+
+  | | old rule | new rule |
+  |---|---|---|
+  | methods suppressed by the filename test | 124 | 46 |
+
+  78 methods across 9 files are no longer hidden — `InboundMessageMetadataMapper.cs`,
+  `InboxCardProjectionService.cs`, `IdentityService.cs`, `Inbox.cs`,
+  `IdentityAuthorizationClient.cs` and four more. 27 genuine interface files
+  (`IApplicationDbContext.cs`, `IBackgroundTaskQueue.cs`, …) are still suppressed, and **nothing
+  became newly suppressed**. That second half matters: a fix that merely stopped suppressing
+  everything would have shown the same headline delta.
+- **Contract impact:** none. `tools/list` is unchanged (`contracts:check` 4/4); this is a behaviour
+  change only — `dead_code_scan` now reports more candidates on .NET repos, which is the point.
+- **Covered by:** `src/analysis/staticAnalyzerDeadCodeCSharp.test.ts`, tests
+  `"MCP-ISSUE-031 fixed: only a capital-I-capital filename reads as an interface file"` and
+  `"MCP-ISSUE-031: the path-based interface checks stay case-insensitive"`.
+- **Noticed, not fixed:** 42 of the 78 freed methods are in test files
+  (`InboundMessageConsumerIntegrationTests.cs`, `InboxCardProjectionServiceConcurrencyTests.cs`).
+  `dead_code_scan` has no `excludeTests` option the way `search_symbols` does, so test methods
+  compete with production candidates in the output. Separate concern, separate change.
 
 ---
 

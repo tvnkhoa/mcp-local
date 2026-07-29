@@ -83,6 +83,9 @@ export function expandInterfaceSiblingsImpl(
            inner join symbols s on s.repo_id = e.repo_id and s.symbol_id = e.from_id
            where e.repo_id = ? and e.type = 'IMPLEMENTS' and (e.to_id = ? or e.to_id = ?)
              and s.kind in ('class', 'struct', 'record', 'record struct')
+           -- Ordered before the cap: which implementors survive IMPLEMENTOR_CAP decided which
+           -- sibling edges got created, and that was an arbitrary choice. MCP-ISSUE-032.
+           order by s.symbol_id, s.file_path
            limit ?`
         )
         .all(repoId, parent.symbolId, `iface:${parent.name}`, IMPLEMENTOR_CAP) as { symbolId: string; filePath: string }[];

@@ -78,24 +78,51 @@ test("the three reason keys are exactly the ones the tool reports", () => {
   );
 });
 
-test("KNOWN DEFECT (MCP-ISSUE-031): any i-prefixed filename reads as an interface file", () => {
-  // `getCSharpSuppressionReason` lowercases the path before taking the filename, then tests
-  // /^i[a-z].*\.cs$/ to spot an interface declaration. The intent is `IThing.cs`, but the casing is
-  // already gone by then, so `ItemEndpoints.cs`, `IndexService.cs` and `InvoiceRepository.cs` all
-  // match — every method in them is suppressed as a contract declaration, and `dead_code_scan`
-  // under-reports on .NET repos.
+test("MCP-ISSUE-031 fixed: only a capital-I-capital filename reads as an interface file", () => {
+  // The defect: the path was lowercased before the filename was taken, and the interface test was
+  // then /^i[a-z].*\.cs$/ — so any `i`-initial filename matched and every method in it was
+  // suppressed. Because suppression *excludes* a symbol, the scan under-reported while looking
+  // clean. Fixed by testing the original casing as /^I[A-Z]/.
   //
-  // Pinned as-is rather than fixed: S-41 is a file split, and tightening this would change tool
-  // output. The first assertion is the behaviour to change when MCP-ISSUE-031 is fixed; the second
-  // is the behaviour that must survive the fix.
-  assert.equal(
-    getCSharpSuppressionReason(row({ filePath: "src/App/Services/ItemService.cs" }), noContexts),
-    "heuristic_contract_declaration"
-  );
+  // These three used to be suppressed and must now be reported.
+  for (const file of ["ItemService.cs", "IndexController.cs", "InvoiceRepository.cs"]) {
+    assert.equal(
+      getCSharpSuppressionReason(row({ filePath: `src/App/Services/${file}` }), noContexts),
+      null,
+      `${file} is an implementation, not a contract`
+    );
+  }
+
+  // A genuine interface file must still be suppressed — the point of the check.
+  for (const file of ["IOrderService.cs", "IRepository.cs", "IUnitOfWork.cs"]) {
+    assert.equal(
+      getCSharpSuppressionReason(row({ filePath: `src/App/Abstractions2/${file}` }), noContexts),
+      "heuristic_contract_declaration",
+      `${file} follows the IThing convention`
+    );
+  }
+
+  // Unchanged by the fix, and the assertion the registry said must survive it.
   assert.equal(
     getCSharpSuppressionReason(row({ filePath: "src/App/Services/OrderService.cs" }), noContexts),
     null
   );
+
+  // A single capital `I` with nothing after it is not the convention.
+  assert.equal(getCSharpSuppressionReason(row({ filePath: "src/App/I.cs" }), noContexts), null);
+});
+
+test("MCP-ISSUE-031: the path-based interface checks stay case-insensitive", () => {
+  // Only the *filename* test became case-sensitive. The three directory checks read from the
+  // lowercased path on purpose, so a repo naming the folder `Interfaces/` or `INTERFACES/` behaves
+  // the same — this is what stops the fix from narrowing more than intended.
+  for (const dir of ["Interfaces", "INTERFACES", "interfaces", "Contracts", "Abstractions"]) {
+    assert.equal(
+      getCSharpSuppressionReason(row({ filePath: `src/App/${dir}/OrderService.cs` }), noContexts),
+      "heuristic_contract_declaration",
+      `${dir}/ should match regardless of case`
+    );
+  }
 });
 
 test("first match wins: an extension method in /interfaces/ is not a contract declaration", () => {

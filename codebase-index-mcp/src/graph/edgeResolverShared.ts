@@ -162,6 +162,9 @@ export function resolveUnlinkedEdges(db: Database.Database, repoId: string): Res
         and not exists (
           select 1 from symbols s where s.repo_id = ? and s.symbol_id = e.to_id
         )
+      -- See MCP-ISSUE-032: a LIMIT without ORDER BY samples arbitrarily, so which 5000 unlinked
+      -- edges get a bridge attempt varied between identical runs.
+      order by e.from_id, e.to_id, e.type
       limit 5000
       `
     )

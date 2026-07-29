@@ -234,13 +234,27 @@ export function getCSharpSuppressionReason(
     return "heuristic_runtime_or_convention_usage";
   }
 
+  // Casing is the whole discriminator here, and `normalizedPath` has already destroyed it — so the
+  // filename test reads from the original path. The C# convention is a capital `I` followed by
+  // another capital (`IOrderService.cs`); testing `/^i[a-z]/` against a lowercased name matched any
+  // `i`-initial file, so `ItemService.cs`, `IndexController.cs` and `InvoiceRepository.cs` had every
+  // method suppressed as a contract declaration. A suppressed symbol is *excluded* from the report,
+  // which made this a false negative: the scan looked clean while hiding candidates. MCP-ISSUE-031.
+  //
+  // The three sibling checks stay on `normalizedPath` — they are path-based and case-insensitive by
+  // intent, so a repo using `Interfaces/` or `INTERFACES/` still matches.
+  // Both spellings are needed, and which one each check wants is the substance of this defect:
+  // `fileName` (lowercased) for the case-insensitive suffix tests, `originalFileName` for the
+  // convention test that depends on capitalisation.
   const fileName = normalizedPath.split("/").pop() ?? "";
+  const originalFileName = row.filePath.replace(/\\/g, "/").split("/").pop() ?? "";
+  const isInterfaceFileName = /^I[A-Z]/.test(originalFileName) && /\.cs$/i.test(originalFileName);
   const isInterfaceContractMethod =
     row.kind === "method" && (
       normalizedPath.includes("/interfaces/") ||
       normalizedPath.includes("/contracts/") ||
       normalizedPath.includes("/abstractions/") ||
-      /^i[a-z].*\.cs$/.test(fileName)
+      isInterfaceFileName
     );
   if (isInterfaceContractMethod) {
     return "heuristic_contract_declaration";

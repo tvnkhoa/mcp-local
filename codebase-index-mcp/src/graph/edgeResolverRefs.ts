@@ -25,6 +25,11 @@ export function resolveTypeRefEdges(db: Database.Database, repoId: string, maxUn
     from edges e
     inner join symbols s on s.repo_id = e.repo_id and s.symbol_id = e.from_id
     where e.repo_id = ? and e.type = 'TYPE_REF' and e.to_id like 'type:%'
+    -- ORDER BY is load-bearing, not cosmetic: with a LIMIT and no ordering, SQLite may return any
+    -- N of the qualifying rows, so resolution ran over an arbitrary sample and two identical runs
+    -- resolved different edges. The key must fully disambiguate, or the sort is arbitrary again.
+    -- MCP-ISSUE-032.
+    order by e.from_id, e.to_id, s.file_path
     ${maxUnresolvedRows > 0 ? "limit ?" : ""}
   `;
   const unresolved = db
@@ -88,6 +93,11 @@ export function resolvePropertyEdges(db: Database.Database, repoId: string, maxU
     inner join symbols s on s.repo_id = e.repo_id and s.symbol_id = e.from_id
     where e.repo_id = ? and e.type in ('PROPERTY_REF', 'PROPERTY_WRITE') and e.to_id like 'property:%'
       and (e.reason is null or e.reason = 'unresolved property token')
+    -- ORDER BY is load-bearing, not cosmetic: with a LIMIT and no ordering, SQLite may return any
+    -- N of the qualifying rows, so resolution ran over an arbitrary sample and two identical runs
+    -- resolved different edges. The key must fully disambiguate, or the sort is arbitrary again.
+    -- MCP-ISSUE-032.
+    order by e.from_id, e.to_id, e.type, s.file_path
     ${maxUnresolvedRows > 0 ? "limit ?" : ""}
   `;
   const unresolved = db

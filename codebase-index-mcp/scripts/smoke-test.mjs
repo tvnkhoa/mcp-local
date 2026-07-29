@@ -25,13 +25,28 @@ async function main() {
   const repoPath = process.cwd();
   const repoId = "smoke-test-repo";
 
+  // Always a throwaway DB. This used to be `process.env.CODEBASE_INDEX_DB_PATH ?? makeTempDbPath()`,
+  // which reads as "allow an override" but in the one context that matters did the opposite: the
+  // installer runs this smoke test with the server's real configured env, so the ambient var was
+  // always set and every install wrote a `smoke-test-repo` row — pointing at the real
+  // codebase-index-mcp path — into the central index. Two repoIds for one directory, and a
+  // `list_repositories` that misleads whoever reads it next.
+  //
+  // Overriding is still possible, but only by naming this script's own variable, so inheriting a
+  // real path can no longer happen by accident.
+  const dbPath = process.env.CODEBASE_INDEX_SMOKE_DB_PATH ?? makeTempDbPath("cbi-smoke-");
+
   const transport = new StdioClientTransport({
     command: "node",
     args: ["dist/index.js"],
     env: {
       ...process.env,
-      CODEBASE_INDEX_ALLOWED_ROOTS: process.env.CODEBASE_INDEX_ALLOWED_ROOTS ?? repoPath,
-      CODEBASE_INDEX_DB_PATH: process.env.CODEBASE_INDEX_DB_PATH ?? makeTempDbPath("cbi-smoke-")
+      // repoPath is what this test indexes, so it must be on the allowlist even when the ambient
+      // config allows something else entirely.
+      CODEBASE_INDEX_ALLOWED_ROOTS: [process.env.CODEBASE_INDEX_ALLOWED_ROOTS, repoPath]
+        .filter(Boolean)
+        .join(","),
+      CODEBASE_INDEX_DB_PATH: dbPath
     },
     stderr: "pipe"
   });

@@ -47,8 +47,13 @@ async function main() {
     args: ["dist/index.js"],
     env: {
       ...process.env,
-      CODEBASE_INDEX_ALLOWED_ROOTS: process.env.CODEBASE_INDEX_ALLOWED_ROOTS ?? repoPath,
-      CODEBASE_INDEX_DB_PATH: process.env.CODEBASE_INDEX_DB_PATH ?? makeTempDbPath("cbi-bench-"),
+      CODEBASE_INDEX_ALLOWED_ROOTS: [process.env.CODEBASE_INDEX_ALLOWED_ROOTS, repoPath]
+        .filter(Boolean)
+        .join(","),
+      // Always a throwaway DB — same defect as the smoke test had: inheriting an ambient
+      // CODEBASE_INDEX_DB_PATH would write a `benchmark-repo` row into the real central index.
+      // Override by naming this script's own variable, never by inheritance.
+      CODEBASE_INDEX_DB_PATH: process.env.CODEBASE_INDEX_BENCH_DB_PATH ?? makeTempDbPath("cbi-bench-"),
       CODEBASE_INDEX_TELEMETRY_ENABLED: process.env.CODEBASE_INDEX_TELEMETRY_ENABLED ?? "true",
       CODEBASE_INDEX_TELEMETRY_SAMPLE_RATE: process.env.CODEBASE_INDEX_TELEMETRY_SAMPLE_RATE ?? "1"
     },
