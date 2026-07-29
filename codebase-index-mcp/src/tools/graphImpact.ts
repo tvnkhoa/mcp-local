@@ -27,7 +27,7 @@ import {
   handleGetDependencyGraph
 } from "../handlers/impactHandler.js";
 import { handleDetectChanges } from "../handlers/indexHandler.js";
-import { handleTraceExecutionFlow } from "../handlers/refactorHandler.js";
+import { handleTraceExecutionFlow } from "../handlers/traceHandler.js";
 import { handleGetSymbolContextPack } from "../handlers/searchHandler.js";
 import * as schemas from "../schemas/toolSchemas.js";
 
