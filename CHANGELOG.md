@@ -2,6 +2,81 @@
 
 All notable changes to this project will be documented in this file.
 
+> This file began as a `codebase-index-mcp` changelog and kept that scope after the workspace grew
+> to four servers: until 2026-07-29 it did not mention `postgres-mcp`, `observe-mcp` or
+> `bitbucket-mcp` **at all**. The three entries below are reconstructed from git history, with the
+> introducing commit named so each claim is checkable. They are backfill, not a record written at
+> the time.
+
+## [Unreleased] - 2026-07-29
+
+### 🧱 Architecture migration — Phases A–J (S-01…S-41)
+
+Restructured a four-server repository into a six-package platform plus four independent servers.
+41 reversible steps; full step-by-step record in `docs/migration/status.md`.
+
+- **`packages/` platform** — `@mcp/core` (tier 0, zero-dependency), `@mcp/sdk` (tier 1, the only
+  importer of `@modelcontextprotocol/sdk`), `@mcp/shared` (tier 2), `@mcp/testing` (tier 3),
+  `@mcp/cli` (tier 4, the guards), `@mcp/manifest` (tier 5, workspace tooling data).
+  - Servers stay **outside** the npm workspace on purpose — `docs/adr/0001-workspace-native-deps.md`.
+- **All four servers migrated onto `@mcp/sdk`** — `bitbucket-mcp` first as the pilot (S-06…S-23),
+  then `postgres-mcp` (S-24), `observe-mcp` (S-25), and `codebase-index-mcp` across four batches
+  (S-26…S-33). Notes per server in `docs/migration/s06-s23-notes.md`, `s24-notes.md`, `s25-notes.md`,
+  `s26-s29-plan.md`.
+- **Static enforcement** — `guard deps` (tier matrix, single protocol-SDK importer, zero-dependency
+  tier, one env reader per server, no cross-server and no tooling imports) and `guard convention`
+  (required files/scripts, size caps, no default exports, no `console.log`). Rules live as data in
+  `packages/cli/src/guards/rules.ts`.
+- **Tool contracts snapshotted** — `contracts/` pins each server's `tools/list`; `contracts:check`
+  boots all four over a real stdio handshake with placeholder env, catching a module that compiles
+  but cannot load. 76 tools total.
+- **Generated from the manifest** (S-35, S-36) — each server's `.env.example`, the marked blocks in
+  its `README.md`, and its tool list. 94 env variables declared once in
+  `packages/manifest/src/envSpecs/`. `generate:check` fails on drift.
+- **Credential-free CI** — `verify:all` (Windows, Node 22) is the gate; `verify:live` needs real
+  backends and is not in CI. See `docs/migration/ci.md`.
+- **Server scaffold** (S-38) — `npm run new:server -- --key <name>` produces a server that builds,
+  typechecks, tests and smokes with no hand-editing.
+- **`codebase-index-mcp` internals** — broke the `graphStore`/`regexSearch` cycle (S-29), extracted
+  the index-run orchestrator (S-26), merged the duplicated watch lifecycle (S-27), made the
+  edge→symbol join indexable (S-30), drove `process.env` reads to a single config module (S-41), and
+  split every file over the 600-line hard cap. `src/` went from 67 loose files to 7, re-homed into
+  domain folders (S-41/S-37).
+- **First unit tests** in `codebase-index-mcp` (S-39) — before this, every test was an integration
+  harness needing a build and a database.
+
+### 🐛 Found while migrating
+
+- **MCP-ISSUE-031** — `dead_code_scan` silently suppresses every method in an `I`-prefixed C# file
+  (`ItemService.cs`, `IndexController.cs`): the path is lowercased before the interface-file test
+  `/^i[a-z].*\.cs$/` runs. A false negative, so the scan looks clean while hiding candidates.
+  Behaviour pinned by a test; fix deferred because it changes tool output.
+- **MCP-ISSUE-032** — an index run is **not reproducible**. Two runs of the same build on a 521-file
+  C# repo disagree by ~500 `PROPERTY_REF` edges while symbols stay identical, because
+  `glob("**/*")` returns the same paths in a different order each call and nothing sorts it. Edge
+  counts therefore cannot be used to validate a change.
+
+Both in `codebase-index-mcp/docs/mcp-codebase-index-issue-registry.md`.
+
+### ➕ Added — servers never previously recorded in this file
+
+- **`postgres-mcp`** — PostgreSQL MCP server. Present since the workspace was initialized
+  (2026-05-04, `7b04b97`). Read-only by default: the read path permits only `SELECT` and
+  `WITH … SELECT`. Optional multi-environment access, reviewed/confirmed data writes
+  (`preview → apply → rollback`, HMAC-approved, mandatory `WHERE`), and EF Core migration tooling —
+  each behind its own env flag, parsed strictly. **`prod` is force read-only regardless of config.**
+  SQL guardrails and approval-token regression tests added 2026-07-27. 17 tools.
+- **`observe-mcp`** — OpenObserve log/trace MCP server for the CommunicationHub backend
+  (2026-07-03, `9eb7123`). Read-only; queries the self-hosted `_search` API to search logs and trace
+  a request end-to-end by trace id (`search_logs`, `trace_logs`, `get_trace_spans`, `log_stats`, …).
+  Credentials via env only. Character caps, pagination and response profiles added 2026-07-06.
+  8 tools.
+- **`bitbucket-mcp`** — Bitbucket Cloud MCP server (2026-07-07, `a37366b`). Reads repositories and
+  pull requests, and **creates** pull requests. Scopes `read:repository` / `read:pullrequest` /
+  `write:pullrequest`; auth via Bearer token or email + API token. **PR creation is off unless
+  `BITBUCKET_WRITE_ENABLED=true`**, and `create_pull_request` supports `dryRun`. Also the pilot for
+  the `@mcp/sdk` migration (S-06…S-23). 8 tools.
+
 ## [Unreleased] - 2026-07-08
 
 ### 🧰 Workspace Tooling

@@ -95,7 +95,7 @@ npm run generate:check   # fails on drift; runs inside verify:all
 ```
 
 `mcp:doctor` reports a stale generated file per server as a warning. Env vars are declared once,
-in `packages/manifest/src/envSpecs/<server>.ts` — 89 across the four servers.
+in `packages/manifest/src/envSpecs/<server>.ts` — 94 across the four servers.
 
 ## Architecture (codebase-index-mcp)
 
@@ -194,7 +194,7 @@ When analyzing this codebase, use the `codebase-index-local` MCP tools **before*
 
 ## Workspace Rules & Skills (`.claude/`)
 
-- `.claude/rules/` — always-on policy docs (migrated from the old `.github/instructions/`):
+- `.claude/rules/` — always-on policy docs:
   `mcp-hard-mode` (MCP-first enforcement), `mcp-base`, `typescript-mcp`, `db-guardrails`, `codebase-index`.
 - `.claude/skills/` — MCP **authoring** skills (scaffold, security-review, release-checklist,
   tool-annotations, error-taxonomy, contract-conformance, observability, host-integration-security,

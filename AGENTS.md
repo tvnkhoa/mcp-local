@@ -1,16 +1,28 @@
 # AGENTS.md
 
-Agent guidance for the `mcp-local` workspace containing two MCP servers: `codebase-index-mcp` and `postgres-mcp`.
+Agent guidance for the `mcp-local` workspace: four MCP servers over a six-package platform.
+
+New here? `docs/onboarding.md` (install), `docs/architecture.md` (what this is),
+`docs/conventions.md` (the rules, and which ones are enforced).
 
 ## Workspace Structure
 
-Multi-project workspace with four independent MCP servers:
-- `codebase-index-mcp/` - TypeScript/Node.js codebase indexing and graph analysis server
-- `postgres-mcp/` - Read-only PostgreSQL query server with SQL guardrails
-- `observe-mcp/` - Read-only OpenObserve log/trace query server for the CommunicationHub backend
-- `bitbucket-mcp/` - Bitbucket Cloud server: read repositories/PRs and create pull requests (write-gated)
+Four independent MCP servers:
+- `codebase-index-mcp/` - TypeScript/Node.js codebase indexing and graph analysis server (43 tools)
+- `postgres-mcp/` - Read-only PostgreSQL query server with SQL guardrails (17 tools)
+- `observe-mcp/` - Read-only OpenObserve log/trace query server for the CommunicationHub backend (8 tools)
+- `bitbucket-mcp/` - Bitbucket Cloud server: read repositories/PRs and create pull requests (write-gated, 8 tools)
 
-All use `type: "module"` (ES modules), TypeScript 5.7+, and `@modelcontextprotocol/sdk`.
+Plus `packages/` — the shared platform the servers are built on: `@mcp/core` (tier 0,
+zero-dependency), `@mcp/sdk` (tier 1, the only importer of `@modelcontextprotocol/sdk`),
+`@mcp/shared`, `@mcp/testing`, `@mcp/cli` (the guards), `@mcp/manifest` (workspace tooling data).
+
+**The servers are not npm workspace members** — `workspaces` is `["packages/*"]` only, so each
+server has its own `node_modules`, and a fresh clone must run `npm run build:packages` before any
+server builds. This is deliberate: see `docs/adr/0001-workspace-native-deps.md`.
+
+All use `type: "module"` (ES modules), TypeScript 5.7+, and `@modelcontextprotocol/sdk` (via
+`@mcp/sdk`).
 
 ## Essential Commands
 
@@ -322,8 +334,17 @@ When MCP tools fail to provide sufficient evidence, log new issues with:
 
 ## References
 
+Workspace-level:
+- `docs/onboarding.md` - Fresh clone to a working install, and the two gotchas that waste the most time
+- `docs/architecture.md` - The workspace as built; what enforces its shape
+- `docs/conventions.md` - The rules, sorted by whether anything checks them
+- `.claude/rules/mcp-hard-mode.md` - MCP-first enforcement policy
+
+Per-server:
 - `codebase-index-mcp/README.md` - Full tool catalog and usage examples
+- `codebase-index-mcp/CLAUDE.md` - Sub-project guide, including the `src/` folder-ownership table
 - `codebase-index-mcp/docs/MCP-FIRST-CHEATSHEET.md` - Quick operator guide
-- `.claude/rules/mcp-hard-mode.md` - MCP-first enforcement policy (workspace root)
 - `codebase-index-mcp/docs/mcp-codebase-index-issue-registry.md` - Known gaps and resolutions
 - `postgres-mcp/README.md` - PostgreSQL MCP setup and guardrails
+- `observe-mcp/README.md` - OpenObserve log/trace query setup
+- `bitbucket-mcp/README.md` - Bitbucket auth and the PR-creation write gate

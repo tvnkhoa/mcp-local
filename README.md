@@ -121,7 +121,22 @@ a snapshot needs a built server. The generated README spells out the four comman
 
 ## References
 
+**Start here** — three docs cover the workspace end to end:
+
+- `docs/onboarding.md` — fresh clone to four working servers in three commands, plus the two
+  gotchas that cost the most time
+- `docs/architecture.md` — what this is as built: four servers, six packages, and the three
+  mechanisms that hold the shape
+- `docs/conventions.md` — the rules, sorted by whether something actually checks them
+
+Then:
+
 - `CLAUDE.md` — workspace guidance, critical constraints, MCP-first operating rules
 - `AGENTS.md` — env var reference, common pitfalls, integration config examples
 - `packages/manifest/README.md` — single source of truth for all servers and their env vars
 - `<server>/README.md` — per-server tool catalog and usage
+- `docs/architecture/target-architecture.md` — the design and its reasoning (§9 reconciles design
+  against what was built)
+- `docs/adr/` — decision records: why servers sit outside the npm workspace, why three SQL token
+  lists differ, why there is one root `.gitignore`
+- `docs/migration/status.md` — all 41 completed steps, verified against the working tree
