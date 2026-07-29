@@ -408,13 +408,34 @@ export const TRIVIAL_PROPERTY_TOKENS = new Set<string>([
  * not a property read. Used to avoid emitting false PROPERTY_REF edges for
  * LINQ/repository method chains.
  */
+/**
+ * Do two node handles refer to the same syntax node?
+ *
+ * **Never compare tree-sitter nodes with `===`.** Every `.parent`, `.childForFieldName()` and
+ * `.descendantsOfType()` access mints a NEW JavaScript wrapper around the same underlying native node.
+ * The binding keeps a weak cache of wrappers, so `===` happens to hold most of the time and stops
+ * holding once that cache is pruned — which makes it a function of garbage collection, not of the
+ * syntax tree.
+ *
+ * This was the root cause of MCP-ISSUE-032. Four sites compared nodes by reference; the one in
+ * `isAncestorInvocation` decided whether a member access was part of an invocation, so under memory
+ * pressure method calls like `Regex.IsMatch` were misclassified and emitted 14 spurious PROPERTY_REF
+ * edges for one 300-line file. That is why two identical index runs disagreed on edge counts while
+ * agreeing exactly on symbols, and why the variance sat in PROPERTY_REF.
+ *
+ * `node.id` is a stable native identity. (`node.equals()` does not exist in this binding version.)
+ */
+export function isSameNode(a: Parser.SyntaxNode | null | undefined, b: Parser.SyntaxNode | null | undefined): boolean {
+  return a !== null && a !== undefined && b !== null && b !== undefined && a.id === b.id;
+}
+
 export function isAncestorInvocation(node: Parser.SyntaxNode): boolean {
   let current: Parser.SyntaxNode | null = node.parent;
   while (current) {
     if (current.type === "invocation_expression") {
       const fn = current.childForFieldName("function");
       // If this node or any ancestor is the function of an invocation → it's a call
-      if (fn === node || fn?.descendantsOfType(node.type).some(d => d === node)) {
+      if (isSameNode(fn, node) || fn?.descendantsOfType(node.type).some((d) => isSameNode(d, node))) {
         return true;
       }
       // Walk up — stop at statement boundaries

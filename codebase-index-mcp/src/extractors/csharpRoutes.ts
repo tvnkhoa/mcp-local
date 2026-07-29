@@ -15,6 +15,7 @@ import {
   combineRouteTemplate,
   dedupeRoutes,
   extractFirstStringLiteral,
+  isSameNode,
   normalizeEndpointPath,
   stableId,
   toEndpointContractId
@@ -343,7 +344,7 @@ function collectAttachedAttributeTexts(node: Parser.SyntaxNode): string[] {
   const parent = node.parent;
   if (!parent) return attrs;
   for (const child of parent.namedChildren) {
-    if (child === node) break;
+    if (isSameNode(child, node)) break;
     if (child.type === "attribute_list") attrs.push(child.text);
   }
   return attrs;

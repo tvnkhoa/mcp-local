@@ -14,7 +14,8 @@ import {
   emitPropertyAccessEdge,
   findEnclosingCSharpSymbolId,
   findEnclosingCSharpTypeName,
-  isAncestorInvocation
+  isAncestorInvocation,
+  isSameNode
 } from "./extractorUtils.js";
 
 export function extractPropertyAccessEdges(
@@ -281,7 +282,7 @@ function isPropertyWrite(node: Parser.SyntaxNode): boolean {
   // Check if this is the left side of an assignment
   if (parent.type === "assignment_expression") {
     const leftNode = parent.childForFieldName("left");
-    return leftNode === node;
+    return isSameNode(leftNode, node);
   }
 
   // Check for compound assignments (+=, -=, etc.)
@@ -290,7 +291,7 @@ function isPropertyWrite(node: Parser.SyntaxNode): boolean {
       parent.type === "multiply_assignment_expression" ||
       parent.type === "divide_assignment_expression") {
     const leftNode = parent.childForFieldName("left");
-    return leftNode === node;
+    return isSameNode(leftNode, node);
   }
 
   return false;

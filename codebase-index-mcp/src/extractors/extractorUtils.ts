@@ -44,6 +44,7 @@ export {
   emitTypeRefEdgesFromTypeNode,
   getEffectiveEdgeConfidence,
   isAncestorInvocation,
+  isSameNode,
   resolveIntraFileEdges
 } from "./extractorEdges.js";
 export {

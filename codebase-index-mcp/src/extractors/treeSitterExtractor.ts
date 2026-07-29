@@ -126,28 +126,60 @@ export function extractGraphData(input: ExtractInput): ExtractOutput {
 
   const root = tree.rootNode;
 
-  // Extract based on language
-  let literals: ExtractOutput["literals"];
-  if (input.language === "javascript" || input.language === "typescript") {
-    extractJavaScriptSymbolsImpl(input, root, symbols, edges, moduleSymbolId);
-    routes.push(...extractJavaScriptRoutesImpl(input, symbols, moduleSymbolId));
-    literals = extractStringLiteralsImpl(input, root, resolveLiteralPolicy(input.performanceProfile ?? "standard"));
-  } else if (input.language === "csharp") {
-    extractCSharpSymbolsImpl(input, root, symbols, edges, moduleSymbolId, input.knownPackageNames);
-    routes.push(...extractCSharpRoutesImpl(input, root, symbols));
-    emitEndpointContractSymbolsImpl(input, symbols, routes);
-    emitEndpointContractSymbolsFromCSharpSignaturesImpl(input, symbols);
-    literals = extractStringLiteralsImpl(input, root, resolveLiteralPolicy(input.performanceProfile ?? "standard"));
+  try {
+    // Extract based on language
+    let literals: ExtractOutput["literals"];
+    if (input.language === "javascript" || input.language === "typescript") {
+      extractJavaScriptSymbolsImpl(input, root, symbols, edges, moduleSymbolId);
+      routes.push(...extractJavaScriptRoutesImpl(input, symbols, moduleSymbolId));
+      literals = extractStringLiteralsImpl(input, root, resolveLiteralPolicy(input.performanceProfile ?? "standard"));
+    } else if (input.language === "csharp") {
+      extractCSharpSymbolsImpl(input, root, symbols, edges, moduleSymbolId, input.knownPackageNames);
+      routes.push(...extractCSharpRoutesImpl(input, root, symbols));
+      emitEndpointContractSymbolsImpl(input, symbols, routes);
+      emitEndpointContractSymbolsFromCSharpSignaturesImpl(input, symbols);
+      literals = extractStringLiteralsImpl(input, root, resolveLiteralPolicy(input.performanceProfile ?? "standard"));
+    }
+
+    const resolvedEdges = resolveIntraFileEdges(edges, symbols);
+
+    return {
+      symbols: dedupeSymbols(symbols),
+      edges: applyEdgeConfidenceFilter(applyCallEdgeCap(dedupeEdges(resolvedEdges), edgePolicy.maxCallEdgesPerFile), edgePolicy.minEdgeConfidence),
+      routes,
+      literals
+    };
+  } finally {
+    keepTreeAlive(tree);
   }
+}
 
-  const resolvedEdges = resolveIntraFileEdges(edges, symbols);
-
-  return {
-    symbols: dedupeSymbols(symbols),
-    edges: applyEdgeConfidenceFilter(applyCallEdgeCap(dedupeEdges(resolvedEdges), edgePolicy.maxCallEdgesPerFile), edgePolicy.minEdgeConfidence),
-    routes,
-    literals
-  };
+/**
+ * Keep a parsed tree reachable until extraction has finished. **This is not defensive padding — it is
+ * the fix for MCP-ISSUE-032.**
+ *
+ * `node-tree-sitter`'s `SyntaxNode` objects hold pointers into the tree's native memory and do **not**
+ * keep the `Tree` alive. The extractor did `const tree = parser.parse(...)` followed by
+ * `const root = tree.rootNode`, and never touched `tree` again — so from that line on `tree` was
+ * unreachable and V8 was free to collect it *while the passes below were still walking `root`*.
+ * Traversal past that point silently yields nothing rather than crashing.
+ *
+ * Which is why the symptom looked like an ordering problem for so long:
+ *   - symbol counts never varied — symbols are extracted first, before collection can bite;
+ *   - the variance was concentrated in PROPERTY_REF, extracted by the LAST C# pass;
+ *   - three back-to-back extractions of one unchanged file in one process gave 79, 77, 70 edges,
+ *     decreasing monotonically as heap pressure rose;
+ *   - and three fresh processes gave 82, 82, 80 — GC timing, not input.
+ *
+ * Called from a `finally` so the reference is live across the whole `try`, including while the return
+ * value is being computed. Reading a native property rather than storing the tree somewhere: it makes
+ * the object observably reachable without retaining it after this returns.
+ */
+function keepTreeAlive(tree: Parser.Tree): void {
+  // A native accessor V8 cannot fold away, so the read cannot be optimised out.
+  if (tree.rootNode.endIndex < 0) {
+    throw new Error("unreachable: negative endIndex");
+  }
 }
 
 /** ISSUE-023: literal-lane policy per performance profile (mirror defaultEdgePolicy). */

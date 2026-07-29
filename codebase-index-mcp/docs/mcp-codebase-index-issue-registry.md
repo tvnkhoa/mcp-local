@@ -11,8 +11,8 @@ Workaround · Enhancement proposal. Filed here so the MCP server team can triage
 
 ## MCP-ISSUE-032 — an index run is not reproducible: edge counts vary between identical runs
 
-- **Status:** open — **root cause relocated 2026-07-29**, see the update below. Two contributing
-  bugs fixed; the main one is narrowed to the extraction phase and not yet fixed. Found while
+- **Status:** **extraction nondeterminism FIXED** 2026-07-29 (`src/extractors/extractorEdges.ts` +3
+  files). A residual resolve-phase variance remains — see the bottom of this entry. Found while
   validating the S-41 `indexPipeline` split; pre-existing and unrelated to that change.
 - **Scenario:** index the same repository twice, same build, same input, nothing changed on disk.
 - **Evidence:** on `wec.communication-hub` (521 files), two runs of the **same** build:
@@ -96,9 +96,62 @@ Workaround · Enhancement proposal. Filed here so the MCP server team can triage
     longer arbitrary).
   - 30/30 harnesses pass; `contracts:check` 4/4 — no schema change.
 
-- **Status:** still **open**, with the root cause corrected and narrowed to extraction. The workaround
-  is unchanged and still necessary: compare symbol counts, not edge counts; for edges, run the same
-  build twice to establish the noise band before reading any delta as signal.
+### Root cause, third attempt — and this one is it: `===` on tree-sitter nodes
+
+Neither the glob order, nor worker concurrency, nor the unordered `LIMIT`s. Four sites compared
+tree-sitter nodes by **JavaScript object identity**:
+
+```js
+if (fn === node || fn?.descendantsOfType(node.type).some(d => d === node))   // extractorEdges.ts
+return leftNode === node;                                                    // csharpPropertyEdges.ts ×2
+if (child === node) break;                                                   // csharpRoutes.ts
+```
+
+Every `.parent`, `.childForFieldName()` and `.descendantsOfType()` access mints a **new** JS wrapper
+around the same underlying native node. The binding keeps a *weak* cache of wrappers, so `===` holds
+most of the time and stops holding once that cache is pruned — which makes the comparison a function of
+**garbage collection**, not of the syntax tree. Fixed by comparing `node.id`, a stable native identity
+(`node.equals()` does not exist in this binding version).
+
+How it was isolated, after two wrong root causes:
+
+1. `extractGraphData` is a pure function, so it was called three times on each of 60 real C# files.
+   Two files varied — proving the variance was inside extraction, not the write path.
+2. Three calls in one process gave **79 / 77 / 70** edges, decreasing monotonically; three *fresh
+   processes* gave **82 / 82 / 80**. Monotonic decay under accumulating heap pressure.
+3. `node --expose-gc` with a forced collection between calls collapsed it immediately and repeatably:
+   **82, then 66 forever**. That confirmed GC and ruled out input, ordering and JIT warm-up.
+4. Diffing the edge sets showed all 14 lost edges were method invocations — `Regex.IsMatch`,
+   `string.Split`, `LoadHtml`, `ToString` — i.e. `isAncestorInvocation` misclassifying calls as property
+   references. `CALLS` was 45 in every run, which is why symbol counts never moved.
+
+**It was also a correctness bug, not only a reproducibility one.** The pre-fix run emitted *spurious*
+PROPERTY_REF edges for method calls; the stable post-fix value is the lower, correct one. So the graph
+was wrong in a way that made `find_impact_files` and property-reference queries report calls as
+property reads.
+
+| | before | after |
+|---|---|---|
+| same file, 3 calls, GC forced | 82 / 66 / 66 | **66 / 66 / 66** |
+| 60-file purity sweep | 2 files unstable | **all deterministic** |
+| PROPERTY_REF over 3 full index runs | 10564 / 10951 / 11162 | **9168 / 9168 / 9168** |
+
+Covered by `scripts/test/test-node-identity.mjs` (`test:node-identity`), asserted behaviourally — a
+method invocation must never appear as a property reference — rather than by forcing GC, since a test
+that depends on collection timing fails for the wrong reasons.
+
+### Residual: the resolve phase still varies
+
+Three full runs now agree exactly on `PROPERTY_REF`, `PROPERTY_WRITE`, `IMPORTS` and `DEPENDS_ON`, but
+still differ on `CALLS` (14661/14712/14696), `TYPE_REF` (4892/4874/4891), `IMPLEMENTS` (290/281/295),
+`CONSUMES` (54/48/52) and `PUBLISHES` (28/25/28) — precisely the types resolved *after* extraction.
+Prime suspect: `vectorSearchSymbols`, an approximate-nearest-neighbour search used as a resolution
+fallback in `edgeResolverCalls`, `edgeResolverRefs`, `edgeResolverImports` and `edgeResolverContracts`.
+ANN search need not be deterministic, and there is no env switch to disable vectors for a quick control
+run — so confirming it needs one.
+
+Workaround, narrowed: symbol counts and the four stable edge types are now safe to compare between
+runs. The five resolved types are not.
 
 ---
 
@@ -303,14 +356,42 @@ to effort.
   for every symbol in the same file. **Nothing read it**: not the suppressors, not the response. It was
   the most expensive part of the statement and its value was discarded. Removed; the call went from
   timing out to ~29.5s.
-- **Still open — `dead_code_scan` is slow on large repos.** 29.5s for 4442 symbols is functional but
-  poor, and `wec.be` (67 887 symbols) did not finish a measurement run. Cause: the query pages **all**
-  matching rows regardless of `limit`, evaluating five correlated counting subqueries per row. The
-  obvious fix is that four of those five exist only to find rows whose count is **zero** — a reported
-  candidate has no incoming edges by definition — so they can become `NOT EXISTS` predicates in the
-  `WHERE` clause, which short-circuit on the first match and use `idx_edges_repo_type_to`. Only
-  `outgoingCalls` is genuinely needed as a value (by `isLikelyEntryPoint`). Not done here: it is a
-  separate, well-scoped change and this entry is already about a correctness fix.
+- **Performance — fixed 2026-07-29.** Three changes, each necessary; the third did most of the work:
+
+  1. **`NOT EXISTS` instead of counting.** Four of the five correlated subqueries existed only to find
+     rows whose count was zero, so they moved into the `WHERE` clause where they short-circuit on the
+     first match and use `idx_edges_repo_type_to`. Only `outgoingCalls` is still selected as a value —
+     `isLikelyEntryPoint` reads it.
+  2. **Two queries, not one.** The counts could not simply move: `buildFileContexts` needs *every* row
+     of a file to collect its evidence ("does this file hold a validator class?"), and that class
+     usually *does* have incoming edges — so it would vanish from a filtered row set and silently
+     weaken suppression. Candidates are fetched first, then context rows for just those candidates'
+     files. The context query deliberately ignores the caller's `kind`/`includePrivate` filters, for
+     the same reason.
+  3. **Keyset pagination instead of `OFFSET`.** This was the real bottleneck. With `OFFSET`, SQLite
+     re-evaluates and discards the skipped prefix on every page, re-running the `NOT EXISTS` predicates
+     quadratically. A `(file_path, line)` cursor matching the `ORDER BY` fixed it: `wec.communication-hub`
+     went 15.2s → 0.4s and `wec.be` from a request timeout → 0.8s.
+
+  | repo | symbols | before | after |
+  |---|---|---|---|
+  | `codebase-index-mcp` | 1051 | 83ms | **18ms** |
+  | `ssnet` | 5087 | 7.2s | **186ms** |
+  | `wec.communication-hub` | 4411 | 29.5s | **402ms** |
+  | `api-testing-studio` | 3937 | — | **261ms** |
+  | `wec.social-ads` | 9406 | — | **619ms** |
+  | `wec.be` | 67887 | **request timeout** | **838ms** |
+
+- **Two deliberate output changes**, both stated rather than slipped in:
+  - `suppressed.total` is smaller (171 → 95 on `wec.communication-hub`). The suppression checks run
+    *before* the incoming-edge test, so the old count included symbols that had incoming edges and were
+    never candidates at all. The new number counts only symbols that would otherwise have been
+    reported, which is what the field is for.
+  - A **`suppressed.truncated: true`** flag. The candidate scan stops at `max(limit * 20, 300)` rows,
+    because paging the entire candidate set costs 40s on `wec.be` against 0.8s with the bound. That
+    makes `suppressed.total` a count over rows examined rather than over the repo, so it is reported —
+    a capped number that looks total is worse than a smaller number that says it is capped. Raise
+    `limit` for a wider census; the cap scales with it.
 
 - **Lesson worth keeping:** a tool that returns a well-formed empty result is harder to notice than
   one that errors. MCP-ISSUE-031 was found by reading code, and its fix could only be *measured* by
