@@ -12,7 +12,7 @@
 
 import { execSync } from "node:child_process";
 import { serverDirPath, serverEntryPath } from "./lib/manifest.mjs";
-import { detectAgents, readServerEntry } from "./lib/agents.mjs";
+import { detectAgents, readServerEntries } from "./lib/agents.mjs";
 import { installSkill } from "./lib/skills.mjs";
 import { verifyServer } from "./lib/verify.mjs";
 import { parseArgs, resolveServers } from "./lib/cli.mjs";
@@ -21,10 +21,15 @@ import { banner, section, ok, warn, err, info, step } from "./lib/log.mjs";
 const ARGS = parseArgs(process.argv.slice(2), { all: ["--all"] });
 
 // Recover the env the server was configured with, so verify uses real values.
+//
+// Falls back to the first environment-suffixed instance when the canonical key is not registered:
+// a server run against several backends (`<key>-<suffix>`) has no entry under the bare key, and
+// verifying it with an empty env would fail on missing credentials rather than on anything real.
+// Any instance's credentials are enough here, because this only needs the server to start.
 function existingEnv(agents, key) {
   for (const agent of agents) {
-    const e = readServerEntry(agent, key);
-    if (e) return e.env || e.environment || {};
+    const found = readServerEntries(agent, key);
+    if (found.length) return found[0].entry.env || found[0].entry.environment || {};
   }
   return {};
 }

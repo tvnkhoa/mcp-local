@@ -57,12 +57,36 @@ npm run mcp:doctor      # per-server: build, config, env, skill, generated files
 
 Never prints secrets.
 
-**A `FAIL` here is not always a broken install.** Doctor matches a server by its exact manifest key,
-so a server registered under a suffixed key is invisible to it. Running one server against several
-environments is the normal reason to do that — for example `observe-mcp` registered as
-`observe-mcp-ssdev_au` and `observe-mcp-wecrm_au_prod`. Doctor then reports `config not registered`,
-skips the env check, and `start` fails because the process launches with no credentials. The server
-itself is fine. Confirm by listing the keys in `~/.claude.json` before believing the failure.
+### Running one server against several environments
+
+Register the same server more than once, with a suffix per backend, and each registration carries
+its own credentials:
+
+```
+observe-mcp-ssdev_au        →  the dev OpenObserve
+observe-mcp-wecrm_au_prod   →  the prod OpenObserve
+```
+
+This is supported, not a workaround. Doctor recognises `<key>` and `<key>-<suffix>`, **names every
+instance it found**, and runs the env and start checks once per instance — because starting one of
+them proves nothing about a sibling with different credentials:
+
+```
+PASS  config  registered in Claude Code as observe-mcp-ssdev_au, observe-mcp-wecrm_au_prod
+PASS  env observe-mcp-ssdev_au required env keys present
+PASS  env observe-mcp-wecrm_au_prod required env keys present
+PASS  start observe-mcp-ssdev_au responded to initialize
+PASS  start observe-mcp-wecrm_au_prod responded to initialize
+```
+
+Instances are listed by name rather than counted, so a registration you did not expect is visible
+rather than quietly absorbed into the total. Read that line — it is the only place an orphaned or
+misnamed entry shows up.
+
+Until 2026-07-29 doctor matched the exact manifest key only, and reported this setup as
+`config not registered` → env skipped → `start` **FAIL**, because it launched the process with no
+credentials at all. If you see that on an install you believe is fine, check you are on a build
+that includes the fix.
 
 ---
 

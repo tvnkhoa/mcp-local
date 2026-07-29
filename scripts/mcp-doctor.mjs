@@ -10,6 +10,10 @@
  *   [skill]  operational skill installed in ~/.claude/skills/<key>/
  *   [start]  server spawns and responds to `initialize`
  *
+ * A server registered several times under environment-suffixed keys (`<key>-<suffix>`) is a
+ * supported setup, not a misconfiguration. Every instance is named in the [config] line, and
+ * [env] and [start] run once per instance, because each carries its own credentials.
+ *
  * Usage: node scripts/mcp-doctor.mjs [--server <key>] [--skip-start]
  */
 
@@ -19,7 +23,7 @@ import path from "node:path";
 import { serverDirPath, serverEntryPath, evaluateEnv } from "./lib/manifest.mjs";
 import { staleTargets } from "./lib/generate.mjs";
 import { toConfigPath } from "./lib/jsonc.mjs";
-import { detectAgents, readServerEntry } from "./lib/agents.mjs";
+import { detectAgents, readServerEntries } from "./lib/agents.mjs";
 import { verifyServer } from "./lib/verify.mjs";
 import { parseArgs, resolveServers } from "./lib/cli.mjs";
 import { C, log, section, banner, ok, warn, err, info } from "./lib/log.mjs";
@@ -39,42 +43,60 @@ async function checkServer(server, agents) {
   else { checks.push(["build", "fail", "not built"]); fix.push(`cd ${server.dir} && npm run build`); }
 
   // config (across all detected agents)
+  //
+  // A server may be registered more than once: the same build against different backends, under
+  // environment-suffixed keys. Each instance carries its own credentials, so env and start are
+  // checked per instance below rather than once for the server.
   const entryNorm = toConfigPath(entry);
-  let configured = null, agentName = null;
+  let instances = [];
+  let agentName = null;
   for (const agent of agents) {
-    const e = readServerEntry(agent, server.key);
-    if (e) { configured = e; agentName = agent.name; break; }
+    const found = readServerEntries(agent, server.key);
+    if (found.length) { instances = found; agentName = agent.name; break; }
   }
-  if (!configured) {
+  if (instances.length === 0) {
     checks.push(["config", "warn", "not registered in any detected agent"]);
     fix.push(`node scripts/install-mcp.mjs --server ${server.key}`);
   } else {
-    const args = configured.args || configured.command; // opencode uses command[]
-    const argsStr = Array.isArray(args) ? args.join(" ") : String(args);
     // Windows paths are case-insensitive and drive-letter casing is not stable,
     // so compare case-insensitively after normalizing slashes.
-    const pathMatches = argsStr.replace(/\\/g, "/").toLowerCase().includes(entryNorm.toLowerCase());
-    checks.push(["config", pathMatches ? "pass" : "warn",
-      pathMatches ? `registered in ${agentName}` : `registered in ${agentName} but args path differs from built entry`]);
-    if (!pathMatches) fix.push(`re-run installer to fix args path for ${server.key}`);
+    const mismatched = instances.filter((i) => {
+      const args = i.entry.args || i.entry.command; // opencode uses command[]
+      const argsStr = Array.isArray(args) ? args.join(" ") : String(args);
+      return !argsStr.replace(/\\/g, "/").toLowerCase().includes(entryNorm.toLowerCase());
+    });
+    // Instances are named, never just counted — see readServerEntries().
+    const label = instances.length === 1 && !instances[0].suffixed
+      ? `registered in ${agentName}`
+      : `registered in ${agentName} as ${instances.map((i) => i.name).join(", ")}`;
+    if (mismatched.length === 0) {
+      checks.push(["config", "pass", label]);
+    } else {
+      checks.push(["config", "warn",
+        `${label} — args path differs from built entry for: ${mismatched.map((i) => i.name).join(", ")}`]);
+      fix.push(`re-run installer to fix args path for ${server.key}`);
+    }
   }
 
   // env (keys only, from whichever config we found — never print values).
   // Uses the same predicate as the installer (manifest.evaluateEnv).
-  if (configured) {
-    const envObj = configured.env || configured.environment || {};
-    const presentKeys = Object.keys(envObj).filter((k) => envObj[k] !== "" && envObj[k] != null);
-    const { missingRequired, unsatisfiedGroups } = evaluateEnv(server, presentKeys);
-    if (missingRequired.length || unsatisfiedGroups.length) {
-      const parts = [];
-      if (missingRequired.length) parts.push(`missing: ${missingRequired.join(", ")}`);
-      if (unsatisfiedGroups.length) parts.push(`no value for group(s): ${unsatisfiedGroups.join(", ")}`);
-      checks.push(["env", "warn", parts.join("; ")]);
-    } else {
-      checks.push(["env", "pass", "required env keys present"]);
-    }
-  } else {
+  if (instances.length === 0) {
     checks.push(["env", "warn", "skipped (no config)"]);
+  } else {
+    for (const inst of instances) {
+      const envObj = inst.entry.env || inst.entry.environment || {};
+      const presentKeys = Object.keys(envObj).filter((k) => envObj[k] !== "" && envObj[k] != null);
+      const { missingRequired, unsatisfiedGroups } = evaluateEnv(server, presentKeys);
+      const scope = instances.length === 1 ? "env" : `env ${inst.name}`;
+      if (missingRequired.length || unsatisfiedGroups.length) {
+        const parts = [];
+        if (missingRequired.length) parts.push(`missing: ${missingRequired.join(", ")}`);
+        if (unsatisfiedGroups.length) parts.push(`no value for group(s): ${unsatisfiedGroups.join(", ")}`);
+        checks.push([scope, "warn", parts.join("; ")]);
+      } else {
+        checks.push([scope, "pass", "required env keys present"]);
+      }
+    }
   }
 
   // skill
@@ -99,10 +121,17 @@ async function checkServer(server, agents) {
   if (ARGS.skipStart) {
     checks.push(["start", "warn", "skipped (--skip-start)"]);
   } else if (fs.existsSync(entry)) {
-    const envObj = configured ? (configured.env || configured.environment || {}) : {};
-    const res = await verifyServer(entry, envObj);
-    checks.push(["start", res.ok ? "pass" : "fail", res.message]);
-    if (!res.ok) fix.push(`check ${server.key} env/config (see .env.example)`);
+    // Once per instance: a server that needs credentials starts only with the ones its own
+    // registration carries, so starting it once with the first instance's env would report a
+    // second, differently-credentialed instance as healthy without ever launching it.
+    const toStart = instances.length ? instances : [{ name: server.key, entry: {} }];
+    for (const inst of toStart) {
+      const envObj = inst.entry.env || inst.entry.environment || {};
+      const res = await verifyServer(entry, envObj);
+      const scope = toStart.length === 1 ? "start" : `start ${inst.name}`;
+      checks.push([scope, res.ok ? "pass" : "fail", res.message]);
+      if (!res.ok) fix.push(`check ${inst.name} env/config (see .env.example)`);
+    }
   } else {
     checks.push(["start", "fail", "no entry to start"]);
   }

@@ -521,15 +521,33 @@ Neither is fixed here: both change tool output, and this step is a restructuring
   eight splits added 26. 59 moved, 7 stayed, 1 deleted.
 - `CLAUDE.md` claimed 89 env vars across the four servers; the manifest reports **94**.
 
-### S-41 · a doctor false alarm, documented not fixed
+### S-41 · a doctor false alarm — found, then fixed
 
-`npm run mcp:doctor` reports `observe-mcp` as **FAIL** on a healthy install. It matches a server by
-its exact manifest key, so the environment-suffixed registrations this machine actually uses
-(`observe-mcp-ssdev_au`, `observe-mcp-wecrm_au_prod`) are invisible to it: config "not registered",
-env check skipped, then `start` exits 1 because the process launches without credentials. Running one
-server against several environments is the normal reason to register it that way. Documented in
-`docs/onboarding.md` with how to confirm it; widening the match changes tooling behaviour and belongs
-in its own change.
+`npm run mcp:doctor` reported `observe-mcp` as **FAIL** on a healthy install. It matched a server by
+its exact manifest key, so the environment-suffixed registrations this machine uses
+(`observe-mcp-ssdev_au`, `observe-mcp-wecrm_au_prod`) were invisible: config "not registered", env
+check skipped, then `start` exited 1 because the process launched with no credentials.
+
+I first recorded this as a user-side quirk to document rather than fix. That was the wrong reading:
+running one server against several backends is a **deliberate, supported pattern**, so the defect was
+in the tooling, not the configuration. Fixed 2026-07-29:
+
+- `readServerEntries(agent, key)` returns the canonical entry **and** every `<key>-<suffix>` instance.
+- `mcp:doctor` names every instance it found and runs `env` and `start` **once per instance** —
+  starting one proves nothing about a sibling with different credentials. All four servers now PASS,
+  and single-instance output is unchanged.
+- `update-mcp.mjs` had the same bug in `existingEnv()`: it recovered env by exact key, so it would
+  have verified a multi-instance server with an empty env.
+
+Instances are **named, never just counted.** A suffix match is a heuristic, and this matters directly
+for S-44: after renaming `codebase-index-local` → `codebase-index`, the stale old key matches the new
+one's prefix. It is deliberately *not* filtered out — a filter would hide an orphaned registration —
+so doctor prints it and a human can see an entry they did not expect. Pinned by a test.
+
+`scripts/lib/` had **no tests at all**, which is how this survived. Added `scripts/lib/agents.test.mjs`
+(8 tests, including the S-44 collision) and a `test:scripts` step inside `verify:packages`. Note
+`node --test scripts/lib/` does not work on Node 22 + Windows — it tries to load the directory as a
+module — so the script uses a quoted glob.
 
 ### S-39 · the files had already been moved once
 

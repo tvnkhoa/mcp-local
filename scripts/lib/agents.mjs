@@ -155,3 +155,44 @@ export function readServerEntry(agent, key) {
     null
   );
 }
+
+/**
+ * Every registration of `key` in an agent config: the canonical entry, plus any
+ * environment-suffixed instance (`<key>-<suffix>`).
+ *
+ * One server run against several backends is a supported pattern, not a misconfiguration — the
+ * same build registered twice with different credentials, e.g. `observe-mcp-ssdev_au` and
+ * `observe-mcp-wecrm_au_prod`. `readServerEntry` only ever looked for the exact key, so the doctor
+ * reported such a server as "not registered", skipped its env check, and then failed `start`
+ * because it launched the process with no credentials at all. A healthy install read as broken.
+ *
+ * Returns `[{ name, entry, suffixed }]`. Callers are expected to REPORT the names they got rather
+ * than collapse them to a count: a suffix match is a heuristic, and naming it is what keeps an
+ * unrelated entry from being silently absorbed. That matters for the planned S-44 rename of
+ * `codebase-index-local` → `codebase-index`, after which the stale old key would match as a
+ * "suffixed instance" of the new one — visible if named, invisible if merely counted.
+ */
+export function readServerEntries(agent, key) {
+  let cfg;
+  try {
+    cfg = loadConfig(agent.configPath);
+  } catch {
+    return [];
+  }
+  const buckets = [cfg.mcpServers, cfg.mcp?.servers, cfg.mcp, cfg["mcp.servers"]];
+  const found = new Map();
+  for (const bucket of buckets) {
+    if (!bucket || typeof bucket !== "object") continue;
+    for (const name of Object.keys(bucket)) {
+      if (name !== key && !name.startsWith(`${key}-`)) continue;
+      const entry = bucket[name];
+      // `cfg.mcp` also holds non-server settings, so require something server-shaped.
+      if (!entry || typeof entry !== "object" || (!entry.command && !entry.args)) continue;
+      if (!found.has(name)) found.set(name, { name, entry, suffixed: name !== key });
+    }
+  }
+  // Canonical key first, then suffixed instances in a stable order.
+  return [...found.values()].sort((a, b) =>
+    a.suffixed === b.suffixed ? a.name.localeCompare(b.name) : (a.suffixed ? 1 : -1)
+  );
+}
