@@ -48,6 +48,46 @@ export function resolveTypeRefEdges(db: Database.Database, repoId: string, maxUn
 
   const candidateMap = buildNamedCandidateMap(db, repoId, ["class", "interface", "struct", "type"]);
 
+  /**
+   * Memoized fallback lookup, keyed by type name.
+   *
+   * Both fallbacks below — the cross-repo provider search and the vector similarity search — depend
+   * only on the type name, so the same answer was being recomputed for every occurrence. The primary
+   * `pickBestNamedCandidate` match is deliberately NOT memoized: it takes `row.fromFile` to prefer a
+   * same-file declaration, so it is genuinely per-row.
+   *
+   * This matters because of which rows reach here. MCP-ISSUE-034 raised unresolved TYPE_REF rows from
+   * 110 to ~3200, and the overwhelming majority are framework types (`Task`, `CancellationToken`,
+   * `ILogger`, `IServiceCollection`) that will never resolve — so they always fall through to the
+   * expensive path, and they are also the names that repeat most. On `wec.communication-hub` that took
+   * `typeResolveMs` from 5214 to 111950. Distinct names are a few hundred against a few thousand rows.
+   */
+  const fallbackCache = new Map<string, { symbolId: string; confidence: number; reason: string } | null>();
+
+  function resolveFallback(typeName: string): { symbolId: string; confidence: number; reason: string } | null {
+    const cached = fallbackCache.get(typeName);
+    if (cached !== undefined) {
+      return cached;
+    }
+
+    let result: { symbolId: string; confidence: number; reason: string } | null = null;
+
+    // Cross-repo fallback: look for the type in provider repos linked via nuget: DEPENDS_ON (ISSUE-006)
+    const crossRepoMatch = findProviderSymbolByName(db, repoId, typeName);
+    if (crossRepoMatch) {
+      result = { symbolId: crossRepoMatch.symbolId, confidence: 0.65, reason: "resolved type cross-repo" };
+    } else if (isVectorEnabled()) {
+      // Vector fallback for internal types that didn't match exactly
+      const vecResults = vectorSearchSymbols(db, repoId, typeName, 3);
+      if (vecResults.length > 0 && vecResults[0].distance < 0.30) {
+        result = { symbolId: vecResults[0].symbolId, confidence: 0.5, reason: "resolved type vector-fallback" };
+      }
+    }
+
+    fallbackCache.set(typeName, result);
+    return result;
+  }
+
   let count = 0;
   const tx = db.transaction(() => {
     for (const row of unresolved) {
@@ -65,18 +105,10 @@ export function resolveTypeRefEdges(db: Database.Database, repoId: string, maxUn
         updateStmt.run(match.symbolId, confidence, reason, repoId, row.fromId, row.toId);
         count += 1;
       } else {
-        // Cross-repo fallback: look for the type in provider repos linked via nuget: DEPENDS_ON (ISSUE-006)
-        const crossRepoMatch = findProviderSymbolByName(db, repoId, typeName);
-        if (crossRepoMatch) {
-          updateStmt.run(crossRepoMatch.symbolId, 0.65, "resolved type cross-repo", repoId, row.fromId, row.toId);
+        const fallback = resolveFallback(typeName);
+        if (fallback) {
+          updateStmt.run(fallback.symbolId, fallback.confidence, fallback.reason, repoId, row.fromId, row.toId);
           count += 1;
-        } else if (isVectorEnabled()) {
-          // Vector fallback for internal types that didn't match exactly
-          const vecResults = vectorSearchSymbols(db, repoId, typeName, 3);
-          if (vecResults.length > 0 && vecResults[0].distance < 0.30) {
-            updateStmt.run(vecResults[0].symbolId, 0.50, "resolved type vector-fallback", repoId, row.fromId, row.toId);
-            count += 1;
-          }
         }
       }
     }

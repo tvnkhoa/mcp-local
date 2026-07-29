@@ -201,11 +201,53 @@ record positional parameters showed a *negative* total delta on one run purely a
 per-position harness (`scripts/test/test-csharp-type-refs.mjs`, 11 cases) is deterministic and is what
 proved each position works.
 
-### Cost
+### Cost — and the 21× regression it first caused
 
-`typeResolveMs` on this repo went 5214 → 19798: there is now ~33× more to resolve. Acceptable for an
-index run, but it lands on the same resolver queries as MCP-ISSUE-032's `ORDER BY` work, so a future
-performance pass should look at both together.
+The initial measurement of `typeResolveMs` (19798, from a single-repo temp DB) was too optimistic. On
+the **real** 319 MB central DB holding seven repos, the first full re-index reported
+**`typeResolveMs: 111950`** and `resolvePhaseMs: 133078` — the index run exceeded the 120s tool timeout
+and had to finish in the background. A 21× regression against the 5214 it replaced.
+
+Cause: in `resolveTypeRefEdges`, every row that fails the primary name match falls through to two
+**per-row** fallbacks — a cross-repo provider lookup and a **vector similarity search**. Raising
+unresolved TYPE_REF rows from 110 to ~3200 multiplied that path by 29, and the rows that reach it are
+overwhelmingly framework types (`Task`, `CancellationToken`, `ILogger`, `IServiceCollection`) which can
+never resolve — so they *always* take the expensive branch, and they are also the names that repeat
+most.
+
+Both fallbacks depend only on the type name, so they are now memoized per name (a few hundred distinct
+names against a few thousand rows). The primary `pickBestNamedCandidate` match is deliberately **not**
+cached: it takes `row.fromFile` to prefer a same-file declaration, so it is genuinely per-row.
+
+| | before -034 | after -034 | after memoization |
+|---|---|---|---|
+| `typeResolveMs` | 5214 | 111950 | **11527** |
+| `resolvePhaseMs` | 28354 | 133078 | **31794** |
+| run completes inline | yes | no (>120s) | yes (6.9s elapsed) |
+
+2.2× the original resolve cost for 33× the edges is the honest trade. It lands on the same resolver
+queries as MCP-ISSUE-032's `ORDER BY` work, so a performance pass should treat them together.
+
+### What the fix visibly changed in `dead_code_scan`
+
+Re-indexed and re-scanned the same repo. Gone from the candidate list — these were the false positives:
+`RequestContext`, `NotificationLabel`, `ComposeResult`, `ParseResult`, `ReplyTarget`,
+`CustomerSuggestCacheEntry`, `ErrorCategory`, `N8nChatDecisionRequest`, `N8nChatDecisionResponse`,
+`N8nCustomerProfileSnapshot`, `N8nOutboundMemoryEntry`. Suppressed rose 87 → 171, and the candidate list
+now contains **methods** rather than only type declarations.
+
+The false positives that remain map precisely onto the positions listed above as uncovered, which is
+the useful part — it says what to do next:
+
+| still reported | why | uncovered position |
+|---|---|---|
+| `ValidationException`, `ForbiddenAccessException` | only ever `throw new ValidationException(...)` | object creation `new X()` |
+| `N8nApiEnvelope` | only a deserialization type argument | generic args on method invocations |
+| `AuditPayloadSerializer`, `CrossChannelReplyHelpers` | reached by static call on the type name | static member access |
+| `BeValidBase64`, `BeAllowedReviewUrl` | FluentValidation `.Must(BeValidBase64)` — a method group, never invoked | method-group reference |
+
+`new X()` and invocation generic arguments are the two with the best ratio of remaining false positives
+to effort.
 
 ---
 
