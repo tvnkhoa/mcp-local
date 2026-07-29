@@ -35,6 +35,7 @@
     "generate:docs": "node scripts/generate-docs.mjs",
     "generate:all": "npm run generate:tools && npm run build:packages && npm run generate:env && npm run generate:docs",
     "generate:check": "node scripts/generate-tools.mjs --check && node scripts/generate-env.mjs --check && node scripts/generate-docs.mjs --check",
+    "new:server": "node scripts/new-server.mjs",
     "verify:all": "npm run verify:packages && npm run verify:servers && npm run contracts:check && npm run generate:check",
     "verify:live": "npm run smoke:servers"
   }

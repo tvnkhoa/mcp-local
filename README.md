@@ -110,8 +110,13 @@ are rendered from the manifest — edit `packages/manifest/src/envSpecs/<server>
 
 ## Adding a new server
 
-Append an entry to `packages/manifest/src/servers.ts` and add `<dir>/skill/SKILL.md` — the
-installer, doctor, updater, and skill generator pick it up automatically. See the
+```bash
+npm run new:server -- --key myserver      # scaffold + build + typecheck + test + smoke
+```
+
+The scaffold is **not registered** — that is a separate step, and it has an ordering constraint:
+`servers.ts` throws for a server with no generated tool list, the list comes from `contracts/`, and
+a snapshot needs a built server. The generated README spells out the four commands. See the
 `mcp-skill-authoring` skill.
 
 ## References

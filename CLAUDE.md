@@ -143,8 +143,10 @@ On install, each server gets a **native Claude Code skill** rendered from its
 the committed source of truth is the template. Registration writes to `~/.claude.json` (per-agent
 config, secrets kept there per the workspace convention).
 
-Adding a new MCP server: append it to `packages/manifest/src/servers.ts` and add
-`<dir>/skill/SKILL.md` — the installer, doctor, and skill generator pick it up automatically. See
+Adding a new MCP server: run `npm run new:server -- --key <name>` (scaffolds from
+`templates/server/`, then builds/tests/smokes it), then append it to
+`packages/manifest/src/servers.ts` and add its env contract to
+`packages/manifest/src/envSpecs/<name>.ts` — the installer, doctor, and skill generator pick it up automatically. See
 the `mcp-skill-authoring` skill.
 
 > `scripts/lib/manifest.mjs` still exists as a re-export shim (S-34) and is scheduled for

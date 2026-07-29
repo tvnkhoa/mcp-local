@@ -91,7 +91,8 @@ mcp-local/
 ├── postgres-mcp/   observe-mcp/   bitbucket-mcp/     same shape
 │
 ├── contracts/                       golden tools/list snapshots, one per server
-├── scripts/                         installer / doctor / skill generator
+├── templates/server/                scaffold for a new server (npm run new:server)
+├── scripts/                         installer / doctor / generators / scaffolder
 │   └── lib/manifest.mjs             re-export shim for @mcp/manifest (S-34; to be deleted)
 ├── docs/
 │   ├── architecture/                this document + the audit

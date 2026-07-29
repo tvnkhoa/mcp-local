@@ -11,6 +11,20 @@ when writing/improving an operational skill so the model reliably auto-invokes i
 The workspace has a closed loop: **one manifest entry + one template ⇒ installer, doctor,
 uninstall/update, and a generated native skill all work for the new server.**
 
+## 0. Scaffold it first
+
+```bash
+npm run new:server -- --key myserver
+```
+
+Writes `myserver-mcp/` from `templates/server/`, then installs, builds, typechecks, tests and
+smoke-tests it. The result already follows every convention the guards check, so start from it
+rather than copying an existing server.
+
+Registration is **not** part of it — see step 1, and note the ordering: snapshot the contract
+before adding the manifest entry, because `servers.ts` throws for a server with no generated tool
+list.
+
 ## 1. Register the server (`packages/manifest/src/servers.ts`)
 
 Append an object to `SERVERS`. It is typed (`ServerDescriptor`), so a missing field is a

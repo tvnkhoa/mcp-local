@@ -5,7 +5,7 @@ Phase H's row updated after the S-28 SDK work landed. Every
 row cites the artifact that proves it. Where no artifact was found, the row says so
 rather than guessing.
 
-**33 of 44 done · 1 partial · 1 skipped by decision · 9 open.** **Phase H is complete** —
+**35 of 44 done · 1 partial · 1 skipped by decision · 7 open.** **Phase H is complete** —
 S-31, S-32 and S-33 all landed 2026-07-28. All 43 codebase-index tools are on the SDK registry,
 the legacy bridge is gone, and **all four servers now run on `@mcp/sdk`**. S-33 carried one
 intended contract change (unknown tool → `not_found`); see [the S-33 section](#s-33--the-decision-and-the-one-contract-change).
@@ -417,6 +417,66 @@ guard required the package README, `tier/unknown-package` required the TIER_RULE
 places rather than an accident in one.
 
 ## Phase J — Conventions and Housekeeping · 2/5
+
+| Step | Status | Evidence |
+|---|---|---|
+| S-37 Normalize folder layout + per-server `.gitignore` | ✅ | **decision: no per-server `.gitignore`** — `docs/adr/0003-single-root-gitignore.md`. Re-homing folded into S-41 by agreement |
+| S-38 Server scaffold generator | ✅ | `templates/server/**` + `scripts/new-server.mjs`; `npm run new:server -- --key scratch` verified end to end |
+| S-39 Consolidate the test strategy | ❌ | not started |
+| S-40 Index registry and workspace hygiene | ❌ | not started |
+| S-41 Flip guards to enforce; finalize docs | ❌ | **blocked** — eleven files in `codebase-index-mcp/src` still exceed the 600-line hard cap |
+
+### S-37 · the premise had expired
+
+The plan lists `codebase-index-mcp/.gitignore` and `postgres-mcp/.gitignore` as files to add,
+treating the two servers that have one as the desirable state. The root `.gitignore` has since
+grown `**/`-prefixed patterns that cover the whole workspace, so `git check-ignore -v` shows the
+**root** file deciding every path — `**/node_modules/`, `**/dist/`, `.env`, `.env.*`,
+`**/*.tsbuildinfo`. Every line in the two per-server files is already covered.
+
+Adding two more would have been four copies of the same rules with nothing checking they agree —
+the exact duplication S-35 and S-36 had just removed from the env and tool contracts. Recorded as
+ADR 0003 rather than done reflexively because the plan said to do it.
+
+One thing was worth verifying rather than assuming: all four `.env.example` files are **tracked**,
+so an ignore bug affecting them would be invisible until server #5. Creating a fresh directory
+confirmed `git add -n` picks up `.env.example` while `.env` stays ignored.
+
+*(An earlier reading of `git check-ignore`'s exit code suggested `.env.example` was being ignored.
+It is not: when the deciding rule is a negation, the command reports the match and exits 0. The
+real behaviour was confirmed with an actual file.)*
+
+**Re-homing deferred to S-41, by agreement.** `codebase-index-mcp/src` has 41 loose `.ts` files,
+and **7 of the 11 files over the hard cap are among them** — `graphStore.ts` (830),
+`refactorEngine.ts` (701), `indexPipeline.ts` (682), `impactAnalyzer.ts` (1457), `edgeResolver.ts`
+(1423), `staticAnalyzer.ts` (1228), `symbolSearch.ts` (797). Moving them now and splitting them in
+S-41 would touch the same files twice and rewrite imports twice. S-41 does both in one pass.
+
+### S-38 · the scaffold does not register the server, on purpose
+
+`npm run new:server -- --key scratch` produces a directory that **builds, typechecks, tests and
+smoke-tests with zero hand-editing**, and both guards report **0 findings** on it.
+
+What it deliberately omits is the manifest entry, because there is an ordering constraint it cannot
+satisfy: `servers.ts` throws for a server with no generated tool list, that list comes from
+`contracts/`, and a contract snapshot needs a built server. So the sequence is scaffold → build →
+snapshot → register → generate, and the generated README states it in that order.
+
+That omission is also what makes the plan's own last validation true: `scratch-mcp` was deleted and
+`verify:all` still exited 0, with nothing to clean up elsewhere. Had the scaffold written a
+manifest entry, deleting the directory would have broken the manifest's "every declared directory
+exists" test.
+
+The template encodes the conventions rather than describing them: `config/` as the only reader of
+`process.env`, `errors.ts` owning the wire envelope, tools as data in `tools.ts`, `index.ts` holding
+no testable logic, and — per ADR 0003 — no `.gitignore`.
+
+Two things were caught by checking the SDK instead of assuming its shape: the tool spec field is
+`input` (not `zodSchema`), `annotations.read()` is a function rather than a constant, and a handler
+returns `ok(payload)` because dispatch resolves the profile and serializes. A scaffold that got
+those wrong would have taught every future server the wrong pattern.
+
+ · 2/5
 
 | Step | Status | Evidence |
 |---|---|---|
