@@ -102,6 +102,57 @@ Workaround · Enhancement proposal. Filed here so the MCP server team can triage
 
 ---
 
+## MCP-ISSUE-033 — `dead_code_scan` returned an empty result for every repo, always
+
+- **Status:** **fixed** 2026-07-29 (`src/analysis/staticAnalyzerDeadCode.ts`). Found while trying to
+  observe the MCP-ISSUE-031 fix through the tool — which turned out to be impossible, because the
+  tool had never returned anything.
+- **Scenario:** `dead_code_scan` on any repo, with default options.
+- **Symptom:** `{"count": 0, "suppressed": {"total": 0, "reasons": {}}, "symbols": []}`. Both lists
+  empty, status ok.
+- **Root cause (confirmed):** `includePrivate` defaults to `false`, which added the condition
+  `s.name not like '_%'`. The intent was "skip names beginning with an underscore" (the C# private
+  backing-field convention). But in SQL `LIKE`, `_` is a **single-character wildcard**, so `'_%'`
+  matches every name of length ≥ 1 and `NOT LIKE '_%'` excluded **every symbol**. Measured on
+  `wec.communication-hub`:
+
+  | filter applied | rows surviving |
+  |---|---|
+  | repo + kind filter | 2760 |
+  | + `signature not like 'private %'` | 2137 |
+  | + `name not like '_%'` *(as written)* | **0** |
+  | + `name not like '\_%' escape ''` *(fixed)* | 2760 |
+
+  For the record, the repo contains **zero** symbols actually starting with an underscore, so the
+  condition was removing 2760 rows to filter nothing.
+- **Why it survived this long:** the empty result is a *plausible* answer — "no dead code found" reads
+  as a clean bill of health, not as a broken filter. Two further things pointed away from the cause:
+  the `suppressed` block was also empty (suppression only ever sees candidates, and there were none),
+  and the response's own hint suggested unresolved call/import edges, which sends a reader to look at
+  edge resolution. It also means **every previous clean `dead_code_scan` in this workspace was
+  meaningless**, including the ones behind the "Dead public symbols" row in the tool-selection table.
+- **Fix:** `s.name not like '\_%' escape ''`. Only one site in `src/` used an unescaped `_` in a
+  LIKE pattern, verified by grep.
+- **Verified end to end** through a real server against the real graph, `language: "csharp"`:
+  400 candidates (limit-capped) and 997 suppressed, broken down as
+  `heuristic_runtime_or_convention_usage: 631`, `heuristic_entry_point: 302`,
+  `heuristic_contract_declaration: 56`, `heuristic_helper_container: 8` — so the C# suppressors are
+  live rather than merely unreachable. 22 of the reported symbols sit in `I<lowercase>.cs`
+  implementation files (`InboundMessageConsumer.cs`, `IdentityAuthorizationRequest.cs`,
+  `InboxCardProjection.cs`, …), which is MCP-ISSUE-031's fix visible through the tool for the first
+  time.
+- **Covered by:** `src/analysis/staticAnalyzerDeadCode.test.ts` — five tests over an in-memory DB:
+  ordinary names survive, a literal leading underscore is still excluded, `includePrivate: true`
+  lifts both conditions, a symbol with an incoming edge is not a candidate, and the language filter
+  works through the `files` join. The test schema carries the real `primary key (repo_id, path)` on
+  `files`; without it the `insert or ignore` has nothing to conflict on and the LEFT JOIN multiplies
+  every row — a test schema that drifts from the real one invents its own failures.
+- **Lesson worth keeping:** a tool that returns a well-formed empty result is harder to notice than
+  one that errors. MCP-ISSUE-031 was found by reading code, and its fix could only be *measured* by
+  bypassing the tool entirely — that gap should itself have been the signal.
+
+---
+
 ## MCP-ISSUE-031 — `dead_code_scan` suppresses every method in an `i`-prefixed C# file
 
 - **Status:** **fixed** 2026-07-29 (`src/analysis/staticAnalyzerDeadCodeCSharp.ts`). Found the same

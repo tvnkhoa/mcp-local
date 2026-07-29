@@ -75,7 +75,13 @@ export function getDeadCodeCandidates(
   }
   if (!includePrivate) {
     conditions.push("coalesce(s.signature, '') not like 'private %'");
-    conditions.push("s.name not like '_%'");
+    // ESCAPE is mandatory here, not stylistic. In SQL LIKE, `_` is a single-character wildcard, so
+    // `'_%'` matches every name of length >= 1 and `NOT LIKE '_%'` therefore excluded EVERY symbol.
+    // Since `includePrivate` defaults to false, `dead_code_scan` returned an empty result for every
+    // repo, always — 0 candidates and 0 suppressed, which reads as "nothing dead" rather than as a
+    // broken filter. Measured on wec.communication-hub: 2760 rows survive the kind filter, and this
+    // one condition took it to 0. Escaped, the intended convention check keeps all 2760.
+    conditions.push("s.name not like '\\_%' escape '\\'");
   }
 
   const where = conditions.join(" and ");
