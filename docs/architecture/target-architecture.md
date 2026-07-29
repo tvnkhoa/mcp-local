@@ -108,7 +108,7 @@ go/no-go (plan step S-42, recommended skip).
 
 ## 2. Package boundaries
 
-Five packages, each defined by *what it is allowed to know*:
+Six packages, each defined by *what it is allowed to know*:
 
 | Package | Tier | Knows about | Must never know about |
 |---|---|---|---|
@@ -117,6 +117,7 @@ Five packages, each defined by *what it is allowed to know*:
 | `@mcp/shared` | L2 | `@mcp/core` | **The protocol SDK and `@mcp/sdk`** — a capability must never reach the wire format |
 | `@mcp/testing` | L3 | `@mcp/core`, `@mcp/sdk` | Server internals |
 | `@mcp/cli` | L4 | `@mcp/core` | Everything else — it reads source as text |
+| `@mcp/manifest` | L5 | `@mcp/core` | Anything about a server's internals. **No server may import it** (rule 5, enforced as `servers/tooling-import`) |
 
 The boundary that carries the most weight is **`@mcp/shared` must not import the protocol SDK**.
 It is what keeps SQL guardrails, approval tokens and HTTP clients testable as plain functions, and
@@ -263,6 +264,7 @@ that had already shipped.
 | `tsconfig.base.json`, solution file, project references, `tsconfig.test.json` | **Built** |
 | `packages/{core,sdk,shared,testing,cli}` with the tier model | **Built** |
 | `packages/manifest` (L5 tooling data) | **↑ Built** (`61b1782`, S-34) — `scripts/lib/manifest.mjs` is now a re-export shim |
+| Env vars and tool names declared exactly once, generated outward (S-35/S-36) | **↑ Built** (`77d9909`+) — 89 env vars in `envSpecs/`, 76 tools from `contracts/`; `generate:check` gates in `verify:all` |
 | Dependency guard (tiers, zero-dep, protocol ownership, deep imports, env access, cross-server, tooling-import) | **Built and enforcing** — 0 errors |
 | Convention guard (required files/scripts, size caps, no default export, no `console.log`) | **Built and enforcing** |
 | Consistent `src/{config,guardrails,response}/` in all four servers | **Built** (`3f5b702`) |

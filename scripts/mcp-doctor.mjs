@@ -16,7 +16,8 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { serverEntryPath, evaluateEnv } from "./lib/manifest.mjs";
+import { serverDirPath, serverEntryPath, evaluateEnv } from "./lib/manifest.mjs";
+import { staleTargets } from "./lib/generate.mjs";
 import { toConfigPath } from "./lib/jsonc.mjs";
 import { detectAgents, readServerEntry } from "./lib/agents.mjs";
 import { verifyServer } from "./lib/verify.mjs";
@@ -80,6 +81,19 @@ async function checkServer(server, agents) {
   const skillPath = path.join(os.homedir(), ".claude", "skills", server.key, "SKILL.md");
   if (fs.existsSync(skillPath)) checks.push(["skill", "pass", "installed (~/.claude/skills)"]);
   else { checks.push(["skill", "warn", "not installed"]); fix.push(`node scripts/install-mcp.mjs --server ${server.key}`); }
+
+  // generated (S-35/S-36) — .env.example and the README's generated blocks are rendered from the
+  // manifest, so a mismatch means someone edited the output instead of the source. A warning, not
+  // a failure: stale documentation does not stop the server from working, and the doctor's job is
+  // to report the state of the installation rather than to gate on it.
+  const owned = staleTargets().filter((t) => t.file.startsWith(serverDirPath(server) + path.sep));
+  if (owned.length === 0) {
+    checks.push(["generated", "pass", ".env.example + README blocks match the manifest"]);
+  } else {
+    const names = owned.map((t) => path.basename(t.file)).join(", ");
+    checks.push(["generated", "warn", `stale: ${names}`]);
+    fix.push("npm run generate:all   # then commit the result");
+  }
 
   // start
   if (ARGS.skipStart) {

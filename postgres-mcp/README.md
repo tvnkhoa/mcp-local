@@ -34,6 +34,30 @@ npm run build; npm start
 
 ## 4. Tools
 
+<!-- BEGIN GENERATED: tool-list -->
+
+17 tools, namespaced `mcp__postgres-mcp__<tool>`:
+
+- `compare_environments`
+- `data_diff`
+- `describe_table`
+- `get_table_relationships`
+- `health_check`
+- `list_environments`
+- `list_tables`
+- `migration_add`
+- `migration_apply`
+- `migration_dry_run`
+- `migration_preview`
+- `migration_status`
+- `profile_table`
+- `run_read_query`
+- `write_apply`
+- `write_preview`
+- `write_rollback`
+
+<!-- END GENERATED: tool-list -->
+
 | Tool | Mô tả |
 |---|---|
 | `health_check` | Kiểm tra kết nối (theo `environment`) |
@@ -95,47 +119,32 @@ Mọi `write_apply` / `write_rollback` / `migration_apply` được ghi vào b�
 
 ### 9.1. Nguồn connection — **bắt buộc ít nhất một**
 
-| Biến | Mặc định | Mô tả |
-|---|---|---|
-| `CH_DB_CONNECTION` | — | Connection string đơn (legacy) → đăng ký env tên `default`. |
-| `PG_ENV_<NAME>` | — | Connection string cho từng env, vd `PG_ENV_DEV`, `PG_ENV_STAGING`, `PG_ENV_PROD`. `<NAME>` được canonical hoá (`PRODUCTION`→`prod`, `DEVELOPMENT`→`dev`…). Ghi đè nguồn từ appsettings. |
-| `CH_APPSETTINGS_ROOTS` | — | CSV các thư mục chứa `appsettings*.json`; mỗi `appsettings.<Env>.json` → một env. Quét 1 cấp/thư mục. |
-| `CH_CONNECTION_NAME` | `CommunicationHubDb` | Tên key trong `ConnectionStrings` của appsettings để lấy connection. |
+<!-- BEGIN GENERATED: env-table -->
 
-Connection string nhận cả `postgres://user:pass@host:5432/db` lẫn `Server=...;Port=...;Database=...;Username=...;Password=...;` (Npgsql-style).
+| Variable | Required | Default | Notes |
+|---|---|---|---|
+| `CH_DB_CONNECTION` | one of `connection-source` | — | **secret** · Connection source. Need ONE of: CH_DB_CONNECTION \| PG_ENV_* \| CH_APPSETTINGS_ROOTS. |
+| `CH_APPSETTINGS_ROOTS` | one of `connection-source` | — | Alternative connection source: discover connection strings from .NET appsettings*.json. |
+| `PG_ENV_*` | one of `connection-source` | — | **secret** · Per-env connection strings, declared directly instead of discovered from appsettings. Any one satisfies the connection source. `PG_ENV_*` is a family, not a literal var name — the trailing underscore is part of the prefix, so PG_ENVIRONMENT does not count. |
+| `CH_CONNECTION_NAME` | no | `CommunicationHubDb` | Which named connection to pick out of appsettings. |
+| `PG_ALLOWED_ENVIRONMENTS` | no | `dev` | — |
+| `PG_WRITABLE_ENVIRONMENTS` | no | — | prod is ALWAYS read-only regardless of this value. |
+| `PG_DEFAULT_ENVIRONMENT` | no | `dev` | — |
+| `MCP_DB_DEFAULT_LIMIT` | no | `500` | — |
+| `MCP_DB_MAX_LIMIT` | no | `2000` | — |
+| `MCP_DB_DEFAULT_TIMEOUT_MS` | no | `30000` | — |
+| `MCP_DB_MAX_TIMEOUT_MS` | no | `60000` | — |
+| `PG_EXPLAIN_COST_WARN` | no | `1000000` *(code)* | EXPLAIN cost above which a read query is flagged as expensive. |
+| `PG_WRITE_ENABLED` | no | `false` | Data writes (preview→apply→rollback) OFF unless true. |
+| `PG_WRITE_APPROVAL_SECRET` | no | — | **secret** · Auto-generated per process if empty; set to keep tokens valid across restarts. |
+| `PG_WRITE_PREVIEW_TTL_MS` | no | `900000` *(code)* | Write-preview lifetime — 15 minutes. |
+| `PG_WRITE_SAMPLE_LIMIT` | no | `20` *(code)* | Rows sampled into a write preview. |
+| `PG_MIGRATION_ENABLED` | no | `false` | EF Core migration tooling OFF unless true. |
+| `PG_MIGRATION_PREVIEW_TTL_MS` | no | `3600000` *(code)* | Migration-preview lifetime — 1 hour. |
+| `CH_DOTNET_PROJECT` | no | — | Path to the EF Core project (the one holding the DbContext). |
+| `CH_DOTNET_STARTUP_PROJECT` | no | — | Startup project passed to `dotnet ef --startup-project`. |
+| `PG_DOTNET_TIMEOUT_MS` | no | `120000` *(code)* | Timeout for a `dotnet ef` invocation. |
 
-### 9.2. Đa môi trường
+21 variables. Defaults marked *(code)* are the server's own fallback and are **not** written into your agent config — set them only to override.
 
-| Biến | Mặc định | Mô tả |
-|---|---|---|
-| `PG_ALLOWED_ENVIRONMENTS` | (rỗng = cho phép tất cả) | CSV allowlist env được nạp; env ngoài danh sách bị bỏ qua. |
-| `PG_WRITABLE_ENVIRONMENTS` | `dev,staging,default` | CSV env được phép ghi. **`prod` luôn bị ép read-only** bất kể giá trị này. |
-| `PG_DEFAULT_ENVIRONMENT` | `dev` nếu có, không thì `default`, không thì env đầu tiên | Env dùng khi request không nêu `environment`. |
-
-### 9.3. Read query
-
-| Biến | Mặc định | Mô tả |
-|---|---|---|
-| `MCP_DB_DEFAULT_LIMIT` | `500` | Limit mặc định khi query không nêu `limit`. |
-| `MCP_DB_MAX_LIMIT` | `2000` | Trần limit (chặn trên cả `limit` do client gửi). |
-| `MCP_DB_DEFAULT_TIMEOUT_MS` | `30000` | `statement_timeout` mặc định / pool. |
-| `MCP_DB_MAX_TIMEOUT_MS` | `60000` | Trần `timeoutMs` của một query. |
-| `PG_EXPLAIN_COST_WARN` | `1000000` | Ngưỡng cost để gắn `costWarning` khi `run_read_query` chạy với `explain:true`. |
-
-### 9.4. Ghi có review (cần `PG_WRITE_ENABLED`)
-
-| Biến | Mặc định | Mô tả |
-|---|---|---|
-| `PG_WRITE_ENABLED` | `false` | Bật nhóm tool `write_*`. |
-| `PG_WRITE_APPROVAL_SECRET` | (tự sinh ngẫu nhiên/process) | Secret HMAC ký/xác minh approval token. Không cần set; chỉ set nếu muốn token sống qua restart. |
-| `PG_WRITE_PREVIEW_TTL_MS` | `900000` (15 phút) | TTL của preview + approval token (dùng chung cho cả migration preview). |
-| `PG_WRITE_SAMPLE_LIMIT` | `20` | Số hàng mẫu (`affectedSample`) trả về trong `write_preview`. |
-
-### 9.5. Migration EF Core (cần `PG_MIGRATION_ENABLED`)
-
-| Biến | Mặc định | Mô tả |
-|---|---|---|
-| `PG_MIGRATION_ENABLED` | `false` | Bật nhóm tool `migration_*` + `compare_environments`. |
-| `CH_DOTNET_PROJECT` | — | **Bắt buộc khi bật.** Project chứa `DbContext` + thư mục `Migrations` (vd `src/Infrastructure`). |
-| `CH_DOTNET_STARTUP_PROJECT` | — | **Bắt buộc khi bật.** Startup project (vd `src/Web`). |
-| `PG_DOTNET_TIMEOUT_MS` | `120000` | Timeout cho mỗi lệnh `dotnet ef`. |
+<!-- END GENERATED: env-table -->

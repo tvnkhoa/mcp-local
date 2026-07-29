@@ -46,6 +46,10 @@ gate fail for anyone without production access.
 
 ### What covers the gap
 
+`generate:check` sits alongside it and is pure comparison: it re-renders every generated file
+(`.env.example`, the README blocks, the tool lists) from the manifest and fails if the committed
+copy differs. No server is started, so it costs milliseconds.
+
 `contracts:check` is the credential-free boot check. It starts **all four servers over a real stdio
 MCP handshake** with placeholder environment values synthesized from `@mcp/manifest`,
 completes `initialize`, and calls `tools/list`. A server that compiles but cannot load fails here.

@@ -25,6 +25,7 @@ no value, and why an equivalence check proved it rather than a review claiming i
 | `getServer(key)` | One server, or `null` |
 | `serverKeys()` | Just the keys |
 | `evaluateEnv(server, presentKeys)` | "Is this server's environment satisfied?" |
+| `TOOL_LISTS`, `TOTAL_TOOL_COUNT` | generated tool names per server (76 total) |
 | `WORKSPACE_ROOT` | Absolute path to the workspace root |
 | `serverEntryPath(server)` / `serverDirPath(server)` | Absolute paths |
 | `ServerDescriptor`, `EnvField`, `ServerBuild`, `EnvEvaluation` | The types |
@@ -65,12 +66,38 @@ the tests do — and it breaks silently if `dist` ever becomes nested or the pac
 No type check can see that, so the test suite asserts the resolved directory really is the
 workspace root by looking for `tsconfig.base.json` and the root `package.json` name.
 
-## Known drift: `tools`
+## What is generated from this package
 
-`tools` is a hand-maintained subset for the generated skill, not the server's real `tools/list`.
-`codebase-index-local` names 12 of its 43; `postgres-mcp` names 16 of 17. Step **S-36** derives
-these from each server's registry and removes the possibility. Until then, treat the list as
-documentation, and `contracts/` as the truth.
+Three artifacts are rendered from the manifest, so each fact is declared once (S-35, S-36):
+
+| Artifact | Written by | Source |
+|---|---|---|
+| `<server>/.env.example` | `generate:env` | the `env` arrays |
+| `<server>/README.md` blocks | `generate:docs` | `env` + `tools`, spliced between `<!-- BEGIN/END GENERATED -->` markers |
+| `<server>/skill/SKILL.md` → `~/.claude/skills/` | the installer | `{{ENV_TABLE}}` / `{{TOOL_LIST}}` placeholders |
+
+`npm run generate:all` writes all of them; `npm run generate:check` fails on drift and runs inside
+`verify:all`. `mcp:doctor` reports a stale file per server as a warning.
+
+`tools` itself is **generated** into `src/generated/toolLists.ts` by `generate:tools`, from the
+committed `contracts/` snapshots. It used to be hand-maintained and had drifted to 12 of
+`codebase-index-local`'s 43 tools — so the installed skill advertised under a third of the server,
+and nothing noticed. The manifest's tests now assert the lists against `contracts/` directly.
+
+## `default` vs `codeDefault`
+
+The distinction matters, because `install-mcp` writes any field with a `default` (or a `prompt`)
+into `~/.claude.json` — which **pins** it.
+
+- **`default`** — the installer should write this. Use for things a user must actually configure.
+- **`codeDefault`** — documentation only, never written anywhere. What the server falls back to
+  when the var is unset.
+
+S-35 added 48 vars the code reads and the manifest had never declared. Almost all are tuning
+knobs, so they carry `codeDefault`: they show up in `.env.example` **commented out** and in the
+README table marked *(code)*, and the installer stays silent about them. Pinning 48 knobs at
+today's values in every user's config would have been the wrong outcome, and is why the two
+fields are separate rather than one `default` doing double duty.
 
 ## Test
 
@@ -78,6 +105,8 @@ documentation, and `contracts/` as the truth.
 npm test --workspace @mcp/manifest
 ```
 
-Covers the export surface, the `evaluateEnv` branches, the `WORKSPACE_ROOT` markers, and two
-hygiene invariants: no path default may contain a backslash (these strings land in JSON, where
-it is an escape character), and no `secret` field may carry a committed default.
+Covers the export surface, the `evaluateEnv` branches, the `WORKSPACE_ROOT` markers, the tool
+lists against `contracts/`, and the env hygiene invariants: no path default may contain a
+backslash (these strings land in JSON, where it is an escape character), no `secret` field may
+carry a committed default, no field may declare both `default` and `codeDefault`, and every field
+must name a `section`.

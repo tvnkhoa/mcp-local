@@ -16,6 +16,17 @@ uninstall/update, and a generated native skill all work for the new server.**
 Append an object to `SERVERS`. It is typed (`ServerDescriptor`), so a missing field is a
 compile error rather than a runtime surprise in the installer.
 
+Two fields are **not** written by hand (S-35, S-36):
+
+- **`env`** goes in `packages/manifest/src/envSpecs/<server>.ts`. Use `default` only for values
+  the installer should write into `~/.claude.json`; use `codeDefault` to document a fallback
+  without pinning it. Every field needs a `section`.
+- **`tools`** is generated from `contracts/`. Snapshot the new server first
+  (`npm run contracts:update -- --server <key>`), then `npm run generate:tools` — the manifest
+  throws at import time if a server has no generated tool list.
+
+Then `npm run generate:all` writes the server's `.env.example` and README blocks.
+
 > Moved here from `scripts/lib/manifest.mjs` in S-34. That file is now a re-export shim awaiting
 > deletion — edit the package. After editing, run `npm run build:packages` so `scripts/` sees it.
 

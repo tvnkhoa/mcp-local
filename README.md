@@ -102,6 +102,12 @@ node scripts/smoke-test.mjs  # integration test (requires build first)
 and `npm run benchmark:plan:check` (compact-mode token-savings gate). See its `CLAUDE.md` /
 `README.md` for the full pre-commit sequence and tool catalog.
 
+## Generated files
+
+A server's `.env.example`, its README's `<!-- BEGIN/END GENERATED -->` blocks, and its tool list
+are rendered from the manifest — edit `packages/manifest/src/envSpecs/<server>.ts`, then run
+`npm run generate:all`. `npm run generate:check` fails on drift and runs inside `verify:all`.
+
 ## Adding a new server
 
 Append an entry to `packages/manifest/src/servers.ts` and add `<dir>/skill/SKILL.md` — the

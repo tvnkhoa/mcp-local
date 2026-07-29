@@ -24,25 +24,56 @@ npm run build && node scripts/smoke-test.mjs
 
 ## Configuration (env)
 
-| Var | Default | Notes |
-| --- | --- | --- |
-| `OBSERVE_BASE_URL` | `https://observe.easyserv.au:10443` | Query API/UI host (not the OTLP ingest host) |
-| `OBSERVE_ORG` | `36619ZLzJ9IjUYKMqTT3MJC5A7Z` | `org_identifier` from the OpenObserve URL |
-| `OBSERVE_LOG_STREAM` | `wecrm_dev` | Logs stream |
-| `OBSERVE_TRACE_STREAM` | = log stream | Traces stream (override if different) |
-| `OBSERVE_AUTH_BASIC` | — | Pre-encoded Basic token (alternative to user/pass) |
-| `OBSERVE_USERNAME` / `OBSERVE_PASSWORD` | — | Basic-auth credentials, encoded at startup |
-| `OBSERVE_DEFAULT_SIZE` / `OBSERVE_MAX_SIZE` | 100 / 1000 | Result caps |
-| `OBSERVE_DEFAULT_LOOKBACK_MS` / `OBSERVE_MAX_LOOKBACK_MS` | 1h / 7d | Time-window caps |
-| `OBSERVE_TIMEOUT_MS` | 30000 | HTTP request timeout (per attempt) |
-| `OBSERVE_MAX_RETRIES` | 2 | Retry transient failures (network / 5xx / 429) with backoff; 0 disables |
-| `OBSERVE_LOG_COLUMNS` | — | Optional CSV column projection for log/trace queries (else `SELECT *`); auto-falls back to `SELECT *` on a missing-column error |
-| `OBSERVE_MSG_MAX_*` / `OBSERVE_EXC_MAX_*` | see below | Per-profile char caps for `message`/`exception` |
-| `NODE_TLS_REJECT_UNAUTHORIZED` | — | Set `0` only for self-signed TLS (last resort) |
+<!-- BEGIN GENERATED: env-table -->
+
+| Variable | Required | Default | Notes |
+|---|---|---|---|
+| `OBSERVE_BASE_URL` | **yes** | — | The OpenObserve UI/API host — NOT the OTLP ingest host. |
+| `OBSERVE_ORG` | **yes** | — | From the OpenObserve URL: org_identifier=… |
+| `OBSERVE_LOG_STREAM` | **yes** | `wecrm_dev` | — |
+| `OBSERVE_TRACE_STREAM` | **yes** | `wecrm_dev` | — |
+| `OBSERVE_AUTH_BASIC` | one of `observe-auth` | — | **secret** · Auth: provide this OR OBSERVE_USERNAME + OBSERVE_PASSWORD. Accepted with or without the "Basic " prefix. |
+| `OBSERVE_USERNAME` | one of `observe-auth` | — | — |
+| `OBSERVE_PASSWORD` | one of `observe-auth` | — | **secret** |
+| `OBSERVE_DEFAULT_SIZE` | no | `100` | — |
+| `OBSERVE_MAX_SIZE` | no | `1000` | — |
+| `OBSERVE_DEFAULT_LOOKBACK_MS` | no | `3600000` | 1 hour. |
+| `OBSERVE_MAX_LOOKBACK_MS` | no | `604800000` | 7 days. |
+| `OBSERVE_TIMEOUT_MS` | no | `30000` | — |
+| `OBSERVE_MAX_RETRIES` | no | `2` *(code)* | Retries for transient HTTP failures (network / 5xx / 429). 0 disables. |
+| `OBSERVE_LOG_COLUMNS` | no | — | Comma-separated columns instead of SELECT * (smaller/faster). Unset = SELECT *, which is schema-safe. A query naming a column the stream lacks auto-falls back to SELECT *. |
+| `OBSERVE_MSG_MAX_NANO` | no | `200` *(code)* | Caps the long `message` field per response profile. verbose keeps full text. |
+| `OBSERVE_MSG_MAX_COMPACT` | no | `400` *(code)* | — |
+| `OBSERVE_MSG_MAX_STANDARD` | no | `2000` *(code)* | — |
+| `OBSERVE_MSG_MAX_VERBOSE` | no | `unlimited` *(code)* | — |
+| `OBSERVE_EXC_MAX_NANO` | no | `0` *(code)* | Caps the `exception` field. 0 = drop the field entirely, which is what nano does. |
+| `OBSERVE_EXC_MAX_COMPACT` | no | `800` *(code)* | — |
+| `OBSERVE_EXC_MAX_STANDARD` | no | `6000` *(code)* | — |
+| `OBSERVE_EXC_MAX_VERBOSE` | no | `unlimited` *(code)* | — |
+| `NODE_TLS_REJECT_UNAUTHORIZED` | no | — | Set to 0 ONLY if the query host uses a self-signed/untrusted TLS certificate. This is a Node flag, not a server setting, and it disables certificate verification for the WHOLE process — every outbound TLS connection, not just OpenObserve. Prefer trusting the CA. |
+
+23 variables. Defaults marked *(code)* are the server's own fallback and are **not** written into your agent config — set them only to override.
+
+<!-- END GENERATED: env-table -->
 
 Provide exactly one of `OBSERVE_AUTH_BASIC` **or** `OBSERVE_USERNAME`+`OBSERVE_PASSWORD`.
 
 ## Tools
+
+<!-- BEGIN GENERATED: tool-list -->
+
+8 tools, namespaced `mcp__observe-mcp__<tool>`:
+
+- `describe_stream`
+- `get_trace_spans`
+- `list_streams`
+- `log_stats`
+- `run_observe_query`
+- `search_logs`
+- `tail_logs`
+- `trace_logs`
+
+<!-- END GENERATED: tool-list -->
 
 | Tool | Purpose |
 | --- | --- |

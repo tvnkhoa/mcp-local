@@ -3,7 +3,16 @@ import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import test from "node:test";
 
-import { SERVERS, WORKSPACE_ROOT, evaluateEnv, getServer, serverDirPath, serverEntryPath, serverKeys } from "./index.js";
+import {
+  SERVERS,
+  TOTAL_TOOL_COUNT,
+  WORKSPACE_ROOT,
+  evaluateEnv,
+  getServer,
+  serverDirPath,
+  serverEntryPath,
+  serverKeys
+} from "./index.js";
 import type { ServerDescriptor } from "./types.js";
 
 const byKey = (key: string): ServerDescriptor => {
@@ -141,6 +150,81 @@ test("path defaults are POSIX-separated", () => {
       }
     }
   }
+});
+
+// --- generated tool lists (S-36) ---------------------------------------------
+
+test("tool lists match the committed contract snapshots exactly", () => {
+  // The manifest's `tools` used to be hand-maintained and had drifted to 12 of 43 for
+  // codebase-index-local. This asserts the generator's output against the same source it read,
+  // so a hand-edit to either side fails here rather than silently shipping a wrong skill.
+  let total = 0;
+  for (const server of SERVERS) {
+    const snapshot = JSON.parse(
+      readFileSync(path.join(WORKSPACE_ROOT, "contracts", `${server.key}.json`), "utf8")
+    ) as { tools: { name: string }[] };
+    const expected = snapshot.tools.map((t) => t.name).sort();
+    assert.deepEqual([...server.tools], expected, `${server.key}: tool list is stale`);
+    total += server.tools.length;
+  }
+  assert.equal(total, TOTAL_TOOL_COUNT);
+  assert.equal(total, 76, "the workspace advertises 76 tools; update this number deliberately");
+});
+
+test("codebase-index-local advertises all 43 of its tools", () => {
+  // The specific drift S-36 existed to fix — pinned so it cannot silently return.
+  assert.equal(byKey("codebase-index-local").tools.length, 43);
+});
+
+// --- env field hygiene (S-35) -------------------------------------------------
+
+test("no field carries both default and codeDefault", () => {
+  // They mean opposite things: `default` is written into the agent config, `codeDefault` documents
+  // what the server does when nothing is written. A field with both tells the reader neither.
+  for (const server of SERVERS) {
+    for (const field of server.env) {
+      const both = field.default !== undefined && field.codeDefault !== undefined;
+      assert.equal(both, false, `${server.key}/${field.name}: has default AND codeDefault`);
+    }
+  }
+});
+
+test("every env field declares a section", () => {
+  // The generated .env.example groups by section; a field without one lands in a fallback bucket
+  // and reads like an afterthought.
+  for (const server of SERVERS) {
+    for (const field of server.env) {
+      assert.ok(field.section, `${server.key}/${field.name}: no section`);
+    }
+  }
+});
+
+test("familyExamples belong to prefix fields and match the prefix", () => {
+  for (const server of SERVERS) {
+    for (const field of server.env) {
+      if (field.familyExamples === undefined) continue;
+      assert.ok(field.prefix, `${server.key}/${field.name}: familyExamples without a prefix`);
+      for (const example of field.familyExamples) {
+        assert.ok(
+          example.startsWith(field.prefix as string),
+          `${server.key}: "${example}" does not start with "${field.prefix}"`
+        );
+      }
+    }
+  }
+});
+
+test("the env contract covers every server, and grew as S-35 intended", () => {
+  // 89 vars across four servers, up from the 41 the manifest declared before S-35. The count is
+  // asserted so that dropping a declaration is a test failure rather than a quiet regression in
+  // the generated docs.
+  const counts = Object.fromEntries(SERVERS.map((s) => [s.key, s.env.length]));
+  assert.deepEqual(counts, {
+    "codebase-index-local": 39,
+    "postgres-mcp": 21,
+    "observe-mcp": 23,
+    "bitbucket-mcp": 11
+  });
 });
 
 test("no env default carries a secret value", () => {

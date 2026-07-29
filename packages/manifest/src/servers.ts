@@ -1,17 +1,28 @@
 /**
  * Every MCP server in this workspace.
  *
- * To add one: append an entry here and add `<dir>/skill/SKILL.md`. The installer, doctor, skill
- * generator, contract snapshotter and server runner all pick it up with no further edits — see
- * `.claude/skills/mcp-skill-authoring/SKILL.md` for the full contract.
+ * To add one: append an entry here, add its env contract under `envSpecs/`, and add
+ * `<dir>/skill/SKILL.md`. The installer, doctor, skill generator, contract snapshotter and server
+ * runner all pick it up with no further edits — see `.claude/skills/mcp-skill-authoring/SKILL.md`.
  *
- * Ported verbatim from `scripts/lib/manifest.mjs` in S-34. Not one value changed: this data is
- * what `~/.claude.json` is written from, so a "tidy-up" here silently rewrites working
- * configuration on the next install.
+ * Two fields are deliberately not written here:
+ *
+ * - `env` lives in `envSpecs/` — 89 fields across four servers do not belong in one file, and
+ *   keeping them separate means a change to one server's contract has a diff that says so.
+ * - `tools` is **generated** from `contracts/` by `scripts/generate-tools.mjs`. It used to be a
+ *   hand-maintained subset and had drifted to 12 of 43 tools for `codebase-index-local` (S-36).
+ *
+ * This data is what `~/.claude.json` gets written from, so a "tidy-up" here silently rewrites
+ * working agent configuration on the next install.
  */
 
 import { toPosixPath } from "@mcp/core";
 
+import { bitbucketEnv } from "./envSpecs/bitbucket.js";
+import { codebaseIndexEnv } from "./envSpecs/codebaseIndex.js";
+import { observeEnv } from "./envSpecs/observe.js";
+import { postgresEnv } from "./envSpecs/postgres.js";
+import { TOOL_LISTS } from "./generated/toolLists.js";
 import { WORKSPACE_ROOT } from "./paths.js";
 import type { ServerDescriptor } from "./types.js";
 
@@ -19,10 +30,21 @@ import type { ServerDescriptor } from "./types.js";
  * The workspace root as it must appear *inside a config value*.
  *
  * Forward slashes even on Windows: these strings become defaults in `~/.claude.json` and in
- * `CODEBASE_INDEX_ALLOWED_ROOTS`, where a backslash is an escape character. `toPosixPath` is
- * `@mcp/core`'s, and byte-identical to the `toConfigPath` this file used before S-34.
+ * `CODEBASE_INDEX_ALLOWED_ROOTS`, where a backslash is an escape character.
  */
 const ROOT = toPosixPath(WORKSPACE_ROOT);
+
+/** Fails loudly rather than advertising a server with no tools, which would render an empty skill. */
+function toolsFor(key: string): readonly string[] {
+  const tools = TOOL_LISTS[key];
+  if (tools === undefined || tools.length === 0) {
+    throw new Error(
+      `No generated tool list for "${key}". Run \`npm run generate:tools\` after adding the ` +
+        `server's contract snapshot (\`npm run contracts:update -- --server ${key}\`).`
+    );
+  }
+  return tools;
+}
 
 export const SERVERS: readonly ServerDescriptor[] = [
   {
@@ -34,26 +56,8 @@ export const SERVERS: readonly ServerDescriptor[] = [
     build: { install: true, guards: ["guard:no-llm-runtime"] },
     smokeTest: "node scripts/smoke-test.mjs",
     skillSource: "codebase-index-mcp/skill",
-    tools: [
-      "list_repositories", "index_repository", "health_check",
-      "search_symbols", "get_symbol_context_pack", "find_impact_files",
-      "trace_execution_flow", "get_call_chain", "search_regex",
-      "refactor_replace_preview", "refactor_replace_apply", "refactor_replace_rollback",
-    ],
-    env: [
-      { name: "CODEBASE_INDEX_ALLOWED_ROOTS", required: true, group: "roots", default: ROOT,
-        prompt: "Allowed roots (comma-separated absolute paths)",
-        note: "The ONLY required var. Comma-separated absolute paths the server may index." },
-      { name: "CODEBASE_INDEX_DB_PATH", required: false, default: `${ROOT}/mcp-codebase-index.db`,
-        prompt: "SQLite DB path",
-        note: "Where the code graph is stored. Defaults next to the workspace." },
-      { name: "CODEBASE_INDEX_DOCS_INDEXING_ENABLED", required: false, default: "false" },
-      { name: "CODEBASE_INDEX_DOCS_TOOLS_ENABLED", required: false, default: "false" },
-      { name: "CODEBASE_INDEX_TELEMETRY_ENABLED", required: false, default: "false" },
-      { name: "CODEBASE_INDEX_WATCH_AUTO_START", required: false, default: "false" },
-      { name: "CODEBASE_INDEX_REFACTOR_APPROVAL_SECRET", required: false, secret: true,
-        note: "HMAC secret for refactor approval tokens. Auto-generated per process if unset." },
-    ],
+    tools: toolsFor("codebase-index-local"),
+    env: codebaseIndexEnv(ROOT)
   },
 
   {
@@ -65,37 +69,8 @@ export const SERVERS: readonly ServerDescriptor[] = [
     build: { install: true, guards: [] },
     smokeTest: "node scripts/smoke-test.mjs",
     skillSource: "postgres-mcp/skill",
-    tools: [
-      "list_environments", "list_tables", "describe_table", "get_table_relationships",
-      "run_read_query", "profile_table", "compare_environments", "data_diff",
-      "write_preview", "write_apply", "write_rollback",
-      "migration_status", "migration_add", "migration_preview", "migration_dry_run", "migration_apply",
-    ],
-    env: [
-      { name: "CH_DB_CONNECTION", required: false, secret: true, group: "connection-source",
-        prompt: "Postgres connection string (Npgsql; blank to use PG_ENV_* or appsettings)",
-        note: "Connection source. Need ONE of: CH_DB_CONNECTION | PG_ENV_* | CH_APPSETTINGS_ROOTS." },
-      { name: "CH_APPSETTINGS_ROOTS", required: false, group: "connection-source",
-        prompt: "appsettings.json root(s) to discover connections (optional)",
-        note: "Alternative connection source: discover connection strings from .NET appsettings*.json." },
-      { name: "PG_ENV_*", prefix: "PG_ENV_", required: false, secret: true, group: "connection-source",
-        note: "Per-env connections, e.g. PG_ENV_DEV / PG_ENV_STAGING / PG_ENV_PROD. Any one satisfies the connection source." },
-      { name: "CH_CONNECTION_NAME", required: false, default: "CommunicationHubDb" },
-      { name: "PG_ALLOWED_ENVIRONMENTS", required: false, default: "dev" },
-      { name: "PG_WRITABLE_ENVIRONMENTS", required: false, default: "",
-        note: "prod is ALWAYS read-only regardless of this value." },
-      { name: "PG_DEFAULT_ENVIRONMENT", required: false, default: "dev" },
-      { name: "MCP_DB_DEFAULT_LIMIT", required: false, default: "500" },
-      { name: "MCP_DB_MAX_LIMIT", required: false, default: "2000" },
-      { name: "MCP_DB_DEFAULT_TIMEOUT_MS", required: false, default: "30000" },
-      { name: "MCP_DB_MAX_TIMEOUT_MS", required: false, default: "60000" },
-      { name: "PG_WRITE_ENABLED", required: false, default: "false",
-        note: "Data writes (preview→apply→rollback) OFF unless true." },
-      { name: "PG_WRITE_APPROVAL_SECRET", required: false, secret: true,
-        note: "Auto-generated per process if empty; set to keep tokens valid across restarts." },
-      { name: "PG_MIGRATION_ENABLED", required: false, default: "false",
-        note: "EF Core migration tooling OFF unless true." },
-    ],
+    tools: toolsFor("postgres-mcp"),
+    env: postgresEnv
   },
 
   {
@@ -107,30 +82,8 @@ export const SERVERS: readonly ServerDescriptor[] = [
     build: { install: true, guards: [] },
     smokeTest: "node scripts/smoke-test.mjs",
     skillSource: "observe-mcp/skill",
-    tools: [
-      "list_streams", "describe_stream", "search_logs", "tail_logs",
-      "trace_logs", "get_trace_spans", "log_stats", "run_observe_query",
-    ],
-    env: [
-      { name: "OBSERVE_BASE_URL", required: true,
-        prompt: "OpenObserve base URL (query API host)",
-        note: "The OpenObserve UI/API host — NOT the OTLP ingest host." },
-      { name: "OBSERVE_ORG", required: true, prompt: "Organization identifier" },
-      { name: "OBSERVE_LOG_STREAM", required: true, prompt: "Log stream name", default: "wecrm_dev" },
-      { name: "OBSERVE_TRACE_STREAM", required: true, prompt: "Trace stream name", default: "wecrm_dev" },
-      { name: "OBSERVE_AUTH_BASIC", required: false, secret: true, group: "observe-auth",
-        prompt: "Pre-encoded Basic token (blank to use username+password)",
-        note: "Auth: provide this OR OBSERVE_USERNAME + OBSERVE_PASSWORD." },
-      { name: "OBSERVE_USERNAME", required: false, group: "observe-auth",
-        prompt: "OpenObserve username (if not using OBSERVE_AUTH_BASIC)" },
-      { name: "OBSERVE_PASSWORD", required: false, secret: true, group: "observe-auth",
-        prompt: "OpenObserve password" },
-      { name: "OBSERVE_DEFAULT_SIZE", required: false, default: "100" },
-      { name: "OBSERVE_MAX_SIZE", required: false, default: "1000" },
-      { name: "OBSERVE_DEFAULT_LOOKBACK_MS", required: false, default: "3600000" },
-      { name: "OBSERVE_MAX_LOOKBACK_MS", required: false, default: "604800000" },
-      { name: "OBSERVE_TIMEOUT_MS", required: false, default: "30000" },
-    ],
+    tools: toolsFor("observe-mcp"),
+    env: observeEnv
   },
 
   {
@@ -142,28 +95,9 @@ export const SERVERS: readonly ServerDescriptor[] = [
     build: { install: true, guards: [] },
     smokeTest: "node scripts/smoke-test.mjs",
     skillSource: "bitbucket-mcp/skill",
-    tools: [
-      "list_repositories", "get_repository", "list_branches",
-      "list_pull_requests", "get_pull_request", "get_pull_request_diff",
-      "create_pull_request", "health_check",
-    ],
-    env: [
-      { name: "BITBUCKET_WORKSPACE", required: true, prompt: "Bitbucket workspace slug" },
-      { name: "BITBUCKET_ACCESS_TOKEN", required: false, secret: true, group: "bitbucket-auth",
-        prompt: "Access token for Bearer auth (blank to use email + API token)",
-        note: "Auth: this (Bearer) OR BITBUCKET_EMAIL + BITBUCKET_API_TOKEN (Basic)." },
-      { name: "BITBUCKET_EMAIL", required: false, group: "bitbucket-auth",
-        prompt: "Atlassian account email (Basic auth)",
-        note: "siliconstack workspace uses an Atlassian API token → Basic auth (email + token)." },
-      { name: "BITBUCKET_API_TOKEN", required: false, secret: true, group: "bitbucket-auth",
-        prompt: "Atlassian API token (Basic auth)" },
-      { name: "BITBUCKET_DEFAULT_REPO", required: false, prompt: "Default repository slug (optional)" },
-      { name: "BITBUCKET_WRITE_ENABLED", required: false, default: "false",
-        note: "create_pull_request is DISABLED unless true." },
-      { name: "BITBUCKET_TIMEOUT_MS", required: false, default: "30000" },
-      { name: "BITBUCKET_MAX_RETRIES", required: false, default: "2" },
-    ],
-  },
+    tools: toolsFor("bitbucket-mcp"),
+    env: bitbucketEnv
+  }
 ];
 
 export function getServer(key: string): ServerDescriptor | null {

@@ -5,7 +5,7 @@ Phase H's row updated after the S-28 SDK work landed. Every
 row cites the artifact that proves it. Where no artifact was found, the row says so
 rather than guessing.
 
-**31 of 44 done · 1 partial · 1 skipped by decision · 11 open.** **Phase H is complete** —
+**33 of 44 done · 1 partial · 1 skipped by decision · 9 open.** **Phase H is complete** —
 S-31, S-32 and S-33 all landed 2026-07-28. All 43 codebase-index tools are on the SDK registry,
 the legacy bridge is gone, and **all four servers now run on `@mcp/sdk`**. S-33 carried one
 intended contract change (unknown tool → `not_found`); see [the S-33 section](#s-33--the-decision-and-the-one-contract-change).
@@ -74,7 +74,7 @@ that the plan folded into S-31. **This document's numbering is authoritative.**
 | S-12 Dependency-rule guard | ✅ | same |
 | S-13 Contract guard + platform no-LLM guard | ✅ | same; `guard:no-llm-runtime` also runs per-server |
 
-Current output: **0 errors, 34 warnings, 1 accepted exemption across 374 files.** Warn mode is
+Current output: **0 errors, 34 warnings, 1 accepted exemption across 384 files.** Warn mode is
 correct until S-41 — flipping now would turn 34 warnings into 34 build failures.
 
 ## Phase E — Shared Core Extraction · 7/7 ✅
@@ -245,13 +245,100 @@ report the envelope. **Kept, as a fix.** The old behaviour lost the `PolicyViola
 into an opaque protocol error and was inconsistent with the other 42 tools *and* with its own two
 siblings; the missing `await` reads as an oversight, not a decision. Pinned by a test now.
 
-## Phase I — Manifest Generation · 1/3
+## Phase I — Manifest Generation · 3/3 ✅
 
 | Step | Status | Evidence |
 |---|---|---|
 | S-34 Convert manifest to `@mcp/manifest` | ✅ | `packages/manifest` (tier 5); `scripts/lib/manifest.mjs` is now a shim. Equivalence proved before the switch — see below |
-| S-35 Generate `.env.example` | ❌ | four `.env.example` files exist but are hand-written — no generator |
-| S-36 Generate README/skill tables + tool lists | ❌ | no generator found |
+| S-35 Generate `.env.example` | ✅ | `scripts/generate-env.mjs`; all four files generated. The manifest gained **48** vars it had never declared — see below |
+| S-36 Generate README/skill tables + tool lists | ✅ | `scripts/generate-{tools,docs}.mjs`; `tools` derived from `contracts/` — 76, and the installed skills now advertise all of them |
+
+### S-35 / S-36 · the env contract was wrong in every direction
+
+**The numbers the plan predicted were optimistic.** It expected key counts of 7 / 19 / 12 / 9
+(manifest / `.env.example` / README / skill) for one server and a reconciliation job. The actual
+spread across all four:
+
+| | manifest, before | `.env.example`, before | **read by the code** |
+|---|---|---|---|
+| `codebase-index-local` | 7 | 16 | **39** |
+| `postgres-mcp` | 14 | 22 | **21** |
+| `observe-mcp` | 12 | 21 | **23** |
+| `bitbucket-mcp` | 8 | 9 | **11** |
+
+The manifest declared **41 of 89**. Not one of the three sources agreed with another, and nothing
+checked — which is exactly the condition S-35 exists to end, just larger than estimated.
+
+#### How the real list was found
+
+Not by grepping `process.env`. The migrated servers read env through
+`createEnvReader(defaultEnvSource())` and local wrappers, so the keys appear only as string
+literals inside calls like `env.string("OBSERVE_BASE_URL", …)`. A regex over `process.env` missed
+27 of codebase-index's 39 vars, and a first attempt "found" `OBSERVE_BASE_URL` as *declared but
+unread* — obviously false, which is what exposed the method as unsound.
+
+What worked: boot each server with `process.env` replaced by a recording `Proxy` and capture every
+key actually read, then read each call site for its true fallback. That found vars no static scan
+would have — including `CODEBASE_INDEX_WATCH_ACTIVE_ONLY`, whose default is **`true`**, the only
+boolean in that server that does not default to false.
+
+#### `default` would have been the wrong field
+
+`install-mcp` writes any field with a `default` (or `prompt`) into `~/.claude.json`, which *pins*
+it. Declaring 48 tuning knobs with defaults would have written 48 lines into every user's agent
+config and frozen them at today's values — so a later change to a code default would silently stop
+applying.
+
+Hence `codeDefault`: documentation only, never written anywhere. Those vars appear in
+`.env.example` **commented out** and in the README marked *(code)*, and the installer stays silent.
+A test asserts no field declares both.
+
+#### Reviewing the diff caught three things worth keeping and one bug
+
+The plan is explicit that the first generation is *"a diff to review, not to trust"*. Comparing
+generated output against the committed originals found four keys that would have been dropped:
+
+- **`NODE_TLS_REJECT_UNAUTHORIZED`** — real operational guidance for a self-signed query host.
+  Not an observe-mcp variable, but preserved with a note that it disables certificate
+  verification **process-wide**, not just for OpenObserve.
+- **`PG_ENV_DEV` / `PG_ENV_STAGING` / `PG_ENV_PROD`** — the family's concrete members. The first
+  renderer emitted only `PG_ENV_*`, which is worse than what it replaced: a reader still has to
+  guess the suffix. `familyExamples` restores them.
+- **`LARGE_FILE_THRESHOLD_BYTES`** — correctly dropped. The code reads only
+  `CODEBASE_INDEX_LARGE_FILE_THRESHOLD_BYTES`; the un-prefixed name in the hand-written file
+  **did nothing at all**. A documentation bug that had been sitting there being copied.
+
+`PG_ALLOWED_ENVIRONMENTS` also tightened from `dev,staging,prod` to `dev` — the committed example
+carried one developer's local convenience as though it were the default.
+
+#### S-36 · the drift was worse than the plan's example
+
+`tools` was hand-maintained and named 12 of `codebase-index-local`'s 43 and 16 of
+`postgres-mcp`'s 17. The **installed skill** therefore advertised under a third of the largest
+server, so a model reading it could not know most tools existed.
+
+It is now generated into `src/generated/toolLists.ts` from `contracts/` — the committed
+`tools/list` snapshots, which `contracts:check` already verifies against the running servers in
+CI. Reading the snapshot rather than booting again keeps the generator free of a build dependency
+on the manifest it writes into. After `mcp:update -- --all`, the installed skills list
+**43 / 17 / 8 / 8 = 76**, matching `contracts/`.
+
+READMEs get generated blocks between `<!-- BEGIN/END GENERATED: … -->` markers, and **only** the
+contiguous env table and tool list are replaced. Two of these READMEs are in Vietnamese and
+`codebase-index-mcp`'s carries a 60-line annotated tool catalogue that is more useful than any
+generated list — replacing those wholesale would have been a downgrade dressed up as automation.
+
+#### The gate, and proof it gates
+
+`generate:check` runs inside `verify:all`, and `mcp:doctor` reports staleness per server as a
+**warning** — stale docs do not stop a server from working, and the doctor reports state rather
+than gating on it.
+
+Verified by hand-editing a generated `.env.example`: `generate:check` exited **1**, `verify:all`
+exited **1**, and the doctor showed `WARN generated stale: .env.example` against `observe-mcp`
+alone. Reverted, both returned to 0.
+
+---
 
 ### S-34 · the port, and the two things the plan did not account for
 

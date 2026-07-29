@@ -58,7 +58,7 @@ root aggregates work uniformly. They are driven by `@mcp/manifest`, so a newly
 registered server is covered automatically.
 
 ```bash
-npm run verify:all     # the gate: packages + servers + tool contracts. Credential-free.
+npm run verify:all     # the gate: packages + servers + tool contracts + generated docs. Credential-free.
 npm run verify:live    # the four live smoke tests. NEEDS REAL CREDENTIALS.
 ```
 
@@ -70,8 +70,21 @@ credential-free boot check, and it is what catches a module that compiles but ca
 The live smoke tests reach real Postgres / OpenObserve / Bitbucket and are **not** in CI. Run
 `verify:live` before a release. See `docs/migration/ci.md`.
 
-Narrower targets: `verify:packages`, `verify:servers`, `test:servers`, `contracts:check`, and
-`node scripts/run-servers.mjs <script> [--server <key>]`.
+Narrower targets: `verify:packages`, `verify:servers`, `test:servers`, `contracts:check`,
+`generate:check`, and `node scripts/run-servers.mjs <script> [--server <key>]`.
+
+### Generated files — do not hand-edit (S-35, S-36)
+
+Each server's `.env.example`, the `<!-- BEGIN/END GENERATED -->` blocks in its `README.md`, and
+its `tools` list are **rendered from `@mcp/manifest`**. Edit the manifest, then regenerate:
+
+```bash
+npm run generate:all     # tools (from contracts/) -> env -> README blocks
+npm run generate:check   # fails on drift; runs inside verify:all
+```
+
+`mcp:doctor` reports a stale generated file per server as a warning. Env vars are declared once,
+in `packages/manifest/src/envSpecs/<server>.ts` — 89 across the four servers.
 
 ## Architecture (codebase-index-mcp)
 

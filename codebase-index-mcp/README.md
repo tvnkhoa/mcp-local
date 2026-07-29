@@ -17,6 +17,56 @@ npm install && npm run build
 
 ## Tool Catalog
 
+<!-- BEGIN GENERATED: tool-list -->
+
+43 tools, namespaced `mcp__codebase-index-local__<tool>`:
+
+- `change_impact`
+- `change_value_representation`
+- `dead_code_scan`
+- `detect_changes`
+- `detect_circular_dependencies`
+- `find_entry_points`
+- `find_field_accesses`
+- `find_impact_files`
+- `find_implementations`
+- `find_package_consumers`
+- `find_symbol_at_line`
+- `get_call_chain`
+- `get_change_context`
+- `get_cross_repo_impact`
+- `get_dependency_graph`
+- `get_feature_bundle`
+- `get_file_context`
+- `get_file_summary`
+- `get_folder_summary`
+- `get_persistence_mapping`
+- `get_symbol_blame`
+- `get_symbol_context_pack`
+- `get_symbol_detail`
+- `get_symbol_source`
+- `get_value_contract_impact`
+- `health_check`
+- `index_repository`
+- `link_tests_to_source`
+- `list_repositories`
+- `orient`
+- `query_docs`
+- `query_graph`
+- `refactor_replace_apply`
+- `refactor_replace_preview`
+- `refactor_replace_rollback`
+- `refactor_symbol_migration`
+- `rename_assist`
+- `route_map`
+- `search_literals`
+- `search_regex`
+- `search_symbols`
+- `trace_execution_flow`
+- `watch_repo`
+
+<!-- END GENERATED: tool-list -->
+
 ### Indexing & Health
 | Tool | Description |
 |------|-------------|
@@ -126,53 +176,53 @@ Refactor tools: `refactor_replace_preview` and `refactor_replace_apply` support 
 
 ### Required
 
-| Variable | Description |
-|----------|-------------|
-| `CODEBASE_INDEX_ALLOWED_ROOTS` | Comma-separated absolute paths allowed for indexing |
+<!-- BEGIN GENERATED: env-table -->
 
-### Recommended
+| Variable | Required | Default | Notes |
+|---|---|---|---|
+| `CODEBASE_INDEX_ALLOWED_ROOTS` | **yes** | `D:/1.SourceCode/mcp-local` | The ONLY required var. Comma-separated absolute paths the server may index. Use the exact path `list_repositories` reports — changing drive-letter casing or slash style causes allowlist rejection. |
+| `CODEBASE_INDEX_DB_PATH` | no | `D:/1.SourceCode/mcp-local/mcp-codebase-index.db` | Where the code graph is stored. Defaults next to the workspace. |
+| `CODEBASE_INDEX_DOCS_INDEXING_ENABLED` | no | `false` | — |
+| `CODEBASE_INDEX_DOCS_TOOLS_ENABLED` | no | `false` | — |
+| `CODEBASE_INDEX_TELEMETRY_ENABLED` | no | `false` | — |
+| `CODEBASE_INDEX_TELEMETRY_SAMPLE_RATE` | no | `1` *(code)* | Ratio 0–1. Only meaningful when telemetry is enabled. |
+| `CODEBASE_INDEX_WATCH_AUTO_START` | no | `false` | Watchless by default, per the workspace's MCP hard-mode policy. |
+| `CODEBASE_INDEX_WATCH_ACTIVE_ONLY` | no | `true` *(code)* | Defaults to TRUE — only the active repo is watched. The one boolean here whose default is not false. |
+| `CODEBASE_INDEX_WATCH_ACTIVE_TTL_MS` | no | `900000` *(code)* | Idle watcher stop timeout. Clamped to 5s–24h. |
+| `CODEBASE_INDEX_WATCH_DEBOUNCE_MS` | no | `500` *(code)* | — |
+| `CODEBASE_INDEX_WATCH_BATCH_SIZE` | no | — | — |
+| `CODEBASE_INDEX_WATCH_MAX_FILES_PER_RUN` | no | — | — |
+| `CODEBASE_INDEX_WATCH_MAX_QUEUED_EVENTS` | no | — | — |
+| `CODEBASE_INDEX_AUTO_WATCH_REPOS` | no | — | Comma-separated repoIds to auto-watch at boot. Unset = none. |
+| `CODEBASE_INDEX_MAX_FILES_PER_RUN` | no | `20000` *(code)* | — |
+| `CODEBASE_INDEX_MAX_FILE_SIZE_BYTES` | no | `500000` *(code)* | — |
+| `CODEBASE_INDEX_LARGE_FILE_THRESHOLD_BYTES` | no | `0` *(code)* | 0 = no large-file special casing. |
+| `CODEBASE_INDEX_MAX_RESULT_LIMIT` | no | `500` *(code)* | Hard ceiling on any tool's `limit`. |
+| `CODEBASE_INDEX_MAX_DEPTH` | no | `5` *(code)* | Hard ceiling on traversal `depth`. |
+| `CODEBASE_INDEX_LARGE_REPO_PROFILE` | no | `auto` *(code)* | Performance profile: auto \| standard/off \| large/balanced \| very-large/aggressive. |
+| `CODEBASE_INDEX_PARSE_WORKERS` | no | — | Worker-pool size. Unset = derived from CPU count. |
+| `CODEBASE_INDEX_PARSE_TIMEOUT_MS` | no | `5000` *(code)* | Per-file parse timeout. |
+| `CODEBASE_INDEX_PARSE_JOB_TIMEOUT_MS` | no | `20000` *(code)* | Whole-batch timeout. |
+| `CODEBASE_INDEX_MAX_CALL_EDGES_PER_FILE` | no | — | Override; unset = the extractor's own limit. |
+| `CODEBASE_INDEX_MIN_EDGE_CONFIDENCE` | no | — | Ratio 0–1. Drops low-confidence edges at extraction time. |
+| `CODEBASE_INDEX_MAX_STRING_LITERALS_PER_FILE` | no | — | — |
+| `CODEBASE_INDEX_MIN_STRING_LITERAL_LENGTH` | no | — | — |
+| `NUGET_NAMESPACE_MAP` | no | — | Extra NuGet package → namespace mappings for .NET dependency edges. |
+| `CODEBASE_INDEX_SUBTX_SIZE` | no | `20` *(code)* | Files per SQLite sub-transaction. |
+| `CODEBASE_INDEX_CHECKPOINT_EVERY_N_BATCHES` | no | `1` *(code)* | WAL checkpoint cadence. |
+| `CODEBASE_INDEX_MAX_UNRESOLVED_RESOLVE_ROWS` | no | — | Cap on unresolved pairs resolved after extraction. Profile-dependent when unset (0 = unlimited for standard/very-large, 120000 for large). |
+| `CODEBASE_INDEX_POST_RESOLVE_TYPE_REFS` | no | `true` *(code)* | — |
+| `CODEBASE_INDEX_POST_RESOLVE_PROPERTY_REFS` | no | `true` *(code)* | — |
+| `CODEBASE_INDEX_CROSS_REPO_NAMESPACES` | no | — | Namespaces treated as shared when resolving cross-repo edges. |
+| `CODEBASE_INDEX_REFACTOR_APPROVAL_SECRET` | no | — | **secret** · HMAC secret for refactor approval tokens. Auto-generated per process if unset; set it to keep tokens valid across restarts. |
+| `CODEBASE_INDEX_REFACTOR_PREVIEW_TTL_MS` | no | `1800000` *(code)* | Preview/token lifetime — 30 minutes. |
+| `CODEBASE_INDEX_REFACTOR_STRICT_APPROVAL` | no | `false` *(code)* | When true, startup fails unless CODEBASE_INDEX_REFACTOR_APPROVAL_SECRET is set. |
+| `CODEBASE_INDEX_INDEX_LOG` | no | — | Enables verbose index-progress logging on stderr. |
+| `CODEBASE_INDEX_LLM_ENABLED` | no | `false` *(code)* | Runtime LLM invocation is prohibited by design. Setting this to true ABORTS STARTUP, and `guard:no-llm-runtime` statically verifies no LLM client is importable. Declared here so the constraint is documented, not so it can be turned on. |
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `CODEBASE_INDEX_DB_PATH` | `./codebase-index.db` | SQLite database path. Use an absolute path outside the project. |
-| `CODEBASE_INDEX_REFACTOR_APPROVAL_SECRET` | — | HMAC secret for refactor approval tokens. Generate: `node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"` |
-| `CODEBASE_INDEX_TELEMETRY_ENABLED` | `false` | Enable per-tool telemetry to stderr |
-| `CODEBASE_INDEX_INDEX_LOG` | — | Indexing stderr verbosity. Unset: quiet — only warnings + one final summary line (live progress is streamed to the MCP host via `notifications/progress`). `verbose`: full line-by-line `[index-*]` logs (CI / debugging a hang). `quiet`: suppress even the summary line. |
+39 variables. Defaults marked *(code)* are the server's own fallback and are **not** written into your agent config — set them only to override.
 
-### Common Optional
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `CODEBASE_INDEX_DOCS_INDEXING_ENABLED` | `false` | Index markdown/docs lane |
-| `CODEBASE_INDEX_DOCS_TOOLS_ENABLED` | `false` | Enable `query_docs`, `find_stale_docs`, `find_doc_coverage` |
-| `CODEBASE_INDEX_MAX_FILES_PER_RUN` | `20000` | Hard cap per index run |
-| `CODEBASE_INDEX_LARGE_REPO_PROFILE` | `auto` | `auto\|standard\|large\|very-large` |
-| `CODEBASE_INDEX_WATCH_AUTO_START` | `false` | Auto-start watchers on startup. Keep `false`; use `watch_repo` manually. |
-| `CODEBASE_INDEX_LLM_ENABLED` | `false` | When `true`, startup is rejected — LLM runtime is prohibited by policy. |
-
-### Refactor Optional
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `CODEBASE_INDEX_REFACTOR_STRICT_APPROVAL` | `false` | Reject startup if approval secret is not set |
-| `CODEBASE_INDEX_REFACTOR_PREVIEW_TTL_MS` | `1800000` | Preview token TTL (30 min) |
-
-### Watch Optional
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `CODEBASE_INDEX_WATCH_DEBOUNCE_MS` | `1200` | File change debounce |
-| `CODEBASE_INDEX_WATCH_MAX_FILES_PER_RUN` | `4000` | Max files per incremental watch run |
-| `CODEBASE_INDEX_WATCH_ACTIVE_TTL_MS` | `900000` | Idle watcher auto-stop TTL (15 min) |
-
-### Advanced Tuning
-
-| Variable | Description |
-|----------|-------------|
-| `CODEBASE_INDEX_BATCH_BYTE_BUDGET` | Per-batch byte budget in pipeline |
-| `CODEBASE_INDEX_MAX_CALL_EDGES_PER_FILE` | CALLS edge cap per file |
-| `CODEBASE_INDEX_MIN_EDGE_CONFIDENCE` | Minimum edge confidence filter in extractor |
-| `CODEBASE_INDEX_POST_RESOLVE_TYPE_REFS` | Force enable/disable post-phase type-ref resolution |
+<!-- END GENERATED: env-table -->
 
 ## MCP Host Configuration
 

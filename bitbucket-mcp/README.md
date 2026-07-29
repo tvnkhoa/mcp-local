@@ -20,17 +20,25 @@ npm run build     # tsc → dist/
 
 ## Cấu hình (env)
 
-| Var | Bắt buộc | Mặc định | Ý nghĩa |
-|-----|:---:|---|---|
-| `BITBUCKET_ACCESS_TOKEN` | ✅ | — | Repository/Workspace/Project **Access Token** (gửi `Authorization: Bearer <token>`) |
-| `BITBUCKET_WORKSPACE` | ✅ | — | Workspace slug |
-| `BITBUCKET_DEFAULT_REPO` | — | — | Repo slug mặc định (khỏi truyền `repoSlug` mỗi call) |
-| `BITBUCKET_BASE_URL` | — | `https://api.bitbucket.org/2.0` | Override base URL |
-| `BITBUCKET_WRITE_ENABLED` | — | `false` | `true`/`1` mới cho phép `create_pull_request` |
-| `BITBUCKET_TIMEOUT_MS` | — | `30000` | Timeout mỗi request (phải > 0) |
-| `BITBUCKET_MAX_RETRIES` | — | `2` | Retry cho lỗi tạm thời (network / 429 / 5xx) |
-| `BITBUCKET_DEFAULT_PAGELEN` | — | `25` | Page size mặc định cho list |
-| `BITBUCKET_MAX_PAGELEN` | — | `100` | Trần page size |
+<!-- BEGIN GENERATED: env-table -->
+
+| Variable | Required | Default | Notes |
+|---|---|---|---|
+| `BITBUCKET_WORKSPACE` | **yes** | — | The ID in bitbucket.org/<workspace>/… |
+| `BITBUCKET_DEFAULT_REPO` | no | — | Lets you omit `repoSlug` on every call. |
+| `BITBUCKET_ACCESS_TOKEN` | one of `bitbucket-auth` | — | **secret** · Auth: this (Bearer) OR BITBUCKET_EMAIL + BITBUCKET_API_TOKEN (Basic). Scopes: read:repository, read:pullrequest, write:pullrequest. |
+| `BITBUCKET_EMAIL` | one of `bitbucket-auth` | — | Basic auth needs BOTH this and BITBUCKET_API_TOKEN. An Atlassian API token (ATATT…) is a Basic credential, not a Bearer one. |
+| `BITBUCKET_API_TOKEN` | one of `bitbucket-auth` | — | **secret** |
+| `BITBUCKET_WRITE_ENABLED` | no | `false` | create_pull_request is DISABLED unless true. The tool is still advertised; the gate is enforced when it is called. |
+| `BITBUCKET_BASE_URL` | no | `https://api.bitbucket.org/2.0` *(code)* | — |
+| `BITBUCKET_TIMEOUT_MS` | no | `30000` | Must be > 0, else the default applies. |
+| `BITBUCKET_MAX_RETRIES` | no | `2` | Retries for transient failures (network / 429 / 5xx). 0 disables. |
+| `BITBUCKET_DEFAULT_PAGELEN` | no | `25` *(code)* | — |
+| `BITBUCKET_MAX_PAGELEN` | no | `100` *(code)* | — |
+
+11 variables. Defaults marked *(code)* are the server's own fallback and are **not** written into your agent config — set them only to override.
+
+<!-- END GENERATED: env-table -->
 
 Thay thế (khi không dùng access token): đặt `BITBUCKET_EMAIL` + `BITBUCKET_API_TOKEN` (Atlassian API token) → server dùng Basic auth. Access token (Bearer) được ưu tiên nếu cả hai được set.
 
@@ -66,6 +74,21 @@ Thêm vào block `mcpServers` (global):
 Restart MCP (`/mcp` trong Claude Code) để nạp bản build mới.
 
 ## Tools
+
+<!-- BEGIN GENERATED: tool-list -->
+
+8 tools, namespaced `mcp__bitbucket-mcp__<tool>`:
+
+- `create_pull_request`
+- `get_pull_request`
+- `get_pull_request_diff`
+- `get_repository`
+- `health_check`
+- `list_branches`
+- `list_pull_requests`
+- `list_repositories`
+
+<!-- END GENERATED: tool-list -->
 
 | Tool | Quyền | Mô tả |
 |------|-------|-------|

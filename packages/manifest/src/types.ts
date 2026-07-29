@@ -22,8 +22,25 @@ export interface EnvField {
   readonly required: boolean;
   /** True = never echoed by the doctor or the install summary. */
   readonly secret?: boolean;
-  /** Written silently when the user supplies no value. */
+  /**
+   * Written silently into the agent config when the user supplies no value.
+   *
+   * Setting this has a consequence beyond documentation: `install-mcp` writes any field that has
+   * a `default` (or a `prompt`) into `~/.claude.json`, which *pins* the value. A tuning knob
+   * pinned at today's default stops tracking the code's default when that changes. Use
+   * {@link codeDefault} to document a fallback without pinning it.
+   */
   readonly default?: string;
+  /**
+   * What the server falls back to when this var is unset — **documentation only, never written
+   * to any config.**
+   *
+   * S-35 added 48 vars the code reads and the manifest had never declared. Almost all are tuning
+   * knobs whose value should stay wherever the code puts it, so they carry `codeDefault` and no
+   * `default`: they appear in `.env.example` (commented out) and in the README table, and the
+   * installer stays silent about them.
+   */
+  readonly codeDefault?: string;
   /** Present = the installer asks for this var interactively, using this label. */
   readonly prompt?: string;
   /** "At least one var in this group must be set." */
@@ -35,6 +52,21 @@ export interface EnvField {
    * satisfies the field. Only `PG_ENV_*` uses it, and only inside a group.
    */
   readonly prefix?: string;
+  /**
+   * Concrete member names to show for a `prefix` family.
+   *
+   * The hand-written `.env.example` listed `PG_ENV_DEV` / `PG_ENV_STAGING` / `PG_ENV_PROD`, which
+   * is more useful than the wildcard alone — someone reading `PG_ENV_*` still has to guess the
+   * suffix convention. Kept so generating the file does not make it worse than what it replaced.
+   */
+  readonly familyExamples?: readonly string[];
+  /**
+   * Heading this var is grouped under in the generated `.env.example` and README table.
+   *
+   * Ordering follows first appearance in the array, so the generated file reads like the
+   * hand-written one it replaced rather than like an alphabetical dump.
+   */
+  readonly section?: string;
 }
 
 /** How the installer prepares a server before registering it. */
@@ -64,10 +96,12 @@ export interface ServerDescriptor {
   /** Directory holding the `SKILL.md` template the installer renders. */
   readonly skillSource: string;
   /**
-   * Tools listed in the generated skill.
+   * Every tool the server advertises, as `tools/list` reports it.
    *
-   * A hand-maintained subset, not the full `tools/list` — codebase-index-local names 12 of its
-   * 43. S-36 derives this from each server's registry; until then it can drift, and does.
+   * **Generated** — see `src/generated/toolLists.ts`. Until S-36 this was a hand-maintained
+   * subset that had already drifted (`codebase-index-local` named 12 of its 43), which is why it
+   * is no longer hand-written: `generate:docs` derives it from the committed contract snapshots,
+   * and `generate:check` fails when the two disagree.
    */
   readonly tools: readonly string[];
   readonly env: readonly EnvField[];
