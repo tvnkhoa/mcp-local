@@ -31,16 +31,27 @@ npm run guard:no-llm-runtime
 # Quality gate — compact-mode token savings must be ≥ 40%
 npm run benchmark:plan:check
 
-# Individual test scripts
+# Test layers
+npm run test              # everything: unit + integration, one result
+npm run test:unit         # node:test over src/**/*.test.ts — no build, no DB
+npm run test:integration  # the .mjs harnesses only (needs a build)
+
+# Individual harnesses — all 26 keep their own name
 npm run test:endpoint-bridge
 npm run test:csharp-inheritance-bridge
 npm run test:refactor-engine
 ```
 
 **Pre-commit sequence:** run the workspace gate from the repo root instead — see
-*Verification* below. Within this package, `npm run test` now runs the whole
-suite (it discovers every `test:*` script from `package.json`, so the list cannot
-fall behind).
+*Verification* below. Within this package, `npm run test` runs the whole suite
+(it discovers every `test:*` script from `package.json`, so the list cannot fall
+behind) and puts `test:unit` first, since a compile-level break should not wait
+behind 26 harnesses.
+
+`typecheck` covers `src/**/*.test.ts` too, via each server's own
+`tsconfig.test.json`. Before S-39 no server's test files were type-checked
+anywhere: each server's build excludes them, and the root `tsconfig.test.json`
+covers `packages/` only.
 
 ### postgres-mcp
 

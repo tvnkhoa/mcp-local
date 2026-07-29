@@ -5,7 +5,7 @@ Phase H's row updated after the S-28 SDK work landed. Every
 row cites the artifact that proves it. Where no artifact was found, the row says so
 rather than guessing.
 
-**35 of 44 done · 1 partial · 1 skipped by decision · 7 open.** **Phase H is complete** —
+**37 of 44 done · 1 partial · 1 skipped by decision · 5 open.** **Phase H is complete** —
 S-31, S-32 and S-33 all landed 2026-07-28. All 43 codebase-index tools are on the SDK registry,
 the legacy bridge is gone, and **all four servers now run on `@mcp/sdk`**. S-33 carried one
 intended contract change (unknown tool → `not_found`); see [the S-33 section](#s-33--the-decision-and-the-one-contract-change).
@@ -416,15 +416,116 @@ guard required the package README, `tier/unknown-package` required the TIER_RULE
 `cli.test.ts` pins the package list exactly — so adding a package is a deliberate edit in three
 places rather than an accident in one.
 
-## Phase J — Conventions and Housekeeping · 2/5
+## Phase J — Conventions and Housekeeping · 4/5
 
 | Step | Status | Evidence |
 |---|---|---|
 | S-37 Normalize folder layout + per-server `.gitignore` | ✅ | **decision: no per-server `.gitignore`** — `docs/adr/0003-single-root-gitignore.md`. Re-homing folded into S-41 by agreement |
 | S-38 Server scaffold generator | ✅ | `templates/server/**` + `scripts/new-server.mjs`; `npm run new:server -- --key scratch` verified end to end |
-| S-39 Consolidate the test strategy | ❌ | not started |
-| S-40 Index registry and workspace hygiene | ❌ | not started |
+| S-39 Consolidate the test strategy | ✅ | `test:unit` + `test:integration`; first 20 unit tests in `codebase-index-mcp`; all 26 harness aliases intact; server test files now type-checked |
+| S-40 Index registry and workspace hygiene | ✅ | 85,220 rows pruned via `scripts/prune-repo.mjs`; 9 repos → 7; typo fixed; DB default aligned |
 | S-41 Flip guards to enforce; finalize docs | ❌ | **blocked** — eleven files in `codebase-index-mcp/src` still exceed the 600-line hard cap |
+
+### S-39 · the files had already been moved once
+
+The plan asks for `codebase-index-mcp/scripts/*.mjs` (it says 39 files) to be reclassified under
+`test/integration/`. Two things were off:
+
+- The real counts are **36** harnesses in `scripts/test/` and **27** `test:*` scripts, not 39 and 24.
+- `docs/migration/normalization-report.md` records that those files were **already moved once**,
+  from `scripts/*.mjs` into `scripts/test/`. Moving them again to `test/integration/` would be a
+  second relocation of the same 36 files, into a directory no other server uses — a third location
+  convention, when `scripts/` is where every server keeps its harnesses and its `smoke-test.mjs`.
+
+So the move was skipped and the substance was done instead:
+
+- **`test:unit`** — `node:test` over `src/**/*.test.ts`. `codebase-index-mcp` had **zero** of these;
+  the other three servers have had them since their SDK migrations. 20 tests now cover `fileFilter`
+  (what enters the graph at all) and `indexing/runPolicy` (whether a run is skipped, and which
+  performance profile applies). S-26 making `store` an explicit parameter is what allows a stub
+  instead of a SQLite file.
+- **`test:integration`** — the harnesses alone, for when the unit suite is not what you are debugging.
+- **`test`** — both, one result: **29/29**. `test:unit` runs *first*, because a compile-level break
+  should not wait behind 26 harnesses that each need a build.
+- All 26 individual aliases still work, verified by name.
+
+`test:integration` had to be excluded from `run-tests.mjs`'s own discovery. It is an alias for that
+runner, so discovering it would have made the runner spawn itself until the process table gave up.
+
+#### Server test files were type-checked nowhere
+
+Found while wiring this: each server's `tsconfig.json` excludes `src/**/*.test.ts` from the build,
+and the root `tsconfig.test.json` covers `packages/` only. So every server test file — including
+`observe-mcp`'s and `bitbucket-mcp`'s, which have existed since S-23/S-24 — was compiled by nothing
+and checked by nothing.
+
+Each server now has its own `tsconfig.test.json` extending **its own** config, and `typecheck` runs
+both passes. Extending the platform's base config instead was tried first and rejected: it dragged
+the server's transitive source under stricter settings and surfaced 7 unused-variable errors in
+`codebase-index-mcp`. Real dead code, but not this step's business — and the root config has no
+business governing a server's strictness. All four servers pass.
+
+`codebase-index-mcp/tsconfig.json` also had to start excluding `*.test.ts`; unlike the other three
+it never did, so a new test file would have been emitted into `dist/`.
+
+#### One real documentation bug
+
+`AGENTS.md` documented six commands that **cannot run** — `node scripts/test-endpoint-bridge.mjs`
+and friends, paths that stopped existing when the harnesses moved into `scripts/test/`. Replaced
+with the npm script names, which are the stable interface. Two more stale paths in the issue
+registry fixed the same way.
+
+### S-40 · four DB names, not three, and a plan precondition that failed
+
+Both defects the plan describes were real, and confirmed before touching anything:
+
+- `ssnet.communicationhub.messaging` pointed at `D:/1.SourceCode/crm/ssnet` — the **same path** as
+  `ssnet`, with identical counts (738 files, 5,087 symbols).
+- `wec.commnunication-hub` (missing the `u`) pointed at a directory that **does not exist on disk**,
+  yet had been indexed **384 times**.
+
+**85,220 rows** removed across 12 repo-scoped tables plus `vec_symbols`. `list_repositories` now
+returns **7** repositories, one per real repository. Both target repos re-indexed `status: ok`.
+
+Done with a script, `codebase-index-mcp/scripts/prune-repo.mjs`, rather than ad-hoc SQL, because two
+details make hand-written DELETEs wrong here:
+
+- `vec_symbols` is a `vec0` virtual table with **no `repo_id`**. It is reachable only through
+  `vec_symbol_map.vec_rowid`, so those ids must be read *before* the map rows are deleted or the
+  vectors are orphaned and unreachable. Counts matched exactly (38,955 = 38,955), so there were no
+  pre-existing orphans to inherit.
+- All three FTS5 tables are **external-content** (`content='symbols'`, …), and there are **no
+  triggers**. A plain DELETE is not how external-content FTS5 is maintained — the index is rebuilt
+  from the content table, which is precisely what `symbolSearch.ts` already does after every run.
+
+The 335 MB database was backed up to `mcp-local-index-central.db.pre-s40` first (plan rollback R4).
+
+#### The plan's own precondition failed for one deletion
+
+It asks to "delete the orphaned `codebase-index-mcp/codebase-index.db` **after confirming it is
+unreferenced**". It is not unreferenced: `check-symbols.mjs` and `query-db.mjs` both open it, and
+`mcp-local-index.db` is opened by `audit.mjs`, `eval-graph.mjs`, `index-self.mjs` and
+`test-new-tools.mjs`. Both files are **empty** (0 repositories) and regenerable, so they were left
+alone rather than deleted against the plan's stated condition.
+
+`codebase-index-mcp/.understand-anything/` no longer exists. One file *was* deleted: `probe.db`,
+left behind by the S-35 env probe. `contract-snapshot.db` at the workspace root is a byproduct that
+every `contracts:check` recreates, not debt.
+
+#### The count was four, not three
+
+The plan says three DB names are in play. There are **four**, and the fourth is the one that
+matters: `src/index.ts` falls back to the **relative** path `./codebase-index.db` when
+`CODEBASE_INDEX_DB_PATH` is unset — so a server started from a different working directory
+silently creates a fresh empty index. The manifest default is now
+`mcp-local-index-central.db`, matching what is actually configured and in use, and the env note
+records the relative-fallback hazard. Changing the code default is a behaviour change and was left
+out of scope.
+
+The misspelled repoId is gone from live guidance — `.claude/rules/mcp-hard-mode.md` (4
+occurrences), the `mcp-first-codebase-operations` skill, and `MCP-FIRST-CHEATSHEET.md`. The
+historical records in `audit-report.md`, `normalization-report.md` and the plan keep it: there, the
+typo is the subject.
 
 ### S-37 · the premise had expired
 

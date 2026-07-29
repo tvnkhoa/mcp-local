@@ -181,7 +181,7 @@ Refactor tools: `refactor_replace_preview` and `refactor_replace_apply` support 
 | Variable | Required | Default | Notes |
 |---|---|---|---|
 | `CODEBASE_INDEX_ALLOWED_ROOTS` | **yes** | `D:/1.SourceCode/mcp-local` | The ONLY required var. Comma-separated absolute paths the server may index. Use the exact path `list_repositories` reports — changing drive-letter casing or slash style causes allowlist rejection. |
-| `CODEBASE_INDEX_DB_PATH` | no | `D:/1.SourceCode/mcp-local/mcp-codebase-index.db` | Where the code graph is stored. Defaults next to the workspace. |
+| `CODEBASE_INDEX_DB_PATH` | no | `D:/1.SourceCode/mcp-local/mcp-local-index-central.db` | Where the code graph is stored — one file holds every repo, scoped by repoId. Four names were in play before S-40; this is the one actually in use. Note that the server's own fallback when this is unset is the RELATIVE path ./codebase-index.db, which lands wherever the process was started, so leaving it set is what keeps the index in one place. |
 | `CODEBASE_INDEX_DOCS_INDEXING_ENABLED` | no | `false` | — |
 | `CODEBASE_INDEX_DOCS_TOOLS_ENABLED` | no | `false` | — |
 | `CODEBASE_INDEX_TELEMETRY_ENABLED` | no | `false` | — |

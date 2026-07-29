@@ -3,6 +3,8 @@
   "//2": "`node --import tsx --test` strips types without checking them, so without this",
   "//3": "roughly a thousand lines of contract-asserting test code was never verified.",
   "//4": "Run AFTER build:packages — cross-package imports resolve via each package's dist types.",
+  "//5": "Servers are NOT here: each has its own tsconfig.test.json, so its tests are checked",
+  "//6": "under the compiler contract that server actually builds with (S-39).",
   "extends": "./tsconfig.base.json",
   "compilerOptions": {
     "composite": false,

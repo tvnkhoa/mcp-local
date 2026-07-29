@@ -42,6 +42,10 @@ pnpm-debug.log*
 *.db
 *.db-shm
 *.db-wal
+# Database backups. `*.db` does not match a suffixed copy such as
+# `mcp-local-index-central.db.pre-s40`, and these files are hundreds of megabytes.
+*.db.*
+!*.db.example
 
 # OS/editor noise
 .DS_Store

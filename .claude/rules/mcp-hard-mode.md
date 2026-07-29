@@ -22,13 +22,13 @@ Primary targets in this workspace:
 
 Reference and benchmark target (optional):
 
-1. `wec.commnunication-hub`
+1. `wec.communication-hub`
 
 Recommended MCP target binding:
 
 1. `repoId=codebase-index-mcp`, `repoPath=D:/1.SourceCode/mcp-local/codebase-index-mcp`
 2. `repoId=mcp-local`, `repoPath=D:/1.SourceCode/mcp-local`
-3. `repoId=wec.commnunication-hub`, `repoPath=D:/1.SourceCode/crm/wec.commnunication-hub`
+3. `repoId=wec.communication-hub`, `repoPath=D:/1.SourceCode/crm/wec.communication-hub`
 
 Path normalization rule (critical):
 
@@ -366,4 +366,4 @@ Include in final summary:
 - If fallback occurred: issue ID updated in registry
 - Gate status: Discovery/Scope/Confidence passed or failed
 - Evidence sufficiency statement and residual uncertainty (if any)
-- Target repoId(s): must explicitly state whether result applies to `codebase-index-mcp`, `postgres-mcp`, `mcp-local`, `wec.commnunication-hub`, or a subset.
+- Target repoId(s): must explicitly state whether result applies to `codebase-index-mcp`, `postgres-mcp`, `mcp-local`, `wec.communication-hub`, or a subset.

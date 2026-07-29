@@ -45,9 +45,9 @@ node scripts/smoke-test.mjs   # Full integration test (requires build first)
 
 Test scripts (all require build first):
 ```bash
-node scripts/test-endpoint-bridge.mjs
-node scripts/test-csharp-inheritance-bridge.mjs
-node scripts/test-refactor-engine.mjs
+npm run test:endpoint-bridge
+npm run test:csharp-inheritance-bridge
+npm run test:refactor-engine
 ```
 
 ### postgres-mcp
@@ -127,7 +127,7 @@ If any step fails, fix before commit. The benchmark gate is a quality contract.
 After modifying refactor logic:
 ```bash
 npm run build
-node scripts/test-refactor-engine.mjs
+npm run test:refactor-engine
 ```
 
 Regression suite must show `N passed, 0 failed`. Current baseline: 47 tests.
@@ -136,7 +136,7 @@ Regression suite must show `N passed, 0 failed`. Current baseline: 47 tests.
 
 1. Add parser dependency to `package.json` (e.g., `tree-sitter-python`)
 2. Update `treeSitterExtractor.ts` with language-specific extraction logic
-3. Add test coverage in `scripts/test-extractor.mjs`
+3. Add test coverage in `scripts/test/test-extractor.mjs`
 4. Update `README.md` feature list
 
 ### Watch behavior (codebase-index-mcp)
@@ -176,7 +176,7 @@ Default: watchless operation (`CODEBASE_INDEX_WATCH_AUTO_START=false`)
 **C# initializer migrations:**
 - For dotted targets in object initializers, provide `initializerRewrite` metadata
 - Without it, preview blocks with `ambiguous_target` (safe default)
-- See `scripts/test-refactor-engine.mjs` suite 3.6-3.8 for examples
+- See `scripts/test/test-refactor-engine.mjs` suite 3.6-3.8 for examples
 
 ## Environment Variables
 

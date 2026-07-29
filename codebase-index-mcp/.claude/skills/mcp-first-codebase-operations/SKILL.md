@@ -17,7 +17,7 @@ argument-hint: "Provide repoId, target symbol/file intent, and expected output (
 ## mcp-local Guardrails
 
 1. Use `repoId=codebase-index-mcp` or `repoId=mcp-local` by default for this workspace.
-2. Use `repoId=wec.commnunication-hub` only for benchmark/reference comparisons.
+2. Use `repoId=wec.communication-hub` only for benchmark/reference comparisons.
 3. Treat `.claude/rules/mcp-hard-mode.md` as policy source-of-truth for gates, blocked behaviors, and fallback rules.
 4. Use this skill as execution playbook; do not duplicate full policy blocks in task output.
 

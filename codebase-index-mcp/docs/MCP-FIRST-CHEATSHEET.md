@@ -6,7 +6,7 @@ Use this as a fast operator guide for `codebase-index-mcp` and `postgres-mcp` wo
 
 1. `codebase-index-mcp`
 2. `mcp-local`
-3. `wec.commnunication-hub` (reference)
+3. `wec.communication-hub` (reference)
 
 Always reuse exact `repoPath` from `list_repositories` before `index_repository`.
 

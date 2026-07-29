@@ -13,9 +13,10 @@
  * Requires a build first — the scripts run against `dist/`.
  *
  * Usage:
- *   node scripts/run-tests.mjs           # everything
- *   node scripts/run-tests.mjs --list    # show what would run
- *   node scripts/run-tests.mjs --bail    # stop at the first failure
+ *   node scripts/run-tests.mjs                    # unit + integration, one result
+ *   node scripts/run-tests.mjs --integration-only # skip the node:test unit suite
+ *   node scripts/run-tests.mjs --list             # show what would run
+ *   node scripts/run-tests.mjs --bail             # stop at the first failure
  */
 
 import { spawnSync } from "node:child_process";
@@ -28,6 +29,7 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const argv = process.argv.slice(2);
 const LIST_ONLY = argv.includes("--list");
 const BAIL = argv.includes("--bail");
+const INTEGRATION_ONLY = argv.includes("--integration-only");
 
 const scripts = JSON.parse(fs.readFileSync(path.join(ROOT, "package.json"), "utf8")).scripts ?? {};
 
@@ -44,7 +46,11 @@ const EXTRA = ["guard:no-llm-runtime", "verify:enhancements"];
  * somewhere else — see `.github/workflows/ci.yml`.
  */
 const EXCLUDED = {
-  "benchmark:plan:check": "a performance gate, not a correctness test; run as its own CI step"
+  "benchmark:plan:check": "a performance gate, not a correctness test; run as its own CI step",
+  // Discovery would otherwise find the alias that invokes THIS runner, and recurse until the
+  // process table gives up. `test:integration` is a name for "everything except the unit suite",
+  // which is a flag here, not a script to spawn.
+  "test:integration": "an alias for this runner (--integration-only); spawning it would recurse"
 };
 
 const selected = [
@@ -52,7 +58,12 @@ const selected = [
   ...Object.keys(scripts)
     .filter((name) => name.startsWith("test:"))
     .sort()
-].filter((name) => !(name in EXCLUDED));
+]
+  .filter((name) => !(name in EXCLUDED))
+  // `test:unit` is the node:test suite over src/**/*.test.ts. It needs no build and no database,
+  // so it runs first when present — a compile-level break should not wait behind 26 harnesses.
+  .filter((name) => !(INTEGRATION_ONLY && name === "test:unit"))
+  .sort((a, b) => (a === "test:unit" ? -1 : b === "test:unit" ? 1 : 0));
 
 if (LIST_ONLY) {
   console.log(`${selected.length} script(s):`);
@@ -61,7 +72,10 @@ if (LIST_ONLY) {
   process.exit(0);
 }
 
-if (!fs.existsSync(path.join(ROOT, "dist", "index.js"))) {
+// The integration harnesses run against `dist/`, so a missing build is a setup error rather than
+// a test failure. `test:unit` reads source through tsx and needs none of it.
+const needsBuild = selected.some((name) => name !== "test:unit");
+if (needsBuild && !fs.existsSync(path.join(ROOT, "dist", "index.js"))) {
   console.error("dist/index.js not found — run `npm run build` first.");
   process.exit(2);
 }

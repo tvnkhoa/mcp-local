@@ -32,10 +32,10 @@ export function codebaseIndexEnv(root: string): readonly EnvField[] {
     {
       name: "CODEBASE_INDEX_DB_PATH",
       required: false,
-      default: `${root}/mcp-codebase-index.db`,
+      default: `${root}/mcp-local-index-central.db`,
       section: "Storage",
       prompt: "SQLite DB path",
-      note: "Where the code graph is stored. Defaults next to the workspace."
+      note: "Where the code graph is stored — one file holds every repo, scoped by repoId. Four names were in play before S-40; this is the one actually in use. Note that the server's own fallback when this is unset is the RELATIVE path ./codebase-index.db, which lands wherever the process was started, so leaving it set is what keeps the index in one place."
     },
 
     // --- Docs lane ----------------------------------------------------------------

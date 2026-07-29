@@ -1,0 +1,9 @@
+{
+  "//": "Type-checks this server's *.test.ts, which tsconfig.json excludes from the build.",
+  "//2": "Extends the server's OWN config on purpose: a test should be checked under the same",
+  "//3": "compiler contract as the code it tests, not the platform's stricter one (S-39).",
+  "extends": "./tsconfig.json",
+  "compilerOptions": { "noEmit": true },
+  "include": ["src/**/*.ts"],
+  "exclude": ["node_modules", "dist"]
+}
