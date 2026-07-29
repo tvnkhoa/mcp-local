@@ -218,6 +218,106 @@ export function emitTypeRefEdge(
   });
 }
 
+/**
+ * C# keyword types. Emitting a TYPE_REF for `string` or `int` would add thousands of edges that can
+ * never resolve to a symbol in any repo, drowning the ones that can.
+ */
+const CSHARP_BUILTIN_TYPES = new Set([
+  "void", "var", "dynamic", "object", "string", "bool", "byte", "sbyte", "char", "decimal",
+  "double", "float", "int", "uint", "long", "ulong", "short", "ushort", "nint", "nuint"
+]);
+
+/**
+ * Every type name mentioned by a type expression, including nested generic arguments.
+ *
+ * `Task<List<OrderDto>>` yields `Task`, `List`, `OrderDto` — the last being the one that matters, and
+ * the reason walking into generics is not optional: a DTO's only reference is very often a generic
+ * argument on a return type.
+ *
+ * Handled per node kind rather than by collecting every descendant `identifier`, because a
+ * `qualified_name` would otherwise contribute its namespace segments —
+ * `System.Threading.Tasks.Task` becoming references to `System`, `Threading` and `Tasks`.
+ */
+function collectTypeNames(node: Parser.SyntaxNode | null | undefined, out: string[]): void {
+  if (!node) {
+    return;
+  }
+
+  switch (node.type) {
+    case "predefined_type":
+      return; // int/string/bool/... — never a repo symbol.
+
+    case "identifier": {
+      const text = node.text.trim();
+      if (text && !CSHARP_BUILTIN_TYPES.has(text)) {
+        out.push(text);
+      }
+      return;
+    }
+
+    case "qualified_name": {
+      // Only the right-most segment is the type; the rest is namespace.
+      const right = node.childForFieldName("name") ?? node.namedChildren[node.namedChildren.length - 1];
+      collectTypeNames(right, out);
+      return;
+    }
+
+    case "generic_name": {
+      // The base name, then each type argument. Both matter: `IRequestHandler<CreateOrder, Result>`
+      // references the handler interface AND both contracts.
+      const base = node.childForFieldName("name") ?? node.namedChildren.find((c) => c.type === "identifier");
+      collectTypeNames(base, out);
+      const args =
+        node.childForFieldName("type_arguments") ??
+        node.namedChildren.find((c) => c.type === "type_argument_list");
+      for (const arg of args?.namedChildren ?? []) {
+        collectTypeNames(arg, out);
+      }
+      return;
+    }
+
+    case "nullable_type":
+    case "array_type":
+    case "pointer_type":
+    case "ref_type":
+    case "tuple_type":
+    case "type_argument_list":
+      for (const child of node.namedChildren) {
+        collectTypeNames(child, out);
+      }
+      return;
+
+    default:
+      // An unrecognised wrapper (`scoped_type`, future grammar additions): descend one level rather
+      // than dropping the reference silently.
+      for (const child of node.namedChildren) {
+        collectTypeNames(child, out);
+      }
+  }
+}
+
+/**
+ * Emit a TYPE_REF for every type a declaration's type expression mentions.
+ *
+ * MCP-ISSUE-034: `emitTypeRefEdge` had exactly one call site in the whole extractor — the base class
+ * in a `base_list`. So a repo's TYPE_REF edges only ever recorded inheritance: 148 edges and 22
+ * distinct target symbols across a 4442-symbol C# repo, leaving 99% of type declarations with no
+ * incoming reference at all. `dead_code_scan` then reported live DTOs and records as dead, correctly
+ * by its own rule, because the edges it reasons over did not exist.
+ */
+export function emitTypeRefEdgesFromTypeNode(
+  input: ExtractInput,
+  fromSymbolId: string,
+  typeNode: Parser.SyntaxNode | null | undefined,
+  edges: EdgeRecord[]
+): void {
+  const names: string[] = [];
+  collectTypeNames(typeNode, names);
+  for (const name of names) {
+    emitTypeRefEdge(input, fromSymbolId, name, edges);
+  }
+}
+
 // ============================================================================
 // C# Property Edge Utilities
 // ============================================================================

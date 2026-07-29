@@ -210,6 +210,10 @@ When analyzing this codebase, use the `codebase-index` MCP tools **before** fall
 tree, what blocks what, and the step-number reconciliation for three commits whose labels
 drifted from the plan.
 
+**What is left:** `docs/backlog.md` — the post-migration backlog (B-01…B-12), prioritized by whether
+a tool reports something untrue, a gate does not bite, or it is only a cost. Also lists the accepted
+debt that is **not** in it, so decided questions stay decided.
+
 **Decision records:** `docs/adr/0001-workspace-native-deps.md` (why servers stay outside
 the npm workspace, and why `instanceof` fails across packages) ·
 `docs/adr/0002-sql-guardrail-token-lists.md` (why the three SQL token lists stay

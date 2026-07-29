@@ -8,7 +8,7 @@ import type { ExtractInput } from "./extractorTypes.js";
 import type { EdgeRecord, SymbolRecord } from "../types.js";
 import {
   collectCSharpScopeTypeMap,
-  emitTypeRefEdge,
+  emitTypeRefEdgesFromTypeNode,
   extractCSharpHttpDependencyContract,
   extractCSharpUsingNamespace,
   extractFirstStringLiteral,
@@ -85,6 +85,83 @@ function genericFirstTypeArg(node: Parser.SyntaxNode | null | undefined): string
   const first = targs?.namedChildren[0];
   if (!first) return null;
   return normalizeContractName(first.text);
+}
+
+/**
+ * The symbolId of the type declaration enclosing a node, or null at file scope.
+ *
+ * Mirrors the parentSymbolId walk in the main loop, including its use of `csharpTypeKindForNode` —
+ * the kind is part of the stableId, so a record resolved as "class" would produce an id matching no
+ * emitted symbol and the edge would dangle. (ISSUE-015 is the same trap.)
+ */
+function enclosingTypeSymbolId(node: Parser.SyntaxNode, input: ExtractInput): string | null {
+  let current: Parser.SyntaxNode | null = node.parent;
+  while (current) {
+    if (
+      current.type === "class_declaration" ||
+      current.type === "struct_declaration" ||
+      current.type === "interface_declaration" ||
+      current.type === "record_declaration"
+    ) {
+      const nameNode = current.childForFieldName("name");
+      if (!nameNode) return null;
+      const kind = csharpTypeKindForNode(current);
+      return stableId(`${input.repoId}:${input.filePath}:${kind}:${nameNode.text}:${current.startPosition.row}`);
+    }
+    current = current.parent;
+  }
+  return null;
+}
+
+/**
+ * TYPE_REF for the declared type of every field.
+ *
+ * Fields are not emitted as symbols, so they never appeared in the declaration walk and their types
+ * were invisible. In a .NET service this is where injected dependencies live
+ * (`private readonly IOrderService _orders;`) — the single most common way one type names another.
+ * Attributed to the enclosing type, since there is no field symbol to attribute to.
+ */
+function emitFieldTypeRefs(
+  input: ExtractInput,
+  root: Parser.SyntaxNode,
+  edges: EdgeRecord[]
+): void {
+  for (const field of root.descendantsOfType(["field_declaration", "event_field_declaration"])) {
+    const owner = enclosingTypeSymbolId(field, input);
+    if (!owner) continue;
+    // The type sits on the inner variable_declaration, not on field_declaration itself.
+    const decl =
+      field.childForFieldName("declaration") ??
+      field.namedChildren.find((c) => c.type === "variable_declaration");
+    emitTypeRefEdgesFromTypeNode(input, owner, decl?.childForFieldName("type"), edges);
+  }
+}
+
+/**
+ * TYPE_REF for each declared parameter type of a method or constructor.
+ *
+ * Constructor parameters are where a .NET class names its injected service interfaces, and method
+ * parameters are where request/command DTOs appear — both invisible before MCP-ISSUE-034.
+ */
+function emitParameterTypeRefs(
+  input: ExtractInput,
+  fromSymbolId: string,
+  node: Parser.SyntaxNode,
+  edges: EdgeRecord[]
+): void {
+  // A record's positional parameter_list carries NO field name in this grammar, so
+  // childForFieldName("parameters") returns null for it — hence the by-type fallback. Methods and
+  // constructors do name the field.
+  const params =
+    node.childForFieldName("parameters") ??
+    node.namedChildren.find((c) => c.type === "parameter_list");
+  if (!params) return;
+  for (const param of params.namedChildren) {
+    // `parameter` covers the ordinary case; a `_parameter`-ish wrapper or an attribute list is
+    // skipped by looking only for the type field.
+    if (param.type !== "parameter") continue;
+    emitTypeRefEdgesFromTypeNode(input, fromSymbolId, param.childForFieldName("type"), edges);
+  }
 }
 
 /** When a publish has no explicit generic, infer the contract from a `new T(...)`/`new T{...}` first arg. */
@@ -289,6 +366,13 @@ export function extractCSharpSymbolsImpl(
           // which the non-nested `<[^>]*>` form could not handle. (ISSUE-013)
           const baseName = typeName.replace(/<.*>$/, "").trim();
           if (!baseName) continue;
+          // MCP-ISSUE-034: the generic arguments of a base type are references too, and stripping
+          // `<...>` above discarded them. `IRequestHandler<CreateOrderCommand, Result>` referenced only
+          // the handler interface, so the command and result records — which frequently have no other
+          // reference anywhere — looked unreferenced. Emitted for both branches below, in addition to
+          // (not instead of) the IMPLEMENTS/CONSUMES edges, which carry different meaning.
+          emitTypeRefEdgesFromTypeNode(input, symbolId, baseNode, edges);
+
           if (isLikelyCSharpInterfaceName(baseName)) {
             edges.push({
               repoId: input.repoId,
@@ -307,16 +391,46 @@ export function extractCSharpSymbolsImpl(
                 edges.push({ repoId: input.repoId, fromId: symbolId, toId: `contract:${contract}`, type: "CONSUMES", confidence: 0.95, reason: "message consumer" });
               }
             }
-          } else {
-            // Base class → TYPE_REF
-            emitTypeRefEdge(input, symbolId, baseName, edges);
           }
+          // The base-class TYPE_REF that used to be emitted here is now covered by
+          // emitTypeRefEdgesFromTypeNode above, which also reaches the generic arguments.
         }
       }
     }
 
+    // MCP-ISSUE-034: every other type position. Until this existed, the base_list above was the ONLY
+    // producer of TYPE_REF edges in the extractor, so the graph recorded inheritance and nothing else
+    // — 99% of C# type declarations had no incoming reference, and anything reasoning over TYPE_REF
+    // (dead_code_scan, find_impact_files view "surface", type blast radius) was working from an
+    // almost-empty relation.
+    //
+    // Attribution is to the declaring member, matching the base_list convention above (the class owns
+    // its base-type reference), so `find_impact_files` reports the method or property that mentions a
+    // type rather than only the file.
+    if (node.type === "method_declaration") {
+      // The return-type field is `returns`, NOT `type` — verified against the grammar by dumping the
+      // node's fields. `type` reads as null here, so an earlier version of this silently emitted
+      // nothing for return types while parameters worked, which the per-position test caught.
+      emitTypeRefEdgesFromTypeNode(input, symbolId, node.childForFieldName("returns"), edges);
+      emitParameterTypeRefs(input, symbolId, node, edges);
+    } else if (node.type === "property_declaration") {
+      emitTypeRefEdgesFromTypeNode(input, symbolId, node.childForFieldName("type"), edges);
+    } else if (node.type === "constructor_declaration") {
+      // No return type; DI constructors are where service interfaces are referenced.
+      emitParameterTypeRefs(input, symbolId, node, edges);
+    } else if (node.type === "record_declaration" || node.type === "class_declaration" || node.type === "struct_declaration") {
+      // Positional (primary-constructor) parameters: `record CreateOrder(OrderDto Order)`. This is
+      // the whole shape of a CQRS command or a DTO, so its parameter types are often the only
+      // reference the referenced record has. C# 12 allows the same on class/struct, and
+      // `childForFieldName("parameters")` is simply absent when there is no primary constructor.
+      emitParameterTypeRefs(input, symbolId, node, edges);
+    }
+
     symbols.push({ repoId: input.repoId, symbolId, filePath: input.filePath, name: nameNode.text, kind, line: node.startPosition.row + 1, endLine: node.endPosition.row + 1, signature: extractSignature(node), parentSymbolId });
   }
+
+  // MCP-ISSUE-034: field types, attributed to the enclosing type.
+  emitFieldTypeRefs(input, root, edges);
 
   // Extract json_key symbols from [JsonPropertyName("...")] attributes (ISSUE-005)
   extractJsonKeySymbols(input, root, symbols);

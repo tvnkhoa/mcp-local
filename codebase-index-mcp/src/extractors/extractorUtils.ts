@@ -41,6 +41,7 @@ export {
   dedupeSymbols,
   emitPropertyAccessEdge,
   emitTypeRefEdge,
+  emitTypeRefEdgesFromTypeNode,
   getEffectiveEdgeConfidence,
   isAncestorInvocation,
   resolveIntraFileEdges

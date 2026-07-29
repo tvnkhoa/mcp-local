@@ -104,8 +104,9 @@ Workaround · Enhancement proposal. Filed here so the MCP server team can triage
 
 ## MCP-ISSUE-034 — C# `TYPE_REF` edges are almost never produced, so every C# type looks dead
 
-- **Status:** open. Found 2026-07-29, immediately after MCP-ISSUE-033 made `dead_code_scan` return
-  results for the first time — the tool became usable and its first real output was mostly wrong.
+- **Status:** **largely fixed** 2026-07-29 (`src/extractors/csharpSymbols.ts`,
+  `src/extractors/extractorEdges.ts`). Found immediately after MCP-ISSUE-033 made `dead_code_scan`
+  return results for the first time — the tool became usable and its first real output was mostly wrong.
 - **Scenario:** `dead_code_scan` on a .NET repo. Every candidate it reports is a type declaration
   (`class` / `record` / `record struct`), and the obvious ones are live: `ValidationException`,
   `ForbiddenAccessException`, `RequestContext`, `N8nChatDecisionRequest`, and
@@ -146,6 +147,65 @@ Workaround · Enhancement proposal. Filed here so the MCP server team can triage
   worth acting on.
 - **Do not "fix" by dropping TYPE_REF from the scan rule.** That would hide the missing edges behind a
   narrower query and make the graph's real gap invisible.
+
+### Root cause (confirmed) and fix
+
+`emitTypeRefEdge` had **exactly one call site in the entire extractor** — the base class inside a
+`base_list` in `csharpSymbols.ts`. Every other type position emitted nothing. Resolution was not at
+fault: of the 148 edges that existed, 110 were unresolved `type:` tokens and all of them were
+framework base types (`DbContext`, `BackgroundService`, `AbstractValidator`, `Exception`, `Migration`)
+that legitimately have no symbol in the repo.
+
+Added `emitTypeRefEdgesFromTypeNode`, which walks a type expression per node kind and emits one edge
+per name mentioned, including nested generic arguments — `Task<List<OrderDto>>` yields `Task`, `List`
+and `OrderDto`. Walking generics is the point: a DTO's only reference is very often a generic argument
+on a return type. Handled per node kind rather than by collecting descendant identifiers, so a
+`qualified_name` contributes the type and not its namespace segments. C# keyword types are excluded —
+`string` and `int` would add thousands of edges that can never resolve in any repo.
+
+Wired into: method return types and parameters, property types, constructor parameters, field and
+event-field types (attributed to the enclosing type, since fields are not emitted as symbols), record
+and primary-constructor positional parameters, and the generic arguments of a base type — which the
+old `base_list` path discarded by stripping `<...>`, so `IRequestHandler<CreateOrderCommand, Result>`
+referenced only the interface.
+
+**Two field names were wrong and only a per-position test caught them.** A `method_declaration`'s
+return type is the **`returns`** field, not `type` — reading `type` returns null, so return types
+silently emitted nothing while parameters worked. And a record's positional `parameter_list` carries
+**no field name at all**, so `childForFieldName("parameters")` was null for exactly the CQRS shape this
+was meant to fix. Both were found by dumping the grammar's fields after the test failed, not by
+reading the code.
+
+### Measured (`wec.communication-hub`, 475 files, 4411 symbols)
+
+| | before | after |
+|---|---|---|
+| TYPE_REF edges | 148 | **4885** |
+| distinct TYPE_REF target symbols | 22 | **576** |
+| type declarations with no incoming TYPE_REF | 784 / 792 (99.0%) | **479 / 794 (60.3%)** |
+
+Of the 479 still unreferenced, **248 are under `Migrations/` or `Tests/`** — EF migrations and test
+classes are discovered by reflection and genuinely have no code reference, which is why
+`dead_code_scan` already suppresses them under `heuristic_runtime_or_convention_usage`.
+
+### Still not covered (deliberate, and why the entry stays open)
+
+Local variable declared types, `new Foo()` object creation, attribute usages, `typeof`/cast
+expressions, and generic arguments on method invocations. Each is a smaller increment than the
+positions above and some are noisy (a local variable type is usually also a parameter or field type
+somewhere). The residual ~231 non-migration/test unreferenced types are where they would help.
+
+**Do not measure any of this by re-indexing and comparing edge totals.** MCP-ISSUE-032 means two
+identical runs differ by ~1.4%, which is larger than what a single new position contributes — adding
+record positional parameters showed a *negative* total delta on one run purely as noise. The
+per-position harness (`scripts/test/test-csharp-type-refs.mjs`, 11 cases) is deterministic and is what
+proved each position works.
+
+### Cost
+
+`typeResolveMs` on this repo went 5214 → 19798: there is now ~33× more to resolve. Acceptable for an
+index run, but it lands on the same resolver queries as MCP-ISSUE-032's `ORDER BY` work, so a future
+performance pass should look at both together.
 
 ---
 
