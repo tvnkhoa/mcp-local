@@ -31,9 +31,21 @@ import {
   numberFromEnv,
   parseBoolEnv
 } from "./config/index.js";
+import { resolveAliases } from "./config/aliases.js";
 import { resolveApprovalSecret } from "./write/approval.js";
 import { WritePreviewStore } from "./write/previewStore.js";
 import { type WriteConfig } from "./write/writeHandlers.js";
+
+/**
+ * Honour the pre-S-43 variable names before anything reads configuration.
+ *
+ * First statement with an effect, deliberately: every `numberFromEnv` / `parseBoolEnv` below reads a
+ * `POSTGRES_*` name, and an install still carrying `PG_*` or `CH_*` would otherwise fall through to
+ * defaults — silently, and for the write and migration gates that means reading `false` where the
+ * operator set `true`. `resolveEnvironments()` calls this again for the same reason; it is
+ * idempotent.
+ */
+resolveAliases();
 
 /**
  * stderr event logger. Emits `{"level":..,"event":..,...detail}`. stdout is the
@@ -43,11 +55,11 @@ const eventLog = createEventLogger();
 
 
 const limits: QueryLimits = {
-  defaultLimit: numberFromEnv("MCP_DB_DEFAULT_LIMIT", 500),
-  maxLimit: numberFromEnv("MCP_DB_MAX_LIMIT", 2000),
-  defaultTimeoutMs: numberFromEnv("MCP_DB_DEFAULT_TIMEOUT_MS", 30_000),
-  maxTimeoutMs: numberFromEnv("MCP_DB_MAX_TIMEOUT_MS", 60_000),
-  explainCostWarn: numberFromEnv("PG_EXPLAIN_COST_WARN", 1_000_000)
+  defaultLimit: numberFromEnv("POSTGRES_DEFAULT_LIMIT", 500),
+  maxLimit: numberFromEnv("POSTGRES_MAX_LIMIT", 2000),
+  defaultTimeoutMs: numberFromEnv("POSTGRES_DEFAULT_TIMEOUT_MS", 30_000),
+  maxTimeoutMs: numberFromEnv("POSTGRES_MAX_TIMEOUT_MS", 60_000),
+  explainCostWarn: numberFromEnv("POSTGRES_EXPLAIN_COST_WARN", 1_000_000)
 };
 
 const connections = new ConnectionManager({
@@ -58,29 +70,29 @@ const connections = new ConnectionManager({
 });
 
 // One shared HMAC secret for both write + migration approvals. Auto-generated per
-// process when PG_WRITE_APPROVAL_SECRET is unset — the token is signed and verified
+// process when POSTGRES_WRITE_APPROVAL_SECRET is unset — the token is signed and verified
 // entirely in-process against an in-memory preview store, so no client config is
-// needed to enable writes (PG_WRITE_ENABLED=true is the on switch).
+// needed to enable writes (POSTGRES_WRITE_ENABLED=true is the on switch).
 const APPROVAL_SECRET = resolveApprovalSecret(approvalSecretFromEnv());
 
 const writeConfig: WriteConfig = {
-  enabled: parseBoolEnv("PG_WRITE_ENABLED"),
+  enabled: parseBoolEnv("POSTGRES_WRITE_ENABLED"),
   approvalSecret: APPROVAL_SECRET,
-  previewTtlMs: numberFromEnv("PG_WRITE_PREVIEW_TTL_MS", 900_000),
-  sampleLimit: numberFromEnv("PG_WRITE_SAMPLE_LIMIT", 20)
+  previewTtlMs: numberFromEnv("POSTGRES_WRITE_PREVIEW_TTL_MS", 900_000),
+  sampleLimit: numberFromEnv("POSTGRES_WRITE_SAMPLE_LIMIT", 20)
 };
 const writeStore = new WritePreviewStore();
 
 const migrationConfig: MigrationConfig = {
-  enabled: parseBoolEnv("PG_MIGRATION_ENABLED"),
+  enabled: parseBoolEnv("POSTGRES_MIGRATION_ENABLED"),
   ...dotnetProjectsFromEnv(),
-  timeoutMs: numberFromEnv("PG_DOTNET_TIMEOUT_MS", 120_000),
+  timeoutMs: numberFromEnv("POSTGRES_DOTNET_TIMEOUT_MS", 120_000),
   approvalSecret: APPROVAL_SECRET,
   // Longer default (1h) than write previews: migration_apply against a prod-like env is
   // human-gated, so the preview→approve pause can outlast the 15-min write TTL. This bounds
   // how long the in-memory preview record survives; freshness is enforced by the drift guard
   // at apply time, not this window (see handleMigrationApply / PG-PRV-002).
-  previewTtlMs: numberFromEnv("PG_MIGRATION_PREVIEW_TTL_MS", 3_600_000)
+  previewTtlMs: numberFromEnv("POSTGRES_MIGRATION_PREVIEW_TTL_MS", 3_600_000)
 };
 
 const handle = createMcpServer({

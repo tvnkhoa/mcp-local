@@ -25,13 +25,13 @@ export function assertMigrationEnabled(config: MigrationConfig): void {
   if (!config.enabled) {
     throw new PolicyViolationError(
       "MIGRATION_DISABLED",
-      "Migration tools are disabled. Set PG_MIGRATION_ENABLED=true, CH_DOTNET_PROJECT and CH_DOTNET_STARTUP_PROJECT to enable."
+      "Migration tools are disabled. Set POSTGRES_MIGRATION_ENABLED=true, POSTGRES_DOTNET_PROJECT and POSTGRES_DOTNET_STARTUP_PROJECT to enable."
     );
   }
   if (!config.project || !config.startupProject) {
     throw new PolicyViolationError(
       "MIGRATION_PROJECT_UNCONFIGURED",
-      "CH_DOTNET_PROJECT and CH_DOTNET_STARTUP_PROJECT must be set for migration tools."
+      "POSTGRES_DOTNET_PROJECT and POSTGRES_DOTNET_STARTUP_PROJECT must be set for migration tools."
     );
   }
 }
@@ -50,9 +50,13 @@ export function sanitizeMigrationName(name: string): string {
 /**
  * Run `dotnet ef <subcommand...>` with a FIXED argument template. The only
  * variable inputs are (a) the sanitized migration name and (b) the target
- * connection string, injected via the CH_DB_CONNECTION env var that the project's
+ * connection string, injected via the `CH_DB_CONNECTION` env var that the project's
  * IDesignTimeDbContextFactory already reads. No user string is ever concatenated
  * into a shell command — spawn is called with an argv array and shell:false.
+ *
+ * `CH_DB_CONNECTION` here is deliberately NOT renamed by S-43. It is an *outbound* name — the one
+ * the .NET project expects — not this server's own configuration. Every inbound `CH_*` var became
+ * `POSTGRES_*`; this one cannot, because the reader lives in a codebase this workspace does not own.
  */
 function runEf(config: MigrationConfig, efArgs: string[], connectionString: string): Promise<EfResult> {
   const args = [

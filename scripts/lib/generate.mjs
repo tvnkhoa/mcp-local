@@ -83,6 +83,11 @@ export function renderEnvExample(server) {
     out.push("", pad(title));
     for (const field of fields) {
       if (field.note) out.push(...commentLines(field.note));
+      // A renamed var must say so where an operator will actually look. Without this the old name
+      // still works but is undiscoverable, so the deprecation never completes.
+      if (field.deprecatedAliases?.length) {
+        out.push(...commentLines(`Renamed. Still accepts: ${field.deprecatedAliases.join(", ")}.`));
+      }
       if (field.prefix !== undefined) {
         // Never emit the wildcard as if it were assignable — `PG_ENV_*=` invites someone to set
         // it literally, which satisfies nothing. Show the real member names instead.
@@ -113,7 +118,13 @@ export function renderEnvTable(server) {
       : field.codeDefault !== undefined
         ? `\`${esc(field.codeDefault)}\` *(code)*`
         : "—";
-    const notes = [field.secret === true ? "**secret**" : null, field.note ? esc(field.note) : null]
+    const notes = [
+      field.secret === true ? "**secret**" : null,
+      field.deprecatedAliases?.length
+        ? `renamed — still accepts \`${field.deprecatedAliases.join("`, `")}\``
+        : null,
+      field.note ? esc(field.note) : null
+    ]
       .filter(Boolean)
       .join(" · ");
     return `| \`${field.name}\` | ${req} | ${dflt} | ${notes || "—"} |`;

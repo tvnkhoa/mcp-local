@@ -5,6 +5,7 @@ import process from "node:process";
 import type { PoolConfig } from "pg";
 
 import { PolicyViolationError } from "../errors.js";
+import { resolveAliases } from "./aliases.js";
 
 export type EnvCapability = "read" | "write";
 
@@ -168,11 +169,11 @@ function discoverFromAppsettings(
   return result;
 }
 
-/** Collect PG_ENV_<NAME> overrides from the environment. */
+/** Collect POSTGRES_ENV_<NAME> overrides from the environment. */
 function discoverFromEnvVars(): Map<string, { connectionString: string; varName: string }> {
   const result = new Map<string, { connectionString: string; varName: string }>();
   for (const [key, value] of Object.entries(process.env)) {
-    const match = /^PG_ENV_(.+)$/.exec(key);
+    const match = /^POSTGRES_ENV_(.+)$/.exec(key);
     if (!match || !value || value.trim().length === 0) {
       continue;
     }
@@ -184,30 +185,36 @@ function discoverFromEnvVars(): Map<string, { connectionString: string; varName:
 
 /**
  * Build the multi-environment registry from (in priority order):
- *   1. PG_ENV_<NAME> env vars (override everything)
- *   2. appsettings*.json under CH_APPSETTINGS_ROOTS
- *   3. legacy CH_DB_CONNECTION (single-env backward compatibility)
+ *   1. POSTGRES_ENV_<NAME> env vars (override everything)
+ *   2. appsettings*.json under POSTGRES_APPSETTINGS_ROOTS
+ *   3. legacy POSTGRES_CONNECTION (single-env backward compatibility)
  *
- * Writability is governed by PG_WRITABLE_ENVIRONMENTS; "prod" is force-demoted to
+ * Writability is governed by POSTGRES_WRITABLE_ENVIRONMENTS; "prod" is force-demoted to
  * read-only regardless of configuration.
  */
 export function buildEnvironmentRegistry(): EnvironmentRegistry {
-  const connectionName = (process.env.CH_CONNECTION_NAME ?? "CommunicationHubDb").trim();
-  const appsettingsRoots = splitCsv(process.env.CH_APPSETTINGS_ROOTS).map((p) => path.resolve(p));
+  // Idempotent, and called here as well as from `index.ts` on purpose: this is the one function
+  // that turns "no variables I recognise" into a thrown startup error, so it must not depend on
+  // having been reached through the entry point. A test importing it directly gets the same
+  // alias handling a real boot does.
+  resolveAliases();
+
+  const connectionName = (process.env.POSTGRES_CONNECTION_NAME ?? "CommunicationHubDb").trim();
+  const appsettingsRoots = splitCsv(process.env.POSTGRES_APPSETTINGS_ROOTS).map((p) => path.resolve(p));
 
   const fromAppsettings = discoverFromAppsettings(appsettingsRoots, connectionName);
   const fromEnvVars = discoverFromEnvVars();
 
   const environments = new Map<string, EnvironmentConfig>();
 
-  const allowed = splitCsv(process.env.PG_ALLOWED_ENVIRONMENTS).map(canonicalEnvName);
+  const allowed = splitCsv(process.env.POSTGRES_ALLOWED_ENVIRONMENTS).map(canonicalEnvName);
   const allowedSet = allowed.length > 0 ? new Set(allowed) : null;
 
   // Writable set defaults to dev + staging (+ the legacy single-connection "default"
-  // env) when not specified. Without "default" here, a legacy CH_DB_CONNECTION-only
-  // setup could never write even with PG_WRITE_ENABLED=true. "prod" is still
+  // env) when not specified. Without "default" here, a legacy POSTGRES_CONNECTION-only
+  // setup could never write even with POSTGRES_WRITE_ENABLED=true. "prod" is still
   // force-demoted to read-only below regardless of this set.
-  const writableRaw = process.env.PG_WRITABLE_ENVIRONMENTS;
+  const writableRaw = process.env.POSTGRES_WRITABLE_ENVIRONMENTS;
   const writable = new Set(
     (writableRaw === undefined ? ["dev", "staging", "default"] : splitCsv(writableRaw)).map(canonicalEnvName)
   );
@@ -221,7 +228,7 @@ export function buildEnvironmentRegistry(): EnvironmentRegistry {
     if (allowedSet && !allowedSet.has(name)) {
       return;
     }
-    // prod is never writable, no matter what PG_WRITABLE_ENVIRONMENTS says.
+    // prod is never writable, no matter what POSTGRES_WRITABLE_ENVIRONMENTS says.
     const canWrite = name !== "prod" && writable.has(name);
     const capabilities: EnvCapability[] = canWrite ? ["read", "write"] : ["read"];
     environments.set(name, {
@@ -244,25 +251,25 @@ export function buildEnvironmentRegistry(): EnvironmentRegistry {
 
   // Legacy single-connection fallback keeps the original behavior working unchanged.
   if (environments.size === 0) {
-    const legacy = process.env.CH_DB_CONNECTION;
+    const legacy = process.env.POSTGRES_CONNECTION;
     if (!legacy) {
       throw new Error(
-        "No database environments configured. Set CH_DB_CONNECTION, or PG_ENV_<NAME>, or CH_APPSETTINGS_ROOTS."
+        "No database environments configured. Set POSTGRES_CONNECTION, or POSTGRES_ENV_<NAME>, or POSTGRES_APPSETTINGS_ROOTS."
       );
     }
-    register("default", legacy, "legacy", "CH_DB_CONNECTION");
-  } else if (process.env.CH_DB_CONNECTION && !environments.has("default")) {
+    register("default", legacy, "legacy", "POSTGRES_CONNECTION");
+  } else if (process.env.POSTGRES_CONNECTION && !environments.has("default")) {
     // Honor the legacy var as an explicit "default" env alongside discovered ones.
-    register("default", process.env.CH_DB_CONNECTION, "legacy", "CH_DB_CONNECTION");
+    register("default", process.env.POSTGRES_CONNECTION, "legacy", "POSTGRES_CONNECTION");
   }
 
   if (environments.size === 0) {
-    throw new Error("No database environments matched PG_ALLOWED_ENVIRONMENTS.");
+    throw new Error("No database environments matched POSTGRES_ALLOWED_ENVIRONMENTS.");
   }
 
   // Resolve default environment.
-  const requestedDefault = process.env.PG_DEFAULT_ENVIRONMENT
-    ? canonicalEnvName(process.env.PG_DEFAULT_ENVIRONMENT)
+  const requestedDefault = process.env.POSTGRES_DEFAULT_ENVIRONMENT
+    ? canonicalEnvName(process.env.POSTGRES_DEFAULT_ENVIRONMENT)
     : undefined;
   let defaultEnvironment: string;
   if (requestedDefault && environments.has(requestedDefault)) {

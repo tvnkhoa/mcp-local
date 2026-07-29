@@ -65,7 +65,7 @@ test("keys are unique, and so are env names within a server", () => {
 });
 
 test("a prefix field is only meaningful inside a group", () => {
-  // `PG_ENV_*` is not a real variable name; it stands for a family, and only the group's
+  // `POSTGRES_ENV_*` is not a real variable name; it stands for a family, and only the group's
   // "one of" check knows how to satisfy it. A prefix field outside a group could never be met.
   for (const server of SERVERS) {
     for (const field of server.env) {
@@ -117,23 +117,36 @@ test("evaluateEnv: one group member satisfies the whole group", () => {
 
 test("evaluateEnv: a prefix family is satisfied by any matching var, not its literal name", () => {
   const postgres = byKey("postgres-mcp");
-  // The literal "PG_ENV_*" is never set by anyone; a real per-env var is what counts.
-  assert.deepEqual(evaluateEnv(postgres, ["PG_ENV_DEV"]).unsatisfiedGroups, []);
-  assert.deepEqual(evaluateEnv(postgres, ["PG_ENV_PROD"]).unsatisfiedGroups, []);
+  // The literal "POSTGRES_ENV_*" is never set by anyone; a real per-env var is what counts.
+  assert.deepEqual(evaluateEnv(postgres, ["POSTGRES_ENV_DEV"]).unsatisfiedGroups, []);
+  assert.deepEqual(evaluateEnv(postgres, ["POSTGRES_ENV_PROD"]).unsatisfiedGroups, []);
   // The trailing underscore is part of the prefix, so a var that merely starts with the same
-  // letters does NOT count. `PG_ENVIRONMENT` is the near-miss worth pinning: it would be an
-  // easy thing to "fix" by trimming the prefix to `PG_ENV`, which would then let an unrelated
-  // variable pass as a connection source.
+  // letters does NOT count. `POSTGRES_ENVIRONMENT` is the near-miss worth pinning: it would be an
+  // easy thing to "fix" by trimming the prefix to `POSTGRES_ENV`, which would then let an
+  // unrelated variable pass as a connection source.
+  assert.deepEqual(evaluateEnv(postgres, ["POSTGRES_ENVIRONMENT"]).unsatisfiedGroups, ["connection-source"]);
+  assert.deepEqual(evaluateEnv(postgres, ["POSTGRES_WRITE_ENABLED"]).unsatisfiedGroups, ["connection-source"]);
+});
+
+test("evaluateEnv: a deprecated alias satisfies its field (S-43)", () => {
+  const postgres = byKey("postgres-mcp");
+  // The whole point of S-43's aliases: an install that still carries the pre-rename names is
+  // configured, and the installer and doctor must agree with the runtime about that. Reporting
+  // "no connection source" on a server that connects fine is worse than the rename itself.
+  assert.deepEqual(evaluateEnv(postgres, ["CH_DB_CONNECTION"]).unsatisfiedGroups, []);
+  assert.deepEqual(evaluateEnv(postgres, ["CH_APPSETTINGS_ROOTS"]).unsatisfiedGroups, []);
+  // A family's alias is the old PREFIX, so it is matched the same way — by prefix, not equality.
+  assert.deepEqual(evaluateEnv(postgres, ["PG_ENV_DEV"]).unsatisfiedGroups, []);
+  // ...and the same near-miss rule applies to the legacy prefix.
   assert.deepEqual(evaluateEnv(postgres, ["PG_ENVIRONMENT"]).unsatisfiedGroups, ["connection-source"]);
-  assert.deepEqual(evaluateEnv(postgres, ["PG_WRITE_ENABLED"]).unsatisfiedGroups, ["connection-source"]);
 });
 
 test("evaluateEnv: groupMembers lists the alternatives for the installer's message", () => {
   const result = evaluateEnv(byKey("postgres-mcp"), []);
   assert.deepEqual(result.groupMembers("connection-source"), [
-    "CH_DB_CONNECTION",
-    "CH_APPSETTINGS_ROOTS",
-    "PG_ENV_*"
+    "POSTGRES_CONNECTION",
+    "POSTGRES_APPSETTINGS_ROOTS",
+    "POSTGRES_ENV_*"
   ]);
   assert.deepEqual(result.groupMembers("no-such-group"), []);
 });
@@ -215,7 +228,7 @@ test("familyExamples belong to prefix fields and match the prefix", () => {
 });
 
 test("the env contract covers every server, and grew as S-35 intended", () => {
-  // 89 vars across four servers, up from the 41 the manifest declared before S-35. The count is
+  // 94 vars across four servers, up from the 41 the manifest declared before S-35. The count is
   // asserted so that dropping a declaration is a test failure rather than a quiet regression in
   // the generated docs.
   const counts = Object.fromEntries(SERVERS.map((s) => [s.key, s.env.length]));

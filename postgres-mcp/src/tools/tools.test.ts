@@ -33,9 +33,9 @@ const logger = createNullLogger("test");
 const eventLog = createEventLogger(() => {});
 
 /** Nothing listens here, so a stray DB call fails fast instead of hanging. */
-process.env.CH_DB_CONNECTION = "postgres://t:t@127.0.0.1:59999/t";
-delete process.env.PG_ALLOWED_ENVIRONMENTS;
-delete process.env.PG_DEFAULT_ENVIRONMENT;
+process.env.POSTGRES_CONNECTION = "postgres://t:t@127.0.0.1:59999/t";
+delete process.env.POSTGRES_ALLOWED_ENVIRONMENTS;
+delete process.env.POSTGRES_DEFAULT_ENVIRONMENT;
 
 const LIMITS: QueryLimits = {
   defaultLimit: 500,
@@ -239,11 +239,11 @@ test("the guardrails reject writes, DDL, multi-statement and CTE writes", async 
 
 // --- the write gate ----------------------------------------------------------
 
-test("all three write tools refuse when PG_WRITE_ENABLED is off", async () => {
+test("all three write tools refuse when POSTGRES_WRITE_ENABLED is off", async () => {
   const expected = {
     code: "WRITE_DISABLED",
     message:
-      "Data modification is disabled. Set PG_WRITE_ENABLED=true and PG_WRITE_APPROVAL_SECRET to enable."
+      "Data modification is disabled. Set POSTGRES_WRITE_ENABLED=true and POSTGRES_WRITE_APPROVAL_SECRET to enable."
   };
   assert.deepEqual((await bodyOf("write_preview", { sql: "update t set a=1 where id=1" })).payload, expected);
   assert.deepEqual((await bodyOf("write_apply", { previewId: "p", approvalToken: "t" })).payload, expected);
@@ -277,11 +277,11 @@ test("with writes on, the shape guards still refuse before any database work", a
 
 // --- the migration gate ------------------------------------------------------
 
-test("all five migration tools refuse when PG_MIGRATION_ENABLED is off", async () => {
+test("all five migration tools refuse when POSTGRES_MIGRATION_ENABLED is off", async () => {
   const expected = {
     code: "MIGRATION_DISABLED",
     message:
-      "Migration tools are disabled. Set PG_MIGRATION_ENABLED=true, CH_DOTNET_PROJECT and CH_DOTNET_STARTUP_PROJECT to enable."
+      "Migration tools are disabled. Set POSTGRES_MIGRATION_ENABLED=true, POSTGRES_DOTNET_PROJECT and POSTGRES_DOTNET_STARTUP_PROJECT to enable."
   };
   for (const [name, args] of [
     ["migration_status", {}],
@@ -298,7 +298,7 @@ test("enabling migrations without a project still refuses, before spawning dotne
   const on = { migrationConfig: { ...MIGRATION_OFF, enabled: true } };
   assert.deepEqual((await bodyOf("migration_status", {}, on)).payload, {
     code: "MIGRATION_PROJECT_UNCONFIGURED",
-    message: "CH_DOTNET_PROJECT and CH_DOTNET_STARTUP_PROJECT must be set for migration tools."
+    message: "POSTGRES_DOTNET_PROJECT and POSTGRES_DOTNET_STARTUP_PROJECT must be set for migration tools."
   });
 });
 
@@ -326,7 +326,7 @@ test("list_environments succeeds without a database and is serialized by dispatc
       name: "default",
       capabilities: ["read", "write"],
       source: "legacy",
-      sourceDetail: "CH_DB_CONNECTION",
+      sourceDetail: "POSTGRES_CONNECTION",
       // The masking contract: host/database/user only. No password, and not the
       // raw DSN — this payload is the one a client is most likely to log.
       connection: { host: "127.0.0.1", database: "t", user: "t" },

@@ -39,7 +39,7 @@ export function buildMigrationTools(deps: PostgresDeps): AnyToolDefinition[] {
   const migrationStatus = defineTool({
     name: "migration_status",
     description:
-      "Show applied vs pending EF Core migrations for an environment. Requires PG_MIGRATION_ENABLED.",
+      "Show applied vs pending EF Core migrations for an environment. Requires POSTGRES_MIGRATION_ENABLED.",
     input: z.object({ environment: environmentArg, profile: profileArg }).strict(),
     inputSchema: schema.object({ environment: envProp, profile: profileProp }),
     annotations: readsDb,

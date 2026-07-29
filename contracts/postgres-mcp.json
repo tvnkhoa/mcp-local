@@ -379,7 +379,7 @@
         "openWorldHint": true,
         "readOnlyHint": true
       },
-      "description": "Show applied vs pending EF Core migrations for an environment. Requires PG_MIGRATION_ENABLED.",
+      "description": "Show applied vs pending EF Core migrations for an environment. Requires POSTGRES_MIGRATION_ENABLED.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -558,7 +558,7 @@
         "openWorldHint": true,
         "readOnlyHint": true
       },
-      "description": "Preview an INSERT/UPDATE/DELETE (dry-run, rolled back) and get an approval token. Requires PG_WRITE_ENABLED. UPDATE/DELETE must have WHERE unless allowFullTable.",
+      "description": "Preview an INSERT/UPDATE/DELETE (dry-run, rolled back) and get an approval token. Requires POSTGRES_WRITE_ENABLED. UPDATE/DELETE must have WHERE unless allowFullTable.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {

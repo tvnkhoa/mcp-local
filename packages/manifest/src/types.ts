@@ -67,6 +67,21 @@ export interface EnvField {
    * hand-written one it replaced rather than like an alphabetical dump.
    */
   readonly section?: string;
+  /**
+   * Former names for this var, still accepted at runtime.
+   *
+   * S-43 converged `postgres-mcp` on a single `POSTGRES_*` prefix; it previously used three
+   * (`CH_*`, `PG_*`, `MCP_DB_*`). An operator's `~/.claude.json` and `.env` files predate that, so
+   * a rename that only changed the canonical name would silently stop reading their configuration —
+   * and for a database server, "no connection source" is indistinguishable from "wrong credentials"
+   * at the point of failure.
+   *
+   * The canonical name always wins when both are set. The server warns once per legacy name it had
+   * to fall back to, so the deprecation is visible without being fatal.
+   *
+   * For a prefix family the alias is the old *prefix*: `PG_ENV_` for `POSTGRES_ENV_`.
+   */
+  readonly deprecatedAliases?: readonly string[];
 }
 
 /** How the installer prepares a server before registering it. */

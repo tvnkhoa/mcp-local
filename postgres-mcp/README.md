@@ -123,27 +123,27 @@ Mọi `write_apply` / `write_rollback` / `migration_apply` được ghi vào b�
 
 | Variable | Required | Default | Notes |
 |---|---|---|---|
-| `CH_DB_CONNECTION` | one of `connection-source` | — | **secret** · Connection source. Need ONE of: CH_DB_CONNECTION \| PG_ENV_* \| CH_APPSETTINGS_ROOTS. |
-| `CH_APPSETTINGS_ROOTS` | one of `connection-source` | — | Alternative connection source: discover connection strings from .NET appsettings*.json. |
-| `PG_ENV_*` | one of `connection-source` | — | **secret** · Per-env connection strings, declared directly instead of discovered from appsettings. Any one satisfies the connection source. `PG_ENV_*` is a family, not a literal var name — the trailing underscore is part of the prefix, so PG_ENVIRONMENT does not count. |
-| `CH_CONNECTION_NAME` | no | `CommunicationHubDb` | Which named connection to pick out of appsettings. |
-| `PG_ALLOWED_ENVIRONMENTS` | no | `dev` | — |
-| `PG_WRITABLE_ENVIRONMENTS` | no | — | prod is ALWAYS read-only regardless of this value. |
-| `PG_DEFAULT_ENVIRONMENT` | no | `dev` | — |
-| `MCP_DB_DEFAULT_LIMIT` | no | `500` | — |
-| `MCP_DB_MAX_LIMIT` | no | `2000` | — |
-| `MCP_DB_DEFAULT_TIMEOUT_MS` | no | `30000` | — |
-| `MCP_DB_MAX_TIMEOUT_MS` | no | `60000` | — |
-| `PG_EXPLAIN_COST_WARN` | no | `1000000` *(code)* | EXPLAIN cost above which a read query is flagged as expensive. |
-| `PG_WRITE_ENABLED` | no | `false` | Data writes (preview→apply→rollback) OFF unless true. |
-| `PG_WRITE_APPROVAL_SECRET` | no | — | **secret** · Auto-generated per process if empty; set to keep tokens valid across restarts. |
-| `PG_WRITE_PREVIEW_TTL_MS` | no | `900000` *(code)* | Write-preview lifetime — 15 minutes. |
-| `PG_WRITE_SAMPLE_LIMIT` | no | `20` *(code)* | Rows sampled into a write preview. |
-| `PG_MIGRATION_ENABLED` | no | `false` | EF Core migration tooling OFF unless true. |
-| `PG_MIGRATION_PREVIEW_TTL_MS` | no | `3600000` *(code)* | Migration-preview lifetime — 1 hour. |
-| `CH_DOTNET_PROJECT` | no | — | Path to the EF Core project (the one holding the DbContext). |
-| `CH_DOTNET_STARTUP_PROJECT` | no | — | Startup project passed to `dotnet ef --startup-project`. |
-| `PG_DOTNET_TIMEOUT_MS` | no | `120000` *(code)* | Timeout for a `dotnet ef` invocation. |
+| `POSTGRES_CONNECTION` | one of `connection-source` | — | **secret** · renamed — still accepts `CH_DB_CONNECTION` · Connection source. Need ONE of: POSTGRES_CONNECTION \| POSTGRES_ENV_* \| POSTGRES_APPSETTINGS_ROOTS. |
+| `POSTGRES_APPSETTINGS_ROOTS` | one of `connection-source` | — | renamed — still accepts `CH_APPSETTINGS_ROOTS` · Alternative connection source: discover connection strings from .NET appsettings*.json. |
+| `POSTGRES_ENV_*` | one of `connection-source` | — | **secret** · renamed — still accepts `PG_ENV_` · Per-env connection strings, declared directly instead of discovered from appsettings. Any one satisfies the connection source. `POSTGRES_ENV_*` is a family, not a literal var name — the trailing underscore is part of the prefix, so POSTGRES_ENVIRONMENT would not count (and no such var exists). The legacy `PG_ENV_` prefix is still accepted. |
+| `POSTGRES_CONNECTION_NAME` | no | `CommunicationHubDb` | renamed — still accepts `CH_CONNECTION_NAME` · Which named connection to pick out of appsettings. |
+| `POSTGRES_ALLOWED_ENVIRONMENTS` | no | `dev` | renamed — still accepts `PG_ALLOWED_ENVIRONMENTS` |
+| `POSTGRES_WRITABLE_ENVIRONMENTS` | no | — | renamed — still accepts `PG_WRITABLE_ENVIRONMENTS` · prod is ALWAYS read-only regardless of this value. |
+| `POSTGRES_DEFAULT_ENVIRONMENT` | no | `dev` | renamed — still accepts `PG_DEFAULT_ENVIRONMENT` |
+| `POSTGRES_DEFAULT_LIMIT` | no | `500` | renamed — still accepts `MCP_DB_DEFAULT_LIMIT` |
+| `POSTGRES_MAX_LIMIT` | no | `2000` | renamed — still accepts `MCP_DB_MAX_LIMIT` |
+| `POSTGRES_DEFAULT_TIMEOUT_MS` | no | `30000` | renamed — still accepts `MCP_DB_DEFAULT_TIMEOUT_MS` |
+| `POSTGRES_MAX_TIMEOUT_MS` | no | `60000` | renamed — still accepts `MCP_DB_MAX_TIMEOUT_MS` |
+| `POSTGRES_EXPLAIN_COST_WARN` | no | `1000000` *(code)* | renamed — still accepts `PG_EXPLAIN_COST_WARN` · EXPLAIN cost above which a read query is flagged as expensive. |
+| `POSTGRES_WRITE_ENABLED` | no | `false` | renamed — still accepts `PG_WRITE_ENABLED` · Data writes (preview→apply→rollback) OFF unless true. Parsed strictly: exact "true" or "1". |
+| `POSTGRES_WRITE_APPROVAL_SECRET` | no | — | **secret** · renamed — still accepts `PG_WRITE_APPROVAL_SECRET` · Auto-generated per process if empty; set to keep tokens valid across restarts. |
+| `POSTGRES_WRITE_PREVIEW_TTL_MS` | no | `900000` *(code)* | renamed — still accepts `PG_WRITE_PREVIEW_TTL_MS` · Write-preview lifetime — 15 minutes. |
+| `POSTGRES_WRITE_SAMPLE_LIMIT` | no | `20` *(code)* | renamed — still accepts `PG_WRITE_SAMPLE_LIMIT` · Rows sampled into a write preview. |
+| `POSTGRES_MIGRATION_ENABLED` | no | `false` | renamed — still accepts `PG_MIGRATION_ENABLED` · EF Core migration tooling OFF unless true. Parsed strictly: exact "true" or "1". |
+| `POSTGRES_MIGRATION_PREVIEW_TTL_MS` | no | `3600000` *(code)* | renamed — still accepts `PG_MIGRATION_PREVIEW_TTL_MS` · Migration-preview lifetime — 1 hour. |
+| `POSTGRES_DOTNET_PROJECT` | no | — | renamed — still accepts `CH_DOTNET_PROJECT` · Path to the EF Core project (the one holding the DbContext). |
+| `POSTGRES_DOTNET_STARTUP_PROJECT` | no | — | renamed — still accepts `CH_DOTNET_STARTUP_PROJECT` · Startup project passed to `dotnet ef --startup-project`. |
+| `POSTGRES_DOTNET_TIMEOUT_MS` | no | `120000` *(code)* | renamed — still accepts `PG_DOTNET_TIMEOUT_MS` · Timeout for a `dotnet ef` invocation. |
 
 21 variables. Defaults marked *(code)* are the server's own fallback and are **not** written into your agent config — set them only to override.
 

@@ -274,7 +274,7 @@ export async function handleMigrationApply(
   assertMigrationEnabled(config);
   const preview = migrationPreviews.get(args.previewId);
   if (!preview) {
-    // Record is swept only after PG_MIGRATION_PREVIEW_TTL_MS (default 1h) or on server restart;
+    // Record is swept only after POSTGRES_MIGRATION_PREVIEW_TTL_MS (default 1h) or on server restart;
     // within that window a human-gated approval can pause freely — the token's own expiry no
     // longer blocks apply (PG-PRV-002), the drift guard below is the real staleness check.
     throw new PolicyViolationError("PREVIEW_NOT_FOUND", `Migration preview '${args.previewId}' not found or expired.`);

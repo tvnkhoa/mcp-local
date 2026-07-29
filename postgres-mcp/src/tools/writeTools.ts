@@ -27,13 +27,13 @@ import {
 export function buildWriteTools(deps: PostgresDeps): AnyToolDefinition[] {
   const { connections, writeStore, writeConfig } = deps;
 
-  // The PG_WRITE_ENABLED check stays inside the handlers rather than becoming a
+  // The POSTGRES_WRITE_ENABLED check stays inside the handlers rather than becoming a
   // featureFlagGuard: a guard runs before the handler, and the handlers refuse
   // with their own WRITE_DISABLED envelope which clients already match on.
   const writePreview = defineTool({
     name: "write_preview",
     description:
-      "Preview an INSERT/UPDATE/DELETE (dry-run, rolled back) and get an approval token. Requires PG_WRITE_ENABLED. UPDATE/DELETE must have WHERE unless allowFullTable.",
+      "Preview an INSERT/UPDATE/DELETE (dry-run, rolled back) and get an approval token. Requires POSTGRES_WRITE_ENABLED. UPDATE/DELETE must have WHERE unless allowFullTable.",
     input: z
       .object({
         sql: z.string().min(1),

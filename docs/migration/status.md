@@ -6,7 +6,7 @@ Phase H's row updated after the S-28 SDK work landed. Every
 row cites the artifact that proves it. Where no artifact was found, the row says so
 rather than guessing.
 
-**38 of 44 done · 1 partial · 1 skipped by decision · 4 open.** **Phases A–J are complete**;
+**39 of 44 done · 1 partial · 1 skipped by decision · 3 open.** **Phases A–J are complete**;
 S-41 landed 2026-07-29, which the plan marks as the point where the migration is done — Phase K
 (S-42…S-44) is optional.
  **Phase H is complete** —
@@ -710,13 +710,74 @@ those wrong would have taught every future server the wrong pattern.
 | S-40 Index registry + workspace hygiene | ✅ | `*.db`, `*.db-shm`, `*.db-wal` gitignored; central DB at the root is untracked |
 | S-41 Flip guards to enforce; finalize docs | ✅ | hard-cap 11 → 0; 5 rules flipped to error; `scripts/prove-guards.sh` shows all 8 mechanisms reject a violation |
 
-## Phase K — Deferred Decisions · 0/3 (1 skipped)
+## Phase K — Deferred Decisions · 1/3 (1 skipped)
 
 | Step | Status | Evidence |
 |---|---|---|
 | S-42 Move servers into `servers/` | ⏭ skipped by decision | recorded in the plan |
-| S-43 Unify env prefixes | ❌ | still mixed: `CODEBASE_INDEX_*`, `PG_*`, `OBSERVE_*`, `BITBUCKET_*`, and `CH_*` shared by two servers |
+| S-43 Unify env prefixes | ✅ | `postgres-mcp`'s 21 vars all `POSTGRES_*`; every old name still honoured with a one-time deprecation warning; live install verified running on legacy names only |
 | S-44 Rename the `codebase-index-local` key | ❌ | key still in `packages/manifest/src/servers.ts` |
+
+### S-43 · the rename, and the two names that could not move
+
+`postgres-mcp` read from three unrelated prefixes: `CH_*` (5 vars, named for the CommunicationHub
+app it was first written against), `PG_*` (12) and `MCP_DB_*` (4). All 21 are now `POSTGRES_*`.
+
+**Nothing breaks.** Each field carries `deprecatedAliases` in the manifest and a matching entry in
+`postgres-mcp/src/config/aliases.ts`; `resolveAliases()` copies a legacy value onto its canonical
+name before anything reads configuration, warns once per legacy name on stderr, and lets the
+canonical name win when both are set. Proof rather than assertion: the live `~/.claude.json` on this
+machine carries **only** legacy names — `MCP_DB_*`, `PG_ENV_UAT`, `PG_ENV_PROD`, `PG_WRITE_ENABLED`,
+`CH_DOTNET_PROJECT`, … and no `POSTGRES_*` at all — and `mcp:doctor` reports PASS on both `env` and
+`start`.
+
+Two names deliberately did **not** move:
+
+- **`CH_DB_CONNECTION` in `migration/efRunner.ts`.** It is *written*, not read — injected into the
+  `dotnet ef` child process because that is the name the .NET project's
+  `IDesignTimeDbContextFactory` expects. An outbound contract with a codebase this workspace does
+  not own. The mechanical rewrite would have renamed it; the script protects that one line, a test
+  asserts it is the only legacy name left in source, and the comment above it now says why.
+  The comment initially got rewritten to `POSTGRES_CONNECTION` — a comment lying about an external
+  contract — and was corrected.
+- **`POSTGRES_USER` / `POSTGRES_PASSWORD` / `POSTGRES_DB`** are avoided as names. They belong to the
+  official postgres Docker image, and taking one would mean this server and a local database
+  container silently reconfigure each other from the same shell. That is why `CH_DB_CONNECTION`
+  became `POSTGRES_CONNECTION` rather than `POSTGRES_DB_CONNECTION`. Pinned by a test.
+
+**`evaluateEnv` had to learn about aliases too.** Without that, the installer and the doctor would
+have reported this machine's working install as having no connection source, while the runtime
+connected fine. Reporting a false problem on a healthy install is how an operator learns to ignore
+the tooling — the same failure the doctor multi-environment bug produced.
+
+**The alias table exists twice, and a test compares the copies.** It must: `@mcp/manifest` needs it
+to generate `.env.example`, the README table and the installer prompts, while the server needs it at
+runtime — and a server may not import the tooling packages (`servers/tooling-import`).
+`scripts/lib/envAliases.test.mjs` diffs the two, and also asserts every var is `POSTGRES_`-prefixed,
+that no alias is itself a canonical name, and that no name collides with the family prefix
+`POSTGRES_ENV_`. ADR 0002 is exactly this shape of problem.
+
+**Generated docs now show the rename.** `.env.example` gets `# Renamed. Still accepts: CH_DB_CONNECTION.`
+and the README table gets `renamed — still accepts \`PG_WRITE_ENABLED\``. Without this the old names
+keep working but are undiscoverable, so the deprecation never completes.
+
+**One intended contract change.** Two tool descriptions name the gate variables
+(`run_read_query`-adjacent write preview, and `migration_status`), so `contracts:check` reported
+drift on `postgres-mcp`. Reviewed and re-snapshotted: `PG_WRITE_ENABLED` → `POSTGRES_WRITE_ENABLED`
+and `PG_MIGRATION_ENABLED` → `POSTGRES_MIGRATION_ENABLED` in the wire text.
+
+**A verification that passed for the wrong reason.** The `prod`-stays-read-only probe first asserted
+on `prod.writable`, which does not exist — writability is expressed as `capabilities: ["read"]` — so
+it read `undefined`, was falsy, and "passed". Rewritten against `capabilities`, plus a control
+asserting `dev` **is** writable in each case, so a build where nothing is writable cannot pass.
+Result: `prod:[read]` while `dev:[read|write]` under legacy, canonical, and mixed naming.
+
+**Noticed, not fixed:** the live postgres config also sets `PGSSLMODE` and
+`NODE_TLS_REJECT_UNAUTHORIZED`, neither declared in the manifest, so neither appears in the
+generated `.env.example`. They are external conventions (libpq and Node), not this server's own
+names, but the omission means the generated file is not a complete picture of what a real install
+uses. `observe-mcp` does declare `NODE_TLS_REJECT_UNAUTHORIZED`, so the two servers are inconsistent
+about it.
 
 ---
 
