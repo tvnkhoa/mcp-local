@@ -102,6 +102,53 @@ Workaround · Enhancement proposal. Filed here so the MCP server team can triage
 
 ---
 
+## MCP-ISSUE-034 — C# `TYPE_REF` edges are almost never produced, so every C# type looks dead
+
+- **Status:** open. Found 2026-07-29, immediately after MCP-ISSUE-033 made `dead_code_scan` return
+  results for the first time — the tool became usable and its first real output was mostly wrong.
+- **Scenario:** `dead_code_scan` on a .NET repo. Every candidate it reports is a type declaration
+  (`class` / `record` / `record struct`), and the obvious ones are live: `ValidationException`,
+  `ForbiddenAccessException`, `RequestContext`, `N8nChatDecisionRequest`, and
+  `NormalizedMessageContent` — which is the return type of the very file it is declared in.
+- **Measured on `wec.communication-hub`** (4442 symbols, 35 887 edges):
+
+  | edge type | distinct symbols that are its TARGET |
+  |---|---|
+  | CALLS | 1751 |
+  | PROPERTY_REF | 1622 |
+  | IMPORTS | 79 |
+  | IMPLEMENTS | 58 |
+  | **TYPE_REF** | **22** |
+
+  | | count |
+  |---|---|
+  | C#-type-like declarations (`class`/`record`/`record struct`/`struct`/`interface`/`type`) | 792 |
+  | ...with **zero** incoming `TYPE_REF` edge | **784 (99.0%)** |
+
+- **Root cause (not yet confirmed):** the graph barely contains resolved C# type references at all —
+  22 target symbols across a whole repo is not a suppression problem or a scan problem, it is an
+  extraction/resolution problem. `dead_code_scan`'s rule ("no incoming CALLS/TYPE_REF/IMPORTS") is
+  correct given the edges it is shown; the edges are missing. Whether the loss is at extraction
+  (`treeSitterExtractor` not emitting `type:` placeholders for declarations, fields, parameters and
+  return types) or at resolution (`resolveTypeRefEdges` not matching them) is the next question, and
+  the `TYPE_REF` totals are small enough — 145 to 149 across runs — to inspect exhaustively.
+- **Relationship to MCP-ISSUE-032:** `TYPE_REF` is one of the edge types that varies between identical
+  runs there (145/146/147/148/149). Scarce *and* nondeterministic is a consistent picture: C# type
+  resolution is barely functioning, so tiny differences in what happens to resolve move the total by a
+  few percent.
+- **Impact:** `dead_code_scan` is mechanically working but its **type-level** results on C# are not
+  trustworthy — a reported type means "no TYPE_REF edge exists", which is true of 99% of types. Its
+  method-level results are better founded, since `CALLS` coverage is real (1751 targets). Also affects
+  anything else reading `TYPE_REF`: `find_impact_files` view `"surface"` (whose 0.75-confidence rows
+  are TYPE_REF-based), and `get_change_context` blast radius for types.
+- **Workaround:** treat a reported `class`/`record`/`struct` candidate as unproven. Cross-check with
+  `search_regex` on the type name, or `find_impact_files`. Method/function candidates are the ones
+  worth acting on.
+- **Do not "fix" by dropping TYPE_REF from the scan rule.** That would hide the missing edges behind a
+  narrower query and make the graph's real gap invisible.
+
+---
+
 ## MCP-ISSUE-033 — `dead_code_scan` returned an empty result for every repo, always
 
 - **Status:** **fixed** 2026-07-29 (`src/analysis/staticAnalyzerDeadCode.ts`). Found while trying to
