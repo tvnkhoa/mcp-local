@@ -21,7 +21,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { serverDirPath, serverEntryPath, evaluateEnv } from "./lib/manifest.mjs";
 import { toConfigPath } from "./lib/jsonc.mjs";
-import { detectAgents, configureAgent } from "./lib/agents.mjs";
+import { detectAgents, configureAgent, readServerEntry } from "./lib/agents.mjs";
 import { installSkill } from "./lib/skills.mjs";
 import { verifyServer } from "./lib/verify.mjs";
 import { parseArgs, resolveServers } from "./lib/cli.mjs";
@@ -47,19 +47,74 @@ function buildServer(server) {
   ok("Build complete");
 }
 
+/**
+ * What this server is configured with right now, across every detected agent.
+ *
+ * `configureAgent` replaces a server's entry wholesale (`[key]: mcpConfig`), so whatever
+ * `collectEnv` returns IS the new env — anything omitted is deleted. Until this existed, `collectEnv`
+ * built its answer purely from manifest prompts and defaults, which meant re-running `setup` silently
+ * reset every tuned value an operator had set: allowed roots narrowed to the manifest default, docs
+ * and telemetry flipped back off, tuning knobs dropped entirely. `mcp:doctor` could not catch it,
+ * because it only asserts that required keys are *present* — and they were, at the wrong values.
+ *
+ * Found the hard way during the S-44 key rename, which is uninstall-then-install and so hit this on
+ * every key it touched.
+ */
+function existingEnvFor(server, agents) {
+  const merged = {};
+  // Later agents win only for keys earlier ones did not set, so a value is never silently
+  // downgraded by an agent that happens to be scanned later.
+  for (const agent of agents) {
+    const entry = readServerEntry(agent, server.key);
+    const env = entry?.env ?? entry?.environment ?? null;
+    if (!env) continue;
+    for (const [k, v] of Object.entries(env)) {
+      if (merged[k] === undefined && typeof v === "string" && v !== "") merged[k] = v;
+    }
+  }
+  return merged;
+}
+
 // ---- Collect env values ----
-async function collectEnv(server) {
+async function collectEnv(server, agents) {
   const env = {};
+  const existing = existingEnvFor(server, agents);
+  const hasExisting = Object.keys(existing).length > 0;
+
+  if (hasExisting) {
+    info(`Found an existing configuration (${String(Object.keys(existing).length)} values) — keeping it unless you change it.`);
+  }
 
   for (const field of server.env) {
     let value = "";
+    const current = existing[field.name];
     if (field.prompt) {
       if (field.note) step(field.note);
-      value = await ask(field.prompt + (field.secret ? " (input stored in agent config)" : ""), field.default || "", ARGS.yes);
+      // The configured value is the prompt default, not the manifest default: re-running the
+      // installer should not require re-typing what is already set correctly.
+      value = await ask(
+        field.prompt + (field.secret ? " (input stored in agent config)" : ""),
+        current ?? field.default ?? "",
+        ARGS.yes
+      );
+    } else if (current !== undefined) {
+      value = current;
     } else if (field.default !== undefined) {
       value = field.default;
     }
     if (value) env[field.name] = value;
+  }
+
+  // Keys the operator set that the manifest does not declare — e.g. `PGSSLMODE` and
+  // `NODE_TLS_REJECT_UNAUTHORIZED` on postgres-mcp, which are libpq's and Node's own names rather
+  // than a server's. They are real configuration; dropping them on reinstall would be the same bug
+  // in a form no manifest change can prevent.
+  const undeclared = Object.keys(existing).filter((k) => !server.env.some((f) => f.name === k));
+  for (const k of undeclared) {
+    env[k] = existing[k];
+  }
+  if (undeclared.length > 0) {
+    info(`Preserved ${String(undeclared.length)} value(s) not declared in the manifest: ${undeclared.join(", ")}`);
   }
 
   // Validate required fields + "at least one of" groups using the shared
@@ -84,7 +139,7 @@ async function installOne(server, agents) {
   buildServer(server);
 
   section("2/6  Environment");
-  const env = await collectEnv(server);
+  const env = await collectEnv(server, agents);
 
   section("3/6  Configure agents");
   if (agents.length === 0) {
