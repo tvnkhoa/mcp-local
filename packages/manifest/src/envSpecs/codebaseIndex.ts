@@ -1,5 +1,5 @@
 /**
- * `codebase-index-local`'s environment contract — 34 vars.
+ * `codebase-index`'s environment contract — 34 vars.
  *
  * Seven of these were declared before S-35; the other 27 were read by the code and declared
  * nowhere, which is why `.env.example`, the README and this manifest each described a different

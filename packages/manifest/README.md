@@ -52,10 +52,13 @@ there is one implementation. Three rules interact:
 - **`group`** — "at least one of these". A grouped variable is *never* reported as individually
   missing, even when it also carries `required: true`; otherwise the installer would print a
   contradiction for `CODEBASE_INDEX_ALLOWED_ROOTS`, which is both.
-- **`prefix`** — marks a *family*. `PG_ENV_*` is not a real variable name; any set variable
-  starting with `PG_ENV_` satisfies it. The trailing underscore is part of the prefix, so
-  `PG_ENVIRONMENT` does **not** count — pinned by a test, because trimming the prefix to
-  `PG_ENV` is an easy "fix" that would let an unrelated variable pass as a connection source.
+- **`prefix`** — marks a *family*. `POSTGRES_ENV_*` is not a real variable name; any set variable
+  starting with `POSTGRES_ENV_` satisfies it. The trailing underscore is part of the prefix, so
+  `POSTGRES_ENVIRONMENT` does **not** count — pinned by a test, because trimming the prefix to
+  `POSTGRES_ENV` is an easy "fix" that would let an unrelated variable pass as a connection source.
+- **`deprecatedAliases`** — former names still honoured at runtime (S-43). Satisfies the field for
+  `evaluateEnv`, so an install carrying only pre-rename names is reported as configured rather than
+  as missing a connection source. For a family the alias is the old *prefix* (`PG_ENV_`).
 
 ## `WORKSPACE_ROOT` is the fragile part
 
@@ -81,7 +84,7 @@ Three artifacts are rendered from the manifest, so each fact is declared once (S
 
 `tools` itself is **generated** into `src/generated/toolLists.ts` by `generate:tools`, from the
 committed `contracts/` snapshots. It used to be hand-maintained and had drifted to 12 of
-`codebase-index-local`'s 43 tools — so the installed skill advertised under a third of the server,
+`codebase-index`'s 43 tools — so the installed skill advertised under a third of the server,
 and nothing noticed. The manifest's tests now assert the lists against `contracts/` directly.
 
 ## `default` vs `codeDefault`

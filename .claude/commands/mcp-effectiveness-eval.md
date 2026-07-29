@@ -3,7 +3,7 @@ description: "Compare code analysis WITHOUT MCP vs WITH the codebase-index MCP o
 argument-hint: "[repoId] [repoPath]"
 ---
 
-Use `$1` as `repoId` and `$2` as `repoPath` below (falling back to `list_repositories` if omitted). MCP tools are namespaced `mcp__codebase-index-local__<tool>`.
+Use `$1` as `repoId` and `$2` as `repoPath` below (falling back to `list_repositories` if omitted). MCP tools are namespaced `mcp__codebase-index__<tool>`.
 
 # MCP Codebase-Index Effectiveness Evaluation (No LLM Mode)
 
@@ -12,7 +12,7 @@ Use `$1` as `repoId` and `$2` as `repoPath` below (falling back to `list_reposit
 This prompt is workspace-agnostic and can run on any repository.
 
 - Baseline track: only structural tools (`file_search`, `grep_search`, `list_dir`, `read_file`).
-- MCP track: only `codebase-index-local` deterministic tools (`mcp__codebase-index-local__*`).
+- MCP track: only `codebase-index` deterministic tools (`mcp__codebase-index__*`).
 - No semantic inference from LLM is allowed in either track.
 
 Inputs:

@@ -16,7 +16,7 @@ export const TOOL_LISTS: Readonly<Record<string, readonly string[]>> = {
     "list_repositories"
   ],
 
-  "codebase-index-local": [
+  "codebase-index": [
     "change_impact",
     "change_value_representation",
     "dead_code_scan",

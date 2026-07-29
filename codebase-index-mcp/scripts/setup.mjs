@@ -22,7 +22,7 @@ const INSTALLER = path.join(WORKSPACE_ROOT, "scripts", "install-mcp.mjs");
 const forwarded = process.argv.slice(2);
 const child = spawn(
   process.execPath,
-  [INSTALLER, "--server", "codebase-index-local", ...forwarded],
+  [INSTALLER, "--server", "codebase-index", ...forwarded],
   { stdio: "inherit", cwd: WORKSPACE_ROOT }
 );
 child.on("close", (code) => process.exit(code ?? 0));

@@ -18,7 +18,7 @@ import { configureAgent } from "../../../scripts/lib/agents.mjs";
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const SERVER_PATH = path.join(__dirname, "..", "dist", "index.js");
-const KEY = "codebase-index-local";
+const KEY = "codebase-index";
 
 console.log("Testing setup script configuration generation (real configureAgent)...\n");
 
@@ -65,7 +65,7 @@ const tests = [
     agentType: "claude-code",
     check(config) {
       const server = config?.mcpServers?.[KEY];
-      assert(server, "mcpServers[codebase-index-local] should exist");
+      assert(server, "mcpServers[codebase-index] should exist");
       assert(server.command === "node", 'command should be "node"');
       assert(Array.isArray(server.args), "args should be an array");
       assert(server.env?.CODEBASE_INDEX_ALLOWED_ROOTS, "env.CODEBASE_INDEX_ALLOWED_ROOTS should be set");
@@ -78,7 +78,7 @@ const tests = [
     agentType: "claude",
     check(config) {
       const server = config?.mcpServers?.[KEY];
-      assert(server, "mcpServers[codebase-index-local] should exist");
+      assert(server, "mcpServers[codebase-index] should exist");
       assert(server.command === "node", 'command should be "node"');
       assert(Array.isArray(server.args), "args should be an array");
       assert(server.env?.CODEBASE_INDEX_ALLOWED_ROOTS, "env.CODEBASE_INDEX_ALLOWED_ROOTS should be set");
@@ -90,7 +90,7 @@ const tests = [
     check(config) {
       assert(!config["mcp.servers"], 'flat "mcp.servers" key must not exist (VS Code needs nested format)');
       const server = config?.mcp?.servers?.[KEY];
-      assert(server, "mcp.servers[codebase-index-local] should exist");
+      assert(server, "mcp.servers[codebase-index] should exist");
       assert(server.command === "node", 'command should be "node"');
       assert(Array.isArray(server.args), "args should be an array");
       assert(server.env?.CODEBASE_INDEX_ALLOWED_ROOTS, "env should be set");
@@ -101,7 +101,7 @@ const tests = [
     agentType: "opencode",
     check(config) {
       const server = config?.mcp?.[KEY];
-      assert(server, "mcp[codebase-index-local] should exist");
+      assert(server, "mcp[codebase-index] should exist");
       assert(server.type === "local", 'type should be "local"');
       assert(Array.isArray(server.command), "command should be an array");
       assert(server.command[0] === "node", 'command[0] should be "node"');

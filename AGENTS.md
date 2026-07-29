@@ -36,7 +36,7 @@ npm run mcp:uninstall -- --server <key>    # remove config + skill (config backe
 npm run mcp:update -- --all                # rebuild + regenerate skills + verify
 ```
 
-Server keys: `codebase-index-local`, `postgres-mcp`, `observe-mcp`, `bitbucket-mcp`.
+Server keys: `codebase-index`, `postgres-mcp`, `observe-mcp`, `bitbucket-mcp`.
 Source of truth for every server (entry path, env schema, tools, skill source) is
 `packages/manifest` (`@mcp/manifest`). The installer writes MCP config into each detected agent
 (`~/.claude.json` for Claude Code) and renders a native skill per server.
@@ -117,7 +117,7 @@ npm run dev
 - Blocks: `INSERT`, `UPDATE`, `DELETE`, `TRUNCATE`, `ALTER`, `DROP`, `CREATE`, etc.
 - Single statement only (no semicolon-separated batches)
 - Parameterized queries required for user input
-- Connection string via `CH_DB_CONNECTION` env var (never commit secrets)
+- Connection string via `POSTGRES_CONNECTION` env var (never commit secrets). The pre-S-43 name `CH_DB_CONNECTION` still works.
 
 ## Development Workflow
 
@@ -208,14 +208,14 @@ Default: watchless operation (`CODEBASE_INDEX_WATCH_AUTO_START=false`)
 
 ### postgres-mcp (required)
 
-- `CH_DB_CONNECTION` - PostgreSQL connection string (Npgsql format)
+- `POSTGRES_CONNECTION` - PostgreSQL connection string (Npgsql format). *(was `CH_DB_CONNECTION`)*
 
 ### postgres-mcp (optional)
 
-- `MCP_DB_DEFAULT_LIMIT` - Default row limit (default: 500)
-- `MCP_DB_MAX_LIMIT` - Maximum row limit (default: 2000)
-- `MCP_DB_DEFAULT_TIMEOUT_MS` - Default query timeout (default: 30000)
-- `MCP_DB_MAX_TIMEOUT_MS` - Maximum query timeout (default: 60000)
+- `POSTGRES_DEFAULT_LIMIT` - Default row limit (default: 500). *(was `MCP_DB_DEFAULT_LIMIT`)*
+- `POSTGRES_MAX_LIMIT` - Maximum row limit (default: 2000). *(was `MCP_DB_MAX_LIMIT`)*
+- `POSTGRES_DEFAULT_TIMEOUT_MS` - Default query timeout (default: 30000). *(was `MCP_DB_DEFAULT_TIMEOUT_MS`)*
+- `POSTGRES_MAX_TIMEOUT_MS` - Maximum query timeout (default: 60000). *(was `MCP_DB_MAX_TIMEOUT_MS`)*
 
 ### bitbucket-mcp (required)
 
@@ -293,7 +293,7 @@ When MCP tools fail to provide sufficient evidence, log new issues with:
 ```json
 {
   "servers": {
-    "codebase-index-local": {
+    "codebase-index": {
       "command": "node",
       "args": ["${workspaceFolder}/codebase-index-mcp/dist/index.js"],
       "env": {

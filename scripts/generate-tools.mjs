@@ -3,7 +3,7 @@
  * Derive each server's tool list into `packages/manifest/src/generated/toolLists.ts` (S-36).
  *
  * Before this, `tools:` was hand-maintained in the manifest and had already drifted —
- * `codebase-index-local` named 12 of its 43 tools, so the generated skill advertised a third of
+ * `codebase-index` named 12 of its 43 tools, so the generated skill advertised a third of
  * the server. Nothing detected that, because nothing compared the list to the server.
  *
  * The source is `contracts/<key>.json`: the committed `tools/list` snapshot, captured from a real

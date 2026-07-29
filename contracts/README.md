@@ -52,7 +52,7 @@ Reproducibility is the whole value; a snapshot that varies per machine is noise.
 
 | Server | Tools | Advertises annotations |
 |---|---|---|
-| `codebase-index-local` | 43 | **yes** — migrated to `@mcp/sdk` (S-31…S-33) |
+| `codebase-index` | 43 | **yes** — migrated to `@mcp/sdk` (S-31…S-33) |
 | `postgres-mcp` | 17 | **yes** — migrated to `@mcp/sdk` (S-25) |
 | `observe-mcp` | 8 | **yes** — migrated to `@mcp/sdk` (S-24) |
 | `bitbucket-mcp` | 8 | **yes** — migrated to `@mcp/sdk` (S-23) |

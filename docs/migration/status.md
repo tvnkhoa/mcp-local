@@ -1,18 +1,24 @@
 # Migration status — all 44 steps
 
-**Verified** 2026-07-28 against the working tree, not from memory, and updated 2026-07-29 for
-Phase J's completion. Baseline `9ccae95`;
-Phase H's row updated after the S-28 SDK work landed. Every
-row cites the artifact that proves it. Where no artifact was found, the row says so
-rather than guessing.
+**Verified** 2026-07-28 against the working tree, not from memory, and updated 2026-07-29 through
+the end of Phase K. Baseline `9ccae95`. Every row cites the artifact that proves it. Where no
+artifact was found, the row says so rather than guessing.
 
-**39 of 44 done · 1 partial · 1 skipped by decision · 3 open.** **Phases A–J are complete**;
-S-41 landed 2026-07-29, which the plan marks as the point where the migration is done — Phase K
-(S-42…S-44) is optional.
- **Phase H is complete** —
-S-31, S-32 and S-33 all landed 2026-07-28. All 43 codebase-index tools are on the SDK registry,
-the legacy bridge is gone, and **all four servers now run on `@mcp/sdk`**. S-33 carried one
-intended contract change (unknown tool → `not_found`); see [the S-33 section](#s-33--the-decision-and-the-one-contract-change).
+## **43 of 44 done · 1 skipped by decision (S-42) · 0 open. The migration is complete.**
+
+Phases A–J all landed by 2026-07-29, which the plan marks as the point the migration is finished.
+Phase K was optional; S-43 and S-44 were done anyway on the plan's own recommendation, and S-42
+(moving servers into `servers/`) was skipped by decision — the plan recommends skipping it.
+
+An earlier revision of this header read "1 partial · N open". That arithmetic came from a **second,
+stale Phase J table** further down which still listed S-38 as undone and S-39 as partial long after
+both had landed. Reconciled 2026-07-29; the Phase J table under
+[Conventions and Housekeeping](#phase-j--conventions-and-housekeeping--55-) is authoritative. Two
+tables describing one phase is itself the defect that let the drift happen.
+
+All 43 codebase-index tools are on the SDK registry, the legacy bridge is gone, and **all four
+servers run on `@mcp/sdk`**. S-33 carried one intended contract change (unknown tool →
+`not_found`); see [the S-33 section](#s-33--the-decision-and-the-one-contract-change).
 
 S-31 also found `benchmark:plan:check` — a hard CI step — **already failing on `main`**, for
 two reasons that had nothing to do with the migration. Both fixed; see
@@ -700,23 +706,67 @@ Two things were caught by checking the SDK instead of assuming its shape: the to
 returns `ok(payload)` because dispatch resolves the profile and serializes. A scaffold that got
 those wrong would have taught every future server the wrong pattern.
 
- · 2/5
+### Phase J, restated from the gitignore section's point of view · 5/5
+
+> A second Phase J table, written when this section was about `.gitignore` scope. It said S-38 was
+> undone and S-39 partial; both had landed by the time S-41 finished. Reconciled 2026-07-29 — the
+> [Phase J table above](#phase-j--conventions-and-housekeeping--55-) is authoritative, and two
+> tables for one phase is itself the defect that let this drift.
 
 | Step | Status | Evidence |
 |---|---|---|
-| S-37 Normalize folders + `.gitignore` | ✅ | `3f5b702`, `docs/migration/normalization-report.md` (48 files) |
-| S-38 Server scaffold generator | ❌ | no scaffold script |
-| S-39 Consolidate the test strategy | 🟡 partial | script vocabulary is uniform and `run-tests.mjs` discovers `test:*` so the list cannot fall behind — but no strategy document exists |
+| S-37 Normalize folders + `.gitignore` | ✅ | `3f5b702`, `docs/migration/normalization-report.md` (48 files); re-homing completed in S-41 |
+| S-38 Server scaffold generator | ✅ | `templates/server/**` + `scripts/new-server.mjs`, verified end to end |
+| S-39 Consolidate the test strategy | ✅ | `test:unit` + `test:integration`; the strategy is documented in `docs/conventions.md` §4 and `CLAUDE.md` |
 | S-40 Index registry + workspace hygiene | ✅ | `*.db`, `*.db-shm`, `*.db-wal` gitignored; central DB at the root is untracked |
 | S-41 Flip guards to enforce; finalize docs | ✅ | hard-cap 11 → 0; 5 rules flipped to error; `scripts/prove-guards.sh` shows all 8 mechanisms reject a violation |
 
-## Phase K — Deferred Decisions · 1/3 (1 skipped)
+## Phase K — Deferred Decisions · 2/3 (1 skipped) — complete
 
 | Step | Status | Evidence |
 |---|---|---|
 | S-42 Move servers into `servers/` | ⏭ skipped by decision | recorded in the plan |
 | S-43 Unify env prefixes | ✅ | `postgres-mcp`'s 21 vars all `POSTGRES_*`; every old name still honoured with a one-time deprecation warning; live install verified running on legacy names only |
-| S-44 Rename the `codebase-index-local` key | ❌ | key still in `packages/manifest/src/servers.ts` |
+| S-44 Rename the `codebase-index-local` key | ✅ | key, package name and skill dir aligned on `codebase-index`; 34 lines across 16 files; live cutover applied across three agent configs with no orphan |
+
+### S-44 · the rename, and the gap it exposed in our own tooling
+
+`codebase-index-local` → `codebase-index`. 54 occurrences in 23 files, split three ways rather than
+swept:
+
+- **16 files rewritten** — the manifest key, the generated tool list, the contract snapshot (file
+  *and* its internal `server` field), `.gitignore`'s skill-dir pattern, `setup.mjs`, the
+  setup-config test, and eight docs including the tool namespace
+  `mcp__codebase-index-local__*` → `mcp__codebase-index__*`. The namespace is replaced *before* the
+  bare key, because the longer string contains the shorter one.
+- **4 files deliberately left alone** — `migration-plan.md` and `status.md` record a past state, and
+  `scripts/lib/agents.mjs` / `agents.test.mjs` use the old key as the *fixture* for the prefix
+  collision this rename creates. Rewriting those would delete the warning.
+- **1 file by hand** — `types.ts` said key is "deliberately not always equal to `dir`: see
+  `codebase-index-local` (S-44 owns that)". Still true after the rename (`codebase-index` vs
+  `codebase-index-mcp`), so the sentence needed rewording rather than substituting.
+
+**Our own uninstaller could not clean up after the rename.** `mcp:uninstall --server
+codebase-index-local` fails with *"Unknown server"* the moment the manifest stops declaring that
+key — it resolves keys through the manifest. Left as-is, the installer would have written
+`codebase-index` alongside a stranded `codebase-index-local`: two registrations of one build, two
+processes on one SQLite database. Fixed by adding `--key <name>`, which bypasses manifest resolution
+for exactly this case. A separate flag rather than a fallback for an unrecognised `--server`, so a
+typo stays an error instead of a no-op that reports success.
+
+**The cutover touched three agent configs, not one.** The installer detected Claude Code, VS Code and
+OpenCode; the uninstall step reported removing the old key from Claude Code only. Rather than assume
+the other two were clean, all three were checked directly: old key absent, new key present in each.
+Every config was backed up by the tool, plus one taken by hand beforehand.
+
+`prod`-style safety note: nothing about the rename touches `CODEBASE_INDEX_DB_PATH` or the indexed
+`repoId`s (`codebase-index-mcp`, `mcp-local`), so no re-index was needed.
+
+**Two S-43 gaps found while reading files for this step** — `CLAUDE.md` and `AGENTS.md` still
+documented `CH_DB_CONNECTION`, `PG_ENV_*`, `PG_WRITE_ENABLED`, `MCP_DB_*` as current, and
+`packages/manifest/src/types.ts` plus `packages/manifest/README.md` used `PG_ENV_*` as the live
+family example. S-43 renamed the code and the generated files but missed the hand-written docs.
+Corrected here, with the alias note added so the old names are still discoverable.
 
 ### S-43 · the rename, and the two names that could not move
 

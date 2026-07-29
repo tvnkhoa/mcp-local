@@ -81,7 +81,7 @@ test("getServer returns null for an unknown key rather than throwing", () => {
 });
 
 test("serverEntryPath and serverDirPath are absolute and nested correctly", () => {
-  const server = byKey("codebase-index-local");
+  const server = byKey("codebase-index");
   assert.ok(path.isAbsolute(serverEntryPath(server)));
   assert.equal(serverDirPath(server), path.join(WORKSPACE_ROOT, "codebase-index-mcp"));
   assert.equal(serverEntryPath(server), path.join(WORKSPACE_ROOT, "codebase-index-mcp", "dist", "index.js"));
@@ -104,7 +104,7 @@ test("evaluateEnv: nothing set reports required vars and unsatisfied groups", ()
 test("evaluateEnv: a grouped var is never reported as individually missing", () => {
   // CODEBASE_INDEX_ALLOWED_ROOTS is `required: true` AND in the "roots" group. The group is what
   // must be satisfied; reporting it twice would make the installer print a contradiction.
-  const result = evaluateEnv(byKey("codebase-index-local"), []);
+  const result = evaluateEnv(byKey("codebase-index"), []);
   assert.deepEqual(result.missingRequired, []);
   assert.deepEqual(result.unsatisfiedGroups, ["roots"]);
 });
@@ -169,7 +169,7 @@ test("path defaults are POSIX-separated", () => {
 
 test("tool lists match the committed contract snapshots exactly", () => {
   // The manifest's `tools` used to be hand-maintained and had drifted to 12 of 43 for
-  // codebase-index-local. This asserts the generator's output against the same source it read,
+  // codebase-index. This asserts the generator's output against the same source it read,
   // so a hand-edit to either side fails here rather than silently shipping a wrong skill.
   let total = 0;
   for (const server of SERVERS) {
@@ -184,9 +184,9 @@ test("tool lists match the committed contract snapshots exactly", () => {
   assert.equal(total, 76, "the workspace advertises 76 tools; update this number deliberately");
 });
 
-test("codebase-index-local advertises all 43 of its tools", () => {
+test("codebase-index advertises all 43 of its tools", () => {
   // The specific drift S-36 existed to fix — pinned so it cannot silently return.
-  assert.equal(byKey("codebase-index-local").tools.length, 43);
+  assert.equal(byKey("codebase-index").tools.length, 43);
 });
 
 // --- env field hygiene (S-35) -------------------------------------------------
@@ -233,7 +233,7 @@ test("the env contract covers every server, and grew as S-35 intended", () => {
   // the generated docs.
   const counts = Object.fromEntries(SERVERS.map((s) => [s.key, s.env.length]));
   assert.deepEqual(counts, {
-    "codebase-index-local": 39,
+    "codebase-index": 39,
     "postgres-mcp": 21,
     "observe-mcp": 23,
     "bitbucket-mcp": 11

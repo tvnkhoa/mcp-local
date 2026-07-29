@@ -9,7 +9,7 @@ All are TypeScript 5.7+ ESM built on `@modelcontextprotocol/sdk`.
 
 | Key | Directory | What it does |
 |-----|-----------|--------------|
-| `codebase-index-local` | `codebase-index-mcp/` | Code graph indexing: symbols, call chains, impact analysis, safe rule-based refactors. **No runtime LLM.** |
+| `codebase-index` | `codebase-index-mcp/` | Code graph indexing: symbols, call chains, impact analysis, safe rule-based refactors. **No runtime LLM.** |
 | `postgres-mcp` | `postgres-mcp/` | Read-only Postgres access with SQL guardrails; gated data writes + EF Core migration tooling. `prod` is force read-only. |
 | `observe-mcp` | `observe-mcp/` | Read-only log/trace search over OpenObserve for the CommunicationHub backend. |
 | `bitbucket-mcp` | `bitbucket-mcp/` | Read repositories / pull requests and **create PRs** on Bitbucket Cloud (write gated). |
@@ -40,7 +40,7 @@ Pass npm script args after `--`:
 ```bash
 # One server only
 node scripts/install-mcp.mjs --server postgres-mcp
-npm run mcp:doctor -- --server codebase-index-local
+npm run mcp:doctor -- --server codebase-index
 npm run mcp:update -- --server observe-mcp
 npm run mcp:uninstall -- --server bitbucket-mcp
 
@@ -49,7 +49,7 @@ npm run mcp:update -- --all
 npm run mcp:uninstall -- --all
 ```
 
-Known keys: `codebase-index-local`, `postgres-mcp`, `observe-mcp`, `bitbucket-mcp`.
+Known keys: `codebase-index`, `postgres-mcp`, `observe-mcp`, `bitbucket-mcp`.
 
 ### Command flags
 
@@ -67,7 +67,7 @@ Known keys: `codebase-index-local`, `postgres-mcp`, `observe-mcp`, `bitbucket-mc
 npm run setup
 
 # Non-interactive install of just the codebase index server with defaults
-node scripts/install-mcp.mjs --server codebase-index-local --yes
+node scripts/install-mcp.mjs --server codebase-index --yes
 
 # Check health after a machine change or config edit
 npm run mcp:doctor

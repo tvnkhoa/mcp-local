@@ -48,7 +48,7 @@ export function raw(result: CallToolResult): ToolCallResult {
  * Note these are NEW on the wire. The pre-SDK descriptors carried no annotations at all, so a
  * migrated tool gains an `annotations` object in `tools/list` — a real, deliberate, spec-shaped
  * contract addition, made one batch at a time, and the reason
- * `contracts/codebase-index-local.json` gained annotations across S-32.
+ * `contracts/codebase-index.json` gained annotations across S-32.
  */
 export const readsGraph: ToolAnnotations = {
   readOnly: true,

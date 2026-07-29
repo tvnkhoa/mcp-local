@@ -16,7 +16,7 @@
  * kind of thing a reader assumes and gets wrong.
  */
 export interface EnvField {
-  /** The env var name. For a prefix family this is the display form, e.g. `PG_ENV_*`. */
+  /** The env var name. For a prefix family this is the display form, e.g. `POSTGRES_ENV_*`. */
   readonly name: string;
   /** True = the server cannot work without it. Group members express "one of" instead. */
   readonly required: boolean;
@@ -49,14 +49,14 @@ export interface EnvField {
   readonly note?: string;
   /**
    * Marks a variable *family* rather than one name: any set var starting with this prefix
-   * satisfies the field. Only `PG_ENV_*` uses it, and only inside a group.
+   * satisfies the field. Only `POSTGRES_ENV_*` uses it, and only inside a group.
    */
   readonly prefix?: string;
   /**
    * Concrete member names to show for a `prefix` family.
    *
-   * The hand-written `.env.example` listed `PG_ENV_DEV` / `PG_ENV_STAGING` / `PG_ENV_PROD`, which
-   * is more useful than the wildcard alone — someone reading `PG_ENV_*` still has to guess the
+   * The hand-written `.env.example` listed `POSTGRES_ENV_DEV` / `_STAGING` / `_PROD`, which is more
+   * useful than the wildcard alone — someone reading `POSTGRES_ENV_*` still has to guess the
    * suffix convention. Kept so generating the file does not make it worse than what it replaced.
    */
   readonly familyExamples?: readonly string[];
@@ -96,7 +96,10 @@ export interface ServerDescriptor {
   /**
    * The MCP registration key — what a client namespaces tools with
    * (`mcp__<key>__<tool>`), so it is user-visible configuration, not an internal id.
-   * Deliberately not always equal to `dir`: see `codebase-index-local` (S-44 owns that).
+   *
+   * Still not always equal to `dir`: S-44 aligned `codebase-index`'s key with its package name,
+   * but its directory keeps the `-mcp` suffix that every server directory carries. Renaming the
+   * directory too would be S-42, which was skipped by decision.
    */
   readonly key: string;
   readonly displayName: string;
@@ -114,7 +117,7 @@ export interface ServerDescriptor {
    * Every tool the server advertises, as `tools/list` reports it.
    *
    * **Generated** — see `src/generated/toolLists.ts`. Until S-36 this was a hand-maintained
-   * subset that had already drifted (`codebase-index-local` named 12 of its 43), which is why it
+   * subset that had already drifted (`codebase-index` named 12 of its 43), which is why it
    * is no longer hand-written: `generate:docs` derives it from the committed contract snapshots,
    * and `generate:check` fails when the two disagree.
    */

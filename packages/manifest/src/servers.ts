@@ -10,7 +10,7 @@
  * - `env` lives in `envSpecs/` — 89 fields across four servers do not belong in one file, and
  *   keeping them separate means a change to one server's contract has a diff that says so.
  * - `tools` is **generated** from `contracts/` by `scripts/generate-tools.mjs`. It used to be a
- *   hand-maintained subset and had drifted to 12 of 43 tools for `codebase-index-local` (S-36).
+ *   hand-maintained subset and had drifted to 12 of 43 tools for `codebase-index` (S-36).
  *
  * This data is what `~/.claude.json` gets written from, so a "tidy-up" here silently rewrites
  * working agent configuration on the next install.
@@ -48,7 +48,7 @@ function toolsFor(key: string): readonly string[] {
 
 export const SERVERS: readonly ServerDescriptor[] = [
   {
-    key: "codebase-index-local",
+    key: "codebase-index",
     displayName: "Codebase Index MCP",
     dir: "codebase-index-mcp",
     entry: "dist/index.js",
@@ -56,7 +56,7 @@ export const SERVERS: readonly ServerDescriptor[] = [
     build: { install: true, guards: ["guard:no-llm-runtime"] },
     smokeTest: "node scripts/smoke-test.mjs",
     skillSource: "codebase-index-mcp/skill",
-    tools: toolsFor("codebase-index-local"),
+    tools: toolsFor("codebase-index"),
     env: codebaseIndexEnv(ROOT)
   },
 

@@ -19,7 +19,7 @@ npm install && npm run build
 
 <!-- BEGIN GENERATED: tool-list -->
 
-43 tools, namespaced `mcp__codebase-index-local__<tool>`:
+43 tools, namespaced `mcp__codebase-index__<tool>`:
 
 - `change_impact`
 - `change_value_representation`
@@ -231,7 +231,7 @@ Refactor tools: `refactor_replace_preview` and `refactor_replace_apply` support 
 ```json
 {
   "mcpServers": {
-    "codebase-index-local": {
+    "codebase-index": {
       "command": "node",
       "args": ["${workspaceFolder}/codebase-index-mcp/dist/index.js"],
       "env": {

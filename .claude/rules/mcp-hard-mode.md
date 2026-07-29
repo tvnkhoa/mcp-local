@@ -89,11 +89,11 @@ Anti-pattern (avoid):
 Policy in this file uses short tool names. At execution time, Claude Code namespaces
 every MCP tool as `mcp__<serverKey>__<toolName>`:
 
-- Codebase index tools → `mcp__codebase-index-local__<tool>` (e.g. `mcp__codebase-index-local__search_symbols`).
+- Codebase index tools → `mcp__codebase-index__<tool>` (e.g. `mcp__codebase-index__search_symbols`).
 - PostgreSQL tools → `mcp__postgres-mcp__<tool>` (e.g. `mcp__postgres-mcp__run_read_query`, `mcp__postgres-mcp__health_check`).
 
 So a short name like `search_symbols` in this document means the runtime tool
-`mcp__codebase-index-local__search_symbols`.
+`mcp__codebase-index__search_symbols`.
 
 Reference: execution playbooks live in `codebase-index-mcp/.claude/skills/mcp-first-codebase-operations/SKILL.md`.
 

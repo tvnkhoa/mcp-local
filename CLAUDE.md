@@ -129,7 +129,7 @@ src/index.ts           # MCP tool dispatch
 
 **Path allowlist (codebase-index-mcp):** `CODEBASE_INDEX_ALLOWED_ROOTS` (comma-separated absolute paths) is the only required env var. Always use the exact `repoPath` from `list_repositories` output — do not change drive-letter casing or slash style, as mismatches cause allowlist rejection.
 
-**postgres-mcp default-safe:** Read path permits only `SELECT` and `WITH ... SELECT`. A connection source is required (`CH_DB_CONNECTION`, or `PG_ENV_*`, or `CH_APPSETTINGS_ROOTS`). Data writes are OFF unless `PG_WRITE_ENABLED=true` (preview→apply→rollback, HMAC-approved, mandatory WHERE); migrations OFF unless `PG_MIGRATION_ENABLED=true`. The approval token is signed/verified in-process, so `PG_WRITE_APPROVAL_SECRET` is auto-generated per process when unset (set it only to keep tokens valid across restarts). **`prod` is force read-only** regardless of config. No secrets in code.
+**postgres-mcp default-safe:** Read path permits only `SELECT` and `WITH ... SELECT`. A connection source is required (`POSTGRES_CONNECTION`, or `POSTGRES_ENV_*`, or `POSTGRES_APPSETTINGS_ROOTS`). Data writes are OFF unless `POSTGRES_WRITE_ENABLED=true` (preview→apply→rollback, HMAC-approved, mandatory WHERE); migrations OFF unless `POSTGRES_MIGRATION_ENABLED=true`. The approval token is signed/verified in-process, so `POSTGRES_WRITE_APPROVAL_SECRET` is auto-generated per process when unset (set it only to keep tokens valid across restarts). **`prod` is force read-only** regardless of config. No secrets in code. S-43 renamed all 21 vars to `POSTGRES_*`; every pre-rename name (`CH_*`, `PG_*`, `MCP_DB_*`) is still honoured with a one-time deprecation warning.
 
 **Smoke test requires build:** `node scripts/smoke-test.mjs` runs `dist/index.js`, not source. Always `npm run build` first.
 
@@ -180,7 +180,7 @@ Use this for rapid iteration. Run the full pre-commit sequence before committing
 
 ## MCP-First Operating Rules
 
-When analyzing this codebase, use the `codebase-index-local` MCP tools **before** falling back to grep/read:
+When analyzing this codebase, use the `codebase-index` MCP tools **before** falling back to grep/read:
 
 - Registered repoIds: `codebase-index-mcp` (the sub-project) and `mcp-local` (this workspace)
 - Prefer `search_symbols` → `get_symbol_context_pack` → `find_impact_files` for code navigation
