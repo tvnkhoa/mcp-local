@@ -13,6 +13,7 @@ import {
   MCP_PROTOCOL_PACKAGE,
   TOOLING_PACKAGES,
   isNodeBuiltin,
+  isTestFile,
   ruleFor
 } from "./rules.js";
 import {
@@ -23,6 +24,20 @@ import {
   readWorkspacePackages,
   stripComments
 } from "../scan.js";
+
+/**
+ * Reading a *configuration value* out of the environment: `process.env.FOO` or
+ * `process.env["FOO"]`.
+ *
+ * Deliberately narrower than `process.env` alone, which also matched `{ ...process.env }` —
+ * spreading the whole environment into a child process is inheritance, not configuration.
+ * `postgres-mcp`'s `efRunner` must do it so `dotnet ef` inherits PATH and DOTNET_ROOT, and
+ * reporting that as a rule-10 violation was simply wrong.
+ *
+ * A determined author can still evade this by aliasing (`const e = process.env; e.FOO`). Accepted:
+ * the guard is a tripwire for drift, not a sandbox.
+ */
+const ENV_READ = /\bprocess\s*\.\s*env\s*(?:\.\s*\w+|\[)/;
 
 export interface DependencyGuardOptions {
   readonly workspaceRoot: string;
@@ -55,10 +70,12 @@ export function runDependencyGuard(options: DependencyGuardOptions): GuardReport
     for (const file of files) {
       // Rule 10 - process.env is read in one place only. Comments are stripped
       // first so documenting the rule does not violate it.
-      if (/\bprocess\s*\.\s*env\b/.test(stripComments(file.content))) {
-        const permitted = ENV_ACCESS_ALLOWLIST.some((allowed) =>
-          allowed.startsWith("/") ? file.relativePath.endsWith(allowed) : file.relativePath === allowed
-        );
+      if (ENV_READ.test(stripComments(file.content))) {
+        const permitted =
+          isTestFile(file.relativePath) ||
+          ENV_ACCESS_ALLOWLIST.some((allowed) =>
+            allowed.startsWith("/") ? file.relativePath.endsWith(allowed) : file.relativePath === allowed
+          );
         if (!permitted) {
           findings.push({
             rule: "env/direct-access",
@@ -193,10 +210,12 @@ export function runDependencyGuard(options: DependencyGuardOptions): GuardReport
       // platform yet, so scattered env reads are the expected pre-migration
       // state. This count is the number the migration drives to zero, and
       // `--strict` (migration-plan step S-41) is what makes it blocking.
-      if (/\bprocess\s*\.\s*env\b/.test(stripComments(file.content))) {
-        const permitted = ENV_ACCESS_ALLOWLIST.some((allowed) =>
-          allowed.startsWith("/") ? file.relativePath.endsWith(allowed) : file.relativePath === allowed
-        );
+      if (ENV_READ.test(stripComments(file.content))) {
+        const permitted =
+          isTestFile(file.relativePath) ||
+          ENV_ACCESS_ALLOWLIST.some((allowed) =>
+            allowed.startsWith("/") ? file.relativePath.endsWith(allowed) : file.relativePath === allowed
+          );
         if (!permitted) {
           findings.push({
             rule: "env/direct-access",

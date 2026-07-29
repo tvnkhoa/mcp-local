@@ -1,4 +1,5 @@
 import process from "node:process";
+import { INDEX_LOG_MODE } from "./config/envConfig.js";
 
 /**
  * Indexing progress reporting + log gating.
@@ -19,7 +20,7 @@ import process from "node:process";
  *   - quiet   → suppress even the final summary line.
  */
 
-const LOG_MODE = (process.env.CODEBASE_INDEX_INDEX_LOG ?? "").toLowerCase();
+const LOG_MODE = INDEX_LOG_MODE;
 
 /** Full line-by-line `[index-*]` logs (opt-in, e.g. CI / debugging a hang). */
 export const VERBOSE_LOG = LOG_MODE === "verbose";

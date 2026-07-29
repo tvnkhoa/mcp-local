@@ -10,6 +10,7 @@
 
 import type Database from "better-sqlite3";
 import { indexLog, indexWarn } from "./indexProgress.js";
+import { optionalStringFromEnv } from "./config/envConfig.js";
 
 // ── Constants ──────────────────────────────────────────────────────────────────
 
@@ -43,7 +44,7 @@ const KNOWN_EXTERNAL_NAMESPACES = new Set([
 // Configurable via CODEBASE_INDEX_CROSS_REPO_NAMESPACES (comma-separated top-level namespaces).
 // Default: ["SSNet", "CRM"]. These are NOT treated as external; the cross-repo resolver handles them.
 function buildCrossRepoNamespaces(): Set<string> {
-  const raw = process.env["CODEBASE_INDEX_CROSS_REPO_NAMESPACES"];
+  const raw = optionalStringFromEnv("CODEBASE_INDEX_CROSS_REPO_NAMESPACES");
   if (raw && raw.trim()) {
     return new Set(raw.split(",").map((s) => s.trim()).filter(Boolean));
   }

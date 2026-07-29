@@ -19,19 +19,20 @@ import { fileURLToPath } from "node:url";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 
 import { GraphStore } from "./graphStore.js";
-import {
-  assertPathAllowed,
-  clamp,
-  parseAllowedRoots,
-  parseAutoWatchRepos,
-  parseBooleanEnv,
-  parseWatchConfigFromEnv
-} from "./guardrails/indexGuardrails.js";
+import { assertPathAllowed, clamp } from "./guardrails/indexGuardrails.js";
 import { WatchManager } from "./watchManager.js";
 import { createIndexRunner } from "./indexing/indexRunner.js";
 import { armWatchInactivityTimer, startAutoWatchers } from "./watch/watchLifecycle.js";
-import { parsePerformanceProfileEnv } from "./config/performanceConfig.js";
-import { numberFromEnv, ratioFromEnv } from "./config/envConfig.js";
+import {
+  allowedRootsFromEnv,
+  autoWatchReposFromEnv,
+  booleanFromEnv,
+  numberFromEnv,
+  performanceProfileOverrideFromEnv,
+  ratioFromEnvName,
+  stringFromEnv,
+  watchConfigFromEnv
+} from "./config/envConfig.js";
 import {
   type ResponseProfile,
   type ToolRequestContext,
@@ -43,8 +44,8 @@ import type { HandlerContext } from "./handlers/handlerContext.js";
 import { createCodebaseIndexServer } from "./server.js";
 import { buildTools } from "./tools/index.js";
 
-const dbPath = process.env.CODEBASE_INDEX_DB_PATH ?? "./codebase-index.db";
-const allowedRoots = parseAllowedRoots(process.env.CODEBASE_INDEX_ALLOWED_ROOTS);
+const dbPath = stringFromEnv("CODEBASE_INDEX_DB_PATH", "./codebase-index.db");
+const allowedRoots = allowedRootsFromEnv();
 const MODULE_DIR = path.dirname(fileURLToPath(import.meta.url));
 
 const MAX_FILES_PER_RUN = numberFromEnv("CODEBASE_INDEX_MAX_FILES_PER_RUN", 20_000);
@@ -62,18 +63,18 @@ const MAX_FILE_SIZE_BYTES = numberFromEnv("CODEBASE_INDEX_MAX_FILE_SIZE_BYTES", 
 const DEFAULT_PARSE_WORKERS = Math.max(1, Math.floor(os.cpus().length / 2));
 const PARSE_WORKERS = numberFromEnv("CODEBASE_INDEX_PARSE_WORKERS", DEFAULT_PARSE_WORKERS);
 const PARSE_JOB_TIMEOUT_MS = numberFromEnv("CODEBASE_INDEX_PARSE_JOB_TIMEOUT_MS", 20_000);
-const WATCH_AUTO_START = parseBooleanEnv(process.env.CODEBASE_INDEX_WATCH_AUTO_START, false);
-const WATCH_ACTIVE_ONLY = parseBooleanEnv(process.env.CODEBASE_INDEX_WATCH_ACTIVE_ONLY, true);
+const WATCH_AUTO_START = booleanFromEnv("CODEBASE_INDEX_WATCH_AUTO_START", false);
+const WATCH_ACTIVE_ONLY = booleanFromEnv("CODEBASE_INDEX_WATCH_ACTIVE_ONLY", true);
 const WATCH_ACTIVE_TTL_MS = clamp(numberFromEnv("CODEBASE_INDEX_WATCH_ACTIVE_TTL_MS", 15 * 60 * 1000), 5_000, 24 * 60 * 60 * 1000);
-const AUTO_WATCH_REPOS = parseAutoWatchRepos(process.env.CODEBASE_INDEX_AUTO_WATCH_REPOS);
-const watchConfig = parseWatchConfigFromEnv(process.env);
-const TELEMETRY_ENABLED = parseBooleanEnv(process.env.CODEBASE_INDEX_TELEMETRY_ENABLED, false);
-const TELEMETRY_SAMPLE_RATE = ratioFromEnv(process.env.CODEBASE_INDEX_TELEMETRY_SAMPLE_RATE, 1);
-const DOCS_INDEXING_ENABLED = parseBooleanEnv(process.env.CODEBASE_INDEX_DOCS_INDEXING_ENABLED, false);
-const DOCS_TOOLS_ENABLED = parseBooleanEnv(process.env.CODEBASE_INDEX_DOCS_TOOLS_ENABLED, false);
-const LLM_ENABLED = parseBooleanEnv(process.env.CODEBASE_INDEX_LLM_ENABLED, false);
-const REFACTOR_STRICT_APPROVAL = parseBooleanEnv(process.env.CODEBASE_INDEX_REFACTOR_STRICT_APPROVAL, false);
-const REFACTOR_APPROVAL_SECRET = process.env.CODEBASE_INDEX_REFACTOR_APPROVAL_SECRET ?? "";
+const AUTO_WATCH_REPOS = autoWatchReposFromEnv();
+const watchConfig = watchConfigFromEnv();
+const TELEMETRY_ENABLED = booleanFromEnv("CODEBASE_INDEX_TELEMETRY_ENABLED", false);
+const TELEMETRY_SAMPLE_RATE = ratioFromEnvName("CODEBASE_INDEX_TELEMETRY_SAMPLE_RATE", 1);
+const DOCS_INDEXING_ENABLED = booleanFromEnv("CODEBASE_INDEX_DOCS_INDEXING_ENABLED", false);
+const DOCS_TOOLS_ENABLED = booleanFromEnv("CODEBASE_INDEX_DOCS_TOOLS_ENABLED", false);
+const LLM_ENABLED = booleanFromEnv("CODEBASE_INDEX_LLM_ENABLED", false);
+const REFACTOR_STRICT_APPROVAL = booleanFromEnv("CODEBASE_INDEX_REFACTOR_STRICT_APPROVAL", false);
+const REFACTOR_APPROVAL_SECRET = stringFromEnv("CODEBASE_INDEX_REFACTOR_APPROVAL_SECRET", "");
 const REFACTOR_PREVIEW_TTL_MS = numberFromEnv("CODEBASE_INDEX_REFACTOR_PREVIEW_TTL_MS", 30 * 60 * 1000);
 const REFACTOR_LOW_CONFIDENCE_THRESHOLD = 0.8;
 const SERVER_VERSION = resolveServerVersion(MODULE_DIR);
@@ -104,7 +105,7 @@ const runIndexAndResolve = createIndexRunner({
     parseJobTimeoutMs: PARSE_JOB_TIMEOUT_MS
   },
   resolveProgressNotifier: () => toolContextStorage.getStore()?.progressNotifier,
-  resolvePerformanceProfileOverride: () => parsePerformanceProfileEnv(process.env.CODEBASE_INDEX_LARGE_REPO_PROFILE)
+  resolvePerformanceProfileOverride: () => performanceProfileOverrideFromEnv()
 });
 
 const watchManager = new WatchManager(

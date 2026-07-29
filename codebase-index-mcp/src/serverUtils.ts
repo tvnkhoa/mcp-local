@@ -5,8 +5,10 @@
 import fs from "node:fs";
 import path from "node:path";
 
+import { NPM_PACKAGE_VERSION } from "./config/envConfig.js";
+
 export function resolveServerVersion(moduleDir: string): string {
-  const npmVersion = (process.env.npm_package_version ?? "").trim();
+  const npmVersion = NPM_PACKAGE_VERSION;
   if (npmVersion.length > 0) {
     return npmVersion;
   }

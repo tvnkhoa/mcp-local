@@ -93,10 +93,25 @@ export const ENV_ACCESS_ALLOWLIST: readonly string[] = [
   "packages/cli/src/guards/rules.ts",
   // Each server's config module is the other permitted reader. Every server
   // keeps its config under src/config/ — the filename differs because
-  // postgres-mcp resolves multiple environments.
+  // postgres-mcp resolves multiple environments and codebase-index-mcp splits
+  // env parsing from the performance profile it derives.
   "/src/config/index.ts",
-  "/src/config/environments.ts"
+  "/src/config/environments.ts",
+  "/src/config/envConfig.ts",
+  "/src/config/performanceConfig.ts"
 ];
+
+/**
+ * A test file may read or set `process.env` freely.
+ *
+ * Rule 10 exists so production code has one place that resolves configuration. A test that pins
+ * behaviour *across* env values has to set them, and routing that through the config module would
+ * mean the test could no longer isolate what it is testing. Reported as a violation until S-41,
+ * this was one of three findings that were never real.
+ */
+export function isTestFile(relativePath: string): boolean {
+  return /\.test\.ts$/.test(relativePath) || /(^|\/)scripts\/test\//.test(relativePath);
+}
 
 /** Node builtins are always allowed. */
 export function isNodeBuiltin(specifier: string): boolean {

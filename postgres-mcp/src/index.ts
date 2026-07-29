@@ -25,6 +25,12 @@ import { ConnectionManager } from "./db/connectionManager.js";
 import { toWireError } from "./errors.js";
 import { type MigrationConfig } from "./migration/efRunner.js";
 import { buildSchemaResources, buildTools, type QueryLimits } from "./tools/index.js";
+import {
+  approvalSecretFromEnv,
+  dotnetProjectsFromEnv,
+  numberFromEnv,
+  parseBoolEnv
+} from "./config/index.js";
 import { resolveApprovalSecret } from "./write/approval.js";
 import { WritePreviewStore } from "./write/previewStore.js";
 import { type WriteConfig } from "./write/writeHandlers.js";
@@ -35,28 +41,6 @@ import { type WriteConfig } from "./write/writeHandlers.js";
  */
 const eventLog = createEventLogger();
 
-// Declared before the first parseBoolEnv() call below: these are top-level
-// `const` initialisers, so a later declaration would be in its temporal dead
-// zone and the module would fail to load.
-const envReader = createEnvReader(defaultEnvSource());
-
-function numberFromEnv(key: string, fallbackValue: number): number {
-  const raw = process.env[key];
-  if (!raw) {
-    return fallbackValue;
-  }
-  const parsed = Number(raw);
-  if (!Number.isFinite(parsed) || parsed <= 0) {
-    return fallbackValue;
-  }
-  return parsed;
-}
-
-function parseBoolEnv(key: string): boolean {
-  // Strict on purpose: PG_WRITE_ENABLED / PG_MIGRATION_ENABLED are write gates,
-  // and `strictFlag` accepts only exact "true" or "1" — no casing, no trimming.
-  return envReader.strictFlag(key);
-}
 
 const limits: QueryLimits = {
   defaultLimit: numberFromEnv("MCP_DB_DEFAULT_LIMIT", 500),
@@ -77,7 +61,7 @@ const connections = new ConnectionManager({
 // process when PG_WRITE_APPROVAL_SECRET is unset — the token is signed and verified
 // entirely in-process against an in-memory preview store, so no client config is
 // needed to enable writes (PG_WRITE_ENABLED=true is the on switch).
-const APPROVAL_SECRET = resolveApprovalSecret(process.env.PG_WRITE_APPROVAL_SECRET ?? "");
+const APPROVAL_SECRET = resolveApprovalSecret(approvalSecretFromEnv());
 
 const writeConfig: WriteConfig = {
   enabled: parseBoolEnv("PG_WRITE_ENABLED"),
@@ -89,8 +73,7 @@ const writeStore = new WritePreviewStore();
 
 const migrationConfig: MigrationConfig = {
   enabled: parseBoolEnv("PG_MIGRATION_ENABLED"),
-  project: (process.env.CH_DOTNET_PROJECT ?? "").trim(),
-  startupProject: (process.env.CH_DOTNET_STARTUP_PROJECT ?? "").trim(),
+  ...dotnetProjectsFromEnv(),
   timeoutMs: numberFromEnv("PG_DOTNET_TIMEOUT_MS", 120_000),
   approvalSecret: APPROVAL_SECRET,
   // Longer default (1h) than write previews: migration_apply against a prod-like env is

@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import type Parser from "tree-sitter";
 import type { EdgeRecord, RouteRecord, SymbolRecord } from "../types.js";
 import type { ExtractInput } from "./extractorTypes.js";
+import { optionalStringFromEnv } from "../config/envConfig.js";
 
 // ============================================================================
 // ID & Hashing
@@ -116,7 +117,7 @@ export function mapUsingNamespaceToNugetContract(namespaceImport: string, knownP
 
   // Config-driven overrides via NUGET_NAMESPACE_MAP env var.
   // Format: JSON array of { "prefix": "My.Namespace", "contractId": "nuget:my.package" }
-  const envMap = process.env["NUGET_NAMESPACE_MAP"];
+  const envMap = optionalStringFromEnv("NUGET_NAMESPACE_MAP");
   if (envMap) {
     try {
       const entries = JSON.parse(envMap) as { prefix: string; contractId: string }[];

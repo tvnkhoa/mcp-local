@@ -27,6 +27,7 @@ import {
   applyEdgeConfidenceFilter
 } from "./extractors/extractorUtils.js";
 import { extractStringLiteralsImpl } from "./extractors/literalExtractor.js";
+import { optionalNumberFromEnv, optionalRatioFromEnv } from "./config/envConfig.js";
 
 // Re-export types for backward compatibility
 export type { ExtractInput, ExtractOutput };
@@ -227,29 +228,6 @@ export function parseCSharpOnDemand(content: string, filePath: string): Parser.T
   return tree;
 }
 
-function optionalNumberFromEnv(name: string): number | undefined {
-  const raw = process.env[name];
-  if (!raw) {
-    return undefined;
-  }
-  const parsed = Number(raw);
-  if (!Number.isFinite(parsed) || parsed < 0) {
-    return undefined;
-  }
-  return Math.floor(parsed);
-}
-
-function optionalRatioFromEnv(name: string): number | undefined {
-  const raw = process.env[name];
-  if (!raw) {
-    return undefined;
-  }
-  const parsed = Number(raw);
-  if (!Number.isFinite(parsed)) {
-    return undefined;
-  }
-  return Math.min(1, Math.max(0, parsed));
-}
 
 function resolveEdgePolicy(profile: "standard" | "large" | "very-large"): {
   maxCallEdgesPerFile: number;
