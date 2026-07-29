@@ -113,17 +113,17 @@ export function getDeadCodeCandidates(
           )) as incomingTypeRefs,
       (select count(*) from edges e where e.repo_id = s.repo_id and e.to_id = s.symbol_id and e.type = 'IMPORTS') as incomingImports,
       (select count(*) from edges e where e.repo_id = s.repo_id and e.to_id = s.symbol_id and e.type = 'PUBLISHES') as incomingPublishes,
-      (select count(*) from edges e where e.repo_id = s.repo_id and e.from_id = s.symbol_id and e.type = 'CALLS') as outgoingCalls,
-      (
-        select count(*)
-        from edges e
-        inner join symbols sf on sf.repo_id = e.repo_id and sf.symbol_id = e.from_id
-        inner join symbols st on st.repo_id = e.repo_id and st.symbol_id = e.to_id
-        where e.repo_id = s.repo_id
-          and st.file_path = s.file_path
-          and sf.file_path != st.file_path
-          and e.type in ('CALLS', 'IMPORTS', 'TYPE_REF')
-      ) as fileIncomingUsages
+      (select count(*) from edges e where e.repo_id = s.repo_id and e.from_id = s.symbol_id and e.type = 'CALLS') as outgoingCalls
+      -- fileIncomingUsages used to be selected here: a correlated subquery joining edges to symbols
+      -- twice, per row. Nothing read it -- not the suppressors, not the response -- so the most
+      -- expensive part of this statement computed a value that was then discarded.
+      --
+      -- It could not have been cheap to keep either: correlated only on s.file_path, it recomputed an
+      -- identical answer for every symbol in the same file. Nobody noticed because MCP-ISSUE-033 meant
+      -- the WHERE clause matched zero rows, so the subquery never ran at all. Fixing that filter made
+      -- dead_code_scan exceed a 120s tool timeout on a 4442-symbol repo; removing this brought it back.
+      -- If a per-file usage count is ever wanted, compute it once per file and join it in.
+      -- (No backticks in here -- this is a template literal.)
     from symbols s
     left join files f on f.repo_id = s.repo_id and f.path = s.file_path
     where ${where}

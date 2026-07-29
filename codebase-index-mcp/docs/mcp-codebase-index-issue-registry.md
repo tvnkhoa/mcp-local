@@ -147,6 +147,22 @@ Workaround · Enhancement proposal. Filed here so the MCP server team can triage
   works through the `files` join. The test schema carries the real `primary key (repo_id, path)` on
   `files`; without it the `insert or ignore` has nothing to conflict on and the LEFT JOIN multiplies
   every row — a test schema that drifts from the real one invents its own failures.
+- **Follow-on found by the fix: the scan was never fast, only empty.** With the filter working, the
+  first live call exceeded the 120s tool timeout on `wec.communication-hub` (4442 symbols). The row
+  query selected `fileIncomingUsages` — a correlated subquery joining `edges` to `symbols` **twice**,
+  evaluated once per row, and correlated only on `s.file_path`, so it recomputed an identical answer
+  for every symbol in the same file. **Nothing read it**: not the suppressors, not the response. It was
+  the most expensive part of the statement and its value was discarded. Removed; the call went from
+  timing out to ~29.5s.
+- **Still open — `dead_code_scan` is slow on large repos.** 29.5s for 4442 symbols is functional but
+  poor, and `wec.be` (67 887 symbols) did not finish a measurement run. Cause: the query pages **all**
+  matching rows regardless of `limit`, evaluating five correlated counting subqueries per row. The
+  obvious fix is that four of those five exist only to find rows whose count is **zero** — a reported
+  candidate has no incoming edges by definition — so they can become `NOT EXISTS` predicates in the
+  `WHERE` clause, which short-circuit on the first match and use `idx_edges_repo_type_to`. Only
+  `outgoingCalls` is genuinely needed as a value (by `isLikelyEntryPoint`). Not done here: it is a
+  separate, well-scoped change and this entry is already about a correctness fix.
+
 - **Lesson worth keeping:** a tool that returns a well-formed empty result is harder to notice than
   one that errors. MCP-ISSUE-031 was found by reading code, and its fix could only be *measured* by
   bypassing the tool entirely — that gap should itself have been the signal.

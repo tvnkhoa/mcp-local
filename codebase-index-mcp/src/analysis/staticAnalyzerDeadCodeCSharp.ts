@@ -46,7 +46,6 @@ export interface DeadCodeRow {
   incomingImports: number;
   incomingPublishes: number;
   outgoingCalls: number;
-  fileIncomingUsages: number;
 }
 
 /**

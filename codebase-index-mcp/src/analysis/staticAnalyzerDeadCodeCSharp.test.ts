@@ -43,7 +43,6 @@ function row(over: Partial<DeadCodeRow> = {}): DeadCodeRow {
     incomingImports: 0,
     incomingPublishes: 0,
     outgoingCalls: 0,
-    fileIncomingUsages: 0,
     ...over
   };
 }
