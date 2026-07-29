@@ -61,6 +61,15 @@ jobs:
       - name: Test packages
         run: npm run test:packages
 
+      # Blocking since S-41. An `error` finding fails this step and therefore the build; there is
+      # no `continue-on-error`. Five rules were flipped from warning to error in S-41 once the
+      # migration had driven each to zero: env/direct-access, tier/undeclared-external,
+      # package/exports-map, style/no-default-export, exemption/stale.
+      #
+      # Deliberately NOT `--strict`. That would also fail on warnings, and `size/soft-cap` is
+      # advisory by design — 17 files sit in the 400-600 band, several because they are genuinely
+      # one thing (see docs/conventions.md §5). Making the soft cap blocking would force splits
+      # that add indirection without making any failure easier to diagnose.
       - name: Platform guards
         run: npm run guard:all
 

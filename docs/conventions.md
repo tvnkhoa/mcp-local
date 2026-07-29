@@ -13,13 +13,16 @@ enforced (`adr/0002-sql-guardrail-token-lists.md`). So each rule below says what
 
 Run: `npm run guard:deps`. Source of truth: `packages/cli/src/guards/rules.ts` (data, not code).
 
+Every rule below is an **error** and fails the build. Since S-41 that is not a claim on trust:
+each one has been shown to reject a deliberate violation (see §8).
+
 | Rule | What fails |
 |---|---|
 | `tier/violation` | a package imports one at the same or a higher tier — imports flow downward only |
 | `tier/unknown-package` | a package with no row in the tier matrix. Adding a package forces an explicit decision about what it may import |
 | `tier/zero-dependency` | `@mcp/core` (or any package declaring `allowedExternal: []`) acquires a runtime dependency. Needs an ADR |
 | `tier/forbidden-import` | an always-forbidden import regardless of tier — e.g. `@mcp/shared` reaching the protocol layer |
-| `tier/undeclared-external` | an external import not in the package's `allowedExternal` list *(warning)* |
+| `tier/undeclared-external` | an external import not in the package's `allowedExternal` list |
 | `imports/protocol-sdk` | anything other than `@mcp/sdk` imports `@modelcontextprotocol/sdk` |
 | `imports/deep-import` | an import past a package entry point. The `exports` map makes these unresolvable, not merely discouraged |
 | `imports/undeclared-dependency` | an import missing from the package's `package.json` |
@@ -29,7 +32,7 @@ Run: `npm run guard:deps`. Source of truth: `packages/cli/src/guards/rules.ts` (
 
 ## 2. Enforced by `guard convention`
 
-Run: `npm run guard:convention`.
+Run: `npm run guard:convention`. Errors except where marked.
 
 | Rule | What fails |
 |---|---|
@@ -117,7 +120,30 @@ Tests colocate as `*.test.ts` beside their subject.
 
 `codebase-index-mcp/CLAUDE.md` has the per-folder ownership table for the largest server.
 
-## 8. Conventions nothing checks yet
+## 8. Proof that the guards guard (S-41)
+
+A guard that has never been shown to fail is a guard on trust. Each mechanism below was given a
+deliberate violation, confirmed to reject it, and reverted:
+
+| Mechanism | Violation injected | Result |
+|---|---|---|
+| `guard deps` · `env/direct-access` | `process.env.SNEAKY_VALUE` added to `postgres-mcp/src/index.ts` | rejected |
+| `guard deps` · `servers/cross-import` | `observe-mcp` importing `codebase-index-mcp`'s graph store | rejected |
+| `guard deps` · `servers/tooling-import` | `bitbucket-mcp` importing `@mcp/manifest` | rejected |
+| `guard convention` · `size/hard-cap` | a 700-line file added to `packages/core` | rejected |
+| `guard convention` · `style/no-default-export` | a default export added to `packages/core/src/paths.ts` | rejected |
+| `guard:no-llm-runtime` | `import OpenAI from "openai"` added to `codebase-index-mcp` | rejected |
+| `contracts:check` | renamed `create_pull_request` in the bitbucket snapshot | rejected |
+| `generate:check` | hand-edit appended to `observe-mcp/.env.example` | rejected |
+
+Five rules were flipped from warning to error in S-41, once the migration had driven each to zero:
+`env/direct-access`, `tier/undeclared-external`, `package/exports-map`, `style/no-default-export`,
+`exemption/stale`. CI runs `guard:all` **without** `--strict`, so errors block and `size/soft-cap`
+stays advisory.
+
+Re-run the proof with `scripts/prove-guards.sh`.
+
+## 9. Conventions nothing checks yet
 
 Honest list — these are preferences until something enforces them:
 

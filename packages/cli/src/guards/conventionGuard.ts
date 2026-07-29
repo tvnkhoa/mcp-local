@@ -121,7 +121,7 @@ export function runConventionGuard(options: ConventionGuardOptions): GuardReport
     if (pkg.manifest["exports"] === undefined) {
       findings.push({
         rule: "package/exports-map",
-        severity: "warning",
+        severity: "error",
         file: `${pkg.relativeDir}/package.json`,
         message: `${pkg.name} has no "exports" map, so deep imports cannot be prevented.`
       });
@@ -219,7 +219,7 @@ export function runConventionGuard(options: ConventionGuardOptions): GuardReport
         if (!applied) {
           findings.push({
             rule: "exemption/stale",
-            severity: "warning",
+            severity: "error",
             file: file.relativePath,
             message: `Exemption from "${rule}" is unused — the file no longer violates it.`,
             hint: "Delete the pragma."
@@ -230,7 +230,7 @@ export function runConventionGuard(options: ConventionGuardOptions): GuardReport
       if (!file.isTest && /^\s*export\s+default\b/m.test(file.content)) {
         findings.push({
           rule: "style/no-default-export",
-          severity: "warning",
+          severity: "error",
           file: file.relativePath,
           message: "Default export found; the platform uses named exports only.",
           hint: "Named exports are greppable and survive renames."

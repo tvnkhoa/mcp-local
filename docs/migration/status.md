@@ -1,11 +1,15 @@
 # Migration status — all 44 steps
 
-**Verified** 2026-07-28 against the working tree, not from memory. Baseline `9ccae95`;
+**Verified** 2026-07-28 against the working tree, not from memory, and updated 2026-07-29 for
+Phase J's completion. Baseline `9ccae95`;
 Phase H's row updated after the S-28 SDK work landed. Every
 row cites the artifact that proves it. Where no artifact was found, the row says so
 rather than guessing.
 
-**37 of 44 done · 1 partial · 1 skipped by decision · 5 open.** **Phase H is complete** —
+**38 of 44 done · 1 partial · 1 skipped by decision · 4 open.** **Phases A–J are complete**;
+S-41 landed 2026-07-29, which the plan marks as the point where the migration is done — Phase K
+(S-42…S-44) is optional.
+ **Phase H is complete** —
 S-31, S-32 and S-33 all landed 2026-07-28. All 43 codebase-index tools are on the SDK registry,
 the legacy bridge is gone, and **all four servers now run on `@mcp/sdk`**. S-33 carried one
 intended contract change (unknown tool → `not_found`); see [the S-33 section](#s-33--the-decision-and-the-one-contract-change).
@@ -75,7 +79,7 @@ that the plan folded into S-31. **This document's numbering is authoritative.**
 | S-13 Contract guard + platform no-LLM guard | ✅ | same; `guard:no-llm-runtime` also runs per-server |
 
 Current output: **0 errors, 34 warnings, 1 accepted exemption across 384 files.** Warn mode is
-correct until S-41 — flipping now would turn 34 warnings into 34 build failures.
+correct until S-41 — flipping then would have turned 34 warnings into 34 build failures. S-41 part 1 drove them to zero, and the rule is now an error.
 
 ## Phase E — Shared Core Extraction · 7/7 ✅
 
@@ -416,7 +420,7 @@ guard required the package README, `tier/unknown-package` required the TIER_RULE
 `cli.test.ts` pins the package list exactly — so adding a package is a deliberate edit in three
 places rather than an accident in one.
 
-## Phase J — Conventions and Housekeeping · 4/5
+## Phase J — Conventions and Housekeeping · 5/5 ✅
 
 | Step | Status | Evidence |
 |---|---|---|
@@ -424,7 +428,106 @@ places rather than an accident in one.
 | S-38 Server scaffold generator | ✅ | `templates/server/**` + `scripts/new-server.mjs`; `npm run new:server -- --key scratch` verified end to end |
 | S-39 Consolidate the test strategy | ✅ | `test:unit` + `test:integration`; first 20 unit tests in `codebase-index-mcp`; all 26 harness aliases intact; server test files now type-checked |
 | S-40 Index registry and workspace hygiene | ✅ | 85,220 rows pruned via `scripts/prune-repo.mjs`; 9 repos → 7; typo fixed; DB default aligned |
-| S-41 Flip guards to enforce; finalize docs | ❌ | **blocked** — eleven files in `codebase-index-mcp/src` still exceed the 600-line hard cap |
+| S-41 Flip guards to enforce; finalize docs | ✅ | hard-cap findings 11 → 0 across eight splits; 59 files re-homed; 5 rules flipped to error; all 8 mechanisms proven to reject a violation (`scripts/prove-guards.sh`) |
+
+### S-41 · what actually had to change, and what was already done
+
+The plan's premise was that guards were in *warn mode* and needed converting to *fail*. That was
+half true by the time the step ran:
+
+- **Already blocking.** `--strict` existed, `exitCodeFor` already failed on any `error`, and CI
+  already ran `npm run guard:all` with no `continue-on-error`. Errors blocked the build before this
+  step touched anything.
+- **The real flip** was five *rules* that were warnings only because the migration had not finished:
+  `env/direct-access`, `tier/undeclared-external`, `package/exports-map`, `style/no-default-export`,
+  `exemption/stale`. Each was at **zero findings** when flipped, so none broke the build.
+  `dependencyGuard.ts` even said so in a comment — "`--strict` (migration-plan step S-41) is what
+  makes it blocking" — written when there were 34 `env/direct-access` violations. S-41 part 1 drove
+  those to zero, so the rule could become an error outright rather than needing a flag.
+- **`size/soft-cap` stays a warning**, by decision. 17 files sit in the 400–600 band and several are
+  legitimately one thing (`conventions.md` §5). CI therefore runs `guard:all` **without**
+  `--strict`; that is now stated in the workflow rather than implied.
+
+**The hard-cap blocker took eight splits**, not one:
+
+| Part | File | Before → after |
+|---|---|---|
+| 1 | env reads consolidated | 34 → 0 `env/direct-access` |
+| 2 | `schemas/toolSchemas.ts` | 1,105 → 14 (barrel) |
+| 3 | `edgeResolver.ts`, `impactAnalyzer.ts` | 1,423 / 1,457 → 13 each |
+| 4 | `staticAnalyzer.ts` | 1,228 → 11 |
+| 5 | `extractors/extractorUtils.ts`, `csharpExtractor.ts` | 1,007 / 970 → 57 / 14 |
+| 6 | `refactorEngine.ts`, `handlers/refactorHandler.ts` | 701 / 632 → 11 each |
+| 7 | `symbolSearch.ts` | 797 → 12 |
+| 8 | `indexPipeline.ts` | 682 → 558 (not a barrel — see below) |
+
+Total guard findings fell 22 → 17, and every remaining one is `size/soft-cap`. The number moved
+less than the file count suggests because six splits pushed a part into the 400–600 band: hard-cap
+−1 and soft-cap +1 nets to zero. Reported that way at each step rather than as a headline
+reduction.
+
+`indexPipeline.ts` is the one file that did **not** become a barrel. `runIndexPipeline` was 619 of
+its 682 lines — one closure over nine mutable counters that two nested progress functions also
+read. Three phases that touch no counter lifted out (`indexing/runLimits.ts`, `fileScan.ts`,
+`runFinalize.ts`); the batch loop stayed, because splitting it further would mean inventing a
+context object to pass the same state around. It remains a soft-cap warning at 558 lines, which is
+the honest outcome rather than a cap satisfied by indirection.
+
+### S-41 · three things the verification caught that a typecheck could not
+
+1. **A dropped call.** Rewriting `indexPipeline`'s setup block by hand lost
+   `store.ensureRepository()`. Typecheck passed, the counter-equivalence check did not reach the
+   hand-written region, and the first version of the index probe did not count the `repositories`
+   table. A missing repo row breaks `list_repositories` and the registered-`repoPath` contract every
+   MCP-first flow depends on. Found by enumerating every `store.*` effect in the rewritten regions
+   and locating each one.
+2. **Stale `dist/`.** `tsc` does not prune. After the re-home, the probe still held hardcoded
+   `dist/graphStore.js` and `dist/indexPipeline.js` paths, silently loaded the modules left at the
+   old locations, and reported "identical" **while running the previous build**. Caught by wiping
+   `dist/` and rebuilding. Now warned about in `codebase-index-mcp/CLAUDE.md`, `docs/onboarding.md`
+   and `docs/conventions.md` §9.
+3. **A self-referential baseline.** The first index probe targeted `codebase-index-mcp` itself — the
+   repo the splits were adding files to — so "+3 files" was the change measuring itself. Moved to
+   three unchanged targets.
+
+### S-41 · two defects found, filed, not fixed
+
+Both in `codebase-index-mcp/docs/mcp-codebase-index-issue-registry.md`:
+
+- **MCP-ISSUE-031** — `dead_code_scan` suppresses every method in an `I`-prefixed C# file, because
+  the path is lowercased before the interface-file test `/^i[a-z].*\.cs$/` runs. A false negative:
+  the scan looks clean while hiding candidates. Found by the first unit tests written for that
+  policy, which were only possible *because* the split turned three closures into exported pure
+  functions. Behaviour pinned by a test that names which assertion must flip when it is fixed.
+- **MCP-ISSUE-032** — an index run is **not reproducible**. Two runs of the same build on a 521-file
+  C# repo disagree by ~500 `PROPERTY_REF` edges while symbols stay identical, because
+  `glob("**/*")` returns the same paths in a different order each call and nothing sorts it
+  (verified over three consecutive calls, first divergence at index 11). This invalidated the first
+  C# before/after comparison, which looked like a 237-edge regression until a same-build control run
+  showed the noise band was larger than the signal.
+
+Neither is fixed here: both change tool output, and this step is a restructuring.
+
+### S-41 · plan claims that were wrong
+
+- "Convert every guard from warn to fail" — see above; errors already failed.
+- `tools/guards/*.mjs` — that path does not exist. The guards live in `packages/cli/src/guards/`.
+- "add the missing `observe-mcp` and `bitbucket-mcp` history" to `CHANGELOG.md` — **`postgres-mcp`
+  was missing too**, with zero mentions, despite existing since the workspace was initialized
+  (2026-05-04, `7b04b97`). All three backfilled from git history with the introducing commit named.
+- The plan says re-home "41 loose `.ts` files". By the time the step ran there were **67** — the
+  eight splits added 26. 59 moved, 7 stayed, 1 deleted.
+- `CLAUDE.md` claimed 89 env vars across the four servers; the manifest reports **94**.
+
+### S-41 · a doctor false alarm, documented not fixed
+
+`npm run mcp:doctor` reports `observe-mcp` as **FAIL** on a healthy install. It matches a server by
+its exact manifest key, so the environment-suffixed registrations this machine actually uses
+(`observe-mcp-ssdev_au`, `observe-mcp-wecrm_au_prod`) are invisible to it: config "not registered",
+env check skipped, then `start` exits 1 because the process launches without credentials. Running one
+server against several environments is the normal reason to register it that way. Documented in
+`docs/onboarding.md` with how to confirm it; widening the match changes tooling behaviour and belongs
+in its own change.
 
 ### S-39 · the files had already been moved once
 
@@ -585,7 +688,7 @@ those wrong would have taught every future server the wrong pattern.
 | S-38 Server scaffold generator | ❌ | no scaffold script |
 | S-39 Consolidate the test strategy | 🟡 partial | script vocabulary is uniform and `run-tests.mjs` discovers `test:*` so the list cannot fall behind — but no strategy document exists |
 | S-40 Index registry + workspace hygiene | ✅ | `*.db`, `*.db-shm`, `*.db-wal` gitignored; central DB at the root is untracked |
-| S-41 Flip guards to enforce; finalize docs | ❌ | would fail on the 35 current warnings; the graphStore cap is settled, but 11 other files are still over 600 lines |
+| S-41 Flip guards to enforce; finalize docs | ✅ | hard-cap 11 → 0; 5 rules flipped to error; `scripts/prove-guards.sh` shows all 8 mechanisms reject a violation |
 
 ## Phase K — Deferred Decisions · 0/3 (1 skipped)
 
@@ -605,8 +708,9 @@ deliberately deferred decisions.
 **S-34 is unblocked, and by S-32 rather than S-33.** The plan blocks S-34 on S-33 "since
 deriving tool lists requires every server to expose a registry" — but the registry held all 43
 from the moment S-32's last batch landed, and `legacy.listTools()` was already returning `[]`.
-The remaining blocker for S-41 is unchanged: eleven files in `codebase-index-mcp/src` are still
-over 600 lines.
+The remaining blocker for S-41 was, at the time of writing, eleven files in
+`codebase-index-mcp/src` still over 600 lines. **Cleared 2026-07-29** across eight splits — see
+the [S-41 section](#s-41--what-actually-had-to-change-and-what-was-already-done).
 
 **Mechanical — S-35, S-36 and S-38.** Generators over `@mcp/manifest`, which is already the
 single source of truth and, since S-34, typed. Low risk, no behaviour change, independently
@@ -725,8 +829,9 @@ pragma registering as a live exemption. The guard's own hint string exempted
 `conventionGuard.ts` from its hard cap, and the test fixture exempted `cli.test.ts`. Fixed by
 anchoring the pattern to the start of a line; both are now regression tests.
 
-**The other 11 files over 600 lines in `codebase-index-mcp/src` are not exempted** — they are
-genuine debt and still block S-41:
+**The other 11 files over 600 lines in `codebase-index-mcp/src` are not exempted** — they were
+genuine debt and blocked S-41 until 2026-07-29, when the eight splits took hard-cap findings to
+zero. The list below is the state as of S-30:
 
 ```
 impactAnalyzer 1457 · edgeResolver 1423 · index 1351 · staticAnalyzer 1228
@@ -871,4 +976,5 @@ The plan lists two more validation items for S-33 that it cannot deliver:
   enforces. The convention guard's cap is 600 and reports no finding.
 - **`guard:convention` reports zero oversized files in `codebase-index-mcp`.** Not achievable
   here and never was: `impactAnalyzer` (~1,457), `edgeResolver` (~1,423), `staticAnalyzer`
-  (~1,228) and eight others predate this phase. That is S-41's blocker, not S-33's work.
+  (~1,228) and eight others predate this phase. That was S-41's blocker, not S-33's work — and
+  S-41 cleared it.

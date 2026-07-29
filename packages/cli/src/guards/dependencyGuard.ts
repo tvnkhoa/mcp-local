@@ -172,7 +172,7 @@ export function runDependencyGuard(options: DependencyGuardOptions): GuardReport
         ) {
           findings.push({
             rule: "tier/undeclared-external",
-            severity: "warning",
+            severity: "error",
             file: file.relativePath,
             line: ref.line,
             message: `${pkg.name} imports "${imported}", which is not in its allowedExternal list.`,
@@ -206,10 +206,12 @@ export function runDependencyGuard(options: DependencyGuardOptions): GuardReport
     for (const file of files) {
       // Rule 10 - a server reads process.env only in its config module.
       //
-      // Reported as a WARNING, not an error: no server has been migrated to the
-      // platform yet, so scattered env reads are the expected pre-migration
-      // state. This count is the number the migration drives to zero, and
-      // `--strict` (migration-plan step S-41) is what makes it blocking.
+      // An error since S-41. It was a warning for most of the migration because scattered env
+      // reads were the expected pre-migration state, and the count was what the migration drove
+      // to zero (34 -> 0 in S-41 part 1). Now that it is at zero, the first reappearance is a
+      // defect: with more than one reader there is again no single place that answers "what does
+      // this server read from the environment?" -- the question S-35 had to answer by booting a
+      // server and proxying process.env, because no file could.
       if (ENV_READ.test(stripComments(file.content))) {
         const permitted =
           isTestFile(file.relativePath) ||
@@ -219,7 +221,7 @@ export function runDependencyGuard(options: DependencyGuardOptions): GuardReport
         if (!permitted) {
           findings.push({
             rule: "env/direct-access",
-            severity: "warning",
+            severity: "error",
             file: file.relativePath,
             message: "Reads process.env outside the server's config module.",
             hint: "Load config once in src/config.ts and pass the typed result down."
