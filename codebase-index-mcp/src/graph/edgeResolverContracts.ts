@@ -32,6 +32,19 @@ import {
  * Reading final CALLS edges instead covers both shapes uniformly — the intra-file link and the
  * cross-file one the batch resolver produces — and needs no knowledge of which phase created the edge.
  */
+/**
+ * Composite key for the (file, member) override map.
+ *
+ * A shared function, not two template literals, because building the key inline once with a NUL separator
+ * and once with a space made every lookup miss — silently, since a Map returns undefined rather than
+ * complaining. The pass reported 0 edges and the only visible symptom was three tests failing. `\u0000` is
+ * written as an escape so the separator is legible in source; typed literally it is invisible and turns the
+ * file binary to grep.
+ */
+function overrideKey(filePath: string, memberName: string): string {
+  return `${filePath}\u0000${memberName}`;
+}
+
 export function resolveBaseClassDispatch(db: Database.Database, repoId: string): number {
   // Capped like interface dispatch: past a point the edges are noise, and a base class with 200
   // subclasses would otherwise multiply every call on it.
@@ -85,16 +98,32 @@ export function resolveBaseClassDispatch(db: Database.Database, repoId: string):
     subclassFilesByBaseId.set(r.baseId, list);
   }
 
-  const overrideStmt = db.prepare(
-    // `override ` is required, not merely preferred. Without it a `new`/shadow method of the same name
-    // would be treated as an override, attributing the call to code that cannot run — and for
-    // `dead_code_scan` a false "live" hides real dead code, the one direction of error it cannot afford.
-    `select symbol_id as symbolId from symbols
-     where repo_id = ? and file_path = ? and name = ? and kind = 'method'
-       and signature is not null and signature like '%override %'
-     order by symbol_id
-     limit 1`
-  );
+  // Every override in the repo, loaded ONCE and keyed by (file, name).
+  //
+  // This was a `select ... where file_path = ? and name = ? and signature like '%override %'` executed
+  // inside the loop below, and the shape is why it was catastrophic: `like '%override %'` cannot use an
+  // index, so each call scanned the repo's symbols. On `wec.be` that meant 175 virtual calls x up to 10
+  // subclass files = ~1750 scans of 67980 rows — **56851ms to produce 19 edges**. One scan replaces all of
+  // them, and the loop becomes in-memory lookups.
+  //
+  // `override ` is required, not merely preferred. Without it a `new`/shadow method of the same name would
+  // be treated as an override, attributing the call to code that cannot run — and for `dead_code_scan` a
+  // false "live" hides real dead code, the one direction of error it cannot afford.
+  const overrideByFileAndName = new Map<string, string>();
+  for (const row of db
+    .prepare(
+      `select symbol_id as symbolId, file_path as filePath, name from symbols
+       where repo_id = ? and kind = 'method' and signature is not null and signature like '%override %'
+       order by file_path, name, symbol_id`
+    )
+    .all(repoId) as { symbolId: string; filePath: string; name: string }[]) {
+    // First wins, and the ORDER BY makes "first" the same every run. C# permits overloads, so one
+    // (file, name) can hold several overrides; picking a stable one keeps the graph reproducible
+    // (MCP-ISSUE-032) even though it cannot distinguish overloads by signature.
+    const key = overrideKey(row.filePath, row.name);
+    if (!overrideByFileAndName.has(key)) overrideByFileAndName.set(key, row.symbolId);
+  }
+  if (overrideByFileAndName.size === 0) return 0;
   const insertStmt = db.prepare(
     `insert or ignore into edges (repo_id, from_id, to_id, type, confidence, reason)
      values (?, ?, ?, 'CALLS', 0.7, 'base-class-dispatch')`
@@ -105,8 +134,9 @@ export function resolveBaseClassDispatch(db: Database.Database, repoId: string):
     for (const call of virtualCalls) {
       const files = (subclassFilesByBaseId.get(call.baseTypeId) ?? []).slice(0, MAX_SUBCLASS_DISPATCH_FANOUT);
       for (const filePath of files) {
-        const override = overrideStmt.get(repoId, filePath, call.memberName) as { symbolId: string } | undefined;
-        if (!override || override.symbolId === call.baseMethodId) continue;
+        const overrideId = overrideByFileAndName.get(overrideKey(filePath, call.memberName));
+        if (overrideId === undefined || overrideId === call.baseMethodId) continue;
+        const override = { symbolId: overrideId };
         // The base's own edge is left untouched: the fan-out ADDS reachability rather than moving it.
         // Moving it would trade one false "dead" for another.
         insertStmt.run(repoId, call.fromId, override.symbolId);

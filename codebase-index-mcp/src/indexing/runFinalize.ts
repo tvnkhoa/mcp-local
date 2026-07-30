@@ -71,11 +71,12 @@ export function pruneAndResolve(
   // Resolve iface: placeholders → real symbolIds after all C# files have been indexed.
   if (input.mode === "full" && scanWasComplete) {
     const resolvedImpl = store.resolveImplementsEdges(input.repoId);
-    // Order matters twice: EXTENDS must be linked before the fan-out can walk it, and the fan-out must
-    // run AFTER call resolution because it reads final CALLS edges — the base of a template-method class
-    // calls its own abstract member in the same file, which extraction already resolved.
-    store.resolveExtendsEdges(input.repoId);
-    store.resolveBaseClassDispatch(input.repoId);
+    // EXTENDS and the base-class dispatch fan-out are NOT invoked here, on purpose. This function runs
+    // inside the pipeline, BEFORE `indexRunner`'s post-phase resolves call edges — and the fan-out reads
+    // final CALLS edges, so running it here would work on unresolved tokens and produce nothing. It also
+    // duplicated the work: both sites ran, and the useful one was the second. `implementsResolveMs`
+    // reported 137576ms on wec.be, larger than the whole run, which is what exposed the double call.
+    // They live in `indexRunner`'s post-phase only.
     if (resolvedImpl > 0) {
       indexLog(`[index-resolve] resolved ${String(resolvedImpl)} IMPLEMENTS edge(s)`);
     }
