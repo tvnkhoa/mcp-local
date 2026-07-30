@@ -163,6 +163,32 @@ export function resolveCallEdgesBatch(
       }
     }
 
+    // The receiver is a CLASS, not an interface — `CrossChannelReplyHelpers.ResolveSubject(...)`, the
+    // ordinary static-helper call. The block above only consults `interfaceByName`, so this fell through
+    // to the name-only fallback below, which discards the receiver entirely.
+    //
+    // Discarding it is not merely imprecise, it attributes the call to the WRONG method. Two classes can
+    // hold a same-named static helper — `ActivityCursor.EncodeCursor` and a private `EncodeCursor` in
+    // `GetInboxConversations`, both real in this repo — and the name-only lookup picks one winner for
+    // both. Every call then lands on that winner, the other symbol shows zero incoming calls, and
+    // `dead_code_scan` reports a method with nine call sites as dead. Worse, the extractor emits the
+    // qualified token AND the bare one, which resolve to the same symbol and collapse under the unique
+    // index, so the count does not even hint that something was lost.
+    if (!match && calleeName.includes(".")) {
+      const parts = calleeName.split(".").filter((x) => x.length > 0);
+      const receiverType = parts.slice(0, -1).join(".");
+      const memberName = parts[parts.length - 1] ?? "";
+      const ownerClass = (candidateMap.get(receiverType) ?? []).find((c) => c.kind === "class");
+      if (ownerClass && memberName) {
+        const members = candidateMap.get(memberName) ?? [];
+        // parent linkage first; file identity as the fallback, because symbols indexed before
+        // parent_symbol_id existed carry no parent and would otherwise silently miss.
+        match =
+          members.find((c) => c.kind === "method" && c.parentSymbolId === ownerClass.symbolId) ??
+          members.find((c) => c.kind === "method" && c.filePath === ownerClass.filePath);
+      }
+    }
+
     if (!match && calleeName.includes(".")) {
       const baseName = calleeName.split(".").pop() ?? calleeName;
       match = pickBestNamedCandidate(
