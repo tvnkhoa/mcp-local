@@ -209,6 +209,46 @@ reproduce it, since the wrapper cache is only pruned once there is enough churn 
 
 ---
 
+## MCP-ISSUE-037 — abstract/virtual base-class members have no dispatch fan-out, so every override looks dead
+
+- **Status:** **OPEN**, filed 2026-07-30. Not fixed: it needs a new edge semantic, which is a design
+  decision rather than a repair. Found while verifying MCP-ISSUE-036 — after two false-positive causes were
+  removed, this is what the remaining `dead_code_scan` candidates turned out to be.
+- **Scenario:** a template-method base class. `SentMessageConsumerBase<TContract>` declares
+  `protected abstract SentMessageInfo GetMessageInfo(TContract)` and calls it; `AutomationSentConsumer` and
+  `CampaignSentConsumer` each `override` it.
+- **Evidence:**
+
+  | symbol | signature | incoming CALLS |
+  |---|---|---|
+  | `SentMessageConsumerBase.GetMessageInfo` | `protected abstract` | 1 |
+  | `AutomationSentConsumer.GetMessageInfo` | `protected override` | **0** |
+  | `CampaignSentConsumer.GetMessageInfo` | `protected override` | **0** |
+
+  Same for `BuildCommand`, `LogProcessed`, `LogDuplicate`. The base's own call resolves to the base's
+  abstract declaration and stops there.
+- **Why the existing machinery does not cover it:** interface dispatch IS handled — a call to an interface
+  method fans out to implementors as `interface-dispatch` CALLS edges, capped by
+  `MAX_INTERFACE_DISPATCH_FANOUT`. The identical relationship through an abstract *class* has no
+  equivalent, and cannot be given one as things stand, because **class inheritance is not recorded as a
+  traversable relation at all.** `IMPLEMENTS` is only emitted for base-list entries passing
+  `isLikelyCSharpInterfaceName`, so `class X : SomeBaseClass` yields nothing; verified on
+  `AutomationSentConsumer`, which has zero IMPLEMENTS edges and only a `TYPE_REF` to its base — and a
+  TYPE_REF carries no "extends" meaning, so nothing can walk it as a hierarchy.
+- **Impact:** every `override` of an abstract or virtual member is a `dead_code_scan` false positive, and
+  `find_implementations` / `get_call_chain` cannot follow a template-method hierarchy. The template-method
+  pattern is common in this codebase's consumer lane, so the false positives cluster and look like a
+  systematic finding rather than noise.
+- **Shape of a fix (two parts, in order):** emit an inheritance edge for a non-interface base type — either
+  a distinct `EXTENDS` type or `IMPLEMENTS` with a reason that distinguishes it, and the choice matters
+  because several tools already read `IMPLEMENTS` as "interface contract". Then reuse the existing
+  dispatch fan-out, keyed on that edge, for members marked `abstract` or `virtual`.
+- **Workaround until then:** treat a candidate whose signature contains `override` as suppressed. Note that
+  `dead_code_scan` does not currently do this — the signature is already stored, so it is a cheap interim
+  guard if the full fix is deferred.
+
+---
+
 ## MCP-ISSUE-036 — a qualified static call resolved to the WRONG same-named method
 
 - **Status:** **FIXED** 2026-07-30 (`src/graph/edgeResolverCalls.ts`). Found by checking `dead_code_scan`
