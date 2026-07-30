@@ -209,6 +209,45 @@ reproduce it, since the wrapper cache is only pruned once there is enough churn 
 
 ---
 
+## MCP-ISSUE-038 — the `very-large` profile silently discards every unresolved TYPE_REF, so MCP-ISSUE-034's fix is inert on the biggest repo
+
+- **Status:** **OPEN**, filed 2026-07-30. Deliberately not fixed: every remedy raises edge volume on the
+  largest repo, which is the exact thing the profile exists to bound. That trade is the user's to make.
+- **Scenario:** `wec.be` — 7528 files, so `performanceProfile` auto-selects `very-large`.
+- **Evidence:** TYPE_REF on `wec.be` is **1112 edges over 67980 symbols, with ZERO unresolved tokens**.
+  Compare `wec.communication-hub` (`standard`): 14377 edges, of which 6652 are unresolved tokens. Two
+  repos of the same language and shape, differing by two orders of magnitude in the relation that
+  `dead_code_scan` depends on.
+- **Root cause — a threshold collision, not a decision anyone made:**
+  - `getEffectiveEdgeConfidence` gives a `type:` token no explicit confidence, so it defaults to **0.45**.
+  - `defaultEdgePolicy("very-large")` sets `minEdgeConfidence: **0.5**`.
+  - `applyEdgeConfidenceFilter` therefore drops **all** of them at extraction, before they reach the DB.
+    The 1112 survivors are intra-file resolutions, which carry 0.9.
+- **Why it went unnoticed:** before MCP-ISSUE-034 the extractor emitted ~148 TYPE_REF edges in total, so
+  losing the unresolved ones cost nothing observable. Now TYPE_REF is the primary evidence for "is this
+  type referenced anywhere", and on the largest repo all of it is thrown away.
+- **Confirming detail that rules out a different explanation:** bare `callee:` tokens default to 0.4 and are
+  dropped for the same reason, while *qualified* `callee:Type.Method` carries an explicit 0.75 and survives
+  — `wec.be` holds 11086 unresolved CALLS tokens. So the filter is working as written; it is the
+  unannotated defaults that fall on the wrong side of the line.
+- **Impact:** `dead_code_scan` on `wec.be` still reports type declarations as its top candidates
+  (`ConversationReplyPublishRequest`, `ManualCallLogRequest`, `OsbBookingPublishRequest`), the exact class of
+  false positive MCP-ISSUE-034 fixed elsewhere. The 48% reduction measured on `wec.communication-hub` does
+  not transfer to any repo large enough to trip the profile.
+- **Three remedies, each with its real cost:**
+  1. Give `type:` tokens an explicit confidence ≥ 0.5. Smallest change, but it makes the profile's own
+     threshold meaningless for TYPE_REF rather than stating an intent.
+  2. Exempt TYPE_REF from the confidence filter and bound it separately (a per-file cap, as CALLS already
+     has via `maxCallEdgesPerFile`). Most honest, most work.
+  3. Lower `very-large`'s `minEdgeConfidence`. Cheapest to write, widest blast radius — it would also
+     re-admit bare `callee:` tokens, roughly doubling CALLS on a 67k-symbol repo.
+- **Estimated cost of admitting them:** `wec.communication-hub` carries 6652 unresolved TYPE_REF tokens for
+  4457 symbols (~1.5 per symbol). At that ratio `wec.be` would gain on the order of 100k edges against its
+  current 117893 — a near-doubling of the table, plus the resolve-phase work those rows attract. Not a
+  detail to decide in passing, which is why this is filed rather than fixed.
+
+---
+
 ## MCP-ISSUE-037 — abstract/virtual base-class members have no dispatch fan-out, so every override looks dead
 
 - **Status:** **OPEN**, filed 2026-07-30. Not fixed: it needs a new edge semantic, which is a design
