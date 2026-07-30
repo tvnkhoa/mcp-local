@@ -25,6 +25,7 @@ export function resolveImplementsEdges(db: Database.Database, repoId: string): n
       select distinct e.from_id as fromId, e.to_id as toId
       from edges e
       where e.repo_id = ? and e.type = 'IMPLEMENTS' and e.to_id like 'iface:%'
+      order by e.from_id, e.to_id
       `
     )
     .all(repoId) as { fromId: string; toId: string }[];
@@ -47,10 +48,16 @@ export function resolveImplementsEdges(db: Database.Database, repoId: string): n
     ? []
     : db
         .prepare(
+          // ORDER BY is load-bearing because of the `if (!has(name))` first-row-wins below: two files
+          // can declare the same interface name, and unordered, "first" was whichever row SQLite
+          // happened to hand back. The IMPLEMENTS edge then pointed at a different declaration between
+          // runs — and since `to_id` is part of the edge identity, `update or ignore` sometimes
+          // collapsed two edges into one and sometimes did not, moving the total.
           `
           select name, symbol_id as symbolId
           from symbols
           where repo_id = ? and kind = 'interface' and name in (${namePlaceholders})
+          order by name, symbol_id
           `
         )
         .all(repoId, ...interfaceNames) as { name: string; symbolId: string }[];
@@ -101,11 +108,13 @@ export function resolveImplementsEdges(db: Database.Database, repoId: string): n
  * ENH-C coverage block on the traversal tools.
  */
 export function resolvePublishesConsumesEdges(db: Database.Database, repoId: string): number {
+  // Ordered because these row sets seed `consumersByContract` below, and its per-contract Set therefore
+  // inherits their order — which `consumers[0]` then treats as a ranking.
   const consumesRows = db
-    .prepare(`select distinct from_id as fromId, to_id as toId from edges where repo_id = ? and type = 'CONSUMES' and to_id like 'contract:%'`)
+    .prepare(`select distinct from_id as fromId, to_id as toId from edges where repo_id = ? and type = 'CONSUMES' and to_id like 'contract:%' order by from_id, to_id`)
     .all(repoId) as { fromId: string; toId: string }[];
   const publishesRows = db
-    .prepare(`select distinct from_id as fromId, to_id as toId from edges where repo_id = ? and type = 'PUBLISHES' and to_id like 'contract:%'`)
+    .prepare(`select distinct from_id as fromId, to_id as toId from edges where repo_id = ? and type = 'PUBLISHES' and to_id like 'contract:%' order by from_id, to_id`)
     .all(repoId) as { fromId: string; toId: string }[];
   if (consumesRows.length === 0 && publishesRows.length === 0) return 0;
 
@@ -124,7 +133,9 @@ export function resolvePublishesConsumesEdges(db: Database.Database, repoId: str
   if (contractNames.length > 0) {
     const ph = contractNames.map(() => "?").join(",");
     const rows = db
-      .prepare(`select name, symbol_id as symbolId from symbols where repo_id = ? and kind in ('class','struct','record','record struct','interface') and name in (${ph})`)
+      // Same first-row-wins hazard as the interface lookup above: a contract name declared in more than
+      // one place resolved to a different symbol per run.
+      .prepare(`select name, symbol_id as symbolId from symbols where repo_id = ? and kind in ('class','struct','record','record struct','interface') and name in (${ph}) order by name, symbol_id`)
       .all(repoId, ...contractNames) as { name: string; symbolId: string }[];
     for (const r of rows) if (!contractSymbolByName.has(r.name)) contractSymbolByName.set(r.name, r.symbolId);
   }
@@ -147,7 +158,10 @@ export function resolvePublishesConsumesEdges(db: Database.Database, repoId: str
     // PUBLISHES → consumer symbol(s) (or external when no consumer indexed)
     for (const r of publishesRows) {
       const contract = r.toId.slice("contract:".length);
-      const consumers = [...(consumersByContract.get(contract) ?? [])].filter((c) => c !== r.fromId);
+      // Sorted explicitly, not left to Set insertion order. `consumers[0]` is privileged — it UPDATEs the
+      // existing edge while the rest are INSERTed — so which consumer lands first decides the edge's
+      // identity, and Set order came from a query whose ordering was never guaranteed.
+      const consumers = [...(consumersByContract.get(contract) ?? [])].filter((c) => c !== r.fromId).sort();
       if (consumers.length === 0) {
         tagExternalPub.run(repoId, r.fromId, r.toId);
         continue;

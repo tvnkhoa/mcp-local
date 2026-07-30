@@ -214,13 +214,14 @@ Refactor tools: `refactor_replace_preview` and `refactor_replace_apply` support 
 | `CODEBASE_INDEX_POST_RESOLVE_TYPE_REFS` | no | `true` *(code)* | — |
 | `CODEBASE_INDEX_POST_RESOLVE_PROPERTY_REFS` | no | `true` *(code)* | — |
 | `CODEBASE_INDEX_CROSS_REPO_NAMESPACES` | no | — | Namespaces treated as shared when resolving cross-repo edges. |
+| `CODEBASE_INDEX_VECTOR_ENABLED` | no | `true` *(code)* | false disables trigram vector search entirely (no in-memory fallback) — a control for isolating vector-assisted resolution. |
 | `CODEBASE_INDEX_REFACTOR_APPROVAL_SECRET` | no | — | **secret** · HMAC secret for refactor approval tokens. Auto-generated per process if unset; set it to keep tokens valid across restarts. |
 | `CODEBASE_INDEX_REFACTOR_PREVIEW_TTL_MS` | no | `1800000` *(code)* | Preview/token lifetime — 30 minutes. |
 | `CODEBASE_INDEX_REFACTOR_STRICT_APPROVAL` | no | `false` *(code)* | When true, startup fails unless CODEBASE_INDEX_REFACTOR_APPROVAL_SECRET is set. |
 | `CODEBASE_INDEX_INDEX_LOG` | no | — | Enables verbose index-progress logging on stderr. |
 | `CODEBASE_INDEX_LLM_ENABLED` | no | `false` *(code)* | Runtime LLM invocation is prohibited by design. Setting this to true ABORTS STARTUP, and `guard:no-llm-runtime` statically verifies no LLM client is importable. Declared here so the constraint is documented, not so it can be turned on. |
 
-39 variables. Defaults marked *(code)* are the server's own fallback and are **not** written into your agent config — set them only to override.
+40 variables. Defaults marked *(code)* are the server's own fallback and are **not** written into your agent config — set them only to override.
 
 <!-- END GENERATED: env-table -->
 

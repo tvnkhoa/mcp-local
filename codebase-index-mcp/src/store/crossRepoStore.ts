@@ -56,7 +56,9 @@ export function findProviderSymbolByName(
       where s.repo_id in (${ph2})
         and s.name = ?
         and s.kind in ('class', 'interface', 'struct', 'type')
-      order by s.repo_id
+      -- repo_id alone is not a total order: a provider repo commonly declares the same type name in
+      -- several files (partial classes, per-namespace duplicates), and the winner was then arbitrary.
+      order by s.repo_id, s.symbol_id
       limit 1
       `
     )

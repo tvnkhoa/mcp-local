@@ -39,7 +39,9 @@ export interface CallResolutionContext {
  */
 export function buildCallResolutionContext(db: Database.Database, repoId: string): CallResolutionContext {
   const interfaceRows = db
-    .prepare(`select symbol_id as symbolId, name, file_path as filePath from symbols where repo_id = ? and kind = 'interface'`)
+    // `interfaceByName` keeps the first row per name, so ordering decides which declaration of a
+    // duplicated interface name wins.
+    .prepare(`select symbol_id as symbolId, name, file_path as filePath from symbols where repo_id = ? and kind = 'interface' order by name, symbol_id`)
     .all(repoId) as { symbolId: string; name: string; filePath: string }[];
   const interfaceByName = new Map<string, { symbolId: string; filePath: string }>();
   const interfaceIdSet = new Set<string>();
@@ -51,10 +53,15 @@ export function buildCallResolutionContext(db: Database.Database, repoId: string
   // record / record struct are class-like implementors too (ISSUE-013/ISSUE-022).
   const implEdgeRows = db
     .prepare(
+      // This feeds `implementorFilesByIfaceId`, which is capped by MAX_INTERFACE_DISPATCH_FANOUT at the
+      // point of use. Unordered, an interface with more implementors than the cap contributed a
+      // different arbitrary subset each run — the largest single source of run-to-run edge drift, at 99
+      // of the 120 edges that appeared in one run and not the next.
       `select distinct e.to_id as ifaceId, s.file_path as filePath
        from edges e
        inner join symbols s on s.repo_id = e.repo_id and s.symbol_id = e.from_id
-       where e.repo_id = ? and e.type = 'IMPLEMENTS' and s.kind in ('class', 'struct', 'record', 'record struct')`
+       where e.repo_id = ? and e.type = 'IMPLEMENTS' and s.kind in ('class', 'struct', 'record', 'record struct')
+       order by e.to_id, s.file_path`
     )
     .all(repoId) as { ifaceId: string; filePath: string }[];
   const implementorFilesByIfaceId = new Map<string, string[]>();
@@ -85,10 +92,13 @@ export function buildCallResolutionContext(db: Database.Database, repoId: string
   // reason is set at extraction time while to_id is still a callee: placeholder.
   const unresolvedRows = db
     .prepare(
+      // Ordered because these rows are sliced into batches by `offset`, so row order determines batch
+      // membership — and the dispatch insert is `where not exists`, making the outcome order-sensitive.
       `select distinct e.from_id as fromId, e.to_id as toId, s.file_path as fromFile
        from edges e
        inner join symbols s on s.repo_id = e.repo_id and s.symbol_id = e.from_id
-       where e.repo_id = ? and e.type = 'CALLS' and e.to_id like 'callee:%'`
+       where e.repo_id = ? and e.type = 'CALLS' and e.to_id like 'callee:%'
+       order by e.from_id, e.to_id`
     )
     .all(repoId) as { fromId: string; toId: string; fromFile: string }[];
 
@@ -349,7 +359,9 @@ export function resolveCallEdges(db: Database.Database, repoId: string, maxUnres
 
   // Pre-build interface lookup map: name → { symbolId, filePath }
   const interfaceRows = db
-    .prepare(`select symbol_id as symbolId, name, file_path as filePath from symbols where repo_id = ? and kind = 'interface'`)
+    // `interfaceByName` keeps the first row per name, so ordering decides which declaration of a
+    // duplicated interface name wins.
+    .prepare(`select symbol_id as symbolId, name, file_path as filePath from symbols where repo_id = ? and kind = 'interface' order by name, symbol_id`)
     .all(repoId) as { symbolId: string; name: string; filePath: string }[];
   const interfaceByName = new Map<string, { symbolId: string; filePath: string }>();
   const interfaceIdSet = new Set<string>();
@@ -362,10 +374,15 @@ export function resolveCallEdges(db: Database.Database, repoId: string, maxUnres
   // record / record struct are class-like implementors too (ISSUE-013/ISSUE-022).
   const implEdgeRows = db
     .prepare(
+      // This feeds `implementorFilesByIfaceId`, which is capped by MAX_INTERFACE_DISPATCH_FANOUT at the
+      // point of use. Unordered, an interface with more implementors than the cap contributed a
+      // different arbitrary subset each run — the largest single source of run-to-run edge drift, at 99
+      // of the 120 edges that appeared in one run and not the next.
       `select distinct e.to_id as ifaceId, s.file_path as filePath
        from edges e
        inner join symbols s on s.repo_id = e.repo_id and s.symbol_id = e.from_id
-       where e.repo_id = ? and e.type = 'IMPLEMENTS' and s.kind in ('class', 'struct', 'record', 'record struct')`
+       where e.repo_id = ? and e.type = 'IMPLEMENTS' and s.kind in ('class', 'struct', 'record', 'record struct')
+       order by e.to_id, s.file_path`
     )
     .all(repoId) as { ifaceId: string; filePath: string }[];
   const implementorFilesByIfaceId = new Map<string, string[]>();

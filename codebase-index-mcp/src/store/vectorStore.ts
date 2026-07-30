@@ -10,7 +10,7 @@
 
 import type Database from "better-sqlite3";
 import { indexLog, indexWarn } from "../indexing/indexProgress.js";
-import { optionalStringFromEnv } from "../config/envConfig.js";
+import { booleanFromEnv, optionalStringFromEnv } from "../config/envConfig.js";
 
 // ── Constants ──────────────────────────────────────────────────────────────────
 
@@ -95,10 +95,27 @@ const inMemoryRepoIndex = new Map<string, Set<string>>();
 
 // ── State ──────────────────────────────────────────────────────────────────────
 
+/** vec0 is loaded and usable. Says nothing about whether we are ALLOWED to use vectors. */
 let _vectorEnabled = false;
 
 export function isVectorEnabled(): boolean {
-  return _vectorEnabled;
+  return _vectorEnabled && vectorsAllowed();
+}
+
+/**
+ * `CODEBASE_INDEX_VECTOR_ENABLED=false` turns vector search off entirely — not "fall back to the
+ * in-memory index", genuinely off: `vectorSearchSymbols` returns nothing and no vectors are built.
+ *
+ * The distinction matters because this exists to be a CONTROL. Edge counts for the resolved types
+ * (CALLS, TYPE_REF, IMPLEMENTS, CONSUMES, PUBLISHES) varied between identical full re-index runs, and
+ * attributing that to the vector fallback was guesswork until it could be switched off and the run
+ * repeated. A switch that quietly re-routed to a different vector implementation would have answered
+ * a different question.
+ *
+ * Read per call rather than cached at module load so a test can flip it between runs in one process.
+ */
+function vectorsAllowed(): boolean {
+  return booleanFromEnv("CODEBASE_INDEX_VECTOR_ENABLED", true);
 }
 
 // ── Text normalization ─────────────────────────────────────────────────────────
@@ -277,16 +294,61 @@ export function ensureVectorSchema(db: Database.Database, vectorEnabled: boolean
 
   if (vectorEnabled) {
     try {
+      // `repo_id` is a PARTITION KEY, and that is the whole point of this table definition.
+      //
+      // Without it, `k` is evaluated against the entire table and `repo_id` is filtered afterwards, in
+      // the outer query. This DB is shared by every indexed repo — 34709 vectors across 7 repos when
+      // this was found — so a k=3 search asked for the 3 nearest symbols IN THE WORLD and then kept
+      // whichever happened to belong to the repo being resolved. Measured on wec.communication-hub
+      // (7.7% of the table): of 40 real type names, 34 got fewer than the 3 rows requested and 14 got
+      // ZERO despite the repo holding candidates — one had 332. Resolution silently lost its fallback
+      // in proportion to how many OTHER repos shared the database.
+      //
+      // It also made runs non-reproducible: vec0 assigns rowids on insert, `deleteVectorsByRepo`
+      // re-inserts on every rebuild, and ties at the k cutoff (common — trigram vectors collide for
+      // similar names) broke by rowid. 7 of those 40 queries were tie-affected.
+      //
+      // With the partition key, vec0 applies k WITHIN the repo and neither problem exists.
       db.exec(`
         CREATE VIRTUAL TABLE IF NOT EXISTS vec_symbols USING vec0(
+          repo_id TEXT partition key,
           embedding float[${VECTOR_DIMS}]
         )
       `);
+      migrateUnpartitionedVectorTable(db);
     } catch (e) {
       indexWarn(`[vector] vec0 table creation failed, disabling: ${e}`);
       _vectorEnabled = false;
     }
   }
+}
+
+/**
+ * A `vec_symbols` created before the partition key existed has no `repo_id` column, so every query
+ * against it would fail with "no such column". Vectors are DERIVED data — trigram hashes of
+ * `symbols.name` — so the table is dropped and recreated rather than copied, and `vec_symbol_map` is
+ * emptied so the next index run rebuilds it.
+ *
+ * `pragma_table_info` works on vec0 virtual tables and reports the partition key as a column, which is
+ * what makes this detectable at all.
+ */
+function migrateUnpartitionedVectorTable(db: Database.Database): void {
+  const columns = db.prepare(`SELECT name FROM pragma_table_info('vec_symbols')`).all() as { name: string }[];
+  if (columns.some((c) => c.name === "repo_id")) return;
+
+  indexWarn(
+    "[vector] vec_symbols predates the repo_id partition key; dropping and rebuilding. " +
+      "Vector-assisted resolution is degraded until the next index run for each repo."
+  );
+  db.exec(`DROP TABLE vec_symbols`);
+  db.exec(`
+    CREATE VIRTUAL TABLE vec_symbols USING vec0(
+      repo_id TEXT partition key,
+      embedding float[${VECTOR_DIMS}]
+    )
+  `);
+  // Leaving stale rows here would point at rowids in a table that no longer has them.
+  db.prepare(`DELETE FROM vec_symbol_map`).run();
 }
 
 // ── Upsert helpers ─────────────────────────────────────────────────────────────
@@ -298,6 +360,8 @@ export function upsertSymbolVector(
   name: string,
   signature?: string
 ): void {
+  if (!vectorsAllowed()) return;
+
   const text = normalizeSymbolText(name, signature);
   const vec = trigramVector(text);
 
@@ -312,8 +376,11 @@ export function upsertSymbolVector(
       db.prepare(`DELETE FROM vec_symbols WHERE rowid = ?`).run(existing.vec_rowid);
     }
 
-    // Insert into vec0 without explicit rowid — vec0 auto-assigns
-    const info = db.prepare(`INSERT INTO vec_symbols (embedding) VALUES (?)`).run(Buffer.from(vec.buffer));
+    // repo_id is the partition key — omitting it would put the row in an unnamed partition that the
+    // scoped search can never reach.
+    const info = db
+      .prepare(`INSERT INTO vec_symbols (repo_id, embedding) VALUES (?, ?)`)
+      .run(repoId, Buffer.from(vec.buffer));
     const vecRowid = Number(info.lastInsertRowid);
 
     db.prepare(`
@@ -341,6 +408,7 @@ export function batchUpsertSymbolVectors(
   });
 
   if (eligible.length === 0) return 0;
+  if (!vectorsAllowed()) return 0;
 
   let count = 0;
   const BATCH = 500;
@@ -349,7 +417,9 @@ export function batchUpsertSymbolVectors(
     SELECT vec_rowid FROM vec_symbol_map WHERE repo_id = ? AND symbol_id = ?
   `);
   const deleteVec = _vectorEnabled ? db.prepare(`DELETE FROM vec_symbols WHERE rowid = ?`) : null;
-  const insertVec = _vectorEnabled ? db.prepare(`INSERT INTO vec_symbols (embedding) VALUES (?)`) : null;
+  const insertVec = _vectorEnabled
+    ? db.prepare(`INSERT INTO vec_symbols (repo_id, embedding) VALUES (?, ?)`)
+    : null;
   const upsertMap = _vectorEnabled ? db.prepare(`
     INSERT INTO vec_symbol_map (repo_id, symbol_id, vec_rowid)
     VALUES (?, ?, ?)
@@ -369,8 +439,8 @@ export function batchUpsertSymbolVectors(
           if (existing?.vec_rowid != null) {
             deleteVec.run(existing.vec_rowid);
           }
-          // Insert new vec row — vec0 auto-assigns rowid
-          const info = insertVec.run(Buffer.from(vec.buffer));
+          // Insert new vec row into this repo's partition — vec0 auto-assigns rowid
+          const info = insertVec.run(repoId, Buffer.from(vec.buffer));
           const vecRowid = Number(info.lastInsertRowid);
           upsertMap.run(repoId, sym.symbolId, vecRowid);
           count++;
@@ -400,28 +470,93 @@ function l2Distance(a: Float32Array, b: Float32Array): number {
   return Math.sqrt(sum);
 }
 
+/** Total order on (distance, symbolId) — distance alone is not one, which is the entire problem. */
+function byDistanceThenId(
+  a: { symbolId: string; distance: number },
+  b: { symbolId: string; distance: number }
+): number {
+  if (a.distance !== b.distance) return a.distance - b.distance;
+  return a.symbolId < b.symbolId ? -1 : a.symbolId > b.symbolId ? 1 : 0;
+}
+
+/**
+ * KNN whose result does not depend on vec0 rowids.
+ *
+ * `ORDER BY distance, symbol_id` is NOT sufficient, which cost a round of tests to notice: vec0 picks
+ * its k rows first, breaking ties by rowid internally, and only then does SQL sort them. The ORDER BY
+ * can reorder the k rows chosen — it cannot change WHICH k were chosen. With identical trigram vectors
+ * (same normalized name => distance exactly equal) the choice was arbitrary, and rowids are reassigned
+ * on every rebuild, so two identical full re-index runs resolved different edges.
+ *
+ * The distances themselves are deterministic even when the tied winners are not. So: over-fetch, then
+ * cut with a real total order. The fetch widens until the farthest row returned is STRICTLY farther
+ * than the k-th — at that point every row tied at the cutoff distance is provably in hand, and the
+ * slice is exact rather than merely likely.
+ */
+function knnDeterministic(
+  db: Database.Database,
+  repoId: string,
+  queryVec: Float32Array,
+  k: number
+): { symbolId: string; distance: number }[] | null {
+  // `v.repo_id = ?` constrains the PARTITION, so vec0 evaluates k within this repo. The old query put
+  // the same predicate on the joined map table instead — reads almost identically, behaves completely
+  // differently. See the comment on the table definition in `ensureVectorSchema`.
+  const stmt = db.prepare(`
+    SELECT m.symbol_id as symbolId, v.distance
+    FROM vec_symbols v
+    INNER JOIN vec_symbol_map m ON m.vec_rowid = v.rowid
+    WHERE v.repo_id = ?
+      AND v.embedding MATCH ?
+      AND k = ?
+    ORDER BY v.distance
+  `);
+  const buf = Buffer.from(queryVec.buffer);
+
+  // Starts at 4x because tie groups are small in practice (a handful of same-named overloads), and each
+  // widening is a full extra KNN. Capped so a pathological repo cannot turn one lookup into many.
+  let fetch = Math.max(k * 4, 16);
+  for (let round = 0; round < 3; round++) {
+    const rows = stmt.all(repoId, buf, fetch) as { symbolId: string; distance: number }[];
+    rows.sort(byDistanceThenId);
+
+    // Fewer candidates than requested: nothing was truncated, so nothing could be arbitrary.
+    if (rows.length <= k) return rows;
+
+    // vec0 returned fewer rows than asked for => the partition is exhausted and this is the COMPLETE
+    // candidate set. Widening cannot add anything, so the ordered slice is already exact. Without this
+    // an all-tied group (four identically-named overloads) burned every widening round to reach the
+    // same answer.
+    if (rows.length < fetch) return rows.slice(0, k);
+
+    // The farthest row is strictly beyond the cutoff => the whole tie group at the cutoff is included.
+    if (rows[rows.length - 1].distance > rows[k - 1].distance) return rows.slice(0, k);
+
+    fetch *= 4;
+  }
+
+  // Cap reached: every row fetched is tied at one distance, so no widening can separate them. Ordering
+  // by symbolId still yields the same answer run to run, which is what callers depend on.
+  const rows = stmt.all(repoId, buf, fetch) as { symbolId: string; distance: number }[];
+  rows.sort(byDistanceThenId);
+  return rows.slice(0, k);
+}
+
 export function vectorSearchSymbols(
   db: Database.Database,
   repoId: string,
   queryText: string,
   k: number
 ): { symbolId: string; distance: number }[] {
+  if (!vectorsAllowed()) return [];
+
   const text = normalizeSymbolText(queryText);
   const queryVec = trigramVector(text);
 
   if (_vectorEnabled) {
     try {
-      // vec0 KNN query syntax — join via vec_rowid
-      const rows = db.prepare(`
-        SELECT m.symbol_id as symbolId, v.distance
-        FROM vec_symbols v
-        INNER JOIN vec_symbol_map m ON m.vec_rowid = v.rowid
-        WHERE m.repo_id = ?
-          AND v.embedding MATCH ?
-          AND k = ?
-        ORDER BY v.distance
-      `).all(repoId, Buffer.from(queryVec.buffer), k) as { symbolId: string; distance: number }[];
-      return rows;
+      const rows = knnDeterministic(db, repoId, queryVec, k);
+      if (rows !== null) return rows;
     } catch {
       // Fall through to in-memory fallback if vec0 query fails
     }
@@ -438,13 +573,19 @@ export function vectorSearchSymbols(
     results.push({ symbolId, distance: l2Distance(queryVec, vec) });
   }
 
-  results.sort((a, b) => a.distance - b.distance);
+  // Same tie-break as the vec0 path. `Array.prototype.sort` is stable, but the input order here is Set
+  // insertion order — i.e. whatever order symbols were indexed in — so stability alone guarantees
+  // nothing across runs. Sorting by symbolId does.
+  results.sort((a, b) => a.distance - b.distance || (a.symbolId < b.symbolId ? -1 : a.symbolId > b.symbolId ? 1 : 0));
   return results.slice(0, k);
 }
 
 // ── Rebuild ────────────────────────────────────────────────────────────────────
 
 export function rebuildVectorIndexForRepo(db: Database.Database, repoId: string): number {
+  // Nothing will read these, so do not spend the trigram hashing on them.
+  if (!vectorsAllowed()) return 0;
+
   // Fetch all eligible symbols for this repo
   const symbols = db.prepare(`
     SELECT symbol_id as symbolId, name, kind, signature
@@ -468,19 +609,26 @@ export function rebuildVectorIndexForRepo(db: Database.Database, repoId: string)
 export function deleteVectorsByRepo(db: Database.Database, repoId: string): void {
   if (_vectorEnabled) {
     try {
-      // Delete from vec_symbols via vec_rowid join
-      const vecRowids = db.prepare(`
-        SELECT vec_rowid FROM vec_symbol_map WHERE repo_id = ? AND vec_rowid IS NOT NULL
-      `).all(repoId) as { vec_rowid: number }[];
-      const deleteVec = db.prepare(`DELETE FROM vec_symbols WHERE rowid = ?`);
-      const tx = db.transaction(() => {
-        for (const r of vecRowids) {
-          deleteVec.run(r.vec_rowid);
-        }
-      });
-      tx();
+      // One statement, because repo_id is a partition key: 20108 rows for wec.be used to mean 20108
+      // prepared `DELETE ... WHERE rowid = ?` runs.
+      db.prepare(`DELETE FROM vec_symbols WHERE repo_id = ?`).run(repoId);
     } catch {
-      // Ignore if vec_symbols doesn't exist yet
+      // Older table without the partition key (or no table yet). Fall back to the per-rowid delete so
+      // vectors are never left orphaned — silently skipping would strand them in every future KNN.
+      try {
+        const vecRowids = db.prepare(`
+          SELECT vec_rowid FROM vec_symbol_map WHERE repo_id = ? AND vec_rowid IS NOT NULL
+        `).all(repoId) as { vec_rowid: number }[];
+        const deleteVec = db.prepare(`DELETE FROM vec_symbols WHERE rowid = ?`);
+        const tx = db.transaction(() => {
+          for (const r of vecRowids) {
+            deleteVec.run(r.vec_rowid);
+          }
+        });
+        tx();
+      } catch {
+        // Ignore if vec_symbols doesn't exist yet
+      }
     }
   }
   // Always clear map table and in-memory

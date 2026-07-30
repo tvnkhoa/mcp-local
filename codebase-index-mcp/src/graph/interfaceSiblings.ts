@@ -95,15 +95,33 @@ export function expandInterfaceSiblingsImpl(
       }
     } else {
       // implementation method → interface method cùng tên trên mỗi interface mà class implements.
+      // `limit 10` with no ORDER BY: a class implementing more than 10 interfaces handed SQLite a free
+      // choice of which 10, and it chose differently between runs as the table's physical layout
+      // shifted. This was the single largest contributor to the run-to-run edge drift —
+      // `interface-dispatch` accounted for 99 of the 120 edges present in one run and absent in the next.
       const ifaceEdges = db
-        .prepare(`select to_id as toId from edges where repo_id = ? and from_id = ? and type = 'IMPLEMENTS' limit 10`)
+        .prepare(
+          `select to_id as toId from edges
+           where repo_id = ? and from_id = ? and type = 'IMPLEMENTS'
+           order by to_id
+           limit 10`
+        )
         .all(repoId, parent.symbolId) as { toId: string }[];
       for (const edge of ifaceEdges) {
         const iface = edge.toId.startsWith("iface:")
-          ? (db
-              .prepare(`select symbol_id as symbolId, file_path as filePath from symbols where repo_id = ? and name = ? and kind = 'interface' limit 1`)
+          ? // Name lookup, so more than one file can declare `IFoo`. Ordered by symbol_id to pick the
+            // same one every time; unordered, `limit 1` meant the sibling edges pointed at a different
+            // declaration from run to run.
+            (db
+              .prepare(
+                `select symbol_id as symbolId, file_path as filePath from symbols
+                 where repo_id = ? and name = ? and kind = 'interface'
+                 order by symbol_id
+                 limit 1`
+              )
               .get(repoId, edge.toId.slice("iface:".length)) as { symbolId: string; filePath: string } | undefined)
-          : (db
+          : // symbol_id is the primary key — at most one row, so no ordering is needed here.
+            (db
               .prepare(`select symbol_id as symbolId, file_path as filePath from symbols where repo_id = ? and symbol_id = ? and kind = 'interface' limit 1`)
               .get(repoId, edge.toId) as { symbolId: string; filePath: string } | undefined);
         if (!iface) continue;
@@ -130,9 +148,12 @@ function resolveParentType(
   }
   const fallback = db
     .prepare(
+      // `line desc` alone is not a total order: two types can be declared on the same line (nested
+      // generic declarations, single-line records), and then the winner was arbitrary.
       `select symbol_id as symbolId, name, kind from symbols
        where repo_id = ? and file_path = ? and kind in ('class', 'struct', 'record', 'record struct', 'interface')
-       order by line desc limit 1`
+       order by line desc, symbol_id
+       limit 1`
     )
     .get(repoId, method.filePath) as { symbolId: string; name: string; kind: string } | undefined;
   return fallback ?? null;
@@ -146,12 +167,27 @@ function findMemberMethod(
   typeFilePath: string,
   name: string
 ): string | null {
+  // Both lookups are name-based, and C# permits OVERLOADS — several methods with this exact name under
+  // the same parent. `limit 1` therefore picks one of several valid rows, and unordered it picked
+  // differently between runs. Ordering does not make the choice *correct* (see the note below), but it
+  // makes it the same choice every time, which is the difference between a wrong edge and a wrong edge
+  // that also moves.
   const byParent = db
-    .prepare(`select symbol_id as symbolId from symbols where repo_id = ? and parent_symbol_id = ? and name = ? and kind = 'method' limit 1`)
+    .prepare(
+      `select symbol_id as symbolId from symbols
+       where repo_id = ? and parent_symbol_id = ? and name = ? and kind = 'method'
+       order by symbol_id
+       limit 1`
+    )
     .get(repoId, typeSymbolId, name) as { symbolId: string } | undefined;
   if (byParent) return byParent.symbolId;
   const byFile = db
-    .prepare(`select symbol_id as symbolId from symbols where repo_id = ? and file_path = ? and name = ? and kind = 'method' limit 1`)
+    .prepare(
+      `select symbol_id as symbolId from symbols
+       where repo_id = ? and file_path = ? and name = ? and kind = 'method'
+       order by symbol_id
+       limit 1`
+    )
     .get(repoId, typeFilePath, name) as { symbolId: string } | undefined;
   return byFile?.symbolId ?? null;
 }

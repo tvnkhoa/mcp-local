@@ -117,6 +117,13 @@ export function codebaseIndexEnv(root: string): readonly EnvField[] {
     { name: "CODEBASE_INDEX_POST_RESOLVE_TYPE_REFS", required: false, codeDefault: "true", section: "Post-resolve phase" },
     { name: "CODEBASE_INDEX_POST_RESOLVE_PROPERTY_REFS", required: false, codeDefault: "true", section: "Post-resolve phase" },
     { name: "CODEBASE_INDEX_CROSS_REPO_NAMESPACES", required: false, section: "Post-resolve phase", note: "Namespaces treated as shared when resolving cross-repo edges." },
+    {
+      name: "CODEBASE_INDEX_VECTOR_ENABLED",
+      required: false,
+      codeDefault: "true",
+      section: "Post-resolve phase",
+      note: "false disables trigram vector search entirely (no in-memory fallback) — a control for isolating vector-assisted resolution."
+    },
 
     // --- Refactor approval --------------------------------------------------------
     {

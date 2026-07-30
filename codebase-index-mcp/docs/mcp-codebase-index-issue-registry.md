@@ -11,9 +11,11 @@ Workaround · Enhancement proposal. Filed here so the MCP server team can triage
 
 ## MCP-ISSUE-032 — an index run is not reproducible: edge counts vary between identical runs
 
-- **Status:** **extraction nondeterminism FIXED** 2026-07-29 (`src/extractors/extractorEdges.ts` +3
-  files). A residual resolve-phase variance remains — see the bottom of this entry. Found while
-  validating the S-41 `indexPipeline` split; pre-existing and unrelated to that change.
+- **Status:** **CLOSED** 2026-07-30. All nine edge types reproduce exactly across three full runs, with
+  vectors on and off. Fixed in two stages — extraction node identity on 2026-07-29
+  (`src/extractors/extractorEdges.ts` +3 files), then a fifth node-identity site plus nine unordered
+  reads on 2026-07-30; see the two update sections at the bottom. Found while validating the S-41
+  `indexPipeline` split; pre-existing and unrelated to that change.
 - **Scenario:** index the same repository twice, same build, same input, nothing changed on disk.
 - **Evidence:** on `wec.communication-hub` (521 files), two runs of the **same** build:
 
@@ -140,18 +142,105 @@ Covered by `scripts/test/test-node-identity.mjs` (`test:node-identity`), asserte
 method invocation must never appear as a property reference — rather than by forcing GC, since a test
 that depends on collection timing fails for the wrong reasons.
 
-### Residual: the resolve phase still varies
+### Update 2026-07-30 — CLOSED. All nine edge types are now reproducible.
 
-Three full runs now agree exactly on `PROPERTY_REF`, `PROPERTY_WRITE`, `IMPORTS` and `DEPENDS_ON`, but
-still differ on `CALLS` (14661/14712/14696), `TYPE_REF` (4892/4874/4891), `IMPLEMENTS` (290/281/295),
-`CONSUMES` (54/48/52) and `PUBLISHES` (28/25/28) — precisely the types resolved *after* extraction.
-Prime suspect: `vectorSearchSymbols`, an approximate-nearest-neighbour search used as a resolution
-fallback in `edgeResolverCalls`, `edgeResolverRefs`, `edgeResolverImports` and `edgeResolverContracts`.
-ANN search need not be deterministic, and there is no env switch to disable vectors for a quick control
-run — so confirming it needs one.
+The residual was **not** the vector fallback. That hypothesis was tested and refuted, then the real
+causes were found: one more `===` on tree-sitter nodes, plus a family of `LIMIT`/first-row-wins reads
+with no total order.
 
-Workaround, narrowed: symbol counts and the four stable edge types are now safe to compare between
-runs. The five resolved types are not.
+**The vector hypothesis, refuted.** `CODEBASE_INDEX_VECTOR_ENABLED` was added specifically to run the
+control (see MCP-ISSUE-035, which the attempt uncovered). With vectors off entirely, the same four types
+varied by the same magnitude — so vectors were never the cause:
+
+| | vectors on | vectors off |
+|---|---|---|
+| CALLS | 14664 / 14654 / 14784 | 14639 / 14797 / 14690 |
+| TYPE_REF | 4880 / 4894 / 4893 | 4882 / 4907 / 4893 |
+| IMPLEMENTS | 281 / 291 / 293 | 280 / 302 / 292 |
+
+**Cause 1 — ordering.** Diffing edge *rows* rather than counts showed the drift concentrated in
+`reason='interface-dispatch'` (99 of 120 rows unique to one run). Nine reads decided an outcome without
+a total order, each in a place where the choice was then treated as a ranking:
+
+- `edgeResolverCalls.ts` — `implementorFilesByIfaceId` is capped by `MAX_INTERFACE_DISPATCH_FANOUT` at
+  the point of use, so an unordered source query meant an arbitrary subset survived the cap.
+- `edgeResolverShared.ts` — `buildNamedCandidateMap` feeds `pickBestNamedCandidate`, which keeps the
+  first candidate at the minimum score. Same-named types in different files tie, so list order picked the
+  winner. This one map serves CALLS, TYPE_REF and PROPERTY_REF, which is why a single missing `ORDER BY`
+  surfaced as drift across three edge types.
+- `edgeResolverContracts.ts` — four unordered reads plus two `if (!map.has(name))` first-row-wins
+  lookups, and `consumers[0]` taken from a `Set` whose order came from an unordered query. `consumers[0]`
+  is privileged: it UPDATEs the existing edge while the rest are INSERTed, so it decides edge identity.
+- `interfaceSiblings.ts` — `limit 10` and three `limit 1` name lookups (C# overloads make the latter
+  genuinely multi-row).
+- `crossRepoStore.ts` — `order by s.repo_id limit 1`, not a total order when a provider repo declares the
+  same type name in several files.
+
+`pickBestNamedCandidate` now also breaks ties on `symbolId` itself, so its result is a property of its
+arguments rather than of their arrangement — ordering every caller works until the next caller forgets.
+
+This took the drift from 120/107 rows down to 26/80, but not to zero.
+
+**Cause 2 — the fifth `===`, and the worst of them.** `csharpSymbols.ts` had
+`if (baseList.parent !== node) continue;`. Missed in the first sweep because that pass searched for
+`=== node`, not `.parent !== node`. When the wrapper identity misfired, the guard skipped the class
+**entirely** — no IMPLEMENTS edge, no base-list TYPE_REF. Six extractions of one unchanged real file in
+one process gave **0, 0, 6, 6, 0, 6** IMPLEMENTS edges.
+
+That explains why the drift looked correlated across five edge types and resisted every ordering fix:
+IMPLEMENTS seeds interface-dispatch CALLS and contract CONSUMES/PUBLISHES resolution, so one flipped
+comparison moved all of them together.
+
+**Result — three full runs, `wec.communication-hub`, both vector settings:**
+
+| edge type | before (3 runs) | after (3 runs) |
+|---|---|---|
+| CALLS | 14664 / 14654 / 14784 | **14591 / 14591 / 14591** |
+| TYPE_REF | 4880 / 4894 / 4893 | **4949 / 4949 / 4949** |
+| IMPLEMENTS | 281 / 291 / 293 | **314 / 314 / 314** |
+| CONSUMES | 54 / 55 / 49 | **60 / 60 / 60** |
+| PUBLISHES | 28 / 28 / 25 | **28 / 28 / 28** |
+
+Counts went **up**: classes that were being silently skipped now contribute their edges. As with the
+first half of this issue, the reproducibility bug was also a correctness bug.
+
+Covered by `test:node-identity`, extended with a multi-class base-list case — a single class could not
+reproduce it, since the wrapper cache is only pruned once there is enough churn to prune.
+
+---
+
+## MCP-ISSUE-035 — vector KNN applied `k` across all repos, then filtered, so resolution lost its fallback
+
+- **Status:** **FIXED** 2026-07-30 (`src/store/vectorStore.ts`). Found while building the control run for
+  MCP-ISSUE-032 — the hypothesis was wrong, but looking for it surfaced this.
+- **Scenario:** any repo sharing the central DB with others; worse the smaller its share.
+- **Root cause:** `vec_symbols` had no repo column, so the query filtered `m.repo_id` on the *joined map
+  table* while `k` was evaluated by vec0 against the **entire** table. It asked for the 3 nearest symbols
+  in the world, then kept whichever happened to belong to the repo being resolved.
+- **Evidence:** 34709 vectors across 7 repos; `wec.communication-hub` is 7.7% of them. Of 40 real
+  unresolved type names from that repo:
+
+  | | before | after |
+  |---|---|---|
+  | returned fewer than the 3 rows requested | **34 / 40** | **0 / 40** |
+  | returned ZERO rows | **14 / 40** | **0 / 40** |
+  | zero despite the repo holding candidates | 14 (one had 332) | 0 |
+
+- **Second defect, same query:** vec0 assigns rowids on insert and `deleteVectorsByRepo` re-inserts on
+  every rebuild, so distance ties broke by rowid — 7 of those 40 queries were tie-affected. `ORDER BY
+  distance, symbol_id` is **not** enough: vec0 picks its k rows first, breaking ties internally, and only
+  then does SQL sort them. The ORDER BY can reorder the chosen k, not change which k were chosen. Fixed
+  by over-fetching and widening until the farthest row returned is strictly beyond the k-th, at which
+  point the whole tie group is provably in hand.
+- **Fix:** `repo_id TEXT partition key` on `vec_symbols`, so vec0 evaluates k within the repo; plus the
+  deterministic cut above. A pre-partition table is detected via `pragma_table_info` and rebuilt — vectors
+  are derived data (trigram hashes of `symbols.name`), so dropping beats migrating. 2664 vectors rebuild
+  in 319ms.
+- **Also added:** `CODEBASE_INDEX_VECTOR_ENABLED=false` disables vector search outright — not "fall back
+  to the in-memory index", genuinely off. The distinction is the point: it exists to be a control, and a
+  switch that quietly re-routed to another vector implementation would answer a different question.
+- **Covered by:** `src/store/vectorStore.test.ts`, 5 cases, built on a deliberately multi-repo fixture. A
+  single-repo fixture passes either way and would have caught nothing.
 
 ---
 

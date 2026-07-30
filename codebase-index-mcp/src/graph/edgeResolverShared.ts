@@ -98,19 +98,26 @@ export function buildNamedCandidateMap(
   repoId: string,
   allowedKinds?: readonly string[]
 ): Map<string, { symbolId: string; filePath: string; kind: string; parentSymbolId: string | null }[]> {
+  // ORDER BY, even though nothing here reads the rows in order directly: the per-name lists built below
+  // are consumed by `pickBestNamedCandidate`, which keeps the FIRST candidate at the minimum score. Two
+  // same-named types in different files score identically, so list order silently decided the winner —
+  // and this map feeds CALLS, TYPE_REF and PROPERTY_REF resolution alike, which is why one missing
+  // ORDER BY showed up as drift across three edge types at once.
   const rows = allowedKinds && allowedKinds.length > 0
     ? db
         .prepare(
           `select symbol_id as symbolId, name, file_path as filePath, kind, parent_symbol_id as parentSymbolId
            from symbols
-           where repo_id = ? and kind in (${allowedKinds.map(() => "?").join(", ")})`
+           where repo_id = ? and kind in (${allowedKinds.map(() => "?").join(", ")})
+           order by name, symbol_id`
         )
         .all(repoId, ...allowedKinds) as { symbolId: string; name: string; filePath: string; kind: string; parentSymbolId: string | null }[]
     : db
         .prepare(
           `select symbol_id as symbolId, name, file_path as filePath, kind, parent_symbol_id as parentSymbolId
            from symbols
-           where repo_id = ?`
+           where repo_id = ?
+           order by name, symbol_id`
         )
         .all(repoId) as { symbolId: string; name: string; filePath: string; kind: string; parentSymbolId: string | null }[];
 
@@ -138,7 +145,11 @@ export function pickBestNamedCandidate<T extends { symbolId: string; filePath: s
     const sameFilePenalty = candidate.filePath === fromFile ? 0 : 100;
     const kindPenalty = rank.get(candidate.kind) ?? 999;
     const score = sameFilePenalty + kindPenalty;
-    if (score < bestScore) {
+    // Ties are common — two same-named classes in different files score identically — and `score <
+    // bestScore` alone resolved them by input order. Every caller now orders its query, but relying on
+    // that leaves the next caller free to reintroduce the bug; breaking the tie on symbolId here makes
+    // the function's result a property of its arguments rather than of their arrangement.
+    if (score < bestScore || (score === bestScore && candidate.symbolId < best.symbolId)) {
       best = candidate;
       bestScore = score;
     }

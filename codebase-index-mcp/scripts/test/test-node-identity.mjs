@@ -90,6 +90,46 @@ if (kept.size === 0) {
   log.push(`  ok    a genuine property read is still emitted (${[...kept].sort().join(", ")})`);
 }
 
+// The fifth site, found later and worse than the other four: `baseList.parent !== node` in
+// `csharpSymbols.ts`. When the identity check misfired the whole class was SKIPPED — no IMPLEMENTS edge
+// and no base-list TYPE_REF — so classes appeared and vanished between runs. Six repeated extractions of
+// one real test file gave 0, 0, 6, 6, 0, 6 IMPLEMENTS edges.
+//
+// Several classes in one file, because a single class was not enough to reproduce it: the wrapper cache
+// only gets pruned once there is enough churn to prune.
+const multiClass = `
+  public interface IAlpha { }
+  public interface IBeta { }
+  public class One : IAlpha { public void M() { Regex.IsMatch("a", "b"); } }
+  public class Two : IBeta { public void M() { "x".Trim().Split(','); } }
+  public class Three : IAlpha, IBeta { public void M() { JsonSerializer.Deserialize<Thing>("{}"); } }
+  public class Outer : IAlpha {
+    public class Nested : IBeta { }
+    public void M() { Console.WriteLine("x"); }
+  }
+`;
+const implementsSets = new Set();
+for (let i = 0; i < 8; i += 1) {
+  const { edges } = extractGraphData({ repoId: "r", filePath: "src/Multi.cs", language: "csharp", source: multiClass });
+  implementsSets.add(
+    edges.filter((e) => e.type === "IMPLEMENTS").map((e) => `${e.fromId}|${e.toId}`).sort().join(",")
+  );
+}
+const oneSet = [...implementsSets][0] ?? "";
+if (implementsSets.size !== 1) {
+  failures += 1;
+  log.push(`  FAIL  8 extractions produced ${implementsSets.size} different IMPLEMENTS sets`);
+  log.push(`          base_list parent identity is order/GC dependent again`);
+} else if (oneSet.split(",").filter(Boolean).length < 6) {
+  // One, Two, Outer, Nested + Three twice = 6. Nested counts on its own: the guard rejects a base_list
+  // that belongs to a DIFFERENT declaration, and Nested's base_list belongs to Nested. Fewer than 6
+  // means whole classes are being skipped, which is the failure this case exists to catch.
+  failures += 1;
+  log.push(`  FAIL  IMPLEMENTS edges are being dropped: only ${oneSet.split(",").filter(Boolean).length} of 6`);
+} else {
+  log.push(`  ok    8 extractions agree on IMPLEMENTS across 4 classes (${oneSet.split(",").filter(Boolean).length} edges)`);
+}
+
 // Determinism: repeated extraction of the same source must give an identical edge set. This is the
 // property that MCP-ISSUE-032 broke, stated directly.
 const src = `public class S {

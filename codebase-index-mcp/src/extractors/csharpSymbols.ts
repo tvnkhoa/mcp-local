@@ -16,6 +16,7 @@ import {
   findEnclosingCSharpSymbolId,
   findEnclosingCSharpTypeName,
   isLikelyCSharpInterfaceName,
+  isSameNode,
   mapUsingNamespaceToNugetContract,
   stableId,
   toEndpointContractId
@@ -355,8 +356,19 @@ export function extractCSharpSymbolsImpl(
     if (node.type === "class_declaration" || node.type === "struct_declaration" || node.type === "record_declaration") {
       const baseListNodes = node.descendantsOfType(["base_list"]);
       for (const baseList of baseListNodes) {
-        // Only process direct base_list (not nested classes)
-        if (baseList.parent !== node) continue;
+        // Only process direct base_list (not nested classes).
+        //
+        // `!==` here, not `isSameNode`, was the last surviving instance of MCP-ISSUE-032, and the most
+        // damaging: `.parent` mints a fresh SyntaxNode wrapper whose identity is cached only weakly, so
+        // once the cache was collected the comparison reported "different node" for the same node and
+        // this `continue` skipped the class ENTIRELY — no IMPLEMENTS edge, no base-list TYPE_REF.
+        //
+        // Whole classes therefore appeared and disappeared between runs. Measured on
+        // ConversationTransitionEventHandlerTests.cs: six repeated extractions of one unchanged file in
+        // one process gave 0, 0, 6, 6, 0, 6 IMPLEMENTS edges. Because IMPLEMENTS seeds interface-dispatch
+        // CALLS and contract CONSUMES/PUBLISHES resolution, one flipped comparison moved five edge types
+        // at once — which is why the drift looked correlated and resisted every ORDER BY fix.
+        if (!isSameNode(baseList.parent, node)) continue;
         for (const baseNode of baseList.namedChildren) {
           // Children are identifier, generic_name, or qualified_name
           const typeName = baseNode.text?.trim();
