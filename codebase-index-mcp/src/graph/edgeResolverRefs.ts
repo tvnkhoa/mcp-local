@@ -9,6 +9,7 @@ import type Database from "better-sqlite3";
 import type { Statement } from "better-sqlite3";
 import type { ResolutionStats } from "../types.js";
 import { findProviderSymbolByName } from "../store/crossRepoStore.js";
+import { indexWarn } from "../indexing/indexProgress.js";
 import {
   isKnownExternalToken,
   isKnownExternalNamespace,
@@ -19,7 +20,23 @@ import {
 } from "../store/vectorStore.js";
 import { buildNamedCandidateMap, pickBestNamedCandidate } from "./edgeResolverShared.js";
 
-export function resolveTypeRefEdges(db: Database.Database, repoId: string, maxUnresolvedRows = 0): number {
+/** Mirrors VECTOR_PROBE_SIZE in the CALLS lane: ~3s of probing before concluding the lane cannot pay. */
+const TYPE_VECTOR_PROBE_SIZE = 100;
+
+/**
+ * @param skipExpensiveFallbacks skip the cross-repo provider search and the vector search, keeping only the
+ *   in-memory name match.
+ *
+ *   This is the second half of the MCP-ISSUE-038 remedy, and the halves are separable on purpose. Keeping
+ *   the EDGES is what `dead_code_scan` needs: its predicate is
+ *   `to_id = s.symbol_id OR to_id = 'type:' || s.name`, so it matches UNRESOLVED tokens by name and needs
+ *   no resolution at all. RESOLVING them is what costs — 105743ms on `wec.be`, where 39937 tokens each
+ *   reach `findProviderSymbolByName` (three queries per distinct name) and then the vector lane.
+ *
+ *   So the `very-large` profile now keeps every token and skips the linking. The relation stops being empty,
+ *   which was the bug, without paying 105s for cross-repo links to framework types that do not exist.
+ */
+export function resolveTypeRefEdges(db: Database.Database, repoId: string, maxUnresolvedRows = 0, skipExpensiveFallbacks = false): number {
   const unresolvedSql = `
     select distinct e.from_id as fromId, e.to_id as toId, s.file_path as fromFile
     from edges e
@@ -63,6 +80,8 @@ export function resolveTypeRefEdges(db: Database.Database, repoId: string, maxUn
    * `typeResolveMs` from 5214 to 111950. Distinct names are a few hundred against a few thousand rows.
    */
   const fallbackCache = new Map<string, { symbolId: string; confidence: number; reason: string } | null>();
+  // Per-call state, so one repo abandoning the lane cannot affect the next.
+  const vectorProbe = { attempted: 0, hits: 0, abandoned: false };
 
   function resolveFallback(typeName: string): { symbolId: string; confidence: number; reason: string } | null {
     const cached = fallbackCache.get(typeName);
@@ -72,15 +91,33 @@ export function resolveTypeRefEdges(db: Database.Database, repoId: string, maxUn
 
     let result: { symbolId: string; confidence: number; reason: string } | null = null;
 
+    if (skipExpensiveFallbacks) {
+      fallbackCache.set(typeName, null);
+      return null;
+    }
+
     // Cross-repo fallback: look for the type in provider repos linked via nuget: DEPENDS_ON (ISSUE-006)
     const crossRepoMatch = findProviderSymbolByName(db, repoId, typeName);
     if (crossRepoMatch) {
       result = { symbolId: crossRepoMatch.symbolId, confidence: 0.65, reason: "resolved type cross-repo" };
-    } else if (isVectorEnabled()) {
-      // Vector fallback for internal types that didn't match exactly
+    } else if (isVectorEnabled() && !vectorProbe.abandoned) {
+      // Vector fallback for internal types that didn't match exactly.
+      //
+      // Same adaptive cutoff as the CALLS lane: each KNN costs ~31ms, and on a repo whose unresolved types
+      // are all framework names none of them clears the 0.30 gate. Memoizing by name (above) removes the
+      // repeats but not the first lookup of each distinct name, and MCP-ISSUE-034 raised the distinct count
+      // by 2.9x — so the lane's floor cost rose with the very change that made TYPE_REF useful.
       const vecResults = vectorSearchSymbols(db, repoId, typeName, 3);
+      vectorProbe.attempted += 1;
       if (vecResults.length > 0 && vecResults[0].distance < 0.30) {
+        vectorProbe.hits += 1;
         result = { symbolId: vecResults[0].symbolId, confidence: 0.5, reason: "resolved type vector-fallback" };
+      }
+      if (vectorProbe.hits === 0 && vectorProbe.attempted >= TYPE_VECTOR_PROBE_SIZE) {
+        vectorProbe.abandoned = true;
+        indexWarn(
+          `[index-resolve] type vector fallback abandoned for ${repoId}: ${String(TYPE_VECTOR_PROBE_SIZE)} lookups, 0 matches under the confidence gate.`
+        );
       }
     }
 

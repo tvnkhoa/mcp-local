@@ -23,6 +23,20 @@ export type ExtractOutput = {
   mentions?: DocMentionRecord[];
   /** ISSUE-023: string-literal lane (C# + JS/TS). Worker pool serialize nguyên ExtractOutput nên field này đi qua không cần sửa worker. */
   literals?: StringLiteralRecord[];
+  /**
+   * What this file's edge bounds discarded — zero on the `standard` profile.
+   *
+   * Carried out of extraction so the index run can report it. Every bound in this codebase reports itself
+   * now; MCP-ISSUE-038 is what the alternative looks like, where a cost-control threshold deleted an
+   * entire edge category and the only symptom was a tool answering confidently from almost no data.
+   *
+   * A plain object rather than a class, because the worker pool structured-clones `ExtractOutput`.
+   */
+  edgePolicyDrops?: {
+    droppedByConfidence: number;
+    droppedByCallCap: number;
+    droppedByTypeRefCap: number;
+  };
 };
 
 // ============================================================================

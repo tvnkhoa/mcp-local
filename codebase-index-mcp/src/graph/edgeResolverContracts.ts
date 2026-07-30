@@ -18,6 +18,180 @@ import {
   isVectorEnabled,
 } from "../store/vectorStore.js";
 
+/**
+ * Fan out a call on an `abstract`/`virtual` base member to the overrides in its subclasses
+ * (MCP-ISSUE-037) — the class-inheritance counterpart of `interface-dispatch`.
+ *
+ * **Runs as its own pass over ALREADY-RESOLVED CALLS edges, and that placement is the whole reason this
+ * works.** The first attempt lived inside `resolveCallEdgesBatch`, alongside interface dispatch, and
+ * produced nothing: the template-method shape has the base calling its own abstract member *in the same
+ * file*, so `resolveIntraFileEdges` links it at EXTRACTION time and the edge never appears among the
+ * unresolved `callee:` rows the batch resolver iterates. Hooking into the unresolved lane means missing
+ * exactly the case this exists for.
+ *
+ * Reading final CALLS edges instead covers both shapes uniformly — the intra-file link and the
+ * cross-file one the batch resolver produces — and needs no knowledge of which phase created the edge.
+ */
+export function resolveBaseClassDispatch(db: Database.Database, repoId: string): number {
+  // Capped like interface dispatch: past a point the edges are noise, and a base class with 200
+  // subclasses would otherwise multiply every call on it.
+  const MAX_SUBCLASS_DISPATCH_FANOUT = 10;
+
+  const virtualCalls = db
+    .prepare(
+      // The `abstract `/`virtual ` test is on the stored signature. A modifier is always followed by a
+      // return type, so the trailing space keeps `abstractPath` and `virtually` from matching. A dedicated
+      // modifier column would be sturdier but needs a schema change and a full re-index of every repo.
+      `
+      select distinct e.from_id as fromId, s.symbol_id as baseMethodId, s.name as memberName,
+             s.parent_symbol_id as baseTypeId
+      from edges e
+      inner join symbols s on s.repo_id = e.repo_id and s.symbol_id = e.to_id
+      where e.repo_id = ?
+        and e.type = 'CALLS'
+        and s.kind = 'method'
+        and s.parent_symbol_id is not null
+        and s.signature is not null
+        and (s.signature like '%abstract %' or s.signature like '%virtual %')
+      order by e.from_id, s.symbol_id
+      `
+    )
+    .all(repoId) as { fromId: string; baseMethodId: string; memberName: string; baseTypeId: string }[];
+
+  if (virtualCalls.length === 0) return 0;
+
+  const subclassRows = db
+    .prepare(
+      // Only resolved EXTENDS rows: one still holding a `base:` token is a framework base with nothing
+      // in-repo to dispatch to. Ordered before the cap, or which subclasses survive it would be arbitrary
+      // and vary between runs (MCP-ISSUE-032).
+      `
+      select distinct e.to_id as baseId, s.file_path as filePath
+      from edges e
+      inner join symbols s on s.repo_id = e.repo_id and s.symbol_id = e.from_id
+      where e.repo_id = ? and e.type = 'EXTENDS' and e.to_id not like 'base:%'
+        and s.kind in ('class', 'struct', 'record', 'record struct')
+      order by e.to_id, s.file_path
+      `
+    )
+    .all(repoId) as { baseId: string; filePath: string }[];
+
+  if (subclassRows.length === 0) return 0;
+
+  const subclassFilesByBaseId = new Map<string, string[]>();
+  for (const r of subclassRows) {
+    const list = subclassFilesByBaseId.get(r.baseId) ?? [];
+    list.push(r.filePath);
+    subclassFilesByBaseId.set(r.baseId, list);
+  }
+
+  const overrideStmt = db.prepare(
+    // `override ` is required, not merely preferred. Without it a `new`/shadow method of the same name
+    // would be treated as an override, attributing the call to code that cannot run — and for
+    // `dead_code_scan` a false "live" hides real dead code, the one direction of error it cannot afford.
+    `select symbol_id as symbolId from symbols
+     where repo_id = ? and file_path = ? and name = ? and kind = 'method'
+       and signature is not null and signature like '%override %'
+     order by symbol_id
+     limit 1`
+  );
+  const insertStmt = db.prepare(
+    `insert or ignore into edges (repo_id, from_id, to_id, type, confidence, reason)
+     values (?, ?, ?, 'CALLS', 0.7, 'base-class-dispatch')`
+  );
+
+  let count = 0;
+  const tx = db.transaction(() => {
+    for (const call of virtualCalls) {
+      const files = (subclassFilesByBaseId.get(call.baseTypeId) ?? []).slice(0, MAX_SUBCLASS_DISPATCH_FANOUT);
+      for (const filePath of files) {
+        const override = overrideStmt.get(repoId, filePath, call.memberName) as { symbolId: string } | undefined;
+        if (!override || override.symbolId === call.baseMethodId) continue;
+        // The base's own edge is left untouched: the fan-out ADDS reachability rather than moving it.
+        // Moving it would trade one false "dead" for another.
+        insertStmt.run(repoId, call.fromId, override.symbolId);
+        count += 1;
+      }
+    }
+  });
+  tx();
+
+  return count;
+}
+
+/**
+ * Resolve `base:Name` tokens to the base class symbol (MCP-ISSUE-037).
+ *
+ * Kept separate from `resolveImplementsEdges` rather than generalised over both token prefixes, because
+ * the two differ in a way that matters downstream: an unresolvable interface is an external contract and a
+ * legitimate end state, while an unresolvable base class means the hierarchy simply stops there and no
+ * dispatch fan-out is possible. Same tagging, different meaning, and collapsing them would hide which one
+ * a given edge is.
+ */
+export function resolveExtendsEdges(db: Database.Database, repoId: string): number {
+  const unresolved = db
+    .prepare(
+      `
+      select distinct e.from_id as fromId, e.to_id as toId
+      from edges e
+      where e.repo_id = ? and e.type = 'EXTENDS' and e.to_id like 'base:%'
+      order by e.from_id, e.to_id
+      `
+    )
+    .all(repoId) as { fromId: string; toId: string }[];
+
+  if (unresolved.length === 0) return 0;
+
+  const baseNames = [...new Set(unresolved.map((row) => row.toId.slice("base:".length)))];
+  const placeholders = baseNames.map(() => "?").join(",");
+  const rows = db
+    .prepare(
+      // Ordered for the same first-row-wins reason as the interface lookup below: two files can declare
+      // the same class name, and unordered the winner moved between runs (MCP-ISSUE-032).
+      `
+      select name, symbol_id as symbolId
+      from symbols
+      where repo_id = ? and kind in ('class', 'struct', 'record', 'record struct') and name in (${placeholders})
+      order by name, symbol_id
+      `
+    )
+    .all(repoId, ...baseNames) as { name: string; symbolId: string }[];
+
+  const baseByName = new Map<string, string>();
+  for (const row of rows) {
+    if (!baseByName.has(row.name)) baseByName.set(row.name, row.symbolId);
+  }
+
+  const updateStmt = db.prepare(
+    `update or ignore edges set to_id = ?, confidence = ?, reason = ?
+     where repo_id = ? and from_id = ? and to_id = ? and type = 'EXTENDS'`
+  );
+  const tagExternalStmt = db.prepare(
+    `update edges set confidence = 0.1, reason = 'external boundary'
+     where repo_id = ? and from_id = ? and to_id = ? and type = 'EXTENDS'`
+  );
+
+  let count = 0;
+  const tx = db.transaction(() => {
+    for (const row of unresolved) {
+      const match = baseByName.get(row.toId.slice("base:".length));
+      if (match && match !== row.fromId) {
+        // `update or ignore`: a partial class listing the same base twice, or two base-list entries
+        // collapsing to one symbol, would otherwise violate the unique index and abort the transaction.
+        updateStmt.run(match, 0.95, "base_list class", repoId, row.fromId, row.toId);
+        count += 1;
+      } else {
+        // A framework base — ControllerBase, DbContext, BackgroundService. Tagged rather than left as a
+        // raw token so it is classified, matching how unresolvable interfaces are handled.
+        tagExternalStmt.run(repoId, row.fromId, row.toId);
+      }
+    }
+  });
+  tx();
+
+  return count;
+}
+
 export function resolveImplementsEdges(db: Database.Database, repoId: string): number {
   const unresolved = db
     .prepare(

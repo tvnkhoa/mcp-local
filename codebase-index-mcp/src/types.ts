@@ -21,6 +21,16 @@ export type IndexRunSummary = {
   mentionsUpserted: number;
   parseFailures: number;
   parseTimeouts: number;
+  /**
+   * Edges the performance profile's bounds discarded — present only when non-zero.
+   *
+   * These exist because MCP-ISSUE-038 was undetectable from the run record: `very-large`'s confidence
+   * floor deleted every unresolved TYPE_REF, and the summary reported a healthy run. A bound that does
+   * not surface here cannot be audited, and its absence reads as "nothing was dropped".
+   */
+  edgesDroppedByConfidence?: number;
+  edgesDroppedByCallCap?: number;
+  edgesDroppedByTypeRefCap?: number;
   elapsedMs: number;
   crossRepoAttempts?: number;
   crossRepoResolved?: number;
@@ -153,7 +163,12 @@ export type EdgeRecord = {
   repoId: string;
   fromId: string;
   toId: string;
-  type: "IMPORTS" | "CALLS" | "DEPENDS_ON" | "IMPLEMENTS" | "TYPE_REF" | "PROPERTY_REF" | "PROPERTY_WRITE" | "PUBLISHES" | "CONSUMES";
+  /**
+   * `EXTENDS` is class inheritance and is deliberately NOT folded into `IMPLEMENTS` (MCP-ISSUE-037).
+   * C# allows one base class and many interfaces, and several tools read `IMPLEMENTS` as "satisfies an
+   * interface contract" — merging them would make those answers wrong without changing their shape.
+   */
+  type: "IMPORTS" | "CALLS" | "DEPENDS_ON" | "IMPLEMENTS" | "EXTENDS" | "TYPE_REF" | "PROPERTY_REF" | "PROPERTY_WRITE" | "PUBLISHES" | "CONSUMES";
   confidence?: number;
   reason?: string;
   /** ENH-029-B: RHS source text captured at PROPERTY_WRITE sites (assigned literal/expression). */

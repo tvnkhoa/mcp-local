@@ -71,6 +71,11 @@ export function pruneAndResolve(
   // Resolve iface: placeholders → real symbolIds after all C# files have been indexed.
   if (input.mode === "full" && scanWasComplete) {
     const resolvedImpl = store.resolveImplementsEdges(input.repoId);
+    // Order matters twice: EXTENDS must be linked before the fan-out can walk it, and the fan-out must
+    // run AFTER call resolution because it reads final CALLS edges — the base of a template-method class
+    // calls its own abstract member in the same file, which extraction already resolved.
+    store.resolveExtendsEdges(input.repoId);
+    store.resolveBaseClassDispatch(input.repoId);
     if (resolvedImpl > 0) {
       indexLog(`[index-resolve] resolved ${String(resolvedImpl)} IMPLEMENTS edge(s)`);
     }
@@ -119,6 +124,17 @@ export interface RunCounters {
   mentionsUpserted: number;
   parseFailures: number;
   parseTimeouts: number;
+  /**
+   * Edges the performance profile's bounds discarded this run — zero on `standard`.
+   *
+   * Reported, not merely counted. MCP-ISSUE-038: the `very-large` profile's confidence floor silently
+   * deleted every unresolved TYPE_REF, so `dead_code_scan` on a 67980-symbol repo answered from 1112
+   * edges and said nothing was wrong. A bound that does not appear in the run record is a bound nobody
+   * can audit.
+   */
+  edgesDroppedByConfidence: number;
+  edgesDroppedByCallCap: number;
+  edgesDroppedByTypeRefCap: number;
 }
 
 export interface RunIdentity {
@@ -164,6 +180,11 @@ export function buildRunSummary(
     mentionsUpserted: counters.mentionsUpserted,
     parseFailures: counters.parseFailures,
     parseTimeouts: counters.parseTimeouts,
+    // Omitted when nothing was dropped, so the common case adds nothing to the wire and a present field
+    // always means the profile actually cost this run something.
+    ...(counters.edgesDroppedByConfidence > 0 ? { edgesDroppedByConfidence: counters.edgesDroppedByConfidence } : {}),
+    ...(counters.edgesDroppedByCallCap > 0 ? { edgesDroppedByCallCap: counters.edgesDroppedByCallCap } : {}),
+    ...(counters.edgesDroppedByTypeRefCap > 0 ? { edgesDroppedByTypeRefCap: counters.edgesDroppedByTypeRefCap } : {}),
     elapsedMs,
     ...(vectorSymbolsIndexed === undefined ? {} : { vectorSymbolsIndexed })
   };

@@ -111,7 +111,8 @@ export async function runIndexPipeline(store: GraphStore, input: RunIndexInput):
 
   const c: RunCounters = {
     filesScanned: 0, filesIndexed: 0, filesSkipped: 0, symbolsUpserted: 0, edgesUpserted: 0,
-    docsUpserted: 0, mentionsUpserted: 0, parseFailures: 0, parseTimeouts: 0
+    docsUpserted: 0, mentionsUpserted: 0, parseFailures: 0, parseTimeouts: 0,
+    edgesDroppedByConfidence: 0, edgesDroppedByCallCap: 0, edgesDroppedByTypeRefCap: 0
   };
   const languageStats = new Map<string, { scanned: number; indexed: number }>();
 
@@ -151,6 +152,7 @@ export async function runIndexPipeline(store: GraphStore, input: RunIndexInput):
           docs?: import("../types.js").DocRecord[];
           mentions?: import("../types.js").DocMentionRecord[];
           literals?: import("../types.js").StringLiteralRecord[];
+          edgePolicyDrops?: { droppedByConfidence: number; droppedByCallCap: number; droppedByTypeRefCap: number };
         };
       }> = [];
       const largeExtractionJobs: Array<Promise<{
@@ -171,8 +173,19 @@ export async function runIndexPipeline(store: GraphStore, input: RunIndexInput):
           docs?: import("../types.js").DocRecord[];
           mentions?: import("../types.js").DocMentionRecord[];
           literals?: import("../types.js").StringLiteralRecord[];
+          edgePolicyDrops?: { droppedByConfidence: number; droppedByCallCap: number; droppedByTypeRefCap: number };
         }
       ): void => {
+        // Accumulated here because this is the single funnel all three extraction paths pass through —
+        // the .csproj lane, the inline lane, and the worker lane. Counting at the call sites instead would
+        // mean three places to forget, and a bound that stops being reported is a bound that stops
+        // existing as far as anyone reading the run record can tell.
+        const drops = extracted.edgePolicyDrops;
+        if (drops) {
+          c.edgesDroppedByConfidence += drops.droppedByConfidence;
+          c.edgesDroppedByCallCap += drops.droppedByCallCap;
+          c.edgesDroppedByTypeRefCap += drops.droppedByTypeRefCap;
+        }
         pendingWrites.push({
           file: {
             repoId: input.repoId,

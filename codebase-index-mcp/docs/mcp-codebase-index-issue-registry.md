@@ -209,10 +209,11 @@ reproduce it, since the wrapper cache is only pruned once there is enough churn 
 
 ---
 
-## MCP-ISSUE-038 — the `very-large` profile silently discards every unresolved TYPE_REF, so MCP-ISSUE-034's fix is inert on the biggest repo
+## MCP-ISSUE-038 — the `very-large` profile silently discarded every unresolved TYPE_REF, so MCP-ISSUE-034's fix was inert on the biggest repo
 
-- **Status:** **OPEN**, filed 2026-07-30. Deliberately not fixed: every remedy raises edge volume on the
-  largest repo, which is the exact thing the profile exists to bound. That trade is the user's to make.
+- **Status:** **FIXED** 2026-07-30. Filed as open because every remedy considered at the time raised edge
+  volume on the largest repo. What shipped avoids that trade entirely — see the update at the end: the
+  expensive part was never the storage, it was the LINKING, and `dead_code_scan` does not need it.
 - **Scenario:** `wec.be` — 7528 files, so `performanceProfile` auto-selects `very-large`.
 - **Evidence:** TYPE_REF on `wec.be` is **1112 edges over 67980 symbols, with ZERO unresolved tokens**.
   Compare `wec.communication-hub` (`standard`): 14377 edges, of which 6652 are unresolved tokens. Two
@@ -246,13 +247,75 @@ reproduce it, since the wrapper cache is only pruned once there is enough churn 
   current 117893 — a near-doubling of the table, plus the resolve-phase work those rows attract. Not a
   detail to decide in passing, which is why this is filed rather than fixed.
 
+### Update 2026-07-30 — FIXED, and none of the three remedies above is what shipped
+
+All three framed this as "how much extra cost do we accept". That framing was wrong. The expensive part is
+not storing the edges, it is LINKING them — and `dead_code_scan`, the tool this whole issue is about, does
+not need them linked. Its predicate is `to_id = s.symbol_id OR to_id = 'type:' || s.name`, which matches
+**unresolved tokens by name**.
+
+So the two halves were separated:
+
+1. **Keep the edges.** TYPE_REF is exempt from the confidence filter and bounded by its own per-file cap
+   (`applyTypeRefEdgeCap`, env `CODEBASE_INDEX_MAX_TYPE_REF_EDGES_PER_FILE`). A cap degrades locally — the
+   worst file contributes less — where a confidence floor degraded categorically, deleting the relation
+   repo-wide. The 0.45 default is now stated at the point of emission rather than inherited from a prefix
+   table in another module, which was the real fragility: nobody reading either file could see that one
+   number sat 0.05 below the other.
+2. **Skip the linking on `very-large`.** The cross-repo provider search and the vector search are gated off
+   there. `findProviderSymbolByName` runs three queries per distinct type name, and on `wec.be` 40k tokens
+   are framework names with no in-repo target — 105 seconds spent proving nothing.
+
+**Measured on `wec.be` (7528 files, 67980 symbols, `very-large`):**
+
+| | before | keep-edges only | + skip linking |
+|---|---|---|---|
+| TYPE_REF edges | 1112 | 80931 | **80931** |
+| unresolved tokens | 0 | 39937 | 40246 |
+| `typeResolveMs` | 1 | 105743 | **1719** |
+| run `elapsedMs` | 98801 | 117577 | **100542** |
+| falsely-dead class/record/struct | 6251 | — | **2626 (−58%)** |
+
+**72.8x more TYPE_REF and 58% fewer falsely-dead types, for 1.7 seconds.** Skipping the linking costs 309
+tokens that would have resolved via fallback, and `dead_code_scan` matches those by name regardless.
+
+Every bound now reports itself, which was the other half of the lesson: the run summary carries
+`edgesDroppedByConfidence` / `byCallCap` / `byTypeRefCap`, present only when non-zero. On `wec.be` that
+immediately surfaced **37824 edges still dropped by the confidence floor** — bare `callee:` tokens at 0.4, a
+separate lane that was equally invisible before. Not addressed here, but now countable rather than merely
+absent.
+
+---
+
+## MCP-ISSUE-039 — the vector fallback cost 30s per run and resolved nothing
+
+- **Status:** **FIXED** 2026-07-30 (`edgeResolverCalls.ts`, `edgeResolverRefs.ts`, `vectorStore.ts`).
+  A regression introduced by MCP-ISSUE-035's own fix, found while measuring MCP-ISSUE-037.
+- **How it was caused:** before MCP-ISSUE-035, 35% of vector queries returned zero rows because `k` was
+  consumed by other repos in the shared table, and finding nothing is fast. Making the lane CORRECT made it
+  do real work, and the work turned out to be worthless on this data.
+- **Evidence:** 968 distinct tokens reach the lane on `wec.communication-hub`, each KNN costs ~31ms, and
+  **zero** clear the `distance < 0.35` gate. Confirmed by differencing a full run with
+  `CODEBASE_INDEX_VECTOR_ENABLED` on and off: the CALLS `reason` breakdown is **byte-identical**, 11331 rows
+  tagged `external boundary` either way. Draining those rows took 27860ms with vectors on against 226ms with
+  them off — 123x for no edges.
+- **Fix — the lane measures itself.** Neither disabled (it can pay where unresolved tokens are in-repo
+  near-misses) nor unbounded. After 100 lookups with no hit it stops, and says so via `indexWarn`: a
+  capability switching itself off silently is exactly what produced MCP-ISSUE-038. `vectorSearchSymbols` is
+  also memoized, cleared on any vector write.
+- **Measured:** `callResolveMs` 30023 -> **4485**, below the 4953 pre-regression baseline. Full-run wall on
+  `wec.communication-hub` 62s -> **29.5s**, all nine edge types identical across three runs.
+- **Note on the over-fetch:** MCP-ISSUE-035's deterministic tie-break raises k from 3 to 16, and raw KNN cost
+  is roughly linear in k (11.7ms at k=3, 28.4ms at k=16, 95ms at k=64). That multiplier stands — it is the
+  price of a reproducible cut — but is now paid 100 times per repo instead of once per token.
+
 ---
 
 ## MCP-ISSUE-037 — abstract/virtual base-class members have no dispatch fan-out, so every override looks dead
 
-- **Status:** **OPEN**, filed 2026-07-30. Not fixed: it needs a new edge semantic, which is a design
-  decision rather than a repair. Found while verifying MCP-ISSUE-036 — after two false-positive causes were
-  removed, this is what the remaining `dead_code_scan` candidates turned out to be.
+- **Status:** **FIXED** 2026-07-30, in two parts — see the update at the end. Found while verifying
+  MCP-ISSUE-036: after two false-positive causes were removed, this is what the remaining `dead_code_scan`
+  candidates turned out to be.
 - **Scenario:** a template-method base class. `SentMessageConsumerBase<TContract>` declares
   `protected abstract SentMessageInfo GetMessageInfo(TContract)` and calls it; `AutomationSentConsumer` and
   `CampaignSentConsumer` each `override` it.
@@ -285,6 +348,54 @@ reproduce it, since the wrapper cache is only pruned once there is enough churn 
 - **Workaround until then:** treat a candidate whose signature contains `override` as suppressed. Note that
   `dead_code_scan` does not currently do this — the signature is already stored, so it is a cheap interim
   guard if the full fix is deferred.
+
+### Update 2026-07-30 — FIXED as two mechanisms, because the candidates are two populations
+
+The entry above treated this as one problem. It is not, and building only the dispatch half would have left
+half the false positives standing:
+
+1. **Overriding an in-repo abstract/virtual member** — fixable, and now fixed by `EXTENDS` + fan-out.
+2. **Overriding an EXTERNAL virtual member** — `Equals`, `GetHashCode`, `ToString`, `Dispose`,
+   `OnModelCreating`. The caller is the BCL or a framework, so no in-repo edge can ever exist. No amount of
+   inheritance modelling reaches these; suppression is the correct permanent answer.
+
+**Part 1 — `heuristic_override_member` suppression.** `dead_code_scan` already models "I cannot tell" as
+suppression, with `scanPolicy.note` stating that exclusion does not prove a symbol live — exactly the claim
+being made. So the honest fix for the second population was a suppression reason, not an edge. Cost, stated:
+a genuinely dead override inside a dead subclass is now hidden.
+
+**Part 2 — `EXTENDS` + `base-class-dispatch`.** A distinct edge type rather than reusing `IMPLEMENTS`,
+because C# allows one base class and many interfaces, and several tools read `IMPLEMENTS` as "satisfies an
+interface contract" — folding them would make "how many interfaces does this implement" answer wrong without
+changing its shape. `base:Name` tokens resolve in `resolveExtendsEdges`; unresolvable ones (ControllerBase,
+DbContext) are tagged `external boundary`, as unresolvable interfaces already are.
+
+**Two things this got wrong first, both worth recording:**
+
+- **The fan-out was in the wrong phase.** It started inside `resolveCallEdgesBatch`, beside interface
+  dispatch, and produced nothing. The template-method shape has the base calling its own abstract member *in
+  the same file*, so `resolveIntraFileEdges` links it at EXTRACTION time and the edge never reaches the
+  unresolved-token lane the batch resolver iterates. Hooking into that lane misses exactly the case this
+  exists for. It is now its own pass over FINAL CALLS edges, covering both shapes without caring which phase
+  created the edge.
+- **An early return disabled the whole thing.** `if (localMethods.size === 0) return` was correct for the
+  method-group branch it was written for and catastrophic beside this one: a FluentValidation validator is
+  usually a class whose only member is a constructor. Only a test whose fixture also had no
+  `method_declaration` caught it — a fixture with one incidental method would have passed and proven nothing.
+
+**The gate that makes it safe:** only `abstract` and `virtual` members fan out, read off the stored
+signature. A non-virtual base method is never overridden, so a same-named subclass method is a `new`/shadow —
+a different method — and reaching it would attribute a call to code that cannot run. For `dead_code_scan` a
+false "live" hides real dead code, the one direction of error it cannot afford.
+
+**Measured on `wec.communication-hub`:** 136 override false positives suppressed, of which **12 are now
+genuinely reachable** through dispatch rather than merely suppressed (matching 12 `base-class-dispatch`
+edges). `EXTENDS` = 157. On `wec.be`: `EXTENDS` = 3796, 19 dispatch edges. The remaining 124 suppressions are
+the external-override population, where suppression is the answer rather than a placeholder.
+
+Covered by `test:base-class-dispatch`, 8 cases — three of them NEGATIVE, since the failure mode that matters
+is over-reaching: a shadow method, a same-named method outside the hierarchy, and the base keeping its own
+direct call (the fan-out must ADD reachability, not move it).
 
 ---
 

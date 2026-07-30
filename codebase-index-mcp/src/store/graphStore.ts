@@ -48,6 +48,8 @@ import {
   buildCallResolutionContext as buildCallResolutionContextImpl,
   resolveTypeRefEdges as resolveTypeRefEdgesImpl,
   resolvePropertyEdges as resolvePropertyEdgesImpl,
+  resolveBaseClassDispatch as resolveBaseClassDispatchImpl,
+  resolveExtendsEdges as resolveExtendsEdgesImpl,
   resolveImplementsEdges as resolveImplementsEdgesImpl,
   resolvePublishesConsumesEdges as resolvePublishesConsumesEdgesImpl
 } from "../graph/edgeResolver.js";
@@ -540,8 +542,8 @@ export class GraphStore {
     return resolveCallEdgesBatchImpl(this.db, repoId, ctx, batchSize);
   }
 
-  resolveTypeRefEdges(repoId: string, maxUnresolvedRows = 0): number {
-    return resolveTypeRefEdgesImpl(this.db, repoId, maxUnresolvedRows);
+  resolveTypeRefEdges(repoId: string, maxUnresolvedRows = 0, skipExpensiveFallbacks = false): number {
+    return resolveTypeRefEdgesImpl(this.db, repoId, maxUnresolvedRows, skipExpensiveFallbacks);
   }
 
   resolvePropertyEdges(repoId: string, maxUnresolvedRows = 0): number {
@@ -647,6 +649,14 @@ export class GraphStore {
    * Resolve IMPLEMENTS edges — convert iface:InterfaceName placeholders to real symbolIds.
    * Should be called after indexing C# files.
    */
+  resolveExtendsEdges(repoId: string): number {
+    return resolveExtendsEdgesImpl(this.db, repoId);
+  }
+
+  resolveBaseClassDispatch(repoId: string): number {
+    return resolveBaseClassDispatchImpl(this.db, repoId);
+  }
+
   resolveImplementsEdges(repoId: string): number {
     return resolveImplementsEdgesImpl(this.db, repoId);
   }

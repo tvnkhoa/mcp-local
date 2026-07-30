@@ -204,6 +204,7 @@ Refactor tools: `refactor_replace_preview` and `refactor_replace_apply` support 
 | `CODEBASE_INDEX_PARSE_TIMEOUT_MS` | no | `5000` *(code)* | Per-file parse timeout. |
 | `CODEBASE_INDEX_PARSE_JOB_TIMEOUT_MS` | no | `20000` *(code)* | Whole-batch timeout. |
 | `CODEBASE_INDEX_MAX_CALL_EDGES_PER_FILE` | no | — | Override; unset = the extractor's own limit. |
+| `CODEBASE_INDEX_MAX_TYPE_REF_EDGES_PER_FILE` | no | — | Per-file TYPE_REF ceiling. Bounds this lane by volume instead of by confidence (MCP-ISSUE-038); unset = the profile default. |
 | `CODEBASE_INDEX_MIN_EDGE_CONFIDENCE` | no | — | Ratio 0–1. Drops low-confidence edges at extraction time. |
 | `CODEBASE_INDEX_MAX_STRING_LITERALS_PER_FILE` | no | — | — |
 | `CODEBASE_INDEX_MIN_STRING_LITERAL_LENGTH` | no | — | — |
@@ -221,7 +222,7 @@ Refactor tools: `refactor_replace_preview` and `refactor_replace_apply` support 
 | `CODEBASE_INDEX_INDEX_LOG` | no | — | Enables verbose index-progress logging on stderr. |
 | `CODEBASE_INDEX_LLM_ENABLED` | no | `false` *(code)* | Runtime LLM invocation is prohibited by design. Setting this to true ABORTS STARTUP, and `guard:no-llm-runtime` statically verifies no LLM client is importable. Declared here so the constraint is documented, not so it can be turned on. |
 
-40 variables. Defaults marked *(code)* are the server's own fallback and are **not** written into your agent config — set them only to override.
+41 variables. Defaults marked *(code)* are the server's own fallback and are **not** written into your agent config — set them only to override.
 
 <!-- END GENERATED: env-table -->
 

@@ -29,6 +29,7 @@
     "test:bus-edges": "node scripts/test/test-bus-edges.mjs",
     "test:search-ranking": "node scripts/test/test-search-ranking.mjs",
     "test:interface-dispatch": "node scripts/test/test-interface-dispatch.mjs",
+    "test:base-class-dispatch": "node scripts/test/test-base-class-dispatch.mjs",
     "test:string-literals": "node scripts/test/test-string-literals.mjs",
     "test:search-regex": "node scripts/test/test-search-regex.mjs",
     "test:issue-refinements": "node scripts/test/test-issue-refinements.mjs",

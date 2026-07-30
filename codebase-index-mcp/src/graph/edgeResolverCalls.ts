@@ -18,6 +18,15 @@ import {
   isVectorEnabled,
 } from "../store/vectorStore.js";
 import { buildNamedCandidateMap, pickBestNamedCandidate } from "./edgeResolverShared.js";
+import { indexWarn } from "../indexing/indexProgress.js";
+
+/**
+ * How many fruitless vector lookups to tolerate before concluding the lane cannot pay on this repo.
+ *
+ * 100 x ~31ms is about 3 seconds of probing — enough to find a hit if hits exist (they cluster, since a
+ * near-miss token usually has several siblings), cheap enough that being wrong costs little.
+ */
+const VECTOR_PROBE_SIZE = 100;
 
 export interface CallResolutionContext {
   candidateMap: Map<string, { symbolId: string; filePath: string; kind: string; parentSymbolId: string | null }[]>;
@@ -25,12 +34,41 @@ export interface CallResolutionContext {
   /** ISSUE-022: symbolIds của mọi interface — detect bare-name match trúng interface method để fan-out. */
   interfaceIdSet: Set<string>;
   implementorFilesByIfaceId: Map<string, string[]>;
+  /**
+   * MCP-ISSUE-037: subclass files per base-class symbolId — the class-inheritance counterpart of
+   * `implementorFilesByIfaceId`. Populated from resolved `EXTENDS` edges.
+   */
+  subclassFilesByBaseId: Map<string, string[]>;
+  /**
+   * symbolIds of methods declared `abstract` or `virtual`.
+   *
+   * The gate that makes class fan-out safe. A non-virtual base method is NOT overridden, so a same-named
+   * method in a subclass is a `new`/shadow declaration and an entirely different method — fanning out to
+   * it would attribute a call to code that never runs, which is exactly the misattribution class of
+   * MCP-ISSUE-036. Interface members need no such gate because every interface member is dispatchable by
+   * definition.
+   */
+  virtualMethodIds: Set<string>;
   updateStmt: Statement;
   insertDispatchStmt: Statement;
   /** All unresolved rows pre-fetched once — sliced per batch in memory */
   unresolvedRows: { fromId: string; toId: string; fromFile: string }[];
   /** Current offset into unresolvedRows for batching */
   offset: number;
+  /**
+   * Adaptive cutoff for the vector fallback, carried across batches.
+   *
+   * The lane is expensive and, on some repos, worthless. Measured on `wec.communication-hub`: 968 distinct
+   * tokens reach it, each KNN costs ~31ms, and **zero** clear the `distance < 0.35` gate — 30 seconds of
+   * the resolve phase producing not one edge. Confirmed by differencing a full run with
+   * `CODEBASE_INDEX_VECTOR_ENABLED` on and off: byte-identical CALLS reasons, 11331 rows tagged
+   * `external boundary` either way.
+   *
+   * Rather than disable the lane (it can pay on a repo whose unresolved tokens are in-repo near-misses) or
+   * leave it unbounded, it measures itself: after `VECTOR_PROBE_SIZE` lookups with no hit, it stops. The
+   * capability survives where it works; the waste is capped at a few seconds where it does not.
+   */
+  vectorProbe: { attempted: number; hits: number; abandoned: boolean };
 }
 
 /**
@@ -71,6 +109,45 @@ export function buildCallResolutionContext(db: Database.Database, repoId: string
     implementorFilesByIfaceId.set(r.ifaceId, list);
   }
 
+  // MCP-ISSUE-037: the class-inheritance mirror of the two structures above. `EXTENDS` is resolved before
+  // this runs, so `to_id` is a real class symbolId; rows still holding a `base:` token are framework bases
+  // with nothing in-repo to dispatch to, and the `not like` excludes them rather than mapping them to
+  // nothing silently.
+  const extendsRows = db
+    .prepare(
+      `select distinct e.to_id as baseId, s.file_path as filePath
+       from edges e
+       inner join symbols s on s.repo_id = e.repo_id and s.symbol_id = e.from_id
+       where e.repo_id = ? and e.type = 'EXTENDS' and e.to_id not like 'base:%'
+         and s.kind in ('class', 'struct', 'record', 'record struct')
+       order by e.to_id, s.file_path`
+    )
+    .all(repoId) as { baseId: string; filePath: string }[];
+  const subclassFilesByBaseId = new Map<string, string[]>();
+  for (const r of extendsRows) {
+    const list = subclassFilesByBaseId.get(r.baseId) ?? [];
+    list.push(r.filePath);
+    subclassFilesByBaseId.set(r.baseId, list);
+  }
+
+  // Read off the stored signature. A dedicated modifier column would be sturdier than a string test, but
+  // it needs a schema change plus a full re-index of every repo, and the signature is already captured
+  // verbatim — `protected abstract SentMessageInfo GetMessageInfo(TContract message);`. The trailing space
+  // in each pattern is deliberate: a modifier is always followed by a return type, so it keeps
+  // `abstractPath` and `virtually` from matching.
+  const virtualMethodIds = new Set<string>(
+    (
+      db
+        .prepare(
+          `select symbol_id as symbolId from symbols
+           where repo_id = ? and kind = 'method' and signature is not null
+             and (signature like '%abstract %' or signature like '%virtual %')
+           order by symbol_id`
+        )
+        .all(repoId) as { symbolId: string }[]
+    ).map((r) => r.symbolId)
+  );
+
   const candidateMap = buildNamedCandidateMap(db, repoId, ["function", "method", "constructor", "class"]);
 
   const updateStmt = db.prepare(
@@ -102,7 +179,7 @@ export function buildCallResolutionContext(db: Database.Database, repoId: string
     )
     .all(repoId) as { fromId: string; toId: string; fromFile: string }[];
 
-  return { candidateMap, interfaceByName, interfaceIdSet, implementorFilesByIfaceId, updateStmt, insertDispatchStmt, unresolvedRows, offset: 0 };
+  return { candidateMap, interfaceByName, interfaceIdSet, implementorFilesByIfaceId, subclassFilesByBaseId, virtualMethodIds, updateStmt, insertDispatchStmt, unresolvedRows, offset: 0, vectorProbe: { attempted: 0, hits: 0, abandoned: false } };
 }
 
 /**
@@ -225,6 +302,7 @@ export function resolveCallEdgesBatch(
           inserts.push({ fromId: row.fromId, toId: implMethod.symbolId, confidence: 0.7, reason: "interface-dispatch" });
         }
       }
+
     } else {
       const rawName = calleeName.split(".").pop() ?? calleeName;
       const normalized = stripGenerics(rawName);
@@ -256,9 +334,23 @@ export function resolveCallEdgesBatch(
     }
     // Single pass: one vector search per unique token (not per edge)
     for (const token of tokenToResult.keys()) {
+      // The adaptive cutoff. `abandoned` persists across batches via ctx, so a repo whose vector lane
+      // pays nothing stops paying after the probe rather than once per batch.
+      if (ctx.vectorProbe.abandoned) break;
       const vecResults = vectorSearchSymbols(db, repoId, token, 3);
+      ctx.vectorProbe.attempted += 1;
       if (vecResults.length > 0 && vecResults[0].distance < 0.35) {
+        ctx.vectorProbe.hits += 1;
         tokenToResult.set(token, vecResults[0]);
+      }
+      if (ctx.vectorProbe.hits === 0 && ctx.vectorProbe.attempted >= VECTOR_PROBE_SIZE) {
+        ctx.vectorProbe.abandoned = true;
+        // Warn, not log: a capability switching itself off is exactly the kind of silent degradation that
+        // produced MCP-ISSUE-038, so it has to be visible in the default quiet mode.
+        indexWarn(
+          `[index-resolve] vector fallback abandoned for ${repoId}: ${String(VECTOR_PROBE_SIZE)} lookups, 0 matches under the confidence gate. ` +
+            `Remaining unresolved callees are tagged external boundary without a vector attempt.`
+        );
       }
     }
     // Apply results back to edges

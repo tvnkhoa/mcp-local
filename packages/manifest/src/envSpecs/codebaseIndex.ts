@@ -102,6 +102,12 @@ export function codebaseIndexEnv(root: string): readonly EnvField[] {
     { name: "CODEBASE_INDEX_PARSE_TIMEOUT_MS", required: false, codeDefault: "5000", section: "Parser tuning", note: "Per-file parse timeout." },
     { name: "CODEBASE_INDEX_PARSE_JOB_TIMEOUT_MS", required: false, codeDefault: "20000", section: "Parser tuning", note: "Whole-batch timeout." },
     { name: "CODEBASE_INDEX_MAX_CALL_EDGES_PER_FILE", required: false, section: "Parser tuning", note: "Override; unset = the extractor's own limit." },
+    {
+      name: "CODEBASE_INDEX_MAX_TYPE_REF_EDGES_PER_FILE",
+      required: false,
+      section: "Parser tuning",
+      note: "Per-file TYPE_REF ceiling. Bounds this lane by volume instead of by confidence (MCP-ISSUE-038); unset = the profile default."
+    },
     { name: "CODEBASE_INDEX_MIN_EDGE_CONFIDENCE", required: false, section: "Parser tuning", note: "Ratio 0–1. Drops low-confidence edges at extraction time." },
     { name: "CODEBASE_INDEX_MAX_STRING_LITERALS_PER_FILE", required: false, section: "Parser tuning" },
     { name: "CODEBASE_INDEX_MIN_STRING_LITERAL_LENGTH", required: false, section: "Parser tuning" },

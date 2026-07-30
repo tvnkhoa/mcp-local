@@ -151,15 +151,104 @@ export function applyCallEdgeCap(edges: EdgeRecord[], maxCallEdgesPerFile: numbe
   return output;
 }
 
-export function applyEdgeConfidenceFilter(edges: EdgeRecord[], minEdgeConfidence: number): EdgeRecord[] {
-  if (minEdgeConfidence <= 0) {
+/**
+ * Per-file ceiling on TYPE_REF, replacing the confidence filter as the way this lane is bounded
+ * (MCP-ISSUE-038).
+ *
+ * A cap and a confidence threshold are not interchangeable ways of spending less. A cap degrades
+ * LOCALLY: the worst file contributes less and every other file is untouched. A confidence threshold
+ * degrades CATEGORICALLY: it removed unresolved TYPE_REF from the entire repo, so `dead_code_scan` on
+ * `wec.be` answered "nothing references this type" for 67980 symbols off 1112 edges. A partial answer is
+ * recoverable; a confident wrong one is not.
+ */
+export function applyTypeRefEdgeCap(edges: EdgeRecord[], maxTypeRefEdgesPerFile: number): EdgeRecord[] {
+  if (maxTypeRefEdgesPerFile <= 0) {
     return edges;
   }
 
-  return edges.filter((edge) => {
-    const confidence = getEffectiveEdgeConfidence(edge);
-    return confidence >= minEdgeConfidence;
+  const output: EdgeRecord[] = [];
+  let typeRefCount = 0;
+  for (const edge of edges) {
+    if (edge.type !== "TYPE_REF") {
+      output.push(edge);
+      continue;
+    }
+    if (typeRefCount >= maxTypeRefEdgesPerFile) {
+      continue;
+    }
+    typeRefCount += 1;
+    output.push(edge);
+  }
+  return output;
+}
+
+/**
+ * Edge types exempt from the confidence filter because, for them, "unresolved" does not mean "uncertain".
+ *
+ * A `type:Foo` token is a fully certain syntactic fact — that type name appears at that position — that
+ * merely has not been LINKED to a symbol yet. Its 0.45 default encodes "might not resolve", not "might not
+ * be a real reference", so filtering on it discards certain facts for being unlinked. That is a category
+ * error, and it is the whole of MCP-ISSUE-038: the `very-large` profile's 0.5 floor sat 0.05 above that
+ * default and silently deleted the relation `dead_code_scan` depends on most.
+ *
+ * It stayed invisible because the extractor emitted ~148 TYPE_REF edges in total before MCP-ISSUE-034, so
+ * losing the unresolved ones cost nothing measurable.
+ */
+const CONFIDENCE_FILTER_EXEMPT_TYPES = new Set(["TYPE_REF"]);
+
+export function applyEdgeConfidenceFilter(
+  edges: EdgeRecord[],
+  minEdgeConfidence: number
+): { edges: EdgeRecord[]; droppedByConfidence: number } {
+  if (minEdgeConfidence <= 0) {
+    return { edges, droppedByConfidence: 0 };
+  }
+
+  const kept = edges.filter((edge) => {
+    if (CONFIDENCE_FILTER_EXEMPT_TYPES.has(edge.type)) {
+      return true;
+    }
+    return getEffectiveEdgeConfidence(edge) >= minEdgeConfidence;
   });
+  return { edges: kept, droppedByConfidence: edges.length - kept.length };
+}
+
+/** What a profile's bounds actually cost this file. Zero everywhere on the `standard` profile. */
+export type EdgePolicyDrops = {
+  droppedByConfidence: number;
+  droppedByCallCap: number;
+  droppedByTypeRefCap: number;
+};
+
+export function emptyEdgePolicyDrops(): EdgePolicyDrops {
+  return { droppedByConfidence: 0, droppedByCallCap: 0, droppedByTypeRefCap: 0 };
+}
+
+/**
+ * The one place a profile's edge bounds are applied — previously three identical expressions inlined at
+ * three return sites, which is how TYPE_REF came to be filtered by a threshold nobody had aimed at it.
+ *
+ * Returns what it discarded. Every bound in this codebase now reports itself: `dead_code_scan` grew
+ * `suppressed.truncated` for the same reason, and MCP-ISSUE-038 is what happens when one does not — a
+ * cost-control knob deleted an entire relation and the only symptom was a tool answering confidently
+ * from almost no data.
+ */
+export function applyEdgePolicy(
+  edges: EdgeRecord[],
+  symbols: SymbolRecord[],
+  policy: { maxCallEdgesPerFile: number; maxTypeRefEdgesPerFile: number; minEdgeConfidence: number }
+): { edges: EdgeRecord[]; drops: EdgePolicyDrops } {
+  const resolved = dedupeEdges(resolveIntraFileEdges(edges, symbols));
+
+  const afterCallCap = applyCallEdgeCap(resolved, policy.maxCallEdgesPerFile);
+  const droppedByCallCap = resolved.length - afterCallCap.length;
+
+  const afterTypeRefCap = applyTypeRefEdgeCap(afterCallCap, policy.maxTypeRefEdgesPerFile);
+  const droppedByTypeRefCap = afterCallCap.length - afterTypeRefCap.length;
+
+  const { edges: kept, droppedByConfidence } = applyEdgeConfidenceFilter(afterTypeRefCap, policy.minEdgeConfidence);
+
+  return { edges: kept, drops: { droppedByConfidence, droppedByCallCap, droppedByTypeRefCap } };
 }
 
 export function getEffectiveEdgeConfidence(edge: EdgeRecord): number {
@@ -214,7 +303,14 @@ export function emitTypeRefEdge(
     repoId: input.repoId,
     fromId: fromSymbolId,
     toId: `type:${normalized}`,
-    type: "TYPE_REF"
+    type: "TYPE_REF",
+    // Stated, not inherited from `getEffectiveEdgeConfidence`'s prefix default. The number is the same
+    // 0.45 as before; what changes is that it is now visible at the point of emission.
+    //
+    // The real fragility in MCP-ISSUE-038 was never the value — it was that one module relied on an
+    // unstated default sitting exactly 0.05 below a threshold defined in another module. Nobody reading
+    // either file could see the relationship, and the collision only surfaced once TYPE_REF mattered.
+    confidence: 0.45
   });
 }
 

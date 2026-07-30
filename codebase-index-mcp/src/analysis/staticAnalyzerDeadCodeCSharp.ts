@@ -206,6 +206,27 @@ export function getCSharpSuppressionReason(
     return "heuristic_runtime_or_convention_usage";
   }
 
+  // An `override` is reached through its base declaration, and the graph cannot follow that hop
+  // (MCP-ISSUE-037). Two distinct populations end up here, which is why this is one suppression rather
+  // than two:
+  //
+  //   1. Overriding an abstract/virtual member declared IN this repo. The call resolves to the base's
+  //      declaration and stops — a fixable gap, and the reason this suppression is a placeholder rather
+  //      than an answer. Class inheritance is not yet a traversable relation, so there is nothing to walk.
+  //   2. Overriding an EXTERNAL virtual member — `Equals`, `GetHashCode`, `ToString`, `Dispose`,
+  //      `OnModelCreating`. The caller is the BCL or a framework, so no in-repo edge can ever exist. Not
+  //      fixable by inheritance edges at all; suppression is the correct permanent answer here.
+  //
+  // Reporting it as suppressed rather than dead is the honest state: `scanPolicy.note` already says
+  // exclusion does not prove a symbol is live, which is exactly the claim being made. The cost is a
+  // genuinely dead override inside a dead subclass, which this now hides — accepted, because the
+  // alternative is a candidate list where every override of a template-method base is a false positive
+  // and the real findings are buried.
+  const isOverride = /(^|\s)override(\s|$)/i.test(row.signature ?? "");
+  if (isOverride) {
+    return "heuristic_override_member";
+  }
+
   const isMigrationOrDesignerArtifact =
     normalizedPath.includes("/migrations/") ||
     normalizedPath.endsWith(".designer.cs");

@@ -20,11 +20,8 @@ import {
 import {
   stableId,
   dedupeSymbols,
-  dedupeEdges,
   dedupeRoutes,
-  resolveIntraFileEdges,
-  applyCallEdgeCap,
-  applyEdgeConfidenceFilter
+  applyEdgePolicy
 } from "./extractorUtils.js";
 import { extractStringLiteralsImpl } from "./literalExtractor.js";
 import { optionalNumberFromEnv, optionalRatioFromEnv } from "../config/envConfig.js";
@@ -52,6 +49,7 @@ const TREE_SITTER_MIN_BUFFER = 512 * 1024;
 const TREE_SITTER_MAX_BUFFER = 32 * 1024 * 1024;
 const parserCache = new Map<string, Parser>();
 const OVERRIDE_MAX_CALL_EDGES_PER_FILE = optionalNumberFromEnv("CODEBASE_INDEX_MAX_CALL_EDGES_PER_FILE");
+const OVERRIDE_MAX_TYPE_REF_EDGES_PER_FILE = optionalNumberFromEnv("CODEBASE_INDEX_MAX_TYPE_REF_EDGES_PER_FILE");
 const OVERRIDE_MIN_EDGE_CONFIDENCE = optionalRatioFromEnv("CODEBASE_INDEX_MIN_EDGE_CONFIDENCE");
 // ISSUE-023: string-literal lane policy — min length lọc token ngắn ("GET", "utf8"),
 // cap per file chặn locale/generated-string blowup; override qua env.
@@ -85,20 +83,22 @@ export function extractGraphData(input: ExtractInput): ExtractOutput {
 
   if (input.language === "python") {
     extractPythonSymbolsAndRoutesImpl(input, symbols, edges, routes, moduleSymbolId);
-    const resolvedEdges = resolveIntraFileEdges(edges, symbols);
+    const python = applyEdgePolicy(edges, symbols, edgePolicy);
     return {
       symbols: dedupeSymbols(symbols),
-      edges: applyEdgeConfidenceFilter(applyCallEdgeCap(dedupeEdges(resolvedEdges), edgePolicy.maxCallEdgesPerFile), edgePolicy.minEdgeConfidence),
+      edges: python.edges,
+      edgePolicyDrops: python.drops,
       routes: dedupeRoutes(routes)
     };
   }
 
   if (input.language === "proto") {
     extractProtoSymbolsImpl(input, symbols, edges, moduleSymbolId);
-    const resolvedEdges = resolveIntraFileEdges(edges, symbols);
+    const proto = applyEdgePolicy(edges, symbols, edgePolicy);
     return {
       symbols: dedupeSymbols(symbols),
-      edges: applyEdgeConfidenceFilter(applyCallEdgeCap(dedupeEdges(resolvedEdges), edgePolicy.maxCallEdgesPerFile), edgePolicy.minEdgeConfidence)
+      edges: proto.edges,
+      edgePolicyDrops: proto.drops
     };
   }
 
@@ -141,11 +141,12 @@ export function extractGraphData(input: ExtractInput): ExtractOutput {
       literals = extractStringLiteralsImpl(input, root, resolveLiteralPolicy(input.performanceProfile ?? "standard"));
     }
 
-    const resolvedEdges = resolveIntraFileEdges(edges, symbols);
+    const applied = applyEdgePolicy(edges, symbols, edgePolicy);
 
     return {
       symbols: dedupeSymbols(symbols),
-      edges: applyEdgeConfidenceFilter(applyCallEdgeCap(dedupeEdges(resolvedEdges), edgePolicy.maxCallEdgesPerFile), edgePolicy.minEdgeConfidence),
+      edges: applied.edges,
+      edgePolicyDrops: applied.drops,
       routes,
       literals
     };
@@ -263,26 +264,34 @@ export function parseCSharpOnDemand(content: string, filePath: string): Parser.T
 
 function resolveEdgePolicy(profile: "standard" | "large" | "very-large"): {
   maxCallEdgesPerFile: number;
+  maxTypeRefEdgesPerFile: number;
   minEdgeConfidence: number;
 } {
   const defaults = defaultEdgePolicy(profile);
   return {
     maxCallEdgesPerFile: OVERRIDE_MAX_CALL_EDGES_PER_FILE ?? defaults.maxCallEdgesPerFile,
+    maxTypeRefEdgesPerFile: OVERRIDE_MAX_TYPE_REF_EDGES_PER_FILE ?? defaults.maxTypeRefEdgesPerFile,
     minEdgeConfidence: OVERRIDE_MIN_EDGE_CONFIDENCE ?? defaults.minEdgeConfidence
   };
 }
 
 function defaultEdgePolicy(profile: "standard" | "large" | "very-large"): {
   maxCallEdgesPerFile: number;
+  maxTypeRefEdgesPerFile: number;
   minEdgeConfidence: number;
 } {
+  // TYPE_REF is now bounded by its own per-file cap instead of falling under `minEdgeConfidence`
+  // (MCP-ISSUE-038). The caps are generous relative to real files — the largest C# file measured here
+  // produced 732 edges in total — so they act as a guard against generated or pathological input rather
+  // than as a routine budget. That is the intended difference from a confidence floor, which applied to
+  // every file whether it was pathological or not.
   if (profile === "large") {
-    return { maxCallEdgesPerFile: 2500, minEdgeConfidence: 0.4 };
+    return { maxCallEdgesPerFile: 2500, maxTypeRefEdgesPerFile: 2500, minEdgeConfidence: 0.4 };
   }
   if (profile === "very-large") {
-    return { maxCallEdgesPerFile: 1200, minEdgeConfidence: 0.5 };
+    return { maxCallEdgesPerFile: 1200, maxTypeRefEdgesPerFile: 1200, minEdgeConfidence: 0.5 };
   }
-  return { maxCallEdgesPerFile: 0, minEdgeConfidence: 0 };
+  return { maxCallEdgesPerFile: 0, maxTypeRefEdgesPerFile: 0, minEdgeConfidence: 0 };
 }
 
 function extractMarkdownFile(input: ExtractInput): ExtractOutput {

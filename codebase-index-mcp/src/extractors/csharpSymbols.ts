@@ -405,6 +405,33 @@ export function extractCSharpSymbolsImpl(
               }
             }
           }
+          else {
+            // A non-interface base type: class inheritance (MCP-ISSUE-037).
+            //
+            // A distinct `EXTENDS` type rather than reusing `IMPLEMENTS`, because the two relations are
+            // genuinely different and several tools already read `IMPLEMENTS` as "satisfies an interface
+            // contract". C# permits exactly ONE base class and any number of interfaces, so folding them
+            // together would make "how many interfaces does this implement" answer wrong — quietly, and
+            // in a way nobody would think to check.
+            //
+            // Until this existed, `class X : SomeBase` produced only a TYPE_REF, and a TYPE_REF carries no
+            // hierarchy meaning, so nothing could walk it. That is why every `override` of an abstract
+            // member showed zero incoming calls: interface dispatch fans out to implementors, and the
+            // identical relationship through a class had no relation to fan out along.
+            //
+            // `isLikelyCSharpInterfaceName` is a NAME heuristic, so a base class conventionally prefixed
+            // with `I` lands in the interface branch instead. Accepted: the resolver treats an
+            // unresolvable `iface:` token as an external boundary either way, and the alternative is
+            // resolving the base type at extraction, which needs cross-file knowledge this pass lacks.
+            edges.push({
+              repoId: input.repoId,
+              fromId: symbolId,
+              toId: `base:${baseName}`,
+              type: "EXTENDS",
+              confidence: 0.95,
+              reason: "base_list class"
+            });
+          }
           // The base-class TYPE_REF that used to be emitted here is now covered by
           // emitTypeRefEdgesFromTypeNode above, which also reaches the generic arguments.
         }

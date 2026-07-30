@@ -410,6 +410,8 @@ export function batchUpsertSymbolVectors(
   if (eligible.length === 0) return 0;
   if (!vectorsAllowed()) return 0;
 
+  clearVectorSearchCache();
+
   let count = 0;
   const BATCH = 500;
 
@@ -551,6 +553,44 @@ export function vectorSearchSymbols(
   if (!vectorsAllowed()) return [];
 
   const text = normalizeSymbolText(queryText);
+
+  // Memoized because the resolver asks the same question thousands of times. Every unresolved token whose
+  // name repeats — `Task`, `ILogger`, `CancellationToken` — reaches the same lookup, and the answer depends
+  // only on (repo, text, k).
+  //
+  // Measured, and the reason this exists: draining wec.communication-hub's 11331 unresolved call edges took
+  // 27860ms with vectors on against 226ms with them off — 123x — while resolving the SAME 11331 edges
+  // either way. The fix for MCP-ISSUE-035 is what surfaced the cost: before it, 35% of queries returned
+  // zero rows because `k` was consumed by other repos, and finding nothing is fast. Making the lane
+  // correct made it do real work, and the work was almost entirely repeated.
+  const cacheKey = `${repoId} ${String(k)} ${text}`;
+  const cached = searchCache.get(cacheKey);
+  if (cached !== undefined) {
+    return cached;
+  }
+
+  const result = searchUncached(db, repoId, text, k);
+  searchCache.set(cacheKey, result);
+  return result;
+}
+
+/**
+ * Cleared whenever a repo's vectors change, so a stale answer cannot outlive the index it came from.
+ * Process-lifetime otherwise: the watcher re-indexes in-process, and a cache that survived a rebuild
+ * would keep resolving against symbols that no longer exist.
+ */
+const searchCache = new Map<string, { symbolId: string; distance: number }[]>();
+
+export function clearVectorSearchCache(): void {
+  searchCache.clear();
+}
+
+function searchUncached(
+  db: Database.Database,
+  repoId: string,
+  text: string,
+  k: number
+): { symbolId: string; distance: number }[] {
   const queryVec = trigramVector(text);
 
   if (_vectorEnabled) {
@@ -607,6 +647,9 @@ export function rebuildVectorIndexForRepo(db: Database.Database, repoId: string)
 }
 
 export function deleteVectorsByRepo(db: Database.Database, repoId: string): void {
+  // Any change to this repo's vectors invalidates every memoized answer for it. Cleared wholesale rather
+  // than per-repo because the key encodes the repo and a full clear cannot leave a stale entry behind.
+  clearVectorSearchCache();
   if (_vectorEnabled) {
     try {
       // One statement, because repo_id is a partition key: 20108 rows for wec.be used to mean 20108

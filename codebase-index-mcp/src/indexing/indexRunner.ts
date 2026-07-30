@@ -299,7 +299,10 @@ export function createIndexRunner(options: IndexRunnerOptions): RunIndexAndResol
     progress.phase("resolving types");
     indexLog(`[index-post] repoId=${repoId} resolving type references...`);
     const typeStart = Date.now();
-    (() => { try { store.resolveTypeRefEdges(repoId, postPolicy.maxUnresolvedRows); } catch { /* non-fatal */ } })();
+    // MCP-ISSUE-038: on very-large repos keep every TYPE_REF token but skip the cross-repo and vector
+    // fallbacks. `dead_code_scan` matches unresolved tokens by name, so the capability survives; what is
+    // dropped is 105s of linking framework type names that have no in-repo target.
+    (() => { try { store.resolveTypeRefEdges(repoId, postPolicy.maxUnresolvedRows, performanceProfile === "very-large"); } catch { /* non-fatal */ } })();
     typeResolveMs = Date.now() - typeStart;
   } else {
     indexLog(`[index-post-skip] repoId=${repoId} skipping type reference resolution by policy`);
@@ -321,6 +324,11 @@ export function createIndexRunner(options: IndexRunnerOptions): RunIndexAndResol
     indexLog(`[index-post] repoId=${repoId} resolving interface implementations...`);
     const implementsStart = Date.now();
     try { store.resolveImplementsEdges(repoId); } catch { /* non-fatal */ }
+    try { store.resolveExtendsEdges(repoId); } catch { /* non-fatal */ }
+    // MCP-ISSUE-037: must come AFTER call resolution above, because it reads final CALLS edges. The base
+    // of a template-method class calls its own abstract member in the same file, so extraction already
+    // resolved that edge and it never passes through the unresolved-token lane.
+    try { store.resolveBaseClassDispatch(repoId); } catch { /* non-fatal */ }
     // ISSUE-020: match message-bus PUBLISHES/CONSUMES tokens (depends on consumer IMPLEMENTS being resolved).
     try { store.resolvePublishesConsumesEdges(repoId); } catch { /* non-fatal */ }
     implementsResolveMs = Date.now() - implementsStart;
