@@ -48,6 +48,24 @@ export interface EnvField {
   /** Shown near the prompt and in the generated skill's env table. */
   readonly note?: string;
   /**
+   * The shape a configured value must have, for `mcp:doctor` to validate.
+   *
+   * Doctor previously checked only that required KEYS were present, which passes for a config whose
+   * keys are all correct and whose values are wrong — the failure that actually happened here, when an
+   * install narrowed `CODEBASE_INDEX_ALLOWED_ROOTS` and flipped two feature flags off. Every check
+   * reported healthy.
+   *
+   * Usually inferable from the declared default (`"true"` -> boolean, `"5000"` -> number), so most
+   * fields need nothing. Set it explicitly where the default cannot say: paths, enums, and vars with no
+   * default at all.
+   *
+   * Deliberately NOT a full schema. Doctor must never print a value, so a check is only worth having if
+   * its failure can be described by the var's NAME and the expected shape alone.
+   */
+  readonly kind?: "boolean" | "number" | "path" | "path-list" | "enum" | "string";
+  /** Allowed values for `kind: "enum"`. Compared case-insensitively. */
+  readonly enumValues?: readonly string[];
+  /**
    * Marks a variable *family* rather than one name: any set var starting with this prefix
    * satisfies the field. Only `POSTGRES_ENV_*` uses it, and only inside a group.
    */

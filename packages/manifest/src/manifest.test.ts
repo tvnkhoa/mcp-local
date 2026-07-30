@@ -8,6 +8,7 @@ import {
   TOTAL_TOOL_COUNT,
   WORKSPACE_ROOT,
   evaluateEnv,
+  evaluateEnvValues,
   getServer,
   serverDirPath,
   serverEntryPath,
@@ -252,4 +253,64 @@ test("no env default carries a secret value", () => {
       }
     }
   }
+});
+
+test("evaluateEnvValues catches a config whose keys are right and values are wrong", () => {
+  const cbi = byKey("codebase-index");
+
+  // The shape that passed every check while the install was broken: keys all present, values wrong.
+  const bad = evaluateEnvValues(cbi, {
+    CODEBASE_INDEX_ALLOWED_ROOTS: "D:/1.SourceCode/mcp-local,,relative/path",
+    CODEBASE_INDEX_DOCS_INDEXING_ENABLED: "yep",
+    CODEBASE_INDEX_PARSE_TIMEOUT_MS: "5s",
+    CODEBASE_INDEX_LARGE_REPO_PROFILE: "turbo"
+  });
+  const byName = Object.fromEntries(bad.map((f) => [f.name, f.problem]));
+
+  assert.match(byName.CODEBASE_INDEX_ALLOWED_ROOTS ?? "", /empty entry|absolute/);
+  // Inferred from `default: "false"` — no annotation needed for the boolean flags.
+  assert.match(byName.CODEBASE_INDEX_DOCS_INDEXING_ENABLED ?? "", /boolean/);
+  // Inferred from `codeDefault: "5000"`. `booleanFromEnv`/`numberFromEnv` fall back silently, so this
+  // knob was simply not applied and nothing said so.
+  assert.match(byName.CODEBASE_INDEX_PARSE_TIMEOUT_MS ?? "", /number/);
+  assert.match(byName.CODEBASE_INDEX_LARGE_REPO_PROFILE ?? "", /expected one of/);
+});
+
+test("evaluateEnvValues never echoes a value it rejects", () => {
+  const pg = byKey("postgres-mcp");
+  const secretish = "postgres://user:hunter2@db.internal:5432/app";
+  const findings = evaluateEnvValues(pg, {
+    POSTGRES_APPSETTINGS_ROOTS: secretish, // not a path; will be reported
+    POSTGRES_WRITE_ENABLED: secretish
+  });
+  assert.ok(findings.length > 0, "expected findings to prove the check ran");
+  for (const f of findings) {
+    assert.ok(!f.problem.includes("hunter2"), `leaked a value: ${f.problem}`);
+    assert.ok(!f.problem.includes(secretish), `leaked a value: ${f.problem}`);
+  }
+});
+
+test("evaluateEnvValues stays silent on a healthy config and on absent vars", () => {
+  const cbi = byKey("codebase-index");
+  assert.deepEqual(
+    evaluateEnvValues(cbi, {
+      CODEBASE_INDEX_ALLOWED_ROOTS: "D:/1.SourceCode/mcp-local,/srv/other",
+      CODEBASE_INDEX_DOCS_INDEXING_ENABLED: "true",
+      CODEBASE_INDEX_PARSE_TIMEOUT_MS: "5000",
+      CODEBASE_INDEX_LARGE_REPO_PROFILE: "AUTO" // case-insensitive on purpose
+    }),
+    []
+  );
+  // Absence is evaluateEnv's question. Answering it here too would double-report every optional var.
+  assert.deepEqual(evaluateEnvValues(cbi, {}), []);
+  assert.deepEqual(evaluateEnvValues(cbi, { CODEBASE_INDEX_DOCS_INDEXING_ENABLED: "  " }), []);
+});
+
+test("evaluateEnvValues honours deprecated aliases, so a pre-rename config is not misreported", () => {
+  const pg = byKey("postgres-mcp");
+  // S-43 renamed this; the runtime still reads the old name, so validating only the canonical name
+  // would silently skip the check for exactly the operators most likely to have a stale value.
+  const findings = evaluateEnvValues(pg, { CH_APPSETTINGS_ROOTS: "not/absolute" });
+  assert.equal(findings.length, 1);
+  assert.equal(findings[0].name, "POSTGRES_APPSETTINGS_ROOTS");
 });

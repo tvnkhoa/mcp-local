@@ -22,6 +22,7 @@ export function codebaseIndexEnv(root: string): readonly EnvField[] {
       name: "CODEBASE_INDEX_ALLOWED_ROOTS",
       required: true,
       group: "roots",
+      kind: "path-list",
       default: root,
       section: "Required",
       prompt: "Allowed roots (comma-separated absolute paths)",
@@ -32,6 +33,7 @@ export function codebaseIndexEnv(root: string): readonly EnvField[] {
     {
       name: "CODEBASE_INDEX_DB_PATH",
       required: false,
+      kind: "path",
       default: `${root}/mcp-local-index-central.db`,
       section: "Storage",
       prompt: "SQLite DB path",
@@ -89,6 +91,8 @@ export function codebaseIndexEnv(root: string): readonly EnvField[] {
       name: "CODEBASE_INDEX_LARGE_REPO_PROFILE",
       required: false,
       codeDefault: "auto",
+      kind: "enum",
+      enumValues: ["auto", "standard", "off", "large", "balanced", "very-large", "aggressive"],
       section: "Indexing limits",
       note: "Performance profile: auto | standard/off | large/balanced | very-large/aggressive."
     },

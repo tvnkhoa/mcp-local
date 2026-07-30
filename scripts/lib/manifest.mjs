@@ -31,6 +31,7 @@ export const {
   SERVERS,
   WORKSPACE_ROOT,
   evaluateEnv,
+  evaluateEnvValues,
   getServer,
   serverDirPath,
   serverEntryPath,

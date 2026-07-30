@@ -42,6 +42,7 @@ export const postgresEnv: readonly EnvField[] = [
     name: "POSTGRES_APPSETTINGS_ROOTS",
     deprecatedAliases: ["CH_APPSETTINGS_ROOTS"],
     required: false,
+    kind: "path-list",
     group: "connection-source",
     section: "Connection source (need ONE of these three)",
     prompt: "appsettings.json root(s) to discover connections (optional)",

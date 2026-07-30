@@ -20,11 +20,12 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { serverDirPath, serverEntryPath, evaluateEnv } from "./lib/manifest.mjs";
+import { serverDirPath, serverEntryPath, evaluateEnv, evaluateEnvValues } from "./lib/manifest.mjs";
 import { staleTargets } from "./lib/generate.mjs";
 import { toConfigPath } from "./lib/jsonc.mjs";
 import { detectAgents, readServerEntries } from "./lib/agents.mjs";
 import { verifyServer } from "./lib/verify.mjs";
+import { findMissingEnvPaths } from "./lib/envPaths.mjs";
 import { parseArgs, resolveServers } from "./lib/cli.mjs";
 import { C, log, section, banner, ok, warn, err, info } from "./lib/log.mjs";
 
@@ -95,6 +96,29 @@ async function checkServer(server, agents) {
         checks.push([scope, "warn", parts.join("; ")]);
       } else {
         checks.push([scope, "pass", "required env keys present"]);
+      }
+
+      // Presence was being treated as sufficient. It is not: a config whose keys are all correct and
+      // whose VALUES are wrong passed every check here, which is how an install that narrowed
+      // CODEBASE_INDEX_ALLOWED_ROOTS and switched the docs lane off was reported healthy.
+      //
+      // Findings name the variable and the expected shape, never the value — so this stays safe to run
+      // over an entry holding tokens, and the "never prints secrets" guarantee in this file's header
+      // still holds.
+      const shape = evaluateEnvValues(server, envObj);
+      const valueScope = instances.length === 1 ? "env values" : `env values ${inst.name}`;
+
+      // The filesystem half, which the manifest deliberately does not do (it is imported by the
+      // generators and has no fs access). In `lib/envPaths.mjs` so it is testable — a doctor check that
+      // silently does nothing still prints PASS, which is the exact failure mode this work exists to fix.
+      const pathProblems = findMissingEnvPaths(server, envObj);
+
+      const allProblems = [...shape.map((f) => `${f.name}: ${f.problem}`), ...pathProblems];
+      if (allProblems.length > 0) {
+        checks.push([valueScope, "warn", allProblems.join("; ")]);
+        fix.push(`review ${inst.name} env values (see .env.example)`);
+      } else {
+        checks.push([valueScope, "pass", "configured values have the expected shape"]);
       }
     }
   }
