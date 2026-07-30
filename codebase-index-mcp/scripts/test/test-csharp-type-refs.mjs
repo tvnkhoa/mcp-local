@@ -140,6 +140,107 @@ check(
   ["System", "Threading", "Tasks", "Application", "Orders"]
 );
 
+// ── Positions inside method bodies (MCP-ISSUE-034, second half) ────────────────────────────────
+//
+// Signature positions cover where a type is DECLARED. These cover where it is USED — a DTO that is only
+// ever constructed, or a helper only ever reached through a static call, has no signature mention
+// anywhere and so had no incoming TYPE_REF at all.
+
+check(
+  "object creation",
+  `public class S { public void M() { var a = new Order(); var b = new Repo<Invoice>(); } }`,
+  ["Order", "Repo", "Invoice"]
+);
+
+check(
+  "generic arguments on an invocation, without the method name",
+  `public class S { public void M(string s) { JsonSerializer.Deserialize<OrderDto>(s); } }`,
+  ["OrderDto"],
+  // `Deserialize` is a method; emitting it as a type would make every generic call a bogus type
+  // reference. `JsonSerializer` is a BCL static receiver and is filtered.
+  ["Deserialize", "JsonSerializer"]
+);
+
+check(
+  "static member access on a repo type",
+  `public class S { public void M() { OrderHelper.Compute(); var x = OrderConstants.Max; } }`,
+  ["OrderHelper", "OrderConstants"]
+);
+
+check(
+  "BCL static receivers are not emitted",
+  `public class S { public void M() { Console.WriteLine(Math.Abs(-1)); Log.Information("x"); var g = Guid.NewGuid(); } }`,
+  [],
+  ["Console", "Math", "Log", "Guid"]
+);
+
+check(
+  "typeof, cast, as, and both is-pattern forms",
+  `public class S {
+     public void M(object o) {
+       var t = typeof(Order);
+       var c = (Invoice)o;
+       var d = o as Vendor;
+       if (o is Customer bound) { }
+       if (o is Supplier) { }
+     }
+   }`,
+  ["Order", "Invoice", "Vendor", "Customer", "Supplier"]
+);
+
+check(
+  "catch clause, local declaration, generic constraint, attribute",
+  `[Authorize]
+   public class S<T> where T : IAggregate {
+     public void M() { Order local = null; try { } catch (DomainException e) { } }
+   }`,
+  ["Authorize", "IAggregate", "Order", "DomainException"]
+);
+
+check(
+  "var does not emit a type",
+  `public class S { public void M() { var x = 1; } }`,
+  [],
+  ["var", "x"]
+);
+
+// Method groups are CALLS, not TYPE_REF, so they need their own assertion.
+{
+  const { edges } = extractGraphData({
+    repoId: "r",
+    filePath: "src/Thing.cs",
+    language: "csharp",
+    source: `public class S {
+       public void Configure(RuleBuilder b) { b.Must(BeValidBase64); b.Must(x => x > 0); }
+       private bool BeValidBase64(string s) => true;
+     }`
+  });
+  const groupEdges = edges.filter((e) => e.type === "CALLS" && e.reason === "method group reference");
+  // Exactly one: `BeValidBase64` is a method declared in this file; the lambda is not an identifier.
+  if (groupEdges.length === 1) {
+    results.push("  ok    method group passed as a delegate emits a CALLS edge");
+  } else {
+    failures += 1;
+    results.push(`  FAIL  method group passed as a delegate emits a CALLS edge`);
+    results.push(`          expected 1 'method group reference' edge, got ${groupEdges.length}`);
+  }
+
+  // The guard that keeps this from firing on ordinary variable arguments.
+  const { edges: noneExpected } = extractGraphData({
+    repoId: "r",
+    filePath: "src/Thing.cs",
+    language: "csharp",
+    source: `public class S { public void M(string payload) { Send(payload); } }`
+  });
+  const spurious = noneExpected.filter((e) => e.reason === "method group reference");
+  if (spurious.length === 0) {
+    results.push("  ok    a plain variable argument is not treated as a method group");
+  } else {
+    failures += 1;
+    results.push(`  FAIL  a plain variable argument was treated as a method group (${spurious.length} edges)`);
+  }
+}
+
 console.log(results.join("\n"));
 console.log(`\n  ${failures === 0 ? "PASS" : "FAIL"} — C# TYPE_REF positions (${failures} failing)`);
 assert.equal(failures, 0, `${failures} TYPE_REF position(s) not emitted as expected`);

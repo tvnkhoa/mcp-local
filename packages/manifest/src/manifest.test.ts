@@ -228,12 +228,12 @@ test("familyExamples belong to prefix fields and match the prefix", () => {
 });
 
 test("the env contract covers every server, and grew as S-35 intended", () => {
-  // 94 vars across four servers, up from the 41 the manifest declared before S-35. The count is
+  // 95 vars across four servers, up from the 41 the manifest declared before S-35. The count is
   // asserted so that dropping a declaration is a test failure rather than a quiet regression in
-  // the generated docs.
+  // the generated docs. codebase-index gained CODEBASE_INDEX_VECTOR_ENABLED (MCP-ISSUE-035).
   const counts = Object.fromEntries(SERVERS.map((s) => [s.key, s.env.length]));
   assert.deepEqual(counts, {
-    "codebase-index": 39,
+    "codebase-index": 40,
     "postgres-mcp": 21,
     "observe-mcp": 23,
     "bitbucket-mcp": 11

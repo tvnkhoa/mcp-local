@@ -246,8 +246,9 @@ reproduce it, since the wrapper cache is only pruned once there is enough churn 
 
 ## MCP-ISSUE-034 — C# `TYPE_REF` edges are almost never produced, so every C# type looks dead
 
-- **Status:** **largely fixed** 2026-07-29 (`src/extractors/csharpSymbols.ts`,
-  `src/extractors/extractorEdges.ts`). Found immediately after MCP-ISSUE-033 made `dead_code_scan`
+- **Status:** **FIXED** — signature positions 2026-07-29 (`src/extractors/csharpSymbols.ts`,
+  `src/extractors/extractorEdges.ts`), body positions 2026-07-30 (`src/extractors/csharpTypeRefs.ts`);
+  see the update at the end of this entry. Found immediately after MCP-ISSUE-033 made `dead_code_scan`
   return results for the first time — the tool became usable and its first real output was mostly wrong.
 - **Scenario:** `dead_code_scan` on a .NET repo. Every candidate it reports is a type declaration
   (`class` / `record` / `record struct`), and the obvious ones are live: `ValidationException`,
@@ -330,12 +331,50 @@ Of the 479 still unreferenced, **248 are under `Migrations/` or `Tests/`** — E
 classes are discovered by reflection and genuinely have no code reference, which is why
 `dead_code_scan` already suppresses them under `heuristic_runtime_or_convention_usage`.
 
-### Still not covered (deliberate, and why the entry stays open)
+### Update 2026-07-30 — body positions added, entry closed
 
-Local variable declared types, `new Foo()` object creation, attribute usages, `typeof`/cast
-expressions, and generic arguments on method invocations. Each is a smaller increment than the
-positions above and some are noisy (a local variable type is usually also a parameter or field type
-somewhere). The residual ~231 non-migration/test unreferenced types are where they would help.
+The positions deferred above were each expected to be "a smaller increment". Probing them first showed
+that was wrong: **eight** distinct positions emitted nothing at all, not four, and together they were
+worth more than everything already covered.
+
+Added in `src/extractors/csharpTypeRefs.ts` (its own module, to keep `csharpSymbols.ts` under the file
+cap): object creation, generic arguments on invocations, static member access, `typeof`, casts,
+`as`, both `is`-pattern forms, `catch` declarations, local variable declarations, generic constraints,
+and attributes. Grammar node types and field names were read off a live parse rather than assumed —
+`as` has `left`/`right` and no `type` field, and `o is Customer` without a binding is a
+`constant_pattern`, not the `declaration_pattern` that `o is Customer c` produces.
+
+Two judgment calls, both stated rather than hidden:
+
+- **Static member access is filtered against a BCL receiver list.** `OrderHelper.Compute()` is a real
+  reference to a repo type — and `dead_code_scan` could not see it, because the existing lane emits
+  `callee:OrderHelper.Compute` while the scan tests `to_id = 'callee:' || name`, which never matches the
+  dotted form. But `Console.WriteLine` and `Log.Information` are not references to anything indexable,
+  and unresolvable TYPE_REF rows have a measured cost — they are the ones that fall through to the
+  cross-repo and vector fallbacks. So ~60 BCL statics are excluded by name.
+- **Method groups emit CALLS, not TYPE_REF** (`b.Must(BeValidBase64)`). The method really is invoked, by
+  the validator, but nothing names it in an `invocation_expression`. Restricted to a bare identifier
+  matching a method declared in the SAME FILE: a bare identifier argument is usually a variable, and a
+  spurious CALLS edge is worse than a missing one because it makes a dead symbol look live.
+
+| | signature positions only | + body positions |
+|---|---|---|
+| TYPE_REF edges | 4949 | **14377** |
+| resolved to a real symbol | — | 7725 (603 distinct targets) |
+| unresolved `type:` tokens | — | 6652 (framework types, expected) |
+| raw dead-code candidates | 1568 | **1387** |
+| of which class/record/struct | 345 | **180 (−48%)** |
+| `type_resolve_ms` | 10723 | 12021 (+12%) |
+
+The 48% drop in falsely-dead type declarations is the point of the whole issue. The resolve cost stayed
+nearly flat only because the per-name memoization added earlier absorbed it; without that, 2.9× the rows
+would have gone through the expensive fallback path.
+
+Determinism was re-verified after the change, since these are new extraction passes: three full runs,
+all nine edge types identical.
+
+Covered by `test:csharp-type-refs`, extended from 11 to 19 cases — including two negative ones (BCL
+receivers must NOT emit, and a plain variable argument must not be read as a method group).
 
 **Do not measure any of this by re-indexing and comparing edge totals.** MCP-ISSUE-032 means two
 identical runs differ by ~1.4%, which is larger than what a single new position contributes — adding

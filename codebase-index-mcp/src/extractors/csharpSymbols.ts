@@ -22,6 +22,7 @@ import {
   toEndpointContractId
 } from "./extractorUtils.js";
 import { extractPropertyAccessEdges } from "./csharpPropertyEdges.js";
+import { extractCSharpBodyTypeRefs } from "./csharpTypeRefs.js";
 
 /**
  * Map a C# type-declaration node to a SymbolRecord kind. (ISSUE-015)
@@ -450,4 +451,9 @@ export function extractCSharpSymbolsImpl(
   // Extract property access edges (PROPERTY_REF and PROPERTY_WRITE)
   // This includes object initializers, member access expressions, and assignments
   extractPropertyAccessEdges(input, root, edges, moduleSymbolId);
+
+  // TYPE_REF for type positions inside method bodies — `new X()`, generic call arguments, static
+  // receivers, casts, patterns, catch clauses. The signature positions above cover where a type is
+  // declared; this covers where it is used. (MCP-ISSUE-034, second half)
+  extractCSharpBodyTypeRefs(input, root, edges, moduleSymbolId);
 }
