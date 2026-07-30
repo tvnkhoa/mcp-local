@@ -225,6 +225,54 @@ check(
     results.push(`          expected 1 'method group reference' edge, got ${groupEdges.length}`);
   }
 
+  // The qualified form — how it is actually written when the helper lives in another class, and the case
+  // the first pass missed: three real EmailReplyAttachmentRules helpers stayed "dead" because every call
+  // site is in a different file.
+  const qualified = extractGraphData({
+    repoId: "r",
+    filePath: "src/Validator.cs",
+    language: "csharp",
+    source: `public class V {
+       public V() {
+         RuleFor(x => x.Data).Must(EmailReplyAttachmentRules.BeValidBase64);
+         RuleFor(x => x.Data).MaximumLength(EmailReplyAttachmentRules.MaxChars);
+       }
+     }`
+  }).edges.filter((e) => e.reason === "method group reference");
+
+  // Both lines have the same AST shape — a PascalCase static member passed as an argument — so both emit.
+  // What keeps that safe is the token FORM: qualified only, never a bare `callee:MaxChars`, which
+  // dead_code_scan would count as a reference even unresolved and use to mark a same-named method live.
+  const tokens = qualified.map((e) => e.toId).sort();
+  if (tokens.length === 2 && tokens.every((t) => t.startsWith("callee:EmailReplyAttachmentRules."))) {
+    results.push("  ok    a qualified static method group emits a qualified callee token");
+  } else {
+    failures += 1;
+    results.push(`  FAIL  a qualified static method group emits a qualified callee token`);
+    results.push(`          got: ${tokens.join(", ") || "(none)"}`);
+  }
+  const bare = qualified.filter((e) => !e.toId.includes("."));
+  if (bare.length === 0) {
+    results.push("  ok    no bare callee token is emitted for a qualified member (a const cannot fake a method)");
+  } else {
+    failures += 1;
+    results.push(`  FAIL  emitted a bare callee token: ${bare.map((e) => e.toId).join(", ")}`);
+  }
+
+  // A lowercase receiver is a local or field, so `x.SomeProperty` is a value, not a method group.
+  const lower = extractGraphData({
+    repoId: "r",
+    filePath: "src/Validator.cs",
+    language: "csharp",
+    source: `public class V { public void M(Thing x) { Send(x.Payload); } }`
+  }).edges.filter((e) => e.reason === "method group reference");
+  if (lower.length === 0) {
+    results.push("  ok    a lowercase receiver is not treated as a static method group");
+  } else {
+    failures += 1;
+    results.push(`  FAIL  a lowercase receiver was treated as a method group (${lower.length} edges)`);
+  }
+
   // The guard that keeps this from firing on ordinary variable arguments.
   const { edges: noneExpected } = extractGraphData({
     repoId: "r",

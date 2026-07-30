@@ -170,29 +170,73 @@ function emitMethodGroupCalls(
   edges: EdgeRecord[],
   moduleSymbolId: string
 ): void {
+  // Only the bare-identifier branch below consults this. There is deliberately NO early return when it
+  // is empty: a FluentValidation validator is typically a class whose only member is a constructor, so
+  // `localMethods` is empty in exactly the files that carry the qualified method groups this also handles.
+  // An early return here silently disabled the qualified case on every real call site, and only a test
+  // whose fixture had no method_declaration caught it.
   const localMethods = new Set<string>();
   for (const decl of root.descendantsOfType(["method_declaration", "local_function_statement"])) {
     const name = decl.childForFieldName("name")?.text?.trim();
     if (name) localMethods.add(name);
   }
-  if (localMethods.size === 0) return;
 
   for (const call of root.descendantsOfType(["invocation_expression"])) {
     const args = call.childForFieldName("arguments");
     for (const arg of args?.namedChildren ?? []) {
       // `argument` wraps the expression; a bare method group is a lone identifier inside it.
       const expr = arg.type === "argument" ? arg.namedChildren[0] : arg;
-      if (expr?.type !== "identifier") continue;
-      const name = expr.text.trim();
-      if (!localMethods.has(name)) continue;
-      edges.push({
-        repoId: input.repoId,
-        fromId: findEnclosingCSharpSymbolId(call, input) ?? moduleSymbolId,
-        toId: `callee:${name}`,
-        type: "CALLS",
-        confidence: 0.7,
-        reason: "method group reference"
-      });
+      if (!expr) continue;
+      const fromId = findEnclosingCSharpSymbolId(call, input) ?? moduleSymbolId;
+
+      if (expr.type === "identifier") {
+        const name = expr.text.trim();
+        if (!localMethods.has(name)) continue;
+        edges.push({
+          repoId: input.repoId,
+          fromId,
+          toId: `callee:${name}`,
+          type: "CALLS",
+          confidence: 0.7,
+          reason: "method group reference"
+        });
+        continue;
+      }
+
+      // The QUALIFIED form, `Must(EmailReplyAttachmentRules.BeValidBase64)`, which is how this is
+      // actually written when the helper lives in another class — and it is the case that motivated the
+      // whole method-group rule, yet the same-file identifier check above cannot see it. Verified against
+      // the real repo: three `EmailReplyAttachmentRules` helpers were still reported dead after the first
+      // pass shipped, because every call site is in a different file and uses this form.
+      //
+      // Emitted as the QUALIFIED token ONLY, never also as `callee:Member`, and that is what makes it
+      // safe. The same shape covers a static CONSTANT passed as an argument —
+      // `MaximumLength(EmailReplyAttachmentRules.MaxInlineAttachmentBase64CharsPerFile)` sits four lines
+      // away in that same file — and extraction cannot tell a static method from a static const without
+      // cross-file knowledge. A bare `callee:Member` token would be counted as a reference by
+      // `dead_code_scan` even unresolved (it tests `to_id = 'callee:' || name`), so a const would make a
+      // same-named method look live. The qualified token is not counted unless the resolver rewrites it
+      // to a real method symbolId — so a const simply fails to resolve and contributes nothing.
+      //
+      // For dead_code_scan the direction of the error matters: a false "live" hides real dead code and
+      // costs the tool its credibility, while a false "dead" is a candidate a human dismisses.
+      if (expr.type === "member_access_expression") {
+        const receiver = expr.childForFieldName("expression");
+        const member = expr.childForFieldName("name");
+        if (receiver?.type !== "identifier" || member?.type !== "identifier") continue;
+        const receiverName = receiver.text.trim();
+        // PascalCase receiver = a type, so this is a static member group. A lowercase receiver is a local
+        // or field, and `x.SomeProperty` is a value being passed, not a method being referenced.
+        if (!/^[A-Z]/.test(receiverName) || CSHARP_BCL_STATIC_RECEIVERS.has(receiverName)) continue;
+        edges.push({
+          repoId: input.repoId,
+          fromId,
+          toId: `callee:${receiverName}.${member.text.trim()}`,
+          type: "CALLS",
+          confidence: 0.7,
+          reason: "method group reference"
+        });
+      }
     }
   }
 }
