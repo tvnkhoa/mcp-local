@@ -102,8 +102,27 @@ async function main() {
    * not. Pinning it also makes the gate fail loudly if the path ever disappears, instead of
    * silently retargeting.
    */
-  const contextFilePath = process.env.BENCH_CONTEXT_FILE ?? "src/graphStore.ts";
+  const contextFilePath = process.env.BENCH_CONTEXT_FILE ?? "src/store/graphStore.ts";
   const folderPath = contextFilePath.replace(/\\/g, "/").split("/").slice(0, -1).join("/") || "src";
+
+  // The comment above claims pinning the path "makes the gate fail loudly if the path ever disappears".
+  // It did not. S-41 moved this file from `src/` into `src/store/`, the three path-dependent scenarios
+  // (file-context, file-summary, folder-summary) began querying a file that does not exist, and the tool
+  // answered with a near-empty payload instead of an error. `file-context` verbose fell from ~1274 bytes to
+  // 264, its compact/verbose ratio moved 0.1232 -> 0.5947, and CI failed on every commit from S-41 onward —
+  // for a reason that had nothing to do with token efficiency. `file-summary` and `folder-summary` were
+  // measuring empty responses too; their ratios simply stayed inside the 0.05 tolerance, so nothing said so.
+  //
+  // So the check the comment promised now exists. A benchmark whose fixture has vanished must refuse to
+  // produce a number, because a plausible number is worse than no number: it looks like a token regression
+  // and sends the next reader after the wrong thing.
+  if (!fs.existsSync(path.join(repoPath, contextFilePath))) {
+    throw new Error(
+      `benchmark fixture missing: ${contextFilePath} does not exist under ${repoPath}. ` +
+        `Point BENCH_CONTEXT_FILE at a real file, or update the default if the file moved. ` +
+        `Benchmarking a non-existent path yields an empty payload and a meaningless ratio.`
+    );
+  }
 
   const scenarios = [
     {
