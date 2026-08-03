@@ -1,6 +1,7 @@
 # Architecture — as built
 
-What this workspace *is*, as of 2026-07-29 (end of migration Phase J).
+What this workspace *is*, as of 2026-08-03 (post-migration, after the standard-structure refactor
+and the SDK builder family).
 
 > This is the **as-built** description. The **design** — the reasoning behind the tier model, the
 > rules it implies, and what was deliberately not done — is `architecture/target-architecture.md`,
@@ -31,7 +32,12 @@ observe-mcp/          8 tools   OpenObserve logs and traces           (read-only
 bitbucket-mcp/        8 tools   repos and pull requests               (PR creation gated)
 ```
 
-76 tools and 96 env variables in total, both counted from `@mcp/manifest` rather than by hand.
+**76 tools and 98 env variables** in total (env: 41 / 23 / 23 / 11), both counted from
+`@mcp/manifest` rather than by hand:
+
+```bash
+node -e "import('@mcp/manifest').then(m => m.SERVERS.forEach(s => console.log(s.key, s.tools.length, s.env.length)))"
+```
 
 **Servers are not workspace members.** `workspaces` is `["packages/*"]` only. This is a decision,
 not an oversight — see `adr/0001-workspace-native-deps.md`: npm hoisting would relocate
@@ -66,9 +72,11 @@ npm run verify:all     # packages + servers + contracts + generated docs. Creden
 npm run verify:live    # the four live smoke tests. NEEDS REAL CREDENTIALS.
 ```
 
-`verify:all` is what CI runs (Windows, Node 22) and is deliberately credential-free, so it means
-the same thing on a fresh clone as in CI. `verify:live` reaches real Postgres / OpenObserve /
-Bitbucket and is not in CI; run it before a release.
+CI (`.github/workflows/ci.yml`, Windows + Node 22) runs the same steps, credential-free — with two
+differences in each direction: it adds `install:servers` and `benchmark:plan:check`, and it does
+**not** run `test:scripts` or `generate:check`. So generated-file drift is caught locally or not at
+all. `verify:live` reaches real Postgres / OpenObserve / Bitbucket and is not in CI; run it before a
+release.
 
 ## 4. Safety posture
 
@@ -78,7 +86,7 @@ with an HMAC approval token bound to the previewed plan.
 
 | Server | Off by default | Notes |
 |---|---|---|
-| postgres-mcp | `PG_WRITE_ENABLED`, `PG_MIGRATION_ENABLED` | read path permits only `SELECT` / `WITH … SELECT`; **`prod` is force read-only regardless of config** |
+| postgres-mcp | `POSTGRES_WRITE_ENABLED`, `POSTGRES_MIGRATION_ENABLED` | read path permits only `SELECT` / `WITH … SELECT`; **`prod` is force read-only regardless of config**. S-43 renamed all vars to `POSTGRES_*`; every pre-rename name (`CH_*`, `PG_*`, `MCP_DB_*`) is still honoured with a one-time deprecation warning |
 | bitbucket-mcp | `BITBUCKET_WRITE_ENABLED` | `create_pull_request` supports `dryRun` |
 | codebase-index-mcp | refactor apply requires an HMAC token | `CODEBASE_INDEX_LLM_ENABLED=true` **fails startup by design** |
 
@@ -86,15 +94,45 @@ The no-LLM policy in `codebase-index-mcp` is a hard constraint, verified statica
 `guard:no-llm-runtime`: no LLM client import may exist in `src/`. Every refactor decision is
 `decisionSource=rule_engine`, `llmInvolved=false`.
 
-## 5. Where to read next
+## 5. Inside a server
+
+All four lay out the same nine slots, and a folder exists **only** where the server has that
+concern — an empty `prompts/` would advertise a capability that is not there:
+
+```
+src/  index.ts
+      tools/          declarations + handlers/
+      resources/      resources/list + resources/read providers
+      prompts/        (none of the four declares one)
+      middleware/     guardrails, response serialization, error mapping
+      services/       domain logic
+      repositories/   persistence
+      config/         the only reader of process.env
+      types/          shared types + schemas/
+```
+
+A call goes `resolve → profile → validate → guards → handle → serialize`, and nothing throws out of
+dispatch. Two hooks let a server keep an established contract while adopting the platform:
+`formatError` (its own failure envelope) and `renderResult` (its own payload-to-text hop, which for
+`codebase-index-mcp` is where telemetry is emitted).
+
+Per-server map, the rule that decides which slot a file belongs in, and the N/A slots:
+`refactor/standard-structure-report.md` and [`folder-convention.md`](folder-convention.md).
+
+## 6. Where to read next
 
 | Question | File |
 |---|---|
+| How do I get running? | [`onboarding.md`](onboarding.md) |
+| What do I run before committing? | [`development.md`](development.md) |
+| What are the rules, and which are enforced? | [`conventions.md`](conventions.md) |
+| Where does this file go? / may this import that? | [`folder-convention.md`](folder-convention.md), [`dependency-rules.md`](dependency-rules.md) |
+| How do I add a tool or a server? | [`tool-development.md`](tool-development.md), [`server-development.md`](server-development.md) |
+| What is each package for? | [`packages.md`](packages.md) |
 | Why is it shaped this way? | `architecture/target-architecture.md` |
 | What did the old repo look like? | `architecture/audit-report.md` (audited at `01c532e`) |
-| What are the rules, and which are enforced? | `conventions.md` |
-| How do I get running? | `onboarding.md` |
-| Why are servers outside the workspace? | `adr/0001-workspace-native-deps.md` |
-| Why do three SQL token lists differ? | `adr/0002-sql-guardrail-token-lists.md` |
-| What happened, step by step? | `migration/status.md`, `migration/migration-plan.md` |
+| Why are servers outside the workspace? | [`adr/0001-workspace-native-deps.md`](adr/0001-workspace-native-deps.md) |
+| Why do three SQL token lists differ? | [`adr/0002-sql-guardrail-token-lists.md`](adr/0002-sql-guardrail-token-lists.md) |
+| What happened, step by step? | [`migration/README.md`](migration/README.md) |
 | What does CI cover, and not? | `migration/ci.md` |
+| What is left? | [`backlog.md`](backlog.md) |

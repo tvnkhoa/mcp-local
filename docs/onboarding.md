@@ -108,7 +108,11 @@ node scripts/run-servers.mjs <build|typecheck|test|smoke> [--server <key>]
 ```
 
 Inside `codebase-index-mcp`, `npm run test` runs everything — unit tests first, then the integration
-harnesses, since a compile-level break should not wait behind 29 of them.
+harnesses, since a compile-level break should not wait behind 31 of them.
+
+`verify:all` is the pre-commit gate. CI runs the same credential-free steps **plus**
+`install:servers` and `benchmark:plan:check`, and **minus** `test:scripts` and `generate:check` — so
+generated-file drift is caught here or not at all ([`development.md`](development.md) §4).
 
 ---
 
@@ -155,8 +159,13 @@ built server. See the `mcp-skill-authoring` skill.
 
 | | |
 |---|---|
-| What is this, as built? | `architecture.md` |
-| What are the rules, and which are enforced? | `conventions.md` |
+| The full documentation index | [`README.md`](README.md) |
+| What is this, as built? | [`architecture.md`](architecture.md) |
+| The day-to-day loop and the test layers | [`development.md`](development.md) |
+| What are the rules, and which are enforced? | [`conventions.md`](conventions.md) |
+| Where does this file go? / may this import that? | [`folder-convention.md`](folder-convention.md), [`dependency-rules.md`](dependency-rules.md) |
+| How do I add a tool or a server? | [`tool-development.md`](tool-development.md), [`server-development.md`](server-development.md) |
+| How do I commit and get reviewed? | [`../CONTRIBUTING.md`](../CONTRIBUTING.md) |
 | Why is it shaped this way? | `architecture/target-architecture.md` |
 | How do I use the codebase-index tools well? | `../.claude/rules/mcp-hard-mode.md` |
 | Largest server's internals | `../codebase-index-mcp/CLAUDE.md` |

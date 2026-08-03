@@ -36,7 +36,7 @@ Run: `npm run guard:convention`. Errors except where marked.
 
 | Rule | What fails |
 |---|---|
-| `size/hard-cap` | a file over **600** lines |
+| `size/hard-cap` | a file over **600** lines *(error in `packages/*`; downgraded to a warning inside a server `src/`, see §5)* |
 | `size/soft-cap` | a file over **400** lines *(warning — advisory by design, see §5)* |
 | `style/no-default-export` | a default export. Named exports keep a symbol greppable |
 | `logging/console-log` | `console.log`. On a stdio transport, stdout **is** the protocol channel — writing to it corrupts the stream |
@@ -62,8 +62,10 @@ configuration** — `postgres-mcp`'s `efRunner` must do it so `dotnet ef` inheri
 report that. A determined author can still evade it by aliasing; the guard is a tripwire for drift,
 not a sandbox.
 
-Env variables are **declared once**, in `packages/manifest/src/envSpecs/<server>.ts` — 94 across the
-four servers. A field carries either a `default` (which the installer *writes* into
+Env variables are **declared once**, in `packages/manifest/src/envSpecs/<server>.ts` — **98** across
+the four servers (41 / 23 / 23 / 11), counted by
+`node -e "import('@mcp/manifest').then(m => m.SERVERS.forEach(s => console.log(s.key, s.env.length)))"`.
+A field carries either a `default` (which the installer *writes* into
 `~/.claude.json`, pinning it) or a `codeDefault` (documentation of what the server falls back to when
 unset, never written anywhere). Never both. No secret has a committed default.
 
@@ -82,15 +84,37 @@ every root aggregate pick it up automatically — nothing else needs editing.
 
 ## 5. File size, and why the soft cap stays advisory
 
-The hard cap is a boundary; the soft cap is a prompt to think. Some files are legitimately long
-because they are **one** thing:
+The hard cap is a boundary; the soft cap is a prompt to think.
 
-- `codebase-index-mcp/src/services/analysis/staticAnalyzerDeadCodeCSharp.ts` (437) is a single ordered `if`-chain where first-match
-  wins and the winning branch decides which reason a suppression is reported under. Splitting it
-  risks a reorder, which would change tool output while leaving every count the same.
-- `codebase-index-mcp/src/services/indexing/indexPipeline.ts` (558) is a batch loop whose parts share a mutable accumulator and an
-  abort signal checked at four points. Splitting it further would mean inventing a context object to
-  pass the same state around — more indirection, no failure made easier to diagnose.
+**Severity depends on where the file is.** Packages are checked as *migrated*, so `size/hard-cap`
+and `logging/console-log` are errors there. Server `src/` trees are passed to the guard as
+`extraDirs`, which downgrades both to warnings — `style/no-default-export` is **not** downgraded and
+is an error everywhere.
+
+Current state (`npm run guard:all`):
+
+```
+0 errors · 20 warnings · 1 accepted exemption · across 508 files
+```
+
+18 of the 20 are `size/soft-cap`. **Two are `size/hard-cap`**, both in `codebase-index-mcp` and
+therefore warnings rather than errors: `src/repositories/vectorStore.ts` (716) and
+`src/services/graph/edgeResolverCalls.ts` (622). Neither is exempted; they are outstanding. The one
+accepted exemption is `src/repositories/graphStore.ts` (841), reported as `info` with its reason.
+
+> Older passages in `docs/` say *"no hard-cap finding since S-41"* and *"every remaining warning is
+> `size/soft-cap`"*. That was true when written. Re-derive from the command, not from prose.
+
+Some files are legitimately long because they are **one** thing:
+
+- `codebase-index-mcp/src/services/analysis/staticAnalyzerDeadCodeCSharp.ts` is a single ordered
+  `if`-chain where first-match wins and the winning branch decides which reason a suppression is
+  reported under. Splitting it risks a reorder, which would change tool output while leaving every
+  count the same.
+- `codebase-index-mcp/src/services/indexing/indexPipeline.ts` (572) is a batch loop whose parts share
+  a mutable accumulator and an abort signal checked at four points. Splitting it further would mean
+  inventing a context object to pass the same state around — more indirection, no failure made
+  easier to diagnose.
 
 To waive a **hard** cap, state why in the file:
 
@@ -114,11 +138,16 @@ warning.
 
 ## 7. Naming and layout
 
-Server `src/` follows `{config,guardrails,response,<domain>}/` — concerns that exist sit at the
-conventional path; concerns that do not exist are absent. `src/index.ts` is the only entry point.
-Tests colocate as `*.test.ts` beside their subject.
+Server `src/` follows the nine-slot standard structure —
+`{tools,resources,prompts,middleware,services,repositories,config,types}/` plus `index.ts`.
+Concerns that exist sit at the conventional path; concerns that do not exist are absent.
+`src/index.ts` is the only entry point. Tests colocate as `*.test.ts` beside their subject.
 
-`codebase-index-mcp/CLAUDE.md` has the per-folder ownership table for the largest server.
+Full rules, the per-server slot map, and the naming table: [`folder-convention.md`](folder-convention.md).
+The per-folder ownership table for the largest server is in `codebase-index-mcp/CLAUDE.md`.
+
+*(This section previously described `{config,guardrails,response,<domain>}/`, which the
+standard-structure refactor superseded — `refactor/standard-structure-report.md`.)*
 
 ## 8. Proof that the guards guard (S-41)
 

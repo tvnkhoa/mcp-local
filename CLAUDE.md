@@ -36,7 +36,7 @@ npm run test              # everything: unit + integration, one result
 npm run test:unit         # node:test over src/**/*.test.ts — no build, no DB
 npm run test:integration  # the .mjs harnesses only (needs a build)
 
-# Individual harnesses — all 26 keep their own name
+# Individual harnesses — all 31 keep their own name
 npm run test:endpoint-bridge
 npm run test:csharp-inheritance-bridge
 npm run test:refactor-engine
@@ -46,7 +46,7 @@ npm run test:refactor-engine
 *Verification* below. Within this package, `npm run test` runs the whole suite
 (it discovers every `test:*` script from `package.json`, so the list cannot fall
 behind) and puts `test:unit` first, since a compile-level break should not wait
-behind 26 harnesses.
+behind 31 harnesses.
 
 `typecheck` covers `src/**/*.test.ts` too, via each server's own
 `tsconfig.test.json`. Before S-39 no server's test files were type-checked
@@ -73,10 +73,14 @@ npm run verify:all     # the gate: packages + servers + tool contracts + generat
 npm run verify:live    # the four live smoke tests. NEEDS REAL CREDENTIALS.
 ```
 
-`verify:all` is what CI runs (`.github/workflows/ci.yml`, Windows + Node 22) and is deliberately
-credential-free, so it means the same thing on a fresh clone as it does in CI. `contracts:check`
-inside it boots all four servers over a real stdio handshake with placeholder env — that is the
-credential-free boot check, and it is what catches a module that compiles but cannot load.
+`verify:all` is the pre-commit gate and is deliberately credential-free, so it means the same thing
+on a fresh clone as in CI. `contracts:check` inside it boots all four servers over a real stdio
+handshake with placeholder env — that is the credential-free boot check, and it is what catches a
+module that compiles but cannot load.
+
+CI (`.github/workflows/ci.yml`, Windows + Node 22) runs the same steps **plus** `install:servers`
+and `benchmark:plan:check`, and **minus** `test:scripts` and `generate:check`. Generated-file drift
+is therefore caught locally or not at all — run `verify:all` before pushing.
 
 The live smoke tests reach real Postgres / OpenObserve / Bitbucket and are **not** in CI. Run
 `verify:live` before a release. See `docs/migration/ci.md`.
@@ -95,7 +99,7 @@ npm run generate:check   # fails on drift; runs inside verify:all
 ```
 
 `mcp:doctor` reports a stale generated file per server as a warning. Env vars are declared once,
-in `packages/manifest/src/envSpecs/<server>.ts` — 96 across the four servers (41/21/23/11).
+in `packages/manifest/src/envSpecs/<server>.ts` — **98** across the four servers (41/23/23/11).
 
 ## Architecture (codebase-index-mcp)
 
@@ -210,7 +214,21 @@ When analyzing this codebase, use the `codebase-index` MCP tools **before** fall
 
 ## References
 
-**Start here:** `docs/migration/status.md` — all 44 steps verified against the working
+**The doc index is `docs/README.md`.** The guides most likely to answer a question about this
+workspace:
+
+| | |
+|---|---|
+| `docs/architecture.md` | what this is, as built |
+| `docs/development.md` | the loop, the test layers, the gate, and what CI does *not* cover |
+| `docs/server-development.md` · `docs/tool-development.md` | adding or changing a server / a tool |
+| `docs/folder-convention.md` · `docs/dependency-rules.md` | where a file goes; what may import what |
+| `docs/packages.md` | what each of the six packages is for |
+| `docs/conventions.md` | every rule, sorted by what enforces it |
+| `CONTRIBUTING.md` | commits, review, and what a change has to carry with it |
+| `docs/adr/README.md` · `docs/migration/README.md` | the decisions, and the migration record |
+
+**Migration history:** `docs/migration/status.md` — all 44 steps verified against the working
 tree, what blocks what, and the step-number reconciliation for three commits whose labels
 drifted from the plan. Its last section, *Post-migration*, covers the two pieces of work that
 landed after the migration closed: the standard `src/` structure and the SDK builder family.

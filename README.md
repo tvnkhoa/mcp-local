@@ -14,9 +14,29 @@ All are TypeScript 5.7+ ESM built on `@modelcontextprotocol/sdk`.
 | `observe-mcp` | `observe-mcp/` | Read-only log/trace search over OpenObserve for the CommunicationHub backend. |
 | `bitbucket-mcp` | `bitbucket-mcp/` | Read repositories / pull requests and **create PRs** on Bitbucket Cloud (write gated). |
 
+**76 tools and 98 environment variables** across the four (`43/17/8/8` and `41/23/23/11`), both
+counted from the manifest rather than by hand.
+
 The source of truth for every server (dir, entry point, tools, env vars, skill template) is
 `packages/manifest` (`@mcp/manifest`). The installer, doctor, updater, and skill generator all
 read from it.
+
+## The platform
+
+Six packages under `packages/*`, in strict tiers — imports flow downward only, enforced by
+`npm run guard:deps`:
+
+| Tier | Package | What it is |
+|---|---|---|
+| 0 | `@mcp/core` | zero-dependency primitives: `Result`, errors, env reader, logger, redaction, profiles |
+| 1 | `@mcp/sdk` | the tool builder and MCP runtime — **the only importer of `@modelcontextprotocol/sdk`** |
+| 2 | `@mcp/shared` | capabilities: approval tokens, SQL guardrails, HTTP client, path allowlist |
+| 3 | `@mcp/testing` | invoke a tool without a server; leak assertions; contract snapshots |
+| 4 | `@mcp/cli` | the architecture guards (`mcp-platform guard …`) |
+| 5 | `@mcp/manifest` | workspace tooling data — which servers exist, and what each needs |
+
+Servers are **not** workspace members and consume these through `file:` dependencies, so a fresh
+clone must run `npm run build:packages` first ([ADR 0001](docs/adr/0001-workspace-native-deps.md)).
 
 ## Workspace commands
 
@@ -102,6 +122,18 @@ node scripts/smoke-test.mjs  # integration test (requires build first)
 and `npm run benchmark:plan:check` (compact-mode token-savings gate). See its `CLAUDE.md` /
 `README.md` for the full pre-commit sequence and tool catalog.
 
+## Verification
+
+```bash
+npm run verify:all     # the gate: packages + servers + tool contracts + generated docs. Credential-free.
+npm run verify:live    # the four live smoke tests. NEEDS REAL CREDENTIALS. Run before a release.
+```
+
+CI (`.github/workflows/ci.yml`, Windows + Node 22) runs the same credential-free steps, plus
+`install:servers` and `benchmark:plan:check`, and **without** `test:scripts` or `generate:check` —
+so generated-file drift is caught locally or not at all. Details:
+[docs/development.md](docs/development.md) §4.
+
 ## Generated files
 
 A server's `.env.example`, its README's `<!-- BEGIN/END GENERATED -->` blocks, and its tool list
@@ -119,24 +151,46 @@ The scaffold is **not registered** — that is a separate step, and it has an or
 a snapshot needs a built server. The generated README spells out the four commands. See the
 `mcp-skill-authoring` skill.
 
-## References
+## Documentation
 
-**Start here** — three docs cover the workspace end to end:
+**[docs/README.md](docs/README.md) is the full index.** Start with these three:
 
-- `docs/onboarding.md` — fresh clone to four working servers in three commands, plus the two
-  gotchas that cost the most time
-- `docs/architecture.md` — what this is as built: four servers, six packages, and the three
-  mechanisms that hold the shape
-- `docs/conventions.md` — the rules, sorted by whether something actually checks them
+| | |
+|---|---|
+| [docs/onboarding.md](docs/onboarding.md) | Fresh clone to four working servers in three commands, plus the two gotchas that cost the most time |
+| [docs/architecture.md](docs/architecture.md) | What this is as built: four servers, six packages, and the three mechanisms that hold the shape |
+| [docs/conventions.md](docs/conventions.md) | The rules, sorted by whether something actually checks them |
 
-Then:
+**Working in the repo**
+
+| | |
+|---|---|
+| [docs/development.md](docs/development.md) | The loop, the test layers, the gate, and the failures that cost an afternoon |
+| [CONTRIBUTING.md](CONTRIBUTING.md) | Commits, review, and what a change has to carry with it |
+| [docs/server-development.md](docs/server-development.md) | Scaffolding, registering and operating a server |
+| [docs/tool-development.md](docs/tool-development.md) | Declaring, gating, testing and snapshotting a tool |
+
+**Reference**
+
+| | |
+|---|---|
+| [docs/packages.md](docs/packages.md) | What each of the six packages is for |
+| [docs/folder-convention.md](docs/folder-convention.md) | Where a file goes, and what decides it |
+| [docs/dependency-rules.md](docs/dependency-rules.md) | What may import what |
+| [docs/adr/README.md](docs/adr/README.md) | Decision records — why servers sit outside the npm workspace, why three SQL token lists differ, why there is one root `.gitignore` |
+| [docs/architecture/target-architecture.md](docs/architecture/target-architecture.md) | The design and its reasoning (§9 reconciles it against what was built) |
+
+**History and state**
+
+| | |
+|---|---|
+| [docs/migration/README.md](docs/migration/README.md) | The 44-step migration: 43 done, 1 skipped by decision, and the findings worth carrying forward |
+| [docs/backlog.md](docs/backlog.md) | What is left, and what is explicitly *not* left |
+| [CHANGELOG.md](CHANGELOG.md) | Dated entries, with the introducing commit named |
+
+**Also**
 
 - `CLAUDE.md` — workspace guidance, critical constraints, MCP-first operating rules
 - `AGENTS.md` — env var reference, common pitfalls, integration config examples
-- `packages/manifest/README.md` — single source of truth for all servers and their env vars
-- `<server>/README.md` — per-server tool catalog and usage
-- `docs/architecture/target-architecture.md` — the design and its reasoning (§9 reconciles design
-  against what was built)
-- `docs/adr/` — decision records: why servers sit outside the npm workspace, why three SQL token
-  lists differ, why there is one root `.gitignore`
-- `docs/migration/status.md` — all 41 completed steps, verified against the working tree
+- `packages/<name>/README.md` · `<server>/README.md` — per-package and per-server references
+- `contracts/README.md` — what the golden `tools/list` snapshots are and how to update them

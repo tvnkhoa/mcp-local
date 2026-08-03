@@ -273,7 +273,7 @@ error against. A table consulted to find remaining work is worse than no table w
 | `tsconfig.base.json`, solution file, project references, `tsconfig.test.json` | **Built** |
 | `packages/{core,sdk,shared,testing,cli}` with the tier model | **Built** |
 | `packages/manifest` (L5 tooling data) | **↑ Built** (`61b1782`, S-34) — `scripts/lib/manifest.mjs` is now a re-export shim |
-| Env vars and tool names declared exactly once, generated outward (S-35/S-36) | **↑ Built** (`77d9909`+) — **96** env vars in `envSpecs/` (41/21/23/11; `serverKeys().map(k => getServer(k).env.length)`), 76 tools from `contracts/`; `generate:check` gates in `verify:all` |
+| Env vars and tool names declared exactly once, generated outward (S-35/S-36) | **↑ Built** (`77d9909`+) — **98** env vars in `envSpecs/` (41/23/23/11; `serverKeys().map(k => getServer(k).env.length)`), 76 tools from `contracts/`; `generate:check` gates in `verify:all`. *(Read 96 until 2026-08-03: B-08 corrected the count on the same day B-07 added `PGSSLMODE` and `NODE_TLS_REJECT_UNAUTHORIZED`, taking postgres-mcp 21 → 23.)* |
 | Dependency guard (tiers, zero-dep, protocol ownership, deep imports, env access, cross-server, tooling-import) | **Built and enforcing** — 0 errors |
 | Convention guard (required files/scripts, size caps, no default export, no `console.log`) | **Built and enforcing** |
 | Consistent `src/{config,guardrails,response}/` in all four servers | **Superseded** — `3f5b702` built it; the standard-structure refactor replaced it with the nine-slot layout (S2) |
@@ -284,7 +284,7 @@ error against. A table consulted to find remaining work is worse than no table w
 | Uniform script vocabulary (S4) | **↑ Built** — all four answer `build` / `typecheck` / `test` / `smoke` (S-03) |
 | CI | **↑ Built** — `.github/workflows/ci.yml`, Windows + Node 22, credential-free (S-05) |
 | Config loaded once per server (S3) | **↑ Built** — `npm run guard:deps` reports **0 errors**. The one call site that looked like an exception, `postgres-mcp/src/services/migration/efRunner.ts`, spreads `process.env` into a `dotnet ef` child process so it inherits `PATH`; `conventions.md` §3 classifies that as *inheritance, not configuration*. Was listed **Partial** until 2026-08-03, describing work that should not be done |
-| File size caps met by servers | **↑ Built** — `npm run guard:all`: **0 errors, 20 `size/soft-cap` warnings, 1 accepted exemption across 508 files**. No hard-cap finding since S-41's eight splits; the soft cap stays advisory by decision (`conventions.md` §5). Was listed *"Not yet — eleven files exceed the hard cap. Blocks S-41"* until 2026-08-03 |
+| File size caps met by servers | **Partial** — `npm run guard:all`: **0 errors, 20 warnings, 1 accepted exemption across 508 files**. 18 warnings are `size/soft-cap`, which stays advisory by decision (`conventions.md` §5). **Two are `size/hard-cap`**, both in `codebase-index-mcp` and therefore downgraded to warnings: `src/repositories/vectorStore.ts` (716) and `src/services/graph/edgeResolverCalls.ts` (622). Neither is exempted. *(This row read "Built — no hard-cap finding since S-41" until re-derived; the two files crossed the cap after that pass.)* |
 | `zod` / protocol SDK deduplicated across servers | **Not planned before S-09.** Measured consequence: `mapError` cannot be shared, because `instanceof` compares class identity across copies |
 | `servers/` directory move | **Deliberately skipped** (S-42) |
 
