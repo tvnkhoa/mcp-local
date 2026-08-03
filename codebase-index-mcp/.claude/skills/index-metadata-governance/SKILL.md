@@ -29,3 +29,7 @@ description: "Ensure index runs store complete provenance metadata for auditabil
 ## Output Format
 - Required-field coverage report
 - Missing-field remediation plan
+
+## Authoritative reference
+
+The graph model and its schema guardrails: `codebase-index-mcp/CLAUDE.md` §"Graph model". Both unions are declared in `src/types/index.ts`, which is authoritative.

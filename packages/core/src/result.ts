@@ -1,7 +1,7 @@
 /**
  * Result<T, E> — the platform's cross-boundary return type.
  *
- * Convention (docs/conventions.md rule 6): functions that cross a module or
+ * Convention (docs/reference/conventions.md rule 6): functions that cross a module or
  * package boundary return a Result instead of throwing. Throwing is reserved
  * for programmer error (invalid tool definitions, impossible states).
  */

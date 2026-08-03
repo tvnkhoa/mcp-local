@@ -20,7 +20,7 @@
  *
  * One-time evidence beyond this fixture: the rewrite was diffed against the old predicate over
  * all 229 files of a workspace index (via getImpactFilesImpl's full two-query + aggregation
- * path) with 0 mismatches and a 448x speedup. See docs/migration/status.md, S-30.
+ * path) with 0 mismatches and a 448x speedup. See docs/archive/migration/status.md, S-30.
  *
  * Usage: node scripts/test/test-impact-join-parity.mjs   (requires: npm run build)
  */

@@ -121,3 +121,7 @@ Use the smallest MCP set needed for the task and prefer focused calls with expli
 - Skill remains execution-focused while policy remains in hard-mode instruction.
 - Workflow is MCP-first, minimal, and reproducible.
 - Evidence is sufficient without unnecessary context expansion.
+
+## Authoritative reference
+
+`.claude/rules/mcp-hard-mode.md` is the **policy source** and now carries the one-page runbook index. This skill is the entry point; the rule file is what governs.

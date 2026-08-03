@@ -19,3 +19,7 @@ description: "Implement hash-based incremental indexing for codebase intelligenc
 - No orphan edges after incremental run.
 - Deterministic results between full vs incremental for same revision.
 - Safe rollback strategy on partial failure.
+
+## Authoritative reference
+
+As built: `codebase-index-mcp/CLAUDE.md` §"Data flow" and `src/services/indexing/`. Known defects and their fixes: `codebase-index-mcp/docs/mcp-codebase-index-issue-registry.md`.

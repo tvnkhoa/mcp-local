@@ -7,6 +7,32 @@ Workaround · Enhancement proposal. Filed here so the MCP server team can triage
 > Note: consumer repos keep their own *fallback log* (when they drop to Grep/Read) separately; this
 > file tracks defects/limitations of the MCP server itself.
 
+
+## Index
+
+**13 entries, all resolved.** Statuses and dates are copied from each entry's own
+`**Status:**` line — the entry is authoritative. Regenerate by scanning `^## ` headings and the
+first `- **Status:**` line beneath each.
+
+| ID | Title | Status |
+|---|---|---|
+| `MCP-ISSUE-040` | a live server running a replaced build fails every parse, and the run still reports `ok` | ✅ FIXED 2026-08-03 |
+| `MCP-ISSUE-041` | `get_call_chain` stopped seeing through DI when a fix was orphaned by a file move | ✅ FIXED 2026-08-03 |
+| `MCP-ISSUE-032` | an index run is not reproducible: edge counts vary between identical runs | ✅ CLOSED 2026-07-30 |
+| `MCP-ISSUE-038` | the `very-large` profile silently discarded every unresolved TYPE_REF, so MCP-ISSUE-034's fix was… | ✅ FIXED 2026-07-30 |
+| `MCP-ISSUE-039` | the vector fallback cost 30s per run and resolved nothing | ✅ FIXED 2026-07-30 |
+| `MCP-ISSUE-037` | abstract/virtual base-class members have no dispatch fan-out, so every override looks dead | ✅ FIXED 2026-07-30 |
+| `MCP-ISSUE-036` | a qualified static call resolved to the WRONG same-named method | ✅ FIXED 2026-07-30 |
+| `MCP-ISSUE-035` | vector KNN applied `k` across all repos, then filtered, so resolution lost its fallback | ✅ FIXED 2026-07-30 |
+| `MCP-ISSUE-034` | C# `TYPE_REF` edges are almost never produced, so every C# type looks dead | ✅ FIXED |
+| `MCP-ISSUE-033` | `dead_code_scan` returned an empty result for every repo, always | ✅ FIXED 2026-07-29 |
+| `MCP-ISSUE-031` | `dead_code_scan` suppresses every method in an `i`-prefixed C# file | ✅ FIXED 2026-07-29 |
+| `ISSUE-CR-001` | Package bridge resolves 0/257 (cross-repo provider linkage) | ✅ FIXED 2026-06-29 |
+| `ISSUE-CR-002` | `find_package_consumers` double-prefixes `nuget:` | ✅ FIXED 2026-06-29 |
+
+> IDs are not contiguous: this registry was pruned to the currently-tracked set, so `001`–`021`
+> and `023`–`030` no longer appear. A document citing one of those is citing a removed entry.
+
 ---
 
 ## MCP-ISSUE-040 — a live server running a replaced build fails every parse, and the run still reports `ok`
@@ -45,7 +71,7 @@ Workaround · Enhancement proposal. Filed here so the MCP server team can triage
   2. `mcp:doctor` gains a **`running`** check (`scripts/lib/runningServers.mjs`): any live process
      whose start time predates the newest `dist/**/*.js`. Warning-only and never fatal — after any
      rebuild this is expected and harmless *unless a module moved*, which is the case it exists for.
-  3. `docs/folder-convention.md` §8 records the rule; B-12's dist-orphan check covers the sibling
+  3. `docs/reference/folder-convention.md` §8 records the rule; B-12's dist-orphan check covers the sibling
      case (a file on disk with no source) and this covers the other (a process older than the disk).
 - **Enhancement not taken:** having the worker pool verify its worker path exists at pool
   construction and fail loudly. Worth doing, but it fixes one symptom of a stale process rather than

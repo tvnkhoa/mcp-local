@@ -26,3 +26,7 @@ description: "Audit SQL construction to ensure parameterized execution, anti-con
 ## Output Format
 - `pass` or `fail`
 - Violations with exact fix recommendations
+
+## Authoritative reference
+
+The per-dialect forbidden-token decision and its two-part rule: `docs/decisions/0002-sql-guardrail-token-lists.md`. Mechanism: `@mcp/shared/sql` (`packages/shared/README.md`). Policy: `.claude/rules/db-guardrails.md`.

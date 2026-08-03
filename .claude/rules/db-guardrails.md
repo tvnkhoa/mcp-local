@@ -7,8 +7,11 @@ description: "Use when adding or changing database-related MCP tools, SQL valida
 
 - Default DB tools to **read-only** unless the task explicitly requires mutation.
 - Always block multi-statement SQL where not required.
-- Block dangerous SQL tokens for read-only tools (DDL/DML/admin tokens).
-- Enforce bounded `limit` and `timeoutMs` from config with safe defaults.
+- Block dangerous SQL tokens for read-only tools (DDL/DML/admin tokens). **The forbidden-token list is
+  per-dialect by decision** — read `docs/decisions/0002-sql-guardrail-token-lists.md` and its two-part rule
+  before adding a token. `@mcp/shared/sql` ships the mechanism and no list.
+- Enforce bounded `limit` and `timeoutMs` from config with safe defaults (`POSTGRES_DEFAULT_LIMIT` /
+  `POSTGRES_MAX_LIMIT` / `POSTGRES_DEFAULT_TIMEOUT_MS` / `POSTGRES_MAX_TIMEOUT_MS`).
 - Never log secrets, full connection strings, or raw sensitive payloads.
 
 ## Query Safety

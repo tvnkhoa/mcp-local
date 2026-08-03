@@ -36,7 +36,7 @@ GitHub at all. Every copy is another place to leak from, another rotation obliga
 audience. That trade is available because this workspace has one operator on one machine — which is
 also the condition that would have to change to reopen it.
 
-**The residual risk is accepted, not solved,** and now says so in `docs/migration/ci.md` and the
+**The residual risk is accepted, not solved,** and now says so in `docs/development/ci.md` and the
 backlog's *Explicitly NOT* table: real query execution, real auth, real pagination and the EF Core
 tooling stay untested until someone runs `npm run verify:live` locally. `contracts:check` still boots
 all four servers over a real stdio handshake on every push, so *loading* a client is covered;
@@ -115,7 +115,7 @@ byte-identical at 76 tools, and every server's entry point is still `dist/index.
 `~/.claude.json` entry needed rewriting.
 
 Full per-server map, the rule that decides which slot a file belongs in, the slots that are N/A and
-why, and the compatibility evidence: `docs/refactor/standard-structure-report.md`.
+why, and the compatibility evidence: `docs/archive/refactor/standard-structure-report.md`.
 
 ### 🧱 One builder vocabulary across all three MCP surfaces
 
@@ -149,7 +149,7 @@ One deliberate behaviour change for scaffolded servers: a bad argument now answe
 `validation_error` with readable issues in `detail`, where before it answered `internal_error`
 carrying a **raw zod issue array**. An unknown tool still answers `not_found`, byte-identical —
 verified by probing a server scaffolded from the old template and one from the new over real stdio
-sessions. `docs/migration/status.md` §"Post-migration" has the before/after table.
+sessions. `docs/archive/migration/status.md` §"Post-migration" has the before/after table.
 
 ### 🧹 Fixed
 
@@ -159,7 +159,7 @@ sessions. `docs/migration/status.md` §"Post-migration" has the before/after tab
   `target-architecture.md` §9 still said eleven files exceeded the file-size hard cap and that
   config-loaded-once was "Partial"; both had been true and neither was. Env-var count corrected in
   three places (89 / 94 / 94 → **96**). Each row now names the command its number comes from.
-- **`docs/backlog.md`** — B-01, B-01b, B-02, B-02b closed on 2026-07-30 and never marked. C# `TYPE_REF`
+- **`docs/development/backlog.md`** — B-01, B-01b, B-02, B-02b closed on 2026-07-30 and never marked. C# `TYPE_REF`
   extraction (`266d91b`, `9574e3e`, `f1c0160`, `9b55de4`) and index-run reproducibility
   (`b764b39`, `ae1af79`, MCP-ISSUE-032 CLOSED) are done — which matters beyond bookkeeping, because
   an edge count is usable as evidence again.
@@ -169,15 +169,15 @@ sessions. `docs/migration/status.md` §"Post-migration" has the before/after tab
 ### 🧱 Architecture migration — Phases A–J (S-01…S-41)
 
 Restructured a four-server repository into a six-package platform plus four independent servers.
-41 reversible steps; full step-by-step record in `docs/migration/status.md`.
+41 reversible steps; full step-by-step record in `docs/archive/migration/status.md`.
 
 - **`packages/` platform** — `@mcp/core` (tier 0, zero-dependency), `@mcp/sdk` (tier 1, the only
   importer of `@modelcontextprotocol/sdk`), `@mcp/shared` (tier 2), `@mcp/testing` (tier 3),
   `@mcp/cli` (tier 4, the guards), `@mcp/manifest` (tier 5, workspace tooling data).
-  - Servers stay **outside** the npm workspace on purpose — `docs/adr/0001-workspace-native-deps.md`.
+  - Servers stay **outside** the npm workspace on purpose — `docs/decisions/0001-workspace-native-deps.md`.
 - **All four servers migrated onto `@mcp/sdk`** — `bitbucket-mcp` first as the pilot (S-06…S-23),
   then `postgres-mcp` (S-24), `observe-mcp` (S-25), and `codebase-index-mcp` across four batches
-  (S-26…S-33). Notes per server in `docs/migration/s06-s23-notes.md`, `s24-notes.md`, `s25-notes.md`,
+  (S-26…S-33). Notes per server in `docs/archive/migration/s06-s23-notes.md`, `s24-notes.md`, `s25-notes.md`,
   `s26-s29-plan.md`.
 - **Static enforcement** — `guard deps` (tier matrix, single protocol-SDK importer, zero-dependency
   tier, one env reader per server, no cross-server and no tooling imports) and `guard convention`
@@ -190,7 +190,7 @@ Restructured a four-server repository into a six-package platform plus four inde
   its `README.md`, and its tool list. 94 env variables declared once in
   `packages/manifest/src/envSpecs/`. `generate:check` fails on drift.
 - **Credential-free CI** — `verify:all` (Windows, Node 22) is the gate; `verify:live` needs real
-  backends and is not in CI. See `docs/migration/ci.md`.
+  backends and is not in CI. See `docs/development/ci.md`.
 - **Server scaffold** (S-38) — `npm run new:server -- --key <name>` produces a server that builds,
   typechecks, tests and smokes with no hand-editing.
 - **`codebase-index-mcp` internals** — broke the `graphStore`/`regexSearch` cycle (S-29), extracted

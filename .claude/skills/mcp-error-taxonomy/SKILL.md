@@ -29,3 +29,7 @@ description: "Standardize MCP errors into user-actionable vs developer/internal 
 
 ## Output Format
 - Error matrix: case -> code -> message style -> action
+
+## Authoritative reference
+
+Codes and factories live in `@mcp/core` `errors` (`ERROR_CODES`, `toPlatformError`) — `packages/core/README.md`. The shared branch order is `createErrorMapper` in `@mcp/sdk`, which takes its error classes as **parameters** because `instanceof` cannot cross the package boundary (`docs/decisions/0001-workspace-native-deps.md`).

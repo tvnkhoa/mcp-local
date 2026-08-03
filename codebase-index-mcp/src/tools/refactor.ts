@@ -15,7 +15,7 @@
  *     (unknown previewId, PREVIEW_EXPIRED, AMBIGUITY_THRESHOLD_EXCEEDED, unknown repo) surface
  *     as a raw JSON-RPC error while its two siblings returned the normal
  *     `{ code, message, requestId }` envelope. All three now await, so all three report the
- *     envelope. See the S-32 notes in `docs/migration/status.md`.
+ *     envelope. See the S-32 notes in `docs/archive/migration/status.md`.
  */
 
 import { ok } from "@mcp/core";

@@ -33,3 +33,7 @@ description: "Review MCP server changes for security guardrails: least privilege
 - Pass/fail summary.
 - List of findings with severity: `high|medium|low`.
 - Concrete remediation suggestions.
+
+## Authoritative reference
+
+Enforced rules and what checks them: `docs/reference/conventions.md`. Import and env-access rules: `docs/reference/dependency-rules.md`. Guard proof: `scripts/prove-guards.sh`.

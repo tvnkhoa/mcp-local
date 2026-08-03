@@ -29,3 +29,7 @@ description: "Define operational telemetry and incident runbooks for MCP servers
 - Metrics set
 - Alert set
 - Runbook steps with owners
+
+## Authoritative reference
+
+Logging is stderr-only via `@mcp/core` `createLogger`, with redaction in the logger rather than at call sites — `docs/development/workflow.md` §8. On stdio, stdout **is** the protocol channel.

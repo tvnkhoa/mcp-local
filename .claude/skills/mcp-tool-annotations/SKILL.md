@@ -27,3 +27,7 @@ description: "Apply consistent read-only, idempotent, and destructive hints to M
 ## Output Format
 - Annotation map per tool
 - Mismatch list and required fixes
+
+## Authoritative reference
+
+Annotation helpers: `@mcp/sdk` `annotations.{read,readRemote,preview,apply,create}` (`packages/sdk/README.md`). Which tools are non-read-only and which are destructive is recorded in `contracts/README.md`. Declaring a tool: `docs/servers/tool-development.md`.

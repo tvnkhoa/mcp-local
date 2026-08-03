@@ -20,3 +20,7 @@ description: "Run pre-release checks for internal codebase indexing MCP: correct
 ## Release Decision
 - `ready` if no high-severity blockers.
 - `blocked` with explicit blocker list and owners.
+
+## Authoritative reference
+
+The workspace gate and the release-readiness list: `docs/development/workflow.md` §4. Run `npm run verify:all` (credential-free) and `npm run verify:live` (needs credentials) — plus `npm run benchmark:plan:check` for this server.

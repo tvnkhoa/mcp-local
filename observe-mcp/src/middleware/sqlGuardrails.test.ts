@@ -92,7 +92,7 @@ test("DataFusion dialect: `$` is an ordinary character, not a string delimiter",
 // --- S-18: the five omissions are a decision, not drift ----------------------
 
 test("S-18: the five tokens postgres-mcp blocks stay OUT of this list", () => {
-  // ADR docs/adr/0002-sql-guardrail-token-lists.md. DataFusion executes none of
+  // ADR docs/decisions/0002-sql-guardrail-token-lists.md. DataFusion executes none of
   // these, so blocking them guards nothing — while every token added also rejects
   // any column with that name, and OpenObserve streams are schemaless. Do not
   // "reconcile" the three lists by unioning them; that is the change this pins.

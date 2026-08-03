@@ -36,7 +36,7 @@ npm run test              # everything: unit + integration, one result
 npm run test:unit         # node:test over src/**/*.test.ts — no build, no DB
 npm run test:integration  # the .mjs harnesses only (needs a build)
 
-# Individual harnesses — all 34 keep their own name
+# Individual harnesses — each keeps its own name (32 of them)
 npm run test:endpoint-bridge
 npm run test:csharp-inheritance-bridge
 npm run test:refactor-engine
@@ -46,7 +46,7 @@ npm run test:refactor-engine
 *Verification* below. Within this package, `npm run test` runs the whole suite
 (it discovers every `test:*` script from `package.json`, so the list cannot fall
 behind) and puts `test:unit` first, since a compile-level break should not wait
-behind 34 harnesses.
+behind the 32 integration harnesses.
 
 `typecheck` covers `src/**/*.test.ts` too, via each server's own
 `tsconfig.test.json`. Before S-39 no server's test files were type-checked
@@ -83,7 +83,7 @@ and `benchmark:plan:check`, and **minus** `test:scripts` and `generate:check`. G
 is therefore caught locally or not at all — run `verify:all` before pushing.
 
 The live smoke tests reach real Postgres / OpenObserve / Bitbucket and are **not** in CI. Run
-`verify:live` before a release. See `docs/migration/ci.md`.
+`verify:live` before a release. See `docs/development/ci.md`.
 
 Narrower targets: `verify:packages`, `verify:servers`, `test:servers`, `contracts:check`,
 `generate:check`, and `node scripts/run-servers.mjs <script> [--server <key>]`.
@@ -105,7 +105,7 @@ in `packages/manifest/src/envSpecs/<server>.ts` — **98** across the four serve
 
 **Standard structure (all four servers):** `src/{tools,resources,prompts,middleware,services,repositories,config,types}/`
 plus `src/index.ts`. A slot exists only where the server has that concern — see
-`docs/refactor/standard-structure-report.md` for the per-server map and which slots are N/A.
+`docs/archive/refactor/standard-structure-report.md` for the per-server map and which slots are N/A.
 
 **Indexing data flow:**
 ```
@@ -204,12 +204,16 @@ When analyzing this codebase, use the `codebase-index` MCP tools **before** fall
 
 - `.claude/rules/` — always-on policy docs:
   `mcp-hard-mode` (MCP-first enforcement), `mcp-base`, `typescript-mcp`, `db-guardrails`, `codebase-index`.
-- `.claude/skills/` — MCP **authoring** skills (scaffold, security-review, release-checklist,
-  tool-annotations, error-taxonomy, contract-conformance, observability, host-integration-security,
-  db-parameterization-audit, db-query-budgeting) plus `mcp-skill-authoring`. Operational
-  "how to use server X" skills are generated per server (gitignored).
-- `codebase-index-mcp/.claude/skills/` — indexing-internals skills (tree-sitter, graph-schema,
+- `.claude/skills/` — MCP **authoring** skills (security-review, tool-annotations, error-taxonomy,
+  contract-conformance, observability, host-integration-security, db-parameterization-audit,
+  db-query-budgeting) plus `mcp-skill-authoring`. Each ends with an *Authoritative reference* section
+  naming the maintained doc that governs it. Operational "how to use server X" skills are generated
+  per server (gitignored). `mcp-scaffold` and `mcp-release-checklist` were archived 2026-08-03 —
+  superseded by `docs/servers/server-development.md` §1–2 and `docs/development/workflow.md` §4.
+- `codebase-index-mcp/.claude/skills/` — indexing-internals skills (tree-sitter,
   incremental-indexing, conformance, metadata-governance, unresolved-symbol-policy, etc.).
+  `graph-schema-design` was archived 2026-08-03; its guardrails are in
+  `codebase-index-mcp/CLAUDE.md` §"Graph model".
 - `.claude/commands/mcp-effectiveness-eval.md` — slash command benchmarking baseline vs MCP.
 
 ## References
@@ -219,45 +223,42 @@ workspace:
 
 | | |
 |---|---|
-| `docs/architecture.md` | what this is, as built |
-| `docs/development.md` | the loop, the test layers, the gate, and what CI does *not* cover |
-| `docs/server-development.md` · `docs/tool-development.md` | adding or changing a server / a tool |
-| `docs/folder-convention.md` · `docs/dependency-rules.md` | where a file goes; what may import what |
-| `docs/packages.md` | what each of the six packages is for |
-| `docs/conventions.md` | every rule, sorted by what enforces it |
+| `docs/architecture/as-built.md` | what this is, as built |
+| `docs/development/workflow.md` | the loop, the test layers, the gate, and what CI does *not* cover |
+| `docs/servers/server-development.md` · `docs/servers/tool-development.md` | adding or changing a server / a tool |
+| `docs/reference/folder-convention.md` · `docs/reference/dependency-rules.md` | where a file goes; what may import what |
+| `docs/reference/packages.md` | what each of the six packages is for |
+| `docs/reference/conventions.md` | every rule, sorted by what enforces it |
 | `CONTRIBUTING.md` | commits, review, and what a change has to carry with it |
-| `docs/adr/README.md` · `docs/migration/README.md` | the decisions, and the migration record |
+| `docs/decisions/README.md` · `docs/archive/migration/README.md` | the decisions, and the migration record |
 
-**Migration history:** `docs/migration/status.md` — all 44 steps verified against the working
-tree, what blocks what, and the step-number reconciliation for three commits whose labels
-drifted from the plan. Its last section, *Post-migration*, covers the two pieces of work that
-landed after the migration closed: the standard `src/` structure and the SDK builder family.
-
-**What is left:** `docs/backlog.md` — the post-migration backlog (B-01…B-12), prioritized by whether
+**What is left:** `docs/development/backlog.md` — the post-migration backlog (B-01…B-12), prioritized by whether
 a tool reports something untrue, a gate does not bite, or it is only a cost. Also lists the accepted
 debt that is **not** in it, so decided questions stay decided.
 
-**Decision records:** `docs/adr/0001-workspace-native-deps.md` (why servers stay outside
+**Decision records:** `docs/decisions/0001-workspace-native-deps.md` (why servers stay outside
 the npm workspace, and why `instanceof` fails across packages) ·
-`docs/adr/0002-sql-guardrail-token-lists.md` (why the three SQL token lists stay
+`docs/decisions/0002-sql-guardrail-token-lists.md` (why the three SQL token lists stay
 different, and the two-part rule for adding one) ·
-`docs/adr/0003-single-root-gitignore.md` (one root `.gitignore`; no per-server copies).
+`docs/decisions/0003-single-root-gitignore.md` (one root `.gitignore`; no per-server copies).
 
-**Architecture & migration** (read in this order for the full picture):
+**Current-state reference:**
 
-- `docs/architecture/audit-report.md` — Phase 0 audit of the pre-restructuring repository (`01c532e`): dependency map, duplication, technical-debt register, risks
 - `docs/architecture/target-architecture.md` — the tier model, dependency rules, and the naming / coding / server / package conventions. §9 reconciles design against what is actually built
-- `docs/migration/migration-plan.md` — **frozen/historical**: the 44 reversible steps (S-01…S-44) as *planned*, with their rollback classes. Never read a status out of it — `status.md` is the live one
-- `docs/migration/foundation-notes.md` — what the `packages/` foundation contains and why
-- `docs/migration/normalization-report.md` — the 48-file in-place folder normalization
-- `docs/refactor/duplication-extraction-report.md` — the shared-component extraction, its measured behaviour deltas, and the one cluster deliberately left alone
-- `docs/refactor/standard-structure-report.md` — the nine-slot `src/` layout in all four servers: the rule that decides which slot a file belongs in, the per-server before/after map, which slots are N/A and why, and the compatibility evidence
-- `docs/migration/s06-s23-notes.md` — contract snapshots + the `bitbucket-mcp` SDK pilot; read this before migrating another server
-- `docs/migration/s24-notes.md` — the `postgres-mcp` SDK migration: the call-replay method, and why the SDK gained `resources` and `rawResult`
-- `docs/migration/s25-notes.md` — the `observe-mcp` SDK migration; the first needing no new SDK capability, and a profile-dependent serialization finding no schema could reveal
-- `docs/migration/s26-s29-plan.md` — the `codebase-index-mcp` entry-point survey and the three SDK gaps that blocked migrating it. **Done** — all four servers run on `@mcp/sdk`; note this file numbers its steps commit-side, so its S-26/S-27/S-28/S-29 are `status.md`'s S-28/S-31/S-32/S-33 (reconciled in `status.md` §Phase H)
-- `docs/migration/ci.md` — what CI covers, what it deliberately does not (no live backends, no secrets), and the script vocabulary that makes the root aggregates work
+- `docs/development/ci.md` — what CI covers, what it deliberately does not (no live backends, no secrets), and the script vocabulary that makes the root aggregates work
 - `contracts/README.md` — what the golden `tools/list` snapshots are and how to update them
+
+**History — `docs/archive/`.** The 44-step migration (43 done, S-42 skipped, closed 2026-07-29), the
+two post-migration refactor reports, the pre-restructuring audit at `01c532e`, and four superseded
+documents. **Nothing there is maintained; do not read a current state out of it.**
+`docs/archive/README.md` is the cover note — it says what closed, and which maintained document
+replaced each piece. Start there rather than with a specific file.
+
+Two things from it worth knowing without opening it:
+
+- `docs/archive/migration/status.md` is where the **step-number reconciliation** lives: three commits
+  carry S-numbers that differ from the plan's.
+- `docs/archive/migration/migration-plan.md` is **frozen** — never read a status out of it.
 
 **Per-server:**
 

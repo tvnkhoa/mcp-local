@@ -24,3 +24,7 @@ description: "Extract symbols, imports, and call edges from source code using tr
 - Stable symbol IDs across incremental runs.
 - Deterministic extraction for unchanged files.
 - Bounded parse time and memory usage.
+
+## Authoritative reference
+
+As built: `codebase-index-mcp/CLAUDE.md` §"Data flow" and the naming rules for `src/services/extractors/`. Edge and symbol unions: `src/types/index.ts`.

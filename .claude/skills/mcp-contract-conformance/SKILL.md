@@ -30,3 +30,7 @@ description: "Validate MCP contract stability for tools/list, tools/call, schema
 - `pass` or `fail`
 - Findings with severity: `high|medium|low`
 - Remediation per finding
+
+## Authoritative reference
+
+`contracts/README.md` is authoritative — `npm run contracts:check` boots all four servers over a real stdio handshake and diffs `tools/list`. Never re-snapshot to make a red check green.

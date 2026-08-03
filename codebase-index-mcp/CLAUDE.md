@@ -121,17 +121,38 @@ language-specific — `extractorCSharpScope.ts` and `extractorJsCalls.ts` — an
 > imports must be retargeted in the same change — `tsc` will not warn, and the harness fails at
 > `ERR_MODULE_NOT_FOUND`.
 
-> `dist/` is not pruned by `tsc`. After renaming or moving a source file, `rm -rf dist` before
-> trusting a run — a stale module at the old path will still load and can mask a broken import.
-> `npm run mcp:doctor` (from the workspace root) reports orphaned `dist/*.js` files by name, so
-> this is detectable rather than only documented.
+> The harnesses above are why stale `dist/` bites hardest in this server: they import compiled
+> modules **by path**, so an orphaned `dist/*.js` keeps resolving.
+> [`../docs/development/workflow.md`](../docs/development/workflow.md) §7 has the remedy.
 
 ### Graph model
 
-- **Symbols**: `function | class | method | variable | module | interface | property | constructor | type | struct | impl`
-- **Edge types**: `IMPORTS | CALLS | DEPENDS_ON | IMPLEMENTS | TYPE_REF | PROPERTY_REF | PROPERTY_WRITE`
+Both unions are declared in `src/types/index.ts` — that file is authoritative, and this table is a
+copy. Re-derive rather than trust it:
+
+```bash
+grep -nE '^  (kind|type):' src/types/index.ts
+```
+
+- **Symbol kinds** (14, `src/types/index.ts:170`): `function | class | method | variable | module | interface | property | constructor | type | struct | record | record struct | impl | unknown`
+- **Edge types** (10, `src/types/index.ts:188`): `IMPORTS | CALLS | DEPENDS_ON | IMPLEMENTS | EXTENDS | TYPE_REF | PROPERTY_REF | PROPERTY_WRITE | PUBLISHES | CONSUMES`
 - **Stable IDs**: SHA-256 of `repoId:filePath:symbolName` truncated to 24 hex chars
 - **Multi-repo**: All tables are scoped by `repoId`; a single SQLite DB can hold multiple repos
+- **Confidence**: edges carry a 0.0–1.0 score; unresolved edges are tracked separately for diagnostics
+
+**Schema guardrails** — apply these when adding an edge type or changing persistence:
+
+- Keep the repo boundary explicit in **every** primary index and query path. `repoId` scoping is the
+  isolation mechanism, not a convention.
+- Track provenance on every index run: parser version, rule version, run id. Without it a graph
+  cannot be reproduced, and MCP-ISSUE-032 was exactly that failure.
+- Do not store raw sensitive source spans unless justified; prefer hashes and metadata.
+- Document the migration path and backward compatibility before changing an existing table.
+
+*(Guardrails absorbed from the `graph-schema-design` authoring skill, archived 2026-08-03. That skill
+prescribed nodes `Repository/Revision/File/Module/Symbol/IndexRun` and edges
+`CONTAINS/IMPORTS/EXPORTS/CALLS/DEPENDS_ON/CHANGED_IN` — three of those edges never existed and seven
+real ones were missing. The unions above are the measured truth.)*
 
 ### Refactor engine
 
@@ -160,4 +181,29 @@ This workspace has `.claude/rules/mcp-hard-mode.md` as the policy source for how
 - **Path normalization**: run `list_repositories` and reuse the exact registered `repoPath` — do not rewrite drive-letter casing or slash style
 - **Watch policy**: keep `watch_repo` off except during active implementation/debug sessions; stop immediately after
 - **Tool budget**: soft cap 5 MCP calls per question; hard cap 8 with fallback; max 2 query rewrites
-- **Fallback logging**: if MCP returns empty/low-confidence after 2 attempts, log to `docs/mcp-codebase-index-issue-registry.md` before continuing with baseline tools
+- **Fallback logging**: if MCP returns empty/low-confidence after 2 attempts, log to `codebase-index-mcp/docs/mcp-codebase-index-issue-registry.md` before continuing with baseline tools
+
+## Extending the extractor
+
+Adding a tree-sitter language:
+
+1. Add the parser dependency to `package.json` (e.g. `tree-sitter-python`).
+2. Add the language's entry point as `services/extractors/<language>Extractor.ts`, following the
+   naming rule above.
+3. Add coverage in `scripts/test/test-extractor.mjs`, and wire it to a `test:*` script — a harness
+   with no script never runs.
+4. Update the feature list in `README.md`.
+
+**Worker pool.** Tree-sitter parsing runs in worker threads, `cpus/2` by default.
+`LARGE_FILE_THRESHOLD_BYTES=0` routes every non-markdown file to a worker. The per-file job timeout is
+`CODEBASE_INDEX_PARSE_JOB_TIMEOUT_MS` (20s).
+
+**Benchmark false positives.** `npm run benchmark:plan:check` needs telemetry on
+(`CODEBASE_INDEX_TELEMETRY_ENABLED=true`) and a sample rate of 1
+(`CODEBASE_INDEX_TELEMETRY_SAMPLE_RATE=1`). The benchmark script sets both itself; a hand-run that
+skips them reports a false regression.
+
+**C# initializer migrations.** For dotted targets in object initializers, supply `initializerRewrite`
+metadata; without it the preview blocks with `ambiguous_target`, which is the safe default. Worked
+examples: `scripts/test/test-refactor-engine.mjs` suites 3.6–3.8.
+

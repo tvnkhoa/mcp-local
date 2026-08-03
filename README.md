@@ -36,7 +36,7 @@ Six packages under `packages/*`, in strict tiers — imports flow downward only,
 | 5 | `@mcp/manifest` | workspace tooling data — which servers exist, and what each needs |
 
 Servers are **not** workspace members and consume these through `file:` dependencies, so a fresh
-clone must run `npm run build:packages` first ([ADR 0001](docs/adr/0001-workspace-native-deps.md)).
+clone must run `npm run build:packages` first ([ADR 0001](./docs/decisions/0001-workspace-native-deps.md)).
 
 ## Workspace commands
 
@@ -132,7 +132,7 @@ npm run verify:live    # the four live smoke tests. NEEDS REAL CREDENTIALS. Run 
 CI (`.github/workflows/ci.yml`, Windows + Node 22) runs the same credential-free steps, plus
 `install:servers` and `benchmark:plan:check`, and **without** `test:scripts` or `generate:check` —
 so generated-file drift is caught locally or not at all. Details:
-[docs/development.md](docs/development.md) §4.
+[docs/development/workflow.md](./docs/development/workflow.md) §4.
 
 ## Generated files
 
@@ -153,44 +153,20 @@ a snapshot needs a built server. The generated README spells out the four comman
 
 ## Documentation
 
-**[docs/README.md](docs/README.md) is the full index.** Start with these three:
+**[`docs/README.md`](docs/README.md) is the documentation entry point.** Everything is reachable from
+there in at most two hops — this page does not repeat its index.
 
-| | |
+| Section | For |
 |---|---|
-| [docs/onboarding.md](docs/onboarding.md) | Fresh clone to four working servers in three commands, plus the two gotchas that cost the most time |
-| [docs/architecture.md](docs/architecture.md) | What this is as built: four servers, six packages, and the three mechanisms that hold the shape |
-| [docs/conventions.md](docs/conventions.md) | The rules, sorted by whether something actually checks them |
+| [`docs/guides/`](docs/guides/README.md) | Getting running — start with [onboarding](docs/guides/onboarding.md) |
+| [`docs/development/`](docs/development/README.md) | The working loop: workflow, CI, backlog |
+| [`docs/servers/`](docs/servers/README.md) | The four servers, and how to add or change one |
+| [`docs/architecture/`](docs/architecture/README.md) | The shape, and the design reasoning behind it |
+| [`docs/reference/`](docs/reference/README.md) | Conventions, folder rules, dependency rules, packages |
+| [`docs/decisions/`](docs/decisions/README.md) | The ADR log |
+| [`docs/reports/`](docs/reports/README.md) | Point-in-time reviews of the documentation |
+| [`docs/archive/`](docs/archive/README.md) | Closed records. **Not maintained** |
 
-**Working in the repo**
-
-| | |
-|---|---|
-| [docs/development.md](docs/development.md) | The loop, the test layers, the gate, and the failures that cost an afternoon |
-| [CONTRIBUTING.md](CONTRIBUTING.md) | Commits, review, and what a change has to carry with it |
-| [docs/server-development.md](docs/server-development.md) | Scaffolding, registering and operating a server |
-| [docs/tool-development.md](docs/tool-development.md) | Declaring, gating, testing and snapshotting a tool |
-
-**Reference**
-
-| | |
-|---|---|
-| [docs/packages.md](docs/packages.md) | What each of the six packages is for |
-| [docs/folder-convention.md](docs/folder-convention.md) | Where a file goes, and what decides it |
-| [docs/dependency-rules.md](docs/dependency-rules.md) | What may import what |
-| [docs/adr/README.md](docs/adr/README.md) | Decision records — why servers sit outside the npm workspace, why three SQL token lists differ, why there is one root `.gitignore` |
-| [docs/architecture/target-architecture.md](docs/architecture/target-architecture.md) | The design and its reasoning (§9 reconciles it against what was built) |
-
-**History and state**
-
-| | |
-|---|---|
-| [docs/migration/README.md](docs/migration/README.md) | The 44-step migration: 43 done, 1 skipped by decision, and the findings worth carrying forward |
-| [docs/backlog.md](docs/backlog.md) | What is left, and what is explicitly *not* left |
-| [CHANGELOG.md](CHANGELOG.md) | Dated entries, with the introducing commit named |
-
-**Also**
-
-- `CLAUDE.md` — workspace guidance, critical constraints, MCP-first operating rules
-- `AGENTS.md` — env var reference, common pitfalls, integration config examples
-- `packages/<name>/README.md` · `<server>/README.md` — per-package and per-server references
-- `contracts/README.md` — what the golden `tools/list` snapshots are and how to update them
+Alongside the code: [`CONTRIBUTING.md`](CONTRIBUTING.md) (commits and review) ·
+[`CHANGELOG.md`](CHANGELOG.md) · `CLAUDE.md` and `AGENTS.md` (agent guidance) ·
+[`contracts/README.md`](contracts/README.md) · `packages/<name>/README.md` · `<server>/README.md`.

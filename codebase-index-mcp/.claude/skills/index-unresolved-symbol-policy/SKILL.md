@@ -30,3 +30,7 @@ description: "Define safe handling for unresolved symbols during extraction and 
 ## Output Format
 - Policy conformance report
 - Unresolved counters and remediation priorities
+
+## Authoritative reference
+
+Unresolved-edge handling as built, plus the defects it produced (MCP-ISSUE-034, 038): `codebase-index-mcp/docs/mcp-codebase-index-issue-registry.md`.

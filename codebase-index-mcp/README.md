@@ -135,9 +135,7 @@ npm install && npm run build
 
 ## Graph Model
 
-**Symbol kinds**: `function`, `class`, `method`, `variable`, `module`, `interface`, `property`, `constructor`, `type`, `struct`
-
-**Edge types and semantics**:
+**Edge types and semantics** (10, from the `EdgeType` union in `src/types/index.ts`):
 
 | Edge | Meaning | Note |
 |------|---------|------|
@@ -148,12 +146,15 @@ npm install && npm run build
 | `PROPERTY_WRITE` | Assignment to a property or field | |
 | `DEPENDS_ON` | Project-level dependency (NuGet, npm) | |
 | `IMPLEMENTS` | Class implements interface | |
+| `EXTENDS` | Class or interface inheritance | |
 | `PUBLISHES` | A `Publish<T>`/`Send<T>` callsite for message contract T | Resolved to the consumer of T (heuristic, by contract name); crosses the bus in trace/call-chain |
 | `CONSUMES` | An `IConsumer<T>`/handler of message contract T | Resolved to the in-repo contract type when present |
 
 **Confidence scores**: Values are `0.0–1.0`. Below `0.7` means low confidence — verify with a file read before acting on it.
 
-**Stable IDs**: SHA-256 of `repoId:filePath:symbolName` truncated to 24 hex chars. All tables scoped by `repoId`.
+**Symbol kinds, stable IDs and the schema guardrails** are in
+[`CLAUDE.md`](CLAUDE.md) §"Graph model", which cites `src/types/index.ts` as authoritative. The table
+above is the consumer-facing reading of each edge type.
 
 ## Response Profiles
 
@@ -166,9 +167,21 @@ All read tools that return symbol or edge lists support `profile`:
 | `standard` | All items, full fields, minified JSON | Single deep query, need full field detail |
 | `verbose` | All items + debug/summary fields, **pretty-printed** | Debugging, edge case inspection (only profile that is indented) |
 
-All paths in responses are normalized to forward slashes (`src/foo.ts`) regardless of host OS. `compact` is now the default for every read tool, including `get_symbol_detail`, `get_folder_summary`, `query_docs`, `find_entry_points`, `find_implementations`, and `find_symbol_at_line` (previously fixed-format). Only `verbose` is pretty-printed; all other profiles emit minified JSON.
+All paths in responses are normalized to forward slashes (`src/foo.ts`) regardless of host OS. `compact` is the default for every read tool that accepts `profile`. Only `verbose` is pretty-printed; all other profiles emit minified JSON.
 
-Tools with profile support: `search_symbols`, `get_file_context`, `get_change_context`, `get_symbol_context_pack`, `get_file_summary`, `get_symbol_detail`, `get_symbol_source`, `find_symbol_at_line`, `find_impact_files`, `get_dependency_graph`, `get_call_chain`, `list_repositories`, `dead_code_scan`, `detect_circular_dependencies`, `detect_changes`, `link_tests_to_source`, `trace_execution_flow`, `rename_assist`, `route_map`, `get_folder_summary`, `query_docs`, `find_entry_points`, `find_implementations`.
+**Which tools accept `profile`** — 32 of 43. The list is not maintained by hand here, because a
+hand-maintained copy of it was wrong in both directions (it claimed six tools that have no `profile`
+parameter, and omitted fifteen that do). `contracts/codebase-index.json` is authoritative:
+
+```bash
+node -e "const d=require('./contracts/codebase-index.json');   console.log((d.tools||d).filter(t=>t.inputSchema?.properties?.profile).map(t=>t.name).join('
+'))"
+```
+
+The eleven without it return a fixed shape: `index_repository`, `watch_repo`, `health_check`,
+`get_symbol_detail`, `find_symbol_at_line`, `get_folder_summary`, `query_docs`, `find_entry_points`,
+`find_implementations`, `refactor_replace_rollback`, `refactor_symbol_migration`. Passing `profile` to
+one of them is **rejected** — the input schemas are `.strict()`.
 
 Refactor tools: `refactor_replace_preview` and `refactor_replace_apply` support `nano` (summary only, no hunk content) and `compact` (hunks without before/after text). Use `nano` to check match count and affected files before requesting hunk detail.
 
@@ -322,3 +335,13 @@ The refactor flow is: `refactor_replace_preview` → `refactor_replace_apply` �
 - **Windows native build**: `better-sqlite3` requires Visual Studio C++ Build Tools. If build fails, install VS Build Tools.
 - **Docs lane**: disabled by default (`CODEBASE_INDEX_DOCS_INDEXING_ENABLED=false`). Use `docsMode: "off"` per run for fastest indexing.
 - **Watch**: keep `CODEBASE_INDEX_WATCH_AUTO_START=false`. Start watchers manually only during active debug sessions, stop immediately after.
+
+## Further reading
+
+| | |
+|---|---|
+| [`docs/decision-tree.md`](docs/decision-tree.md) | Which tool to use, in what order, with which profile |
+| [`docs/examples.md`](docs/examples.md) | Five worked end-to-end workflows |
+| [`docs/mcp-codebase-index-issue-registry.md`](docs/mcp-codebase-index-issue-registry.md) | Known server-side defects, with a status index |
+| [`CLAUDE.md`](CLAUDE.md) | Internals: the `src/` folder-ownership table, the graph model, the refactor engine |
+| [`../.claude/rules/mcp-hard-mode.md`](../.claude/rules/mcp-hard-mode.md) | The MCP-first operating policy and its one-page runbook index |

@@ -41,7 +41,7 @@ Use `strategy: "name"` first. Fall back to `strategy: "intent"` only if name ret
 
 ### Analyze change impact
 ```
-find_impact_files(repoId, changedFiles: ["src/foo.ts"], depth: 2, profile: "compact")
+find_impact_files(repoId, filePath: "src/foo.ts", view: "files", groupBy: "module", profile: "compact")
 link_tests_to_source(repoId, filePath: "src/foo.ts", minScore: 0.7)
 ```
 
@@ -57,8 +57,8 @@ Note: use a **callable** symbolId (function/method), not a class or module-level
 ### Safe refactor (always preview → apply → rollback)
 ```
 // Step 1: Preview
-refactor_replace_preview(repoId, searchPattern: "oldName", replacePattern: "newName",
-  scope: { filePaths: ["src/**/*.ts"] })
+refactor_replace_preview(repoId, find: "oldName", replaceExpression: "newName",
+  findMode: "literal", scope: { includePaths: ["src"] })
 // Returns previewId, approvalToken, hunks, riskFlags
 
 // Step 2: Review hunks and riskFlags carefully before applying
@@ -67,7 +67,7 @@ refactor_replace_preview(repoId, searchPattern: "oldName", replacePattern: "newN
 refactor_replace_apply(previewId, approvalToken, includeLowConfidence: false)
 
 // Step 4: Rollback if needed
-refactor_replace_rollback(applyId)
+refactor_replace_rollback(rollbackId)
 ```
 
 Approval tokens expire in 30 minutes. Re-run preview if expired.
@@ -84,7 +84,7 @@ detect_circular_dependencies(repoId, mode: "module")
 2. Use `profile: "compact"` for most calls; `profile: "nano"` for high-volume queries
 3. Soft cap: 5 MCP calls per question; hard cap: 8 with fallback
 4. Baseline tools (`grep`, `read_file`) allowed only after 2 failed MCP attempts
-5. If fallback is used, log the gap to `docs/mcp-codebase-index-issue-registry.md`
+5. If fallback is used, log the gap to `codebase-index-mcp/docs/mcp-codebase-index-issue-registry.md`
 
 ## Tool Reference
 

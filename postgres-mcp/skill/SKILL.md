@@ -24,26 +24,26 @@ get_table_relationships(table)
 run_read_query(sql: "SELECT ... WHERE ... LIMIT 100", environment?, limit?, timeoutMs?, explain?)
 ```
 - Only `SELECT` and `WITH ... SELECT` are allowed. Multi-statement and mutation tokens are blocked.
-- Always bound results with a `LIMIT` (server also caps via `MCP_DB_DEFAULT_LIMIT`/`MCP_DB_MAX_LIMIT`).
-- Use `explain:true` to see the plan; a warning fires when EXPLAIN cost exceeds `PG_EXPLAIN_COST_WARN`.
+- Always bound results with a `LIMIT` (server also caps via `POSTGRES_DEFAULT_LIMIT`/`POSTGRES_MAX_LIMIT`).
+- Use `explain:true` to see the plan; a warning fires when EXPLAIN cost exceeds `POSTGRES_EXPLAIN_COST_WARN`.
 - `profile_table`, `compare_environments`, `data_diff` for profiling and cross-env comparison.
 
 ## Environment selection
 
-Pass `environment` explicitly for anything sensitive. `PG_DEFAULT_ENVIRONMENT` is used when omitted. Only envs in `PG_ALLOWED_ENVIRONMENTS` are reachable; only those in `PG_WRITABLE_ENVIRONMENTS` accept writes. **`prod` is force read-only regardless of config.**
+Pass `environment` explicitly for anything sensitive. `POSTGRES_DEFAULT_ENVIRONMENT` is used when omitted. Only envs in `POSTGRES_ALLOWED_ENVIRONMENTS` are reachable; only those in `POSTGRES_WRITABLE_ENVIRONMENTS` accept writes. **`prod` is force read-only regardless of config.**
 
-## Writes (OFF unless `PG_WRITE_ENABLED=true`) — preview → apply → rollback
+## Writes (OFF unless `POSTGRES_WRITE_ENABLED=true`) — preview → apply → rollback
 
 ```
 write_preview(sql, environment)   // returns previewId, approvalToken, affected sample, mandatory-WHERE check
 // review the sample + row estimate carefully
 write_apply(previewId, approvalToken)
-write_rollback(applyId)           // if needed
+write_rollback(rollbackId)        // if needed
 ```
 - A `WHERE` clause is **mandatory** for UPDATE/DELETE — unbounded mutations are rejected.
-- Approval tokens are HMAC-signed and expire (`PG_WRITE_PREVIEW_TTL_MS`, default 15 min).
+- Approval tokens are HMAC-signed and expire (`POSTGRES_WRITE_PREVIEW_TTL_MS`, default 15 min).
 
-## Migrations (OFF unless `PG_MIGRATION_ENABLED=true`)
+## Migrations (OFF unless `POSTGRES_MIGRATION_ENABLED=true`)
 
 ```
 migration_status → migration_add / migration_preview → migration_dry_run → migration_apply
@@ -60,7 +60,9 @@ Preview and dry-run before applying. Requires the configured .NET project paths.
 
 Server entry: `node {{ENTRY_PATH}}`
 
-A connection source is required — set **one** of `CH_DB_CONNECTION`, `PG_ENV_*`, or `CH_APPSETTINGS_ROOTS`.
+A connection source is required — set **one** of `POSTGRES_CONNECTION`, `POSTGRES_ENV_*`, or `POSTGRES_APPSETTINGS_ROOTS`.
+(The pre-S-43 names `CH_DB_CONNECTION`, `PG_ENV_*`, `CH_APPSETTINGS_ROOTS` are still accepted, with a
+one-time deprecation warning. Use the canonical names above.)
 
 {{ENV_TABLE}}
 

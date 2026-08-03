@@ -4,8 +4,8 @@ Internal workspace. No external contributions, no published packages, no telemet
 is `"private": true` and stays that way.
 
 This page is the process. The rules the process enforces are in
-[docs/conventions.md](docs/conventions.md), and the day-to-day mechanics are in
-[docs/development.md](docs/development.md).
+[docs/reference/conventions.md](./docs/reference/conventions.md), and the day-to-day mechanics are in
+[docs/development/workflow.md](./docs/development/workflow.md).
 
 ---
 
@@ -56,12 +56,11 @@ Match the surrounding code: its comment density, its naming, its idioms. Then:
 "Mechanism, not policy" is necessary but not sufficient. Extraction proved that shared code is *not*
 automatically better than the copies it replaces — three examples, all now pinned by tests:
 
-- a finite `maxDepth` default in shared JSON normalization **truncated real data** the server copies
-  rendered in full
-- `shouldDropNullish` as `profile !== "verbose"` **changed the `standard` profile's response shape**
-  for all four servers
-- enabling Postgres dollar-quote scanning on a SQLite/DataFusion dialect **weakens** the guard: it
-  blanks the span between `$…$` markers and hides a forbidden token
+Three extractions changed behaviour before any consumer adopted them — a truncating `maxDepth`
+default, a `shouldDropNullish` rule that altered the `standard` profile's shape, and dollar-quote
+scanning that *weakened* a SQL guard on the wrong dialect. All three are worked through in
+[docs/architecture/target-architecture.md](docs/architecture/target-architecture.md)
+§"One design assumption the implementation corrected".
 
 So: before a consumer adopts shared code, prove the mechanism equivalent against that consumer.
 
@@ -116,7 +115,7 @@ credential-free so it means the same thing on your machine as in CI.
 
 **A green CI does not replace it.** CI does not run `generate:check` or `test:scripts`, so
 generated-file drift is caught locally or not at all. See
-[Development Guide](docs/development.md) §4 for the exact difference.
+[Development Guide](./docs/development/workflow.md) §4 for the exact difference.
 
 Before a **release**, additionally:
 
@@ -133,10 +132,10 @@ npm run verify:live     # real Postgres / OpenObserve / Bitbucket
 | A tool's name, description, schema or annotations | `contracts:update -- --server <key>`, **read the diff**, then `generate:all` |
 | An env var | edit `packages/manifest/src/envSpecs/<server>.ts`, then `generate:all`. Never a generated file directly |
 | Added a package | a tier row in `packages/cli/src/guards/rules.ts`, a root `tsconfig.json` reference, and the pinned list in `packages/cli/src/cli.test.ts` |
-| Added a server | see [Server Development Guide](docs/server-development.md) §2 — snapshot **before** registering |
+| Added a server | see [Server Development Guide](./docs/servers/server-development.md) §2 — snapshot **before** registering |
 | Moved or renamed a file | `rm -rf dist && npm run build`, then `npm run mcp:doctor`. `tsc` does not prune, and a stale module still loads |
 | Anything destructive | it goes behind an env flag (off by default, strict parsing) and `preview → apply → rollback` with an HMAC token |
-| A decision you expect to be re-litigated | an ADR in `docs/adr/`, not a comment |
+| A decision you expect to be re-litigated | an ADR in `docs/decisions/`, not a comment |
 
 ### Never re-snapshot a contract to make a red check green
 
@@ -151,14 +150,14 @@ Three kinds of document, with different rules:
 
 | Kind | Rule |
 |---|---|
-| **Current-state** (`README.md`, `docs/architecture.md`, `docs/conventions.md`, the guides) | Update when the state changes. Every number should be re-derivable from a named command |
-| **Historical** (`CHANGELOG.md`, `docs/migration/*`, `docs/refactor/*`, the issue registries) | **Leave alone.** An entry describing a past state was accurate at the commit it describes; rewriting it makes the record claim something that never happened |
+| **Current-state** (`README.md`, `docs/architecture/as-built.md`, `docs/reference/conventions.md`, the guides) | Update when the state changes. Every number should be re-derivable from a named command |
+| **Historical** (`CHANGELOG.md`, `docs/archive/migration/*`, `docs/archive/refactor/*`, the issue registries) | **Leave alone.** An entry describing a past state was accurate at the commit it describes; rewriting it makes the record claim something that never happened |
 | **Generated** (`.env.example`, the marked README blocks, tool lists) | Never hand-edit. Edit the manifest and run `generate:all` |
 
 If a doc states a count — env vars, tools, guard findings — state the command it came from. Counts
 drift; commands do not. Prefer:
 
-> `guard:all`: 0 errors, 20 warnings, 1 accepted exemption across 508 files
+> `guard:all`: 0 errors, 20 warnings, 1 accepted exemption across 516 files
 
 over an unattributed number.
 
@@ -190,7 +189,7 @@ Use a stable id (`MCP-ISSUE-NNN`). Record: scenario · tool/query attempted · e
 impact · workaround · enhancement proposal. If the same pattern occurs three or more times, mark it
 an enhancement candidate.
 
-Work that is scoped but not scheduled goes in [docs/backlog.md](docs/backlog.md), which sorts by
+Work that is scoped but not scheduled goes in [docs/development/backlog.md](./docs/development/backlog.md), which sorts by
 whether a tool reports something untrue, a gate does not bite, or it is only a cost. That file also
 lists what is **explicitly not** in it, so decided questions stay decided — reopening one of those
 needs a new ADR, not a backlog item.
@@ -208,8 +207,8 @@ an agent confidently wrong.
 
 ## Related
 
-- [Development Guide](docs/development.md) — the loop, the layers, the failures
-- [Conventions](docs/conventions.md) — every rule, sorted by what enforces it
-- [Dependency Rules](docs/dependency-rules.md) · [Folder Convention](docs/folder-convention.md)
-- [Server Development Guide](docs/server-development.md) · [Tool Development Guide](docs/tool-development.md)
-- [Architecture Decision Records](docs/adr/README.md)
+- [Development Guide](./docs/development/workflow.md) — the loop, the layers, the failures
+- [Conventions](./docs/reference/conventions.md) — every rule, sorted by what enforces it
+- [Dependency Rules](./docs/reference/dependency-rules.md) · [Folder Convention](./docs/reference/folder-convention.md)
+- [Server Development Guide](./docs/servers/server-development.md) · [Tool Development Guide](./docs/servers/tool-development.md)
+- [Architecture Decision Records](./docs/decisions/README.md)

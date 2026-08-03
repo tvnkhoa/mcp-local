@@ -4,8 +4,8 @@ MCP server cho PostgreSQL với 3 nhóm năng lực, **mặc định read-only**
 
 1. **Read-only query** (luôn bật) — `SELECT` / `WITH ... SELECT`, single-statement, giới hạn limit/timeout.
 2. **Đa môi trường** — chọn DB theo `environment` (dev/staging/prod), discover connection từ `appsettings*.json` hoặc env var. **prod luôn read-only.**
-3. **Ghi có review/confirm** (bật bằng `PG_WRITE_ENABLED`) — `write_preview` → `write_apply` → `write_rollback`, HMAC approval token, bắt buộc WHERE, dry-run, audit log.
-4. **EF Core migrations** (bật bằng `PG_MIGRATION_ENABLED`) — snapshot → preview → apply → verify, dry-run, so sánh schema giữa env.
+3. **Ghi có review/confirm** (bật bằng `POSTGRES_WRITE_ENABLED`) — `write_preview` → `write_apply` → `write_rollback`, HMAC approval token, bắt buộc WHERE, dry-run, audit log.
+4. **EF Core migrations** (bật bằng `POSTGRES_MIGRATION_ENABLED`) — snapshot → preview → apply → verify, dry-run, so sánh schema giữa env.
 
 ## 1. Cài đặt
 
@@ -18,9 +18,9 @@ npm run build
 ## 2. Cấu hình
 
 Copy `.env.example` và chỉnh. Tối thiểu cần một nguồn connection (xem `.env.example`):
-- `CH_DB_CONNECTION` (legacy, 1 env), **hoặc**
-- `CH_APPSETTINGS_ROOTS` + `CH_CONNECTION_NAME` (đọc từ appsettings), **hoặc**
-- `PG_ENV_DEV` / `PG_ENV_STAGING` / `PG_ENV_PROD`.
+- `POSTGRES_CONNECTION`  *(1 env; cũ: `CH_DB_CONNECTION`)*, **hoặc**
+- `POSTGRES_APPSETTINGS_ROOTS` + `POSTGRES_CONNECTION_NAME` (đọc từ appsettings), **hoặc**
+- `POSTGRES_ENV_DEV` / `POSTGRES_ENV_STAGING` / `POSTGRES_ENV_PROD`.
 
 Connection string nhận cả `postgres://...` lẫn `Server=...;Database=...;User Id=...;Password=...;`.
 
@@ -67,8 +67,8 @@ npm run build; npm start
 | `get_table_relationships` | FK graph (cho JOIN & phân tích impact) |
 | `profile_table` | Row count ước lượng + stats cột + sample |
 | `data_diff` | So dữ liệu 1 bảng giữa 2 env (count + checksum) |
-| `write_preview` / `write_apply` / `write_rollback` | Ghi có review/confirm (cần `PG_WRITE_ENABLED`) |
-| `migration_status` / `migration_add` / `migration_preview` / `migration_apply` / `migration_dry_run` | EF Core migrations (cần `PG_MIGRATION_ENABLED`) |
+| `write_preview` / `write_apply` / `write_rollback` | Ghi có review/confirm (cần `POSTGRES_WRITE_ENABLED`) |
+| `migration_status` / `migration_add` / `migration_preview` / `migration_apply` / `migration_dry_run` | EF Core migrations (cần `POSTGRES_MIGRATION_ENABLED`) |
 | `compare_environments` | Diff schema (+ row count tùy chọn) giữa 2 env |
 
 Mọi read-tool nhận thêm `environment` và `profile` (`nano`/`compact`/`standard`/`verbose`, mặc định `compact`).
@@ -88,7 +88,7 @@ write_rollback { "rollbackId": "..." }
 
 - UPDATE/DELETE thiếu `WHERE` bị chặn (`MISSING_WHERE`) trừ khi `allowFullTable:true`.
 - Rollback hỗ trợ INSERT/DELETE đầy đủ; UPDATE chỉ khi bảng có PK, single-table, có WHERE và không dùng params.
-- Preview/token sống theo `PG_WRITE_PREVIEW_TTL_MS` (mặc định 15 phút), một preview chỉ apply một lần.
+- Preview/token sống theo `POSTGRES_WRITE_PREVIEW_TTL_MS` (mặc định 15 phút), một preview chỉ apply một lần.
 
 ## 6. Luồng migration (EF Core)
 
@@ -101,7 +101,7 @@ migration_apply    { "environment": "dev", "previewId": "...", "approvalToken": 
 compare_environments { "source": "dev", "target": "staging", "includeRowCounts": true }
 ```
 
-`dotnet ef` được gọi với argv cố định (không nối shell), tên migration bắt buộc `^[A-Za-z0-9_]+$`, connection inject qua `CH_DB_CONNECTION` cho đúng env.
+`dotnet ef` được gọi với argv cố định (không nối shell), tên migration bắt buộc `^[A-Za-z0-9_]+$`, connection inject qua `CH_DB_CONNECTION` cho đúng env (tên này là **outbound contract** với project .NET, không phải config của server — xem `docs/reference/dependency-rules.md` §4).
 
 ## 7. Audit
 
@@ -109,7 +109,7 @@ Mọi `write_apply` / `write_rollback` / `migration_apply` được ghi vào b�
 
 ## 8. Lưu ý bảo mật
 
-- Mặc định read-only. Ghi/migration phải bật cờ tường minh (`PG_WRITE_ENABLED` / `PG_MIGRATION_ENABLED`). Approval token được ký/xác minh hoàn toàn trong process: nếu không set `PG_WRITE_APPROVAL_SECRET`, MCP tự sinh secret ngẫu nhiên mỗi lần khởi động (token không thể giả mạo, không cần cấu hình). Chỉ set secret nếu muốn token còn hiệu lực qua restart.
+- Mặc định read-only. Ghi/migration phải bật cờ tường minh (`POSTGRES_WRITE_ENABLED` / `POSTGRES_MIGRATION_ENABLED`). Approval token được ký/xác minh hoàn toàn trong process: nếu không set `POSTGRES_WRITE_APPROVAL_SECRET`, MCP tự sinh secret ngẫu nhiên mỗi lần khởi động (token không thể giả mạo, không cần cấu hình). Chỉ set secret nếu muốn token còn hiệu lực qua restart.
 - **prod không bao giờ ghi được** (ép read-only bất kể cấu hình).
 - Không commit secret vào repo. Không log raw SQL nhạy cảm (chỉ log hash).
 

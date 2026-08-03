@@ -112,4 +112,5 @@ doctor line — keys only.
 - Descriptions are for auto-invocation: test that a realistic user phrasing would match.
 - Prefer editing an existing operational skill over adding a parallel one.
 - Related policy: `.claude/rules/mcp-base.md`, `.claude/rules/typescript-mcp.md`. For scaffolding the
-  server code itself, see the `mcp-scaffold` skill.
+  server code itself, see `docs/servers/server-development.md` §1–2 (the `mcp-scaffold` skill it used to point
+  at was archived 2026-08-03 as superseded).

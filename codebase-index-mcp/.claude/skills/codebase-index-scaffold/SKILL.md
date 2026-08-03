@@ -25,3 +25,7 @@ description: "Scaffold an internal MCP server for intelligent codebase indexing 
 - Minimal, safe defaults.
 - Internal-only posture.
 - Clear MCP tool contracts and examples.
+
+## Authoritative reference
+
+**This server already exists.** To add a *new* server, use `npm run new:server` and follow `docs/servers/server-development.md` §1–2 — do not hand-build one. This skill is kept for the design reasoning only.

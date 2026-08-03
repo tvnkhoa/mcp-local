@@ -19,3 +19,7 @@ description: "Review security for internal codebase-index MCP: data isolation, s
 ## Output Format
 - `pass` or `fail` with severity-tagged findings.
 - Concrete remediation per finding.
+
+## Authoritative reference
+
+Enforced rules: `docs/reference/conventions.md`. The path allowlist (`CODEBASE_INDEX_ALLOWED_ROOTS`) and the no-LLM policy are the two hard constraints — `codebase-index-mcp/CLAUDE.md`.

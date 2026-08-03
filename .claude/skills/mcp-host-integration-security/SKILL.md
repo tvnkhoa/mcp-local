@@ -27,3 +27,7 @@ description: "Harden MCP host/client integration with token hygiene, scope minim
 ## Output Format
 - Pass/fail
 - Security findings with severity and mitigation
+
+## Authoritative reference
+
+What the installer writes, and where secrets live (`~/.claude.json`): `README.md` §"What install writes" and `docs/guides/onboarding.md`. Path allowlisting: `@mcp/shared/fs` `createPathAllowlist`.

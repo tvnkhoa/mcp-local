@@ -12,14 +12,18 @@ description: "Use when building or updating MCP tools for codebase indexing, dep
 - Record index run metadata (version, commit SHA, startedAt, finishedAt, status, counters).
 
 ## MCP Tool Contract
-- Keep tools focused and composable:
+- Keep tools focused and composable. The core traversal set, as actually declared in
+  `contracts/codebase-index.json`:
   - `index_repository`
   - `get_dependency_graph`
   - `get_call_chain`
-  - `get_module_flow`
-  - `find_impact_surface`
+  - `trace_execution_flow` — execution sub-graph from a callable entry symbol
+  - `find_impact_files` with `view: "surface"` — the caller surface per symbol
 - Validate all inputs with schema and enforce hard bounds (`depth`, `limit`, `timeoutMs`).
 - Return deterministic error codes for unsupported language/parser/index state.
+- `contracts/codebase-index.json` is authoritative for names and parameters. Verify against it before
+  citing a tool here — this list previously named `get_module_flow` and `find_impact_surface`, neither
+  of which ever existed.
 
 ## Internal Security & Storage
 - Internal-only deployment; no external data exfiltration paths by default.

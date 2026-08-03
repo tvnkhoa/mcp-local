@@ -1,7 +1,7 @@
 # Target Architecture — Internal Local MCP Platform
 
 **Written** — 2026-07-27
-**Input** — `docs/architecture/audit-report.md`
+**Input** — `docs/archive/audit-report.md`
 
 > **Provenance.** Produced as Phase 1 of the architecture engagement under the constraint
 > *"DO NOT MOVE ANY FILE. DO NOT IMPLEMENT ANY CODE"*, so it was originally delivered as a design
@@ -30,9 +30,8 @@ Two constraints come from the audit rather than the goals, and they dominate the
   compiled. Restructuring `node_modules` risks a rebuild that needs VS C++ Build Tools. Therefore
   **servers are not npm workspace members** — workspaces are scoped to `packages/*`, and servers
   consume shared code through `file:` dependencies, which npm satisfies with a symlink.
-- **`~/.claude.json` is live machine state.** Server directory names and entry points are recorded
-  there. Any change to them breaks every agent session until re-registration, so directory moves
-  are treated as separate, explicitly-approved steps.
+- **`~/.claude.json` is live machine state**, which is why directory moves are separate,
+  explicitly-approved steps — [`../servers/server-development.md`](../servers/server-development.md) §6.
 
 ---
 
@@ -211,10 +210,10 @@ Every server, without exception:
 | # | Rule |
 |---|---|
 | S1 | `src/index.ts` is the only entry point |
-| S2 | Layout is the standard structure: `src/{tools,resources,prompts,middleware,services,repositories,config,types}/` + `index.ts`. Concerns that exist are at the conventional path; concerns that do not exist are absent (a server that declares no prompts has no `prompts/`). See `docs/refactor/standard-structure-report.md` for the layer rule that decides which slot a file belongs in, and the per-server map |
+| S2 | Layout is the standard structure: `src/{tools,resources,prompts,middleware,services,repositories,config,types}/` + `index.ts`. Concerns that exist are at the conventional path; concerns that do not exist are absent (a server that declares no prompts has no `prompts/`). See `docs/archive/refactor/standard-structure-report.md` for the layer rule that decides which slot a file belongs in, and the per-server map |
 | S3 | Config is loaded **once**, at startup, into a typed object, and passed down. No module reads `process.env` except the config module |
 | S4 | Script vocabulary is identical everywhere: `build`, `typecheck`, `test`, `start`, `dev`, `smoke-test` |
-| S5 | `scripts/smoke-test.mjs` performs a real MCP handshake over stdio and lists tools. It is the check that catches what typecheck and unit tests cannot — module initialization order, transport wiring, startup failure |
+| S5 | `<server>/scripts/smoke-test.mjs` performs a real MCP handshake over stdio and lists tools. It is the check that catches what typecheck and unit tests cannot — module initialization order, transport wiring, startup failure |
 | S6 | **Fail fast on invalid config.** A missing credential is a startup error, not a per-call error |
 | S7 | Destructive operations are `preview → apply → rollback`, gated by an HMAC approval token bound to the previewed plan |
 | S8 | Write capability is **off** unless an explicit env flag enables it, parsed strictly (exact `"true"` / `"1"`) |
@@ -284,7 +283,7 @@ error against. A table consulted to find remaining work is worse than no table w
 | Uniform script vocabulary (S4) | **↑ Built** — all four answer `build` / `typecheck` / `test` / `smoke` (S-03) |
 | CI | **↑ Built** — `.github/workflows/ci.yml`, Windows + Node 22, credential-free (S-05) |
 | Config loaded once per server (S3) | **↑ Built** — `npm run guard:deps` reports **0 errors**. The one call site that looked like an exception, `postgres-mcp/src/services/migration/efRunner.ts`, spreads `process.env` into a `dotnet ef` child process so it inherits `PATH`; `conventions.md` §3 classifies that as *inheritance, not configuration*. Was listed **Partial** until 2026-08-03, describing work that should not be done |
-| File size caps met by servers | **Partial** — `npm run guard:all`: **0 errors, 20 warnings, 1 accepted exemption across 508 files**. 18 warnings are `size/soft-cap`, which stays advisory by decision (`conventions.md` §5). **Two are `size/hard-cap`**, both in `codebase-index-mcp` and therefore downgraded to warnings: `src/repositories/vectorStore.ts` (716) and `src/services/graph/edgeResolverCalls.ts` (622). Neither is exempted. *(This row read "Built — no hard-cap finding since S-41" until re-derived; the two files crossed the cap after that pass.)* |
+| File size caps met by servers | **Partial** — `npm run guard:all`: **0 errors, 20 warnings, 1 accepted exemption across 516 files**. 18 warnings are `size/soft-cap`, which stays advisory by decision (`conventions.md` §5). **Two are `size/hard-cap`**, both in `codebase-index-mcp` and therefore downgraded to warnings: `src/repositories/vectorStore.ts` (716) and `src/services/graph/edgeResolverCalls.ts` (622). Neither is exempted. *(This row read "Built — no hard-cap finding since S-41" until re-derived; the two files crossed the cap after that pass.)* |
 | `zod` / protocol SDK deduplicated across servers | **Not planned before S-09.** Measured consequence: `mapError` cannot be shared, because `instanceof` compares class identity across copies |
 | `servers/` directory move | **Deliberately skipped** (S-42) |
 

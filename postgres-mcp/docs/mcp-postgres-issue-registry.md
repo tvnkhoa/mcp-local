@@ -10,6 +10,34 @@ Resolution. Mirrors the format of `codebase-index-mcp/docs/mcp-codebase-index-is
 
 ---
 
+## Index
+
+**14 entries** — all 14 resolved (some as documented guidance rather than code changes). Statuses are copied from each
+entry's own `**Status:**` line; the entry is authoritative.
+
+| ID | Title | Status |
+|---|---|---|
+| `PG-ENV-001` | Single environment disabled `compare_environments` / `data_diff` | ✅ fixed 2026-06-29 (config, not code) — a local `dev` |
+| `PG-SEC-001` | Shared RDS `default` was marked writable (latent write-to-prod risk) | ✅ fixed 2026-06-29 (config) — writes locked to `dev` |
+| `PG-DOC-001` | `postgres-mcp-operations` skill stale on write gating & approval secret | ✅ fixed 2026-06-29 (docs) — skill + new CLAUDE.md sect |
+| `PG-CMP-001` | `compare_environments` flags `constraintChanged:true` on (nearly) every table | ✅ fixed 2026-07-02 (code) — `src/migration/schemaSnaps |
+| `PG-MIG-001` | `migration_status` reads 0-applied (and `migration_apply` would fail) on a DB whose `__EFMigr… | ✅ closed 2026-07-02 (external, non-actionable) — confi |
+| `PG-MIG-002` | `migration_status` mis-classifies migrations whose NAME contains "Pending" as pending | ✅ fixed 2026-07-02 (code) — classification now anchors |
+| `PG-MIG-003` | Migration squashing invalidates `migration_status`'s ledger-based check (guidance, not a bug) | ✅ documented 2026-07-02 — workflow guidance only, no s |
+| `PG-MIG-004` | `migration_status` now sources `dotnet ef migrations list --json` instead of scraping text | ✅ fixed 2026-07-02 (code) — `src/migration/efRunner.ts |
+| `PG-DIF-001` | `data_diff` checksum vulnerable to representation-vs-semantics false positives (+ dead `keyCo… | ✅ fixed 2026-07-02 (code) — `src/db/introspection.ts` |
+| `PG-DIF-002` | `data_diff` checksum used an O(n log n) sort + unbounded in-memory string on large tables | ✅ fixed 2026-07-02 (code) — `src/db/introspection.ts` |
+| `PG-REV-001` | Code-review sweep of PG-DIF-001/002/PG-CMP-001 changes (8-angle review, 10 confirmed fixes) | ✅ fixed 2026-07-02 (code) — `src/db/introspection.ts` |
+| `PG-PRV-001` | `migration_preview` response too large (~50 KB), ignores `profile`, forces file-dump + manual… | ✅ fixed 2026-07-06 — reported same day from `wec.commu |
+| `PG-PRV-002` | Approval-token TTL (~15 min, in-memory) races against the human-approval gate on `migration_a… | ✅ fixed 2026-07-06 — reported same day; design/UX sugg |
+| `PG-STA-001` | `migration_status.raw` duplicates parsed arrays as an escaped JSON blob even at `profile:"com… | ✅ fixed 2026-07-06 — reported same day; low priority / |
+
+> ID prefixes group by area: `ENV` environment resolution · `SEC` safety posture · `DOC`
+> documentation drift · `CMP` compare_environments · `MIG` EF Core migrations · `DIF` data_diff ·
+> `REV` code review sweeps · `PRV` preview payloads · `STA` status payloads.
+
+---
+
 ## PG-ENV-001 — Single environment disabled `compare_environments` / `data_diff`
 
 - **Status:** fixed 2026-06-29 (config, not code) — a local `dev` environment was registered.
@@ -92,6 +120,14 @@ Resolution. Mirrors the format of `codebase-index-mcp/docs/mcp-codebase-index-is
     Consequence: approval tokens are in-memory and **per-process — they do not survive a server
     restart**; a `previewId`/`approvalToken` from before a restart will fail verification.
 - **Resolution:** corrected the skill and added a verified gating section to CLAUDE.md.
+- **Regressed and re-fixed 2026-08-03.** The 2026-06-29 fix predated **S-43**, which renamed all 23
+  vars to `POSTGRES_*`. `postgres-mcp/skill/SKILL.md` was not updated, so it went on naming
+  `PG_WRITE_ENABLED`, `PG_MIGRATION_ENABLED`, `CH_DB_CONNECTION` and `MCP_DB_*` as the operative
+  names — now only deprecated aliases — while the `{{ENV_TABLE}}` rendered beside them showed the
+  canonical ones. Corrected in the documentation cleanup; see
+  `docs/archive/reports/documentation-cleanup-report.md` (finding F-02). **This is the second occurrence of
+  the same class of defect in this file, and nothing checks for it** — the skill templates are the
+  one generated surface neither `generate:check` nor `mcp:doctor` validates.
 
 ## PG-CMP-001 — `compare_environments` flags `constraintChanged:true` on (nearly) every table
 

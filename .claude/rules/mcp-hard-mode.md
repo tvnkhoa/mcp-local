@@ -122,7 +122,7 @@ Before any baseline tool call, verify and satisfy:
 
 ## Tool Selection Guide
 
-> Quick reference: see `codebase-index-mcp/docs/DECISION-TREE.md` for a task-oriented flowchart with profile heuristics and fallback escalation steps.
+> Quick reference: see `codebase-index-mcp/docs/decision-tree.md` for a task-oriented flowchart with profile heuristics and fallback escalation steps.
 
 | Intent | Preferred tool | Notes |
 |--------|---------------|-------|
@@ -199,6 +199,27 @@ Confidence interpretation standard:
 6. Performing fallback without creating/updating an issue entry.
 7. Repo-wide “safety scan” phrasing/actions are prohibited unless fallback conditions are met.
 8. After edits, do NOT broad-scan repository for remaining references. Use MCP impact narrowing first (`search_symbols` -> `get_symbol_context_pack` or `find_impact_files` -> targeted `get_file_summary`/`read_file`).
+
+## One-Page Quick Reference
+
+Compressed index of the flows below — scan this, then read the matching flow for the exact calls.
+Absorbed from `MCP-FIRST-CHEATSHEET.md` (archived 2026-08-03; this file is now the single home for
+MCP-first policy and its playbooks).
+
+| Goal | Runbook | Detailed flow |
+|---|---|---|
+| Analyze a symbol's impact | `search_symbols` → `get_symbol_context_pack` → `find_impact_files` → `get_symbol_source` | *Standard flow* |
+| Orient in a new area | `get_folder_summary` → `get_file_summary` → `find_impact_files(view:"surface")` | *Orientation flow* |
+| Understand how a method propagates | `search_symbols` → `trace_execution_flow` → `get_call_chain` | *Execution trace flow* |
+| Debug from a stack trace | `find_symbol_at_line` → `trace_execution_flow` or `get_change_context` | *Stack trace debug flow* |
+| Re-index safely | `health_check` → `list_repositories` → `index_repository` → `health_check` | *Re-index Request Flow* |
+| Gate a new feature / refactor | `detect_circular_dependencies` → `dead_code_scan` | *Health gate flow* |
+| Rename or bulk-edit inside MCP | `rename_assist(emitPreview:true)` → `refactor_replace_apply` → `refactor_replace_rollback` | *Refactor / rename flow* |
+| Validate a Postgres change | `mcp__postgres-mcp__health_check` → `mcp__postgres-mcp__run_read_query` | *Postgres tool check flow* |
+| Triage risk before merge | `detect_changes(policy:"release-gate")` → `find_impact_files(view:"surface")` → `link_tests_to_source` | *Pre-release risk scan flow* |
+
+Always: reuse the exact `repoPath` from `list_repositories`; bound calls with `limit` and
+`profile:"compact"`; stop when evidence is sufficient. Report per the *Output Contract* below.
 
 ## Required MCP-First Flow
 

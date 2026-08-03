@@ -42,8 +42,8 @@ Reproducibility is the whole value; a snapshot that varies per machine is noise.
   `group` get a fixed placeholder; everything else is *unset* so the server falls back to its own
   defaults. A developer's real credentials can neither leak in nor change the output.
 - Optional vars are deliberately unset rather than given a placeholder. A made-up value for
-  something like `PG_ALLOWED_ENVIRONMENTS` is not harmless — it is a filter that matches nothing,
-  and the server refuses to start.
+  something like `POSTGRES_ALLOWED_ENVIRONMENTS` is not harmless — it is a filter that matches
+  nothing, and the server refuses to start.
 - Tools are sorted by name and every object key is sorted, so a diff shows semantic change rather
   than serialization order.
 - The server list comes from `@mcp/manifest`, so a new server is picked up automatically.

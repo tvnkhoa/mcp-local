@@ -24,3 +24,7 @@ description: "Verify correctness parity between full and incremental indexing fo
 ## Output Format
 - `ready` or `blocked`
 - Diff report and likely root causes
+
+## Authoritative reference
+
+Reproducibility was a real defect — see MCP-ISSUE-032 in `codebase-index-mcp/docs/mcp-codebase-index-issue-registry.md`. Harness: `codebase-index-mcp/scripts/test/`.

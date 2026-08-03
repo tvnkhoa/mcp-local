@@ -12,11 +12,14 @@ description: "Base instruction layer for all local MCP packages in this workspac
 - Keep tool names explicit and stable; avoid hidden behavior changes.
 
 ## Base Contracts
-- Every MCP package should provide:
-  - `src/index.ts` as entrypoint.
-  - A dedicated guardrails file when safety logic exists.
+- Every MCP server provides:
+  - `src/index.ts` as the only entrypoint.
+  - The nine-slot standard structure — guardrails, response serialization and error mapping live in
+    `src/middleware/`, not in a root-level file. See `docs/reference/folder-convention.md` §2.
+  - `src/config/` as the only reader of `process.env`.
   - `README.md` with setup, run command, tool list, input/output examples.
-- Keep scripts compatible with `build`, `dev`, `start`, `typecheck`.
+- **Script vocabulary: `build`, `typecheck`, `test`, `smoke`** (plus `start`, `dev`). The first four
+  are what make the root aggregates work uniformly — see `docs/reference/conventions.md` §4.
 
 ## Safety Baseline
 - Never hardcode secrets, tokens, or connection strings.

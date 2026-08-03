@@ -22,7 +22,7 @@ health_check(repoId: "<repoId>")
 If `shouldReindex: true` or the repo is unknown:
 
 ```
-index_repository(repoId, repoPath: "<exact path>", mode: "incremental", docsMode: "off", profile: "compact")
+index_repository(repoId, repoPath: "<exact path>", mode: "incremental", docsMode: "off")
 ```
 
 ## Core workflows
@@ -36,7 +36,7 @@ Use `strategy:"name"` first; fall back to `strategy:"intent"` only if it returns
 
 **Analyze change impact**
 ```
-find_impact_files(repoId, changedFiles: ["src/foo.ts"], depth: 2, profile: "compact")
+find_impact_files(repoId, filePath: "src/foo.ts", view: "files", groupBy: "module", profile: "compact")
 link_tests_to_source(repoId, filePath: "src/foo.ts", minScore: 0.7)
 ```
 
@@ -55,10 +55,11 @@ Use a **callable** symbolId (function/method), not a class/module id.
 ## Safe refactor (preview → apply → rollback)
 
 ```
-refactor_replace_preview(repoId, searchPattern, replacePattern, scope: { filePaths: ["src/**/*.ts"] })
+refactor_replace_preview(repoId, find: "oldName", replaceExpression: "newName",
+                         findMode: "literal", scope: { includePaths: ["src"] })
 // returns previewId, approvalToken, hunks, riskFlags — review before applying
 refactor_replace_apply(previewId, approvalToken, includeLowConfidence: false)
-refactor_replace_rollback(applyId)   // if needed
+refactor_replace_rollback(rollbackId)   // if needed
 ```
 For renames use `rename_assist(emitPreview:true)` then `refactor_replace_apply` (`includeLowConfidence:true` for top-level identifiers). Approval tokens expire in 30 min — re-run preview if expired. Refactors are rule-based only (`llmInvolved:false`).
 
