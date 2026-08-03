@@ -45,7 +45,7 @@ have shipped all five as silent regressions.
 | **C** | HTTP client helpers | 2 | `sleep`, `enc`, `truncate`, backoff schedule — byte-identical | **Extracted** → `@mcp/shared/http` |
 | **D** | Approval HMAC | 2 | `issueApprovalToken` **byte-identical**; `verifyApprovalToken` identical but for the comparison | **Extracted** → `@mcp/shared/approval/previewToken` |
 | **E** | Env parsing | 2–3 | `numberFromEnv`, `stringFromEnv`, `nonNegFromEnv` byte-identical; `parseBoolEnv` byte-identical ×2 | **Extracted** → `@mcp/core/env` |
-| **F** | Error mapping | 3 / 2 | `PolicyViolationError` identical ×3; `mapError` near-identical ×2 | **Split**: class extracted, `mapError` **deliberately not** — §5 |
+| **F** | Error mapping | 3 / 2 | `PolicyViolationError` identical ×3; `mapError` near-identical ×2 | **Split**: class extracted; `mapError` deliberately not, *at the time* — §5, and the amendment that reversed it |
 | **G** | Logging | 3 | `logInfo` / `logError` byte-identical ×3 | **Extracted** → `@mcp/core/logging` |
 
 ### Excluded as false positives
@@ -107,9 +107,12 @@ functions, not module initialization order.
 
 ---
 
-## 5. `mapError` — deliberately NOT extracted
+## 5. `mapError` — not extracted here, extracted later by injection
 
-The one cluster where the evidence says *don't*.
+The one cluster where the evidence said *don't* — correctly about the approach on the table, and
+wrongly about the conclusion drawn from it. The original section is kept in full below because the
+measurement is still the reason a shared mapper may not import `zod`; the amendment at the end
+records what the measurement did **not** prove.
 
 `mapError` is near-identical in observe-mcp and bitbucket-mcp, and the natural home would be
 `@mcp/sdk` (it needs `zod` and `McpError`, both of which `@mcp/shared` forbids by tier rule).
@@ -143,6 +146,50 @@ have to rediscover it.
 `PolicyViolationError` **was** extracted: it is a plain `Error` subclass with no external
 dependency, and `@mcp/core` resolves through a single symlink, so every importer sees the same
 class object.
+
+### Amendment — extracted 2026-08-03, and S-09 was never the blocker
+
+*Everything above stands as a measurement. The sentence that did not stand is "safe to revisit
+once those two dependencies are deduplicated, and not before."*
+
+The constraint the measurement establishes is precise: **a shared module must not `instanceof`
+against a class it imported itself.** That is a statement about who holds the import, not about
+where the algorithm lives. There was a third option neither this section nor ADR 0001 considered —
+pass the classes **in**:
+
+```ts
+createErrorMapper({
+  validation: { type: z.ZodError, message: "Invalid arguments.", rootLabel: "(root)" },
+  coded: [PolicyViolationError, BitbucketHttpError],
+  mcpError: McpError,
+  rules: [abortRule("Request to Bitbucket timed out.")]
+})
+```
+
+`packages/sdk/src/errorMapper.ts` (`4390fa1`) imports neither `zod` nor
+`@modelcontextprotocol/sdk`. Every `instanceof` runs against exactly the classes the calling server
+throws, so the degradation described above cannot occur — the constraint is satisfied, not
+circumvented. `bitbucket-mcp`, `observe-mcp` and `postgres-mcp` share it; `codebase-index-mcp`
+deliberately does not, for an unrelated reason (a different envelope — UPPER_SNAKE codes, a
+`requestId`, tool-name-prefixed messages — and only one copy of it, so there is no duplication to
+remove).
+
+**Shared: the branch order and the envelope shape. Local: every string a client can see** — which
+is exactly the split §2 used to classify postgres-mcp's variant as a false positive
+(`"Invalid tool input."` / `rootLabel: "root"` versus `"Invalid arguments."` / `"(root)"`). Those
+differences survive as arguments.
+
+Two corrections worth carrying forward:
+
+- **S-09 was recorded as the prerequisite and was not one.** The cost of that inference was three
+  near-identical copies kept for a week, waiting on a step that is still not done and no longer
+  needs to be.
+- **ADR 0001 originally proposed duck-typing (`.name` / `.code`) as the way out. Injection is
+  strictly safer.** `.name` matching classifies any object that happens to be called `ZodError`;
+  `errorMapper.test.ts` pins that difference with two same-named, same-shaped, unrelated classes —
+  the injected one is classified, the rival one reaches `internal_error`.
+
+The comment above each server's `mapError` now describes injection rather than the old prohibition.
 
 ---
 
@@ -226,7 +273,9 @@ Policy divergences deliberately preserved                          5
 - **S-18** — reconcile the SQL token lists (18 / 13 / 16). A policy decision with security
   consequences; now trivial to compare, since all three lists sit in `guardrails/` behind one
   shared mechanism.
-- **S-09** — deduplicate `zod` and `@modelcontextprotocol/sdk` across the servers. Unblocks the
-  `mapError` extraction and nothing else here depends on it.
+- **S-09** — deduplicate `zod` and `@modelcontextprotocol/sdk` across the servers. Written here as
+  the thing that "unblocks the `mapError` extraction". **It was not**: that extraction shipped on
+  2026-08-03 by injecting the classes instead (§5 amendment), and S-09 remains undone. Nothing else
+  here depends on it.
 - The 34 guard warnings (oversized entry points, scattered `process.env` in postgres-mcp's
   `migration/efRunner.ts`) remain the tracked pre-migration baseline.

@@ -126,5 +126,27 @@ export const postgresEnv: readonly EnvField[] = [
   { name: "POSTGRES_MIGRATION_PREVIEW_TTL_MS", deprecatedAliases: ["PG_MIGRATION_PREVIEW_TTL_MS"], required: false, codeDefault: "3600000", section: "EF Core migrations (OFF unless enabled)", note: "Migration-preview lifetime — 1 hour." },
   { name: "POSTGRES_DOTNET_PROJECT", deprecatedAliases: ["CH_DOTNET_PROJECT"], required: false, section: "EF Core migrations (OFF unless enabled)", note: "Path to the EF Core project (the one holding the DbContext)." },
   { name: "POSTGRES_DOTNET_STARTUP_PROJECT", deprecatedAliases: ["CH_DOTNET_STARTUP_PROJECT"], required: false, section: "EF Core migrations (OFF unless enabled)", note: "Startup project passed to `dotnet ef --startup-project`." },
-  { name: "POSTGRES_DOTNET_TIMEOUT_MS", deprecatedAliases: ["PG_DOTNET_TIMEOUT_MS"], required: false, codeDefault: "120000", section: "EF Core migrations (OFF unless enabled)", note: "Timeout for a `dotnet ef` invocation." }
+  { name: "POSTGRES_DOTNET_TIMEOUT_MS", deprecatedAliases: ["PG_DOTNET_TIMEOUT_MS"], required: false, codeDefault: "120000", section: "EF Core migrations (OFF unless enabled)", note: "Timeout for a `dotnet ef` invocation." },
+
+  // --- Node / libpq runtime -----------------------------------------------------
+  // Neither is a postgres-mcp variable, and neither is read by this server's code. Both are set by
+  // the live install on this workspace, so leaving them undeclared meant the generated
+  // `.env.example` was not a complete picture of what a real deployment needs — the gap S-35 exists
+  // to close (backlog B-07). `observe-mcp` already declares NODE_TLS_REJECT_UNAUTHORIZED, so
+  // omitting it here also made two servers disagree about the same variable.
+  //
+  // Declared WITHOUT `default`: `install-mcp` writes any field carrying one into `~/.claude.json`,
+  // which would pin an external convention into every user's agent config (the S-35 finding).
+  {
+    name: "PGSSLMODE",
+    required: false,
+    section: "Node / libpq runtime (external conventions)",
+    note: "libpq's own TLS mode (`disable` | `require` | `verify-ca` | `verify-full`), read by the driver, not by this server. Set it when the target requires TLS but the connection string does not say so."
+  },
+  {
+    name: "NODE_TLS_REJECT_UNAUTHORIZED",
+    required: false,
+    section: "Node / libpq runtime (external conventions)",
+    note: "Set to 0 ONLY if the database host presents a self-signed/untrusted TLS certificate. This is a Node flag, not a server setting, and it disables certificate verification for the WHOLE process — every outbound TLS connection, not just Postgres. Prefer `PGSSLMODE=verify-full` with a trusted CA."
+  }
 ];

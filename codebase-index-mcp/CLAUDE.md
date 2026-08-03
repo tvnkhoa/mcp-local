@@ -113,6 +113,8 @@ absent because this server declares no MCP prompts.
 
 > `dist/` is not pruned by `tsc`. After renaming or moving a source file, `rm -rf dist` before
 > trusting a run — a stale module at the old path will still load and can mask a broken import.
+> `npm run mcp:doctor` (from the workspace root) reports orphaned `dist/*.js` files by name, so
+> this is detectable rather than only documented.
 
 ### Graph model
 

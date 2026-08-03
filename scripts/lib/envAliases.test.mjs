@@ -86,14 +86,51 @@ test("the runtime table declares nothing the manifest does not", () => {
   }
 });
 
-test("every postgres-mcp env var is POSTGRES_-prefixed", () => {
+/**
+ * Names postgres-mcp declares but does not own: they belong to libpq and to Node, and this server
+ * neither reads nor sets them. They are declared so the generated `.env.example` is a complete
+ * picture of what a real install configures (backlog B-07).
+ *
+ * An explicit allowlist rather than a relaxed predicate. "Not POSTGRES_-prefixed" must stay a test
+ * failure by default — that is the whole of S-43 — so adding a third name here is a deliberate
+ * edit with a reviewer, not something a new declaration can do by accident.
+ */
+const FOREIGN_CONVENTIONS = new Set(["PGSSLMODE", "NODE_TLS_REJECT_UNAUTHORIZED"]);
+
+test("every postgres-mcp env var this server owns is POSTGRES_-prefixed", () => {
   // S-43's actual goal. Three prefixes (CH_, PG_, MCP_DB_) became one; this is what stops a
   // fourth appearing.
   for (const field of postgres.env) {
+    if (FOREIGN_CONVENTIONS.has(field.name)) {
+      continue;
+    }
     assert.ok(
       field.name.startsWith("POSTGRES_"),
       `${field.name} is not under the POSTGRES_ prefix`
     );
+  }
+});
+
+test("a foreign-convention var carries no alias and no default", () => {
+  // The exemption above must not become a hole. A name outside the prefix may not claim
+  // deprecated aliases (S-43's rename machinery is for names this server owns), and may not carry
+  // a `default` — `install-mcp` writes any field with one into `~/.claude.json`, which would pin
+  // an external convention into every user's agent config (the S-35 finding).
+  for (const field of postgres.env) {
+    if (!FOREIGN_CONVENTIONS.has(field.name)) {
+      continue;
+    }
+    assert.equal(field.deprecatedAliases, undefined, `${field.name} must not declare aliases`);
+    assert.equal(field.default, undefined, `${field.name} must not carry a default`);
+  }
+});
+
+test("the foreign-convention allowlist names nothing that is absent", () => {
+  // A stale exemption is worse than none: it silently permits a prefix violation for a name that
+  // no longer exists, and reads as though the manifest still declares it.
+  const declared = new Set(postgres.env.map((f) => f.name));
+  for (const name of FOREIGN_CONVENTIONS) {
+    assert.ok(declared.has(name), `${name} is exempted but no longer declared`);
   }
 });
 

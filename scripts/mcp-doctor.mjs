@@ -34,6 +34,49 @@ const selected = () => resolveServers(ARGS.servers, { allowAllDefault: true });
 
 const MARK = { pass: `${C.green}PASS${C.reset}`, warn: `${C.yellow}WARN${C.reset}`, fail: `${C.red}FAIL${C.reset}` };
 
+/**
+ * Compiled modules in `dist/` with no corresponding source file (backlog B-12).
+ *
+ * `tsc` does not prune. Rename or move a source file and the old `.js` stays behind, loadable and
+ * importable — during S-41 that produced a probe reporting "identical" while it was running the
+ * *previous* build. Three documents warn about this in prose; nothing detected it.
+ *
+ * A warning rather than a failure, and a warning on the doctor rather than a clean build on every
+ * `npm run build`: a stale module only matters when something still imports it by path, and paying
+ * a full rebuild on every compile to prevent an occasional trap is the wrong trade.
+ *
+ * Returns `null` when there is no `dist/` at all (the `build` check above already reports that),
+ * and paths relative to `dist/`. Only `.js` is considered — `.d.ts` and `.map` orphans are
+ * harmless because nothing loads them at runtime.
+ */
+function findOrphanedDistModules(server) {
+  const serverRoot = serverDirPath(server);
+  const distRoot = path.join(serverRoot, "dist");
+  const srcRoot = path.join(serverRoot, "src");
+  if (!fs.existsSync(distRoot) || !fs.existsSync(srcRoot)) return null;
+
+  const orphans = [];
+  const walk = (dir) => {
+    for (const item of fs.readdirSync(dir, { withFileTypes: true })) {
+      const full = path.join(dir, item.name);
+      if (item.isDirectory()) {
+        walk(full);
+        continue;
+      }
+      if (!item.name.endsWith(".js")) continue;
+      const relative = path.relative(distRoot, full);
+      const base = relative.slice(0, -".js".length);
+      // A `.js` may come from a `.ts` or, for the odd hand-written helper, a `.js` of its own.
+      const hasSource = [".ts", ".tsx", ".js"].some((ext) =>
+        fs.existsSync(path.join(srcRoot, `${base}${ext}`))
+      );
+      if (!hasSource) orphans.push(relative.split(path.sep).join("/"));
+    }
+  };
+  walk(distRoot);
+  return orphans.sort();
+}
+
 async function checkServer(server, agents) {
   const checks = [];
   const fix = [];
@@ -42,6 +85,19 @@ async function checkServer(server, agents) {
   const entry = serverEntryPath(server);
   if (fs.existsSync(entry)) checks.push(["build", "pass", "dist/index.js present"]);
   else { checks.push(["build", "fail", "not built"]); fix.push(`cd ${server.dir} && npm run build`); }
+
+  // stale dist (backlog B-12)
+  const orphans = findOrphanedDistModules(server);
+  if (orphans === null) {
+    checks.push(["dist", "warn", "skipped (no dist/ to inspect)"]);
+  } else if (orphans.length === 0) {
+    checks.push(["dist", "pass", "every dist/*.js has a matching source file"]);
+  } else {
+    const shown = orphans.slice(0, 5).join(", ");
+    const more = orphans.length > 5 ? ` (+${orphans.length - 5} more)` : "";
+    checks.push(["dist", "warn", `stale build output: ${shown}${more}`]);
+    fix.push(`cd ${server.dir} && rm -rf dist && npm run build`);
+  }
 
   // config (across all detected agents)
   //

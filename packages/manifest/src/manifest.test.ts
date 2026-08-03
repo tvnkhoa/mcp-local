@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 
 import {
   SERVERS,
@@ -23,24 +24,47 @@ const byKey = (key: string): ServerDescriptor => {
 };
 
 // --- WORKSPACE_ROOT ----------------------------------------------------------
-// The one genuinely fragile value in the package: it counts `..` segments from this module, so
-// it breaks silently if the emitted layout gains a level or the package moves. Type-checking
-// cannot see that, which is why it is asserted against the real directory.
+// Was the one genuinely fragile value in the package: it counted `..` segments from this module,
+// so it broke silently if the emitted layout gained a level or the package moved. Since B-09 it is
+// an upward search for `tsconfig.base.json` + `package.json`, correct at any depth.
+//
+// That change made the old assertion a tautology — it checked for exactly the markers the
+// implementation now searches for, so it could not fail. These assert *consequences* instead:
+// the resolved directory is the right one by a property the search does not test for (the root
+// package's name), and every path derived from it lands on something that exists.
 
-test("WORKSPACE_ROOT points at the actual workspace root", () => {
-  assert.ok(
-    existsSync(path.join(WORKSPACE_ROOT, "tsconfig.base.json")),
-    `no tsconfig.base.json under ${WORKSPACE_ROOT} — the '..' depth in paths.ts is wrong`
-  );
+test("WORKSPACE_ROOT is the mcp-local root, not merely a directory with the markers", () => {
+  // The search stops at the first directory holding both markers. This is the check that it
+  // stopped at the *right* one — `name` is not something the search looks at.
   const pkg = JSON.parse(readFileSync(path.join(WORKSPACE_ROOT, "package.json"), "utf8")) as { name?: string };
   assert.equal(pkg.name, "mcp-local", `resolved ${WORKSPACE_ROOT}, which is not the workspace root`);
 });
 
-test("WORKSPACE_ROOT resolves the same from src and dist", () => {
-  // Both layouts sit exactly three levels under the root. Asserting the shape rather than the
-  // string keeps this meaningful on any checkout path.
-  assert.equal(path.basename(path.dirname(WORKSPACE_ROOT)) !== "packages", true);
+test("every path derived from WORKSPACE_ROOT lands on something that exists", () => {
+  // The behaviour that actually matters: these are the strings the installer writes into
+  // `~/.claude.json`. A root off by one level produces paths that point nowhere, and this is what
+  // notices — for all four servers at once, rather than for the root in the abstract.
   assert.ok(existsSync(path.join(WORKSPACE_ROOT, "packages", "manifest", "package.json")));
+  for (const server of SERVERS) {
+    const dir = serverDirPath(server);
+    assert.ok(existsSync(dir), `${server.key}: ${dir} does not exist`);
+    assert.ok(
+      existsSync(path.join(dir, "package.json")),
+      `${server.key}: ${dir} exists but is not a package — WORKSPACE_ROOT resolved to the wrong level`
+    );
+  }
+});
+
+test("WORKSPACE_ROOT is an ancestor of this module, at any depth", () => {
+  // Replaces "both layouts sit exactly three levels under the root", which pinned the very
+  // assumption B-09 removed. Containment holds for `src/` (tsx, here) and `dist/` (what `scripts/`
+  // loads), and keeps holding if the emitted layout ever gains a level.
+  const moduleDir = path.dirname(fileURLToPath(import.meta.url));
+  const relative = path.relative(WORKSPACE_ROOT, moduleDir);
+  assert.ok(
+    relative.length > 0 && !relative.startsWith("..") && !path.isAbsolute(relative),
+    `${moduleDir} is not inside ${WORKSPACE_ROOT}`
+  );
 });
 
 // --- the data itself ---------------------------------------------------------
@@ -229,14 +253,16 @@ test("familyExamples belong to prefix fields and match the prefix", () => {
 });
 
 test("the env contract covers every server, and grew as S-35 intended", () => {
-  // 96 vars across four servers, up from the 41 the manifest declared before S-35. The count is
+  // 98 vars across four servers, up from the 41 the manifest declared before S-35. The count is
   // asserted so that dropping a declaration is a test failure rather than a quiet regression in
   // the generated docs. codebase-index gained CODEBASE_INDEX_VECTOR_ENABLED (MCP-ISSUE-035) and
-  // CODEBASE_INDEX_MAX_TYPE_REF_EDGES_PER_FILE (MCP-ISSUE-038).
+  // CODEBASE_INDEX_MAX_TYPE_REF_EDGES_PER_FILE (MCP-ISSUE-038); postgres gained PGSSLMODE and
+  // NODE_TLS_REJECT_UNAUTHORIZED (backlog B-07) — external conventions a real install sets, which
+  // is why postgres-mcp is the one server whose env list is not entirely `POSTGRES_`-prefixed.
   const counts = Object.fromEntries(SERVERS.map((s) => [s.key, s.env.length]));
   assert.deepEqual(counts, {
     "codebase-index": 41,
-    "postgres-mcp": 21,
+    "postgres-mcp": 23,
     "observe-mcp": 23,
     "bitbucket-mcp": 11
   });

@@ -154,4 +154,8 @@ Honest list — these are preferences until something enforces them:
 - **`dist/` is not pruned by `tsc`.** After renaming or moving a source file, `rm -rf dist` before
   trusting a run — a stale module at the old path still loads and can mask a broken import. This has
   already produced one false "identical" verification result.
-- **Servers have no `clean` script**, so the point above has no one-command remedy.
+  **`npm run mcp:doctor` now detects it** (backlog B-12): a `dist/*.js` with no matching source file
+  is reported as `WARN dist stale build output: …` with the rebuild command. A warning, not a
+  failure — a stale module only matters when something still imports it by path.
+- **Servers have no `clean` script**, so the point above has no one-command remedy — the doctor
+  tells you when you need one.

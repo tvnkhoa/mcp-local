@@ -120,6 +120,10 @@ stays at the old path and still loads. Anything importing by path — the `.mjs`
 produced one verification that reported "identical" while executing the previous build. When you
 have moved files: `rm -rf dist && npm run build`. There is no `clean` script for servers.
 
+You do not have to remember this on your own any more: `npm run mcp:doctor` reports a `dist/*.js`
+with no matching source as `WARN dist stale build output: …`, naming the files and the rebuild
+command (backlog B-12). Run it after any rename before you trust a measurement.
+
 **Generated files are not editable.** Each server's `.env.example`, the `<!-- BEGIN/END GENERATED -->`
 blocks in its `README.md`, and its tool list come from `@mcp/manifest`. Edit
 `packages/manifest/src/envSpecs/<server>.ts` (or `servers.ts`), then `npm run generate:all`.

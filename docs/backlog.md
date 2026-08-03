@@ -2,8 +2,11 @@
 
 **Created** — 2026-07-29
 **Baseline** — `32f2a82`, working tree carrying the MCP-ISSUE-031/033 dead-code fixes
-**Refreshed** — 2026-08-03. **B-01, B-01b, B-02, B-02b and B-08 are done**; each closed row now
-cites the commit and the registry entry that proves it. Five of fourteen items closed, nine open.
+**Refreshed** — 2026-08-03. **Nine of fourteen items are closed** (B-01, B-01b, B-02, B-02b, B-07,
+B-08, B-09, B-12 done; B-10 won't-do with its underlying defect fixed). Every closed row cites the
+commit, command or registry entry that proves it. **Five remain open — B-03, B-04, B-05, B-06 and
+B-11** — and two of those cannot be closed by writing code at all: B-04 needs measurements spread
+across several commits, B-05 needs real credentials provisioned as CI secrets.
 **Input** — the post-migration assessment of `docs/migration/status.md` §, re-measured against the
 working tree rather than restated from the migration docs
 
@@ -323,7 +326,25 @@ builders. Those closures becoming exported functions is precisely what made MCP-
 
 ---
 
-### B-07 · Declare the two env vars a real install uses and the manifest does not
+### B-07 · Declare the two env vars a real install uses and the manifest does not — ✅ DONE 2026-08-03
+
+`PGSSLMODE` and `NODE_TLS_REJECT_UNAUTHORIZED` declared in `packages/manifest/src/envSpecs/postgres.ts`
+under a `Node / libpq runtime (external conventions)` section, both **without** `default` — the S-35
+finding: a field carrying one gets written into every user's `~/.claude.json`, which would pin an
+external convention. Generated `.env.example` shows both commented out, with the process-wide
+warning on the TLS flag; `generate:check` clean.
+
+**Two guards fired, which is the part worth recording.** The manifest count test
+(`postgres-mcp: 21 → 23`) and the S-43 test *"every postgres-mcp env var is POSTGRES_-prefixed"*
+both failed, correctly — the second is a real design tension, not a nuisance: these are libpq's and
+Node's names, so they cannot take the prefix S-43 exists to enforce.
+
+Resolved with an explicit `FOREIGN_CONVENTIONS` allowlist in `scripts/lib/envAliases.test.mjs`
+rather than a relaxed predicate, so "not `POSTGRES_`-prefixed" stays a failure by default and a
+third exemption is a deliberate edit. Two further assertions close the hole the exemption opens: an
+exempted name may carry neither `deprecatedAliases` nor `default`, and the allowlist may not name
+something the manifest no longer declares. All three proven to reject a violation by mutation
+before being kept.
 
 **Purpose** Close the last hole in "env declared once, generated outward".
 
@@ -389,7 +410,29 @@ named in the row.
 
 ---
 
-### B-09 · Make `WORKSPACE_ROOT` stop counting directories
+### B-09 · Make `WORKSPACE_ROOT` stop counting directories — ✅ DONE 2026-08-03
+
+`packages/manifest/src/paths.ts` now walks up from its own module until it finds a directory
+holding **both** `tsconfig.base.json` and `package.json`, and throws with an actionable message if
+it reaches the filesystem root. Correct at any depth, so nesting `dist/` or moving the package can
+no longer produce a silently wrong answer.
+
+Two markers, not one: every package and every server has a `package.json`, so searching for that
+alone stops at `packages/manifest/`.
+
+All three of this item's validations, run rather than reasoned:
+
+| check | result |
+|---|---|
+| `mcp:doctor` output byte-diffed against a baseline captured beforehand | **identical**, same exit code |
+| resolves from `src/` (tsx, the tests) and `dist/` (what `scripts/` loads) | both — `test:packages` 26/26, `mcp:doctor` PASS 4/4 |
+| fails loudly outside the workspace | copied `dist/` to a temp dir and imported it: threw *"Cannot locate the workspace root … walked to the filesystem root"* |
+
+This item also predicted that the existing test would become a tautology, and it was right — it
+asserted exactly the markers the new implementation searches for. Re-pointed at consequences
+instead: the root package's `name` (something the search never looks at), every `serverDirPath()`
+landing on a real package directory, and containment of this module rather than *"both layouts sit
+exactly three levels under the root"* — the very assumption this item removed.
 
 **Purpose** Remove a silent-failure mode from the one export the whole installer depends on.
 
@@ -421,7 +464,37 @@ paths).
 
 ---
 
-### B-10 · Delete the `scripts/lib/manifest.mjs` shim
+### B-10 · Delete the `scripts/lib/manifest.mjs` shim — ⛔ WON'T DO 2026-08-03 · the defect behind it fixed instead
+
+**The shim cannot be deleted without losing the message, and that is a fact about ESM rather than
+a preference.** This item assumed the actionable `ERR_MODULE_NOT_FOUND` re-throw could be
+"re-homed". It cannot:
+
+> A static `import … from "@mcp/manifest"` is **resolved during linking**, before the body of any
+> module in the graph runs. A preflight module imported first — the obvious re-homing — never
+> executes, because the graph fails to link first.
+
+Measured, not reasoned: `scripts/lib/requireBuiltPackages.mjs` was written, all eleven importers
+were repointed at the package, and with `packages/manifest/dist` moved aside **every entry point
+still died on a raw `ERR_MODULE_NOT_FOUND`** — `mcp:doctor`, `contract-snapshot`, `generate-env`,
+`run-servers`. The whole change was reverted.
+
+A dynamic `await import()` inside a try/catch is the only construct that can intercept it, and a
+dynamic import cannot be star-re-exported. **The hand-written name list is the price of the
+message, not an oversight** — which is what this item read it as.
+
+**What was a real defect, and is now fixed.** The list had drifted: eight names re-exported against
+the package's ten, so `TOOL_LISTS` and `TOTAL_TOOL_COUNT` were unreachable through the shim and
+resolved to `undefined` rather than failing. Both added, and `scripts/lib/manifestShim.test.mjs`
+now diffs the two export surfaces in both directions plus rejects any `undefined` re-export —
+proven by mutation to name the missing symbol in its failure message.
+
+**Also found: this item undercounted the importers, the same way the migration plan undercounted at
+S-34.** It lists seven; there are **eleven** — `scripts/lib/{cli,generate,skills,envPaths.test}.mjs`
+import it too.
+
+Reopening this needs `packages/*/dist` to stop being gitignored, or the entry points to accept a
+worse first-run message. Neither is worth it for 45 lines.
 
 **Purpose** Finish S-34. The shim was always temporary; `CLAUDE.md` says so.
 
@@ -475,7 +548,24 @@ standard `status.md` already sets for itself.
 
 ---
 
-### B-12 · Make stale `dist/` a check instead of a warning in three documents
+### B-12 · Make stale `dist/` a check instead of a warning in three documents — ✅ DONE 2026-08-03
+
+`mcp:doctor` gained a `dist` check: any `dist/**/*.js` with no matching source file is reported as
+`WARN dist stale build output: <names>` with `rm -rf dist && npm run build` in the fix list.
+
+Took the doctor-warning option, not clean-on-every-build, for the reason this item gives: a stale
+module only matters when something still imports it by path, and a full rebuild on every compile is
+too much to pay for an occasional trap. `.d.ts` and `.map` orphans are ignored — nothing loads them
+at runtime.
+
+Both halves of the validation ran: a clean tree reports `PASS dist every dist/*.js has a matching
+source file` on all four servers, and dropping a `ghostModule.js` into `bitbucket-mcp/dist`
+produced the warning naming that file, then PASS again once removed.
+
+The three prose copies (`codebase-index-mcp/CLAUDE.md`, `docs/onboarding.md`,
+`docs/conventions.md` §9) now point at the check instead of only warning — they stay because the
+rule is still worth stating, but they are no longer the *only* thing standing between a reader and
+a false measurement.
 
 **Purpose** Turn a known trap into something that detects itself.
 
@@ -510,8 +600,7 @@ item — listing them here is what stops them being "discovered" again every six
 
 | Item | Why it stays | Record |
 |---|---|---|
-| Four copies of `zod` / protocol SDK | The price of not hoisting `better-sqlite3` / `tree-sitter`. Measured consequence: `mapError` cannot be shared, `instanceof` fails across the boundary | ADR 0001 |
-| `mapError` not extracted | Same cause, measured not assumed | `duplication-extraction-report.md` §5 |
+| Four copies of `zod` / protocol SDK | The price of not hoisting `better-sqlite3` / `tree-sitter`. Measured consequence: **`instanceof` fails across the boundary**, so no shared module may match against a class it imported itself | ADR 0001 |
 | Three different SQL forbidden-token lists (18/13/16) | Partly correct by dialect — SQLite needs `pragma`, DataFusion has no `merge`. Mechanism shared, policy local; two tests pin the divergence | ADR 0002 |
 | No per-server `.gitignore` | Root file's `**/` patterns already decide every path | ADR 0003 |
 | Servers not moved into `servers/` | Cosmetic symmetry, and the only change that rewrites `~/.claude.json` | S-42, skipped |
@@ -519,6 +608,29 @@ item — listing them here is what stops them being "discovered" again every six
 | 17 `size/soft-cap` warnings | Advisory by design; several of those files are legitimately one thing | `conventions.md` §5 |
 | The postgres alias table existing twice | Required: a server may not import `@mcp/manifest` (`servers/tooling-import`). A test diffs the copies | S-43 |
 | `CH_DB_CONNECTION` kept in `efRunner` | It is *written*, not read — an outbound contract with a .NET project this workspace does not own | S-43 |
+
+### One row left this table — reopened, and resolved (2026-08-03)
+
+**`mapError` not extracted.** Listed above until 2026-08-03 on the strength of
+`duplication-extraction-report.md` §5. The measurement behind it was correct and still is: a shared
+mapper that **imports `zod` itself** compares against a different class object, both `instanceof`
+branches fall through, and every validation error degrades to `internal_error` carrying a raw zod
+dump.
+
+What did not follow is the conclusion. The constraint is *"a shared module must not `instanceof`
+against a class it imported"* — which says nothing about where the **algorithm** lives. Passing the
+classes in as parameters satisfies it directly: `createErrorMapper` (`packages/sdk/src/errorMapper.ts`,
+`4390fa1`) imports neither `zod` nor `@modelcontextprotocol/sdk`, and three servers now share the
+branch order while keeping every client-visible string local.
+
+The table's own rule — *reopening one needs a new ADR, not a backlog item* — is what happened:
+ADR 0001 carries the amendment. Two things worth keeping from it:
+
+- S-09 (deduplicating `zod`) was recorded as the prerequisite. **It was not**, and waiting for it
+  was the actual cost of the wrong conclusion.
+- ADR 0001 originally suggested duck-typing on `.name` as the escape hatch. Injection is strictly
+  safer: `errorMapper.test.ts` pins a same-named, same-shaped `RivalZodError` reaching
+  `internal_error`, which `.name` matching would have misclassified as a validation error.
 
 ---
 
@@ -532,20 +644,29 @@ B-02 ─> B-02b ─┘
 B-02b is closed, so an edge count is evidence again — every remaining item that
       validates a graph change can now measure instead of running a noise band
 
-B-08  ✅ closed 2026-08-03
+B-07 · B-08 · B-09 · B-12   ✅ closed 2026-08-03
+B-10                        ⛔ won't do — see the item; the drift it was really about is fixed
 
-B-03  independent, per-tool, pausable after any tool
-B-04  needs elapsed time more than effort — start collecting now, decide later
-B-05 · B-07 · B-09 · B-10 · B-11 · B-12   all independent
+Still open, and none of them blocks another:
+
+B-03  independent, per-tool, pausable after any tool — the only one that changes tool output
+B-04  needs elapsed time, not effort: five runs across different commits before a floor can be set
+B-05  needs credentials provisioned as CI secrets — a decision, not a task
+B-06  the largest remaining, and the one that makes future graph fixes cheaper to verify
+B-11  documentation only
 ```
 
-**Suggested next slice, now that the P1 investigations are closed:** B-07 (< 0.5 d, the last
-stated-vs-actual env gap), then B-06 — the two fixes above landed *without* the fixture-level tests
-this item was meant to provide, so their regressions are currently pinned by integration harnesses
-and a registry entry. B-04 begins as data collection and closes whenever the evidence is there.
+**Suggested next slice:** **B-06** is now the one worth doing first. It was originally scheduled to
+support B-01b and B-02b; those landed without it, verified against real repos, so their regressions
+are pinned by integration harnesses and a registry entry rather than by fixture-level tests. That
+worked once and is not a plan.
 
-The original plan had B-01/B-02 waiting on B-06. They did not wait, and both were verified against
-real repos instead. That worked, but it is why B-06 moved up rather than off the list.
+Then **B-04** as data collection — it closes whenever five runs' evidence exists, and starting late
+just moves the finish line. **B-05** is a conversation about credentials before it is any code.
+**B-03** stays last: it is the only remaining item that changes what a tool returns.
+
+The original plan had B-01/B-02 waiting on B-06. They did not wait. That is the one sequencing call
+this backlog got wrong, and it cost the assurance B-06 was supposed to provide.
 
 **What this backlog deliberately does not contain:** more restructuring. The tier model, the guards,
 the contracts and the generators all work and are all enforced. Every item above either makes a tool
@@ -563,9 +684,9 @@ tell the truth, or makes an existing gate capable of failing.
 | B-04 | Raise the graph-accuracy floor | P2 | Low | R1 | XS | open |
 | B-05 | Run `verify:live` on a schedule | P2 | **Med** | R1 | M | open |
 | B-06 | Unit tests in `codebase-index` | P2 | Low | R1 | M | open |
-| B-07 | Declare `PGSSLMODE` + `NODE_TLS_REJECT_UNAUTHORIZED` | P2 | Low | R1 | XS | open |
+| B-07 | Declare `PGSSLMODE` + `NODE_TLS_REJECT_UNAUTHORIZED` | P2 | Low | R1 | XS | ✅ 2026-08-03 |
 | B-08 | Correct the §9 reconciliation rows | P3 | Low | R1 | XS | ✅ 2026-08-03 |
-| B-09 | `WORKSPACE_ROOT` by marker, not depth | P3 | **Med** | R1 | S | open |
-| B-10 | Delete the manifest shim | P3 | Low | R1 | S | open |
+| B-09 | `WORKSPACE_ROOT` by marker, not depth | P3 | **Med** | R1 | S | ✅ 2026-08-03 · doctor output byte-identical |
+| B-10 | Delete the manifest shim | P3 | Low | R1 | S | ⛔ won't do — ESM links before it evaluates; drift fixed + guarded |
 | B-11 | One authoritative state document | P3 | Low | R1 | S | open |
-| B-12 | Detect stale `dist/` | P3 | Low | R1 | S | open |
+| B-12 | Detect stale `dist/` | P3 | Low | R1 | S | ✅ 2026-08-03 · `mcp:doctor` `dist` check |

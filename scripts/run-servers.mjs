@@ -5,7 +5,7 @@
  * The servers are deliberately NOT npm workspace members — they carry native
  * dependencies (`better-sqlite3`, `tree-sitter`) whose builds must not be
  * hoisted or deduplicated — so `npm run --workspaces` cannot reach them. This is
- * the equivalent, driven by `scripts/lib/manifest.mjs` so a newly registered
+ * the equivalent, driven by `@mcp/manifest` so a newly registered
  * server is covered without editing anything here.
  *
  * Usage:

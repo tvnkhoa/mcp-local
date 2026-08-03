@@ -144,7 +144,9 @@ Mọi `write_apply` / `write_rollback` / `migration_apply` được ghi vào b�
 | `POSTGRES_DOTNET_PROJECT` | no | — | renamed — still accepts `CH_DOTNET_PROJECT` · Path to the EF Core project (the one holding the DbContext). |
 | `POSTGRES_DOTNET_STARTUP_PROJECT` | no | — | renamed — still accepts `CH_DOTNET_STARTUP_PROJECT` · Startup project passed to `dotnet ef --startup-project`. |
 | `POSTGRES_DOTNET_TIMEOUT_MS` | no | `120000` *(code)* | renamed — still accepts `PG_DOTNET_TIMEOUT_MS` · Timeout for a `dotnet ef` invocation. |
+| `PGSSLMODE` | no | — | libpq's own TLS mode (`disable` \| `require` \| `verify-ca` \| `verify-full`), read by the driver, not by this server. Set it when the target requires TLS but the connection string does not say so. |
+| `NODE_TLS_REJECT_UNAUTHORIZED` | no | — | Set to 0 ONLY if the database host presents a self-signed/untrusted TLS certificate. This is a Node flag, not a server setting, and it disables certificate verification for the WHOLE process — every outbound TLS connection, not just Postgres. Prefer `PGSSLMODE=verify-full` with a trusted CA. |
 
-21 variables. Defaults marked *(code)* are the server's own fallback and are **not** written into your agent config — set them only to override.
+23 variables. Defaults marked *(code)* are the server's own fallback and are **not** written into your agent config — set them only to override.
 
 <!-- END GENERATED: env-table -->
