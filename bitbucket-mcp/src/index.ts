@@ -16,10 +16,8 @@
  *   - `src/tools.test.ts` pins every call response, including error envelopes
  */
 
-import process from "node:process";
-
 import { createEventLogger } from "@mcp/core";
-import { asErrorPayload, createMcpServer } from "@mcp/sdk";
+import { asErrorPayload, createMcpServer, runServer } from "@mcp/sdk";
 
 import { BitbucketClient } from "./services/bitbucketClient.js";
 import { loadConfig, describeConfig, type BitbucketConfig } from "./config/index.js";
@@ -50,12 +48,7 @@ const handle = createMcpServer({
   formatError: (error) => asErrorPayload(toWireError(error), "verbose")
 });
 
-async function main(): Promise<void> {
-  await handle.start();
-  eventLog.info("server_started", { config: describeConfig(config) });
-}
-
-main().catch((error) => {
-  eventLog.error("server_crashed", { error: mapError(error) });
-  process.exit(1);
+runServer(handle, {
+  onStarted: () => eventLog.info("server_started", { config: describeConfig(config) }),
+  onCrash: (error) => eventLog.error("server_crashed", { error: mapError(error) })
 });

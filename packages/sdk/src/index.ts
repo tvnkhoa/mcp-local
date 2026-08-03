@@ -22,19 +22,51 @@ export type {
 export { toToolDescriptor } from "./toolDefinition.js";
 
 export type { RawToolSpec, ToolSpec } from "./defineTool.js";
-export { annotations, defineTool } from "./defineTool.js";
+export { annotations, createTool, defineTool } from "./defineTool.js";
 
-export type { ResourceContent, ResourceDescriptor, ResourceProvider } from "./resources.js";
+export type { Entry } from "./collect.js";
+
+export type {
+  MatchedResourceSpec,
+  RegisterResourceOptions,
+  ResourceContent,
+  ResourceDefinition,
+  ResourceDescriptor,
+  ResourceProvider,
+  ResourceReadContext,
+  StaticResourceSpec
+} from "./resources.js";
+export { createResource, registerResource } from "./resources.js";
+
+export type {
+  PromptArgument,
+  PromptDefinition,
+  PromptDescriptor,
+  PromptMessage,
+  PromptProvider,
+  PromptResult,
+  PromptSpec
+} from "./prompts.js";
+export { createPrompt, registerPrompt, toPromptDescriptor } from "./prompts.js";
 
 export type { CallContext, CallWrapper } from "./callContext.js";
 
 export { defineGuard, featureFlagGuard, immutableTargetGuard, runGuards } from "./guards.js";
 
+export type {
+  ErrorClass,
+  ErrorMapperSpec,
+  ErrorRule,
+  ValidationErrorSpec,
+  WireError
+} from "./errorMapper.js";
+export { abortRule, createErrorMapper, stringProperty } from "./errorMapper.js";
+
 export type { SerializeOptions, ToolCallResult } from "./responses.js";
 export { asError, asErrorPayload, asFatalError, asText, serializePayload } from "./responses.js";
 
 export type { LegacyBridge, ListedToolDescriptor, RegistryOptions, ToolRegistry } from "./registry.js";
-export { createToolRegistry } from "./registry.js";
+export { createToolRegistry, registerTool } from "./registry.js";
 
 export type { DispatchDeps } from "./dispatch.js";
 export { dispatchToolCall } from "./dispatch.js";
@@ -48,4 +80,7 @@ export type { HealthCheckOptions, HealthCheckPayload, HealthStatus } from "./hea
 export { createHealthCheckTool } from "./healthTool.js";
 
 export type { McpServerHandle, McpServerOptions } from "./createServer.js";
-export { createMcpServer } from "./createServer.js";
+export { createMcpServer, createServer } from "./createServer.js";
+
+export type { RunServerOptions } from "./runServer.js";
+export { runServer } from "./runServer.js";

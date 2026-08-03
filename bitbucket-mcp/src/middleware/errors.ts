@@ -1,6 +1,8 @@
 import { McpError } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 
+import { abortRule, createErrorMapper, type WireError } from "@mcp/sdk";
+
 /**
  * Re-exported from @mcp/core, where the three servers' byte-identical copies now
  * live. Kept as a named export from this module so every existing import site is
@@ -24,50 +26,30 @@ export class BitbucketHttpError extends Error {
   }
 }
 
-export type MappedError = {
-  code: string;
-  message: string;
-  detail?: string;
-};
+export type MappedError = WireError;
 
 /**
- * Normalize any thrown value into a stable { code, message, detail? } shape.
+ * Normalize any thrown value into this server's `{ code, message, detail? }`
+ * envelope.
  *
- * NOT extracted to a shared package, despite being near-identical to
- * bitbucket-mcp's / observe-mcp's copy. The `z.ZodError` and `McpError` branches
- * are `instanceof` checks, and each server carries its OWN copy of `zod` and
- * `@modelcontextprotocol/sdk` (servers are intentionally not npm workspace
- * members, so those deps are not hoisted or deduplicated). A shared
- * implementation would compare against a DIFFERENT class object and both
- * branches would silently fall through — turning every validation error into
- * `internal_error` with a raw Zod JSON dump as its message. Verified empirically:
- * an error from a server's zod is not `instanceof` the hoisted zod's ZodError.
+ * The branch order and every string are unchanged from the hand-written version;
+ * what moved into `@mcp/sdk` is the order itself, which this server shared exactly
+ * with observe-mcp and almost exactly with postgres-mcp.
  *
- * Safe to share once the servers deduplicate those two dependencies
- * (migration-plan step S-09), and not before.
+ * **The classes are passed in, not imported by the SDK, and that is the whole
+ * point.** Per ADR-0001 this server owns its own copies of `zod` and
+ * `@modelcontextprotocol/sdk`, so a `ZodError` thrown here is not an instance of
+ * any class a shared package could import. Injecting them keeps every `instanceof`
+ * running against the classes this server actually throws — which is why the
+ * extraction is safe now rather than only once those dependencies are
+ * deduplicated (migration-plan step S-09).
  */
-export function mapError(error: unknown): MappedError {
-  if (error instanceof z.ZodError) {
-    return {
-      code: "validation_error",
-      message: "Invalid arguments.",
-      detail: error.issues.map((i) => `${i.path.join(".") || "(root)"}: ${i.message}`).join("; ")
-    };
-  }
-  if (error instanceof PolicyViolationError) {
-    return { code: error.code, message: error.message };
-  }
-  if (error instanceof BitbucketHttpError) {
-    return { code: error.code, message: error.message, detail: error.detail };
-  }
-  if (error instanceof McpError) {
-    return { code: "mcp_error", message: error.message };
-  }
-  if (error instanceof Error) {
-    if (error.name === "AbortError") {
-      return { code: "timeout", message: "Request to Bitbucket timed out." };
-    }
-    return { code: "internal_error", message: error.message };
-  }
-  return { code: "internal_error", message: String(error) };
-}
+export const mapError: (error: unknown) => MappedError = createErrorMapper({
+  validation: { type: z.ZodError, message: "Invalid arguments.", rootLabel: "(root)" },
+  // Order preserved: a policy violation is matched before an upstream HTTP error.
+  coded: [PolicyViolationError, BitbucketHttpError],
+  mcpError: McpError,
+  rules: [abortRule("Request to Bitbucket timed out.")]
+  // No `fallback`: the platform default *is* this server's previous behaviour —
+  // `internal_error` carrying the thrown value's own message.
+});

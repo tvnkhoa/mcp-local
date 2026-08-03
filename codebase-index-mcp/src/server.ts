@@ -39,7 +39,7 @@ import { createMcpServer } from "@mcp/sdk";
 
 import { mapError } from "./middleware/errorHandler.js";
 import type { GraphStore } from "./repositories/graphStore.js";
-import { handleListResources, handleReadResource } from "./resources/resourceHandler.js";
+import { buildRepoResources } from "./resources/resourceHandler.js";
 import type { HandlerContext } from "./tools/handlers/handlerContext.js";
 import {
   type ResponseProfile,
@@ -138,15 +138,11 @@ export function createCodebaseIndexServer(options: CodebaseIndexServerOptions): 
   /**
    * The `repo://{repoId}/{context|schema|routes|risk}` resources.
    *
-   * `read` never returns the not-served sentinel: `handleReadResource` throws its own
-   * `McpError` for both an unroutable URI and an unknown repoId, and a provider's throw
-   * propagates unchanged. That keeps the message the client already gets, rather than the
-   * platform's generic substitute.
+   * Composed by `registerResource` inside `buildRepoResources`, which is also where the
+   * two behaviours the platform would otherwise supply defaults for are pinned: the
+   * unroutable-URI message stays this server's, and a cursored list stays an empty page.
    */
-  const resources: ResourceProvider = {
-    list: (cursor) => handleListResources(options.store, cursor).resources,
-    read: (uri) => handleReadResource(uri, options.store, options.limits.maxResultLimit).contents
-  };
+  const resources: ResourceProvider = buildRepoResources(options.store, options.limits.maxResultLimit);
 
   /**
    * Establish the per-request scope, then run the pre-dispatch watch policy inside it.

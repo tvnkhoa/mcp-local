@@ -17,6 +17,7 @@ import os from "node:os";
 import { fileURLToPath } from "node:url";
 
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
+import { runServer } from "@mcp/sdk";
 
 import { GraphStore } from "./repositories/graphStore.js";
 import { assertPathAllowed, clamp } from "./middleware/indexGuardrails.js";
@@ -201,12 +202,14 @@ handle.lifecycle.onShutdown({
   }
 });
 
-async function main(): Promise<void> {
-  await handle.start();
-  await startAutoWatchers(buildHandlerContext(), AUTO_WATCH_REPOS);
-}
-
-main().catch((error) => {
-  process.stderr.write(`${error instanceof Error ? error.stack ?? error.message : String(error)}\n`);
-  void handle.stop("startup_failed").finally(() => process.exit(1));
+runServer(handle, {
+  onStarted: () => startAutoWatchers(buildHandlerContext(), AUTO_WATCH_REPOS),
+  // The store and the watchers are acquired above, before start() — so unlike the other
+  // three servers this one must run its shutdown hooks on a failed start-up.
+  stopOnCrash: true,
+  // The raw stack, not an event line: this is the only diagnostic a start-up failure
+  // leaves behind, and it goes to stderr because stdout is the transport.
+  onCrash: (error) => {
+    process.stderr.write(`${error instanceof Error ? error.stack ?? error.message : String(error)}\n`);
+  }
 });

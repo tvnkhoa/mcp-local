@@ -7,85 +7,71 @@ import { PolicyViolationError, isPlatformError } from "@mcp/core";
 import { McpError } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 
+import { createErrorMapper, stringProperty, type ErrorRule, type WireError } from "@mcp/sdk";
+
 export { PolicyViolationError };
 
-export type MappedError = {
-  code: string;
-  message: string;
-  detail?: string;
+export type MappedError = WireError;
+
+/** Postgres `SQLSTATE 57014` — the statement was cancelled by `statement_timeout`. */
+const statementTimeout: ErrorRule = (error) =>
+  stringProperty(error, "code") === "57014"
+    ? { code: "timeout", message: "Query timed out by statement_timeout." }
+    : undefined;
+
+/**
+ * Any other failure that arrived with a message — in practice a `pg` driver error.
+ *
+ * The driver's message goes in `detail` and never in `message`, which is why this
+ * server cannot use the platform's default catch-all: a connection failure's
+ * message can carry the connection string.
+ */
+const databaseFailure: ErrorRule = (error) => {
+  const message = stringProperty(error, "message");
+  // Truthiness, not just presence: the hand-written branch was `if (message)`, so an
+  // object carrying an EMPTY message falls through to the catch-all below instead of
+  // reporting a database failure with nothing to show for it.
+  return message ? { code: "internal_error", message: "Database query failed.", detail: message } : undefined;
 };
 
 /**
  * Normalize any thrown value into this server's stable `{ code, message, detail? }`
- * envelope. Moved here verbatim from `index.ts` when the tool table was extracted
- * (S-24); the branch order and every string are unchanged, because this shape is
+ * envelope. The branch order and every string are unchanged, because this shape is
  * what clients already parse.
  *
- * NOT extracted to a shared package, despite being near-identical to
- * bitbucket-mcp's and observe-mcp's copies. The `z.ZodError` and `McpError`
- * branches are `instanceof` checks, and each server carries its OWN copy of `zod`
- * and `@modelcontextprotocol/sdk` (servers are intentionally not npm workspace
- * members, so those deps are not hoisted or deduplicated). A shared implementation
- * would compare against a DIFFERENT class object and both branches would silently
- * fall through — turning every validation error into `internal_error` with a raw
- * Zod dump as its detail. Safe to share once those two dependencies are
- * deduplicated (migration-plan step S-09), and not before.
+ * What moved into `@mcp/sdk` is the branch order this server shared with
+ * observe-mcp and bitbucket-mcp. The two branches it does *not* share, and its
+ * catch-all, stay here as rules.
+ *
+ * **The classes are passed in, not imported by the SDK, and that is the whole
+ * point.** Per ADR-0001 this server owns its own copies of `zod` and
+ * `@modelcontextprotocol/sdk`, so a `ZodError` thrown here is not an instance of
+ * any class a shared package could import. Injecting them keeps every `instanceof`
+ * running against the classes this server actually throws — which is why the
+ * extraction is safe now rather than only once those dependencies are deduplicated
+ * (migration-plan step S-09).
  */
-export function mapError(error: unknown): MappedError {
-  if (error instanceof z.ZodError) {
-    return {
-      code: "validation_error",
-      message: "Invalid tool input.",
-      detail: error.issues.map((x) => `${x.path.join(".") || "root"}: ${x.message}`).join("; ")
-    };
-  }
-
-  if (error instanceof PolicyViolationError) {
-    return {
-      code: error.code,
-      message: error.message
-    };
-  }
-
-  if (error instanceof McpError) {
-    return {
-      code: "mcp_error",
-      message: error.message
-    };
-  }
-
-  if (typeof error === "object" && error !== null) {
-    const maybe = error as Record<string, unknown>;
-    const code = typeof maybe.code === "string" ? maybe.code : undefined;
-    const message = typeof maybe.message === "string" ? maybe.message : undefined;
-    if (code === "57014") {
-      return {
-        code: "timeout",
-        message: "Query timed out by statement_timeout."
-      };
-    }
-    if (message) {
-      return {
-        code: "internal_error",
-        message: "Database query failed.",
-        detail: message
-      };
-    }
-  }
-
-  return {
-    code: "internal_error",
-    message: "Unexpected error."
-  };
-}
+export const mapError: (error: unknown) => MappedError = createErrorMapper({
+  validation: { type: z.ZodError, message: "Invalid tool input.", rootLabel: "root" },
+  coded: [PolicyViolationError],
+  mcpError: McpError,
+  // Order preserved: SQLSTATE first, so a cancelled statement is reported as a
+  // timeout rather than as a generic database failure.
+  rules: [statementTimeout, databaseFailure],
+  fallback: () => ({ code: "internal_error", message: "Unexpected error." })
+});
 
 /**
  * `mapError`, plus the refusals dispatch itself raises.
  *
- * A `PlatformError` reaching `mapError` would fall into its generic
- * "object with a message" branch and be reported as `internal_error: Database
- * query failed` — actively misleading for something like an unknown tool name.
- * Unwrapping it first preserves the code dispatch chose.
+ * A `PlatformError` reaching `mapError` would fall into the `databaseFailure` rule
+ * and be reported as `internal_error: Database query failed` — actively misleading
+ * for something like an unknown tool name. Unwrapping it first preserves the code
+ * dispatch chose.
+ *
+ * Stays a hand-written wrapper rather than becoming another mapper branch:
+ * `isPlatformError` is this server's own import, and "platform errors take
+ * precedence over everything" is this server's decision, not the shared engine's.
  */
 export function toWireError(error: unknown): MappedError {
   if (isPlatformError(error)) {

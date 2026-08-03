@@ -26,6 +26,7 @@
  */
 
 import type { AnyToolDefinition } from "@mcp/sdk";
+import { registerTool } from "@mcp/sdk";
 
 import type { PostgresDeps } from "./common.js";
 import { buildMigrationTools } from "./migrationTools.js";
@@ -37,7 +38,11 @@ export type { PostgresDeps, QueryLimits } from "./common.js";
 /**
  * The 17 tools in registration order — which is the order `tools/list`
  * advertises, and is unchanged from the hand-written array it replaced.
+ *
+ * `registerTool` flattens the three groups and rejects a duplicate name at the
+ * point of assembly, so a tool accidentally declared in two groups fails here
+ * rather than inside the runtime one frame later.
  */
-export function buildTools(deps: PostgresDeps): AnyToolDefinition[] {
-  return [...buildReadTools(deps), ...buildWriteTools(deps), ...buildMigrationTools(deps)];
+export function buildTools(deps: PostgresDeps): readonly AnyToolDefinition[] {
+  return registerTool([buildReadTools(deps), buildWriteTools(deps), buildMigrationTools(deps)]);
 }

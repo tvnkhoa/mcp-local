@@ -40,10 +40,24 @@ copies of `zod` and four of `@modelcontextprotocol/sdk`, one per server.
 That is not merely disk: it means **`instanceof` does not work across the boundary**.
 A `ZodError` thrown inside `postgres-mcp` is not an instance of the `ZodError` class
 that `packages/shared` would import, because they are different class objects from
-different module instances. This is the concrete reason each server still owns its own
-`mapError` rather than sharing one — see `s24-notes.md`. Any shared code that needs to
-classify an error must do so structurally (duck-typing on `.name`/`.code`), never with
-`instanceof`.
+different module instances. Any shared code that needs to classify an error must
+therefore never `instanceof` against a class **it imported itself**.
+
+> **Amendment — the third option: injection.** This consequence was read for a while as
+> "each server must own its own `mapError`" (`s24-notes.md`), leaving three near-identical
+> copies. That does not follow. A shared classifier can take the class objects **as
+> parameters**: `createErrorMapper` in `@mcp/sdk` imports neither `zod` nor
+> `@modelcontextprotocol/sdk`, and each server passes its own `z.ZodError` and `McpError`
+> in, so every `instanceof` runs against exactly the classes that server throws.
+>
+> This satisfies the constraint above rather than working around it, and it is strictly
+> safer than the duck-typing escape hatch originally suggested: matching on `.name` would
+> classify any object that happens to be called `ZodError`. `packages/sdk/src/errorMapper.test.ts`
+> pins that difference with two same-named, same-shaped classes.
+>
+> What is shared is the branch order and the envelope shape; every client-visible string
+> stays in the server. Deduplicating `zod` and `@modelcontextprotocol/sdk` (S-09) is no
+> longer a prerequisite for sharing error classification.
 
 **Accepted cost — five lockfiles.** CI caches all of them
 (`.github/workflows/ci.yml`, `cache-dependency-path`), and the root aggregate scripts

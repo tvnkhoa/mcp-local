@@ -10,6 +10,7 @@
  */
 
 import type { AnyToolDefinition } from "@mcp/sdk";
+import { registerTool } from "@mcp/sdk";
 
 import { buildReadMetadataTools } from "./readMetadata.js";
 import { buildRefactorTools } from "./refactor.js";
@@ -20,6 +21,17 @@ import type { CodebaseIndexDeps } from "./common.js";
 
 export type { CodebaseIndexDeps } from "./common.js";
 
-export function buildTools(deps: CodebaseIndexDeps): AnyToolDefinition[] {
-  return [...buildReadMetadataTools(deps), ...buildSearchTools(deps), ...buildGraphImpactTools(deps), ...buildIndexingWatchTools(deps), ...buildRefactorTools(deps)];
+/**
+ * `registerTool` flattens the five groups and rejects a duplicate name at the point
+ * of assembly — with 43 tools across five files, two groups declaring the same name
+ * is the mistake worth catching by construction.
+ */
+export function buildTools(deps: CodebaseIndexDeps): readonly AnyToolDefinition[] {
+  return registerTool([
+    buildReadMetadataTools(deps),
+    buildSearchTools(deps),
+    buildGraphImpactTools(deps),
+    buildIndexingWatchTools(deps),
+    buildRefactorTools(deps)
+  ]);
 }

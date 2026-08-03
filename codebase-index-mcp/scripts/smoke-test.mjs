@@ -199,36 +199,51 @@ async function main() {
   // Scoped to two SMALL subtrees rather than all of src/ and scripts/. Matches come back
   // ordered by path, so a broad pattern lets the alphabetically-earlier prefix consume the
   // whole `limit` and starve the other one — which looks exactly like the OR being broken.
-  // That is not hypothetical: with `["src/", "scripts/"]` and `limit: 200`, scripts/ alone
-  // crossed 200 matches of "import" in S-31 and this assertion failed on a server whose
-  // behaviour was unchanged. Two subtrees whose combined match count stays far below the
-  // limit test the same semantics without the volume coupling.
-  const OR_PREFIXES = ["src/repositories/", "src/tools/"];
-  const regexMultiPrefix = readJsonTextContent(
-    await client.callTool({
-      name: "search_regex",
-      arguments: { repoId, pattern: "import", filePathPrefix: OR_PREFIXES, limit: 200 }
-    })
-  ).json;
-  if (regexMultiPrefix.matches.length >= 200) {
-    throw new Error("smoke-test: OR-semantics probe hit its own limit — narrow the prefixes or the pattern");
+  // That is not hypothetical, and it happened twice: with `["src/", "scripts/"]` and
+  // `limit: 200`, scripts/ alone crossed 200 matches of "import" in S-31; the replacement
+  // pair `["src/repositories/", "src/tools/"]` then grew past 200 as well (291 by the time
+  // the builder refactor touched it), failing again on unchanged behaviour.
+  //
+  // Twice is enough: the assertion no longer depends on how big the subtrees are. Each
+  // prefix is measured on its OWN, and the OR is checked as exact set equality against
+  // those two measurements — `both === kept + excludable`. Starvation and a broken OR now
+  // fail differently from each other, and neither needs a hand-tuned volume assumption.
+  // The limit stays only as a runaway guard, and the two prefixes are named once so the
+  // exclusion glob cannot drift from the query it describes.
+  const OR_PREFIX_KEPT = "src/resources/";
+  const OR_PREFIX_EXCLUDED = "src/config/";
+  const OR_PREFIXES = [OR_PREFIX_KEPT, OR_PREFIX_EXCLUDED];
+  const OR_LIMIT = 500;
+  const searchScoped = async (filePathPrefix, extra = {}) =>
+    readJsonTextContent(
+      await client.callTool({
+        name: "search_regex",
+        arguments: { repoId, pattern: "import", filePathPrefix, limit: OR_LIMIT, ...extra }
+      })
+    ).json;
+
+  const keptAlone = await searchScoped([OR_PREFIX_KEPT]);
+  const excludableAlone = await searchScoped([OR_PREFIX_EXCLUDED]);
+  const regexMultiPrefix = await searchScoped(OR_PREFIXES);
+  const expectedUnion = keptAlone.matches.length + excludableAlone.matches.length;
+
+  if (keptAlone.matches.length === 0 || excludableAlone.matches.length === 0) {
+    throw new Error(`smoke-test: an OR probe subtree matches nothing on its own (${OR_PREFIX_KEPT}=${keptAlone.matches.length}, ${OR_PREFIX_EXCLUDED}=${excludableAlone.matches.length}) — pick subtrees that still contain the pattern`);
   }
-  const hasStore = regexMultiPrefix.matches.some((m) => m.filePath.startsWith("src/repositories/"));
-  const hasTools = regexMultiPrefix.matches.some((m) => m.filePath.startsWith("src/tools/"));
-  if (!hasStore || !hasTools) {
-    throw new Error(`ISSUE-028 regression: filePathPrefix array did not OR across subtrees (store=${hasStore}, tools=${hasTools})`);
+  if (expectedUnion >= OR_LIMIT) {
+    throw new Error(`smoke-test: OR probe subtrees outgrew the ${OR_LIMIT} limit (${expectedUnion} matches) — narrow the prefixes or the pattern`);
   }
-  const regexExcluded = readJsonTextContent(
-    await client.callTool({
-      name: "search_regex",
-      arguments: { repoId, pattern: "import", filePathPrefix: OR_PREFIXES, pathExclude: "src/tools/**", limit: 200 }
-    })
-  ).json;
-  if (regexExcluded.matches.some((m) => m.filePath.startsWith("src/tools/"))) {
-    throw new Error("ISSUE-028 regression: pathExclude 'src/tools/**' did not subtract the excluded subtree");
+  if (regexMultiPrefix.matches.length !== expectedUnion) {
+    throw new Error(`ISSUE-028 regression: filePathPrefix array is not the union of its prefixes (both=${regexMultiPrefix.matches.length}, ${OR_PREFIX_KEPT}=${keptAlone.matches.length}, ${OR_PREFIX_EXCLUDED}=${excludableAlone.matches.length})`);
   }
-  if (regexExcluded.matches.length === 0) {
-    throw new Error("ISSUE-028 regression: pathExclude subtracted everything, not just the excluded subtree");
+
+  const regexExcluded = await searchScoped(OR_PREFIXES, { pathExclude: `${OR_PREFIX_EXCLUDED}**` });
+  if (regexExcluded.matches.some((m) => m.filePath.startsWith(OR_PREFIX_EXCLUDED))) {
+    throw new Error(`ISSUE-028 regression: pathExclude '${OR_PREFIX_EXCLUDED}**' did not subtract the excluded subtree`);
+  }
+  // Exact, not merely non-empty: subtracting one prefix must leave the other one whole.
+  if (regexExcluded.matches.length !== keptAlone.matches.length) {
+    throw new Error(`ISSUE-028 regression: pathExclude did not subtract exactly the excluded subtree (remaining=${regexExcluded.matches.length}, expected=${keptAlone.matches.length})`);
   }
   console.log("SEARCH_REGEX_SCOPE_OK:", { bothSubtrees: regexMultiPrefix.matches.length, oneExcluded: regexExcluded.matches.length });
 

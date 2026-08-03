@@ -18,7 +18,7 @@
 
 import { ok } from "@mcp/core";
 import type { AnyToolDefinition, JsonSchemaNode, ToolCallResult } from "@mcp/sdk";
-import { annotations, defineTool, schema } from "@mcp/sdk";
+import { annotations, defineTool, registerTool, schema } from "@mcp/sdk";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 
@@ -85,7 +85,7 @@ function describeFields(
     .sort((a, b) => a.name.localeCompare(b.name));
 }
 
-export function buildTools(config: ObserveConfig, client: ObserveClient): AnyToolDefinition[] {
+export function buildTools(config: ObserveConfig, client: ObserveClient): readonly AnyToolDefinition[] {
   // --- shared zod fragments --------------------------------------------------
   const profileArg = responseProfileSchema.optional();
   const offsetArg = z.number().int().min(0).optional();
@@ -532,7 +532,9 @@ export function buildTools(config: ObserveConfig, client: ObserveClient): AnyToo
 
   // Registration order is the order `tools/list` advertises, unchanged from the
   // hand-written array it replaced.
-  return [
+  // Order is the order `tools/list` advertises. `registerTool` only flattens and
+  // rejects a duplicate name; it does not reorder.
+  return registerTool([
     listStreams,
     searchLogs,
     traceLogs,
@@ -541,5 +543,5 @@ export function buildTools(config: ObserveConfig, client: ObserveClient): AnyToo
     logStats,
     runObserveQuery,
     describeStream
-  ];
+  ]);
 }

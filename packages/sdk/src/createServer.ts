@@ -12,6 +12,8 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import {
   CallToolRequestSchema,
   ErrorCode,
+  GetPromptRequestSchema,
+  ListPromptsRequestSchema,
   ListResourcesRequestSchema,
   ListToolsRequestSchema,
   McpError,
@@ -19,17 +21,21 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 
 import type { Logger, ResponseProfile } from "@mcp/core";
-import { DEFAULT_RESPONSE_PROFILE, createLogger } from "@mcp/core";
+import { DEFAULT_RESPONSE_PROFILE, createLogger, isPlatformError } from "@mcp/core";
 
 import type { CallContext, CallWrapper } from "./callContext.js";
+import type { Entry } from "./collect.js";
 import { redirectConsoleToStderr } from "./console.js";
 import type { DispatchDeps } from "./dispatch.js";
 import { dispatchToolCall } from "./dispatch.js";
 import type { Lifecycle } from "./lifecycle.js";
 import { createLifecycle } from "./lifecycle.js";
+import type { PromptDefinition, PromptProvider } from "./prompts.js";
+import { registerPrompt } from "./prompts.js";
 import type { LegacyBridge, ToolRegistry } from "./registry.js";
 import { createToolRegistry } from "./registry.js";
-import type { ResourceProvider } from "./resources.js";
+import type { ResourceDefinition, ResourceProvider } from "./resources.js";
+import { registerResource } from "./resources.js";
 import type { SerializeOptions, ToolCallResult } from "./responses.js";
 import { asFatalError } from "./responses.js";
 import type { AnyToolDefinition } from "./toolDefinition.js";
@@ -64,8 +70,16 @@ export interface McpServerOptions {
    * Read-addressable state served over `resources/list` and `resources/read`.
    * Supplying one is what declares the `resources` capability — a server that
    * has none must not advertise it.
+   *
+   * A list of `createResource` definitions is composed with `registerResource`
+   * defaults; pass the provider itself when you need its options.
    */
-  readonly resources?: ResourceProvider;
+  readonly resources?: ResourceProvider | readonly Entry<ResourceDefinition>[];
+  /**
+   * Message templates served over `prompts/list` and `prompts/get`. Same rule as
+   * `resources`: supplying one is what declares the `prompts` capability.
+   */
+  readonly prompts?: PromptProvider | readonly Entry<PromptDefinition>[];
   /**
    * Run around every `tools/call`. The only place with access to the request's
    * progress token and notification channel, and the only place a server-wide
@@ -90,11 +104,35 @@ export function createMcpServer(options: McpServerOptions): McpServerHandle {
   });
   const lifecycle = createLifecycle(logger);
 
-  const resources = options.resources;
+  /**
+   * A *list* of definitions is composed here; a provider is taken as given.
+   *
+   * An empty list counts as none at all, so it does not advertise the capability:
+   * a server passing `[]` has declared no resources, and a capability with
+   * nothing behind it invites a client to call a method the server cannot
+   * usefully answer. A provider is never second-guessed this way — it may be
+   * serving state that is only empty right now.
+   */
+  const resources = Array.isArray(options.resources)
+    ? options.resources.length === 0
+      ? undefined
+      : registerResource(options.resources)
+    : (options.resources as ResourceProvider | undefined);
+  const prompts = Array.isArray(options.prompts)
+    ? options.prompts.length === 0
+      ? undefined
+      : registerPrompt(options.prompts)
+    : (options.prompts as PromptProvider | undefined);
 
   const server = new Server(
     { name: options.name, version: options.version },
-    { capabilities: { tools: {}, ...(resources === undefined ? {} : { resources: {} }) } }
+    {
+      capabilities: {
+        tools: {},
+        ...(resources === undefined ? {} : { resources: {} }),
+        ...(prompts === undefined ? {} : { prompts: {} })
+      }
+    }
   );
 
   server.setRequestHandler(ListToolsRequestSchema, async () => ({
@@ -175,6 +213,46 @@ export function createMcpServer(options: McpServerOptions): McpServerHandle {
     });
   }
 
+  if (prompts !== undefined) {
+    server.setRequestHandler(ListPromptsRequestSchema, async (request) => ({
+      // Cursor forwarded, not interpreted — the provider owns paging, as with resources.
+      prompts: (await prompts.list(request.params?.cursor)).map((descriptor) => ({
+        ...descriptor,
+        ...(descriptor.arguments === undefined
+          ? {}
+          : { arguments: descriptor.arguments.map((argument) => ({ ...argument })) })
+      }))
+    }));
+
+    server.setRequestHandler(GetPromptRequestSchema, async (request) => {
+      const name = request.params.name;
+      let result;
+      try {
+        result = await prompts.get(name, request.params.arguments ?? {});
+      } catch (cause) {
+        /**
+         * A user-audience `PlatformError` is a bad request, not a server fault —
+         * a missing required argument being the one `createPrompt` itself raises.
+         * Mapping it to invalid-params keeps the client's own retry logic viable;
+         * anything else is a genuine failure and propagates as it is.
+         */
+        if (isPlatformError(cause) && cause.audience === "user") {
+          throw new McpError(ErrorCode.InvalidParams, cause.message);
+        }
+        throw cause;
+      }
+      if (result === undefined) {
+        // Same distinction resources draw: a name this server does not serve is
+        // an invalid parameter, not an internal fault.
+        throw new McpError(ErrorCode.InvalidParams, `Unknown prompt: ${name}`);
+      }
+      return {
+        ...(result.description === undefined ? {} : { description: result.description }),
+        messages: result.messages.map((message) => ({ ...message, content: { ...message.content } }))
+      };
+    });
+  }
+
   let restoreConsole: (() => void) | undefined;
   let detachSignals: (() => void) | undefined;
 
@@ -219,3 +297,13 @@ export function createMcpServer(options: McpServerOptions): McpServerHandle {
     }
   };
 }
+
+/**
+ * `createMcpServer` under the name the rest of the builder family uses.
+ *
+ * An alias, not a rename: all four servers call `createMcpServer`, and renaming
+ * their call sites would be churn with no behavioural gain. `createServer` /
+ * `createTool` / `createPrompt` / `createResource` read as one vocabulary for new
+ * code.
+ */
+export const createServer: typeof createMcpServer = createMcpServer;

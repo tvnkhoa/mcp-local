@@ -16,10 +16,8 @@
  *   - `src/tools/tools.test.ts` pins call responses, including error envelopes
  */
 
-import process from "node:process";
-
 import { createEnvReader, createEventLogger, defaultEnvSource } from "@mcp/core";
-import { asErrorPayload, createMcpServer } from "@mcp/sdk";
+import { asErrorPayload, createMcpServer, runServer } from "@mcp/sdk";
 
 import { ConnectionManager } from "./repositories/connectionManager.js";
 import { toWireError } from "./middleware/errors.js";
@@ -112,17 +110,14 @@ const handle = createMcpServer({
   formatError: (error) => asErrorPayload(toWireError(error), "verbose")
 });
 
-async function main(): Promise<void> {
-  await handle.start();
-  eventLog.info("server_started", {
-    name: "communicationhub-postgres-mcp",
-    version: "0.2.0",
-    defaultEnvironment: connections.defaultEnvironment,
-    environments: connections.list().map((e) => `${e.name}:${e.capabilities.join("|")}`)
-  });
-}
-
-main().catch((error) => {
-  eventLog.error("server_crashed", { error: error instanceof Error ? error.message : String(error) });
-  process.exit(1);
+runServer(handle, {
+  onStarted: () =>
+    eventLog.info("server_started", {
+      name: "communicationhub-postgres-mcp",
+      version: "0.2.0",
+      defaultEnvironment: connections.defaultEnvironment,
+      environments: connections.list().map((e) => `${e.name}:${e.capabilities.join("|")}`)
+    }),
+  onCrash: (error) =>
+    eventLog.error("server_crashed", { error: error instanceof Error ? error.message : String(error) })
 });

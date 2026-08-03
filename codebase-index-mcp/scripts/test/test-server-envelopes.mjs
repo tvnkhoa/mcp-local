@@ -28,7 +28,7 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 import { writeFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { makeTempDir } from "./_fixtures.mjs";
-import { handleListResources } from "../../dist/resources/resourceHandler.js";
+import { buildRepoResources } from "../../dist/resources/resourceHandler.js";
 
 let passed = 0, failed = 0;
 function assert(cond, label, detail = "") {
@@ -285,8 +285,9 @@ try {
   // nextCursor, so a conforming client never sends one. Asserted directly instead,
   // because a provider interface with no cursor parameter silently loses it.
   const fakeStore = { listRepositories: () => [{ repoId: "r1", repoPath: "/tmp/r1" }] };
-  assert(handleListResources(fakeStore).resources.length === 4, "handleListResources: no cursor → full list");
-  assert(handleListResources(fakeStore, "some-cursor").resources.length === 0, "handleListResources: any cursor → empty page");
+  const repoResources = buildRepoResources(fakeStore, 500);
+  assert((await repoResources.list()).length === 4, "resources/list: no cursor → full list");
+  assert((await repoResources.list("some-cursor")).length === 0, "resources/list: any cursor → empty page");
 
   // ── Telemetry, on both paths ─────────────────────────────────────────────────
   const telemetry = stderrText.split("\n").filter((line) => line.includes("[tool-telemetry]"));

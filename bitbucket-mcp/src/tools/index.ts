@@ -8,7 +8,7 @@
 
 import { isPlatformError, ok } from "@mcp/core";
 import type { PlatformError, Result } from "@mcp/core";
-import { annotations, defineTool, schema } from "@mcp/sdk";
+import { annotations, defineTool, registerTool, schema } from "@mcp/sdk";
 import type { AnyToolDefinition, JsonSchemaNode } from "@mcp/sdk";
 import { z } from "zod";
 
@@ -35,7 +35,7 @@ export function toWireError(error: unknown): { code: string; message: string; de
 
 const UUID_RE = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
 
-export function buildTools(config: BitbucketConfig, client: BitbucketClient): AnyToolDefinition[] {
+export function buildTools(config: BitbucketConfig, client: BitbucketClient): readonly AnyToolDefinition[] {
   // --- shared zod fragments -------------------------------------------------
   const profileArg = responseProfileSchema.optional();
   const repoSlugArg = z.string().min(1).max(256).optional();
@@ -337,7 +337,9 @@ export function buildTools(config: BitbucketConfig, client: BitbucketClient): An
 
   // Registration order is the order clients see in `tools/list`. The helper
   // functions below are declarations, so they are hoisted and usable here.
-  return [
+  // Order is the order `tools/list` advertises. `registerTool` only flattens and
+  // rejects a duplicate name; it does not reorder.
+  return registerTool([
     healthCheckTool,
     listRepositoriesTool,
     getRepositoryTool,
@@ -346,7 +348,7 @@ export function buildTools(config: BitbucketConfig, client: BitbucketClient): An
     getPullRequestTool,
     getPullRequestDiffTool,
     createPullRequestTool
-  ];
+  ]);
 
   // --- helpers --------------------------------------------------------------
 

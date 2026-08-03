@@ -90,6 +90,16 @@ export function defineTool<S extends ZodType, O>(
   return Object.freeze(definition);
 }
 
+/**
+ * `defineTool` under the name the rest of the builder family uses.
+ *
+ * Same function, same overloads — kept as an alias rather than a rename because
+ * every tool in all four servers is declared through `defineTool` and a rename
+ * would touch every one of those files for no behavioural gain. New code can read
+ * `createTool` / `createPrompt` / `createResource` as one vocabulary.
+ */
+export const createTool: typeof defineTool = defineTool;
+
 /** Common annotation presets, so the usual cases stay one word. */
 export const annotations = {
   read: (): ToolAnnotations => ({ readOnly: true, idempotent: true, destructive: false, openWorld: false }),

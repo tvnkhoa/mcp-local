@@ -1,13 +1,16 @@
 /**
  * postgres-mcp's MCP resource provider.
  *
- * Split out of `tools/index.ts` so `resources/list` + `resources/read` sit at the
- * conventional path rather than inside the tool table. The provider itself is
- * unchanged — same URI scheme, same descriptors, same `undefined`-on-no-match
- * contract that the SDK turns into the protocol's invalid-params rejection.
+ * Declared through `createResource` / `registerResource`, which own the descriptor
+ * plumbing, the mime type, the JSON serialization and the not-my-URI contract.
+ * Two things stay local because both are this server's contract rather than
+ * boilerplate: the `schema://…` router, and the split between an unroutable URI
+ * (`undefined`, which the SDK renders as invalid-params) and an unknown
+ * environment (a throw out of `getPool`, which stays an internal error).
  */
 
 import type { ResourceProvider } from "@mcp/sdk";
+import { createResource, registerResource } from "@mcp/sdk";
 
 import type { ConnectionManager } from "../repositories/connectionManager.js";
 import { captureSchema } from "../services/migration/schemaSnapshot.js";
@@ -17,7 +20,10 @@ import { captureSchema } from "../services/migration/schemaSnapshot.js";
  * read structure once instead of repeating `describe_table` calls.
  */
 export function buildSchemaResources(connections: ConnectionManager): ResourceProvider {
-  return {
+  const schema = createResource({
+    name: "schema",
+    mimeType: "application/json",
+
     list: () =>
       connections.list().map((env) => ({
         uri: `schema://${env.name}`,
@@ -26,18 +32,20 @@ export function buildSchemaResources(connections: ConnectionManager): ResourcePr
         mimeType: "application/json"
       })),
 
-    read: async (uri) => {
-      const match = /^schema:\/\/(.+)$/.exec(uri);
-      if (match === null) {
-        // Not a URI this server routes — the SDK turns undefined into the
-        // protocol's invalid-params rejection, which is what the hand-written
-        // handler raised. An unknown *environment*, by contrast, throws out of
-        // getPool and stays an internal error, as it did before.
-        return undefined;
-      }
-      const pool = connections.getPool(match[1]);
-      const snapshot = await captureSchema(pool);
-      return [{ uri, mimeType: "application/json", text: JSON.stringify(snapshot) }];
-    }
-  };
+    /**
+     * The environment name is the whole remainder of the URI, greedily — kept
+     * exactly as the hand-written provider matched it. A tighter pattern would
+     * move `schema://a/b` from "unknown environment" (an internal error out of
+     * `getPool`) to "unroutable URI", which is a different answer to the same
+     * request.
+     */
+    match: (uri) => {
+      const found = /^schema:\/\/(.+)$/.exec(uri);
+      return found === null ? undefined : { environment: found[1] };
+    },
+
+    read: async ({ params }) => captureSchema(connections.getPool(params.environment))
+  });
+
+  return registerResource([schema]);
 }

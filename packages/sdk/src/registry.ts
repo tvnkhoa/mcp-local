@@ -7,6 +7,8 @@
  * live, so tools can move a few at a time instead of all at once.
  */
 
+import type { Entry } from "./collect.js";
+import { flattenEntries, indexByName } from "./collect.js";
 import type { AnyToolDefinition, ToolDescriptor } from "./toolDefinition.js";
 import { toToolDescriptor } from "./toolDefinition.js";
 
@@ -55,18 +57,29 @@ export interface RegistryOptions {
   readonly legacy?: LegacyBridge;
 }
 
+/**
+ * Assemble a server's tool table from its groups.
+ *
+ * The counterpart to `registerPrompt` / `registerResource`, and the same
+ * entries-may-be-groups shape: a server's `buildTools()` passes the five lists it
+ * builds instead of spreading them into one literal. Duplicate names fail here,
+ * at construction, rather than at `createToolRegistry` a stack frame later — the
+ * point being that the failure names the builder the author was calling.
+ *
+ * Returns the frozen table, which is what `createServer` takes. The registry
+ * itself stays an internal concern of the runtime.
+ */
+export function registerTool(tools: readonly Entry<AnyToolDefinition>[]): readonly AnyToolDefinition[] {
+  const flat = flattenEntries(tools);
+  indexByName("registerTool", "tool", flat);
+  return Object.freeze(flat);
+}
+
 export function createToolRegistry(
   tools: readonly AnyToolDefinition[],
   options: RegistryOptions = {}
 ): ToolRegistry {
-  const byName = new Map<string, AnyToolDefinition>();
-
-  for (const tool of tools) {
-    if (byName.has(tool.name)) {
-      throw new Error(`createToolRegistry: duplicate tool name "${tool.name}"`);
-    }
-    byName.set(tool.name, tool);
-  }
+  const byName = indexByName("createToolRegistry", "tool", tools);
 
   const legacy = options.legacy;
 
