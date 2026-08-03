@@ -91,6 +91,30 @@ jobs:
 
       # A performance gate rather than a correctness test, so it is its own step:
       # compact-mode token savings must stay at or above 40%.
+      #
+      # The output is captured rather than discarded (backlog B-04). `BENCH_MIN_RESOLVED_CALL_EDGE_PCT`
+      # is 60 while the observed value is 100 — a floor 40 points below observation cannot fail, and
+      # raising it needs several runs' evidence rather than one measurement. Recording the number on
+      # every push turns "five runs across different commits" from a chore someone has to remember
+      # into something that accumulates on its own; the job summary is retained with the run.
       - name: Benchmark gate (codebase-index-mcp)
-        run: npm run benchmark:plan:check
+        shell: bash
+        run: npm run benchmark:plan:check | tee "$RUNNER_TEMP/bench.json"
         working-directory: codebase-index-mcp
+
+      - name: Record the graph-accuracy observation
+        if: always()
+        shell: bash
+        run: |
+          observed=$(grep -o '"resolvedCallEdgePct": *[0-9.]*' "$RUNNER_TEMP/bench.json" | head -1 | grep -o '[0-9.]*$' || echo "n/a")
+          floor=$(grep -o '"minResolvedCallEdgePct": *[0-9.]*' "$RUNNER_TEMP/bench.json" | head -1 | grep -o '[0-9.]*$' || echo "n/a")
+          {
+            echo "## Graph accuracy (B-04 datapoint)"
+            echo ""
+            echo "| commit | observed \`resolvedCallEdgePct\` | floor |"
+            echo "|---|---|---|"
+            echo "| \`${GITHUB_SHA:0:12}\` | **${observed}** | ${floor} |"
+            echo ""
+            echo "Raise the floor once five observations across different commits exist — set it"
+            echo "below the lowest, with the margin justified from the spread. See docs/backlog.md B-04."
+          } >> "$GITHUB_STEP_SUMMARY"

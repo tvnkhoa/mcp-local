@@ -437,10 +437,10 @@ places rather than an accident in one.
 
 | Step | Status | Evidence |
 |---|---|---|
-| S-37 Normalize folder layout + per-server `.gitignore` | ✅ | **decision: no per-server `.gitignore`** — `docs/adr/0003-single-root-gitignore.md`. Re-homing folded into S-41 by agreement |
+| S-37 Normalize folder layout + per-server `.gitignore` | ✅ | `3f5b702`; 48 files, `docs/migration/normalization-report.md`. **Decision: no per-server `.gitignore`** — `docs/adr/0003-single-root-gitignore.md`. Re-homing folded into S-41 by agreement |
 | S-38 Server scaffold generator | ✅ | `templates/server/**` + `scripts/new-server.mjs`; `npm run new:server -- --key scratch` verified end to end |
 | S-39 Consolidate the test strategy | ✅ | `test:unit` + `test:integration`; first 20 unit tests in `codebase-index-mcp`; all 26 harness aliases intact; server test files now type-checked |
-| S-40 Index registry and workspace hygiene | ✅ | 85,220 rows pruned via `scripts/prune-repo.mjs`; 9 repos → 7; typo fixed; DB default aligned |
+| S-40 Index registry and workspace hygiene | ✅ | 85,220 rows pruned via `scripts/prune-repo.mjs`; 9 repos → 7; typo fixed; DB default aligned; `*.db`, `*.db-shm`, `*.db-wal` gitignored and the central DB at the root left untracked |
 | S-41 Flip guards to enforce; finalize docs | ✅ | hard-cap findings 11 → 0 across eight splits; 59 files re-homed; 5 rules flipped to error; all 8 mechanisms proven to reject a violation (`scripts/prove-guards.sh`) |
 
 ### S-41 · what actually had to change, and what was already done
@@ -711,20 +711,19 @@ Two things were caught by checking the SDK instead of assuming its shape: the to
 returns `ok(payload)` because dispatch resolves the profile and serializes. A scaffold that got
 those wrong would have taught every future server the wrong pattern.
 
-### Phase J, restated from the gitignore section's point of view · 5/5
+### The second Phase J table, and why it is gone
 
-> A second Phase J table, written when this section was about `.gitignore` scope. It said S-38 was
-> undone and S-39 partial; both had landed by the time S-41 finished. Reconciled 2026-07-29 — the
-> [Phase J table above](#phase-j--conventions-and-housekeeping--55-) is authoritative, and two
-> tables for one phase is itself the defect that let this drift.
+A duplicate Phase J table used to sit here, written when this section was about `.gitignore` scope.
+It said S-38 was undone and S-39 partial long after both had landed, which is where this document's
+own header got *"1 partial · N open"* from. Reconciled 2026-07-29; **deleted 2026-08-03** (backlog
+B-11), with its two unique facts — S-37's `normalization-report.md` and S-40's gitignore patterns —
+folded into [the Phase J table above](#phase-j--conventions-and-housekeeping--55-), which is now the
+only one.
 
-| Step | Status | Evidence |
-|---|---|---|
-| S-37 Normalize folders + `.gitignore` | ✅ | `3f5b702`, `docs/migration/normalization-report.md` (48 files); re-homing completed in S-41 |
-| S-38 Server scaffold generator | ✅ | `templates/server/**` + `scripts/new-server.mjs`, verified end to end |
-| S-39 Consolidate the test strategy | ✅ | `test:unit` + `test:integration`; the strategy is documented in `docs/conventions.md` §4 and `CLAUDE.md` |
-| S-40 Index registry + workspace hygiene | ✅ | `*.db`, `*.db-shm`, `*.db-wal` gitignored; central DB at the root is untracked |
-| S-41 Flip guards to enforce; finalize docs | ✅ | hard-cap 11 → 0; 5 rules flipped to error; `scripts/prove-guards.sh` shows all 8 mechanisms reject a violation |
+Worth keeping as a finding rather than just a fix: **two tables describing one phase is the defect,
+not the drift between them.** Nothing kept them in step, so the copy nobody was reading went stale
+and then fed a wrong number back into the summary at the top of the file. One table per phase is the
+rule this document now follows.
 
 ## Phase K — Deferred Decisions · 2/3 (1 skipped) — complete
 

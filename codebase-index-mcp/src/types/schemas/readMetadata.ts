@@ -18,7 +18,13 @@ export const healthCheckSchema = z
   .strict();
 
 // List repositories
-export const listRepositoriesSchema = z.object({ profile: responseProfileSchema.default("compact").optional() }).strict();
+// `.default("compact")`, NOT `.default("compact").optional()` — backlog B-03. `.optional()` wraps
+// the default and short-circuits an absent value before it applies, so `parse({})` returned `{}`
+// and the handler's own fallback answered at `standard`. The tool advertised one profile and
+// served another, and nothing could see it: `tools/list` carries the hand-written JSON Schema, and
+// the two profiles serialize identically for this payload. `schemaDefaults.test.ts` now pins every
+// profile default so the ordering trap cannot come back anywhere.
+export const listRepositoriesSchema = z.object({ profile: responseProfileSchema.default("compact") }).strict();
 
 // File context
 export const getFileContextSchema = (MAX_RESULT_LIMIT: number) => z

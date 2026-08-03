@@ -247,7 +247,7 @@ different, and the two-part rule for adding one) ·
 
 - `docs/architecture/audit-report.md` — Phase 0 audit of the pre-restructuring repository (`01c532e`): dependency map, duplication, technical-debt register, risks
 - `docs/architecture/target-architecture.md` — the tier model, dependency rules, and the naming / coding / server / package conventions. §9 reconciles design against what is actually built
-- `docs/migration/migration-plan.md` — 44 reversible steps (S-01…S-44) across phases A–K
+- `docs/migration/migration-plan.md` — **frozen/historical**: the 44 reversible steps (S-01…S-44) as *planned*, with their rollback classes. Never read a status out of it — `status.md` is the live one
 - `docs/migration/foundation-notes.md` — what the `packages/` foundation contains and why
 - `docs/migration/normalization-report.md` — the 48-file in-place folder normalization
 - `docs/refactor/duplication-extraction-report.md` — the shared-component extraction, its measured behaviour deltas, and the one cluster deliberately left alone

@@ -277,7 +277,11 @@ export function handleGetFileSummary(
 // ── list_repositories ─────────────────────────────────────────────────────────
 
 export function handleListRepositories(args: { profile?: string }, ctx: HandlerContext): CallToolResult {
-  const profile = resolveResponseProfile((args.profile ?? "standard") as Parameters<typeof resolveResponseProfile>[0]);
+  // B-03: the fallback is `compact` because that is what `listRepositoriesSchema` declares, and
+  // what CLAUDE.md states is the default for every read tool. It read `standard`, which is how the
+  // tool came to answer at a profile it never advertised. Unreachable through the tool now that the
+  // schema default applies; kept for direct callers (harnesses) and aligned so the two agree.
+  const profile = resolveResponseProfile((args.profile ?? "compact") as Parameters<typeof resolveResponseProfile>[0]);
   const repos = ctx.store.listRepositories();
   if (profile === "nano") {
     return ctx.asText({

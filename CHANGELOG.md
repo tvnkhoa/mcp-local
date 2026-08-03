@@ -10,6 +10,53 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased] - 2026-08-03
 
+### 🐞 `list_repositories` answered at a profile it never advertised
+
+`listRepositoriesSchema` declared `responseProfileSchema.default("compact").optional()`. `.optional()`
+wraps the default and short-circuits an absent value **before** it applies, so `parse({})` returned
+`{}`, the handler's own `?? "standard"` took over, and the tool served `standard`. Invisible to every
+existing gate: `tools/list` carries a separate hand-written JSON Schema, and for this payload the two
+profiles serialize to the same 220 bytes.
+
+`schemaDefaults.test.ts` now rejects any field declared both `.default()` and `.optional()` in either
+order, across every tool schema, and asserts each profile field resolves on parse. Closes backlog
+B-03 — the 43-tool conversion that item proposed turned out not to be needed, and two of its three
+claimed exposures did not exist.
+
+### 🔒 Decided: no credential goes into CI — `verify:live` stays local
+
+Backlog B-05 asked for the four live smoke tests to stop depending on someone remembering. A
+`verify-live.yml` was written for it — separate workflow, weekly schedule, secrets in a
+`live-backends` environment, fail-fast on an unset secret name — and then **deleted the same day
+without ever running**. `ci.yml` was never touched and remains credential-free.
+
+The decision is the stronger form of the rule B-05 was working around: the live credentials (an RDS
+connection string, an OpenObserve basic-auth header, a Bitbucket API token) are not copied into
+GitHub at all. Every copy is another place to leak from, another rotation obligation, another
+audience. That trade is available because this workspace has one operator on one machine — which is
+also the condition that would have to change to reopen it.
+
+**The residual risk is accepted, not solved,** and now says so in `docs/migration/ci.md` and the
+backlog's *Explicitly NOT* table: real query execution, real auth, real pagination and the EF Core
+tooling stay untested until someone runs `npm run verify:live` locally. `contracts:check` still boots
+all four servers over a real stdio handshake on every push, so *loading* a client is covered;
+*reaching a backend* is not.
+
+### 📐 The graph-accuracy floor now collects its own evidence
+
+`BENCH_MIN_RESOLVED_CALL_EDGE_PCT` is 60 against an observed 100 — a floor 40 points below
+observation cannot fail. Raising it needs several commits' evidence, so `ci.yml` now records the
+observed value to the job summary on every push (backlog B-04, 1 of 5 observations). The gate
+mechanism is proven non-vacuous: forcing the floor to 101 exits 3.
+
+### 🧹 One live state document for the migration
+
+`migration-plan.md` is marked **frozen/historical** — its header still claimed *"In progress — 24 of
+44 steps done"*, sixteen steps stale. `status.md` now has one table per phase; the duplicate Phase J
+table is deleted with its two unique facts folded into the authoritative one. That duplicate is what
+fed a wrong step count into the file's own header for weeks. Closes B-11 — without collapsing the two
+documents, because the cost was two documents claiming to describe the present, not their length.
+
 ### 🐞 `get_call_chain` sees through DI again — a fix that had been dead for four commits
 
 MCP-ISSUE-022's **query-layer** half — seeding the caller frontier with a symbol's interface

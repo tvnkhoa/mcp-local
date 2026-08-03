@@ -308,18 +308,23 @@ try {
     telemetry.slice(-3).join(" | ").slice(0, 400)
   );
 
-  // The profile a tool actually answered at, which is only observable here.
+  // The profile a tool actually answered at, which is only observable here — this telemetry line
+  // is the ONLY place the resolved profile appears. Neither tools/list nor a response replay can
+  // show it, and for this payload `compact` and `standard` serialize to the same bytes.
   //
-  // list_repositories declares `profile: responseProfileSchema.default("compact").optional()`.
-  // `.optional()` short-circuits an absent value BEFORE `.default()` runs, so `profile` reaches
-  // the handler as undefined and the handler falls back to "standard". S-32 migrated this tool
-  // as `rawResult` precisely to keep that: letting dispatch serialize would resolve the profile
-  // from the raw arguments and answer at "compact" instead — same tool, smaller response, and
-  // nothing in tools/list or a response replay would show which one was intended.
+  // This assertion used to require **"standard"**, and it was pinning a bug (backlog B-03).
+  // `listRepositoriesSchema` declared `responseProfileSchema.default("compact").optional()`;
+  // `.optional()` wraps the default and short-circuits an absent value before it applies, so
+  // `profile` reached the handler as `undefined` and its own `?? "standard"` answered. The tool
+  // advertised `compact` and served `standard`.
+  //
+  // Updated rather than deleted, which is what B-03 required: the observation is the valuable part,
+  // only the expected value was wrong. `types/schemas/schemaDefaults.test.ts` now rejects the
+  // `.default().optional()` ordering across every tool schema, so the trap cannot return silently.
   const listRepoLine = telemetry.find((line) => line.includes("\"toolName\":\"list_repositories\""));
   assert(
-    (listRepoLine ?? "").includes("\"profile\":\"standard\""),
-    "list_repositories with no profile argument answers at standard, not compact",
+    (listRepoLine ?? "").includes("\"profile\":\"compact\""),
+    "list_repositories with no profile argument answers at the compact it advertises",
     String(listRepoLine)
   );
 } finally {

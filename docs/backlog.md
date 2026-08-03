@@ -2,11 +2,26 @@
 
 **Created** — 2026-07-29
 **Baseline** — `32f2a82`, working tree carrying the MCP-ISSUE-031/033 dead-code fixes
-**Refreshed** — 2026-08-03. **Ten of fourteen items are closed** (B-01, B-01b, B-02, B-02b, B-06,
-B-07, B-08, B-09, B-12 done; B-10 won't-do with its underlying defect fixed). Every closed row cites
-the commit, command or registry entry that proves it. **Four remain open — B-03, B-04, B-05 and
-B-11** — and two of those cannot be closed by writing code at all: B-04 needs measurements spread
-across several commits, B-05 needs real credentials provisioned as CI secrets.
+**Refreshed** — 2026-08-03, twice: once against the working tree, then again after a full repository
+review closed most of what was left. **Thirteen of fourteen items are closed or resolved** — B-01,
+B-01b, B-02, B-02b, B-03, B-06, B-07, B-08, B-09, B-11, B-12 **done**; B-05 and B-10 **won't-do**,
+each with its reasoning recorded and B-10's underlying defect fixed. Every closed row cites the
+commit, command or measurement that proves it.
+
+**B-04 alone remains open**, and it needs elapsed time rather than effort: five accuracy
+observations across different commits before a floor can be justified. Its collection is now
+automatic (CI records the value on every push) and its gate is proven non-vacuous, so what is left
+is waiting, not work.
+
+**B-05 is a won't-do**: no credential goes into CI, so `verify:live` stays a local release step and
+the risk it named is accepted rather than solved. The workflow was written and then deleted the same
+day — the reasoning is in the item and in `docs/migration/ci.md`.
+
+Two items closed *smaller* than they were scoped, and each records what did not survive measurement:
+**B-03** was one line plus a guard rather than a 43-tool conversion, and two of its three claimed
+exposures (`get_file_context`, the three refactor handlers) turned out not to exist; **B-11** kept
+both documents rather than collapsing them, because the cost was two documents claiming to describe
+the present, not their combined length.
 **Input** — the post-migration assessment of `docs/migration/status.md` §, re-measured against the
 working tree rather than restated from the migration docs
 
@@ -194,7 +209,62 @@ they say.
 
 ---
 
-### B-03 · One profile resolution, not two
+### B-03 · One profile resolution, not two — ✅ DONE 2026-08-03, and **not** by converting 43 tools
+
+**The defect was one line, and the 43-tool conversion this item proposed turned out not to be
+needed to fix it.** `listRepositoriesSchema` declared
+`responseProfileSchema.default("compact").optional()`. `.optional()` wraps the default and
+short-circuits an absent value before it applies, so `parse({})` returned `{}` and the handler's own
+`?? "standard"` answered. Measured, not reasoned:
+
+```
+listRepositoriesSchema.parse({})  ->  {}          profile undefined, default never applied
+handler: args.profile ?? "standard"  ->  standard  the tool advertised compact
+```
+
+Fixed by dropping `.optional()` and aligning the handler's fallback to `compact` — the profile
+`CLAUDE.md` states is the default for every read tool.
+
+**Three of this item's claims did not survive measurement**, and that is worth recording:
+
+- *"`get_file_context` has the same exposure"* — it does not. Its schema is already a working
+  `.default("compact")` and the legacy `compact: true` boolean maps to `compact` deliberately.
+  Verified: with `profile` omitted it answers at 1756 B, exactly its `compact` response, against
+  8189 B for `standard`. No change needed.
+- *"Dispatch would have answered at compact: same tool, smaller response"* — for this payload
+  `compact` and `standard` serialize **identically** (220 B both). The bug was real but produced no
+  observable size difference, which is why neither `contracts:check` nor a response replay could
+  see it. That strengthens the item's point about observability rather than weakening it.
+- *"All 43 tools are `rawResult: true`, so each handler resolves its own profile … and the two
+  disagree"* — only one did. The other three handlers carrying a `?? "standard"` fallback
+  (`refactorApplyHandlers`, `refactorMigrationHandlers`, `refactorPreviewHandlers`) sit behind
+  schemas whose `.default()` **does** apply, so the fallback is unreachable. Left as-is with a
+  comment; changing dead code is churn.
+
+**Why the conversion is not being done.** The item's purpose is *"make the profile a tool answers at
+be the profile the caller asked for"*. That is now true, and `schemaDefaults.test.ts` keeps it true
+for every schema, not just the two this item named: it rejects any field declared both `.default()`
+and `.optional()` in either order, and asserts every profile field resolves to a valid profile on
+parse. Converting 43 tools to payload-returning is a Medium-risk change to response *size* for every
+caller that omits `profile` — the item says so itself, and requires a separate commit each. It buys
+nothing the guard does not already provide. Reopening needs a reason other than tidiness.
+
+Proven by mutation: reinstating `.optional()` fails all three new tests, naming the field.
+
+**A harness was pinning the bug, and this item predicted it.** `test-server-envelopes.mjs` asserted
+`"list_repositories with no profile argument answers at standard, not compact"` — so the fix turned
+`verify:all` red until that expectation was corrected. Updated to `compact`, **not deleted**, which is
+exactly what this item's validation required: the observation is the valuable part (that telemetry
+line is the only place the resolved profile is visible at all), and only the expected value was wrong.
+46 assertions pass.
+
+That is worth recording as a shape, not just an incident: a test written to document current
+behaviour reads identically to a test written to require correct behaviour, and the comment above it
+had faithfully explained *why* the bug happened without ever asking whether it should.
+
+---
+
+### B-03 (original text)
 
 **Purpose**
 Make the profile a tool answers at be the profile the caller asked for.
@@ -238,7 +308,37 @@ per tool, in the migration's replay style.
 
 ## P2 — A gate that does not bite
 
-### B-04 · Raise the graph-accuracy floor to something that can fail
+### B-04 · Raise the graph-accuracy floor to something that can fail — 🔵 IN PROGRESS · collection wired, 1 of 5 observations
+
+**Not closed, and it should not be.** This item's own method requires five observations across
+different commits, and one session cannot honestly produce them. What it *can* remove is the reason
+they were never collected: nobody was recording the number.
+
+**Done 2026-08-03:**
+
+1. **Two of the three validations are met.** The gate is verified **non-vacuous** — forcing
+   `BENCH_MIN_RESOLVED_CALL_EDGE_PCT=101` against an observed 100 exits **3** and reports the
+   failure, so the mechanism bites when an observation falls below the floor. And the premise is
+   re-confirmed by measurement, not restated: floor **60**, observed **100**.
+2. **Collection is automatic.** `ci.yml`'s benchmark step now tees its JSON and a following step
+   writes the observation to the job summary — commit sha, observed value, floor — on every push to
+   `main`. The evidence accumulates whether or not anyone remembers to look.
+
+**Observations so far:**
+
+| # | date | commit | observed | floor |
+|---|---|---|---|---|
+| 1 | 2026-08-03 | `65c8c8d` (working tree) | **100** | 60 |
+
+**What closes it:** four more rows from different commits, then set the floor below the lowest with
+the margin justified from the spread — not picked. On a flat 100 across five commits, something like
+90 leaves ten points of headroom for a legitimately harder repo while still catching the kind of
+regression that took resolution from 100 to 60. Do not raise it off this single row; that is the
+mistake S-31 deliberately avoided and the reason this item exists rather than a one-line change.
+
+---
+
+### B-04 (original text)
 
 **Purpose** Make `benchmark:plan:check`'s accuracy gate capable of catching a regression.
 
@@ -265,7 +365,44 @@ on unrelated work.
 
 ---
 
-### B-05 · Put `verify:live` somewhere it actually runs
+### B-05 · Put `verify:live` somewhere it actually runs — ⛔ WON'T DO 2026-08-03 · `verify:live` stays local
+
+**The item was built, then withdrawn the same day by an explicit decision: no credential goes into
+CI.** `.github/workflows/verify-live.yml` existed for about an hour — separate workflow, weekly
+schedule, secrets in a `live-backends` environment, fail-fast on an unset secret name — and was
+deleted without ever running. `ci.yml` was never touched.
+
+**Why, and why it is not a smaller version of this item.** B-05 reasoned that the credential-free
+main gate was the property worth protecting, so a *separate* credentialed workflow paid an acceptable
+price. The decision taken is the stronger form: the four live credentials — an RDS connection string,
+an OpenObserve basic-auth header, a Bitbucket API token — are not copied into GitHub at all. Every
+copy is another place to leak from, another rotation obligation, another audience. Credential-free
+then becomes something the repo *has* rather than something it maintains.
+
+The decision is available because this workspace has **one operator on one machine**. That is the
+condition, and it is what would have to change to reopen this. See `docs/migration/ci.md`
+§*`verify:live` stays local*.
+
+**What the aborted work did establish**, worth keeping because it is the design a team would need:
+
+- A missing credential must **fail**, not skip. A smoke test with no credential can exit 0 by never
+  reaching its backend, which makes a green run prove nothing. A name-only check (never values, never
+  echoed) was verified three ways locally: all nine unset → exit 1 listing nine; one unset → exit 1
+  naming only that one; all set → exit 0.
+- The required set is nine: `POSTGRES_CONNECTION`,
+  `OBSERVE_{BASE_URL,ORG,LOG_STREAM,TRACE_STREAM,AUTH_BASIC}`, `BITBUCKET_{WORKSPACE,EMAIL,API_TOKEN}`.
+  Least privilege: read-only Postgres role — `prod` is force read-only in code, but nothing stops a
+  non-prod key pointing at a writable database — and Bitbucket `read:repository` / `read:pullrequest`.
+
+**The residual risk is accepted, not solved.** Real query execution, real authentication, real API
+pagination and the EF Core migration tooling stay untested until someone runs `npm run verify:live`
+locally, so a broken client path is invisible until then. `contracts:check` still boots all four
+servers over a real stdio handshake on every push, so *loading* a client is covered; *reaching a
+backend* is not. The release checklist is the mechanism.
+
+---
+
+### B-05 (original text)
 
 **Purpose** Stop the four real-backend smoke tests from depending on someone remembering.
 
@@ -549,7 +686,28 @@ without relocating that message re-introduces the fresh-clone cliff S-34 fixed.
 
 ---
 
-### B-11 · One authoritative state document
+### B-11 · One authoritative state document — ✅ DONE 2026-08-03
+
+- `migration-plan.md` carries a **frozen/historical** banner. Its old header read *"Status: In
+  progress — 24 of 44 steps done"* — sixteen steps stale, and the exact failure this item describes.
+- `status.md` has **one table per phase**. The duplicate Phase J table is deleted; its two unique
+  facts (S-37's `normalization-report.md`, S-40's gitignore patterns) are folded into the
+  authoritative table, and a short note in its place records *why* it existed and what it cost.
+- `docs/migration/README.md` and `CLAUDE.md` now point at `status.md` for state and describe
+  `migration-plan.md` as the reasoning record.
+
+**Not done: collapsing the two files.** This item framed 2,641 lines as the cost. That framing was
+wrong — the cost was **two documents both claiming to describe the present**, which is what made the
+Phase J drift possible. A frozen plan and a verified state document are two different artifacts and
+both earn their length. Deleting the plan would throw away the reversibility classes and batching
+rationale, which is the part still worth consulting when planning work of a similar shape.
+
+**Validation, as this item set it:** no phase has two tables — `grep -E "^#{2,3} .*Phase [A-K]"` on
+`status.md` returns exactly eleven headings for eleven phases, A–K.
+
+---
+
+### B-11 (original text)
 
 **Purpose** Stop paying for two descriptions of one thing.
 
@@ -637,6 +795,7 @@ item — listing them here is what stops them being "discovered" again every six
 | 20 size warnings — 18 `size/soft-cap` + 2 `size/hard-cap` | Advisory by design; several of those files are legitimately one thing. Both hard-cap findings are in `codebase-index-mcp`, where the rule is downgraded to a warning — `repositories/vectorStore.ts` (716) and `services/graph/edgeResolverCalls.ts` (622) | `conventions.md` §5 · re-derive with `npm run guard:all` |
 | The postgres alias table existing twice | Required: a server may not import `@mcp/manifest` (`servers/tooling-import`). A test diffs the copies | S-43 |
 | `CH_DB_CONNECTION` kept in `efRunner` | It is *written*, not read — an outbound contract with a .NET project this workspace does not own | S-43 |
+| Live backends never reached from CI | No credential is copied into GitHub. One operator, one machine — every copy is another place to leak from and another rotation obligation. `verify:live` is a local release step, and the risk of a client path rotting unnoticed is accepted | B-05 won't-do · `docs/migration/ci.md` |
 
 ### One row left this table — reopened, and resolved (2026-08-03)
 
@@ -678,25 +837,29 @@ B-10                        ⛔ won't do — see the item; the drift it was real
 
 Still open, and none of them blocks another:
 
-B-03  independent, per-tool, pausable after any tool — the only one that changes tool output
-B-04  needs elapsed time, not effort: five runs across different commits before a floor can be set
-B-05  needs credentials provisioned as CI secrets — a decision, not a task
-B-11  documentation only
+B-04  needs elapsed time, not effort: four more observations before a floor can be justified.
+      Collection is automatic now (CI job summary per push) and the gate is proven non-vacuous,
+      so this is waiting rather than work.
 
-B-06  ✅ closed 2026-08-03 during the repository review
+B-03 · B-06 · B-11   ✅ closed 2026-08-03 during the repository review
+B-05                 ⛔ won't do — no credential goes into CI; the risk is accepted, not solved
 ```
 
-**Suggested next slice:** **B-06** is now the one worth doing first. It was originally scheduled to
-support B-01b and B-02b; those landed without it, verified against real repos, so their regressions
-are pinned by integration harnesses and a registry entry rather than by fixture-level tests. That
-worked once and is not a plan.
+**Suggested next slice:** nothing here is blocking. B-04 closes on its own once four more CI runs
+land; B-05 closes the moment someone provisions the `live-backends` secrets. Neither benefits from
+being picked up sooner.
 
-Then **B-04** as data collection — it closes whenever five runs' evidence exists, and starting late
-just moves the finish line. **B-05** is a conversation about credentials before it is any code.
-**B-03** stays last: it is the only remaining item that changes what a tool returns.
+**Two sequencing calls this backlog got wrong, both worth keeping as findings:**
 
-The original plan had B-01/B-02 waiting on B-06. They did not wait. That is the one sequencing call
-this backlog got wrong, and it cost the assurance B-06 was supposed to provide.
+1. It had B-01/B-02 waiting on B-06. They did not wait, and shipped verified against real repos
+   instead of fixture tests. That cost exactly the assurance B-06 was meant to provide — and the
+   2026-08-03 review found the bill: ISSUE-022's query-layer fix had been dead since `a1d992c`, with
+   35 integration harnesses green over it, because none drove `get_call_chain` across an interface.
+   A unit test would have caught it. B-06 is closed now, and that is the argument for it.
+2. It scoped B-03 as a 43-tool conversion and B-11 as a document collapse. Both were **larger than
+   the defect**. Measuring first turned B-03 into one line plus a guard, and showed B-11's real cost
+   was two documents claiming the present rather than their length. The lesson is the one this
+   backlog already states at the top and did not apply to itself: *measure, do not reason.*
 
 **What this backlog deliberately does not contain:** more restructuring. The tier model, the guards,
 the contracts and the generators all work and are all enforced. Every item above either makes a tool
@@ -710,13 +873,13 @@ tell the truth, or makes an existing gate capable of failing.
 | B-01b | Fix C# `TYPE_REF` | P1 | — | — | unscoped | ✅ 2026-07-30 · `266d91b` `9574e3e` `f1c0160` `9b55de4` |
 | B-02 | Locate extraction nondeterminism | P1 | Low | R1 | M | ✅ 2026-07-30 · `b764b39` |
 | B-02b | Make an index run reproducible | P1 | — | — | unscoped | ✅ 2026-07-30 · `ae1af79` |
-| B-03 | One profile resolution | P1 | **Med** | R2 | S / tool | open |
-| B-04 | Raise the graph-accuracy floor | P2 | Low | R1 | XS | open |
-| B-05 | Run `verify:live` on a schedule | P2 | **Med** | R1 | M | open |
+| B-03 | One profile resolution | P1 | **Med** | R2 | S / tool | ✅ 2026-08-03 · one line + a guard; the 43-tool conversion was not needed |
+| B-04 | Raise the graph-accuracy floor | P2 | Low | R1 | XS | 🔵 collection wired + gate proven non-vacuous · 1/5 observations |
+| B-05 | Run `verify:live` on a schedule | P2 | **Med** | R1 | M | ⛔ won't do — no credential goes into CI; `verify:live` stays local |
 | B-06 | Unit tests in `codebase-index` | P2 | Low | R1 | M | ✅ 2026-08-03 · `test:unit` 39 → 66, each proven by mutation |
 | B-07 | Declare `PGSSLMODE` + `NODE_TLS_REJECT_UNAUTHORIZED` | P2 | Low | R1 | XS | ✅ 2026-08-03 |
 | B-08 | Correct the §9 reconciliation rows | P3 | Low | R1 | XS | ✅ 2026-08-03 |
 | B-09 | `WORKSPACE_ROOT` by marker, not depth | P3 | **Med** | R1 | S | ✅ 2026-08-03 · doctor output byte-identical |
 | B-10 | Delete the manifest shim | P3 | Low | R1 | S | ⛔ won't do — ESM links before it evaluates; drift fixed + guarded |
-| B-11 | One authoritative state document | P3 | Low | R1 | S | open |
+| B-11 | One authoritative state document | P3 | Low | R1 | S | ✅ 2026-08-03 · plan frozen; one table per phase |
 | B-12 | Detect stale `dist/` | P3 | Low | R1 | S | ✅ 2026-08-03 · `mcp:doctor` `dist` check |

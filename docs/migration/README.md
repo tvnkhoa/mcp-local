@@ -119,13 +119,21 @@ throughout.
 
 ## What is left
 
-[`../backlog.md`](../backlog.md) — the post-migration backlog. Nine of fourteen items closed; five
-open (B-03, B-04, B-05, B-06, B-11), two of which cannot be closed by writing code at all. It also
-lists the accepted debt that is **not** in it, so decided questions stay decided.
+[`../backlog.md`](../backlog.md) — the post-migration backlog. Thirteen of fourteen items closed or
+resolved; **B-04 alone remains**, and it needs elapsed time rather than effort (five accuracy
+observations across different commits, now collected automatically by CI). It also lists the
+accepted debt that is **not** in it, so decided questions stay decided.
 
-**B-11 is about this directory**: `migration-plan.md` (1,530 lines) + `status.md` (1,210) is 2,741
-lines describing finished work, and the cost is not hypothetical — a second, stale Phase J table
-inside `status.md` made the document's own header report a step count that was wrong for weeks.
+**B-11 was about this directory, and is closed (2026-08-03).** `migration-plan.md` is now marked
+**frozen and historical** in its own header — it was still claiming *"In progress — 24 of 44 steps
+done"*, sixteen steps stale — and `status.md` is the single live state document with **one table per
+phase**. The duplicate Phase J table is deleted, its two unique facts folded into the authoritative
+one. That duplicate is what made this document's own header report a step count that was wrong for
+weeks; two tables for one phase was the defect, not the drift between them.
+
+The two files still total ~2,750 lines, and that is fine: one is a frozen record of *why* each step
+was shaped as it was, the other is the verified state. The cost B-11 named was two documents both
+claiming to describe the present, which is no longer the case.
 
 ---
 

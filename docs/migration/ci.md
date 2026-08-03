@@ -62,6 +62,34 @@ What remains genuinely untested by CI: real query execution, real authentication
 pagination, and the EF Core migration tooling (which shells out to `dotnet`). Those are what
 `verify:live` is for, and they should be run before a release.
 
+## `verify:live` stays local — decided 2026-08-03
+
+**No credential goes into CI. Not in `ci.yml`, and not in a second workflow either.**
+
+A `verify-live.yml` was written on 2026-08-03 for backlog B-05 — separate workflow, weekly schedule,
+secrets in a `live-backends` environment, fail-fast when a secret name is unset — and **deleted the
+same day, without ever running.**
+
+B-05 assumed the credential-free main gate was the thing worth protecting, so a *separate*
+credentialed workflow was an acceptable price. The decision taken instead is stronger: the live
+credentials — an RDS connection string, an OpenObserve basic-auth header, a Bitbucket API token —
+are not copied into GitHub at all. Each one added is another place to leak from, another rotation
+obligation, and another audience. The credential-free property then becomes something this repo
+*has* rather than something it maintains.
+
+That trade is only available because this workspace has one operator on one machine. A team would
+need the second workflow, and reopening this needs that to have changed.
+
+**What it costs, stated plainly.** Nothing exercises real query execution, real authentication, real
+API pagination, or the EF Core migration tooling until somebody runs `npm run verify:live` with
+credentials in the local environment. A broken client path stays invisible until that happens. This
+is the residual risk B-05 existed to remove, and here it is **accepted rather than solved** — the
+release checklist is the whole mechanism.
+
+What CI still covers regardless: `contracts:check` boots all four servers over a real stdio
+handshake with placeholder env on every push, so a module that compiles but cannot load is caught.
+The gap is specifically *reaching a backend*, not loading its client.
+
 ## Why Windows
 
 `better-sqlite3` and `tree-sitter` build natively, and the path normalization this workspace does —
