@@ -149,10 +149,71 @@ export interface RunIdentity {
 }
 
 /**
+ * A run is degraded when this share of the files it actually attempted failed to parse.
+ *
+ * 10% is well clear of both observed regimes: a healthy full index of this workspace reports 0
+ * failures, and the incident that motivated the check reported 217 of 400 (54%). Deliberately a
+ * module constant rather than an env var — every env var in this workspace is declared in
+ * `packages/manifest` and generated outward, and a tuning knob nobody sets is not worth a row in
+ * four generated files.
+ */
+export const PARSE_FAILURE_DEGRADED_RATIO = 0.1;
+
+/**
+ * Below this many indexed files, "no edges" is unremarkable — a two-file repo may genuinely have
+ * no imports or calls. Above it, a symbol-bearing graph with zero edges means extraction ran and
+ * produced nothing usable.
+ */
+const ZERO_EDGE_MIN_FILES = 10;
+
+/**
+ * Decide whether a completed run produced a graph worth trusting.
+ *
+ * Reads counters only — no store access — so it is a pure function the unit tests can drive
+ * directly, which is the property that makes this check itself testable.
+ */
+export function assessRunHealth(
+  counters: RunCounters,
+  mode: IndexMode
+): { degraded: boolean; reasons: string[] } {
+  const reasons: string[] = [];
+
+  const attempted = counters.filesIndexed + counters.parseFailures;
+  if (attempted > 0) {
+    const ratio = counters.parseFailures / attempted;
+    if (ratio >= PARSE_FAILURE_DEGRADED_RATIO) {
+      reasons.push(
+        `${String(counters.parseFailures)} of ${String(attempted)} files failed to parse ` +
+          `(${(ratio * 100).toFixed(1)}%, threshold ${String(PARSE_FAILURE_DEGRADED_RATIO * 100)}%)` +
+          (counters.parseTimeouts > 0 ? `, including ${String(counters.parseTimeouts)} timeout(s)` : "") +
+          " — check that the running server's build matches dist/ and re-run after a restart."
+      );
+    }
+  }
+
+  // Scoped to full runs: an incremental or dirty run legitimately upserts no edges when the
+  // changed files contain none, so the same observation carries no signal there.
+  if (
+    mode === "full" &&
+    counters.edgesUpserted === 0 &&
+    counters.symbolsUpserted > 0 &&
+    counters.filesIndexed >= ZERO_EDGE_MIN_FILES
+  ) {
+    reasons.push(
+      `indexed ${String(counters.filesIndexed)} files and ${String(counters.symbolsUpserted)} symbols ` +
+        "but produced 0 edges — the graph has no call, import or type relationships and impact tools will return nothing."
+    );
+  }
+
+  return { degraded: reasons.length > 0, reasons };
+}
+
+/**
  * The single place a run summary is shaped, for both the success and the failure path.
  *
  * `vectorSymbolsIndexed` is omitted rather than zeroed when absent, because the failure path
  * never set it and adding it as 0 would claim the vector index was rebuilt and found nothing.
+ * `healthReasons` follows the same rule: absent means "nothing to report", not "checked and clean".
  */
 export function buildRunSummary(
   identity: RunIdentity,
@@ -160,7 +221,8 @@ export function buildRunSummary(
   status: IndexRunSummary["status"],
   finishedAt: string,
   elapsedMs: number,
-  vectorSymbolsIndexed?: number
+  vectorSymbolsIndexed?: number,
+  healthReasons?: string[]
 ): IndexRunSummary {
   return {
     runId: identity.runId,
@@ -186,6 +248,7 @@ export function buildRunSummary(
     ...(counters.edgesDroppedByConfidence > 0 ? { edgesDroppedByConfidence: counters.edgesDroppedByConfidence } : {}),
     ...(counters.edgesDroppedByCallCap > 0 ? { edgesDroppedByCallCap: counters.edgesDroppedByCallCap } : {}),
     ...(counters.edgesDroppedByTypeRefCap > 0 ? { edgesDroppedByTypeRefCap: counters.edgesDroppedByTypeRefCap } : {}),
+    ...(healthReasons !== undefined && healthReasons.length > 0 ? { healthReasons } : {}),
     elapsedMs,
     ...(vectorSymbolsIndexed === undefined ? {} : { vectorSymbolsIndexed })
   };

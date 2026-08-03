@@ -118,7 +118,7 @@ export function describeConfig(config: BitbucketConfig): Record<string, unknown>
 }
 
 /** Mask a secret, keeping only the scheme so it can be recognized but not reused. */
-export function maskSecret(value: string): string {
+function maskSecret(value: string): string {
   if (!value) {
     return "";
   }

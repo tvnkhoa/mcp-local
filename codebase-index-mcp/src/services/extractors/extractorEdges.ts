@@ -9,7 +9,7 @@
 import type Parser from "tree-sitter";
 import type { EdgeRecord, SymbolRecord } from "../../types/index.js";
 import type { ExtractInput } from "./extractorTypes.js";
-import { normalizeCSharpTypeName } from "./extractorCSharpScope.js";
+import { normalizeCSharpTypeName } from "./csharpScope.js";
 
 export function dedupeEdges(edges: EdgeRecord[]): EdgeRecord[] {
   const seen = new Set<string>();

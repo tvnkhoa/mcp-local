@@ -1,6 +1,16 @@
 export type IndexMode = "full" | "incremental" | "dirty";
 
-export type IndexRunStatus = "running" | "ok" | "failed" | "cancelled";
+/**
+ * `degraded` means the run completed but the graph it produced should not be trusted.
+ *
+ * Added after a full re-index of `mcp-local` reported `ok` while upserting 57 symbols and
+ * **0 edges** against 217 parse failures — the previous run of the same tree had 2097 symbols
+ * and 6233 edges. Nothing downstream could tell: `health_check` saw a run at HEAD with status
+ * `ok`, so every graph tool answered from an empty index without a warning. A run that fails to
+ * parse most of the repository is not a successful run, and the summary is the only place that
+ * can say so.
+ */
+export type IndexRunStatus = "running" | "ok" | "degraded" | "failed" | "cancelled";
 
 export type IndexRunSummary = {
   runId: string;
@@ -31,6 +41,13 @@ export type IndexRunSummary = {
   edgesDroppedByConfidence?: number;
   edgesDroppedByCallCap?: number;
   edgesDroppedByTypeRefCap?: number;
+  /**
+   * Why `status` is `degraded` — one human-readable line per failing check, present only then.
+   *
+   * The status alone tells a caller not to trust the graph; these say what to fix. Same principle
+   * as the `edgesDropped*` counters above: a bound that does not name itself cannot be acted on.
+   */
+  healthReasons?: string[];
   elapsedMs: number;
   crossRepoAttempts?: number;
   crossRepoResolved?: number;

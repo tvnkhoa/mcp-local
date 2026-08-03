@@ -17,7 +17,6 @@ import {
   vectorSearchSymbols,
   isVectorEnabled,
 } from "../../repositories/vectorStore.js";
-import { resolveImportsCrossRepo } from "./edgeResolverImports.js";
 
 /**
  * Bulk-tag all import edges whose namespace belongs to a known external namespace (System, Microsoft, etc.)

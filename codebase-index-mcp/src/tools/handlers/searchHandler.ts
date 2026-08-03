@@ -5,8 +5,8 @@ import {
   redactEmail,
   getRepoStaleness,
   buildStaleWarning
-} from "../../services/gitHelpers.js";
-import { runGit } from "../../services/gitHelpers.js";
+} from "../../services/git/gitHelpers.js";
+import { runGit } from "../../services/git/gitHelpers.js";
 import { resolveResponseProfile } from "../../middleware/responseFormatter.js";
 import { formatChangeContextPayload, buildIndexMeta } from "./impactHandler.js";
 import { readSymbolSourceSpan } from "../../services/refactor/refactorUtils.js";

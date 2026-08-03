@@ -17,7 +17,7 @@ export type IntentRule = {
   caveats: string[];
 };
 
-export const INTENT_RULES: IntentRule[] = [
+const INTENT_RULES: IntentRule[] = [
   {
     id: "implement-like",
     keywords: ["implement like", "similar to", "same pattern", "mirror", "scaffold", "vertical slice", "like the", "by mirroring"],

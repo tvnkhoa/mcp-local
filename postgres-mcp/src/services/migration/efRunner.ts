@@ -37,7 +37,7 @@ export function assertMigrationEnabled(config: MigrationConfig): void {
 }
 
 /** EF migration names: letters/digits/underscore only — prevents arg/shell injection. */
-export function sanitizeMigrationName(name: string): string {
+function sanitizeMigrationName(name: string): string {
   if (!/^[A-Za-z0-9_]+$/.test(name)) {
     throw new PolicyViolationError(
       "INVALID_MIGRATION_NAME",
@@ -100,7 +100,7 @@ function runEf(config: MigrationConfig, efArgs: string[], connectionString: stri
   });
 }
 
-export function efMigrationsList(config: MigrationConfig, connectionString: string): Promise<EfResult> {
+function efMigrationsList(config: MigrationConfig, connectionString: string): Promise<EfResult> {
   return runEf(config, ["migrations", "list", "--no-connect"], connectionString);
 }
 
@@ -125,7 +125,7 @@ export function efMigrationsScript(config: MigrationConfig, connectionString: st
 }
 
 /** EF migration ids look like `20240131120000_AddFoo` — validate before using as a CLI arg. */
-export function sanitizeMigrationId(id: string): string {
+function sanitizeMigrationId(id: string): string {
   if (!/^\d+_[A-Za-z0-9_]+$/.test(id)) {
     throw new PolicyViolationError(
       "INVALID_MIGRATION_ID",

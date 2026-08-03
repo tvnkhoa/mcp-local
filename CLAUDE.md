@@ -36,7 +36,7 @@ npm run test              # everything: unit + integration, one result
 npm run test:unit         # node:test over src/**/*.test.ts — no build, no DB
 npm run test:integration  # the .mjs harnesses only (needs a build)
 
-# Individual harnesses — all 31 keep their own name
+# Individual harnesses — all 34 keep their own name
 npm run test:endpoint-bridge
 npm run test:csharp-inheritance-bridge
 npm run test:refactor-engine
@@ -46,7 +46,7 @@ npm run test:refactor-engine
 *Verification* below. Within this package, `npm run test` runs the whole suite
 (it discovers every `test:*` script from `package.json`, so the list cannot fall
 behind) and puts `test:unit` first, since a compile-level break should not wait
-behind 31 harnesses.
+behind 34 harnesses.
 
 `typecheck` covers `src/**/*.test.ts` too, via each server's own
 `tsconfig.test.json`. Before S-39 no server's test files were type-checked
@@ -240,7 +240,8 @@ debt that is **not** in it, so decided questions stay decided.
 **Decision records:** `docs/adr/0001-workspace-native-deps.md` (why servers stay outside
 the npm workspace, and why `instanceof` fails across packages) ·
 `docs/adr/0002-sql-guardrail-token-lists.md` (why the three SQL token lists stay
-different, and the two-part rule for adding one).
+different, and the two-part rule for adding one) ·
+`docs/adr/0003-single-root-gitignore.md` (one root `.gitignore`; no per-server copies).
 
 **Architecture & migration** (read in this order for the full picture):
 
@@ -254,7 +255,7 @@ different, and the two-part rule for adding one).
 - `docs/migration/s06-s23-notes.md` — contract snapshots + the `bitbucket-mcp` SDK pilot; read this before migrating another server
 - `docs/migration/s24-notes.md` — the `postgres-mcp` SDK migration: the call-replay method, and why the SDK gained `resources` and `rawResult`
 - `docs/migration/s25-notes.md` — the `observe-mcp` SDK migration; the first needing no new SDK capability, and a profile-dependent serialization finding no schema could reveal
-- `docs/migration/s26-s29-plan.md` — the `codebase-index-mcp` entry-point survey, the three SDK gaps that block migrating it, and why the work is four steps (S-26 done)
+- `docs/migration/s26-s29-plan.md` — the `codebase-index-mcp` entry-point survey and the three SDK gaps that blocked migrating it. **Done** — all four servers run on `@mcp/sdk`; note this file numbers its steps commit-side, so its S-26/S-27/S-28/S-29 are `status.md`'s S-28/S-31/S-32/S-33 (reconciled in `status.md` §Phase H)
 - `docs/migration/ci.md` — what CI covers, what it deliberately does not (no live backends, no secrets), and the script vocabulary that makes the root aggregates work
 - `contracts/README.md` — what the golden `tools/list` snapshots are and how to update them
 

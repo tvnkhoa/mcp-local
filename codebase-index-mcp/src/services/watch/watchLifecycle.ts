@@ -112,7 +112,7 @@ export async function activateWatchForRepo(
 }
 
 /** Configured targets if any, otherwise every registered repo. */
-export function resolveAutoWatchTargets(
+function resolveAutoWatchTargets(
   store: GraphStore,
   configured: readonly WatchTarget[]
 ): WatchTarget[] {

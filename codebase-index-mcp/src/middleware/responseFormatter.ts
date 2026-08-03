@@ -1,6 +1,7 @@
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
+import { normalizePayload as normalizeShared, type ResponseProfile } from "@mcp/core";
 
-export type ResponseProfile = "nano" | "compact" | "standard" | "verbose";
+export type { ResponseProfile };
 
 export function resolveResponseProfile(profile: ResponseProfile, compact?: boolean): ResponseProfile {
   return compact ? "compact" : profile;
@@ -9,61 +10,48 @@ export function resolveResponseProfile(profile: ResponseProfile, compact?: boole
 // ── Payload normalization (token reduction) ─────────────────────────────────────
 // Key-scoped so it never touches code content (refactor hunk text, query_graph SQL echo).
 
-// Scalar string fields that hold a filesystem path → backslashes normalized to POSIX "/".
-const PATH_KEYS = new Set([
+/**
+ * Keys whose string values are filesystem paths → backslashes rewritten to POSIX "/".
+ *
+ * One list, where there used to be two. The local implementation separated "scalar path keys"
+ * from "array-of-path keys" because it applied them at different recursion points;
+ * `@mcp/core`'s normalizer carries the parent key into array elements, so a key listed once
+ * covers both `filePath: "a\\b"` and `affectedFiles: ["a\\b"]`.
+ *
+ * Two keys therefore widen slightly: `path` and `scopePaths` were array-only and now also
+ * normalize a scalar of the same name. That is the intended reading of a key called `path`,
+ * and the replay in the header below shows no response actually changed.
+ */
+const PATH_KEYS = [
   "filePath", "fromFilePath", "toFilePath", "callerFile", "calleeFile",
-  "sourceFile", "testFile", "repoPath", "dbPath", "folderPath", "headingPath"
-]);
-
-// Array fields whose string elements are paths → each element normalized.
-const PATH_ARRAY_KEYS = new Set([
+  "sourceFile", "testFile", "repoPath", "dbPath", "folderPath", "headingPath",
   "affectedFiles", "importedByFiles", "path", "scopePaths"
-]);
-
-function isPlainObject(value: unknown): value is Record<string, unknown> {
-  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
-}
+];
 
 /**
- * Recursively normalizes a payload before serialization:
- *  - POSIX-normalizes path-like string values (key-scoped, never blanket-string).
- *  - When `strip` is true (compact/nano profiles), omits `null` fields.
- *    (Empty arrays/objects are intentionally kept: they carry "explicitly none" meaning and
- *    dropping them would break the nano ≤ compact ≤ standard size monotonicity gate.)
+ * Reshape a payload before serialization. Delegates to `@mcp/core`.
+ *
+ * This module used to carry its own recursive normalizer — the fourth copy of one the other three
+ * servers had already replaced (S-24/S-25). `@mcp/core.normalizePayload` was written with a
+ * `pathKeys` option *for this server*: its own doc comment cites codebase-index-mcp's deeply
+ * nested graph payloads as the reason it is unbounded by default. The option was built and then
+ * not adopted here.
+ *
+ * `strip` maps to `dropNullish`, matching the positional-boolean call sites, and empty arrays and
+ * objects survive in both implementations — they carry "explicitly none", and dropping them would
+ * break the nano ≤ compact ≤ standard size monotonicity gate.
+ *
+ * What the shared version adds, none of which the local one handled: cycle detection (a repeated
+ * sibling node is *not* treated as a cycle), BigInt → string, Date → ISO.
+ *
+ * Verified by replaying 18 calls × 4 profiles before and after the swap: **72/72 identical** once
+ * the fields that differ between any two runs are masked — `requestId`, timestamps, and the git
+ * working-tree counters (`dirtyFiles`, `dirtyCount`), which change simply because making the
+ * change edits files. Worth stating plainly: the first raw diff showed 37/72 and every one of the
+ * 35 was one of those fields.
  */
-export function normalizePayload(value: unknown, strip: boolean, key?: string): unknown {
-  if (typeof value === "string") {
-    // Skip the regex entirely when there's nothing to rewrite (the common case).
-    return key && PATH_KEYS.has(key) && value.includes("\\") ? value.replace(/\\/g, "/") : value;
-  }
-  if (Array.isArray(value)) {
-    const normalizeStrings = key !== undefined && PATH_ARRAY_KEYS.has(key);
-    let changed = false;
-    const out = value.map((item) => {
-      if (normalizeStrings && typeof item === "string") {
-        if (!item.includes("\\")) return item;
-        changed = true;
-        return item.replace(/\\/g, "/");
-      }
-      const nv = normalizePayload(item, strip);
-      if (nv !== item) changed = true;
-      return nv;
-    });
-    // Return the original reference when nothing changed — avoids reallocating unchanged subtrees.
-    return changed ? out : value;
-  }
-  if (isPlainObject(value)) {
-    let changed = false;
-    const out: Record<string, unknown> = {};
-    for (const [k, v] of Object.entries(value)) {
-      const nv = normalizePayload(v, strip, k);
-      if (strip && nv === null) { changed = true; continue; }
-      if (nv !== v) changed = true;
-      out[k] = nv;
-    }
-    return changed ? out : value;
-  }
-  return value;
+function normalizePayload(value: unknown, strip: boolean): unknown {
+  return normalizeShared(value, { dropNullish: strip, pathKeys: PATH_KEYS });
 }
 
 export type ToolRequestContext = {
@@ -91,7 +79,7 @@ export type ToolTelemetryEvent = {
   errorCode?: string;
 };
 
-export function estimateResultCount(payload: unknown): number | null {
+function estimateResultCount(payload: unknown): number | null {
   if (Array.isArray(payload)) {
     return payload.length;
   }

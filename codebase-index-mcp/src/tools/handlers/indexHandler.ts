@@ -1,6 +1,6 @@
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { McpError, ErrorCode } from "@modelcontextprotocol/sdk/types.js";
-import { getRepoStaleness, getRepoWorkingTreeState } from "../../services/gitHelpers.js";
+import { getRepoStaleness, getRepoWorkingTreeState } from "../../services/git/gitHelpers.js";
 import { assertPathAllowed, clamp } from "../../middleware/indexGuardrails.js";
 import { resolveResponseProfile } from "../../middleware/responseFormatter.js";
 import { resolveDetectChangesPolicy } from "../../services/analysis/policyResolver.js";
@@ -495,7 +495,7 @@ export function handleChangeImpact(
 
 // ── local helpers (used only by this handler group) ──────────────────────────
 
-export function resolveDocsMode(mode: "auto" | "on" | "off", docsEnabled: boolean): boolean {
+function resolveDocsMode(mode: "auto" | "on" | "off", docsEnabled: boolean): boolean {
   if (mode === "on") return true;
   if (mode === "off") return false;
   return docsEnabled;

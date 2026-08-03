@@ -43,20 +43,53 @@ discovering the answer later from an import that already shipped.
 |---|---|---|---|
 | 1 | Imports flow to a strictly lower tier | `tier/violation` | A cycle between platform packages is unfixable without a rewrite |
 | 2 | `@mcp/core` has **zero** runtime dependencies | `tier/zero-dependency` | Every tier depends on it; a dependency here is inherited by all of them. Adding one requires an ADR |
-| 3 | `@mcp/sdk` is the **only** importer of `@modelcontextprotocol/sdk` | `imports/protocol-sdk` | A protocol-SDK major upgrade is then a change to `packages/sdk/src/createServer.ts`, not to every server |
+| 3 | `@mcp/sdk` is the **only** importer of `@modelcontextprotocol/sdk` — **`packages/*` only**, see below | `imports/protocol-sdk` | Keeps a protocol-SDK major upgrade inside `packages/sdk`. Not enforced in servers, where 41 imports remain |
 | 4 | `@mcp/shared` may not import `@mcp/sdk` or the protocol SDK | `tier/forbidden-import` | A capability must never reach the wire format. Declared as a hard `forbidden` list, not merely omitted from `mayImport` |
 | 5 | No server imports another server | `servers/cross-import` | A shared need is promoted into `packages/`, where a guard governs it |
 | 5b | No server imports `@mcp/manifest` or `@mcp/cli` | `servers/tooling-import` | A server should know its own config and nothing about its siblings' directories or env contracts |
-| 6 | No deep imports past a package entry point | `imports/deep-import` | The `exports` map makes these unresolvable rather than merely discouraged. If a symbol is missing, re-export it from `src/index.ts` |
+| 6 | No deep imports past a package entry point — **`packages/*` only** | `imports/deep-import` | The `exports` map makes these unresolvable rather than merely discouraged. If a symbol is missing, re-export it from `src/index.ts` |
 | 7 | Every import is declared in the importing `package.json` | `imports/undeclared-dependency` | Otherwise it resolves only by hoisting accident |
 | 8 | `process.env` is read in one place per unit | `env/direct-access` | See §3 |
 | 9 | Servers are **not** npm workspace members | *(structural, not a guard)* | ADR 0001 — hoisting relocates `better-sqlite3`'s native binary, and a hoisted duplicate makes `instanceof` fail across the boundary |
 | 10 | No runtime LLM invocation in `codebase-index-mcp` | `npm run guard:no-llm-runtime` | A hard product constraint. `CODEBASE_INDEX_LLM_ENABLED=true` fails startup by design |
 
-Rules 5 and 5b only apply when the guard is told where the servers are, which the root script does:
+### Which of these the guard actually applies to a server
+
+`dependencyGuard` runs **two** loops, and they do not check the same things. The package loop walks
+`packages/*` and applies rules 1–4, 6 and 7. The server loop
+(`packages/cli/src/guards/dependencyGuard.ts`, the `options.serverDirs` block) applies exactly
+three: `env/direct-access`, `servers/cross-import`, `servers/tooling-import`.
+
+| | `packages/*` | a server's `src/` |
+|---|---|---|
+| 1 tier flow · 2 zero-dependency · 4 forbidden import | ✅ | — *(no tier row exists for a server)* |
+| 3 protocol SDK has one importer | ✅ | **—** |
+| 6 no deep imports · 7 imports declared | ✅ | **—** |
+| 5 · 5b no cross-server / tooling import | n/a | ✅ |
+| 8 `process.env` in one place | ✅ | ✅ |
+
+Rules 5 and 5b need the guard to be told where the servers are, which the root script does:
 
 ```jsonc
 "guard:deps": "… guard deps --servers codebase-index-mcp,postgres-mcp,observe-mcp,bitbucket-mcp"
+```
+
+**Rule 3 is therefore a package-level rule, not a workspace-level one**, and its stated payoff —
+"a protocol-SDK major upgrade is a change to `packages/sdk/src/createServer.ts`, not to every
+server" — does not hold as written today. Server `src/` currently holds **41** imports of
+`@modelcontextprotocol/sdk` (26 `import type`, 15 value). The value imports are `McpError` and
+`ErrorCode`; three servers confine theirs to a single `middleware/errors.ts`, which is deliberate —
+`createErrorMapper` takes its error classes as parameters precisely because `instanceof` cannot
+cross the boundary (§4), so *something* local has to import the class. `codebase-index-mcp` is the
+outlier at 12 files.
+
+Rule 6 is likewise packages-only, and could not be applied to servers unchanged:
+`@modelcontextprotocol/sdk/types.js` is itself a deep import.
+
+Re-derive both numbers with:
+
+```bash
+grep -rn 'from "@modelcontextprotocol/sdk' */src --include="*.ts" | grep -v '\.test\.ts' | wc -l
 ```
 
 ---
@@ -150,6 +183,34 @@ violation, confirmed to reject it, and reverted — re-runnable via `scripts/pro
 | `guard:no-llm-runtime` | `import OpenAI from "openai"` in `codebase-index-mcp` | rejected |
 
 The convention-guard half of that table is in [Folder Convention](folder-convention.md) §6.
+
+---
+
+## 7. Import cycles — currently zero, and not yet gated
+
+```
+codebase-index-mcp 0 · postgres-mcp 0 · observe-mcp 0 · bitbucket-mcp 0
+core 0 · sdk 0 · shared 0 · testing 0 · cli 0 · manifest 0
+```
+
+Rule 1 makes a cycle *between packages* impossible, but nothing stops one *inside* a unit, and
+`guard:deps` does not look for it. The 2026-08-03 review found three in `codebase-index-mcp`, all
+fixed in that pass:
+
+| Cycle | Cause | Fix |
+|---|---|---|
+| `config/envConfig` ↔ `config/performanceConfig` | `performanceConfig` needs the env primitives; `envConfig` needed one pure profile parser back | Moved `parsePerformanceProfileEnv` down into `envConfig` |
+| `services/graph/edgeResolverShared` ↔ `edgeResolverImports` | **an unused import** — the symbol survived only in a comment | Deleted the import |
+| `services/impact/impactShared` ↔ `impactSurface` | same — unused import, symbol referenced only in a doc comment | Deleted the import |
+
+Two of the three cost nothing to fix because nothing was using the edge. That is the argument for
+checking: a cycle that exists only because an import outlived its call site is invisible to review
+and free to remove, but it constrains module initialisation order for as long as it is there.
+
+**Count only value imports.** `import type` is erased by `tsc`, so a path through one is not a cycle
+in the emitted JavaScript. A detector that ignores this over-reports badly — on this repo it turned
+3 real cycles into 8. `detect_circular_dependencies` does not currently make the distinction either,
+so treat its output as a candidate list.
 
 ---
 

@@ -62,6 +62,26 @@ configuration** — `postgres-mcp`'s `efRunner` must do it so `dotnet ef` inheri
 report that. A determined author can still evade it by aliasing; the guard is a tripwire for drift,
 not a sandbox.
 
+### Export only what another file uses
+
+A `export` on something only its own module reads widens the surface for nothing and makes the
+symbol look load-bearing to every later reader. Not enforced by a guard; measured on 2026-08-03 and
+brought to zero for **values**:
+
+| | unnecessary value exports | unnecessary type exports |
+|---|---|---|
+| `packages/*` | 0 | 0 |
+| the four servers | 0 *(was 30, removed)* | 85 |
+
+**The 85 type exports stay, deliberately.** An exported `interface` or `type` beside the function
+whose argument or return it describes is documentation, and it costs nothing at runtime — TypeScript
+erases it. The 30 that were removed were functions, classes and consts, where an export is a real
+claim that someone else calls it. Re-derive with a word-frequency scan over each unit plus its
+`scripts/` (harnesses import from `dist/` at runtime, so the compiler cannot vouch for them and they
+must be in the corpus).
+
+---
+
 Env variables are **declared once**, in `packages/manifest/src/envSpecs/<server>.ts` — **98** across
 the four servers (41 / 23 / 23 / 11), counted by
 `node -e "import('@mcp/manifest').then(m => m.SERVERS.forEach(s => console.log(s.key, s.env.length)))"`.

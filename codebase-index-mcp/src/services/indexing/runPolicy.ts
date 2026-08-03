@@ -15,7 +15,7 @@
 
 import { randomUUID } from "node:crypto";
 
-import { hasWorkingTreeChanges, resolveHeadCommitSha } from "../gitHelpers.js";
+import { hasWorkingTreeChanges, resolveHeadCommitSha } from "../git/gitHelpers.js";
 import type { GraphStore } from "../../repositories/graphStore.js";
 import { INDEX_VERSION, type PerformanceProfile } from "./indexPipeline.js";
 import type { IndexMode, IndexRunResult, ResolutionStats } from "../../types/index.js";

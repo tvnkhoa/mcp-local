@@ -107,7 +107,7 @@ in `index.ts`, which is what rule S1 describes.
 ```
 <server>/
   scripts/smoke-test.mjs    real stdio handshake + tools/list — same name in every server
-  scripts/test/             integration harnesses (codebase-index-mcp only, 41 files)
+  scripts/test/             integration harnesses (codebase-index-mcp only, 42 files)
   skill/SKILL.md            the operational-skill template the installer renders
   docs/                     everything except README.md and CLAUDE.md
   README.md                 hand-written, with two generated blocks
@@ -279,6 +279,12 @@ Honest list. These are preferences until something enforces them:
   stays at the old path and still loads. `npm run mcp:doctor` now reports this as
   `WARN dist stale build output: …`, but there is no `clean` script for servers — the remedy is
   `rm -rf dist && npm run build`.
+- **A rebuild does not reach a server that is already running.** The doctor's `start` check spawns a
+  *fresh* process, so it confirms the build on disk works and nothing about the process your agent
+  is connected to. `WARN running live server predates the current build` is the check that closes
+  that gap (`scripts/lib/runningServers.mjs`); the remedy is to restart the MCP server. This is not
+  hypothetical — it produced a `codebase-index` server whose every parse failed while `mcp:doctor`
+  reported PASS 4/4 and `health_check` reported the index fresh at HEAD.
 
 ---
 

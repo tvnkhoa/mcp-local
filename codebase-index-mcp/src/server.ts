@@ -37,7 +37,7 @@ import type {
 } from "@mcp/sdk";
 import { createMcpServer } from "@mcp/sdk";
 
-import { mapError } from "./middleware/errorHandler.js";
+import { mapError } from "./middleware/errors.js";
 import type { GraphStore } from "./repositories/graphStore.js";
 import { buildRepoResources } from "./resources/resourceHandler.js";
 import type { HandlerContext } from "./tools/handlers/handlerContext.js";

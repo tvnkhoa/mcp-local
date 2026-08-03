@@ -9,7 +9,6 @@ import type Database from "better-sqlite3";
 import type { EdgeRecord, GraphHealth, ReliabilitySummary, ResolvedEdge, SymbolRecord } from "../../types/index.js";
 import { CALL_TRAVERSAL_EDGE_SQL_LIST, CALL_TRAVERSAL_EDGE_TYPES } from "../../types/index.js";
 import { expandInterfaceSiblingsImpl } from "../graph/interfaceSiblings.js";
-import { getImpactFilesImpl, getImpactSurfaceImpl } from "./impactSurface.js";
 
 export const TRIVIAL_CALLEE_TOKENS = new Set([
   "map", "filter", "find", "findIndex", "findLast", "forEach", "reduce", "reduceRight",
@@ -140,7 +139,7 @@ function ifaceNameFromToken(token: string): string {
   return token.replace(/^iface:/, "").replace(/<.*>$/, "").trim();
 }
 
-export function detectWiringShapeImpl(
+function detectWiringShapeImpl(
   db: Database.Database,
   repoId: string,
   filePath: string
@@ -209,7 +208,7 @@ export function detectWiringShapeImpl(
 }
 
 /** Human-readable note explaining why a wired type has an empty static blast radius. */
-export function buildWiringNote(shape: WiringShape): string {
+function buildWiringNote(shape: WiringShape): string {
   const label = shape.matchedInterface ?? shape.kind ?? "DI-wired type";
   if (shape.kind === "mediatr_pipeline") {
     const flow = shape.requestCount > 0 ? ` — ${String(shape.requestCount)} requests flow through the MediatR pipeline` : " — requests are dispatched through the MediatR pipeline at runtime";

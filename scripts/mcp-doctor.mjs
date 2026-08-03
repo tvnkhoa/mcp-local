@@ -27,6 +27,7 @@ import { detectAgents, readServerEntries } from "./lib/agents.mjs";
 import { verifyServer } from "./lib/verify.mjs";
 import { findMissingEnvPaths } from "./lib/envPaths.mjs";
 import { parseArgs, resolveServers } from "./lib/cli.mjs";
+import { findStaleRunningServers } from "./lib/runningServers.mjs";
 import { C, log, section, banner, ok, warn, err, info } from "./lib/log.mjs";
 
 const ARGS = parseArgs(process.argv.slice(2), { skipStart: ["--skip-start"] });
@@ -97,6 +98,33 @@ async function checkServer(server, agents) {
     const more = orphans.length > 5 ? ` (+${orphans.length - 5} more)` : "";
     checks.push(["dist", "warn", `stale build output: ${shown}${more}`]);
     fix.push(`cd ${server.dir} && rm -rf dist && npm run build`);
+  }
+
+  // A live server still running an older build than dist/.
+  //
+  // The `start` check below spawns a fresh process, so it can only ever confirm that the build on
+  // disk works — never that the process the agent is talking to shares it. That blind spot hid a
+  // total indexing failure on 2026-08-03; see scripts/lib/runningServers.mjs.
+  const staleProcs = findStaleRunningServers(entry, path.join(serverDirPath(server), "dist"));
+  if (staleProcs === null) {
+    checks.push(["running", "pass", "no build to compare, or process list unavailable"]);
+  } else if (staleProcs.length === 0) {
+    checks.push(["running", "pass", "no live server is older than dist/"]);
+  } else {
+    // Expect this after any `npm run build` / `verify:all`, which rewrites every dist file whether
+    // or not its content changed — mtime is all we have, since nothing records what the running
+    // process loaded. Harmless when the rebuild was a no-op; a total failure when a module moved,
+    // which is why it warns rather than staying silent. Never fatal: exit code is unaffected.
+    const detail = staleProcs
+      .map((p) => `pid ${p.pid} (+${Math.round(p.behindMs / 60_000)} min)`)
+      .join(", ");
+    checks.push([
+      "running",
+      "warn",
+      `${staleProcs.length} live server(s) started before the current build: ${detail}. ` +
+        "Harmless if nothing moved; stale modules if a file was renamed or relocated."
+    ]);
+    fix.push(`restart the ${server.key} MCP server (/mcp in Claude Code) if you have renamed or moved a module since it started`);
   }
 
   // config (across all detected agents)

@@ -55,7 +55,7 @@ function splitCsv(raw: string | undefined): string[] {
  * Accepts both a postgres:// URI and the Npgsql-style `Server=...;Database=...;` format.
  * (Moved out of index.ts so every environment is parsed identically.)
  */
-export function parseConnection(raw: string): PoolConfig {
+function parseConnection(raw: string): PoolConfig {
   const trimmed = raw.trim();
 
   // URI mode: postgresql://user:pass@host:5432/db

@@ -10,6 +10,54 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased] - 2026-08-03
 
+### 🐞 `get_call_chain` sees through DI again — a fix that had been dead for four commits
+
+MCP-ISSUE-022's **query-layer** half — seeding the caller frontier with a symbol's interface
+siblings — lived in `services/graph/graphTraversal.ts`. S-41 (`a1d992c`) re-homed the loose `src/`
+files, inlined the traversal into `tools/handlers/impactHandler.ts` **without** the seeding, and
+left the fixed module orphaned and imported by nothing. Since then `get_call_chain(callers)` missed
+every caller that dispatches through an interface — production code, since only tests `new` the
+concrete class.
+
+35 integration harnesses stayed green throughout, because none of them drove `get_call_chain`
+across an interface: `test-interface-dispatch` asserts the *resolution*-layer half through
+`getChangeContext`. `test:call-chain-interface` now covers the gap, on a fixture where only the
+sibling seeding can succeed, and was shown to fail without it. The dead module is deleted.
+
+### 🐞 An index run that produces no graph no longer reports `ok`
+
+A full re-index of this workspace reported `status: "ok"` while upserting 57 symbols and **0 edges**
+against 217 parse failures and 126 timeouts — the previous run of the same tree produced 2097
+symbols and 6233 edges. `health_check` then showed a run at HEAD with status `ok`, so every graph
+tool answered from an empty index without a warning.
+
+`IndexRunStatus` gains **`degraded`**, set by `assessRunHealth` when ≥10% of attempted files fail
+to parse, or when a `full` run over ≥10 files produces symbols but zero edges. `healthReasons`
+carries one line per failing check. The cause in this instance was not the build: `mcp:doctor` now
+also reports **`WARN running live server predates the current build`**, which is what nothing in
+the workspace could see (`scripts/lib/runningServers.mjs`).
+
+### 🧹 Zero import cycles, workspace-wide
+
+Three real cycles in `codebase-index-mcp`, now none anywhere. `config/envConfig` ↔
+`config/performanceConfig` was broken by moving the pure `parsePerformanceProfileEnv` down into
+`envConfig`; the other two — `graph/edgeResolverShared` ↔ `edgeResolverImports` and
+`impact/impactShared` ↔ `impactSurface` — were **unused imports**, symbols surviving only in a
+comment. Count value imports only: `import type` is erased, and a detector that ignores this
+reported 8 where there were 3.
+
+### 🧹 The fourth copy of `normalizePayload`, and 30 exports nobody imported
+
+`codebase-index-mcp/src/middleware/responseFormatter.ts` now delegates to `@mcp/core`, whose
+`pathKeys` option was written for this server and then not adopted. Verified by replaying 18 calls
+× 4 profiles: **72/72 identical** once per-run fields are masked. `mapError` deliberately stays
+local — a different envelope, recorded in the file so it is not re-raised.
+
+Also: `test:unit` 39 → 66 (closing backlog B-06, each new test proven by mutation), four files
+renamed to the workspace naming rule (`middleware/errors.ts`, `services/git/gitHelpers.ts`,
+`csharpScope.ts`, `jsCalls.ts`), and `dependency-rules.md` corrected — six of the ten rules apply
+to `packages/*` only, which the page implied the opposite of.
+
 ### 🧱 The standard `src/` structure, in all four servers
 
 `d692094` · `7676dbd`. Every server now lays out `src/{tools,resources,prompts,middleware,services,repositories,config,types}/`

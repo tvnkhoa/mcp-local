@@ -51,7 +51,7 @@ export function parseBoolEnv(key: string): boolean {
 }
 
 /** A trimmed string, empty when unset. */
-export function stringFromEnv(key: string): string {
+function stringFromEnv(key: string): string {
   return envReader.string(key, "").trim();
 }
 

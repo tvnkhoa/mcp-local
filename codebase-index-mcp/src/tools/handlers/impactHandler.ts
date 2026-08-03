@@ -2,8 +2,8 @@ import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { McpError, ErrorCode } from "@modelcontextprotocol/sdk/types.js";
 import { resolveResponseProfile } from "../../middleware/responseFormatter.js";
 import { validateReadOnlyGraphSql, validateAllowedTables } from "../../middleware/sqliteGuardrails.js";
-import { buildStaleWarning, getRepoStaleness, collectDirtyFiles, countCommitsBehind } from "../../services/gitHelpers.js";
-import type { StaleWarning } from "../../services/gitHelpers.js";
+import { buildStaleWarning, getRepoStaleness, collectDirtyFiles, countCommitsBehind } from "../../services/git/gitHelpers.js";
+import type { StaleWarning } from "../../services/git/gitHelpers.js";
 import { buildCoverageBlock } from "../../middleware/coverage.js";
 import { GraphStore } from "../../repositories/graphStore.js";
 import type { HandlerContext } from "./handlerContext.js";
@@ -530,7 +530,20 @@ function traverseDependencyGraph(store: GraphStore, repoId: string, symbolId: st
 function traverseCallGraph(store: GraphStore, repoId: string, symbolId: string, direction: "callers" | "callees", depth: number, limit: number) {
   const all: ReturnType<GraphStore["getCallEdges"]> = [];
   const visited = new Set<string>();
-  let frontier = [symbolId];
+  // MCP-ISSUE-022: the callers direction must see through DI. Production code calls the
+  // interface method; only tests `new` the concrete class. Seeding the frontier with the
+  // symbol's interface siblings (interface method ↔ impl method, class → members) is the
+  // query-layer half of that fix — the resolution-layer half is the interface-dispatch
+  // CALLS edges written at resolve time. Both are needed: resolution cannot see a caller
+  // whose edge lands on the sibling rather than on `symbolId` itself.
+  //
+  // This lived in services/graph/graphTraversal.ts until S-41 (a1d992c) re-homed the loose
+  // src files, inlined the traversal here without it, and left the fixed module orphaned.
+  // Covered by scripts/test/test-call-chain-interface.mjs — do not drop it again.
+  let frontier =
+    direction === "callers"
+      ? [symbolId, ...store.expandInterfaceSiblings(repoId, [symbolId]).map((s) => s.symbolId)]
+      : [symbolId];
   for (let level = 0; level < depth && all.length < limit && frontier.length > 0; level += 1) {
     const nextFrontier: string[] = [];
     for (const current of frontier) {

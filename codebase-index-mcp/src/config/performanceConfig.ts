@@ -5,20 +5,6 @@
 import type { PerformanceProfile } from "../services/indexing/indexPipeline.js";
 import { nonNegativeNumberFromEnv, parseOptionalBooleanEnv } from "./envConfig.js";
 
-export function parsePerformanceProfileEnv(raw: string | undefined): PerformanceProfile | "auto" {
-  const value = (raw ?? "auto").trim().toLowerCase();
-  if (value === "standard" || value === "off") {
-    return "standard";
-  }
-  if (value === "large" || value === "balanced") {
-    return "large";
-  }
-  if (value === "very-large" || value === "aggressive") {
-    return "very-large";
-  }
-  return "auto";
-}
-
 export function resolvePostPhasePolicy(profile: PerformanceProfile): {
   maxUnresolvedRows: number;
   resolveTypeRefs: boolean;

@@ -2,9 +2,9 @@
 
 **Created** — 2026-07-29
 **Baseline** — `32f2a82`, working tree carrying the MCP-ISSUE-031/033 dead-code fixes
-**Refreshed** — 2026-08-03. **Nine of fourteen items are closed** (B-01, B-01b, B-02, B-02b, B-07,
-B-08, B-09, B-12 done; B-10 won't-do with its underlying defect fixed). Every closed row cites the
-commit, command or registry entry that proves it. **Five remain open — B-03, B-04, B-05, B-06 and
+**Refreshed** — 2026-08-03. **Ten of fourteen items are closed** (B-01, B-01b, B-02, B-02b, B-06,
+B-07, B-08, B-09, B-12 done; B-10 won't-do with its underlying defect fixed). Every closed row cites
+the commit, command or registry entry that proves it. **Four remain open — B-03, B-04, B-05 and
 B-11** — and two of those cannot be closed by writing code at all: B-04 needs measurements spread
 across several commits, B-05 needs real credentials provisioned as CI secrets.
 **Input** — the post-migration assessment of `docs/migration/status.md` §, re-measured against the
@@ -296,7 +296,32 @@ credentials, and `BITBUCKET_WRITE_ENABLED` must stay unset.
 
 ---
 
-### B-06 · Unit tests where the assurance currently is not
+### B-06 · Unit tests where the assurance currently is not — ✅ DONE 2026-08-03
+
+**Its own three validations are met.** `test:unit` went 39 → 66 tests, adding
+`services/graph/edgeResolverShared.test.ts`, `services/impact/impactShared.test.ts`,
+`repositories/graphQueries.test.ts` and `services/indexing/runFinalize.test.ts` — the three areas
+this item names, plus the new index-health check. All are type-checked via `tsconfig.test.json`.
+
+Each was proven to fail against a deliberately broken subject, not assumed to:
+
+| Mutation | Caught by |
+|---|---|
+| drop the `symbolId` tie-break in `pickBestNamedCandidate` | *a tie is broken by symbolId* · *order independence across every permutation* |
+| delete the `TYPE_REF` branch from the pairs CTE | all three *pairs CTE* tests |
+| `CALL_TRAVERSAL_EDGE_TYPES = ["CALLS"]` (stop crossing the bus) | *getCallEdges crosses the message bus (ISSUE-020)* |
+
+The item predicted this work would make graph fixes cheaper to verify. The same day's review found
+the counter-example that justifies it: ISSUE-022's query-layer fix had been dead since `a1d992c`
+and 35 integration harnesses stayed green, because none of them drove `get_call_chain` across an
+interface. A unit test would have.
+
+**Still true, and not closed by this:** `codebase-index-mcp` has 9 `*.test.ts` against 125 source
+files. The bar this item set was the three named areas; the ratio is a standing cost, not an open item.
+
+---
+
+### B-06 (original text)
 
 **Purpose** Move some of `codebase-index-mcp`'s assurance off the integration harnesses.
 
@@ -384,6 +409,10 @@ size caps* → **Built** (`guard:all`: 0 errors, 20 `size/soft-cap` warnings, 1 
 across 508 files). The env-var count was stale in three more places than this item knew about —
 §9 said 89, `CLAUDE.md` and `docs/architecture.md` said 94, the manifest reports **96** — all four
 now agree.
+
+> Superseded by B-07 on the same day: the count is **98** (41/23/23/11). The closing note above also
+> reads "20 `size/soft-cap` warnings"; `guard:all` reports 20 warnings of which **18** are soft-cap
+> and **2** are hard-cap. Corrected 2026-08-03 during the repository review.
 
 **Purpose** Fix a doc that reports a defect the repo does not have.
 
@@ -604,8 +633,8 @@ item — listing them here is what stops them being "discovered" again every six
 | Three different SQL forbidden-token lists (18/13/16) | Partly correct by dialect — SQLite needs `pragma`, DataFusion has no `merge`. Mechanism shared, policy local; two tests pin the divergence | ADR 0002 |
 | No per-server `.gitignore` | Root file's `**/` patterns already decide every path | ADR 0003 |
 | Servers not moved into `servers/` | Cosmetic symmetry, and the only change that rewrites `~/.claude.json` | S-42, skipped |
-| `store/graphStore.ts` at 831 lines | A delegation façade's length *is* its method count. The exemption is declared and reported as `info`, not silent | S-30 |
-| 17 `size/soft-cap` warnings | Advisory by design; several of those files are legitimately one thing | `conventions.md` §5 |
+| `repositories/graphStore.ts` at 841 lines | A delegation façade's length *is* its method count. The exemption is declared and reported as `info`, not silent | S-30 |
+| 20 size warnings — 18 `size/soft-cap` + 2 `size/hard-cap` | Advisory by design; several of those files are legitimately one thing. Both hard-cap findings are in `codebase-index-mcp`, where the rule is downgraded to a warning — `repositories/vectorStore.ts` (716) and `services/graph/edgeResolverCalls.ts` (622) | `conventions.md` §5 · re-derive with `npm run guard:all` |
 | The postgres alias table existing twice | Required: a server may not import `@mcp/manifest` (`servers/tooling-import`). A test diffs the copies | S-43 |
 | `CH_DB_CONNECTION` kept in `efRunner` | It is *written*, not read — an outbound contract with a .NET project this workspace does not own | S-43 |
 
@@ -652,8 +681,9 @@ Still open, and none of them blocks another:
 B-03  independent, per-tool, pausable after any tool — the only one that changes tool output
 B-04  needs elapsed time, not effort: five runs across different commits before a floor can be set
 B-05  needs credentials provisioned as CI secrets — a decision, not a task
-B-06  the largest remaining, and the one that makes future graph fixes cheaper to verify
 B-11  documentation only
+
+B-06  ✅ closed 2026-08-03 during the repository review
 ```
 
 **Suggested next slice:** **B-06** is now the one worth doing first. It was originally scheduled to
@@ -683,7 +713,7 @@ tell the truth, or makes an existing gate capable of failing.
 | B-03 | One profile resolution | P1 | **Med** | R2 | S / tool | open |
 | B-04 | Raise the graph-accuracy floor | P2 | Low | R1 | XS | open |
 | B-05 | Run `verify:live` on a schedule | P2 | **Med** | R1 | M | open |
-| B-06 | Unit tests in `codebase-index` | P2 | Low | R1 | M | open |
+| B-06 | Unit tests in `codebase-index` | P2 | Low | R1 | M | ✅ 2026-08-03 · `test:unit` 39 → 66, each proven by mutation |
 | B-07 | Declare `PGSSLMODE` + `NODE_TLS_REJECT_UNAUTHORIZED` | P2 | Low | R1 | XS | ✅ 2026-08-03 |
 | B-08 | Correct the §9 reconciliation rows | P3 | Low | R1 | XS | ✅ 2026-08-03 |
 | B-09 | `WORKSPACE_ROOT` by marker, not depth | P3 | **Med** | R1 | S | ✅ 2026-08-03 · doctor output byte-identical |

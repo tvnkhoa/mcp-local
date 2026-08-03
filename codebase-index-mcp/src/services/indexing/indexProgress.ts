@@ -23,7 +23,7 @@ import { INDEX_LOG_MODE } from "../../config/envConfig.js";
 const LOG_MODE = INDEX_LOG_MODE;
 
 /** Full line-by-line `[index-*]` logs (opt-in, e.g. CI / debugging a hang). */
-export const VERBOSE_LOG = LOG_MODE === "verbose";
+const VERBOSE_LOG = LOG_MODE === "verbose";
 const SILENT = LOG_MODE === "quiet";
 
 /** Minimum gap between progress notifications, to avoid flooding the host. */

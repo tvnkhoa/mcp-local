@@ -127,12 +127,12 @@ export function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-export function normalizeTypeToken(typeName: string): string {
+function normalizeTypeToken(typeName: string): string {
   const withoutNamespace = typeName.split(".").pop() ?? typeName;
   return withoutNamespace.replace(/<.*>/g, "").trim();
 }
 
-export function findMatchingBraceEnd(content: string, openBraceOffset: number): number {
+function findMatchingBraceEnd(content: string, openBraceOffset: number): number {
   let depth = 0;
   for (let i = openBraceOffset; i < content.length; i += 1) {
     const ch = content[i];
@@ -173,7 +173,7 @@ export function findEnclosingObjectInitializer(content: string, offset: number):
   return null;
 }
 
-export function findEnclosingClassName(content: string, offset: number): string | null {
+function findEnclosingClassName(content: string, offset: number): string | null {
   const prefix = content.slice(0, Math.max(0, offset));
   const classMatches = [...prefix.matchAll(/\bclass\s+([A-Za-z_][A-Za-z0-9_]*)/g)];
   if (classMatches.length > 0) {
@@ -343,7 +343,7 @@ export function isDottedMemberPath(value: string): boolean {
   return /^[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)+$/.test(value.trim());
 }
 
-export function isSimpleIdentifier(value: string): boolean {
+function isSimpleIdentifier(value: string): boolean {
   return /^[A-Za-z_][A-Za-z0-9_]*$/.test(value.trim());
 }
 

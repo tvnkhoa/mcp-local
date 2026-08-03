@@ -14,7 +14,6 @@ import {
   parseBooleanEnv,
   parseWatchConfigFromEnv
 } from "../middleware/indexGuardrails.js";
-import { parsePerformanceProfileEnv } from "./performanceConfig.js";
 import type { PerformanceProfile } from "../services/indexing/indexPipeline.js";
 
 export function numberFromEnv(name: string, fallback: number): number {
@@ -31,7 +30,7 @@ export function numberFromEnv(name: string, fallback: number): number {
   return Math.floor(value);
 }
 
-export function ratioFromEnv(raw: string | undefined, fallback: number): number {
+function ratioFromEnv(raw: string | undefined, fallback: number): number {
   if (!raw) {
     return fallback;
   }
@@ -153,6 +152,29 @@ export function autoWatchReposFromEnv(): ReturnType<typeof parseAutoWatchRepos> 
 /** The whole watch config, which reads several `CODEBASE_INDEX_WATCH_*` variables. */
 export function watchConfigFromEnv(): ReturnType<typeof parseWatchConfigFromEnv> {
   return parseWatchConfigFromEnv(process.env);
+}
+
+/**
+ * Map the raw `CODEBASE_INDEX_LARGE_REPO_PROFILE` value onto a profile.
+ *
+ * Pure — value in, profile out, no `process.env` — and it lives here rather than in
+ * `performanceConfig.ts` to keep `config/` acyclic. `performanceConfig` needs this module's env
+ * primitives (`nonNegativeNumberFromEnv`, `parseOptionalBooleanEnv`), so the dependency has to run
+ * in that direction only; with this function on the other side the two imported each other, which
+ * was the 2-cycle at the root of six of the eight cycles a full scan reported in this server.
+ */
+function parsePerformanceProfileEnv(raw: string | undefined): PerformanceProfile | "auto" {
+  const value = (raw ?? "auto").trim().toLowerCase();
+  if (value === "standard" || value === "off") {
+    return "standard";
+  }
+  if (value === "large" || value === "balanced") {
+    return "large";
+  }
+  if (value === "very-large" || value === "aggressive") {
+    return "very-large";
+  }
+  return "auto";
 }
 
 /**

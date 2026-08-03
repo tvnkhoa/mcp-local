@@ -40,7 +40,7 @@ import {
   asText as asTextCore
 } from "./middleware/responseFormatter.js";
 import { resolveServerVersion } from "./config/serverVersion.js";
-import { assertNoLlmRuntimePolicy, assertRefactorApprovalPolicy } from "./middleware/errorHandler.js";
+import { assertNoLlmRuntimePolicy, assertRefactorApprovalPolicy } from "./middleware/errors.js";
 import type { HandlerContext } from "./tools/handlers/handlerContext.js";
 import { createCodebaseIndexServer } from "./server.js";
 import { buildTools } from "./tools/index.js";

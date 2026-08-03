@@ -51,7 +51,7 @@ const databaseFailure: ErrorRule = (error) => {
  * extraction is safe now rather than only once those dependencies are deduplicated
  * (migration-plan step S-09).
  */
-export const mapError: (error: unknown) => MappedError = createErrorMapper({
+const mapError: (error: unknown) => MappedError = createErrorMapper({
   validation: { type: z.ZodError, message: "Invalid tool input.", rootLabel: "root" },
   coded: [PolicyViolationError],
   mcpError: McpError,

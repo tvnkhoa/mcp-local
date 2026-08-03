@@ -13,7 +13,7 @@ import { z } from "zod";
 export const responseProfileSchema = z.enum(["nano", "compact", "standard", "verbose"]);
 
 // Refactor schemas
-export const refactorSymbolKindSchema = z.enum(["class", "property", "field", "method"]);
+const refactorSymbolKindSchema = z.enum(["class", "property", "field", "method"]);
 
 export const refactorScopeSchema = z
   .object({
@@ -43,7 +43,7 @@ export const refactorInitializerRewriteSchema = z
   })
   .strict();
 
-export const refactorCompilerDiagnosticSchema = z
+const refactorCompilerDiagnosticSchema = z
   .object({
     code: z.string().min(1).max(20),
     filePath: z.string().min(1).max(500),

@@ -1,5 +1,18 @@
 /**
- * Error handling utilities
+ * Error handling utilities.
+ *
+ * **This does not use `@mcp/sdk`'s `createErrorMapper`, and that is deliberate.** The other three
+ * servers share it; this one publishes a different envelope — `{ code, message, requestId }` with
+ * UPPER_SNAKE codes and every message prefixed with the tool name, against the shared
+ * `{ code, message, detail? }`. `createErrorMapper` also builds a `(error) => WireError`, while
+ * this signature is `(error, toolName)` and mints a fresh `requestId` per call, so adopting it
+ * would mean either rebuilding a mapper per call or post-processing its output back into this
+ * shape. `packages/sdk/src/errorMapper.ts` states the same conclusion from the other side: with
+ * only one copy of this envelope there is no duplication to remove, and folding it in distorts both.
+ *
+ * Raised again during the 2026-08-03 repository review — "three servers share a mapper, this one
+ * does not" reads as drift until you check what the envelopes actually are. Recorded here so the
+ * next reader spends no time on it. Reopening needs the envelope itself to change first.
  */
 
 import { randomUUID } from "node:crypto";

@@ -1,6 +1,6 @@
 import { execFileSync } from "node:child_process";
 
-import type { GraphStore } from "../repositories/graphStore.js";
+import type { GraphStore } from "../../repositories/graphStore.js";
 
 export function runGit(repoPath: string, args: string[]): string {
   return execFileSync("git", args, { cwd: repoPath, encoding: "utf8" }).trim();
@@ -36,7 +36,7 @@ export function resolveCurrentBranch(repoPath: string): string | null {
   }
 }
 
-export function runGitStatusPorcelain(repoPath: string): string[] | null {
+function runGitStatusPorcelain(repoPath: string): string[] | null {
   try {
     const text = runGit(repoPath, ["status", "--porcelain"]);
     if (!text) {

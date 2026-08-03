@@ -32,7 +32,7 @@ export {
   isLikelyCSharpInterfaceName,
   mapUsingNamespaceToNugetContract,
   normalizeCSharpTypeName
-} from "./extractorCSharpScope.js";
+} from "./csharpScope.js";
 export {
   TRIVIAL_PROPERTY_TOKENS,
   applyCallEdgeCap,
@@ -59,4 +59,4 @@ export {
   JS_STATIC_RECEIVER_NAMES,
   NODE_BUILTINS,
   shouldSkipJavaScriptMemberCall
-} from "./extractorJsCalls.js";
+} from "./jsCalls.js";

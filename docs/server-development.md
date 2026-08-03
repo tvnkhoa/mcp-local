@@ -260,7 +260,7 @@ npm run benchmark:plan:check    # compact-mode token savings must stay ≥ 40%
 
 The suite is **discovered** from `package.json` rather than listed, so it cannot fall behind when
 someone adds a `test:*` script. `test:unit` runs first: a compile-level break should not wait behind
-31 harnesses that each need a build.
+34 harnesses that each need a build.
 
 > Nine harnesses in `codebase-index-mcp/scripts/test/` are wired to no npm script and therefore
 > never run. They were already unverified before the standard-structure move and nothing since has

@@ -29,7 +29,7 @@ import { optionalNumberFromEnv, optionalRatioFromEnv } from "../../config/envCon
 // Re-export types for backward compatibility
 export type { ExtractInput, ExtractOutput };
 
-export class ParseTimeoutError extends Error {
+class ParseTimeoutError extends Error {
   readonly filePath: string;
   readonly timeoutMs: number;
 

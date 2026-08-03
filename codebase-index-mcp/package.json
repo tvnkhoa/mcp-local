@@ -29,6 +29,7 @@
     "test:bus-edges": "node scripts/test/test-bus-edges.mjs",
     "test:search-ranking": "node scripts/test/test-search-ranking.mjs",
     "test:interface-dispatch": "node scripts/test/test-interface-dispatch.mjs",
+    "test:call-chain-interface": "node scripts/test/test-call-chain-interface.mjs",
     "test:base-class-dispatch": "node scripts/test/test-base-class-dispatch.mjs",
     "test:benchmark-fixture": "node scripts/test/test-benchmark-fixture.mjs",
     "test:string-literals": "node scripts/test/test-string-literals.mjs",

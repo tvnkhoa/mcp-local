@@ -134,7 +134,7 @@ export function stripGenerics(name: string): string {
  * - strip known prefixes (callee:, property:, import:, type:)
  * - split PascalCase tokens
  */
-export function normalizeSymbolText(name: string, signature?: string): string {
+function normalizeSymbolText(name: string, signature?: string): string {
   // Strip known edge prefixes
   let text = name
     .replace(/^(callee:|property:|import:|type:)/, "")
@@ -165,7 +165,7 @@ export function normalizeSymbolText(name: string, signature?: string): string {
  * Build a deterministic trigram-based Float32Array vector.
  * Uses djb2-style hash to map each trigram to a dimension index.
  */
-export function trigramVector(text: string, dims = VECTOR_DIMS): Float32Array {
+function trigramVector(text: string, dims = VECTOR_DIMS): Float32Array {
   const vec = new Float32Array(dims);
   const tokens = text.split(/\s+/).filter((t) => t.length >= 2);
 
@@ -581,7 +581,7 @@ export function vectorSearchSymbols(
  */
 const searchCache = new Map<string, { symbolId: string; distance: number }[]>();
 
-export function clearVectorSearchCache(): void {
+function clearVectorSearchCache(): void {
   searchCache.clear();
 }
 

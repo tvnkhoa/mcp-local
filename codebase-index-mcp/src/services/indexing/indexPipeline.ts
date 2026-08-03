@@ -20,7 +20,7 @@ import process from "node:process";
 
 import { shouldIndexFile, type FilterDecision } from "./fileFilter.js";
 import { GraphStore } from "../../repositories/graphStore.js";
-import { resolveHeadCommitSha, resolveCurrentBranch } from "../gitHelpers.js";
+import { resolveHeadCommitSha, resolveCurrentBranch } from "../git/gitHelpers.js";
 import { redactSensitive } from "../../middleware/indexGuardrails.js";
 import { extractGraphData, isParseTimeoutError } from "../extractors/treeSitterExtractor.js";
 import { ExtractionWorkerPool } from "../extractors/extractionWorkerPool.js";
@@ -29,13 +29,14 @@ import { createIndexProgress, indexLog, indexWarn, type IndexProgress } from "./
 import { resolveIndexRunLimits } from "./runLimits.js";
 import { scanRepoFiles } from "./fileScan.js";
 import {
+  assessRunHealth,
   buildRunSummary,
   pruneAndResolve,
   rebuildVectorIndex,
   type RunCounters,
   type RunIdentity
 } from "./runFinalize.js";
-import type { IndexMode, IndexProgressSnapshot, IndexRunSummary } from "../../types/index.js";
+import type { IndexMode, IndexProgressSnapshot, IndexRunStatus, IndexRunSummary } from "../../types/index.js";
 
 export type PerformanceProfile = "standard" | "large" | "very-large";
 
@@ -460,20 +461,29 @@ export async function runIndexPipeline(store: GraphStore, input: RunIndexInput):
     const elapsedMs = Date.now() - started;
     const wasCancelled = input.abortSignal?.aborted ?? false;
 
+    // A run can finish without throwing and still have produced an unusable graph. Cancellation
+    // outranks the health verdict: an aborted run is expected to be incomplete, so reporting it
+    // as "degraded" would describe the wrong thing.
+    const health = assessRunHealth(c, input.mode);
+    const runStatus = wasCancelled ? "cancelled" : health.degraded ? "degraded" : "ok";
+    for (const reason of health.reasons) {
+      indexWarn(`[index-degraded] ${reason}`);
+    }
+
     const summary = buildRunSummary(
-      identity, c, wasCancelled ? "cancelled" : "ok", finishedAt, elapsedMs, vectorSymbolsIndexed
+      identity, c, runStatus, finishedAt, elapsedMs, vectorSymbolsIndexed, health.reasons
     );
 
     // Note: recordRun is called by the caller (index.ts) after computing resolution metrics
-    emitProgress(wasCancelled ? "cancelled" : "ok", finishedAt);
+    emitProgress(runStatus, finishedAt);
     syncProgressBar();
     const elapsedSec = (Date.now() - started) / 1000;
-    const doneLine = `[index-done] status=${wasCancelled ? "cancelled" : "ok"} indexed=${String(c.filesIndexed)} skipped=${String(c.filesSkipped)} failures=${String(c.parseFailures)} timeouts=${String(c.parseTimeouts)} symbols=${String(c.symbolsUpserted)} elapsed=${elapsedSec.toFixed(1)}s`;
+    const doneLine = `[index-done] status=${runStatus} indexed=${String(c.filesIndexed)} skipped=${String(c.filesSkipped)} failures=${String(c.parseFailures)} timeouts=${String(c.parseTimeouts)} symbols=${String(c.symbolsUpserted)} elapsed=${elapsedSec.toFixed(1)}s`;
     indexLog(doneLine);
     if (ownsProgress) {
       // No caller post-phase — finish the reporter with a concise summary here.
-      const mark = wasCancelled ? "⚠" : "✓";
-      progress.stop(`${mark} index ${input.repoId} · ${wasCancelled ? "cancelled" : "done"} · ${String(c.filesIndexed)} files · ${String(c.symbolsUpserted)} symbols · ${elapsedSec.toFixed(1)}s`);
+      const mark = runStatus === "ok" ? "✓" : "⚠";
+      progress.stop(`${mark} index ${input.repoId} · ${runStatus === "ok" ? "done" : runStatus} · ${String(c.filesIndexed)} files · ${String(c.symbolsUpserted)} symbols · ${elapsedSec.toFixed(1)}s`);
     } else {
       // Caller continues into its edge-resolution post-phase; keep reporting.
       progress.phase("resolving edges");
@@ -505,7 +515,7 @@ export async function runIndexPipeline(store: GraphStore, input: RunIndexInput):
   }
 
   function emitProgress(
-    status: "running" | "ok" | "failed" | "cancelled",
+    status: IndexRunStatus,
     finishedAtArg?: string,
     errorMessage?: string
   ): void {

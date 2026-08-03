@@ -75,6 +75,7 @@ the shared vocabulary, keeping their names as sub-domains under `services/`.
 |--------|------|
 | `services/analysis/` | static analysis over the built graph: dead code, cycles, test linkage, value contracts |
 | `services/extractors/` | source → symbols/edges, per language, plus the worker lane |
+| `services/git/` | `git` shell-outs: HEAD sha, branch, working-tree dirt, staleness warnings |
 | `services/graph/` | edge resolution and traversal |
 | `services/impact/` | blast radius: who calls, who is affected, what changed |
 | `services/indexing/` | the index run — scan, limits, batches, progress, finalize |
@@ -84,6 +85,15 @@ the shared vocabulary, keeping their names as sub-domains under `services/`.
 
 Root: `index.ts` (S1 — the only entry point) and `server.ts`, its protocol-wiring half. `prompts/` is
 absent because this server declares no MCP prompts.
+
+**Naming inside `services/extractors/`.** Two prefixes, and the split is by scope, not by taste:
+`<language>Extractor.ts` is a language's entry point (`jsExtractor`, `pythonExtractor`,
+`csharpExtractor`); `csharp*` / `js*` are that language's internals (`csharpSymbols`,
+`csharpTypeRefs`, `csharpScope`, `jsCalls`); bare `extractor*` is machinery shared across
+languages (`extractorEdges`, `extractorUtils`, `extractorPrimitives`, `extractorTypes`,
+`extractorRoutes`). Two files broke the rule by carrying the shared prefix while being
+language-specific — `extractorCSharpScope.ts` and `extractorJsCalls.ts` — and were renamed to
+`csharpScope.ts` and `jsCalls.ts` on 2026-08-03.
 
 ### Key source files
 

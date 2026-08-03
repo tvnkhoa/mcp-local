@@ -22,7 +22,7 @@ import { createResource, registerResource } from "@mcp/sdk";
 
 import type { GraphStore } from "../repositories/graphStore.js";
 import { parseRepoResourceUri } from "./repoResourceUri.js";
-import { getRepoStaleness, runGitLines } from "../services/gitHelpers.js";
+import { getRepoStaleness, runGitLines } from "../services/git/gitHelpers.js";
 import { resolveDetectChangesPolicy, scoreChangeRisk } from "../services/analysis/policyResolver.js";
 
 type ParsedRepoUri = NonNullable<ReturnType<typeof parseRepoResourceUri>>;
@@ -93,7 +93,7 @@ export function buildRepoResources(store: GraphStore, maxResultLimit: number): R
   });
 }
 
-export function buildRiskSnapshot(
+function buildRiskSnapshot(
   store: GraphStore,
   repoId: string,
   policy: "quick-triage" | "strict-review" | "release-gate" | "custom",
