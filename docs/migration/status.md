@@ -4,6 +4,11 @@
 the end of Phase K. Baseline `9ccae95`. Every row cites the artifact that proves it. Where no
 artifact was found, the row says so rather than guessing.
 
+**Extended 2026-08-03** with [the work that landed after the migration
+closed](#post-migration--standard-structure-and-the-sdk-builder-family-2026-08-03) — the standard
+`src/` structure and the SDK builder family. The 44 steps below are unchanged; that section is
+additive.
+
 ## **43 of 44 done · 1 skipped by decision (S-42) · 0 open. The migration is complete.**
 
 Phases A–J all landed by 2026-07-29, which the plan marks as the point the migration is finished.
@@ -828,6 +833,99 @@ generated `.env.example`. They are external conventions (libpq and Node), not th
 names, but the omission means the generated file is not a complete picture of what a real install
 uses. `observe-mcp` does declare `NODE_TLS_REJECT_UNAUTHORIZED`, so the two servers are inconsistent
 about it.
+
+---
+
+## Post-migration — Standard structure and the SDK builder family (2026-08-03)
+
+Two pieces of work landed after the 44 steps closed. Neither is a migration step, and neither had a
+state record until now — they existed only as commit messages, which is the condition this document
+exists to prevent.
+
+| Work | Status | Evidence |
+|---|---|---|
+| Standard `src/` structure in all four servers | ✅ | `d692094` + `7676dbd` — 153 files moved, 1 split; full report in `docs/refactor/standard-structure-report.md` |
+| One `create*` / `register*` vocabulary across all three MCP surfaces | ✅ | `4390fa1` — `packages/sdk/README.md` §"The builder family" |
+| The scaffold rebuilt on that vocabulary | ✅ | 2026-08-03 — `templates/server/**`, verified by scaffolding and deleting a server |
+
+### What `4390fa1` added
+
+`registerTool` joined `defineTool`, and the same pair now exists for the other two surfaces:
+`createResource`/`registerResource` and `createPrompt`/`registerPrompt`. Alongside them,
+`runServer` (the entry-point tail, previously four hand-written copies of the same twelve lines),
+`createErrorMapper` (the shared branch order, with each server injecting its own classes — the
+ADR-0001 constraint is why injection rather than import), and `collect.ts`. Export surface:
+`packages/sdk/src/index.ts`.
+
+Each `register*` flattens nested groups and **rejects a duplicate name at assembly**, so a
+collision fails at start-up rather than one tool silently shadowing another on a call.
+
+Three things worth stating so they are not re-discovered as defects:
+
+- **`prompts/` has no consumer.** `createServer` wires prompts (`createServer.ts`) and the SDK
+  serves `prompts/list` / `prompts/get`, but no server declares one — grep for
+  `createPrompt|registerPrompt` across the four servers returns nothing. That is a platform
+  capability without a user yet, and it is why no server has a `prompts/` folder
+  (`standard-structure-report.md` §4).
+- **`codebase-index-mcp` deliberately does not use `createErrorMapper`.** Its envelope is a
+  different contract — UPPER_SNAKE codes, a `requestId`, every message prefixed with the tool name
+  — and there is only one copy of it, so there is no duplication to remove. The reason is recorded
+  at the top of `packages/sdk/src/errorMapper.ts`, not just here.
+- **`toWireError` is not part of the mapper.** Unwrapping a `PlatformError` before mapping is what
+  makes an unknown tool answer `not_found` instead of `internal_error`; `createErrorMapper` has no
+  such branch, on purpose, because "platform errors take precedence" is a per-server decision.
+
+### The scaffold was left behind, and that is what this pass fixed
+
+`4390fa1` moved all four servers onto the new vocabulary and did not touch `templates/server/`.
+S-38's whole claim is that the template *encodes* the conventions rather than describing them, so
+until 2026-08-03 server #5 would have been born on the superseded pattern: a hand-written
+`main()` / `process.exit` tail, a hand-written four-branch `mapError`, a fourth private copy of
+`PolicyViolationError`, and `buildTools` returning a raw array.
+
+Now: `runServer`, `createErrorMapper` + `toWireError`, `registerTool`, and
+`PolicyViolationError` re-exported from `@mcp/core`.
+
+**Measured, not asserted.** A server was scaffolded from the *old* template and its error envelopes
+recorded over a real stdio session, then the template was changed and a fresh server scaffolded and
+probed the same way:
+
+| probe | before | after |
+|---|---|---|
+| unknown tool | `not_found` · "Unknown tool: no_such_tool." | **identical** |
+| `echo` with a valid message | `{"message":"hello","server":…}` | **identical** |
+| `echo {message:""}` | `internal_error`, message = **a raw zod issue array** | `validation_error` · "Invalid arguments." · detail `message: String must contain at least 1 character(s)` |
+| `echo {}` | same raw dump | `validation_error` · detail `message: Required` |
+| `echo {extra:1}` | same raw dump | `validation_error` · detail `(root): Unrecognized key(s)…` |
+
+The validation rows are an **intended** change: the scaffold had no validation branch at all, so it
+disagreed with all three real servers and leaked zod internals to clients. The `not_found` row is
+the one that had to stay byte-identical, and it did — that is what `toWireError` protects.
+
+The template's own test file now pins both, so the claim in its header ("`tools.test.ts` pins
+that") is true rather than aspirational; it previously tested only the tool table.
+
+Verified end to end with `npm run new:server -- --key scratch`: install, build, typecheck, test and
+smoke all pass with no hand-editing, and `guard all --servers scratch-mcp` reports **0 findings**
+across both guards. The scaffold was then deleted and `verify:all` exited 0 with nothing left
+behind — the property S-38 designed for by *not* registering the server in the manifest.
+
+*(One thing S-38's write-up implies that is not true: `guard:all` and `contract-snapshot` are both
+manifest-driven, so neither sees an unregistered scaffold. The guards have to be pointed at it with
+`--servers`, and a contract snapshot is only possible after the manifest entry exists — which is
+the ordering the generated README already states.)*
+
+### One dead copy removed while doing it
+
+`observe-mcp` carried `toWireError` **twice** — byte-identical bodies in `middleware/errors.ts` and
+`tools/index.ts`. Only the second is imported by anything; the first was stranded by the structure
+refactor and exported to nobody. Removed. `observe-mcp` still passes 56/56 with an unchanged
+contract, which is what proves the deleted copy was the dead one.
+
+### Gate state when this was written
+
+`verify:all` exit 0 · contracts 43 / 17 / 8 / 8 = **76 tools**, no diff · `generate:check` clean ·
+`guard:all` **0 errors, 20 `size/soft-cap` warnings, 1 accepted exemption across 508 files**.
 
 ---
 

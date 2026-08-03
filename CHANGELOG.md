@@ -8,6 +8,67 @@ All notable changes to this project will be documented in this file.
 > introducing commit named so each claim is checkable. They are backfill, not a record written at
 > the time.
 
+## [Unreleased] - 2026-08-03
+
+### 🧱 The standard `src/` structure, in all four servers
+
+`d692094` · `7676dbd`. Every server now lays out `src/{tools,resources,prompts,middleware,services,repositories,config,types}/`
+plus `index.ts`, with a folder present **only** where the server has that concern — an empty
+`prompts/` would advertise a capability that is not there. 153 files moved and one split; 157 of
+158 relocations are tracked as renames. No behaviour change and no API change: `contracts:check` is
+byte-identical at 76 tools, and every server's entry point is still `dist/index.js`, so no
+`~/.claude.json` entry needed rewriting.
+
+Full per-server map, the rule that decides which slot a file belongs in, the slots that are N/A and
+why, and the compatibility evidence: `docs/refactor/standard-structure-report.md`.
+
+### 🧱 One builder vocabulary across all three MCP surfaces
+
+`4390fa1`. `@mcp/sdk` gained `registerTool` beside `defineTool`, and the same `create*` /
+`register*` pair for the other two surfaces — `createResource`/`registerResource`,
+`createPrompt`/`registerPrompt`. Each `register*` flattens nested groups and rejects a duplicate
+name **at assembly**, so a collision fails at start-up instead of one tool silently shadowing
+another at call time.
+
+- **`runServer`** — the entry-point tail. Four servers each ended with the same twelve lines
+  (`main()`, log, `main().catch` → `process.exit`), one of which can never be exercised by a test.
+  The difference between them is now a set of arguments, and `process.exit` lives in one reviewed
+  place.
+- **`createErrorMapper`** — the shared branch order (validation → coded classes → protocol error →
+  rules → fallback). The error *classes* are injected by each server rather than imported by the
+  SDK: per ADR-0001 each server owns its own `zod`, so a `ZodError` thrown in a server is not an
+  instance of any class a shared package could import. Adopted by `bitbucket-mcp`, `observe-mcp`
+  and `postgres-mcp`; **deliberately not** by `codebase-index-mcp`, whose envelope is a different
+  contract (reason recorded in `packages/sdk/src/errorMapper.ts`).
+- `prompts` are wired end to end but **no server declares one yet** — a platform capability without
+  a consumer, which is why no server has a `prompts/` folder.
+
+### 🧱 The scaffold rebuilt on that vocabulary
+
+`4390fa1` moved the servers and not `templates/server/`, so server #5 would have been born on the
+superseded pattern. The scaffold now emits `runServer`, `createErrorMapper` + `toWireError`,
+`registerTool`, and `PolicyViolationError` re-exported from `@mcp/core` instead of a fourth private
+copy.
+
+One deliberate behaviour change for scaffolded servers: a bad argument now answers
+`validation_error` with readable issues in `detail`, where before it answered `internal_error`
+carrying a **raw zod issue array**. An unknown tool still answers `not_found`, byte-identical —
+verified by probing a server scaffolded from the old template and one from the new over real stdio
+sessions. `docs/migration/status.md` §"Post-migration" has the before/after table.
+
+### 🧹 Fixed
+
+- **`observe-mcp`** — removed a stranded second copy of `toWireError` in `middleware/errors.ts`,
+  exported to and imported by nothing since the structure refactor. 56/56 tests unchanged.
+- **Docs that reported numbers the repo does not have** (backlog B-08) —
+  `target-architecture.md` §9 still said eleven files exceeded the file-size hard cap and that
+  config-loaded-once was "Partial"; both had been true and neither was. Env-var count corrected in
+  three places (89 / 94 / 94 → **96**). Each row now names the command its number comes from.
+- **`docs/backlog.md`** — B-01, B-01b, B-02, B-02b closed on 2026-07-30 and never marked. C# `TYPE_REF`
+  extraction (`266d91b`, `9574e3e`, `f1c0160`, `9b55de4`) and index-run reproducibility
+  (`b764b39`, `ae1af79`, MCP-ISSUE-032 CLOSED) are done — which matters beyond bookkeeping, because
+  an edge count is usable as evidence again.
+
 ## [Unreleased] - 2026-07-29
 
 ### 🧱 Architecture migration — Phases A–J (S-01…S-41)

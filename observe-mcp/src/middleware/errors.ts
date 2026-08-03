@@ -8,7 +8,7 @@ import { abortRule, createErrorMapper, type WireError } from "@mcp/sdk";
  * live. Kept as a named export from this module so every existing import site is
  * unchanged.
  */
-import { PolicyViolationError, isPlatformError } from "@mcp/core";
+import { PolicyViolationError } from "@mcp/core";
 
 export { PolicyViolationError };
 
@@ -54,20 +54,9 @@ export const mapError: (error: unknown) => MappedError = createErrorMapper({
   // `internal_error` carrying the thrown value's own message.
 });
 
-/**
- * `mapError`, plus the refusals dispatch itself raises.
- *
- * A `PlatformError` reaching `mapError` would fall into its catch-all and be
- * reported as `internal_error` — actively misleading for something like an unknown
- * tool name. Unwrapping it first preserves the code dispatch chose.
- *
- * Stays a hand-written wrapper rather than becoming another mapper branch:
- * `isPlatformError` is this server's own import, and "platform errors take
- * precedence over everything" is this server's decision, not the shared engine's.
- */
-export function toWireError(error: unknown): MappedError {
-  if (isPlatformError(error)) {
-    return { code: error.code, message: error.message };
-  }
-  return mapError(error);
-}
+// `toWireError` — the `mapError` wrapper that unwraps a `PlatformError` first — lives in
+// `tools/index.ts`, which is where `index.ts` and `tools.test.ts` both import it from.
+//
+// A second, byte-identical copy sat here until 2026-08-03, exported and imported by nothing. It
+// was left behind when the standard-structure refactor split this module out; the live copy never
+// moved. Removed rather than re-pointed, so there is one definition again.

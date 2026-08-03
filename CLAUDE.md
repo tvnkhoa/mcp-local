@@ -95,7 +95,7 @@ npm run generate:check   # fails on drift; runs inside verify:all
 ```
 
 `mcp:doctor` reports a stale generated file per server as a warning. Env vars are declared once,
-in `packages/manifest/src/envSpecs/<server>.ts` — 94 across the four servers.
+in `packages/manifest/src/envSpecs/<server>.ts` — 96 across the four servers (41/21/23/11).
 
 ## Architecture (codebase-index-mcp)
 
@@ -212,7 +212,8 @@ When analyzing this codebase, use the `codebase-index` MCP tools **before** fall
 
 **Start here:** `docs/migration/status.md` — all 44 steps verified against the working
 tree, what blocks what, and the step-number reconciliation for three commits whose labels
-drifted from the plan.
+drifted from the plan. Its last section, *Post-migration*, covers the two pieces of work that
+landed after the migration closed: the standard `src/` structure and the SDK builder family.
 
 **What is left:** `docs/backlog.md` — the post-migration backlog (B-01…B-12), prioritized by whether
 a tool reports something untrue, a gate does not bite, or it is only a cost. Also lists the accepted

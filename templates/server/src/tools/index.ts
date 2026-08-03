@@ -13,16 +13,38 @@
  *   the `annotations.*` presets and pick by what the tool actually does.
  */
 
-import { ok } from "@mcp/core";
-import { annotations, createHealthCheckTool, defineTool, schema } from "@mcp/sdk";
+import { isPlatformError, ok } from "@mcp/core";
+import { annotations, createHealthCheckTool, defineTool, registerTool, schema } from "@mcp/sdk";
 import type { AnyToolDefinition } from "@mcp/sdk";
 import { z } from "zod";
 
 import { describeConfig, type __PASCAL__Config } from "../config/index.js";
+import { mapError, type MappedError } from "../middleware/errors.js";
 import { responseProfileSchema } from "../middleware/responseFormatter.js";
 
-export function buildTools(config: __PASCAL__Config): AnyToolDefinition[] {
-  return [
+/**
+ * `mapError`, plus the refusals dispatch itself raises.
+ *
+ * A `PlatformError` reaching `mapError` would fall into its catch-all and be reported as
+ * `internal_error` — actively misleading for something like an unknown tool name, which dispatch
+ * answers with `not_found`. Unwrapping it first preserves the code dispatch chose.
+ *
+ * Declared here rather than in `middleware/errors.ts` so this module is the single place
+ * `index.ts` and the tests wire their error contract from — same as `observe-mcp` and
+ * `bitbucket-mcp`. This is what `formatError` gets, not `mapError` itself.
+ */
+export function toWireError(error: unknown): MappedError {
+  if (isPlatformError(error)) {
+    return { code: error.code, message: error.message };
+  }
+  return mapError(error);
+}
+
+export function buildTools(config: __PASCAL__Config): readonly AnyToolDefinition[] {
+  // `registerTool` flattens the groups it is given and rejects a duplicate name at the point of
+  // assembly — at start-up — rather than letting one tool silently shadow another at call time.
+  // One group today; add `buildWriteTools(...)` beside it as the server grows.
+  return registerTool([
     /**
      * Server convention S1: every server exposes `health_check`, with an identical shape supplied
      * by the SDK so `mcp:doctor` and the smoke tests need no per-server special cases.
@@ -65,5 +87,5 @@ export function buildTools(config: __PASCAL__Config): AnyToolDefinition[] {
         .strict(),
       handler: async (args) => ok({ message: args.message, server: "__KEY__" })
     })
-  ];
+  ]);
 }

@@ -2,6 +2,8 @@
 
 **Created** — 2026-07-29
 **Baseline** — `32f2a82`, working tree carrying the MCP-ISSUE-031/033 dead-code fixes
+**Refreshed** — 2026-08-03. **B-01, B-01b, B-02, B-02b and B-08 are done**; each closed row now
+cites the commit and the registry entry that proves it. Five of fourteen items closed, nine open.
 **Input** — the post-migration assessment of `docs/migration/status.md` §, re-measured against the
 working tree rather than restated from the migration docs
 
@@ -43,7 +45,18 @@ Two additions the migration learned and this backlog adopts:
 
 ## P1 — A tool reports something untrue
 
-### B-01 · Diagnose why C# `TYPE_REF` edges are almost never produced
+### B-01 · Diagnose why C# `TYPE_REF` edges are almost never produced — ✅ DONE 2026-07-30
+
+**Outcome** — the loss was at **extraction**, and the answer was sharper than the question expected:
+`emitTypeRefEdge` had *exactly one call site in the whole extractor*, the base class inside a
+`base_list`. Every other type position emitted nothing. Resolution was not at fault — of the 148
+edges that did exist, the 110 unresolved ones were all framework base types (`DbContext`,
+`Exception`, …) that legitimately have no symbol in the repo.
+
+Filed as MCP-ISSUE-034 (`c68bda5`); the registry entry
+(`codebase-index-mcp/docs/mcp-codebase-index-issue-registry.md`) now carries the confirmed root
+cause and is marked **FIXED**. The original text is kept below because the method — enumerate the
+surviving edges exhaustively and classify each target — is the part worth reusing.
 
 **Purpose**
 Decide whether the loss is at extraction or at resolution. Nothing else. The fix is B-01b, scoped
@@ -78,7 +91,20 @@ types. An agent following `mcp-hard-mode` reads those as evidence.
 
 ---
 
-### B-01b · Fix C# `TYPE_REF` extraction/resolution
+### B-01b · Fix C# `TYPE_REF` extraction/resolution — ✅ DONE 2026-07-30
+
+**Shipped in three commits, then a fourth.** Signature positions first (`266d91b`), a memoization
+pass when type resolution turned out to cost 112 s (`9574e3e`, back to 11.5 s), then body positions
+(`f1c0160`) — **falsely-dead type declarations down 48%** on `wec.communication-hub`.
+
+The fourth is the interesting one. MCP-ISSUE-038: the `very-large` performance profile discarded
+every *unresolved* `TYPE_REF`, so on the biggest repo — `wec.be`, 7528 files, which auto-selects
+that profile — the fix was **inert** until `9b55de4`. A fix measured on a mid-sized repo can be
+switched off by a profile on the repo that motivated it.
+
+`dead_code_scan` no longer reports `ValidationException`, `RequestContext` or
+`NormalizedMessageContent`. The rule was **not** narrowed to exclude `TYPE_REF`, as this item
+required.
 
 **Purpose** Produce the missing edges.
 
@@ -96,7 +122,17 @@ types. An agent following `mcp-hard-mode` reads those as evidence.
 
 ---
 
-### B-02 · Locate the extraction-time nondeterminism
+### B-02 · Locate the extraction-time nondeterminism — ✅ DONE 2026-07-30
+
+**It was not a lookup.** The divergence came from comparing tree-sitter nodes with `===`
+(`b764b39`): the binding hands out wrapper objects around the same native node and keeps only a
+*weak* cache of them, so `===` held or did not hold depending on whether the previous wrapper had
+been collected — not on anything in the tree. Five such sites: four found first, then a fifth plus
+nine unordered reads on 2026-07-30 (`ae1af79`). Pinned by `test:node-identity`.
+
+This is why the item insisted on a negative control. The three hypotheses it had already ruled out
+by measurement — glob order, worker concurrency, unordered `LIMIT`s — were all *plausible*, and the
+`.sort()` that "fixed" glob order was still in place while the variance continued.
 
 **Purpose**
 Find the one lookup that makes two identical runs disagree, and prove it is the one.
@@ -133,7 +169,15 @@ after comparison that looked like a 237-edge regression.
 
 ---
 
-### B-02b · Make an index run reproducible
+### B-02b · Make an index run reproducible — ✅ DONE 2026-07-30
+
+`ae1af79`. MCP-ISSUE-032 is **CLOSED**: all nine edge types reproduce exactly across three full
+runs of `wec.communication-hub`, with vectors on and off.
+
+**This is the item that unblocked measurement.** While it was open, no edge-count delta was
+evidence and every graph change had to be validated against a hand-run noise band. That workaround
+is retired, not reworded — so B-01b's before/after numbers above, and any future one, mean what
+they say.
 
 **Purpose** Two runs of one build on one unchanged tree produce identical counts.
 
@@ -311,7 +355,14 @@ would pin them into every user's `~/.claude.json` (the S-35 finding).
 
 ## P3 — A cost, not a defect
 
-### B-08 · Correct the `§9` reconciliation row about `process.env`
+### B-08 · Correct the `§9` reconciliation row about `process.env` — ✅ DONE 2026-08-03
+
+Both rows corrected in `docs/architecture/target-architecture.md` §9, each now naming the command
+its number comes from: *Config loaded once per server* → **Built** (`guard:deps`, 0 errors), *File
+size caps* → **Built** (`guard:all`: 0 errors, 20 `size/soft-cap` warnings, 1 accepted exemption
+across 508 files). The env-var count was stale in three more places than this item knew about —
+§9 said 89, `CLAUDE.md` and `docs/architecture.md` said 94, the manifest reports **96** — all four
+now agree.
 
 **Purpose** Fix a doc that reports a defect the repo does not have.
 
@@ -475,21 +526,26 @@ item — listing them here is what stops them being "discovered" again every six
 
 ```
 B-01 ─> B-01b ─┐
-               ├─> both need B-06's fixture-level tests to be verifiable
-B-02 ─> B-02b ─┘   without tripping over each other
+               ├─ ✅ both closed 2026-07-30, ahead of B-06 rather than after it
+B-02 ─> B-02b ─┘
 
-B-02b unblocks: any future validation that reads an edge count as evidence
-                (including B-01b's own before/after)
+B-02b is closed, so an edge count is evidence again — every remaining item that
+      validates a graph change can now measure instead of running a noise band
+
+B-08  ✅ closed 2026-08-03
 
 B-03  independent, per-tool, pausable after any tool
 B-04  needs elapsed time more than effort — start collecting now, decide later
-B-05 · B-07 · B-08 · B-09 · B-10 · B-11 · B-12   all independent
+B-05 · B-07 · B-09 · B-10 · B-11 · B-12   all independent
 ```
 
-**Suggested first slice:** B-07 and B-08 (both < 0.5 d, both close a stated-vs-actual gap), then
-B-01 and B-02 in parallel as the two investigations, with B-06 started alongside because both fixes
-will need somewhere to assert. B-04 begins immediately as data collection and closes whenever the
-evidence is there.
+**Suggested next slice, now that the P1 investigations are closed:** B-07 (< 0.5 d, the last
+stated-vs-actual env gap), then B-06 — the two fixes above landed *without* the fixture-level tests
+this item was meant to provide, so their regressions are currently pinned by integration harnesses
+and a registry entry. B-04 begins as data collection and closes whenever the evidence is there.
+
+The original plan had B-01/B-02 waiting on B-06. They did not wait, and both were verified against
+real repos instead. That worked, but it is why B-06 moved up rather than off the list.
 
 **What this backlog deliberately does not contain:** more restructuring. The tier model, the guards,
 the contracts and the generators all work and are all enforced. Every item above either makes a tool
@@ -497,19 +553,19 @@ tell the truth, or makes an existing gate capable of failing.
 
 ## Summary
 
-| # | Item | Tier | Risk | Rev. | Complexity |
-|---|---|---|---|---|---|
-| B-01 | Diagnose C# `TYPE_REF` loss | P1 | Low | R1 | M |
-| B-01b | Fix C# `TYPE_REF` | P1 | — | — | unscoped |
-| B-02 | Locate extraction nondeterminism | P1 | Low | R1 | M |
-| B-02b | Make an index run reproducible | P1 | — | — | unscoped |
-| B-03 | One profile resolution | P1 | **Med** | R2 | S / tool |
-| B-04 | Raise the graph-accuracy floor | P2 | Low | R1 | XS |
-| B-05 | Run `verify:live` on a schedule | P2 | **Med** | R1 | M |
-| B-06 | Unit tests in `codebase-index` | P2 | Low | R1 | M |
-| B-07 | Declare `PGSSLMODE` + `NODE_TLS_REJECT_UNAUTHORIZED` | P2 | Low | R1 | XS |
-| B-08 | Correct the §9 reconciliation rows | P3 | Low | R1 | XS |
-| B-09 | `WORKSPACE_ROOT` by marker, not depth | P3 | **Med** | R1 | S |
-| B-10 | Delete the manifest shim | P3 | Low | R1 | S |
-| B-11 | One authoritative state document | P3 | Low | R1 | S |
-| B-12 | Detect stale `dist/` | P3 | Low | R1 | S |
+| # | Item | Tier | Risk | Rev. | Complexity | Status |
+|---|---|---|---|---|---|---|
+| B-01 | Diagnose C# `TYPE_REF` loss | P1 | Low | R1 | M | ✅ 2026-07-30 · `c68bda5` |
+| B-01b | Fix C# `TYPE_REF` | P1 | — | — | unscoped | ✅ 2026-07-30 · `266d91b` `9574e3e` `f1c0160` `9b55de4` |
+| B-02 | Locate extraction nondeterminism | P1 | Low | R1 | M | ✅ 2026-07-30 · `b764b39` |
+| B-02b | Make an index run reproducible | P1 | — | — | unscoped | ✅ 2026-07-30 · `ae1af79` |
+| B-03 | One profile resolution | P1 | **Med** | R2 | S / tool | open |
+| B-04 | Raise the graph-accuracy floor | P2 | Low | R1 | XS | open |
+| B-05 | Run `verify:live` on a schedule | P2 | **Med** | R1 | M | open |
+| B-06 | Unit tests in `codebase-index` | P2 | Low | R1 | M | open |
+| B-07 | Declare `PGSSLMODE` + `NODE_TLS_REJECT_UNAUTHORIZED` | P2 | Low | R1 | XS | open |
+| B-08 | Correct the §9 reconciliation rows | P3 | Low | R1 | XS | ✅ 2026-08-03 |
+| B-09 | `WORKSPACE_ROOT` by marker, not depth | P3 | **Med** | R1 | S | open |
+| B-10 | Delete the manifest shim | P3 | Low | R1 | S | open |
+| B-11 | One authoritative state document | P3 | Low | R1 | S | open |
+| B-12 | Detect stale `dist/` | P3 | Low | R1 | S | open |

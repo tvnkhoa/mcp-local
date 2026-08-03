@@ -62,7 +62,11 @@ step 1 cannot be skipped. See the `mcp-skill-authoring` skill for the full contr
 - `src/middleware/errors.ts` owns the `{ code, message, detail? }` wire envelope; `src/middleware/`
   is where cross-cutting call-pipeline concerns live (guardrails, serialization, error mapping).
 - Tools are declared as data in `src/tools/index.ts` and dispatched by `@mcp/sdk` — no hand-written
-  `switch`.
-- `index.ts` is the entry point and holds no testable logic.
+  `switch`. Each surface uses the same `create*` / `register*` pair: `defineTool` + `registerTool`
+  for tools, `createResource` + `registerResource` for resources, `createPrompt` + `registerPrompt`
+  for prompts. `register*` rejects a duplicate name at assembly, so it fails at start-up rather
+  than at call time. See `packages/sdk/README.md` for the full table.
+- `index.ts` is the entry point and holds no testable logic. It ends with `runServer(handle, …)`,
+  which owns the start-and-exit tail — do not hand-write a `main()` / `process.exit` pair.
 - stdout is the MCP transport: log to stderr only. `console.log` is a guard violation.
 - No `.gitignore` here — the root one covers every server (ADR 0003).

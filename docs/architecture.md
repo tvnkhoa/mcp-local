@@ -31,7 +31,7 @@ observe-mcp/          8 tools   OpenObserve logs and traces           (read-only
 bitbucket-mcp/        8 tools   repos and pull requests               (PR creation gated)
 ```
 
-76 tools and 94 env variables in total, both counted from `@mcp/manifest` rather than by hand.
+76 tools and 96 env variables in total, both counted from `@mcp/manifest` rather than by hand.
 
 **Servers are not workspace members.** `workspaces` is `["packages/*"]` only. This is a decision,
 not an oversight — see `adr/0001-workspace-native-deps.md`: npm hoisting would relocate
