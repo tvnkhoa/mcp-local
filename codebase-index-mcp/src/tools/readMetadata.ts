@@ -26,17 +26,17 @@ import { ok } from "@mcp/core";
 import type { AnyToolDefinition } from "@mcp/sdk";
 import { defineTool } from "@mcp/sdk";
 
-import { handleHealthCheck } from "../handlers/indexHandler.js";
+import { handleHealthCheck } from "./handlers/indexHandler.js";
 import {
   handleGetFileContext,
   handleGetFileSummary,
   handleGetFolderSummary,
   handleListRepositories,
   handleQueryDocs
-} from "../handlers/impactHandler.js";
-import { handleFindEntryPoints } from "../handlers/analysisHandler.js";
-import { handleOrient } from "../handlers/orientHandler.js";
-import * as schemas from "../schemas/toolSchemas.js";
+} from "./handlers/impactHandler.js";
+import { handleFindEntryPoints } from "./handlers/analysisHandler.js";
+import { handleOrient } from "./handlers/orientHandler.js";
+import * as schemas from "../types/schemas/toolSchemas.js";
 
 import { PROFILE_PROP, raw, readsGraph, type CodebaseIndexDeps } from "./common.js";
 

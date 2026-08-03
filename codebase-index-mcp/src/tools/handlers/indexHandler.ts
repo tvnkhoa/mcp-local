@@ -1,14 +1,14 @@
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { McpError, ErrorCode } from "@modelcontextprotocol/sdk/types.js";
-import { getRepoStaleness, getRepoWorkingTreeState } from "../gitHelpers.js";
-import { assertPathAllowed, clamp } from "../guardrails/indexGuardrails.js";
-import { resolveResponseProfile } from "../response/responseFormatter.js";
-import { resolveDetectChangesPolicy } from "../analysis/policyResolver.js";
-import { computeChangedFileImpacts } from "../impact/changeAnalysis.js";
-import { buildCoverageBlock } from "../response/coverage.js";
+import { getRepoStaleness, getRepoWorkingTreeState } from "../../services/gitHelpers.js";
+import { assertPathAllowed, clamp } from "../../middleware/indexGuardrails.js";
+import { resolveResponseProfile } from "../../middleware/responseFormatter.js";
+import { resolveDetectChangesPolicy } from "../../services/analysis/policyResolver.js";
+import { computeChangedFileImpacts } from "../../services/impact/changeAnalysis.js";
+import { buildCoverageBlock } from "../../middleware/coverage.js";
 import { buildIndexMeta } from "./impactHandler.js";
-import type { IndexMode } from "../types.js";
-import { activateWatchForRepo, clearWatchInactivityTimer } from "../watch/watchLifecycle.js";
+import type { IndexMode } from "../../types/index.js";
+import { activateWatchForRepo, clearWatchInactivityTimer } from "../../services/watch/watchLifecycle.js";
 import type { HandlerContext } from "./handlerContext.js";
 
 // ── health_check ─────────────────────────────────────────────────────────────

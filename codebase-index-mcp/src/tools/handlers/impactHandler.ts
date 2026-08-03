@@ -1,11 +1,11 @@
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { McpError, ErrorCode } from "@modelcontextprotocol/sdk/types.js";
-import { resolveResponseProfile } from "../response/responseFormatter.js";
-import { validateReadOnlyGraphSql, validateAllowedTables } from "../guardrails/sqliteGuardrails.js";
-import { buildStaleWarning, getRepoStaleness, collectDirtyFiles, countCommitsBehind } from "../gitHelpers.js";
-import type { StaleWarning } from "../gitHelpers.js";
-import { buildCoverageBlock } from "../response/coverage.js";
-import { GraphStore } from "../store/graphStore.js";
+import { resolveResponseProfile } from "../../middleware/responseFormatter.js";
+import { validateReadOnlyGraphSql, validateAllowedTables } from "../../middleware/sqliteGuardrails.js";
+import { buildStaleWarning, getRepoStaleness, collectDirtyFiles, countCommitsBehind } from "../../services/gitHelpers.js";
+import type { StaleWarning } from "../../services/gitHelpers.js";
+import { buildCoverageBlock } from "../../middleware/coverage.js";
+import { GraphStore } from "../../repositories/graphStore.js";
 import type { HandlerContext } from "./handlerContext.js";
 
 // ── Staleness Gate ────────────────────────────────────────────────────────────

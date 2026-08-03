@@ -99,15 +99,19 @@ in `packages/manifest/src/envSpecs/<server>.ts` — 94 across the four servers.
 
 ## Architecture (codebase-index-mcp)
 
+**Standard structure (all four servers):** `src/{tools,resources,prompts,middleware,services,repositories,config,types}/`
+plus `src/index.ts`. A slot exists only where the server has that concern — see
+`docs/refactor/standard-structure-report.md` for the per-server map and which slots are N/A.
+
 **Indexing data flow:**
 ```
-fileFilter.ts          # binary sniff + extension → language tag
-indexPipeline.ts       # glob, hash, batch dispatch
-  ├─ treeSitterExtractor.ts / extractionWorkerPool.ts   # AST → symbols + edges
-  ├─ dotnetProjectParser.ts   # .csproj/.sln → NuGet + ProjectReference edges
-  └─ markdownParser.ts        # headings + code blocks
-graphStore.ts          # SQLite upsert (WAL mode, batched writes)
-src/index.ts           # MCP tool dispatch
+services/indexing/fileFilter.ts       # binary sniff + extension → language tag
+services/indexing/indexPipeline.ts    # glob, hash, batch dispatch
+  ├─ services/extractors/treeSitterExtractor.ts / extractionWorkerPool.ts   # AST → symbols + edges
+  ├─ services/extractors/dotnetProjectParser.ts   # .csproj/.sln → NuGet + ProjectReference edges
+  └─ services/extractors/markdownParser.ts        # headings + code blocks
+repositories/graphStore.ts            # SQLite upsert (WAL mode, batched writes)
+src/index.ts                          # MCP tool dispatch
 ```
 
 **Graph model:**
@@ -227,6 +231,7 @@ different, and the two-part rule for adding one).
 - `docs/migration/foundation-notes.md` — what the `packages/` foundation contains and why
 - `docs/migration/normalization-report.md` — the 48-file in-place folder normalization
 - `docs/refactor/duplication-extraction-report.md` — the shared-component extraction, its measured behaviour deltas, and the one cluster deliberately left alone
+- `docs/refactor/standard-structure-report.md` — the nine-slot `src/` layout in all four servers: the rule that decides which slot a file belongs in, the per-server before/after map, which slots are N/A and why, and the compatibility evidence
 - `docs/migration/s06-s23-notes.md` — contract snapshots + the `bitbucket-mcp` SDK pilot; read this before migrating another server
 - `docs/migration/s24-notes.md` — the `postgres-mcp` SDK migration: the call-replay method, and why the SDK gained `resources` and `rawResult`
 - `docs/migration/s25-notes.md` — the `observe-mcp` SDK migration; the first needing no new SDK capability, and a profile-dependent serialization finding no schema could reveal

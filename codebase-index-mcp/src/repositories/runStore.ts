@@ -11,7 +11,7 @@
 
 import type Database from "better-sqlite3";
 
-import type { IndexRunSummary } from "../types.js";
+import type { IndexRunSummary } from "../types/index.js";
 
 export function recordRun(db: Database.Database, summary: IndexRunSummary & { crossRepoLinked?: number; callEdgesResolved?: number; importEdgesResolved?: number; mentionsResolved?: number }): void {
   db

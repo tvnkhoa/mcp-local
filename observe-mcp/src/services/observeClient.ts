@@ -1,5 +1,5 @@
-import type { ObserveConfig } from "./config/index.js";
-import { ObserveHttpError } from "./errors.js";
+import type { ObserveConfig } from "../config/index.js";
+import { ObserveHttpError } from "../middleware/errors.js";
 
 import {
   backoffFromSchedule,

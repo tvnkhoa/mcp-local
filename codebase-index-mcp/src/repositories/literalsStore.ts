@@ -1,6 +1,6 @@
 import type Database from "better-sqlite3";
-import type { StringLiteralRecord } from "../types.js";
-import { indexLog, indexWarn } from "../indexing/indexProgress.js";
+import type { StringLiteralRecord } from "../types/index.js";
+import { indexLog, indexWarn } from "../services/indexing/indexProgress.js";
 
 // ISSUE-023 — string-literal lane storage. Bảng riêng + FTS5 external-content
 // (mirror docs_fts): KHÔNG nhét vào symbols để không phá ranking search_symbols

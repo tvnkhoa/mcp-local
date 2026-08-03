@@ -3,18 +3,18 @@ import { randomUUID, createHash } from "node:crypto";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import type { Pool, PoolClient } from "pg";
 
-import type { ConnectionManager } from "../db/connectionManager.js";
-import { PolicyViolationError } from "../errors.js";
-import { asText, type ResponseProfile } from "../response/responseFormatter.js";
-import { quoteIdent } from "../guardrails/ident.js";
-import { validateWriteSql, type WriteTarget } from "../guardrails/writeGuardrails.js";
-import { recordAudit } from "./auditLog.js";
+import type { ConnectionManager } from "../../repositories/connectionManager.js";
+import { PolicyViolationError } from "../../middleware/errors.js";
+import { asText, type ResponseProfile } from "../../middleware/responseFormatter.js";
+import { quoteIdent } from "../../middleware/ident.js";
+import { validateWriteSql, type WriteTarget } from "../../middleware/writeGuardrails.js";
+import { recordAudit } from "../../services/write/auditLog.js";
 import {
   createWriteDigest,
   issueApprovalToken,
   verifyApprovalToken
-} from "./approval.js";
-import { WritePreviewStore, type WriteApplyRecord } from "./previewStore.js";
+} from "../../services/write/approval.js";
+import { WritePreviewStore, type WriteApplyRecord } from "../../services/write/previewStore.js";
 
 export interface WriteConfig {
   enabled: boolean;

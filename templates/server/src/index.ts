@@ -14,8 +14,8 @@ import { createEventLogger } from "@mcp/core";
 import { asErrorPayload, createMcpServer } from "@mcp/sdk";
 
 import { loadConfig, describeConfig, type __PASCAL__Config } from "./config/index.js";
-import { mapError } from "./errors.js";
-import { buildTools } from "./tools.js";
+import { mapError } from "./middleware/errors.js";
+import { buildTools } from "./tools/index.js";
 
 const config: __PASCAL__Config = loadConfig();
 

@@ -1,6 +1,6 @@
 import assert from "node:assert";
 
-import { extractGraphData } from "../../dist/extractors/treeSitterExtractor.js";
+import { extractGraphData } from "../../dist/services/extractors/treeSitterExtractor.js";
 
 function run() {
   const source = `

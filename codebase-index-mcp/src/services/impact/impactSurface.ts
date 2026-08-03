@@ -6,8 +6,8 @@
  */
 
 import type Database from "better-sqlite3";
-import type { EdgeRecord, GraphHealth, ReliabilitySummary, ResolvedEdge, SymbolRecord } from "../types.js";
-import { CALL_TRAVERSAL_EDGE_SQL_LIST, CALL_TRAVERSAL_EDGE_TYPES } from "../types.js";
+import type { EdgeRecord, GraphHealth, ReliabilitySummary, ResolvedEdge, SymbolRecord } from "../../types/index.js";
+import { CALL_TRAVERSAL_EDGE_SQL_LIST, CALL_TRAVERSAL_EDGE_TYPES } from "../../types/index.js";
 import { expandInterfaceSiblingsImpl } from "../graph/interfaceSiblings.js";
 import { buildEdgeToSymbolPairsCte, buildReliabilitySummaryImpl, countUnresolvedEdgesForFileImpl, findModuleSymbolId, resolveCanonicalFilePath, wiringNoteFor } from "./impactShared.js";
 

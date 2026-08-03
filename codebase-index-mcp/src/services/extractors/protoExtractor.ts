@@ -1,4 +1,4 @@
-import type { EdgeRecord, SymbolRecord } from "../types.js";
+import type { EdgeRecord, SymbolRecord } from "../../types/index.js";
 import type { ExtractInput } from "./extractorTypes.js";
 import { stableId, lineFromOffset } from "./extractorUtils.js";
 

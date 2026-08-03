@@ -5,8 +5,8 @@
  * inherits the same guards, caps and ambiguity rules as a plain replace.
  */
 
-import type { RefactorRiskFlag } from "../types.js";
-import type { GraphStore } from "../store/graphStore.js";
+import type { RefactorRiskFlag } from "../../types/index.js";
+import type { GraphStore } from "../../repositories/graphStore.js";
 import type { PreviewCandidateHunk, RefactorSymbolMigrationInput } from "./refactorTypes.js";
 import {
   safeReadText,

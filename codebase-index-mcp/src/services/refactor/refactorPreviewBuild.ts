@@ -8,8 +8,8 @@
 
 import fs from "node:fs";
 import { globSync } from "glob";
-import type { RefactorRiskFlag } from "../types.js";
-import type { GraphStore } from "../store/graphStore.js";
+import type { RefactorRiskFlag } from "../../types/index.js";
+import type { GraphStore } from "../../repositories/graphStore.js";
 import type {
   PreviewCandidateHunk,
   RefactorScopeInput,

@@ -2,12 +2,12 @@ import { createHash, randomUUID } from "node:crypto";
 
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 
-import type { ConnectionManager } from "../db/connectionManager.js";
-import { PolicyViolationError } from "../errors.js";
-import { asText, type ResponseProfile } from "../response/responseFormatter.js";
-import { quoteIdent } from "../guardrails/ident.js";
-import { issueApprovalToken, verifyApprovalToken } from "../write/approval.js";
-import { recordAudit } from "../write/auditLog.js";
+import type { ConnectionManager } from "../../repositories/connectionManager.js";
+import { PolicyViolationError } from "../../middleware/errors.js";
+import { asText, type ResponseProfile } from "../../middleware/responseFormatter.js";
+import { quoteIdent } from "../../middleware/ident.js";
+import { issueApprovalToken, verifyApprovalToken } from "../../services/write/approval.js";
+import { recordAudit } from "../../services/write/auditLog.js";
 import {
   assertMigrationEnabled,
   efDatabaseUpdate,
@@ -18,8 +18,8 @@ import {
   listMigrationFiles,
   type EfResult,
   type MigrationConfig
-} from "./efRunner.js";
-import { captureSchema, diffSnapshots } from "./schemaSnapshot.js";
+} from "../../services/migration/efRunner.js";
+import { captureSchema, diffSnapshots } from "../../services/migration/schemaSnapshot.js";
 
 interface MigrationPreviewRecord {
   previewId: string;

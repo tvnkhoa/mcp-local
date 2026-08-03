@@ -1,8 +1,8 @@
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
-import type { GraphStore } from "../store/graphStore.js";
-import type { WatchManager } from "../watch/watchManager.js";
-import type { ResponseProfile } from "../response/responseFormatter.js";
-import type { IndexMode, IndexRunResult } from "../types.js";
+import type { GraphStore } from "../../repositories/graphStore.js";
+import type { WatchManager } from "../../services/watch/watchManager.js";
+import type { ResponseProfile } from "../../middleware/responseFormatter.js";
+import type { IndexMode, IndexRunResult } from "../../types/index.js";
 
 export interface HandlerConstants {
   MAX_FILES_PER_RUN: number;

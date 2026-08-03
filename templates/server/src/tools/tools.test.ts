@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { buildTools } from "./tools.js";
-import type { __PASCAL__Config } from "./config/index.js";
+import { buildTools } from "./index.js";
+import type { __PASCAL__Config } from "../config/index.js";
 
 const config: __PASCAL__Config = { baseUrl: "https://example.invalid", timeoutMs: 1000 };
 

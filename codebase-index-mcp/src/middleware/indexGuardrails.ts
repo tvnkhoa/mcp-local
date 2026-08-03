@@ -1,6 +1,6 @@
 import path from "node:path";
 
-import type { WatchConfig } from "../types.js";
+import type { WatchConfig } from "../types/index.js";
 
 const SECRET_PATTERNS: RegExp[] = [
   /AKIA[0-9A-Z]{16}/g,

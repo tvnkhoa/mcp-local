@@ -2,7 +2,7 @@ import path from "node:path";
 
 import chokidar, { type FSWatcher } from "chokidar";
 
-import type { RepoWatchStatus, WatchConfig } from "../types.js";
+import type { RepoWatchStatus, WatchConfig } from "../../types/index.js";
 
 type RunIndexer = (repoId: string, repoPath: string, config: WatchConfig) => Promise<void>;
 type PruneDeleted = (repoId: string, deletedRelativePaths: string[]) => number;

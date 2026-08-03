@@ -7,7 +7,7 @@
 
 import { createHash } from "node:crypto";
 import type Parser from "tree-sitter";
-import type { SymbolRecord } from "../types.js";
+import type { SymbolRecord } from "../../types/index.js";
 import type { ExtractInput } from "./extractorTypes.js";
 
 export function stableId(input: string): string {

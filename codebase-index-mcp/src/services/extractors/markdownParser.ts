@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 
-import type { DocMentionRecord, DocRecord } from "../types.js";
+import type { DocMentionRecord, DocRecord } from "../../types/index.js";
 
 /**
  * Parse markdown file and extract:

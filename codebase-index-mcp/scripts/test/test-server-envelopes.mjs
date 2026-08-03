@@ -28,7 +28,7 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 import { writeFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { makeTempDir } from "./_fixtures.mjs";
-import { handleListResources } from "../../dist/handlers/resourceHandler.js";
+import { handleListResources } from "../../dist/resources/resourceHandler.js";
 
 let passed = 0, failed = 0;
 function assert(cond, label, detail = "") {

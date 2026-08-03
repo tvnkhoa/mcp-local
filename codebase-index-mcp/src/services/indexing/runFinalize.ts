@@ -12,9 +12,9 @@
 
 import path from "node:path";
 
-import type { GraphStore } from "../store/graphStore.js";
+import type { GraphStore } from "../../repositories/graphStore.js";
 import { indexLog, indexWarn, type IndexProgress } from "./indexProgress.js";
-import type { IndexMode, IndexRunSummary } from "../types.js";
+import type { IndexMode, IndexRunSummary } from "../../types/index.js";
 
 export interface FinalizeInput {
   readonly repoId: string;

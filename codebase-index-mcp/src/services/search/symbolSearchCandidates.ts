@@ -8,7 +8,7 @@
  */
 
 import type Database from "better-sqlite3";
-import type { SymbolRecord } from "../types.js";
+import type { SymbolRecord } from "../../types/index.js";
 import { isTestPath } from "../indexing/fileFilter.js";
 import { RANKED_KIND_BONUS, TEST_PATH_PENALTY, extractIntentTokens } from "./symbolSearchFts.js";
 

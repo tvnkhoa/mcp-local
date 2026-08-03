@@ -8,7 +8,7 @@
 
 import type Parser from "tree-sitter";
 import type { ExtractInput } from "./extractorTypes.js";
-import { optionalStringFromEnv } from "../config/envConfig.js";
+import { optionalStringFromEnv } from "../../config/envConfig.js";
 import { stableId, stripQuotes } from "./extractorPrimitives.js";
 
 export function extractCSharpUsingNamespace(node: Parser.SyntaxNode): string | null {

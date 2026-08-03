@@ -1,7 +1,7 @@
 ﻿/**
  * `GraphStore` — the single entry point every caller uses to reach the graph.
  *
- * The SQL lives in the modules under `store/` and in the lane modules (`impactAnalyzer`,
+ * The SQL lives in the modules under `repositories/` and in the lane modules (`impactAnalyzer`,
  * `symbolSearch`, `docsStore`, `refactorStore`, `crossRepoStore`, `edgeResolver`,
  * `vectorStore`, `literalsStore`, `regexSearch`). What is left here is a façade: one method
  * per operation, forwarding to the module that owns it, so that 158 call sites across the
@@ -20,7 +20,7 @@
 
 import Database from "better-sqlite3";
 import { createRequire } from "node:module";
-import { indexWarn } from "../indexing/indexProgress.js";
+import { indexWarn } from "../services/indexing/indexProgress.js";
 
 import type {
   RefactorApplyHunkRecord,
@@ -39,7 +39,7 @@ import type {
   RouteRecord,
   StringLiteralRecord,
   SymbolRecord
-} from "../types.js";
+} from "../types/index.js";
 import {
   resolveUnlinkedEdges as resolveUnlinkedEdgesImpl,
   resolveImportEdges as resolveImportEdgesImpl,
@@ -52,7 +52,7 @@ import {
   resolveExtendsEdges as resolveExtendsEdgesImpl,
   resolveImplementsEdges as resolveImplementsEdgesImpl,
   resolvePublishesConsumesEdges as resolvePublishesConsumesEdgesImpl
-} from "../graph/edgeResolver.js";
+} from "../services/graph/edgeResolver.js";
 import {
   linkTestsToSource as linkTestsToSourceImpl,
   getDeadCodeCandidates as getDeadCodeCandidatesImpl,
@@ -60,7 +60,7 @@ import {
   findEntryPoints as findEntryPointsImpl,
   findImplementations as findImplementationsImpl,
   findSimilarInterfaceNames as findSimilarInterfaceNamesImpl
-} from "../analysis/staticAnalyzer.js";
+} from "../services/analysis/staticAnalyzer.js";
 import {
   upsertDocsImpl,
   upsertDocMentionsImpl,
@@ -99,15 +99,15 @@ import {
   findReferencesImpl,
   getContextByNameImpl,
   getSymbolCandidatesImpl
-} from "../search/symbolSearch.js";
-import { expandInterfaceSiblingsImpl } from "../graph/interfaceSiblings.js";
+} from "../services/search/symbolSearch.js";
+import { expandInterfaceSiblingsImpl } from "../services/graph/interfaceSiblings.js";
 import {
   replaceLiteralsForFileImpl,
   rebuildLiteralsFtsImpl,
   searchLiteralsImpl,
   type LiteralSearchResult
 } from "./literalsStore.js";
-import { searchRegexImpl, type RegexSearchOptions, type RegexSearchResult } from "../search/regexSearch.js";
+import { searchRegexImpl, type RegexSearchOptions, type RegexSearchResult } from "../services/search/regexSearch.js";
 import {
   resolveCanonicalFilePath,
   findModuleSymbolId,
@@ -126,7 +126,7 @@ import {
   runReadOnlyGraphQueryImpl,
   listIndexedFilesImpl,
   listRepositoriesImpl
-} from "../impact/impactAnalyzer.js";
+} from "../services/impact/impactAnalyzer.js";
 import { initGraphSchema, runGraphMigrations } from "./schema.js";
 import { recordRun as recordRunImpl, getLatestRun as getLatestRunImpl } from "./runStore.js";
 import {
@@ -666,11 +666,11 @@ export class GraphStore {
     return resolvePublishesConsumesEdgesImpl(this.db, repoId);
   }
 
-  upsertDocs(docs: import("../types.js").DocRecord[]): void {
+  upsertDocs(docs: import("../types/index.js").DocRecord[]): void {
     upsertDocsImpl(this.db, docs);
   }
 
-  upsertDocMentions(mentions: import("../types.js").DocMentionRecord[]): void {
+  upsertDocMentions(mentions: import("../types/index.js").DocMentionRecord[]): void {
     upsertDocMentionsImpl(this.db, mentions);
   }
 

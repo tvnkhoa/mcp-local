@@ -1,7 +1,7 @@
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { McpError, ErrorCode } from "@modelcontextprotocol/sdk/types.js";
-import { resolveResponseProfile } from "../response/responseFormatter.js";
-import { readSymbolSourceSpan } from "../refactor/refactorUtils.js";
+import { resolveResponseProfile } from "../../middleware/responseFormatter.js";
+import { readSymbolSourceSpan } from "../../services/refactor/refactorUtils.js";
 import { buildIndexMeta } from "./impactHandler.js";
 import {
   CONVENTIONS,
@@ -10,7 +10,7 @@ import {
   pluralize,
   type ConventionName,
   type ConventionRole
-} from "../analysis/conventions.js";
+} from "../../services/analysis/conventions.js";
 import type { HandlerContext } from "./handlerContext.js";
 
 // Type-like kinds a slice member can be (records included for post-ISSUE-015 labeling).

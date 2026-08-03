@@ -21,12 +21,13 @@ import { test } from "node:test";
 import { createNullLogger, createEventLogger } from "@mcp/core";
 import { asErrorPayload, createToolRegistry, dispatchToolCall } from "@mcp/sdk";
 
-import { ConnectionManager } from "../db/connectionManager.js";
-import { toWireError } from "../errors.js";
-import { type MigrationConfig } from "../migration/efRunner.js";
-import { buildSchemaResources, buildTools, type PostgresDeps, type QueryLimits } from "./index.js";
-import { WritePreviewStore } from "../write/previewStore.js";
-import { type WriteConfig } from "../write/writeHandlers.js";
+import { ConnectionManager } from "../repositories/connectionManager.js";
+import { toWireError } from "../middleware/errors.js";
+import { type MigrationConfig } from "../services/migration/efRunner.js";
+import { buildSchemaResources } from "../resources/schemaResources.js";
+import { buildTools, type PostgresDeps, type QueryLimits } from "./index.js";
+import { WritePreviewStore } from "../services/write/previewStore.js";
+import { type WriteConfig } from "./handlers/writeHandlers.js";
 
 const logger = createNullLogger("test");
 /** Discards its output: these tests must not write to stderr. */

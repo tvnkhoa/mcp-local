@@ -21,10 +21,11 @@ import process from "node:process";
 import { createEnvReader, createEventLogger, defaultEnvSource } from "@mcp/core";
 import { asErrorPayload, createMcpServer } from "@mcp/sdk";
 
-import { ConnectionManager } from "./db/connectionManager.js";
-import { toWireError } from "./errors.js";
-import { type MigrationConfig } from "./migration/efRunner.js";
-import { buildSchemaResources, buildTools, type QueryLimits } from "./tools/index.js";
+import { ConnectionManager } from "./repositories/connectionManager.js";
+import { toWireError } from "./middleware/errors.js";
+import { type MigrationConfig } from "./services/migration/efRunner.js";
+import { buildSchemaResources } from "./resources/schemaResources.js";
+import { buildTools, type QueryLimits } from "./tools/index.js";
 import {
   approvalSecretFromEnv,
   dotnetProjectsFromEnv,
@@ -32,9 +33,9 @@ import {
   parseBoolEnv
 } from "./config/index.js";
 import { resolveAliases } from "./config/aliases.js";
-import { resolveApprovalSecret } from "./write/approval.js";
-import { WritePreviewStore } from "./write/previewStore.js";
-import { type WriteConfig } from "./write/writeHandlers.js";
+import { resolveApprovalSecret } from "./services/write/approval.js";
+import { WritePreviewStore } from "./services/write/previewStore.js";
+import { type WriteConfig } from "./tools/handlers/writeHandlers.js";
 
 /**
  * Honour the pre-S-43 variable names before anything reads configuration.

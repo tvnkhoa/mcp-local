@@ -19,8 +19,8 @@
 
 import type Database from "better-sqlite3";
 
-import type { EdgeRecord, FileRecord, RouteRecord, SymbolRecord } from "../types.js";
-import { getEdgeDefaults } from "../impact/impactAnalyzer.js";
+import type { EdgeRecord, FileRecord, RouteRecord, SymbolRecord } from "../types/index.js";
+import { getEdgeDefaults } from "../services/impact/impactAnalyzer.js";
 
 /** Prepared statements for the hot per-file write path, prepared once per connection. */
 export interface WriteStatements {

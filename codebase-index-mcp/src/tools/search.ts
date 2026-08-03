@@ -24,10 +24,10 @@ import {
   handleSearchLiterals,
   handleSearchRegex,
   handleSearchSymbols
-} from "../handlers/searchHandler.js";
-import { handleFindImplementations } from "../handlers/analysisHandler.js";
-import { handleQueryGraph, handleRouteMap } from "../handlers/impactHandler.js";
-import * as schemas from "../schemas/toolSchemas.js";
+} from "./handlers/searchHandler.js";
+import { handleFindImplementations } from "./handlers/analysisHandler.js";
+import { handleQueryGraph, handleRouteMap } from "./handlers/impactHandler.js";
+import * as schemas from "../types/schemas/toolSchemas.js";
 
 import { PROFILE_PROP, raw, readsGraph, type CodebaseIndexDeps } from "./common.js";
 
@@ -243,7 +243,7 @@ export function buildSearchTools(deps: CodebaseIndexDeps): AnyToolDefinition[] {
         profile: PROFILE_PROP
       }
     },
-    // Read-only despite taking SQL: `guardrails/sqliteGuardrails.ts` rejects every mutation and
+    // Read-only despite taking SQL: `middleware/sqliteGuardrails.ts` rejects every mutation and
     // admin token before the statement reaches SQLite. That guard is what makes this annotation
     // true, so it must not be relaxed.
     annotations: readsGraph,

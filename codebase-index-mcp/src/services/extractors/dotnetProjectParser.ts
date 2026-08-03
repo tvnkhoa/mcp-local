@@ -8,7 +8,7 @@
 
 import { createHash } from "node:crypto";
 
-import type { EdgeRecord, SymbolRecord } from "../types.js";
+import type { EdgeRecord, SymbolRecord } from "../../types/index.js";
 
 export type DotnetExtractInput = {
   repoId: string;

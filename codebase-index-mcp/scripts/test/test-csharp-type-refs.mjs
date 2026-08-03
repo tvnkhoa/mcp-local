@@ -14,7 +14,7 @@
 
 import assert from "node:assert";
 
-import { extractGraphData } from "../../dist/extractors/treeSitterExtractor.js";
+import { extractGraphData } from "../../dist/services/extractors/treeSitterExtractor.js";
 
 let failures = 0;
 const results = [];

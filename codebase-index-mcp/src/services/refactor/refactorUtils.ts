@@ -8,7 +8,7 @@ import {
 import fs from "node:fs";
 import path from "node:path";
 
-import type { RefactorRiskFlag, RefactorPreviewHunkRecord } from "../types.js";
+import type { RefactorRiskFlag, RefactorPreviewHunkRecord } from "../../types/index.js";
 import type {
   PreviewCandidateHunk,
   ObjectInitializerContext,

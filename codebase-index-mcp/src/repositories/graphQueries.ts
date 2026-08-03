@@ -12,9 +12,9 @@
 
 import type Database from "better-sqlite3";
 
-import type { EdgeRecord, ResolvedEdge, SymbolRecord } from "../types.js";
-import { CALL_TRAVERSAL_EDGE_SQL_LIST } from "../types.js";
-import { buildEdgeToSymbolPairsCte, resolveCanonicalFilePath } from "../impact/impactAnalyzer.js";
+import type { EdgeRecord, ResolvedEdge, SymbolRecord } from "../types/index.js";
+import { CALL_TRAVERSAL_EDGE_SQL_LIST } from "../types/index.js";
+import { buildEdgeToSymbolPairsCte, resolveCanonicalFilePath } from "../services/impact/impactAnalyzer.js";
 
 export function getDependencies(db: Database.Database, repoId: string, fromId: string, limit: number): EdgeRecord[] {
   return db

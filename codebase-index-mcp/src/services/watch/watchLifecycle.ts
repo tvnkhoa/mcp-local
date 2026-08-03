@@ -3,7 +3,7 @@
  * it again, and the two paths that trigger activation — boot auto-start and
  * per-tool-call auto-activation.
  *
- * Before S-27 this existed **twice**. `index.ts` and `handlers/indexHandler.ts`
+ * Before S-27 this existed **twice**. `index.ts` and `tools/handlers/indexHandler.ts`
  * each carried their own `activateWatchForRepo` / `armWatchInactivityTimer` /
  * `clearWatchInactivityTimer`, and which pair ran depended on how the watcher was
  * triggered: the `watch_repo` tool went through the handler's copy, while boot
@@ -16,13 +16,13 @@
  * Dependencies arrive through a context object rather than module state, so the
  * same functions serve both callers. {@link WatchContext} is deliberately
  * structural: `HandlerContext` satisfies it without this module importing from
- * `handlers/`.
+ * `tools/handlers/`.
  */
 
 import process from "node:process";
 
-import { assertPathAllowed } from "../guardrails/indexGuardrails.js";
-import type { GraphStore } from "../store/graphStore.js";
+import { assertPathAllowed } from "../../middleware/indexGuardrails.js";
+import type { GraphStore } from "../../repositories/graphStore.js";
 import type { WatchManager } from "./watchManager.js";
 
 export interface WatchTarget {

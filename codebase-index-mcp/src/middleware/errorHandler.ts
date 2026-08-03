@@ -6,7 +6,7 @@ import { randomUUID } from "node:crypto";
 import { McpError } from "@modelcontextprotocol/sdk/types.js";
 import { isPlatformError } from "@mcp/core";
 import { z } from "zod";
-import { PolicyViolationError } from "./refactor/refactorUtils.js";
+import { PolicyViolationError } from "../services/refactor/refactorUtils.js";
 
 export function mapError(error: unknown, toolName: string): { code: string; message: string; requestId: string } {
   const requestId = randomUUID();

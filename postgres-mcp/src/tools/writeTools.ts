@@ -10,7 +10,7 @@ import type { AnyToolDefinition } from "@mcp/sdk";
 import { defineTool, schema } from "@mcp/sdk";
 import { z } from "zod";
 
-import { handleWritePreview, handleWriteApply, handleWriteRollback } from "../write/writeHandlers.js";
+import { handleWritePreview, handleWriteApply, handleWriteRollback } from "./handlers/writeHandlers.js";
 import {
   appliesChange,
   envProp,

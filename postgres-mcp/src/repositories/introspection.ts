@@ -2,10 +2,10 @@ import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import type { Pool } from "pg";
 
 import type { ConnectionManager } from "./connectionManager.js";
-import { PolicyViolationError } from "../errors.js";
-import { asText, type ResponseProfile } from "../response/responseFormatter.js";
-import { quoteIdent } from "../guardrails/ident.js";
-import { safeRollback } from "../write/writeHandlers.js";
+import { PolicyViolationError } from "../middleware/errors.js";
+import { asText, type ResponseProfile } from "../middleware/responseFormatter.js";
+import { quoteIdent } from "../middleware/ident.js";
+import { safeRollback } from "../tools/handlers/writeHandlers.js";
 
 // ── get_table_relationships ─────────────────────────────────────────────────────
 

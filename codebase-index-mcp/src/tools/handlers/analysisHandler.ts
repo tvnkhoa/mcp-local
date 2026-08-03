@@ -1,6 +1,6 @@
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
-import { resolveResponseProfile } from "../response/responseFormatter.js";
-import { buildCoverageBlock } from "../response/coverage.js";
+import { resolveResponseProfile } from "../../middleware/responseFormatter.js";
+import { buildCoverageBlock } from "../../middleware/coverage.js";
 import type { HandlerContext } from "./handlerContext.js";
 
 // ── dead_code_scan ────────────────────────────────────────────────────────────

@@ -1,9 +1,9 @@
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { McpError, ErrorCode } from "@modelcontextprotocol/sdk/types.js";
 
-import { getPersistenceMapping } from "../analysis/efPersistence.js";
-import { getValueContractImpact } from "../analysis/valueContract.js";
-import { resolveResponseProfile } from "../response/responseFormatter.js";
+import { getPersistenceMapping } from "../../services/analysis/efPersistence.js";
+import { getValueContractImpact } from "../../services/analysis/valueContract.js";
+import { resolveResponseProfile } from "../../middleware/responseFormatter.js";
 import type { HandlerContext } from "./handlerContext.js";
 
 /**

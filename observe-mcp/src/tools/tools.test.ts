@@ -18,9 +18,9 @@ import { test } from "node:test";
 import { createNullLogger } from "@mcp/core";
 import { asErrorPayload, createToolRegistry, dispatchToolCall } from "@mcp/sdk";
 
-import type { ObserveConfig } from "./config/index.js";
-import type { ObserveClient } from "./observeClient.js";
-import { buildTools, toWireError } from "./tools.js";
+import type { ObserveConfig } from "../config/index.js";
+import type { ObserveClient } from "../services/observeClient.js";
+import { buildTools, toWireError } from "./index.js";
 
 const logger = createNullLogger("test");
 

@@ -3,7 +3,7 @@ import fs from "node:fs";
 import { glob } from "glob";
 import { minimatch } from "minimatch";
 
-import type { SymbolRecord } from "../types.js";
+import type { SymbolRecord } from "../../types/index.js";
 import {
   isTestPath,
   isBinary,
@@ -12,7 +12,7 @@ import {
   INDEX_IGNORE_GLOBS
 } from "../indexing/fileFilter.js";
 import { assertSafeRepoFilePath, normalizeRelativePath } from "../refactor/refactorUtils.js";
-import { numberFromEnv } from "../config/envConfig.js";
+import { numberFromEnv } from "../../config/envConfig.js";
 
 // Bound cost per query. PER_FILE_MATCH_CAP is deliberately tighter than refactorEngine's
 // REGEX_PER_FILE_MATCH_CAP (2000): this is an interactive search lane, not a bulk rewrite, so

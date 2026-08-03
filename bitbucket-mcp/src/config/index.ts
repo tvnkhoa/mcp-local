@@ -1,6 +1,6 @@
 import process from "node:process";
 
-import { PolicyViolationError } from "../errors.js";
+import { PolicyViolationError } from "../middleware/errors.js";
 
 import { createEnvReader, defaultEnvSource } from "@mcp/core";
 

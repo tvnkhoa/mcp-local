@@ -7,7 +7,7 @@ import type {
   RefactorPreviewRecord,
   RefactorRiskFlag,
   RefactorRollbackRecord
-} from "../types.js";
+} from "../types/index.js";
 
 // ── parseRiskFlags ─────────────────────────────────────────────────────
 

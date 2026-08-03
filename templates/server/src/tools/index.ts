@@ -18,8 +18,8 @@ import { annotations, createHealthCheckTool, defineTool, schema } from "@mcp/sdk
 import type { AnyToolDefinition } from "@mcp/sdk";
 import { z } from "zod";
 
-import { describeConfig, type __PASCAL__Config } from "./config/index.js";
-import { responseProfileSchema } from "./response/responseFormatter.js";
+import { describeConfig, type __PASCAL__Config } from "../config/index.js";
+import { responseProfileSchema } from "../middleware/responseFormatter.js";
 
 export function buildTools(config: __PASCAL__Config): AnyToolDefinition[] {
   return [

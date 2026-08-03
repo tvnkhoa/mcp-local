@@ -6,7 +6,7 @@
  */
 
 import type Database from "better-sqlite3";
-import type { SymbolRecord } from "../types.js";
+import type { SymbolRecord } from "../../types/index.js";
 import { expandInterfaceSiblingsImpl } from "../graph/interfaceSiblings.js";
 import { buildFtsQuery, kindPriorityOrder } from "./symbolSearchFts.js";
 

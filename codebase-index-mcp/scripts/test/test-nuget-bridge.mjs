@@ -1,8 +1,8 @@
 import assert from "node:assert";
 
-import { extractDotnetProjectData } from "../../dist/extractors/dotnetProjectParser.js";
-import { GraphStore } from "../../dist/store/graphStore.js";
-import { toNugetContractId } from "../../dist/response/responseFormatter.js";
+import { extractDotnetProjectData } from "../../dist/services/extractors/dotnetProjectParser.js";
+import { GraphStore } from "../../dist/repositories/graphStore.js";
+import { toNugetContractId } from "../../dist/middleware/responseFormatter.js";
 import { makeTempDbPath } from "./_fixtures.mjs";
 
 function createTempDbPath() {

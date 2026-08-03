@@ -7,7 +7,7 @@
  */
 
 import fs from "node:fs";
-import type { RefactorPreviewHunkRecord, RefactorApplyChangeRecord, RefactorApplyHunkRecord } from "../types.js";
+import type { RefactorPreviewHunkRecord, RefactorApplyChangeRecord, RefactorApplyHunkRecord } from "../../types/index.js";
 import {
   sha256,
   safeReadText,

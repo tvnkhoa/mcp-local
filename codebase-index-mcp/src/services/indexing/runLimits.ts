@@ -10,7 +10,7 @@
  * bounds are what turn a bad value into a slow run instead of a broken one.
  */
 
-import { clamp } from "../guardrails/indexGuardrails.js";
+import { clamp } from "../../middleware/indexGuardrails.js";
 
 export interface IndexRunLimits {
   readonly maxFiles: number;

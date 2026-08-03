@@ -2,10 +2,10 @@ import fs from "node:fs";
 
 import Parser from "tree-sitter";
 
-import type { GraphStore } from "../store/graphStore.js";
+import type { GraphStore } from "../../repositories/graphStore.js";
 import { parseCSharpOnDemand } from "../extractors/treeSitterExtractor.js";
 import type { PreviewCandidateHunk } from "../refactor/refactorTypes.js";
-import type { RefactorRiskFlag } from "../types.js";
+import type { RefactorRiskFlag } from "../../types/index.js";
 import {
   normalizeRelativePath,
   sha256,

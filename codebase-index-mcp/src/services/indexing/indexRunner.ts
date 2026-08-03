@@ -15,11 +15,11 @@
  */
 
 import { createIndexProgress, indexLog, type ProgressNotifier } from "./indexProgress.js";
-import { resolvePostPhasePolicy } from "../config/performanceConfig.js";
+import { resolvePostPhasePolicy } from "../../config/performanceConfig.js";
 import { collectDirtyFiles, resolveCurrentBranch, resolveHeadCommitSha } from "../gitHelpers.js";
-import type { GraphStore } from "../store/graphStore.js";
+import type { GraphStore } from "../../repositories/graphStore.js";
 import { runIndexPipeline, INDEX_VERSION, type PerformanceProfile } from "./indexPipeline.js";
-import type { IndexMode, IndexRunResult } from "../types.js";
+import type { IndexMode, IndexRunResult } from "../../types/index.js";
 import {
   buildSkippedRunSummary,
   evaluateIncrementalSkip,

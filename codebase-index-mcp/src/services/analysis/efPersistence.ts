@@ -2,7 +2,7 @@ import fs from "node:fs";
 
 import Parser from "tree-sitter";
 
-import type { GraphStore } from "../store/graphStore.js";
+import type { GraphStore } from "../../repositories/graphStore.js";
 import { parseCSharpOnDemand } from "../extractors/treeSitterExtractor.js";
 import {
   normalizeRelativePath,

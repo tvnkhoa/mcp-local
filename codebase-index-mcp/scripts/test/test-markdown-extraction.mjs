@@ -5,9 +5,9 @@
 
 import fs from "node:fs";
 import path from "node:path";
-import { shouldIndexFile } from "../../dist/indexing/fileFilter.js";
-import { parseMarkdownFile } from "../../dist/extractors/markdownParser.js";
-import { extractGraphData } from "../../dist/extractors/treeSitterExtractor.js";
+import { shouldIndexFile } from "../../dist/services/indexing/fileFilter.js";
+import { parseMarkdownFile } from "../../dist/services/extractors/markdownParser.js";
+import { extractGraphData } from "../../dist/services/extractors/treeSitterExtractor.js";
 
 const testDir = process.cwd();
 

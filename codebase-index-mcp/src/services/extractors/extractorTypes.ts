@@ -1,5 +1,5 @@
 import type Parser from "tree-sitter";
-import type { DocMentionRecord, DocRecord, EdgeRecord, RouteRecord, StringLiteralRecord, SymbolRecord } from "../types.js";
+import type { DocMentionRecord, DocRecord, EdgeRecord, RouteRecord, StringLiteralRecord, SymbolRecord } from "../../types/index.js";
 
 // ============================================================================
 // Extract Input/Output Types

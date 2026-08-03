@@ -7,8 +7,8 @@
 
 import type Database from "better-sqlite3";
 import type { Statement } from "better-sqlite3";
-import type { ResolutionStats } from "../types.js";
-import { findProviderSymbolByName } from "../store/crossRepoStore.js";
+import type { ResolutionStats } from "../../types/index.js";
+import { findProviderSymbolByName } from "../../repositories/crossRepoStore.js";
 import { indexWarn } from "../indexing/indexProgress.js";
 import {
   isKnownExternalToken,
@@ -17,7 +17,7 @@ import {
   stripGenerics,
   vectorSearchSymbols,
   isVectorEnabled,
-} from "../store/vectorStore.js";
+} from "../../repositories/vectorStore.js";
 import { buildNamedCandidateMap, pickBestNamedCandidate } from "./edgeResolverShared.js";
 
 /** Mirrors VECTOR_PROBE_SIZE in the CALLS lane: ~3s of probing before concluding the lane cannot pay. */

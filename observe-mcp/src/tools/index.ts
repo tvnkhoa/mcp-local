@@ -22,12 +22,12 @@ import { annotations, defineTool, schema } from "@mcp/sdk";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 
-import type { ObserveConfig } from "./config/index.js";
+import type { ObserveConfig } from "../config/index.js";
 import { isPlatformError } from "@mcp/core";
-import { validateReadOnlySql } from "./guardrails/sqlGuardrails.js";
-import { mapError, type MappedError } from "./errors.js";
-import { normalizeLog, normalizeSpan, capLog } from "./logParser.js";
-import type { ObserveClient } from "./observeClient.js";
+import { validateReadOnlySql } from "../middleware/sqlGuardrails.js";
+import { mapError, type MappedError } from "../middleware/errors.js";
+import { normalizeLog, normalizeSpan, capLog } from "../services/logParser.js";
+import type { ObserveClient } from "../services/observeClient.js";
 import {
   resolveWindow,
   clampSize,
@@ -36,8 +36,8 @@ import {
   buildTraceSpansSql,
   buildLogStatsSql,
   buildSampleSql
-} from "./queryBuilder.js";
-import { asText as asTextProfiled, asError as asErrorProfiled, responseProfileSchema } from "./response/responseFormatter.js";
+} from "../services/queryBuilder.js";
+import { asText as asTextProfiled, asError as asErrorProfiled, responseProfileSchema } from "../middleware/responseFormatter.js";
 
 /**
  * `mapError`, plus the refusals dispatch itself raises. Re-declared here rather

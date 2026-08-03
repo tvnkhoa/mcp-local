@@ -25,10 +25,7 @@
  *     normal path.
  */
 
-import type { AnyToolDefinition, ResourceProvider } from "@mcp/sdk";
-
-import type { ConnectionManager } from "../db/connectionManager.js";
-import { captureSchema } from "../migration/schemaSnapshot.js";
+import type { AnyToolDefinition } from "@mcp/sdk";
 
 import type { PostgresDeps } from "./common.js";
 import { buildMigrationTools } from "./migrationTools.js";
@@ -43,34 +40,4 @@ export type { PostgresDeps, QueryLimits } from "./common.js";
  */
 export function buildTools(deps: PostgresDeps): AnyToolDefinition[] {
   return [...buildReadTools(deps), ...buildWriteTools(deps), ...buildMigrationTools(deps)];
-}
-
-/**
- * Each environment's schema as a resource (`schema://<env>`), so a client can
- * read structure once instead of repeating `describe_table` calls.
- */
-export function buildSchemaResources(connections: ConnectionManager): ResourceProvider {
-  return {
-    list: () =>
-      connections.list().map((env) => ({
-        uri: `schema://${env.name}`,
-        name: `Schema (${env.name})`,
-        description: `Database schema snapshot for environment '${env.name}'.`,
-        mimeType: "application/json"
-      })),
-
-    read: async (uri) => {
-      const match = /^schema:\/\/(.+)$/.exec(uri);
-      if (match === null) {
-        // Not a URI this server routes — the SDK turns undefined into the
-        // protocol's invalid-params rejection, which is what the hand-written
-        // handler raised. An unknown *environment*, by contrast, throws out of
-        // getPool and stays an internal error, as it did before.
-        return undefined;
-      }
-      const pool = connections.getPool(match[1]);
-      const snapshot = await captureSchema(pool);
-      return [{ uri, mimeType: "application/json", text: JSON.stringify(snapshot) }];
-    }
-  };
 }

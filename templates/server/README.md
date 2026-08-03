@@ -55,9 +55,13 @@ step 1 cannot be skipped. See the `mcp-skill-authoring` skill for the full contr
 
 ## Conventions this scaffold already follows
 
+- The standard structure: `src/{tools,resources,prompts,middleware,services,repositories,config,types}/`
+  plus `src/index.ts`. A folder is created only when it has content — this scaffold ships
+  `tools/`, `middleware/` and `config/`, and you add the rest as the server grows.
 - `src/config/` is the **only** place `process.env` is read (`guard:deps` enforces it).
-- `src/errors.ts` owns the `{ code, message, detail? }` wire envelope.
-- Tools are declared as data in `src/tools.ts` and dispatched by `@mcp/sdk` — no hand-written
+- `src/middleware/errors.ts` owns the `{ code, message, detail? }` wire envelope; `src/middleware/`
+  is where cross-cutting call-pipeline concerns live (guardrails, serialization, error mapping).
+- Tools are declared as data in `src/tools/index.ts` and dispatched by `@mcp/sdk` — no hand-written
   `switch`.
 - `index.ts` is the entry point and holds no testable logic.
 - stdout is the MCP transport: log to stderr only. `console.log` is a guard violation.

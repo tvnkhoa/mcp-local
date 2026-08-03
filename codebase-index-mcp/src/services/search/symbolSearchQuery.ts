@@ -8,8 +8,8 @@
  */
 
 import type Database from "better-sqlite3";
-import type { SymbolRecord } from "../types.js";
-import { vectorSearchSymbols, isVectorEnabled } from "../store/vectorStore.js";
+import type { SymbolRecord } from "../../types/index.js";
+import { vectorSearchSymbols, isVectorEnabled } from "../../repositories/vectorStore.js";
 import { buildFtsQuery, buildIntentFtsQuery, extractIntentTokens } from "./symbolSearchFts.js";
 
 export function searchSymbolsImpl(

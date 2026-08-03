@@ -6,7 +6,7 @@ import {
   verifyPreviewToken
 } from "@mcp/shared";
 
-import { PolicyViolationError } from "../errors.js";
+import { PolicyViolationError } from "../../middleware/errors.js";
 
 function sha256(value: string): string {
   return createHash("sha256").update(value).digest("hex");

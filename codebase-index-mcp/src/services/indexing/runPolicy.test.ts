@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import type { GraphStore } from "../store/graphStore.js";
+import type { GraphStore } from "../../repositories/graphStore.js";
 import { evaluateIncrementalSkip, resolvePerformanceProfileDecision } from "./runPolicy.js";
 
 /**

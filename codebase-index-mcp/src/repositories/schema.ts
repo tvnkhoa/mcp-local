@@ -14,7 +14,7 @@
 
 import type Database from "better-sqlite3";
 
-import { indexLog } from "../indexing/indexProgress.js";
+import { indexLog } from "../services/indexing/indexProgress.js";
 import { ensureVectorSchema } from "./vectorStore.js";
 
 /** Create every table, index and FTS view the graph needs, if absent. */

@@ -13,9 +13,9 @@ import {
   parseAutoWatchRepos,
   parseBooleanEnv,
   parseWatchConfigFromEnv
-} from "../guardrails/indexGuardrails.js";
+} from "../middleware/indexGuardrails.js";
 import { parsePerformanceProfileEnv } from "./performanceConfig.js";
-import type { PerformanceProfile } from "../indexing/indexPipeline.js";
+import type { PerformanceProfile } from "../services/indexing/indexPipeline.js";
 
 export function numberFromEnv(name: string, fallback: number): number {
   const raw = process.env[name];
@@ -115,14 +115,14 @@ export const INDEX_LOG_MODE = (process.env.CODEBASE_INDEX_INDEX_LOG ?? "").toLow
 /**
  * npm's own `npm_package_version`, set only when the process was started through an npm script.
  *
- * Not this server's configuration, which is why it looked out of place in `serverUtils.ts` — but it
+ * Not this server's configuration, which is why it looked out of place in the old `serverUtils.ts` — but it
  * is still an environment read, and rule 10 does not carve out exceptions for whose variable it is.
  */
 export const NPM_PACKAGE_VERSION = (process.env.npm_package_version ?? "").trim();
 
 // ── Named accessors, so `index.ts` never touches process.env ─────────────────
 // Each one pairs a variable name with the parser that already owned its meaning. The parsers are
-// unchanged and still live in `guardrails/indexGuardrails.ts`; only the environment access moved
+// unchanged and still live in `middleware/indexGuardrails.ts`; only the environment access moved
 // here (S-41). Read at call time, exactly as before.
 
 /** A boolean flag with an explicit default — note not every default is `false`. */

@@ -1,5 +1,5 @@
 import type Parser from "tree-sitter";
-import type { StringLiteralRecord } from "../types.js";
+import type { StringLiteralRecord } from "../../types/index.js";
 import type { ExtractInput } from "./extractorTypes.js";
 import { findEnclosingCSharpSymbolId, findEnclosingSymbolId, stableId } from "./extractorUtils.js";
 

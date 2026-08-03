@@ -18,9 +18,9 @@ import { test } from "node:test";
 import { createNullLogger } from "@mcp/core";
 import { asErrorPayload, createToolRegistry, dispatchToolCall } from "@mcp/sdk";
 
-import type { BitbucketClient } from "./bitbucketClient.js";
-import type { BitbucketConfig } from "./config/index.js";
-import { buildTools, toWireError } from "./tools.js";
+import type { BitbucketClient } from "../services/bitbucketClient.js";
+import type { BitbucketConfig } from "../config/index.js";
+import { buildTools, toWireError } from "./index.js";
 
 const logger = createNullLogger("test");
 

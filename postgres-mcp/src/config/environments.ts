@@ -4,7 +4,7 @@ import process from "node:process";
 
 import type { PoolConfig } from "pg";
 
-import { PolicyViolationError } from "../errors.js";
+import { PolicyViolationError } from "../middleware/errors.js";
 import { resolveAliases } from "./aliases.js";
 
 export type EnvCapability = "read" | "write";

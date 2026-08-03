@@ -1,6 +1,6 @@
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
-import { resolveResponseProfile } from "../response/responseFormatter.js";
-import { classifyIntent } from "../analysis/orient.js";
+import { resolveResponseProfile } from "../../middleware/responseFormatter.js";
+import { classifyIntent } from "../../services/analysis/orient.js";
 import type { HandlerContext } from "./handlerContext.js";
 
 // ── orient (ENH-F) ──────────────────────────────────────────────────────────────

@@ -57,9 +57,9 @@ so every type it reports is unproven. It also silently degrades `find_impact_fil
 types. An agent following `mcp-hard-mode` reads those as evidence.
 
 **Files affected**
-- `src/extractors/treeSitterExtractor.ts` — read only: does it emit `type:` placeholders for
+- `src/services/extractors/treeSitterExtractor.ts` — read only: does it emit `type:` placeholders for
   declarations, fields, parameters, return types?
-- `src/graph/edgeResolverRefs.ts` (`resolveTypeRefEdges`) — read only: does it match them?
+- `src/services/graph/edgeResolverRefs.ts` (`resolveTypeRefEdges`) — read only: does it match them?
 - `codebase-index-mcp/docs/mcp-codebase-index-issue-registry.md` — MCP-ISSUE-034 updated with the
   answer
 
@@ -104,7 +104,7 @@ Find the one lookup that makes two identical runs disagree, and prove it is the 
 **Why now**
 Three causes are already ruled out by measurement — glob order (the `.sort()` landed and variance
 survived), worker concurrency (`PARSE_WORKERS=0` still varies), and the six unordered `LIMIT`s in
-`src/graph/` (fixed; variance survived). The remaining evidence is sharp: identical batch
+`src/services/graph/` (fixed; variance survived). The remaining evidence is sharp: identical batch
 composition, identical symbol count, **103 more edges** in the same batch. So the nondeterminism is
 inside extracting one file's edges.
 
@@ -114,7 +114,7 @@ applied by hand every time anyone validates a graph change. It already invalidat
 after comparison that looked like a 237-edge regression.
 
 **Files affected**
-- `src/store/`, `src/search/` — ~175 candidate `LIMIT`-without-`ORDER BY` sites, read only
+- `src/repositories/`, `src/services/search/` — ~175 candidate `LIMIT`-without-`ORDER BY` sites, read only
 - Instrumentation is throwaway, not committed
 
 **Risk** — **Low.** Investigation.
@@ -165,7 +165,7 @@ in one telemetry line. That is exactly why it is still here after a migration th
 everything else.
 
 **Files affected**
-- `src/handlers/` — convert handler by handler to return a plain payload; `renderResult` is the seam
+- `src/tools/handlers/` — convert handler by handler to return a plain payload; `renderResult` is the seam
   already waiting for it (S-31)
 - `src/tools/` — drop `rawResult: true` per converted tool
 - Start with `list_repositories` and `get_file_context`, the two with measured exposure
@@ -317,7 +317,7 @@ would pin them into every user's `~/.claude.json` (the S-35 finding).
 
 **Why**
 `target-architecture.md` §9 lists "Config loaded once per server (S3)" as **Partial**, citing
-`postgres-mcp/src/migration/efRunner.ts`. That line is `env: { ...process.env, CH_DB_CONNECTION: … }`
+`postgres-mcp/src/services/migration/efRunner.ts`. That line is `env: { ...process.env, CH_DB_CONNECTION: … }`
 — spreading the parent environment into a `dotnet ef` child process so it inherits `PATH`. The
 convention doc already classifies that as *inheritance, not configuration* (`conventions.md` §3),
 and `guard:deps` reports **0 errors**. So the row describes work that should not be done.

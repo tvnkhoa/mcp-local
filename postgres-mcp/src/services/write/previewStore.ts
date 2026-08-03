@@ -1,4 +1,4 @@
-import type { WriteStatementType, WriteTarget } from "../guardrails/writeGuardrails.js";
+import type { WriteStatementType, WriteTarget } from "../../middleware/writeGuardrails.js";
 
 export interface WritePreviewRecord {
   previewId: string;

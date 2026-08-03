@@ -1,6 +1,6 @@
 import fs from "node:fs";
 
-import type { GraphStore } from "../store/graphStore.js";
+import type { GraphStore } from "../../repositories/graphStore.js";
 import { assertSafeRepoFilePath, escapeRegExp } from "../refactor/refactorUtils.js";
 
 /**

@@ -6,7 +6,7 @@
  * repos from each other until both are re-indexed.
  */
 
-import type { RouteRecord } from "../types.js";
+import type { RouteRecord } from "../../types/index.js";
 import { stripQuotes } from "./extractorPrimitives.js";
 
 export function normalizeEndpointPath(raw: string): string {

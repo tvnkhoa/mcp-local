@@ -22,9 +22,9 @@ import { createEventLogger } from "@mcp/core";
 import { asErrorPayload, createMcpServer } from "@mcp/sdk";
 
 import { loadConfig, describeConfig, type ObserveConfig } from "./config/index.js";
-import { mapError } from "./errors.js";
-import { ObserveClient } from "./observeClient.js";
-import { buildTools, toWireError } from "./tools.js";
+import { mapError } from "./middleware/errors.js";
+import { ObserveClient } from "./services/observeClient.js";
+import { buildTools, toWireError } from "./tools/index.js";
 
 const config: ObserveConfig = loadConfig();
 const client = new ObserveClient(config);

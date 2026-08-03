@@ -13,7 +13,7 @@
 import type { ToolAnnotations, ToolCallResult, JsonSchemaNode } from "@mcp/sdk";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 
-import type { HandlerContext } from "../handlers/handlerContext.js";
+import type { HandlerContext } from "./handlers/handlerContext.js";
 import type { DescriptorLimits } from "./limits.js";
 
 export interface CodebaseIndexDeps {

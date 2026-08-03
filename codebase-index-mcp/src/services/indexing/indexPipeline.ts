@@ -19,9 +19,9 @@ import path from "node:path";
 import process from "node:process";
 
 import { shouldIndexFile, type FilterDecision } from "./fileFilter.js";
-import { GraphStore } from "../store/graphStore.js";
+import { GraphStore } from "../../repositories/graphStore.js";
 import { resolveHeadCommitSha, resolveCurrentBranch } from "../gitHelpers.js";
-import { redactSensitive } from "../guardrails/indexGuardrails.js";
+import { redactSensitive } from "../../middleware/indexGuardrails.js";
 import { extractGraphData, isParseTimeoutError } from "../extractors/treeSitterExtractor.js";
 import { ExtractionWorkerPool } from "../extractors/extractionWorkerPool.js";
 import { extractDotnetProjectData } from "../extractors/dotnetProjectParser.js";
@@ -35,7 +35,7 @@ import {
   type RunCounters,
   type RunIdentity
 } from "./runFinalize.js";
-import type { IndexMode, IndexProgressSnapshot, IndexRunSummary } from "../types.js";
+import type { IndexMode, IndexProgressSnapshot, IndexRunSummary } from "../../types/index.js";
 
 export type PerformanceProfile = "standard" | "large" | "very-large";
 
@@ -146,12 +146,12 @@ export async function runIndexPipeline(store: GraphStore, input: RunIndexInput):
           updatedAt: string;
         };
         extracted: {
-          symbols: import("../types.js").SymbolRecord[];
-          edges: import("../types.js").EdgeRecord[];
-          routes?: import("../types.js").RouteRecord[];
-          docs?: import("../types.js").DocRecord[];
-          mentions?: import("../types.js").DocMentionRecord[];
-          literals?: import("../types.js").StringLiteralRecord[];
+          symbols: import("../../types/index.js").SymbolRecord[];
+          edges: import("../../types/index.js").EdgeRecord[];
+          routes?: import("../../types/index.js").RouteRecord[];
+          docs?: import("../../types/index.js").DocRecord[];
+          mentions?: import("../../types/index.js").DocMentionRecord[];
+          literals?: import("../../types/index.js").StringLiteralRecord[];
           edgePolicyDrops?: { droppedByConfidence: number; droppedByCallCap: number; droppedByTypeRefCap: number };
         };
       }> = [];
@@ -167,12 +167,12 @@ export async function runIndexPipeline(store: GraphStore, input: RunIndexInput):
         language: string,
         contentHash: string,
         extracted: {
-          symbols: import("../types.js").SymbolRecord[];
-          edges: import("../types.js").EdgeRecord[];
-          routes?: import("../types.js").RouteRecord[];
-          docs?: import("../types.js").DocRecord[];
-          mentions?: import("../types.js").DocMentionRecord[];
-          literals?: import("../types.js").StringLiteralRecord[];
+          symbols: import("../../types/index.js").SymbolRecord[];
+          edges: import("../../types/index.js").EdgeRecord[];
+          routes?: import("../../types/index.js").RouteRecord[];
+          docs?: import("../../types/index.js").DocRecord[];
+          mentions?: import("../../types/index.js").DocMentionRecord[];
+          literals?: import("../../types/index.js").StringLiteralRecord[];
           edgePolicyDrops?: { droppedByConfidence: number; droppedByCallCap: number; droppedByTypeRefCap: number };
         }
       ): void => {

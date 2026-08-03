@@ -19,7 +19,7 @@ import {
   handleMigrationApply,
   handleMigrationDryRun,
   handleCompareEnvironments
-} from "../migration/migrationHandlers.js";
+} from "./handlers/migrationHandlers.js";
 import {
   appliesChange,
   createsFiles,

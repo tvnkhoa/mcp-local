@@ -203,7 +203,7 @@ async function main() {
   // crossed 200 matches of "import" in S-31 and this assertion failed on a server whose
   // behaviour was unchanged. Two subtrees whose combined match count stays far below the
   // limit test the same semantics without the volume coupling.
-  const OR_PREFIXES = ["src/store/", "src/tools/"];
+  const OR_PREFIXES = ["src/repositories/", "src/tools/"];
   const regexMultiPrefix = readJsonTextContent(
     await client.callTool({
       name: "search_regex",
@@ -213,7 +213,7 @@ async function main() {
   if (regexMultiPrefix.matches.length >= 200) {
     throw new Error("smoke-test: OR-semantics probe hit its own limit — narrow the prefixes or the pattern");
   }
-  const hasStore = regexMultiPrefix.matches.some((m) => m.filePath.startsWith("src/store/"));
+  const hasStore = regexMultiPrefix.matches.some((m) => m.filePath.startsWith("src/repositories/"));
   const hasTools = regexMultiPrefix.matches.some((m) => m.filePath.startsWith("src/tools/"));
   if (!hasStore || !hasTools) {
     throw new Error(`ISSUE-028 regression: filePathPrefix array did not OR across subtrees (store=${hasStore}, tools=${hasTools})`);

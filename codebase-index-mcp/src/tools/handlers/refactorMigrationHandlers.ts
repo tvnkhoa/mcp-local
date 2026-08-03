@@ -8,18 +8,18 @@
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { McpError, ErrorCode } from "@modelcontextprotocol/sdk/types.js";
 import { randomUUID } from "node:crypto";
-import { buildSymbolMigrationPreview } from "../refactor/refactorEngine.js";
-import { buildValueRepresentationPreview, type ValueRepresentationInput } from "../analysis/valueRepresentation.js";
+import { buildSymbolMigrationPreview } from "../../services/refactor/refactorEngine.js";
+import { buildValueRepresentationPreview, type ValueRepresentationInput } from "../../services/analysis/valueRepresentation.js";
 import {
   collectExpectedApplyFiles,
   countPreviewRisks,
   createPreviewDigest,
   groupPreviewHunks,
   noLlmAudit
-} from "../refactor/refactorUtils.js";
-import type { RefactorSymbolMigrationInput } from "../refactor/refactorTypes.js";
-import type { RefactorPreviewRecord, RefactorPreviewHunkRecord } from "../types.js";
-import { resolveResponseProfile } from "../response/responseFormatter.js";
+} from "../../services/refactor/refactorUtils.js";
+import type { RefactorSymbolMigrationInput } from "../../services/refactor/refactorTypes.js";
+import type { RefactorPreviewRecord, RefactorPreviewHunkRecord } from "../../types/index.js";
+import { resolveResponseProfile } from "../../middleware/responseFormatter.js";
 import type { HandlerContext } from "./handlerContext.js";
 import { applyPreviewExclusively } from "./refactorApplyGate.js";
 

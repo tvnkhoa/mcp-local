@@ -9,7 +9,7 @@
  */
 
 import type Database from "better-sqlite3";
-import { indexLog, indexWarn } from "../indexing/indexProgress.js";
+import { indexLog, indexWarn } from "../services/indexing/indexProgress.js";
 import { booleanFromEnv, optionalStringFromEnv } from "../config/envConfig.js";
 
 // ── Constants ──────────────────────────────────────────────────────────────────

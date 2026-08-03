@@ -1,8 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import type { ObserveConfig } from "./config/index.js";
-import { PolicyViolationError } from "./errors.js";
+import type { ObserveConfig } from "../config/index.js";
+import { PolicyViolationError } from "../middleware/errors.js";
 import {
   resolveWindow,
   clampSize,

@@ -1,7 +1,7 @@
 import process from "node:process";
 
-import { PolicyViolationError } from "../errors.js";
-import type { ResponseProfile } from "../response/responseFormatter.js";
+import { PolicyViolationError } from "../middleware/errors.js";
+import type { ResponseProfile } from "../middleware/responseFormatter.js";
 
 import { createEnvReader, defaultEnvSource } from "@mcp/core";
 

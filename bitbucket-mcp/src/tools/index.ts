@@ -12,10 +12,10 @@ import { annotations, defineTool, schema } from "@mcp/sdk";
 import type { AnyToolDefinition, JsonSchemaNode } from "@mcp/sdk";
 import { z } from "zod";
 
-import type { BitbucketClient, CreatePullRequestBody } from "./bitbucketClient.js";
-import { describeConfig, type BitbucketConfig } from "./config/index.js";
-import { mapError, PolicyViolationError } from "./errors.js";
-import { responseProfileSchema } from "./response/responseFormatter.js";
+import type { BitbucketClient, CreatePullRequestBody } from "../services/bitbucketClient.js";
+import { describeConfig, type BitbucketConfig } from "../config/index.js";
+import { mapError, PolicyViolationError } from "../middleware/errors.js";
+import { responseProfileSchema } from "../middleware/responseFormatter.js";
 
 /**
  * Render any failure in this server's `{ code, message, detail? }` envelope.

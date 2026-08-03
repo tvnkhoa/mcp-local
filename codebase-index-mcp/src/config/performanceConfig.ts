@@ -2,7 +2,7 @@
  * Performance profile configuration utilities
  */
 
-import type { PerformanceProfile } from "../indexing/indexPipeline.js";
+import type { PerformanceProfile } from "../services/indexing/indexPipeline.js";
 import { nonNegativeNumberFromEnv, parseOptionalBooleanEnv } from "./envConfig.js";
 
 export function parsePerformanceProfileEnv(raw: string | undefined): PerformanceProfile | "auto" {

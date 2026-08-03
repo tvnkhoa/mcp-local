@@ -7,8 +7,8 @@
 
 import type Database from "better-sqlite3";
 import type { Statement } from "better-sqlite3";
-import type { ResolutionStats } from "../types.js";
-import { findProviderSymbolByName } from "../store/crossRepoStore.js";
+import type { ResolutionStats } from "../../types/index.js";
+import { findProviderSymbolByName } from "../../repositories/crossRepoStore.js";
 import {
   isKnownExternalToken,
   isKnownExternalNamespace,
@@ -16,7 +16,7 @@ import {
   stripGenerics,
   vectorSearchSymbols,
   isVectorEnabled,
-} from "../store/vectorStore.js";
+} from "../../repositories/vectorStore.js";
 import { tagExternalNamespaceImports } from "./edgeResolverShared.js";
 
 export function resolveImportEdges(db: Database.Database, repoId: string, maxUnresolvedRows = 0): number {

@@ -1,4 +1,4 @@
-import type { RefactorRiskFlag } from "../types.js";
+import type { RefactorRiskFlag } from "../../types/index.js";
 
 export type PreviewCandidateHunk = {
   filePath: string;

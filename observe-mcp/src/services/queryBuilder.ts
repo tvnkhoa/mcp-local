@@ -1,5 +1,5 @@
-import type { ObserveConfig } from "./config/index.js";
-import { PolicyViolationError } from "./errors.js";
+import type { ObserveConfig } from "../config/index.js";
+import { PolicyViolationError } from "../middleware/errors.js";
 
 export type TimeWindow = {
   startUs: number;

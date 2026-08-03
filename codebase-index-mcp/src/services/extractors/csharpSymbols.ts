@@ -5,7 +5,7 @@
 
 import type Parser from "tree-sitter";
 import type { ExtractInput } from "./extractorTypes.js";
-import type { EdgeRecord, SymbolRecord } from "../types.js";
+import type { EdgeRecord, SymbolRecord } from "../../types/index.js";
 import {
   collectCSharpScopeTypeMap,
   emitTypeRefEdgesFromTypeNode,

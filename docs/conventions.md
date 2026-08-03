@@ -85,10 +85,10 @@ every root aggregate pick it up automatically — nothing else needs editing.
 The hard cap is a boundary; the soft cap is a prompt to think. Some files are legitimately long
 because they are **one** thing:
 
-- `codebase-index-mcp/src/analysis/staticAnalyzerDeadCodeCSharp.ts` (437) is a single ordered `if`-chain where first-match
+- `codebase-index-mcp/src/services/analysis/staticAnalyzerDeadCodeCSharp.ts` (437) is a single ordered `if`-chain where first-match
   wins and the winning branch decides which reason a suppression is reported under. Splitting it
   risks a reorder, which would change tool output while leaving every count the same.
-- `codebase-index-mcp/src/indexing/indexPipeline.ts` (558) is a batch loop whose parts share a mutable accumulator and an
+- `codebase-index-mcp/src/services/indexing/indexPipeline.ts` (558) is a batch loop whose parts share a mutable accumulator and an
   abort signal checked at four points. Splitting it further would mean inventing a context object to
   pass the same state around — more indirection, no failure made easier to diagnose.
 

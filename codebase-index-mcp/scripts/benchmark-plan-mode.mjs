@@ -102,7 +102,7 @@ async function main() {
    * not. Pinning it also makes the gate fail loudly if the path ever disappears, instead of
    * silently retargeting.
    */
-  const contextFilePath = process.env.BENCH_CONTEXT_FILE ?? "src/store/graphStore.ts";
+  const contextFilePath = process.env.BENCH_CONTEXT_FILE ?? "src/repositories/graphStore.ts";
   const folderPath = contextFilePath.replace(/\\/g, "/").split("/").slice(0, -1).join("/") || "src";
 
   // The comment above claims pinning the path "makes the gate fail loudly if the path ever disappears".
@@ -116,6 +116,9 @@ async function main() {
   // So the check the comment promised now exists. A benchmark whose fixture has vanished must refuse to
   // produce a number, because a plausible number is worse than no number: it looks like a token regression
   // and sends the next reader after the wrong thing.
+  //
+  // The standard-structure refactor moved the file a second time — `src/store/` -> `src/repositories/` —
+  // and this is the guard doing its job: it failed the run rather than silently measuring nothing.
   if (!fs.existsSync(path.join(repoPath, contextFilePath))) {
     throw new Error(
       `benchmark fixture missing: ${contextFilePath} does not exist under ${repoPath}. ` +

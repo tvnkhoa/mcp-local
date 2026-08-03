@@ -1,6 +1,6 @@
 import type Parser from "tree-sitter";
 
-import type { EdgeRecord, RouteRecord, SymbolRecord } from "../types.js";
+import type { EdgeRecord, RouteRecord, SymbolRecord } from "../../types/index.js";
 import type { ExtractInput } from "./extractorTypes.js";
 
 import {

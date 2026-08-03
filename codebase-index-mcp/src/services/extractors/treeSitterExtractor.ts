@@ -3,7 +3,7 @@ import JavaScript from "tree-sitter-javascript";
 import TypeScript from "tree-sitter-typescript";
 import CSharp from "tree-sitter-c-sharp";
 
-import type { DocMentionRecord, DocRecord, EdgeRecord, RouteRecord, SymbolRecord } from "../types.js";
+import type { DocMentionRecord, DocRecord, EdgeRecord, RouteRecord, SymbolRecord } from "../../types/index.js";
 import type { ExtractInput, ExtractOutput } from "./extractorTypes.js";
 
 import { parseMarkdownFile } from "./markdownParser.js";
@@ -24,7 +24,7 @@ import {
   applyEdgePolicy
 } from "./extractorUtils.js";
 import { extractStringLiteralsImpl } from "./literalExtractor.js";
-import { optionalNumberFromEnv, optionalRatioFromEnv } from "../config/envConfig.js";
+import { optionalNumberFromEnv, optionalRatioFromEnv } from "../../config/envConfig.js";
 
 // Re-export types for backward compatibility
 export type { ExtractInput, ExtractOutput };

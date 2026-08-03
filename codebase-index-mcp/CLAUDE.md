@@ -41,43 +41,49 @@ This is an **MCP (Model Context Protocol) server** that builds a code graph over
 
 ```
 Files on disk
-  → indexing/fileFilter.ts     # extension/binary sniff → include/exclude + language tag
-  → indexing/indexPipeline.ts  # batch, hash, dispatch  (scan/limits/finalize in sibling files)
-      ├─ extractors/treeSitterExtractor.ts   # JS/TS/C# → symbols + edges (CALLS, IMPORTS, TYPE_REF, PROPERTY_REF, PROPERTY_WRITE)
-      ├─ extractors/extractionWorkerPool.ts  # worker threads (threshold is env-tuned; 0 = always)
-      ├─ extractors/dotnetProjectParser.ts   # .csproj/.sln → NuGet + ProjectReference edges
-      └─ extractors/markdownParser.ts        # headings + code blocks + backtick mentions
-  → store/graphStore.ts        # upsert into SQLite (better-sqlite3)
-  → graph/edgeResolver.ts      # resolve cross-file edges after all files are seen
-  → index.ts                   # entry: env, construction, start-up
+  → services/indexing/fileFilter.ts     # extension/binary sniff → include/exclude + language tag
+  → services/indexing/indexPipeline.ts  # batch, hash, dispatch  (scan/limits/finalize in sibling files)
+      ├─ services/extractors/treeSitterExtractor.ts   # JS/TS/C# → symbols + edges (CALLS, IMPORTS, TYPE_REF, PROPERTY_REF, PROPERTY_WRITE)
+      ├─ services/extractors/extractionWorkerPool.ts  # worker threads (threshold is env-tuned; 0 = always)
+      ├─ services/extractors/dotnetProjectParser.ts   # .csproj/.sln → NuGet + ProjectReference edges
+      └─ services/extractors/markdownParser.ts        # headings + code blocks + backtick mentions
+  → repositories/graphStore.ts          # upsert into SQLite (better-sqlite3)
+  → services/graph/edgeResolver.ts      # resolve cross-file edges after all files are seen
+  → index.ts                            # entry: env, construction, start-up
 ```
 
 ### Layout
 
-`src/` follows target-architecture rule S2 — `{config,guardrails,response,<domain>}/`. S-41 re-homed
-59 loose files into domain folders; only the entry point and the contracts every domain needs stay at
-the root.
+`src/` follows the workspace standard structure — the same nine slots in every server. S-41 re-homed
+59 loose files into domain folders; the standard-structure refactor then folded those folders into
+the shared vocabulary, keeping their names as sub-domains under `services/`.
 
 | Folder | Owns |
 |--------|------|
-| `analysis/` | static analysis over the built graph: dead code, cycles, test linkage, value contracts |
-| `config/` | the only modules permitted to read `process.env` (dependency rule 10) |
-| `extractors/` | source → symbols/edges, per language, plus the worker lane |
-| `graph/` | edge resolution and traversal |
-| `guardrails/` | path allowlist, redaction, SQL token blocking |
-| `handlers/` | one function per tool, called by `tools/` |
-| `impact/` | blast radius: who calls, who is affected, what changed |
-| `indexing/` | the index run — scan, limits, batches, progress, finalize |
-| `refactor/` | preview → apply → rollback, and the HMAC approval path |
-| `response/` | profile-aware serialization and the coverage block |
-| `schemas/` | zod input schemas, one file per tool group |
-| `search/` | symbol search, FTS, regex search, candidate resolution |
-| `store/` | every SQLite read and write |
 | `tools/` | `tools/list` declarations via `@mcp/sdk` |
-| `watch/` | chokidar watcher and its lifecycle |
+| `tools/handlers/` | one function per tool, called by the declarations beside it |
+| `resources/` | the four `repo://` resources and their URI parsing |
+| `middleware/` | cross-cutting call-pipeline concerns: guardrails, serialization, error mapping |
+| `services/` | domain logic, one sub-folder per sub-domain (below) |
+| `repositories/` | every SQLite read and write |
+| `config/` | the only modules permitted to read `process.env` (dependency rule 10) |
+| `types/` | shared types plus `types/schemas/` — zod input schemas, one file per tool group |
 
-Root: `index.ts` (S1 — the only entry point), `server.ts`, `types.ts`, `vendor.d.ts`,
-`errorHandler.ts`, `serverUtils.ts`, `gitHelpers.ts`.
+`services/` sub-domains:
+
+| Folder | Owns |
+|--------|------|
+| `services/analysis/` | static analysis over the built graph: dead code, cycles, test linkage, value contracts |
+| `services/extractors/` | source → symbols/edges, per language, plus the worker lane |
+| `services/graph/` | edge resolution and traversal |
+| `services/impact/` | blast radius: who calls, who is affected, what changed |
+| `services/indexing/` | the index run — scan, limits, batches, progress, finalize |
+| `services/refactor/` | preview → apply → rollback, and the HMAC approval path |
+| `services/search/` | symbol search, FTS, regex search, candidate resolution |
+| `services/watch/` | chokidar watcher and its lifecycle |
+
+Root: `index.ts` (S1 — the only entry point) and `server.ts`, its protocol-wiring half. `prompts/` is
+absent because this server declares no MCP prompts.
 
 ### Key source files
 
@@ -85,20 +91,25 @@ Root: `index.ts` (S1 — the only entry point), `server.ts`, `types.ts`, `vendor
 |------|------|
 | `src/index.ts` | Entry: env parsing, construction, start-up |
 | `src/server.ts` | Protocol wiring; `tools/list` table lives in `src/tools/` |
-| `src/store/graphStore.ts` | All SQLite reads/writes; schema migrations; refactor tables |
-| `src/indexing/indexPipeline.ts` | Core batch indexing loop; progress snapshots; commit-SHA staleness check |
-| `src/indexing/fileFilter.ts` | File include/exclude rules; binary sniff; language detection |
-| `src/extractors/treeSitterExtractor.ts` | AST extraction per language; edge policy by performance profile |
-| `src/extractors/extractionWorkerPool.ts` | Worker-thread pool for large-file parse isolation |
-| `src/extractors/dotnetProjectParser.ts` | Regex-based .csproj/.sln parser (NuGet + ProjectReference edges) |
-| `src/extractors/markdownParser.ts` | Docs-lane extraction for `.md` files |
-| `src/guardrails/indexGuardrails.ts` | Path allowlist enforcement; sensitive-pattern redaction; env parsing helpers |
-| `src/guardrails/sqliteGuardrails.ts` | Blocks mutation SQL tokens in `query_graph` tool to prevent injection |
-| `src/watch/watchManager.ts` | chokidar watcher; debounced incremental re-index |
-| `src/types.ts` | Shared types: `SymbolRecord`, `EdgeRecord`, `RefactorPreviewRecord`, etc. |
+| `src/repositories/graphStore.ts` | All SQLite reads/writes; schema migrations; refactor tables |
+| `src/services/indexing/indexPipeline.ts` | Core batch indexing loop; progress snapshots; commit-SHA staleness check |
+| `src/services/indexing/fileFilter.ts` | File include/exclude rules; binary sniff; language detection |
+| `src/services/extractors/treeSitterExtractor.ts` | AST extraction per language; edge policy by performance profile |
+| `src/services/extractors/extractionWorkerPool.ts` | Worker-thread pool for large-file parse isolation |
+| `src/services/extractors/dotnetProjectParser.ts` | Regex-based .csproj/.sln parser (NuGet + ProjectReference edges) |
+| `src/services/extractors/markdownParser.ts` | Docs-lane extraction for `.md` files |
+| `src/middleware/indexGuardrails.ts` | Path allowlist enforcement; sensitive-pattern redaction; env parsing helpers |
+| `src/middleware/sqliteGuardrails.ts` | Blocks mutation SQL tokens in `query_graph` tool to prevent injection |
+| `src/services/watch/watchManager.ts` | chokidar watcher; debounced incremental re-index |
+| `src/types/index.ts` | Shared types: `SymbolRecord`, `EdgeRecord`, `RefactorPreviewRecord`, etc. |
 
 > `extractionWorkerPool.ts` spawns its worker with `new URL("./extractionWorker.js",
 > import.meta.url)`, so those two files must stay in the same folder.
+
+> The integration harnesses in `scripts/test/` import compiled modules by path
+> (`dist/repositories/graphStore.js`, …). Moving a source file moves its `dist/` twin, so those
+> imports must be retargeted in the same change — `tsc` will not warn, and the harness fails at
+> `ERR_MODULE_NOT_FOUND`.
 
 > `dist/` is not pruned by `tsc`. After renaming or moving a source file, `rm -rf dist` before
 > trusting a run — a stale module at the old path will still load and can mask a broken import.

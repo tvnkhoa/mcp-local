@@ -19,7 +19,7 @@ import {
   verifyApprovalToken,
   resolveApprovalSecret,
   PolicyViolationError
-} from "../../dist/refactor/refactorUtils.js";
+} from "../../dist/services/refactor/refactorUtils.js";
 
 const SECRET = "test-secret-0123456789";
 const PREVIEW = "prev-abc-123";

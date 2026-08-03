@@ -22,9 +22,9 @@ import { ok } from "@mcp/core";
 import type { AnyToolDefinition } from "@mcp/sdk";
 import { defineTool } from "@mcp/sdk";
 
-import { handleFindFieldAccesses } from "../handlers/impactHandler.js";
-import { handleChangeImpact } from "../handlers/indexHandler.js";
-import { handleGetValueContractImpact } from "../handlers/persistenceHandler.js";
+import { handleFindFieldAccesses } from "./handlers/impactHandler.js";
+import { handleChangeImpact } from "./handlers/indexHandler.js";
+import { handleGetValueContractImpact } from "./handlers/persistenceHandler.js";
 import {
   handleChangeValueRepresentation,
   handleRefactorReplaceApply,
@@ -32,9 +32,9 @@ import {
   handleRefactorReplaceRollback,
   handleRefactorSymbolMigration,
   handleRenameAssist
-} from "../handlers/refactorHandler.js";
-import { handleGetSymbolBlame } from "../handlers/searchHandler.js";
-import * as schemas from "../schemas/toolSchemas.js";
+} from "./handlers/refactorHandler.js";
+import { handleGetSymbolBlame } from "./handlers/searchHandler.js";
+import * as schemas from "../types/schemas/toolSchemas.js";
 
 import {
   PROFILE_PROP,

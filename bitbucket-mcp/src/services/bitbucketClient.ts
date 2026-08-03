@@ -1,5 +1,5 @@
-import type { BitbucketConfig } from "./config/index.js";
-import { BitbucketHttpError } from "./errors.js";
+import type { BitbucketConfig } from "../config/index.js";
+import { BitbucketHttpError } from "../middleware/errors.js";
 
 import {
   backoffFromSchedule,

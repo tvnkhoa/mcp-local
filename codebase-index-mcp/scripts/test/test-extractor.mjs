@@ -1,4 +1,4 @@
-import { extractGraphData } from '../../dist/extractors/treeSitterExtractor.js';
+import { extractGraphData } from '../../dist/services/extractors/treeSitterExtractor.js';
 import Parser from 'tree-sitter';
 import TypeScript from 'tree-sitter-typescript';
 import { readFileSync } from 'fs';

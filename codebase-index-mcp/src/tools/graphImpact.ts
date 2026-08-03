@@ -18,18 +18,18 @@ import {
   handleDeadCodeScan,
   handleDetectCircularDependencies,
   handleLinkTestsToSource
-} from "../handlers/analysisHandler.js";
-import { handleFindPackageConsumers, handleGetCrossRepoImpact } from "../handlers/crossRepoHandler.js";
+} from "./handlers/analysisHandler.js";
+import { handleFindPackageConsumers, handleGetCrossRepoImpact } from "./handlers/crossRepoHandler.js";
 import {
   handleFindImpactFiles,
   handleGetCallChain,
   handleGetChangeContext,
   handleGetDependencyGraph
-} from "../handlers/impactHandler.js";
-import { handleDetectChanges } from "../handlers/indexHandler.js";
-import { handleTraceExecutionFlow } from "../handlers/traceHandler.js";
-import { handleGetSymbolContextPack } from "../handlers/searchHandler.js";
-import * as schemas from "../schemas/toolSchemas.js";
+} from "./handlers/impactHandler.js";
+import { handleDetectChanges } from "./handlers/indexHandler.js";
+import { handleTraceExecutionFlow } from "./handlers/traceHandler.js";
+import { handleGetSymbolContextPack } from "./handlers/searchHandler.js";
+import * as schemas from "../types/schemas/toolSchemas.js";
 
 import { PROFILE_PROP, raw, readsGraph, type CodebaseIndexDeps } from "./common.js";
 

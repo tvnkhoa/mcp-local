@@ -73,13 +73,16 @@ mcp-local/
 │                                        — tooling data; a server may NOT import it
 │
 ├── codebase-index-mcp/              independent server (NOT a workspace member)
-│   ├── src/
+│   ├── src/                         the standard structure — same nine slots everywhere
 │   │   ├── index.ts                 entry point
-│   │   ├── errors.ts                error taxonomy
+│   │   ├── tools/                   tool declarations + handlers/
+│   │   ├── resources/               MCP resource providers
+│   │   ├── prompts/                 MCP prompt declarations
+│   │   ├── middleware/              guardrails, response shaping, error taxonomy
+│   │   ├── services/                domain logic (extractors/ indexing/ graph/ …)
+│   │   ├── repositories/            persistence and data access
 │   │   ├── config/                  config + env resolution
-│   │   ├── guardrails/              ALL safety / validation logic
-│   │   ├── response/                response shaping
-│   │   └── <domain>/                extractors/ handlers/ schemas/ …
+│   │   └── types/                   shared types + schemas/
 │   ├── scripts/
 │   │   ├── smoke-test.mjs           integration entry — same name in every server
 │   │   └── test/                    test harnesses + fixtures
@@ -208,7 +211,7 @@ Every server, without exception:
 | # | Rule |
 |---|---|
 | S1 | `src/index.ts` is the only entry point |
-| S2 | Layout is `src/{config,guardrails,response,<domain>}/` + `errors.ts`. Concerns that exist are at the conventional path; concerns that do not exist are absent (a server with no SQL surface has no `guardrails/`) |
+| S2 | Layout is the standard structure: `src/{tools,resources,prompts,middleware,services,repositories,config,types}/` + `index.ts`. Concerns that exist are at the conventional path; concerns that do not exist are absent (a server that declares no prompts has no `prompts/`). See `docs/refactor/standard-structure-report.md` for the layer rule that decides which slot a file belongs in, and the per-server map |
 | S3 | Config is loaded **once**, at startup, into a typed object, and passed down. No module reads `process.env` except the config module |
 | S4 | Script vocabulary is identical everywhere: `build`, `typecheck`, `test`, `start`, `dev`, `smoke-test` |
 | S5 | `scripts/smoke-test.mjs` performs a real MCP handshake over stdio and lists tools. It is the check that catches what typecheck and unit tests cannot — module initialization order, transport wiring, startup failure |
@@ -268,14 +271,14 @@ that had already shipped.
 | Env vars and tool names declared exactly once, generated outward (S-35/S-36) | **↑ Built** (`77d9909`+) — 89 env vars in `envSpecs/`, 76 tools from `contracts/`; `generate:check` gates in `verify:all` |
 | Dependency guard (tiers, zero-dep, protocol ownership, deep imports, env access, cross-server, tooling-import) | **Built and enforcing** — 0 errors |
 | Convention guard (required files/scripts, size caps, no default export, no `console.log`) | **Built and enforcing** |
-| Consistent `src/{config,guardrails,response}/` in all four servers | **Built** (`3f5b702`) |
+| Consistent `src/{config,guardrails,response}/` in all four servers | **Superseded** — `3f5b702` built it; the standard-structure refactor replaced it with the nine-slot layout (S2) |
 | Servers consuming `packages/*` via `file:` deps | **Built** — all four |
 | Shared: response formatting, SQL guardrails, approval tokens, HTTP helpers, env parsing, logging, `PolicyViolationError` | **Built** (`829ecd9`) — 6 of 7 clusters |
 | Servers declaring tools via `defineTool` / `createToolRegistry` (S10) | **↑ Built** — all four migrated (S-23…S-33); `codebase-index-mcp` last, at `b3454e1` |
 | `contracts/` golden `tools/list` snapshots (S11) | **↑ Built** — `contracts/`, 76 tools across four servers |
 | Uniform script vocabulary (S4) | **↑ Built** — all four answer `build` / `typecheck` / `test` / `smoke` (S-03) |
 | CI | **↑ Built** — `.github/workflows/ci.yml`, Windows + Node 22, credential-free (S-05) |
-| Config loaded once per server (S3) | **Partial** — `postgres-mcp/src/migration/efRunner.ts` still reads `process.env` directly |
+| Config loaded once per server (S3) | **Partial** — `postgres-mcp/src/services/migration/efRunner.ts` still reads `process.env` directly |
 | File size caps met by servers | **Not yet** — 34 warnings, 1 accepted exemption; eleven files in `codebase-index-mcp/src` exceed the hard cap. Blocks S-41 |
 | `zod` / protocol SDK deduplicated across servers | **Not planned before S-09.** Measured consequence: `mapError` cannot be shared, because `instanceof` compares class identity across copies |
 | `servers/` directory move | **Deliberately skipped** (S-42) |

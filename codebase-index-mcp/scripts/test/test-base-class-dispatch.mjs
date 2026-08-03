@@ -16,8 +16,8 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-import { GraphStore } from "../../dist/store/graphStore.js";
-import { extractGraphData } from "../../dist/extractors/treeSitterExtractor.js";
+import { GraphStore } from "../../dist/repositories/graphStore.js";
+import { extractGraphData } from "../../dist/services/extractors/treeSitterExtractor.js";
 
 const repoId = "bcd-test";
 const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "cbi-bcd-"));

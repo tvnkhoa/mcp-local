@@ -8,7 +8,7 @@
  */
 
 import type Database from "better-sqlite3";
-import type { ResolvedEdge, SymbolRecord } from "../types.js";
+import type { ResolvedEdge, SymbolRecord } from "../../types/index.js";
 
 export function getSymbolDetailImpl(
   db: Database.Database,

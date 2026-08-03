@@ -10,7 +10,7 @@
 
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
-import { validateAllowedTables } from "../../dist/guardrails/sqliteGuardrails.js";
+import { validateAllowedTables } from "../../dist/middleware/sqliteGuardrails.js";
 import { mkdtempSync, writeFileSync, readFileSync, rmSync, mkdirSync } from "fs";
 import { tmpdir } from "os";
 import { join, resolve } from "path";

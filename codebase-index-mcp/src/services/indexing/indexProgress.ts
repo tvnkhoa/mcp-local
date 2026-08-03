@@ -1,5 +1,5 @@
 import process from "node:process";
-import { INDEX_LOG_MODE } from "../config/envConfig.js";
+import { INDEX_LOG_MODE } from "../../config/envConfig.js";
 
 /**
  * Indexing progress reporting + log gating.

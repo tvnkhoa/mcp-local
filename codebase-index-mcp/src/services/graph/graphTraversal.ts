@@ -3,8 +3,8 @@
  * BFS traversal for dependency and call graphs
  */
 
-import type { GraphStore } from "../store/graphStore.js";
-import type { CallChainDirection } from "../types.js";
+import type { GraphStore } from "../../repositories/graphStore.js";
+import type { CallChainDirection } from "../../types/index.js";
 
 export function traverseDependencyGraph(
   store: GraphStore,

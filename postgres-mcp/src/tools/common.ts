@@ -14,11 +14,11 @@ import { schema } from "@mcp/sdk";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 
-import type { ConnectionManager } from "../db/connectionManager.js";
-import type { MigrationConfig } from "../migration/efRunner.js";
-import { responseProfileSchema } from "../response/responseFormatter.js";
-import type { WritePreviewStore } from "../write/previewStore.js";
-import type { WriteConfig } from "../write/writeHandlers.js";
+import type { ConnectionManager } from "../repositories/connectionManager.js";
+import type { MigrationConfig } from "../services/migration/efRunner.js";
+import { responseProfileSchema } from "../middleware/responseFormatter.js";
+import type { WritePreviewStore } from "../services/write/previewStore.js";
+import type { WriteConfig } from "./handlers/writeHandlers.js";
 
 /** Bounds read from the environment once, at startup. */
 export interface QueryLimits {
@@ -48,7 +48,7 @@ export interface PostgresDeps {
  *
  * `CallToolResult.content` is a union array (text | image | resource); the
  * platform type narrows it to text. Every value produced here is text, so this
- * is variance, not a shape change — the same cast `response/responseFormatter.ts`
+ * is variance, not a shape change — the same cast `middleware/responseFormatter.ts`
  * already makes in the other direction.
  */
 export function raw(result: CallToolResult): ToolCallResult {

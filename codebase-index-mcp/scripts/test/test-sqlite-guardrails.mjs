@@ -12,7 +12,7 @@
  * Usage: npm run build && node scripts/test/test-sqlite-guardrails.mjs
  */
 
-import { validateReadOnlyGraphSql, validateAllowedTables } from "../../dist/guardrails/sqliteGuardrails.js";
+import { validateReadOnlyGraphSql, validateAllowedTables } from "../../dist/middleware/sqliteGuardrails.js";
 
 const Q = String.fromCharCode(39);
 const DQ = String.fromCharCode(34);

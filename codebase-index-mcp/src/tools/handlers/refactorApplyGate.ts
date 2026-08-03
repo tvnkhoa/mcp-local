@@ -7,10 +7,10 @@
  */
 
 import { randomUUID } from "node:crypto";
-import { executeRefactorApplyPlan } from "../refactor/refactorEngine.js";
-import { deriveApplyStatus, mapPreviewStatusFromApplyStatus } from "../refactor/refactorUtils.js";
-import type { RefactorPreviewHunkRecord, RefactorApplyRecord } from "../types.js";
-import { collectGitChangedFiles } from "../gitHelpers.js";
+import { executeRefactorApplyPlan } from "../../services/refactor/refactorEngine.js";
+import { deriveApplyStatus, mapPreviewStatusFromApplyStatus } from "../../services/refactor/refactorUtils.js";
+import type { RefactorPreviewHunkRecord, RefactorApplyRecord } from "../../types/index.js";
+import { collectGitChangedFiles } from "../../services/gitHelpers.js";
 import type { HandlerContext } from "./handlerContext.js";
 
 // Serializes the read-modify-write phase of refactor applies. Two concurrent applies that touch the

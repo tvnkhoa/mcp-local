@@ -10,7 +10,7 @@
 
 import type Parser from "tree-sitter";
 import type { ExtractInput } from "./extractorTypes.js";
-import type { RouteRecord, SymbolRecord } from "../types.js";
+import type { RouteRecord, SymbolRecord } from "../../types/index.js";
 import {
   combineRouteTemplate,
   dedupeRoutes,

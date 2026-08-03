@@ -1,4 +1,4 @@
-import { GraphStore } from "../../dist/store/graphStore.js";
+import { GraphStore } from "../../dist/repositories/graphStore.js";
 const store = new GraphStore("mcp-local-index.db");
 
 // Test search_docs

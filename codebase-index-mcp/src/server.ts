@@ -37,18 +37,18 @@ import type {
 } from "@mcp/sdk";
 import { createMcpServer } from "@mcp/sdk";
 
-import { mapError } from "./errorHandler.js";
-import type { GraphStore } from "./store/graphStore.js";
-import { handleListResources, handleReadResource } from "./handlers/resourceHandler.js";
-import type { HandlerContext } from "./handlers/handlerContext.js";
+import { mapError } from "./middleware/errorHandler.js";
+import type { GraphStore } from "./repositories/graphStore.js";
+import { handleListResources, handleReadResource } from "./resources/resourceHandler.js";
+import type { HandlerContext } from "./tools/handlers/handlerContext.js";
 import {
   type ResponseProfile,
   type ToolRequestContext,
   asArgsRecord,
   emitTelemetry
-} from "./response/responseFormatter.js";
+} from "./middleware/responseFormatter.js";
 import type { DescriptorLimits } from "./tools/limits.js";
-import { maybeAutoActivateWatchFromArgs } from "./watch/watchLifecycle.js";
+import { maybeAutoActivateWatchFromArgs } from "./services/watch/watchLifecycle.js";
 
 export interface TelemetryConfig {
   readonly enabled: boolean;

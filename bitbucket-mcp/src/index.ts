@@ -21,10 +21,10 @@ import process from "node:process";
 import { createEventLogger } from "@mcp/core";
 import { asErrorPayload, createMcpServer } from "@mcp/sdk";
 
-import { BitbucketClient } from "./bitbucketClient.js";
+import { BitbucketClient } from "./services/bitbucketClient.js";
 import { loadConfig, describeConfig, type BitbucketConfig } from "./config/index.js";
-import { mapError } from "./errors.js";
-import { buildTools, toWireError } from "./tools.js";
+import { mapError } from "./middleware/errors.js";
+import { buildTools, toWireError } from "./tools/index.js";
 
 const config: BitbucketConfig = loadConfig();
 const client = new BitbucketClient(config);

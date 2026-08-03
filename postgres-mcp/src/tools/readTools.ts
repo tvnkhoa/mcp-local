@@ -18,10 +18,10 @@ import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { type FieldDef } from "pg";
 import { z } from "zod";
 
-import { handleGetTableRelationships, handleProfileTable, handleDataDiff } from "../db/introspection.js";
-import { validateReadOnlySql } from "../guardrails/sqlGuardrails.js";
-import { asText as asTextProfiled, asError as asErrorProfiled } from "../response/responseFormatter.js";
-import { safeRollback } from "../write/writeHandlers.js";
+import { handleGetTableRelationships, handleProfileTable, handleDataDiff } from "../repositories/introspection.js";
+import { validateReadOnlySql } from "../middleware/sqlGuardrails.js";
+import { asText as asTextProfiled, asError as asErrorProfiled } from "../middleware/responseFormatter.js";
+import { safeRollback } from "./handlers/writeHandlers.js";
 import {
   envProp,
   environmentArg,

@@ -96,9 +96,9 @@ capability, not on an observed failure.
 
 ## Consequences
 
-- No code change. `observe-mcp/src/guardrails/sqlGuardrails.ts` keeps 13 tokens.
+- No code change. `observe-mcp/src/middleware/sqlGuardrails.ts` keeps 13 tokens.
 - The rule above is pinned by a regression test in
-  `observe-mcp/src/guardrails/sqlGuardrails.test.ts`, so a future "let's just union the
+  `observe-mcp/src/middleware/sqlGuardrails.test.ts`, so a future "let's just union the
   lists" change fails with a pointer back to this ADR.
 - Adding a token to any list is now a decision with two stated criteria rather than a
   judgement call.

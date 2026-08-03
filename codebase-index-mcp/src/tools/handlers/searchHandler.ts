@@ -5,14 +5,14 @@ import {
   redactEmail,
   getRepoStaleness,
   buildStaleWarning
-} from "../gitHelpers.js";
-import { runGit } from "../gitHelpers.js";
-import { resolveResponseProfile } from "../response/responseFormatter.js";
+} from "../../services/gitHelpers.js";
+import { runGit } from "../../services/gitHelpers.js";
+import { resolveResponseProfile } from "../../middleware/responseFormatter.js";
 import { formatChangeContextPayload, buildIndexMeta } from "./impactHandler.js";
-import { readSymbolSourceSpan } from "../refactor/refactorUtils.js";
-import { buildCoverageBlock } from "../response/coverage.js";
-import { isTestPath } from "../indexing/fileFilter.js";
-import { RegexSearchError } from "../search/regexSearch.js";
+import { readSymbolSourceSpan } from "../../services/refactor/refactorUtils.js";
+import { buildCoverageBlock } from "../../middleware/coverage.js";
+import { isTestPath } from "../../services/indexing/fileFilter.js";
+import { RegexSearchError } from "../../services/search/regexSearch.js";
 import type { HandlerContext } from "./handlerContext.js";
 
 /**

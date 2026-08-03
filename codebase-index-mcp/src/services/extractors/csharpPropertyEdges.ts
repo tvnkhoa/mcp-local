@@ -8,7 +8,7 @@
 
 import type Parser from "tree-sitter";
 import type { ExtractInput } from "./extractorTypes.js";
-import type { EdgeRecord } from "../types.js";
+import type { EdgeRecord } from "../../types/index.js";
 import {
   collectCSharpScopeTypeMap,
   emitPropertyAccessEdge,

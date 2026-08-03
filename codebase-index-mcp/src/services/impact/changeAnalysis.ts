@@ -6,10 +6,10 @@
  * no drift between the two tools. Callers layer their own policy/sort/grouping (detect_changes)
  * or test-linking/residual-risk (change_impact) on top of this common core.
  */
-import type { GraphStore } from "../store/graphStore.js";
+import type { GraphStore } from "../../repositories/graphStore.js";
 import { resolveHeadCommitSha, runGitLines } from "../gitHelpers.js";
 import { scoreChangeRisk } from "../analysis/policyResolver.js";
-import type { ReliabilitySummary } from "../types.js";
+import type { ReliabilitySummary } from "../../types/index.js";
 
 export type ChangedFileImpact = {
   filePath: string;

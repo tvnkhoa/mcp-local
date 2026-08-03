@@ -17,10 +17,10 @@ import { ok } from "@mcp/core";
 import type { AnyToolDefinition } from "@mcp/sdk";
 import { defineTool } from "@mcp/sdk";
 
-import { handleGetFeatureBundle } from "../handlers/bundleHandler.js";
-import { handleIndexRepository, handleWatchRepo } from "../handlers/indexHandler.js";
-import { handleGetPersistenceMapping } from "../handlers/persistenceHandler.js";
-import * as schemas from "../schemas/toolSchemas.js";
+import { handleGetFeatureBundle } from "./handlers/bundleHandler.js";
+import { handleIndexRepository, handleWatchRepo } from "./handlers/indexHandler.js";
+import { handleGetPersistenceMapping } from "./handlers/persistenceHandler.js";
+import * as schemas from "../types/schemas/toolSchemas.js";
 
 import {
   PROFILE_PROP,

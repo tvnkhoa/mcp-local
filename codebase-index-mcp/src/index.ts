@@ -18,11 +18,11 @@ import { fileURLToPath } from "node:url";
 
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 
-import { GraphStore } from "./store/graphStore.js";
-import { assertPathAllowed, clamp } from "./guardrails/indexGuardrails.js";
-import { WatchManager } from "./watch/watchManager.js";
-import { createIndexRunner } from "./indexing/indexRunner.js";
-import { armWatchInactivityTimer, startAutoWatchers } from "./watch/watchLifecycle.js";
+import { GraphStore } from "./repositories/graphStore.js";
+import { assertPathAllowed, clamp } from "./middleware/indexGuardrails.js";
+import { WatchManager } from "./services/watch/watchManager.js";
+import { createIndexRunner } from "./services/indexing/indexRunner.js";
+import { armWatchInactivityTimer, startAutoWatchers } from "./services/watch/watchLifecycle.js";
 import {
   allowedRootsFromEnv,
   autoWatchReposFromEnv,
@@ -37,10 +37,10 @@ import {
   type ResponseProfile,
   type ToolRequestContext,
   asText as asTextCore
-} from "./response/responseFormatter.js";
-import { resolveServerVersion } from "./serverUtils.js";
-import { assertNoLlmRuntimePolicy, assertRefactorApprovalPolicy } from "./errorHandler.js";
-import type { HandlerContext } from "./handlers/handlerContext.js";
+} from "./middleware/responseFormatter.js";
+import { resolveServerVersion } from "./config/serverVersion.js";
+import { assertNoLlmRuntimePolicy, assertRefactorApprovalPolicy } from "./middleware/errorHandler.js";
+import type { HandlerContext } from "./tools/handlers/handlerContext.js";
 import { createCodebaseIndexServer } from "./server.js";
 import { buildTools } from "./tools/index.js";
 

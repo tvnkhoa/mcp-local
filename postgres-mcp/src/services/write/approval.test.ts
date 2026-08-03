@@ -13,7 +13,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { PolicyViolationError } from "../errors.js";
+import { PolicyViolationError } from "../../middleware/errors.js";
 import {
   createWriteDigest,
   issueApprovalToken,

@@ -2,7 +2,7 @@ import { spawn } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 
-import { PolicyViolationError } from "../errors.js";
+import { PolicyViolationError } from "../../middleware/errors.js";
 
 export interface MigrationConfig {
   enabled: boolean;

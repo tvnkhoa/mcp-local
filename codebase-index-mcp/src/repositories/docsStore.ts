@@ -1,6 +1,6 @@
 import type Database from "better-sqlite3";
-import type { DocRecord, DocMentionRecord } from "../types.js";
-import { indexLog, indexWarn } from "../indexing/indexProgress.js";
+import type { DocRecord, DocMentionRecord } from "../types/index.js";
+import { indexLog, indexWarn } from "../services/indexing/indexProgress.js";
 
 // ── Docs CRUD ──────────────────────────────────────────────────────────
 
