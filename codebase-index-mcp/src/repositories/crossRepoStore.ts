@@ -128,6 +128,8 @@ export function getCrossRepoImpactImpl(
   relatedKind: string | null;
   relatedFilePath: string | null;
   relatedSignature: string | null;
+  /** `edges.reason` for the edge this row was derived from — distinguishes a bare-name guess from a real match (MCP-ISSUE-045). */
+  edgeReason: string | null;
 }[] {
   if (direction === "outbound") {
     return db
@@ -142,7 +144,15 @@ export function getCrossRepoImpactImpl(
           s.name as relatedName,
           s.kind as relatedKind,
           s.file_path as relatedFilePath,
-          s.signature as relatedSignature
+          s.signature as relatedSignature,
+          (
+            select e.reason from edges e
+            where e.repo_id = c.from_repo_id
+              and e.from_id = c.from_symbol_id
+              and e.to_id = c.to_symbol_id
+              and e.type = c.type
+            limit 1
+          ) as edgeReason
         from cross_repo_deps c
         left join symbols s
           on s.repo_id = c.to_repo_id and s.symbol_id = c.to_symbol_id
@@ -161,6 +171,7 @@ export function getCrossRepoImpactImpl(
       relatedKind: string | null;
       relatedFilePath: string | null;
       relatedSignature: string | null;
+      edgeReason: string | null;
     }[];
   }
 
@@ -176,7 +187,15 @@ export function getCrossRepoImpactImpl(
         s.name as relatedName,
         s.kind as relatedKind,
         s.file_path as relatedFilePath,
-        s.signature as relatedSignature
+        s.signature as relatedSignature,
+        (
+          select e.reason from edges e
+          where e.repo_id = c.from_repo_id
+            and e.from_id = c.from_symbol_id
+            and e.to_id = c.to_symbol_id
+            and e.type = c.type
+          limit 1
+        ) as edgeReason
       from cross_repo_deps c
       left join symbols s
         on s.repo_id = c.from_repo_id and s.symbol_id = c.from_symbol_id
@@ -195,10 +214,21 @@ export function getCrossRepoImpactImpl(
     relatedKind: string | null;
     relatedFilePath: string | null;
     relatedSignature: string | null;
+    edgeReason: string | null;
   }[];
 }
 
 // ── Find package consumers ─────────────────────────────────────────────
+//
+// MCP-ISSUE-046: this used to return the files that DEFINE the package. Two lanes write the
+// `from_id` side of a `DEPENDS_ON` edge, and one of them fires inside the publishing repo:
+// `dotnetProjectParser` emits the `.csproj` that declares a `<PackageReference>`, and
+// `csharpSymbols` emits a "namespace package contract bridge" edge for every file whose
+// `using` maps to the contract — including the provider's own contract files, which `using`
+// their siblings. The publisher is identifiable because `dotnetProjectParser` also emits a
+// `module` symbol whose `signature` IS the contract id, so the `not exists` below drops any
+// repo that exports the contract it appears to consume. "Who consumes this contract" is the
+// pre-change gate for a contract bump, and answering it with the publisher inverts the question.
 
 export function findPackageConsumersImpl(
   db: Database.Database,
@@ -220,7 +250,7 @@ export function findPackageConsumersImpl(
     return db
       .prepare(
         `
-        select
+        select distinct
           e.repo_id as consumerRepoId,
           e.from_id as consumerSymbolId,
           s.name as consumerName,
@@ -247,6 +277,12 @@ export function findPackageConsumersImpl(
         where e.type = 'DEPENDS_ON'
           and e.to_id = ?
           and e.repo_id = ?
+          and not exists (
+            select 1
+            from symbols own
+            where own.repo_id = e.repo_id
+              and own.signature = e.to_id
+          )
         order by e.repo_id, s.file_path, s.name
         limit ?
         `
@@ -267,7 +303,7 @@ export function findPackageConsumersImpl(
   return db
     .prepare(
       `
-      select
+      select distinct
         e.repo_id as consumerRepoId,
         e.from_id as consumerSymbolId,
         s.name as consumerName,
@@ -293,6 +329,12 @@ export function findPackageConsumersImpl(
         )
       where e.type = 'DEPENDS_ON'
         and e.to_id = ?
+        and not exists (
+          select 1
+          from symbols own
+          where own.repo_id = e.repo_id
+            and own.signature = e.to_id
+        )
       order by e.repo_id, s.file_path, s.name
       limit ?
       `
@@ -308,6 +350,84 @@ export function findPackageConsumersImpl(
     providerRepoId: string | null;
     providerSymbolId: string | null;
   }[];
+}
+
+// ── Package providers, and whether the contract is known at all ─────────
+//
+// The publisher rows excluded from `findPackageConsumersImpl` are still worth reporting — just
+// not mixed into `consumers[]`, where they answer the opposite question (MCP-ISSUE-046).
+
+export function findPackageProvidersImpl(
+  db: Database.Database,
+  packageContractId: string,
+  limit: number
+): { providerRepoId: string; providerName: string; providerFilePath: string }[] {
+  return db
+    .prepare(
+      `
+      select
+        s.repo_id as providerRepoId,
+        s.name as providerName,
+        s.file_path as providerFilePath
+      from symbols s
+      where s.signature = ?
+      order by s.repo_id, s.file_path
+      limit ?
+      `
+    )
+    .all(packageContractId, limit) as { providerRepoId: string; providerName: string; providerFilePath: string }[];
+}
+
+/**
+ * How many `DEPENDS_ON` rows `findPackageConsumersImpl` suppressed because they live in a repo that
+ * publishes the contract.
+ *
+ * Reported so the exclusion is never silent: on `ssnet` it is 64 rows — 44 in the publishing project
+ * itself and 20 in that package's own test project. A monorepo where a *different* project consumes
+ * a sibling's package would also land here, and a caller seeing a non-zero count can drop to the
+ * `edges` query to inspect them.
+ */
+export function countPublisherSelfReferencesImpl(db: Database.Database, packageContractId: string): number {
+  const row = db
+    .prepare(
+      `
+      select count(*) as cnt
+      from edges e
+      where e.type = 'DEPENDS_ON'
+        and e.to_id = ?
+        and exists (
+          select 1 from symbols own
+          where own.repo_id = e.repo_id and own.signature = e.to_id
+        )
+      `
+    )
+    .get(packageContractId) as { cnt: number };
+  return row.cnt;
+}
+
+/**
+ * Is this contract id known to the index at all — as a dependency target or as a published
+ * package? MCP-ISSUE-046: without this, a mistyped package name returned
+ * `{consumerCount: 0, consumers: []}`, byte-identical to a package that genuinely has no
+ * consumers. The `didYouMean` suggester cannot cover the gap because it is prefix-anchored, so a
+ * name wrong in its first segment produced no suggestions and therefore no hint either.
+ */
+export function packageContractExistsImpl(db: Database.Database, packageContractId: string): boolean {
+  const row = db
+    .prepare(
+      `
+      select 1 as hit
+      from edges
+      where type = 'DEPENDS_ON' and to_id = ?
+      union all
+      select 1 as hit
+      from symbols
+      where signature = ?
+      limit 1
+      `
+    )
+    .get(packageContractId, packageContractId) as { hit: number } | undefined;
+  return row !== undefined;
 }
 
 // ── Find similar package contract IDs (did-you-mean support) ────────────

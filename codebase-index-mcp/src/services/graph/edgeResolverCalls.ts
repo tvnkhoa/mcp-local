@@ -191,7 +191,14 @@ export function resolveCallEdgesBatch(
   db: Database.Database,
   repoId: string,
   ctx: CallResolutionContext,
-  batchSize: number
+  batchSize: number,
+  /**
+   * Optional side-channel for the two populations that are NOT resolutions of the attempted set:
+   * rows touched by the UPDATE (a pair can be several rows) and dispatch edges newly inserted.
+   * Kept out of the return value so `callEdgesResolved` stays a partition of `callEdgesAttempted`
+   * (MCP-ISSUE-048).
+   */
+  stats?: { rowsUpdated: number; dispatchInserted: number }
 ): number {
   const batch = ctx.unresolvedRows.slice(ctx.offset, ctx.offset + batchSize);
   ctx.offset += batchSize;
@@ -414,7 +421,12 @@ export function resolveCallEdgesBatch(
         and edges.to_id = b.old_to_id
         and edges.type = 'CALLS'
     `).run(repoId);
-    count += result.changes;
+    // MCP-ISSUE-048: count PAIRS, not rows. The attempted population is `select distinct from_id,
+    // to_id`, but this UPDATE rewrites every row matching a pair — and `edges` has no unique index, so
+    // one pair can be several rows. Returning `result.changes` made "resolved" exceed "attempted",
+    // which drove resolveCallsCoverage above 1.0 and made attempted−resolved go negative.
+    count += updates.length;
+    if (stats) stats.rowsUpdated += result.changes;
 
     // Handle dispatch inserts in same transaction
     if (inserts.length > 0) {
@@ -423,7 +435,9 @@ export function resolveCallEdgesBatch(
           repoId, ins.fromId, ins.toId, ins.confidence, ins.reason,
           repoId, ins.fromId, ins.toId
         );
-        if (r.changes > 0) count += 1;
+        // NOT added to `count`: a dispatch edge is newly created, never part of the attempted
+        // population, so counting it as a resolution broke the partition.
+        if (r.changes > 0 && stats) stats.dispatchInserted += 1;
       }
     }
 

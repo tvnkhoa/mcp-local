@@ -70,6 +70,10 @@ export function applyPreviewExclusively(
     };
     store.recordRefactorApply(applyRecord, applyOutcome.changes, applyOutcome.appliedHunks);
     store.markRefactorPreviewStatus(previewId, mapPreviewStatusFromApplyStatus(applyRecord.status));
+    // MCP-ISSUE-042: apply does not re-index either. Here the working tree at least goes dirty, so
+    // git-based staleness still reports something — but recording the files keeps the two halves of
+    // the refactor lifecycle symmetric and survives a later `git stash`/commit that cleans the tree.
+    store.recordPendingReindexFiles(repoId, appliedFiles.map((x) => x.filePath), "written by refactor apply");
     return { applyId, rollbackId, applyOutcome, applyRecord, beforeChangedFiles, afterChangedFiles };
   });
 }

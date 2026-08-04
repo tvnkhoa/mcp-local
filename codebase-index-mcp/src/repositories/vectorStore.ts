@@ -231,6 +231,23 @@ const KNOWN_EXTERNAL_TYPE_RECEIVERS = new Set([
   "CancellationToken", "CancellationTokenSource", "IAsyncEnumerable", "IQueryable",
 ]);
 
+/**
+ * Is this BARE token the name of a BCL/framework type?
+ *
+ * Deliberately separate from `isKnownExternalToken`, which only consults
+ * `KNOWN_EXTERNAL_TYPE_RECEIVERS` for a qualified `Receiver.Method` token. That restriction is
+ * load-bearing for the CALLS lane, which calls `isKnownExternalToken` on bare *method* names —
+ * and this set contains `Log`, `Is`, `Has`, `Type`, `String` and `Mock`, so making the token check
+ * accept bare names would silently suppress real call edges (MCP-ISSUE-045).
+ *
+ * The TYPE_REF lane needs the opposite question — "is bare `Task` a framework type?" — and asks it
+ * only after same-repo resolution has already failed, so a false positive here costs a cross-repo
+ * link to a framework type, which is never correct anyway.
+ */
+export function isKnownExternalTypeName(name: string): boolean {
+  return KNOWN_EXTERNAL_TYPE_RECEIVERS.has(name);
+}
+
 export function isKnownExternalToken(token: string): boolean {
   // Check simple token first (terminal method name)
   if (

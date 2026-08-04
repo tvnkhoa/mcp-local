@@ -187,7 +187,7 @@ export function buildRefactorTools(deps: CodebaseIndexDeps): AnyToolDefinition[]
 
   const refactorSymbolMigration = defineTool({
     name: "refactor_symbol_migration",
-    description: "Run owner-type constrained symbol migrations (dry-run by default) using the same preview/apply engine.",
+    description: "Run owner-type constrained symbol migrations (dry-run by default) using the same preview/apply engine. Sites are constrained by requiredOwnerType and, optionally, by symbolKinds (default: any kind). When a migration reports 0 matches, read rejectedSites — it names the guard that dropped each site.",
     input: schemas.refactorSymbolMigrationSchema,
     inputSchema: {
       type: "object",
@@ -208,6 +208,12 @@ export function buildRefactorTools(deps: CodebaseIndexDeps): AnyToolDefinition[]
               toSymbol: { type: "string" },
               requiredOwnerType: { type: "string" },
               forbiddenOwnerTypes: { type: "array", items: { type: "string" }, maxItems: 200 },
+              symbolKinds: {
+                type: "array",
+                items: { type: "string" },
+                maxItems: 20,
+                description: "Restrict sites to these inferred kinds (e.g. [\"property\",\"field\"]). Omit for any kind."
+              },
               initializerRewrite: {
                 type: "object",
                 additionalProperties: false,
@@ -222,7 +228,8 @@ export function buildRefactorTools(deps: CodebaseIndexDeps): AnyToolDefinition[]
           }
         },
         scopePaths: { type: "array", items: { type: "string" }, maxItems: 200 },
-        dryRun: { type: "boolean" }
+        dryRun: { type: "boolean" },
+        includeLowConfidence: { type: "boolean", description: "Allow apply for low-confidence hunks. Does NOT lift a risk flag such as ambiguous_target." }
       }
     },
     // Dry-run by default; a non-dry-run call goes through the apply path, which is itself
@@ -253,6 +260,7 @@ export function buildRefactorTools(deps: CodebaseIndexDeps): AnyToolDefinition[]
         includeComparisons: { type: "boolean", description: "Also rewrite ==/!= and assertion-argument sites (default true); false = assignments/initializers only." },
         scopePaths: { type: "array", items: { type: "string" }, maxItems: 200 },
         dryRun: { type: "boolean" },
+        includeLowConfidence: { type: "boolean", description: "Allow apply for low-confidence hunks. Does NOT lift the ambiguous_target risk flag — see ambiguousReasons in the response." },
         profile: PROFILE_PROP
       }
     },

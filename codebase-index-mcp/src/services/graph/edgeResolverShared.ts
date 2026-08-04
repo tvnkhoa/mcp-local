@@ -169,6 +169,16 @@ export function resolveUnlinkedEdges(db: Database.Database, repoId: string): Res
       where e.repo_id = ?
         and e.to_id not like 'import:%'
         and e.to_id not like 'callee:%'
+        -- MCP-ISSUE-048: these four are also placeholders owned by dedicated resolvers, and omitting
+        -- them let them flood the 5000-row window below. On a full run the graph is full of freshly
+        -- extracted 'type:'/'iface:' tokens, so the window was spent almost entirely on tokens that
+        -- cannot cross a repo boundary (8 links from 521 files), while a 3-file dirty run — whose
+        -- graph was still resolved from the previous run — found 459. Same corpus, 57x the links,
+        -- purely from which rows the sample happened to contain.
+        and e.to_id not like 'type:%'
+        and e.to_id not like 'iface:%'
+        and e.to_id not like 'property:%'
+        and e.to_id not like 'base:%'
         and not exists (
           select 1 from symbols s where s.repo_id = ? and s.symbol_id = e.to_id
         )

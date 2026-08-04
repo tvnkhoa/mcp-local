@@ -106,21 +106,33 @@ function verifyOwner(
   access: Parser.SyntaxNode,
   requiredOwnerType: string,
   scopeForNode: (node: Parser.SyntaxNode) => Map<string, string>
-): OwnerVerdict {
+): { verdict: OwnerVerdict; rule: string; inferredOwnerType: string | null } {
   const required = requiredOwnerType.toLowerCase();
 
   if (access.type === "identifier") {
     // Bare `Prop` inside an object initializer → owner is the constructed type.
     const ctorType = enclosingObjectCreationType(access);
-    if (ctorType) return ctorType.toLowerCase() === required ? "verified" : "cross_type";
-    return "unknown";
+    if (ctorType) {
+      return ctorType.toLowerCase() === required
+        ? { verdict: "verified", rule: "initializer_type_match", inferredOwnerType: ctorType }
+        : { verdict: "cross_type", rule: "initializer_type_mismatch", inferredOwnerType: ctorType };
+    }
+    // A bare assignment that is NOT inside `new T { … }` — e.g. `HandledBy = "ai";` in a method of
+    // the declaring type itself, or a `with` expression, neither of which this prover recognizes.
+    return { verdict: "unknown", rule: "no_enclosing_object_creation", inferredOwnerType: null };
   }
 
   const receiver = memberAccessReceiverName(access);
-  if (!receiver) return "unknown";
+  // Requires a BARE identifier receiver, so any nested path (`conversation.Assignment.HandledBy`)
+  // is permanently unprovable — the owned-entity shape this tool exists for (MCP-ISSUE-043).
+  if (!receiver) return { verdict: "unknown", rule: "receiver_not_identifier", inferredOwnerType: null };
   const declaredType = scopeForNode(access).get(receiver);
-  if (!declaredType) return "unknown";
-  return declaredType.toLowerCase() === required ? "verified" : "cross_type";
+  if (!declaredType) {
+    return { verdict: "unknown", rule: "receiver_type_not_in_scope", inferredOwnerType: null };
+  }
+  return declaredType.toLowerCase() === required
+    ? { verdict: "verified", rule: "receiver_type_match", inferredOwnerType: declaredType }
+    : { verdict: "cross_type", rule: "receiver_type_mismatch", inferredOwnerType: declaredType };
 }
 
 /** Type name of an `object_creation_expression` (`new T(...)` → "T"). */
@@ -235,7 +247,14 @@ export function buildValueRepresentationPreview(
   repoId: string,
   input: ValueRepresentationInput,
   scopePaths: string[]
-): { hunks: PreviewCandidateHunk[]; affectedFiles: string[] } {
+): {
+  hunks: PreviewCandidateHunk[];
+  affectedFiles: string[];
+  /** Sites dropped because the owner is known to be a different type. */
+  rejectedSites: { filePath: string; line: number; rule: string; detail: string }[];
+  /** Sites kept but flagged `ambiguous_target`, with the rule that could not prove the owner. */
+  ambiguousReasons: { filePath: string; line: number; rule: string; detail: string }[];
+} {
   const includeComparisons = input.includeComparisons !== false;
   const includePaths = (scopePaths ?? []).map((x) => normalizeRelativePath(x));
 
@@ -248,6 +267,8 @@ export function buildValueRepresentationPreview(
 
   const hunks: PreviewCandidateHunk[] = [];
   const affected = new Set<string>();
+  const rejectedSites: { filePath: string; line: number; rule: string; detail: string }[] = [];
+  const ambiguousReasons: { filePath: string; line: number; rule: string; detail: string }[] = [];
   let totalMatches = 0;
 
   for (const filePath of selectedFiles) {
@@ -290,25 +311,40 @@ export function buildValueRepresentationPreview(
       const site = classifyLiteralSite(literal, input.property, includeComparisons);
       if (!site) continue;
 
-      const verdict = verifyOwner(site.access, input.requiredOwnerType, scopeForNode);
-      if (verdict === "cross_type") continue; // known-different owner — never rewrite
+      const owner = verifyOwner(site.access, input.requiredOwnerType, scopeForNode);
+      const line = offsetToLine(content, literal.startIndex);
+      if (owner.verdict === "cross_type") {
+        // known-different owner — never rewrite, but say so rather than dropping it silently
+        rejectedSites.push({
+          filePath,
+          line,
+          rule: owner.rule,
+          detail: `inferred owner '${owner.inferredOwnerType ?? "unknown"}' != required '${input.requiredOwnerType}'`
+        });
+        continue;
+      }
 
       const riskFlags: RefactorRiskFlag[] = [];
       if (generated) riskFlags.push("generated_file");
-      if (verdict === "unknown") riskFlags.push("ambiguous_target");
+      if (owner.verdict === "unknown") {
+        riskFlags.push("ambiguous_target");
+        // `ambiguous_target` blocks apply unconditionally (isApplyRunnableHunk rejects on any risk
+        // flag), so the caller needs to know WHICH rule could not prove the owner.
+        ambiguousReasons.push({ filePath, line, rule: owner.rule, detail: describeOwnerRule(owner.rule) });
+      }
 
-      let confidence = verdict === "verified" ? 0.95 : 0.7;
+      let confidence = owner.verdict === "verified" ? 0.95 : 0.7;
       if (generated) confidence -= 0.2;
       confidence = Math.max(0, Math.min(1, Number(confidence.toFixed(2))));
 
       hunks.push({
         filePath,
-        line: offsetToLine(content, literal.startIndex),
+        line,
         startOffset: literal.startIndex,
         endOffset: literal.endIndex,
         beforeText: content.slice(literal.startIndex, literal.endIndex),
         afterText: replacement,
-        ownerType: verdict === "verified" ? input.requiredOwnerType : null,
+        ownerType: owner.verdict === "verified" ? input.requiredOwnerType : null,
         symbolKind: "property",
         confidence,
         riskFlags,
@@ -323,6 +359,22 @@ export function buildValueRepresentationPreview(
   hunks.sort((a, b) => a.filePath.localeCompare(b.filePath) || a.startOffset - b.startOffset);
   return {
     hunks,
-    affectedFiles: [...affected].sort((a, b) => a.localeCompare(b))
+    affectedFiles: [...affected].sort((a, b) => a.localeCompare(b)),
+    rejectedSites,
+    ambiguousReasons
   };
+}
+
+/** Why a rule could not prove the owner, in terms a caller can act on (MCP-ISSUE-043). */
+function describeOwnerRule(rule: string): string {
+  switch (rule) {
+    case "receiver_not_identifier":
+      return "the receiver is itself a member-access path (e.g. a.B.Prop); the prover only types a bare identifier receiver";
+    case "receiver_type_not_in_scope":
+      return "the receiver's declared type is not in the method scope map (property, field, foreach variable, lambda parameter or method return)";
+    case "no_enclosing_object_creation":
+      return "a bare assignment outside a `new T { … }` initializer — including an assignment inside the declaring type itself, and `with` expressions";
+    default:
+      return rule;
+  }
 }

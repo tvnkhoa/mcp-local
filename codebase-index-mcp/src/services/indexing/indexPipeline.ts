@@ -454,7 +454,7 @@ export async function runIndexPipeline(store: GraphStore, input: RunIndexInput):
       }
     }
 
-    pruneAndResolve(store, input, progress, files, selectedFiles, maxFiles);
+    const pruneCounts = pruneAndResolve(store, input, progress, files, selectedFiles, maxFiles);
     const vectorSymbolsIndexed = rebuildVectorIndex(store, input.repoId, progress);
 
     const finishedAt = new Date().toISOString();
@@ -470,9 +470,16 @@ export async function runIndexPipeline(store: GraphStore, input: RunIndexInput):
       indexWarn(`[index-degraded] ${reason}`);
     }
 
-    const summary = buildRunSummary(
-      identity, c, runStatus, finishedAt, elapsedMs, vectorSymbolsIndexed, health.reasons
-    );
+    const summary = {
+      ...buildRunSummary(identity, c, runStatus, finishedAt, elapsedMs, vectorSymbolsIndexed, health.reasons),
+      // MCP-ISSUE-048: `elapsedMs` above covers scan + extraction + write only, and `indexRunner`
+      // copies it through unchanged — which is how a contained phase (`resolvePhaseMs`) came to
+      // report longer than the run. Keep it under a name that says what it measures; `indexRunner`
+      // overwrites `elapsedMs` with the whole-run figure.
+      extractPhaseMs: elapsedMs,
+      filesPruned: pruneCounts.filesPruned,
+      edgesPruned: pruneCounts.edgesPruned
+    };
 
     // Note: recordRun is called by the caller (index.ts) after computing resolution metrics
     emitProgress(runStatus, finishedAt);

@@ -28,6 +28,7 @@ export function buildSymbolMigrationPreview(
 ): {
   hunks: PreviewCandidateHunk[];
   affectedFiles: string[];
+  rejectedSites: { filePath: string; line: number; rule: string; detail: string }[];
 } {
   const preview = buildRefactorPreview(
     store,
@@ -42,7 +43,12 @@ export function buildSymbolMigrationPreview(
     },
     {
       language: undefined,
-      symbolKinds: ["property", "field"],
+      // MCP-ISSUE-043: this was hardcoded to ["property", "field"], and the kind guard runs BEFORE the
+      // owner guard — so migrating a METHOD dropped every site (inferSymbolKind classifies any
+      // `Name(` as "method") and reported 0 matches where the plain preview found 3. The tool
+      // description never said property/field-only, and the owner-type prover was never even reached.
+      // Empty means "any kind"; a caller that wants the old behaviour passes it explicitly.
+      symbolKinds: migration.symbolKinds ?? [],
       allowOwnerTypes: [migration.requiredOwnerType],
       disallowOwnerTypes: migration.forbiddenOwnerTypes,
       disallowTypeList: migration.forbiddenOwnerTypes
@@ -84,7 +90,8 @@ export function buildSymbolMigrationPreview(
 
     return {
       hunks: guardedHunks.sort((a, b) => a.filePath.localeCompare(b.filePath) || a.startOffset - b.startOffset || a.beforeText.localeCompare(b.beforeText)),
-      affectedFiles: [...new Set(guardedHunks.map((x) => x.filePath))].sort((a, b) => a.localeCompare(b))
+      affectedFiles: [...new Set(guardedHunks.map((x) => x.filePath))].sort((a, b) => a.localeCompare(b)),
+      rejectedSites: preview.rejectedSites
     };
   }
 
@@ -207,6 +214,7 @@ export function buildSymbolMigrationPreview(
 
   return {
     hunks,
-    affectedFiles: [...new Set(hunks.map((x) => x.filePath))].sort((a, b) => a.localeCompare(b))
+    affectedFiles: [...new Set(hunks.map((x) => x.filePath))].sort((a, b) => a.localeCompare(b)),
+    rejectedSites: preview.rejectedSites
   };
 }

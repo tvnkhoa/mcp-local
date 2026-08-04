@@ -8,7 +8,7 @@
  */
 
 import { z } from "zod";
-import { responseProfileSchema, refactorScopeSchema, refactorGuardsSchema, refactorInitializerRewriteSchema, refactorCompilerAssistSchema } from "./shared.js";
+import { responseProfileSchema, refactorScopeSchema, refactorGuardsSchema, refactorInitializerRewriteSchema, refactorCompilerAssistSchema, refactorSymbolKindSchema } from "./shared.js";
 
 // Field accesses (ISSUE-018) — read/write callsites of a property
 export const findFieldAccessesSchema = (MAX_RESULT_LIMIT: number) => z
@@ -114,6 +114,9 @@ export const refactorSymbolMigrationSchema = z
             toSymbol: z.string().min(1).max(500),
             requiredOwnerType: z.string().min(1).max(200),
             forbiddenOwnerTypes: z.array(z.string().min(1).max(200)).max(200).default([]),
+            // MCP-ISSUE-043: was hardcoded to ["property","field"], which silently dropped every
+            // method site before the owner prover ran. Empty (the default) means any kind.
+            symbolKinds: z.array(refactorSymbolKindSchema).max(10).default([]),
             initializerRewrite: refactorInitializerRewriteSchema.optional()
           })
           .strict()
@@ -121,7 +124,8 @@ export const refactorSymbolMigrationSchema = z
       .min(1)
       .max(200),
     scopePaths: z.array(z.string().min(1).max(500)).max(200).default([]),
-    dryRun: z.boolean().default(true)
+    dryRun: z.boolean().default(true),
+    includeLowConfidence: z.boolean().default(false)
   })
   .strict();
 
@@ -134,6 +138,7 @@ export const changeValueRepresentationSchema = z
     includeComparisons: z.boolean().default(true),
     scopePaths: z.array(z.string().min(1).max(500)).max(200).default([]),
     dryRun: z.boolean().default(true),
+    includeLowConfidence: z.boolean().default(false),
     profile: responseProfileSchema.default("standard")
   })
   .strict()

@@ -111,6 +111,21 @@ export function initGraphSchema(db: Database.Database): void {
       create index if not exists idx_cross_repo_from on cross_repo_deps(from_repo_id, from_symbol_id);
       create index if not exists idx_cross_repo_to on cross_repo_deps(to_repo_id, to_symbol_id);
 
+      -- Files written by the refactor engine that the graph has not seen yet (MCP-ISSUE-042).
+      --
+      -- Both staleness signals are blind to these: one compares the indexed commit sha against HEAD,
+      -- the other shells out to git status. A rollback restores the exact pre-apply bytes, so HEAD is
+      -- unchanged AND the tree is clean again, while the graph still holds the applied names. This
+      -- table is the third signal, and it is what makes dirty mode sufficient after a rollback --
+      -- git itself reports nothing to re-index.
+      create table if not exists pending_reindex_files (
+        repo_id text not null,
+        file_path text not null,
+        reason text not null,
+        recorded_at text not null,
+        primary key (repo_id, file_path)
+      );
+
       create virtual table if not exists symbols_fts using fts5(
         name,
         signature,
@@ -386,6 +401,28 @@ export function runGraphMigrations(db: Database.Database, vectorEnabled: boolean
     }
     ensureRunColumnReal("resolve_calls_coverage");
     ensureRunColumnText("performance_profile");
+
+    // MCP-ISSUE-048: counters the `index_repository` response reported but `index_runs` never stored,
+    // so `health_check.latestRun` contradicted the run's own report for the same run.
+    //
+    // `index_version` is the consequential one and is not merely a reporting gap: `evaluateIncrementalSkip`
+    // compares `latestRun.indexVersion !== INDEX_VERSION`, and with no column the left side was always
+    // `undefined` — so the version gate always fired and `mode:"incremental"` could never fast-skip.
+    ensureRunColumnText("index_version");
+    ensureRunColumn("parse_timeouts");
+    ensureRunColumn("edges_dropped_by_confidence");
+    ensureRunColumn("edges_dropped_by_call_cap");
+    ensureRunColumn("edges_dropped_by_type_ref_cap");
+    ensureRunColumn("files_pruned");
+    ensureRunColumn("edges_pruned");
+    ensureRunColumn("edges_deduplicated");
+    ensureRunColumn("symbols_in_graph");
+    ensureRunColumn("edges_in_graph");
+    ensureRunColumn("extract_phase_ms");
+    ensureRunColumn("call_edges_attempted");
+    ensureRunColumn("call_edges_unresolved");
+    ensureRunColumnText("health_reasons");
+    ensureRunColumnText("skip_reason");
 
     // Add commit_sha for staleness detection.
     if (!runCols.some((c) => c.name === "commit_sha")) {

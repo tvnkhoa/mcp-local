@@ -12,6 +12,7 @@ import { findProviderSymbolByName } from "../../repositories/crossRepoStore.js";
 import { indexWarn } from "../indexing/indexProgress.js";
 import {
   isKnownExternalToken,
+  isKnownExternalTypeName,
   isKnownExternalNamespace,
   isKnownCrossRepoNamespace,
   stripGenerics,
@@ -83,8 +84,13 @@ export function resolveTypeRefEdges(db: Database.Database, repoId: string, maxUn
   // Per-call state, so one repo abandoning the lane cannot affect the next.
   const vectorProbe = { attempted: 0, hits: 0, abandoned: false };
 
-  function resolveFallback(typeName: string): { symbolId: string; confidence: number; reason: string } | null {
-    const cached = fallbackCache.get(typeName);
+  function resolveFallback(
+    typeName: string,
+    rawTypeName: string
+  ): { symbolId: string; confidence: number; reason: string } | null {
+    // Cache on the RAW token: the cross-repo gate below reads the namespace, so
+    // `System.Threading.Tasks.Task` and a repo-local `Task` must not share an entry.
+    const cached = fallbackCache.get(rawTypeName);
     if (cached !== undefined) {
       return cached;
     }
@@ -92,14 +98,24 @@ export function resolveTypeRefEdges(db: Database.Database, repoId: string, maxUn
     let result: { symbolId: string; confidence: number; reason: string } | null = null;
 
     if (skipExpensiveFallbacks) {
-      fallbackCache.set(typeName, null);
+      fallbackCache.set(rawTypeName, null);
       return null;
     }
 
     // Cross-repo fallback: look for the type in provider repos linked via nuget: DEPENDS_ON (ISSUE-006)
-    const crossRepoMatch = findProviderSymbolByName(db, repoId, typeName);
+    //
+    // MCP-ISSUE-045: `findProviderSymbolByName` matches a BARE name against every symbol in every
+    // provider repo, so `Task` — by far the most common unresolved token, per the note above —
+    // linked `System.Threading.Tasks.Task` to an unrelated `SSNet.QueueManagement` domain class and
+    // presented it as `symbol_id_exact_match`. A framework type is never an ssnet contract, so it
+    // must not cross a repo boundary. This gate runs AFTER same-repo `pickBestNamedCandidate` has
+    // failed, so it cannot affect resolution within a repo.
+    const isFrameworkType =
+      isKnownExternalTypeName(typeName) ||
+      (rawTypeName.includes(".") && isKnownExternalToken(rawTypeName));
+    const crossRepoMatch = isFrameworkType ? null : findProviderSymbolByName(db, repoId, typeName);
     if (crossRepoMatch) {
-      result = { symbolId: crossRepoMatch.symbolId, confidence: 0.65, reason: "resolved type cross-repo" };
+      result = { symbolId: crossRepoMatch.symbolId, confidence: 0.65, reason: "resolved type cross-repo name-match" };
     } else if (isVectorEnabled() && !vectorProbe.abandoned) {
       // Vector fallback for internal types that didn't match exactly.
       //
@@ -121,7 +137,7 @@ export function resolveTypeRefEdges(db: Database.Database, repoId: string, maxUn
       }
     }
 
-    fallbackCache.set(typeName, result);
+    fallbackCache.set(rawTypeName, result);
     return result;
   }
 
@@ -142,7 +158,7 @@ export function resolveTypeRefEdges(db: Database.Database, repoId: string, maxUn
         updateStmt.run(match.symbolId, confidence, reason, repoId, row.fromId, row.toId);
         count += 1;
       } else {
-        const fallback = resolveFallback(typeName);
+        const fallback = resolveFallback(typeName, rawTypeName);
         if (fallback) {
           updateStmt.run(fallback.symbolId, fallback.confidence, fallback.reason, repoId, row.fromId, row.toId);
           count += 1;

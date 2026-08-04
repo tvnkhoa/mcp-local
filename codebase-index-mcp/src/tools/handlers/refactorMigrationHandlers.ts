@@ -29,6 +29,7 @@ export async function handleRefactorSymbolMigration(
     migrations: RefactorSymbolMigrationInput[];
     scopePaths?: string[];
     dryRun: boolean;
+    includeLowConfidence?: boolean;
   },
   ctx: HandlerContext
 ): Promise<CallToolResult> {
@@ -42,6 +43,8 @@ export async function handleRefactorSymbolMigration(
     fromSymbol: string; toSymbol: string; requiredOwnerType: string;
     previewId: string; totalMatches: number; unresolvedOccurrences: number;
     previewSummary: ReturnType<typeof groupPreviewHunks>;
+    rejectedSiteCount?: number;
+    rejectedSites?: { filePath: string; line: number; rule: string; detail: string }[];
     applyId?: string; rollbackId?: string;
   }> = [];
   const suggestedFollowUpFiles = new Set<string>();
@@ -74,15 +77,22 @@ export async function handleRefactorSymbolMigration(
       fromSymbol: migration.fromSymbol, toSymbol: migration.toSymbol, requiredOwnerType: migration.requiredOwnerType,
       previewId, totalMatches: hunkRecords.length,
       unresolvedOccurrences: hunkRecords.filter((x) => x.riskFlags.includes("ambiguous_target")).length,
-      previewSummary: groupPreviewHunks(hunkRecords)
+      previewSummary: groupPreviewHunks(hunkRecords),
+      // MCP-ISSUE-043: say which guard dropped what, so a 0-match result is diagnosable instead of
+      // being indistinguishable from "the symbol does not appear in scope".
+      ...(previewResult.rejectedSites.length > 0 && {
+        rejectedSiteCount: previewResult.rejectedSites.length,
+        rejectedSites: previewResult.rejectedSites.slice(0, 20)
+      })
     };
     for (const hunk of hunkRecords) suggestedFollowUpFiles.add(hunk.filePath);
 
     if (!args.dryRun) {
-      const expectedApplyFiles = collectExpectedApplyFiles(hunkRecords, false, constants.REFACTOR_LOW_CONFIDENCE_THRESHOLD);
+      const includeLowConfidence = args.includeLowConfidence ?? false;
+      const expectedApplyFiles = collectExpectedApplyFiles(hunkRecords, includeLowConfidence, constants.REFACTOR_LOW_CONFIDENCE_THRESHOLD);
       const applied = await applyPreviewExclusively(
         store, repo.repoPath, args.repoId, previewId, hunkRecords, expectedApplyFiles,
-        { maxFilesPerBatch: 50, stopOnFirstConflict: true, includeLowConfidence: false, lowConfidenceThreshold: constants.REFACTOR_LOW_CONFIDENCE_THRESHOLD }
+        { maxFilesPerBatch: 50, stopOnFirstConflict: true, includeLowConfidence, lowConfidenceThreshold: constants.REFACTOR_LOW_CONFIDENCE_THRESHOLD }
       );
       resultRow.applyId = applied.applyId;
       resultRow.rollbackId = applied.rollbackId;
@@ -116,6 +126,7 @@ export async function handleChangeValueRepresentation(
     includeComparisons?: boolean;
     scopePaths?: string[];
     dryRun: boolean;
+    includeLowConfidence?: boolean;
     profile?: string;
   },
   ctx: HandlerContext
@@ -163,6 +174,9 @@ export async function handleChangeValueRepresentation(
     repoId: string; dryRun: boolean; property: string; requiredOwnerType: string;
     previewId: string; totalMatches: number; ambiguousOccurrences: number;
     affectedFiles: string[]; previewSummary: ReturnType<typeof groupPreviewHunks>;
+    ambiguousReasons?: { filePath: string; line: number; rule: string; detail: string }[];
+    rejectedSites?: { filePath: string; line: number; rule: string; detail: string }[];
+    applyBlockedNote?: string;
     applyId?: string; rollbackId?: string; applyStatus?: string;
     executionPolicy: ReturnType<typeof noLlmAudit>;
   } = {
@@ -173,11 +187,24 @@ export async function handleChangeValueRepresentation(
     executionPolicy: noLlmAudit(constants.REFACTOR_STRICT_APPROVAL)
   };
 
+  // MCP-ISSUE-043: `ambiguous_target` is a RISK FLAG, and apply rejects any hunk carrying one
+  // regardless of `includeLowConfidence` — so the documented workaround cannot reach this lane. Say
+  // which rule failed to prove each owner instead of reporting a bare count.
+  if (previewResult.ambiguousReasons.length > 0) {
+    result.ambiguousReasons = previewResult.ambiguousReasons.slice(0, 20);
+    result.applyBlockedNote =
+      "sites flagged ambiguous_target cannot be applied: the apply gate rejects any hunk with a risk flag, and includeLowConfidence does not lift a flag (it only lifts a low-confidence score). Resolve the owner (assign through a bare typed local) or use refactor_replace_preview with an explicit scope.";
+  }
+  if (previewResult.rejectedSites.length > 0) {
+    result.rejectedSites = previewResult.rejectedSites.slice(0, 20);
+  }
+
   if (!args.dryRun) {
-    const expectedApplyFiles = collectExpectedApplyFiles(hunkRecords, false, constants.REFACTOR_LOW_CONFIDENCE_THRESHOLD);
+    const includeLowConfidence = args.includeLowConfidence ?? false;
+    const expectedApplyFiles = collectExpectedApplyFiles(hunkRecords, includeLowConfidence, constants.REFACTOR_LOW_CONFIDENCE_THRESHOLD);
     const applied = await applyPreviewExclusively(
       store, repo.repoPath, args.repoId, previewId, hunkRecords, expectedApplyFiles,
-      { maxFilesPerBatch: 50, stopOnFirstConflict: true, includeLowConfidence: false, lowConfidenceThreshold: constants.REFACTOR_LOW_CONFIDENCE_THRESHOLD }
+      { maxFilesPerBatch: 50, stopOnFirstConflict: true, includeLowConfidence, lowConfidenceThreshold: constants.REFACTOR_LOW_CONFIDENCE_THRESHOLD }
     );
     result.applyId = applied.applyId;
     result.rollbackId = applied.rollbackId;

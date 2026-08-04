@@ -287,12 +287,36 @@ function findProjectionTrapsInFile(content: string, filePath: string, property: 
 export type PersistenceMappingResult = {
   repoId: string;
   property: string;
+  /** The property name as actually declared, which may differ in case from what was asked (MCP-ISSUE-047). */
+  resolvedProperty: string | null;
   requestedOwnerType: string | null;
   mappings: EfPropertyMapping[];
+  /**
+   * Every owner type that maps this property, regardless of `requestedOwnerType`. Present so a caller
+   * that passed the DECLARING type (what `find_field_accesses` reports) instead of the EF-configured
+   * owner can see that the property IS persisted, rather than reading `mappings: []` as "not
+   * persisted" — MCP-ISSUE-047 scenario C.
+   */
+  ownersWithMapping: string[];
   checkConstraints: EfCheckConstraint[];
+  /** CHECK constraints found in the same files that do NOT name this property's column. Only populated when asked for. */
+  unrelatedCheckConstraints: EfCheckConstraint[];
   projectionWarnings: EfProjectionWarning[];
   filesScanned: number;
 };
+
+/**
+ * Does a CHECK expression actually name this column?
+ *
+ * `String.includes` was the original test, which matched `status` inside `inbox_status_logs` and was
+ * half of why every constraint in the file came back (MCP-ISSUE-047). SQL identifiers are
+ * `[A-Za-z0-9_]`, so a word-boundary test on that class is the right predicate; case-insensitive
+ * because Postgres folds unquoted identifiers.
+ */
+function expressionNamesColumn(expression: string, column: string): boolean {
+  const escaped = column.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`(^|[^A-Za-z0-9_])${escaped}([^A-Za-z0-9_]|$)`, "i").test(expression);
+}
 
 /**
  * Resolve the persistence mapping for a property: scan EF config files for HasConversion/column/
@@ -302,10 +326,14 @@ export function getPersistenceMapping(
   store: GraphStore,
   repoPath: string,
   repoId: string,
-  args: { property: string; ownerType?: string }
+  args: { property: string; ownerType?: string; includeUnrelatedConstraints?: boolean }
 ): PersistenceMappingResult {
   const property = args.property;
+  const propertyLower = property.toLowerCase();
   const requestedOwner = args.ownerType ?? null;
+  const requestedOwnerLower = requestedOwner?.toLowerCase() ?? null;
+  const ownersWithMapping = new Set<string>();
+  let resolvedProperty: string | null = null;
 
   const csharpFiles = store
     .listIndexedFiles(repoId)
@@ -315,6 +343,7 @@ export function getPersistenceMapping(
 
   const mappings: EfPropertyMapping[] = [];
   const checkConstraints: EfCheckConstraint[] = [];
+  const unrelatedCheckConstraints: EfCheckConstraint[] = [];
   const projectionWarnings: EfProjectionWarning[] = [];
   let filesScanned = 0;
 
@@ -333,40 +362,66 @@ export function getPersistenceMapping(
     if (filesScanned >= MAX_FILES_SCANNED) break;
     if (!isEfConfigCandidate(filePath)) continue;
     const content = readSafe(filePath);
-    if (content === null || !content.includes(property)) continue;
+    // Case-insensitive pre-filter: `find_field_accesses` resolves names through a case-insensitive
+    // LIKE, so an agent chaining the two tools arrives here with whatever casing that returned.
+    if (content === null || !content.toLowerCase().includes(propertyLower)) continue;
     filesScanned++;
     const { mappings: fileMappings, checks } = extractMappingsFromFile(content, filePath);
-    for (const m of fileMappings) {
-      if (m.property !== property) continue;
-      if (requestedOwner && m.ownerType && m.ownerType.toLowerCase() !== requestedOwner.toLowerCase()) continue;
-      mappings.push(m);
+
+    const propertyMatches = fileMappings.filter((m) => m.property.toLowerCase() === propertyLower);
+    for (const m of propertyMatches) {
+      resolvedProperty ??= m.property;
+      if (m.ownerType) ownersWithMapping.add(m.ownerType);
     }
-    // Associate CHECK constraints to this property by column name (or surface all when column unknown).
-    const columns = new Set(fileMappings.filter((m) => m.property === property).map((m) => m.columnName).filter(Boolean) as string[]);
+    const ownerMatches = requestedOwnerLower
+      ? propertyMatches.filter((m) => !m.ownerType || m.ownerType.toLowerCase() === requestedOwnerLower)
+      : propertyMatches;
+    mappings.push(...ownerMatches);
+
+    // Associate CHECK constraints to this property's column.
+    //
+    // MCP-ISSUE-047: `columns` used to be derived from the property matches WITHOUT the owner filter,
+    // and an empty set meant "surface all" — so a property configured without an explicit
+    // HasColumnName returned every CHECK constraint in the file, which for a single large DbContext
+    // is every constraint in the repository, identical for every property queried.
+    const columns = new Set(ownerMatches.map((m) => m.columnName).filter(Boolean) as string[]);
+    if (columns.size === 0) {
+      // EF defaults the column name to the property name — that is the implicit column, not "all".
+      columns.add(property);
+    }
     for (const check of checks) {
-      if (columns.size === 0 || [...columns].some((col) => check.expression.includes(col))) checkConstraints.push(check);
+      if ([...columns].some((col) => expressionNamesColumn(check.expression, col))) {
+        checkConstraints.push(check);
+      } else if (args.includeUnrelatedConstraints) {
+        unrelatedCheckConstraints.push(check);
+      }
     }
   }
 
   // Pass 2 — projection-trap scan, only meaningful when the property is value-converted.
   const isConverted = mappings.some((m) => m.hasConverter);
+  // Scan for the name as DECLARED, so a caller who passed the wrong casing still gets the traps.
+  const scanName = resolvedProperty ?? property;
   if (isConverted) {
     for (const filePath of csharpFiles) {
       if (filesScanned >= MAX_FILES_SCANNED) break;
       const content = readSafe(filePath);
-      if (content === null || !content.includes(property)) continue;
+      if (content === null || !content.includes(scanName)) continue;
       if (!content.includes(".Select(") && !content.includes(".Where(")) continue;
       filesScanned++;
-      projectionWarnings.push(...findProjectionTrapsInFile(content, filePath, property));
+      projectionWarnings.push(...findProjectionTrapsInFile(content, filePath, scanName));
     }
   }
 
   return {
     repoId,
     property,
+    resolvedProperty,
     requestedOwnerType: requestedOwner,
     mappings: mappings.sort((a, b) => a.filePath.localeCompare(b.filePath) || a.line - b.line),
+    ownersWithMapping: [...ownersWithMapping].sort((a, b) => a.localeCompare(b)),
     checkConstraints,
+    unrelatedCheckConstraints,
     projectionWarnings: projectionWarnings.sort((a, b) => a.filePath.localeCompare(b.filePath) || a.line - b.line),
     filesScanned
   };

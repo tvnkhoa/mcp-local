@@ -17,6 +17,7 @@ import {
   extractFirstStringLiteral,
   isSameNode,
   normalizeEndpointPath,
+  normalizeRouteTemplate,
   stableId,
   toEndpointContractId
 } from "./extractorUtils.js";
@@ -158,17 +159,26 @@ export function extractCSharpRoutesImpl(
         const receiverNode = fnNode.childForFieldName("expression");
         const receiverName = receiverNode?.type === "identifier" ? receiverNode.text.trim() : "";
         if (!receiverName || !builderVarsInClass.has(receiverName)) continue;
-        // Resolve group prefix: if receiver is a MapGroup var, look up its path arg
-        const groupPrefix = resolveMapGroupPrefix(classNode, receiverName);
+        // Resolve group prefix: a local MapGroup var, else the class's declared convention prefix
+        // (the builder can arrive as a parameter, which has no declarator to read) — MCP-ISSUE-044.
+        const groupPrefix = resolveMapGroupPrefix(classNode, receiverName) ?? resolveConventionRoutePrefix(classNode);
         const argList = invNode.childForFieldName("arguments");
         const rawTemplate = argList ? extractFirstStringLiteral(argList.text) : null;
         if (!rawTemplate) continue;
-        const routeTemplate = groupPrefix ? `${groupPrefix.replace(/\/$/, "")}/${rawTemplate.replace(/^\//, "")}` : rawTemplate;
+        const combined = groupPrefix ? `${groupPrefix.replace(/\/$/, "")}/${rawTemplate.replace(/^\//, "")}` : rawTemplate;
+        // Normalize only when the result is a real absolute path; a template whose group prefix could
+        // not be resolved stays relative rather than pretending to be absolute.
+        const routeTemplate = groupPrefix || combined.startsWith("/") ? normalizeRouteTemplate(combined) : combined;
         routes.push({
           repoId: input.repoId,
           filePath: input.filePath,
           controllerSymbolId: classSymbolId,
-          handlerSymbolId: classSymbolId,
+          // The delegate is the handler. Lambdas have no symbol, so fall back to the enclosing
+          // registration method, and only then to the group class (the old behaviour for everything).
+          handlerSymbolId:
+            resolveDelegateHandlerSymbolId(invNode, symbols) ??
+            enclosingMethodSymbolId(invNode, symbols) ??
+            classSymbolId,
           httpMethod,
           routeTemplate,
           line: invNode.startPosition.row + 1
@@ -195,12 +205,19 @@ export function extractCSharpRoutesImpl(
       const argList = invNode.childForFieldName("arguments");
       const rawTemplate = argList ? extractFirstStringLiteral(argList.text) : null;
       if (!rawTemplate) continue;
-      const routeTemplate = groupPrefix ? `${groupPrefix.replace(/\/$/, "")}/${rawTemplate.replace(/^\//, "")}` : rawTemplate;
+      const combined = groupPrefix ? `${groupPrefix.replace(/\/$/, "")}/${rawTemplate.replace(/^\//, "")}` : rawTemplate;
+      const routeTemplate = groupPrefix || combined.startsWith("/") ? normalizeRouteTemplate(combined) : combined;
       routes.push({
         repoId: input.repoId,
         filePath: input.filePath,
         controllerSymbolId: "",
-        handlerSymbolId: `module:${input.filePath}`,
+        // MCP-ISSUE-044: this was the literal string `module:<filePath>`, which is not a symbol id and
+        // so could never join `symbols` — `route_map` reported handlerName:null and `find_entry_points`
+        // printed the raw placeholder. Use the delegate, else this file's real module symbol.
+        handlerSymbolId:
+          resolveDelegateHandlerSymbolId(invNode, symbols) ??
+          symbols.find((s) => s.kind === "module" && s.filePath === input.filePath)?.symbolId ??
+          "",
         httpMethod,
         routeTemplate,
         line: invNode.startPosition.row + 1
@@ -219,6 +236,71 @@ function isInsideClassDeclaration(node: Parser.SyntaxNode): boolean {
     cur = cur.parent;
   }
   return false;
+}
+
+/**
+ * Resolve the handler a minimal-API registration actually dispatches to.
+ *
+ * MCP-ISSUE-044: `handlerSymbolId` used to be the enclosing class, so every route in an endpoint-group
+ * file resolved to the same group symbol and route → handler → call-graph was a dead end. The handler
+ * is the delegate argument — `groupBuilder.MapPost("{id}/reply", Reply)` dispatches to `Reply`. A method
+ * group (bare identifier, or `Handlers.Reply`) names a real symbol; an inline lambda does not, and for
+ * that case the caller falls back to the enclosing method, which is where the lambda body lives.
+ */
+function resolveDelegateHandlerSymbolId(
+  invNode: Parser.SyntaxNode,
+  symbols: SymbolRecord[]
+): string | null {
+  const argList = invNode.childForFieldName("arguments");
+  if (!argList) return null;
+
+  const argNodes = argList.namedChildren.filter((c) => c.type === "argument");
+  // arg 0 is the route template; the delegate is the next positional argument.
+  const delegateArg = argNodes[1]?.namedChildren[0] ?? argNodes[1]?.firstNamedChild;
+  if (!delegateArg) return null;
+
+  const handlerName =
+    delegateArg.type === "identifier"
+      ? delegateArg.text.trim()
+      : delegateArg.type === "member_access_expression"
+        ? (delegateArg.childForFieldName("name")?.text?.trim() ?? "")
+        : "";
+  if (!handlerName) return null;
+
+  return symbols.find((s) => s.kind === "method" && s.name === handlerName)?.symbolId ?? null;
+}
+
+/** The method_declaration a node sits in, resolved to its symbol id. */
+function enclosingMethodSymbolId(node: Parser.SyntaxNode, symbols: SymbolRecord[]): string | null {
+  let cur: Parser.SyntaxNode | null = node.parent;
+  while (cur) {
+    if (cur.type === "method_declaration") {
+      const name = cur.childForFieldName("name")?.text ?? "";
+      if (!name) return null;
+      return findSymbolIdByNode(symbols, "method", name, cur.startPosition.row + 1);
+    }
+    cur = cur.parent;
+  }
+  return null;
+}
+
+/**
+ * Route prefix declared by convention on an endpoint-group class, for the case where the group
+ * builder arrives as a PARAMETER and so has no local `MapGroup` declarator to read.
+ *
+ * MCP-ISSUE-044: `resolveMapGroupPrefix` only handles `var g = app.MapGroup("/v1")`. The endpoint-group
+ * pattern instead declares the prefix on the class (`static string? RoutePrefix => "api/v1/conversations"`)
+ * and receives an already-grouped `RouteGroupBuilder`, so every template was stored group-relative —
+ * `{conversationId}/reply` rather than the real request path. Narrow by design: a static string-valued
+ * property named `RoutePrefix`, read only when no MapGroup declarator was found.
+ */
+function resolveConventionRoutePrefix(classNode: Parser.SyntaxNode): string | null {
+  for (const propNode of classNode.descendantsOfType(["property_declaration"])) {
+    if ((propNode.childForFieldName("name")?.text ?? "") !== "RoutePrefix") continue;
+    const literal = extractFirstStringLiteral(propNode.text);
+    if (literal) return literal;
+  }
+  return null;
 }
 
 /**

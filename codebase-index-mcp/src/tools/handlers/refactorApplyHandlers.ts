@@ -171,11 +171,25 @@ export function handleRefactorReplaceRollback(
   store.recordRefactorRollback({ rollbackId: args.rollbackId, applyId: payload.apply.applyId, status, createdAt: new Date().toISOString(), completedAt: new Date().toISOString(), restoredFiles: restored, conflictCount: conflicts });
   if (status === "restored") store.markRefactorPreviewStatus(payload.apply.previewId, "rolled_back");
 
+  // MCP-ISSUE-042: restoring the files puts the tree back to HEAD, so neither staleness signal can
+  // see that the graph still holds the applied names. Record the files so `health_check` reports
+  // stale and `mode:"dirty"` has something to re-index — git will report nothing.
+  store.recordPendingReindexFiles(payload.apply.repoId, [...touchedFiles], "restored by refactor rollback");
+
   return ctx.asText({
     rollbackId: args.rollbackId,
     restoredFilesCount: restored,
     conflicts,
     diagnostics: { code: conflicts > 0 ? "ROLLBACK_PARTIAL" : "ROLLBACK_OK", machineReadable: true },
+    ...(restored > 0 && {
+      actionHints: [
+        {
+          action: "index_repository",
+          arguments: { repoId: payload.apply.repoId, mode: "dirty" },
+          reason: "the graph still holds the reverted names until these files are re-indexed"
+        }
+      ]
+    }),
     executionPolicy: noLlmAudit(constants.REFACTOR_STRICT_APPROVAL)
   });
 }

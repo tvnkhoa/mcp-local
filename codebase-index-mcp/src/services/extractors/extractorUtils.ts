@@ -19,6 +19,7 @@ export {
   combineRouteTemplate,
   dedupeRoutes,
   normalizeEndpointPath,
+  normalizeRouteTemplate,
   normalizeRouteToken,
   toEndpointContractId
 } from "./extractorRoutes.js";

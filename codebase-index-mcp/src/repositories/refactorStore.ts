@@ -420,3 +420,55 @@ export function recordRefactorRollbackImpl(
     rollback.conflictCount
   );
 }
+
+// ── Pending re-index set (MCP-ISSUE-042) ───────────────────────────────
+//
+// The refactor engine writes files directly and never re-indexes. Apply is survivable — the tree is
+// dirty afterwards, so `health_check` reports "dirty" and `mode:"dirty"` picks the files up. Rollback
+// is not: it restores the exact pre-apply bytes, so HEAD matches, `git status` is clean, and every
+// graph tool keeps answering from the applied names with nothing reporting a problem. Recording the
+// touched files gives staleness a signal git cannot provide.
+
+export function recordPendingReindexFilesImpl(
+  db: Database.Database,
+  repoId: string,
+  filePaths: string[],
+  reason: string
+): void {
+  if (filePaths.length === 0) return;
+  const stmt = db.prepare(
+    `
+    insert into pending_reindex_files (repo_id, file_path, reason, recorded_at)
+    values (?, ?, ?, ?)
+    on conflict(repo_id, file_path) do update set reason = excluded.reason, recorded_at = excluded.recorded_at
+    `
+  );
+  const recordedAt = new Date().toISOString();
+  const tx = db.transaction(() => {
+    for (const filePath of filePaths) {
+      stmt.run(repoId, filePath, reason, recordedAt);
+    }
+  });
+  tx();
+}
+
+export function getPendingReindexFilesImpl(
+  db: Database.Database,
+  repoId: string
+): { filePath: string; reason: string; recordedAt: string }[] {
+  return db
+    .prepare(
+      `
+      select file_path as filePath, reason as reason, recorded_at as recordedAt
+      from pending_reindex_files
+      where repo_id = ?
+      order by file_path
+      `
+    )
+    .all(repoId) as { filePath: string; reason: string; recordedAt: string }[];
+}
+
+/** Cleared at the end of an index run — whatever it held has now been seen by the graph. */
+export function clearPendingReindexFilesImpl(db: Database.Database, repoId: string): void {
+  db.prepare("delete from pending_reindex_files where repo_id = ?").run(repoId);
+}

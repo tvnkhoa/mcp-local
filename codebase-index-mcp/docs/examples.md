@@ -40,7 +40,7 @@ find_impact_files({ repoId: "mcp-local", filePath: "src/repositories/graphStore.
 → { totalFiles: 12, topFiles: [{ filePath: "src/services/indexing/indexPipeline.ts", symbolCount: 8 }, ...], hasMore: true }
 
 find_impact_files({ repoId: "mcp-local", filePath: "src/repositories/graphStore.ts", view: "surface", profile: "compact" })
-→ { files: [{ filePath: "src/services/indexing/indexPipeline.ts", callerSymbols: [...] }] }
+→ { callers: [{ callerName: "runIndexPipeline", callerFile: "src/services/indexing/indexPipeline.ts", callerLine: 409, symbolAffected: "replaceEdgesForFile", edgeType: "CALLS", confidence: 0.95 }], graphHealth: {...}, reliabilitySummary: {...} }
 
 detect_changes({ repoId: "mcp-local", policy: "strict-review", profile: "compact" })
 → { changes: [{ filePath: "src/repositories/graphStore.ts", riskLevel: "high", riskScore: 0.85 }] }

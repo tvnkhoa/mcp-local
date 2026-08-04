@@ -129,6 +129,15 @@ export function createIndexRunner(options: IndexRunnerOptions): RunIndexAndResol
   let dirtyFileSet: Set<string> | undefined;
   if (mode === "dirty") {
     dirtyFileSet = collectDirtyFiles(repoPath);
+    // MCP-ISSUE-042: union in files the refactor engine wrote. After a rollback the tree is clean
+    // again, so git contributes nothing and this set is the only reason `mode:"dirty"` has work to do.
+    const pending = store.getPendingReindexFiles(repoId);
+    for (const entry of pending) {
+      dirtyFileSet.add(entry.filePath);
+    }
+    if (pending.length > 0) {
+      indexLog(`[index-dirty] repoId=${repoId} +${String(pending.length)} file(s) from the pending re-index set`);
+    }
     if (dirtyFileSet.size === 0) {
       const noOp = buildSkippedRunSummary({
         repoId,
@@ -232,12 +241,10 @@ export function createIndexRunner(options: IndexRunnerOptions): RunIndexAndResol
   }
   ftsRebuildMs = Date.now() - ftsStart;
 
-  indexLog(`[index-post] repoId=${repoId} resolving cross-repo links...`);
-  const crossStats = safeCrossRepoResolve(store, repoId);
-  await yieldToEventLoop();
-
   progress.phase("resolving calls");
   indexLog(`[index-post] repoId=${repoId} resolving call edges...`);
+  // Populations that are not resolutions of the attempted set — see resolveCallEdgesBatch.
+  const callResolveStats = { rowsUpdated: 0, dispatchInserted: 0 };
   const callEdgesResolved = await (async () => {
     const callStart = Date.now();
     try {
@@ -260,7 +267,7 @@ export function createIndexRunner(options: IndexRunnerOptions): RunIndexAndResol
       let iteration = 0;
       const maxIterations = 1000;
       while (iteration < maxIterations) {
-        const resolved = store.resolveCallEdgesBatch(repoId, ctx, BATCH_SIZE);
+        const resolved = store.resolveCallEdgesBatch(repoId, ctx, BATCH_SIZE, callResolveStats);
         total += resolved;
         iteration += 1;
         // Heartbeat only — keep the real symbol count in the message rather than
@@ -337,6 +344,34 @@ export function createIndexRunner(options: IndexRunnerOptions): RunIndexAndResol
   }
   await yieldToEventLoop();
 
+  // MCP-ISSUE-048: cross-repo resolution runs LAST, not first.
+  //
+  // It used to run before the call/type/implements resolvers, so it saw a graph full of unresolved
+  // placeholders and its 5000-row window was spent on tokens that resolve locally a moment later.
+  // Running it here means the population is what genuinely could not be resolved inside this repo —
+  // which is the only population where a cross-repo bridge is the right answer — and it makes the
+  // count comparable between full and dirty runs instead of inverting between them.
+  // MCP-ISSUE-045: a full run REBUILDS this repo's outbound cross-repo links rather than adding to
+  // them. `cross_repo_deps` was append-only (`insert … on conflict do nothing`) and never cleared, so
+  // links created by an earlier, wronger rule survived every subsequent run — the 408 bogus `Task`
+  // rows this fix was meant to remove were still there after it shipped, because nothing deletes.
+  // A resolution rule that cannot heal the rows it already wrote is not a fix.
+  //
+  // Scoped to `from_repo_id = this repo`: those are the links this run is responsible for. Rows where
+  // another repo points INTO this one belong to that repo's run. Full runs only — a dirty/incremental
+  // run re-extracts a subset, so clearing would drop links whose source files it never looked at.
+  if (mode === "full") {
+    try {
+      const cleared = store.clearOutboundCrossRepoDeps(repoId);
+      if (cleared > 0) {
+        indexLog(`[index-post] repoId=${repoId} cleared ${String(cleared)} stale outbound cross-repo link(s) before re-resolving`);
+      }
+    } catch { /* non-fatal — a stale link is worse than a failed run, but not worth losing the run over */ }
+  }
+  indexLog(`[index-post] repoId=${repoId} resolving cross-repo links...`);
+  const crossStats = safeCrossRepoResolve(store, repoId);
+  await yieldToEventLoop();
+
   // Post-resolve dedup: remove duplicate resolved edges that arise when both simple and
   // qualified edges resolve to the same symbolId (e.g. callee:Save + callee:IRepo.Save → same target).
   indexLog(`[index-post] repoId=${repoId} deduplicating resolved edges...`);
@@ -352,11 +387,39 @@ export function createIndexRunner(options: IndexRunnerOptions): RunIndexAndResol
   const mentionsElapsed = Date.now() - mentionsStart;
   indexLog(`[index-post] repoId=${repoId} resolved ${mentionsResolved} mentions in ${mentionsElapsed}ms`);
 
+  // The actual remainder, after every resolver has run (MCP-ISSUE-048).
+  const callEdgesRemaining = (() => {
+    try {
+      return store.countUnresolvedCallEdges(repoId);
+    } catch {
+      return Math.max(0, callEdgesAttempted - callEdgesResolved);
+    }
+  })();
+
   const recordStart = Date.now();
   indexLog(`[index-post] repoId=${repoId} recording run metadata...`);
 
+  // MCP-ISSUE-048: the authoritative graph size, read back from the tables the run just wrote.
+  // `symbolsUpserted`/`edgesUpserted` are counted at EXTRACTION time (array lengths handed to the
+  // writer), so they can never equal the row counts once dedup and pruning have run. Both numbers are
+  // legitimate — they answer different questions — but only one of them was reported, under a name
+  // that reads like the other.
+  const graphSnapshot = (() => {
+    try {
+      const snap = store.getRepoSchemaSnapshot(repoId);
+      return { symbolsInGraph: snap.symbolCount, edgesInGraph: snap.edgeCount };
+    } catch {
+      return {};
+    }
+  })();
+
   const fullSummary = {
     ...summary,
+    // Spans the whole run, including the post-phase below. The pipeline's own figure is preserved as
+    // `extractPhaseMs`, so nothing is lost and no contained phase can exceed the total.
+    elapsedMs: Date.now() - runStartedMs,
+    ...graphSnapshot,
+    edgesDeduplicated: dedupCount,
     crossRepoLinked: crossStats.resolved,
     callEdgesResolved,
     importEdgesResolved,
@@ -378,13 +441,29 @@ export function createIndexRunner(options: IndexRunnerOptions): RunIndexAndResol
     // ISSUE-025: self-describing call-resolution counters. `unresolvedCallsTotal` is a
     // deprecated alias of `callEdgesAttempted` (the pre-resolve unresolved-edge count).
     callEdgesAttempted,
+    // Still a partition of `callEdgesAttempted` — that invariant is load-bearing (the smoke test
+    // asserts it). What MCP-ISSUE-048 actually broke was the NUMERATOR: `callEdgesResolved` counted
+    // updated rows plus inserted dispatch edges, so it could exceed `attempted`, drive this
+    // subtraction negative, and leave the clamp reporting 0. `resolveCallEdgesBatch` now returns
+    // pairs, so the partition holds arithmetically instead of by clamping.
     callEdgesUnresolved: Math.max(0, callEdgesAttempted - callEdgesResolved),
+    // The MEASURED remainder, and a different question: how many CALLS rows in the graph still point
+    // at a `callee:` placeholder. Not a partition of `attempted` — most of these are external/BCL
+    // targets that were never candidates for resolution — which is why it gets its own name rather
+    // than redefining the field above.
+    callEdgesUnresolvedInGraph: callEdgesRemaining,
+    callRowsUpdated: callResolveStats.rowsUpdated,
+    dispatchEdgesInserted: callResolveStats.dispatchInserted,
     unresolvedCallsTotal: callEdgesAttempted,
     unresolvedImportsCappedByPolicy: postPolicy.maxUnresolvedRows > 0,
-    resolveCallsCoverage: callEdgesAttempted > 0 ? callEdgesResolved / callEdgesAttempted : 1,
+    // Clamped as a backstop; with a pair-level numerator it should no longer be reachable.
+    resolveCallsCoverage:
+      callEdgesAttempted > 0 ? Math.min(1, callEdgesResolved / callEdgesAttempted) : 1,
     performanceProfile
   };
   store.recordRun(fullSummary);
+  // Whatever the refactor engine wrote has now been through the graph (MCP-ISSUE-042).
+  store.clearPendingReindexFiles(repoId);
   const recordElapsed = Date.now() - recordStart;
   indexLog(`[index-post] repoId=${repoId} recorded run metadata in ${recordElapsed}ms`);
 

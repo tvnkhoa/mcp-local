@@ -89,14 +89,23 @@ export function handleFindEntryPoints(
   const entries = ctx.store.findEntryPoints(args.repoId, args.filePathPrefix ?? null, args.kind ?? null, args.limit);
   const runtimeEntryPoints = entries.filter((e) => e.entryReason === "bootstrap_file");
   const graphEntryPoints = entries.filter((e) => e.entryReason === "uncalled_symbol");
+  // MCP-ISSUE-044: the route fast-path stamps a THIRD `entryReason` ("route_handler"), which matched
+  // neither array above — so `kind:"route_handler"` returned a non-zero `total` with two empty arrays
+  // and nothing downstream could act on it. Route rows get their own array, and `total` is now derived
+  // from what is actually emitted, so a fourth reason cannot reintroduce the same silent hole.
+  const routeEntryPoints = entries.filter((e) => e.entryReason === "route_handler");
+  const emitted = [...runtimeEntryPoints, ...graphEntryPoints, ...routeEntryPoints];
+  const unclassified = entries.filter((e) => !emitted.includes(e));
   // `entryPoints` is just runtime+graph concatenated; drop the duplicate in token-lean profiles
   // (nano/compact) and keep it only in standard/verbose for backward compatibility.
   const includeFlat = profile === "standard" || profile === "verbose";
   return ctx.asText({
     repoId: args.repoId,
-    total: entries.length,
+    total: emitted.length + unclassified.length,
     runtimeEntryPoints,
     graphEntryPoints,
+    ...(routeEntryPoints.length > 0 && { routeEntryPoints }),
+    ...(unclassified.length > 0 && { unclassifiedEntryPoints: unclassified }),
     ...(includeFlat && { entryPoints: entries })
   }, profile);
 }

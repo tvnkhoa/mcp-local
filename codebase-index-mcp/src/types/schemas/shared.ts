@@ -13,7 +13,7 @@ import { z } from "zod";
 export const responseProfileSchema = z.enum(["nano", "compact", "standard", "verbose"]);
 
 // Refactor schemas
-const refactorSymbolKindSchema = z.enum(["class", "property", "field", "method"]);
+export const refactorSymbolKindSchema = z.enum(["class", "property", "field", "method"]);
 
 export const refactorScopeSchema = z
   .object({

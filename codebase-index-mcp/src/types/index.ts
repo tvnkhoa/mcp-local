@@ -66,8 +66,37 @@ export type IndexRunSummary = {
   ftsRebuildMs?: number;
   /** ISSUE-025: số call edge chưa resolve TRƯỚC resolve phase (population được attempt). */
   callEdgesAttempted?: number;
-  /** ISSUE-025: attempted − resolved; cùng callEdgesResolved partition đúng population. */
+  /**
+   * CALLS edges still on a `callee:` placeholder AFTER every resolver has run — measured, not derived.
+   *
+   * MCP-ISSUE-048: this used to be `max(0, attempted − resolved)`, but those two count different
+   * things (distinct pairs vs updated rows plus inserted dispatch edges), so the subtraction went
+   * negative and the clamp reported 0 next to `unresolvedCallsTotal: 14420`.
+   */
   callEdgesUnresolved?: number;
+  /**
+   * CALLS rows in the graph still on a `callee:` placeholder — measured, and NOT a partition of
+   * `callEdgesAttempted`: most are external/BCL targets that were never resolution candidates.
+   */
+  callEdgesUnresolvedInGraph?: number;
+  /** Rows the resolve UPDATE touched (a pair can be several rows) and dispatch edges newly inserted. */
+  callRowsUpdated?: number;
+  dispatchEdgesInserted?: number;
+  /**
+   * Row counts read back from `symbols`/`edges` after the run — the authoritative graph size.
+   *
+   * `symbolsUpserted`/`edgesUpserted` are counted at extraction time, so they cannot equal these once
+   * dedup and pruning have run. Both are legitimate; reporting only the first under a name that reads
+   * like the second is what made MCP-ISSUE-048 look like a counting bug.
+   */
+  symbolsInGraph?: number;
+  edgesInGraph?: number;
+  /** Rows the post-resolve dedup removed, and what pruning removed — previously logged and discarded. */
+  edgesDeduplicated?: number;
+  filesPruned?: number;
+  edgesPruned?: number;
+  /** Scan + extraction + write only. `elapsedMs` spans the whole run, post-phase included. */
+  extractPhaseMs?: number;
   /** @deprecated alias của callEdgesAttempted — tên cũ gây hiểu nhầm là "còn lại sau resolve". */
   unresolvedCallsTotal?: number;
   /** true khi import/type/property resolve bị cap bởi maxUnresolvedRows policy.

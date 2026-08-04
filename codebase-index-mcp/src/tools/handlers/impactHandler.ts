@@ -165,17 +165,29 @@ export function handleFindFieldAccesses(
   const coverage = buildCoverageBlock({ resultCount: result.accesses.length, kind: "field_accesses", query: result.property.name });
   const staleWarning = staleWarningFor(args.repoId, store);
 
+  // MCP-ISSUE-047: `getSymbolCandidates` matches by case-insensitive substring, so `name:"owner"`
+  // resolves to `Owner`, `OwnerId` or `AssignedOwnerName` and the response reports only the winner.
+  // Echo what was asked when it differs, so the caller can see a substitution happened.
+  const nameResolution =
+    args.name !== undefined && args.name !== result.property.name
+      ? {
+          queriedName: args.name,
+          resolvedName: result.property.name,
+          note: "resolved by case-insensitive substring match — pass symbolId to pin an exact symbol"
+        }
+      : null;
+
   if (profile === "nano") {
     const top = result.accesses.slice(0, 10).map((a) => ({ mode: a.mode, enclosingName: a.enclosingName, filePath: a.filePath, line: a.line }));
-    return ctx.asText({ property: { name: result.property.name, filePath: result.property.filePath }, readCount: reads.length, writeCount: writes.length, top, hasMore: result.accesses.length > top.length, coverage: coverage.confidence, ...(staleWarning && { staleWarning }) }, profile);
+    return ctx.asText({ property: { name: result.property.name, filePath: result.property.filePath }, readCount: reads.length, writeCount: writes.length, top, hasMore: result.accesses.length > top.length, coverage: coverage.confidence, ...(nameResolution && { nameResolution }), ...(staleWarning && { staleWarning }) }, profile);
   }
 
   const compactAccess = (a: typeof result.accesses[number]) => ({ mode: a.mode, enclosingName: a.enclosingName, enclosingKind: a.enclosingKind, filePath: a.filePath, line: a.line, confidence: a.confidence, ...(a.assignedExpression ? { assignedExpression: a.assignedExpression } : {}) });
   if (profile === "compact") {
-    return ctx.asText({ property: { symbolId: result.property.symbolId, name: result.property.name, kind: result.property.kind, filePath: result.property.filePath, line: result.property.line, declaringType: result.property.declaringType }, mode: args.mode, readCount: reads.length, writeCount: writes.length, reads: reads.map(compactAccess), writes: writes.map(compactAccess), coverage, indexMeta: buildIndexMeta(store, args.repoId), ...(staleWarning && { staleWarning }) }, profile);
+    return ctx.asText({ property: { symbolId: result.property.symbolId, name: result.property.name, kind: result.property.kind, filePath: result.property.filePath, line: result.property.line, declaringType: result.property.declaringType }, mode: args.mode, readCount: reads.length, writeCount: writes.length, reads: reads.map(compactAccess), writes: writes.map(compactAccess), coverage, indexMeta: buildIndexMeta(store, args.repoId), ...(nameResolution && { nameResolution }), ...(staleWarning && { staleWarning }) }, profile);
   }
 
-  return ctx.asText({ property: result.property, mode: args.mode, readCount: reads.length, writeCount: writes.length, accesses: result.accesses, coverage, indexMeta: buildIndexMeta(store, args.repoId), ...(staleWarning && { staleWarning }) }, profile);
+  return ctx.asText({ property: result.property, mode: args.mode, readCount: reads.length, writeCount: writes.length, accesses: result.accesses, coverage, indexMeta: buildIndexMeta(store, args.repoId), ...(nameResolution && { nameResolution }), ...(staleWarning && { staleWarning }) }, profile);
 }
 
 // ── find_impact_files ─────────────────────────────────────────────────────────

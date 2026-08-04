@@ -182,6 +182,22 @@ function findEnclosingClassName(content: string, offset: number): string | null 
   return null;
 }
 
+/**
+ * The type that owns the site at `offset` — best-effort, and knowingly wrong in one case.
+ *
+ * KNOWN LIMITATION (MCP-ISSUE-043, deferred): outside an object initializer this falls through to
+ * `findEnclosingClassName`, which returns *the class the code sits in*, not *the type that owns the
+ * member being referenced*. For a declaration site those coincide; for a usage site they do not, so
+ * three call sites of one method reported three different owner types (each caller's own class) and
+ * an `allowOwnerTypes` guard could match at most one of them. It also returns null for any file with
+ * no `class` keyword — every top-level/free function — which is why `includeLowConfidence: true` is
+ * documented as the workaround for renaming top-level identifiers.
+ *
+ * Fixing it means resolving the receiver's declared type the way
+ * `services/analysis/valueRepresentation.ts:verifyOwner` does, which needs the AST rather than a
+ * prefix scan. Until then, callers should report WHICH owner was inferred (see `rejectedSites` in
+ * `refactorPreviewBuild`) so a wrong inference is visible instead of silent.
+ */
 export function findOwnerType(content: string, offset: number): string | null {
   const initializer = findEnclosingObjectInitializer(content, offset);
   if (initializer) {

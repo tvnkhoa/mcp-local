@@ -64,6 +64,11 @@ export type RefactorSymbolMigrationInput = {
   toSymbol: string;
   requiredOwnerType: string;
   forbiddenOwnerTypes: string[];
+  /**
+   * Restrict sites to these inferred kinds. Omit (or empty) for any kind — the previous hardcoded
+   * ["property", "field"] silently made this tool unusable for method migrations (MCP-ISSUE-043).
+   */
+  symbolKinds?: ("class" | "property" | "field" | "method")[];
   initializerRewrite?: {
     objectProperty: string;
     objectType: string;

@@ -85,6 +85,10 @@
             "description": "Also rewrite ==/!= and assertion-argument sites (default true); false = assignments/initializers only.",
             "type": "boolean"
           },
+          "includeLowConfidence": {
+            "description": "Allow apply for low-confidence hunks. Does NOT lift the ambiguous_target risk flag — see ambiguousReasons in the response.",
+            "type": "boolean"
+          },
           "profile": {
             "enum": [
               "nano",
@@ -1736,11 +1740,15 @@
         "openWorldHint": false,
         "readOnlyHint": true
       },
-      "description": "Run owner-type constrained symbol migrations (dry-run by default) using the same preview/apply engine.",
+      "description": "Run owner-type constrained symbol migrations (dry-run by default) using the same preview/apply engine. Sites are constrained by requiredOwnerType and, optionally, by symbolKinds (default: any kind). When a migration reports 0 matches, read rejectedSites — it names the guard that dropped each site.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
           "dryRun": {
+            "type": "boolean"
+          },
+          "includeLowConfidence": {
+            "description": "Allow apply for low-confidence hunks. Does NOT lift a risk flag such as ambiguous_target.",
             "type": "boolean"
           },
           "migrations": {
@@ -1778,6 +1786,14 @@
                 },
                 "requiredOwnerType": {
                   "type": "string"
+                },
+                "symbolKinds": {
+                  "description": "Restrict sites to these inferred kinds (e.g. [\"property\",\"field\"]). Omit for any kind.",
+                  "items": {
+                    "type": "string"
+                  },
+                  "maxItems": 20,
+                  "type": "array"
                 },
                 "toSymbol": {
                   "type": "string"

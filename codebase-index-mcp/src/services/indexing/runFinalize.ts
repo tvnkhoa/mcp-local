@@ -44,21 +44,27 @@ export function pruneAndResolve(
   files: string[],
   selectedFiles: string[],
   maxFiles: number
-): void {
+): { filesPruned: number; edgesPruned: number } {
   if (input.abortSignal?.aborted) {
-    return;
+    return { filesPruned: 0, edgesPruned: 0 };
   }
 
   const scanWasComplete = files.length <= maxFiles && !input.onlyRelativePaths;
+  // MCP-ISSUE-048: these two were computed, logged, and thrown away — which is why the gap between
+  // `edgesUpserted` (extraction-time) and the row count in `edges` could not be accounted for.
+  let filesPruned = 0;
+  let edgesPruned = 0;
 
   progress.phase("pruning");
   if (scanWasComplete) {
     const currentPaths = selectedFiles.map((f) => path.relative(input.repoPath, f));
     const pruned = store.pruneStaleFiles(input.repoId, currentPaths);
+    filesPruned = pruned;
     if (pruned > 0) {
       indexLog(`[index-prune] removed ${String(pruned)} stale file(s) from index`);
     }
     const prunedEdges = store.pruneOrphanedEdges(input.repoId);
+    edgesPruned = prunedEdges;
     if (prunedEdges > 0) {
       indexLog(`[index-prune] removed ${String(prunedEdges)} orphaned edge(s) from index`);
     }
@@ -86,6 +92,8 @@ export function pruneAndResolve(
       indexLog(`[index-resolve] resolved ${String(resolvedBus)} PUBLISHES bus edge(s)`);
     }
   }
+
+  return { filesPruned, edgesPruned };
 }
 
 /**

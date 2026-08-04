@@ -77,13 +77,19 @@ import {
   recordRefactorApplyImpl,
   getApplyByRollbackIdImpl,
   getRecentAppliedFileHashesImpl,
-  recordRefactorRollbackImpl
+  recordRefactorRollbackImpl,
+  recordPendingReindexFilesImpl,
+  getPendingReindexFilesImpl,
+  clearPendingReindexFilesImpl
 } from "./refactorStore.js";
 import {
   upsertCrossRepoDepImpl,
   getCrossRepoDepsImpl,
   getCrossRepoImpactImpl,
   findPackageConsumersImpl,
+  findPackageProvidersImpl,
+  packageContractExistsImpl,
+  countPublisherSelfReferencesImpl,
   findSimilarPackageContractIdsImpl,
   getPackageBridgeStatsImpl
 } from "./crossRepoStore.js";
@@ -360,6 +366,17 @@ export class GraphStore {
     upsertCrossRepoDepImpl(this.db, fromRepoId, fromSymbolId, toRepoId, toSymbolId, type);
   }
 
+  /**
+   * Drop this repo's OUTBOUND cross-repo links so a full run can rebuild them (MCP-ISSUE-045).
+   *
+   * The table is written with `on conflict do nothing` and had no delete path anywhere, which made it
+   * append-only for the lifetime of the database: a link created by a rule that was later corrected
+   * survived indefinitely. Returns the number of rows removed.
+   */
+  clearOutboundCrossRepoDeps(fromRepoId: string): number {
+    return this.db.prepare("delete from cross_repo_deps where from_repo_id = ?").run(fromRepoId).changes;
+  }
+
   getCrossRepoDeps(fromRepoId: string, fromSymbolId: string, limit: number): {
     toRepoId: string;
     toSymbolId: string;
@@ -383,6 +400,7 @@ export class GraphStore {
     relatedKind: string | null;
     relatedFilePath: string | null;
     relatedSignature: string | null;
+    edgeReason: string | null;
   }[] {
     return getCrossRepoImpactImpl(this.db, repoId, symbolId, direction, limit);
   }
@@ -407,6 +425,21 @@ export class GraphStore {
 
   findSimilarPackageContractIds(packageContractId: string, repoId: string | null, limit: number): string[] {
     return findSimilarPackageContractIdsImpl(this.db, packageContractId, repoId, limit);
+  }
+
+  findPackageProviders(
+    packageContractId: string,
+    limit: number
+  ): { providerRepoId: string; providerName: string; providerFilePath: string }[] {
+    return findPackageProvidersImpl(this.db, packageContractId, limit);
+  }
+
+  packageContractExists(packageContractId: string): boolean {
+    return packageContractExistsImpl(this.db, packageContractId);
+  }
+
+  countPublisherSelfReferences(packageContractId: string): number {
+    return countPublisherSelfReferencesImpl(this.db, packageContractId);
   }
 
   getPackageBridgeStats(repoId: string): {
@@ -538,8 +571,13 @@ export class GraphStore {
     return buildCallResolutionContextImpl(this.db, repoId);
   }
 
-  resolveCallEdgesBatch(repoId: string, ctx: ReturnType<typeof buildCallResolutionContextImpl>, batchSize: number): number {
-    return resolveCallEdgesBatchImpl(this.db, repoId, ctx, batchSize);
+  resolveCallEdgesBatch(
+    repoId: string,
+    ctx: ReturnType<typeof buildCallResolutionContextImpl>,
+    batchSize: number,
+    stats?: { rowsUpdated: number; dispatchInserted: number }
+  ): number {
+    return resolveCallEdgesBatchImpl(this.db, repoId, ctx, batchSize, stats);
   }
 
   resolveTypeRefEdges(repoId: string, maxUnresolvedRows = 0, skipExpensiveFallbacks = false): number {
@@ -807,6 +845,20 @@ export class GraphStore {
     recordRefactorRollbackImpl(this.db, rollback);
   }
 
+  // ── Pending re-index set (MCP-ISSUE-042) ────────────────────────────────────
+
+  recordPendingReindexFiles(repoId: string, filePaths: string[], reason: string): void {
+    recordPendingReindexFilesImpl(this.db, repoId, filePaths, reason);
+  }
+
+  getPendingReindexFiles(repoId: string): { filePath: string; reason: string; recordedAt: string }[] {
+    return getPendingReindexFilesImpl(this.db, repoId);
+  }
+
+  clearPendingReindexFiles(repoId: string): void {
+    clearPendingReindexFilesImpl(this.db, repoId);
+  }
+
 
   // ── Vector store methods ────────────────────────────────────────────────────
 
@@ -836,5 +888,23 @@ export class GraphStore {
 
   getUnresolvedStats(repoId: string): UnresolvedStats {
     return getUnresolvedStatsImpl(this.db, repoId);
+  }
+
+  /**
+   * CALLS edges still pointing at a `callee:` placeholder — the measured remainder after resolution.
+   *
+   * MCP-ISSUE-048: `callEdgesUnresolved` used to be derived by subtracting the resolved count from the
+   * attempted count, but those are different populations (distinct pairs vs updated rows plus inserted
+   * dispatch edges), so the subtraction clamped to 0 while the run reported 14420 unresolved calls in
+   * the same object.
+   */
+  countUnresolvedCallEdges(repoId: string): number {
+    const row = this.db
+      .prepare(
+        `select count(*) as cnt from edges
+         where repo_id = ? and type = 'CALLS' and to_id like 'callee:%'`
+      )
+      .get(repoId) as { cnt: number };
+    return row.cnt;
   }
 }

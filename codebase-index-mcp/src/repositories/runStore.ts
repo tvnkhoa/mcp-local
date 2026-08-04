@@ -13,7 +13,7 @@ import type Database from "better-sqlite3";
 
 import type { IndexRunSummary } from "../types/index.js";
 
-export function recordRun(db: Database.Database, summary: IndexRunSummary & { crossRepoLinked?: number; callEdgesResolved?: number; importEdgesResolved?: number; mentionsResolved?: number }): void {
+export function recordRun(db: Database.Database, summary: IndexRunSummary & { crossRepoLinked?: number; callEdgesResolved?: number; importEdgesResolved?: number; mentionsResolved?: number; skipReason?: string }): void {
   db
     .prepare(
       `
@@ -30,7 +30,13 @@ export function recordRun(db: Database.Database, summary: IndexRunSummary & { cr
         resolve_phase_ms, build_context_ms, call_resolve_ms, import_resolve_ms,
         type_resolve_ms, property_resolve_ms, implements_resolve_ms, fts_rebuild_ms,
         unresolved_calls_total, unresolved_rows_capped_by_policy, unresolved_imports_capped_by_policy, resolve_calls_coverage,
-        performance_profile
+        performance_profile,
+        index_version, parse_timeouts,
+        edges_dropped_by_confidence, edges_dropped_by_call_cap, edges_dropped_by_type_ref_cap,
+        files_pruned, edges_pruned, edges_deduplicated,
+        symbols_in_graph, edges_in_graph, extract_phase_ms,
+        call_edges_attempted, call_edges_unresolved,
+        vector_symbols_indexed, health_reasons, skip_reason
       ) values (
         ?, ?, ?, ?, ?, ?,
         ?, ?, ?, ?,
@@ -44,7 +50,13 @@ export function recordRun(db: Database.Database, summary: IndexRunSummary & { cr
         ?, ?, ?, ?,
         ?, ?, ?, ?,
         ?, ?, ?, ?,
-        ?
+        ?,
+        ?, ?,
+        ?, ?, ?,
+        ?, ?, ?,
+        ?, ?, ?,
+        ?, ?,
+        ?, ?, ?
       )
       `
     )
@@ -88,7 +100,26 @@ export function recordRun(db: Database.Database, summary: IndexRunSummary & { cr
       0, // unresolved_rows_capped_by_policy — kept for backward compat, always 0 (use unresolvedImportsCappedByPolicy)
       summary.unresolvedImportsCappedByPolicy ? 1 : 0,
       summary.resolveCallsCoverage ?? 0,
-      summary.performanceProfile ?? null
+      summary.performanceProfile ?? null,
+      // MCP-ISSUE-048: previously reported on the wire and then dropped on the floor.
+      // `index_version` in particular gates the incremental fast-skip, which could never fire while
+      // the stored value was always undefined.
+      summary.indexVersion ?? null,
+      summary.parseTimeouts ?? 0,
+      summary.edgesDroppedByConfidence ?? 0,
+      summary.edgesDroppedByCallCap ?? 0,
+      summary.edgesDroppedByTypeRefCap ?? 0,
+      summary.filesPruned ?? 0,
+      summary.edgesPruned ?? 0,
+      summary.edgesDeduplicated ?? 0,
+      summary.symbolsInGraph ?? 0,
+      summary.edgesInGraph ?? 0,
+      summary.extractPhaseMs ?? 0,
+      summary.callEdgesAttempted ?? 0,
+      summary.callEdgesUnresolved ?? 0,
+      summary.vectorSymbolsIndexed ?? 0,
+      summary.healthReasons && summary.healthReasons.length > 0 ? JSON.stringify(summary.healthReasons) : null,
+      summary.skipReason ?? null
     );
 }
 
@@ -132,11 +163,28 @@ export function getLatestRun(db: Database.Database, repoId: string): IndexRunSum
         property_resolve_ms as propertyResolveMs,
         implements_resolve_ms as implementsResolveMs,
         fts_rebuild_ms as ftsRebuildMs,
-        unresolved_calls_total as callEdgesAttempted,
         unresolved_calls_total as unresolvedCallsTotal,
         unresolved_imports_capped_by_policy as unresolvedImportsCappedByPolicy,
         resolve_calls_coverage as resolveCallsCoverage,
-        performance_profile as performanceProfile
+        performance_profile as performanceProfile,
+        -- MCP-ISSUE-048: read back what is now stored, instead of aliasing one column to two names
+        -- and re-deriving the unresolved count with the same broken subtraction the writer used.
+        index_version as indexVersion,
+        parse_timeouts as parseTimeouts,
+        edges_dropped_by_confidence as edgesDroppedByConfidence,
+        edges_dropped_by_call_cap as edgesDroppedByCallCap,
+        edges_dropped_by_type_ref_cap as edgesDroppedByTypeRefCap,
+        files_pruned as filesPruned,
+        edges_pruned as edgesPruned,
+        edges_deduplicated as edgesDeduplicated,
+        symbols_in_graph as symbolsInGraph,
+        edges_in_graph as edgesInGraph,
+        extract_phase_ms as extractPhaseMs,
+        call_edges_attempted as callEdgesAttempted,
+        call_edges_unresolved as callEdgesUnresolved,
+        vector_symbols_indexed as vectorSymbolsIndexed,
+        health_reasons as healthReasonsJson,
+        skip_reason as skipReason
       from index_runs
       where repo_id = ?
       order by finished_at desc, started_at desc, rowid desc
@@ -145,10 +193,23 @@ export function getLatestRun(db: Database.Database, repoId: string): IndexRunSum
     )
     .get(repoId) as IndexRunSummary | undefined;
 
-  if (row && typeof row.callEdgesAttempted === "number") {
-    // ISSUE-025: derive unresolved từ partition attempted − resolved (không có cột riêng).
-    const resolved = (row as IndexRunSummary & { callEdgesResolved?: number }).callEdgesResolved ?? 0;
-    row.callEdgesUnresolved = Math.max(0, row.callEdgesAttempted - resolved);
+  if (!row) return null;
+
+  // Rows written before the MCP-ISSUE-048 columns existed default to 0. Fall back to the legacy
+  // alias so an old run still reports an attempted count rather than a bare zero.
+  if (!row.callEdgesAttempted && typeof row.unresolvedCallsTotal === "number") {
+    row.callEdgesAttempted = row.unresolvedCallsTotal;
   }
-  return row ?? null;
+
+  const withJson = row as IndexRunSummary & { healthReasonsJson?: string | null };
+  if (withJson.healthReasonsJson) {
+    try {
+      row.healthReasons = JSON.parse(withJson.healthReasonsJson) as string[];
+    } catch {
+      row.healthReasons = [];
+    }
+  }
+  delete withJson.healthReasonsJson;
+
+  return row;
 }

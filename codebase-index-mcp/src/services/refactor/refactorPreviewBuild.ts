@@ -92,6 +92,20 @@ export function buildRefactorPreview(
 ): {
   hunks: PreviewCandidateHunk[];
   affectedFiles: string[];
+  /**
+   * Sites a guard dropped, and which guard dropped them (MCP-ISSUE-043).
+   *
+   * Both guards below used to be a silent `continue`, so a guarded tool reported
+   * `totalMatches: 0, unresolvedOccurrences: 0` — indistinguishable from "the identifier does not
+   * appear in scope" — while the ungated preview found the same sites. The refusal has to be legible
+   * before it can be judged wrong.
+   */
+  rejectedSites: {
+    filePath: string;
+    line: number;
+    rule: "kind_not_allowed" | "owner_not_allowed" | "no_enclosing_type";
+    detail: string;
+  }[];
 } {
   const indexedFiles = store.listIndexedFiles(repoId).map((x) => normalizeRelativePath(x.path));
   const includePaths = (scope.includePaths ?? []).map((x) => normalizeRelativePath(x));
@@ -117,6 +131,12 @@ export function buildRefactorPreview(
 
   const hunks: PreviewCandidateHunk[] = [];
   const affected = new Set<string>();
+  const rejectedSites: {
+    filePath: string;
+    line: number;
+    rule: "kind_not_allowed" | "owner_not_allowed" | "no_enclosing_type";
+    detail: string;
+  }[] = [];
 
   // Compile the regex once when in regex mode (only i/m/s flags honored; `g` is forced).
   const compiledRegex =
@@ -167,10 +187,35 @@ export function buildRefactorPreview(
       const symbolKind = inferSymbolKind(lineText);
 
       if (guards.symbolKinds.length > 0) {
-        if (!symbolKind || !guards.symbolKinds.includes(symbolKind)) continue;
+        if (!symbolKind || !guards.symbolKinds.includes(symbolKind)) {
+          rejectedSites.push({
+            filePath,
+            line,
+            rule: "kind_not_allowed",
+            detail: `inferred kind '${symbolKind ?? "unknown"}' is not in [${guards.symbolKinds.join(", ")}]`
+          });
+          continue;
+        }
       }
       if (guards.allowOwnerTypes.length > 0) {
-        if (!ownerType || !guards.allowOwnerTypes.some((x) => x.toLowerCase() === ownerType.toLowerCase())) continue;
+        if (!ownerType) {
+          rejectedSites.push({
+            filePath,
+            line,
+            rule: "no_enclosing_type",
+            detail: `no enclosing type could be inferred; required one of [${guards.allowOwnerTypes.join(", ")}]`
+          });
+          continue;
+        }
+        if (!guards.allowOwnerTypes.some((x) => x.toLowerCase() === ownerType.toLowerCase())) {
+          rejectedSites.push({
+            filePath,
+            line,
+            rule: "owner_not_allowed",
+            detail: `inferred owner '${ownerType}' != required [${guards.allowOwnerTypes.join(", ")}]`
+          });
+          continue;
+        }
       }
 
       const riskFlags: RefactorRiskFlag[] = [];
@@ -215,6 +260,7 @@ export function buildRefactorPreview(
   hunks.sort((a, b) => a.filePath.localeCompare(b.filePath) || a.startOffset - b.startOffset);
   return {
     hunks,
-    affectedFiles: [...affected].sort((a, b) => a.localeCompare(b))
+    affectedFiles: [...affected].sort((a, b) => a.localeCompare(b)),
+    rejectedSites
   };
 }

@@ -31,6 +31,24 @@ export function normalizeEndpointPath(raw: string): string {
   return withLeadingSlash.toLowerCase();
 }
 
+/**
+ * Structural normalization for a STORED route template: collapse separators and guarantee a single
+ * leading slash, preserving case.
+ *
+ * Distinct from `normalizeEndpointPath`, which lowercases — correct for a contract id, wrong for a
+ * template a human reads or matches against a request path, since it would turn `{conversationId}`
+ * into `{conversationid}`. MCP-ISSUE-044 reported one payload mixing conventions: templates from one
+ * endpoint file had a leading slash and another's did not.
+ *
+ * Only apply this to a template that IS absolute. A group-relative template whose prefix could not be
+ * resolved must stay relative — adding a leading slash would make it masquerade as a real path.
+ */
+export function normalizeRouteTemplate(template: string): string {
+  const collapsed = template.replace(/\\/g, "/").replace(/\/{2,}/g, "/").trim();
+  const withLeadingSlash = collapsed.startsWith("/") ? collapsed : `/${collapsed}`;
+  return withLeadingSlash.length > 1 ? withLeadingSlash.replace(/\/$/, "") : withLeadingSlash;
+}
+
 export function toEndpointContractId(httpMethod: RouteRecord["httpMethod"], routeTemplate: string): string {
   return `endpoint:${httpMethod.toUpperCase()}:${normalizeEndpointPath(routeTemplate)}`;
 }

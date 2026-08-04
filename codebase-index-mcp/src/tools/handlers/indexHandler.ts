@@ -30,11 +30,20 @@ export function handleHealthCheck(
   const vectorStats = repoId ? store.getVectorStats(repoId) : null;
   const unresolvedStats = repoId ? store.getUnresolvedStats(repoId) : null;
 
+  // MCP-ISSUE-042: the third staleness signal. The other two are git-based and a refactor rollback
+  // defeats both — it restores the pre-apply bytes, so HEAD matches and the tree is clean, while the
+  // graph still holds the applied names. Without this, `health_check` reported "ready" for a graph
+  // containing a symbol that exists in no file on disk.
+  const pendingReindex = repoId ? store.getPendingReindexFiles(repoId) : [];
+
   const reasons: string[] = [];
   if (repoId && !repo) reasons.push("repository not registered; run index_repository first");
   if (repoId && repo && !latestRun) reasons.push("repository has no indexed run yet");
   if (staleness?.isStale === true) reasons.push("indexed commit differs from HEAD");
   if (workingTree?.isDirty === true) reasons.push("working tree has uncommitted changes");
+  if (pendingReindex.length > 0) {
+    reasons.push(`${String(pendingReindex.length)} file(s) written by the refactor engine are not re-indexed`);
+  }
 
   let codebaseStatus: "unknown" | "needs_index" | "stale" | "dirty" | "ready" = "unknown";
   if (!repoId || !repo) {
@@ -42,6 +51,10 @@ export function handleHealthCheck(
   } else if (!latestRun) {
     codebaseStatus = "needs_index";
   } else if (staleness?.isStale === true) {
+    codebaseStatus = "stale";
+  } else if (pendingReindex.length > 0) {
+    // Ranked above "dirty": a clean tree with a pending set is exactly the rollback case, and it is
+    // the one where nothing else in this response would report a problem.
     codebaseStatus = "stale";
   } else if (workingTree?.isDirty === true) {
     codebaseStatus = "dirty";
@@ -66,12 +79,20 @@ export function handleHealthCheck(
             reason:
               codebaseStatus === "needs_index"
                 ? "No successful index run exists for this repo."
-                : codebaseStatus === "stale"
-                  ? "Indexed commit does not match HEAD."
-                  : codebaseStatus === "dirty"
-                    ? "Working tree changed after latest index run."
-                    : "Index appears up-to-date.",
-            arguments: { repoId, repoPath: repo.repoPath, mode: "incremental" }
+                : pendingReindex.length > 0
+                  ? "Files written by the refactor engine have not been re-indexed — the graph may hold names that exist in no file on disk."
+                  : codebaseStatus === "stale"
+                    ? "Indexed commit does not match HEAD."
+                    : codebaseStatus === "dirty"
+                      ? "Working tree changed after latest index run."
+                      : "Index appears up-to-date.",
+            // `dirty` is sufficient and far cheaper for the refactor case: the pending set is unioned
+            // into the changed-file set, so those files are re-indexed even with a clean tree.
+            arguments: {
+              repoId,
+              repoPath: repo.repoPath,
+              mode: pendingReindex.length > 0 && staleness?.isStale !== true ? "dirty" : "incremental"
+            }
           },
           {
             action: "watch_repo_start",
@@ -112,6 +133,12 @@ export function handleHealthCheck(
       shouldReindex,
       shouldEnableWatch,
       workingTree,
+      ...(pendingReindex.length > 0 && {
+        pendingReindex: {
+          fileCount: pendingReindex.length,
+          files: pendingReindex.slice(0, 20).map((x) => ({ filePath: x.filePath, reason: x.reason }))
+        }
+      }),
       reasons
     },
     packageBridge,
