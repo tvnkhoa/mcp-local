@@ -10,12 +10,26 @@ Workaround · Enhancement proposal. Filed here so the MCP server team can triage
 
 ## Index
 
-**13 entries, all resolved.** Statuses and dates are copied from each entry's own
+**21 entries — 13 resolved, 8 open.** Statuses and dates are copied from each entry's own
 `**Status:**` line — the entry is authoritative. Regenerate by scanning `^## ` headings and the
 first `- **Status:**` line beneath each.
 
+The eight open entries all come from one sweep: every tool (43) and every resource (28) exercised
+against `wec.communication-hub` on 2026-08-04, on the post-restructure build (`411afe5`), from a
+fresh server process (staleness gate per MCP-ISSUE-040 cleared first). They are **not** regressions
+of the restructure — each reproduces a defect first observed on 2026-08-03 unless the entry says
+otherwise.
+
 | ID | Title | Status |
 |---|---|---|
+| `MCP-ISSUE-042` | `refactor_replace_rollback` restores the files and leaves the graph holding the reverted names, while `health_check` reports "ready" | 🔴 OPEN 2026-08-04 |
+| `MCP-ISSUE-043` | the owner-type prover cannot prove any site, so both guarded-refactor tools refuse work `refactor_replace_preview` does | 🔴 OPEN 2026-08-04 |
+| `MCP-ISSUE-044` | `find_entry_points(kind:"route_handler")` returns a count with empty arrays; `route_map` names the endpoint group, not the handler | 🔴 OPEN 2026-08-04 |
+| `MCP-ISSUE-045` | cross-repo resolution matches bare type names, so `Task` links every repo to one unrelated class | 🔴 OPEN 2026-08-04 |
+| `MCP-ISSUE-046` | `find_package_consumers` returns the files that DEFINE the package, and a wrong name returns 0 silently | 🔴 OPEN 2026-08-04 |
+| `MCP-ISSUE-047` | `get_persistence_mapping` dumps every CHECK constraint in the repo, ignores `profile`, and disagrees with `find_field_accesses` about "owner" | 🔴 OPEN 2026-08-04 |
+| `MCP-ISSUE-048` | index-run counters contradict the database and each other | 🔴 OPEN 2026-08-04 |
+| `MCP-ISSUE-049` | ten papercuts found by the same sweep (identity dropped at compact/nano, `view` ignored, no test filter, envelope varies by mode, path style split) | 🔴 OPEN 2026-08-04 |
 | `MCP-ISSUE-040` | a live server running a replaced build fails every parse, and the run still reports `ok` | ✅ FIXED 2026-08-03 |
 | `MCP-ISSUE-041` | `get_call_chain` stopped seeing through DI when a fix was orphaned by a file move | ✅ FIXED 2026-08-03 |
 | `MCP-ISSUE-032` | an index run is not reproducible: edge counts vary between identical runs | ✅ CLOSED 2026-07-30 |
@@ -934,3 +948,121 @@ to effort.
 - **Expected vs actual:** Expected the tool to accept the contract id as-is. Actual: it re-prepended `nuget:`, producing `packageContractId: "nuget:nuget:<name>"` → `consumerCount: 0` (false negative).
 - **Fix:** `toNugetContractId` strips a leading `nuget:` prefix (any case/whitespace) before re-prefixing, so both a bare name and a fully-qualified id normalize to the same `nuget:<lowercase>` contract id. Covered by `scripts/test/test-nuget-bridge.mjs` (idempotency scenario).
 - **Note:** Passing the bare package name still works exactly as before; both forms are now accepted.
+
+---
+
+## MCP-ISSUE-042 — `refactor_replace_rollback` restores the files and leaves the graph holding the reverted names, while `health_check` reports "ready"
+
+- **Status:** **OPEN** 2026-08-04. First observed 2026-08-03; re-verified on `411afe5` from a fresh process.
+- **Scenario (exact repro, `wec.communication-hub` at `8fe717b`, clean tree):**
+  1. `refactor_replace_preview{ find:"NormalizeToConversationCode", replaceExpression:"NormalizeToConversationCodeX", scope:{includePaths:["backend/CommunicationHub/src"]} }` → 3 matches / 3 files.
+  2. `refactor_replace_apply` → `driftPercent 0`, `appliedReplacementsCount 3`. `git diff --stat` = 3 files, 3 insertions.
+  3. `index_repository{ mode:"dirty" }` → graph now holds the new name (`query_graph`: `SELECT name FROM symbols WHERE name LIKE 'NormalizeToConversationCode%'` → `NormalizeToConversationCodeX`).
+  4. `refactor_replace_rollback` → `restoredFilesCount 3`, `conflicts 0`; `git status` clean.
+  5. **`query_graph` still returns `NormalizeToConversationCodeX`** — a symbol that exists in no file on disk.
+- **Expected vs actual:** expected rollback to either re-index the restored files or mark the repo stale. Actual: `health_check` reports `codebaseState.status:"ready"`, `shouldReindex:false`, `reasons:[]`, `actionHints[0].reason:"Index appears up-to-date"`, and `staleness.isStale:false`.
+- **Why staleness can't see it:** the check diffs `indexedCommitSha` against HEAD and inspects the working tree. Rollback restores the tree to HEAD, so both signals read healthy — the graph's divergence is invisible to both.
+- **Impact:** every graph tool answers from a phantom name after a rollback, with no warning. This is the same failure *class* as MCP-ISSUE-040 (a graph that does not match reality while `status` says otherwise), reached by a supported operation rather than by a stale process.
+- **Workaround (verified):** `index_repository{ mode:"incremental" }` immediately after any rollback — restores the correct symbol. `mode:"dirty"` does **not** work: the tree is clean again, so the changed-file set is empty.
+- **Enhancement proposal:** have `refactor_replace_rollback` record the restored file list into the same pending-reindex set `dirty` mode consumes (so `mode:"dirty"` becomes sufficient), or have it mark those files' stored content hash invalid so `codebaseState` reports `stale` with `reasons:["files restored by rollback are not re-indexed"]`. Failing either, `refactor_replace_rollback` should return an `actionHints` entry recommending the incremental re-index — the response currently returns only `restoredFilesCount`/`conflicts`.
+
+---
+
+## MCP-ISSUE-043 — the owner-type prover cannot prove any site, so both guarded-refactor tools refuse work `refactor_replace_preview` does
+
+- **Status:** **OPEN** 2026-08-04. First observed 2026-08-03; both halves re-verified.
+- **Scenario A — `refactor_symbol_migration` finds nothing where the plain preview finds three:**
+  - `refactor_symbol_migration{ migrations:[{ fromSymbol:"NormalizeToConversationCode", toSymbol:"NormalizeToConversationCodeX", requiredOwnerType:"ConversationLoopCorrelationCodec" }], scopePaths:["backend/CommunicationHub/src"], dryRun:true }` → `totalMatches: 0`, `unresolvedOccurrences: 0`, empty `previewSummary`.
+  - Same repo, same scope, same identifier via `refactor_replace_preview` → **3 matches**, each with a correctly resolved `ownerType` (`ConversationLoopCorrelationCodec`, `OutboundDeliveryFailedNotifier`, `ProcessOutboundSentConfirmCommandHandler`) and `confidence 0.95`. The declaring site's own owner type *is* the one that was required, so at least one match cannot legitimately be filtered out.
+- **Scenario B — `change_value_representation` flags every site ambiguous under either owner type:**
+  - `change_value_representation{ property:"HandledBy", requiredOwnerType:"ConversationAssignmentState", valueMap:{ai:"ConversationHandledBy.Ai", human:"ConversationHandledBy.Human"}, dryRun:true }` → `totalMatches 3`, `ambiguousOccurrences 3`, all three hunks `riskFlags:["ambiguous_target"]`.
+  - Repeating with `requiredOwnerType:"Conversation"` gives the same 3/3 (recorded 2026-08-03). `ConversationAssignmentState` is the *declaring* type — `find_field_accesses("HandledBy")` reports exactly that in its `declaringType` field — so this is not a caller passing the wrong type.
+- **Impact:** the entire guarded-refactor lane is unusable. Apply is blocked by default on `ambiguous_target`, so the safe, AST-based path for string→enum promotion degrades to `refactor_replace_preview` + a hand-written regex — the thing these tools exist to replace (see MCP-ISSUE-029 for what that costs).
+- **Workaround:** `refactor_replace_preview` with a zero-width lookahead to constrain context, accepting that it has no owner-type guarantee.
+- **Enhancement proposal:** make the prover's failure legible before making it stricter — return, per unmatched/ambiguous site, *which* owner type was inferred and which rule rejected it (`no_enclosing_type`, `inferred:X ≠ required:Y`, `initializer_target_unknown`). Two candidate causes worth checking first: (a) an object-initializer/`with`-expression site has no enclosing type to attribute, and (b) an owned-entity property is attributed to the owning entity in one code path and to the owned type in another — which is the same owner-semantics split filed as MCP-ISSUE-047.
+
+---
+
+## MCP-ISSUE-044 — `find_entry_points(kind:"route_handler")` returns a count with empty arrays; `route_map` names the endpoint group, not the handler
+
+- **Status:** **OPEN** 2026-08-04. First observed 2026-08-03, unchanged.
+- **Scenario:** `find_entry_points{ repoId:"wec.communication-hub", kind:"route_handler", limit:5 }` → `{"total":5,"runtimeEntryPoints":[],"graphEntryPoints":[]}`. A total of 5 with nothing to show it in; the documented fast-path ("surface C# ASP.NET route handlers from the routes table") returns no rows through this tool.
+- **Scenario (second half):** `route_map` and the `repo://wec.communication-hub/routes` resource both return all 34 routes with `handlerSymbolId == controllerSymbolId` — the endpoint **group** class (`Conversations`, `Customers`, `Inbox`), never the delegate that handles the route. `routeTemplate` omits the `MapGroup` prefix (`{conversationId}/reply`, not `/api/conversations/{conversationId}/reply`), and normalization is inconsistent inside one payload: `Conversations.cs` templates have no leading slash while `Inbox.cs` templates do (`/conversations`).
+- **Also:** 6 of the 34 routes come from test files (`AuthPolicyIntegrationTests.cs`, `MyAuthTestSupport.cs`, `PlaybookAlignmentIntegrationTests.cs`) with no way to exclude them — see MCP-ISSUE-049.
+- **Impact:** "what is this service's API surface" cannot be answered from the index. Every route resolves to the same handful of group symbols, so route → handler → call-graph is a dead end, and the templates cannot be matched against real request paths or against `docs/04-api/ch2-fe-api-contract.md`.
+- **Workaround:** `route_map` for the file/line, then `find_symbol_at_line` on that line to get the actual delegate; reconstruct the prefix by reading the `MapGroup` call at the top of the endpoint file.
+- **Enhancement proposal:** (1) make `find_entry_points` put the route rows it counted into `runtimeEntryPoints` (a `total` that matches no returned array is worse than an error — nothing downstream can act on it); (2) attribute minimal-API routes to the lambda/method passed to `MapGet`/`MapPost` rather than the enclosing group class; (3) resolve `routeTemplate` against the enclosing `MapGroup` and emit one normalized absolute path.
+
+---
+
+## MCP-ISSUE-045 — cross-repo resolution matches bare type names, so `Task` links every repo to one unrelated class
+
+- **Status:** **OPEN** 2026-08-04. **New** — not previously filed.
+- **Scenario:** `query_graph{ sql:"SELECT from_symbol_id, to_repo_id, to_symbol_id, type FROM cross_repo_deps WHERE from_repo_id=:repoId LIMIT 10" }` on `wec.communication-hub` → 7 of 10 rows point at the same `to_symbol_id` (`2e1d3ffff6aa4656e787707d`). Resolving it: `get_cross_repo_impact{ symbolId:"00031af4f1504af45a0e4c0a", direction:"outbound" }` → `relatedName:"Task"`, `relatedFilePath:"src\\SSNet.QueueManagement\\Domain\\Model\\Task.cs"`, `relatedSignature:"public class Task"`, `contractType:"symbol"`, **`resolutionReason:"symbol_id_exact_match"`**.
+- **Expected vs actual:** the consuming symbol is a Hub integration test using `System.Threading.Tasks.Task`. Expected: no cross-repo edge (a BCL type is not an ssnet contract). Actual: an edge to an unrelated domain class in `SSNet.QueueManagement`, presented with the highest-confidence reason string the tool has.
+- **Impact:** cross-repo counts are noise. `crossRepoLinked: 8` on the full run is mostly this one false target, and the number moves with run mode (`crossRepoResolved` 8 on `full` vs **459** on `dirty` over 3 files — see MCP-ISSUE-048), so it cannot be used as a coverage signal or a data-contract gate. `get_cross_repo_impact` inherits the falsehood.
+- **Workaround:** for contract questions use `get_value_contract_impact` (literal-based, verified correct on `"call_log"` across hub+ssnet) or `find_package_consumers` + the `nuget:` edge query, and ignore `cross_repo_deps` type rows whose name is a BCL type.
+- **Enhancement proposal:** require more than a name match to cross a repo boundary — namespace agreement (the consumer must `using` a namespace the provider repo actually declares), exclusion of BCL/framework type names, or a provider-side `module` symbol carrying the package contract id (the bridge ISSUE-CR-001 describes). Whatever the rule, `resolutionReason` should distinguish "matched by symbol id" from "matched by bare name", because those are not the same claim.
+
+---
+
+## MCP-ISSUE-046 — `find_package_consumers` returns the files that DEFINE the package, and a wrong name returns 0 silently
+
+- **Status:** **OPEN** 2026-08-04. First observed 2026-08-03. Sharpens ISSUE-CR-001, which reported the
+  `resolved:false` bridge gap but treated the 8 returned rows as consumers.
+- **Scenario:** `find_package_consumers{ packageName:"SSNet.CommunicationHub.Messaging" }` → `consumerCount: 8`, and all 8 are in the **provider** repo: `ssnet` `src\SSNet.CommunicationHub.Messaging\Contracts\{Automation,Campaign,ConversationReply,EmailSent,EmailDeliveryFailed,EscalationRequired}*Contract.cs`, `consumerKind:"module"`, `dependencyReason:"namespace package contract bridge"`, `resolved:false`, backslash paths.
+- **Expected vs actual:** the actual consumer is `wec.communication-hub`, which holds **34** `DEPENDS_ON` edges to `nuget:ssnet.communicationhub.messaging` (`query_graph`: `SELECT to_id, COUNT(*) FROM edges WHERE type='DEPENDS_ON' AND to_id LIKE 'nuget:%' GROUP BY to_id`). It appears nowhere in the result. The rows returned are the files that declare the contracts.
+- **Second defect in the same call path:** a package name that does not exist returns `{"consumerCount":0,"consumers":[]}` with no diagnostic — `find_package_consumers{ packageName:"SSNet.Messaging.Contracts" }` (a plausible-looking wrong name) is indistinguishable from a real zero. The correct id was only findable via the `edges` query above.
+- **Impact:** the tool answers the inverse of the question asked. "Who consumes this contract" is the pre-change gate for a contract bump, and acting on this output would mean reviewing the publisher instead of the consumers.
+- **Workaround (verified):** the `nuget:` `DEPENDS_ON` query in `query_graph` — it gives both the exact contract ids and the consuming repos, and is unaffected by the bridge state.
+- **Enhancement proposal:** (1) return rows keyed by the repo holding the `DEPENDS_ON` edge (consumer side), and if provider definitions are useful keep them in a separate `providers[]` array rather than mixing them into `consumers[]`; (2) when the normalized `packageContractId` matches no `to_id` in any repo, say so (`unknownPackage: true` plus the nearest known ids) instead of returning an empty success.
+
+---
+
+## MCP-ISSUE-047 — `get_persistence_mapping` dumps every CHECK constraint in the repo, ignores `profile`, and disagrees with `find_field_accesses` about "owner"
+
+- **Status:** **OPEN** 2026-08-04. Constraint dump first observed 2026-08-03; the `profile` and owner-semantics halves are **new**.
+- **Scenario A — unfiltered constraints:** `get_persistence_mapping{ property:"HandledBy", ownerType:"Conversation" }` returns the correct mapping (`handled_by`, `hasConverter true`, `maxLength 16`) **and all 24 `HasCheckConstraint` rows in the repository** — `ck_tenant_configs_timeout_hours`, `ck_outbox_status`, `ck_customer_inbox_status_logs_*`, … — none of which involve `HandledBy` or `Conversation`. This is the largest single token payload of the 43-tool sweep, and it is the same list for every property queried.
+- **Scenario B — `profile` ignored:** the same call with `profile:"nano"` returns the identical full payload. Every other profile-aware tool trims; this one does not.
+- **Scenario C — two tools, two definitions of "owner":** `find_field_accesses{ name:"HandledBy" }` reports `declaringType:"ConversationAssignmentState"` (correct: the property is declared on the owned type). Passing that value back in — `get_persistence_mapping{ property:"HandledBy", ownerType:"ConversationAssignmentState" }` — returns `mappings: []` while still dumping all 24 constraints. Only `ownerType:"Conversation"` (the EF-configured owner) yields the mapping. An agent chaining the two tools, which is the natural workflow, gets an empty answer that looks like "not persisted".
+- **Impact:** A: token waste plus a real risk of misreading an unrelated constraint as the property's. C: silent false negative on the exact question the tool exists to answer, and the same owner-semantics split is a candidate root cause for MCP-ISSUE-043.
+- **What still works well (not a regression):** the projection-trap detector — `DB_TRANSLATED_PROJECTION` at `GetCustomerConversationDetail.cs:89` with the correct explanation. Keep it.
+- **Enhancement proposal:** (1) filter `checkConstraints` to constraints whose expression names the mapped column (or the owner's table), and put the repo-wide list behind `profile:"verbose"`; (2) honour `profile`; (3) accept either the declaring type or the EF owner for `ownerType`, resolving owned-entity relationships, and when a requested owner yields no mapping say which owners *do* have one instead of returning `[]`.
+
+---
+
+## MCP-ISSUE-048 — index-run counters contradict the database and each other
+
+- **Status:** **OPEN** 2026-08-04. Four counters; the internal contradictions were first observed 2026-08-03, the DB mismatch is **new**.
+- **Scenario:** one `index_repository{ mode:"full" }` on `wec.communication-hub` (run `f4119319`), then reading the same numbers back from the graph.
+
+  | claim | run report | `query_graph` / resource |
+  |---|---|---|
+  | edges | `edgesUpserted: 49582` | **47998** (sum of `SELECT type, COUNT(*) FROM edges GROUP BY type`, and `repo://…/schema` `edgeCount`) |
+  | wall clock vs phase | `elapsedMs: 15924` | `resolvePhaseMs: 22270` — a phase longer than the run that contains it (dirty run: **1055** vs **22241**) |
+  | call coverage | `resolveCallsCoverage: 1.0446` | a ratio above 1.0 |
+  | unresolved calls | `callEdgesUnresolved: 0` | `unresolvedCallsTotal: 14420` in the same object |
+  | cross-repo | `crossRepoResolved: 8` (full, 521 files) | **459** (dirty, 3 files) — fewer files, 57× more links |
+
+- **Impact:** these are the numbers a reviewer uses to decide whether an index run is trustworthy, and MCP-ISSUE-040's fix (`degraded` when a run produces symbols but zero edges) is built on the edge counter. A counter that disagrees with the table it wrote cannot support that gate. `symbolsUpserted` (4457) and `filesIndexed` (521) do match the DB, so the problem is specific.
+- **Workaround:** treat `query_graph` / the `schema` resource as the source of truth for graph size; ignore `elapsedMs`, `resolveCallsCoverage` and the cross-repo counters entirely.
+- **Enhancement proposal:** name each counter for what it counts — `edgeUpsertAttempts` vs `edgesStored` (the delta is presumably deduped/replaced rows, which is fine, but not what `edgesUpserted` reads as); make `elapsedMs` span the resolve phase or rename it `extractionMs`; clamp/rebase `resolveCallsCoverage` on the same denominator as `callEdgesAttempted`; and make `callEdgesUnresolved` agree with `unresolvedCallsTotal` or explain the difference in the field name. The cross-repo full-vs-dirty inversion is probably a scoping bug worth its own investigation (see MCP-ISSUE-045, which suggests the links themselves are unsound).
+
+---
+
+## MCP-ISSUE-049 — ten papercuts found by the same sweep
+
+- **Status:** **OPEN** 2026-08-04. Grouped deliberately: each is small, none is a wrong answer to a
+  correctness question, and they share two roots — response shaping and the absence of a test filter.
+  Split any of them out if it gets picked up.
+- **Identity dropped by profile (2):** `get_call_chain{ profile:"nano" }` returns `chainLength: 10` with `path:[{confidence:0.75}, {via:"interface", confidence:0.7}, …]` — no name, file or id on any hop, so the response cannot be acted on. At `profile:"compact"` the same tool returns only `fromId`/`toId`, forcing a second call to resolve names, while `get_dependency_graph` compact resolves names for the same edges. Note the fix is per-handler, not global: `get_symbol_context_pack{ profile:"nano" }` keeps full identity and is the model to copy.
+- **Duplicate rows (3):** `trace_execution_flow{ profile:"nano" }` → `topCallees:["Equals","NotifyAsync","TryResolveByBridgeMessageIdAsync","Failure","NotifyAsync","NotifyAsync","SaveChangesAsync","Success","NotifyAsync","SaveChangesAsync"]` (NotifyAsync ×4). `get_dependency_graph{ filePath }` emits self-TYPE_REFs (`OutboundDeliveryFailedNotifier → OutboundDeliveryFailedNotifier`) and lists every ctor-injected interface twice, once from the constructor symbol and once from the class. `find_impact_files` lists each caller once per edge type (`Resolve` appears as CALLS and as TYPE_REF).
+- **`view:"surface"` ignored (1):** `find_impact_files{ view:"surface" }` returns the `files`-view shape (a `callers[]` array), not the external-symbol surface the schema documents.
+- **No way to exclude tests (1, six tools):** `find_implementations` (2 of 3 results are test doubles), `route_map` (6 of 34 routes), `search_literals`, `get_symbol_context_pack` callers (5 of 6), `get_value_contract_impact` (3 test files classified as producers), and `get_feature_bundle` — which put `ConversationNotesCommandHandlerTests` in the `command` role and resolved `dbSet` to `TestDbContext` in a test file. `search_symbols` already has `excludeTests`; the flag needs to reach these.
+- **`query_docs` envelope varies by mode (1):** `mode:"search"` returns an object (`repoId`, `mode`, `count`, `results`); `mode:"coverage"` and `mode:"stale"` return bare arrays. Same tool, three shapes.
+- **`query_docs` precision (1):** `mode:"search"` returns `contentType:"symbol"` rows whose `text` is a file pointer (`"0004-autoreply-confidence-threshold.md @ line 1"`) rather than the matching doc section, and mixes code symbols into doc results. `mode:"stale"` still matches bare identifiers: symbolId for `ConversationLoopCorrelationCodec.Parse` → 5 hits, all in `docs/02-flows/_archive/*`, matched on the word `Parse` inside quoted C# in an archived doc.
+- **Path style is split (1):** tool responses normalize to forward slashes, but the `repo://…/routes` resource, raw `query_graph` rows, `find_package_consumers.consumerFilePath`, `get_cross_repo_impact.relatedFilePath` and `rename_assist.hints` return backslashes — `rename_assist` returns both conventions in one payload (`affectedFiles` forward, `hints` back).
+- **`health_check` without `repoId` reports misleading zeros (1):** `vectorIndex.symbolsIndexed: 0` and `codebaseState.status:"unknown"`; the same call with `repoId` gives `2664` / `"ready"`. The zero reads as "the vector index is empty", which is what it looked like at the start of this sweep.
+- **Intent ranking is dominated by EF migrations (1):** `search_symbols{ query:"send outbound email via crm callback", strategy:"intent" }` → the top 5 are all migration `Up`/`Down` methods (`AddSenderEmailToCrmRefs`, `AddOutboundConfirmTrackingConsolidated`, …). `orient{ intent:"what breaks if I change the HandledBy property on Conversation", seed:"HandledBy" }` classifies correctly (blast-radius → `find_impact_files`/`change_impact`) but seeds the same way: migration `Up`/`Down` above `ConversationHandledByValues.ToStorageValue` and `Conversation.MarkHandledByHuman`. Migration class names carry the vocabulary of every schema change ever made; they should be down-weighted the way test paths already are.
+- **Two tools, two symbol counts (1):** `get_file_context` reports `symbolCount: 7` and `get_file_summary` `symbolCount: 6` for `ConversationLoopCorrelationCodec.cs`; the module pseudo-symbol is counted in one and not the other.
+- **`rename_assist` advisory omits the declaring file (1):** `affectedFileCount: 2` (the two caller files) where `emitPreview:true` correctly includes the declaring file as well — 3 files. The advisory understates the blast radius of the rename it is advising on.

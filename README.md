@@ -75,7 +75,7 @@ Known keys: `codebase-index`, `postgres-mcp`, `observe-mcp`, `bitbucket-mcp`.
 
 | Command | Flags |
 |---------|-------|
-| `install` | `--server <key>` (repeatable), `--yes` / `-y` (non-interactive, use defaults), `--skip-smoke` |
+| `install` | `--server <key>` (repeatable), `--yes` / `-y` (non-interactive, use defaults), `--skip-smoke`, `--skip-skill` / `--no-skill` (register MCP config only — `mcp:update` installs the skill later) |
 | `doctor` | `--server <key>`, `--skip-start` (skip the spawn/`initialize` check) |
 | `update` | `--server <key>`, `--all` |
 | `uninstall` | `--server <key>`, `--all` |

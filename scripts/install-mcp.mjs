@@ -12,8 +12,13 @@
  *   node scripts/install-mcp.mjs --server postgres-mcp # one server
  *   node scripts/install-mcp.mjs --yes                 # non-interactive (defaults)
  *   node scripts/install-mcp.mjs --skip-smoke          # skip smoke tests
+ *   node scripts/install-mcp.mjs --skip-skill          # register MCP config only, write no skill
  *
- * Flags: --server <key> (repeatable), --yes/-y, --skip-smoke
+ * Flags: --server <key> (repeatable), --yes/-y, --skip-smoke, --skip-skill/--no-skill
+ *
+ * Skills are installed by default: without one the agent has the tools but none of the
+ * sequences or guardrails that make them usable. --skip-skill exists for operators who
+ * curate ~/.claude themselves; `npm run mcp:update -- --server <key>` installs it later.
  */
 
 import { execSync } from "node:child_process";
@@ -27,7 +32,11 @@ import { verifyServer } from "./lib/verify.mjs";
 import { parseArgs, resolveServers } from "./lib/cli.mjs";
 import { C, log, section, banner, ok, warn, err, info, step, ask } from "./lib/log.mjs";
 
-const ARGS = parseArgs(process.argv.slice(2), { yes: ["--yes", "-y"], skipSmoke: ["--skip-smoke"] });
+const ARGS = parseArgs(process.argv.slice(2), {
+  yes: ["--yes", "-y"],
+  skipSmoke: ["--skip-smoke"],
+  skipSkill: ["--skip-skill", "--no-skill"],
+});
 
 // ---- Build ----
 function buildServer(server) {
@@ -143,7 +152,8 @@ async function installOne(server, agents) {
 
   section("3/6  Configure agents");
   if (agents.length === 0) {
-    warn("No code agents detected — skill will still be installed; configure MCP config manually.");
+    warn("No code agents detected — configure MCP config manually.");
+    if (!ARGS.skipSkill) info("The project skill copy under .claude/skills/ is still written.");
   }
   const mcpConfig = {
     command: "node",
@@ -153,10 +163,15 @@ async function installOne(server, agents) {
   for (const agent of agents) configureAgent(agent, server.key, mcpConfig);
 
   section("4/6  Install skill");
-  try {
-    installSkill(server, agents);
-  } catch (e) {
-    err(`Skill install failed: ${e.message}`);
+  if (ARGS.skipSkill) {
+    step("Skipped (--skip-skill)");
+    info(`Install it later with  npm run mcp:update -- --server ${server.key}`);
+  } else {
+    try {
+      installSkill(server, agents);
+    } catch (e) {
+      err(`Skill install failed: ${e.message}`);
+    }
   }
 
   section("5/6  Verify server starts");
@@ -183,6 +198,7 @@ async function installOne(server, agents) {
 async function main() {
   banner("MCP Workspace — Unified Installer");
   if (ARGS.yes) info("Non-interactive mode (--yes): using defaults");
+  if (ARGS.skipSkill) info("Skill install disabled (--skip-skill): MCP config only");
 
   const servers = resolveServers(ARGS.servers, { allowAllDefault: true });
   info(`Installing: ${servers.map((s) => s.key).join(", ")}`);
@@ -213,7 +229,11 @@ async function main() {
   log("Next steps:", C.bright);
   log("  1. Restart your code agent(s) so the new MCP config + skills load.", C.reset);
   log("  2. Run  npm run mcp:doctor  to confirm everything is healthy.", C.reset);
-  log("  3. The AI now auto-loads each server's skill (.claude/skills/<key>/SKILL.md).", C.reset);
+  if (ARGS.skipSkill) {
+    log("  3. Skills were skipped (--skip-skill) — run  npm run mcp:update -- --all  to install them.", C.reset);
+  } else {
+    log("  3. The AI now auto-loads each server's skill (.claude/skills/<key>/SKILL.md).", C.reset);
+  }
   console.log();
 }
 

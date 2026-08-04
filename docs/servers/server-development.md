@@ -151,7 +151,8 @@ npm run verify:all
 
 `<server>/skill/SKILL.md` is the **committed source of truth**; the installer renders it into
 `~/.claude/skills/<key>/` (global) and `.claude/skills/<key>/` (project), both gitignored because
-they carry machine-specific paths.
+they carry machine-specific paths. That render is the default — see §6 for why, and for the
+`--skip-skill` opt-out.
 
 Placeholders in `{{DOUBLE_BRACES}}` are filled from the manifest: `{{KEY}}`, `{{DISPLAY_NAME}}`,
 `{{TAGLINE}}`, `{{TOOL_NAMESPACE}}`, the tool list, the env table.
@@ -295,6 +296,25 @@ npm run mcp:uninstall -- --server <key>        # remove config + skill (config b
 
 `install` and `doctor` act on **all** servers when given no target; `update` and `uninstall`
 **require** `--server <key>` or `--all`.
+
+Install flags: `--server <key>` (repeatable), `--yes` / `-y`, `--skip-smoke`,
+`--skip-skill` / `--no-skill`.
+
+### Why the installer writes the skill by default
+
+Registering a server without its skill leaves the agent holding the tools and none of the
+sequences or guardrails — which tool for which intent, what is gated, what must be previewed
+first. So step 4/6 installs it unless you opt out, and the write is already scoped to what each
+agent can actually use (`scripts/lib/skills.mjs`): the project copy always, `~/.claude/skills/`
+only when Claude Code is detected, a Copilot prompt only when VS Code is, nothing at all for
+agents with no skill system.
+
+`--skip-skill` is the escape hatch for the one invasive part — the write into `~/.claude`. Use it
+when the operator curates their global skills themselves (dotfiles, shared machine), or when
+testing an install against a scratch `HOME`. It skips **both** copies, leaves everything else
+unchanged, and prints the follow-up: `npm run mcp:update -- --server <key>` installs the skill
+later. Note that install **overwrites** a generated `SKILL.md` without warning — hand edits belong
+in the committed template, never in the rendered copy.
 
 `mcp:doctor` checks five things per server:
 
