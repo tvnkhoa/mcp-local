@@ -11,6 +11,27 @@ import path from "node:path";
 
 import { SERVERS, WORKSPACE_ROOT } from "./manifest.mjs";
 
+/**
+ * Stand-in for the checkout path in generated files.
+ *
+ * Two manifest defaults are derived from the workspace root — `CODEBASE_INDEX_ALLOWED_ROOTS` and
+ * `CODEBASE_INDEX_DB_PATH` — because the installer has to write a real absolute path into
+ * `~/.claude.json`. Rendering that path into a committed file makes the file true for exactly one
+ * machine: the generated content on a CI runner checked out at `D:\a\mcp-local\mcp-local` differs
+ * from the committed content, so `generate:check` fails on every push for a reason no one can act
+ * on. Substituting here keeps the manifest honest about what the installer writes while making the
+ * generated artifacts machine-independent — including for any path-derived default added later.
+ */
+const ROOT_PLACEHOLDER = "<workspace-root>";
+const ROOT_FORMS = [WORKSPACE_ROOT.replaceAll("\\", "/"), WORKSPACE_ROOT];
+
+/** Replace every form of the checkout path in a rendered value with the placeholder. */
+function portable(value) {
+  let out = String(value);
+  for (const form of ROOT_FORMS) out = out.split(form).join(ROOT_PLACEHOLDER);
+  return out;
+}
+
 /** Markers delimiting a generated region inside an otherwise hand-written file. */
 const BEGIN = (id) => `<!-- BEGIN GENERATED: ${id} -->`;
 const END = (id) => `<!-- END GENERATED: ${id} -->`;
@@ -97,9 +118,9 @@ export function renderEnvExample(server) {
       }
       const active = field.default !== undefined || field.prompt !== undefined;
       if (active) {
-        out.push(`${field.name}=${field.secret === true ? "" : (field.default ?? "")}`);
+        out.push(`${field.name}=${field.secret === true ? "" : portable(field.default ?? "")}`);
       } else {
-        out.push(`# ${field.name}=${field.codeDefault ?? ""}`);
+        out.push(`# ${field.name}=${portable(field.codeDefault ?? "")}`);
       }
       out.push("");
     }
@@ -114,9 +135,9 @@ export function renderEnvTable(server) {
   const rows = server.env.map((field) => {
     const req = field.required ? "**yes**" : field.group ? `one of \`${field.group}\`` : "no";
     const dflt = field.default !== undefined && field.default !== ""
-      ? `\`${esc(field.default)}\``
+      ? `\`${esc(portable(field.default))}\``
       : field.codeDefault !== undefined
-        ? `\`${esc(field.codeDefault)}\` *(code)*`
+        ? `\`${esc(portable(field.codeDefault))}\` *(code)*`
         : "—";
     const notes = [
       field.secret === true ? "**secret**" : null,

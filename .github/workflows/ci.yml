@@ -114,12 +114,25 @@ jobs:
         run: npm run benchmark:plan:check | tee "$RUNNER_TEMP/bench.json"
         working-directory: codebase-index-mcp
 
+      # Hardened rather than fixed — the previous form has not been observed to fail. GitHub runs
+      # `shell: bash` with `-eo pipefail`, so in `grep … | head -1 … || echo "n/a"` a SIGPIPE to
+      # grep (head closes the pipe after one line) fails the pipeline and the rescue writes "n/a"
+      # over a number that was there. At today's ~10KB of benchmark output grep finishes writing
+      # first and it never triggers; the race only opens up as the output grows. Since this step
+      # exists to accumulate a datapoint nobody watches, a wrong value is worse than no value:
+      # `grep -m1` stops grep itself, and the missing-file case is now stated rather than inferred
+      # from a failed pipeline.
       - name: Record the graph-accuracy observation
         if: always()
         shell: bash
         run: |
-          observed=$(grep -o '"resolvedCallEdgePct": *[0-9.]*' "$RUNNER_TEMP/bench.json" | head -1 | grep -o '[0-9.]*$' || echo "n/a")
-          floor=$(grep -o '"minResolvedCallEdgePct": *[0-9.]*' "$RUNNER_TEMP/bench.json" | head -1 | grep -o '[0-9.]*$' || echo "n/a")
+          bench="$RUNNER_TEMP/bench.json"
+          field() {
+            if [ ! -f "$bench" ]; then echo "n/a"; return; fi
+            grep -o -m1 "\"$1\": *[0-9.]*" "$bench" | sed 's/.*: *//' || echo "n/a"
+          }
+          observed=$(field resolvedCallEdgePct)
+          floor=$(field minResolvedCallEdgePct)
           {
             echo "## Graph accuracy (B-04 datapoint)"
             echo ""
