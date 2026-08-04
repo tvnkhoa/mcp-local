@@ -25,7 +25,16 @@ export function resolveResponseProfile(profile: ResponseProfile, compact?: boole
 const PATH_KEYS = [
   "filePath", "fromFilePath", "toFilePath", "callerFile", "calleeFile",
   "sourceFile", "testFile", "repoPath", "dbPath", "folderPath", "headingPath",
-  "affectedFiles", "importedByFiles", "path", "scopePaths"
+  "affectedFiles", "importedByFiles", "path", "scopePaths",
+  // MCP-ISSUE-049 — the keys that were reaching clients with Windows backslashes while every
+  // neighbouring key was normalized, so one response carried both conventions.
+  //
+  // camelCase: two cross-repo/package tools name their path column differently and were simply
+  // never added to this list.
+  "consumerFilePath", "relatedFilePath", "topFiles",
+  // snake_case: `query_graph` echoes raw DB rows, so the column alias IS the response key. These
+  // are the path columns in the allowlisted tables (`files.path` is covered by "path" above).
+  "file_path", "from_file_path", "to_file_path", "repo_path"
 ];
 
 /**
@@ -52,6 +61,18 @@ const PATH_KEYS = [
  */
 function normalizePayload(value: unknown, strip: boolean): unknown {
   return normalizeShared(value, { dropNullish: strip, pathKeys: PATH_KEYS });
+}
+
+/**
+ * Path-normalize a payload that does NOT go through `asText`.
+ *
+ * MCP-ISSUE-049: the `repo://` resources serialize through `@mcp/sdk`, so they never touched the
+ * normalizer above — which is the whole reason `route_map` returned forward slashes while
+ * `repo://…/routes` returned backslashes for the same rows. Nullish keys are deliberately KEPT: a
+ * resource payload is not profile-shaped, and `latestRun: null` is a meaningful answer there.
+ */
+export function normalizeResourcePayload(value: unknown): unknown {
+  return normalizePayload(value, false);
 }
 
 export type ToolRequestContext = {

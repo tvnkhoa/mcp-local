@@ -148,6 +148,25 @@ async function main() {
   // Assert rather than skip. A silent skip here hid a broken lookup indefinitely.
   assert(typeof symbolId === "string", "resolved a callable symbolId for get_call_chain");
 
+  // The identity assertions below need a symbol that actually HAS callers, which the name above
+  // does not guarantee: this harness indexes only a 100-file sample, so a chosen symbol's callers
+  // may simply not be in it. Asking the graph for a CALLS edge with both endpoints resolved makes
+  // the choice data-driven — and stops the assertions from silently skipping, which is exactly how
+  // the identity gap in MCP-ISSUE-049 survived this suite in the first place.
+  const edgePick = await client.callTool({
+    name: "query_graph",
+    arguments: {
+      repoId,
+      sql: `select e.to_id as toId from edges e
+            inner join symbols sf on sf.repo_id = e.repo_id and sf.symbol_id = e.from_id
+            inner join symbols st on st.repo_id = e.repo_id and st.symbol_id = e.to_id
+            where e.repo_id = :repoId and e.type = 'CALLS' limit 1`,
+      profile: "compact"
+    }
+  });
+  const calledSymbolId = readJson(edgePick).json?.rows?.[0]?.toId ?? null;
+  assert(typeof calledSymbolId === "string", "found a CALLS edge with both endpoints resolved");
+
   if (symbolId) {
     const chainNano = await client.callTool({ name: "get_call_chain", arguments: { repoId, symbolId, direction: "callers", profile: "nano" } });
     const chainCompact = await client.callTool({ name: "get_call_chain", arguments: { repoId, symbolId, direction: "callers", profile: "compact" } });
@@ -159,6 +178,26 @@ async function main() {
     assert(typeof chainNanoJson?.chainLength === "number", "nano has chainLength");
     assert(Array.isArray(chainNanoJson?.path), "nano has path");
     assert(typeof chainNanoJson?.truncated === "boolean", "nano has truncated");
+
+    // MCP-ISSUE-049: identity must survive the profile. nano used to emit hops of
+    // {confidence, via} only — the name and file were selected as null by the query and then
+    // removed by compact null-stripping, so the response could not be acted on at all.
+    const idNano = await client.callTool({ name: "get_call_chain", arguments: { repoId, symbolId: calledSymbolId, direction: "callers", profile: "nano" } });
+    const idCompact = await client.callTool({ name: "get_call_chain", arguments: { repoId, symbolId: calledSymbolId, direction: "callers", profile: "compact" } });
+    const nanoHop = readJson(idNano).json?.path?.[0];
+    const compactEdge = readJson(idCompact).json?.edges?.[0];
+
+    assert(nanoHop != null, "the chosen symbol has at least one caller hop");
+    assert(typeof nanoHop?.symbolId === "string", "nano hop carries symbolId", JSON.stringify(nanoHop));
+    assert(typeof nanoHop?.name === "string", "nano hop carries name", JSON.stringify(nanoHop));
+    assert(typeof nanoHop?.filePath === "string", "nano hop carries filePath", JSON.stringify(nanoHop));
+
+    assert(compactEdge != null, "compact returns the same hop as an edge");
+    assert(typeof compactEdge?.fromName === "string", "compact edge carries fromName", JSON.stringify(compactEdge));
+    assert(typeof compactEdge?.toName === "string", "compact edge carries toName", JSON.stringify(compactEdge));
+    assert(typeof compactEdge?.fromFilePath === "string", "compact edge carries fromFilePath", JSON.stringify(compactEdge));
+    // Paths in a response are forward-slash, on every platform.
+    assert(!(compactEdge?.fromFilePath ?? "").includes("\\"), "compact edge path is forward-slash", JSON.stringify(compactEdge?.fromFilePath));
   } else {
     console.log("  [skip] get_call_chain — no callable symbol found for this repo");
   }

@@ -368,9 +368,27 @@ Operational rule:
 | `get_call_chain` | Same as above | Use callable symbolId |
 | `dead_code_scan` | Runtime-wired symbols may appear dead | Cross-check bootstrap/registration paths before reporting |
 | `link_tests_to_source` | Score 0.55 links are `name_similarity` only — unreliable | Filter with `minScore: 0.7` |
-| `find_impact_files` view `"surface"` | Confidence 0.75 is TYPE_REF, not direct call | Note confidence and edgeType in output |
+| `find_impact_files` view `"surface"` | Confidence 0.75 is TYPE_REF, not direct call | Note confidence and `edgeTypes` in output |
 | `find_symbol_at_line` | Often resolves declaration-level positions, not inner-block lines | Prefer declaration line or pair with one focused search |
 | `get_cross_repo_impact` | Returns empty when repos have no shared symbols (normal for isolated systems) | Only useful when repos share interface/contract symbol names (e.g., shared library pattern) |
+| `get_symbol_detail` · `find_symbol_at_line` · `get_folder_summary` · `find_entry_points` | Accept `profile` in code but do **not** advertise it in `tools/list` (MCP-ISSUE-051) | Do not send `profile` to these four; the other 34 tools advertise it and accept it |
+
+### Fixed by MCP-ISSUE-049 (2026-08-04) — do not work around these any more
+
+| Was | Now |
+|---|---|
+| `get_call_chain` compact returned `fromId`/`toId` only, so a second call was needed per hop | Every profile carries `symbolId` + name + file on each hop |
+| `find_impact_files{view:"surface"}` listed a caller once per edge type | One row per caller→symbol pair, with `edgeTypes[]` — **an array**, and the scalar `edgeType` is gone |
+| `find_impact_files{view:"surface"}` silently ignored `groupBy` | `groupBy:"module"` groups, and the response echoes `groupBy` |
+| `query_docs` returned an object for `search` and bare arrays for `stale`/`coverage` | All three modes return `{ repoId, mode, count, results }` |
+| `query_docs{mode:"search"}` mixed code symbols into doc results | Opt-in via `includeSymbols:true`; off by default |
+| `query_docs{mode:"stale"}` matched identifiers inside pasted code samples | Code-block mentions are a separate `code_call` type, excluded from staleness; `includeCodeMentions:true` opts in. **Takes effect on re-index** — this one changes how mentions are written, not just read |
+| Six tools had no way to exclude test files | `excludeTests` on `find_implementations`, `route_map`, `search_literals`, `get_symbol_context_pack`, `get_value_contract_impact`, `get_feature_bundle` (default `false`) |
+| Intent ranking put EF migration `Up`/`Down` on top of every business-phrase query | Migrations are demoted below tests as the **primary** sort key; an explicit name query still finds them |
+| `health_check` without `repoId` reported `symbolsIndexed: 0` | Repo-scoped counters are omitted, `scope:"server"` and a `note` say why |
+| `repo://…/routes`, raw `query_graph` rows and `rename_assist.hints` returned backslashes | One convention everywhere: forward slashes |
+| `get_file_context` and `get_file_summary` disagreed on `symbolCount` | Both exclude the module pseudo-symbol |
+| `rename_assist` advisory omitted the declaring file | `affectedFiles`/`affectedFileCount` include it, matching `emitPreview:true` |
 
 ## Efficiency Limits
 - Default budget: soft cap 5 tool calls per question.

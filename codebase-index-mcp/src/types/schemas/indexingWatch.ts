@@ -32,6 +32,7 @@ export const getFeatureBundleSchema = z
     maxFiles: z.number().int().min(1).max(60).default(25),
     maxBytesPerFile: z.number().int().min(1).max(20000).default(8000),
     includeSource: z.boolean().default(true),
+    excludeTests: z.boolean().default(false),
     profile: responseProfileSchema.default("compact")
   })
   .strict()

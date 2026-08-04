@@ -34,6 +34,7 @@ export const searchLiteralsSchema = (MAX_RESULT_LIMIT: number) => z
     query: z.string().min(1).max(200),
     filePath: z.string().max(500).optional(),
     limit: z.number().int().min(1).max(MAX_RESULT_LIMIT).default(50),
+    excludeTests: z.boolean().default(false),
     profile: responseProfileSchema.default("compact")
   })
   .strict();
@@ -97,6 +98,7 @@ export const findImplementationsSchema = (MAX_RESULT_LIMIT: number) => z
     repoId: z.string().min(1).max(200),
     interfaceName: z.string().min(1).max(200),
     limit: z.number().int().min(1).max(MAX_RESULT_LIMIT).default(50),
+    excludeTests: z.boolean().default(false),
     profile: responseProfileSchema.default("compact")
   })
   .strict();
@@ -108,6 +110,7 @@ export const routeMapSchema = (MAX_RESULT_LIMIT: number) => z
     filePathPrefix: z.string().max(500).optional(),
     httpMethod: z.enum(["GET", "POST", "PUT", "DELETE", "PATCH"]).optional(),
     limit: z.number().int().min(1).max(MAX_RESULT_LIMIT).default(100),
+    excludeTests: z.boolean().default(false),
     profile: responseProfileSchema.default("compact")
   })
   .strict();

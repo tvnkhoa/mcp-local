@@ -34,6 +34,13 @@ function addEdge(conn: Database.Database, fromId: string, toId: string, type: st
   ).run("r", fromId, toId, type, 1.0, "test");
 }
 
+function addSymbol(conn: Database.Database, symbolId: string, name: string, filePath: string) {
+  conn.prepare(
+    `insert into symbols (repo_id, symbol_id, file_path, name, kind, line)
+     values (?, ?, ?, ?, ?, ?)`
+  ).run("r", symbolId, filePath, name, "method", 1);
+}
+
 test("getDependencies returns IMPORTS and DEPENDS_ON only", () => {
   const conn = db();
   addEdge(conn, "a", "imported", "IMPORTS");
@@ -122,5 +129,46 @@ test("getCallEdges carries confidence and reason through", () => {
   const [row] = getCallEdges(conn, "r", "impl", "callers", 50);
   assert.equal(row.confidence, 0.7);
   assert.equal(row.reason, "interface-dispatch");
+  conn.close();
+});
+
+test("both queries resolve endpoint names and files (MCP-ISSUE-049)", () => {
+  // The defect these pin: ids only. `get_call_chain` at its DEFAULT profile could report nothing
+  // but a 24-hex `fromId`/`toId`, so acting on the answer cost a second tool call per hop. Asserted
+  // on both queries because they had the same omission and `getModuleFlow` — same table, same
+  // join — did not, which is how the inconsistency survived.
+  const conn = db();
+  addSymbol(conn, "caller", "HandleAsync", "src/Handlers/Handler.cs");
+  addSymbol(conn, "target", "NotifyAsync", "src/Notify/Notifier.cs");
+  addSymbol(conn, "importer", "Module", "src/Module.ts");
+  addSymbol(conn, "imported", "Dep", "src/Dep.ts");
+  addEdge(conn, "caller", "target", "CALLS");
+  addEdge(conn, "importer", "imported", "IMPORTS");
+
+  const [call] = getCallEdges(conn, "r", "target", "callers", 50);
+  assert.equal(call.fromName, "HandleAsync");
+  assert.equal(call.fromFilePath, "src/Handlers/Handler.cs");
+  assert.equal(call.toName, "NotifyAsync");
+  assert.equal(call.toFilePath, "src/Notify/Notifier.cs");
+
+  const [dep] = getDependencies(conn, "r", "importer", 50);
+  assert.equal(dep.fromName, "Module");
+  assert.equal(dep.toName, "Dep");
+  assert.equal(dep.toFilePath, "src/Dep.ts");
+  conn.close();
+});
+
+test("an unresolved callee still yields a hop, with null identity (MCP-ISSUE-049)", () => {
+  // The endpoint resolution is a LEFT join for this reason: `callee:` placeholders have no symbols
+  // row. An inner join would have silently shortened every call chain that reaches external/BCL
+  // code, which is the majority of them.
+  const conn = db();
+  addSymbol(conn, "caller", "HandleAsync", "src/Handlers/Handler.cs");
+  addEdge(conn, "caller", "callee:Console.WriteLine", "CALLS");
+
+  const [row] = getCallEdges(conn, "r", "caller", "callees", 50);
+  assert.equal(row.toId, "callee:Console.WriteLine");
+  assert.equal(row.toName, null);
+  assert.equal(row.fromName, "HandleAsync");
   conn.close();
 });

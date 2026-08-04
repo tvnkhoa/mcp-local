@@ -103,7 +103,7 @@ export function getFileContextImpl(
   compact = false
 ): { symbols: SymbolRecord[] | { name: string; kind: string; line: number }[]; edges: ResolvedEdge[]; graphHealth: GraphHealth } {
   const canonicalPath = resolveCanonicalFilePath(db, repoId, filePath);
-  const symbols = db
+  const allSymbols = db
     .prepare(
       `
       select repo_id as repoId, symbol_id as symbolId, file_path as filePath, name, kind, line, signature
@@ -114,7 +114,18 @@ export function getFileContextImpl(
     )
     .all(repoId, canonicalPath, limit) as SymbolRecord[];
 
-  if (symbols.length === 0) {
+  // MCP-ISSUE-049: the module pseudo-symbol is dropped from what is REPORTED — this tool counted it
+  // and `getFileSummaryImpl` did not, so the two disagreed (7 vs 6) about the same file. The module
+  // row stands for the file itself, is not a symbol the caller can navigate to, and
+  // `findDocCoverageImpl` already excludes it.
+  //
+  // It is deliberately kept in the edge query below: IMPORTS edges hang off the module symbol, so
+  // filtering it out of `symbolIds` too would silently drop every import edge from the response.
+  // `getFileSummaryImpl` makes the same distinction, by unshifting the module id onto its own
+  // `symbolIds` after excluding it from `exports`.
+  const symbols = allSymbols.filter((s) => s.kind !== "module");
+
+  if (allSymbols.length === 0) {
     return { symbols: [], edges: [], graphHealth: { unresolvedCalls: 0, unresolvedImports: 0, unresolvedTypeRefs: 0, unresolvedProperties: 0, note: "no symbols found" } };
   }
 
@@ -123,7 +134,7 @@ export function getFileContextImpl(
     return { symbols: symbols.map((s) => ({ name: s.name, kind: s.kind, line: s.line })), edges: [], graphHealth };
   }
 
-  const symbolIds = symbols.map((s) => s.symbolId);
+  const symbolIds = allSymbols.map((s) => s.symbolId);
   const placeholders = symbolIds.map(() => "?").join(", ");
   const edges = db
     .prepare(
@@ -163,7 +174,7 @@ export function getBatchContextImpl(
   }
   const canonicalPaths = filePaths.map((fp) => resolveCanonicalFilePath(db, repoId, fp));
   const placeholders = canonicalPaths.map(() => "?").join(", ");
-  const symbols = db
+  const allSymbols = db
     .prepare(
       `
       select repo_id as repoId, symbol_id as symbolId, file_path as filePath, name, kind, line, signature
@@ -174,7 +185,12 @@ export function getBatchContextImpl(
     )
     .all(repoId, ...canonicalPaths, limit) as SymbolRecord[];
 
-  if (symbols.length === 0) {
+  // MCP-ISSUE-049: same split as the single-file path above — the module pseudo-symbol is excluded
+  // from the reported set (so `symbolCount` agrees with get_file_summary) but kept for the edge query
+  // (so IMPORTS edges, which hang off it, survive). The batched form had the identical asymmetry.
+  const symbols = allSymbols.filter((s) => s.kind !== "module");
+
+  if (allSymbols.length === 0) {
     return { symbols: [], edges: [] };
   }
 
@@ -182,7 +198,7 @@ export function getBatchContextImpl(
     return { symbols: symbols.map((s) => ({ name: s.name, kind: s.kind, filePath: s.filePath, line: s.line })), edges: [] };
   }
 
-  const symbolIds = symbols.map((s) => s.symbolId);
+  const symbolIds = allSymbols.map((s) => s.symbolId);
   const symPlaceholders = symbolIds.map(() => "?").join(", ");
   const edges = db
     .prepare(

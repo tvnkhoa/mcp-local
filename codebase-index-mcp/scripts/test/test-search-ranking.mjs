@@ -111,9 +111,50 @@ function run() {
     `param-type intent query should match Handle via signature (got: ${JSON.stringify(byParamType.map((c) => `${c.name}:${c.signature}`))})`
   );
 
+  // 6 — MCP-ISSUE-049: EF migrations must not dominate a business-phrase intent query.
+  //
+  // The fixture reproduces the exact mechanism. A migration class name is a log of a schema change,
+  // so it carries MORE of the query's tokens than the code that does the work — here the migration
+  // matches all four ("conversation", "assigned", "outbound", "email") while the production handler
+  // matches three. Before the fix, `matched` was the primary sort key, so the migration won; the
+  // test-path penalty lived only in `confidenceRaw`, the second key, and had the same weakness.
+  // `Up`/`Down` also being the shortest names in any EF repo won every remaining tie.
+  indexFile(store, repoId, "src/Migrations/20260731_AddConversationAssignedOutboundEmail.cs", `
+namespace App.Migrations;
+
+public class AddConversationAssignedOutboundEmail
+{
+    public void Up() { }
+    public void Down() { }
+}
+`);
+  indexFile(store, repoId, "src/Notify/OutboundEmailNotifier.cs", `
+namespace App.Notify;
+
+public class ConversationAssignedOutboundNotifier
+{
+    public Task NotifyAsync(string conversationId) => Task.CompletedTask;
+}
+`);
+
+  const businessPhrase = store.getSymbolCandidates(repoId, "conversation assigned outbound email", 10, "intent");
+  const firstMigrationIndex = businessPhrase.findIndex((c) => /\/migrations\//i.test(c.filePath));
+  const firstProductionIndex = businessPhrase.findIndex((c) => !/\/migrations\//i.test(c.filePath) && !c.filePath.startsWith("tests/"));
+  assert(firstProductionIndex !== -1, `expected at least one production row (got: ${JSON.stringify(businessPhrase.map((c) => c.filePath))})`);
+  assert(
+    firstMigrationIndex === -1 || firstProductionIndex < firstMigrationIndex,
+    `a business-phrase query must rank production code above EF migrations, even when the migration matches MORE tokens (got: ${JSON.stringify(businessPhrase.map((c) => `${c.filePath}:${c.name}`))})`
+  );
+  // Demoted, not removed: a migration is still a legitimate answer when nothing else matches.
+  const migrationByName = store.getSymbolCandidates(repoId, "AddConversationAssignedOutboundEmail", 5, "name");
+  assert(
+    migrationByName.some((c) => /\/migrations\//i.test(c.filePath)),
+    `an explicit name query must still find the migration (got: ${JSON.stringify(migrationByName.map((c) => c.filePath))})`
+  );
+
   store.close();
   fs.rmSync(path.dirname(dbPath), { recursive: true });
-  console.log("[ok] ranked search: qualifiedName, parent-token matching, test penalty, excludeTests, signature param-type match");
+  console.log("[ok] ranked search: qualifiedName, parent-token matching, test penalty, excludeTests, signature param-type match, migration demotion");
 }
 
 try {

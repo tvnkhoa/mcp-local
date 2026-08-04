@@ -2,6 +2,7 @@ import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { McpError, ErrorCode } from "@modelcontextprotocol/sdk/types.js";
 import { resolveResponseProfile } from "../../middleware/responseFormatter.js";
 import { readSymbolSourceSpan } from "../../services/refactor/refactorUtils.js";
+import { isTestPath } from "../../services/indexing/fileFilter.js";
 import { buildIndexMeta } from "./impactHandler.js";
 import {
   CONVENTIONS,
@@ -47,6 +48,7 @@ export function handleGetFeatureBundle(
     maxFiles: number;
     maxBytesPerFile: number;
     includeSource: boolean;
+    excludeTests: boolean;
     profile: string;
   },
   ctx: HandlerContext
@@ -63,7 +65,7 @@ export function handleGetFeatureBundle(
   // 1. Resolve the entity name from the seed.
   let entity: string | null = null;
   if (args.seedSymbol) {
-    const cand = store.getSymbolCandidates(args.repoId, args.seedSymbol, 5)[0];
+    const cand = store.getSymbolCandidates(args.repoId, args.seedSymbol, 5, "name", { excludeTests: args.excludeTests })[0];
     entity = entityNameFromSeed(cand?.name ?? args.seedSymbol, convention);
   } else if (args.seedFile) {
     const summary = store.getFileSummary(args.repoId, args.seedFile);
@@ -85,6 +87,11 @@ export function handleGetFeatureBundle(
   type Candidate = { symbolId: string; name: string; kind: string; filePath: string; line: number };
   const addMember = (role: ConventionRole, c: Candidate): boolean => {
     if (seen.has(c.symbolId)) return false;
+    // MCP-ISSUE-049: gate every candidate here — 2a (name patterns), 2b (Commands folder walk) and
+    // 2c (endpoint markers) all funnel through this one function. A name-pattern walk is happy to
+    // award the `command` role to `ConversationNotesCommandHandlerTests`, and a role claimed by a
+    // test double is not merely noise: it is the wrong file to mirror when implementing a feature.
+    if (args.excludeTests && isTestPath(c.filePath)) return false;
     seen.add(c.symbolId);
     rolesMatched.add(role);
 
@@ -169,8 +176,10 @@ export function handleGetFeatureBundle(
   const unresolvedRoles: ConventionRole[] = convention.rules.map((r) => r.role).filter((role) => !rolesMatched.has(role));
 
   // DbSet registration site: the *DbContext that references the entity (best-effort).
+  // MCP-ISSUE-049: this resolved to `TestDbContext` in the filed case — a substring match on
+  // "DbContext" ranks a test harness's context exactly as highly as the production one.
   const dbContext = store
-    .getSymbolCandidates(args.repoId, "DbContext", 5)
+    .getSymbolCandidates(args.repoId, "DbContext", 5, "name", { excludeTests: args.excludeTests })
     .find((c) => c.kind === "class" && c.name.endsWith("DbContext"));
   const dbSet = dbContext ? { filePath: dbContext.filePath, contextName: dbContext.name } : null;
 

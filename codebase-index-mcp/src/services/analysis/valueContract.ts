@@ -1,6 +1,7 @@
 import fs from "node:fs";
 
 import type { GraphStore } from "../../repositories/graphStore.js";
+import { isTestPath } from "../indexing/fileFilter.js";
 import { assertSafeRepoFilePath, escapeRegExp } from "../refactor/refactorUtils.js";
 
 /**
@@ -85,7 +86,7 @@ function readLine(repoPath: string, filePath: string, line: number): string | nu
 /** Trace a storage/wire value across every registered repo, grouped and producer/consumer-classified. */
 export function getValueContractImpact(
   store: GraphStore,
-  args: { value: string; column?: string; repoIds?: string[] }
+  args: { value: string; column?: string; repoIds?: string[]; excludeTests?: boolean }
 ): ValueContractResult {
   const value = args.value;
   const column = args.column ?? null;
@@ -99,7 +100,11 @@ export function getValueContractImpact(
 
   for (const repo of repos) {
     const rawHits = store.searchLiterals(repo.repoId, value, PER_REPO_LIMIT, null)
-      .filter((h) => h.value === value); // exact token only — the contract is the literal itself
+      .filter((h) => h.value === value) // exact token only — the contract is the literal itself
+      // MCP-ISSUE-049: a test asserting `Assert.Equal("resolved", x)` reads as a CONSUMER and one
+      // building a fixture reads as a PRODUCER, so test files inflated both counts — and this tool
+      // is the gate for deciding whether a storage-format migration is safe.
+      .filter((h) => (args.excludeTests ? !isTestPath(h.filePath) : true));
 
     if (rawHits.length === 0) continue;
 

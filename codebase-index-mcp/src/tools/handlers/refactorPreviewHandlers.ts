@@ -39,7 +39,18 @@ export function handleRenameAssist(
   if (!result.symbol) {
     throw new McpError(ErrorCode.InvalidParams, `rename_assist: symbol '${args.symbolId}' not found in repo '${args.repoId}'.`);
   }
-  const affectedFiles = [...new Set([...result.callers.map((c) => c.fromFilePath).filter(Boolean), ...result.importers.map((i) => i.fromFilePath).filter(Boolean)])] as string[];
+  // MCP-ISSUE-049: the DECLARING file belongs in the blast radius. The advisory built this set from
+  // callers + importers only and reported `affectedFileCount: 2`, while `emitPreview:true` scoped its
+  // preview to `[symbol.filePath, ...affectedFiles]` — 3 files — for the very same rename. An advisory
+  // that understates what the apply will touch is worse than no advisory. Declaring file first, since
+  // that is where the rename actually happens.
+  const affectedFiles = [
+    ...new Set([
+      result.symbol.filePath,
+      ...result.callers.map((c) => c.fromFilePath).filter(Boolean),
+      ...result.importers.map((i) => i.fromFilePath).filter(Boolean)
+    ])
+  ] as string[];
 
   // emitPreview: turn the advisory rename into an applyable refactor preview (previewId + approvalToken)
   // scoped to the symbol's own file + affected files, matching the identifier on word boundaries.
@@ -47,7 +58,9 @@ export function handleRenameAssist(
     const repo = store.getRepository(args.repoId);
     if (!repo) throw new McpError(ErrorCode.InvalidParams, `rename_assist: unknown repoId '${args.repoId}'. Run index_repository first.`);
     const wholeWord = args.wholeWord !== false;
-    const includePaths = [...new Set([result.symbol.filePath, ...affectedFiles])];
+    // `affectedFiles` already leads with the declaring file; the Set is kept because
+    // `RefactorScopeInput.includePaths` must not carry a duplicate.
+    const includePaths = [...new Set(affectedFiles)];
     return createReplacePreview(
       ctx,
       repo.repoPath,
@@ -66,14 +79,21 @@ export function handleRenameAssist(
     );
   }
 
-  const hints = affectedFiles.map((fp) => `In ${fp}: rename '${result.symbol!.name}' → '${args.newName}'`);
+  // MCP-ISSUE-049: `hints` embeds a path INSIDE a sentence, and the response normalizer is
+  // key-scoped — it rewrites the value of a path-named key, and cannot reach a path spliced into
+  // free text. So this payload returned `affectedFiles` with forward slashes and `hints` with
+  // backslashes. Normalized at the source instead.
+  const hints = affectedFiles.map((fp) => `In ${fp.replace(/\\/g, "/")}: rename '${result.symbol!.name}' → '${args.newName}'`);
+  // Derived from the set above rather than from `result.affectedFileCount`, which counts callers and
+  // importers only — the count and the list have to describe the same thing.
+  const affectedFileCount = affectedFiles.length;
   if (profile === "nano") {
-    return ctx.asText({ oldName: result.symbol.name, newName: args.newName, symbolId: args.symbolId, affectedFileCount: result.affectedFileCount, affectedFiles }, profile);
+    return ctx.asText({ oldName: result.symbol.name, newName: args.newName, symbolId: args.symbolId, affectedFileCount, affectedFiles }, profile);
   }
   return ctx.asText({
     symbol: { symbolId: result.symbol.symbolId, name: result.symbol.name, kind: result.symbol.kind, filePath: result.symbol.filePath, line: result.symbol.line },
     newName: args.newName,
-    affectedFileCount: result.affectedFileCount,
+    affectedFileCount,
     affectedFiles,
     callerCount: result.callers.length,
     importerCount: result.importers.length,

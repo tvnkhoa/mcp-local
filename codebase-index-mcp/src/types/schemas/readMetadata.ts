@@ -60,6 +60,17 @@ export const queryDocsSchema = (MAX_RESULT_LIMIT: number) => z
     symbolIds: z.array(z.string().min(1).max(200)).min(1).max(100).optional(),
     filePath: z.string().min(1).optional(),
     limit: z.number().int().min(1).max(MAX_RESULT_LIMIT).default(20),
+    /**
+     * MCP-ISSUE-049: mode="search" used to pad a short doc-result set with code symbols from
+     * `symbols_fts`, so a docs query answered with symbols. Padding is now opt-in.
+     */
+    includeSymbols: z.boolean().default(false),
+    /**
+     * MCP-ISSUE-049: mode="stale" excludes `code_call` mentions — identifiers scraped from fenced
+     * code blocks, which were the entire reported false positive. Opt back in for "where is this
+     * symbol illustrated" rather than "which docs are now stale".
+     */
+    includeCodeMentions: z.boolean().default(false),
     profile: responseProfileSchema.default("compact")
   })
   .strict()

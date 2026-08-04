@@ -110,7 +110,7 @@ export function handleGetPersistenceMapping(
  * This is the data-contract gate a symbol-oriented cross-repo query can't answer. Rule-based, no LLM.
  */
 export function handleGetValueContractImpact(
-  args: { value: string; column?: string; repoIds?: string[]; profile?: string },
+  args: { value: string; column?: string; repoIds?: string[]; excludeTests?: boolean; profile?: string },
   ctx: HandlerContext
 ): CallToolResult {
   // compact is the default for read tools (per CLAUDE.md: minified JSON, null fields dropped).
@@ -118,7 +118,8 @@ export function handleGetValueContractImpact(
   const result = getValueContractImpact(ctx.store, {
     value: args.value,
     column: args.column,
-    repoIds: args.repoIds
+    repoIds: args.repoIds,
+    excludeTests: args.excludeTests
   });
 
   return ctx.asText({

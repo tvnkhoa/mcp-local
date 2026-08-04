@@ -159,6 +159,16 @@ export function resolveMentionsImpl(db: Database.Database, repoId: string): numb
   const namePrefixMap = new Map<string, string>();
   const filePathMap = new Map<string, string>();
   const filePathSuffixMap = new Map<string, string>();
+  /**
+   * MCP-ISSUE-049: how many DISTINCT dotted symbols share each unqualified suffix.
+   *
+   * The suffix map below is what let a bare `` `Parse` `` in a doc resolve to
+   * `ConversationLoopCorrelationCodec.Parse` — and `query_docs{ mode:"stale" }` then reported five
+   * archived docs as stale references to a symbol they never mention, because the word `Parse`
+   * appeared inside a quoted C# snippet. A suffix that several symbols share cannot identify one of
+   * them, so ambiguity is now tracked and an ambiguous bare suffix resolves to nothing.
+   */
+  const nameSuffixCount = new Map<string, Set<string>>();
 
   for (const sym of allSymbols) {
     const rank = kindRank(sym.kind);
@@ -179,6 +189,8 @@ export function resolveMentionsImpl(db: Database.Database, repoId: string): numb
     if (dotIdx >= 0) {
       const suffix = nameLower.slice(dotIdx + 1);
       if (!nameSuffixMap.has(suffix)) nameSuffixMap.set(suffix, sym.symbol_id);
+      if (!nameSuffixCount.has(suffix)) nameSuffixCount.set(suffix, new Set());
+      nameSuffixCount.get(suffix)!.add(nameLower);
       const prefix = nameLower.slice(0, dotIdx);
       if (!namePrefixMap.has(prefix)) namePrefixMap.set(prefix, sym.symbol_id);
     }
@@ -208,13 +220,22 @@ export function resolveMentionsImpl(db: Database.Database, repoId: string): numb
   for (const mention of unresolved) {
     let resolvedSymbolId: string | undefined;
 
-    if (mention.mention_type === "backtick") {
+    if (mention.mention_type === "backtick" || mention.mention_type === "code_call") {
       const lower = mention.mention_text.toLowerCase();
-      resolvedSymbolId =
-        nameMap.get(mention.mention_text) ??
-        nameLowerMap.get(lower) ??
-        nameSuffixMap.get(lower) ??
-        namePrefixMap.get(lower);
+      // Exact name (case-sensitive, then insensitive): the mention names the symbol.
+      resolvedSymbolId = nameMap.get(mention.mention_text) ?? nameLowerMap.get(lower);
+
+      // An UNQUALIFIED suffix can only identify a symbol if exactly one dotted symbol carries it.
+      // Picking `nameSuffixMap`'s arbitrary first entry when several share the suffix is a guess
+      // reported as a fact. (This is a correctness guard in its own right; it is not what caused
+      // MCP-ISSUE-049's false positives — those resolved by exact name, because C# members are
+      // stored under their bare name. The cause was mentions harvested from fenced code blocks;
+      // see `extractMentionsFromCode` and the `code_call` type.)
+      if (resolvedSymbolId === undefined) {
+        const sharing = nameSuffixCount.get(lower);
+        if (sharing?.size === 1) resolvedSymbolId = nameSuffixMap.get(lower);
+      }
+      resolvedSymbolId ??= namePrefixMap.get(lower);
     } else if (mention.mention_type === "filepath") {
       const normalizedMention = mention.mention_text
         .replace(/\\/g, "/")
@@ -249,13 +270,24 @@ export function resolveMentionsImpl(db: Database.Database, repoId: string): numb
 
 // ── Search docs ────────────────────────────────────────────────────────
 
+/**
+ * `query_docs{ mode:"search" }`.
+ *
+ * MCP-ISSUE-049: when the doc lane returned fewer rows than `limit`, this padded the remainder from
+ * `symbols_fts` — so a docs search returned code symbols labelled `contentType:"symbol"` whose `text`
+ * was a synthesized file pointer (`"0004-autoreply-confidence-threshold.md @ line 1"`, a *module*
+ * pseudo-symbol standing in for a doc file) rather than any documentation. The padding is now
+ * opt-in via `includeSymbols`, and when requested it excludes module pseudo-symbols, which were the
+ * rows that read as nonsense.
+ */
 export function searchDocsImpl(
   db: Database.Database,
   repoId: string,
   query: string,
   limit: number,
   buildFtsQuery: (q: string) => string,
-  buildIntentFtsQuery: (q: string) => string
+  buildIntentFtsQuery: (q: string) => string,
+  includeSymbols = false
 ): {
   docId: string;
   filePath: string;
@@ -360,7 +392,7 @@ export function searchDocsImpl(
     );
   }
 
-  if (docResults.length < desiredLimit) {
+  if (includeSymbols && docResults.length < desiredLimit) {
     const symbolSlots = desiredLimit - docResults.length;
     try {
       db.prepare("select * from symbols_fts limit 0").all();
@@ -375,7 +407,7 @@ export function searchDocsImpl(
             s.line as line
           from symbols_fts sf
           inner join symbols s on s.repo_id = ? and s.symbol_id = sf.symbol_id
-          where symbols_fts match ?
+          where symbols_fts match ? and s.kind != 'module'
           order by rank
           limit ?
           `
@@ -409,29 +441,44 @@ export function searchDocsImpl(
 
 // ── Find stale docs ────────────────────────────────────────────────────
 
+/**
+ * "Which docs mention these symbols, and so may now be stale."
+ *
+ * MCP-ISSUE-049: `code_call` mentions are excluded by default. They are identifiers scraped from
+ * inside fenced code blocks, and they were the whole of the reported false positive: a symbolId for
+ * `ConversationLoopCorrelationCodec.Parse` returned five hits in `docs/02-flows/_archive/**`, every
+ * one of them a `Parse(` inside a pasted C# snippet in a document about something else. A doc that
+ * merely *contains* a call is not a doc that *documents* the callee, and "this doc is now stale"
+ * is a claim strong enough that it needs the prose-level signal.
+ *
+ * `includeCodeMentions` opts them back in for "where is this symbol illustrated" questions.
+ */
 export function findStaleDocsImpl(
   db: Database.Database,
   repoId: string,
-  symbolIds: string[]
+  symbolIds: string[],
+  includeCodeMentions = false
 ): {
   docId: string;
   filePath: string;
   headingPath: string;
   text: string | null;
   mentionText: string;
+  mentionType: string;
   symbolName: string | null;
 }[] {
   if (symbolIds.length === 0) return [];
   const ph = symbolIds.map(() => "?").join(",");
+  const typeFilter = includeCodeMentions ? "" : "and dm.mention_type != 'code_call'";
   return db
     .prepare(
       `
       select dm.doc_id as docId, d.file_path as filePath, d.heading_path as headingPath,
-             d.text, dm.mention_text as mentionText, s.name as symbolName
+             d.text, dm.mention_text as mentionText, dm.mention_type as mentionType, s.name as symbolName
       from doc_mentions dm
       inner join docs d on d.repo_id = dm.repo_id and d.doc_id = dm.doc_id
       left join symbols s on s.repo_id = dm.repo_id and s.symbol_id = dm.symbol_id
-      where dm.repo_id = ? and dm.symbol_id in (${ph})
+      where dm.repo_id = ? and dm.symbol_id in (${ph}) ${typeFilter}
       order by d.file_path, d.heading_path
       limit 200
       `
@@ -442,6 +489,7 @@ export function findStaleDocsImpl(
     headingPath: string;
     text: string | null;
     mentionText: string;
+    mentionType: string;
     symbolName: string | null;
   }[];
 }

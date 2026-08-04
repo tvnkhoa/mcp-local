@@ -25,7 +25,11 @@ export function handleTraceExecutionFlow(
   }
   const coverage = buildCoverageBlock({ resultCount: result.nodes.length, truncated: result.truncated, kind: "execution_flow", query: result.entrySymbol.name });
   if (profile === "nano") {
-    return ctx.asText({ entrySymbol: { name: result.entrySymbol.name, filePath: result.entrySymbol.filePath }, nodeCount: result.nodes.length, edgeCount: result.edges.length, depthReached: result.depthReached, truncated: result.truncated, topCallees: result.edges.slice(0, 10).map((e) => e.toName), coverage: coverage.confidence }, profile);
+    // MCP-ISSUE-049: dedupe BEFORE the slice. Taking the first 10 edges and mapping to a name gave
+    // `["Equals","NotifyAsync",…,"NotifyAsync","NotifyAsync"]` — NotifyAsync four times — so the cap
+    // was spent on repeats and genuinely distinct callees never made the list.
+    const topCallees = [...new Set(result.edges.map((e) => e.toName).filter(Boolean))].slice(0, 10);
+    return ctx.asText({ entrySymbol: { name: result.entrySymbol.name, filePath: result.entrySymbol.filePath }, nodeCount: result.nodes.length, edgeCount: result.edges.length, depthReached: result.depthReached, truncated: result.truncated, topCallees, distinctCalleeCount: new Set(result.edges.map((e) => e.toName).filter(Boolean)).size, coverage: coverage.confidence }, profile);
   }
   if (profile === "compact") {
     return ctx.asText({

@@ -35,6 +35,7 @@ import type {
   RefactorRollbackRecord,
   ReliabilitySummary,
   ResolvedEdge,
+  ResolvedEdgeRecord,
   ResolutionStats,
   RouteRecord,
   StringLiteralRecord,
@@ -322,7 +323,7 @@ export class GraphStore {
   }
 
   /** @see store/graphQueries.ts */
-  getDependencies(repoId: string, fromId: string, limit: number): EdgeRecord[] {
+  getDependencies(repoId: string, fromId: string, limit: number): ResolvedEdgeRecord[] {
     return getDependenciesImpl(this.db, repoId, fromId, limit);
   }
 
@@ -330,7 +331,7 @@ export class GraphStore {
     return findModuleSymbolId(this.db, repoId, filePath);
   }
 
-  getCallEdges(repoId: string, symbolId: string, direction: "callers" | "callees", limit: number): EdgeRecord[] {
+  getCallEdges(repoId: string, symbolId: string, direction: "callers" | "callees", limit: number): ResolvedEdgeRecord[] {
     return getCallEdgesImpl(this.db, repoId, symbolId, direction, limit);
   }
 
@@ -588,7 +589,9 @@ export class GraphStore {
     return resolvePropertyEdgesImpl(this.db, repoId, maxUnresolvedRows);
   }
 
-  getImpactSurface(repoId: string, filePath: string, limit: number): { callers: { callerName: string; callerFile: string; callerLine: number; symbolAffected: string; edgeType: string; confidence: number; reason: string | null }[]; graphHealth: GraphHealth; reliabilitySummary: ReliabilitySummary; wiringNote?: string } {
+  // MCP-ISSUE-049: `edgeTypes: string[]`, not `edgeType: string` — one row per caller→symbol pair
+  // now carries every edge type it reaches by, instead of the pair appearing once per type.
+  getImpactSurface(repoId: string, filePath: string, limit: number): { callers: { callerName: string; callerFile: string; callerLine: number; symbolAffected: string; edgeTypes: string[]; confidence: number; reason: string | null }[]; graphHealth: GraphHealth; reliabilitySummary: ReliabilitySummary; wiringNote?: string } {
     return getImpactSurfaceImpl(this.db, repoId, filePath, limit);
   }
 
@@ -761,7 +764,8 @@ export class GraphStore {
   searchDocs(
     repoId: string,
     query: string,
-    limit: number
+    limit: number,
+    includeSymbols = false
   ): {
     docId: string;
     filePath: string;
@@ -771,21 +775,23 @@ export class GraphStore {
     level: number | null;
     resolvedMentions: { symbolId: string; symbolName: string | null; mentionText: string }[];
   }[] {
-    return searchDocsImpl(this.db, repoId, query, limit, buildFtsQuery, buildIntentFtsQuery);
+    return searchDocsImpl(this.db, repoId, query, limit, buildFtsQuery, buildIntentFtsQuery, includeSymbols);
   }
 
   findStaleDocs(
     repoId: string,
-    symbolIds: string[]
+    symbolIds: string[],
+    includeCodeMentions = false
   ): {
     docId: string;
     filePath: string;
     headingPath: string;
     text: string | null;
     mentionText: string;
+    mentionType: string;
     symbolName: string | null;
   }[] {
-    return findStaleDocsImpl(this.db, repoId, symbolIds);
+    return findStaleDocsImpl(this.db, repoId, symbolIds, includeCodeMentions);
   }
 
   findDocCoverage(

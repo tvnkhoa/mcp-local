@@ -96,7 +96,7 @@ export function buildSearchTools(deps: CodebaseIndexDeps): AnyToolDefinition[] {
 
   const searchLiterals = defineTool({
     name: "search_literals",
-    description: "Search string-literal CONTENT (notification titles, error messages, log templates, user-facing text) across a repo's indexed code. Returns each literal with file, line, and enclosing symbol — use for 'what text does this repo emit' audits (notification catalogs, error-message inventories, i18n sweeps) instead of grep. Interpolated/template strings are indexed with {…} placeholders.",
+    description: "Search string-literal CONTENT (notification titles, error messages, log templates, user-facing text) across a repo's indexed code. Returns each literal with file, line, and enclosing symbol — use for 'what text does this repo emit' audits (notification catalogs, error-message inventories, i18n sweeps) instead of grep. Interpolated/template strings are indexed with {…} placeholders. excludeTests=true drops test-path results entirely.",
     input: schemas.searchLiteralsSchema(limits.maxResultLimit),
     inputSchema: {
       type: "object",
@@ -107,6 +107,7 @@ export function buildSearchTools(deps: CodebaseIndexDeps): AnyToolDefinition[] {
         query: { type: "string" },
         filePath: { type: "string" },
         limit: { type: "integer", minimum: 1, maximum: limits.maxResultLimit },
+        excludeTests: { type: "boolean" },
         profile: PROFILE_PROP
       }
     },
@@ -177,7 +178,7 @@ export function buildSearchTools(deps: CodebaseIndexDeps): AnyToolDefinition[] {
 
   const findImplementations = defineTool({
     name: "find_implementations",
-    description: "Find all classes or structs that implement a named interface (via IMPLEMENTS edges). Useful for .NET/C# DI tracing — e.g. find_implementations('IUserRepository') to locate concrete implementations. Requires C# indexing.",
+    description: "Find all classes or structs that implement a named interface (via IMPLEMENTS edges). Useful for .NET/C# DI tracing — e.g. find_implementations('IUserRepository') to locate concrete implementations. Requires C# indexing. excludeTests=true drops test-path results entirely (test doubles/fakes are usually the majority of implementations).",
     input: schemas.findImplementationsSchema(limits.maxResultLimit),
     inputSchema: {
       type: "object",
@@ -186,7 +187,12 @@ export function buildSearchTools(deps: CodebaseIndexDeps): AnyToolDefinition[] {
       properties: {
         repoId: { type: "string" },
         interfaceName: { type: "string" },
-        limit: { type: "integer", minimum: 1, maximum: limits.maxResultLimit }
+        limit: { type: "integer", minimum: 1, maximum: limits.maxResultLimit },
+        excludeTests: { type: "boolean" },
+        // MCP-ISSUE-049: `profile` was accepted by the zod schema and NOT advertised here, so a
+        // client honouring `additionalProperties: false` had to reject a parameter the tool supports.
+        // Found while adding excludeTests; the two belong in the same contract update.
+        profile: PROFILE_PROP
       }
     },
     annotations: readsGraph,
@@ -196,7 +202,7 @@ export function buildSearchTools(deps: CodebaseIndexDeps): AnyToolDefinition[] {
 
   const routeMap = defineTool({
     name: "route_map",
-    description: "Map ASP.NET C# routes to handler methods using extracted route attributes ([Route], [HttpGet], [HttpPost], ...). Use to inspect API surface deterministically.",
+    description: "Map ASP.NET C# routes to handler methods using extracted route attributes ([Route], [HttpGet], [HttpPost], ...). Use to inspect API surface deterministically. excludeTests=true drops test-path results entirely.",
     input: schemas.routeMapSchema(limits.maxResultLimit),
     inputSchema: {
       type: "object",
@@ -207,6 +213,7 @@ export function buildSearchTools(deps: CodebaseIndexDeps): AnyToolDefinition[] {
         filePathPrefix: { type: "string" },
         httpMethod: { type: "string", enum: ["GET", "POST", "PUT", "DELETE", "PATCH"] },
         limit: { type: "integer", minimum: 1, maximum: limits.maxResultLimit },
+        excludeTests: { type: "boolean" },
         profile: PROFILE_PROP
       }
     },

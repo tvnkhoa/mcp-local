@@ -127,6 +127,12 @@ export function handleHealthCheck(
       watcherCount: watchStatuses.length,
       watchers: watchStatuses
     },
+    // MCP-ISSUE-049: without `repoId` this call measures nothing repo-scoped, and must not report a
+    // number as if it had. `scope` says which question was answered; the same call WITH a repoId
+    // returned 2664 / "ready" where this one said 0 / "unknown", and the 0 read as "the vector index
+    // is empty" — which is exactly how the sweep that filed this issue started.
+    scope: repoId ? "repo" : "server",
+    ...(repoId ? {} : { note: "server-scoped answer: pass repoId for codebase state, vector index size and unresolved stats." }),
     codebaseState: {
       repoId: repoId ?? null,
       status: codebaseStatus,
@@ -143,9 +149,13 @@ export function handleHealthCheck(
     },
     packageBridge,
     vectorIndex: {
+      // `enabled` IS server-wide, so it is always honest. The two counters are per-repo: they are
+      // omitted rather than zeroed when there is no repo to count, because compact strips nulls and
+      // `symbolsIndexed: 0` is indistinguishable from a genuinely empty index.
       enabled: store.isVectorEnabled,
-      symbolsIndexed: vectorStats?.symbolsIndexed ?? 0,
-      lastRebuildAt: vectorStats?.lastRebuildAt ?? null,
+      ...(vectorStats
+        ? { symbolsIndexed: vectorStats.symbolsIndexed, lastRebuildAt: vectorStats.lastRebuildAt ?? null }
+        : { measured: false })
     },
     unresolvedStats: unresolvedStats
       ? {

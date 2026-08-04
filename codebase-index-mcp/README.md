@@ -82,10 +82,10 @@ npm install && npm run build
 | `search_regex` | Grep repo source by **regex**, returning matches with context lines + the enclosing symbol. Use instead of baseline grep for pattern searches (TODO/FIXME sweeps, API-usage hunts, config keys). Scans indexed files by default; `scanAll=true` also walks non-code text files (json/yaml). Flags limited to `[ims]` (`g` implicit); `filePathPrefix`/`language`/`excludeTests` narrow scope. Caps at `limit` + per-file cap with `truncated`/`truncationReason`. |
 | `get_symbol_detail` | Full detail for a known symbolId |
 | `get_symbol_source` | Raw source text span of a symbol read from disk (by symbolId or name) — read exact code without a separate file read. Uses persisted end-line (re-index to populate) or estimates it. |
-| `get_symbol_context_pack` | Symbol + neighbors + callers/callees in one call. Prefer over `get_change_context` when not doing deep caller traversal. |
+| `get_symbol_context_pack` | Symbol + neighbors + callers/callees in one call. Prefer over `get_change_context` when not doing deep caller traversal. `excludeTests=true` drops test-path candidates *and* callers. |
 | `get_symbol_blame` | Git blame metadata for a symbol |
 | `find_symbol_at_line` | Resolve symbol at a specific file/line |
-| `find_implementations` | Find classes that implement a given interface/type |
+| `find_implementations` | Find classes that implement a given interface/type. `excludeTests=true` drops test doubles, which are often the majority of the result. |
 | `rename_assist` | Suggest all sites requiring a rename and flag risks. `emitPreview=true` returns an applyable refactor preview (previewId + approvalToken) to execute the rename directly. |
 
 ### File & Folder Context
@@ -95,16 +95,16 @@ npm install && npm run build
 | `get_file_summary` | Symbol count, top symbols, language for a file |
 | `get_file_context` | All symbols + edges for one file. Use after `get_file_summary` when deeper context is needed. |
 | `find_entry_points` | Locate runtime and graph entry points in a repo |
-| `route_map` | Map HTTP routes for web API projects |
+| `route_map` | Map HTTP routes for web API projects. `excludeTests=true` drops test-only endpoints. |
 
 ### Dependency & Impact Analysis
 | Tool | Description |
 |------|-------------|
 | `get_change_context` | Callers and callees for a symbol (BFS); crosses MassTransit-style message-bus hops (`PUBLISHES`). Use when you need deep caller traversal; otherwise prefer `get_symbol_context_pack`. |
-| `find_impact_files` | Files impacted by changing a symbol. Use before `refactor_replace_preview` to scope blast radius. A stale index returns a non-fatal `staleWarning` field, not an error. |
+| `find_impact_files` | Files impacted by changing a symbol. Use before `refactor_replace_preview` to scope blast radius. A stale index returns a non-fatal `staleWarning` field, not an error. `view="surface"` returns one row per caller→symbol pair with `edgeTypes[]` (an array, not a scalar `edgeType`) and honors `groupBy`. |
 | `find_field_accesses` | Read/write callsites of a property (field) with their enclosing symbol — the "who reads vs writes this field" audit. Partitions `reads`/`writes`, `mode=read\|write\|all`. Accepts a property `symbolId` or resolvable `name`. Prefer over grepping a field name. |
 | `get_dependency_graph` | Graph edges for a file or symbol |
-| `get_call_chain` | Call path between two symbols. Shows path, not caller list. Crosses MassTransit-style message-bus hops (`PUBLISHES`). |
+| `get_call_chain` | Call path between two symbols. Shows path, not caller list. Crosses MassTransit-style message-bus hops (`PUBLISHES`). Every profile carries hop identity (`symbolId`/name/file), so no follow-up call is needed to resolve an id. |
 | `get_cross_repo_impact` | Impact across multiple indexed repos |
 | `trace_execution_flow` | Trace execution path through entry points. Follows `CALLS` and crosses message-bus `PUBLISHES` hops into the matched consumer. |
 
@@ -125,12 +125,12 @@ npm install && npm run build
 | `refactor_symbol_migration` | Migrate symbol references with optional C# initializer rewrite |
 | `change_value_representation` | Promote a property's string literals to enum members (C# AST, no regex backreference) across assignments, initializers, `==`/`!=` comparisons, and assertion arguments; preview-gated, cross-type sites skipped |
 | `get_persistence_mapping` | EF mapping for a property (column, converter, max length, CHECK) + `DB_TRANSLATED_PROJECTION` warning when a converted property is projected in an un-materialized `.Select()`/`.Where()` |
-| `get_value_contract_impact` | Trace a stored/wire value across all registered repos; groups exact-value hits per repo and classifies producer (write) vs consumer (read) — the data-contract gate for a storage-format migration |
+| `get_value_contract_impact` | Trace a stored/wire value across all registered repos; groups exact-value hits per repo and classifies producer (write) vs consumer (read) — the data-contract gate for a storage-format migration. `excludeTests=true` keeps fixtures and assertions out of the producer/consumer counts. |
 
 ### Docs & Advanced
 | Tool | Description |
 |------|-------------|
-| `query_docs` | Search indexed docs (requires `CODEBASE_INDEX_DOCS_TOOLS_ENABLED=true`) |
+| `query_docs` | Search indexed docs (requires `CODEBASE_INDEX_DOCS_TOOLS_ENABLED=true`). All three modes (`search`/`stale`/`coverage`) return the same envelope: `{ repoId, mode, count, results }`. `includeSymbols=true` (mode=search only) also returns matching code symbols — **off** by default. `mode=stale` counts prose mentions only; `includeCodeMentions=true` also counts identifiers inside fenced code samples (needs a re-index to populate the distinction). |
 | `query_graph` | Raw SQL against the graph database. For advanced use only; prefer structured tools. |
 
 ## Graph Model
@@ -169,7 +169,7 @@ All read tools that return symbol or edge lists support `profile`:
 
 All paths in responses are normalized to forward slashes (`src/foo.ts`) regardless of host OS. `compact` is the default for every read tool that accepts `profile`. Only `verbose` is pretty-printed; all other profiles emit minified JSON.
 
-**Which tools accept `profile`** — 32 of 43. The list is not maintained by hand here, because a
+**Which tools accept `profile`** — 34 of 43. The list is not maintained by hand here, because a
 hand-maintained copy of it was wrong in both directions (it claimed six tools that have no `profile`
 parameter, and omitted fifteen that do). `contracts/codebase-index.json` is authoritative:
 
@@ -178,10 +178,17 @@ node -e "const d=require('./contracts/codebase-index.json');   console.log((d.to
 '))"
 ```
 
-The eleven without it return a fixed shape: `index_repository`, `watch_repo`, `health_check`,
-`get_symbol_detail`, `find_symbol_at_line`, `get_folder_summary`, `query_docs`, `find_entry_points`,
-`find_implementations`, `refactor_replace_rollback`, `refactor_symbol_migration`. Passing `profile` to
-one of them is **rejected** — the input schemas are `.strict()`.
+The nine without it return a fixed shape: `index_repository`, `watch_repo`, `health_check`,
+`get_symbol_detail`, `find_symbol_at_line`, `get_folder_summary`, `find_entry_points`,
+`refactor_replace_rollback`, `refactor_symbol_migration`. Passing `profile` to one of them is
+**rejected** — the advertised input schemas are `additionalProperties: false`.
+
+> Four of those nine — `get_symbol_detail`, `find_symbol_at_line`, `get_folder_summary`,
+> `find_entry_points` — do accept `profile` in their **zod** schema while not advertising it, so a
+> client that trusts `tools/list` must not send it and a client that ignores `tools/list` will find it
+> works. That contradiction is **MCP-ISSUE-051**, not a documentation error. `find_implementations`
+> and `query_docs` had the same gap and were corrected as part of MCP-ISSUE-049; both now advertise
+> `profile` and are in the 34.
 
 Refactor tools: `refactor_replace_preview` and `refactor_replace_apply` support `nano` (summary only, no hunk content) and `compact` (hunks without before/after text). Use `nano` to check match count and affected files before requesting hunk detail.
 

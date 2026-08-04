@@ -297,7 +297,7 @@ export function buildRefactorTools(deps: CodebaseIndexDeps): AnyToolDefinition[]
 
   const getValueContractImpact = defineTool({
     name: "get_value_contract_impact",
-    description: "Trace a stored/wire VALUE (e.g. a status string \"resolved\" or magic code) across ALL registered repos by fanning search_literals, grouping exact-value hits by repo and classifying each as producer (assigned/written) or consumer (compared/read) where inferable. This is the data-contract gate for a storage-format migration — what get_cross_repo_impact (symbol-oriented) can't answer. Rule-based, no LLM.",
+    description: "Trace a stored/wire VALUE (e.g. a status string \"resolved\" or magic code) across ALL registered repos by fanning search_literals, grouping exact-value hits by repo and classifying each as producer (assigned/written) or consumer (compared/read) where inferable. This is the data-contract gate for a storage-format migration — what get_cross_repo_impact (symbol-oriented) can't answer. Rule-based, no LLM. excludeTests=true drops test-path hits entirely, so a fixture asserting the value is not reported as a producer of it.",
     input: schemas.getValueContractImpactSchema,
     inputSchema: {
       type: "object",
@@ -307,6 +307,7 @@ export function buildRefactorTools(deps: CodebaseIndexDeps): AnyToolDefinition[]
         value: { type: "string", description: "The exact stored/wire literal to trace, e.g. \"resolved\"." },
         column: { type: "string", description: "Optional DB column/field name to sharpen producer/consumer classification, e.g. \"status\"." },
         repoIds: { type: "array", items: { type: "string" }, maxItems: 50, description: "Optional subset of registered repoIds; defaults to all." },
+        excludeTests: { type: "boolean" },
         profile: PROFILE_PROP
       }
     },

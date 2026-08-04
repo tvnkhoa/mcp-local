@@ -21,6 +21,7 @@ import type { ResourceDescriptor, ResourceProvider } from "@mcp/sdk";
 import { createResource, registerResource } from "@mcp/sdk";
 
 import type { GraphStore } from "../repositories/graphStore.js";
+import { normalizeResourcePayload } from "../middleware/responseFormatter.js";
 import { parseRepoResourceUri } from "./repoResourceUri.js";
 import { getRepoStaleness, runGitLines } from "../services/git/gitHelpers.js";
 import { resolveDetectChangesPolicy, scoreChangeRisk } from "../services/analysis/policyResolver.js";
@@ -75,8 +76,10 @@ export function buildRepoResources(store: GraphStore, maxResultLimit: number): R
   const family = createResource({
     name: "repo",
     mimeType: "application/json",
-    // Two-space indent, as the hand-written handler emitted.
-    serialize: (payload) => JSON.stringify(payload, null, 2),
+    // Two-space indent, as the hand-written handler emitted. MCP-ISSUE-049: normalize first, so a
+    // resource reports paths in the same style the tools do — this is the only serialization point
+    // in the server that did not run through the shared normalizer.
+    serialize: (payload) => JSON.stringify(normalizeResourcePayload(payload), null, 2),
     list: () => listRepoResources(store),
     match: (uri) => parseRepoResourceUri(uri, maxResultLimit) ?? undefined,
     read: ({ params }) => readRepoResource(store, params, maxResultLimit)

@@ -125,6 +125,38 @@ export function isTestPath(filePath: string): boolean {
   return TEST_PATH_REGEX.test(filePath.replace(/\\/g, "/"));
 }
 
+/**
+ * MCP-ISSUE-049: EF Core migration files, the sibling of `isTestPath` for ranking purposes.
+ *
+ * A migration class name carries the vocabulary of every schema change ever made
+ * (`AddSenderEmailToCrmRefs`, `AddOutboundConfirmTrackingConsolidated`), so an intent query like
+ * "send outbound email via crm callback" matches migrations on more tokens than it matches the code
+ * that actually does the work. Combined with `Up`/`Down` being the shortest method names in any EF
+ * repo — and name length being the tie-break — migrations won the top of every business-phrase
+ * search. They are a historical record, almost never the answer to "where does this happen".
+ *
+ * Kept as one regex here for the same reason `TEST_PATH_REGEX` is: so callers cannot drift.
+ */
+const MIGRATION_PATH_REGEX = /(^|\/)migrations?\//i;
+
+export function isMigrationPath(filePath: string): boolean {
+  return MIGRATION_PATH_REGEX.test(filePath.replace(/\\/g, "/"));
+}
+
+/**
+ * The two method names EF generates for every migration. Checked together with the enclosing type
+ * so a hand-written `Up()` outside a migration folder is not demoted — `isMigrationPath` alone is
+ * enough for the folder case, and this covers a migration parked outside the conventional folder.
+ */
+const MIGRATION_MEMBER_NAMES = new Set(["up", "down"]);
+
+export function isMigrationSymbol(filePath: string, name: string, parentName?: string | null): boolean {
+  if (isMigrationPath(filePath)) return true;
+  if (!MIGRATION_MEMBER_NAMES.has(name.toLowerCase())) return false;
+  // A timestamped or `Migration`-suffixed enclosing type is the EF convention when the folder is not.
+  return /^\d{8,}_|migration/i.test(parentName ?? "");
+}
+
 /** Returns true if the first 512 bytes contain a null byte — reliable binary file indicator. */
 export function isBinary(bytes: Uint8Array): boolean {
   const limit = Math.min(bytes.length, 512);

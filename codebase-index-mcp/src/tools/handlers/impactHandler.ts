@@ -5,6 +5,7 @@ import { validateReadOnlyGraphSql, validateAllowedTables } from "../../middlewar
 import { buildStaleWarning, getRepoStaleness, collectDirtyFiles, countCommitsBehind } from "../../services/git/gitHelpers.js";
 import type { StaleWarning } from "../../services/git/gitHelpers.js";
 import { buildCoverageBlock } from "../../middleware/coverage.js";
+import { isTestPath } from "../../services/indexing/fileFilter.js";
 import { GraphStore } from "../../repositories/graphStore.js";
 import type { HandlerContext } from "./handlerContext.js";
 
@@ -87,11 +88,12 @@ export function handleGetDependencyGraph(
   const profile = resolveResponseProfile(args.profile as Parameters<typeof resolveResponseProfile>[0]);
   if (args.filePath) {
     const result = store.getModuleFlow(args.repoId, args.filePath, args.limit);
+    const collapsed = result.collapsed ? { collapsed: result.collapsed } : {};
     if (profile === "nano") {
-      const topEdges = result.edges.slice(0, 10).map((e) => ({ fromName: (e as { fromName?: string }).fromName ?? null, toName: (e as { toName?: string }).toName ?? null, type: (e as { type?: string }).type ?? null }));
-      return ctx.asText({ repoId: args.repoId, filePath: args.filePath, edgeCount: result.edges.length, topEdges, hasMore: result.edges.length > topEdges.length }, profile);
+      const topEdges = result.edges.slice(0, 10).map((e) => ({ fromName: e.fromName, toName: e.toName, type: e.type }));
+      return ctx.asText({ repoId: args.repoId, filePath: args.filePath, edgeCount: result.edges.length, topEdges, hasMore: result.edges.length > topEdges.length, ...collapsed }, profile);
     }
-    return ctx.asText({ repoId: args.repoId, filePath: args.filePath, edges: result.edges, unresolvedCalls: result.unresolvedCalls }, profile);
+    return ctx.asText({ repoId: args.repoId, filePath: args.filePath, edges: result.edges, unresolvedCalls: result.unresolvedCalls, ...collapsed }, profile);
   }
   let rows = traverseDependencyGraph(store, args.repoId, args.symbolId!, args.depth, args.limit);
   if (rows.length === 0) {
@@ -104,7 +106,7 @@ export function handleGetDependencyGraph(
     }
   }
   if (profile === "nano") {
-    const topEdges = rows.slice(0, 10).map((e) => ({ fromName: (e as { fromName?: string }).fromName ?? null, toName: (e as { toName?: string }).toName ?? null, type: e.type, confidence: e.confidence ?? null }));
+    const topEdges = rows.slice(0, 10).map((e) => ({ fromName: e.fromName, toName: e.toName, type: e.type, confidence: e.confidence ?? null }));
     return ctx.asText({ repoId: args.repoId, symbolId: args.symbolId, edgeCount: rows.length, topEdges, hasMore: rows.length > topEdges.length }, profile);
   }
   return ctx.asText({ repoId: args.repoId, symbolId: args.symbolId, depth: args.depth, edges: rows }, profile);
@@ -121,19 +123,34 @@ export function handleGetCallChain(
   type CallChainDirection = "callers" | "callees";
   const direction: CallChainDirection = args.direction;
   const rows = traverseCallGraph(store, args.repoId, args.symbolId, direction, args.depth, args.limit);
-  if (profile === "nano") {
-    const pathNodes = rows.slice(0, 10).map((e) => ({
-      name: direction === "callees" ? (e as { toName?: string }).toName ?? null : (e as { fromName?: string }).fromName ?? null,
-      filePath: direction === "callees" ? (e as { toFilePath?: string }).toFilePath ?? null : (e as { fromFilePath?: string }).fromFilePath ?? null,
-      // Mark bus hops (PUBLISHES) and interface-dispatch hops so nano output distinguishes
-      // them from direct static calls, matching trace_execution_flow. (ISSUE-020/022)
-      ...(e.type === "PUBLISHES" ? { via: "bus" } : e.reason === "interface-dispatch" ? { via: "interface" } : {}),
-      confidence: e.confidence ?? null
-    }));
-    const coverageNano = buildCoverageBlock({ resultCount: rows.length, truncated: rows.length >= args.limit, kind: "call_chain", query: args.symbolId });
-    return ctx.asText({ repoId: args.repoId, symbolId: args.symbolId, direction, chainLength: rows.length, path: pathNodes, truncated: rows.length > pathNodes.length, coverage: coverageNano.confidence }, profile);
-  }
   const coverage = buildCoverageBlock({ resultCount: rows.length, truncated: rows.length >= args.limit, kind: "call_chain", query: args.symbolId });
+
+  // MCP-ISSUE-049: every profile must carry enough identity to act on. `getCallEdges` now resolves
+  // both endpoints, so the far end of each hop has a name, a file and an id — before, nano emitted
+  // `{confidence, via}` with the name/file nulled and stripped, and compact returned raw edge rows
+  // whose only endpoint information was an opaque 24-hex id. `get_symbol_context_pack{nano}` keeps
+  // full identity and is the model this follows.
+  const farEnd = (e: (typeof rows)[number]) =>
+    direction === "callees"
+      ? { symbolId: e.toId, name: e.toName ?? null, filePath: e.toFilePath ?? null }
+      : { symbolId: e.fromId, name: e.fromName ?? null, filePath: e.fromFilePath ?? null };
+  // Mark bus hops (PUBLISHES) and interface-dispatch hops so output distinguishes
+  // them from direct static calls, matching trace_execution_flow. (ISSUE-020/022)
+  const via = (e: (typeof rows)[number]) =>
+    e.type === "PUBLISHES" ? { via: "bus" } : e.reason === "interface-dispatch" ? { via: "interface" } : {};
+
+  if (profile === "nano") {
+    const pathNodes = rows.slice(0, 10).map((e) => ({ ...farEnd(e), ...via(e), confidence: e.confidence ?? null }));
+    return ctx.asText({ repoId: args.repoId, symbolId: args.symbolId, direction, chainLength: rows.length, path: pathNodes, truncated: rows.length > pathNodes.length, coverage: coverage.confidence }, profile);
+  }
+  if (profile === "compact") {
+    const edges = rows.map((e) => ({
+      fromId: e.fromId, fromName: e.fromName ?? null, fromFilePath: e.fromFilePath ?? null,
+      toId: e.toId, toName: e.toName ?? null, toFilePath: e.toFilePath ?? null,
+      type: e.type, ...via(e), confidence: e.confidence ?? null
+    }));
+    return ctx.asText({ repoId: args.repoId, symbolId: args.symbolId, direction, depth: args.depth, edges, coverage }, profile);
+  }
   return ctx.asText({ repoId: args.repoId, symbolId: args.symbolId, direction, depth: args.depth, edges: rows, coverage }, profile);
 }
 
@@ -206,12 +223,25 @@ export function handleFindImpactFiles(
   if (args.view === "surface") {
     const result = store.getImpactSurface(args.repoId, args.filePath, args.limit);
     const surfaceWiring = result.wiringNote ? { wiringNote: result.wiringNote } : {};
+    const callers = result.callers;
     if (profile === "nano") {
-      const callers = result.callers;
-      const topItems = callers.slice(0, 10).map((x) => ({ callerName: x.callerName, callerFile: x.callerFile, edgeType: x.edgeType }));
+      const topItems = callers.slice(0, 10).map((x) => ({ callerName: x.callerName, callerFile: x.callerFile, edgeTypes: x.edgeTypes }));
       return ctx.asText({ repoId: args.repoId, filePath: args.filePath, totalCallers: callers.length, topItems, hasMore: callers.length > topItems.length, ...surfaceWiring, ...warn }, profile);
     }
-    return ctx.asText({ repoId: args.repoId, filePath: args.filePath, ...result, indexMeta: buildIndexMeta(store, args.repoId, true), ...warn }, profile);
+    // MCP-ISSUE-049: `groupBy` used to be unreachable here — the surface branch returned before
+    // `args.groupBy` was ever read, so `groupBy:"module"` produced an ungrouped list with no note
+    // that the parameter had been ignored. Grouped through the same helper the files view uses.
+    if (args.groupBy === "module") {
+      const grouped = store.groupFilesByModule([...new Set(callers.map((x) => x.callerFile))]);
+      const moduleGroups = Object.entries(grouped).map(([module, files]) => ({
+        module,
+        fileCount: files.length,
+        callerCount: callers.filter((x) => files.includes(x.callerFile)).length,
+        topFiles: files.slice(0, 5)
+      }));
+      return ctx.asText({ repoId: args.repoId, filePath: args.filePath, groupBy: "module", totalCallers: callers.length, moduleGroups, graphHealth: result.graphHealth, reliabilitySummary: result.reliabilitySummary, ...surfaceWiring, indexMeta: buildIndexMeta(store, args.repoId, true), ...warn }, profile);
+    }
+    return ctx.asText({ repoId: args.repoId, filePath: args.filePath, ...result, callers, indexMeta: buildIndexMeta(store, args.repoId, true), ...warn }, profile);
   }
   const result = store.getImpactFiles(args.repoId, args.filePath, args.limit);
   const filesWiring = result.wiringNote ? { wiringNote: result.wiringNote } : {};
@@ -413,12 +443,14 @@ export function handleGetFolderSummary(
 // ── route_map ────────────────────────────────────────────────────────────────
 
 export function handleRouteMap(
-  args: { repoId: string; filePathPrefix?: string; httpMethod?: string; limit: number; profile: string },
+  args: { repoId: string; filePathPrefix?: string; httpMethod?: string; limit: number; excludeTests: boolean; profile: string },
   ctx: HandlerContext
 ): CallToolResult {
   const { store } = ctx;
   const profile = resolveResponseProfile(args.profile as Parameters<typeof resolveResponseProfile>[0]);
-  const routes = store.getRouteMap(args.repoId, args.filePathPrefix ?? null, args.httpMethod ?? null, args.limit);
+  const routesRaw = store.getRouteMap(args.repoId, args.filePathPrefix ?? null, args.httpMethod ?? null, args.limit);
+  // MCP-ISSUE-049: 6 of 34 routes in the filed case were test-only endpoints.
+  const routes = args.excludeTests ? routesRaw.filter((r) => !isTestPath(r.filePath)) : routesRaw;
 
   const emptyHint =
     routes.length === 0
@@ -490,8 +522,16 @@ export function handleQueryGraph(
 
 // ── query_docs ────────────────────────────────────────────────────────────────
 
+/**
+ * `query_docs` — one tool, one envelope.
+ *
+ * MCP-ISSUE-049: `mode:"search"` returned a keyed object while `stale` and `coverage` returned bare
+ * arrays, so the same tool answered in three shapes and a caller had to branch on the mode it had
+ * just requested. All three now return `{ repoId, mode, count, results, ...hint }` — the shape
+ * `search` already had, which is also the convention every other read tool here follows.
+ */
 export function handleQueryDocs(
-  args: { repoId: string; mode: "search" | "stale" | "coverage"; query?: string; symbolIds?: string[]; filePath?: string; limit: number; profile: string },
+  args: { repoId: string; mode: "search" | "stale" | "coverage"; query?: string; symbolIds?: string[]; filePath?: string; limit: number; includeSymbols: boolean; includeCodeMentions: boolean; profile: string },
   ctx: HandlerContext
 ): CallToolResult {
   if (!ctx.constants.DOCS_TOOLS_ENABLED) {
@@ -499,10 +539,9 @@ export function handleQueryDocs(
   }
   const { store } = ctx;
   const profile = resolveResponseProfile(args.profile as Parameters<typeof resolveResponseProfile>[0]);
+
   if (args.mode === "search") {
-    // Always return a keyed object (stable shape regardless of result count), attaching a
-    // docs-lane hint only when empty — mirrors the find_implementations wrapper convention.
-    const results = store.searchDocs(args.repoId, args.query!, args.limit);
+    const results = store.searchDocs(args.repoId, args.query!, args.limit, args.includeSymbols);
     return ctx.asText(
       {
         repoId: args.repoId,
@@ -515,8 +554,39 @@ export function handleQueryDocs(
       profile
     );
   }
-  if (args.mode === "stale") return ctx.asText(store.findStaleDocs(args.repoId, args.symbolIds!), profile);
-  return ctx.asText(store.findDocCoverage(args.repoId, args.filePath!), profile);
+
+  if (args.mode === "stale") {
+    const results = store.findStaleDocs(args.repoId, args.symbolIds!, args.includeCodeMentions);
+    return ctx.asText(
+      {
+        repoId: args.repoId,
+        mode: "stale",
+        symbolIds: args.symbolIds,
+        count: results.length,
+        results,
+        ...(results.length === 0 && {
+          hint: args.includeCodeMentions
+            ? "no doc mentions reference these symbols — the docs lane may not be indexed for this repo (index_repository with docsMode='on'), or nothing documents them."
+            : "no PROSE doc mentions reference these symbols — the docs lane may not be indexed (index_repository with docsMode='on'), nothing documents them, or they are only named inside fenced code samples (retry with includeCodeMentions=true)."
+        })
+      },
+      profile
+    );
+  }
+
+  const results = store.findDocCoverage(args.repoId, args.filePath!);
+  return ctx.asText(
+    {
+      repoId: args.repoId,
+      mode: "coverage",
+      filePath: args.filePath,
+      count: results.length,
+      documented: results.filter((r) => r.hasDocs).length,
+      results,
+      ...(results.length === 0 && { hint: "no symbols found for this file — check the path against list_repositories/get_file_summary, and that the file was indexed." })
+    },
+    profile
+  );
 }
 
 // ── internal graph traversal helpers ─────────────────────────────────────────

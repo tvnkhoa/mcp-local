@@ -40,7 +40,14 @@ find_impact_files({ repoId: "mcp-local", filePath: "src/repositories/graphStore.
 → { totalFiles: 12, topFiles: [{ filePath: "src/services/indexing/indexPipeline.ts", symbolCount: 8 }, ...], hasMore: true }
 
 find_impact_files({ repoId: "mcp-local", filePath: "src/repositories/graphStore.ts", view: "surface", profile: "compact" })
-→ { callers: [{ callerName: "runIndexPipeline", callerFile: "src/services/indexing/indexPipeline.ts", callerLine: 409, symbolAffected: "replaceEdgesForFile", edgeType: "CALLS", confidence: 0.95 }], graphHealth: {...}, reliabilitySummary: {...} }
+→ { callers: [{ callerName: "runIndexPipeline", callerFile: "src/services/indexing/indexPipeline.ts", callerLine: 409, symbolAffected: "replaceEdgesForFile", edgeTypes: ["CALLS", "TYPE_REF"], confidence: 0.95 }], graphHealth: {...}, reliabilitySummary: {...} }
+
+# `edgeTypes` is an ARRAY: one row per (caller, affected symbol), listing every way that caller
+# reaches it. It used to be a scalar `edgeType` with one row per type, which double-counted a caller
+# that both calls a symbol and references its type (MCP-ISSUE-049).
+
+find_impact_files({ repoId: "mcp-local", filePath: "src/repositories/graphStore.ts", view: "surface", groupBy: "module" })
+→ { groupBy: "module", totalCallers: 31, moduleGroups: [{ module: "services/indexing", fileCount: 4, callerCount: 11, topFiles: [...] }] }
 
 detect_changes({ repoId: "mcp-local", policy: "strict-review", profile: "compact" })
 → { changes: [{ filePath: "src/repositories/graphStore.ts", riskLevel: "high", riskScore: 0.85 }] }

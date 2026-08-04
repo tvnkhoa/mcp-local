@@ -5,6 +5,8 @@ import {
   hasExcludedPathSegment,
   isBinary,
   isLikelyMinified,
+  isMigrationPath,
+  isMigrationSymbol,
   isTestPath,
   shouldIndexFile
 } from "./fileFilter.js";
@@ -64,6 +66,36 @@ test("isTestPath: recognizes test layouts across the languages this server index
 test("isTestPath: backslash paths are normalized, so Windows input behaves the same", () => {
   assert.equal(isTestPath("src\\__tests__\\thing.ts"), true);
   assert.equal(hasExcludedPathSegment("repo\\node_modules\\pkg\\index.js"), true);
+});
+
+test("isMigrationPath: EF migration folders, whole segment only (MCP-ISSUE-049)", () => {
+  for (const path of [
+    "src/Infrastructure/Migrations/20260731_AddSenderEmail.cs",
+    "Migrations/20260731_AddSenderEmail.cs",
+    "src/Infrastructure/Migration/One.cs"
+  ]) {
+    assert.equal(isMigrationPath(path), true, `expected migration path: ${path}`);
+  }
+  // A substring must not match: "migrationsHelper" is ordinary code, and demoting it would hide a
+  // real answer — the same whole-segment discipline `hasExcludedPathSegment` follows.
+  for (const path of ["src/migrationsHelper.ts", "src/Services/Migrator.cs", "src/thing.cs"]) {
+    assert.equal(isMigrationPath(path), false, `expected NOT a migration path: ${path}`);
+  }
+  assert.equal(isMigrationPath("src\\Migrations\\One.cs"), true, "backslashes normalized");
+});
+
+test("isMigrationSymbol: Up/Down only count inside a migration shape (MCP-ISSUE-049)", () => {
+  // In the folder → demoted regardless of member name.
+  assert.equal(isMigrationSymbol("src/Migrations/One.cs", "Up", "AddSenderEmail"), true);
+  // Outside the folder, Up/Down still demote when the enclosing type looks like a migration —
+  // EF allows the file to live anywhere.
+  assert.equal(isMigrationSymbol("src/Data/One.cs", "Down", "20260731_AddSenderEmail"), true);
+  assert.equal(isMigrationSymbol("src/Data/One.cs", "Up", "AddSenderEmailMigration"), true);
+  // A hand-written Up() in ordinary code is NOT a migration — this is the false positive the
+  // parentName check exists to prevent.
+  assert.equal(isMigrationSymbol("src/Ui/Scroller.cs", "Up", "ScrollController"), false);
+  assert.equal(isMigrationSymbol("src/Ui/Scroller.cs", "Up", null), false);
+  assert.equal(isMigrationSymbol("src/Notify/Notifier.cs", "NotifyAsync", "Notifier"), false);
 });
 
 test("hasExcludedPathSegment: matches whole segments, not substrings", () => {

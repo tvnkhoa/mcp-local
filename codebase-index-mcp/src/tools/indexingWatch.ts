@@ -77,7 +77,7 @@ export function buildIndexingWatchTools(deps: CodebaseIndexDeps): AnyToolDefinit
 
   const getFeatureBundle = defineTool({
     name: "get_feature_bundle",
-    description: "Gather a whole vertical-slice feature from one seed: given an entity (seedSymbol e.g. 'ConversationNote', or seedFile) it walks the C# convention (entity → {E}Configuration → Create/Update/Delete{E}Command + handlers + validators → Get{E}Query + handlers → {E}Endpoints) and returns the related symbols with source in one call. Use for 'implement X by mirroring Y' tasks instead of reading 6+ files separately. Heuristic, name-pattern based; unresolvedRoles lists roles not found by name.",
+    description: "Gather a whole vertical-slice feature from one seed: given an entity (seedSymbol e.g. 'ConversationNote', or seedFile) it walks the C# convention (entity → {E}Configuration → Create/Update/Delete{E}Command + handlers + validators → Get{E}Query + handlers → {E}Endpoints) and returns the related symbols with source in one call. Use for 'implement X by mirroring Y' tasks instead of reading 6+ files separately. Heuristic, name-pattern based; unresolvedRoles lists roles not found by name. excludeTests=true drops test-path results entirely — recommended, since a name-pattern match happily awards a role to '{E}CommandHandlerTests' or resolves a DbSet to a TestDbContext.",
     input: schemas.getFeatureBundleSchema,
     inputSchema: {
       type: "object",
@@ -91,6 +91,7 @@ export function buildIndexingWatchTools(deps: CodebaseIndexDeps): AnyToolDefinit
         maxFiles: { type: "integer", minimum: 1, maximum: 60 },
         maxBytesPerFile: { type: "integer", minimum: 1, maximum: 20000 },
         includeSource: { type: "boolean" },
+        excludeTests: { type: "boolean" },
         profile: PROFILE_PROP
       }
     },

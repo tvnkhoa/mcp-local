@@ -256,6 +256,22 @@ export type ResolvedEdge = {
   via?: "interface" | "bus" | "member";
 };
 
+/**
+ * An `EdgeRecord` whose two endpoints have been resolved to a symbol name and file.
+ *
+ * MCP-ISSUE-049: `getCallEdges` and `getDependencies` selected ids only, so `get_call_chain` and
+ * `get_dependency_graph` could report nothing but `fromId`/`toId` — an opaque 24-hex hash the caller
+ * had to spend a second tool call resolving. This is `ResolvedEdge`'s name/path fields grafted onto
+ * `EdgeRecord`, rather than `ResolvedEdge` itself, so the `repoId` those queries select and the narrow
+ * `type` union both survive and every existing consumer keeps compiling.
+ */
+export type ResolvedEdgeRecord = EdgeRecord & {
+  fromName: string | null;
+  fromFilePath: string | null;
+  toName: string | null;
+  toFilePath: string | null;
+};
+
 /** ISSUE-023: string literal được index làm lane riêng (KHÔNG vào symbols — tránh phá ranking + dead_code_scan). */
 export type StringLiteralRecord = {
   repoId: string;
@@ -283,7 +299,20 @@ export type DocMentionRecord = {
   repoId: string;
   docId: string;
   symbolId: string | null; // null if unresolved
-  mentionType: "backtick" | "heading" | "filepath";
+  /**
+   * How the mention was found, which is also how much it is worth.
+   *
+   * `backtick` / `heading` / `filepath` are **prose** signals: an author deliberately named a symbol
+   * in the text of a document, so the document is about that symbol.
+   *
+   * `code_call` is a bare `identifier(` harvested from inside a fenced code block (MCP-ISSUE-049).
+   * It used to be recorded as `backtick`, with a code comment conceding "Treat as backtick-level
+   * confidence since it's code" — which made every identifier in every pasted code sample look like
+   * documentation of that symbol. A sample containing `Parse(` is not a doc for
+   * `ConversationLoopCorrelationCodec.Parse`. Kept, because it is genuinely useful for "where is this
+   * illustrated", but excluded from staleness by default.
+   */
+  mentionType: "backtick" | "heading" | "filepath" | "code_call";
   confidence: number; // 1.0, 0.7, 0.5
   mentionText: string; // the actual text matched, e.g., "GraphStore"
 };

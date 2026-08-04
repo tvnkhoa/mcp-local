@@ -75,6 +75,7 @@ export const getSymbolContextPackSchema = (MAX_DEPTH: number, MAX_RESULT_LIMIT: 
     callerDepth: z.number().int().min(1).max(MAX_DEPTH).default(2),
     calleeDepth: z.number().int().min(1).max(MAX_DEPTH).default(1),
     limit: z.number().int().min(1).max(MAX_RESULT_LIMIT).default(20),
+    excludeTests: z.boolean().default(false),
     profile: responseProfileSchema.default("compact")
   })
   .strict();

@@ -103,12 +103,14 @@ export function handleSearchSymbols(
 // i18n sweeps) are one MCP call instead of grep + full-file reads.
 
 export function handleSearchLiterals(
-  args: { repoId: string; query: string; filePath?: string; limit: number; profile: string },
+  args: { repoId: string; query: string; filePath?: string; limit: number; excludeTests: boolean; profile: string },
   ctx: HandlerContext
 ): CallToolResult {
   const { store } = ctx;
   const profile = resolveResponseProfile(args.profile as Parameters<typeof resolveResponseProfile>[0]);
-  const results = store.searchLiterals(args.repoId, args.query, args.limit, args.filePath ?? null);
+  const resultsRaw = store.searchLiterals(args.repoId, args.query, args.limit, args.filePath ?? null);
+  // MCP-ISSUE-049: post-filter, matching how search_symbols/search_regex apply the same flag.
+  const results = args.excludeTests ? resultsRaw.filter((r) => !isTestPath(r.filePath)) : resultsRaw;
   const staleWarning = buildStaleWarning(args.repoId, store, "literal lines may be off vs current HEAD — re-index for exact positions.");
   const coverage = buildCoverageBlock({ resultCount: results.length, kind: "search", query: args.query });
 
@@ -261,6 +263,7 @@ export function handleGetSymbolContextPack(
     callerDepth: number;
     calleeDepth: number;
     limit: number;
+    excludeTests: boolean;
     profile: string;
   },
   ctx: HandlerContext
@@ -268,10 +271,29 @@ export function handleGetSymbolContextPack(
   const { store } = ctx;
   const profile = resolveResponseProfile(args.profile as Parameters<typeof resolveResponseProfile>[0]);
 
-  const candidates = store.getSymbolCandidates(args.repoId, args.name, args.limit);
-  const context = store.getContextByName(args.repoId, args.name, args.limit);
+  // MCP-ISSUE-049: 5 of 6 callers were test files in the filed case. `getSymbolCandidates` already
+  // honours the flag; the caller/callee lists are graph reads that do not, so they are filtered here.
+  const candidates = store.getSymbolCandidates(args.repoId, args.name, args.limit, "name", { excludeTests: args.excludeTests });
+  const contextRaw = store.getContextByName(args.repoId, args.name, args.limit);
+  const context = args.excludeTests
+    ? {
+        ...contextRaw,
+        callers: contextRaw.callers.filter((x) => !isTestPath(x.callerFile)),
+        callees: contextRaw.callees.filter((x) => !isTestPath(x.calleeFile ?? "")),
+        importedByFiles: contextRaw.importedByFiles.filter((f) => !isTestPath(f))
+      }
+    : contextRaw;
   const selectedSymbolId = context.symbol?.symbolId ?? candidates[0]?.symbolId ?? null;
-  const change = selectedSymbolId ? store.getChangeContext(args.repoId, selectedSymbolId, args.callerDepth, args.calleeDepth, args.limit) : null;
+  const changeRaw = selectedSymbolId ? store.getChangeContext(args.repoId, selectedSymbolId, args.callerDepth, args.calleeDepth, args.limit) : null;
+  const change =
+    changeRaw && args.excludeTests
+      ? {
+          ...changeRaw,
+          callers: changeRaw.callers.filter((x) => !isTestPath(x.fromFilePath ?? "")),
+          callees: changeRaw.callees.filter((x) => !isTestPath(x.toFilePath ?? "")),
+          typeDeps: changeRaw.typeDeps.filter((x) => !isTestPath(x.toFilePath ?? ""))
+        }
+      : changeRaw;
 
   // ISSUE-021: uniform coverage signal so the CLAUDE.md fallback gate applies here too.
   const coverage = buildCoverageBlock({

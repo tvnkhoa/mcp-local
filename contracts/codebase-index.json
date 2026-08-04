@@ -478,10 +478,13 @@
         "openWorldHint": false,
         "readOnlyHint": true
       },
-      "description": "Find all classes or structs that implement a named interface (via IMPLEMENTS edges). Useful for .NET/C# DI tracing — e.g. find_implementations('IUserRepository') to locate concrete implementations. Requires C# indexing.",
+      "description": "Find all classes or structs that implement a named interface (via IMPLEMENTS edges). Useful for .NET/C# DI tracing — e.g. find_implementations('IUserRepository') to locate concrete implementations. Requires C# indexing. excludeTests=true drops test-path results entirely (test doubles/fakes are usually the majority of implementations).",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
+          "excludeTests": {
+            "type": "boolean"
+          },
           "interfaceName": {
             "type": "string"
           },
@@ -489,6 +492,15 @@
             "maximum": 500,
             "minimum": 1,
             "type": "integer"
+          },
+          "profile": {
+            "enum": [
+              "nano",
+              "compact",
+              "standard",
+              "verbose"
+            ],
+            "type": "string"
           },
           "repoId": {
             "type": "string"
@@ -779,7 +791,7 @@
         "openWorldHint": false,
         "readOnlyHint": true
       },
-      "description": "Gather a whole vertical-slice feature from one seed: given an entity (seedSymbol e.g. 'ConversationNote', or seedFile) it walks the C# convention (entity → {E}Configuration → Create/Update/Delete{E}Command + handlers + validators → Get{E}Query + handlers → {E}Endpoints) and returns the related symbols with source in one call. Use for 'implement X by mirroring Y' tasks instead of reading 6+ files separately. Heuristic, name-pattern based; unresolvedRoles lists roles not found by name.",
+      "description": "Gather a whole vertical-slice feature from one seed: given an entity (seedSymbol e.g. 'ConversationNote', or seedFile) it walks the C# convention (entity → {E}Configuration → Create/Update/Delete{E}Command + handlers + validators → Get{E}Query + handlers → {E}Endpoints) and returns the related symbols with source in one call. Use for 'implement X by mirroring Y' tasks instead of reading 6+ files separately. Heuristic, name-pattern based; unresolvedRoles lists roles not found by name. excludeTests=true drops test-path results entirely — recommended, since a name-pattern match happily awards a role to '{E}CommandHandlerTests' or resolves a DbSet to a TestDbContext.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -788,6 +800,9 @@
               "csharp-vertical-slice"
             ],
             "type": "string"
+          },
+          "excludeTests": {
+            "type": "boolean"
           },
           "includeSource": {
             "type": "boolean"
@@ -1031,7 +1046,7 @@
         "openWorldHint": false,
         "readOnlyHint": true
       },
-      "description": "Single-call planning pack for a symbol name: ranked candidates + callers + callees + importers + change-context. When a name resolves to several symbols (e.g. a class and its same-named constructor), the substantive symbol (class/interface/method) is selected for the context, so callers/importers are meaningful. Use this instead of get_change_context when you need symbol detail without deep caller traversal. Use profile='compact' (default) or 'nano' in Plan mode.",
+      "description": "Single-call planning pack for a symbol name: ranked candidates + callers + callees + importers + change-context. When a name resolves to several symbols (e.g. a class and its same-named constructor), the substantive symbol (class/interface/method) is selected for the context, so callers/importers are meaningful. Use this instead of get_change_context when you need symbol detail without deep caller traversal. Use profile='compact' (default) or 'nano' in Plan mode. excludeTests=true drops test-path candidates and callers entirely.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -1044,6 +1059,9 @@
             "maximum": 5,
             "minimum": 1,
             "type": "integer"
+          },
+          "excludeTests": {
+            "type": "boolean"
           },
           "limit": {
             "maximum": 500,
@@ -1159,13 +1177,16 @@
         "openWorldHint": false,
         "readOnlyHint": true
       },
-      "description": "Trace a stored/wire VALUE (e.g. a status string \"resolved\" or magic code) across ALL registered repos by fanning search_literals, grouping exact-value hits by repo and classifying each as producer (assigned/written) or consumer (compared/read) where inferable. This is the data-contract gate for a storage-format migration — what get_cross_repo_impact (symbol-oriented) can't answer. Rule-based, no LLM.",
+      "description": "Trace a stored/wire VALUE (e.g. a status string \"resolved\" or magic code) across ALL registered repos by fanning search_literals, grouping exact-value hits by repo and classifying each as producer (assigned/written) or consumer (compared/read) where inferable. This is the data-contract gate for a storage-format migration — what get_cross_repo_impact (symbol-oriented) can't answer. Rule-based, no LLM. excludeTests=true drops test-path hits entirely, so a fixture asserting the value is not reported as a producer of it.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
           "column": {
             "description": "Optional DB column/field name to sharpen producer/consumer classification, e.g. \"status\".",
             "type": "string"
+          },
+          "excludeTests": {
+            "type": "boolean"
           },
           "profile": {
             "enum": [
@@ -1385,12 +1406,20 @@
         "openWorldHint": false,
         "readOnlyHint": true
       },
-      "description": "Unified docs tool. mode=search: full-text search across indexed documentation sections (requires query); mode=stale: find docs that mention changed symbols (requires symbolIds); mode=coverage: show which exported symbols are documented (requires filePath). Requires docs lane enabled.",
+      "description": "Unified docs tool. mode=search: full-text search across indexed documentation sections (requires query); mode=stale: find docs that mention changed symbols (requires symbolIds); mode=coverage: show which exported symbols are documented (requires filePath). All three modes return the same envelope: { repoId, mode, count, results }. Requires docs lane enabled. includeSymbols=true (mode=search only) additionally pads the result set with matching CODE symbols — off by default, because a docs search answering with symbols is rarely what was asked. mode=stale counts PROSE mentions only; includeCodeMentions=true also counts identifiers appearing inside fenced code samples.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
           "filePath": {
             "type": "string"
+          },
+          "includeCodeMentions": {
+            "description": "mode=stale only: also count identifiers scraped from fenced code samples (mentionType='code_call'). Off by default — a doc that merely contains a call is not documentation of the callee.",
+            "type": "boolean"
+          },
+          "includeSymbols": {
+            "description": "mode=search only: also return matching code symbols (contentType='symbol'). Off by default.",
+            "type": "boolean"
           },
           "limit": {
             "maximum": 500,
@@ -1402,6 +1431,15 @@
               "search",
               "stale",
               "coverage"
+            ],
+            "type": "string"
+          },
+          "profile": {
+            "enum": [
+              "nano",
+              "compact",
+              "standard",
+              "verbose"
             ],
             "type": "string"
           },
@@ -1888,10 +1926,13 @@
         "openWorldHint": false,
         "readOnlyHint": true
       },
-      "description": "Map ASP.NET C# routes to handler methods using extracted route attributes ([Route], [HttpGet], [HttpPost], ...). Use to inspect API surface deterministically.",
+      "description": "Map ASP.NET C# routes to handler methods using extracted route attributes ([Route], [HttpGet], [HttpPost], ...). Use to inspect API surface deterministically. excludeTests=true drops test-path results entirely.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
+          "excludeTests": {
+            "type": "boolean"
+          },
           "filePathPrefix": {
             "type": "string"
           },
@@ -1937,10 +1978,13 @@
         "openWorldHint": false,
         "readOnlyHint": true
       },
-      "description": "Search string-literal CONTENT (notification titles, error messages, log templates, user-facing text) across a repo's indexed code. Returns each literal with file, line, and enclosing symbol — use for 'what text does this repo emit' audits (notification catalogs, error-message inventories, i18n sweeps) instead of grep. Interpolated/template strings are indexed with {…} placeholders.",
+      "description": "Search string-literal CONTENT (notification titles, error messages, log templates, user-facing text) across a repo's indexed code. Returns each literal with file, line, and enclosing symbol — use for 'what text does this repo emit' audits (notification catalogs, error-message inventories, i18n sweeps) instead of grep. Interpolated/template strings are indexed with {…} placeholders. excludeTests=true drops test-path results entirely.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
+          "excludeTests": {
+            "type": "boolean"
+          },
           "filePath": {
             "type": "string"
           },

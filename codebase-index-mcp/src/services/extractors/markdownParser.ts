@@ -154,6 +154,12 @@ function extractMentionsFromCode(code: string, docId: string, repoId: string, me
   }
 
   // Function-like calls: functionName(), ClassName.method(), etc.
+  //
+  // MCP-ISSUE-049: recorded as `code_call`, NOT `backtick`. Every identifier followed by `(` in a
+  // pasted code sample lands here — `Parse(`, `Handle(`, `Deserialize(` — and calling that a
+  // "backtick mention" made an archived doc containing a C# snippet register as documentation of
+  // whatever same-named symbol happened to exist. It is a "this symbol appears in an example" signal,
+  // which is worth keeping and is not worth treating as prose.
   const callRegex = /([a-zA-Z_][a-zA-Z0-9_]*)\s*\(/g;
   while ((match = callRegex.exec(code)) !== null) {
     const funcName = match[1];
@@ -163,8 +169,8 @@ function extractMentionsFromCode(code: string, docId: string, repoId: string, me
         repoId,
         docId,
         symbolId: null,
-        mentionType: "backtick", // Treat as backtick-level confidence since it's code
-        confidence: 0.8,
+        mentionType: "code_call",
+        confidence: 0.5,
         mentionText: funcName
       });
     }

@@ -9,8 +9,22 @@
 
 import type Database from "better-sqlite3";
 import type { SymbolRecord } from "../../types/index.js";
-import { isTestPath } from "../indexing/fileFilter.js";
+import { isMigrationSymbol, isTestPath } from "../indexing/fileFilter.js";
 import { RANKED_KIND_BONUS, TEST_PATH_PENALTY, extractIntentTokens } from "./symbolSearchFts.js";
+
+/**
+ * How far a row is pushed down the intent ranking regardless of how well it matches (MCP-ISSUE-049).
+ *
+ * `0` production code · `1` test paths · `2` EF migrations. Migrations rank below tests deliberately:
+ * a test at least exercises the behaviour asked about, whereas a migration only mentions the words.
+ *
+ * This is a *tier*, not a score, because a score cannot win against `matched`. See the sort below.
+ */
+function demotionTierFor(row: SymbolRecord & { parentName?: string | null }): 0 | 1 | 2 {
+  if (isMigrationSymbol(row.filePath, row.name, row.parentName)) return 2;
+  if (isTestPath(row.filePath)) return 1;
+  return 0;
+}
 
 export function getSymbolCandidatesImpl(
   db: Database.Database,
@@ -73,7 +87,15 @@ export function getSymbolCandidatesImpl(
         left join symbols p on p.repo_id = s.repo_id and p.symbol_id = s.parent_symbol_id
         ${langJoin}
         where s.repo_id = ? and (${tokenClauses}) ${filterWhere}
-        order by length(s.name)
+        -- MCP-ISSUE-049: this was \`order by length(s.name)\` alone, which decided the candidate POOL
+        -- before any scoring ran. \`Up\` and \`Down\` are the shortest method names in an EF repo, so a
+        -- repo with many migrations spent the whole \`fetchLimit\` window on them and long, relevant
+        -- names were discarded before they could be scored at all. Pushing demoted paths to the back
+        -- of the pool makes the window describe candidates rather than short names.
+        order by
+          case when replace(s.file_path, char(92), '/') like '%/migrations/%'
+                 or replace(s.file_path, char(92), '/') like 'migrations/%' then 1 else 0 end,
+          length(s.name)
         limit ?
         `
       )
@@ -89,10 +111,16 @@ export function getSymbolCandidatesImpl(
       const testPenalty = isTestPath(row.filePath) ? TEST_PATH_PENALTY : 0;
       const confidenceRaw = Math.max(0, Math.min(1, 0.5 + 0.45 * coverage + kindBonus - testPenalty));
       const matchType: "exact" | "prefix" | "contains" = coverage >= 1 ? "exact" : "contains";
-      return { row, matched, matchType, confidenceRaw };
+      return { row, matched, matchType, confidenceRaw, demotionTier: demotionTierFor(row) };
     });
+    // MCP-ISSUE-049: demotion is the PRIMARY key. It used to live only in `confidenceRaw`, the
+    // second key, so a migration matching one more token than the real symbol outranked it however
+    // heavily it was penalized — and a business-phrase query matches migration class names on more
+    // tokens than anything else, because those names are a log of every schema change ever made.
+    // Ordering by tier first also repairs the test-path penalty, which had the same weakness.
     scored.sort(
       (a, b) =>
+        a.demotionTier - b.demotionTier ||
         b.matched - a.matched ||
         b.confidenceRaw - a.confidenceRaw ||
         a.row.name.length - b.row.name.length ||

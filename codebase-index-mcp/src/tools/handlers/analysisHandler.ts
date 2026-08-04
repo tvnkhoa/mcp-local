@@ -1,6 +1,7 @@
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { resolveResponseProfile } from "../../middleware/responseFormatter.js";
 import { buildCoverageBlock } from "../../middleware/coverage.js";
+import { isTestPath } from "../../services/indexing/fileFilter.js";
 import type { HandlerContext } from "./handlerContext.js";
 
 // ── dead_code_scan ────────────────────────────────────────────────────────────
@@ -113,11 +114,14 @@ export function handleFindEntryPoints(
 // ── find_implementations ──────────────────────────────────────────────────────
 
 export function handleFindImplementations(
-  args: { repoId: string; interfaceName: string; limit: number; profile: string },
+  args: { repoId: string; interfaceName: string; limit: number; excludeTests: boolean; profile: string },
   ctx: HandlerContext
 ): CallToolResult {
   const profile = resolveResponseProfile(args.profile as Parameters<typeof resolveResponseProfile>[0]);
-  const rows = ctx.store.findImplementations(args.repoId, args.interfaceName, args.limit);
+  const rowsRaw = ctx.store.findImplementations(args.repoId, args.interfaceName, args.limit);
+  // MCP-ISSUE-049: on a C# repo the test doubles are usually the MAJORITY of implementations
+  // (2 of 3 in the filed case), so without this the caller had to eyeball the paths every time.
+  const rows = args.excludeTests ? rowsRaw.filter((x) => !isTestPath(x.filePath)) : rowsRaw;
 
   // When no implementations resolve, surface similar indexed interface names as hints.
   // Covers typos and C#-only gating (e.g. querying a TS type, or "IUserRepo" vs "IUserRepository").

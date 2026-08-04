@@ -149,6 +149,7 @@ export const getValueContractImpactSchema = z
     value: z.string().min(1).max(500),
     column: z.string().min(1).max(200).optional(),
     repoIds: z.array(z.string().min(1).max(200)).max(50).optional(),
+    excludeTests: z.boolean().default(false),
     profile: responseProfileSchema.default("compact")
   })
   .strict();

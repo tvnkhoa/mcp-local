@@ -127,7 +127,7 @@ export function buildGraphImpactTools(deps: CodebaseIndexDeps): AnyToolDefinitio
 
   const getSymbolContextPack = defineTool({
     name: "get_symbol_context_pack",
-    description: "Single-call planning pack for a symbol name: ranked candidates + callers + callees + importers + change-context. When a name resolves to several symbols (e.g. a class and its same-named constructor), the substantive symbol (class/interface/method) is selected for the context, so callers/importers are meaningful. Use this instead of get_change_context when you need symbol detail without deep caller traversal. Use profile='compact' (default) or 'nano' in Plan mode.",
+    description: "Single-call planning pack for a symbol name: ranked candidates + callers + callees + importers + change-context. When a name resolves to several symbols (e.g. a class and its same-named constructor), the substantive symbol (class/interface/method) is selected for the context, so callers/importers are meaningful. Use this instead of get_change_context when you need symbol detail without deep caller traversal. Use profile='compact' (default) or 'nano' in Plan mode. excludeTests=true drops test-path candidates and callers entirely.",
     input: schemas.getSymbolContextPackSchema(limits.maxDepth, limits.maxResultLimit),
     inputSchema: {
       type: "object",
@@ -139,6 +139,7 @@ export function buildGraphImpactTools(deps: CodebaseIndexDeps): AnyToolDefinitio
         callerDepth: { type: "integer", minimum: 1, maximum: limits.maxDepth },
         calleeDepth: { type: "integer", minimum: 1, maximum: limits.maxDepth },
         limit: { type: "integer", minimum: 1, maximum: limits.maxResultLimit },
+        excludeTests: { type: "boolean" },
         profile: PROFILE_PROP
       }
     },

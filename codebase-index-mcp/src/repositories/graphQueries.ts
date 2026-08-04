@@ -12,50 +12,58 @@
 
 import type Database from "better-sqlite3";
 
-import type { EdgeRecord, ResolvedEdge, SymbolRecord } from "../types/index.js";
+import type { ResolvedEdge, ResolvedEdgeRecord, SymbolRecord } from "../types/index.js";
 import { CALL_TRAVERSAL_EDGE_SQL_LIST } from "../types/index.js";
 import { buildEdgeToSymbolPairsCte, resolveCanonicalFilePath } from "../services/impact/impactAnalyzer.js";
 
-export function getDependencies(db: Database.Database, repoId: string, fromId: string, limit: number): EdgeRecord[] {
+/**
+ * Endpoint name/file resolution, shared by every edge query in this file.
+ *
+ * MCP-ISSUE-049: three queries here returned bare ids while `getModuleFlow` — same table, same
+ * join — returned names, which is exactly why `get_dependency_graph{filePath}` could label its
+ * edges and `get_call_chain` could not. One fragment so the two cannot drift apart again.
+ */
+const RESOLVED_ENDPOINT_COLUMNS = `
+        sf.name as fromName,
+        sf.file_path as fromFilePath,
+        st.name as toName,
+        st.file_path as toFilePath`;
+
+const RESOLVED_ENDPOINT_JOINS = `
+      left join symbols sf on sf.repo_id = e.repo_id and sf.symbol_id = e.from_id
+      left join symbols st on st.repo_id = e.repo_id and st.symbol_id = e.to_id`;
+
+export function getDependencies(db: Database.Database, repoId: string, fromId: string, limit: number): ResolvedEdgeRecord[] {
   return db
     .prepare(
       `
-      select repo_id as repoId, from_id as fromId, to_id as toId, type
-      from edges
-      where repo_id = ? and from_id = ? and type in ('IMPORTS', 'DEPENDS_ON')
+      select e.repo_id as repoId, e.from_id as fromId, e.to_id as toId, e.type,${RESOLVED_ENDPOINT_COLUMNS}
+      from edges e${RESOLVED_ENDPOINT_JOINS}
+      where e.repo_id = ? and e.from_id = ? and e.type in ('IMPORTS', 'DEPENDS_ON')
       limit ?
       `
     )
-    .all(repoId, fromId, limit) as EdgeRecord[];
+    .all(repoId, fromId, limit) as ResolvedEdgeRecord[];
 }
 
-export function getCallEdges(db: Database.Database, repoId: string, symbolId: string, direction: "callers" | "callees", limit: number): EdgeRecord[] {
+export function getCallEdges(db: Database.Database, repoId: string, symbolId: string, direction: "callers" | "callees", limit: number): ResolvedEdgeRecord[] {
   // CALLS for the static call graph; PUBLISHES (ISSUE-020) so callers/callees cross the message
   // bus — a publisher counts as a "caller" of the consumer it was matched to, and vice versa.
   // confidence/reason selected so consumers can tag via:"interface" (ISSUE-022) / via:"bus".
-  if (direction === "callees") {
-    return db
-      .prepare(
-        `
-        select repo_id as repoId, from_id as fromId, to_id as toId, type, confidence, reason
-        from edges
-        where repo_id = ? and from_id = ? and type in (${CALL_TRAVERSAL_EDGE_SQL_LIST})
-        limit ?
-        `
-      )
-      .all(repoId, symbolId, limit) as EdgeRecord[];
-  }
-
+  //
+  // The endpoint join is a LEFT join on purpose: an unresolved callee (`callee:Foo`) has no symbols
+  // row, and dropping those hops would silently shrink the call graph rather than label it.
+  const endpointColumn = direction === "callees" ? "e.from_id" : "e.to_id";
   return db
     .prepare(
       `
-      select repo_id as repoId, from_id as fromId, to_id as toId, type, confidence, reason
-      from edges
-      where repo_id = ? and to_id = ? and type in (${CALL_TRAVERSAL_EDGE_SQL_LIST})
+      select e.repo_id as repoId, e.from_id as fromId, e.to_id as toId, e.type, e.confidence, e.reason,${RESOLVED_ENDPOINT_COLUMNS}
+      from edges e${RESOLVED_ENDPOINT_JOINS}
+      where e.repo_id = ? and ${endpointColumn} = ? and e.type in (${CALL_TRAVERSAL_EDGE_SQL_LIST})
       limit ?
       `
     )
-    .all(repoId, symbolId, limit) as EdgeRecord[];
+    .all(repoId, symbolId, limit) as ResolvedEdgeRecord[];
 }
 
 /** One property symbol plus every read/write callsite that reaches it. */
@@ -142,6 +150,14 @@ export function getFieldAccesses(db: Database.Database,
 export interface ModuleFlowResult {
   edges: ResolvedEdge[];
   unresolvedCalls: { count: number; samples: string[] };
+  /**
+   * MCP-ISSUE-049: rows the collapse below removed, reported rather than dropped in silence.
+   * `selfReferences` are `fromId === toId` (a type referring to itself is not a dependency);
+   * `duplicateEndpoints` is the same (file → target, type) reached twice, which is what a
+   * ctor-injected interface looks like when both the constructor symbol and its class carry
+   * the TYPE_REF.
+   */
+  collapsed?: { selfReferences: number; duplicateEndpoints: number };
 }
 
 export function getModuleFlow(db: Database.Database, repoId: string, filePath: string, limit: number): ModuleFlowResult {
@@ -189,12 +205,30 @@ export function getModuleFlow(db: Database.Database, repoId: string, filePath: s
   const edges: ResolvedEdge[] = [];
   const unresolvedNames: string[] = [];
 
+  // MCP-ISSUE-049: the raw row set double-reports a ctor-injected interface — once from the
+  // constructor symbol and once from the enclosing class — and includes `X → X` self-TYPE_REFs.
+  // Keyed on the SOURCE FILE rather than `fromId`, because the two rows differ only in which
+  // symbol inside this file the edge hangs off, which is not a distinction the caller can use.
+  const seenEndpoints = new Set<string>();
+  let selfReferences = 0;
+  let duplicateEndpoints = 0;
+
   for (const row of all) {
     if (row.toId.startsWith("callee:")) {
       unresolvedNames.push(row.toId.slice(7));
-    } else {
-      edges.push(row);
+      continue;
     }
+    if (row.fromId === row.toId) {
+      selfReferences += 1;
+      continue;
+    }
+    const key = `${row.fromFilePath ?? row.fromId} ${row.toId} ${row.type}`;
+    if (seenEndpoints.has(key)) {
+      duplicateEndpoints += 1;
+      continue;
+    }
+    seenEndpoints.add(key);
+    edges.push(row);
   }
 
   // Dedupe and cap samples
@@ -204,7 +238,10 @@ export function getModuleFlow(db: Database.Database, repoId: string, filePath: s
     unresolvedCalls: {
       count: unresolvedNames.length,
       samples: uniqueNames.slice(0, 20)
-    }
+    },
+    ...(selfReferences > 0 || duplicateEndpoints > 0
+      ? { collapsed: { selfReferences, duplicateEndpoints } }
+      : {})
   };
 }
 
