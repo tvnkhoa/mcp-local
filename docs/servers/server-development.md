@@ -16,6 +16,14 @@ npm run new:server -- --key myserver
 npm run new:server -- --key myserver --dir myserver-mcp --display "My Server MCP" --no-verify
 ```
 
+| Flag | Effect |
+|---|---|
+| `--key <name>` | the MCP registration key — required |
+| `--dir <name>` | directory name; defaults to `<key>-mcp` |
+| `--display "…"` | display name used in the generated skill and install summary |
+| `--no-verify` | skip the build / typecheck / test / smoke pass |
+| `--force` | overwrite an existing directory. Destructive — the scaffold otherwise refuses |
+
 Copies `templates/server/`, substituting `__KEY__`, `__DIR__`, `__PASCAL__`, `__CAMEL__`,
 `__DISPLAY__`, `__ENV_PREFIX__`, `__DESC__`, then builds, typechecks, tests and smoke-tests it. The
 result passes both guards with zero findings and needs no hand-editing to run.

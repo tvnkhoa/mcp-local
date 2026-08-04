@@ -25,12 +25,13 @@ npm run build:servers
 npm run typecheck:servers
 npm run test:servers       # all four servers (see note below for current counts)
 npm run contracts:check    # boots all four over stdio, diffs tools/list
+npm run generate:check     # generated files match the manifest
+npm run docs:check         # links, tool args/names, capability claims, env names
 npm run benchmark:plan:check   # compact-mode token savings ≥ 40%
 ```
 
-Locally the same set is **`npm run verify:all` minus `install:servers` and `benchmark:plan:check`, plus
-`test:scripts` and `generate:check`** — see [`development.md`](./workflow.md) §4 for the difference in
-both directions.
+Locally the same set is **`npm run verify:all` minus `install:servers` and `benchmark:plan:check`,
+plus `test:scripts`** — see [`workflow.md`](workflow.md) §4 for the difference in both directions.
 
 ### Test counts — re-derive, do not read
 
@@ -73,7 +74,10 @@ gate fail for anyone without production access.
 
 `generate:check` sits alongside it and is pure comparison: it re-renders every generated file
 (`.env.example`, the README blocks, the tool lists) from the manifest and fails if the committed
-copy differs. No server is started, so it costs milliseconds.
+copy differs. No server is started, so it costs milliseconds. `docs:check` is the same shape for
+documentation — links, documented tool arguments and names, capability claims, and deprecated env
+names used as instructions. Both run in CI as of 2026-08-03; before that, drift in either was caught
+locally or not at all.
 
 `contracts:check` is the credential-free boot check. It starts **all four servers over a real stdio
 MCP handshake** with placeholder environment values synthesized from `@mcp/manifest`,
@@ -157,5 +161,5 @@ reporting so one CI run names every broken package instead of only the first.
 |---|---|
 | `verify:packages` | build + typecheck:tests + test + guards, for `packages/*` |
 | `verify:servers` | build + typecheck + test, for all four servers |
-| `verify:all` | `verify:packages` + `verify:servers` + `contracts:check` + **`generate:check`** — credential-free |
+| `verify:all` | `verify:packages` + `verify:servers` + `contracts:check` + `generate:check` + `docs:check` — credential-free |
 | `verify:live` | `smoke:servers` — **needs credentials** |

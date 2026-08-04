@@ -113,8 +113,8 @@ npm run verify:all
 That is the gate. It covers packages, servers, tool contracts and generated docs, and it is
 credential-free so it means the same thing on your machine as in CI.
 
-**A green CI does not replace it.** CI does not run `generate:check` or `test:scripts`, so
-generated-file drift is caught locally or not at all. See
+**A green CI is close but not identical.** CI does not run `test:scripts`; it does run
+`generate:check` and `docs:check`. See
 [Development Guide](./docs/development/workflow.md) §4 for the exact difference.
 
 Before a **release**, additionally:

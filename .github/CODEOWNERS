@@ -1,0 +1,16 @@
+# Ownership for this workspace. One operator today; this file exists so that stops being implicit.
+#
+# `docs/development/ci.md` records a security decision that depends on it: no credential goes into
+# CI because there is one operator on one machine. If that changes, revisit that decision too.
+
+*                       @koitran-siliconstack
+
+# The platform packages and the guards that enforce their rules
+/packages/              @koitran-siliconstack
+/.github/               @koitran-siliconstack
+
+# Contracts are the public API of every server — a change here is an API change
+/contracts/             @koitran-siliconstack
+
+# Documentation portal
+/docs/                  @koitran-siliconstack

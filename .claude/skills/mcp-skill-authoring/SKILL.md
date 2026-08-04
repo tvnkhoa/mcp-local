@@ -69,7 +69,7 @@ Then `npm run generate:all` writes the server's `.env.example` and README blocks
 | `default` | written silently when the user gives no value |
 | `prompt` | if present, the installer asks for it interactively |
 | `group` | "at least one var in this group must be set" (e.g. auth alternatives) |
-| `prefix` | any present key starting with this satisfies the group (e.g. `PG_ENV_`) |
+| `prefix` | any present key starting with this satisfies the group (e.g. `POSTGRES_ENV_`) |
 | `note` | shown near the prompt and in the generated skill's env table |
 
 Only fields with a `prompt` are asked interactively; the rest with a `default` are written silently.

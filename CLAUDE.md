@@ -79,14 +79,15 @@ handshake with placeholder env — that is the credential-free boot check, and i
 module that compiles but cannot load.
 
 CI (`.github/workflows/ci.yml`, Windows + Node 22) runs the same steps **plus** `install:servers`
-and `benchmark:plan:check`, and **minus** `test:scripts` and `generate:check`. Generated-file drift
-is therefore caught locally or not at all — run `verify:all` before pushing.
+and `benchmark:plan:check`, and **minus** `test:scripts`. Since 2026-08-03 it also runs
+`generate:check` and `docs:check`, so generated-file and documentation drift are caught on every
+push rather than only locally.
 
 The live smoke tests reach real Postgres / OpenObserve / Bitbucket and are **not** in CI. Run
 `verify:live` before a release. See `docs/development/ci.md`.
 
 Narrower targets: `verify:packages`, `verify:servers`, `test:servers`, `contracts:check`,
-`generate:check`, and `node scripts/run-servers.mjs <script> [--server <key>]`.
+`generate:check`, `docs:check`, and `node scripts/run-servers.mjs <script> [--server <key>]`.
 
 ### Generated files — do not hand-edit (S-35, S-36)
 

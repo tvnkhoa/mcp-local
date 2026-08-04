@@ -72,11 +72,9 @@ npm run verify:all     # packages + servers + contracts + generated docs. Creden
 npm run verify:live    # the four live smoke tests. NEEDS REAL CREDENTIALS.
 ```
 
-CI (`.github/workflows/ci.yml`, Windows + Node 22) runs the same steps, credential-free — with two
-differences in each direction: it adds `install:servers` and `benchmark:plan:check`, and it does
-**not** run `test:scripts` or `generate:check`. So generated-file drift is caught locally or not at
-all. `verify:live` reaches real Postgres / OpenObserve / Bitbucket and is not in CI; run it before a
-release.
+CI (`.github/workflows/ci.yml`, Windows + Node 22) runs the same steps, credential-free: it adds
+`install:servers` and `benchmark:plan:check`, and omits only `test:scripts`. `verify:live` reaches
+real Postgres / OpenObserve / Bitbucket and is not in CI; run it before a release.
 
 ## 4. Safety posture
 

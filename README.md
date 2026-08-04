@@ -130,8 +130,7 @@ npm run verify:live    # the four live smoke tests. NEEDS REAL CREDENTIALS. Run 
 ```
 
 CI (`.github/workflows/ci.yml`, Windows + Node 22) runs the same credential-free steps, plus
-`install:servers` and `benchmark:plan:check`, and **without** `test:scripts` or `generate:check` —
-so generated-file drift is caught locally or not at all. Details:
+`install:servers` and `benchmark:plan:check`, and omits only `test:scripts`. Details:
 [docs/development/workflow.md](./docs/development/workflow.md) §4.
 
 ## Generated files

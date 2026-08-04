@@ -62,6 +62,8 @@ for packages. The rule and why it exists are in
 | Command | Does |
 |---|---|
 | `npm run build:packages` | `tsc -b` over all six packages |
+| `npm run typecheck:packages` | `tsc -b` with no emit, packages only |
+| `npm run clean:packages` | delete every package's `dist/` and build info |
 | `npm run typecheck:tests` | the `*.test.ts` each package's build excludes |
 | `npm run test:packages` | `npm test --workspaces` |
 | `npm run test:scripts` | `node --test "scripts/**/*.test.mjs"` |
@@ -69,6 +71,7 @@ for packages. The rule and why it exists are in
 | `npm run build:servers` / `typecheck:servers` / `test:servers` / `smoke:servers` | over all four servers |
 | `npm run contracts:check` | boot all four over stdio, diff `tools/list` against `contracts/` |
 | `npm run generate:check` | fail on generated-file drift |
+| `npm run docs:check` | the documentation gate — links, documented tool arguments and names, capability claims, deprecated env names |
 | `node scripts/run-servers.mjs <script> [--server <key>] [--continue]` | one script across servers |
 
 `--continue` keeps going after a failure so one run reports every broken server, not just the first.
@@ -100,7 +103,14 @@ verify:packages   build:packages → typecheck:tests → test:packages → test:
 verify:servers    build:servers  → typecheck:servers → test:servers
 contracts:check
 generate:check
+docs:check
 ```
+
+`docs:check` (`scripts/check-docs.mjs`) is the documentation gate: relative links and anchors,
+documented tool arguments against `contracts/`, tool names that must exist, prose capability claims,
+and deprecated env names used as instructions. Historical documents are exempt from everything but
+the link check — an archived audit that quotes a past defect must not be reported as committing it.
+Each of the five checks has been shown to reject a deliberate violation.
 
 `verify:live` reaches real Postgres / OpenObserve / Bitbucket. It is **not** in CI; run it before a
 release.
@@ -120,7 +130,8 @@ It is **not** literally `verify:all`, and the difference matters in both directi
 | | `verify:all` | CI |
 |---|---|---|
 | `test:scripts` | ✅ | ❌ **not run** |
-| `generate:check` | ✅ | ❌ **not run** — generated-file drift is caught only locally |
+| `docs:check` | ✅ | ✅ |
+| `generate:check` | ✅ | ✅ |
 | `install:servers` (`npm ci` per server) | ❌ | ✅ |
 | `benchmark:plan:check` | ❌ | ✅ — compact-mode token savings must stay ≥ 40% |
 

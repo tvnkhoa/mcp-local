@@ -170,3 +170,10 @@ Honest list — these are preferences until something enforces them:
   barrel against the original's exports), not by a guard.
 - **`dist/` is not pruned by `tsc`**, and servers have no `clean` script. `mcp:doctor` detects the
   stale output but nothing prevents it — [`../development/workflow.md`](../development/workflow.md) §7.
+
+## 10. Documentation language
+
+**New documents are written in English.** The two Vietnamese server READMEs (`postgres-mcp`,
+`bitbucket-mcp`) predate this and stay as they are — translating them would churn a working document
+for symmetry alone, and their generated blocks are language-independent. Everything a second
+maintainer must read to work here is English: the portal, the guides, the reference, the decisions.

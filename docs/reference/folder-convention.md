@@ -251,7 +251,7 @@ npm run generate:check    # fails on drift
 ```
 
 `generate:check` runs inside `verify:all` and `mcp:doctor` reports a stale generated file per server
-as a warning. Note it is **not** in CI — see [Development Guide](../development/workflow.md) §4.
+as a warning. `generate:check` runs in `verify:all` **and** in CI.
 
 ---
 

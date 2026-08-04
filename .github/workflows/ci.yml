@@ -89,6 +89,18 @@ jobs:
       - name: Check tool contracts
         run: npm run contracts:check
 
+      # Generated-file drift used to be caught locally or not at all: generate:check was in
+      # verify:all but absent here, so a hand-edit to a .env.example or a README block could
+      # survive a push. Cheap (pure comparison, no server started).
+      - name: Check generated files
+        run: npm run generate:check
+
+      # The documentation gate (scripts/check-docs.mjs): links, documented tool arguments and
+      # names, capability claims, and deprecated env names used as instructions. Every check here
+      # closes a failure mode that a hand review found and no gate caught.
+      - name: Check documentation
+        run: npm run docs:check
+
       # A performance gate rather than a correctness test, so it is its own step:
       # compact-mode token savings must stay at or above 40%.
       #

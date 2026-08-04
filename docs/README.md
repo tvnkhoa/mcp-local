@@ -28,8 +28,8 @@ it as a bug and re-derive it — counts drift, commands do not.
 | **[architecture/](architecture/README.md)** | The shape, and why | As built · Target architecture (§9 reconciles them) |
 | **[reference/](reference/README.md)** | Normative lookups | Conventions · Folder convention · Dependency rules · Packages |
 | **[decisions/](decisions/README.md)** | The ADR log | 0001 native deps · 0002 SQL token lists · 0003 one `.gitignore` |
-| **[reports/](reports/README.md)** | Reviews of the docs | Audit → cleanup plan → cleanup report → review |
-| **[archive/](archive/README.md)** | Closed records | The 44-step migration · two refactor reports · the pre-migration audit · four superseded docs. **Not maintained** |
+| **[reports/](reports/README.md)** | Reviews of the docs | Health · Simplification (the four earlier reports are archived) |
+| **[archive/](archive/README.md)** | Closed records | The 44-step migration · two refactor reports · the pre-migration audit · four superseded docs · four earlier documentation reports. **Not maintained** |
 
 ---
 
@@ -65,7 +65,7 @@ Documents that live next to the code they describe, rather than in `docs/`.
 | [`../CONTRIBUTING.md`](../CONTRIBUTING.md) | Commits, review, and what a change has to carry with it |
 | [`../CLAUDE.md`](../CLAUDE.md) · [`../AGENTS.md`](../AGENTS.md) | Agent guidance: constraints, env reference, MCP-first operating rules |
 | [`../CHANGELOG.md`](../CHANGELOG.md) | Dated entries, with the introducing commit named |
-| `../.claude/rules/` | Always-on policy — `mcp-hard-mode`, `mcp-base`, `typescript-mcp`, `db-guardrails`, `codebase-index` |
+| `../.claude/rules/` | Always-on policy, loaded by scope rather than by link: [`mcp-hard-mode`](../.claude/rules/mcp-hard-mode.md) (MCP-first operating rules) · [`mcp-base`](../.claude/rules/mcp-base.md) · [`typescript-mcp`](../.claude/rules/typescript-mcp.md) · [`db-guardrails`](../.claude/rules/db-guardrails.md) · [`codebase-index`](../.claude/rules/codebase-index.md) |
 | `../.claude/skills/` | MCP **authoring** skills. The four **operational** skills are generated per server from `<server>/skill/SKILL.md` and are gitignored — edit the template, then `npm run mcp:update` |
 | `../packages/<name>/README.md` | Per-package reference — all six linked from [Reference › Packages](reference/packages.md) |
 | `../<server>/README.md` | Per-server reference — all four linked from [Servers](servers/README.md) |

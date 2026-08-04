@@ -1,5 +1,25 @@
 # Documentation Health
 
+> ## ✅ Re-scored 2026-08-03 — action items 1, 2, 3, 8, 9 are done
+>
+> | | At assessment | Now | What changed |
+> |---|---|---|---|
+> | **Documentation Health** | 85 | **95** | |
+> | Accuracy | 94 | **100** | `npm run mcp:update -- --all` ran; the installed `postgres-mcp` skill went from **25 legacy env names / 0 canonical** to **2 / 28** (the 2 are its deliberate deprecation note) |
+> | Maintainability | 58 | **88** | `scripts/check-docs.mjs` exists and is wired into `verify:all` **and CI**; `generate:check` added to CI. Gated failure modes **3 of 10 → 8 of 10**. Each of the five doc checks was shown to reject a deliberate violation |
+> | Coverage | 84 | **93** | `CODEOWNERS` added; documentation-language policy added (`conventions.md` §10); `--force`, `typecheck:packages`, `clean:packages` documented |
+> | Navigation | 96 | 96 | unchanged |
+> | Consistency | 88 | 88 | unchanged |
+>
+> **Still open:** generate the graph model (item 4 — risk reduced from 5 hand-copies to 2 by the
+> simplification pass, but not eliminated), claim derivability (item 6), the 9 unwired test harnesses
+> (item 10 — a test-content decision, deliberately not taken unilaterally), per-server README skeleton
+> (item 11). Items 5 and 7 were completed by the
+> [simplification pass](documentation-simplification.md).
+>
+> **The body below is the assessment as written**, and is left unedited so the scores above have
+> something to be measured against.
+
 **Assessed** — 2026-08-03, after the portal reorganization
 **Scope** — 96 Markdown files (92 tracked + 4 untracked-not-ignored), 11,262 lines
 **Series** — [audit](../archive/reports/documentation-audit.md) → [cleanup plan](../archive/reports/documentation-cleanup-plan.md) → [cleanup report](../archive/reports/documentation-cleanup-report.md) → [review](../archive/reports/documentation-review.md) → **this health check**
