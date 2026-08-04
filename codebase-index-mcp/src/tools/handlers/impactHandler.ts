@@ -90,7 +90,11 @@ export function handleGetDependencyGraph(
     const result = store.getModuleFlow(args.repoId, args.filePath, args.limit);
     const collapsed = result.collapsed ? { collapsed: result.collapsed } : {};
     if (profile === "nano") {
-      const topEdges = result.edges.slice(0, 10).map((e) => ({ fromName: e.fromName, toName: e.toName, type: e.type }));
+      // MCP-ISSUE-049: names alone are not identity. Distinct edges that share a name pair — an
+      // interface, its implementation and a test double — rendered as indistinguishable repeats,
+      // which made the (working) duplicate collapse look broken. An unresolved target drops
+      // `toName` entirely, leaving a row naming nothing at all.
+      const topEdges = result.edges.slice(0, 10).map((e) => ({ fromId: e.fromId, fromName: e.fromName, toId: e.toId, toName: e.toName, type: e.type }));
       return ctx.asText({ repoId: args.repoId, filePath: args.filePath, edgeCount: result.edges.length, topEdges, hasMore: result.edges.length > topEdges.length, ...collapsed }, profile);
     }
     return ctx.asText({ repoId: args.repoId, filePath: args.filePath, edges: result.edges, unresolvedCalls: result.unresolvedCalls, ...collapsed }, profile);
@@ -106,7 +110,8 @@ export function handleGetDependencyGraph(
     }
   }
   if (profile === "nano") {
-    const topEdges = rows.slice(0, 10).map((e) => ({ fromName: e.fromName, toName: e.toName, type: e.type, confidence: e.confidence ?? null }));
+    // MCP-ISSUE-049: same widening as the module-flow branch above.
+    const topEdges = rows.slice(0, 10).map((e) => ({ fromId: e.fromId, fromName: e.fromName, toId: e.toId, toName: e.toName, type: e.type, confidence: e.confidence ?? null }));
     return ctx.asText({ repoId: args.repoId, symbolId: args.symbolId, edgeCount: rows.length, topEdges, hasMore: rows.length > topEdges.length }, profile);
   }
   return ctx.asText({ repoId: args.repoId, symbolId: args.symbolId, depth: args.depth, edges: rows }, profile);

@@ -186,6 +186,26 @@ async function main() {
   const endpointKeys = gEdges.map((e) => `${e.fromFilePath}|${e.toId}|${e.type}`);
   assert(new Set(endpointKeys).size === endpointKeys.length, "no duplicate (file, target, type)", `${endpointKeys.length} vs ${new Set(endpointKeys).size}`);
 
+  // nano carries identity too. The round above asserted this for `get_call_chain` and checked
+  // `get_dependency_graph` only at compact — where fromId/toId were never missing. So nano kept
+  // shipping name-only rows, and distinct edges sharing a name pair (an interface, its
+  // implementation, a test double) read as duplicates the collapse had failed to remove. An
+  // unresolved target is the sharper case: `toName` is null, dropped by the serializer, leaving a
+  // row that names nothing at all.
+  for (const [label, args] of [
+    ["filePath", { repoId, filePath: target, profile: "nano", limit: 300 }],
+    ["symbolId", { repoId, symbolId: anySymbolId, profile: "nano", limit: 300 }]
+  ]) {
+    const nano = readJson(await call("get_dependency_graph", args));
+    const rows = nano?.topEdges ?? [];
+    if (rows.length === 0) {
+      console.log(`  [note] nano/${label} returned no topEdges for this target; identity not exercised`);
+      continue;
+    }
+    assert(rows.every((e) => typeof e.fromId === "string"), `nano/${label} topEdges carry fromId`, JSON.stringify(rows[0]));
+    assert(rows.every((e) => e.toId !== undefined), `nano/${label} topEdges carry toId even when unresolved`, JSON.stringify(rows.find((e) => e.toId === undefined)));
+  }
+
   // ── excludeTests reaches the six tools ─────────────────────────────────────
   console.log("\n[excludeTests] accepted by all six, and actually filters");
   const isTestish = (p) => /(^|\/)(__tests__|tests?)\//i.test(p ?? "") || /\.(test|spec)\.[^.]+$/i.test(p ?? "");

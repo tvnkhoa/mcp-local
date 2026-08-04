@@ -65,6 +65,7 @@ import {
 import {
   upsertDocsImpl,
   upsertDocMentionsImpl,
+  replaceDocsForFileImpl,
   rebuildDocsFtsImpl,
   resolveMentionsImpl,
   searchDocsImpl,
@@ -709,6 +710,16 @@ export class GraphStore {
 
   upsertDocs(docs: import("../types/index.js").DocRecord[]): void {
     upsertDocsImpl(this.db, docs);
+  }
+
+  /** Replace-per-file for the docs lane. Prefer this to the two upserts — see MCP-ISSUE-049. */
+  replaceDocsForFile(
+    repoId: string,
+    filePath: string,
+    docs: import("../types/index.js").DocRecord[],
+    mentions: import("../types/index.js").DocMentionRecord[]
+  ): void {
+    replaceDocsForFileImpl(this.db, repoId, filePath, docs, mentions);
   }
 
   upsertDocMentions(mentions: import("../types/index.js").DocMentionRecord[]): void {

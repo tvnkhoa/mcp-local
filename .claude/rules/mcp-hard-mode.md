@@ -371,13 +371,15 @@ Operational rule:
 | `find_impact_files` view `"surface"` | Confidence 0.75 is TYPE_REF, not direct call | Note confidence and `edgeTypes` in output |
 | `find_symbol_at_line` | Often resolves declaration-level positions, not inner-block lines | Prefer declaration line or pair with one focused search |
 | `get_cross_repo_impact` | Returns empty when repos have no shared symbols (normal for isolated systems) | Only useful when repos share interface/contract symbol names (e.g., shared library pattern) |
-| `get_symbol_detail` · `find_symbol_at_line` · `get_folder_summary` · `find_entry_points` | Accept `profile` in code but do **not** advertise it in `tools/list` (MCP-ISSUE-051) | Do not send `profile` to these four; the other 34 tools advertise it and accept it |
 
 ### Fixed by MCP-ISSUE-049 (2026-08-04) — do not work around these any more
 
 | Was | Now |
 |---|---|
 | `get_call_chain` compact returned `fromId`/`toId` only, so a second call was needed per hop | Every profile carries `symbolId` + name + file on each hop |
+| `get_dependency_graph{profile:"nano"}` `topEdges` carried names only, so distinct edges sharing a name pair read as duplicates and an unresolved target named nothing at all | `topEdges` carries `fromId`/`toId` in both the `filePath` and `symbolId` branches |
+| `query_docs{mode:"stale"}` still returned archived-doc false positives after the `code_call` fix, because `doc_mentions` was append-only — a relabel inserted a row and the legacy `backtick` row outlived every re-index | The docs lane is replace-per-file. One re-index with `docsMode:"on"` genuinely clears them |
+| `get_symbol_detail`, `find_symbol_at_line`, `get_folder_summary` and `find_entry_points` accepted `profile` but never advertised it, so a client honouring `additionalProperties:false` had to reject it (MCP-ISSUE-051) | All **38** profile-taking tools advertise it. A parity test now compares every tool's zod key set against its advertised `properties`, in both directions |
 | `find_impact_files{view:"surface"}` listed a caller once per edge type | One row per caller→symbol pair, with `edgeTypes[]` — **an array**, and the scalar `edgeType` is gone |
 | `find_impact_files{view:"surface"}` silently ignored `groupBy` | `groupBy:"module"` groups, and the response echoes `groupBy` |
 | `query_docs` returned an object for `search` and bare arrays for `stale`/`coverage` | All three modes return `{ repoId, mode, count, results }` |

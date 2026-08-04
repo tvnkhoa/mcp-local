@@ -18,21 +18,29 @@ Entries 042–049 all came from one sweep: every tool (43) and every resource (2
 against `wec.communication-hub` on 2026-08-04, on the post-restructure build (`411afe5`), from a
 fresh server process (staleness gate per MCP-ISSUE-040 cleared first). They were **not** regressions
 of the restructure — each reproduced a defect first observed on 2026-08-03 unless the entry says
-otherwise. Seven were triaged and fixed on 2026-08-04; **049 is partly fixed** (its response-shaping
-papercuts remain) and one of its ten items was **refuted** on inspection.
+otherwise. Seven were triaged and fixed on 2026-08-04, 049 in a third wave the same day with one of
+its ten items **refuted** on inspection. The consumer repo then re-ran every repro independently —
+see *Independent re-verification* below: seven confirmed fixed, **two sub-items of 049 still
+reproduce**, and 043's deferred half is measurably load-bearing rather than cosmetic. Both surviving
+sub-items were then reproduced here and **fixed 2026-08-04 (fourth wave)**; the staleness one was not
+the relabelling defect the consumer diagnosed but an append-only table underneath it — see
+*Fourth wave* below, and read it before trusting any "verified on a fresh index" claim in this file.
+**051 closed in the same wave**, with the zod↔JSON-Schema parity check the entry named as its real
+deliverable. Every entry in this registry is now closed; the one piece deliberately left undone is
+043's owner prover, promoted to backlog **B-13** (P1) because it needs AST work, not a patch.
 
 | ID | Title | Status |
 |---|---|---|
 | `MCP-ISSUE-042` | `refactor_replace_rollback` restores the files and leaves the graph holding the reverted names, while `health_check` reports "ready" | ✅ FIXED 2026-08-04 |
-| `MCP-ISSUE-043` | the guarded-refactor tools refuse work `refactor_replace_preview` does — **not** the owner prover, a hardcoded kind filter | ✅ FIXED 2026-08-04 (prover correctness deferred) |
+| `MCP-ISSUE-043` | the guarded-refactor tools refuse work `refactor_replace_preview` does — **not** the owner prover, a hardcoded kind filter | ✅ FIXED 2026-08-04 (prover correctness → backlog **B-13**, P1) |
 | `MCP-ISSUE-044` | `find_entry_points(kind:"route_handler")` returns a count with empty arrays; `route_map` names the endpoint group, not the handler | ✅ FIXED 2026-08-04 |
 | `MCP-ISSUE-045` | cross-repo resolution matches bare type names, so `Task` links every repo to one unrelated class | ✅ FIXED 2026-08-04 |
 | `MCP-ISSUE-046` | `find_package_consumers` returns the files that DEFINE the package, and a wrong name returns 0 silently | ✅ FIXED 2026-08-04 |
 | `MCP-ISSUE-047` | `get_persistence_mapping` dumps every CHECK constraint in the repo, ignores `profile`, and disagrees with `find_field_accesses` about "owner" | ✅ FIXED 2026-08-04 |
 | `MCP-ISSUE-048` | index-run counters contradict the database and each other | ✅ FIXED 2026-08-04 |
 | `MCP-ISSUE-050` | `index_version` was never persisted, so `mode:"incremental"` could never fast-skip | ✅ FIXED 2026-08-04 |
-| `MCP-ISSUE-049` | ten papercuts found by the same sweep (identity dropped at compact/nano, no test filter, envelope varies by mode, path style split) | ✅ FIXED 2026-08-04 |
-| `MCP-ISSUE-051` | four tools accept `profile` in code but never advertise it, so a spec-conformant client must reject it | 🔴 OPEN 2026-08-04 |
+| `MCP-ISSUE-049` | ten papercuts found by the same sweep (identity dropped at compact/nano, no test filter, envelope varies by mode, path style split) | ✅ FIXED 2026-08-04 — incl. the 2 sub-items that survived consumer re-verification (4th wave) |
+| `MCP-ISSUE-051` | four tools accept `profile` in code but never advertise it, so a spec-conformant client must reject it | ✅ FIXED 2026-08-04 (incl. the zod↔JSON-Schema parity check) |
 | `MCP-ISSUE-040` | a live server running a replaced build fails every parse, and the run still reports `ok` | ✅ FIXED 2026-08-03 |
 | `MCP-ISSUE-041` | `get_call_chain` stopped seeing through DI when a fix was orphaned by a file move | ✅ FIXED 2026-08-03 |
 | `MCP-ISSUE-032` | an index run is not reproducible: edge counts vary between identical runs | ✅ CLOSED 2026-07-30 |
@@ -65,7 +73,102 @@ Each entry's own repro re-run against the fixed build. Measured, not asserted:
 | **048** timings | `elapsedMs 15924` < `resolvePhaseMs 22270` | `elapsedMs 34358` > `extractPhaseMs 13891` + `resolvePhaseMs 20275`; containment holds |
 | **048** coverage / unresolved | `1.0446`; `callEdgesUnresolved 0` beside `unresolvedCallsTotal 14420` | `resolveCallsCoverage 1` exactly (14420/14420); partition holds, and the measured remainder is reported separately as `callEdgesUnresolvedInGraph: 11331`. Note `dispatchEdgesInserted: 644` — and 14420 + 644 = 15064, which is the inflated "resolved" figure this entry recorded as 15063. That is the root cause, arithmetically confirmed. |
 | **048** cross-repo | full 8 (attempts saturated at 5000) vs dirty 459 | full 123/425 attempts vs dirty 123/423 — no longer saturated, no longer inverted |
-| **045** `Task` cross-repo links | 7 of 10 sampled rows | **408 links still present after the denylist shipped** — which exposed the append-only table described in that entry. Re-verify after the clearing fix. |
+| **045** `Task` cross-repo links | 7 of 10 sampled rows | **408 links still present after the denylist shipped** — which exposed the append-only table described in that entry. Re-verify after the clearing fix. → **done, clean:** see the row for 045 in the consumer re-verification below. |
+
+### Independent re-verification from the consumer repo — 2026-08-04
+
+Same repros, re-run from `wec.communication-hub` by the agent that filed 042–049, against `dist`
+built **16:40:22** (i.e. including `src/services/extractors/markdownParser.ts` at 16:33:11), on its
+own full re-index — run `9f3c2a8a`, 521 files / 4459 symbols / `edgesInGraph` 47998. Independent of
+run `194918d4` above. Live tool calls only; no source inspection.
+
+**Confirmed fixed, from the consumer side:**
+
+| | measured |
+|---|---|
+| **042** | After apply → `dirty` → rollback on a clean tree: `codebaseState.status:"stale"`, `shouldReindex:true`, `pendingReindex.fileCount:3` each with `reason:"restored by refactor rollback"`, `reasons:["3 file(s) written by the refactor engine are not re-indexed"]`, and an `actionHints` entry at urgency **high** whose reason states the danger outright. `refactor_replace_rollback`'s own response carries the same hint. `mode:"dirty"` then scanned exactly those 3 files **on a clean tree** and the graph healed to the real name; `pendingReindex` cleared and status returned to `ready`. Both enhancements the entry proposed, and the transient desync is now disclosed rather than hidden. |
+| **044** | `find_entry_points{kind:"route_handler"}` → `total:5` with 5 `routeEntryPoints`, distinct symbolIds, `signature:"POST /api/v1/conversations/{conversationId}/reply"`. `route_map{excludeTests:true}` → `handlerName:"Reply"` ≠ `controllerName`, absolute template. |
+| **045** | `cross_repo_deps` rows pointing at ssnet `Task`: **0** (was 7 of 10 sampled, then 408 table-wide). 123 links total, every target a genuine SSNet symbol — `OutboundFlowType`, `IOutboundDeliveryPublisher`, `QueueNames`, `ManualCallLogSourceType`, `CrmNotificationException`. The clearing fix works; the row above is superseded. |
+| **046** | `consumerCount:46`, `consumerRepos:["wec.be","wec.communication-hub"]` — the hub's 34 edges are in — `resolvedCount:36`, `providers[]` separated, `excludedPublisherRows:64`. |
+| **047** | `profile:"nano"` → 9 fields, `checkConstraintCount:1` (was all 24), `ownersWithMapping:["Conversation"]`. Wrong owner (`ConversationAssignmentState`) now answers with a `hint` naming the owned-type/EF-owner distinction and telling the caller to retry from `ownersWithMapping` — which is what closes the `find_field_accesses` → `get_persistence_mapping` chain the entry described. |
+| **048** | Own full run: `elapsedMs 32060` > `extractPhaseMs 10774` + `resolvePhaseMs 21055`; `resolveCallsCoverage` exactly `1`; `edgesUpserted 49582` / `edgesInGraph 47998` / `edgesDeduplicated 2243` / `dispatchEdgesInserted 644` in one payload; cross-repo `425 attempts / 123 resolved` on full vs `423 / 123` on dirty — no saturation, no inversion. |
+| **050** | `mode:"incremental"` on an unchanged clean tree → `filesScanned:0`, `elapsedMs:0`, `skipReason:"head unchanged and working tree clean"`. |
+| **049** (8 of 10) | `get_call_chain{nano}` hops now carry `symbolId`+`name`+`filePath`; `view:"files"` and `view:"surface"` return visibly different shapes with `edgeTypes[]`; all three `query_docs` modes return the object envelope (`documented` on coverage); `health_check` without `repoId` → `scope:"server"` + `note` + `vectorIndex.measured:false` instead of a `0`; `find_implementations{excludeTests:true}` → 1 row; `get_feature_bundle{excludeTests:true}` → `command` role down to 4 and no `TestDbContext`; `rename_assist` → `affectedFileCount:3` including the declaring file, `hints` forward-slashed; `trace_execution_flow{nano}` → 10 distinct callees + `distinctCalleeCount:15`; `get_file_context` and `get_file_summary` now agree at `symbolCount:6`; intent ranking no longer returns a single migration in the top 4. |
+
+**Still reproduces — two sub-items of 049, both under the `FIXED` status:**
+
+1. **`mode:"stale"` still returns the archived-doc hits.** `query_docs{mode:"stale", symbolIds:["42814a63…" /* ConversationLoopCorrelationCodec.Parse */]}` → the same **5** hits, all `docs/02-flows/_archive/*`, each `mentionType:"backtick"` — the label the root-cause note identifies as the wrong one for an identifier harvested from a fenced code block. Measured after a `mode:"full"` run that re-extracted the docs lane (`docsUpserted 298`, `mentionsUpserted 2182`) on a `dist` newer than the parser source, so it is not a stale-mention artefact. If a rebuild after 16:57 changes this, the check is one call.
+2. **nano `topEdges` still has no identity, which is what made the "duplicates" look unfixed.** `get_dependency_graph{profile:"nano"}` reports `collapsed:{selfReferences:1,duplicateEndpoints:13}` — the dedupe is working — but the surviving rows carry **names only**, so three genuinely distinct `NotifyAsync → PublishConversationNotificationAsync` edges (interface, implementation, test double) and a constructor→class `TYPE_REF` pair render as indistinguishable repeats. `get_call_chain{nano}` gained `symbolId` in the same change set; `topEdges` did not. From the consumer side this is the identity item, not the duplicate item — the fix is the same one-line-ish widening.
+
+### Fourth wave — both reproduced here, both fixed 2026-08-04
+
+Item 2 was exactly as reported. **Item 1's symptom was real and its diagnosis was wrong**, in a way
+worth keeping on the record, because the wrong diagnosis is the one this file's own evidence pointed at.
+
+**Item 2 — nano `topEdges` identity. Confirmed, fixed.** `handleGetDependencyGraph`
+(`src/tools/handlers/impactHandler.ts`) mapped both nano branches to `{fromName, toName, type}`.
+Widened to carry `fromId`/`toId`, matching what `get_call_chain` already did. One detail the consumer
+could not have seen from names alone: when a target is unresolved, `toName` is null and the compact
+serializer drops null fields, so the row arrived as `{"fromName":"docsStore.ts","type":"IMPORTS"}` —
+naming nothing at all, not merely looking like a duplicate.
+
+**Item 1 — `mode:"stale"`. Symptom confirmed; cause is not the parser.** The relabelling fix was
+present and correct in the `dist` the consumer measured (`code_call` is in
+`dist/services/extractors/markdownParser.js`, built 16:40:22 against a 16:33:11 source). The real
+cause is one table below:
+
+- `doc_mentions` was written by `upsertDocMentionsImpl` and **deleted by nothing**. There was no
+  `delete from doc_mentions` anywhere in `src/`. `pruneFiles` (`src/repositories/writeStore.ts`)
+  clears `edges`, `symbols`, `docs`, `routes`, `string_literals` and `files` for a path and omitted
+  this one table — and it only runs for files that disappeared, never on re-extraction.
+- The primary key is `(repo_id, doc_id, symbol_id, mention_type, mention_text)`. **`mention_type` is
+  part of the key.** So correcting a mention's label does not update the row; it inserts a second one
+  beside a legacy `backtick` row that no re-index can remove, `mode:"full"` included.
+- `findStaleDocs` filters `mention_type != 'code_call'`, so it kept matching the legacy row. Five
+  hits in, five hits out.
+
+Reproduced in isolation before touching anything — one upsert as `backtick`, one as `code_call`,
+against the real schema: two rows survive, and the staleness query still returns one hit.
+
+The consumer's inference — *"Measured after a `mode:"full"` run … so it is not a stale-mention
+artefact"* — is exactly inverted: a full re-index was the one thing guaranteed **not** to clear that
+table. **And the reason our own verification passed is written in this file, in this entry:**
+*"Verified as a pair, on `wec.communication-hub` indexed into a **throwaway DB**: `Parse` went 5 → 0."*
+A throwaway DB has no legacy row. The assertion was run on the only database that could not exhibit
+the bug. This is the same defect class as MCP-ISSUE-045's append-only `cross_repo_deps` — the second
+time in one day that a write-path fix was validated against a table that was never cleared.
+
+**What shipped:**
+
+- `replaceDocsForFileImpl` (`src/repositories/docsStore.ts`) — replace-per-file for the docs lane,
+  the counterpart to `replaceSymbolsForFile`. Deletes mentions before docs, since mentions are
+  reachable only by joining `docs` on `file_path`. `runIndexPipeline` now calls it instead of the two
+  upserts, alongside the four `replace*ForFile` calls it already made.
+- `pruneFiles` gained the missing `doc_mentions` delete, ordered before the `docs` delete.
+- **Two further parser defects, found while confirming the first and never reported:**
+  `extractMentionsFromCode`'s *backtick* branch still emitted `mentionType:"backtick"` — only the
+  call branch had been corrected — so a fenced-code identifier could still enter the prose signal
+  even on a clean database. That is the defect the consumer believed they were observing; it exists,
+  just not on the path they measured. And the heading regex ran regardless of fence state, so a
+  `# comment` inside a bash block became a real heading: it published a doc node, reset
+  `currentHeadingPath` for every following line, and fed its backticked identifiers to the prose
+  extractor. In a repo whose docs are largely command samples that is a steady source of this same
+  false positive.
+
+**Regression coverage — the gap mattered more than the bug.** `src/repositories/docsStore.test.ts`
+(new) asserts the **second** index pass: a relabel leaves one row and clears the false positive,
+while `includeCodeMentions:true` still returns it; a mention dropped from a doc does not survive; and
+nothing inside a fence reaches the prose signal. `test-issue-049-shapes.mjs` gained nano identity
+assertions for both `get_dependency_graph` branches — it had checked `fromId`/`toId` only at
+`compact`, where they were never missing. A single-pass assertion on a fresh DB is what let this
+through; that shape of test is not evidence for a write-path fix.
+
+Gate: 4/4 servers build + typecheck, 36/36 harnesses (63 assertions in the 049 harness, up from 59),
+84 unit tests (up from 81), `generate:check` and `docs:check` clean.
+
+**043 — the deferred half is load-bearing, not cosmetic.** `refactor_symbol_migration{requiredOwnerType:"ConversationLoopCorrelationCodec"}` now returns `totalMatches:1` plus `rejectedSiteCount:2` naming the rule (`owner_not_allowed`, `inferred owner 'OutboundDeliveryFailedNotifier' != required`) — a real improvement over the silent `0`. But because `findOwnerType` returns the *enclosing* class, `requiredOwnerType` can only ever match sites **inside the declaring type**: 1 of the 3 sites `refactor_replace_preview` finds. That makes the tool's primary use case — migrate a member across its consumers under an owner guard — currently unreachable, with `refactor_replace_preview` (no owner guarantee) as the only path. Worth weighing when the AST work is scheduled. → **Accepted, and promoted:** the assessment is correct — the doc comment on `findOwnerType` already concedes the mechanism. Scheduled as **B-13** in `docs/development/backlog.md`, filed under *P1 — a tool reports something untrue* rather than left as a deferred cosmetic. Not fixed here: it needs real AST resolution of the receiver expression's type.
+
+**Two other observations, neither worth its own entry:** `cross_repo_deps` now counts `SSNet.sln` as a target (32 rows) alongside the `.csproj` module rows, which is provenance noise rather than a wrong link; and `strategy:"intent"` no longer surfaces migrations but is still weak on relevance — `"send outbound email via crm callback"` returns `ISender.Send` / `SimpleMediator.Send` / `EmailSignatures.Map`, i.e. the mediator, not the outbound delivery path.
 
 ---
 
@@ -1297,6 +1400,15 @@ with the same broken subtraction; a pre-fix row falls back to the legacy alias. 
 - **Status:** **FIXED** 2026-08-04 — all of them, plus the two adjacent defects the triage notes had
   left open (`groupBy` ignored under `view:"surface"`, and the intent-ranking correction). One item
   stays **refuted**; the stale example that caused it was already corrected. See *What shipped* below.
+  **Two sub-items survived** the consumer's re-verification against `dist` 16:40:22 and were **fixed
+  in a fourth wave the same day**: nano `topEdges` now carries `fromId`/`toId`, and `mode:"stale"`
+  clears — but *not* for the reported reason. The relabelling fix below was already correct in that
+  build; `doc_mentions` was an **append-only table** whose primary key includes `mention_type`, so
+  the correction inserted a row instead of replacing one and the legacy `backtick` row outlived every
+  re-index. It is now replace-per-file, and `pruneFiles` gained the delete it never had. Two further
+  parser defects surfaced while confirming it — see *Fourth wave* in the Index section for the
+  mechanism, the two-pass regression tests, and why the original verification could not have caught
+  this.
 - **Original status:** PARTLY OPEN 2026-08-04. Grouped deliberately: each is small, none is a wrong answer to a
   correctness question, and they share two roots — response shaping and the absence of a test filter.
   Split any of them out if it gets picked up.
@@ -1393,12 +1505,26 @@ wrong code. Recorded because the wrong theory is plausible enough to be re-attem
   `includeCodeMentions:true` returns the same 5 (all labelled `code_call`), and the control symbol
   `TenantId` — prose-mentioned — still returns its **10**. Asserting only that the count fell to zero
   would have been satisfied equally well by breaking the docs lane outright.
+  > ⚠️ **This verification was worthless, and the word "throwaway" is why.** The consumer repo re-ran
+  > the same call on a real database and got the same 5 hits back. `doc_mentions` had no delete path
+  > and a primary key containing `mention_type`, so the relabel *added* a row and the legacy
+  > `backtick` row survived every re-index — a fresh DB is the one database with no legacy row to
+  > survive. Fixed in the fourth wave; the pairing instinct was right, the fixture was not. Full
+  > mechanism in *Fourth wave* in the Index section.
 - **Kept from the wrong fix:** the suffix-map uniqueness guard, which is correct on its own terms
   (picking an arbitrary first entry when several symbols share a suffix is a guess reported as a
   fact). The minimum-length threshold was dropped — it was pure consequence of the wrong theory.
 - **Note this only takes effect on re-index.** Unlike every other item here, which is read-path,
   this changes how mentions are *written*. An existing database keeps its old `doc_mentions` rows
-  until the repo is re-indexed with `docsMode:"on"`.
+  until the repo is re-indexed with `docsMode:"on"` — and **before the fourth wave it kept them even
+  then**, which is exactly what this note failed to anticipate. A re-index now replaces a file's
+  mentions rather than adding to them, so one run with `docsMode:"on"` is genuinely sufficient.
+- **Incomplete as first shipped:** only the *call* branch of `extractMentionsFromCode` was corrected.
+  Its backtick branch kept emitting `mentionType:"backtick"` for identifiers inside fences, and the
+  heading regex ran regardless of fence state, so `# comment` lines in bash samples became headings
+  and fed the prose extractor. Both closed in the fourth wave. Everything harvested from inside a
+  fence is now `code_call`: the mention type records where the text came from, not what shape it had
+  once it got there.
 
 **Two adjacent contract defects found while fixing this**, both "zod accepts a parameter that
 `tools/list` does not advertise", which an `additionalProperties: false` client must reject:
@@ -1448,8 +1574,10 @@ cost less than removing the duplicate rows saved).
 
 ## MCP-ISSUE-051 — four tools accept `profile` in code but never advertise it
 
-- **Status:** **OPEN** 2026-08-04. Found while adding `excludeTests` to six tools for MCP-ISSUE-049;
-  filed separately rather than widening that change.
+- **Status:** **FIXED** 2026-08-04 — the four `inputSchema` blocks, **and the parity check the entry
+  named as the real deliverable**. See *What shipped* below.
+- **Original status:** OPEN 2026-08-04. Found while adding `excludeTests` to six tools for
+  MCP-ISSUE-049; filed separately rather than widening that change.
 - **Scenario:** every tool here declares its input **twice** — a zod schema (`types/schemas/*.ts`,
   what the handler actually validates against) and a hand-written JSON Schema (`tools/*.ts`, what
   `tools/list` advertises). For four tools the two disagree: the zod schema has
@@ -1484,3 +1612,26 @@ cost less than removing the duplicate rows saved).
   not against zod) and to `docs:check`. A test that compares each tool's zod key set against its
   advertised `properties` would have caught all six instances at once, and would prevent the next one.
   That check is the real deliverable here; the four one-line additions are the symptom.
+
+**What shipped 2026-08-04:**
+
+- `profile: PROFILE_PROP` on all four `inputSchema` blocks (`tools/search.ts`,
+  `tools/readMetadata.ts`), plus `npm run contracts:update`. The snapshot diff is **purely additive**
+  — four `profile` properties, nothing removed — so no client that worked before can break.
+- **`src/tools/schemaParity.test.ts`** — the check the entry asked for. It builds all 43 tools and
+  compares each one's zod key set against its advertised `properties`, **in both directions**,
+  because the two failures mean different things: an advertised key with no zod key is a parameter
+  the server will reject as unknown; a zod key with no advertised key is a parameter a conformant
+  client cannot send. A third test asserts that a tool declaring `additionalProperties:false`
+  advertises every key it marks `required` — that combination is unsatisfiable, and nothing else
+  looks for it.
+- The check is guarded against going vacuous (`compared >= 40`) and pinned by a named test for the
+  four tools in this entry, so deleting the general check cannot quietly un-fix the filed issue.
+- **Proven by mutation**, per B-06's standard: removing the `profile` line from
+  `find_symbol_at_line` fails both the general check and the named one, and the failure message
+  names the tool and the direction — `find_symbol_at_line: accepts "profile" but never advertises it`.
+
+Why this was invisible: `typecheck` sees two unrelated object literals; `contracts:check` pins the
+advertised schema against a snapshot of *itself*, so a parameter missing from both stays missing; and
+`docs:check` reads only the advertised side. Six instances existed before anyone looked, and all six
+were found by hand while editing something else.

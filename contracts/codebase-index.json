@@ -356,6 +356,15 @@
             "minimum": 1,
             "type": "integer"
           },
+          "profile": {
+            "enum": [
+              "nano",
+              "compact",
+              "standard",
+              "verbose"
+            ],
+            "type": "string"
+          },
           "repoId": {
             "type": "string"
           }
@@ -570,6 +579,15 @@
           "line": {
             "minimum": 1,
             "type": "integer"
+          },
+          "profile": {
+            "enum": [
+              "nano",
+              "compact",
+              "standard",
+              "verbose"
+            ],
+            "type": "string"
           },
           "repoId": {
             "type": "string"
@@ -947,6 +965,15 @@
             "minimum": 1,
             "type": "integer"
           },
+          "profile": {
+            "enum": [
+              "nano",
+              "compact",
+              "standard",
+              "verbose"
+            ],
+            "type": "string"
+          },
           "repoId": {
             "type": "string"
           }
@@ -1107,6 +1134,15 @@
             "maximum": 500,
             "minimum": 1,
             "type": "integer"
+          },
+          "profile": {
+            "enum": [
+              "nano",
+              "compact",
+              "standard",
+              "verbose"
+            ],
+            "type": "string"
           },
           "repoId": {
             "type": "string"

@@ -32,6 +32,47 @@ export function upsertDocsImpl(db: Database.Database, docs: DocRecord[]): void {
   })(docs);
 }
 
+/**
+ * Replace one file's docs *and* its mentions — the docs lane's equivalent of
+ * `replaceSymbolsForFile`, and the reason it exists.
+ *
+ * MCP-ISSUE-049: `doc_mentions` was written by upsert alone and deleted by nothing, in a table whose
+ * primary key includes `mention_type`. So when the parser was corrected to label a fenced-code
+ * identifier `code_call` instead of `backtick`, re-indexing did not *relabel* the row — it inserted a
+ * second one beside a legacy row that outlives every re-index, including `mode:"full"`. `findStaleDocs`
+ * excludes `code_call` and therefore kept matching the legacy row, so the fix verified clean on a
+ * throwaway DB and reproduced unchanged on every real one. A relabelling fix in an append-only table
+ * is not a fix; the clearing is the fix.
+ *
+ * Mentions are deleted first: they are reachable only by joining `docs` on `file_path`.
+ */
+export function replaceDocsForFileImpl(
+  db: Database.Database,
+  repoId: string,
+  filePath: string,
+  docs: DocRecord[],
+  mentions: DocMentionRecord[]
+): void {
+  const run = () => {
+    db.prepare(
+      `
+      delete from doc_mentions
+      where repo_id = ?
+        and doc_id in (select doc_id from docs where repo_id = ? and file_path = ?)
+      `
+    ).run(repoId, repoId, filePath);
+    db.prepare(`delete from docs where repo_id = ? and file_path = ?`).run(repoId, filePath);
+    upsertDocsImpl(db, docs);
+    upsertDocMentionsImpl(db, mentions);
+  };
+
+  if (db.inTransaction) {
+    run();
+    return;
+  }
+  db.transaction(run)();
+}
+
 export function upsertDocMentionsImpl(db: Database.Database, mentions: DocMentionRecord[]): void {
   const stmt = db.prepare(
     `

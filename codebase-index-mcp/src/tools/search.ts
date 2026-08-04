@@ -149,7 +149,8 @@ export function buildSearchTools(deps: CodebaseIndexDeps): AnyToolDefinition[] {
       properties: {
         repoId: { type: "string" },
         symbolId: { type: "string" },
-        limit: { type: "integer", minimum: 1, maximum: limits.maxResultLimit }
+        limit: { type: "integer", minimum: 1, maximum: limits.maxResultLimit },
+        profile: PROFILE_PROP
       }
     },
     annotations: readsGraph,
@@ -168,7 +169,8 @@ export function buildSearchTools(deps: CodebaseIndexDeps): AnyToolDefinition[] {
       properties: {
         repoId: { type: "string" },
         filePath: { type: "string" },
-        line: { type: "integer", minimum: 1 }
+        line: { type: "integer", minimum: 1 },
+        profile: PROFILE_PROP
       }
     },
     annotations: readsGraph,

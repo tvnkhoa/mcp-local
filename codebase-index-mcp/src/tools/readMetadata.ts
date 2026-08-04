@@ -176,7 +176,8 @@ export function buildReadMetadataTools(deps: CodebaseIndexDeps): AnyToolDefiniti
       properties: {
         repoId: { type: "string" },
         folderPath: { type: "string" },
-        maxFiles: { type: "integer", minimum: 1, maximum: limits.maxResultLimit }
+        maxFiles: { type: "integer", minimum: 1, maximum: limits.maxResultLimit },
+        profile: PROFILE_PROP
       }
     },
     annotations: readsGraph,
@@ -196,7 +197,8 @@ export function buildReadMetadataTools(deps: CodebaseIndexDeps): AnyToolDefiniti
         repoId: { type: "string" },
         filePathPrefix: { type: "string" },
         kind: { type: "string" },
-        limit: { type: "integer", minimum: 1, maximum: limits.maxResultLimit }
+        limit: { type: "integer", minimum: 1, maximum: limits.maxResultLimit },
+        profile: PROFILE_PROP
       }
     },
     annotations: readsGraph,

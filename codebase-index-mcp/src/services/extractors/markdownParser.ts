@@ -24,30 +24,13 @@ export function parseMarkdownFile(input: {
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
 
-    // Track heading hierarchy
-    const headingMatch = line.match(/^(#{1,6})\s+(.+)$/);
-    if (headingMatch) {
-      const level = headingMatch[1].length;
-      const text = headingMatch[2].trim();
-      currentHeadingPath = `${input.filePath}#${text}`;
-
-      // Store heading as doc node
-      const docId = hashOf(currentHeadingPath);
-      docs.push({
-        repoId: input.repoId,
-        docId,
-        filePath: input.filePath,
-        headingPath: currentHeadingPath,
-        contentType: "heading",
-        text: text.slice(0, 500),
-        level
-      });
-
-      // Extract mentions from heading text
-      extractMentionsFromText(text, docId, input.repoId, mentions);
-    }
-
-    // Track code blocks
+    // Fences and their contents are settled before anything else looks at the line.
+    //
+    // MCP-ISSUE-049: the heading match used to run unconditionally, so a `# comment` inside a shell
+    // or bash fence became a real heading — it published a doc node, reset `currentHeadingPath` for
+    // every following line, and fed its backticked identifiers into the prose signal. In a repo
+    // whose docs are largely command samples that is a steady source of the same false positive
+    // this issue is about.
     if (line.startsWith("```")) {
       if (!inCodeBlock) {
         inCodeBlock = true;
@@ -72,14 +55,39 @@ export function parseMarkdownFile(input: {
         extractMentionsFromCode(codeBlockContent, docId, input.repoId, mentions);
         codeBlockContent = "";
       }
-    } else if (inCodeBlock) {
+      continue;
+    }
+    if (inCodeBlock) {
       codeBlockContent += line + "\n";
+      continue;
     }
 
-    // Extract mentions from paragraphs (backticks + file paths)
-    if (!inCodeBlock && !headingMatch) {
-      extractMentionsFromText(line, hashOf(currentHeadingPath), input.repoId, mentions);
+    // Track heading hierarchy
+    const headingMatch = line.match(/^(#{1,6})\s+(.+)$/);
+    if (headingMatch) {
+      const level = headingMatch[1].length;
+      const text = headingMatch[2].trim();
+      currentHeadingPath = `${input.filePath}#${text}`;
+
+      // Store heading as doc node
+      const docId = hashOf(currentHeadingPath);
+      docs.push({
+        repoId: input.repoId,
+        docId,
+        filePath: input.filePath,
+        headingPath: currentHeadingPath,
+        contentType: "heading",
+        text: text.slice(0, 500),
+        level
+      });
+
+      // Extract mentions from heading text
+      extractMentionsFromText(text, docId, input.repoId, mentions);
+      continue;
     }
+
+    // Prose line: backticks + file paths.
+    extractMentionsFromText(line, hashOf(currentHeadingPath), input.repoId, mentions);
   }
 
   // Always add file-level doc node
@@ -138,7 +146,13 @@ function extractMentionsFromText(text: string, docId: string, repoId: string, me
  * - Focus on backticks and identifiers that look like function/class calls
  */
 function extractMentionsFromCode(code: string, docId: string, repoId: string, mentions: DocMentionRecord[]): void {
-  // Backticks in code context
+  // Backticks *inside* a fenced block — a nested backtick in a comment or a doc-comment sample.
+  //
+  // MCP-ISSUE-049: this branch is code-block provenance exactly like the call branch below, and it
+  // kept emitting `backtick` after that one was corrected — so a fenced-code identifier could still
+  // enter the prose signal and be reported as documentation of a same-named symbol. Everything
+  // harvested from inside a fence is `code_call`; the mention type records where the text came
+  // from, not what shape it had once it got there.
   const backtickRegex = /`([a-zA-Z_][a-zA-Z0-9_]*)`/g;
   let match;
   while ((match = backtickRegex.exec(code)) !== null) {
@@ -147,8 +161,8 @@ function extractMentionsFromCode(code: string, docId: string, repoId: string, me
       repoId,
       docId,
       symbolId: null,
-      mentionType: "backtick",
-      confidence: 1.0,
+      mentionType: "code_call",
+      confidence: 0.5,
       mentionText: symbolName
     });
   }

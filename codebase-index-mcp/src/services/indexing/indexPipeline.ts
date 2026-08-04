@@ -415,16 +415,16 @@ export async function runIndexPipeline(store: GraphStore, input: RunIndexInput):
             store.replaceEdgesForFile(input.repoId, item.file.path, item.extracted.edges);
             store.replaceRoutesForFile(input.repoId, item.file.path, item.extracted.routes ?? []);
             store.replaceLiteralsForFile(input.repoId, item.file.path, item.extracted.literals ?? []);
-            // Upsert docs and mentions if present (e.g., from markdown files)
-            if (item.extracted.docs && item.extracted.docs.length > 0) {
-              if (includeDocs) {
-                store.upsertDocs(item.extracted.docs);
-              }
-            }
-            if (item.extracted.mentions && item.extracted.mentions.length > 0) {
-              if (includeDocs) {
-                store.upsertDocMentions(item.extracted.mentions);
-              }
+            // Docs lane (markdown files). Replace-per-file, matching the four lines above.
+            // MCP-ISSUE-049: this was two upserts and no delete, which made `doc_mentions`
+            // append-only — a corrected mention_type inserted a row instead of replacing one.
+            if (includeDocs && (item.extracted.docs !== undefined || item.extracted.mentions !== undefined)) {
+              store.replaceDocsForFile(
+                input.repoId,
+                item.file.path,
+                item.extracted.docs ?? [],
+                item.extracted.mentions ?? []
+              );
             }
           }
         });

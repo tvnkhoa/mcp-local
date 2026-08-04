@@ -333,6 +333,15 @@ export function pruneFiles(db: Database.Database, repoId: string, relativePaths:
         `
       ).run(repoId, repoId, filePath);
       db.prepare(`delete from symbols where repo_id = ? and file_path = ?`).run(repoId, filePath);
+      // MCP-ISSUE-049: mentions before docs — they are reachable only through the docs join, so
+      // dropping `docs` first orphans them permanently. This delete was missing entirely.
+      db.prepare(
+        `
+        delete from doc_mentions
+        where repo_id = ?
+          and doc_id in (select doc_id from docs where repo_id = ? and file_path = ?)
+        `
+      ).run(repoId, repoId, filePath);
       db.prepare(`delete from docs where repo_id = ? and file_path = ?`).run(repoId, filePath);
       db.prepare(`delete from routes where repo_id = ? and file_path = ?`).run(repoId, filePath);
       db.prepare(`delete from string_literals where repo_id = ? and file_path = ?`).run(repoId, filePath);

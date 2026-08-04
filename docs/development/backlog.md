@@ -63,6 +63,34 @@ Two additions the migration learned and this backlog adopts:
 
 ## P1 — A tool reports something untrue
 
+### B-13 · Give `findOwnerType` a real owner, so `requiredOwnerType` can guard a migration — 🔴 OPEN 2026-08-04
+
+`refactor_symbol_migration`'s owner guard cannot express its primary use case: *migrate a member
+across its consumers, under an owner constraint.* `findOwnerType`
+(`codebase-index-mcp/src/services/refactor/refactorUtils.ts`) falls through to
+`findEnclosingClassName` outside an object initializer — it returns **the class the code sits in**,
+not **the type that owns the member being referenced**. Those coincide at a declaration site and
+diverge at every usage site, so `requiredOwnerType` can only ever match sites *inside the declaring
+type*.
+
+Measured from `wec.communication-hub`: `requiredOwnerType:"ConversationLoopCorrelationCodec"` returns
+`totalMatches:1` with `rejectedSiteCount:2` — the two rejections naming
+`owner_not_allowed, inferred owner 'OutboundDeliveryFailedNotifier' != required`, i.e. each *caller's*
+own class. `refactor_replace_preview` finds all 3 sites. So the guarded tool is strictly weaker than
+the unguarded one, and the only path that reaches every site is the one with no owner guarantee at all.
+
+The diagnostics half of MCP-ISSUE-043 shipped 2026-08-04 and is a genuine improvement — the rejections
+are now visible and named, where before this was a silent `0`. The prover itself was deferred as
+cosmetic. The consumer's independent re-run showed it is **load-bearing**: `requiredOwnerType` is not
+merely imprecise, it is unusable for the thing it exists to do.
+
+Needs real AST resolution of the receiver expression's type at the call site, which is why it was
+deferred and why it is a scoped piece of work rather than a patch. Until then, `requiredOwnerType`
+should be understood as "sites within the declaring type", not "sites that touch this type's member".
+
+Registry entry: MCP-ISSUE-043 (`codebase-index-mcp/docs/mcp-codebase-index-issue-registry.md`);
+the limitation is also documented in the doc comment on `findOwnerType` itself.
+
 ### B-01 · Diagnose why C# `TYPE_REF` edges are almost never produced — ✅ DONE 2026-07-30
 
 **Outcome** — the loss was at **extraction**, and the answer was sharper than the question expected:
@@ -869,6 +897,7 @@ tell the truth, or makes an existing gate capable of failing.
 
 | # | Item | Tier | Risk | Rev. | Complexity | Status |
 |---|---|---|---|---|---|---|
+| B-13 | `findOwnerType` returns the enclosing class, not the owner | P1 | **Med** | R2 | M / AST | 🔴 open 2026-08-04 · `requiredOwnerType` matches 1 of 3 sites |
 | B-01 | Diagnose C# `TYPE_REF` loss | P1 | Low | R1 | M | ✅ 2026-07-30 · `c68bda5` |
 | B-01b | Fix C# `TYPE_REF` | P1 | — | — | unscoped | ✅ 2026-07-30 · `266d91b` `9574e3e` `f1c0160` `9b55de4` |
 | B-02 | Locate extraction nondeterminism | P1 | Low | R1 | M | ✅ 2026-07-30 · `b764b39` |
