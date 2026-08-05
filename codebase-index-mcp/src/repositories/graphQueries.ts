@@ -269,6 +269,62 @@ export function getSymbolsByIds(db: Database.Database, repoId: string, symbolIds
     .all(repoId, ...symbolIds) as SymbolRecord[];
 }
 
+/** Symbol kinds that declare a C# type — the set the owner prover treats as a static receiver. */
+const CSHARP_TYPE_KIND_SQL_LIST = `'class', 'interface', 'struct', 'record', 'record struct', 'type'`;
+
+/**
+ * Every C# type name declared in this repo (B-13).
+ *
+ * The owner prover needs this to tell a static member access apart from an unknown local: in
+ * `Codec.Normalize(...)`, `Codec` is not in the method scope map, and without knowing it is a
+ * declared type the site is unattributable — which is the shape MCP-ISSUE-043 could not prove.
+ * Scoped to C# files because the prover is C#-only; a same-named TS class must not make a C#
+ * receiver look like a type.
+ */
+export function listCSharpTypeNames(db: Database.Database, repoId: string): string[] {
+  const rows = db
+    .prepare(
+      `
+      select distinct s.name as name
+      from symbols s
+      join files f on f.repo_id = s.repo_id and f.path = s.file_path
+      where s.repo_id = ? and f.language = 'csharp' and s.kind in (${CSHARP_TYPE_KIND_SQL_LIST})
+      `
+    )
+    .all(repoId) as { name: string }[];
+  return rows.map((x) => x.name).filter((x) => typeof x === "string" && x.length > 0);
+}
+
+/**
+ * Declarations of a member by name, with the declaring type and the persisted signature (B-13).
+ *
+ * Feeds two-hop receiver resolution — `conversation.Assignment.HandledBy`, MCP-ISSUE-043 Scenario B:
+ * having typed `conversation`, the caller needs the declared type of member `Assignment` on it. The
+ * declared type is parsed from the signature by the prover, which is where the C#-specific knowledge
+ * lives; this query stays a plain row read.
+ */
+export function listMemberDeclarations(
+  db: Database.Database,
+  repoId: string,
+  memberName: string
+): { name: string; parentName: string | null; signature: string | null }[] {
+  return db
+    .prepare(
+      `
+      select s.name as name, p.name as parentName, s.signature as signature
+      from symbols s
+      join files f on f.repo_id = s.repo_id and f.path = s.file_path
+      left join symbols p on p.repo_id = s.repo_id and p.symbol_id = s.parent_symbol_id
+      where s.repo_id = ?
+        and f.language = 'csharp'
+        and s.name = ?
+        and s.kind in ('property', 'variable', 'method')
+        and s.parent_symbol_id is not null
+      `
+    )
+    .all(repoId, memberName) as { name: string; parentName: string | null; signature: string | null }[];
+}
+
 export function getRepository(db: Database.Database, repoId: string): { repoId: string; repoPath: string; updatedAt: string } | null {
   const row = db
     .prepare(

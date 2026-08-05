@@ -23,10 +23,16 @@ import {
   inferLanguageFromPath,
   isGeneratedFilePath,
   offsetToLine,
-  findOwnerType,
   inferSymbolKind,
   pathStartsWithAny
 } from "./refactorUtils.js";
+import {
+  createOwnerFileContext,
+  createOwnerRepoIndex,
+  describeOwnerRule,
+  resolveOwnerAt,
+  type OwnerFileContext
+} from "./ownerResolver.js";
 
 // Match caps for regex find mode — bound work on pathological patterns / huge repos.
 const REGEX_PER_FILE_MATCH_CAP = 2000;
@@ -99,6 +105,9 @@ export function buildRefactorPreview(
    * `totalMatches: 0, unresolvedOccurrences: 0` — indistinguishable from "the identifier does not
    * appear in scope" — while the ungated preview found the same sites. The refusal has to be legible
    * before it can be judged wrong.
+   *
+   * Since B-13 the owner guard rejects only a **proven different** owner (`cross_type`). A site whose
+   * owner cannot be proven is no longer dropped here — see `ambiguousReasons`.
    */
   rejectedSites: {
     filePath: string;
@@ -106,6 +115,13 @@ export function buildRefactorPreview(
     rule: "kind_not_allowed" | "owner_not_allowed" | "no_enclosing_type";
     detail: string;
   }[];
+  /**
+   * Sites kept but flagged `ambiguous_target` because the owner could not be proven, with the rule
+   * that failed (B-13). `ambiguous_target` blocks apply unconditionally (`isApplyRunnableHunk`), so
+   * these are visible in the preview and unappliable — never silently rewritten, never silently lost.
+   * Same shape and semantics as `buildValueRepresentationPreview`, the sibling tool in this lane.
+   */
+  ambiguousReasons: { filePath: string; line: number; rule: string; detail: string }[];
 } {
   const indexedFiles = store.listIndexedFiles(repoId).map((x) => normalizeRelativePath(x.path));
   const includePaths = (scope.includePaths ?? []).map((x) => normalizeRelativePath(x));
@@ -137,6 +153,10 @@ export function buildRefactorPreview(
     rule: "kind_not_allowed" | "owner_not_allowed" | "no_enclosing_type";
     detail: string;
   }[] = [];
+  const ambiguousReasons: { filePath: string; line: number; rule: string; detail: string }[] = [];
+  // Repo-level facts the owner prover needs (declared type names, member declared types). Lazy inside:
+  // a preview that never reaches a static/two-hop receiver issues no query.
+  const ownerRepoIndex = createOwnerRepoIndex(store, repoId);
 
   // Compile the regex once when in regex mode (only i/m/s flags honored; `g` is forced).
   const compiledRegex =
@@ -178,12 +198,19 @@ export function buildRefactorPreview(
       }
     }
 
+    // Owner resolution context for this file, built on the first match only — a file with no match
+    // is never parsed, and a non-C# file never parses at all.
+    let ownerContext: OwnerFileContext | null = null;
+    const ownerContextFor = (): OwnerFileContext => {
+      ownerContext ??= createOwnerFileContext(filePath, content, ownerRepoIndex);
+      return ownerContext;
+    };
+
     const fileLines = content.split(/\r?\n/);
     for (const { start, end, replacement, unsubstituted } of rawMatches) {
       if (totalMatchCount >= REGEX_GLOBAL_MATCH_CAP) break;
       const line = offsetToLine(content, start);
       const lineText = fileLines[line - 1] ?? "";
-      const ownerType = findOwnerType(content, start);
       const symbolKind = inferSymbolKind(lineText);
 
       if (guards.symbolKinds.length > 0) {
@@ -197,30 +224,30 @@ export function buildRefactorPreview(
           continue;
         }
       }
-      if (guards.allowOwnerTypes.length > 0) {
-        if (!ownerType) {
-          rejectedSites.push({
-            filePath,
-            line,
-            rule: "no_enclosing_type",
-            detail: `no enclosing type could be inferred; required one of [${guards.allowOwnerTypes.join(", ")}]`
-          });
-          continue;
-        }
-        if (!guards.allowOwnerTypes.some((x) => x.toLowerCase() === ownerType.toLowerCase())) {
-          rejectedSites.push({
-            filePath,
-            line,
-            rule: "owner_not_allowed",
-            detail: `inferred owner '${ownerType}' != required [${guards.allowOwnerTypes.join(", ")}]`
-          });
-          continue;
-        }
+
+      // B-13: the owner is proven from the C# AST — the type that owns the referenced member, not
+      // the class the code sits in. Three verdicts, and only a PROVEN different owner is rejected.
+      // `proof.ownerType` on an `unknown` verdict is the scan hint, so this field keeps its historical
+      // meaning and the confidence formula below is unchanged; the verdict drives the risk flag.
+      const proof = resolveOwnerAt(ownerContextFor(), start, end, guards.allowOwnerTypes);
+      const ownerType = proof.ownerType;
+
+      if (guards.allowOwnerTypes.length > 0 && proof.verdict === "cross_type") {
+        rejectedSites.push({
+          filePath,
+          line,
+          rule: "owner_not_allowed",
+          detail: `inferred owner '${proof.ownerType}' != required [${guards.allowOwnerTypes.join(", ")}] (rule: ${proof.rule})`
+        });
+        continue;
       }
 
       const riskFlags: RefactorRiskFlag[] = [];
-      if ((mode === "symbol-aware" || mode === "syntax-aware") && !ownerType) {
+      if (proof.verdict === "unknown" && (guards.allowOwnerTypes.length > 0 || mode === "symbol-aware" || mode === "syntax-aware")) {
+        // Unprovable under an owner constraint, or in a mode that claims symbol awareness. Kept and
+        // flagged rather than dropped — `ambiguous_target` blocks apply, so nothing unproven is written.
         riskFlags.push("ambiguous_target");
+        ambiguousReasons.push({ filePath, line, rule: proof.rule, detail: describeOwnerRule(proof.rule) });
       }
       const disallowNames = new Set([...guards.disallowOwnerTypes, ...guards.disallowTypeList].map((x) => x.toLowerCase()));
       if (ownerType && disallowNames.has(ownerType.toLowerCase())) {
@@ -261,6 +288,7 @@ export function buildRefactorPreview(
   return {
     hunks,
     affectedFiles: [...affected].sort((a, b) => a.localeCompare(b)),
-    rejectedSites
+    rejectedSites,
+    ambiguousReasons
   };
 }

@@ -29,6 +29,8 @@ export function buildSymbolMigrationPreview(
   hunks: PreviewCandidateHunk[];
   affectedFiles: string[];
   rejectedSites: { filePath: string; line: number; rule: string; detail: string }[];
+  /** Sites kept but unprovable under `requiredOwnerType`, with the rule that failed (B-13). */
+  ambiguousReasons: { filePath: string; line: number; rule: string; detail: string }[];
 } {
   const preview = buildRefactorPreview(
     store,
@@ -91,7 +93,8 @@ export function buildSymbolMigrationPreview(
     return {
       hunks: guardedHunks.sort((a, b) => a.filePath.localeCompare(b.filePath) || a.startOffset - b.startOffset || a.beforeText.localeCompare(b.beforeText)),
       affectedFiles: [...new Set(guardedHunks.map((x) => x.filePath))].sort((a, b) => a.localeCompare(b)),
-      rejectedSites: preview.rejectedSites
+      rejectedSites: preview.rejectedSites,
+      ambiguousReasons: preview.ambiguousReasons
     };
   }
 
@@ -215,6 +218,7 @@ export function buildSymbolMigrationPreview(
   return {
     hunks,
     affectedFiles: [...new Set(hunks.map((x) => x.filePath))].sort((a, b) => a.localeCompare(b)),
-    rejectedSites: preview.rejectedSites
+    rejectedSites: preview.rejectedSites,
+    ambiguousReasons: preview.ambiguousReasons
   };
 }

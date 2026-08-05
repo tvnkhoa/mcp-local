@@ -26,13 +26,16 @@ sub-items were then reproduced here and **fixed 2026-08-04 (fourth wave)**; the 
 the relabelling defect the consumer diagnosed but an append-only table underneath it — see
 *Fourth wave* below, and read it before trusting any "verified on a fresh index" claim in this file.
 **051 closed in the same wave**, with the zod↔JSON-Schema parity check the entry named as its real
-deliverable. Every entry in this registry is now closed; the one piece deliberately left undone is
-043's owner prover, promoted to backlog **B-13** (P1) because it needs AST work, not a patch.
+deliverable. The one piece left undone was 043's owner prover, promoted to backlog **B-13** (P1)
+because it needed AST work rather than a patch — **shipped 2026-08-05 as the fifth wave**, and with it
+every entry in this registry is closed. See *043 → Deferred* below: the prover moved to
+`src/services/refactor/ownerResolver.ts`, `requiredOwnerType` went from 1 of 3 sites to 3 of 3, and an
+unprovable owner is now flagged rather than dropped.
 
 | ID | Title | Status |
 |---|---|---|
 | `MCP-ISSUE-042` | `refactor_replace_rollback` restores the files and leaves the graph holding the reverted names, while `health_check` reports "ready" | ✅ FIXED 2026-08-04 |
-| `MCP-ISSUE-043` | the guarded-refactor tools refuse work `refactor_replace_preview` does — **not** the owner prover, a hardcoded kind filter | ✅ FIXED 2026-08-04 (prover correctness → backlog **B-13**, P1) |
+| `MCP-ISSUE-043` | the guarded-refactor tools refuse work `refactor_replace_preview` does — a hardcoded kind filter, **and** an owner prover that answered the wrong question | ✅ FIXED 2026-08-04 (kind filter + diagnostics) · ✅ FIXED 2026-08-05 (AST owner prover, B-13) |
 | `MCP-ISSUE-044` | `find_entry_points(kind:"route_handler")` returns a count with empty arrays; `route_map` names the endpoint group, not the handler | ✅ FIXED 2026-08-04 |
 | `MCP-ISSUE-045` | cross-repo resolution matches bare type names, so `Task` links every repo to one unrelated class | ✅ FIXED 2026-08-04 |
 | `MCP-ISSUE-046` | `find_package_consumers` returns the files that DEFINE the package, and a wrong name returns 0 silently | ✅ FIXED 2026-08-04 |
@@ -166,7 +169,7 @@ through; that shape of test is not evidence for a write-path fix.
 Gate: 4/4 servers build + typecheck, 36/36 harnesses (63 assertions in the 049 harness, up from 59),
 84 unit tests (up from 81), `generate:check` and `docs:check` clean.
 
-**043 — the deferred half is load-bearing, not cosmetic.** `refactor_symbol_migration{requiredOwnerType:"ConversationLoopCorrelationCodec"}` now returns `totalMatches:1` plus `rejectedSiteCount:2` naming the rule (`owner_not_allowed`, `inferred owner 'OutboundDeliveryFailedNotifier' != required`) — a real improvement over the silent `0`. But because `findOwnerType` returns the *enclosing* class, `requiredOwnerType` can only ever match sites **inside the declaring type**: 1 of the 3 sites `refactor_replace_preview` finds. That makes the tool's primary use case — migrate a member across its consumers under an owner guard — currently unreachable, with `refactor_replace_preview` (no owner guarantee) as the only path. Worth weighing when the AST work is scheduled. → **Accepted, and promoted:** the assessment is correct — the doc comment on `findOwnerType` already concedes the mechanism. Scheduled as **B-13** in `docs/development/backlog.md`, filed under *P1 — a tool reports something untrue* rather than left as a deferred cosmetic. Not fixed here: it needs real AST resolution of the receiver expression's type.
+**043 — the deferred half is load-bearing, not cosmetic.** `refactor_symbol_migration{requiredOwnerType:"ConversationLoopCorrelationCodec"}` now returns `totalMatches:1` plus `rejectedSiteCount:2` naming the rule (`owner_not_allowed`, `inferred owner 'OutboundDeliveryFailedNotifier' != required`) — a real improvement over the silent `0`. But because `findOwnerType` returns the *enclosing* class, `requiredOwnerType` can only ever match sites **inside the declaring type**: 1 of the 3 sites `refactor_replace_preview` finds. That makes the tool's primary use case — migrate a member across its consumers under an owner guard — currently unreachable, with `refactor_replace_preview` (no owner guarantee) as the only path. Worth weighing when the AST work is scheduled. → **Accepted, and promoted:** the assessment is correct — the doc comment on `findOwnerType` already concedes the mechanism. Scheduled as **B-13** in `docs/development/backlog.md`, filed under *P1 — a tool reports something untrue* rather than left as a deferred cosmetic. Not fixed here: it needs real AST resolution of the receiver expression's type. → **Fixed 2026-08-05 (fifth wave)**, exactly that way: `src/services/refactor/ownerResolver.ts` types the receiver from the C# AST, `requiredOwnerType` reaches 3 of 3 sites, and the consumer's judgement that this was load-bearing rather than cosmetic is what got it scheduled. See the *Deferred* section of 043.
 
 **Two other observations, neither worth its own entry:** `cross_repo_deps` now counts `SSNet.sln` as a target (32 rows) alongside the `.csproj` module rows, which is provenance noise rather than a wrong link; and `strategy:"intent"` no longer surfaces migrations but is still weak on relevance — `"send outbound email via crm callback"` returns `ISender.Send` / `SimpleMediator.Send` / `EmailSignatures.Map`, i.e. the mediator, not the outbound delivery path.
 
@@ -1122,8 +1125,9 @@ pending-set shape is required, not merely preferred. Round-trip pinned in
 > of Scenario B and **false of Scenario A**, whose sites never reach the prover at all. Both of the
 > entry's own candidate root causes were wrong for A; see *Measured cause* below.
 
-- **Status:** **FIXED** 2026-08-04 for the lane being unusable and the refusal being illegible;
-  **prover correctness deferred** (see *Deferred* below). First observed 2026-08-03; both halves re-verified.
+- **Status:** **FIXED** — 2026-08-04 for the lane being unusable and the refusal being illegible;
+  **2026-08-05 for prover correctness** (B-13, see *Deferred* below, which now records the closure).
+  First observed 2026-08-03; every half re-verified.
 - **Scenario A — `refactor_symbol_migration` finds nothing where the plain preview finds three:**
   - `refactor_symbol_migration{ migrations:[{ fromSymbol:"NormalizeToConversationCode", toSymbol:"NormalizeToConversationCodeX", requiredOwnerType:"ConversationLoopCorrelationCodec" }], scopePaths:["backend/CommunicationHub/src"], dryRun:true }` → `totalMatches: 0`, `unresolvedOccurrences: 0`, empty `previewSummary`.
   - Same repo, same scope, same identifier via `refactor_replace_preview` → **3 matches**, each with a correctly resolved `ownerType` (`ConversationLoopCorrelationCodec`, `OutboundDeliveryFailedNotifier`, `ProcessOutboundSentConfirmCommandHandler`) and `confidence 0.95`. The declaring site's own owner type *is* the one that was required, so at least one match cannot legitimately be filtered out.
@@ -1163,18 +1167,76 @@ Scenario B *is* the prover, and the entry's proposal was right about what to do 
   `.claude/rules/mcp-hard-mode.md`, `orient.ts`, `docs/decision-tree.md`, the skill) works for
   `rename_assist` (mode `"text"`, no flag, merely low confidence) and cannot reach this lane.
 
-### Deferred — `findOwnerType` is a category error
+### ~~Deferred~~ — `findOwnerType` was a category error → **FIXED 2026-08-05 (B-13, fifth wave)**
 
-`refactorUtils.ts:findOwnerType` falls back to `findEnclosingClassName`, which returns *the class the
+> This section described the state between 2026-08-04 and 2026-08-05. It is kept for the diagnosis;
+> the closure is immediately below it. Do not read a current limitation out of the paragraph.
+
+`refactorUtils.ts:findOwnerType` fell back to `findEnclosingClassName`, which returns *the class the
 code sits in*, not *the type that owns the referenced member*. At a declaration site those coincide; at
 a usage site they do not — which is why the three observed `ownerType` values were three different
-enclosing classes, and why an `allowOwnerTypes` guard can match at most one of them. It also returns
+enclosing classes, and why an `allowOwnerTypes` guard could match at most one of them. It also returned
 null for any file with no `class` keyword, i.e. every top-level function.
 
-Fixing it means resolving the receiver's declared type the way `valueRepresentation.verifyOwner`
-already does, which needs the AST rather than a prefix scan, plus its own test suite. Documented at the
-function so the limitation is visible where it bites; until then the `rejectedSites` reporting above
-makes a wrong inference **visible** rather than silent.
+**Closed by an AST prover, not a patch.** `src/services/refactor/ownerResolver.ts` is now the single
+answer to "which type owns this site", and both lanes route through it — `refactorPreviewBuild`
+(`refactor_replace_preview`, `refactor_symbol_migration`) and `analysis/valueRepresentation`
+(`change_value_representation`), whose three private scope helpers moved into it rather than being
+duplicated. `findOwnerType` is renamed `findEnclosingTypeNameByScan` and demoted to what it always
+was: the non-C# fallback, labelled `enclosing_type_fallback` in the response so a scan is never
+mistaken for a proof.
+
+Rules, all C#: `declaration_site` · `initializer_type_match` · `receiver_type_match` (instance) ·
+`implicit_this` (`this.M`, bare `M(...)`) · `base_type_receiver` · `static_type_receiver` (`Codec.M`
+— the rule this entry needed) · `qualified_type_receiver` (`A.B.Codec.M`) · `receiver_member_type`
+(one nested hop — Scenario B). Two repo-scoped lookups feed the last three
+(`listCSharpTypeNames`, `listMemberDeclarations`), both lazy.
+
+**Scenario A — measured live on `wec.communication-hub` @ `8fe717b`**, the repo and commit this entry
+was filed from (full re-index, run `48413133`, 475 files / 4413 symbols / 48009 edges / 0 parse
+failures, isolated DB). Same call as the repro:
+
+| | as filed | now |
+|---|---|---|
+| `refactor_symbol_migration{requiredOwnerType:"ConversationLoopCorrelationCodec"}` | `totalMatches:1`, `rejectedSiteCount:2` | **`totalMatches:3`**, `rejectedSiteCount:0`, `unresolvedOccurrences:0` — all three at confidence `0.95` with **no risk flags**, i.e. appliable rather than merely visible |
+| the two rejections | `inferred owner 'OutboundDeliveryFailedNotifier' != required` and the equivalent for `ProcessOutboundSentConfirm` — each caller's own class | gone; both sites now resolve to `ConversationLoopCorrelationCodec` via `static_type_receiver` |
+| `refactor_replace_preview`'s `ownerType` at the same 3 sites | `ConversationLoopCorrelationCodec`, `OutboundDeliveryFailedNotifier`, `ProcessOutboundSentConfirmCommandHandler` | `ConversationLoopCorrelationCodec` ×3 |
+
+The guarded tool and the unguarded one now agree at 3, which is what "the guard is usable" means.
+
+**Scenario B — the *shape* is fixed; this repo's three sites are a different shape and are not.** Be
+precise about this, because the fixture and the live repo disagree for a real reason:
+
+- The two-hop receiver `conversation.Assignment.HandledBy` — the shape this entry named — resolves,
+  proven in `scripts/test/test-owner-prover.mjs`: owner `ConversationAssignmentState` via
+  `receiver_member_type`, and `requiredOwnerType:"Conversation"` **rejects** it rather than flagging
+  it ambiguous.
+- The three live sites are **not** that shape. All three are in
+  `tests/Application.UnitTests/…/GetCustomerConversationDetailQueryHandlerTests.cs` — two are
+  `var smsMap = Assert.Single(…); … smsMap.HandledBy` (a `var` local initialised from a **method
+  call**, so no declared type to read) and one is `detail.ChannelConversations[0].HandledBy` (an
+  **element access** receiver). Both need return-type / generic-element inference, neither of which
+  this prover does. They remain `totalMatches:3, ambiguousOccurrences:3` — unchanged — but now each
+  names its rule (`receiver_type_not_in_scope`, `receiver_not_identifier`) instead of being an
+  unexplained ambiguity. Worth noting the original repro also asked for the wrong owner: these are
+  DTO assertions, so neither `ConversationAssignmentState` nor `Conversation` owns them.
+
+Reverting the static-receiver rule to the enclosing type reproduces `totalMatches:1` and the
+`'Notifier'`/`'Handler'` rejections exactly, and fails 4 harness assertions — so the harness is
+evidence, not decoration.
+
+**Known gaps, named rather than left to be rediscovered.** A receiver typed only by a method's return
+value (`var x = Factory.Make(); x.M`) is `receiver_type_not_in_scope`; an element-access receiver
+(`list[0].M`) is `receiver_not_identifier`. Both need inference this prover does not do, both are
+reported with their rule, and neither is ever attributed to a wrong type — which is the property that
+matters, since a wrong `verified` is what B-13 existed to remove.
+
+**One contract change, deliberate.** An owner that cannot be *proven* is no longer a silent drop. It
+is kept, flagged `ambiguous_target` (so `isApplyRunnableHunk` still blocks apply) and explained in a
+new `ambiguousReasons` array — the shape `change_value_representation` already used, now shared by the
+whole lane. Only a **proven different** owner lands in `rejectedSites`. So `totalMatches` can rise for
+a C# caller using an owner guard, with `unresolvedOccurrences` accounting for the delta, and
+`refactor_replace_preview` surfaces both arrays where it previously surfaced neither.
 
 ---
 

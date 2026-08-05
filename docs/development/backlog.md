@@ -63,33 +63,58 @@ Two additions the migration learned and this backlog adopts:
 
 ## P1 — A tool reports something untrue
 
-### B-13 · Give `findOwnerType` a real owner, so `requiredOwnerType` can guard a migration — 🔴 OPEN 2026-08-04
+### B-13 · Give `findOwnerType` a real owner, so `requiredOwnerType` can guard a migration — ✅ DONE 2026-08-05
 
-`refactor_symbol_migration`'s owner guard cannot express its primary use case: *migrate a member
-across its consumers, under an owner constraint.* `findOwnerType`
-(`codebase-index-mcp/src/services/refactor/refactorUtils.ts`) falls through to
-`findEnclosingClassName` outside an object initializer — it returns **the class the code sits in**,
-not **the type that owns the member being referenced**. Those coincide at a declaration site and
-diverge at every usage site, so `requiredOwnerType` can only ever match sites *inside the declaring
-type*.
+**The defect.** `findOwnerType` (`codebase-index-mcp/src/services/refactor/refactorUtils.ts`) fell
+through to `findEnclosingClassName` outside an object initializer — it returned **the class the code
+sits in**, not **the type that owns the member being referenced**. Those coincide at a declaration
+site and diverge at every usage site, so `requiredOwnerType` could only ever match sites *inside the
+declaring type*, and `refactor_symbol_migration` could not express its primary use case: *migrate a
+member across its consumers, under an owner constraint.*
 
-Measured from `wec.communication-hub`: `requiredOwnerType:"ConversationLoopCorrelationCodec"` returns
-`totalMatches:1` with `rejectedSiteCount:2` — the two rejections naming
-`owner_not_allowed, inferred owner 'OutboundDeliveryFailedNotifier' != required`, i.e. each *caller's*
-own class. `refactor_replace_preview` finds all 3 sites. So the guarded tool is strictly weaker than
-the unguarded one, and the only path that reaches every site is the one with no owner guarantee at all.
+Measured from `wec.communication-hub`: `requiredOwnerType:"ConversationLoopCorrelationCodec"` returned
+`totalMatches:1` with `rejectedSiteCount:2`, the two rejections naming
+`owner_not_allowed, inferred owner 'OutboundDeliveryFailedNotifier' != required` — each *caller's* own
+class — while `refactor_replace_preview` found all 3 sites. The guarded tool was strictly weaker than
+the unguarded one.
 
-The diagnostics half of MCP-ISSUE-043 shipped 2026-08-04 and is a genuine improvement — the rejections
-are now visible and named, where before this was a silent `0`. The prover itself was deferred as
-cosmetic. The consumer's independent re-run showed it is **load-bearing**: `requiredOwnerType` is not
-merely imprecise, it is unusable for the thing it exists to do.
+**Outcome — the owner is now proven from the C# AST.**
+`codebase-index-mcp/src/services/refactor/ownerResolver.ts` is the single answer to "which type owns
+this site", and both lanes route through it: `refactorPreviewBuild` (`refactor_replace_preview`,
+`refactor_symbol_migration`) and `analysis/valueRepresentation` (`change_value_representation`), whose
+three private scope helpers moved into it. It resolves a declaration site, an object initializer, and
+an instance / `this` / `base` / static / namespace-qualified / one-hop-nested receiver.
 
-Needs real AST resolution of the receiver expression's type at the call site, which is why it was
-deferred and why it is a scoped piece of work rather than a patch. Until then, `requiredOwnerType`
-should be understood as "sites within the declaring type", not "sites that touch this type's member".
+**Measured live on `wec.communication-hub` @ `8fe717b`** — the repo, commit and call this was filed
+from (full re-index, 475 files / 4413 symbols / 48009 edges / 0 parse failures, isolated DB):
 
-Registry entry: MCP-ISSUE-043 (`codebase-index-mcp/docs/mcp-codebase-index-issue-registry.md`);
-the limitation is also documented in the doc comment on `findOwnerType` itself.
+| | as filed | now |
+|---|---|---|
+| `requiredOwnerType:"ConversationLoopCorrelationCodec"` | `totalMatches:1`, `rejectedSiteCount:2` | **`totalMatches:3`**, `rejectedSiteCount:0`, `unresolvedOccurrences:0`, all at confidence `0.95` with no risk flags — appliable, not merely visible |
+| the rejections | each caller's own class (`OutboundDeliveryFailedNotifier`, `ProcessOutboundSentConfirmCommandHandler`) | gone — both resolve to the codec via `static_type_receiver` |
+| guarded vs unguarded | 1 vs 3 | **3 vs 3** |
+
+Proven non-vacuous: reverting the static-receiver rule to the enclosing type reproduces
+`totalMatches:1` and the caller-class rejections exactly, and fails 4 harness assertions.
+
+**What is *not* fixed, stated plainly.** MCP-ISSUE-043's Scenario B has two halves. The two-hop
+receiver it named (`conversation.Assignment.HandledBy`) resolves, proven in the harness. But the three
+live sites in that repo are a different shape — `var x = Assert.Single(…); x.HandledBy` and
+`detail.ChannelConversations[0].HandledBy`, i.e. a `var` local typed by a method's return value and an
+element-access receiver. Both need inference this prover does not do; they stay ambiguous at
+`3 of 3`, now each naming its rule. No follow-up item is filed: they are test-file DTO assertions
+whose real owner is neither type the repro asked for, so nothing there reports something untrue.
+
+**Two decisions worth keeping.** (1) **C# only** — every other language keeps the text scan, renamed
+to `findEnclosingTypeNameByScan` and labelled `enclosing_type_fallback`, so TS/JS renames are
+untouched. (2) **An unprovable owner is no longer a silent drop**: it is kept, flagged
+`ambiguous_target` (which blocks apply) and explained in a new `ambiguousReasons` array — the model
+`change_value_representation` already used. `refactor_replace_preview` now surfaces `rejectedSites`
+and `ambiguousReasons` too; it surfaced neither before.
+
+Registry entry: MCP-ISSUE-043 (`codebase-index-mcp/docs/mcp-codebase-index-issue-registry.md`), fifth
+wave. Gate: 37/37 harnesses (the new `test:owner-prover` at 13 assertions), 107 unit tests (up from
+87), `verify:all` clean, contract snapshot updated for the two tool descriptions.
 
 ### B-01 · Diagnose why C# `TYPE_REF` edges are almost never produced — ✅ DONE 2026-07-30
 
@@ -871,6 +896,7 @@ B-04  needs elapsed time, not effort: four more observations before a floor can 
 
 B-03 · B-06 · B-11   ✅ closed 2026-08-03 during the repository review
 B-05                 ⛔ won't do — no credential goes into CI; the risk is accepted, not solved
+B-13                 ✅ closed 2026-08-05 — filed after this section was written, blocked nothing
 ```
 
 **Suggested next slice:** nothing here is blocking. B-04 closes on its own once four more CI runs
@@ -897,7 +923,7 @@ tell the truth, or makes an existing gate capable of failing.
 
 | # | Item | Tier | Risk | Rev. | Complexity | Status |
 |---|---|---|---|---|---|---|
-| B-13 | `findOwnerType` returns the enclosing class, not the owner | P1 | **Med** | R2 | M / AST | 🔴 open 2026-08-04 · `requiredOwnerType` matches 1 of 3 sites |
+| B-13 | `findOwnerType` returns the enclosing class, not the owner | P1 | **Med** | R2 | M / AST | ✅ 2026-08-05 · AST prover; `requiredOwnerType` matches 3 of 3 |
 | B-01 | Diagnose C# `TYPE_REF` loss | P1 | Low | R1 | M | ✅ 2026-07-30 · `c68bda5` |
 | B-01b | Fix C# `TYPE_REF` | P1 | — | — | unscoped | ✅ 2026-07-30 · `266d91b` `9574e3e` `f1c0160` `9b55de4` |
 | B-02 | Locate extraction nondeterminism | P1 | Low | R1 | M | ✅ 2026-07-30 · `b764b39` |

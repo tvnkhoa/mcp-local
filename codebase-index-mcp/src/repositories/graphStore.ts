@@ -164,6 +164,8 @@ import {
   getSymbolsByIds as getSymbolsByIdsImpl,
   getRepository as getRepositoryImpl,
   getUnresolvedStats as getUnresolvedStatsImpl,
+  listCSharpTypeNames as listCSharpTypeNamesImpl,
+  listMemberDeclarations as listMemberDeclarationsImpl,
   type FieldAccessResult,
   type ModuleFlowResult,
   type UnresolvedStats
@@ -362,6 +364,16 @@ export class GraphStore {
 
   getRepository(repoId: string): { repoId: string; repoPath: string; updatedAt: string } | null {
     return getRepositoryImpl(this.db, repoId);
+  }
+
+  /** Every C# type name declared in this repo — the owner prover's static-receiver test (B-13). */
+  listCSharpTypeNames(repoId: string): string[] {
+    return listCSharpTypeNamesImpl(this.db, repoId);
+  }
+
+  /** Declarations of a member by name, with declaring type + signature — two-hop owner resolution (B-13). */
+  listMemberDeclarations(repoId: string, memberName: string): { name: string; parentName: string | null; signature: string | null }[] {
+    return listMemberDeclarationsImpl(this.db, repoId, memberName);
   }
 
   upsertCrossRepoDep(fromRepoId: string, fromSymbolId: string, toRepoId: string, toSymbolId: string, type: string): void {

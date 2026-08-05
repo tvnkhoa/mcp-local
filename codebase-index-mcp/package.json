@@ -43,6 +43,7 @@
     "test:link-tests-boost": "node scripts/test/test-link-tests-boost.mjs",
     "test:field-access-rhs": "node scripts/test/test-field-access-rhs.mjs",
     "test:change-value-representation": "node scripts/test/test-change-value-representation.mjs",
+    "test:owner-prover": "node scripts/test/test-owner-prover.mjs",
     "test:persistence-mapping": "node scripts/test/test-persistence-mapping.mjs",
     "test:value-contract-impact": "node scripts/test/test-value-contract-impact.mjs",
     "benchmark:plan": "node scripts/benchmark-plan-mode.mjs",

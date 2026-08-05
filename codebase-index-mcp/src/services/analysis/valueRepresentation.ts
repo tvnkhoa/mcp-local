@@ -15,7 +15,12 @@ import {
   offsetToLine,
   pathStartsWithAny
 } from "../refactor/refactorUtils.js";
-import { collectCSharpScopeTypeMap } from "../extractors/extractorUtils.js";
+import {
+  createOwnerFileContext,
+  createOwnerRepoIndex,
+  describeOwnerRule,
+  resolveOwnerForNode
+} from "../refactor/ownerResolver.js";
 
 /**
  * ENH-029-A — `change_value_representation`.
@@ -70,119 +75,6 @@ function accessedPropertyName(node: Parser.SyntaxNode): string | null {
     return node.text.trim();
   }
   return null;
-}
-
-/** Receiver identifier of a member access (`recv.Prop` → "recv"), or null. */
-function memberAccessReceiverName(node: Parser.SyntaxNode): string | null {
-  if (node.type !== "member_access_expression") return null;
-  const recv = node.childForFieldName("expression");
-  return recv && recv.type === "identifier" ? recv.text.trim() : null;
-}
-
-/** Nearest enclosing object_creation_expression type name (`new Conversation { … }` → "Conversation"). */
-function enclosingObjectCreationType(node: Parser.SyntaxNode): string | null {
-  let current: Parser.SyntaxNode | null = node.parent;
-  while (current) {
-    if (current.type === "object_creation_expression") {
-      const typeNode = current.childForFieldName("type");
-      return typeNode ? typeNode.text.trim() : null;
-    }
-    // An initializer belongs to the object_creation that directly precedes it; don't escape the statement.
-    if (current.type === "block" || current.type === "method_declaration") break;
-    current = current.parent;
-  }
-  return null;
-}
-
-type OwnerVerdict = "verified" | "unknown" | "cross_type";
-
-/**
- * Decide whether a property access belongs to `requiredOwnerType`.
- * - object-initializer: type comes from the enclosing `new T { … }`.
- * - member access `recv.Prop`: receiver type from the method scope type map (param/local/field).
- * Returns "cross_type" only when a *known* owner type differs — those sites are dropped, never rewritten.
- */
-function verifyOwner(
-  access: Parser.SyntaxNode,
-  requiredOwnerType: string,
-  scopeForNode: (node: Parser.SyntaxNode) => Map<string, string>
-): { verdict: OwnerVerdict; rule: string; inferredOwnerType: string | null } {
-  const required = requiredOwnerType.toLowerCase();
-
-  if (access.type === "identifier") {
-    // Bare `Prop` inside an object initializer → owner is the constructed type.
-    const ctorType = enclosingObjectCreationType(access);
-    if (ctorType) {
-      return ctorType.toLowerCase() === required
-        ? { verdict: "verified", rule: "initializer_type_match", inferredOwnerType: ctorType }
-        : { verdict: "cross_type", rule: "initializer_type_mismatch", inferredOwnerType: ctorType };
-    }
-    // A bare assignment that is NOT inside `new T { … }` — e.g. `HandledBy = "ai";` in a method of
-    // the declaring type itself, or a `with` expression, neither of which this prover recognizes.
-    return { verdict: "unknown", rule: "no_enclosing_object_creation", inferredOwnerType: null };
-  }
-
-  const receiver = memberAccessReceiverName(access);
-  // Requires a BARE identifier receiver, so any nested path (`conversation.Assignment.HandledBy`)
-  // is permanently unprovable — the owned-entity shape this tool exists for (MCP-ISSUE-043).
-  if (!receiver) return { verdict: "unknown", rule: "receiver_not_identifier", inferredOwnerType: null };
-  const declaredType = scopeForNode(access).get(receiver);
-  if (!declaredType) {
-    return { verdict: "unknown", rule: "receiver_type_not_in_scope", inferredOwnerType: null };
-  }
-  return declaredType.toLowerCase() === required
-    ? { verdict: "verified", rule: "receiver_type_match", inferredOwnerType: declaredType }
-    : { verdict: "cross_type", rule: "receiver_type_mismatch", inferredOwnerType: declaredType };
-}
-
-/** Type name of an `object_creation_expression` (`new T(...)` → "T"). */
-function objectCreationTypeName(node: Parser.SyntaxNode | undefined): string | undefined {
-  if (!node || node.type !== "object_creation_expression") return undefined;
-  const typeField = node.childForFieldName("type")?.text.trim();
-  if (typeField) return typeField;
-  // Fallback: first named child is the type identifier in grammars without a `type` field.
-  const first = node.namedChildren[0];
-  return first && (first.type === "identifier" || first.type.endsWith("_name")) ? first.text.trim() : undefined;
-}
-
-/**
- * Map locally-declared variables to their concrete type. The shared scope-map helper reads the type
- * off `local_declaration_statement`, but in this grammar the type lives under `variable_declaration`
- * (and is `var`/`implicit_type` for inferred locals), so locals are missed entirely. Walk
- * `variable_declaration` directly: prefer the explicit declared type, falling back to the `new T()`
- * initializer's type for `var` locals — which is what most assignment/comparison receivers use.
- */
-function collectLocalDeclaredTypes(scopeRoot: Parser.SyntaxNode): Map<string, string> {
-  const map = new Map<string, string>();
-  for (const vd of scopeRoot.descendantsOfType("variable_declaration")) {
-    const declaredType = vd.childForFieldName("type")?.text.trim();
-    const isInferred = !declaredType || declaredType === "var";
-    for (const declarator of vd.descendantsOfType("variable_declarator")) {
-      const name = declarator.childForFieldName("name")?.text.trim();
-      if (!name) continue;
-      const created = objectCreationTypeName(declarator.namedChildren.find((c) => c.type === "object_creation_expression"));
-      const concrete = isInferred ? created : declaredType;
-      if (concrete) map.set(name, concrete);
-    }
-  }
-  return map;
-}
-
-/** Enclosing method/constructor node used as the scope root for type inference, or the file root. */
-function enclosingScopeRoot(node: Parser.SyntaxNode): Parser.SyntaxNode {
-  let current: Parser.SyntaxNode | null = node;
-  while (current) {
-    if (
-      current.type === "method_declaration" ||
-      current.type === "constructor_declaration" ||
-      current.type === "local_function_statement"
-    ) {
-      return current;
-    }
-    if (!current.parent) return current;
-    current = current.parent;
-  }
-  return node;
 }
 
 /**
@@ -269,6 +161,8 @@ export function buildValueRepresentationPreview(
   const affected = new Set<string>();
   const rejectedSites: { filePath: string; line: number; rule: string; detail: string }[] = [];
   const ambiguousReasons: { filePath: string; line: number; rule: string; detail: string }[] = [];
+  // Repo-level facts the prover needs for static and two-hop receivers; queried lazily on first use.
+  const ownerRepoIndex = createOwnerRepoIndex(store, repoId);
   let totalMatches = 0;
 
   for (const filePath of selectedFiles) {
@@ -281,23 +175,9 @@ export function buildValueRepresentationPreview(
     const tree = parseCSharpOnDemand(content, filePath);
     if (!tree) continue; // too large / parse timeout → skip this file
     const generated = isGeneratedFilePath(filePath);
-
-    // Memoize the scope type map per enclosing method node — reused across literals in that method.
-    const scopeCache = new Map<number, Map<string, string>>();
-    const scopeForNode = (node: Parser.SyntaxNode): Map<string, string> => {
-      const root = enclosingScopeRoot(node);
-      let map = scopeCache.get(root.id);
-      if (!map) {
-        map = collectCSharpScopeTypeMap(root, /* includeDiAliases */ false);
-        // Overlay locally-declared variable types (the shared helper misses locals in this grammar).
-        for (const [name, type] of collectLocalDeclaredTypes(root)) {
-          const existing = map.get(name);
-          if (!existing || existing.toLowerCase() === "var") map.set(name, type);
-        }
-        scopeCache.set(root.id, map);
-      }
-      return map;
-    };
+    // B-13: one prover for both refactor lanes. It reuses the tree parsed above (no second parse) and
+    // memoizes the scope type map per enclosing method, as this function used to do inline.
+    const ownerContext = createOwnerFileContext(filePath, content, ownerRepoIndex, tree);
 
     let perFile = 0;
     const literals = tree.rootNode.descendantsOfType([...CSHARP_STRING_NODE_TYPES]);
@@ -311,7 +191,7 @@ export function buildValueRepresentationPreview(
       const site = classifyLiteralSite(literal, input.property, includeComparisons);
       if (!site) continue;
 
-      const owner = verifyOwner(site.access, input.requiredOwnerType, scopeForNode);
+      const owner = resolveOwnerForNode(ownerContext, site.access, [input.requiredOwnerType]);
       const line = offsetToLine(content, literal.startIndex);
       if (owner.verdict === "cross_type") {
         // known-different owner — never rewrite, but say so rather than dropping it silently
@@ -319,7 +199,7 @@ export function buildValueRepresentationPreview(
           filePath,
           line,
           rule: owner.rule,
-          detail: `inferred owner '${owner.inferredOwnerType ?? "unknown"}' != required '${input.requiredOwnerType}'`
+          detail: `inferred owner '${owner.ownerType ?? "unknown"}' != required '${input.requiredOwnerType}'`
         });
         continue;
       }
@@ -363,18 +243,4 @@ export function buildValueRepresentationPreview(
     rejectedSites,
     ambiguousReasons
   };
-}
-
-/** Why a rule could not prove the owner, in terms a caller can act on (MCP-ISSUE-043). */
-function describeOwnerRule(rule: string): string {
-  switch (rule) {
-    case "receiver_not_identifier":
-      return "the receiver is itself a member-access path (e.g. a.B.Prop); the prover only types a bare identifier receiver";
-    case "receiver_type_not_in_scope":
-      return "the receiver's declared type is not in the method scope map (property, field, foreach variable, lambda parameter or method return)";
-    case "no_enclosing_object_creation":
-      return "a bare assignment outside a `new T { … }` initializer — including an assignment inside the declaring type itself, and `with` expressions";
-    default:
-      return rule;
-  }
 }

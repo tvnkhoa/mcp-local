@@ -183,22 +183,25 @@ function findEnclosingClassName(content: string, offset: number): string | null 
 }
 
 /**
- * The type that owns the site at `offset` — best-effort, and knowingly wrong in one case.
+ * The enclosing type name at `offset`, by text scan: the nearest object-initializer the offset sits
+ * inside, else the nearest preceding class declaration.
  *
- * KNOWN LIMITATION (MCP-ISSUE-043, deferred): outside an object initializer this falls through to
- * `findEnclosingClassName`, which returns *the class the code sits in*, not *the type that owns the
- * member being referenced*. For a declaration site those coincide; for a usage site they do not, so
- * three call sites of one method reported three different owner types (each caller's own class) and
- * an `allowOwnerTypes` guard could match at most one of them. It also returns null for any file with
- * no `class` keyword — every top-level/free function — which is why `includeLowConfidence: true` is
- * documented as the workaround for renaming top-level identifiers.
+ * This answers "which type does the code SIT IN", which is **not** the same question as "which type
+ * OWNS the member being referenced" — they coincide only at a declaration site. Naming it as the
+ * scan it is, rather than `findOwnerType`, is half of the B-13 fix: the owner question now belongs to
+ * `ownerResolver.ts`, which resolves the receiver's type from the C# AST.
  *
- * Fixing it means resolving the receiver's declared type the way
- * `services/analysis/valueRepresentation.ts:verifyOwner` does, which needs the AST rather than a
- * prefix scan. Until then, callers should report WHICH owner was inferred (see `rejectedSites` in
- * `refactorPreviewBuild`) so a wrong inference is visible instead of silent.
+ * Still the answer for every non-C# language (no on-demand TS/JS parse or scope-type map exists to
+ * prove anything with) and the degraded answer when the C# parser declines a file. In both cases the
+ * prover labels it — `enclosing_type_fallback` / `parse_unavailable` — so the caller can tell a proof
+ * from a guess.
+ *
+ * Two properties of a scan, both pre-dating B-13 and both reasons the label matters: it does not skip
+ * comments or strings, so prose mentioning a declaration keyword can be picked up as the answer; and
+ * it returns null for a file that declares no type at all, which is why `includeLowConfidence: true`
+ * is the documented path for renaming top-level identifiers.
  */
-export function findOwnerType(content: string, offset: number): string | null {
+export function findEnclosingTypeNameByScan(content: string, offset: number): string | null {
   const initializer = findEnclosingObjectInitializer(content, offset);
   if (initializer) {
     return initializer.typeName;

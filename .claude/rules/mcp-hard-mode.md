@@ -372,6 +372,14 @@ Operational rule:
 | `find_symbol_at_line` | Often resolves declaration-level positions, not inner-block lines | Prefer declaration line or pair with one focused search |
 | `get_cross_repo_impact` | Returns empty when repos have no shared symbols (normal for isolated systems) | Only useful when repos share interface/contract symbol names (e.g., shared library pattern) |
 
+### Fixed by B-13 / MCP-ISSUE-043 (2026-08-05) — `requiredOwnerType` changed meaning
+
+| Was | Now |
+|---|---|
+| `requiredOwnerType` / `guards.allowOwnerTypes` meant "sites **within** the declaring type": the owner was the class the code sits in, so a member's external call sites were rejected naming each *caller's* own class. The workaround was to give up the guard and use `refactor_replace_preview` | The owner is proven from the C# AST — the type that **owns** the referenced member. Static (`Codec.M`), instance, `this`, `base`, namespace-qualified and one-hop-nested (`a.B.M`) receivers all resolve, so a migration reaches a member's consumers. Non-C# files still use the enclosing-type text scan, labelled `enclosing_type_fallback` |
+| A site whose owner could not be inferred was **dropped** by the guard, indistinguishable from "not found" | It is **kept**, flagged `ambiguous_target` (so it cannot apply) and explained in `ambiguousReasons`, which names the rule that failed. Only a proven *different* owner lands in `rejectedSites`. Expect `totalMatches` to be higher than before, with `unresolvedOccurrences` accounting for the difference |
+| `refactor_replace_preview` surfaced neither `rejectedSites` nor `ambiguousReasons`, so a guard that dropped every site read as an empty result | Both are in the response (counts at `nano`, detail above it) |
+
 ### Fixed by MCP-ISSUE-049 (2026-08-04) — do not work around these any more
 
 | Was | Now |

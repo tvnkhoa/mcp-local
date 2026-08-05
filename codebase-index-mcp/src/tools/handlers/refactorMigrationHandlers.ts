@@ -45,6 +45,7 @@ export async function handleRefactorSymbolMigration(
     previewSummary: ReturnType<typeof groupPreviewHunks>;
     rejectedSiteCount?: number;
     rejectedSites?: { filePath: string; line: number; rule: string; detail: string }[];
+    ambiguousReasons?: { filePath: string; line: number; rule: string; detail: string }[];
     applyId?: string; rollbackId?: string;
   }> = [];
   const suggestedFollowUpFiles = new Set<string>();
@@ -83,6 +84,11 @@ export async function handleRefactorSymbolMigration(
       ...(previewResult.rejectedSites.length > 0 && {
         rejectedSiteCount: previewResult.rejectedSites.length,
         rejectedSites: previewResult.rejectedSites.slice(0, 20)
+      }),
+      // B-13: a site whose owner could not be PROVEN is kept and flagged rather than dropped, so it
+      // is counted in `unresolvedOccurrences`. This names the rule that failed for each one.
+      ...(previewResult.ambiguousReasons.length > 0 && {
+        ambiguousReasons: previewResult.ambiguousReasons.slice(0, 20)
       })
     };
     for (const hunk of hunkRecords) suggestedFollowUpFiles.add(hunk.filePath);

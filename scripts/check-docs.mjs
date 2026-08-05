@@ -122,6 +122,12 @@ const NOT_TOOLS = new Set([
   ...ERROR_CODES,
   "read_file", "grep_search", "file_search", "codebase_search", "semantic_search",
   "snake_case", "kebab_case", "camel_case", "pascal_case", "record_struct",
+  // Owner-prover rule names (B-13). They are response *values* — `ownerResolver.ts` reports which
+  // rule decided a site — and read as tool-shaped only because they are snake_case in backticks.
+  "enclosing_type_fallback", "static_type_receiver", "receiver_member_type", "declaration_site",
+  "initializer_type_match", "qualified_type_receiver", "base_type_receiver", "implicit_this",
+  "receiver_type_match", "receiver_type_not_in_scope", "receiver_path_unresolved",
+  "receiver_not_identifier", "site_not_an_identifier", "parse_unavailable",
 ]);
 
 // A line may name a non-existent tool in order to say it does not exist. Exempt the disclaimer, not

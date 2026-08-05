@@ -192,9 +192,23 @@ function createReplacePreview(
 
   const ambiguity = { ratioPercent: Number(ambiguousRatio.toFixed(2)), thresholdPercent: args.ambiguityThresholdPercent, blockedByPolicy: blockedByAmbiguity };
 
+  // Guard diagnostics (MCP-ISSUE-043 / B-13). This handler surfaced neither before, so an owner guard
+  // that dropped every site read as "the identifier does not appear in scope". Counts at every profile,
+  // detail above nano: `rejectedSites` are sites a guard REFUSED (proven wrong kind/owner);
+  // `ambiguousReasons` are sites KEPT but unprovable, and therefore blocked from apply.
+  const guardCounts = {
+    ...(previewResult.rejectedSites.length > 0 && { rejectedSiteCount: previewResult.rejectedSites.length }),
+    ...(previewResult.ambiguousReasons.length > 0 && { unprovenOwnerCount: previewResult.ambiguousReasons.length })
+  };
+  const guardDetail = {
+    ...guardCounts,
+    ...(previewResult.rejectedSites.length > 0 && { rejectedSites: previewResult.rejectedSites.slice(0, 20) }),
+    ...(previewResult.ambiguousReasons.length > 0 && { ambiguousReasons: previewResult.ambiguousReasons.slice(0, 20) })
+  };
+
   // nano: summary only — no hunk content (best for checking blast radius before requesting detail)
   if (profile === "nano") {
-    return ctx.asText({ previewId, approvalToken, totalMatches: effectiveHunks.length, affectedFileCount: effectiveAffectedFiles.length, affectedFiles: effectiveAffectedFiles, riskFlags, ambiguity, diagnostics, executionPolicy, expiresAt }, profile);
+    return ctx.asText({ previewId, approvalToken, totalMatches: effectiveHunks.length, affectedFileCount: effectiveAffectedFiles.length, affectedFiles: effectiveAffectedFiles, riskFlags, ...guardCounts, ambiguity, diagnostics, executionPolicy, expiresAt }, profile);
   }
 
   // compact: hunks without before/after text (saves 50-80% tokens on large refactors)
@@ -205,13 +219,14 @@ function createReplacePreview(
       filePath, hunkCount: items.length,
       hunks: items.map((h) => ({ hunkId: h.hunkId, line: h.line, replacementText: h.replacementText, symbolKind: h.symbolKind, confidence: h.confidence, riskFlags: h.riskFlags }))
     }));
-    return ctx.asText({ previewId, mode: args.mode, totalMatches: effectiveHunks.length, affectedFiles: effectiveAffectedFiles, groupedPreviewHunks: compactHunks, riskFlags, ambiguity, diagnostics, executionPolicy, approvalToken, expiresAt }, profile);
+    return ctx.asText({ previewId, mode: args.mode, totalMatches: effectiveHunks.length, affectedFiles: effectiveAffectedFiles, groupedPreviewHunks: compactHunks, riskFlags, ...guardDetail, ambiguity, diagnostics, executionPolicy, approvalToken, expiresAt }, profile);
   }
 
   return ctx.asText({
     previewId, mode: args.mode, totalMatches: effectiveHunks.length, affectedFiles: effectiveAffectedFiles,
     groupedPreviewHunks: groupPreviewHunks(hunkRecords),
     riskFlags,
+    ...guardDetail,
     compilerAssist: compilerAssistOutcome
       ? { enabled: true, totalDiagnostics: compilerAssistOutcome.totalDiagnostics, acceptedDiagnostics: compilerAssistOutcome.acceptedDiagnostics, matchedDiagnostics: compilerAssistOutcome.matchedDiagnostics, filteredOutHunks: compilerAssistOutcome.filteredOutHunks, lineWindow: compilerAssistOutcome.lineWindow, codes: compilerAssistOutcome.codes }
       : { enabled: false },

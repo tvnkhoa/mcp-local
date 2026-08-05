@@ -1604,7 +1604,7 @@
         "openWorldHint": false,
         "readOnlyHint": true
       },
-      "description": "Preview bulk replacements with scope and type-ownership guards. findMode='literal' (default) matches `find` as plain text; findMode='regex' treats `find` as a regular expression and substitutes capture-group backreferences in `replaceExpression` — numbered ($1..$99), whole-match ($&), named ($<name> or ${name}), and a literal `$` via $$ — ideal for context-preserving bulk edits in one pass. A backreference to a group that did not match is flagged `unsubstituted_backreference` and blocked at apply (it is never silently written). profile='nano' returns only match count + affected files (fastest blast-radius check); 'compact' omits before/after text; 'standard' (default) returns full hunk content.",
+      "description": "Preview bulk replacements with scope and type-ownership guards. findMode='literal' (default) matches `find` as plain text; findMode='regex' treats `find` as a regular expression and substitutes capture-group backreferences in `replaceExpression` — numbered ($1..$99), whole-match ($&), named ($<name> or ${name}), and a literal `$` via $$ — ideal for context-preserving bulk edits in one pass. A backreference to a group that did not match is flagged `unsubstituted_backreference` and blocked at apply (it is never silently written). guards.allowOwnerTypes is proven from the C# AST — the type that OWNS the referenced member (instance/static/base/`this` receivers, object initializers, and one nested hop), not the class the code sits in; for other languages it is the enclosing type by text scan. Only a proven DIFFERENT owner is dropped (see rejectedSites); a site whose owner cannot be proven is kept, flagged `ambiguous_target` and explained in ambiguousReasons, so it is visible but never applied. profile='nano' returns only match count + affected files (fastest blast-radius check); 'compact' omits before/after text; 'standard' (default) returns full hunk content.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -1814,7 +1814,7 @@
         "openWorldHint": false,
         "readOnlyHint": true
       },
-      "description": "Run owner-type constrained symbol migrations (dry-run by default) using the same preview/apply engine. Sites are constrained by requiredOwnerType and, optionally, by symbolKinds (default: any kind). When a migration reports 0 matches, read rejectedSites — it names the guard that dropped each site.",
+      "description": "Run owner-type constrained symbol migrations (dry-run by default) using the same preview/apply engine. requiredOwnerType means \"sites that touch this type's member\", proven from the C# AST — a static (`Codec.M`), instance, `this`, `base`, namespace-qualified or one-hop-nested receiver, plus object initializers and the declaration itself — so it reaches a member's consumers, not only the declaring type. Non-C# files fall back to the enclosing type by text scan. Optionally constrain by symbolKinds (default: any kind). A proven different owner is dropped and named in rejectedSites; a site whose owner cannot be proven is KEPT, counted in unresolvedOccurrences, flagged `ambiguous_target` (so it cannot apply) and explained in ambiguousReasons. When a migration reports fewer matches than expected, read both arrays — they name the rule for every site.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {

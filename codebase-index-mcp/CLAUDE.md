@@ -161,6 +161,17 @@ real ones were missing. The unions above are the measured truth.)*
 - Approval tokens use HMAC (env: `CODEBASE_INDEX_REFACTOR_APPROVAL_SECRET`)
 - C# object-initializer rewrites require explicit `initializerRewrite` config; dotted paths without it are blocked as `ambiguous_target`
 
+**Owner types are proven, not scanned (B-13).** `services/refactor/ownerResolver.ts` is the single
+answer to "which type owns this site", shared by `refactorPreviewBuild` and
+`analysis/valueRepresentation`. For C# it types the receiver from the AST — instance, `this`, `base`,
+static (`Codec.M`), namespace-qualified, one nested hop (`a.B.M`), object initializers, and
+declaration sites — so `requiredOwnerType` means *sites that touch this type's member*, not *sites
+inside the declaring type*. Other languages keep the text scan
+(`refactorUtils.findEnclosingTypeNameByScan`), reported as rule `enclosing_type_fallback`.
+Three verdicts: `verified` keeps the site, `cross_type` rejects it into `rejectedSites`, and
+`unknown` **keeps** it flagged `ambiguous_target` with the failing rule in `ambiguousReasons` —
+an unprovable owner is never a silent drop and never applies.
+
 ### No-LLM policy
 
 `npm run guard:no-llm-runtime` (scripts/guard-no-llm-runtime.mjs) statically verifies the `src/` tree contains no LLM client imports. Setting `CODEBASE_INDEX_LLM_ENABLED=true` causes startup to fail. This must remain true.
