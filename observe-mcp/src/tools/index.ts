@@ -2,7 +2,7 @@
  * observe-mcp's tool table, declared as data (migration-plan step S-25).
  *
  * What used to be a `ListTools` array plus a hand-written `switch` in `index.ts`
- * is now eight `defineTool` declarations. The shared pipeline in `@mcp/sdk`
+ * is now a set of `defineTool` declarations. The shared pipeline in `@mcp/sdk`
  * supplies resolve → profile → validate → guards → handle → serialize; what
  * stays local is this server's own contract — the exact descriptions and JSON
  * Schemas, the SQL guardrail, and the `{ code, message, detail? }` error
@@ -12,22 +12,28 @@
  * `contracts/observe-mcp.json` is a committed contract, and a generator would be
  * free to drift it. `schema.*` only removes boilerplate.
  *
- * Seven of the eight handlers return a plain payload and let dispatch serialize
- * it. `run_observe_query` is the exception and is documented at its declaration.
+ * Every tool except `list_environments` takes an optional `environment` and
+ * resolves its client through `ClientManager`, and every response echoes the
+ * environment that answered — including when the argument was omitted. Without
+ * that echo a caller cannot tell dev from prod in a payload.
+ *
+ * All handlers return a plain payload and let dispatch serialize it, except
+ * `run_observe_query`, which is documented at its declaration.
  */
 
 import { ok } from "@mcp/core";
-import type { AnyToolDefinition, JsonSchemaNode, ToolCallResult } from "@mcp/sdk";
+import type { AnyToolDefinition, ToolCallResult } from "@mcp/sdk";
 import { annotations, defineTool, registerTool, schema } from "@mcp/sdk";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 
-import type { ObserveConfig } from "../config/index.js";
+import type { ObserveLimits } from "../config/index.js";
 import { isPlatformError } from "@mcp/core";
 import { validateReadOnlySql } from "../middleware/sqlGuardrails.js";
 import { mapError, type MappedError } from "../middleware/errors.js";
-import { normalizeLog, normalizeSpan, capLog } from "../services/logParser.js";
-import type { ObserveClient } from "../services/observeClient.js";
+import { normalizeLog, normalizeSpan, capLog, describeFields } from "../services/logParser.js";
+import type { ClientManager } from "../services/clientManager.js";
+import { isMissingColumnError } from "../services/observeClient.js";
 import {
   resolveWindow,
   clampSize,
@@ -35,14 +41,33 @@ import {
   buildTraceLogsSql,
   buildTraceSpansSql,
   buildLogStatsSql,
-  buildSampleSql
+  buildSampleSql,
+  type TraceIdColumn
 } from "../services/queryBuilder.js";
-import { asText as asTextProfiled, asError as asErrorProfiled, responseProfileSchema } from "../middleware/responseFormatter.js";
+import { asText as asTextProfiled, asError as asErrorProfiled } from "../middleware/responseFormatter.js";
+
+import { buildDiscoveryTools } from "./discovery.js";
+import {
+  envProp,
+  environmentArg,
+  instantArg,
+  limitArg,
+  limitProp,
+  offsetArg,
+  offsetProp,
+  profileArg,
+  profileProp,
+  streamArg,
+  streamTypeArg,
+  timeArg,
+  traceIdArg,
+  typeProp
+} from "./common.js";
 
 /**
  * `mapError`, plus the refusals dispatch itself raises. Re-declared here rather
- * than imported so `tools.ts` is the single place `index.ts` and the tests wire
- * their error contract from.
+ * than imported so `tools/index.ts` is the single place `index.ts` and the tests
+ * wire their error contract from.
  */
 export function toWireError(error: unknown): MappedError {
   if (isPlatformError(error)) {
@@ -60,68 +85,43 @@ function raw(result: CallToolResult): ToolCallResult {
   return result as unknown as ToolCallResult;
 }
 
-/** Summarize the fields present across sampled rows: observed JSON types + non-null count. */
-function describeFields(
-  hits: Array<Record<string, unknown>>
-): Array<{ name: string; types: string[]; nonNull: number }> {
-  const acc = new Map<string, { types: Set<string>; nonNull: number }>();
-  for (const hit of hits) {
-    for (const [key, value] of Object.entries(hit)) {
-      let entry = acc.get(key);
-      if (!entry) {
-        entry = { types: new Set<string>(), nonNull: 0 };
-        acc.set(key, entry);
-      }
-      if (value === null || value === undefined) {
-        entry.types.add("null");
-      } else {
-        entry.nonNull += 1;
-        entry.types.add(Array.isArray(value) ? "array" : typeof value);
-      }
-    }
-  }
-  return [...acc.entries()]
-    .map(([name, e]) => ({ name, types: [...e.types].sort(), nonNull: e.nonNull }))
-    .sort((a, b) => a.name.localeCompare(b.name));
-}
-
-export function buildTools(config: ObserveConfig, client: ObserveClient): readonly AnyToolDefinition[] {
-  // --- shared zod fragments --------------------------------------------------
-  const profileArg = responseProfileSchema.optional();
-  const offsetArg = z.number().int().min(0).optional();
-  const timeArg = z.string().min(1).max(32).optional();
-  const instantArg = z.string().min(1).max(64).optional();
-  const traceIdArg = z.string().min(8).max(64);
-  const streamTypeArg = z.enum(["logs", "traces", "metrics"]);
-  const limitArg = z.number().int().positive().optional();
-  const streamArg = z.string().min(1).max(256).optional();
-
-  // --- shared JSON Schema fragments -----------------------------------------
-  // Deliberately NOT `schema.profile()`: that helper adds a description this
-  // server has never advertised, and `tools/list` is a committed contract.
-  const profileProp: JsonSchemaNode = schema.enumOf(["nano", "compact", "standard", "verbose"]);
-  const typeProp: JsonSchemaNode = schema.enumOf(["logs", "traces", "metrics"]);
-  const limitProp: JsonSchemaNode = schema.number();
-  const offsetProp: JsonSchemaNode = schema.number(
-    "Row offset for pagination (default 0); use the returned nextOffset to page"
-  );
-
-  /** Every tool here reads a remote observability backend and changes nothing. */
+export function buildTools(limits: ObserveLimits, clients: ClientManager): readonly AnyToolDefinition[] {
+  /** Every tool that reaches OpenObserve reads a remote backend and changes nothing. */
   const reads = annotations.readRemote();
+
+  // --- list_environments -----------------------------------------------------
+  const listEnvironments = defineTool({
+    name: "list_environments",
+    description:
+      "List the configured OpenObserve environments (org, log/trace stream, and which one answers by default). Call this first when you do not know which environment names exist.",
+    input: z.object({ profile: profileArg }).strict(),
+    inputSchema: schema.object({ profile: profileProp }),
+    // The only tool here that touches no network — it reports resolved config, so
+    // openWorld is false. Everything else is `readRemote`.
+    annotations: annotations.read(),
+    handler: () =>
+      ok({
+        defaultEnvironment: clients.defaultEnvironment,
+        count: clients.list().length,
+        environments: clients.list()
+      })
+  });
 
   // --- list_streams ----------------------------------------------------------
   const listStreams = defineTool({
     name: "list_streams",
     description:
       "List OpenObserve streams (log/trace/metric datasets) for the configured org. Doubles as a connectivity + auth check.",
-    input: z.object({ type: streamTypeArg.optional(), profile: profileArg }).strict(),
-    inputSchema: schema.object({ type: typeProp, profile: profileProp }),
+    input: z.object({ type: streamTypeArg.optional(), environment: environmentArg, profile: profileArg }).strict(),
+    inputSchema: schema.object({ type: typeProp, environment: envProp, profile: profileProp }),
     annotations: reads,
     handler: async (input) => {
-      const streams = await client.listStreams(input.type);
+      const env = clients.getEnvironment(input.environment);
+      const streams = await clients.getClient(input.environment).listStreams(input.type);
       return ok({
-        org: config.org,
-        baseUrl: config.baseUrl,
+        environment: env.name,
+        org: env.org,
+        baseUrl: env.baseUrl,
         count: streams.length,
         streams: streams.map((s) => ({ name: s.name, type: s.stream_type ?? null }))
       });
@@ -145,11 +145,12 @@ export function buildTools(config: ObserveConfig, client: ObserveClient): readon
         limit: limitArg,
         offset: offsetArg,
         stream: streamArg,
+        environment: environmentArg,
         profile: profileArg
       })
       .strict(),
     inputSchema: schema.object({
-      service: schema.string("service_name, e.g. CommunicationHub.Web"),
+      service: schema.string("service_name, e.g. CRM.Gateway — use discover_services to list them"),
       level: schema.string(
         "Log level; prefix-matched on `severity`, so INFO/WARN/ERROR/FATAL all work (Information/Warning/...)"
       ),
@@ -161,26 +162,29 @@ export function buildTools(config: ObserveConfig, client: ObserveClient): readon
       limit: limitProp,
       offset: offsetProp,
       stream: schema.string("Override the configured logs stream"),
+      environment: envProp,
       profile: profileProp
     }),
     annotations: reads,
     handler: async (input) => {
-      const stream = input.stream ?? config.logStream;
-      const window = resolveWindow(input, config, Date.now());
-      const size = clampSize(input.limit, config);
+      const env = clients.getEnvironment(input.environment);
+      const stream = input.stream ?? env.logStream;
+      const window = resolveWindow(input, limits, Date.now());
+      const size = clampSize(input.limit, limits);
       const offset = input.offset ?? 0;
-      const sql = buildSearchLogsSql(stream, input, size, config.logColumns);
-      const res = await client.search({
+      const sql = buildSearchLogsSql(stream, input, size, limits.logColumns);
+      const res = await clients.getClient(input.environment).search({
         sql,
         startUs: window.startUs,
         endUs: window.endUs,
         from: offset,
         size,
         type: "logs",
-        fallbackSelectAll: config.logColumns.length > 0
+        fallbackSelectAll: limits.logColumns.length > 0
       });
-      const caps = config.fieldCaps[input.profile ?? "compact"];
+      const caps = limits.fieldCaps[input.profile ?? "compact"];
       return ok({
+        environment: env.name,
         stream,
         total: res.total ?? res.hits.length,
         count: res.hits.length,
@@ -205,6 +209,7 @@ export function buildTools(config: ObserveConfig, client: ObserveClient): readon
         end: instantArg,
         limit: limitArg,
         stream: streamArg,
+        environment: environmentArg,
         profile: profileArg
       })
       .strict(),
@@ -216,26 +221,29 @@ export function buildTools(config: ObserveConfig, client: ObserveClient): readon
         end: schema.string(),
         limit: limitProp,
         stream: schema.string(),
+        environment: envProp,
         profile: profileProp
       },
       { required: ["traceId"] }
     ),
     annotations: reads,
     handler: async (input) => {
-      const stream = input.stream ?? config.logStream;
-      const window = resolveWindow(input, config, Date.now());
-      const size = clampSize(input.limit, config);
-      const sql = buildTraceLogsSql(stream, input.traceId, size, config.logColumns);
-      const res = await client.search({
+      const env = clients.getEnvironment(input.environment);
+      const stream = input.stream ?? env.logStream;
+      const window = resolveWindow(input, limits, Date.now());
+      const size = clampSize(input.limit, limits);
+      const sql = buildTraceLogsSql(stream, input.traceId, size, limits.logColumns);
+      const res = await clients.getClient(input.environment).search({
         sql,
         startUs: window.startUs,
         endUs: window.endUs,
         size,
         type: "logs",
-        fallbackSelectAll: config.logColumns.length > 0
+        fallbackSelectAll: limits.logColumns.length > 0
       });
-      const caps = config.fieldCaps[input.profile ?? "compact"];
+      const caps = limits.fieldCaps[input.profile ?? "compact"];
       return ok({
+        environment: env.name,
         stream,
         traceId: input.traceId,
         count: res.hits.length,
@@ -258,6 +266,7 @@ export function buildTools(config: ObserveConfig, client: ObserveClient): readon
         end: instantArg,
         limit: limitArg,
         stream: streamArg,
+        environment: environmentArg,
         profile: profileArg
       })
       .strict(),
@@ -269,31 +278,68 @@ export function buildTools(config: ObserveConfig, client: ObserveClient): readon
         end: schema.string(),
         limit: limitProp,
         stream: schema.string("Override the configured traces stream"),
+        environment: envProp,
         profile: profileProp
       },
       { required: ["traceId"] }
     ),
     annotations: reads,
     handler: async (input) => {
-      const stream = input.stream ?? config.traceStream;
-      const window = resolveWindow(input, config, Date.now());
-      const size = clampSize(input.limit, config);
-      const sql = buildTraceSpansSql(stream, input.traceId, size);
-      // Spans live in a traces stream ordered by `start_time`. If no dedicated
-      // traces stream is configured, this falls back to the logs stream — which
-      // has no `start_time` column, so the query errors / returns nothing. Warn.
+      const env = clients.getEnvironment(input.environment);
+      const stream = input.stream ?? env.traceStream;
+      const window = resolveWindow(input, limits, Date.now());
+      const size = clampSize(input.limit, limits);
+      // Spans live in a traces stream ordered by `start_time`. With no dedicated
+      // traces stream configured this reuses the logs stream NAME — which usually
+      // works, because the search call passes `type: "traces"` and OpenObserve
+      // resolves a stream name within its type: both shipped environments have
+      // traceStream === logStream and return tens of millions of spans. So the
+      // warning is decided AFTER the query, from an empty result, rather than
+      // asserted up front from config — the old unconditional version fired on
+      // every call in exactly the deployments this server targets.
+      const usingLogsStreamName = !input.stream && !env.traceStreamConfigured;
+
+      const client = clients.getClient(input.environment);
+      const runSpans = (traceIdColumn: TraceIdColumn) =>
+        client.search({
+          sql: buildTraceSpansSql(stream, input.traceId, size, traceIdColumn),
+          startUs: window.startUs,
+          endUs: window.endUs,
+          size,
+          type: "traces"
+        });
+
+      // A traces stream names its trace id `trace_id` (OTel) or `traceid`, never
+      // both, and referencing the absent one fails the query at plan time rather
+      // than simply matching nothing. So try the standard column and fall back
+      // once, instead of ORing them and breaking on every stream that has only one.
+      //
+      // The FIRST error is what gets reported if the retry also fails. The
+      // missing-column test is deliberately broad (any 400 naming a column, field
+      // or schema), so it also catches "No field named start_time" — the real
+      // failure when this ran against a stream that holds no spans. Surfacing the
+      // retry's "No field named traceid" instead would point at the wrong column.
+      let res;
+      try {
+        res = await runSpans("trace_id");
+      } catch (error) {
+        if (!isMissingColumnError(error)) {
+          throw error;
+        }
+        try {
+          res = await runSpans("traceid");
+        } catch {
+          throw error;
+        }
+      }
+
       const warning =
-        !input.stream && !config.traceStreamConfigured
-          ? "No traces stream configured (OBSERVE_TRACE_STREAM is unset), so spans are being queried against the logs stream — this may error or return nothing. Set OBSERVE_TRACE_STREAM to your traces stream, or pass `stream` explicitly."
+        usingLogsStreamName && res.hits.length === 0
+          ? `No traces stream is configured for environment '${env.name}', so spans were queried against "${stream}" — the logs stream name — and nothing matched. That name usually also resolves as a traces stream; when it does not, set a traceStream for the environment or pass \`stream\` explicitly.`
           : null;
-      const res = await client.search({
-        sql,
-        startUs: window.startUs,
-        endUs: window.endUs,
-        size,
-        type: "traces"
-      });
+
       return ok({
+        environment: env.name,
         stream,
         traceId: input.traceId,
         warning,
@@ -316,6 +362,7 @@ export function buildTools(config: ObserveConfig, client: ObserveClient): readon
         minutes: z.number().int().positive().max(1440).optional(),
         limit: limitArg,
         stream: streamArg,
+        environment: environmentArg,
         profile: profileArg
       })
       .strict(),
@@ -325,30 +372,33 @@ export function buildTools(config: ObserveConfig, client: ObserveClient): readon
       minutes: schema.number("Lookback minutes (default 15, max 1440)"),
       limit: limitProp,
       stream: schema.string(),
+      environment: envProp,
       profile: profileProp
     }),
     annotations: reads,
     handler: async (input) => {
-      const stream = input.stream ?? config.logStream;
+      const env = clients.getEnvironment(input.environment);
+      const stream = input.stream ?? env.logStream;
       const minutes = input.minutes ?? 15;
-      const window = resolveWindow({ time: `${minutes}m` }, config, Date.now());
-      const size = clampSize(input.limit, config);
+      const window = resolveWindow({ time: `${minutes}m` }, limits, Date.now());
+      const size = clampSize(input.limit, limits);
       const sql = buildSearchLogsSql(
         stream,
         { service: input.service, level: input.level },
         size,
-        config.logColumns
+        limits.logColumns
       );
-      const res = await client.search({
+      const res = await clients.getClient(input.environment).search({
         sql,
         startUs: window.startUs,
         endUs: window.endUs,
         size,
         type: "logs",
-        fallbackSelectAll: config.logColumns.length > 0
+        fallbackSelectAll: limits.logColumns.length > 0
       });
-      const caps = config.fieldCaps[input.profile ?? "compact"];
+      const caps = limits.fieldCaps[input.profile ?? "compact"];
       return ok({
+        environment: env.name,
         stream,
         minutes,
         count: res.hits.length,
@@ -370,6 +420,7 @@ export function buildTools(config: ObserveConfig, client: ObserveClient): readon
         end: instantArg,
         limit: z.number().int().positive().max(500).optional(),
         stream: streamArg,
+        environment: environmentArg,
         profile: profileArg
       })
       .strict(),
@@ -380,13 +431,15 @@ export function buildTools(config: ObserveConfig, client: ObserveClient): readon
       end: schema.string(),
       limit: limitProp,
       stream: schema.string(),
+      environment: envProp,
       profile: profileProp
     }),
     annotations: reads,
     handler: async (input) => {
-      const stream = input.stream ?? config.logStream;
-      const window = resolveWindow(input, config, Date.now());
-      const size = clampSize(input.limit ?? 100, config);
+      const env = clients.getEnvironment(input.environment);
+      const stream = input.stream ?? env.logStream;
+      const window = resolveWindow(input, limits, Date.now());
+      const size = clampSize(input.limit ?? 100, limits);
       const column =
         input.groupBy === "service"
           ? "service_name"
@@ -394,14 +447,14 @@ export function buildTools(config: ObserveConfig, client: ObserveClient): readon
             ? "instrumentation_library_name"
             : "severity";
       const sql = buildLogStatsSql(stream, column, size);
-      const res = await client.search({
+      const res = await clients.getClient(input.environment).search({
         sql,
         startUs: window.startUs,
         endUs: window.endUs,
         size,
         type: "logs"
       });
-      return ok({ stream, groupBy: column, tookMs: res.took ?? null, buckets: res.hits });
+      return ok({ environment: env.name, stream, groupBy: column, tookMs: res.took ?? null, buckets: res.hits });
     }
   });
 
@@ -415,6 +468,7 @@ export function buildTools(config: ObserveConfig, client: ObserveClient): readon
       end: instantArg,
       size: z.number().int().positive().optional(),
       offset: offsetArg,
+      environment: environmentArg,
       profile: profileArg
     })
     .strict();
@@ -426,13 +480,14 @@ export function buildTools(config: ObserveConfig, client: ObserveClient): readon
     input: runQuerySchema,
     inputSchema: schema.object(
       {
-        sql: schema.string('e.g. SELECT * FROM "wecrm_dev" WHERE severity_text = \'ERROR\''),
+        sql: schema.string('e.g. SELECT * FROM "my_stream" WHERE severity_text = \'ERROR\''),
         type: typeProp,
         time: schema.string("Relative window (default 1h)"),
         start: schema.string(),
         end: schema.string(),
         size: limitProp,
         offset: offsetProp,
+        environment: envProp,
         profile: profileProp
       },
       { required: ["sql"] }
@@ -456,10 +511,11 @@ export function buildTools(config: ObserveConfig, client: ObserveClient): readon
     if (!guard.ok) {
       return asErrorProfiled(guard.error, args.profile ?? "verbose");
     }
-    const window = resolveWindow(args, config, Date.now());
-    const size = clampSize(args.size, config);
+    const env = clients.getEnvironment(args.environment);
+    const window = resolveWindow(args, limits, Date.now());
+    const size = clampSize(args.size, limits);
     const offset = args.offset ?? 0;
-    const res = await client.search({
+    const res = await clients.getClient(args.environment).search({
       sql: guard.sanitizedSql,
       startUs: window.startUs,
       endUs: window.endUs,
@@ -469,6 +525,7 @@ export function buildTools(config: ObserveConfig, client: ObserveClient): readon
     });
     return asTextProfiled(
       {
+        environment: env.name,
         total: res.total ?? res.hits.length,
         count: res.hits.length,
         offset,
@@ -494,6 +551,7 @@ export function buildTools(config: ObserveConfig, client: ObserveClient): readon
         time: timeArg,
         start: instantArg,
         end: instantArg,
+        environment: environmentArg,
         profile: profileArg
       })
       .strict(),
@@ -504,15 +562,17 @@ export function buildTools(config: ObserveConfig, client: ObserveClient): readon
       time: schema.string("Relative window to sample from (default 1h)"),
       start: schema.string(),
       end: schema.string(),
+      environment: envProp,
       profile: profileProp
     }),
     annotations: reads,
     handler: async (input) => {
-      const stream = input.stream ?? config.logStream;
-      const window = resolveWindow(input, config, Date.now());
+      const env = clients.getEnvironment(input.environment);
+      const stream = input.stream ?? env.logStream;
+      const window = resolveWindow(input, limits, Date.now());
       const sample = input.sample ?? 5;
       const sql = buildSampleSql(stream, sample);
-      const res = await client.search({
+      const res = await clients.getClient(input.environment).search({
         sql,
         startUs: window.startUs,
         endUs: window.endUs,
@@ -521,6 +581,7 @@ export function buildTools(config: ObserveConfig, client: ObserveClient): readon
       });
       const fields = describeFields(res.hits);
       return ok({
+        environment: env.name,
         stream,
         type: input.type ?? null,
         sampled: res.hits.length,
@@ -530,10 +591,9 @@ export function buildTools(config: ObserveConfig, client: ObserveClient): readon
     }
   });
 
-  // Registration order is the order `tools/list` advertises, unchanged from the
-  // hand-written array it replaced.
   // Order is the order `tools/list` advertises. `registerTool` only flattens and
-  // rejects a duplicate name; it does not reorder.
+  // rejects a duplicate name; it does not reorder. New tools are appended so the
+  // eight original positions are unchanged.
   return registerTool([
     listStreams,
     searchLogs,
@@ -542,6 +602,8 @@ export function buildTools(config: ObserveConfig, client: ObserveClient): readon
     tailLogs,
     logStats,
     runObserveQuery,
-    describeStream
+    describeStream,
+    listEnvironments,
+    ...buildDiscoveryTools(limits, clients)
   ]);
 }

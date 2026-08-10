@@ -25,18 +25,39 @@ async function main() {
   const tools = await client.listTools();
   console.log("TOOLS:", tools.tools.map((t) => t.name));
 
-  // 1. Connectivity + auth check.
+  // 1. Configured environments — credential-free, so it fails before the network does.
+  const envs = await client.callTool({ name: "list_environments", arguments: { profile: "standard" } });
+  console.log("\nLIST_ENVIRONMENTS:\n" + textOf(envs));
+
+  // 2. Connectivity + auth check.
   const streams = await client.callTool({ name: "list_streams", arguments: { type: "logs", profile: "standard" } });
   console.log("\nLIST_STREAMS:\n" + textOf(streams));
 
-  // 2. Recent logs — inspect a raw hit to confirm field mapping.
+  // 3. Which services actually exist, and pick a real one for the log query below.
+  // Hard-coding a service name is what made this test vacuous before: it filtered on
+  // `CommunicationHub.Web`, which exists only in the TRACES lane, so search_logs
+  // matched nothing and the test still "passed".
+  const discovered = await client.callTool({
+    name: "discover_services",
+    arguments: { time: "1h", limit: 10, include: ["codeLinks"], profile: "standard" }
+  });
+  console.log("\nDISCOVER_SERVICES:\n" + textOf(discovered));
+
+  let service;
+  try {
+    service = JSON.parse(textOf(discovered))?.services?.find((s) => s.logCount > 0)?.name;
+  } catch {
+    service = undefined;
+  }
+
+  // 4. Recent logs — inspect a raw hit to confirm field mapping.
   const logs = await client.callTool({
     name: "search_logs",
-    arguments: { service: "CommunicationHub.Web", time: "15m", limit: 5, profile: "standard" }
+    arguments: { ...(service ? { service } : {}), time: "15m", limit: 5, profile: "standard" }
   });
-  console.log("\nSEARCH_LOGS:\n" + textOf(logs));
+  console.log(`\nSEARCH_LOGS (service=${service ?? "<any>"}):\n` + textOf(logs));
 
-  // 3. If a trace id turns up, trace it end to end.
+  // 5. If a trace id turns up, trace it end to end.
   try {
     const parsed = JSON.parse(textOf(logs));
     const traceId = parsed?.logs?.map((l) => l.traceId).find((t) => t);
@@ -53,7 +74,7 @@ async function main() {
     console.log("\nTRACE_LOGS: skipped (could not parse search_logs output)", error);
   }
 
-  // 4. Error/warning summary.
+  // 6. Error/warning summary.
   const stats = await client.callTool({ name: "log_stats", arguments: { time: "1h", profile: "standard" } });
   console.log("\nLOG_STATS:\n" + textOf(stats));
 

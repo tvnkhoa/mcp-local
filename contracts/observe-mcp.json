@@ -1,6 +1,6 @@
 {
   "server": "observe-mcp",
-  "toolCount": 8,
+  "toolCount": 10,
   "tools": [
     {
       "annotations": {
@@ -14,6 +14,10 @@
         "additionalProperties": false,
         "properties": {
           "end": {
+            "type": "string"
+          },
+          "environment": {
+            "description": "Which configured environment to query (default: the server's default; see list_environments)",
             "type": "string"
           },
           "profile": {
@@ -60,11 +64,100 @@
         "openWorldHint": true,
         "readOnlyHint": true
       },
+      "description": "Discover which services are emitting into an environment: per-service log volume, error/warning counts, first/last seen, and (with include:\"codeLinks\") the application namespaces that identify the owning code. Covers both the logs and traces lanes. Use this instead of assuming a fixed service list.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "end": {
+            "description": "Absolute end (ISO 8601 or epoch ms)",
+            "type": "string"
+          },
+          "environment": {
+            "description": "Which configured environment to query (default: the server's default; see list_environments)",
+            "type": "string"
+          },
+          "include": {
+            "description": "Optional extra sections",
+            "items": {
+              "enum": [
+                "contexts",
+                "fields",
+                "streams",
+                "codeLinks"
+              ],
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "lane": {
+            "enum": [
+              "logs",
+              "traces",
+              "both"
+            ],
+            "type": "string"
+          },
+          "limit": {
+            "description": "Max services per lane (default 200); servicesTruncated says when it bit",
+            "type": "number"
+          },
+          "profile": {
+            "enum": [
+              "nano",
+              "compact",
+              "standard",
+              "verbose"
+            ],
+            "type": "string"
+          },
+          "sample": {
+            "description": "Rows to sample when include contains \"fields\" (default 25, max 50)",
+            "type": "number"
+          },
+          "service": {
+            "description": "Restrict contexts/fields to one service_name",
+            "type": "string"
+          },
+          "source": {
+            "enum": [
+              "live",
+              "catalog"
+            ],
+            "type": "string"
+          },
+          "start": {
+            "description": "Absolute start (ISO 8601 or epoch ms)",
+            "type": "string"
+          },
+          "stream": {
+            "description": "Override the environment's logs stream",
+            "type": "string"
+          },
+          "time": {
+            "description": "Relative window ending now, e.g. 24h, 7d (default 1h)",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "discover_services"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": true,
+        "readOnlyHint": true
+      },
       "description": "Return the distributed-trace spans for a trace id from the traces stream (operation, service, duration, status), ordered by start time.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
           "end": {
+            "type": "string"
+          },
+          "environment": {
+            "description": "Which configured environment to query (default: the server's default; see list_environments)",
             "type": "string"
           },
           "limit": {
@@ -105,6 +198,31 @@
       "annotations": {
         "destructiveHint": false,
         "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "description": "List the configured OpenObserve environments (org, log/trace stream, and which one answers by default). Call this first when you do not know which environment names exist.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "profile": {
+            "enum": [
+              "nano",
+              "compact",
+              "standard",
+              "verbose"
+            ],
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "list_environments"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
         "openWorldHint": true,
         "readOnlyHint": true
       },
@@ -112,6 +230,10 @@
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
+          "environment": {
+            "description": "Which configured environment to query (default: the server's default; see list_environments)",
+            "type": "string"
+          },
           "profile": {
             "enum": [
               "nano",
@@ -146,6 +268,10 @@
         "additionalProperties": false,
         "properties": {
           "end": {
+            "type": "string"
+          },
+          "environment": {
+            "description": "Which configured environment to query (default: the server's default; see list_environments)",
             "type": "string"
           },
           "groupBy": {
@@ -197,6 +323,10 @@
           "end": {
             "type": "string"
           },
+          "environment": {
+            "description": "Which configured environment to query (default: the server's default; see list_environments)",
+            "type": "string"
+          },
           "offset": {
             "description": "Row offset for pagination (default 0); use the returned nextOffset to page",
             "type": "number"
@@ -214,7 +344,7 @@
             "type": "number"
           },
           "sql": {
-            "description": "e.g. SELECT * FROM \"wecrm_dev\" WHERE severity_text = 'ERROR'",
+            "description": "e.g. SELECT * FROM \"my_stream\" WHERE severity_text = 'ERROR'",
             "type": "string"
           },
           "start": {
@@ -259,6 +389,10 @@
             "description": "Absolute end (ISO 8601 or epoch ms)",
             "type": "string"
           },
+          "environment": {
+            "description": "Which configured environment to query (default: the server's default; see list_environments)",
+            "type": "string"
+          },
           "level": {
             "description": "Log level; prefix-matched on `severity`, so INFO/WARN/ERROR/FATAL all work (Information/Warning/...)",
             "type": "string"
@@ -280,7 +414,7 @@
             "type": "string"
           },
           "service": {
-            "description": "service_name, e.g. CommunicationHub.Web",
+            "description": "service_name, e.g. CRM.Gateway — use discover_services to list them",
             "type": "string"
           },
           "sourceContext": {
@@ -315,6 +449,10 @@
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
+          "environment": {
+            "description": "Which configured environment to query (default: the server's default; see list_environments)",
+            "type": "string"
+          },
           "level": {
             "type": "string"
           },
@@ -357,6 +495,10 @@
         "additionalProperties": false,
         "properties": {
           "end": {
+            "type": "string"
+          },
+          "environment": {
+            "description": "Which configured environment to query (default: the server's default; see list_environments)",
             "type": "string"
           },
           "limit": {

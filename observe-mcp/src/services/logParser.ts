@@ -47,14 +47,31 @@ function asStr(value: unknown): string | null {
   return String(value);
 }
 
-/** OpenObserve `_timestamp` is microseconds since epoch. Render ISO if numeric. */
+/**
+ * Render an epoch timestamp as ISO, inferring the unit from magnitude.
+ *
+ * The units genuinely differ by field: log `_timestamp` is MICROseconds, while a
+ * span's `start_time` is NANOseconds. Without the nanosecond branch a span read as
+ * microseconds is off by 1000x and renders as the year 58576 — which is what
+ * `get_trace_spans` and the traces-lane service inventory were both reporting.
+ *
+ * The thresholds are far apart, so this is not a close call: a 2026 date is ~1.8e18
+ * in ns, ~1.8e15 in µs, ~1.8e12 in ms and ~1.8e9 in s. Each cut sits an order of
+ * magnitude clear of both neighbours.
+ */
 function toIso(value: unknown): string | null {
   if (value === null || value === undefined) {
     return null;
   }
   if (typeof value === "number" && Number.isFinite(value)) {
-    // Heuristic: values > 1e15 are microseconds, > 1e12 are milliseconds.
-    const ms = value > 1e15 ? value / 1000 : value > 1e12 ? value : value * 1000;
+    const ms =
+      value > 1e17
+        ? value / 1e6 // nanoseconds (span start_time / end_time)
+        : value > 1e14
+          ? value / 1e3 // microseconds (log _timestamp)
+          : value > 1e11
+            ? value // milliseconds
+            : value * 1e3; // seconds
     return new Date(ms).toISOString();
   }
   return asStr(value);
@@ -123,6 +140,39 @@ export function capLog(log: NormalizedLog, caps: { message: number; exception: n
   message = truncateField(message, caps.message);
 
   return { ...log, message, exception };
+}
+
+/**
+ * Summarize the fields present across sampled rows: observed JSON types + non-null
+ * count. Shared by `describe_stream` and `discover_services`, which is why it lives
+ * here rather than staying private to the tool table — two samplers inferring a
+ * schema two different ways would report two different shapes for one stream.
+ */
+export function describeFields(hits: Hit[]): Array<{ name: string; types: string[]; nonNull: number }> {
+  const acc = new Map<string, { types: Set<string>; nonNull: number }>();
+  for (const hit of hits) {
+    for (const [key, value] of Object.entries(hit)) {
+      let entry = acc.get(key);
+      if (!entry) {
+        entry = { types: new Set<string>(), nonNull: 0 };
+        acc.set(key, entry);
+      }
+      if (value === null || value === undefined) {
+        entry.types.add("null");
+      } else {
+        entry.nonNull += 1;
+        entry.types.add(Array.isArray(value) ? "array" : typeof value);
+      }
+    }
+  }
+  return [...acc.entries()]
+    .map(([name, e]) => ({ name, types: [...e.types].sort(), nonNull: e.nonNull }))
+    .sort((a, b) => a.name.localeCompare(b.name));
+}
+
+/** Epoch microseconds (as OpenObserve aggregates return them) → ISO string. */
+export function microsToIso(value: unknown): string | null {
+  return toIso(value);
 }
 
 export function normalizeSpan(hit: Hit): NormalizedSpan {

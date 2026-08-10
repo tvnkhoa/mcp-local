@@ -89,13 +89,21 @@ test("keys are unique, and so are env names within a server", () => {
   }
 });
 
-test("a prefix field is only meaningful inside a group", () => {
-  // `POSTGRES_ENV_*` is not a real variable name; it stands for a family, and only the group's
-  // "one of" check knows how to satisfy it. A prefix field outside a group could never be met.
+test("a REQUIRED prefix field is only meaningful inside a group", () => {
+  // A prefix name like `POSTGRES_ENV_*` is not a real variable, so nothing can ever set it
+  // literally. If such a field were `required`, `missingRequired` would report a variable the user
+  // cannot possibly define — only the group's "one of" check knows how to satisfy it.
+  //
+  // Scoped to required fields deliberately. An OPTIONAL family has nothing to satisfy and is
+  // meaningful ungrouped: `OBSERVE_ENV_*` is purely additive — each member adds an environment
+  // rather than being one of several alternative ways to supply a mandatory setting. Forcing it
+  // into a group would be worse than cosmetic, because `evaluateEnv` excludes group members from
+  // `missingRequired`, so grouping it with observe-mcp's required connection trio would stop
+  // `mcp:doctor` noticing an install that configured no connection at all.
   for (const server of SERVERS) {
     for (const field of server.env) {
-      if (field.prefix !== undefined) {
-        assert.ok(field.group, `${server.key}/${field.name}: prefix field must belong to a group`);
+      if (field.prefix !== undefined && field.required) {
+        assert.ok(field.group, `${server.key}/${field.name}: a required prefix field must belong to a group`);
       }
     }
   }
@@ -117,12 +125,9 @@ test("serverEntryPath and serverDirPath are absolute and nested correctly", () =
 
 test("evaluateEnv: nothing set reports required vars and unsatisfied groups", () => {
   const result = evaluateEnv(byKey("observe-mcp"), []);
-  assert.deepEqual([...result.missingRequired].sort(), [
-    "OBSERVE_BASE_URL",
-    "OBSERVE_LOG_STREAM",
-    "OBSERVE_ORG",
-    "OBSERVE_TRACE_STREAM"
-  ]);
+  // OBSERVE_TRACE_STREAM is deliberately absent: it falls back to the logs stream name, so an
+  // install without it is healthy and the doctor must not report it as missing.
+  assert.deepEqual([...result.missingRequired].sort(), ["OBSERVE_BASE_URL", "OBSERVE_LOG_STREAM", "OBSERVE_ORG"]);
   assert.deepEqual(result.unsatisfiedGroups, ["observe-auth"]);
 });
 
@@ -206,7 +211,8 @@ test("tool lists match the committed contract snapshots exactly", () => {
     total += server.tools.length;
   }
   assert.equal(total, TOTAL_TOOL_COUNT);
-  assert.equal(total, 76, "the workspace advertises 76 tools; update this number deliberately");
+  // 76 -> 78: observe-mcp gained `list_environments` and `discover_services`.
+  assert.equal(total, 78, "the workspace advertises 78 tools; update this number deliberately");
 });
 
 test("codebase-index advertises all 43 of its tools", () => {
@@ -253,17 +259,20 @@ test("familyExamples belong to prefix fields and match the prefix", () => {
 });
 
 test("the env contract covers every server, and grew as S-35 intended", () => {
-  // 98 vars across four servers, up from the 41 the manifest declared before S-35. The count is
+  // 104 vars across four servers, up from the 41 the manifest declared before S-35. The count is
   // asserted so that dropping a declaration is a test failure rather than a quiet regression in
   // the generated docs. codebase-index gained CODEBASE_INDEX_VECTOR_ENABLED (MCP-ISSUE-035) and
   // CODEBASE_INDEX_MAX_TYPE_REF_EDGES_PER_FILE (MCP-ISSUE-038); postgres gained PGSSLMODE and
   // NODE_TLS_REJECT_UNAUTHORIZED (backlog B-07) — external conventions a real install sets, which
   // is why postgres-mcp is the one server whose env list is not entirely `POSTGRES_`-prefixed.
+  // observe-mcp went 23 -> 29 when it became multi-environment: the OBSERVE_ENV_* family plus
+  // PRIMARY_ENV_NAME / DEFAULT_ENVIRONMENT / ALLOWED_ENVIRONMENTS, and the two namespace-prefix
+  // lists that classify a log scope as application code or framework noise.
   const counts = Object.fromEntries(SERVERS.map((s) => [s.key, s.env.length]));
   assert.deepEqual(counts, {
     "codebase-index": 41,
     "postgres-mcp": 23,
-    "observe-mcp": 23,
+    "observe-mcp": 29,
     "bitbucket-mcp": 11
   });
 });

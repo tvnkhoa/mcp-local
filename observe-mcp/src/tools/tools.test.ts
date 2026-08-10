@@ -18,7 +18,9 @@ import { test } from "node:test";
 import { createNullLogger } from "@mcp/core";
 import { asErrorPayload, createToolRegistry, dispatchToolCall } from "@mcp/sdk";
 
-import type { ObserveConfig } from "../config/index.js";
+import type { ObserveLimits } from "../config/index.js";
+import type { EnvironmentRegistry, ObserveEnvironment } from "../config/environments.js";
+import { ClientManager } from "../services/clientManager.js";
 import type { ObserveClient } from "../services/observeClient.js";
 import { buildTools, toWireError } from "./index.js";
 
@@ -26,13 +28,7 @@ const logger = createNullLogger("test");
 
 const CAPS = { message: 2000, exception: 4000, attributes: 20 };
 
-const CONFIG: ObserveConfig = {
-  baseUrl: "http://contract-snapshot.invalid",
-  org: "test-org",
-  logStream: "test_logs",
-  traceStream: "test_traces",
-  traceStreamConfigured: true,
-  authHeader: "Basic dGVzdA==",
+const LIMITS: ObserveLimits = {
   defaultSize: 100,
   maxSize: 1000,
   defaultLookbackMs: 3_600_000,
@@ -40,8 +36,22 @@ const CONFIG: ObserveConfig = {
   timeoutMs: 30_000,
   maxRetries: 0,
   logColumns: [],
-  fieldCaps: { nano: CAPS, compact: CAPS, standard: CAPS, verbose: CAPS }
-} as unknown as ObserveConfig;
+  fieldCaps: { nano: CAPS, compact: CAPS, standard: CAPS, verbose: CAPS },
+  appNamespacePrefixes: ["CRM.", "CommunicationHub."],
+  frameworkNamespacePrefixes: ["Microsoft.", "System."]
+} as unknown as ObserveLimits;
+
+const TEST_ENV: ObserveEnvironment = {
+  name: "test",
+  baseUrl: "http://contract-snapshot.invalid",
+  org: "test-org",
+  logStream: "test_logs",
+  traceStream: "test_traces",
+  traceStreamConfigured: true,
+  authHeader: "Basic dGVzdA==",
+  source: "flat",
+  sourceDetail: "test"
+};
 
 /** Every method rejects: no test here should reach the network. */
 const STUB_CLIENT = {
@@ -53,12 +63,23 @@ const STUB_CLIENT = {
   }
 } as unknown as ObserveClient;
 
+function registryOf(env: ObserveEnvironment = TEST_ENV): EnvironmentRegistry {
+  return { environments: new Map([[env.name, env]]), defaultEnvironment: env.name };
+}
+
+/** A manager over an injected registry and a stub client factory — no env, no network. */
+function managerOf(env: ObserveEnvironment = TEST_ENV): ClientManager {
+  return new ClientManager(LIMITS, registryOf(env), () => STUB_CLIENT);
+}
+
+const CLIENTS = managerOf();
+
 function call(
   name: string,
   args: Record<string, unknown>,
-  config: ObserveConfig = CONFIG
+  clients: ClientManager = CLIENTS
 ): Promise<{ isError?: boolean; content: readonly { text: string }[] }> {
-  const registry = createToolRegistry(buildTools(config, STUB_CLIENT));
+  const registry = createToolRegistry(buildTools(LIMITS, clients));
   return dispatchToolCall(registry, name, args, {
     logger,
     // Identical to the wiring in index.ts — the envelope is what is under test.
@@ -69,18 +90,20 @@ function call(
 async function bodyOf(
   name: string,
   args: Record<string, unknown>,
-  config?: ObserveConfig
+  clients?: ClientManager
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
 ): Promise<{ isError?: boolean; payload: any; text: string }> {
-  const result = await call(name, args, config);
+  const result = await call(name, args, clients);
   const text = result.content[0]?.text ?? "null";
   return { isError: result.isError, payload: JSON.parse(text), text };
 }
 
 // --- tools/list side of the contract ---------------------------------------
 
-test("the tool table is the 8 advertised tools, in registration order", () => {
-  const names = buildTools(CONFIG, STUB_CLIENT).map((tool) => tool.name);
+test("the tool table is the advertised tools, in registration order", () => {
+  const names = buildTools(LIMITS, CLIENTS).map((tool) => tool.name);
+  // The original eight keep their positions; multi-environment and discovery
+  // tools are appended, so an existing client sees no reordering.
   assert.deepEqual(names, [
     "list_streams",
     "search_logs",
@@ -89,32 +112,78 @@ test("the tool table is the 8 advertised tools, in registration order", () => {
     "tail_logs",
     "log_stats",
     "run_observe_query",
-    "describe_stream"
+    "describe_stream",
+    "list_environments",
+    "discover_services"
   ]);
 });
 
-test("every tool is read-only and open-world — this server never writes", () => {
-  for (const tool of buildTools(CONFIG, STUB_CLIENT)) {
+test("every tool is read-only and non-destructive — this server never writes", () => {
+  for (const tool of buildTools(LIMITS, CLIENTS)) {
     assert.equal(tool.annotations.readOnly, true, tool.name);
     assert.equal(tool.annotations.destructive, false, tool.name);
-    assert.equal(tool.annotations.openWorld, true, tool.name);
+  }
+});
+
+test("only list_environments is closed-world; everything else reaches OpenObserve", () => {
+  for (const tool of buildTools(LIMITS, CLIENTS)) {
+    assert.equal(tool.annotations.openWorld, tool.name !== "list_environments", tool.name);
   }
 });
 
 test("every tool advertising a profile omits a description for it", () => {
   // schema.profile() would add one; this server has never advertised it, and
   // tools/list is a committed contract.
-  for (const tool of buildTools(CONFIG, STUB_CLIENT)) {
+  for (const tool of buildTools(LIMITS, CLIENTS)) {
     assert.equal(tool.inputSchema.properties["profile"]?.description, undefined, tool.name);
+  }
+});
+
+test("every tool that queries a backend takes an environment argument", () => {
+  for (const tool of buildTools(LIMITS, CLIENTS)) {
+    if (tool.name === "list_environments") {
+      assert.equal(tool.inputSchema.properties["environment"], undefined, tool.name);
+      continue;
+    }
+    assert.equal(tool.inputSchema.properties["environment"]?.type, "string", tool.name);
   }
 });
 
 test("limit and offset advertise `number`, not `integer`", () => {
   // The zod schemas are .int(), but the published JSON Schema says number.
   // Tightening it would be a contract change.
-  const search = buildTools(CONFIG, STUB_CLIENT).find((t) => t.name === "search_logs");
+  const search = buildTools(LIMITS, CLIENTS).find((t) => t.name === "search_logs");
   assert.equal(search?.inputSchema.properties["limit"]?.type, "number");
   assert.equal(search?.inputSchema.properties["offset"]?.type, "number");
+});
+
+// --- multi-environment routing ------------------------------------------------
+
+test("list_environments reports the registry without any credential", async () => {
+  const { payload } = await bodyOf("list_environments", {});
+  assert.equal(payload.defaultEnvironment, "test");
+  assert.equal(payload.count, 1);
+  assert.deepEqual(payload.environments[0].name, "test");
+  assert.equal(payload.environments[0].isDefault, true);
+  // The auth header must be structurally absent, not merely masked.
+  assert.equal(JSON.stringify(payload).includes("Basic"), false);
+  assert.equal(payload.environments[0].authHeader, undefined);
+});
+
+test("an unknown environment is refused by name, listing the known ones", async () => {
+  const { isError, payload } = await bodyOf("search_logs", { environment: "nope" });
+  assert.equal(isError, true);
+  assert.equal(payload.code, "unknown_environment");
+  assert.equal(payload.message, "Environment 'nope' is not configured. Known environments: test.");
+});
+
+test("an environment name is canonicalized before lookup, not after", async () => {
+  // "Prod" must resolve to the configured "prod" rather than failing as unknown.
+  const clients = managerOf({ ...TEST_ENV, name: "prod" });
+  const { payload } = await bodyOf("search_logs", { environment: "Prod" }, clients);
+  // Reaches the stub client, i.e. the environment resolved.
+  assert.equal(payload.code, "internal_error");
+  assert.equal(payload.message, "network not available in tests");
 });
 
 // --- error envelope: { code, message, detail? }, always verbose -------------
@@ -236,7 +305,8 @@ test("an upstream failure is reported for every tool that reaches the backend", 
     ["tail_logs", {}],
     ["log_stats", {}],
     ["run_observe_query", { sql: "select 1" }],
-    ["describe_stream", {}]
+    ["describe_stream", {}],
+    ["discover_services", {}]
   ] as [string, Record<string, unknown>][]) {
     const { isError, payload } = await bodyOf(name, args);
     assert.equal(isError, true, name);
@@ -248,8 +318,8 @@ test("an upstream failure is reported for every tool that reaches the backend", 
 test("get_trace_spans warns when no traces stream is configured", async () => {
   // The warning is computed before the search call, so it survives the stub's
   // rejection only via the config check — assert the config branch directly.
-  const unconfigured = { ...CONFIG, traceStreamConfigured: false } as ObserveConfig;
-  const tools = buildTools(unconfigured, STUB_CLIENT);
+  const unconfigured = managerOf({ ...TEST_ENV, traceStreamConfigured: false });
+  const tools = buildTools(LIMITS, unconfigured);
   assert.ok(tools.find((t) => t.name === "get_trace_spans"));
   // An explicit `stream` suppresses the warning; both paths still hit the stub.
   const { payload } = await bodyOf(

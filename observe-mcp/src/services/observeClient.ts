@@ -1,4 +1,5 @@
-import type { ObserveConfig } from "../config/index.js";
+import type { ObserveLimits } from "../config/index.js";
+import type { ObserveEnvironment } from "../config/environments.js";
 import { ObserveHttpError } from "../middleware/errors.js";
 
 import {
@@ -48,19 +49,26 @@ export type StreamInfo = {
  * Thin HTTP client for the OpenObserve REST API. Uses the global `fetch` (undici) —
  * no extra dependencies. All auth lives in the Authorization header and is never
  * logged. Non-2xx responses raise ObserveHttpError with the body as detail.
+ *
+ * One instance is bound to one environment (org + host + credentials); the
+ * process-wide limits are shared. `ClientManager` owns the instances — nothing
+ * else should construct one, so that "which org did this query hit" always has a
+ * single answer.
  */
 export class ObserveClient {
-  private readonly config: ObserveConfig;
+  private readonly env: ObserveEnvironment;
+  private readonly limits: ObserveLimits;
 
-  constructor(config: ObserveConfig) {
-    this.config = config;
+  constructor(deps: { environment: ObserveEnvironment; limits: ObserveLimits }) {
+    this.env = deps.environment;
+    this.limits = deps.limits;
   }
 
   /** POST /api/{org}/_search — run a SQL query over a stream within a time window. */
   async search(params: SearchParams): Promise<SearchResponse> {
     const path = params.type
-      ? `/api/${enc(this.config.org)}/_search?type=${encodeURIComponent(params.type)}`
-      : `/api/${enc(this.config.org)}/_search`;
+      ? `/api/${enc(this.env.org)}/_search?type=${encodeURIComponent(params.type)}`
+      : `/api/${enc(this.env.org)}/_search`;
 
     const runOnce = (sql: string): Promise<SearchResponse> =>
       this.request<SearchResponse>("POST", path, {
@@ -69,7 +77,7 @@ export class ObserveClient {
           start_time: params.startUs,
           end_time: params.endUs,
           from: params.from ?? 0,
-          size: params.size ?? this.config.defaultSize
+          size: params.size ?? this.limits.defaultSize
         }
       });
 
@@ -98,8 +106,8 @@ export class ObserveClient {
   /** GET /api/{org}/streams?type=... — list streams (log/trace/metric datasets). */
   async listStreams(type?: StreamType): Promise<StreamInfo[]> {
     const path = type
-      ? `/api/${enc(this.config.org)}/streams?type=${encodeURIComponent(type)}`
-      : `/api/${enc(this.config.org)}/streams`;
+      ? `/api/${enc(this.env.org)}/streams?type=${encodeURIComponent(type)}`
+      : `/api/${enc(this.env.org)}/streams`;
     const body = await this.request<{ list?: StreamInfo[] }>("GET", path);
     return Array.isArray(body.list) ? body.list : [];
   }
@@ -108,7 +116,7 @@ export class ObserveClient {
     // Retry transient failures (network / 5xx / 429) with exponential backoff. A
     // timeout (AbortError) and any other 4xx are not retried — they will not fix
     // themselves and retrying would just burn the caller's time budget.
-    const maxRetries = this.config.maxRetries;
+    const maxRetries = this.limits.maxRetries;
     let lastError: unknown;
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
       try {
@@ -125,9 +133,9 @@ export class ObserveClient {
   }
 
   private async attempt<T>(method: "GET" | "POST", path: string, jsonBody?: unknown): Promise<T> {
-    const url = `${this.config.baseUrl}${path}`;
+    const url = `${this.env.baseUrl}${path}`;
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), this.config.timeoutMs);
+    const timer = setTimeout(() => controller.abort(), this.limits.timeoutMs);
 
     // The timeout must cover the body read too — a server can send headers and
     // then stall the body — so clearTimeout only fires once we are fully done.
@@ -137,7 +145,7 @@ export class ObserveClient {
         response = await fetch(url, {
           method,
           headers: {
-            Authorization: this.config.authHeader,
+            Authorization: this.env.authHeader,
             Accept: "application/json",
             ...(jsonBody !== undefined ? { "Content-Type": "application/json" } : {})
           },
@@ -148,7 +156,7 @@ export class ObserveClient {
         if (error instanceof Error && error.name === "AbortError") {
           throw error;
         }
-        throw new ObserveHttpError(0, `Failed to reach OpenObserve at ${this.config.baseUrl}.`, String(error));
+        throw new ObserveHttpError(0, `Failed to reach OpenObserve at ${this.env.baseUrl}.`, String(error));
       }
 
       const rawText = await response.text();
@@ -190,7 +198,7 @@ function isRetryable(error: unknown): boolean {
 }
 
 /** A projected SELECT that references a column the stream lacks. */
-function isMissingColumnError(error: unknown): boolean {
+export function isMissingColumnError(error: unknown): boolean {
   if (!(error instanceof ObserveHttpError) || error.status !== 400) {
     return false;
   }

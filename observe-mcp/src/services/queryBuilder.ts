@@ -1,4 +1,4 @@
-import type { ObserveConfig } from "../config/index.js";
+import type { ObserveLimits } from "../config/index.js";
 import { PolicyViolationError } from "../middleware/errors.js";
 
 export type TimeWindow = {
@@ -26,7 +26,7 @@ const UNIT_MS: Record<string, number> = {
  */
 export function resolveWindow(
   opts: { time?: string; start?: string; end?: string },
-  config: ObserveConfig,
+  config: ObserveLimits,
   nowMs: number
 ): TimeWindow {
   let startMs: number;
@@ -91,7 +91,7 @@ function parseInstantMs(input: string, label: string): number {
 }
 
 /** Clamp a requested size into [1, maxSize], falling back to the default. */
-export function clampSize(requested: number | undefined, config: ObserveConfig): number {
+export function clampSize(requested: number | undefined, config: ObserveLimits): number {
   if (requested === undefined || !Number.isFinite(requested)) {
     return config.defaultSize;
   }
@@ -188,15 +188,40 @@ export function buildTraceLogsSql(stream: string, traceId: string, size: number,
   return `SELECT ${selectList(columns)} FROM ${sqlIdent(stream)} WHERE ${match} ORDER BY _timestamp ASC LIMIT ${size}`;
 }
 
-/** Plain recent-rows sample used for field/schema discovery (describe_stream). */
-export function buildSampleSql(stream: string, size: number): string {
-  return `SELECT * FROM ${sqlIdent(stream)} ORDER BY _timestamp DESC LIMIT ${size}`;
+/**
+ * Plain recent-rows sample used for field/schema discovery (describe_stream, and
+ * `discover_services` with `include:"fields"`). An optional `service` narrows the
+ * sample, so field discovery for one service is not diluted by every other one.
+ */
+export function buildSampleSql(stream: string, size: number, service?: string): string {
+  const where = service ? ` WHERE service_name = ${sqlString(service)}` : "";
+  return `SELECT * FROM ${sqlIdent(stream)}${where} ORDER BY _timestamp DESC LIMIT ${size}`;
 }
 
-export function buildTraceSpansSql(stream: string, traceId: string, size: number): string {
+/** The column a stream stores its trace id in. Spans use one or the other, never both. */
+export type TraceIdColumn = "trace_id" | "traceid";
+
+/**
+ * Spans for one trace, ordered along the timeline.
+ *
+ * Matches a SINGLE column, unlike `buildTraceLogsSql` which ORs `trace_id` and
+ * `traceid`. That difference is load-bearing: a logs stream is a flattened
+ * free-for-all where both spellings can appear across rows, but a traces stream
+ * follows the OTel schema and has exactly one of them. Naming the absent one is not
+ * harmless — DataFusion rejects an unknown column while PLANNING the query, so the
+ * OR form failed the whole request with "Schema error: No field named traceid" and
+ * `get_trace_spans` returned nothing at all on a standard traces stream.
+ *
+ * The caller picks the column and retries with the other on a missing-column error.
+ */
+export function buildTraceSpansSql(
+  stream: string,
+  traceId: string,
+  size: number,
+  traceIdColumn: TraceIdColumn = "trace_id"
+): string {
   const id = assertTraceId(traceId);
-  const match = `(trace_id = ${sqlString(id)} OR traceid = ${sqlString(id)})`;
-  return `SELECT * FROM ${sqlIdent(stream)} WHERE ${match} ORDER BY start_time ASC LIMIT ${size}`;
+  return `SELECT * FROM ${sqlIdent(stream)} WHERE ${traceIdColumn} = ${sqlString(id)} ORDER BY start_time ASC LIMIT ${size}`;
 }
 
 export type StatsColumn = "severity" | "service_name" | "instrumentation_library_name";
@@ -204,4 +229,94 @@ export type StatsColumn = "severity" | "service_name" | "instrumentation_library
 /** Aggregate log counts grouped by a dimension over the window. */
 export function buildLogStatsSql(stream: string, groupBy: StatsColumn, size: number): string {
   return `SELECT ${groupBy}, COUNT(*) AS count FROM ${sqlIdent(stream)} GROUP BY ${groupBy} ORDER BY count DESC LIMIT ${size}`;
+}
+
+// ---------------------------------------------------------------------------
+// Discovery builders (discover_services)
+// ---------------------------------------------------------------------------
+
+/**
+ * Severity is matched case-insensitively and against both vocabularies on purpose.
+ * These orgs export Serilog levels as title-case words (`Information` / `Warning` /
+ * `Error`), but an OTel-native exporter writes `ERROR` / `FATAL`, and a stream
+ * could hold either. Comparing `UPPER(severity)` to both spellings means the
+ * counts stay correct without the caller having to know which producer wrote the row.
+ */
+const ERROR_LEVELS = "('ERROR', 'FATAL', 'CRITICAL')";
+const WARN_LEVELS = "('WARNING', 'WARN')";
+
+/**
+ * The whole per-service inventory in one round trip: volume, error/warn split,
+ * first/last seen, and how many distinct source contexts the service emitted.
+ *
+ * Verified against a live stream: ~410 ms over 6h and ~1.2 s over 7d, so the 7-day
+ * capture the service catalog takes is a single query per environment rather than
+ * one query per service.
+ *
+ * `MIN`/`MAX(_timestamp)` come back as epoch microseconds — callers must render
+ * them through the same conversion `logParser` applies to row timestamps.
+ */
+export function buildServiceInventorySql(stream: string, size: number): string {
+  return (
+    `SELECT service_name, COUNT(*) AS log_count, ` +
+    `MIN(_timestamp) AS first_seen, MAX(_timestamp) AS last_seen, ` +
+    `SUM(CASE WHEN UPPER(severity) IN ${ERROR_LEVELS} THEN 1 ELSE 0 END) AS error_count, ` +
+    `SUM(CASE WHEN UPPER(severity) IN ${WARN_LEVELS} THEN 1 ELSE 0 END) AS warn_count, ` +
+    `COUNT(DISTINCT instrumentation_library_name) AS context_count ` +
+    `FROM ${sqlIdent(stream)} GROUP BY service_name ORDER BY log_count DESC LIMIT ${size}`
+  );
+}
+
+/**
+ * The traces-lane inventory. Deliberately a separate, simpler query: a traces
+ * stream has no `severity` column, so reusing the logs builder above would fail.
+ *
+ * This lane is not redundant — a live check found `CommunicationHub.Web` (the
+ * largest span producer by an order of magnitude), `CRM.EasyServ.DataSync` and
+ * `whatsapp-api` present in traces but absent from the logs inventory. Answering
+ * "which services exist" from logs alone silently omits them.
+ */
+export function buildTraceServiceInventorySql(stream: string, size: number): string {
+  return (
+    `SELECT service_name, COUNT(*) AS span_count, ` +
+    `MIN(start_time) AS first_seen, MAX(start_time) AS last_seen ` +
+    `FROM ${sqlIdent(stream)} GROUP BY service_name ORDER BY span_count DESC LIMIT ${size}`
+  );
+}
+
+/**
+ * Distinct source contexts (Serilog `SourceContext`, exported as the OTLP
+ * instrumentation scope name), optionally for one service.
+ *
+ * Classification into app / framework / unclassified happens in TypeScript, not
+ * here: the prefix lists are configurable, and building a `NOT LIKE` chain out of
+ * environment-supplied strings would put configuration into a SQL statement.
+ */
+export function buildContextInventorySql(stream: string, size: number, service?: string): string {
+  const clauses = ["instrumentation_library_name IS NOT NULL"];
+  if (service) {
+    clauses.push(`service_name = ${sqlString(service)}`);
+  }
+  return (
+    `SELECT instrumentation_library_name, COUNT(*) AS count ` +
+    `FROM ${sqlIdent(stream)} WHERE ${clauses.join(" AND ")} ` +
+    `GROUP BY instrumentation_library_name ORDER BY count DESC LIMIT ${size}`
+  );
+}
+
+/**
+ * The service × context matrix, used by the service catalog to attribute code to a
+ * service name.
+ *
+ * This is what makes `unknown_service:dotnet` readable. It is the largest bucket in
+ * both live environments, and it is not one service — it is every app that never
+ * set OTel `service.name`. The only way to tell them apart is the namespace of the
+ * context that emitted each row, which is exactly what this pairing recovers.
+ */
+export function buildServiceContextMatrixSql(stream: string, size: number): string {
+  return (
+    `SELECT service_name, instrumentation_library_name, COUNT(*) AS count ` +
+    `FROM ${sqlIdent(stream)} WHERE instrumentation_library_name IS NOT NULL ` +
+    `GROUP BY service_name, instrumentation_library_name ORDER BY count DESC LIMIT ${size}`
+  );
 }

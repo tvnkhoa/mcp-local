@@ -19,13 +19,18 @@
 import { createEventLogger } from "@mcp/core";
 import { asErrorPayload, createMcpServer, runServer } from "@mcp/sdk";
 
-import { loadConfig, describeConfig, type ObserveConfig } from "./config/index.js";
+import { loadLimits, describeLimits, type ObserveLimits } from "./config/index.js";
 import { mapError } from "./middleware/errors.js";
-import { ObserveClient } from "./services/observeClient.js";
+import { ClientManager } from "./services/clientManager.js";
 import { buildTools, toWireError } from "./tools/index.js";
 
-const config: ObserveConfig = loadConfig();
-const client = new ObserveClient(config);
+const limits: ObserveLimits = loadLimits();
+/**
+ * One manager, many environments. Building it here is what turns a missing or
+ * malformed environment configuration into a startup failure rather than a
+ * confusing per-call error — the registry throws if nothing is configured.
+ */
+const clients = new ClientManager(limits);
 
 /**
  * stderr event logger. Emits `{"level":..,"event":..,...detail}`. stdout is the
@@ -36,7 +41,7 @@ const eventLog = createEventLogger();
 const handle = createMcpServer({
   name: "communicationhub-observe-mcp",
   version: "0.1.0",
-  tools: buildTools(config, client),
+  tools: buildTools(limits, clients),
   /**
    * This server's error contract, not the platform's. Every failure — zod
    * validation, a time-window refusal, an ObserveHttpError — is rendered in the
@@ -51,6 +56,12 @@ const handle = createMcpServer({
 });
 
 runServer(handle, {
-  onStarted: () => eventLog.info("server_started", { config: describeConfig(config) }),
+  onStarted: () =>
+    eventLog.info("server_started", {
+      limits: describeLimits(limits),
+      defaultEnvironment: clients.defaultEnvironment,
+      // `list()` is the masked view — no credential can reach the log through it.
+      environments: clients.list()
+    }),
   onCrash: (error) => eventLog.error("server_crashed", { error: mapError(error) })
 });
