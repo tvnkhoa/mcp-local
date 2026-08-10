@@ -34,6 +34,7 @@ import { mapError, type MappedError } from "../middleware/errors.js";
 import { normalizeLog, normalizeSpan, capLog, describeFields } from "../services/logParser.js";
 import type { ClientManager } from "../services/clientManager.js";
 import { isMissingColumnError } from "../services/observeClient.js";
+import { describeIdentity, logColumnsWithIdentity, withIdentity, RAW_SERVICE_COLUMN } from "../services/identity.js";
 import {
   resolveWindow,
   clampSize,
@@ -88,6 +89,13 @@ function raw(result: CallToolResult): ToolCallResult {
 export function buildTools(limits: ObserveLimits, clients: ClientManager): readonly AnyToolDefinition[] {
   /** Every tool that reaches OpenObserve reads a remote backend and changes nothing. */
   const reads = annotations.readRemote();
+
+  /**
+   * The projection every logs tool uses. Carries the app-name field alongside an
+   * explicit `OBSERVE_LOG_COLUMNS` list so `normalizeLog` can resolve the service on
+   * the returned rows, not just in the WHERE clause.
+   */
+  const logProjection = logColumnsWithIdentity(limits.logColumns, limits);
 
   // --- list_environments -----------------------------------------------------
   const listEnvironments = defineTool({
@@ -150,7 +158,9 @@ export function buildTools(limits: ObserveLimits, clients: ClientManager): reado
       })
       .strict(),
     inputSchema: schema.object({
-      service: schema.string("service_name, e.g. CRM.Gateway — use discover_services to list them"),
+      service: schema.string(
+        "Service name, e.g. CRM.Gateway — matched on the RESOLVED identity, so it finds an app whose rows arrive under unknown_service:dotnet too. Use discover_services to list them"
+      ),
       level: schema.string(
         "Log level; prefix-matched on `severity`, so INFO/WARN/ERROR/FATAL all work (Information/Warning/...)"
       ),
@@ -172,26 +182,32 @@ export function buildTools(limits: ObserveLimits, clients: ClientManager): reado
       const window = resolveWindow(input, limits, Date.now());
       const size = clampSize(input.limit, limits);
       const offset = input.offset ?? 0;
-      const sql = buildSearchLogsSql(stream, input, size, limits.logColumns);
-      const res = await clients.getClient(input.environment).search({
-        sql,
-        startUs: window.startUs,
-        endUs: window.endUs,
-        from: offset,
-        size,
-        type: "logs",
-        fallbackSelectAll: limits.logColumns.length > 0
-      });
+      const client = clients.getClient(input.environment);
+      // `service` matches the RESOLVED identity, which is what makes a query for an
+      // app on the Serilog OTLP path return its rows instead of nothing.
+      const run = await withIdentity(`${env.name}:${stream}`, limits, (serviceExpr) =>
+        client.search({
+          sql: buildSearchLogsSql(stream, input, size, logProjection, serviceExpr),
+          startUs: window.startUs,
+          endUs: window.endUs,
+          from: offset,
+          size,
+          type: "logs",
+          fallbackSelectAll: logProjection.length > 0
+        })
+      );
+      const res = run.result;
       const caps = limits.fieldCaps[input.profile ?? "compact"];
       return ok({
         environment: env.name,
         stream,
+        identity: describeIdentity(limits, run.resolved),
         total: res.total ?? res.hits.length,
         count: res.hits.length,
         offset,
         nextOffset: res.hits.length === size ? offset + size : null,
         tookMs: res.took ?? null,
-        logs: res.hits.map((h) => capLog(normalizeLog(h), caps))
+        logs: res.hits.map((h) => capLog(normalizeLog(h, limits), caps))
       });
     }
   });
@@ -232,14 +248,18 @@ export function buildTools(limits: ObserveLimits, clients: ClientManager): reado
       const stream = input.stream ?? env.logStream;
       const window = resolveWindow(input, limits, Date.now());
       const size = clampSize(input.limit, limits);
-      const sql = buildTraceLogsSql(stream, input.traceId, size, limits.logColumns);
+      // No service filter here, so no resolved expression is needed in the SQL — but
+      // the timeline still names each row's service, and on the Serilog path that
+      // name only exists in the app-name field. Hence the projection and the
+      // identity-aware normalize.
+      const sql = buildTraceLogsSql(stream, input.traceId, size, logProjection);
       const res = await clients.getClient(input.environment).search({
         sql,
         startUs: window.startUs,
         endUs: window.endUs,
         size,
         type: "logs",
-        fallbackSelectAll: limits.logColumns.length > 0
+        fallbackSelectAll: logProjection.length > 0
       });
       const caps = limits.fieldCaps[input.profile ?? "compact"];
       return ok({
@@ -248,7 +268,7 @@ export function buildTools(limits: ObserveLimits, clients: ClientManager): reado
         traceId: input.traceId,
         count: res.hits.length,
         tookMs: res.took ?? null,
-        timeline: res.hits.map((h) => capLog(normalizeLog(h), caps))
+        timeline: res.hits.map((h) => capLog(normalizeLog(h, limits), caps))
       });
     }
   });
@@ -382,27 +402,32 @@ export function buildTools(limits: ObserveLimits, clients: ClientManager): reado
       const minutes = input.minutes ?? 15;
       const window = resolveWindow({ time: `${minutes}m` }, limits, Date.now());
       const size = clampSize(input.limit, limits);
-      const sql = buildSearchLogsSql(
-        stream,
-        { service: input.service, level: input.level },
-        size,
-        limits.logColumns
+      const client = clients.getClient(input.environment);
+      const run = await withIdentity(`${env.name}:${stream}`, limits, (serviceExpr) =>
+        client.search({
+          sql: buildSearchLogsSql(
+            stream,
+            { service: input.service, level: input.level },
+            size,
+            logProjection,
+            serviceExpr
+          ),
+          startUs: window.startUs,
+          endUs: window.endUs,
+          size,
+          type: "logs",
+          fallbackSelectAll: logProjection.length > 0
+        })
       );
-      const res = await clients.getClient(input.environment).search({
-        sql,
-        startUs: window.startUs,
-        endUs: window.endUs,
-        size,
-        type: "logs",
-        fallbackSelectAll: limits.logColumns.length > 0
-      });
+      const res = run.result;
       const caps = limits.fieldCaps[input.profile ?? "compact"];
       return ok({
         environment: env.name,
         stream,
         minutes,
+        identity: describeIdentity(limits, run.resolved),
         count: res.hits.length,
-        logs: res.hits.map((h) => capLog(normalizeLog(h), caps))
+        logs: res.hits.map((h) => capLog(normalizeLog(h, limits), caps))
       });
     }
   });
@@ -411,10 +436,10 @@ export function buildTools(limits: ObserveLimits, clients: ClientManager): reado
   const logStats = defineTool({
     name: "log_stats",
     description:
-      "Aggregate log counts grouped by level (default), service, or sourceContext over a time window — an error/warning summary.",
+      "Aggregate log counts grouped by level (default), service, or sourceContext over a time window — an error/warning summary. `service` groups by the RESOLVED service identity, so apps whose rows arrive under unknown_service:dotnet are counted under their own name; use `serviceRaw` for the raw service_name column.",
     input: z
       .object({
-        groupBy: z.enum(["level", "service", "sourceContext"]).optional(),
+        groupBy: z.enum(["level", "service", "serviceRaw", "sourceContext"]).optional(),
         time: timeArg,
         start: instantArg,
         end: instantArg,
@@ -425,7 +450,7 @@ export function buildTools(limits: ObserveLimits, clients: ClientManager): reado
       })
       .strict(),
     inputSchema: schema.object({
-      groupBy: schema.enumOf(["level", "service", "sourceContext"]),
+      groupBy: schema.enumOf(["level", "service", "serviceRaw", "sourceContext"]),
       time: schema.string("Relative window (default 1h)"),
       start: schema.string(),
       end: schema.string(),
@@ -441,20 +466,41 @@ export function buildTools(limits: ObserveLimits, clients: ClientManager): reado
       const window = resolveWindow(input, limits, Date.now());
       const size = clampSize(input.limit ?? 100, limits);
       const column =
-        input.groupBy === "service"
-          ? "service_name"
+        input.groupBy === "service" || input.groupBy === "serviceRaw"
+          ? RAW_SERVICE_COLUMN
           : input.groupBy === "sourceContext"
             ? "instrumentation_library_name"
             : "severity";
-      const sql = buildLogStatsSql(stream, column, size);
-      const res = await clients.getClient(input.environment).search({
-        sql,
-        startUs: window.startUs,
-        endUs: window.endUs,
-        size,
-        type: "logs"
+
+      // Only `service` resolves. `serviceRaw` is the escape hatch that keeps the
+      // pre-resolution view reachable — it is how you see how much of the index still
+      // lands in the sentinel bucket, which is the emitter-side bug's own metric.
+      const client = clients.getClient(input.environment);
+      const resolving = input.groupBy === "service";
+      const run = await withIdentity(`${env.name}:${stream}`, limits, (serviceExpr) =>
+        client.search({
+          // The alias belongs to the resolved branch alone: applied to a bare
+          // `severity` group it would rename the bucket key to `service_name`.
+          sql: resolving
+            ? buildLogStatsSql(stream, serviceExpr, size, RAW_SERVICE_COLUMN)
+            : buildLogStatsSql(stream, column, size),
+          startUs: window.startUs,
+          endUs: window.endUs,
+          size,
+          type: "logs"
+        })
+      );
+      const res = run.result;
+      return ok({
+        environment: env.name,
+        stream,
+        groupBy: column,
+        // The bucket key is always `service_name`; this says whether that key holds a
+        // resolved identity or the raw column, which changes what the counts mean.
+        identity: resolving ? describeIdentity(limits, run.resolved) : null,
+        tookMs: res.took ?? null,
+        buckets: res.hits
       });
-      return ok({ environment: env.name, stream, groupBy: column, tookMs: res.took ?? null, buckets: res.hits });
     }
   });
 

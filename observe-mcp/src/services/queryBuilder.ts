@@ -130,6 +130,14 @@ export function assertTraceId(traceId: string): string {
 // SQL builders
 // ---------------------------------------------------------------------------
 
+/**
+ * The raw OTLP resource column. Every traces query uses it directly; a logs query
+ * may instead use the resolved expression from `services/identity.ts`, which is
+ * threaded in as `serviceExpr` rather than hardcoded here — this module builds SQL
+ * and does not decide identity policy.
+ */
+export const RAW_SERVICE_COLUMN = "service_name";
+
 export type LogFilters = {
   service?: string;
   level?: string;
@@ -138,10 +146,10 @@ export type LogFilters = {
 };
 
 /** Build the WHERE fragment (without the "WHERE" keyword) from log filters. */
-function buildLogWhere(filters: LogFilters): string {
+function buildLogWhere(filters: LogFilters, serviceExpr: string = RAW_SERVICE_COLUMN): string {
   const clauses: string[] = [];
   if (filters.service) {
-    clauses.push(`service_name = ${sqlString(filters.service)}`);
+    clauses.push(`${serviceExpr} = ${sqlString(filters.service)}`);
   }
   if (filters.level) {
     // Serilog levels land in `severity` as full words (Information/Warning/Error/Fatal).
@@ -163,7 +171,7 @@ function buildLogWhere(filters: LogFilters): string {
 }
 
 /** Validate a bare column identifier for a projection list (reject anything unsafe). */
-function sqlColumn(name: string): string {
+export function sqlColumn(name: string): string {
   if (!/^[A-Za-z0-9_.]+$/.test(name)) {
     throw new PolicyViolationError("validation_error", `Unsafe column name: "${name}".`);
   }
@@ -175,8 +183,14 @@ function selectList(columns?: string[]): string {
   return columns && columns.length > 0 ? columns.map(sqlColumn).join(", ") : "*";
 }
 
-export function buildSearchLogsSql(stream: string, filters: LogFilters, size: number, columns?: string[]): string {
-  const where = buildLogWhere(filters);
+export function buildSearchLogsSql(
+  stream: string,
+  filters: LogFilters,
+  size: number,
+  columns?: string[],
+  serviceExpr: string = RAW_SERVICE_COLUMN
+): string {
+  const where = buildLogWhere(filters, serviceExpr);
   const whereClause = where ? ` WHERE ${where}` : "";
   return `SELECT ${selectList(columns)} FROM ${sqlIdent(stream)}${whereClause} ORDER BY _timestamp DESC LIMIT ${size}`;
 }
@@ -193,8 +207,13 @@ export function buildTraceLogsSql(stream: string, traceId: string, size: number,
  * `discover_services` with `include:"fields"`). An optional `service` narrows the
  * sample, so field discovery for one service is not diluted by every other one.
  */
-export function buildSampleSql(stream: string, size: number, service?: string): string {
-  const where = service ? ` WHERE service_name = ${sqlString(service)}` : "";
+export function buildSampleSql(
+  stream: string,
+  size: number,
+  service?: string,
+  serviceExpr: string = RAW_SERVICE_COLUMN
+): string {
+  const where = service ? ` WHERE ${serviceExpr} = ${sqlString(service)}` : "";
   return `SELECT * FROM ${sqlIdent(stream)}${where} ORDER BY _timestamp DESC LIMIT ${size}`;
 }
 
@@ -226,9 +245,23 @@ export function buildTraceSpansSql(
 
 export type StatsColumn = "severity" | "service_name" | "instrumentation_library_name";
 
-/** Aggregate log counts grouped by a dimension over the window. */
-export function buildLogStatsSql(stream: string, groupBy: StatsColumn, size: number): string {
-  return `SELECT ${groupBy}, COUNT(*) AS count FROM ${sqlIdent(stream)} GROUP BY ${groupBy} ORDER BY count DESC LIMIT ${size}`;
+/**
+ * Aggregate log counts grouped by a dimension over the window.
+ *
+ * `groupBy` may be a bare column OR the resolved-service expression, so the result
+ * column is aliased: without the alias a `COALESCE(...)` group renders its whole
+ * expression as the bucket key, and every consumer reading `bucket.service_name`
+ * would silently find nothing. The alias keeps one bucket shape whichever it was —
+ * which of the two ran is reported by the tool's echoed `groupBy` and `identity`.
+ */
+export function buildLogStatsSql(
+  stream: string,
+  groupBy: string,
+  size: number,
+  alias: StatsColumn | null = null
+): string {
+  const projection = alias && alias !== groupBy ? `${groupBy} AS ${alias}` : groupBy;
+  return `SELECT ${projection}, COUNT(*) AS count FROM ${sqlIdent(stream)} GROUP BY ${groupBy} ORDER BY count DESC LIMIT ${size}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -256,14 +289,25 @@ const WARN_LEVELS = "('WARNING', 'WARN')";
  * `MIN`/`MAX(_timestamp)` come back as epoch microseconds — callers must render
  * them through the same conversion `logParser` applies to row timestamps.
  */
-export function buildServiceInventorySql(stream: string, size: number): string {
+export function buildServiceInventorySql(
+  stream: string,
+  size: number,
+  serviceExpr: string = RAW_SERVICE_COLUMN,
+  identitySelect: string | null = null
+): string {
+  const projection = serviceExpr === RAW_SERVICE_COLUMN ? serviceExpr : `${serviceExpr} AS ${RAW_SERVICE_COLUMN}`;
+  // The two identity counters ride along in the SAME aggregate. That is the whole
+  // reason reporting how a service was attributed is affordable: it is a wider
+  // SELECT over a GROUP BY that already had to run, not a second query.
+  const identity = identitySelect ? `${identitySelect}, ` : "";
   return (
-    `SELECT service_name, COUNT(*) AS log_count, ` +
+    `SELECT ${projection}, COUNT(*) AS log_count, ` +
     `MIN(_timestamp) AS first_seen, MAX(_timestamp) AS last_seen, ` +
     `SUM(CASE WHEN UPPER(severity) IN ${ERROR_LEVELS} THEN 1 ELSE 0 END) AS error_count, ` +
     `SUM(CASE WHEN UPPER(severity) IN ${WARN_LEVELS} THEN 1 ELSE 0 END) AS warn_count, ` +
+    `${identity}` +
     `COUNT(DISTINCT instrumentation_library_name) AS context_count ` +
-    `FROM ${sqlIdent(stream)} GROUP BY service_name ORDER BY log_count DESC LIMIT ${size}`
+    `FROM ${sqlIdent(stream)} GROUP BY ${serviceExpr} ORDER BY log_count DESC LIMIT ${size}`
   );
 }
 
@@ -292,10 +336,15 @@ export function buildTraceServiceInventorySql(stream: string, size: number): str
  * here: the prefix lists are configurable, and building a `NOT LIKE` chain out of
  * environment-supplied strings would put configuration into a SQL statement.
  */
-export function buildContextInventorySql(stream: string, size: number, service?: string): string {
+export function buildContextInventorySql(
+  stream: string,
+  size: number,
+  service?: string,
+  serviceExpr: string = RAW_SERVICE_COLUMN
+): string {
   const clauses = ["instrumentation_library_name IS NOT NULL"];
   if (service) {
-    clauses.push(`service_name = ${sqlString(service)}`);
+    clauses.push(`${serviceExpr} = ${sqlString(service)}`);
   }
   return (
     `SELECT instrumentation_library_name, COUNT(*) AS count ` +
@@ -308,15 +357,23 @@ export function buildContextInventorySql(stream: string, size: number, service?:
  * The service × context matrix, used by the service catalog to attribute code to a
  * service name.
  *
- * This is what makes `unknown_service:dotnet` readable. It is the largest bucket in
- * both live environments, and it is not one service — it is every app that never
- * set OTel `service.name`. The only way to tell them apart is the namespace of the
- * context that emitted each row, which is exactly what this pairing recovers.
+ * This is what makes `unknown_service:dotnet` readable. It used to be the ONLY way:
+ * the sentinel bucket is every app that never set OTel `service.name`, and the
+ * namespace of the emitting context was the only thing telling them apart. With
+ * `serviceExpr` resolving the app name directly (`services/identity.ts`) the pairing
+ * is no longer load-bearing for attribution — but it stays the mechanism that maps a
+ * service to its CODE, and it is still the only signal for a row that resolution
+ * cannot name.
  */
-export function buildServiceContextMatrixSql(stream: string, size: number): string {
+export function buildServiceContextMatrixSql(
+  stream: string,
+  size: number,
+  serviceExpr: string = RAW_SERVICE_COLUMN
+): string {
+  const projection = serviceExpr === RAW_SERVICE_COLUMN ? serviceExpr : `${serviceExpr} AS ${RAW_SERVICE_COLUMN}`;
   return (
-    `SELECT service_name, instrumentation_library_name, COUNT(*) AS count ` +
+    `SELECT ${projection}, instrumentation_library_name, COUNT(*) AS count ` +
     `FROM ${sqlIdent(stream)} WHERE instrumentation_library_name IS NOT NULL ` +
-    `GROUP BY service_name, instrumentation_library_name ORDER BY count DESC LIMIT ${size}`
+    `GROUP BY ${serviceExpr}, instrumentation_library_name ORDER BY count DESC LIMIT ${size}`
   );
 }

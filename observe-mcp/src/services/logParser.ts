@@ -3,6 +3,8 @@
 // tolerates a list of candidate field names. The exact keys were confirmed against a
 // live sample during verification; new variants can be added to the candidate lists.
 
+import { resolveServiceValue, type IdentityConfig } from "./identity.js";
+
 export type NormalizedLog = {
   ts: string | null;
   level: string | null;
@@ -85,12 +87,30 @@ const SPAN_KEYS = ["span_id", "spanid", "SpanId", "otel_span_id", "OtelSpanId"];
 const PARENT_SPAN_KEYS = ["reference_parent_span_id", "parent_span_id", "OtelParentSpanId", "otel_parent_span_id"];
 const SOURCE_KEYS = ["instrumentation_library_name", "source_context", "sourcecontext", "SourceContext"];
 const SERVICE_KEYS = ["service_name", "servicename", "ServiceName", "service"];
+/**
+ * Candidate spellings of the Serilog-enricher app name. The configured
+ * `OBSERVE_APP_NAME_FIELD` is tried first — this list only catches the variants
+ * OpenObserve's flattening produces for the same property.
+ */
+const APP_NAME_KEYS = ["applicationname", "application_name", "ApplicationName"];
 const EXCEPTION_KEYS = ["exception", "Exception", "exceptions_message", "error"];
 const OP_KEYS = ["operation_name", "operationname", "name", "span_name"];
 const DURATION_KEYS = ["duration", "duration_ms", "durationms"];
 const STATUS_KEYS = ["span_status", "status", "status_code"];
 
-export function normalizeLog(hit: Hit): NormalizedLog {
+/**
+ * `service` is the RESOLVED name, not the raw `service_name`.
+ *
+ * A row from the Serilog OTLP path carries `service_name = unknown_service:dotnet`
+ * and its real name in the enricher field; reporting the raw column there labels ~19%
+ * of rows with a value that names no application. `identity` is optional so a caller
+ * with no config (tests, `describe_stream`) still gets the old behaviour.
+ */
+export function normalizeLog(hit: Hit, identity?: IdentityConfig): NormalizedLog {
+  const rawService = asStr(pick(hit, SERVICE_KEYS));
+  const appName = identity
+    ? asStr(pick(hit, [identity.appNameField, ...APP_NAME_KEYS].filter((k) => k.length > 0)))
+    : null;
   return {
     ts: toIso(pick(hit, TS_KEYS)),
     level: asStr(pick(hit, LEVEL_KEYS)),
@@ -98,7 +118,7 @@ export function normalizeLog(hit: Hit): NormalizedLog {
     traceId: asStr(pick(hit, TRACE_KEYS)),
     spanId: asStr(pick(hit, SPAN_KEYS)),
     sourceContext: asStr(pick(hit, SOURCE_KEYS)),
-    service: asStr(pick(hit, SERVICE_KEYS)),
+    service: identity ? resolveServiceValue(rawService, appName, identity) : rawService,
     exception: asStr(pick(hit, EXCEPTION_KEYS))
   };
 }

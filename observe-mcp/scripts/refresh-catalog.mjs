@@ -24,7 +24,16 @@
  * Usage:
  *   npm run catalog:refresh                  # capture and write (7d window)
  *   npm run catalog:check                    # offline validation of the committed file
+ *   npm run catalog:verify                   # LIVE: re-test the file's assertions, write nothing
  *   node scripts/refresh-catalog.mjs --window 24h
+ *
+ * `--check` and `--verify` answer different questions and neither replaces the other.
+ * `--check` asks "is this file well-formed and not ancient" with no credentials.
+ * `--verify` asks "are its claims still TRUE", which is the failure that actually
+ * bites: a capture reported `ageDays: 0` while four of its assertions about one
+ * service were already false, because a consuming team had fixed that service's
+ * `service.name` three hours after the capture. Age cannot see that; only re-testing
+ * the assertions can.
  *
  * `--window` is bounded by the server's own `OBSERVE_MAX_LOOKBACK_MS`, which
  * defaults to exactly 7 days — so 7d is both the default here and the longest
@@ -54,6 +63,7 @@ const STALE_AFTER_DAYS = 30;
 
 const argv = process.argv.slice(2);
 const CHECK = argv.includes("--check");
+const VERIFY = argv.includes("--verify");
 /**
  * Validated rather than read positionally: `--window` as the LAST argument made
  * `argv[i + 1]` undefined, which was then dropped from the JSON-RPC arguments, so
@@ -174,6 +184,46 @@ async function callTool(client, name, args) {
   return payload;
 }
 
+/**
+ * The OTel spec default a .NET SDK reports when nothing set `service.name`.
+ *
+ * Hardcoded here on purpose, and only for PRESENTATION — this script decides nothing
+ * about identity, it just needs to know whether an entry is the shared unnamed bucket
+ * so it can word that entry differently. The resolution itself is the server's, via
+ * `OBSERVE_UNKNOWN_SERVICE_SENTINEL`, and a deployment that changed the sentinel would
+ * simply lose the special wording, not get a wrong catalog.
+ */
+const SENTINEL_SERVICE_NAMES = new Set(["unknown_service:dotnet", "unknown_service"]);
+
+function isSentinelName(name) {
+  return SENTINEL_SERVICE_NAMES.has(name) || name.startsWith("unknown_service:");
+}
+
+/** One value from what each environment observed: agreement, or `mixed` if they differ. */
+function identitySourceOf(sources) {
+  const seen = [...sources];
+  if (seen.length === 0) return null;
+  if (seen.length === 1) return seen[0];
+  return "mixed";
+}
+
+/**
+ * Which signal an entry is grounded in, strongest first.
+ *
+ * The precedence is not a preference, it is a difference in evidential value:
+ * `namespaceRoots` names the owning CODE, `appContexts` names the emitting class,
+ * `frameworkHints` names only the KIND of app (Ocelot → gateway, Elsa/Rebus →
+ * workflow engine, Quartz → has scheduled jobs). An entry resting on the last one is
+ * not wrong, it is weak — and saying so is the difference between a reader trusting
+ * it as a code pointer and treating it as a hint.
+ */
+function identifiedByOf(entry) {
+  if (entry.namespaceRoots.length > 0) return "namespace";
+  if (entry.appContexts.size > 0 || entry.unclassifiedContexts.size > 0) return "context";
+  if (entry.frameworkHints.size > 0) return "framework";
+  return "serviceNameOnly";
+}
+
 /** Merge the code-link rows returned for one environment into a per-service map. */
 function indexCodeLinks(codeLinks) {
   const byService = new Map();
@@ -183,7 +233,75 @@ function indexCodeLinks(codeLinks) {
   return byService;
 }
 
-async function refresh() {
+/** The server's own rule for "is there a connection configured at all". */
+function hasObserveConnection(env) {
+  return Boolean(env.OBSERVE_BASE_URL) || Object.keys(env).some((k) => k.startsWith("OBSERVE_ENV_"));
+}
+
+/**
+ * Credentials come from the agent registration when the shell has none.
+ *
+ * By workspace convention the OBSERVE_* values live in `~/.claude.json` under the
+ * registered server, not in any shell profile — so running this script from a normal
+ * terminal failed with `config_error: No OpenObserve environments configured`, and
+ * the only workaround was to re-export secrets by hand. This script drives *that same
+ * registered server*, so inheriting *that same env* is the coherent thing to do.
+ *
+ * Read-only, via the installer's own helper, and values are never printed — only the
+ * agent and entry NAME that supplied them.
+ *
+ * Several registrations are refused rather than merged. A merge across
+ * `observe-mcp-ssdev_au` and `observe-mcp-prod` would silently build one process
+ * holding two orgs' credentials, which is the same wrong-account failure
+ * `resolveAuthHeader` refuses in `config/index.ts` — arrived at from the other side.
+ */
+async function inheritedEnv() {
+  if (hasObserveConnection(process.env)) {
+    return process.env;
+  }
+  let agents;
+  let readServerEntries;
+  try {
+    ({ detectAgents: agents, readServerEntries } = await import(
+      new URL("../../scripts/lib/agents.mjs", import.meta.url).href
+    ).then((m) => ({ detectAgents: m.detectAgents, readServerEntries: m.readServerEntries })));
+  } catch {
+    // Standalone checkout without the workspace scripts — nothing to inherit, and
+    // the server's own startup error already says exactly what to set.
+    return process.env;
+  }
+
+  const found = [];
+  for (const agent of agents()) {
+    for (const entry of readServerEntries(agent, "observe-mcp")) {
+      if (entry.entry?.env && hasObserveConnection(entry.entry.env)) {
+        found.push({ agent: agent.name, name: entry.name, env: entry.entry.env });
+      }
+    }
+  }
+  if (found.length === 0) {
+    return process.env;
+  }
+  if (found.length > 1) {
+    console.error(
+      `Found ${found.length} observe-mcp registrations (${found.map((f) => `${f.agent}:${f.name}`).join(", ")}).`
+    );
+    console.error("Refusing to guess which credentials to use — set OBSERVE_* in the shell to choose explicitly.");
+    process.exit(1);
+  }
+  console.log(`Using credentials from the ${found[0].agent} registration "${found[0].name}" (no OBSERVE_* in the shell).`);
+  return { ...process.env, ...found[0].env };
+}
+
+/**
+ * Start the built server over stdio and hand back a connected MCP client.
+ *
+ * Shared by `refresh` and `--verify` so both fail the same way: the server's stderr
+ * is captured, because a startup failure — a missing credential, an unparseable
+ * OBSERVE_ENV_* spec — otherwise surfaces only as the SDK's "MCP error -32000:
+ * Connection closed", which names neither the cause nor the fix.
+ */
+async function openServer(clientName) {
   const entryPath = path.join(SERVER_DIR, ENTRY);
   if (!fs.existsSync(entryPath)) {
     console.error(`${ENTRY} not found — run \`npm run build\` first.`);
@@ -195,21 +313,28 @@ async function refresh() {
     args: [ENTRY],
     cwd: SERVER_DIR,
     // The developer's real credentials, on purpose: this reaches live OpenObserve.
-    env: { ...process.env },
+    // The shell first, the agent registration as the fallback — see `inheritedEnv`.
+    env: await inheritedEnv(),
     stderr: "pipe"
   });
-  const client = new Client({ name: "catalog-refresh", version: "1.0.0" });
+  const client = new Client({ name: clientName, version: "1.0.0" });
 
-  /**
-   * Capture the server's stderr. Without this a startup failure — a missing
-   * credential, an unparseable OBSERVE_ENV_* spec — surfaces only as the SDK's
-   * "MCP error -32000: Connection closed", which names neither the cause nor the
-   * fix. The server writes a diagnostic there; it just has to be read.
-   */
   let serverStderr = "";
   transport.stderr?.on("data", (chunk) => {
     serverStderr += String(chunk);
   });
+
+  try {
+    await client.connect(transport);
+  } catch (error) {
+    const detail = serverStderr.trim();
+    throw new Error(`Could not start ${ENTRY}: ${error.message}${detail ? `\n\nServer stderr:\n${detail}` : ""}`);
+  }
+  return client;
+}
+
+async function refresh() {
+  const client = await openServer("catalog-refresh");
 
   const previous = readCatalog();
   const previousServices = previous?.services ?? {};
@@ -220,15 +345,6 @@ async function refresh() {
   let secondPassCalls = 0;
 
   try {
-    try {
-      await client.connect(transport);
-    } catch (error) {
-      const detail = serverStderr.trim();
-      throw new Error(
-        `Could not start ${ENTRY}: ${error.message}${detail ? `\n\nServer stderr:\n${detail}` : ""}`
-      );
-    }
-
     const envList = await callTool(client, "list_environments", { profile: "standard" });
     const envNames = (envList.environments ?? []).map((e) => e.name);
     if (envNames.length === 0) {
@@ -290,12 +406,18 @@ async function refresh() {
         traceStream: discovered.traceStream ?? null,
         window: WINDOW,
         logServiceCount: services.length,
+        // `identitySource` is captured per ENVIRONMENT, unlike the rest of the
+        // identity block: a service is routinely fixed in dev before prod, so one
+        // merged value across environments would assert something false about one of
+        // them. This is the field `--verify` re-tests.
+        identityResolved: discovered.identity?.resolved ?? null,
         services: services.map((s) => ({
           name: s.name,
           logCount: s.logCount,
           errorCount: s.errorCount,
           warnCount: s.warnCount,
           lanes: s.lanes ?? ["logs"],
+          identitySource: s.identitySource ?? null,
           lastSeen: s.lastSeen ?? null
         })),
         traceOnlyServiceCount: traceOnly.length,
@@ -303,7 +425,7 @@ async function refresh() {
       };
 
       // Identity is environment-independent, so accumulate it across environments.
-      const accumulate = (name, lanes) => {
+      const accumulate = (name, lanes, identitySource) => {
         if (!name) return;
         const entry = merged.get(name) ?? {
           serviceName: name,
@@ -312,10 +434,12 @@ async function refresh() {
           namespaceRoots: [],
           frameworkHints: new Set(),
           lanes: new Set(),
+          identitySources: new Set(),
           environments: new Set()
         };
         entry.environments.add(envName);
         for (const lane of lanes) entry.lanes.add(lane);
+        if (identitySource) entry.identitySources.add(identitySource);
         const link = codeLinks.get(name);
         if (link) {
           for (const c of link.appContexts ?? []) entry.appContexts.add(c);
@@ -330,25 +454,33 @@ async function refresh() {
         merged.set(name, entry);
       };
 
-      for (const s of services) accumulate(s.name, s.lanes ?? ["logs"]);
-      for (const s of traceOnly) accumulate(s.name, ["traces"]);
+      for (const s of services) accumulate(s.name, s.lanes ?? ["logs"], s.identitySource);
+      // The traces lane has no app-name column, so a span producer is always named by
+      // its OTLP resource — `resource` is a fact here, not an assumption.
+      for (const s of traceOnly) accumulate(s.name, ["traces"], "resource");
     }
   } finally {
     await client.close().catch(() => {});
   }
 
-  // --- cross-lane attribution ------------------------------------------------
+  // --- cross-lane attribution (the FALLBACK) ---------------------------------
   // Some services name themselves on their SPANS but not on their LOG rows, so
   // their logs land under `unknown_service:dotnet` while their span rows carry a
   // real service name. Observed live: `Bmw.Teleservices.V3.Api` has no log
   // contexts of its own, yet `Bmw.Teleservices.V3.Api.Services.*` appears in the
   // logs under `unknown_service:dotnet`.
   //
-  // That link is derivable — match the service's own name against the contexts
-  // recorded for every other service — and it is the difference between a service
-  // being unidentifiable and pointing straight at its code. Recorded as
-  // `logsUnder` so the reader knows to search a DIFFERENT service_name to find
-  // this service's logs.
+  // This is a NAME-PREFIX guess, and it is now the second choice, not the first.
+  // The server resolves those rows directly via the app-name field, so a service
+  // whose logs carry one arrives here with its own `appContexts` already populated
+  // and the `continue` below skips it. What is left is the case the enricher cannot
+  // cover: a span producer whose log rows carry neither a real `service_name` nor an
+  // app name — only a namespace that happens to start with the service's name.
+  //
+  // Keeping it matters because the guess is wrong whenever an app's assembly name is
+  // not a prefix of every namespace it logs from. A Clean-Architecture host
+  // (`X.Web` logging from `X.Web.*`, `X.Application.*`, `X.Infrastructure.*`) matched
+  // one root and orphaned three — which is why it must never outrank a measurement.
   const contextOwners = new Map();
   for (const [owner, entry] of merged) {
     for (const ctx of entry.appContexts) {
@@ -384,21 +516,35 @@ async function refresh() {
       namespaceRoots: entry.namespaceRoots,
       frameworkHints: [...entry.frameworkHints],
       lanes: [...entry.lanes].sort(),
+      // How the name was established, measured rather than inferred: `resource` =
+      // the OTLP resource carried it, `enricher` = it came from the app-name field
+      // because the emitter never set service.name, `mixed` = both paths at once,
+      // which is the ordinary state for a .NET app here and marks a service that
+      // loses rows to any query using service_name alone.
+      identitySource: identitySourceOf(entry.identitySources),
+      // Which signal this entry is actually grounded in, strongest first. A caller
+      // can then tell "points at first-party code" from "we only know what libraries
+      // it uses", which the flat set of fields never said.
+      identifiedBy: identifiedByOf(entry),
       environments: [...entry.environments].sort()
     };
-    // A service name that carries several application namespace roots is not one
-    // service — it is several apps that never set OTel service.name. Say so in the
-    // artifact, because it changes how the logs must be read.
-    if (entry.namespaceRoots.length > 1) {
+    // Several application namespace roots under ONE service name means one of two
+    // very different things, and saying the wrong one misdirects the reader:
+    //  - on the shared sentinel entry it is several apps that never set service.name;
+    //  - on a real service it is just a layered app (Web/Application/Infrastructure),
+    //    which is normal and needs no warning at all.
+    // Before identity resolution these were indistinguishable, so every multi-root
+    // entry got the alarming note. Now only the unnamed bucket earns it.
+    if (entry.namespaceRoots.length > 1 && isSentinelName(name)) {
       recognizeBy.note =
-        "Multiple application namespace roots emit under this service name — attribute rows by namespaceRoots, not by service alone.";
+        "Not one service: these are the apps that never set OTel service.name AND carry no application-name field, so nothing can name them. Attribute rows by namespaceRoots.";
     }
     if (entry.logsUnder) {
       recognizeBy.logsUnder = entry.logsUnder;
       recognizeBy.borrowedContexts = entry.borrowedContexts;
-      recognizeBy.note = `This service names itself on spans but not on log rows: search logs under service_name ${entry.logsUnder
+      recognizeBy.note = `Point-in-time observation, re-test with \`npm run catalog:verify\`: at capture this service had no log rows under its own name. Its logs were attributed by namespace prefix under service_name ${entry.logsUnder
         .map((s) => `"${s}"`)
-        .join(" / ")} and filter by sourceContext starting "${name}.".`;
+        .join(" / ")}; search there and filter by sourceContext starting "${name}.".`;
     } else if (entry.appContexts.size === 0 && [...entry.lanes].join() === "traces") {
       // Produces spans and no log rows at all, under this name or any other. Not a
       // hole in the capture — there is nothing in the logs to find, so say that
@@ -427,7 +573,11 @@ async function refresh() {
     capturedAt: new Date().toISOString(),
     window: WINDOW,
     generator: "npm run catalog:refresh",
-    note: "`recognizeBy` is derived from logs and is rewritten on every refresh. `code` is hand-verified and preserved — edit it freely.",
+    note:
+      "`recognizeBy` is derived from logs and is rewritten on every refresh. `code` is hand-verified and preserved — edit it freely. " +
+      "`identifiedBy` ranks the evidence: namespace (names the owning code) > context (names the emitting class) > framework (names only the kind of app) > serviceNameOnly. " +
+      "`identitySource` says how the service was NAMED: resource (the OTLP resource carried it), enricher (recovered from the application-name field because the emitter never set service.name), mixed (both paths at once — the ordinary state for a .NET app here, and the marker of a service that loses rows to any query using service_name alone). " +
+      "`logsUnder` and `note` are point-in-time observations, not durable facts: re-test them with `npm run catalog:verify`.",
     environments,
     services
   });
@@ -449,8 +599,28 @@ async function refresh() {
       typeof services[n].recognizeBy.note === "string"
   );
 
+  const byEvidence = {};
+  for (const n of currentNames) {
+    const key = services[n].recognizeBy.identifiedBy ?? "serviceNameOnly";
+    byEvidence[key] = (byEvidence[key] ?? 0) + 1;
+  }
+  const enricherNamed = [...currentNames].filter((n) =>
+    ["enricher", "mixed"].includes(services[n].recognizeBy.identitySource)
+  );
+
   console.log(`\nWrote ${path.relative(SERVER_DIR, CATALOG_FILE)} — ${currentNames.size} services, ${WINDOW} window.`);
   console.log(`  ${identified.length}/${currentNames.size} have a usable recognition signal.`);
+  console.log(
+    `  identifiedBy: ${Object.entries(byEvidence)
+      .sort((a, b) => b[1] - a[1])
+      .map(([k, v]) => `${k} ${v}`)
+      .join(", ")}`
+  );
+  // Not a warning — these are services the resolution RECOVERED. Naming them is how
+  // you see the emitter-side backlog shrink between captures.
+  if (enricherNamed.length > 0) {
+    console.log(`  named via the application-name field (emitter never set service.name): ${enricherNamed.join(", ")}`);
+  }
   if (secondPassCalls > 0) console.log(`  ${secondPassCalls} service(s) needed an individual code-link query.`);
   if (previous) {
     console.log(`  new since last capture:  ${added.length > 0 ? added.join(", ") : "(none)"}`);
@@ -464,8 +634,134 @@ async function refresh() {
   }
 }
 
+// ---------------------------------------------------------------------------
+// --verify: re-test the committed file's ASSERTIONS against live data
+// ---------------------------------------------------------------------------
+
+/**
+ * The cheap half of a refresh, and the half that actually rots.
+ *
+ * A full capture is one query per environment plus a per-service second pass; this is
+ * ONE `discover_services` call per environment, because every assertion in the file is
+ * about which lane a service appears in and under what name — all of which one
+ * inventory answers for every entry at once.
+ *
+ * Contradictions, not staleness:
+ *  - `logsUnder` says "no log rows under its own name". If the service is now in the
+ *    logs inventory under its own name, the instruction sends a reader to the wrong
+ *    bucket. This is the exact failure that motivated the check.
+ *  - `lanes: ["traces"]` says "emits no log rows at all". Same test, opposite claim.
+ *  - `identitySource` drift is REPORTED, never failed. Two reasons. It is compared
+ *    against the per-ENVIRONMENT capture, not `recognizeBy.identitySource`, which is
+ *    merged across environments — a service fixed in dev but not prod merges to
+ *    `mixed`, and testing that against one environment's live value contradicts
+ *    itself by construction (the first run of this check did exactly that for
+ *    `CommunicationHub.Web`). And even correctly compared it is a weak signal: a
+ *    window is a sample, so a service whose Serilog-sink rows are sparse can read
+ *    `resource` in one window and `mixed` in the next with nothing having changed.
+ *    Failing on that would make the check cry wolf, and a gate people learn to
+ *    ignore is worse than no gate.
+ *
+ * A service that has simply gone quiet is NOT a contradiction either — absence over
+ * one window proves nothing, and treating it as an error would make this fail on
+ * every idle dev environment. Only a claim proved FALSE counts.
+ */
+async function verify() {
+  const catalog = readCatalog();
+  if (!catalog) {
+    console.error(`MISSING ${path.relative(SERVER_DIR, CATALOG_FILE)} — run \`npm run catalog:refresh\`.`);
+    process.exit(1);
+  }
+
+  const client = await openServer("catalog-verify");
+  const contradictions = [];
+  /** identitySource changes: informational, never a failure — see the note above. */
+  const drifted = [];
+  let checked = 0;
+
+  try {
+    const envList = await callTool(client, "list_environments", { profile: "standard" });
+    const envNames = (envList.environments ?? []).map((e) => e.name);
+    const window = typeof catalog.window === "string" && catalog.window.trim() !== "" ? catalog.window : "7d";
+    console.log(`Re-testing ${Object.keys(catalog.services ?? {}).length} entries over ${window} in: ${envNames.join(", ")}`);
+
+    for (const envName of envNames) {
+      const live = await callTool(client, "discover_services", {
+        environment: envName,
+        time: window,
+        limit: 200,
+        lane: "both",
+        profile: "standard"
+      });
+
+      const logNames = new Map((live.services ?? []).map((s) => [s.name, s]));
+      const traceNames = new Set((live.traceOnlyServices ?? []).map((s) => s.name));
+      const seenLive = logNames.size > 0 || traceNames.size > 0;
+      if (!seenLive) {
+        console.log(`  ${envName}: no services in the window — skipped (nothing to contradict).`);
+        continue;
+      }
+
+      // The per-environment half of the capture. `recognizeBy` is merged across
+      // environments and cannot answer "what did THIS environment look like".
+      const capturedHere = new Map(
+        ((catalog.environments ?? {})[envName]?.services ?? []).map((s) => [s.name, s])
+      );
+
+      for (const [name, entry] of Object.entries(catalog.services ?? {})) {
+        const recognizeBy = entry?.recognizeBy ?? {};
+        // Only test entries the capture actually observed in THIS environment.
+        if (!(recognizeBy.environments ?? []).includes(envName)) continue;
+        checked += 1;
+        const liveRow = logNames.get(name);
+
+        if ((recognizeBy.logsUnder ?? []).length > 0 && liveRow) {
+          contradictions.push(
+            `${envName}: "${name}" claims logsUnder ${JSON.stringify(recognizeBy.logsUnder)}, but it now has ` +
+              `${liveRow.logCount} log rows under its own name. The note sends readers to the wrong bucket.`
+          );
+        }
+        if ((recognizeBy.lanes ?? []).join() === "traces" && liveRow) {
+          contradictions.push(
+            `${envName}: "${name}" claims lanes ["traces"] (no log rows), but it now emits ${liveRow.logCount} log rows.`
+          );
+        }
+        // Compared against what THIS environment recorded, and only ever reported.
+        const capturedSource = capturedHere.get(name)?.identitySource ?? null;
+        if (liveRow?.identitySource && capturedSource && liveRow.identitySource !== capturedSource) {
+          drifted.push(
+            `${envName}: "${name}" identitySource ${capturedSource} → ${liveRow.identitySource}` +
+              (liveRow.identitySource === "resource"
+                ? " (the emitter now sets service.name — a fix landed)"
+                : liveRow.identitySource === "enricher"
+                  ? " (all rows now need the app-name field to be named)"
+                  : " (rows arriving down BOTH OTLP paths — the ordinary state)")
+          );
+        }
+      }
+    }
+  } finally {
+    await client.close().catch(() => {});
+  }
+
+  for (const d of drifted) console.log(`  IDENTITY-DRIFT ${d}`);
+  if (contradictions.length === 0) {
+    console.log(`\nOK     ${checked} entry-environment assertions still hold.`);
+    if (drifted.length > 0) {
+      console.log(`       ${drifted.length} identitySource change(s) reported above — informational, refresh when convenient.`);
+    }
+    return;
+  }
+  console.error(`\nCONTRADICTED ${contradictions.length} of ${checked} assertions in ${path.relative(SERVER_DIR, CATALOG_FILE)}`);
+  for (const c of contradictions) console.error(`  - ${c}`);
+  console.error("\n→ run `npm run catalog:refresh` to re-derive the file.");
+  process.exit(1);
+}
+
 if (CHECK) {
   runCheck();
+} else if (VERIFY) {
+  await verify();
 } else {
   await refresh();
 }

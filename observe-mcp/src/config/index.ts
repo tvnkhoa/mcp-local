@@ -45,6 +45,10 @@ export type ObserveLimits = {
   appNamespacePrefixes: string[];
   /** Namespace prefixes treated as framework/library noise. */
   frameworkNamespacePrefixes: string[];
+  /** Logs-only column holding the app name when the OTLP resource does not. Empty = never resolve. */
+  appNameField: string;
+  /** The `service_name` value meaning "the emitter never set service.name". Empty = never resolve. */
+  unknownServiceSentinel: string;
 };
 
 function numberFromEnv(key: string, fallback: number): number {
@@ -54,6 +58,17 @@ function numberFromEnv(key: string, fallback: number): number {
 /** Like numberFromEnv but permits 0 (unlike lookback/size which must be positive). */
 function nonNegFromEnv(key: string, fallback: number): number {
   return env.nonNegativeInteger(key, fallback);
+}
+
+/**
+ * Read a trimmed string, falling back when unset. An explicitly EMPTY value is
+ * honoured rather than replaced by the fallback — that is how identity resolution
+ * is switched off (`OBSERVE_UNKNOWN_SERVICE_SENTINEL=`), and a fallback there would
+ * make the off switch silently do nothing.
+ */
+function stringFromEnv(key: string, fallback: string): string {
+  const raw = process.env[key];
+  return raw === undefined ? fallback : raw.trim();
 }
 
 /** Parse a comma-separated list; drops blanks. Empty/unset yields `fallback`. */
@@ -123,6 +138,19 @@ const DEFAULT_FRAMEWORK_NAMESPACE_PREFIXES = [
   "IdentityServer",
   "FFmpeg."
 ];
+
+/**
+ * The OTel spec's default `service.name` for a .NET SDK that was never configured,
+ * and the Serilog enricher property that names the app on those same rows.
+ *
+ * These are the two halves of one observation: a .NET process here emits logs down
+ * two OTLP paths, and only one of them carries the SDK resource. Rows from the other
+ * arrive with the sentinel below and the real name in `applicationname`. Measured on
+ * both live orgs, that is ~19% of log rows, and every one of them carries the field —
+ * there is no third bucket. See `services/identity.ts` for what is done with them.
+ */
+const DEFAULT_APP_NAME_FIELD = "applicationname";
+const DEFAULT_UNKNOWN_SERVICE_SENTINEL = "unknown_service:dotnet";
 
 function buildFieldCaps(): Record<ResponseProfile, FieldCaps> {
   const INF = Number.POSITIVE_INFINITY;
@@ -234,7 +262,9 @@ export function loadLimits(): ObserveLimits {
     frameworkNamespacePrefixes: csvFromEnv(
       "OBSERVE_FRAMEWORK_NAMESPACE_PREFIXES",
       DEFAULT_FRAMEWORK_NAMESPACE_PREFIXES
-    )
+    ),
+    appNameField: stringFromEnv("OBSERVE_APP_NAME_FIELD", DEFAULT_APP_NAME_FIELD),
+    unknownServiceSentinel: stringFromEnv("OBSERVE_UNKNOWN_SERVICE_SENTINEL", DEFAULT_UNKNOWN_SERVICE_SENTINEL)
   };
 }
 
@@ -247,6 +277,8 @@ export function describeLimits(limits: ObserveLimits): Record<string, unknown> {
     maxLookbackMs: limits.maxLookbackMs,
     timeoutMs: limits.timeoutMs,
     maxRetries: limits.maxRetries,
-    logColumns: limits.logColumns.length > 0 ? limits.logColumns : "*"
+    logColumns: limits.logColumns.length > 0 ? limits.logColumns : "*",
+    appNameField: limits.appNameField || null,
+    unknownServiceSentinel: limits.unknownServiceSentinel || null
   };
 }

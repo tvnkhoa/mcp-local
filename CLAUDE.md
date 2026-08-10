@@ -8,7 +8,7 @@ Four independent MCP servers — **not** a monorepo with shared packages. Each h
 
 - `codebase-index-mcp/` — Code graph indexing and analysis server. Most development work happens here.
 - `postgres-mcp/` — PostgreSQL MCP server. Read-only by default (SQL guardrails); optional multi-environment access, reviewed/confirmed data writes, and EF Core migration tooling, each gated behind explicit env flags.
-- `observe-mcp/` — OpenObserve log/trace MCP server for the CommunicationHub / CRM backend. Read-only; queries the self-hosted OpenObserve `_search` API to search logs, trace a request end-to-end by trace id, and discover what is in the index (`search_logs`, `trace_logs`, `get_trace_spans`, `log_stats`, `discover_services`, `list_environments`, ...). **Multi-environment in one process**: environments come from the flat `OBSERVE_BASE_URL`/`ORG`/`LOG_STREAM` trio plus the `OBSERVE_ENV_<NAME>` family, and every tool takes an optional `environment`. A dated 7-day service inventory is committed at `observe-mcp/docs/service-catalog.json` (`npm run catalog:refresh`, live credentials, never CI). Credentials via env only. Registered as `observe-mcp` in `~/.claude.json`.
+- `observe-mcp/` — OpenObserve log/trace MCP server for the CommunicationHub / CRM backend. Read-only; queries the self-hosted OpenObserve `_search` API to search logs, trace a request end-to-end by trace id, and discover what is in the index (`search_logs`, `trace_logs`, `get_trace_spans`, `log_stats`, `discover_services`, `list_environments`, ...). **Multi-environment in one process**: environments come from the flat `OBSERVE_BASE_URL`/`ORG`/`LOG_STREAM` trio plus the `OBSERVE_ENV_<NAME>` family, and every tool takes an optional `environment`. A dated 7-day service inventory is committed at `observe-mcp/docs/service-catalog.json` (`npm run catalog:refresh`, live credentials, never CI; `catalog:check` validates it offline, `catalog:verify` re-tests its assertions live). **Service identity is resolved, not raw**: these apps emit logs down two OTLP paths, and rows from the Serilog sink arrive as `unknown_service:dotnet` with the real name in `applicationname`, so every logs tool matches `COALESCE(NULLIF(service_name, sentinel), applicationname, service_name)` and echoes an `identity` block. Traces are always raw — that stream has no such column. Credentials via env only. Registered as `observe-mcp` in `~/.claude.json`.
 - `bitbucket-mcp/` — Bitbucket Cloud MCP server. Reads repositories/pull requests and **creates pull requests** (`list_repositories`, `get_repository`, `list_branches`, `list_pull_requests`, `get_pull_request`, `get_pull_request_diff`, `create_pull_request`). Uses scopes `read:repository` / `read:pullrequest` / `write:pullrequest`. Auth via env (`BITBUCKET_ACCESS_TOKEN` Bearer, or `BITBUCKET_EMAIL`+`BITBUCKET_API_TOKEN` Basic). **PR creation is OFF unless `BITBUCKET_WRITE_ENABLED=true`**; `create_pull_request` supports `dryRun`. Registered as `bitbucket-mcp` in `~/.claude.json`.
 
 ## Commands
@@ -103,7 +103,7 @@ npm run generate:check   # fails on drift; runs inside verify:all
 ```
 
 `mcp:doctor` reports a stale generated file per server as a warning. Env vars are declared once,
-in `packages/manifest/src/envSpecs/<server>.ts` — **104** across the four servers (41/23/29/11).
+in `packages/manifest/src/envSpecs/<server>.ts` — **106** across the four servers (41/23/31/11).
 
 ## Architecture (codebase-index-mcp)
 

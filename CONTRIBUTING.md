@@ -180,10 +180,11 @@ Read the diff for these, in this order:
 
 ## Filing a defect
 
-Two registries, both checked into the repo:
+Three registries, all checked into the repo:
 
 - `codebase-index-mcp/docs/mcp-codebase-index-issue-registry.md`
 - `postgres-mcp/docs/mcp-postgres-issue-registry.md`
+- `observe-mcp/docs/mcp-observe-issue-registry.md`
 
 Use a stable id (`MCP-ISSUE-NNN`). Record: scenario · tool/query attempted · expected vs actual ·
 impact · workaround · enhancement proposal. If the same pattern occurs three or more times, mark it

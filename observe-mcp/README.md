@@ -41,6 +41,8 @@ npm run build && node scripts/smoke-test.mjs
 | `OBSERVE_ALLOWED_ENVIRONMENTS` | no | — | Comma-separated allowlist. Filters at registration, so a name outside it does not exist in the server at all. Unset = no filtering. |
 | `OBSERVE_APP_NAMESPACE_PREFIXES` | no | `CRM.,SS.,SSNet.,WEC,WeCRM.,CommunicationHub.,OSB.,Bmw.,WecSocialAds.` *(code)* | Comma-separated namespace prefixes counted as first-party code when classifying a log row's sourceContext. This is what makes discover_services able to point at the owning project. |
 | `OBSERVE_FRAMEWORK_NAMESPACE_PREFIXES` | no | `Microsoft.,System.,Npgsql,MassTransit,Quartz,Hangfire,Serilog,OpenTelemetry,Rebus,Ocelot,Elsa.,Grpc.,Amazon.,AWSSDK,Azure.,Polly,StackExchange.,MediatR,FluentValidation,Refit,IdentityServer,FFmpeg.` *(code)* | Comma-separated prefixes treated as framework/library noise. Necessary because by raw volume the top log scopes are all framework plumbing, which identifies nothing. A context matching neither list is reported as `unclassified`, never dropped. |
+| `OBSERVE_APP_NAME_FIELD` | no | `applicationname` *(code)* | Log column holding the application name when the OTLP resource does not (a Serilog enricher property). Used only for LOGS — the traces stream has no such column, and naming an absent column fails the query at plan time, so trace queries always use service_name. A logs stream without this column downgrades automatically on the first query and reports identity.resolved=false. |
+| `OBSERVE_UNKNOWN_SERVICE_SENTINEL` | no | `unknown_service:dotnet` *(code)* | The service_name value that means "the emitter never set service.name" (the OTel spec default). Rows carrying it are re-attributed via OBSERVE_APP_NAME_FIELD. Set to an empty string to disable resolution entirely and go back to raw service_name. |
 | `OBSERVE_DEFAULT_SIZE` | no | `100` | — |
 | `OBSERVE_MAX_SIZE` | no | `1000` | — |
 | `OBSERVE_DEFAULT_LOOKBACK_MS` | no | `3600000` | 1 hour. |
@@ -58,7 +60,7 @@ npm run build && node scripts/smoke-test.mjs
 | `OBSERVE_EXC_MAX_VERBOSE` | no | `unlimited` *(code)* | — |
 | `NODE_TLS_REJECT_UNAUTHORIZED` | no | — | Set to 0 ONLY if the query host uses a self-signed/untrusted TLS certificate. This is a Node flag, not a server setting, and it disables certificate verification for the WHOLE process — every outbound TLS connection, not just OpenObserve. Prefer trusting the CA. |
 
-29 variables. Defaults marked *(code)* are the server's own fallback and are **not** written into your agent config — set them only to override.
+31 variables. Defaults marked *(code)* are the server's own fallback and are **not** written into your agent config — set them only to override.
 
 <!-- END GENERATED: env-table -->
 

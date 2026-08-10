@@ -111,3 +111,39 @@ test("capLog with Infinity caps keeps fields intact (verbose)", () => {
   assert.equal(capped.exception, long);
   assert.equal(capped.message, "m");
 });
+
+// --- resolved service identity -----------------------------------------------
+
+const IDENTITY = { appNameField: "applicationname", unknownServiceSentinel: "unknown_service:dotnet" };
+
+test("normalizeLog: a Serilog-path row reports the app name, not the sentinel", () => {
+  // ~19% of rows on these orgs arrive this way. Reporting `service_name` verbatim
+  // labels all of them with a value that names no application.
+  const log = normalizeLog(
+    { service_name: "unknown_service:dotnet", applicationname: "CommunicationHub.Web", body: "x" },
+    IDENTITY
+  );
+  assert.equal(log.service, "CommunicationHub.Web");
+});
+
+test("normalizeLog: an OTel-path row is untouched by resolution", () => {
+  const log = normalizeLog({ service_name: "CRM.Gateway", body: "x" }, IDENTITY);
+  assert.equal(log.service, "CRM.Gateway");
+});
+
+test("normalizeLog: without identity config the raw column is reported", () => {
+  const log = normalizeLog({ service_name: "unknown_service:dotnet", applicationname: "X" });
+  assert.equal(log.service, "unknown_service:dotnet");
+});
+
+test("normalizeLog: an unnameable row keeps the sentinel rather than going null", () => {
+  const log = normalizeLog({ service_name: "unknown_service:dotnet", body: "x" }, IDENTITY);
+  assert.equal(log.service, "unknown_service:dotnet");
+});
+
+test("normalizeLog: a non-configured spelling of the app-name field still resolves", () => {
+  // OpenObserve's flattening is not consistent about case/underscores, so the
+  // configured field is tried first and the known variants after it.
+  const log = normalizeLog({ service_name: "unknown_service:dotnet", ApplicationName: "CRM.Report.Api" }, IDENTITY);
+  assert.equal(log.service, "CRM.Report.Api");
+});

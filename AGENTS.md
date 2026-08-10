@@ -64,7 +64,7 @@ renamed. The generated tables are the single source of truth.
 |---|---|
 | `codebase-index` | [README](codebase-index-mcp/README.md) — 43-tool catalogue and MCP host configuration · [CLAUDE.md](codebase-index-mcp/CLAUDE.md) — internals, graph model, extractor rules · [decision tree](codebase-index-mcp/docs/decision-tree.md) · [examples](codebase-index-mcp/docs/examples.md) · [issue registry](codebase-index-mcp/docs/mcp-codebase-index-issue-registry.md) |
 | `postgres-mcp` | [README](postgres-mcp/README.md) · [issue registry](postgres-mcp/docs/mcp-postgres-issue-registry.md) |
-| `observe-mcp` | [README](observe-mcp/README.md) |
+| `observe-mcp` | [README](observe-mcp/README.md) · [issue registry](observe-mcp/docs/mcp-observe-issue-registry.md) |
 | `bitbucket-mcp` | [README](bitbucket-mcp/README.md) |
 
 Manual MCP host configuration — both profiles — is in

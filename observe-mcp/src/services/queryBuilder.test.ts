@@ -172,3 +172,58 @@ test("discovery builders reject an injected stream or service", () => {
   // not rejected, so a legitimate name containing a quote still works.
   assert.match(buildContextInventorySql("wecrm_dev", 10, "a'b"), /service_name = 'a''b'/);
 });
+
+// --- identity-aware builders -------------------------------------------------
+// The expression itself is `services/identity.ts`'s; what these pin down is that
+// every logs builder threads it through, and that the traces builders do NOT — a
+// traces stream has no app-name column, and naming one fails at PLAN time.
+
+const RESOLVED = "COALESCE(NULLIF(service_name, 'unknown_service:dotnet'), NULLIF(applicationname, ''), service_name)";
+
+test("buildSearchLogsSql: a service filter matches the resolved identity", () => {
+  const sql = buildSearchLogsSql("wecrm_dev", { service: "CommunicationHub.Web" }, 10, [], RESOLVED);
+  assert.match(sql, /WHERE COALESCE\(NULLIF\(service_name, 'unknown_service:dotnet'\)/);
+  assert.match(sql, /= 'CommunicationHub\.Web'/);
+});
+
+test("buildSearchLogsSql: omitting the expression keeps the raw column", () => {
+  const sql = buildSearchLogsSql("wecrm_dev", { service: "CRM.Gateway" }, 10);
+  assert.match(sql, /WHERE service_name = 'CRM\.Gateway'/);
+});
+
+test("buildServiceInventorySql: the resolved group is aliased back to service_name", () => {
+  // Without the alias the bucket key would be the whole COALESCE expression and
+  // every consumer reading `row.service_name` would silently find nothing.
+  const sql = buildServiceInventorySql("wecrm_dev", 50, RESOLVED, "SUM(1) AS enricher_rows");
+  assert.match(sql, /AS service_name, COUNT\(\*\) AS log_count/);
+  assert.match(sql, /SUM\(1\) AS enricher_rows, COUNT\(DISTINCT/);
+  assert.ok(sql.includes(`GROUP BY ${RESOLVED}`), sql);
+});
+
+test("buildServiceInventorySql: the raw column is not self-aliased", () => {
+  const sql = buildServiceInventorySql("wecrm_dev", 50);
+  assert.match(sql, /^SELECT service_name, COUNT/);
+  assert.equal(/service_name AS service_name/.test(sql), false);
+});
+
+test("buildLogStatsSql: an expression group is aliased, a bare column is not", () => {
+  const resolved = buildLogStatsSql("wecrm_dev", RESOLVED, 100, "service_name");
+  assert.match(resolved, /\) AS service_name, COUNT\(\*\) AS count/);
+  assert.ok(resolved.includes(`GROUP BY ${RESOLVED}`), resolved);
+
+  const raw = buildLogStatsSql("wecrm_dev", "service_name", 100, "service_name");
+  assert.match(raw, /^SELECT service_name, COUNT\(\*\) AS count/);
+});
+
+test("buildServiceContextMatrixSql / buildContextInventorySql accept the resolved expression", () => {
+  assert.ok(buildServiceContextMatrixSql("wecrm_dev", 100, RESOLVED).includes(`GROUP BY ${RESOLVED},`));
+  assert.match(buildContextInventorySql("wecrm_dev", 100, "CRM.Gateway", RESOLVED), /AND COALESCE\(NULLIF\(service_name/);
+});
+
+test("the traces builders never reference the app-name column", () => {
+  // Load-bearing: DataFusion rejects an unknown column while PLANNING, so naming
+  // `applicationname` against a traces stream fails the whole request rather than
+  // matching nothing. Verified live: "Schema error: No field named applicationname".
+  assert.equal(/applicationname/.test(buildTraceServiceInventorySql("wecrm_dev", 50)), false);
+  assert.equal(/applicationname/.test(buildTraceSpansSql("wecrm_dev", "abc123def456", 10)), false);
+});

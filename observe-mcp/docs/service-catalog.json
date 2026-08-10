@@ -1,751 +1,919 @@
 {
-  "capturedAt": "2026-08-10T06:04:22.872Z",
+  "capturedAt": "2026-08-10T10:34:11.095Z",
   "environments": {
     "ssdev_au": {
-      "logServiceCount": 34,
+      "identityResolved": true,
+      "logServiceCount": 44,
       "logStream": "wecrm_easyserv_dev",
       "services": [
         {
-          "errorCount": 43,
+          "errorCount": 157,
+          "identitySource": "mixed",
           "lanes": [
             "logs",
             "traces"
           ],
-          "lastSeen": "2026-08-10T06:04:07.013Z",
-          "logCount": 2141578,
+          "lastSeen": "2026-08-10T10:33:55.398Z",
+          "logCount": 2722730,
           "name": "SS.Identity.Api",
-          "warnCount": 421
+          "warnCount": 9212
         },
         {
-          "errorCount": 1853,
+          "errorCount": 3832,
+          "identitySource": "mixed",
           "lanes": [
             "logs",
             "traces"
           ],
-          "lastSeen": "2026-08-10T06:04:07.716Z",
-          "logCount": 2066869,
+          "lastSeen": "2026-08-10T10:33:55.398Z",
+          "logCount": 2722543,
           "name": "CRM.Gateway",
-          "warnCount": 8512
+          "warnCount": 24720
         },
         {
-          "errorCount": 11492,
-          "lanes": [
-            "logs"
-          ],
-          "lastSeen": "2026-08-10T06:04:06.083Z",
-          "logCount": 1710588,
-          "name": "unknown_service:dotnet",
-          "warnCount": 89205
-        },
-        {
-          "errorCount": 584,
+          "errorCount": 1198,
+          "identitySource": "mixed",
           "lanes": [
             "logs",
             "traces"
           ],
-          "lastSeen": "2026-08-10T06:04:09.193Z",
-          "logCount": 1226920,
+          "lastSeen": "2026-08-10T10:33:50.765Z",
+          "logCount": 1290795,
           "name": "SS.Workflow.WorkerService.Touchpoint",
-          "warnCount": 6391
+          "warnCount": 13595
         },
         {
-          "errorCount": 60,
+          "errorCount": 6976,
+          "identitySource": "mixed",
           "lanes": [
             "logs",
             "traces"
           ],
-          "lastSeen": "2026-08-10T06:04:08.300Z",
-          "logCount": 1117512,
+          "lastSeen": "2026-08-10T10:33:50.451Z",
+          "logCount": 1220762,
+          "name": "CRM.Marketing.WorkerService",
+          "warnCount": 10507
+        },
+        {
+          "errorCount": 197,
+          "identitySource": "mixed",
+          "lanes": [
+            "logs",
+            "traces"
+          ],
+          "lastSeen": "2026-08-10T10:33:51.535Z",
+          "logCount": 1209949,
           "name": "CRM.Marketing.Api",
-          "warnCount": 1555
+          "warnCount": 5319
         },
         {
-          "errorCount": 1,
+          "errorCount": 4,
+          "identitySource": "mixed",
           "lanes": [
             "logs",
             "traces"
           ],
-          "lastSeen": "2026-08-10T06:04:07.570Z",
-          "logCount": 1092245,
+          "lastSeen": "2026-08-10T10:33:51.864Z",
+          "logCount": 1148414,
           "name": "CRM.workflow.invoker",
-          "warnCount": 140
+          "warnCount": 202
+        },
+        {
+          "errorCount": 167,
+          "identitySource": "mixed",
+          "lanes": [
+            "logs",
+            "traces"
+          ],
+          "lastSeen": "2026-08-10T10:33:52.429Z",
+          "logCount": 1096313,
+          "name": "CRM.Customer.Api",
+          "warnCount": 5868
+        },
+        {
+          "errorCount": 45,
+          "identitySource": "mixed",
+          "lanes": [
+            "logs",
+            "traces"
+          ],
+          "lastSeen": "2026-08-10T10:33:51.283Z",
+          "logCount": 1014649,
+          "name": "CRM.SMS",
+          "warnCount": 318
+        },
+        {
+          "errorCount": 470,
+          "identitySource": "mixed",
+          "lanes": [
+            "logs",
+            "traces"
+          ],
+          "lastSeen": "2026-08-10T10:33:53.723Z",
+          "logCount": 836609,
+          "name": "CRM.Report.Api",
+          "warnCount": 6148
+        },
+        {
+          "errorCount": 0,
+          "identitySource": "mixed",
+          "lanes": [
+            "logs",
+            "traces"
+          ],
+          "lastSeen": "2026-08-10T10:33:54.861Z",
+          "logCount": 828722,
+          "name": "CRM.Upload.Api",
+          "warnCount": 76
+        },
+        {
+          "errorCount": 170,
+          "identitySource": "mixed",
+          "lanes": [
+            "logs",
+            "traces"
+          ],
+          "lastSeen": "2026-08-10T10:33:50.643Z",
+          "logCount": 784556,
+          "name": "CRM.Customer.WorkerService",
+          "warnCount": 15834
+        },
+        {
+          "errorCount": 6,
+          "identitySource": "mixed",
+          "lanes": [
+            "logs",
+            "traces"
+          ],
+          "lastSeen": "2026-08-10T10:33:51.158Z",
+          "logCount": 773823,
+          "name": "CRM.CRC.Api",
+          "warnCount": 885
+        },
+        {
+          "errorCount": 112,
+          "identitySource": "mixed",
+          "lanes": [
+            "logs",
+            "traces"
+          ],
+          "lastSeen": "2026-08-10T10:33:52.151Z",
+          "logCount": 737892,
+          "name": "CRM.CRC.WorkerService",
+          "warnCount": 832
         },
         {
           "errorCount": 2,
+          "identitySource": "mixed",
           "lanes": [
             "logs",
             "traces"
           ],
-          "lastSeen": "2026-08-10T06:04:09.302Z",
-          "logCount": 999758,
-          "name": "CRM.Customer.Api",
-          "warnCount": 2200
-        },
-        {
-          "errorCount": 3472,
-          "lanes": [
-            "logs",
-            "traces"
-          ],
-          "lastSeen": "2026-08-10T06:04:07.160Z",
-          "logCount": 994156,
-          "name": "CRM.Marketing.WorkerService",
-          "warnCount": 1535
-        },
-        {
-          "errorCount": 0,
-          "lanes": [
-            "logs",
-            "traces"
-          ],
-          "lastSeen": "2026-08-10T06:04:08.773Z",
-          "logCount": 977894,
-          "name": "CRM.SMS",
-          "warnCount": 164
-        },
-        {
-          "errorCount": 89,
-          "lanes": [
-            "logs",
-            "traces"
-          ],
-          "lastSeen": "2026-08-10T06:04:07.600Z",
-          "logCount": 811165,
-          "name": "CRM.Report.Api",
-          "warnCount": 1508
-        },
-        {
-          "errorCount": 0,
-          "lanes": [
-            "logs",
-            "traces"
-          ],
-          "lastSeen": "2026-08-10T06:04:06.040Z",
-          "logCount": 780669,
-          "name": "CRM.Upload.Api",
-          "warnCount": 50
-        },
-        {
-          "errorCount": 3,
-          "lanes": [
-            "logs",
-            "traces"
-          ],
-          "lastSeen": "2026-08-10T06:04:08.087Z",
-          "logCount": 767883,
-          "name": "CRM.CRC.Api",
-          "warnCount": 297
-        },
-        {
-          "errorCount": 82,
-          "lanes": [
-            "logs",
-            "traces"
-          ],
-          "lastSeen": "2026-08-10T06:04:06.387Z",
-          "logCount": 752875,
-          "name": "CRM.Customer.WorkerService",
-          "warnCount": 2467
-        },
-        {
-          "errorCount": 56,
-          "lanes": [
-            "logs",
-            "traces"
-          ],
-          "lastSeen": "2026-08-10T06:04:07.060Z",
-          "logCount": 730067,
-          "name": "CRM.CRC.WorkerService",
-          "warnCount": 264
-        },
-        {
-          "errorCount": 1,
-          "lanes": [
-            "logs",
-            "traces"
-          ],
-          "lastSeen": "2026-08-10T06:04:05.859Z",
-          "logCount": 726620,
+          "lastSeen": "2026-08-10T10:33:55.701Z",
+          "logCount": 726969,
           "name": "OSB.Integration.Worker",
           "warnCount": 25
         },
         {
-          "errorCount": 275,
+          "errorCount": 271,
+          "identitySource": "resource",
           "lanes": [
             "logs"
           ],
-          "lastSeen": "2026-08-10T06:04:10.896Z",
-          "logCount": 700022,
+          "lastSeen": "2026-08-10T10:33:51.660Z",
+          "logCount": 703655,
           "name": "wecsocialads-api",
-          "warnCount": 18155
+          "warnCount": 18159
         },
         {
-          "errorCount": 18,
+          "errorCount": 36,
+          "identitySource": "mixed",
           "lanes": [
             "logs",
             "traces"
           ],
-          "lastSeen": "2026-08-10T06:04:07.451Z",
-          "logCount": 575799,
+          "lastSeen": "2026-08-10T10:33:53.105Z",
+          "logCount": 645170,
           "name": "CRM.Core.Api",
-          "warnCount": 2653
+          "warnCount": 5841
         },
         {
-          "errorCount": 0,
+          "errorCount": 33,
+          "identitySource": "mixed",
           "lanes": [
             "logs",
             "traces"
           ],
-          "lastSeen": "2026-08-10T06:04:07.934Z",
-          "logCount": 356079,
+          "lastSeen": "2026-08-10T10:33:51.456Z",
+          "logCount": 366886,
           "name": "CRM.Task.Api",
-          "warnCount": 491
+          "warnCount": 1307
         },
         {
           "errorCount": 0,
+          "identitySource": "mixed",
           "lanes": [
             "logs",
             "traces"
           ],
-          "lastSeen": "2026-08-10T06:04:06.179Z",
-          "logCount": 323607,
+          "lastSeen": "2026-08-10T10:33:46.905Z",
+          "logCount": 324103,
           "name": "CRM.InboundEmail",
-          "warnCount": 34
+          "warnCount": 45
         },
         {
           "errorCount": 0,
+          "identitySource": "resource",
           "lanes": [
             "logs"
           ],
-          "lastSeen": "2026-08-10T06:04:06.473Z",
+          "lastSeen": "2026-08-10T10:33:44.484Z",
           "logCount": 323394,
           "name": "CRM.DES",
           "warnCount": 26
         },
         {
-          "errorCount": 30,
+          "errorCount": 4,
+          "identitySource": "mixed",
           "lanes": [
             "logs",
             "traces"
           ],
-          "lastSeen": "2026-08-10T06:00:00.010Z",
-          "logCount": 60156,
+          "lastSeen": "2026-08-10T10:33:00.846Z",
+          "logCount": 191052,
+          "name": "CRM.CDS",
+          "warnCount": 4675
+        },
+        {
+          "errorCount": 88,
+          "identitySource": "mixed",
+          "lanes": [
+            "logs",
+            "traces"
+          ],
+          "lastSeen": "2026-08-10T10:33:54.509Z",
+          "logCount": 78686,
           "name": "CRM.Lead.Api",
-          "warnCount": 1466
+          "warnCount": 3730
+        },
+        {
+          "errorCount": 260,
+          "identitySource": "mixed",
+          "lanes": [
+            "logs",
+            "traces"
+          ],
+          "lastSeen": "2026-08-10T10:21:19.416Z",
+          "logCount": 64188,
+          "name": "CRM.Template.Render.Api",
+          "warnCount": 87
+        },
+        {
+          "errorCount": 961,
+          "identitySource": "enricher",
+          "lanes": [
+            "logs",
+            "traces"
+          ],
+          "lastSeen": "2026-08-10T10:33:38.983Z",
+          "logCount": 51084,
+          "name": "CRM.NotificationHub.Api",
+          "warnCount": 3267
+        },
+        {
+          "errorCount": 33,
+          "identitySource": "enricher",
+          "lanes": [
+            "logs",
+            "traces"
+          ],
+          "lastSeen": "2026-08-10T10:32:46.771Z",
+          "logCount": 41031,
+          "name": "Bmw.Teleservices.V3.Worker",
+          "warnCount": 28
+        },
+        {
+          "errorCount": 1277,
+          "identitySource": "mixed",
+          "lanes": [
+            "logs",
+            "traces"
+          ],
+          "lastSeen": "2026-08-10T10:33:52.371Z",
+          "logCount": 39340,
+          "name": "CommunicationHub.Web",
+          "warnCount": 16883
         },
         {
           "errorCount": 0,
+          "identitySource": "resource",
           "lanes": [
             "logs"
           ],
-          "lastSeen": "2026-08-10T06:00:40.500Z",
-          "logCount": 32033,
+          "lastSeen": "2026-08-10T10:00:19.123Z",
+          "logCount": 32175,
           "name": "CRM.Marketing.AutomationTelemetryCollector",
           "warnCount": 0
         },
         {
-          "errorCount": 446,
-          "lanes": [
-            "logs",
-            "traces"
-          ],
-          "lastSeen": "2026-08-10T06:01:16.884Z",
-          "logCount": 7213,
-          "name": "whatsapp-api",
-          "warnCount": 6228
-        },
-        {
-          "errorCount": 0,
-          "lanes": [
-            "logs",
-            "traces"
-          ],
-          "lastSeen": "2026-08-10T05:02:26.568Z",
-          "logCount": 4368,
-          "name": "SS.Workflow.WorkerService.Campaign2",
-          "warnCount": 125
-        },
-        {
-          "errorCount": 88,
-          "lanes": [
-            "logs",
-            "traces"
-          ],
-          "lastSeen": "2026-08-10T05:02:26.303Z",
-          "logCount": 3901,
-          "name": "CRM.Template.Render.Api",
-          "warnCount": 54
-        },
-        {
-          "errorCount": 31,
-          "lanes": [
-            "logs",
-            "traces"
-          ],
-          "lastSeen": "2026-08-10T05:32:05.550Z",
-          "logCount": 3555,
-          "name": "CRM.Email",
-          "warnCount": 56
-        },
-        {
-          "errorCount": 0,
-          "lanes": [
-            "logs",
-            "traces"
-          ],
-          "lastSeen": "2026-08-10T06:00:00.136Z",
-          "logCount": 3534,
-          "name": "CRM.CDS",
-          "warnCount": 2351
-        },
-        {
-          "errorCount": 0,
+          "errorCount": 112,
+          "identitySource": "mixed",
           "lanes": [
             "logs",
             "traces"
           ],
           "lastSeen": "2026-08-09T21:04:52.766Z",
-          "logCount": 3171,
+          "logCount": 23964,
           "name": "TenantAnalystJob",
-          "warnCount": 623
+          "warnCount": 1246
         },
         {
-          "errorCount": 2351,
+          "errorCount": 78,
+          "identitySource": "mixed",
+          "lanes": [
+            "logs",
+            "traces"
+          ],
+          "lastSeen": "2026-08-10T10:33:01.517Z",
+          "logCount": 21108,
+          "name": "CRM.Email",
+          "warnCount": 152
+        },
+        {
+          "errorCount": 0,
+          "identitySource": "mixed",
+          "lanes": [
+            "logs",
+            "traces"
+          ],
+          "lastSeen": "2026-08-10T10:27:22.291Z",
+          "logCount": 12607,
+          "name": "SS.Workflow.WorkerService.Campaign2",
+          "warnCount": 188
+        },
+        {
+          "errorCount": 28,
+          "identitySource": "enricher",
+          "lanes": [
+            "logs",
+            "traces"
+          ],
+          "lastSeen": "2026-08-10T10:32:44.537Z",
+          "logCount": 7441,
+          "name": "Bmw.Teleservices.V3.Api",
+          "warnCount": 41
+        },
+        {
+          "errorCount": 426,
+          "identitySource": "resource",
+          "lanes": [
+            "logs",
+            "traces"
+          ],
+          "lastSeen": "2026-08-10T10:31:17.405Z",
+          "logCount": 7192,
+          "name": "whatsapp-api",
+          "warnCount": 6228
+        },
+        {
+          "errorCount": 4703,
+          "identitySource": "mixed",
           "lanes": [
             "logs"
           ],
-          "lastSeen": "2026-08-10T06:03:39.730Z",
-          "logCount": 2351,
+          "lastSeen": "2026-08-10T10:33:08.836Z",
+          "logCount": 4703,
           "name": "CRM.Review.GetReviewJob",
           "warnCount": 0
         },
         {
-          "errorCount": 29,
-          "lanes": [
-            "logs",
-            "traces"
-          ],
-          "lastSeen": "2026-08-10T04:20:27.402Z",
-          "logCount": 901,
-          "name": "CRM.EmailReply",
-          "warnCount": 33
-        },
-        {
           "errorCount": 0,
+          "identitySource": "mixed",
           "lanes": [
             "logs",
             "traces"
           ],
-          "lastSeen": "2026-08-10T04:40:28.374Z",
-          "logCount": 602,
+          "lastSeen": "2026-08-10T10:30:54.055Z",
+          "logCount": 3787,
           "name": "CRM.Vehicle.Api",
-          "warnCount": 93
+          "warnCount": 183
         },
         {
-          "errorCount": 1,
+          "errorCount": 72,
+          "identitySource": "mixed",
           "lanes": [
             "logs",
             "traces"
           ],
-          "lastSeen": "2026-08-10T05:12:55.836Z",
-          "logCount": 378,
-          "name": "CRM.Review.Api",
-          "warnCount": 37
+          "lastSeen": "2026-08-10T10:24:12.453Z",
+          "logCount": 1919,
+          "name": "CRM.EmailReply",
+          "warnCount": 44
         },
         {
-          "errorCount": 1,
+          "errorCount": 2,
+          "identitySource": "enricher",
           "lanes": [
             "logs"
           ],
-          "lastSeen": "2026-08-09T10:00:23.131Z",
-          "logCount": 251,
+          "lastSeen": "2026-08-10T10:30:26.898Z",
+          "logCount": 1027,
+          "name": "IdentityActivityJob",
+          "warnCount": 109
+        },
+        {
+          "errorCount": 2,
+          "identitySource": "mixed",
+          "lanes": [
+            "logs",
+            "traces"
+          ],
+          "lastSeen": "2026-08-10T10:22:53.899Z",
+          "logCount": 455,
+          "name": "CRM.Review.Api",
+          "warnCount": 57
+        },
+        {
+          "errorCount": 1,
+          "identitySource": "resource",
+          "lanes": [
+            "logs"
+          ],
+          "lastSeen": "2026-08-10T10:00:13.680Z",
+          "logCount": 274,
           "name": "wec.ape-logo-sync",
           "warnCount": 0
         },
         {
           "errorCount": 0,
+          "identitySource": "enricher",
           "lanes": [
             "logs",
             "traces"
           ],
-          "lastSeen": "2026-08-09T14:02:19.930Z",
-          "logCount": 35,
+          "lastSeen": "2026-08-10T10:27:35.043Z",
+          "logCount": 270,
+          "name": "Bmw.Teleservices.V3.FeedbackService",
+          "warnCount": 13
+        },
+        {
+          "errorCount": 0,
+          "identitySource": "enricher",
+          "lanes": [
+            "logs"
+          ],
+          "lastSeen": "2026-08-09T17:00:28.444Z",
+          "logCount": 217,
+          "name": "Bmw.Teleservices.V3.DailyNormalizeJob",
+          "warnCount": 7
+        },
+        {
+          "errorCount": 20,
+          "identitySource": "enricher",
+          "lanes": [
+            "logs",
+            "traces"
+          ],
+          "lastSeen": "2026-08-10T10:25:00.317Z",
+          "logCount": 179,
+          "name": "CRM.Zns",
+          "warnCount": 49
+        },
+        {
+          "errorCount": 0,
+          "identitySource": "enricher",
+          "lanes": [
+            "logs",
+            "traces"
+          ],
+          "lastSeen": "2026-08-10T10:24:34.293Z",
+          "logCount": 141,
+          "name": "CRM.Whatsapp",
+          "warnCount": 36
+        },
+        {
+          "errorCount": 0,
+          "identitySource": "enricher",
+          "lanes": [
+            "logs",
+            "traces"
+          ],
+          "lastSeen": "2026-08-10T10:20:12.150Z",
+          "logCount": 78,
+          "name": "CRM.EasyServ.DataSync",
+          "warnCount": 0
+        },
+        {
+          "errorCount": 0,
+          "identitySource": "resource",
+          "lanes": [
+            "logs",
+            "traces"
+          ],
+          "lastSeen": "2026-08-10T10:32:59.235Z",
+          "logCount": 38,
           "name": "CRM.Notification",
           "warnCount": 10
+        },
+        {
+          "errorCount": 0,
+          "identitySource": "enricher",
+          "lanes": [
+            "logs"
+          ],
+          "lastSeen": "2026-08-09T15:00:28.424Z",
+          "logCount": 7,
+          "name": "TaskReminderJob",
+          "warnCount": 0
         }
       ],
-      "traceOnlyServiceCount": 8,
-      "traceOnlyServices": [
-        {
-          "name": "CommunicationHub.Web",
-          "spanCount": 9603058
-        },
-        {
-          "name": "CRM.EasyServ.DataSync",
-          "spanCount": 201791
-        },
-        {
-          "name": "CRM.NotificationHub.Api",
-          "spanCount": 24112
-        },
-        {
-          "name": "Bmw.Teleservices.V3.Api",
-          "spanCount": 1378
-        },
-        {
-          "name": "CRM.Zns",
-          "spanCount": 232
-        },
-        {
-          "name": "CRM.Whatsapp",
-          "spanCount": 179
-        },
-        {
-          "name": "Bmw.Teleservices.V3.Worker",
-          "spanCount": 49
-        },
-        {
-          "name": "Bmw.Teleservices.V3.FeedbackService",
-          "spanCount": 26
-        }
-      ],
+      "traceOnlyServiceCount": 0,
+      "traceOnlyServices": [],
       "traceStream": "wecrm_easyserv_dev",
       "window": "7d"
     },
     "wecrm_au_prod_al": {
-      "logServiceCount": 29,
+      "identityResolved": true,
+      "logServiceCount": 31,
       "logStream": "wecrm_al_prod",
       "services": [
         {
-          "errorCount": 4001,
-          "lanes": [
-            "logs"
-          ],
-          "lastSeen": "2026-08-10T06:04:16.807Z",
-          "logCount": 7404199,
-          "name": "unknown_service:dotnet",
-          "warnCount": 781583
-        },
-        {
-          "errorCount": 0,
-          "lanes": [
-            "logs",
-            "traces"
-          ],
-          "lastSeen": "2026-08-10T06:04:16.528Z",
-          "logCount": 4069585,
-          "name": "SS.Identity.Api",
-          "warnCount": 319
-        },
-        {
-          "errorCount": 217,
-          "lanes": [
-            "logs",
-            "traces"
-          ],
-          "lastSeen": "2026-08-10T06:04:12.962Z",
-          "logCount": 3367731,
-          "name": "CRM.Gateway",
-          "warnCount": 52852
-        },
-        {
           "errorCount": 3,
+          "identitySource": "mixed",
           "lanes": [
             "logs",
             "traces"
           ],
-          "lastSeen": "2026-08-10T06:04:14.248Z",
-          "logCount": 2030870,
+          "lastSeen": "2026-08-10T10:34:01.280Z",
+          "logCount": 4721850,
+          "name": "SS.Identity.Api",
+          "warnCount": 2179
+        },
+        {
+          "errorCount": 444,
+          "identitySource": "mixed",
+          "lanes": [
+            "logs",
+            "traces"
+          ],
+          "lastSeen": "2026-08-10T10:34:01.909Z",
+          "logCount": 4281339,
+          "name": "CRM.Gateway",
+          "warnCount": 66138
+        },
+        {
+          "errorCount": 17,
+          "identitySource": "mixed",
+          "lanes": [
+            "logs",
+            "traces"
+          ],
+          "lastSeen": "2026-08-10T10:33:57.587Z",
+          "logCount": 2682844,
           "name": "CRM.Customer.Api",
-          "warnCount": 100
+          "warnCount": 4563
         },
         {
-          "errorCount": 44,
+          "errorCount": 88,
+          "identitySource": "mixed",
           "lanes": [
             "logs",
             "traces"
           ],
-          "lastSeen": "2026-08-10T06:04:12.094Z",
-          "logCount": 1639175,
+          "lastSeen": "2026-08-10T10:33:53.930Z",
+          "logCount": 2572227,
           "name": "SS.Workflow.WorkerService.Touchpoint",
-          "warnCount": 1154
+          "warnCount": 2341
         },
         {
-          "errorCount": 2,
+          "errorCount": 143,
+          "identitySource": "mixed",
           "lanes": [
             "logs",
             "traces"
           ],
-          "lastSeen": "2026-08-10T06:04:13.439Z",
-          "logCount": 1386046,
-          "name": "CRM.CRC.Api",
-          "warnCount": 122
-        },
-        {
-          "errorCount": 48,
-          "lanes": [
-            "logs",
-            "traces"
-          ],
-          "lastSeen": "2026-08-10T06:04:14.767Z",
-          "logCount": 1344012,
+          "lastSeen": "2026-08-10T10:33:58.791Z",
+          "logCount": 1999255,
           "name": "CRM.Marketing.WorkerService",
-          "warnCount": 60
+          "warnCount": 448
         },
         {
-          "errorCount": 1,
+          "errorCount": 8,
+          "identitySource": "mixed",
           "lanes": [
             "logs",
             "traces"
           ],
-          "lastSeen": "2026-08-10T06:04:15.121Z",
-          "logCount": 1294246,
+          "lastSeen": "2026-08-10T10:33:57.005Z",
+          "logCount": 1713505,
+          "name": "CRM.CRC.Api",
+          "warnCount": 1437
+        },
+        {
+          "errorCount": 15,
+          "identitySource": "mixed",
+          "lanes": [
+            "logs",
+            "traces"
+          ],
+          "lastSeen": "2026-08-10T10:33:56.088Z",
+          "logCount": 1655022,
           "name": "CRM.Marketing.Api",
-          "warnCount": 101
+          "warnCount": 840
         },
         {
-          "errorCount": 61,
+          "errorCount": 122,
+          "identitySource": "mixed",
           "lanes": [
             "logs",
             "traces"
           ],
-          "lastSeen": "2026-08-10T06:04:11.092Z",
-          "logCount": 1089375,
-          "name": "CRM.workflow.invoker",
-          "warnCount": 15
-        },
-        {
-          "errorCount": 24,
-          "lanes": [
-            "logs",
-            "traces"
-          ],
-          "lastSeen": "2026-08-10T06:04:11.190Z",
-          "logCount": 1062085,
-          "name": "CRM.Report.Api",
-          "warnCount": 7661
-        },
-        {
-          "errorCount": 2,
-          "lanes": [
-            "logs",
-            "traces"
-          ],
-          "lastSeen": "2026-08-10T06:04:11.197Z",
-          "logCount": 1057151,
-          "name": "CRM.Task.Api",
-          "warnCount": 6026
-        },
-        {
-          "errorCount": 6,
-          "lanes": [
-            "logs",
-            "traces"
-          ],
-          "lastSeen": "2026-08-10T06:04:06.918Z",
-          "logCount": 1044251,
-          "name": "CRM.SMS",
-          "warnCount": 6
-        },
-        {
-          "errorCount": 2,
-          "lanes": [
-            "logs",
-            "traces"
-          ],
-          "lastSeen": "2026-08-10T06:04:14.722Z",
-          "logCount": 802461,
-          "name": "CRM.CRC.WorkerService",
-          "warnCount": 3288
-        },
-        {
-          "errorCount": 60,
-          "lanes": [
-            "logs",
-            "traces"
-          ],
-          "lastSeen": "2026-08-10T06:04:13.694Z",
-          "logCount": 787827,
+          "lastSeen": "2026-08-10T10:33:56.231Z",
+          "logCount": 1531568,
           "name": "CRM.Customer.WorkerService",
-          "warnCount": 91
+          "warnCount": 657068
         },
         {
-          "errorCount": 14,
+          "errorCount": 31,
+          "identitySource": "mixed",
           "lanes": [
             "logs",
             "traces"
           ],
-          "lastSeen": "2026-08-10T06:04:09.007Z",
-          "logCount": 785901,
+          "lastSeen": "2026-08-10T10:33:58.186Z",
+          "logCount": 1237116,
+          "name": "CRM.Task.Api",
+          "warnCount": 12269
+        },
+        {
+          "errorCount": 353,
+          "identitySource": "mixed",
+          "lanes": [
+            "logs",
+            "traces"
+          ],
+          "lastSeen": "2026-08-10T10:33:53.230Z",
+          "logCount": 1232210,
+          "name": "CRM.Report.Api",
+          "warnCount": 21513
+        },
+        {
+          "errorCount": 31,
+          "identitySource": "mixed",
+          "lanes": [
+            "logs",
+            "traces"
+          ],
+          "lastSeen": "2026-08-10T10:33:57.828Z",
+          "logCount": 1197895,
           "name": "CRM.Email",
-          "warnCount": 2
+          "warnCount": 24
         },
         {
-          "errorCount": 2,
+          "errorCount": 1202,
+          "identitySource": "mixed",
           "lanes": [
             "logs",
             "traces"
           ],
-          "lastSeen": "2026-08-10T06:04:08.883Z",
-          "logCount": 738706,
+          "lastSeen": "2026-08-10T10:33:52.619Z",
+          "logCount": 1185483,
+          "name": "CRM.SMS",
+          "warnCount": 61
+        },
+        {
+          "errorCount": 162,
+          "identitySource": "mixed",
+          "lanes": [
+            "logs",
+            "traces"
+          ],
+          "lastSeen": "2026-08-10T10:33:59.438Z",
+          "logCount": 1103538,
+          "name": "CRM.workflow.invoker",
+          "warnCount": 54
+        },
+        {
+          "errorCount": 5,
+          "identitySource": "mixed",
+          "lanes": [
+            "logs",
+            "traces"
+          ],
+          "lastSeen": "2026-08-10T10:33:51.721Z",
+          "logCount": 942289,
           "name": "CRM.Core.Api",
-          "warnCount": 91
+          "warnCount": 493
         },
         {
-          "errorCount": 0,
+          "errorCount": 8,
+          "identitySource": "mixed",
           "lanes": [
             "logs",
             "traces"
           ],
-          "lastSeen": "2026-08-10T06:04:11.029Z",
-          "logCount": 736620,
-          "name": "CRM.Upload.Api",
-          "warnCount": 2
-        },
-        {
-          "errorCount": 0,
-          "lanes": [
-            "logs",
-            "traces"
-          ],
-          "lastSeen": "2026-08-10T06:04:08.651Z",
-          "logCount": 728325,
-          "name": "CRM.Lead.Api",
-          "warnCount": 52
-        },
-        {
-          "errorCount": 0,
-          "lanes": [
-            "logs",
-            "traces"
-          ],
-          "lastSeen": "2026-08-10T06:04:11.192Z",
-          "logCount": 725634,
-          "name": "OSB.Integration.Worker",
-          "warnCount": 1
+          "lastSeen": "2026-08-10T10:33:55.875Z",
+          "logCount": 881435,
+          "name": "CRM.CRC.WorkerService",
+          "warnCount": 6868
         },
         {
           "errorCount": 2,
+          "identitySource": "mixed",
+          "lanes": [
+            "logs",
+            "traces"
+          ],
+          "lastSeen": "2026-08-10T10:33:58.737Z",
+          "logCount": 742779,
+          "name": "CRM.Upload.Api",
+          "warnCount": 12
+        },
+        {
+          "errorCount": 0,
+          "identitySource": "mixed",
+          "lanes": [
+            "logs",
+            "traces"
+          ],
+          "lastSeen": "2026-08-10T10:33:56.537Z",
+          "logCount": 730137,
+          "name": "CRM.Lead.Api",
+          "warnCount": 206
+        },
+        {
+          "errorCount": 0,
+          "identitySource": "mixed",
+          "lanes": [
+            "logs",
+            "traces"
+          ],
+          "lastSeen": "2026-08-10T10:33:59.376Z",
+          "logCount": 725746,
+          "name": "OSB.Integration.Worker",
+          "warnCount": 2
+        },
+        {
+          "errorCount": 104,
+          "identitySource": "mixed",
+          "lanes": [
+            "logs",
+            "traces"
+          ],
+          "lastSeen": "2026-08-10T09:50:13.989Z",
+          "logCount": 703026,
+          "name": "CRM.Template.Render.Api",
+          "warnCount": 74643
+        },
+        {
+          "errorCount": 2,
+          "identitySource": "resource",
           "lanes": [
             "logs"
           ],
-          "lastSeen": "2026-08-10T06:00:03.149Z",
-          "logCount": 462544,
+          "lastSeen": "2026-08-10T10:00:03.239Z",
+          "logCount": 462495,
           "name": "CRM.Marketing.AutomationTelemetryCollector",
           "warnCount": 0
         },
         {
-          "errorCount": 52,
-          "lanes": [
-            "logs",
-            "traces"
-          ],
-          "lastSeen": "2026-08-10T06:00:43.034Z",
-          "logCount": 100176,
-          "name": "CRM.Template.Render.Api",
-          "warnCount": 4
-        },
-        {
           "errorCount": 0,
+          "identitySource": "mixed",
           "lanes": [
             "logs",
             "traces"
           ],
-          "lastSeen": "2026-08-06T23:37:41.587Z",
-          "logCount": 19470,
+          "lastSeen": "2026-08-10T09:28:53.720Z",
+          "logCount": 158311,
           "name": "SS.Workflow.WorkerService.Campaign2",
-          "warnCount": 5
+          "warnCount": 14
         },
         {
-          "errorCount": 0,
+          "errorCount": 1831,
+          "identitySource": "enricher",
           "lanes": [
             "logs",
             "traces"
           ],
-          "lastSeen": "2026-08-10T05:55:39.455Z",
-          "logCount": 9801,
-          "name": "CRM.InboundEmail",
-          "warnCount": 1
+          "lastSeen": "2026-08-10T10:28:50.353Z",
+          "logCount": 83114,
+          "name": "CommunicationHub.Web",
+          "warnCount": 14753
         },
         {
-          "errorCount": 0,
+          "errorCount": 25,
+          "identitySource": "mixed",
           "lanes": [
             "logs",
             "traces"
           ],
-          "lastSeen": "2026-08-10T06:00:00.212Z",
-          "logCount": 4815,
+          "lastSeen": "2026-08-10T10:30:00.189Z",
+          "logCount": 56699,
           "name": "CRM.CDS",
-          "warnCount": 90
+          "warnCount": 358
         },
         {
-          "errorCount": 4,
+          "errorCount": 0,
+          "identitySource": "mixed",
           "lanes": [
             "logs",
             "traces"
           ],
-          "lastSeen": "2026-08-10T03:52:05.582Z",
-          "logCount": 1575,
+          "lastSeen": "2026-08-10T09:33:02.125Z",
+          "logCount": 20126,
+          "name": "CRM.InboundEmail",
+          "warnCount": 2
+        },
+        {
+          "errorCount": 10,
+          "identitySource": "mixed",
+          "lanes": [
+            "logs",
+            "traces"
+          ],
+          "lastSeen": "2026-08-10T09:27:48.112Z",
+          "logCount": 4831,
           "name": "CRM.EmailReply",
-          "warnCount": 5
+          "warnCount": 11
         },
         {
           "errorCount": 0,
+          "identitySource": "mixed",
+          "lanes": [
+            "logs",
+            "traces"
+          ],
+          "lastSeen": "2026-08-10T09:29:04.980Z",
+          "logCount": 3851,
+          "name": "CRM.Vehicle.Api",
+          "warnCount": 36
+        },
+        {
+          "errorCount": 0,
+          "identitySource": "mixed",
           "lanes": [
             "logs",
             "traces"
           ],
           "lastSeen": "2026-08-09T20:33:34.003Z",
-          "logCount": 847,
+          "logCount": 2728,
           "name": "TenantAnalystJob",
-          "warnCount": 623
+          "warnCount": 1246
         },
         {
           "errorCount": 0,
-          "lanes": [
-            "logs",
-            "traces"
-          ],
-          "lastSeen": "2026-08-05T09:20:42.310Z",
-          "logCount": 410,
-          "name": "CRM.Review.Api",
-          "warnCount": 5
-        },
-        {
-          "errorCount": 0,
-          "lanes": [
-            "logs",
-            "traces"
-          ],
-          "lastSeen": "2026-08-04T11:03:00.032Z",
-          "logCount": 70,
-          "name": "CRM.Vehicle.Api",
-          "warnCount": 4
-        },
-        {
-          "errorCount": 0,
+          "identitySource": "enricher",
           "lanes": [
             "logs"
           ],
-          "lastSeen": "2026-08-04T10:24:50.521Z",
-          "logCount": 17,
-          "name": "CRM.DES",
-          "warnCount": 1
-        }
-      ],
-      "traceOnlyServiceCount": 1,
-      "traceOnlyServices": [
+          "lastSeen": "2026-08-10T04:00:04.623Z",
+          "logCount": 1903,
+          "name": "TaskReminderJob",
+          "warnCount": 63
+        },
         {
-          "name": "CommunicationHub.Web",
-          "spanCount": 42129473
+          "errorCount": 0,
+          "identitySource": "enricher",
+          "lanes": [
+            "logs"
+          ],
+          "lastSeen": "2026-08-10T10:30:01.286Z",
+          "logCount": 1168,
+          "name": "IdentityActivityJob",
+          "warnCount": 36
+        },
+        {
+          "errorCount": 0,
+          "identitySource": "mixed",
+          "lanes": [
+            "logs",
+            "traces"
+          ],
+          "lastSeen": "2026-08-10T09:27:49.873Z",
+          "logCount": 507,
+          "name": "CRM.Review.Api",
+          "warnCount": 16
+        },
+        {
+          "errorCount": 0,
+          "identitySource": "resource",
+          "lanes": [
+            "logs"
+          ],
+          "lastSeen": "2026-08-10T09:28:43.472Z",
+          "logCount": 34,
+          "name": "CRM.DES",
+          "warnCount": 2
         }
       ],
+      "traceOnlyServiceCount": 0,
+      "traceOnlyServices": [],
       "traceStream": "wecrm_al_prod",
       "window": "7d"
     }
   },
   "generator": "npm run catalog:refresh",
-  "note": "`recognizeBy` is derived from logs and is rewritten on every refresh. `code` is hand-verified and preserved — edit it freely.",
+  "note": "`recognizeBy` is derived from logs and is rewritten on every refresh. `code` is hand-verified and preserved — edit it freely. `identifiedBy` ranks the evidence: namespace (names the owning code) > context (names the emitting class) > framework (names only the kind of app) > serviceNameOnly. `identitySource` says how the service was NAMED: resource (the OTLP resource carried it), enricher (recovered from the application-name field because the emitter never set service.name), mixed (both paths at once — the ordinary state for a .NET app here, and the marker of a service that loses rows to any query using service_name alone). `logsUnder` and `note` are point-in-time observations, not durable facts: re-test them with `npm run catalog:verify`.",
   "services": {
     "Bmw.Teleservices.V3.Api": {
       "code": {
@@ -755,23 +923,53 @@
         "repoId": "wec.be"
       },
       "recognizeBy": {
-        "appContexts": [],
-        "borrowedContexts": [
+        "appContexts": [
           "Bmw.Teleservices.V3.Api.Services.TeleserviceTicketService"
         ],
         "environments": [
           "ssdev_au"
         ],
-        "frameworkHints": [],
+        "frameworkHints": [
+          "Microsoft",
+          "MassTransit"
+        ],
+        "identifiedBy": "namespace",
+        "identitySource": "enricher",
         "lanes": [
+          "logs",
           "traces"
         ],
-        "logsUnder": [
-          "unknown_service:dotnet"
+        "namespaceRoots": [
+          "Bmw.Teleservices"
         ],
-        "namespaceRoots": [],
-        "note": "This service names itself on spans but not on log rows: search logs under service_name \"unknown_service:dotnet\" and filter by sourceContext starting \"Bmw.Teleservices.V3.Api.\".",
         "serviceName": "Bmw.Teleservices.V3.Api",
+        "unclassifiedContexts": []
+      }
+    },
+    "Bmw.Teleservices.V3.DailyNormalizeJob": {
+      "code": {},
+      "recognizeBy": {
+        "appContexts": [
+          "Bmw.Teleservices.V3.Infrastructure.Jobs.DailyNormalizeJob",
+          "Bmw.Teleservices.V3.Infrastructure.Services.TeleserviceDailyNormalize"
+        ],
+        "environments": [
+          "ssdev_au"
+        ],
+        "frameworkHints": [
+          "Quartz",
+          "Microsoft",
+          "MassTransit"
+        ],
+        "identifiedBy": "namespace",
+        "identitySource": "enricher",
+        "lanes": [
+          "logs"
+        ],
+        "namespaceRoots": [
+          "Bmw.Teleservices"
+        ],
+        "serviceName": "Bmw.Teleservices.V3.DailyNormalizeJob",
         "unclassifiedContexts": []
       }
     },
@@ -783,22 +981,26 @@
         "repoId": "wec.be"
       },
       "recognizeBy": {
-        "appContexts": [],
-        "borrowedContexts": [
-          "Bmw.Teleservices.V3.FeedbackService.BmwTeleserviceFeedbackConsumer"
+        "appContexts": [
+          "Bmw.Teleservices.V3.FeedbackService.BmwTeleserviceFeedbackConsumer",
+          "Bmw.Teleservices.V3.Infrastructure.Services.SftpService"
         ],
         "environments": [
           "ssdev_au"
         ],
-        "frameworkHints": [],
+        "frameworkHints": [
+          "Microsoft",
+          "MassTransit"
+        ],
+        "identifiedBy": "namespace",
+        "identitySource": "enricher",
         "lanes": [
+          "logs",
           "traces"
         ],
-        "logsUnder": [
-          "unknown_service:dotnet"
+        "namespaceRoots": [
+          "Bmw.Teleservices"
         ],
-        "namespaceRoots": [],
-        "note": "This service names itself on spans but not on log rows: search logs under service_name \"unknown_service:dotnet\" and filter by sourceContext starting \"Bmw.Teleservices.V3.FeedbackService.\".",
         "serviceName": "Bmw.Teleservices.V3.FeedbackService",
         "unclassifiedContexts": []
       }
@@ -811,8 +1013,10 @@
         "repoId": "wec.be"
       },
       "recognizeBy": {
-        "appContexts": [],
-        "borrowedContexts": [
+        "appContexts": [
+          "Bmw.Teleservices.V3.Infrastructure.Services.MockBmwApiService",
+          "Bmw.Teleservices.V3.Infrastructure.Services.Normalization.AustraliaNewZealandNormalizationStrategy",
+          "Bmw.Teleservices.V3.Infrastructure.Services.SftpService",
           "Bmw.Teleservices.V3.Worker.Consumers.CompleteTeleserviceNormalizeTicketConsumer",
           "Bmw.Teleservices.V3.Worker.Consumers.NormalizeManualLeadTicketConsumer",
           "Bmw.Teleservices.V3.Worker.Consumers.PrepareFeedbackConsumer",
@@ -823,15 +1027,19 @@
         "environments": [
           "ssdev_au"
         ],
-        "frameworkHints": [],
+        "frameworkHints": [
+          "Microsoft",
+          "MassTransit"
+        ],
+        "identifiedBy": "namespace",
+        "identitySource": "enricher",
         "lanes": [
+          "logs",
           "traces"
         ],
-        "logsUnder": [
-          "unknown_service:dotnet"
+        "namespaceRoots": [
+          "Bmw.Teleservices"
         ],
-        "namespaceRoots": [],
-        "note": "This service names itself on spans but not on log rows: search logs under service_name \"unknown_service:dotnet\" and filter by sourceContext starting \"Bmw.Teleservices.V3.Worker.\".",
         "serviceName": "Bmw.Teleservices.V3.Worker",
         "unclassifiedContexts": []
       }
@@ -853,8 +1061,12 @@
         "frameworkHints": [
           "Microsoft",
           "MassTransit",
-          "AWSSDK"
+          "AWSSDK",
+          "StackExchange",
+          "Quartz"
         ],
+        "identifiedBy": "namespace",
+        "identitySource": "mixed",
         "lanes": [
           "logs",
           "traces"
@@ -875,6 +1087,7 @@
       "recognizeBy": {
         "appContexts": [
           "SSNet.CommunicationHub.Messaging.Publishers.CrmInboundPublisher",
+          "SSNet.CommunicationHub.Messaging.Publishers.ManualCallLogMessageIdResolver",
           "SSNet.QueueManagement.Base.QueuePublisher"
         ],
         "environments": [
@@ -885,8 +1098,11 @@
           "Microsoft",
           "System",
           "Quartz",
-          "MassTransit"
+          "MassTransit",
+          "Grpc"
         ],
+        "identifiedBy": "namespace",
+        "identitySource": "mixed",
         "lanes": [
           "logs",
           "traces"
@@ -895,7 +1111,6 @@
           "SSNet.QueueManagement",
           "SSNet.CommunicationHub"
         ],
-        "note": "Multiple application namespace roots emit under this service name — attribute rows by namespaceRoots, not by service alone.",
         "serviceName": "CRM.CRC.Api",
         "unclassifiedContexts": []
       }
@@ -924,8 +1139,11 @@
           "System",
           "MassTransit",
           "Quartz",
-          "Grpc"
+          "Grpc",
+          "StackExchange"
         ],
+        "identifiedBy": "namespace",
+        "identitySource": "mixed",
         "lanes": [
           "logs",
           "traces"
@@ -934,7 +1152,6 @@
           "CRM.CRC",
           "SSNet.QueueManagement"
         ],
-        "note": "Multiple application namespace roots emit under this service name — attribute rows by namespaceRoots, not by service alone.",
         "serviceName": "CRM.CRC.WorkerService",
         "unclassifiedContexts": []
       }
@@ -959,6 +1176,8 @@
           "StackExchange",
           "AWSSDK"
         ],
+        "identifiedBy": "framework",
+        "identitySource": "mixed",
         "lanes": [
           "logs",
           "traces"
@@ -1000,6 +1219,8 @@
           "Grpc",
           "StackExchange"
         ],
+        "identifiedBy": "namespace",
+        "identitySource": "mixed",
         "lanes": [
           "logs",
           "traces"
@@ -1008,7 +1229,6 @@
           "SSNet.QueueManagement",
           "CRM.Customer"
         ],
-        "note": "Multiple application namespace roots emit under this service name — attribute rows by namespaceRoots, not by service alone.",
         "serviceName": "CRM.Customer.Api",
         "unclassifiedContexts": []
       }
@@ -1030,10 +1250,13 @@
         "frameworkHints": [
           "Microsoft",
           "System",
-          "Quartz",
           "MassTransit",
-          "Grpc"
+          "Quartz",
+          "Grpc",
+          "StackExchange"
         ],
+        "identifiedBy": "namespace",
+        "identitySource": "mixed",
         "lanes": [
           "logs",
           "traces"
@@ -1061,6 +1284,8 @@
           "Microsoft",
           "Quartz"
         ],
+        "identifiedBy": "framework",
+        "identitySource": "resource",
         "lanes": [
           "logs"
         ],
@@ -1081,12 +1306,17 @@
         "environments": [
           "ssdev_au"
         ],
-        "frameworkHints": [],
+        "frameworkHints": [
+          "MassTransit"
+        ],
+        "identifiedBy": "framework",
+        "identitySource": "enricher",
         "lanes": [
+          "logs",
           "traces"
         ],
         "namespaceRoots": [],
-        "note": "Appears only in the traces lane and emits no log rows — use get_trace_spans / span attributes, not search_logs, to investigate it.",
+        "note": "Emits only framework/library log contexts — no first-party namespace appears in its logs. Identify it by service_name alone.",
         "serviceName": "CRM.EasyServ.DataSync",
         "unclassifiedContexts": []
       }
@@ -1101,6 +1331,7 @@
         "appContexts": [
           "CRM.Email.Implements.SDKAwsSESService",
           "SSNet.CommunicationHub.Messaging.Publishers.CrmNotifier",
+          "SSNet.CommunicationHub.Messaging.Publishers.DefaultMessageIdResolver",
           "SSNet.CommunicationHub.Messaging.Publishers.SentEventPublisher"
         ],
         "environments": [
@@ -1112,8 +1343,11 @@
           "System",
           "MassTransit",
           "AWSSDK",
-          "StackExchange"
+          "StackExchange",
+          "Grpc"
         ],
+        "identifiedBy": "namespace",
+        "identitySource": "mixed",
         "lanes": [
           "logs",
           "traces"
@@ -1122,7 +1356,6 @@
           "CRM.Email",
           "SSNet.CommunicationHub"
         ],
-        "note": "Multiple application namespace roots emit under this service name — attribute rows by namespaceRoots, not by service alone.",
         "serviceName": "CRM.Email",
         "unclassifiedContexts": []
       }
@@ -1143,11 +1376,14 @@
           "wecrm_au_prod_al"
         ],
         "frameworkHints": [
-          "Microsoft",
           "MassTransit",
+          "Microsoft",
           "System",
-          "AWSSDK"
+          "AWSSDK",
+          "Grpc"
         ],
+        "identifiedBy": "namespace",
+        "identitySource": "mixed",
         "lanes": [
           "logs",
           "traces"
@@ -1156,7 +1392,6 @@
           "CRM.EmailReply",
           "SSNet.CommunicationHub"
         ],
-        "note": "Multiple application namespace roots emit under this service name — attribute rows by namespaceRoots, not by service alone.",
         "serviceName": "CRM.EmailReply",
         "unclassifiedContexts": []
       }
@@ -1179,6 +1414,8 @@
           "Ocelot",
           "System"
         ],
+        "identifiedBy": "framework",
+        "identitySource": "mixed",
         "lanes": [
           "logs",
           "traces"
@@ -1210,6 +1447,8 @@
           "MassTransit",
           "AWSSDK"
         ],
+        "identifiedBy": "namespace",
+        "identitySource": "mixed",
         "lanes": [
           "logs",
           "traces"
@@ -1246,10 +1485,12 @@
         "frameworkHints": [
           "Microsoft",
           "System",
-          "Quartz",
           "MassTransit",
+          "Quartz",
           "AWSSDK"
         ],
+        "identifiedBy": "namespace",
+        "identitySource": "mixed",
         "lanes": [
           "logs",
           "traces"
@@ -1258,7 +1499,6 @@
           "CRM.Lead",
           "SSNet.QueueManagement"
         ],
-        "note": "Multiple application namespace roots emit under this service name — attribute rows by namespaceRoots, not by service alone.",
         "serviceName": "CRM.Lead.Api",
         "unclassifiedContexts": []
       }
@@ -1282,10 +1522,12 @@
           "Microsoft",
           "System",
           "MassTransit",
-          "AWSSDK",
           "Grpc",
+          "AWSSDK",
           "StackExchange"
         ],
+        "identifiedBy": "namespace",
+        "identitySource": "mixed",
         "lanes": [
           "logs",
           "traces"
@@ -1294,7 +1536,6 @@
           "SSNet.QueueManagement",
           "CRM.Marketing"
         ],
-        "note": "Multiple application namespace roots emit under this service name — attribute rows by namespaceRoots, not by service alone.",
         "serviceName": "CRM.Marketing.Api",
         "unclassifiedContexts": []
       }
@@ -1312,6 +1553,8 @@
           "wecrm_au_prod_al"
         ],
         "frameworkHints": [],
+        "identifiedBy": "namespace",
+        "identitySource": "resource",
         "lanes": [
           "logs"
         ],
@@ -1350,8 +1593,11 @@
           "System",
           "MassTransit",
           "Grpc",
-          "AWSSDK"
+          "AWSSDK",
+          "StackExchange"
         ],
+        "identifiedBy": "namespace",
+        "identitySource": "mixed",
         "lanes": [
           "logs",
           "traces"
@@ -1360,7 +1606,6 @@
           "CRM.Marketing",
           "SSNet.QueueManagement"
         ],
-        "note": "Multiple application namespace roots emit under this service name — attribute rows by namespaceRoots, not by service alone.",
         "serviceName": "CRM.Marketing.WorkerService",
         "unclassifiedContexts": []
       }
@@ -1375,6 +1620,8 @@
         "frameworkHints": [
           "MassTransit"
         ],
+        "identifiedBy": "namespace",
+        "identitySource": "resource",
         "lanes": [
           "logs",
           "traces"
@@ -1391,16 +1638,33 @@
     "CRM.NotificationHub.Api": {
       "code": {},
       "recognizeBy": {
-        "appContexts": [],
+        "appContexts": [
+          "CRM.NotificationHub.Application.Services.NotificationChannelDispatcher",
+          "CRM.NotificationHub.Application.Services.NotificationDispatcher",
+          "CRM.NotificationHub.Infrastructure.Authentication.CustomerAttributes.MyAuthAttribute",
+          "CRM.NotificationHub.Infrastructure.Authentication.IdentityClient",
+          "CRM.NotificationHub.Infrastructure.Messaging.SendNotificationConsumer",
+          "CRM.NotificationHub.Infrastructure.UserResolver.HttpUserResolver",
+          "SSNet.Instrument.Api.Middleware.ErrorExceptionMiddleware"
+        ],
         "environments": [
           "ssdev_au"
         ],
-        "frameworkHints": [],
+        "frameworkHints": [
+          "Serilog",
+          "Microsoft",
+          "MassTransit"
+        ],
+        "identifiedBy": "namespace",
+        "identitySource": "enricher",
         "lanes": [
+          "logs",
           "traces"
         ],
-        "namespaceRoots": [],
-        "note": "Appears only in the traces lane and emits no log rows — use get_trace_spans / span attributes, not search_logs, to investigate it.",
+        "namespaceRoots": [
+          "CRM.NotificationHub",
+          "SSNet.Instrument"
+        ],
         "serviceName": "CRM.NotificationHub.Api",
         "unclassifiedContexts": []
       }
@@ -1421,7 +1685,11 @@
           "CRM.Report.Application.ExportReports.Command.GlobalAgentLeaderboardCommand",
           "CRM.Report.Application.ExportReports.Command.GlobalCRCOutBoundCommand",
           "CRM.Report.Application.ExportReports.Command.GlobalDialPerHourCommand",
+          "CRM.Report.Application.ExportReports.Command.GlobalInBoundCommand",
+          "CRM.Report.Application.ExportReports.Command.GlobalTeleserviceDashboardCommand",
           "CRM.Report.Application.ExportReports.Command.OrganisationAgentLeaderboardCommand",
+          "CRM.Report.Application.ExportReports.Command.OrganisationClickThroughCommand",
+          "CRM.Report.Application.ExportReports.Command.OrganisationDialPerHourCommand",
           "CRM.Report.Application.ExportReports.Command.TaskManagementCommand",
           "CRM.Report.Application.ExportReports.Handler.BaseExportHandler",
           "CRM.Report.Application.Report.Commands.ExecuteReport.ExecuteReportCommand",
@@ -1439,8 +1707,11 @@
           "System",
           "Quartz",
           "MassTransit",
-          "StackExchange"
+          "StackExchange",
+          "Grpc"
         ],
+        "identifiedBy": "namespace",
+        "identitySource": "mixed",
         "lanes": [
           "logs",
           "traces"
@@ -1449,7 +1720,6 @@
           "CRM.Report",
           "SSNet.QueueManagement"
         ],
-        "note": "Multiple application namespace roots emit under this service name — attribute rows by namespaceRoots, not by service alone.",
         "serviceName": "CRM.Report.Api",
         "unclassifiedContexts": []
       }
@@ -1474,6 +1744,8 @@
           "Microsoft",
           "System"
         ],
+        "identifiedBy": "namespace",
+        "identitySource": "mixed",
         "lanes": [
           "logs",
           "traces"
@@ -1499,6 +1771,8 @@
         "frameworkHints": [
           "Microsoft"
         ],
+        "identifiedBy": "framework",
+        "identitySource": "mixed",
         "lanes": [
           "logs"
         ],
@@ -1519,6 +1793,7 @@
           "CRM.SMS.Services.Implement.SmsService",
           "SSNet.CommunicationHub.Messaging.Publishers.CrmInboundPublisher",
           "SSNet.CommunicationHub.Messaging.Publishers.CrmNotifier",
+          "SSNet.CommunicationHub.Messaging.Publishers.DefaultMessageIdResolver",
           "SSNet.CommunicationHub.Messaging.Publishers.SentEventPublisher"
         ],
         "environments": [
@@ -1529,8 +1804,11 @@
           "Microsoft",
           "System",
           "MassTransit",
-          "Grpc"
+          "Grpc",
+          "StackExchange"
         ],
+        "identifiedBy": "namespace",
+        "identitySource": "mixed",
         "lanes": [
           "logs",
           "traces"
@@ -1539,7 +1817,6 @@
           "CRM.SMS",
           "SSNet.CommunicationHub"
         ],
-        "note": "Multiple application namespace roots emit under this service name — attribute rows by namespaceRoots, not by service alone.",
         "serviceName": "CRM.SMS",
         "unclassifiedContexts": []
       }
@@ -1566,6 +1843,8 @@
           "AWSSDK",
           "Grpc"
         ],
+        "identifiedBy": "namespace",
+        "identitySource": "mixed",
         "lanes": [
           "logs",
           "traces"
@@ -1574,7 +1853,6 @@
           "CRM.Task",
           "SSNet.CommunicationHub"
         ],
-        "note": "Multiple application namespace roots emit under this service name — attribute rows by namespaceRoots, not by service alone.",
         "serviceName": "CRM.Task.Api",
         "unclassifiedContexts": []
       }
@@ -1596,6 +1874,8 @@
           "Microsoft",
           "Grpc"
         ],
+        "identifiedBy": "framework",
+        "identitySource": "mixed",
         "lanes": [
           "logs",
           "traces"
@@ -1621,8 +1901,11 @@
         "frameworkHints": [
           "Microsoft",
           "System",
-          "AWSSDK"
+          "AWSSDK",
+          "Grpc"
         ],
+        "identifiedBy": "framework",
+        "identitySource": "mixed",
         "lanes": [
           "logs",
           "traces"
@@ -1646,11 +1929,14 @@
           "wecrm_au_prod_al"
         ],
         "frameworkHints": [
-          "Quartz",
           "Microsoft",
+          "Quartz",
           "System",
-          "AWSSDK"
+          "AWSSDK",
+          "Grpc"
         ],
+        "identifiedBy": "framework",
+        "identitySource": "mixed",
         "lanes": [
           "logs",
           "traces"
@@ -1672,12 +1958,18 @@
         "environments": [
           "ssdev_au"
         ],
-        "frameworkHints": [],
+        "frameworkHints": [
+          "MassTransit",
+          "Microsoft"
+        ],
+        "identifiedBy": "framework",
+        "identitySource": "enricher",
         "lanes": [
+          "logs",
           "traces"
         ],
         "namespaceRoots": [],
-        "note": "Appears only in the traces lane and emits no log rows — use get_trace_spans / span attributes, not search_logs, to investigate it.",
+        "note": "Emits only framework/library log contexts — no first-party namespace appears in its logs. Identify it by service_name alone.",
         "serviceName": "CRM.Whatsapp",
         "unclassifiedContexts": []
       }
@@ -1693,12 +1985,18 @@
         "environments": [
           "ssdev_au"
         ],
-        "frameworkHints": [],
+        "frameworkHints": [
+          "MassTransit",
+          "Microsoft"
+        ],
+        "identifiedBy": "framework",
+        "identitySource": "enricher",
         "lanes": [
+          "logs",
           "traces"
         ],
         "namespaceRoots": [],
-        "note": "Appears only in the traces lane and emits no log rows — use get_trace_spans / span attributes, not search_logs, to investigate it.",
+        "note": "Emits only framework/library log contexts — no first-party namespace appears in its logs. Identify it by service_name alone.",
         "serviceName": "CRM.Zns",
         "unclassifiedContexts": []
       }
@@ -1720,8 +2018,11 @@
           "Rebus",
           "Quartz",
           "Elsa",
-          "MassTransit"
+          "MassTransit",
+          "Grpc"
         ],
+        "identifiedBy": "framework",
+        "identitySource": "mixed",
         "lanes": [
           "logs",
           "traces"
@@ -1740,266 +2041,7 @@
         "repoId": "wec.communication-hub"
       },
       "recognizeBy": {
-        "appContexts": [],
-        "borrowedContexts": [
-          "CommunicationHub.Web.Infrastructure.MyAuthEndpointFilter",
-          "CommunicationHub.Web.Infrastructure.ProblemDetailsExceptionHandler",
-          "CommunicationHub.Web.Infrastructure.XssSanitizationEndpointFilter"
-        ],
-        "environments": [
-          "ssdev_au",
-          "wecrm_au_prod_al"
-        ],
-        "frameworkHints": [],
-        "lanes": [
-          "traces"
-        ],
-        "logsUnder": [
-          "unknown_service:dotnet"
-        ],
-        "namespaceRoots": [],
-        "note": "This service names itself on spans but not on log rows: search logs under service_name \"unknown_service:dotnet\" and filter by sourceContext starting \"CommunicationHub.Web.\".",
-        "serviceName": "CommunicationHub.Web",
-        "unclassifiedContexts": []
-      }
-    },
-    "OSB.Integration.Worker": {
-      "code": {
-        "match": "csproj-name",
-        "project": "src/services/osb-integration/OSB.Integration.Worker/OSB.Integration.Worker.csproj",
-        "repoId": "wec.be"
-      },
-      "recognizeBy": {
         "appContexts": [
-          "OSB.Integration.Worker.Consumers.SyncServiceConsumer"
-        ],
-        "environments": [
-          "ssdev_au",
-          "wecrm_au_prod_al"
-        ],
-        "frameworkHints": [
-          "Microsoft",
-          "MassTransit",
-          "System"
-        ],
-        "lanes": [
-          "logs",
-          "traces"
-        ],
-        "namespaceRoots": [
-          "OSB.Integration"
-        ],
-        "serviceName": "OSB.Integration.Worker",
-        "unclassifiedContexts": []
-      }
-    },
-    "SS.Identity.Api": {
-      "code": {
-        "match": "csproj-name",
-        "project": "src/services/identity/SS.Identity.Api/SS.Identity.Api.csproj",
-        "repoId": "wec.be"
-      },
-      "recognizeBy": {
-        "appContexts": [],
-        "environments": [
-          "ssdev_au",
-          "wecrm_au_prod_al"
-        ],
-        "frameworkHints": [
-          "Microsoft",
-          "System",
-          "Quartz",
-          "MassTransit",
-          "AWSSDK"
-        ],
-        "lanes": [
-          "logs",
-          "traces"
-        ],
-        "namespaceRoots": [
-          "Detection.Startup"
-        ],
-        "serviceName": "SS.Identity.Api",
-        "unclassifiedContexts": [
-          "Detection.Startup"
-        ]
-      }
-    },
-    "SS.Workflow.WorkerService.Campaign2": {
-      "code": {
-        "match": "csproj-name",
-        "project": "src/services/workflow.campaign/SS.Workflow.WorkerService.Campaign2/SS.Workflow.WorkerService.Campaign2.csproj",
-        "repoId": "wec.be"
-      },
-      "recognizeBy": {
-        "appContexts": [],
-        "environments": [
-          "ssdev_au",
-          "wecrm_au_prod_al"
-        ],
-        "frameworkHints": [
-          "System",
-          "Rebus",
-          "Elsa",
-          "Microsoft",
-          "Quartz",
-          "MassTransit"
-        ],
-        "lanes": [
-          "logs",
-          "traces"
-        ],
-        "namespaceRoots": [],
-        "note": "Emits only framework/library log contexts — no first-party namespace appears in its logs. Identify it by service_name alone.",
-        "serviceName": "SS.Workflow.WorkerService.Campaign2",
-        "unclassifiedContexts": []
-      }
-    },
-    "SS.Workflow.WorkerService.Touchpoint": {
-      "code": {
-        "match": "csproj-name",
-        "project": "src/services/workflow.touchpoint/SS.Workflow.WorkerService.Touchpoint/SS.Workflow.WorkerService.Touchpoint.csproj",
-        "repoId": "wec.be"
-      },
-      "recognizeBy": {
-        "appContexts": [
-          "SS.Workflow.Activity.Communication.SendCrcActivity",
-          "SS.Workflow.Activity.Communication.SendSmsActivity",
-          "SS.Workflow.Activity.Touchpoint.Activities.Suppression.SuppressionForTime",
-          "SS.Workflow.Activity.Touchpoint.Activities.Suppression.SuppressionUntilTime",
-          "SS.Workflow.Activity.Touchpoint.SendEmailActivity",
-          "SS.Workflow.WorkerService.Touchpoint.Consumers.CustomWorkflowRequestConsumer"
-        ],
-        "environments": [
-          "ssdev_au",
-          "wecrm_au_prod_al"
-        ],
-        "frameworkHints": [
-          "Microsoft",
-          "System",
-          "Rebus",
-          "Elsa",
-          "Quartz",
-          "MassTransit",
-          "Grpc"
-        ],
-        "lanes": [
-          "logs",
-          "traces"
-        ],
-        "namespaceRoots": [
-          "SS.Workflow",
-          "Workflow.Touchpoint"
-        ],
-        "note": "Multiple application namespace roots emit under this service name — attribute rows by namespaceRoots, not by service alone.",
-        "serviceName": "SS.Workflow.WorkerService.Touchpoint",
-        "unclassifiedContexts": [
-          "Workflow.Touchpoint.Core.Activities.Communication.PushNotificationActivity"
-        ]
-      }
-    },
-    "TenantAnalystJob": {
-      "code": {
-        "match": "csproj-name",
-        "project": "src/services/background/TenantAnalystJob/TenantAnalystJob.csproj",
-        "repoId": "wec.be"
-      },
-      "recognizeBy": {
-        "appContexts": [],
-        "environments": [
-          "ssdev_au",
-          "wecrm_au_prod_al"
-        ],
-        "frameworkHints": [
-          "Microsoft"
-        ],
-        "lanes": [
-          "logs",
-          "traces"
-        ],
-        "namespaceRoots": [
-          "TenantAnalystJob.Worker"
-        ],
-        "serviceName": "TenantAnalystJob",
-        "unclassifiedContexts": [
-          "TenantAnalystJob.Worker"
-        ]
-      }
-    },
-    "unknown_service:dotnet": {
-      "code": {
-        "attributeByNamespace": true,
-        "notes": "Not one service. Resolve the owning app from recognizeBy.namespaceRoots, then look that name up in this catalog."
-      },
-      "recognizeBy": {
-        "appContexts": [
-          "Bmw.Teleservices.V3.Api.Services.TeleserviceTicketService",
-          "Bmw.Teleservices.V3.FeedbackService.BmwTeleserviceFeedbackConsumer",
-          "Bmw.Teleservices.V3.Infrastructure.Jobs.DailyNormalizeJob",
-          "Bmw.Teleservices.V3.Infrastructure.Services.MockBmwApiService",
-          "Bmw.Teleservices.V3.Infrastructure.Services.Normalization.AustraliaNewZealandNormalizationStrategy",
-          "Bmw.Teleservices.V3.Infrastructure.Services.SftpService",
-          "Bmw.Teleservices.V3.Infrastructure.Services.TeleserviceDailyNormalize",
-          "Bmw.Teleservices.V3.Worker.Consumers.CompleteTeleserviceNormalizeTicketConsumer",
-          "Bmw.Teleservices.V3.Worker.Consumers.NormalizeManualLeadTicketConsumer",
-          "Bmw.Teleservices.V3.Worker.Consumers.PrepareFeedbackConsumer",
-          "Bmw.Teleservices.V3.Worker.NotificationProcessingWorker",
-          "Bmw.Teleservices.V3.Worker.Services.Implements.NormalizeCompleteService",
-          "Bmw.Teleservices.V3.Worker.Services.Implements.TeleserviceTicketService",
-          "CRM.CRC.Api.Consumers.ExportCallCenterConsumer",
-          "CRM.CRC.WorkerService.Consumers.CreateCrcCallConsumer",
-          "CRM.CRC.WorkerService.Consumers.ExportPresentativeConsumer",
-          "CRM.Customer.Service.Consumers.ExportCustomerDataConsumer",
-          "CRM.Customer.Service.Consumers.ExportCustomerDetailsConsumer",
-          "CRM.Customer.Service.Consumers.ExportOptOutConsumer",
-          "CRM.Customer.Service.Consumers.ExportTrackingVehicleConsumer",
-          "CRM.Customer.Service.Implement.CustomerExportService",
-          "CRM.Customer.Service.Implement.CustomerService",
-          "CRM.Customer.Service.ServiceProtos.SmsConversationProtoService",
-          "CRM.Customer.WorkerService.Consumers.CreateOptOutConsumer",
-          "CRM.Customer.WorkerService.ProtoServices.ContactBuilderProtoService",
-          "CRM.Email.Implements.SDKAwsSESService",
-          "CRM.EmailReply.Consumers.EmailReplyConsumer",
-          "CRM.InboundEmail.Consumers.InboundEmailConsumer",
-          "CRM.InboundEmail.Factories.EmailHandlerFactory",
-          "CRM.InboundEmail.Handlers.BookingFromAutoleagueHandler",
-          "CRM.Lead.Service.Consumers.BulkAssignLeadConsumer",
-          "CRM.Lead.Service.Consumers.CreateOrUpdateCustomerAndVehicleConsumer",
-          "CRM.Lead.Service.Consumers.ExportLeadDataConsumer",
-          "CRM.Lead.Service.Consumers.ImportLeadDataConsumer",
-          "CRM.Lead.Service.Implements.LeadService",
-          "CRM.Lead.Service.ProtoServices.LeadProtoService",
-          "CRM.Marketing.Service.Implements.ContactBuilderExecutorService",
-          "CRM.Marketing.Service.Implements.TriggerBatchExecutionService",
-          "CRM.Marketing.Service.ServiceProtos.TriggerProtoService",
-          "CRM.Marketing.WorkerService.Consumers.ExportBuildViewConsumer",
-          "CRM.Marketing.WorkerService.Consumers.ExportCampaignPerformanceConsumer",
-          "CRM.Marketing.WorkerService.Consumers.ExportListBuilderConsumer",
-          "CRM.Marketing.WorkerService.Consumers.ExportListRecipientConsumer",
-          "CRM.NotificationHub.Application.Services.NotificationChannelDispatcher",
-          "CRM.NotificationHub.Application.Services.NotificationDispatcher",
-          "CRM.NotificationHub.Infrastructure.Authentication.CustomerAttributes.MyAuthAttribute",
-          "CRM.NotificationHub.Infrastructure.Authentication.IdentityClient",
-          "CRM.NotificationHub.Infrastructure.Messaging.SendNotificationConsumer",
-          "CRM.NotificationHub.Infrastructure.UserResolver.HttpUserResolver",
-          "CRM.Report.Api.Consumers.ExportNoContactReportConsumer",
-          "CRM.Report.Application.Common.Behaviours.ResponseCachingBehaviour",
-          "CRM.Report.Application.ExportReports.Command.ExportRecallReportCommand",
-          "CRM.Report.Application.ExportReports.Command.ExportTechnicalReportCommand",
-          "CRM.Report.Application.ExportReports.Command.FullRoiExportCommand",
-          "CRM.Report.Application.ExportReports.Command.GlobalAgentLeaderboardCommand",
-          "CRM.Report.Application.ExportReports.Command.GlobalCRCOutBoundCommand",
-          "CRM.Report.Application.ExportReports.Command.GlobalDialPerHourCommand",
-          "CRM.Report.Application.ExportReports.Command.OrganisationAgentLeaderboardCommand",
-          "CRM.Report.Application.ExportReports.Command.TaskManagementCommand",
-          "CRM.Report.Application.ExportReports.Handler.BaseExportHandler",
-          "CRM.Report.Application.Report.Commands.ExecuteReport.ExecuteReportCommand",
-          "CRM.Report.Application.Report.Queries.GetReportList.GetReportListQuery",
-          "CRM.Review.Api.ApiEndpoints.ReviewSetting.EmptyCheckRequest",
-          "CRM.Review.Api.ApiEndpoints.ReviewSetting.EmptyGetReviewSettings",
-          "CRM.Review.Api.ApiEndpoints.ReviewTemplates.GetReviewTemplatesRequest",
-          "CRM.SMS.Services.Implement.SmsService",
-          "CRM.Task.Service.Implements.TaskService",
           "CommunicationHub.Application.Common.Behaviours.AuthorizationBehaviour",
           "CommunicationHub.Application.Common.Behaviours.XssSanitizationBehaviour",
           "CommunicationHub.Application.Common.Mediator.SimpleMediator",
@@ -2011,7 +2053,9 @@
           "CommunicationHub.Application.Conversations.Commands.ProcessInboundMessage.ProcessInboundMessageCommand",
           "CommunicationHub.Application.Conversations.Commands.ProcessInboundMessage.ProcessInboundMessageCommandHandler",
           "CommunicationHub.Application.Conversations.Commands.ReplyCallLogConversation.ReplyCallLogConversationCommandHandler",
+          "CommunicationHub.Application.Conversations.Commands.ReplyConversation.ReplyConversationCommand",
           "CommunicationHub.Application.Conversations.Commands.ReplyOsbConversation.ReplyOsbConversationCommandHandler",
+          "CommunicationHub.Application.Conversations.Commands.StartComposeConversation.StartComposeConversationCommand",
           "CommunicationHub.Application.Conversations.Commands.StartComposeConversation.StartComposeConversationCommandHandler",
           "CommunicationHub.Application.Conversations.Common.ChatDecisionService",
           "CommunicationHub.Application.Conversations.EventHandlers.ConversationAssignedToAIEventHandler",
@@ -2045,32 +2089,12 @@
           "CommunicationHub.Web.Infrastructure.MyAuthEndpointFilter",
           "CommunicationHub.Web.Infrastructure.ProblemDetailsExceptionHandler",
           "CommunicationHub.Web.Infrastructure.XssSanitizationEndpointFilter",
-          "OSB.Integration.Worker.Consumers.SyncServiceConsumer",
-          "SS.Workflow.Activity.Communication.SendCrcActivity",
-          "SS.Workflow.Activity.Communication.SendSmsActivity",
-          "SS.Workflow.Activity.Touchpoint.Activities.Suppression.SuppressionForTime",
-          "SS.Workflow.Activity.Touchpoint.Activities.Suppression.SuppressionUntilTime",
-          "SS.Workflow.Activity.Touchpoint.SendEmailActivity",
-          "SS.Workflow.WorkerService.Touchpoint.Consumers.CustomWorkflowRequestConsumer",
-          "SS.Workflow.WorkerService.Touchpoint.NotificationHandler.WorkflowCompletedHandler",
-          "SS.Workflow.WorkerService.Touchpoint.NotificationHandler.WorkflowFailedHandler",
           "SSNet.CommunicationHub.Messaging.MassTransit",
-          "SSNet.CommunicationHub.Messaging.Publishers.CrmInboundPublisher",
-          "SSNet.CommunicationHub.Messaging.Publishers.CrmNotifier",
-          "SSNet.CommunicationHub.Messaging.Publishers.DefaultMessageIdResolver",
-          "SSNet.CommunicationHub.Messaging.Publishers.ManualCallLogMessageIdResolver",
           "SSNet.CommunicationHub.Messaging.Publishers.Outbound.AutomationOutboundHandler",
           "SSNet.CommunicationHub.Messaging.Publishers.Outbound.CampaignOutboundHandler",
           "SSNet.CommunicationHub.Messaging.Publishers.Outbound.ManualOutboundHandler",
           "SSNet.CommunicationHub.Messaging.Publishers.Outbound.OsbOutboundHandler",
-          "SSNet.CommunicationHub.Messaging.Publishers.OutboundDeliveryPublisher",
-          "SSNet.CommunicationHub.Messaging.Publishers.SentEventPublisher",
-          "SSNet.EventPublishing.Sns.Services.SnsPublisherBackgroundService",
-          "SSNet.Instrument.Api.Middleware.ErrorExceptionMiddleware",
-          "SSNet.QueueManagement.Base.BaseConsumer",
-          "SSNet.QueueManagement.Base.QueuePublisher",
-          "SSNet.QueueManagement.Consumer.UpdateTaskConsumer",
-          "SSNet.QueueManagement.Domain.Store.QueueManagementStore"
+          "SSNet.CommunicationHub.Messaging.Publishers.OutboundDeliveryPublisher"
         ],
         "environments": [
           "ssdev_au",
@@ -2078,55 +2102,252 @@
         ],
         "frameworkHints": [
           "Microsoft",
-          "Serilog",
-          "MassTransit",
-          "Elsa",
-          "Rebus",
-          "Ocelot",
-          "Grpc",
-          "Quartz",
+          "MassTransit"
+        ],
+        "identifiedBy": "namespace",
+        "identitySource": "mixed",
+        "lanes": [
+          "logs",
+          "traces"
+        ],
+        "namespaceRoots": [
+          "CommunicationHub.Infrastructure",
+          "CommunicationHub.Web",
+          "CommunicationHub.Application",
+          "SSNet.CommunicationHub"
+        ],
+        "serviceName": "CommunicationHub.Web",
+        "unclassifiedContexts": []
+      }
+    },
+    "IdentityActivityJob": {
+      "code": {},
+      "recognizeBy": {
+        "appContexts": [],
+        "environments": [
+          "ssdev_au",
+          "wecrm_au_prod_al"
+        ],
+        "frameworkHints": [
+          "Microsoft",
           "StackExchange"
         ],
+        "identifiedBy": "namespace",
+        "identitySource": "enricher",
         "lanes": [
           "logs"
         ],
         "namespaceRoots": [
-          "Bmw.Teleservices",
-          "CommunicationHub.Infrastructure",
-          "CRM.NotificationHub",
-          "CRM.Report",
-          "CommunicationHub.Web",
-          "TenantAnalystJob.Worker",
-          "SSNet.QueueManagement",
-          "CRM.Lead",
-          "CommunicationHub.Application",
-          "CRM.Marketing",
+          "IdentityActivityJob.Worker"
+        ],
+        "serviceName": "IdentityActivityJob",
+        "unclassifiedContexts": [
+          "IdentityActivityJob.Worker"
+        ]
+      }
+    },
+    "OSB.Integration.Worker": {
+      "code": {
+        "match": "csproj-name",
+        "project": "src/services/osb-integration/OSB.Integration.Worker/OSB.Integration.Worker.csproj",
+        "repoId": "wec.be"
+      },
+      "recognizeBy": {
+        "appContexts": [
+          "OSB.Integration.Worker.Consumers.SyncServiceConsumer"
+        ],
+        "environments": [
+          "ssdev_au",
+          "wecrm_au_prod_al"
+        ],
+        "frameworkHints": [
+          "Microsoft",
+          "MassTransit",
+          "System"
+        ],
+        "identifiedBy": "namespace",
+        "identitySource": "mixed",
+        "lanes": [
+          "logs",
+          "traces"
+        ],
+        "namespaceRoots": [
+          "OSB.Integration"
+        ],
+        "serviceName": "OSB.Integration.Worker",
+        "unclassifiedContexts": []
+      }
+    },
+    "SS.Identity.Api": {
+      "code": {
+        "match": "csproj-name",
+        "project": "src/services/identity/SS.Identity.Api/SS.Identity.Api.csproj",
+        "repoId": "wec.be"
+      },
+      "recognizeBy": {
+        "appContexts": [],
+        "environments": [
+          "ssdev_au",
+          "wecrm_au_prod_al"
+        ],
+        "frameworkHints": [
+          "Microsoft",
+          "System",
+          "Quartz",
+          "MassTransit",
+          "AWSSDK",
+          "Grpc",
+          "StackExchange"
+        ],
+        "identifiedBy": "namespace",
+        "identitySource": "mixed",
+        "lanes": [
+          "logs",
+          "traces"
+        ],
+        "namespaceRoots": [
+          "Detection.Startup"
+        ],
+        "serviceName": "SS.Identity.Api",
+        "unclassifiedContexts": [
+          "Detection.Startup"
+        ]
+      }
+    },
+    "SS.Workflow.WorkerService.Campaign2": {
+      "code": {
+        "match": "csproj-name",
+        "project": "src/services/workflow.campaign/SS.Workflow.WorkerService.Campaign2/SS.Workflow.WorkerService.Campaign2.csproj",
+        "repoId": "wec.be"
+      },
+      "recognizeBy": {
+        "appContexts": [],
+        "environments": [
+          "ssdev_au",
+          "wecrm_au_prod_al"
+        ],
+        "frameworkHints": [
+          "Elsa",
+          "System",
+          "Rebus",
+          "MassTransit",
+          "Microsoft",
+          "Quartz",
+          "Grpc",
+          "StackExchange"
+        ],
+        "identifiedBy": "framework",
+        "identitySource": "mixed",
+        "lanes": [
+          "logs",
+          "traces"
+        ],
+        "namespaceRoots": [],
+        "note": "Emits only framework/library log contexts — no first-party namespace appears in its logs. Identify it by service_name alone.",
+        "serviceName": "SS.Workflow.WorkerService.Campaign2",
+        "unclassifiedContexts": []
+      }
+    },
+    "SS.Workflow.WorkerService.Touchpoint": {
+      "code": {
+        "match": "csproj-name",
+        "project": "src/services/workflow.touchpoint/SS.Workflow.WorkerService.Touchpoint/SS.Workflow.WorkerService.Touchpoint.csproj",
+        "repoId": "wec.be"
+      },
+      "recognizeBy": {
+        "appContexts": [
+          "SS.Workflow.Activity.Communication.SendCrcActivity",
+          "SS.Workflow.Activity.Communication.SendSmsActivity",
+          "SS.Workflow.Activity.Touchpoint.Activities.Suppression.SuppressionForTime",
+          "SS.Workflow.Activity.Touchpoint.Activities.Suppression.SuppressionUntilTime",
+          "SS.Workflow.Activity.Touchpoint.SendEmailActivity",
+          "SS.Workflow.WorkerService.Touchpoint.Consumers.CustomWorkflowRequestConsumer",
+          "SS.Workflow.WorkerService.Touchpoint.NotificationHandler.WorkflowCompletedHandler",
+          "SS.Workflow.WorkerService.Touchpoint.NotificationHandler.WorkflowFailedHandler"
+        ],
+        "environments": [
+          "ssdev_au",
+          "wecrm_au_prod_al"
+        ],
+        "frameworkHints": [
+          "Microsoft",
+          "Elsa",
+          "System",
+          "Rebus",
+          "Quartz",
+          "MassTransit",
+          "Grpc",
+          "StackExchange"
+        ],
+        "identifiedBy": "namespace",
+        "identitySource": "mixed",
+        "lanes": [
+          "logs",
+          "traces"
+        ],
+        "namespaceRoots": [
           "SS.Workflow",
-          "CRM.SMS",
-          "CRM.CRC",
-          "SSNet.CommunicationHub",
-          "CRM.EmailReply",
-          "CRM.Customer",
-          "CRM.InboundEmail",
-          "IdentityActivityJob.Worker",
-          "CRM.Email",
-          "CRM.Task",
-          "SSNet.Instrument",
-          "SSNet.EventPublishing",
-          "Detection.Startup",
-          "CRM.Review",
-          "OSB.Integration",
-          "Workflow.Touchpoint",
+          "Workflow.Touchpoint"
+        ],
+        "serviceName": "SS.Workflow.WorkerService.Touchpoint",
+        "unclassifiedContexts": [
+          "Workflow.Touchpoint.Core.Activities.Communication.PushNotificationActivity"
+        ]
+      }
+    },
+    "TaskReminderJob": {
+      "code": {},
+      "recognizeBy": {
+        "appContexts": [],
+        "environments": [
+          "ssdev_au",
+          "wecrm_au_prod_al"
+        ],
+        "frameworkHints": [
+          "MassTransit",
+          "Microsoft"
+        ],
+        "identifiedBy": "namespace",
+        "identitySource": "enricher",
+        "lanes": [
+          "logs"
+        ],
+        "namespaceRoots": [
           "TaskReminderJob.Worker"
         ],
-        "note": "Multiple application namespace roots emit under this service name — attribute rows by namespaceRoots, not by service alone.",
-        "serviceName": "unknown_service:dotnet",
+        "serviceName": "TaskReminderJob",
         "unclassifiedContexts": [
-          "Detection.Startup",
-          "IdentityActivityJob.Worker",
-          "TaskReminderJob.Worker",
-          "TenantAnalystJob.Worker",
-          "Workflow.Touchpoint.Core.Activities.Communication.PushNotificationActivity"
+          "TaskReminderJob.Worker"
+        ]
+      }
+    },
+    "TenantAnalystJob": {
+      "code": {
+        "match": "csproj-name",
+        "project": "src/services/background/TenantAnalystJob/TenantAnalystJob.csproj",
+        "repoId": "wec.be"
+      },
+      "recognizeBy": {
+        "appContexts": [],
+        "environments": [
+          "ssdev_au",
+          "wecrm_au_prod_al"
+        ],
+        "frameworkHints": [
+          "Microsoft"
+        ],
+        "identifiedBy": "namespace",
+        "identitySource": "mixed",
+        "lanes": [
+          "logs",
+          "traces"
+        ],
+        "namespaceRoots": [
+          "TenantAnalystJob.Worker"
+        ],
+        "serviceName": "TenantAnalystJob",
+        "unclassifiedContexts": [
+          "TenantAnalystJob.Worker"
         ]
       }
     },
@@ -2138,6 +2359,8 @@
           "ssdev_au"
         ],
         "frameworkHints": [],
+        "identifiedBy": "namespace",
+        "identitySource": "resource",
         "lanes": [
           "logs"
         ],
@@ -2157,25 +2380,31 @@
           "WecSocialAds.Application.Core.Behaviours.ValidationBehaviour",
           "WecSocialAds.Application.Core.Errors.ErrorHandlerRegistry",
           "WecSocialAds.Application.Core.Logging.BusinessLogger",
+          "WecSocialAds.Application.Core.Services.OAuthUrlGenerationService",
           "WecSocialAds.Application.Features.Campaign.Commands.GetOrCreateDraft.GetOrCreateDraftCommandHandler",
           "WecSocialAds.Application.Features.Campaign.Commands.GetOrCreateMetaDraft.GetOrCreateMetaDraftCommandHandler",
           "WecSocialAds.Application.Features.Campaign.Commands.SendCampaignRequestedEmail.SendCampaignRequestedEmailCommandHandler",
           "WecSocialAds.Application.Features.Campaign.EventHandlers.CampaignApprovalRequestedEventHandler",
-          "WecSocialAds.Application.Features.Campaign.EventHandlers.CampaignCancelledEventHandler",
+          "WecSocialAds.Application.Features.Campaign.EventHandlers.CampaignApprovalSucceededEmailHandler",
           "WecSocialAds.Application.Features.Campaign.EventHandlers.CampaignCreatedEventHandler",
           "WecSocialAds.Application.Features.Campaign.EventHandlers.CampaignStatusChangedEventHandler",
           "WecSocialAds.Application.Features.Campaign.EventHandlers.CampaignSubmittedForReviewEventHandler",
           "WecSocialAds.Application.Features.Campaign.EventHandlers.MetaCampaignUpdatedEventHandler",
           "WecSocialAds.Application.Features.Campaign.Queries.GetCampaignsWithFilter.GetCampaignsWithFilterQueryHandler",
+          "WecSocialAds.Application.Features.Campaign.Queries.GetMetaCampaignDetails.GetMetaCampaignDetailsQueryHandler",
           "WecSocialAds.Application.Features.CampaignTemplate.EventHandlers.CampaignTemplateRequestedEventHandler",
+          "WecSocialAds.Application.Features.MetaCampaign.Commands.ApproveMetaCampaign.ApproveMetaCampaignCommandHandler",
           "WecSocialAds.Application.Features.MetaCampaign.Commands.AssignMetaToClient.AssignMetaToClientCommandHandler",
-          "WecSocialAds.Application.Features.MetaCampaign.Commands.CancelMetaCampaign.CancelMetaCampaignCommandHandler",
+          "WecSocialAds.Application.Features.MetaCampaign.Commands.LaunchMetaCampaign.LaunchMetaCampaignCommand",
+          "WecSocialAds.Application.Features.MetaCampaign.Commands.LaunchMetaCampaign.LaunchMetaCampaignCommandHandler",
           "WecSocialAds.Application.Features.MetaCampaign.Commands.SubmitToReview.SubmitMetaToReviewCommandHandler",
+          "WecSocialAds.Application.Features.MetaCampaign.Commands.SyncMetaPlatformInformation.SyncMetaPlatformInformationCommandHandler",
+          "WecSocialAds.Application.Features.MetaCampaign.EventHandlers.MetaCampaignApprovalCompletedEventHandler",
           "WecSocialAds.Application.Features.Reports.SyncCampaignReportsWorkflow",
           "WecSocialAds.Application.Features.Reports.SyncMetaAdsReportsWorkflow",
+          "WecSocialAds.Application.Features.SocialPlatformOAuth.GenerateAuthUrl.GenerateAuthUrlCommandHandler",
           "WecSocialAds.Application.Features.SocialPlatformOAuth.Queries.GetAccountsWithFilter.GetAccountsWithFilterQueryHandler",
           "WecSocialAds.Application.Services.Campaign.CampaignEntityOverrideService",
-          "WecSocialAds.Application.Services.Targeting.TargetingReferenceDataService",
           "WecSocialAds.Infrastructure.Data.Repositories.CampaignReportRepository",
           "WecSocialAds.Infrastructure.Data.Repositories.CampaignRepository",
           "WecSocialAds.Infrastructure.Data.UnitOfWork",
@@ -2186,7 +2415,9 @@
           "WecSocialAds.Infrastructure.Jobs.CleanupDeletedCampaignsJob",
           "WecSocialAds.Infrastructure.Jobs.LaunchedToCompletedJob",
           "WecSocialAds.Infrastructure.Jobs.LaunchingToLaunchedJob",
+          "WecSocialAds.Infrastructure.Jobs.MetaCampaignPushScheduler",
           "WecSocialAds.Infrastructure.Jobs.PreflightAutoExpiryJob",
+          "WecSocialAds.Infrastructure.Jobs.PushMetaCampaignJob",
           "WecSocialAds.Infrastructure.Jobs.RefreshSocialPlatformTokensJob",
           "WecSocialAds.Infrastructure.Jobs.RetryFailedEmailJob",
           "WecSocialAds.Infrastructure.Jobs.SendQueuedEmailJob",
@@ -2195,6 +2426,13 @@
           "WecSocialAds.Infrastructure.Redis.RedisConnectionProvider",
           "WecSocialAds.Infrastructure.Services.Email.EmailNotificationService",
           "WecSocialAds.Infrastructure.Services.IdentityAuthorizationClient",
+          "WecSocialAds.Infrastructure.Services.Meta.Builders.MetaCreativeBuilder",
+          "WecSocialAds.Infrastructure.Services.Meta.Builders.MetaTargetingBuilder",
+          "WecSocialAds.Infrastructure.Services.Meta.MetaAdsCampaignSyncService",
+          "WecSocialAds.Infrastructure.Services.Meta.MetaGraphApiClient",
+          "WecSocialAds.Infrastructure.Services.Meta.MetaLeadFormProvisioner",
+          "WecSocialAds.Infrastructure.Services.Meta.MetaMediaUploadService",
+          "WecSocialAds.Infrastructure.Services.Meta.MetaPlacementImageService",
           "WecSocialAds.Web.Middleware.RequestLoggingMiddleware"
         ],
         "environments": [
@@ -2207,6 +2445,8 @@
           "Hangfire",
           "FFmpeg"
         ],
+        "identifiedBy": "namespace",
+        "identitySource": "resource",
         "lanes": [
           "logs"
         ],
@@ -2215,7 +2455,6 @@
           "WecSocialAds.Application",
           "WecSocialAds.Web"
         ],
-        "note": "Multiple application namespace roots emit under this service name — attribute rows by namespaceRoots, not by service alone.",
         "serviceName": "wecsocialads-api",
         "unclassifiedContexts": []
       }
@@ -2246,6 +2485,8 @@
           "MassTransit",
           "AWSSDK"
         ],
+        "identifiedBy": "namespace",
+        "identitySource": "resource",
         "lanes": [
           "logs",
           "traces"
@@ -2254,7 +2495,6 @@
           "WeCRM.WhatsApp",
           "Program"
         ],
-        "note": "Multiple application namespace roots emit under this service name — attribute rows by namespaceRoots, not by service alone.",
         "serviceName": "whatsapp-api",
         "unclassifiedContexts": [
           "Program"

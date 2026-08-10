@@ -19,7 +19,7 @@ them.
 |---|---|---|---|
 | `codebase-index` | `codebase-index-mcp/` | Code graph indexing: symbols, call chains, impact analysis, safe rule-based refactors. **No runtime LLM.** | [README](../../codebase-index-mcp/README.md) · [CLAUDE.md](../../codebase-index-mcp/CLAUDE.md) · [decision tree](../../codebase-index-mcp/docs/decision-tree.md) · [examples](../../codebase-index-mcp/docs/examples.md) · [issue registry](../../codebase-index-mcp/docs/mcp-codebase-index-issue-registry.md) |
 | `postgres-mcp` | `postgres-mcp/` | Read-only Postgres with SQL guardrails; gated writes + EF Core migrations. `prod` is force read-only. | [README](../../postgres-mcp/README.md) · [issue registry](../../postgres-mcp/docs/mcp-postgres-issue-registry.md) |
-| `observe-mcp` | `observe-mcp/` | Read-only log/trace search over OpenObserve. | [README](../../observe-mcp/README.md) |
+| `observe-mcp` | `observe-mcp/` | Read-only log/trace search over OpenObserve. | [README](../../observe-mcp/README.md) · [issue registry](../../observe-mcp/docs/mcp-observe-issue-registry.md) |
 | `bitbucket-mcp` | `bitbucket-mcp/` | Read repositories / pull requests and **create PRs** (write gated). | [README](../../bitbucket-mcp/README.md) |
 
 Counts (76 tools, 98 env vars) come from the manifest, not from this page —

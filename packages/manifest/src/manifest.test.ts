@@ -259,7 +259,7 @@ test("familyExamples belong to prefix fields and match the prefix", () => {
 });
 
 test("the env contract covers every server, and grew as S-35 intended", () => {
-  // 104 vars across four servers, up from the 41 the manifest declared before S-35. The count is
+  // 106 vars across four servers, up from the 41 the manifest declared before S-35. The count is
   // asserted so that dropping a declaration is a test failure rather than a quiet regression in
   // the generated docs. codebase-index gained CODEBASE_INDEX_VECTOR_ENABLED (MCP-ISSUE-035) and
   // CODEBASE_INDEX_MAX_TYPE_REF_EDGES_PER_FILE (MCP-ISSUE-038); postgres gained PGSSLMODE and
@@ -267,12 +267,14 @@ test("the env contract covers every server, and grew as S-35 intended", () => {
   // is why postgres-mcp is the one server whose env list is not entirely `POSTGRES_`-prefixed.
   // observe-mcp went 23 -> 29 when it became multi-environment: the OBSERVE_ENV_* family plus
   // PRIMARY_ENV_NAME / DEFAULT_ENVIRONMENT / ALLOWED_ENVIRONMENTS, and the two namespace-prefix
-  // lists that classify a log scope as application code or framework noise.
+  // lists that classify a log scope as application code or framework noise. It went 29 -> 31 with
+  // OBSERVE_APP_NAME_FIELD / OBSERVE_UNKNOWN_SERVICE_SENTINEL (OBS-CAT-002), which make the
+  // two-OTLP-path service identity resolution configurable and switchable off.
   const counts = Object.fromEntries(SERVERS.map((s) => [s.key, s.env.length]));
   assert.deepEqual(counts, {
     "codebase-index": 41,
     "postgres-mcp": 23,
-    "observe-mcp": 29,
+    "observe-mcp": 31,
     "bitbucket-mcp": 11
   });
 });

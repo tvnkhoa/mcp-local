@@ -112,6 +112,28 @@ export const observeEnv: readonly EnvField[] = [
     section: "Discovery",
     note: "Comma-separated prefixes treated as framework/library noise. Necessary because by raw volume the top log scopes are all framework plumbing, which identifies nothing. A context matching neither list is reported as `unclassified`, never dropped."
   },
+  // --- Service identity ----------------------------------------------------------
+  // These two exist because a .NET process can emit logs down TWO OTLP paths: the OTel
+  // SDK's ILogger provider (carries the SDK resource, so `service_name` is right) and a
+  // Serilog OTLP sink (builds its own resource and, unless the app sets service.name,
+  // falls back to the spec sentinel while a Serilog enricher supplies the real app name
+  // in a separate field). Measured on the live orgs: ~19% of log rows/hour arrive on the
+  // second path. Without this resolution `search_logs(service:)` returns 0 rows for those
+  // apps and `log_stats(groupBy:"service")` reports the sentinel as the largest service.
+  {
+    name: "OBSERVE_APP_NAME_FIELD",
+    required: false,
+    codeDefault: "applicationname",
+    section: "Service identity",
+    note: "Log column holding the application name when the OTLP resource does not (a Serilog enricher property). Used only for LOGS — the traces stream has no such column, and naming an absent column fails the query at plan time, so trace queries always use service_name. A logs stream without this column downgrades automatically on the first query and reports identity.resolved=false."
+  },
+  {
+    name: "OBSERVE_UNKNOWN_SERVICE_SENTINEL",
+    required: false,
+    codeDefault: "unknown_service:dotnet",
+    section: "Service identity",
+    note: "The service_name value that means \"the emitter never set service.name\" (the OTel spec default). Rows carrying it are re-attributed via OBSERVE_APP_NAME_FIELD. Set to an empty string to disable resolution entirely and go back to raw service_name."
+  },
 
   // --- Result and time-window caps ---------------------------------------------
   { name: "OBSERVE_DEFAULT_SIZE", required: false, default: "100", section: "Result and time-window caps" },

@@ -118,7 +118,9 @@ const LIMITS: ObserveLimits = {
   logColumns: [],
   fieldCaps: { nano: CAPS, compact: CAPS, standard: CAPS, verbose: CAPS },
   appNamespacePrefixes: ["CRM.", "CommunicationHub."],
-  frameworkNamespacePrefixes: ["Microsoft.", "System."]
+  frameworkNamespacePrefixes: ["Microsoft.", "System."],
+  appNameField: "applicationname",
+  unknownServiceSentinel: "unknown_service:dotnet"
 } as unknown as ObserveLimits;
 
 const TEST_ENV: ObserveEnvironment = {
@@ -237,4 +239,58 @@ test('source:"catalog" says nothing about ignored arguments when none were passe
   const payload = await discover({ source: "catalog", profile: "standard" }, clientsReturning([], []));
   assert.equal(payload.ignoredArguments, undefined);
   assert.equal(payload.ignoredArgumentsNote, undefined);
+});
+
+// --- resolved identity in the inventory --------------------------------------
+// `unknown_service:dotnet` used to be the largest "service" in both orgs. It was
+// never one service — it was every app that never set OTel service.name. The logs
+// lane now groups by the resolved identity, and says how each name was established.
+
+test("the logs inventory groups by the resolved identity and says how each was named", async () => {
+  const payload = await discover(
+    { lane: "logs", profile: "standard" },
+    clientsReturning(
+      [
+        // named by its OTLP resource only
+        { service_name: "CRM.Gateway", log_count: 100, resource_rows: 100, enricher_rows: 0 },
+        // recovered from the app-name field: the emitter never set service.name
+        { service_name: "CommunicationHub.Web", log_count: 50, resource_rows: 0, enricher_rows: 50 },
+        // rows arriving down BOTH paths — the ordinary state, and the one that says
+        // this service loses rows to a raw service_name query
+        { service_name: "CRM.Report.Api", log_count: 30, resource_rows: 20, enricher_rows: 10 }
+      ],
+      []
+    )
+  );
+
+  assert.deepEqual(
+    payload.services.map((s: { name: string; identitySource: string }) => [s.name, s.identitySource]),
+    [
+      ["CRM.Gateway", "resource"],
+      ["CommunicationHub.Web", "enricher"],
+      ["CRM.Report.Api", "mixed"]
+    ]
+  );
+  assert.equal(payload.identity.resolved, true);
+  assert.equal(payload.identity.field, "applicationname");
+});
+
+test('lane:"traces" reports no identity block — the traces stream has no app-name column', async () => {
+  // Naming that column against a traces stream fails at PLAN time, so the traces
+  // lane is always on `service_name` and must not claim otherwise.
+  const payload = await discover(
+    { lane: "traces", profile: "standard" },
+    clientsReturning([], [{ service_name: "CommunicationHub.Web", span_count: 5 }])
+  );
+  assert.equal(payload.identity, null);
+  assert.equal(payload.services[0].identitySource, undefined);
+});
+
+test("the catalog branch warns that its assertions are point-in-time, at any age", async () => {
+  // Age was the wrong freshness test: a capture read `ageDays: 0` while four of its
+  // assertions about one service were already false.
+  const payload = await discover({ source: "catalog", profile: "standard" }, clientsReturning([], []));
+  assert.equal(payload.error, undefined, "expected docs/service-catalog.json to be present");
+  assert.match(payload.catalog.assertionsNote, /point-in-time/);
+  assert.match(payload.catalog.assertionsNote, /catalog:verify/);
 });

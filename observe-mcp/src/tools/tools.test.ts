@@ -20,6 +20,8 @@ import { asErrorPayload, createToolRegistry, dispatchToolCall } from "@mcp/sdk";
 
 import type { ObserveLimits } from "../config/index.js";
 import type { EnvironmentRegistry, ObserveEnvironment } from "../config/environments.js";
+import { ObserveHttpError } from "../middleware/errors.js";
+import { resetIdentityCapability } from "../services/identity.js";
 import { ClientManager } from "../services/clientManager.js";
 import type { ObserveClient } from "../services/observeClient.js";
 import { buildTools, toWireError } from "./index.js";
@@ -38,7 +40,9 @@ const LIMITS: ObserveLimits = {
   logColumns: [],
   fieldCaps: { nano: CAPS, compact: CAPS, standard: CAPS, verbose: CAPS },
   appNamespacePrefixes: ["CRM.", "CommunicationHub."],
-  frameworkNamespacePrefixes: ["Microsoft.", "System."]
+  frameworkNamespacePrefixes: ["Microsoft.", "System."],
+  appNameField: "applicationname",
+  unknownServiceSentinel: "unknown_service:dotnet"
 } as unknown as ObserveLimits;
 
 const TEST_ENV: ObserveEnvironment = {
@@ -342,4 +346,85 @@ test("DELTA: an unknown tool now reports not_found instead of mcp_error", async 
   const { isError, payload } = await bodyOf("no_such_tool", {});
   assert.equal(isError, true);
   assert.deepEqual(payload, { code: "not_found", message: "Unknown tool: no_such_tool." });
+});
+
+// --- resolved service identity ---------------------------------------------
+// The failure that motivated this: `search_logs(service:"CommunicationHub.Web")`
+// returned 0 rows while the service was the largest span producer in the org,
+// because its log rows arrive under `unknown_service:dotnet` with the real name in
+// a Serilog enricher field.
+
+/** A manager whose client records the SQL it was handed and returns fixed rows. */
+function recordingClients(rows: Record<string, unknown>[] = []): { clients: ClientManager; sql: string[] } {
+  const sql: string[] = [];
+  const client = {
+    search: async (req: { sql: string }) => {
+      sql.push(req.sql);
+      return { hits: rows, took: 1 };
+    },
+    listStreams: async () => []
+  } as unknown as ObserveClient;
+  return { clients: new ClientManager(LIMITS, registryOf(), () => client), sql };
+}
+
+test("search_logs matches `service` on the resolved identity", async () => {
+  const { clients, sql } = recordingClients();
+  const { payload } = await bodyOf("search_logs", { service: "CommunicationHub.Web", profile: "standard" }, clients);
+
+  assert.match(sql[0], /WHERE COALESCE\(NULLIF\(service_name, 'unknown_service:dotnet'\)/);
+  assert.equal(payload.identity.resolved, true);
+  assert.equal(payload.identity.field, "applicationname");
+});
+
+test("search_logs reports the resolved service on each returned row", async () => {
+  const { clients } = recordingClients([
+    { _timestamp: 1_700_000_000_000_000, service_name: "unknown_service:dotnet", applicationname: "CommunicationHub.Web", body: "x" }
+  ]);
+  const { payload } = await bodyOf("search_logs", { profile: "standard" }, clients);
+  assert.equal(payload.logs[0].service, "CommunicationHub.Web");
+});
+
+test('log_stats groupBy:"service" resolves, groupBy:"serviceRaw" does not', async () => {
+  const { clients: a, sql: resolvedSql } = recordingClients();
+  const { payload: resolved } = await bodyOf("log_stats", { groupBy: "service", profile: "standard" }, a);
+  assert.match(resolvedSql[0], /GROUP BY COALESCE\(NULLIF\(service_name/);
+  // The bucket key stays `service_name` whichever ran, so consumers do not break.
+  assert.match(resolvedSql[0], /\) AS service_name, COUNT/);
+  assert.equal(resolved.groupBy, "service_name");
+  assert.equal(resolved.identity.resolved, true);
+
+  const { clients: b, sql: rawSql } = recordingClients();
+  const { payload: raw } = await bodyOf("log_stats", { groupBy: "serviceRaw", profile: "standard" }, b);
+  assert.equal(/COALESCE/.test(rawSql[0]), false);
+  assert.match(rawSql[0], /GROUP BY service_name/);
+  // No identity block: nothing was resolved, so claiming otherwise would be wrong.
+  assert.equal(raw.identity, null);
+});
+
+test("log_stats leaves the non-service groupings alone", async () => {
+  const { clients, sql } = recordingClients();
+  await bodyOf("log_stats", { groupBy: "level", profile: "standard" }, clients);
+  assert.match(sql[0], /^SELECT severity, COUNT/);
+  assert.equal(/COALESCE/.test(sql[0]), false);
+});
+
+test("a logs stream without the app-name column downgrades instead of failing", async () => {
+  // The traces stream genuinely has no such column, and DataFusion rejects an
+  // unknown column at PLAN time — so this has to degrade, not error.
+  resetIdentityCapability();
+  const client = {
+    search: async (req: { sql: string }) => {
+      if (req.sql.includes("applicationname")) {
+        throw new ObserveHttpError(400, "OpenObserve returned 400 Bad Request.", "Schema error: No field named applicationname.");
+      }
+      return { hits: [], took: 1 };
+    },
+    listStreams: async () => []
+  } as unknown as ObserveClient;
+  const clients = new ClientManager(LIMITS, registryOf(), () => client);
+
+  const { payload } = await bodyOf("search_logs", { service: "CRM.Gateway", profile: "standard" }, clients);
+  assert.equal(payload.isError, undefined);
+  assert.equal(payload.identity.resolved, false);
+  assert.match(payload.identity.note, /no "applicationname" column/);
 });

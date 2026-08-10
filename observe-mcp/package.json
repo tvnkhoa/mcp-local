@@ -12,7 +12,8 @@
     "test": "node --import tsx --test \"src/**/*.test.ts\"",
     "smoke": "node scripts/smoke-test.mjs",
     "catalog:refresh": "node scripts/refresh-catalog.mjs",
-    "catalog:check": "node scripts/refresh-catalog.mjs --check"
+    "catalog:check": "node scripts/refresh-catalog.mjs --check",
+    "catalog:verify": "node scripts/refresh-catalog.mjs --verify"
   },
   "dependencies": {
     "@mcp/core": "file:../packages/core",

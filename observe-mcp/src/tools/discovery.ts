@@ -16,9 +16,12 @@
  *     default because a logs-only answer is incomplete.
  *  2. **Contexts must be classified, not ranked.** By raw volume every top source
  *     context is framework plumbing. See `services/namespaces.ts`.
- *  3. **`unknown_service:dotnet` is not one service.** It is the largest bucket in
- *     both environments and is every app that never set OTel `service.name`.
- *     `include:"codeLinks"` is what takes it apart.
+ *  3. **`unknown_service:dotnet` is not one service.** It is every app that never set
+ *     OTel `service.name`, and it used to be the largest bucket in both environments.
+ *     It is now taken apart before you see it: the logs lane groups by the resolved
+ *     identity (`services/identity.ts`), so those apps appear under their own names
+ *     with an `identitySource` saying how each was attributed. What still lands in the
+ *     bucket is only what no field can name. `include:"codeLinks"` maps the rest.
  */
 
 import fs from "node:fs";
@@ -30,6 +33,12 @@ import { z } from "zod";
 
 import type { ObserveLimits } from "../config/index.js";
 import type { ClientManager } from "../services/clientManager.js";
+import {
+  classifyIdentitySource,
+  describeIdentity,
+  identitySourceSelect,
+  withIdentity
+} from "../services/identity.js";
 import { describeFields, microsToIso } from "../services/logParser.js";
 import { classifyNamespace, frameworkHints, nonFrameworkNamespaceRoots } from "../services/namespaces.js";
 import {
@@ -129,6 +138,11 @@ export function projectCatalogEntry(entry: unknown, detail: boolean): unknown {
       logsUnder: r.logsUnder,
       lanes: r.lanes,
       environments: r.environments,
+      // Two scalars, and they are what tells a caller how far to trust the rest —
+      // how the service was named, and whether the entry points at code or only at
+      // the libraries it uses. Too cheap to trim, too load-bearing to omit.
+      identitySource: r.identitySource,
+      identifiedBy: r.identifiedBy,
       note: r.note,
       frameworkHints: r.frameworkHints,
       appContextCount: asArray(r.appContexts).length + asArray(r.borrowedContexts).length
@@ -172,18 +186,37 @@ export function environmentRowsFor(capture: unknown, service: string): unknown {
   };
 }
 
-/** Age of the capture in whole days, plus a warning once it is old enough to mislead. */
+/**
+ * Age of the capture, plus the caveat that age alone cannot express.
+ *
+ * Age is a weak freshness signal here and reporting it alone was actively misleading:
+ * a capture showed `ageDays: 0` while four of its assertions about one service were
+ * already false, because the owning team fixed that service's `service.name` three
+ * hours after the capture. The staler the artifact, the more confident the note read.
+ *
+ * So `assertionsNote` is unconditional, not gated on age: `logsUnder` and `note` are
+ * point-in-time observations about where a service's rows landed, and any of them can
+ * be invalidated by a single deploy. `npm run catalog:verify` re-tests them.
+ */
 function catalogFreshness(catalog: ServiceCatalog, nowMs: number): Record<string, unknown> {
   const capturedAt = typeof catalog.capturedAt === "string" ? catalog.capturedAt : null;
   const parsed = capturedAt ? Date.parse(capturedAt) : Number.NaN;
+  const assertionsNote =
+    "`logsUnder`, `lanes` and `note` are point-in-time observations, not durable facts — one deploy on the emitting service can invalidate them at any age. Re-test with `npm run catalog:verify`, or drop source:\"catalog\" to measure live.";
   if (!capturedAt || Number.isNaN(parsed)) {
-    return { capturedAt: null, ageDays: null, staleWarning: "Catalog has no usable capturedAt; treat it as unverified." };
+    return {
+      capturedAt: null,
+      ageDays: null,
+      assertionsNote,
+      staleWarning: "Catalog has no usable capturedAt; treat it as unverified."
+    };
   }
   const ageDays = Math.floor((nowMs - parsed) / 86_400_000);
   return {
     capturedAt,
     window: catalog.window ?? null,
     ageDays,
+    assertionsNote,
     staleWarning:
       ageDays > 30
         ? `Catalog was captured ${ageDays} days ago; re-run \`npm run catalog:refresh\` before relying on it.`
@@ -199,7 +232,7 @@ export function buildDiscoveryTools(limits: ObserveLimits, clients: ClientManage
   const discoverServices = defineTool({
     name: "discover_services",
     description:
-      "Discover which services are emitting into an environment: per-service log volume, error/warning counts, first/last seen, and (with include:\"codeLinks\") the application namespaces that identify the owning code. Covers both the logs and traces lanes. Use this instead of assuming a fixed service list.",
+      "Discover which services are emitting into an environment: per-service log volume, error/warning counts, first/last seen, how the service was identified (identitySource), and (with include:\"codeLinks\") the application namespaces that identify the owning code. Covers both the logs and traces lanes. Use this instead of assuming a fixed service list.",
     input: z
       .object({
         environment: environmentArg,
@@ -226,7 +259,7 @@ export function buildDiscoveryTools(limits: ObserveLimits, clients: ClientManage
       start: schema.string("Absolute start (ISO 8601 or epoch ms)"),
       end: schema.string("Absolute end (ISO 8601 or epoch ms)"),
       limit: schema.number("Max services per lane (default 200); servicesTruncated says when it bit"),
-      service: schema.string("Restrict contexts/fields to one service_name"),
+      service: schema.string("Restrict contexts/fields to one service (matched on the resolved identity)"),
       lane: schema.enumOf(["logs", "traces", "both"]),
       include: schema.array(schema.enumOf(["contexts", "fields", "streams", "codeLinks"]), "Optional extra sections"),
       sample: schema.number("Rows to sample when include contains \"fields\" (default 25, max 50)"),
@@ -345,18 +378,23 @@ export function buildDiscoveryTools(limits: ObserveLimits, clients: ClientManage
       const lane = input.lane ?? "both";
 
       // --- the logs lane -----------------------------------------------------
-      const logRows =
+      // Grouped by the RESOLVED identity, so an app whose rows arrive on the Serilog
+      // OTLP path is listed under its own name instead of being folded into the
+      // shared `unknown_service:dotnet` bucket with 25 others.
+      const identityKey = `${env.name}:${stream}`;
+      const identityRun =
         lane === "traces"
-          ? []
-          : (
-              await client.search({
-                sql: buildServiceInventorySql(stream, limit),
+          ? { result: { hits: [] as Record<string, unknown>[] }, resolved: false }
+          : await withIdentity(identityKey, limits, (serviceExpr) =>
+              client.search({
+                sql: buildServiceInventorySql(stream, limit, serviceExpr, identitySourceSelect(limits)),
                 startUs: window.startUs,
                 endUs: window.endUs,
                 size: limit,
                 type: "logs"
               })
-            ).hits;
+            );
+      const logRows = identityRun.result.hits;
 
       const services = logRows.map((row) => ({
         name: stringOf(row.service_name),
@@ -364,6 +402,13 @@ export function buildDiscoveryTools(limits: ObserveLimits, clients: ClientManage
         errorCount: numberOf(row.error_count),
         warnCount: numberOf(row.warn_count),
         contextCount: numberOf(row.context_count),
+        // Which OTLP path named this service. `mixed` is not an ambiguity and not
+        // rare — an app normally runs both paths, so it is the ordinary state, and
+        // it is the useful one: it marks a service whose rows are partly reachable
+        // only through the app-name field.
+        identitySource: identityRun.resolved
+          ? classifyIdentitySource(numberOf(row.resource_rows), numberOf(row.enricher_rows))
+          : null,
         firstSeen: microsToIso(row.first_seen),
         lastSeen: microsToIso(row.last_seen)
       }));
@@ -437,6 +482,7 @@ export function buildDiscoveryTools(limits: ObserveLimits, clients: ClientManage
           ? "lane:\"traces\" queried only the traces stream, so `services` is the span-producing inventory and the logs/trace-only split is not available. Use lane:\"both\" for that."
           : null,
         limit,
+        identity: lane === "traces" ? null : describeIdentity(limits, identityRun.resolved),
         serviceCount: inventory.length,
         services: inventory,
         servicesTruncated,
@@ -454,13 +500,17 @@ export function buildDiscoveryTools(limits: ObserveLimits, clients: ClientManage
       // --- include: contexts -------------------------------------------------
       if (include.has("contexts")) {
         const size = clampSize(limits.maxSize, limits);
-        const res = await client.search({
-          sql: buildContextInventorySql(stream, size, input.service),
-          startUs: window.startUs,
-          endUs: window.endUs,
-          size,
-          type: "logs"
-        });
+        const res = (
+          await withIdentity(identityKey, limits, (serviceExpr) =>
+            client.search({
+              sql: buildContextInventorySql(stream, size, input.service, serviceExpr),
+              startUs: window.startUs,
+              endUs: window.endUs,
+              size,
+              type: "logs"
+            })
+          )
+        ).result;
         const contexts = res.hits.map((row) => {
           const name = stringOf(row.instrumentation_library_name) ?? "";
           return { name, count: numberOf(row.count), classification: classifyNamespace(name, limits) };
@@ -474,18 +524,26 @@ export function buildDiscoveryTools(limits: ObserveLimits, clients: ClientManage
       // it, the global matrix is bounded by maxSize and high-volume services eat
       // the budget, so the truncation is reported rather than hidden. The catalog
       // refresh script iterates services one at a time for full coverage.
+      //
+      // Grouped by the resolved identity, which is what fixes the attribution: a
+      // Clean-Architecture app logs from several namespace roots, and before this
+      // only the root matching its own service name reached its entry — the rest
+      // stayed on the sentinel's. Now every context a service emits lands on it.
       if (include.has("codeLinks")) {
         const size = clampSize(limits.maxSize, limits);
-        const sql = input.service
-          ? buildContextInventorySql(stream, size, input.service)
-          : buildServiceContextMatrixSql(stream, size);
-        const res = await client.search({
-          sql,
-          startUs: window.startUs,
-          endUs: window.endUs,
-          size,
-          type: "logs"
-        });
+        const res = (
+          await withIdentity(identityKey, limits, (serviceExpr) =>
+            client.search({
+              sql: input.service
+                ? buildContextInventorySql(stream, size, input.service, serviceExpr)
+                : buildServiceContextMatrixSql(stream, size, serviceExpr),
+              startUs: window.startUs,
+              endUs: window.endUs,
+              size,
+              type: "logs"
+            })
+          )
+        ).result;
 
         const perService = new Map<string, Array<{ name: string; count: number }>>();
         for (const row of res.hits) {
@@ -520,13 +578,17 @@ export function buildDiscoveryTools(limits: ObserveLimits, clients: ClientManage
         // 25, not describe_stream's 5: a 5-row sample misses any field absent
         // from those rows, which for a service-scoped sample is most of them.
         const sample = input.sample ?? 25;
-        const res = await client.search({
-          sql: buildSampleSql(stream, sample, input.service),
-          startUs: window.startUs,
-          endUs: window.endUs,
-          size: sample,
-          type: "logs"
-        });
+        const res = (
+          await withIdentity(identityKey, limits, (serviceExpr) =>
+            client.search({
+              sql: buildSampleSql(stream, sample, input.service, serviceExpr),
+              startUs: window.startUs,
+              endUs: window.endUs,
+              size: sample,
+              type: "logs"
+            })
+          )
+        ).result;
         const fields = describeFields(res.hits);
         payload.sampled = res.hits.length;
         payload.fieldCount = fields.length;

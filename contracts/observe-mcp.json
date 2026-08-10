@@ -64,7 +64,7 @@
         "openWorldHint": true,
         "readOnlyHint": true
       },
-      "description": "Discover which services are emitting into an environment: per-service log volume, error/warning counts, first/last seen, and (with include:\"codeLinks\") the application namespaces that identify the owning code. Covers both the logs and traces lanes. Use this instead of assuming a fixed service list.",
+      "description": "Discover which services are emitting into an environment: per-service log volume, error/warning counts, first/last seen, how the service was identified (identitySource), and (with include:\"codeLinks\") the application namespaces that identify the owning code. Covers both the logs and traces lanes. Use this instead of assuming a fixed service list.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -115,7 +115,7 @@
             "type": "number"
           },
           "service": {
-            "description": "Restrict contexts/fields to one service_name",
+            "description": "Restrict contexts/fields to one service (matched on the resolved identity)",
             "type": "string"
           },
           "source": {
@@ -263,7 +263,7 @@
         "openWorldHint": true,
         "readOnlyHint": true
       },
-      "description": "Aggregate log counts grouped by level (default), service, or sourceContext over a time window — an error/warning summary.",
+      "description": "Aggregate log counts grouped by level (default), service, or sourceContext over a time window — an error/warning summary. `service` groups by the RESOLVED service identity, so apps whose rows arrive under unknown_service:dotnet are counted under their own name; use `serviceRaw` for the raw service_name column.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -278,6 +278,7 @@
             "enum": [
               "level",
               "service",
+              "serviceRaw",
               "sourceContext"
             ],
             "type": "string"
@@ -414,7 +415,7 @@
             "type": "string"
           },
           "service": {
-            "description": "service_name, e.g. CRM.Gateway — use discover_services to list them",
+            "description": "Service name, e.g. CRM.Gateway — matched on the RESOLVED identity, so it finds an app whose rows arrive under unknown_service:dotnet too. Use discover_services to list them",
             "type": "string"
           },
           "sourceContext": {
