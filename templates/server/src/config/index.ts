@@ -6,9 +6,25 @@
  * down rather than reaching for the environment again.
  */
 
-import { createEnvReader, defaultEnvSource } from "@mcp/core";
+import { createEnvReader, defaultEnvSource, type EnvReader } from "@mcp/core";
 
-const env = createEnvReader(defaultEnvSource());
+let reader: EnvReader | undefined;
+
+/**
+ * The environment snapshot, taken on first read rather than at import.
+ *
+ * `defaultEnvSource()` copies `process.env` — so *when* it is called decides what the server sees.
+ * At module scope it runs during the entry point's import phase, before a single statement of
+ * `index.ts` has executed, which means anything the entry point does to the environment first is
+ * invisible to every read below. `postgres-mcp` shipped that bug (PG-ENV-002): its legacy-variable
+ * alias pass ran as the first statement of `index.ts` and still lost to this snapshot, silently
+ * turning off its write and migration gates.
+ *
+ * Reading lazily costs nothing and removes the ordering question entirely. Keep it lazy.
+ */
+function env(): EnvReader {
+  return (reader ??= createEnvReader(defaultEnvSource()));
+}
 
 export interface __PASCAL__Config {
   /** Example required setting. Replace with this server's own. */
@@ -23,13 +39,13 @@ export interface __PASCAL__Config {
  * one that refuses to start, so validation belongs here rather than in a handler.
  */
 export function loadConfig(): __PASCAL__Config {
-  const baseUrl = env.string("__ENV_PREFIX___BASE_URL", "");
+  const baseUrl = env().string("__ENV_PREFIX___BASE_URL", "");
   if (baseUrl === "") {
     throw new Error("__ENV_PREFIX___BASE_URL is required — see .env.example");
   }
   return {
     baseUrl,
-    timeoutMs: env.positiveNumber("__ENV_PREFIX___TIMEOUT_MS", 30_000)
+    timeoutMs: env().positiveNumber("__ENV_PREFIX___TIMEOUT_MS", 30_000)
   };
 }
 

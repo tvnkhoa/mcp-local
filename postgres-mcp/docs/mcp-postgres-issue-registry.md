@@ -12,8 +12,8 @@ Resolution. Mirrors the format of `codebase-index-mcp/docs/mcp-codebase-index-is
 
 ## Index
 
-**14 entries** — all 14 resolved (some as documented guidance rather than code changes). Statuses are copied from each
-entry's own `**Status:**` line; the entry is authoritative.
+**15 entries** — all 15 resolved (some as documented guidance rather than code changes), **0 open**.
+Statuses are copied from each entry's own `**Status:**` line; the entry is authoritative.
 
 | ID | Title | Status |
 |---|---|---|
@@ -31,10 +31,16 @@ entry's own `**Status:**` line; the entry is authoritative.
 | `PG-PRV-001` | `migration_preview` response too large (~50 KB), ignores `profile`, forces file-dump + manual… | ✅ fixed 2026-07-06 — reported same day from `wec.commu |
 | `PG-PRV-002` | Approval-token TTL (~15 min, in-memory) races against the human-approval gate on `migration_a… | ✅ fixed 2026-07-06 — reported same day; design/UX sugg |
 | `PG-STA-001` | `migration_status.raw` duplicates parsed arrays as an escaped JSON blob even at `profile:"com… | ✅ fixed 2026-07-06 — reported same day; low priority / |
+| `PG-ENV-002` | S-43 env aliases inert for everything read through `config/index.ts` — silently disables the… | ✅ fixed 2026-08-05 (code) — `src/config/index.ts` reads |
 
 > ID prefixes group by area: `ENV` environment resolution · `SEC` safety posture · `DOC`
 > documentation drift · `CMP` compare_environments · `MIG` EF Core migrations · `DIF` data_diff ·
 > `REV` code review sweeps · `PRV` preview payloads · `STA` status payloads.
+
+> **Environment names moved.** Most entries below are written against `environment:"default"`, which
+> **no longer exists** — as of 2026-08-05 the environments are `dev` (the default, and the same
+> database `default` named), `uat`, and a new read-only `prod`. See the 2026-08-05 topology update in
+> PG-ENV-001 before re-running any example.
 
 ---
 
@@ -71,6 +77,42 @@ entry's own `**Status:**` line; the entry is authoritative.
   out to be legacy/non-EF objects unique to `default` — they exist identically on both sides and were
   only ever flagged due to the PG-CMP-001 bug. `schemaIdentical:false` between `default`/`uat` reflects
   a small amount of real, specific drift, not systemic legacy divergence.
+- **Update 2026-08-05 — topology changed again; `default` no longer exists. Read this before trusting
+  any `environment:"default"` example elsewhere in this file.** Live `list_environments` after a
+  server reconnect now returns **three** environments, all `source:"env"`:
+
+  | Env | Host | Capabilities | Was |
+  |---|---|---|---|
+  | `dev` (**isDefault**) | `sscrm-postgresql…ap-southeast-2.rds…` | `["read","write"]` | the same physical RDS the old `default` pointed at — host string is identical |
+  | `uat` | `wecrm-uat-postgres…` | `["read","write"]` | unchanged since the 2026-06-30 update |
+  | `prod` | `wecrm-prod-postgres…` | `["read"]` | **new** — no `prod` env existed before today |
+
+  `POSTGRES_DEFAULT_ENVIRONMENT` is now `dev`, and `migration_status(environment:"default")` fails
+  with `UNKNOWN_ENVIRONMENT: Environment 'default' is not configured. Known environments: dev, prod,
+  uat.` Every example in this file written against `default` — PG-MIG-001/002/003/004, PG-DIF-001/002,
+  PG-REV-001, PG-SEC-001 — was written against **that same `sscrm-postgresql` database**; only the env
+  name it answers to changed. Substitute `dev` when re-running any of them.
+
+  Three consequences worth carrying forward:
+
+  1. **PG-SEC-001's posture is materially different.** A genuinely separate `prod` environment now
+     exists, and the server's unconditional force-demotion of `prod` to read-only is load-bearing for
+     the first time rather than a guard with nothing to guard. The shared prod-like RDS is still
+     directly writable, now under the name `dev`.
+  2. **PG-MIG-003's live example has resolved.** That entry recorded `default` at
+     `appliedCount:0, pendingCount:3` with 49 pre-squash rows in `__EFMigrationsHistory` — the
+     ledger-ID mismatch that made `migration_dry_run` fail on `relation "conversations" already
+     exists`. `migration_status(environment:"dev")` today reports **54 applied / 0 pending**, with the
+     full pre-squash lineage (`20260325103154_InitialCreate` → `20260805042256_AddConversation…`)
+     listed as applied. So the squash boundary this database was stuck on is behind it. The *guidance*
+     in PG-MIG-003 stands unchanged — it describes a property of ledger-based checking, not an
+     incident — but its "currently active on `default`, not just historical" framing is now historical.
+  3. **`compare_environments` / `data_diff` are meaningful across three distinct RDS instances**, which
+     is the concern this entry was opened for. Note `prod` is read-only, so it is a valid *source* or
+     *target* for comparison but never a write/migration target.
+
+  Not re-verified today: `migration_status` on `uat`/`prod`, and the `dev` ↔ `uat` schema drift last
+  measured on 2026-07-02. Only the topology and `dev`'s migration ledger were checked.
 
 ## PG-SEC-001 — Shared RDS `default` was marked writable (latent write-to-prod risk)
 
@@ -608,6 +650,130 @@ entry's own `**Status:**` line; the entry is authoritative.
 
 ---
 
+## PG-ENV-002 — S-43 env aliases are inert for everything read through `config/index.ts`, silently disabling the write + migration gates
+
+- **Status:** fixed 2026-08-05 (code) — `src/config/index.ts` now creates its `EnvReader` lazily and
+  runs the alias pass itself. Reported the same day from `wec.communication-hub`, which had worked
+  around it by renaming its own env keys to canonical `POSTGRES_*`.
+- **First observed:** 2026-08-05, applying `20260805042256_AddConversationReasonsAndComposeThreadKey`
+  to `default`.
+- **Scenario:** an install still carrying the pre-S-43 variable names — i.e. every install that
+  existed before the rename, which is exactly the population the alias table was written to protect.
+- **Tool/query:** `migration_status(environment:"default")`.
+- **Expected vs actual:** expected the alias table to make `PG_MIGRATION_ENABLED=true` work as
+  documented ("the old names keep working"). Actual: `MIGRATION_DISABLED — Set
+  POSTGRES_MIGRATION_ENABLED=true, POSTGRES_DOTNET_PROJECT and POSTGRES_DOTNET_STARTUP_PROJECT to
+  enable.", while `list_environments` resolved `PG_ENV_UAT`/`PG_ENV_PROD`/`PG_WRITABLE_ENVIRONMENTS`
+  perfectly — so the server looked correctly configured.
+- **Root cause:** ESM evaluation order defeats `resolveAliases()`.
+  `src/index.ts` calls it as its first statement, with a comment stating the intent
+  ("First statement with an effect, deliberately … an install still carrying `PG_*` or `CH_*` would
+  otherwise fall through to defaults — silently, and for the write and migration gates that means
+  reading `false` where the operator set `true`"). But a module's **imports are fully evaluated before
+  its body runs**, and `src/config/index.ts:20` snapshots the environment at module scope:
+
+  ```ts
+  const envReader = createEnvReader(defaultEnvSource());   // defaultEnvSource() = { ...process.env }
+  ```
+
+  So the snapshot is taken during import, before `resolveAliases()` copies legacy → canonical. The
+  comment on `defaultEnvSource` in `packages/core/src/env.js` ("Called explicitly — never at module
+  load") states the contract that this call site breaks.
+
+  Reproduced directly:
+
+  ```
+  $ PG_MIGRATION_ENABLED=true node -e "…resolveAliases(); …"
+  POSTGRES_MIGRATION_ENABLED = "true"     ← alias copied fine
+  parseBoolEnv(...)          = false      ← reader still on the pre-alias snapshot
+  ```
+
+- **Impact:** **fails silently toward "off"**, and — this is the part that makes it worth a code fix
+  rather than a doc note — only for the config that gates destructive capability.
+
+  **Corrected 2026-08-05 (the original report over-stated the blast radius).** Not everything read
+  via `config/index.ts` was affected: only the accessors that went through the snapshotted
+  `EnvReader`. `numberFromEnv` read `process.env[key]` **live** on every call, so by the time it ran
+  (from `index.ts`'s body, after `resolveAliases()`) the aliases were in place and it worked
+  correctly. Reproduced both halves in one boot with only legacy names set:
+
+  | Legacy name set by the operator | Read via | What the server actually used |
+  |---|---|---|
+  | `PG_WRITE_ENABLED=true` | `envReader.strictFlag` | `false` → **all write tools disabled** |
+  | `PG_MIGRATION_ENABLED=true` | `envReader.strictFlag` | `false` → all migration tools disabled |
+  | `CH_DOTNET_PROJECT` / `CH_DOTNET_STARTUP_PROJECT` | `envReader.string` | `""` → migration gate reports unconfigured |
+  | `PG_WRITE_APPROVAL_SECRET` | `envReader.string` | `""` → a per-process secret generated instead, so tokens silently stopped surviving a restart |
+  | `MCP_DB_DEFAULT_LIMIT` / `MCP_DB_MAX_LIMIT` / `MCP_DB_*_TIMEOUT_MS` / `PG_EXPLAIN_COST_WARN` / the four TTL+sample vars | `numberFromEnv` (live) | **correct** — the operator's value was honoured. The original report's "hardcoded defaults, operator values ignored" row was wrong |
+
+  So the affected surface was exactly **5** of the 20 aliased variables — and all five gate or
+  authenticate a write path, which is why the failure was invisible until someone tried to migrate.
+
+  `POSTGRES_ENV_*` / `POSTGRES_WRITABLE_ENVIRONMENTS` / `POSTGRES_DEFAULT_ENVIRONMENT` are **not**
+  affected — `resolveEnvironments()` calls `resolveAliases()` itself and then reads live. That
+  asymmetry is what makes the failure confusing to diagnose: the visible surface
+  (`list_environments`) is correct while the gates are off, so it reads as "migration tools are
+  broken" rather than "your variable names are stale".
+
+  Note the deprecation warnings on stderr *do* fire (`PG_MIGRATION_ENABLED is deprecated — use
+  POSTGRES_MIGRATION_ENABLED. The old name still works for now.`), which actively misleads: the
+  warning asserts the fallback worked, at the moment it did not.
+
+- **Fix (2026-08-05, `src/config/index.ts`):** both halves of the suggestion, as one mechanism — the
+  `EnvReader` is created on first read, and creating it runs the alias pass:
+
+  ```ts
+  function env(): EnvReader {
+    if (reader === undefined) {
+      resolveAliases();
+      reader = createEnvReader(defaultEnvSource());
+    }
+    return reader;
+  }
+  ```
+
+  Lazy alone would have been enough for the entry point, but calling `resolveAliases()` here means a
+  caller that never went through `index.ts` — a test, or a second entry point — gets the same alias
+  handling a real boot does. That is the existing `resolveEnvironments()` precedent, and
+  `resolveAliases` is idempotent, so the entry point's own call still reports each deprecation exactly
+  once (pinned by a test). `numberFromEnv` was moved off its direct `process.env` read onto
+  `env().raw(key)` for the same reason; `raw` trims and treats a whitespace-only value as unset, which
+  is the outcome the old `!raw` / `Number("  ") <= 0` path produced for **every** input, so the parse
+  is unchanged — deliberately, since these values include `POSTGRES_EXPLAIN_COST_WARN` and the TTLs.
+
+- **Regression test:** `src/config/envAliasOrder.test.ts`, and it runs in a **child process** by
+  design, not by convenience. An in-process test cannot catch this class of bug: by the time it
+  executes, its own imports have been evaluated and any module-scope snapshot is long taken, so
+  setting `process.env` and asserting would pass against the broken code too. The child boots with
+  static imports in the same order `index.ts` uses, carrying **only** legacy names, with every
+  inherited `POSTGRES_*`/`PG_*`/`CH_*`/`MCP_DB_*` variable stripped first — a developer machine
+  running this suite has a real configuration in its shell, and inheriting a canonical name would
+  satisfy the assertion while hiding the regression. Four cases: legacy-only reaches both gates,
+  the deprecation warning fires once and names its replacement, canonical still works and wins over a
+  legacy twin, and an unset gate still reads `false`. Verified discriminating: the same boot script
+  against the pre-fix build returns `migrationEnabled: false, writeEnabled: false`; against the fixed
+  source, `true`/`true`. Full suite 68/68, typecheck clean.
+
+- **Audit of the other three servers — no exposure (2026-08-05).** The report flagged the same
+  module-scope `createEnvReader(defaultEnvSource())` pattern in `codebase-index-mcp`, `observe-mcp`
+  and `bitbucket-mcp` as worth checking. They do share the pattern, but none of them has an alias
+  table: `deprecatedAliases` appears **22 times in `packages/manifest/src/envSpecs/postgres.ts` and 0
+  times** in the other three specs, and no `resolveAliases` exists anywhere in their `src/`. With
+  nothing mutating the environment before the snapshot, the eager read is harmless there. The bug
+  needed both ingredients, and only `postgres-mcp` has the second one.
+
+- **`templates/server/src/config/index.ts` (fixed 2026-08-05, prevention).** The scaffold every new
+  server is generated from carried the same eager module-scope snapshot. Harmless as shipped — a new
+  server has no alias table either — but it propagates the pattern to code written after the alias
+  question is forgotten. Made lazy, with the comment explaining what `postgres-mcp` paid for it.
+
+- **Consumer workaround (2026-08-05, now unnecessary):** the consuming repo had renamed all 12 keys in
+  the `postgres-mcp` env block of `~/.claude.json` to canonical `POSTGRES_*` and reconnected (env is
+  read at spawn). Verified after reconnect: `migration_status` → 53 applied / 1 pending, and the
+  pending migration applied cleanly. Canonical names remain the right thing to configure — the fix
+  means an install that never renamed no longer fails silently.
+
+---
+
 ## Verified-working behaviors (confirmed against the live server / source, 2026-06-29)
 
 - **SSL is per-connection via the URI `sslmode`, overriding global `PGSSLMODE`.** `parseConnection`
@@ -628,9 +794,11 @@ entry's own `**Status:**` line; the entry is authoritative.
 - **Undocumented capability — `schema://<env>` MCP resource.** The server exposes one schema-snapshot
   resource per environment (`ListResources`/`ReadResource`), letting a client read full structure once
   instead of repeating `describe_table`. Not surfaced as a tool — a token saver worth using.
-- **Migration tools** require `PG_MIGRATION_ENABLED=true` plus `CH_DOTNET_PROJECT` (Infrastructure,
-  holds `ApplicationDbContext`) and `CH_DOTNET_STARTUP_PROJECT` (Web). `dotnet ef` must be on PATH
-  (verified: EF Core 10.0.4 present).
+- **Migration tools** require `POSTGRES_MIGRATION_ENABLED=true` plus `POSTGRES_DOTNET_PROJECT`
+  (Infrastructure, holds `ApplicationDbContext`) and `POSTGRES_DOTNET_STARTUP_PROJECT` (Web).
+  `dotnet ef` must be on PATH (verified: EF Core 10.0.4 present). Prefer the canonical `POSTGRES_*`
+  names, but the legacy `PG_*`/`CH_*` aliases do now work for these three — they were inert until
+  `PG-ENV-002` was fixed on 2026-08-05.
 - **Migration pipeline verified end-to-end against a real RDS (2026-06-30, `uat`).**
   `migration_dry_run` → `migration_preview` → `migration_apply` of one pending migration onto a DB
   already holding the baseline behaved correctly: the preview SQL guards **every** statement with

@@ -15,9 +15,36 @@
  * stop reporting it.
  */
 
-import { createEnvReader, defaultEnvSource } from "@mcp/core";
+import { createEnvReader, defaultEnvSource, type EnvReader } from "@mcp/core";
 
-const envReader = createEnvReader(defaultEnvSource());
+import { resolveAliases } from "./aliases.js";
+
+let reader: EnvReader | undefined;
+
+/**
+ * The environment snapshot, taken on first read rather than at import (PG-ENV-002).
+ *
+ * `index.ts` calls `resolveAliases()` as its first statement with an effect, but a module's imports
+ * are fully evaluated before the importer's body runs — so a module-scope
+ * `createEnvReader(defaultEnvSource())` here snapshotted `process.env` *before* the alias pass had
+ * copied any legacy name onto its canonical one. Everything read through this reader then fell
+ * through to its default: the write and migration gates read `false` where the operator had set
+ * `true`, silently, while the deprecation warning on stderr asserted the fallback had worked.
+ *
+ * Two things fix it, and both are here on purpose. Lazily creating the reader means the snapshot
+ * cannot precede an alias pass no matter who imports this module first; calling `resolveAliases()`
+ * ourselves means a caller that never went through the entry point — a test, or a future second
+ * entry point — gets the same alias handling a real boot does. That is the existing precedent from
+ * `resolveEnvironments()`, and `resolveAliases` is idempotent, so the entry point's own call still
+ * reports the deprecations exactly once.
+ */
+function env(): EnvReader {
+  if (reader === undefined) {
+    resolveAliases();
+    reader = createEnvReader(defaultEnvSource());
+  }
+  return reader;
+}
 
 /**
  * A positive number, or the fallback when unset, unparseable, or ≤ 0.
@@ -26,10 +53,15 @@ const envReader = createEnvReader(defaultEnvSource());
  * `envReader.positiveNumber`: that helper floors its result, and these values include
  * `POSTGRES_EXPLAIN_COST_WARN` and TTLs where a silent change of parsing is a change of behaviour. The
  * point of S-41 is to move the read, not to re-decide what it means.
+ *
+ * The read goes through `env().raw` rather than `process.env` directly so that a caller which never
+ * reached the entry point still gets the alias pass (PG-ENV-002). `raw` trims and reports a
+ * whitespace-only value as unset, which is the same outcome the old `!raw` / `Number("  ") <= 0`
+ * path produced for every input — the parse below is unchanged.
  */
 export function numberFromEnv(key: string, fallbackValue: number): number {
-  const raw = process.env[key];
-  if (!raw) {
+  const raw = env().raw(key);
+  if (raw === undefined) {
     return fallbackValue;
   }
   const parsed = Number(raw);
@@ -47,12 +79,12 @@ export function numberFromEnv(key: string, fallbackValue: number): number {
  * write path, which is the one place in this server where a permissive parse is a security bug.
  */
 export function parseBoolEnv(key: string): boolean {
-  return envReader.strictFlag(key);
+  return env().strictFlag(key);
 }
 
 /** A trimmed string, empty when unset. */
 function stringFromEnv(key: string): string {
-  return envReader.string(key, "").trim();
+  return env().string(key, "").trim();
 }
 
 /**
@@ -60,7 +92,7 @@ function stringFromEnv(key: string): string {
  * one. Empty string when unset, which is what triggers per-process generation.
  */
 export function approvalSecretFromEnv(): string {
-  return envReader.string("POSTGRES_WRITE_APPROVAL_SECRET", "");
+  return env().string("POSTGRES_WRITE_APPROVAL_SECRET", "");
 }
 
 /** `dotnet ef` project paths. Empty when unset; the migration gate reports that as unconfigured. */

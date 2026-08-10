@@ -158,7 +158,16 @@ test("no legacy name is left in postgres-mcp source outside the alias table", ()
       if (fs.statSync(full).isDirectory()) { walk(full); continue; }
       if (!name.endsWith(".ts")) continue;
       const rel = path.relative(ROOT, full).replace(/\\/g, "/");
-      if (rel.endsWith("config/aliases.ts") || rel.endsWith("config/aliases.test.ts")) continue;
+      // The alias table itself, and the two test files whose whole subject is the alias table:
+      // `aliases.test.ts` pins the mapping, `envAliasOrder.test.ts` boots a child process carrying
+      // only legacy names to pin that they reach the gates (PG-ENV-002). Exempted by name rather
+      // than by a blanket `.test.ts` skip, so a test that quietly reads a legacy name for real
+      // configuration is still caught.
+      if (
+        rel.endsWith("config/aliases.ts") ||
+        rel.endsWith("config/aliases.test.ts") ||
+        rel.endsWith("config/envAliasOrder.test.ts")
+      ) continue;
       const text = fs.readFileSync(full, "utf8");
       text.split("\n").forEach((line, i) => {
         if (!legacy.test(line)) return;
