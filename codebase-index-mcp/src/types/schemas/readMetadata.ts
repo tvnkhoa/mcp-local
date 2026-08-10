@@ -71,6 +71,13 @@ export const queryDocsSchema = (MAX_RESULT_LIMIT: number) => z
      * symbol illustrated" rather than "which docs are now stale".
      */
     includeCodeMentions: z.boolean().default(false),
+    /**
+     * MCP-ISSUE-058(d): which doc section kinds mode="search" may answer with. Defaults to prose and
+     * headings — a search for a type name that answers with a mermaid diagram matching two unrelated
+     * words is a false positive, and `mode:"stale"` already counts prose only, so the two modes used
+     * to disagree about what a mention is. Pass ["code_block"] (or all three) to widen.
+     */
+    contentTypes: z.array(z.enum(["heading", "prose", "code_block"])).min(1).max(3).optional(),
     profile: responseProfileSchema.default("compact")
   })
   .strict()

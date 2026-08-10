@@ -203,6 +203,14 @@ export type SymbolRecord = {
   signature?: string;
   /** ID of the enclosing class/struct/interface symbol. Used for qualified property edge resolution. */
   parentSymbolId?: string;
+  /**
+   * How this row was matched, when it came from a search (MCP-ISSUE-058(b)).
+   *
+   * Absent means the index matched the query terms. `"fuzzy"` means it arrived through the vector
+   * near-neighbour padding and may share no name token with the query at all — a distinction the
+   * caller previously had no way to make, because both were reported at `confidence: "high"`.
+   */
+  matchType?: "fuzzy";
 };
 
 export type EdgeRecord = {
@@ -237,6 +245,11 @@ export type RouteRecord = {
   filePath: string;
   controllerSymbolId: string;
   handlerSymbolId: string;
+  /**
+   * MCP-ISSUE-055: the delegate name as written at the registration site. Survives when
+   * `handlerSymbolId` could not be resolved — e.g. a partial-class handler declared in a sibling file.
+   */
+  handlerName: string | null;
   httpMethod: "GET" | "POST" | "PUT" | "DELETE" | "PATCH";
   routeTemplate: string;
   line: number;
@@ -430,3 +443,54 @@ export type RefactorRollbackRecord = {
   restoredFiles: number;
   conflictCount: number;
 };
+
+/**
+ * Edge `reason` labels that mean "the target was chosen from the callee's NAME alone".
+ *
+ * MCP-ISSUE-052: a traversal standing on one of these is standing on a guess. The resolver writes
+ * them (`services/graph/edgeResolverCalls.ts`) and the read side uses them to refuse a
+ * `coverage.confidence: "high"` it has not earned — so the two must agree on the exact strings.
+ */
+export const NAME_ONLY_EDGE_REASONS: ReadonlySet<string> = new Set([
+  "resolved callee by name",
+  "resolved callee by name (ambiguous)",
+  "resolved callee vector-fallback",
+  "resolved property by name",
+  // The receiver's type was never proven — only the member name matched. MCP-ISSUE-052.
+  "resolved property by name (unproven owner)"
+]);
+
+/** Provenance roll-up for the edges underneath a traversal result. */
+export type EdgeProvenance = {
+  /** Edges considered. */
+  total: number;
+  /** How many of them were resolved by name only — see NAME_ONLY_EDGE_REASONS. */
+  nameOnly: number;
+  /** Lowest edge confidence in the set; 1 when there were no edges. */
+  minConfidence: number;
+};
+
+/**
+ * `to_id` prefixes that mean "extraction emitted a token and resolution never found a symbol for it".
+ *
+ * MCP-ISSUE-053: these rows join no symbol, so they surface with a null `toName` and a synthetic id —
+ * `{"toId":"callee:Contains"}`, or worse `{"confidence":0.1}` with nothing else once null fields are
+ * dropped. They also consumed `limit` slots ahead of real edges, so raising `limit` was the only way
+ * to see actual callees. They are already counted in `graphHealth` / `unresolved`, which is where they
+ * belong.
+ *
+ * Deliberately NOT listed: `nuget:`, `endpoint:` and `contract:`. Those are unresolved *by design* —
+ * they name something outside the repo that a consumer legitimately queries (find_package_consumers
+ * reads `DEPENDS_ON` → `nuget:%`), so they are data rather than noise.
+ */
+export const UNRESOLVED_SYMBOL_TOKEN_PREFIXES = ["callee:", "property:", "type:", "iface:", "base:", "import:"] as const;
+
+/**
+ * SQL predicate form of {@link UNRESOLVED_SYMBOL_TOKEN_PREFIXES}, for filtering in the query rather
+ * than after it — applying it post-hoc leaves the noise counted against `LIMIT`.
+ *
+ * `e` is the edges alias.
+ */
+export const RESOLVED_TARGET_SQL_PREDICATE = UNRESOLVED_SYMBOL_TOKEN_PREFIXES.map(
+  (p) => `e.to_id not like '${p}%'`
+).join(" and ");

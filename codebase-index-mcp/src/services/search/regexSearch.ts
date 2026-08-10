@@ -73,6 +73,8 @@ export type RegexSearchMatch = {
 export type RegexSearchResult = {
   matches: RegexSearchMatch[];
   filesScanned: number;
+  /** Files matching the scope filters, before the scan cap — see MCP-ISSUE-058(a). */
+  filesEligible: number;
   truncated: boolean;
   /** Why truncation stopped the scan, when it did — surfaced so callers never silently cap. */
   truncationReason: "limit_reached" | "files_cap_reached" | null;
@@ -272,6 +274,10 @@ export function searchRegexImpl(
   return {
     matches,
     filesScanned,
+    // MCP-ISSUE-058(a): how many files were IN SCOPE, so a caller can tell "absent" from "not looked
+    // at". `count: 0, filesScanned: 5000` on a 7528-file repo was read as "the symbol does not exist
+    // in that repo" — it meant 2528 files were never opened.
+    filesEligible: selected.length,
     truncated: truncationReason !== null,
     truncationReason
   };

@@ -10,6 +10,19 @@
 import type Database from "better-sqlite3";
 import { isTestPath } from "../indexing/fileFilter.js";
 
+/**
+ * Files that can never be "the code under test" (MCP-ISSUE-058(c)).
+ *
+ * The docs lane indexes Markdown into the same `files` table, and "not a test path" was the only
+ * filter on the source side — so a prose flow document scored a name-affinity link against a handler
+ * test and was returned as its `sourceFile`.
+ */
+const NON_CODE_SOURCE_EXT = /\.(md|markdown|mdx|txt|rst|adoc|json|ya?ml|xml|csv|lock|ini|toml|cfg|conf|sql|html?|css|scss|svg)$/i;
+
+function isNonCodePath(filePath: string): boolean {
+  return NON_CODE_SOURCE_EXT.test(filePath);
+}
+
 // ENH-029-D: EF/persistence changes (value converters, CHECK constraints, migrations) are only
 // proven by the round-trip integration test, but name-affinity linkage favors the same-named unit
 // test. When the changed file lives in the persistence layer, admit + boost integration tests.
@@ -110,7 +123,11 @@ export function linkTestsToSource(
 
   const allPaths = files.map((x) => normalizePath(x.filePath));
   const testFiles = allPaths.filter(isTestPath);
-  const sourceFiles = allPaths.filter((x) => !isTestPath(x));
+  // MCP-ISSUE-058(c): "not a test" is not the same as "is source". With the docs lane enabled, the
+  // candidate set included Markdown, and the tool answered
+  // `sourceFile: "docs/02-flows/flow-call-log-reply.md"` for a handler test — a documentation file
+  // is never the code under test.
+  const sourceFiles = allPaths.filter((x) => !isTestPath(x) && !isNonCodePath(x));
 
   const targetNormalized = filePath ? normalizePath(filePath) : null;
   const targetIsTest = targetNormalized ? isTestPath(targetNormalized) : false;
@@ -141,6 +158,8 @@ export function linkTestsToSource(
   };
 
   const targetTokens = targetNormalized && !targetIsTest ? distinctiveNameTokens(targetNormalized) : new Set<string>();
+  /** Non-null when the caller named a SOURCE file: every emitted pair must be about that file. */
+  const anchorSourceFile = targetNormalized && !targetIsTest ? targetNormalized : null;
   // ENH-029-D: a persistence-layer change must run the integration tests even when their names
   // don't share the changed file's tokens — admit them on path so the boost below can rank them.
   const targetIsInfraPersistence = Boolean(targetNormalized) && !targetIsTest && isInfraPersistencePath(targetNormalized!);
@@ -236,7 +255,7 @@ export function linkTestsToSource(
       addScore(targetNormalized, 0.6, "infrastructure_integration_priority");
     }
 
-    const ranked = [...sourceScoreMap.entries()]
+    const scored = [...sourceScoreMap.entries()]
       .map(([sourceFile, v]) => ({
         testFile,
         sourceFile,
@@ -244,10 +263,24 @@ export function linkTestsToSource(
         reasons: [...v.reasons]
       }))
       .filter((x) => x.score >= minScore)
-      .sort((a, b) => b.score - a.score || a.sourceFile.localeCompare(b.sourceFile))
+      .sort((a, b) => b.score - a.score || a.sourceFile.localeCompare(b.sourceFile));
+
+    // MCP-ISSUE-058(c): `filePath` seeded the TEST candidate set but never constrained the answer, so
+    // asking about `Domain/Entities/Conversation.cs` returned 20 repo-wide pairs of which exactly one
+    // involved the requested file — every selected test had been paired with its OWN best source.
+    // When the caller names a source file, that file is the anchor, not a hint.
+    //
+    // Applied HERE, inside the loop (code review 2026-08-10). As a post-loop filter it ran after two
+    // things had already thrown the anchor away: `slice(0, maxCandidates)` — default 3 — could drop
+    // the anchored pair in favour of a test's own better-scoring source, and `output.length >= limit`
+    // could break out before a later test file contributed the only anchored pair at all. The
+    // symptom was `link_tests_to_source(filePath: X)` answering "no covering tests" for a file that
+    // has them, which `change_impact` then reports as `residualRisk.untestedChangedFiles`.
+    const ranked = (anchorSourceFile ? scored.filter((x) => normalizePath(x.sourceFile) === anchorSourceFile) : scored)
       .slice(0, maxCandidates);
 
     output.push(...ranked);
+    // Only rows that survived the anchor count toward `limit` — that is the whole point of moving it.
     if (output.length >= limit) {
       break;
     }

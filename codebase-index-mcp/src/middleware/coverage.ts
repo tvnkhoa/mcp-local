@@ -12,7 +12,27 @@
  * by find_impact_files / get_change_context, extending the same idea to tools that lack it.
  */
 
+import { NAME_ONLY_EDGE_REASONS } from "../types/index.js";
+
 export type CoverageConfidence = "high" | "medium" | "low";
+
+/**
+ * Roll up how a set of edges was resolved, for `CoverageInput.edgeProvenance` (MCP-ISSUE-052).
+ *
+ * Takes anything carrying `reason` + `confidence`, so both the BFS traversal rows and the flat
+ * call-chain rows can feed the same signal without a shared row type.
+ */
+export function summarizeEdgeProvenance(
+  edges: readonly { reason?: string | null; confidence?: number | null }[]
+): { total: number; nameOnly: number; minConfidence: number } {
+  let nameOnly = 0;
+  let minConfidence = 1;
+  for (const e of edges) {
+    if (e.reason && NAME_ONLY_EDGE_REASONS.has(e.reason)) nameOnly++;
+    if (typeof e.confidence === "number" && e.confidence < minConfidence) minConfidence = e.confidence;
+  }
+  return { total: edges.length, nameOnly, minConfidence };
+}
 
 export type CoverageBlock = {
   confidence: CoverageConfidence;
@@ -50,6 +70,19 @@ export type CoverageInput = {
   kind: CoverageKind;
   /** Query echoed back into the fallback suggestion (e.g. the interface name). */
   query?: string;
+  /**
+   * MCP-ISSUE-052: how the edges underneath the result were resolved.
+   *
+   * The failure this exists for: one CALLS edge resolved by callee name alone pointed at a same-named
+   * method in an unrelated class, and the seven-node subtree hanging off it was reported with
+   * `confidence: "high"` and `knownGaps: []`. A consuming agent cannot detect that — it is strictly
+   * worse than an error. A traversal standing on a guess now says so.
+   */
+  edgeProvenance?: {
+    total: number;
+    nameOnly: number;
+    minConfidence: number;
+  };
 };
 
 function unresolvedTotal(gh: CoverageInput["graphHealth"]): number {
@@ -138,11 +171,29 @@ export function buildCoverageBlock(input: CoverageInput): CoverageBlock {
     confidence = "low";
   }
 
+  // MCP-ISSUE-052: a result built on name-only edges cannot claim "high", however many rows it has.
+  // This is deliberately independent of `lowOrEmpty` — the dangerous case is a LARGE confident answer,
+  // not an empty one.
+  const prov = input.edgeProvenance;
+  const provGaps: string[] = [];
+  if (prov && prov.nameOnly > 0) {
+    if (confidence === "high") confidence = "medium";
+    provGaps.push(
+      `${String(prov.nameOnly)} of ${String(prov.total)} traversed edge(s) were resolved by callee NAME only, with no receiver type — ` +
+        `such a hop can land on a same-named symbol in an unrelated type, and everything reached through it inherits that doubt.`
+    );
+  }
+
   const { gaps, fallback } = gapsFor(input.kind, lowOrEmpty, input.query);
+  const knownGaps = [...gaps, ...provGaps];
+  const provFallback =
+    provGaps.length > 0
+      ? "confirm the suspect hops with get_symbol_source before relying on this traversal."
+      : null;
   return {
     confidence,
-    knownGaps: gaps,
+    knownGaps,
     // No fallback when the result is confidently complete.
-    suggestFallback: confidence === "high" ? null : fallback
+    suggestFallback: confidence === "high" ? null : (fallback ?? provFallback)
   };
 }

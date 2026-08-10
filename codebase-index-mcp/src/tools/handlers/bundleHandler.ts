@@ -16,6 +16,31 @@ import type { HandlerContext } from "./handlerContext.js";
 
 // Type-like kinds a slice member can be (records included for post-ISSUE-015 labeling).
 const BUNDLE_TYPE_KINDS = new Set(["class", "struct", "record", "record struct", "interface"]);
+
+/**
+ * Which declaration wins when two symbols share a name and a file (MCP-ISSUE-057).
+ * Mirrors the SQL `kindPriorityOrder` in `services/search/symbolSearchFts.ts` — lower is better.
+ */
+const BUNDLE_KIND_RANK: Record<string, number> = {
+  class: 0, record: 0, interface: 1, struct: 2, "record struct": 2,
+  method: 3, function: 4, constructor: 8, module: 9
+};
+const bundleKindRank = (kind: string): number => BUNDLE_KIND_RANK[kind] ?? 5;
+
+/**
+ * The last PascalCase word of a type name — `ConversationNote` → `Note` (MCP-ISSUE-057).
+ *
+ * The route segment names the RESOURCE, not the full entity: `/notes`, not `/conversationnotes`.
+ * Same split the FTS query builder uses on identifiers.
+ */
+function lastPascalWord(name: string): string {
+  const parts = name
+    .replace(/([A-Z][a-z]+|[A-Z]{2,}(?=[A-Z][a-z]|$)|[A-Z]{2,})/g, " $1")
+    .trim()
+    .split(/\s+/)
+    .filter((t) => t.length > 0);
+  return parts.length > 0 ? parts[parts.length - 1] : name;
+}
 // Marker interfaces a minimal-API endpoint group implements (CH uses IEndpointGroup).
 const ENDPOINT_MARKER_INTERFACES = ["IEndpointGroup", "IEndpointGroupBase"];
 // Suffixes that mark a Commands-folder type as a DTO/projection, not the command request itself.
@@ -85,8 +110,32 @@ export function handleGetFeatureBundle(
   let sourceIncluded = 0;
 
   type Candidate = { symbolId: string; name: string; kind: string; filePath: string; line: number };
+
+  // MCP-ISSUE-057: one declaration, one member. `getSymbolCandidates` returns a class AND its
+  // same-named constructor, and both satisfy the exact-name check in 2a, so every handler and every
+  // validator was listed twice — `membersResolved: 23` for roughly 12 distinct symbols, doubling the
+  // payload of a tool whose entire purpose is to fit a vertical slice into ONE call.
+  // Collapsed on (name, filePath), keeping the substantive kind. Same precedence as the SQL
+  // `kindPriorityOrder` used by symbol search, so the two agree on which namesake wins.
+  const memberByNameFile = new Map<string, BundleMember>();
+  let collapsedDuplicates = 0;
+
   const addMember = (role: ConventionRole, c: Candidate): boolean => {
     if (seen.has(c.symbolId)) return false;
+    // The separator is written as an ESCAPE (`\u0000`), never as a raw NUL byte: a raw NUL makes
+    // git classify this whole file as binary, which hid ~120 lines of MCP-ISSUE-057 changes from
+    // diff, blame and 3-way merge.
+    const nameFileKey = `${c.name}\u0000${c.filePath}`;
+    const existing = memberByNameFile.get(nameFileKey);
+    if (existing) {
+      collapsedDuplicates += 1;
+      // Keep whichever declaration is the substantive one; a constructor never wins over its class.
+      if (bundleKindRank(c.kind) >= bundleKindRank(existing.kind)) return false;
+      const idx = members.indexOf(existing);
+      if (idx >= 0) members.splice(idx, 1);
+      seen.delete(existing.symbolId);
+      if (existing.source !== undefined) sourceIncluded -= 1;
+    }
     // MCP-ISSUE-049: gate every candidate here — 2a (name patterns), 2b (Commands folder walk) and
     // 2c (endpoint markers) all funnel through this one function. A name-pattern walk is happy to
     // award the `command` role to `ConversationNotesCommandHandlerTests`, and a role claimed by a
@@ -127,6 +176,7 @@ export function handleGetFeatureBundle(
       }
     }
     members.push(member);
+    memberByNameFile.set(nameFileKey, member);
     return true;
   };
 
@@ -173,6 +223,38 @@ export function handleGetFeatureBundle(
     }
   }
 
+  // 2d. MCP-ISSUE-057: a nested resource legitimately lives under its PARENT's endpoint file.
+  // `ConversationNote` has five real endpoints, all in `Web/Endpoints/Customers.cs` — so neither the
+  // `{E}Endpoints` patterns (2a) nor the IEndpointGroup name match (2c) can find them, and the role
+  // came back empty with an honest but unhelpful `knownGaps`. The data was already indexed: the
+  // `routes` table holds all five with correct templates. This is a join, not new analysis.
+  //
+  // Matched on the route SEGMENT for the pluralized last word of the entity — ConversationNote →
+  // "Note" → "notes" → any route whose path contains a `/notes` segment.
+  if (!rolesMatched.has("endpoint")) {
+    const segment = pluralize(lastPascalWord(entity)).toLowerCase();
+    if (segment.length >= 3) {
+      const routes = store.getRouteMap(args.repoId, null, null, 200);
+      const seenRouteHandlers = new Set<string>();
+      for (const route of routes) {
+        if (args.excludeTests && isTestPath(route.filePath)) continue;
+        const templateSegments = route.routeTemplate.toLowerCase().split("/");
+        if (!templateSegments.includes(segment)) continue;
+        if (!route.handlerSymbolId || seenRouteHandlers.has(route.handlerSymbolId)) continue;
+        seenRouteHandlers.add(route.handlerSymbolId);
+        const handler = store.getSymbolDetail(args.repoId, route.handlerSymbolId, 1).symbol;
+        if (!handler) continue;
+        addMember("endpoint", {
+          symbolId: handler.symbolId,
+          name: route.handlerName ?? handler.name,
+          kind: handler.kind,
+          filePath: handler.filePath,
+          line: handler.line
+        });
+      }
+    }
+  }
+
   const unresolvedRoles: ConventionRole[] = convention.rules.map((r) => r.role).filter((role) => !rolesMatched.has(role));
 
   // DbSet registration site: the *DbContext that references the entity (best-effort).
@@ -203,7 +285,13 @@ export function handleGetFeatureBundle(
     membersResolved: members.length,
     filesResolved,
     sourceIncluded,
-    rolesEmpty: unresolvedRoles
+    rolesEmpty: unresolvedRoles,
+    // MCP-ISSUE-057: disclose the collapse rather than performing it silently, matching the
+    // `collapsed` block get_dependency_graph already ships. A quieter response that does not say
+    // what it dropped is how a "missing" symbol becomes a bug report.
+    ...(collapsedDuplicates > 0
+      ? { collapsed: { duplicateDeclarations: collapsedDuplicates, rule: "one member per (name, filePath); class/record outranks its same-named constructor" } }
+      : {})
   };
 
   // Group members by role for the response.

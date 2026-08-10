@@ -7,7 +7,7 @@
 
 import type Database from "better-sqlite3";
 import type { EdgeRecord, GraphHealth, ReliabilitySummary, ResolvedEdge, SymbolRecord } from "../../types/index.js";
-import { CALL_TRAVERSAL_EDGE_SQL_LIST, CALL_TRAVERSAL_EDGE_TYPES } from "../../types/index.js";
+import { CALL_TRAVERSAL_EDGE_SQL_LIST, CALL_TRAVERSAL_EDGE_TYPES, RESOLVED_TARGET_SQL_PREDICATE } from "../../types/index.js";
 import { expandInterfaceSiblingsImpl } from "../graph/interfaceSiblings.js";
 import { TRIVIAL_CALLEE_TOKENS, buildReliabilitySummaryImpl, countUnresolvedEdgesForFileImpl, normalizePath, resolveCanonicalFilePath } from "./impactShared.js";
 
@@ -230,7 +230,12 @@ export function getChangeContextImpl(
   symbolId: string,
   callerDepth: number,
   calleeDepth: number,
-  limit: number
+  limit: number,
+  /**
+   * MCP-ISSUE-056: applied in SQL, before every `limit ?`. As a post-filter it could return
+   * `callers: []` for a symbol whose first page of rows happened to be test files.
+   */
+  excludeTests = false
 ): {
   symbol: SymbolRecord | null;
   callers: (ResolvedEdge & { distance: number })[];
@@ -308,6 +313,7 @@ export function getChangeContextImpl(
         left join symbols st on st.repo_id = e.repo_id and st.symbol_id = e.to_id
         where e.repo_id = ?
           and ((e.type in (${edgeTypePh}) and e.to_id in (${ph})) ${fallbackClause})
+          ${excludeTests ? "and (sf.file_path is null or is_test_path(sf.file_path) = 0)" : ""}
         limit ?
         `
       )
@@ -347,7 +353,13 @@ export function getChangeContextImpl(
       from edges e
       left join symbols sf on sf.repo_id = e.repo_id and sf.symbol_id = e.from_id
       left join symbols st on st.repo_id = e.repo_id and st.symbol_id = e.to_id
+      -- MCP-ISSUE-053: unresolved tokens are excluded in SQL, not after it. At profile "nano" with
+      -- limit 8 they filled 6 of the 8 slots as bare {"confidence":0.1} objects — no name, no path,
+      -- no id — while calleeCount counted them, so the count could not even be used to decide
+      -- whether raising the limit would help. They remain reported, in unresolved / graphHealth.
       where e.repo_id = ? and e.from_id = ? and e.type in (${CALL_TRAVERSAL_EDGE_SQL_LIST})
+        and ${RESOLVED_TARGET_SQL_PREDICATE}
+        ${excludeTests ? "and (st.file_path is null or is_test_path(st.file_path) = 0)" : ""}
       limit 20
       `
     )

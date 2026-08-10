@@ -77,7 +77,14 @@ export function searchSymbolsImpl(
       )
       .all(ftsQuery, ...params, limit) as (SymbolRecord & { repoPath: string | null })[];
 
-    // Hybrid: if FTS returns few results and vector is available, augment with vector search
+    // Hybrid: if FTS returns few results and vector is available, augment with vector search.
+    //
+    // MCP-ISSUE-058(b): this padding is why `search_symbols(query:"ManualOutboundHandler",
+    // strategy:"name")` answered `count: 50` for a symbol that does not exist in the repo —
+    // `GlobalCRCOutBoundHandler`, `GlobalInBoundHandler`, `ExportOutboundAsync` and 47 more, all
+    // vector neighbours, none a name match, and the whole set reported at `confidence: "high"` with
+    // `knownGaps: []`. The padding is worth keeping (it rescues a near-miss spelling), but it must be
+    // LABELLED, so a caller can tell "here are five things a bit like it" from "here it is".
     if (ftsResults.length < 3 && isVectorEnabled() && repoId) {
       const vecResults = vectorSearchSymbols(db, repoId, query, limit);
       const seen = new Set(ftsResults.map((r) => r.symbolId));
@@ -100,7 +107,7 @@ export function searchSymbolsImpl(
           limit 1
         `).get(repoId, vr.symbolId) as (SymbolRecord & { repoPath: string | null }) | undefined;
         if (sym) {
-          ftsResults.push(sym);
+          ftsResults.push({ ...sym, matchType: "fuzzy" });
           seen.add(vr.symbolId);
         }
       }

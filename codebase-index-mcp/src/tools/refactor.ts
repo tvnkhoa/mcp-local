@@ -318,7 +318,7 @@ export function buildRefactorTools(deps: CodebaseIndexDeps): AnyToolDefinition[]
 
   const findFieldAccesses = defineTool({
     name: "find_field_accesses",
-    description: "List every read/write callsite of a property (field) with its enclosing symbol — the 'who reads vs who writes this field' audit for wrong-level-resolution checks. Reads the PROPERTY_REF (read) / PROPERTY_WRITE (write) edges. Provide a property symbolId or a resolvable name. mode=read|write|all (default all). Returns reads/writes partitioned, each with enclosingName/filePath/line, plus a coverage block. Use this instead of grepping a field name across the repo.",
+    description: "List every read/write callsite of a property (field) with its enclosing symbol — the 'who reads vs who writes this field' audit for wrong-level-resolution checks. Reads the PROPERTY_REF (read) / PROPERTY_WRITE (write) edges. Provide a property symbolId or a resolvable name. mode=read|write|all (default all). Returns reads/writes partitioned, each with enclosingName/filePath/line, plus a coverage block. Use this instead of grepping a field name across the repo. excludeTests=true drops test-path results entirely.",
     input: schemas.findFieldAccessesSchema(limits.maxResultLimit),
     inputSchema: {
       type: "object",
@@ -330,6 +330,7 @@ export function buildRefactorTools(deps: CodebaseIndexDeps): AnyToolDefinition[]
         name: { type: "string" },
         mode: { type: "string", enum: ["read", "write", "all"] },
         limit: { type: "integer", minimum: 1, maximum: limits.maxResultLimit },
+        excludeTests: { type: "boolean" },
         profile: PROFILE_PROP
       }
     },

@@ -6,8 +6,8 @@
  */
 
 import type Database from "better-sqlite3";
-import type { EdgeRecord, GraphHealth, ReliabilitySummary, ResolvedEdge, SymbolRecord } from "../../types/index.js";
-import { CALL_TRAVERSAL_EDGE_SQL_LIST, CALL_TRAVERSAL_EDGE_TYPES } from "../../types/index.js";
+import type { EdgeProvenance, EdgeRecord, GraphHealth, ReliabilitySummary, ResolvedEdge, SymbolRecord } from "../../types/index.js";
+import { CALL_TRAVERSAL_EDGE_SQL_LIST, CALL_TRAVERSAL_EDGE_TYPES, NAME_ONLY_EDGE_REASONS } from "../../types/index.js";
 import { expandInterfaceSiblingsImpl } from "../graph/interfaceSiblings.js";
 
 export function getRenameImpactImpl(
@@ -88,6 +88,8 @@ export function traceExecutionFlowImpl(
   edges: { fromId: string; toId: string; fromName: string; toName: string; confidence: number | null; via?: string }[];
   depthReached: number;
   truncated: boolean;
+  /** MCP-ISSUE-052: how the traversed edges were resolved, so `coverage` can refuse an unearned "high". */
+  provenance: EdgeProvenance;
 } {
   const entrySymbol = db
     .prepare(
@@ -97,7 +99,7 @@ export function traceExecutionFlowImpl(
     .get(repoId, entrySymbolId) as SymbolRecord | undefined ?? null;
 
   if (!entrySymbol) {
-    return { entrySymbol: null, nodes: [], edges: [], depthReached: 0, truncated: false };
+    return { entrySymbol: null, nodes: [], edges: [], depthReached: 0, truncated: false, provenance: { total: 0, nameOnly: 0, minConfidence: 1 } };
   }
 
   const visitedSymbols = new Set<string>([entrySymbolId]);
@@ -107,6 +109,9 @@ export function traceExecutionFlowImpl(
   let frontier = [entrySymbolId];
   let depthReached = 0;
   let truncated = false;
+  let provTotal = 0;
+  let provNameOnly = 0;
+  let provMinConfidence = 1;
 
   for (let depth = 0; depth < maxDepth && frontier.length > 0 && resultNodes.length < maxNodes; depth++) {
     const nextFrontier: string[] = [];
@@ -136,6 +141,11 @@ export function traceExecutionFlowImpl(
           // ISSUE-020/022: tag bus hops and interface-dispatch hops so the flow distinguishes them.
           const via = row.edgeType === "PUBLISHES" ? "bus" : row.edgeReason === "interface-dispatch" ? "interface" : undefined;
           resultEdges.push({ fromId: row.fromId, toId: row.toId, fromName: row.fromName, toName: row.toName, confidence: row.confidence ?? null, ...(via && { via }) });
+          // MCP-ISSUE-052: accumulate provenance as we walk. One name-only hop can contribute an
+          // entire false subtree, so the count matters more than the average.
+          provTotal++;
+          if (row.edgeReason && NAME_ONLY_EDGE_REASONS.has(row.edgeReason)) provNameOnly++;
+          if (row.confidence !== null && row.confidence < provMinConfidence) provMinConfidence = row.confidence;
         }
         if (!visitedSymbols.has(row.toId) && resultNodes.length < maxNodes) {
           visitedSymbols.add(row.toId);
@@ -150,7 +160,14 @@ export function traceExecutionFlowImpl(
 
   if (frontier.length > 0 && resultNodes.length >= maxNodes) truncated = true;
 
-  return { entrySymbol, nodes: resultNodes, edges: resultEdges, depthReached, truncated };
+  return {
+    entrySymbol,
+    nodes: resultNodes,
+    edges: resultEdges,
+    depthReached,
+    truncated,
+    provenance: { total: provTotal, nameOnly: provNameOnly, minConfidence: provMinConfidence }
+  };
 }
 
 // ── getFolderSummary ───────────────────────────────────────────────────

@@ -44,7 +44,6 @@ import type {
 import {
   resolveUnlinkedEdges as resolveUnlinkedEdgesImpl,
   resolveImportEdges as resolveImportEdgesImpl,
-  resolveCallEdges as resolveCallEdgesImpl,
   resolveCallEdgesBatch as resolveCallEdgesBatchImpl,
   buildCallResolutionContext as buildCallResolutionContextImpl,
   resolveTypeRefEdges as resolveTypeRefEdgesImpl,
@@ -109,6 +108,7 @@ import {
   getSymbolCandidatesImpl
 } from "../services/search/symbolSearch.js";
 import { expandInterfaceSiblingsImpl } from "../services/graph/interfaceSiblings.js";
+import { resolveRouteHandlersImpl } from "../services/graph/routeHandlerResolver.js";
 import {
   replaceLiteralsForFileImpl,
   rebuildLiteralsFtsImpl,
@@ -334,8 +334,8 @@ export class GraphStore {
     return findModuleSymbolId(this.db, repoId, filePath);
   }
 
-  getCallEdges(repoId: string, symbolId: string, direction: "callers" | "callees", limit: number): ResolvedEdgeRecord[] {
-    return getCallEdgesImpl(this.db, repoId, symbolId, direction, limit);
+  getCallEdges(repoId: string, symbolId: string, direction: "callers" | "callees", limit: number, excludeTests = false): ResolvedEdgeRecord[] {
+    return getCallEdgesImpl(this.db, repoId, symbolId, direction, limit, excludeTests);
   }
 
   /** ISSUE-022: interface siblings (interface method ↔ impl method, class → members) cho caller expansion. */
@@ -350,8 +350,8 @@ export class GraphStore {
    * any-owner `%.Member`, bare `Member`) is shared with impact analysis via
    * buildEdgeToSymbolPairsCte, so the token grammar lives in exactly one place.
    */
-  getFieldAccesses(repoId: string, symbolId: string, mode: "read" | "write" | "all", limit: number): FieldAccessResult {
-    return getFieldAccessesImpl(this.db, repoId, symbolId, mode, limit);
+  getFieldAccesses(repoId: string, symbolId: string, mode: "read" | "write" | "all", limit: number, excludeTests = false): FieldAccessResult {
+    return getFieldAccessesImpl(this.db, repoId, symbolId, mode, limit, excludeTests);
   }
 
   getModuleFlow(repoId: string, filePath: string, limit: number): ModuleFlowResult {
@@ -557,8 +557,8 @@ export class GraphStore {
     return getSearchSuggestionsImpl(this.db, query, repoId, limit);
   }
 
-  getSymbolDetail(repoId: string, symbolId: string, limit: number): { symbol: SymbolRecord | null; edgesOut: ResolvedEdge[]; edgesIn: ResolvedEdge[] } {
-    return getSymbolDetailImpl(this.db, repoId, symbolId, limit);
+  getSymbolDetail(repoId: string, symbolId: string, limit: number, excludeTests = false): { symbol: SymbolRecord | null; edgesOut: ResolvedEdge[]; edgesIn: ResolvedEdge[] } {
+    return getSymbolDetailImpl(this.db, repoId, symbolId, limit, excludeTests);
   }
 
   getFileContext(repoId: string, filePath: string, limit: number, compact = false): { symbols: SymbolRecord[] | { name: string; kind: string; line: number }[]; edges: ResolvedEdge[]; graphHealth: GraphHealth } {
@@ -577,12 +577,13 @@ export class GraphStore {
     return resolveImportEdgesImpl(this.db, repoId, maxUnresolvedRows);
   }
 
-  resolveCallEdges(repoId: string, maxUnresolvedRows = 0): number {
-    return resolveCallEdgesImpl(this.db, repoId, maxUnresolvedRows);
-  }
-
   buildCallResolutionContext(repoId: string): ReturnType<typeof buildCallResolutionContextImpl> {
     return buildCallResolutionContextImpl(this.db, repoId);
+  }
+
+  /** MCP-ISSUE-055: rebind partial-class route handlers once every file is in the graph. */
+  resolveRouteHandlers(repoId: string): number {
+    return resolveRouteHandlersImpl(this.db, repoId);
   }
 
   resolveCallEdgesBatch(
@@ -604,20 +605,24 @@ export class GraphStore {
 
   // MCP-ISSUE-049: `edgeTypes: string[]`, not `edgeType: string` — one row per caller→symbol pair
   // now carries every edge type it reaches by, instead of the pair appearing once per type.
-  getImpactSurface(repoId: string, filePath: string, limit: number): { callers: { callerName: string; callerFile: string; callerLine: number; symbolAffected: string; edgeTypes: string[]; confidence: number; reason: string | null }[]; graphHealth: GraphHealth; reliabilitySummary: ReliabilitySummary; wiringNote?: string } {
-    return getImpactSurfaceImpl(this.db, repoId, filePath, limit);
+  getImpactSurface(repoId: string, filePath: string, limit: number, excludeTests = false): { callers: { callerName: string; callerFile: string; callerLine: number; symbolAffected: string; edgeTypes: string[]; confidence: number; reason: string | null }[]; graphHealth: GraphHealth; reliabilitySummary: ReliabilitySummary; wiringNote?: string } {
+    return getImpactSurfaceImpl(this.db, repoId, filePath, limit, excludeTests);
   }
 
-  getImpactFiles(repoId: string, filePath: string, limit: number): { impactedFiles: { filePath: string; reason: string; confidence: number; symbolsAffected: string[] }[]; graphHealth: GraphHealth; reliabilitySummary: ReliabilitySummary; wiringNote?: string } {
-    return getImpactFilesImpl(this.db, repoId, filePath, limit);
+  /**
+   * `totalImpactedCount` is the untruncated dependent count and is what the risk model must be
+   * scored from; `impactedFiles` is a page of at most `limit` rows (MCP-ISSUE-054).
+   */
+  getImpactFiles(repoId: string, filePath: string, limit: number, excludeTests = false): { impactedFiles: { filePath: string; reason: string; confidence: number; symbolsAffected: string[] }[]; totalImpactedCount: number; truncated: boolean; graphHealth: GraphHealth; reliabilitySummary: ReliabilitySummary; wiringNote?: string } {
+    return getImpactFilesImpl(this.db, repoId, filePath, limit, excludeTests);
   }
 
   getFileSummary(repoId: string, filePath: string): { file: { filePath: string; language: string | null }; exports: SymbolRecord[]; imports: ResolvedEdge[]; importedBy: { fromFilePath: string; edgeType: string }[]; graphHealth: GraphHealth } {
     return getFileSummaryImpl(this.db, repoId, filePath);
   }
 
-  getChangeContext(repoId: string, symbolId: string, callerDepth: number, calleeDepth: number, limit: number): { symbol: SymbolRecord | null; callers: (ResolvedEdge & { distance: number })[]; callees: ResolvedEdge[]; typeDeps: ResolvedEdge[]; graphHealth: GraphHealth; reliabilitySummary: ReliabilitySummary } {
-    return getChangeContextImpl(this.db, repoId, symbolId, callerDepth, calleeDepth, limit);
+  getChangeContext(repoId: string, symbolId: string, callerDepth: number, calleeDepth: number, limit: number, excludeTests = false): { symbol: SymbolRecord | null; callers: (ResolvedEdge & { distance: number })[]; callees: ResolvedEdge[]; typeDeps: ResolvedEdge[]; graphHealth: GraphHealth; reliabilitySummary: ReliabilitySummary } {
+    return getChangeContextImpl(this.db, repoId, symbolId, callerDepth, calleeDepth, limit, excludeTests);
   }
 
   findCallersByName(repoId: string, symbolName: string, limit: number): { symbolName: string; callers: { callerName: string; callerFile: string; callerLine: number; kind: string }[] } {
@@ -772,13 +777,7 @@ export class GraphStore {
   }
 
   // --- Phase 7C: execution flow BFS ---
-  traceExecutionFlow(repoId: string, entrySymbolId: string, maxDepth: number, maxNodes: number): {
-    entrySymbol: SymbolRecord | null;
-    nodes: SymbolRecord[];
-    edges: { fromId: string; toId: string; fromName: string; toName: string; confidence: number | null }[];
-    depthReached: number;
-    truncated: boolean;
-  } {
+  traceExecutionFlow(repoId: string, entrySymbolId: string, maxDepth: number, maxNodes: number): ReturnType<typeof traceExecutionFlowImpl> {
     return traceExecutionFlowImpl(this.db, repoId, entrySymbolId, maxDepth, maxNodes);
   }
 
@@ -788,7 +787,8 @@ export class GraphStore {
     repoId: string,
     query: string,
     limit: number,
-    includeSymbols = false
+    includeSymbols = false,
+    contentTypes: readonly string[] | null = null
   ): {
     docId: string;
     filePath: string;
@@ -798,7 +798,7 @@ export class GraphStore {
     level: number | null;
     resolvedMentions: { symbolId: string; symbolName: string | null; mentionText: string }[];
   }[] {
-    return searchDocsImpl(this.db, repoId, query, limit, buildFtsQuery, buildIntentFtsQuery, includeSymbols);
+    return searchDocsImpl(this.db, repoId, query, limit, buildFtsQuery, buildIntentFtsQuery, includeSymbols, contentTypes);
   }
 
   findStaleDocs(

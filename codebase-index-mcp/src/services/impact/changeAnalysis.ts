@@ -13,13 +13,52 @@ import type { ReliabilitySummary } from "../../types/index.js";
 
 export type ChangedFileImpact = {
   filePath: string;
+  /**
+   * The TRUE number of dependent files — never capped by `impactLimit` (MCP-ISSUE-054 re-open).
+   * It used to be `min(trueDependents, impactLimit)`, which is why the same file on the same diff
+   * scored `medium` at the default page size and `high` at a wider one.
+   */
   impactedFilesCount: number;
   reliabilitySummary: ReliabilitySummary;
   riskScore: number;
   riskLevel: "high" | "medium" | "low";
-  riskSignals: { impactBreadth: number; unresolvedPenalty: number; confidencePenalty: number; lowConfidencePenalty: number };
+  riskSignals: { impactBreadth: number; unresolvedPenalty: number; confidencePenalty: number; lowConfidencePenalty: number; capHit: boolean };
+  /**
+   * MCP-ISSUE-054: `topImpactedFiles` is a page — more dependents exist than were listed. It no
+   * longer means "the score is a floor": the score is now computed from the untruncated count.
+   * Named after `search_regex`'s existing vocabulary rather than a new word.
+   */
+  truncated: boolean;
+  truncationReason: "impact_limit_reached" | null;
   topImpactedFiles: { filePath: string; reason: string; confidence: number; symbolsAffected: string[] }[];
 };
+
+/**
+ * Score one changed file's blast radius. Exported so the invariance MCP-ISSUE-054 is about can be
+ * asserted THROUGH the store call — the unit test that pinned `scoreChangeRisk` alone passed
+ * happily while the truncation sat in this caller, one layer up. A correct test of the wrong seam.
+ */
+export function scoreFileImpact(
+  store: GraphStore,
+  repoId: string,
+  filePath: string,
+  impactLimit: number
+): ChangedFileImpact {
+  const impact = store.getImpactFiles(repoId, filePath, impactLimit);
+  // `totalImpactedCount`, NOT `impactedFiles.length`: the latter is the page.
+  const risk = scoreChangeRisk(impact.totalImpactedCount, impact.reliabilitySummary, impactLimit);
+  return {
+    filePath,
+    impactedFilesCount: impact.totalImpactedCount,
+    reliabilitySummary: impact.reliabilitySummary,
+    riskScore: risk.riskScore,
+    riskLevel: risk.riskLevel,
+    riskSignals: risk.signals,
+    truncated: impact.truncated,
+    truncationReason: impact.truncated ? "impact_limit_reached" : null,
+    topImpactedFiles: impact.impactedFiles.slice(0, 5)
+  };
+}
 
 export type ChangedFileImpactsResult = {
   baseRef: string | null;
@@ -78,19 +117,9 @@ export function computeChangedFileImpacts(
     )
   ].slice(0, args.maxFiles);
 
-  const impacts: ChangedFileImpact[] = changedFiles.map((filePath) => {
-    const impact = store.getImpactFiles(args.repoId, filePath, args.impactLimit);
-    const risk = scoreChangeRisk(impact.impactedFiles.length, impact.reliabilitySummary, args.impactLimit);
-    return {
-      filePath,
-      impactedFilesCount: impact.impactedFiles.length,
-      reliabilitySummary: impact.reliabilitySummary,
-      riskScore: risk.riskScore,
-      riskLevel: risk.riskLevel,
-      riskSignals: risk.signals,
-      topImpactedFiles: impact.impactedFiles.slice(0, 5)
-    };
-  });
+  const impacts: ChangedFileImpact[] = changedFiles.map((filePath) =>
+    scoreFileImpact(store, args.repoId, filePath, args.impactLimit)
+  );
 
   return { baseRef: baseRef ?? null, headRef, indexedCommitSha: args.indexedCommitSha, changedFiles, note, impacts };
 }

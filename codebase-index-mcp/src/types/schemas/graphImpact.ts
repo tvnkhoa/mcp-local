@@ -34,6 +34,9 @@ export const getCallChainSchema = (MAX_DEPTH: number, MAX_RESULT_LIMIT: number) 
     direction: z.enum(["callers", "callees"]).default("callees"),
     depth: z.number().int().min(1).max(MAX_DEPTH).default(1),
     limit: z.number().int().min(1).max(MAX_RESULT_LIMIT).default(100),
+    // MCP-ISSUE-056: interface dispatch fans hardest into test doubles, so the call-graph tools
+    // are exactly where a test filter is most load-bearing — see the note on the handlers.
+    excludeTests: z.boolean().default(false),
     profile: responseProfileSchema.default("compact")
   })
   .strict();
@@ -46,6 +49,9 @@ export const findImpactFilesSchema = (MAX_RESULT_LIMIT: number) => z
     limit: z.number().int().min(1).max(MAX_RESULT_LIMIT).default(50),
     groupBy: z.enum(["file", "module"]).default("file"),
     view: z.enum(["files", "surface"]).default("files"),
+    // MCP-ISSUE-056: interface dispatch fans hardest into test doubles, so the call-graph tools
+    // are exactly where a test filter is most load-bearing — see the note on the handlers.
+    excludeTests: z.boolean().default(false),
     profile: responseProfileSchema.default("compact")
   })
   .strict();
@@ -59,6 +65,9 @@ export const getChangeContextSchema = (MAX_DEPTH: number, MAX_RESULT_LIMIT: numb
     callerDepth: z.number().int().min(1).max(MAX_DEPTH).default(2),
     calleeDepth: z.number().int().min(1).max(MAX_DEPTH).default(1),
     limit: z.number().int().min(1).max(MAX_RESULT_LIMIT).default(20),
+    // MCP-ISSUE-056: interface dispatch fans hardest into test doubles, so the call-graph tools
+    // are exactly where a test filter is most load-bearing — see the note on the handlers.
+    excludeTests: z.boolean().default(false),
     profile: responseProfileSchema.default("compact")
   })
   .strict()
@@ -159,6 +168,9 @@ export const linkTestsToSourceSchema = (MAX_RESULT_LIMIT: number) => z
     limit: z.number().int().min(1).max(MAX_RESULT_LIMIT).default(100),
     maxCandidates: z.number().int().min(1).max(20).default(3),
     minScore: z.number().min(0).max(1).default(0.4),
+    // MCP-ISSUE-056/058(c): drop test files from the SOURCE side of each pair. A test-to-test link
+    // is never the answer to "what covers this file".
+    excludeTests: z.boolean().default(false),
     profile: responseProfileSchema.default("compact")
   })
   .strict();
@@ -170,6 +182,9 @@ export const traceExecutionFlowSchema = z
     entrySymbolId: z.string().min(1).max(200),
     maxDepth: z.number().int().min(1).max(8).default(4),
     maxNodes: z.number().int().min(1).max(100).default(30),
+    // MCP-ISSUE-056: interface dispatch fans hardest into test doubles, so the call-graph tools
+    // are exactly where a test filter is most load-bearing — see the note on the handlers.
+    excludeTests: z.boolean().default(false),
     profile: responseProfileSchema.default("compact")
   })
   .strict();

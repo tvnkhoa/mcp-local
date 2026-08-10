@@ -140,7 +140,7 @@ export function buildSearchTools(deps: CodebaseIndexDeps): AnyToolDefinition[] {
 
   const getSymbolDetail = defineTool({
     name: "get_symbol_detail",
-    description: "Get full detail for a symbol by ID — returns the symbol record plus all outgoing and incoming edges with resolved names. Use after search_symbols to drill into a specific symbol.",
+    description: "Get full detail for a symbol by ID — returns the symbol record plus all outgoing and incoming edges with resolved names. Use after search_symbols to drill into a specific symbol. excludeTests=true drops test-path results entirely.",
     input: schemas.getSymbolDetailSchema(limits.maxResultLimit),
     inputSchema: {
       type: "object",
@@ -150,6 +150,7 @@ export function buildSearchTools(deps: CodebaseIndexDeps): AnyToolDefinition[] {
         repoId: { type: "string" },
         symbolId: { type: "string" },
         limit: { type: "integer", minimum: 1, maximum: limits.maxResultLimit },
+        excludeTests: { type: "boolean" },
         profile: PROFILE_PROP
       }
     },
@@ -204,7 +205,7 @@ export function buildSearchTools(deps: CodebaseIndexDeps): AnyToolDefinition[] {
 
   const routeMap = defineTool({
     name: "route_map",
-    description: "Map ASP.NET C# routes to handler methods using extracted route attributes ([Route], [HttpGet], [HttpPost], ...). Use to inspect API surface deterministically. excludeTests=true drops test-path results entirely.",
+    description: "Map ASP.NET C# routes to handler methods. Reads BOTH dialects: minimal-API registrations (MapGroup/MapGet/MapPost/MapPut/MapPatch/MapDelete, with the group prefix folded into an absolute routeTemplate) and attribute-routed controllers ([Route], [HttpGet], [HttpPost], ...). handlerName is the delegate at the registration site, so it stays correct when the handler is declared in another file of a partial class. Use to inspect API surface deterministically. excludeTests=true drops test-path results entirely.",
     input: schemas.routeMapSchema(limits.maxResultLimit),
     inputSchema: {
       type: "object",
@@ -233,7 +234,7 @@ export function buildSearchTools(deps: CodebaseIndexDeps): AnyToolDefinition[] {
       "Requires :repoId named parameter in SQL and blocks write/admin statements.",
       "Allowed tables: repositories, files, symbols, edges, index_runs, routes, cross_repo_deps, refactor_previews, refactor_preview_hunks, refactor_applies, refactor_apply_changes, refactor_apply_hunks, refactor_rollbacks, vec_symbol_map.",
       "Key columns — symbols: (repo_id, symbol_id, name, kind, file_path, line, signature);",
-      "edges: (repo_id, from_id, to_id, type, confidence, reason) — type values: CALLS, IMPORTS, TYPE_REF, DEPENDS_ON, PROPERTY_REF, PROPERTY_WRITE;",
+      "edges: (repo_id, from_id, to_id, type, confidence, reason) — type values: CALLS, IMPORTS, TYPE_REF, DEPENDS_ON, PROPERTY_REF, PROPERTY_WRITE, IMPLEMENTS, EXTENDS, PUBLISHES, CONSUMES;",
       "cross_repo_deps: (from_repo_id, from_symbol_id, to_repo_id, to_symbol_id, type);",
       "routes: (repo_id, file_path, controller_symbol_id, handler_symbol_id, http_method, route_template, line).",
       "Note: 'package_consumers' is not a table — query edges WHERE type='DEPENDS_ON' AND to_id LIKE 'nuget:%' instead."

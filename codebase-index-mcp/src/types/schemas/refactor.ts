@@ -18,6 +18,9 @@ export const findFieldAccessesSchema = (MAX_RESULT_LIMIT: number) => z
     name: z.string().min(1).max(200).optional(),
     mode: z.enum(["read", "write", "all"]).default("all"),
     limit: z.number().int().min(1).max(MAX_RESULT_LIMIT).default(100),
+    // MCP-ISSUE-056: interface dispatch fans hardest into test doubles, so the call-graph tools
+    // are exactly where a test filter is most load-bearing — see the note on the handlers.
+    excludeTests: z.boolean().default(false),
     profile: responseProfileSchema.default("compact")
   })
   .strict()

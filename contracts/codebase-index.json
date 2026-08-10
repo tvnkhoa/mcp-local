@@ -383,10 +383,13 @@
         "openWorldHint": false,
         "readOnlyHint": true
       },
-      "description": "List every read/write callsite of a property (field) with its enclosing symbol — the 'who reads vs who writes this field' audit for wrong-level-resolution checks. Reads the PROPERTY_REF (read) / PROPERTY_WRITE (write) edges. Provide a property symbolId or a resolvable name. mode=read|write|all (default all). Returns reads/writes partitioned, each with enclosingName/filePath/line, plus a coverage block. Use this instead of grepping a field name across the repo.",
+      "description": "List every read/write callsite of a property (field) with its enclosing symbol — the 'who reads vs who writes this field' audit for wrong-level-resolution checks. Reads the PROPERTY_REF (read) / PROPERTY_WRITE (write) edges. Provide a property symbolId or a resolvable name. mode=read|write|all (default all). Returns reads/writes partitioned, each with enclosingName/filePath/line, plus a coverage block. Use this instead of grepping a field name across the repo. excludeTests=true drops test-path results entirely.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
+          "excludeTests": {
+            "type": "boolean"
+          },
           "limit": {
             "maximum": 500,
             "minimum": 1,
@@ -433,10 +436,13 @@
         "openWorldHint": false,
         "readOnlyHint": true
       },
-      "description": "Scope blast radius for a file change. view='files' (default): which files import/call symbols in this file. view='surface': which external symbols call into this file. Use before refactor_replace_preview to scope the change. profile='nano' for top-10 count, 'compact' (default) for full list. A stale index (indexed commit ≠ HEAD) is reported as a non-fatal `staleWarning` field in the response, not an error — re-index for exact results.",
+      "description": "Scope blast radius for a file change. view='files' (default): which files import/call symbols in this file. view='surface': which external symbols call into this file. Use before refactor_replace_preview to scope the change. profile='nano' for top-10 count, 'compact' (default) for full list. A stale index (indexed commit ≠ HEAD) is reported as a non-fatal `staleWarning` field in the response, not an error — re-index for exact results. excludeTests=true drops test-path results entirely.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
+          "excludeTests": {
+            "type": "boolean"
+          },
           "filePath": {
             "type": "string"
           },
@@ -530,7 +536,7 @@
         "openWorldHint": false,
         "readOnlyHint": true
       },
-      "description": "Find repositories/symbols that depend on a NuGet package contract (nuget:<name>) without requiring a symbolId.",
+      "description": "Find repositories/symbols that depend on a NuGet package contract, without requiring a symbolId. The package argument accepts either the bare name or the nuget:<name> form — both normalize to nuget:<lowercased>, so the prefix is optional, not required.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -609,7 +615,7 @@
         "openWorldHint": false,
         "readOnlyHint": true
       },
-      "description": "Trace a call path from a symbolId (direction=callers or callees). Shows the path, not a caller list — use get_change_context for caller lists. Requires a callable symbolId (function/method), not a class. Use profile='nano' for path summary, 'compact' (default) for full edge list.",
+      "description": "Trace a call path from a symbolId (direction=callers or callees). Shows the path, not a caller list — use get_change_context for caller lists. Requires a callable symbolId (function/method), not a class. Use profile='nano' for path summary, 'compact' (default) for full edge list. excludeTests=true drops test-path results entirely.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -624,6 +630,9 @@
               "callees"
             ],
             "type": "string"
+          },
+          "excludeTests": {
+            "type": "boolean"
           },
           "limit": {
             "maximum": 500,
@@ -661,7 +670,7 @@
         "openWorldHint": false,
         "readOnlyHint": true
       },
-      "description": "Get callers (BFS up to depth), callees, and type deps for a symbol. Accepts symbolId or name (one required). Use profile=nano for ultra-compact, compact to reduce payload during planning, standard for balanced, verbose for debugging. A stale index (indexed commit ≠ HEAD) is reported as a non-fatal `staleWarning` field in the response, not an error.",
+      "description": "Get callers (BFS up to depth), callees, and type deps for a symbol. Accepts symbolId or name (one required). Use profile=nano for ultra-compact, compact to reduce payload during planning, standard for balanced, verbose for debugging. A stale index (indexed commit ≠ HEAD) is reported as a non-fatal `staleWarning` field in the response, not an error. excludeTests=true drops test-path results entirely.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -674,6 +683,9 @@
             "maximum": 5,
             "minimum": 1,
             "type": "integer"
+          },
+          "excludeTests": {
+            "type": "boolean"
           },
           "limit": {
             "maximum": 500,
@@ -1126,10 +1138,13 @@
         "openWorldHint": false,
         "readOnlyHint": true
       },
-      "description": "Get full detail for a symbol by ID — returns the symbol record plus all outgoing and incoming edges with resolved names. Use after search_symbols to drill into a specific symbol.",
+      "description": "Get full detail for a symbol by ID — returns the symbol record plus all outgoing and incoming edges with resolved names. Use after search_symbols to drill into a specific symbol. excludeTests=true drops test-path results entirely.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
+          "excludeTests": {
+            "type": "boolean"
+          },
           "limit": {
             "maximum": 500,
             "minimum": 1,
@@ -1331,10 +1346,13 @@
         "openWorldHint": false,
         "readOnlyHint": true
       },
-      "description": "Link tests to likely source files using deterministic naming heuristics plus IMPORTS/CALLS tracing.",
+      "description": "Link tests to likely source files using deterministic naming heuristics plus IMPORTS/CALLS tracing. excludeTests=true drops test-path results entirely.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
+          "excludeTests": {
+            "type": "boolean"
+          },
           "filePath": {
             "type": "string"
           },
@@ -1442,10 +1460,24 @@
         "openWorldHint": false,
         "readOnlyHint": true
       },
-      "description": "Unified docs tool. mode=search: full-text search across indexed documentation sections (requires query); mode=stale: find docs that mention changed symbols (requires symbolIds); mode=coverage: show which exported symbols are documented (requires filePath). All three modes return the same envelope: { repoId, mode, count, results }. Requires docs lane enabled. includeSymbols=true (mode=search only) additionally pads the result set with matching CODE symbols — off by default, because a docs search answering with symbols is rarely what was asked. mode=stale counts PROSE mentions only; includeCodeMentions=true also counts identifiers appearing inside fenced code samples.",
+      "description": "Unified docs tool. mode=search: full-text search across indexed documentation sections (requires query); mode=stale: find docs that mention changed symbols (requires symbolIds); mode=coverage: show which exported symbols are documented (requires filePath). All three modes return the same envelope: { repoId, mode, count, results }. Requires docs lane enabled. includeSymbols=true (mode=search only) additionally pads the result set with matching CODE symbols — off by default, because a docs search answering with symbols is rarely what was asked. mode=stale counts PROSE mentions only; includeCodeMentions=true also counts identifiers appearing inside fenced code samples. mode=search matches headings and prose by default — pass contentTypes to include code_block sections (diagrams, fenced samples).",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
+          "contentTypes": {
+            "description": "mode=search only: which doc section kinds may answer. Defaults to heading+prose; pass code_block to include fenced samples and diagrams.",
+            "items": {
+              "enum": [
+                "heading",
+                "prose",
+                "code_block"
+              ],
+              "type": "string"
+            },
+            "maxItems": 3,
+            "minItems": 1,
+            "type": "array"
+          },
           "filePath": {
             "type": "string"
           },
@@ -1509,7 +1541,7 @@
         "openWorldHint": false,
         "readOnlyHint": true
       },
-      "description": "Run a read-only SQL query against graph tables in a sandboxed mode. Requires :repoId named parameter in SQL and blocks write/admin statements. Allowed tables: repositories, files, symbols, edges, index_runs, routes, cross_repo_deps, refactor_previews, refactor_preview_hunks, refactor_applies, refactor_apply_changes, refactor_apply_hunks, refactor_rollbacks, vec_symbol_map. Key columns — symbols: (repo_id, symbol_id, name, kind, file_path, line, signature); edges: (repo_id, from_id, to_id, type, confidence, reason) — type values: CALLS, IMPORTS, TYPE_REF, DEPENDS_ON, PROPERTY_REF, PROPERTY_WRITE; cross_repo_deps: (from_repo_id, from_symbol_id, to_repo_id, to_symbol_id, type); routes: (repo_id, file_path, controller_symbol_id, handler_symbol_id, http_method, route_template, line). Note: 'package_consumers' is not a table — query edges WHERE type='DEPENDS_ON' AND to_id LIKE 'nuget:%' instead.",
+      "description": "Run a read-only SQL query against graph tables in a sandboxed mode. Requires :repoId named parameter in SQL and blocks write/admin statements. Allowed tables: repositories, files, symbols, edges, index_runs, routes, cross_repo_deps, refactor_previews, refactor_preview_hunks, refactor_applies, refactor_apply_changes, refactor_apply_hunks, refactor_rollbacks, vec_symbol_map. Key columns — symbols: (repo_id, symbol_id, name, kind, file_path, line, signature); edges: (repo_id, from_id, to_id, type, confidence, reason) — type values: CALLS, IMPORTS, TYPE_REF, DEPENDS_ON, PROPERTY_REF, PROPERTY_WRITE, IMPLEMENTS, EXTENDS, PUBLISHES, CONSUMES; cross_repo_deps: (from_repo_id, from_symbol_id, to_repo_id, to_symbol_id, type); routes: (repo_id, file_path, controller_symbol_id, handler_symbol_id, http_method, route_template, line). Note: 'package_consumers' is not a table — query edges WHERE type='DEPENDS_ON' AND to_id LIKE 'nuget:%' instead.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -1962,7 +1994,7 @@
         "openWorldHint": false,
         "readOnlyHint": true
       },
-      "description": "Map ASP.NET C# routes to handler methods using extracted route attributes ([Route], [HttpGet], [HttpPost], ...). Use to inspect API surface deterministically. excludeTests=true drops test-path results entirely.",
+      "description": "Map ASP.NET C# routes to handler methods. Reads BOTH dialects: minimal-API registrations (MapGroup/MapGet/MapPost/MapPut/MapPatch/MapDelete, with the group prefix folded into an absolute routeTemplate) and attribute-routed controllers ([Route], [HttpGet], [HttpPost], ...). handlerName is the delegate at the registration site, so it stays correct when the handler is declared in another file of a partial class. Use to inspect API surface deterministically. excludeTests=true drops test-path results entirely.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -2212,12 +2244,15 @@
         "openWorldHint": false,
         "readOnlyHint": true
       },
-      "description": "BFS-trace the call graph starting from an entry symbol, following CALLS edges outbound up to maxDepth levels. Returns nodes and edges forming the execution sub-graph. Use to understand how a method propagates through the codebase.",
+      "description": "BFS-trace the call graph starting from an entry symbol, following CALLS edges outbound up to maxDepth levels. Returns nodes and edges forming the execution sub-graph. Use to understand how a method propagates through the codebase. excludeTests=true drops test-path results entirely.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
           "entrySymbolId": {
             "type": "string"
+          },
+          "excludeTests": {
+            "type": "boolean"
           },
           "maxDepth": {
             "maximum": 8,

@@ -62,6 +62,9 @@ export const getSymbolDetailSchema = (MAX_RESULT_LIMIT: number) => z
     repoId: z.string().min(1).max(200),
     symbolId: z.string().min(1).max(200),
     limit: z.number().int().min(1).max(MAX_RESULT_LIMIT).default(100),
+    // MCP-ISSUE-056: interface dispatch fans hardest into test doubles, so the call-graph tools
+    // are exactly where a test filter is most load-bearing — see the note on the handlers.
+    excludeTests: z.boolean().default(false),
     profile: responseProfileSchema.default("compact")
   })
   .strict();

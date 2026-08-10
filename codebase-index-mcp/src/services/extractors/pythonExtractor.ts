@@ -79,6 +79,8 @@ export function extractPythonSymbolsAndRoutesImpl(
       filePath: input.filePath,
       controllerSymbolId: moduleSymbolId,
       handlerSymbolId,
+      // MCP-ISSUE-055: the name as written at the registration site, kept even when unresolved.
+      handlerName: handlerName.length > 0 ? handlerName : null,
       httpMethod: method,
       routeTemplate: template.startsWith("/") ? template : `/${template}`,
       line

@@ -580,7 +580,7 @@ export function vectorSearchSymbols(
   // either way. The fix for MCP-ISSUE-035 is what surfaced the cost: before it, 35% of queries returned
   // zero rows because `k` was consumed by other repos, and finding nothing is fast. Making the lane
   // correct made it do real work, and the work was almost entirely repeated.
-  const cacheKey = `${repoId} ${String(k)} ${text}`;
+  const cacheKey = `${repoId}\u0000${String(k)}\u0000${text}`;
   const cached = searchCache.get(cacheKey);
   if (cached !== undefined) {
     return cached;

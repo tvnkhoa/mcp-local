@@ -9,12 +9,19 @@
 
 import type Database from "better-sqlite3";
 import type { ResolvedEdge, SymbolRecord } from "../../types/index.js";
+import { RESOLVED_TARGET_SQL_PREDICATE } from "../../types/index.js";
 
 export function getSymbolDetailImpl(
   db: Database.Database,
   repoId: string,
   symbolId: string,
-  limit: number
+  limit: number,
+  /**
+   * MCP-ISSUE-056: filters the FAR end of each edge — outgoing by target, incoming by source —
+   * inside the query, for the same reason `RESOLVED_TARGET_SQL_PREDICATE` is there: so the LIMIT
+   * budget is spent on rows the caller actually asked for.
+   */
+  excludeTests = false
 ): {
   symbol: SymbolRecord | null;
   edgesOut: ResolvedEdge[];
@@ -49,7 +56,11 @@ export function getSymbolDetailImpl(
       from edges e
       left join symbols sf on sf.repo_id = e.repo_id and sf.symbol_id = e.from_id
       left join symbols st on st.repo_id = e.repo_id and st.symbol_id = e.to_id
-      where e.repo_id = ? and e.from_id = ?
+      -- MCP-ISSUE-053 / MCP-ISSUE-059(3): this tool's description promises "all outgoing and incoming
+      -- edges WITH RESOLVED NAMES", and 6 of 12 rows arrived with no toName at all. Filtered here
+      -- rather than after the query so the LIMIT budget is spent on edges that have something to say.
+      where e.repo_id = ? and e.from_id = ? and ${RESOLVED_TARGET_SQL_PREDICATE}
+        ${excludeTests ? "and (st.file_path is null or is_test_path(st.file_path) = 0)" : ""}
       limit ?
       `
     )
@@ -70,6 +81,7 @@ export function getSymbolDetailImpl(
       left join symbols sf on sf.repo_id = e.repo_id and sf.symbol_id = e.from_id
       left join symbols st on st.repo_id = e.repo_id and st.symbol_id = e.to_id
       where e.repo_id = ? and e.to_id = ?
+        ${excludeTests ? "and (sf.file_path is null or is_test_path(sf.file_path) = 0)" : ""}
       limit ?
       `
     )

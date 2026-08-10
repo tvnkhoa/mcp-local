@@ -11,6 +11,20 @@ import type { IndexMode } from "../../types/index.js";
 import { activateWatchForRepo, clearWatchInactivityTimer } from "../../services/watch/watchLifecycle.js";
 import type { HandlerContext } from "./handlerContext.js";
 
+/**
+ * Changed files that cannot have a linked test, by nature (MCP-ISSUE-058(e)).
+ *
+ * `change_impact` on a docs-only diff put 10 `SKILL.md`, 3 `docs/*.md` and a `Dockerfile` into
+ * `residualRisk.untestedChangedFiles` with "run the broader suite for these" — advice that is not
+ * merely useless but actively misleading about what the change did.
+ */
+const NON_TESTABLE_CHANGE_PATH =
+  /(\.(md|markdown|mdx|txt|rst|adoc|ya?ml|json|toml|ini|cfg|conf|lock|svg|png|jpe?g|gif|ico|csv)$)|(^|\/)(Dockerfile|\.dockerignore|\.gitignore|\.editorconfig|LICENSE)$/i;
+
+function isNonTestableChangePath(filePath: string): boolean {
+  return NON_TESTABLE_CHANGE_PATH.test(filePath.replace(/\\/g, "/"));
+}
+
 // ── health_check ─────────────────────────────────────────────────────────────
 
 export function handleHealthCheck(
@@ -320,6 +334,16 @@ export function handleDetectChanges(
         })()
       : undefined;
 
+  // MCP-ISSUE-054: say WHY the result is empty. `strict-review` sets minRiskScore 40; on a real
+  // 83-file diff that filtered every row, and the response then read
+  // `riskSummary:{highRiskCount:0,...,maxRiskScore:0}` — which a caller reasonably summarises as
+  // "no risk in 83 changed files". `matchedCount: 0` was present but stated nothing about the cause.
+  // The number quoted here must be the MAXIMUM score, and `sortedImpacts[0]` is only that under
+  // `sortBy: "risk"`. `strict-review` — the policy this diagnostic exists for — defaults to
+  // `sortBy: "impact"`, and `"path"` sorts alphabetically, so element 0 was routinely some other
+  // file's score: a diagnostic added to prevent a false conclusion was stating a false number.
+  const emptiedByFilter = filteredImpacts.length === 0 && sortedImpacts.length > 0;
+  const maxRiskScoreBeforeFilter = sortedImpacts.reduce((max, x) => Math.max(max, x.riskScore), 0);
   const filterInfo = {
     policyUsed: args.policy,
     minRiskScore,
@@ -328,7 +352,16 @@ export function handleDetectChanges(
     sortBy,
     matchedCount: filteredImpacts.length,
     returnedCount: selectedImpacts.length,
-    droppedByLimit: Math.max(0, filteredImpacts.length - selectedImpacts.length)
+    droppedByLimit: Math.max(0, filteredImpacts.length - selectedImpacts.length),
+    ...(emptiedByFilter
+      ? {
+          emptyReason:
+            `the filter removed all ${String(sortedImpacts.length)} scored file(s), the diff is not empty — ` +
+            `highest score seen was ${String(maxRiskScoreBeforeFilter)} against minRiskScore ${String(minRiskScore)}` +
+            (args.policy === "custom" ? "." : ` from policy '${args.policy}'.`),
+          maxRiskScoreBeforeFilter
+        }
+      : {})
   };
 
   if (profile === "nano") {
@@ -447,10 +480,13 @@ export function handleChangeImpact(
   const dependentCount = dependentFiles.size;
   const covered = [...dependentFiles].filter((f) => coveredSources.has(f)).length;
 
+  // MCP-ISSUE-058(e): a file scoring 0 is not "low risk", it is "no measurable risk". Bucketing 14
+  // zero-scoring docs as `low: 14` reads as a finding; `none` reads as what it is.
   const riskSummary = {
     high: core.impacts.filter((x) => x.riskLevel === "high").length,
     medium: core.impacts.filter((x) => x.riskLevel === "medium").length,
-    low: core.impacts.filter((x) => x.riskLevel === "low").length,
+    low: core.impacts.filter((x) => x.riskLevel === "low" && x.riskScore > 0).length,
+    none: core.impacts.filter((x) => x.riskScore === 0).length,
     maxRiskScore: core.impacts.reduce((m, x) => Math.max(m, x.riskScore), 0)
   };
 
@@ -465,12 +501,21 @@ export function handleChangeImpact(
     kind: "change_impact"
   });
 
+  // MCP-ISSUE-058(e): a Markdown file or a Dockerfile has no linked test because it CANNOT have one.
+  // Lumping all 14 files of a docs-only diff into "run the broader suite for these" turned a no-op
+  // change into an alarm. Partitioned so the actionable half stands on its own.
+  const untestedCode = untestedChangedFiles.filter((f) => !isNonTestableChangePath(f));
+  const untestedNonCode = untestedChangedFiles.filter((f) => isNonTestableChangePath(f));
   const residualRisk = {
-    untestedChangedFiles,
+    untestedChangedFiles: untestedCode,
+    ...(untestedNonCode.length > 0 ? { nonCodeChangedFiles: untestedNonCode } : {}),
     note:
-      untestedChangedFiles.length > 0
-        ? `${String(untestedChangedFiles.length)} changed file(s) have no linked test — run the broader suite for these.`
-        : "all changed files have at least one linked test."
+      untestedCode.length > 0
+        ? `${String(untestedCode.length)} changed CODE file(s) have no linked test — run the broader suite for these.` +
+          (untestedNonCode.length > 0 ? ` ${String(untestedNonCode.length)} further changed file(s) are non-code (docs/config) and are not testable.` : "")
+        : untestedNonCode.length > 0
+          ? `no changed code file lacks a test; the remaining ${String(untestedNonCode.length)} changed file(s) are non-code (docs/config) and are not testable.`
+          : "all changed files have at least one linked test."
   };
   const testCoverage = { dependentFiles: dependentCount, covered, uncovered: dependentCount - covered, ...(sourceProbeTruncated ? { probeTruncatedAt: CHANGE_IMPACT_SOURCE_PROBE_CAP } : {}) };
 

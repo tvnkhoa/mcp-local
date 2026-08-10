@@ -140,6 +140,7 @@ export function extractCSharpRoutesImpl(
           filePath: input.filePath,
           controllerSymbolId: classSymbolId,
           handlerSymbolId,
+          handlerName: methodName,
           httpMethod: attr.method,
           routeTemplate,
           line: methodNode.startPosition.row + 1
@@ -179,6 +180,8 @@ export function extractCSharpRoutesImpl(
             resolveDelegateHandlerSymbolId(invNode, symbols) ??
             enclosingMethodSymbolId(invNode, symbols) ??
             classSymbolId,
+          // The delegate name, whether or not its symbol resolved in THIS file (MCP-ISSUE-055).
+          handlerName: delegateHandlerName(invNode),
           httpMethod,
           routeTemplate,
           line: invNode.startPosition.row + 1
@@ -218,6 +221,7 @@ export function extractCSharpRoutesImpl(
           resolveDelegateHandlerSymbolId(invNode, symbols) ??
           symbols.find((s) => s.kind === "module" && s.filePath === input.filePath)?.symbolId ??
           "",
+        handlerName: delegateHandlerName(invNode),
         httpMethod,
         routeTemplate,
         line: invNode.startPosition.row + 1
@@ -251,6 +255,26 @@ function resolveDelegateHandlerSymbolId(
   invNode: Parser.SyntaxNode,
   symbols: SymbolRecord[]
 ): string | null {
+  const handlerName = delegateHandlerName(invNode);
+  if (!handlerName) return null;
+
+  return symbols.find((s) => s.kind === "method" && s.name === handlerName)?.symbolId ?? null;
+}
+
+/**
+ * The handler NAME at a minimal-API registration site — the delegate argument, as written.
+ *
+ * MCP-ISSUE-055: split out from `resolveDelegateHandlerSymbolId` because the two questions have
+ * different answers. Reading the name off the AST always works; finding its symbol does not, because
+ * extraction sees one file at a time and `Customers` is a `partial class` whose handlers are declared
+ * in `Customers.Notes.cs`, `Customers.Timeline.cs` and so on. When the lookup missed, every route fell
+ * back to the enclosing `Map` method and all 13 endpoints in the group reported `handlerName: "Map"`.
+ *
+ * (The original report blamed `.WithName("literal")` vs `.WithName(nameof(X))`. That was a
+ * coincidence: `Conversations.cs` happens to use `nameof` AND to be a single non-partial class with
+ * every handler in-file. The `.WithName()` argument is never read here — the delegate is.)
+ */
+function delegateHandlerName(invNode: Parser.SyntaxNode): string | null {
   const argList = invNode.childForFieldName("arguments");
   if (!argList) return null;
 
@@ -265,9 +289,7 @@ function resolveDelegateHandlerSymbolId(
       : delegateArg.type === "member_access_expression"
         ? (delegateArg.childForFieldName("name")?.text?.trim() ?? "")
         : "";
-  if (!handlerName) return null;
-
-  return symbols.find((s) => s.kind === "method" && s.name === handlerName)?.symbolId ?? null;
+  return handlerName.length > 0 ? handlerName : null;
 }
 
 /** The method_declaration a node sits in, resolved to its symbol id. */

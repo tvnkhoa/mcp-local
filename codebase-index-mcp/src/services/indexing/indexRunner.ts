@@ -324,6 +324,18 @@ export function createIndexRunner(options: IndexRunnerOptions): RunIndexAndResol
   } else {
     indexLog(`[index-post-skip] repoId=${repoId} skipping property reference resolution by policy`);
   }
+
+  // MCP-ISSUE-055: bind routes whose handler lives in another part of the same partial class. Runs
+  // unconditionally — it is one UPDATE over the (small) routes table, and it is not governed by the
+  // unresolved-row budget the edge resolvers share. Non-fatal: a failure here costs handler
+  // addressability, never the index run.
+  (() => {
+    try {
+      const rebound = store.resolveRouteHandlers(repoId);
+      if (rebound > 0) indexLog(`[index-post] repoId=${repoId} rebound ${String(rebound)} route handler(s) across partial-class files`);
+    } catch { /* non-fatal */ }
+  })();
+
   await yieldToEventLoop();
 
   const shouldResolveImplementsInPost = effectiveResolveImplementsInPost;

@@ -12,18 +12,47 @@ import { McpError, ErrorCode } from "@modelcontextprotocol/sdk/types.js";
 import { resolveResponseProfile } from "../../middleware/responseFormatter.js";
 import { buildCoverageBlock } from "../../middleware/coverage.js";
 import type { HandlerContext } from "./handlerContext.js";
+import type { GraphStore } from "../../repositories/graphStore.js";
+import { isTestPath } from "../../services/indexing/fileFilter.js";
+
+/**
+ * MCP-ISSUE-056: drop test-file nodes from a traced sub-graph, and the edges that pointed at them.
+ *
+ * A traversal is not a flat list — removing a node without removing its edges leaves hops that name a
+ * symbol no longer present, which is a worse answer than either extreme. The entry symbol is always
+ * kept: tracing outward FROM a test is a legitimate question, and answering it with an empty graph
+ * would be silently wrong.
+ */
+function filterTracedTests<T extends ReturnType<GraphStore["traceExecutionFlow"]>>(
+  result: T,
+  excludeTests: boolean,
+  entrySymbolId: string
+): T {
+  if (!excludeTests) return result;
+  const keptNodes = result.nodes.filter((n) => n.symbolId === entrySymbolId || !isTestPath(n.filePath));
+  const keptIds = new Set(keptNodes.map((n) => n.symbolId));
+  return {
+    ...result,
+    nodes: keptNodes,
+    edges: result.edges.filter((e) => keptIds.has(e.fromId) && keptIds.has(e.toId))
+  };
+}
 
 export function handleTraceExecutionFlow(
-  args: { repoId: string; entrySymbolId: string; maxDepth: number; maxNodes: number; profile: string },
+  args: { repoId: string; entrySymbolId: string; maxDepth: number; maxNodes: number; excludeTests: boolean; profile: string },
   ctx: HandlerContext
 ): CallToolResult {
   const { store } = ctx;
   const profile = resolveResponseProfile(args.profile as Parameters<typeof resolveResponseProfile>[0]);
-  const result = store.traceExecutionFlow(args.repoId, args.entrySymbolId, args.maxDepth, args.maxNodes);
+  const result = filterTracedTests(
+    store.traceExecutionFlow(args.repoId, args.entrySymbolId, args.maxDepth, args.maxNodes),
+    args.excludeTests,
+    args.entrySymbolId
+  );
   if (!result.entrySymbol) {
     throw new McpError(ErrorCode.InvalidParams, `trace_execution_flow: entry symbol '${args.entrySymbolId}' not found in repo '${args.repoId}'.`);
   }
-  const coverage = buildCoverageBlock({ resultCount: result.nodes.length, truncated: result.truncated, kind: "execution_flow", query: result.entrySymbol.name });
+  const coverage = buildCoverageBlock({ resultCount: result.nodes.length, truncated: result.truncated, kind: "execution_flow", query: result.entrySymbol.name, edgeProvenance: result.provenance });
   if (profile === "nano") {
     // MCP-ISSUE-049: dedupe BEFORE the slice. Taking the first 10 edges and mapping to a name gave
     // `["Equals","NotifyAsync",…,"NotifyAsync","NotifyAsync"]` — NotifyAsync four times — so the cap

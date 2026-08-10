@@ -77,8 +77,8 @@ export function prepareWriteStatements(db: Database.Database): WriteStatements {
     ),
     insertRoute: db.prepare(
       `
-      insert into routes (repo_id, file_path, controller_symbol_id, handler_symbol_id, http_method, route_template, line)
-      values (@repoId, @filePath, @controllerSymbolId, @handlerSymbolId, @httpMethod, @routeTemplate, @line)
+      insert into routes (repo_id, file_path, controller_symbol_id, handler_symbol_id, handler_name, http_method, route_template, line)
+      values (@repoId, @filePath, @controllerSymbolId, @handlerSymbolId, @handlerName, @httpMethod, @routeTemplate, @line)
       `
     )
   };
@@ -403,7 +403,9 @@ export function replaceRoutesForFile(ctx: WriteContext, repoId: string, filePath
 
   const writeRows = (rows: RouteRecord[]): void => {
     for (const row of rows) {
-      ctx.stmts.insertRoute.run(row);
+      // handlerName is nullable and better-sqlite3 rejects `undefined` for a named parameter, so an
+      // older RouteRecord (or a shape without a delegate) is normalized to an explicit null.
+      ctx.stmts.insertRoute.run({ ...row, handlerName: row.handlerName ?? null });
     }
   };
 

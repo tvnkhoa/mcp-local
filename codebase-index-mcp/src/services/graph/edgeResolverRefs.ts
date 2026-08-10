@@ -113,7 +113,15 @@ export function resolveTypeRefEdges(db: Database.Database, repoId: string, maxUn
     const isFrameworkType =
       isKnownExternalTypeName(typeName) ||
       (rawTypeName.includes(".") && isKnownExternalToken(rawTypeName));
-    const crossRepoMatch = isFrameworkType ? null : findProviderSymbolByName(db, repoId, typeName);
+    // MCP-ISSUE-058(f): 045's fix held for `Task`, but four bare-name links survived it —
+    // `Message` → `SSNet.ChatGpt/Model/ChatResponse.cs`, `Request` →
+    // `SSNet.Instrument.Api/Models/Request/Request.cs`, `Program` →
+    // `samples/QueueManagement/.../Program.cs`. None is a framework type, so the gate above let them
+    // through; all three are names so generic that EVERY .NET repo declares one, which makes a bare
+    // name no evidence at all of a shared contract. A genuine cross-repo contract carries a
+    // distinctive name (`IOutboundDeliveryPublisher`, `OutboundFlowType`) — those are unaffected.
+    const crossRepoMatch =
+      isFrameworkType || isTooGenericToCrossRepos(typeName) ? null : findProviderSymbolByName(db, repoId, typeName);
     if (crossRepoMatch) {
       result = { symbolId: crossRepoMatch.symbolId, confidence: 0.65, reason: "resolved type cross-repo name-match" };
     } else if (isVectorEnabled() && !vectorProbe.abandoned) {
@@ -171,6 +179,26 @@ export function resolveTypeRefEdges(db: Database.Database, repoId: string, maxUn
   return count;
 }
 
+/**
+ * Type names too generic for a bare-name match to be evidence of a shared contract (MCP-ISSUE-058(f)).
+ *
+ * Sibling of the framework-type gate: those names are excluded because they belong to the BCL, these
+ * because every repo in the workspace declares its own. Same consequence either way — the name alone
+ * cannot justify crossing a repo boundary.
+ */
+const TOO_GENERIC_CROSS_REPO_TYPE_NAMES = new Set(
+  [
+    "Program", "Startup", "Message", "Request", "Response", "Result", "Error", "Options", "Settings",
+    "Config", "Configuration", "Context", "Item", "Entity", "Model", "Data", "Info", "Metadata",
+    "Constants", "Helpers", "Extensions", "Utils", "Handler", "Service", "Repository", "Factory",
+    "Worker", "Client", "Server", "Event", "Command", "Query", "Status", "Type", "Key", "Value"
+  ].map((x) => x.toLowerCase())
+);
+
+function isTooGenericToCrossRepos(typeName: string): boolean {
+  return TOO_GENERIC_CROSS_REPO_TYPE_NAMES.has(typeName.toLowerCase());
+}
+
 export function resolvePropertyEdges(db: Database.Database, repoId: string, maxUnresolvedRows = 0): number {
   const unresolvedSql = `
     select distinct e.from_id as fromId, e.to_id as toId, s.file_path as fromFile, e.type as edgeType
@@ -204,12 +232,16 @@ export function resolvePropertyEdges(db: Database.Database, repoId: string, maxU
   // Method candidates: fallback for method-group references (e.g. _repo.FindByCondition used
   // without () — accessed as delegate/expression). Only used for PROPERTY_REF, not PROPERTY_WRITE.
   const methodCandidates = buildNamedCandidateMap(db, repoId, ["method", "function"]);
+  // MCP-ISSUE-052: `record` and `record struct` were missing, so a property owned by a CQRS record or
+  // a `readonly record struct` (e.g. `ConversationLoopCorrelationCodec.ParseResult`) could never be
+  // used to constrain a candidate set — the type-qualified branch below silently fell through to the
+  // unconstrained name match for exactly the types this codebase uses most.
   const typeRows = db
     .prepare(
       `
       select name, file_path as filePath
       from symbols
-      where repo_id = ? and kind in ('class', 'interface', 'struct', 'type')
+      where repo_id = ? and kind in ('class', 'interface', 'struct', 'type', 'record', 'record struct', 'enum')
       `
     )
     .all(repoId) as { name: string; filePath: string }[];
@@ -276,13 +308,51 @@ export function resolvePropertyEdges(db: Database.Database, repoId: string, maxU
         return filtered.length > 0 ? filtered : namedCandidates;
       })();
 
+      // MCP-ISSUE-052 (property variant): refuse to guess an owner we cannot prove.
+      //
+      // `parsed.ConversationCode`, where `parsed` is a local of type
+      // `ConversationLoopCorrelationCodec.ParseResult`, arrives here as the BARE token
+      // `property:ConversationCode` — the receiver is a local, so extraction had no type to qualify it
+      // with. The name then matched a same-named property in a unit-test file and was written out at
+      // 0.75 as though it were fact. The declaring type is a positional `record struct` parameter, so
+      // the correct target is not in the graph at all: every cross-file candidate here is wrong, and
+      // picking the least-wrong one is worse than admitting the gap.
+      //
+      // Narrow on purpose. A same-file match still resolves (no cross-file inference needed), and so
+      // does a bare token with exactly one candidate repo-wide (nothing to be ambiguous about). Only a
+      // bare, cross-file, multi-candidate token is refused — the shape that cannot be anything but a
+      // coin flip.
+      const tokenIsBare = !typeName;
+      const ambiguousOwner =
+        tokenIsBare && constrainedCandidates.length > 1 && constrainedCandidates.every((c) => c.filePath !== row.fromFile);
+      if (ambiguousOwner) {
+        updateStmt.run(row.toId, 0.1, "unresolved property (ambiguous owner)", repoId, row.fromId, row.toId, row.edgeType);
+        count += 1;
+        continue;
+      }
+
       const match = pickBestNamedCandidate(constrainedCandidates, row.fromFile, ["property"]);
       if (match) {
         const sameFile = match.filePath === row.fromFile;
+        // A bare token that lands cross-file on the ONLY property of that name is a plausible guess,
+        // not a proven one: `parsed.CorrelationId` resolved to `ReplyConversation.CorrelationId`
+        // simply because no other `CorrelationId` exists, while the real owner —
+        // `ConversationLoopCorrelationCodec.ParseResult` — is a positional record parameter and so is
+        // not in the graph at all. Name uniqueness is not ownership.
+        //
+        // Kept rather than refused, because this is 2791 of 8578 resolved property edges on the
+        // reference repo and most of them ARE right; deleting them to fix one would trade a wrong
+        // answer for a missing one. Demoted and labelled instead, so `find_field_accesses` still
+        // finds it while every traversal treats it as the guess it is (NAME_ONLY_EDGE_REASONS).
+        const unprovenOwner = !sameFile && tokenIsBare;
         const confidence = row.edgeType === "PROPERTY_WRITE"
-          ? (sameFile ? 0.84 : 0.72)
-          : (sameFile ? 0.88 : 0.75);
-        const reason = sameFile ? "resolved property same-file" : "resolved property by name";
+          ? (sameFile ? 0.84 : unprovenOwner ? 0.4 : 0.72)
+          : (sameFile ? 0.88 : unprovenOwner ? 0.4 : 0.75);
+        const reason = sameFile
+          ? "resolved property same-file"
+          : unprovenOwner
+            ? "resolved property by name (unproven owner)"
+            : "resolved property by name";
         updateStmt.run(match.symbolId, confidence, reason, repoId, row.fromId, row.toId, row.edgeType);
         count += 1;
         continue;

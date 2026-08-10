@@ -185,7 +185,10 @@ export function getRouteMapImpl(
         r.controller_symbol_id as controllerSymbolId,
         cs.name as controllerName,
         r.handler_symbol_id as handlerSymbolId,
-        hs.name as handlerName,
+        -- MCP-ISSUE-055: the registration-site delegate name wins over the joined symbol's name.
+        -- When a partial-class handler could not be bound, the join lands on the enclosing Map
+        -- and reported "Map" for every route in the group; the recorded name is still correct.
+        coalesce(r.handler_name, hs.name) as handlerName,
         r.http_method as httpMethod,
         r.route_template as routeTemplate,
         r.line as line

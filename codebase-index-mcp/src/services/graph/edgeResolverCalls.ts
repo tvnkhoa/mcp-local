@@ -28,6 +28,20 @@ import { indexWarn } from "../indexing/indexProgress.js";
  */
 const VECTOR_PROBE_SIZE = 100;
 
+/**
+ * The two `reason` labels that mean "this target came from the callee's NAME alone, across files".
+ *
+ * Named because MCP-ISSUE-052's suppression keys off exactly this population: a same-file match or a
+ * receiver-typed match is evidence, a cross-file name match is a guess, and only a guess may be
+ * overruled by a qualified sibling.
+ */
+const NAME_ONLY_REASON = "resolved callee by name";
+const NAME_ONLY_AMBIGUOUS_REASON = "resolved callee by name (ambiguous)";
+const NAME_ONLY_REASONS: ReadonlySet<string> = new Set([NAME_ONLY_REASON, NAME_ONLY_AMBIGUOUS_REASON]);
+
+/** Marks the bare half of a qualified call site that a qualified sibling has already answered. */
+const SUPERSEDED_REASON = "superseded by qualified call";
+
 export interface CallResolutionContext {
   candidateMap: Map<string, { symbolId: string; filePath: string; kind: string; parentSymbolId: string | null }[]>;
   interfaceByName: Map<string, { symbolId: string; filePath: string }>;
@@ -174,12 +188,89 @@ export function buildCallResolutionContext(db: Database.Database, repoId: string
       `select distinct e.from_id as fromId, e.to_id as toId, s.file_path as fromFile
        from edges e
        inner join symbols s on s.repo_id = e.repo_id and s.symbol_id = e.from_id
-       where e.repo_id = ? and e.type = 'CALLS' and e.to_id like 'callee:%'
+       where e.repo_id = @repoId and e.type = 'CALLS' and e.to_id like 'callee:%'
+         -- MCP-ISSUE-052 durability (code review 2026-08-10): a suppressed bare edge is DEMOTED, not
+         -- deleted, so it keeps its callee: token and matched the LIKE above on every later run.
+         -- Call resolution runs repo-wide even on incremental runs, and by then the qualified sibling
+         -- is already resolved, so it is absent from this set: provenByCaller has no proof, the guard
+         -- cannot fire, and the bare edge was re-resolved to the wrong same-named method at
+         -- confidence 0.75. One unrelated file touched was enough to undo the fix. The
+         -- "superseded by qualified call" marker was written and never read; reading it here is what
+         -- makes the suppression stick. Re-indexing the caller own file clears it the right way:
+         -- deleteEdgesForFile drops the row and extraction re-emits it without the marker.
+         and coalesce(e.reason, '') != @supersededReason
        order by e.from_id, e.to_id`
     )
-    .all(repoId) as { fromId: string; toId: string; fromFile: string }[];
+    .all({ repoId, supersededReason: SUPERSEDED_REASON }) as { fromId: string; toId: string; fromFile: string }[];
 
   return { candidateMap, interfaceByName, interfaceIdSet, implementorFilesByIfaceId, subclassFilesByBaseId, virtualMethodIds, updateStmt, insertDispatchStmt, unresolvedRows, offset: 0, vectorProbe: { attempted: 0, hits: 0, abandoned: false } };
+}
+
+export type ResolvedUpdate = { fromId: string; oldToId: string; newToId: string; confidence: number; reason: string };
+
+/**
+ * MCP-ISSUE-052 — drop the bare half of a qualified call site once the qualified half has answered it.
+ *
+ * The C# extractor emits BOTH tokens for one call site: `callee:Parse` and
+ * `callee:ConversationLoopCorrelationCodec.Parse` (`csharpSymbols.ts`, the "simple + qualified" pair).
+ * That was safe only while both resolved to the same symbol, because the unique index on
+ * `edges(repo_id, from_id, to_id, type)` then collapsed them into one row — which is exactly what the
+ * MCP-ISSUE-036 note observed.
+ *
+ * MCP-ISSUE-036 then taught the qualified token to follow its receiver. The qualified half now lands on
+ * the right method while the bare half still goes through `pickBestNamedCandidate` and picks whichever
+ * same-named method wins the heuristic. Two different `to_id` values, nothing collapses, and the caller
+ * ends up with one correct edge plus one wrong one — the wrong one seeding entire traversals at
+ * `confidence: "high"`.
+ *
+ * The bare edge is suppressed only when all three hold, which is what keeps a genuine same-named local
+ * call from being lost:
+ *   1. a qualified sibling `X.M` from the SAME caller resolved to a real symbol,
+ *   2. the bare edge resolved by name ACROSS files — a same-file or receiver-typed match is evidence
+ *      and is left alone,
+ *   3. the two disagree about the target.
+ *
+ * Suppressed edges are demoted rather than deleted: `to_id` returns to its placeholder with
+ * `confidence: 0.1`, the same shape as an external-boundary row, so the audit trail survives and
+ * MCP-ISSUE-053's unresolved filter hides it from `edgesOut` / `topCallees`.
+ */
+export function suppressBareCallsShadowedByQualified(updates: ResolvedUpdate[]): number {
+  // fromId → member name → the symbolIds a qualified token proved for that member
+  const provenByCaller = new Map<string, Map<string, Set<string>>>();
+  for (const u of updates) {
+    if (!u.oldToId.startsWith("callee:")) continue;
+    const token = u.oldToId.slice(7);
+    if (!token.includes(".")) continue;
+    // Still a placeholder — the qualified token did not resolve, so it proves nothing.
+    if (u.newToId === u.oldToId) continue;
+    const member = token.split(".").pop() ?? "";
+    if (!member) continue;
+    let byMember = provenByCaller.get(u.fromId);
+    if (!byMember) {
+      byMember = new Map<string, Set<string>>();
+      provenByCaller.set(u.fromId, byMember);
+    }
+    const ids = byMember.get(member) ?? new Set<string>();
+    ids.add(u.newToId);
+    byMember.set(member, ids);
+  }
+  if (provenByCaller.size === 0) return 0;
+
+  let suppressed = 0;
+  for (const u of updates) {
+    if (!u.oldToId.startsWith("callee:")) continue;
+    const token = u.oldToId.slice(7);
+    if (token.includes(".")) continue;
+    if (u.newToId === u.oldToId) continue;
+    if (!NAME_ONLY_REASONS.has(u.reason)) continue;
+    const proven = provenByCaller.get(u.fromId)?.get(token);
+    if (!proven || proven.has(u.newToId)) continue;
+    u.newToId = u.oldToId;
+    u.confidence = 0.1;
+    u.reason = SUPERSEDED_REASON;
+    suppressed++;
+  }
+  return suppressed;
 }
 
 /**
@@ -200,8 +291,16 @@ export function resolveCallEdgesBatch(
    */
   stats?: { rowsUpdated: number; dispatchInserted: number }
 ): number {
-  const batch = ctx.unresolvedRows.slice(ctx.offset, ctx.offset + batchSize);
-  ctx.offset += batchSize;
+  // MCP-ISSUE-052: never split one caller across two batches. The bare/qualified pairing at the end
+  // of this function needs every row of a `from_id` in the same pass, and the pre-fetch is ordered by
+  // `from_id`, so extending to the end of the caller that straddles the boundary is enough.
+  let batchEnd = Math.min(ctx.offset + batchSize, ctx.unresolvedRows.length);
+  const boundaryFromId = ctx.unresolvedRows[batchEnd - 1]?.fromId;
+  while (batchEnd < ctx.unresolvedRows.length && ctx.unresolvedRows[batchEnd].fromId === boundaryFromId) {
+    batchEnd++;
+  }
+  const batch = ctx.unresolvedRows.slice(ctx.offset, batchEnd);
+  ctx.offset = batchEnd;
 
   if (batch.length === 0) return 0;
 
@@ -211,10 +310,9 @@ export function resolveCallEdgesBatch(
   const MAX_INTERFACE_DISPATCH_FANOUT = 10;
 
   // Phase 1: resolve all rows in memory → collect updates and inserts
-  type UpdateRow = { fromId: string; oldToId: string; newToId: string; confidence: number; reason: string };
   type InsertRow = { fromId: string; toId: string; confidence: number; reason: string };
   type PendingVectorLookup = { fromId: string; oldToId: string; normalized: string };
-  const updates: UpdateRow[] = [];
+  const updates: ResolvedUpdate[] = [];
   const inserts: InsertRow[] = [];
   const pendingVectorLookups: PendingVectorLookup[] = [];
 
@@ -222,8 +320,17 @@ export function resolveCallEdgesBatch(
     const calleeName = row.toId.slice(7);
     let dispatchMethodName: string | null = null;
     let dispatchInterfaceId: string | null = null;
+    // MCP-ISSUE-052: HOW the match was obtained, not just what it is. The receiver-as-class branch
+    // added by MCP-ISSUE-036 shared the "resolved callee by name" label with the name-only fallback,
+    // so a correct receiver-typed edge and a blind name guess were indistinguishable in `reason` —
+    // which is why the consumer report concluded that branch had never fired when in fact it had.
+    let matchVia: "name" | "receiver_type" = "name";
+    // Whether the name that produced the match had more than one candidate. A single-candidate name
+    // is a safe guess; a multi-candidate one is a coin flip that must say so.
+    const directCandidates = candidateMap.get(calleeName) ?? [];
+    let nameAmbiguous = directCandidates.length > 1;
     let match = pickBestNamedCandidate(
-      candidateMap.get(calleeName) ?? [],
+      directCandidates,
       row.fromFile,
       ["function", "method", "constructor", "class"]
     );
@@ -270,13 +377,21 @@ export function resolveCallEdgesBatch(
         match =
           members.find((c) => c.kind === "method" && c.parentSymbolId === ownerClass.symbolId) ??
           members.find((c) => c.kind === "method" && c.filePath === ownerClass.filePath);
+        // The owner was PROVEN from the receiver, not guessed from a name — record that, and stop
+        // an earlier multi-candidate reading from labelling this edge ambiguous.
+        if (match) {
+          matchVia = "receiver_type";
+          nameAmbiguous = false;
+        }
       }
     }
 
     if (!match && calleeName.includes(".")) {
       const baseName = calleeName.split(".").pop() ?? calleeName;
+      const baseCandidates = candidateMap.get(baseName) ?? [];
+      nameAmbiguous = baseCandidates.length > 1;
       match = pickBestNamedCandidate(
-        candidateMap.get(baseName) ?? [],
+        baseCandidates,
         row.fromFile,
         ["function", "method", "constructor", "class"]
       );
@@ -291,12 +406,24 @@ export function resolveCallEdgesBatch(
     }
 
     if (match) {
+      const sameFile = match.filePath === row.fromFile;
+      // A receiver-typed match outranks a name guess: the owner came from `parent_symbol_id`, so it
+      // is knowledge rather than a heuristic — but it stays below a same-file match, which needs no
+      // cross-file inference at all.
       const confidence = dispatchMethodName
-        ? (match.filePath === row.fromFile ? 0.9 : 0.8)
-        : (match.filePath === row.fromFile ? 0.9 : 0.75);
+        ? (sameFile ? 0.9 : 0.8)
+        : matchVia === "receiver_type"
+          ? (sameFile ? 0.9 : 0.85)
+          : (sameFile ? 0.9 : 0.75);
       const reason = dispatchMethodName
         ? "resolved interface method"
-        : (confidence >= 0.9 ? "resolved callee same-file" : "resolved callee by name");
+        : matchVia === "receiver_type"
+          ? "resolved callee by receiver type"
+          : sameFile
+            ? "resolved callee same-file"
+            : nameAmbiguous
+              ? NAME_ONLY_AMBIGUOUS_REASON
+              : NAME_ONLY_REASON;
       updates.push({ fromId: row.fromId, oldToId: row.toId, newToId: match.symbolId, confidence, reason });
 
       if (dispatchMethodName && dispatchInterfaceId) {
@@ -377,6 +504,10 @@ export function resolveCallEdgesBatch(
     }
   }
 
+  // MCP-ISSUE-052: runs after the vector lane so it sees every resolution this caller produced.
+  // Batch boundaries are extended above so a caller's bare and qualified rows are never split.
+  suppressBareCallsShadowedByQualified(updates);
+
   if (updates.length === 0 && inserts.length === 0) return 0;
 
   // Phase 2: use temp table + single UPDATE JOIN for bulk resolution
@@ -444,192 +575,6 @@ export function resolveCallEdgesBatch(
     db.exec(`delete from _resolve_batch`);
   });
   batchTx();
-
-  return count;
-}
-
-export function resolveCallEdges(db: Database.Database, repoId: string, maxUnresolvedRows = 0): number {
-  // Find all CALLS edges with unresolved plain-text toId ("callee:<name>")
-  // Join symbols to get the caller's file for same-file resolution priority
-  // Filter only on to_id prefix — do NOT filter by reason.
-  // 'qualified call' reason is set at extraction time while to_id is still a callee: placeholder.
-  const unresolvedSql = `
-    select distinct e.from_id as fromId, e.to_id as toId, s.file_path as fromFile
-    from edges e
-    inner join symbols s on s.repo_id = e.repo_id and s.symbol_id = e.from_id
-    where e.repo_id = ? and e.type = 'CALLS' and e.to_id like 'callee:%'
-    -- ORDER BY is load-bearing, not cosmetic: with a LIMIT and no ordering, SQLite may return any
-    -- N of the qualifying rows, so resolution ran over an arbitrary sample and two identical runs
-    -- resolved different edges. The key must fully disambiguate, or the sort is arbitrary again.
-    -- MCP-ISSUE-032.
-    order by e.from_id, e.to_id, s.file_path
-    ${maxUnresolvedRows > 0 ? "limit ?" : ""}
-  `;
-  const unresolved = db
-    .prepare(unresolvedSql)
-    .all(...(maxUnresolvedRows > 0 ? [repoId, maxUnresolvedRows] : [repoId])) as {
-    fromId: string;
-    toId: string;
-    fromFile: string;
-  }[];
-
-  if (unresolved.length === 0) return 0;
-
-  const updateStmt = db.prepare(
-    `update edges set to_id = ?, confidence = ?, reason = ? where repo_id = ? and from_id = ? and to_id = ?`
-  );
-  const insertDispatchStmt = db.prepare(
-    `
-    insert into edges (repo_id, from_id, to_id, type, confidence, reason)
-    select ?, ?, ?, 'CALLS', ?, ?
-    where not exists (
-      select 1 from edges
-      where repo_id = ? and from_id = ? and to_id = ? and type = 'CALLS'
-    )
-    `
-  );
-
-  // Pre-build interface lookup map: name → { symbolId, filePath }
-  const interfaceRows = db
-    // `interfaceByName` keeps the first row per name, so ordering decides which declaration of a
-    // duplicated interface name wins.
-    .prepare(`select symbol_id as symbolId, name, file_path as filePath from symbols where repo_id = ? and kind = 'interface' order by name, symbol_id`)
-    .all(repoId) as { symbolId: string; name: string; filePath: string }[];
-  const interfaceByName = new Map<string, { symbolId: string; filePath: string }>();
-  const interfaceIdSet = new Set<string>();
-  for (const r of interfaceRows) {
-    if (!interfaceByName.has(r.name)) interfaceByName.set(r.name, { symbolId: r.symbolId, filePath: r.filePath });
-    interfaceIdSet.add(r.symbolId);
-  }
-
-  // Pre-build implementor files map: interfaceSymbolId → filePath[]
-  // record / record struct are class-like implementors too (ISSUE-013/ISSUE-022).
-  const implEdgeRows = db
-    .prepare(
-      // This feeds `implementorFilesByIfaceId`, which is capped by MAX_INTERFACE_DISPATCH_FANOUT at the
-      // point of use. Unordered, an interface with more implementors than the cap contributed a
-      // different arbitrary subset each run — the largest single source of run-to-run edge drift, at 99
-      // of the 120 edges that appeared in one run and not the next.
-      `select distinct e.to_id as ifaceId, s.file_path as filePath
-       from edges e
-       inner join symbols s on s.repo_id = e.repo_id and s.symbol_id = e.from_id
-       where e.repo_id = ? and e.type = 'IMPLEMENTS' and s.kind in ('class', 'struct', 'record', 'record struct')
-       order by e.to_id, s.file_path`
-    )
-    .all(repoId) as { ifaceId: string; filePath: string }[];
-  const implementorFilesByIfaceId = new Map<string, string[]>();
-  for (const r of implEdgeRows) {
-    const list = implementorFilesByIfaceId.get(r.ifaceId) ?? [];
-    list.push(r.filePath);
-    implementorFilesByIfaceId.set(r.ifaceId, list);
-  }
-
-  const candidateMap = buildNamedCandidateMap(db, repoId, ["function", "method", "constructor", "class"]);
-
-  let count = 0;
-  const tx = db.transaction(() => {
-    for (const row of unresolved) {
-      const calleeName = row.toId.slice(7); // strip "callee:"
-      let dispatchMethodName: string | null = null;
-      let dispatchInterfaceId: string | null = null;
-      let match = pickBestNamedCandidate(
-        candidateMap.get(calleeName) ?? [],
-        row.fromFile,
-        ["function", "method", "constructor", "class"]
-      );
-
-      // For qualified calls like "IRepository.Save", resolve primary target to the
-      // interface method first, then fan out lower-confidence edges to implementing methods.
-      if (calleeName.includes(".")) {
-        const parts = calleeName.split(".").filter((x) => x.length > 0);
-        const receiverType = parts.length > 1 ? parts.slice(0, -1).join(".") : "";
-        const memberName = parts[parts.length - 1] ?? "";
-        if (receiverType && memberName) {
-          const iface = interfaceByName.get(receiverType);
-          if (iface) {
-            // Find the interface method via the candidateMap (already in memory)
-            const ifaceMethod = (candidateMap.get(memberName) ?? []).find(
-              (c) => c.filePath === iface.filePath && c.kind === "method"
-            );
-            if (ifaceMethod) {
-              match = ifaceMethod;
-              dispatchMethodName = memberName;
-              dispatchInterfaceId = iface.symbolId;
-            }
-          }
-        }
-      }
-
-      // Retry qualified placeholders like "TypeName.methodName" using terminal symbol name.
-      if (!match && calleeName.includes(".")) {
-        const baseName = calleeName.split(".").pop() ?? calleeName;
-        match = pickBestNamedCandidate(
-          candidateMap.get(baseName) ?? [],
-          row.fromFile,
-          ["function", "method", "constructor", "class"]
-        );
-      }
-
-      // ISSUE-022 (Bug D): bare-name match landing on an interface's own method → fan out too.
-      if (match && !dispatchMethodName && match.kind === "method" && match.parentSymbolId && interfaceIdSet.has(match.parentSymbolId)) {
-        dispatchMethodName = calleeName.split(".").pop() ?? calleeName;
-        dispatchInterfaceId = match.parentSymbolId;
-      }
-
-      if (match) {
-        const confidence = dispatchMethodName
-          ? (match.filePath === row.fromFile ? 0.9 : 0.8)
-          : (match.filePath === row.fromFile ? 0.9 : 0.75);
-        const reason = dispatchMethodName
-          ? "resolved interface method"
-          : (confidence >= 0.9 ? "resolved callee same-file" : "resolved callee by name");
-        updateStmt.run(match.symbolId, confidence, reason, repoId, row.fromId, row.toId);
-        count += 1;
-
-        if (dispatchMethodName && dispatchInterfaceId) {
-          const implementorFiles = (implementorFilesByIfaceId.get(dispatchInterfaceId) ?? []).slice(0, 10);
-          for (const implFilePath of implementorFiles) {
-            const implMethod = (candidateMap.get(dispatchMethodName) ?? []).find(
-              (c) => c.filePath === implFilePath && c.kind === "method"
-            );
-            if (!implMethod || implMethod.symbolId === match.symbolId) {
-              continue;
-            }
-            const insertResult = insertDispatchStmt.run(
-              repoId,
-              row.fromId,
-              implMethod.symbolId,
-              0.7,
-              "interface-dispatch",
-              repoId,
-              row.fromId,
-              implMethod.symbolId
-            );
-            if (insertResult.changes > 0) {
-              count += 1;
-            }
-          }
-        }
-      } else {
-        // No exact match — try external tagging then vector fallback
-        const rawName = calleeName.split(".").pop() ?? calleeName;
-        const normalized = stripGenerics(rawName);
-
-        if (isKnownExternalToken(normalized)) {
-          // Tag as external boundary — reduces unresolved noise
-          updateStmt.run(row.toId, 0.1, "external boundary", repoId, row.fromId, row.toId);
-        } else if (isVectorEnabled()) {
-          // Vector fallback for internal symbols that didn't match exactly
-          const vecResults = vectorSearchSymbols(db, repoId, normalized, 3);
-          if (vecResults.length > 0 && vecResults[0].distance < 0.35) {
-            updateStmt.run(vecResults[0].symbolId, 0.52, "resolved callee vector-fallback", repoId, row.fromId, row.toId);
-            count += 1;
-          }
-        }
-      }
-    }
-  });
-  tx();
 
   return count;
 }

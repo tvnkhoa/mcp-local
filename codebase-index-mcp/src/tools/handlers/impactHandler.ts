@@ -4,7 +4,7 @@ import { resolveResponseProfile } from "../../middleware/responseFormatter.js";
 import { validateReadOnlyGraphSql, validateAllowedTables } from "../../middleware/sqliteGuardrails.js";
 import { buildStaleWarning, getRepoStaleness, collectDirtyFiles, countCommitsBehind } from "../../services/git/gitHelpers.js";
 import type { StaleWarning } from "../../services/git/gitHelpers.js";
-import { buildCoverageBlock } from "../../middleware/coverage.js";
+import { buildCoverageBlock, summarizeEdgeProvenance } from "../../middleware/coverage.js";
 import { isTestPath } from "../../services/indexing/fileFilter.js";
 import { GraphStore } from "../../repositories/graphStore.js";
 import type { HandlerContext } from "./handlerContext.js";
@@ -120,15 +120,19 @@ export function handleGetDependencyGraph(
 // ── get_call_chain ────────────────────────────────────────────────────────────
 
 export function handleGetCallChain(
-  args: { repoId: string; symbolId: string; direction: "callers" | "callees"; depth: number; limit: number; profile: string },
+  args: { repoId: string; symbolId: string; direction: "callers" | "callees"; depth: number; limit: number; excludeTests: boolean; profile: string },
   ctx: HandlerContext
 ): CallToolResult {
   const { store } = ctx;
   const profile = resolveResponseProfile(args.profile as Parameters<typeof resolveResponseProfile>[0]);
   type CallChainDirection = "callers" | "callees";
   const direction: CallChainDirection = args.direction;
-  const rows = traverseCallGraph(store, args.repoId, args.symbolId, direction, args.depth, args.limit);
-  const coverage = buildCoverageBlock({ resultCount: rows.length, truncated: rows.length >= args.limit, kind: "call_chain", query: args.symbolId });
+  // MCP-ISSUE-056: `excludeTests` is applied on the FAR end of each hop, inside `getCallEdges`'s
+  // SQL. It used to be a post-filter here, which had two consequences: the traversal spent its
+  // `limit` on rows that were then discarded, and `truncated` below was computed on the shortened
+  // array — so a genuinely truncated chain reported `truncated: false`.
+  const rows = traverseCallGraph(store, args.repoId, args.symbolId, direction, args.depth, args.limit, args.excludeTests);
+  const coverage = buildCoverageBlock({ resultCount: rows.length, truncated: rows.length >= args.limit, kind: "call_chain", query: args.symbolId, edgeProvenance: summarizeEdgeProvenance(rows) });
 
   // MCP-ISSUE-049: every profile must carry enough identity to act on. `getCallEdges` now resolves
   // both endpoints, so the far end of each hop has a name, a file and an id — before, nano emitted
@@ -165,7 +169,7 @@ export function handleGetCallChain(
 // instead of falling back to grep. Accepts a property symbolId or a resolvable name.
 
 export function handleFindFieldAccesses(
-  args: { repoId: string; symbolId?: string; name?: string; mode: "read" | "write" | "all"; limit: number; profile: string },
+  args: { repoId: string; symbolId?: string; name?: string; mode: "read" | "write" | "all"; limit: number; excludeTests: boolean; profile: string },
   ctx: HandlerContext
 ): CallToolResult {
   const { store } = ctx;
@@ -179,8 +183,12 @@ export function handleFindFieldAccesses(
   }
   if (!symbolId) throw new McpError(ErrorCode.InvalidParams, "find_field_accesses: provide symbolId or a resolvable name.");
 
-  const result = store.getFieldAccesses(args.repoId, symbolId, args.mode, args.limit);
-  if (!result.property) throw new McpError(ErrorCode.InvalidParams, `find_field_accesses: symbol '${symbolId}' not found in repo '${args.repoId}'.`);
+  // MCP-ISSUE-056: `excludeTests` is applied in the query — the filed case returned 5 of 7 reads of
+  // "HandledBy" from test files, and filtering after the `limit` spent the budget on the dropped rows.
+  const rawFieldAccesses = store.getFieldAccesses(args.repoId, symbolId, args.mode, args.limit, args.excludeTests);
+  const property = rawFieldAccesses.property;
+  if (!property) throw new McpError(ErrorCode.InvalidParams, `find_field_accesses: symbol '${symbolId}' not found in repo '${args.repoId}'.`);
+  const result = { ...rawFieldAccesses, property };
 
   const reads = result.accesses.filter((a) => a.mode === "read");
   const writes = result.accesses.filter((a) => a.mode === "write");
@@ -215,7 +223,7 @@ export function handleFindFieldAccesses(
 // ── find_impact_files ─────────────────────────────────────────────────────────
 
 export function handleFindImpactFiles(
-  args: { repoId: string; filePath: string; limit: number; view: "files" | "surface"; groupBy: "file" | "module"; profile: string },
+  args: { repoId: string; filePath: string; limit: number; view: "files" | "surface"; groupBy: "file" | "module"; excludeTests: boolean; profile: string },
   ctx: HandlerContext
 ): CallToolResult {
   const { store } = ctx;
@@ -226,7 +234,10 @@ export function handleFindImpactFiles(
   const warn = staleWarning ? { staleWarning } : {};
 
   if (args.view === "surface") {
-    const result = store.getImpactSurface(args.repoId, args.filePath, args.limit);
+    // MCP-ISSUE-056: the filed case returned 9 of 15 callers from a single test file. `excludeTests`
+    // goes INTO the query — as a post-filter over an already-LIMIT-ed page it could return `[]` for a
+    // symbol that has production callers, which reads as "nothing calls this".
+    const result = store.getImpactSurface(args.repoId, args.filePath, args.limit, args.excludeTests);
     const surfaceWiring = result.wiringNote ? { wiringNote: result.wiringNote } : {};
     const callers = result.callers;
     if (profile === "nano") {
@@ -248,7 +259,8 @@ export function handleFindImpactFiles(
     }
     return ctx.asText({ repoId: args.repoId, filePath: args.filePath, ...result, callers, indexMeta: buildIndexMeta(store, args.repoId, true), ...warn }, profile);
   }
-  const result = store.getImpactFiles(args.repoId, args.filePath, args.limit);
+  // MCP-ISSUE-056: same filter as the surface view, and likewise in-query so it applies before the cap.
+  const result = store.getImpactFiles(args.repoId, args.filePath, args.limit, args.excludeTests);
   const filesWiring = result.wiringNote ? { wiringNote: result.wiringNote } : {};
   if (args.groupBy === "module") {
     const filePaths = result.impactedFiles.map((f) => f.filePath);
@@ -261,7 +273,9 @@ export function handleFindImpactFiles(
   }
   if (profile === "nano") {
     const topFiles = result.impactedFiles.slice(0, 10).map((f) => ({ filePath: f.filePath, symbolCount: (f as { symbolCount?: number }).symbolCount ?? null }));
-    return ctx.asText({ repoId: args.repoId, filePath: args.filePath, totalFiles: result.impactedFiles.length, topFiles, hasMore: result.impactedFiles.length > topFiles.length, ...filesWiring, ...warn }, profile);
+    // `totalFiles` is the true dependent count (MCP-ISSUE-054), so `hasMore` compares against it —
+    // otherwise a blast radius of 300 shown 10 at a time reported `totalFiles: 20`.
+    return ctx.asText({ repoId: args.repoId, filePath: args.filePath, totalFiles: result.totalImpactedCount, topFiles, hasMore: result.totalImpactedCount > topFiles.length, ...filesWiring, ...warn }, profile);
   }
   return ctx.asText({ repoId: args.repoId, filePath: args.filePath, ...result, indexMeta: buildIndexMeta(store, args.repoId, true), ...warn }, profile);
 }
@@ -269,7 +283,7 @@ export function handleFindImpactFiles(
 // ── get_change_context ────────────────────────────────────────────────────────
 
 export function handleGetChangeContext(
-  args: { repoId: string; symbolId?: string; name?: string; callerDepth: number; calleeDepth: number; limit: number; profile: string },
+  args: { repoId: string; symbolId?: string; name?: string; callerDepth: number; calleeDepth: number; limit: number; excludeTests: boolean; profile: string },
   ctx: HandlerContext
 ): CallToolResult {
   const { store } = ctx;
@@ -289,7 +303,10 @@ export function handleGetChangeContext(
     }
     resolvedSymbolId = context.symbol.symbolId;
   }
-  const result = store.getChangeContext(args.repoId, resolvedSymbolId!, args.callerDepth, args.calleeDepth, args.limit);
+  // MCP-ISSUE-056: filter both directions IN the query, so `limit` is spent on rows the caller
+  // asked for. The counts in the payload are derived from these arrays, so `callerCount` /
+  // `calleeCount` stay honest about what was returned.
+  const result = store.getChangeContext(args.repoId, resolvedSymbolId!, args.callerDepth, args.calleeDepth, args.limit, args.excludeTests);
   return ctx.asText({ ...(formatChangeContextPayload(result, profile) as Record<string, unknown>), ...warn }, profile);
 }
 
@@ -536,7 +553,7 @@ export function handleQueryGraph(
  * `search` already had, which is also the convention every other read tool here follows.
  */
 export function handleQueryDocs(
-  args: { repoId: string; mode: "search" | "stale" | "coverage"; query?: string; symbolIds?: string[]; filePath?: string; limit: number; includeSymbols: boolean; includeCodeMentions: boolean; profile: string },
+  args: { repoId: string; mode: "search" | "stale" | "coverage"; query?: string; symbolIds?: string[]; filePath?: string; limit: number; includeSymbols: boolean; includeCodeMentions: boolean; contentTypes?: string[]; profile: string },
   ctx: HandlerContext
 ): CallToolResult {
   if (!ctx.constants.DOCS_TOOLS_ENABLED) {
@@ -546,7 +563,7 @@ export function handleQueryDocs(
   const profile = resolveResponseProfile(args.profile as Parameters<typeof resolveResponseProfile>[0]);
 
   if (args.mode === "search") {
-    const results = store.searchDocs(args.repoId, args.query!, args.limit, args.includeSymbols);
+    const results = store.searchDocs(args.repoId, args.query!, args.limit, args.includeSymbols, args.contentTypes ?? null);
     return ctx.asText(
       {
         repoId: args.repoId,
@@ -618,7 +635,7 @@ function traverseDependencyGraph(store: GraphStore, repoId: string, symbolId: st
   return all;
 }
 
-function traverseCallGraph(store: GraphStore, repoId: string, symbolId: string, direction: "callers" | "callees", depth: number, limit: number) {
+function traverseCallGraph(store: GraphStore, repoId: string, symbolId: string, direction: "callers" | "callees", depth: number, limit: number, excludeTests = false) {
   const all: ReturnType<GraphStore["getCallEdges"]> = [];
   const visited = new Set<string>();
   // MCP-ISSUE-022: the callers direction must see through DI. Production code calls the
@@ -639,7 +656,12 @@ function traverseCallGraph(store: GraphStore, repoId: string, symbolId: string, 
     const nextFrontier: string[] = [];
     for (const current of frontier) {
       if (all.length >= limit) break;
-      const edges = store.getCallEdges(repoId, current, direction, limit - all.length);
+      // MCP-ISSUE-056: `limit` is spent during traversal, so ORDER decides what survives truncation —
+      // `interface-dispatch` edges are a speculative fan-out and must be the ones dropped. That
+      // ordering is now inside `getCallEdges`'s SQL (`order by … then 1 else 0 end`), because it has
+      // to be applied BEFORE the `limit ?`. Sorting here, as this first shipped, reordered a page the
+      // database had already truncated: a no-op for what survives.
+      const edges = store.getCallEdges(repoId, current, direction, limit - all.length, excludeTests);
       for (const edge of edges) {
         const key = `${edge.fromId}:${edge.toId}:${edge.type}`;
         if (visited.has(key)) continue;

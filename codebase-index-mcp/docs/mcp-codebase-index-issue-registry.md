@@ -10,7 +10,39 @@ Workaround · Enhancement proposal. Filed here so the MCP server team can triage
 
 ## Index
 
-**22 entries — 20 resolved, 2 open.** Statuses and dates are copied from each entry's own
+**30 entries — 29 resolved, 1 re-opened (`054`).** The last 8 (`052`–`059`) were filed by the
+2026-08-05 consumer sweep — see *Sweep 2026-08-05* near the end of this file, which also records the
+independent re-verification that **every one of the 042–051 fixes held**, and lists the symptoms that
+turned out to be consumer misuse so they are not re-triaged as defects. All eight were reproduced and
+fixed on 2026-08-10 (`052`–`059`), verified by a full re-index of `wec.communication-hub` plus a new
+regression harness (`test:issue-052-qualified-call`) and unit tests for the risk scorer.
+
+**The consumer then re-verified that wave the same day, and `054` did not survive it.** Seven of the
+eight hold under independent repro; `054`'s disclosure fields hold but its central claim — that the
+risk score is invariant under `impactLimit` — is false in the pipeline, because the cap moved from the
+denominator to the numerator rather than being removed. Its unit test passes because it exercises
+`scoreChangeRisk` in isolation, where the truncation cannot be observed. **Read `054` → *Re-open*
+before closing it again; it names the end-to-end assertion that would have caught this.**
+
+Two of the eight were filed with the **wrong root cause**, and the corrected mechanism is recorded in
+each entry — read those before treating either as a regression baseline:
+
+- **`052`** — the report said 036's receiver-as-class branch "never fired". It fired. The extractor emits
+  a bare *and* a qualified token per call site and relied on the unique index to collapse them; once 036
+  taught the qualified half to resolve correctly the two stopped agreeing, so both survived.
+- **`055`** — nothing to do with `.WithName()`. `Customers` is a **partial class** and its handlers are
+  declared in sibling files, which the file-local symbol lookup could not see.
+
+**`054` was also worse than filed:** it does not merely flatten the risk signal, it inverts the verdict —
+the same file scores 78/high or 30/low on the same diff depending on `impactLimit`. **The inversion
+still reproduces after the fix**, in the opposite direction (49/medium at the default, 75/high at any
+wider page) — hence the re-open. Two further items are knowingly **left undone** and are marked as such
+in their entries: `strict-review`'s threshold has not been re-calibrated against the new scale (`054`),
+and the `.sln`/`.csproj` double-count plus the `query_graph` path-style split remain open (`058(f)`).
+Note the `.sln`/`.csproj` half of `058(f)` no longer reproduces on `wec.communication-hub` — the graph
+holds zero such edges — so it may be closable on measurement rather than work.
+
+Statuses and dates are copied from each entry's own
 `**Status:**` line — the entry is authoritative. Regenerate by scanning `^## ` headings and the
 first `- **Status:**` line beneath each.
 
@@ -34,6 +66,14 @@ unprovable owner is now flagged rather than dropped.
 
 | ID | Title | Status |
 |---|---|---|
+| `MCP-ISSUE-052` | a qualified static call produces the correct edge **and** a wrong same-named one, and `trace_execution_flow` reports 7 of 9 false nodes at `confidence:"high"` | ✅ FIXED 2026-08-10 · was P0 · follow-up to 036 |
+| `MCP-ISSUE-053` | unresolved edges surface as nameless rows / synthetic ids, inflating `calleeCount` and eating the `limit` budget | ✅ FIXED 2026-08-10 · was P1 |
+| `MCP-ISSUE-054` | `detect_changes` applies the default `impactLimit: 20` before breadth normalization, so the risk model is a constant; a policy preset can empty the result silently | ✅ FIXED 2026-08-10 (2nd attempt) · re-opened same day, cap moved out of the NUMERATOR · was P1 |
+| `MCP-ISSUE-055` | `route_map` takes `handlerName` from `.WithName()`, so a string-literal endpoint name collapses every route onto the group method | ✅ FIXED 2026-08-10 · was P2 · follow-up to 044 · rebind hardened 2026-08-10 (review) |
+| `MCP-ISSUE-056` | `excludeTests` still missing on the seven call-graph tools, where interface dispatch fans hardest into test doubles | ✅ FIXED 2026-08-10 · was P2 · follow-up to 049 · filters moved into SQL 2026-08-10 (review) |
+| `MCP-ISSUE-057` | `get_feature_bundle` misses endpoints living in a shared file, and lists class + constructor separately in every role | ✅ FIXED 2026-08-10 · was P2 |
+| `MCP-ISSUE-058` | five ways a zero or positive result misleads: scan cap, fuzzy name match, ignored scope, over-fuzzy doc search, non-code residual risk | ✅ FIXED 2026-08-10 · was P3 · (f) follow-up to 045 |
+| `MCP-ISSUE-059` | advertised descriptions understate or contradict actual behaviour (4 items) | ✅ FIXED 2026-08-10 · was P4 |
 | `MCP-ISSUE-042` | `refactor_replace_rollback` restores the files and leaves the graph holding the reverted names, while `health_check` reports "ready" | ✅ FIXED 2026-08-04 |
 | `MCP-ISSUE-043` | the guarded-refactor tools refuse work `refactor_replace_preview` does — a hardcoded kind filter, **and** an owner prover that answered the wrong question | ✅ FIXED 2026-08-04 (kind filter + diagnostics) · ✅ FIXED 2026-08-05 (AST owner prover, B-13) |
 | `MCP-ISSUE-044` | `find_entry_points(kind:"route_handler")` returns a count with empty arrays; `route_map` names the endpoint group, not the handler | ✅ FIXED 2026-08-04 |
@@ -1697,3 +1737,687 @@ Why this was invisible: `typecheck` sees two unrelated object literals; `contrac
 advertised schema against a snapshot of *itself*, so a parameter missing from both stays missing; and
 `docs:check` reads only the advertised side. Six instances existed before anyone looked, and all six
 were found by hand while editing something else.
+
+---
+
+# Sweep 2026-08-05 (entries 052–059)
+
+Filed from `wec.communication-hub` @ `3f45bee` (521 files / 4459 symbols / 47995 edges, fresh
+`mode:"incremental"` run `2712aff5`, docs lane **on**: 12 docs / 166 mentions / 30 resolved). All 43
+tools invoked per their own advertised description, plus the destructive lane end-to-end
+(preview → apply → rollback, git-verified both directions). Server v0.3.0, 7 repos registered.
+
+**Context that matters for triage:** this sweep started as a re-verification of the 042–051 wave and
+**confirmed those fixes hold** — see *Confirmed fixed* at the end. It also found that a large share of
+what the consumer previously treated as defects was consumer misuse, now corrected on our side and
+listed there too, so those are explicitly **not** filed as issues. What remains below is what
+reproduced against correct usage.
+
+Two of the eight are follow-ups on entries already closed (`052` → 036, `055` → 044, `058` partly →
+045); each says so and explains why the original fix does not cover the new case.
+
+---
+
+## MCP-ISSUE-052 — a qualified static call now produces the CORRECT edge **and** a wrong same-named one, and every traversal built on it reports `confidence:"high"`
+
+- **Status:** ✅ FIXED 2026-08-10 (filed 2026-08-05, was **P0**). Follow-up to `MCP-ISSUE-036` (FIXED 2026-07-30,
+  `src/graph/edgeResolverCalls.ts`) — same root area, inverted symptom.
+- **Scenario:** `ConversationReplyTargetResolver.Resolve`
+  (`src/Application/Common/Messaging/ConversationReplyTargetResolver.cs:18-42`) contains exactly one
+  qualified static call, verified with `get_symbol_source`:
+  ```csharp
+  var parsed = ConversationLoopCorrelationCodec.Parse(bodyTokenOrCorrelationId);
+  ```
+- **Expected:** one `CALLS` edge, to `ConversationLoopCorrelationCodec.Parse`.
+- **Actual:** two, both confidence 0.75:
+
+  ```
+  query_graph: SELECT s.name, s.file_path, e.reason FROM edges e JOIN symbols s
+    ON s.symbol_id = e.to_id AND s.repo_id = e.repo_id
+    WHERE e.repo_id = :repoId AND e.from_id = '48209250031266423408eb5d' AND s.name = 'Parse'
+
+  Parse  src/Application/Common/Messaging/ConversationLoopCorrelationCodec.cs   resolved callee by name
+  Parse  src/Infrastructure/BackgroundJobs/OutboundMetadataResolver.cs          resolved callee by name
+  ```
+
+- **The diagnostic detail:** `reason` is **`"resolved callee by name"` on BOTH**. The receiver-as-class
+  path that 036 added never fired — neither edge came from it. And it should have: all the data that
+  path needs is present and correct, checked directly —
+
+  | method | `parent_symbol_id` | joins to | kind |
+  |---|---|---|---|
+  | `…/ConversationLoopCorrelationCodec.cs:30` `Parse` | `d6d177d288dc9bb59007ee8d` | `ConversationLoopCorrelationCodec` | `class` |
+  | `…/OutboundMetadataResolver.cs:26` `Parse` | `bd94610190d8cb1f78b8693a` | `OutboundMetadataResolver` | `class` |
+
+  So `parent_symbol_id` is populated and resolvable for both, and the receiver class exists as a
+  `class` symbol. 036's root-cause note says the dotted branch *"consulted only `interfaceByName`,
+  which misses a static class"* — and `ConversationLoopCorrelationCodec` is a **static class**. Worth
+  checking whether the static-class case is genuinely covered, or whether the bare `callee:Parse`
+  token is separately resolving by name and no longer collapsing: 036 explicitly noted that the
+  qualified and bare tokens used to *"resolve to the same symbolId and collapse under the unique index
+  on `edges(repo_id, from_id, to_id, type)`"*. If the qualified token now resolves correctly but the
+  bare token still goes through `pickBestNamedCandidate`, they land on **different** symbolIds and the
+  dedup that used to hide this no longer applies — which would make this the visible tail of 036
+  rather than a new regression.
+- **Impact — this is the P0 part.** The false edge is not one bad row; it seeds whole traversals:
+  ```
+  trace_execution_flow(repoId, entrySymbolId:"48209250031266423408eb5d", maxDepth:3)
+  → nodeCount 9, depthReached 3, truncated false
+  → coverage: { confidence: "high", knownGaps: [] }
+  ```
+  **7 of those 9 nodes are the false subtree** — the wrong `Parse` plus `ReadEmailAttachments`,
+  `ReadStringArray`, `ReadString`, `ReadInt`, `ReadBool`, `ReadLong`, all from
+  `OutboundMetadataResolver`. The one true callee contributes 0 further nodes. So 78% of the payload
+  is wrong while the tool self-reports high confidence and no known gaps. That combination is the
+  failure mode a consuming agent cannot detect — it is strictly worse than an error.
+  `get_call_chain`, `get_change_context`, `get_symbol_detail` and `find_impact_files` inherit the same
+  edge. The false edge also crosses Application → Infrastructure, a boundary this repo forbids, so it
+  is additionally detectable as a smell without type inference.
+- **Same root cause, property variant (please fix together):** `Resolve` reads `parsed.ConversationCode`
+  and `parsed.CorrelationId`, where `parsed` is `ConversationLoopCorrelationCodec.ParseResult` — a
+  `record struct` in the **same file** at line 96, confirmed present in the graph via
+  `get_file_context`. The emitted `PROPERTY_REF` edges:
+
+  | property | resolved to | correct? |
+  |---|---|---|
+  | `ConversationCode` | `tests/Application.UnitTests/Common/Behaviours/ConversationVisibilityBehaviourTests.cs` | no |
+  | `CorrelationId` | `src/Application/Conversations/Commands/ReplyConversation/ReplyConversation.cs` | no |
+
+  The local's type is available from its initializer, so the owner is derivable without full semantic
+  analysis. This is the concrete mechanism behind the "PROPERTY_REF resolving into test files"
+  sub-item of `MCP-ISSUE-049`.
+- **Correction — the filed diagnosis was wrong about the mechanism (2026-08-10).** The report concluded
+  that "the receiver-as-class path that 036 added never fired". It fired. Read from source, the real
+  chain is:
+  1. `csharpSymbols.ts:285` **always** emits the bare `callee:Parse`; `:299` emits the qualified
+     `callee:ConversationLoopCorrelationCodec.Parse` as well. The comment at `:295` says both are stored
+     deliberately because the unique index on `edges(repo_id, from_id, to_id, type)` collapses them.
+  2. That collapse only holds while both halves resolve to the **same** symbol.
+  3. `edgeResolverCalls.ts:261-274` — 036's receiver-as-class branch — resolves the qualified token
+     **correctly**, while the bare token still goes through `pickBestNamedCandidate` at `:225` and picks
+     `OutboundMetadataResolver.Parse`. Two different `to_id` values, nothing collapses, both survive.
+
+  So this was exactly the "visible tail of 036" the entry hypothesised in its last paragraph, and not a
+  failure of the 036 branch. The reason the two edges were indistinguishable in `reason` is separate and
+  now fixed: the receiver-typed branch had **no label of its own** and fell through to the shared
+  `"resolved callee by name"` string, which is what made a proven resolution look like a name guess.
+- **Fix.** `suppressBareCallsShadowedByQualified` (`edgeResolverCalls.ts`) demotes the bare edge when
+  all three hold: a qualified sibling from the same caller resolved to a real symbol, the bare edge
+  resolved **by name across files** (a same-file or receiver-typed match is evidence and is left alone),
+  and the two disagree. Demoted, not deleted — `to_id` returns to its placeholder at `confidence: 0.1`,
+  so the decision stays auditable and MCP-ISSUE-053's filter hides it from `edgesOut`/`topCallees`.
+  Batch boundaries were widened so one caller's rows are never split across two passes. The
+  receiver-typed branch now reports `reason: "resolved callee by receiver type"` at confidence 0.85, and
+  a multi-candidate name guess reports `"resolved callee by name (ambiguous)"`.
+  On `wec.communication-hub`: **227 bare edges demoted**, and `Resolve` now has exactly one `Parse` edge.
+- **Follow-up 2026-08-10 (code review): the suppression did not survive the next index run.** Demoting
+  rather than deleting means the row keeps its `callee:` token — so `buildCallResolutionContext`, whose
+  pre-fetch is `where … and e.to_id like 'callee:%'`, re-selected it on every subsequent run. Call
+  resolution runs repo-wide even on **incremental** runs (`indexRunner.ts`), and by then the qualified
+  sibling is already resolved and therefore absent from `unresolvedRows` — so `provenByCaller` holds no
+  proof, the three-part guard cannot fire, and the bare edge is re-resolved to the wrong same-named
+  method at confidence 0.75. Reproduction: full index (suppressed) → touch any unrelated file →
+  incremental index → the wrong high-confidence CALLS edge is back. The
+  `reason = "superseded by qualified call"` marker was written and never read; the pre-fetch now
+  excludes rows carrying it. Re-indexing the caller's own file still clears the suppression the right
+  way, because `deleteEdgesForFile` drops the row and extraction re-emits it unmarked.
+- **Fix, coverage half.** `trace_execution_flow` and `get_call_chain` feed edge provenance into
+  `buildCoverageBlock`, which can no longer report `confidence: "high"` for a traversal standing on a
+  name-only edge, and names the count in `knownGaps`. The shared label set is
+  `NAME_ONLY_EDGE_REASONS` in `types/index.ts` — resolver and read side must agree on the strings.
+- **Fix, property half — partial, and deliberately so.** `record` / `record struct` / `enum` were missing
+  from the type-constraint query, so a property owned by a CQRS record could never constrain a candidate
+  set. Added. Beyond that, a **bare** property token that matches >1 candidate and none in the caller's
+  own file is now **refused** rather than resolved (`unresolved property (ambiguous owner)`): picking one
+  of 25 same-named `ConversationCode` properties is noise, not a guess, and that is what produced the
+  edge into `ConversationVisibilityBehaviourTests.cs`. **2630 tokens refused** on the reference repo, and
+  the test-file edge is gone.
+  The `CorrelationId` case is **knowingly left as a labelled guess.** Its true owner —
+  `ConversationLoopCorrelationCodec.ParseResult` — is a positional record parameter and so is not in the
+  graph at all, while exactly one `CorrelationId` property exists repo-wide. Refusing every unique-name
+  cross-file bare token would delete **2791 of 8578** resolved property edges, most of which are correct;
+  that trades a wrong answer for a missing one. Those edges are now demoted to confidence **0.4** with
+  `reason: "resolved property by name (unproven owner)"` and counted as name-only in coverage. Resolving
+  them properly needs the local's initializer type, i.e. return-type inference across files — not done.
+- **Workaround (consumer side):** never trust a single-name call/property edge, or any traversal built
+  on one, without confirming against `get_symbol_source`.
+- **Enhancement proposal:** the owner prover shipped for `MCP-ISSUE-043` / **B-13**
+  (`src/services/refactor/ownerResolver.ts`) already types exactly this receiver shape correctly — it
+  emits `static_type_receiver_mismatch` for a qualified static receiver, and handles instance, `this`,
+  `base`, namespace-qualified and one-hop-nested receivers. **Reuse it in the call/property
+  resolvers**, and once a receiver type is proven, drop competing same-name candidates instead of
+  emitting both. Secondary ask: when a resolution came from the name-only fallback, that must not
+  surface as `confidence: "high"` / `knownGaps: []` at the traversal level — propagate the weakest
+  edge's provenance into `coverage`.
+
+---
+
+## MCP-ISSUE-053 — unresolved edges surface as nameless rows and synthetic ids, inflating counts and consuming the `limit` budget
+
+- **Status:** ✅ FIXED 2026-08-10 (filed 2026-08-05, was **P1**).
+- **`get_symbol_detail` breaks its own contract.** The description promises *"the symbol record plus
+  all outgoing and incoming edges **with resolved names**"*. For
+  `symbolId:"48209250031266423408eb5d"`, 6 of 12 `edgesOut` carry **no `toName`** and a synthetic id:
+  ```json
+  {"toId":"callee:Contains"}, {"toId":"callee:string?.Trim"},
+  {"toId":"callee:IsNullOrWhiteSpace"}, {"toId":"callee:StartsWith"},
+  {"toId":"property:IsSuccess"}, {"toId":"property:Separator"}
+  ```
+- **`get_change_context` is worse.** Same symbol, `profile:"nano"`, `limit:8`: `topCallees` contains
+  six entries that are literally `{"confidence":0.1}` — no name, no path, no id at all — and
+  `calleeCount: 8` where only **2** callees are real. Because they occupy 6 of the 8 `limit` slots,
+  raising `limit` is the only way to see real callees, and `calleeCount` cannot be used to decide
+  whether that is necessary.
+- **The information is already reported correctly elsewhere in the same responses:**
+  `get_change_context` returns `unresolved: {calls: 6, imports: 0, typeRefs: 0}`, and
+  `get_file_summary` on the same file returns
+  `graphHealth: {unresolvedCalls: 6, unresolvedProperties: 2}`. So the counts are known; only the
+  edge lists disagree with them.
+- **Impact:** callers that trust `calleeCount` or iterate `edgesOut` get BCL noise mixed into real
+  graph data with no field to filter on. It also makes the two tools disagree about how many callees
+  a symbol has.
+- **Enhancement proposal:** exclude unresolved BCL members from `edgesOut` / `topCallees` and let the
+  existing `unresolved` / `graphHealth` blocks carry them; or give them a stable resolvable label
+  (`System.String.Contains`) plus an `unresolved: true` marker so they can be filtered. Either way,
+  `calleeCount` should count what the array contains.
+- **Fix (2026-08-10).** The first option, filtered **in SQL** rather than after it so the `limit` budget
+  is spent on edges that have something to say. `UNRESOLVED_SYMBOL_TOKEN_PREFIXES` in `types/index.ts`
+  lists the placeholder prefixes (`callee:`, `property:`, `type:`, `iface:`, `base:`, `import:`) and
+  `RESOLVED_TARGET_SQL_PREDICATE` is its query form, applied in `getSymbolDetailImpl` (edgesOut) and
+  `getChangeContextImpl` (callees). `calleeCount` is derived from the filtered array, so the two agree.
+  `nuget:`, `endpoint:` and `contract:` are deliberately NOT in that list — they are unresolved by
+  design and name something outside the repo a consumer legitimately queries. This also closes
+  `MCP-ISSUE-059` item 3, which was the same defect stated as a doc mismatch.
+
+---
+
+## MCP-ISSUE-054 — `detect_changes` applies the default `impactLimit: 20` before breadth normalization, so the risk model is a constant; and a policy preset can filter every row without saying so
+
+- **Status:** ✅ **FIXED 2026-08-10, second attempt** (filed 2026-08-05, was **P1**; marked FIXED,
+  then re-opened the same day by consumer re-verification from `wec.communication-hub`). The first
+  attempt moved the cap out of the scoring *denominator* and left it in the *numerator*; the second
+  removed it from the pipeline entirely. See **Re-open** for the diagnosis and **Second fix** for
+  what shipped.
+- **Scenario:** `detect_changes(repoId, baseRef:"HEAD~4")` — a 61-file diff — run twice, changing only
+  `impactLimit`:
+
+  | `impactLimit` | `impactedFilesCount` | `impactBreadth` |
+  |---|---|---|
+  | default (20) | pinned at **20** for most files | **1.0** on most files |
+  | `400` | 7 / 24 / 2 / 1 / 2 / 0 | 0.005 – 0.06 |
+
+  The cap is applied *before* breadth normalization, so at the default the breadth signal saturates
+  and every file scores alike. `riskScore` then clusters (31/30/29/27/25/25) regardless of real
+  blast radius.
+- **This is the true root cause of a symptom previously mis-filed as a tool defect.** The consumer's
+  2026-08-04 note recorded *"`impactedFilesCount` caps at exactly 20 ⇒ `impactBreadth 1.0` on most
+  files"* as a scoring bug. It is the documented default interacting with the normalizer — but a
+  default that silently flattens the primary output is worth changing rather than documenting.
+- **Second, independent problem in the same tool:** `policy:"strict-review"` sets
+  `minRiskScore: 40`, while the observed real maximum on this 61-file diff was **31**. Result:
+  ```json
+  {"impacts": [], "riskSummary": {"highRiskCount":0,"mediumRiskCount":0,"lowRiskCount":0,"maxRiskScore":0,"avgRiskScore":0},
+   "impactedFileCount": 0, "filter": {"policyUsed":"strict-review","minRiskScore":40,"matchedCount":0}}
+  ```
+  A caller reading `riskSummary` concludes "no risk in 61 changed files". The `filter` block does
+  carry `matchedCount: 0`, but nothing states that the preset, not the diff, produced the emptiness.
+- **Worse than filed, measured 2026-08-10.** This does not merely flatten the signal, it **inverts the
+  verdict**. Same diff (`baseRef:"HEAD~4"`, 83 files), same file: `GetCustomerConversationTimeline.cs`
+  scores **78 / high** at the default `impactLimit: 20` and **30 / low** at `impactLimit: 400`. And the
+  trap closes: `policy:"strict-review"` + `impactLimit: 400` returns `matchedCount: 0`,
+  `maxRiskScore: 0` on those 83 changed files — so the usage this registry filed under *consumer
+  misuse* ("`impactLimit` left at its default") is the one that empties the preset.
+- **Fix (2026-08-10).** `impactBreadth` is normalized against a fixed
+  `BREADTH_REFERENCE_DEPENDENTS = 50` (`services/analysis/policyResolver.ts`), never against
+  `impactLimit` — which stays a pagination parameter and is now used only to report `capHit`. The
+  score is therefore invariant under `impactLimit`, which is what `policyResolver.test.ts` pins. Each
+  impact row carries `truncated` + `truncationReason: "impact_limit_reached"`, reusing `search_regex`'s
+  existing vocabulary rather than inventing a word. When a preset filters everything, `filter` gains
+  `emptyReason` and `maxRiskScoreBeforeFilter`, so "no risk in 83 changed files" is no longer a
+  reading a caller can arrive at honestly.
+  **Not done:** re-calibrating `strict-review`'s `minRiskScore: 40` against the new scale. The
+  threshold is unchanged and should be re-measured on a few real diffs before being moved.
+- **Original proposal (kept for the record):** normalize `impactBreadth` against the effective limit rather than a fixed
+  denominator, and set an explicit `capHit`/`truncated` flag when the cap bound the result (the tool
+  already has this vocabulary — `search_regex` uses `truncated` + `truncationReason`). Separately,
+  emit a note when `matchedCount === 0 && changedFileCount > 0`, and consider whether
+  `strict-review`'s threshold is calibrated against scores this scorer actually produces.
+
+### Re-open 2026-08-10 — the denominator was fixed, the numerator was not
+
+Re-verified from the consumer repo (`wec.communication-hub`, full re-index at commit `7104253`,
+544 files / 4691 symbols). **The claim "the score is therefore invariant under `impactLimit`" is false
+in the pipeline.** One diff (`baseRef: "HEAD~6"`, 37 changed files), one file
+(`Application/Conversations/Queries/GetInboxConversations/GetInboxConversations.cs`), three values of
+`impactLimit`:
+
+| `impactLimit` | `impactedFilesCount` | `impactBreadth` | `lowConfidencePenalty` | `capHit` | **verdict** |
+|---|---|---|---|---|---|
+| 20 (default) | 20 | **0.4** | 1.0 | `true` | **49 / medium** |
+| 50 | 50 | **1.0** | 0.96 | `true` | **75 / high** |
+| 400 | 97 | **1.0** | 0.938 | `false` | **74 / high** |
+
+Same diff, same file, same commit — `medium` at the default and `high` at any wider page. This is the
+original defect with a new shape: it no longer saturates *upward* at the default, it now saturates
+*downward*.
+
+**Mechanism.** `policyResolver.ts` was fixed correctly — `impactBreadth = impactedFilesCount /
+BREADTH_REFERENCE_DEPENDENTS` with the fixed reference of 50. But `impactedFilesCount` is still
+truncated by `impactLimit` **before** it reaches the scorer, one layer up:
+
+```ts
+// services/impact/changeAnalysis.ts:88-89
+const impact = store.getImpactFiles(args.repoId, filePath, args.impactLimit);
+const risk = scoreChangeRisk(impact.impactedFiles.length, impact.reliabilitySummary, args.impactLimit);
+```
+
+`impact.impactedFiles.length` is `min(trueDependents, impactLimit)`. So for every file whose real
+blast radius exceeds the page size — precisely the files that matter — breadth is
+`impactLimit / 50` rather than `trueDependents / 50`. The fix moved the cap from the denominator to
+the numerator instead of removing it.
+
+**Second-order:** `impact.reliabilitySummary` is computed over the same truncated edge set, so the
+confidence-derived signals move too. That is why 50 and 400 differ at all (75 vs 74) even though both
+reach breadth 1.0 — `lowConfidencePenalty` 0.96 vs 0.938 over 50 vs 97 edges. Fixing breadth alone
+will not make the score fully invariant; the reliability summary needs the untruncated set as well.
+
+**Why `policyResolver.test.ts` passes anyway.** The regression test pins the scorer in isolation and
+holds the count constant across the two limits:
+
+```ts
+const atDefault = scoreChangeRisk(24, CLEAN_RELIABILITY, 20);
+const atWide    = scoreChangeRisk(24, CLEAN_RELIABILITY, 400);
+assert.equal(atDefault.riskScore, atWide.riskScore);
+```
+
+In the real call path those two invocations receive `20` and `97`, never `24` and `24`. The test can
+only fail if the scorer itself reintroduces `impactLimit` into the formula — it cannot observe the
+truncation, because the truncation happens in the caller. **The unit test is a correct test of the
+wrong seam.**
+
+**What did ship and does hold** — please don't regress these while fixing the above:
+`truncated` + `truncationReason: "impact_limit_reached"` per impact row; `riskSignals.capHit`;
+`filter.emptyReason` + `filter.maxRiskScoreBeforeFilter`. On this diff `policy: "strict-review"` now
+returns 4 matched rows rather than a silent empty set. `capHit: true` is a reliable signal that the
+row's score is understated — it is currently the only way a caller can detect the defect.
+
+**Enhancement proposal.** Separate the pagination cap from the scoring input: have
+`getImpactFiles` return the true dependent count (and the untruncated reliability summary) alongside
+the truncated page — e.g. `{ impactedFiles, totalImpactedCount, reliabilitySummary }` — and score from
+`totalImpactedCount`. Then extend the regression test **through `analyzeChanges`**, not just
+`scoreChangeRisk`, asserting that one file's `riskScore` is identical at `impactLimit` 20 / 50 / 400
+on a fixture whose true dependent count exceeds 50. Until that end-to-end assertion exists, this entry
+should not be closed again.
+
+### Second fix 2026-08-10 — the cap is out of the pipeline, and the gate can now fire
+
+The enhancement proposal above, implemented as written, plus one thing it did not ask for.
+
+1. **`getImpactFilesImpl` answers two questions instead of one** (`services/impact/impactSurface.ts`).
+   An unbounded aggregate pass yields `totalImpactedCount` and a `reliabilitySummary` over the FULL
+   dependent set; `limit` then selects the page of detail rows. `truncated` says the page is a window.
+   It costs a full walk of the caller set where the old form could stop early — that is the price of
+   the count being a measurement.
+2. **`changeAnalysis.ts` scores from `totalImpactedCount`**, via a new exported `scoreFileImpact` —
+   the seam the end-to-end test needed. `impactedFilesCount` in the response is now the true count,
+   not the page size, so `sortBy:"impact"` also sorts by something real. `resources/resourceHandler.ts`
+   carried the identical defect and was fixed with it, or `repo://…/risk` and `detect_changes` would
+   report different verdicts for one commit.
+3. **The weights were recalibrated**, which the re-open did not catch and a code review did. Fixing
+   the numerator alone was not enough: breadth carried 0.5 and the other 0.5 was three penalties that
+   measure *how much the index trusts its own edges*. That is uncertainty about the GRAPH, not risk in
+   the CHANGE — so the widest possible blast radius on a well-indexed repo scored 50, `medium`, and
+   `policy:"release-gate"` (minRiskScore 67, `riskLevels:["high"]`) returned empty on any healthy
+   diff. A gate that never fires reads exactly like a gate that passed. Breadth now carries 0.7
+   (`RISK_WEIGHTS` in `policyResolver.ts`): a file at the reference blast radius clears `high` on its
+   own. The 67/34 boundaries and the 20/40/67 policy floors are unchanged — the reachable range under
+   them was the broken part.
+4. **`capHit` changed meaning** — `totalImpactedCount > impactLimit`, i.e. "the returned rows are a
+   window", and no longer "the score is a floor". It is `>` rather than `>=` because a count equal to
+   the page size is now a full page, not a truncated one.
+5. **The end-to-end assertion exists**: `services/impact/changeAnalysis.test.ts` builds a 60-dependent
+   fixture on the real schema in `:memory:` and asserts one file's `riskScore`, `riskLevel`,
+   `impactBreadth`, `confidencePenalty` and `lowConfidencePenalty` are identical at `impactLimit`
+   20 / 50 / 400 — going through the store call, which is where the truncation was. The
+   scorer-in-isolation tests in `policyResolver.test.ts` stay, with a note saying why they were never
+   sufficient.
+
+**What did NOT change:** `truncated` + `truncationReason:"impact_limit_reached"` per row,
+`filter.emptyReason`, `filter.maxRiskScoreBeforeFilter` — the disclosure half that already held.
+`maxRiskScoreBeforeFilter` was, however, reading `sortedImpacts[0]`, which is the maximum only under
+`sortBy:"risk"`; `strict-review` defaults to `sortBy:"impact"`, so the diagnostic added to prevent a
+false conclusion was quoting a false number. It is a `Math.max` now.
+
+**Consumer note:** the workaround is retired. `impactLimit` is a page size and nothing else — leave it
+at the default unless you want more rows listed. Expect scores to RISE for shared-infrastructure files
+relative to the pre-fix numbers; that is the correction, not a regression.
+
+**Superseded consumer workaround (kept for the record):** always pass `impactLimit: 300–500`, and
+treat `capHit: true` as "this score is a floor, not a verdict."
+
+---
+
+## MCP-ISSUE-055 — `route_map` takes `handlerName` from `.WithName()`, so a string-literal endpoint name collapses every route onto the group method
+
+- **Status:** ✅ FIXED 2026-08-10 (filed 2026-08-05, was **P2**). Follow-up to `MCP-ISSUE-044` (FIXED 2026-08-04) —
+  the fix works, but only for one of the two `.WithName()` styles in this repo, and 044's
+  re-verification sampled only the working one.
+- **Scenario:** two endpoint files, same minimal-API shape, handler passed as the 2nd argument of
+  `MapX`:
+
+  | file | `.WithName(...)` | `handlerName` returned |
+  |---|---|---|
+  | `Web/Endpoints/Conversations.cs` | `.WithName(nameof(Reply))` | `Reply`, `RetryReply`, `OsbReply`, `CallLogReply`, `GetSuggest`, … — **correct** |
+  | `Web/Endpoints/Customers.cs` | `.WithName("GetCustomerNotes")` | **`Map` for all 13 routes** |
+
+  Repro: `route_map(repoId, filePathPrefix:".../Web/Endpoints/Customers.cs", excludeTests:true)` →
+  13 routes, correct `routeTemplate` on every one (full `MapGroup` prefix included), and
+  `handlerName:"Map"` on every one. Source confirmed with `search_regex`: line 38 is
+  `MapGet("{customerId:int}/notes", GetNotes)` followed by `.WithName("GetCustomerNotes")`.
+- **Impact:** on `Customers.cs` all 13 routes share one name and one enclosing symbolId, so the API
+  surface is not addressable per handler there — which is what 044 set out to fix.
+  `find_entry_points(kind:"route_handler")` inherits it (its `Customers.cs` row is `name:"Map"`).
+- **Correction — `.WithName()` is not the cause (2026-08-10).** The two files differ in a second,
+  decisive way: `Customers` is a **`partial class`** (`Customers.cs:8`) whose handlers are declared in
+  sibling files — `GetNotes` lives in `Customers.Notes.cs:16`, registered from `Customers.cs:38`.
+  `resolveDelegateHandlerSymbolId` (`csharpRoutes.ts`) looked the delegate up in **the current file's**
+  symbols, missed, and fell back to the enclosing method `Map`. `Conversations.cs` works because it is a
+  single non-partial class with every handler in-file; that it also uses `nameof(...)` is coincidence.
+  A fix aimed at `.WithName()` would have changed nothing.
+- **Fix.** Two parts. (1) The registration-site delegate name is now persisted in a new
+  `routes.handler_name` column and preferred over the joined symbol's name, so `route_map` is correct
+  even when the symbol cannot be bound. (2) `services/graph/routeHandlerResolver.ts` runs after
+  indexing — when every file IS in the graph — and rebinds `handler_symbol_id` by joining the delegate
+  name to a method whose declaring type name matches the route's controller, which is what identifies a
+  partial-class member. It only touches rows that are currently wrong and only when a replacement
+  exists, so it is idempotent and never nulls out a genuinely unresolvable lambda.
+  Verified on the real repo: `Customers.cs` returns **13 routes with 13 distinct handler names**, and
+  `GET /notes` binds to `Customers.Notes.cs`.
+- **Original proposal (kept for the record):** resolve the handler from the `MapX` delegate argument, which is present in
+  the AST in both styles, and treat `.WithName()` as a display alias only.
+- **Doc note, same tool:** `route_map`'s description still says it extracts *"route attributes
+  (`[Route]`, `[HttpGet]`, …)"*. It reads minimal-API `MapGroup`/`MapGet` routes — the description
+  understates a working feature, and a consumer reading it would not try the tool on this repo at all.
+- **Follow-up 2026-08-10 (code review): the rebind matched the declaring type by SIMPLE name.**
+  `p.name = c.name` alone, unscoped by namespace, assembly or path — so two same-named endpoint groups
+  in different projects of one solution cross-bind, and `order by m.file_path, m.line limit 1` made the
+  wrong pick deterministic rather than correct. There is no namespace column on `symbols`, and SQLite
+  has no `reverse`, so `resolveRouteHandlersImpl` is now a per-route loop in JS: among the namesake
+  candidates it takes the one sharing the LONGEST directory prefix with the file that registered the
+  route (parts of a partial class live in one project — `Customers.Notes.cs` beside `Customers.cs`
+  shares its whole directory). When nothing but the repo root is shared and more than one namesake
+  exists, the row is left alone: guessing would cross-bind, and `handler_name` already carries the
+  answer. Route counts are in the hundreds, so the per-route query is not a cost worth contorting SQL
+  to avoid.
+
+---
+
+## MCP-ISSUE-056 — `excludeTests` is still missing on the seven call-graph tools, where interface dispatch fans hardest into test doubles
+
+- **Status:** ✅ FIXED 2026-08-10 (filed 2026-08-05, was **P2**). Follow-up to the "no test filter" sub-item of
+  `MCP-ISSUE-049` (FIXED 2026-08-04).
+- **What shipped and works:** `excludeTests` is now a real, honored parameter on `search_symbols`,
+  `search_regex`, `search_literals`, `find_implementations`, `get_feature_bundle`,
+  `get_symbol_context_pack`, `route_map`, `get_value_contract_impact`. Verified on each.
+- **Still missing:** `get_call_chain` · `get_change_context` · `get_symbol_detail` ·
+  `trace_execution_flow` · `find_impact_files` · `find_field_accesses` · `link_tests_to_source`.
+- **Why these are the ones that need it most — interface dispatch over-fans.**
+  `get_call_chain(symbolId:"a1b8b39fb653bf31e72822c5" /* Reply endpoint */, direction:"callees",
+  profile:"standard", limit:8)` resolves `ISender.Send` to **six different test doubles** —
+  `DispatchDomainEventsInterceptorSyncTests`, `AutomationSentConsumerIntegrationTests`,
+  `InboundMessageConsumerIntegrationTests`, `EndpointContractIntegrationTests` (×2),
+  `CampaignSentConsumerIntegrationTests` — all `reason:"interface-dispatch"`, confidence 0.7. That is
+  **6 of 8** returned callees, so the real production path is crowded out of the default `limit`.
+  Same pattern elsewhere: `find_impact_files(view:"surface")` returned 9 of 15 callers from a single
+  test file; `find_field_accesses("HandledBy")` returned 5 of 7 reads from tests.
+- **Enhancement proposal:** add `excludeTests` to the seven tools above. Additionally consider ranking
+  `interface-dispatch` edges below resolved ones so that a `limit` truncation drops test doubles
+  before production callers — a filter alone still leaves the fan-out dominating unbounded queries.
+- **Fix (2026-08-10).** Both halves. `excludeTests` is declared, advertised and honored on all seven,
+  filtering on the FAR end of each row (`tools/handlers/testFilter.ts`, using the same `isTestPath`
+  classifier the other eight tools use so the two families cannot drift). `trace_execution_flow` drops
+  the edges of dropped nodes too, and always keeps the entry symbol — tracing outward from a test is a
+  legitimate question. Separately, `traverseCallGraph` now sorts `interface-dispatch` edges last within
+  each frontier, so a `limit` truncation drops the speculative fan-out before the production hop.
+- **Follow-up 2026-08-10 (code review): both halves of that fix ran AFTER the `LIMIT`, so neither did
+  what it says.**
+  1. *The filter.* Every one of the seven filtered in JS over a page SQL had already truncated. A
+     symbol with 30 callers whose first 20 rows happen to be test files answered `callers: []` —
+     indistinguishable from "nothing calls this", and the opposite of what the parameter promises.
+     `get_call_chain` compounded it: `truncated: rows.length >= limit` was computed on the
+     post-filter array, so a truncated chain reported `truncated: false`. The predicate is now inside
+     the query on all of them — `find_impact_files` (both views), `get_change_context`,
+     `get_symbol_detail`, `get_call_chain`, `find_field_accesses` — via a SQLite UDF `is_test_path()`
+     registered in `initGraphSchema`. A UDF rather than a hand-written `like` chain because
+     `TEST_PATH_REGEX` is deliberately kept as ONE regex so its callers cannot drift (ISSUE-024), and
+     a SQL copy of it would be exactly that drift. `link_tests_to_source` keeps its post-filter: its
+     candidate `sourceFiles` set is already `!isTestPath(x)`, so the filter can never remove a row.
+  2. *The ordering.* `traverseCallGraph` sorted the array `getCallEdges` returned — but `getCallEdges`
+     was `... limit ?` with **no `ORDER BY`**, so SQLite had already chosen which rows survived, in an
+     arbitrary order, before the sort ran. Every fetched edge was then pushed unconditionally. The
+     reported failure — six `ISender.Send` dispatch edges crowding the production hop out of
+     `limit: 8` — was completely unchanged by it. The `order by case when e.reason =
+     'interface-dispatch' then 1 else 0 end, e.rowid` now lives in the SQL, before the `limit`.
+
+---
+
+## MCP-ISSUE-057 — `get_feature_bundle`: the `endpoint` role misses endpoints that live in a shared file, and every role lists the class and its constructor separately
+
+- **Status:** ✅ FIXED 2026-08-10 (filed 2026-08-05, was **P2**).
+- **Scenario:** `get_feature_bundle(repoId, seedSymbol:"ConversationNote", excludeTests:true)` returns
+  `endpoint: []`, `unresolvedRoles: ["endpoint"]`, `rolesEmpty: ["endpoint"]`, with
+  `coverage.knownGaps: ["roles not found by name convention: endpoint — they may live in
+  differently-named files."]`.
+- **Actual:** five note endpoints exist, found with `search_regex`:
+  ```
+  Web/Endpoints/Customers.cs:38  MapGet    {customerId:int}/notes
+  Web/Endpoints/Customers.cs:41  MapPost   {customerId:int}/notes
+  Web/Endpoints/Customers.cs:44  MapPatch  {customerId:int}/notes/{noteId:guid}
+  Web/Endpoints/Customers.cs:47  MapPatch  {customerId:int}/notes/{noteId:guid}/pin-state
+  Web/Endpoints/Customers.cs:50  MapDelete {customerId:int}/notes/{noteId:guid}
+  ```
+  The walk looks for `{E}Endpoints`; a nested resource legitimately lives under its parent's endpoint
+  file. The `knownGaps` string is honest, which is good — but the data is available.
+- **Enhancement proposal:** fall back to the `routes` table and match a `routeTemplate` **segment**
+  against the pluralized entity name (`ConversationNote` → `/notes`). `route_map` already extracts
+  these five correctly, so this is a join, not new analysis. (Note `handlerName` on those rows is
+  affected by `MCP-ISSUE-055`; `routeTemplate` is not.)
+- **Fix (2026-08-10).** Step 2d in `bundleHandler.ts` joins the `routes` table when the `endpoint` role
+  is still empty, matching the pluralized last PascalCase word of the entity against a route-template
+  **segment** (`ConversationNote` → `Note` → `notes` → `/notes`). Reuses `pluralize` from
+  `conventions.ts`; the five endpoints were already indexed, so this is a join and not new analysis.
+- **Second issue, same call:** every role lists the class **and** its constructor as separate members —
+  `CreateConversationNoteCommandHandler` twice, `UpdateConversationNoteCommandHandler` twice, all four
+  validators twice. `stats.membersResolved: 23` for roughly 12 distinct symbols, doubling the payload
+  of a tool whose purpose is to fit a whole vertical slice into one call. `get_dependency_graph`
+  already ships a `collapsed: {selfReferences, duplicateEndpoints}` block — the same collapse (and the
+  same disclosure) applied here would halve this response.
+- **Fix (2026-08-10).** Members are collapsed on `(name, filePath)`, keeping the substantive kind via a
+  rank table that mirrors the SQL `kindPriorityOrder` used by symbol search, so the two agree on which
+  namesake wins. Disclosed as `stats.collapsed: { duplicateDeclarations, rule }` rather than performed
+  silently — a quieter response that does not say what it dropped is how a "missing" symbol becomes the
+  next bug report.
+- **Follow-up 2026-08-10 (code review): the collapse key held a RAW NUL byte**, written as a literal
+  `\x00` character in the template literal rather than as an escape sequence. Git classifies a file
+  containing a NUL as binary, so this whole file's diff read `Binary files a/… and b/… differ` — the
+  ~120 lines of this fix were invisible to review, `git blame` and 3-way merge. Now `\u0000`, an
+  escape. A repo-wide sweep found three more, all pre-existing and all in dedupe keys of the same
+  shape: `repositories/graphQueries.ts`, `repositories/vectorStore.ts`,
+  `services/impact/impactSurface.ts`. All four are escapes now; no source file contains a raw NUL.
+
+---
+
+## MCP-ISSUE-058 — five ways a zero or a positive result misleads: scan cap, fuzzy name match, ignored scope, over-fuzzy doc search, non-code residual risk
+
+- **Status:** ✅ FIXED 2026-08-10 (filed 2026-08-05, was **P3**). Grouped as papercuts in the style of
+  `MCP-ISSUE-049`; each is independently reproducible. Sub-item **(e)** is a follow-up to
+  `MCP-ISSUE-045`.
+
+**(a) `search_regex` silently caps at 5000 files scanned, so `count: 0` is indistinguishable from "absent".**
+`search_regex(repoId:"wec.be", pattern:"ManualOutbound")` on a repo with 7528 indexed files:
+```json
+{"count":0,"filesScanned":5000,"truncated":true,"truncationReason":"files_cap_reached"}
+```
+2528 files were never scanned. `coverage.knownGaps` carries only the generic *"0 results may mean the
+wrong search strategy, a too-narrow filter, or a stale index"* — it does not mention the cap.
+**Ask:** when `truncated && count === 0`, add an explicit `knownGaps` entry naming the cap and the
+unscanned count; optionally expose the cap as a parameter. This one cost real time: the 0 was read as
+"the symbol does not exist in that repo".
+**Fixed 2026-08-10.** `searchRegex` returns `filesEligible` (in-scope before the cap), so the handler can
+say how many files were never opened, in words: *"scan cap reached: 5000 of 7528 in-scope file(s) were
+read, 2528 were NOT searched. A count of 0 here does not mean the pattern is absent."* Confidence drops
+to `medium` and a scoping fallback is suggested. `truncation` now also carries `filesEligible` +
+`filesUnscanned`. Note the second half of this bug: at `profile:"nano"` `coverage` collapses to a bare
+confidence string, which threw the gap text away exactly when it mattered — nano now keeps the full block
+whenever there is a gap. The cap is not yet a parameter.
+
+**(b) `search_symbols(strategy:"name")` returns fuzzy near-misses with `count > 0` and `confidence:"high"`.**
+`search_symbols(repoId:"wec.be", query:"ManualOutboundHandler", strategy:"name")` →
+`count: 5`: `GlobalCRCOutBoundHandler`, `GlobalInBoundHandler`, `ExportOutboundAsync`, `GetHandler`,
+`ReviewGMHandler`, with `coverage:{confidence:"high",knownGaps:[]}` and no score or `matchType` field
+in that response shape. The symbol does not exist in that repo. The same query with `ranked:true`
+elsewhere honestly returns `count: 0`. **Ask:** tag results `matchType:"exact"|"fuzzy"`, or make
+`strategy:"name"` exact by default with the fuzzy fallback behind a flag — and never report
+`confidence:"high"` for a fallback-only result set.
+**Fixed 2026-08-10, and the cause was not FTS.** The 50 rows came from the **vector near-neighbour
+padding** in `searchSymbolsImpl` (it fires when FTS returns fewer than 3 hits and pads to `limit`), not
+from `buildFtsQuery`. Those rows are now tagged `matchType:"fuzzy"`. When the whole set is fuzzy —
+i.e. nothing matched by name — coverage drops to **`low`** and says so: *"no symbol matched X by name;
+all N results are vector near-neighbours and may share no name token with the query. Treat this as
+'not found, here is what is nearby'."* A partially-fuzzy set drops to `medium` and reports the ratio.
+The padding is kept, because it does rescue a near-miss spelling; what changed is that it is labelled.
+
+**(c) `link_tests_to_source` ignores `filePath`, and now returns docs as `sourceFile`.**
+`link_tests_to_source(repoId, filePath:"src/Domain/Entities/Conversation.cs", minScore:0.5)` returns
+**20 repo-wide pairs**; exactly one involves the requested file. And with the docs lane enabled:
+```json
+{"testFile":"tests/.../ReplyCallLogConversationCommandHandlerTests.cs",
+ "sourceFile":"docs/02-flows/flow-call-log-reply.md","score":0.5,"reasons":["name-affinity"]}
+```
+**Ask:** honor `filePath` as a filter, and exclude non-code files from the `sourceFile` candidate set.
+**Fixed 2026-08-10.** Both. `filePath` seeded the TEST candidate set but never constrained the answer, so
+every selected test was paired with its OWN best source — when the caller names a non-test file, that
+file is now the anchor and only pairs whose `sourceFile` is it are returned. Separately, the source
+candidate set was "everything that is not a test", which with the docs lane enabled included Markdown;
+non-code extensions are excluded, so a flow document can no longer be reported as the code under test.
+`excludeTests` was also added (MCP-ISSUE-056), filtering the source side only.
+**Follow-up 2026-08-10 (code review): the anchor was applied too late to work.** It ran as a
+post-filter over `output`, after the scoring loop had already (a) sliced each test's candidates to
+`maxCandidates` — default **3** — and (b) executed `if (output.length >= limit) break`. So the anchored
+pair could be discarded before the filter ever saw it: dropped in favour of a test's own better-scoring
+source, or never produced because the loop broke on `limit` first. The symptom is the one the fix was
+written for, inverted — `link_tests_to_source(filePath: X)` answering "no covering tests" for a file
+that has them, which `change_impact` then reports as `residualRisk.untestedChangedFiles`. The anchor is
+now applied **inside** the loop, before `maxCandidates` and before the `limit` break, so only rows that
+survive it count toward `limit`.
+
+**(d) `query_docs mode:"search"` is over-fuzzy and mixes `code_block` content into a prose search.**
+`query_docs(repoId, mode:"search", query:"ConversationNote")` returns exactly one result: a mermaid
+`contentType:"code_block"` in `docs/00-overview/architecture-highlevel-nontech.md` whose text matches
+only the words *"pinned note"*. Cross-checked with
+`search_regex(pattern:"ConversationNote", filePathPrefix:"docs", scanAll:true)` → `count: 0` over 53
+files, i.e. **0 was the correct answer**. Meanwhile `mode:"stale"` on the same symbolId correctly
+returns 0 because it counts prose only — so `search` and `stale` disagree on what a mention is.
+**Ask:** an exact/phrase option, and a `contentTypes` filter (`heading` | `prose` | `code_block`).
+**Fixed 2026-08-10 (the filter half).** `query_docs{mode:"search"}` takes `contentTypes`, and now defaults
+to `["heading","prose"]` — so the mermaid `code_block` matching only "pinned note" no longer answers a
+type-name query, and `search` agrees with `stale` about what a mention is. Pass `["code_block"]` (or all
+three) to widen. **Not done:** the exact/phrase option; the query is still FTS token matching.
+Credit where due: `mode:"stale"`'s hint and `mode:"coverage"` (30 symbols, 15 documented, per-symbol
+`mentionCount`) both behaved exactly as advertised.
+
+**(e) `change_impact.residualRisk` tells you to run tests for Markdown and Dockerfiles.**
+`change_impact(repoId, baseRef:"HEAD~2", impactLimit:400)` on a docs-only diff (10 `SKILL.md`, 3
+`docs/*.md`, 1 `Dockerfile`) puts all 14 in `residualRisk.untestedChangedFiles` with *"14 changed
+file(s) have no linked test — run the broader suite for these."* Also
+`riskSummary:{low:14, maxRiskScore:0}` — 14 files scoring 0 are bucketed `low` rather than a
+`none`/not-applicable bucket. **Ask:** partition `residualRisk` into code vs non-code.
+**Fixed 2026-08-10.** `residualRisk.untestedChangedFiles` now holds only files that COULD have a test;
+docs/config/images move to `nonCodeChangedFiles` and the note says which is which. `riskSummary` gained a
+`none` bucket for files scoring 0, so a docs-only diff no longer reports `low: 14` — which read as a
+finding rather than as "nothing measurable happened".
+
+**(f) residual generic-name cross-repo edges, and a split path style inside one response.**
+Follow-up to `MCP-ISSUE-045`: the `Task` case is **gone and verified clean** — all 13 hub→ssnet
+targets are now real contracts (`SSNet.CommunicationHub.Messaging` 34, `OutboundFlowType` 21,
+`IOutboundDeliveryPublisher` 8, `QueueNames` 5, `ManualCallLogSourceType` 4). Residual, 4 edges of 123:
+`Message` → `src/SSNet.ChatGpt/Model/ChatResponse.cs`, `Request` →
+`src/SSNet.Instrument.Api/Models/Request/Request.cs`, `Program` →
+`samples/QueueManagement/SS.QueueManagement.Publisher/Program.cs`. Also `SSNet.sln` appears as an edge
+target with 32 edges alongside the `.csproj` with 34, which looks like the same package reference
+counted twice. Separately, one `query_graph` result set returned method rows with forward slashes and
+their joined parent rows with backslashes — the `MCP-ISSUE-049` path-style split, still observable
+within a single response.
+**Partially fixed 2026-08-10.** The generic-name residue is closed: `isTooGenericToCrossRepos`
+(`edgeResolverRefs.ts`) is the sibling of the existing framework-type gate — framework names are excluded
+because they belong to the BCL, these because *every* repo declares its own (`Program`, `Message`,
+`Request`, `Response`, `Context`, …). A distinctive contract name such as `IOutboundDeliveryPublisher` is
+unaffected. **Not done:** the `.sln`/`.csproj` double-count, and the path-style split inside a single
+`query_graph` result set — that one is a raw-row response, so it needs the normalization applied at the
+SQL projection rather than at the response layer.
+
+---
+
+## MCP-ISSUE-059 — advertised descriptions understate or contradict actual behaviour (4 items)
+
+- **Status:** ✅ FIXED 2026-08-10 (filed 2026-08-05, was **P4**). Doc-only; no code behaviour to change except item 3.
+1. **`route_map`** — says it extracts `[Route]`/`[HttpGet]` attributes; it reads minimal-API
+   `MapGroup`/`MapGet` routes. Understates a working feature badly enough that a consumer would skip
+   the tool on a minimal-API repo. (See also `MCP-ISSUE-055`.)
+2. **`query_graph`** — documents edge types as `CALLS, IMPORTS, TYPE_REF, DEPENDS_ON, PROPERTY_REF,
+   PROPERTY_WRITE`. **`CONSUMES`** also exists (handler → command; surfaced by `get_dependency_graph`
+   on `ProcessOutboundSentConfirm.cs`) but is not listed, so a consumer writing SQL against the edge
+   table cannot know to query it.
+3. **`get_symbol_detail`** — promises "edges with resolved names"; see `MCP-ISSUE-053`. This one is a
+   behaviour fix, not a doc fix.
+4. **`find_package_consumers`** — description says `nuget:<name>`; the bare name works identically
+   (both normalize to `nuget:<lowercased>`, verified A/B). Harmless, but the doc implies the prefix is
+   required, and a consumer who assumed the prefix was the fix for `MCP-ISSUE-046` would draw the
+   wrong conclusion about what changed.
+
+**Fixed 2026-08-10.** Items 1, 2 and 4 are description changes; item 3 was a behaviour fix and shipped
+with `MCP-ISSUE-053`. `route_map` now states that it reads BOTH dialects and leads with minimal-API,
+since that is what this codebase uses. `query_graph`'s edge-type list was missing four types, not one —
+`IMPLEMENTS`, `EXTENDS`, `PUBLISHES` and `CONSUMES` are all real and all now listed.
+`find_package_consumers` says the `nuget:` prefix is optional. Snapshots in
+`contracts/codebase-index.json` regenerated; `generate:check` and `docs:check` are clean.
+
+---
+
+## Confirmed fixed — 2026-08-05 re-verification of the 042–051 wave
+
+Re-run independently from the consumer repo. **Every entry held.** Recorded so a future regression has
+a baseline:
+
+| entry | verified this sweep |
+|---|---|
+| **042** rollback desync | **Closed, and better than filed.** The `refactor_replace_rollback` response now carries `actionHints:[{action:"index_repository", arguments:{mode:"dirty"}, reason:"the graph still holds the reverted names until these files are re-indexed"}]` — it warns at the moment it matters. Also established: if you do **not** re-index between apply and rollback there is no desync at all (`search_symbols` for the applied name → `count:0`, tree clean). The original report's polluting step was an intermediate `mode:"dirty"` index. |
+| **043 / B-13** owner prover | Holds, and is now the best self-documentation in the server. `refactor_symbol_migration` and `change_value_representation` name the rule for every site across `rejectedSites` / `ambiguousReasons` — `implicit_this_mismatch`, `static_type_receiver_mismatch`, `kind_not_allowed`, `site_not_an_identifier`, `receiver_not_identifier`, `receiver_type_not_in_scope` — and `applyBlockedNote` states the workaround. This is the machinery `MCP-ISSUE-052` asks to reuse. |
+| **044** route handlers | `find_entry_points(kind:"route_handler")` → 10 `routeEntryPoints`, each a real handler with its own symbolId and an absolute template. Partially incomplete for one `.WithName()` style → `MCP-ISSUE-055`. |
+| **045** cross-repo `Task` | Clean. See `MCP-ISSUE-058(f)` for the 4-edge residue. |
+| **046** `find_package_consumers` | Correct: 15 consumers across `wec.be` + hub, `providerCount: 1` (ssnet), `excludedPublisherRows: 64`. Works with and without the `nuget:` prefix. |
+| **047** `get_persistence_mapping` | Property-scoped: `HandledBy`/`Conversation` → exactly `ck_conversations_handled_by`, not the old 24-constraint dump. `DB_TRANSLATED_PROJECTION` still detected at `GetCustomerConversationDetail.cs:89`. |
+| **048** run counters | `elapsedMs` no longer inverted against phase timings on the runs observed; `resolveCallsCoverage: 1` exactly. |
+| **049** papercuts | `excludeTests` shipped (7 tools verified); `query_docs` envelope uniform; `rename_assist` advisory now includes the declaring file (`affectedFiles[0]` + `hints[0]`); `get_dependency_graph` ships `collapsed`; `get_call_chain` at `profile:"standard"` returns full names. Two sub-items still reproduce → `MCP-ISSUE-056` (test filter on 7 more tools) and `MCP-ISSUE-052` (PROPERTY_REF into test files). |
+| **050 / 051** | `mode:"incremental"` fast-skips (1419 of 1422 files skipped on a no-op run); `profile` accepted and advertised on the tools checked. |
+
+**Also worth recording: the destructive lane is exact.** `refactor_replace_preview` →
+`PREVIEW_READY`, `ambiguity.ratioPercent 0`, `riskFlags: []`, mode auto-selected `symbol-aware` →
+`refactor_replace_apply` → `APPLY_OK`, `driftPercent 0`, `unexpectedFiles: []`, `git diff` showed
+exactly one line → `refactor_replace_rollback` → `ROLLBACK_OK`, `restoredFilesCount 1`,
+`conflicts 0`, `git status` clean. A hand-mangled approval token was correctly rejected with
+`INVALID_APPROVAL_TOKEN`. `findMode:"regex"` with `$1` backreferences works, and
+`PREVIEW_BLOCKED_BY_AMBIGUITY` correctly refused an unguarded static-member rewrite at
+`ratioPercent 100` vs `thresholdPercent 1`.
+
+**Not filed, because they were consumer misuse** (listed so the team is not asked to "fix" them).
+**One entry was struck on 2026-08-10:** "`impactLimit` left at its default" was not misuse — raising
+`impactLimit` is what silently empties `strict-review`, so both settings were wrong and the tool was at
+fault either way. See `MCP-ISSUE-054`. The rest stand: reading only
+`runtimeEntryPoints`/`graphEntryPoints` and missing `routeEntryPoints`; expecting names from
+`get_call_chain` at `compact`/`nano` when it is a path tool and `standard` carries names; passing a
+substring (`"Ai"`) as `refactor_symbol_migration.fromSymbol` and reading the resulting
+`site_not_an_identifier` flags as a prover failure; passing the declaring type instead of the
+EF-configured owner to `get_persistence_mapping`; passing `name` instead of `symbolId` to
+`get_cross_repo_impact` and getting the constructor overload; misreading `find_impact_files`
+`view:"surface"` (whose payload key is `callers` by design) as the tool ignoring the parameter.

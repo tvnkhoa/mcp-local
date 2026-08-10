@@ -46,7 +46,7 @@ export function getDependencies(db: Database.Database, repoId: string, fromId: s
     .all(repoId, fromId, limit) as ResolvedEdgeRecord[];
 }
 
-export function getCallEdges(db: Database.Database, repoId: string, symbolId: string, direction: "callers" | "callees", limit: number): ResolvedEdgeRecord[] {
+export function getCallEdges(db: Database.Database, repoId: string, symbolId: string, direction: "callers" | "callees", limit: number, excludeTests = false): ResolvedEdgeRecord[] {
   // CALLS for the static call graph; PUBLISHES (ISSUE-020) so callers/callees cross the message
   // bus — a publisher counts as a "caller" of the consumer it was matched to, and vice versa.
   // confidence/reason selected so consumers can tag via:"interface" (ISSUE-022) / via:"bus".
@@ -54,12 +54,27 @@ export function getCallEdges(db: Database.Database, repoId: string, symbolId: st
   // The endpoint join is a LEFT join on purpose: an unresolved callee (`callee:Foo`) has no symbols
   // row, and dropping those hops would silently shrink the call graph rather than label it.
   const endpointColumn = direction === "callees" ? "e.from_id" : "e.to_id";
+  // MCP-ISSUE-056: the FAR end of the hop is what `excludeTests` is asked about — the starting
+  // symbol may legitimately live in a test file without that making the chain a test result. In SQL,
+  // before the `limit`, or a page full of test doubles returns `[]` and reads as "nothing calls this".
+  // `is null` keeps unresolved endpoints (`callee:Foo` has no symbols row) rather than silently
+  // shrinking the graph, matching why the endpoint join is LEFT.
+  const farEndFile = direction === "callees" ? "st.file_path" : "sf.file_path";
+  const testClause = excludeTests ? `and (${farEndFile} is null or is_test_path(${farEndFile}) = 0)` : "";
+  // MCP-ISSUE-056: the ORDER lives in the SQL below, not in the caller. `limit` is spent during
+  // traversal, so whatever SQLite happens to return first is what survives truncation — and an
+  // `interface-dispatch` edge is a speculative fan-out (one `ISender.Send` produced six, all landing
+  // on integration-test doubles, pushing the real production hop out of the default limit). Sorting
+  // the already-truncated page in JS, as this first shipped, only reordered a result the database had
+  // already chosen. `e.rowid` keeps the pick deterministic.
   return db
     .prepare(
       `
       select e.repo_id as repoId, e.from_id as fromId, e.to_id as toId, e.type, e.confidence, e.reason,${RESOLVED_ENDPOINT_COLUMNS}
       from edges e${RESOLVED_ENDPOINT_JOINS}
       where e.repo_id = ? and ${endpointColumn} = ? and e.type in (${CALL_TRAVERSAL_EDGE_SQL_LIST})
+      ${testClause}
+      order by case when e.reason = 'interface-dispatch' then 1 else 0 end, e.rowid
       limit ?
       `
     )
@@ -86,7 +101,8 @@ export function getFieldAccesses(db: Database.Database,
   repoId: string,
   symbolId: string,
   mode: "read" | "write" | "all",
-  limit: number
+  limit: number,
+  excludeTests = false
 ): FieldAccessResult {
   const symbol = db
     .prepare(
@@ -124,11 +140,15 @@ export function getFieldAccesses(db: Database.Database,
       inner join edges e on e.rowid = p.eid
       left join symbols sf on sf.repo_id = e.repo_id and sf.symbol_id = e.from_id
       where e.type in (${typePh})
+        -- MCP-ISSUE-056: in-query, before the cap. The filed case returned 5 of 7 reads of
+        -- "HandledBy" from test files; post-filtering that page left 2 rows out of a LIMIT spent
+        -- on the 5 that were dropped.
+        and (@excludeTests = 0 or sf.file_path is null or is_test_path(sf.file_path) = 0)
       order by sf.file_path, sf.line
       limit @limit
       `
     )
-    .all({ repoId, symbolId, ...typeParams, limit }) as { enclosingSymbolId: string; enclosingName: string | null; enclosingKind: string | null; filePath: string | null; line: number | null; toId: string; type: string; confidence: number | null; assignedExpression: string | null }[];
+    .all({ repoId, symbolId, ...typeParams, limit, excludeTests: excludeTests ? 1 : 0 }) as { enclosingSymbolId: string; enclosingName: string | null; enclosingKind: string | null; filePath: string | null; line: number | null; toId: string; type: string; confidence: number | null; assignedExpression: string | null }[];
 
   return {
     property: { symbolId: symbol.symbolId, name: symbol.name, kind: symbol.kind, filePath: symbol.filePath, line: symbol.line, declaringType },
@@ -222,7 +242,7 @@ export function getModuleFlow(db: Database.Database, repoId: string, filePath: s
       selfReferences += 1;
       continue;
     }
-    const key = `${row.fromFilePath ?? row.fromId} ${row.toId} ${row.type}`;
+    const key = `${row.fromFilePath ?? row.fromId}\u0000${row.toId}\u0000${row.type}`;
     if (seenEndpoints.has(key)) {
       duplicateEndpoints += 1;
       continue;

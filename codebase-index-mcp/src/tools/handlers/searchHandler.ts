@@ -81,13 +81,36 @@ export function handleSearchSymbols(
   const staleness = args.repoId ? getRepoStaleness(args.repoId, store) : null;
   const coverage = buildCoverageBlock({ resultCount: results.length, kind: "search", query: args.query });
 
+  // MCP-ISSUE-058(b): a result set that is ENTIRELY vector near-neighbours is not an answer to a name
+  // query — it is a list of things that sound similar. The filed case returned 50 such rows for a
+  // symbol that does not exist in the repo, at confidence "high" with no gap noted. Say it plainly,
+  // and never claim "high" for a set with no index match in it.
+  const fuzzyCount = results.filter((r) => r.matchType === "fuzzy").length;
+  if (fuzzyCount > 0) {
+    const allFuzzy = fuzzyCount === results.length;
+    if (allFuzzy) {
+      coverage.confidence = "low";
+      coverage.knownGaps = [
+        `no symbol matched '${args.query}' by name — all ${String(fuzzyCount)} result(s) are vector near-neighbours (matchType:"fuzzy") and may share no name token with the query. Treat this as "not found, here is what is nearby".`,
+        ...coverage.knownGaps
+      ];
+      coverage.suggestFallback ??= `confirm with search_regex(pattern:"${args.query}") before concluding the symbol exists.`;
+    } else {
+      if (coverage.confidence === "high") coverage.confidence = "medium";
+      coverage.knownGaps = [
+        `${String(fuzzyCount)} of ${String(results.length)} result(s) are vector near-neighbours (matchType:"fuzzy"), not name matches.`,
+        ...coverage.knownGaps
+      ];
+    }
+  }
+
   if (profile === "nano") {
-    const topSymbols = results.slice(0, 10).map((s) => ({ name: s.name, kind: s.kind, filePath: s.filePath, line: s.line }));
-    return ctx.asText({ query: args.query, strategy: strategyUsed, autoRouted: autoRouted || undefined, count: results.length, topSymbols, hasMore: results.length > topSymbols.length, suggestions: suggestions.slice(0, 3), suggestion, isStale: staleness?.isStale ?? null, coverage: coverage.confidence }, profile);
+    const topSymbols = results.slice(0, 10).map((s) => ({ name: s.name, kind: s.kind, filePath: s.filePath, line: s.line, ...(s.matchType ? { matchType: s.matchType } : {}) }));
+    return ctx.asText({ query: args.query, strategy: strategyUsed, autoRouted: autoRouted || undefined, count: results.length, topSymbols, hasMore: results.length > topSymbols.length, suggestions: suggestions.slice(0, 3), suggestion, isStale: staleness?.isStale ?? null, coverage: coverage.knownGaps.length > 0 ? coverage : coverage.confidence }, profile);
   }
 
   if (profile === "compact") {
-    return ctx.asText({ query: args.query, strategy: strategyUsed, autoRouted: autoRouted || undefined, count: results.length, symbols: results.map((s) => ({ name: s.name, kind: s.kind, filePath: s.filePath, line: s.line })), suggestions, suggestion, staleness, coverage }, profile);
+    return ctx.asText({ query: args.query, strategy: strategyUsed, autoRouted: autoRouted || undefined, count: results.length, symbols: results.map((s) => ({ name: s.name, kind: s.kind, filePath: s.filePath, line: s.line, ...(s.matchType ? { matchType: s.matchType } : {}) })), suggestions, suggestion, staleness, coverage }, profile);
   }
 
   if (profile === "verbose") {
@@ -182,15 +205,35 @@ export function handleSearchRegex(
     throw err;
   }
 
-  const { matches, filesScanned, truncated, truncationReason } = result;
+  const { matches, filesScanned, filesEligible, truncated, truncationReason } = result;
   const staleWarning = buildStaleWarning(args.repoId, store, "match lines/text are read live from disk and are current; only enclosingSymbol is resolved from the index and may be off — re-index for accurate enclosing symbols.");
   const coverage = buildCoverageBlock({ resultCount: matches.length, kind: "search", query: args.pattern });
-  const truncation = truncated ? { truncated, truncationReason } : {};
+  // MCP-ISSUE-058(a): a capped scan that found nothing is NOT "absent" — say so, in words, naming the
+  // number of files never opened. The generic 0-results gap ("wrong strategy, too-narrow filter, or a
+  // stale index") actively misled here, because none of those was the cause.
+  const unscanned = Math.max(0, filesEligible - filesScanned);
+  if (truncationReason === "files_cap_reached" && unscanned > 0) {
+    coverage.knownGaps = [
+      `scan cap reached: ${String(filesScanned)} of ${String(filesEligible)} in-scope file(s) were read, ${String(unscanned)} were NOT searched. ` +
+        (matches.length === 0
+          ? "A count of 0 here does not mean the pattern is absent from the repo."
+          : "There may be further matches in the unscanned files."),
+      ...coverage.knownGaps
+    ];
+    if (coverage.confidence === "high") coverage.confidence = "medium";
+    coverage.suggestFallback ??= "narrow the scope with filePathPrefix / language / pathExclude so the whole candidate set fits under the cap.";
+  }
+  const truncation = truncated ? { truncated, truncationReason, filesEligible, filesUnscanned: unscanned } : {};
 
   if (profile === "nano") {
     const top = matches.slice(0, 10).map((m) => ({ filePath: m.filePath, line: m.line, matchText: m.matchText }));
     return ctx.asText(
-      { pattern: args.pattern, count: matches.length, filesScanned, matches: top, hasMore: matches.length > top.length, ...truncation, coverage: coverage.confidence },
+      {
+        pattern: args.pattern, count: matches.length, filesScanned, matches: top, hasMore: matches.length > top.length, ...truncation,
+        // MCP-ISSUE-058(a): nano collapses coverage to a bare confidence string, which threw the gap
+        // text away exactly when it mattered most. Keep the full block whenever there is a gap.
+        coverage: coverage.knownGaps.length > 0 ? coverage : coverage.confidence
+      },
       profile
     );
   }
@@ -247,11 +290,14 @@ export function handleFindSymbolAtLine(
 // ── get_symbol_detail ─────────────────────────────────────────────────────────
 
 export function handleGetSymbolDetail(
-  args: { repoId: string; symbolId: string; limit: number; profile: string },
+  args: { repoId: string; symbolId: string; limit: number; excludeTests: boolean; profile: string },
   ctx: HandlerContext
 ): CallToolResult {
   const profile = resolveResponseProfile(args.profile as Parameters<typeof resolveResponseProfile>[0]);
-  return ctx.asText(ctx.store.getSymbolDetail(args.repoId, args.symbolId, args.limit), profile);
+  // MCP-ISSUE-056: filter the FAR end of each edge — outgoing by target, incoming by source — and do
+  // it in the query, so `limit` is not spent on rows that are about to be discarded.
+  const detail = ctx.store.getSymbolDetail(args.repoId, args.symbolId, args.limit, args.excludeTests);
+  return ctx.asText(detail, profile);
 }
 
 // ── get_symbol_context_pack ───────────────────────────────────────────────────

@@ -15,10 +15,33 @@
 import type Database from "better-sqlite3";
 
 import { indexLog } from "../services/indexing/indexProgress.js";
+import { isTestPath } from "../services/indexing/fileFilter.js";
 import { ensureVectorSchema } from "./vectorStore.js";
+
+/**
+ * Expose `isTestPath` to SQL as `is_test_path(path) -> 0 | 1` (MCP-ISSUE-056, code review 2026-08-10).
+ *
+ * `excludeTests` shipped as a post-filter over an already-`LIMIT`-ed page, so a symbol with 30
+ * callers whose first 20 SQL rows were test files answered `callers: []` — indistinguishable from
+ * "nothing calls this", which is the opposite of what the parameter promises. The predicate has to
+ * run before the cap, i.e. inside the query.
+ *
+ * A UDF rather than a hand-translated `like` chain because `TEST_PATH_REGEX` is deliberately kept as
+ * ONE regex so its callers cannot drift (ISSUE-024); a SQL copy of it would be exactly that drift.
+ * Not indexable, but every query using it is already a bounded join, not a table scan.
+ *
+ * Registered from `initGraphSchema` so it exists on every connection — including the `:memory:`
+ * databases the unit tests build, which never construct a `GraphStore`.
+ */
+function registerGraphFunctions(db: Database.Database): void {
+  db.function("is_test_path", { deterministic: true }, (filePath: unknown): number =>
+    typeof filePath === "string" && isTestPath(filePath) ? 1 : 0
+  );
+}
 
 /** Create every table, index and FTS view the graph needs, if absent. */
 export function initGraphSchema(db: Database.Database): void {
+    registerGraphFunctions(db);
     db.exec(`
       create table if not exists repositories (
         repo_id text primary key,
@@ -174,6 +197,13 @@ export function initGraphSchema(db: Database.Database): void {
         file_path text not null,
         controller_symbol_id text not null,
         handler_symbol_id text not null,
+        -- MCP-ISSUE-055: the handler's NAME as written at the registration site, independent of
+        -- whether its symbol could be resolved. Customers is a partial class whose handlers live in
+        -- sibling files (Customers.Notes.cs), and extraction sees one file at a time — so the symbol
+        -- lookup missed and every route fell back to the enclosing Map, collapsing 13 endpoints onto
+        -- one name. The delegate name is right there in the AST either way; persisting it means
+        -- route_map answers correctly even when the symbol join cannot.
+        handler_name text,
         http_method text not null,
         route_template text not null,
         line integer not null
@@ -325,6 +355,13 @@ export function runGraphMigrations(db: Database.Database, vectorEnabled: boolean
       db.exec("alter table symbols add column end_line integer");
     }
 
+    // MCP-ISSUE-055: the registration-site handler name, so a partial-class handler declared in a
+    // sibling file still has a name even when its symbol id could not be resolved.
+    const routesCols = db.prepare("pragma table_info(routes)").all() as { name: string }[];
+    if (routesCols.length > 0 && !routesCols.some((c) => c.name === "handler_name")) {
+      db.exec("alter table routes add column handler_name text");
+    }
+
     // Refresh symbols_fts if it doesn't have the signature column yet
     try {
       db.prepare("select signature from symbols_fts limit 0").all();
@@ -472,6 +509,13 @@ export function runGraphMigrations(db: Database.Database, vectorEnabled: boolean
         file_path text not null,
         controller_symbol_id text not null,
         handler_symbol_id text not null,
+        -- MCP-ISSUE-055: the handler's NAME as written at the registration site, independent of
+        -- whether its symbol could be resolved. Customers is a partial class whose handlers live in
+        -- sibling files (Customers.Notes.cs), and extraction sees one file at a time — so the symbol
+        -- lookup missed and every route fell back to the enclosing Map, collapsing 13 endpoints onto
+        -- one name. The delegate name is right there in the AST either way; persisting it means
+        -- route_map answers correctly even when the symbol join cannot.
+        handler_name text,
         http_method text not null,
         route_template text not null,
         line integer not null

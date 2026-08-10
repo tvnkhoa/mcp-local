@@ -3,6 +3,7 @@ import { resolveResponseProfile } from "../../middleware/responseFormatter.js";
 import { buildCoverageBlock } from "../../middleware/coverage.js";
 import { isTestPath } from "../../services/indexing/fileFilter.js";
 import type { HandlerContext } from "./handlerContext.js";
+import { dropTestRows } from "./testFilter.js";
 
 // ── dead_code_scan ────────────────────────────────────────────────────────────
 
@@ -158,12 +159,18 @@ export function handleFindImplementations(
 // ── link_tests_to_source ──────────────────────────────────────────────────────
 
 export function handleLinkTestsToSource(
-  args: { repoId: string; filePath?: string; limit: number; maxCandidates: number; minScore: number; profile: string },
+  args: { repoId: string; filePath?: string; limit: number; maxCandidates: number; minScore: number; excludeTests: boolean; profile: string },
   ctx: HandlerContext
 ): CallToolResult {
   const { store } = ctx;
   const profile = resolveResponseProfile(args.profile as Parameters<typeof resolveResponseProfile>[0]);
-  const links = store.linkTestsToSource(args.repoId, args.filePath ?? null, args.limit, args.maxCandidates, args.minScore);
+  const allLinks = store.linkTestsToSource(args.repoId, args.filePath ?? null, args.limit, args.maxCandidates, args.minScore);
+  // MCP-ISSUE-056: filter the SOURCE side only — the test side is the point of this tool. Defensive
+  // rather than load-bearing: the candidate `sourceFiles` set inside the analyzer is already built as
+  // `!isTestPath(x) && !isNonCodePath(x)`, so this drops nothing today. Kept so the parameter cannot
+  // become a lie if that selection ever widens. It is also the one `excludeTests` site with no
+  // post-LIMIT hazard, because it can never remove a row.
+  const links = dropTestRows(allLinks, args.excludeTests, (x) => x.sourceFile);
 
   const emptyHint =
     links.length === 0

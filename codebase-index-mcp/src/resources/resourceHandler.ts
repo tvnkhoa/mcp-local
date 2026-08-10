@@ -127,7 +127,11 @@ function buildRiskSnapshot(
   const changedFiles = runGitLines(repo.repoPath, ["diff", "--name-only", "HEAD"]).map((x) => x.replace(/\\/g, "/")).slice(0, 100);
   const impacts = changedFiles.map((filePath) => {
     const impact = store.getImpactFiles(repoId, filePath, 20);
-    const risk = scoreChangeRisk(impact.impactedFiles.length, impact.reliabilitySummary, 20);
+    // MCP-ISSUE-054: `totalImpactedCount`, not `impactedFiles.length`. This resource carried the same
+    // defect as `detect_changes` — scoring a page-sized count made every wide-blast-radius file look
+    // identical — and it must stay in step with the tool, or `repo://…/risk` and `detect_changes`
+    // report different verdicts for the same commit.
+    const risk = scoreChangeRisk(impact.totalImpactedCount, impact.reliabilitySummary, 20);
     return { filePath, riskScore: risk.riskScore, riskLevel: risk.riskLevel };
   });
 

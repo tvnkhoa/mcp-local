@@ -328,7 +328,15 @@ export function searchDocsImpl(
   limit: number,
   buildFtsQuery: (q: string) => string,
   buildIntentFtsQuery: (q: string) => string,
-  includeSymbols = false
+  includeSymbols = false,
+  /**
+   * MCP-ISSUE-058(d): which section kinds may answer. Default excludes `code_block`, because a prose
+   * search that answers with a mermaid diagram is not answering the question that was asked: the
+   * filed case returned exactly one hit for "ConversationNote" — a flowchart matching only the words
+   * "pinned note" — while `search_regex` over the same 53 doc files correctly returned 0. `mode:"stale"`
+   * already counts prose only, so the two modes disagreed about what a mention is.
+   */
+  contentTypes: readonly string[] | null = null
 ): {
   docId: string;
   filePath: string;
@@ -342,6 +350,8 @@ export function searchDocsImpl(
   let docIds: string[] = [];
   let usedFts = false;
   const desiredLimit = Math.max(1, limit);
+  const allowedTypes = contentTypes && contentTypes.length > 0 ? contentTypes : ["heading", "prose"];
+  const typePlaceholders = allowedTypes.map(() => "?").join(", ");
 
   try {
     db.prepare("select * from docs_fts limit 0").all();
@@ -351,12 +361,12 @@ export function searchDocsImpl(
         select docs_fts.doc_id as docId
         from docs_fts
         inner join docs on docs.doc_id = docs_fts.doc_id and docs.repo_id = ?
-        where docs_fts match ?
+        where docs_fts match ? and docs.content_type in (${typePlaceholders})
         order by rank
         limit ?
         `
       )
-      .all(repoId, ftsQuery, desiredLimit) as { docId: string }[];
+      .all(repoId, ftsQuery, ...allowedTypes, desiredLimit) as { docId: string }[];
     docIds = ftsRows.map((r) => r.docId);
     usedFts = true;
   } catch {
@@ -366,9 +376,9 @@ export function searchDocsImpl(
   if (!usedFts || docIds.length === 0) {
     const likeRows = db
       .prepare(
-        `select doc_id as docId from docs where repo_id = ? and text like ? order by rowid limit ?`
+        `select doc_id as docId from docs where repo_id = ? and text like ? and content_type in (${typePlaceholders}) order by rowid limit ?`
       )
-      .all(repoId, `%${query}%`, desiredLimit) as { docId: string }[];
+      .all(repoId, `%${query}%`, ...allowedTypes, desiredLimit) as { docId: string }[];
     docIds = likeRows.map((r) => r.docId);
   }
 

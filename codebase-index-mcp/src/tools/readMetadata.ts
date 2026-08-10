@@ -118,7 +118,7 @@ export function buildReadMetadataTools(deps: CodebaseIndexDeps): AnyToolDefiniti
 
   const queryDocs = defineTool({
     name: "query_docs",
-    description: "Unified docs tool. mode=search: full-text search across indexed documentation sections (requires query); mode=stale: find docs that mention changed symbols (requires symbolIds); mode=coverage: show which exported symbols are documented (requires filePath). All three modes return the same envelope: { repoId, mode, count, results }. Requires docs lane enabled. includeSymbols=true (mode=search only) additionally pads the result set with matching CODE symbols — off by default, because a docs search answering with symbols is rarely what was asked. mode=stale counts PROSE mentions only; includeCodeMentions=true also counts identifiers appearing inside fenced code samples.",
+    description: "Unified docs tool. mode=search: full-text search across indexed documentation sections (requires query); mode=stale: find docs that mention changed symbols (requires symbolIds); mode=coverage: show which exported symbols are documented (requires filePath). All three modes return the same envelope: { repoId, mode, count, results }. Requires docs lane enabled. includeSymbols=true (mode=search only) additionally pads the result set with matching CODE symbols — off by default, because a docs search answering with symbols is rarely what was asked. mode=stale counts PROSE mentions only; includeCodeMentions=true also counts identifiers appearing inside fenced code samples. mode=search matches headings and prose by default — pass contentTypes to include code_block sections (diagrams, fenced samples).",
     input: schemas.queryDocsSchema(limits.maxResultLimit),
     inputSchema: {
       type: "object",
@@ -133,6 +133,7 @@ export function buildReadMetadataTools(deps: CodebaseIndexDeps): AnyToolDefiniti
         limit: { type: "integer", minimum: 1, maximum: limits.maxResultLimit },
         includeSymbols: { type: "boolean", description: "mode=search only: also return matching code symbols (contentType='symbol'). Off by default." },
         includeCodeMentions: { type: "boolean", description: "mode=stale only: also count identifiers scraped from fenced code samples (mentionType='code_call'). Off by default — a doc that merely contains a call is not documentation of the callee." },
+        contentTypes: { type: "array", items: { type: "string", enum: ["heading", "prose", "code_block"] }, minItems: 1, maxItems: 3, description: "mode=search only: which doc section kinds may answer. Defaults to heading+prose; pass code_block to include fenced samples and diagrams." },
         // MCP-ISSUE-049: `profile` was accepted by the zod schema and never advertised, so a client
         // honouring `additionalProperties: false` had to reject a parameter the tool supports.
         // Four more tools have the same gap (get_folder_summary, find_entry_points,

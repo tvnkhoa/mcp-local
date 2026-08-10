@@ -27,6 +27,7 @@
     "test:minimal-api-guard": "node scripts/test/test-minimal-api-guard.mjs",
     "test:wiring-note": "node scripts/test/test-wiring-note.mjs",
     "test:issue-049-shapes": "node scripts/test/test-issue-049-shapes.mjs",
+    "test:issue-052-qualified-call": "node scripts/test/test-issue-052-qualified-call.mjs",
     "test:bus-edges": "node scripts/test/test-bus-edges.mjs",
     "test:search-ranking": "node scripts/test/test-search-ranking.mjs",
     "test:interface-dispatch": "node scripts/test/test-interface-dispatch.mjs",

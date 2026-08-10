@@ -60,7 +60,7 @@ export function buildGraphImpactTools(deps: CodebaseIndexDeps): AnyToolDefinitio
 
   const getCallChain = defineTool({
     name: "get_call_chain",
-    description: "Trace a call path from a symbolId (direction=callers or callees). Shows the path, not a caller list — use get_change_context for caller lists. Requires a callable symbolId (function/method), not a class. Use profile='nano' for path summary, 'compact' (default) for full edge list.",
+    description: "Trace a call path from a symbolId (direction=callers or callees). Shows the path, not a caller list — use get_change_context for caller lists. Requires a callable symbolId (function/method), not a class. Use profile='nano' for path summary, 'compact' (default) for full edge list. excludeTests=true drops test-path results entirely.",
     input: schemas.getCallChainSchema(limits.maxDepth, limits.maxResultLimit),
     inputSchema: {
       type: "object",
@@ -72,6 +72,7 @@ export function buildGraphImpactTools(deps: CodebaseIndexDeps): AnyToolDefinitio
         direction: { type: "string", enum: ["callers", "callees"] },
         depth: { type: "integer", minimum: 1, maximum: limits.maxDepth },
         limit: { type: "integer", minimum: 1, maximum: limits.maxResultLimit },
+        excludeTests: { type: "boolean" },
         profile: PROFILE_PROP
       }
     },
@@ -82,7 +83,7 @@ export function buildGraphImpactTools(deps: CodebaseIndexDeps): AnyToolDefinitio
 
   const findImpactFiles = defineTool({
     name: "find_impact_files",
-    description: "Scope blast radius for a file change. view='files' (default): which files import/call symbols in this file. view='surface': which external symbols call into this file. Use before refactor_replace_preview to scope the change. profile='nano' for top-10 count, 'compact' (default) for full list. A stale index (indexed commit ≠ HEAD) is reported as a non-fatal `staleWarning` field in the response, not an error — re-index for exact results.",
+    description: "Scope blast radius for a file change. view='files' (default): which files import/call symbols in this file. view='surface': which external symbols call into this file. Use before refactor_replace_preview to scope the change. profile='nano' for top-10 count, 'compact' (default) for full list. A stale index (indexed commit ≠ HEAD) is reported as a non-fatal `staleWarning` field in the response, not an error — re-index for exact results. excludeTests=true drops test-path results entirely.",
     input: schemas.findImpactFilesSchema(limits.maxResultLimit),
     inputSchema: {
       type: "object",
@@ -94,6 +95,7 @@ export function buildGraphImpactTools(deps: CodebaseIndexDeps): AnyToolDefinitio
         limit: { type: "integer", minimum: 1, maximum: limits.maxResultLimit },
         groupBy: { type: "string", enum: ["file", "module"] },
         view: { type: "string", enum: ["files", "surface"] },
+        excludeTests: { type: "boolean" },
         profile: PROFILE_PROP
       }
     },
@@ -104,7 +106,7 @@ export function buildGraphImpactTools(deps: CodebaseIndexDeps): AnyToolDefinitio
 
   const getChangeContext = defineTool({
     name: "get_change_context",
-    description: "Get callers (BFS up to depth), callees, and type deps for a symbol. Accepts symbolId or name (one required). Use profile=nano for ultra-compact, compact to reduce payload during planning, standard for balanced, verbose for debugging. A stale index (indexed commit ≠ HEAD) is reported as a non-fatal `staleWarning` field in the response, not an error.",
+    description: "Get callers (BFS up to depth), callees, and type deps for a symbol. Accepts symbolId or name (one required). Use profile=nano for ultra-compact, compact to reduce payload during planning, standard for balanced, verbose for debugging. A stale index (indexed commit ≠ HEAD) is reported as a non-fatal `staleWarning` field in the response, not an error. excludeTests=true drops test-path results entirely.",
     input: schemas.getChangeContextSchema(limits.maxDepth, limits.maxResultLimit),
     inputSchema: {
       type: "object",
@@ -117,6 +119,7 @@ export function buildGraphImpactTools(deps: CodebaseIndexDeps): AnyToolDefinitio
         callerDepth: { type: "integer", minimum: 1, maximum: limits.maxDepth },
         calleeDepth: { type: "integer", minimum: 1, maximum: limits.maxDepth },
         limit: { type: "integer", minimum: 1, maximum: limits.maxResultLimit },
+        excludeTests: { type: "boolean" },
         profile: PROFILE_PROP
       }
     },
@@ -225,7 +228,7 @@ export function buildGraphImpactTools(deps: CodebaseIndexDeps): AnyToolDefinitio
 
   const linkTestsToSource = defineTool({
     name: "link_tests_to_source",
-    description: "Link tests to likely source files using deterministic naming heuristics plus IMPORTS/CALLS tracing.",
+    description: "Link tests to likely source files using deterministic naming heuristics plus IMPORTS/CALLS tracing. excludeTests=true drops test-path results entirely.",
     input: schemas.linkTestsToSourceSchema(limits.maxResultLimit),
     inputSchema: {
       type: "object",
@@ -237,6 +240,7 @@ export function buildGraphImpactTools(deps: CodebaseIndexDeps): AnyToolDefinitio
         limit: { type: "integer", minimum: 1, maximum: limits.maxResultLimit },
         maxCandidates: { type: "integer", minimum: 1, maximum: 20 },
         minScore: { type: "number", minimum: 0, maximum: 1 },
+        excludeTests: { type: "boolean" },
         profile: PROFILE_PROP
       }
     },
@@ -269,7 +273,7 @@ export function buildGraphImpactTools(deps: CodebaseIndexDeps): AnyToolDefinitio
 
   const findPackageConsumers = defineTool({
     name: "find_package_consumers",
-    description: "Find repositories/symbols that depend on a NuGet package contract (nuget:<name>) without requiring a symbolId.",
+    description: "Find repositories/symbols that depend on a NuGet package contract, without requiring a symbolId. The package argument accepts either the bare name or the nuget:<name> form — both normalize to nuget:<lowercased>, so the prefix is optional, not required.",
     input: schemas.findPackageConsumersSchema(limits.maxResultLimit),
     inputSchema: {
       type: "object",
@@ -289,7 +293,7 @@ export function buildGraphImpactTools(deps: CodebaseIndexDeps): AnyToolDefinitio
 
   const traceExecutionFlow = defineTool({
     name: "trace_execution_flow",
-    description: "BFS-trace the call graph starting from an entry symbol, following CALLS edges outbound up to maxDepth levels. Returns nodes and edges forming the execution sub-graph. Use to understand how a method propagates through the codebase.",
+    description: "BFS-trace the call graph starting from an entry symbol, following CALLS edges outbound up to maxDepth levels. Returns nodes and edges forming the execution sub-graph. Use to understand how a method propagates through the codebase. excludeTests=true drops test-path results entirely.",
     input: schemas.traceExecutionFlowSchema,
     inputSchema: {
       type: "object",
@@ -300,6 +304,7 @@ export function buildGraphImpactTools(deps: CodebaseIndexDeps): AnyToolDefinitio
         entrySymbolId: { type: "string" },
         maxDepth: { type: "integer", minimum: 1, maximum: 8 },
         maxNodes: { type: "integer", minimum: 1, maximum: 100 },
+        excludeTests: { type: "boolean" },
         profile: PROFILE_PROP
       }
     },
