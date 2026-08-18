@@ -100,8 +100,12 @@ const LANGUAGE_BY_EXTENSION: Record<string, string> = {
   ".md": "markdown",
   ".mdx": "markdown",
   // JavaScript / TypeScript (codebase-index-mcp)
+  // `.tsx` keeps the `typescript` tag on purpose — the JSX dialect is chosen per file in
+  // `getOrCreateParserForLanguage`, so the tag stays joinable in `files.language`.
   ".ts": "typescript",
   ".tsx": "typescript",
+  ".mts": "typescript",
+  ".cts": "typescript",
   ".js": "javascript",
   ".jsx": "javascript",
   ".mjs": "javascript",
@@ -192,6 +196,15 @@ export function shouldIndexFile(filePath: string, bytes: Uint8Array, maxFileSize
   // Skip EF Core migration Designer.cs snapshots — auto-generated, large, slow to parse
   if (normalizedLower.includes("/migrations/") && normalizedLower.endsWith(".designer.cs")) {
     return { include: false, reason: "excluded_generated", language: null };
+  }
+
+  // TypeScript declaration files carry no implementation: they are `function_signature` /
+  // `property_signature` / `module` nodes, none of which the extractor walks, so a `.d.ts` used to
+  // contribute a module symbol plus a few interfaces and nothing else — while its names competed
+  // with real code in `search_symbols` ranking. `extname()` reports ".ts" for "x.d.ts", so this has
+  // to be matched on the full name.
+  if (/\.d\.(ts|mts|cts)$/.test(normalizedLower)) {
+    return { include: false, reason: "declaration_file", language: null };
   }
 
   const extension = extname(filePath).toLowerCase();

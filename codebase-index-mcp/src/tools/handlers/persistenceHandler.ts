@@ -43,7 +43,16 @@ export function handleGetPersistenceMapping(
             `configured on the owning entity, so the declaring type reported by find_field_accesses is often ` +
             `not the EF owner.`
         }
-      : null;
+      : result.mappings.length === 0
+        ? {
+            // Without this the tool returns a silent zero, which reads as "this property is not
+            // persisted" in any repo — including a TypeScript one, where it can only ever be zero.
+            hint:
+              `no EF mapping found — this tool reads EF Core configuration out of C# ` +
+              `(IEntityTypeConfiguration/OnModelCreating) only. Prisma, TypeORM, Drizzle and raw SQL are not ` +
+              `read, so a TS/JS repo is always empty here.`
+          }
+        : null;
 
   if (profile === "nano") {
     return ctx.asText({

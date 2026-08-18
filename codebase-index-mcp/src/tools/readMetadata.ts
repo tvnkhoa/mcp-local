@@ -188,7 +188,7 @@ export function buildReadMetadataTools(deps: CodebaseIndexDeps): AnyToolDefiniti
 
   const findEntryPoints = defineTool({
     name: "find_entry_points",
-    description: "Find symbols with 0 incoming CALLS edges — these are publicly callable entry points not called by other code in the repo. Use to discover public API surface, HTTP endpoints, or top-level service methods. Filter by kind='method' for controllers, kind='class' for services, kind='route_handler' to surface C# ASP.NET route handlers from the routes table (fast-path, does not require call-graph analysis).",
+    description: "Find symbols with 0 incoming CALLS edges — these are publicly callable entry points not called by other code in the repo. Use to discover public API surface, HTTP endpoints, or top-level service methods. Filter by kind='method' for controllers, kind='class' for services, kind='route_handler' to surface route handlers from the routes table — a fast path that needs no call-graph analysis, covering C# attribute/minimal-API routing plus direct JS/TS app|router|fastify.VERB registrations.",
     input: schemas.findEntryPointsSchema(limits.maxResultLimit),
     inputSchema: {
       type: "object",

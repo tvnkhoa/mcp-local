@@ -131,7 +131,7 @@ export function handleFindImplementations(
   const emptyHint =
     rows.length === 0
       ? {
-          hint: "no implementations found — IMPLEMENTS edges require C# indexing; verify the interface name (see didYouMean) or that the repo contains C# implementations.",
+          hint: "no implementations found — IMPLEMENTS edges are emitted by the C# extractor only, so a TypeScript `class X implements Y` is not yet recorded; verify the interface name (see didYouMean) or that the repo contains C# implementations.",
           didYouMean
         }
       : {};

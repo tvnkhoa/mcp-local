@@ -31,22 +31,76 @@ export function extractFirstStringLiteral(input: string): string | null {
 // Route Utilities
 // ============================================================================
 
+/**
+ * The one place a symbol id is minted. Every extractor keys on the same four parts, and the
+ * enclosing-symbol lookup below has to reproduce the string byte for byte or the edge it builds
+ * points at nothing.
+ *
+ * That is not hypothetical: the JS lane spelled the id without `kind` and with `row + 1` while
+ * registration used `kind` and `row`, so 77% of TypeScript edges carried a `fromId` that matched no
+ * symbol. The C# twin (`findEnclosingCSharpSymbolId`) carries a comment warning about exactly this.
+ * Call this helper on both sides instead of re-spelling the template.
+ *
+ * `row` is the tree-sitter 0-indexed `startPosition.row`, NOT the 1-indexed `line` on the record.
+ */
+export function makeSymbolId(
+  input: ExtractInput,
+  kind: string,
+  name: string,
+  row: number
+): string {
+  return stableId(`${input.repoId}:${input.filePath}:${kind}:${name}:${row}`);
+}
+
+/**
+ * Node types the JS/TS extractor registers as symbols, mapped to the kind it registers them under.
+ *
+ * A `Map`, not an object literal: these are looked up by arbitrary grammar node names, and a plain
+ * object answers `obj["constructor"]` with `Object.prototype.constructor` — a truthy value that is
+ * not a kind. No current node type is named that, but the lookup should not depend on it.
+ */
+const JS_ENCLOSING_KIND_BY_NODE_TYPE = new Map<string, string>([
+  ["function_declaration", "function"],
+  ["generator_function_declaration", "function"],
+  ["method_definition", "method"],
+  ["class_declaration", "class"],
+  ["abstract_class_declaration", "class"]
+]);
+
+/**
+ * A function expression only becomes a symbol when it is bound to a name, and the id is keyed on the
+ * *declaration* row, not the arrow's own row — `jsSymbols` registers it while walking
+ * `lexical_declaration`. Returns null for a genuinely anonymous callback so the caller can keep
+ * walking outward and attribute the call to the nearest named owner.
+ */
+export function boundFunctionSymbolId(node: Parser.SyntaxNode, input: ExtractInput): string | null {
+  const declarator = node.parent;
+  if (declarator?.type !== "variable_declarator") return null;
+  const nameNode = declarator.childForFieldName("name");
+  if (!nameNode || nameNode.type !== "identifier") return null;
+  const declaration = declarator.parent;
+  if (declaration?.type !== "lexical_declaration") return null;
+  return makeSymbolId(input, "function", nameNode.text, declaration.startPosition.row);
+}
+
 export function findEnclosingSymbolId(node: Parser.SyntaxNode, input: ExtractInput): string | null {
-  const FUNCTION_TYPES = new Set([
-    "function_declaration",
-    "function_expression",
-    "arrow_function",
-    "method_definition"
-  ]);
   let current: Parser.SyntaxNode | null = node.parent;
 
   while (current) {
-    if (FUNCTION_TYPES.has(current.type)) {
+    const kind = JS_ENCLOSING_KIND_BY_NODE_TYPE.get(current.type);
+    if (kind) {
       const nameNode = current.childForFieldName("name");
+      // An unnamed `export default function () {}` registers no symbol; walk outward rather than
+      // mint an id for something that was never stored.
       if (nameNode) {
-        return stableId(`${input.repoId}:${input.filePath}:${nameNode.text}:${current.startPosition.row + 1}`);
+        // A constructor is registered under its own kind, not `method`. Spelling it `method` here
+        // put every call in a constructor body on an id that matched nothing.
+        const resolvedKind = kind === "method" && nameNode.text === "constructor" ? "constructor" : kind;
+        return makeSymbolId(input, resolvedKind, nameNode.text, current.startPosition.row);
       }
-      return stableId(`${input.repoId}:${input.filePath}:anonymous:${current.startPosition.row + 1}`);
+    } else if (current.type === "arrow_function" || current.type === "function_expression") {
+      const bound = boundFunctionSymbolId(current, input);
+      if (bound) return bound;
     }
     current = current.parent;
   }

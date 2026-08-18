@@ -18,6 +18,14 @@ import {
   isVectorEnabled,
 } from "../../repositories/vectorStore.js";
 import { tagExternalNamespaceImports } from "./edgeResolverShared.js";
+import {
+  EMPTY_ALIASES,
+  loadIndexedFilePaths,
+  loadRepoPath,
+  looksLikeModulePath,
+  readTsconfigAliases,
+  resolveModuleSpecifier
+} from "./moduleResolution.js";
 
 export function resolveImportEdges(db: Database.Database, repoId: string, maxUnresolvedRows = 0): number {
   // Phase 0: Bulk-tag all external namespace imports BEFORE row-limited resolution.
@@ -106,6 +114,10 @@ export function resolveImportEdges(db: Database.Database, repoId: string, maxUnr
     }
   }
 
+  const knownFiles = loadIndexedFilePaths(db, repoId);
+  const repoPath = loadRepoPath(db, repoId);
+  const aliases = repoPath ? readTsconfigAliases(repoPath) : EMPTY_ALIASES;
+
   const importResolveCache = new Map<string, string | null>();
 
   let count = 0;
@@ -118,7 +130,12 @@ export function resolveImportEdges(db: Database.Database, repoId: string, maxUnr
 
       // P2.1: Try C# namespace resolution first for dotted namespace imports
       // e.g. import:CRM.Marketing.Model → find module symbol for that namespace
-      if (!importPath.startsWith(".") && importPath.includes(".")) {
+      //
+      // `looksLikeModulePath` is the guard that keeps JS/TS out of this branch. The condition used
+      // to be "not relative AND contains a dot", which is also true of `@/db/pool.js` — the ordinary
+      // ESM-plus-path-alias form, and the one this workspace's own target stack uses. Those went
+      // looking for a C# namespace, found none, and were dropped as unresolvable.
+      if (!importPath.startsWith(".") && importPath.includes(".") && !looksLikeModulePath(importPath)) {
         // Check if top-level namespace is a known external — tag and skip
         const topNs = importPath.split(".")[0];
         if (topNs && isKnownExternalNamespace(topNs)) {
@@ -167,17 +184,9 @@ export function resolveImportEdges(db: Database.Database, repoId: string, maxUnr
         continue;
       }
 
-      // Only attempt resolution for relative imports (JS/TS)
-      if (!importPath.startsWith(".")) continue;
-
-      // Resolve relative path
-      const parts = `${fromDir}/${importPath}`.split("/");
-      const resolved: string[] = [];
-      for (const part of parts) {
-        if (part === ".." && resolved.length > 0) resolved.pop();
-        else if (part !== ".") resolved.push(part);
-      }
-      const resolvedBase = resolved.join("/");
+      // JS/TS: a relative specifier, or one a tsconfig path alias / baseUrl can turn into a path.
+      const isPathLike = importPath.startsWith(".") || looksLikeModulePath(importPath);
+      if (!isPathLike) continue;
 
       const cacheKey = `${fromDir}|${importPath}`;
       if (importResolveCache.has(cacheKey)) {
@@ -189,28 +198,11 @@ export function resolveImportEdges(db: Database.Database, repoId: string, maxUnr
         continue;
       }
 
-      // Try with various extensions and index files
-      const candidates = [
-        resolvedBase,
-        `${resolvedBase}.ts`,
-        `${resolvedBase}.js`,
-        `${resolvedBase}.tsx`,
-        `${resolvedBase}.mts`,
-        `${resolvedBase}/index.ts`,
-        `${resolvedBase}/index.js`,
-        // Strip known extensions to allow .js → .ts rewrite
-        resolvedBase.replace(/\.js$/, ".ts"),
-        resolvedBase.replace(/\.mjs$/, ".ts"),
-      ];
-
-      let matchedModuleId: string | undefined;
-      for (const candidate of candidates) {
-        const moduleId = fileToModuleId.get(candidate);
-        if (moduleId) {
-          matchedModuleId = moduleId;
-          break;
-        }
-      }
+      // One resolver, shared with the call lane. It knows the ESM `.js → .ts` rewrite (required on a
+      // relative import under `"type": "module"`, so it is the normal case rather than a fallback),
+      // every TypeScript extension including `.mts`/`.cts`, index files, and tsconfig `paths`.
+      const targetFile = resolveModuleSpecifier(row.fromFile, importPath, knownFiles, aliases);
+      const matchedModuleId = targetFile ? fileToModuleId.get(targetFile) : undefined;
 
       importResolveCache.set(cacheKey, matchedModuleId ?? null);
 

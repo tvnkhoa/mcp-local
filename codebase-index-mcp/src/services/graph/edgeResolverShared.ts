@@ -17,6 +17,7 @@ import {
   vectorSearchSymbols,
   isVectorEnabled,
 } from "../../repositories/vectorStore.js";
+import { normalizeFilePath } from "./moduleResolution.js";
 
 /**
  * Bulk-tag all import edges whose namespace belongs to a known external namespace (System, Microsoft, etc.)
@@ -132,7 +133,18 @@ export function buildNamedCandidateMap(
 export function pickBestNamedCandidate<T extends { symbolId: string; filePath: string; kind: string }>(
   candidates: T[],
   fromFile: string,
-  kindPriority: readonly string[]
+  kindPriority: readonly string[],
+  /**
+   * Repo files `fromFile` imports. A candidate living in one of them outranks a same-named symbol
+   * anywhere else in the repo, which is the difference between "the function this file actually
+   * calls" and "whichever same-named function sorted first".
+   *
+   * The concrete failure this fixes: `src/index.ts` calls `numberFromEnv`, declared in both
+   * `src/config/envConfig.ts` (imported) and `scripts/benchmark-plan-mode.mjs` (not imported). With
+   * only the same-file test the two tied, and the tie-break on `symbolId` picked the benchmark
+   * script — a wrong edge, reported with full confidence.
+   */
+  importedFiles?: ReadonlySet<string>
 ): T | undefined {
   if (candidates.length === 0) {
     return undefined;
@@ -141,7 +153,16 @@ export function pickBestNamedCandidate<T extends { symbolId: string; filePath: s
   let best = candidates[0];
   let bestScore = Number.POSITIVE_INFINITY;
   for (const candidate of candidates) {
-    const sameFilePenalty = candidate.filePath === fromFile ? 0 : 100;
+    // `symbols.file_path` keeps whatever separator `path.relative` produced, which is a backslash on
+    // Windows, while the imported-file set is normalized to forward slashes like every other path the
+    // server reports. Comparing them raw silently never matches — and a scoping tier that never fires
+    // looks exactly like one that is not helping.
+    const sameFilePenalty =
+      candidate.filePath === fromFile
+        ? 0
+        : importedFiles?.has(normalizeFilePath(candidate.filePath))
+          ? 25
+          : 100;
     const kindPenalty = rank.get(candidate.kind) ?? 999;
     const score = sameFilePenalty + kindPenalty;
     // Ties are common — two same-named classes in different files score identically — and `score <

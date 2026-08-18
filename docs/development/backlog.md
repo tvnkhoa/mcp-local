@@ -2,11 +2,17 @@
 
 **Created** — 2026-07-29
 **Baseline** — `32f2a82`, working tree carrying the MCP-ISSUE-031/033 dead-code fixes
-**Refreshed** — 2026-08-18: B-04 closed on the twelve CI observations its 2026-08-03 wiring had been
-accumulating, which makes **every item in this backlog closed** — B-01, B-01b, B-02, B-02b, B-03,
+**Refreshed** — 2026-08-18, twice. First: B-04 closed on the twelve CI observations its 2026-08-03
+wiring had been accumulating, which closed every item then filed — B-01, B-01b, B-02, B-02b, B-03,
 B-04, B-06, B-07, B-08, B-09, B-11, B-12, B-13 **done**; B-05 and B-10 **won't-do**, each with its
 reasoning recorded and B-10's underlying defect fixed. Every closed row cites the commit, command or
 measurement that proves it.
+
+Then **B-14 was filed and the backlog reopened.** It is a P1 because the TypeScript lane was not
+merely incomplete but *wrong*: 77% of the TypeScript edges in this repository's own graph pointed at
+a symbol that did not exist. The reason it went unseen for so long is structural and worth stating —
+all 59 issues in the registry were filed from a single C# repository, so no gate and no reporter had
+ever looked at TS. Nine sub-items are closed; four remain.
 
 Previously refreshed 2026-08-03, twice: once against the working tree, then again after a full
 repository review closed most of what was left. B-13 was filed and closed after that refresh
@@ -66,6 +72,140 @@ Two additions the migration learned and this backlog adopts:
 ---
 
 ## P1 — A tool reports something untrue
+
+### B-14 · Make the TypeScript lane tell the truth — 🔵 IN PROGRESS, opened 2026-08-18
+
+**Why this exists at all.** Every one of the 59 entries in
+`codebase-index-mcp/docs/mcp-codebase-index-issue-registry.md` was filed from one C# repository. No
+TypeScript repo has ever been in the feedback loop, so the TS lane was never measured — and it turned
+out to be not merely thin but **wrong**, which is what puts it in P1 rather than P3.
+
+**Measured before any change**, by running `extractGraphData` over all 147 `.ts` files in
+`codebase-index-mcp/src`:
+
+| | Baseline | Now |
+|---|---|---|
+| Orphan `fromId` (edge whose source symbol does not exist) | **2306 / 2995 = 77.0%** | **0** |
+| Edge types produced (of 10) | **2** — `IMPORTS`, `CALLS` | **7** — + `TYPE_REF`, `PROPERTY_REF`, `PROPERTY_WRITE`, `EXTENDS`, `IMPLEMENTS` |
+| `TYPE_REF` | 0 | 1052 |
+| `PROPERTY_REF` / `PROPERTY_WRITE` | 0 / 0 | 132 / 14 |
+| `EXTENDS` / `IMPLEMENTS` | 0 / 0 | 3 / 1 (this repo declares only 6 classes) |
+| `property` symbols | **0** | 487 |
+| `constructor` symbols | **0** | 6 |
+| `IMPORTS` | 582 | 654 (re-export, `require`, dynamic `import`) |
+| `benchmark:plan:check` `resolvedCallEdgePct` | 100 | 99.22 — see note |
+| `CALLS` tokens qualified with a receiver | **0 of 2413** | 0 — B-14.9, still open |
+
+> The accuracy figure moved *down* by 0.78 without anything getting worse. The gate measures the
+> share of **resolvable** callee tokens that resolved, and registering nested functions and class
+> members made 14 previously-invisible tokens resolvable. They are local closures the resolver
+> cannot bind without per-name import bindings — B-14.9/B-14.10. The floor is 90.
+
+**Closed in the first slice (2026-08-18).**
+
+- **B-14.1 — the dangling `fromId`.** `findEnclosingSymbolId` minted
+  `repoId:filePath:name:row+1`; registration used `repoId:filePath:kind:name:row`. The two never
+  hashed alike, so three quarters of the TypeScript graph pointed at nothing, and no gate noticed —
+  the benchmark's accuracy gate measures `to_id` resolution only. Both sides now go through
+  `makeSymbolId`. Two further mismatches fell out of the same fix: an anonymous callback minted an
+  `anonymous:<row>` id for a symbol that was never stored (now the call is attributed to the nearest
+  *named* owner), and `descendantsOfType("variable_declarator")` reached declarators of *nested*
+  declarations and keyed them on the outer declaration's row (now direct children only). Pinned by
+  `test:typescript-symbols`, the first wired harness to exercise the TS lane at all.
+- **B-14.2 — `.tsx` parsed with the wrong grammar.** `TypeScript.tsx` ships in `node_modules` and
+  was never loaded; `.tsx` went through the plain dialect, where JSX becomes an ERROR node that
+  swallows the rest of the subtree. The dialect is now chosen per file. The `typescript` language
+  tag is deliberately unchanged — `files.language` is joined on across the query layer.
+- **B-14.3 — a regex guess could reject a refactor site.** For non-C#, `resolveOwnerAt` fed
+  `findEnclosingTypeNameByScan` into `decide()`, which can return `cross_type`, which
+  `refactorPreviewBuild` turns into a *rejection*. That is the guard claiming a proven different
+  owner for something it never proved — the same defect B-13 fixed for C#. A non-C# mismatch is now
+  `unknown`, so the site stays visible and flagged `ambiguous_target` instead of vanishing.
+- **B-14.4 — hints that were false.** `route_map`'s empty-result hint said it "only extracts ASP.NET
+  C# attribute routing" while JS/TS routes were in fact being indexed, which is a hint that talks a
+  caller out of a working tool. `find_implementations` and `find_entry_points` were similarly
+  imprecise, and `get_persistence_mapping` returned a silent zero for TS with no explanation.
+- **B-14.5 — extensions.** `.mts`/`.cts` were skipped as `unknown_extension`. `.d.ts` was indexed as
+  ordinary TypeScript, contributing nothing but names that competed in `search_symbols` ranking; it
+  is now excluded as `declaration_file`.
+
+**Also closed in the second slice (2026-08-18).**
+
+- **B-14.6 — symbol coverage and ownership.** Class fields, constructors (their own kind, not
+  `method`), interface members, enum members, generators and named class expressions are now
+  registered, each with `parentSymbolId`. That field is the precondition for the three
+  receiver-aware branches in `edgeResolverCalls.ts`, which had been dead code for every TypeScript
+  repo. Members of an inline object type are deliberately *not* registered — structural typing is
+  not membership, and indexing it fills the graph with names nobody searches for.
+- **B-14.7 — `EXTENDS` / `IMPLEMENTS`.** TypeScript needs no equivalent of the C#
+  `isLikelyCSharpInterfaceName` heuristic: a C# base list cannot say which entry is the base class,
+  while `extends_clause` and `implements_clause` are distinct nodes here. `interface A extends B` is
+  recorded as IMPLEMENTS, because that is the relation `find_implementations(B)` is asked about.
+  `extends mixin(Base)` is dropped rather than guessed.
+- **B-14.8 — `TYPE_REF` and property access.** Annotations, generic arguments, `new X()` and
+  heritage type arguments. Property edges are restricted to a `this.<member>` receiver, which is the
+  only case where the owning type is known from syntax alone and the `Owner.member` token is
+  therefore trustworthy; a wider net would add rows without signal.
+- **B-14.10 — import-scoped call resolution.** Delivered *without* the import-binding table the item
+  was scoped around. `pickBestNamedCandidate` gained a middle tier — same file (0) beats
+  imported file (25) beats anywhere in the repo (100) — fed by a shared
+  `services/graph/moduleResolution.ts` that resolves a specifier to a repo file, including the ESM
+  `.js → .ts` rewrite, `.mts`/`.cts`, index files and tsconfig `paths`. That is a resolver-only
+  change reading edges that already exist, against eight files and a schema migration for the table.
+  Two defects fell out of building it:
+  - the import lane sent any non-relative specifier containing a dot into its **C# namespace**
+    branch, which catches `@/db/pool.js` — the ordinary ESM-plus-alias form;
+  - `symbols.file_path` keeps the separator `path.relative` produced, a backslash on Windows, so the
+    first version of the scoping tier compared against forward-slash paths and silently never fired.
+    A tier that never matches is indistinguishable from one that does not help.
+
+  Proven end-to-end: `src/index.ts` calls `numberFromEnv`, declared both in the `envConfig` it
+  imports and in `scripts/benchmark-plan-mode.mjs`. The two tied on score and the `symbolId`
+  tie-break picked the benchmark script — a wrong edge at full confidence. It now resolves to
+  `src/config/envConfig.ts`, and no edge in the smoke test points into the benchmark script.
+
+**Five defects caught by review of the two slices above, all fixed 2026-08-18.** Two of them meant
+a claim above was not yet true when written, which is the reason they are recorded rather than
+quietly folded in:
+
+- **The re-export edge did not resolve.** `reason` on an IMPORTS edge is not descriptive — a NULL
+  reason is what `schema.ts` rewrites to `'unresolved import token'`, and that exact string is the
+  `where` clause `resolveImportEdges` selects on. Labelling a re-export `re_export` therefore left
+  its `to_id` a raw token forever; `detectCircularDependencies` inner-joins `symbols` on `to_id` and
+  dropped it, so barrels stayed invisible — the precise thing B-14.6's import pass was added to fix.
+  The same label also counted as *classified* in `importsClassified`, corrupting the health figure
+  in the other direction at once. No import shape carries a custom reason any more.
+- **`tsconfig` alias support was dead on almost every real repo.** The comment stripper used
+  `/\/\*[\s\S]*?\*\//` — but `"@/*"` contains `/*` and `"src/**/*.ts"` contains `*` then `/`, so
+  everything between them was deleted as one block comment, leaving JSON that would not parse and
+  therefore no aliases at all, silently. It parses with a string-aware scanner now. The original test
+  passed only because it omitted `include`, which no real tsconfig does.
+- A **named class expression** (`const A = class Foo extends Base {}`) minted its heritage edge from
+  `Foo` while the symbol is registered as `A` — a fresh instance of the dangling-`fromId` class this
+  whole item exists to remove.
+- **`"baseUrl": "."` at the repo root resolves to `""`**, a legitimate value and a falsy one, so the
+  bare-specifier branch never fired in exactly the configuration it was written for. Absence is a
+  `null` sentinel now.
+- **Generic type parameters were emitted as `TYPE_REF`.** `TValue` is spelled like a type reference
+  but is local to the signature, so the edge can never resolve — pure inflation of the
+  `unresolvedRatio` that `health_check` reports and that this workspace's MCP policy treats as a
+  fallback trigger above 0.3.
+
+Each has a regression test: `test:typescript-edges` for the first, third and fifth,
+`moduleResolution.test.ts` for the second and fourth.
+
+**Still open.**
+
+- **B-14.9** — qualified callee tokens (`callee:Recv.Member`) via a TS scope-type map. Needs to land
+  with the resolver support that reads them, or `resolvedCallEdgePct` drops on the way in.
+- **B-14.11** — per-name import bindings. Import *scoping* is in; per-name binding would close the
+  remaining 14 unresolved tokens, all local closures.
+- **B-14.12** — framework awareness (Fastify/pg-boss entry points, Zod contracts) and a TS
+  dead-code suppression policy. Today `dead_code_scan` runs for TS with **no** suppression at all:
+  every C# rule short-circuits on `language !== "csharp"`, so barrel re-exports and default exports
+  read as dead.
+- **B-14.13** — a TS owner prover, so `change_value_representation` and guarded
+  `refactor_symbol_migration` work on TypeScript rather than being blocked at `unknown`.
 
 ### B-13 · Give `findOwnerType` a real owner, so `requiredOwnerType` can guard a migration — ✅ DONE 2026-08-05
 
@@ -967,6 +1107,7 @@ tell the truth, or makes an existing gate capable of failing.
 
 | # | Item | Tier | Risk | Rev. | Complexity | Status |
 |---|---|---|---|---|---|---|
+| B-14 | The TypeScript lane reports a graph that is 77% dangling | P1 | **High** | R2 | L / extractor | 🔵 9 of 13 done 2026-08-18 · orphan `fromId` 77.0% → 0; edge types 2 → 7 |
 | B-13 | `findOwnerType` returns the enclosing class, not the owner | P1 | **Med** | R2 | M / AST | ✅ 2026-08-05 · AST prover; `requiredOwnerType` matches 3 of 3 |
 | B-01 | Diagnose C# `TYPE_REF` loss | P1 | Low | R1 | M | ✅ 2026-07-30 · `c68bda5` |
 | B-01b | Fix C# `TYPE_REF` | P1 | — | — | unscoped | ✅ 2026-07-30 · `266d91b` `9574e3e` `f1c0160` `9b55de4` |

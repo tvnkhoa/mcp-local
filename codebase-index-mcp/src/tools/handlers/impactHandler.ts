@@ -476,7 +476,7 @@ export function handleRouteMap(
 
   const emptyHint =
     routes.length === 0
-      ? { hint: "no routes found — route_map only extracts ASP.NET C# attribute routing ([Route]/[HttpGet]/...); non-C# repos and convention/Minimal-API routing won't appear here. Try search_symbols or find_entry_points(kind='route_handler')." }
+      ? { hint: "no routes found — route_map reads C# attribute and minimal-API routing, plus JS/TS app|router|fastify.VERB('/path', handler). Not read yet: NestJS decorators, Next.js file routing, app.use(prefix, router) mounting, all/head/options. Try find_entry_points(kind='route_handler')." }
       : {};
 
   if (profile === "nano") {

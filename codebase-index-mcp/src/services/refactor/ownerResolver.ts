@@ -19,7 +19,9 @@
  *                  `ambiguous_target` (which blocks apply), rather than dropping it.
  *
  * C# only. Every other language keeps the historical scan under rule `enclosing_type_fallback`,
- * because no on-demand TS/JS parse or scope-type map exists to prove anything with.
+ * because no on-demand TS/JS parse or scope-type map exists to prove anything with — and because a
+ * scan proves nothing, a non-C# mismatch is downgraded to `unknown` rather than `cross_type`. A
+ * regex guess must never be able to reject a site.
  */
 
 import Parser from "tree-sitter";
@@ -286,10 +288,19 @@ export function resolveOwnerAt(
   required: string[]
 ): OwnerProof {
   if (ctx.language !== "csharp") {
-    // No prover exists for this language; keep the historical answer and label it honestly. The
-    // verdict still compares against `required`, so non-C# guard behaviour is unchanged.
+    // No prover exists for this language, so the scan may report a name but can never *prove* one:
+    // it takes the last `class X` before the offset with no scope check, no comment/string
+    // skipping, and no awareness of `interface`, `type`, a namespace or a top-level function.
+    //
+    // A guess must therefore never reach `cross_type` — that verdict makes `refactorPreviewBuild`
+    // drop the site into `rejectedSites`, which is the guard reporting "proven different owner"
+    // about something it never proved, and is exactly the defect MCP-ISSUE-043 was filed for.
+    // `unknown` keeps the site, flagged `ambiguous_target`, so it is visible and cannot apply.
     const scanned = findEnclosingTypeNameByScan(ctx.content, startOffset);
-    return decide(scanned, required, "enclosing_type_fallback");
+    const proof = decide(scanned, required, "enclosing_type_fallback");
+    return proof.verdict === "cross_type"
+      ? { verdict: "unknown", ownerType: proof.ownerType, rule: "enclosing_type_fallback" }
+      : proof;
   }
   if (!ctx.tree) {
     const scanned = findEnclosingTypeNameByScan(ctx.content, startOffset);
@@ -523,7 +534,7 @@ export function describeOwnerRule(rule: string): string {
     case "parse_unavailable":
       return "the C# parser declined this file (over the size cap or a parse timeout); the owner shown is the enclosing type from a text scan, not a proof";
     case "enclosing_type_fallback":
-      return "no AST prover exists for this language; the owner is the enclosing type from a text scan";
+      return "no AST prover exists for this language; the owner shown is the enclosing type from a text scan, not a proof — a mismatch cannot reject the site, only mark it ambiguous";
     case "base_type_unknown":
       return "a `base.Member` access whose enclosing type declares no base list";
     default:

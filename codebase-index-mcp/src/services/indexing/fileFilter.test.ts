@@ -123,6 +123,35 @@ test("shouldIndexFile: maps a known extension to its language", () => {
   assert.deepEqual(decision, { include: true, reason: "extension_match", language: "typescript" });
 });
 
+test("shouldIndexFile: every TypeScript extension maps to the typescript tag", () => {
+  // `.tsx` shares the tag with `.ts` deliberately — the JSX grammar is chosen per file, not per
+  // language tag, so `files.language` stays joinable. `.mts`/`.cts` were missing entirely and were
+  // skipped as unknown_extension.
+  for (const path of ["src/app.ts", "src/App.tsx", "src/app.mts", "src/app.cts"]) {
+    const decision = shouldIndexFile(path, bytes("export const a = 1;"));
+    assert.deepEqual(
+      decision,
+      { include: true, reason: "extension_match", language: "typescript" },
+      `expected ${path} to be indexed as typescript`
+    );
+  }
+});
+
+test("shouldIndexFile: declaration files are excluded before the extension match", () => {
+  // extname("types.d.ts") is ".ts", so without an explicit check these were indexed as ordinary
+  // TypeScript and only ever yielded a module symbol plus names that polluted search ranking.
+  for (const path of ["src/types.d.ts", "src/env.d.mts", "src/global.d.cts"]) {
+    const decision = shouldIndexFile(path, bytes("export declare const a: number;"));
+    assert.equal(decision.include, false, `expected ${path} to be excluded`);
+    assert.equal(decision.reason, "declaration_file");
+    assert.equal(decision.language, null);
+  }
+
+  // A file that merely has a `d` segment in its name is not a declaration file.
+  assert.equal(shouldIndexFile("src/d.ts", bytes("export const a = 1;")).include, true);
+  assert.equal(shouldIndexFile("src/models.ts", bytes("export const a = 1;")).include, true);
+});
+
 test("shouldIndexFile: an unknown extension is excluded, not guessed", () => {
   const decision = shouldIndexFile("src/app.zzz", bytes("whatever"));
   assert.equal(decision.include, false);

@@ -199,11 +199,27 @@ This workspace has `.claude/rules/mcp-hard-mode.md` as the policy source for how
 Adding a tree-sitter language:
 
 1. Add the parser dependency to `package.json` (e.g. `tree-sitter-python`).
-2. Add the language's entry point as `services/extractors/<language>Extractor.ts`, following the
+2. Register the grammar in `getOrCreateParserForLanguage` and add the dispatch branch in
+   `extractGraphData` (both in `services/extractors/treeSitterExtractor.ts`). A language absent from
+   the registry returns a lone module symbol and no edges, **silently** — there is no error.
+3. Map the extension in `LANGUAGE_BY_EXTENSION` (`services/indexing/fileFilter.ts`). Nothing runs
+   without this: an unmapped extension is skipped as `unknown_extension`.
+4. Add the language's entry point as `services/extractors/<language>Extractor.ts`, following the
    naming rule above.
-3. Add coverage in `scripts/test/test-extractor.mjs`, and wire it to a `test:*` script — a harness
-   with no script never runs.
-4. Update the feature list in `README.md`.
+5. Add a new `scripts/test/test-<language>-*.mjs` harness — copy the shape of
+   `test-csharp-inheritance-bridge.mjs` (or `test-typescript-symbols.mjs`) — and wire it to a
+   `test:*` script in `package.json`. `scripts/run-tests.mjs` discovers the list *from
+   package.json*, so a harness with no script is invisible and never runs.
+   > Do not add to `scripts/test/test-extractor.mjs`. It is unwired, has no assertions, and still
+   > reads `./src/graphStore.ts` — a path that moved in S-41 — so it cannot run at all.
+6. Update the feature list in `README.md`.
+
+**A symbol id is minted in one place.** `makeSymbolId(input, kind, name, row)` in
+`extractorPrimitives.ts` is the only correct way to spell one, and the enclosing-symbol lookup that
+builds an edge's `fromId` must call it too. When the JS lane spelled the id by hand on one side and
+not the other, 77% of this repo's own TypeScript edges pointed at a symbol that did not exist, and
+nothing failed — the graph was simply wrong. `row` is the tree-sitter 0-indexed `startPosition.row`,
+not the 1-indexed `line` stored on the record.
 
 **Worker pool.** Tree-sitter parsing runs in worker threads, `cpus/2` by default.
 `LARGE_FILE_THRESHOLD_BYTES=0` routes every non-markdown file to a worker. The per-file job timeout is

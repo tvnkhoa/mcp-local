@@ -181,7 +181,7 @@ export function buildSearchTools(deps: CodebaseIndexDeps): AnyToolDefinition[] {
 
   const findImplementations = defineTool({
     name: "find_implementations",
-    description: "Find all classes or structs that implement a named interface (via IMPLEMENTS edges). Useful for .NET/C# DI tracing — e.g. find_implementations('IUserRepository') to locate concrete implementations. Requires C# indexing. excludeTests=true drops test-path results entirely (test doubles/fakes are usually the majority of implementations).",
+    description: "Find all classes or structs that implement a named interface (via IMPLEMENTS edges). Useful for .NET/C# DI tracing — e.g. find_implementations('IUserRepository') to locate concrete implementations. IMPLEMENTS edges are currently emitted by the C# extractor only, so this returns empty for a TypeScript repo regardless of what it declares. excludeTests=true drops test-path results entirely (test doubles/fakes are usually the majority of implementations).",
     input: schemas.findImplementationsSchema(limits.maxResultLimit),
     inputSchema: {
       type: "object",
@@ -205,7 +205,7 @@ export function buildSearchTools(deps: CodebaseIndexDeps): AnyToolDefinition[] {
 
   const routeMap = defineTool({
     name: "route_map",
-    description: "Map ASP.NET C# routes to handler methods. Reads BOTH dialects: minimal-API registrations (MapGroup/MapGet/MapPost/MapPut/MapPatch/MapDelete, with the group prefix folded into an absolute routeTemplate) and attribute-routed controllers ([Route], [HttpGet], [HttpPost], ...). handlerName is the delegate at the registration site, so it stays correct when the handler is declared in another file of a partial class. Use to inspect API surface deterministically. excludeTests=true drops test-path results entirely.",
+    description: "Map HTTP routes to handler methods. C# is read in full; JS/TS coverage is limited to direct app|router|fastify.VERB('/path', handler) registrations — see the empty-result hint for what is not read yet. Reads BOTH dialects: minimal-API registrations (MapGroup/MapGet/MapPost/MapPut/MapPatch/MapDelete, with the group prefix folded into an absolute routeTemplate) and attribute-routed controllers ([Route], [HttpGet], [HttpPost], ...). handlerName is the delegate at the registration site, so it stays correct when the handler is declared in another file of a partial class. Use to inspect API surface deterministically. excludeTests=true drops test-path results entirely.",
     input: schemas.routeMapSchema(limits.maxResultLimit),
     inputSchema: {
       type: "object",

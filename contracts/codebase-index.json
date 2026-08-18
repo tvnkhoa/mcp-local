@@ -341,7 +341,7 @@
         "openWorldHint": false,
         "readOnlyHint": true
       },
-      "description": "Find symbols with 0 incoming CALLS edges — these are publicly callable entry points not called by other code in the repo. Use to discover public API surface, HTTP endpoints, or top-level service methods. Filter by kind='method' for controllers, kind='class' for services, kind='route_handler' to surface C# ASP.NET route handlers from the routes table (fast-path, does not require call-graph analysis).",
+      "description": "Find symbols with 0 incoming CALLS edges — these are publicly callable entry points not called by other code in the repo. Use to discover public API surface, HTTP endpoints, or top-level service methods. Filter by kind='method' for controllers, kind='class' for services, kind='route_handler' to surface route handlers from the routes table — a fast path that needs no call-graph analysis, covering C# attribute/minimal-API routing plus direct JS/TS app|router|fastify.VERB registrations.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -493,7 +493,7 @@
         "openWorldHint": false,
         "readOnlyHint": true
       },
-      "description": "Find all classes or structs that implement a named interface (via IMPLEMENTS edges). Useful for .NET/C# DI tracing — e.g. find_implementations('IUserRepository') to locate concrete implementations. Requires C# indexing. excludeTests=true drops test-path results entirely (test doubles/fakes are usually the majority of implementations).",
+      "description": "Find all classes or structs that implement a named interface (via IMPLEMENTS edges). Useful for .NET/C# DI tracing — e.g. find_implementations('IUserRepository') to locate concrete implementations. IMPLEMENTS edges are currently emitted by the C# extractor only, so this returns empty for a TypeScript repo regardless of what it declares. excludeTests=true drops test-path results entirely (test doubles/fakes are usually the majority of implementations).",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -1994,7 +1994,7 @@
         "openWorldHint": false,
         "readOnlyHint": true
       },
-      "description": "Map ASP.NET C# routes to handler methods. Reads BOTH dialects: minimal-API registrations (MapGroup/MapGet/MapPost/MapPut/MapPatch/MapDelete, with the group prefix folded into an absolute routeTemplate) and attribute-routed controllers ([Route], [HttpGet], [HttpPost], ...). handlerName is the delegate at the registration site, so it stays correct when the handler is declared in another file of a partial class. Use to inspect API surface deterministically. excludeTests=true drops test-path results entirely.",
+      "description": "Map HTTP routes to handler methods. C# is read in full; JS/TS coverage is limited to direct app|router|fastify.VERB('/path', handler) registrations — see the empty-result hint for what is not read yet. Reads BOTH dialects: minimal-API registrations (MapGroup/MapGet/MapPost/MapPut/MapPatch/MapDelete, with the group prefix folded into an absolute routeTemplate) and attribute-routed controllers ([Route], [HttpGet], [HttpPost], ...). handlerName is the delegate at the registration site, so it stays correct when the handler is declared in another file of a partial class. Use to inspect API surface deterministically. excludeTests=true drops test-path results entirely.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {

@@ -7,11 +7,13 @@
  */
 
 export {
+  boundFunctionSymbolId,
   extractFirstStringLiteral,
   extractSignature,
   findEnclosingSymbolId,
   findSymbolIdByName,
   lineFromOffset,
+  makeSymbolId,
   stableId,
   stripQuotes
 } from "./extractorPrimitives.js";

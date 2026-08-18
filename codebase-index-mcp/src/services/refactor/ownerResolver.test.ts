@@ -285,17 +285,35 @@ test("a match spanning something that is not a whole identifier is unprovable, w
   assert.equal(typeof proof.ownerType, "string");
 });
 
-test("a non-C# file keeps the historical text scan, labelled as a fallback, and still compares", () => {
+test("a non-C# file keeps the historical text scan, labelled as a fallback", () => {
   const source = `export class Codec {\n  normalize(raw: string) { return raw.trim(); }\n}\n`;
   const match = proveAt(source, "normalize", 1, ["Codec"], repoIndex(), "src/codec.ts");
   assert.equal(match.verdict, "verified");
   assert.equal(match.ownerType, "Codec");
   assert.equal(match.rule, "enclosing_type_fallback");
+});
 
-  // The guard still bites for non-C#: a mismatch is cross_type, exactly as before B-13.
+test("a non-C# mismatch is ambiguous, never a rejection", () => {
+  // The scan takes the last `class X` before the offset — no scope check, no comment/string
+  // skipping, no awareness of `interface`, `type` or a top-level function. It can report a name,
+  // but it cannot prove one, so a mismatch must not reach `cross_type`: that verdict makes
+  // refactorPreviewBuild drop the site into `rejectedSites`, i.e. the guard claims "proven
+  // different owner" about something it never proved. `unknown` keeps the site visible and
+  // unappliable instead — the same contract an unprovable C# site gets.
+  const source = `export class Codec {\n  normalize(raw: string) { return raw.trim(); }\n}\n`;
   const mismatch = proveAt(source, "normalize", 1, ["Other"], repoIndex(), "src/codec.ts");
-  assert.equal(mismatch.verdict, "cross_type");
+  assert.equal(mismatch.verdict, "unknown");
+  assert.equal(mismatch.rule, "enclosing_type_fallback");
+  // The scanned name is still carried as a hint so `hunk.ownerType` stays populated.
   assert.equal(mismatch.ownerType, "Codec");
+});
+
+test("a non-C# site the scan cannot name at all is unknown, not rejected", () => {
+  // The dominant TypeScript shape: a module with no `class` keyword anywhere.
+  const source = `export function normalize(raw: string) {\n  return raw.trim();\n}\n`;
+  const proof = proveAt(source, "normalize", 1, ["Codec"], repoIndex(), "src/codec.ts");
+  assert.equal(proof.verdict, "unknown");
+  assert.equal(proof.rule, "enclosing_type_fallback");
 });
 
 // ---------------------------------------------------------------------------

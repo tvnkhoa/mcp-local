@@ -18,6 +18,7 @@ import {
   isVectorEnabled,
 } from "../../repositories/vectorStore.js";
 import { buildNamedCandidateMap, pickBestNamedCandidate } from "./edgeResolverShared.js";
+import { buildImportedFilesByFile, normalizeFilePath } from "./moduleResolution.js";
 import { indexWarn } from "../indexing/indexProgress.js";
 
 /**
@@ -83,6 +84,14 @@ export interface CallResolutionContext {
    * capability survives where it works; the waste is capped at a few seconds where it does not.
    */
   vectorProbe: { attempted: number; hits: number; abandoned: boolean };
+  /**
+   * Per-file set of repo files that file imports, used to scope name candidates.
+   *
+   * Built from the raw `import:<specifier>` tokens, not from resolved IMPORTS edges: call
+   * resolution runs BEFORE import resolution in the post-index phase, so reading resolved edges
+   * here would see an empty map on every full index.
+   */
+  importedFilesByFile: Map<string, Set<string>>;
 }
 
 /**
@@ -90,6 +99,7 @@ export interface CallResolutionContext {
  * Call this ONCE before batched resolveCallEdgesBatch() calls.
  */
 export function buildCallResolutionContext(db: Database.Database, repoId: string): CallResolutionContext {
+  const importedFilesByFile = buildImportedFilesByFile(db, repoId);
   const interfaceRows = db
     // `interfaceByName` keeps the first row per name, so ordering decides which declaration of a
     // duplicated interface name wins.
@@ -203,7 +213,7 @@ export function buildCallResolutionContext(db: Database.Database, repoId: string
     )
     .all({ repoId, supersededReason: SUPERSEDED_REASON }) as { fromId: string; toId: string; fromFile: string }[];
 
-  return { candidateMap, interfaceByName, interfaceIdSet, implementorFilesByIfaceId, subclassFilesByBaseId, virtualMethodIds, updateStmt, insertDispatchStmt, unresolvedRows, offset: 0, vectorProbe: { attempted: 0, hits: 0, abandoned: false } };
+  return { candidateMap, interfaceByName, interfaceIdSet, implementorFilesByIfaceId, subclassFilesByBaseId, virtualMethodIds, updateStmt, insertDispatchStmt, unresolvedRows, offset: 0, vectorProbe: { attempted: 0, hits: 0, abandoned: false }, importedFilesByFile };
 }
 
 export type ResolvedUpdate = { fromId: string; oldToId: string; newToId: string; confidence: number; reason: string };
@@ -329,10 +339,12 @@ export function resolveCallEdgesBatch(
     // is a safe guess; a multi-candidate one is a coin flip that must say so.
     const directCandidates = candidateMap.get(calleeName) ?? [];
     let nameAmbiguous = directCandidates.length > 1;
+    const importedFiles = ctx.importedFilesByFile.get(normalizeFilePath(row.fromFile));
     let match = pickBestNamedCandidate(
       directCandidates,
       row.fromFile,
-      ["function", "method", "constructor", "class"]
+      ["function", "method", "constructor", "class"],
+      importedFiles
     );
 
     if (calleeName.includes(".")) {
@@ -393,7 +405,8 @@ export function resolveCallEdgesBatch(
       match = pickBestNamedCandidate(
         baseCandidates,
         row.fromFile,
-        ["function", "method", "constructor", "class"]
+        ["function", "method", "constructor", "class"],
+        importedFiles
       );
     }
 

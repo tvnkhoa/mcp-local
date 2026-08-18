@@ -102,7 +102,7 @@ export function extractGraphData(input: ExtractInput): ExtractOutput {
     };
   }
 
-  const parser = getOrCreateParserForLanguage(input.language);
+  const parser = getOrCreateParserForLanguage(input.language, input.filePath);
   if (!parser) {
     return { symbols, edges: [] };
   }
@@ -192,32 +192,41 @@ function resolveLiteralPolicy(profile: "standard" | "large" | "very-large"): { m
   };
 }
 
-function getOrCreateParserForLanguage(language: string): Parser | null {
-  const cached = parserCache.get(language);
+/**
+ * `.tsx` is tagged `typescript` by `fileFilter`, but the two dialects are separate grammars and the
+ * plain one cannot read JSX: `const C = () => <div/>` parses to a tree with `hasError`, and the
+ * ERROR node swallows the rest of the subtree, so every symbol after the first JSX expression was
+ * silently lost. The language tag stays `typescript` on purpose — `files.language` is joined on
+ * across the query layer — and only the grammar is chosen per file.
+ */
+function isTsxPath(filePath: string | undefined): boolean {
+  return filePath !== undefined && /\.tsx$/i.test(filePath);
+}
+
+function getOrCreateParserForLanguage(language: string, filePath?: string): Parser | null {
+  const useTsxDialect = language === "typescript" && isTsxPath(filePath);
+  // The two TypeScript dialects are distinct grammars, so they need distinct cache slots.
+  const cacheKey = useTsxDialect ? "typescript:tsx" : language;
+
+  const cached = parserCache.get(cacheKey);
   if (cached) {
     return cached;
   }
 
   const parser = new Parser();
   if (language === "javascript") {
+    // tree-sitter-javascript reads JSX natively, so `.jsx` needs no separate dialect.
     parser.setLanguage(JavaScript);
-    parserCache.set(language, parser);
-    return parser;
-  }
-
-  if (language === "typescript") {
-    parser.setLanguage(TypeScript.typescript);
-    parserCache.set(language, parser);
-    return parser;
-  }
-
-  if (language === "csharp") {
+  } else if (language === "typescript") {
+    parser.setLanguage(useTsxDialect ? TypeScript.tsx : TypeScript.typescript);
+  } else if (language === "csharp") {
     parser.setLanguage(CSharp);
-    parserCache.set(language, parser);
-    return parser;
+  } else {
+    return null;
   }
 
-  return null;
+  parserCache.set(cacheKey, parser);
+  return parser;
 }
 
 function getTreeSitterBufferSize(sourceBytes: number): number {
