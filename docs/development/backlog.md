@@ -2,16 +2,20 @@
 
 **Created** — 2026-07-29
 **Baseline** — `32f2a82`, working tree carrying the MCP-ISSUE-031/033 dead-code fixes
-**Refreshed** — 2026-08-03, twice: once against the working tree, then again after a full repository
-review closed most of what was left. **Thirteen of fourteen items are closed or resolved** — B-01,
-B-01b, B-02, B-02b, B-03, B-06, B-07, B-08, B-09, B-11, B-12 **done**; B-05 and B-10 **won't-do**,
-each with its reasoning recorded and B-10's underlying defect fixed. Every closed row cites the
-commit, command or measurement that proves it.
+**Refreshed** — 2026-08-18: B-04 closed on the twelve CI observations its 2026-08-03 wiring had been
+accumulating, which makes **every item in this backlog closed** — B-01, B-01b, B-02, B-02b, B-03,
+B-04, B-06, B-07, B-08, B-09, B-11, B-12, B-13 **done**; B-05 and B-10 **won't-do**, each with its
+reasoning recorded and B-10's underlying defect fixed. Every closed row cites the commit, command or
+measurement that proves it.
 
-**B-04 alone remains open**, and it needs elapsed time rather than effort: five accuracy
-observations across different commits before a floor can be justified. Its collection is now
-automatic (CI records the value on every push) and its gate is proven non-vacuous, so what is left
-is waiting, not work.
+Previously refreshed 2026-08-03, twice: once against the working tree, then again after a full
+repository review closed most of what was left. B-13 was filed and closed after that refresh
+(2026-08-05), and the header's old count never learned about it — it is included above.
+
+**B-04 is the one item that closed on elapsed time rather than effort**, and it is worth knowing why
+it worked: nobody collected anything by hand. CI recorded the accuracy value to the job summary on
+every push from 2026-08-03 onward, twelve rows accumulated across twelve commits, all **100**, and
+the floor went 60 → **90** on that evidence. The item that has to wait is the item to make automatic.
 
 **B-05 is a won't-do**: no credential goes into CI, so `verify:live` stays a local release step and
 the risk it named is accepted rather than solved. The workflow was written and then deleted the same
@@ -361,33 +365,73 @@ per tool, in the migration's replay style.
 
 ## P2 — A gate that does not bite
 
-### B-04 · Raise the graph-accuracy floor to something that can fail — 🔵 IN PROGRESS · collection wired, 1 of 5 observations
+### B-04 · Raise the graph-accuracy floor to something that can fail — ✅ DONE 2026-08-18
 
-**Not closed, and it should not be.** This item's own method requires five observations across
-different commits, and one session cannot honestly produce them. What it *can* remove is the reason
-they were never collected: nobody was recording the number.
+**Closed on the evidence it asked for, not on reasoning.** The item required five observations
+across different commits before a floor could be justified. Twelve exist. Every one of them reads
+**100** against a floor of **60**, so the floor is now **90** — ten points below the lowest
+observation, which is the margin this item named when it was written.
 
-**Done 2026-08-03:**
+**Where the numbers came from.** The 2026-08-03 wiring worked exactly as intended: `ci.yml` recorded
+the observation to the job summary on every push to `main`, and nobody had to remember. Eleven rows
+below were read back out of the CI run logs (the benchmark step's JSON is teed to stdout, so the
+value survives in the log even though a job summary has no REST API). Row 1 is the original local
+measurement; row 13 is a local re-run at `a0431eb` on the closing day, which reproduced its CI row
+byte for byte — the same 100 over the same 156 calls.
 
-1. **Two of the three validations are met.** The gate is verified **non-vacuous** — forcing
+| # | date | commit | observed | floor | totalCalls | source |
+|---|---|---|---|---|---|---|
+| 1 | 2026-08-03 | `65c8c8d` (working tree) | **100** | 60 | — | local |
+| 2 | 2026-08-03 | `74d43a0` | **100** | 60 | 143 | CI `30801295470` |
+| 3 | 2026-08-04 | `e74f164` | **100** | 60 | 143 | CI `30873883762` |
+| 4 | 2026-08-04 | `a12d6c2` | **100** | 60 | 143 | CI `30874662339` |
+| 5 | 2026-08-04 | `d4232ec` | **100** | 60 | 143 | CI `30881101571` |
+| 6 | 2026-08-04 | `5bf2468` | **100** | 60 | 144 | CI `30898610481` |
+| 7 | 2026-08-04 | `203880b` | **100** | 60 | 145 | CI `30901894091` |
+| 8 | 2026-08-05 | `48880e2` | **100** | 60 | 149 | CI `30970890168` |
+| 9 | 2026-08-10 | `e85a245` | **100** | 60 | 149 | CI `31351422598` |
+| 10 | 2026-08-10 | `7248276` | **100** | 60 | 156 | CI `31356793685` |
+| 11 | 2026-08-10 | `babb5da` | **100** | 60 | 156 | CI `31376558675` |
+| 12 | 2026-08-10 | `a0431eb` | **100** | 60 | 156 | CI `31380343354` |
+| 13 | 2026-08-18 | `a0431eb` (local re-run) | **100** | 60 | 156 | local, cross-check of row 12 |
+
+One push produced no row: `411afe5` (CI `30872764828`) failed at `generate:check` — the checkout
+path being generated into a committed file, fixed the same day by `e74f164` — so the job never
+reached the benchmark step. A missing row is the correct behaviour there; it is not a zero.
+
+**Why the spread justifies 90 rather than 99 or 60.** The spread is **zero** — thirteen identical
+readings — so the usual method (floor below the lowest, margin from the spread) has no variance to
+size a margin from. What the rows *do* show is that the denominator moved while the ratio did not:
+`totalCalls` went 143 → 156 (+9%) as the repo grew, across a `search_regex` feature, a namespace
+classification feature and two bug-fix waves. The measurement is live, not frozen at some cached
+number, and it stayed at 100 through exactly the kind of change that would perturb it. Ten points is
+therefore headroom for a legitimately harder repo, not slack for a regression: the failure this gate
+exists to catch is the 100 → 60 class, and 90 catches it on the first push.
+
+**Done 2026-08-18:**
+
+1. **Floor raised to 90** — `codebase-index-mcp/scripts/benchmark-plan-mode.mjs:43`, the one-line
+   change this item scoped. `BENCH_MIN_RESOLVED_CALL_EDGE_PCT` still overrides it.
+2. **Re-proven non-vacuous at the new value**, measured not assumed: floor `90` exits **0**, floor
+   `101` exits **3** on the same working tree. The 2026-08-03 proof was against a floor of 60; this
+   one is against the floor that now ships.
+3. **`ci.yml`'s comment no longer describes a floor 40 points below observation** — it now says what
+   the recorded rows are for, which is watching for the day one of them is not 100.
+
+**Done 2026-08-03** (kept — this is what made the closure possible):
+
+1. **Two of the three validations were met.** The gate was verified **non-vacuous** — forcing
    `BENCH_MIN_RESOLVED_CALL_EDGE_PCT=101` against an observed 100 exits **3** and reports the
-   failure, so the mechanism bites when an observation falls below the floor. And the premise is
-   re-confirmed by measurement, not restated: floor **60**, observed **100**.
-2. **Collection is automatic.** `ci.yml`'s benchmark step now tees its JSON and a following step
-   writes the observation to the job summary — commit sha, observed value, floor — on every push to
-   `main`. The evidence accumulates whether or not anyone remembers to look.
+   failure. And the premise was re-confirmed by measurement, not restated: floor **60**, observed
+   **100**.
+2. **Collection is automatic.** `ci.yml`'s benchmark step tees its JSON and a following step writes
+   the observation to the job summary — commit sha, observed value, floor — on every push to `main`.
+   The evidence accumulated whether or not anyone remembered to look. It did, and this is the item
+   that spent it.
 
-**Observations so far:**
-
-| # | date | commit | observed | floor |
-|---|---|---|---|---|
-| 1 | 2026-08-03 | `65c8c8d` (working tree) | **100** | 60 |
-
-**What closes it:** four more rows from different commits, then set the floor below the lowest with
-the margin justified from the spread — not picked. On a flat 100 across five commits, something like
-90 leaves ten points of headroom for a legitimately harder repo while still catching the kind of
-regression that took resolution from 100 to 60. Do not raise it off this single row; that is the
-mistake S-31 deliberately avoided and the reason this item exists rather than a one-line change.
+**What is left, stated plainly.** Nothing here, but the recording step stays: a floor is only worth
+what the next observation says about it, and the rows keep accumulating for free. If one ever comes
+back below 100, that is a defect to file, not a floor to lower.
 
 ---
 

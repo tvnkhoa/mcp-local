@@ -104,11 +104,11 @@ jobs:
       # A performance gate rather than a correctness test, so it is its own step:
       # compact-mode token savings must stay at or above 40%.
       #
-      # The output is captured rather than discarded (backlog B-04). `BENCH_MIN_RESOLVED_CALL_EDGE_PCT`
-      # is 60 while the observed value is 100 — a floor 40 points below observation cannot fail, and
-      # raising it needs several runs' evidence rather than one measurement. Recording the number on
-      # every push turns "five runs across different commits" from a chore someone has to remember
-      # into something that accumulates on its own; the job summary is retained with the run.
+      # The output is captured rather than discarded (backlog B-04). That collection did its job:
+      # twelve pushes between 2026-08-03 and 2026-08-10 each recorded 100, and on that evidence
+      # `BENCH_MIN_RESOLVED_CALL_EDGE_PCT` went 60 -> 90 on 2026-08-18. The recording stays, and its
+      # purpose changes: it is no longer accumulating evidence for a decision, it is watching for the
+      # first observation that is not 100 — which is a defect to file, not a floor to lower.
       - name: Benchmark gate (codebase-index-mcp)
         shell: bash
         run: npm run benchmark:plan:check | tee "$RUNNER_TEMP/bench.json"
@@ -140,6 +140,6 @@ jobs:
             echo "|---|---|---|"
             echo "| \`${GITHUB_SHA:0:12}\` | **${observed}** | ${floor} |"
             echo ""
-            echo "Raise the floor once five observations across different commits exist — set it"
-            echo "below the lowest, with the margin justified from the spread. See docs/development/backlog.md B-04."
+            echo "Floor raised to 90 on 2026-08-18 from twelve observations, all 100 (backlog B-04, now closed)."
+            echo "An observation below 100 is a regression to file — see docs/development/backlog.md B-04."
           } >> "$GITHUB_STEP_SUMMARY"

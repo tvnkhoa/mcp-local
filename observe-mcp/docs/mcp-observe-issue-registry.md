@@ -25,7 +25,7 @@ the rest (`applicationname`) was never read by the server.**
 | `OBS-CAT-001` | `logsUnder` prefix heuristic attributes 4 of 3,504 rows for CommunicationHub.Web | defect | ✅ fixed |
 | `OBS-CAT-002` | Server never reads `applicationname` — no second-tier identity resolution | enhancement | ✅ fixed |
 | `OBS-CAT-003` | Catalog asserts lane facts that rot silently when a consumer fixes `service.name` | defect | ✅ fixed |
-| `OBS-CAT-004` | Identification hints unranked; 5 entries carry no code link at all | enhancement | ✅ fixed (ranking); code links remain a manual TODO |
+| `OBS-CAT-004` | Identification hints unranked; 5 entries carry no code link at all | enhancement | ✅ fixed — ranking 2026-08-10, code links 2026-08-18 (5 filled, 3 have no code in this workspace) |
 
 ### What was built
 
@@ -305,8 +305,12 @@ Any rule added must stay correct for all three quadrants.
 
 ## OBS-CAT-004 — Identification hints unranked; 5 entries carry no code link
 
-- **Status:** ✅ fixed 2026-08-10 for the ranking. The five missing `code` links remain open as a
-  manual task — see *Remaining* below. Filed the same day.
+- **Status:** ✅ fixed 2026-08-10 for the ranking. Filed the same day.
+- **Follow-up 2026-08-18 — the code links are done too.** Five of the eight were filled by hand
+  (`catalog:check`: 41 of 44 mapped, up from 36). The remaining three are a **negative result**:
+  `CRM.NotificationHub.Api`, `whatsapp-api` and `wec.ape-logo-sync` have no implementation anywhere
+  in the `siliconstack` workspace — only their message contracts do. The evidence and the exact
+  searches are in *Remaining* below, recorded so nobody repeats them.
 - **Resolution:** every catalog entry now carries
   `identifiedBy: "namespace" | "context" | "framework" | "serviceNameOnly"`, the artifact's
   top-level `note` states what the precedence means, and `catalog:refresh` prints the distribution
@@ -335,15 +339,34 @@ Any rule added must stay correct for all three quadrants.
 
 Two items survive the fix. Neither is a code change.
 
-- **Eight entries have an empty `code: {}`** — up from five, because the re-capture surfaced three
-  services that had been invisible inside the sentinel bucket. The original five:
-  `CRM.Notification`, `CRM.NotificationHub.Api`, `wec.ape-logo-sync`, `wecsocialads-api`,
-  `whatsapp-api`; newly visible: `Bmw.Teleservices.V3.DailyNormalizeJob`, `IdentityActivityJob`,
-  `TaskReminderJob`. The `code` block is hand-verified and preserved across refreshes by design, so
-  no capture will ever fill it. The first five most likely live outside the `wec.be` repo the
-  matcher scans; `bitbucket-mcp list_repositories` and a name match is the cheapest way in. Filling
-  them is safe at any time — edit `docs/service-catalog.json` directly and a refresh keeps what you
-  wrote.
+- **~~Eight~~ three entries have an empty `code: {}`** — five were filled by hand on 2026-08-18
+  (`catalog:check` now reports **41 of 44** with a code mapping, up from 36). What was resolved, and
+  on what evidence, since a name match alone would not have been enough for three of them:
+  `wecsocialads-api` → `wec.social-ads` `src/Web/Web.csproj`, confirmed by the OTLP `ServiceName`
+  literal in `appsettings.*.json` rather than inferred · `CRM.Notification` → `wec.notification`
+  `src/API/API.csproj`, matched on its single context `Infrastructure.Senders.AWSSDKEmailSender`,
+  which exists **only on `develop` and the `release/*` branches** — `master` is still the initial
+  commit, so a master-only search returns nothing · `IdentityActivityJob` and `TaskReminderJob` →
+  `wec.be` `src/services/background/<name>/<name>.csproj`, project name = namespace = service name,
+  and the logged `.Worker` context is the `Worker` class inside each ·
+  `Bmw.Teleservices.V3.DailyNormalizeJob` → `wec.be`
+  `src/services/teleservices/Teleservice.NormalizeProcessWorker`, on the same namespace-vs-project
+  convention already recorded for `Bmw.Teleservices.V3.Api` (`Bmw.Teleservices.V3.*` comes from the
+  shared `CRM.Core` contracts; the project files are `Teleservice.*`).
+
+- **The three that are left are a negative result, not an unstarted task.** `CRM.NotificationHub.Api`,
+  `whatsapp-api` and `wec.ape-logo-sync` have **no code in this Bitbucket workspace.** Searched
+  2026-08-18: all 9 repos in `siliconstack` (`bitbucket-mcp list_repositories`), then
+  `git grep` for `namespace CRM.NotificationHub` and `namespace WeCRM.WhatsApp` across `wec.be`,
+  `wec.communication-hub` and **every one of `wec.notification`'s 15 branches** — 0 hits for the
+  implementations. The only hits are shared message contracts
+  (`wec.be` `src/packages/CRM.Core/MessageContract/Commands/NotificationHub/`, and the mirror in
+  `wec.communication-hub`), i.e. the callers, not the service. `wec.be`'s `whatsapp` folder is
+  `CRM.Whatsapp.*`, a **different** codebase from the `WeCRM.WhatsApp.*` that is emitting. So these
+  three are hosted somewhere this workspace cannot see; re-running the name match will not find
+  them, and the next step is asking who owns them rather than searching again. Their `code` stays
+  `{}` deliberately — filling it with a "not found" marker would make `catalog:check`'s
+  *N with a code mapping* counter claim coverage that does not exist.
 - **`CommunicationHub.Web`'s emitter fix has not reached prod.** The capture measures it as
   `enricher` on `wecrm_au_prod_al` and `mixed` on `ssdev_au`, i.e. every prod log row is still
   named only via `applicationname`. Nothing is broken — resolution covers it — but the consumer-side

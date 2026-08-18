@@ -40,7 +40,11 @@ async function main() {
   const repoId = process.env.BENCH_REPO_ID ?? "benchmark-repo";
   const minCompactSavingsPercent = numberFromEnv("BENCH_MIN_COMPACT_SAVINGS_PERCENT", 40);
   const requireCompactLowerPerScenario = booleanFromEnv("BENCH_REQUIRE_COMPACT_LOWER_PER_SCENARIO", true);
-  const minResolvedCallEdgePct = numberFromEnv("BENCH_MIN_RESOLVED_CALL_EDGE_PCT", 60);
+  // 90, raised from 60 on 2026-08-18. Thirteen observations across twelve commits (2026-08-03 →
+  // 2026-08-10, recorded by ci.yml on every push) all read 100, while totalCalls moved 143 → 156 —
+  // so the ratio is measured, not cached, and ten points is headroom for a harder repo rather than
+  // slack for a regression. Backlog B-04 carries the rows and the reasoning.
+  const minResolvedCallEdgePct = numberFromEnv("BENCH_MIN_RESOLVED_CALL_EDGE_PCT", 90);
 
   const transport = new StdioClientTransport({
     command: "node",

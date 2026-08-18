@@ -947,7 +947,12 @@
       }
     },
     "Bmw.Teleservices.V3.DailyNormalizeJob": {
-      "code": {},
+      "code": {
+        "match": "namespace-root",
+        "notes": "Same convention as Bmw.Teleservices.V3.Api: the namespace is Bmw.Teleservices.V3.*, the project files are Teleservice.*. The job class is BackgroundJobs/DailyNormalizeJob.cs in this worker, and the TeleserviceDailyNormalize service it also logs from is Teleservice.SharedDomain/Services/TeleserviceDailyNormalize/. Teleservice.NormalizeSGProcessWorker is the SG sibling, not this service.",
+        "project": "src/services/teleservices/Teleservice.NormalizeProcessWorker/Teleservice.NormalizeProcessWorker.csproj",
+        "repoId": "wec.be"
+      },
       "recognizeBy": {
         "appContexts": [
           "Bmw.Teleservices.V3.Infrastructure.Jobs.DailyNormalizeJob",
@@ -1611,7 +1616,12 @@
       }
     },
     "CRM.Notification": {
-      "code": {},
+      "code": {
+        "match": "namespace-root",
+        "notes": "The namespaces in this repo are generic (API.*, Application.*, Domain.*, Infrastructure.*), so the match rests on the one context this service emits: Infrastructure.Senders.AWSSDKEmailSender is src/Infrastructure/Senders/AWSSDKEmailSender.cs. Note the code is on develop and the release/* branches — master is still the initial commit, so a master-only search finds nothing.",
+        "project": "src/API/API.csproj",
+        "repoId": "wec.notification"
+      },
       "recognizeBy": {
         "appContexts": [],
         "environments": [
@@ -2121,7 +2131,12 @@
       }
     },
     "IdentityActivityJob": {
-      "code": {},
+      "code": {
+        "match": "csproj-name",
+        "notes": "Project name, assembly and namespace are all IdentityActivityJob; the logged context IdentityActivityJob.Worker is the Worker class inside it, which is why recognizeBy lists it as unclassified rather than as a namespace root.",
+        "project": "src/services/background/IdentityActivityJob/IdentityActivityJob.csproj",
+        "repoId": "wec.be"
+      },
       "recognizeBy": {
         "appContexts": [],
         "environments": [
@@ -2296,7 +2311,12 @@
       }
     },
     "TaskReminderJob": {
-      "code": {},
+      "code": {
+        "match": "csproj-name",
+        "notes": "Project name, assembly and namespace are all TaskReminderJob; the logged context TaskReminderJob.Worker is the Worker class inside it. Sits beside IdentityActivityJob under src/services/background/.",
+        "project": "src/services/background/TaskReminderJob/TaskReminderJob.csproj",
+        "repoId": "wec.be"
+      },
       "recognizeBy": {
         "appContexts": [],
         "environments": [
@@ -2374,7 +2394,12 @@
       }
     },
     "wecsocialads-api": {
-      "code": {},
+      "code": {
+        "match": "namespace-root",
+        "notes": "AssemblyName/RootNamespace are WecSocialAds.Web, .Application and .Infrastructure, matching all three namespaceRoots. Confirmed against config rather than inferred: src/Web/appsettings.Development.json and appsettings.Production.json both set the OTLP ServiceName to \"wecsocialads-api\". The repo slug is wec.social-ads; the local checkout tracks release/bmw.",
+        "project": "src/Web/Web.csproj",
+        "repoId": "wec.social-ads"
+      },
       "recognizeBy": {
         "appContexts": [
           "WecSocialAds.Application.Core.Behaviours.ValidationBehaviour",
