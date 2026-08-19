@@ -51,7 +51,13 @@ const only = (() => {
  */
 function placeholderFor(entry) {
   const name = entry.name;
-  // A connection string has to actually parse — the server validates it at startup.
+  // A connection string has to actually parse — the server validates it at startup. Which means
+  // the placeholder has to be in the right DIALECT: sqlserver-mcp parses ADO.NET key/value pairs
+  // and rejects a postgres URI outright, so a shared placeholder would fail the boot check for a
+  // reason that has nothing to do with the server's contract.
+  if (/^SQLSERVER_/.test(name) && /CONNECTION/.test(name)) {
+    return "data source=localhost;initial catalog=snapshot;User Id=snapshot;Password=snapshot";
+  }
   if (/CONNECTION|_DSN$/.test(name)) return "postgres://snapshot:snapshot@localhost:5432/snapshot";
   if (/_(URL|BASE_URL)$/.test(name)) return "https://contract-snapshot.invalid";
   // Must be a real directory: allowlist resolution rejects a path that is absent.

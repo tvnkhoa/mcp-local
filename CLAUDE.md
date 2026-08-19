@@ -4,10 +4,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Workspace Overview
 
-Four independent MCP servers — **not** a monorepo with shared packages. Each has its own `package.json`, `tsconfig.json`, and `dist/`. All use TypeScript 5.7+ with ESM (`"type": "module"`) and `@modelcontextprotocol/sdk`.
+Five independent MCP servers — **not** a monorepo with shared packages. Each has its own `package.json`, `tsconfig.json`, and `dist/`. All use TypeScript 5.7+ with ESM (`"type": "module"`) and `@modelcontextprotocol/sdk`.
 
 - `codebase-index-mcp/` — Code graph indexing and analysis server. Most development work happens here.
 - `postgres-mcp/` — PostgreSQL MCP server. Read-only by default (SQL guardrails); optional multi-environment access, reviewed/confirmed data writes, and EF Core migration tooling, each gated behind explicit env flags.
+- `sqlserver-mcp/` — Microsoft SQL Server MCP server. Read-only by default (T-SQL guardrails). **The unit of work is a catalog, not the server**: one SQL Server login reaches every database on the instance, so every data tool takes an optional `database`, pools are keyed `(environment, catalog)` with an LRU cap, and `run_read_query` takes `databases[]` to fan one statement across catalogs. Three-part names (`OtherDb.dbo.Thing`) are permitted — they are how SQL Server joins catalogs; four-part names are refused. T-SQL has no `LIMIT` (rows are bounded by cancelling the stream, the statement is never rewritten) and no read-only transaction, so the deployment control is a read-only SQL login (db_datareader) plus `SQLSERVER_ALLOWED_DATABASES`. `find_cross_database_references` maps the dependency graph *between* catalogs. Stored-procedure execution is OFF unless `SQLSERVER_EXEC_ENABLED=true` and is annotated destructive for every routine — the catalog records nothing about whether a procedure writes. See `docs/decisions/0004-tsql-guardrail-policy.md`.
 - `observe-mcp/` — OpenObserve log/trace MCP server for the CommunicationHub / CRM backend. Read-only; queries the self-hosted OpenObserve `_search` API to search logs, trace a request end-to-end by trace id, and discover what is in the index (`search_logs`, `trace_logs`, `get_trace_spans`, `log_stats`, `discover_services`, `list_environments`, ...). **Multi-environment in one process**: environments come from the flat `OBSERVE_BASE_URL`/`ORG`/`LOG_STREAM` trio plus the `OBSERVE_ENV_<NAME>` family, and every tool takes an optional `environment`. A dated 7-day service inventory is committed at `observe-mcp/docs/service-catalog.json` (`npm run catalog:refresh`, live credentials, never CI; `catalog:check` validates it offline, `catalog:verify` re-tests its assertions live). **Service identity is resolved, not raw**: these apps emit logs down two OTLP paths, and rows from the Serilog sink arrive as `unknown_service:dotnet` with the real name in `applicationname`, so every logs tool matches `COALESCE(NULLIF(service_name, sentinel), applicationname, service_name)` and echoes an `identity` block. Traces are always raw — that stream has no such column. Credentials via env only. Registered as `observe-mcp` in `~/.claude.json`.
 - `bitbucket-mcp/` — Bitbucket Cloud MCP server. Reads repositories/pull requests and **creates pull requests** (`list_repositories`, `get_repository`, `list_branches`, `list_pull_requests`, `get_pull_request`, `get_pull_request_diff`, `create_pull_request`). Uses scopes `read:repository` / `read:pullrequest` / `write:pullrequest`. Auth via env (`BITBUCKET_ACCESS_TOKEN` Bearer, or `BITBUCKET_EMAIL`+`BITBUCKET_API_TOKEN` Basic). **PR creation is OFF unless `BITBUCKET_WRITE_ENABLED=true`**; `create_pull_request` supports `dryRun`. Registered as `bitbucket-mcp` in `~/.claude.json`.
 
@@ -64,17 +65,17 @@ npm run dev
 
 ### Verification (run from the workspace root)
 
-All four servers answer to the same four scripts — `build`, `typecheck`, `test`, `smoke` — so the
+All five servers answer to the same four scripts — `build`, `typecheck`, `test`, `smoke` — so the
 root aggregates work uniformly. They are driven by `@mcp/manifest`, so a newly
 registered server is covered automatically.
 
 ```bash
 npm run verify:all     # the gate: packages + servers + tool contracts + generated docs. Credential-free.
-npm run verify:live    # the four live smoke tests. NEEDS REAL CREDENTIALS.
+npm run verify:live    # the live smoke tests. NEEDS REAL CREDENTIALS.
 ```
 
 `verify:all` is the pre-commit gate and is deliberately credential-free, so it means the same thing
-on a fresh clone as in CI. `contracts:check` inside it boots all four servers over a real stdio
+on a fresh clone as in CI. `contracts:check` inside it boots all five servers over a real stdio
 handshake with placeholder env — that is the credential-free boot check, and it is what catches a
 module that compiles but cannot load.
 
@@ -83,7 +84,7 @@ and `benchmark:plan:check`, and **minus** `test:scripts`. Since 2026-08-03 it al
 `generate:check` and `docs:check`, so generated-file and documentation drift are caught on every
 push rather than only locally.
 
-The live smoke tests reach real Postgres / OpenObserve / Bitbucket and are **not** in CI. Run
+The live smoke tests reach real Postgres / SQL Server / OpenObserve / Bitbucket and are **not** in CI. Run
 `verify:live` before a release. See `docs/development/ci.md`.
 
 Narrower targets: `verify:packages`, `verify:servers`, `test:servers`, `contracts:check`,
@@ -103,11 +104,11 @@ npm run generate:check   # fails on drift; runs inside verify:all
 ```
 
 `mcp:doctor` reports a stale generated file per server as a warning. Env vars are declared once,
-in `packages/manifest/src/envSpecs/<server>.ts` — **106** across the four servers (41/23/31/11).
+in `packages/manifest/src/envSpecs/<server>.ts` — **124** across the five servers (41/23/18/31/11).
 
 ## Architecture (codebase-index-mcp)
 
-**Standard structure (all four servers):** `src/{tools,resources,prompts,middleware,services,repositories,config,types}/`
+**Standard structure (all five servers):** `src/{tools,resources,prompts,middleware,services,repositories,config,types}/`
 plus `src/index.ts`. A slot exists only where the server has that concern — see
 `docs/archive/refactor/standard-structure-report.md` for the per-server map and which slots are N/A.
 
@@ -242,9 +243,11 @@ debt that is **not** in it, so decided questions stay decided.
 
 **Decision records:** `docs/decisions/0001-workspace-native-deps.md` (why servers stay outside
 the npm workspace, and why `instanceof` fails across packages) ·
-`docs/decisions/0002-sql-guardrail-token-lists.md` (why the three SQL token lists stay
+`docs/decisions/0002-sql-guardrail-token-lists.md` (why the four SQL token lists stay
 different, and the two-part rule for adding one) ·
-`docs/decisions/0003-single-root-gitignore.md` (one root `.gitignore`; no per-server copies).
+`docs/decisions/0003-single-root-gitignore.md` (one root `.gitignore`; no per-server copies) ·
+`docs/decisions/0004-tsql-guardrail-policy.md` (the T-SQL token list, the bracket-identifier scanner
+switch, and why four-part names are refused while three-part names are not).
 
 **Current-state reference:**
 

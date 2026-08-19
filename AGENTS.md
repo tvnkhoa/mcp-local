@@ -1,6 +1,6 @@
 # AGENTS.md
 
-Cross-agent entry point for the `mcp-local` workspace: four MCP servers on a six-package platform.
+Cross-agent entry point for the `mcp-local` workspace: five MCP servers on a six-package platform.
 
 **This file points; it does not copy.** [`CLAUDE.md`](CLAUDE.md) is the full agent guide, and
 [`docs/README.md`](docs/README.md) is the documentation portal. Everything below is either a hard

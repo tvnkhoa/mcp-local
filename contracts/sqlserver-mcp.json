@@ -1,0 +1,568 @@
+{
+  "server": "sqlserver-mcp",
+  "toolCount": 12,
+  "tools": [
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": true,
+        "readOnlyHint": true
+      },
+      "description": "Full shape of one table or view: columns with types and defaults, computed definitions, indexes, and foreign keys in both directions.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "database": {
+            "description": "Catalog to run against. Defaults to the catalog named by the connection string.",
+            "type": "string"
+          },
+          "environment": {
+            "description": "Configured environment name. Defaults to the configured default environment.",
+            "type": "string"
+          },
+          "profile": {
+            "description": "Response verbosity. Defaults to compact.",
+            "enum": [
+              "nano",
+              "compact",
+              "standard",
+              "verbose"
+            ],
+            "type": "string"
+          },
+          "schema": {
+            "description": "Schema name. Defaults to dbo.",
+            "type": "string"
+          },
+          "table": {
+            "description": "Table or view name.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "table"
+        ],
+        "type": "object"
+      },
+      "name": "describe_table",
+      "title": "Describe table"
+    },
+    {
+      "annotations": {
+        "destructiveHint": true,
+        "idempotentHint": false,
+        "openWorldHint": true,
+        "readOnlyHint": false
+      },
+      "description": "Execute a stored procedure with bound parameters and return its recordsets, output parameters and return value. DISABLED unless SQLSERVER_EXEC_ENABLED=true. Treated as destructive for every routine: SQL Server records nothing about whether a procedure writes, so the name is not evidence. Read get_routine_definition first.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "database": {
+            "description": "Catalog to run against. Defaults to the catalog named by the connection string.",
+            "type": "string"
+          },
+          "environment": {
+            "description": "Configured environment name. Defaults to the configured default environment.",
+            "type": "string"
+          },
+          "maxRows": {
+            "description": "Row cap per recordset.",
+            "type": "integer"
+          },
+          "parameters": {
+            "additionalProperties": true,
+            "description": "Parameter values keyed by name, without the @ prefix. Bound by the driver, never interpolated. Types are inferred from the value.",
+            "properties": {},
+            "type": "object"
+          },
+          "profile": {
+            "description": "Response verbosity. Defaults to compact.",
+            "enum": [
+              "nano",
+              "compact",
+              "standard",
+              "verbose"
+            ],
+            "type": "string"
+          },
+          "routine": {
+            "description": "Stored procedure name.",
+            "type": "string"
+          },
+          "schema": {
+            "description": "Schema name. Defaults to dbo.",
+            "type": "string"
+          },
+          "timeoutMs": {
+            "description": "Execution timeout in milliseconds.",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "routine"
+        ],
+        "type": "object"
+      },
+      "name": "execute_routine",
+      "title": "Execute routine"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": true,
+        "readOnlyHint": true
+      },
+      "description": "Which objects in this catalog reference objects in another catalog on the same instance, grouped by the catalog they reach into. This is the dependency graph between databases — SQL Server's three-part names are the only cross-catalog mechanism short of a linked server.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "database": {
+            "description": "Catalog to run against. Defaults to the catalog named by the connection string.",
+            "type": "string"
+          },
+          "environment": {
+            "description": "Configured environment name. Defaults to the configured default environment.",
+            "type": "string"
+          },
+          "profile": {
+            "description": "Response verbosity. Defaults to compact.",
+            "enum": [
+              "nano",
+              "compact",
+              "standard",
+              "verbose"
+            ],
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "find_cross_database_references",
+      "title": "Find cross-database references"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": true,
+        "readOnlyHint": true
+      },
+      "description": "Full text of a stored procedure, function, view or trigger, plus its parameter contract (name, type, output, has-default). Read this before calling execute_routine.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "database": {
+            "description": "Catalog to run against. Defaults to the catalog named by the connection string.",
+            "type": "string"
+          },
+          "environment": {
+            "description": "Configured environment name. Defaults to the configured default environment.",
+            "type": "string"
+          },
+          "includeBody": {
+            "description": "Include the definition text. Defaults to true.",
+            "type": "boolean"
+          },
+          "profile": {
+            "description": "Response verbosity. Defaults to compact.",
+            "enum": [
+              "nano",
+              "compact",
+              "standard",
+              "verbose"
+            ],
+            "type": "string"
+          },
+          "routine": {
+            "description": "Routine name.",
+            "type": "string"
+          },
+          "schema": {
+            "description": "Schema name. Defaults to dbo.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "routine"
+        ],
+        "type": "object"
+      },
+      "name": "get_routine_definition",
+      "title": "Get routine definition"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": true,
+        "readOnlyHint": true
+      },
+      "description": "Foreign keys touching a table, in both directions — what it points at, and what points at it. The incoming half is what determines whether a row can be deleted.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "database": {
+            "description": "Catalog to run against. Defaults to the catalog named by the connection string.",
+            "type": "string"
+          },
+          "environment": {
+            "description": "Configured environment name. Defaults to the configured default environment.",
+            "type": "string"
+          },
+          "profile": {
+            "description": "Response verbosity. Defaults to compact.",
+            "enum": [
+              "nano",
+              "compact",
+              "standard",
+              "verbose"
+            ],
+            "type": "string"
+          },
+          "schema": {
+            "description": "Schema name. Defaults to dbo.",
+            "type": "string"
+          },
+          "table": {
+            "description": "Table name.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "table"
+        ],
+        "type": "object"
+      },
+      "name": "get_table_relationships",
+      "title": "Get table relationships"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "description": "Report readiness for sqlserver-mcp: connectivity, non-secret configuration, and version.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "profile": {
+            "description": "Response verbosity. Defaults to compact.",
+            "enum": [
+              "nano",
+              "compact",
+              "standard",
+              "verbose"
+            ],
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "health_check",
+      "title": "Health check"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": true,
+        "readOnlyHint": true
+      },
+      "description": "List catalogs on the instance, with state, collation and whether the current login can actually open each one. Start here — catalog names are deployment-specific and must be discovered, not assumed.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "environment": {
+            "description": "Configured environment name. Defaults to the configured default environment.",
+            "type": "string"
+          },
+          "includeSystem": {
+            "description": "Include master/model/msdb/tempdb. Defaults to false.",
+            "type": "boolean"
+          },
+          "profile": {
+            "description": "Response verbosity. Defaults to compact.",
+            "enum": [
+              "nano",
+              "compact",
+              "standard",
+              "verbose"
+            ],
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "list_databases",
+      "title": "List databases"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "description": "List configured SQL Server environments with masked connection details, which are allowed, and how many catalog pools are currently open for each.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "profile": {
+            "description": "Response verbosity. Defaults to compact.",
+            "enum": [
+              "nano",
+              "compact",
+              "standard",
+              "verbose"
+            ],
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "list_environments",
+      "title": "List environments"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": true,
+        "readOnlyHint": true
+      },
+      "description": "Inventory of stored procedures, functions, views and triggers in one catalog. On a schema where most read logic lives in procedures rather than in tables, this is the map.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "database": {
+            "description": "Catalog to run against. Defaults to the catalog named by the connection string.",
+            "type": "string"
+          },
+          "environment": {
+            "description": "Configured environment name. Defaults to the configured default environment.",
+            "type": "string"
+          },
+          "namePattern": {
+            "description": "T-SQL LIKE pattern on the routine name, e.g. 'Report[_]%'.",
+            "type": "string"
+          },
+          "profile": {
+            "description": "Response verbosity. Defaults to compact.",
+            "enum": [
+              "nano",
+              "compact",
+              "standard",
+              "verbose"
+            ],
+            "type": "string"
+          },
+          "schema": {
+            "description": "Restrict to one schema.",
+            "type": "string"
+          },
+          "type": {
+            "description": "Restrict to one routine kind.",
+            "enum": [
+              "procedure",
+              "scalar_function",
+              "inline_table_function",
+              "table_function",
+              "view",
+              "trigger"
+            ],
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "list_routines",
+      "title": "List routines"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": true,
+        "readOnlyHint": true
+      },
+      "description": "Inventory of tables and views in one catalog, with approximate row counts taken from partition statistics rather than COUNT(*).",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "database": {
+            "description": "Catalog to run against. Defaults to the catalog named by the connection string.",
+            "type": "string"
+          },
+          "environment": {
+            "description": "Configured environment name. Defaults to the configured default environment.",
+            "type": "string"
+          },
+          "includeViews": {
+            "description": "Include views. Defaults to true.",
+            "type": "boolean"
+          },
+          "namePattern": {
+            "description": "T-SQL LIKE pattern on the object name, e.g. 'Trigger%'.",
+            "type": "string"
+          },
+          "profile": {
+            "description": "Response verbosity. Defaults to compact.",
+            "enum": [
+              "nano",
+              "compact",
+              "standard",
+              "verbose"
+            ],
+            "type": "string"
+          },
+          "schema": {
+            "description": "Restrict to one schema. Omit for all schemas.",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "list_tables",
+      "title": "List tables and views"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": true,
+        "readOnlyHint": true
+      },
+      "description": "Per-column null ratio and distinct count for a table, plus its exact row count. Reads the table, so it is bounded by the same timeout as a query. distinctCount is null for types SQL Server cannot compare (xml, text, image, geography, …).",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "columns": {
+            "description": "Restrict to these columns. Defaults to all.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "database": {
+            "description": "Catalog to run against. Defaults to the catalog named by the connection string.",
+            "type": "string"
+          },
+          "environment": {
+            "description": "Configured environment name. Defaults to the configured default environment.",
+            "type": "string"
+          },
+          "profile": {
+            "description": "Response verbosity. Defaults to compact.",
+            "enum": [
+              "nano",
+              "compact",
+              "standard",
+              "verbose"
+            ],
+            "type": "string"
+          },
+          "schema": {
+            "description": "Schema name. Defaults to dbo.",
+            "type": "string"
+          },
+          "table": {
+            "description": "Table name.",
+            "type": "string"
+          },
+          "timeoutMs": {
+            "description": "Statement timeout in milliseconds.",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "table"
+        ],
+        "type": "object"
+      },
+      "name": "profile_table",
+      "title": "Profile table"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": true,
+        "readOnlyHint": true
+      },
+      "description": "Run one read-only T-SQL statement (SELECT, or WITH … SELECT). Three-part names (Database.dbo.Table) are allowed and are the way to join across catalogs; four-part names are refused. Pass `databases` to run the same statement across several catalogs and get results labelled per catalog.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "database": {
+            "description": "Catalog to run against. Defaults to the catalog named by the connection string.",
+            "type": "string"
+          },
+          "databases": {
+            "description": "Run the same statement against each of these catalogs. Mutually exclusive with `database`.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "environment": {
+            "description": "Configured environment name. Defaults to the configured default environment.",
+            "type": "string"
+          },
+          "maxRows": {
+            "description": "Row cap. Reaching it cancels the request, so a batch returning several recordsets is cut off at that point — `truncated: true` says so.",
+            "type": "integer"
+          },
+          "parameters": {
+            "description": "Positional parameter values, bound as @p1, @p2, … Never interpolated into the statement.",
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "type": "array"
+          },
+          "profile": {
+            "description": "Response verbosity. Defaults to compact.",
+            "enum": [
+              "nano",
+              "compact",
+              "standard",
+              "verbose"
+            ],
+            "type": "string"
+          },
+          "sql": {
+            "description": "A single SELECT / WITH … SELECT statement.",
+            "type": "string"
+          },
+          "timeoutMs": {
+            "description": "Statement timeout in milliseconds.",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "sql"
+        ],
+        "type": "object"
+      },
+      "name": "run_read_query",
+      "title": "Run read query"
+    }
+  ]
+}

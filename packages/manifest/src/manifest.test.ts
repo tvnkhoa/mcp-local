@@ -212,7 +212,8 @@ test("tool lists match the committed contract snapshots exactly", () => {
   }
   assert.equal(total, TOTAL_TOOL_COUNT);
   // 76 -> 78: observe-mcp gained `list_environments` and `discover_services`.
-  assert.equal(total, 78, "the workspace advertises 78 tools; update this number deliberately");
+  // 78 -> 90: sqlserver-mcp joined with 12.
+  assert.equal(total, 90, "the workspace advertises 90 tools; update this number deliberately");
 });
 
 test("codebase-index advertises all 43 of its tools", () => {
@@ -259,7 +260,7 @@ test("familyExamples belong to prefix fields and match the prefix", () => {
 });
 
 test("the env contract covers every server, and grew as S-35 intended", () => {
-  // 106 vars across four servers, up from the 41 the manifest declared before S-35. The count is
+  // 124 vars across five servers, up from the 41 the manifest declared before S-35. The count is
   // asserted so that dropping a declaration is a test failure rather than a quiet regression in
   // the generated docs. codebase-index gained CODEBASE_INDEX_VECTOR_ENABLED (MCP-ISSUE-035) and
   // CODEBASE_INDEX_MAX_TYPE_REF_EDGES_PER_FILE (MCP-ISSUE-038); postgres gained PGSSLMODE and
@@ -270,12 +271,17 @@ test("the env contract covers every server, and grew as S-35 intended", () => {
   // lists that classify a log scope as application code or framework noise. It went 29 -> 31 with
   // OBSERVE_APP_NAME_FIELD / OBSERVE_UNKNOWN_SERVICE_SENTINEL (OBS-CAT-002), which make the
   // two-OTLP-path service identity resolution configurable and switchable off.
+  // sqlserver-mcp arrives with 18. Two of them are the ones worth knowing about:
+  // SQLSERVER_ALLOWED_DATABASES, because a SQL Server login is scoped to the INSTANCE and so
+  // reaches every catalog on it unless that list narrows it; and SQLSERVER_EXEC_ENABLED, because
+  // the catalog records nothing about whether a stored procedure writes.
   const counts = Object.fromEntries(SERVERS.map((s) => [s.key, s.env.length]));
   assert.deepEqual(counts, {
     "codebase-index": 41,
     "postgres-mcp": 23,
     "observe-mcp": 31,
-    "bitbucket-mcp": 11
+    "bitbucket-mcp": 11,
+    "sqlserver-mcp": 18
   });
 });
 

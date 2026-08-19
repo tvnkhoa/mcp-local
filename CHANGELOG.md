@@ -8,6 +8,74 @@ All notable changes to this project will be documented in this file.
 > introducing commit named so each claim is checkable. They are backfill, not a record written at
 > the time.
 
+## [Unreleased] - 2026-08-19
+
+### 🗄️ `sqlserver-mcp` — the fifth server
+
+Microsoft SQL Server, read-only by default, 12 tools. Not a driver swap on `postgres-mcp`;
+three things about SQL Server force a different shape, and each is a place the obvious port
+would have been wrong.
+
+**The unit of work is a catalog, not the server.** A SQL Server login is scoped to the
+instance, so one connection string is authority over every database on it — ~23 in the
+deployment this was designed against. Every data tool takes an optional `database`, pools
+are keyed `(environment, catalog)` with an LRU cap, and `run_read_query` takes `databases[]`
+to run one statement across several catalogs and label the results per catalog. The server
+never derives that list itself: which catalogs exist, and which are tenants, is the caller's
+knowledge.
+
+**Cross-catalog reads are ordinary, so the guardrail permits them.** Three-part names
+(`OtherDb.dbo.Thing`) are the only mechanism SQL Server offers short of a linked server, and
+the audited corpus uses them ~4,000 times across 2,106 `.sql` files — one catalog reaches
+another 1,625 times on its own. Four-part names are refused; linked servers measured zero.
+`find_cross_database_references` turns that into a tool: the dependency graph *between*
+catalogs, from `sys.sql_expression_dependencies`, with a `coverage` field that says how many
+modules build SQL dynamically and are therefore invisible to it.
+
+**T-SQL has no `LIMIT` and no read-only transaction.** Rows are bounded by cancelling the
+result stream, never by rewriting the caller's statement — `select top (n) * from (…)` breaks
+CTEs and top-level `ORDER BY`. And there is no `BEGIN TRANSACTION READ ONLY` to sit behind the
+syntactic guard, so the README, the skill and ADR 0004 all say plainly that the enforcement is
+a `db_datareader` login, not the parser.
+
+Stored-procedure execution is a separate lane, off unless `SQLSERVER_EXEC_ENABLED=true`, and
+annotated destructive for **every** routine — the catalog records nothing about whether a
+procedure writes, and the audited schema has `Report_GetContactCentreResults` sitting beside
+`Customer_UpdateLastActivity` in the same schema.
+
+The connection string is parsed into parts and the catalog switched by field assignment. The
+application audited does `connString.Replace(oldDb, newDb)`, which corrupts the credential
+whenever the catalog name also appears in the password — a regression test asserts both the
+correct behaviour and the failure the naive form produces.
+
+`docs/decisions/0004-tsql-guardrail-policy.md` argues the 29-token list against ADR 0002's
+two-part rule, and records the two things a token list cannot express: the scanner switches,
+and the four-part-name shape rule.
+
+### 🩹 Two guardrail bypasses found in review, before release
+
+Both shipped in the first draft of the server above and are fixed with regression tests.
+
+**Bracket-quoting defeated the four-part-name refusal.** The shape test ran on the
+token-check text, which blanks `[…]` — so `[srv].[db].[dbo].[t]` held no word characters and
+matched nothing, and any partially-bracketed form worked too. The two checks want opposite
+things from the scanner; they now get separate passes, with each bracketed segment reduced to
+one placeholder word so `[my.db].dbo.t` still counts as three parts.
+
+**`SQLSERVER_READONLY_DATABASES` was bypassable by naming an environment.** The guard resolved
+the *default* environment's catalog while the handler resolved the caller's, so a call naming
+a second environment was checked against the wrong catalog and then executed against the right
+one.
+
+Also from the same review: `encrypt` defaulted to `false` and reached mssql's `options`, which
+override the driver's secure default — every connection string omitting `Encrypt=` connected
+in plaintext; the allowlist bounded only the connection catalog, not catalogs reached by
+three-part name; `profile_table` interpolated column names into aliases it did not escape; and
+a fan-out discarded every catalog's results when one entry failed to resolve.
+
+`verify:all`: exit 0. `sqlserver-mcp`: 56 tests. Nothing here has run against a real SQL
+Server — `npm run smoke` is the only path that does.
+
 ## [Unreleased] - 2026-08-03
 
 ### 🐞 `list_repositories` answered at a profile it never advertised

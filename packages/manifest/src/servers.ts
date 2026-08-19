@@ -22,6 +22,7 @@ import { bitbucketEnv } from "./envSpecs/bitbucket.js";
 import { codebaseIndexEnv } from "./envSpecs/codebaseIndex.js";
 import { observeEnv } from "./envSpecs/observe.js";
 import { postgresEnv } from "./envSpecs/postgres.js";
+import { sqlserverEnv } from "./envSpecs/sqlserver.js";
 import { TOOL_LISTS } from "./generated/toolLists.js";
 import { WORKSPACE_ROOT } from "./paths.js";
 import type { ServerDescriptor } from "./types.js";
@@ -71,6 +72,19 @@ export const SERVERS: readonly ServerDescriptor[] = [
     skillSource: "postgres-mcp/skill",
     tools: toolsFor("postgres-mcp"),
     env: postgresEnv
+  },
+
+  {
+    key: "sqlserver-mcp",
+    displayName: "SQL Server MCP",
+    dir: "sqlserver-mcp",
+    entry: "dist/index.js",
+    tagline: "Read-only SQL Server access across catalogs on one instance; gated stored procedures.",
+    build: { install: true, guards: [] },
+    smokeTest: "node scripts/smoke-test.mjs",
+    skillSource: "sqlserver-mcp/skill",
+    tools: toolsFor("sqlserver-mcp"),
+    env: sqlserverEnv
   },
 
   {
