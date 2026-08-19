@@ -142,6 +142,11 @@ export interface CatalogRollup<T extends object> {
 /**
  * Flat when single, rolled up when fanned out — the one place that branch is written.
  *
+ * The single-catalog form is deliberately NOT a one-element array. That call is the overwhelmingly
+ * common one, and making every caller reach through `results[0]` to get at `recordsets[0].rows`
+ * costs two levels of nesting — and the tokens to render them — on every read, to spare a branch
+ * on the rare one.
+ *
  * Three copies of `fannedOut ? {…} : {…}` is how one of them ends up spelling it `databaseCount`.
  *
  * The return is a union rather than `B & Record<string, unknown>` so a caller reading

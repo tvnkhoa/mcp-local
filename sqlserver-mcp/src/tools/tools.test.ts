@@ -708,3 +708,62 @@ test("catalog matching is case-insensitive, as SQL Server names are", () => {
   );
   assert.deepEqual(unresolvedTargets, []);
 });
+
+// --- run_read_query response shape --------------------------------------------
+//
+// The response shape is NOT in `contracts/sqlserver-mcp.json` — that snapshot pins the *input*
+// schema only. So when the fan-out moved onto a shared seam there was nothing to catch a key
+// quietly appearing, disappearing or being renamed on the way through. These are that net.
+//
+// They reach no database. An allowlist makes `resolve()` refuse each requested catalog before a
+// connection is attempted, while the connection's own default catalog — which the payload's
+// `environment` is resolved from — is not allowlist-checked, so the call still completes.
+
+const ALLOWLISTED = () => makeConfig({ allowedDatabases: ["Permitted"] });
+
+test("the fan-out shape is the rolled-up one, with a slot per catalog in request order", async () => {
+  const { payload } = await bodyOf(
+    "run_read_query",
+    { sql: "select 1", databases: ["Alpha", "Beta"] },
+    ALLOWLISTED()
+  );
+  assert.deepEqual(Object.keys(payload).sort(), [
+    "catalogCount",
+    "environment",
+    "failureCount",
+    "maxRows",
+    "results"
+  ]);
+  assert.equal(payload.catalogCount, 2);
+  assert.equal(payload.failureCount, 2);
+  assert.deepEqual(
+    payload.results.map((slot: { database: string }) => slot.database),
+    ["Alpha", "Beta"],
+    "request order, not completion order"
+  );
+});
+
+test("one refused catalog is a slot, not a failed call", async () => {
+  // The whole point of the fan-out contract: the envelope stays a success and the refusal is
+  // reported in the catalog it belongs to, carrying the code that says what to change.
+  const { isError, payload } = await bodyOf(
+    "run_read_query",
+    { sql: "select 1", databases: ["Alpha"] },
+    ALLOWLISTED()
+  );
+  assert.equal(isError, undefined, "a refused catalog must not fail the whole call");
+  const slot = payload.results[0];
+  assert.deepEqual(Object.keys(slot).sort(), ["database", "error", "errorCode"]);
+  assert.equal(slot.errorCode, "database_not_allowed", "the actionable code, not a generic failure");
+});
+
+test("a one-element databases array still gets the fan-out shape", async () => {
+  // The rule that keeps the shape stable for a caller whose catalog list is computed.
+  const { payload } = await bodyOf(
+    "run_read_query",
+    { sql: "select 1", databases: ["Solo"] },
+    ALLOWLISTED()
+  );
+  assert.ok("results" in payload, "one entry must not collapse to the flat shape");
+  assert.equal(payload.catalogCount, 1);
+});

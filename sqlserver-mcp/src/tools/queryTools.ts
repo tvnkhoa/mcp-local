@@ -13,9 +13,9 @@ import { defineTool, schema } from "@mcp/sdk";
 import { z } from "zod";
 
 import { PolicyViolationError } from "../middleware/errors.js";
+import { catalogPayload, resolveCatalogs, runAcrossCatalogs } from "./fanout.js";
 import { referencedCatalogCandidates, validateReadOnlySql } from "../middleware/sqlGuardrails.js";
 import { describeColumns } from "../repositories/introspection.js";
-import { MAX_FANOUT_CONCURRENCY, type ResolvedTarget } from "../repositories/connectionManager.js";
 import { runBounded, type BoundedResult } from "../repositories/queryRunner.js";
 import {
   clamp,
@@ -34,22 +34,6 @@ import {
   schemaProp,
   type SqlserverDeps
 } from "./common.js";
-
-/** One catalog's slice of a `run_read_query` result. `error` is set only in the fan-out form. */
-type CatalogOutcome = BoundedResult & { database: string; error?: string };
-
-/**
- * `run_read_query` returns one of two shapes, discriminated by whether `databases` was passed.
- *
- * The single-catalog form is deliberately NOT wrapped in a one-element array. That call is the
- * overwhelmingly common one, and making every caller reach through `results[0]` to get at
- * `recordsets[0].rows` costs two levels of nesting — and the tokens to render them — on every read,
- * to spare a branch on the rare one.
- */
-type ReadQueryPayload = { environment: string; maxRows: number } & (
-  | Omit<CatalogOutcome, "error">
-  | { catalogCount: number; failureCount: number; results: CatalogOutcome[] }
-);
 
 /**
  * Types SQL Server refuses to compare or sort, and therefore to `COUNT(DISTINCT …)`.
@@ -113,24 +97,15 @@ export function buildQueryTools(deps: SqlserverDeps): AnyToolDefinition[] {
       })
       .strict(),
     handler: async (input) => {
-      if (input.database !== undefined && input.databases !== undefined) {
-        throw new PolicyViolationError(
-          "validation_error",
-          "Pass either `database` or `databases`, not both."
-        );
-      }
-
       const guard = validateReadOnlySql(input.sql);
       if (!guard.ok) {
         throw new PolicyViolationError(guard.error.code, guard.error.message);
       }
 
-      if (input.databases !== undefined && input.databases.length > limits.maxFanout) {
-        throw new PolicyViolationError(
-          "fanout_limit_exceeded",
-          `Requested ${input.databases.length} catalogs; SQLSERVER_MAX_FANOUT is ${limits.maxFanout}.`
-        );
-      }
+      // After the guardrail, deliberately. `drop table t` across too many catalogs is bad SQL, not
+      // a fan-out that is too wide, and reporting the width first would send the caller to fix the
+      // wrong thing. Pinned by "the guardrail runs before the fan-out limit" in tools.test.ts.
+      const selection = resolveCatalogs(input, limits.maxFanout);
 
       // `resolve()` bounds the catalog a CONNECTION is opened against, but the guardrail
       // deliberately permits `OtherDb.dbo.Table` — so without this the allowlist bounded nothing
@@ -154,76 +129,42 @@ export function buildQueryTools(deps: SqlserverDeps): AnyToolDefinition[] {
 
       const maxRows = clamp(input.maxRows, limits.defaultLimit, limits.maxLimit);
       const timeoutMs = clamp(input.timeoutMs, limits.defaultTimeoutMs, limits.maxTimeoutMs);
-      const catalogs = input.databases ?? [input.database as string | undefined];
 
-      const runOne = async (database: string | undefined) => {
-        // `resolve` is INSIDE the try. It throws for an unknown environment, a malformed catalog
-        // name, or one outside the allowlist — and with it outside, a single bad entry in
-        // `databases[]` rejected the whole Promise.all and discarded every other catalog's rows,
-        // which is exactly what the comment below promises does not happen.
-        let target: ResolvedTarget | undefined;
-        try {
-          target = connections.resolve(input.environment, database);
+      const outcomes = await runAcrossCatalogs<BoundedResult>({
+        ...selection,
+        // `resolve` is INSIDE `runOne`, not before it. It throws for an unknown environment, a
+        // malformed catalog name, or one outside the allowlist — and hoisted out, a single bad
+        // entry in `databases[]` rejected the whole fan-out and discarded every other catalog's
+        // rows, which is exactly what a per-catalog slot exists to prevent.
+        runOne: async (database) => {
+          const target = connections.resolve(input.environment, database);
           const pool = await connections.pool(target);
           const request = pool.request();
           for (const [index, value] of (input.parameters ?? []).entries()) {
-            request.input(`p${index + 1}`, value);
+            request.input(`p${String(index + 1)}`, value);
           }
-          const result = await runBounded(
-            request,
-            () => request.query(guard.sanitizedSql),
-            { maxRows, timeoutMs }
-          );
+          const result = await runBounded(request, () => request.query(guard.sanitizedSql), {
+            maxRows,
+            timeoutMs
+          });
           logger.info("query_succeeded", {
             environment: target.environment.name,
             database: target.database,
             elapsedMs: result.elapsedMs,
             truncated: result.truncated
           });
-          return { database: target.database, ...result, error: undefined };
-        } catch (error) {
-          // A fan-out is not all-or-nothing: one unreachable catalog must not discard the results
-          // from the others, so the failure is reported in that catalog's slot.
-          const message = error instanceof Error ? error.message : String(error);
-          const label = target?.database ?? database ?? "(default)";
-          logger.error("query_failed", { database: label, error: message });
-          if (input.databases === undefined) {
-            throw error;
-          }
-          return { database: label, recordsets: [], rowsAffected: [], truncated: false, elapsedMs: 0, error: message };
+          return { database: target.database, ...result };
+        },
+        onFailure: (database, error) => {
+          logger.error("query_failed", {
+            database: database ?? "(default)",
+            error: error instanceof Error ? error.message : String(error)
+          });
         }
-      };
-
-      // Bounded concurrency, results kept in request order. A fan-out across 25 catalogs run all
-      // at once would open 25 pools simultaneously — slow to establish, and exactly what
-      // SQLSERVER_MAX_POOLS exists to prevent.
-      const results = new Array<Awaited<ReturnType<typeof runOne>>>(catalogs.length);
-      let cursor = 0;
-      await Promise.all(
-        Array.from({ length: Math.min(MAX_FANOUT_CONCURRENCY, catalogs.length) }, async () => {
-          for (let index = cursor++; index < catalogs.length; index = cursor++) {
-            results[index] = await runOne(catalogs[index]);
-          }
-        })
-      );
+      });
 
       const environmentName = connections.resolve(input.environment).environment.name;
-
-      const payload: ReadQueryPayload =
-        input.databases === undefined
-          ? (() => {
-              const { error: _unused, ...single } = results[0]!;
-              return { environment: environmentName, maxRows, ...single };
-            })()
-          : {
-              environment: environmentName,
-              maxRows,
-              catalogCount: results.length,
-              failureCount: results.filter((result) => result.error !== undefined).length,
-              results
-            };
-
-      return ok(payload);
+      return ok(catalogPayload({ environment: environmentName, maxRows }, outcomes, selection.fannedOut));
     }
   });
 
