@@ -78,3 +78,48 @@ test("sql: enabling a dialect the engine lacks would WEAKEN the guard", () => {
   const rightDialect = stripStringsAndComments(sql, { dollarQuotedStrings: false });
   assert.equal(findForbiddenToken(rightDialect, ["drop"]), "drop");
 });
+
+// --- Bracket-quoted identifiers (T-SQL, opt-in) -------------------------------
+
+test("sql: bracket identifiers are opt-in, and off by default", () => {
+  const sql = "select [Update], [Delete] from t";
+
+  // Default (Postgres / SQLite / DataFusion): `[` is an ordinary character, so
+  // the reserved words stay visible and a read-only guard would refuse them.
+  assert.equal(findForbiddenToken(stripStringsAndComments(sql), ["update", "delete"]), "update");
+
+  // T-SQL: the identifiers are blanked out, so the statement reads as the
+  // ordinary SELECT it is.
+  const tsql = stripStringsAndComments(sql, {
+    dollarQuotedStrings: false,
+    escapeStrings: false,
+    bracketQuotedIdentifiers: true
+  });
+  assert.equal(findForbiddenToken(tsql, ["update", "delete"]), undefined);
+  assert.equal(isSelectLike(tsql), true);
+});
+
+test("sql: `]]` inside brackets escapes a literal `]`, it does not terminate", () => {
+  // `[a]]b]` is ONE identifier named `a]b`. Treating the first `]` as the
+  // terminator would leave `b]` as bare text — and a token hidden there would
+  // be read as statement text rather than as part of the name.
+  const sql = "select [a]]b] from [drop]] table] where x = 1";
+  const cleaned = stripStringsAndComments(sql, { bracketQuotedIdentifiers: true });
+
+  assert.equal(findForbiddenToken(cleaned, ["drop", "table"]), undefined);
+  assert.match(cleaned, /where x = 1/);
+});
+
+test("sql: an unterminated bracket is reported, not silently swallowed", () => {
+  const scan = scanSql("select [Update from t", { bracketQuotedIdentifiers: true });
+  assert.equal(scan.unterminated, true);
+});
+
+test("sql: bracket scanning does not hide a real statement separator", () => {
+  // The separator sits OUTSIDE the identifier, so it must survive scanning.
+  const sql = "select [Name] from t; drop table t";
+  const cleaned = stripStringsAndComments(sql, { bracketQuotedIdentifiers: true });
+
+  assert.equal(hasMultipleStatements(cleaned), true);
+  assert.equal(findForbiddenToken(cleaned, ["drop"]), "drop");
+});

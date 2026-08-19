@@ -54,6 +54,7 @@ const DOLLAR_TAG = /^\$([A-Za-z_][A-Za-z0-9_]*)?\$/;
  *     the rest of the statement, hiding a second statement from every check.
  *   - escape strings (`E'…\'…'`), where a backslash escapes the delimiter
  *   - standard literals with doubled-quote escaping (`'it''s'`)
+ *   - bracket-quoted identifiers (`[Update]`, `[a]]b]`) — T-SQL, opt-in
  *   - line and block comments
  *
  * `$1`-style parameter placeholders are left alone: the tag pattern requires a
@@ -72,11 +73,28 @@ export interface SqlScanOptions {
    * quote. Postgres only, same reasoning as above. Defaults to `true`.
    */
   readonly escapeStrings?: boolean;
+  /**
+   * Treat `[…]` as a quoted identifier, with `]]` escaping a literal `]`.
+   * T-SQL only.
+   *
+   * **Defaults to `false`, unlike the two options above.** Their default is `true`
+   * because over-scanning a dialect that lacks the syntax fails safe. This one is
+   * the opposite: `[` is an ordinary character in Postgres array subscripts and in
+   * SQLite, so blanking from `[` to `]` would erase real statement text for the
+   * three servers that already depend on this scanner. Off by default keeps their
+   * committed `tools/list` behaviour byte-identical; T-SQL opts in.
+   *
+   * What opting in buys: SQL Server escapes reserved words as identifiers, so
+   * `select [Update], [Delete] from t` is a legal read. Without this the token
+   * scanner sees the bare words and refuses the statement.
+   */
+  readonly bracketQuotedIdentifiers?: boolean;
 }
 
 export function scanSql(sql: string, options: SqlScanOptions = {}): SqlScan {
   const allowDollarQuoted = options.dollarQuotedStrings ?? true;
   const allowEscapeStrings = options.escapeStrings ?? true;
+  const allowBracketIdentifiers = options.bracketQuotedIdentifiers ?? false;
   let output = "";
   let index = 0;
   let unterminated = false;
@@ -126,6 +144,38 @@ export function scanSql(sql: string, options: SqlScanOptions = {}): SqlScan {
         }
         continue;
       }
+    }
+
+    // Bracket-quoted identifier: [Order Date], [Update], [a]]b]
+    if (allowBracketIdentifiers && char === "[") {
+      let closed = false;
+
+      output += " ";
+      index += 1;
+
+      while (index < sql.length) {
+        const current = sql[index] as string;
+
+        // `]]` inside brackets is an escaped `]`, not the terminator.
+        if (current === "]" && sql[index + 1] === "]") {
+          output += "  ";
+          index += 2;
+          continue;
+        }
+        if (current === "]") {
+          output += " ";
+          index += 1;
+          closed = true;
+          break;
+        }
+        output += current === "\n" ? "\n" : " ";
+        index += 1;
+      }
+
+      if (!closed) {
+        unterminated = true;
+      }
+      continue;
     }
 
     // Single- or double-quoted literal / quoted identifier
