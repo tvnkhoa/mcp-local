@@ -164,7 +164,12 @@ export function buildQueryTools(deps: SqlserverDeps): AnyToolDefinition[] {
       });
 
       const environmentName = connections.resolve(input.environment).environment.name;
-      return ok(catalogPayload({ environment: environmentName, maxRows }, outcomes, selection.fannedOut));
+      // `timeoutMs` is echoed for the same reason `maxRows` is: both are clamped, and a caller who
+      // asked for 999999 and got `timedOut: true` at 60s otherwise has no in-band signal that
+      // their bound was overridden rather than their query being genuinely that slow.
+      return ok(
+        catalogPayload({ environment: environmentName, maxRows, timeoutMs }, outcomes, selection.fannedOut)
+      );
     }
   });
 

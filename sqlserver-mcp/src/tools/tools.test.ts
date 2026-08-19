@@ -18,6 +18,7 @@ import {
 import { ConnectionManager, MAX_FANOUT_CONCURRENCY } from "../repositories/connectionManager.js";
 import { referencedCatalogCandidates, validateReadOnlySql } from "../middleware/sqlGuardrails.js";
 import { buildCrossDatabasePayload } from "./readTools.js";
+import { catalogPayload } from "./fanout.js";
 import type { ResponseProfile } from "../middleware/responseFormatter.js";
 import {
   classifyConnectionFailure,
@@ -679,9 +680,9 @@ const XML_AND_DROPPED = [
 
 // Lower-case key -> the instance's own spelling, matching ConnectionManager.catalogNames().
 const REAL_CATALOGS = new Map([
-  ["crm_identity", "CRM_Identity"],
-  ["crm_master", "CRM_Master"],
-  ["master", "master"]
+  ["crm_identity", { name: "CRM_Identity", state: "ONLINE" }],
+  ["crm_master", { name: "CRM_Master", state: "ONLINE" }],
+  ["master", { name: "master", state: "ONLINE" }]
 ]);
 
 test("a target that is not a catalog is marked, not dropped", () => {
@@ -739,7 +740,8 @@ test("the fan-out shape is the rolled-up one, with a slot per catalog in request
     "environment",
     "failureCount",
     "maxRows",
-    "results"
+    "results",
+    "timeoutMs"
   ]);
   assert.equal(payload.catalogCount, 2);
   assert.equal(payload.failureCount, 2);
@@ -833,7 +835,7 @@ const XREFS = [
   { fromSchema: "dbo", fromObject: "V", fromType: "VIEW", toDatabase: "Other", toSchema: "dbo", toObject: "T" },
   { fromSchema: "dbo", fromObject: "P", fromType: "SQL_STORED_PROCEDURE", toDatabase: "Gone", toSchema: "dbo", toObject: "T" }
 ];
-const KNOWN = new Map([["other", "Other"]]);
+const KNOWN = new Map([["other", { name: "Other", state: "ONLINE" }]]);
 
 const xrefPayload = (profile: ResponseProfile, includeReferences?: boolean) =>
   buildCrossDatabasePayload({
@@ -930,4 +932,69 @@ test("list_routines accepts an ISO timestamp for modifiedAfter and rejects prose
   const { isError, payload } = await bodyOf("list_routines", { modifiedAfter: "last tuesday" });
   assert.equal(isError, true);
   assert.equal(payload.code, "validation_error");
+});
+
+// --- what adversarial live verification found ----------------------------------
+
+test("includeReferences gates ONLY the reference rows, not the target detail", () => {
+  // It gated both, so `verbose` + `includeReferences: false` returned strictly LESS than the
+  // default `compact` — no way to ask for full targets while skipping 1,573 rows.
+  const off = xrefPayload("verbose", false);
+  assert.equal("references" in off, false);
+  const targets = off.targets as { referencingObjects?: unknown }[];
+  assert.ok(targets[0]?.referencingObjects, "verbose must keep target detail when references are off");
+  // And the flag still cannot resurrect target detail below its own threshold.
+  const nanoOn = xrefPayload("nano", true);
+  assert.equal("references" in nanoOn, true, "opt-in must still work at nano");
+  assert.equal(
+    "referencingObjects" in (nanoOn.targets as object[])[0]!,
+    false,
+    "nano's target shape is a profile decision, not a references decision"
+  );
+});
+
+test("a fan-out that timed out somewhere does not read as all-clear", () => {
+  // failureCount counted only error slots, so one catalog returning nothing at all showed as
+  // `failureCount: 0`. A timeout is a partial success by design — but it has to be visible.
+  const payload = catalogPayload({ environment: "default" }, [
+    { database: "fast", recordsets: [], truncated: false, timedOut: false },
+    { database: "slow", recordsets: [], truncated: false, timedOut: true }
+  ], true);
+  assert.ok("catalogCount" in payload);
+  assert.equal(payload.failureCount, 0, "a timeout is not a failure — it carries partial rows");
+  assert.equal(payload.timedOutCount, 1, "but it must not be invisible either");
+});
+
+test("timedOutCount is omitted when nothing timed out", () => {
+  const payload = catalogPayload({ environment: "default" }, [
+    { database: "a", recordsets: [], truncated: false, timedOut: false }
+  ], true);
+  assert.equal("timedOutCount" in payload, false, "no field of noise on the ordinary response");
+});
+
+test("a name the caller mistyped is not_found, not internal_error", async () => {
+  // `select * from dbo.NoSuchTable` came back as internal_error — "the server broke" — for a typo.
+  // The code is what a client routes on, so the class has to be actionable.
+  for (const message of [
+    "Invalid object name 'dbo.NoSuchTable'.",
+    "Invalid column name 'Nope'.",
+    "Could not find stored procedure 'dbo.Missing'."
+  ]) {
+    assert.equal(toWireError(new Error(message)).code, "not_found", message);
+  }
+  // A genuine internal failure must NOT be reclassified by the same rule.
+  assert.equal(toWireError(new Error("Something exploded")).code, "internal_error");
+});
+
+test("list_routines refuses an unknown schema exactly as list_tables does", () => {
+  // The fix had been applied to one of the two, so a typo'd schema got two different answers
+  // depending on which inventory you asked for. Asserted on the tool table rather than live:
+  // both tools must advertise the same `schema` contract for the behaviours to be comparable.
+  const tools = makeTools();
+  for (const name of ["list_tables", "list_routines"]) {
+    const tool = tools.find((candidate) => candidate.name === name);
+    assert.ok(tool, `${name} not found`);
+    const props = (tool.inputSchema as { properties: Record<string, unknown> }).properties;
+    assert.ok("schema" in props, `${name} must take a schema to be able to refuse a bad one`);
+  }
 });

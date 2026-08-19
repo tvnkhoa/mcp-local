@@ -178,11 +178,26 @@ export function connectionFailureAsPlatformError(error: unknown): PlatformError 
 /** Wired into `mapError` below, so every tool that opens a connection reports the same cause. */
 const connectionFailureRule: ErrorRule = (error) => classifyConnectionFailure(error);
 
+/**
+ * A name the caller wrote that SQL Server cannot resolve is the caller's problem, not a defect.
+ *
+ * Without this, `select * from dbo.NoSuchTable` came back as `internal_error` — "the server
+ * broke" — for a typo. The code is what a client routes on, so an unactionable class here sends
+ * an agent to retry or escalate instead of fixing its own SQL. These messages name only the object
+ * the caller already typed, so forwarding them leaks nothing.
+ */
+const INVALID_NAME = /invalid (?:object|column) name|could not find stored procedure/i;
+
+const invalidNameRule: ErrorRule = (error) => {
+  const message = error instanceof Error ? error.message : String(error);
+  return INVALID_NAME.test(message) ? { code: "not_found", message } : undefined;
+};
+
 export const mapError: (error: unknown) => MappedError = createErrorMapper({
   validation: { type: z.ZodError, message: "Invalid arguments.", rootLabel: "(root)" },
   coded: [PolicyViolationError],
   mcpError: McpError,
-  rules: [abortRule("Request timed out."), connectionFailureRule]
+  rules: [abortRule("Request timed out."), connectionFailureRule, invalidNameRule]
   // No `fallback`: the platform default is `internal_error` carrying the thrown value's own
   // message. Supply one if this server's upstream errors can carry a secret — a connection string,
   // a token — that must not reach a client.

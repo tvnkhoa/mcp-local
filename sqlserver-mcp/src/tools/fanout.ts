@@ -136,6 +136,13 @@ export async function runAcrossCatalogs<T extends object>(
 export interface CatalogRollup<T extends object> {
   readonly catalogCount: number;
   readonly failureCount: number;
+  /**
+   * Slots that hit their time budget. Counted separately from `failureCount` because a timeout is
+   * a *partial success* by design — the slot carries the rows read before the cancel — but a
+   * caller reading only `failureCount: 0` would conclude every catalog answered, when one returned
+   * nothing at all. Omitted when zero, so the ordinary response does not carry a field of noise.
+   */
+  readonly timedOutCount?: number;
   readonly results: readonly CatalogOutcome<T>[];
 }
 
@@ -161,10 +168,14 @@ export function catalogPayload<T extends object, B extends object>(
   if (!fannedOut) {
     return { ...base, ...(outcomes[0] as CatalogOutcome<T>) };
   }
+  const timedOutCount = outcomes.filter(
+    (outcome) => (outcome as { timedOut?: boolean }).timedOut === true
+  ).length;
   return {
     ...base,
     catalogCount: outcomes.length,
     failureCount: outcomes.filter((outcome) => outcome.error !== undefined).length,
+    ...(timedOutCount > 0 ? { timedOutCount } : {}),
     results: outcomes
   };
 }

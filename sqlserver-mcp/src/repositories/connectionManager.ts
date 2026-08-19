@@ -12,6 +12,12 @@
 import sql from "mssql";
 
 import { PolicyViolationError } from "../middleware/errors.js";
+
+/** What the catalog cache remembers per database: the instance's own spelling, and its state. */
+export interface CatalogInfo {
+  readonly name: string;
+  readonly state: string;
+}
 import type { PoolLimits, SqlserverConfig } from "../config/index.js";
 import {
   assertEnvironment,
@@ -50,7 +56,7 @@ export class ConnectionManager {
   private readonly pools = new Map<string, Promise<sql.ConnectionPool>>();
   private readonly catalogCache = new Map<
     string,
-    { names: Map<string, string>; expiresAt: number }
+    { names: Map<string, CatalogInfo>; expiresAt: number }
   >();
 
   constructor(config: SqlserverConfig) {
@@ -121,15 +127,19 @@ export class ConnectionManager {
    * ordinary schema-qualified column is to know which names are real catalogs. Cached because that
    * check runs on every query while the answer changes about never.
    */
-  async catalogNames(target: ResolvedTarget): Promise<ReadonlyMap<string, string>> {
+  async catalogNames(target: ResolvedTarget): Promise<ReadonlyMap<string, CatalogInfo>> {
     const key = target.environment.name;
     const cached = this.catalogCache.get(key);
     if (cached !== undefined && cached.expiresAt > Date.now()) {
       return cached.names;
     }
     const pool = await this.pool(target);
-    const result = await pool.request().query<{ name: string }>("select name from sys.databases");
-    const names = new Map(result.recordset.map((row) => [row.name.toLowerCase(), row.name]));
+    const result = await pool
+      .request()
+      .query<{ name: string; state: string }>("select name, state_desc as state from sys.databases");
+    const names = new Map(
+      result.recordset.map((row) => [row.name.toLowerCase(), { name: row.name, state: row.state }])
+    );
     this.catalogCache.set(key, { names, expiresAt: Date.now() + CATALOG_CACHE_TTL_MS });
     return names;
   }
@@ -189,11 +199,23 @@ export class ConnectionManager {
         environment: target.environment,
         database: target.environment.settings.database
       });
-      if (!known.has(target.database.toLowerCase())) {
+      const info = known.get(target.database.toLowerCase());
+      if (info === undefined) {
         return new PolicyViolationError(
           "not_found",
           `No catalog named "${target.database}" on this instance. ` +
             "Catalog names are deployment-specific — call `list_databases` rather than guessing one."
+        );
+      }
+      // An OFFLINE catalog answers ELOGIN too, and it is *in* sys.databases — so the existence
+      // check above passes and the caller was still told to go check their password. Same
+      // misdiagnosis as a typo'd name, one catalog over. `list_databases` already reports the
+      // state; this is the same fact, said at the moment it matters.
+      if (info.state !== "ONLINE") {
+        return new PolicyViolationError(
+          "conflict",
+          `Catalog "${info.name}" is ${info.state}, so it cannot be opened. ` +
+            "This is the catalog's state, not a credentials problem — `list_databases` reports it."
         );
       }
     } catch {

@@ -44,6 +44,7 @@ import {
 } from "./common.js";
 import { includesDetail, resolveProfile, type ResponseProfile } from "../middleware/responseFormatter.js";
 import { catalogPayload, resolveCatalogs, runAcrossCatalogs } from "./fanout.js";
+import type { CatalogInfo } from "../repositories/connectionManager.js";
 
 
 /** One catalog reached by the catalog under inspection, with whether it is a real database. */
@@ -77,7 +78,7 @@ export interface CrossDatabaseTarget {
  */
 export function summarizeCrossDatabaseTargets(
   references: readonly CrossDatabaseReference[],
-  catalogNames: ReadonlyMap<string, string>
+  catalogNames: ReadonlyMap<string, CatalogInfo>
 ): {
   targets: CrossDatabaseTarget[];
   unresolvedTargets: CrossDatabaseTarget[];
@@ -98,7 +99,7 @@ export function summarizeCrossDatabaseTargets(
       // The instance's own spelling when it is a real catalog, else the first one seen. Echoing a
       // name back in whatever casing a developer happened to use makes it unusable as a `database`
       // argument on the next call.
-      database: catalogNames.get(key) ?? row.toDatabase,
+      database: catalogNames.get(key)?.name ?? row.toDatabase,
       referenceCount: 0,
       objects: new Set<string>()
     };
@@ -130,7 +131,7 @@ export interface CrossDatabasePayloadInput {
   readonly environment: string;
   readonly database: string;
   readonly references: readonly CrossDatabaseReference[];
-  readonly catalogNames: ReadonlyMap<string, string>;
+  readonly catalogNames: ReadonlyMap<string, CatalogInfo>;
   readonly dynamicSqlModules: number;
   readonly profile: ResponseProfile;
   readonly includeReferences?: boolean;
@@ -162,7 +163,11 @@ export function buildCrossDatabasePayload(input: CrossDatabasePayloadInput): Rec
     input.catalogNames
   );
   const withReferences = includesDetail(input.profile, input.includeReferences);
-  const withReferencingObjects = includesDetail(input.profile, input.includeReferences, "compact");
+  // NOT overridable by `includeReferences`. That flag is documented as "include the per-reference
+  // rows", and passing it here too meant `verbose` + `includeReferences: false` returned strictly
+  // less than the default `compact` — turning references off silently demoted you to nano's target
+  // shape, with no way to ask for "full targets, skip the 1,573 rows".
+  const withReferencingObjects = includesDetail(input.profile, undefined, "compact");
   const dynamic = input.dynamicSqlModules;
 
   return {
@@ -479,6 +484,14 @@ export function buildReadTools(deps: SqlserverDeps): AnyToolDefinition[] {
             typeCode: input.type === undefined ? undefined : ROUTINE_TYPES[input.type],
             modifiedAfter: input.modifiedAfter
           });
+          // Same rule as list_tables. Applying it to one of the two left the server answering a
+          // typo'd schema two different ways depending on which inventory you asked for.
+          if (rows.length === 0 && input.schema !== undefined && !(await schemaExists(pool, input.schema))) {
+            throw new PolicyViolationError(
+              "not_found",
+              `No schema named "${input.schema}" in ${target.database}.`
+            );
+          }
           return { database: target.database, count: rows.length, routines: rows };
         },
         onFailure: (database, error) => {
