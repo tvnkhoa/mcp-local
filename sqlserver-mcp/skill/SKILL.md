@@ -68,12 +68,16 @@ Most read logic on a mature SQL Server instance lives in procedures and views, n
 
 ```
 list_routines(database, type: "procedure", namePattern: "Report[_]%")
+list_routines(database, modifiedAfter: "2026-08-19")   // what changed — start an incident here
 get_routine_definition(database, routine)     // full body + parameter contract
 find_cross_database_references(database)      // which OTHER catalogs this one reaches into
 ```
 
 `find_cross_database_references` is the fastest way to understand how an instance is wired: it
-returns the dependency graph *between* databases, grouped by target. Read its `coverage` field —
+returns the dependency graph *between* databases, grouped by target. The per-reference rows are
+omitted below `standard`: `targets` answers "which catalogs depend on which", and the row list is
+large enough to overflow a client. Ask for `profile: "standard"` or `includeReferences: true` when
+you need the drill-down. Read its `coverage` field —
 references built inside dynamic SQL (`sp_executesql`, `EXEC(@sql)`) are invisible to the catalog and
 it says so rather than implying completeness.
 

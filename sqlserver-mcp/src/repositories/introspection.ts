@@ -355,7 +355,7 @@ export interface RoutineRow {
 
 export async function listRoutines(
   pool: sql.ConnectionPool,
-  options: { schema?: string; namePattern?: string; typeCode?: string }
+  options: { schema?: string; namePattern?: string; typeCode?: string; modifiedAfter?: string }
 ): Promise<RoutineRow[]> {
   return query(
     pool,
@@ -375,13 +375,31 @@ export async function listRoutines(
        and (@typeCode is null or o.type = @typeCode)
        and (@schemaName is null or s.name = @schemaName)
        and (@namePattern is null or o.name like @namePattern)
+       and (@modifiedAfter is null or o.modify_date >= convert(datetime2, @modifiedAfter, 126))
      order by s.name, o.name`,
     {
       schemaName: nvarchar(options.schema ?? null),
       namePattern: nvarchar(options.namePattern ?? null),
-      typeCode: nvarchar(options.typeCode ?? null)
+      typeCode: nvarchar(options.typeCode ?? null),
+      modifiedAfter: nvarchar(options.modifiedAfter ?? null)
     }
   );
+}
+
+/**
+ * Does this schema exist in the current catalog?
+ *
+ * Only called when a filtered listing came back empty. `list_tables(schema: "notaschema")` used to
+ * answer `count: 0`, which is indistinguishable from an empty schema — while a typo'd *table* got
+ * a proper `not_found`. One query, on the path that is already returning nothing.
+ */
+export async function schemaExists(pool: sql.ConnectionPool, schema: string): Promise<boolean> {
+  const rows = await query<{ n: number }>(
+    pool,
+    "select count(*) as n from sys.schemas where name = @schemaName",
+    { schemaName: nvarchar(schema) }
+  );
+  return (rows[0]?.n ?? 0) > 0;
 }
 
 export interface RoutineParameter {

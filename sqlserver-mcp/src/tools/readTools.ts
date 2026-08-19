@@ -13,6 +13,7 @@ import { z } from "zod";
 import { PolicyViolationError } from "../middleware/errors.js";
 import {
   countUnresolvedModules,
+  schemaExists,
   describeColumns,
   describeForeignKeys,
   describeIndexes,
@@ -41,6 +42,7 @@ import {
   schemaProp,
   type SqlserverDeps
 } from "./common.js";
+import { includesDetail, resolveProfile, type ResponseProfile } from "../middleware/responseFormatter.js";
 import { catalogPayload, resolveCatalogs, runAcrossCatalogs } from "./fanout.js";
 
 
@@ -75,22 +77,34 @@ export interface CrossDatabaseTarget {
  */
 export function summarizeCrossDatabaseTargets(
   references: readonly CrossDatabaseReference[],
-  catalogNames: ReadonlySet<string>
+  catalogNames: ReadonlyMap<string, string>
 ): {
   targets: CrossDatabaseTarget[];
   unresolvedTargets: CrossDatabaseTarget[];
   unresolvedReferenceCount: number;
 } {
-  const byDatabase = new Map<string, { database: string; referenceCount: number; objects: Set<string> }>();
+  // Keyed lower-case, because `referenced_database_name` records the spelling the developer typed
+  // and SQL Server catalog names are case-insensitive under a CI collation. Grouping on the raw
+  // name split `CRM_Marketing` (848 refs) from `CRM_marketing` (4) into two targets and understated
+  // both — while the existence check below already folded case, so one catalog could be reported
+  // as several that all `exists: true`.
+  const byDatabase = new Map<
+    string,
+    { database: string; referenceCount: number; objects: Set<string> }
+  >();
   for (const row of references) {
-    const entry = byDatabase.get(row.toDatabase) ?? {
-      database: row.toDatabase,
+    const key = row.toDatabase.toLowerCase();
+    const entry = byDatabase.get(key) ?? {
+      // The instance's own spelling when it is a real catalog, else the first one seen. Echoing a
+      // name back in whatever casing a developer happened to use makes it unusable as a `database`
+      // argument on the next call.
+      database: catalogNames.get(key) ?? row.toDatabase,
       referenceCount: 0,
       objects: new Set<string>()
     };
     entry.referenceCount += 1;
     entry.objects.add(`${row.fromSchema}.${row.fromObject}`);
-    byDatabase.set(row.toDatabase, entry);
+    byDatabase.set(key, entry);
   }
 
   const targets: CrossDatabaseTarget[] = [...byDatabase.values()]
@@ -108,6 +122,83 @@ export function summarizeCrossDatabaseTargets(
     targets,
     unresolvedTargets,
     unresolvedReferenceCount: unresolvedTargets.reduce((n, e) => n + e.referenceCount, 0)
+  };
+}
+
+
+export interface CrossDatabasePayloadInput {
+  readonly environment: string;
+  readonly database: string;
+  readonly references: readonly CrossDatabaseReference[];
+  readonly catalogNames: ReadonlyMap<string, string>;
+  readonly dynamicSqlModules: number;
+  readonly profile: ResponseProfile;
+  readonly includeReferences?: boolean;
+}
+
+/**
+ * Assemble the `find_cross_database_references` payload, sized to the profile.
+ *
+ * Pure, and split out for the same reason `summarizeCrossDatabaseTargets` above it is: the whole
+ * suite runs without a database, and a broken `list_tables` shipped because the parts that needed
+ * one were never executed. Every profile rung below is asserted by a test that opens no connection.
+ *
+ * The sizing exists because this tool returned **295KB** on a real catalog and overflowed the
+ * client at every profile — `nano` and `compact` were byte-identical, since the platform's profile
+ * handling is null-dropping plus minification and this payload has no nulls. Three rungs now:
+ *
+ *  - `nano` — targets without `referencingObjects`. The remaining unbounded string array.
+ *  - `compact` (the default) — targets in full. This is the answer to "which catalogs depend on
+ *    which", which is what the tool is for.
+ *  - `standard` / `verbose` — plus `references[]`, the per-row drill-down that caused the overflow.
+ *
+ * `referenceCount` is always present, so the number never disappears along with the array it
+ * counts. `includeReferences` overrides in **both** directions, including forcing the 295KB array
+ * back on at `nano` — that footgun is one explicit flag away and is left armed deliberately.
+ */
+export function buildCrossDatabasePayload(input: CrossDatabasePayloadInput): Record<string, unknown> {
+  const { targets, unresolvedTargets, unresolvedReferenceCount } = summarizeCrossDatabaseTargets(
+    input.references,
+    input.catalogNames
+  );
+  const withReferences = includesDetail(input.profile, input.includeReferences);
+  const withReferencingObjects = includesDetail(input.profile, input.includeReferences, "compact");
+  const dynamic = input.dynamicSqlModules;
+
+  return {
+    environment: input.environment,
+    database: input.database,
+    referenceCount: input.references.length,
+    resolvedReferenceCount: input.references.length - unresolvedReferenceCount,
+    unresolvedReferenceCount,
+    unresolvedTargets: unresolvedTargets.map((entry) => entry.database),
+    targets: withReferencingObjects
+      ? targets
+      : targets.map(({ referencingObjects: _dropped, ...rest }) => rest),
+    ...(withReferences ? { references: input.references } : {}),
+    // Stated rather than implied. sys.sql_expression_dependencies resolves names as they were
+    // compiled, so a catalog reached only through dynamic SQL leaves no row here at all.
+    coverage: {
+      complete: dynamic === 0,
+      dynamicSqlModules: dynamic,
+      unresolvedTargetCount: unresolvedTargets.length,
+      referencesIncluded: withReferences,
+      note:
+        (dynamic === 0
+          ? "No modules build SQL dynamically; the dependency graph is complete."
+          : `${String(dynamic)} module(s) build SQL dynamically (sp_executesql / EXEC(@…)). ` +
+            "References made only inside dynamic SQL are invisible to the catalog and are NOT listed.") +
+        (unresolvedTargets.length === 0
+          ? ""
+          : ` ${String(unresolvedTargets.length)} target name(s) are not catalogs on this instance ` +
+            "(`exists: false`): either XML shredding recorded as a three-part name, or a " +
+            "reference to a dropped database — which means that module no longer binds. " +
+            "Use resolvedReferenceCount for the real cross-catalog total.") +
+        (withReferences
+          ? ""
+          : " Per-reference rows are omitted at this profile; ask for `standard` or set " +
+            "`includeReferences: true` for the drill-down.")
+    }
   };
 }
 
@@ -214,6 +305,15 @@ export function buildReadTools(deps: SqlserverDeps): AnyToolDefinition[] {
             namePattern: input.namePattern,
             includeViews: input.includeViews ?? true
           });
+          // Only on the empty path, so the ordinary call pays nothing. A named schema that does not
+          // exist is a typo, and answering `count: 0` makes it indistinguishable from an empty one
+          // — while a typo'd table already gets `not_found`.
+          if (rows.length === 0 && input.schema !== undefined && !(await schemaExists(pool, input.schema))) {
+            throw new PolicyViolationError(
+              "not_found",
+              `No schema named "${input.schema}" in ${target.database}.`
+            );
+          }
           return { database: target.database, count: rows.length, objects: rows };
         },
         // No per-catalog success log. A fan-out over 25 catalogs would emit 25 info lines for one
@@ -348,6 +448,10 @@ export function buildReadTools(deps: SqlserverDeps): AnyToolDefinition[] {
       schema: schema.string("Restrict to one schema."),
       namePattern: schema.string("T-SQL LIKE pattern on the routine name, e.g. 'Report[_]%'."),
       type: schema.enumOf(Object.keys(ROUTINE_TYPES), "Restrict to one routine kind."),
+      modifiedAfter: schema.string(
+        "ISO 8601 timestamp. Only routines altered at or after it — the fastest way to find what " +
+          "changed during an incident."
+      ),
       profile: profileProp
     }),
     input: z
@@ -358,6 +462,7 @@ export function buildReadTools(deps: SqlserverDeps): AnyToolDefinition[] {
         schema: schemaArg,
         namePattern: z.string().min(1).max(256).optional(),
         type: z.enum(Object.keys(ROUTINE_TYPES) as [string, ...string[]]).optional(),
+        modifiedAfter: z.string().datetime({ offset: true }).or(z.string().date()).optional(),
         profile: profileArg
       })
       .strict(),
@@ -371,7 +476,8 @@ export function buildReadTools(deps: SqlserverDeps): AnyToolDefinition[] {
           const rows = await listRoutines(pool, {
             schema: input.schema,
             namePattern: input.namePattern,
-            typeCode: input.type === undefined ? undefined : ROUTINE_TYPES[input.type]
+            typeCode: input.type === undefined ? undefined : ROUTINE_TYPES[input.type],
+            modifiedAfter: input.modifiedAfter
           });
           return { database: target.database, count: rows.length, routines: rows };
         },
@@ -457,12 +563,21 @@ export function buildReadTools(deps: SqlserverDeps): AnyToolDefinition[] {
     inputSchema: schema.object({
       environment: environmentProp,
       database: databaseProp,
+      includeReferences: schema.boolean(
+        "Include the per-reference rows. Defaults to on at `standard` and above, off below — the " +
+          "rollup in `targets` answers the usual question and this array is what overflows clients."
+      ),
       profile: profileProp
     }),
     input: z
-      .object({ environment: environmentArg, database: databaseArg, profile: profileArg })
+      .object({
+        environment: environmentArg,
+        database: databaseArg,
+        includeReferences: z.boolean().optional(),
+        profile: profileArg
+      })
       .strict(),
-    handler: async (input) => {
+    handler: async (input, ctx) => {
       const target = connections.resolve(input.environment, input.database);
       const pool = await connections.pool(target);
 
@@ -472,39 +587,17 @@ export function buildReadTools(deps: SqlserverDeps): AnyToolDefinition[] {
         connections.catalogNames(target)
       ]);
 
-      const { targets, unresolvedTargets, unresolvedReferenceCount } = summarizeCrossDatabaseTargets(
-        references,
-        catalogNames
-      );
-
-      return ok({
-        environment: target.environment.name,
-        database: target.database,
-        referenceCount: references.length,
-        resolvedReferenceCount: references.length - unresolvedReferenceCount,
-        unresolvedReferenceCount,
-        unresolvedTargets: unresolvedTargets.map((entry) => entry.database),
-        targets,
-        references,
-        // Stated rather than implied. sys.sql_expression_dependencies resolves names as they were
-        // compiled, so a catalog reached only through dynamic SQL leaves no row here at all.
-        coverage: {
-          complete: dynamicSqlModules === 0,
+      return ok(
+        buildCrossDatabasePayload({
+          environment: target.environment.name,
+          database: target.database,
+          references,
+          catalogNames,
           dynamicSqlModules,
-          unresolvedTargetCount: unresolvedTargets.length,
-          note:
-            (dynamicSqlModules === 0
-              ? "No modules build SQL dynamically; the dependency graph is complete."
-              : `${dynamicSqlModules} module(s) build SQL dynamically (sp_executesql / EXEC(@…)). ` +
-                "References made only inside dynamic SQL are invisible to the catalog and are NOT listed.") +
-            (unresolvedTargets.length === 0
-              ? ""
-              : ` ${unresolvedTargets.length} target name(s) are not catalogs on this instance ` +
-                "(`exists: false`): either XML shredding recorded as a three-part name, or a " +
-                "reference to a dropped database — which means that module no longer binds. " +
-                "Use resolvedReferenceCount for the real cross-catalog total.")
-        }
-      });
+          profile: resolveProfile(input.profile, ctx),
+          includeReferences: input.includeReferences
+        })
+      );
     }
   });
 

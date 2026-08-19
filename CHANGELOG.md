@@ -8,6 +8,88 @@ All notable changes to this project will be documented in this file.
 > introducing commit named so each claim is checkable. They are backfill, not a record written at
 > the time.
 
+## [Unreleased] - 2026-08-19d
+
+### 🔧 What two simulated use cases found, and what it took to fix
+
+Two subagents drove all 12 tools against a live instance as an onboarding developer and an on-call
+engineer. Seven of the eight defects they reported were real; four were regressions introduced by
+the same day's fixes. The work below is those seven plus the two capability gaps both runs hit
+independently.
+
+**`timeoutMs` had never done anything.** `mssql` has no per-request timeout — `requestTimeout` is
+set once per pool — so `request.timeout = …` assigned a property the driver never reads. A query
+asked to finish in 2s ran for 17s and returned normally. It is now applied the way the row cap
+already was, by cancelling the stream, and returns the rows read so far with `timedOut: true`.
+`truncated` keeps its old meaning. Both derive from one `cancelReason`, so they can never both be
+true and leave a caller guessing which bound it hit — and the guard that swallows the driver's
+`Canceled.` had to test that same variable, or a timeout would have thrown with zero rows.
+
+**A fan-out slot printed the SQL login.** The per-catalog catch put `error.message` straight into
+the slot, so a sweep over a missing catalog returned `Login failed for user '<login>'` — the name
+`health_check` deliberately masks as `***`. Slots now carry `errorCode` and go through
+`toWireError`, the same function the top-level envelope uses.
+
+**A typo'd catalog was reported as a credentials problem.** SQL Server answers a connect to a
+non-existent database with error 4060, surfaced as `ELOGIN` — identical to a wrong password. The
+day's own error-classification work therefore made this *more* confidently wrong: it told the
+caller to check `User ID` / `Password`. The server can tell the two apart because it already knows
+which catalogs exist, so an `ELOGIN` against an unknown catalog is now `not_found` naming it. If
+the catalog list itself cannot be read, `unauthorized` stands — that is the honest answer.
+
+**One catalog was reported as several.** `find_cross_database_references` grouped on the raw
+`referenced_database_name`, which records whatever spelling a developer typed, while the existence
+check folded case — so `CRM_Marketing` (848 refs) and `CRM_marketing` (4) became two targets that
+both said `exists: true`. Six catalogs appeared as sixteen. Grouping now folds, and the instance's
+own spelling is echoed back, because a made-up casing is not usable as the next call's `database`.
+
+**`find_cross_database_references` overflowed clients at every profile.** 295KB on a real catalog,
+and `nano` was byte-identical to `compact` because the platform's profile handling is null-dropping
+plus minification. Three rungs now: `nano` drops `referencingObjects`, `compact` (the default) is
+the `targets` rollup, `standard` and above add `references[]`. `includeReferences` overrides either
+way. This is the first use of `profileVerbosityRank`, which had been documented for exactly this
+and had no consumer; `packages/core` gained a test pinning that the ranks ascend, now that
+something depends on it.
+
+**`list_tables(schema: "notaschema")` answered `count: 0`** — indistinguishable from an empty
+schema, while a typo'd *table* already got `not_found`. It now checks `sys.schemas`, on the empty
+path only, so an ordinary call pays nothing.
+
+### 🧭 Two capability gaps, found by watching what the agents did instead
+
+Both runs abandoned the MCP at the same point and hand-wrote `sys.tables` / `sys.partitions`
+through `run_read_query` — one asking which catalogs hold a table, the other how many tables each
+catalog has. They were reimplementing `list_tables` because `databases[]` existed on one tool only.
+That was a gap in the server's own thesis: the unit of work is a catalog, and the metadata tools
+were the ones pinned to a single one. `list_tables` and `list_routines` now take `databases[]` on
+the same seam, which buys what the workaround could not: per-catalog labelling, request-order
+results, and a failed catalog in its own slot rather than a dead sweep.
+
+`list_routines` also gained `modifiedAfter`. The strongest lead in the simulated incident was "five
+report procs changed today", found by eye across 189 rows.
+
+The fan-out mechanism was extracted to `tools/fanout.ts` first and is tested against a fake
+`runOne` — ordering, a concurrency high-water mark, partial failure, and an `ELOGIN` rejection
+whose slot does not contain the login name. `run_read_query` moved onto it at -59 lines.
+
+### 🧪 Schema parity, for all five servers
+
+Every tool declares its input twice and only `codebase-index-mcp` compared the two. No other gate
+can: `contracts:check` pins the advertised side against a snapshot of itself, so a parameter
+missing from both stays missing. Lifted into `@mcp/testing` and wired into all five, each with a
+floor equal to its tool count.
+
+The lift could not use `instanceof` — ADR 0001 — and injecting the caller's zod, the obvious fix,
+turned out to be insufficient: one tool table mixes copies, because `health_check` comes from
+`@mcp/sdk` with the hoisted zod while a server's own tools carry the server's. Exactly one tool
+dropped out silently, caught only by the floor. The walk now discriminates on `_def.typeName`.
+Testing it also found a latent bug in the version it was lifted from: `ZodDefault` has no
+`.unwrap()`, so a `z.object(…).default(…)` input threw rather than being unwrapped.
+
+No pre-existing drift on any of the five. The gate went in green.
+
+`verify:all`: exit 0. `sqlserver-mcp`: 112 tests, up from 70.
+
 ## [Unreleased] - 2026-08-19c
 
 ### 🐞 `list_tables` had never worked

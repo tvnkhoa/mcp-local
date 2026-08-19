@@ -48,7 +48,10 @@ export class ConnectionManager {
   private readonly limits: PoolLimits;
   /** Insertion-ordered, so the first key is the least recently used. */
   private readonly pools = new Map<string, Promise<sql.ConnectionPool>>();
-  private readonly catalogCache = new Map<string, { names: Set<string>; expiresAt: number }>();
+  private readonly catalogCache = new Map<
+    string,
+    { names: Map<string, string>; expiresAt: number }
+  >();
 
   constructor(config: SqlserverConfig) {
     this.config = config;
@@ -105,14 +108,20 @@ export class ConnectionManager {
   }
 
   /**
-   * Catalog names on the instance, lower-cased, cached briefly per environment.
+   * Catalog names on the instance, keyed lower-case to the instance's own spelling, cached briefly
+   * per environment.
+   *
+   * A Map rather than a Set because two callers need different halves of it: the allowlist check
+   * only asks `has()`, while `find_cross_database_references` needs the real casing to echo back —
+   * `sys.sql_expression_dependencies` records whatever spelling a developer typed, and handing that
+   * back makes the name unusable as a `database` argument on the next call.
    *
    * Needed by the three-part-name allowlist check in `run_read_query`: `Payroll.dbo.Salaries` and
    * `dbo.Customer.Name` are the same shape, so the only way to tell a cross-catalog read from an
    * ordinary schema-qualified column is to know which names are real catalogs. Cached because that
    * check runs on every query while the answer changes about never.
    */
-  async catalogNames(target: ResolvedTarget): Promise<ReadonlySet<string>> {
+  async catalogNames(target: ResolvedTarget): Promise<ReadonlyMap<string, string>> {
     const key = target.environment.name;
     const cached = this.catalogCache.get(key);
     if (cached !== undefined && cached.expiresAt > Date.now()) {
@@ -120,7 +129,7 @@ export class ConnectionManager {
     }
     const pool = await this.pool(target);
     const result = await pool.request().query<{ name: string }>("select name from sys.databases");
-    const names = new Set(result.recordset.map((row) => row.name.toLowerCase()));
+    const names = new Map(result.recordset.map((row) => [row.name.toLowerCase(), row.name]));
     this.catalogCache.set(key, { names, expiresAt: Date.now() + CATALOG_CACHE_TTL_MS });
     return names;
   }
@@ -152,11 +161,45 @@ export class ConnectionManager {
       await creating;
     } catch (error) {
       this.pools.delete(key);
-      throw error;
+      throw await this.explainConnectFailure(target, error);
     }
 
     await this.evictOverflow();
     return creating;
+  }
+
+  /**
+   * Turn "login failed" into "no such catalog" when that is what it actually was.
+   *
+   * SQL Server answers a connect to a database that does not exist with error 4060, which the
+   * driver surfaces as `ELOGIN` / `Login failed for user '…'` — the *same* code and the same shape
+   * as a wrong password. So a typo'd catalog name was reported as `unauthorized`, sending the
+   * caller off to check credentials that were never wrong. The message cannot tell the two apart;
+   * this server can, because it already knows which catalogs exist.
+   *
+   * If the catalog list itself cannot be read, the login really is suspect and `unauthorized`
+   * stands — that fallback is the honest answer, not a guess.
+   */
+  private async explainConnectFailure(target: ResolvedTarget, error: unknown): Promise<unknown> {
+    if ((error as { code?: unknown } | null)?.code !== "ELOGIN") {
+      return error;
+    }
+    try {
+      const known = await this.catalogNames({
+        environment: target.environment,
+        database: target.environment.settings.database
+      });
+      if (!known.has(target.database.toLowerCase())) {
+        return new PolicyViolationError(
+          "not_found",
+          `No catalog named "${target.database}" on this instance. ` +
+            "Catalog names are deployment-specific — call `list_databases` rather than guessing one."
+        );
+      }
+    } catch {
+      // Fall through: if we cannot list catalogs, the credentials are the likelier problem.
+    }
+    return error;
   }
 
   private async connect(settings: SqlConnectionSettings): Promise<sql.ConnectionPool> {

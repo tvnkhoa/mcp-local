@@ -17,6 +17,8 @@ import {
 } from "../config/environments.js";
 import { ConnectionManager, MAX_FANOUT_CONCURRENCY } from "../repositories/connectionManager.js";
 import { referencedCatalogCandidates, validateReadOnlySql } from "../middleware/sqlGuardrails.js";
+import { buildCrossDatabasePayload } from "./readTools.js";
+import type { ResponseProfile } from "../middleware/responseFormatter.js";
 import {
   classifyConnectionFailure,
   connectionFailureAsPlatformError
@@ -675,7 +677,12 @@ const XML_AND_DROPPED = [
   { fromSchema: "dbo", fromObject: "SP_GetOrgInfo", fromType: "SQL_STORED_PROCEDURE", toDatabase: "CRM_Identity", toSchema: "dbo", toObject: "Entity" }
 ];
 
-const REAL_CATALOGS = new Set(["crm_identity", "crm_master", "master"]);
+// Lower-case key -> the instance's own spelling, matching ConnectionManager.catalogNames().
+const REAL_CATALOGS = new Map([
+  ["crm_identity", "CRM_Identity"],
+  ["crm_master", "CRM_Master"],
+  ["master", "master"]
+]);
 
 test("a target that is not a catalog is marked, not dropped", () => {
   const { targets, unresolvedTargets } = summarizeCrossDatabaseTargets(XML_AND_DROPPED, REAL_CATALOGS);
@@ -814,3 +821,113 @@ for (const toolName of ["list_tables", "list_routines"]) {
     assert.equal(payload.results[0].errorCode, "database_not_allowed");
   });
 }
+
+// --- find_cross_database_references payload sizing -----------------------------
+//
+// This tool returned 295KB against a real catalog and overflowed the client at EVERY profile:
+// `nano` and `compact` were byte-identical because the platform's profile handling is
+// null-dropping plus minification, and this payload has no nulls. Tested through the pure builder
+// so the whole matrix runs with no connection.
+
+const XREFS = [
+  { fromSchema: "dbo", fromObject: "V", fromType: "VIEW", toDatabase: "Other", toSchema: "dbo", toObject: "T" },
+  { fromSchema: "dbo", fromObject: "P", fromType: "SQL_STORED_PROCEDURE", toDatabase: "Gone", toSchema: "dbo", toObject: "T" }
+];
+const KNOWN = new Map([["other", "Other"]]);
+
+const xrefPayload = (profile: ResponseProfile, includeReferences?: boolean) =>
+  buildCrossDatabasePayload({
+    environment: "default",
+    database: "AppMain",
+    references: XREFS,
+    catalogNames: KNOWN,
+    dynamicSqlModules: 3,
+    profile,
+    ...(includeReferences === undefined ? {} : { includeReferences })
+  });
+
+test("references are omitted below standard and present at or above it", () => {
+  assert.equal("references" in xrefPayload("nano"), false);
+  assert.equal("references" in xrefPayload("compact"), false, "compact is the DEFAULT — it must be small");
+  assert.equal("references" in xrefPayload("standard"), true);
+  assert.equal("references" in xrefPayload("verbose"), true);
+});
+
+test("nano spends its rung on the remaining unbounded array", () => {
+  const nano = xrefPayload("nano").targets as { referencingObjects?: unknown; referencingObjectCount: number }[];
+  assert.equal("referencingObjects" in nano[0]!, false, "the last unbounded string array must go");
+  assert.equal(nano[0]?.referencingObjectCount, 1, "the count survives the array");
+  const compact = xrefPayload("compact").targets as { referencingObjects?: unknown }[];
+  assert.ok(compact[0]?.referencingObjects, "compact keeps them — it is the usable default");
+});
+
+test("includeReferences overrides in both directions, at every profile", () => {
+  for (const profile of ["nano", "compact", "standard", "verbose"] as const) {
+    assert.equal("references" in xrefPayload(profile, true), true, `${profile}: opt-in ignored`);
+    assert.equal("references" in xrefPayload(profile, false), false, `${profile}: opt-out ignored`);
+  }
+});
+
+test("the counts survive at every profile, so the number never vanishes with the array", () => {
+  for (const profile of ["nano", "compact", "standard", "verbose"] as const) {
+    const payload = xrefPayload(profile);
+    assert.equal(payload.referenceCount, 2, `${profile}: referenceCount missing`);
+    assert.equal(payload.resolvedReferenceCount, 1, `${profile}: one target is not a real catalog`);
+    assert.equal(payload.unresolvedReferenceCount, 1);
+  }
+});
+
+test("coverage says whether the drill-down was included, and how to get it", () => {
+  const compact = xrefPayload("compact").coverage as { referencesIncluded: boolean; note: string };
+  assert.equal(compact.referencesIncluded, false);
+  assert.match(compact.note, /includeReferences/, "a truncated payload must say how to widen it");
+  const standard = xrefPayload("standard").coverage as { referencesIncluded: boolean; note: string };
+  assert.equal(standard.referencesIncluded, true);
+  assert.equal(/includeReferences/.test(standard.note), false, "no advice needed when nothing was cut");
+});
+
+test("catalog spellings fold together, and the instance's own casing is echoed back", () => {
+  // Live output split `CRM_Marketing` (848 refs) from `CRM_marketing` (4) into two targets and
+  // understated both, while the existence check already folded case — so one catalog was reported
+  // as several that all said `exists: true`. `referenced_database_name` records the spelling the
+  // developer typed; catalog names are case-insensitive under a CI collation.
+  const rows = [
+    { fromSchema: "dbo", fromObject: "A", fromType: "VIEW", toDatabase: "CRM_Master", toSchema: "dbo", toObject: "T" },
+    { fromSchema: "dbo", fromObject: "B", fromType: "VIEW", toDatabase: "crm_master", toSchema: "dbo", toObject: "T" },
+    { fromSchema: "dbo", fromObject: "C", fromType: "VIEW", toDatabase: "CRM_MASTER", toSchema: "dbo", toObject: "T" }
+  ];
+  const { targets } = summarizeCrossDatabaseTargets(rows, REAL_CATALOGS);
+  assert.equal(targets.length, 1, `three spellings of one catalog became ${String(targets.length)} targets`);
+  assert.equal(targets[0]?.referenceCount, 3, "counts must accumulate across spellings");
+  assert.equal(targets[0]?.referencingObjectCount, 3);
+  assert.equal(
+    targets[0]?.database,
+    "CRM_Master",
+    "echo the instance's spelling — a made-up casing is not usable as a `database` argument"
+  );
+});
+
+test("an unresolved target keeps the spelling it was written with", () => {
+  // There is no instance spelling to prefer when the catalog does not exist.
+  const rows = [
+    { fromSchema: "dbo", fromObject: "P", fromType: "SQL_STORED_PROCEDURE", toDatabase: "agent_nodes", toSchema: "n", toObject: "value" }
+  ];
+  const { targets } = summarizeCrossDatabaseTargets(rows, REAL_CATALOGS);
+  assert.equal(targets[0]?.database, "agent_nodes");
+  assert.equal(targets[0]?.exists, false);
+});
+
+test("list_routines accepts an ISO timestamp for modifiedAfter and rejects prose", async () => {
+  // The strongest lead in a real incident was "five report procs changed today", found by eye
+  // across 189 rows of `modifiedAt`. Both accepted spellings are pinned because a date alone is
+  // what an operator actually types.
+  for (const value of ["2026-08-19", "2026-08-19T02:49:00Z", "2026-08-19T02:49:00+10:00"]) {
+    const { payload } = await bodyOf("list_routines", { databases: ["Nope"], modifiedAfter: value },
+      makeConfig({ allowedDatabases: ["Permitted"] }));
+    // Refused at the catalog, not at the argument — which is how we know the argument parsed.
+    assert.equal(payload.results[0].errorCode, "database_not_allowed", `rejected ${value}`);
+  }
+  const { isError, payload } = await bodyOf("list_routines", { modifiedAfter: "last tuesday" });
+  assert.equal(isError, true);
+  assert.equal(payload.code, "validation_error");
+});

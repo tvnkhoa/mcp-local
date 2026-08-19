@@ -7,7 +7,7 @@ import { isPlainObject, normalizePayload, stableStringify } from "./json.js";
 import { resolveBound } from "./limits.js";
 import { createEventLogger, createLogger } from "./logging.js";
 import { isPathWithin, toPosixPath } from "./paths.js";
-import { parseResponseProfile, shouldDropNullish, shouldPrettyPrint } from "./profiles.js";
+import { parseResponseProfile, shouldDropNullish, shouldPrettyPrint, profileVerbosityRank } from "./profiles.js";
 import { maskSecret, redactObject } from "./redaction.js";
 import { allOk, err, isErr, isOk, ok } from "./result.js";
 
@@ -323,4 +323,13 @@ test("logging: detail overrides level/event, as the originals allowed", () => {
   const log = createEventLogger((line) => lines.push(line));
   log.info("original", { event: "overridden", level: "warn" });
   assert.deepEqual(JSON.parse(lines[0] as string), { level: "warn", event: "overridden" });
+});
+
+test("the profile ranks are strictly ordered", () => {
+  // `profileVerbosityRank` had no consumer for its whole life, so nothing pinned that the numbers
+  // actually ascend. sqlserver-mcp now gates optional payload blocks on `rank >= rank(atLeast)`,
+  // which is only meaningful if this holds.
+  const ranks = (["nano", "compact", "standard", "verbose"] as const).map(profileVerbosityRank);
+  assert.deepEqual(ranks, [...ranks].sort((a, b) => a - b), `not ascending: ${ranks.join(" < ")}`);
+  assert.equal(new Set(ranks).size, ranks.length, "two profiles share a rank");
 });

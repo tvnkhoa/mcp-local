@@ -127,6 +127,10 @@
             "description": "Configured environment name. Defaults to the configured default environment.",
             "type": "string"
           },
+          "includeReferences": {
+            "description": "Include the per-reference rows. Defaults to on at `standard` and above, off below — the rollup in `targets` answers the usual question and this array is what overflows clients.",
+            "type": "boolean"
+          },
           "profile": {
             "description": "Response verbosity. Defaults to compact.",
             "enum": [
@@ -352,6 +356,10 @@
           },
           "environment": {
             "description": "Configured environment name. Defaults to the configured default environment.",
+            "type": "string"
+          },
+          "modifiedAfter": {
+            "description": "ISO 8601 timestamp. Only routines altered at or after it — the fastest way to find what changed during an incident.",
             "type": "string"
           },
           "namePattern": {

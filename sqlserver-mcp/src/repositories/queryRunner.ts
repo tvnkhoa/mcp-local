@@ -30,7 +30,10 @@ export interface RecordSetResult {
 export interface BoundedResult {
   readonly recordsets: readonly RecordSetResult[];
   readonly rowsAffected: readonly number[];
+  /** The row cap was reached. Distinct from {@link BoundedResult.timedOut} — see `cancelReason`. */
   readonly truncated: boolean;
+  /** `timeoutMs` elapsed and the stream was cancelled. Rows read before that point are returned. */
+  readonly timedOut: boolean;
   readonly elapsedMs: number;
   readonly output?: Record<string, unknown>;
   readonly returnValue?: unknown;
@@ -111,11 +114,19 @@ export async function runBounded(
 
   request.stream = true;
   request.arrayRowMode = true;
-  (request as unknown as { timeout?: number }).timeout = options.timeoutMs;
 
   const recordsets: Array<{ columns: ColumnMeta[]; rows: unknown[][]; truncated: boolean }> = [];
   let current: { columns: ColumnMeta[]; rows: unknown[][]; truncated: boolean } | undefined;
-  let cancelledByUs = false;
+  /**
+   * Why we cancelled, or `undefined` if we did not.
+   *
+   * One field rather than two booleans, so `truncated` and `timedOut` cannot both be true and
+   * leave a caller guessing which bound it actually hit. It also has to be *this* variable the
+   * guard below tests: the driver reports both cancellations identically as `Canceled.`, and a
+   * timeout that set some other flag would fall through to `throw` and return an error with zero
+   * rows — the opposite of returning what was read.
+   */
+  let cancelReason: "rowCap" | "timeout" | undefined;
   let streamError: unknown;
 
   request.on("recordset", (meta: unknown) => {
@@ -129,9 +140,9 @@ export async function runBounded(
       recordsets.push(current);
     }
     if (current.rows.length >= options.maxRows) {
-      if (!cancelledByUs) {
+      if (cancelReason === undefined) {
         current.truncated = true;
-        cancelledByUs = true;
+        cancelReason = "rowCap";
         request.cancel();
       }
       return;
@@ -146,16 +157,33 @@ export async function runBounded(
     streamError = error;
   });
 
+  /**
+   * The statement timeout, applied the same way the row cap is: by cancelling the stream.
+   *
+   * `mssql` has no per-request timeout — `requestTimeout` is set once per pool, and the
+   * `request.timeout = …` this replaced assigned a property the driver never reads, so every
+   * caller-supplied `timeoutMs` was silently ignored. A query asked to finish in 2s ran for 17s
+   * and returned normally.
+   */
+  const deadline = setTimeout(() => {
+    if (cancelReason === undefined) {
+      cancelReason = "timeout";
+      request.cancel();
+    }
+  }, options.timeoutMs);
+
   let settled: sql.IResult<unknown> | sql.IProcedureResult<unknown> | undefined;
   try {
     settled = await start();
   } catch (error) {
-    if (!(cancelledByUs && isCancellation(error))) {
+    if (!(cancelReason !== undefined && isCancellation(error))) {
       throw error;
     }
+  } finally {
+    clearTimeout(deadline);
   }
 
-  if (streamError !== undefined && !(cancelledByUs && isCancellation(streamError))) {
+  if (streamError !== undefined && !(cancelReason !== undefined && isCancellation(streamError))) {
     throw streamError;
   }
 
@@ -169,7 +197,8 @@ export async function runBounded(
       truncated: set.truncated
     })),
     rowsAffected: settled?.rowsAffected ?? [],
-    truncated: cancelledByUs,
+    truncated: cancelReason === "rowCap",
+    timedOut: cancelReason === "timeout",
     elapsedMs: Date.now() - startedAt,
     output:
       output === undefined || Object.keys(output).length === 0
