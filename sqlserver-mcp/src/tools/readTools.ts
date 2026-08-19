@@ -29,6 +29,8 @@ import {
 import {
   databaseArg,
   databaseProp,
+  databasesArg,
+  databasesProp,
   environmentArg,
   environmentProp,
   profileArg,
@@ -39,6 +41,7 @@ import {
   schemaProp,
   type SqlserverDeps
 } from "./common.js";
+import { catalogPayload, resolveCatalogs, runAcrossCatalogs } from "./fanout.js";
 
 
 /** One catalog reached by the catalog under inspection, with whether it is a real database. */
@@ -109,7 +112,7 @@ export function summarizeCrossDatabaseTargets(
 }
 
 export function buildReadTools(deps: SqlserverDeps): AnyToolDefinition[] {
-  const { config, connections } = deps;
+  const { config, connections, logger } = deps;
 
   const listEnvironments = defineTool({
     name: "list_environments",
@@ -182,6 +185,7 @@ export function buildReadTools(deps: SqlserverDeps): AnyToolDefinition[] {
     inputSchema: schema.object({
       environment: environmentProp,
       database: databaseProp,
+      databases: databasesProp,
       schema: schema.string("Restrict to one schema. Omit for all schemas."),
       namePattern: schema.string("T-SQL LIKE pattern on the object name, e.g. 'Trigger%'."),
       includeViews: schema.boolean("Include views. Defaults to true."),
@@ -191,6 +195,7 @@ export function buildReadTools(deps: SqlserverDeps): AnyToolDefinition[] {
       .object({
         environment: environmentArg,
         database: databaseArg,
+        databases: databasesArg,
         schema: schemaArg,
         namePattern: z.string().min(1).max(256).optional(),
         includeViews: z.boolean().optional(),
@@ -198,19 +203,30 @@ export function buildReadTools(deps: SqlserverDeps): AnyToolDefinition[] {
       })
       .strict(),
     handler: async (input) => {
-      const target = connections.resolve(input.environment, input.database);
-      const pool = await connections.pool(target);
-      const rows = await listTables(pool, {
-        schema: input.schema,
-        namePattern: input.namePattern,
-        includeViews: input.includeViews ?? true
+      const selection = resolveCatalogs(input, config.limits.maxFanout);
+      const outcomes = await runAcrossCatalogs({
+        ...selection,
+        runOne: async (database) => {
+          const target = connections.resolve(input.environment, database);
+          const pool = await connections.pool(target);
+          const rows = await listTables(pool, {
+            schema: input.schema,
+            namePattern: input.namePattern,
+            includeViews: input.includeViews ?? true
+          });
+          return { database: target.database, count: rows.length, objects: rows };
+        },
+        // No per-catalog success log. A fan-out over 25 catalogs would emit 25 info lines for one
+        // call; the failure line is the one an operator needs.
+        onFailure: (database, error) => {
+          logger.error("list_tables_failed", {
+            database: database ?? "(default)",
+            error: error instanceof Error ? error.message : String(error)
+          });
+        }
       });
-      return ok({
-        environment: target.environment.name,
-        database: target.database,
-        count: rows.length,
-        objects: rows
-      });
+      const environment = connections.resolve(input.environment).environment.name;
+      return ok(catalogPayload({ environment }, outcomes, selection.fannedOut));
     }
   });
 
@@ -328,6 +344,7 @@ export function buildReadTools(deps: SqlserverDeps): AnyToolDefinition[] {
     inputSchema: schema.object({
       environment: environmentProp,
       database: databaseProp,
+      databases: databasesProp,
       schema: schema.string("Restrict to one schema."),
       namePattern: schema.string("T-SQL LIKE pattern on the routine name, e.g. 'Report[_]%'."),
       type: schema.enumOf(Object.keys(ROUTINE_TYPES), "Restrict to one routine kind."),
@@ -337,6 +354,7 @@ export function buildReadTools(deps: SqlserverDeps): AnyToolDefinition[] {
       .object({
         environment: environmentArg,
         database: databaseArg,
+        databases: databasesArg,
         schema: schemaArg,
         namePattern: z.string().min(1).max(256).optional(),
         type: z.enum(Object.keys(ROUTINE_TYPES) as [string, ...string[]]).optional(),
@@ -344,19 +362,28 @@ export function buildReadTools(deps: SqlserverDeps): AnyToolDefinition[] {
       })
       .strict(),
     handler: async (input) => {
-      const target = connections.resolve(input.environment, input.database);
-      const pool = await connections.pool(target);
-      const rows = await listRoutines(pool, {
-        schema: input.schema,
-        namePattern: input.namePattern,
-        typeCode: input.type === undefined ? undefined : ROUTINE_TYPES[input.type]
+      const selection = resolveCatalogs(input, config.limits.maxFanout);
+      const outcomes = await runAcrossCatalogs({
+        ...selection,
+        runOne: async (database) => {
+          const target = connections.resolve(input.environment, database);
+          const pool = await connections.pool(target);
+          const rows = await listRoutines(pool, {
+            schema: input.schema,
+            namePattern: input.namePattern,
+            typeCode: input.type === undefined ? undefined : ROUTINE_TYPES[input.type]
+          });
+          return { database: target.database, count: rows.length, routines: rows };
+        },
+        onFailure: (database, error) => {
+          logger.error("list_routines_failed", {
+            database: database ?? "(default)",
+            error: error instanceof Error ? error.message : String(error)
+          });
+        }
       });
-      return ok({
-        environment: target.environment.name,
-        database: target.database,
-        count: rows.length,
-        routines: rows
-      });
+      const environment = connections.resolve(input.environment).environment.name;
+      return ok(catalogPayload({ environment }, outcomes, selection.fannedOut));
     }
   });
 

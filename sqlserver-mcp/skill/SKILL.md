@@ -21,6 +21,7 @@ Catalog names are deployment-specific and often generated — never guess one. `
 health_check                       // connectivity, server version, linkedServerCount
 list_databases                     // WHICH CATALOGS EXIST. Always start here.
 list_tables(database)              // tables + views, approximate row counts
+                                   // takes `databases: [...]` to sweep several catalogs at once
 describe_table(database, table)    // columns, defaults, indexes, FKs both directions
 ```
 
@@ -40,16 +41,26 @@ run_read_query(sql, database?, parameters?, maxRows?, timeoutMs?)
   `recordsets[].rows` (positional arrays) with a matching `columns[]`, so duplicate column names in
   a wide join are never silently dropped.
 
-### Running one query across many catalogs
+### Running one thing across many catalogs
 
 ```
 run_read_query(sql, databases: ["TenantA", "TenantB", …])
+list_tables(databases: ["TenantA", "TenantB", …])
+list_routines(databases: [...], namePattern: "Report[_]%")
 ```
 
-Same statement, one result slot per catalog, labelled. A catalog that fails lands as `error` in its
-own slot and does not discard the others. **You supply the list** — this server has no idea which
-catalogs are tenants or how to find them. If the list lives in a table, read it first with an
-ordinary `run_read_query`, then pass the names in.
+One result slot per catalog, labelled, in the order you asked. A catalog that fails lands as
+`error` + `errorCode` in its own slot and does not discard the others — check `failureCount` rather
+than assuming every slot succeeded.
+
+**Reach for `databases` on the metadata tools before hand-writing `sys.tables` / `sys.partitions`
+through `run_read_query`.** That is the workaround it exists to remove, and it loses the per-catalog
+labelling and the partial-failure handling you would then have to rebuild.
+
+**You supply the list** — this server has no idea which catalogs are tenants or how to find them.
+If the list lives in a table, read it first with an ordinary `run_read_query`, then pass the names
+in. `database` and `databases` are mutually exclusive, and the width is capped by
+`SQLSERVER_MAX_FANOUT`.
 
 ## Understanding a schema you have not seen
 

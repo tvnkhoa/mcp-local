@@ -343,6 +343,13 @@
             "description": "Catalog to run against. Defaults to the catalog named by the connection string.",
             "type": "string"
           },
+          "databases": {
+            "description": "Run against each of these catalogs and label the results per catalog. Mutually exclusive with `database`.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
           "environment": {
             "description": "Configured environment name. Defaults to the configured default environment.",
             "type": "string"
@@ -397,6 +404,13 @@
           "database": {
             "description": "Catalog to run against. Defaults to the catalog named by the connection string.",
             "type": "string"
+          },
+          "databases": {
+            "description": "Run against each of these catalogs and label the results per catalog. Mutually exclusive with `database`.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
           },
           "environment": {
             "description": "Configured environment name. Defaults to the configured default environment.",

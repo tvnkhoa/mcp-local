@@ -767,3 +767,50 @@ test("a one-element databases array still gets the fan-out shape", async () => {
   assert.ok("results" in payload, "one entry must not collapse to the flat shape");
   assert.equal(payload.catalogCount, 1);
 });
+
+// --- fan-out on the metadata tools ---------------------------------------------
+
+test("the three fan-out tools advertise the SAME databases node, not three lookalikes", () => {
+  // `common.ts` exists so two tools meaning the same thing by a parameter advertise it identically.
+  // Object identity is the only way to assert that and have it survive someone "improving" one of
+  // the three descriptions in isolation.
+  const nodes = ["run_read_query", "list_tables", "list_routines"].map((name) => {
+    const tool = makeTools().find((candidate) => candidate.name === name);
+    assert.ok(tool, `${name} not found`);
+    return (tool.inputSchema as { properties: Record<string, unknown> }).properties["databases"];
+  });
+  assert.ok(nodes[0], "run_read_query must still advertise databases");
+  assert.equal(nodes[1], nodes[0], "list_tables advertises a different databases node");
+  assert.equal(nodes[2], nodes[0], "list_routines advertises a different databases node");
+});
+
+for (const toolName of ["list_tables", "list_routines"]) {
+  test(`${toolName}: database and databases are mutually exclusive`, async () => {
+    const { isError, payload } = await bodyOf(toolName, { database: "A", databases: ["B"] });
+    assert.equal(isError, true);
+    assert.match(payload.message, /not both/);
+  });
+
+  test(`${toolName}: a fan-out wider than the configured limit is refused`, async () => {
+    const config = makeConfig({ limits: { ...makeConfig().limits, maxFanout: 2 } });
+    const { isError, payload } = await bodyOf(toolName, { databases: ["A", "B", "C"] }, config);
+    assert.equal(isError, true);
+    assert.equal(payload.code, "fanout_limit_exceeded");
+  });
+
+  test(`${toolName}: a refused catalog is a slot, and the other catalogs are unaffected`, async () => {
+    // The fan-out contract, provable without a database: the allowlist refuses at `resolve()`,
+    // before a connection is attempted.
+    const config = makeConfig({ allowedDatabases: ["Permitted"] });
+    const { isError, payload } = await bodyOf(toolName, { databases: ["Alpha", "Beta"] }, config);
+    assert.equal(isError, undefined, "one refused catalog must not fail the whole call");
+    assert.equal(payload.catalogCount, 2);
+    assert.equal(payload.failureCount, 2);
+    assert.deepEqual(
+      payload.results.map((slot: { database: string }) => slot.database),
+      ["Alpha", "Beta"],
+      "request order"
+    );
+    assert.equal(payload.results[0].errorCode, "database_not_allowed");
+  });
+}
