@@ -14,6 +14,10 @@ import {
 } from "../config/environments.js";
 import { ConnectionManager, MAX_FANOUT_CONCURRENCY } from "../repositories/connectionManager.js";
 import { referencedCatalogCandidates, validateReadOnlySql } from "../middleware/sqlGuardrails.js";
+import {
+  classifyConnectionFailure,
+  connectionFailureAsPlatformError
+} from "../middleware/errors.js";
 
 /**
  * Tools are pinned here rather than only in `contracts/sqlserver-mcp.json`.
@@ -510,4 +514,100 @@ test("the pool cap can never drop below the fan-out concurrency", () => {
   const config = makeConfig({ pools: { poolMax: 5, maxPools: 1, idleTimeoutMs: 1000 } });
   const manager = new ConnectionManager(config) as unknown as { limits: { maxPools: number } };
   assert.ok(manager.limits.maxPools >= MAX_FANOUT_CONCURRENCY);
+});
+
+
+// ---- Connection failure classification (found by the first real install: a TLS failure reached
+// the caller as `internal_error` / "Health probe failed.", which is the one answer a health check
+// must not give) ----
+
+/** Shaped like a `mssql` ConnectionError, which nests the useful text on `originalError`. */
+function driverError(code: string, message: string): Error & { code: string; originalError: Error } {
+  const error = new Error(message) as Error & { code: string; originalError: Error };
+  error.code = code;
+  error.originalError = new Error(message);
+  return error;
+}
+
+test("a TLS chain failure is reported as config_error and names the fix", () => {
+  const classified = classifyConnectionFailure(
+    driverError("ESOCKET", "Failed to connect to db.example:1433 - unable to get local issuer certificate")
+  );
+  assert.equal(classified?.code, "config_error");
+  assert.match(classified?.message ?? "", /NODE_EXTRA_CA_CERTS/);
+  // The trade-off is stated, not just the workaround.
+  assert.match(classified?.message ?? "", /impersonable/);
+});
+
+test("classification never echoes the driver's own text", () => {
+  // Both the host and the login name appear in real driver messages, and `describeConfig`
+  // redacts the login to `***` — forwarding the message would leak past our own redaction.
+  const cases = [
+    driverError("ESOCKET", "Failed to connect to secret-host.internal:1433 - getaddrinfo ENOTFOUND secret-host.internal"),
+    driverError("ELOGIN", "Login failed for user 'svc_reporting'."),
+    driverError("ETIMEOUT", "Timeout: request failed to complete in 15000ms"),
+    driverError("ECONNRESET", "socket hang up at secret-host.internal")
+  ];
+  for (const error of cases) {
+    const message = classifyConnectionFailure(error)?.message ?? "";
+    assert.equal(message.includes("secret-host.internal"), false, message);
+    assert.equal(message.includes("svc_reporting"), false, message);
+  }
+});
+
+test("each connect failure gets its own code, and the driver code is carried", () => {
+  const expected: ReadonlyArray<readonly [string, string, string]> = [
+    ["ESOCKET", "getaddrinfo ENOTFOUND host", "config_error"],
+    ["ELOGIN", "Login failed for user 'u'.", "unauthorized"],
+    ["ETIMEOUT", "Timeout: connection failed", "timeout"],
+    ["ECONNREFUSED", "connect ECONNREFUSED 10.0.0.1:1433", "config_error"],
+    ["ESOCKET", "socket hang up", "upstream_error"]
+  ];
+  for (const [code, text, want] of expected) {
+    const classified = classifyConnectionFailure(driverError(code, text));
+    assert.equal(classified?.code, want, `${code}: ${text}`);
+    assert.match(classified?.message ?? "", new RegExp(`driver: ${code}`));
+  }
+});
+
+test("a non-driver error is left to the normal mapper", () => {
+  assert.equal(classifyConnectionFailure(new Error("something else")), undefined);
+  // A `code` outside the fixed vocabulary is not interpolated into a message.
+  assert.equal(classifyConnectionFailure(driverError("not a code", "x")), undefined);
+});
+
+test("the probe's PlatformError keeps the original on cause, never in the message", () => {
+  const cause = driverError("ELOGIN", "Login failed for user 'svc_reporting'.");
+  const error = connectionFailureAsPlatformError(cause);
+  assert.equal(error.code, "unauthorized");
+  assert.equal(error.message.includes("svc_reporting"), false);
+  assert.equal(error.cause, cause, "the full error stays reachable for the log");
+});
+
+test("an unclassifiable probe failure still says it was the probe", () => {
+  const error = connectionFailureAsPlatformError(new Error("boom"));
+  assert.equal(error.code, "internal_error");
+  assert.match(error.message, /probe/i);
+});
+
+// ---- Default catalog ----
+
+test("a connection string with no catalog starts in master", () => {
+  // Requiring one contradicted the server's own thesis: the catalog is per-call, and the
+  // connection string only names where to start. This was a hard boot failure until 2026-08-19.
+  const parsed = parseConnectionString("Data Source=h; User Id=u; Password=p");
+  assert.equal(parsed.database, "master");
+});
+
+test("an explicit catalog still wins, under either spelling", () => {
+  assert.equal(parseConnectionString("Server=h; Initial Catalog=AppMain; User Id=u; Password=p").database, "AppMain");
+  assert.equal(parseConnectionString("Server=h; Database=AppMain; User Id=u; Password=p").database, "AppMain");
+});
+
+test("a missing server is still refused — only the catalog got a default", () => {
+  assert.throws(
+    () => parseConnectionString("some-host.example.com;User Id=u;Password=p"),
+    /missing a server/,
+    "a bare host with no `Data Source=` is what a real operator pasted, and ADO.NET refuses it too"
+  );
 });

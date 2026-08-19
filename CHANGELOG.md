@@ -8,6 +8,64 @@ All notable changes to this project will be documented in this file.
 > introducing commit named so each claim is checkable. They are backfill, not a record written at
 > the time.
 
+## [Unreleased] - 2026-08-19b
+
+### 🔌 What the first real install of `sqlserver-mcp` found
+
+Three failures before a single tool ran, against AWS RDS. Two were operator input; the third and
+worst was that the server could not say so.
+
+**`health_check` answered `internal_error` / "Health probe failed."** — for a TLS chain failure,
+which is a configuration problem with a specific fix. The probe threw, and `createHealthCheckTool`
+turns a thrown error into that fixed string by design: `toPlatformError` puts the driver's message
+on `cause`, which is logged and never serialized, because a driver message can embed a connection
+string. The shared behaviour is right and is unchanged. What was wrong is that this server's probe
+threw at all — the SDK's own docstring says *"Returning an error marks the server degraded rather
+than throwing"*, and the seam for classifying by a driver's fields (`stringProperty`) was already
+there for exactly this.
+
+So `classifyConnectionFailure` reads the driver error, decides what happened, and emits wording
+written in `middleware/errors.ts`: TLS chain, DNS, login rejected, timeout, refused. The driver's
+own text is never forwarded — it embeds `host:port` on every `ESOCKET`, and `Login failed for user
+'x'` names the account `describeConfig` deliberately redacts to `***`. Only the driver's `code` is
+interpolated, and only after matching `/^[A-Z_]{1,32}$/`. It is wired in as an `ErrorRule`, so
+every tool that opens a connection reports the same cause, not just `health_check`.
+
+The TLS case now returns `config_error` and names the fix. Verified by reproducing the original
+failure against the live instance.
+
+**`Initial Catalog=` was a hard boot failure.** That contradicted the server's own thesis. The unit
+of work is a catalog, every data tool takes `database`, and a connection string is therefore only
+naming which catalog to *start* in — so refusing to start without one made the config require a
+decision the design says is per-call. It now defaults to `master`: present on every instance,
+reachable by any login that can connect, and where `sys.databases` lives, so `list_databases` is
+the first call a caller can make from it. Resolved explicitly rather than left to the login's own
+default, because pools are keyed `(environment, catalog)` and a key unknowable until after connect
+is a key two callers can disagree about.
+
+**The documented answer to a TLS problem was to turn TLS verification off — twice.**
+`NODE_TLS_REJECT_UNAUTHORIZED` and `TrustServerCertificate=true` were the only two options in the
+generated env docs. Both leave the traffic encrypted but unauthenticated, which on a public RDS
+endpoint is a real exposure rather than a theoretical one. `NODE_EXTRA_CA_CERTS` is now declared
+(19 vars for this server, 125 across the workspace) with the regional RDS CA bundle URL. It is the
+one option that keeps the certificate verified, and it needs no code change.
+
+### 📌 Correction: ADR 0004 claimed zero linked servers, and there are two
+
+The `OPEN*` paragraph asserted *"zero linked servers configured on the instance (`sys.servers` has
+only the local entry)"*. That was never measured — the audit read 2,106 SQL files, not the server.
+The first `health_check` against a real instance reported `linkedServerCount: 2`: `BMWDataLake` and
+`dataprocess-dev-1`.
+
+The decision does not change and its justification gets stronger. Closing off "read a remote system
+through the database" was written up as pre-emptive. It is not: an `OPENQUERY` against
+`BMWDataLake` would have reached a data lake through a read-only SQL login, and a four-part name
+would have done it with no `OPEN*` token at all. The zero that carries the argument is the corpus
+zero, which was measured. Reporting `linkedServerCount` is what caught the other one, which is the
+only reason that field exists.
+
+`verify:all`: exit 0. `sqlserver-mcp`: 65 tests, up from 56.
+
 ## [Unreleased] - 2026-08-19
 
 ### 🗄️ `sqlserver-mcp` — the fifth server

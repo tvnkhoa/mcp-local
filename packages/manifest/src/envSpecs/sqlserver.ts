@@ -122,9 +122,15 @@ export const sqlserverEnv: readonly EnvField[] = [
   // a real deployment needs is not a complete picture. No `default` — writing one would pin an
   // external convention into every user's agent config.
   {
+    name: "NODE_EXTRA_CA_CERTS",
+    required: false,
+    section: "Node runtime",
+    note: "Absolute path to a PEM bundle added to Node's trust store. This is the fix for `TLS certificate verification failed` and the only one of the three that keeps the certificate verified. AWS RDS chains to an Amazon RDS CA that Node does not ship: download the bundle for your region from https://truststore.pki.rds.amazonaws.com/<region>/<region>-bundle.pem and point this at it."
+  },
+  {
     name: "NODE_TLS_REJECT_UNAUTHORIZED",
     required: false,
     section: "Node runtime",
-    note: "Node-level TLS switch. Prefer TrustServerCertificate=true in the connection string, which is scoped to this connection instead of the whole process."
+    note: "Node-level TLS switch. A blunt last resort: it disables verification for every TLS connection the process makes. Prefer NODE_EXTRA_CA_CERTS, which fixes the cause; failing that TrustServerCertificate=true, which at least scopes the damage to this connection. Both of those leave the traffic encrypted but unauthenticated — reachable by anyone who can get in the path."
   }
 ];

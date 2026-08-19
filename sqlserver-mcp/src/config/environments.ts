@@ -186,6 +186,13 @@ function parseBool(value: string | undefined, fallback: boolean): boolean {
 }
 
 /**
+ * The catalog a connection starts in when the connection string does not name one.
+ *
+ * `master` and not the login's default database — see the note at its use site.
+ */
+export const DEFAULT_CATALOG = "master";
+
+/**
  * Parse an ADO.NET / Npgsql-shaped SQL Server connection string.
  *
  * Accepts the aliases that actually appear in .NET configuration rather than only the canonical
@@ -211,12 +218,16 @@ export function parseConnectionString(raw: string): SqlConnectionSettings {
     );
   }
 
-  const database = get("initial catalog", "database");
-  if (database === undefined) {
-    throw new Error(
-      "Connection string is missing a database (expected `Initial Catalog=` or `Database=`)."
-    );
-  }
+  // Defaulting rather than refusing, because requiring a catalog here contradicts what this
+  // server is: the unit of work is a catalog and every data tool takes `database`, so a connection
+  // string is only ever naming the one to *start* in. `master` is the honest default — it exists on
+  // every instance, any login that can connect at all can reach it, and it is where `sys.databases`
+  // lives, so `list_databases` is exactly the first call a caller can make from it.
+  //
+  // Left explicit rather than resolved to the login's own default database: pools are keyed
+  // `(environment, catalog)`, and a key that cannot be known until after the connect opens is a key
+  // two callers can disagree about.
+  const database = get("initial catalog", "database") ?? DEFAULT_CATALOG;
 
   // Windows/integrated auth is not reachable from this driver on a non-Windows host and needs a
   // different code path even on one. Refusing here beats a connect-time error that reads like bad

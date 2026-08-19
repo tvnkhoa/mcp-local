@@ -11,12 +11,16 @@
  *    Server may write without anything in the catalog saying so.
  */
 
-import { isPlatformError, ok } from "@mcp/core";
+import { err, isPlatformError, ok } from "@mcp/core";
 import { createHealthCheckTool, registerTool } from "@mcp/sdk";
 import type { AnyToolDefinition } from "@mcp/sdk";
 
 import { describeConfig, type SqlserverConfig } from "../config/index.js";
-import { mapError, type MappedError } from "../middleware/errors.js";
+import {
+  connectionFailureAsPlatformError,
+  mapError,
+  type MappedError
+} from "../middleware/errors.js";
 import { getServerInfo, listLinkedServers } from "../repositories/introspection.js";
 import type { ConnectionManager } from "../repositories/connectionManager.js";
 import { buildExecTools } from "./execTools.js";
@@ -51,27 +55,36 @@ export function buildTools(deps: SqlserverDeps): readonly AnyToolDefinition[] {
      * `mcp:doctor` and the smoke tests need no per-server special cases.
      *
      * The probe reports `linkedServerCount` because that number is what the SQL guardrail's
-     * four-part-name rule assumes. If it stops being zero, the assumption behind the rule has
-     * changed and an operator should be able to see that without reading the source.
+     * four-part-name rule is about. ADR 0004 originally assumed it was zero everywhere; the first
+     * run against a real instance returned 2, which is why the field exists — the rule is closing
+     * off a path that is reachable, not a hypothetical one.
      */
     createHealthCheckTool({
       serverName: "sqlserver-mcp",
       version: "0.1.0",
       describeConfig: () => describeConfig(config),
       probe: async () => {
-        const target = connections.resolve();
-        const pool = await connections.pool(target);
-        const [info, linked] = await Promise.all([getServerInfo(pool), listLinkedServers(pool)]);
-        return ok({
-          environment: target.environment.name,
-          serverName: info.serverName,
-          version: info.version,
-          edition: info.edition,
-          currentDatabase: info.currentDatabase,
-          serverUtcTime: info.utcTime,
-          linkedServerCount: linked.length,
-          linkedServers: linked.map((entry) => entry.name)
-        });
+        // Returning the failure rather than throwing is the whole point: `createHealthCheckTool`
+        // turns a thrown error into `internal_error` / "Health probe failed.", which is the one
+        // answer a health check must never give. `connectionFailureAsPlatformError` names the
+        // cause — TLS, DNS, login, timeout — without echoing the driver's own text.
+        try {
+          const target = connections.resolve();
+          const pool = await connections.pool(target);
+          const [info, linked] = await Promise.all([getServerInfo(pool), listLinkedServers(pool)]);
+          return ok({
+            environment: target.environment.name,
+            serverName: info.serverName,
+            version: info.version,
+            edition: info.edition,
+            currentDatabase: info.currentDatabase,
+            serverUtcTime: info.utcTime,
+            linkedServerCount: linked.length,
+            linkedServers: linked.map((entry) => entry.name)
+          });
+        } catch (cause) {
+          return err(connectionFailureAsPlatformError(cause));
+        }
       }
     }),
 

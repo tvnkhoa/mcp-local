@@ -77,9 +77,10 @@ name and typed parameters, which the driver binds.
 | `SQLSERVER_EXEC_ENABLED` | no | `false` | execute_routine is OFF unless true. Parsed strictly: exact "true" or "1". SQL Server records nothing about whether a procedure writes, so enabling this grants write capability regardless of which routines you intend to call. |
 | `SQLSERVER_EXEC_ALLOWLIST` | no | `(empty = no narrowing)` *(code)* | Comma-separated glob patterns over `schema.routine`, e.g. `dbo.Report_*,dbo.Get*`. `*` is the whole grammar. Empty does NOT deny — the flag above is the gate. |
 | `SQLSERVER_EXEC_TIMEOUT_MS` | no | `120000` *(code)* | — |
-| `NODE_TLS_REJECT_UNAUTHORIZED` | no | — | Node-level TLS switch. Prefer TrustServerCertificate=true in the connection string, which is scoped to this connection instead of the whole process. |
+| `NODE_EXTRA_CA_CERTS` | no | — | Absolute path to a PEM bundle added to Node's trust store. This is the fix for `TLS certificate verification failed` and the only one of the three that keeps the certificate verified. AWS RDS chains to an Amazon RDS CA that Node does not ship: download the bundle for your region from https://truststore.pki.rds.amazonaws.com/<region>/<region>-bundle.pem and point this at it. |
+| `NODE_TLS_REJECT_UNAUTHORIZED` | no | — | Node-level TLS switch. A blunt last resort: it disables verification for every TLS connection the process makes. Prefer NODE_EXTRA_CA_CERTS, which fixes the cause; failing that TrustServerCertificate=true, which at least scopes the damage to this connection. Both of those leave the traffic encrypted but unauthenticated — reachable by anyone who can get in the path. |
 
-18 variables. Defaults marked *(code)* are the server's own fallback and are **not** written into your agent config — set them only to override.
+19 variables. Defaults marked *(code)* are the server's own fallback and are **not** written into your agent config — set them only to override.
 
 <!-- END GENERATED: env-table -->
 

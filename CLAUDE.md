@@ -104,7 +104,7 @@ npm run generate:check   # fails on drift; runs inside verify:all
 ```
 
 `mcp:doctor` reports a stale generated file per server as a warning. Env vars are declared once,
-in `packages/manifest/src/envSpecs/<server>.ts` — **124** across the five servers (41/23/18/31/11).
+in `packages/manifest/src/envSpecs/<server>.ts` — **125** across the five servers (41/23/19/31/11).
 
 ## Architecture (codebase-index-mcp)
 

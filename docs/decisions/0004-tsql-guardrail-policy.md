@@ -56,11 +56,23 @@ Two entries deserve their reasoning stated rather than tabulated.
 statement that occupies a connection for a day, and this server holds a bounded pool per catalog —
 so the denial-of-service is against the tool, not only against the database.
 
-**The `OPEN*` family.** The audit measured **zero** occurrences across all 2,106 SQL files, and zero
-linked servers configured on the instance (`sys.servers` has only the local entry). Forbidding them
-therefore costs nothing real and removes the entire "read a remote system through the database"
-class from the tool's reach. `health_check` reports `linkedServerCount` so an operator can see if
-that premise ever stops holding.
+**The `OPEN*` family.** The audit measured **zero** occurrences across all 2,106 SQL files, so
+forbidding them costs nothing real and removes the entire "read a remote system through the
+database" class from the tool's reach. `health_check` reports `linkedServerCount` so an operator
+can see what the instance actually offers that class.
+
+> **Corrected 2026-08-19.** This paragraph also claimed *"zero linked servers configured on the
+> instance (`sys.servers` has only the local entry)"*. That was never measured — the audit read
+> 2,106 SQL files, not the server — and it is false. The first `health_check` against a real
+> instance reported `linkedServerCount: 2` (`BMWDataLake`, `dataprocess-dev-1`).
+>
+> The decision does not change; its justification gets stronger. "Reading a remote system through
+> the database" was written up as a hypothetical class being closed off pre-emptively. It is not
+> hypothetical on this instance — an `OPENQUERY` against `BMWDataLake` would have reached a data
+> lake through a read-only SQL login, and a four-part name would have done it without any `OPEN*`
+> token at all. The zero that carries the argument is the **corpus** zero, which was measured. The
+> instance zero was an assumption, and reporting `linkedServerCount` is what caught it — which is
+> the only reason that field exists.
 
 ### What is deliberately NOT on the list
 
