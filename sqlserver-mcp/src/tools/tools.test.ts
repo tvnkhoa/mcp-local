@@ -1,10 +1,13 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import test from "node:test";
 
 import { createNullLogger, createEventLogger } from "@mcp/core";
 import { asErrorPayload, createToolRegistry, dispatchToolCall } from "@mcp/sdk";
 
 import { buildDeps, buildTools, toWireError } from "./index.js";
+import { summarizeCrossDatabaseTargets } from "./readTools.js";
 import type { SqlserverConfig } from "../config/index.js";
 import {
   parseConnectionString,
@@ -610,4 +613,98 @@ test("a missing server is still refused — only the catalog got a default", () 
     /missing a server/,
     "a bare host with no `Data Source=` is what a real operator pasted, and ADO.NET refuses it too"
   );
+});
+
+
+// ---- Reserved words in generated SQL ----
+
+/**
+ * T-SQL reserved words that are plausible column aliases. Not the full list — the full list is 180
+ * words and most of them (`CROSS`, `HAVING`) could never be mistaken for a result column name.
+ * These are the ones that read like data.
+ */
+const RESERVED_ALIASES = new Set([
+  "rowcount", "key", "percent", "plan", "public", "read", "user", "current_user", "session_user",
+  "system_user", "file", "identity", "check", "column", "constraint", "default", "distinct",
+  "escape", "function", "grant", "index", "left", "right", "like", "national", "option", "order",
+  "over", "primary", "print", "proc", "public", "raiserror", "replication", "restore", "return",
+  "revert", "rule", "save", "schema", "select", "set", "statistics", "table", "top", "tran",
+  "trigger", "truncate", "union", "unique", "update", "use", "values", "view", "when", "where",
+  "while", "with", "writetext"
+]);
+
+test("no generated SQL aliases a column to a T-SQL reserved word", () => {
+  // `list_tables` shipped broken: `as rowCount` is a syntax error because ROWCOUNT is reserved
+  // (`SET ROWCOUNT`), so every call failed with "Incorrect syntax near the keyword 'rowCount'".
+  // No test caught it — all of these run without a database, and the smoke test was never run.
+  // This scans the SQL itself, which needs no connection.
+  const source = readFileSync(
+    fileURLToPath(new URL("../repositories/introspection.ts", import.meta.url)),
+    "utf8"
+  );
+  const offenders: string[] = [];
+  const aliasPattern = /\bas\s+([A-Za-z_][A-Za-z0-9_]*)\s*(?=[,\r\n]|$)/gm;
+  for (const match of source.matchAll(aliasPattern)) {
+    const alias = match[1] ?? "";
+    if (RESERVED_ALIASES.has(alias.toLowerCase())) {
+      offenders.push(alias);
+    }
+  }
+  assert.deepEqual(
+    offenders,
+    [],
+    `alias(es) collide with a T-SQL reserved word and must be bracketed, e.g. \`as [${offenders[0] ?? "x"}]\``
+  );
+});
+
+
+// ---- Cross-database targets that are not catalogs ----
+// Found by running the tool against a real instance: of 13 target names reported for CRM_Master,
+// four were not databases at all. `referenceCount: 107` was really 103 plus noise.
+
+const XML_AND_DROPPED = [
+  // XML shredding: `CROSS APPLY … AS agent_nodes(agent_node)` then `agent_node.value(…)` is
+  // recorded by the catalog as the three-part name `agent_nodes.agent_node.value`.
+  { fromSchema: "dbo", fromObject: "sp_WhoIsActive", fromType: "SQL_STORED_PROCEDURE", toDatabase: "agent_nodes", toSchema: "agent_node", toObject: "value" },
+  { fromSchema: "dbo", fromObject: "USP_CaptureDeadlock", fromType: "SQL_STORED_PROCEDURE", toDatabase: "x", toSchema: "dl", toObject: "value" },
+  // A real reference to a database that has since been dropped — the module no longer binds.
+  { fromSchema: "dbo", fromObject: "ImportNZBSI", fromType: "SQL_STORED_PROCEDURE", toDatabase: "CRM_Tenant_NZ", toSchema: "dbo", toObject: "Vehicle" },
+  { fromSchema: "dbo", fromObject: "ImportNZBSI", fromType: "SQL_STORED_PROCEDURE", toDatabase: "CRM_Tenant_NZ", toSchema: "dbo", toObject: "Warranty" },
+  // Two genuine cross-catalog reads.
+  { fromSchema: "dbo", fromObject: "DealerGroupView", fromType: "VIEW", toDatabase: "CRM_Identity", toSchema: "dbo", toObject: "Entity" },
+  { fromSchema: "dbo", fromObject: "SP_GetOrgInfo", fromType: "SQL_STORED_PROCEDURE", toDatabase: "CRM_Identity", toSchema: "dbo", toObject: "Entity" }
+];
+
+const REAL_CATALOGS = new Set(["crm_identity", "crm_master", "master"]);
+
+test("a target that is not a catalog is marked, not dropped", () => {
+  const { targets, unresolvedTargets } = summarizeCrossDatabaseTargets(XML_AND_DROPPED, REAL_CATALOGS);
+  // Dropping them would hide CRM_Tenant_NZ, which is the one finding here worth acting on.
+  assert.deepEqual(
+    unresolvedTargets.map((t) => t.database).sort(),
+    ["CRM_Tenant_NZ", "agent_nodes", "x"]
+  );
+  assert.equal(targets.length, 4, "every target still appears");
+  assert.equal(targets.find((t) => t.database === "CRM_Identity")?.exists, true);
+});
+
+test("the headline count is split so noise cannot inflate it", () => {
+  const { unresolvedReferenceCount } = summarizeCrossDatabaseTargets(XML_AND_DROPPED, REAL_CATALOGS);
+  assert.equal(unresolvedReferenceCount, 4, "2 XML rows + 2 rows to the dropped catalog");
+  assert.equal(XML_AND_DROPPED.length - unresolvedReferenceCount, 2, "only 2 are real");
+});
+
+test("real catalogs sort ahead of unresolved names", () => {
+  const { targets } = summarizeCrossDatabaseTargets(XML_AND_DROPPED, REAL_CATALOGS);
+  const firstUnresolved = targets.findIndex((t) => !t.exists);
+  const lastReal = targets.map((t) => t.exists).lastIndexOf(true);
+  assert.ok(lastReal < firstUnresolved, `real targets must come first: ${targets.map((t) => t.database).join(", ")}`);
+});
+
+test("catalog matching is case-insensitive, as SQL Server names are", () => {
+  const { unresolvedTargets } = summarizeCrossDatabaseTargets(
+    [{ fromSchema: "dbo", fromObject: "V", fromType: "VIEW", toDatabase: "CRM_IDENTITY", toSchema: "dbo", toObject: "Entity" }],
+    REAL_CATALOGS
+  );
+  assert.deepEqual(unresolvedTargets, []);
 });

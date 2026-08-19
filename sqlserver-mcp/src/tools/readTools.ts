@@ -18,6 +18,7 @@ import {
   describeIndexes,
   describeRoutineParameters,
   findCrossDatabaseReferences,
+  type CrossDatabaseReference,
   getObjectDescription,
   getRoutineDefinition,
   listDatabases,
@@ -38,6 +39,74 @@ import {
   schemaProp,
   type SqlserverDeps
 } from "./common.js";
+
+
+/** One catalog reached by the catalog under inspection, with whether it is a real database. */
+export interface CrossDatabaseTarget {
+  readonly database: string;
+  readonly exists: boolean;
+  readonly referenceCount: number;
+  readonly referencingObjectCount: number;
+  readonly referencingObjects: readonly string[];
+}
+
+/**
+ * Group `sys.sql_expression_dependencies` rows by target catalog, and mark the ones that are not
+ * catalogs at all.
+ *
+ * A name in `referenced_database_name` is not proof a catalog exists, and two very different
+ * things land there looking identical:
+ *
+ *  - **XML shredding.** `CROSS APPLY x.nodes(…) AS agent_nodes(agent_node)` followed by
+ *    `agent_node.value(…)` is recorded as the three-part name `agent_nodes.agent_node.value`.
+ *    Pure noise — there is no catalog and never was.
+ *  - **A dropped catalog.** SQL Server binds names late, so a module still carries a dependency on
+ *    a database that no longer exists. That is not noise: the module no longer binds, and this is
+ *    the only place that says so.
+ *
+ * Both are marked rather than dropped, because the second is worth more than the tool's headline
+ * number. Real catalogs sort first; the counts are split so the headline is not inflated by either.
+ *
+ * Split out of the handler so it can be tested without a database, which is the whole test suite's
+ * posture — and the reason a broken `list_tables` shipped, so the seam is deliberate.
+ */
+export function summarizeCrossDatabaseTargets(
+  references: readonly CrossDatabaseReference[],
+  catalogNames: ReadonlySet<string>
+): {
+  targets: CrossDatabaseTarget[];
+  unresolvedTargets: CrossDatabaseTarget[];
+  unresolvedReferenceCount: number;
+} {
+  const byDatabase = new Map<string, { database: string; referenceCount: number; objects: Set<string> }>();
+  for (const row of references) {
+    const entry = byDatabase.get(row.toDatabase) ?? {
+      database: row.toDatabase,
+      referenceCount: 0,
+      objects: new Set<string>()
+    };
+    entry.referenceCount += 1;
+    entry.objects.add(`${row.fromSchema}.${row.fromObject}`);
+    byDatabase.set(row.toDatabase, entry);
+  }
+
+  const targets: CrossDatabaseTarget[] = [...byDatabase.values()]
+    .map((entry) => ({
+      database: entry.database,
+      exists: catalogNames.has(entry.database.toLowerCase()),
+      referenceCount: entry.referenceCount,
+      referencingObjectCount: entry.objects.size,
+      referencingObjects: [...entry.objects].sort()
+    }))
+    .sort((a, b) => (a.exists === b.exists ? b.referenceCount - a.referenceCount : a.exists ? -1 : 1));
+
+  const unresolvedTargets = targets.filter((entry) => !entry.exists);
+  return {
+    targets,
+    unresolvedTargets,
+    unresolvedReferenceCount: unresolvedTargets.reduce((n, e) => n + e.referenceCount, 0)
+  };
+}
 
 export function buildReadTools(deps: SqlserverDeps): AnyToolDefinition[] {
   const { config, connections } = deps;
@@ -370,46 +439,43 @@ export function buildReadTools(deps: SqlserverDeps): AnyToolDefinition[] {
       const target = connections.resolve(input.environment, input.database);
       const pool = await connections.pool(target);
 
-      const [references, dynamicSqlModules] = await Promise.all([
+      const [references, dynamicSqlModules, catalogNames] = await Promise.all([
         findCrossDatabaseReferences(pool),
-        countUnresolvedModules(pool)
+        countUnresolvedModules(pool),
+        connections.catalogNames(target)
       ]);
 
-      const byDatabase = new Map<string, { database: string; referenceCount: number; objects: Set<string> }>();
-      for (const row of references) {
-        const entry = byDatabase.get(row.toDatabase) ?? {
-          database: row.toDatabase,
-          referenceCount: 0,
-          objects: new Set<string>()
-        };
-        entry.referenceCount += 1;
-        entry.objects.add(`${row.fromSchema}.${row.fromObject}`);
-        byDatabase.set(row.toDatabase, entry);
-      }
+      const { targets, unresolvedTargets, unresolvedReferenceCount } = summarizeCrossDatabaseTargets(
+        references,
+        catalogNames
+      );
 
       return ok({
         environment: target.environment.name,
         database: target.database,
         referenceCount: references.length,
-        targets: [...byDatabase.values()]
-          .map((entry) => ({
-            database: entry.database,
-            referenceCount: entry.referenceCount,
-            referencingObjectCount: entry.objects.size,
-            referencingObjects: [...entry.objects].sort()
-          }))
-          .sort((a, b) => b.referenceCount - a.referenceCount),
+        resolvedReferenceCount: references.length - unresolvedReferenceCount,
+        unresolvedReferenceCount,
+        unresolvedTargets: unresolvedTargets.map((entry) => entry.database),
+        targets,
         references,
         // Stated rather than implied. sys.sql_expression_dependencies resolves names as they were
         // compiled, so a catalog reached only through dynamic SQL leaves no row here at all.
         coverage: {
           complete: dynamicSqlModules === 0,
           dynamicSqlModules,
+          unresolvedTargetCount: unresolvedTargets.length,
           note:
-            dynamicSqlModules === 0
+            (dynamicSqlModules === 0
               ? "No modules build SQL dynamically; the dependency graph is complete."
               : `${dynamicSqlModules} module(s) build SQL dynamically (sp_executesql / EXEC(@…)). ` +
-                "References made only inside dynamic SQL are invisible to the catalog and are NOT listed."
+                "References made only inside dynamic SQL are invisible to the catalog and are NOT listed.") +
+            (unresolvedTargets.length === 0
+              ? ""
+              : ` ${unresolvedTargets.length} target name(s) are not catalogs on this instance ` +
+                "(`exists: false`): either XML shredding recorded as a three-part name, or a " +
+                "reference to a dropped database — which means that module no longer binds. " +
+                "Use resolvedReferenceCount for the real cross-catalog total.")
         }
       });
     }

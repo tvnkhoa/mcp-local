@@ -8,6 +8,56 @@ All notable changes to this project will be documented in this file.
 > introducing commit named so each claim is checkable. They are backfill, not a record written at
 > the time.
 
+## [Unreleased] - 2026-08-19c
+
+### 🐞 `list_tables` had never worked
+
+Every call returned `Incorrect syntax near the keyword 'rowCount'`. The inventory query aliased a
+column `as rowCount`, and `ROWCOUNT` is a T-SQL reserved word (`SET ROWCOUNT`), so the statement
+did not compile — in any catalog, at any profile, since the tool was written.
+
+Nothing caught it. All 65 tests run without a database by design, `contracts:check` boots the
+server and reads `tools/list` without calling anything, and `npm run smoke` — the one path that
+would have executed it — had never been run against a real instance. The tool was found by calling
+it, on the first attempt, which is the least sophisticated test available.
+
+Fixed by bracketing the alias. The guard is a test that scans the introspection SQL for aliases
+colliding with a T-SQL reserved word, so the next one fails in CI rather than on a user's first
+call. It needs no connection, which is why it can exist at all. Confirmed to fail when the bracket
+is removed.
+
+The irony is on the record: `bracketQuotedIdentifiers` was added to the shared SQL scanner so this
+server could *read* reserved words wrapped in brackets, and then the server's own generated SQL
+emitted one without them.
+
+`sqlserver-mcp`: 66 tests, up from 65.
+
+### 🧹 `find_cross_database_references` counted things that were not databases
+
+Run against a real instance, `CRM_Master` reported 13 target catalogs and `referenceCount: 107`.
+Four of those names are not databases on the instance at all, and they arrive there for two
+unrelated reasons that look identical in `sys.sql_expression_dependencies`:
+
+- **XML shredding.** `CROSS APPLY x.nodes(…) AS agent_nodes(agent_node)` followed by
+  `agent_node.value(…)` is recorded as the three-part name `agent_nodes.agent_node.value`. There is
+  no catalog and never was — `agent_nodes`, `trans_nodes` and `x` are all this.
+- **A dropped catalog.** `CRM_Tenant_NZ` no longer exists, but `ImportNZBSIPackageToWarrantyNZ`
+  still carries a dependency on it, because SQL Server binds names late. That is not noise: the
+  module no longer binds, and this tool is the only place that says so.
+
+Both are now marked `exists: false` rather than dropped, because the second finding is worth more
+than the headline number. Real catalogs sort first, and the count is split — `referenceCount: 107`,
+`resolvedReferenceCount: 102`, `unresolvedReferenceCount: 5` — so noise cannot inflate the figure
+the tool leads with. The `coverage` note explains both causes beside the dynamic-SQL caveat it
+already carried.
+
+The target check reuses the `sys.databases` cache added for the three-part-name allowlist, so it
+costs nothing per call. The grouping logic moved out of the handler into
+`summarizeCrossDatabaseTargets` so it can be tested without a database — the same gap that let a
+broken `list_tables` ship, so the seam is deliberate.
+
+`sqlserver-mcp`: 70 tests, up from 66.
+
 ## [Unreleased] - 2026-08-19b
 
 ### 🔌 What the first real install of `sqlserver-mcp` found

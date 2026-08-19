@@ -136,7 +136,7 @@ export async function listTables(
         s.name                                    as schemaName,
         o.name                                    as name,
         case o.type when 'V' then 'view' else 'table' end as type,
-        c.row_count                               as rowCount,
+        c.row_count                               as [rowCount],
         convert(varchar(33), o.create_date, 126)  as createdAt
      from sys.objects o
      join sys.schemas s on s.schema_id = o.schema_id
