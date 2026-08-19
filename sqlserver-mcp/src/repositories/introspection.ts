@@ -375,7 +375,14 @@ export async function listRoutines(
        and (@typeCode is null or o.type = @typeCode)
        and (@schemaName is null or s.name = @schemaName)
        and (@namePattern is null or o.name like @namePattern)
-       and (@modifiedAfter is null or o.modify_date >= convert(datetime2, @modifiedAfter, 126))
+       -- Compared as instants, not as wall-clock text. sys.objects.modify_date is server LOCAL
+       -- time with no zone attached, and style 126 silently DISCARDS an offset — so
+       -- '2026-08-19T02:49:00+10:00' was read as 02:49 server time, a ten-hour-wrong window with
+       -- no error. Style 127 keeps the offset, and todatetimeoffset() puts modify_date in the
+       -- server's own frame so the two are comparable.
+       and (@modifiedAfter is null
+            or todatetimeoffset(o.modify_date, datepart(tz, sysdatetimeoffset()))
+               >= convert(datetimeoffset, @modifiedAfter, 127))
      order by s.name, o.name`,
     {
       schemaName: nvarchar(options.schema ?? null),

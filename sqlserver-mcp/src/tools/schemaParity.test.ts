@@ -15,9 +15,12 @@ import { ConnectionManager } from "../repositories/connectionManager.js";
  * `docs:check` reads the advertised side only. This server gained the gate the day `databases` and
  * `includeReferences` were about to be hand-added to three tools.
  *
- * `z` is passed in deliberately. This server owns its own copy of zod (ADR 0001), so the shared
- * helper cannot import one: `instanceof` is false across copies and every tool would drop out of
- * the comparison silently. The floor is what turns that into a failure instead of a clean report.
+ * No zod namespace is passed. Injecting one was the first design — ADR 0001 means this server's
+ * `ZodObject` is not an instance of a hoisted package's class — and it does not work here:
+ * `health_check` comes from `@mcp/sdk` carrying the hoisted zod while this server's own eleven
+ * tools carry its copy, so no single namespace matches the table. The helper discriminates on
+ * `_def.typeName` instead, and the floor is what turns a broken walk into a failure rather than a
+ * clean report over nothing.
  */
 
 const CONNECTION =

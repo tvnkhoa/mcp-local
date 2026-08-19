@@ -325,7 +325,10 @@ export function buildReadTools(deps: SqlserverDeps): AnyToolDefinition[] {
         // call; the failure line is the one an operator needs.
         onFailure: (database, error) => {
           logger.error("list_tables_failed", {
-            database: database ?? "(default)",
+            // The catalog the connection string names, not the literal "(default)". An operator
+            // correlating this with the server side needs the real name, and a single-catalog call
+            // passes no `database` at all.
+            database: database ?? connections.resolve(input.environment).database,
             error: error instanceof Error ? error.message : String(error)
           });
         }
@@ -496,7 +499,10 @@ export function buildReadTools(deps: SqlserverDeps): AnyToolDefinition[] {
         },
         onFailure: (database, error) => {
           logger.error("list_routines_failed", {
-            database: database ?? "(default)",
+            // The catalog the connection string names, not the literal "(default)". An operator
+            // correlating this with the server side needs the real name, and a single-catalog call
+            // passes no `database` at all.
+            database: database ?? connections.resolve(input.environment).database,
             error: error instanceof Error ? error.message : String(error)
           });
         }

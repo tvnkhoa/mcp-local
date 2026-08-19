@@ -38,7 +38,7 @@ import {
  */
 const DATABASE_NAME = /^[A-Za-z_][A-Za-z0-9_$#@.\- ]{0,127}$/;
 
-/** Must match the worker count in `tools/queryTools.ts` — see the pool-cap floor below. */
+/** Used by `tools/fanout.ts`, which runs the loop for `run_read_query`, `list_tables` and `list_routines` — see the pool-cap floor below. */
 export const MAX_FANOUT_CONCURRENCY = 4;
 
 /** How long the per-environment catalog list is reused. Catalogs are created rarely. */
@@ -189,9 +189,21 @@ export class ConnectionManager {
    *
    * If the catalog list itself cannot be read, the login really is suspect and `unauthorized`
    * stands — that fallback is the honest answer, not a guess.
+   *
+   * **The default-catalog guard is what stops this recursing forever.** Reading the catalog list
+   * means connecting to the environment's default catalog, so on genuinely wrong credentials that
+   * connect fails `ELOGIN` too, and explaining *it* would read the list again — a loop that never
+   * settles, because nothing populates the cache on failure. The `try/catch` below cannot help: the
+   * inner call does not reject, it never returns. A bad password would hang every tool while
+   * hammering the login, which on many instances trips account lockout. Since the inner connect is
+   * always against the default catalog, declining to explain that one target bounds the depth at
+   * two by construction.
    */
   private async explainConnectFailure(target: ResolvedTarget, error: unknown): Promise<unknown> {
     if ((error as { code?: unknown } | null)?.code !== "ELOGIN") {
+      return error;
+    }
+    if (target.database.toLowerCase() === target.environment.settings.database.toLowerCase()) {
       return error;
     }
     try {
@@ -232,7 +244,11 @@ export class ConnectionManager {
       user: settings.user,
       password: settings.password,
       connectionTimeout: settings.connectTimeoutMs ?? 15_000,
-      requestTimeout: this.config.limits.maxTimeoutMs,
+      // The larger of the two budgets, because this is a pool-wide cap and the exec lane's is the
+      // longer one: at `maxTimeoutMs` alone a 120s SQLSERVER_EXEC_TIMEOUT_MS was unreachable, the
+      // driver cancelling at 60s while the tool believed it had twice that. Per-request bounds are
+      // enforced by `runBounded`'s own timer; this is only the backstop behind them.
+      requestTimeout: Math.max(this.config.limits.maxTimeoutMs, this.config.exec.timeoutMs),
       pool: {
         max: this.limits.poolMax,
         min: 0,

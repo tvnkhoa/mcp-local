@@ -164,9 +164,14 @@ export function assertSchemaParity(
  * Assert no tool marks a key required without advertising it.
  *
  * A required key absent from `properties` under `additionalProperties: false` is unsatisfiable:
- * the caller must send it and must not. Needs no zod, so it takes no options.
+ * the caller must send it and must not.
+ *
+ * Every tool whose schema is not `additionalProperties: false` is skipped, so if a server ever
+ * stopped emitting that flag this would inspect nothing and pass — the same silent-zero-coverage
+ * hole the parity check's `floor` exists to close, one function down. Hence the count.
  */
 export function assertRequiredKeysAdvertised(tools: readonly ParityTool[]): void {
+  let inspected = 0;
   for (const tool of tools) {
     const schema = tool.inputSchema as
       | { properties?: Record<string, unknown>; required?: string[]; additionalProperties?: boolean }
@@ -174,6 +179,7 @@ export function assertRequiredKeysAdvertised(tools: readonly ParityTool[]): void
     if (schema?.additionalProperties !== false) {
       continue;
     }
+    inspected += 1;
     for (const key of schema.required ?? []) {
       assert.ok(
         key in (schema.properties ?? {}),
@@ -181,4 +187,9 @@ export function assertRequiredKeysAdvertised(tools: readonly ParityTool[]): void
       );
     }
   }
+  assert.ok(
+    inspected > 0,
+    `inspected 0 of ${String(tools.length)} tools — none declares additionalProperties:false, ` +
+      "so this assertion checked nothing. Fix the schemas rather than deleting the check."
+  );
 }
