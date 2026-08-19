@@ -9,7 +9,7 @@
 import { McpError } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 
-import { PlatformError, PolicyViolationError, type ErrorCode } from "@mcp/core";
+import { PlatformError, PolicyViolationError, isPlatformError, type ErrorCode } from "@mcp/core";
 import {
   abortRule,
   createErrorMapper,
@@ -187,3 +187,22 @@ export const mapError: (error: unknown) => MappedError = createErrorMapper({
   // message. Supply one if this server's upstream errors can carry a secret — a connection string,
   // a token — that must not reach a client.
 });
+
+/**
+ * `mapError`, plus the refusals dispatch itself raises.
+ *
+ * A `PlatformError` reaching `mapError` would fall into its catch-all and be reported as
+ * `internal_error` — misleading for an unknown tool name, which dispatch answers with `not_found`.
+ * Unwrapping it first preserves the code dispatch chose. This is what `formatError` gets.
+ *
+ * It lives here rather than in `tools/index.ts` because it is the error contract, which is this
+ * file's stated job — and because `tools/index.ts` imports every tool builder, so anything under
+ * `tools/` that needed this would have formed an import cycle. `tools/index.ts` re-exports it, so
+ * no call site changed.
+ */
+export function toWireError(error: unknown): MappedError {
+  if (isPlatformError(error)) {
+    return { code: error.code, message: error.message };
+  }
+  return mapError(error);
+}

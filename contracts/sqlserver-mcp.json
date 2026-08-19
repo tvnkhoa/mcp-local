@@ -503,7 +503,7 @@
             "type": "string"
           },
           "databases": {
-            "description": "Run the same statement against each of these catalogs. Mutually exclusive with `database`.",
+            "description": "Run against each of these catalogs and label the results per catalog. Mutually exclusive with `database`.",
             "items": {
               "type": "string"
             },

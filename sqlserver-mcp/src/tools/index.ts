@@ -11,16 +11,12 @@
  *    Server may write without anything in the catalog saying so.
  */
 
-import { err, isPlatformError, ok } from "@mcp/core";
+import { err, ok } from "@mcp/core";
 import { createHealthCheckTool, registerTool } from "@mcp/sdk";
 import type { AnyToolDefinition } from "@mcp/sdk";
 
 import { describeConfig, type SqlserverConfig } from "../config/index.js";
-import {
-  connectionFailureAsPlatformError,
-  mapError,
-  type MappedError
-} from "../middleware/errors.js";
+import { connectionFailureAsPlatformError, toWireError } from "../middleware/errors.js";
 import { getServerInfo, listLinkedServers } from "../repositories/introspection.js";
 import type { ConnectionManager } from "../repositories/connectionManager.js";
 import { buildExecTools } from "./execTools.js";
@@ -31,18 +27,10 @@ import type { SqlserverDeps } from "./common.js";
 export type { SqlserverDeps };
 
 /**
- * `mapError`, plus the refusals dispatch itself raises.
- *
- * A `PlatformError` reaching `mapError` would fall into its catch-all and be reported as
- * `internal_error` — misleading for an unknown tool name, which dispatch answers with `not_found`.
- * Unwrapping it first preserves the code dispatch chose. This is what `formatError` gets.
+ * Re-exported so `index.ts` and the tests keep importing it from here. The function itself moved to
+ * `middleware/errors.ts` — see the note there.
  */
-export function toWireError(error: unknown): MappedError {
-  if (isPlatformError(error)) {
-    return { code: error.code, message: error.message };
-  }
-  return mapError(error);
-}
+export { toWireError };
 
 export function buildTools(deps: SqlserverDeps): readonly AnyToolDefinition[] {
   const { config, connections } = deps;

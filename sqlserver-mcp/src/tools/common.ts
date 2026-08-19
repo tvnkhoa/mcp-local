@@ -61,6 +61,16 @@ export const executesRoutine: ToolAnnotations = {
 export const environmentArg = z.string().min(1).max(64).optional();
 export const databaseArg = z.string().min(1).max(128).optional();
 export const schemaArg = z.string().min(1).max(128).optional();
+
+/**
+ * The fan-out list, shared by every tool that offers one.
+ *
+ * The array bound (200) is an input sanity limit, not the policy: the refusal a caller actually
+ * meets is `SQLSERVER_MAX_FANOUT` (default 25), checked in the handler so the message can name the
+ * configured number. Two bounds because a 10,000-element array should be rejected by shape before
+ * anything reads config.
+ */
+export const databasesArg = z.array(z.string().min(1).max(128)).min(1).max(200).optional();
 export const profileArg = responseProfileSchema.optional();
 
 /** A scalar bound to a query parameter. Anything richer would have to be serialized to SQL text. */
@@ -85,6 +95,16 @@ export const databaseProp: JsonSchemaNode = schema.string(
 );
 
 export const schemaProp: JsonSchemaNode = schema.string("Schema name. Defaults to dbo.");
+
+/**
+ * Deliberately worded without "statement": three tools offer this and only one runs SQL. Declaring
+ * it once is what `common.ts` is for — two tools that mean the same thing by `databases` must
+ * advertise it identically, and the only way to guarantee that is to have one of it.
+ */
+export const databasesProp: JsonSchemaNode = schema.array(
+  schema.string(),
+  "Run against each of these catalogs and label the results per catalog. Mutually exclusive with `database`."
+);
 
 export const scalarParamProp: JsonSchemaNode = schema.array(
   schema.anyOf([schema.string(), schema.number(), schema.boolean(), schema.null()]),

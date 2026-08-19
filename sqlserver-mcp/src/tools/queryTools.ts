@@ -21,6 +21,8 @@ import {
   clamp,
   databaseArg,
   databaseProp,
+  databasesArg,
+  databasesProp,
   environmentArg,
   environmentProp,
   profileArg,
@@ -87,10 +89,7 @@ export function buildQueryTools(deps: SqlserverDeps): AnyToolDefinition[] {
         sql: schema.string("A single SELECT / WITH … SELECT statement."),
         environment: environmentProp,
         database: databaseProp,
-        databases: schema.array(
-          schema.string(),
-          "Run the same statement against each of these catalogs. Mutually exclusive with `database`."
-        ),
+        databases: databasesProp,
         parameters: scalarParamProp,
         maxRows: schema.integer(
           "Row cap. Reaching it cancels the request, so a batch returning several recordsets is cut " +
@@ -106,7 +105,7 @@ export function buildQueryTools(deps: SqlserverDeps): AnyToolDefinition[] {
         sql: z.string().min(1).max(100_000),
         environment: environmentArg,
         database: databaseArg,
-        databases: z.array(z.string().min(1).max(128)).min(1).max(200).optional(),
+        databases: databasesArg,
         parameters: scalarParamArg,
         maxRows: z.number().int().positive().optional(),
         timeoutMs: z.number().int().positive().optional(),
