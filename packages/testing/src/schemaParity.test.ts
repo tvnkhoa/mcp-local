@@ -24,7 +24,7 @@ const matched = tool("matched", z.object({ a: z.string(), b: z.number().optional
 });
 
 test("a tool whose two declarations agree reports no drift", () => {
-  const { drift, compared } = findSchemaParityDrift([matched], { floor: 1 });
+  const { drift, compared } = findSchemaParityDrift([matched]);
   assert.deepEqual(drift, []);
   assert.equal(compared, 1);
 });
@@ -37,7 +37,7 @@ test("both directions are reported, and they say different things", () => {
     a: { type: "string" },
     ghost: { type: "string" }
   });
-  const { drift } = findSchemaParityDrift([unadvertised, unaccepted], { floor: 2 });
+  const { drift } = findSchemaParityDrift([unadvertised, unaccepted]);
   assert.deepEqual(drift, [
     'unadvertised: accepts "secret" but never advertises it',
     'unaccepted: advertises "ghost" but the handler rejects it'
@@ -52,7 +52,7 @@ test("the modifiers a schema may be wrapped in are unwrapped", () => {
     tool("default", z.object({ a: z.string() }).default({ a: "x" }), base),
     tool("effects", z.object({ a: z.string() }).refine(() => true), base)
   ];
-  const { drift, compared } = findSchemaParityDrift(wrapped, { floor: 4 });
+  const { drift, compared } = findSchemaParityDrift(wrapped);
   assert.deepEqual(drift, []);
   assert.equal(compared, 4, "every wrapper shape must be reachable");
 });
@@ -61,7 +61,7 @@ test("a non-object input is skipped, not failed", () => {
   const union = tool("union", z.union([z.object({ a: z.string() }), z.string()]), {
     a: { type: "string" }
   });
-  const { drift, compared } = findSchemaParityDrift([union], { floor: 0 });
+  const { drift, compared } = findSchemaParityDrift([union]);
   assert.deepEqual(drift, []);
   assert.equal(compared, 0, "skipped rather than compared — this is what `floor` guards");
 });
@@ -81,10 +81,7 @@ test("a node from a different copy of zod is still compared", () => {
     _def: { typeName: "ZodObject" },
     shape: { a: z.string(), b: z.number() }
   };
-  const { drift, compared } = findSchemaParityDrift(
-    [tool("fromAnotherCopy", foreignCopy, { a: { type: "string" }, b: { type: "number" } })],
-    { floor: 1 }
-  );
+  const { drift, compared } = findSchemaParityDrift([tool("fromAnotherCopy", foreignCopy, { a: { type: "string" }, b: { type: "number" } })]);
   assert.equal(compared, 1, "a foreign-copy node must still be walked");
   assert.deepEqual(drift, []);
 });

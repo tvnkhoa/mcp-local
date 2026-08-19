@@ -13,10 +13,11 @@ import type { HandlerContext } from "./handlers/handlerContext.js";
  * The comparison itself now lives in `@mcp/testing`, because four other servers needed the same
  * gate and had none. What stays here is this server's floor and the issue-specific check below.
  *
- * **`z` is passed in, and that is load-bearing.** Per ADR 0001 this server owns its own copy of
- * zod, so a `ZodObject` it builds is not an instance of the class a hoisted package imports —
- * `instanceof` is false across the copies. The helper never imports zod for exactly that reason;
- * handing it the wrong one makes it compare nothing, which its floor is there to catch.
+ * The helper takes no zod namespace. Passing one was the first design — ADR 0001 means this
+ * server's `ZodObject` is not an instance of a hoisted package's class — but it does not work
+ * here: `health_check` comes from `@mcp/sdk` carrying the hoisted zod while this server's own
+ * tools carry its copy, so no single namespace matches the whole table. The helper discriminates
+ * on `_def.typeName` instead. The floor below is what catches it if that ever stops working.
  */
 
 const deps: CodebaseIndexDeps = {
@@ -28,7 +29,10 @@ const deps: CodebaseIndexDeps = {
 const tools = buildTools(deps);
 
 test("every tool advertises exactly the parameters its zod schema accepts", () => {
-  assertSchemaParity(tools, { floor: 40 });
+  // The floor must equal the tool count, or the gate is slack by the difference. It sat at 40
+  // against a 43-tool surface — carried forward unexamined from the inline version this replaced,
+  // so three tools could have stopped being comparable with the test still green.
+  assertSchemaParity(tools, { floor: 43 });
 });
 
 test("the four tools from MCP-ISSUE-051 advertise profile", () => {

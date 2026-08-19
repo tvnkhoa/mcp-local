@@ -103,11 +103,13 @@ function objectShape(schema: unknown): Record<string, unknown> | null {
   return null;
 }
 
-/** Collect drift without asserting, for callers that want to report rather than fail. */
-export function findSchemaParityDrift(
-  tools: readonly ParityTool[],
-  options: SchemaParityOptions
-): SchemaParityResult {
+/**
+ * Collect drift without asserting, for callers that want to report rather than fail.
+ *
+ * Takes no options: the floor is an assertion concern, and accepting one here only to discard it
+ * made every caller invent a number that did nothing.
+ */
+export function findSchemaParityDrift(tools: readonly ParityTool[]): SchemaParityResult {
   const drift: string[] = [];
   let compared = 0;
 
@@ -145,7 +147,7 @@ export function assertSchemaParity(
 ): void {
   assert.ok(tools.length > 0, "no tools were passed to assertSchemaParity");
 
-  const { drift, compared } = findSchemaParityDrift(tools, options);
+  const { drift, compared } = findSchemaParityDrift(tools);
 
   assert.ok(
     compared >= options.floor,
