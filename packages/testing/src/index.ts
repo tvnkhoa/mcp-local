@@ -21,3 +21,6 @@ export {
 
 export type { ContractDifference, ContractSnapshot } from "./contract.js";
 export { diffSnapshots, formatDifferences, serializeSnapshot, snapshotTools } from "./contract.js";
+
+export type { ParityTool, SchemaParityOptions, SchemaParityResult } from "./schemaParity.js";
+export { assertRequiredKeysAdvertised, assertSchemaParity, findSchemaParityDrift } from "./schemaParity.js";

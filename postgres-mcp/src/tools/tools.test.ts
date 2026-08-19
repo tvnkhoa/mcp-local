@@ -20,6 +20,7 @@ import { test } from "node:test";
 
 import { createNullLogger, createEventLogger } from "@mcp/core";
 import { asErrorPayload, createToolRegistry, dispatchToolCall } from "@mcp/sdk";
+import { assertRequiredKeysAdvertised, assertSchemaParity } from "@mcp/testing";
 
 import { ConnectionManager } from "../repositories/connectionManager.js";
 import { toWireError } from "../middleware/errors.js";
@@ -371,4 +372,20 @@ test("DELTA: an unknown tool now reports not_found instead of mcp_error", async 
   const { isError, payload } = await bodyOf("no_such_tool", {});
   assert.equal(isError, true);
   assert.deepEqual(payload, { code: "not_found", message: "Unknown tool: no_such_tool." });
+});
+
+
+// --- input-schema parity ------------------------------------------------------
+//
+// Every tool declares its input twice: a zod schema the handler validates with, and a hand-written
+// JSON Schema `tools/list` advertises. Nothing else compares them — `contracts:check` pins the
+// advertised side against a snapshot of *itself*, so a parameter missing from both stays missing,
+// and `docs:check` reads the advertised side only. Until now only codebase-index-mcp had this gate.
+
+test("every tool advertises exactly the parameters its zod schema accepts", () => {
+  assertSchemaParity(buildTools(deps()), { floor: 17 });
+});
+
+test("a tool declaring additionalProperties:false advertises every required key", () => {
+  assertRequiredKeysAdvertised(buildTools(deps()));
 });

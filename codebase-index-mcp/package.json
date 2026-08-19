@@ -74,6 +74,7 @@
     "zod": "^3.24.1"
   },
   "devDependencies": {
+    "@mcp/testing": "file:../packages/testing",
     "@types/better-sqlite3": "^7.6.13",
     "@types/node": "^22.10.5",
     "tsx": "^4.19.2",

@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Bitbucket Cloud MCP server — read repositories/pull requests and create pull requests (read:repository, read:pullrequest, write:pullrequest)",
+  "description": "Bitbucket Cloud MCP server \u2014 read repositories/pull requests and create pull requests (read:repository, read:pullrequest, write:pullrequest)",
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "start": "node dist/index.js",
@@ -21,6 +21,7 @@
     "zod": "^3.24.1"
   },
   "devDependencies": {
+    "@mcp/testing": "file:../packages/testing",
     "@types/node": "^22.10.5",
     "tsx": "^4.19.2",
     "typescript": "^5.7.2"

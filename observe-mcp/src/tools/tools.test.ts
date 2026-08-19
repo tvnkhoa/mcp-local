@@ -17,6 +17,7 @@ import { test } from "node:test";
 
 import { createNullLogger } from "@mcp/core";
 import { asErrorPayload, createToolRegistry, dispatchToolCall } from "@mcp/sdk";
+import { assertRequiredKeysAdvertised, assertSchemaParity } from "@mcp/testing";
 
 import type { ObserveLimits } from "../config/index.js";
 import type { EnvironmentRegistry, ObserveEnvironment } from "../config/environments.js";
@@ -427,4 +428,20 @@ test("a logs stream without the app-name column downgrades instead of failing", 
   assert.equal(payload.isError, undefined);
   assert.equal(payload.identity.resolved, false);
   assert.match(payload.identity.note, /no "applicationname" column/);
+});
+
+
+// --- input-schema parity ------------------------------------------------------
+//
+// Every tool declares its input twice: a zod schema the handler validates with, and a hand-written
+// JSON Schema `tools/list` advertises. Nothing else compares them — `contracts:check` pins the
+// advertised side against a snapshot of *itself*, so a parameter missing from both stays missing,
+// and `docs:check` reads the advertised side only. Until now only codebase-index-mcp had this gate.
+
+test("every tool advertises exactly the parameters its zod schema accepts", () => {
+  assertSchemaParity(buildTools(LIMITS, CLIENTS), { floor: 10 });
+});
+
+test("a tool declaring additionalProperties:false advertises every required key", () => {
+  assertRequiredKeysAdvertised(buildTools(LIMITS, CLIENTS));
 });
