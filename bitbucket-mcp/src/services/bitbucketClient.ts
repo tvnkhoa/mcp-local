@@ -1,5 +1,6 @@
 import type { BitbucketConfig } from "../config/index.js";
 import { BitbucketHttpError } from "../middleware/errors.js";
+import { rangeStartOffset, type HttpOutcome } from "./httpRange.js";
 
 import {
   backoffFromSchedule,
@@ -35,6 +36,27 @@ export type ListReposParams = ListParams & {
 export type ListPullRequestsParams = ListParams & {
   /** OPEN | MERGED | DECLINED | SUPERSEDED (Bitbucket accepts repeats; we send one). */
   state?: string;
+};
+
+/**
+ * Pipelines do NOT filter like the other collections.
+ *
+ * Verified against the live API on 2026-08-21: the pipelines endpoint **ignores
+ * `q` entirely** — `q=build_number > 3` and even `q=totally_not_a_field="zzz"`
+ * both return every run with no error. Filtering is by dedicated parameters
+ * instead: `target.branch`, and a `status` that may repeat (Bitbucket ORs the
+ * repeats; a comma-separated list matches nothing).
+ *
+ * So this type deliberately has no `q`. Advertising one would advertise a no-op.
+ */
+export type ListPipelinesParams = {
+  sort?: string;
+  page?: number;
+  pagelen?: number;
+  /** Sent as `target.branch`. */
+  branch?: string;
+  /** Sent as one repeated `status` parameter per entry. */
+  status?: readonly string[];
 };
 
 export type CreatePullRequestBody = {
@@ -119,6 +141,94 @@ export class BitbucketClient {
     return this.post<Record<string, unknown>>(this.createPullRequestPath(repoSlug), body);
   }
 
+  // --- pipelines -----------------------------------------------------------
+
+  /** GET /repositories/{workspace}/{repo_slug}/pipelines — list pipeline runs. */
+  listPipelines(repoSlug: string, params: ListPipelinesParams = {}): Promise<Paginated> {
+    // No `q`: see ListPipelinesParams for why this endpoint is the odd one out.
+    const query = this.listQuery({
+      sort: params.sort,
+      page: params.page,
+      pagelen: params.pagelen
+    });
+    if (params.branch) {
+      query.set("target.branch", params.branch);
+    }
+    for (const status of params.status ?? []) {
+      // append, not set — repeated parameters are how this endpoint says OR.
+      query.append("status", status);
+    }
+    return this.get<Paginated>(
+      `/repositories/${enc(this.config.workspace)}/${enc(repoSlug)}/pipelines${qs(query)}`
+    );
+  }
+
+  /**
+   * GET /repositories/{workspace}/{repo_slug}/pipelines/{pipeline_ref} — one run.
+   *
+   * `pipelineRef` is already normalized by the tool layer to either a braced
+   * UUID or a build number; `enc` percent-encodes the braces.
+   */
+  getPipeline(repoSlug: string, pipelineRef: string): Promise<Record<string, unknown>> {
+    return this.get<Record<string, unknown>>(
+      `/repositories/${enc(this.config.workspace)}/${enc(repoSlug)}/pipelines/${enc(pipelineRef)}`
+    );
+  }
+
+  /** GET .../pipelines/{pipeline_ref}/steps — the steps of one run. */
+  listPipelineSteps(
+    repoSlug: string,
+    pipelineRef: string,
+    params: ListParams = {}
+  ): Promise<Paginated> {
+    const query = this.listQuery(params);
+    return this.get<Paginated>(
+      `/repositories/${enc(this.config.workspace)}/${enc(repoSlug)}/pipelines/${enc(pipelineRef)}/steps${qs(query)}`
+    );
+  }
+
+  /**
+   * GET .../pipelines/{pipeline_ref}/steps/{step_uuid}/log — the step's log, as text.
+   *
+   * A build log can be tens of megabytes, so this asks for a *suffix range* —
+   * the last `maxBytes` bytes, which is where a failure is. Bitbucket answers
+   * 206 with the tail; a server that ignores `Range` answers 200 with the whole
+   * log, which the tool layer then truncates, so the bound holds either way.
+   */
+  async getPipelineStepLog(
+    repoSlug: string,
+    pipelineRef: string,
+    stepUuid: string,
+    maxBytes: number
+  ): Promise<{ text: string; partial: boolean }> {
+    const path =
+      `/repositories/${enc(this.config.workspace)}/${enc(repoSlug)}` +
+      `/pipelines/${enc(pipelineRef)}/steps/${enc(stepUuid)}/log`;
+    const accept = "text/plain, */*";
+    let result;
+    try {
+      result = await this.attemptWithRetries("GET", path, undefined, accept, {
+        Range: `bytes=-${String(Math.floor(maxBytes))}`
+      });
+    } catch (error) {
+      // A suffix range against a zero-length log is unsatisfiable (416), and a
+      // 4xx is never retried. An empty log is an empty log, not a failure.
+      if (error instanceof BitbucketHttpError && error.status === 416) {
+        result = await this.attemptWithRetries("GET", path, undefined, accept);
+      } else {
+        throw error;
+      }
+    }
+
+    // `206` alone does NOT mean the body was cut. A suffix range wider than the
+    // log is satisfied by returning the whole log — still 206, but with
+    // `Content-Range: bytes 0-9032/9033`. Verified against a real 9 KB step log:
+    // the default 256 KiB request answers 206 at offset 0. Reading 206 as "cut"
+    // therefore deleted the genuine first line of every log smaller than
+    // maxBytes, which is the common case. The start offset is the only proof.
+    return { text: result.body, partial: rangeStartOffset(result.contentRange) > 0 };
+  }
+
   // --- transport -----------------------------------------------------------
 
   private get<T>(path: string): Promise<T> {
@@ -169,8 +279,9 @@ export class BitbucketClient {
     method: "GET" | "POST",
     path: string,
     jsonBody: unknown,
-    accept: string
-  ): Promise<{ status: number; body: string }> {
+    accept: string,
+    extraHeaders?: Record<string, string>
+  ): Promise<HttpOutcome> {
     // Retry transient failures with exponential backoff. Which failures are
     // retryable depends on the method (see isRetryable): idempotent GETs retry
     // on network/5xx/429, but a create-PR POST only retries on 429 so a blip
@@ -180,7 +291,7 @@ export class BitbucketClient {
     let lastError: unknown;
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
       try {
-        return await this.attempt(method, path, jsonBody, accept);
+        return await this.attempt(method, path, jsonBody, accept, extraHeaders);
       } catch (error) {
         lastError = error;
         if (attempt >= maxRetries || !isRetryable(error, method)) {
@@ -196,8 +307,9 @@ export class BitbucketClient {
     method: "GET" | "POST",
     path: string,
     jsonBody: unknown,
-    accept: string
-  ): Promise<{ status: number; body: string }> {
+    accept: string,
+    extraHeaders?: Record<string, string>
+  ): Promise<HttpOutcome> {
     const url = `${this.config.baseUrl}${path}`;
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), this.config.timeoutMs);
@@ -210,6 +322,9 @@ export class BitbucketClient {
         response = await fetch(url, {
           method,
           headers: {
+            // First, so no caller-supplied header can shadow Authorization or
+            // Accept. Today the only extra header is Range on a step log.
+            ...(extraHeaders ?? {}),
             Authorization: this.config.authHeader,
             Accept: accept,
             ...(jsonBody !== undefined ? { "Content-Type": "application/json" } : {})
@@ -232,13 +347,16 @@ export class BitbucketClient {
           truncate(rawText, 1000)
         );
       }
-      return { status: response.status, body: rawText };
+      return {
+        status: response.status,
+        body: rawText,
+        contentRange: response.headers.get("content-range")
+      };
     } finally {
       clearTimeout(timer);
     }
   }
 }
-
 
 
 /**
@@ -277,4 +395,3 @@ function qs(query: URLSearchParams): string {
   const s = query.toString();
   return s ? `?${s}` : "";
 }
-

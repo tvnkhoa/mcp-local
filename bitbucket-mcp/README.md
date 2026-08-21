@@ -1,12 +1,15 @@
 # bitbucket-mcp
 
-MCP server cho **Bitbucket Cloud** — đọc repository / pull request và **tạo pull request**. Read-only mặc định; việc tạo PR bị khóa sau một env flag.
+MCP server cho **Bitbucket Cloud** — đọc repository / pull request / pipeline và **tạo pull request**. Read-only mặc định; việc tạo PR bị khóa sau một env flag.
 
-Server này chỉ dùng ba nhóm quyền của Bitbucket:
+Server này chỉ dùng bốn nhóm quyền của Bitbucket:
 
 - `read:repository:bitbucket` → `list_repositories`, `get_repository`, `list_branches`
 - `read:pullrequest:bitbucket` → `list_pull_requests`, `get_pull_request`, `get_pull_request_diff`
+- `read:pipeline:bitbucket` → `list_pipelines`, `get_pipeline`, `list_pipeline_steps`, `get_pipeline_step_log`
 - `write:pullrequest:bitbucket` → `create_pull_request`
+
+> Token thiếu scope này sẽ trả **403** cho các tool pipeline, kèm detail liệt kê `required` / `granted` — đã xác nhận trên workspace `siliconstack` ngày 2026-08-21. Cần cấp lại token có `read:pipeline`.
 
 Không có dependency HTTP ngoài — dùng `fetch` (undici) của Node. Cùng khuôn với `observe-mcp` (client HTTP + retry/timeout + error taxonomy) và cơ chế write-gating bằng env flag của `postgres-mcp`.
 
@@ -77,14 +80,18 @@ Restart MCP (`/mcp` trong Claude Code) để nạp bản build mới.
 
 <!-- BEGIN GENERATED: tool-list -->
 
-8 tools, namespaced `mcp__bitbucket-mcp__<tool>`:
+12 tools, namespaced `mcp__bitbucket-mcp__<tool>`:
 
 - `create_pull_request`
+- `get_pipeline`
+- `get_pipeline_step_log`
 - `get_pull_request`
 - `get_pull_request_diff`
 - `get_repository`
 - `health_check`
 - `list_branches`
+- `list_pipeline_steps`
+- `list_pipelines`
 - `list_pull_requests`
 - `list_repositories`
 
@@ -99,6 +106,10 @@ Restart MCP (`/mcp` trong Claude Code) để nạp bản build mới.
 | `list_pull_requests` | read:pullrequest | Liệt kê PR (mặc định `OPEN`; lọc theo `state`) |
 | `get_pull_request` | read:pullrequest | Chi tiết một PR theo `id` |
 | `get_pull_request_diff` | read:pullrequest | Diff dạng text của PR |
+| `list_pipelines` | read:pipeline | Liệt kê pipeline run (mới nhất trước); lọc `branch` và `status[]` (nhiều status = OR) |
+| `get_pipeline` | read:pipeline | Một run theo UUID (không cần ngoặc) hoặc theo build number |
+| `list_pipeline_steps` | read:pipeline | Các step của một run — tìm step nào fail và lấy `stepUuid` |
+| `get_pipeline_step_log` | read:pipeline | Log của một step; trả **phần cuối** (`maxBytes`, mặc định 256 KiB, tối đa 1 MiB) |
 | `create_pull_request` | write:pullrequest | Tạo PR (khóa sau `BITBUCKET_WRITE_ENABLED`; hỗ trợ `dryRun`) |
 
 ### Tạo PR
@@ -119,6 +130,40 @@ create_pull_request {
 - `dryRun:true` luôn chạy được kể cả khi write đang tắt — trả về `{ method, path, body }` để bạn kiểm tra trước.
 - `dryRun:false` cần `BITBUCKET_WRITE_ENABLED=true`, nếu không sẽ trả lỗi `WRITE_DISABLED`.
 - `reviewers`: chuỗi bắt đầu bằng `{` được coi là `uuid`, còn lại là `account_id`.
+
+### Debug một build fail
+
+```jsonc
+// 1. build nào vừa chạy trên branch, và cái nào fail
+list_pipelines {
+  "repoSlug": "my-repo",
+  "branch": "main",
+  "status": ["FAILED", "ERROR"],   // nhiều status = OR
+  "pagelen": 5
+}
+
+// 2. chi tiết một run — nhận uuid có/không ngoặc, hoặc build number
+get_pipeline { "repoSlug": "my-repo", "pipelineUuid": "1234" }
+
+// 3. step nào fail, và lấy stepUuid
+list_pipeline_steps { "repoSlug": "my-repo", "pipelineUuid": "1234" }
+
+// 4. đọc log của step đó — trả PHẦN CUỐI, nơi lỗi nằm
+get_pipeline_step_log {
+  "repoSlug": "my-repo",
+  "pipelineUuid": "1234",
+  "stepUuid": "11111111-2222-3333-4444-555555555555",
+  "maxBytes": 65536
+}
+```
+
+- **Từ vựng lọc KHÁC từ vựng response.** Run có `result: "SUCCESSFUL"` phải lọc bằng `status: ["PASSED"]`; lọc `SUCCESSFUL` hay `COMPLETED` sẽ ra rỗng. Đã xác minh trên API thật ngày 2026-08-21.
+- Giá trị `status` sai → Bitbucket trả **200 kèm page rỗng**, không có lỗi. Vì vậy `status` là enum đóng ở tầng tool: gửi giá trị lạ bị chặn bằng `validation_error` thay vì đọc thành "không có run nào".
+- Endpoint pipelines **bỏ qua `q`/BBQL hoàn toàn** (`q=totally_not_a_field="zzz"` vẫn trả đủ run), nên tool không có tham số `q` — advertise nó là advertise một no-op.
+- Response echo lại `filters` khi có lọc, để phân biệt "page rỗng vì bộ lọc" với "repo không có run".
+- `webUrl` là link mở được trên browser (dựng từ build number); `href` của Bitbucket trỏ repo bằng UUID nên người không dùng được.
+- `get_pipeline_step_log` xin phần cuối bằng header `Range`; nếu server bỏ qua `Range` thì phần cắt vẫn được áp ở tầng tool, nên response luôn bị chặn theo `maxBytes`. `truncated: true` nghĩa là log đã bị cắt đầu.
+- Step chưa bắt đầu chạy thì chưa có log và sẽ trả 404.
 
 ## Response profiles
 

@@ -15,7 +15,12 @@ import { z } from "zod";
 import type { BitbucketClient, CreatePullRequestBody } from "../services/bitbucketClient.js";
 import { describeConfig, type BitbucketConfig } from "../config/index.js";
 import { mapError, PolicyViolationError } from "../middleware/errors.js";
-import { responseProfileSchema } from "../middleware/responseFormatter.js";
+import { buildPipelineTools } from "./pipelines.js";
+import { UUID_RE, bool, get, num, pageInfo, resolveRepo, str } from "./shared.js";
+import {
+  pageArg, pagelenArg, profileArg, qArg, repoSlugArg, sortArg,
+  pageProp, pagelenProp, profileProp, repoSlugProp
+} from "./shared.js";
 
 /**
  * Render any failure in this server's `{ code, message, detail? }` envelope.
@@ -33,28 +38,10 @@ export function toWireError(error: unknown): { code: string; message: string; de
   return mapError(error);
 }
 
-const UUID_RE = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
-
 export function buildTools(config: BitbucketConfig, client: BitbucketClient): readonly AnyToolDefinition[] {
-  // --- shared zod fragments -------------------------------------------------
-  const profileArg = responseProfileSchema.optional();
-  const repoSlugArg = z.string().min(1).max(256).optional();
-  const qArg = z.string().min(1).max(512).optional();
-  const sortArg = z.string().min(1).max(128).optional();
-  const pageArg = z.number().int().positive().optional();
-  const pagelenArg = z.number().int().positive().max(100).optional();
+  // The fragments every tool group shares now live in `./shared.js` — the
+  // pipeline group needs them too, and a closure cannot be imported.
   const branchArg = z.string().min(1).max(512);
-
-  // --- shared JSON Schema fragments -----------------------------------------
-  // Deliberately NOT `schema.profile()`: that helper adds a description this
-  // server has never advertised, and `tools/list` is a committed contract.
-  const profileProp: JsonSchemaNode = schema.enumOf(["nano", "compact", "standard", "verbose"]);
-  const repoSlugProp: JsonSchemaNode = schema.string("Repo slug (default: BITBUCKET_DEFAULT_REPO)");
-  const pageProp: JsonSchemaNode = schema.integer(undefined, { minimum: 1 });
-  const pagelenProp: JsonSchemaNode = schema.integer("Page size (default 25, max 100)", {
-    minimum: 1,
-    maximum: 100
-  });
   const prIdProp: JsonSchemaNode = schema.integer("Pull request id", { minimum: 1 });
 
   // --- tools -----------------------------------------------------------------
@@ -124,7 +111,7 @@ export function buildTools(config: BitbucketConfig, client: BitbucketClient): re
     inputSchema: schema.object({ repoSlug: repoSlugProp, profile: profileProp }),
     annotations: annotations.readRemote(),
     handler: async (args) => {
-      const repoSlug = resolveRepo(args.repoSlug);
+      const repoSlug = resolveRepo(config, args.repoSlug);
       const repo = await client.getRepository(repoSlug);
       return ok({ workspace: config.workspace, repository: normalizeRepo(repo) });
     }
@@ -154,7 +141,7 @@ export function buildTools(config: BitbucketConfig, client: BitbucketClient): re
     }),
     annotations: annotations.readRemote(),
     handler: async (args) => {
-      const repoSlug = resolveRepo(args.repoSlug);
+      const repoSlug = resolveRepo(config, args.repoSlug);
       const res = await client.listBranches(repoSlug, args);
       return ok({
         workspace: config.workspace,
@@ -191,7 +178,7 @@ export function buildTools(config: BitbucketConfig, client: BitbucketClient): re
     }),
     annotations: annotations.readRemote(),
     handler: async (args) => {
-      const repoSlug = resolveRepo(args.repoSlug);
+      const repoSlug = resolveRepo(config, args.repoSlug);
       const res = await client.listPullRequests(repoSlug, args);
       return ok({
         workspace: config.workspace,
@@ -216,7 +203,7 @@ export function buildTools(config: BitbucketConfig, client: BitbucketClient): re
     ),
     annotations: annotations.readRemote(),
     handler: async (args) => {
-      const repoSlug = resolveRepo(args.repoSlug);
+      const repoSlug = resolveRepo(config, args.repoSlug);
       const pr = await client.getPullRequest(repoSlug, args.id);
       return ok({ workspace: config.workspace, repoSlug, pullRequest: normalizePr(pr) });
     }
@@ -235,7 +222,7 @@ export function buildTools(config: BitbucketConfig, client: BitbucketClient): re
     ),
     annotations: annotations.readRemote(),
     handler: async (args) => {
-      const repoSlug = resolveRepo(args.repoSlug);
+      const repoSlug = resolveRepo(config, args.repoSlug);
       const diff = await client.getPullRequestDiff(repoSlug, args.id);
       return ok({
         workspace: config.workspace,
@@ -285,7 +272,7 @@ export function buildTools(config: BitbucketConfig, client: BitbucketClient): re
     // Explicit return type: the dry-run preview and the created-PR result are
     // different shapes, so inference would lock onto whichever appears first.
     handler: async (args): Promise<Result<Record<string, unknown>, PlatformError>> => {
-      const repoSlug = resolveRepo(args.repoSlug);
+      const repoSlug = resolveRepo(config, args.repoSlug);
 
       const body: CreatePullRequestBody = {
         title: args.title,
@@ -339,6 +326,8 @@ export function buildTools(config: BitbucketConfig, client: BitbucketClient): re
   // functions below are declarations, so they are hoisted and usable here.
   // Order is the order `tools/list` advertises. `registerTool` only flattens and
   // rejects a duplicate name; it does not reorder.
+  // The pipeline group sits after the pull-request reads and before the one
+  // write tool, so every read-only tool is contiguous in `tools/list`.
   return registerTool([
     healthCheckTool,
     listRepositoriesTool,
@@ -347,23 +336,11 @@ export function buildTools(config: BitbucketConfig, client: BitbucketClient): re
     listPullRequestsTool,
     getPullRequestTool,
     getPullRequestDiffTool,
+    ...buildPipelineTools(config, client),
     createPullRequestTool
   ]);
 
   // --- helpers --------------------------------------------------------------
-
-  /** Resolve the target repo slug from an explicit arg or the configured default. */
-  function resolveRepo(repoSlug: string | undefined): string {
-    const slug = repoSlug?.trim() || config.defaultRepo;
-    if (!slug) {
-      throw new PolicyViolationError(
-        "repo_required",
-        "No repository specified. Pass `repoSlug` or set BITBUCKET_DEFAULT_REPO."
-      );
-    }
-    return slug;
-  }
-
 
   /**
    * Map a reviewer string to Bitbucket's shape. A UUID (with or without the
@@ -376,16 +353,6 @@ export function buildTools(config: BitbucketConfig, client: BitbucketClient): re
       return { uuid: `{${core}}` };
     }
     return { account_id: raw };
-  }
-
-  /** Summarize a Bitbucket paginated response (page/size/next flag). */
-  function pageInfo(res: { page?: number; pagelen?: number; size?: number; next?: string }): Record<string, unknown> {
-    return {
-      page: res.page ?? null,
-      pagelen: res.pagelen ?? null,
-      size: res.size ?? null,
-      hasNext: Boolean(res.next)
-    };
   }
 
   function normalizeRepo(repo: Record<string, unknown>): Record<string, unknown> {
@@ -425,24 +392,4 @@ export function buildTools(config: BitbucketConfig, client: BitbucketClient): re
     };
   }
 
-  // --- tiny safe accessors for untyped Bitbucket JSON -----------------------
-  function str(v: unknown): string | null {
-    return typeof v === "string" ? v : null;
-  }
-  function num(v: unknown): number | null {
-    return typeof v === "number" ? v : null;
-  }
-  function bool(v: unknown): boolean | null {
-    return typeof v === "boolean" ? v : null;
-  }
-  function get(root: unknown, ...keys: string[]): unknown {
-    let cur: unknown = root;
-    for (const key of keys) {
-      if (!cur || typeof cur !== "object" || Array.isArray(cur)) {
-        return undefined;
-      }
-      cur = (cur as Record<string, unknown>)[key];
-    }
-    return cur;
-  }
 }

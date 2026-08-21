@@ -1,6 +1,6 @@
 {
   "server": "bitbucket-mcp",
-  "toolCount": 8,
+  "toolCount": 12,
   "tools": [
     {
       "annotations": {
@@ -65,6 +65,89 @@
         "type": "object"
       },
       "name": "create_pull_request"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": true,
+        "readOnlyHint": true
+      },
+      "description": "Get one pipeline run by UUID (braces optional) or by build number — state, result, target branch/commit, trigger and duration.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "pipelineUuid": {
+            "description": "Pipeline UUID (braces optional) or build number",
+            "type": "string"
+          },
+          "profile": {
+            "enum": [
+              "nano",
+              "compact",
+              "standard",
+              "verbose"
+            ],
+            "type": "string"
+          },
+          "repoSlug": {
+            "description": "Repo slug (default: BITBUCKET_DEFAULT_REPO)",
+            "type": "string"
+          }
+        },
+        "required": [
+          "pipelineUuid"
+        ],
+        "type": "object"
+      },
+      "name": "get_pipeline"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": true,
+        "readOnlyHint": true
+      },
+      "description": "Read the log of one pipeline step. Returns the LAST maxBytes bytes (default 256 KiB, max 1 MiB) because that is where a failure is. A step that has not started yet has no log and answers 404.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "maxBytes": {
+            "description": "Tail size in bytes (default 262144, max 1048576)",
+            "maximum": 1048576,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "pipelineUuid": {
+            "description": "Pipeline UUID (braces optional) or build number",
+            "type": "string"
+          },
+          "profile": {
+            "enum": [
+              "nano",
+              "compact",
+              "standard",
+              "verbose"
+            ],
+            "type": "string"
+          },
+          "repoSlug": {
+            "description": "Repo slug (default: BITBUCKET_DEFAULT_REPO)",
+            "type": "string"
+          },
+          "stepUuid": {
+            "description": "Step UUID (braces optional)",
+            "type": "string"
+          }
+        },
+        "required": [
+          "pipelineUuid",
+          "stepUuid"
+        ],
+        "type": "object"
+      },
+      "name": "get_pipeline_step_log"
     },
     {
       "annotations": {
@@ -239,6 +322,119 @@
         "type": "object"
       },
       "name": "list_branches"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": true,
+        "readOnlyHint": true
+      },
+      "description": "List the steps of one pipeline run with per-step state, result and duration — this is how you find which step failed, and the stepUuid to read its log.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "page": {
+            "minimum": 1,
+            "type": "integer"
+          },
+          "pagelen": {
+            "description": "Page size (default 25, max 100)",
+            "maximum": 100,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "pipelineUuid": {
+            "description": "Pipeline UUID (braces optional) or build number",
+            "type": "string"
+          },
+          "profile": {
+            "enum": [
+              "nano",
+              "compact",
+              "standard",
+              "verbose"
+            ],
+            "type": "string"
+          },
+          "repoSlug": {
+            "description": "Repo slug (default: BITBUCKET_DEFAULT_REPO)",
+            "type": "string"
+          }
+        },
+        "required": [
+          "pipelineUuid"
+        ],
+        "type": "object"
+      },
+      "name": "list_pipeline_steps"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": true,
+        "readOnlyHint": true
+      },
+      "description": "List pipeline runs of a repository, newest first. Filter by branch and/or status (several statuses are ORed). NOTE the filter vocabulary is not the response vocabulary: a run whose result reads SUCCESSFUL is selected by status PASSED. An unsupported status matches nothing rather than erroring, so an empty result can mean a wrong value. Requires the read:pipeline scope.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "branch": {
+            "description": "Only runs targeting this branch (sent as target.branch)",
+            "type": "string"
+          },
+          "page": {
+            "minimum": 1,
+            "type": "integer"
+          },
+          "pagelen": {
+            "description": "Page size (default 25, max 100)",
+            "maximum": 100,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "profile": {
+            "enum": [
+              "nano",
+              "compact",
+              "standard",
+              "verbose"
+            ],
+            "type": "string"
+          },
+          "repoSlug": {
+            "description": "Repo slug (default: BITBUCKET_DEFAULT_REPO)",
+            "type": "string"
+          },
+          "sort": {
+            "description": "Default -created_on (newest first)",
+            "type": "string"
+          },
+          "status": {
+            "description": "One or more run statuses, ORed. PASSED is the filter spelling of a SUCCESSFUL result.",
+            "items": {
+              "enum": [
+                "PENDING",
+                "BUILDING",
+                "IN_PROGRESS",
+                "PAUSED",
+                "HALTED",
+                "PASSED",
+                "FAILED",
+                "ERROR",
+                "STOPPED"
+              ],
+              "type": "string"
+            },
+            "maxItems": 9,
+            "minItems": 1,
+            "type": "array"
+          }
+        },
+        "type": "object"
+      },
+      "name": "list_pipelines"
     },
     {
       "annotations": {

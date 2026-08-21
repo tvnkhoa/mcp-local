@@ -213,7 +213,8 @@ test("tool lists match the committed contract snapshots exactly", () => {
   assert.equal(total, TOTAL_TOOL_COUNT);
   // 76 -> 78: observe-mcp gained `list_environments` and `discover_services`.
   // 78 -> 90: sqlserver-mcp joined with 12.
-  assert.equal(total, 90, "the workspace advertises 90 tools; update this number deliberately");
+  // 90 -> 94: bitbucket-mcp gained the four read-only Pipelines tools.
+  assert.equal(total, 94, "the workspace advertises 94 tools; update this number deliberately");
 });
 
 test("codebase-index advertises all 43 of its tools", () => {

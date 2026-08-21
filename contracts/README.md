@@ -54,9 +54,10 @@ Reproducibility is the whole value; a snapshot that varies per machine is noise.
 |---|---|---|
 | `codebase-index` | 43 | **yes** — migrated to `@mcp/sdk` (S-31…S-33) |
 | `postgres-mcp` | 17 | **yes** — migrated to `@mcp/sdk` (S-25) |
-| `observe-mcp` | 8 | **yes** — migrated to `@mcp/sdk` (S-24) |
-| `bitbucket-mcp` | 8 | **yes** — migrated to `@mcp/sdk` (S-23) |
-| **Total** | **76** | all four |
+| `observe-mcp` | 10 | **yes** — migrated to `@mcp/sdk` (S-24) |
+| `bitbucket-mcp` | 12 | **yes** — migrated to `@mcp/sdk` (S-23) |
+| `sqlserver-mcp` | 12 | **yes** — built on `@mcp/sdk` |
+| **Total** | **94** | all five |
 
 Servers on `@mcp/sdk` advertise MCP annotation hints (`readOnlyHint` / `idempotentHint` /
 `destructiveHint` / `openWorldHint`), which the SDK derives from each tool's declared annotations.
