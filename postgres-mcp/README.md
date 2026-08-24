@@ -87,8 +87,30 @@ write_rollback { "rollbackId": "..." }
 ```
 
 - UPDATE/DELETE thiếu `WHERE` bị chặn (`MISSING_WHERE`) trừ khi `allowFullTable:true`.
-- Rollback hỗ trợ INSERT/DELETE đầy đủ; UPDATE chỉ khi bảng có PK, single-table, có WHERE và không dùng params.
 - Preview/token sống theo `POSTGRES_WRITE_PREVIEW_TTL_MS` (mặc định 15 phút), một preview chỉ apply một lần.
+
+**Rollback không phải lúc nào cũng có.** Nguyên tắc: chỉ hỗ trợ khi server tự nắm được dữ liệu
+hoàn nguyên. `write_preview` luôn trả `rollbackSupported`, và `rollbackNote` nói rõ lý do khi
+không — **đọc nó trước khi apply**, vì `write_apply` sẽ trả `rollbackId: null` và lúc đó không còn
+đường lùi. Các trường hợp bị từ chối:
+
+| Trường hợp | Vì sao |
+|---|---|
+| Bảng không có primary key | không định danh được dòng để khôi phục |
+| Câu lệnh tự viết `RETURNING` | capture cần tự gắn `returning *, xmin` |
+| `INSERT ... ON CONFLICT DO UPDATE` | có thể sửa dòng đã tồn tại, không capture được giá trị cũ (`DO NOTHING` thì **được** hỗ trợ) |
+| `UPDATE` gán vào cột PK | khôi phục theo PK đã capture sẽ không khớp dòng nào |
+| `UPDATE` có params / có `FROM`-join / không `WHERE` | snapshot chạy lại chính `WHERE` đó nên nó phải tự đủ |
+| Ảnh hưởng > 10.000 dòng | snapshot nằm trong RAM; chia nhỏ theo batch |
+
+- Rollback khôi phục **từng dòng độc lập** (mỗi dòng một `SAVEPOINT`): một dòng xung đột không
+  làm mất phần còn lại. Response trả `status` của lần gọi đó (`restored` / `partial` / `failed`),
+  `pending` là số dòng còn lại, và `unrestored[]` nêu lý do từng dòng. Một rollback `partial` hay
+  `failed` **vẫn gọi lại được**, và lần sau chỉ chạm những dòng còn thiếu.
+- Dòng bị người/hệ thống khác sửa sau khi apply thì **không bị ghi đè**: rollback so `xmin` (row
+  version của Postgres) và báo `row_changed_since_apply` thay vì xóa mất thay đổi đó.
+- Rollback record chỉ nằm trong RAM tiến trình: restart hoặc quá 1.000 apply gần nhất thì
+  `rollbackId` trả `ROLLBACK_NOT_FOUND`. Nhật ký bền nằm ở `mcp_ops.audit_log` trên chính database.
 
 ## 6. Luồng migration (EF Core)
 

@@ -520,7 +520,7 @@
         "openWorldHint": true,
         "readOnlyHint": false
       },
-      "description": "Apply a previously previewed write using its previewId + approvalToken. Commits the change and returns a rollbackId.",
+      "description": "Apply a previously previewed write using its previewId + approvalToken. Commits the change and returns a rollbackId, or null when the preview reported the statement cannot be rolled back.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -558,7 +558,7 @@
         "openWorldHint": true,
         "readOnlyHint": true
       },
-      "description": "Preview an INSERT/UPDATE/DELETE (dry-run, rolled back) and get an approval token. Requires POSTGRES_WRITE_ENABLED. UPDATE/DELETE must have WHERE unless allowFullTable.",
+      "description": "Preview an INSERT/UPDATE/DELETE (dry-run, rolled back) and get an approval token. Requires POSTGRES_WRITE_ENABLED. UPDATE/DELETE must have WHERE unless allowFullTable. Check rollbackSupported/rollbackNote: not every statement can be rolled back.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -615,7 +615,7 @@
         "openWorldHint": true,
         "readOnlyHint": false
       },
-      "description": "Roll back a previously applied write using its rollbackId (restores captured rows).",
+      "description": "Roll back a previously applied write using its rollbackId. Restores each captured row independently; a row changed since the apply is reported, not overwritten. A partial rollback is retryable.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {

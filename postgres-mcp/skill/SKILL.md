@@ -43,6 +43,19 @@ write_rollback(rollbackId)        // if needed
 - A `WHERE` clause is **mandatory** for UPDATE/DELETE — unbounded mutations are rejected.
 - Approval tokens are HMAC-signed and expire (`POSTGRES_WRITE_PREVIEW_TTL_MS`, default 15 min).
 
+**Check `rollbackSupported` in the preview before you apply.** Rollback is offered only when the
+server can capture the undo data itself. When it cannot, the preview says so in `rollbackNote`,
+`write_apply` returns `rollbackId: null`, and the change is one-way. Refused for: a table with no
+primary key · a statement with its own `RETURNING` · `INSERT ... ON CONFLICT DO UPDATE` (plain
+`DO NOTHING` is fine) · an `UPDATE` that assigns a primary-key column · a parameterized, joined or
+whole-table `UPDATE` · more than 10,000 affected rows. If you need rollback and hit one of these,
+rewrite the statement — e.g. split an upsert into a preview-able `UPDATE`, or batch a large delete.
+
+Rollback restores each row independently, so one conflicting row does not cost the others. Read
+`status` (this call), `pending` (rows still outstanding) and `unrestored[]` (why each row failed).
+A `partial` or `failed` rollback is **retryable** and retries only what is left. A row somebody
+else changed after the apply is reported as `row_changed_since_apply` rather than overwritten.
+
 ## Migrations (OFF unless `POSTGRES_MIGRATION_ENABLED=true`)
 
 ```

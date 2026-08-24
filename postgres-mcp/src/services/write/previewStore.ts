@@ -17,6 +17,23 @@ export interface WritePreviewRecord {
   status: "ready" | "applied" | "expired";
 }
 
+/** One row of undo data, plus what rollback needs to apply it exactly once. */
+export interface CapturedRow {
+  /** UPDATE/DELETE: the column values before the change. INSERT: the row as inserted. */
+  values: Record<string, unknown>;
+  /**
+   * The row's MVCC version (`xmin`) as it stood *after* the apply committed, or null
+   * when there is no row left to version (DELETE). Restore matches on it, so a row
+   * somebody else changed in between is reported instead of silently clobbered.
+   */
+  xmin: string | null;
+  /**
+   * Set once this row has been restored. A partially-successful rollback stays
+   * retryable, and the retry attempts only the rows still outstanding.
+   */
+  restored: boolean;
+}
+
 export interface WriteApplyRecord {
   rollbackId: string;
   applyId: string;
@@ -25,8 +42,7 @@ export interface WriteApplyRecord {
   statementType: WriteStatementType;
   target: WriteTarget;
   pkColumns: string[];
-  /** UPDATE/DELETE: full rows before the change. INSERT: rows that were inserted. */
-  capturedRows: Array<Record<string, unknown>>;
+  capturedRows: CapturedRow[];
   rowsAffected: number;
   appliedAt: number;
   rolledBack: boolean;
@@ -45,6 +61,15 @@ export interface WriteApplyRecord {
  * ROLLBACK_NOT_FOUND, same as after a restart.
  */
 const MAX_APPLIES = 1000;
+
+/**
+ * Cap on the rows one apply may capture. `MAX_APPLIES` bounds how many rollback
+ * records are retained; this bounds how large a single one can get, which is the other
+ * half of the same problem — one DELETE across a large table would otherwise pull the
+ * whole thing into memory. `write_preview` knows the exact row count from its dry run,
+ * so a statement over the cap is refused rollback up front rather than discovered here.
+ */
+export const MAX_ROLLBACK_ROWS = 10_000;
 
 export class WritePreviewStore {
   private readonly previews = new Map<string, WritePreviewRecord>();

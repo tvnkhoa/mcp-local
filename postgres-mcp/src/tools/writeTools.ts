@@ -33,7 +33,7 @@ export function buildWriteTools(deps: PostgresDeps): AnyToolDefinition[] {
   const writePreview = defineTool({
     name: "write_preview",
     description:
-      "Preview an INSERT/UPDATE/DELETE (dry-run, rolled back) and get an approval token. Requires POSTGRES_WRITE_ENABLED. UPDATE/DELETE must have WHERE unless allowFullTable.",
+      "Preview an INSERT/UPDATE/DELETE (dry-run, rolled back) and get an approval token. Requires POSTGRES_WRITE_ENABLED. UPDATE/DELETE must have WHERE unless allowFullTable. Check rollbackSupported/rollbackNote: not every statement can be rolled back.",
     input: z
       .object({
         sql: z.string().min(1),
@@ -61,7 +61,7 @@ export function buildWriteTools(deps: PostgresDeps): AnyToolDefinition[] {
   const writeApply = defineTool({
     name: "write_apply",
     description:
-      "Apply a previously previewed write using its previewId + approvalToken. Commits the change and returns a rollbackId.",
+      "Apply a previously previewed write using its previewId + approvalToken. Commits the change and returns a rollbackId, or null when the preview reported the statement cannot be rolled back.",
     input: z
       .object({
         previewId: z.string().min(1).max(128),
@@ -86,7 +86,8 @@ export function buildWriteTools(deps: PostgresDeps): AnyToolDefinition[] {
 
   const writeRollback = defineTool({
     name: "write_rollback",
-    description: "Roll back a previously applied write using its rollbackId (restores captured rows).",
+    description:
+      "Roll back a previously applied write using its rollbackId. Restores each captured row independently; a row changed since the apply is reported, not overwritten. A partial rollback is retryable.",
     input: z
       .object({
         rollbackId: z.string().min(1).max(128),

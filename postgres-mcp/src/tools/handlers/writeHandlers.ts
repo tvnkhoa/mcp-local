@@ -7,14 +7,19 @@ import type { ConnectionManager } from "../../repositories/connectionManager.js"
 import { PolicyViolationError } from "../../middleware/errors.js";
 import { asText, type ResponseProfile } from "../../middleware/responseFormatter.js";
 import { quoteIdent } from "../../middleware/ident.js";
-import { validateWriteSql, type WriteTarget } from "../../middleware/writeGuardrails.js";
+import { validateWriteSql, type WriteStatementType, type WriteTarget } from "../../middleware/writeGuardrails.js";
 import { recordAudit } from "../../services/write/auditLog.js";
 import {
   createWriteDigest,
   issueApprovalToken,
   verifyApprovalToken
 } from "../../services/write/approval.js";
-import { WritePreviewStore, type WriteApplyRecord } from "../../services/write/previewStore.js";
+import {
+  MAX_ROLLBACK_ROWS,
+  WritePreviewStore,
+  type CapturedRow,
+  type WriteApplyRecord
+} from "../../services/write/previewStore.js";
 
 export interface WriteConfig {
   enabled: boolean;
@@ -119,6 +124,75 @@ function updateHasJoin(sql: string): boolean {
   return /\bfrom\b/i.test(masked.slice(setIdx));
 }
 
+/**
+ * Whether this statement's undo data can be captured, and if not, why.
+ *
+ * One principle decides every branch: **rollback is offered only when this server owns
+ * the undo data.** Each `reason` below is a case where it does not.
+ *
+ *  - No primary key — nothing to address a row by.
+ *  - The caller's own RETURNING — capture appends `returning *, xmin`, which it cannot
+ *    do to a statement that already returns something.
+ *  - `ON CONFLICT … DO UPDATE` — RETURNING hands back a row that may have existed
+ *    before, indistinguishable from a fresh insert, and its prior values were never
+ *    captured. Deleting it on rollback destroyed data (PG-WRT-002). `DO NOTHING` is
+ *    fine: it returns only rows that were really inserted.
+ *  - An UPDATE that assigns a PK column — restore addresses rows by the PK it captured,
+ *    which after the change matches nothing (PG-WRT-003).
+ *  - Parameterized / joined / whole-table UPDATE — the before-snapshot re-runs the
+ *    statement's WHERE, so it needs a self-contained single-table WHERE.
+ *  - More rows than MAX_ROLLBACK_ROWS — the snapshot is held in memory.
+ */
+function assessRollback(
+  validated: Extract<ReturnType<typeof validateWriteSql>, { ok: true }>,
+  pkColumns: string[],
+  params: unknown[],
+  rowsAffected: number
+): { reason?: string } {
+  if (pkColumns.length === 0) {
+    return { reason: "Rollback is not available: the table has no primary key, so a row cannot be addressed." };
+  }
+  if (validated.hasReturning) {
+    return {
+      reason:
+        "Rollback is not available: the statement has its own RETURNING clause, which rollback needs in order to capture undo data. Remove it — write_preview already reports the affected rows."
+    };
+  }
+  if (validated.hasOnConflictUpdate) {
+    return {
+      reason:
+        "Rollback is not available: INSERT ... ON CONFLICT DO UPDATE can modify a row that already existed, and its prior values are not captured. ON CONFLICT DO NOTHING is supported."
+    };
+  }
+  if (validated.statementType === "update") {
+    const pkSet = new Set(pkColumns);
+    const assignedPk = validated.setColumns.filter((column) => pkSet.has(column));
+    if (assignedPk.length > 0) {
+      return {
+        reason: `Rollback is not available: this UPDATE assigns the primary key column(s) ${assignedPk.join(", ")}, so the captured rows could no longer be located.`
+      };
+    }
+    if (params.length > 0) {
+      return {
+        reason:
+          "Rollback is not available for a parameterized UPDATE: the before-snapshot re-runs the WHERE clause, which needs to be self-contained."
+      };
+    }
+    if (updateHasJoin(validated.sanitizedSql)) {
+      return { reason: "Rollback is not available for an UPDATE with a FROM/join clause." };
+    }
+    if (!validated.hasWhere) {
+      return { reason: "Rollback is not available for a whole-table UPDATE." };
+    }
+  }
+  if (rowsAffected > MAX_ROLLBACK_ROWS) {
+    return {
+      reason: `Rollback is not available: this statement affects ${String(rowsAffected)} rows, over the ${String(MAX_ROLLBACK_ROWS)}-row capture limit. Narrow the WHERE clause and apply it in batches.`
+    };
+  }
+  return {};
+}
+
 interface ColumnMeta {
   /** pg_attribute.attidentity: '' none, 'a' GENERATED ALWAYS AS IDENTITY, 'd' BY DEFAULT. */
   identity: string;
@@ -201,14 +275,6 @@ export async function handleWritePreview(
   const pool = connections.getPool(args.environment, true);
   const pkColumns = await getPrimaryKeyColumns(pool, validated.target);
 
-  // Rollback support depends on having a PK and (for UPDATE) being a simple single-table form.
-  let rollbackSupported = pkColumns.length > 0;
-  if (validated.statementType === "update") {
-    if (params.length > 0 || updateHasJoin(validated.sanitizedSql) || !validated.hasWhere) {
-      rollbackSupported = false;
-    }
-  }
-
   // Dry-run: execute inside a transaction we always roll back, to get the real
   // affected-row count and a sample of affected rows. Nothing is persisted.
   const dryRunSql = hasReturning(validated.sanitizedSql)
@@ -230,6 +296,9 @@ export async function handleWritePreview(
   } finally {
     client.release();
   }
+
+  const rollback = assessRollback(validated, pkColumns, params, rowsAffected);
+  const rollbackSupported = rollback.reason === undefined;
 
   const previewId = randomUUID();
   const expiresAt = new Date(Date.now() + config.previewTtlMs).toISOString();
@@ -269,9 +338,7 @@ export async function handleWritePreview(
       rowsAffected,
       affectedSample,
       rollbackSupported,
-      rollbackNote: rollbackSupported
-        ? undefined
-        : "Rollback is not available for this statement (no primary key, parameterized UPDATE, joined UPDATE, or whole-table UPDATE).",
+      rollbackNote: rollback.reason,
       expiresAt
     },
     profile
@@ -313,30 +380,39 @@ export async function handleWriteApply(
     const rollbackId = randomUUID();
     const applyId = randomUUID();
     let rowsAffected = 0;
-    let capturedRows: Array<Record<string, unknown>> = [];
+    let capturedRows: CapturedRow[] = [];
 
     try {
       await client.query("begin");
 
       // Capture rollback data inside the same committed transaction.
+      //
+      // UPDATE's before-values come from re-running the statement's own WHERE, which is
+      // sound only because rollbackSupported already required a self-contained,
+      // single-table, param-less WHERE.
+      let beforeRows: Array<Record<string, unknown>> = [];
       if (preview.rollbackSupported && preview.statementType === "update") {
         const where = extractWhereClause(preview.sql);
         if (where) {
           const snap = await client.query<Record<string, unknown>>(
             `select * from ${qualified(preview.target)} where ${where}`
           );
-          capturedRows = snap.rows;
+          beforeRows = snap.rows;
         }
       }
 
-      const execSql = (preview.statementType === "delete" || preview.statementType === "insert") && !hasReturning(preview.sql)
-        ? `${preview.sql} returning *`
-        : preview.sql;
+      // `xmin` is the row's MVCC version, captured here as of *after* the change. It is
+      // what lets rollback tell "still as I left it" from "somebody else changed it",
+      // without comparing column values in JS.
+      const execSql = preview.rollbackSupported ? `${preview.sql} returning *, xmin` : preview.sql;
       const result = await client.query<Record<string, unknown>>(execSql, preview.params);
       rowsAffected = result.rowCount ?? 0;
 
-      if (preview.rollbackSupported && (preview.statementType === "delete" || preview.statementType === "insert")) {
-        capturedRows = result.rows;
+      if (preview.rollbackSupported) {
+        capturedRows =
+          preview.statementType === "update"
+            ? pairSnapshotWithVersions(beforeRows, result.rows, preview.pkColumns)
+            : result.rows.map((row) => toCapturedRow(row, preview.statementType));
       }
 
       await client.query("commit");
@@ -367,7 +443,7 @@ export async function handleWriteApply(
       statementType: preview.statementType,
       target: preview.target,
       pkColumns: preview.pkColumns,
-      capturedRows: preview.rollbackSupported ? capturedRows : [],
+      capturedRows,
       rowsAffected,
       appliedAt: Date.now(),
       rolledBack: false
@@ -400,6 +476,49 @@ export async function handleWriteApply(
   });
 }
 
+// ── capture helpers ──────────────────────────────────────────────────────────
+
+/** Stable key for a row's primary-key tuple. */
+function pkKey(row: Record<string, unknown>, pkColumns: string[]): string {
+  return pkColumns.map((column) => String(row[column])).join(" ");
+}
+
+/** Split the `xmin` column back off a `returning *, xmin` row. */
+function toCapturedRow(row: Record<string, unknown>, statementType: WriteStatementType): CapturedRow {
+  const { xmin, ...values } = row;
+  return {
+    values,
+    // A deleted row has no surviving version to match on. Its reinsert is guarded by
+    // the primary-key constraint instead, which is what catches a re-created row.
+    xmin: statementType === "delete" || xmin === null || xmin === undefined ? null : String(xmin),
+    restored: false
+  };
+}
+
+/**
+ * Join the before-snapshot (which carries the values to restore) with the UPDATE's own
+ * RETURNING (which carries the post-apply `xmin`) on the primary key.
+ *
+ * Sound because an UPDATE that assigns a PK column is refused rollback at preview time,
+ * so the key is stable across the statement.
+ */
+function pairSnapshotWithVersions(
+  beforeRows: Array<Record<string, unknown>>,
+  returnedRows: Array<Record<string, unknown>>,
+  pkColumns: string[]
+): CapturedRow[] {
+  const versions = new Map<string, string | null>();
+  for (const row of returnedRows) {
+    const xmin = row.xmin;
+    versions.set(pkKey(row, pkColumns), xmin === null || xmin === undefined ? null : String(xmin));
+  }
+  return beforeRows.map((row) => ({
+    values: row,
+    xmin: versions.get(pkKey(row, pkColumns)) ?? null,
+    restored: false
+  }));
+}
+
 // ── write_rollback ──────────────────────────────────────────────────────────────
 
 export async function handleWriteRollback(
@@ -430,37 +549,72 @@ export async function handleWriteRollback(
     const pool = connections.getPool(apply.environment, true);
     const colMeta = await getColumnMeta(pool, apply.target);
     const client = await pool.connect();
-    let restored = 0;
-    let conflicts = 0;
+
+    const outstanding = apply.capturedRows.filter((row) => !row.restored);
+    const restoredNow: CapturedRow[] = [];
+    const unrestored: Array<{ pk: Record<string, unknown>; reason: RestoreFailure }> = [];
 
     try {
       await client.query("begin");
-      for (const row of apply.capturedRows) {
+      for (const [index, row] of outstanding.entries()) {
+        // A SAVEPOINT per row is what makes the per-row error handling real. Without
+        // one, the first failing statement aborts the whole transaction: every later
+        // row fails too, COMMIT silently degrades to ROLLBACK, and the tool reported
+        // rows as restored that were never written (PG-WRT-001). The name is built from
+        // a loop index, so it cannot carry anything but digits.
+        const savepoint = `mcp_rollback_${String(index)}`;
+        await client.query(`savepoint ${savepoint}`);
         try {
-          if (apply.statementType === "delete") {
-            restored += await reinsertRow(client, apply.target, row, colMeta);
-          } else if (apply.statementType === "insert") {
-            restored += await deleteByPk(client, apply.target, apply.pkColumns, row);
-          } else {
-            restored += await restoreUpdatedRow(client, apply.target, apply.pkColumns, row, colMeta);
+          const affected = await restoreRow(client, apply, row, colMeta);
+          if (affected > 0) {
+            await client.query(`release savepoint ${savepoint}`);
+            restoredNow.push(row);
+            continue;
           }
+          // Matched nothing. Previously this counted as success and reported a no-op
+          // rollback as "restored" (PG-WRT-003).
+          await client.query(`rollback to savepoint ${savepoint}`);
+          unrestored.push({
+            pk: pkOf(row, apply.pkColumns),
+            reason: await diagnoseMiss(client, apply, row)
+          });
         } catch {
-          conflicts += 1;
+          await client.query(`rollback to savepoint ${savepoint}`);
+          unrestored.push({ pk: pkOf(row, apply.pkColumns), reason: "conflict" });
         }
       }
       await client.query("commit");
     } catch (error) {
       await safeRollback(client);
       client.release();
+      // Audit the failure too. Only the success path used to be recorded, so a rollback
+      // that threw left no trace in mcp_ops.audit_log.
+      await recordAudit(pool, env.name, {
+        tool: "write_rollback",
+        environment: env.name,
+        statementType: apply.statementType,
+        targetTable: `${apply.target.schema}.${apply.target.table}`,
+        sqlHash: null,
+        rowsAffected: null,
+        status: "failed",
+        rollbackId: apply.rollbackId,
+        detail: { error: String(error) }
+      });
       throw error;
     }
     client.release();
 
-    const status = conflicts === 0 ? "restored" : restored > 0 ? "partial" : "failed";
-    // Only mark as rolled back if at least one row was restored. A fully-failed
-    // rollback (every row conflicted, nothing restored) stays retryable instead of
-    // being permanently locked out with ALREADY_ROLLED_BACK.
-    apply.rolledBack = status !== "failed";
+    // Only now that COMMIT succeeded is a row really restored.
+    for (const row of restoredNow) {
+      row.restored = true;
+    }
+    const pending = apply.capturedRows.filter((row) => !row.restored).length;
+    // `status` describes THIS call; `pending` describes what is left overall. A rollback
+    // that restored nothing stays retryable — the row it conflicted on may be freed
+    // later — and the retry attempts only the outstanding rows.
+    const status =
+      unrestored.length === 0 ? "restored" : restoredNow.length > 0 ? "partial" : "failed";
+    apply.rolledBack = pending === 0;
 
     await recordAudit(pool, env.name, {
       tool: "write_rollback",
@@ -468,14 +622,77 @@ export async function handleWriteRollback(
       statementType: apply.statementType,
       targetTable: `${apply.target.schema}.${apply.target.table}`,
       sqlHash: null,
-      rowsAffected: restored,
+      rowsAffected: restoredNow.length,
       status,
       rollbackId: apply.rollbackId,
-      detail: { conflicts }
+      detail: { conflicts: unrestored.length, pending }
     });
 
-    return asText({ rollbackId: apply.rollbackId, environment: env.name, status, restored, conflicts }, profile);
+    return asText(
+      {
+        rollbackId: apply.rollbackId,
+        environment: env.name,
+        status,
+        restored: restoredNow.length,
+        conflicts: unrestored.length,
+        pending,
+        unrestored: unrestored.length > 0 ? unrestored : undefined,
+        note:
+          apply.capturedRows.length === 0
+            ? "Nothing was captured for this apply, so there was nothing to restore."
+            : undefined
+      },
+      profile
+    );
   });
+}
+
+/** Why one row could not be put back. */
+type RestoreFailure = "row_missing" | "row_changed_since_apply" | "no_restorable_columns" | "conflict";
+
+function pkOf(row: CapturedRow, pkColumns: string[]): Record<string, unknown> {
+  const pk: Record<string, unknown> = {};
+  for (const column of pkColumns) {
+    pk[column] = row.values[column];
+  }
+  return pk;
+}
+
+async function restoreRow(
+  client: PoolClient,
+  apply: WriteApplyRecord,
+  row: CapturedRow,
+  colMeta: Map<string, ColumnMeta>
+): Promise<number> {
+  if (apply.statementType === "delete") {
+    return reinsertRow(client, apply.target, row, colMeta);
+  }
+  if (apply.statementType === "insert") {
+    return deleteByPk(client, apply.target, apply.pkColumns, row);
+  }
+  return restoreUpdatedRow(client, apply.target, apply.pkColumns, row, colMeta);
+}
+
+/**
+ * Distinguish "the row is gone" from "somebody changed it since the apply". Runs only
+ * on the failure path, after the savepoint rollback made the transaction usable again,
+ * so the happy path costs nothing.
+ */
+async function diagnoseMiss(
+  client: PoolClient,
+  apply: WriteApplyRecord,
+  row: CapturedRow
+): Promise<RestoreFailure> {
+  if (apply.statementType === "delete") {
+    // A reinsert matches nothing only when there was no writable column to insert.
+    return "no_restorable_columns";
+  }
+  const conds = apply.pkColumns.map((column, i) => `${quoteIdent(column)} = $${String(i + 1)}`);
+  const probe = await client.query(
+    `select 1 from ${qualified(apply.target)} where ${conds.join(" and ")}`,
+    apply.pkColumns.map((column) => row.values[column])
+  );
+  return (probe.rowCount ?? 0) > 0 ? "row_changed_since_apply" : "row_missing";
 }
 
 // ── row-level restore primitives ─────────────────────────────────────────────
@@ -483,11 +700,11 @@ export async function handleWriteRollback(
 async function reinsertRow(
   client: PoolClient,
   target: WriteTarget,
-  row: Record<string, unknown>,
+  row: CapturedRow,
   colMeta: Map<string, ColumnMeta>
 ): Promise<number> {
   // STORED generated columns are computed by the DB and cannot be written.
-  const cols = Object.keys(row).filter((c) => colMeta.get(c)?.generated !== "s");
+  const cols = Object.keys(row.values).filter((c) => colMeta.get(c)?.generated !== "s");
   if (cols.length === 0) {
     return 0;
   }
@@ -500,19 +717,35 @@ async function reinsertRow(
   const overriding = needsOverride ? " overriding system value" : "";
   const placeholders = cols.map((_, i) => `$${i + 1}`);
   const sql = `insert into ${qualified(target)} (${cols.map(quoteIdent).join(", ")})${overriding} values (${placeholders.join(", ")})`;
-  const res = await client.query(sql, cols.map((c) => row[c]));
+  const res = await client.query(sql, cols.map((c) => row.values[c]));
   return res.rowCount ?? 0;
+}
+
+/**
+ * The row's captured version as a WHERE condition, so a row somebody else touched
+ * after the apply matches nothing and gets reported rather than overwritten.
+ *
+ * `xmin::text` rather than `xmin`: the captured version travels as a string, and
+ * Postgres will not infer a text-to-xid cast for a bind parameter.
+ */
+function versionGuard(row: CapturedRow, values: unknown[]): string[] {
+  if (row.xmin === null) {
+    return [];
+  }
+  values.push(row.xmin);
+  return [`xmin::text = $${String(values.length)}`];
 }
 
 async function deleteByPk(
   client: PoolClient,
   target: WriteTarget,
   pkColumns: string[],
-  row: Record<string, unknown>
+  row: CapturedRow
 ): Promise<number> {
-  const conds = pkColumns.map((c, i) => `${quoteIdent(c)} = $${i + 1}`);
-  const sql = `delete from ${qualified(target)} where ${conds.join(" and ")}`;
-  const res = await client.query(sql, pkColumns.map((c) => row[c]));
+  const values = pkColumns.map((c) => row.values[c]);
+  const conds = pkColumns.map((c, i) => `${quoteIdent(c)} = $${String(i + 1)}`);
+  const sql = `delete from ${qualified(target)} where ${[...conds, ...versionGuard(row, values)].join(" and ")}`;
+  const res = await client.query(sql, values);
   return res.rowCount ?? 0;
 }
 
@@ -520,19 +753,19 @@ async function restoreUpdatedRow(
   client: PoolClient,
   target: WriteTarget,
   pkColumns: string[],
-  row: Record<string, unknown>,
+  row: CapturedRow,
   colMeta: Map<string, ColumnMeta>
 ): Promise<number> {
   const pkSet = new Set(pkColumns);
   // Skip PK columns (used in WHERE) and STORED generated columns (cannot be written).
-  const setCols = Object.keys(row).filter((c) => !pkSet.has(c) && colMeta.get(c)?.generated !== "s");
+  const setCols = Object.keys(row.values).filter((c) => !pkSet.has(c) && colMeta.get(c)?.generated !== "s");
   if (setCols.length === 0) {
     return 0;
   }
-  const setClause = setCols.map((c, i) => `${quoteIdent(c)} = $${i + 1}`);
-  const whereClause = pkColumns.map((c, i) => `${quoteIdent(c)} = $${setCols.length + i + 1}`);
-  const sql = `update ${qualified(target)} set ${setClause.join(", ")} where ${whereClause.join(" and ")}`;
-  const values = [...setCols.map((c) => row[c]), ...pkColumns.map((c) => row[c])];
+  const setClause = setCols.map((c, i) => `${quoteIdent(c)} = $${String(i + 1)}`);
+  const whereClause = pkColumns.map((c, i) => `${quoteIdent(c)} = $${String(setCols.length + i + 1)}`);
+  const values = [...setCols.map((c) => row.values[c]), ...pkColumns.map((c) => row.values[c])];
+  const sql = `update ${qualified(target)} set ${setClause.join(", ")} where ${[...whereClause, ...versionGuard(row, values)].join(" and ")}`;
   const res = await client.query(sql, values);
   return res.rowCount ?? 0;
 }

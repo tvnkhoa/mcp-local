@@ -12,7 +12,7 @@ Resolution. Mirrors the format of `codebase-index-mcp/docs/mcp-codebase-index-is
 
 ## Index
 
-**15 entries** — all 15 resolved (some as documented guidance rather than code changes), **0 open**.
+**20 entries** — all 20 resolved (some as documented guidance rather than code changes), **0 open**.
 Statuses are copied from each entry's own `**Status:**` line; the entry is authoritative.
 
 | ID | Title | Status |
@@ -32,10 +32,15 @@ Statuses are copied from each entry's own `**Status:**` line; the entry is autho
 | `PG-PRV-002` | Approval-token TTL (~15 min, in-memory) races against the human-approval gate on `migration_a… | ✅ fixed 2026-07-06 — reported same day; design/UX sugg |
 | `PG-STA-001` | `migration_status.raw` duplicates parsed arrays as an escaped JSON blob even at `profile:"com… | ✅ fixed 2026-07-06 — reported same day; low priority / |
 | `PG-ENV-002` | S-43 env aliases inert for everything read through `config/index.ts` — silently disables the… | ✅ fixed 2026-08-05 (code) — `src/config/index.ts` reads |
+| `PG-WRT-001` | `write_rollback` reported rows restored that were never written, then locked itself out | ✅ fixed 2026-08-24 (code) — SAVEPOINT per row; honest s
+| `PG-WRT-002` | Rollback of `INSERT ... ON CONFLICT DO UPDATE` deleted a row that existed before the write | ✅ fixed 2026-08-24 (code) — refused at preview; `DO NOT
+| `PG-WRT-003` | An UPDATE that moved the primary key made rollback a silent no-op reported as `restored` | ✅ fixed 2026-08-24 (code) — refused at preview; a 0-row
+| `PG-WRT-004` | Rollback overwrote rows that were changed after the apply committed | ✅ fixed 2026-08-24 (c
+| `PG-WRT-005` | The write flow had no behavioural test; four defects survived from its first commit | ✅ fixed 2026-08-24 (test) — writeGuardrails.test.ts + a liode) — restore matches on captured
 
 > ID prefixes group by area: `ENV` environment resolution · `SEC` safety posture · `DOC`
 > documentation drift · `CMP` compare_environments · `MIG` EF Core migrations · `DIF` data_diff ·
-> `REV` code review sweeps · `PRV` preview payloads · `STA` status payloads.
+> `REV` code review sweeps · `PRV` preview payloads · `STA` status payloads · `WRT` data writes / rollback.
 
 > **Environment names moved.** Most entries below are written against `environment:"default"`, which
 > **no longer exists** — as of 2026-08-05 the environments are `dev` (the default, and the same
@@ -774,6 +779,183 @@ Statuses are copied from each entry's own `**Status:**` line; the entry is autho
 
 ---
 
+## PG-WRT-001 — `write_rollback` reported rows as restored that were never written, then locked itself out
+
+**Status:** ✅ fixed 2026-08-24 (code) — `src/tools/handlers/writeHandlers.ts`, SAVEPOINT per row.
+
+- **Scenario:** delete three rows through `write_preview` → `write_apply`, let a third party
+  re-create one of the deleted primary keys, then call `write_rollback`.
+
+- **Tool/query:** `write_preview{sql:"delete from t_multi where id in (1,2,3)"}` → `write_apply`
+  → (`insert into t_multi values (2,'squatter')` from another session) → `write_rollback`.
+
+- **Expected vs actual:** expected rows 1 and 3 restored, row 2 reported as a conflict, and the
+  rollback retryable for the outstanding row. Actual:
+  `{"status":"partial","restored":1,"conflicts":2}` while the table held **zero** restored rows,
+  and the retry was refused with `ALREADY_ROLLED_BACK`.
+
+- **Root cause:** the per-row loop caught errors per row but ran without `SAVEPOINT`. Postgres
+  aborts the entire transaction on the first failing statement, so every later row failed too —
+  which is why one real conflict was counted as two — and `COMMIT` on an aborted transaction
+  silently degrades to `ROLLBACK` without throwing. `apply.rolledBack = status !== "failed"` then
+  locked the record. The comment above that line claimed a fully-failed rollback stayed retryable;
+  the abort cascade meant the code could not deliver the property it described.
+
+- **Impact:** the write stayed applied while the operator was told part of it had been undone, and
+  no retry was possible. The worst shape for a rollback bug: it fails in the direction of
+  "everything is fine".
+
+- **Resolution:** a `SAVEPOINT` per row (`release` on success, `rollback to` on failure), so one
+  conflicting row costs only itself. `status` now describes the call that was just made, `pending`
+  describes what is still outstanding, `unrestored[]` names a reason per row, and `rolledBack` is
+  set only when `pending` reaches 0 — a `partial` or `failed` rollback stays retryable and the
+  retry attempts only the rows still missing. The failure path now also writes an audit row; only
+  the success path used to, so a rollback that threw left no trace in `mcp_ops.audit_log`.
+
+- **Why it survived from the start:** the write flow had no behavioural test of any kind.
+  `src/tools/tools.test.ts` deliberately reaches no database, and `scripts/smoke-test.mjs` never
+  called the three write tools. `git log` on `writeHandlers.ts` shows two commits: the original and
+  a directory move. See `PG-WRT-005` for the harness that now covers it.
+
+---
+
+## PG-WRT-002 — rollback of `INSERT ... ON CONFLICT DO UPDATE` deleted a row that existed before the write
+
+**Status:** ✅ fixed 2026-08-24 (code) — refused at preview; `ON CONFLICT DO NOTHING` still supported.
+
+- **Scenario:** upsert onto a key that already exists, then roll back.
+
+- **Tool/query:**
+  `write_preview{sql:"insert into t_upsert (id,name) values (7,'upserted') on conflict (id) do update set name = excluded.name"}`
+  against a table already holding `(7,'original')` → `write_apply` → `write_rollback`.
+
+- **Expected vs actual:** expected either a restore to `'original'` or an up-front refusal. Actual:
+  `{"status":"restored","restored":1}` and row 7 **deleted outright** — it existed before the write
+  and after the rollback it was gone.
+
+- **Root cause:** `write_apply` appends `returning *` for an INSERT and treats every returned row as
+  "a row this write created", so rollback deletes it. On an upsert, `RETURNING` yields rows from
+  both branches: genuinely inserted rows *and* rows that were updated in place. The prior values of
+  the second kind were never captured, so there was nothing to restore even in principle.
+
+- **Impact:** silent data loss on a common statement shape, reported as a successful rollback.
+
+- **Resolution:** `validateWriteSql` now reports `hasOnConflictUpdate`, and `write_preview` refuses
+  rollback for it (`rollbackSupported:false` with a `rollbackNote` saying why; `write_apply` returns
+  `rollbackId:null`). `ON CONFLICT DO NOTHING` is deliberately **still supported** — its `RETURNING`
+  yields only rows that were actually inserted, so deleting them is correct, and refusing it too
+  would have been over-refusal on a common and harmless statement.
+
+- **Considered and rejected:** splitting the branches with `(xmax = 0)` in `RETURNING` to delete only
+  the genuinely-inserted rows. It works, but it applies only when this server owns the `RETURNING`
+  clause, it leaves the operator a partial outcome to reconcile by hand, and it turns an MVCC
+  implementation detail into contract. Snapshotting the would-conflict rows before the upsert was
+  rejected outright: knowing which rows will conflict means parsing the VALUES list and the conflict
+  target, and is not possible at all for `insert ... select ...`.
+
+---
+
+## PG-WRT-003 — an UPDATE that moved the primary key made rollback a silent no-op reported as `restored`
+
+**Status:** ✅ fixed 2026-08-24 (code) — refused at preview, and a 0-row restore is no longer success.
+
+- **Scenario:** an UPDATE whose SET list assigns the primary key, then roll back.
+
+- **Tool/query:** `write_preview{sql:"update t_pkchange set id = 99, name = 'moved' where id = 1"}`
+  → `write_apply` → `write_rollback`.
+
+- **Expected vs actual:** expected a refusal or a restore of `id = 1`. Actual:
+  `{"status":"restored","restored":0,"conflicts":0}` with the table still holding
+  `{id:99,name:'moved'}`, and the record marked `rolledBack` so no retry was possible.
+
+- **Root cause:** two independent gaps. `restoreUpdatedRow` addresses the row by the primary key it
+  captured, which after the change matches nothing — and a `rowCount` of 0 is not an exception, so
+  it was counted as a successful restore. Nothing at preview time inspected the SET list.
+
+- **Impact:** a rollback that did nothing at all reported success, and the same silent-success path
+  covered every other way a row can stop being findable (deleted, key reassigned).
+
+- **Resolution:** both halves. `validateWriteSql` now returns `setColumns` (with Postgres identifier
+  folding applied, so they compare against `pg_attribute.attname`), and `write_preview` refuses
+  rollback when the SET list intersects the primary key. Independently, a restore that affects 0
+  rows is now counted as unrestored, and a probe on the failure path reports whether the row is
+  missing or was changed — so the general case is honest even where the preview check cannot see it.
+
+---
+
+## PG-WRT-004 — rollback overwrote rows that were changed after the apply committed
+
+**Status:** ✅ fixed 2026-08-24 (code) — restore matches on the captured `xmin`.
+
+- **Scenario:** apply an UPDATE, let somebody else edit the same row, then roll back.
+
+- **Tool/query:** `write_preview{sql:"update t_stale set name = 'applied' where id = 1"}` →
+  `write_apply` → (`update t_stale set name = 'someone else' where id = 1` from another session) →
+  `write_rollback`.
+
+- **Expected vs actual:** expected the rollback to refuse to touch a row it no longer recognised.
+  Actual: `{"status":"restored","restored":1}` and the third party's `'someone else'` overwritten
+  with the pre-apply value, with nothing reported.
+
+- **Root cause:** restore wrote the captured snapshot over whatever was there, addressing the row by
+  primary key alone. The write mutex (`runExclusive`) serializes only this process's own writes, so
+  it offers no protection against an edit from anywhere else.
+
+- **Impact:** rollback could destroy an unrelated change — including a newer, deliberate correction —
+  and report success.
+
+- **Resolution:** `write_apply` captures each row's post-apply `xmin` (its MVCC row version) via
+  `returning *, xmin`, and restore carries `and xmin::text = $n`. A row somebody else touched
+  matches nothing, lands in `unrestored[]` as `row_changed_since_apply`, and is left alone. Doing
+  the check in SQL rather than by comparing column values in JS avoids the whole class of
+  type-round-trip false positives (`timestamptz`, `numeric`, `bytea`, `jsonb` key order). For UPDATE
+  the version comes from the statement's own `RETURNING` and is joined to the before-snapshot on the
+  primary key — sound because `PG-WRT-003` already refuses rollback when the key moves. A DELETE has
+  no surviving row to version; its reinsert is guarded by the primary-key constraint instead.
+
+- **Related refusals added with it.** Two more cases now report `rollbackSupported:false` rather than
+  doing something unsound: a statement that carries **its own `RETURNING`** (capture needs to own
+  that clause), and one affecting more than `MAX_ROLLBACK_ROWS` (10,000) rows. The row cap is the
+  other half of `MAX_APPLIES`: that constant bounds how many rollback records are retained, this one
+  bounds how large a single one may grow, so one wide DELETE cannot pull a whole table into memory.
+
+---
+
+## PG-WRT-005 — the write flow had no behavioural test; four defects survived from its first commit
+
+**Status:** ✅ fixed 2026-08-24 (test) — `scripts/write-flow-test.mjs`, 14 scenarios.
+
+- **Scenario:** `PG-WRT-001` through `-004` were all present in `d692094`, the commit that
+  introduced the write handlers, and none was ever detected. Two of them lost data.
+
+- **Root cause:** nothing exercised the flow. `src/tools/tools.test.ts` pins `tools/call` envelopes
+  but states outright that no test there reaches a database, `contracts/postgres-mcp.json` covers
+  `tools/list` only, and `scripts/smoke-test.mjs` ran a single read query. The defects all live in
+  SQL semantics — transaction abort cascade, `RETURNING` on an upsert, `rowCount` 0 — which no
+  amount of validation-level testing can reach.
+
+- **Resolution:** two layers, split by what each can actually run.
+  `src/middleware/writeGuardrails.test.ts` covers the parse half (`hasOnConflictUpdate`,
+  `hasReturning`, `setColumns`, including keywords hidden in string literals and quoted identifiers)
+  and runs in CI with no database. `scripts/write-flow-test.mjs` covers the behaviour: it provisions
+  a throwaway Postgres container, points the server at it over real stdio MCP, runs 14 scenarios,
+  and removes the container. It is the first live test in this workspace that **writes** to a
+  database, and it never touches a configured environment — the same posture as bitbucket-mcp's
+  `dryRun` smoke case.
+
+- **Why it lives under `smoke`, not `test`:** `test` must be credential-free *and* runnable in CI.
+  This harness needs no credentials but does need Docker, and CI is a Windows runner without it —
+  under `test` it would skip on every run, which is a test that never runs. It is wired into
+  `postgres-mcp`'s `smoke` script, so `npm run verify:live` covers it, and it skips with a message
+  when Docker is absent.
+
+- **Verified discriminating:** against the pre-fix build, 8 of the 14 scenarios fail
+  (`D/partial-conflict-isolated`, `D/partial-retryable`, `D/partial-completes`,
+  `E/upsert-do-update-refused`, `F/pk-changing-update-refused`, `I/uncapturable-refused`,
+  `J/stale-row-not-clobbered`, `K/oversized-snapshot-refused`). Against the fixed build, 14/14.
+
+---
+
 ## Verified-working behaviors (confirmed against the live server / source, 2026-06-29)
 
 - **SSL is per-connection via the URI `sslmode`, overriding global `PGSSLMODE`.** `parseConnection`
@@ -788,7 +970,9 @@ Statuses are copied from each entry's own `**Status:**` line; the entry is autho
   `explain:true` returns the plan + `estimatedTotalCost` and never executes.
 - **Write guardrails (`src/sql/writeGuardrails.ts`):** single statement only; DDL rejected (must go
   through migrations); `SELECT`/`WITH` rejected (use `run_read_query`); UPDATE/DELETE require a WHERE
-  unless `allowFullTable:true`. Apply returns a `rollbackId`; rollback is capture-based.
+  unless `allowFullTable:true`. Apply returns a `rollbackId`; rollback is capture-based. **Superseded in part:** rollback is
+  offered only when the server can capture the undo data itself — see `PG-WRT-002`/`PG-WRT-004`
+  for the refusal rules and `PG-WRT-001` for how a partial rollback now behaves.
 - **Approval token:** HMAC over `{previewId, digest, expiresAt}`; digest binds env+sql+params+
   statementType+rowsAffected, so a token only applies the exact previewed plan. TTL default 900s.
 - **Undocumented capability — `schema://<env>` MCP resource.** The server exposes one schema-snapshot
