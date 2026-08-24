@@ -47,14 +47,19 @@ write_rollback(rollbackId)        // if needed
 server can capture the undo data itself. When it cannot, the preview says so in `rollbackNote`,
 `write_apply` returns `rollbackId: null`, and the change is one-way. Refused for: a table with no
 primary key · a statement with its own `RETURNING` · `INSERT ... ON CONFLICT DO UPDATE` (plain
-`DO NOTHING` is fine) · an `UPDATE` that assigns a primary-key column · a parameterized, joined or
-whole-table `UPDATE` · more than 10,000 affected rows. If you need rollback and hit one of these,
-rewrite the statement — e.g. split an upsert into a preview-able `UPDATE`, or batch a large delete.
+`DO NOTHING` is fine) · an `UPDATE` that assigns a primary-key column, or whose SET list cannot be
+read as plain `column = value` assignments · a parameterized, joined or whole-table `UPDATE` · more
+than 10,000 affected rows. If you need rollback and hit one of these, rewrite the statement — e.g.
+split an upsert into a preview-able `UPDATE`, or batch a large delete. `write_apply` can also
+downgrade the preview's verdict: if fewer rows were captured than the change affected, it returns
+`rollbackId: null` rather than offer an undo that would be incomplete.
 
 Rollback restores each row independently, so one conflicting row does not cost the others. Read
-`status` (this call), `pending` (rows still outstanding) and `unrestored[]` (why each row failed).
-A `partial` or `failed` rollback is **retryable** and retries only what is left. A row somebody
-else changed after the apply is reported as `row_changed_since_apply` rather than overwritten.
+`status` (this call), `pending` (rows still outstanding) and `unrestored[]` (why each row failed:
+`row_changed_since_apply`, `row_missing`, `version_unavailable`, `no_restorable_columns`, or
+`conflict` with the Postgres `sqlState`). A `partial` or `failed` rollback is **retryable** and
+retries only what is left. A row somebody else changed after the apply is reported as
+`row_changed_since_apply` rather than overwritten.
 
 ## Migrations (OFF unless `POSTGRES_MIGRATION_ENABLED=true`)
 

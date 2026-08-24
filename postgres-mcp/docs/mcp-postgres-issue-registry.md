@@ -12,7 +12,7 @@ Resolution. Mirrors the format of `codebase-index-mcp/docs/mcp-codebase-index-is
 
 ## Index
 
-**20 entries** — all 20 resolved (some as documented guidance rather than code changes), **0 open**.
+**21 entries** — all 21 resolved (some as documented guidance rather than code changes), **0 open**.
 Statuses are copied from each entry's own `**Status:**` line; the entry is authoritative.
 
 | ID | Title | Status |
@@ -36,7 +36,8 @@ Statuses are copied from each entry's own `**Status:**` line; the entry is autho
 | `PG-WRT-002` | Rollback of `INSERT ... ON CONFLICT DO UPDATE` deleted a row that existed before the write | ✅ fixed 2026-08-24 (code) — refused at preview; `DO NOT
 | `PG-WRT-003` | An UPDATE that moved the primary key made rollback a silent no-op reported as `restored` | ✅ fixed 2026-08-24 (code) — refused at preview; a 0-row
 | `PG-WRT-004` | Rollback overwrote rows that were changed after the apply committed | ✅ fixed 2026-08-24 (c
-| `PG-WRT-005` | The write flow had no behavioural test; four defects survived from its first commit | ✅ fixed 2026-08-24 (test) — writeGuardrails.test.ts + a liode) — restore matches on captured
+| `PG-WRT-005` | The write flow had no behavioural test; four defects survived from its first commit | ✅ fixed 2026-08-24 (test) — writeGuardrails.test.ts + a li
+| `PG-WRT-006` | Code-review sweep of the PG-WRT-001…004 fixes (9 findings, 8 fixed, 1 accepted) | ✅ fixed 2026-08-24 (code) — two defects the fixes haode) — restore matches on captured
 
 > ID prefixes group by area: `ENV` environment resolution · `SEC` safety posture · `DOC`
 > documentation drift · `CMP` compare_environments · `MIG` EF Core migrations · `DIF` data_diff ·
@@ -953,6 +954,78 @@ Statuses are copied from each entry's own `**Status:**` line; the entry is autho
   (`D/partial-conflict-isolated`, `D/partial-retryable`, `D/partial-completes`,
   `E/upsert-do-update-refused`, `F/pk-changing-update-refused`, `I/uncapturable-refused`,
   `J/stale-row-not-clobbered`, `K/oversized-snapshot-refused`). Against the fixed build, 14/14.
+
+---
+
+## PG-WRT-006 — code-review sweep of the PG-WRT-001…004 fixes (9 findings, 8 fixed)
+
+**Status:** ✅ fixed 2026-08-24 (code) — reviewed before merge; 8 of 9 findings fixed, 1 accepted.
+
+A review of the rollback fixes themselves, run against the branch before merge. Two findings were
+defects the fixes had *introduced*; the rest were pre-existing holes the fixes had left standing or
+made newly load-bearing. All were reproduced before being fixed.
+
+- **Appended clause swallowed by a trailing comment (introduced).** `write_apply` built
+  `` `${sql} returning *, xmin` `` on one line, so `delete from t where id = 1 -- cleanup` became
+  `… -- cleanup returning *, xmin`. `rowCount` was still 1, so the apply looked healthy, but
+  `result.rows` was empty: the write committed with no undo data while rollback reported
+  `status:"restored"`. For UPDATE the same swallow yielded `xmin: null` on every row, quietly
+  turning the new PG-WRT-004 guard off. The clause now goes on its own line — a `--` comment ends
+  at the newline. The same shape existed in the preview dry-run and was fixed with it. Covered by
+  `L/trailing-comment-capture`.
+
+- **A comment in the SET list disarmed the PK guard (introduced).** `extractSetColumns` finds
+  boundaries in the masked text but slices the original, so `update t set /* bump */ id = 2` parsed
+  the column name as `"/* bump */ id"`, which matches no primary key — and PG-WRT-003's refusal
+  therefore did not fire. Worse than a missed refusal: with `update t set id = id - 1 where id in
+  (2,3)`, `pairSnapshotWithVersions` would then key captured row `id=2` against the *returned*
+  `id=2` (really old row 3), the `xmin` guard would pass, and restore would write old row 2's values
+  onto old row 3. `setColumns` is now `string[] | null` and `readIdent` returns null for anything
+  that is not a lone identifier; the handler treats null as "unknown" and refuses. Postgres does not
+  accept a qualified SET target either, so nothing valid is lost. Covered by
+  `M/unparseable-set-refused` and 8 unit cases.
+
+- **A capture that came back short was still offered as rollback.** The before-snapshot for an
+  UPDATE took no row locks, and at READ COMMITTED it sees a different snapshot from the UPDATE that
+  follows it in the same transaction: a row another session commits in between is modified but never
+  captured, and rollback would then report `status:"restored", pending:0` having missed it. The
+  snapshot now takes `for update`, and — belt and braces — `write_apply` compares
+  `capturedRows.length` against `rowsAffected` and returns `rollbackId: null` with a `rollbackNote`
+  on any mismatch rather than offer a partial undo silently. This also makes the "captured nothing
+  but affected rows" case unreachable, which would otherwise have reported `restored` and set
+  `rolledBack`. No live scenario: the interleaving cannot be forced from outside the server's own
+  transaction.
+
+- **A missing row version silently meant "no guard".** `pairSnapshotWithVersions` fell back to
+  `xmin: null` when the join missed, and `versionGuard` emits nothing for null — so the restore ran
+  unguarded, which is exactly the clobbering PG-WRT-004 exists to prevent. For UPDATE and INSERT a
+  missing version is now reported as `version_unavailable` and the row is not touched. Null still
+  legitimately means "unversioned" for DELETE, whose reinsert is guarded by the PK constraint.
+
+- **Savepoints were never released on the failure path.** `ROLLBACK TO SAVEPOINT s` leaves `s`
+  established, so each failed row nested one level deeper — 10,000 failing rows meant 10,000 levels.
+  `release savepoint` now runs on both paths.
+
+- **A raw NUL byte in the source.** `pkKey`'s separator was written as a literal U+0000 rather than
+  the `"\u0000"` escape. The separator choice is right, but the byte made `file` report the module as
+  `data` and ripgrep report "binary file matches" with no hits — so `Grep` / `search_regex` / `grep`
+  over `writeHandlers.ts` silently found nothing, and any tool normalizing the byte away would have
+  turned the separator into `""` with no compile error.
+
+- **Every restore failure read as `conflict`.** The catch discarded the error, so a foreign-key
+  violation, a NOT NULL violation, a deadlock and a statement timeout were indistinguishable —
+  while the README and skill promised `unrestored[]` said why. It now carries `sqlState`.
+
+- **Unrollbackable applies consumed the retention budget.** `saveApply` ran even when the
+  `rollbackId` was never disclosed, evicting usable records from the 1000-entry FIFO early. Only a
+  record that can actually be rolled back is stored now.
+
+- **Accepted, not fixed: subtransaction count.** One savepoint per row means up to
+  `MAX_ROLLBACK_ROWS` (10,000) subtransactions in a single transaction, past the 64-entry subxid
+  cache and into `pg_subtrans` lookups. It is bounded, it only happens during an explicit rollback,
+  and correctness does not depend on it. The optimization — attempt the batch under one savepoint
+  and fall back to per-row only on failure — makes the common case one savepoint, but adds a second
+  code path for a cost that has not yet been observed. Revisit if a large rollback proves slow.
 
 ---
 

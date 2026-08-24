@@ -120,6 +120,23 @@ test("setColumns understands the multi-column assignment form", () => {
   assert.deepEqual(parse("update t set (a, b) = (1, 2), c = 3 where id = 1").setColumns, ["a", "b", "c"]);
 });
 
+test("setColumns is null, never a wrong name, when a target is not a lone identifier", () => {
+  // Boundaries come from the masked text but the slice comes from the original, so a
+  // comment inside the SET list is still present in the candidate. Reading it as part of
+  // the column name would match no primary key and silently disarm the PK-assignment
+  // guard — the caller must see "unknown" instead.
+  assert.equal(parse("update t set /* bump */ id = 2 where id = 1").setColumns, null);
+  assert.equal(parse("update t set -- bump\n id = 2 where id = 1").setColumns, null);
+  assert.equal(parse('update t set /* c */ "Name" = 2 where id = 1').setColumns, null);
+  assert.equal(parse("update t set a = 1, /* c */ b = 2 where id = 1").setColumns, null);
+  assert.equal(parse("update t set (a, /* c */ b) = (1, 2) where id = 1").setColumns, null);
+  // A qualified target is not valid Postgres either way, and must not read as "a".
+  assert.equal(parse("update t set t.a = 1 where id = 1").setColumns, null);
+  // Comments elsewhere in the statement are harmless.
+  assert.deepEqual(parse("update t /* only here */ set a = 1 where id = 1").setColumns, ["a"]);
+  assert.deepEqual(parse("update t set a = 1 where id = 1 -- trailing").setColumns, ["a"]);
+});
+
 test("setColumns is empty for INSERT and DELETE", () => {
   assert.deepEqual(parse("insert into t (a) values (1)").setColumns, []);
   assert.deepEqual(parse("delete from t where id = 1").setColumns, []);

@@ -28,11 +28,13 @@ export type WriteGuardrailResult =
        */
       hasOnConflictUpdate: boolean;
       /**
-       * Columns assigned by an UPDATE's SET list, `[]` for INSERT/DELETE. Unquoted
-       * names are folded to lower case the way Postgres folds them, so they compare
-       * directly against `pg_attribute.attname`.
+       * Columns assigned by an UPDATE's SET list, `[]` for INSERT/DELETE, and **`null`
+       * when the list could not be parsed with confidence**. A caller using this to decide
+       * whether a primary key is being assigned must read `null` as "unknown" and refuse —
+       * never as "no PK columns". Unquoted names are folded to lower case the way Postgres
+       * folds them, so they compare directly against `pg_attribute.attname`.
        */
-      setColumns: string[];
+      setColumns: string[] | null;
     }
   | {
       ok: false;
@@ -58,15 +60,29 @@ function parseTableIdentifier(raw: string): WriteTarget | null {
 }
 
 /**
- * Fold a parsed identifier the way Postgres does: an unquoted name folds to lower
- * case, a quoted one keeps its exact spelling (with `""` unescaped).
+ * A SET target read as one identifier and folded the way Postgres folds it — an unquoted
+ * name to lower case, a quoted one kept verbatim (with a doubled quote unescaped) — or
+ * `null` when the text is not a lone identifier.
+ *
+ * The `null` case is load-bearing, not defensive. Boundaries come from the masked text but
+ * the text itself is sliced from the ORIGINAL, so anything the mask blanked is still
+ * present here. A block comment between `set` and the column name would otherwise be read
+ * as part of the name, which matches no primary key and so quietly disarms the guard that
+ * refuses rollback for a PK-assigning UPDATE. Postgres does not accept a qualified SET
+ * target (`update t set t.a = 1` is an error), so a lone identifier is the whole of the
+ * valid grammar and rejecting anything else costs nothing correct.
  */
-function foldIdent(raw: string): string {
+function readIdent(raw: string): string | null {
   const trimmed = raw.trim();
-  if (trimmed.length >= 2 && trimmed.startsWith('"') && trimmed.endsWith('"')) {
+  if (/^"(?:[^"]|"")+"$/.test(trimmed)) {
     return trimmed.slice(1, -1).replace(/""/g, '"');
   }
-  return trimmed.toLowerCase();
+  // Postgres unquoted identifiers: a letter (any alphabet) or underscore, then letters,
+  // digits, underscores or dollar signs.
+  if (/^[\p{L}_][\p{L}\p{N}_$]*$/u.test(trimmed)) {
+    return trimmed.toLowerCase();
+  }
+  return null;
 }
 
 /**
@@ -146,13 +162,14 @@ function findAtTopLevel(masked: string, from: number, keywords: RegExp): number 
 const SET_LIST_END = /^(from|where|returning)\b/i;
 
 /**
- * Column names assigned by an UPDATE's SET list.
+ * Column names assigned by an UPDATE's SET list, or `null` if any target could not be
+ * read as a lone identifier — see {@link readIdent} for why that distinction matters.
  *
  * Boundaries are found in `masked` (same length as the original, literals and
  * comments blanked) and the text is then sliced out of the ORIGINAL, so a quoted
  * identifier like `"Name"` survives — `masked` has blanked it.
  */
-function extractSetColumns(originalSql: string, masked: string): string[] {
+function extractSetColumns(originalSql: string, masked: string): string[] | null {
   const setMatch = /\bset\b/i.exec(masked);
   if (!setMatch) {
     return [];
@@ -170,16 +187,25 @@ function extractSetColumns(originalSql: string, masked: string): string[] {
     if (open >= 0) {
       // Multi-column form: `set (a, b) = (row(...))` / `= (select …)`.
       const close = masked.lastIndexOf(")", eq);
-      if (close > open) {
-        for (const [innerFrom, innerTo] of splitTopLevelRanges(masked, open + 1, close)) {
-          columns.push(foldIdent(originalSql.slice(innerFrom, innerTo)));
+      if (close <= open) {
+        return null;
+      }
+      for (const [innerFrom, innerTo] of splitTopLevelRanges(masked, open + 1, close)) {
+        const name = readIdent(originalSql.slice(innerFrom, innerTo));
+        if (name === null) {
+          return null;
         }
+        columns.push(name);
       }
       continue;
     }
-    columns.push(foldIdent(originalSql.slice(from, eq)));
+    const name = readIdent(originalSql.slice(from, eq));
+    if (name === null) {
+      return null;
+    }
+    columns.push(name);
   }
-  return columns.filter((name) => name.length > 0);
+  return columns;
 }
 
 /**

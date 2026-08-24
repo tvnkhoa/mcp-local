@@ -100,6 +100,8 @@ create table t_ident   (id int generated always as identity primary key,
                         upper_name text generated always as (upper(name)) stored);
 create table t_stale   (id int primary key, name text);
 create table t_big     (id int primary key, name text);
+create table t_comment (id int primary key, name text);
+create table t_setcomment (id int primary key, name text);
 insert into t_update  values (1,'a','n1'),(2,'b','n2');
 insert into t_delete  values (1,'a'),(2,'b');
 insert into t_multi   values (1,'a'),(2,'b'),(3,'c');
@@ -107,6 +109,8 @@ insert into t_upsert  values (7,'original');
 insert into t_pkchange values (1,'a');
 insert into t_ident (name) values ('x'),('y');
 insert into t_stale  values (1,'before');
+insert into t_comment values (1,'keep');
+insert into t_setcomment values (1,'keep');
 insert into t_big select g, 'row' from generate_series(1, ${String(MAX_ROLLBACK_ROWS + 1)}) g;
 `;
 
@@ -364,6 +368,41 @@ async function main() {
           Array.isArray(r.unrestored) &&
           r.unrestored[0]?.reason === "row_changed_since_apply",
         `rollback=${JSON.stringify(r)} finalName=${final}`
+      );
+    }
+
+    // ── L. a trailing line comment must not swallow the capture clause ──────
+    {
+      // The clause is appended on its own line. On the same line it would land inside the
+      // comment, the write would commit with no undo data, and rollback would report
+      // "restored" having done nothing.
+      const p = await preview("delete from t_comment where id = 1 -- cleanup");
+      const a = await apply(p);
+      const gone = (await rows("select 1 from t_comment where id = 1")).length === 0;
+      const { payload: r } = await rollback(a.rollbackId);
+      const back = await rows("select id, name from t_comment where id = 1");
+      check(
+        "L/trailing-comment-capture",
+        p.rollbackSupported === true &&
+          a.rollbackId !== null &&
+          gone &&
+          r.status === "restored" &&
+          back.length === 1 &&
+          back[0].name === "keep",
+        `rollbackSupported=${String(p.rollbackSupported)} deleted=${String(gone)} rollback=${JSON.stringify(r)} back=${JSON.stringify(back)}`
+      );
+    }
+
+    // ── M. an unparseable SET list must not disarm the PK guard ─────────────
+    {
+      // Without the guard this reads the column name as "/* bump */ id", matches no
+      // primary key, and offers rollback on a statement that moves the key.
+      const p = await preview("update t_setcomment set /* bump */ id = 5 where id = 1");
+      const a = await apply(p);
+      check(
+        "M/unparseable-set-refused",
+        p.rollbackSupported === false && a.rollbackId === null,
+        `rollbackSupported=${String(p.rollbackSupported)} note=${String(p.rollbackNote)}`
       );
     }
 

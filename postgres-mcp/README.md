@@ -100,13 +100,20 @@ không — **đọc nó trước khi apply**, vì `write_apply` sẽ trả `roll
 | Câu lệnh tự viết `RETURNING` | capture cần tự gắn `returning *, xmin` |
 | `INSERT ... ON CONFLICT DO UPDATE` | có thể sửa dòng đã tồn tại, không capture được giá trị cũ (`DO NOTHING` thì **được** hỗ trợ) |
 | `UPDATE` gán vào cột PK | khôi phục theo PK đã capture sẽ không khớp dòng nào |
+| `UPDATE` có SET list không đọc được chắc chắn (ví dụ comment nằm giữa `set` và tên cột) | không biết được nó có gán vào PK hay không, nên không dám nhận |
 | `UPDATE` có params / có `FROM`-join / không `WHERE` | snapshot chạy lại chính `WHERE` đó nên nó phải tự đủ |
 | Ảnh hưởng > 10.000 dòng | snapshot nằm trong RAM; chia nhỏ theo batch |
 
+`write_apply` cũng có thể **hạ** quyết định của preview: nếu số dòng capture được không khớp số
+dòng thực sự bị ảnh hưởng thì undo sẽ không đầy đủ, nên nó trả `rollbackId: null` kèm
+`rollbackNote` thay vì đưa ra một rollback chỉ hoàn nguyên được một phần mà không nói.
+
 - Rollback khôi phục **từng dòng độc lập** (mỗi dòng một `SAVEPOINT`): một dòng xung đột không
   làm mất phần còn lại. Response trả `status` của lần gọi đó (`restored` / `partial` / `failed`),
-  `pending` là số dòng còn lại, và `unrestored[]` nêu lý do từng dòng. Một rollback `partial` hay
-  `failed` **vẫn gọi lại được**, và lần sau chỉ chạm những dòng còn thiếu.
+  `pending` là số dòng còn lại, và `unrestored[]` nêu lý do từng dòng — `row_changed_since_apply`,
+  `row_missing`, `version_unavailable`, `no_restorable_columns`, hoặc `conflict` kèm `sqlState`
+  (SQLSTATE của Postgres, để phân biệt vi phạm khóa ngoại với deadlock hay timeout). Một rollback
+  `partial` hay `failed` **vẫn gọi lại được**, và lần sau chỉ chạm những dòng còn thiếu.
 - Dòng bị người/hệ thống khác sửa sau khi apply thì **không bị ghi đè**: rollback so `xmin` (row
   version của Postgres) và báo `row_changed_since_apply` thay vì xóa mất thay đổi đó.
 - Rollback record chỉ nằm trong RAM tiến trình: restart hoặc quá 1.000 apply gần nhất thì
