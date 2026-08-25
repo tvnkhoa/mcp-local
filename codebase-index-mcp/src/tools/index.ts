@@ -81,8 +81,9 @@ function withRepoIdGuard(
     if (typeof repoId !== "string" || repoId.length === 0) return ok(undefined);
     if (deps.buildContext().store.getRepository(repoId)) return ok(undefined);
     return err(
+      // No tool-name prefix: `mapError` is the single place that adds it (see prefixOnce there).
       notFound(
-        `${context.toolName}: unknown repoId '${repoId}'. Run list_repositories to see the indexed repos, or index_repository first.`,
+        `unknown repoId '${repoId}'. Run list_repositories to see the indexed repos, or index_repository first.`,
         { guard: "repo_indexed", repoId }
       )
     );

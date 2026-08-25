@@ -21,6 +21,28 @@ import { isPlatformError } from "@mcp/core";
 import { z } from "zod";
 import { PolicyViolationError } from "../services/refactor/refactorUtils.js";
 
+/**
+ * MCP-ISSUE-060: prefix the tool name exactly once.
+ *
+ * Every branch below prepends `${toolName}: `, and many handlers already build their message that
+ * way — building the message as "<toolName>: ..." is the house idiom in roughly 37 places. The two
+ * compose, so a real response read:
+ *
+ *   "search_regex: MCP error -32602: search_regex: invalid regex pattern: ..."
+ *
+ * — the tool named twice, with the transport's own framing wedged between. The envelope contract
+ * (asserted by `test:server-envelopes`) is that the message STARTS with the tool name, which this
+ * preserves; what it removes is the second copy.
+ */
+function prefixOnce(toolName: string, message: string): string {
+  // `new McpError(code, msg)` sets `.message` to "MCP error <code>: <msg>", so the handler's own
+  // "<toolName>: " prefix is no longer at the start and a naive startsWith check misses it — which is
+  // exactly how the doubled form survived. Strip the transport framing first: it is the JSON-RPC
+  // number, already carried structurally in `code`, and it means nothing to the reader.
+  const unframed = message.replace(/^MCP error -?\d+:\s*/, "");
+  return unframed.startsWith(`${toolName}:`) ? unframed : `${toolName}: ${unframed}`;
+}
+
 export function mapError(error: unknown, toolName: string): { code: string; message: string; requestId: string } {
   const requestId = randomUUID();
 
@@ -46,7 +68,7 @@ export function mapError(error: unknown, toolName: string): { code: string; mess
   if (isPlatformError(error)) {
     return {
       code: error.code,
-      message: `${toolName}: ${error.message}`,
+      message: prefixOnce(toolName, error.message),
       requestId
     };
   }
@@ -54,7 +76,7 @@ export function mapError(error: unknown, toolName: string): { code: string; mess
   if (error instanceof z.ZodError) {
     return {
       code: "VALIDATION_ERROR",
-      message: `${toolName}: ${error.issues.map((x) => `${x.path.join(".") || "input"}: ${x.message}`).join("; ")}`,
+      message: prefixOnce(toolName, error.issues.map((x) => `${x.path.join(".") || "input"}: ${x.message}`).join("; ")),
       requestId
     };
   }
@@ -62,7 +84,7 @@ export function mapError(error: unknown, toolName: string): { code: string; mess
   if (error instanceof PolicyViolationError) {
     return {
       code: error.code,
-      message: `${toolName}: ${error.message}`,
+      message: prefixOnce(toolName, error.message),
       requestId
     };
   }
@@ -70,14 +92,14 @@ export function mapError(error: unknown, toolName: string): { code: string; mess
   if (error instanceof McpError) {
     return {
       code: "MCP_ERROR",
-      message: `${toolName}: ${error.message}`,
+      message: prefixOnce(toolName, error.message),
       requestId
     };
   }
 
   return {
     code: "INTERNAL_ERROR",
-    message: `${toolName}: ${error instanceof Error ? error.message : "Unknown error"}`,
+    message: prefixOnce(toolName, error instanceof Error ? error.message : "Unknown error"),
     requestId
   };
 }
