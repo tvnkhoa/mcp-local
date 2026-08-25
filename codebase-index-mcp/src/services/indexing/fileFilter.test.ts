@@ -7,6 +7,7 @@ import {
   isLikelyMinified,
   isMigrationPath,
   isMigrationSymbol,
+  INDEX_IGNORE_GLOBS,
   isSecretBearingFile,
   isTestPath,
   shouldIndexFile
@@ -273,4 +274,32 @@ test("shouldIndexFile refuses a secret-bearing file outright", () => {
   const decision = shouldIndexFile(".env", Buffer.from("DB_PASSWORD=hunter2"));
   assert.equal(decision.include, false);
   assert.equal(decision.reason, "excluded_filename");
+});
+
+test("a vendor tree is excluded at the GLOB, not only by the post-walk filter", () => {
+  // The distinction that cost a whole re-index. `hasExcludedPathSegment` runs after the glob and
+  // after `maxFiles` truncates it, so a 62,311-file `.venv` was still walked, still sorted ahead of
+  // the real sources, and still consumed the entire 20,000-file budget — `filesIndexed: 3`,
+  // `filesSkipped: 19997`. A truncated scan then correctly refuses to prune, so the previous run's
+  // 9,156 stale rows survived too. Excluding a tree has to happen where the walk happens.
+  for (const dir of [".venv", "venv", "site-packages", "node_modules", ".tox", ".yarn", ".gradle"]) {
+    assert.ok(
+      INDEX_IGNORE_GLOBS.includes(`**/${dir}/**`),
+      `${dir} must be in INDEX_IGNORE_GLOBS, not only in EXCLUDED_PATH_SEGMENTS`
+    );
+  }
+});
+
+test("every glob-ignored vendor tree is also segment-excluded, and vice versa", () => {
+  // Both lists are derived from one array precisely so they cannot drift again — this asserts the
+  // derivation, so replacing it with two hand-maintained lists fails here rather than in production.
+  for (const glob of INDEX_IGNORE_GLOBS) {
+    const m = /^\*\*\/(.+)\/\*\*$/.exec(glob);
+    if (!m) continue;
+    assert.equal(
+      hasExcludedPathSegment(`repo/${m[1]}/file.ts`),
+      true,
+      `${glob} is glob-ignored but ${m[1]} is not a excluded path segment`
+    );
+  }
 });

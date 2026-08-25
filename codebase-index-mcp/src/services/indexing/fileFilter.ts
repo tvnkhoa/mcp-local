@@ -9,41 +9,31 @@ export type FilterDecision = {
 // Glob ignore set shared by the indexer (indexPipeline.ts) and the scanAll path of
 // search_regex (regexSearch.ts) so both agree on what "the repo" excludes. Keep this the
 // single source — do not re-declare the array elsewhere.
-export const INDEX_IGNORE_GLOBS = [
-  "**/node_modules/**",
-  "**/dist/**",
-  "**/build/**",
-  "**/.git/**",
-  "**/coverage/**",
-  "**/*.log",
-  "**/*.lock",
-  "**/package-lock.json",
-  "**/yarn.lock",
-  "**/pnpm-lock.yaml"
-];
-
-const EXCLUDED_PATH_SEGMENTS = new Set([
+/**
+ * Directory names that hold a dependency tree or a tool cache — never this repository's own code.
+ *
+ * MCP-ISSUE-060 follow-up. These feed BOTH the glob ignore list and the path-segment filter, and
+ * that is the point: the first attempt at this fix added the dot-spelled entries to the segment
+ * filter only. The filter runs AFTER the glob and after `maxFiles` truncates it, so `.venv` was
+ * still walked, still sorted ahead of the real files, and still consumed the entire 20 000-file
+ * budget — the re-index reported `filesIndexed: 3, filesSkipped: 19997`, and because a truncated
+ * scan correctly refuses to prune, the 9 156 stale rows from the previous run survived. Excluding a
+ * tree has to happen where the walk happens.
+ */
+const VENDOR_DIR_SEGMENTS = [
   "node_modules",
   "dist",
   "build",
-  ".git",
-  ".next",
-  ".turbo",
   "coverage",
   "out",
   "target",
   "bin",
   "obj",
   "artifacts",
-  ".vscode",
-  ".vs",
-  ".idea",
   "__pycache__",
-  // MCP-ISSUE-060 follow-up: added when `dot: true` was turned on for the file walk. Before that,
-  // node-glob's default silently skipped every dot-directory and this list never had to name them.
-  // Measured the moment it did: `wec.rag` went from 140 indexed files to 9159, of which 9156 were
-  // `.venv/**` — 110,513 of its 111,454 symbols came from a Python virtualenv. A dependency tree is
-  // not this repo's code, and `node_modules` was already excluded for exactly this reason.
+  // Dot-spelled equivalents. Invisible to node-glob's default until `dot: true` was turned on so
+  // that `.claude/` and `.github/` could be searched at all, at which point a 62 311-file Python
+  // virtualenv walked straight in.
   ".venv",
   "venv",
   "site-packages",
@@ -56,8 +46,6 @@ const EXCLUDED_PATH_SEGMENTS = new Set([
   ".ipynb_checkpoints",
   ".gradle",
   ".terraform",
-  ".svn",
-  ".hg",
   ".yarn",
   ".pnpm-store",
   ".parcel-cache",
@@ -66,6 +54,30 @@ const EXCLUDED_PATH_SEGMENTS = new Set([
   ".cache",
   ".nuget",
   ".conda",
+  ".next",
+  ".turbo"
+];
+
+export const INDEX_IGNORE_GLOBS = [
+  ...VENDOR_DIR_SEGMENTS.map((dir) => `**/${dir}/**`),
+  "**/.git/**",
+  "**/.svn/**",
+  "**/.hg/**",
+  "**/*.log",
+  "**/*.lock",
+  "**/package-lock.json",
+  "**/yarn.lock",
+  "**/pnpm-lock.yaml"
+];
+
+const EXCLUDED_PATH_SEGMENTS = new Set([
+  ...VENDOR_DIR_SEGMENTS,
+  ".git",
+  ".svn",
+  ".hg",
+  ".vscode",
+  ".vs",
+  ".idea",
   "wwwroot",
   "public",
   "static",
