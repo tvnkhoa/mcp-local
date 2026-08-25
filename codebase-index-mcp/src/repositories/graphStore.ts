@@ -585,7 +585,7 @@ export class GraphStore {
     return getFileContextImpl(this.db, repoId, filePath, limit, compact);
   }
 
-  getBatchContext(repoId: string, filePaths: string[], limit: number, compact = false): { symbols: SymbolRecord[] | { name: string; kind: string; filePath: string; line: number }[]; edges: ResolvedEdge[] } {
+  getBatchContext(repoId: string, filePaths: string[], limit: number, compact = false): { symbols: SymbolRecord[] | { name: string; kind: string; filePath: string; line: number }[]; edges: ResolvedEdge[]; edgesTruncated?: boolean } {
     return getBatchContextImpl(this.db, repoId, filePaths, limit, compact);
   }
 

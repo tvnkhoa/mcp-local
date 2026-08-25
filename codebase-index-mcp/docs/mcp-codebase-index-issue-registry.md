@@ -2531,6 +2531,24 @@ The rule is deliberately comparative — extraction demonstrably works in *this*
 
 New test files: `src/services/impact/impactSurface.test.ts`, `src/services/search/symbolSearchContextPack.test.ts`, `src/services/search/symbolSearchCandidates.test.ts`, `scripts/test/test-unknown-input-honesty.mjs`. Cases appended to `edgeResolverCalls.test.ts`, `changeAnalysis.test.ts`, `staticAnalyzerDeadCode.test.ts`, `schemaParity.test.ts`.
 
+### Evidence for the concurrent-dispatch hang, found while fixing CI
+
+Not a fix, but the first hard data point on the open item. `scripts/verify-enhancements.mjs` spawns
+the server with `stderr: "pipe"` and never read it. On Windows a pipe write blocks once the 64 KB OS
+buffer fills, so as soon as a run produced enough server logging the server blocked mid-write and the
+client reported `MCP error -32000: Connection closed`. Isolated by changing one thing: adding
+`transport.stderr?.on("data", () => {})` makes it pass, repeatably, with `stderr` still piped.
+
+It only fired when the working tree was dirty — step 5 indexes changed files in `mode:"dirty"`, and an
+empty change set logs almost nothing. A clean CI checkout has zero dirty files, which is why it passed
+on every push and failed locally.
+
+This is the H2 shape from the audit's diagnosis plan — a blocked write on a pipe nobody is draining —
+demonstrated end to end on this machine, on stderr rather than stdout. It does not prove the
+concurrent-call hang has the same cause, and stdout is drained by the client where stderr was not. But
+it moves H2 from "structurally possible" to "observed here", and the diagnosis harness should measure
+response bytes and pipe backpressure before anything else.
+
 ### Still open after this change
 
 The concurrent-dispatch hang — mechanism **not** established, and three of the audit's hypotheses argue against fixing it blind (it may be cold-cache, host-side, or in the response write path, and a queue would make two of those worse). A diagnosis harness is designed but not run. `rename_assist`'s 17–22% preview recall. The missing `approvalToken` on `refactor_symbol_migration` / `change_value_representation` — the annotation is now correct, which is what protects a host, but these two still preview-and-apply in one round trip where the `refactor_replace_*` trio requires an HMAC. The remaining P2 extractor work (receiver-typed calls, object-literal arrow attribution, `@mcp/*` package links, DI-bound dispatch, config-file indexing). And the `noUnusedLocals` gap that let (a) survive: `impactRenameTrace.ts` and `impactRepoSummaries.ts` still carry the unused import, left in place deliberately as evidence until each is resolved on its merits.

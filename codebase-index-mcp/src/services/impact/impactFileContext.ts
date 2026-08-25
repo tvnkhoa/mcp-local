@@ -211,8 +211,10 @@ export function getBatchContextImpl(
   repoId: string,
   filePaths: string[],
   limit: number,
-  compact = false
-): { symbols: SymbolRecord[] | { name: string; kind: string; filePath: string; line: number }[]; edges: ResolvedEdge[] } {
+  compact = false,
+  edgeLimit?: number,
+  includePropertyRefs = false
+): { symbols: SymbolRecord[] | { name: string; kind: string; filePath: string; line: number }[]; edges: ResolvedEdge[]; edgesTruncated?: boolean } {
   if (filePaths.length === 0) {
     return { symbols: [], edges: [] };
   }
@@ -244,7 +246,12 @@ export function getBatchContextImpl(
 
   const symbolIds = allSymbols.map((s) => s.symbolId);
   const symPlaceholders = symbolIds.map(() => "?").join(", ");
-  const edges = db
+  // MCP-ISSUE-060: the batch form gets the same edge budget as the single-file form. Missing it here
+  // first time round left `get_file_context({filePaths})` with the original unbounded shape while
+  // `{filePath}` was fixed — the same tool answering two different ways depending on which argument
+  // the caller reached for.
+  const edgeBudget = resolveEdgeLimit(limit, edgeLimit);
+  const edgeRows = db
     .prepare(
       `
       select
@@ -259,12 +266,25 @@ export function getBatchContextImpl(
       left join symbols sf on sf.repo_id = e.repo_id and sf.symbol_id = e.from_id
       left join symbols st on st.repo_id = e.repo_id and st.symbol_id = e.to_id
       where e.repo_id = ? and (e.from_id in (${symPlaceholders}) or e.to_id in (${symPlaceholders}))
+        and (? = 1 or e.type not in ('PROPERTY_REF', 'PROPERTY_WRITE'))
+      order by case e.type
+                 when 'IMPLEMENTS' then 0
+                 when 'EXTENDS' then 1
+                 when 'IMPORTS' then 2
+                 when 'DEPENDS_ON' then 3
+                 when 'PUBLISHES' then 4
+                 when 'CONSUMES' then 5
+                 when 'CALLS' then 6
+                 when 'TYPE_REF' then 7
+                 else 8
+               end
       limit ?
       `
     )
-    .all(repoId, ...symbolIds, ...symbolIds, limit) as ResolvedEdge[];
+    .all(repoId, ...symbolIds, ...symbolIds, includePropertyRefs ? 1 : 0, edgeBudget + 1) as ResolvedEdge[];
 
-  return { symbols, edges };
+  const edges = edgeRows.slice(0, edgeBudget);
+  return { symbols, edges, edgesTruncated: edgeRows.length > edges.length };
 }
 // ── getChangeContext ───────────────────────────────────────────────────
 

@@ -30,6 +30,16 @@ async function main() {
   const client = new Client({ name: "verify", version: "0.1.0" });
   await client.connect(transport);
 
+  // The child's stderr is piped, so SOMETHING has to read it. On Windows a pipe write blocks once
+  // the OS buffer (64 KB) is full, and nothing here was draining it — so as soon as a run produced
+  // enough server logging, the server blocked mid-write and the client saw "Connection closed".
+  //
+  // It only ever fired when the working tree was dirty: step 5 indexes the changed files in
+  // `mode:"dirty"`, and an empty change set logs almost nothing. A clean CI checkout has zero dirty
+  // files, which is why this passed on every push and failed locally. `test-server-envelopes.mjs`
+  // has always attached a reader here; this harness did not.
+  transport.stderr?.on("data", () => {});
+
   // List tools — confirm the 3 new tools registered.
   const tools = (await client.listTools()).tools.map((t) => t.name);
   for (const t of ["orient", "get_feature_bundle", "change_impact"]) {
