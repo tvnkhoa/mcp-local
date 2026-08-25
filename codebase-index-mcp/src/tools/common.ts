@@ -100,11 +100,18 @@ export const controlsWatcher: ToolAnnotations = {
 /**
  * A refactor step that computes a plan and writes nothing to the working tree.
  *
- * `refactor_replace_preview`, `rename_assist`, and the two dry-run-by-default rewriters. Not
- * `readsGraph`, because these are not free of effect: each one persists a preview row plus an
- * HMAC approval token that a later `refactor_replace_apply` will accept. Nothing in the repo
- * changes, so `readOnly: true` is still the honest hint for a host deciding whether to
- * confirm — but `idempotent: false`, because every call mints a new previewId.
+ * `refactor_replace_preview` and `rename_assist`. Not `readsGraph`, because these are not free of
+ * effect: each one persists a preview row plus an HMAC approval token that a later
+ * `refactor_replace_apply` will accept. Nothing in the repo changes, so `readOnly: true` is still
+ * the honest hint for a host deciding whether to confirm — but `idempotent: false`, because every
+ * call mints a new previewId.
+ *
+ * MCP-ISSUE-060: `refactor_symbol_migration` and `change_value_representation` used to be annotated
+ * with this and are NOT preview-only — `dryRun:false` reaches `applyPreviewExclusively`, the same
+ * `fs.writeFileSync` path `refactor_replace_apply` uses. MCP annotations are static per tool, not
+ * per argument, so a host trusting `readOnlyHint` to skip its confirmation had no way to know that
+ * one particular call was about to rewrite source files. They now carry `appliesChange`. Annotate
+ * for the worst a tool can do, never for its default.
  */
 export const previewsChange: ToolAnnotations = {
   readOnly: true,

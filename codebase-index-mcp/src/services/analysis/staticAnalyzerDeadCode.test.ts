@@ -120,3 +120,65 @@ test("the language filter matches via the files join", () => {
     ["TsThing"]
   );
 });
+
+/**
+ * MCP-ISSUE-060 — a language whose extractor records no calls cannot support "nothing calls this".
+ *
+ * Measured on the registered `wec.rag` repo (95 of 140 files Python, 45% of its source): every edge
+ * from a `.py` symbol is an IMPORT — 449 of them, zero CALLS, zero TYPE_REF, zero PROPERTY_REF —
+ * because `pythonExtractor.ts` is a ~89-line regex stub. `dead_code_scan` therefore reported the
+ * program's own `main` as a dead-code candidate, with `suppressed.total: 0` beside it, because every
+ * other heuristic here is C#-shaped. A `BOOTSTRAP_FILE_NAMES` entry would not have helped: that
+ * `main` lives in `chat.py`.
+ *
+ * The second test is the one that matters more. A first attempt suppressed any language with no CALLS
+ * edges, full stop — which is true of every fixture in this file and of any repo indexed moments ago,
+ * so it replaced a wrong answer with no answer at all and turned four tests above red. The rule has to
+ * be comparative: extraction demonstrably works in THIS repo, and produces nothing for THIS language.
+ */
+function addSymbolIn(
+  db: ReturnType<typeof makeDb>,
+  name: string,
+  file: string,
+  language: string
+) {
+  db.prepare(
+    "insert into symbols (repo_id, symbol_id, file_path, name, kind, line, signature) values (?,?,?,?,?,?,?)"
+  ).run("r", `id-${name}`, file, name, "function", 1, "public void X()");
+  db.prepare("insert or ignore into files (repo_id, path, language) values (?,?,?)").run("r", file, language);
+}
+
+test("a language lane that records no call edges is suppressed, not reported dead", () => {
+  const db = makeDb();
+  // C# has real call traffic in this repo, so extraction demonstrably works here.
+  addSymbolIn(db, "CsCaller", "src/A.cs", "csharp");
+  addSymbolIn(db, "CsCallee", "src/B.cs", "csharp");
+  db.prepare("insert into edges (repo_id, from_id, to_id, type, reason) values (?,?,?,?,?)")
+    .run("r", "id-CsCaller", "id-CsCallee", "CALLS", "test");
+  // Python contributes symbols and nothing else — the wec.rag shape.
+  addSymbolIn(db, "main", "chat.py", "python");
+  addSymbolIn(db, "helper", "util.py", "python");
+
+  const result = getDeadCodeCandidates(db, "r", null, null, null, false, 50);
+  const names = result.candidates.map((c) => c.name);
+
+  assert.ok(!names.includes("main"), `Python main must not be reported dead; got ${JSON.stringify(names)}`);
+  assert.ok(!names.includes("helper"));
+  assert.equal(result.suppressed.reasons.language_lane_has_no_call_edges, 2);
+  // C# is unaffected: CsCaller has no incoming calls and is a legitimate candidate.
+  assert.ok(names.includes("CsCaller"), `C# candidates must survive; got ${JSON.stringify(names)}`);
+});
+
+test("a repo with no call edges at all suppresses nothing — absence of data is not evidence", () => {
+  const db = makeDb();
+  addSymbolIn(db, "Alpha", "src/A.cs", "csharp");
+  addSymbolIn(db, "Beta", "src/B.py", "python");
+
+  const result = getDeadCodeCandidates(db, "r", null, null, null, false, 50);
+  const names = result.candidates.map((c) => c.name).sort();
+
+  // Every language here is call-blind by the naive reading. Acting on that would empty the result for
+  // a freshly indexed repo and for every fixture in this file.
+  assert.deepEqual(names, ["Alpha", "Beta"]);
+  assert.equal(result.suppressed.reasons.language_lane_has_no_call_edges, undefined);
+});

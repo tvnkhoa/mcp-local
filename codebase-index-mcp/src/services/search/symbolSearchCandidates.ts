@@ -26,9 +26,18 @@ function demotionTierFor(row: SymbolRecord & { parentName?: string | null }): 0 
   return 0;
 }
 
+/**
+ * MCP-ISSUE-060: `repoId` is nullable, meaning "every indexed repo".
+ *
+ * `search_symbols({ranked:true})` without a `repoId` returned 0 results for every query and every
+ * strategy — while dropping `ranked` made cross-repo search work, and adding `repoId` made `ranked`
+ * work. Only the combination failed, and it failed silently: a well-formed empty response,
+ * indistinguishable from "this symbol exists nowhere". The cause was the handler passing
+ * `args.repoId ?? ""` into a `where s.repo_id = ?` that then matched no row in any repo.
+ */
 export function getSymbolCandidatesImpl(
   db: Database.Database,
-  repoId: string,
+  repoId: string | null,
   name: string,
   limit: number,
   strategy: "name" | "intent" = "name",
@@ -46,6 +55,11 @@ export function getSymbolCandidatesImpl(
   score: number;
   confidence: number;
 }[] {
+  // MCP-ISSUE-060: an absent repoId scopes to the whole index rather than to a repo named "".
+  // Kept as a clause + params pair so both query branches bind identically whichever way it goes.
+  const repoWhere = repoId == null || repoId === "" ? "" : "s.repo_id = ? and";
+  const repoParams: unknown[] = repoId == null || repoId === "" ? [] : [repoId];
+
   // Filter clauses (kind/language/filePath) — previously dropped on the ranked path.
   const filterConds: string[] = [];
   const filterParams: unknown[] = [];
@@ -86,7 +100,7 @@ export function getSymbolCandidatesImpl(
         from symbols s
         left join symbols p on p.repo_id = s.repo_id and p.symbol_id = s.parent_symbol_id
         ${langJoin}
-        where s.repo_id = ? and (${tokenClauses}) ${filterWhere}
+        where ${repoWhere} (${tokenClauses}) ${filterWhere}
         -- MCP-ISSUE-049: this was \`order by length(s.name)\` alone, which decided the candidate POOL
         -- before any scoring ran. \`Up\` and \`Down\` are the shortest method names in an EF repo, so a
         -- repo with many migrations spent the whole \`fetchLimit\` window on them and long, relevant
@@ -99,7 +113,7 @@ export function getSymbolCandidatesImpl(
         limit ?
         `
       )
-      .all(repoId, ...tokenParams, ...filterParams, fetchLimit) as (SymbolRecord & { parentName?: string | null })[];
+      .all(...repoParams, ...tokenParams, ...filterParams, fetchLimit) as (SymbolRecord & { parentName?: string | null })[];
     const rows = filters.excludeTests ? allRows.filter((r) => !isTestPath(r.filePath)) : allRows;
 
     const lowerTokens = tokens.map((t) => t.toLowerCase());
@@ -154,7 +168,7 @@ export function getSymbolCandidatesImpl(
       from symbols s
       left join symbols p on p.repo_id = s.repo_id and p.symbol_id = s.parent_symbol_id
       ${langJoin}
-      where s.repo_id = ? and (s.name = ? or s.name like ?) ${filterWhere}
+      where ${repoWhere} (s.name = ? or s.name like ?) ${filterWhere}
       order by
         case
           when lower(s.name) = lower(?) then 0
@@ -167,7 +181,7 @@ export function getSymbolCandidatesImpl(
       limit ?
       `
     )
-    .all(repoId, name, `%${name}%`, ...filterParams, name, `${name}%`, fetchLimit) as (SymbolRecord & { parentName?: string | null })[];
+    .all(...repoParams, name, `%${name}%`, ...filterParams, name, `${name}%`, fetchLimit) as (SymbolRecord & { parentName?: string | null })[];
   const rows = (filters.excludeTests ? allRows.filter((r) => !isTestPath(r.filePath)) : allRows).slice(0, limit);
 
   const normalizedQuery = name.toLowerCase();

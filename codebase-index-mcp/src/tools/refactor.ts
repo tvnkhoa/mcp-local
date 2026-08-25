@@ -234,7 +234,7 @@ export function buildRefactorTools(deps: CodebaseIndexDeps): AnyToolDefinition[]
     },
     // Dry-run by default; a non-dry-run call goes through the apply path, which is itself
     // annotated destructive. The hint describes the default posture of this entry point.
-    annotations: previewsChange,
+    annotations: appliesChange,
     rawResult: true,
     handler: async (input) => ok(raw(await handleRefactorSymbolMigration(input, buildContext())))
   });
@@ -264,7 +264,7 @@ export function buildRefactorTools(deps: CodebaseIndexDeps): AnyToolDefinition[]
         profile: PROFILE_PROP
       }
     },
-    annotations: previewsChange,
+    annotations: appliesChange,
     rawResult: true,
     handler: async (input) => ok(raw(await handleChangeValueRepresentation(input, buildContext())))
   });

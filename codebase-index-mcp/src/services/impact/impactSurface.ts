@@ -8,8 +8,7 @@
 import type Database from "better-sqlite3";
 import type { EdgeRecord, GraphHealth, ReliabilitySummary, ResolvedEdge, SymbolRecord } from "../../types/index.js";
 import { CALL_TRAVERSAL_EDGE_SQL_LIST, CALL_TRAVERSAL_EDGE_TYPES } from "../../types/index.js";
-import { expandInterfaceSiblingsImpl } from "../graph/interfaceSiblings.js";
-import { buildEdgeToSymbolPairsCte, buildReliabilitySummaryImpl, countUnresolvedEdgesForFileImpl, findModuleSymbolId, resolveCanonicalFilePath, wiringNoteFor } from "./impactShared.js";
+import { buildEdgeToSymbolPairsCte, buildImpactSeed, buildReliabilitySummaryImpl, countUnresolvedEdgesForFileImpl, findModuleSymbolId, resolveCanonicalFilePath, wiringNoteFor } from "./impactShared.js";
 
 export function getImpactSurfaceImpl(
   db: Database.Database,
@@ -41,11 +40,12 @@ export function getImpactSurfaceImpl(
   wiringNote?: string;
 } {
   const canonicalFilePath = resolveCanonicalFilePath(db, repoId, filePath);
+  const seed = buildImpactSeed(db, repoId, canonicalFilePath);
 
   const callers = db
     .prepare(
       `
-      with ${buildEdgeToSymbolPairsCte("s.repo_id = @repoId and s.file_path = @filePath")}
+      with ${buildEdgeToSymbolPairsCte(seed.symbolFilter)}
       select
         sf.name as callerName,
         sf.file_path as callerFile,
@@ -58,7 +58,11 @@ export function getImpactSurfaceImpl(
       inner join symbols s on s.repo_id = @repoId and s.symbol_id = p.sid
       inner join edges e on e.rowid = p.eid
       inner join symbols sf on sf.repo_id = e.repo_id and sf.symbol_id = e.from_id
-      where sf.file_path != s.file_path
+      -- MCP-ISSUE-060: was \`sf.file_path != s.file_path\`. Once the seed can hold siblings living in
+      -- OTHER files, \`s.file_path\` is the interface's file, not the queried one — that form both
+      -- admitted the interface's declaring file as an "impacted" file and dropped genuine callers
+      -- that happen to live in it. Self-exclusion is against the file that was asked about.
+      where sf.file_path != @filePath
         and (@excludeTests = 0 or is_test_path(sf.file_path) = 0)
       order by sf.file_path, e.type
       limit @limit
@@ -160,7 +164,8 @@ export function getImpactFilesImpl(
   wiringNote?: string;
 } {
   const canonicalFilePath = resolveCanonicalFilePath(db, repoId, filePath);
-  const pairs = buildEdgeToSymbolPairsCte("s.repo_id = @repoId and s.file_path = @filePath");
+  const seed = buildImpactSeed(db, repoId, canonicalFilePath);
+  const pairs = buildEdgeToSymbolPairsCte(seed.symbolFilter);
 
   // Pass 1 — unbounded. One row per dependent file carrying its strongest edge confidence, which is
   // exactly what the per-file merge below would arrive at, so the summary over this set matches the
@@ -174,7 +179,9 @@ export function getImpactFilesImpl(
       inner join symbols s on s.repo_id = @repoId and s.symbol_id = p.sid
       inner join edges e on e.rowid = p.eid
       inner join symbols sf on sf.repo_id = e.repo_id and sf.symbol_id = e.from_id
-      where sf.file_path != s.file_path
+      -- MCP-ISSUE-060: self-exclusion is against the QUERIED file, not the matched symbol's file,
+      -- which may now be an interface declared elsewhere. See buildImpactSeed.
+      where sf.file_path != @filePath
         and (@excludeTests = 0 or is_test_path(sf.file_path) = 0)
       group by sf.file_path
       order by sf.file_path
@@ -224,7 +231,7 @@ export function getImpactFilesImpl(
       inner join edges e on e.rowid = p.eid
       inner join symbols sf on sf.repo_id = e.repo_id and sf.symbol_id = e.from_id
       where sf.file_path in (${ph})
-        and sf.file_path != s.file_path
+        and sf.file_path != @filePath
       order by sf.file_path
       `
     )

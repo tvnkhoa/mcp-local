@@ -289,13 +289,21 @@ Always: reuse the exact `repoPath` from `list_repositories`; bound calls with `l
 
 ### Refactor / rename flow (execute changes inside MCP — do not hand-edit each file)
 ```
-Rename a symbol/param:
-1. search_symbols (strategy: "name") → get symbolId
-2. rename_assist (symbolId, newName, emitPreview: true)
-   → returns previewId + approvalToken (word-boundary match across affected files)
-3. refactor_replace_apply (previewId, approvalToken, includeLowConfidence: true)
+Rename a symbol/param — use refactor_replace_preview DIRECTLY, not rename_assist:
+1. refactor_replace_preview (findMode: "regex", find: "\bOldName\b",
+                             replaceExpression: "NewName", ambiguityThresholdPercent: 100)
+2. refactor_replace_apply (previewId, approvalToken, includeLowConfidence: true)
    → includeLowConfidence is needed for top-level identifiers (no enclosing owner type)
-4. refactor_replace_rollback (rollbackId)  → if the change must be undone
+3. refactor_replace_rollback (rollbackId)  → if the change must be undone
+
+   DO NOT use `rename_assist(emitPreview: true)` for a symbol used outside its own file.
+   Measured against grep on four real symbols: recall 17–22% (2 of 9 occurrences, 1 of 6,
+   2 of 10), precision 100%, `riskFlags: []`. It scopes the underlying preview to
+   `affectedFiles` from a caller/importer graph that returns 0/0 even for a plain
+   `import { x } from './y.js'`, so the preview looks clean and applying it leaves every
+   other file calling a name that no longer exists. The same two symbols through
+   `refactor_replace_preview` directly: 9/9 and 10/10. Tracked as MCP-ISSUE-060, open.
+   `rename_assist` without `emitPreview` is still fine as an advisory read.
 
 Pattern / signature edit across many sites:
 1. refactor_replace_preview (findMode: "regex", find: "<pattern>", replaceExpression: "<$1 template>")
@@ -379,6 +387,25 @@ Operational rule:
 | `requiredOwnerType` / `guards.allowOwnerTypes` meant "sites **within** the declaring type": the owner was the class the code sits in, so a member's external call sites were rejected naming each *caller's* own class. The workaround was to give up the guard and use `refactor_replace_preview` | The owner is proven from the C# AST — the type that **owns** the referenced member. Static (`Codec.M`), instance, `this`, `base`, namespace-qualified and one-hop-nested (`a.B.M`) receivers all resolve, so a migration reaches a member's consumers. Non-C# files still use the enclosing-type text scan, labelled `enclosing_type_fallback` |
 | A site whose owner could not be inferred was **dropped** by the guard, indistinguishable from "not found" | It is **kept**, flagged `ambiguous_target` (so it cannot apply) and explained in `ambiguousReasons`, which names the rule that failed. Only a proven *different* owner lands in `rejectedSites`. Expect `totalMatches` to be higher than before, with `unresolvedOccurrences` accounting for the difference |
 | `refactor_replace_preview` surfaced neither `rejectedSites` nor `ambiguousReasons`, so a guard that dropped every site read as an empty result | Both are in the response (counts at `nano`, detail above it) |
+
+### Fixed by MCP-ISSUE-060 (2026-08-25) — do not work around these any more
+
+| Was | Now |
+|---|---|
+| `find_impact_files` reported `totalImpactedCount: 0` for a class whose callers all reach it through its interface, while `get_symbol_context_pack` reported 14 for the same class in the same session. `expandInterfaceSiblingsImpl` was imported by four impact modules and called by none | Both views expand the queried file's symbols through their interface siblings. Measured on `wec.be`: 0 → 11 callers. Takes effect on the EXISTING index — no re-index needed |
+| `get_symbol_context_pack(name:…)` pooled callers across every same-named symbol, so `CreateMessageAsync` returned **16** callers of which 15 were other methods' | Callers and importers are scoped to the selected symbol, as callees always were. 16 → 1, matching `get_call_chain`. `candidates[]` still lists the homonyms |
+| An unknown `repoId` returned `edges: []` with `coverage.confidence:"high"`, or `graphHealth.note:"graph data complete"`, or a clean `rowCount: 1` from `query_graph` | Refused with `not_found` naming the repoId, by every tool that takes one. `health_check` and `index_repository` still answer for an unregistered repo, by design |
+| A file absent from the index answered `{"symbolCount":0,"exports":[]}` — indistinguishable from an empty file | `find_impact_files` carries `fileIndexed: false` and says an empty result means "not indexed", not "no dependents" |
+| `detect_changes` with a `baseRef` git cannot resolve reported `changedFileCount: 0, highRiskCount: 0, note:"using git range diff"` | Fails with `INVALID_PARAMS` naming the ref. Working-tree mode on a non-git directory still returns empty, which is correct there |
+| `detect_changes` `changedFileCount` was the post-cap page length — 100 against a real 300, cut alphabetically so a whole server was invisible | `changedFileCount` is the true count; `changedFilesReturned` and `changedFilesDroppedByLimit` describe the page |
+| `search_symbols` at `compact` — the documented default — omitted `symbolId`, which `get_call_chain` requires | `symbolId` at every profile |
+| `search_symbols(ranked: true)` with no `repoId` returned 0 for every query and every strategy | Cross-repo ranked search works. An unknown repoId still returns nothing |
+| `route_map` and `get_call_chain` reported truncation only at `nano`; at `compact` a 44-hop chain looked like 5 | `hasMore` / `chainLength` / `truncated` at every profile |
+| `get_file_context{profile:"standard"}` returned 68 663 chars for a 22-symbol C# file — past the token cap. 96% was edges, half of them `PROPERTY_REF` | Edges have their own budget (40), property refs are excluded (use `find_field_accesses`), structural edges are kept first, `edgesTruncated` says so. 70 526 → 21 070 chars |
+| `search_regex` could not see `.claude/` or `.github/` in ANY mode, `scanAll` included | Both the search walk and the indexer walk pass `dot: true`. The indexer half needs a re-index per repo |
+| `dead_code_scan` reported the program's own `main` on a Python repo, `suppressed.total: 0` | A language whose lane records no CALLS edges anywhere in the repo is suppressed as `language_lane_has_no_call_edges`. `wec.rag` Python: 0 candidates, 294 suppressed |
+| `refactor_symbol_migration` / `change_value_representation` advertised `readOnlyHint: true` while `dryRun:false` wrote files | Annotated `destructiveHint: true` unconditionally. They still lack the HMAC gate the `refactor_replace_*` trio has — see MCP-ISSUE-060, open |
+| A bare-name match that happened to land on an interface method was labelled `resolved interface method` at 0.8, indistinguishable from a receiver-proven one. On `wec.be`, 986 of 2070 such edges named a method two or more interfaces declare | Name-derived ones are `resolved interface method (unproven receiver)` and count as name-only provenance, so a traversal standing on them cannot report `high`. **Applies on the next index run** |
 
 ### Fixed by MCP-ISSUE-049 (2026-08-04) — do not work around these any more
 

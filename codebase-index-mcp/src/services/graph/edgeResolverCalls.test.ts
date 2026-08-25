@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { suppressBareCallsShadowedByQualified, type ResolvedUpdate } from "./edgeResolverCalls.js";
+import { NAME_ONLY_EDGE_REASONS } from "../../types/index.js";
+import { buildCoverageBlock, summarizeEdgeProvenance } from "../../middleware/coverage.js";
 
 /**
  * MCP-ISSUE-052 — the bare/qualified double edge.
@@ -142,4 +144,55 @@ test("a dotted receiver chain still keys off the terminal member", () => {
 
   assert.equal(suppressBareCallsShadowedByQualified(updates), 1);
   assert.equal(updates[1].reason, "superseded by qualified call");
+});
+
+/**
+ * MCP-ISSUE-060 — the interface relabel laundered a name guess into a proof.
+ *
+ * `resolveCallEdgesBatch` sets `dispatchMethodName` on two different paths: one where extraction
+ * handed it a receiver that named an interface, and one where a bare NAME match merely happened to
+ * land on a method whose parent is an interface. Both emitted `resolved interface method` at 0.8,
+ * and because the reason ternary tested `dispatchMethodName` before `nameAmbiguous`, the ambiguity
+ * branch was unreachable for the second path.
+ *
+ * Measured on `wec.be`: 2070 such edges, of which 986 targeted a method name declared by two or more
+ * DIFFERENT interfaces — `CreateAsync` by 35 of them. That is how `EmailOnAcidService` acquired a
+ * confident CALLS edge into `ISmsConversationService.GetAsync`.
+ *
+ * The value of the fix is entirely in what the coverage layer sees, so that is what is pinned here:
+ * the unproven variant must count as name-only, and the proven one must not.
+ */
+test("an unproven-receiver interface edge counts as name-only provenance; a proven one does not", () => {
+  assert.equal(
+    NAME_ONLY_EDGE_REASONS.has("resolved interface method (unproven receiver)"),
+    true,
+    "the unproven variant must reach summarizeEdgeProvenance's nameOnly count"
+  );
+  assert.equal(
+    NAME_ONLY_EDGE_REASONS.has("resolved interface method"),
+    false,
+    "a receiver-proven interface dispatch is knowledge, not a guess — flagging it would train agents to discount good answers"
+  );
+
+  const prov = summarizeEdgeProvenance([
+    { reason: "resolved interface method", confidence: 0.8 },
+    { reason: "resolved interface method (unproven receiver)", confidence: 0.7 },
+    { reason: "resolved callee same-file", confidence: 0.9 }
+  ]);
+  assert.equal(prov.total, 3);
+  assert.equal(prov.nameOnly, 1);
+});
+
+test("a traversal standing on an unproven interface edge cannot report high confidence", () => {
+  const block = buildCoverageBlock({
+    resultCount: 7,
+    kind: "call_chain",
+    edgeProvenance: summarizeEdgeProvenance([
+      { reason: "resolved interface method (unproven receiver)", confidence: 0.7 }
+    ])
+  });
+  // MCP-ISSUE-052's rule, now reaching this lane: a large confident answer built on a guess is the
+  // dangerous case, not an empty one.
+  assert.notEqual(block.confidence, "high");
+  assert.ok(block.knownGaps.some((g) => g.includes("NAME only")));
 });

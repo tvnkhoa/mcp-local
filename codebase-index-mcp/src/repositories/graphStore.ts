@@ -366,6 +366,26 @@ export class GraphStore {
     return getRepositoryImpl(this.db, repoId);
   }
 
+  /**
+   * MCP-ISSUE-060: does the index hold this path at all?
+   *
+   * The distinction the file-scoped tools could not draw. `get_file_summary` on a file added after
+   * the last index run returned `{"symbolCount":0,"exports":[],"imports":[],"importedBy":[]}` — a
+   * clean 200 that reads exactly like "this file is genuinely empty". A whole 29-file server in this
+   * workspace was in that state and every tool agreed it was nothing.
+   *
+   * Matches on both separators because `files.path` is written with whatever the scan produced,
+   * while callers pass whatever the agent typed.
+   */
+  isFileIndexed(repoId: string, filePath: string): boolean {
+    const forward = filePath.replace(/\\/g, "/");
+    const back = forward.replace(/\//g, "\\");
+    const row = this.db
+      .prepare(`select 1 as ok from files where repo_id = ? and (path = ? or path = ?) limit 1`)
+      .get(repoId, forward, back);
+    return row != null;
+  }
+
   /** Every C# type name declared in this repo — the owner prover's static-receiver test (B-13). */
   listCSharpTypeNames(repoId: string): string[] {
     return listCSharpTypeNamesImpl(this.db, repoId);
@@ -561,7 +581,7 @@ export class GraphStore {
     return getSymbolDetailImpl(this.db, repoId, symbolId, limit, excludeTests);
   }
 
-  getFileContext(repoId: string, filePath: string, limit: number, compact = false): { symbols: SymbolRecord[] | { name: string; kind: string; line: number }[]; edges: ResolvedEdge[]; graphHealth: GraphHealth } {
+  getFileContext(repoId: string, filePath: string, limit: number, compact = false): { symbols: SymbolRecord[] | { name: string; kind: string; line: number }[]; edges: ResolvedEdge[]; edgesTruncated?: boolean; graphHealth: GraphHealth } {
     return getFileContextImpl(this.db, repoId, filePath, limit, compact);
   }
 
@@ -649,11 +669,11 @@ export class GraphStore {
    * Single-call context lookup by symbol name — avoids the 2-hop search_symbols → get_symbol_detail pattern.
    * Returns the best-matching symbol plus its callers, callees, and importing files.
    */
-  getContextByName(repoId: string, name: string, limit: number): { symbol: SymbolRecord | null; callers: { callerName: string; callerFile: string; callerLine: number; kind: string; via?: "interface" | "member" }[]; callees: { calleeName: string; calleeFile: string | null; calleeLine: number | null; kind: string | null }[]; importedByFiles: string[]; allMatchedSymbols: SymbolRecord[] } {
-    return getContextByNameImpl(this.db, repoId, name, limit);
+  getContextByName(repoId: string, name: string, limit: number, excludeTests = false): { symbol: SymbolRecord | null; callers: { callerName: string; callerFile: string; callerLine: number; kind: string; via?: "interface" | "member" }[]; callees: { calleeName: string; calleeFile: string | null; calleeLine: number | null; kind: string | null }[]; importedByFiles: string[]; allMatchedSymbols: SymbolRecord[] } {
+    return getContextByNameImpl(this.db, repoId, name, limit, excludeTests);
   }
 
-  getSymbolCandidates(repoId: string, name: string, limit: number, strategy: "name" | "intent" = "name", filters: { kind?: string | null; language?: string | null; filePath?: string | null; excludeTests?: boolean } = {}): { symbolId: string; name: string; kind: string; filePath: string; line: number; signature: string | null; qualifiedName?: string; matchType: "exact" | "prefix" | "contains"; score: number; confidence: number }[] {
+  getSymbolCandidates(repoId: string | null, name: string, limit: number, strategy: "name" | "intent" = "name", filters: { kind?: string | null; language?: string | null; filePath?: string | null; excludeTests?: boolean } = {}): { symbolId: string; name: string; kind: string; filePath: string; line: number; signature: string | null; qualifiedName?: string; matchType: "exact" | "prefix" | "contains"; score: number; confidence: number }[] {
     return getSymbolCandidatesImpl(this.db, repoId, name, limit, strategy, filters);
   }
 

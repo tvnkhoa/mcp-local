@@ -2,19 +2,64 @@ import { execFileSync } from "node:child_process";
 
 import type { GraphStore } from "../../repositories/graphStore.js";
 
+/**
+ * MCP-ISSUE-060: bounded, because this is the only unbounded synchronous wait on the read path.
+ *
+ * `execFileSync` blocks the event loop for as long as the child runs, and every read tool that takes
+ * a `repoId` reaches here — `search_symbols` costs one spawn, `find_impact_files` up to five. With no
+ * `timeout`, a hung `git` hangs the whole server, and there is no in-process way to interrupt it.
+ *
+ * `maxBuffer` is a correctness fix, not a tuning knob. Node's default is 1 MB; `git status --porcelain`
+ * on a large dirty repo exceeds it and throws ENOBUFS, which the callers below swallow — so
+ * `health_check` reported "non-git repo or unable to read working tree status" for a repo that was
+ * merely dirty.
+ */
 export function runGit(repoPath: string, args: string[]): string {
-  return execFileSync("git", args, { cwd: repoPath, encoding: "utf8" }).trim();
+  return execFileSync("git", args, {
+    cwd: repoPath,
+    encoding: "utf8",
+    timeout: GIT_TIMEOUT_MS,
+    maxBuffer: GIT_MAX_BUFFER_BYTES,
+    windowsHide: true
+  }).trim();
 }
 
+const GIT_TIMEOUT_MS = 5_000;
+const GIT_MAX_BUFFER_BYTES = 16 * 1024 * 1024;
+
+function splitGitLines(text: string): string[] {
+  if (!text) return [];
+  return text.split(/\r?\n/).map((x) => x.trim()).filter((x) => x.length > 0);
+}
+
+/**
+ * `[]` on failure. Correct for callers that cannot distinguish, and wrong for callers that must —
+ * see `runGitLinesOrNull`.
+ */
 export function runGitLines(repoPath: string, args: string[]): string[] {
   try {
-    const text = runGit(repoPath, args);
-    if (!text) {
-      return [];
-    }
-    return text.split(/\r?\n/).map((x) => x.trim()).filter((x) => x.length > 0);
+    return splitGitLines(runGit(repoPath, args));
   } catch {
     return [];
+  }
+}
+
+/**
+ * MCP-ISSUE-060: `null` when git itself failed, `[]` when it ran and reported nothing.
+ *
+ * `runGitLines` conflates the two, and `detect_changes` is built on it: a typo'd or unfetched
+ * `baseRef` made `git diff base..HEAD` fail, the catch returned `[]`, and the release-gate tool
+ * answered `changedFileCount: 0, highRiskCount: 0` with `note: "using git range diff"` — asserting
+ * that the diff had succeeded and found nothing.
+ *
+ * The `[]`-on-failure behaviour is kept where it is genuinely right (a non-git directory, an unborn
+ * HEAD on a fresh repo), so this is a second function rather than a change to the first.
+ */
+export function runGitLinesOrNull(repoPath: string, args: string[]): string[] | null {
+  try {
+    return splitGitLines(runGit(repoPath, args));
+  } catch {
+    return null;
   }
 }
 

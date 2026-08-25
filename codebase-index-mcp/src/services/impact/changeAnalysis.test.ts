@@ -109,3 +109,119 @@ test("excludeTests is applied before the page, not after it", () => {
   assert.ok(filtered.impactedFiles.every((f) => !f.filePath.startsWith("tests/")), "a test file survived the filter");
   db.close();
 });
+
+/**
+ * MCP-ISSUE-060 — the release gate answered "nothing changed, zero risk" for a ref that does not exist.
+ *
+ * `runGitLines` returns `[]` on any failure, so `git diff typo..HEAD` — which exits non-zero with
+ * "unknown revision" — was indistinguishable from a clean diff. `detect_changes` then reported
+ * `changedFileCount: 0`, `highRiskCount: 0` and `note: "using git range diff"`, asserting that the
+ * diff had run. That is the single most dangerous output shape a pre-merge gate can produce.
+ *
+ * These use a real throwaway git repo rather than a stub, because the thing under test IS the
+ * boundary between "git ran and found nothing" and "git did not run".
+ */
+
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { computeChangedFileImpacts, ChangeAnalysisError } from "./changeAnalysis.js";
+
+function tempGitRepo(): string {
+  const dir = mkdtempSync(join(tmpdir(), "ci-changeanalysis-"));
+  const git = (...args: string[]): void => {
+    execFileSync("git", args, { cwd: dir, stdio: "ignore" });
+  };
+  git("init", "-q");
+  git("config", "user.email", "t@t.local");
+  git("config", "user.name", "t");
+  git("config", "commit.gpgsign", "false");
+  writeFileSync(join(dir, "a.txt"), "one\n");
+  git("add", ".");
+  git("commit", "-qm", "first");
+  return dir;
+}
+
+test("an unresolvable baseRef fails loudly instead of reporting an empty diff", () => {
+  const db = fixture();
+  const repoPath = tempGitRepo();
+  const store = { getImpactFiles: () => ({ impactedFiles: [], totalImpactedCount: 0, truncated: false, graphHealth: {}, reliabilitySummary: {} }) } as never;
+
+  try {
+    assert.throws(
+      () =>
+        computeChangedFileImpacts(store, {
+          repoId: "r",
+          repoPath,
+          baseRef: "definitely-not-a-ref-xyz",
+          headRef: "HEAD",
+          includeUntracked: false,
+          maxFiles: 100,
+          impactLimit: 20,
+          indexedCommitSha: "0000000000000000000000000000000000000000"
+        }),
+      (e: unknown) => {
+        assert.ok(e instanceof ChangeAnalysisError);
+        assert.equal(e.code, "UNRESOLVED_REF");
+        // The message must name the ref, or the caller cannot tell which of the two they got wrong.
+        assert.match(e.message, /definitely-not-a-ref-xyz/);
+        return true;
+      }
+    );
+  } finally {
+    rmSync(repoPath, { recursive: true, force: true });
+    db.close();
+  }
+});
+
+test("a working-tree diff on a non-git directory still returns empty rather than throwing", () => {
+  const db = fixture();
+  const dir = mkdtempSync(join(tmpdir(), "ci-notgit-"));
+  const store = { getImpactFiles: () => ({ impactedFiles: [], totalImpactedCount: 0, truncated: false, graphHealth: {}, reliabilitySummary: {} }) } as never;
+
+  try {
+    // No baseRef → working-tree mode, which legitimately reads `[]` as "nothing to report".
+    // Tightening that path too would break every non-git directory the server indexes.
+    const result = computeChangedFileImpacts(store, {
+      repoId: "r",
+      repoPath: dir,
+      headRef: "HEAD",
+      includeUntracked: true,
+      maxFiles: 100,
+      impactLimit: 20,
+      indexedCommitSha: null
+    });
+    assert.deepEqual(result.changedFiles, []);
+    assert.equal(result.totalChangedFileCount, 0);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+    db.close();
+  }
+});
+
+test("totalChangedFileCount is the pre-cap truth, not the page length", () => {
+  const db = fixture();
+  const repoPath = tempGitRepo();
+  const git = (...args: string[]): void => { execFileSync("git", args, { cwd: repoPath, stdio: "ignore" }); };
+  for (const n of ["b", "c", "d", "e"]) writeFileSync(join(repoPath, `${n}.txt`), "x\n");
+  git("add", ".");
+  const store = { getImpactFiles: () => ({ impactedFiles: [], totalImpactedCount: 0, truncated: false, graphHealth: {}, reliabilitySummary: {} }) } as never;
+
+  try {
+    const result = computeChangedFileImpacts(store, {
+      repoId: "r",
+      repoPath,
+      headRef: "HEAD",
+      includeUntracked: true,
+      maxFiles: 2,
+      impactLimit: 20,
+      indexedCommitSha: null
+    });
+    assert.equal(result.changedFiles.length, 2, "the page is capped");
+    assert.equal(result.totalChangedFileCount, 4, "the count is not");
+  } finally {
+    rmSync(repoPath, { recursive: true, force: true });
+    db.close();
+  }
+});

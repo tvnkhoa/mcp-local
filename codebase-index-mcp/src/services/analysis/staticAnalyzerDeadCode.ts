@@ -253,7 +253,25 @@ export function getDeadCodeCandidates(
   // From the UNFILTERED set — see the note on the two queries above.
   const fileContexts = buildFileContexts(contextRows);
 
+  const callBlindLanguages = languagesWithoutCallEdges(db, repoId);
+
   for (const row of rows) {
+    // MCP-ISSUE-060: a language whose extractor emits no CALLS edges at all cannot support the claim
+    // "nothing calls this". Measured on `wec.rag` (95 of 140 files Python): every edge from a `.py`
+    // symbol is an IMPORT — 449 of them, and zero CALLS, TYPE_REF or PROPERTY_REF — because
+    // `pythonExtractor.ts` is a ~89-line regex stub. `dead_code_scan` duly reported the program's own
+    // `main` as a candidate, with `suppressed.total: 0` beside it, because every existing heuristic
+    // here is C#-shaped. A filename allowlist would not have caught it either: that `main` lives in
+    // `chat.py`, not `main.py`.
+    //
+    // Derived from the index rather than from a hardcoded language list, so a lane that gains call
+    // extraction later stops being suppressed without anyone editing this file, and a lane added as a
+    // stub is covered the day it appears.
+    if (row.language != null && callBlindLanguages.has(row.language)) {
+      recordSuppressed("language_lane_has_no_call_edges");
+      continue;
+    }
+
     const normalizedPath = row.filePath.replace(/\\/g, "/");
     const isBootstrap = BOOTSTRAP_FILE_NAMES.some((f) => normalizedPath.endsWith(`/${f}`) || normalizedPath === f);
     if (isBootstrap) {
@@ -300,4 +318,42 @@ export function getDeadCodeCandidates(
       note: "Suppressed symbols are excluded from dead-code candidates because they match low-confidence runtime/convention heuristics; exclusion does not prove the symbol is live."
     }
   };
+}
+
+/**
+ * Languages in this repo from whose symbols the graph holds no CALLS edge at all.
+ *
+ * The distinction the candidate query cannot draw: "this symbol has no callers" and "this language's
+ * extractor does not record callers" both produce zero incoming edges, and only one of them means
+ * anything. See the suppression above for the measurement that motivated it.
+ */
+function languagesWithoutCallEdges(db: Database.Database, repoId: string): Set<string> {
+  // Only meaningful RELATIVE to the rest of the repo. A repo with no CALLS edges anywhere is not
+  // evidence that one lane is blind — it is a repo that has not been indexed, or a small fixture, and
+  // suppressing everything there would replace a wrong answer with no answer. The signal worth acting
+  // on is narrower and much stronger: extraction demonstrably produces call edges HERE, and produces
+  // none at all for this one language.
+  const repoHasAnyCalls = db
+    .prepare(`select 1 as ok from edges where repo_id = ? and type = 'CALLS' limit 1`)
+    .get(repoId);
+  if (!repoHasAnyCalls) return new Set<string>();
+
+  const languages = db
+    .prepare(`select distinct language from files where repo_id = ? and language is not null`)
+    .all(repoId) as { language: string }[];
+
+  const hasCalls = db.prepare(
+    `select 1 as ok
+     from edges e
+     join symbols s on s.repo_id = e.repo_id and s.symbol_id = e.from_id
+     join files f on f.repo_id = s.repo_id and f.path = s.file_path
+     where e.repo_id = ? and e.type = 'CALLS' and f.language = ?
+     limit 1`
+  );
+
+  const blind = new Set<string>();
+  for (const { language } of languages) {
+    if (!hasCalls.get(repoId, language)) blind.add(language);
+  }
+  return blind;
 }

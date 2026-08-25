@@ -457,7 +457,11 @@ export const NAME_ONLY_EDGE_REASONS: ReadonlySet<string> = new Set([
   "resolved callee vector-fallback",
   "resolved property by name",
   // The receiver's type was never proven — only the member name matched. MCP-ISSUE-052.
-  "resolved property by name (unproven owner)"
+  "resolved property by name (unproven owner)",
+  // Same shape one lane over (MCP-ISSUE-060): a bare-name match that happened to land on an
+  // interface method was relabelled as an interface dispatch, which made it LOOK receiver-proven.
+  // On `wec.be`, 986 of 2070 such edges named a method that two or more interfaces declare.
+  "resolved interface method (unproven receiver)"
 ]);
 
 /** Provenance roll-up for the edges underneath a traversal result. */

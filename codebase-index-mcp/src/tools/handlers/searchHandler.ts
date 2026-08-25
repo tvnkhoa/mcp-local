@@ -51,7 +51,7 @@ export function handleSearchSymbols(
   const strategyUsed: "name" | "intent" = autoRouted ? "intent" : args.strategy;
 
   if (args.ranked) {
-    const candidates = store.getSymbolCandidates(args.repoId ?? "", args.query, args.limit, strategyUsed, {
+    const candidates = store.getSymbolCandidates(args.repoId ?? null, args.query, args.limit, strategyUsed, {
       kind: args.kind ?? null,
       language: args.language ?? null,
       filePath: args.filePath ?? null,
@@ -104,13 +104,27 @@ export function handleSearchSymbols(
     }
   }
 
+  // MCP-ISSUE-060: `symbolId` at EVERY profile. `compact` is the documented default and this is the
+  // documented first step, but the row it returned carried no id — while `get_call_chain`,
+  // `get_dependency_graph` and `trace_execution_flow` all require one. The golden path could not feed
+  // its own second step without either bumping the profile or spending a second call to re-find the
+  // symbol by name. It is 24 hex characters per row.
+  const row = (s: (typeof results)[number]): Record<string, unknown> => ({
+    symbolId: s.symbolId,
+    name: s.name,
+    kind: s.kind,
+    filePath: s.filePath,
+    line: s.line,
+    ...(s.matchType ? { matchType: s.matchType } : {})
+  });
+
   if (profile === "nano") {
-    const topSymbols = results.slice(0, 10).map((s) => ({ name: s.name, kind: s.kind, filePath: s.filePath, line: s.line, ...(s.matchType ? { matchType: s.matchType } : {}) }));
+    const topSymbols = results.slice(0, 10).map(row);
     return ctx.asText({ query: args.query, strategy: strategyUsed, autoRouted: autoRouted || undefined, count: results.length, topSymbols, hasMore: results.length > topSymbols.length, suggestions: suggestions.slice(0, 3), suggestion, isStale: staleness?.isStale ?? null, coverage: coverage.knownGaps.length > 0 ? coverage : coverage.confidence }, profile);
   }
 
   if (profile === "compact") {
-    return ctx.asText({ query: args.query, strategy: strategyUsed, autoRouted: autoRouted || undefined, count: results.length, symbols: results.map((s) => ({ name: s.name, kind: s.kind, filePath: s.filePath, line: s.line, ...(s.matchType ? { matchType: s.matchType } : {}) })), suggestions, suggestion, staleness, coverage }, profile);
+    return ctx.asText({ query: args.query, strategy: strategyUsed, autoRouted: autoRouted || undefined, count: results.length, symbols: results.map(row), suggestions, suggestion, staleness, coverage }, profile);
   }
 
   if (profile === "verbose") {
@@ -320,7 +334,7 @@ export function handleGetSymbolContextPack(
   // MCP-ISSUE-049: 5 of 6 callers were test files in the filed case. `getSymbolCandidates` already
   // honours the flag; the caller/callee lists are graph reads that do not, so they are filtered here.
   const candidates = store.getSymbolCandidates(args.repoId, args.name, args.limit, "name", { excludeTests: args.excludeTests });
-  const contextRaw = store.getContextByName(args.repoId, args.name, args.limit);
+  const contextRaw = store.getContextByName(args.repoId, args.name, args.limit, args.excludeTests === true);
   const context = args.excludeTests
     ? {
         ...contextRaw,

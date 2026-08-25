@@ -1,6 +1,7 @@
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { McpError, ErrorCode } from "@modelcontextprotocol/sdk/types.js";
 import { resolveResponseProfile } from "../../middleware/responseFormatter.js";
+import { fileIndexedNote } from "../../middleware/inputGuards.js";
 import { validateReadOnlyGraphSql, validateAllowedTables } from "../../middleware/sqliteGuardrails.js";
 import { buildStaleWarning, getRepoStaleness, collectDirtyFiles, countCommitsBehind } from "../../services/git/gitHelpers.js";
 import type { StaleWarning } from "../../services/git/gitHelpers.js";
@@ -148,9 +149,23 @@ export function handleGetCallChain(
   const via = (e: (typeof rows)[number]) =>
     e.type === "PUBLISHES" ? { via: "bus" } : e.reason === "interface-dispatch" ? { via: "interface" } : {};
 
+  /**
+   * MCP-ISSUE-060: truncation is reported at EVERY profile, not only at nano.
+   *
+   * Measured: `get_call_chain(direction:"callers", limit:5)` at `compact` returned 5 edges and no
+   * truncation field of any kind, while the identical query at `nano` returned
+   * `chainLength: 44, truncated: true`. An agent on the documented default profile reports "5
+   * callers" for a symbol with 44. A profile may change how MUCH is returned; it must never change
+   * whether the response is honest about being a page.
+   *
+   * `truncated` means the row limit bound the result — the same condition `coverage` is computed
+   * from at the top of this function, now surfaced instead of only being folded into a word.
+   */
+  const chainTruncation = { chainLength: rows.length, truncated: rows.length >= args.limit };
+
   if (profile === "nano") {
     const pathNodes = rows.slice(0, 10).map((e) => ({ ...farEnd(e), ...via(e), confidence: e.confidence ?? null }));
-    return ctx.asText({ repoId: args.repoId, symbolId: args.symbolId, direction, chainLength: rows.length, path: pathNodes, truncated: rows.length > pathNodes.length, coverage: coverage.confidence }, profile);
+    return ctx.asText({ repoId: args.repoId, symbolId: args.symbolId, direction, ...chainTruncation, path: pathNodes, hasMore: rows.length > pathNodes.length, coverage: coverage.confidence }, profile);
   }
   if (profile === "compact") {
     const edges = rows.map((e) => ({
@@ -158,9 +173,9 @@ export function handleGetCallChain(
       toId: e.toId, toName: e.toName ?? null, toFilePath: e.toFilePath ?? null,
       type: e.type, ...via(e), confidence: e.confidence ?? null
     }));
-    return ctx.asText({ repoId: args.repoId, symbolId: args.symbolId, direction, depth: args.depth, edges, coverage }, profile);
+    return ctx.asText({ repoId: args.repoId, symbolId: args.symbolId, direction, depth: args.depth, ...chainTruncation, edges, coverage }, profile);
   }
-  return ctx.asText({ repoId: args.repoId, symbolId: args.symbolId, direction, depth: args.depth, edges: rows, coverage }, profile);
+  return ctx.asText({ repoId: args.repoId, symbolId: args.symbolId, direction, depth: args.depth, ...chainTruncation, edges: rows, coverage }, profile);
 }
 
 // ── find_field_accesses ───────────────────────────────────────────────────────
@@ -231,7 +246,11 @@ export function handleFindImpactFiles(
 
   // Stale index → warn (embedded in payload), don't block.
   const staleWarning = staleWarningFor(args.repoId, store);
-  const warn = staleWarning ? { staleWarning } : {};
+  // MCP-ISSUE-060: "this path is not in the index" and "this path has no dependents" are different
+  // answers, and both used to render as `totalImpactedCount: 0` with `graph data complete` beside it.
+  // A 29-file server added to this workspace after the last index run was in exactly that state, and
+  // every file-scoped tool agreed it was nothing.
+  const warn = { ...(staleWarning ? { staleWarning } : {}), ...fileIndexedNote(store, args.repoId, args.filePath) };
 
   if (args.view === "surface") {
     // MCP-ISSUE-056: the filed case returned 9 of 15 callers from a single test file. `excludeTests`
@@ -474,6 +493,18 @@ export function handleRouteMap(
   // MCP-ISSUE-049: 6 of 34 routes in the filed case were test-only endpoints.
   const routes = args.excludeTests ? routesRaw.filter((r) => !isTestPath(r.filePath)) : routesRaw;
 
+  /**
+   * MCP-ISSUE-060: `hasMore` at every profile, not only nano.
+   *
+   * Measured on `wec.be`: `route_map` at `compact` — the documented default — returned
+   * `{"count":100,"routes":[...]}` with no `hasMore`, no `total`, nothing. The SAME query at `nano`
+   * returned `hasMore: true`. A monolith with hundreds of controllers reported 100 routes as if that
+   * were all of them. `routesRaw.length >= args.limit` is the honest signal: the store's own LIMIT
+   * bound the result, so more may exist. It is computed BEFORE `excludeTests` filters, because that
+   * filter shrinks the page without changing whether the query hit its cap.
+   */
+  const routesTruncated = routesRaw.length >= args.limit;
+
   const emptyHint =
     routes.length === 0
       ? { hint: "no routes found — route_map reads C# attribute and minimal-API routing, plus JS/TS app|router|fastify.VERB('/path', handler). Not read yet: NestJS decorators, Next.js file routing, app.use(prefix, router) mounting, all/head/options. Try find_entry_points(kind='route_handler')." }
@@ -481,16 +512,16 @@ export function handleRouteMap(
 
   if (profile === "nano") {
     const topRoutes = routes.slice(0, 10).map((r) => ({ method: r.httpMethod, route: r.routeTemplate, handlerName: r.handlerName, filePath: r.filePath }));
-    return ctx.asText({ repoId: args.repoId, count: routes.length, topRoutes, hasMore: routes.length > topRoutes.length, ...emptyHint }, profile);
+    return ctx.asText({ repoId: args.repoId, count: routes.length, hasMore: routesTruncated || routes.length > topRoutes.length, topRoutes, ...emptyHint }, profile);
   }
   if (profile === "compact") {
-    return ctx.asText({ repoId: args.repoId, count: routes.length, routes: routes.map((r) => ({ filePath: r.filePath, controllerName: r.controllerName, handlerName: r.handlerName, httpMethod: r.httpMethod, routeTemplate: r.routeTemplate, line: r.line })), ...emptyHint }, profile);
+    return ctx.asText({ repoId: args.repoId, count: routes.length, hasMore: routesTruncated, routes: routes.map((r) => ({ filePath: r.filePath, controllerName: r.controllerName, handlerName: r.handlerName, httpMethod: r.httpMethod, routeTemplate: r.routeTemplate, line: r.line })), ...emptyHint }, profile);
   }
   if (profile === "verbose") {
     const byMethod = routes.reduce<Record<string, number>>((acc, row) => { acc[row.httpMethod] = (acc[row.httpMethod] ?? 0) + 1; return acc; }, {});
-    return ctx.asText({ repoId: args.repoId, count: routes.length, routes, summary: { byMethod }, ...emptyHint }, profile);
+    return ctx.asText({ repoId: args.repoId, count: routes.length, hasMore: routesTruncated, routes, summary: { byMethod }, ...emptyHint }, profile);
   }
-  return ctx.asText({ repoId: args.repoId, count: routes.length, routes, ...emptyHint }, profile);
+  return ctx.asText({ repoId: args.repoId, count: routes.length, hasMore: routesTruncated, routes, ...emptyHint }, profile);
 }
 
 // ── query_graph ───────────────────────────────────────────────────────────────

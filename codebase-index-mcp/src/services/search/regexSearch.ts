@@ -160,9 +160,16 @@ export function searchRegexImpl(
   // Build the candidate file list as repo-relative POSIX paths + a known language (when available).
   let candidates: { path: string; language: string | null }[];
   if (opts.scanAll) {
+    // MCP-ISSUE-060: `dot: true`, or node-glob skips every dot-directory. `.claude/` and `.github/`
+    // were unreachable by ANY mode of this tool — including `scanAll`, whose whole purpose is to walk
+    // the non-code text — so "where is CI defined" and "what does the hard-mode rule say" returned
+    // nothing, with no signal that a class of directory had been excluded. The exclusion side of this
+    // same function already passed `dot: true` (see the `pathExclude` minimatch below), so the tool
+    // could exclude dotfiles it could never include. `.git/**` stays out via INDEX_IGNORE_GLOBS.
     const globbed = glob.sync("**/*", {
       cwd: repoPath,
       nodir: true,
+      dot: true,
       windowsPathsNoEscape: true,
       ignore: INDEX_IGNORE_GLOBS
     });

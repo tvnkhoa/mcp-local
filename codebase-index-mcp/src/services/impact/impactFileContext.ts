@@ -100,8 +100,10 @@ export function getFileContextImpl(
   repoId: string,
   filePath: string,
   limit: number,
-  compact = false
-): { symbols: SymbolRecord[] | { name: string; kind: string; line: number }[]; edges: ResolvedEdge[]; graphHealth: GraphHealth } {
+  compact = false,
+  edgeLimit?: number,
+  includePropertyRefs = false
+): { symbols: SymbolRecord[] | { name: string; kind: string; line: number }[]; edges: ResolvedEdge[]; edgesTruncated?: boolean; graphHealth: GraphHealth } {
   const canonicalPath = resolveCanonicalFilePath(db, repoId, filePath);
   const allSymbols = db
     .prepare(
@@ -136,7 +138,8 @@ export function getFileContextImpl(
 
   const symbolIds = allSymbols.map((s) => s.symbolId);
   const placeholders = symbolIds.map(() => "?").join(", ");
-  const edges = db
+  const edgeBudget = resolveEdgeLimit(limit, edgeLimit);
+  const edgeRows = db
     .prepare(
       `
       select
@@ -151,13 +154,54 @@ export function getFileContextImpl(
       left join symbols sf on sf.repo_id = e.repo_id and sf.symbol_id = e.from_id
       left join symbols st on st.repo_id = e.repo_id and st.symbol_id = e.to_id
       where e.repo_id = ? and (e.from_id in (${placeholders}) or e.to_id in (${placeholders}))
+        and (? = 1 or e.type not in ('PROPERTY_REF', 'PROPERTY_WRITE'))
+      -- Structure before behaviour before detail. Row order used to be arbitrary, so the first cap
+      -- applied filled the budget with whatever the index happened to yield first: on the measured
+      -- file that was 40 CALLS edges, starving all 26 IMPORTS and both IMPLEMENTS/EXTENDS — the
+      -- edges that answer "what IS this file" before "what does it do".
+      order by case e.type
+                 when 'IMPLEMENTS' then 0
+                 when 'EXTENDS' then 1
+                 when 'IMPORTS' then 2
+                 when 'DEPENDS_ON' then 3
+                 when 'PUBLISHES' then 4
+                 when 'CONSUMES' then 5
+                 when 'CALLS' then 6
+                 when 'TYPE_REF' then 7
+                 else 8
+               end
       limit ?
       `
     )
-    .all(repoId, ...symbolIds, ...symbolIds, limit) as ResolvedEdge[];
+    .all(repoId, ...symbolIds, ...symbolIds, includePropertyRefs ? 1 : 0, edgeBudget + 1) as ResolvedEdge[];
 
+  const edges = edgeRows.slice(0, edgeBudget);
   const graphHealth = countUnresolvedEdgesForFileImpl(db, repoId, canonicalPath);
-  return { symbols, edges, graphHealth };
+  return { symbols, edges, edgesTruncated: edgeRows.length > edges.length, graphHealth };
+}
+
+/**
+ * MCP-ISSUE-060: edges get their own budget, separate from the symbol `limit`.
+ *
+ * Measured: `get_file_context(profile:"standard")` on a 22-symbol C# service returned **68 663**
+ * characters — past the host's token cap, so the response was diverted to a file the agent then had
+ * to read back in chunks. `wc`/`grep` over that payload: 200 edges at ~330 characters each, i.e.
+ * **96%** of it, of which `PROPERTY_REF` alone was 51%. The same call at `verbose` reached 83 449.
+ *
+ * The cause was one `limit` doing two jobs: it bounded the symbol query AND the edge query, so a file
+ * with few symbols and a dense domain model got no edge bound at all in practice. A TypeScript file
+ * of 108 symbols stayed small only because it has zero `PROPERTY_REF` edges — this was a C# tax, on
+ * exactly the repo the workspace rules name as the primary target.
+ *
+ * `PROPERTY_REF`/`PROPERTY_WRITE` are excluded by default because they are the lowest-value edge for
+ * "what does this file do" and the highest-volume by far; `compact` already omitted every edge and
+ * lost nothing anyone missed. `includePropertyRefs` opts back in.
+ */
+export const DEFAULT_FILE_CONTEXT_EDGE_LIMIT = 40;
+
+function resolveEdgeLimit(symbolLimit: number, edgeLimit: number | undefined): number {
+  if (edgeLimit != null && edgeLimit > 0) return edgeLimit;
+  return Math.min(symbolLimit, DEFAULT_FILE_CONTEXT_EDGE_LIMIT);
 }
 
 // ── getBatchContext ────────────────────────────────────────────────────

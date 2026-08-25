@@ -48,3 +48,39 @@ test("the four tools from MCP-ISSUE-051 advertise profile", () => {
 test("a tool declaring additionalProperties:false advertises every required key", () => {
   assertRequiredKeysAdvertised(tools);
 });
+
+/**
+ * MCP-ISSUE-060 — every tool that can write to the working tree must say so, unconditionally.
+ *
+ * `refactor_symbol_migration` and `change_value_representation` were annotated `previewsChange`
+ * (`readOnlyHint:true`, `destructiveHint:false`) on the reasoning that it described their DEFAULT
+ * posture, `dryRun:true`. But MCP annotations are static per tool, not per argument: a single call
+ * with `dryRun:false` reaches `applyPreviewExclusively` and then `fs.writeFileSync`, the same path
+ * `refactor_replace_apply` takes — and a host trusting `readOnlyHint` to skip a confirmation prompt
+ * had no way to see it coming.
+ *
+ * Pinned by name rather than derived, because the derivation ("does any code path from this handler
+ * reach a write?") is exactly what a reader cannot check at a glance, and is what went wrong.
+ */
+test("every tool with a write path is annotated destructive, whatever its default arguments", () => {
+  for (const name of [
+    "refactor_replace_apply",
+    "refactor_replace_rollback",
+    "refactor_symbol_migration",
+    "change_value_representation"
+  ]) {
+    const tool = tools.find((t) => t.name === name);
+    assert.ok(tool, `${name} not found`);
+    assert.equal(tool.annotations?.destructive, true, `${name} can write files but is not annotated destructive`);
+    assert.equal(tool.annotations?.readOnly, false, `${name} can write files but advertises readOnly`);
+  }
+});
+
+test("the genuine preview tools stay read-only, so the signal keeps meaning something", () => {
+  for (const name of ["refactor_replace_preview", "rename_assist"]) {
+    const tool = tools.find((t) => t.name === name);
+    assert.ok(tool, `${name} not found`);
+    assert.equal(tool.annotations?.readOnly, true, `${name} writes nothing and should say so`);
+    assert.equal(tool.annotations?.destructive, false);
+  }
+});

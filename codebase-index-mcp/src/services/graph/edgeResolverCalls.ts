@@ -38,6 +38,13 @@ const VECTOR_PROBE_SIZE = 100;
  */
 const NAME_ONLY_REASON = "resolved callee by name";
 const NAME_ONLY_AMBIGUOUS_REASON = "resolved callee by name (ambiguous)";
+/**
+ * MCP-ISSUE-060: the interface relabel below can fire on a match that came from a bare NAME lookup,
+ * where the receiver was never proven. Those edges must not borrow the proven label's credibility —
+ * same distinction `resolved property by name (unproven owner)` already draws for MCP-ISSUE-052.
+ */
+const INTERFACE_METHOD_REASON = "resolved interface method";
+const INTERFACE_METHOD_UNPROVEN_REASON = "resolved interface method (unproven receiver)";
 const NAME_ONLY_REASONS: ReadonlySet<string> = new Set([NAME_ONLY_REASON, NAME_ONLY_AMBIGUOUS_REASON]);
 
 /** Marks the bare half of a qualified call site that a qualified sibling has already answered. */
@@ -330,6 +337,12 @@ export function resolveCallEdgesBatch(
     const calleeName = row.toId.slice(7);
     let dispatchMethodName: string | null = null;
     let dispatchInterfaceId: string | null = null;
+    /**
+     * MCP-ISSUE-060: HOW the interface was arrived at. `receiver_type` means extraction handed us
+     * the receiver and it named an interface. `name` means we matched a bare method name and only
+     * afterwards noticed the winner happened to sit on an interface — a guess wearing a proof's label.
+     */
+    let dispatchVia: "receiver_type" | "name" = "receiver_type";
     // MCP-ISSUE-052: HOW the match was obtained, not just what it is. The receiver-as-class branch
     // added by MCP-ISSUE-036 shared the "resolved callee by name" label with the name-only fallback,
     // so a correct receiver-typed edge and a blind name guess were indistinguishable in `reason` —
@@ -416,6 +429,13 @@ export function resolveCallEdgesBatch(
     if (match && !dispatchMethodName && match.kind === "method" && match.parentSymbolId && interfaceIdSet.has(match.parentSymbolId)) {
       dispatchMethodName = calleeName.split(".").pop() ?? calleeName;
       dispatchInterfaceId = match.parentSymbolId;
+      // MCP-ISSUE-060: `match` here came from a name lookup, not from a proven receiver. Measured on
+      // `wec.be`: 986 of 2070 `resolved interface method` edges targeted a method name declared by two
+      // or more DIFFERENT interfaces (`CreateAsync` by 35 of them), and every one of those was labelled
+      // as proven at 0.8 because the ternary below tested `dispatchMethodName` before `nameAmbiguous`,
+      // making the ambiguity branch unreachable. That is how `EmailOnAcidService.GetListClientAsync`
+      // acquired a confident CALLS edge into `ISmsConversationService.GetAsync`.
+      dispatchVia = matchVia === "receiver_type" ? "receiver_type" : "name";
     }
 
     if (match) {
@@ -424,12 +444,18 @@ export function resolveCallEdgesBatch(
       // is knowledge rather than a heuristic — but it stays below a same-file match, which needs no
       // cross-file inference at all.
       const confidence = dispatchMethodName
-        ? (sameFile ? 0.9 : 0.8)
+        ? dispatchVia === "receiver_type"
+          ? (sameFile ? 0.9 : 0.8)
+          // An unproven receiver is a name guess that landed on an interface. It keeps the interface
+          // fan-out (ISSUE-022 Bug D still wants those implementations reached) but not the credibility.
+          : (sameFile ? 0.9 : nameAmbiguous ? 0.7 : 0.75)
         : matchVia === "receiver_type"
           ? (sameFile ? 0.9 : 0.85)
           : (sameFile ? 0.9 : 0.75);
       const reason = dispatchMethodName
-        ? "resolved interface method"
+        ? dispatchVia === "receiver_type"
+          ? INTERFACE_METHOD_REASON
+          : INTERFACE_METHOD_UNPROVEN_REASON
         : matchVia === "receiver_type"
           ? "resolved callee by receiver type"
           : sameFile

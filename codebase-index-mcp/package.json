@@ -20,6 +20,7 @@
     "test:endpoint-bridge": "node scripts/test/test-endpoint-bridge.mjs",
     "test:endpoint-fallback-context": "node scripts/test/test-endpoint-fallback-context.mjs",
     "test:typescript-symbols": "node scripts/test/test-typescript-symbols.mjs",
+    "test:unknown-input-honesty": "node scripts/test/test-unknown-input-honesty.mjs",
     "test:typescript-edges": "node scripts/test/test-typescript-edges.mjs",
     "test:csharp-inheritance-bridge": "node scripts/test/test-csharp-inheritance-bridge.mjs",
     "test:csharp-type-refs": "node scripts/test/test-csharp-type-refs.mjs",

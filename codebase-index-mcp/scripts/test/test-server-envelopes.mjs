@@ -106,8 +106,13 @@ try {
     // Preview/dry-run: writes no source, but mints a previewId + approval token per call.
     refactor_replace_preview: { readOnlyHint: true, idempotentHint: false, destructiveHint: false, openWorldHint: false },
     rename_assist: { readOnlyHint: true, idempotentHint: false, destructiveHint: false, openWorldHint: false },
-    refactor_symbol_migration: { readOnlyHint: true, idempotentHint: false, destructiveHint: false, openWorldHint: false },
-    change_value_representation: { readOnlyHint: true, idempotentHint: false, destructiveHint: false, openWorldHint: false }
+    // MCP-ISSUE-060: these two were annotated read-only on the reasoning that it described their
+    // DEFAULT posture (`dryRun: true`). But annotations are static per tool, not per argument, and a
+    // single call with `dryRun: false` reaches the same `fs.writeFileSync` path `refactor_replace_apply`
+    // takes — so a host trusting `readOnlyHint` to skip its confirmation prompt could not see it coming.
+    // Annotate for the worst a tool can do, never for its default.
+    refactor_symbol_migration: { readOnlyHint: false, idempotentHint: false, destructiveHint: true, openWorldHint: false },
+    change_value_representation: { readOnlyHint: false, idempotentHint: false, destructiveHint: true, openWorldHint: false }
   };
 
   const unannotated = listed.filter((t) => t.annotations === undefined).map((t) => t.name);

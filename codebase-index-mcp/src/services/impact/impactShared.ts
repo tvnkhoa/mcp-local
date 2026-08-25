@@ -102,6 +102,75 @@ export function buildEdgeToSymbolPairsCte(symbolFilter: string): string {
   )`;
 }
 
+/**
+ * MCP-ISSUE-060: the seed set `find_impact_files` matches against, widened to interface siblings.
+ *
+ * The bug this fixes: `expandInterfaceSiblingsImpl` was imported by four modules in this folder
+ * and called by none of them, so both views of `find_impact_files` matched only symbols declared
+ * IN the queried file. A class whose callers all go through its interface reported
+ * `totalImpactedCount: 0` while `get_symbol_context_pack`, on the same class in the same session,
+ * reported 14 callers — the same orphaned-fix shape `impactHandler.ts` already warns about.
+ *
+ * Why a temp table and not `s.symbol_id in (@s0…@sN)`: `symbolFilter` is interpolated once per
+ * branch of a six-branch union, so a 100-symbol file expanded by 20 implementors each would bind
+ * ~12 000 parameters. A one-column temp table is a single index seek per branch instead.
+ *
+ * Why not a seventh union branch: the header above records that this CTE replaced a form measuring
+ * 216 s with one measuring 0.5 s, precisely by keeping every branch drivable from an index. A branch
+ * carrying a two-hop `IMPLEMENTS` join re-introduces the unindexable shape it was rewritten to escape.
+ *
+ * The caller MUST pair this with `sf.file_path != @filePath` — see `buildImpactSeed`'s return note.
+ */
+export function buildImpactSeed(
+  db: Database.Database,
+  repoId: string,
+  canonicalFilePath: string
+): {
+  /** Drop-in replacement for `s.repo_id = @repoId and s.file_path = @filePath`. */
+  symbolFilter: string;
+  /** Symbols declared in the file. Includes the module pseudo-symbol: IMPORTS edges target it. */
+  ownCount: number;
+  /** Sibling symbols reached through IMPLEMENTS. 0 means this behaves exactly as before. */
+  siblingCount: number;
+  /** True when the file had more symbols than `EXPANSION_SEED_CAP` allowed us to expand. */
+  expansionCapped: boolean;
+} {
+  const own = (
+    db
+      .prepare(`select symbol_id as symbolId, kind from symbols where repo_id = ? and file_path = ?`)
+      .all(repoId, canonicalFilePath) as { symbolId: string; kind: string }[]
+  );
+
+  // `expandInterfaceSiblingsImpl` issues per-method queries in a loop, so the seed it receives is
+  // capped independently of the match set. Types first: a class expands to its members anyway, so
+  // spending the budget on type-kind symbols reaches more of the file than spending it on methods.
+  const expansionSeed = own
+    .filter((s) => s.kind !== "module")
+    .sort((a, b) => Number(EXPANDABLE_TYPE_KINDS.has(b.kind)) - Number(EXPANDABLE_TYPE_KINDS.has(a.kind)))
+    .slice(0, EXPANSION_SEED_CAP)
+    .map((s) => s.symbolId);
+
+  const siblings =
+    expansionSeed.length > 0 ? expandInterfaceSiblingsImpl(db, repoId, expansionSeed) : [];
+
+  db.exec(`create temp table if not exists _impact_seed (sid text primary key)`);
+  db.prepare(`delete from _impact_seed`).run();
+  const insert = db.prepare(`insert or ignore into _impact_seed (sid) values (?)`);
+  db.transaction((ids: string[]) => {
+    for (const id of ids) insert.run(id);
+  })([...own.map((s) => s.symbolId), ...siblings.map((s) => s.symbolId)]);
+
+  return {
+    symbolFilter: `s.repo_id = @repoId and s.symbol_id in (select sid from _impact_seed)`,
+    ownCount: own.length,
+    siblingCount: siblings.length,
+    expansionCapped: own.filter((s) => s.kind !== "module").length > EXPANSION_SEED_CAP
+  };
+}
+
+const EXPANSION_SEED_CAP = 60;
+const EXPANDABLE_TYPE_KINDS = new Set(["class", "struct", "record", "record struct", "interface"]);
+
 // ── Helpers ────────────────────────────────────────────────────────────
 
 export function normalizePath(filePath: string): string {

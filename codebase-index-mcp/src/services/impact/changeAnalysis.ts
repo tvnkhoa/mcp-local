@@ -7,7 +7,7 @@
  * or test-linking/residual-risk (change_impact) on top of this common core.
  */
 import type { GraphStore } from "../../repositories/graphStore.js";
-import { resolveHeadCommitSha, runGitLines } from "../git/gitHelpers.js";
+import { resolveHeadCommitSha, runGitLines, runGitLinesOrNull } from "../git/gitHelpers.js";
 import { scoreChangeRisk } from "../analysis/policyResolver.js";
 import type { ReliabilitySummary } from "../../types/index.js";
 
@@ -65,9 +65,32 @@ export type ChangedFileImpactsResult = {
   headRef: string;
   indexedCommitSha: string | null;
   changedFiles: string[];
+  /**
+   * MCP-ISSUE-060: changed files BEFORE `maxFiles`. `changedFiles.length` is the page; this is the
+   * truth. The old code computed this number one expression earlier and threw it away, so a 300-file
+   * diff reported `changedFileCount: 100` with no signal — and because the cap slices an
+   * alphabetically ordered set, a whole server's worth of files past the cut never appeared at all.
+   */
+  totalChangedFileCount: number;
   note: string;
   impacts: ChangedFileImpact[];
 };
+
+/**
+ * MCP-ISSUE-060: git ran and failed, as opposed to git ran and found nothing.
+ *
+ * Mapped to `InvalidParams` by the handlers, because the only way to reach it is an input the caller
+ * chose: a ref that does not resolve in this repo.
+ */
+export class ChangeAnalysisError extends Error {
+  constructor(
+    readonly code: "UNRESOLVED_REF",
+    message: string
+  ) {
+    super(message);
+    this.name = "ChangeAnalysisError";
+  }
+}
 
 /**
  * Resolve the changed-file set (git range diff or working-tree diff) and score the static
@@ -101,7 +124,17 @@ export function computeChangedFileImpacts(
       ? "using working-tree diff (no new commits since last index; showing staged + unstaged changes)"
       : "baseRef unavailable; using working-tree diff against HEAD";
   } else {
-    trackedChanged = runGitLines(args.repoPath, ["diff", "--name-only", `${baseRef}..${headRef}`]);
+    // MCP-ISSUE-060: the one case with no legitimate reading of `[]`. A ref the caller typed either
+    // resolves or it does not; answering "0 files changed, 0 high risk" for a ref that does not exist
+    // is the worst possible output from a release gate.
+    const ranged = runGitLinesOrNull(args.repoPath, ["diff", "--name-only", `${baseRef}..${headRef}`]);
+    if (ranged === null) {
+      throw new ChangeAnalysisError(
+        "UNRESOLVED_REF",
+        `git could not diff '${String(baseRef)}..${headRef}' in this repository. Check that both refs exist locally (git fetch may be needed) and are spelled correctly.`
+      );
+    }
+    trackedChanged = ranged;
     note = "using git range diff";
   }
 
@@ -109,17 +142,19 @@ export function computeChangedFileImpacts(
     ? runGitLines(args.repoPath, ["ls-files", "--others", "--exclude-standard"])
     : [];
 
-  const changedFiles = [
+  const allChangedFiles = [
     ...new Set(
       [...trackedChanged, ...untracked]
         .map((x) => x.replace(/\\/g, "/").trim())
         .filter((x) => x.length > 0)
     )
-  ].slice(0, args.maxFiles);
+  ];
+  const totalChangedFileCount = allChangedFiles.length;
+  const changedFiles = allChangedFiles.slice(0, args.maxFiles);
 
   const impacts: ChangedFileImpact[] = changedFiles.map((filePath) =>
     scoreFileImpact(store, args.repoId, filePath, args.impactLimit)
   );
 
-  return { baseRef: baseRef ?? null, headRef, indexedCommitSha: args.indexedCommitSha, changedFiles, note, impacts };
+  return { baseRef: baseRef ?? null, headRef, indexedCommitSha: args.indexedCommitSha, changedFiles, totalChangedFileCount, note, impacts };
 }

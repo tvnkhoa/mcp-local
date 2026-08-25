@@ -25,6 +25,25 @@ function isNonTestableChangePath(filePath: string): boolean {
   return NON_TESTABLE_CHANGE_PATH.test(filePath.replace(/\\/g, "/"));
 }
 
+/**
+ * MCP-ISSUE-060: a ref the caller chose that git cannot resolve is invalid INPUT, not a server fault.
+ * Left unmapped it falls through `mapError`'s final branch and reports `INTERNAL_ERROR`, telling the
+ * caller to file a bug about their own typo.
+ *
+ * Matched by `name`, not `instanceof`: ADR 0001 records that identity checks across package
+ * boundaries are unreliable in this workspace, and this guard is cheap enough to be robust anyway.
+ */
+function asInvalidParamsOnBadRef<T>(run: () => T): T {
+  try {
+    return run();
+  } catch (error) {
+    if (error instanceof Error && error.name === "ChangeAnalysisError") {
+      throw new McpError(ErrorCode.InvalidParams, error.message);
+    }
+    throw error;
+  }
+}
+
 // ── health_check ─────────────────────────────────────────────────────────────
 
 export function handleHealthCheck(
@@ -285,17 +304,20 @@ export function handleDetectChanges(
   const maxResults = args.maxResults ?? policyDefaults.maxResults;
   const sortBy = args.sortBy ?? policyDefaults.sortBy;
 
-  const core = computeChangedFileImpacts(store, {
-    repoId: args.repoId,
-    repoPath: repo.repoPath,
-    baseRef: args.baseRef,
-    headRef: args.headRef,
-    includeUntracked: args.includeUntracked,
-    maxFiles: args.maxFiles,
-    impactLimit: args.impactLimit,
-    indexedCommitSha
-  });
-  const { baseRef, headRef, changedFiles, note, impacts } = core;
+  const core = asInvalidParamsOnBadRef(() =>
+    computeChangedFileImpacts(store, {
+      repoId: args.repoId,
+      repoPath: repo.repoPath,
+      baseRef: args.baseRef,
+      headRef: args.headRef,
+      includeUntracked: args.includeUntracked,
+      maxFiles: args.maxFiles,
+      impactLimit: args.impactLimit,
+      indexedCommitSha
+    })
+  );
+  const { baseRef, headRef, changedFiles, totalChangedFileCount, note, impacts } = core;
+  const changedFilesDroppedByLimit = Math.max(0, totalChangedFileCount - changedFiles.length);
 
   const sortedImpacts = [...impacts].sort((a, b) => {
     if (sortBy === "impact") return b.impactedFilesCount - a.impactedFilesCount || b.riskScore - a.riskScore || a.filePath.localeCompare(b.filePath);
@@ -366,23 +388,23 @@ export function handleDetectChanges(
 
   if (profile === "nano") {
     const topRiskChanges = selectedImpacts.slice(0, 5).map((x) => ({ filePath: x.filePath, riskScore: x.riskScore, riskLevel: x.riskLevel }));
-    return ctx.asText({ repoId: args.repoId, baseRef, headRef, changedFileCount: changedFiles.length, topChangedFiles: changedFiles.slice(0, 20), topRiskChanges, riskSummary, filter: filterInfo, impactedFileCount: impactedFileSet.size, ...(moduleGroups ? { moduleGroups } : {}), note }, profile);
+    return ctx.asText({ repoId: args.repoId, baseRef, headRef, changedFileCount: totalChangedFileCount, changedFilesReturned: changedFiles.length, changedFilesDroppedByLimit, topChangedFiles: changedFiles.slice(0, 20), topRiskChanges, riskSummary, filter: filterInfo, impactedFileCount: impactedFileSet.size, ...(moduleGroups ? { moduleGroups } : {}), note }, profile);
   }
 
   if (profile === "compact") {
-    return ctx.asText({ repoId: args.repoId, indexedCommitSha, baseRef, headRef, changedFileCount: changedFiles.length, changedFiles, impacts: selectedImpacts, riskSummary, filter: filterInfo, impactedFileCount: impactedFileSet.size, ...(moduleGroups ? { moduleGroups } : {}), note }, profile);
+    return ctx.asText({ repoId: args.repoId, indexedCommitSha, baseRef, headRef, changedFileCount: totalChangedFileCount, changedFilesReturned: changedFiles.length, changedFilesDroppedByLimit, changedFiles, impacts: selectedImpacts, riskSummary, filter: filterInfo, impactedFileCount: impactedFileSet.size, ...(moduleGroups ? { moduleGroups } : {}), note }, profile);
   }
 
   if (profile === "verbose") {
     return ctx.asText({
       repoId: args.repoId, indexedCommitSha, latestRun, baseRef, headRef, includeUntracked: args.includeUntracked,
-      changedFileCount: changedFiles.length, changedFiles, impacts: selectedImpacts, riskSummary, filter: filterInfo,
+      changedFileCount: totalChangedFileCount, changedFilesReturned: changedFiles.length, changedFilesDroppedByLimit, changedFiles, impacts: selectedImpacts, riskSummary, filter: filterInfo,
       impactedFileCount: impactedFileSet.size, ...(moduleGroups ? { moduleGroups } : {}), note,
-      summary: { filesCapped: changedFiles.length === args.maxFiles, maxFiles: args.maxFiles, impactLimit: args.impactLimit, resultsLimited: filterInfo.droppedByLimit > 0 }
+      summary: { filesCapped: changedFilesDroppedByLimit > 0, maxFiles: args.maxFiles, impactLimit: args.impactLimit, resultsLimited: filterInfo.droppedByLimit > 0 }
     }, profile);
   }
 
-  return ctx.asText({ repoId: args.repoId, indexedCommitSha, baseRef, headRef, changedFileCount: changedFiles.length, changedFiles, impacts: selectedImpacts, riskSummary, filter: filterInfo, impactedFileCount: impactedFileSet.size, ...(moduleGroups ? { moduleGroups } : {}), note }, profile);
+  return ctx.asText({ repoId: args.repoId, indexedCommitSha, baseRef, headRef, changedFileCount: totalChangedFileCount, changedFilesReturned: changedFiles.length, changedFilesDroppedByLimit, changedFiles, impacts: selectedImpacts, riskSummary, filter: filterInfo, impactedFileCount: impactedFileSet.size, ...(moduleGroups ? { moduleGroups } : {}), note }, profile);
 }
 
 // ── change_impact (ENH-E) ──────────────────────────────────────────────────────
@@ -418,7 +440,7 @@ export function handleChangeImpact(
   }
 
   const indexedCommitSha = store.getLatestRun(args.repoId)?.commitSha ?? null;
-  const core = computeChangedFileImpacts(store, {
+  const core = asInvalidParamsOnBadRef(() => computeChangedFileImpacts(store, {
     repoId: args.repoId,
     repoPath: repo.repoPath,
     baseRef: args.baseRef,
@@ -427,7 +449,7 @@ export function handleChangeImpact(
     maxFiles: args.maxFiles,
     impactLimit: args.impactLimit,
     indexedCommitSha
-  });
+  }));
 
   // Dependent set = changed files ∪ their static dependents. Carry per-file risk for ranking.
   const riskByFile = new Map<string, number>();
@@ -523,7 +545,7 @@ export function handleChangeImpact(
     return ctx.asText(
       {
         repoId: args.repoId,
-        changedFileCount: core.changedFiles.length,
+        changedFileCount: core.totalChangedFileCount, changedFilesReturned: core.changedFiles.length, changedFilesDroppedByLimit: Math.max(0, core.totalChangedFileCount - core.changedFiles.length),
         topTestsToRun: testsToRun.slice(0, 10).map((t) => ({ testFile: t.testFile, score: t.score })),
         riskSummary,
         residualRisk: residualRisk.note,
@@ -540,7 +562,7 @@ export function handleChangeImpact(
         repoId: args.repoId,
         baseRef: core.baseRef,
         headRef: core.headRef,
-        changedFileCount: core.changedFiles.length,
+        changedFileCount: core.totalChangedFileCount, changedFilesReturned: core.changedFiles.length, changedFilesDroppedByLimit: Math.max(0, core.totalChangedFileCount - core.changedFiles.length),
         changedFiles: core.changedFiles,
         riskSummary,
         testsToRun: testsToRun.map((t) => ({ testFile: t.testFile, coveredSources: t.coveredSources, score: t.score })),
@@ -560,7 +582,7 @@ export function handleChangeImpact(
       indexedCommitSha,
       baseRef: core.baseRef,
       headRef: core.headRef,
-      changedFileCount: core.changedFiles.length,
+      changedFileCount: core.totalChangedFileCount, changedFilesReturned: core.changedFiles.length, changedFilesDroppedByLimit: Math.max(0, core.totalChangedFileCount - core.changedFiles.length),
       changedFiles: core.changedFiles,
       impacts: core.impacts,
       riskSummary,
