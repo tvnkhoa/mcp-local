@@ -39,6 +39,33 @@ const EXCLUDED_PATH_SEGMENTS = new Set([
   ".vs",
   ".idea",
   "__pycache__",
+  // MCP-ISSUE-060 follow-up: added when `dot: true` was turned on for the file walk. Before that,
+  // node-glob's default silently skipped every dot-directory and this list never had to name them.
+  // Measured the moment it did: `wec.rag` went from 140 indexed files to 9159, of which 9156 were
+  // `.venv/**` — 110,513 of its 111,454 symbols came from a Python virtualenv. A dependency tree is
+  // not this repo's code, and `node_modules` was already excluded for exactly this reason.
+  ".venv",
+  "venv",
+  "site-packages",
+  ".tox",
+  ".nox",
+  ".eggs",
+  ".mypy_cache",
+  ".pytest_cache",
+  ".ruff_cache",
+  ".ipynb_checkpoints",
+  ".gradle",
+  ".terraform",
+  ".svn",
+  ".hg",
+  ".yarn",
+  ".pnpm-store",
+  ".parcel-cache",
+  ".nx",
+  ".angular",
+  ".cache",
+  ".nuget",
+  ".conda",
   "wwwroot",
   "public",
   "static",
@@ -78,6 +105,41 @@ const EXCLUDED_EXTENSIONS = new Set([
   ".prettierrc",
   ".eslintrc",
   ".babelrc"
+]);
+
+/**
+ * MCP-ISSUE-060 follow-up: files whose whole purpose is to hold a secret.
+ *
+ * Turning on `dot: true` made `.env` reachable by `search_regex(scanAll: true)`, which reads from
+ * disk rather than from the index — so "it has no language mapping, the indexer skips it" was no
+ * longer the whole answer. `wec.rag` has a real `.env` at its root. Nothing was ever written into
+ * the graph (verified: zero rows across all nine repos, zero extracted literals), but a tool that
+ * can grep a credentials file on request is a leak waiting for the right question.
+ *
+ * `.env.example` / `.sample` / `.template` are deliberately NOT excluded: they are documentation of
+ * which variables exist, carry no values, and are what `generate:env` maintains.
+ */
+export function isSecretBearingFile(basename: string): boolean {
+  const name = basename.toLowerCase();
+  if (/\.(example|sample|template|dist)$/.test(name)) return false;
+  if (name === ".env" || name.startsWith(".env.")) return true;
+  if (SECRET_FILENAMES.has(name)) return true;
+  return /\.(pem|pfx|p12|jks|keystore|asc|ppk)$/.test(name) || /(^|\.)id_(rsa|dsa|ecdsa|ed25519)$/.test(name);
+}
+
+const SECRET_FILENAMES = new Set([
+  ".npmrc",
+  ".netrc",
+  "_netrc",
+  ".pypirc",
+  ".dockercfg",
+  ".git-credentials",
+  "credentials",
+  "secrets.json",
+  "secrets.yaml",
+  "secrets.yml",
+  "id_rsa",
+  "id_ed25519"
 ]);
 
 const EXCLUDED_FILENAMES = new Set([
@@ -223,6 +285,10 @@ export function shouldIndexFile(filePath: string, bytes: Uint8Array, maxFileSize
     knownLanguage !== "markdown" &&
     (EXCLUDED_FILENAMES.has(basename) || EXCLUDED_FILENAMES.has(basenameNoExt))
   ) {
+    return { include: false, reason: "excluded_filename", language: null };
+  }
+
+  if (isSecretBearingFile(basename)) {
     return { include: false, reason: "excluded_filename", language: null };
   }
 

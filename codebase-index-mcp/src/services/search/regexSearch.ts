@@ -9,6 +9,7 @@ import {
   isBinary,
   isLikelyMinified,
   hasExcludedPathSegment,
+  isSecretBearingFile,
   INDEX_IGNORE_GLOBS
 } from "../indexing/fileFilter.js";
 import { assertSafeRepoFilePath, normalizeRelativePath } from "../refactor/refactorUtils.js";
@@ -177,7 +178,9 @@ export function searchRegexImpl(
     // ignore list alone doesn't cover, so scanAll doesn't dredge compiled/tooling artifacts.
     candidates = globbed
       .map((p) => normalizeRelativePath(p))
-      .filter((p) => !hasExcludedPathSegment(p))
+      // MCP-ISSUE-060 follow-up: scanAll reads from DISK, not from the index, so "the indexer skips
+      // it" is not protection here. A credentials file must not be greppable on request.
+      .filter((p) => !hasExcludedPathSegment(p) && !isSecretBearingFile(p.split("/").pop() ?? p))
       .map((p) => ({ path: p, language: null }));
   } else {
     candidates = store.listIndexedFiles(repoId).map((f) => ({ path: normalizeRelativePath(f.path), language: f.language }));

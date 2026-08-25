@@ -7,6 +7,7 @@ import {
   isLikelyMinified,
   isMigrationPath,
   isMigrationSymbol,
+  isSecretBearingFile,
   isTestPath,
   shouldIndexFile
 } from "./fileFilter.js";
@@ -199,4 +200,77 @@ test("shouldIndexFile: binary content is rejected even with an indexable extensi
   const decision = shouldIndexFile("src/app.ts", new Uint8Array([0x61, 0x00, 0x62]));
   assert.equal(decision.include, false);
   assert.equal(decision.reason, "binary_file");
+});
+
+/**
+ * MCP-ISSUE-060 follow-up — the two things `dot: true` let through.
+ *
+ * Turning it on for the file walk was correct: `.claude/` and `.github/` were unreachable by every
+ * mode of `search_regex`, including the one whose whole purpose is to walk non-code text. What the
+ * change did not account for is that node-glob's dotfile default had been doing two other jobs by
+ * accident.
+ *
+ * Job one: keeping dependency trees out. The first re-index after the change took `wec.rag` from 140
+ * indexed files to 9159, of which 9156 were `.venv/**`; 110,513 of its 111,454 symbols came from a
+ * Python virtualenv. `node_modules` was already excluded for exactly this reason — the list simply
+ * had never needed to name the dot-spelled equivalents.
+ *
+ * Job two: keeping credentials unreadable. `search_regex(scanAll: true)` reads from disk, not from
+ * the index, so "no language mapping, the indexer skips it" stopped being protection. Nothing ever
+ * reached the graph — verified as zero rows across all nine repos and zero extracted literals — but
+ * a tool that can grep a `.env` on request is a leak waiting for the right question.
+ */
+test("a dependency tree spelled with a dot is excluded like node_modules is", () => {
+  for (const p of [
+    ".venv/lib/python3.11/site-packages/requests/api.py",
+    "backend/.venv/Lib/site-packages/urllib3/util.py",
+    "venv/bin/activate.py",
+    "src/.tox/py311/lib/thing.py",
+    "src/.mypy_cache/3.11/foo.json",
+    "web/.yarn/cache/pkg.js",
+    "infra/.terraform/providers/main.tf",
+    "app/.angular/cache/x.js"
+  ]) {
+    assert.equal(hasExcludedPathSegment(p), true, `${p} should be excluded`);
+  }
+});
+
+test("the dot-directories the change existed to reach are still reachable", () => {
+  // The whole point of dot:true. If these ever start being excluded, the fix has been undone.
+  for (const p of [".claude/rules/mcp-hard-mode.md", ".github/workflows/ci.yml", ".gitignore"]) {
+    assert.equal(hasExcludedPathSegment(p), false, `${p} must stay in scope`);
+  }
+});
+
+test("a file whose purpose is to hold a secret is never read", () => {
+  for (const name of [
+    ".env",
+    ".env.local",
+    ".env.production",
+    ".npmrc",
+    ".netrc",
+    ".pypirc",
+    ".git-credentials",
+    "id_rsa",
+    "id_ed25519",
+    "server.pem",
+    "cert.pfx",
+    "keystore.jks"
+  ]) {
+    assert.equal(isSecretBearingFile(name), true, `${name} should be treated as secret-bearing`);
+  }
+});
+
+test("the documentation twins of those files are NOT excluded", () => {
+  // `.env.example` lists which variables exist and carries no values — it is what `generate:env`
+  // maintains, and excluding it would hide the env contract from every search.
+  for (const name of [".env.example", ".env.sample", ".env.template", "appsettings.json", "config.ts"]) {
+    assert.equal(isSecretBearingFile(name), false, `${name} must stay readable`);
+  }
+});
+
+test("shouldIndexFile refuses a secret-bearing file outright", () => {
+  const decision = shouldIndexFile(".env", Buffer.from("DB_PASSWORD=hunter2"));
+  assert.equal(decision.include, false);
+  assert.equal(decision.reason, "excluded_filename");
 });
