@@ -306,6 +306,14 @@ export type DocRecord = {
   contentType: "heading" | "code_block" | "paragraph";
   text: string;
   level?: number; // heading level (1-6) if contentType="heading"
+  /**
+   * MCP-ISSUE-061 Stage 3: document lifecycle, set on the FILE-LEVEL node only (the one whose
+   * headingPath equals filePath). Derived from a body-level "**Status** - ..." line or from an
+   * archive/superseded path segment. Undefined means no signal, which is treated as active.
+   */
+  docStatus?: string;
+  /** Free text after "Superseded by", when the document names its successor. */
+  supersededBy?: string;
 };
 
 export type DocMentionRecord = {

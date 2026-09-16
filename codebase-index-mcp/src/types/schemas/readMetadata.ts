@@ -86,6 +86,11 @@ export const queryDocsSchema = (MAX_RESULT_LIMIT: number) => z
      * — `nano`/`compact` only drop nullish keys. `limit` caps the row COUNT; this caps the payload,
      * which is the axis that matters once a row can hold a whole doc section.
      */
+    /**
+     * MCP-ISSUE-061 Stage 3, mode="search": archived and superseded documents are excluded by
+     * default. CLAUDE.md had to say this in prose; now it is mechanical.
+     */
+    includeArchived: z.boolean().default(false),
     maxTokens: z.number().int().min(200).max(50_000).optional(),
     /**
      * MCP-ISSUE-061 Stage 3, mode="drift" only: how close a symbol name must be to an unresolved

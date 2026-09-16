@@ -39,17 +39,19 @@ type DocCoverageRow = {
 export function upsertDocsImpl(db: Database.Database, docs: DocRecord[]): void {
   const stmt = db.prepare(
     `
-    insert into docs (repo_id, doc_id, file_path, heading_path, content_type, text, level)
-    values (@repoId, @docId, @filePath, @headingPath, @contentType, @text, @level)
+    insert into docs (repo_id, doc_id, file_path, heading_path, content_type, text, level, doc_status, superseded_by)
+    values (@repoId, @docId, @filePath, @headingPath, @contentType, @text, @level, @docStatus, @supersededBy)
     on conflict(repo_id, doc_id) do update set
       text = excluded.text,
-      level = excluded.level
+      level = excluded.level,
+      doc_status = excluded.doc_status,
+      superseded_by = excluded.superseded_by
     `
   );
 
   const writeRows = (rows: DocRecord[]) => {
     for (const row of rows) {
-      const normalized = { ...row, level: row.level ?? undefined };
+      const normalized = { ...row, level: row.level ?? undefined, docStatus: row.docStatus ?? null, supersededBy: row.supersededBy ?? null };
       stmt.run(normalized);
     }
   };
@@ -378,7 +380,14 @@ export function searchDocsImpl(
    * that cannot reach 44% of the corpus. Narrow it again — to `["heading","prose"]` — once
    * `parseMarkdownFile` actually emits prose sections.
    */
-  contentTypes: readonly string[] | null = null
+  contentTypes: readonly string[] | null = null,
+  /**
+   * MCP-ISSUE-061 Stage 3. `CLAUDE.md` warns in prose that nothing under `docs/archive/` is
+   * maintained and that a current state must not be read out of it. That warning exists because
+   * agents keep doing exactly that, so the default now EXCLUDES archived and superseded documents
+   * and this flag opts them back in for history questions.
+   */
+  includeArchived = false
 ): {
   docId: string;
   filePath: string;
@@ -395,6 +404,12 @@ export function searchDocsImpl(
   const allowedTypes =
     contentTypes && contentTypes.length > 0 ? contentTypes : ["heading", "prose", "code_block"];
   const typePlaceholders = allowedTypes.map(() => "?").join(", ");
+  // `doc_status` lives on the FILE-LEVEL row only, so a heading inside an archived file carries
+  // none — the filter has to go by file, not by row.
+  const archiveFilter = includeArchived
+    ? ""
+    : `and docs.file_path not in (select file_path from docs where repo_id = ? and doc_status in ('archived','superseded'))`;
+  const archiveParams: string[] = includeArchived ? [] : [repoId];
 
   try {
     db.prepare("select * from docs_fts limit 0").all();
@@ -404,12 +419,12 @@ export function searchDocsImpl(
         select docs_fts.doc_id as docId
         from docs_fts
         inner join docs on docs.doc_id = docs_fts.doc_id and docs.repo_id = ?
-        where docs_fts match ? and docs.content_type in (${typePlaceholders})
+        where docs_fts match ? and docs.content_type in (${typePlaceholders}) ${archiveFilter}
         order by rank
         limit ?
         `
       )
-      .all(repoId, ftsQuery, ...allowedTypes, desiredLimit) as { docId: string }[];
+      .all(repoId, ftsQuery, ...allowedTypes, ...archiveParams, desiredLimit) as { docId: string }[];
     docIds = ftsRows.map((r) => r.docId);
     usedFts = true;
   } catch {
@@ -419,9 +434,9 @@ export function searchDocsImpl(
   if (!usedFts || docIds.length === 0) {
     const likeRows = db
       .prepare(
-        `select doc_id as docId from docs where repo_id = ? and text like ? and content_type in (${typePlaceholders}) order by rowid limit ?`
+        `select doc_id as docId from docs where repo_id = ? and text like ? and content_type in (${typePlaceholders}) ${archiveFilter} order by rowid limit ?`
       )
-      .all(repoId, `%${query}%`, ...allowedTypes, desiredLimit) as { docId: string }[];
+      .all(repoId, `%${query}%`, ...allowedTypes, ...archiveParams, desiredLimit) as { docId: string }[];
     docIds = likeRows.map((r) => r.docId);
   }
 

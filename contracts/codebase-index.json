@@ -1481,6 +1481,10 @@
           "filePath": {
             "type": "string"
           },
+          "includeArchived": {
+            "description": "mode=search only: include documents marked archived or superseded (by an archive/superseded path segment, or a **Status** line). Off by default — an archived doc is not a current state.",
+            "type": "boolean"
+          },
           "includeCodeMentions": {
             "description": "mode=stale only: also count identifiers scraped from fenced code samples (mentionType='code_call'). Off by default — a doc that merely contains a call is not documentation of the callee.",
             "type": "boolean"

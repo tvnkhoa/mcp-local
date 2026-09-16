@@ -810,7 +810,8 @@ export class GraphStore {
     query: string,
     limit: number,
     includeSymbols = false,
-    contentTypes: readonly string[] | null = null
+    contentTypes: readonly string[] | null = null,
+    includeArchived = false
   ): {
     docId: string;
     filePath: string;
@@ -820,7 +821,7 @@ export class GraphStore {
     level: number | null;
     resolvedMentions: { symbolId: string; symbolName: string | null; mentionText: string }[];
   }[] {
-    return searchDocsImpl(this.db, repoId, query, limit, buildFtsQuery, buildIntentFtsQuery, includeSymbols, contentTypes);
+    return searchDocsImpl(this.db, repoId, query, limit, buildFtsQuery, buildIntentFtsQuery, includeSymbols, contentTypes, includeArchived);
   }
 
   findStaleDocs(

@@ -166,6 +166,11 @@ export function initGraphSchema(db: Database.Database): void {
         content_type text not null,
         text text,
         level integer,
+        -- MCP-ISSUE-061 Stage 3: document lifecycle, on the file-level row only. doc_status is
+        -- archived / superseded / draft / proposed / accepted; null means no signal, i.e. active.
+        -- superseded_by carries the text after "Superseded by" when the doc names a successor.
+        doc_status text,
+        superseded_by text,
         primary key (repo_id, doc_id)
       );
 
@@ -488,6 +493,18 @@ export function runGraphMigrations(db: Database.Database, vectorEnabled: boolean
     } catch {
       // Ignore if table doesn't exist yet
     }
+
+    // MCP-ISSUE-061 Stage 3: the first forward migration `docs` has ever had. Until now the table
+    // appeared only in `initGraphSchema`, so an existing database kept the original docs shape
+    // forever while a fresh clone got the new one — the two would silently disagree.
+    const docCols = db.prepare("pragma table_info(docs)").all() as { name: string }[];
+    const ensureDocColumn = (name: string, sqlType: string) => {
+      if (!docCols.some((c) => c.name === name)) {
+        db.exec(`alter table docs add column ${name} ${sqlType}`);
+      }
+    };
+    ensureDocColumn("doc_status", "text");
+    ensureDocColumn("superseded_by", "text");
 
     const edgeCols = db.prepare("pragma table_info(edges)").all() as { name: string }[];
     const ensureEdgeColumn = (name: string, sqlType: string, defaultExpr?: string) => {

@@ -100,6 +100,7 @@ export function parseMarkdownFile(input: {
 
   // Always add file-level doc node
   const fileDocId = hashOf(input.filePath);
+  const lifecycle = detectLifecycle(input.filePath, input.source);
   docs.unshift({
     repoId: input.repoId,
     docId: fileDocId,
@@ -107,7 +108,9 @@ export function parseMarkdownFile(input: {
     headingPath: input.filePath,
     contentType: "heading",
     text: input.filePath,
-    level: 1
+    level: 1,
+    ...(lifecycle.docStatus && { docStatus: lifecycle.docStatus }),
+    ...(lifecycle.supersededBy && { supersededBy: lifecycle.supersededBy })
   });
 
   return { docs, mentions };
@@ -199,6 +202,59 @@ function extractMentionsFromCode(code: string, docId: string, repoId: string, me
       });
     }
   }
+}
+
+/**
+ * Document lifecycle. MCP-ISSUE-061 Stage 3.
+ *
+ * `CLAUDE.md` has to carry the sentence *"Nothing there is maintained; do not read a current state
+ * out of it"* about `docs/archive/`. That sentence exists because agents keep reading state out of
+ * the archive, and prose cannot stop them. This makes it queryable instead.
+ *
+ * **Front matter was the obvious mechanism and it is the wrong one here.** Measured over this
+ * workspace: 39 of 107 markdown files open with a `---` block, and every one is a Claude Code
+ * artifact (SKILL.md, a rule, a command) whose only keys are `name`, `description` and
+ * `argument-hint`. **Zero of the 47 files under `docs/` have front matter at all**, and `owner` /
+ * `tags` / `status` appear nowhere as YAML keys. A front-matter reader would have returned nothing
+ * for the entire documentation tree.
+ *
+ * What this workspace actually uses is a bold-key body line with an **em-dash, not a colon** — all
+ * four ADRs follow `docs/decisions/README.md`'s convention, and 32 files carry the same shape for
+ * `**Risk**` / `**Complexity**` / `**Rollback**`. Both separators are accepted here because a
+ * convention documented in prose is a convention people spell two ways.
+ *
+ * The path rule is the general half: a segment named `archive`, `_archive`, `superseded` or
+ * `deprecated` marks a document inactive regardless of its body. That is structural and holds in any
+ * repository, where mining a specific index file's link table would not.
+ *
+ * Scanned over the first 60 lines only — a status line belongs near the top, and reading further
+ * invites a false positive from a document *quoting* a status.
+ */
+function detectLifecycle(filePath: string, source: string): { docStatus?: string; supersededBy?: string } {
+  const segments = filePath.replace(/\\/g, "/").toLowerCase().split("/");
+  const archived = segments.some((s) => s === "archive" || s === "_archive" || s === "superseded" || s === "deprecated");
+
+  const head = source.split("\n", 60).join("\n");
+  const statusLine = head.match(/^\s*\*\*Status\*\*\s*(?:—|–|-|:)\s*(.+)$/im);
+  const raw = statusLine ? statusLine[1].trim() : "";
+
+  let supersededBy: string | undefined;
+  const supersedes = raw.match(/superseded\s+by\s+(.+?)\s*$/i);
+  if (supersedes) supersededBy = supersedes[1].replace(/[.*_`]+$/g, "").trim() || undefined;
+
+  let docStatus: string | undefined;
+  if (supersededBy) docStatus = "superseded";
+  else if (/^superseded/i.test(raw)) docStatus = "superseded";
+  else if (/^accepted/i.test(raw)) docStatus = "accepted";
+  else if (/^proposed/i.test(raw)) docStatus = "proposed";
+  else if (/^draft/i.test(raw)) docStatus = "draft";
+  else if (/^(deprecated|obsolete)/i.test(raw)) docStatus = "archived";
+
+  // The path wins only when the body said nothing — an archived ADR that still records
+  // "Accepted" is accurately both, and the path is the fact a reader needs.
+  if (archived) docStatus = docStatus === "superseded" ? "superseded" : "archived";
+
+  return { docStatus, supersededBy };
 }
 
 /**
