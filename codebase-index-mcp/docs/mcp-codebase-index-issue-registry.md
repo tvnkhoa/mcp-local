@@ -2728,6 +2728,16 @@ Two consequences for design, both of which overturned a plausible first plan:
   fences and 320 tables full of link-shaped example text.
 
 Mention resolution, for scale on (c) and on any drift reporting: `wec.social-ads` resolves 127 of 984
-backtick mentions (13%), `wec.rag` 112 of 268 (42%). `resolveMentionsImpl` **discards** every mention
-it cannot resolve, so the majority signal — a doc naming an identifier that no longer exists — is
-computed and thrown away.
+backtick mentions (13%), `wec.rag` 112 of 268 (42%).
+
+**Correction (2026-09-16, while implementing `mode:"drift"`):** an earlier draft of this entry said
+`resolveMentionsImpl` **discards** every mention it cannot resolve. It does not. Unresolved mentions
+stay in `doc_mentions` with `symbol_id = null` — 1 218 rows for `mcp-local`, 659 for
+`codebase-index-mcp` — and were simply never read back by any tool. The defect was a missing read,
+not a lost write, which made the fix considerably smaller than this entry originally implied.
+
+Reading them raw is still not useful: the most frequent unresolved mentions here are **MCP tool
+names** (`find_impact_files` 91, `health_check` 79, `search_symbols` 77), because a document about a
+tool names the tool. `mode:"drift"` therefore reports only near misses against an existing symbol,
+after filtering naming-convention variants (`find_implementations` vs `findImplementations`) and
+plurals (`contentTypes` vs `contentType`) — 1 218 unresolved → 152 near misses → 23 candidates.
