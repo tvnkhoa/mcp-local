@@ -14,11 +14,18 @@ import type { GraphStore } from "../../repositories/graphStore.js";
  * `health_check` reported "non-git repo or unable to read working tree status" for a repo that was
  * merely dirty.
  */
-export function runGit(repoPath: string, args: string[]): string {
+/**
+ * `timeoutMs` overrides the 5s default for the rare call that legitimately walks history. A whole-log
+ * walk on this workspace already takes ~3.4s, which is close enough to the default that adding
+ * `execFileSync` overhead tipped `lastCommitTimeByFile` into a silent timeout — it returned an empty
+ * map that read as "this repo has no history". Any caller that raises it owes the user a note saying
+ * what an empty result means.
+ */
+export function runGit(repoPath: string, args: string[], timeoutMs = GIT_TIMEOUT_MS): string {
   return execFileSync("git", args, {
     cwd: repoPath,
     encoding: "utf8",
-    timeout: GIT_TIMEOUT_MS,
+    timeout: timeoutMs,
     maxBuffer: GIT_MAX_BUFFER_BYTES,
     windowsHide: true
   }).trim();

@@ -649,6 +649,32 @@ export function findDocCoverageImpl(
   return { rows, total };
 }
 
+// ── Doc mention targets (for git-grounded freshness) ───────────────────
+
+/**
+ * Every (document file, mentioned symbol, symbol file) triple with a RESOLVED symbol.
+ *
+ * `code_call` is excluded on the same ground MCP-ISSUE-049 settled for staleness: an identifier
+ * scraped from inside a fenced sample is not the document describing that symbol, so a code sample
+ * should not make a document look out of date.
+ */
+export function listDocMentionTargetsImpl(
+  db: Database.Database,
+  repoId: string
+): { docFilePath: string; symbolName: string; symbolFilePath: string }[] {
+  return db
+    .prepare(
+      `
+      select distinct d.file_path as docFilePath, s.name as symbolName, s.file_path as symbolFilePath
+      from doc_mentions dm
+      inner join docs d on d.repo_id = dm.repo_id and d.doc_id = dm.doc_id
+      inner join symbols s on s.repo_id = dm.repo_id and s.symbol_id = dm.symbol_id
+      where dm.repo_id = ? and dm.symbol_id is not null and dm.mention_type != 'code_call'
+      `
+    )
+    .all(repoId) as { docFilePath: string; symbolName: string; symbolFilePath: string }[];
+}
+
 // ── Doc → doc link graph ───────────────────────────────────────────────
 
 export type DocLinkReport = {

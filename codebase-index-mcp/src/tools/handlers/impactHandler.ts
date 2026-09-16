@@ -8,6 +8,7 @@ import type { StaleWarning } from "../../services/git/gitHelpers.js";
 import { buildCoverageBlock, summarizeEdgeProvenance } from "../../middleware/coverage.js";
 import { isTestPath } from "../../services/indexing/fileFilter.js";
 import { buildCallableHint } from "../../services/analysis/callableHint.js";
+import { findDocsBehindCode } from "../../services/analysis/docFreshness.js";
 import { GraphStore } from "../../repositories/graphStore.js";
 import type { HandlerContext } from "./handlerContext.js";
 
@@ -590,7 +591,7 @@ export function handleQueryGraph(
  * `search` already had, which is also the convention every other read tool here follows.
  */
 export function handleQueryDocs(
-  args: { repoId: string; mode: "search" | "stale" | "coverage" | "drift" | "links"; query?: string; symbolIds?: string[]; filePath?: string; limit: number; maxTokens?: number; minSimilarity?: number; includeSymbols: boolean; includeCodeMentions: boolean; includeArchived?: boolean; contentTypes?: string[]; profile: string },
+  args: { repoId: string; mode: "search" | "stale" | "coverage" | "drift" | "links" | "behind"; query?: string; symbolIds?: string[]; filePath?: string; limit: number; maxTokens?: number; minSimilarity?: number; minDaysBehind?: number; includeSymbols: boolean; includeCodeMentions: boolean; includeArchived?: boolean; contentTypes?: string[]; profile: string },
   ctx: HandlerContext
 ): CallToolResult {
   if (!ctx.constants.DOCS_TOOLS_ENABLED) {
@@ -614,6 +615,29 @@ export function handleQueryDocs(
         ...(dropped > 0 && { truncated: true, resultsDropped: dropped }),
         results,
         ...(matched.length === 0 && { hint: "no documentation matched — ensure the docs lane was indexed for this repo (index_repository with docsMode='on') and try broader query terms." })
+      },
+      profile
+    );
+  }
+
+  if (args.mode === "behind") {
+    const report = findDocsBehindCode(store, args.repoId, {
+      minDaysBehind: args.minDaysBehind,
+      limit: args.limit
+    });
+    return ctx.asText(
+      {
+        repoId: args.repoId,
+        mode: "behind",
+        count: report.total,
+        returned: report.rows.length,
+        ...(report.total > report.rows.length && { droppedByLimit: report.total - report.rows.length }),
+        docsCompared: report.filesCompared,
+        results: report.rows,
+        ...(report.note && { note: report.note }),
+        ...(report.total === 0 && !report.note && {
+          hint: "no document is behind the code it mentions. A doc committed before its code is not proof of staleness either — a typo fix bumps a source file without invalidating prose — so this is a review queue, not a verdict."
+        })
       },
       profile
     );

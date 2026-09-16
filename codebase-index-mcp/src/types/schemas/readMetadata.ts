@@ -55,7 +55,7 @@ export const getFileSummarySchema = z
 export const queryDocsSchema = (MAX_RESULT_LIMIT: number) => z
   .object({
     repoId: z.string().min(1).max(200),
-    mode: z.enum(["search", "stale", "coverage", "drift", "links"]),
+    mode: z.enum(["search", "stale", "coverage", "drift", "links", "behind"]),
     query: z.string().min(1).max(200).optional(),
     symbolIds: z.array(z.string().min(1).max(200)).min(1).max(100).optional(),
     filePath: z.string().min(1).optional(),
@@ -98,6 +98,8 @@ export const queryDocsSchema = (MAX_RESULT_LIMIT: number) => z
      * match, which would already have resolved; below ~0.7 unrelated identifiers start pairing.
      */
     minSimilarity: z.number().min(0.5).max(0.99).optional(),
+    /** mode="behind" only: ignore gaps smaller than this many days (default 1). */
+    minDaysBehind: z.number().int().min(0).max(3650).optional(),
     profile: responseProfileSchema.default("compact")
   })
   .strict()

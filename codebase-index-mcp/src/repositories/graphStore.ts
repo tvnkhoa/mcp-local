@@ -71,7 +71,8 @@ import {
   findStaleDocsImpl,
   findDocCoverageImpl,
   findDriftingDocsImpl,
-  findDocLinksImpl
+  findDocLinksImpl,
+  listDocMentionTargetsImpl
 } from "./docsStore.js";
 import {
   saveRefactorPreviewImpl,
@@ -842,6 +843,10 @@ export class GraphStore {
     total: number;
   } {
     return findStaleDocsImpl(this.db, repoId, symbolIds, includeCodeMentions, limit);
+  }
+
+  listDocMentionTargets(repoId: string): ReturnType<typeof listDocMentionTargetsImpl> {
+    return listDocMentionTargetsImpl(this.db, repoId);
   }
 
   findDocLinks(repoId: string, limit?: number): ReturnType<typeof findDocLinksImpl> {
