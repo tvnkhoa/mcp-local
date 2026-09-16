@@ -2741,3 +2741,28 @@ names** (`find_impact_files` 91, `health_check` 79, `search_symbols` 77), becaus
 tool names the tool. `mode:"drift"` therefore reports only near misses against an existing symbol,
 after filtering naming-convention variants (`find_implementations` vs `findImplementations`) and
 plurals (`contentTypes` vs `contentType`) — 1 218 unresolved → 152 near misses → 23 candidates.
+
+### Stage 3 outcome (2026-09-16) — four shipped, one measured away
+
+| Item | Outcome |
+|---|---|
+| doc→doc link graph, `mode:"links"` | Shipped. 258 links over 107 files, **0 broken**, 33 orphans. Zero broken is the load-bearing number: wrong path resolution would have produced false "broken" everywhere |
+| document lifecycle, `includeArchived` | Shipped. 82 active / 21 archived by path / 4 ADRs `accepted` via the em-dash `**Status**` line. A search for "cheatsheet" returns 0 by default and 5 with `includeArchived` |
+| `mode:"drift"` | Shipped. 1 218 unresolved mentions → 152 near misses → 23 candidates after filtering convention variants and plurals |
+| `mode:"behind"` | Shipped. `mcp-local` 89 docs compared / 57 behind; `codebase-index-mcp` 7 / 4 |
+| registry-noise weighting | **Dropped — the premise did not survive measurement** |
+
+**Why the weighting item was dropped.** The plan asserted that five files at 17%+ of the corpus
+(`mcp-codebase-index-issue-registry.md` alone is 229 KB) would dominate any ranked retrieval, and that
+a weighting or exclusion policy was a prerequisite for ranking work. Measured on actual search
+results, it does not happen: across four probe queries the worst case was **4 of 20 results from one
+file**, with 11–18 distinct files per 20 results, and the 104-row registry topped none of them.
+
+The obvious explanation — that the Stage 3.2 archive filter had already removed three of the five
+offenders — is **also wrong**: concentration is essentially identical with `includeArchived` on and
+off. The actual reason is that FTS5's bm25 normalizes by row length, and a doc row is one short
+heading, so a large file gets more rows but no per-row advantage.
+
+Two theories, both refuted by the same measurement. Recorded so neither is re-proposed. If prose
+sections land (Stage 4) rows get much longer and this should be **re-measured**, not assumed either
+way.
