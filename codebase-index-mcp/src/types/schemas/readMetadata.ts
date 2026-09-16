@@ -55,7 +55,7 @@ export const getFileSummarySchema = z
 export const queryDocsSchema = (MAX_RESULT_LIMIT: number) => z
   .object({
     repoId: z.string().min(1).max(200),
-    mode: z.enum(["search", "stale", "coverage"]),
+    mode: z.enum(["search", "stale", "coverage", "drift"]),
     query: z.string().min(1).max(200).optional(),
     symbolIds: z.array(z.string().min(1).max(200)).min(1).max(100).optional(),
     filePath: z.string().min(1).optional(),
@@ -87,6 +87,12 @@ export const queryDocsSchema = (MAX_RESULT_LIMIT: number) => z
      * which is the axis that matters once a row can hold a whole doc section.
      */
     maxTokens: z.number().int().min(200).max(50_000).optional(),
+    /**
+     * MCP-ISSUE-061 Stage 3, mode="drift" only: how close a symbol name must be to an unresolved
+     * mention before it counts as a probable rename rather than a word in backticks. 1.0 is an exact
+     * match, which would already have resolved; below ~0.7 unrelated identifiers start pairing.
+     */
+    minSimilarity: z.number().min(0.5).max(0.99).optional(),
     profile: responseProfileSchema.default("compact")
   })
   .strict()

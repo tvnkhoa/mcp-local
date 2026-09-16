@@ -590,7 +590,7 @@ export function handleQueryGraph(
  * `search` already had, which is also the convention every other read tool here follows.
  */
 export function handleQueryDocs(
-  args: { repoId: string; mode: "search" | "stale" | "coverage"; query?: string; symbolIds?: string[]; filePath?: string; limit: number; maxTokens?: number; includeSymbols: boolean; includeCodeMentions: boolean; contentTypes?: string[]; profile: string },
+  args: { repoId: string; mode: "search" | "stale" | "coverage" | "drift"; query?: string; symbolIds?: string[]; filePath?: string; limit: number; maxTokens?: number; minSimilarity?: number; includeSymbols: boolean; includeCodeMentions: boolean; contentTypes?: string[]; profile: string },
   ctx: HandlerContext
 ): CallToolResult {
   if (!ctx.constants.DOCS_TOOLS_ENABLED) {
@@ -614,6 +614,36 @@ export function handleQueryDocs(
         ...(dropped > 0 && { truncated: true, resultsDropped: dropped }),
         results,
         ...(matched.length === 0 && { hint: "no documentation matched — ensure the docs lane was indexed for this repo (index_repository with docsMode='on') and try broader query terms." })
+      },
+      profile
+    );
+  }
+
+  if (args.mode === "drift") {
+    // MCP-ISSUE-061 Stage 3. Unresolved mentions were already stored (`symbol_id is null`) and never
+    // read back; this reads them, but only where a near-miss symbol exists — see findDriftingDocsImpl
+    // for why the raw list is dominated by tool names rather than renames.
+    const { rows, total, scanned } = store.findDriftingDocs(
+      args.repoId,
+      args.minSimilarity,
+      args.limit,
+      args.includeCodeMentions
+    );
+    return ctx.asText(
+      {
+        repoId: args.repoId,
+        mode: "drift",
+        count: total,
+        returned: rows.length,
+        ...(total > rows.length && { droppedByLimit: total - rows.length }),
+        unresolvedMentionsScanned: scanned,
+        minSimilarity: args.minSimilarity ?? 0.75,
+        results: rows,
+        ...(total === 0 && {
+          hint: scanned === 0
+            ? "no unresolved doc mentions for this repo — the docs lane may not be indexed (index_repository with docsMode='on')."
+            : `${String(scanned)} unresolved mentions, none close enough to an indexed symbol to look like a rename. Lower minSimilarity to widen, but note most unresolved mentions are tool names, flags and ordinary words in backticks, not drift.`
+        })
       },
       profile
     );

@@ -634,6 +634,144 @@ export function findDocCoverageImpl(
   return { rows, total };
 }
 
+// ── Find drifting docs ─────────────────────────────────────────────────
+
+export type DriftRow = {
+  mentionText: string;
+  mentionType: string;
+  docCount: number;
+  docs: { docId: string; filePath: string; headingPath: string }[];
+  nearestSymbol: { symbolId: string; name: string; kind: string; filePath: string } | null;
+  similarity: number;
+};
+
+/**
+ * `query_docs{ mode:"drift" }` — MCP-ISSUE-061 Stage 3.
+ *
+ * A doc naming an identifier the graph does not have is the central docs-first staleness signal, and
+ * the data was already on disk: `resolveMentionsImpl` leaves a mention it cannot resolve in place
+ * with `symbol_id = null`. Nothing ever read those rows back. (The registry entry for 061 says they
+ * are "discarded" — they are not; they are stored and unread. Corrected here.)
+ *
+ * Reading them raw is useless, which is why this is not a one-line query. On `mcp-local` the most
+ * common unresolved mentions are **MCP tool names** — `find_impact_files` 91 times, `health_check`
+ * 79 — because a doc about a tool names the tool. So are shell flags, env vars, JSON keys and any
+ * English word someone put in backticks. Reporting those as drift would bury the real signal.
+ *
+ * What a rename actually looks like is a NEAR MISS: the doc says `getUserById` and the graph has
+ * `getUserByIdAsync`. So a mention is drift when no symbol carries its name and one carries a very
+ * similar name. `minSimilarity` is the dial; at 1.0 nothing qualifies (that is an exact match, which
+ * would have resolved), and below ~0.7 unrelated identifiers start pairing up.
+ *
+ * `code_call` mentions are excluded by default for the reason MCP-ISSUE-049 settled: an identifier
+ * scraped from inside a fenced sample is not the document asserting anything about that symbol.
+ */
+export function findDriftingDocsImpl(
+  db: Database.Database,
+  repoId: string,
+  minSimilarity = 0.75,
+  limit = DOCS_PAGE_LIMIT,
+  includeCodeMentions = false
+): { rows: DriftRow[]; total: number; scanned: number } {
+  const typeFilter = includeCodeMentions ? "" : "and dm.mention_type != 'code_call'";
+
+  const unresolved = db
+    .prepare(
+      `
+      select dm.mention_text as mentionText, dm.mention_type as mentionType,
+             count(distinct dm.doc_id) as docCount
+      from doc_mentions dm
+      where dm.repo_id = ? and dm.symbol_id is null and length(dm.mention_text) >= 4 ${typeFilter}
+      group by dm.mention_text, dm.mention_type
+      order by docCount desc
+      `
+    )
+    .all(repoId) as { mentionText: string; mentionType: string; docCount: number }[];
+
+  if (unresolved.length === 0) return { rows: [], total: 0, scanned: 0 };
+
+  const symbols = db
+    .prepare(`select symbol_id as symbolId, name, kind, file_path as filePath from symbols where repo_id = ? and kind != 'module'`)
+    .all(repoId) as { symbolId: string; name: string; kind: string; filePath: string }[];
+
+  // Bucket by first character so each mention compares against a slice, not the whole symbol table.
+  // Levenshtein over every (mention, symbol) pair on a large repo is the difference between a tool
+  // that answers and one that times out.
+  const byFirstChar = new Map<string, typeof symbols>();
+  for (const sym of symbols) {
+    const key = sym.name.charAt(0).toLowerCase();
+    const bucket = byFirstChar.get(key);
+    if (bucket) bucket.push(sym);
+    else byFirstChar.set(key, [sym]);
+  }
+
+  const docsFor = db.prepare(
+    `
+    select distinct d.doc_id as docId, d.file_path as filePath, d.heading_path as headingPath
+    from doc_mentions dm
+    inner join docs d on d.repo_id = dm.repo_id and d.doc_id = dm.doc_id
+    where dm.repo_id = ? and dm.mention_text = ? and dm.symbol_id is null
+    limit 10
+    `
+  );
+
+  /**
+   * `find_implementations` vs `findImplementations` is the SAME name in two conventions — an MCP
+   * tool and the function behind it — not a rename. It scores 0.95 and was the single most common
+   * result before this guard, 17 documents deep. Collapsing separators and case before comparing
+   * removes that whole class, which is the difference between a drift report worth reading and a
+   * list of naming conventions.
+   */
+  const conventionKey = (name: string) => name.replace(/[_-]/g, "").toLowerCase();
+  /**
+   * …and `contentTypes` vs `contentType`, or `sourceFiles` vs `sourceFile`, is a plural, which is how
+   * a doc refers to a collection of a thing that exists. Also not drift. Stripping a trailing `s`
+   * on top of the convention key removed three of the five highest-scoring rows on this repo.
+   */
+  const stem = (name: string) => conventionKey(name).replace(/s$/, "");
+
+  const rows: DriftRow[] = [];
+  for (const m of unresolved) {
+    const bucket = byFirstChar.get(m.mentionText.charAt(0).toLowerCase()) ?? [];
+    const mentionStem = stem(m.mentionText);
+    let best: (typeof symbols)[number] | null = null;
+    let bestScore = 0;
+    for (const sym of bucket) {
+      if (stem(sym.name) === mentionStem) {
+        // Same identifier, different casing/separators. Not drift — and not a candidate either,
+        // because a closer-but-genuinely-different name should not win by default.
+        best = null;
+        bestScore = 0;
+        break;
+      }
+      const score = stringSimilarity(m.mentionText, sym.name);
+      // 1.0 would mean an exact match, which `resolveMentions` would already have linked.
+      if (score > bestScore && score < 1) {
+        bestScore = score;
+        best = sym;
+      }
+    }
+    if (!best || bestScore < minSimilarity) continue;
+
+    const docs = docsFor.all(repoId, m.mentionText) as { docId: string; filePath: string; headingPath: string }[];
+    // A mention whose doc rows have been pruned cannot be cited, and an uncitable finding is not
+    // one worth reporting.
+    if (docs.length === 0) continue;
+
+    rows.push({
+      mentionText: m.mentionText,
+      mentionType: m.mentionType,
+      docCount: m.docCount,
+      docs,
+      nearestSymbol: { symbolId: best.symbolId, name: best.name, kind: best.kind, filePath: best.filePath },
+      similarity: Math.round(bestScore * 100) / 100
+    });
+  }
+
+  rows.sort((a, b) => b.similarity - a.similarity || b.docCount - a.docCount);
+  return { rows: rows.slice(0, Math.max(1, limit)), total: rows.length, scanned: unresolved.length };
+}
+
 // ── String similarity helpers (used by resolveMentions) ────────────────
 
 export function stringSimilarity(a: string, b: string): number {

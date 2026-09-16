@@ -69,7 +69,8 @@ import {
   resolveMentionsImpl,
   searchDocsImpl,
   findStaleDocsImpl,
-  findDocCoverageImpl
+  findDocCoverageImpl,
+  findDriftingDocsImpl
 } from "./docsStore.js";
 import {
   saveRefactorPreviewImpl,
@@ -839,6 +840,15 @@ export class GraphStore {
     total: number;
   } {
     return findStaleDocsImpl(this.db, repoId, symbolIds, includeCodeMentions, limit);
+  }
+
+  findDriftingDocs(
+    repoId: string,
+    minSimilarity?: number,
+    limit?: number,
+    includeCodeMentions?: boolean
+  ): ReturnType<typeof findDriftingDocsImpl> {
+    return findDriftingDocsImpl(this.db, repoId, minSimilarity, limit, includeCodeMentions);
   }
 
   findDocCoverage(
