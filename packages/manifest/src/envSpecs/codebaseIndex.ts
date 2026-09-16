@@ -41,8 +41,29 @@ export function codebaseIndexEnv(root: string): readonly EnvField[] {
     },
 
     // --- Docs lane ----------------------------------------------------------------
-    { name: "CODEBASE_INDEX_DOCS_INDEXING_ENABLED", required: false, default: "false", section: "Docs lane (off by default)" },
-    { name: "CODEBASE_INDEX_DOCS_TOOLS_ENABLED", required: false, default: "false", section: "Docs lane (off by default)" },
+    //
+    // MCP-ISSUE-061(i): both shipped `default: "false"`, so a docs-first workspace got no docs lane
+    // until it opted in twice — and `default` (unlike `codeDefault`) is written into the operator's
+    // ~/.claude.json by the installer, so the opt-out was frozen at install time rather than being a
+    // value the server could later change its mind about. Now on by default and NOT pinned: an
+    // operator who wants the lane off sets the var explicitly.
+    //
+    // This does not reach a config the installer already wrote. An existing install carrying
+    // `CODEBASE_INDEX_DOCS_INDEXING_ENABLED=false` keeps it until that line is removed by hand.
+    {
+      name: "CODEBASE_INDEX_DOCS_INDEXING_ENABLED",
+      required: false,
+      codeDefault: "true",
+      section: "Docs lane",
+      note: "false skips markdown during indexing. On by default since MCP-ISSUE-061."
+    },
+    {
+      name: "CODEBASE_INDEX_DOCS_TOOLS_ENABLED",
+      required: false,
+      codeDefault: "true",
+      section: "Docs lane",
+      note: "false makes query_docs refuse with INVALID_PARAMS. On by default since MCP-ISSUE-061."
+    },
 
     // --- Telemetry ----------------------------------------------------------------
     { name: "CODEBASE_INDEX_TELEMETRY_ENABLED", required: false, default: "false", section: "Telemetry (off by default)" },

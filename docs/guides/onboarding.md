@@ -24,8 +24,9 @@ fresh clone cannot build a server before the packages exist.
 
 ### If `npm run setup` fails on `better-sqlite3`
 
-Windows needs Visual Studio C++ Build Tools to compile it. Install those, or switch
-`codebase-index-mcp` to the JS-only SQLite backend. Nothing else in the workspace needs a native
+Windows needs Visual Studio C++ Build Tools to compile it. Install those — there is no alternative
+backend to switch to. Every SQLite call site in `codebase-index-mcp` imports `better-sqlite3`
+directly, with no driver abstraction (MCP-ISSUE-061(j)). Nothing else in the workspace needs a native
 build.
 
 ---

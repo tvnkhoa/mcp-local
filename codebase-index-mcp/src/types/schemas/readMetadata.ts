@@ -72,12 +72,21 @@ export const queryDocsSchema = (MAX_RESULT_LIMIT: number) => z
      */
     includeCodeMentions: z.boolean().default(false),
     /**
-     * MCP-ISSUE-058(d): which doc section kinds mode="search" may answer with. Defaults to prose and
-     * headings — a search for a type name that answers with a mermaid diagram matching two unrelated
-     * words is a false positive, and `mode:"stale"` already counts prose only, so the two modes used
-     * to disagree about what a mention is. Pass ["code_block"] (or all three) to widen.
+     * MCP-ISSUE-058(d): which doc section kinds mode="search" may answer with. A search for a type
+     * name that answers with a mermaid diagram matching two unrelated words is a false positive.
+     *
+     * MCP-ISSUE-061: 058(d) narrowed the default to ["heading","prose"], but nothing writes `prose`
+     * — the indexer emits `heading` and `code_block` only. The default therefore excluded 44% of the
+     * corpus and included a kind with zero rows. Default is all three until a prose writer lands;
+     * pass ["heading"] to get the strict behaviour 058(d) intended.
      */
     contentTypes: z.array(z.enum(["heading", "prose", "code_block"])).min(1).max(3).optional(),
+    /**
+     * MCP-ISSUE-061(d): no response in this server was size-bounded, and `profile` does not bound one
+     * — `nano`/`compact` only drop nullish keys. `limit` caps the row COUNT; this caps the payload,
+     * which is the axis that matters once a row can hold a whole doc section.
+     */
+    maxTokens: z.number().int().min(200).max(50_000).optional(),
     profile: responseProfileSchema.default("compact")
   })
   .strict()

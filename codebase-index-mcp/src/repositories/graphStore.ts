@@ -824,32 +824,40 @@ export class GraphStore {
   findStaleDocs(
     repoId: string,
     symbolIds: string[],
-    includeCodeMentions = false
+    includeCodeMentions = false,
+    limit?: number
   ): {
-    docId: string;
-    filePath: string;
-    headingPath: string;
-    text: string | null;
-    mentionText: string;
-    mentionType: string;
-    symbolName: string | null;
-  }[] {
-    return findStaleDocsImpl(this.db, repoId, symbolIds, includeCodeMentions);
+    rows: {
+      docId: string;
+      filePath: string;
+      headingPath: string;
+      text: string | null;
+      mentionText: string;
+      mentionType: string;
+      symbolName: string | null;
+    }[];
+    total: number;
+  } {
+    return findStaleDocsImpl(this.db, repoId, symbolIds, includeCodeMentions, limit);
   }
 
   findDocCoverage(
     repoId: string,
-    filePath: string
+    filePath: string,
+    limit?: number
   ): {
-    symbolId: string;
-    name: string;
-    kind: string;
-    line: number;
-    signature: string | null;
-    hasDocs: boolean;
-    mentionCount: number;
-  }[] {
-    return findDocCoverageImpl(this.db, repoId, filePath);
+    rows: {
+      symbolId: string;
+      name: string;
+      kind: string;
+      line: number;
+      signature: string | null;
+      hasDocs: boolean;
+      mentionCount: number;
+    }[];
+    total: number;
+  } {
+    return findDocCoverageImpl(this.db, repoId, filePath, limit);
   }
 
   // countUnresolvedEdgesForFile → impactAnalyzer.ts

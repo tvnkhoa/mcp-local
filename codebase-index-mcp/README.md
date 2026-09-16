@@ -202,8 +202,8 @@ Refactor tools: `refactor_replace_preview` and `refactor_replace_apply` support 
 |---|---|---|---|
 | `CODEBASE_INDEX_ALLOWED_ROOTS` | **yes** | `<workspace-root>` | The ONLY required var. Comma-separated absolute paths the server may index. Use the exact path `list_repositories` reports — changing drive-letter casing or slash style causes allowlist rejection. |
 | `CODEBASE_INDEX_DB_PATH` | no | `<workspace-root>/mcp-local-index-central.db` | Where the code graph is stored — one file holds every repo, scoped by repoId. Four names were in play before S-40; this is the one actually in use. Note that the server's own fallback when this is unset is the RELATIVE path ./codebase-index.db, which lands wherever the process was started, so leaving it set is what keeps the index in one place. |
-| `CODEBASE_INDEX_DOCS_INDEXING_ENABLED` | no | `false` | — |
-| `CODEBASE_INDEX_DOCS_TOOLS_ENABLED` | no | `false` | — |
+| `CODEBASE_INDEX_DOCS_INDEXING_ENABLED` | no | `true` *(code)* | false skips markdown during indexing. On by default since MCP-ISSUE-061. |
+| `CODEBASE_INDEX_DOCS_TOOLS_ENABLED` | no | `true` *(code)* | false makes query_docs refuse with INVALID_PARAMS. On by default since MCP-ISSUE-061. |
 | `CODEBASE_INDEX_TELEMETRY_ENABLED` | no | `false` | — |
 | `CODEBASE_INDEX_TELEMETRY_SAMPLE_RATE` | no | `1` *(code)* | Ratio 0–1. Only meaningful when telemetry is enabled. |
 | `CODEBASE_INDEX_WATCH_AUTO_START` | no | `false` | Watchless by default, per the workspace's MCP hard-mode policy. |

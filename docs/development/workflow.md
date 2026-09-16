@@ -274,7 +274,7 @@ whether a secret is *present*, not what it is.
 | `generate:check` red | a hand-edit to a generated file, or a manifest change without `generate:all` |
 | `tier/unknown-package` | a new package with no row in `packages/cli/src/guards/rules.ts` |
 | `codebase-index` rejects a path | pass the **exact** `repoPath` string `list_repositories` returned — do not change drive-letter casing or slash style |
-| `better-sqlite3` fails to build | install VS C++ Build Tools, or switch to the JS-only SQLite backend |
+| `better-sqlite3` fails to build | install VS C++ Build Tools — there is no fallback backend (MCP-ISSUE-061(j)) |
 
 ---
 

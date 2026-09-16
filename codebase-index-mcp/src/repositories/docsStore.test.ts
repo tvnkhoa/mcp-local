@@ -56,17 +56,17 @@ test("re-indexing a doc replaces its mentions instead of accumulating them", () 
   // Pass 1: the pre-fix build, which labelled a fenced `Parse(` as prose.
   upsertDocsImpl(conn, [DOC]);
   upsertDocMentionsImpl(conn, [mention("backtick", 1.0)]);
-  assert.equal(findStaleDocsImpl(conn, "hub", ["sym-parse"]).length, 1, "precondition: the false positive exists");
+  assert.equal(findStaleDocsImpl(conn, "hub", ["sym-parse"]).total, 1, "precondition: the false positive exists");
 
   // Pass 2: the corrected build re-indexes the same file and labels it `code_call`.
   replaceDocsForFileImpl(conn, "hub", FILE, [DOC], [mention("code_call", 0.5)]);
 
   const types = conn.prepare("select mention_type from doc_mentions").all() as { mention_type: string }[];
   assert.deepEqual(types.map((r) => r.mention_type), ["code_call"], "the legacy row is gone, not shadowed");
-  assert.equal(findStaleDocsImpl(conn, "hub", ["sym-parse"]).length, 0, "the false positive clears on re-index");
+  assert.equal(findStaleDocsImpl(conn, "hub", ["sym-parse"]).total, 0, "the false positive clears on re-index");
 
   // Asserted as a pair: a count of zero is equally satisfied by having broken the lane outright.
-  assert.equal(findStaleDocsImpl(conn, "hub", ["sym-parse"], true).length, 1, "the mention is still reachable on opt-in");
+  assert.equal(findStaleDocsImpl(conn, "hub", ["sym-parse"], true).total, 1, "the mention is still reachable on opt-in");
 });
 
 test("a mention dropped from a doc does not survive the re-index", () => {
@@ -77,7 +77,7 @@ test("a mention dropped from a doc does not survive the re-index", () => {
   // The doc is edited and no longer mentions the symbol at all.
   replaceDocsForFileImpl(conn, "hub", FILE, [DOC], []);
 
-  assert.equal(findStaleDocsImpl(conn, "hub", ["sym-parse"], true).length, 0);
+  assert.equal(findStaleDocsImpl(conn, "hub", ["sym-parse"], true).total, 0);
 });
 
 test("nothing inside a fenced block reaches the prose signal", () => {

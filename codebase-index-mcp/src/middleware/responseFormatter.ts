@@ -186,6 +186,43 @@ export function asText(
   };
 }
 
+/**
+ * MCP-ISSUE-061(d): nothing in this server bounded a response. `responseBytes` above is telemetry —
+ * measured, written to stderr, never enforced — and `profile` does not help, because `nano` and
+ * `compact` differ from `standard` only by dropping nullish keys (`strip` in `asText`): no field
+ * selection, no row cap, no text truncation. `get_file_context` got an explicit edge budget after
+ * returning 68 663 characters; the docs lane never got the equivalent, and it is the lane about to
+ * start storing whole section bodies.
+ *
+ * Results arrive in relevance order, so the tail is the right thing to drop. Returns what fits plus
+ * the number discarded, and the caller is expected to disclose that number — a silently shortened
+ * list is the defect this exists to prevent, one field over.
+ *
+ * The estimate is `chars/4`, the same approximation the workspace's token accounting uses. It is
+ * rough on both sides; it is a budget, not a guarantee.
+ */
+export const DEFAULT_RESULT_BUDGET_TOKENS = 10_000;
+
+export function applyResultBudget<T>(
+  results: readonly T[],
+  maxTokens: number = DEFAULT_RESULT_BUDGET_TOKENS
+): { kept: T[]; dropped: number } {
+  const budgetChars = Math.max(1, maxTokens) * 4;
+  const kept: T[] = [];
+  let used = 0;
+
+  for (const row of results) {
+    const cost = JSON.stringify(row)?.length ?? 0;
+    // Always keep the first row: returning zero results because one row is oversized reads as
+    // "nothing matched", which is the misreport this whole issue is about.
+    if (kept.length > 0 && used + cost > budgetChars) break;
+    kept.push(row);
+    used += cost;
+  }
+
+  return { kept, dropped: results.length - kept.length };
+}
+
 export function asArgsRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value)
     ? (value as Record<string, unknown>)

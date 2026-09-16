@@ -146,7 +146,7 @@ src/index.ts                          # MCP tool dispatch
 
 **Smoke test requires build:** `node scripts/smoke-test.mjs` runs `dist/index.js`, not source. Always `npm run build` first.
 
-**better-sqlite3 on Windows:** Requires Visual Studio C++ Build Tools. If native build fails, install VS Build Tools or switch to the JS-only SQLite backend.
+**better-sqlite3 on Windows:** Requires Visual Studio C++ Build Tools. If the native build fails, install VS Build Tools — there is no fallback. Every SQLite call site imports `better-sqlite3` directly; the server has no driver abstraction and no JS-only backend (MCP-ISSUE-061(j)).
 
 ## Installation, Skills & Doctor
 

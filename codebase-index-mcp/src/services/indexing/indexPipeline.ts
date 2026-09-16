@@ -202,7 +202,23 @@ export async function runIndexPipeline(store: GraphStore, input: RunIndexInput):
         c.symbolsUpserted += extracted.symbols.length;
         c.edgesUpserted += extracted.edges.length;
         if (includeDocs && extracted.docs) {
-          c.docsUpserted += extracted.docs.length;
+          // MCP-ISSUE-061(g): this counted `extracted.docs.length` — the array the parser produced,
+          // not the rows the write produced. `upsertDocsImpl` writes `on conflict(repo_id, doc_id)
+          // do update`, and docIds collide (061(f)): a repeated heading text in one file, or two
+          // fences under one heading whose first 50 characters agree. Every collision was reported
+          // as two rows and stored as one, so the counter that exists to make the docs lane
+          // auditable was the one hiding the loss.
+          //
+          // Every docId hashes a string beginning with this file's path, so a collision is always
+          // intra-file and counting distinct ids here is exactly the row count.
+          const distinctDocIds = new Set(extracted.docs.map((d) => d.docId));
+          c.docsUpserted += distinctDocIds.size;
+          const collided = extracted.docs.length - distinctDocIds.size;
+          if (collided > 0) {
+            indexWarn(
+              `[index-docs-collision] ${relativePath}: ${String(collided)} of ${String(extracted.docs.length)} doc nodes share a docId and will overwrite each other`
+            );
+          }
         }
         if (includeDocs && extracted.mentions) {
           c.mentionsUpserted += extracted.mentions.length;

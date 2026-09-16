@@ -10,7 +10,14 @@ Workaround · Enhancement proposal. Filed here so the MCP server team can triage
 
 ## Index
 
-**30 entries — 29 resolved, 1 re-opened (`054`).** The last 8 (`052`–`059`) were filed by the
+**31 entries — 29 resolved, 1 re-opened (`054`), 1 open (`061`).** `061` is the 2026-09-16 docs-lane
+sweep: the docs lane stores **no prose rows**, so `query_docs{mode:"search"}` answers from heading text
+alone — a regression introduced by the 2026-08-10 `contentTypes` fix, which added a `prose` slot no
+writer populates and dropped `code_block` from the default. Eleven defects, plus **four claims that
+were investigated and refuted** — read that table before re-proposing a vector-lane shutdown or a
+tool-count consolidation on token grounds; both rest on numbers that do not hold.
+
+The last 8 (`052`–`059`) were filed by the
 2026-08-05 consumer sweep — see *Sweep 2026-08-05* near the end of this file, which also records the
 independent re-verification that **every one of the 042–051 fixes held**, and lists the symptoms that
 turned out to be consumer misuse so they are not re-triaged as defects. All eight were reproduced and
@@ -2552,3 +2559,175 @@ response bytes and pipe backpressure before anything else.
 ### Still open after this change
 
 The concurrent-dispatch hang — mechanism **not** established, and three of the audit's hypotheses argue against fixing it blind (it may be cold-cache, host-side, or in the response write path, and a queue would make two of those worse). A diagnosis harness is designed but not run. `rename_assist`'s 17–22% preview recall. The missing `approvalToken` on `refactor_symbol_migration` / `change_value_representation` — the annotation is now correct, which is what protects a host, but these two still preview-and-apply in one round trip where the `refactor_replace_*` trio requires an HMAC. The remaining P2 extractor work (receiver-typed calls, object-literal arrow attribution, `@mcp/*` package links, DI-bound dispatch, config-file indexing). And the `noUnusedLocals` gap that let (a) survive: `impactRenameTrace.ts` and `impactRepoSummaries.ts` still carry the unused import, left in place deliberately as evidence until each is resolved on its merits.
+
+---
+
+## MCP-ISSUE-061 — the docs lane stores no prose, and the 2026-08-10 `contentTypes` fix narrowed the default search to headings alone
+
+- **Status:** **OPEN** — filed 2026-09-16 from a four-track discovery sweep run for a docs-first
+  consumer. Eleven defects confirmed; **four further claims were investigated and REFUTED** and are
+  recorded below so they are not re-proposed.
+- **Scope:** `mcp-local`, `wec.communication-hub`, `wec.rag`, `wec.social-ads` (measured); the fixes
+  are all in `codebase-index-mcp`.
+
+### (a) `contentType:"prose"` is advertised, is the default filter, and no code path writes it
+
+`query_docs{mode:"search"}` defaults to `contentTypes: ["heading","prose"]` (`docsStore.ts:353`) and
+the value is advertised in both schema sites (`tools/readMetadata.ts:136`,
+`types/schemas/readMetadata.ts:80`) and in the golden contract. But `parseMarkdownFile` writes only
+`"code_block"` (`markdownParser.ts:49`) and `"heading"` (`:79`, `:100`). Prose lines are scraped for
+mentions at `:90` and the line itself is **discarded**.
+
+Measured on the central index — every repo, all content types:
+
+```
+heading     2 259
+code_block  1 810
+prose           0
+```
+
+`mcp-local` alone: 1 378 heading, 294 code_block, 0 prose. Mean heading `text` length **35 chars**,
+max 192. So the default search answers from titles.
+
+Repro: `query_docs(repoId:"mcp-local", mode:"search", query:"forbidden token list per-dialect
+decision")` — a phrase present verbatim in the prose of `.claude/rules/db-guardrails.md` — returns
+`count: 0`.
+
+**This is a regression introduced by a fix, not an original gap.** The `contentTypes` filter shipped
+2026-08-10 against MCP-ISSUE-058(d) (over-fuzzy search; a mermaid `code_block` answering a type-name
+query) and is recorded earlier in this file. Its default of `["heading","prose"]` assumed a `prose`
+row existed. Net effect: `code_block` (1 810 rows) left the default, `prose` (0 rows) joined it, and
+the searchable corpus fell from 4 069 rows to 2 259 rows of headings. The precision bug was traded for
+a recall collapse, invisible because the assertion made at the time — "the mermaid block no longer
+answers" — was true.
+
+**The LIKE fallback does not rescue it.** `docsStore.ts:376-383` triggers when FTS is unavailable *or*
+matched nothing, but it applies the **same** `content_type in (...)` filter as the FTS branch
+(`:364` vs `:381`), so it cannot reach `code_block` either.
+
+**Cheapest correct fix:** add `code_block` to the default at `docsStore.ts:353`. One line, no
+migration, restores 1 810 rows immediately. The full fix is a prose writer.
+
+### (b) Three spellings of the third content type, and a fourth dead mention type
+
+`DocRecord.contentType` is `"heading" | "code_block" | "paragraph"` (`types/index.ts:306`); the store
+default and the tool enum say `"prose"`; the writer emits neither. `"prose"` is the one in the
+published contract, so it should win and the type union is what changes.
+`DocMentionRecord.mentionType` likewise declares `"heading"` (`types/index.ts:325`), never emitted —
+`extractMentionsFromText` produces only `backtick` and `filepath`.
+
+### (c) `mode:"coverage"` reports a page length as a total — and the cap is live
+
+`findDocCoverageImpl` hardcodes `limit 200` (`docsStore.ts:579`) while the tool advertises `limit` up
+to 500, and sets no truncation flag, so `count` in the envelope is the post-cap length. The graph
+holds **381** non-module symbols, so this fires on real files today. `findStaleDocsImpl` has the same
+hardcoded cap (`:534`) but is currently theoretical — the maximum mentions for any single symbol
+corpus-wide is 49. Same defect class as `detect_changes.changedFileCount` under MCP-ISSUE-060; the fix
+should take the same shape (true count + `returned` + `droppedByLimit`).
+
+### (d) There is no response size budget anywhere in the server
+
+No byte, character or token cap exists in `src/middleware/`. `responseBytes`
+(`responseFormatter.ts:94`, `:175`) is telemetry — measured, logged to stderr, never enforced. And
+`profile` does almost nothing for `query_docs`: `responseFormatter.ts:163` shows `nano`/`compact`
+differ from `standard` **only** by dropping nullish keys — no field selection, no row cap, no text
+truncation. `get_file_context` received an edge budget after returning 68 663 chars; the docs lane
+never got the equivalent. **This blocks any prose work**: 500 prose sections would leave as one
+unbounded string.
+
+### (e) Indented fences are not detected
+
+`markdownParser.ts:34` tests `line.startsWith` against a triple-backtick prefix. The `mcp-local`
+corpus contains **28 fences indented inside list items**. For those `inCodeBlock` never toggles, so
+the body is scanned as prose and any `#` comment inside becomes a real heading — the exact failure
+MCP-ISSUE-049 was opened to fix, still present for the indented case.
+
+### (f) docId collisions overwrite silently
+
+Code-block docIds are `hash(headingPath + ":code:" + content.slice(0,50))` (`markdownParser.ts:43`);
+heading docIds are `hash(filePath + "#" + headingText)` (`:70`, `:73`), and `currentHeadingPath` holds
+only the **last** heading, not an ancestry path, so a repeated heading text in one file collides
+regardless of level. Collisions resolve as silent overwrites through
+`on conflict(repo_id, doc_id) do update set text = excluded.text` (`docsStore.ts:12`).
+
+**Measured, not assumed:** reimplementing the hash over the real corpus yields **3 code_block + 2
+heading collisions = 5 rows lost of ~1 672 = 0.3%**, all three code collisions inside
+`.claude/commands/mcp-effectiveness-eval.md`. A stable docId needs a line number, and neither
+`DocRecord` nor the `docs` table has a line column.
+
+### (g) `docsUpserted` counts the array, not the rows
+
+`indexPipeline.ts:204-206` increments by `extracted.docs.length` at the funnel, before the write, so
+the collisions in (f) are absorbed rather than visible.
+
+### (h) The LIKE fallback has no relevance order, and the re-sort breaks past 99
+
+`docsStore.ts:381` orders by `rowid` — insertion order. And the client-side re-sort that restores FTS
+rank (`:438-441`) assigns missing ids a sort key of `99`, which misorders any result set larger than
+99.
+
+### (i) Both docs flags default to `false`
+
+`CODEBASE_INDEX_DOCS_INDEXING_ENABLED` and `CODEBASE_INDEX_DOCS_TOOLS_ENABLED` are both `false`
+(`src/index.ts:74-75`), so a fresh clone has no docs lane at all and must opt in twice. For a
+docs-first consumer this is the single highest-leverage default in the server.
+
+### (j) Three documents describe a JS-only SQLite backend that has never existed
+
+`CLAUDE.md:149`, `docs/development/workflow.md:277` and `docs/guides/onboarding.md:26-28` all tell the
+reader to "switch to the JS-only SQLite backend" if the native build fails. All ~25 SQLite touch
+points import `better-sqlite3` directly and unconditionally (`graphStore.ts:21`, `schema.ts:15`,
+`docsStore.ts:1`, ...). There is no driver abstraction and no reference to `node:sqlite`, `sql.js` or
+wasm anywhere in `src/`.
+
+### (k) `isLikelyMinified` applies to markdown — latent, not currently firing
+
+`fileFilter.ts:253-259` skips any file over 10 KB whose average line length exceeds 500, and markdown
+is not carved out. A document written one long line per paragraph would be dropped with no error.
+**Measured: 0 of 107 files exceed it** — the longest average line length in the corpus is 101.7, a 5x
+margin. Recorded as a latent hazard, not as work.
+
+---
+
+### REFUTED — four claims that did not survive verification
+
+Recorded because each was argued from real evidence and each is wrong. Do not re-propose them.
+
+| Claim | Why it is wrong |
+|---|---|
+| "Disable `CODEBASE_INDEX_VECTOR_ENABLED`: the lane costs 27 860 ms per run and resolves nothing." | The 27 860 ms is the **pre-fix** figure from MCP-ISSUE-039, whose header reads `Status: FIXED 2026-07-30`. Post-fix `callResolveMs` is **4 485**, below the 4 953 pre-regression baseline; the lane now self-limits after 100 lookups with no hit. That entry already decided the question — *"Neither disabled (it can pay where unresolved tokens are in-repo near-misses) nor unbounded."* Disabling would also silently regress `search_symbols`: `symbolSearchQuery.ts:88` pads thin FTS result sets with vector neighbours behind `isVectorEnabled()`. |
+| "The 43-tool `tools/list` costs ~11 174 tokens of context per session." | Only for a client that requests full schemas. Full schemas are 44 695 chars (~11 174 tok); the **name-only listing is 1 698 chars (~425 tok)**, a 26x difference, and Claude Code defers tool schemas by default. Real fixed overhead is ~15 127 tok, of which **97% is this repo's own markdown** (`mcp-hard-mode.md` alone is 53.5%), not the tool surface. Any plan to consolidate the tool count on token grounds is attacking 2.8%. |
+| "docId collisions are the dominant shape in this workspace's docs." | 0.3% — see (f). The reasoning (consecutive shell blocks under one `## Commands` heading sharing their first 50 chars) is sound; the frequency was asserted, not counted. |
+| "The corpus is uniformly LF" / "the corpus is uniformly CRLF." | Both wrong. **3 CRLF files, 104 LF.** But `core.autocrlf=true`, so a fresh Windows clone produces CRLF throughout. The parser survives today only because `.trim()` incidentally strips the carriage return on headings (`markdownParser.ts:70`, `:80`); **prose lines are trimmed nowhere**, so a prose chunker that stores raw lines would persist a trailing carriage return on every line and pollute FTS tokens. A bug that a prose lane would *introduce*. |
+
+### Corpus measurements that ground any fix here
+
+From a full survey of `mcp-local` (107 `.md`, 1.31 MB, ~336 K tokens; 0 `.mdx`), cross-checked against
+`wec.communication-hub` (82) and `api-testing-studio` (86):
+
+```
+1 327 headings   H1 108 - H2 747 - H3 455 - H4+ 17   -> a 2-3 level tree covers 99%
+1 374 sections   median 640 ch (~160 tok) - p90 2 149 ch (~540 tok) - <=2 KB = 90%
+  320 tables     73/107 files - 2 925 rows = 21% of all content lines - median 7 rows
+  311 fences     49% carry no language tag (procedural recipes and ASCII diagrams, not code)
+                 40 (12.9%) exceed the 500-char store limit; at 1 000 only 6 (1.9%) would
+  319 links      all relative .md - 0 wiki-links, 0 external URLs, 0 reference-style, 0 anchored
+   39 files      have YAML front matter; ALL are Claude Code artifacts. 0 of the 47 under docs/
+```
+
+Two consequences for design, both of which overturned a plausible first plan:
+
+- **Front matter cannot carry doc metadata here.** Zero coverage on `docs/`. The real convention is
+  body-level `**Status** — Accepted` (em-dash, not colon) in all four ADRs,
+  `**Risk**`/`**Complexity**`/`**Rollback**` in 32 files, `Status` as a table column in 11, and
+  supersession expressed structurally as `docs/archive/superseded/` plus a link table in
+  `docs/archive/README.md`. `owner`/`tags` appear nowhere in any form.
+- **A doc-to-doc link extractor needs one parser, not five.** CommonMark inline links with three
+  resolution rules — bare relative (133 = 43%), parent-relative (140 = 44%), dot-slash (46 = 13%) —
+  plus dropping the 23 pure-anchor links. It must be fence-aware or it will harvest the 28 indented
+  fences and 320 tables full of link-shaped example text.
+
+Mention resolution, for scale on (c) and on any drift reporting: `wec.social-ads` resolves 127 of 984
+backtick mentions (13%), `wec.rag` 112 of 268 (42%). `resolveMentionsImpl` **discards** every mention
+it cannot resolve, so the majority signal — a doc naming an identifier that no longer exists — is
+computed and thrown away.

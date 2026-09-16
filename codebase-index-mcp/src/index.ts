@@ -71,8 +71,9 @@ const AUTO_WATCH_REPOS = autoWatchReposFromEnv();
 const watchConfig = watchConfigFromEnv();
 const TELEMETRY_ENABLED = booleanFromEnv("CODEBASE_INDEX_TELEMETRY_ENABLED", false);
 const TELEMETRY_SAMPLE_RATE = ratioFromEnvName("CODEBASE_INDEX_TELEMETRY_SAMPLE_RATE", 1);
-const DOCS_INDEXING_ENABLED = booleanFromEnv("CODEBASE_INDEX_DOCS_INDEXING_ENABLED", false);
-const DOCS_TOOLS_ENABLED = booleanFromEnv("CODEBASE_INDEX_DOCS_TOOLS_ENABLED", false);
+// MCP-ISSUE-061(i): both defaulted false, so a fresh clone had no docs lane and `query_docs` refused.
+const DOCS_INDEXING_ENABLED = booleanFromEnv("CODEBASE_INDEX_DOCS_INDEXING_ENABLED", true);
+const DOCS_TOOLS_ENABLED = booleanFromEnv("CODEBASE_INDEX_DOCS_TOOLS_ENABLED", true);
 const LLM_ENABLED = booleanFromEnv("CODEBASE_INDEX_LLM_ENABLED", false);
 const REFACTOR_STRICT_APPROVAL = booleanFromEnv("CODEBASE_INDEX_REFACTOR_STRICT_APPROVAL", false);
 const REFACTOR_APPROVAL_SECRET = stringFromEnv("CODEBASE_INDEX_REFACTOR_APPROVAL_SECRET", "");

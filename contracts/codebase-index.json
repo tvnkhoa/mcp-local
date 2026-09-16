@@ -1465,7 +1465,7 @@
         "additionalProperties": false,
         "properties": {
           "contentTypes": {
-            "description": "mode=search only: which doc section kinds may answer. Defaults to heading+prose; pass code_block to include fenced samples and diagrams.",
+            "description": "mode=search only: which doc section kinds may answer. Defaults to all three. NOTE: no indexer writes 'prose' yet (MCP-ISSUE-061), so today the default is effectively heading+code_block; pass ['heading'] to exclude fenced samples and diagrams.",
             "items": {
               "enum": [
                 "heading",
@@ -1492,6 +1492,12 @@
           "limit": {
             "maximum": 500,
             "minimum": 1,
+            "type": "integer"
+          },
+          "maxTokens": {
+            "description": "mode=search only: approximate payload budget for results (default 10000). Caps response SIZE where limit caps row COUNT; drops lowest-ranked results and reports truncated + resultsDropped.",
+            "maximum": 50000,
+            "minimum": 200,
             "type": "integer"
           },
           "mode": {

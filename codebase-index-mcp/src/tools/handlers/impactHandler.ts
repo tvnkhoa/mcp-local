@@ -1,6 +1,6 @@
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { McpError, ErrorCode } from "@modelcontextprotocol/sdk/types.js";
-import { resolveResponseProfile } from "../../middleware/responseFormatter.js";
+import { applyResultBudget, resolveResponseProfile } from "../../middleware/responseFormatter.js";
 import { fileIndexedNote } from "../../middleware/inputGuards.js";
 import { validateReadOnlyGraphSql, validateAllowedTables } from "../../middleware/sqliteGuardrails.js";
 import { buildStaleWarning, getRepoStaleness, collectDirtyFiles, countCommitsBehind } from "../../services/git/gitHelpers.js";
@@ -584,7 +584,7 @@ export function handleQueryGraph(
  * `search` already had, which is also the convention every other read tool here follows.
  */
 export function handleQueryDocs(
-  args: { repoId: string; mode: "search" | "stale" | "coverage"; query?: string; symbolIds?: string[]; filePath?: string; limit: number; includeSymbols: boolean; includeCodeMentions: boolean; contentTypes?: string[]; profile: string },
+  args: { repoId: string; mode: "search" | "stale" | "coverage"; query?: string; symbolIds?: string[]; filePath?: string; limit: number; maxTokens?: number; includeSymbols: boolean; includeCodeMentions: boolean; contentTypes?: string[]; profile: string },
   ctx: HandlerContext
 ): CallToolResult {
   if (!ctx.constants.DOCS_TOOLS_ENABLED) {
@@ -594,30 +594,45 @@ export function handleQueryDocs(
   const profile = resolveResponseProfile(args.profile as Parameters<typeof resolveResponseProfile>[0]);
 
   if (args.mode === "search") {
-    const results = store.searchDocs(args.repoId, args.query!, args.limit, args.includeSymbols, args.contentTypes ?? null);
+    const matched = store.searchDocs(args.repoId, args.query!, args.limit, args.includeSymbols, args.contentTypes ?? null);
+    // MCP-ISSUE-061(d): `results` carries whole doc sections and nothing bounded it. The budget is
+    // applied after ranking, so what survives is the most relevant prefix.
+    const { kept: results, dropped } = applyResultBudget(matched, args.maxTokens);
     return ctx.asText(
       {
         repoId: args.repoId,
         mode: "search",
         query: args.query,
-        count: results.length,
+        count: matched.length,
+        returned: results.length,
+        ...(dropped > 0 && { truncated: true, resultsDropped: dropped }),
         results,
-        ...(results.length === 0 && { hint: "no documentation matched — ensure the docs lane was indexed for this repo (index_repository with docsMode='on') and try broader query terms." })
+        ...(matched.length === 0 && { hint: "no documentation matched — ensure the docs lane was indexed for this repo (index_repository with docsMode='on') and try broader query terms." })
       },
       profile
     );
   }
 
   if (args.mode === "stale") {
-    const results = store.findStaleDocs(args.repoId, args.symbolIds!, args.includeCodeMentions);
+    // MCP-ISSUE-061(c): `count` used to be `results.length` after an undisclosed 200-row cap, i.e. a
+    // page length presented as a total. It is now the true row count, with `returned` and
+    // `droppedByLimit` describing the page — the shape MCP-ISSUE-060 settled for `detect_changes`.
+    const { rows: results, total } = store.findStaleDocs(
+      args.repoId,
+      args.symbolIds!,
+      args.includeCodeMentions,
+      args.limit
+    );
     return ctx.asText(
       {
         repoId: args.repoId,
         mode: "stale",
         symbolIds: args.symbolIds,
-        count: results.length,
+        count: total,
+        returned: results.length,
+        ...(total > results.length && { droppedByLimit: total - results.length }),
         results,
-        ...(results.length === 0 && {
+        ...(total === 0 && {
           hint: args.includeCodeMentions
             ? "no doc mentions reference these symbols — the docs lane may not be indexed for this repo (index_repository with docsMode='on'), or nothing documents them."
             : "no PROSE doc mentions reference these symbols — the docs lane may not be indexed (index_repository with docsMode='on'), nothing documents them, or they are only named inside fenced code samples (retry with includeCodeMentions=true)."
@@ -627,16 +642,21 @@ export function handleQueryDocs(
     );
   }
 
-  const results = store.findDocCoverage(args.repoId, args.filePath!);
+  const { rows: results, total } = store.findDocCoverage(args.repoId, args.filePath!, args.limit);
   return ctx.asText(
     {
       repoId: args.repoId,
       mode: "coverage",
       filePath: args.filePath,
-      count: results.length,
+      count: total,
+      returned: results.length,
+      ...(total > results.length && { droppedByLimit: total - results.length }),
+      // `documented` counts the RETURNED page, not the file — saying otherwise would repeat 061(c)
+      // one field over. `documentedScope` makes that explicit rather than leaving it inferable.
       documented: results.filter((r) => r.hasDocs).length,
+      ...(total > results.length && { documentedScope: "returned page only" }),
       results,
-      ...(results.length === 0 && { hint: "no symbols found for this file — check the path against list_repositories/get_file_summary, and that the file was indexed." })
+      ...(total === 0 && { hint: "no symbols found for this file — check the path against list_repositories/get_file_summary, and that the file was indexed." })
     },
     profile
   );

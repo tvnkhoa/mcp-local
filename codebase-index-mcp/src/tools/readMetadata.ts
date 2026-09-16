@@ -133,7 +133,8 @@ export function buildReadMetadataTools(deps: CodebaseIndexDeps): AnyToolDefiniti
         limit: { type: "integer", minimum: 1, maximum: limits.maxResultLimit },
         includeSymbols: { type: "boolean", description: "mode=search only: also return matching code symbols (contentType='symbol'). Off by default." },
         includeCodeMentions: { type: "boolean", description: "mode=stale only: also count identifiers scraped from fenced code samples (mentionType='code_call'). Off by default — a doc that merely contains a call is not documentation of the callee." },
-        contentTypes: { type: "array", items: { type: "string", enum: ["heading", "prose", "code_block"] }, minItems: 1, maxItems: 3, description: "mode=search only: which doc section kinds may answer. Defaults to heading+prose; pass code_block to include fenced samples and diagrams." },
+        contentTypes: { type: "array", items: { type: "string", enum: ["heading", "prose", "code_block"] }, minItems: 1, maxItems: 3, description: "mode=search only: which doc section kinds may answer. Defaults to all three. NOTE: no indexer writes 'prose' yet (MCP-ISSUE-061), so today the default is effectively heading+code_block; pass ['heading'] to exclude fenced samples and diagrams." },
+        maxTokens: { type: "integer", minimum: 200, maximum: 50000, description: "mode=search only: approximate payload budget for results (default 10000). Caps response SIZE where limit caps row COUNT; drops lowest-ranked results and reports truncated + resultsDropped." },
         // MCP-ISSUE-049: `profile` was accepted by the zod schema and never advertised, so a client
         // honouring `additionalProperties: false` had to reject a parameter the tool supports.
         // Four more tools have the same gap (get_folder_summary, find_entry_points,

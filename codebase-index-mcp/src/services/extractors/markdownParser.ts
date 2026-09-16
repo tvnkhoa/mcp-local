@@ -31,10 +31,18 @@ export function parseMarkdownFile(input: {
     // every following line, and fed its backticked identifiers into the prose signal. In a repo
     // whose docs are largely command samples that is a steady source of the same false positive
     // this issue is about.
-    if (line.startsWith("```")) {
+    //
+    // MCP-ISSUE-061(e): the test was `line.startsWith`, so a fence INDENTED inside a list item never
+    // toggled `inCodeBlock` — 28 of them in this workspace. Their bodies were scanned as prose and
+    // any `# comment` inside them still became a heading, i.e. 049 was fixed only for the
+    // column-zero case. CommonMark allows up to three leading spaces before a fence; more than that
+    // is an indented code block, which this parser does not track, so trimming the whole run is the
+    // closer approximation of the two.
+    const fenceLine = line.trimStart();
+    if (fenceLine.startsWith("```")) {
       if (!inCodeBlock) {
         inCodeBlock = true;
-        codeBlockLang = line.slice(3).trim().toLowerCase();
+        codeBlockLang = fenceLine.slice(3).trim().toLowerCase();
         codeBlockContent = "";
       } else {
         inCodeBlock = false;

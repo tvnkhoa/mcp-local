@@ -2,6 +2,38 @@ import type Database from "better-sqlite3";
 import type { DocRecord, DocMentionRecord } from "../types/index.js";
 import { indexLog, indexWarn } from "../services/indexing/indexProgress.js";
 
+/**
+ * MCP-ISSUE-061(c): `findStaleDocsImpl` and `findDocCoverageImpl` each hardcoded `limit 200` while
+ * `query_docs` advertises `limit` up to 500, and neither reported that it had truncated — so `count`
+ * in the envelope was a page length presented as a total. Measured live: this repo's graph holds 381
+ * non-module symbols, so `mode:"coverage"` was silently dropping a third of them.
+ *
+ * Both now take the caller's limit and return `{ rows, total }`, the shape MCP-ISSUE-060 settled for
+ * `detect_changes.changedFileCount`. This constant is only the fallback for a caller that passes
+ * none; it is not a ceiling.
+ */
+const DOCS_PAGE_LIMIT = 200;
+
+type StaleDocRow = {
+  docId: string;
+  filePath: string;
+  headingPath: string;
+  text: string | null;
+  mentionText: string;
+  mentionType: string;
+  symbolName: string | null;
+};
+
+type DocCoverageRow = {
+  symbolId: string;
+  name: string;
+  kind: string;
+  line: number;
+  signature: string | null;
+  hasDocs: boolean;
+  mentionCount: number;
+};
+
 // ── Docs CRUD ──────────────────────────────────────────────────────────
 
 export function upsertDocsImpl(db: Database.Database, docs: DocRecord[]): void {
@@ -330,11 +362,21 @@ export function searchDocsImpl(
   buildIntentFtsQuery: (q: string) => string,
   includeSymbols = false,
   /**
-   * MCP-ISSUE-058(d): which section kinds may answer. Default excludes `code_block`, because a prose
-   * search that answers with a mermaid diagram is not answering the question that was asked: the
-   * filed case returned exactly one hit for "ConversationNote" — a flowchart matching only the words
-   * "pinned note" — while `search_regex` over the same 53 doc files correctly returned 0. `mode:"stale"`
-   * already counts prose only, so the two modes disagreed about what a mention is.
+   * MCP-ISSUE-058(d): which section kinds may answer. The filed case returned exactly one hit for
+   * "ConversationNote" — a mermaid flowchart matching only the words "pinned note" — while
+   * `search_regex` over the same 53 doc files correctly returned 0.
+   *
+   * MCP-ISSUE-061: that fix set the default to `["heading","prose"]`, and **no code path writes
+   * `prose`** — `parseMarkdownFile` emits `heading` and `code_block` only, scraping prose lines for
+   * mentions and discarding the text. So the default named one kind that does not exist and dropped
+   * one that does: the searchable corpus fell from 4069 rows to 2259 rows of heading text averaging
+   * 35 characters, and a phrase search against real document bodies returned 0. The LIKE fallback
+   * does not rescue it — it applies this same filter.
+   *
+   * `code_block` is back in the default until a prose writer exists. That reopens 058(d)'s diagram
+   * noise, which is the lesser defect: a search that occasionally answers with a flowchart beats one
+   * that cannot reach 44% of the corpus. Narrow it again — to `["heading","prose"]` — once
+   * `parseMarkdownFile` actually emits prose sections.
    */
   contentTypes: readonly string[] | null = null
 ): {
@@ -350,7 +392,8 @@ export function searchDocsImpl(
   let docIds: string[] = [];
   let usedFts = false;
   const desiredLimit = Math.max(1, limit);
-  const allowedTypes = contentTypes && contentTypes.length > 0 ? contentTypes : ["heading", "prose"];
+  const allowedTypes =
+    contentTypes && contentTypes.length > 0 ? contentTypes : ["heading", "prose", "code_block"];
   const typePlaceholders = allowedTypes.map(() => "?").join(", ");
 
   try {
@@ -508,20 +551,26 @@ export function findStaleDocsImpl(
   db: Database.Database,
   repoId: string,
   symbolIds: string[],
-  includeCodeMentions = false
-): {
-  docId: string;
-  filePath: string;
-  headingPath: string;
-  text: string | null;
-  mentionText: string;
-  mentionType: string;
-  symbolName: string | null;
-}[] {
-  if (symbolIds.length === 0) return [];
+  includeCodeMentions = false,
+  limit = DOCS_PAGE_LIMIT
+): { rows: StaleDocRow[]; total: number } {
+  if (symbolIds.length === 0) return { rows: [], total: 0 };
   const ph = symbolIds.map(() => "?").join(",");
   const typeFilter = includeCodeMentions ? "" : "and dm.mention_type != 'code_call'";
-  return db
+  const where = `where dm.repo_id = ? and dm.symbol_id in (${ph}) ${typeFilter}`;
+
+  const { total } = db
+    .prepare(
+      `
+      select count(*) as total
+      from doc_mentions dm
+      inner join docs d on d.repo_id = dm.repo_id and d.doc_id = dm.doc_id
+      ${where}
+      `
+    )
+    .get(repoId, ...symbolIds) as { total: number };
+
+  const rows = db
     .prepare(
       `
       select dm.doc_id as docId, d.file_path as filePath, d.heading_path as headingPath,
@@ -529,20 +578,14 @@ export function findStaleDocsImpl(
       from doc_mentions dm
       inner join docs d on d.repo_id = dm.repo_id and d.doc_id = dm.doc_id
       left join symbols s on s.repo_id = dm.repo_id and s.symbol_id = dm.symbol_id
-      where dm.repo_id = ? and dm.symbol_id in (${ph}) ${typeFilter}
+      ${where}
       order by d.file_path, d.heading_path
-      limit 200
+      limit ?
       `
     )
-    .all(repoId, ...symbolIds) as {
-    docId: string;
-    filePath: string;
-    headingPath: string;
-    text: string | null;
-    mentionText: string;
-    mentionType: string;
-    symbolName: string | null;
-  }[];
+    .all(repoId, ...symbolIds, Math.max(1, limit)) as StaleDocRow[];
+
+  return { rows, total };
 }
 
 // ── Find doc coverage ──────────────────────────────────────────────────
@@ -550,17 +593,16 @@ export function findStaleDocsImpl(
 export function findDocCoverageImpl(
   db: Database.Database,
   repoId: string,
-  filePath: string
-): {
-  symbolId: string;
-  name: string;
-  kind: string;
-  line: number;
-  signature: string | null;
-  hasDocs: boolean;
-  mentionCount: number;
-}[] {
-  return db
+  filePath: string,
+  limit = DOCS_PAGE_LIMIT
+): { rows: DocCoverageRow[]; total: number } {
+  const scope = `where s.repo_id = ? and replace(s.file_path, char(92), '/') = replace(?, char(92), '/') and s.kind != 'module'`;
+
+  const { total } = db
+    .prepare(`select count(*) as total from symbols s ${scope}`)
+    .get(repoId, filePath) as { total: number };
+
+  const rows = db
     .prepare(
       `
       select
@@ -573,13 +615,13 @@ export function findDocCoverageImpl(
         count(dm.doc_id) as mentionCount
       from symbols s
       left join doc_mentions dm on dm.repo_id = s.repo_id and dm.symbol_id = s.symbol_id
-      where s.repo_id = ? and replace(s.file_path, char(92), '/') = replace(?, char(92), '/') and s.kind != 'module'
+      ${scope}
       group by s.symbol_id, s.name, s.kind, s.line, s.signature
       order by s.line
-      limit 200
+      limit ?
       `
     )
-    .all(repoId, filePath) as {
+    .all(repoId, filePath, Math.max(1, limit)) as {
     symbolId: string;
     name: string;
     kind: string;
@@ -588,6 +630,8 @@ export function findDocCoverageImpl(
     hasDocs: boolean;
     mentionCount: number;
   }[];
+
+  return { rows, total };
 }
 
 // ── String similarity helpers (used by resolveMentions) ────────────────
