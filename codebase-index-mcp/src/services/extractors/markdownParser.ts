@@ -90,12 +90,12 @@ export function parseMarkdownFile(input: {
       });
 
       // Extract mentions from heading text
-      extractMentionsFromText(text, docId, input.repoId, mentions);
+      extractMentionsFromText(text, docId, input.repoId, mentions, input.filePath);
       continue;
     }
 
     // Prose line: backticks + file paths.
-    extractMentionsFromText(line, hashOf(currentHeadingPath), input.repoId, mentions);
+    extractMentionsFromText(line, hashOf(currentHeadingPath), input.repoId, mentions, input.filePath);
   }
 
   // Always add file-level doc node
@@ -118,7 +118,9 @@ export function parseMarkdownFile(input: {
  * - Backticks: `functionName`, `ClassName`, etc.
  * - File paths: src/graphStore.ts, codebase-index-mcp/src/index.ts
  */
-function extractMentionsFromText(text: string, docId: string, repoId: string, mentions: DocMentionRecord[]): void {
+function extractMentionsFromText(text: string, docId: string, repoId: string, mentions: DocMentionRecord[], sourceFilePath: string): void {
+  extractDocLinks(text, docId, repoId, mentions, sourceFilePath);
+
   // Backticks: `symbol`
   const backtickRegex = /`([a-zA-Z_][a-zA-Z0-9_]*)`/g;
   let match;
@@ -196,6 +198,77 @@ function extractMentionsFromCode(code: string, docId: string, repoId: string, me
         mentionText: funcName
       });
     }
+  }
+}
+
+/**
+ * Doc → doc edges. MCP-ISSUE-061 Stage 3.
+ *
+ * `search_regex` can find a string in a document; it cannot tell you which documents point at this
+ * one, which are orphaned, or which links are broken. Those are set operations over an index, and
+ * they are the part of a docs-first workflow a text search will never cover.
+ *
+ * The corpus decided the scope, so this is deliberately narrow. Measured over `mcp-local`'s 107
+ * markdown files: **319 relative `.md` links, 0 wiki-links, 0 external URLs, 0 reference-style
+ * definitions, 0 autolinks, and 0 links carrying a `#fragment`.** So one CommonMark inline matcher
+ * and three resolution rules cover everything that exists — bare relative (133 links), `../` (140)
+ * and `./` (46) — and support for the forms this workspace does not use would be dead code.
+ *
+ * Two exclusions that are not arbitrary:
+ * - **Pure `#anchor` links (23 of them) are intra-document** and would make every file its own
+ *   neighbour.
+ * - **Anything inside a fence never reaches here.** The caller routes fenced lines to
+ *   `extractMentionsFromCode`, which is why link-shaped text in the 311 code samples does not become
+ *   an edge. Markdown tables DO reach here, and that is correct — `docs/archive/README.md` encodes
+ *   its supersession map as a table of links.
+ *
+ * `mentionText` is the resolved repo-relative path with forward slashes, so it can be matched
+ * against `docs.file_path` (which stores the platform separator) after the same normalization.
+ */
+function extractDocLinks(
+  text: string,
+  docId: string,
+  repoId: string,
+  mentions: DocMentionRecord[],
+  sourceFilePath: string
+): void {
+  // CommonMark inline link. The target stops at whitespace or `)` so a title (`[x](y "t")`) is
+  // dropped rather than folded into the path.
+  const linkRegex = /\[[^\]]*\]\(\s*([^)\s]+)/g;
+  const sourceDir = sourceFilePath.replace(/\\/g, "/").split("/").slice(0, -1);
+
+  let match: RegExpExecArray | null;
+  while ((match = linkRegex.exec(text)) !== null) {
+    const rawTarget = match[1];
+
+    if (rawTarget.startsWith("#")) continue; // intra-document anchor
+    if (/^[a-z][a-z0-9+.-]*:/i.test(rawTarget)) continue; // http:, mailto:, etc.
+    if (!/\.mdx?($|#|\?)/i.test(rawTarget)) continue; // only doc→doc edges
+
+    const target = rawTarget.split("#")[0].split("?")[0];
+    const segments = target.startsWith("/")
+      ? target.slice(1).split("/")
+      : [...sourceDir, ...target.split("/")];
+
+    // Resolve `.` and `..` without touching the filesystem — the link may be broken, and reporting
+    // that is the point.
+    const resolved: string[] = [];
+    for (const seg of segments) {
+      if (seg === "" || seg === ".") continue;
+      if (seg === "..") resolved.pop();
+      else resolved.push(seg);
+    }
+    const resolvedPath = resolved.join("/");
+    if (resolvedPath === "") continue;
+
+    mentions.push({
+      repoId,
+      docId,
+      symbolId: null, // a doclink targets a document, not a symbol — it never resolves to one
+      mentionType: "doclink",
+      confidence: 1.0,
+      mentionText: resolvedPath
+    });
   }
 }
 

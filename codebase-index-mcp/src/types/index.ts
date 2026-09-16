@@ -325,7 +325,7 @@ export type DocMentionRecord = {
    * `ConversationLoopCorrelationCodec.Parse`. Kept, because it is genuinely useful for "where is this
    * illustrated", but excluded from staleness by default.
    */
-  mentionType: "backtick" | "heading" | "filepath" | "code_call";
+  mentionType: "backtick" | "heading" | "filepath" | "code_call" | "doclink";
   confidence: number; // 1.0, 0.7, 0.5
   mentionText: string; // the actual text matched, e.g., "GraphStore"
 };

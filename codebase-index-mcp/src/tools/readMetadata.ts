@@ -118,7 +118,7 @@ export function buildReadMetadataTools(deps: CodebaseIndexDeps): AnyToolDefiniti
 
   const queryDocs = defineTool({
     name: "query_docs",
-    description: "Unified docs tool. mode=search: full-text search across indexed documentation sections (requires query); mode=stale: find docs that mention changed symbols (requires symbolIds); mode=coverage: show which exported symbols are documented (requires filePath); mode=drift: CANDIDATES for doc staleness — docs naming an identifier the graph does not have, paired with the closest symbol name that does exist. Review them; a near miss is often a rename but can also be a sibling (callEdgesResolved vs callEdgesUnresolved). Naming-convention and plural variants are already filtered out. Tune with minSimilarity (default 0.75). All modes return the same envelope: { repoId, mode, count, results }. Requires docs lane enabled. includeSymbols=true (mode=search only) additionally pads the result set with matching CODE symbols — off by default, because a docs search answering with symbols is rarely what was asked. mode=stale counts PROSE mentions only; includeCodeMentions=true also counts identifiers appearing inside fenced code samples. mode=search matches headings and prose by default — pass contentTypes to include code_block sections (diagrams, fenced samples).",
+    description: "Unified docs tool. mode=search: full-text search across indexed documentation sections (requires query); mode=stale: find docs that mention changed symbols (requires symbolIds); mode=coverage: show which exported symbols are documented (requires filePath); mode=drift: CANDIDATES for doc staleness — docs naming an identifier the graph does not have, paired with the closest symbol name that does exist. Review them; a near miss is often a rename but can also be a sibling (callEdgesResolved vs callEdgesUnresolved). Naming-convention and plural variants are already filtered out. Tune with minSimilarity (default 0.75). mode=links: the doc-to-doc link graph — broken links, orphan documents and the most-linked hubs. Most modes return { repoId, mode, count, results }. Requires docs lane enabled. includeSymbols=true (mode=search only) additionally pads the result set with matching CODE symbols — off by default, because a docs search answering with symbols is rarely what was asked. mode=stale counts PROSE mentions only; includeCodeMentions=true also counts identifiers appearing inside fenced code samples. mode=search matches headings and prose by default — pass contentTypes to include code_block sections (diagrams, fenced samples).",
     input: schemas.queryDocsSchema(limits.maxResultLimit),
     inputSchema: {
       type: "object",
@@ -126,7 +126,7 @@ export function buildReadMetadataTools(deps: CodebaseIndexDeps): AnyToolDefiniti
       required: ["repoId", "mode"],
       properties: {
         repoId: { type: "string" },
-        mode: { type: "string", enum: ["search", "stale", "coverage", "drift"] },
+        mode: { type: "string", enum: ["search", "stale", "coverage", "drift", "links"] },
         query: { type: "string" },
         symbolIds: { type: "array", items: { type: "string" }, minItems: 1, maxItems: 100 },
         filePath: { type: "string" },

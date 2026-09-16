@@ -590,7 +590,7 @@ export function handleQueryGraph(
  * `search` already had, which is also the convention every other read tool here follows.
  */
 export function handleQueryDocs(
-  args: { repoId: string; mode: "search" | "stale" | "coverage" | "drift"; query?: string; symbolIds?: string[]; filePath?: string; limit: number; maxTokens?: number; minSimilarity?: number; includeSymbols: boolean; includeCodeMentions: boolean; contentTypes?: string[]; profile: string },
+  args: { repoId: string; mode: "search" | "stale" | "coverage" | "drift" | "links"; query?: string; symbolIds?: string[]; filePath?: string; limit: number; maxTokens?: number; minSimilarity?: number; includeSymbols: boolean; includeCodeMentions: boolean; contentTypes?: string[]; profile: string },
   ctx: HandlerContext
 ): CallToolResult {
   if (!ctx.constants.DOCS_TOOLS_ENABLED) {
@@ -614,6 +614,29 @@ export function handleQueryDocs(
         ...(dropped > 0 && { truncated: true, resultsDropped: dropped }),
         results,
         ...(matched.length === 0 && { hint: "no documentation matched — ensure the docs lane was indexed for this repo (index_repository with docsMode='on') and try broader query terms." })
+      },
+      profile
+    );
+  }
+
+  if (args.mode === "links") {
+    // MCP-ISSUE-061 Stage 3: broken links, orphans and hubs — set operations over the doclink edges
+    // the parser emits, which is the part of docs-first `search_regex` cannot reach.
+    const report = store.findDocLinks(args.repoId, args.limit);
+    return ctx.asText(
+      {
+        repoId: args.repoId,
+        mode: "links",
+        linkCount: report.linkCount,
+        docFileCount: report.docFileCount,
+        brokenCount: report.broken.length,
+        orphanCount: report.orphans.length,
+        broken: report.broken,
+        orphans: report.orphans,
+        hubs: report.hubs,
+        ...(report.linkCount === 0 && {
+          hint: "no doc-to-doc links found — re-index with docsMode='on' to populate them (doclink edges are written at index time, so an index built before this feature has none)."
+        })
       },
       profile
     );

@@ -634,6 +634,81 @@ export function findDocCoverageImpl(
   return { rows, total };
 }
 
+// ── Doc → doc link graph ───────────────────────────────────────────────
+
+export type DocLinkReport = {
+  linkCount: number;
+  docFileCount: number;
+  broken: { fromFilePath: string; target: string }[];
+  orphans: string[];
+  hubs: { filePath: string; inboundCount: number }[];
+};
+
+/**
+ * `query_docs{ mode:"links" }` — MCP-ISSUE-061 Stage 3.
+ *
+ * Three questions a text search cannot answer, from one pass over the `doclink` mentions the parser
+ * now emits: which links point at a document that is not there, which documents nothing points at,
+ * and which documents everything points at.
+ *
+ * Paths are compared after normalizing the separator, because `docs.file_path` stores the platform's
+ * (backslashes on Windows) while a resolved link is always forward-slashed. `findDocCoverageImpl`
+ * already had to do this; the convention is the comparison, not the storage.
+ *
+ * An orphan is **not** a defect on its own — a README, a skill template or an entry point is
+ * legitimately unlinked. It is a list to read, which is why it is returned rather than counted.
+ */
+export function findDocLinksImpl(
+  db: Database.Database,
+  repoId: string,
+  limit = DOCS_PAGE_LIMIT
+): DocLinkReport {
+  const norm = `replace(d.file_path, char(92), '/')`;
+
+  const links = db
+    .prepare(
+      `
+      select distinct ${norm} as fromFilePath, dm.mention_text as target
+      from doc_mentions dm
+      inner join docs d on d.repo_id = dm.repo_id and d.doc_id = dm.doc_id
+      where dm.repo_id = ? and dm.mention_type = 'doclink'
+      `
+    )
+    .all(repoId) as { fromFilePath: string; target: string }[];
+
+  const docFiles = db
+    .prepare(`select distinct ${norm} as filePath from docs d where d.repo_id = ?`)
+    .all(repoId) as { filePath: string }[];
+
+  const known = new Set(docFiles.map((f) => f.filePath));
+  const inbound = new Map<string, number>();
+  const broken: { fromFilePath: string; target: string }[] = [];
+
+  for (const link of links) {
+    if (link.target === link.fromFilePath) continue; // a self-link is not an edge
+    if (known.has(link.target)) {
+      inbound.set(link.target, (inbound.get(link.target) ?? 0) + 1);
+    } else {
+      broken.push(link);
+    }
+  }
+
+  const orphans = docFiles.map((f) => f.filePath).filter((f) => !inbound.has(f));
+  const hubs = [...inbound.entries()]
+    .map(([filePath, inboundCount]) => ({ filePath, inboundCount }))
+    .sort((a, b) => b.inboundCount - a.inboundCount)
+    .slice(0, 10);
+
+  const cap = Math.max(1, limit);
+  return {
+    linkCount: links.length,
+    docFileCount: docFiles.length,
+    broken: broken.slice(0, cap),
+    orphans: orphans.slice(0, cap),
+    hubs
+  };
+}
+
 // ── Find drifting docs ─────────────────────────────────────────────────
 
 export type DriftRow = {

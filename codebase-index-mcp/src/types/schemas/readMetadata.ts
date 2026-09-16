@@ -55,7 +55,7 @@ export const getFileSummarySchema = z
 export const queryDocsSchema = (MAX_RESULT_LIMIT: number) => z
   .object({
     repoId: z.string().min(1).max(200),
-    mode: z.enum(["search", "stale", "coverage", "drift"]),
+    mode: z.enum(["search", "stale", "coverage", "drift", "links"]),
     query: z.string().min(1).max(200).optional(),
     symbolIds: z.array(z.string().min(1).max(200)).min(1).max(100).optional(),
     filePath: z.string().min(1).optional(),
