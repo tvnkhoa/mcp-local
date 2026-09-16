@@ -66,36 +66,17 @@ Output minimums for re-index response:
 
 ## Watch Usage Playbook (Feature Lifecycle)
 
-Use watch only as a short-lived accelerator while implementing or debugging a feature. Do not keep watchers running by default.
-
-1. Before coding: run `index_repository` once to establish a clean baseline.
-2. During active feature work: run `watch_repo` start for the target repo to capture rapid local edits.
-3. During verification: use normal MCP analysis tools (`detect_changes`, `find_impact_files`, `get_symbol_context_pack`) while watch is active.
-4. After feature is done (PR-ready or context switch): run `watch_repo` stop immediately.
-5. If no active implementation/debug session exists: keep watch disabled and rely on on-demand `index_repository`.
-
-Practical intent:
-1. Watch ON = short implementation/debug window.
-2. Watch OFF = normal operation, review, and release flow.
-
-Anti-pattern (avoid):
-1. Starting watch and leaving it running after feature work is done.
-2. Keeping watch active during PR review, release checklist, or non-coding analysis sessions.
-3. Starting watch without a clear implementation/debug objective for the current repo.
-4. Using watch as a substitute for explicit `index_repository` baseline checkpoints.
+`watch_repo` is a short-lived accelerator for an active implementation or debug session, nothing else.
+Establish a baseline with `index_repository`, start the watcher, and **stop it the moment the feature
+is PR-ready or you switch context**. Keep it off for review, release checklists and any non-coding
+analysis; on-demand `index_repository` covers those. A watcher left running after the work is done is
+the failure mode this section exists to prevent.
 
 ## MCP Naming Convention (Policy vs Runtime)
 
-Policy in this file uses short tool names. At execution time, Claude Code namespaces
-every MCP tool as `mcp__<serverKey>__<toolName>`:
-
-- Codebase index tools → `mcp__codebase-index__<tool>` (e.g. `mcp__codebase-index__search_symbols`).
-- PostgreSQL tools → `mcp__postgres-mcp__<tool>` (e.g. `mcp__postgres-mcp__run_read_query`, `mcp__postgres-mcp__health_check`).
-
-So a short name like `search_symbols` in this document means the runtime tool
-`mcp__codebase-index__search_symbols`.
-
-Reference: execution playbooks live in `codebase-index-mcp/.claude/skills/mcp-first-codebase-operations/SKILL.md`.
+Short names here map to `mcp__<serverKey>__<toolName>` at runtime — `search_symbols` means
+`mcp__codebase-index__search_symbols`. Execution playbooks:
+`codebase-index-mcp/.claude/skills/mcp-first-codebase-operations/SKILL.md`.
 
 ## Hard Rules
 1. For codebase analysis tasks, use MCP codebase-index tools first.
@@ -112,13 +93,8 @@ Reference: execution playbooks live in `codebase-index-mcp/.claude/skills/mcp-fi
 
 ## Per-Turn Compliance Self-Check (Mandatory)
 
-Before any baseline tool call, verify and satisfy:
-1. Discovery gate already passed.
-2. Scope gate already passed.
-3. Confidence gate already passed, or fallback condition is explicitly met.
-4. If fallback is used, issue entry update is prepared in the same turn.
-5. No duplicate MCP query with equivalent intent beyond rewrite limit.
-6. Tool names in execution plan map to concrete MCP runtime names.
+Before any baseline tool call: the three *Enforcement Gates* have passed, or a *Fallback Condition* is
+explicitly met and the registry entry is being written in the same turn.
 
 ## Tool Selection Guide
 
@@ -133,8 +109,8 @@ Before any baseline tool call, verify and satisfy:
 | Grep source by pattern / discover an identifier token | `search_regex` | MCP-native replacement for `grep_search`: returns matches with context + enclosing symbol. `scanAll=true` for non-code text (json/yaml). Use to find exact symbol names before `search_symbols`. |
 | Full context for one symbol | `get_symbol_context_pack` | Single call: candidates + callers + callees + change-context |
 | Callers/callees drill-down | `get_change_context` | Use `profile: "compact"`, callerDepth ≤ 2 |
-| Call chain traversal | `get_call_chain` | Must use callable symbolId (function/method), not container symbol |
-| Execution sub-graph | `trace_execution_flow` | Use callable symbolId from `search_symbols` or `find_symbol_at_line` |
+| Call chain traversal | `get_call_chain` | Needs a callable symbolId; a container returns an empty chain plus a `hint` naming its callables |
+| Execution sub-graph | `trace_execution_flow` | Same: a container entry returns a `hint` with callable candidates |
 | Who uses this file | `find_impact_files` view `"files"` | Blast radius grouped by module |
 | What calls into this file | `find_impact_files` view `"surface"` | Caller surface per symbol |
 | File structure + exports | `get_file_summary` | Shows exports, imports, importedBy |
@@ -193,7 +169,6 @@ Confidence interpretation standard:
 ## Blocked Behaviors
 1. Starting with `grep_search`, `file_search`, or large `read_file` ranges before MCP gates complete.
 2. Using natural-language phrases as `search_symbols` query (will always return 0 results).
-3. Using `trace_execution_flow` or `get_call_chain` with class-level symbolId (returns empty graph).
 4. Repeating equivalent MCP queries more than 2 rewrites for the same symbol intent.
 5. Collecting extra context after evidence is already sufficient.
 6. Performing fallback without creating/updating an issue entry.
@@ -202,138 +177,61 @@ Confidence interpretation standard:
 
 ## One-Page Quick Reference
 
-Compressed index of the flows below — scan this, then read the matching flow for the exact calls.
+The call sequence for each goal. Tool arguments are in each tool's own schema — read them there.
 Absorbed from `MCP-FIRST-CHEATSHEET.md` (archived 2026-08-03; this file is now the single home for
 MCP-first policy and its playbooks).
 
-| Goal | Runbook | Detailed flow |
-|---|---|---|
-| Analyze a symbol's impact | `search_symbols` → `get_symbol_context_pack` → `find_impact_files` → `get_symbol_source` | *Standard flow* |
-| Orient in a new area | `get_folder_summary` → `get_file_summary` → `find_impact_files(view:"surface")` | *Orientation flow* |
-| Understand how a method propagates | `search_symbols` → `trace_execution_flow` → `get_call_chain` | *Execution trace flow* |
-| Debug from a stack trace | `find_symbol_at_line` → `trace_execution_flow` or `get_change_context` | *Stack trace debug flow* |
-| Re-index safely | `health_check` → `list_repositories` → `index_repository` → `health_check` | *Re-index Request Flow* |
-| Gate a new feature / refactor | `detect_circular_dependencies` → `dead_code_scan` | *Health gate flow* |
-| Rename or bulk-edit inside MCP | `rename_assist(emitPreview:true)` → `refactor_replace_apply` → `refactor_replace_rollback` | *Refactor / rename flow* |
-| Validate a Postgres change | `mcp__postgres-mcp__health_check` → `mcp__postgres-mcp__run_read_query` | *Postgres tool check flow* |
-| Triage risk before merge | `detect_changes(policy:"release-gate")` → `find_impact_files(view:"surface")` → `link_tests_to_source` | *Pre-release risk scan flow* |
+| Goal | Runbook |
+|---|---|
+| Analyze a symbol's impact | `search_symbols` → `get_symbol_context_pack` → `find_impact_files` → `get_symbol_source` |
+| Orient in a new area | `get_folder_summary` → `get_file_summary` → `find_impact_files(view:"surface")` |
+| Understand how a method propagates | `search_symbols` → `trace_execution_flow` → `get_call_chain` |
+| Debug from a stack trace | `find_symbol_at_line` → `trace_execution_flow` or `get_change_context` |
+| Re-index safely | `health_check` → `list_repositories` → `index_repository` → `health_check` |
+| Gate a new feature / refactor | `detect_circular_dependencies` → `dead_code_scan` |
+| Rename or bulk-edit inside MCP | `refactor_replace_preview(findMode:"regex")` → `refactor_replace_apply` → `refactor_replace_rollback` — NOT `rename_assist`, see below |
+| Validate a Postgres change | `mcp__postgres-mcp__health_check` → `mcp__postgres-mcp__run_read_query` |
+| Triage risk before merge | `detect_changes(policy:"release-gate")` → `find_impact_files(view:"surface")` → `link_tests_to_source` |
 
 Always: reuse the exact `repoPath` from `list_repositories`; bound calls with `limit` and
 `profile:"compact"`; stop when evidence is sufficient. Report per the *Output Contract* below.
 
 ## Required MCP-First Flow
 
-### Standard flow (symbol known)
-```
-1. search_symbols (strategy: "name", identifier token)
-   → get symbolId for the matched symbol
-2. get_symbol_context_pack (name: "<identifier>")
-   → one call: candidates + callers + callees + change context
-3. find_impact_files (view: "files", groupBy: "module")
-   → blast radius scoped to target file
-4. get_symbol_source (symbolId or name)
-   → exact source span of the symbol, read from disk via MCP (NOT a baseline read_file).
-     Prefer this to read the code you are about to change; use contextLines to widen.
-5. read_file ONLY for non-symbol regions (config, plain text) get_symbol_source can't target
-```
+The table above IS the flow set — it names the exact call sequence for each goal. Nine prose blocks
+repeating those sequences with argument hints used to follow it; they were removed on 2026-09-16
+(MCP-ISSUE-061 Stage 2) because a tool's arguments are advertised in its own schema, which the client
+already has, and duplicating them here cost ~1 100 tokens in every session to restate what the tool
+would tell you for free.
 
-### Orientation flow (new module / unknown codebase area)
-```
-1. get_folder_summary (folderPath: "<layer>")
-   → per-file symbol/caller metrics, no file reads needed
-2. get_file_summary (filePath: "<high-callerCount file>")
-   → exports + importedBy in one call
-3. find_impact_files (view: "surface")
-   → who calls into it and which methods
-```
+Two things those blocks carried that the table does not, kept here because they are live constraints:
 
-### Execution trace flow (understand how a method propagates)
-```
-1. search_symbols (strategy: "name") → get callable symbolId
-2. trace_execution_flow (entrySymbolId: "<callable symbolId>", maxDepth: 4)
-3. get_call_chain (symbolId: "<callable symbolId>", direction: "callees")
-```
+### Renaming: do not use `rename_assist(emitPreview: true)` for a symbol used outside its own file
 
-### Stack trace debug flow (crash line → symbol → call graph)
-```
-1. find_symbol_at_line (filePath: "path\\or/path/to/file", line: <N>)
-   → get callable symbolId from the crash line
-   NOTE: separator is normalized; forward and backslash should both resolve.
-2. trace_execution_flow (entrySymbolId: "<symbolId>", maxDepth: 3)
-   → full execution sub-graph from the crash point
-   OR get_change_context (symbolId: "<symbolId>", callerDepth: 2)
-   → who calls into this method (blast radius for the crash)
-```
+Use `refactor_replace_preview` directly instead:
 
-### Post-upgrade verification flow (only when MCP parser/indexer is upgraded)
 ```
-1. index_repository (mode: "full", docsMode: "on")
-   → refresh graph after engine/parser changes
-2. find_symbol_at_line with paired paths on same target line
-   - test A: filePath with forward slash
-   - test B: filePath with backslash
-   - PASS if both resolve the same symbolId
-3. Run sample capability checks by language/domain in scope
-   - TypeScript package: `search_symbols` + `get_file_summary`
-   - C# sample repo (if used): `route_map` + `find_implementations`
-   - PASS if representative queries return non-empty results on target repos
-   NOTE: this is a release/upgrade safeguard, not a per-task mandatory step.
-```
-
-### Health gate flow (before new feature / refactor)
-```
-1. detect_circular_dependencies (mode: "module") → confirm 0 cycles
-2. dead_code_scan (filePathPrefix: "<src path>") → find orphaned publics
-   NOTE: runtime-wired symbols may appear "dead"; cross-check bootstrap/registration files before reporting.
-```
-
-### Refactor / rename flow (execute changes inside MCP — do not hand-edit each file)
-```
-Rename a symbol/param — use refactor_replace_preview DIRECTLY, not rename_assist:
 1. refactor_replace_preview (findMode: "regex", find: "\bOldName\b",
                              replaceExpression: "NewName", ambiguityThresholdPercent: 100)
 2. refactor_replace_apply (previewId, approvalToken, includeLowConfidence: true)
-   → includeLowConfidence is needed for top-level identifiers (no enclosing owner type)
-3. refactor_replace_rollback (rollbackId)  → if the change must be undone
-
-   DO NOT use `rename_assist(emitPreview: true)` for a symbol used outside its own file.
-   Measured against grep on four real symbols: recall 17–22% (2 of 9 occurrences, 1 of 6,
-   2 of 10), precision 100%, `riskFlags: []`. It scopes the underlying preview to
-   `affectedFiles` from a caller/importer graph that returns 0/0 even for a plain
-   `import { x } from './y.js'`, so the preview looks clean and applying it leaves every
-   other file calling a name that no longer exists. The same two symbols through
-   `refactor_replace_preview` directly: 9/9 and 10/10. Tracked as MCP-ISSUE-060, open.
-   `rename_assist` without `emitPreview` is still fine as an advisory read.
-
-Pattern / signature edit across many sites:
-1. refactor_replace_preview (findMode: "regex", find: "<pattern>", replaceExpression: "<$1 template>")
-   → regex with capture-group substitution ($1, $&); scope with includePaths to bound it
-2. refactor_replace_apply (previewId, approvalToken)
-3. refactor_replace_rollback (rollbackId) if needed
-
-Prefer this over baseline multi-file find/replace: it is preview-gated, HMAC-approved, and reversible.
+3. refactor_replace_rollback (rollbackId)   → if it must be undone
 ```
 
-### Postgres tool check flow (when task touches `postgres-mcp`)
-```
-1. mcp__postgres-mcp__health_check
-   → confirm MCP server + PostgreSQL connectivity
-2. mcp__postgres-mcp__run_read_query (targeted read-only SQL, bounded limit)
-   → validate behavior without write impact
-3. detect_changes (policy: "quick-triage")
-   → prioritize follow-up impact checks when source has changed
-```
+Measured against grep on four real symbols, `rename_assist`'s preview recall is **17–22%** (2 of 9
+occurrences, 1 of 6, 2 of 10) at 100% precision with `riskFlags: []` — it scopes the preview to
+`affectedFiles` from a caller/importer graph that returns 0/0 even for a plain
+`import { x } from './y.js'`, so the preview looks clean and applying it leaves every other file
+calling a name that no longer exists. The same symbols through `refactor_replace_preview`: 9/9 and
+10/10. **MCP-ISSUE-060, still open.** `rename_assist` without `emitPreview` remains a fine advisory
+read. `includeLowConfidence: true` is required for top-level identifiers, which have no enclosing
+owner type.
 
-### Pre-release risk scan flow (before merge / release)
-```
-1. detect_changes (policy: "release-gate", sortBy: "risk", riskLevels: ["high", "medium"])
-   → list changed files with risk score sorted by impact
-   NOTE: risk=0 for docs-only changes; high risk = files with many callers in graph
-2. For each high-risk file → find_impact_files (view: "surface") → verify caller blast radius
-3. link_tests_to_source (filePath: "<high-risk file>", minScore: 0.7) → confirm test coverage exists
-4. For docs-only changed files, run baseline review (read_file + targeted grep/semantic checks)
-   → assess business/rationale/regression-risk text changes that MCP risk score cannot capture
-```
+### After a parser or indexer upgrade, not per task
+
+Run `index_repository(mode: "full", docsMode: "on")`, then check that `find_symbol_at_line` resolves
+the same symbolId for a path spelled with forward slashes and with backslashes, and that a
+representative query per language in scope returns non-empty. This is a release safeguard; it is not
+part of any normal task.
 
 ## Fallback Conditions (Baseline Allowed)
 Baseline tools are allowed only when at least one condition is true:
@@ -372,60 +270,27 @@ Operational rule:
 |------|-----------|---------------|
 | `search_symbols` | Single-token name match is best; long prose still weak | Use identifier tokens. For multi-word intent, `strategy: "intent"` now also works WITH `ranked: true` (returns scored candidates) — previously that combo returned 0 |
 | `find_impact_files` / `get_change_context` | Stale index no longer blocks — returns data + `staleWarning` instead of erroring | No need to pre-re-index; re-index only when the warning matters for accuracy |
-| `trace_execution_flow` | Container-level symbolId can return sparse graph | Resolve callable symbolId first |
-| `get_call_chain` | Same as above | Use callable symbolId |
 | `dead_code_scan` | Runtime-wired symbols may appear dead | Cross-check bootstrap/registration paths before reporting |
 | `link_tests_to_source` | Score 0.55 links are `name_similarity` only — unreliable | Filter with `minScore: 0.7` |
 | `find_impact_files` view `"surface"` | Confidence 0.75 is TYPE_REF, not direct call | Note confidence and `edgeTypes` in output |
 | `find_symbol_at_line` | Often resolves declaration-level positions, not inner-block lines | Prefer declaration line or pair with one focused search |
 | `get_cross_repo_impact` | Returns empty when repos have no shared symbols (normal for isolated systems) | Only useful when repos share interface/contract symbol names (e.g., shared library pattern) |
+| `refactor_symbol_migration` / `change_value_representation` | Preview and apply in ONE round trip, with no HMAC approval token — unlike the `refactor_replace_*` trio. Annotated `destructiveHint: true`, which is what protects a host, but there is no second gate | Treat `dryRun:false` as immediately destructive; run `dryRun:true` first and read it. Open, MCP-ISSUE-060 |
 
-### Fixed by B-13 / MCP-ISSUE-043 (2026-08-05) — `requiredOwnerType` changed meaning
+### Already fixed — do not design around the old behaviour
 
-| Was | Now |
-|---|---|
-| `requiredOwnerType` / `guards.allowOwnerTypes` meant "sites **within** the declaring type": the owner was the class the code sits in, so a member's external call sites were rejected naming each *caller's* own class. The workaround was to give up the guard and use `refactor_replace_preview` | The owner is proven from the C# AST — the type that **owns** the referenced member. Static (`Codec.M`), instance, `this`, `base`, namespace-qualified and one-hop-nested (`a.B.M`) receivers all resolve, so a migration reaches a member's consumers. Non-C# files still use the enclosing-type text scan, labelled `enclosing_type_fallback` |
-| A site whose owner could not be inferred was **dropped** by the guard, indistinguishable from "not found" | It is **kept**, flagged `ambiguous_target` (so it cannot apply) and explained in `ambiguousReasons`, which names the rule that failed. Only a proven *different* owner lands in `rejectedSites`. Expect `totalMatches` to be higher than before, with `unresolvedOccurrences` accounting for the difference |
-| `refactor_replace_preview` surfaced neither `rejectedSites` nor `ambiguousReasons`, so a guard that dropped every site read as an empty result | Both are in the response (counts at `nano`, detail above it) |
+Three "Was / Now" changelogs used to live here, for B-13 / MCP-ISSUE-043, MCP-ISSUE-060 and
+MCP-ISSUE-049 — about 1 900 tokens describing behaviour that no longer exists. They were removed on
+2026-09-16 (MCP-ISSUE-061 Stage 2): once a fix has landed, the current behaviour is simply what the
+tools do, and the before/after record belongs where this workspace keeps measured evidence.
 
-### Fixed by MCP-ISSUE-060 (2026-08-25) — do not work around these any more
+**`codebase-index-mcp/docs/mcp-codebase-index-issue-registry.md`** is that record. Read the entry for
+a tool when it behaves unexpectedly and you need to know whether this is a known defect, a fixed one,
+or something new worth filing.
 
-| Was | Now |
-|---|---|
-| `find_impact_files` reported `totalImpactedCount: 0` for a class whose callers all reach it through its interface, while `get_symbol_context_pack` reported 14 for the same class in the same session. `expandInterfaceSiblingsImpl` was imported by four impact modules and called by none | Both views expand the queried file's symbols through their interface siblings. Measured on `wec.be`: 0 → 11 callers. Takes effect on the EXISTING index — no re-index needed |
-| `get_symbol_context_pack(name:…)` pooled callers across every same-named symbol, so `CreateMessageAsync` returned **16** callers of which 15 were other methods' | Callers and importers are scoped to the selected symbol, as callees always were. 16 → 1, matching `get_call_chain`. `candidates[]` still lists the homonyms |
-| An unknown `repoId` returned `edges: []` with `coverage.confidence:"high"`, or `graphHealth.note:"graph data complete"`, or a clean `rowCount: 1` from `query_graph` | Refused with `not_found` naming the repoId, by every tool that takes one. `health_check` and `index_repository` still answer for an unregistered repo, by design |
-| A file absent from the index answered `{"symbolCount":0,"exports":[]}` — indistinguishable from an empty file | `find_impact_files` carries `fileIndexed: false` and says an empty result means "not indexed", not "no dependents" |
-| `detect_changes` with a `baseRef` git cannot resolve reported `changedFileCount: 0, highRiskCount: 0, note:"using git range diff"` | Fails with `INVALID_PARAMS` naming the ref. Working-tree mode on a non-git directory still returns empty, which is correct there |
-| `detect_changes` `changedFileCount` was the post-cap page length — 100 against a real 300, cut alphabetically so a whole server was invisible | `changedFileCount` is the true count; `changedFilesReturned` and `changedFilesDroppedByLimit` describe the page |
-| `search_symbols` at `compact` — the documented default — omitted `symbolId`, which `get_call_chain` requires | `symbolId` at every profile |
-| `search_symbols(ranked: true)` with no `repoId` returned 0 for every query and every strategy | Cross-repo ranked search works. An unknown repoId still returns nothing |
-| `route_map` and `get_call_chain` reported truncation only at `nano`; at `compact` a 44-hop chain looked like 5 | `hasMore` / `chainLength` / `truncated` at every profile |
-| `get_file_context{profile:"standard"}` returned 68 663 chars for a 22-symbol C# file — past the token cap. 96% was edges, half of them `PROPERTY_REF` | Edges have their own budget (40), property refs are excluded (use `find_field_accesses`), structural edges are kept first, `edgesTruncated` says so. 70 526 → 21 070 chars |
-| `search_regex` could not see `.claude/` or `.github/` in ANY mode, `scanAll` included | Both the search walk and the indexer walk pass `dot: true`. The indexer half needs a re-index per repo |
-| `dead_code_scan` reported the program's own `main` on a Python repo, `suppressed.total: 0` | A language whose lane records no CALLS edges anywhere in the repo is suppressed as `language_lane_has_no_call_edges`. `wec.rag` Python: 0 candidates, 294 suppressed |
-| `refactor_symbol_migration` / `change_value_representation` advertised `readOnlyHint: true` while `dryRun:false` wrote files | Annotated `destructiveHint: true` unconditionally. They still lack the HMAC gate the `refactor_replace_*` trio has — see MCP-ISSUE-060, open |
-| A bare-name match that happened to land on an interface method was labelled `resolved interface method` at 0.8, indistinguishable from a receiver-proven one. On `wec.be`, 986 of 2070 such edges named a method two or more interfaces declare | Name-derived ones are `resolved interface method (unproven receiver)` and count as name-only provenance, so a traversal standing on them cannot report `high`. **Applies on the next index run** |
-
-### Fixed by MCP-ISSUE-049 (2026-08-04) — do not work around these any more
-
-| Was | Now |
-|---|---|
-| `get_call_chain` compact returned `fromId`/`toId` only, so a second call was needed per hop | Every profile carries `symbolId` + name + file on each hop |
-| `get_dependency_graph{profile:"nano"}` `topEdges` carried names only, so distinct edges sharing a name pair read as duplicates and an unresolved target named nothing at all | `topEdges` carries `fromId`/`toId` in both the `filePath` and `symbolId` branches |
-| `query_docs{mode:"stale"}` still returned archived-doc false positives after the `code_call` fix, because `doc_mentions` was append-only — a relabel inserted a row and the legacy `backtick` row outlived every re-index | The docs lane is replace-per-file. One re-index with `docsMode:"on"` genuinely clears them |
-| `get_symbol_detail`, `find_symbol_at_line`, `get_folder_summary` and `find_entry_points` accepted `profile` but never advertised it, so a client honouring `additionalProperties:false` had to reject it (MCP-ISSUE-051) | All **38** profile-taking tools advertise it. A parity test now compares every tool's zod key set against its advertised `properties`, in both directions |
-| `find_impact_files{view:"surface"}` listed a caller once per edge type | One row per caller→symbol pair, with `edgeTypes[]` — **an array**, and the scalar `edgeType` is gone |
-| `find_impact_files{view:"surface"}` silently ignored `groupBy` | `groupBy:"module"` groups, and the response echoes `groupBy` |
-| `query_docs` returned an object for `search` and bare arrays for `stale`/`coverage` | All three modes return `{ repoId, mode, count, results }` |
-| `query_docs{mode:"search"}` mixed code symbols into doc results | Opt-in via `includeSymbols:true`; off by default |
-| `query_docs{mode:"stale"}` matched identifiers inside pasted code samples | Code-block mentions are a separate `code_call` type, excluded from staleness; `includeCodeMentions:true` opts in. **Takes effect on re-index** — this one changes how mentions are written, not just read |
-| Six tools had no way to exclude test files | `excludeTests` on `find_implementations`, `route_map`, `search_literals`, `get_symbol_context_pack`, `get_value_contract_impact`, `get_feature_bundle` (default `false`) |
-| Intent ranking put EF migration `Up`/`Down` on top of every business-phrase query | Migrations are demoted below tests as the **primary** sort key; an explicit name query still finds them |
-| `health_check` without `repoId` reported `symbolsIndexed: 0` | Repo-scoped counters are omitted, `scope:"server"` and a `note` say why |
-| `repo://…/routes`, raw `query_graph` rows and `rename_assist.hints` returned backslashes | One convention everywhere: forward slashes |
-| `get_file_context` and `get_file_summary` disagreed on `symbolCount` | Both exclude the module pseudo-symbol |
-| `rename_assist` advisory omitted the declaring file | `affectedFiles`/`affectedFileCount` include it, matching `emitPreview:true` |
+The two items from those tables that are **still open** were kept above rather than deleted:
+`rename_assist`'s 17–22% preview recall (see *Renaming*, under *Required MCP-First Flow*) and the missing approval gate
+on the two migration tools (the last row of the table).
 
 ## Efficiency Limits
 - Default budget: soft cap 5 tool calls per question.

@@ -7,6 +7,7 @@ import { buildStaleWarning, getRepoStaleness, collectDirtyFiles, countCommitsBeh
 import type { StaleWarning } from "../../services/git/gitHelpers.js";
 import { buildCoverageBlock, summarizeEdgeProvenance } from "../../middleware/coverage.js";
 import { isTestPath } from "../../services/indexing/fileFilter.js";
+import { buildCallableHint } from "../../services/analysis/callableHint.js";
 import { GraphStore } from "../../repositories/graphStore.js";
 import type { HandlerContext } from "./handlerContext.js";
 
@@ -163,9 +164,14 @@ export function handleGetCallChain(
    */
   const chainTruncation = { chainLength: rows.length, truncated: rows.length >= args.limit };
 
+  // MCP-ISSUE-061 Stage 2: an empty chain on a container symbol used to be documented in the rules
+  // file instead of reported here. Computed only when the traversal found nothing.
+  const containerHint = rows.length === 0 ? buildCallableHint(store, args.repoId, args.symbolId) : null;
+  const hintBlock = containerHint ? { hint: containerHint } : {};
+
   if (profile === "nano") {
     const pathNodes = rows.slice(0, 10).map((e) => ({ ...farEnd(e), ...via(e), confidence: e.confidence ?? null }));
-    return ctx.asText({ repoId: args.repoId, symbolId: args.symbolId, direction, ...chainTruncation, path: pathNodes, hasMore: rows.length > pathNodes.length, coverage: coverage.confidence }, profile);
+    return ctx.asText({ repoId: args.repoId, symbolId: args.symbolId, direction, ...chainTruncation, path: pathNodes, hasMore: rows.length > pathNodes.length, coverage: coverage.confidence, ...hintBlock }, profile);
   }
   if (profile === "compact") {
     const edges = rows.map((e) => ({
@@ -173,9 +179,9 @@ export function handleGetCallChain(
       toId: e.toId, toName: e.toName ?? null, toFilePath: e.toFilePath ?? null,
       type: e.type, ...via(e), confidence: e.confidence ?? null
     }));
-    return ctx.asText({ repoId: args.repoId, symbolId: args.symbolId, direction, depth: args.depth, ...chainTruncation, edges, coverage }, profile);
+    return ctx.asText({ repoId: args.repoId, symbolId: args.symbolId, direction, depth: args.depth, ...chainTruncation, edges, coverage, ...hintBlock }, profile);
   }
-  return ctx.asText({ repoId: args.repoId, symbolId: args.symbolId, direction, depth: args.depth, ...chainTruncation, edges: rows, coverage }, profile);
+  return ctx.asText({ repoId: args.repoId, symbolId: args.symbolId, direction, depth: args.depth, ...chainTruncation, edges: rows, coverage, ...hintBlock }, profile);
 }
 
 // ── find_field_accesses ───────────────────────────────────────────────────────

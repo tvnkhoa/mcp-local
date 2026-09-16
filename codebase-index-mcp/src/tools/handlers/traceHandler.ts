@@ -14,6 +14,7 @@ import { buildCoverageBlock } from "../../middleware/coverage.js";
 import type { HandlerContext } from "./handlerContext.js";
 import type { GraphStore } from "../../repositories/graphStore.js";
 import { isTestPath } from "../../services/indexing/fileFilter.js";
+import { buildCallableHint } from "../../services/analysis/callableHint.js";
 
 /**
  * MCP-ISSUE-056: drop test-file nodes from a traced sub-graph, and the edges that pointed at them.
@@ -53,12 +54,18 @@ export function handleTraceExecutionFlow(
     throw new McpError(ErrorCode.InvalidParams, `trace_execution_flow: entry symbol '${args.entrySymbolId}' not found in repo '${args.repoId}'.`);
   }
   const coverage = buildCoverageBlock({ resultCount: result.nodes.length, truncated: result.truncated, kind: "execution_flow", query: result.entrySymbol.name, edgeProvenance: result.provenance });
+
+  // MCP-ISSUE-061 Stage 2: a container entry symbol owns no CALLS edges, so the sub-graph came back
+  // as the entry node alone. That was documented in .claude/rules/mcp-hard-mode.md; it belongs here,
+  // where the agent is when it gets it wrong. Computed only when the trace found no edges.
+  const containerHint = result.edges.length === 0 ? buildCallableHint(store, args.repoId, args.entrySymbolId) : null;
+  const hintBlock = containerHint ? { hint: containerHint } : {};
   if (profile === "nano") {
     // MCP-ISSUE-049: dedupe BEFORE the slice. Taking the first 10 edges and mapping to a name gave
     // `["Equals","NotifyAsync",…,"NotifyAsync","NotifyAsync"]` — NotifyAsync four times — so the cap
     // was spent on repeats and genuinely distinct callees never made the list.
     const topCallees = [...new Set(result.edges.map((e) => e.toName).filter(Boolean))].slice(0, 10);
-    return ctx.asText({ entrySymbol: { name: result.entrySymbol.name, filePath: result.entrySymbol.filePath }, nodeCount: result.nodes.length, edgeCount: result.edges.length, depthReached: result.depthReached, truncated: result.truncated, topCallees, distinctCalleeCount: new Set(result.edges.map((e) => e.toName).filter(Boolean)).size, coverage: coverage.confidence }, profile);
+    return ctx.asText({ entrySymbol: { name: result.entrySymbol.name, filePath: result.entrySymbol.filePath }, nodeCount: result.nodes.length, edgeCount: result.edges.length, depthReached: result.depthReached, truncated: result.truncated, topCallees, distinctCalleeCount: new Set(result.edges.map((e) => e.toName).filter(Boolean)).size, coverage: coverage.confidence, ...hintBlock }, profile);
   }
   if (profile === "compact") {
     return ctx.asText({
@@ -66,8 +73,9 @@ export function handleTraceExecutionFlow(
       nodeCount: result.nodes.length, edgeCount: result.edges.length, depthReached: result.depthReached, truncated: result.truncated,
       nodes: result.nodes.map((n) => ({ symbolId: n.symbolId, name: n.name, kind: n.kind, filePath: n.filePath })),
       edges: result.edges.map((e) => ({ fromId: e.fromId, toId: e.toId, fromName: e.fromName, toName: e.toName, confidence: e.confidence })),
-      coverage
+      coverage,
+      ...hintBlock
     }, profile);
   }
-  return ctx.asText({ entrySymbol: result.entrySymbol, nodeCount: result.nodes.length, edgeCount: result.edges.length, depthReached: result.depthReached, truncated: result.truncated, nodes: result.nodes, edges: result.edges, coverage }, profile);
+  return ctx.asText({ entrySymbol: result.entrySymbol, nodeCount: result.nodes.length, edgeCount: result.edges.length, depthReached: result.depthReached, truncated: result.truncated, nodes: result.nodes, edges: result.edges, coverage, ...hintBlock }, profile);
 }
