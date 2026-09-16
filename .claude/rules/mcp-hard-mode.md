@@ -98,35 +98,24 @@ explicitly met and the registry entry is being written in the same turn.
 
 ## Tool Selection Guide
 
-> Quick reference: see `codebase-index-mcp/docs/decision-tree.md` for a task-oriented flowchart with profile heuristics and fallback escalation steps.
+**Ask the server, not this file.** `orient(intent: "<what you are trying to do>")` returns the
+recommended tools, their arguments and the caveats that apply, from a static keyword table in
+`codebase-index-mcp/src/services/analysis/orient.ts`. It covers rename, blast radius, entry points,
+grep-by-pattern, file structure, trace/call-flow, dead code, circular deps, docs search, stack traces,
+cross-repo, tests, risk triage, freshness and the Postgres check. A thirty-row copy of that table
+lived here until 2026-09-16 (MCP-ISSUE-061 Stage 2) and drifted from it — it was still recommending
+`rename_assist` for renames months after that path was measured at 17-22% recall.
 
-| Intent | Preferred tool | Notes |
-|--------|---------------|-------|
-| Bootstrap / entry points | `find_entry_points` | `kind: "route_handler"` for HTTP routes |
-| Orient new module | `get_folder_summary` | Returns per-file symbolCount/callerCount without reading |
-| Look up exact symbol name | `search_symbols` strategy `"name"` | Use source-level identifier token, not prose |
-| Look up by token fragment | `search_symbols` strategy `"intent"` | Keep query short and identifier-like |
-| Grep source by pattern / discover an identifier token | `search_regex` | MCP-native replacement for `grep_search`: returns matches with context + enclosing symbol. `scanAll=true` for non-code text (json/yaml). Use to find exact symbol names before `search_symbols`. |
-| Full context for one symbol | `get_symbol_context_pack` | Single call: candidates + callers + callees + change-context |
-| Callers/callees drill-down | `get_change_context` | Use `profile: "compact"`, callerDepth ≤ 2 |
-| Call chain traversal | `get_call_chain` | Needs a callable symbolId; a container returns an empty chain plus a `hint` naming its callables |
-| Execution sub-graph | `trace_execution_flow` | Same: a container entry returns a `hint` with callable candidates |
-| Who uses this file | `find_impact_files` view `"files"` | Blast radius grouped by module |
-| What calls into this file | `find_impact_files` view `"surface"` | Caller surface per symbol |
-| File structure + exports | `get_file_summary` | Shows exports, imports, importedBy |
-| Read a symbol's exact code | `get_symbol_source` | Source span from disk by symbolId/name — use INSTEAD of baseline `read_file`; `contextLines` to widen |
-| Bulk pattern / signature edit | `refactor_replace_preview` findMode `"regex"` | Capture-group substitution ($1, $&) in `replaceExpression`; then apply → rollback |
-| Execute a rename | `rename_assist` emitPreview `true` | Returns applyable preview (previewId + token); apply with `includeLowConfidence: true` for top-level identifiers |
-| Dead public symbols | `dead_code_scan` | Entry points wired by runtime/DI may appear dead; manual verify required |
-| Circular deps check | `detect_circular_dependencies` | Fast gate before implementing new dependency |
-| Test ↔ source mapping | `link_tests_to_source` | Use `minScore: 0.7` for reliable results |
-| Docs search | `query_docs` mode `"search"` | Full-text across indexed markdown/docs |
-| Stack trace line → symbolId | `find_symbol_at_line` | Best for declaration lines; inner-block lines may not resolve |
-| Multi-file symbol map | `get_file_context` | Use `filePaths` array (up to 50 files); profile=compact; richer than `get_file_summary` — returns all symbols + edges |
-| Cross-repo shared contracts | `get_cross_repo_impact` | direction: `"outbound"`/`"inbound"`; only useful when repos share interface/symbol names |
-| Pre-release risk triage | `detect_changes` | policy: `"quick-triage"`/`"strict-review"`/`"release-gate"`; sortBy: `"risk"`; compares working tree vs last indexed commit |
-| DB connectivity check | `mcp__postgres-mcp__health_check` | Fast validation before DB read query |
-| DB read validation | `mcp__postgres-mcp__run_read_query` | Read-only verification for Postgres tooling |
+Four choices `orient` cannot make for you, because they are policy rather than routing:
+
+| Situation | Rule |
+|---|---|
+| You need to read code | `get_symbol_source` (by symbolId or name), **not** `read_file`. Fall back to `read_file` only for non-symbol regions — config, plain text |
+| You need to grep | `search_regex`, **not** baseline grep. It returns the enclosing symbol with each match, which grep cannot |
+| You have a business phrase, not an identifier | `search_symbols` is a token matcher, not a semantic engine. Discover the identifier with `search_regex` first — see *Symbol Lookup Rules* below |
+| The answer is already sufficient | Stop. Collecting more context after the evidence is in is the most common budget overrun |
+
+> A task-oriented flowchart with profile heuristics lives at `codebase-index-mcp/docs/decision-tree.md`.
 
 ## Symbol Lookup Rules (Critical)
 
