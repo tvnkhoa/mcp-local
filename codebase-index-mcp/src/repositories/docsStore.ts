@@ -387,7 +387,13 @@ export function searchDocsImpl(
    * agents keep doing exactly that, so the default now EXCLUDES archived and superseded documents
    * and this flag opts them back in for history questions.
    */
-  includeArchived = false
+  includeArchived = false,
+  /**
+   * MCP-ISSUE-061 Stage 5. "auto" runs the strict AND tier then tops up from the broad OR tier;
+   * "strict" keeps the pre-Stage-5 behaviour for a caller that wants precision only; "phrase"
+   * requires the words adjacent and in order, for a caller who knows the exact wording.
+   */
+  matchMode: "auto" | "strict" | "phrase" = "auto"
 ): {
   docId: string;
   filePath: string;
@@ -397,11 +403,15 @@ export function searchDocsImpl(
   level: number | null;
   startLine: number | null;
   endLine: number | null;
+  /** "strict" = matched the AND query; "broad" = came from the OR top-up tier (Stage 5). */
+  matchTier: "strict" | "broad";
   resolvedMentions: { symbolId: string; symbolName: string | null; mentionText: string }[];
 }[] {
   const ftsQuery = buildFtsQuery(query);
   let docIds: string[] = [];
   let usedFts = false;
+  // How many of `docIds` came from the strict tier — everything past this index is broad.
+  let strictCount = 0;
   const desiredLimit = Math.max(1, limit);
   const allowedTypes =
     contentTypes && contentTypes.length > 0 ? contentTypes : ["heading", "prose", "code_block"];
@@ -413,9 +423,22 @@ export function searchDocsImpl(
     : `and docs.file_path not in (select file_path from docs where repo_id = ? and doc_status in ('archived','superseded'))`;
   const archiveParams: string[] = includeArchived ? [] : [repoId];
 
-  try {
-    db.prepare("select * from docs_fts limit 0").all();
-    const ftsRows = db
+  /**
+   * MCP-ISSUE-061 Stage 5: two FTS tiers, strict then broad.
+   *
+   * `buildFtsQuery` joins its prefix terms with an implicit AND, so a nine-word question demanded
+   * all nine tokens inside one chunk. The Stage 0 harness put a number on what that costs: across
+   * ten natural-language questions the strict query scored **0/10, and seven of them returned no
+   * rows at all**, while the OR form of the same queries scored **7/10**. `buildIntentFtsQuery` —
+   * the OR builder — already existed for symbol search and had never been wired to docs.
+   *
+   * So the strict tier runs first and keeps its precision, and the broad tier tops up whatever is
+   * missing. Broad rows are LABELLED `matchTier: "broad"`, which is the rule MCP-ISSUE-058(b)
+   * settled: padded results that look identical to direct hits are how a confident wrong answer gets
+   * reported at `confidence: "high"`.
+   */
+  const runFts = (matchExpr: string, want: number): string[] =>
+    db
       .prepare(
         `
         select docs_fts.doc_id as docId
@@ -426,20 +449,46 @@ export function searchDocsImpl(
         limit ?
         `
       )
-      .all(repoId, ftsQuery, ...allowedTypes, ...archiveParams, desiredLimit) as { docId: string }[];
-    docIds = ftsRows.map((r) => r.docId);
+      .all(repoId, matchExpr, ...allowedTypes, ...archiveParams, want)
+      .map((r) => (r as { docId: string }).docId);
+
+  try {
+    db.prepare("select * from docs_fts limit 0").all();
+    if (matchMode === "phrase") {
+      // FTS5 phrase syntax: the quoted tokens must appear adjacent, in order. The narrowest
+      // possible match, for a caller who knows the exact wording.
+      docIds = runFts(`"${query.replace(/"/g, "")}"`, desiredLimit);
+    } else {
+      docIds = runFts(ftsQuery, desiredLimit);
+      strictCount = docIds.length;
+      if (matchMode !== "strict" && docIds.length < desiredLimit) {
+        const seen = new Set(docIds);
+        for (const id of runFts(buildIntentFtsQuery(query), desiredLimit * 2)) {
+          if (docIds.length >= desiredLimit) break;
+          if (seen.has(id)) continue;
+          seen.add(id);
+          docIds.push(id);
+        }
+      }
+    }
     usedFts = true;
   } catch {
     // FTS unavailable
   }
 
-  if (!usedFts || docIds.length === 0) {
-    const likeRows = db
+  /**
+   * LIKE is now a fallback for FTS being UNAVAILABLE, not for it matching nothing — the broad tier
+   * above covers that case far better. It also no longer orders by `rowid`, which is insertion
+   * order and no relevance at all; shortest text first is a crude proxy, but a crude proxy beats
+   * "whichever section happened to be parsed first".
+   */
+  if (!usedFts) {
+    docIds = db
       .prepare(
-        `select doc_id as docId from docs where repo_id = ? and text like ? and content_type in (${typePlaceholders}) ${archiveFilter} order by rowid limit ?`
+        `select doc_id as docId from docs where repo_id = ? and text like ? and content_type in (${typePlaceholders}) ${archiveFilter} order by length(text) limit ?`
       )
-      .all(repoId, `%${query}%`, ...allowedTypes, ...archiveParams, desiredLimit) as { docId: string }[];
-    docIds = likeRows.map((r) => r.docId);
+      .all(repoId, `%${query}%`, ...allowedTypes, ...archiveParams, desiredLimit)
+      .map((r) => (r as { docId: string }).docId);
   }
 
   const docResults: {
@@ -451,6 +500,7 @@ export function searchDocsImpl(
     level: number | null;
     startLine: number | null;
     endLine: number | null;
+    matchTier: "strict" | "broad";
     resolvedMentions: { symbolId: string; symbolName: string | null; mentionText: string }[];
   }[] = [];
 
@@ -500,11 +550,18 @@ export function searchDocsImpl(
         .push({ symbolId: row.symbolId, symbolName: row.symbolName, mentionText: row.mentionText });
     }
 
+    // MCP-ISSUE-061(h): missing ids used to get sort key 99, which silently mis-ordered any result
+    // set larger than 99. An id not in the ranked list sorts last, whatever the list's length.
     const orderMap = new Map(docIds.map((id, i) => [id, i]));
+    const rankOf = (id: string) => orderMap.get(id) ?? Number.MAX_SAFE_INTEGER;
     docResults.push(
       ...docs
-        .sort((a, b) => (orderMap.get(a.docId) ?? 99) - (orderMap.get(b.docId) ?? 99))
-        .map((doc) => ({ ...doc, resolvedMentions: mentionsByDoc.get(doc.docId) ?? [] }))
+        .sort((a, b) => rankOf(a.docId) - rankOf(b.docId))
+        .map((doc) => ({
+          ...doc,
+          matchTier: (rankOf(doc.docId) < strictCount ? "strict" : "broad") as "strict" | "broad",
+          resolvedMentions: mentionsByDoc.get(doc.docId) ?? []
+        }))
     );
   }
 
@@ -546,6 +603,7 @@ export function searchDocsImpl(
           level: null,
           startLine: row.line,
           endLine: row.line,
+          matchTier: "broad" as const,
           resolvedMentions: [{ symbolId: row.symbolId, symbolName: row.symbolName, mentionText: row.symbolName }]
         });
       }

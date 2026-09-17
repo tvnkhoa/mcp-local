@@ -96,6 +96,14 @@ export const queryDocsSchema = (MAX_RESULT_LIMIT: number) => z
      * — `nano`/`compact` only drop nullish keys. `limit` caps the row COUNT; this caps the payload,
      * which is the axis that matters now that a row holds a whole doc section.
      */
+    /**
+     * MCP-ISSUE-061 Stage 5, mode="search". "auto" runs the strict AND tier and tops up from a broad
+     * OR tier; rows say which one they came from via `matchTier`. Measured on the Stage 0 harness:
+     * strict alone scored 0/10 on natural-language questions with 7 returning nothing, the OR form
+     * scored 7/10. "strict" is the pre-Stage-5 behaviour; "phrase" requires the words adjacent and
+     * in order.
+     */
+    matchMode: z.enum(["auto", "strict", "phrase"]).default("auto"),
     maxTokens: z.number().int().min(200).max(50_000).optional(),
     /**
      * MCP-ISSUE-061 Stage 3, mode="drift" only: how close a symbol name must be to an unresolved

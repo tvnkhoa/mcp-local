@@ -38,7 +38,13 @@ async function main() {
   // `mode:"dirty"`, and an empty change set logs almost nothing. A clean CI checkout has zero dirty
   // files, which is why this passed on every push and failed locally. `test-server-envelopes.mjs`
   // has always attached a reader here; this harness did not.
-  transport.stderr?.on("data", () => {});
+  // Drained unconditionally (a blocked pipe was a real failure once — see the comment above), and
+  // surfaced under SHOW_SERVER_STDERR=1, which is how the still-open "Connection closed" item should
+  // be investigated next: run the suite with it set until the failure recurs, and read what the
+  // server said before it went away.
+  transport.stderr?.on("data", (d) => {
+    if (process.env.SHOW_SERVER_STDERR) process.stderr.write(d);
+  });
 
   // List tools — confirm the 3 new tools registered.
   const tools = (await client.listTools()).tools.map((t) => t.name);
@@ -72,10 +78,16 @@ async function main() {
   console.log("FIND_IMPACT_FRESHNESS_OK", { hasIndexLag: Boolean(impact.indexMeta.indexLag), dirtyCount: impact.indexMeta.indexLag?.dirtyCount ?? 0 });
 
   // 5. mode="dirty" — fast re-index of working-tree changes only.
-  // Explicit timeout, like the full index above. Without one this used the SDK's 60s default, and an
-  // index run on a loaded machine (41 harnesses share it) exceeded that and surfaced as
-  // "MCP error -32000: Connection closed" — a message that points at the transport rather than at
-  // the clock. It passed in isolation every time, which is what made it read as a flake.
+  // Explicit timeout, matching the full index above — consistency, not a fix.
+  //
+  // This was first added on the theory that the SDK's 60s default was expiring here. That theory is
+  // WRONG and the comment that asserted it has been corrected: the failure recurs at ~8s, far under
+  // any timeout, which means the server process is going away rather than the client giving up. It
+  // passes in isolation every time and passes in the runner most times, so it is intermittent.
+  //
+  // This is the "Connection closed" item still open in
+  // `docs/mcp-codebase-index-issue-registry.md` — mechanism not established. Do not let a single
+  // green run be read as a diagnosis; that is how the wrong cause got written down the first time.
   const dirty = text(await client.callTool({ name: "index_repository", arguments: { repoId, repoPath, mode: "dirty" } }, undefined, { timeout: 180_000 }));
   console.log("DIRTY_MODE_OK", { mode: dirty.mode, filesIndexed: dirty.filesIndexed, skipReason: dirty.skipReason ?? null });
 

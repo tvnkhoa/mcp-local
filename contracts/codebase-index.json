@@ -1498,6 +1498,15 @@
             "minimum": 1,
             "type": "integer"
           },
+          "matchMode": {
+            "description": "mode=search only: auto (default) runs a strict AND match then tops up from a broad OR match, labelling each row with matchTier; strict returns AND matches only; phrase requires the words adjacent and in order.",
+            "enum": [
+              "auto",
+              "strict",
+              "phrase"
+            ],
+            "type": "string"
+          },
           "maxTokens": {
             "description": "mode=search only: approximate payload budget for results (default 10000). Caps response SIZE where limit caps row COUNT; drops lowest-ranked results and reports truncated + resultsDropped.",
             "maximum": 50000,
