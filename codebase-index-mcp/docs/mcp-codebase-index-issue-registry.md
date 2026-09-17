@@ -2766,3 +2766,29 @@ heading, so a large file gets more rows but no per-row advantage.
 Two theories, both refuted by the same measurement. Recorded so neither is re-proposed. If prose
 sections land (Stage 4) rows get much longer and this should be **re-measured**, not assumed either
 way.
+
+### Stage 4 outcome (2026-09-17) — the prose lane
+
+The defect this whole entry opened on is closed. `parseMarkdownFile` emits `prose` sections.
+
+```
+prose                0 -> 1603 rows (avg 754 chars)     heading 1437     code_block 303
+docId collisions     5 -> 0        (ids hash the start line; two nodes cannot share one)
+carriage returns          0        (CRLF stripped at read; core.autocrlf=true makes clones CRLF)
+rows with no span         0
+chunks over budget        0        (largest 2047 of 2048)
+table chunks            368, of which 0 lost a header row
+```
+
+Chunk budget 2048 chars (~512 tokens) from the corpus: median section 640, p90 2149, 90% under 2 KB.
+Code-block text 500 → 1000 chars, cutting truncation from 12.9% of blocks to 1.9%.
+
+**Not yet done, and the success criterion is therefore unproven.** The plan set "≥15/20 recall on a
+20-query prose set", and Stage 0's measurement harness was never built — shipping was prioritized
+over instrumenting. Three hand-picked phrase queries went 0 → 4, 0 → 4, 0 → 5, which demonstrates the
+capability but is not the metric. Anyone continuing this work should build the Stage 0 harness before
+claiming a recall number.
+
+**Operational:** prose rows, doclinks and `doc_status` are all written at index time. An index built
+before these stages has none of them — run `index_repository(mode:"full", docsMode:"on")` after
+restarting the server.
