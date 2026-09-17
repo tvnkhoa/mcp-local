@@ -1103,12 +1103,22 @@ export function findDriftingDocsImpl(
     else byFirstChar.set(key, [sym]);
   }
 
+  /**
+   * The SAME `typeFilter` as the count above.
+   *
+   * It was missing here, so `docCount` excluded `code_call` mentions while the `docs` array beside
+   * it did not — `execute_routine` reported `docCount: 4` and then listed six citations. Worse than
+   * inconsistent: `code_call` is an identifier scraped from inside a fenced sample, which
+   * MCP-ISSUE-049 settled is NOT the document asserting anything about that symbol, so the evidence
+   * list was padded with exactly the rows this mode's own rule rejects. A count and the list beside
+   * it have to describe the same thing.
+   */
   const docsFor = db.prepare(
     `
     select distinct d.doc_id as docId, d.file_path as filePath, d.heading_path as headingPath
     from doc_mentions dm
     inner join docs d on d.repo_id = dm.repo_id and d.doc_id = dm.doc_id
-    where dm.repo_id = ? and dm.mention_text = ? and dm.symbol_id is null
+    where dm.repo_id = ? and dm.mention_text = ? and dm.symbol_id is null ${typeFilter}
     limit 10
     `
   );
