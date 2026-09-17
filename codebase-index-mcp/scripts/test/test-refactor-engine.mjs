@@ -14,6 +14,7 @@ import { validateAllowedTables } from "../../dist/middleware/sqliteGuardrails.js
 import { mkdtempSync, writeFileSync, readFileSync, rmSync, mkdirSync } from "fs";
 import { tmpdir } from "os";
 import { join, resolve } from "path";
+import { attachServerStderr } from "./_serverStderr.mjs";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -224,10 +225,10 @@ public sealed class FixtureNoRewrite
 
   const client = new Client({ name: "refactor-regression-test", version: "0.1.0" });
   await client.connect(transport);
+  attachServerStderr(transport, "test-refactor-engine");
   // Drain the server's stderr. With stderr:"pipe" and no reader, a chatty server (index logs,
   // progress bars) fills the ~64KB OS pipe buffer; its next synchronous console.error then blocks
   // the server event loop and every request times out. Consuming the pipe keeps the server alive.
-  transport.stderr?.resume();
 
   // ── 3.1  Index the temp repo ─────────────────────────────────────────────
   console.log("\n  [3.1] Indexing temp repo...");

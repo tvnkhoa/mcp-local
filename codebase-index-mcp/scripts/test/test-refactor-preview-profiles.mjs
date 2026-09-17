@@ -9,6 +9,7 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { makeTempDbPath } from "./_fixtures.mjs";
+import { attachServerStderr } from "./_serverStderr.mjs";
 
 function readTextContent(result) {
   return Array.isArray(result?.content)
@@ -69,6 +70,7 @@ async function main() {
 
   const client = new Client({ name: "refactor-profile-test", version: "0.1.0" });
   await client.connect(transport);
+  attachServerStderr(transport, "test-refactor-preview-profiles");
 
   // Index current directory
   console.log("\n[setup] Indexing current repo...");

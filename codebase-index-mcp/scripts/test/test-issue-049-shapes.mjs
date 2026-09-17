@@ -19,6 +19,7 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { makeTempDbPath } from "./_fixtures.mjs";
+import { attachServerStderr } from "./_serverStderr.mjs";
 
 let passed = 0;
 let failed = 0;
@@ -78,6 +79,7 @@ async function main() {
 
   const client = new Client({ name: "issue-049-shapes", version: "0.1.0" });
   await client.connect(transport);
+  attachServerStderr(transport, "test-issue-049-shapes");
 
   const call = (name, args, timeout = 60_000) =>
     client.callTool({ name, arguments: args }, undefined, { timeout });

@@ -1,6 +1,7 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { makeTempDbPath } from "./_fixtures.mjs";
+import { attachServerStderr } from "./_serverStderr.mjs";
 
 function readTextContent(result) {
   return Array.isArray(result?.content)
@@ -35,6 +36,7 @@ async function main() {
 
   const client = new Client({ name: "codebase-index-mcp-regex-test", version: "0.1.0" });
   await client.connect(transport);
+  attachServerStderr(transport, "test-search-regex");
 
   const toolNames = (await client.listTools()).tools.map((t) => t.name);
   if (!toolNames.includes("search_regex")) {

@@ -29,6 +29,7 @@ import { writeFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { makeTempDir } from "./_fixtures.mjs";
 import { buildRepoResources } from "../../dist/resources/resourceHandler.js";
+import { attachServerStderr } from "./_serverStderr.mjs";
 
 let passed = 0, failed = 0;
 function assert(cond, label, detail = "") {
@@ -64,6 +65,7 @@ const transport = new StdioClientTransport({
 });
 const client = new Client({ name: "envelope-test", version: "0.1.0" });
 await client.connect(transport);
+attachServerStderr(transport, "test-server-envelopes");
 
 let stderrText = "";
 transport.stderr?.on("data", (chunk) => { stderrText += chunk.toString("utf8"); });

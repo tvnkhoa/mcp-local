@@ -18,6 +18,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import process from "node:process";
+import { attachServerStderr } from "./_serverStderr.mjs";
 
 function text(res) {
   const t = res?.content?.find((c) => c.type === "text")?.text ?? "{}";
@@ -126,6 +127,7 @@ async function main() {
   });
   const client = new Client({ name: "test-refinements", version: "0.1.0" });
   await client.connect(transport);
+  attachServerStderr(transport, "test-issue-refinements");
 
   try {
     await client.callTool(

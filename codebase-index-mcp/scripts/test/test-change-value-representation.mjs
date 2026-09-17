@@ -13,6 +13,7 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 import { writeFileSync, mkdirSync, readFileSync } from "fs";
 import { join } from "path";
 import { bufferOverflowPad, makeTempDir } from "./_fixtures.mjs";
+import { attachServerStderr } from "./_serverStderr.mjs";
 
 let passed = 0, failed = 0;
 function assert(cond, label, detail = "") {
@@ -62,7 +63,7 @@ const transport = new StdioClientTransport({
 });
 const client = new Client({ name: "cvr-test", version: "0.1.0" });
 await client.connect(transport);
-transport.stderr?.resume();
+attachServerStderr(transport, "test-change-value-representation");
 
 try {
   await client.callTool({ name: "index_repository", arguments: { repoId, repoPath: tmpDir, mode: "full" } });

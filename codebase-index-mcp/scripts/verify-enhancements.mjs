@@ -8,6 +8,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { makeTempDbPath } from "./test/_fixtures.mjs";
 import process from "node:process";
+import { attachServerStderr } from "./test/_serverStderr.mjs";
 
 function text(res) {
   const t = res?.content?.find((c) => c.type === "text")?.text ?? "{}";
@@ -29,6 +30,7 @@ async function main() {
   });
   const client = new Client({ name: "verify", version: "0.1.0" });
   await client.connect(transport);
+  attachServerStderr(transport, "verify-enhancements");
 
   // The child's stderr is piped, so SOMETHING has to read it. On Windows a pipe write blocks once
   // the OS buffer (64 KB) is full, and nothing here was draining it — so as soon as a run produced
