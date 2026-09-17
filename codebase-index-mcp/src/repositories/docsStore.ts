@@ -917,8 +917,20 @@ export function findNonEnglishDocsImpl(
  */
 export function listDocMentionTargetsImpl(
   db: Database.Database,
-  repoId: string
+  repoId: string,
+  includeArchived = false
 ): { docFilePath: string; symbolName: string; symbolFilePath: string }[] {
+  /**
+   * MCP-ISSUE-061 Stage 6c: archived and superseded documents are excluded by default, matching
+   * `mode:"search"`. Nothing under `docs/archive/` is maintained, so "44 days behind" there is
+   * expected rather than actionable — and measured, it was 17 of 56 rows, 30% of a queue whose whole
+   * purpose is to be read top-down.
+   */
+  const archiveFilter = includeArchived
+    ? ""
+    : `and d.file_path not in (select file_path from docs where repo_id = ? and doc_status in ('archived','superseded'))`;
+  const params: string[] = includeArchived ? [repoId] : [repoId, repoId];
+
   return db
     .prepare(
       `
@@ -926,10 +938,10 @@ export function listDocMentionTargetsImpl(
       from doc_mentions dm
       inner join docs d on d.repo_id = dm.repo_id and d.doc_id = dm.doc_id
       inner join symbols s on s.repo_id = dm.repo_id and s.symbol_id = dm.symbol_id
-      where dm.repo_id = ? and dm.symbol_id is not null and dm.mention_type != 'code_call'
+      where dm.repo_id = ? and dm.symbol_id is not null and dm.mention_type != 'code_call' ${archiveFilter}
       `
     )
-    .all(repoId) as { docFilePath: string; symbolName: string; symbolFilePath: string }[];
+    .all(...params) as { docFilePath: string; symbolName: string; symbolFilePath: string }[];
 }
 
 // ── Doc → doc link graph ───────────────────────────────────────────────

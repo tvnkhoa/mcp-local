@@ -85,7 +85,7 @@ const iso = (unixSeconds: number) => new Date(unixSeconds * 1000).toISOString().
 export function findDocsBehindCode(
   store: GraphStore,
   repoId: string,
-  options: { minDaysBehind?: number; limit?: number } = {}
+  options: { minDaysBehind?: number; limit?: number; includeArchived?: boolean } = {}
 ): { rows: DocBehindRow[]; total: number; filesCompared: number; note?: string } {
   const minDaysBehind = options.minDaysBehind ?? 1;
   const limit = Math.max(1, options.limit ?? 50);
@@ -104,7 +104,7 @@ export function findDocsBehindCode(
   }
 
   const norm = (p: string) => p.replace(/\\/g, "/");
-  const pairs = store.listDocMentionTargets(repoId);
+  const pairs = store.listDocMentionTargets(repoId, options.includeArchived);
 
   // doc file → the newest mentioned code files
   const byDoc = new Map<string, { symbolName: string; filePath: string; committedAt: number }[]>();

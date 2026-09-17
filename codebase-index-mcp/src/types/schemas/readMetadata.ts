@@ -87,8 +87,9 @@ export const queryDocsSchema = (MAX_RESULT_LIMIT: number) => z
      */
     contentTypes: z.array(z.enum(["heading", "prose", "code_block"])).min(1).max(3).optional(),
     /**
-     * MCP-ISSUE-061 Stage 3, mode="search": archived and superseded documents are excluded by
-     * default. CLAUDE.md had to say this in prose; now it is mechanical.
+     * MCP-ISSUE-061, mode="search" AND mode="behind": archived and superseded documents are excluded by
+     * default. CLAUDE.md had to say this in prose; now it is mechanical. On `behind` it was measured
+     * noise: 17 of 56 rows, 30% of a queue whose whole purpose is to be read top-down.
      */
     includeArchived: z.boolean().default(false),
     /**

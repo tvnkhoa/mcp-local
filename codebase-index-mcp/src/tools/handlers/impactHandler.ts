@@ -645,7 +645,8 @@ export function handleQueryDocs(
   if (args.mode === "behind") {
     const report = findDocsBehindCode(store, args.repoId, {
       minDaysBehind: args.minDaysBehind,
-      limit: args.limit
+      limit: args.limit,
+      includeArchived: args.includeArchived
     });
     return ctx.asText(
       {

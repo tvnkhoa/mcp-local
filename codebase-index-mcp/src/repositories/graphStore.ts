@@ -855,8 +855,8 @@ export class GraphStore {
     return findNonEnglishDocsImpl(this.db, repoId, minRatioPercent, limit);
   }
 
-  listDocMentionTargets(repoId: string): ReturnType<typeof listDocMentionTargetsImpl> {
-    return listDocMentionTargetsImpl(this.db, repoId);
+  listDocMentionTargets(repoId: string, includeArchived?: boolean): ReturnType<typeof listDocMentionTargetsImpl> {
+    return listDocMentionTargetsImpl(this.db, repoId, includeArchived);
   }
 
   findDocLinks(repoId: string, limit?: number): ReturnType<typeof findDocLinksImpl> {
