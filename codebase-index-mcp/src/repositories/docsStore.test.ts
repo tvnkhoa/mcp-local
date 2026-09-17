@@ -7,7 +7,8 @@ import {
   replaceDocsForFileImpl,
   upsertDocsImpl,
   upsertDocMentionsImpl,
-  findStaleDocsImpl
+  findStaleDocsImpl,
+  rebuildDocsFtsImpl
 } from "./docsStore.js";
 import { parseMarkdownFile } from "../services/extractors/markdownParser.js";
 import type { DocMentionRecord } from "../types/index.js";
@@ -106,4 +107,52 @@ test("nothing inside a fenced block reaches the prose signal", () => {
   const code = mentions.filter((m) => m.mentionType === "code_call").map((m) => m.mentionText);
   assert.ok(code.includes("Parse"), "the fenced identifier is recorded, as code");
   assert.ok(!prose.includes("Parse"), "and never as prose");
+});
+
+
+/**
+ * MCP-ISSUE-061(o). `docs_fts` is an external-content FTS5 table, and the old rebuild cleared it with
+ * `DELETE FROM docs_fts` — which requires reading each row's current text back out of `docs` to know
+ * which terms to drop. Every row `replaceDocsForFileImpl` had already deleted therefore left its
+ * terms behind pointing at a dead rowid, and the next MATCH raised
+ * `SQLITE_CORRUPT_VTAB: fts5: missing row N`.
+ *
+ * It went unnoticed for one reason: BOTH the rebuild and the search path catch and continue, so a
+ * corrupt index looked exactly like a repo with no docs lane, and `mode:"search"` quietly served
+ * unranked LIKE substring hits instead. On the live workspace database every repo was in this state.
+ *
+ * The delete-then-rebuild sequence below is the minimum that reproduces it. A single-pass test
+ * cannot: a freshly built index is always consistent.
+ */
+test("docs_fts survives a file's docs being replaced", () => {
+  const conn = db();
+
+  const rows = (fp: string, n: number) =>
+    Array.from({ length: n }, (_, i) => ({
+      repoId: "hub",
+      docId: `${fp}:${i}`,
+      filePath: fp,
+      headingPath: `${fp}#h${i}`,
+      contentType: "prose" as const,
+      text: `the pipeline resolves edges in pass ${i}`,
+      level: 2
+    }));
+
+  upsertDocsImpl(conn, [...rows("a.md", 3), ...rows("b.md", 3)]);
+  rebuildDocsFtsImpl(conn);
+
+  // The operation that orphaned the index: one file's docs deleted and re-written.
+  replaceDocsForFileImpl(conn, "hub", "a.md", rows("a.md", 2), []);
+  rebuildDocsFtsImpl(conn);
+
+  const matched = conn
+    .prepare(
+      `select count(*) as c from docs_fts
+       inner join docs on docs.doc_id = docs_fts.doc_id
+       where docs_fts match ? and docs.repo_id = ?`
+    )
+    .get("pipeline", "hub") as { c: number };
+
+  // Five rows survive the replace (2 + 3); all five must be reachable through FTS.
+  assert.equal(matched.c, 5, "docs_fts must answer MATCH after a replace, not raise SQLITE_CORRUPT_VTAB");
 });

@@ -825,7 +825,7 @@ export class GraphStore {
     level: number | null;
     startLine: number | null;
     endLine: number | null;
-    matchTier: "strict" | "broad";
+    matchTier: "strict" | "broad" | "fallback";
     resolvedMentions: { symbolId: string; symbolName: string | null; mentionText: string }[];
   }[] {
     return searchDocsImpl(this.db, repoId, query, limit, buildFtsQuery, buildIntentFtsQuery, includeSymbols, contentTypes, includeArchived, matchMode, maxPerFile);

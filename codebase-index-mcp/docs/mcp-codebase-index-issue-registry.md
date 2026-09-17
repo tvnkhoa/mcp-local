@@ -2965,3 +2965,139 @@ it is no longer the standout.
 
 What survives all four: the server writes nothing at the JS level, it dies during or just after an
 `index_repository` call, and it never reproduces standalone.
+
+
+### `mode:"behind"` — two defects, found on `wec.aria` (2026-09-17)
+
+Both are the shape this program keeps finding: **a number describing something other than the list
+beside it.**
+
+**(l) `newerCode` was capped at five with no total.** `docFreshness.ts` deduplicated the newer code
+files by path and then `.slice(0, 5)`, reporting neither the cap nor the count. On `wec.aria`,
+**37 of 106 rows were truncated, hiding 206 code files**; the widest,
+`specs/SPEC-021-ingest-http-surface.md`, showed 5 of **22**. A review queue whose rows all look five
+files wide cannot be prioritised — the doc trailing 22 files was indistinguishable from one trailing
+one. Fixed by adding `newerCodeTotal` beside the sample. mcp-local: 6 rows, 22 hidden files, widest
+12.
+
+**(m) `docsCompared` counted documents that were never compared.** `filesCompared: byDoc.size` was
+read off the map of documents *with mentions*, while the loop below it `continue`s on any document
+git has no commit time for. Those documents were counted as compared while no comparison ran:
+**147 → 145** on `wec.aria`, **69 → 65** on mcp-local. Now counted inside the loop.
+
+**Refuted while measuring this.** The four top rows all cited `Customer` in
+`packages/contracts/src/entities/customer.ts`, committed that day, which looked like one touched file
+flooding the queue. It is not: the top drivers are `identity/src/introspection.ts` (26 rows),
+`contracts/src/entities/market.ts` (24) and `core/ports/index.ts` (21) out of 106 — spread, not a
+flood. The 72% rate on `wec.aria` is real; it is a docs-first repo mid-refactor.
+
+### (n) `mode:"drift"` precision was ~0/6 on an unfamiliar repo (2026-09-17)
+
+First run of `drift` against `wec.aria` returned 99 candidates whose **top six were all false
+positives**, in three classes:
+
+| Class | Example | Why it is not drift |
+|---|---|---|
+| A backticked English word | `terminate` → `terminated`, `retrieved` → `Retriever`, `schedule` → `scheduler`, `verified` → `VERIFIER` | Backticking a word is typography; the metric then matches any symbol sharing its root |
+| Nearest symbol in test / fixture / build output | `VERIFIER` in `dep-lint/samples/`, `MarketRegistry` in `core/dist-runtime/` | Nobody renamed a document's subject to a symbol living in a fixture or a compiled copy |
+| A live enum or config **value** | `erasure_queued` (0.93 vs `ERASURE_QUEUE`), documented under `4. Enumerations` | The document describes a value that exists; the enum is working as intended |
+
+Three guards, each measured on two repos before shipping, each **reporting its own count** in
+`suppressedAsNoise` so the queue never shrinks silently:
+
+- `isPlainWord` — a single all-lowercase alphabetic token. Removes 39/99 and 25/61. Stated cost: a
+  genuine one-word lowercase rename (`orient` → `orientate`) goes with them, the same trade the
+  existing convention and plural guards already make.
+- `isNonProductionPath` — test, spec, fixture, sample, mock, and `dist*`/`build`/`out`/`coverage`.
+  Removes 20 and 2.
+- `literalExists` — the mention text appears verbatim in `string_literals` for that repo. Removes 11
+  and 7.
+
+Plus a widened plural guard: `stem` strips one `s`, so `deprecatedAliases` stemmed to
+`deprecatedaliase` and never met `deprecatedAlias`. Comparing the **set** `{key, key−s, key−es}`
+catches both and can only add matches — stripping `-es` unconditionally would break `nodes`/`node`.
+
+**Result: 99 → 29 on `wec.aria`, 61 → 27 on mcp-local**, and the survivors are what the mode was for:
+`normalizedPath` → `normalizePath`, `callEdgesUnresolved` → `callEdgesResolved`,
+`filesUnscanned` → `filesScanned`, `hasOnConflictUpdate` → `hasOnConflictDoUpdate`.
+
+**Known residue, not fixed.** Antonym pairs score high and mean opposite things — `calleeCount` vs
+`callerCount`. Separating them needs semantics, and a document naming `filesUnscanned` where only
+`filesScanned` exists is arguably a real doc error, so they stay.
+
+### "Connection closed" — occurrence 5, and the "load" framing is refuted
+
+`verify:enhancements`, 8.3s, slot **3 of 41**. Standalone immediately after: PASS. Three suite runs
+the same afternoon went pass / fail / pass, so it is roughly one in three.
+
+Slot 3 kills the working frame. `scripts/run-tests.mjs` has **no concurrency** — no `Promise.all`, no
+pool, no worker cap — so nothing runs beside it, and the only two harnesses before it are
+`test:unit` (node:test, no DB, no server) and `guard:no-llm-runtime` (a static import scan). Neither
+boots a server, opens the index or spawns git. There is no accumulated state for them to have left.
+
+So "load-dependent" was the wrong word for "only fails inside the suite", and the difference between
+suite and standalone is now unexplained rather than explained. What still holds across all five: the
+server writes nothing at the JS level, it dies during or just after `index_repository`, and it has
+never reproduced standalone.
+
+
+### (o) `docs_fts` was corrupt on every repo, and both code paths hid it (2026-09-17)
+
+**The largest defect in this program, and it was invisible from inside the test suite.**
+
+Found by asking `wec.aria` a question whose wording is a heading in
+`docs/14-software-architecture.md`. It returned `count: 1` — that heading — and no body text. The
+direct SQL underneath returned **43 rows** for the same terms. Probing it raised the reason:
+
+```
+SqliteError: fts5: missing row 14564 from content table 'main'.'docs'   (SQLITE_CORRUPT_VTAB)
+```
+
+Every repo, every `MATCH`: `mcp-local`, `wec.aria` and `codebase-index-mcp` all threw. So
+`mode:"search"` had been answering from the **LIKE substring fallback** — unranked, no prefix
+matching, no two-tier recall — for as long as the corruption existed. The Stage 5 ranking work was
+running on nothing.
+
+**Cause.** `docs_fts` is external-content (`content='docs'`). The rebuild cleared it with
+`DELETE FROM docs_fts`, which on such a table must read every row's *current* text back out of
+`docs` to know which terms to remove. Reproduced in isolation, that `DELETE` raises
+`SQLITE_CORRUPT_VTAB: database disk image is malformed` on the **first** call — so the chunked
+re-insert that followed was always building on a table that had just failed to clear. The one
+correct statement is `INSERT INTO docs_fts(docs_fts) VALUES('rebuild')`, which re-reads the content
+table from scratch.
+
+**Why nobody saw it.** Two `catch` blocks, both behaving as designed:
+
+- `rebuildDocsFtsImpl` caught the failure and logged a warning into the index run's output.
+- `searchDocsImpl` caught it as `// FTS unavailable` and fell through to LIKE — and then labelled
+  those rows `matchTier: "broad"`, asserting an FTS tier that had never run.
+
+A corrupt index was therefore indistinguishable from a repo with no docs lane, and the tool reported
+a confident-looking answer either way. This is MCP-ISSUE-058(b)'s rule — *padding that looks
+identical to a direct hit* — reappearing one layer down.
+
+**Fixed, three parts.**
+
+1. `rebuildDocsFtsImpl` uses `'rebuild'`. It is also ~10x faster: **196 ms for 10,882 rows**, one
+   pass in C, against the chunked loop it replaces.
+2. `matchTier` gains `"fallback"`. A LIKE row is now labelled as one, and `query_docs` emits a
+   `degraded` string naming the repair.
+3. `searchDocsImpl` distinguishes *corrupt* from *unavailable* and, on corrupt, repairs once and
+   re-runs both tiers. A read-only handle throws again and falls through to the honest fallback.
+
+**Measured, same query, same corrupt database:** `count: 1` (one heading) → **6 ranked results, five
+of them prose**, from five different documents.
+
+**Guarded.** `docsStore.test.ts` gained a test that writes two files' docs, rebuilds, replaces one
+file's docs, rebuilds again, and asserts the surviving five rows are reachable through `MATCH`. A
+single-pass test cannot catch this — a freshly built index is always consistent — which is the same
+reason MCP-ISSUE-049 escaped its first fix. Verified red against the old rebuild. 177/177 unit.
+
+**The live workspace index was repaired in place** (489 ms); `'pipeline'` now matches 46 / 154 / 1
+rows across the three repos instead of raising.
+
+### "Connection closed" — occurrence 6
+
+`verify:enhancements` failed in the suite again and passed standalone immediately after, with the
+`docs_fts` work in the tree. Unrelated to it, and unchanged in signature. Three of the four suite runs
+this afternoon failed at that harness, which is the highest rate observed so far.

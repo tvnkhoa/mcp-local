@@ -27,7 +27,12 @@ export type DocBehindRow = {
   docCommittedAt: string;
   codeCommittedAt: string;
   daysBehind: number;
-  /** The mentioned symbols whose files are newer than the document, newest first. */
+  /**
+   * Distinct code FILES newer than the document. `newerCode` below is capped at five of them, so
+   * this is the breadth of the gap; the array is a sample, not the set.
+   */
+  newerCodeTotal: number;
+  /** Up to five of those files, newest first, each named by one symbol the document mentions. */
   newerCode: { symbolName: string; filePath: string; committedAt: string }[];
 };
 
@@ -118,9 +123,13 @@ export function findDocsBehindCode(
   }
 
   const rows: DocBehindRow[] = [];
+  // Counted inside the loop, not as `byDoc.size`: a document git has never seen cannot be compared
+  // against anything, and reporting it as compared claims a freshness check that never ran.
+  let compared = 0;
   for (const [docPath, code] of byDoc) {
     const docTime = commitTimes.get(docPath);
     if (docTime === undefined) continue;
+    compared += 1;
 
     const newer = code
       .filter((c) => c.committedAt > docTime)
@@ -130,18 +139,21 @@ export function findDocsBehindCode(
     const daysBehind = Math.floor((newer[0].committedAt - docTime) / DAY_SECONDS);
     if (daysBehind < minDaysBehind) continue;
 
+    // Deduplicated by code file: ten symbols in one file is one reason to look, not ten.
+    const distinct = [...new Map(newer.map((c) => [c.filePath, c])).values()];
+
     rows.push({
       filePath: docPath,
       docCommittedAt: iso(docTime),
       codeCommittedAt: iso(newer[0].committedAt),
       daysBehind,
-      // Deduplicated by code file: ten symbols in one file is one reason to look, not ten.
-      newerCode: [...new Map(newer.map((c) => [c.filePath, c])).values()]
+      newerCodeTotal: distinct.length,
+      newerCode: distinct
         .slice(0, 5)
         .map((c) => ({ symbolName: c.symbolName, filePath: c.filePath, committedAt: iso(c.committedAt) }))
     });
   }
 
   rows.sort((a, b) => b.daysBehind - a.daysBehind);
-  return { rows: rows.slice(0, limit), total: rows.length, filesCompared: byDoc.size };
+  return { rows: rows.slice(0, limit), total: rows.length, filesCompared: compared };
 }

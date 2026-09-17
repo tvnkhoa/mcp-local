@@ -143,57 +143,50 @@ export function upsertDocMentionsImpl(db: Database.Database, mentions: DocMentio
 export function rebuildDocsFtsImpl(db: Database.Database): void {
   const start = Date.now();
   try {
-    const countStmt = db.prepare(`SELECT COUNT(*) as cnt FROM docs WHERE text IS NOT NULL`);
-    const { cnt: totalDocs } = countStmt.get() as { cnt: number };
+    const { cnt: totalDocs } = db
+      .prepare(`SELECT COUNT(*) as cnt FROM docs WHERE text IS NOT NULL`)
+      .get() as { cnt: number };
 
     if (totalDocs === 0) {
       indexLog(`[index-docs-fts] no docs to index`);
       return;
     }
 
-    try {
-      db.prepare(`DELETE FROM docs_fts`).run();
-    } catch (e) {
-      indexLog(`[index-docs-fts] docs_fts malformed, recreating table...`);
-      db.exec(`DROP TABLE IF EXISTS docs_fts`);
-      db.exec(`
-        CREATE VIRTUAL TABLE IF NOT EXISTS docs_fts USING fts5(
-          text,
-          doc_id UNINDEXED,
-          repo_id UNINDEXED,
-          content='docs',
-          content_rowid='rowid'
-        )
-      `);
-    }
+    /**
+     * `docs_fts` is an EXTERNAL-CONTENT table (`content='docs'`), and this one statement is the only
+     * correct way to rebuild one: FTS5 re-reads the content table from scratch and discards whatever
+     * it held.
+     *
+     * What was here before — `DELETE FROM docs_fts` followed by a chunked
+     * `INSERT ... SELECT rowid, text ... FROM docs` — cannot do that. On an external-content table a
+     * DELETE has to read each row's CURRENT text out of `docs` to know which terms to remove, so any
+     * row `replaceDocsForFileImpl` had already deleted left its terms behind, pointing at a rowid
+     * that no longer exists. The re-insert then added fresh rowids on top. The result is an index
+     * that reports `SQLITE_CORRUPT_VTAB: fts5: missing row N from content table 'main'.'docs'` on
+     * every `MATCH`, and the failure is invisible because both this function and the search path
+     * catch and continue.
+     *
+     * Measured on the live workspace DB: every repo threw on every MATCH, and `mode:"search"` had
+     * silently degraded to a LIKE substring scan. `'rebuild'` repaired 10,882 rows in 196 ms — an
+     * order of magnitude faster than the chunked loop it replaces, because it is one pass in C.
+     */
+    db.exec(`INSERT INTO docs_fts(docs_fts) VALUES('rebuild')`);
+    db.exec(`INSERT INTO docs_fts(docs_fts) VALUES('optimize')`);
 
-    const chunkSize = 5000;
-    const chunks = Math.ceil(totalDocs / chunkSize);
-
-    for (let chunk = 0; chunk < chunks; chunk += 1) {
-      const offset = chunk * chunkSize;
-      db.prepare(
-        `INSERT INTO docs_fts(rowid, text, doc_id, repo_id)
-         SELECT rowid, text, doc_id, repo_id FROM docs
-         WHERE text IS NOT NULL
-         ORDER BY rowid
-         LIMIT ? OFFSET ?`
-      ).run(chunkSize, offset);
-
-      if ((chunk + 1) % 2 === 0 || chunk === chunks - 1) {
-        const pct = Math.round(((chunk + 1) / chunks) * 100);
-        const elapsed = Date.now() - start;
-        indexLog(`[index-docs-fts] ${pct}% | ${Math.min((chunk + 1) * chunkSize, totalDocs)}/${totalDocs} docs | ${elapsed}ms`);
-      }
-    }
-
-    db.prepare(`INSERT INTO docs_fts(docs_fts) VALUES('optimize')`).run();
-
-    const elapsed = Date.now() - start;
-    indexLog(`[index-docs-fts] completed ${totalDocs} docs in ${elapsed}ms`);
+    indexLog(`[index-docs-fts] rebuilt ${totalDocs} docs in ${Date.now() - start}ms`);
   } catch (e) {
     indexWarn(`[index-docs-fts-error] rebuild failed: ${e instanceof Error ? e.message : String(e)}`);
   }
+}
+
+/**
+ * True when `docs_fts` cannot answer a MATCH. Distinguishes the two reasons, because they need
+ * different responses: a missing table means the docs lane was never indexed, while a corrupt one
+ * means the index is there and lying.
+ */
+function ftsFailureKind(e: unknown): "corrupt" | "unavailable" {
+  const msg = e instanceof Error ? e.message : String(e);
+  return /fts5:|SQLITE_CORRUPT|missing row/i.test(msg) ? "corrupt" : "unavailable";
 }
 
 // ── Resolve doc mentions ───────────────────────────────────────────────
@@ -421,8 +414,12 @@ export function searchDocsImpl(
   level: number | null;
   startLine: number | null;
   endLine: number | null;
-  /** "strict" = matched the AND query; "broad" = came from the OR top-up tier (Stage 5). */
-  matchTier: "strict" | "broad";
+  /**
+   * "strict" = matched the AND query; "broad" = came from the OR top-up tier (Stage 5);
+   * "fallback" = FTS could not answer and this row came from a LIKE substring scan, which is not
+   * ranked at all. A fallback row used to be labelled "broad", asserting a tier that never ran.
+   */
+  matchTier: "strict" | "broad" | "fallback";
   resolvedMentions: { symbolId: string; symbolName: string | null; mentionText: string }[];
 }[] {
   const ftsQuery = buildFtsQuery(query);
@@ -537,8 +534,33 @@ export function searchDocsImpl(
       }
     }
     usedFts = true;
-  } catch {
-    // FTS unavailable
+  } catch (e) {
+    /**
+     * A corrupt `docs_fts` is repairable in one statement and roughly 200 ms, and the alternative is
+     * every future search on this database silently returning LIKE substring hits. So try once, then
+     * re-run the tiers. A read-only or concurrently-locked handle throws again here and we fall
+     * through to LIKE, which is the honest outcome and is now labelled as such.
+     */
+    if (ftsFailureKind(e) === "corrupt") {
+      try {
+        db.exec(`INSERT INTO docs_fts(docs_fts) VALUES('rebuild')`);
+        docIds = runFts(ftsQuery, desiredLimit);
+        strictCount = docIds.length;
+        if (matchMode !== "strict" && docIds.length < desiredLimit) {
+          const seen = new Set(docIds);
+          for (const id of runFts(buildIntentFtsQuery(query), desiredLimit * 2)) {
+            if (docIds.length >= desiredLimit) break;
+            if (seen.has(id)) continue;
+            seen.add(id);
+            docIds.push(id);
+          }
+        }
+        usedFts = true;
+      } catch {
+        docIds = [];
+        strictCount = 0;
+      }
+    }
   }
 
   /**
@@ -565,7 +587,7 @@ export function searchDocsImpl(
     level: number | null;
     startLine: number | null;
     endLine: number | null;
-    matchTier: "strict" | "broad";
+    matchTier: "strict" | "broad" | "fallback";
     resolvedMentions: { symbolId: string; symbolName: string | null; mentionText: string }[];
   }[] = [];
 
@@ -624,7 +646,11 @@ export function searchDocsImpl(
         .sort((a, b) => rankOf(a.docId) - rankOf(b.docId))
         .map((doc) => ({
           ...doc,
-          matchTier: (rankOf(doc.docId) < strictCount ? "strict" : "broad") as "strict" | "broad",
+          matchTier: (!usedFts
+            ? "fallback"
+            : rankOf(doc.docId) < strictCount
+              ? "strict"
+              : "broad") as "strict" | "broad" | "fallback",
           resolvedMentions: mentionsByDoc.get(doc.docId) ?? []
         }))
     );
@@ -668,7 +694,7 @@ export function searchDocsImpl(
           level: null,
           startLine: row.line,
           endLine: row.line,
-          matchTier: "broad" as const,
+          matchTier: (usedFts ? "broad" : "fallback") as "strict" | "broad" | "fallback",
           resolvedMentions: [{ symbolId: row.symbolId, symbolName: row.symbolName, mentionText: row.symbolName }]
         });
       }
@@ -1120,7 +1146,12 @@ export function findDriftingDocsImpl(
   minSimilarity = 0.75,
   limit = DOCS_PAGE_LIMIT,
   includeCodeMentions = false
-): { rows: DriftRow[]; total: number; scanned: number } {
+): {
+  rows: DriftRow[];
+  total: number;
+  scanned: number;
+  suppressed: { nonProductionTarget: number; plainWord: number; liveLiteral: number };
+} {
   const typeFilter = includeCodeMentions ? "" : "and dm.mention_type != 'code_call'";
 
   const unresolved = db
@@ -1136,7 +1167,8 @@ export function findDriftingDocsImpl(
     )
     .all(repoId) as { mentionText: string; mentionType: string; docCount: number }[];
 
-  if (unresolved.length === 0) return { rows: [], total: 0, scanned: 0 };
+  const suppressed = { nonProductionTarget: 0, plainWord: 0, liveLiteral: 0 };
+  if (unresolved.length === 0) return { rows: [], total: 0, scanned: 0, suppressed };
 
   const symbols = db
     .prepare(`select symbol_id as symbolId, name, kind, file_path as filePath from symbols where repo_id = ? and kind != 'module'`)
@@ -1187,15 +1219,72 @@ export function findDriftingDocsImpl(
    * on top of the convention key removed three of the five highest-scoring rows on this repo.
    */
   const stem = (name: string) => conventionKey(name).replace(/s$/, "");
+  /**
+   * `stem` strips one `s`, which handles `sourceFiles`/`sourceFile` but not an `-es` plural:
+   * `deprecatedAliases` stems to `deprecatedaliase`, never meeting `deprecatedalias`. Comparing the
+   * SET of candidate stems instead catches both and can only ever add matches, since the plain stem
+   * stays in the set — stripping `-es` unconditionally would break `nodes`/`node`.
+   */
+  const stems = (name: string) => {
+    const key = conventionKey(name);
+    return new Set([key, key.replace(/s$/, ""), key.replace(/es$/, "")]);
+  };
+  const sameIdentifier = (a: string, b: string) => {
+    const bStems = stems(b);
+    for (const candidate of stems(a)) if (bStems.has(candidate)) return true;
+    return false;
+  };
+
+  /**
+   * Three precision guards, added after `mode:"drift"` was first run against an unfamiliar repo and
+   * returned 0 of its top 6 rows as real drift. Each removes a class, not a case, and each reports
+   * how many it removed — a filter that silently shrinks a queue is the defect it is fixing.
+   */
+
+  /**
+   * A document documents production code. A test, fixture or sample is the nearest NAME often enough
+   * (`terminate` -> `terminated` in `core/test/agent.test.ts`, `verified` -> `VERIFIER` in
+   * `dep-lint/samples/`) while being useless as a lead: nobody renamed the doc's subject to a symbol
+   * that lives in a fixture. Build output is excluded for the same reason — `dist-runtime/` is a
+   * compiled copy, so matching it points at a generated duplicate of the real symbol.
+   */
+  const isNonProductionPath = (filePath: string) => {
+    const p = filePath.replace(/\\/g, "/");
+    return (
+      /(^|\/)(tests?|__tests__|__mocks__|fixtures?|samples?|examples?|mocks?)(\/|$)/i.test(p) ||
+      /(^|\/)(dist|build|out|coverage)[^/]*(\/|$)/i.test(p) ||
+      /\.(test|spec)\.[cm]?[jt]sx?$/i.test(p)
+    );
+  };
+
+  /**
+   * A single all-lowercase alphabetic token is an English word, not an identifier: `terminate`,
+   * `retrieved`, `schedule`, `verified`. Backticking a word is a typographic habit, and the
+   * similarity metric then happily matches it to any symbol sharing its root.
+   *
+   * The cost is explicit: a genuine one-word lowercase rename (`orient` -> `orientate`) is dropped
+   * with them. That is the same trade the convention and plural guards above already make, and at 39
+   * of 99 rows on the repo this was measured against, the class is far too noisy to keep for it.
+   */
+  const isPlainWord = (text: string) => /^[a-z]+$/.test(text);
+
+  /**
+   * If the mention text exists verbatim as a string literal in this repo's code, the document is
+   * describing a live VALUE — an enum member, a status, a config key — not a dangling identifier.
+   * `erasure_queued` is documented under `4. Enumerations` and scored 0.93 against the variable
+   * `ERASURE_QUEUE`; it is not drift, it is the enum working as intended.
+   */
+  const literalExists = db.prepare(
+    `select 1 from string_literals where repo_id = ? and value = ? limit 1`
+  );
 
   const rows: DriftRow[] = [];
   for (const m of unresolved) {
     const bucket = byFirstChar.get(m.mentionText.charAt(0).toLowerCase()) ?? [];
-    const mentionStem = stem(m.mentionText);
     let best: (typeof symbols)[number] | null = null;
     let bestScore = 0;
     for (const sym of bucket) {
-      if (stem(sym.name) === mentionStem) {
+      if (sameIdentifier(sym.name, m.mentionText)) {
         // Same identifier, different casing/separators. Not drift — and not a candidate either,
         // because a closer-but-genuinely-different name should not win by default.
         best = null;
@@ -1210,6 +1299,19 @@ export function findDriftingDocsImpl(
       }
     }
     if (!best || bestScore < minSimilarity) continue;
+
+    if (isPlainWord(m.mentionText)) {
+      suppressed.plainWord += 1;
+      continue;
+    }
+    if (isNonProductionPath(best.filePath)) {
+      suppressed.nonProductionTarget += 1;
+      continue;
+    }
+    if (literalExists.get(repoId, m.mentionText) !== undefined) {
+      suppressed.liveLiteral += 1;
+      continue;
+    }
 
     const docs = docsFor.all(repoId, m.mentionText) as { docId: string; filePath: string; headingPath: string }[];
     // A mention whose doc rows have been pruned cannot be cited, and an uncitable finding is not
@@ -1227,7 +1329,12 @@ export function findDriftingDocsImpl(
   }
 
   rows.sort((a, b) => b.similarity - a.similarity || b.docCount - a.docCount);
-  return { rows: rows.slice(0, Math.max(1, limit)), total: rows.length, scanned: unresolved.length };
+  return {
+    rows: rows.slice(0, Math.max(1, limit)),
+    total: rows.length,
+    scanned: unresolved.length,
+    suppressed
+  };
 }
 
 // ── String similarity helpers (used by resolveMentions) ────────────────

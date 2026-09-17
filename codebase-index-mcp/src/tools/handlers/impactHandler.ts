@@ -613,6 +613,12 @@ export function handleQueryDocs(
         count: matched.length,
         returned: results.length,
         ...(dropped > 0 && { truncated: true, resultsDropped: dropped }),
+        // A `fallback` row means docs_fts could not answer and this is an unranked LIKE substring
+        // scan. Said out loud, because the previous behaviour was to label those rows `broad` and
+        // report them exactly like ranked hits.
+        ...(matched.some((m) => m.matchTier === "fallback") && {
+          degraded: "docs_fts could not be queried, so these are unranked substring matches. Run index_repository with docsMode='on' to rebuild it."
+        }),
         results,
         ...(matched.length === 0 && { hint: "no documentation matched — ensure the docs lane was indexed for this repo (index_repository with docsMode='on') and try broader query terms." })
       },
@@ -704,7 +710,7 @@ export function handleQueryDocs(
     // MCP-ISSUE-061 Stage 3. Unresolved mentions were already stored (`symbol_id is null`) and never
     // read back; this reads them, but only where a near-miss symbol exists — see findDriftingDocsImpl
     // for why the raw list is dominated by tool names rather than renames.
-    const { rows, total, scanned } = store.findDriftingDocs(
+    const { rows, total, scanned, suppressed } = store.findDriftingDocs(
       args.repoId,
       args.minSimilarity,
       args.limit,
@@ -718,6 +724,11 @@ export function handleQueryDocs(
         returned: rows.length,
         ...(total > rows.length && { droppedByLimit: total - rows.length }),
         unresolvedMentionsScanned: scanned,
+        // Near-misses that cleared the similarity bar and were then rejected as a known false-positive
+        // class. Reported rather than dropped quietly, so the queue's size is never a mystery.
+        ...(suppressed.plainWord + suppressed.nonProductionTarget + suppressed.liveLiteral > 0 && {
+          suppressedAsNoise: suppressed
+        }),
         minSimilarity: args.minSimilarity ?? 0.75,
         results: rows,
         ...(total === 0 && {
