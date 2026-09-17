@@ -591,7 +591,7 @@ export function handleQueryGraph(
  * `search` already had, which is also the convention every other read tool here follows.
  */
 export function handleQueryDocs(
-  args: { repoId: string; mode: "search" | "stale" | "coverage" | "drift" | "links" | "behind"; query?: string; symbolIds?: string[]; filePath?: string; limit: number; maxTokens?: number; minSimilarity?: number; minDaysBehind?: number; includeSymbols: boolean; includeCodeMentions: boolean; includeArchived?: boolean; matchMode?: "auto" | "strict" | "phrase"; contentTypes?: string[]; profile: string },
+  args: { repoId: string; mode: "search" | "stale" | "coverage" | "drift" | "links" | "behind" | "language"; query?: string; symbolIds?: string[]; filePath?: string; limit: number; maxTokens?: number; minSimilarity?: number; minDaysBehind?: number; minRatioPercent?: number; includeSymbols: boolean; includeCodeMentions: boolean; includeArchived?: boolean; matchMode?: "auto" | "strict" | "phrase"; contentTypes?: string[]; profile: string },
   ctx: HandlerContext
 ): CallToolResult {
   if (!ctx.constants.DOCS_TOOLS_ENABLED) {
@@ -615,6 +615,28 @@ export function handleQueryDocs(
         ...(dropped > 0 && { truncated: true, resultsDropped: dropped }),
         results,
         ...(matched.length === 0 && { hint: "no documentation matched — ensure the docs lane was indexed for this repo (index_repository with docsMode='on') and try broader query terms." })
+      },
+      profile
+    );
+  }
+
+  if (args.mode === "language") {
+    const report = store.findNonEnglishDocs(args.repoId, args.minRatioPercent, args.limit);
+    return ctx.asText(
+      {
+        repoId: args.repoId,
+        mode: "language",
+        count: report.total,
+        returned: report.rows.length,
+        ...(report.total > report.rows.length && { droppedByLimit: report.total - report.rows.length }),
+        filesScanned: report.filesScanned,
+        cleanFiles: report.cleanFiles,
+        results: report.rows,
+        ...(report.total === 0 && {
+          hint: report.filesScanned === 0
+            ? "no indexed documents for this repo — the docs lane may not be indexed (index_repository with docsMode='on')."
+            : "every indexed document is within the threshold. Non-ASCII typography (em-dashes, arrows, box-drawing) is deliberately not counted, so a clean result here means letters, not punctuation."
+        })
       },
       profile
     );

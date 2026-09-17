@@ -2792,3 +2792,60 @@ claiming a recall number.
 **Operational:** prose rows, doclinks and `doc_status` are all written at index time. An index built
 before these stages has none of them — run `index_repository(mode:"full", docsMode:"on")` after
 restarting the server.
+
+### Stage 5 + 6 outcome (2026-09-17)
+
+**Stage 5 — the plan was wrong about its own content, and the harness said so.** The plan called for
+`exact/phrase` matching. Phrase is NARROWER than the AND query that was already failing, so it would
+have moved nothing. What was actually broken: `buildFtsQuery` joins prefix terms with an implicit
+AND, so a nine-word question demanded all nine tokens in one chunk.
+
+```
+intent queries, strict AND   0/10   (7 of them returned no rows at all)
+intent queries, broad OR     7/10
+```
+
+`buildIntentFtsQuery` — the OR builder — already existed for symbol search and had never been wired
+to docs. `mode:"search"` now runs strict first and tops up from broad, labelling broad rows
+`matchTier:"broad"` per MCP-ISSUE-058(b). Result: **10/20 → 18/20**, past the plan's ≥15/20.
+
+Also fixed here: the LIKE fallback ran whenever FTS "matched nothing" (now: only when FTS is
+unavailable) and ordered by `rowid`; and 061(h)'s rank-99 sort key.
+
+The two residual misses are ranking limits, not defects — "why are servers not in the npm workspace"
+tops out at `backlog.md` instead of ADR 0001, and "which database environment is always read only"
+answers sqlserver instead of postgres. Stage 7 now has a target to beat rather than an argument.
+
+**Stage 6 — `mode:"language"`.** Non-ASCII **letters** (`\p{L}` outside Basic Latin), per chunk.
+
+The naive signal is worthless here: "any non-ASCII codepoint" flags **100 of 107 files**, because
+this prose is full of em-dashes (3 246), arrows (748), middots (578), box-drawing (~670) and check
+marks (317). Restricting to alphabetic characters flags **2 files at the 0.5% default** — exactly the
+two Vietnamese READMEs — with 105 clean. At 0.1% four more appear, and their "letters" are a Greek
+`Δ`: a true positive by the rule, and the reason the threshold exists.
+
+Per chunk rather than per file, because the text is mixed *within* paragraphs — Vietnamese prose
+wrapping English identifiers. That granularity is what makes it a progress meter:
+`postgres-mcp/README.md` reports 20 of 30 chunks flagged, so ten are already English.
+
+Computed on read, not stored: the scan is free at this corpus size and it works on an index built
+before the feature existed.
+
+**Stage 6.2 (cross-repo) needs no code.** The doc link graph already resolves within a registered
+repo tree, including a sub-repo like `codebase-index-mcp` inside `mcp-local`. Links *between*
+separately registered repos do not occur in practice — these are different projects. What remains is
+operational: run `index_repository` for the other repos. Noted so the item is not carried as
+outstanding engineering.
+
+### Still open: "Connection closed" in `verify:enhancements`
+
+New evidence, no diagnosis. It fails at **~8s**, far under any request timeout, so the server process
+is going away rather than the client giving up. Standalone: **3 of 3 passes**. Inside
+`scripts/run-tests.mjs`: intermittent, roughly one run in three, always at the same step.
+
+An earlier commit added a request timeout here on the theory that the SDK's 60s default was expiring,
+and one green run was read as confirmation. **That was wrong** — see the timing above. The timeout
+stays on consistency grounds; the comment in the harness now says it is not a fix.
+
+`SHOW_SERVER_STDERR=1` is wired into the harness. Run the SUITE with it set — not the harness alone,
+which does not reproduce — until the failure recurs, and read what the server wrote before it exited.

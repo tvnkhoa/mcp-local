@@ -72,7 +72,8 @@ import {
   findDocCoverageImpl,
   findDriftingDocsImpl,
   findDocLinksImpl,
-  listDocMentionTargetsImpl
+  listDocMentionTargetsImpl,
+  findNonEnglishDocsImpl
 } from "./docsStore.js";
 import {
   saveRefactorPreviewImpl,
@@ -847,6 +848,10 @@ export class GraphStore {
     total: number;
   } {
     return findStaleDocsImpl(this.db, repoId, symbolIds, includeCodeMentions, limit);
+  }
+
+  findNonEnglishDocs(repoId: string, minRatioPercent?: number, limit?: number): ReturnType<typeof findNonEnglishDocsImpl> {
+    return findNonEnglishDocsImpl(this.db, repoId, minRatioPercent, limit);
   }
 
   listDocMentionTargets(repoId: string): ReturnType<typeof listDocMentionTargetsImpl> {

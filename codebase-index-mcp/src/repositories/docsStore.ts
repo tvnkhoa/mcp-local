@@ -716,6 +716,134 @@ export function findDocCoverageImpl(
   return { rows, total };
 }
 
+// ── Language coverage ──────────────────────────────────────────────────
+
+export type LanguageRow = {
+  filePath: string;
+  docStatus: string | null;
+  chunks: number;
+  flaggedChunks: number;
+  nonAsciiLetters: number;
+  /** Non-ASCII letters as a percentage of the file's indexed text. */
+  ratioPercent: number;
+  /** The worst chunk, so a reviewer can start somewhere concrete. */
+  worstChunk: { startLine: number | null; ratioPercent: number; sample: string } | null;
+};
+
+/**
+ * Non-ASCII **letters** — `\p{L}` outside Basic Latin.
+ *
+ * MCP-ISSUE-061 Stage 6. The naive signal is "any non-ASCII codepoint", and it is worthless here:
+ * it flags **100 of 107 files**, because this workspace's prose is full of em-dashes (3 246), arrows
+ * (748), middots (578), box-drawing (~670) and check marks (317). Restricting to characters that are
+ * alphabetic flags **8 files**, and the top two are exactly the two Vietnamese READMEs — 573 and 415
+ * letters, about 5% of their text — while `— → ─ ✅ ·` all score zero.
+ *
+ * It is also general rather than Vietnamese-specific: Cyrillic, Greek and CJK are alphabetic too, so
+ * this stays correct if the corpus ever gains another language, which a diacritic range would not.
+ */
+function countNonAsciiLetters(text: string): number {
+  let n = 0;
+  for (const ch of text) {
+    if (ch.charCodeAt(0) < 128) continue;
+    if (/\p{L}/u.test(ch)) n += 1;
+  }
+  return n;
+}
+
+/**
+ * `query_docs{ mode:"language" }` — which documents are not yet normalized to English.
+ *
+ * Stage 6's plan is to normalize every document to English and then index cross-repo, which removes
+ * the multilingual requirement from retrieval. But that is **content work outside this codebase**,
+ * and until it is finished the index holds both languages. So this is two things at once: a guard a
+ * retrieval caller can consult, and a progress meter for the rewriting — the only way to know the
+ * normalization is done is to be able to count what is left.
+ *
+ * Computed on read rather than stored. The corpus is small enough that the scan is free, and it
+ * means the report works on an index built before this feature existed — no migration, no re-index.
+ * If it ever needs to filter inside SQL it becomes a column; today that would be a cost with no
+ * buyer.
+ */
+export function findNonEnglishDocsImpl(
+  db: Database.Database,
+  repoId: string,
+  minRatioPercent = 0.5,
+  limit = DOCS_PAGE_LIMIT
+): { rows: LanguageRow[]; total: number; filesScanned: number; cleanFiles: number } {
+  const rows = db
+    .prepare(
+      `
+      select file_path as filePath, doc_status as docStatus, text, start_line as startLine
+      from docs
+      where repo_id = ? and text is not null
+      `
+    )
+    .all(repoId) as { filePath: string; docStatus: string | null; text: string; startLine: number | null }[];
+
+  type Acc = LanguageRow & { chars: number };
+  const byFile = new Map<string, Acc>();
+
+  for (const row of rows) {
+    const key = row.filePath.replace(/\\/g, "/");
+    let acc = byFile.get(key);
+    if (!acc) {
+      acc = {
+        filePath: key,
+        docStatus: row.docStatus,
+        chunks: 0,
+        flaggedChunks: 0,
+        nonAsciiLetters: 0,
+        ratioPercent: 0,
+        worstChunk: null,
+        chars: 0
+      };
+      byFile.set(key, acc);
+    }
+    // `doc_status` is only on the file-level row, so take it wherever it appears.
+    if (row.docStatus !== null) acc.docStatus = row.docStatus;
+
+    const letters = countNonAsciiLetters(row.text);
+    acc.chunks += 1;
+    acc.chars += row.text.length;
+    acc.nonAsciiLetters += letters;
+
+    if (letters === 0) continue;
+    const chunkRatio = (letters / Math.max(1, row.text.length)) * 100;
+    // Per chunk, not per file: this text is mixed WITHIN paragraphs — Vietnamese prose wrapping
+    // English identifiers — so a file-level verdict would be too coarse to act on.
+    if (chunkRatio >= minRatioPercent) acc.flaggedChunks += 1;
+    if (!acc.worstChunk || chunkRatio > acc.worstChunk.ratioPercent) {
+      acc.worstChunk = {
+        startLine: row.startLine,
+        ratioPercent: Math.round(chunkRatio * 100) / 100,
+        sample: row.text.replace(/\s+/g, " ").slice(0, 120)
+      };
+    }
+  }
+
+  const all: LanguageRow[] = [];
+  let cleanFiles = 0;
+  for (const acc of byFile.values()) {
+    const ratio = (acc.nonAsciiLetters / Math.max(1, acc.chars)) * 100;
+    if (acc.flaggedChunks === 0) {
+      cleanFiles += 1;
+      continue;
+    }
+    const { chars, ...row } = acc;
+    void chars;
+    all.push({ ...row, ratioPercent: Math.round(ratio * 100) / 100 });
+  }
+
+  all.sort((a, b) => b.nonAsciiLetters - a.nonAsciiLetters);
+  return {
+    rows: all.slice(0, Math.max(1, limit)),
+    total: all.length,
+    filesScanned: byFile.size,
+    cleanFiles
+  };
+}
+
 // ── Doc mention targets (for git-grounded freshness) ───────────────────
 
 /**

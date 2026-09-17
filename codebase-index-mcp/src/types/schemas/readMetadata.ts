@@ -55,7 +55,7 @@ export const getFileSummarySchema = z
 export const queryDocsSchema = (MAX_RESULT_LIMIT: number) => z
   .object({
     repoId: z.string().min(1).max(200),
-    mode: z.enum(["search", "stale", "coverage", "drift", "links", "behind"]),
+    mode: z.enum(["search", "stale", "coverage", "drift", "links", "behind", "language"]),
     query: z.string().min(1).max(200).optional(),
     symbolIds: z.array(z.string().min(1).max(200)).min(1).max(100).optional(),
     filePath: z.string().min(1).optional(),
@@ -111,6 +111,12 @@ export const queryDocsSchema = (MAX_RESULT_LIMIT: number) => z
      * match, which would already have resolved; below ~0.7 unrelated identifiers start pairing.
      */
     minSimilarity: z.number().min(0.5).max(0.99).optional(),
+    /**
+     * MCP-ISSUE-061 Stage 6, mode="language" only: the minimum share of non-ASCII LETTERS in a chunk
+     * before it counts as un-normalized (default 0.5%). Letters, not codepoints — "any non-ASCII"
+     * flags 100 of this workspace's 107 files on em-dashes and arrows alone.
+     */
+    minRatioPercent: z.number().min(0).max(100).optional(),
     /** mode="behind" only: ignore gaps smaller than this many days (default 1). */
     minDaysBehind: z.number().int().min(0).max(3650).optional(),
     profile: responseProfileSchema.default("compact")
