@@ -138,6 +138,7 @@ export function buildReadMetadataTools(deps: CodebaseIndexDeps): AnyToolDefiniti
         minRatioPercent: { type: "number", minimum: 0, maximum: 100, description: "mode=language only: minimum share of non-ASCII letters in a chunk before it counts as un-normalized (default 0.5)." },
         minDaysBehind: { type: "integer", minimum: 0, maximum: 3650, description: "mode=behind only: ignore gaps smaller than this many days (default 1)." },
         minSimilarity: { type: "number", minimum: 0.5, maximum: 0.99, description: "mode=drift only: how close a symbol name must be to an unresolved mention to count as a probable rename (default 0.75)." },
+        maxPerFile: { type: "integer", minimum: 0, maximum: 20, description: "mode=search only: at most this many chunks from any one file (default 1, 0 disables). A five-row budget spent on one file five times tells you less than five files." },
         matchMode: { type: "string", enum: ["auto", "strict", "phrase"], description: "mode=search only: auto (default) runs a strict AND match then tops up from a broad OR match, labelling each row with matchTier; strict returns AND matches only; phrase requires the words adjacent and in order." },
         maxTokens: { type: "integer", minimum: 200, maximum: 50000, description: "mode=search only: approximate payload budget for results (default 10000). Caps response SIZE where limit caps row COUNT; drops lowest-ranked results and reports truncated + resultsDropped." },
         // MCP-ISSUE-049: `profile` was accepted by the zod schema and never advertised, so a client

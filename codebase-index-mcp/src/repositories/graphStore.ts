@@ -814,7 +814,8 @@ export class GraphStore {
     includeSymbols = false,
     contentTypes: readonly string[] | null = null,
     includeArchived = false,
-    matchMode: "auto" | "strict" | "phrase" = "auto"
+    matchMode: "auto" | "strict" | "phrase" = "auto",
+    maxPerFile?: number
   ): {
     docId: string;
     filePath: string;
@@ -827,7 +828,7 @@ export class GraphStore {
     matchTier: "strict" | "broad";
     resolvedMentions: { symbolId: string; symbolName: string | null; mentionText: string }[];
   }[] {
-    return searchDocsImpl(this.db, repoId, query, limit, buildFtsQuery, buildIntentFtsQuery, includeSymbols, contentTypes, includeArchived, matchMode);
+    return searchDocsImpl(this.db, repoId, query, limit, buildFtsQuery, buildIntentFtsQuery, includeSymbols, contentTypes, includeArchived, matchMode, maxPerFile);
   }
 
   findStaleDocs(

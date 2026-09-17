@@ -104,6 +104,12 @@ export const queryDocsSchema = (MAX_RESULT_LIMIT: number) => z
      * in order.
      */
     matchMode: z.enum(["auto", "strict", "phrase"]).default("auto"),
+    /**
+     * MCP-ISSUE-061 Stage 6b, mode="search": at most this many chunks from one file (default 1,
+     * 0 disables). Measured over the recall harness at limit 5: uncapped returned 83 distinct files
+     * across 100 slots, capped at 1 returned 97, with recall unchanged at 18/20.
+     */
+    maxPerFile: z.number().int().min(0).max(20).optional(),
     maxTokens: z.number().int().min(200).max(50_000).optional(),
     /**
      * MCP-ISSUE-061 Stage 3, mode="drift" only: how close a symbol name must be to an unresolved

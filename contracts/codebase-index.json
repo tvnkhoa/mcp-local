@@ -1507,6 +1507,12 @@
             ],
             "type": "string"
           },
+          "maxPerFile": {
+            "description": "mode=search only: at most this many chunks from any one file (default 1, 0 disables). A five-row budget spent on one file five times tells you less than five files.",
+            "maximum": 20,
+            "minimum": 0,
+            "type": "integer"
+          },
           "maxTokens": {
             "description": "mode=search only: approximate payload budget for results (default 10000). Caps response SIZE where limit caps row COUNT; drops lowest-ranked results and reports truncated + resultsDropped.",
             "maximum": 50000,

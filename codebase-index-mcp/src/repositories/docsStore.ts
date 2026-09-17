@@ -393,7 +393,22 @@ export function searchDocsImpl(
    * "strict" keeps the pre-Stage-5 behaviour for a caller that wants precision only; "phrase"
    * requires the words adjacent and in order, for a caller who knows the exact wording.
    */
-  matchMode: "auto" | "strict" | "phrase" = "auto"
+  matchMode: "auto" | "strict" | "phrase" = "auto",
+  /**
+   * MCP-ISSUE-061 Stage 6b: at most this many chunks from any one file. 0 disables the cap.
+   *
+   * 1 by default, and the default is measured rather than chosen. Across the 20-query harness at
+   * `limit: 5` — 100 slots in total:
+   *
+   *     uncapped   83 distinct files (17 slots duplicated)
+   *     cap 2      84 distinct files (16 duplicated)  — almost nothing
+   *     cap 1      97 distinct files ( 3 duplicated)
+   *
+   * Recall is 18/20 in all three, so the cap costs nothing and returns 14 of 100 slots to documents
+   * that had been crowded out. The failure that prompted it: "which database environment is always
+   * read only" spent five of eight slots on two sqlserver files.
+   */
+  maxPerFile = 1
 ): {
   docId: string;
   filePath: string;
@@ -437,11 +452,28 @@ export function searchDocsImpl(
    * settled: padded results that look identical to direct hits are how a confident wrong answer gets
    * reported at `confidence: "high"`.
    */
-  const runFts = (matchExpr: string, want: number): string[] =>
-    db
+  /**
+   * MCP-ISSUE-061 Stage 6b — **tried, measured, removed.** Do not re-propose without new evidence.
+   *
+   * The Stage 3 link graph knows which documents this workspace points at most (`conventions.md`,
+   * `folder-convention.md` and `workflow.md` at 12 inbound each, ADR 0001 at 9), and bm25 cannot see
+   * that: it scores text, not standing. Blending it into the rank as a tie-break was the obvious
+   * cheap win before reaching for embeddings.
+   *
+   * It did nothing. At weight 0.15 the recall harness read 18/20 and result diversity 84 distinct
+   * files of 100 slots; at weight 0 — the term removed entirely — both numbers were IDENTICAL. The
+   * one query it was supposed to rescue ("why are the servers not part of the npm workspace", where
+   * ADR 0001 sits at rank 6) needed more than a tie-break's worth of push, and raising the weight
+   * until the test passed would have been fitting the metric rather than improving retrieval.
+   *
+   * What did work was the per-file cap below, which came out of looking at the same failure.
+   */
+
+  const runFts = (matchExpr: string, want: number): string[] => {
+    const rows = db
       .prepare(
         `
-        select docs_fts.doc_id as docId
+        select docs_fts.doc_id as docId, replace(docs.file_path, char(92), '/') as filePath, rank as score
         from docs_fts
         inner join docs on docs.doc_id = docs_fts.doc_id and docs.repo_id = ?
         where docs_fts match ? and docs.content_type in (${typePlaceholders}) ${archiveFilter}
@@ -449,8 +481,38 @@ export function searchDocsImpl(
         limit ?
         `
       )
-      .all(repoId, matchExpr, ...allowedTypes, ...archiveParams, want)
-      .map((r) => (r as { docId: string }).docId);
+      .all(repoId, matchExpr, ...allowedTypes, ...archiveParams, want) as {
+      docId: string;
+      filePath: string;
+      score: number;
+    }[];
+
+    /**
+     * At most `maxPerFile` chunks from any one file.
+     *
+     * Measured need, not taste: on "which database environment is always read only", five of the
+     * eight returned slots were two files — `.claude/skills/sqlserver-mcp/SKILL.md` three times and
+     * `sqlserver-mcp/skill/SKILL.md` twice — which crowded out every other document that had an
+     * answer. A caller with a five-row budget learns more from five files than from one file five
+     * times, and the runner-up chunks of a file it has already been shown add almost nothing.
+     */
+    const perFile = new Map<string, number>();
+    const cap = maxPerFile > 0 ? maxPerFile : Number.MAX_SAFE_INTEGER;
+    return rows
+      .map((r) => ({
+        docId: r.docId,
+        filePath: r.filePath,
+        score: r.score
+      }))
+      .sort((a, b) => a.score - b.score)
+      .filter((r) => {
+        const seen = perFile.get(r.filePath) ?? 0;
+        if (seen >= cap) return false;
+        perFile.set(r.filePath, seen + 1);
+        return true;
+      })
+      .map((r) => r.docId);
+  };
 
   try {
     db.prepare("select * from docs_fts limit 0").all();
@@ -875,6 +937,17 @@ export function listDocMentionTargetsImpl(
 export type DocLinkReport = {
   linkCount: number;
   docFileCount: number;
+  /**
+   * TRUE totals, not page lengths.
+   *
+   * The first cut of this returned only the capped arrays, and the handler reported
+   * `orphanCount: report.orphans.length` — the post-cap length presented as a total. With
+   * `limit: 6` it answered "6 orphans" for a repo that has 33. That is exactly MCP-ISSUE-061(c),
+   * the defect this whole entry filed against `mode:"coverage"`, reintroduced in the code written to
+   * fix it. Caught by running the tool against the real index rather than a fixture.
+   */
+  brokenTotal: number;
+  orphanTotal: number;
   broken: { fromFilePath: string; target: string }[];
   orphans: string[];
   hubs: { filePath: string; inboundCount: number }[];
@@ -939,6 +1012,8 @@ export function findDocLinksImpl(
   return {
     linkCount: links.length,
     docFileCount: docFiles.length,
+    brokenTotal: broken.length,
+    orphanTotal: orphans.length,
     broken: broken.slice(0, cap),
     orphans: orphans.slice(0, cap),
     hubs

@@ -591,7 +591,7 @@ export function handleQueryGraph(
  * `search` already had, which is also the convention every other read tool here follows.
  */
 export function handleQueryDocs(
-  args: { repoId: string; mode: "search" | "stale" | "coverage" | "drift" | "links" | "behind" | "language"; query?: string; symbolIds?: string[]; filePath?: string; limit: number; maxTokens?: number; minSimilarity?: number; minDaysBehind?: number; minRatioPercent?: number; includeSymbols: boolean; includeCodeMentions: boolean; includeArchived?: boolean; matchMode?: "auto" | "strict" | "phrase"; contentTypes?: string[]; profile: string },
+  args: { repoId: string; mode: "search" | "stale" | "coverage" | "drift" | "links" | "behind" | "language"; query?: string; symbolIds?: string[]; filePath?: string; limit: number; maxTokens?: number; minSimilarity?: number; minDaysBehind?: number; minRatioPercent?: number; includeSymbols: boolean; includeCodeMentions: boolean; includeArchived?: boolean; matchMode?: "auto" | "strict" | "phrase"; maxPerFile?: number; contentTypes?: string[]; profile: string },
   ctx: HandlerContext
 ): CallToolResult {
   if (!ctx.constants.DOCS_TOOLS_ENABLED) {
@@ -601,7 +601,7 @@ export function handleQueryDocs(
   const profile = resolveResponseProfile(args.profile as Parameters<typeof resolveResponseProfile>[0]);
 
   if (args.mode === "search") {
-    const matched = store.searchDocs(args.repoId, args.query!, args.limit, args.includeSymbols, args.contentTypes ?? null, args.includeArchived, args.matchMode);
+    const matched = store.searchDocs(args.repoId, args.query!, args.limit, args.includeSymbols, args.contentTypes ?? null, args.includeArchived, args.matchMode, args.maxPerFile);
     // MCP-ISSUE-061(d): `results` carries whole doc sections and nothing bounded it. The budget is
     // applied after ranking, so what survives is the most relevant prefix.
     const { kept: results, dropped } = applyResultBudget(matched, args.maxTokens);
@@ -675,8 +675,12 @@ export function handleQueryDocs(
         mode: "links",
         linkCount: report.linkCount,
         docFileCount: report.docFileCount,
-        brokenCount: report.broken.length,
-        orphanCount: report.orphans.length,
+        brokenCount: report.brokenTotal,
+        orphanCount: report.orphanTotal,
+        brokenReturned: report.broken.length,
+        orphansReturned: report.orphans.length,
+        ...(report.brokenTotal > report.broken.length && { brokenDroppedByLimit: report.brokenTotal - report.broken.length }),
+        ...(report.orphanTotal > report.orphans.length && { orphansDroppedByLimit: report.orphanTotal - report.orphans.length }),
         broken: report.broken,
         orphans: report.orphans,
         hubs: report.hubs,
