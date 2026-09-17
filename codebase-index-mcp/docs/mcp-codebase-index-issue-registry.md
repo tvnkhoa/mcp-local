@@ -2953,3 +2953,15 @@ identifier in a comment and a string with no import and no call — so it carrie
 scoping could not see it — plus two assertions: that the preview reaches that file, and that its
 `totalMatches` equals `refactor_replace_preview`'s. This defect survived for weeks because no harness
 asserted recall; both assertions fail if the graph scoping returns. 71/71.
+
+**Occurrence 4 (2026-09-17, later).** `verify:enhancements` again, 8.9s, step 5. Same signature:
+`server_starting`, `server_ready`, `✓ index verify-self · 238 files · 3.1s`, then nothing. Standalone
+immediately afterwards: PASS.
+
+It **weakens the runGit lead**. Occurrences 2 and 3 ended with `fatal: not a git repository`;
+1 and 4 did not. So the correlation is 2 of 4, not the 3 of 3 it looked like. Still worth the
+experiment — the deaths cluster around index runs, which is where the synchronous spawns are — but
+it is no longer the standout.
+
+What survives all four: the server writes nothing at the JS level, it dies during or just after an
+`index_repository` call, and it never reproduces standalone.
