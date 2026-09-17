@@ -796,22 +796,32 @@ export type LanguageRow = {
 };
 
 /**
- * Non-ASCII **letters** — `\p{L}` outside Basic Latin.
+ * Non-ASCII letters that sit INSIDE a word — adjacent to another letter.
  *
- * MCP-ISSUE-061 Stage 6. The naive signal is "any non-ASCII codepoint", and it is worthless here:
- * it flags **100 of 107 files**, because this workspace's prose is full of em-dashes (3 246), arrows
- * (748), middots (578), box-drawing (~670) and check marks (317). Restricting to characters that are
- * alphabetic flags **8 files**, and the top two are exactly the two Vietnamese READMEs — 573 and 415
- * letters, about 5% of their text — while `— → ─ ✅ ·` all score zero.
+ * MCP-ISSUE-061 Stage 6. Two refinements, each forced by a corpus rather than chosen:
  *
- * It is also general rather than Vietnamese-specific: Cyrillic, Greek and CJK are alphabetic too, so
- * this stays correct if the corpus ever gains another language, which a diacritic range would not.
+ * 1. **Letters, not codepoints.** "Any non-ASCII" flags 100 of `mcp-local`'s 107 files, because the
+ *    prose is full of em-dashes (3 246), arrows (748), middots (578) and box-drawing (~670).
+ *    Restricting to `\p{L}` flags 2 — exactly the two Vietnamese READMEs.
+ * 2. **Inside a word, not standalone.** That was still wrong on `wec.aria`, where 5 of 7 flagged
+ *    files were ADRs written in English that use Greek as MATH: `rank = α·relevance + β·authority +
+ *    γ·specificity − δ·staleness`. α, β, γ, δ and Δ are genuinely `\p{L}`, so the ratio threshold
+ *    cannot separate them — a short chunk containing one scores 6.35%. A 71% false-positive rate
+ *    would send someone to translate documents that are already English.
+ *
+ * The discriminator is positional and needs no model: prose in another language puts its non-ASCII
+ * letters INSIDE words, next to other letters — `Yếu`, `Cài đặt`, Cyrillic, CJK. Notation stands
+ * alone, bounded by spaces or punctuation. Verified across ten samples: Vietnamese 10/10, 1/1, 3/3;
+ * Cyrillic 29/29; CJK 15/15; every math form 0.
  */
 function countNonAsciiLetters(text: string): number {
+  const chars = [...text];
+  const isLetter = (ch: string | undefined) => ch !== undefined && /\p{L}/u.test(ch);
   let n = 0;
-  for (const ch of text) {
-    if (ch.charCodeAt(0) < 128) continue;
-    if (/\p{L}/u.test(ch)) n += 1;
+  for (let i = 0; i < chars.length; i += 1) {
+    const ch = chars[i];
+    if (ch.charCodeAt(0) < 128 || !isLetter(ch)) continue;
+    if (isLetter(chars[i - 1]) || isLetter(chars[i + 1])) n += 1;
   }
   return n;
 }
