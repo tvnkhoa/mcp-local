@@ -310,6 +310,8 @@ function extractMentionsFromCode(code: string, docId: string, repoId: string, me
 }
 
 const isTableRow = (line: string) => /^\s*\|/.test(line);
+/** The `|---|---|` row. A table has exactly one, directly under its header. */
+const isTableSeparator = (line: string) => /^\s*\|[\s:|-]*-[\s:|-]*\|/.test(line);
 
 /**
  * Split an accumulated prose run into chunks, respecting the one structure markdown has that cannot
@@ -356,19 +358,34 @@ function chunkProse(
 
     if (unit.isTable && unitChars > PROSE_CHUNK_CHARS) {
       flush(unit.start - 1);
-      // Header + separator repeated per fragment, or the cells lose their meaning.
-      const header = unit.lines.slice(0, 2);
-      const body = unit.lines.slice(2);
+      /**
+       * Repeat the header ONLY when this run actually has one.
+       *
+       * This used to take `lines.slice(0, 2)` unconditionally. Found on `wec.aria`: a decision log
+       * whose table rows are separated by blank lines, so what is one table to a reader arrives here
+       * as ELEVEN contiguous runs — the first carrying the header and separator, the other ten
+       * carrying data rows only. Slicing two lines off those ten promoted data rows to headers and
+       * then duplicated them into every fragment: 211 of 365 table chunks ended up with no separator
+       * row at all, and one chunk reached 17 625 characters against a 2 048 budget because the fake
+       * header compounded with rows that are themselves 6-8 KB each.
+       *
+       * A run with no separator row is not a table fragment that lost its header; it is a run that
+       * never had one, and inventing it is worse than omitting it.
+       */
+      const hasHeader = unit.lines.length >= 2 && isTableSeparator(unit.lines[1]);
+      const header = hasHeader ? unit.lines.slice(0, 2) : [];
+      const body = hasHeader ? unit.lines.slice(2) : unit.lines;
       const headerChars = header.reduce((n, l) => n + l.length + 1, 0);
       let group: string[] = [];
-      let groupStart = unit.start + 2;
+      const headerLines = header.length;
+      let groupStart = unit.start + headerLines;
       let groupChars = headerChars;
       for (let r = 0; r < body.length; r++) {
         const rowChars = body[r].length + 1;
         if (group.length > 0 && groupChars + rowChars > PROSE_CHUNK_CHARS) {
           out.push({ text: [...header, ...group].join("\n"), startLine: groupStart, endLine: unit.start + 1 + r });
           group = [];
-          groupStart = unit.start + 2 + r;
+          groupStart = unit.start + headerLines + r;
           groupChars = headerChars;
         }
         group.push(body[r]);
