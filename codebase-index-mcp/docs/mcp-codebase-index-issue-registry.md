@@ -2849,3 +2849,32 @@ stays on consistency grounds; the comment in the harness now says it is not a fi
 
 `SHOW_SERVER_STDERR=1` is wired into the harness. Run the SUITE with it set — not the harness alone,
 which does not reproduce — until the failure recurs, and read what the server wrote before it exited.
+
+### "Connection closed" — 2026-09-17 hunt: no diagnosis, but the blocker to diagnosing it is gone
+
+Six consecutive suite runs with capture on. It reproduced **once**, and what it produced settled two
+things and refuted one.
+
+**It is not specific to `verify:enhancements`.** The occurrence landed on
+`test:value-contract-impact`, with the same `McpError -32000` at
+`ChildProcess._handle.onexit` — the child process exits. So this is a property of the stdio server
+under `scripts/run-tests.mjs`, not of one script. Standalone it passed 3 of 3, and in the runner it
+is roughly one run in three.
+
+**The blocked-pipe mechanism does not explain it.** That mechanism is real — MCP-ISSUE-049
+demonstrated it here — but two data points contradict it as the cause of this:
+`verify-enhancements.mjs` failed while drained via `on("data")`, and `test-value-contract-impact.mjs`
+failed while drained via `resume()`. Mechanism still not established.
+
+**Why six runs produced nothing readable.** `transport.stderr?.resume()` unblocks the pipe by
+DISCARDING every byte. When the server dies, Node writes the stack trace to stderr, and that drain
+throws away precisely the thing worth reading. Counted across the harnesses: 7 drained nothing at all,
+6 used `resume()`, 2 used an `on("data")` no-op. Every one of the 15 either blocked or went silent.
+
+`scripts/test/_serverStderr.mjs` replaces all 15: always drain, keep the last 64 KB, print that tail
+when the process is about to exit non-zero, or stream it live under `SHOW_SERVER_STDERR=1`.
+
+**Next step, concretely:** run `npm run test` in a loop until a harness fails. The tail now prints
+automatically on the failing run — no env var needed. Read what the server wrote before it exited.
+Two earlier attempts at this item were closed on a theory that a single green run appeared to
+confirm; do not close it that way a third time.
