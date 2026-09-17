@@ -132,6 +132,18 @@ try {
   const fileAPath = join(tmpDir, "src", "serviceA.ts");
   writeFileSync(fileAPath, `export function oldFunctionName(): void {\n  console.log("hello");\n}\n`, "utf8");
 
+  // File D: mentions `oldFunctionName` in a COMMENT only — no import, no call, so the graph has no
+  // edge to it whatsoever. MCP-ISSUE-060 regression fixture: rename_assist used to scope its preview
+  // to the caller/importer graph, so a file like this was invisible and the rename left it behind.
+  const fileMentionsPath = join(tmpDir, "src", "mentionsOnly.ts");
+  writeFileSync(
+    fileMentionsPath,
+    `// oldFunctionName is described here in prose and nowhere called.
+export const NOTE = "see oldFunctionName";
+`,
+    "utf8"
+  );
+
   // File B: will be used for conflict test
   const fileBPath = join(tmpDir, "src", "serviceB.ts");
   writeFileSync(fileBPath, `export const MARKER_TOKEN_XYZ = "original";\n`, "utf8");
@@ -689,6 +701,34 @@ public sealed class FixtureNoRewrite
       JSON.stringify(renamePreviewJson ?? null).slice(0, 200)
     );
     assert(renamePreviewJson?.totalMatches > 0, "rename preview matches the identifier");
+
+    // MCP-ISSUE-060: the preview must reach a file the GRAPH does not connect. `mentionsOnly.ts`
+    // names the identifier in a comment and a string, with no import and no call — so it carries no
+    // edge, and the old caller/importer scoping could not see it. Compared against
+    // `refactor_replace_preview`, the documented alternative that always scanned repo-wide: parity
+    // is the assertion, because an equal count is the only evidence nothing was silently dropped.
+    const BACKSLASH = String.fromCharCode(92);
+    const renameFiles = (renamePreviewJson?.affectedFiles ?? []).map((f) => String(f).split(BACKSLASH).join("/"));
+    assert(
+      renameFiles.some((f) => f.endsWith("src/mentionsOnly.ts")),
+      "rename preview reaches a file with no graph edge to the symbol",
+      JSON.stringify(renameFiles).slice(0, 300)
+    );
+    const directPreview = readJson(await client.callTool({
+      name: "refactor_replace_preview",
+      arguments: {
+        repoId: testRepoId,
+        // word-boundary regex, built without a literal escape so the source stays copy-safe
+        find: BACKSLASH + "boldFunctionName" + BACKSLASH + "b",
+        replaceExpression: "freshFunctionName",
+        findMode: "regex", ambiguityThresholdPercent: 100, profile: "standard"
+      }
+    }));
+    assert(
+      renamePreviewJson?.totalMatches === directPreview?.totalMatches,
+      "rename_assist preview matches refactor_replace_preview hunk-for-hunk",
+      `rename_assist=${renamePreviewJson?.totalMatches} refactor_replace_preview=${directPreview?.totalMatches}`
+    );
 
     if (renamePreviewJson?.previewId && renamePreviewJson?.approvalToken) {
       const renameApply = await client.callTool({

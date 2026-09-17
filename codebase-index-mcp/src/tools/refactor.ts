@@ -51,7 +51,7 @@ export function buildRefactorTools(deps: CodebaseIndexDeps): AnyToolDefinition[]
 
   const renameAssist = defineTool({
     name: "rename_assist",
-    description: "Rename impact for a symbol: returns all callers and importers that need updating. Default (emitPreview=false) is read-only advisory (hints). Set emitPreview=true to get an applyable refactor preview (previewId + approvalToken) that renames the identifier on word boundaries across the affected files — then call refactor_replace_apply (use includeLowConfidence=true for top-level identifiers, which have no enclosing owner type). Use before refactoring to understand blast radius, or to execute the rename directly.",
+    description: "Rename impact for a symbol: returns all callers and importers that need updating. Default (emitPreview=false) is read-only advisory (hints). Set emitPreview=true to get an applyable refactor preview (previewId + approvalToken) that renames the identifier on word boundaries ACROSS THE REPOSITORY — not only the files the graph resolved, which used to cost 25-30% of occurrences (MCP-ISSUE-060, fixed 2026-09-17); pass scopePaths to narrow it deliberately — then call refactor_replace_apply (use includeLowConfidence=true for top-level identifiers, which have no enclosing owner type). Use before refactoring to understand blast radius, or to execute the rename directly.",
     input: schemas.renameAssistSchema(limits.maxResultLimit),
     inputSchema: {
       type: "object",
@@ -64,6 +64,7 @@ export function buildRefactorTools(deps: CodebaseIndexDeps): AnyToolDefinition[]
         limit: { type: "integer", minimum: 1, maximum: limits.maxResultLimit },
         emitPreview: { type: "boolean", description: "Return an applyable refactor preview instead of read-only hints." },
         wholeWord: { type: "boolean", description: "Match the identifier on word boundaries (default true)." },
+        scopePaths: { type: "array", items: { type: "string" }, maxItems: 200, description: "emitPreview only: restrict the scan to these path prefixes. Omit for a repository-wide scan, which is what a rename needs." },
         profile: PROFILE_PROP
       }
     },

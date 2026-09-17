@@ -30,7 +30,7 @@ import { resolveResponseProfile } from "../../middleware/responseFormatter.js";
 import type { HandlerContext } from "./handlerContext.js";
 
 export function handleRenameAssist(
-  args: { repoId: string; symbolId: string; newName: string; limit: number; emitPreview?: boolean; wholeWord?: boolean; profile: string },
+  args: { repoId: string; symbolId: string; newName: string; limit: number; emitPreview?: boolean; wholeWord?: boolean; scopePaths?: string[]; profile: string },
   ctx: HandlerContext
 ): CallToolResult {
   const { store } = ctx;
@@ -52,15 +52,32 @@ export function handleRenameAssist(
     ])
   ] as string[];
 
-  // emitPreview: turn the advisory rename into an applyable refactor preview (previewId + approvalToken)
-  // scoped to the symbol's own file + affected files, matching the identifier on word boundaries.
+  /**
+   * emitPreview: turn the advisory rename into an applyable preview.
+   *
+   * MCP-ISSUE-060: this used to scope the scan to `affectedFiles` — the declaring file plus whatever
+   * carried a resolved `CALLS` or `IMPORTS` edge to this exact symbolId. That is a **category error**.
+   * A rename must touch every TEXTUAL occurrence of the identifier; the graph only knows the subset
+   * it managed to resolve, and an `import { x } from "./y.js"` produces an IMPORTS edge to the MODULE
+   * `y.js`, not to the symbol `x`. A file that merely mentions the name — a type annotation, a
+   * re-export, a doc comment — contributed nothing at all.
+   *
+   * The preview therefore looked clean while missing most of the work, and applying it left other
+   * files calling a name that no longer existed. Measured on this repo, graph-scoped against the
+   * identical unscoped scan: 3 vs 4 hunks, 7 vs 10, 8 vs 11 — 25-30% missing. On `wec.communication-hub`,
+   * where the C# graph is sparser, the registry measured recall at 17-22%.
+   *
+   * So the scan is repo-wide by default, which is exactly what `refactor_replace_preview` does and
+   * what measured complete. `scopePaths` narrows it for a caller who wants that DELIBERATELY, rather
+   * than being narrowed silently by how much of the graph happened to resolve. The graph findings are
+   * still reported — they are a good answer to "who calls this", which is a different question from
+   * "where does this name appear".
+   */
   if (args.emitPreview) {
     const repo = store.getRepository(args.repoId);
     if (!repo) throw new McpError(ErrorCode.InvalidParams, `rename_assist: unknown repoId '${args.repoId}'. Run index_repository first.`);
     const wholeWord = args.wholeWord !== false;
-    // `affectedFiles` already leads with the declaring file; the Set is kept because
-    // `RefactorScopeInput.includePaths` must not carry a duplicate.
-    const includePaths = [...new Set(affectedFiles)];
+    const includePaths = [...new Set(args.scopePaths ?? [])];
     return createReplacePreview(
       ctx,
       repo.repoPath,

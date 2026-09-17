@@ -69,6 +69,13 @@ export const renameAssistSchema = (MAX_RESULT_LIMIT: number) => z
     limit: z.number().int().min(1).max(MAX_RESULT_LIMIT).default(50),
     emitPreview: z.boolean().default(false),
     wholeWord: z.boolean().default(true),
+    /**
+     * MCP-ISSUE-060, emitPreview only: narrow the scan DELIBERATELY. It used to be narrowed
+     * silently, to whatever the caller/importer graph resolved, which cost 25-30% of the occurrences
+     * on this repo and more where the graph is sparser. Omit it and the scan covers the repository,
+     * which is what a rename requires.
+     */
+    scopePaths: z.array(z.string().min(1)).max(200).optional(),
     profile: responseProfileSchema.default("compact")
   })
   .strict();

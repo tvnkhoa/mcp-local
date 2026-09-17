@@ -2916,3 +2916,40 @@ see whether the flake survives it.
 
 Do not close this on a green run. Two previous attempts were, and both of those theories are in the
 refuted list above.
+
+### MCP-ISSUE-060 — `rename_assist(emitPreview:true)` preview recall — FIXED 2026-09-17
+
+**Cause: a category error.** The preview was scoped to `affectedFiles` — the declaring file plus
+whatever carried a resolved `CALLS` or `IMPORTS` edge to that exact symbolId
+(`impactRenameTrace.ts:getRenameImpactImpl`). But a rename must touch every **textual** occurrence of
+the identifier, and the graph only knows the subset it resolved: `import { x } from './y.js'` produces
+an IMPORTS edge to the MODULE `y.js`, not to the symbol `x`, and a file that merely mentions the name
+— a type annotation, a re-export, a doc comment — contributed nothing at all. Using the graph to
+scope a textual rewrite is the wrong instrument, not a tuning problem.
+
+The consequence was the dangerous shape: the preview came back with `riskFlags: []` and looked clean
+while missing most of the work, so applying it left other files calling a name that no longer existed.
+
+**Reproduced before changing anything**, on `codebase-index-mcp`, graph-scoped against the identical
+unscoped scan:
+
+```
+searchDocsImpl        3 hunks vs  4   (25% missing)
+parseMarkdownFile     7 hunks vs 10   (30% missing)
+issueApprovalToken    8 hunks vs 11   (27% missing)
+```
+
+The original report measured 17–22% recall on `wec.communication-hub`, where the C# graph is sparser.
+
+**Fix:** the scan is repo-wide, which is what `refactor_replace_preview` always did and what measures
+complete. `scopePaths` narrows it for a caller who wants that DELIBERATELY, rather than being narrowed
+silently by how much of the graph happened to resolve. The graph findings are still reported — "who
+calls this" is a good question, it is just not the same question as "where does this name appear".
+
+**Verified at parity**, hunk-for-hunk against `refactor_replace_preview` on five symbols: 5/5.
+
+**Guarded.** `test:refactor-engine` §3.12 gained a fixture, `src/mentionsOnly.ts`, that names the
+identifier in a comment and a string with no import and no call — so it carries no edge and the old
+scoping could not see it — plus two assertions: that the preview reaches that file, and that its
+`totalMatches` equals `refactor_replace_preview`'s. This defect survived for weeks because no harness
+asserted recall; both assertions fail if the graph scoping returns. 71/71.

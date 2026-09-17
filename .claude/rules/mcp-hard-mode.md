@@ -178,7 +178,8 @@ MCP-first policy and its playbooks).
 | Debug from a stack trace | `find_symbol_at_line` → `trace_execution_flow` or `get_change_context` |
 | Re-index safely | `health_check` → `list_repositories` → `index_repository` → `health_check` |
 | Gate a new feature / refactor | `detect_circular_dependencies` → `dead_code_scan` |
-| Rename or bulk-edit inside MCP | `refactor_replace_preview(findMode:"regex")` → `refactor_replace_apply` → `refactor_replace_rollback` — NOT `rename_assist`, see below |
+| Rename a symbol | `rename_assist(emitPreview:true)` → `refactor_replace_apply` → `refactor_replace_rollback` |
+| Bulk pattern / signature edit | `refactor_replace_preview(findMode:"regex")` → `refactor_replace_apply` → `refactor_replace_rollback` |
 | Validate a Postgres change | `mcp__postgres-mcp__health_check` → `mcp__postgres-mcp__run_read_query` |
 | Triage risk before merge | `detect_changes(policy:"release-gate")` → `find_impact_files(view:"surface")` → `link_tests_to_source` |
 
@@ -195,25 +196,29 @@ would tell you for free.
 
 Two things those blocks carried that the table does not, kept here because they are live constraints:
 
-### Renaming: do not use `rename_assist(emitPreview: true)` for a symbol used outside its own file
+### Renaming
 
-Use `refactor_replace_preview` directly instead:
+Either path works. `rename_assist(emitPreview: true)` is the shorter one — it resolves the identifier
+from the symbolId for you:
 
 ```
-1. refactor_replace_preview (findMode: "regex", find: "\bOldName\b",
-                             replaceExpression: "NewName", ambiguityThresholdPercent: 100)
+1. rename_assist (symbolId, newName, emitPreview: true)   → previewId + approvalToken
 2. refactor_replace_apply (previewId, approvalToken, includeLowConfidence: true)
 3. refactor_replace_rollback (rollbackId)   → if it must be undone
 ```
 
-Measured against grep on four real symbols, `rename_assist`'s preview recall is **17–22%** (2 of 9
-occurrences, 1 of 6, 2 of 10) at 100% precision with `riskFlags: []` — it scopes the preview to
-`affectedFiles` from a caller/importer graph that returns 0/0 even for a plain
-`import { x } from './y.js'`, so the preview looks clean and applying it leaves every other file
-calling a name that no longer exists. The same symbols through `refactor_replace_preview`: 9/9 and
-10/10. **MCP-ISSUE-060, still open.** `rename_assist` without `emitPreview` remains a fine advisory
-read. `includeLowConfidence: true` is required for top-level identifiers, which have no enclosing
-owner type.
+`includeLowConfidence: true` is required for top-level identifiers, which have no enclosing owner
+type. `rename_assist` without `emitPreview` is a read-only advisory.
+
+**This entry used to say DO NOT use it.** Its preview was scoped to `affectedFiles` from the
+caller/importer graph, which is a category error: a rename must touch every TEXTUAL occurrence, and
+the graph only knows the subset it resolved — an `import { x } from './y.js'` produces an edge to the
+module, not to `x`, and a file that merely mentions the name contributes nothing. Recall measured
+17–22% on `wec.communication-hub`, and 25–30% of occurrences missing on this repo. **Fixed
+2026-09-17 (MCP-ISSUE-060):** the scan is repo-wide, verified at hunk-for-hunk parity with
+`refactor_replace_preview` on five symbols, with a regression assertion in
+`test:refactor-engine` §3.12 that fails if the graph scoping ever comes back. Pass `scopePaths` to
+narrow it deliberately.
 
 ### After a parser or indexer upgrade, not per task
 
@@ -277,10 +282,10 @@ tools do, and the before/after record belongs where this workspace keeps measure
 a tool when it behaves unexpectedly and you need to know whether this is a known defect, a fixed one,
 or something new worth filing.
 
-One item from those tables is **still open** and was kept above rather than deleted: `rename_assist`'s
-17–22% preview recall (see *Renaming*, under *Required MCP-First Flow*). The other — the missing
-approval gate on the two migration tools — was closed on 2026-09-17; its row now records the current
-behaviour rather than the defect.
+Both items from those tables were closed on 2026-09-17: `rename_assist`'s preview recall (see
+*Renaming*, under *Required MCP-First Flow*) and the missing approval gate on the two migration
+tools. Their entries record the current behaviour AND what the defect was — knowing a tool used to
+under-match is what stops the workaround being reinvented.
 
 ## Efficiency Limits
 - Default budget: soft cap 5 tool calls per question.
