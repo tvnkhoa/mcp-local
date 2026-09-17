@@ -86,7 +86,23 @@ export function parseMarkdownFile(input: {
     void endLine;
   };
 
-  for (let i = 0; i < lines.length; i++) {
+  /**
+   * YAML front matter is metadata, not body.
+   *
+   * 39 of this workspace's 107 markdown files open with a `---` block — every Claude Code skill,
+   * rule and command — and until this guard the rewritten loop stored their `name:` and
+   * `description:` lines as prose. The recall harness caught it immediately: asked for a phrase that
+   * occurs in exactly one file, it picked front matter from twelve files in a row, because those
+   * lines are by construction unique and sit at line 1. `detectLifecycle` already reads the block for
+   * `**Status**`; the body extractor should not see it at all.
+   */
+  let bodyStart = 0;
+  if (lines[0]?.trim() === "---") {
+    const close = lines.findIndex((l, i) => i > 0 && l.trim() === "---");
+    if (close > 0) bodyStart = close + 1;
+  }
+
+  for (let i = bodyStart; i < lines.length; i++) {
     const line = lines[i];
     const lineNo = i + 1;
 
