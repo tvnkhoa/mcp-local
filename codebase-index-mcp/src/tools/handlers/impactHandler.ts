@@ -677,12 +677,19 @@ export function handleQueryDocs(
         linkCount: report.linkCount,
         docFileCount: report.docFileCount,
         brokenCount: report.brokenTotal,
+        // Separate from broken: the target is on disk, just not in the index — almost always a file
+        // over CODEBASE_INDEX_MAX_FILE_SIZE_BYTES, which drops a whole file rather than truncating.
+        unindexedTargetCount: report.unindexedTotal,
         orphanCount: report.orphanTotal,
         brokenReturned: report.broken.length,
         orphansReturned: report.orphans.length,
         ...(report.brokenTotal > report.broken.length && { brokenDroppedByLimit: report.brokenTotal - report.broken.length }),
         ...(report.orphanTotal > report.orphans.length && { orphansDroppedByLimit: report.orphanTotal - report.orphans.length }),
         broken: report.broken,
+        ...(report.unindexedTotal > 0 && {
+          unindexedTargets: report.unindexed,
+          unindexedNote: "these link targets EXIST on disk but are absent from the index, so they are not broken links — check CODEBASE_INDEX_MAX_FILE_SIZE_BYTES (a file over the cap is skipped whole, not truncated). Until they are indexed, no docs mode can see them."
+        }),
         orphans: report.orphans,
         hubs: report.hubs,
         ...(report.linkCount === 0 && {

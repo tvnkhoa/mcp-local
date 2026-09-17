@@ -1,3 +1,6 @@
+import { statSync } from "node:fs";
+import nodePath from "node:path";
+
 import type Database from "better-sqlite3";
 import type { DocRecord, DocMentionRecord } from "../types/index.js";
 import { indexLog, indexWarn } from "../services/indexing/indexProgress.js";
@@ -960,6 +963,14 @@ export type DocLinkReport = {
    */
   brokenTotal: number;
   orphanTotal: number;
+  /**
+   * Targets that EXIST on disk but are absent from the index — almost always because the file
+   * exceeds `CODEBASE_INDEX_MAX_FILE_SIZE_BYTES`, which rejects a whole file rather than truncating
+   * it. Reported apart from `broken` because they are a different problem with a different fix, and
+   * calling them broken is simply false.
+   */
+  unindexedTotal: number;
+  unindexed: { fromFilePath: string; target: string }[];
   broken: { fromFilePath: string; target: string }[];
   orphans: string[];
   hubs: { filePath: string; inboundCount: number }[];
@@ -1004,11 +1015,38 @@ export function findDocLinksImpl(
   const known = new Set(docFiles.map((f) => f.filePath));
   const inbound = new Map<string, number>();
   const broken: { fromFilePath: string; target: string }[] = [];
+  const unindexed: { fromFilePath: string; target: string }[] = [];
+
+  /**
+   * "Not in the index" is not the same claim as "not on disk", and this reported both as broken.
+   *
+   * Found on `wec.aria`: four links to `docs/15-decision-log.md` came back broken. The file is
+   * there — it is 941 KB, over the 500 KB `CODEBASE_INDEX_MAX_FILE_SIZE_BYTES` ceiling, which
+   * rejects a whole file rather than truncating it, so nothing about it reaches `docs`. Reporting
+   * that as a broken link sends a reader to fix a link that is already correct, and hides the real
+   * problem: the repository's most-linked document is invisible to every docs mode.
+   *
+   * The filesystem check runs only for targets already missing from the index, so the normal path
+   * costs nothing.
+   */
+  const repoRow = db
+    .prepare(`select repo_path as repoPath from repositories where repo_id = ? limit 1`)
+    .get(repoId) as { repoPath: string } | undefined;
+  const existsOnDisk = (target: string): boolean => {
+    if (!repoRow) return false;
+    try {
+      return statSync(nodePath.join(repoRow.repoPath, target)).isFile();
+    } catch {
+      return false;
+    }
+  };
 
   for (const link of links) {
     if (link.target === link.fromFilePath) continue; // a self-link is not an edge
     if (known.has(link.target)) {
       inbound.set(link.target, (inbound.get(link.target) ?? 0) + 1);
+    } else if (existsOnDisk(link.target)) {
+      unindexed.push(link);
     } else {
       broken.push(link);
     }
@@ -1026,6 +1064,8 @@ export function findDocLinksImpl(
     docFileCount: docFiles.length,
     brokenTotal: broken.length,
     orphanTotal: orphans.length,
+    unindexedTotal: unindexed.length,
+    unindexed: unindexed.slice(0, cap),
     broken: broken.slice(0, cap),
     orphans: orphans.slice(0, cap),
     hubs
