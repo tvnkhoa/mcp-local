@@ -171,6 +171,10 @@ export function initGraphSchema(db: Database.Database): void {
         -- superseded_by carries the text after "Superseded by" when the doc names a successor.
         doc_status text,
         superseded_by text,
+        -- MCP-ISSUE-061 Stage 4: the span this node covers. Needed for a docId that survives an edit
+        -- to the paragraph above it, and for a caller that wants to open the section in an editor.
+        start_line integer,
+        end_line integer,
         primary key (repo_id, doc_id)
       );
 
@@ -505,6 +509,8 @@ export function runGraphMigrations(db: Database.Database, vectorEnabled: boolean
     };
     ensureDocColumn("doc_status", "text");
     ensureDocColumn("superseded_by", "text");
+    ensureDocColumn("start_line", "integer");
+    ensureDocColumn("end_line", "integer");
 
     const edgeCols = db.prepare("pragma table_info(edges)").all() as { name: string }[];
     const ensureEdgeColumn = (name: string, sqlType: string, defaultExpr?: string) => {

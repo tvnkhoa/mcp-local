@@ -303,7 +303,12 @@ export type DocRecord = {
   docId: string;
   filePath: string;
   headingPath: string; // e.g., "README.md#API" or "README.md" for file-level
-  contentType: "heading" | "code_block" | "paragraph";
+  /**
+   * MCP-ISSUE-061(b): three spellings coexisted — this union said "paragraph", the store default and
+   * the tool enum said "prose", and the writer emitted neither. "prose" is the one in the published
+   * contract, so it wins and this is what changed.
+   */
+  contentType: "heading" | "code_block" | "prose";
   text: string;
   level?: number; // heading level (1-6) if contentType="heading"
   /**
@@ -314,6 +319,10 @@ export type DocRecord = {
   docStatus?: string;
   /** Free text after "Superseded by", when the document names its successor. */
   supersededBy?: string;
+  /** 1-based first line of the span this node covers (MCP-ISSUE-061 Stage 4). */
+  startLine?: number;
+  /** 1-based last line, inclusive. */
+  endLine?: number;
 };
 
 export type DocMentionRecord = {

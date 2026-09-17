@@ -72,7 +72,11 @@ async function main() {
   console.log("FIND_IMPACT_FRESHNESS_OK", { hasIndexLag: Boolean(impact.indexMeta.indexLag), dirtyCount: impact.indexMeta.indexLag?.dirtyCount ?? 0 });
 
   // 5. mode="dirty" — fast re-index of working-tree changes only.
-  const dirty = text(await client.callTool({ name: "index_repository", arguments: { repoId, repoPath, mode: "dirty" } }));
+  // Explicit timeout, like the full index above. Without one this used the SDK's 60s default, and an
+  // index run on a loaded machine (41 harnesses share it) exceeded that and surfaced as
+  // "MCP error -32000: Connection closed" — a message that points at the transport rather than at
+  // the clock. It passed in isolation every time, which is what made it read as a flake.
+  const dirty = text(await client.callTool({ name: "index_repository", arguments: { repoId, repoPath, mode: "dirty" } }, undefined, { timeout: 180_000 }));
   console.log("DIRTY_MODE_OK", { mode: dirty.mode, filesIndexed: dirty.filesIndexed, skipReason: dirty.skipReason ?? null });
 
   // 6. find_implementations coverage block present.

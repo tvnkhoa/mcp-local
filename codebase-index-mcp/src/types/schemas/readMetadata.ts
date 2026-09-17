@@ -75,22 +75,27 @@ export const queryDocsSchema = (MAX_RESULT_LIMIT: number) => z
      * MCP-ISSUE-058(d): which doc section kinds mode="search" may answer with. A search for a type
      * name that answers with a mermaid diagram matching two unrelated words is a false positive.
      *
-     * MCP-ISSUE-061: 058(d) narrowed the default to ["heading","prose"], but nothing writes `prose`
-     * — the indexer emits `heading` and `code_block` only. The default therefore excluded 44% of the
-     * corpus and included a kind with zero rows. Default is all three until a prose writer lands;
-     * pass ["heading"] to get the strict behaviour 058(d) intended.
+     * MCP-ISSUE-061: 058(d) narrowed the default to ["heading","prose"], but nothing wrote `prose` —
+     * the indexer emitted `heading` and `code_block` only, so the default excluded 44% of the corpus
+     * and included a kind with zero rows.
+     *
+     * Stage 4 landed the prose writer (1 603 sections here, averaging 754 characters), and the
+     * default stays at all three rather than reverting to 058(d)'s pair. Two reasons: 49% of fences
+     * in this workspace carry no language tag and are numbered tool-call recipes rather than code,
+     * which a docs search should reach; and real prose now outranks a diagram on any query a diagram
+     * used to win by default. Pass ["heading","prose"] for the strict behaviour 058(d) intended.
      */
     contentTypes: z.array(z.enum(["heading", "prose", "code_block"])).min(1).max(3).optional(),
-    /**
-     * MCP-ISSUE-061(d): no response in this server was size-bounded, and `profile` does not bound one
-     * — `nano`/`compact` only drop nullish keys. `limit` caps the row COUNT; this caps the payload,
-     * which is the axis that matters once a row can hold a whole doc section.
-     */
     /**
      * MCP-ISSUE-061 Stage 3, mode="search": archived and superseded documents are excluded by
      * default. CLAUDE.md had to say this in prose; now it is mechanical.
      */
     includeArchived: z.boolean().default(false),
+    /**
+     * MCP-ISSUE-061(d): no response in this server was size-bounded, and `profile` does not bound one
+     * — `nano`/`compact` only drop nullish keys. `limit` caps the row COUNT; this caps the payload,
+     * which is the axis that matters now that a row holds a whole doc section.
+     */
     maxTokens: z.number().int().min(200).max(50_000).optional(),
     /**
      * MCP-ISSUE-061 Stage 3, mode="drift" only: how close a symbol name must be to an unresolved

@@ -3,9 +3,46 @@ import { createHash } from "node:crypto";
 import type { DocMentionRecord, DocRecord } from "../../types/index.js";
 
 /**
- * Parse markdown file and extract:
- * - docs: headings (H1-H3) and code blocks as doc nodes
- * - mentions: backticks, heading keywords, file paths that reference code
+ * Chunk budget in characters. ~512 tokens at the chars/4 approximation this workspace uses.
+ *
+ * Measured over the 1 374 heading-delimited sections in `mcp-local`: median 640 characters, p90
+ * 2 149, and 90% under 2 KB. So one section is normally one chunk and the splitter is the exception,
+ * not the rule — roughly 33 sections workspace-wide exceed it. A smaller budget would fragment the
+ * median section for nothing; a larger one mostly pads.
+ */
+const PROSE_CHUNK_CHARS = 2048;
+
+/** A code block's stored text. MCP-ISSUE-061 Stage 4: 500 truncated 12.9% of blocks, 1000 truncates 1.9% (p90 is 573). */
+const CODE_BLOCK_TEXT_CHARS = 1000;
+
+const HEADING_TEXT_CHARS = 500;
+
+/**
+ * Parse a markdown file into doc nodes and mentions.
+ *
+ * MCP-ISSUE-061 Stage 4 rewrote the loop. It previously emitted headings and code blocks only, and
+ * scraped each prose line for mentions before **discarding the line** — so `docs` held no prose at
+ * all, and `query_docs{mode:"search"}` answered from heading text averaging 35 characters. A phrase
+ * present verbatim in a document returned `count: 0`.
+ *
+ * Four things the rewrite had to get right, each one a defect in the old loop:
+ *
+ * 1. **Four flush points, including EOF.** A prose run ends at a heading, at a fence opening, and at
+ *    EOF; a fence closing starts a new one. The old loop had no EOF handling of any kind, so a file
+ *    ending inside an open fence silently discarded that fence's content and emitted no node.
+ * 2. **Never split a table.** Tables are 21% of all content lines here and the median one is 7 rows
+ *    by 3 columns, which fits a chunk beside its heading. A table cut in half loses the header row
+ *    and with it the meaning of every cell.
+ * 3. **`\r` is stripped.** `core.autocrlf=true` means a fresh Windows clone is CRLF throughout. The
+ *    old loop survived only because `.trim()` incidentally cleaned headings; prose lines were never
+ *    trimmed, so storing them raw would have put a trailing carriage return on every line and
+ *    polluted the FTS tokens.
+ * 4. **Mentions are emitted once per chunk, not once per line.** Scraping per line and again per
+ *    buffer would double every identifier.
+ *
+ * docIds now hash the start line rather than a content prefix, which makes them collision-free by
+ * construction: two nodes cannot begin on the same line. The old code-block id hashed the first 50
+ * characters after the heading and silently overwrote its twin (MCP-ISSUE-061(f)).
  */
 export function parseMarkdownFile(input: {
   repoId: string;
@@ -15,14 +52,43 @@ export function parseMarkdownFile(input: {
   const docs: DocRecord[] = [];
   const mentions: DocMentionRecord[] = [];
 
-  const lines = input.source.split("\n");
+  const lines = input.source.split("\n").map((l) => (l.endsWith("\r") ? l.slice(0, -1) : l));
+  const headingStack: { level: number; text: string }[] = [];
   let currentHeadingPath = input.filePath; // Root level = file itself
   let inCodeBlock = false;
   let codeBlockLang = "";
   let codeBlockContent = "";
+  let codeBlockStart = 0;
+
+  // Prose accumulator. `start` is 1-based, matching how every other line number in this server reads.
+  let proseLines: string[] = [];
+  let proseStart = 0;
+
+  const flushProse = (endLine: number): void => {
+    if (proseLines.length === 0) return;
+    for (const chunk of chunkProse(proseLines, proseStart)) {
+      const docId = hashOf(`${input.filePath}:prose:${chunk.startLine}`);
+      docs.push({
+        repoId: input.repoId,
+        docId,
+        filePath: input.filePath,
+        headingPath: currentHeadingPath,
+        contentType: "prose",
+        text: chunk.text,
+        startLine: chunk.startLine,
+        endLine: chunk.endLine
+      });
+      // Once per chunk. Emitting per line as well would double every identifier.
+      extractMentionsFromText(chunk.text, docId, input.repoId, mentions, input.filePath);
+    }
+    proseLines = [];
+    proseStart = 0;
+    void endLine;
+  };
 
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
+    const lineNo = i + 1;
 
     // Fences and their contents are settled before anything else looks at the line.
     //
@@ -41,26 +107,14 @@ export function parseMarkdownFile(input: {
     const fenceLine = line.trimStart();
     if (fenceLine.startsWith("```")) {
       if (!inCodeBlock) {
+        flushProse(lineNo - 1); // a fence ends the prose run before it
         inCodeBlock = true;
         codeBlockLang = fenceLine.slice(3).trim().toLowerCase();
         codeBlockContent = "";
+        codeBlockStart = lineNo;
       } else {
         inCodeBlock = false;
-
-        // Store code block as doc node
-        const docId = hashOf(`${currentHeadingPath}:code:${codeBlockContent.slice(0, 50)}`);
-        docs.push({
-          repoId: input.repoId,
-          docId,
-          filePath: input.filePath,
-          headingPath: currentHeadingPath,
-          contentType: "code_block",
-          text: codeBlockContent.slice(0, 500)
-          // level not set for code blocks (optional property)
-        });
-
-        // Extract mentions from code content
-        extractMentionsFromCode(codeBlockContent, docId, input.repoId, mentions);
+        emitCodeBlock(codeBlockContent, codeBlockStart, lineNo);
         codeBlockContent = "";
       }
       continue;
@@ -73,29 +127,62 @@ export function parseMarkdownFile(input: {
     // Track heading hierarchy
     const headingMatch = line.match(/^(#{1,6})\s+(.+)$/);
     if (headingMatch) {
+      flushProse(lineNo - 1); // BEFORE the heading path moves, or the section files under the next one
       const level = headingMatch[1].length;
       const text = headingMatch[2].trim();
-      currentHeadingPath = `${input.filePath}#${text}`;
 
-      // Store heading as doc node
-      const docId = hashOf(currentHeadingPath);
+      // Ancestry, not just the last heading. MCP-ISSUE-061(f): `filePath#text` alone collided
+      // whenever a heading text repeated in one file, and it gave the response layer no breadcrumb.
+      while (headingStack.length > 0 && headingStack[headingStack.length - 1].level >= level) {
+        headingStack.pop();
+      }
+      headingStack.push({ level, text });
+      currentHeadingPath = `${input.filePath}#${headingStack.map((h) => h.text).join(">")}`;
+
+      const docId = hashOf(`${input.filePath}:heading:${lineNo}`);
       docs.push({
         repoId: input.repoId,
         docId,
         filePath: input.filePath,
         headingPath: currentHeadingPath,
         contentType: "heading",
-        text: text.slice(0, 500),
-        level
+        text: text.slice(0, HEADING_TEXT_CHARS),
+        level,
+        startLine: lineNo,
+        endLine: lineNo
       });
 
-      // Extract mentions from heading text
       extractMentionsFromText(text, docId, input.repoId, mentions, input.filePath);
       continue;
     }
 
-    // Prose line: backticks + file paths.
-    extractMentionsFromText(line, hashOf(currentHeadingPath), input.repoId, mentions, input.filePath);
+    if (proseLines.length === 0) {
+      if (line.trim() === "") continue; // do not open a run on blank lines
+      proseStart = lineNo;
+    }
+    proseLines.push(line);
+  }
+
+  // EOF. Neither of these existed before: a file ending mid-prose lost the tail, and a file ending
+  // inside an unterminated fence lost the fence entirely and emitted nothing for it.
+  flushProse(lines.length);
+  if (inCodeBlock && codeBlockContent !== "") {
+    emitCodeBlock(codeBlockContent, codeBlockStart, lines.length);
+  }
+
+  function emitCodeBlock(content: string, startLine: number, endLine: number): void {
+    const docId = hashOf(`${input.filePath}:code:${startLine}`);
+    docs.push({
+      repoId: input.repoId,
+      docId,
+      filePath: input.filePath,
+      headingPath: currentHeadingPath,
+      contentType: "code_block",
+      text: content.slice(0, CODE_BLOCK_TEXT_CHARS),
+      startLine,
+      endLine
+    });
+    extractMentionsFromCode(content, docId, input.repoId, mentions);
   }
 
   // Always add file-level doc node
@@ -109,6 +196,8 @@ export function parseMarkdownFile(input: {
     contentType: "heading",
     text: input.filePath,
     level: 1,
+    startLine: 1,
+    endLine: lines.length,
     ...(lifecycle.docStatus && { docStatus: lifecycle.docStatus }),
     ...(lifecycle.supersededBy && { supersededBy: lifecycle.supersededBy })
   });
@@ -202,6 +291,93 @@ function extractMentionsFromCode(code: string, docId: string, repoId: string, me
       });
     }
   }
+}
+
+const isTableRow = (line: string) => /^\s*\|/.test(line);
+
+/**
+ * Split an accumulated prose run into chunks, respecting the one structure markdown has that cannot
+ * survive being cut: the table.
+ *
+ * Tables are **21% of every content line** in this workspace — 320 of them across 73 of 107 files —
+ * so this is not an edge case. A table split down the middle loses its header row, and without the
+ * header a row of cells means nothing at all. So a contiguous run of `|`-leading lines is one
+ * indivisible unit, and only a table larger than the whole budget is split — by row groups, with the
+ * header and separator repeated into each fragment. Twelve tables here exceed 20 rows; those are the
+ * ones that reach that path.
+ */
+function chunkProse(
+  lines: string[],
+  startLine: number
+): { text: string; startLine: number; endLine: number }[] {
+  // Group into units: a table run is one unit, every other line is its own.
+  const units: { lines: string[]; start: number; isTable: boolean }[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    if (isTableRow(lines[i])) {
+      const start = i;
+      while (i < lines.length && isTableRow(lines[i])) i++;
+      units.push({ lines: lines.slice(start, i), start: startLine + start, isTable: true });
+      i--;
+    } else {
+      units.push({ lines: [lines[i]], start: startLine + i, isTable: false });
+    }
+  }
+
+  const out: { text: string; startLine: number; endLine: number }[] = [];
+  let buf: string[] = [];
+  let bufStart = 0;
+  let bufChars = 0;
+
+  const flush = (endLine: number) => {
+    const text = buf.join("\n").trim();
+    if (text !== "") out.push({ text, startLine: bufStart, endLine });
+    buf = [];
+    bufChars = 0;
+  };
+
+  for (const unit of units) {
+    const unitChars = unit.lines.reduce((n, l) => n + l.length + 1, 0);
+
+    if (unit.isTable && unitChars > PROSE_CHUNK_CHARS) {
+      flush(unit.start - 1);
+      // Header + separator repeated per fragment, or the cells lose their meaning.
+      const header = unit.lines.slice(0, 2);
+      const body = unit.lines.slice(2);
+      const headerChars = header.reduce((n, l) => n + l.length + 1, 0);
+      let group: string[] = [];
+      let groupStart = unit.start + 2;
+      let groupChars = headerChars;
+      for (let r = 0; r < body.length; r++) {
+        const rowChars = body[r].length + 1;
+        if (group.length > 0 && groupChars + rowChars > PROSE_CHUNK_CHARS) {
+          out.push({ text: [...header, ...group].join("\n"), startLine: groupStart, endLine: unit.start + 1 + r });
+          group = [];
+          groupStart = unit.start + 2 + r;
+          groupChars = headerChars;
+        }
+        group.push(body[r]);
+        groupChars += rowChars;
+      }
+      if (group.length > 0) {
+        out.push({ text: [...header, ...group].join("\n"), startLine: groupStart, endLine: unit.start + unit.lines.length - 1 });
+      }
+      bufStart = 0;
+      continue;
+    }
+
+    if (buf.length > 0 && bufChars + unitChars > PROSE_CHUNK_CHARS) {
+      flush(unit.start - 1);
+    }
+    if (buf.length === 0) bufStart = unit.start;
+    buf.push(...unit.lines);
+    bufChars += unitChars;
+  }
+
+  if (buf.length > 0) {
+    const last = units[units.length - 1];
+    flush(last.start + last.lines.length - 1);
+  }
+  return out;
 }
 
 /**

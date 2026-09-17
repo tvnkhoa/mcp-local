@@ -39,19 +39,21 @@ type DocCoverageRow = {
 export function upsertDocsImpl(db: Database.Database, docs: DocRecord[]): void {
   const stmt = db.prepare(
     `
-    insert into docs (repo_id, doc_id, file_path, heading_path, content_type, text, level, doc_status, superseded_by)
-    values (@repoId, @docId, @filePath, @headingPath, @contentType, @text, @level, @docStatus, @supersededBy)
+    insert into docs (repo_id, doc_id, file_path, heading_path, content_type, text, level, doc_status, superseded_by, start_line, end_line)
+    values (@repoId, @docId, @filePath, @headingPath, @contentType, @text, @level, @docStatus, @supersededBy, @startLine, @endLine)
     on conflict(repo_id, doc_id) do update set
       text = excluded.text,
       level = excluded.level,
       doc_status = excluded.doc_status,
-      superseded_by = excluded.superseded_by
+      superseded_by = excluded.superseded_by,
+      start_line = excluded.start_line,
+      end_line = excluded.end_line
     `
   );
 
   const writeRows = (rows: DocRecord[]) => {
     for (const row of rows) {
-      const normalized = { ...row, level: row.level ?? undefined, docStatus: row.docStatus ?? null, supersededBy: row.supersededBy ?? null };
+      const normalized = { ...row, level: row.level ?? undefined, docStatus: row.docStatus ?? null, supersededBy: row.supersededBy ?? null, startLine: row.startLine ?? null, endLine: row.endLine ?? null };
       stmt.run(normalized);
     }
   };
@@ -375,10 +377,8 @@ export function searchDocsImpl(
    * 35 characters, and a phrase search against real document bodies returned 0. The LIKE fallback
    * does not rescue it — it applies this same filter.
    *
-   * `code_block` is back in the default until a prose writer exists. That reopens 058(d)'s diagram
-   * noise, which is the lesser defect: a search that occasionally answers with a flowchart beats one
-   * that cannot reach 44% of the corpus. Narrow it again — to `["heading","prose"]` — once
-   * `parseMarkdownFile` actually emits prose sections.
+   * Stage 4 landed the prose writer, and the default stays at all three. See the zod schema for why
+   * it did not revert to 058(d)'s pair once prose existed.
    */
   contentTypes: readonly string[] | null = null,
   /**
@@ -395,6 +395,8 @@ export function searchDocsImpl(
   contentType: string;
   text: string | null;
   level: number | null;
+  startLine: number | null;
+  endLine: number | null;
   resolvedMentions: { symbolId: string; symbolName: string | null; mentionText: string }[];
 }[] {
   const ftsQuery = buildFtsQuery(query);
@@ -447,6 +449,8 @@ export function searchDocsImpl(
     contentType: string;
     text: string | null;
     level: number | null;
+    startLine: number | null;
+    endLine: number | null;
     resolvedMentions: { symbolId: string; symbolName: string | null; mentionText: string }[];
   }[] = [];
 
@@ -455,7 +459,8 @@ export function searchDocsImpl(
     const docs = db
       .prepare(
         `select doc_id as docId, file_path as filePath, heading_path as headingPath,
-                content_type as contentType, text, level
+                content_type as contentType, text, level,
+                start_line as startLine, end_line as endLine
          from docs where repo_id = ? and doc_id in (${ph})`
       )
       .all(repoId, ...docIds) as {
@@ -465,6 +470,8 @@ export function searchDocsImpl(
       contentType: string;
       text: string | null;
       level: number | null;
+      startLine: number | null;
+      endLine: number | null;
     }[];
 
     const mentionRows = db
@@ -537,6 +544,8 @@ export function searchDocsImpl(
           contentType: "symbol",
           text: row.signature ?? `${row.symbolName} @ line ${row.line}`,
           level: null,
+          startLine: row.line,
+          endLine: row.line,
           resolvedMentions: [{ symbolId: row.symbolId, symbolName: row.symbolName, mentionText: row.symbolName }]
         });
       }
