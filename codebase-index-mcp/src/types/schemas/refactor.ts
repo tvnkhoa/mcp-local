@@ -128,6 +128,13 @@ export const refactorSymbolMigrationSchema = z
       .max(200),
     scopePaths: z.array(z.string().min(1).max(500)).max(200).default([]),
     dryRun: z.boolean().default(true),
+    /**
+     * MCP-ISSUE-060: `dryRun: false` used to write in the same round trip with no approval anywhere
+     * in the schema, while the `refactor_replace_*` trio required an HMAC token. Both are now
+     * required to apply, and they come from a prior `dryRun: true` call.
+     */
+    previewId: z.string().min(1).max(200).optional(),
+    approvalToken: z.string().min(1).max(2_000).optional(),
     includeLowConfidence: z.boolean().default(false)
   })
   .strict();
@@ -141,6 +148,13 @@ export const changeValueRepresentationSchema = z
     includeComparisons: z.boolean().default(true),
     scopePaths: z.array(z.string().min(1).max(500)).max(200).default([]),
     dryRun: z.boolean().default(true),
+    /**
+     * MCP-ISSUE-060: `dryRun: false` used to write in the same round trip with no approval anywhere
+     * in the schema, while the `refactor_replace_*` trio required an HMAC token. Both are now
+     * required to apply, and they come from a prior `dryRun: true` call.
+     */
+    previewId: z.string().min(1).max(200).optional(),
+    approvalToken: z.string().min(1).max(2_000).optional(),
     includeLowConfidence: z.boolean().default(false),
     profile: responseProfileSchema.default("standard")
   })

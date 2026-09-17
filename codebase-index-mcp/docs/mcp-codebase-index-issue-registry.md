@@ -2878,3 +2878,41 @@ when the process is about to exit non-zero, or stream it live under `SHOW_SERVER
 automatically on the failing run — no env var needed. Read what the server wrote before it exited.
 Two earlier attempts at this item were closed on a theory that a single green run appeared to
 confirm; do not close it that way a third time.
+
+### "Connection closed" — 2026-09-17, second hunt: characterized, still not root-caused
+
+The capturing drain worked. Three occurrences, three DIFFERENT harnesses, one shape.
+
+| Occurrence | Harness | Duration | Server's last words |
+|---|---|---|---|
+| 1 | `verify:enhancements` | ~8s | `server_ready`, then nothing |
+| 2 | `test:value-contract-impact` | **37.3s** (normally ~5s) | indexed `service-a`, two `fatal: not a git repository`, then nothing |
+| 3 | `test:field-access-rhs` | 14.9s | `server_ready`, two `fatal: not a git repository`, then nothing |
+
+**The decisive new fact: the server writes NOTHING before it dies.** No exception, no stack trace, no
+`tool_threw`. Node prints an uncaught error to stderr, and the drain now captures stderr, so a JS
+failure would be visible. It is not. The client sees `McpError -32000` at
+`ChildProcess._handle.onexit` — the child exited.
+
+Occurrence 2 also shows it **hangs first**: 37.3s against a ~5s norm, well under the SDK's 60s
+request timeout, so the client was still waiting when the process went away. And it died between the
+first and second `index_repository` call — `service-b` never appears.
+
+**Established:** load-dependent (only under `scripts/run-tests.mjs`, roughly one run in three;
+3 of 3 passes standalone), harness-independent, and silent at the JS level.
+
+**Refuted, both mine, both from theorising before measuring:**
+
+- *Blocked stderr pipe.* A real mechanism — MCP-ISSUE-049 proved it here — but not this one:
+  occurrence 1 was drained via `on("data")` and occurrence 2 via `resume()`.
+- *Shared temp database.* Each harness gets its own through `mkdtempSync`, so no two can collide.
+
+**The lead worth following next.** In occurrences 2 and 3 the last thing the server emitted was
+`fatal: not a git repository` — stderr from `runGit`, which is `execFileSync`: a **synchronous child
+process spawn inside the server**. Three deaths cluster immediately after synchronous spawns, on
+Windows, while 41 harnesses compete for the machine. That is a correlation, not a cause. The
+experiment is to instrument `runGit` call counts and timings, or stub git out for one suite run and
+see whether the flake survives it.
+
+Do not close this on a green run. Two previous attempts were, and both of those theories are in the
+refuted list above.

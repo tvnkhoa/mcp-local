@@ -15,13 +15,78 @@ import {
   countPreviewRisks,
   createPreviewDigest,
   groupPreviewHunks,
-  noLlmAudit
+  issueApprovalToken,
+  noLlmAudit,
+  resolveApprovalSecret,
+  verifyApprovalToken,
+  PolicyViolationError
 } from "../../services/refactor/refactorUtils.js";
 import type { RefactorSymbolMigrationInput } from "../../services/refactor/refactorTypes.js";
 import type { RefactorPreviewRecord, RefactorPreviewHunkRecord } from "../../types/index.js";
 import { resolveResponseProfile } from "../../middleware/responseFormatter.js";
 import type { HandlerContext } from "./handlerContext.js";
 import { applyPreviewExclusively } from "./refactorApplyGate.js";
+
+/**
+ * The approval gate these two tools were missing. MCP-ISSUE-060, open since 2026-08-25.
+ *
+ * `refactor_replace_preview` → `refactor_replace_apply` requires an HMAC token minted by the
+ * preview and verified against the stored record. These two tools took `dryRun: false` and wrote in
+ * the SAME round trip, with no token anywhere in their schema — annotated `destructiveHint: true`,
+ * which is what protects a host that reads annotations, but with no second gate for one that does
+ * not. A single argument flip was the whole distance between "show me" and "rewrite my repository".
+ *
+ * The token is an HMAC over `{previewId, digest, expiresAt}`, so it can only be verified against a
+ * STORED preview — which is the right shape anyway: it means the caller approves the specific change
+ * they were shown. Three checks, in the order that fails most cheaply first:
+ *
+ *   1. the preview exists and has not expired;
+ *   2. the token verifies against it;
+ *   3. the digest computed from the CURRENT source still equals the approved one.
+ *
+ * (3) is what a bare token cannot give. The digest is derived from the hunks, so if the code moved
+ * between the dry run and the apply, the approval no longer describes what would be written, and it
+ * must not authorize it.
+ */
+function assertApprovedApply(
+  ctx: HandlerContext,
+  toolName: string,
+  args: { dryRun: boolean; previewId?: string; approvalToken?: string },
+  freshDigest: string
+): void {
+  if (args.dryRun) return;
+
+  if (!args.previewId || !args.approvalToken) {
+    throw new McpError(
+      ErrorCode.InvalidParams,
+      `${toolName}: dryRun=false requires previewId and approvalToken from a prior dryRun=true call. ` +
+        `Run it with dryRun=true (the default), read the preview, then pass back the previewId and approvalToken it returned.`
+    );
+  }
+
+  const stored = ctx.store.getRefactorPreview(args.previewId);
+  if (!stored) {
+    throw new McpError(ErrorCode.InvalidParams, `${toolName}: preview '${args.previewId}' not found. Previews expire; create a fresh one.`);
+  }
+  if (Date.parse(stored.preview.expiresAt) < Date.now()) {
+    throw new PolicyViolationError("PREVIEW_EXPIRED", `${toolName}: preview expired. Create a fresh preview before apply.`);
+  }
+
+  verifyApprovalToken(
+    args.approvalToken,
+    stored.preview.previewId,
+    stored.preview.digest,
+    stored.preview.expiresAt,
+    resolveApprovalSecret(ctx.constants.REFACTOR_APPROVAL_SECRET, ctx.constants.REFACTOR_STRICT_APPROVAL)
+  );
+
+  if (stored.preview.digest !== freshDigest) {
+    throw new PolicyViolationError(
+      "PREVIEW_DIGEST_MISMATCH",
+      `${toolName}: the source changed since the preview you approved, so the approval no longer describes what would be written. Re-run with dryRun=true and review the new preview.`
+    );
+  }
+}
 
 export async function handleRefactorSymbolMigration(
   args: {
@@ -30,6 +95,8 @@ export async function handleRefactorSymbolMigration(
     scopePaths?: string[];
     dryRun: boolean;
     includeLowConfidence?: boolean;
+    previewId?: string;
+    approvalToken?: string;
   },
   ctx: HandlerContext
 ): Promise<CallToolResult> {
@@ -41,7 +108,7 @@ export async function handleRefactorSymbolMigration(
 
   const migrationResults: Array<{
     fromSymbol: string; toSymbol: string; requiredOwnerType: string;
-    previewId: string; totalMatches: number; unresolvedOccurrences: number;
+    previewId: string; approvalToken: string; totalMatches: number; unresolvedOccurrences: number;
     previewSummary: ReturnType<typeof groupPreviewHunks>;
     rejectedSiteCount?: number;
     rejectedSites?: { filePath: string; line: number; rule: string; detail: string }[];
@@ -76,7 +143,11 @@ export async function handleRefactorSymbolMigration(
 
     const resultRow: typeof migrationResults[number] = {
       fromSymbol: migration.fromSymbol, toSymbol: migration.toSymbol, requiredOwnerType: migration.requiredOwnerType,
-      previewId, totalMatches: hunkRecords.length,
+      previewId,
+      // Minted on every call, including a dry run — that is the point: the dry run is where the
+      // caller gets the credential that authorizes the apply.
+      approvalToken: issueApprovalToken(previewId, digest, expiresAt, resolveApprovalSecret(constants.REFACTOR_APPROVAL_SECRET, constants.REFACTOR_STRICT_APPROVAL)),
+      totalMatches: hunkRecords.length,
       unresolvedOccurrences: hunkRecords.filter((x) => x.riskFlags.includes("ambiguous_target")).length,
       previewSummary: groupPreviewHunks(hunkRecords),
       // MCP-ISSUE-043: say which guard dropped what, so a 0-match result is diagnosable instead of
@@ -92,6 +163,8 @@ export async function handleRefactorSymbolMigration(
       })
     };
     for (const hunk of hunkRecords) suggestedFollowUpFiles.add(hunk.filePath);
+
+    assertApprovedApply(ctx, "refactor_symbol_migration", args, digest);
 
     if (!args.dryRun) {
       const includeLowConfidence = args.includeLowConfidence ?? false;
@@ -134,6 +207,8 @@ export async function handleChangeValueRepresentation(
     dryRun: boolean;
     includeLowConfidence?: boolean;
     profile?: string;
+    previewId?: string;
+    approvalToken?: string;
   },
   ctx: HandlerContext
 ): Promise<CallToolResult> {
@@ -178,7 +253,7 @@ export async function handleChangeValueRepresentation(
 
   const result: {
     repoId: string; dryRun: boolean; property: string; requiredOwnerType: string;
-    previewId: string; totalMatches: number; ambiguousOccurrences: number;
+    previewId: string; approvalToken: string; totalMatches: number; ambiguousOccurrences: number;
     affectedFiles: string[]; previewSummary: ReturnType<typeof groupPreviewHunks>;
     ambiguousReasons?: { filePath: string; line: number; rule: string; detail: string }[];
     rejectedSites?: { filePath: string; line: number; rule: string; detail: string }[];
@@ -187,7 +262,9 @@ export async function handleChangeValueRepresentation(
     executionPolicy: ReturnType<typeof noLlmAudit>;
   } = {
     repoId: args.repoId, dryRun: args.dryRun, property: args.property, requiredOwnerType: args.requiredOwnerType,
-    previewId, totalMatches: hunkRecords.length,
+    previewId,
+    approvalToken: issueApprovalToken(previewId, digest, expiresAt, resolveApprovalSecret(constants.REFACTOR_APPROVAL_SECRET, constants.REFACTOR_STRICT_APPROVAL)),
+    totalMatches: hunkRecords.length,
     ambiguousOccurrences: hunkRecords.filter((x) => x.riskFlags.includes("ambiguous_target")).length,
     affectedFiles: previewResult.affectedFiles, previewSummary: groupPreviewHunks(hunkRecords),
     executionPolicy: noLlmAudit(constants.REFACTOR_STRICT_APPROVAL)
@@ -204,6 +281,8 @@ export async function handleChangeValueRepresentation(
   if (previewResult.rejectedSites.length > 0) {
     result.rejectedSites = previewResult.rejectedSites.slice(0, 20);
   }
+
+  assertApprovedApply(ctx, "change_value_representation", args, digest);
 
   if (!args.dryRun) {
     const includeLowConfidence = args.includeLowConfidence ?? false;

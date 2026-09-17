@@ -264,7 +264,7 @@ Operational rule:
 | `find_impact_files` view `"surface"` | Confidence 0.75 is TYPE_REF, not direct call | Note confidence and `edgeTypes` in output |
 | `find_symbol_at_line` | Often resolves declaration-level positions, not inner-block lines | Prefer declaration line or pair with one focused search |
 | `get_cross_repo_impact` | Returns empty when repos have no shared symbols (normal for isolated systems) | Only useful when repos share interface/contract symbol names (e.g., shared library pattern) |
-| `refactor_symbol_migration` / `change_value_representation` | Preview and apply in ONE round trip, with no HMAC approval token — unlike the `refactor_replace_*` trio. Annotated `destructiveHint: true`, which is what protects a host, but there is no second gate | Treat `dryRun:false` as immediately destructive; run `dryRun:true` first and read it. Open, MCP-ISSUE-060 |
+| `refactor_symbol_migration` / `change_value_representation` | **Fixed 2026-09-17.** They now require `previewId` + `approvalToken` from a prior `dryRun:true` call, like the `refactor_replace_*` trio, and refuse if the source changed since the approval | Run `dryRun:true` (the default), read the preview, pass its `previewId` and `approvalToken` back with `dryRun:false` |
 
 ### Already fixed — do not design around the old behaviour
 
@@ -277,9 +277,10 @@ tools do, and the before/after record belongs where this workspace keeps measure
 a tool when it behaves unexpectedly and you need to know whether this is a known defect, a fixed one,
 or something new worth filing.
 
-The two items from those tables that are **still open** were kept above rather than deleted:
-`rename_assist`'s 17–22% preview recall (see *Renaming*, under *Required MCP-First Flow*) and the missing approval gate
-on the two migration tools (the last row of the table).
+One item from those tables is **still open** and was kept above rather than deleted: `rename_assist`'s
+17–22% preview recall (see *Renaming*, under *Required MCP-First Flow*). The other — the missing
+approval gate on the two migration tools — was closed on 2026-09-17; its row now records the current
+behaviour rather than the defect.
 
 ## Efficiency Limits
 - Default budget: soft cap 5 tool calls per question.

@@ -81,10 +81,24 @@ try {
   assert(preview?.totalMatches === 4, "rewrites exactly the 4 Conversation sites in a >32KB file (bufferSize fix; skips cross-type Other)", `totalMatches=${preview?.totalMatches}`);
   assert(preview?.ambiguousOccurrences === 0, "all matched sites have a proven owner type", `ambiguous=${preview?.ambiguousOccurrences}`);
 
-  // 2. Apply.
-  const applied = js(await client.callTool({
+  // 2. Apply — now gated. MCP-ISSUE-060: dryRun=false requires the previewId + approvalToken the
+  // dry run above returned, so the caller applies the change it was actually shown.
+  assert(typeof preview?.approvalToken === "string" && preview.approvalToken.length > 0,
+    "dry run returns an approvalToken", JSON.stringify(preview)?.slice(0, 200));
+
+  const refusedWithoutToken = await client.callTool({
     name: "change_value_representation",
     arguments: { repoId, property: "HandledBy", requiredOwnerType: "Conversation", valueMap, dryRun: false }
+  });
+  assert(/requires previewId and approvalToken/.test(JSON.stringify(refusedWithoutToken)),
+    "apply without an approvalToken is refused", JSON.stringify(refusedWithoutToken)?.slice(0, 300));
+
+  const applied = js(await client.callTool({
+    name: "change_value_representation",
+    arguments: {
+      repoId, property: "HandledBy", requiredOwnerType: "Conversation", valueMap, dryRun: false,
+      previewId: preview.previewId, approvalToken: preview.approvalToken
+    }
   }));
   assert(applied?.applyId && applied?.applyStatus, "apply returns applyId + status", JSON.stringify(applied)?.slice(0, 300));
 

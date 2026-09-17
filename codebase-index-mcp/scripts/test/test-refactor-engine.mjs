@@ -405,7 +405,10 @@ public sealed class FixtureNoRewrite
         }
       ],
       scopePaths: ["src"],
-      dryRun: false
+      dryRun: false,
+      // MCP-ISSUE-060: applying now requires the previewId + approvalToken the dry run returned.
+      previewId: migrationDryRunJson?.migrationMap?.[0]?.previewId,
+      approvalToken: migrationDryRunJson?.migrationMap?.[0]?.approvalToken
     }
   });
   const migrationApplyText = readTextContent(migrationApply);
@@ -467,7 +470,9 @@ public sealed class FixtureNoRewrite
         }
       ],
       scopePaths: ["src"],
-      dryRun: false
+      dryRun: false,
+      previewId: blockedDryRunJson?.migrationMap?.[0]?.previewId,
+      approvalToken: blockedDryRunJson?.migrationMap?.[0]?.approvalToken
     }
   });
   const blockedApplyJson = readJson(blockedApply);

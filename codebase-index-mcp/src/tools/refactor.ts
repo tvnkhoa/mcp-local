@@ -187,7 +187,7 @@ export function buildRefactorTools(deps: CodebaseIndexDeps): AnyToolDefinition[]
 
   const refactorSymbolMigration = defineTool({
     name: "refactor_symbol_migration",
-    description: "Run owner-type constrained symbol migrations (dry-run by default) using the same preview/apply engine. requiredOwnerType means \"sites that touch this type's member\", proven from the C# AST — a static (`Codec.M`), instance, `this`, `base`, namespace-qualified or one-hop-nested receiver, plus object initializers and the declaration itself — so it reaches a member's consumers, not only the declaring type. Non-C# files fall back to the enclosing type by text scan. Optionally constrain by symbolKinds (default: any kind). A proven different owner is dropped and named in rejectedSites; a site whose owner cannot be proven is KEPT, counted in unresolvedOccurrences, flagged `ambiguous_target` (so it cannot apply) and explained in ambiguousReasons. When a migration reports fewer matches than expected, read both arrays — they name the rule for every site.",
+    description: "Run owner-type constrained symbol migrations (dry-run by default) using the same preview/apply engine. Applying requires approval: a dryRun=true call returns previewId + approvalToken, and dryRun=false must pass both back (MCP-ISSUE-060 — this path used to write in one round trip with no gate). requiredOwnerType means \"sites that touch this type's member\", proven from the C# AST — a static (`Codec.M`), instance, `this`, `base`, namespace-qualified or one-hop-nested receiver, plus object initializers and the declaration itself — so it reaches a member's consumers, not only the declaring type. Non-C# files fall back to the enclosing type by text scan. Optionally constrain by symbolKinds (default: any kind). A proven different owner is dropped and named in rejectedSites; a site whose owner cannot be proven is KEPT, counted in unresolvedOccurrences, flagged `ambiguous_target` (so it cannot apply) and explained in ambiguousReasons. When a migration reports fewer matches than expected, read both arrays — they name the rule for every site.",
     input: schemas.refactorSymbolMigrationSchema,
     inputSchema: {
       type: "object",
@@ -229,6 +229,8 @@ export function buildRefactorTools(deps: CodebaseIndexDeps): AnyToolDefinition[]
         },
         scopePaths: { type: "array", items: { type: "string" }, maxItems: 200 },
         dryRun: { type: "boolean" },
+        previewId: { type: "string", description: "Required with dryRun=false: the previewId returned by a prior dryRun=true call." },
+        approvalToken: { type: "string", description: "Required with dryRun=false: the HMAC approvalToken returned by that same dryRun=true call. Refused if the source changed since, so the approval always describes what would actually be written." },
         includeLowConfidence: { type: "boolean", description: "Allow apply for low-confidence hunks. Does NOT lift a risk flag such as ambiguous_target." }
       }
     },
@@ -241,7 +243,7 @@ export function buildRefactorTools(deps: CodebaseIndexDeps): AnyToolDefinition[]
 
   const changeValueRepresentation = defineTool({
     name: "change_value_representation",
-    description: "Promote a property's literal values to enum members (e.g. HandledBy = \"ai\" → ConversationHandledBy.Ai) across assignments, object initializers, ==/!= comparisons, and assertion arguments. Sites are located via the C# AST (no user-authored regex/backreference) and rewritten through the preview/apply/rollback engine — dry-run by default. Cross-type sites (a same-named property on a different owner type) are skipped; sites where the owner type can't be proven are flagged ambiguous_target.",
+    description: "Promote a property's literal values to enum members (e.g. HandledBy = \"ai\" → ConversationHandledBy.Ai) across assignments, object initializers, ==/!= comparisons, and assertion arguments. Sites are located via the C# AST (no user-authored regex/backreference) and rewritten through the preview/apply/rollback engine — dry-run by default. Applying requires approval: a dryRun=true call returns previewId + approvalToken, and dryRun=false must pass both back (MCP-ISSUE-060). Cross-type sites (a same-named property on a different owner type) are skipped; sites where the owner type can't be proven are flagged ambiguous_target.",
     input: schemas.changeValueRepresentationSchema,
     inputSchema: {
       type: "object",
@@ -260,6 +262,8 @@ export function buildRefactorTools(deps: CodebaseIndexDeps): AnyToolDefinition[]
         includeComparisons: { type: "boolean", description: "Also rewrite ==/!= and assertion-argument sites (default true); false = assignments/initializers only." },
         scopePaths: { type: "array", items: { type: "string" }, maxItems: 200 },
         dryRun: { type: "boolean" },
+        previewId: { type: "string", description: "Required with dryRun=false: the previewId returned by a prior dryRun=true call." },
+        approvalToken: { type: "string", description: "Required with dryRun=false: the HMAC approvalToken returned by that same dryRun=true call. Refused if the source changed since, so the approval always describes what would actually be written." },
         includeLowConfidence: { type: "boolean", description: "Allow apply for low-confidence hunks. Does NOT lift the ambiguous_target risk flag — see ambiguousReasons in the response." },
         profile: PROFILE_PROP
       }
