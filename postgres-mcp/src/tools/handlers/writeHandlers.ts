@@ -15,6 +15,7 @@ import {
   type WriteStatementType,
   type WriteTarget
 } from "../../middleware/writeGuardrails.js";
+import { runExclusive } from "../../services/concurrency/envMutex.js";
 import { recordAudit } from "../../services/write/auditLog.js";
 import {
   createWriteDigest,
@@ -329,17 +330,6 @@ async function assertNoInternalSideEffects(client: PoolClient, baseline: number)
       `${reservedSchemaMessage(INTERNAL_SCHEMAS.join(", "))} This statement reaches it indirectly — a trigger or rule on the target table writes there.`
     );
   }
-}
-
-// Single-writer mutex PER ENVIRONMENT: serialize apply/rollback on the same database
-// so two writes never interleave, while letting independent environments proceed in
-// parallel (a long apply on staging must not block an unrelated write on dev).
-const writeMutexes = new Map<string, Promise<unknown>>();
-function runExclusive<T>(envKey: string, fn: () => Promise<T>): Promise<T> {
-  const prev = writeMutexes.get(envKey) ?? Promise.resolve();
-  const run = prev.then(fn, fn);
-  writeMutexes.set(envKey, run.then(() => undefined, () => undefined));
-  return run;
 }
 
 function assertEnabled(config: WriteConfig): void {

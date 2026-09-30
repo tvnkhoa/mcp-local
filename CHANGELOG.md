@@ -35,6 +35,20 @@ are recorded in `postgres-mcp/docs/mcp-postgres-issue-registry.md`.
 - `scripts/write-flow-test.mjs` grows from 16 to 20 scenarios (N, O, P, Q). Each new scenario
   fails with its fix reverted.
 
+### 🔐 `postgres-mcp`: one lock per environment for every lane that changes a database
+
+This is phase 0.2 of the DDL migration lane.
+
+- **PG-MIG-006.** `migration_apply` took no lock. Two concurrent applies of one preview could both
+  pass the drift guard and both run `dotnet ef database update`, and a `write_apply` could change a
+  table mid-migration.
+- The per-environment mutex moved from `writeHandlers.ts` to
+  `src/services/concurrency/envMutex.ts`. `write_apply`, `write_rollback` and `migration_apply` now
+  all take it; the DDL lane will take it too.
+- **Behaviour change:** on one environment, a data write now waits for a running migration.
+- New `envMutex.test.ts` holds the lock from outside the handlers and checks that they wait. It
+  fails if `migration_apply` is left unlocked.
+
 ## [Unreleased] - 2026-08-19d
 
 ### 🔧 What two simulated use cases found, and what it took to fix

@@ -12,7 +12,7 @@ Resolution. Mirrors the format of `codebase-index-mcp/docs/mcp-codebase-index-is
 
 ## Index
 
-**24 entries** — all 24 resolved (some as documented guidance rather than code changes), **0 open**.
+**25 entries** — all 25 resolved (some as documented guidance rather than code changes), **0 open**.
 Statuses are copied from each entry's own `**Status:**` line; the entry is authoritative.
 
 | ID | Title | Status |
@@ -41,6 +41,7 @@ Statuses are copied from each entry's own `**Status:**` line; the entry is autho
 | `PG-MIG-005` | A retried `migration_apply` reported `MIGRATION_DRIFT` that its own audit log caused | ✅ fixed 2026-09-30 (code) — `captureSchema` excludes `mcp_ops` |
 | `PG-SEC-002` | `write_preview` accepted writes to `mcp_ops`, the server's own audit schema | ✅ fixed 2026-09-30 (code) — refused at parse, plan and execution time (triggers) |
 | `PG-WRT-007` | `write_preview` used the regex's guess at the target, not the table the statement writes | ✅ fixed 2026-09-30 (code) — target resolved from the EXPLAIN plan |
+| `PG-MIG-006` | `migration_apply` took no lock: two applies of one preview could both run, and writes could interleave | ✅ fixed 2026-09-30 (code) — shared per-environment mutex |
 
 > ID prefixes group by area: `ENV` environment resolution · `SEC` safety posture · `DOC`
 > documentation drift · `CMP` compare_environments · `MIG` EF Core migrations · `DIF` data_diff ·
@@ -1128,6 +1129,41 @@ time; covered by `writeGuardrails.test.ts`, `tools.test.ts`, `N/internal-schema-
 - **Verified discriminating:** against the regex target, `Q/target-from-plan` fails with
   `targetTable:"public.app", rollbackSupported:false`. With the fix, both spellings report
   `app.orders`, apply, and roll back.
+
+---
+
+## PG-MIG-006 — `migration_apply` took no lock: two applies of one preview could both run, and writes could interleave
+
+**Status:** ✅ fixed 2026-09-30 (code) — `migration_apply` runs under the same per-environment mutex
+as `write_apply` and `write_rollback`; covered by `src/services/concurrency/envMutex.test.ts`.
+
+- **Scenario:** found by reading the code while planning phase 0.2 of the DDL migration lane. It was
+  not observed live. Two cases:
+  1. `migration_apply` is called twice at once with the same `previewId`, for example by a client
+     that retries while the first call is still running.
+  2. A `write_apply` runs against a table while `dotnet ef database update` is changing it.
+- **Root cause:** `write_apply` and `write_rollback` ran under a mutex private to
+  `writeHandlers.ts`. `migration_apply` had no lock at all.
+  - In case 1, the second call finds the preview record, because it is deleted only after a
+    successful update. Its drift guard passes, because the first call has not changed the schema
+    yet. Both calls then start `dotnet ef database update`. EF Core 9 takes its own migration lock,
+    but earlier versions do not.
+  - In case 2, nothing ordered the two lanes at all.
+- **Resolution:** the mutex moved to `src/services/concurrency/envMutex.ts`, and all three handlers
+  import it. `migration_apply` reads the preview's environment only to choose which lock to take.
+  The preview lookup, token check and drift guard all run inside the lock. The second of two
+  concurrent calls therefore waits, and then gets `PREVIEW_NOT_FOUND`. The lock still orders only
+  this process. A second server process is not stopped by it; the DDL lane's advisory lock
+  (phase 2.5 for EF) is what covers that.
+- **Cost:** on one environment, a data write now waits for a running migration to finish, which can
+  take up to `POSTGRES_DOTNET_TIMEOUT_MS` (default 120 s). That wait is the purpose of the change:
+  a write should not land on a table while its migration is running.
+- **Verified discriminating:** the lane tests hold the `default` lock from outside the handler and
+  check that the handler has not settled 50 ms later. With `runExclusive` replaced by a direct call
+  in `migrationHandlers.ts`, `migration_apply waits for the lock that write_apply holds` fails with
+  "migration_apply ran while another lane held the environment's lock".
+- **Not covered:** the end-to-end case of two real `dotnet ef` runs. That needs the injectable runner
+  planned for phase 2.3.
 
 ---
 

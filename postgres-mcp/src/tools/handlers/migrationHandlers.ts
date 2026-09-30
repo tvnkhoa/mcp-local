@@ -7,6 +7,7 @@ import { PolicyViolationError } from "../../middleware/errors.js";
 import { asText, type ResponseProfile } from "../../middleware/responseFormatter.js";
 import { quoteIdent } from "../../middleware/ident.js";
 import { issueApprovalToken, verifyApprovalToken } from "../../services/write/approval.js";
+import { runExclusive } from "../../services/concurrency/envMutex.js";
 import { recordAudit } from "../../services/write/auditLog.js";
 import {
   assertMigrationEnabled,
@@ -272,49 +273,78 @@ export async function handleMigrationApply(
   config: MigrationConfig
 ): Promise<CallToolResult> {
   assertMigrationEnabled(config);
-  const preview = migrationPreviews.get(args.previewId);
-  if (!preview) {
-    // Record is swept only after POSTGRES_MIGRATION_PREVIEW_TTL_MS (default 1h) or on server restart;
-    // within that window a human-gated approval can pause freely — the token's own expiry no
-    // longer blocks apply (PG-PRV-002), the drift guard below is the real staleness check.
-    throw new PolicyViolationError("PREVIEW_NOT_FOUND", `Migration preview '${args.previewId}' not found or expired.`);
-  }
-  // ignoreExpiry: freshness for a schema migration is proven by the drift guard (below), not the
-  // time-box — see verifyApprovalToken. The record-existence check above still bounds how stale a
-  // preview can be, and the HMAC still proves this token was issued for this exact plan.
-  verifyApprovalToken(args.approvalToken, preview.previewId, preview.digest, preview.expiresAt, config.approvalSecret, {
-    ignoreExpiry: true
-  });
 
-  const env = connections.getEnvironment(preview.environment, true);
-  const pool = connections.getPool(preview.environment, true);
+  // The same per-environment mutex as write_apply / write_rollback. Without it, two concurrent
+  // applies of one preview both passed the drift guard (the first had not finished, so nothing
+  // had drifted yet) and both ran `dotnet ef database update`; and a data write could land on a
+  // table mid-migration. The environment is peeked only to key the lock — every check below
+  // runs inside it, so the second of two callers sees PREVIEW_NOT_FOUND, not a stale preview.
+  const previewEnv =
+    migrationPreviews.get(args.previewId)?.environment ?? connections.resolveEnvName(args.environment);
 
-  // Two independent freshness checks, run together (schema round-trip + dotnet subprocess):
-  //  1. Schema drift — the live schema must still match what was previewed.
-  //  2. Pending-set drift — the set of pending migrations must be unchanged. Adding a migration
-  //     between preview and apply leaves the schema untouched, so the snapshot guard alone would
-  //     miss it and `dotnet ef database update` would apply migrations that were never previewed.
-  const [preSnapshot, current] = await Promise.all([
-    captureSchema(pool),
-    listMigrations(config, env.connectionString)
-  ]);
-  if (preSnapshot.snapshotId !== preview.preSnapshotId) {
-    throw new PolicyViolationError(
-      "MIGRATION_DRIFT",
-      "Schema changed since migration_preview. Re-run migration_preview before applying."
-    );
-  }
-  if (current.pending.join(",") !== preview.pendingMigrations.join(",")) {
-    throw new PolicyViolationError(
-      "MIGRATION_DRIFT",
-      "Pending migration set changed since migration_preview. Re-run migration_preview before applying."
-    );
-  }
+  return runExclusive(previewEnv, async () => {
+    const preview = migrationPreviews.get(args.previewId);
+    if (!preview) {
+      // Record is swept only after POSTGRES_MIGRATION_PREVIEW_TTL_MS (default 1h) or on server restart;
+      // within that window a human-gated approval can pause freely — the token's own expiry no
+      // longer blocks apply (PG-PRV-002), the drift guard below is the real staleness check.
+      throw new PolicyViolationError("PREVIEW_NOT_FOUND", `Migration preview '${args.previewId}' not found or expired.`);
+    }
+    // ignoreExpiry: freshness for a schema migration is proven by the drift guard (below), not the
+    // time-box — see verifyApprovalToken. The record-existence check above still bounds how stale a
+    // preview can be, and the HMAC still proves this token was issued for this exact plan.
+    verifyApprovalToken(args.approvalToken, preview.previewId, preview.digest, preview.expiresAt, config.approvalSecret, {
+      ignoreExpiry: true
+    });
 
-  let updateResult: EfResult;
-  try {
-    updateResult = efOk(await efDatabaseUpdate(config, env.connectionString), "database update");
-  } catch (error) {
+    const env = connections.getEnvironment(preview.environment, true);
+    const pool = connections.getPool(preview.environment, true);
+
+    // Two independent freshness checks, run together (schema round-trip + dotnet subprocess):
+    //  1. Schema drift — the live schema must still match what was previewed.
+    //  2. Pending-set drift — the set of pending migrations must be unchanged. Adding a migration
+    //     between preview and apply leaves the schema untouched, so the snapshot guard alone would
+    //     miss it and `dotnet ef database update` would apply migrations that were never previewed.
+    const [preSnapshot, current] = await Promise.all([
+      captureSchema(pool),
+      listMigrations(config, env.connectionString)
+    ]);
+    if (preSnapshot.snapshotId !== preview.preSnapshotId) {
+      throw new PolicyViolationError(
+        "MIGRATION_DRIFT",
+        "Schema changed since migration_preview. Re-run migration_preview before applying."
+      );
+    }
+    if (current.pending.join(",") !== preview.pendingMigrations.join(",")) {
+      throw new PolicyViolationError(
+        "MIGRATION_DRIFT",
+        "Pending migration set changed since migration_preview. Re-run migration_preview before applying."
+      );
+    }
+
+    let updateResult: EfResult;
+    try {
+      updateResult = efOk(await efDatabaseUpdate(config, env.connectionString), "database update");
+    } catch (error) {
+      await recordAudit(pool, env.name, {
+        tool: "migration_apply",
+        environment: env.name,
+        statementType: "migration",
+        targetTable: null,
+        sqlHash: null,
+        rowsAffected: null,
+        status: "failed",
+        rollbackId: null,
+        detail: { error: String(error) }
+      });
+      throw error;
+    }
+
+    // Verify: capture post-snapshot and diff so the caller sees exactly what changed.
+    const postSnapshot = await captureSchema(pool);
+    const diff = diffSnapshots(preSnapshot, postSnapshot);
+    migrationPreviews.delete(args.previewId);
+
     await recordAudit(pool, env.name, {
       tool: "migration_apply",
       environment: env.name,
@@ -322,47 +352,29 @@ export async function handleMigrationApply(
       targetTable: null,
       sqlHash: null,
       rowsAffected: null,
-      status: "failed",
-      rollbackId: null,
-      detail: { error: String(error) }
-    });
-    throw error;
-  }
-
-  // Verify: capture post-snapshot and diff so the caller sees exactly what changed.
-  const postSnapshot = await captureSchema(pool);
-  const diff = diffSnapshots(preSnapshot, postSnapshot);
-  migrationPreviews.delete(args.previewId);
-
-  await recordAudit(pool, env.name, {
-    tool: "migration_apply",
-    environment: env.name,
-    statementType: "migration",
-    targetTable: null,
-    sqlHash: null,
-    rowsAffected: null,
-    status: "applied",
-    rollbackId: null,
-    detail: { preSnapshotId: preSnapshot.snapshotId, postSnapshotId: postSnapshot.snapshotId }
-  });
-
-  return asText(
-    {
-      environment: env.name,
       status: "applied",
-      preSnapshotId: preSnapshot.snapshotId,
-      postSnapshotId: postSnapshot.snapshotId,
-      // Derived from the snapshot IDs themselves (not `!diff.identical`) so this flag can
-      // never disagree with the two IDs shown right next to it — snapshotId is name-sensitive
-      // (it hashes the raw captured constraints) while `diff` is deliberately name-insensitive,
-      // so a rename-only change (e.g. a constraint recreated under a different name) would
-      // otherwise report schemaChanged:false alongside two different snapshot IDs.
-      schemaChanged: preSnapshot.snapshotId !== postSnapshot.snapshotId,
-      diff,
-      raw: verboseOnly(updateResult.stdout.trim(), args.profile ?? "compact")
-    },
-    args.profile ?? "compact"
-  );
+      rollbackId: null,
+      detail: { preSnapshotId: preSnapshot.snapshotId, postSnapshotId: postSnapshot.snapshotId }
+    });
+
+    return asText(
+      {
+        environment: env.name,
+        status: "applied",
+        preSnapshotId: preSnapshot.snapshotId,
+        postSnapshotId: postSnapshot.snapshotId,
+        // Derived from the snapshot IDs themselves (not `!diff.identical`) so this flag can
+        // never disagree with the two IDs shown right next to it — snapshotId is name-sensitive
+        // (it hashes the raw captured constraints) while `diff` is deliberately name-insensitive,
+        // so a rename-only change (e.g. a constraint recreated under a different name) would
+        // otherwise report schemaChanged:false alongside two different snapshot IDs.
+        schemaChanged: preSnapshot.snapshotId !== postSnapshot.snapshotId,
+        diff,
+        raw: verboseOnly(updateResult.stdout.trim(), args.profile ?? "compact")
+      },
+      args.profile ?? "compact"
+    );
+  });
 }
 
 // ── migration_dry_run ──────────────────────────────────────────────────────────
