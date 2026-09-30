@@ -12,7 +12,7 @@ Resolution. Mirrors the format of `codebase-index-mcp/docs/mcp-codebase-index-is
 
 ## Index
 
-**25 entries** — all 25 resolved (some as documented guidance rather than code changes), **0 open**.
+**26 entries** — all 26 resolved (some as documented guidance rather than code changes), **0 open**.
 Statuses are copied from each entry's own `**Status:**` line; the entry is authoritative.
 
 | ID | Title | Status |
@@ -42,6 +42,7 @@ Statuses are copied from each entry's own `**Status:**` line; the entry is autho
 | `PG-SEC-002` | `write_preview` accepted writes to `mcp_ops`, the server's own audit schema | ✅ fixed 2026-09-30 (code) — refused at parse, plan and execution time (triggers) |
 | `PG-WRT-007` | `write_preview` used the regex's guess at the target, not the table the statement writes | ✅ fixed 2026-09-30 (code) — target resolved from the EXPLAIN plan |
 | `PG-MIG-006` | `migration_apply` took no lock: two applies of one preview could both run, and writes could interleave | ✅ fixed 2026-09-30 (code) — shared per-environment mutex |
+| `PG-CMP-002` | The schema snapshot saw only tables: a changed view, function, trigger or enum passed the drift guard | ✅ fixed 2026-09-30 (code) — snapshot v2 captures seven more object kinds |
 
 > ID prefixes group by area: `ENV` environment resolution · `SEC` safety posture · `DOC`
 > documentation drift · `CMP` compare_environments · `MIG` EF Core migrations · `DIF` data_diff ·
@@ -1164,6 +1165,55 @@ as `write_apply` and `write_rollback`; covered by `src/services/concurrency/envM
   "migration_apply ran while another lane held the environment's lock".
 - **Not covered:** the end-to-end case of two real `dotnet ef` runs. That needs the injectable runner
   planned for phase 2.3.
+
+---
+
+## PG-CMP-002 — the schema snapshot saw only tables: a changed view, function, trigger or enum passed the drift guard
+
+**Status:** ✅ fixed 2026-09-30 (code) — snapshot v2 (`snapshotVersion: 2`); covered by
+`schemaSnapshot.test.ts` and `R/snapshot-v2-objects`.
+
+- **Scenario:** phase 0.3 of the DDL migration lane. The lane's drift guard and post-apply diff
+  reuse `captureSchema`. So do `migration_apply`, `compare_environments` and `schema://`.
+- **Expected vs actual:** expected a `create or replace view`, a replaced function body, a new
+  trigger or a reordered enum between `migration_preview` and `migration_apply` to count as drift.
+  Actually, `captureSchema` read only columns, indexes and constraints. A view appeared as its
+  columns alone, so replacing its body without changing its column list was invisible, and the
+  other kinds were not read at all. `compare_environments` reported `schemaIdentical: true` for two
+  databases whose functions differed.
+- **Resolution:** `SchemaSnapshot.objects` holds seven kinds: `views` (with materialized views),
+  `sequences`, `enums`, `domains`, `routines`, `triggers` and `extensions`. The design choices:
+  - **Size.** Views, routines and triggers are stored as an md5 of the server's own rendering, so
+    `schema://` stays small.
+  - **State, not structure.** Sequences keep their parameters, never `last_value`.
+  - **Enum order.** Enum labels keep their order, because the order defines `<` and `>`.
+  - **Version stability.**
+    - Domains take only CHECK constraints. PG17 also catalogues a domain's NOT NULL as a constraint
+      row, and `typnotnull` already covers it.
+    - Routines are limited to `prokind in ('f','p')`, because `pg_get_functiondef` raises on
+      aggregates.
+    - Triggers skip `tgisinternal`, the triggers Postgres creates for foreign keys.
+  - **Extension-owned objects are excluded** through `pg_depend.deptype = 'e'`. The extension
+    itself is still captured, with its version.
+- **`snapshotVersion` is hashed into `snapshotId`,** so a v1 id and a v2 id can never compare equal.
+  Every snapshot id changes with this release. Previews live in memory, so the restart that loads the
+  new code discards them anyway.
+- **`diffSnapshots`** returns `objectChanges`: only the kinds that changed, each as
+  `{ added, removed, changed }`. `identical` now takes them into account. The change is additive:
+  existing fields are unchanged.
+- **Cost, measured on `dev` (CommunicationHub, RDS), 2026-09-30:** the seven object queries plus the
+  column scan take **129 ms** on the server. The database has 551 columns, 12 sequences, 146
+  routines in user schemas, and the extensions `plpgsql`, `pg_trgm` and `vector`. **145 of the 146
+  routines belong to `vector` and `pg_trgm`,** so the extension filter is what keeps the snapshot
+  meaningful here. `prod` could not be measured: the connection timed out from this machine.
+- **Verified discriminating:**
+  - The unit tests fail against v1's `diffSnapshots`, which has no `objectChanges`.
+  - With the extension filter disabled, `R/snapshot-v2-objects` fails with `extensionRoutines=5`:
+    pgcrypto's `digest`, `gen_salt` and `crypt` overloads appear as routines.
+- **Known limit:** `pg_get_viewdef` and `pg_get_functiondef` can render the same definition
+  differently on different Postgres major versions. `compare_environments` between two servers on
+  different major versions may therefore report views or routines as `changed` when they are not.
+  The drift guard is not affected, because it compares a database with itself.
 
 ---
 

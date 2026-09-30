@@ -49,6 +49,22 @@ This is phase 0.2 of the DDL migration lane.
 - New `envMutex.test.ts` holds the lock from outside the handlers and checks that they wait. It
   fails if `migration_apply` is left unlocked.
 
+### 🔭 `postgres-mcp`: the schema snapshot sees more than tables (snapshot v2)
+
+This is phase 0.3 of the DDL migration lane.
+
+- **PG-CMP-002.** `captureSchema` read only columns, indexes and constraints. Between preview and
+  apply, a replaced view body, function, trigger or reordered enum therefore passed the drift guard,
+  and `compare_environments` called two databases identical when their functions differed.
+- The snapshot now has `objects`, which holds seven kinds: views and materialized views, sequences,
+  enums, domains, routines, triggers and extensions. Objects owned by an extension are excluded; on
+  `dev`, that removes 145 of 146 routines, which belong to `vector` and `pg_trgm`.
+- `diff.objectChanges` is added to `compare_environments` and `migration_apply`. It lists only the
+  kinds that changed. The existing fields are unchanged.
+- **Every `snapshotId` changes.** `snapshotVersion: 2` is part of the hash, so v1 and v2 ids never
+  compare equal.
+- Cost measured on `dev`: 129 ms server-side for the seven kinds plus the column scan.
+
 ## [Unreleased] - 2026-08-19d
 
 ### 🔧 What two simulated use cases found, and what it took to fix

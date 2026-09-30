@@ -59,10 +59,130 @@ function constraintMultiset(constraints: ConstraintInfo[]): Map<string, number> 
   return counts;
 }
 
+/**
+ * Bumped whenever what the snapshot captures changes, and hashed into `snapshotId`, so ids from
+ * two different shapes can never compare equal. v1 captured tables only; v2 adds `objects`.
+ */
+export const SNAPSHOT_VERSION = 2;
+
+/** Schema objects other than tables, each kind keyed by a stable qualified name. */
+export const OBJECT_KINDS = ["views", "sequences", "enums", "domains", "routines", "triggers", "extensions"] as const;
+export type ObjectKind = (typeof OBJECT_KINDS)[number];
+
+export interface ObjectDef {
+  /** Qualified and stable: `schema.view`, `schema.fn(int, text)`, `schema.table.trigger`, `extname`. */
+  name: string;
+  /**
+   * What decides equality. For views, routines and triggers this is an md5 of the server's own
+   * rendering (pg_get_viewdef / pg_get_functiondef / pg_get_triggerdef) rather than the text,
+   * which keeps `schema://` small — a diff says WHAT changed, `describe_table` or the catalog
+   * shows how. Short definitions (enum labels, sequence parameters, extension version) are kept
+   * readable.
+   */
+  definition: string;
+}
+
+export type SchemaObjects = Record<ObjectKind, ObjectDef[]>;
+
 export interface SchemaSnapshot {
+  snapshotVersion: number;
   schemas: string[];
   tables: TableSnapshot[];
+  objects: SchemaObjects;
   snapshotId: string;
+}
+
+/**
+ * `not exists (… deptype 'e')` for a catalog row: excludes objects an extension created. Without
+ * it, installing PostGIS or pgcrypto floods every kind with hundreds of entries the migrations
+ * never wrote — and makes two environments at different extension versions look wholesale
+ * different. The extension itself is still captured, by name and version.
+ */
+function notExtensionOwned(catalog: string, oidExpr: string): string {
+  return `not exists (select 1 from pg_depend d where d.classid = '${catalog}'::regclass and d.objid = ${oidExpr} and d.deptype = 'e')`;
+}
+
+async function captureObjects(pool: Pool, schemas: string[]): Promise<SchemaObjects> {
+  const [views, sequences, enums, domains, routines, triggers, extensions] = await Promise.all([
+    pool.query<{ name: string; definition: string }>(
+      `select n.nspname || '.' || c.relname as name,
+              case c.relkind when 'm' then 'materialized ' else '' end || md5(pg_get_viewdef(c.oid, false)) as definition
+       from pg_class c join pg_namespace n on n.oid = c.relnamespace
+       where c.relkind in ('v', 'm') and n.nspname = any($1) and ${notExtensionOwned("pg_class", "c.oid")}`,
+      [schemas]
+    ),
+    // Parameters only. last_value is state, not structure, and changes with every insert.
+    pool.query<{ name: string; definition: string }>(
+      `select n.nspname || '.' || c.relname as name,
+              format('%s start %s increment %s min %s max %s cache %s%s',
+                     format_type(s.seqtypid, null), s.seqstart, s.seqincrement, s.seqmin, s.seqmax,
+                     s.seqcache, case when s.seqcycle then ' cycle' else '' end) as definition
+       from pg_sequence s
+       join pg_class c on c.oid = s.seqrelid
+       join pg_namespace n on n.oid = c.relnamespace
+       where n.nspname = any($1) and ${notExtensionOwned("pg_class", "c.oid")}`,
+      [schemas]
+    ),
+    // Label ORDER is part of an enum's meaning (it defines < and >), so it is kept.
+    pool.query<{ name: string; definition: string }>(
+      `select n.nspname || '.' || t.typname as name,
+              json_agg(e.enumlabel order by e.enumsortorder)::text as definition
+       from pg_type t
+       join pg_enum e on e.enumtypid = t.oid
+       join pg_namespace n on n.oid = t.typnamespace
+       where n.nspname = any($1) and ${notExtensionOwned("pg_type", "t.oid")}
+       group by n.nspname, t.typname`,
+      [schemas]
+    ),
+    // CHECK constraints only (contype 'c'): PG17 started cataloguing a domain's NOT NULL as a
+    // constraint row too, the same split PG18 made for tables — typnotnull covers it on every
+    // version, so taking the rows as well would report drift between PG16 and PG17 servers.
+    pool.query<{ name: string; definition: string }>(
+      `select n.nspname || '.' || t.typname as name,
+              format_type(t.typbasetype, t.typtypmod)
+                || case when t.typnotnull then ' not null' else '' end
+                || coalesce(' default ' || t.typdefault, '')
+                || coalesce((select ' ' || string_agg(pg_get_constraintdef(k.oid, false), ' ' order by pg_get_constraintdef(k.oid, false))
+                             from pg_constraint k where k.contypid = t.oid and k.contype = 'c'), '') as definition
+       from pg_type t join pg_namespace n on n.oid = t.typnamespace
+       where t.typtype = 'd' and n.nspname = any($1) and ${notExtensionOwned("pg_type", "t.oid")}`,
+      [schemas]
+    ),
+    // prokind 'f' and 'p' only: pg_get_functiondef raises on an aggregate ('a') or window ('w')
+    // function, and one such function would fail the whole snapshot.
+    pool.query<{ name: string; definition: string }>(
+      `select n.nspname || '.' || p.proname || '(' || pg_get_function_identity_arguments(p.oid) || ')' as name,
+              md5(pg_get_functiondef(p.oid)) as definition
+       from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+       where p.prokind in ('f', 'p') and n.nspname = any($1) and ${notExtensionOwned("pg_proc", "p.oid")}`,
+      [schemas]
+    ),
+    // tgisinternal excludes the triggers Postgres creates to enforce foreign keys; those are
+    // already captured as constraints, under names that differ per server.
+    pool.query<{ name: string; definition: string }>(
+      `select n.nspname || '.' || c.relname || '.' || t.tgname as name,
+              md5(pg_get_triggerdef(t.oid, false)) as definition
+       from pg_trigger t
+       join pg_class c on c.oid = t.tgrelid
+       join pg_namespace n on n.oid = c.relnamespace
+       where not t.tgisinternal and n.nspname = any($1) and ${notExtensionOwned("pg_class", "c.oid")}`,
+      [schemas]
+    ),
+    // Database-wide, not per schema: an extension is installed once, whichever schema holds it.
+    pool.query<{ name: string; definition: string }>(`select extname as name, extversion as definition from pg_extension`)
+  ]);
+
+  const sorted = (rows: ObjectDef[]): ObjectDef[] =>
+    rows.map((r) => ({ name: r.name, definition: r.definition })).sort((a, b) => a.name.localeCompare(b.name));
+  return {
+    views: sorted(views.rows),
+    sequences: sorted(sequences.rows),
+    enums: sorted(enums.rows),
+    domains: sorted(domains.rows),
+    routines: sorted(routines.rows),
+    triggers: sorted(triggers.rows),
+    extensions: sorted(extensions.rows)
+  };
 }
 
 /**
@@ -187,12 +307,36 @@ export async function captureSchema(pool: Pool, schemas?: string[]): Promise<Sch
     t.constraints.sort((a, b) => constraintKey(a).localeCompare(constraintKey(b)));
   }
 
+  const objects = await captureObjects(pool, targetSchemas);
+
   const snapshotId = createHash("sha256")
-    .update(JSON.stringify({ schemas: targetSchemas, tables }))
+    .update(JSON.stringify({ snapshotVersion: SNAPSHOT_VERSION, schemas: targetSchemas, tables, objects }))
     .digest("hex")
     .slice(0, 24);
 
-  return { schemas: targetSchemas, tables, snapshotId };
+  return { snapshotVersion: SNAPSHOT_VERSION, schemas: targetSchemas, tables, objects, snapshotId };
+}
+
+export interface ObjectKindDiff {
+  added: string[];
+  removed: string[];
+  changed: string[];
+}
+
+/** Per-kind changes, with only the kinds that actually changed present. */
+function diffObjects(a: SchemaObjects, b: SchemaObjects): Partial<Record<ObjectKind, ObjectKindDiff>> {
+  const result: Partial<Record<ObjectKind, ObjectKindDiff>> = {};
+  for (const kind of OBJECT_KINDS) {
+    const aMap = new Map(a[kind].map((o) => [o.name, o.definition]));
+    const bMap = new Map(b[kind].map((o) => [o.name, o.definition]));
+    const added = [...bMap.keys()].filter((k) => !aMap.has(k)).sort();
+    const removed = [...aMap.keys()].filter((k) => !bMap.has(k)).sort();
+    const changed = [...aMap.keys()].filter((k) => bMap.has(k) && bMap.get(k) !== aMap.get(k)).sort();
+    if (added.length || removed.length || changed.length) {
+      result[kind] = { added, removed, changed };
+    }
+  }
+  return result;
 }
 
 export interface SchemaDiff {
@@ -209,6 +353,8 @@ export interface SchemaDiff {
     addedConstraints: string[];
     removedConstraints: string[];
   }>;
+  /** Non-table objects (views, routines, enums, …): only the kinds that changed are present. */
+  objectChanges: Partial<Record<ObjectKind, ObjectKindDiff>>;
 }
 
 /** Diff two snapshots (a = source/before, b = target/after). */
@@ -277,10 +423,17 @@ export function diffSnapshots(a: SchemaSnapshot, b: SchemaSnapshot): SchemaDiff 
     }
   }
 
+  const objectChanges = diffObjects(a.objects, b.objects);
+
   return {
-    identical: addedTables.length === 0 && removedTables.length === 0 && changedTables.length === 0,
+    identical:
+      addedTables.length === 0 &&
+      removedTables.length === 0 &&
+      changedTables.length === 0 &&
+      Object.keys(objectChanges).length === 0,
     addedTables,
     removedTables,
-    changedTables
+    changedTables,
+    objectChanges
   };
 }

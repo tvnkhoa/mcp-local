@@ -527,6 +527,51 @@ async function main() {
         `rowsAffected=${String(p.rowsAffected)} rollbackSupported=${String(p.rollbackSupported)} note=${String(p.rollbackNote)}`
       );
     }
+
+    // ── R. snapshot v2 sees objects that are not tables ─────────────────────
+    {
+      await db.query(`
+        create extension if not exists pgcrypto;
+        create type mood as enum ('sad', 'ok', 'happy');
+        create domain positive_int as int not null check (value > 0);
+        create sequence invoice_no start 100 increment 5;
+        create view v_orders as select id, name from app.orders;
+        create materialized view mv_orders as select count(*) as n from app.orders;
+        create procedure touch() language sql as $p$ select 1 $p$;
+      `);
+      const read = async () => JSON.parse((await mcp.readResource({ uri: "schema://default" })).contents[0].text);
+      const before = await read();
+      const names = (kind) => before.objects[kind].map((o) => o.name);
+      // pgcrypto installs ~40 functions into public. They are the extension's, not ours.
+      const leakedExtensionRoutines = names("routines").filter((n) => /^public\.(digest|gen_salt|crypt)\(/.test(n));
+
+      await db.query("create or replace view v_orders as select id, upper(name) as name from app.orders");
+      const after = await read();
+
+      const expected = {
+        views: ["public.mv_orders", "public.v_orders"],
+        sequences: ["public.invoice_no"],
+        enums: ["public.mood"],
+        domains: ["public.positive_int"],
+        routines: ["public.sneak()", "public.touch()"],
+        triggers: ["public.t_trig.t_trig_sneak", "public.t_trig_late.t_trig_late_sneak"],
+        extensions: ["pgcrypto", "plpgsql"]
+      };
+      const missing = Object.entries(expected).flatMap(([kind, want]) =>
+        want.filter((n) => !names(kind).includes(n)).map((n) => `${kind}:${n}`)
+      );
+      const enumDef = before.objects.enums.find((o) => o.name === "public.mood")?.definition;
+      check(
+        "R/snapshot-v2-objects",
+        before.snapshotVersion === 2 &&
+          missing.length === 0 &&
+          leakedExtensionRoutines.length === 0 &&
+          enumDef === '["sad", "ok", "happy"]' &&
+          after.snapshotId !== before.snapshotId,
+        `missing=${JSON.stringify(missing)} extensionRoutines=${String(leakedExtensionRoutines.length)} ` +
+          `enum=${String(enumDef)} idChangedOnViewEdit=${String(after.snapshotId !== before.snapshotId)}`
+      );
+    }
   } finally {
     await mcp.close().catch(() => undefined);
     await db.end().catch(() => undefined);

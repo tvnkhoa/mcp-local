@@ -75,6 +75,15 @@ Mọi read-tool nhận thêm `environment` và `profile` (`nano`/`compact`/`stan
 
 Schema mỗi env cũng được expose dạng **MCP resource**: `schema://<env>`.
 
+Snapshot (từ v2, trường `snapshotVersion: 2`) có hai phần:
+
+- `tables`: cột, index, constraint của từng bảng.
+- `objects`: view/materialized view, sequence (chỉ tham số, không lấy `last_value`), enum (giữ thứ tự label), domain, function/procedure, trigger (bỏ trigger nội bộ của FK), extension (tên + version).
+
+Với view, function và trigger, snapshot chỉ lưu md5 của định nghĩa để payload nhỏ gọn. Object do extension tạo ra (như `vector`, `pg_trgm`) bị loại. Riêng extension thì vẫn có mặt, kèm version.
+
+`compare_environments` và `migration_apply` trả thêm `diff.objectChanges`, trong đó chỉ có các loại object thực sự thay đổi, mỗi loại gồm `added` / `removed` / `changed`.
+
 ## 5. Luồng ghi có review
 
 ```jsonc
