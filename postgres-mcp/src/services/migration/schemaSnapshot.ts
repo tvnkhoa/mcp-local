@@ -2,6 +2,8 @@ import { createHash } from "node:crypto";
 
 import type { Pool } from "pg";
 
+import { INTERNAL_SCHEMAS } from "../../middleware/internalSchemas.js";
+
 export interface ColumnInfo {
   name: string;
   dataType: string;
@@ -63,7 +65,10 @@ export interface SchemaSnapshot {
   snapshotId: string;
 }
 
-/** Discover every non-system schema (so snapshots aren't silently limited to `public`). */
+/**
+ * Discover every non-system schema (so snapshots aren't silently limited to `public`).
+ * The server's own schemas are excluded too — see INTERNAL_SCHEMAS for why (PG-MIG-005).
+ */
 async function discoverUserSchemas(pool: Pool): Promise<string[]> {
   const result = await pool.query<{ nspname: string }>(
     `
@@ -71,8 +76,10 @@ async function discoverUserSchemas(pool: Pool): Promise<string[]> {
     from pg_namespace
     where nspname not in ('pg_catalog', 'information_schema')
       and nspname not like 'pg\\_%'
+      and nspname <> all($1::text[])
     order by nspname
-    `
+    `,
+    [INTERNAL_SCHEMAS]
   );
   return result.rows.map((r) => r.nspname);
 }
@@ -81,7 +88,7 @@ async function discoverUserSchemas(pool: Pool): Promise<string[]> {
  * Capture a structural snapshot (tables → columns/indexes/constraints).
  * When `schemas` is omitted, ALL non-system schemas are captured — this matters for
  * the migration drift guard and compare_environments, which must not ignore tables
- * that live outside `public`.
+ * that live outside `public`. The server's own `mcp_ops` is not user schema and is left out.
  */
 export async function captureSchema(pool: Pool, schemas?: string[]): Promise<SchemaSnapshot> {
   const targetSchemas =

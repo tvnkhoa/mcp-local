@@ -136,6 +136,12 @@ compare_environments { "source": "dev", "target": "staging", "includeRowCounts":
 
 Mọi `write_apply` / `write_rollback` / `migration_apply` được ghi vào bảng `mcp_ops.audit_log` trên DB đích (tự tạo khi dùng lần đầu) và stderr JSON.
 
+Schema `mcp_ops` thuộc về server, không phải schema của ứng dụng:
+
+- Không ghi được qua `write_preview`. Lệnh ghi vào đó bị trả `WRITE_RESERVED_SCHEMA`. Server kiểm tra hai lần: lúc parse SQL, rồi trên plan mà Postgres resolve ra (`EXPLAIN`), nên viết `mcp_ops . audit_log` hay chèn comment quanh dấu chấm cũng không lọt. Trigger trên bảng của ứng dụng mà ghi vào `mcp_ops` cũng bị chặn, cả khi preview lẫn khi apply.
+- Bảng đích (`targetTable`, PK dùng cho rollback) được lấy từ plan Postgres resolve ra, không phải đoán từ SQL.
+- Không có trong snapshot schema. `compare_environments`, resource `schema://<env>` và drift guard của `migration_apply` đều bỏ qua nó (PG-MIG-005).
+
 ## 8. Lưu ý bảo mật
 
 - Mặc định read-only. Ghi/migration phải bật cờ tường minh (`POSTGRES_WRITE_ENABLED` / `POSTGRES_MIGRATION_ENABLED`). Approval token được ký/xác minh hoàn toàn trong process: nếu không set `POSTGRES_WRITE_APPROVAL_SECRET`, MCP tự sinh secret ngẫu nhiên mỗi lần khởi động (token không thể giả mạo, không cần cấu hình). Chỉ set secret nếu muốn token còn hiệu lực qua restart.

@@ -112,6 +112,20 @@ insert into t_stale  values (1,'before');
 insert into t_comment values (1,'keep');
 insert into t_setcomment values (1,'keep');
 insert into t_big select g, 'row' from generate_series(1, ${String(MAX_ROLLBACK_ROWS + 1)}) g;
+create schema app;
+create table app.orders (id int primary key, name text);
+insert into app.orders values (1,'a'),(2,'b');
+create table t_trig      (id int primary key, name text);
+create table t_trig_late (id int primary key, name text);
+insert into t_trig values (1,'a');
+insert into t_trig_late values (1,'a');
+-- plpgsql resolves mcp_ops at call time, so this can exist before the audit log does.
+create function sneak() returns trigger language plpgsql as $f$
+begin
+  insert into mcp_ops.audit_log (tool, environment, status) values ('sneak', 'x', 'x');
+  return new;
+end $f$;
+create trigger t_trig_sneak after update on t_trig for each row execute function sneak();
 `;
 
 // ── main ─────────────────────────────────────────────────────────────────────
@@ -403,6 +417,104 @@ async function main() {
         "M/unparseable-set-refused",
         p.rollbackSupported === false && a.rollbackId === null,
         `rollbackSupported=${String(p.rollbackSupported)} note=${String(p.rollbackNote)}`
+      );
+    }
+
+    // ── N. the server's own schema cannot be written (PG-SEC-002) ───────────
+    {
+      // Every apply above wrote an audit row, so mcp_ops.audit_log exists and has rows.
+      const before = Number((await rows("select count(*)::int as n from mcp_ops.audit_log"))[0].n);
+      const attempts = [
+        // Caught by the parser.
+        "delete from mcp_ops.audit_log where id > 0",
+        // Hidden from the parser's regex; only the resolved plan sees mcp_ops.
+        "delete from mcp_ops . audit_log where id > 0",
+        "delete from mcp_ops/* x */.audit_log where id > 0"
+      ];
+      const codes = [];
+      for (const sql of attempts) {
+        const { isError, payload } = await callRaw("write_preview", { sql, profile: "standard" });
+        codes.push(isError ? payload.code : "ACCEPTED");
+      }
+      const after = Number((await rows("select count(*)::int as n from mcp_ops.audit_log"))[0].n);
+      check(
+        "N/internal-schema-refused",
+        codes.every((code) => code === "WRITE_RESERVED_SCHEMA") && before > 0 && after === before,
+        `codes=[${codes.join(",")}] auditRows=${String(before)}→${String(after)}`
+      );
+    }
+
+    // ── O. mcp_ops is not user schema to the snapshot (PG-MIG-005) ──────────
+    {
+      // Before the fix, the audit log creating mcp_ops changed the snapshot id, so a
+      // migration_apply retried after a failed (and audited) attempt reported drift.
+      const read = await mcp.readResource({ uri: "schema://default" });
+      const snapshot = JSON.parse(read.contents[0].text);
+      const exists = (await rows("select 1 from pg_namespace where nspname = 'mcp_ops'")).length === 1;
+      const leaked = snapshot.tables.filter((t) => t.schema === "mcp_ops").map((t) => t.table);
+      check(
+        "O/snapshot-excludes-internal",
+        exists && !snapshot.schemas.includes("mcp_ops") && leaked.length === 0 && snapshot.schemas.includes("public"),
+        `mcp_ops exists=${String(exists)} schemas=${JSON.stringify(snapshot.schemas)} leaked=${JSON.stringify(leaked)}`
+      );
+    }
+
+    // ── P. a trigger that writes mcp_ops is refused (PG-SEC-002) ───────────
+    {
+      const sneaks = async () =>
+        Number((await rows("select count(*)::int as n from mcp_ops.audit_log where tool = 'sneak'"))[0].n);
+      // At preview: the statement's own target is fine; only its trigger reaches mcp_ops.
+      const { isError, payload } = await callRaw("write_preview", {
+        sql: "update t_trig set name = 'x' where id = 1",
+        profile: "standard"
+      });
+      const atPreview = isError ? payload.code : "ACCEPTED";
+
+      // At apply: the trigger did not exist when the preview ran.
+      const p = await preview("update t_trig_late set name = 'x' where id = 1");
+      await db.query("create trigger t_trig_late_sneak after update on t_trig_late for each row execute function sneak()");
+      const applied = await callRaw("write_apply", {
+        previewId: p.previewId,
+        approvalToken: p.approvalToken,
+        profile: "standard"
+      });
+      const atApply = applied.isError ? applied.payload.code : "ACCEPTED";
+      const late = (await rows("select name from t_trig_late where id = 1"))[0].name;
+      const sneaked = await sneaks();
+      check(
+        "P/trigger-into-internal-refused",
+        atPreview === "WRITE_RESERVED_SCHEMA" && atApply === "WRITE_RESERVED_SCHEMA" && late === "a" && sneaked === 0,
+        `preview=${atPreview} apply=${atApply} rowAfterApply=${late} sneakRows=${String(sneaked)}`
+      );
+    }
+
+    // ── Q. the target comes from the plan, not the regex ────────────────────
+    {
+      // The regex stops at whitespace or a comment, so both of these used to parse as a
+      // table "public.app". It has no primary key (it does not exist), so rollback was
+      // refused, and targetTable named a table the statement never touched.
+      const verdicts = [];
+      for (const [sql, id] of [
+        ["delete from app . orders where id = 1", 1],
+        ["update app/* c */.orders set name = 'z' where id = 2", 2]
+      ]) {
+        const p = await preview(sql);
+        const a = await apply(p);
+        const { payload: r } = await rollback(a.rollbackId);
+        const back = await rows(`select name from app.orders where id = ${String(id)}`);
+        verdicts.push({
+          targetTable: p.targetTable,
+          rollbackSupported: p.rollbackSupported,
+          rollback: r?.status,
+          restored: back[0]?.name
+        });
+      }
+      check(
+        "Q/target-from-plan",
+        verdicts.every((v) => v.targetTable === "app.orders" && v.rollbackSupported === true && v.rollback === "restored") &&
+          verdicts[0].restored === "a" &&
+          verdicts[1].restored === "b",
+        JSON.stringify(verdicts)
       );
     }
 

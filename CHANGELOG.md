@@ -8,6 +8,33 @@ All notable changes to this project will be documented in this file.
 > introducing commit named so each claim is checkable. They are backfill, not a record written at
 > the time.
 
+## [Unreleased] - 2026-09-30
+
+### 🔒 `postgres-mcp`: `mcp_ops` belongs to the server — not writable, not schema
+
+This is phase 0.1 of the DDL migration lane: the lane's ledger will live in `mcp_ops`, so that
+schema had to be protected first. All three defects were found while reading the code for the plan and
+are recorded in `postgres-mcp/docs/mcp-postgres-issue-registry.md`.
+
+- **PG-SEC-002.** `write_preview` accepted `delete from mcp_ops.audit_log …`, so a caller could erase
+  the audit trail of their own writes. Such a write is now refused with `WRITE_RESERVED_SCHEMA`. The
+  check runs once when the SQL is parsed, and again on the plan Postgres resolves
+  (`explain (verbose, format json)`). The second check is needed because the parser reads
+  `mcp_ops . audit_log` as a table in `public`. A third check catches a trigger on a user table
+  that writes to `mcp_ops`, which the plan does not show. It compares the
+  `pg_stat_xact_user_tables` counters for internal schemas before and after the statement. It runs
+  in the preview's dry run and again in `write_apply` before commit.
+- **PG-WRT-007.** `write_preview` took its target table from a regex that stops at whitespace or a
+  comment, so `delete from app . orders …` was treated as a write to `public.app`. The primary-key
+  lookup and rollback capture then used that table. The target now comes from the plan.
+- **PG-MIG-005.** `captureSchema` treated `mcp_ops` as user schema. The audit log creates that schema
+  the first time it runs, so a `migration_apply` retried after a failed attempt reported a
+  `MIGRATION_DRIFT` that no migration had caused. `mcp_ops` is now excluded, which also removes it
+  from `compare_environments` and the `schema://` resource. **The snapshot id changes** on every
+  database that has `mcp_ops`.
+- `scripts/write-flow-test.mjs` grows from 16 to 20 scenarios (N, O, P, Q). Each new scenario
+  fails with its fix reverted.
+
 ## [Unreleased] - 2026-08-19d
 
 ### 🔧 What two simulated use cases found, and what it took to fix

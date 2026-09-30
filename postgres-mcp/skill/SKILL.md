@@ -42,6 +42,9 @@ write_rollback(rollbackId)        // if needed
 ```
 - A `WHERE` clause is **mandatory** for UPDATE/DELETE — unbounded mutations are rejected.
 - Approval tokens are HMAC-signed and expire (`POSTGRES_WRITE_PREVIEW_TTL_MS`, default 15 min).
+- `mcp_ops` is the server's own schema (the audit log). Writes to it are refused with
+  `WRITE_RESERVED_SCHEMA`, and it does not appear in `compare_environments` or `schema://`. Do not
+  try to work around this.
 
 **Check `rollbackSupported` in the preview before you apply.** Rollback is offered only when the
 server can capture the undo data itself. When it cannot, the preview says so in `rollbackNote`,

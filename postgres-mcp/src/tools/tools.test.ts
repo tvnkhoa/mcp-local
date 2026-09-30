@@ -267,6 +267,11 @@ test("with writes on, the shape guards still refuse before any database work", a
     code: "DDL_NOT_ALLOWED",
     message: "DDL is not allowed here. Schema changes must go through the migration tools."
   });
+  assert.deepEqual((await bodyOf("write_preview", { sql: "delete from mcp_ops.audit_log where id = 1" }, on)).payload, {
+    code: "WRITE_RESERVED_SCHEMA",
+    message:
+      "Schema 'mcp_ops' is owned by this server (audit log, migration history) and cannot be written through write_preview."
+  });
   assert.deepEqual((await bodyOf("write_apply", { previewId: "nope", approvalToken: "bad" }, on)).payload, {
     code: "PREVIEW_NOT_FOUND",
     message: "Preview 'nope' not found or expired."

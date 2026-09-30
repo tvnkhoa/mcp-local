@@ -166,3 +166,23 @@ test("the existing guardrail verdicts are unchanged", () => {
   assert.deepEqual(target.target, { schema: "Schema", table: "Tbl" });
   assert.equal(target.hasWhere, true);
 });
+
+test("the server's own schema is refused as a write target (PG-SEC-002)", () => {
+  for (const sql of [
+    "delete from mcp_ops.audit_log where id = 1",
+    'delete from "mcp_ops"."audit_log" where id = 1',
+    "update MCP_OPS.audit_log set status = 'ok' where id = 1",
+    "insert into mcp_ops.audit_log (tool) values ('x')"
+  ]) {
+    const result = validateWriteSql(sql, false);
+    assert.equal(result.ok, false, sql);
+    assert.equal(!result.ok && result.error.code, "WRITE_RESERVED_SCHEMA", sql);
+  }
+  // Reading it in a WHERE is not writing it.
+  assert.equal(
+    validateWriteSql("delete from t where id in (select id from mcp_ops.audit_log)", false).ok,
+    true
+  );
+  // A table merely named like the schema is not in it.
+  assert.equal(validateWriteSql("delete from public.mcp_ops where id = 1", false).ok, true);
+});

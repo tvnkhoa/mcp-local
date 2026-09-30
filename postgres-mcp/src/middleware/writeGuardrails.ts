@@ -1,4 +1,12 @@
+import { isInternalSchema } from "./internalSchemas.js";
 import { hasMultipleStatements, stripStringsAndComments } from "./sqlGuardrails.js";
+
+export const RESERVED_SCHEMA_CODE = "WRITE_RESERVED_SCHEMA";
+
+/** Shared by the parse-time check here and the plan-time check in the write handler. */
+export function reservedSchemaMessage(schema: string): string {
+  return `Schema '${schema}' is owned by this server (audit log, migration history) and cannot be written through write_preview.`;
+}
 
 export type WriteStatementType = "insert" | "update" | "delete";
 
@@ -242,6 +250,7 @@ function extractTarget(type: WriteStatementType, stripped: string): WriteTarget 
  *  - exactly one statement
  *  - must start with insert / update / delete (DDL is rejected — DDL only flows through migrations)
  *  - UPDATE / DELETE must contain a WHERE clause unless `allowFullTable` is true
+ *  - the target must not be in one of the server's own schemas (INTERNAL_SCHEMAS)
  *
  * The WHERE check is a heuristic safety net (it scans the comment/string-stripped
  * text), not a full parser; it exists to block accidental whole-table writes.
@@ -293,6 +302,12 @@ export function validateWriteSql(inputSql: string, allowFullTable: boolean): Wri
   const target = extractTarget(statementType, noTrailingSemicolon);
   if (!target) {
     return fail("TARGET_NOT_FOUND", "Could not determine the target table for this statement.");
+  }
+  // The cheap, pre-database half of PG-SEC-002. It reads the target the regex found, which
+  // spacing or a comment around the dot can hide (`mcp_ops . audit_log`), so the handler
+  // re-checks against the plan Postgres actually resolved before running anything.
+  if (isInternalSchema(target.schema)) {
+    return fail(RESERVED_SCHEMA_CODE, reservedSchemaMessage(target.schema));
   }
 
   return {

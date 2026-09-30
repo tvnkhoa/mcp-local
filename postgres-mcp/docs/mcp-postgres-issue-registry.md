@@ -12,7 +12,7 @@ Resolution. Mirrors the format of `codebase-index-mcp/docs/mcp-codebase-index-is
 
 ## Index
 
-**21 entries** — all 21 resolved (some as documented guidance rather than code changes), **0 open**.
+**24 entries** — all 24 resolved (some as documented guidance rather than code changes), **0 open**.
 Statuses are copied from each entry's own `**Status:**` line; the entry is authoritative.
 
 | ID | Title | Status |
@@ -38,6 +38,9 @@ Statuses are copied from each entry's own `**Status:**` line; the entry is autho
 | `PG-WRT-004` | Rollback overwrote rows that were changed after the apply committed | ✅ fixed 2026-08-24 (c
 | `PG-WRT-005` | The write flow had no behavioural test; four defects survived from its first commit | ✅ fixed 2026-08-24 (test) — writeGuardrails.test.ts + a li
 | `PG-WRT-006` | Code-review sweep of the PG-WRT-001…004 fixes (9 findings, 8 fixed, 1 accepted) | ✅ fixed 2026-08-24 (code) — two defects the fixes haode) — restore matches on captured
+| `PG-MIG-005` | A retried `migration_apply` reported `MIGRATION_DRIFT` that its own audit log caused | ✅ fixed 2026-09-30 (code) — `captureSchema` excludes `mcp_ops` |
+| `PG-SEC-002` | `write_preview` accepted writes to `mcp_ops`, the server's own audit schema | ✅ fixed 2026-09-30 (code) — refused at parse, plan and execution time (triggers) |
+| `PG-WRT-007` | `write_preview` used the regex's guess at the target, not the table the statement writes | ✅ fixed 2026-09-30 (code) — target resolved from the EXPLAIN plan |
 
 > ID prefixes group by area: `ENV` environment resolution · `SEC` safety posture · `DOC`
 > documentation drift · `CMP` compare_environments · `MIG` EF Core migrations · `DIF` data_diff ·
@@ -1026,6 +1029,105 @@ made newly load-bearing. All were reproduced before being fixed.
   and correctness does not depend on it. The optimization — attempt the batch under one savepoint
   and fall back to per-row only on failure — makes the common case one savepoint, but adds a second
   code path for a cost that has not yet been observed. Revisit if a large rollback proves slow.
+
+---
+
+## PG-MIG-005 — a retried `migration_apply` reported `MIGRATION_DRIFT` that its own audit log caused
+
+**Status:** ✅ fixed 2026-09-30 (code) — `captureSchema` excludes `mcp_ops`; covered by
+`O/snapshot-excludes-internal` in `scripts/write-flow-test.mjs`.
+
+- **Scenario:** `migration_preview`, then a `migration_apply` that fails, then the same apply retried.
+  Found by reading the code while planning the DDL migration lane. It was not observed live.
+- **Root cause:** `captureSchema`'s schema discovery excluded only `pg_*` and `information_schema`,
+  so the server's own `mcp_ops` counted as user schema. `recordAudit` creates `mcp_ops` the first
+  time it runs against a database, and the failure path of `migration_apply` audits before it
+  rethrows. On a database that had never been audited, that failed attempt therefore created a
+  schema. The retry recaptured the schema, got a different snapshot id, and refused with
+  `MIGRATION_DRIFT` although no migration had changed anything. A first `write_apply` between the
+  preview and the apply had the same effect. `compare_environments` also reported `mcp_ops.audit_log`
+  as drift between an environment that had been written to and one that had not.
+- **Resolution:** `src/middleware/internalSchemas.ts` declares `INTERNAL_SCHEMAS = ["mcp_ops"]`, and
+  `discoverUserSchemas` filters them out. This changes the `schema://<env>` resource and
+  `compare_environments` too, because they share the snapshot: neither shows `mcp_ops` any longer.
+  It also changes the snapshot id on any database that has `mcp_ops`. Previews are in memory, so the
+  only preview that change can invalidate is one taken before the restart that loaded the fix, and
+  a restart discards those anyway.
+- **Verified discriminating:** against the pre-fix snapshot code the scenario fails with
+  `schemas=["mcp_ops","public"] leaked=["audit_log"]`. With the fix, it passes.
+
+---
+
+## PG-SEC-002 — `write_preview` accepted writes to `mcp_ops`, the server's own audit schema
+
+**Status:** ✅ fixed 2026-09-30 (code) — `WRITE_RESERVED_SCHEMA`, refused at parse, plan and execution
+time; covered by `writeGuardrails.test.ts`, `tools.test.ts`, `N/internal-schema-refused` and
+`P/trigger-into-internal-refused`.
+
+- **Scenario:** `write_preview("delete from mcp_ops.audit_log where id > 0")` was previewed and could
+  be applied like any other write. A caller could erase the audit trail of their own writes. The
+  planned DDL ledger, `mcp_ops.ddl_history`, would have been just as editable.
+- **Root cause:** `validateWriteSql` extracted the target table but never checked which schema it was
+  in. Nothing else checked it either.
+- **Resolution:** the check runs at three layers, because none of them is complete by itself.
+  - **Parse time** (`validateWriteSql`): refuses a target whose schema is in `INTERNAL_SCHEMAS`. This
+    is cheap and happens before any database work. The comparison ignores case, so an unquoted
+    `MCP_OPS` is caught. The parser's target regex, however, stops at whitespace or a comment, so
+    `mcp_ops . audit_log` and `mcp_ops/* x */.audit_log` both parse as a table in `public`.
+  - **Plan time** (`assertNoInternalTarget` in `writeHandlers.ts`): inside the dry-run transaction,
+    before the statement executes, `explain (verbose, format json)` reports the `Schema` of every
+    `ModifyTable` node Postgres resolved, and any internal schema is refused. EXPLAIN without
+    ANALYZE does not execute the statement. It sees the resolved relation however it was spelled,
+    and it accepts the statement's bind parameters (scenario `I` runs a parameterised UPDATE through
+    it). The token binds the SQL and the environment, so `write_apply` inherits the verdict.
+  - **Execution time** (`assertNoInternalSideEffects`): the plan shows only the statement's own
+    targets, so a trigger on a user table that writes `mcp_ops` gets past the first two layers. The
+    handler therefore reads the `pg_stat_xact_user_tables` tuple counters for internal schemas
+    before the statement and again after it, in the same transaction, and refuses if they rose.
+    This runs in the preview's dry run, and again in `write_apply` before `commit`: a trigger is
+    code, so what it touches can differ between the two runs, or it can be created after the
+    preview.
+  - **Only the difference between the two readings is compared, never a single reading against
+    zero.** The first version compared against zero. Since PG15 the view reports the backend's
+    pending counters, which still include writes from earlier transactions on the same pooled
+    connection that have not yet been flushed. Scenario `A` was refused because an earlier
+    transaction on its connection had inserted the audit row. The counters are never flushed inside
+    a transaction block, so the leftover is constant across the transaction and cancels out.
+  - Reading `mcp_ops` inside a subquery is still allowed; only writing to it is refused.
+- **Verified discriminating:** with the plan-time check disabled, `N/internal-schema-refused` fails
+  with `codes=[WRITE_RESERVED_SCHEMA,ACCEPTED,ACCEPTED]`. The parser caught only the plain spelling.
+  With the execution-time check disabled, `P/trigger-into-internal-refused` fails with
+  `preview=ACCEPTED apply=ACCEPTED sneakRows=1`: the trigger's row was committed. With all three
+  layers, every case is refused and nothing reaches `mcp_ops`.
+- **Still not covered:** a trigger that only runs `TRUNCATE` on an `mcp_ops` table. TRUNCATE does not
+  move the tuple counters. Creating any trigger is DDL, and DDL is not reachable through
+  `write_preview`.
+
+---
+
+## PG-WRT-007 — `write_preview` used the regex's guess at the target, not the table the statement writes
+
+**Status:** ✅ fixed 2026-09-30 (code) — the target is resolved from the `EXPLAIN` plan; covered by
+`Q/target-from-plan`.
+
+- **Scenario:** `delete from app . orders where id = 1`, and `update app/* c */.orders …`. Both are
+  valid SQL: Postgres allows whitespace and comments around the dot of a qualified name.
+- **Expected vs actual:** expected `targetTable: "app.orders"` and a rollback. Actual:
+  `targetTable: "public.app"`, `rollbackSupported: false`, and the delete applied with no undo.
+- **Root cause:** `extractTarget`'s regex, `[A-Za-z0-9_."]+`, stops at the first space or `/`, so it
+  captured `app` and read it as an unqualified table in `public`. That guess was used for three
+  things: the primary-key lookup, the rollback before-snapshot and the `targetTable` in the
+  response. Here the guessed table did not exist, so the lookup found no primary key and rollback was
+  refused, which is safe. If a table `public.app` had existed, the preview would have looked up its
+  primary key and captured rows by that key, which is not safe. The same guess also defaulted every
+  unqualified name to `public`, whatever the `search_path`.
+- **Resolution:** `resolveWriteTarget` reads the ModifyTable relation from the same
+  `explain (verbose, format json)` that PG-SEC-002 already runs, and that relation is used as the
+  target. The parsed target is used only when the plan names none. The primary-key lookup now runs
+  after the plan, against the resolved table.
+- **Verified discriminating:** against the regex target, `Q/target-from-plan` fails with
+  `targetTable:"public.app", rollbackSupported:false`. With the fix, both spellings report
+  `app.orders`, apply, and roll back.
 
 ---
 

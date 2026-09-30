@@ -7,7 +7,14 @@ import type { ConnectionManager } from "../../repositories/connectionManager.js"
 import { PolicyViolationError } from "../../middleware/errors.js";
 import { asText, type ResponseProfile } from "../../middleware/responseFormatter.js";
 import { quoteIdent } from "../../middleware/ident.js";
-import { validateWriteSql, type WriteStatementType, type WriteTarget } from "../../middleware/writeGuardrails.js";
+import { INTERNAL_SCHEMAS, isInternalSchema } from "../../middleware/internalSchemas.js";
+import {
+  RESERVED_SCHEMA_CODE,
+  reservedSchemaMessage,
+  validateWriteSql,
+  type WriteStatementType,
+  type WriteTarget
+} from "../../middleware/writeGuardrails.js";
 import { recordAudit } from "../../services/write/auditLog.js";
 import {
   createWriteDigest,
@@ -240,6 +247,90 @@ async function getPrimaryKeyColumns(pool: Pool, target: WriteTarget): Promise<st
   return result.rows.map((r) => r.attname);
 }
 
+/**
+ * Every relation a ModifyTable node in an `EXPLAIN (verbose, format json)` plan writes to,
+ * outermost first. A rule can rewrite one statement into several plans, so every plan in
+ * the output is walked, not just the first.
+ */
+function modifiedRelations(plan: unknown, found: WriteTarget[] = []): WriteTarget[] {
+  if (Array.isArray(plan)) {
+    for (const item of plan) {
+      modifiedRelations(item, found);
+    }
+  } else if (plan !== null && typeof plan === "object") {
+    const node = plan as Record<string, unknown>;
+    if (
+      node["Node Type"] === "ModifyTable" &&
+      typeof node.Schema === "string" &&
+      typeof node["Relation Name"] === "string"
+    ) {
+      found.push({ schema: node.Schema, table: node["Relation Name"] });
+    }
+    for (const value of Object.values(node)) {
+      modifiedRelations(value, found);
+    }
+  }
+  return found;
+}
+
+/**
+ * The table the statement really writes, as Postgres resolved it — or `null` if the plan
+ * names none, in which case the caller keeps the parsed target.
+ *
+ * The regex in `validateWriteSql` stops at whitespace or a comment, so `app . orders` parses
+ * as a table `public.app`. That wrong target then fed the primary-key lookup and rollback
+ * capture. The plan has no such blind spot: EXPLAIN without ANALYZE plans the statement
+ * without executing it, and reports the relation however it was spelled or reached through
+ * search_path. It is also the authoritative half of PG-SEC-002: an internal schema anywhere
+ * in the plan is refused.
+ */
+async function resolveWriteTarget(client: PoolClient, sql: string, params: unknown[]): Promise<WriteTarget | null> {
+  const result = await client.query(`explain (verbose, format json) ${sql}`, params);
+  const relations = modifiedRelations(result.rows.map((row: Record<string, unknown>) => row["QUERY PLAN"]));
+  for (const relation of relations) {
+    if (isInternalSchema(relation.schema)) {
+      throw new PolicyViolationError(RESERVED_SCHEMA_CODE, reservedSchemaMessage(relation.schema));
+    }
+  }
+  return relations[0] ?? null;
+}
+
+/**
+ * Tuples written so far in internal schemas, as `pg_stat_xact_user_tables` counts them.
+ *
+ * Only a DIFFERENCE of two readings in one transaction means anything. The view reports the
+ * backend's pending counters, and since PG15 those still hold writes from earlier transactions
+ * on the same pooled connection until they are flushed — which never happens inside a
+ * transaction block. The first attempt compared the reading against zero, and refused
+ * `write_preview` on a connection whose previous transaction had written the audit row.
+ */
+async function internalTupleCount(client: PoolClient): Promise<number> {
+  const result = await client.query<{ n: string | null }>(
+    `select sum(n_tup_ins + n_tup_upd + n_tup_del) as n
+     from pg_stat_xact_user_tables
+     where schemaname = any($1::text[])`,
+    [INTERNAL_SCHEMAS]
+  );
+  return Number(result.rows[0]?.n ?? 0);
+}
+
+/**
+ * Refuse if the statement wrote a row in an internal schema since `baseline` was read. Call
+ * it after the statement ran and before the transaction ends.
+ *
+ * The plan shows only the statement's own targets. A trigger on the target table runs code
+ * the plan never shows, and that code can insert into or delete from `mcp_ops`. The per-table
+ * tuple counters see those writes, however they were reached.
+ */
+async function assertNoInternalSideEffects(client: PoolClient, baseline: number): Promise<void> {
+  if ((await internalTupleCount(client)) > baseline) {
+    throw new PolicyViolationError(
+      RESERVED_SCHEMA_CODE,
+      `${reservedSchemaMessage(INTERNAL_SCHEMAS.join(", "))} This statement reaches it indirectly — a trigger or rule on the target table writes there.`
+    );
+  }
+}
+
 // Single-writer mutex PER ENVIRONMENT: serialize apply/rollback on the same database
 // so two writes never interleave, while letting independent environments proceed in
 // parallel (a long apply on staging must not block an unrelated write on dev).
@@ -279,7 +370,6 @@ export async function handleWritePreview(
   }
 
   const pool = connections.getPool(args.environment, true);
-  const pkColumns = await getPrimaryKeyColumns(pool, validated.target);
 
   // Dry-run: execute inside a transaction we always roll back, to get the real
   // affected-row count and a sample of affected rows. Nothing is persisted.
@@ -288,13 +378,17 @@ export async function handleWritePreview(
     : `${validated.sanitizedSql} returning *`;
 
   const client = await pool.connect();
+  let target: WriteTarget = validated.target;
   let rowsAffected = 0;
   let affectedSample: unknown[] = [];
   try {
     await client.query("begin");
+    target = (await resolveWriteTarget(client, validated.sanitizedSql, params)) ?? validated.target;
+    const baseline = await internalTupleCount(client);
     const result = await client.query(dryRunSql, params);
     rowsAffected = result.rowCount ?? 0;
     affectedSample = result.rows.slice(0, config.sampleLimit);
+    await assertNoInternalSideEffects(client, baseline);
     await client.query("rollback");
   } catch (error) {
     await safeRollback(client);
@@ -303,6 +397,9 @@ export async function handleWritePreview(
     client.release();
   }
 
+  // Looked up for the resolved target, not the parsed one: for `app . orders` the parsed
+  // target is a table `public.app`, and its primary key is the wrong key to capture by.
+  const pkColumns = await getPrimaryKeyColumns(pool, target);
   const rollback = assessRollback(validated, pkColumns, params, rowsAffected);
   const rollbackSupported = rollback.reason === undefined;
 
@@ -323,7 +420,7 @@ export async function handleWritePreview(
     sql: validated.sanitizedSql,
     params,
     statementType: validated.statementType,
-    target: validated.target,
+    target,
     digest,
     rowsAffected,
     sampleBefore: affectedSample,
@@ -340,7 +437,7 @@ export async function handleWritePreview(
       approvalToken,
       environment: env.name,
       statementType: validated.statementType,
-      targetTable: `${validated.target.schema}.${validated.target.table}`,
+      targetTable: `${target.schema}.${target.table}`,
       rowsAffected,
       affectedSample,
       rollbackSupported,
@@ -393,6 +490,7 @@ export async function handleWriteApply(
 
     try {
       await client.query("begin");
+      const baseline = await internalTupleCount(client);
 
       // Capture rollback data inside the same committed transaction.
       //
@@ -436,6 +534,9 @@ export async function handleWriteApply(
         }
       }
 
+      // Checked again here, not only at preview: a trigger is code, and the rows it
+      // reaches can differ between the dry run and this run (or it was created since).
+      await assertNoInternalSideEffects(client, baseline);
       await client.query("commit");
     } catch (error) {
       await safeRollback(client);
