@@ -3268,6 +3268,17 @@ this afternoon failed at that harness, which is the highest rate observed so far
   - The live repos were not re-indexed in this change. The "after" count on the central DB is
     pending a full run.
 
+- **Verified live 2026-10-01** after a full re-index at `v3-project-refs`. Dangling `DEPENDS_ON` before → after:
+  - wec.be 271 → 2
+  - api-testing-studio 82 → 0
+  - ssnet 52 → 0
+  - wec.communication-hub 13 → 0
+  - wec.document-management 8 → 0
+  - wec.notification 5 → 0
+  - wec.social-ads 11: not yet measured, because MCP-ISSUE-066 blocked the re-index.
+
+  The 2 left in wec.be reference `src/packages/SS.Cache` and `src/packages/SS.Lib.FilterExpressions`, which do not exist in that repo. That is the documented in-repo-but-unindexed gap, not a minting defect. Any other dangling ids left in these repos are IMPORTS/TYPE_REF edges to symbols in other repos, and all of them match `cross_repo_deps`.
+
 ## MCP-ISSUE-066 — IDE state under `.vs/` consumed the whole 20 000-file scan budget: `filesIndexed: 1`
 
 - **Status:** ✅ FIXED 2026-10-01 (P1; found while re-indexing for MCP-ISSUE-065).
