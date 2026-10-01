@@ -10,6 +10,25 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased] - 2026-10-01
 
+### ↩️ `postgres-mcp`: rollback for the EF Core lane (B-15.4)
+
+- **`migration_preview { targetMigration }`** plans a revert to an applied migration, or `"0"`
+  for all of them. The script is `dotnet ef migrations script <latest> <target>`, which is the Down
+  methods, newest first. `revertMigrations` lists what will run. A target that is not applied is
+  refused with `MIGRATION_UNKNOWN_TARGET`. The latest applied one gives `nothing_to_revert`.
+- **`migration_apply { acknowledgeRisks }`** runs `dotnet ef database update <target>`.
+  - A rollback always needs `EF_REVERT`, plus every high code the DDL lane's lint finds in the
+    Down SQL; a Down that drops a table drops its data. Otherwise it refuses with
+    `MIGRATION_RISK_NOT_ACKNOWLEDGED`.
+  - The drift guard compares the **applied** set, so a migration applied or reverted between
+    preview and apply is caught even when the schema is unchanged.
+- Up previews now report `risks` too, for information only.
+- **Contract:** two optional parameters added (`targetMigration`, `acknowledgeRisks`) and two
+  descriptions updated. Nothing removed.
+- `migration-flow-test.mjs` goes from 14 to 18 scenarios. The fake `dotnet ef` now scripts and
+  applies Down methods. With the acknowledgement gate removed, the rollback ran with only
+  `EF_REVERT`. With the applied-set guard removed, it ran despite the drift.
+
 ### ⏱️ `postgres-mcp`: the EF Core lane waits at most `lock_timeout` for a lock (B-15.1, PG-MIG-009)
 
 **Behaviour change.** `dotnet ef` used to run with no lock wait at all. It now waits at most 5 s by

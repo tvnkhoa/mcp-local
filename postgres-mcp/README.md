@@ -143,12 +143,16 @@ migration_add      { "name": "AddFooColumn" }                // gen file .cs (s�
 migration_dry_run  { "environment": "dev" }                  // chạy đúng SQL preview hiển thị, từng statement, trong BEGIN...ROLLBACK
 migration_preview  { "environment": "dev" }                  // snapshot + script "expect" + token
 migration_apply    { "environment": "dev", "previewId": "...", "approvalToken": "..." } // drift-guard + verify
+migration_preview  { "environment": "dev", "targetMigration": "20260101000000_Init" } // ROLLBACK: revert mọi migration apply sau Init ("0" = tất cả)
+migration_apply    { "previewId": "...", "approvalToken": "...", "acknowledgeRisks": ["EF_REVERT", "DROP_TABLE"] }
 compare_environments { "source": "dev", "target": "staging", "includeRowCounts": true }
 ```
 
 `dotnet ef` được gọi với argv cố định (không nối shell), tên migration bắt buộc `^[A-Za-z0-9_]+$`, connection inject qua `CH_DB_CONNECTION` cho đúng env (tên này là **outbound contract** với project .NET, không phải config của server — xem `docs/reference/dependency-rules.md` §4).
 
 `migration_dry_run` chạy đúng phần SQL mà `migration_preview` hiển thị: delta, hoặc script idempotent khi tập pending không liên tục. Script được tách bằng tokenizer của lane DDL rồi chạy từng statement, nên khi lỗi sẽ chỉ ra đúng statement và SQLSTATE (`failure`). Lệnh điều khiển transaction bị bỏ ở mọi dạng viết, kể cả `commit;` nằm chung dòng với lệnh khác. Statement không chạy được trong transaction (`CONCURRENTLY`, `VACUUM`) bị bỏ qua và liệt kê trong `skipped`; nếu cả script đều như vậy thì kết quả là `not_dry_runnable`.
+
+**Rollback:** `migration_preview { targetMigration }` lập plan revert về một migration đã apply, hoặc `"0"` để revert tất cả. Script là SQL của các hàm Down (`dotnet ef migrations script <latest> <target>`). Khi apply sẽ chạy `dotnet ef database update <target>`. `migration_apply` bắt buộc có `acknowledgeRisks` chứa `EF_REVERT`, cộng thêm mọi mã high mà risk lint của lane DDL tìm thấy trong SQL Down (ví dụ `DROP_TABLE`, `DROP_COLUMN`). Drift guard của rollback so sánh danh sách migration **đã apply**: một migration được apply hoặc revert chen vào giữa preview và apply sẽ bị chặn. Target chưa được apply bị từ chối (`MIGRATION_UNKNOWN_TARGET`). Plan up cũng trả `risks` (chỉ để tham khảo, không bắt buộc acknowledge).
 
 `lock_timeout`: mọi lần gọi `dotnet ef` đều nhận `Options=-c lock_timeout=N` ghép vào connection string. N lấy từ `POSTGRES_MIGRATION_LOCK_TIMEOUT_MS`, mặc định 5000; đặt `0` để tắt. Cần Npgsql 5 trở lên. Dry run cũng dùng cùng mức chờ này. Kết quả của `migration_preview` và `migration_apply` có trường `lockTimeout.applied` để báo mức chờ có thật sự được áp hay không. Hai trường hợp không được áp: connection string dạng `postgres://` URI (Npgsql không đọc được), hoặc connection string đã tự đặt `lock_timeout` (giữ nguyên lựa chọn của người vận hành).
 

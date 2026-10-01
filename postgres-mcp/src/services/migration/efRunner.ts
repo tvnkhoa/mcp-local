@@ -230,6 +230,24 @@ export function efDatabaseUpdate(config: MigrationConfig, connectionString: stri
   return runEf(config, ["database", "update"], connectionString);
 }
 
+/** A rollback target: a migration id, or `0` for "before the first migration" (EF's own spelling). */
+function sanitizeTarget(target: string): string {
+  return target === "0" ? target : sanitizeMigrationId(target);
+}
+
+/**
+ * The SQL that takes the database from `from` to `to`. When `to` is earlier than `from`, EF
+ * scripts the migrations' Down methods, newest first: that is the rollback script.
+ */
+export function efMigrationsScriptRange(config: MigrationConfig, connectionString: string, from: string, to: string): Promise<EfResult> {
+  return runEf(config, ["migrations", "script", sanitizeMigrationId(from), sanitizeTarget(to)], connectionString);
+}
+
+/** `database update <target>`: reverts every migration applied after `target` (`0` = all of them). */
+export function efDatabaseUpdateTo(config: MigrationConfig, connectionString: string, target: string): Promise<EfResult> {
+  return runEf(config, ["database", "update", sanitizeTarget(target)], connectionString);
+}
+
 /** List migration files in the project's Migrations folder (newest first). */
 export function listMigrationFiles(config: MigrationConfig, filterName?: string): string[] {
   const dir = path.join(config.project, "Migrations");

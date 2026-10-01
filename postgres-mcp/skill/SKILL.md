@@ -71,6 +71,12 @@ migration_status → migration_add / migration_preview → migration_dry_run →
 ```
 Preview and dry-run before applying. Requires the configured .NET project paths.
 
+**Rollback** is `migration_preview { targetMigration }`: pass an applied migration id to revert
+back to, or `"0"` to revert every migration. It returns `revertMigrations`, which lists what runs,
+newest first, and the Down SQL. `migration_apply` then needs `acknowledgeRisks` with `EF_REVERT`,
+plus any high risk found in the Down SQL; a Down that drops a table drops its data. **Never fill
+those codes in yourself.** Show the user what will be reverted, and wait for an explicit yes.
+
 ## Raw-SQL DDL migrations (OFF unless `POSTGRES_DDL_ENABLED=true`)
 
 A migration lane independent of EF Core, for schema changes written as SQL.

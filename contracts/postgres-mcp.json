@@ -491,10 +491,17 @@
         "openWorldHint": true,
         "readOnlyHint": false
       },
-      "description": "Apply pending migrations (dotnet ef database update) after a migration_preview. Drift-guarded + verifies post-schema.",
+      "description": "Apply a migration_preview's plan: pending migrations (dotnet ef database update), or a rollback to its targetMigration (dotnet ef database update <target>). Drift-guarded + verifies post-schema.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
+          "acknowledgeRisks": {
+            "description": "Codes from the preview's requiredAcknowledgements (always EF_REVERT for a rollback), confirmed by a human.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
           "approvalToken": {
             "type": "string"
           },
@@ -557,7 +564,7 @@
         "openWorldHint": true,
         "readOnlyHint": true
       },
-      "description": "Snapshot current schema + return the pending migration SQL delta and an approval token. Full idempotent script available at profile:verbose.",
+      "description": "Snapshot current schema + return the pending migration SQL delta and an approval token. Full idempotent script available at profile:verbose. With targetMigration, plans a ROLLBACK instead: reverts every migration applied after it (\"0\" = all) via their Down methods; migration_apply then requires acknowledgeRisks including EF_REVERT.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -571,6 +578,10 @@
               "standard",
               "verbose"
             ],
+            "type": "string"
+          },
+          "targetMigration": {
+            "description": "Rollback: an applied migration id to revert back to, or \"0\" to revert every migration.",
             "type": "string"
           }
         },

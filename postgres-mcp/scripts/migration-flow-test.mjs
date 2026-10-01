@@ -86,6 +86,7 @@ function createFakeEf() {
     withDb(connectionString, async (c) => new Set((await c.query(`select "MigrationId" as id from ${HISTORY}`)).rows.map((r) => r.id)));
 
   const record = (id) => `INSERT INTO ${HISTORY} ("MigrationId", "ProductVersion") VALUES ('${id}', '9.0.0');`;
+  const unrecord = (id) => `DELETE FROM ${HISTORY} WHERE "MigrationId" = '${id}';`;
   const plain = (m) => `START TRANSACTION;\n${m.sql}\n${record(m.id)}\nCOMMIT;\n`;
   const guarded = (m) =>
     `START TRANSACTION;\nDO $EF$\nBEGIN\n    IF NOT EXISTS(SELECT 1 FROM ${HISTORY} WHERE "MigrationId" = '${m.id}') THEN\n    ${m.sql}\n    ${record(m.id)}\n    END IF;\nEND $EF$;\nCOMMIT;\n`;
@@ -102,7 +103,14 @@ function createFakeEf() {
       if (rest[0] === "--idempotent") {
         return ok(state.migrations.map(guarded).join("\n"));
       }
-      const from = rest[0];
+      const [from, to] = rest;
+      if (to !== undefined) {
+        // `script <latest> <target>`: the Down methods of everything after target, newest first.
+        const fromIdx = state.migrations.findIndex((m) => m.id === from);
+        const toIdx = to === "0" ? -1 : state.migrations.findIndex((m) => m.id === to);
+        const reverted = state.migrations.slice(toIdx + 1, fromIdx + 1).reverse();
+        return ok(reverted.map((m) => `START TRANSACTION;\n${m.down}\n${unrecord(m.id)}\nCOMMIT;\n`).join("\n"));
+      }
       const start = from === undefined ? 0 : state.migrations.findIndex((m) => m.id === from) + 1;
       return ok(state.migrations.slice(start).map(plain).join("\n"));
     }
@@ -118,7 +126,22 @@ function createFakeEf() {
         state.failNextUpdate = false;
         return { exitCode: 1, stdout: "", stderr: "Failed executing DbCommand (simulated)" };
       }
+      state.lastUpdateArgs = rest;
       const applied = await appliedIds(connectionString);
+      if (rest[0] !== undefined) {
+        // `database update <target>`: revert what is applied after target, newest first.
+        const toIdx = rest[0] === "0" ? -1 : state.migrations.findIndex((m) => m.id === rest[0]);
+        const reverting = state.migrations.slice(toIdx + 1).filter((m) => applied.has(m.id)).reverse();
+        await withDb(connectionString, async (c) => {
+          for (const m of reverting) {
+            await c.query("begin");
+            await c.query(m.down);
+            await c.query(unrecord(m.id));
+            await c.query("commit");
+          }
+        });
+        return ok("Done.");
+      }
       await withDb(connectionString, async (c) => {
         for (const m of state.migrations.filter((x) => !applied.has(x.id))) {
           await c.query("begin");
@@ -397,6 +420,85 @@ async function main() {
         "N/lock-timeout-reported",
         p.lockTimeout?.ms === 1000 && p.lockTimeout?.applied === false && /URI/.test(p.lockTimeout?.note ?? ""),
         `lockTimeout=${JSON.stringify(p.lockTimeout)}`
+      );
+    }
+
+    // ═══ B-15.4: rollback to a target ═══════════════════════════════════════
+
+    // A migration with a Down, applied forward first (together with whatever else is pending).
+    ef.state.migrations.push({ id: "20260111000000_AddR", sql: "CREATE TABLE r_t (id int primary key);", down: "DROP TABLE r_t;" });
+    {
+      const { payload: up } = await preview();
+      await apply(up);
+    }
+    const appliedNow = (await status()).payload.applied;
+    const beforeR = appliedNow[appliedNow.length - 2];
+    const revertPreview = (targetMigration) => invoke("handleMigrationPreview", { environment: "dev", targetMigration, profile: "standard" });
+    const applyAck = (p, acknowledgeRisks) =>
+      invoke("handleMigrationApply", { previewId: p.previewId, approvalToken: p.approvalToken, acknowledgeRisks, profile: "standard" });
+
+    // ── O. a rollback preview scripts the Down range and names its risks ────
+    let rollback;
+    {
+      ef.state.calls.length = 0;
+      rollback = (await revertPreview(beforeR)).payload;
+      const scriptCalls = ef.state.calls.filter((c) => c[1] === "script");
+      check(
+        "O/rollback-preview",
+        rollback.direction === "down" &&
+          JSON.stringify(rollback.revertMigrations) === JSON.stringify(["20260111000000_AddR"]) &&
+          JSON.stringify(scriptCalls) === JSON.stringify([["migrations", "script", "20260111000000_AddR", beforeR]]) &&
+          JSON.stringify(rollback.requiredAcknowledgements) === JSON.stringify(["EF_REVERT", "DROP_TABLE"]) &&
+          /DROP TABLE r_t/.test(rollback.revertScript),
+        `revert=${JSON.stringify(rollback.revertMigrations)} required=${JSON.stringify(rollback.requiredAcknowledgements)} scriptCalls=${JSON.stringify(scriptCalls)}`
+      );
+    }
+
+    // ── P. it runs only once acknowledged, and runs `database update <target>` ──
+    {
+      const without = await applyAck(rollback, ["EF_REVERT"]);
+      const withAll = await applyAck(rollback, rollback.requiredAcknowledgements);
+      const s = (await status()).payload;
+      check(
+        "P/rollback-apply",
+        without.isError &&
+          without.payload.code === "MIGRATION_RISK_NOT_ACKNOWLEDGED" &&
+          /DROP_TABLE/.test(without.payload.message) &&
+          !withAll.isError &&
+          withAll.payload.direction === "down" &&
+          JSON.stringify(ef.state.lastUpdateArgs) === JSON.stringify([beforeR]) &&
+          !(await exists("public.r_t")) &&
+          s.pending.includes("20260111000000_AddR") &&
+          withAll.payload.diff?.removedTables?.includes("public.r_t"),
+        `without=${String(without.payload.code)} with=${String(withAll.payload.status ?? withAll.payload.code)} updateArgs=${JSON.stringify(ef.state.lastUpdateArgs)} r_t=${String(await exists("public.r_t"))}`
+      );
+    }
+
+    // ── Q. a target that is not applied is refused; the latest one is a no-op ──
+    {
+      const unknown = await revertPreview("20991231000000_Nope");
+      const latest = (await status()).payload.applied.at(-1);
+      const noop = await revertPreview(latest);
+      check(
+        "Q/rollback-targets",
+        unknown.isError && unknown.payload.code === "MIGRATION_UNKNOWN_TARGET" && noop.payload.status === "nothing_to_revert",
+        `unknown=${String(unknown.payload.code)} latest=${String(noop.payload.status)}`
+      );
+    }
+
+    // ── R. the applied set changed between preview and apply ────────────────
+    {
+      const { payload: up } = await preview();
+      await apply(up);
+      const { payload: p } = await revertPreview(beforeR);
+      // History only: the schema is untouched, so only the applied-set check can see this.
+      await db.query(`DELETE FROM ${HISTORY} WHERE "MigrationId" = '20260111000000_AddR'`);
+      const r = await applyAck(p, p.requiredAcknowledgements);
+      await db.query(`INSERT INTO ${HISTORY} VALUES ('20260111000000_AddR', '9.0.0')`);
+      check(
+        "R/rollback-drift",
+        r.isError && r.payload.code === "MIGRATION_DRIFT" && /Applied migration set changed/.test(r.payload.message) && (await exists("public.r_t")),
+        `code=${String(r.payload.code)} message=${String(r.payload.message)}`
       );
     }
 

@@ -74,9 +74,19 @@ export function buildMigrationTools(deps: PostgresDeps): AnyToolDefinition[] {
   const migrationPreview = defineTool({
     name: "migration_preview",
     description:
-      "Snapshot current schema + return the pending migration SQL delta and an approval token. Full idempotent script available at profile:verbose.",
-    input: z.object({ environment: environmentArg, profile: profileArg }).strict(),
-    inputSchema: schema.object({ environment: envProp, profile: profileProp }),
+      "Snapshot current schema + return the pending migration SQL delta and an approval token. Full idempotent script available at profile:verbose. With targetMigration, plans a ROLLBACK instead: reverts every migration applied after it (\"0\" = all) via their Down methods; migration_apply then requires acknowledgeRisks including EF_REVERT.",
+    input: z
+      .object({
+        environment: environmentArg,
+        targetMigration: z.string().regex(/^(\d+_[A-Za-z0-9_]+|0)$/).optional(),
+        profile: profileArg
+      })
+      .strict(),
+    inputSchema: schema.object({
+      environment: envProp,
+      targetMigration: schema.string("Rollback: an applied migration id to revert back to, or \"0\" to revert every migration."),
+      profile: profileProp
+    }),
     annotations: previewsChange,
     rawResult: true,
     handler: async (input) => ok(raw(await handleMigrationPreview(input, connections, migrationConfig)))
@@ -85,11 +95,12 @@ export function buildMigrationTools(deps: PostgresDeps): AnyToolDefinition[] {
   const migrationApply = defineTool({
     name: "migration_apply",
     description:
-      "Apply pending migrations (dotnet ef database update) after a migration_preview. Drift-guarded + verifies post-schema.",
+      "Apply a migration_preview's plan: pending migrations (dotnet ef database update), or a rollback to its targetMigration (dotnet ef database update <target>). Drift-guarded + verifies post-schema.",
     input: z
       .object({
         previewId: z.string().min(1).max(128),
         approvalToken: z.string().min(1),
+        acknowledgeRisks: z.array(z.string().min(1).max(64)).max(50).optional(),
         environment: environmentArg,
         profile: profileArg
       })
@@ -98,6 +109,7 @@ export function buildMigrationTools(deps: PostgresDeps): AnyToolDefinition[] {
       {
         previewId: schema.string(),
         approvalToken: schema.string(),
+        acknowledgeRisks: schema.array(schema.string(), "Codes from the preview's requiredAcknowledgements (always EF_REVERT for a rollback), confirmed by a human."),
         environment: envProp,
         profile: profileProp
       },

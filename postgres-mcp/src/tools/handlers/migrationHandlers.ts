@@ -6,7 +6,8 @@ import type { QueryConfig } from "pg";
 import type { ConnectionManager } from "../../repositories/connectionManager.js";
 import { PolicyViolationError } from "../../middleware/errors.js";
 import { asText, type ResponseProfile } from "../../middleware/responseFormatter.js";
-import { splitSqlStatements, topLevelWords, type SplitStatement } from "../../middleware/ddlGuardrails.js";
+import { splitSqlStatements, topLevelWords, validateDdlScript, type SplitStatement } from "../../middleware/ddlGuardrails.js";
+import { lintDdl, type RiskFinding } from "../../middleware/ddlRiskLint.js";
 import { quoteIdent } from "../../middleware/ident.js";
 import { issueApprovalToken, verifyApprovalToken } from "../../services/write/approval.js";
 import { runExclusive } from "../../services/concurrency/envMutex.js";
@@ -14,10 +15,12 @@ import { recordAudit } from "../../services/write/auditLog.js";
 import {
   assertMigrationEnabled,
   efDatabaseUpdate,
+  efDatabaseUpdateTo,
   efMigrationsAdd,
   efMigrationsListConnected,
   efMigrationsScript,
   efMigrationsScriptDelta,
+  efMigrationsScriptRange,
   listMigrationFiles,
   withLockTimeout,
   type EfResult,
@@ -29,11 +32,51 @@ interface MigrationPreviewRecord {
   previewId: string;
   environment: string;
   preSnapshotId: string;
+  /** "up" applies the pending set; "down" reverts to `targetMigration` (B-15.4). */
+  direction: "up" | "down";
+  targetMigration?: string;
   /** Pending migration ids at preview time — re-checked at apply so a migration added between
    *  preview and apply (schema unchanged, so the snapshot drift guard misses it) is caught. */
   pendingMigrations: string[];
+  /** Applied ids at preview time. A down plan is drift-checked against these instead: what it
+   *  reverts is decided by what is applied, not by what is pending. */
+  appliedMigrations: string[];
+  /** Codes `migration_apply` must be given in acknowledgeRisks. Always empty for "up". */
+  requiredAcknowledgements: string[];
   digest: string;
   expiresAt: string;
+}
+
+/**
+ * The DDL lane's risk lint, applied to an EF-generated script.
+ *
+ * EF scripts carry statements the DDL allowlist refuses (`INSERT INTO "__EFMigrationsHistory"`,
+ * `DO $EF$` blocks), so each statement is offered to the guardrail on its own, and the ones it
+ * accepts are linted. A statement it refuses is simply not linted. This is a review aid, and it
+ * fails open, the same as the lint itself. Every table counts as existing, which is the safe
+ * reading for a script about to run against a populated database.
+ */
+function lintEfScript(script: string): RiskFinding[] {
+  const split = splitSqlStatements(script);
+  if (!split.ok) {
+    return [];
+  }
+  const findings: RiskFinding[] = [];
+  const createdInPlan = new Set<string>();
+  for (const statement of split.statements) {
+    const validated = validateDdlScript(statement.text);
+    if (!validated.ok) {
+      continue;
+    }
+    for (const finding of lintDdl(validated.statements, { createdInPlan }).findings) {
+      findings.push({ ...finding, statementIndex: statement.index });
+    }
+  }
+  return findings;
+}
+
+function highCodes(findings: RiskFinding[]): string[] {
+  return [...new Set(findings.filter((f) => f.level === "high").map((f) => f.code))];
 }
 
 const migrationPreviews = new Map<string, MigrationPreviewRecord>();
@@ -268,7 +311,7 @@ async function buildPendingScript(
 // ── migration_preview ──────────────────────────────────────────────────────────
 
 export async function handleMigrationPreview(
-  args: { environment?: string; profile?: ResponseProfile },
+  args: { environment?: string; targetMigration?: string; profile?: ResponseProfile },
   connections: ConnectionManager,
   config: MigrationConfig
 ): Promise<CallToolResult> {
@@ -290,7 +333,12 @@ export async function handleMigrationPreview(
     captureSchema(pool),
     listMigrations(config, env.connectionString)
   ]);
-  const { entries, pending } = listing;
+  const { entries, pending, applied } = listing;
+
+  if (args.targetMigration !== undefined) {
+    return previewRevert(args.targetMigration, { env, profile, preSnapshotId: preSnapshot.snapshotId, pending, applied }, config);
+  }
+
   if (pending.length === 0) {
     return asText({ environment: env.name, status: "no_pending", note: "No pending migrations." }, profile);
   }
@@ -309,7 +357,10 @@ export async function handleMigrationPreview(
     previewId,
     environment: env.name,
     preSnapshotId: preSnapshot.snapshotId,
+    direction: "up",
     pendingMigrations: pending,
+    appliedMigrations: applied,
+    requiredAcknowledgements: [],
     digest,
     expiresAt
   });
@@ -324,8 +375,79 @@ export async function handleMigrationPreview(
       pendingMigrations: pending,
       pendingScript,
       script: fullScript, // undefined unless verbose — JSON.stringify drops it
+      // Informational on an up plan: nothing has to be acknowledged, but a DROP or a type change in
+      // a forward migration deserves the same second look the DDL lane gives it.
+      risks: lintEfScript(pendingScript),
       lockTimeout: describeLockTimeout(env.connectionString, config),
       expiresAt
+    },
+    profile
+  );
+}
+
+// ── migration_preview { targetMigration }: rollback (B-15.4) ─────────────────────
+
+/**
+ * Plan a rollback: revert every migration applied after `target` (`"0"` = all of them), using the
+ * migrations' Down methods, through the same preview → token → drift guard → apply path as a
+ * forward migration. A down plan always needs `EF_REVERT` acknowledged, plus every high risk the
+ * lint finds in the Down SQL — a Down that drops a table drops its data.
+ */
+async function previewRevert(
+  target: string,
+  ctx: { env: { name: string; connectionString: string }; profile: ResponseProfile; preSnapshotId: string; pending: string[]; applied: string[] },
+  config: MigrationConfig
+): Promise<CallToolResult> {
+  const { env, profile, applied } = ctx;
+  if (target !== "0" && !applied.includes(target)) {
+    // A target that is not applied is almost always a typo, and a typo here would revert
+    // everything newer than whatever it happens to sort after.
+    throw new PolicyViolationError(
+      "MIGRATION_UNKNOWN_TARGET",
+      `targetMigration '${target}' is not applied on '${env.name}'. Pass an applied migration id, or "0" to revert everything.`
+    );
+  }
+  const toRevert = target === "0" ? [...applied] : applied.slice(applied.indexOf(target) + 1);
+  if (toRevert.length === 0) {
+    return asText({ environment: env.name, status: "nothing_to_revert", note: `'${target}' is already the latest applied migration.` }, profile);
+  }
+  const latest = applied[applied.length - 1] as string;
+  const script = efOk(await efMigrationsScriptRange(config, env.connectionString, latest, target), "migrations script").stdout.trim();
+  const risks = lintEfScript(script);
+  const requiredAcknowledgements = ["EF_REVERT", ...highCodes(risks)];
+
+  const previewId = randomUUID();
+  const expiresAt = new Date(Date.now() + config.previewTtlMs).toISOString();
+  const digest = migrationDigest(env.name, ctx.preSnapshotId, `down:${target}:${script}`);
+  migrationPreviews.set(previewId, {
+    previewId,
+    environment: env.name,
+    preSnapshotId: ctx.preSnapshotId,
+    direction: "down",
+    targetMigration: target,
+    pendingMigrations: ctx.pending,
+    appliedMigrations: applied,
+    requiredAcknowledgements,
+    digest,
+    expiresAt
+  });
+
+  return asText(
+    {
+      previewId,
+      approvalToken: issueApprovalToken(previewId, digest, expiresAt, config.approvalSecret),
+      environment: env.name,
+      preSnapshotId: ctx.preSnapshotId,
+      direction: "down",
+      targetMigration: target,
+      // Newest first: the order the Down methods run in.
+      revertMigrations: [...toRevert].reverse(),
+      revertScript: script,
+      risks,
+      requiredAcknowledgements,
+      lockTimeout: describeLockTimeout(env.connectionString, config),
+      expiresAt,
+      next: `Show the user what this reverts and why each code in requiredAcknowledgements matters. Only after an explicit yes: migration_apply with acknowledgeRisks: ${JSON.stringify(requiredAcknowledgements)}.`
     },
     profile
   );
@@ -334,7 +456,7 @@ export async function handleMigrationPreview(
 // ── migration_apply ──────────────────────────────────────────────────────────────
 
 export async function handleMigrationApply(
-  args: { environment?: string; previewId: string; approvalToken: string; profile?: ResponseProfile },
+  args: { environment?: string; previewId: string; approvalToken: string; acknowledgeRisks?: string[]; profile?: ResponseProfile },
   connections: ConnectionManager,
   config: MigrationConfig
 ): Promise<CallToolResult> {
@@ -362,6 +484,14 @@ export async function handleMigrationApply(
     verifyApprovalToken(args.approvalToken, preview.previewId, preview.digest, preview.expiresAt, config.approvalSecret, {
       ignoreExpiry: true
     });
+    const given = new Set(args.acknowledgeRisks ?? []);
+    const missing = preview.requiredAcknowledgements.filter((code) => !given.has(code));
+    if (missing.length > 0) {
+      throw new PolicyViolationError(
+        "MIGRATION_RISK_NOT_ACKNOWLEDGED",
+        `This plan must be acknowledged before it runs: ${missing.join(", ")}. Confirm with a human, then pass acknowledgeRisks.`
+      );
+    }
 
     const env = connections.getEnvironment(preview.environment, true);
     const pool = connections.getPool(preview.environment, true);
@@ -381,16 +511,29 @@ export async function handleMigrationApply(
         "Schema changed since migration_preview. Re-run migration_preview before applying."
       );
     }
-    if (current.pending.join(",") !== preview.pendingMigrations.join(",")) {
+    if (preview.direction === "up" && current.pending.join(",") !== preview.pendingMigrations.join(",")) {
       throw new PolicyViolationError(
         "MIGRATION_DRIFT",
         "Pending migration set changed since migration_preview. Re-run migration_preview before applying."
       );
     }
+    // A revert is decided by what is applied: one applied (or reverted) in between would change
+    // what `database update <target>` undoes, with the schema possibly unchanged.
+    if (preview.direction === "down" && current.applied.join(",") !== preview.appliedMigrations.join(",")) {
+      throw new PolicyViolationError(
+        "MIGRATION_DRIFT",
+        "Applied migration set changed since migration_preview. Re-run migration_preview before reverting."
+      );
+    }
 
     let updateResult: EfResult;
     try {
-      updateResult = efOk(await efDatabaseUpdate(config, env.connectionString), "database update");
+      updateResult = efOk(
+        preview.direction === "down" && preview.targetMigration !== undefined
+          ? await efDatabaseUpdateTo(config, env.connectionString, preview.targetMigration)
+          : await efDatabaseUpdate(config, env.connectionString),
+        "database update"
+      );
     } catch (error) {
       await recordAudit(pool, env.name, {
         tool: "migration_apply",
@@ -401,7 +544,7 @@ export async function handleMigrationApply(
         rowsAffected: null,
         status: "failed",
         rollbackId: null,
-        detail: { error: String(error) }
+        detail: { direction: preview.direction, targetMigration: preview.targetMigration, error: String(error) }
       });
       throw error;
     }
@@ -420,13 +563,15 @@ export async function handleMigrationApply(
       rowsAffected: null,
       status: "applied",
       rollbackId: null,
-      detail: { preSnapshotId: preSnapshot.snapshotId, postSnapshotId: postSnapshot.snapshotId }
+      detail: { direction: preview.direction, targetMigration: preview.targetMigration, preSnapshotId: preSnapshot.snapshotId, postSnapshotId: postSnapshot.snapshotId }
     });
 
     return asText(
       {
         environment: env.name,
         status: "applied",
+        direction: preview.direction,
+        targetMigration: preview.targetMigration,
         preSnapshotId: preSnapshot.snapshotId,
         postSnapshotId: postSnapshot.snapshotId,
         // Derived from the snapshot IDs themselves (not `!diff.identical`) so this flag can
