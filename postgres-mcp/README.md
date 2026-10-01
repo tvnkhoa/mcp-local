@@ -140,13 +140,15 @@ dòng thực sự bị ảnh hưởng thì undo sẽ không đầy đủ, nên n
 ```jsonc
 migration_status   { "environment": "dev" }                  // applied vs pending
 migration_add      { "name": "AddFooColumn" }                // gen file .cs (sửa tay được)
-migration_dry_run  { "environment": "dev" }                  // chạy script trong BEGIN...ROLLBACK
+migration_dry_run  { "environment": "dev" }                  // chạy đúng SQL preview hiển thị, từng statement, trong BEGIN...ROLLBACK
 migration_preview  { "environment": "dev" }                  // snapshot + script "expect" + token
 migration_apply    { "environment": "dev", "previewId": "...", "approvalToken": "..." } // drift-guard + verify
 compare_environments { "source": "dev", "target": "staging", "includeRowCounts": true }
 ```
 
 `dotnet ef` được gọi với argv cố định (không nối shell), tên migration bắt buộc `^[A-Za-z0-9_]+$`, connection inject qua `CH_DB_CONNECTION` cho đúng env (tên này là **outbound contract** với project .NET, không phải config của server — xem `docs/reference/dependency-rules.md` §4).
+
+`migration_dry_run` chạy đúng phần SQL mà `migration_preview` hiển thị: delta, hoặc script idempotent khi tập pending không liên tục. Script được tách bằng tokenizer của lane DDL rồi chạy từng statement, nên khi lỗi sẽ chỉ ra đúng statement và SQLSTATE (`failure`). Lệnh điều khiển transaction bị bỏ ở mọi dạng viết, kể cả `commit;` nằm chung dòng với lệnh khác. Statement không chạy được trong transaction (`CONCURRENTLY`, `VACUUM`) bị bỏ qua và liệt kê trong `skipped`; nếu cả script đều như vậy thì kết quả là `not_dry_runnable`.
 
 `migration_apply` dùng chung một mutex theo từng môi trường với `write_apply` / `write_rollback`. Trên cùng một DB, migration và thao tác ghi dữ liệu chạy lần lượt: một lệnh ghi phải đợi migration đang chạy xong. Nếu hai lần apply cùng một preview được gọi đồng thời, lần sau sẽ nhận `PREVIEW_NOT_FOUND`. Mutex chỉ có hiệu lực trong một process server.
 

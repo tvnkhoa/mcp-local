@@ -12,7 +12,7 @@ Resolution. Mirrors the format of `codebase-index-mcp/docs/mcp-codebase-index-is
 
 ## Index
 
-**28 entries** — all 28 resolved (some as documented guidance rather than code changes), **0 open**.
+**29 entries** — all 29 resolved (some as documented guidance rather than code changes), **0 open**.
 Statuses are copied from each entry's own `**Status:**` line; the entry is authoritative.
 
 | ID | Title | Status |
@@ -43,6 +43,7 @@ Statuses are copied from each entry's own `**Status:**` line; the entry is autho
 | `PG-WRT-007` | `write_preview` used the regex's guess at the target, not the table the statement writes | ✅ fixed 2026-09-30 (code) — target resolved from the EXPLAIN plan |
 | `PG-MIG-006` | `migration_apply` took no lock: two applies of one preview could both run, and writes could interleave | ✅ fixed 2026-09-30 (code) — shared per-environment mutex |
 | `PG-MIG-007` | `migration_dry_run` let `commit ;` through, committing the dry run for real | ✅ fixed 2026-10-01 (code) — strip pattern tolerates whitespace before `;` |
+| `PG-MIG-008` | `migration_dry_run` tested a different script from the one `migration_preview` showed | ✅ fixed 2026-10-01 (code) — shared builder; tokenizer split; one statement at a time |
 | `PG-CMP-002` | The schema snapshot saw only tables: a changed view, function, trigger or enum passed the drift guard | ✅ fixed 2026-09-30 (code) — snapshot v2 captures seven more object kinds |
 | `PG-DDL-001` | The DDL lane's apply hung forever behind a table lock it had not reached yet | ✅ fixed 2026-10-01 (code) — session timeouts set first; planning uses the plan's shortest lock wait |
 
@@ -1141,6 +1142,44 @@ time; covered by `writeGuardrails.test.ts`, `tools.test.ts`, `N/internal-schema-
 
 ---
 
+## PG-MIG-008 — `migration_dry_run` tested a different script from the one `migration_preview` showed
+
+**Status:** ✅ fixed 2026-10-01 (code, B-15.2). Covered by `J`, `K` and `L` in
+`scripts/migration-flow-test.mjs`, and by the `planEfDryRun` unit tests.
+
+- **Scenario:** `migration_preview`, then `migration_dry_run`, then `migration_apply`, on a normal
+  linear history.
+- **Expected vs actual:** the dry run should run the delta the preview had just shown. It always
+  ran the full idempotent script instead.
+- **What that cost:**
+  1. **It verified other SQL.** On a linear history the idempotent script reaches the same end
+     state through `DO $EF$` guards, but its SQL is not what was reviewed.
+  2. **It could not name the failing statement.** The script went to the server as a single
+     simple-protocol query, so a failure said what went wrong but not where.
+  3. **It had nothing to do with `CONCURRENTLY`.** Such a statement made the whole dry run fail,
+     because Postgres refuses it inside a transaction.
+  4. **Removing transaction control depended on line layout.** EF's `START TRANSACTION;` and
+     `COMMIT;` were removed by a line filter (PG-MIG-007's root).
+- **Resolution:**
+  - `buildPendingScript` is shared by preview and dry run, so both use the same script.
+  - `planEfDryRun` splits the script with the DDL lane's tokenizer (`splitSqlStatements`, the same
+    lexer, without the DDL allowlist). It drops transaction control by first word, wherever it
+    appears, and skips statements Postgres refuses inside a transaction, reporting them in
+    `skipped`.
+  - The rest run one at a time over the extended protocol inside `begin … rollback`.
+  - A failure reports `failure: { statementIndex, sqlState, statement }`. A script with nothing
+    runnable reports `not_dry_runnable`.
+  - The `error` string field is unchanged, so existing callers keep working.
+- **Verified discriminating:** against the previous handler, `J` fails: it called
+  `migrations script --idempotent` instead of the delta. `K` and `L` fail with `status: failed`,
+  where the new code reports `ok` with nothing persisted, and with the `CONCURRENTLY` statement in
+  `skipped`. `H` fails because the old result carries no `failure` detail. The new handler passes
+  all 12 scenarios.
+- **Contract:** `migration_dry_run`'s description changed to say what it now does. The input schema
+  is unchanged.
+
+---
+
 ## PG-MIG-007 — `migration_dry_run` let `commit ;` through, committing the dry run for real
 
 **Status:** ✅ fixed 2026-10-01 (code). Covered by `migrationHandlers.test.ts`.
@@ -1154,9 +1193,10 @@ time; covered by `writeGuardrails.test.ts`, `tools.test.ts`, `N/internal-schema-
   that line was kept. It would then commit the dry run's transaction, and everything before it
   would persist: the dry run would apply part of the migration.
 - **Found by:** the first unit test written for the lane, through the B-15.3 runner seam.
-- **Resolution:** the filter now strips `/\s*;\s*$/`. The fuller fix is B-15.2: run the delta
-  statement by statement through the DDL lane's tokenizer, which sees transaction control wherever
-  it is, not only on a line of its own.
+- **Resolution:** the filter first stripped `/\s*;\s*$/`. B-15.2 (PG-MIG-008) then replaced the
+  line filter: the dry run splits the script with the DDL lane's tokenizer and drops transaction
+  control wherever it appears, including `CREATE TABLE t (a int); commit;` on a single line, which
+  no line filter can see (`K/dry-run-commit-contained`).
 
 ---
 

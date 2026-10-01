@@ -1,10 +1,12 @@
 import { createHash, randomUUID } from "node:crypto";
 
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
+import type { QueryConfig } from "pg";
 
 import type { ConnectionManager } from "../../repositories/connectionManager.js";
 import { PolicyViolationError } from "../../middleware/errors.js";
 import { asText, type ResponseProfile } from "../../middleware/responseFormatter.js";
+import { splitSqlStatements, topLevelWords, type SplitStatement } from "../../middleware/ddlGuardrails.js";
 import { quoteIdent } from "../../middleware/ident.js";
 import { issueApprovalToken, verifyApprovalToken } from "../../services/write/approval.js";
 import { runExclusive } from "../../services/concurrency/envMutex.js";
@@ -49,23 +51,60 @@ function migrationDigest(environment: string, preSnapshotId: string, script: str
   return createHash("sha256").update(`${environment}::${preSnapshotId}::${script}`).digest("hex");
 }
 
+/** What `planEfDryRun` decided for one statement it will not run. */
+export interface SkippedStatement {
+  index: number;
+  reason: "TRANSACTION_CONTROL" | "NON_TRANSACTIONAL";
+  /** The first 120 characters, enough to recognise it. */
+  statement: string;
+}
+
+export interface EfDryRunPlan {
+  run: SplitStatement[];
+  skipped: SkippedStatement[];
+}
+
+const TRANSACTION_CONTROL = new Set(["start", "begin", "commit", "end", "rollback", "abort", "savepoint", "release"]);
+
 /**
- * Remove EF's own transaction-control statements (`START TRANSACTION;` / `COMMIT;`),
- * which it emits as standalone lines around each migration in the generated script.
- * Left in place, the script's COMMIT would close the dry-run's outer transaction and
- * persist the DDL — defeating the rolled-back-dry-run guarantee. We strip ONLY these
- * two exact statements; `BEGIN` is left untouched because it legitimately appears
- * inside EF's `DO $EF$ ... BEGIN ... END $EF$;` PL/pgSQL blocks.
+ * Decide, statement by statement, what a dry run of an EF script executes.
+ *
+ * The script is split by the DDL lane's tokenizer, not by lines. That is the fix for PG-MIG-007
+ * and its whole family: the old line filter recognised `COMMIT;` only when it stood alone on a
+ * line in exactly that spelling, so `commit ;` (or any COMMIT the filter did not recognise)
+ * stayed in the script and committed the dry run for real. Here a transaction-control statement
+ * is recognised by its first word wherever it appears, and a `BEGIN` inside EF's `DO $EF$ … $EF$`
+ * blocks is never a statement of its own, because the dollar-quoted body is one token.
+ *
+ * Two kinds of statement are skipped, and every skip is reported:
+ *  - Transaction control (`START TRANSACTION`, `COMMIT`, …). The dry run owns the transaction.
+ *  - Statements Postgres refuses inside a transaction: the `CONCURRENTLY` index builds and drops,
+ *    `DETACH PARTITION … CONCURRENTLY`, `VACUUM`, `CREATE DATABASE`. A dry run cannot run them.
+ *    It says so rather than pretending they passed.
  */
-export function stripTransactionControl(script: string): string {
-  return script
-    .split(/\r?\n/)
-    .filter((line) => {
-      // `\s*;` not `;`: `commit ;` must match too, or it would commit the dry run for real.
-      const normalized = line.trim().replace(/\s*;\s*$/, "").toUpperCase();
-      return normalized !== "START TRANSACTION" && normalized !== "COMMIT";
-    })
-    .join("\n");
+export function planEfDryRun(script: string): { ok: true; plan: EfDryRunPlan } | { ok: false; error: { code: string; message: string } } {
+  const split = splitSqlStatements(script);
+  if (!split.ok) {
+    return { ok: false, error: { code: "EF_SCRIPT_UNSPLITTABLE", message: `The migration script could not be split into statements: ${split.error.message}` } };
+  }
+  const run: SplitStatement[] = [];
+  const skipped: SkippedStatement[] = [];
+  for (const statement of split.statements) {
+    const words = topLevelWords(statement.tokens).map((w) => w.word);
+    const first = words[0] ?? "";
+    const preview = statement.text.replace(/\s+/g, " ").slice(0, 120);
+    if (TRANSACTION_CONTROL.has(first)) {
+      skipped.push({ index: statement.index, reason: "TRANSACTION_CONTROL", statement: preview });
+      continue;
+    }
+    const concurrently = words.includes("concurrently") && (first === "create" || first === "drop" || first === "alter" || first === "reindex");
+    if (concurrently || first === "vacuum" || (first === "create" && words[1] === "database")) {
+      skipped.push({ index: statement.index, reason: "NON_TRANSACTIONAL", statement: preview });
+      continue;
+    }
+    run.push(statement);
+  }
+  return { ok: true, plan: { run, skipped } };
 }
 
 function efOk(result: EfResult, action: string): EfResult {
@@ -172,6 +211,49 @@ export async function handleMigrationAdd(
   );
 }
 
+// ── the pending script ──────────────────────────────────────────────────────────
+
+/**
+ * The SQL for the pending migrations: what `migration_preview` shows and `migration_dry_run`
+ * executes. One builder for both (B-15.2). Before, the dry run always ran the full idempotent
+ * script, so it was not testing the SQL the preview had shown (PG-MIG-008).
+ *
+ * Is the pending set a contiguous suffix (the normal linear case)? If so, script just the delta
+ * from the migration right before the first pending one. If NOT — a pending migration has an id
+ * ordered before an already-applied one (branch merges apply migrations out of id order) — no
+ * `script <from>` range can represent a non-contiguous subset, so fall back to the idempotent full
+ * script, which guards each migration individually and is correct at any migration point.
+ */
+async function buildPendingScript(
+  config: MigrationConfig,
+  connectionString: string,
+  entries: EfMigrationListEntry[],
+  withFullScript: boolean
+): Promise<{ pendingScript: string; fullScript: string | undefined; contiguous: boolean }> {
+  const firstPendingIdx = entries.findIndex((m) => m.applied !== true);
+  const contiguous = entries.slice(firstPendingIdx + 1).every((m) => m.applied !== true);
+  const fromId = firstPendingIdx > 0 ? entries[firstPendingIdx - 1].id : undefined;
+
+  if (contiguous) {
+    // Net pending SQL only — scripting from the last applied migration yields just the delta,
+    // not the whole guarded baseline (the ~50 KB PG-PRV-001 problem). Delta and (verbose-only)
+    // full idempotent script are independent dotnet invocations → run them together.
+    const [delta, full] = await Promise.all([
+      efMigrationsScriptDelta(config, connectionString, fromId),
+      withFullScript ? efMigrationsScript(config, connectionString) : Promise.resolve(undefined)
+    ]);
+    return {
+      pendingScript: efOk(delta, "migrations script").stdout.trim(),
+      fullScript: full ? efOk(full, "migrations script").stdout : undefined,
+      contiguous
+    };
+  }
+  // Non-contiguous: the idempotent full script IS the correct pending representation, so it
+  // doubles as both `pendingScript` and the verbose `script` (one invocation, no delta call).
+  const full = efOk(await efMigrationsScript(config, connectionString), "migrations script").stdout;
+  return { pendingScript: full.trim(), fullScript: withFullScript ? full : undefined, contiguous };
+}
+
 // ── migration_preview ──────────────────────────────────────────────────────────
 
 export async function handleMigrationPreview(
@@ -202,36 +284,7 @@ export async function handleMigrationPreview(
     return asText({ environment: env.name, status: "no_pending", note: "No pending migrations." }, profile);
   }
 
-  // Is the pending set a contiguous suffix (the normal linear case)? If so we can script just the
-  // delta from the migration right before the first pending one. If NOT — a pending migration has
-  // an id ordered before an already-applied one (branch merges apply migrations out of id order) —
-  // no `script <from>` range can represent a non-contiguous subset, so fall back to the idempotent
-  // full script, which guards each migration individually and is correct at any migration point.
-  const firstPendingIdx = entries.findIndex((m) => m.applied !== true);
-  const contiguous = entries.slice(firstPendingIdx + 1).every((m) => m.applied !== true);
-  const fromId = firstPendingIdx > 0 ? entries[firstPendingIdx - 1].id : undefined;
-
-  let pendingScript: string;
-  let fullScript: string | undefined;
-  if (contiguous) {
-    // Net pending SQL only — scripting from the last applied migration yields just the delta,
-    // not the whole guarded baseline (the ~50 KB PG-PRV-001 problem). Delta and (verbose-only)
-    // full idempotent script are independent dotnet invocations → run them together.
-    const [delta, full] = await Promise.all([
-      efMigrationsScriptDelta(config, env.connectionString, fromId),
-      profile === "verbose"
-        ? efMigrationsScript(config, env.connectionString)
-        : Promise.resolve(undefined)
-    ]);
-    pendingScript = efOk(delta, "migrations script").stdout.trim();
-    fullScript = full ? efOk(full, "migrations script").stdout : undefined;
-  } else {
-    // Non-contiguous: the idempotent full script IS the correct pending representation, so it
-    // doubles as both `pendingScript` and the verbose `script` (one invocation, no delta call).
-    const full = efOk(await efMigrationsScript(config, env.connectionString), "migrations script").stdout;
-    pendingScript = full.trim();
-    fullScript = profile === "verbose" ? full : undefined;
-  }
+  const { pendingScript, fullScript } = await buildPendingScript(config, env.connectionString, entries, profile === "verbose");
 
   const previewId = randomUUID();
   const expiresAt = new Date(Date.now() + config.previewTtlMs).toISOString();
@@ -386,43 +439,77 @@ export async function handleMigrationDryRun(
   config: MigrationConfig
 ): Promise<CallToolResult> {
   assertMigrationEnabled(config);
+  const profile = args.profile ?? "compact";
   const env = connections.getEnvironment(args.environment, true);
   const pool = connections.getPool(args.environment, true);
 
-  const script = efOk(await efMigrationsScript(config, env.connectionString), "migrations script").stdout;
-  const trimmed = script.trim();
-  if (!trimmed) {
-    return asText({ environment: env.name, status: "no_pending", note: "No pending migrations." }, args.profile ?? "compact");
+  const { entries, pending } = await listMigrations(config, env.connectionString);
+  if (pending.length === 0) {
+    return asText({ environment: env.name, status: "no_pending", note: "No pending migrations." }, profile);
+  }
+  // The same SQL migration_preview shows: the delta, or the idempotent script when the pending set
+  // is not contiguous.
+  const { pendingScript, contiguous } = await buildPendingScript(config, env.connectionString, entries, false);
+  const planned = planEfDryRun(pendingScript);
+  if (!planned.ok) {
+    throw new PolicyViolationError(planned.error.code, planned.error.message);
+  }
+  const { run, skipped } = planned.plan;
+  const base = {
+    environment: env.name,
+    pendingMigrations: pending,
+    script: contiguous ? "delta" : "idempotent",
+    statements: run.length + skipped.length,
+    skipped: skipped.filter((s) => s.reason === "NON_TRANSACTIONAL"),
+    transactionControlRemoved: skipped.filter((s) => s.reason === "TRANSACTION_CONTROL").length
+  };
+  if (run.length === 0) {
+    return asText(
+      { ...base, status: "not_dry_runnable", note: "Every statement in the pending script must run outside a transaction, so a dry run cannot execute any of them." },
+      profile
+    );
   }
 
-  // Run the idempotent script inside a transaction we always roll back — catches SQL
-  // errors without persisting anything. EF's own START TRANSACTION/COMMIT lines are
-  // stripped first so the script can't commit out from under our rollback.
-  const runnable = stripTransactionControl(trimmed);
+  // One statement at a time, over the extended protocol, inside a transaction that is always
+  // rolled back. One at a time is what lets a failure name its statement. The extended protocol
+  // refuses a statement that hides a second one, so nothing runs unexamined.
   const client = await pool.connect();
+  let ran = 0;
   try {
     await client.query("begin");
-    await client.query(runnable);
-    await client.query("rollback");
-    return asText(
-      {
-        environment: env.name,
-        status: "ok",
-        note: "Migration script executed cleanly in a rolled-back transaction (no changes persisted)."
-      },
-      args.profile ?? "compact"
-    );
-  } catch (error) {
-    try {
-      await client.query("rollback");
-    } catch {
-      // ignore
+    for (const statement of run) {
+      try {
+        await client.query({ text: statement.text, queryMode: "extended" } as QueryConfig);
+        ran += 1;
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error);
+        const sqlState = typeof (error as { code?: unknown }).code === "string" ? (error as { code: string }).code : undefined;
+        return asText(
+          {
+            ...base,
+            status: "failed",
+            statementsRun: ran,
+            error: detail,
+            failure: { statementIndex: statement.index, ...(sqlState === undefined ? {} : { sqlState }), statement: statement.text.replace(/\s+/g, " ").slice(0, 200) }
+          },
+          profile
+        );
+      }
     }
     return asText(
-      { environment: env.name, status: "failed", error: String(error) },
-      args.profile ?? "compact"
+      {
+        ...base,
+        status: "ok",
+        statementsRun: ran,
+        note:
+          skipped.some((x) => x.reason === "NON_TRANSACTIONAL")
+            ? "Ran in a rolled-back transaction. Some statements cannot run inside a transaction and were skipped; they are not verified."
+            : "Migration script executed cleanly in a rolled-back transaction (no changes persisted)."
+      },
+      profile
     );
   } finally {
+    await client.query("rollback").catch(() => undefined);
     client.release();
   }
 }

@@ -315,8 +315,57 @@ async function main() {
       ef.state.migrations.pop();
       check(
         "H/dry-run",
-        good.payload.status === "ok" && persisted === false && bad.payload.status === "failed" && /no_such_table/.test(bad.payload.error),
+        good.payload.status === "ok" &&
+          persisted === false &&
+          bad.payload.status === "failed" &&
+          /no_such_table/.test(bad.payload.error) &&
+          bad.payload.failure?.sqlState === "42P01" &&
+          /no_such_table/.test(bad.payload.failure?.statement ?? ""),
         `good=${String(good.payload.status)} persisted=${String(persisted)} bad=${String(bad.payload.status)}`
+      );
+    }
+
+    // ── J. the dry run executes the delta the preview showed (PG-MIG-008) ───
+    {
+      ef.state.calls.length = 0;
+      const { payload: d } = await invoke("handleMigrationDryRun", { environment: "dev" });
+      const scriptCalls = ef.state.calls.filter((c) => c[1] === "script");
+      check(
+        "J/dry-run-runs-delta",
+        d.status === "ok" &&
+          d.script === "delta" &&
+          d.statementsRun === 2 &&
+          d.transactionControlRemoved === 2 &&
+          scriptCalls.length === 1 &&
+          scriptCalls[0][2] !== "--idempotent",
+        `status=${String(d.status)} script=${String(d.script)} ran=${String(d.statementsRun)} scriptCalls=${JSON.stringify(scriptCalls)}`
+      );
+    }
+
+    // ── K. a hand-written COMMIT inside a migration cannot commit the dry run (PG-MIG-007) ──
+    {
+      // `commit;` on the same line as a statement: invisible to a line filter, whatever its regex.
+      ef.state.migrations.push({ id: "20260108000000_HandEdited", sql: ["CREATE TABLE k_t (a int); commit;", "CREATE TABLE k2_t (a int);"].join("\n") });
+      const { payload: d } = await invoke("handleMigrationDryRun", { environment: "dev" });
+      const persisted = (await exists("public.k_t")) || (await exists("public.e_t"));
+      ef.state.migrations.pop();
+      check(
+        "K/dry-run-commit-contained",
+        d.status === "ok" && persisted === false,
+        `status=${String(d.status)} persisted=${String(persisted)} controlRemoved=${String(d.transactionControlRemoved)}`
+      );
+    }
+
+    // ── L. CONCURRENTLY cannot run in the dry run's transaction: skipped, reported ──
+    {
+      ef.state.migrations.push({ id: "20260109000000_Concurrent", sql: "CREATE INDEX CONCURRENTLY init_idx ON init_t (id);" });
+      const { payload: d } = await invoke("handleMigrationDryRun", { environment: "dev" });
+      const index = await exists("public.init_idx");
+      ef.state.migrations.pop();
+      check(
+        "L/dry-run-skips-concurrently",
+        d.status === "ok" && d.skipped?.length === 1 && d.skipped[0].reason === "NON_TRANSACTIONAL" && index === false,
+        `status=${String(d.status)} skipped=${JSON.stringify(d.skipped)} index=${String(index)}`
       );
     }
 

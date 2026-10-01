@@ -10,6 +10,25 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased] - 2026-10-01
 
+### 🔍 `postgres-mcp`: `migration_dry_run` runs what `migration_preview` showed (B-15.2, PG-MIG-008)
+
+- Preview and dry run share `buildPendingScript`, so the dry run executes the delta, or the
+  idempotent script when the pending set is not contiguous. Before, it always ran the idempotent
+  script.
+- The script is split by the DDL lane's tokenizer: `splitSqlStatements` is new in
+  `ddlGuardrails.ts`, the same lexer without the allowlist. Each statement then runs over the
+  extended protocol inside `begin … rollback`.
+  - A failure names its statement: `failure: { statementIndex, sqlState, statement }`. The `error`
+    string is unchanged.
+  - Transaction control is dropped in any spelling, including `commit;` on the same line as
+    another statement, which no line filter can see. This replaces `stripTransactionControl`.
+  - `CONCURRENTLY`, `VACUUM` and `CREATE DATABASE` cannot run in a transaction, so they are
+    skipped and listed. A script made only of them reports `not_dry_runnable`.
+- **Contract:** `migration_dry_run`'s description now says what it does. The input schema is
+  unchanged.
+- `migration-flow-test.mjs` goes from 9 to 12 scenarios. Against the previous handler, 4 of the 12
+  fail.
+
 ### 🧪 `postgres-mcp`: the EF Core lane is tested for the first time (B-15.3)
 
 - `MigrationConfig.run` is a runner seam that replaces the `dotnet ef` child process. Nothing reads

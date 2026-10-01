@@ -11,7 +11,7 @@ import { test } from "node:test";
 
 import { ConnectionManager } from "../../repositories/connectionManager.js";
 import { buildEfArgv, type EfResult, type MigrationConfig } from "../../services/migration/efRunner.js";
-import { handleMigrationAdd, handleMigrationStatus, stripTransactionControl } from "./migrationHandlers.js";
+import { handleMigrationAdd, handleMigrationStatus, planEfDryRun } from "./migrationHandlers.js";
 
 process.env.POSTGRES_CONNECTION = "postgres://t:t@127.0.0.1:59999/t";
 delete process.env.POSTGRES_ALLOWED_ENVIRONMENTS;
@@ -99,21 +99,55 @@ test("migration_add refuses an unsafe name before the runner is ever called", as
   assert.deepEqual(calls, [["migrations", "add", "AddFoo_2"]]);
 });
 
-test("stripTransactionControl removes EF's own START TRANSACTION / COMMIT and nothing else", () => {
-  const script = [
-    "START TRANSACTION;",
-    'CREATE TABLE "Foo" (id int);',
-    "DO $EF$",
-    "BEGIN",
-    "    IF NOT EXISTS (SELECT 1) THEN",
-    '        CREATE TABLE "Bar" (id int);',
-    "    END IF;",
-    "END $EF$;",
-    "  commit ;",
-    "COMMIT;"
-  ].join("\r\n");
-  assert.equal(
-    stripTransactionControl(script),
-    ['CREATE TABLE "Foo" (id int);', "DO $EF$", "BEGIN", "    IF NOT EXISTS (SELECT 1) THEN", '        CREATE TABLE "Bar" (id int);', "    END IF;", "END $EF$;"].join("\n")
+function planOf(script: string) {
+  const result = planEfDryRun(script);
+  if (!result.ok) {
+    assert.fail(`${result.error.code}: ${result.error.message}`);
+  }
+  return result.plan;
+}
+
+test("the dry-run plan drops EF's transaction control in any spelling, and keeps DO blocks whole", () => {
+  const plan = planOf(
+    [
+      "START TRANSACTION;",
+      'CREATE TABLE "Foo" (id int);',
+      "DO $EF$",
+      "BEGIN",
+      "    IF NOT EXISTS (SELECT 1) THEN",
+      '        CREATE TABLE "Bar" (id int);',
+      "    END IF;",
+      "END $EF$;",
+      // PG-MIG-007: the old line filter kept this one, and it committed the dry run.
+      "  commit ;",
+      "begin; create table baz (a int); COMMIT"
+    ].join("\r\n")
   );
+  assert.deepEqual(
+    plan.run.map((s) => s.text.split(/\s+/).slice(0, 3).join(" ")),
+    ['CREATE TABLE "Foo"', "DO $EF$ BEGIN", "create table baz"]
+  );
+  assert.deepEqual(
+    plan.skipped.map((s) => s.reason),
+    ["TRANSACTION_CONTROL", "TRANSACTION_CONTROL", "TRANSACTION_CONTROL", "TRANSACTION_CONTROL"]
+  );
+});
+
+test("statements Postgres refuses inside a transaction are skipped and reported, not run", () => {
+  const plan = planOf(
+    'CREATE INDEX CONCURRENTLY ix ON "Foo" (id); DROP INDEX CONCURRENTLY ix2; ALTER TABLE p DETACH PARTITION p1 CONCURRENTLY; CREATE INDEX ix3 ON "Foo" (id)'
+  );
+  assert.deepEqual(plan.skipped.map((s) => [s.index, s.reason]), [
+    [0, "NON_TRANSACTIONAL"],
+    [1, "NON_TRANSACTIONAL"],
+    [2, "NON_TRANSACTIONAL"]
+  ]);
+  assert.equal(plan.run.length, 1);
+  // A column named "concurrently" inside parentheses does not make a statement non-transactional.
+  assert.equal(planOf('CREATE INDEX ix ON t ("concurrently", concurrently)').run.length, 1);
+});
+
+test("a script the tokenizer cannot follow is refused with a stable code", () => {
+  const result = planEfDryRun("CREATE TABLE t (a text DEFAULT 'never closed);");
+  assert.equal(result.ok ? "" : result.error.code, "EF_SCRIPT_UNSPLITTABLE");
 });

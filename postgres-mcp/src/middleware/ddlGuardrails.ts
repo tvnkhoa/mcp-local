@@ -511,6 +511,71 @@ function needsNoTransaction(tokens: Token[], verb: DdlVerb, kind: DdlObjectKind)
   return verb === "alter" && kind === "table" && has("detach") && has("concurrently");
 }
 
+// ── splitting ────────────────────────────────────────────────────────────────
+
+/**
+ * Split tokens on `;`. The tokenizer has already consumed every `;` inside a literal or comment,
+ * so what is left is a real boundary — except inside a `BEGIN ATOMIC` body, whose `;` cannot be
+ * told from a statement end without a real parser. A dollar-quoted body says the same thing and
+ * splits cleanly, so that form is refused.
+ */
+function splitTokens(tokens: Token[]): DdlResult<{ groups: Token[][] }> {
+  for (let k = 0; k + 1 < tokens.length; k += 1) {
+    if (wordAt(tokens, k) === "begin" && wordAt(tokens, k + 1) === "atomic") {
+      return fail("DDL_UNSUPPORTED_SYNTAX", "BEGIN ATOMIC function bodies are not accepted. Use a dollar-quoted body: AS $$ … $$.");
+    }
+  }
+  const groups: Token[][] = [];
+  let current: Token[] = [];
+  for (const token of tokens) {
+    if (token.type === "punct" && token.value === ";") {
+      if (current.length > 0) {
+        groups.push(current);
+      }
+      current = [];
+    } else {
+      current.push(token);
+    }
+  }
+  if (current.length > 0) {
+    groups.push(current);
+  }
+  return { ok: true, groups };
+}
+
+export interface SplitStatement {
+  index: number;
+  text: string;
+  tokens: Token[];
+}
+
+/**
+ * Split any Postgres script into statements, with the same tokenizer and the same refusals as
+ * `validateDdlScript`, but WITHOUT its allowlist, directives or size caps.
+ *
+ * For callers that must run a script statement by statement and decide per statement what to do,
+ * where the allowlist would be wrong: the EF Core lane's dry run runs EF-generated scripts, and
+ * those legitimately contain `INSERT INTO "__EFMigrationsHistory"` and `DO $EF$` blocks.
+ */
+export function splitSqlStatements(sql: string): DdlResult<{ statements: SplitStatement[] }> {
+  const lexed = tokenize(sql);
+  if (!lexed.ok) {
+    return lexed;
+  }
+  const split = splitTokens(lexed.tokens);
+  if (!split.ok) {
+    return split;
+  }
+  return {
+    ok: true,
+    statements: split.groups.map((group, index) => ({
+      index,
+      text: sql.slice((group[0] as Token).start, (group[group.length - 1] as Token).end),
+      tokens: group
+    }))
+  };
+}
+
 // ── the entry point ──────────────────────────────────────────────────────────
 
 export type DdlExecutionMode = "transactional" | "non_transactional";
@@ -548,30 +613,11 @@ export function validateDdlScript(sql: string, options: { noTransaction?: boolea
   }
   const directives: DdlDirectives = { ...read.directives, noTransaction: read.directives.noTransaction || options.noTransaction === true };
 
-  // BEGIN ATOMIC bodies contain `;`, which cannot be told from a statement end without a
-  // real parser. A dollar-quoted body says the same thing and splits cleanly.
-  for (let k = 0; k + 1 < tokens.length; k += 1) {
-    if (wordAt(tokens, k) === "begin" && wordAt(tokens, k + 1) === "atomic") {
-      return fail("DDL_UNSUPPORTED_SYNTAX", "BEGIN ATOMIC function bodies are not accepted. Use a dollar-quoted body: AS $$ … $$.");
-    }
+  const split = splitTokens(tokens);
+  if (!split.ok) {
+    return split;
   }
-
-  // Split on `;`. The tokenizer has already consumed every `;` inside a literal or comment.
-  const groups: Token[][] = [];
-  let current: Token[] = [];
-  for (const token of tokens) {
-    if (token.type === "punct" && token.value === ";") {
-      if (current.length > 0) {
-        groups.push(current);
-      }
-      current = [];
-    } else {
-      current.push(token);
-    }
-  }
-  if (current.length > 0) {
-    groups.push(current);
-  }
+  const { groups } = split;
   if (groups.length > MAX_DDL_STATEMENTS) {
     return fail("DDL_TOO_MANY_STATEMENTS", `A migration may hold at most ${String(MAX_DDL_STATEMENTS)} statements; this one has ${String(groups.length)}. Split it.`);
   }

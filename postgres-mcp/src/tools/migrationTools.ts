@@ -111,7 +111,7 @@ export function buildMigrationTools(deps: PostgresDeps): AnyToolDefinition[] {
   const migrationDryRun = defineTool({
     name: "migration_dry_run",
     description:
-      "Run the idempotent migration script inside a rolled-back transaction to catch SQL errors before applying.",
+      "Run the pending migration SQL that migration_preview shows, one statement at a time inside a rolled-back transaction, to catch SQL errors before applying. Reports the failing statement; skips (and lists) statements that cannot run in a transaction, such as CREATE INDEX CONCURRENTLY.",
     input: z.object({ environment: environmentArg, profile: profileArg }).strict(),
     inputSchema: schema.object({ environment: envProp, profile: profileProp }),
     annotations: previewsChange,
