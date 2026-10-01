@@ -400,6 +400,72 @@ export function refreshServerPath(agent, key, entryPath, entrySuffix) {
   return names;
 }
 
+/**
+ * Rename deprecated env keys in every registration of `key` to their canonical names.
+ *
+ * `renamesFor(presentKeys)` returns `[{ legacy, canonical }]` (the manifest's `deprecatedEnvInUse`).
+ * A value is MOVED, never read for display: it is copied to the canonical key and the legacy key is
+ * deleted. When the canonical key already holds a non-empty value, that value wins, exactly as it
+ * does at runtime, and the legacy key is only deleted. Nothing else in the entry changes.
+ *
+ * Returns `[{ name, renamed: [{ legacy, canonical }] }]` per rewritten entry ([] when nothing
+ * needed it, or on failure).
+ */
+export function renameEnvKeys(agent, key, renamesFor) {
+  let cfg;
+  try { cfg = loadConfig(agent.configPath); } catch { return []; }
+
+  const plans = [];
+  for (const { bucket, name, entry } of locateEntries(cfg, key)) {
+    const field = entry.env && typeof entry.env === "object" ? "env" : entry.environment && typeof entry.environment === "object" ? "environment" : null;
+    if (!field) continue;
+    const present = Object.keys(entry[field]).filter((k) => entry[field][k] !== "" && entry[field][k] != null);
+    const renamed = renamesFor(present);
+    if (renamed.length) plans.push({ name, keys: [...bucket, name, field], renamed });
+  }
+  if (plans.length === 0) return [];
+
+  const apply = (c) => {
+    for (const p of plans) {
+      const env = at(c, p.keys);
+      if (!env || typeof env !== "object") continue;
+      for (const { legacy, canonical } of p.renamed) {
+        if (!(legacy in env)) continue;
+        if (env[canonical] === undefined || env[canonical] === "") env[canonical] = env[legacy];
+        delete env[legacy];
+      }
+    }
+    return c;
+  };
+  const expected = apply(structuredClone(cfg));
+
+  const b = backup(agent.configPath);
+  if (b) info(`Backup: ${b}`);
+  let result;
+  try {
+    result = commit(agent, {
+      mutate: apply,
+      edits: plans.map((p) => ({ path: p.keys, value: at(expected, p.keys) })),
+      check: (c) => plans.every((p) => p.renamed.every(({ legacy, canonical }) => {
+        const env = at(c, p.keys);
+        return env && !(legacy in env) && canonical in env;
+      })),
+    });
+  } catch (e) {
+    warn(`${agent.name}: could not update ${agent.configPath}: ${e.message}`);
+    return [];
+  }
+  if (result === "refused") {
+    warn(`${agent.name}: ${agent.configPath} has comments, and an edit that keeps them could not be verified — not rewritten. Rename by hand: ${plans.flatMap((p) => p.renamed.map((r) => `${r.legacy} → ${r.canonical}`)).join(", ")}`);
+    return [];
+  }
+  if (result === "lost") {
+    err(`${agent.name}: the env renames for ${plans.map((p) => p.name).join(", ")} did not stick in ${agent.configPath} — another process keeps overwriting it.`);
+    return [];
+  }
+  return plans.map((p) => ({ name: p.name, renamed: p.renamed }));
+}
+
 /** Every server-shaped entry named `key` or `<key>-<suffix>`: [{ bucket, name, entry }]. */
 function locateEntries(cfg, key) {
   const found = new Map();

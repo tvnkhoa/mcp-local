@@ -21,6 +21,7 @@ import {
   detectAgents,
   readServerEntry,
   refreshServerPath,
+  renameEnvKeys,
   rotateBackups,
   unconfigureAgent,
 } from "./agents.mjs";
@@ -249,4 +250,37 @@ test("detectAgents can be pointed at a temp home", () => {
 
 test.after(() => {
   fs.rmSync(tmpRoot, { recursive: true, force: true });
+});
+
+// ---- env-var naming pass (2026-10-01) ----
+
+test("renameEnvKeys moves a deprecated key's value to the canonical key, and nothing else changes", () => {
+  const configPath = fileWith({
+    numStartups: 3,
+    mcpServers: {
+      "postgres-mcp": { command: "node", args: ["D:/x/postgres-mcp/dist/index.js"], env: { POSTGRES_DOTNET_PROJECT: "proj", POSTGRES_CONNECTION: "keep", POSTGRES_WRITE_APPROVAL_SECRET: "old", POSTGRES_APPROVAL_SECRET: "new" } },
+      "postgres-mcp-prod": { command: "node", args: ["D:/x/postgres-mcp/dist/index.js"], env: { POSTGRES_CONNECTION: "p" } }
+    }
+  });
+  const agent = { name: "Claude Code", type: "claude-code", configPath };
+  const renames = (keys) => [
+    ["POSTGRES_DOTNET_PROJECT", "POSTGRES_MIGRATION_DOTNET_PROJECT"],
+    ["POSTGRES_WRITE_APPROVAL_SECRET", "POSTGRES_APPROVAL_SECRET"]
+  ].filter(([legacy]) => keys.includes(legacy)).map(([legacy, canonical]) => ({ legacy, canonical }));
+
+  const result = renameEnvKeys(agent, "postgres-mcp", renames);
+  assert.deepEqual(result.map((r) => r.name), ["postgres-mcp"]);
+
+  const cfg = readJsonc(configPath);
+  assert.equal(cfg.numStartups, 3);
+  assert.deepEqual(cfg.mcpServers["postgres-mcp"].env, {
+    POSTGRES_CONNECTION: "keep",
+    // A canonical key that is already set wins, as at runtime; the legacy one is only removed.
+    POSTGRES_APPROVAL_SECRET: "new",
+    POSTGRES_MIGRATION_DOTNET_PROJECT: "proj"
+  });
+  assert.deepEqual(cfg.mcpServers["postgres-mcp-prod"].env, { POSTGRES_CONNECTION: "p" });
+
+  // Idempotent.
+  assert.deepEqual(renameEnvKeys(agent, "postgres-mcp", renames), []);
 });

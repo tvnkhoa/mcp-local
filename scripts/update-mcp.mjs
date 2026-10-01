@@ -3,8 +3,9 @@
 /**
  * Update one (or all) MCP server(s) in place: rebuild → re-point an already-registered
  * entry at this checkout → regenerate & reinstall the skill → verify the server starts.
- * Does NOT change any env you already configured in your agent config, and does not
- * register a server that is not registered (that is `mcp:install`).
+ * Does not change any env VALUE you configured, and does not register a server that is not
+ * registered (that is `mcp:install`). It does rename a deprecated env KEY to its canonical name,
+ * moving the value across unread (docs/reference/conventions.md, env-var naming).
  *
  * Usage:
  *   node scripts/update-mcp.mjs --server observe-mcp
@@ -13,9 +14,9 @@
 
 import { execSync } from "node:child_process";
 import path from "node:path";
-import { WORKSPACE_ROOT, serverDirPath, serverEntryPath } from "./lib/manifest.mjs";
+import { WORKSPACE_ROOT, deprecatedEnvInUse, serverDirPath, serverEntryPath } from "./lib/manifest.mjs";
 import { toConfigPath } from "./lib/jsonc.mjs";
-import { detectAgents, readServerEntries, refreshServerPath } from "./lib/agents.mjs";
+import { detectAgents, readServerEntries, refreshServerPath, renameEnvKeys } from "./lib/agents.mjs";
 import { installSkill } from "./lib/skills.mjs";
 import { verifyServer } from "./lib/verify.mjs";
 import { parseArgs, resolveServers } from "./lib/cli.mjs";
@@ -54,6 +55,19 @@ function refreshRegistrations(server, agents) {
   }
 }
 
+/**
+ * Rename deprecated env keys in this server's registrations. A former name keeps working at
+ * runtime, so nothing forces the edit — which is why the doctor warns and this does it. Values are
+ * moved, never read for display; a canonical key that is already set wins and the old one goes.
+ */
+function migrateEnvNames(server, agents) {
+  for (const agent of agents) {
+    for (const { name, renamed } of renameEnvKeys(agent, server.key, (keys) => deprecatedEnvInUse(server, keys))) {
+      ok(`${agent.name}: ${name} env renamed: ${renamed.map((r) => `${r.legacy} → ${r.canonical}`).join(", ")}`);
+    }
+  }
+}
+
 async function main() {
   banner("MCP Update");
   const agents = detectAgents();
@@ -72,6 +86,7 @@ async function main() {
       ok("Rebuilt");
 
       refreshRegistrations(server, agents);
+      migrateEnvNames(server, agents);
       installSkill(server, agents);
 
       const env = existingEnv(agents, server.key);
