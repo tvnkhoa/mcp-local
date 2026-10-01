@@ -61,7 +61,7 @@ and a concrete fix.
 ## Output
 
 `pass` or `fail`, followed by findings tagged `high|medium|low`, each with a file:line and a fix.
-For a SQL-construction-heavy diff, also run the `db-parameterization-audit` skill.
+For a SQL-construction-heavy diff, also run the `db-tool-review` skill (Part 1).
 
 ## Authoritative reference
 

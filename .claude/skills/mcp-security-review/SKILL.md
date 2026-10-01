@@ -1,6 +1,6 @@
 ---
 name: mcp-security-review
-description: "Pre-merge security review of a change to any of this workspace's five MCP servers or shared packages: read-only defaults and env-flag write gates, declared guards, preview/apply/rollback with HMAC approval, prod/allowlist scoping, input validation, secrets and logging, error leakage, and the guard/contract gates that must stay green. Use before merging a server or packages/ diff that adds a tool, touches a gate, a guard, config/env, SQL, file paths, or an upstream client. It is the umbrella review — it hands SQL-construction detail to db-parameterization-audit, bounds to db-query-budgeting, hints to mcp-tool-annotations and host config to mcp-host-integration-security."
+description: "Pre-merge security review of a change to any of this workspace's five MCP servers or shared packages: read-only defaults and env-flag write gates, declared guards, preview/apply/rollback with HMAC approval, prod/allowlist scoping, input validation, secrets and logging, error leakage, and the guard/contract gates that must stay green. Use before merging a server or packages/ diff that adds a tool, touches a gate, a guard, config/env, SQL, file paths, or an upstream client. It is the umbrella review — it hands SQL-construction and bounds detail to db-tool-review, hints to mcp-tool-annotations and host config to mcp-host-integration-security."
 ---
 
 # MCP Security Review
@@ -30,7 +30,7 @@ area the diff touches.
    postgres writes need a `WHERE`; the `mcp_ops` schema belongs to the server and nothing may write to it.
 4. **Input.** zod `.strict()` before business logic; every bound has a max; file paths go through
    the allowlist (`CODEBASE_INDEX_ALLOWED_ROOTS`, exact `repoPath`); environment/catalog names are
-   checked against `*_ALLOWED_*`. SQL → `db-parameterization-audit`.
+   checked against `*_ALLOWED_*`. SQL and bounds → `db-tool-review`.
 5. **Secrets.** Only `src/config/` reads `process.env` (`guard:deps` `env/direct-access`). Nothing
    secret in a response, `describeConfig`, `health_check`, a log field, a contract snapshot, or a
    skill. No secret has a `default` in `envSpecs/`.

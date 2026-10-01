@@ -21,21 +21,25 @@ runs `build:packages`, then `npm install` / build / typecheck / test / smoke in 
 
 ## 2. Register (order matters)
 
-`servers.ts` calls `toolsFor(key)`, which **throws at import** when `generated/toolLists.ts` has no
-entry; that list is generated from `contracts/<key>.json`; and `contract-snapshot.mjs` only snapshots
-servers already in `SERVERS`. So bootstrap the first snapshot like this:
+`contract-snapshot.mjs` only snapshots servers already in `SERVERS`, and the tool list is generated
+from `contracts/<key>.json` — so register first, then snapshot, then generate:
 
 1. `packages/manifest/src/envSpecs/<camel>.ts` — the env contract (fields below).
-2. Append the entry to `SERVERS` in `packages/manifest/src/servers.ts` with a **temporary**
-   `tools: ["health_check"]` instead of `toolsFor("<key>")`, then `npm run build:packages`.
+2. Append the entry to `SERVERS` in `packages/manifest/src/servers.ts` with
+   `tools: toolsFor("<key>")`, then `npm run build:packages`.
 3. `npm run contracts:update -- --server <key>` → `contracts/<key>.json`.
-4. `npm run generate:tools`, switch the entry to `tools: toolsFor("<key>")`, then `npm run generate:all`
-   (tool lists → `.env.example` → README generated blocks; it rebuilds packages).
+4. `npm run generate:all` (tool lists → rebuilds packages → `.env.example` → README generated blocks).
 5. `npm run generate:check && npm run contracts:check`.
+
+Between steps 2 and 4, `toolsFor("<key>")` is `[]`. It no longer throws at import, which is what
+lets the snapshotter load the manifest, and the empty list cannot ship: `contracts:check` reports
+`MISSING` / `NOTOOLS`, `generate:docs` (so `generate:check`) refuses, `mcp:doctor` fails its `tools`
+check, the skill renderer refuses (so `mcp:install` installs no skill), and the manifest test
+`no registered server ships without a generated tool list` fails.
 
 > "Snapshot, then register" fails with `No server matched` because the snapshotter reads the
 > manifest. The new-server "Next" block, `templates/server/README.md` and
-> `docs/servers/server-development.md` §2 all carry the bootstrap above.
+> `docs/servers/server-development.md` §2 all carry the order above.
 
 Entry shape (`ServerDescriptor`, `packages/manifest/src/types.ts`): `key`, `displayName`, `dir`,
 `entry: "dist/index.js"`, `tagline`, `build: { install, guards: [] }` (guards = extra npm scripts

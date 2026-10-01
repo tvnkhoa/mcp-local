@@ -68,8 +68,8 @@ Prove that an incremental or dirty run leaves the graph equal to a full run on t
 This is a measurement with a ready/blocked verdict; the whole release gate is
 `index-release-checklist`.
 
-**No wired harness does this.** `scripts/test/` has none, and `test-orphan-edges.mjs` is unwired and
-points at a hard-coded external path. So the procedure runs through MCP tools against a live index.
+**No wired harness does this.** `scripts/test/` has none, so the procedure runs through MCP tools
+against a live index.
 Use `repoId: "codebase-index-mcp"` and the exact `repoPath` from `list_repositories`.
 
 Index runs have been reproducible since MCP-ISSUE-032 closed, so two full runs on the same build

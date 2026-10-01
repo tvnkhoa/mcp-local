@@ -1,6 +1,6 @@
 ---
 name: tree-sitter-extraction
-description: "Change what codebase-index-mcp extracts from source: add or fix a language lane, a symbol kind, or an edge (CALLS, IMPORTS, TYPE_REF, PROPERTY_REF/WRITE, IMPLEMENTS, EXTENDS, PUBLISHES/CONSUMES) in src/services/extractors/. Use when editing treeSitterExtractor.ts, a <language>Extractor.ts, csharp*/js* internals, extractorPrimitives.ts, or the worker pool, or when upgrading a tree-sitter grammar. Not for edge resolution after extraction (index-unresolved-symbol-policy) or run bookkeeping (index-metadata-governance)."
+description: "Change what codebase-index-mcp extracts from source: add or fix a language lane, a symbol kind, or an edge (CALLS, IMPORTS, TYPE_REF, PROPERTY_REF/WRITE, IMPLEMENTS, EXTENDS, PUBLISHES/CONSUMES) in src/services/extractors/. Use when editing treeSitterExtractor.ts, a <language>Extractor.ts, csharp*/js* internals, extractorPrimitives.ts, or the worker pool, or when upgrading a tree-sitter grammar. Not for edge resolution after extraction or run bookkeeping (index-run-bookkeeping)."
 ---
 
 # Tree-sitter Extraction
@@ -39,7 +39,7 @@ skipped as `unknown_extension`.
    Guarded by `npm run test:node-identity`.
 3. **Emit an unresolved target as a prefixed token; never drop it.** The prefixes are `callee:`,
    `import:`, `type:`, `property:`, `iface:`, `nuget:`. The `services/graph/edgeResolver*.ts`
-   modules resolve them after every file has been seen. See `index-unresolved-symbol-policy`.
+   modules resolve them after every file has been seen. See `index-run-bookkeeping` (Part 2).
 4. **Parse in bounded steps.** `TREE_SITTER_MAX_BUFFER` is 32 MiB: a larger file is skipped and
    yields no symbols. `bufferSize` is adaptive (this fixed the 32 KB native-buffer crash noted in
    `treeSitterExtractor.ts`). A parse
@@ -70,9 +70,7 @@ npm run test:node-identity && npm run test:string-literals && npm run test:bus-e
 
 - Add a regression harness as `scripts/test/test-<name>.mjs` **and** a `test:<name>` script.
   `scripts/run-tests.mjs` discovers harnesses from `package.json`, so a harness with no script never
-  runs. These files in `scripts/test/` are unwired today: `test-extractor`, `test-csharp-parser`,
-  `test-markdown-extraction`, `test-property-edges(-real)`, `test-orphan-edges`,
-  `test-route-map-roundtrip`, `test-new-tools`, `test-index-debug`. Do not count them as coverage.
+  runs.
 - If the change alters output for files that did not change, bump `INDEX_VERSION`
   (`indexPipeline.ts`). Otherwise incremental runs fast-skip and never pick up the new extraction.
 - After a grammar or extractor upgrade, follow *After a parser or indexer upgrade* in

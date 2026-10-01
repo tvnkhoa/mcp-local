@@ -1,6 +1,6 @@
 ---
 name: mcp-host-integration-security
-description: "Review how this workspace's MCP servers are wired into a host agent (Claude Code ~/.claude.json, VS Code/Copilot) — where credentials live, which write/exec flags and allowlists are set in the registered env, TLS settings, the installer/doctor/uninstall scripts, and the gitignored rendered skills. Use when changing scripts/install-mcp.mjs, mcp-doctor, uninstall/update, scripts/lib/agents.mjs or skills.mjs, adding an auth/secret/allowlist env var to packages/manifest/src/envSpecs, registering a server for a new environment, or auditing a machine's MCP config. Not for reviewing tool code inside a server (mcp-security-review) or SQL construction (db-parameterization-audit)."
+description: "Review how this workspace's MCP servers are wired into a host agent (Claude Code ~/.claude.json, VS Code/Copilot) — where credentials live, which write/exec flags and allowlists are set in the registered env, TLS settings, the installer/doctor/uninstall scripts, and the gitignored rendered skills. Use when changing scripts/install-mcp.mjs, mcp-doctor, uninstall/update, scripts/lib/agents.mjs or skills.mjs, adding an auth/secret/allowlist env var to packages/manifest/src/envSpecs, registering a server for a new environment, or auditing a machine's MCP config. Not for reviewing tool code inside a server (mcp-security-review) or SQL construction or query bounds (db-tool-review)."
 ---
 
 # MCP Host Integration Security

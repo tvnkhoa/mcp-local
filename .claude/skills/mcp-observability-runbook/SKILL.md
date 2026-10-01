@@ -46,7 +46,7 @@ per-run metadata (`health_check` surfaces the latest).
 | `ERR_MODULE_NOT_FOUND` on `@mcp/*` | `npm run build:packages` |
 | Builds, but old behaviour / script import fails | stale `dist/` — `tsc` does not prune; `rm -rf dist && npm run build` in that server |
 | A response carries `internal_error` | find the matching stderr error line (event `tool_threw` or `dispatch_failed`) by its `requestId`; if the caller's input caused it, it should not be `internal_error` (see `mcp-error-taxonomy`) |
-| Slow / timeouts | check the payload's `elapsedMs` and the server's `*_TIMEOUT_MS` bounds (`db-query-budgeting`) |
+| Slow / timeouts | check the payload's `elapsedMs` and the server's `*_TIMEOUT_MS` bounds (`db-tool-review`, Part 2) |
 | codebase-index answers look stale | `health_check(repoId)` → re-index flow in `.claude/rules/mcp-hard-mode.md` |
 | Behaviour changed after a parser/indexer upgrade | the full re-index + slash-style check in `mcp-hard-mode.md` |
 
