@@ -27,7 +27,7 @@ import { issueApprovalToken, verifyApprovalToken } from "../../services/write/ap
 import { recordAudit } from "../../services/write/auditLog.js";
 import { assertDdlEnabled, effectiveTimeouts, requireMigrationsDir, type DdlConfig } from "../../services/ddl/ddlConfig.js";
 import { loadMigrations, nextVersion, writeMigrationFiles, type LoadedMigrations } from "../../services/ddl/ddlFiles.js";
-import { deriveState, ensureHistory, readHistory } from "../../services/ddl/ddlHistory.js";
+import { ledgerFor } from "../../services/ddl/ddlLedger.js";
 import { computeStatus, planDigest, type DdlPlan, type PlanRequest } from "../../services/ddl/ddlPlanner.js";
 
 const EF_HISTORY_WARNING =
@@ -46,17 +46,14 @@ export async function handleDdlStatus(
   const env = connections.getEnvironment(args.environment);
   const pool = connections.getPool(args.environment);
 
+  const ledger = ledgerFor(config);
   const loaded: LoadedMigrations =
-    config.migrationsDir === "" ? { migrations: [], ignoredFiles: [], warnings: [] } : await loadMigrations(config.migrationsDir);
-  const [rows, tables] = await Promise.all([
-    readHistory(pool),
-    pool.query<{ ledger: boolean; ef: boolean }>(
-      `select to_regclass('mcp_ops.ddl_history') is not null as ledger,
-              to_regclass('public."__EFMigrationsHistory"') is not null as ef`
-    )
+    config.migrationsDir === "" ? { migrations: [], ignoredFiles: [], warnings: [] } : await loadMigrations(config.migrationsDir, ledger.format);
+  const [read, tables] = await Promise.all([
+    ledger.read(pool),
+    pool.query<{ ef: boolean }>(`select to_regclass('public."__EFMigrationsHistory"') is not null as ef`)
   ]);
-  const state = deriveState(rows);
-  const status = computeStatus(loaded.migrations, state);
+  const status = computeStatus(loaded.migrations, read.state);
   const efHistoryTablePresent = tables.rows[0]?.ef === true;
 
   const warnings = [...loaded.warnings];
@@ -66,24 +63,29 @@ export async function handleDdlStatus(
   if (efHistoryTablePresent) {
     warnings.push(EF_HISTORY_WARNING);
   }
+  if (ledger.external && !read.present) {
+    warnings.push(`The external ledger ${ledger.label} does not exist here yet. ddl_apply refuses until the repo's own runner creates it.`);
+  }
 
   const summary = {
     applied: status.applied.length,
     pending: status.pending.length,
     checksumMismatch: status.checksumMismatch.length,
+    renamed: status.renamed.length,
     missingFiles: status.missingFiles.length,
     outOfOrder: status.outOfOrder.length,
     inlineApplied: status.inlineApplied.length
   };
 
   if (profile === "nano") {
-    return asText({ environment: env.name, summary, historyRows: rows.length }, profile);
+    return asText({ environment: env.name, ledger: ledger.label, summary, historyRows: read.rowCount }, profile);
   }
   return asText(
     {
       environment: env.name,
+      ledger: ledger.label,
       migrationsDirConfigured: config.migrationsDir !== "",
-      historyTablePresent: tables.rows[0]?.ledger === true,
+      historyTablePresent: read.present,
       efHistoryTablePresent,
       summary,
       ...status,
@@ -112,7 +114,7 @@ function withDirective(sql: string, noTransaction: boolean): string {
 
 /** Validate one script for `ddl_create`, failing with the script's role in the message. */
 function checkScript(role: "up" | "down", sql: string, config: DdlConfig): { risks: RiskFinding[]; mode: string; statementCount: number; warnings: string[] } {
-  const validated = validateDdlScript(sql);
+  const validated = validateDdlScript(sql, { ownerRoles: config.ownerRoles ?? [] });
   if (!validated.ok) {
     throw new PolicyViolationError(validated.error.code, `${role}: ${validated.error.message}`);
   }
@@ -140,6 +142,12 @@ export async function handleDdlCreate(
   config: DdlConfig
 ): Promise<CallToolResult> {
   assertDdlEnabled(config);
+  if (config.externalLedger !== undefined) {
+    throw new PolicyViolationError(
+      "DDL_CREATE_UNSUPPORTED",
+      "ddl_create writes V<timestamp>__<name>.up.sql files. With POSTGRES_DDL_EXTERNAL_LEDGER the directory is the repo's own, in its NNNN-<name>.sql layout: add the file there as the repo does, then ddl_preview it."
+    );
+  }
   const dir = requireMigrationsDir(config);
   const profile = args.profile ?? "compact";
   const noTransaction = args.noTransaction === true;
@@ -255,8 +263,11 @@ export async function handleDdlPreview(
   const request = toRequest(args);
   const env = connections.getEnvironment(args.environment, true); // ENVIRONMENT_READ_ONLY on prod
   if (request.mode === "inline") {
+    if (config.externalLedger !== undefined) {
+      throw new PolicyViolationError("DDL_INLINE_UNSUPPORTED", "Inline SQL is not accepted with an external ledger, which records files only. Add the file to the migrations directory.");
+    }
     // Refuse a bad script before any database work, with the guardrail's own code.
-    const validated = validateDdlScript(request.sql, { noTransaction: request.noTransaction });
+    const validated = validateDdlScript(request.sql, { noTransaction: request.noTransaction, ownerRoles: config.ownerRoles ?? [] });
     if (!validated.ok) {
       throw new PolicyViolationError(validated.error.code, validated.error.message);
     }
@@ -345,7 +356,7 @@ export async function handleDdlDryRun(
     const env = connections.getEnvironment(record.environment, true);
     const result = await withDdlSession(env.poolConfig, sessionTimeouts(config, record.plan), async (client, session) => {
       const fresh = await replanForExecution(client, record, config);
-      return dryRunPlan(client, fresh.plan, session);
+      return dryRunPlan(client, fresh.plan, session, config);
     });
     store.recordDryRun(record.previewId, result);
     const payload = {
@@ -392,11 +403,19 @@ export async function handleDdlApply(
     let outcome;
     try {
       outcome = await withDdlSession(env.poolConfig, sessionTimeouts(config, record.plan), async (client, session) => {
-        await ensureHistory(client);
+        const ledger = ledgerFor(config);
+        await ledger.prepare(client);
         const fresh = await replanForExecution(client, record, config);
         // From here on the ledger moves, so the preview can never be applied again, whatever happens.
         store.consume(record.previewId);
-        const applied = await applyPlan(client, fresh.plan, { environment: env.name, previewId: record.previewId, session: sessionTimeouts(config, record.plan), pid: session.pid });
+        const applied = await applyPlan(client, fresh.plan, {
+          environment: env.name,
+          previewId: record.previewId,
+          session: sessionTimeouts(config, record.plan),
+          pid: session.pid,
+          ledger,
+          config
+        });
         return { result: applied, pre: fresh.snapshot, post: await captureSchema(client) };
       });
     } catch (error) {

@@ -70,6 +70,8 @@ export interface AppliedVersion {
   checksum: string;
   kind: "file" | "adopted";
   historyId: number;
+  /** External ledger only: the file name the row records, which is that ledger's key. */
+  file?: string;
 }
 
 export interface HistoryState {

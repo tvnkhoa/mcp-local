@@ -22,6 +22,10 @@
  *  - **No write may reach `mcp_ops`** except the ledger insert. The tuple counters are read before
  *    a migration's statements and again after them, before its ledger row is written. A default
  *    expression, an index expression or a trigger cannot write there unnoticed.
+ *  - **The ledger is whichever one is configured** (`ddlLedger.ts`): `mcp_ops.ddl_history`, or a
+ *    repo's own table. Its row is written in the migration's transaction either way.
+ *  - **POSTGRES_DDL_SESSION_SETTINGS are set before each migration's statements**, transaction-
+ *    local, through `set_config` with bound values. They are never text in the migration.
  */
 
 import os from "node:os";
@@ -32,10 +36,12 @@ import { INTERNAL_SCHEMAS } from "../../middleware/internalSchemas.js";
 import { PolicyViolationError } from "../../middleware/errors.js";
 import { assertNoInternalWrites, internalState } from "../internalWriteGuard.js";
 import { captureSchema, type SchemaSnapshot } from "../migration/schemaSnapshot.js";
-import { requireMigrationsDir, type DdlConfig } from "./ddlConfig.js";
+import type { OwnerRoleAttributes } from "../../middleware/ddlRiskLint.js";
+import { quoteQualified, requireMigrationsDir, type DdlConfig } from "./ddlConfig.js";
 import { loadMigrations } from "./ddlFiles.js";
 import { assertSessionPinned, tryTakeMigrationLock } from "../concurrency/migrationLock.js";
-import { DDL_LOCK_KEY, deriveState, insertHistory, readHistory, type HistoryState, type Queryable } from "./ddlHistory.js";
+import { DDL_LOCK_KEY, type HistoryState, type Queryable } from "./ddlHistory.js";
+import { ledgerFor, type DdlLedger } from "./ddlLedger.js";
 import { buildPlan, planDigest, type DdlPlan, type PlanRequest, type PlanStep } from "./ddlPlanner.js";
 import type { DryRunResult, DryRunStepResult, StepError } from "./ddlPreviewStore.js";
 
@@ -70,10 +76,35 @@ export async function planAgainst(db: Queryable, request: PlanRequest, config: D
   }
 }
 
+/** `pg_roles` attributes for the allowlisted owner roles. A role absent from the map does not exist. */
+async function ownerRoleAttributes(db: Queryable, roles: readonly string[]): Promise<Map<string, OwnerRoleAttributes>> {
+  if (roles.length === 0) {
+    return new Map();
+  }
+  const result = await db.query<{ rolname: string; rolsuper: boolean; rolcreaterole: boolean; rolbypassrls: boolean; rolreplication: boolean }>(
+    "select rolname, rolsuper, rolcreaterole, rolbypassrls, rolreplication from pg_roles where rolname = any($1::text[])",
+    [roles]
+  );
+  return new Map(
+    result.rows.map((r) => [r.rolname, { superuser: r.rolsuper, createRole: r.rolcreaterole, bypassRls: r.rolbypassrls, replication: r.rolreplication }])
+  );
+}
+
 async function planAgainstUnguarded(db: Queryable, request: PlanRequest, config: DdlConfig): Promise<LivePlan> {
-  const loaded = request.mode === "file" ? await loadMigrations(requireMigrationsDir(config)) : undefined;
+  const ledger = ledgerFor(config);
+  const loaded = request.mode === "file" ? await loadMigrations(requireMigrationsDir(config), ledger.format) : undefined;
   const snapshot = await captureSchema(db);
-  const state = deriveState(await readHistory(db));
+  const read = await ledger.read(db);
+  const state = read.state;
+  const sentinel = config.adoptionSentinel;
+  const adoption =
+    sentinel === undefined
+      ? undefined
+      : {
+          sentinel: `${sentinel.schema}.${sentinel.name}`,
+          sentinelPresent: (await db.query<{ p: boolean }>("select to_regclass($1) is not null as p", [quoteQualified(sentinel)])).rows[0]?.p === true,
+          ledgerRowCount: read.rowCount
+        };
   const extra = await db.query<{ ef: boolean }>(`select to_regclass('public."__EFMigrationsHistory"') is not null as ef`);
   const estimates = await db.query<{ name: string; rows: number }>(
     `select n.nspname || '.' || c.relname as name, c.reltuples::float8 as rows
@@ -87,7 +118,9 @@ async function planAgainstUnguarded(db: Queryable, request: PlanRequest, config:
     state,
     request,
     config,
+    ...(adoption === undefined ? {} : { adoption }),
     lint: {
+      ownerRoles: await ownerRoleAttributes(db, config.ownerRoles ?? []),
       existingTables: new Set(snapshot.tables.map((t) => `${t.schema}.${t.table}`)),
       // reltuples is -1 for a table never vacuumed or analyzed: "unknown", not "empty".
       rowEstimate: (table) => {
@@ -210,12 +243,18 @@ async function runStatement(client: pg.Client, text: string): Promise<void> {
   await client.query({ text, queryMode: "extended" } as QueryConfig);
 }
 
-async function setTimeouts(client: pg.Client, step: PlanStep, local: boolean): Promise<void> {
+async function setTimeouts(client: pg.Client, step: PlanStep, local: boolean, config: DdlConfig): Promise<void> {
   await client.query("select set_config('lock_timeout', $1, $3), set_config('statement_timeout', $2, $3)", [
     String(step.timeouts.lockTimeoutMs),
     String(step.timeouts.statementTimeoutMs),
     local
   ]);
+  // A repo's migrations may read settings its runner provides (wec.aria's aria.expected_market).
+  // The session is this lane's own and closes after the plan, so a session-level value in the
+  // non-transactional path does not outlive it.
+  for (const setting of config.sessionSettings ?? []) {
+    await client.query("select set_config($1, $2, $3)", [setting.name, setting.value, local]);
+  }
 }
 
 function stringProp(value: unknown, key: string): string | undefined {
@@ -283,7 +322,7 @@ async function invalidIndexes(client: pg.Client): Promise<Set<string>> {
  * Non-transactional migrations cannot run inside a transaction at all, so they are skipped and
  * reported as skipped, never as passed.
  */
-export async function dryRunPlan(client: pg.Client, plan: DdlPlan, session: { pid: number }): Promise<DryRunResult> {
+export async function dryRunPlan(client: pg.Client, plan: DdlPlan, session: { pid: number }, config: DdlConfig): Promise<DryRunResult> {
   const steps: DryRunStepResult[] = [];
   let error: StepError | undefined;
   let skippedBefore = false;
@@ -310,7 +349,7 @@ export async function dryRunPlan(client: pg.Client, plan: DdlPlan, session: { pi
       }
       const started = Date.now();
       await client.query("savepoint ddl_step");
-      await setTimeouts(client, step, true);
+      await setTimeouts(client, step, true, config);
       const baseline = await internalState(client);
       let failure = await runStatements(client, step);
       if (failure === undefined) {
@@ -378,21 +417,28 @@ function ledgerRow(plan: DdlPlan, step: PlanStep, meta: { environment: string; p
   };
 }
 
-async function recordFailure(client: pg.Client, plan: DdlPlan, step: PlanStep, meta: { environment: string; previewId: string }, error: StepError, durationMs: number): Promise<void> {
+async function recordFailure(client: pg.Client, plan: DdlPlan, step: PlanStep, meta: ApplyMeta, error: StepError, durationMs: number): Promise<void> {
   // Outside the rolled-back transaction, so the attempt is on record. Best effort: losing the
   // failed row must not hide the failure itself from the caller.
-  await insertHistory(
-    client,
-    { ...ledgerRow(plan, step, meta), status: "failed", failedStatement: error.statementIndex, errorSqlstate: error.sqlState ?? null, durationMs },
-    HOST
-  ).catch(() => undefined);
+  await meta.ledger
+    .recordFailure(
+      client,
+      { ...ledgerRow(plan, step, meta), status: "failed", failedStatement: error.statementIndex, errorSqlstate: error.sqlState ?? null, durationMs },
+      HOST
+    )
+    .catch(() => undefined);
 }
 
-export async function applyPlan(
-  client: pg.Client,
-  plan: DdlPlan,
-  meta: { environment: string; previewId: string; session: SessionTimeouts; pid: number }
-): Promise<ApplyResult> {
+export interface ApplyMeta {
+  environment: string;
+  previewId: string;
+  session: SessionTimeouts;
+  pid: number;
+  ledger: DdlLedger;
+  config: DdlConfig;
+}
+
+export async function applyPlan(client: pg.Client, plan: DdlPlan, meta: ApplyMeta): Promise<ApplyResult> {
   const steps: ApplyStepResult[] = [];
   let error: ApplyResult["error"];
 
@@ -414,12 +460,13 @@ export async function applyPlan(
     }
 
     if (step.action === "adopt") {
-      const historyId = await insertHistory(
+      const historyId = await meta.ledger.recordApplied(
         client,
         { ...ledgerRow(plan, step, meta), status: "applied", failedStatement: null, errorSqlstate: null, durationMs: 0 },
+        step.file,
         HOST
       );
-      steps.push({ ...base, status: "adopted", durationMs: 0, historyId });
+      steps.push({ ...base, status: "adopted", durationMs: 0, ...(historyId === undefined ? {} : { historyId }) });
       continue;
     }
 
@@ -430,15 +477,16 @@ export async function applyPlan(
       let failure: StepError | undefined;
       let historyId: number | undefined;
       try {
-        await setTimeouts(client, step, true);
+        await setTimeouts(client, step, true, meta.config);
         const baseline = await internalState(client);
         failure = await runStatements(client, step);
         if (failure === undefined) {
           // Before the ledger insert, which is the one write to mcp_ops that belongs here.
           await assertNoInternalWrites(client, baseline, "DDL_RESERVED_SCHEMA", INTERNAL_WRITE_MESSAGE);
-          historyId = await insertHistory(
+          historyId = await meta.ledger.recordApplied(
             client,
             { ...ledgerRow(plan, step, meta), status: "applied", failedStatement: null, errorSqlstate: null, durationMs: Date.now() - started },
+            step.file,
             HOST
           );
           await client.query("commit");
@@ -459,7 +507,7 @@ export async function applyPlan(
 
     // Non-transactional: one statement, session-level timeouts, no surrounding transaction.
     const invalidBefore = await invalidIndexes(client);
-    await setTimeouts(client, step, false);
+    await setTimeouts(client, step, false, meta.config);
     const failure = await runStatements(client, step);
     // Back to the session's own timeouts, not to the server default: RESET would mean "no
     // lock_timeout" for the post-apply snapshot that follows.
@@ -480,12 +528,13 @@ export async function applyPlan(
       steps.push({ ...base, status: "failed", durationMs: Date.now() - started });
       continue;
     }
-    const historyId = await insertHistory(
+    const historyId = await meta.ledger.recordApplied(
       client,
       { ...ledgerRow(plan, step, meta), status: "applied", failedStatement: null, errorSqlstate: null, durationMs: Date.now() - started },
+      step.file,
       HOST
     );
-    steps.push({ ...base, status: done, durationMs: Date.now() - started, historyId });
+    steps.push({ ...base, status: done, durationMs: Date.now() - started, ...(historyId === undefined ? {} : { historyId }) });
   }
 
   const succeeded = steps.filter((s) => s.status === "applied" || s.status === "adopted" || s.status === "reverted").length;

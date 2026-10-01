@@ -10,7 +10,7 @@ import { validateDdlScript } from "./ddlGuardrails.js";
 import { LARGE_TABLE_ROWS, lintDdl, type LintContext, type LintResult } from "./ddlRiskLint.js";
 
 function lint(sql: string, context?: LintContext, noTransaction = false): LintResult {
-  const validated = validateDdlScript(sql, { noTransaction });
+  const validated = validateDdlScript(sql, { noTransaction, ownerRoles: ["aria", "big"] });
   if (!validated.ok) {
     assert.fail(`guardrail refused: ${validated.error.code}: ${validated.error.message}`);
   }
@@ -124,6 +124,41 @@ test("SECURITY DEFINER and CREATE EXTENSION are high", () => {
   );
   assert.deepEqual(codes(lint("alter function f() security definer")), ["SECURITY_DEFINER:high"]);
   assert.deepEqual(codes(lint("create extension if not exists pg_trgm")), ["CREATE_EXTENSION:high"]);
+});
+
+test("GRANT, REVOKE, POLICY and turning row-level security off are PRIVILEGE_CHANGE", () => {
+  for (const sql of [
+    "grant execute on function f(int) to aria_review",
+    "revoke all on function f(int) from public",
+    "create policy p on orders for select using (true)",
+    "alter policy p on orders to reporting",
+    "drop policy if exists p on orders",
+    "alter table orders disable row level security",
+    "alter table orders no force row level security"
+  ]) {
+    assert.deepEqual(codes(lint(sql)), ["PRIVILEGE_CHANGE:high"], sql);
+  }
+  // Turning it ON narrows access; that needs no acknowledgement.
+  assert.deepEqual(codes(lint("alter table orders enable row level security")), []);
+  assert.deepEqual(codes(lint("alter table orders force row level security")), []);
+});
+
+const ROLES: LintContext = {
+  ownerRoles: new Map([
+    ["aria", { superuser: false, createRole: false, bypassRls: false, replication: false }],
+    ["big", { superuser: false, createRole: true, bypassRls: true, replication: false }]
+  ])
+};
+
+test("OWNER TO is PRIVILEGE_CHANGE, and blocked for a role that is missing or reaches past grants", () => {
+  assert.deepEqual(codes(lint("alter function f(int) owner to aria", ROLES)), ["PRIVILEGE_CHANGE:high"]);
+  const big = lint("alter function f(int) owner to big", ROLES);
+  assert.deepEqual(codes(big), ["PRIVILEGE_CHANGE:high", "OWNER_ROLE_PRIVILEGED:blocked"]);
+  assert.match(big.blocked[0]?.message ?? "", /CREATEROLE, BYPASSRLS/);
+  // Allowlisted, but not created in this database.
+  assert.deepEqual(codes(lint("alter function f(int) owner to aria", { ownerRoles: new Map() })), ["PRIVILEGE_CHANGE:high", "OWNER_ROLE_UNKNOWN:blocked"]);
+  // No database (ddl_create): the role cannot be checked, so only the acknowledgement remains.
+  assert.deepEqual(codes(lint("alter function f(int) owner to big")), ["PRIVILEGE_CHANGE:high"]);
 });
 
 test("ALTER TYPE … ADD VALUE is informational", () => {

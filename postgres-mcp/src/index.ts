@@ -21,13 +21,14 @@ import { asErrorPayload, createMcpServer, runServer } from "@mcp/sdk";
 
 import { ConnectionManager } from "./repositories/connectionManager.js";
 import { toWireError } from "./middleware/errors.js";
-import { type DdlConfig } from "./services/ddl/ddlConfig.js";
+import { parseDdlLaneSettings, type DdlConfig } from "./services/ddl/ddlConfig.js";
 import { DdlPreviewStore } from "./services/ddl/ddlPreviewStore.js";
 import { type MigrationConfig } from "./services/migration/efRunner.js";
 import { buildSchemaResources } from "./resources/schemaResources.js";
 import { buildTools, type QueryLimits } from "./tools/index.js";
 import {
   approvalSecretFromEnv,
+  ddlLaneSettingsFromEnv,
   ddlMigrationsDirFromEnv,
   dotnetProjectsFromEnv,
   migrationLockTimeoutFromEnv,
@@ -108,7 +109,8 @@ const ddlConfig: DdlConfig = {
   statementTimeoutMs: numberFromEnv("POSTGRES_DDL_STATEMENT_TIMEOUT_MS", 300_000),
   maxStatementTimeoutMs: numberFromEnv("POSTGRES_DDL_MAX_STATEMENT_TIMEOUT_MS", 3_600_000),
   previewTtlMs: numberFromEnv("POSTGRES_DDL_PREVIEW_TTL_MS", 3_600_000),
-  approvalSecret: APPROVAL_SECRET
+  approvalSecret: APPROVAL_SECRET,
+  ...parseDdlLaneSettings(ddlLaneSettingsFromEnv())
 };
 const ddlStore = new DdlPreviewStore();
 

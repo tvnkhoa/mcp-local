@@ -326,10 +326,12 @@ test("the env contract covers every server, and grew as S-35 intended", () => {
   // writes where the write lane writes.
   // 29 -> 30 with POSTGRES_MIGRATION_LOCK_TIMEOUT_MS (B-15.1): the EF lane's lock wait, where 0 is a
   // real value (off) rather than "unset".
+  // 30 -> 34 with external-ledger mode (ADR 0005 Decision 7): POSTGRES_DDL_EXTERNAL_LEDGER,
+  // _OWNER_ROLES, _SESSION_SETTINGS and _ADOPTION_SENTINEL, all optional and all failing closed.
   const counts = Object.fromEntries(SERVERS.map((s) => [s.key, s.env.length]));
   assert.deepEqual(counts, {
     "codebase-index": 41,
-    "postgres-mcp": 30,
+    "postgres-mcp": 34,
     "observe-mcp": 31,
     "bitbucket-mcp": 11,
     "sqlserver-mcp": 19

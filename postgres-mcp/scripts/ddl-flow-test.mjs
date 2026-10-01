@@ -185,7 +185,7 @@ async function main() {
       for (const args of [
         { name: "seed", up: "insert into orders values (1, 'x')" },
         { name: "sneak", up: "create table mcp_ops.x (a int)" },
-        { name: "half", up: "create table ok_t (a int)", down: "grant all on ok_t to public" },
+        { name: "half", up: "create table ok_t (a int)", down: "grant some_role to public" },
         { name: "oldie", up: "create table old_t (a int)", version: "20000101000000" }
       ]) {
         const r = await callRaw("ddl_create", args);

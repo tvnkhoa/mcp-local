@@ -155,7 +155,7 @@ test("risks are linted per step, and a table created in an earlier step is not e
 test("a blocked risk and a guardrail refusal stop the plan, naming the file", () => {
   const blocked = buildPlan({ files: files(migration("20261001000020", "drop schema s cascade;")), state: deriveState([]), request: { mode: "file", direction: "up" }, config: CONFIG });
   assert.equal(blocked.ok ? "" : blocked.error.code, "DDL_RISK_BLOCKED");
-  const refused = buildPlan({ files: files(migration("20261001000021", "grant all on t to public;")), state: deriveState([]), request: { mode: "file", direction: "up" }, config: CONFIG });
+  const refused = buildPlan({ files: files(migration("20261001000021", "grant some_role to public;")), state: deriveState([]), request: { mode: "file", direction: "up" }, config: CONFIG });
   assert.equal(refused.ok ? "" : refused.error.code, "DDL_STATEMENT_NOT_ALLOWED");
   assert.match(refused.ok ? "" : refused.error.message, /^V20261001000021__m21\.up\.sql: /);
 });

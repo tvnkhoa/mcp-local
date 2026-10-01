@@ -152,6 +152,34 @@ export const postgresEnv: readonly EnvField[] = [
   { name: "POSTGRES_DDL_STATEMENT_TIMEOUT_MS", required: false, codeDefault: "300000", section: "Raw-SQL DDL migrations (OFF unless enabled)", note: "Default statement_timeout per DDL statement — 5 minutes." },
   { name: "POSTGRES_DDL_MAX_STATEMENT_TIMEOUT_MS", required: false, codeDefault: "3600000", section: "Raw-SQL DDL migrations (OFF unless enabled)", note: "Ceiling for -- mcp:statement-timeout-ms (e.g. a long CREATE INDEX CONCURRENTLY) — 1 hour." },
   { name: "POSTGRES_DDL_PREVIEW_TTL_MS", required: false, codeDefault: "3600000", section: "Raw-SQL DDL migrations (OFF unless enabled)", note: "DDL-preview lifetime — 1 hour. Freshness at apply is checked by the drift guard, not this." },
+  {
+    name: "POSTGRES_DDL_EXTERNAL_LEDGER",
+    required: false,
+    kind: "string",
+    section: "Raw-SQL DDL migrations (OFF unless enabled)",
+    note: "[schema.]table of a repo's own (filename, checksum) ledger, e.g. public.schema_migration. Replaces mcp_ops.ddl_history; the directory then holds psql-style NNNN-name.sql files, forward-only, sha256 over raw bytes. ADR 0005 Decision 7."
+  },
+  {
+    name: "POSTGRES_DDL_OWNER_ROLES",
+    required: false,
+    kind: "string",
+    section: "Raw-SQL DDL migrations (OFF unless enabled)",
+    note: "Comma-separated roles ALTER … OWNER TO may name. Empty refuses every OWNER TO; a SUPERUSER/CREATEROLE/BYPASSRLS/REPLICATION role is refused even when listed."
+  },
+  {
+    name: "POSTGRES_DDL_SESSION_SETTINGS",
+    required: false,
+    kind: "string",
+    section: "Raw-SQL DDL migrations (OFF unless enabled)",
+    note: "Comma-separated prefix.name=value custom settings, set transaction-locally before every migration (e.g. aria.expected_market=AU). Core settings are refused."
+  },
+  {
+    name: "POSTGRES_DDL_ADOPTION_SENTINEL",
+    required: false,
+    kind: "string",
+    section: "Raw-SQL DDL migrations (OFF unless enabled)",
+    note: "[schema.]relation whose presence means the schema already exists. An up plan against an EMPTY ledger is refused while it exists (DDL_ADOPTION_REQUIRED)."
+  },
 
   // --- Node / libpq runtime -----------------------------------------------------
   // Neither is a postgres-mcp variable, and neither is read by this server's code. Both are set by

@@ -76,14 +76,27 @@ interface LineComment {
   start: number;
 }
 
+/**
+ * A psql backslash meta-command, from its `\` to the end of the line, as psql reads it. Only
+ * collected in psql mode; elsewhere a backslash is an ordinary punctuation token, which no
+ * statement can start with.
+ */
+interface MetaCommand {
+  text: string;
+  start: number;
+  /** A token came after the last `;`, so psql would run this in the middle of a statement. */
+  midStatement: boolean;
+}
+
 const IDENT_START = /[A-Za-z_\u0080-￿]/;
 const IDENT_PART = /[A-Za-z0-9_$\u0080-￿]/;
 /** A dollar-quote tag: like an identifier, but without `$`. */
 const DOLLAR_TAG = /^\$(?:[A-Za-z_\u0080-￿][A-Za-z0-9_\u0080-￿]*)?\$/;
 
-function tokenize(sql: string): DdlResult<{ tokens: Token[]; lineComments: LineComment[] }> {
+function tokenize(sql: string, psql = false): DdlResult<{ tokens: Token[]; lineComments: LineComment[]; metaCommands: MetaCommand[] }> {
   const tokens: Token[] = [];
   const lineComments: LineComment[] = [];
+  const metaCommands: MetaCommand[] = [];
   let i = 0;
   const n = sql.length;
 
@@ -93,6 +106,19 @@ function tokenize(sql: string): DdlResult<{ tokens: Token[]; lineComments: LineC
 
     if (/\s/.test(c)) {
       i += 1;
+      continue;
+    }
+
+    // psql reads a backslash outside a literal or comment as a meta-command that runs to the end
+    // of the line, wherever on the line it sits. Only reached at a token boundary, so a backslash
+    // inside a string, a quoted identifier or a dollar-quoted body never gets here.
+    if (psql && c === "\\") {
+      const eol = sql.indexOf("\n", i);
+      const end = eol === -1 ? n : eol;
+      const last = tokens[tokens.length - 1];
+      const midStatement = last !== undefined && !(last.type === "punct" && last.value === ";");
+      metaCommands.push({ text: sql.slice(i, end).trim(), start: i, midStatement });
+      i = end;
       continue;
     }
 
@@ -223,7 +249,7 @@ function tokenize(sql: string): DdlResult<{ tokens: Token[]; lineComments: LineC
     i += 1;
   }
 
-  return { ok: true, tokens, lineComments };
+  return { ok: true, tokens, lineComments, metaCommands };
 }
 
 /** A quoted string from the opening `'` at `open`. `escapes`: backslash escapes too (E'…'). */
@@ -304,7 +330,7 @@ function readDirectives(lineComments: LineComment[], firstTokenStart: number): D
 
 // ── classification ───────────────────────────────────────────────────────────
 
-export type DdlVerb = "create" | "alter" | "drop" | "comment";
+export type DdlVerb = "create" | "alter" | "drop" | "comment" | "grant" | "revoke";
 
 export type DdlObjectKind =
   | "table"
@@ -319,7 +345,10 @@ export type DdlObjectKind =
   | "procedure"
   | "trigger"
   | "extension"
-  | "comment";
+  | "policy"
+  | "comment"
+  /** GRANT / REVOKE of privileges ON an object. Role membership is refused. */
+  | "privilege";
 
 export interface DdlStatement {
   index: number;
@@ -333,10 +362,34 @@ export interface DdlStatement {
 }
 
 const KINDS_BY_VERB: Record<"create" | "alter" | "drop", readonly DdlObjectKind[]> = {
-  create: ["table", "index", "view", "materialized view", "sequence", "type", "domain", "schema", "function", "procedure", "trigger", "extension"],
-  alter: ["table", "index", "view", "materialized view", "sequence", "type", "domain", "schema", "function", "procedure", "trigger"],
-  drop: ["table", "index", "view", "materialized view", "sequence", "type", "domain", "schema", "function", "procedure", "trigger"]
+  create: ["table", "index", "view", "materialized view", "sequence", "type", "domain", "schema", "function", "procedure", "trigger", "extension", "policy"],
+  alter: ["table", "index", "view", "materialized view", "sequence", "type", "domain", "schema", "function", "procedure", "trigger", "policy"],
+  drop: ["table", "index", "view", "materialized view", "sequence", "type", "domain", "schema", "function", "procedure", "trigger", "policy"]
 };
+
+/** What `ALTER … OWNER TO` may be applied to. Ownership of anything else stays out of the lane. */
+const OWNER_KINDS: readonly DdlObjectKind[] = ["table", "view", "materialized view", "sequence", "type", "domain", "schema", "function", "procedure"];
+
+/**
+ * Object classes a GRANT / REVOKE may NOT name after ON, each with a reason. What is left is
+ * TABLE, SEQUENCE, FUNCTION, PROCEDURE, ROUTINE and SCHEMA, or no class word, which is a table. `all` is `ALL TABLES IN SCHEMA`, which
+ * reaches objects the migration never names; `parameter` grants SET / ALTER SYSTEM on a server
+ * setting (PG15+).
+ */
+const REFUSED_GRANT_CLASSES: ReadonlyMap<string, string> = new Map([
+  ["all", "ALL … IN SCHEMA reaches every object in the schema, including ones the migration never names. Grant on each object."],
+  ["database", "Database-level privileges are not schema migrations."],
+  ["tablespace", "Tablespace privileges are not schema migrations."],
+  ["language", "Language privileges decide who may write untrusted code."],
+  ["parameter", "ON PARAMETER grants SET / ALTER SYSTEM on a server setting."],
+  ["foreign", "Foreign-data-wrapper and foreign-server privileges reach outside the database."],
+  ["large", "Large-object privileges are not schema migrations."],
+  ["type", "Grant on the table or function that uses the type instead."],
+  ["domain", "Grant on the table or function that uses the domain instead."]
+]);
+
+/** Role specifications that name whoever runs the migration, not a role the file chose. */
+const SESSION_ROLE_WORDS = new Set(["current_user", "session_user", "current_role"]);
 
 /** Verbs that are refused outright, grouped by the reason a migration may not use them. */
 const REFUSED_VERBS: ReadonlyArray<{ verbs: readonly string[]; reason: string }> = [
@@ -350,8 +403,8 @@ const REFUSED_VERBS: ReadonlyArray<{ verbs: readonly string[]; reason: string }>
     reason: "It runs code the guardrail cannot see into. For conditional DDL use IF [NOT] EXISTS."
   },
   {
-    verbs: ["grant", "revoke", "reassign", "security"],
-    reason: "Privilege and ownership management is outside the migration lane."
+    verbs: ["reassign", "security"],
+    reason: "Bulk ownership changes and security labels are outside the migration lane. GRANT / REVOKE on a named object and ALTER … OWNER TO an allowlisted role are accepted."
   },
   {
     verbs: ["set", "reset", "begin", "start", "commit", "end", "rollback", "abort", "savepoint", "release", "discard", "lock"],
@@ -406,6 +459,10 @@ function classify(tokens: Token[], index: number): DdlResult<{ verb: DdlVerb; ki
       : fail("DDL_STATEMENT_NOT_ALLOWED", `${where}: expected COMMENT ON.`);
   }
 
+  if (verb === "grant" || verb === "revoke") {
+    return { ok: true, verb, kind: "privilege" };
+  }
+
   if (verb !== "create" && verb !== "alter" && verb !== "drop") {
     const reason = refusedVerbReason(verb);
     return fail(
@@ -440,9 +497,11 @@ function classify(tokens: Token[], index: number): DdlResult<{ verb: DdlVerb; ki
     const extra =
       kindWord === "extension"
         ? " Upgrading or dropping an extension changes objects the migration never created."
-        : kindWord === "role" || kindWord === "user" || kindWord === "group" || kindWord === "default"
-          ? " Privilege management is outside the migration lane."
-          : "";
+        : kindWord === "role" || kindWord === "user" || kindWord === "group"
+          ? " Role management is outside the migration lane."
+          : kindWord === "default"
+            ? " ALTER DEFAULT PRIVILEGES changes the privileges of objects created later, by anyone; it is outside the migration lane."
+            : "";
     return fail(
       "DDL_STATEMENT_NOT_ALLOWED",
       `${where}: ${verb.toUpperCase()} ${(kindWord ?? "").toUpperCase()} is not allowed in a migration.${extra} Allowed: ${allowed.map((x) => x.toUpperCase()).join(", ")}.`
@@ -451,13 +510,110 @@ function classify(tokens: Token[], index: number): DdlResult<{ verb: DdlVerb; ki
   return { ok: true, verb, kind: kindWord as DdlObjectKind };
 }
 
+const hasTopLevelComma = (tokens: Token[]): boolean => {
+  let depth = 0;
+  for (const token of tokens) {
+    if (token.type === "punct" && token.value === "(") {
+      depth += 1;
+    } else if (token.type === "punct" && token.value === ")") {
+      depth = Math.max(0, depth - 1);
+    } else if (depth === 0 && token.type === "punct" && token.value === ",") {
+      return true;
+    }
+  }
+  return false;
+};
+
+/** A role name as Postgres resolves it: an unquoted word folds to lower case, a quoted one does not. */
+const roleName = (token: Token | undefined): string | undefined =>
+  token !== undefined && (token.type === "word" || token.type === "quoted") ? token.value : undefined;
+
+/**
+ * `ALTER <kind> … OWNER TO <role>`, as the statement's ONLY action and only to a role the operator
+ * listed. A SECURITY DEFINER function runs with its owner's privileges, so without this the owner
+ * would be whoever connected — typically a personal admin login.
+ */
+function checkOwnerTo(tokens: Token[], verb: DdlVerb, kind: DdlObjectKind, where: string, ownerRoles: readonly string[]): DdlError | undefined {
+  const refuse = (message: string): DdlError => ({ code: "DDL_STATEMENT_NOT_ALLOWED", message: `${where}: ${message}` });
+  const n = tokens.length;
+  const ownerAtEnd = n >= 3 && wordAt(tokens, n - 3) === "owner" && wordAt(tokens, n - 2) === "to";
+  const ownerCount = topLevelWords(tokens).filter((t, k, all) => t.word === "owner" && all[k + 1]?.word === "to" && all[k + 1]?.at === t.at + 1).length;
+  if (verb !== "alter" || !OWNER_KINDS.includes(kind)) {
+    return refuse(`OWNER TO is accepted only on ALTER ${OWNER_KINDS.map((k) => k.toUpperCase()).join(" / ")}.`);
+  }
+  if (!ownerAtEnd || ownerCount !== 1 || hasTopLevelComma(tokens)) {
+    return refuse("OWNER TO must be the statement's only action, at its end: ALTER … name OWNER TO role.");
+  }
+  const last = tokens[n - 1];
+  const role = roleName(last);
+  if (role === undefined || (last?.type === "word" && SESSION_ROLE_WORDS.has(role))) {
+    return refuse("OWNER TO must name a role. CURRENT_USER / SESSION_USER / CURRENT_ROLE would make the owner whoever runs the migration.");
+  }
+  if (!ownerRoles.includes(role)) {
+    return refuse(
+      ownerRoles.length === 0
+        ? `OWNER TO ${role} is refused: no owner role is allowlisted. An operator can allow it with POSTGRES_DDL_OWNER_ROLES.`
+        : `OWNER TO ${role} is refused: it is not in POSTGRES_DDL_OWNER_ROLES (${ownerRoles.join(", ")}).`
+    );
+  }
+  return undefined;
+}
+
+/**
+ * GRANT / REVOKE privileges ON a named object, to or from named roles or PUBLIC. Refused: role
+ * membership (no ON), `ALL … IN SCHEMA` and the non-schema object classes, WITH GRANT OPTION
+ * (it lets the grantee grant further), GRANTED BY, and the session-role words.
+ */
+function checkPrivilege(tokens: Token[], verb: "grant" | "revoke", where: string): DdlError | undefined {
+  const refuse = (message: string): DdlError => ({ code: "DDL_STATEMENT_NOT_ALLOWED", message: `${where}: ${message}` });
+  const top = topLevelWords(tokens);
+  const on = top.find((t) => t.word === "on");
+  if (on === undefined) {
+    return refuse(`${verb.toUpperCase()} without ON is role membership, which is outside the migration lane. Grant privileges ON an object instead.`);
+  }
+  const objectClass = wordAt(tokens, on.at + 1);
+  if (objectClass !== undefined && REFUSED_GRANT_CLASSES.has(objectClass)) {
+    return refuse(`${verb.toUpperCase()} … ON ${objectClass.toUpperCase()} is not allowed. ${REFUSED_GRANT_CLASSES.get(objectClass) ?? ""}`.trimEnd());
+  }
+
+  const keyword = verb === "grant" ? "to" : "from";
+  const granteesAt = top.find((t) => t.at > on.at && t.word === keyword);
+  if (granteesAt === undefined) {
+    return refuse(`expected ${verb.toUpperCase()} … ON … ${keyword.toUpperCase()} role.`);
+  }
+  const after = top.filter((t) => t.at > granteesAt.at).map((t) => t.word);
+  if (verb === "grant" && after.includes("with")) {
+    return refuse("WITH GRANT OPTION lets the grantee pass the privilege on, past anything a migration reviews.");
+  }
+  if (after.includes("granted")) {
+    return refuse("GRANTED BY records a different grantor than the role that ran the migration.");
+  }
+  const sessionRole = tokens.slice(granteesAt.at + 1).find((t) => t.type === "word" && SESSION_ROLE_WORDS.has(t.value));
+  if (sessionRole !== undefined) {
+    return refuse(`${sessionRole.value.toUpperCase()} names whoever runs the migration. Name the role.`);
+  }
+  return undefined;
+}
+
+export interface ShapeOptions {
+  /** Roles `ALTER … OWNER TO` may name (POSTGRES_DDL_OWNER_ROLES). Empty refuses every OWNER TO. */
+  ownerRoles?: readonly string[];
+}
+
 /** Checks that depend on the statement's shape beyond its first words. */
-function checkShape(tokens: Token[], verb: DdlVerb, kind: DdlObjectKind, index: number): DdlError | undefined {
+function checkShape(tokens: Token[], verb: DdlVerb, kind: DdlObjectKind, index: number, options: ShapeOptions = {}): DdlError | undefined {
   const where = `Statement ${String(index + 1)}`;
   const top = topLevelWords(tokens);
 
+  if (verb === "grant" || verb === "revoke") {
+    return checkPrivilege(tokens, verb, where);
+  }
+
   if (hasTopLevelSequence(tokens, ["owner", "to"])) {
-    return { code: "DDL_STATEMENT_NOT_ALLOWED", message: `${where}: OWNER TO is ownership management, outside the migration lane.` };
+    const ownerError = checkOwnerTo(tokens, verb, kind, where, options.ownerRoles ?? []);
+    if (ownerError !== undefined) {
+      return ownerError;
+    }
   }
 
   if (verb === "create" && kind === "table" && top.some((t) => t.word === "as")) {
@@ -587,22 +743,74 @@ export interface ValidatedDdl {
   warnings: string[];
 }
 
+export interface ValidateOptions extends ShapeOptions {
+  /** The inline form of the `-- mcp:no-transaction` directive. Either one turns it on. */
+  noTransaction?: boolean;
+  /**
+   * A file written for psql, as a repo's own runner applies it (POSTGRES_DDL_EXTERNAL_LEDGER):
+   * `\set ON_ERROR_STOP …` is dropped, any other meta-command is refused, and a BEGIN; … COMMIT;
+   * that wraps the whole file is dropped because the server opens that transaction itself.
+   */
+  psql?: boolean;
+}
+
+/** `\set ON_ERROR_STOP on`: the server already stops at the first error, so it changes nothing. */
+const ON_ERROR_STOP = /^\\set\s+ON_ERROR_STOP(?:\s+(?:on|1|true))?$/i;
+
+/** `begin` / `begin work` / `start transaction` with no isolation level or other option. */
+const isBareBegin = (group: Token[]): boolean => {
+  const w = group.every((t) => t.type === "word") ? group.map((t) => t.value).join(" ") : "";
+  return w === "begin" || w === "begin transaction" || w === "begin work" || w === "start transaction";
+};
+
+/** `commit` / `end`, optionally followed by WORK or TRANSACTION, and nothing else (no AND CHAIN). */
+const isBareCommit = (group: Token[]): boolean => {
+  const w = group.every((t) => t.type === "word") ? group.map((t) => t.value).join(" ") : "";
+  return /^(commit|end)( work| transaction)?$/.test(w);
+};
+
 /**
- * Validate one migration script (a file's text or an inline `sql` argument).
- *
- * `options.noTransaction` is the inline form of the `-- mcp:no-transaction` directive. Either one
- * turns non-transactional mode on.
+ * psql mode: refuse every meta-command but `\set ON_ERROR_STOP`, and drop a BEGIN / COMMIT pair
+ * that is exactly the file's first and last statement. Groups keep their original positions, so
+ * "Statement N" still counts from the top of the file.
  */
-export function validateDdlScript(sql: string, options: { noTransaction?: boolean } = {}): DdlResult<ValidatedDdl> {
+function unwrapPsql(metaCommands: readonly MetaCommand[], groups: Token[][], directives: DdlDirectives): DdlResult<{ kept: Array<{ index: number; group: Token[] }> }> {
+  for (const meta of metaCommands) {
+    if (!ON_ERROR_STOP.test(meta.text)) {
+      return fail(
+        "DDL_PSQL_META_COMMAND",
+        `psql meta-command '${meta.text.slice(0, 40)}' is not accepted. Only \\set ON_ERROR_STOP is, because the server already stops at the first error; anything else (\\i, \\c, \\gexec, …) changes what runs.`
+      );
+    }
+    if (meta.midStatement) {
+      return fail("DDL_PSQL_META_COMMAND", `'${meta.text}' sits inside a statement. Put it on its own line between statements.`);
+    }
+  }
+
+  const all = groups.map((group, index) => ({ index, group }));
+  const first = groups[0];
+  const last = groups[groups.length - 1];
+  const wrapped = groups.length >= 2 && first !== undefined && last !== undefined && isBareBegin(first) && isBareCommit(last);
+  if (!wrapped) {
+    return { ok: true, kept: all };
+  }
+  if (directives.noTransaction) {
+    return fail("DDL_INVALID_DIRECTIVE", "-- mcp:no-transaction contradicts the file's own BEGIN; … COMMIT;. Remove one of them.");
+  }
+  return { ok: true, kept: all.slice(1, -1) };
+}
+
+/** Validate one migration script (a file's text or an inline `sql` argument). */
+export function validateDdlScript(sql: string, options: ValidateOptions = {}): DdlResult<ValidatedDdl> {
   if (Buffer.byteLength(sql, "utf8") > MAX_DDL_SCRIPT_BYTES) {
     return fail("DDL_TOO_LARGE", `A migration may be at most ${String(MAX_DDL_SCRIPT_BYTES)} bytes.`);
   }
 
-  const lexed = tokenize(sql);
+  const lexed = tokenize(sql, options.psql === true);
   if (!lexed.ok) {
     return lexed;
   }
-  const { tokens, lineComments } = lexed;
+  const { tokens, lineComments, metaCommands } = lexed;
   if (tokens.length === 0) {
     return fail("DDL_EMPTY", "The migration contains no statements.");
   }
@@ -622,8 +830,20 @@ export function validateDdlScript(sql: string, options: { noTransaction?: boolea
     return fail("DDL_TOO_MANY_STATEMENTS", `A migration may hold at most ${String(MAX_DDL_STATEMENTS)} statements; this one has ${String(groups.length)}. Split it.`);
   }
 
+  let kept = groups.map((group, index) => ({ index, group }));
+  if (options.psql === true) {
+    const unwrapped = unwrapPsql(metaCommands, groups, directives);
+    if (!unwrapped.ok) {
+      return unwrapped;
+    }
+    kept = unwrapped.kept;
+    if (kept.length === 0) {
+      return fail("DDL_EMPTY", "The migration contains no statements inside its BEGIN; … COMMIT;.");
+    }
+  }
+
   const statements: DdlStatement[] = [];
-  for (const [index, group] of groups.entries()) {
+  for (const { index, group } of kept) {
     // The reserved-schema check reads identifiers, quoted or not — anywhere in the statement,
     // not just in the target position. Referring to the server's schema at all is refused:
     // there is no migration that legitimately needs to.
@@ -639,7 +859,7 @@ export function validateDdlScript(sql: string, options: { noTransaction?: boolea
     if (!classified.ok) {
       return classified;
     }
-    const shapeError = checkShape(group, classified.verb, classified.kind, index);
+    const shapeError = checkShape(group, classified.verb, classified.kind, index, options);
     if (shapeError !== undefined) {
       return { ok: false, error: shapeError };
     }

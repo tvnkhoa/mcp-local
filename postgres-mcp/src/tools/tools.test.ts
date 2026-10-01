@@ -356,7 +356,7 @@ test("with DDL on, ddl_create refuses before touching the filesystem", async () 
     [{ name: "sneak", up: "create table mcp_ops.x (a int)" }, "DDL_RESERVED_SCHEMA"],
     [{ name: "idx", up: "create index concurrently i on t (a)" }, "DDL_NEEDS_NO_TRANSACTION"],
     [{ name: "nuke", up: "drop schema s cascade" }, "DDL_RISK_BLOCKED"],
-    [{ name: "ok", up: "create table t (a int)", down: "grant all on t to public" }, "DDL_STATEMENT_NOT_ALLOWED"],
+    [{ name: "ok", up: "create table t (a int)", down: "grant some_role to public" }, "DDL_STATEMENT_NOT_ALLOWED"],
     [{ name: "slow", up: ["-- mcp:lock-timeout-ms=60000", "create table t (a int)"].join("\n") }, "DDL_DIRECTIVE_EXCEEDS_LIMIT"]
   ] as [Record<string, unknown>, string][]) {
     assert.equal((await bodyOf("ddl_create", args, withDir)).payload.code, code, JSON.stringify(args));

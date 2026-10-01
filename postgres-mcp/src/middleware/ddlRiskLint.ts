@@ -45,6 +45,19 @@ export interface LintContext {
    * count as existing in migration 2. The lint adds to it. When omitted, a fresh Set is used.
    */
   createdInPlan?: Set<string>;
+  /**
+   * `pg_roles` attributes of the roles POSTGRES_DDL_OWNER_ROLES allows, read from the target
+   * database. A role missing from the map does not exist there. When the whole map is omitted (no
+   * database, as in `ddl_create`), OWNER TO is not checked against roles at all.
+   */
+  ownerRoles?: ReadonlyMap<string, OwnerRoleAttributes>;
+}
+
+export interface OwnerRoleAttributes {
+  superuser: boolean;
+  createRole: boolean;
+  bypassRls: boolean;
+  replication: boolean;
 }
 
 export interface LintResult {
@@ -170,6 +183,21 @@ export function lintDdl(statements: readonly DdlStatement[], context: LintContex
       }
     }
 
+    // ── privileges, row-level security and ownership ──
+    if (verb === "grant" || verb === "revoke") {
+      add(statement, "high", "PRIVILEGE_CHANGE", `${verb.toUpperCase()} changes who may read, write or run an object.`);
+    }
+    if (kind === "policy") {
+      add(statement, "high", "PRIVILEGE_CHANGE", `${verb.toUpperCase()} POLICY changes which rows a role may see or write.`);
+    }
+    if (verb === "alter" && kind === "table" && top.some((w, i) => (w === "disable" && top[i + 1] === "row") || (w === "no" && top[i + 1] === "force"))) {
+      add(statement, "high", "PRIVILEGE_CHANGE", "Turning row-level security off (or NO FORCE) lets roles past the table's policies.");
+    }
+    const n = tokens.length;
+    if (verb === "alter" && n >= 3 && tokens[n - 3]?.type === "word" && tokens[n - 3]?.value === "owner" && tokens[n - 2]?.value === "to") {
+      lintOwnerTo(statement, context.ownerRoles, add);
+    }
+
     // SECURITY DEFINER can appear on CREATE or ALTER FUNCTION / PROCEDURE.
     if ((kind === "function" || kind === "procedure") && top.some((w, i) => w === "security" && top[i + 1] === "definer")) {
       add(statement, "high", "SECURITY_DEFINER", "SECURITY DEFINER runs the routine with its owner's privileges. Pin search_path in the definition (SET search_path = …).");
@@ -235,6 +263,43 @@ export function lintDdl(statements: readonly DdlStatement[], context: LintContex
 
   const requiredAcknowledgements = [...new Set(findings.filter((f) => f.level === "high").map((f) => f.code))];
   return { findings, requiredAcknowledgements, blocked: findings.filter((f) => f.level === "blocked") };
+}
+
+/**
+ * OWNER TO an allowlisted role (the guardrail refused every other). The new owner holds every
+ * privilege on the object, and a SECURITY DEFINER routine runs as it, so a role with an attribute
+ * that reaches past ordinary grants is refused whatever the operator listed.
+ */
+function lintOwnerTo(
+  statement: DdlStatement,
+  roles: ReadonlyMap<string, OwnerRoleAttributes> | undefined,
+  add: (statement: DdlStatement, level: RiskLevel, code: string, message: string, target?: string) => void
+): void {
+  const role = statement.tokens[statement.tokens.length - 1]?.value ?? "";
+  add(statement, "high", "PRIVILEGE_CHANGE", `OWNER TO ${role}: the new owner holds every privilege on the object, and a SECURITY DEFINER routine runs as it.`, role);
+  if (roles === undefined) {
+    return;
+  }
+  const attributes = roles.get(role);
+  if (attributes === undefined) {
+    add(statement, "blocked", "OWNER_ROLE_UNKNOWN", `OWNER TO ${role}: no such role exists in this database.`, role);
+    return;
+  }
+  const reaching = [
+    attributes.superuser ? "SUPERUSER" : undefined,
+    attributes.createRole ? "CREATEROLE" : undefined,
+    attributes.bypassRls ? "BYPASSRLS" : undefined,
+    attributes.replication ? "REPLICATION" : undefined
+  ].filter((a): a is string => a !== undefined);
+  if (reaching.length > 0) {
+    add(
+      statement,
+      "blocked",
+      "OWNER_ROLE_PRIVILEGED",
+      `OWNER TO ${role} is refused: the role has ${reaching.join(", ")}, so an object it owns — a SECURITY DEFINER routine above all — would run past ordinary privileges.`,
+      role
+    );
+  }
 }
 
 function lintAlterTable(
