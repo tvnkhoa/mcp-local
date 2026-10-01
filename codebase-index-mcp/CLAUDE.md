@@ -210,8 +210,6 @@ Adding a tree-sitter language:
    `test-csharp-inheritance-bridge.mjs` (or `test-typescript-symbols.mjs`) — and wire it to a
    `test:*` script in `package.json`. `scripts/run-tests.mjs` discovers the list *from
    package.json*, so a harness with no script is invisible and never runs.
-   > Do not add to `scripts/test/test-extractor.mjs`. It is unwired, has no assertions, and still
-   > reads `./src/graphStore.ts` — a path that moved in S-41 — so it cannot run at all.
 6. Update the feature list in `README.md`.
 
 **A symbol id is minted in one place.** `makeSymbolId(input, kind, name, row)` in

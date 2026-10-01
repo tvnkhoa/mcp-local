@@ -182,12 +182,12 @@ MCP tool calls then hit the updated build, so you can test directly without the 
   conditions, the call budget, and mandatory issue logging. Do not restate it here or elsewhere.
   Alongside it: `mcp-base`, `typescript-mcp`, `db-guardrails`, `codebase-index`.
 - `.claude/skills/` — MCP **authoring** skills (security-review, tool-annotations, error-taxonomy,
-  contract-conformance, observability, host-integration-security, db-parameterization-audit,
-  db-query-budgeting) plus `mcp-skill-authoring`. Each ends with an *Authoritative reference* naming
+  contract-conformance, observability, host-integration-security, db-tool-review) plus
+  `mcp-skill-authoring`. Each ends with an *Authoritative reference* naming
   the maintained doc that governs it. Operational "how to use server X" skills are generated per
   server and gitignored.
 - `codebase-index-mcp/.claude/skills/` — indexing internals (tree-sitter, incremental-indexing
-  with its full-vs-incremental conformance procedure, metadata-governance, unresolved-symbol-policy, …).
+  with its full-vs-incremental conformance procedure, run-bookkeeping, …).
 - `.claude/commands/mcp-effectiveness-eval.md` — slash command benchmarking baseline vs MCP.
 
 ## References
