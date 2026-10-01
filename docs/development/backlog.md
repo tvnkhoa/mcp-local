@@ -544,7 +544,8 @@ registry. This item holds what was knowingly left open.
 
 Phase 2 of the DDL migration plan. Each sub-item is a gap that the DDL lane does not have.
 
-- **B-15.1 — no `lock_timeout`.** `dotnet ef database update` runs with none, so a busy table holds
+- **B-15.1 — no `lock_timeout`.** ✅ DONE 2026-10-01 (PG-MIG-009). Not yet verified against a real
+  Npgsql: do that with `verify:live`. The original description follows. `dotnet ef database update` runs with none, so a busy table holds
   the apply until `POSTGRES_DOTNET_TIMEOUT_MS` (120 s) kills the process. Fix: merge
   `Options=-c lock_timeout=N` into the connection string the child receives
   (`CH_DB_CONNECTION`, the outbound contract). This needs Npgsql 5 or later in the consuming project. Add a new `POSTGRES_MIGRATION_LOCK_TIMEOUT_MS`, which takes
@@ -1177,7 +1178,7 @@ tell the truth, or makes an existing gate capable of failing.
 |---|---|---|---|---|---|---|
 | B-14 | The TypeScript lane reports a graph that is 77% dangling | P1 | **High** | R2 | L / extractor | 🔵 9 of 13 done 2026-08-18 · orphan `fromId` 77.0% → 0; edge types 2 → 7 |
 | B-16 | The DDL lane's known gaps after it shipped | P2 | **Med** | R1 | S each | 🔵 open 2026-10-01 · lane shipped (5 tools, 24 live scenarios); 6 follow-ups |
-| B-15 | The EF Core lane lacks lock_timeout, delta dry run, tests, rollback, cross-process lock | P2 | **Med** | R1 | M | 🔵 2 of 5 · B-15.3 tests ✅ (found PG-MIG-007) · B-15.2 delta dry run ✅ (PG-MIG-008) |
+| B-15 | The EF Core lane lacks lock_timeout, delta dry run, tests, rollback, cross-process lock | P2 | **Med** | R1 | M | 🔵 3 of 5 · B-15.3 tests ✅ (PG-MIG-007) · B-15.2 delta dry run ✅ (PG-MIG-008) · B-15.1 lock_timeout ✅ (PG-MIG-009) |
 | B-13 | `findOwnerType` returns the enclosing class, not the owner | P1 | **Med** | R2 | M / AST | ✅ 2026-08-05 · AST prover; `requiredOwnerType` matches 3 of 3 |
 | B-01 | Diagnose C# `TYPE_REF` loss | P1 | Low | R1 | M | ✅ 2026-07-30 · `c68bda5` |
 | B-01b | Fix C# `TYPE_REF` | P1 | — | — | unscoped | ✅ 2026-07-30 · `266d91b` `9574e3e` `f1c0160` `9b55de4` |

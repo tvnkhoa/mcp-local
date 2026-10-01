@@ -12,7 +12,7 @@ Resolution. Mirrors the format of `codebase-index-mcp/docs/mcp-codebase-index-is
 
 ## Index
 
-**29 entries** — all 29 resolved (some as documented guidance rather than code changes), **0 open**.
+**30 entries** — all 30 resolved (some as documented guidance rather than code changes), **0 open**.
 Statuses are copied from each entry's own `**Status:**` line; the entry is authoritative.
 
 | ID | Title | Status |
@@ -44,6 +44,7 @@ Statuses are copied from each entry's own `**Status:**` line; the entry is autho
 | `PG-MIG-006` | `migration_apply` took no lock: two applies of one preview could both run, and writes could interleave | ✅ fixed 2026-09-30 (code) — shared per-environment mutex |
 | `PG-MIG-007` | `migration_dry_run` let `commit ;` through, committing the dry run for real | ✅ fixed 2026-10-01 (code) — strip pattern tolerates whitespace before `;` |
 | `PG-MIG-008` | `migration_dry_run` tested a different script from the one `migration_preview` showed | ✅ fixed 2026-10-01 (code) — shared builder; tokenizer split; one statement at a time |
+| `PG-MIG-009` | `dotnet ef database update` waited for locks with no limit | ✅ fixed 2026-10-01 (code) — `Options=-c lock_timeout` via Npgsql; dry run too; default 5 s |
 | `PG-CMP-002` | The schema snapshot saw only tables: a changed view, function, trigger or enum passed the drift guard | ✅ fixed 2026-09-30 (code) — snapshot v2 captures seven more object kinds |
 | `PG-DDL-001` | The DDL lane's apply hung forever behind a table lock it had not reached yet | ✅ fixed 2026-10-01 (code) — session timeouts set first; planning uses the plan's shortest lock wait |
 
@@ -1139,6 +1140,40 @@ time; covered by `writeGuardrails.test.ts`, `tools.test.ts`, `N/internal-schema-
 - **Verified discriminating:** against the regex target, `Q/target-from-plan` fails with
   `targetTable:"public.app", rollbackSupported:false`. With the fix, both spellings report
   `app.orders`, apply, and roll back.
+
+---
+
+## PG-MIG-009 — `dotnet ef database update` waited for locks with no limit
+
+**Status:** ✅ fixed 2026-10-01 (code, B-15.1). **This is a behaviour change**: the default is now a
+5 s wait. Covered by `efRunner.test.ts`, `migrationLockTimeout.test.ts`, and `M` and `N` in
+`scripts/migration-flow-test.mjs`.
+
+- **Scenario:** `migration_apply`, or `migration_dry_run`, while another session holds a lock on a
+  table the migration alters.
+- **Expected vs actual:** the expected result was a fast failure that names the lock. Instead,
+  `database update` queued until `POSTGRES_DOTNET_TIMEOUT_MS` (120 s) killed the process, and the
+  dry run queued until the pool's `statement_timeout` (30 s). Both are worse than a slow failure.
+  An `ALTER TABLE` waiting for ACCESS EXCLUSIVE holds its place in the lock queue, so every
+  ordinary read of that table queued behind it for the whole wait.
+- **Resolution:**
+  - New `POSTGRES_MIGRATION_LOCK_TIMEOUT_MS`, default 5000, where `0` turns it off.
+  - `withLockTimeout` merges `Options=-c lock_timeout=N` (Npgsql 5+) into the connection string
+    every `dotnet ef` invocation receives. The dry run sets `SET LOCAL lock_timeout` to the same
+    value.
+  - `migration_preview` and `migration_apply` report `lockTimeout: { ms, applied, note }`, because
+    two kinds of connection string do not get the wait and must not appear to. A `postgres://` URI
+    has no `Options` keyword for Npgsql to read. A string that already sets `lock_timeout` keeps
+    the operator's value.
+- **A trap avoided:** `numberFromEnv` reads any value ≤ 0 as unset, so through it `0` would have
+  silently become the 5 s default. The var has its own accessor, `migrationLockTimeoutFromEnv`,
+  and a test that pins `0`.
+- **Verified discriminating:** with the dry run's `set_config` removed, `M/dry-run-lock-timeout`
+  fails: the dry run waited 30 032 ms and ended with `57014` (statement timeout). With it, the dry
+  run failed in 1 026 ms with `55P03`.
+- **Not verified here:** that Npgsql honours `Options`. The harness's fake `dotnet ef` cannot test
+  that, and this machine has no .NET project. Check it once with `npm run verify:live` against the
+  consuming project (R6 in the DDL plan).
 
 ---
 

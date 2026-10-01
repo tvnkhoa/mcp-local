@@ -31,6 +31,7 @@ function fake(reply: (efArgs: string[]) => EfResult): { config: MigrationConfig;
       project: "/p/Infrastructure.csproj",
       startupProject: "/p/Web.csproj",
       timeoutMs: 1000,
+      lockTimeoutMs: 5000,
       approvalSecret: "s",
       previewTtlMs: 60_000,
       run: async (efArgs) => {

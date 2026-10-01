@@ -33,7 +33,7 @@ observe-mcp/         10 tools   OpenObserve logs and traces           (read-only
 bitbucket-mcp/       12 tools   repos, pull requests, pipelines       (PR creation gated)
 ```
 
-**99 tools and 131 env variables** in total (env: 41 / 29 / 19 / 31 / 11), both counted from
+**99 tools and 132 env variables** in total (env: 41 / 30 / 19 / 31 / 11), both counted from
 `@mcp/manifest` rather than by hand:
 
 ```bash

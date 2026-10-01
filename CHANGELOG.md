@@ -10,6 +10,24 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased] - 2026-10-01
 
+### ⏱️ `postgres-mcp`: the EF Core lane waits at most `lock_timeout` for a lock (B-15.1, PG-MIG-009)
+
+**Behaviour change.** `dotnet ef` used to run with no lock wait at all. It now waits at most 5 s by
+default. Set `POSTGRES_MIGRATION_LOCK_TIMEOUT_MS=0` to restore the old behaviour.
+
+- **New env var** `POSTGRES_MIGRATION_LOCK_TIMEOUT_MS`. postgres-mcp goes from 29 to 30 env vars,
+  the workspace from 131 to 132. `0` means off. It has its own accessor, because `numberFromEnv`
+  reads `0` as unset.
+- **How the wait reaches EF:** `withLockTimeout` merges `Options=-c lock_timeout=N` into every
+  `dotnet ef` connection string (Npgsql 5+). The dry run sets `SET LOCAL lock_timeout` to the same
+  value.
+- **Reported, not assumed:** `migration_preview` and `migration_apply` report
+  `lockTimeout: { ms, applied, note }`. A `postgres://` URI cannot carry the setting, and a string
+  that already sets `lock_timeout` keeps it. In both cases the response says so.
+- `migration-flow-test.mjs` goes from 12 to 14 scenarios. With the fix removed, the dry run waits
+  30 s and ends with `57014`. With it, it fails in about 1 s with `55P03`.
+- **Not yet checked against a real Npgsql.** Run `verify:live` against the consuming .NET project.
+
 ### 🔍 `postgres-mcp`: `migration_dry_run` runs what `migration_preview` showed (B-15.2, PG-MIG-008)
 
 - Preview and dry run share `buildPendingScript`, so the dry run executes the delta, or the

@@ -150,6 +150,8 @@ compare_environments { "source": "dev", "target": "staging", "includeRowCounts":
 
 `migration_dry_run` chạy đúng phần SQL mà `migration_preview` hiển thị: delta, hoặc script idempotent khi tập pending không liên tục. Script được tách bằng tokenizer của lane DDL rồi chạy từng statement, nên khi lỗi sẽ chỉ ra đúng statement và SQLSTATE (`failure`). Lệnh điều khiển transaction bị bỏ ở mọi dạng viết, kể cả `commit;` nằm chung dòng với lệnh khác. Statement không chạy được trong transaction (`CONCURRENTLY`, `VACUUM`) bị bỏ qua và liệt kê trong `skipped`; nếu cả script đều như vậy thì kết quả là `not_dry_runnable`.
 
+`lock_timeout`: mọi lần gọi `dotnet ef` đều nhận `Options=-c lock_timeout=N` ghép vào connection string. N lấy từ `POSTGRES_MIGRATION_LOCK_TIMEOUT_MS`, mặc định 5000; đặt `0` để tắt. Cần Npgsql 5 trở lên. Dry run cũng dùng cùng mức chờ này. Kết quả của `migration_preview` và `migration_apply` có trường `lockTimeout.applied` để báo mức chờ có thật sự được áp hay không. Hai trường hợp không được áp: connection string dạng `postgres://` URI (Npgsql không đọc được), hoặc connection string đã tự đặt `lock_timeout` (giữ nguyên lựa chọn của người vận hành).
+
 `migration_apply` dùng chung một mutex theo từng môi trường với `write_apply` / `write_rollback`. Trên cùng một DB, migration và thao tác ghi dữ liệu chạy lần lượt: một lệnh ghi phải đợi migration đang chạy xong. Nếu hai lần apply cùng một preview được gọi đồng thời, lần sau sẽ nhận `PREVIEW_NOT_FOUND`. Mutex chỉ có hiệu lực trong một process server.
 
 ## 6b. Luồng DDL (raw SQL)
@@ -275,6 +277,7 @@ Schema `mcp_ops` thuộc về server, không phải schema của ứng dụng:
 | `POSTGRES_DOTNET_PROJECT` | no | — | renamed — still accepts `CH_DOTNET_PROJECT` · Path to the EF Core project (the one holding the DbContext). |
 | `POSTGRES_DOTNET_STARTUP_PROJECT` | no | — | renamed — still accepts `CH_DOTNET_STARTUP_PROJECT` · Startup project passed to `dotnet ef --startup-project`. |
 | `POSTGRES_DOTNET_TIMEOUT_MS` | no | `120000` *(code)* | renamed — still accepts `PG_DOTNET_TIMEOUT_MS` · Timeout for a `dotnet ef` invocation. |
+| `POSTGRES_MIGRATION_LOCK_TIMEOUT_MS` | no | `5000` *(code)* | lock_timeout for every `dotnet ef` session, via Npgsql `Options` (Npgsql 5+); also used by migration_dry_run. 0 = off (server default). |
 | `POSTGRES_DDL_ENABLED` | no | `false` | Raw-SQL DDL migrations (ddl_*) OFF unless true. Parsed strictly: exact "true" or "1". |
 | `POSTGRES_DDL_MIGRATIONS_DIR` | no | — | Directory of V<yyyymmddhhmmss>__<name>.up.sql / .down.sql files. Needed by file-based plans and ddl_create; inline SQL works without it. |
 | `POSTGRES_DDL_LOCK_TIMEOUT_MS` | no | `5000` *(code)* | lock_timeout per migration. A file's -- mcp:lock-timeout-ms may lower it, never raise it. |
@@ -284,6 +287,6 @@ Schema `mcp_ops` thuộc về server, không phải schema của ứng dụng:
 | `PGSSLMODE` | no | — | libpq's own TLS mode (`disable` \| `require` \| `verify-ca` \| `verify-full`), read by the driver, not by this server. Set it when the target requires TLS but the connection string does not say so. |
 | `NODE_TLS_REJECT_UNAUTHORIZED` | no | — | Set to 0 ONLY if the database host presents a self-signed/untrusted TLS certificate. This is a Node flag, not a server setting, and it disables certificate verification for the WHOLE process — every outbound TLS connection, not just Postgres. Prefer `PGSSLMODE=verify-full` with a trusted CA. |
 
-29 variables. Defaults marked *(code)* are the server's own fallback and are **not** written into your agent config — set them only to override.
+30 variables. Defaults marked *(code)* are the server's own fallback and are **not** written into your agent config — set them only to override.
 
 <!-- END GENERATED: env-table -->

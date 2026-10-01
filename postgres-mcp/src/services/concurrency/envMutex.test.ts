@@ -105,6 +105,7 @@ test("migration_apply waits for the lock that write_apply holds", async () => {
       project: "p.csproj",
       startupProject: "s.csproj",
       timeoutMs: 120_000,
+      lockTimeoutMs: 5000,
       approvalSecret: "test-secret",
       previewTtlMs: 3_600_000
     })

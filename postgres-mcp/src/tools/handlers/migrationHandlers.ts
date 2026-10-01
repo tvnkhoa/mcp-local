@@ -19,6 +19,7 @@ import {
   efMigrationsScript,
   efMigrationsScriptDelta,
   listMigrationFiles,
+  withLockTimeout,
   type EfResult,
   type MigrationConfig
 } from "../../services/migration/efRunner.js";
@@ -211,6 +212,16 @@ export async function handleMigrationAdd(
   );
 }
 
+/**
+ * Whether `dotnet ef` really runs with the configured lock wait. It is reported on preview and
+ * apply because a URI connection string, or one that sets its own `lock_timeout`, silently gets a
+ * different wait from the one configured (R6 in the DDL plan).
+ */
+function describeLockTimeout(connectionString: string, config: MigrationConfig): { ms: number; applied: boolean; note?: string } {
+  const result = withLockTimeout(connectionString, config.lockTimeoutMs);
+  return { ms: config.lockTimeoutMs, applied: result.applied, ...(result.note === undefined ? {} : { note: result.note }) };
+}
+
 // ── the pending script ──────────────────────────────────────────────────────────
 
 /**
@@ -313,6 +324,7 @@ export async function handleMigrationPreview(
       pendingMigrations: pending,
       pendingScript,
       script: fullScript, // undefined unless verbose — JSON.stringify drops it
+      lockTimeout: describeLockTimeout(env.connectionString, config),
       expiresAt
     },
     profile
@@ -424,6 +436,7 @@ export async function handleMigrationApply(
         // otherwise report schemaChanged:false alongside two different snapshot IDs.
         schemaChanged: preSnapshot.snapshotId !== postSnapshot.snapshotId,
         diff,
+        lockTimeout: describeLockTimeout(env.connectionString, config),
         raw: verboseOnly(updateResult.stdout.trim(), args.profile ?? "compact")
       },
       args.profile ?? "compact"
@@ -458,6 +471,7 @@ export async function handleMigrationDryRun(
   const base = {
     environment: env.name,
     pendingMigrations: pending,
+    lockTimeoutMs: config.lockTimeoutMs,
     script: contiguous ? "delta" : "idempotent",
     statements: run.length + skipped.length,
     skipped: skipped.filter((s) => s.reason === "NON_TRANSACTIONAL"),
@@ -477,6 +491,11 @@ export async function handleMigrationDryRun(
   let ran = 0;
   try {
     await client.query("begin");
+    // The same lock wait `database update` will get (B-15.1). A dry run takes real locks; without
+    // this it would queue behind a busy table for the pool's whole statement_timeout.
+    if (config.lockTimeoutMs > 0) {
+      await client.query("select set_config('lock_timeout', $1, true)", [String(config.lockTimeoutMs)]);
+    }
     for (const statement of run) {
       try {
         await client.query({ text: statement.text, queryMode: "extended" } as QueryConfig);

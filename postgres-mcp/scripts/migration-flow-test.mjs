@@ -171,6 +171,7 @@ async function main() {
     project: "/fake/Infrastructure.csproj",
     startupProject: "/fake/Web.csproj",
     timeoutMs: 30_000,
+    lockTimeoutMs: 1000,
     approvalSecret: "migration-flow-test-secret",
     previewTtlMs: 3_600_000,
     run: ef.run
@@ -366,6 +367,36 @@ async function main() {
         "L/dry-run-skips-concurrently",
         d.status === "ok" && d.skipped?.length === 1 && d.skipped[0].reason === "NON_TRANSACTIONAL" && index === false,
         `status=${String(d.status)} skipped=${JSON.stringify(d.skipped)} index=${String(index)}`
+      );
+    }
+
+    // ── M. the dry run waits at most lock_timeout for a busy table (B-15.1) ──
+    {
+      ef.state.migrations.push({ id: "20260110000000_AlterInit", sql: "ALTER TABLE init_t ADD COLUMN m int;" });
+      const holder = new pg.Client({ connectionString: CONN });
+      await holder.connect();
+      await holder.query("begin; lock table init_t in access share mode");
+      const started = Date.now();
+      const { payload: d } = await invoke("handleMigrationDryRun", { environment: "dev" });
+      const elapsed = Date.now() - started;
+      await holder.query("rollback");
+      await holder.end();
+      ef.state.migrations.pop();
+      check(
+        "M/dry-run-lock-timeout",
+        d.status === "failed" && d.failure?.sqlState === "55P03" && d.lockTimeoutMs === 1000 && elapsed < 5000,
+        `status=${String(d.status)} sqlState=${String(d.failure?.sqlState)} elapsed=${String(elapsed)}ms`
+      );
+    }
+
+    // ── N. preview says whether dotnet ef really gets the lock wait ──────────
+    {
+      // This harness connects with a postgres:// URI, which Npgsql cannot take an Options keyword on.
+      const { payload: p } = await preview();
+      check(
+        "N/lock-timeout-reported",
+        p.lockTimeout?.ms === 1000 && p.lockTimeout?.applied === false && /URI/.test(p.lockTimeout?.note ?? ""),
+        `lockTimeout=${JSON.stringify(p.lockTimeout)}`
       );
     }
 

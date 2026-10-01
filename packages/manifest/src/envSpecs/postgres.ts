@@ -1,5 +1,5 @@
 /**
- * `postgres-mcp`'s environment contract — 29 vars: 27 under one `POSTGRES_*` prefix, plus the two
+ * `postgres-mcp`'s environment contract — 30 vars: 28 under one `POSTGRES_*` prefix, plus the two
  * Node / libpq runtime vars declared at the bottom (which this server's code does not read).
  *
  * S-43 converged three prefixes into one. Before it, this server read `CH_*` (5 vars, named for the
@@ -128,6 +128,7 @@ export const postgresEnv: readonly EnvField[] = [
   { name: "POSTGRES_DOTNET_PROJECT", deprecatedAliases: ["CH_DOTNET_PROJECT"], required: false, section: "EF Core migrations (OFF unless enabled)", note: "Path to the EF Core project (the one holding the DbContext)." },
   { name: "POSTGRES_DOTNET_STARTUP_PROJECT", deprecatedAliases: ["CH_DOTNET_STARTUP_PROJECT"], required: false, section: "EF Core migrations (OFF unless enabled)", note: "Startup project passed to `dotnet ef --startup-project`." },
   { name: "POSTGRES_DOTNET_TIMEOUT_MS", deprecatedAliases: ["PG_DOTNET_TIMEOUT_MS"], required: false, codeDefault: "120000", section: "EF Core migrations (OFF unless enabled)", note: "Timeout for a `dotnet ef` invocation." },
+  { name: "POSTGRES_MIGRATION_LOCK_TIMEOUT_MS", required: false, codeDefault: "5000", section: "EF Core migrations (OFF unless enabled)", note: "lock_timeout for every `dotnet ef` session, via Npgsql `Options` (Npgsql 5+); also used by migration_dry_run. 0 = off (server default)." },
 
   // --- Raw-SQL DDL migrations (gated) ------------------------------------------
   // No aliases: these names are new, so there is no legacy spelling to keep working. Environment

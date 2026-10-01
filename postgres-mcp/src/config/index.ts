@@ -108,6 +108,20 @@ export function ddlMigrationsDirFromEnv(): string {
   return raw === "" ? "" : path.resolve(raw);
 }
 
+/**
+ * `POSTGRES_MIGRATION_LOCK_TIMEOUT_MS`: a whole number of ms, where **0 is meaningful** — it turns
+ * the lock timeout off. That is why this is not `numberFromEnv`, which reads 0 as "unset" and
+ * would quietly put the 5 s default back. Unset or invalid gives the default.
+ */
+export function migrationLockTimeoutFromEnv(fallback: number): number {
+  const raw = env().raw("POSTGRES_MIGRATION_LOCK_TIMEOUT_MS");
+  if (raw === undefined) {
+    return fallback;
+  }
+  const parsed = Number(raw);
+  return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : fallback;
+}
+
 /** `dotnet ef` project paths. Empty when unset; the migration gate reports that as unconfigured. */
 export function dotnetProjectsFromEnv(): { project: string; startupProject: string } {
   return {

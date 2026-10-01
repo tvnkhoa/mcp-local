@@ -61,6 +61,7 @@ const MIGRATION_OFF: MigrationConfig = {
   project: "",
   startupProject: "",
   timeoutMs: 120_000,
+  lockTimeoutMs: 5000,
   approvalSecret: "test-secret",
   previewTtlMs: 3_600_000
 };

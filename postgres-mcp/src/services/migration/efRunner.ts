@@ -18,6 +18,11 @@ export interface MigrationConfig {
   /** Startup project (e.g. src/Web). */
   startupProject: string;
   timeoutMs: number;
+  /**
+   * `lock_timeout` for every `dotnet ef` session, in ms; 0 leaves the server default (no limit).
+   * Passed through the connection string, because EF opens its own connection (B-15.1).
+   */
+  lockTimeoutMs: number;
   approvalSecret: string;
   previewTtlMs: number;
   /**
@@ -77,12 +82,63 @@ function sanitizeMigrationName(name: string): string {
  * the .NET project expects — not this server's own configuration. Every inbound `CH_*` var became
  * `POSTGRES_*`; this one cannot, because the reader lives in a codebase this workspace does not own.
  */
+export interface LockTimeoutResult {
+  connectionString: string;
+  applied: boolean;
+  /** Why not applied, or what was merged. */
+  note?: string;
+}
+
+/**
+ * The connection string `dotnet ef` receives, with `lock_timeout` set through Npgsql's `Options`
+ * keyword (Npgsql 5.0 or later).
+ *
+ * Before this, `database update` ran with no lock wait at all. A migration that needed a lock on
+ * a busy table queued behind it until `POSTGRES_DOTNET_TIMEOUT_MS` killed the process. While it
+ * queued, it blocked every other session that needed the same table: an `ALTER TABLE` waiting for
+ * ACCESS EXCLUSIVE stops reads too.
+ *
+ * Never silently not applied. The result says whether it took, and why not:
+ *  - `0` disables it.
+ *  - A connection string that already sets `lock_timeout` keeps its own value. The operator chose it.
+ *  - A `postgres://` URI is left alone. Npgsql reads only `key=value;` strings, so there is no
+ *    `Options` to add to.
+ */
+export function withLockTimeout(connectionString: string, lockTimeoutMs: number): LockTimeoutResult {
+  if (lockTimeoutMs <= 0) {
+    return { connectionString, applied: false, note: "disabled (POSTGRES_MIGRATION_LOCK_TIMEOUT_MS=0)" };
+  }
+  const trimmed = connectionString.trim();
+  if (/^postgres(ql)?:\/\//i.test(trimmed)) {
+    return {
+      connectionString,
+      applied: false,
+      note: "the connection string is a postgres:// URI; Npgsql reads key=value strings, so lock_timeout cannot be added to it"
+    };
+  }
+  const setting = `-c lock_timeout=${String(lockTimeoutMs)}`;
+  const parts = trimmed.split(";").filter((p) => p.trim() !== "");
+  const at = parts.findIndex((p) => /^\s*options\s*=/i.test(p));
+  if (at >= 0) {
+    const part = parts[at] as string;
+    if (/lock_timeout/i.test(part)) {
+      return { connectionString, applied: false, note: "the connection string already sets lock_timeout in Options; left as is" };
+    }
+    parts[at] = `${part.trimEnd()} ${setting}`;
+    return { connectionString: `${parts.join(";")};`, applied: true, note: "merged into the existing Options" };
+  }
+  return { connectionString: `${[...parts, `Options=${setting}`].join(";")};`, applied: true };
+}
+
 /** The full argv for `dotnet`: the subcommand, then the fixed project template. */
 export function buildEfArgv(config: Pick<MigrationConfig, "project" | "startupProject">, efArgs: string[]): string[] {
   return ["ef", ...efArgs, "--project", config.project, "--startup-project", config.startupProject, "--no-build"];
 }
 
-function runEf(config: MigrationConfig, efArgs: string[], connectionString: string): Promise<EfResult> {
+function runEf(config: MigrationConfig, efArgs: string[], rawConnectionString: string): Promise<EfResult> {
+  // Every invocation, not only `database update`: `migrations list` reads the history table and
+  // could queue behind a lock on it just the same.
+  const connectionString = withLockTimeout(rawConnectionString, config.lockTimeoutMs).connectionString;
   if (config.run !== undefined) {
     return config.run(efArgs, connectionString);
   }

@@ -30,6 +30,7 @@ import {
   approvalSecretFromEnv,
   ddlMigrationsDirFromEnv,
   dotnetProjectsFromEnv,
+  migrationLockTimeoutFromEnv,
   numberFromEnv,
   parseBoolEnv
 } from "./config/index.js";
@@ -89,6 +90,7 @@ const migrationConfig: MigrationConfig = {
   enabled: parseBoolEnv("POSTGRES_MIGRATION_ENABLED"),
   ...dotnetProjectsFromEnv(),
   timeoutMs: numberFromEnv("POSTGRES_DOTNET_TIMEOUT_MS", 120_000),
+  lockTimeoutMs: migrationLockTimeoutFromEnv(5000),
   approvalSecret: APPROVAL_SECRET,
   // Longer default (1h) than write previews: migration_apply against a prod-like env is
   // human-gated, so the preview→approve pause can outlast the 15-min write TTL. This bounds
