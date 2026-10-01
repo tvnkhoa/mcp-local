@@ -235,9 +235,10 @@ function isSqliteUniqueConstraintError(error: unknown): boolean {
 
 /**
  * Turn a bare UNIQUE-constraint failure into one that names both colliding symbols.
- * A symbol_id is SHA-256(repoId:filePath:symbolName) truncated to 24 hex chars, so a collision
- * means either a genuine hash collision or — far more likely — the same logical symbol extracted
- * twice. Neither is diagnosable from "UNIQUE constraint failed: symbols.symbol_id".
+ * A symbol_id is SHA-256(repoId:filePath:kind:name:row) truncated to 24 hex chars (`makeSymbolId`
+ * in services/extractors/extractorPrimitives.ts; `row` is the 0-indexed tree-sitter row), so a
+ * collision means either a genuine hash collision or — far more likely — the same logical symbol
+ * extracted twice at the same position. Neither is diagnosable from "UNIQUE constraint failed: symbols.symbol_id".
  */
 function buildSymbolCollisionError(db: Database.Database, row: SymbolRecord, error: unknown): Error {
   const existing = db
@@ -361,6 +362,59 @@ export function pruneOrphanedEdges(db: Database.Database, repoId: string): numbe
       WHERE repo_id = ?
         AND from_id NOT LIKE 'callee:%'
         AND from_id NOT IN (SELECT symbol_id FROM symbols WHERE repo_id = ?)
+      `
+    )
+    .run(repoId, repoId);
+  return result.changes;
+}
+
+/**
+ * Files whose RESOLVED edges point into symbols that are gone, or are about to go.
+ *
+ * A symbol id hashes its row (`makeSymbolId`), and `replaceSymbolsForFile` only clears a file's
+ * OUTBOUND edges. So when an incremental run re-extracts file B and B's lines shift, every edge an
+ * unchanged file A resolved into B keeps a `to_id` that no longer exists — the edge is silently
+ * dangling, and `pruneOrphanedEdges` (which checks `from_id`) cannot see it. A full run never has
+ * this: it re-extracts A too, so A's edges come back as `callee:`/`type:`/… tokens and resolve
+ * against B's new ids. Re-extracting exactly these source files is how an incremental run reaches
+ * the same graph.
+ *
+ * "Resolved" is "has no `prefix:`": every placeholder (`callee:`, `type:`, `import:`, `base:`,
+ * `iface:`, `property:`, `nuget:` …) carries one, and a symbol id is 24 hex characters.
+ * `doomedFilePaths` are indexed files about to be pruned as deleted: their symbols still exist, but
+ * an edge into them is just as stale.
+ */
+export function findDanglingEdgeSourceFiles(db: Database.Database, repoId: string, doomedFilePaths: readonly string[]): string[] {
+  const rows = db
+    .prepare(
+      `
+      select distinct src.file_path as filePath
+      from edges e
+      join symbols src on src.repo_id = e.repo_id and src.symbol_id = e.from_id
+      left join symbols dst on dst.repo_id = e.repo_id and dst.symbol_id = e.to_id
+      where e.repo_id = ?
+        and e.to_id not like '%:%'
+        and (dst.symbol_id is null or dst.file_path in (select value from json_each(?)))
+      `
+    )
+    .all(repoId, JSON.stringify(doomedFilePaths)) as { filePath: string }[];
+  return rows.map((r) => r.filePath);
+}
+
+/**
+ * The safety net behind `findDanglingEdgeSourceFiles`: delete resolved edges whose target symbol no
+ * longer exists, for a source file the run could not re-extract (parse failure, now over the size
+ * cap). An edge to nothing is wrong whichever way it is read; dropping it is what `pruneOrphanedEdges`
+ * already does for a missing source. Placeholders are untouched — they never had a target.
+ */
+export function pruneDanglingResolvedEdges(db: Database.Database, repoId: string): number {
+  const result = db
+    .prepare(
+      `
+      DELETE FROM edges
+      WHERE repo_id = ?
+        AND to_id NOT LIKE '%:%'
+        AND to_id NOT IN (SELECT symbol_id FROM symbols WHERE repo_id = ?)
       `
     )
     .run(repoId, repoId);

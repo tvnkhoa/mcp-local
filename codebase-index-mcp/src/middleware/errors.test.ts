@@ -48,6 +48,13 @@ test("a zod failure keeps its VALIDATION_ERROR code and is prefixed once", () =>
   assert.equal(mapped.message.indexOf("search_symbols:"), mapped.message.lastIndexOf("search_symbols:"));
 });
 
+test("an McpError's wire code follows its JSON-RPC code, not a flat MCP_ERROR", () => {
+  const code = (c: ErrorCode) => mapError(new McpError(c, "query_graph: refused"), "query_graph").code;
+  assert.equal(code(ErrorCode.InvalidParams), "VALIDATION_ERROR");
+  assert.equal(code(ErrorCode.InternalError), "INTERNAL_ERROR");
+  assert.equal(code(ErrorCode.InvalidRequest), "MCP_ERROR");
+});
+
 test("a tool whose name is a prefix of another tool's is not confused for it", () => {
   // `get_file_summary` starts with `get_file`, but the guard tests for the colon, so a message from
   // one tool cannot suppress the prefix of another.

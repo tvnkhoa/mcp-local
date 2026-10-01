@@ -14,6 +14,7 @@
  */
 
 import { createHash, randomUUID } from "node:crypto";
+import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import process from "node:process";
@@ -118,9 +119,17 @@ export async function runIndexPipeline(store: GraphStore, input: RunIndexInput):
   const languageStats = new Map<string, { scanned: number; indexed: number }>();
 
   const selectedFiles = files.slice(0, maxFiles);
-  const totalFiles = selectedFiles.length;
-  const totalBatches = Math.max(1, Math.ceil(totalFiles / batchSize));
+  // The batch loop walks `workQueue`, not `selectedFiles`: an incremental run appends the files that
+  // depend on what it changed (see `queueDependentFiles`), which raises both totals mid-run.
+  const workQueue = [...selectedFiles];
+  let totalFiles = workQueue.length;
+  let totalBatches = Math.max(1, Math.ceil(totalFiles / batchSize));
   let completedBatches = 0;
+  // Repo-relative paths this run wrote, and the dependents it must re-extract even though their
+  // content hash is unchanged.
+  const writtenPaths = new Set<string>();
+  const forcedPaths = new Set<string>();
+  let dependentsQueued = false;
 
   indexLog(`[index-ready] processing ${String(totalFiles)} files in ${String(totalBatches)} batches (batchSize=${String(batchSize)})`);
   progress.phase("indexing");
@@ -129,14 +138,18 @@ export async function runIndexPipeline(store: GraphStore, input: RunIndexInput):
   emitProgress("running");
 
   try {
-    for (let offset = 0; offset < selectedFiles.length; offset += batchSize) {
+    // Each batch steps to where it ENDED, fixed before the batch runs, so files appended after a
+    // short last batch start exactly there instead of being stepped over.
+    let batchEnd = 0;
+    for (let offset = 0; offset < workQueue.length; offset = batchEnd) {
+      batchEnd = Math.min(offset + batchSize, workQueue.length);
       if (input.abortSignal?.aborted) {
         // Don't throw immediately - let current batch finish and commit
         progress.note("[index-cancelled] Finishing current batch before stopping...");
         break;
       }
 
-      const batchFiles = selectedFiles.slice(offset, offset + batchSize);
+      const batchFiles = workQueue.slice(offset, batchEnd);
       const extractStart = Date.now();
       const pendingWrites: Array<{
         file: {
@@ -187,6 +200,7 @@ export async function runIndexPipeline(store: GraphStore, input: RunIndexInput):
           c.edgesDroppedByCallCap += drops.droppedByCallCap;
           c.edgesDroppedByTypeRefCap += drops.droppedByTypeRefCap;
         }
+        writtenPaths.add(relativePath);
         pendingWrites.push({
           file: {
             repoId: input.repoId,
@@ -249,21 +263,10 @@ export async function runIndexPipeline(store: GraphStore, input: RunIndexInput):
         const chunkResults = await Promise.allSettled(
           chunk.map(async (filePath) => {
             const relativePath = path.relative(input.repoPath, filePath);
-
-            // Early exit for incremental mode: check hash before reading full file
-            if (input.mode === "incremental") {
-              try {
-                const stats = await import("node:fs/promises").then(m => m.stat(filePath));
-                const quickHash = `${stats.size}-${stats.mtimeMs}`;
-                const previousHash = store.getFileHash(input.repoId, relativePath);
-                if (previousHash && previousHash.startsWith(quickHash)) {
-                  return { filePath, relativePath, bytes: Buffer.from([]), decision: { include: false, reason: "unchanged_quick_check", language: null } as FilterDecision };
-                }
-              } catch {
-                // Continue with normal flow
-              }
-            }
-
+            // There used to be a size/mtime "quick check" here, comparing `${size}-${mtimeMs}` as a
+            // prefix of the stored `content_hash`. That column is a sha256 hex digest of the redacted
+            // content, so the prefix never matched and the branch never fired — it only cost a stat()
+            // per file. The content-hash comparison below is the incremental skip, and it is exact.
             const bytes = await readFile(filePath);
             const decision = shouldIndexFile(filePath, bytes, maxFileSizeBytes);
             
@@ -313,7 +316,7 @@ export async function runIndexPipeline(store: GraphStore, input: RunIndexInput):
           const safeContent = redactSensitive(raw);
           const contentHash = hashOf(safeContent);
 
-          if (input.mode === "incremental") {
+          if (input.mode === "incremental" && !forcedPaths.has(relativePath)) {
             const previousHash = store.getFileHash(input.repoId, relativePath);
             if (previousHash === contentHash) {
               c.filesSkipped += 1;
@@ -468,6 +471,17 @@ export async function runIndexPipeline(store: GraphStore, input: RunIndexInput):
         progress.note("[index-cancelled] Batch committed, stopping index run.");
         break;
       }
+
+      // After the last batch, once: queue the unchanged files whose resolved edges now dangle.
+      if (!dependentsQueued && batchEnd >= workQueue.length) {
+        dependentsQueued = true;
+        const added = queueDependentFiles();
+        if (added > 0) {
+          totalFiles = workQueue.length;
+          totalBatches = completedBatches + Math.ceil(added / batchSize);
+          progress.update({ totalFiles, filesScanned: c.filesScanned, symbols: c.symbolsUpserted });
+        }
+      }
     }
 
     const pruneCounts = pruneAndResolve(store, input, progress, files, selectedFiles, maxFiles);
@@ -586,6 +600,47 @@ export async function runIndexPipeline(store: GraphStore, input: RunIndexInput):
       byLanguage: Object.keys(byLanguage).length > 0 ? byLanguage : undefined,
       errorMessage
     });
+  }
+
+  /**
+   * Append to `workQueue` the unchanged files whose resolved edges point into a symbol this run
+   * replaced or is about to prune, and mark them to bypass the content-hash skip. Returns how many.
+   *
+   * Symbol ids hash the declaration row, so shifting lines in file B gives B's symbols new ids, and
+   * an edge an unchanged file A resolved into B is left pointing at nothing. A full run re-extracts A
+   * and re-resolves its tokens against B's new ids; re-extracting the same A here is what makes the
+   * incremental graph equal to that reference (see `findDanglingEdgeSourceFiles`).
+   *
+   * Full mode needs none of this — it already re-extracts everything. A run that wrote nothing and
+   * prunes nothing cannot have created a dangling edge, so the query is skipped.
+   */
+  function queueDependentFiles(): number {
+    if (input.mode === "full") return 0;
+
+    const scannedByRelative = new Map(files.map((f) => [path.relative(input.repoPath, f), f]));
+    // Mirrors `pruneAndResolve`: deletions are only knowable when the scan saw the whole repo.
+    const scanWasComplete = files.length <= maxFiles && !input.onlyRelativePaths;
+    const doomed = scanWasComplete
+      ? store.listIndexedFiles(input.repoId).map((f) => f.path).filter((p) => !scannedByRelative.has(p))
+      : [];
+    if (writtenPaths.size === 0 && doomed.length === 0) return 0;
+
+    const doomedSet = new Set(doomed);
+    let added = 0;
+    for (const relativePath of store.findDanglingEdgeSourceFiles(input.repoId, doomed)) {
+      if (writtenPaths.has(relativePath) || doomedSet.has(relativePath) || forcedPaths.has(relativePath)) continue;
+      // Dirty mode scans only the changed files, so a dependent outside that set is resolved from
+      // disk. One that no longer exists is left to the prune; its edges go with it.
+      const absolute = scannedByRelative.get(relativePath) ?? path.join(input.repoPath, relativePath);
+      if (!scannedByRelative.has(relativePath) && !existsSync(absolute)) continue;
+      forcedPaths.add(relativePath);
+      workQueue.push(absolute);
+      added += 1;
+    }
+    if (added > 0) {
+      indexLog(`[index-dependents] re-extracting ${String(added)} unchanged file(s) whose resolved edges point into replaced or pruned symbols`);
+    }
+    return added;
   }
 
   // Push the current counters into the progress reporter. Cheap and throttled

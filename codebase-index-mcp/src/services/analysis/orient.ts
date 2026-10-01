@@ -28,19 +28,20 @@ const INTENT_RULES: IntentRule[] = [
     caveats: ["get_feature_bundle is a C# vertical-slice name-pattern heuristic; check unresolvedRoles."]
   },
   {
-    // MCP-ISSUE-060: this used to recommend `rename_assist(emitPreview:true)` — the one path the
-    // registry says NOT to take. Its preview scopes to an `affectedFiles` graph that returns 0/0
-    // even for a plain `import { x } from './y.js'`, measured at 17–22% recall against grep, so the
-    // preview looks clean and applying it leaves other files calling a name that no longer exists.
+    // MCP-ISSUE-060 (fixed 2026-09-17): this rule used to steer AWAY from rename_assist, because
+    // its preview was scoped to the caller/importer graph and measured at 17–22% recall. The scan is
+    // now repo-wide, verified hunk-for-hunk against refactor_replace_preview, and guarded by
+    // test:refactor-engine §3.12 — so rename_assist is the shorter path again.
     id: "rename",
     keywords: ["rename", "change name", "rename symbol"],
     recommendedTools: [
-      { tool: "refactor_replace_preview", why: "regex rename across ALL occurrences; rename_assist's preview misses most of them (MCP-ISSUE-060, open)", args: { findMode: "regex", ambiguityThresholdPercent: 100 } },
-      { tool: "refactor_replace_apply", why: "apply the preview (use includeLowConfidence:true for top-level identifiers)" },
+      { tool: "rename_assist", why: "resolves the identifier from the symbolId and previews a repo-wide rename (parity with refactor_replace_preview)", args: { emitPreview: true } },
+      { tool: "refactor_replace_apply", why: "apply the preview with its previewId + approvalToken (use includeLowConfidence:true for top-level identifiers)" },
       { tool: "refactor_replace_rollback", why: "undo an applied change by rollbackId" }
     ],
     caveats: [
-      "do NOT use rename_assist(emitPreview:true) for a symbol used outside its own file — 17–22% recall.",
+      "rename_assist without emitPreview is a read-only advisory; pass scopePaths only to narrow the scan deliberately.",
+      "refactor_replace_preview(findMode:'regex') is the equivalent path when you have a pattern rather than a symbolId.",
       "top-level identifiers have no enclosing owner — pass includeLowConfidence:true on apply."
     ]
   },
@@ -91,9 +92,12 @@ const INTENT_RULES: IntentRule[] = [
     id: "docs-search",
     keywords: ["documentation", "docs say", "which doc", "readme", "adr", "decision record", "is it documented"],
     recommendedTools: [
-      { tool: "query_docs", why: "full-text over indexed markdown", args: { mode: "search" } }
+      { tool: "query_docs", why: "full-text over indexed markdown: headings, prose sections and fenced blocks", args: { mode: "search" } }
     ],
-    caveats: ["no indexer writes 'prose' sections yet (MCP-ISSUE-061), so this matches headings and fenced blocks, not body text."]
+    caveats: [
+      "an index built before the prose lane (MCP-ISSUE-061 Stage 4) has no prose rows — re-run index_repository(mode:'full', docsMode:'on') if body text never matches.",
+      "matches are lexical, not semantic: rows labelled matchTier:'broad' came from the OR top-up, not a full match; pass contentTypes:['heading','prose'] to exclude code samples."
+    ]
   },
   {
     id: "stack-trace",

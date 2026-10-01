@@ -3101,3 +3101,89 @@ rows across the three repos instead of raising.
 `verify:enhancements` failed in the suite again and passed standalone immediately after, with the
 `docs_fts` work in the tree. Unrelated to it, and unchanged in signature. Three of the four suite runs
 this afternoon failed at that harness, which is the highest rate observed so far.
+
+---
+
+## MCP-ISSUE-062 — `query_graph` repo isolation was a text check: `OR 1=1`, a UNION arm or a second table read every other repo
+
+- **Status:** ✅ FIXED 2026-10-01 (found the same day by the skills review, **P0 — security**).
+- **Scenario:** one central SQLite DB holds 11 repos. `query_graph` is documented as repo-scoped.
+- **Expected vs actual:** `validateReadOnlyGraphSql` only regex-tested that `:repoId` appeared in the
+  SQL, and the runner executed `select * from (<sql>) limit` with no scoping. The following all returned
+  rows from other repos: `... where repo_id = :repoId or 1=1`, a UNION arm, a comma join or a subquery
+  on a second table. Three more holes sat beside it:
+  - the `from|join <ident>` allowlist regex missed comma joins and `"main".symbols`, `[main].symbols`
+    and `'main'.symbols`;
+  - `pragma_database_list` and `pragma_table_info` slipped past the `\bpragma\b` token check;
+  - a trailing `-- comment` broke the wrapper's closing paren.
+- **Impact:** any caller could read the symbols, edges, refactor hunks and source excerpts of any
+  indexed repo, which breaks the "tenant/repo isolation" rule in `.claude/rules/codebase-index.md`.
+- **Fix (three layers):**
+  1. **Shadowing CTEs.** The SQL is wrapped so that each allowed table name resolves to a CTE
+     filtered on a bound `@__scope_repo_id`. That parameter is bound last, so caller params cannot
+     override it.
+     - Child tables without `repo_id` are scoped through their parent.
+     - `cross_repo_deps` matches on either side.
+     - Table scopes live in `QUERY_GRAPH_TABLE_SCOPES` (`src/middleware/sqliteGuardrails.ts`).
+  2. **Schema qualifiers banned.** A SQLite-aware tokenizer rejects `main.`, `temp.` and
+     `temporary.` in every quoting style.
+  3. **Bytecode audit.** better-sqlite3 has no authorizer, so the wrapped statement is `EXPLAIN`ed
+     first. Every `OpenRead`/`ReopenIdx` must target a root page of an allowed table or index;
+     `OpenWrite` and `VOpen` are refused. This also closes `sqlite_master`, `docs`, `symbols_fts`
+     and the `pragma_*` functions.
+- **Contract:** unchanged. The `:repoId` requirement is kept for compatibility and is documented in
+  source as *not* the isolation mechanism.
+- **Guarded:** `src/services/impact/queryGraphIsolation.test.ts` (10 tests, two repos, real schema).
+  Each test fails against the pre-fix code.
+- **Verified live** on the central index (11 repos):
+  - `select repo_id, count(*) from symbols where repo_id = :repoId or 1=1 group by repo_id` →
+    one row, `codebase-index-mcp`, 2035.
+  - `"main".symbols` → refused.
+  - `union ... from sqlite_master` → refused.
+
+## MCP-ISSUE-063 — incremental re-index left resolved edges pointing at symbols that no longer exist; the size/mtime quick check never fired
+
+- **Status:** ✅ FIXED 2026-10-01 (P1).
+- **Scenario:** edit a callee file so its declarations shift lines, or delete it, and run
+  `index_repository(mode: "incremental")`.
+- **Expected vs actual:** a symbol id includes the row (`makeSymbolId` → `repoId:filePath:kind:name:row`).
+  `replaceSymbolsForFile` deleted only the changed file's **outbound** edges, and `pruneOrphanedEdges`
+  checked `from_id` only. Resolved edges from **unchanged** files kept their old `to_id`.
+  - Reproduced: shifting `callee.ts` down 3 lines left 2 dangling CALLS edges; deleting it left 3.
+  - A full index produced 0.
+- **Impact:** `get_call_chain`, `find_impact_files` and every traversal silently lost the caller → callee
+  link until the next full run. No error was raised and health still reported `ok`.
+- **Fix:** files that hold a resolved edge whose target is missing (or is about to be pruned) are
+  re-extracted in the same run, so incremental matches full by construction.
+  - `writeStore.findDanglingEdgeSourceFiles` finds those files, and `indexPipeline` queues them
+    (`queueDependentFiles`).
+  - A non-full safety net, `pruneDanglingResolvedEdges`, removes any leftover and counts it in
+    `edgesPruned`.
+  - `INDEX_VERSION` is unchanged; older dangling edges heal on the next incremental run.
+- **Second defect, same pass:** the size/mtime quick check in `indexPipeline.ts` compared
+  `"<size>-<mtime>"` as a prefix of a sha256 hex digest, so it could never match and only cost one
+  `stat()` per file. It was removed; the content-hash skip below it is the real check.
+- **Guarded:** `src/services/indexing/incrementalInboundEdges.test.ts` covers the line shift and the
+  callee deletion. Each asserts 0 dangling `to_id` and an edge set equal to a fresh full index.
+- **Verified live** on `codebase-index-mcp`:
+  - incremental run `3f780a44`: 0 dangling.
+  - full run `4a60c6d6`: symbols 2035 = 2035, edges 5187 = 5187, unresolved-in-graph 942 = 942.
+- **Residual:** the other repos in the central DB heal on their next incremental run; none was
+  re-indexed for this fix.
+
+## MCP-ISSUE-064 — every `McpError` reached the wire as `MCP_ERROR`, so a caller's bad input read like a server fault
+
+- **Status:** ✅ FIXED 2026-10-01 (P3; found while verifying MCP-ISSUE-062 live).
+- **Expected vs actual:** a `query_graph` scope refusal is thrown as `McpError(InvalidParams)`, yet the
+  client received `code: "MCP_ERROR"`. `mapError` (`src/middleware/errors.ts`) collapsed every JSON-RPC
+  code into that one string. This affected about 36 `InvalidParams` sites, plus `InternalError` and
+  `InvalidRequest`.
+- **Fix:** the wire code now follows the JSON-RPC code:
+  - `InvalidParams` → `VALIDATION_ERROR` (the code zod failures already used);
+  - `InternalError` → `INTERNAL_ERROR`;
+  - any other code → `MCP_ERROR`.
+  Also fixed the refusal text `"...is not allowed Allowed tables: ..."`, which now has its full stop.
+- **Behaviour change:** callers matching on `MCP_ERROR` for bad input now see `VALIDATION_ERROR`.
+  `test:server-envelopes` updated accordingly: a bad `previewId` on `refactor_replace_apply` now
+  expects `VALIDATION_ERROR`.
+- **Guarded:** `src/middleware/errors.test.ts` asserts all three mappings.

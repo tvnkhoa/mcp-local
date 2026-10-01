@@ -104,11 +104,11 @@ check("tables allowed", validateAllowedTables("select 1 from symbols join edges 
 });
 check("table denied", validateAllowedTables("select 1 from secrets", allowed), {
   ok: false,
-  message: "query_graph: table 'secrets' is not allowed"
+  message: "query_graph: table 'secrets' is not allowed."
 });
 check("denied in a join", validateAllowedTables("select 1 from symbols join secrets on 1=1", allowed), {
   ok: false,
-  message: "query_graph: table 'secrets' is not allowed"
+  message: "query_graph: table 'secrets' is not allowed."
 });
 check(
   "table name inside a string is not a table reference",

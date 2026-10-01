@@ -233,7 +233,7 @@ try {
   assert(badApply.isError === true, "a failed apply is an isError result, not a JSON-RPC error");
   const badApplyBody = js(badApply);
   assert(
-    badApplyBody?.code === "MCP_ERROR" && UUID_RE.test(badApplyBody?.requestId ?? ""),
+    badApplyBody?.code === "VALIDATION_ERROR" && UUID_RE.test(badApplyBody?.requestId ?? ""),
     "a failed apply carries the standard { code, message, requestId } envelope",
     JSON.stringify(badApplyBody)
   );

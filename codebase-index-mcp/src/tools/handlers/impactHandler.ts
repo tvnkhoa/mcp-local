@@ -2,7 +2,7 @@ import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { McpError, ErrorCode } from "@modelcontextprotocol/sdk/types.js";
 import { applyResultBudget, resolveResponseProfile } from "../../middleware/responseFormatter.js";
 import { fileIndexedNote } from "../../middleware/inputGuards.js";
-import { validateReadOnlyGraphSql, validateAllowedTables } from "../../middleware/sqliteGuardrails.js";
+import { validateReadOnlyGraphSql, validateAllowedTables, QUERY_GRAPH_TABLE_SCOPES, QueryGraphScopeError } from "../../middleware/sqliteGuardrails.js";
 import { buildStaleWarning, getRepoStaleness, collectDirtyFiles, countCommitsBehind } from "../../services/git/gitHelpers.js";
 import type { StaleWarning } from "../../services/git/gitHelpers.js";
 import { buildCoverageBlock, summarizeEdgeProvenance } from "../../middleware/coverage.js";
@@ -533,7 +533,8 @@ export function handleRouteMap(
 
 // ── query_graph ───────────────────────────────────────────────────────────────
 
-const ALLOWED_QUERY_GRAPH_TABLES = new Set(["repositories", "files", "symbols", "edges", "index_runs", "routes", "cross_repo_deps", "refactor_previews", "refactor_preview_hunks", "refactor_applies", "refactor_apply_changes", "refactor_apply_hunks", "refactor_rollbacks", "vec_symbol_map"]);
+// The allowlist is the scope table: a table is readable exactly when it has a repo filter.
+const ALLOWED_QUERY_GRAPH_TABLES = new Set(Object.keys(QUERY_GRAPH_TABLE_SCOPES));
 
 export function handleQueryGraph(
   args: { repoId: string; sql: string; params?: Record<string, unknown>; limit: number; timeoutMs: number; profile: string },
@@ -561,6 +562,10 @@ export function handleQueryGraph(
   try {
     result = store.runReadOnlyGraphQuery(allowlistCheck.sanitizedSql, { ...args.params, repoId: args.repoId }, args.limit, args.timeoutMs);
   } catch (err: unknown) {
+    // A scope refusal is the caller's mistake, not a failed query, and its message is ours.
+    if (err instanceof QueryGraphScopeError) {
+      throw new McpError(ErrorCode.InvalidParams, err.message);
+    }
     const raw = err instanceof Error ? err.message : String(err);
     const safe = raw.replace(/['"][^'"]{0,200}['"]/g, "'...'").slice(0, 300);
     throw new McpError(ErrorCode.InternalError, `query_graph: query failed — ${safe}. Check SQL syntax and allowed tables.`);

@@ -74,6 +74,18 @@ export function pruneAndResolve(
     indexLog(`[index-prune-skipped] repo has ${String(files.length)} files, exceeds cap of ${String(maxFiles)} — stale-file cleanup and IMPLEMENTS resolution skipped to avoid false deletions`);
   }
 
+  // Inbound edges into replaced symbols: the pipeline already re-extracted their source files
+  // (`queueDependentFiles`), so this deletes only what that could not reach — a dependent that now
+  // fails to parse, or one dirty mode could not see. Safe on a subset scan: it keys on a missing
+  // target symbol, not on the file set. Full runs re-extract every source and never need it.
+  if (input.mode !== "full") {
+    const dangling = store.pruneDanglingResolvedEdges(input.repoId);
+    edgesPruned += dangling;
+    if (dangling > 0) {
+      indexLog(`[index-prune] removed ${String(dangling)} resolved edge(s) whose target symbol no longer exists`);
+    }
+  }
+
   // Resolve iface: placeholders → real symbolIds after all C# files have been indexed.
   if (input.mode === "full" && scanWasComplete) {
     const resolvedImpl = store.resolveImplementsEdges(input.repoId);

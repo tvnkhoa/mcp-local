@@ -157,6 +157,8 @@ import {
   pruneStaleFiles as pruneStaleFilesImpl,
   pruneFiles as pruneFilesImpl,
   pruneOrphanedEdges as pruneOrphanedEdgesImpl,
+  findDanglingEdgeSourceFiles as findDanglingEdgeSourceFilesImpl,
+  pruneDanglingResolvedEdges as pruneDanglingResolvedEdgesImpl,
   replaceEdgesForFile as replaceEdgesForFileImpl,
   replaceRoutesForFile as replaceRoutesForFileImpl
 } from "./writeStore.js";
@@ -293,6 +295,15 @@ export class GraphStore {
 
   pruneOrphanedEdges(repoId: string): number {
     return pruneOrphanedEdgesImpl(this.db, repoId);
+  }
+
+  /** Source files of resolved edges into missing or soon-pruned symbols. @see writeStore.ts */
+  findDanglingEdgeSourceFiles(repoId: string, doomedFilePaths: readonly string[]): string[] {
+    return findDanglingEdgeSourceFilesImpl(this.db, repoId, doomedFilePaths);
+  }
+
+  pruneDanglingResolvedEdges(repoId: string): number {
+    return pruneDanglingResolvedEdgesImpl(this.db, repoId);
   }
 
   replaceEdgesForFile(repoId: string, filePath: string, edges: EdgeRecord[]): void {

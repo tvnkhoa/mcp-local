@@ -9,6 +9,15 @@ import type Database from "better-sqlite3";
 import type { EdgeRecord, GraphHealth, ReliabilitySummary, ResolvedEdge, SymbolRecord } from "../../types/index.js";
 import { CALL_TRAVERSAL_EDGE_SQL_LIST, CALL_TRAVERSAL_EDGE_TYPES } from "../../types/index.js";
 import { expandInterfaceSiblingsImpl } from "../graph/interfaceSiblings.js";
+import {
+  QUERY_GRAPH_TABLE_SCOPES,
+  QueryGraphScopeError,
+  SCOPE_REPO_PARAM,
+  buildRepoScopedGraphSql,
+  findOutOfScopeRead,
+  findSchemaQualifier,
+  type ExplainRow
+} from "../../middleware/sqliteGuardrails.js";
 
 export function getFolderSummaryImpl(
   db: Database.Database,
@@ -261,10 +270,47 @@ export function runReadOnlyGraphQueryImpl(
   elapsedMs: number;
   timedOut: boolean;
 } {
-  const wrappedSql = `select * from (${sql}) as mcp_query limit @__limit`;
+  // Repo isolation is enforced here, not by the `:repoId` text check: see "Repo isolation, enforced"
+  // in middleware/sqliteGuardrails.ts. The scope comes from the bound repoId, which the handler
+  // always sets from the tool's own `repoId` argument after the caller's params.
+  const scopeRepoId = namedParams.repoId;
+  if (typeof scopeRepoId !== "string" || scopeRepoId.length === 0) {
+    throw new QueryGraphScopeError("query_graph: a repoId is required to scope the query");
+  }
+
+  // Re-checked here so the runner is safe on its own, not only behind the handler's text guard:
+  // a qualified `main.symbols` walks straight past the scoping CTEs.
+  const qualifier = findSchemaQualifier(sql);
+  if (qualifier !== undefined) {
+    throw new QueryGraphScopeError(`query_graph: schema-qualified names ('${qualifier}.') are not allowed; name graph tables unqualified`);
+  }
+
+  const allowedTables = Object.keys(QUERY_GRAPH_TABLE_SCOPES);
+  const schemaRows = db
+    .prepare(
+      `select tbl_name as tableName, rootpage as rootPage
+       from main.sqlite_schema
+       where type in ('table', 'index') and rootpage > 0
+         and tbl_name in (${allowedTables.map(() => "?").join(", ")})`
+    )
+    .all(...allowedTables) as { tableName: string; rootPage: number }[];
+  const allowedRootPages = new Map(schemaRows.map((r) => [r.rootPage, r.tableName]));
+  const existingTables = new Set(schemaRows.map((r) => r.tableName));
+
+  const wrappedSql = buildRepoScopedGraphSql(sql, existingTables, "__limit");
+  const boundParams = { ...namedParams, __limit: limit + 1, [SCOPE_REPO_PARAM]: scopeRepoId };
   const stmt = db.prepare(wrappedSql);
+  if (!stmt.reader) {
+    throw new QueryGraphScopeError("query_graph: only statements that return rows are allowed");
+  }
+  const plan = db.prepare(`explain ${wrappedSql}`).all(boundParams) as ExplainRow[];
+  const refusal = findOutOfScopeRead(plan, allowedRootPages);
+  if (refusal !== undefined) {
+    throw new QueryGraphScopeError(refusal);
+  }
+
   const start = Date.now();
-  const rows = stmt.all({ ...namedParams, __limit: limit + 1 }) as Record<string, unknown>[];
+  const rows = stmt.all(boundParams) as Record<string, unknown>[];
   const elapsedMs = Date.now() - start;
   const truncated = rows.length > limit;
   const safeRows = truncated ? rows.slice(0, limit) : rows;

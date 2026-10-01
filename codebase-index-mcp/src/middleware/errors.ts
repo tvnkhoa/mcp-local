@@ -1,7 +1,7 @@
 /**
  * Error handling utilities.
  *
- * **This does not use `@mcp/sdk`'s `createErrorMapper`, and that is deliberate.** The other three
+ * **This does not use `@mcp/sdk`'s `createErrorMapper`, and that is deliberate.** The other four
  * servers share it; this one publishes a different envelope — `{ code, message, requestId }` with
  * UPPER_SNAKE codes and every message prefixed with the tool name, against the shared
  * `{ code, message, detail? }`. `createErrorMapper` also builds a `(error) => WireError`, while
@@ -16,7 +16,7 @@
  */
 
 import { randomUUID } from "node:crypto";
-import { McpError } from "@modelcontextprotocol/sdk/types.js";
+import { ErrorCode, McpError } from "@modelcontextprotocol/sdk/types.js";
 import { isPlatformError } from "@mcp/core";
 import { z } from "zod";
 import { PolicyViolationError } from "../services/refactor/refactorUtils.js";
@@ -61,7 +61,7 @@ export function mapError(error: unknown, toolName: string): { code: string; mess
    *
    * The code is passed through verbatim, so it is lower_snake (`not_found`) while this server's
    * own codes are UPPER_SNAKE. Deliberate: `not_found` is the platform's published vocabulary and
-   * the same string the other three migrated servers emit. Inventing `NOT_FOUND` here would make
+   * the same string the other four servers emit. Inventing `NOT_FOUND` here would make
    * this the only server in the workspace with a fourth spelling. The `PolicyViolationError`
    * branch below already passes lowercase codes through for the same reason.
    */
@@ -89,9 +89,15 @@ export function mapError(error: unknown, toolName: string): { code: string; mess
     };
   }
 
+  /**
+   * The JSON-RPC code decides the wire code. Every `McpError` used to collapse to `MCP_ERROR`, so a
+   * caller's bad input (~36 `InvalidParams` sites, e.g. a `query_graph` scope refusal) read the same
+   * as a server fault. `InvalidParams` is the caller's mistake, like a zod failure above, and
+   * `InternalError` is ours; anything else keeps `MCP_ERROR`.
+   */
   if (error instanceof McpError) {
     return {
-      code: "MCP_ERROR",
+      code: mcpWireCode(error.code),
       message: prefixOnce(toolName, error.message),
       requestId
     };
@@ -102,6 +108,12 @@ export function mapError(error: unknown, toolName: string): { code: string; mess
     message: prefixOnce(toolName, error instanceof Error ? error.message : "Unknown error"),
     requestId
   };
+}
+
+function mcpWireCode(code: number): string {
+  if (code === ErrorCode.InvalidParams) return "VALIDATION_ERROR";
+  if (code === ErrorCode.InternalError) return "INTERNAL_ERROR";
+  return "MCP_ERROR";
 }
 
 export function assertNoLlmRuntimePolicy(llmEnabled: boolean): void {
