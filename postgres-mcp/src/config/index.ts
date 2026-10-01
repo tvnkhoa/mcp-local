@@ -108,6 +108,16 @@ export function ddlMigrationsDirFromEnv(): string {
   return raw === "" ? "" : path.resolve(raw);
 }
 
+/** The DDL lane's optional settings, raw and trimmed. `parseDdlLaneSettings` validates them. */
+export function ddlLaneSettingsFromEnv(): { externalLedger: string; ownerRoles: string; sessionSettings: string; adoptionSentinel: string } {
+  return {
+    externalLedger: stringFromEnv("POSTGRES_DDL_EXTERNAL_LEDGER"),
+    ownerRoles: stringFromEnv("POSTGRES_DDL_OWNER_ROLES"),
+    sessionSettings: stringFromEnv("POSTGRES_DDL_SESSION_SETTINGS"),
+    adoptionSentinel: stringFromEnv("POSTGRES_DDL_ADOPTION_SENTINEL")
+  };
+}
+
 /**
  * `POSTGRES_MIGRATION_LOCK_TIMEOUT_MS`: a whole number of ms, where **0 is meaningful** — it turns
  * the lock timeout off. That is why this is not `numberFromEnv`, which reads 0 as "unset" and

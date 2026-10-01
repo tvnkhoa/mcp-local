@@ -13,6 +13,7 @@
     "smoke": "node scripts/smoke-test.mjs && node scripts/write-flow-test.mjs && node scripts/ddl-flow-test.mjs && node scripts/migration-flow-test.mjs && node scripts/pgbouncer-test.mjs",
     "test:write-flow": "node scripts/write-flow-test.mjs",
     "test:ddl-flow": "node scripts/ddl-flow-test.mjs",
+    "test:ddl-external-ledger": "node scripts/ddl-external-ledger-test.mjs",
     "test:migration-flow": "node scripts/migration-flow-test.mjs",
     "test:pgbouncer": "node scripts/pgbouncer-test.mjs"
   },

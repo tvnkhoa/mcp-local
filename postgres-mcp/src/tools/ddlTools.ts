@@ -25,7 +25,7 @@ export function buildDdlTools(deps: PostgresDeps): AnyToolDefinition[] {
   const ddlStatus = defineTool({
     name: "ddl_status",
     description:
-      "Show raw-SQL DDL migrations for an environment: applied, pending, edited-since-applied (checksum mismatch), missing from disk, and out-of-order. Read-only; works on prod. Requires POSTGRES_DDL_ENABLED.",
+      "Show raw-SQL DDL migrations for an environment: applied, pending, edited-since-applied (checksum mismatch), missing from disk, and out-of-order, read from the configured ledger (mcp_ops.ddl_history, or the repo's own table with POSTGRES_DDL_EXTERNAL_LEDGER). Read-only; works on prod. Requires POSTGRES_DDL_ENABLED.",
     input: z.object({ environment: environmentArg, profile: profileArg }).strict(),
     inputSchema: schema.object({ environment: envProp, profile: profileProp }),
     annotations: readsDb,
@@ -36,7 +36,7 @@ export function buildDdlTools(deps: PostgresDeps): AnyToolDefinition[] {
   const ddlCreate = defineTool({
     name: "ddl_create",
     description:
-      "Write a new DDL migration file pair (V<timestamp>__<name>.up.sql / .down.sql) to POSTGRES_DDL_MIGRATIONS_DIR after validating it. Does NOT touch any database; never overwrites a file. Risks are reported for review, then enforced by ddl_preview.",
+      "Write a new DDL migration file pair (V<timestamp>__<name>.up.sql / .down.sql) to POSTGRES_DDL_MIGRATIONS_DIR after validating it. Does NOT touch any database; never overwrites a file. Risks are reported for review, then enforced by ddl_preview. Not available with POSTGRES_DDL_EXTERNAL_LEDGER, whose files are the repo's own.",
     input: z
       .object({
         name: z.string().regex(MIGRATION_NAME),
@@ -50,7 +50,7 @@ export function buildDdlTools(deps: PostgresDeps): AnyToolDefinition[] {
     inputSchema: schema.object(
       {
         name: schema.string("Migration name: lowercase letters, digits and underscore (^[a-z0-9_]{1,100}$)."),
-        up: schema.string("The migration's SQL. CREATE/ALTER/DROP/COMMENT ON only; no DML, DO, GRANT or transaction control."),
+        up: schema.string("The migration's SQL. CREATE/ALTER/DROP/COMMENT ON, GRANT/REVOKE on a named object, and ALTER … OWNER TO an allowlisted role; no DML, DO, role membership or transaction control."),
         down: schema.string("SQL that reverts `up`. Optional, but without it the migration cannot be rolled back."),
         noTransaction: schema.boolean("Write the -- mcp:no-transaction directive. Required for CREATE/DROP INDEX CONCURRENTLY; the migration must then be one statement."),
         version: schema.string("14-digit UTC timestamp (yyyymmddhhmmss). Omit to use the next one."),
@@ -71,7 +71,7 @@ export function buildDdlTools(deps: PostgresDeps): AnyToolDefinition[] {
       .object({
         environment: environmentArg,
         direction: z.enum(["up", "down"]).optional(),
-        target: z.string().regex(/^(\d{14}|0)$/).optional(),
+        target: z.string().regex(/^(\d{14}|\d{4,13}|0)$/).optional(),
         allowOutOfOrder: z.boolean().optional(),
         sql: z.string().min(1).max(MAX_DDL_SCRIPT_BYTES).optional(),
         label: z.string().regex(MIGRATION_NAME).optional(),
@@ -82,7 +82,7 @@ export function buildDdlTools(deps: PostgresDeps): AnyToolDefinition[] {
     inputSchema: schema.object({
       environment: envProp,
       direction: schema.enumOf(["up", "down"], "File mode: \"up\" (default) applies pending migrations; \"down\" reverts applied ones."),
-      target: schema.string("File mode: 14-digit version. Up: apply through it. Down: revert everything newer than it (\"0\" = everything)."),
+      target: schema.string("File mode: 14-digit version (the NNNN prefix with an external ledger). Up: apply through it. Down: revert everything newer than it (\"0\" = everything)."),
       allowOutOfOrder: schema.boolean("File mode: allow pending migrations older than the newest applied one."),
       sql: schema.string("Inline mode: the DDL to run, instead of files. Same rules as a migration file."),
       label: schema.string("Inline mode: a name for the ledger (^[a-z0-9_]{1,100}$)."),

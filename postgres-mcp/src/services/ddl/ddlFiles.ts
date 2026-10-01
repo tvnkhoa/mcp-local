@@ -9,6 +9,14 @@
  * Versions are UTC timestamps, not counters. Two branches that each add "0042" collide at merge,
  * while two timestamps almost never do. They sort as strings in apply order, and they are the same
  * shape as EF Core's migration ids.
+ *
+ * With POSTGRES_DDL_EXTERNAL_LEDGER the directory is a repo's own, written for psql and applied
+ * until now by that repo's runner, so the layout is that repo's instead (the `psql` format):
+ *
+ *   0017-review-run-counts-its-window.sql
+ *
+ * Forward-only, applied in file-name order, and checksummed over the file's RAW bytes, exactly as
+ * `sha256sum` does, because the ledger rows already there were written that way.
  */
 
 import { createHash } from "node:crypto";
@@ -21,12 +29,17 @@ import { MAX_DDL_SCRIPT_BYTES } from "../../middleware/ddlGuardrails.js";
 export const MIGRATION_FILE = /^V(\d{14})__([a-z0-9_]{1,100})\.(up|down)\.sql$/;
 export const MIGRATION_NAME = /^[a-z0-9_]{1,100}$/;
 export const MIGRATION_VERSION = /^\d{14}$/;
+/** The psql format: a 4–14 digit prefix, a dash, a lower-case slug. */
+export const PSQL_MIGRATION_FILE = /^(\d{4,14})-([a-z0-9][a-z0-9-]{0,150})\.sql$/;
+
+export type MigrationFileFormat = "mcp" | "psql";
 
 export interface MigrationScript {
   /** File name only, never a path: responses must not leak the server's directory layout. */
   file: string;
-  /** BOM-stripped, LF-normalized text: what is checksummed and what runs. */
+  /** BOM-stripped, LF-normalized text: what runs, and in the `mcp` format what is checksummed. */
   text: string;
+  /** `mcp`: `checksumOf(text)`. `psql`: sha256 of the file's raw bytes. */
   checksum: string;
 }
 
@@ -74,10 +87,13 @@ function fileError(code: string, message: string): PolicyViolationError {
  * Only regular files directly in `dir` are read. Subdirectories are not scanned, and symlinks are
  * skipped, so nothing outside the directory can be pulled into a migration.
  */
-export async function loadMigrations(dir: string): Promise<LoadedMigrations> {
-  let entries;
+export async function loadMigrations(dir: string, format: MigrationFileFormat = "mcp"): Promise<LoadedMigrations> {
+  return format === "psql" ? loadPsqlMigrations(dir) : loadMcpMigrations(dir);
+}
+
+async function readEntries(dir: string) {
   try {
-    entries = await readdir(dir, { withFileTypes: true });
+    return await readdir(dir, { withFileTypes: true });
   } catch (error) {
     const code = (error as { code?: string }).code;
     throw fileError(
@@ -85,6 +101,52 @@ export async function loadMigrations(dir: string): Promise<LoadedMigrations> {
       `POSTGRES_DDL_MIGRATIONS_DIR could not be read${code === undefined ? "" : ` (${code})`}. Check that it exists and is a directory.`
     );
   }
+}
+
+/**
+ * The psql format. The version is the numeric prefix, and it must be unique, so that `target` names
+ * one file. Order is by file name, which is the order a shell glob hands the repo's runner.
+ */
+async function loadPsqlMigrations(dir: string): Promise<LoadedMigrations> {
+  const entries = await readEntries(dir);
+  const migrations: MigrationFile[] = [];
+  const ignoredFiles: string[] = [];
+  const warnings: string[] = [];
+
+  for (const entry of entries) {
+    if (!entry.isFile()) {
+      continue;
+    }
+    const match = PSQL_MIGRATION_FILE.exec(entry.name);
+    if (match === null) {
+      if (entry.name.toLowerCase().endsWith(".sql")) {
+        ignoredFiles.push(entry.name);
+      }
+      continue;
+    }
+    const [, version, name] = match as unknown as [string, string, string];
+    const bytes = await readFile(path.join(dir, entry.name));
+    if (bytes.byteLength > MAX_DDL_SCRIPT_BYTES) {
+      throw fileError("DDL_TOO_LARGE", `${entry.name} is over ${String(MAX_DDL_SCRIPT_BYTES)} bytes.`);
+    }
+    const clash = migrations.find((m) => m.version === version);
+    if (clash !== undefined) {
+      throw fileError("DDL_DUPLICATE_VERSION", `Prefix ${version} is used by both ${clash.up.file} and ${entry.name}. Each prefix must be unique.`);
+    }
+    if (bytes.includes("\r\n")) {
+      warnings.push(`${entry.name} has CRLF line endings. Its checksum is over those bytes, as sha256sum takes it, so a ledger row written from an LF checkout will not match.`);
+    }
+    const checksum = createHash("sha256").update(bytes).digest("hex");
+    migrations.push({ version, name, up: { file: entry.name, text: normalizeScript(bytes.toString("utf8")), checksum } });
+  }
+
+  migrations.sort((a, b) => (a.up.file < b.up.file ? -1 : a.up.file > b.up.file ? 1 : 0));
+  ignoredFiles.sort();
+  return { migrations, ignoredFiles, warnings };
+}
+
+async function loadMcpMigrations(dir: string): Promise<LoadedMigrations> {
+  const entries = await readEntries(dir);
 
   const byVersion = new Map<string, { name: string; up?: MigrationScript; down?: MigrationScript }>();
   const ignoredFiles: string[] = [];

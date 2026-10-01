@@ -27,6 +27,12 @@ export interface DdlStatusReport {
   pending: Array<{ version: string; name: string; hasDown: boolean; outOfOrder: boolean }>;
   /** Applied, but the up file on disk has changed since. Blocks every file-mode plan. */
   checksumMismatch: Array<{ version: string; name: string }>;
+  /**
+   * External ledger only: the ledger records this version under a different file name than the
+   * one on disk. That ledger is keyed by file name, so its own runner would apply the renamed file
+   * again. Blocks every file-mode plan.
+   */
+  renamed: Array<{ version: string; recordedFile: string; fileOnDisk: string }>;
   /** Applied, but no longer on disk. Up plans warn; a down plan cannot revert past it. */
   missingFiles: Array<{ version: string; name: string }>;
   /** Pending versions older than the newest applied one. */
@@ -39,8 +45,12 @@ export function computeStatus(files: readonly MigrationFile[], state: HistorySta
   const appliedVersions = new Set(state.applied.map((a) => a.version));
   const newestApplied = state.applied.at(-1)?.version;
 
+  const renamed: DdlStatusReport["renamed"] = [];
   const applied = state.applied.map((a) => {
     const file = onDisk.get(a.version);
+    if (file !== undefined && a.file !== undefined && a.file !== file.up.file) {
+      renamed.push({ version: a.version, recordedFile: a.file, fileOnDisk: file.up.file });
+    }
     return {
       version: a.version,
       name: a.name,
@@ -62,6 +72,7 @@ export function computeStatus(files: readonly MigrationFile[], state: HistorySta
     applied,
     pending,
     checksumMismatch: applied.filter((a) => a.checksumMatches === false).map(({ version, name }) => ({ version, name })),
+    renamed,
     missingFiles: applied.filter((a) => !a.onDisk).map(({ version, name }) => ({ version, name })),
     outOfOrder: pending.filter((p) => p.outOfOrder).map((p) => p.version),
     inlineApplied: state.unadoptedInline.map(({ historyId, name }) => ({ historyId, name }))
@@ -111,6 +122,11 @@ export interface PlanInput {
   request: PlanRequest;
   config: DdlConfig;
   lint?: LintContext;
+  /**
+   * POSTGRES_DDL_ADOPTION_SENTINEL, read from the database: whether the sentinel relation exists,
+   * and how many rows the ledger holds (failed ones included). Omitted when no sentinel is set.
+   */
+  adoption?: { sentinel: string; sentinelPresent: boolean; ledgerRowCount: number };
 }
 
 function fail(code: string, message: string): PlanResult {
@@ -120,13 +136,18 @@ function fail(code: string, message: string): PlanResult {
 /** Validate, time and lint one script into a step. `createdInPlan` carries across steps. */
 function buildStep(
   base: Pick<PlanStep, "version" | "name" | "action" | "file" | "upChecksum">,
-  sql: string,
+  script: { sql: string; checksum: string },
   options: { noTransaction?: boolean },
   input: PlanInput,
   createdInPlan: Set<string>
 ): { ok: true; step: PlanStep } | { ok: false; error: { code: string; message: string } } {
   const label = base.file ?? `inline '${base.name}'`;
-  const validated = validateDdlScript(sql, options);
+  const { sql } = script;
+  const validated = validateDdlScript(sql, {
+    ...options,
+    psql: input.config.externalLedger !== undefined,
+    ownerRoles: input.config.ownerRoles ?? []
+  });
   if (!validated.ok) {
     return { ok: false, error: { code: validated.error.code, message: `${label}: ${validated.error.message}` } };
   }
@@ -152,7 +173,7 @@ function buildStep(
     step: {
       ...base,
       mode: validated.mode,
-      checksum: checksumOf(sql),
+      checksum: script.checksum,
       sql,
       statements: validated.statements,
       timeouts: timed.timeouts,
@@ -177,6 +198,12 @@ export function buildPlan(input: PlanInput): PlanResult {
   const createdInPlan = new Set<string>();
 
   if (request.mode === "inline") {
+    if (input.config.externalLedger !== undefined) {
+      return fail(
+        "DDL_INLINE_UNSUPPORTED",
+        "Inline SQL is not accepted with an external ledger: that ledger records files, and a migration with no file would be invisible to the repo's own runner. Add the file to the migrations directory."
+      );
+    }
     const checksum = checksumOf(request.sql);
     const warnings: string[] = [];
     if (state.unadoptedInline.some((i) => i.checksum === checksum) || state.applied.some((a) => a.checksum === checksum)) {
@@ -184,7 +211,7 @@ export function buildPlan(input: PlanInput): PlanResult {
     }
     const built = buildStep(
       { version: null, name: request.label ?? "inline", action: "apply", file: null, upChecksum: null },
-      request.sql,
+      { sql: request.sql, checksum },
       { noTransaction: request.noTransaction === true },
       input,
       createdInPlan
@@ -197,7 +224,8 @@ export function buildPlan(input: PlanInput): PlanResult {
     return fail("DDL_MIGRATIONS_DIR_UNCONFIGURED", "File-mode plans need the migrations directory.");
   }
   const status = computeStatus(loaded.migrations, state);
-  const warnings = [...loaded.warnings, ...loaded.ignoredFiles.map((f) => `${f} does not follow V<14 digits>__<name>.(up|down).sql and is ignored.`)];
+  const layout = input.config.externalLedger === undefined ? "V<14 digits>__<name>.(up|down).sql" : "NNNN-<name>.sql";
+  const warnings = [...loaded.warnings, ...loaded.ignoredFiles.map((f) => `${f} does not follow ${layout} and is ignored.`)];
 
   // An edited applied file means the directory no longer describes the database. Every file-mode
   // plan stops until the file is restored, because both directions read from it.
@@ -205,6 +233,12 @@ export function buildPlan(input: PlanInput): PlanResult {
     return fail(
       "DDL_CHECKSUM_MISMATCH",
       `Applied migration(s) changed on disk since they ran: ${status.checksumMismatch.map((m) => m.version).join(", ")}. Restore the original files; write a new migration for the change.`
+    );
+  }
+  if (status.renamed.length > 0) {
+    return fail(
+      "DDL_LEDGER_FILENAME_MISMATCH",
+      `The ledger records ${status.renamed.map((r) => `${r.recordedFile} (now ${r.fileOnDisk})`).join(", ")}. It is keyed by file name, so the repo's runner would apply the renamed file again. Restore the original name.`
     );
   }
 
@@ -218,6 +252,16 @@ export function buildPlan(input: PlanInput): PlanResult {
       warnings.push(`Applied migration ${missing.version} (${missing.name}) is no longer on disk.`);
     }
     const selected = status.pending.filter((p) => request.target === undefined || p.version <= request.target);
+    const adoption = input.adoption;
+    if (adoption !== undefined && adoption.sentinelPresent && adoption.ledgerRowCount === 0 && selected.length > 0) {
+      // The repo's own runner refuses here too: a populated schema with an empty ledger was built
+      // some other way (a dump, initdb scripts), and applying every file onto it would re-run
+      // migrations that are not idempotent.
+      return fail(
+        "DDL_ADOPTION_REQUIRED",
+        `${adoption.sentinel} exists but the ledger is empty, so this database was not built by these migrations. Record the files already in it (baseline the ledger) before applying anything.`
+      );
+    }
     const outOfOrder = selected.filter((p) => p.outOfOrder).map((p) => p.version);
     if (outOfOrder.length > 0 && request.allowOutOfOrder !== true) {
       return fail(
@@ -237,7 +281,7 @@ export function buildPlan(input: PlanInput): PlanResult {
       }
       const built = buildStep(
         { version: file.version, name: file.name, action, file: file.up.file, upChecksum: null },
-        file.up.text,
+        { sql: file.up.text, checksum: file.up.checksum },
         {},
         input,
         createdInPlan
@@ -251,6 +295,9 @@ export function buildPlan(input: PlanInput): PlanResult {
   }
 
   // ── down ──
+  if (input.config.externalLedger !== undefined) {
+    return fail("DDL_DOWN_UNSUPPORTED", "An external ledger is forward-only: its files have no down scripts. Write a new migration that undoes the change.");
+  }
   const target = request.target;
   if (target === undefined) {
     return fail("DDL_INVALID_ARGS", "A down plan needs target: the version to revert back to, or \"0\" to revert everything.");
@@ -273,7 +320,7 @@ export function buildPlan(input: PlanInput): PlanResult {
     }
     const built = buildStep(
       { version: applied.version, name: applied.name, action: "revert", file: file.down.file, upChecksum: applied.checksum },
-      file.down.text,
+      { sql: file.down.text, checksum: file.down.checksum },
       {},
       input,
       createdInPlan

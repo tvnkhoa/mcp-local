@@ -185,7 +185,7 @@ ddl_apply   { "previewId": "...", "approvalToken": "...",
 |---|---|
 | `ddl_status` | `environment?`, `profile?` |
 | `ddl_create` | `name` (`^[a-z0-9_]{1,100}$`), `up`, `down?` (≤ 256 KB mỗi script), `noTransaction?`, `version?` (14 chữ số), `profile?` |
-| `ddl_preview` | Chế độ file: `direction?` (`up`\|`down`), `target?` (`^\d{14}$` hoặc `"0"`), `allowOutOfOrder?`. Chế độ inline: `sql`, `label?`, `noTransaction?`. Không được trộn tham số của hai chế độ (`DDL_INVALID_ARGS`). Luôn có `environment?`, `profile?`; `sql` của từng bước chỉ hiện ở `profile: "verbose"` |
+| `ddl_preview` | Chế độ file: `direction?` (`up`\|`down`), `target?` (`^\d{14}$`, prefix `^\d{4,13}$` khi dùng ledger của repo, hoặc `"0"`), `allowOutOfOrder?`. Chế độ inline: `sql`, `label?`, `noTransaction?`. Không được trộn tham số của hai chế độ (`DDL_INVALID_ARGS`). Luôn có `environment?`, `profile?`; `sql` của từng bước chỉ hiện ở `profile: "verbose"` |
 | `ddl_dry_run` | `previewId`, `profile?` |
 | `ddl_apply` | `previewId`, `approvalToken`, `acknowledgeRisks?` (≤ 50 mã), `profile?` |
 
@@ -193,11 +193,15 @@ ddl_apply   { "previewId": "...", "approvalToken": "...",
 
 - **Tên file:** `V<yyyymmddhhmmss>__<name>.up.sql` + `.down.sql` (tuỳ chọn), đặt trong `POSTGRES_DDL_MIGRATIONS_DIR`. `ddl_create` không bao giờ ghi đè file có sẵn.
 - **Checksum:** sha256 của nội dung file, bỏ qua BOM, CRLF và khoảng trắng ở cuối. File đã apply mà bị sửa thì mọi plan theo file đều bị chặn (`DDL_CHECKSUM_MISMATCH`). Khôi phục file gốc, rồi viết migration mới cho thay đổi.
-- **Lệnh được phép:** `CREATE` / `ALTER` / `DROP` trên table, index, view, materialized view, sequence, type, domain, schema, function (sql/plpgsql), procedure, trigger; cộng thêm `COMMENT ON` và `CREATE EXTENSION`.
+- **Lệnh được phép:** `CREATE` / `ALTER` / `DROP` trên table, index, view, materialized view, sequence, type, domain, schema, function (sql/plpgsql), procedure, trigger, policy; cộng thêm `COMMENT ON` và `CREATE EXTENSION`.
+- **Quyền và owner** (ADR 0005, Decision 2 đã sửa đổi): đều cần acknowledge `PRIVILEGE_CHANGE`.
+  - `GRANT` / `REVOKE` trên một object có tên (table, sequence, function, procedure, routine, schema), cho role có tên hoặc `PUBLIC`.
+  - `CREATE` / `ALTER` / `DROP POLICY`, và `ALTER TABLE … DISABLE ROW LEVEL SECURITY` / `NO FORCE …`.
+  - `ALTER <table|view|sequence|type|domain|schema|function|procedure> … OWNER TO <role>`: phải là action duy nhất của statement, và `<role>` phải nằm trong `POSTGRES_DDL_OWNER_ROLES` (mặc định rỗng = từ chối mọi `OWNER TO`). Lúc preview, role được đọc từ `pg_roles`: role không tồn tại thì bị `OWNER_ROLE_UNKNOWN`; role có `SUPERUSER` / `CREATEROLE` / `BYPASSRLS` / `REPLICATION` thì bị `OWNER_ROLE_PRIVILEGED`, dù có trong allowlist.
 - **Lệnh bị từ chối:**
   - DML: dữ liệu đi qua `write_preview`. Pattern chuẩn: thêm cột nullable (ddl) → backfill (`write_preview`) → `SET NOT NULL` (ddl).
   - `DO` / `CALL`.
-  - `GRANT` / ROLE / `OWNER TO`.
+  - ROLE, membership (`GRANT role TO role`), `WITH GRANT OPTION`, `GRANTED BY`, `ON ALL … IN SCHEMA`, `ON DATABASE` / `PARAMETER` / `LANGUAGE` / …, `ALTER DEFAULT PRIVILEGES`, `REASSIGN OWNED`, `CURRENT_USER` / `SESSION_USER` / `CURRENT_ROLE`.
   - `SET` / `BEGIN` và các lệnh điều khiển transaction.
   - VACUUM và các lệnh bảo trì.
   - Mọi tham chiếu tới `mcp_ops`.
@@ -222,6 +226,29 @@ ddl_apply   { "previewId": "...", "approvalToken": "...",
 
 Ngoài ra: tối đa 256 KB và 200 statement cho mỗi migration. Giá trị vượt giới hạn bị từ chối (`DDL_DIRECTIVE_EXCEEDS_LIMIT`), không lặng lẽ bị kẹp về giới hạn. Bước lập plan lúc apply dùng lock wait ngắn nhất trong plan, nên một bảng đang bị khoá sẽ fail nhanh (`DDL_LOCK_TIMEOUT`) chứ không treo.
 
+### Ledger của repo (`POSTGRES_DDL_EXTERNAL_LEDGER`)
+
+Dùng khi repo đã có runner riêng (ví dụ `db/migrate.sh` của wec.aria) với file psql `NNNN-<name>.sql` và bảng ledger `(filename, checksum)`. Lane sẽ đọc và ghi **đúng bảng đó**, nên runner của repo và `ddl_*` thay nhau apply được mà không có ledger thứ hai (ADR 0005, Decision 7).
+
+```bash
+POSTGRES_DDL_ENABLED=true
+POSTGRES_DDL_MIGRATIONS_DIR=D:/repo/db/migrations
+POSTGRES_DDL_EXTERNAL_LEDGER=public.schema_migration
+POSTGRES_DDL_OWNER_ROLES=aria                       # tuỳ chọn: cho phép OWNER TO aria
+POSTGRES_DDL_SESSION_SETTINGS=aria.expected_market=AU   # tuỳ chọn: set_config(…, local) trước mỗi migration
+POSTGRES_DDL_ADOPTION_SENTINEL=public.chunks        # tuỳ chọn: chặn apply lên schema có sẵn mà ledger rỗng
+```
+
+- **Checksum** là sha256 của **byte thô** trong file, giống hệt `sha256sum`, không bỏ BOM/CRLF. File có CRLF sẽ có cảnh báo, vì ledger ghi từ một checkout LF sẽ không khớp.
+- **Thứ tự** theo tên file. `target` là prefix số (`"0017"`). Hai file trùng prefix bị từ chối (`DDL_DUPLICATE_VERSION`).
+- **Tương thích psql:** dòng `\set ON_ERROR_STOP …` bị bỏ qua; mọi meta-command khác (`\i`, `\c`, `\gexec`, …) bị từ chối (`DDL_PSQL_META_COMMAND`). Cặp `BEGIN;` … `COMMIT;` bao toàn file được bỏ, vì server tự mở transaction đó; `BEGIN` / `COMMIT` ở chỗ khác vẫn bị từ chối.
+- **Một transaction:** statement của file và dòng ledger commit cùng nhau, hoặc không cái nào.
+- **Chỉ đi tới:** `direction: "down"` (`DDL_DOWN_UNSUPPORTED`), SQL inline (`DDL_INLINE_UNSUPPORTED`) và `ddl_create` (`DDL_CREATE_UNSUPPORTED`) bị từ chối.
+- **Lane không tạo bảng ledger.** Bảng chưa có thì `ddl_apply` trả `DDL_LEDGER_MISSING`; tạo nó bằng runner của repo. Ledger ghi một file dưới tên khác với file trên đĩa thì bị `DDL_LEDGER_FILENAME_MISMATCH`, vì runner của repo sẽ apply lại file đã đổi tên.
+- **Adoption guard:** khi `POSTGRES_DDL_ADOPTION_SENTINEL` tồn tại mà ledger rỗng thì plan up bị `DDL_ADOPTION_REQUIRED`. Baseline ledger trước.
+- Lần apply thất bại không ghi vào ledger của repo (ledger đó không có khái niệm "failed"), nhưng vẫn có trong `mcp_ops.audit_log`.
+- Giá trị env sai (tên bảng, role, setting) không bị bỏ qua: mọi tool `ddl_*` trả `DDL_CONFIG_INVALID` kèm tên biến.
+
 ### Ví dụ an toàn
 
 ```sql
@@ -238,7 +265,7 @@ Down script `drop column` cũng được tính là risk: lúc rollback, apply s�
 
 Mọi `write_apply` / `write_rollback` / `migration_apply` / `ddl_apply` được ghi vào bảng `mcp_ops.audit_log` trên DB đích (tự tạo khi dùng lần đầu) và stderr JSON.
 
-Lane DDL còn có ledger riêng là `mcp_ops.ddl_history` (append-only), ghi lại mọi lần apply/revert, kể cả lần thất bại.
+Lane DDL còn có ledger riêng là `mcp_ops.ddl_history` (append-only), ghi lại mọi lần apply/revert, kể cả lần thất bại. Khi đặt `POSTGRES_DDL_EXTERNAL_LEDGER` thì ledger của repo thay thế bảng này, và `mcp_ops.ddl_history` không được dùng.
 
 Schema `mcp_ops` thuộc về server, không phải schema của ứng dụng:
 
@@ -290,9 +317,13 @@ Schema `mcp_ops` thuộc về server, không phải schema của ứng dụng:
 | `POSTGRES_DDL_STATEMENT_TIMEOUT_MS` | no | `300000` *(code)* | Default statement_timeout per DDL statement — 5 minutes. |
 | `POSTGRES_DDL_MAX_STATEMENT_TIMEOUT_MS` | no | `3600000` *(code)* | Ceiling for -- mcp:statement-timeout-ms (e.g. a long CREATE INDEX CONCURRENTLY) — 1 hour. |
 | `POSTGRES_DDL_PREVIEW_TTL_MS` | no | `3600000` *(code)* | DDL-preview lifetime — 1 hour. Freshness at apply is checked by the drift guard, not this. |
+| `POSTGRES_DDL_EXTERNAL_LEDGER` | no | — | [schema.]table of a repo's own (filename, checksum) ledger, e.g. public.schema_migration. Replaces mcp_ops.ddl_history; the directory then holds psql-style NNNN-name.sql files, forward-only, sha256 over raw bytes. ADR 0005 Decision 7. |
+| `POSTGRES_DDL_OWNER_ROLES` | no | — | Comma-separated roles ALTER … OWNER TO may name. Empty refuses every OWNER TO; a SUPERUSER/CREATEROLE/BYPASSRLS/REPLICATION role is refused even when listed. |
+| `POSTGRES_DDL_SESSION_SETTINGS` | no | — | Comma-separated prefix.name=value custom settings, set transaction-locally before every migration (e.g. aria.expected_market=AU). Core settings are refused. |
+| `POSTGRES_DDL_ADOPTION_SENTINEL` | no | — | [schema.]relation whose presence means the schema already exists. An up plan against an EMPTY ledger is refused while it exists (DDL_ADOPTION_REQUIRED). |
 | `PGSSLMODE` | no | — | libpq's own TLS mode (`disable` \| `require` \| `verify-ca` \| `verify-full`), read by the driver, not by this server. Set it when the target requires TLS but the connection string does not say so. |
 | `NODE_TLS_REJECT_UNAUTHORIZED` | no | — | Set to 0 ONLY if the database host presents a self-signed/untrusted TLS certificate. This is a Node flag, not a server setting, and it disables certificate verification for the WHOLE process — every outbound TLS connection, not just Postgres. Prefer `PGSSLMODE=verify-full` with a trusted CA. |
 
-30 variables. Defaults marked *(code)* are the server's own fallback and are **not** written into your agent config — set them only to override.
+34 variables. Defaults marked *(code)* are the server's own fallback and are **not** written into your agent config — set them only to override.
 
 <!-- END GENERATED: env-table -->

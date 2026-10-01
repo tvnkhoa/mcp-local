@@ -15,6 +15,8 @@ token list forbids `create`, `alter` and `drop`.
 The lane added five tools (`ddl_status`, `ddl_create`, `ddl_preview`, `ddl_dry_run`,
 `ddl_apply`), a ledger (`mcp_ops.ddl_history`), and six env vars. Six decisions below would look
 wrong to a reviewer who did not see what forced them. Each one rejects the conventional choice.
+Decision 2 was amended and Decision 7 added on 2026-10-01, with four more env vars, when the lane
+was pointed at a repo with its own runner.
 
 ## Decision 1 — a tokenizer of its own, not `@mcp/shared`'s `scanSql`
 
@@ -65,6 +67,32 @@ migration calls) are caught separately. The check reads the `pg_stat_xact_user_t
 before and after the migration, in the same transaction; `services/internalWriteGuard.ts` explains
 why only that difference is trusted.
 
+**Amended 2026-10-01: privileges on named objects, and ownership to an allowlisted role.** The first
+real repo brought to the lane (wec.aria, whose 0017 replaces a SELECT grant with one SECURITY DEFINER
+function) showed that refusing every privilege statement does not keep a migration safe. It leaves
+the migration half-applied. Without `REVOKE … FROM PUBLIC` and `GRANT EXECUTE … TO aria_review` the
+intended role cannot call the function. Without `ALTER FUNCTION … OWNER TO aria` it is worse: a
+SECURITY DEFINER function runs as its owner, and the owner would be whoever connected, typically a
+personal admin login. So the refusal itself caused the privilege escalation it was meant to prevent.
+
+The allowlist therefore gains three shapes, each behind a new `PRIVILEGE_CHANGE` acknowledgement:
+
+- `GRANT` / `REVOKE` **on a named object** (table, sequence, function, procedure, routine, schema),
+  to or from named roles or `PUBLIC`.
+- `CREATE` / `ALTER` / `DROP POLICY`, and turning row-level security off.
+- `ALTER … OWNER TO <role>`, as the statement's only action, **only to a role in
+  `POSTGRES_DDL_OWNER_ROLES`** (empty by default, which refuses it). At preview the role is read
+  from `pg_roles`, and a role with `SUPERUSER`, `CREATEROLE`, `BYPASSRLS` or `REPLICATION` is
+  blocked even when listed, because an object it owns runs past ordinary grants.
+
+What stays refused is what reaches beyond objects the migration names: role membership
+(`GRANT role TO role`), `WITH GRANT OPTION`, `GRANTED BY`, `ON ALL … IN SCHEMA`, database-,
+parameter-, language- and foreign-level privileges, `ALTER DEFAULT PRIVILEGES` (it governs objects
+created later, by anyone), `REASSIGN OWNED`, and the session-role words, which make the grantee
+or owner whoever runs the migration. The operator chose this scope on 2026-10-01 over "GRANT /
+REVOKE only", which would have refused 0017 itself (it hands its function to `aria`) and the next
+aria file that uses a policy.
+
 ## Decision 3 — a non-transactional migration is exactly one statement
 
 `CREATE INDEX CONCURRENTLY`, `DROP INDEX CONCURRENTLY` and `DETACH PARTITION … CONCURRENTLY` cannot
@@ -103,6 +131,42 @@ then plans the same request again inside the locked session and requires the sam
 binds the environment, the schema snapshot, the ledger state and every step's checksum, action,
 mode and timeouts. Equal digests mean the plan is unchanged, whatever the clock says. Unequal ones
 refuse with `DDL_DRIFT`, naming which of the ledger, the schema or the files moved.
+
+## Decision 7 — a repo's own ledger, read and written as its runner does (added 2026-10-01)
+
+The lane's ledger is `mcp_ops.ddl_history`. A repo that already has migrations and a runner has a
+ledger too, and two ledgers that disagree are the problem the "Adopt an existing tool" rejection
+below names. So `POSTGRES_DDL_EXTERNAL_LEDGER=<schema.table>` makes the repo's
+`(filename, checksum)` table the only ledger, and `mcp_ops.ddl_history` is not used at all.
+Either the repo's runner or `ddl_apply` can then apply the next file, and the other sees it as
+applied.
+
+Matching the runner is the whole contract, so each rule below is that runner's rule:
+
+- **Files** are psql-style `NNNN-name.sql`, ordered by file name, forward-only.
+- **The checksum** is sha256 of the file's **raw bytes**, as `sha256sum` computes it, not the
+  normalized text this lane hashes in its own format. A recorded checksum that differs stops every
+  plan (`DDL_CHECKSUM_MISMATCH`). The ledger is keyed by file name, so a file renamed after it
+  ran also stops every plan (`DDL_LEDGER_FILENAME_MISMATCH`), because the runner would run it again.
+- **psql compatibility.** `\set ON_ERROR_STOP` is dropped, because the lane already stops at the
+  first error. Every other meta-command is refused, not skipped, since `\i` or `\gexec` changes what
+  runs. A `BEGIN;` … `COMMIT;` that wraps the whole file is dropped, because the lane opens that
+  transaction itself. Anywhere else, transaction control is refused as before.
+- **The adoption guard** (`POSTGRES_DDL_ADOPTION_SENTINEL`) refuses an up plan when the schema
+  exists but the ledger is empty, as the runner does: such a database was built some other way.
+- **Custom settings** the runner provides (`POSTGRES_DDL_SESSION_SETTINGS`, `prefix.name=value`
+  only) are set transaction-locally with bound values before each migration's statements.
+
+Two things are **stricter** than the runner. The file and its ledger row commit in one transaction,
+where the runner inserts the row in a second psql call. And the lane never creates the table: it
+belongs to the repo, whose runner creates it after its own adoption guard (`DDL_LEDGER_MISSING`).
+One thing is **weaker**: a failed attempt leaves no row, because that ledger has no notion of
+failure. It is still in `mcp_ops.audit_log`.
+
+**Cost, accepted:** inline SQL, `ddl_create` and down migrations are unavailable in this mode, since
+the repo's ledger records files and its files have no down scripts. Anything the runner does beyond
+these rules, such as wec.aria's "skip 0028/0029 until pg-boss has booted", is not reproduced, and a
+file that relies on it is refused or fails visibly.
 
 ## Alternatives rejected
 

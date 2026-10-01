@@ -138,7 +138,7 @@
         "openWorldHint": false,
         "readOnlyHint": false
       },
-      "description": "Write a new DDL migration file pair (V<timestamp>__<name>.up.sql / .down.sql) to POSTGRES_DDL_MIGRATIONS_DIR after validating it. Does NOT touch any database; never overwrites a file. Risks are reported for review, then enforced by ddl_preview.",
+      "description": "Write a new DDL migration file pair (V<timestamp>__<name>.up.sql / .down.sql) to POSTGRES_DDL_MIGRATIONS_DIR after validating it. Does NOT touch any database; never overwrites a file. Risks are reported for review, then enforced by ddl_preview. Not available with POSTGRES_DDL_EXTERNAL_LEDGER, whose files are the repo's own.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -164,7 +164,7 @@
             "type": "string"
           },
           "up": {
-            "description": "The migration's SQL. CREATE/ALTER/DROP/COMMENT ON only; no DML, DO, GRANT or transaction control.",
+            "description": "The migration's SQL. CREATE/ALTER/DROP/COMMENT ON, GRANT/REVOKE on a named object, and ALTER … OWNER TO an allowlisted role; no DML, DO, role membership or transaction control.",
             "type": "string"
           },
           "version": {
@@ -259,7 +259,7 @@
             "type": "string"
           },
           "target": {
-            "description": "File mode: 14-digit version. Up: apply through it. Down: revert everything newer than it (\"0\" = everything).",
+            "description": "File mode: 14-digit version (the NNNN prefix with an external ledger). Up: apply through it. Down: revert everything newer than it (\"0\" = everything).",
             "type": "string"
           }
         },
@@ -274,7 +274,7 @@
         "openWorldHint": true,
         "readOnlyHint": true
       },
-      "description": "Show raw-SQL DDL migrations for an environment: applied, pending, edited-since-applied (checksum mismatch), missing from disk, and out-of-order. Read-only; works on prod. Requires POSTGRES_DDL_ENABLED.",
+      "description": "Show raw-SQL DDL migrations for an environment: applied, pending, edited-since-applied (checksum mismatch), missing from disk, and out-of-order, read from the configured ledger (mcp_ops.ddl_history, or the repo's own table with POSTGRES_DDL_EXTERNAL_LEDGER). Read-only; works on prod. Requires POSTGRES_DDL_ENABLED.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
