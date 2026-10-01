@@ -7,6 +7,7 @@
  */
 
 import { createHash } from "node:crypto";
+import path from "node:path";
 
 import type { EdgeRecord, SymbolRecord } from "../../types/index.js";
 
@@ -55,6 +56,60 @@ function stableId(input: string): string {
   return createHash("sha256").update(input).digest("hex").slice(0, 24);
 }
 
+/**
+ * The canonical spelling of a repo-relative project path: forward slashes, `.`/`..` folded, no
+ * leading `./`, lower-cased. The pipeline hands extractors `path.relative` output, which uses
+ * backslashes on Windows, and a `<ProjectReference>` may spell the same file with either separator
+ * or different casing (MSBuild on Windows is case-insensitive). Keying the id on this form is what
+ * lets a reference and the referenced project agree on one id (MCP-ISSUE-065).
+ */
+function canonicalProjectPath(filePath: string): string {
+  const normalized = path.posix.normalize(filePath.trim().replace(/\\/g, "/"));
+  return normalized.replace(/^(\.\/)+/, "").toLowerCase();
+}
+
+/**
+ * The id of a project's module symbol. The ONLY way to spell it: the `.csproj` lane mints its own
+ * module symbol with it, and every `<ProjectReference>` and `.sln` project edge mints its `to_id`
+ * with it. Before MCP-ISSUE-065 the two sides used different formulas and every project edge dangled.
+ */
+function projectModuleSymbolId(repoId: string, projectFilePath: string): string {
+  const canonical = canonicalProjectPath(projectFilePath);
+  const name = canonical.split("/").pop()?.replace(/\.csproj$/i, "") ?? "unknown";
+  return stableId(`${repoId}:${canonical}:module:${name}`);
+}
+
+type ProjectTarget = { toId: string; confidence: number; reason: string };
+
+/**
+ * Where a project path written inside `ownerFilePath` (a `.csproj` or `.sln`) points.
+ *
+ * - Inside the repo: the referenced project's module symbol id.
+ * - Climbs out of the repo, or is absolute: `project:<path>` tagged `external boundary`. It can
+ *   never be a symbol of this repo, and the unresolved-edge policy keeps such a reference labelled
+ *   rather than dropping it.
+ * - Built from an MSBuild property (`$(SolutionDir)…`): not knowable without evaluating MSBuild, so
+ *   `project:<raw>` as an unresolved token.
+ *
+ * Never a bare hex id that matches nothing: a resolved-looking dangling id is read as a stale edge by
+ * the MCP-ISSUE-063 prune and deleted on the next incremental run.
+ */
+function resolveProjectTarget(repoId: string, ownerFilePath: string, rawRef: string): ProjectTarget {
+  const ref = rawRef.trim().replace(/\\/g, "/");
+  if (ref.includes("$(")) {
+    return { toId: `project:${ref.toLowerCase()}`, confidence: 0.3, reason: "unresolved project reference token" };
+  }
+  if (ref.startsWith("/") || /^[a-z]:\//i.test(ref)) {
+    return { toId: `project:${canonicalProjectPath(ref)}`, confidence: 0.1, reason: "external boundary" };
+  }
+  const ownerDir = path.posix.dirname(ownerFilePath.replace(/\\/g, "/"));
+  const joined = canonicalProjectPath(path.posix.join(ownerDir, ref));
+  if (joined === ".." || joined.startsWith("../")) {
+    return { toId: `project:${joined}`, confidence: 0.1, reason: "external boundary" };
+  }
+  return { toId: projectModuleSymbolId(repoId, joined), confidence: 1, reason: "project reference" };
+}
+
 export function extractDotnetProjectData(input: DotnetExtractInput): DotnetExtractResult {
   if (input.language === "csproj") {
     return extractCsproj(input);
@@ -70,7 +125,7 @@ function extractCsproj(input: DotnetExtractInput): DotnetExtractResult {
   const edges: EdgeRecord[] = [];
 
   const projectName = input.filePath.split(/[\\/]/).pop()?.replace(/\.csproj$/i, "") ?? "unknown";
-  const projectSymbolId = stableId(`${input.repoId}:${input.filePath}:module:${projectName}`);
+  const projectSymbolId = projectModuleSymbolId(input.repoId, input.filePath);
 
   symbols.push({
     repoId: input.repoId,
@@ -131,13 +186,13 @@ function extractCsproj(input: DotnetExtractInput): DotnetExtractResult {
   const projRefRe = /<ProjectReference\s+Include="([^"]+)"/gi;
 
   while ((match = projRefRe.exec(input.source)) !== null) {
-    const refPath = match[1].replace(/\\/g, "/");
-    if (!refPath) continue;
+    const refPath = match[1];
+    if (!refPath?.trim()) continue;
 
     edges.push({
       repoId: input.repoId,
       fromId: projectSymbolId,
-      toId: stableId(`${input.repoId}:project:${refPath.toLowerCase()}`),
+      ...resolveProjectTarget(input.repoId, input.filePath, refPath),
       type: "DEPENDS_ON"
     });
   }
@@ -167,26 +222,17 @@ function extractSln(input: DotnetExtractInput): DotnetExtractResult {
 
   while ((match = projRe.exec(input.source)) !== null) {
     const projName = match[1];
-    const projPath = match[2].replace(/\\/g, "/");
+    const projPath = match[2];
     if (!projName || !projPath) continue;
 
-    // Use a sln-scoped symbolId so two .sln files referencing the same .csproj
-    // don't emit conflicting symbols with the same symbolId.
-    const projSymbolId = stableId(`${input.repoId}:${input.filePath}:project:${projPath.toLowerCase()}`);
-
-    symbols.push({
-      repoId: input.repoId,
-      symbolId: projSymbolId,
-      filePath: input.filePath,  // owned by this .sln, not the .csproj path
-      name: projName,
-      kind: "module",
-      line: 1
-    });
-
+    // The edge targets the project's own module symbol, minted by the .csproj lane. Until
+    // MCP-ISSUE-065 the .sln minted a sln-scoped proxy `module` symbol per project instead, so every
+    // project had an extra same-named module symbol owned by the .sln and the solution graph never
+    // reached the real one.
     edges.push({
       repoId: input.repoId,
       fromId: slnSymbolId,
-      toId: projSymbolId,
+      ...resolveProjectTarget(input.repoId, input.filePath, projPath),
       type: "DEPENDS_ON"
     });
   }

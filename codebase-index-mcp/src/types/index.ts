@@ -502,7 +502,9 @@ export type EdgeProvenance = {
  *
  * Deliberately NOT listed: `nuget:`, `endpoint:` and `contract:`. Those are unresolved *by design* —
  * they name something outside the repo that a consumer legitimately queries (find_package_consumers
- * reads `DEPENDS_ON` → `nuget:%`), so they are data rather than noise.
+ * reads `DEPENDS_ON` → `nuget:%`), so they are data rather than noise. `project:` (MCP-ISSUE-065) is
+ * the same kind: a `<ProjectReference>` / `.sln` entry naming a project outside the repo or behind an
+ * MSBuild property; an in-repo project edge carries the target's real module symbol id instead.
  */
 export const UNRESOLVED_SYMBOL_TOKEN_PREFIXES = ["callee:", "property:", "type:", "iface:", "base:", "import:"] as const;
 

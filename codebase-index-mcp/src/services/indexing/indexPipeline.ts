@@ -80,7 +80,9 @@ export type RunIndexInput = {
 };
 
 // v2: ISSUE-023 string-literal lane — bump buộc evaluateIncrementalSkip không skip để repo cũ repopulate lane.
-export const INDEX_VERSION = "v2-string-literals";
+// v3: MCP-ISSUE-065 — .csproj module ids are separator/case-canonical, ProjectReference and .sln
+// DEPENDS_ON edges target them (or a `project:` token), and the .sln proxy module symbols are gone.
+export const INDEX_VERSION = "v3-project-refs";
 
 export async function runIndexPipeline(store: GraphStore, input: RunIndexInput): Promise<IndexRunSummary> {
   const identity: RunIdentity = {
