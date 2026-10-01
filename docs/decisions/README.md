@@ -3,7 +3,7 @@
 Decisions with a rationale, kept so they are not re-litigated every six months.
 
 An ADR is written when a choice will look wrong to someone who does not know why it was made — and
-in this workspace, when the obvious alternative is the *conventional* one. All four below reject
+in this workspace, when the obvious alternative is the *conventional* one. All five below reject
 something a reasonable reviewer would suggest.
 
 **Reopening one needs a new ADR, not a backlog item.** `docs/development/backlog.md` lists the accepted debt
@@ -19,10 +19,11 @@ these cover precisely so it stays decided.
 | [0002](./0002-sql-guardrail-token-lists.md) | SQL guardrail forbidden-token lists stay per-dialect | Accepted | S-18 | unioning three drifted lists into one |
 | [0003](./0003-single-root-gitignore.md) | One root `.gitignore`; no per-server copies | Accepted | S-37 | the migration plan's own instruction to add two |
 | [0004](./0004-tsql-guardrail-policy.md) | The T-SQL guardrail policy for `sqlserver-mcp` | Accepted | — | reusing the Postgres scanner switches and token list for a fourth dialect |
+| [0005](./0005-ddl-migration-lane.md) | `postgres-mcp` applies raw-SQL DDL through its own lane, with its own tokenizer | Accepted | B-16 | splitting migrations with `scanSql`, a forbidden-token list for DDL, Flyway-style multi-statement no-transaction migrations, and wrapping an existing migration tool |
 
 ---
 
-## The four, in brief
+## The five, in brief
 
 Each summary is one paragraph by design. **The ADR file is the single home for its reasoning** — this
 page previously restated all three at 20–35 lines each, which meant two copies of every argument and
@@ -59,9 +60,20 @@ three-part ones — because cross-catalog reads are the normal case on SQL Serve
 occurrences in the deployment audited. Also states plainly what the guard cannot do: T-SQL has no
 read-only transaction, so the enforcement is a `db_datareader` login, not the parser.
 
+### [0005 — The raw-SQL DDL lane](./0005-ddl-migration-lane.md)
+
+The lane does not split migrations with `scanSql`. That scanner opens a dollar quote inside an
+identifier, which Postgres does not, so `create table foo$x$ (a int); drop table y; -- $x$` reads as
+one statement to it and runs as two on PG 17 (checked live). The lane has its own Postgres-faithful
+tokenizer, backed up by running every statement over the extended protocol, where the server
+refuses two commands. The other choices: a verb-and-object allowlist, not a forbidden-token list;
+a non-transactional migration of exactly one statement, so there is no dirty state; rollback as a
+direction of `ddl_preview`, not a separate tool; the write lane's environment list; and freshness
+proven by re-planning to the same digest.
+
 ## Writing one
 
-Copy the shape the four share — it is what makes them readable in a hurry:
+Copy the shape the five share — it is what makes them readable in a hurry:
 
 ```markdown
 # ADR NNNN — <the decision, as a statement>

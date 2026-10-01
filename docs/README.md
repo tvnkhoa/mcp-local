@@ -27,7 +27,7 @@ it as a bug and re-derive it — counts drift, commands do not.
 | **[servers/](servers/README.md)** | The four servers | Server development · Tool development · links to all four server READMEs |
 | **[architecture/](architecture/README.md)** | The shape, and why | As built · Target architecture (§9 reconciles them) |
 | **[reference/](reference/README.md)** | Normative lookups | Conventions · Folder convention · Dependency rules · Packages |
-| **[decisions/](decisions/README.md)** | The ADR log | 0001 native deps · 0002 SQL token lists · 0003 one `.gitignore` |
+| **[decisions/](decisions/README.md)** | The ADR log | 0001 native deps · 0002 SQL token lists · 0003 one `.gitignore` · 0004 T-SQL guardrails · 0005 the DDL lane |
 | **[reports/](reports/README.md)** | Reviews of the docs | Health · Simplification (the four earlier reports are archived) |
 | **[archive/](archive/README.md)** | Closed records | The 44-step migration · two refactor reports · the pre-migration audit · four superseded docs · four earlier documentation reports. **Not maintained** |
 

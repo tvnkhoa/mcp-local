@@ -1,11 +1,12 @@
 # PostgreSQL MCP
 
-MCP server cho PostgreSQL với 3 nhóm năng lực, **mặc định read-only** và bật dần qua env:
+MCP server cho PostgreSQL, **mặc định read-only**, các năng lực khác bật dần qua env:
 
 1. **Read-only query** (luôn bật) — `SELECT` / `WITH ... SELECT`, single-statement, giới hạn limit/timeout.
 2. **Đa môi trường** — chọn DB theo `environment` (dev/staging/prod), discover connection từ `appsettings*.json` hoặc env var. **prod luôn read-only.**
 3. **Ghi có review/confirm** (bật bằng `POSTGRES_WRITE_ENABLED`) — `write_preview` → `write_apply` → `write_rollback`, HMAC approval token, bắt buộc WHERE, dry-run, audit log.
 4. **EF Core migrations** (bật bằng `POSTGRES_MIGRATION_ENABLED`) — snapshot → preview → apply → verify, dry-run, so sánh schema giữa env.
+5. **Raw-SQL DDL migrations** (bật bằng `POSTGRES_DDL_ENABLED`) — file `.sql` có version hoặc SQL inline; preview → dry-run → apply có risk gate, ledger, drift guard và rollback qua `.down.sql` (§6b).
 
 ## 1. Cài đặt
 
@@ -75,6 +76,7 @@ npm run build; npm start
 | `write_preview` / `write_apply` / `write_rollback` | Ghi có review/confirm (cần `POSTGRES_WRITE_ENABLED`) |
 | `migration_status` / `migration_add` / `migration_preview` / `migration_apply` / `migration_dry_run` | EF Core migrations (cần `POSTGRES_MIGRATION_ENABLED`) |
 | `compare_environments` | Diff schema (+ row count tùy chọn) giữa 2 env |
+| `ddl_status` / `ddl_create` / `ddl_preview` / `ddl_dry_run` / `ddl_apply` | Raw-SQL DDL migrations (cần `POSTGRES_DDL_ENABLED`), §6b |
 
 Mọi read-tool nhận thêm `environment` và `profile` (`nano`/`compact`/`standard`/`verbose`, mặc định `compact`).
 

@@ -89,7 +89,10 @@ executed. Boot coverage is the reason CI can be trusted at all without live back
 
 What remains genuinely untested by CI: real query execution, real authentication, real API
 pagination, and the EF Core migration tooling (which shells out to `dotnet`). Those are what
-`verify:live` is for, and they should be run before a release.
+`verify:live` is for, and they should be run before a release. `postgres-mcp`'s write and DDL flows
+(`test:write-flow`, `test:ddl-flow`) are also outside CI, for a different reason: they need Docker
+for a throwaway Postgres, and the Windows runner has none. They need no credentials, run under
+`npm run smoke`, and skip with a message when Docker is absent.
 
 ## `verify:live` stays local — decided 2026-08-03
 

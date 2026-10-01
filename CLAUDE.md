@@ -123,9 +123,13 @@ change drive-letter casing or slash style, or the allowlist rejects it.
 
 **postgres-mcp default-safe.** A connection source is required (`POSTGRES_CONNECTION`, or
 `POSTGRES_ENV_*`, or `POSTGRES_APPSETTINGS_ROOTS`). Writes off unless `POSTGRES_WRITE_ENABLED=true`
-(preview→apply→rollback, HMAC-approved, mandatory WHERE); migrations off unless
-`POSTGRES_MIGRATION_ENABLED=true`. `POSTGRES_WRITE_APPROVAL_SECRET` is auto-generated per process when
-unset — set it only to keep tokens valid across restarts. **`prod` is force read-only.** S-43 renamed
+(preview→apply→rollback, HMAC-approved, mandatory WHERE); EF Core migrations off unless
+`POSTGRES_MIGRATION_ENABLED=true`; raw-SQL DDL migrations (`ddl_*`) off unless
+`POSTGRES_DDL_ENABLED=true`. The DDL lane has its own tokenizer, not `scanSql`
+(`docs/decisions/0005-ddl-migration-lane.md`), and its ledger is `mcp_ops.ddl_history`. `mcp_ops`
+belongs to the server: no tool may write to it, and it is not in schema snapshots.
+`POSTGRES_WRITE_APPROVAL_SECRET` is auto-generated per process when unset — set it only to keep
+tokens valid across restarts. **`prod` is force read-only.** S-43 renamed
 all 21 vars to `POSTGRES_*`; every pre-rename name (`CH_*`, `PG_*`, `MCP_DB_*`) still works with a
 one-time deprecation warning.
 
@@ -195,8 +199,8 @@ MCP tool calls then hit the updated build, so you can test directly without the 
 | `docs/architecture/as-built.md` | what this is, as built |
 | `docs/development/workflow.md` | the loop, the test layers, the gate, what CI does *not* cover |
 | `docs/reference/conventions.md` | every rule, sorted by what enforces it |
-| `docs/development/backlog.md` | what is left (B-01…B-14), **and** the accepted debt that is deliberately not in it |
-| `docs/decisions/` | four ADRs: native deps (0001), SQL token lists (0002), single-root gitignore (0003), T-SQL guardrails (0004) |
+| `docs/development/backlog.md` | what is left (B-01…B-16), **and** the accepted debt that is deliberately not in it |
+| `docs/decisions/` | five ADRs: native deps (0001), SQL token lists (0002), single-root gitignore (0003), T-SQL guardrails (0004), the DDL lane (0005) |
 | `codebase-index-mcp/docs/mcp-codebase-index-issue-registry.md` | measured defects, their fixes, and the before/after evidence |
 
 **History lives in `docs/archive/` and nothing there is maintained — do not read a current state out

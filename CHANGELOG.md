@@ -8,6 +8,31 @@ All notable changes to this project will be documented in this file.
 > introducing commit named so each claim is checkable. They are backfill, not a record written at
 > the time.
 
+## [Unreleased] - 2026-10-01
+
+### 📜 The DDL lane, documented (phase 1.5)
+
+- **ADR 0005** records the six decisions a reviewer would otherwise reopen, each with the
+  alternative it rejects:
+  1. Its own tokenizer, not `scanSql`. The `foo$x$` case was checked on PG 17.
+  2. An allowlist, not a forbidden-token list.
+  3. A non-transactional migration of exactly one statement, so there is no "dirty" state.
+  4. Rollback as a direction of `ddl_preview`.
+  5. The write lane's environment list.
+  6. Freshness proven by re-planning to the same digest.
+- **Backlog B-16** holds what the lane knowingly left open:
+  - no PgBouncer detection;
+  - no checksum repair;
+  - `prod` snapshot cost unmeasured;
+  - a lexical lint that fails open;
+  - EF model drift;
+  - no run-time `mcp_ops` guard on non-transactional steps.
+- **Backlog B-15** is the EF Core lane catching up to it: `lock_timeout`, a dry run of the delta,
+  tests, rollback, and a cross-process lock.
+- CLAUDE.md, the docs index, the ADR index, both server tables, the postgres README feature list
+  and tool table, and `ci.md` now describe the lane. `ci.md` also states why the write and DDL
+  flows are not in CI: they need Docker, not credentials.
+
 ## [Unreleased] - 2026-09-30
 
 ### 🔒 `postgres-mcp`: `mcp_ops` belongs to the server — not writable, not schema

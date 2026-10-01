@@ -2,7 +2,10 @@
 
 **Created** — 2026-07-29
 **Baseline** — `32f2a82`, working tree carrying the MCP-ISSUE-031/033 dead-code fixes
-**Refreshed** — 2026-08-18, twice. First: B-04 closed on the twelve CI observations its 2026-08-03
+**Refreshed** — 2026-10-01: B-15 and B-16 filed for `postgres-mcp`'s two migration lanes. The raw-SQL
+DDL lane shipped (ADR 0005); B-16 is what it knowingly left open, and B-15 is the EF Core lane
+catching up to it.
+**Previously refreshed** — 2026-08-18, twice. First: B-04 closed on the twelve CI observations its 2026-08-03
 wiring had been accumulating, which closed every item then filed — B-01, B-01b, B-02, B-02b, B-03,
 B-04, B-06, B-07, B-08, B-09, B-11, B-12, B-13 **done**; B-05 and B-10 **won't-do**, each with its
 reasoning recorded and B-10's underlying defect fixed. Every closed row cites the commit, command or
@@ -504,6 +507,62 @@ per tool, in the migration's replay style.
 ---
 
 ## P2 — A gate that does not bite
+
+### B-16 · The raw-SQL DDL lane: what is left after it shipped — 🔵 OPEN, filed 2026-10-01
+
+**The lane itself is done.** Phases 0.1–1.4 shipped `ddl_status`, `ddl_create`, `ddl_preview`,
+`ddl_dry_run` and `ddl_apply`, the `mcp_ops.ddl_history` ledger, and six `POSTGRES_DDL_*` vars.
+`scripts/ddl-flow-test.mjs` runs 24 scenarios against PG 17. The design and what it rejects are in
+[ADR 0005](../decisions/0005-ddl-migration-lane.md); the defects found while building it are
+`PG-SEC-002`, `PG-MIG-005/006`, `PG-WRT-007`, `PG-CMP-002` and `PG-DDL-001` in the postgres
+registry. This item holds what was knowingly left open.
+
+- **B-16.1 — PgBouncer is not detected.** Session advisory locks and session-level timeouts do not
+  survive transaction pooling, which makes `DDL_LOCKED` and the non-transactional path unreliable.
+  The cheap check: compare `pg_backend_pid()` across two statements on the session and refuse if
+  they differ. Until then the README states that a direct connection is required.
+- **B-16.2 — no checksum repair.** An applied file that is edited for a legitimate reason (a
+  comment, whitespace in the middle) blocks every file-mode plan until the file is restored.
+  `ddl_preview { mode: "repair" }`, with an acknowledgement, would re-baseline it. Not built: the
+  workaround (restore, then write a new migration) is always available.
+- **B-16.3 — snapshot v2 was measured on `dev` only.** It took 129 ms on the server, and the extension
+  filter removed 145 of 146 routines. `prod` timed out from the build machine. Measure it before
+  relying on `ddl_preview`'s cost there, although the lane never writes to prod.
+- **B-16.4 — the lint is lexical and fails open.** It recognises the common hazards. An unrecognised
+  shape produces no finding, never a refusal. Grow the case corpus in `ddlRiskLint.test.ts` from
+  every real migration that surprises someone.
+- **B-16.5 — the EF model does not see DDL-lane changes.** The lane warns when
+  `__EFMigrationsHistory` exists, and that warning is all it does. On a database EF also manages, the
+  next `migration_add` may try to undo a DDL-lane change. Accepted, not solved: preventing it would
+  need the lane to read the C# model.
+- **B-16.6 — non-transactional steps skip the run-time `mcp_ops` guard.** Outside a transaction block
+  the `pg_stat_xact` counters can flush between the two readings, so the difference proves nothing.
+  The steps concerned (`CONCURRENTLY` index builds and detaches) cannot run user code that writes,
+  which is why this is accepted.
+
+### B-15 · Give the EF Core lane what the DDL lane has — 🔵 OPEN, filed 2026-10-01
+
+Phase 2 of the DDL migration plan. Each sub-item is a gap that the DDL lane does not have.
+
+- **B-15.1 — no `lock_timeout`.** `dotnet ef database update` runs with none, so a busy table holds
+  the apply until `POSTGRES_DOTNET_TIMEOUT_MS` (120 s) kills the process. Fix: merge
+  `Options=-c lock_timeout=N` into the connection string the child receives
+  (`CH_DB_CONNECTION`, the outbound contract). This needs Npgsql 5 or later in the consuming project. Add a new `POSTGRES_MIGRATION_LOCK_TIMEOUT_MS`, which takes
+  postgres-mcp from 29 to 30 env vars. Changing the default is a behaviour change and needs a
+  CHANGELOG entry.
+- **B-15.2 — the dry run is not the preview.** `migration_dry_run` runs the full idempotent script
+  while `migration_preview` shows the delta. Share one builder, run the delta statement by
+  statement, and skip `CONCURRENTLY` statements, as the DDL dry run does.
+- **B-15.3 — nothing beyond the gate is tested.** Preview, apply, dry run and the contiguity logic
+  have no test at all; `dotnet` cannot run in CI. Add a runner seam on `MigrationConfig` that is
+  never read from env, plus `scripts/migration-flow-test.mjs` with a fake runner against Docker
+  PG 17.
+- **B-15.4 — no rollback.** Add `migration_preview { targetMigration }` →
+  `dotnet ef database update <target>`. It should go through the same drift guard, and require an
+  `EF_REVERT` acknowledgement.
+- **B-15.5 — no cross-process lock.** `migration_apply` takes the in-process mutex (PG-MIG-006) but
+  not the DDL advisory lock. It should hold that lock on a side session while `dotnet ef` runs, so a
+  DDL apply from another process refuses instead of interleaving.
 
 ### B-04 · Raise the graph-accuracy floor to something that can fail — ✅ DONE 2026-08-18
 
@@ -1081,6 +1140,10 @@ B-04  needs elapsed time, not effort: four more observations before a floor can 
 B-03 · B-06 · B-11   ✅ closed 2026-08-03 during the repository review
 B-05                 ⛔ won't do — no credential goes into CI; the risk is accepted, not solved
 B-13                 ✅ closed 2026-08-05 — filed after this section was written, blocked nothing
+
+B-15  independent of everything else. B-15.3 (the runner seam) first: it is what lets the
+      other four be tested at all
+B-16  independent; B-16.1 (PgBouncer) is the one with a correctness consequence
 ```
 
 **Suggested next slice:** nothing here is blocking. B-04 closes on its own once four more CI runs
@@ -1108,6 +1171,8 @@ tell the truth, or makes an existing gate capable of failing.
 | # | Item | Tier | Risk | Rev. | Complexity | Status |
 |---|---|---|---|---|---|---|
 | B-14 | The TypeScript lane reports a graph that is 77% dangling | P1 | **High** | R2 | L / extractor | 🔵 9 of 13 done 2026-08-18 · orphan `fromId` 77.0% → 0; edge types 2 → 7 |
+| B-16 | The DDL lane's known gaps after it shipped | P2 | **Med** | R1 | S each | 🔵 open 2026-10-01 · lane shipped (5 tools, 24 live scenarios); 6 follow-ups |
+| B-15 | The EF Core lane lacks lock_timeout, delta dry run, tests, rollback, cross-process lock | P2 | **Med** | R1 | M | 🔵 open 2026-10-01 · Phase 2 of the DDL plan |
 | B-13 | `findOwnerType` returns the enclosing class, not the owner | P1 | **Med** | R2 | M / AST | ✅ 2026-08-05 · AST prover; `requiredOwnerType` matches 3 of 3 |
 | B-01 | Diagnose C# `TYPE_REF` loss | P1 | Low | R1 | M | ✅ 2026-07-30 · `c68bda5` |
 | B-01b | Fix C# `TYPE_REF` | P1 | — | — | unscoped | ✅ 2026-07-30 · `266d91b` `9574e3e` `f1c0160` `9b55de4` |

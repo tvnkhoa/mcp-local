@@ -10,7 +10,7 @@ All are TypeScript 5.7+ ESM built on `@modelcontextprotocol/sdk`.
 | Key | Directory | What it does |
 |-----|-----------|--------------|
 | `codebase-index` | `codebase-index-mcp/` | Code graph indexing: symbols, call chains, impact analysis, safe rule-based refactors. **No runtime LLM.** |
-| `postgres-mcp` | `postgres-mcp/` | Read-only Postgres access with SQL guardrails; gated data writes + EF Core migration tooling. `prod` is force read-only. |
+| `postgres-mcp` | `postgres-mcp/` | Read-only Postgres access with SQL guardrails; gated data writes, EF Core migration tooling and raw-SQL DDL migrations. `prod` is force read-only. |
 | `observe-mcp` | `observe-mcp/` | Read-only log/trace search over OpenObserve for the CommunicationHub backend. |
 | `bitbucket-mcp` | `bitbucket-mcp/` | Read repositories / pull requests and **create PRs** on Bitbucket Cloud (write gated). |
 
