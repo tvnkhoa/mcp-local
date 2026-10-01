@@ -1,6 +1,6 @@
 ---
 name: mcp-first-codebase-operations
-description: "Execution playbook for the codebase-index MCP tools in this workspace: which argument each tool keys on (symbolId vs name vs filePath), how to chain them without wasted calls, profile choice, and the routing advice in `orient` that is known to be stale. Use when running analysis, impact, re-index, risk-triage or refactor calls against repoId codebase-index-mcp, mcp-local or wec.communication-hub. Policy (gates, fallback, budget, output contract) lives in .claude/rules/mcp-hard-mode.md and is not repeated here."
+description: "Execution playbook for the codebase-index MCP tools in this workspace: which argument each tool keys on (symbolId vs name vs filePath), how to chain them without wasted calls, profile choice, and what to do when `orient` disagrees with the issue registry. Use when running analysis, impact, re-index, risk-triage or refactor calls against repoId codebase-index-mcp, mcp-local or wec.communication-hub. Policy (gates, fallback, budget, output contract) lives in .claude/rules/mcp-hard-mode.md and is not repeated here."
 argument-hint: "repoId, the target symbol/file, and the goal (analysis, impact, re-index, triage, refactor)."
 ---
 
@@ -14,7 +14,7 @@ Two sources are already in context, and this file does not repeat them:
   `src/services/analysis/orient.ts`. Call it first when the right tool is unclear.
 
 This file adds what neither of those gives you: what each tool **keys on**, how to chain calls
-without a wasted one, and where `orient` is wrong.
+without a wasted one, and the one docs-lane condition `orient` cannot check.
 
 ## What each tool keys on
 
@@ -56,18 +56,16 @@ Calls fail or return nothing when a name is passed where an id is expected. Auth
   then `refactor_replace_apply(previewId: "<id>", approvalToken: "<token>", includeLowConfidence: true)`.
   The scan is repo-wide; pass `scopePaths` only to narrow it on purpose.
 
-## `orient` advice that is stale
+## When `orient` disagrees with this file
 
-Trust these corrections over `orient` until `orient.ts` is updated:
+`orient.ts` was brought up to date on 2026-10-01: it recommends `rename_assist(emitPreview:true)`
+and knows the docs lane stores prose, and `orient.test.ts` pins both. Trust `orient` for routing.
+If it ever contradicts the registry again, the registry
+(`docs/mcp-codebase-index-issue-registry.md`) wins, and `orient.ts` is the thing to fix.
 
-- **rename:** `orient` still says *"do NOT use rename_assist(emitPreview:true) … 17–22% recall
-  (MCP-ISSUE-060, open)"*. That was fixed on 2026-09-17: the preview is repo-wide and matches
-  `refactor_replace_preview` hunk for hunk. Either path is fine.
-- **docs-search:** `orient` says no indexer writes `prose` sections. Since MCP-ISSUE-061 Stage 4
-  (2026-09-17), `parseMarkdownFile` does, so `query_docs(mode: "search")` matches body text. Two
-  conditions apply: the index must have been built after that change
-  (`index_repository(mode: "full", docsMode: "on")` after a restart), and
-  `CODEBASE_INDEX_DOCS_TOOLS_ENABLED` must be on. The 061 entry itself stays OPEN.
+One condition `orient` cannot see: `query_docs(mode: "search")` matches body text only on an index
+built after MCP-ISSUE-061 Stage 4. On an older index, re-index with
+`index_repository(mode: "full", docsMode: "on")`.
 
 ## Profile choice
 
