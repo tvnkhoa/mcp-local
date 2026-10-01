@@ -23,7 +23,7 @@ them.
 | `observe-mcp` | `observe-mcp/` | Read-only log/trace search over OpenObserve. | [README](../../observe-mcp/README.md) · [issue registry](../../observe-mcp/docs/mcp-observe-issue-registry.md) |
 | `bitbucket-mcp` | `bitbucket-mcp/` | Read repositories, pull requests and pipelines, and **create PRs** (write gated). | [README](../../bitbucket-mcp/README.md) |
 
-Counts (99 tools, 132 env vars) come from the manifest, not from this page —
+Counts (99 tools, 136 env vars) come from the manifest, not from this page —
 [Architecture › As built](../architecture/as-built.md) §1 names the command.
 
 ## Operational skills
