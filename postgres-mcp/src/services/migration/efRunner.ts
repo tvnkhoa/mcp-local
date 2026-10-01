@@ -4,6 +4,13 @@ import path from "node:path";
 
 import { PolicyViolationError } from "../../middleware/errors.js";
 
+/**
+ * Runs one `dotnet ef` invocation. `efArgs` is the subcommand part only, e.g.
+ * `["migrations", "list", "--json"]`; the fixed `--project` / `--startup-project` / `--no-build`
+ * template is added by {@link buildEfArgv} on the real path.
+ */
+export type EfRunner = (efArgs: string[], connectionString: string) => Promise<EfResult>;
+
 export interface MigrationConfig {
   enabled: boolean;
   /** Project containing the DbContext + Migrations (e.g. src/Infrastructure). */
@@ -13,6 +20,18 @@ export interface MigrationConfig {
   timeoutMs: number;
   approvalSecret: string;
   previewTtlMs: number;
+  /**
+   * TEST SEAM, never configured from the environment: `index.ts` does not set it, and nothing in
+   * `config/` reads it. When present it replaces the `dotnet` child process.
+   *
+   * It exists because `dotnet` cannot run in CI, which left preview, apply, dry run and the
+   * contiguity logic with no test at all (B-15.3). A fake runner can answer `migrations list` and
+   * `migrations script` from fixtures, and stand in for `database update` by running SQL against a
+   * real throwaway Postgres. The handlers above it then run unmodified.
+   *
+   * A fake on PATH would not work: `spawn` with `shell: false` resolves only `.exe` on Windows.
+   */
+  run?: EfRunner;
 }
 
 export interface EfResult {
@@ -58,16 +77,16 @@ function sanitizeMigrationName(name: string): string {
  * the .NET project expects — not this server's own configuration. Every inbound `CH_*` var became
  * `POSTGRES_*`; this one cannot, because the reader lives in a codebase this workspace does not own.
  */
+/** The full argv for `dotnet`: the subcommand, then the fixed project template. */
+export function buildEfArgv(config: Pick<MigrationConfig, "project" | "startupProject">, efArgs: string[]): string[] {
+  return ["ef", ...efArgs, "--project", config.project, "--startup-project", config.startupProject, "--no-build"];
+}
+
 function runEf(config: MigrationConfig, efArgs: string[], connectionString: string): Promise<EfResult> {
-  const args = [
-    "ef",
-    ...efArgs,
-    "--project",
-    config.project,
-    "--startup-project",
-    config.startupProject,
-    "--no-build"
-  ];
+  if (config.run !== undefined) {
+    return config.run(efArgs, connectionString);
+  }
+  const args = buildEfArgv(config, efArgs);
 
   return new Promise((resolve, reject) => {
     const child = spawn("dotnet", args, {

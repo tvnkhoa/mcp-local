@@ -12,7 +12,7 @@ Resolution. Mirrors the format of `codebase-index-mcp/docs/mcp-codebase-index-is
 
 ## Index
 
-**27 entries** — all 27 resolved (some as documented guidance rather than code changes), **0 open**.
+**28 entries** — all 28 resolved (some as documented guidance rather than code changes), **0 open**.
 Statuses are copied from each entry's own `**Status:**` line; the entry is authoritative.
 
 | ID | Title | Status |
@@ -42,6 +42,7 @@ Statuses are copied from each entry's own `**Status:**` line; the entry is autho
 | `PG-SEC-002` | `write_preview` accepted writes to `mcp_ops`, the server's own audit schema | ✅ fixed 2026-09-30 (code) — refused at parse, plan and execution time (triggers) |
 | `PG-WRT-007` | `write_preview` used the regex's guess at the target, not the table the statement writes | ✅ fixed 2026-09-30 (code) — target resolved from the EXPLAIN plan |
 | `PG-MIG-006` | `migration_apply` took no lock: two applies of one preview could both run, and writes could interleave | ✅ fixed 2026-09-30 (code) — shared per-environment mutex |
+| `PG-MIG-007` | `migration_dry_run` let `commit ;` through, committing the dry run for real | ✅ fixed 2026-10-01 (code) — strip pattern tolerates whitespace before `;` |
 | `PG-CMP-002` | The schema snapshot saw only tables: a changed view, function, trigger or enum passed the drift guard | ✅ fixed 2026-09-30 (code) — snapshot v2 captures seven more object kinds |
 | `PG-DDL-001` | The DDL lane's apply hung forever behind a table lock it had not reached yet | ✅ fixed 2026-10-01 (code) — session timeouts set first; planning uses the plan's shortest lock wait |
 
@@ -1059,6 +1060,11 @@ made newly load-bearing. All were reproduced before being fixed.
   a restart discards those anyway.
 - **Verified discriminating:** against the pre-fix snapshot code the scenario fails with
   `schemas=["mcp_ops","public"] leaked=["audit_log"]`. With the fix, it passes.
+- **Reproduced end to end, 2026-10-01 (B-15.3).** `C/fail-then-retry` in
+  `scripts/migration-flow-test.mjs` runs the exact sequence from the root cause: preview, a failed
+  apply whose audit creates `mcp_ops`, then a retry of the same preview. With `INTERNAL_SCHEMAS`
+  emptied, the retry fails with `MIGRATION_DRIFT: Schema changed since migration_preview`. With the
+  fix, it applies.
 
 ---
 
@@ -1135,6 +1141,25 @@ time; covered by `writeGuardrails.test.ts`, `tools.test.ts`, `N/internal-schema-
 
 ---
 
+## PG-MIG-007 — `migration_dry_run` let `commit ;` through, committing the dry run for real
+
+**Status:** ✅ fixed 2026-10-01 (code). Covered by `migrationHandlers.test.ts`.
+
+- **Scenario:** a migration script containing a `COMMIT` line that is not exactly `COMMIT;`, for
+  example `commit ;`. EF itself always emits `COMMIT;`, but a hand-edited migration or a
+  `migrationBuilder.Sql("commit ;")` call may not.
+- **Root cause:** `migration_dry_run` runs the script inside `begin … rollback`, and first removes
+  EF's own `START TRANSACTION;` and `COMMIT;` lines so they cannot end that transaction early.
+  The filter stripped the trailing `;` with `/;\s*$/`, which leaves the space in `commit ;`, so
+  that line was kept. It would then commit the dry run's transaction, and everything before it
+  would persist: the dry run would apply part of the migration.
+- **Found by:** the first unit test written for the lane, through the B-15.3 runner seam.
+- **Resolution:** the filter now strips `/\s*;\s*$/`. The fuller fix is B-15.2: run the delta
+  statement by statement through the DDL lane's tokenizer, which sees transaction control wherever
+  it is, not only on a line of its own.
+
+---
+
 ## PG-MIG-006 — `migration_apply` took no lock: two applies of one preview could both run, and writes could interleave
 
 **Status:** ✅ fixed 2026-09-30 (code) — `migration_apply` runs under the same per-environment mutex
@@ -1165,8 +1190,12 @@ as `write_apply` and `write_rollback`; covered by `src/services/concurrency/envM
   check that the handler has not settled 50 ms later. With `runExclusive` replaced by a direct call
   in `migrationHandlers.ts`, `migration_apply waits for the lock that write_apply holds` fails with
   "migration_apply ran while another lane held the environment's lock".
-- **Not covered:** the end-to-end case of two real `dotnet ef` runs. That needs the injectable runner
-  planned for phase 2.3.
+- **Reproduced end to end, 2026-10-01 (B-15.3).** `F/concurrent-apply` in
+  `scripts/migration-flow-test.mjs` runs two applies of one preview at once, with a fake
+  `database update` that takes 300 ms. With the mutex: `["PREVIEW_NOT_FOUND","applied"]` and
+  exactly one update. With the mutex removed: the update runs twice, and the second fails with
+  `23505` (duplicate key in `__EFMigrationsHistory`). That is the double apply this entry described
+  from the code alone.
 
 ---
 

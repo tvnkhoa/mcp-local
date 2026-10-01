@@ -10,6 +10,25 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased] - 2026-10-01
 
+### 🧪 `postgres-mcp`: the EF Core lane is tested for the first time (B-15.3)
+
+- `MigrationConfig.run` is a runner seam that replaces the `dotnet ef` child process. Nothing reads
+  it from the environment, and `index.ts` never sets it. The fixed argv is now `buildEfArgv`.
+- `migrationHandlers.test.ts` has five unit tests:
+  - the argv template;
+  - classification by the structured `applied` flag (PG-MIG-002);
+  - the `EF_OUTPUT_UNPARSEABLE` and `EF_COMMAND_FAILED` codes;
+  - unsafe names refused before the runner runs;
+  - `stripTransactionControl`.
+- `scripts/migration-flow-test.mjs` has 9 scenarios on Docker PG 17, with a fake `dotnet ef` backed
+  by the real `__EFMigrationsHistory`. It covers status, delta preview, a failed apply followed by
+  a retry, schema drift, pending-set drift, concurrent applies, the non-contiguous fallback, dry
+  run, and prod. It is part of `npm run smoke`, and runs alone with `test:migration-flow`.
+- PG-MIG-005 and PG-MIG-006 are now reproduced end to end, and each fails with its fix removed.
+  Without the mutex, the second concurrent `database update` really runs and hits `23505`.
+- **PG-MIG-007, found by the first unit test:** `migration_dry_run` did not strip a `commit ;` line,
+  so the line committed the dry run's transaction. Fixed.
+
 ### 📜 The DDL lane, documented (phase 1.5)
 
 - **ADR 0005** records the six decisions a reviewer would otherwise reopen, each with the

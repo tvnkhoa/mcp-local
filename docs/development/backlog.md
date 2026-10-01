@@ -553,10 +553,12 @@ Phase 2 of the DDL migration plan. Each sub-item is a gap that the DDL lane does
 - **B-15.2 — the dry run is not the preview.** `migration_dry_run` runs the full idempotent script
   while `migration_preview` shows the delta. Share one builder, run the delta statement by
   statement, and skip `CONCURRENTLY` statements, as the DDL dry run does.
-- **B-15.3 — nothing beyond the gate is tested.** Preview, apply, dry run and the contiguity logic
-  have no test at all; `dotnet` cannot run in CI. Add a runner seam on `MigrationConfig` that is
-  never read from env, plus `scripts/migration-flow-test.mjs` with a fake runner against Docker
-  PG 17.
+- **B-15.3 — nothing beyond the gate is tested.** ✅ DONE 2026-10-01. `MigrationConfig.run` is a
+  runner seam that is never read from env; `buildEfArgv` holds the fixed argv. Five unit tests, plus
+  `scripts/migration-flow-test.mjs`: 9 scenarios with a fake `dotnet ef` backed by the real
+  `__EFMigrationsHistory` on Docker PG 17. Preview, apply, dry run, both drift guards and the
+  contiguity logic are now tested. PG-MIG-005 and PG-MIG-006 were reproduced end to end, and each
+  scenario fails with its fix removed. The first unit test found PG-MIG-007.
 - **B-15.4 — no rollback.** Add `migration_preview { targetMigration }` →
   `dotnet ef database update <target>`. It should go through the same drift guard, and require an
   `EF_REVERT` acknowledgement.
@@ -1172,7 +1174,7 @@ tell the truth, or makes an existing gate capable of failing.
 |---|---|---|---|---|---|---|
 | B-14 | The TypeScript lane reports a graph that is 77% dangling | P1 | **High** | R2 | L / extractor | 🔵 9 of 13 done 2026-08-18 · orphan `fromId` 77.0% → 0; edge types 2 → 7 |
 | B-16 | The DDL lane's known gaps after it shipped | P2 | **Med** | R1 | S each | 🔵 open 2026-10-01 · lane shipped (5 tools, 24 live scenarios); 6 follow-ups |
-| B-15 | The EF Core lane lacks lock_timeout, delta dry run, tests, rollback, cross-process lock | P2 | **Med** | R1 | M | 🔵 open 2026-10-01 · Phase 2 of the DDL plan |
+| B-15 | The EF Core lane lacks lock_timeout, delta dry run, tests, rollback, cross-process lock | P2 | **Med** | R1 | M | 🔵 1 of 5 · B-15.3 tests ✅ 2026-10-01 (found PG-MIG-007) |
 | B-13 | `findOwnerType` returns the enclosing class, not the owner | P1 | **Med** | R2 | M / AST | ✅ 2026-08-05 · AST prover; `requiredOwnerType` matches 3 of 3 |
 | B-01 | Diagnose C# `TYPE_REF` loss | P1 | Low | R1 | M | ✅ 2026-07-30 · `c68bda5` |
 | B-01b | Fix C# `TYPE_REF` | P1 | — | — | unscoped | ✅ 2026-07-30 · `266d91b` `9574e3e` `f1c0160` `9b55de4` |

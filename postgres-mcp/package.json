@@ -10,9 +10,10 @@
     "dev": "tsx src/index.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json",
     "test": "node --import tsx --test \"src/**/*.test.ts\"",
-    "smoke": "node scripts/smoke-test.mjs && node scripts/write-flow-test.mjs && node scripts/ddl-flow-test.mjs",
+    "smoke": "node scripts/smoke-test.mjs && node scripts/write-flow-test.mjs && node scripts/ddl-flow-test.mjs && node scripts/migration-flow-test.mjs",
     "test:write-flow": "node scripts/write-flow-test.mjs",
-    "test:ddl-flow": "node scripts/ddl-flow-test.mjs"
+    "test:ddl-flow": "node scripts/ddl-flow-test.mjs",
+    "test:migration-flow": "node scripts/migration-flow-test.mjs"
   },
   "dependencies": {
     "@mcp/core": "file:../packages/core",

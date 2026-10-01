@@ -57,11 +57,12 @@ function migrationDigest(environment: string, preSnapshotId: string, script: str
  * two exact statements; `BEGIN` is left untouched because it legitimately appears
  * inside EF's `DO $EF$ ... BEGIN ... END $EF$;` PL/pgSQL blocks.
  */
-function stripTransactionControl(script: string): string {
+export function stripTransactionControl(script: string): string {
   return script
     .split(/\r?\n/)
     .filter((line) => {
-      const normalized = line.trim().replace(/;\s*$/, "").toUpperCase();
+      // `\s*;` not `;`: `commit ;` must match too, or it would commit the dry run for real.
+      const normalized = line.trim().replace(/\s*;\s*$/, "").toUpperCase();
       return normalized !== "START TRANSACTION" && normalized !== "COMMIT";
     })
     .join("\n");
