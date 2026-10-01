@@ -3275,7 +3275,7 @@ this afternoon failed at that harness, which is the highest rate observed so far
   - wec.communication-hub 13 → 0
   - wec.document-management 8 → 0
   - wec.notification 5 → 0
-  - wec.social-ads 11: not yet measured, because MCP-ISSUE-066 blocked the re-index.
+  - wec.social-ads 11 → 0, measured after the MCP-ISSUE-066 fix (1 003 files indexed, up from 1).
 
   The 2 left in wec.be reference `src/packages/SS.Cache` and `src/packages/SS.Lib.FilterExpressions`, which do not exist in that repo. That is the documented in-repo-but-unindexed gap, not a minting defect. Any other dangling ids left in these repos are IMPORTS/TYPE_REF edges to symbols in other repos, and all of them match `cross_repo_deps`.
 
