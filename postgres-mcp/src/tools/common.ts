@@ -15,6 +15,7 @@ import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 
 import type { ConnectionManager } from "../repositories/connectionManager.js";
+import type { DdlConfig } from "../services/ddl/ddlConfig.js";
 import type { MigrationConfig } from "../services/migration/efRunner.js";
 import { responseProfileSchema } from "../middleware/responseFormatter.js";
 import type { WritePreviewStore } from "../services/write/previewStore.js";
@@ -34,6 +35,7 @@ export interface PostgresDeps {
   readonly writeStore: WritePreviewStore;
   readonly writeConfig: WriteConfig;
   readonly migrationConfig: MigrationConfig;
+  readonly ddlConfig: DdlConfig;
   readonly limits: QueryLimits;
   /**
    * The stderr event logger, passed in rather than taken from `ToolContext`:

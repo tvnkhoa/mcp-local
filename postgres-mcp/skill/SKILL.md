@@ -1,6 +1,6 @@
 ---
 name: {{KEY}}
-description: "Query PostgreSQL safely via the {{DISPLAY_NAME}}: read-only SQL, table/schema inspection, multi-environment access, and gated writes/migrations. Triggers on: query the database, run SQL, inspect a table/schema, compare environments, diff data, EF Core migration. Read-only by default; prod is always read-only."
+description: "Query PostgreSQL safely via the {{DISPLAY_NAME}}: read-only SQL, table/schema inspection, multi-environment access, and gated writes/migrations. Triggers on: query the database, run SQL, inspect a table/schema, compare environments, diff data, EF Core migration, raw SQL DDL migration, create a migration file. Read-only by default; prod is always read-only."
 ---
 
 # {{DISPLAY_NAME}}
@@ -70,6 +70,21 @@ retries only what is left. A row somebody else changed after the apply is report
 migration_status → migration_add / migration_preview → migration_dry_run → migration_apply
 ```
 Preview and dry-run before applying. Requires the configured .NET project paths.
+
+## Raw-SQL DDL migrations (OFF unless `POSTGRES_DDL_ENABLED=true`)
+
+A migration lane independent of EF Core, for schema changes written as SQL. Available today:
+
+- `ddl_status(environment)` lists applied, pending, edited-since-applied and missing migrations. It
+  is read-only and works on prod.
+- `ddl_create(name, up, down?)` writes `V<timestamp>__<name>.up.sql` / `.down.sql` into
+  `POSTGRES_DDL_MIGRATIONS_DIR` and touches no database. Always write a `down` unless the change
+  truly cannot be reverted.
+  - Only CREATE/ALTER/DROP/COMMENT ON are accepted. Data changes go through `write_preview`.
+  - For `CREATE INDEX CONCURRENTLY`, pass `noTransaction: true` and keep it alone in its migration.
+
+Applying migrations (`ddl_preview` → `ddl_dry_run` → `ddl_apply`) is not available yet. Do not try
+to apply DDL through `write_preview` or `run_read_query`: both refuse it.
 
 ## Guardrails
 

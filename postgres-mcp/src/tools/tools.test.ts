@@ -24,6 +24,7 @@ import { assertRequiredKeysAdvertised, assertSchemaParity } from "@mcp/testing";
 
 import { ConnectionManager } from "../repositories/connectionManager.js";
 import { toWireError } from "../middleware/errors.js";
+import { type DdlConfig } from "../services/ddl/ddlConfig.js";
 import { type MigrationConfig } from "../services/migration/efRunner.js";
 import { buildSchemaResources } from "../resources/schemaResources.js";
 import { buildTools, type PostgresDeps, type QueryLimits } from "./index.js";
@@ -63,6 +64,16 @@ const MIGRATION_OFF: MigrationConfig = {
   previewTtlMs: 3_600_000
 };
 
+const DDL_OFF: DdlConfig = {
+  enabled: false,
+  migrationsDir: "",
+  lockTimeoutMs: 5000,
+  statementTimeoutMs: 300_000,
+  maxStatementTimeoutMs: 3_600_000,
+  previewTtlMs: 3_600_000,
+  approvalSecret: "test-secret"
+};
+
 function deps(overrides: Partial<PostgresDeps> = {}): PostgresDeps {
   return {
     connections: new ConnectionManager({
@@ -74,6 +85,7 @@ function deps(overrides: Partial<PostgresDeps> = {}): PostgresDeps {
     writeStore: new WritePreviewStore(),
     writeConfig: WRITE_OFF,
     migrationConfig: MIGRATION_OFF,
+    ddlConfig: DDL_OFF,
     limits: LIMITS,
     logger: eventLog,
     ...overrides
@@ -101,7 +113,7 @@ async function bodyOf(name: string, args: Record<string, unknown>, overrides?: P
 
 // --- tools/list side of the contract ---------------------------------------
 
-test("the tool table is the 17 advertised tools, in registration order", () => {
+test("the tool table is the 19 advertised tools, in registration order", () => {
   const names = buildTools(deps()).map((tool) => tool.name);
   assert.deepEqual(names, [
     "health_check",
@@ -120,17 +132,20 @@ test("the tool table is the 17 advertised tools, in registration order", () => {
     "migration_preview",
     "migration_apply",
     "migration_dry_run",
-    "compare_environments"
+    "compare_environments",
+    // Appended, so no tool that existed before the DDL lane changed position.
+    "ddl_status",
+    "ddl_create"
   ]);
 });
 
-test("only the four state-changing tools are not read-only", () => {
+test("only the five state-changing tools are not read-only", () => {
   const tools = buildTools(deps());
   assert.deepEqual(
     tools.filter((tool) => !tool.annotations.readOnly).map((tool) => tool.name),
-    ["write_apply", "write_rollback", "migration_add", "migration_apply"]
+    ["write_apply", "write_rollback", "migration_add", "migration_apply", "ddl_create"]
   );
-  // migration_add writes files and touches no database, so it removes nothing.
+  // migration_add and ddl_create write files and touch no database, so they remove nothing.
   assert.deepEqual(
     tools.filter((tool) => tool.annotations.destructive).map((tool) => tool.name),
     ["write_apply", "write_rollback", "migration_apply"]
@@ -139,7 +154,7 @@ test("only the four state-changing tools are not read-only", () => {
   // database that may not be on this machine.
   assert.deepEqual(
     tools.filter((tool) => tool.annotations.openWorld !== true).map((tool) => tool.name),
-    ["list_environments", "migration_add"]
+    ["list_environments", "migration_add", "ddl_create"]
   );
 });
 
@@ -282,6 +297,39 @@ test("with writes on, the shape guards still refuse before any database work", a
   });
 });
 
+// --- the DDL gate ------------------------------------------------------------
+
+test("both DDL tools refuse when POSTGRES_DDL_ENABLED is off", async () => {
+  const expected = {
+    code: "DDL_DISABLED",
+    message:
+      "DDL migrations are disabled. Set POSTGRES_DDL_ENABLED=true (and POSTGRES_DDL_MIGRATIONS_DIR for file-based migrations) to enable."
+  };
+  assert.deepEqual((await bodyOf("ddl_status", {})).payload, expected);
+  assert.deepEqual((await bodyOf("ddl_create", { name: "add_t", up: "create table t (a int)" })).payload, expected);
+});
+
+test("with DDL on, ddl_create refuses before touching the filesystem", async () => {
+  const on = { ddlConfig: { ...DDL_OFF, enabled: true } };
+  assert.equal((await bodyOf("ddl_create", { name: "add_t", up: "create table t (a int)" }, on)).payload.code, "DDL_MIGRATIONS_DIR_UNCONFIGURED");
+
+  // A directory that does not exist: every refusal below is decided before it would be read,
+  // so none of them can come back as DDL_MIGRATIONS_DIR_UNREADABLE.
+  const withDir = { ddlConfig: { ...DDL_OFF, enabled: true, migrationsDir: "/nonexistent/ddl-migrations-9f3c" } };
+  for (const [args, code] of [
+    [{ name: "seed", up: "insert into t values (1)" }, "DDL_STATEMENT_NOT_ALLOWED"],
+    [{ name: "sneak", up: "create table mcp_ops.x (a int)" }, "DDL_RESERVED_SCHEMA"],
+    [{ name: "idx", up: "create index concurrently i on t (a)" }, "DDL_NEEDS_NO_TRANSACTION"],
+    [{ name: "nuke", up: "drop schema s cascade" }, "DDL_RISK_BLOCKED"],
+    [{ name: "ok", up: "create table t (a int)", down: "grant all on t to public" }, "DDL_STATEMENT_NOT_ALLOWED"],
+    [{ name: "slow", up: ["-- mcp:lock-timeout-ms=60000", "create table t (a int)"].join("\n") }, "DDL_DIRECTIVE_EXCEEDS_LIMIT"]
+  ] as [Record<string, unknown>, string][]) {
+    assert.equal((await bodyOf("ddl_create", args, withDir)).payload.code, code, JSON.stringify(args));
+  }
+  // The schema itself refuses a name that is not a plain identifier.
+  assert.equal((await bodyOf("ddl_create", { name: "../escape", up: "create table t (a int)" }, withDir)).isError, true);
+});
+
 // --- the migration gate ------------------------------------------------------
 
 test("all five migration tools refuse when POSTGRES_MIGRATION_ENABLED is off", async () => {
@@ -388,7 +436,7 @@ test("DELTA: an unknown tool now reports not_found instead of mcp_error", async 
 // and `docs:check` reads the advertised side only. Until now only codebase-index-mcp had this gate.
 
 test("every tool advertises exactly the parameters its zod schema accepts", () => {
-  assertSchemaParity(buildTools(deps()), { floor: 17 });
+  assertSchemaParity(buildTools(deps()), { floor: 19 });
 });
 
 test("a tool declaring additionalProperties:false advertises every required key", () => {

@@ -66,7 +66,7 @@ export const SERVERS: readonly ServerDescriptor[] = [
     displayName: "PostgreSQL MCP",
     dir: "postgres-mcp",
     entry: "dist/index.js",
-    tagline: "Read-only Postgres access with SQL guardrails; gated writes + EF Core migrations.",
+    tagline: "Read-only Postgres access with SQL guardrails; gated writes, EF Core migrations and raw-SQL DDL migrations.",
     build: { install: true, guards: [] },
     smokeTest: "node scripts/smoke-test.mjs",
     skillSource: "postgres-mcp/skill",

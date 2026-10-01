@@ -21,11 +21,13 @@ import { asErrorPayload, createMcpServer, runServer } from "@mcp/sdk";
 
 import { ConnectionManager } from "./repositories/connectionManager.js";
 import { toWireError } from "./middleware/errors.js";
+import { type DdlConfig } from "./services/ddl/ddlConfig.js";
 import { type MigrationConfig } from "./services/migration/efRunner.js";
 import { buildSchemaResources } from "./resources/schemaResources.js";
 import { buildTools, type QueryLimits } from "./tools/index.js";
 import {
   approvalSecretFromEnv,
+  ddlMigrationsDirFromEnv,
   dotnetProjectsFromEnv,
   numberFromEnv,
   parseBoolEnv
@@ -94,10 +96,22 @@ const migrationConfig: MigrationConfig = {
   previewTtlMs: numberFromEnv("POSTGRES_MIGRATION_PREVIEW_TTL_MS", 3_600_000)
 };
 
+// The DDL lane shares the approval secret and the writable-environment set with the write lane;
+// it has no environment scope of its own (prod is never writable).
+const ddlConfig: DdlConfig = {
+  enabled: parseBoolEnv("POSTGRES_DDL_ENABLED"),
+  migrationsDir: ddlMigrationsDirFromEnv(),
+  lockTimeoutMs: numberFromEnv("POSTGRES_DDL_LOCK_TIMEOUT_MS", 5000),
+  statementTimeoutMs: numberFromEnv("POSTGRES_DDL_STATEMENT_TIMEOUT_MS", 300_000),
+  maxStatementTimeoutMs: numberFromEnv("POSTGRES_DDL_MAX_STATEMENT_TIMEOUT_MS", 3_600_000),
+  previewTtlMs: numberFromEnv("POSTGRES_DDL_PREVIEW_TTL_MS", 3_600_000),
+  approvalSecret: APPROVAL_SECRET
+};
+
 const handle = createMcpServer({
   name: "communicationhub-postgres-mcp",
   version: "0.2.0",
-  tools: buildTools({ connections, writeStore, writeConfig, migrationConfig, limits, logger: eventLog }),
+  tools: buildTools({ connections, writeStore, writeConfig, migrationConfig, ddlConfig, limits, logger: eventLog }),
   resources: buildSchemaResources(connections),
   /**
    * This server's error contract, not the platform's. Every failure — zod

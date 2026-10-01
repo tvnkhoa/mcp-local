@@ -126,6 +126,22 @@ This is phase 0.3 of the DDL migration lane.
   no code reads them until phase 1.3.
 - 26 new unit tests. The file tests run against a real temporary directory.
 
+### 🧰 `postgres-mcp`: `ddl_status` and `ddl_create` (phase 1.3), 17 → 19 tools
+
+- `ddl_status` reports applied, pending, edited-since-applied, missing and out-of-order migrations.
+  It also flags `__EFMigrationsHistory` and stray `*.sql` files. It is read-only, works on prod,
+  and never creates the ledger.
+- `ddl_create` validates and lints `up` and `down`, then writes the file pair with `wx`.
+  - `noTransaction: true` is written into the files as `-- mcp:no-transaction`, because a
+    file-mode plan reads its mode from the file and nothing else.
+  - A refused migration writes nothing.
+  - Responses name files, never the directory.
+- Both tools refuse with `DDL_DISABLED` unless `POSTGRES_DDL_ENABLED=true`. They are appended after
+  `compare_environments`, so no existing tool moved and the contract change is additive only. The
+  workspace total goes from 94 to 96 tools.
+- New `scripts/ddl-flow-test.mjs`, 7 scenarios against a throwaway Postgres 17. It is part of
+  `npm run smoke`, and can be run alone with `test:ddl-flow`.
+
 ## [Unreleased] - 2026-08-19d
 
 ### 🔧 What two simulated use cases found, and what it took to fix

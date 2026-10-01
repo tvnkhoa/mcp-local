@@ -1,6 +1,6 @@
 {
   "server": "postgres-mcp",
-  "toolCount": 17,
+  "toolCount": 19,
   "tools": [
     {
       "annotations": {
@@ -88,6 +88,83 @@
         "type": "object"
       },
       "name": "data_diff"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": false
+      },
+      "description": "Write a new DDL migration file pair (V<timestamp>__<name>.up.sql / .down.sql) to POSTGRES_DDL_MIGRATIONS_DIR after validating it. Does NOT touch any database; never overwrites a file. Risks are reported for review, then enforced by ddl_preview.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "down": {
+            "description": "SQL that reverts `up`. Optional, but without it the migration cannot be rolled back.",
+            "type": "string"
+          },
+          "name": {
+            "description": "Migration name: lowercase letters, digits and underscore (^[a-z0-9_]{1,100}$).",
+            "type": "string"
+          },
+          "noTransaction": {
+            "description": "Write the -- mcp:no-transaction directive. Required for CREATE/DROP INDEX CONCURRENTLY; the migration must then be one statement.",
+            "type": "boolean"
+          },
+          "profile": {
+            "enum": [
+              "nano",
+              "compact",
+              "standard",
+              "verbose"
+            ],
+            "type": "string"
+          },
+          "up": {
+            "description": "The migration's SQL. CREATE/ALTER/DROP/COMMENT ON only; no DML, DO, GRANT or transaction control.",
+            "type": "string"
+          },
+          "version": {
+            "description": "14-digit UTC timestamp (yyyymmddhhmmss). Omit to use the next one.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "up"
+        ],
+        "type": "object"
+      },
+      "name": "ddl_create"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": true,
+        "readOnlyHint": true
+      },
+      "description": "Show raw-SQL DDL migrations for an environment: applied, pending, edited-since-applied (checksum mismatch), missing from disk, and out-of-order. Read-only; works on prod. Requires POSTGRES_DDL_ENABLED.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "environment": {
+            "type": "string"
+          },
+          "profile": {
+            "enum": [
+              "nano",
+              "compact",
+              "standard",
+              "verbose"
+            ],
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "ddl_status"
     },
     {
       "annotations": {

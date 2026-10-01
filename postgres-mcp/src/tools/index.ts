@@ -2,8 +2,9 @@
  * postgres-mcp's tool table, declared as data (migration-plan step S-24).
  *
  * Everything that used to be a `ListTools` array plus a hand-written `switch` in
- * `index.ts` lives here as 17 `defineTool` declarations, split across three
- * files along the same boundary the handler modules already use. The shared
+ * `index.ts` lives here as `defineTool` declarations — 19 since the DDL lane
+ * (phase 1.3) — split across four files along the same boundary the handler
+ * modules already use. The shared
  * pipeline in `@mcp/sdk` supplies resolve → profile → validate → guards →
  * handle → serialize; what stays local is this server's own contract — the exact
  * descriptions and JSON Schemas, the guardrails, and the `{ code, message,
@@ -29,6 +30,7 @@ import type { AnyToolDefinition } from "@mcp/sdk";
 import { registerTool } from "@mcp/sdk";
 
 import type { PostgresDeps } from "./common.js";
+import { buildDdlTools } from "./ddlTools.js";
 import { buildMigrationTools } from "./migrationTools.js";
 import { buildReadTools } from "./readTools.js";
 import { buildWriteTools } from "./writeTools.js";
@@ -36,13 +38,14 @@ import { buildWriteTools } from "./writeTools.js";
 export type { PostgresDeps, QueryLimits } from "./common.js";
 
 /**
- * The 17 tools in registration order — which is the order `tools/list`
- * advertises, and is unchanged from the hand-written array it replaced.
+ * The 19 tools in registration order — which is the order `tools/list`
+ * advertises. The first 17 are unchanged from the hand-written array they
+ * replaced; the `ddl_*` tools are appended after them, so no existing tool moved.
  *
- * `registerTool` flattens the three groups and rejects a duplicate name at the
+ * `registerTool` flattens the four groups and rejects a duplicate name at the
  * point of assembly, so a tool accidentally declared in two groups fails here
  * rather than inside the runtime one frame later.
  */
 export function buildTools(deps: PostgresDeps): readonly AnyToolDefinition[] {
-  return registerTool([buildReadTools(deps), buildWriteTools(deps), buildMigrationTools(deps)]);
+  return registerTool([buildReadTools(deps), buildWriteTools(deps), buildMigrationTools(deps), buildDdlTools(deps)]);
 }

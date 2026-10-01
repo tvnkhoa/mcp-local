@@ -36,10 +36,12 @@ npm run build; npm start
 
 <!-- BEGIN GENERATED: tool-list -->
 
-17 tools, namespaced `mcp__postgres-mcp__<tool>`:
+19 tools, namespaced `mcp__postgres-mcp__<tool>`:
 
 - `compare_environments`
 - `data_diff`
+- `ddl_create`
+- `ddl_status`
 - `describe_table`
 - `get_table_relationships`
 - `health_check`
@@ -142,6 +144,33 @@ compare_environments { "source": "dev", "target": "staging", "includeRowCounts":
 `dotnet ef` được gọi với argv cố định (không nối shell), tên migration bắt buộc `^[A-Za-z0-9_]+$`, connection inject qua `CH_DB_CONNECTION` cho đúng env (tên này là **outbound contract** với project .NET, không phải config của server — xem `docs/reference/dependency-rules.md` §4).
 
 `migration_apply` dùng chung một mutex theo từng môi trường với `write_apply` / `write_rollback`. Trên cùng một DB, migration và thao tác ghi dữ liệu chạy lần lượt: một lệnh ghi phải đợi migration đang chạy xong. Nếu hai lần apply cùng một preview được gọi đồng thời, lần sau sẽ nhận `PREVIEW_NOT_FOUND`. Mutex chỉ có hiệu lực trong một process server.
+
+## 6b. Luồng DDL (raw SQL) — đang xây dựng
+
+Đây là lane migration bằng SQL thuần, độc lập với EF Core. Lane **TẮT** cho tới khi đặt `POSTGRES_DDL_ENABLED=true`. Lane ghi được vào đúng những môi trường mà write lane ghi được (`POSTGRES_WRITABLE_ENVIRONMENTS`); `prod` luôn chỉ đọc.
+
+Hiện có hai tool:
+
+```jsonc
+ddl_status { "environment": "dev" }   // applied / pending / file đã bị sửa / file mất / sai thứ tự. Chỉ đọc, chạy được trên prod
+ddl_create { "name": "add_orders_note",
+             "up":   "alter table orders add column note text",
+             "down": "alter table orders drop column if exists note" }   // chỉ ghi file, không chạm DB
+```
+
+- **Tên file:** `V<yyyymmddhhmmss>__<name>.up.sql` + `.down.sql` (tuỳ chọn), đặt trong `POSTGRES_DDL_MIGRATIONS_DIR`. `ddl_create` không bao giờ ghi đè file có sẵn.
+- **Lệnh được phép:** `CREATE` / `ALTER` / `DROP` trên table, index, view, materialized view, sequence, type, domain, schema, function (sql/plpgsql), procedure, trigger; cộng thêm `COMMENT ON` và `CREATE EXTENSION`.
+- **Lệnh bị từ chối:**
+  - DML: dữ liệu đi qua `write_preview`.
+  - `DO` / `CALL`.
+  - `GRANT` / ROLE / `OWNER TO`.
+  - `SET` / `BEGIN` và các lệnh điều khiển transaction.
+  - VACUUM và các lệnh bảo trì.
+  - Mọi tham chiếu tới `mcp_ops`.
+- **`CREATE INDEX CONCURRENTLY`:** truyền `noTransaction: true`. Khi đó migration chỉ được có một statement.
+- **Directive ở đầu file:** `-- mcp:no-transaction`, `-- mcp:lock-timeout-ms=N` (chỉ được hạ so với env), `-- mcp:statement-timeout-ms=N` (tối đa bằng `POSTGRES_DDL_MAX_STATEMENT_TIMEOUT_MS`).
+
+`ddl_preview` / `ddl_dry_run` / `ddl_apply` (có cả rollback qua `.down.sql`) sẽ được thêm ở phase sau.
 
 ## 7. Audit
 
