@@ -21,7 +21,7 @@ assembles many of them into the one thing `createServer` takes.
 `createServer` (= `createMcpServer`) wires them, and `runServer` owns the entry
 point's start-and-exit tail.
 
-`createTool`/`createServer` are aliases, not replacements: all four servers call
+`createTool`/`createServer` are aliases, not replacements: all five servers call
 `defineTool`/`createMcpServer` and renaming those call sites would be churn.
 
 Every `register*` takes a list whose entries may themselves be lists, so a server

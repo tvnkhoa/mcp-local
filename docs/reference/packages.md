@@ -1,6 +1,6 @@
 # Package Overview
 
-Six packages under `packages/*`. They are the only npm workspace members — the four servers are
+Six packages under `packages/*`. They are the only npm workspace members — the five servers are
 deliberately outside it ([ADR 0001](../decisions/0001-workspace-native-deps.md)) and consume these through
 `file:` dependencies.
 
@@ -75,7 +75,7 @@ collision fails at start-up rather than shadowing silently at call time.
 `createServer` (= `createMcpServer`) wires them; `runServer` owns the entry point's start-and-exit
 tail and is the one reviewed place that calls `process.exit`.
 
-`createTool`/`createServer` are **aliases, not replacements**. All four servers call
+`createTool`/`createServer` are **aliases, not replacements**. All five servers call
 `defineTool`/`createMcpServer`; renaming those call sites would be churn with no behavioural gain.
 
 ### The rest of the surface
@@ -197,8 +197,8 @@ skill renderer, contract snapshotter, server runner and all three generators rea
 | `TOOL_LISTS`, `TOTAL_TOOL_COUNT` | generated from `contracts/` |
 
 Env contracts live in `src/envSpecs/<server>.ts`, one file per server, so a change to one server's
-contract has a diff that says so. **98 fields across four servers** —
-`codebase-index` 41 · `postgres-mcp` 23 · `observe-mcp` 23 · `bitbucket-mcp` 11:
+contract has a diff that says so. **132 fields across five servers** —
+`codebase-index` 41 · `postgres-mcp` 30 · `sqlserver-mcp` 19 · `observe-mcp` 31 · `bitbucket-mcp` 11:
 
 ```bash
 node -e "import('@mcp/manifest').then(m => m.SERVERS.forEach(s => console.log(s.key, s.env.length)))"

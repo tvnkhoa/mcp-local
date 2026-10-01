@@ -12,14 +12,14 @@ generator, contract snapshotter and every root aggregate pick it up with no furt
 ## 1. Scaffold
 
 ```bash
-npm run new:server -- --key myserver
+npm run new:server -- --key myserver        # key "myserver-mcp" — -mcp is appended if missing
 npm run new:server -- --key myserver --dir myserver-mcp --display "My Server MCP" --no-verify
 ```
 
 | Flag | Effect |
 |---|---|
-| `--key <name>` | the MCP registration key — required |
-| `--dir <name>` | directory name; defaults to `<key>-mcp` |
+| `--key <name>` | the MCP registration key — required. Must match `^[a-z][a-z0-9-]*$`; **`-mcp` is appended if missing**, so `--key myserver` yields key `myserver-mcp`, env prefix `MYSERVER_*`, `MyserverConfig` |
+| `--dir <name>` | directory name; defaults to the key (`myserver-mcp`) |
 | `--display "…"` | display name used in the generated skill and install summary |
 | `--no-verify` | skip the build / typecheck / test / smoke pass |
 | `--force` | overwrite an existing directory. Destructive — the scaffold otherwise refuses |
@@ -52,13 +52,16 @@ the server grows ([Folder Convention](../reference/folder-convention.md) §2).
 > that the standard-structure refactor moved into `middleware/`, and a `build` / `dev` / `start` /
 > `typecheck` script vocabulary that omits **`test` and `smoke`** — the two scripts every root
 > aggregate depends on. It also predated `npm run new:server`, `templates/server/`, and the
-> snapshot-before-register ordering in §2.
+> register-then-snapshot bootstrap in §2.
 
 ### The scaffold deliberately does not register the server
 
-There is an ordering constraint it cannot satisfy: `servers.ts` **throws** for a server with no
-generated tool list, the tool list comes from `contracts/`, and a contract snapshot needs a built
-server. So the sequence is **scaffold → build → snapshot → register → generate**.
+There is an ordering constraint it cannot satisfy: `servers.ts` **throws at import** for a server
+whose `toolsFor(key)` has no generated tool list, the tool list comes from `contracts/`, a contract
+snapshot needs a built server, and `contract-snapshot.mjs` only snapshots servers already in
+`SERVERS`. Neither "snapshot first" nor "register with `toolsFor` first" works, so the first
+registration uses a **temporary literal tool list**:
+**scaffold → build → register (temporary `tools`) → snapshot → generate → switch to `toolsFor`**.
 
 That omission is also what makes a scratch server free: delete the directory and `verify:all` still
 exits 0, with nothing to clean up elsewhere.
@@ -67,24 +70,21 @@ exits 0, with nothing to clean up elsewhere.
 
 ## 2. Register it
 
-Three steps, in this order, because each produces what the next reads.
+Four steps, in this order, because each produces what the next reads. The scaffold already built the
+server (unless you passed `--no-verify`, in which case run `npm run build` in its directory first).
 
-### Step 1 — snapshot the contract
+### Step 1 — declare it in the manifest, with a temporary tool list
 
-```bash
-cd myserver-mcp && npm run build && cd ..
-node scripts/contract-snapshot.mjs --server myserver
-```
-
-Writes `contracts/myserver.json` from a real stdio handshake.
-
-### Step 2 — declare it in the manifest
+`contract-snapshot.mjs` only snapshots servers already in `SERVERS`, so the server must be registered
+before it can be snapshotted. But `toolsFor("<key>")` **throws at import** until a snapshot exists —
+which would break every script that reads the manifest, the snapshotter included. So register it
+first with a literal placeholder:
 
 **`packages/manifest/src/servers.ts`** — append one entry:
 
 ```ts
 {
-  key: "myserver",                     // the MCP registration key: mcp__myserver__<tool>
+  key: "myserver-mcp",                 // the MCP registration key: mcp__myserver-mcp__<tool>
   displayName: "My Server MCP",
   dir: "myserver-mcp",                 // directory under the workspace root
   entry: "dist/index.js",              // POSIX-separated, relative to dir
@@ -92,7 +92,7 @@ Writes `contracts/myserver.json` from a real stdio handshake.
   build: { install: true, guards: [] },   // guards = extra npm scripts run after build
   smokeTest: "node scripts/smoke-test.mjs",
   skillSource: "myserver-mcp/skill",
-  tools: toolsFor("myserver"),         // generated — never hand-written
+  tools: ["health_check"],             // TEMPORARY — replaced by toolsFor("myserver-mcp") in Step 3
   env: myserverEnv
 }
 ```
@@ -135,15 +135,33 @@ which is why the connection string is `POSTGRES_CONNECTION` and not `POSTGRES_DB
 If the server introduces a **package**, add a tier row in `packages/cli/src/guards/rules.ts` too —
 see [Dependency Rules](../reference/dependency-rules.md) §5.
 
-### Step 3 — generate and install
+### Step 2 — snapshot the contract
+
+```bash
+npm run build:packages                          # the snapshotter reads the manifest's dist
+npm run contracts:update -- --server myserver-mcp
+```
+
+Writes `contracts/myserver-mcp.json` from a real stdio handshake.
+
+### Step 3 — generate, switch to `toolsFor`, install
 
 ```bash
 npm run generate:tools        # contracts/ → packages/manifest/src/generated/toolLists.ts
-npm run generate:all          # tools → .env.example → README blocks
-node scripts/install-mcp.mjs --server myserver
-npm run mcp:doctor -- --server myserver
+# now replace tools: ["health_check"] with tools: toolsFor("myserver-mcp") in servers.ts
+npm run generate:all          # tools → build:packages → .env.example → README blocks
+npm run generate:check && npm run contracts:check
+```
+
+### Step 4 — install and check
+
+```bash
+node scripts/install-mcp.mjs --server myserver-mcp
+npm run mcp:doctor -- --server myserver-mcp
 npm run verify:all
 ```
+
+The `mcp-skill-authoring` skill carries the same sequence.
 
 ---
 
@@ -216,7 +234,7 @@ const config = loadConfig();
 const eventLog = createEventLogger();
 
 const handle = createMcpServer({
-  name: "myserver",
+  name: "myserver-mcp",
   version: "0.1.0",
   tools: buildTools(config),
   formatError: (error) => asErrorPayload(toWireError(error), "verbose")

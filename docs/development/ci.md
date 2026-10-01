@@ -23,8 +23,8 @@ npm run test:packages      # all six packages (see note below for current counts
 npm run guard:all          # dependency-tier + convention + file-size guards
 npm run build:servers
 npm run typecheck:servers
-npm run test:servers       # all four servers (see note below for current counts)
-npm run contracts:check    # boots all four over stdio, diffs tools/list
+npm run test:servers       # all five servers (see note below for current counts)
+npm run contracts:check    # boots all five over stdio, diffs tools/list
 npm run generate:check     # generated files match the manifest
 npm run docs:check         # links, tool args/names, capability claims, env names
 npm run benchmark:plan:check   # compact-mode token savings ≥ 40%
@@ -79,7 +79,7 @@ documentation — links, documented tool arguments and names, capability claims,
 names used as instructions. Both run in CI as of 2026-08-03; before that, drift in either was caught
 locally or not at all.
 
-`contracts:check` is the credential-free boot check. It starts **all four servers over a real stdio
+`contracts:check` is the credential-free boot check. It starts **all five servers over a real stdio
 MCP handshake** with placeholder environment values synthesized from `@mcp/manifest`,
 completes `initialize`, and calls `tools/list`. A server that compiles but cannot load fails here.
 
@@ -119,7 +119,7 @@ credentials in the local environment. A broken client path stays invisible until
 is the residual risk B-05 existed to remove, and here it is **accepted rather than solved** — the
 release checklist is the whole mechanism.
 
-What CI still covers regardless: `contracts:check` boots all four servers over a real stdio
+What CI still covers regardless: `contracts:check` boots all five servers over a real stdio
 handshake with placeholder env on every push, so a module that compiles but cannot load is caught.
 The gap is specifically *reaching a backend*, not loading its client.
 
@@ -164,6 +164,6 @@ reporting so one CI run names every broken package instead of only the first.
 | Root script | Runs |
 |---|---|
 | `verify:packages` | build + typecheck:tests + test + guards, for `packages/*` |
-| `verify:servers` | build + typecheck + test, for all four servers |
+| `verify:servers` | build + typecheck + test, for all five servers |
 | `verify:all` | `verify:packages` + `verify:servers` + `contracts:check` + `generate:check` + `docs:check` — credential-free |
 | `verify:live` | `smoke:servers` — **needs credentials** |

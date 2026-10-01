@@ -33,25 +33,29 @@ derived.
 
 ## Register
 
-Three steps, in this order — the ordering matters because each one produces what the next reads:
+Four steps, run from the workspace root, in this order — each one produces what the next reads:
 
 ```bash
-# 1. Snapshot the tool contract (needs a build; writes contracts/__KEY__.json)
-npm run build --prefix ../__DIR__
-node ../scripts/contract-snapshot.mjs --server __KEY__
-
-# 2. Add the manifest entry + env contract, then derive the tool list
-#    - packages/manifest/src/servers.ts        (one entry)
+# 1. Add the manifest entry + env contract, with a TEMPORARY tool list
+#    - packages/manifest/src/servers.ts        (one entry, tools: ["health_check"])
 #    - packages/manifest/src/envSpecs/__CAMEL__.ts   (the env contract)
+npm run build:packages
+
+# 2. Snapshot the tool contract (needs a build; writes contracts/__KEY__.json)
+npm run build --prefix __DIR__
+npm run contracts:update -- --server __KEY__
+
+# 3. Derive the tool list, then switch the entry to tools: toolsFor("__KEY__")
 npm run generate:tools
 npm run generate:all
 
-# 3. Install it
+# 4. Install it
 node scripts/install-mcp.mjs --server __KEY__
 ```
 
-`packages/manifest/src/servers.ts` throws at import time if a server has no generated tool list, so
-step 1 cannot be skipped. See the `mcp-skill-authoring` skill for the full contract.
+`packages/manifest/src/servers.ts` throws at import time if `toolsFor` finds no generated tool list,
+and `contract-snapshot.mjs` only snapshots servers already in the manifest — hence the temporary
+`tools: ["health_check"]` in step 1. See the `mcp-skill-authoring` skill for the full contract.
 
 ## Conventions this scaffold already follows
 

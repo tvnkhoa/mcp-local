@@ -58,7 +58,7 @@ tier matrix lives as data in `packages/cli/src/guards/rules.ts`, so adding a pac
 explicit decision about what it may import — at review time, not later.
 
 **The contract snapshots** (`contracts/`) pin each server's `tools/list` output. `contracts:check`
-boots all four servers over a real stdio handshake with placeholder env, which is the check that
+boots all five servers over a real stdio handshake with placeholder env, which is the check that
 catches a module that compiles but cannot load. A change to a tool's shape is a reviewed diff.
 
 **The generated artifacts.** Each server's `.env.example`, the marked blocks in its `README.md`, and

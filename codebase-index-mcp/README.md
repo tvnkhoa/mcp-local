@@ -317,7 +317,7 @@ The refactor flow is: `refactor_replace_preview` â†’ `refactor_replace_apply` â†
 - Rule-based only (`decisionSource=rule_engine`, `llmInvolved=false`). Never invokes an LLM.
 - Preview generates an HMAC-signed approval token (TTL: 30 min via `CODEBASE_INDEX_REFACTOR_APPROVAL_SECRET`).
 - Apply requires the exact `previewId` and `approvalToken` from the preview response.
-- Rollback requires the `applyId` from the apply response.
+- Rollback requires the `rollbackId` from the apply response.
 - Low-confidence candidates: reported but not applied by default (`includeLowConfidence: false`).
 - Scope drift: if newly changed files after apply exceed 5% of preview scope, diagnostics code is `SCOPE_DRIFT_DETECTED`.
 

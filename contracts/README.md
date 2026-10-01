@@ -53,35 +53,53 @@ Reproducibility is the whole value; a snapshot that varies per machine is noise.
 | Server | Tools | Advertises annotations |
 |---|---|---|
 | `codebase-index` | 43 | **yes** — migrated to `@mcp/sdk` (S-31…S-33) |
-| `postgres-mcp` | 17 | **yes** — migrated to `@mcp/sdk` (S-25) |
+| `postgres-mcp` | 22 | **yes** — migrated to `@mcp/sdk` (S-25) |
 | `observe-mcp` | 10 | **yes** — migrated to `@mcp/sdk` (S-24) |
 | `bitbucket-mcp` | 12 | **yes** — migrated to `@mcp/sdk` (S-23) |
 | `sqlserver-mcp` | 12 | **yes** — built on `@mcp/sdk` |
-| **Total** | **94** | all five |
+| **Total** | **99** | all five |
 
 Servers on `@mcp/sdk` advertise MCP annotation hints (`readOnlyHint` / `idempotentHint` /
 `destructiveHint` / `openWorldHint`), which the SDK derives from each tool's declared annotations.
 In every migration so far this was an **additive** contract change, reviewed via the snapshot diff: names,
 descriptions and input schemas stayed byte-identical.
 
-Clients use these hints to decide what may be auto-approved. Across the workspace the tools marked
-**not read-only** are `create_pull_request`, `write_apply`, `write_rollback`, `migration_apply`,
-`migration_add`, `index_repository`, `watch_repo`, `refactor_replace_apply` and
-`refactor_replace_rollback` — of which all but `create_pull_request`, `migration_add` and
-`watch_repo` are also destructive.
+Clients use these hints to decide what may be auto-approved. Across the workspace the 14 tools marked
+**not read-only** are:
+
+| Server | Not read-only | Of which destructive |
+|---|---|---|
+| `bitbucket-mcp` | `create_pull_request` | — |
+| `postgres-mcp` | `write_apply`, `write_rollback`, `migration_apply`, `migration_add`, `ddl_apply`, `ddl_create` | `write_apply`, `write_rollback`, `migration_apply`, `ddl_apply` |
+| `sqlserver-mcp` | `execute_routine` | `execute_routine` |
+| `codebase-index` | `index_repository`, `watch_repo`, `refactor_replace_apply`, `refactor_replace_rollback`, `refactor_symbol_migration`, `change_value_representation` | all but `watch_repo` |
+
+`migration_add` and `ddl_create` write a new migration file and change no database; `execute_routine`
+is destructive for every routine because the catalog records nothing about whether a procedure
+writes ([ADR 0004](../docs/decisions/0004-tsql-guardrail-policy.md)).
 
 Two of those deserve the note, because a reviewer will read them as too strict or too loose:
 
 - `index_repository` is destructive but touches **only derived state** — it replaces the SQLite
   graph and prunes entries for deleted files, and cannot alter a line of the repository it reads.
-- The four preview/dry-run refactor tools (`refactor_replace_preview`, `rename_assist`,
-  `refactor_symbol_migration`, `change_value_representation`) are read-only yet **not idempotent**:
-  they write nothing to the working tree, but each call mints a new previewId and approval token.
+- The two preview refactor tools (`refactor_replace_preview`, `rename_assist`) are read-only yet
+  **not idempotent**: they write nothing to the working tree, but each call mints a new previewId
+  and approval token. `refactor_symbol_migration` and `change_value_representation` are a preview
+  with `dryRun:true` (the default) but **apply** with `dryRun:false` plus a prior call's
+  `previewId` + `approvalToken`, so one tool carries both and is annotated destructive.
 
-No tool in any server is `openWorldHint: true`.
+`openWorldHint: true` follows where the call goes — **50 of 99** tools reach a database or remote API:
+
+| Server | Open-world | Closed-world (answered from local config or files) |
+|---|---|---|
+| `bitbucket-mcp` | 12 / 12 | — |
+| `postgres-mcp` | 19 / 22 | `list_environments`, `migration_add`, `ddl_create` |
+| `sqlserver-mcp` | 10 / 12 | `list_environments`, `health_check` |
+| `observe-mcp` | 9 / 10 | `list_environments` |
+| `codebase-index` | 0 / 43 | all — it reads only the local repository and its SQLite index |
 
 Tool advertisement is **not** env-dependent in any server: write-gated tools such as
-`create_pull_request`, `write_preview` and `migration_apply` are always listed, and the gate is
+`create_pull_request`, `write_preview`, `migration_apply`, `ddl_apply` and `execute_routine` are always listed, and the gate is
 enforced when they are called. That is why one snapshot per server is sufficient — verified by
 listing tools with the write flags both off and on.
 

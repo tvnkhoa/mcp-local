@@ -35,7 +35,7 @@ mcp-local/
 ├── docs/                     README.md is the portal entry point; every section has its own index
 │   ├── guides/               getting running
 │   ├── development/          the working loop — workflow · ci · backlog
-│   ├── servers/              the four servers, and how to add or change one
+│   ├── servers/              the five servers, and how to add or change one
 │   ├── architecture/         as-built · target-architecture
 │   ├── reference/            conventions · folder-convention · dependency-rules · packages
 │   ├── decisions/            the ADR log

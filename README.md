@@ -46,9 +46,11 @@ Run these from the **workspace root**. Each dispatches to a data-driven script o
 |---------|--------|---------|
 | `npm run setup` | `install-mcp.mjs` | Install deps → build (+ guards) → detect agents → prompt for env → write MCP config → generate & install skills → verify start → smoke test. Runs **all** servers by default. |
 | `npm run mcp:install` | `install-mcp.mjs` | Alias of `setup`. |
-| `npm run mcp:doctor` | `mcp-doctor.mjs` | Health report per server: `build` / `config` / `env` / `skill` / `start`. Never prints secret values. |
-| `npm run mcp:update` | `update-mcp.mjs` | Rebuild → regenerate & reinstall skill → verify start, **in place**. Does not touch your configured env. |
+| `npm run mcp:doctor` | `mcp-doctor.mjs` | Health report per server: `build` / `config` / `env` / `skill` / `start`, plus rendered skills left behind by a renamed or removed key (fix: `mcp:uninstall -- --key <old>`). Never prints secret values. |
+| `npm run mcp:update` | `update-mcp.mjs` | Rebuild → re-point an already-registered entry's `args` path at this checkout (after a move) → regenerate & reinstall skill → verify start, **in place**. Does not touch your configured env. |
 | `npm run mcp:uninstall` | `uninstall-mcp.mjs` | Remove a server from every detected agent config and delete its skill. Config is backed up first; source/`dist/` left untouched. |
+
+Every config write is backed up to `<file>.backup.<ms>` (the newest 5 are kept), re-reads the file just before an atomic write and checks the result, and edits a commented VS Code `settings.json` in place so its comments survive — or, if that edit cannot be verified, leaves the file alone and prints the snippet to paste.
 
 ### Scoping to one server
 
@@ -159,7 +161,7 @@ there in at most two hops — this page does not repeat its index.
 |---|---|
 | [`docs/guides/`](docs/guides/README.md) | Getting running — start with [onboarding](docs/guides/onboarding.md) |
 | [`docs/development/`](docs/development/README.md) | The working loop: workflow, CI, backlog |
-| [`docs/servers/`](docs/servers/README.md) | The four servers, and how to add or change one |
+| [`docs/servers/`](docs/servers/README.md) | The five servers, and how to add or change one |
 | [`docs/architecture/`](docs/architecture/README.md) | The shape, and the design reasoning behind it |
 | [`docs/reference/`](docs/reference/README.md) | Conventions, folder rules, dependency rules, packages |
 | [`docs/decisions/`](docs/decisions/README.md) | The ADR log |

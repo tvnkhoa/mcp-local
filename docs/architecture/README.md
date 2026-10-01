@@ -4,7 +4,7 @@ What this workspace is, and why it is shaped that way.
 
 | | |
 |---|---|
-| [As built](as-built.md) | The system as it actually is: four servers, six packages, and the three mechanisms that hold the shape |
+| [As built](as-built.md) | The system as it actually is: five servers, six packages, and the three mechanisms that hold the shape |
 | [Target architecture](target-architecture.md) | The design and its reasoning. **§9 reconciles the design against what was built** |
 
 **Two files, deliberately.** `as-built.md` describes reality and is updated when reality changes.

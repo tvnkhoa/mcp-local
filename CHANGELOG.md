@@ -10,6 +10,60 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased] - 2026-10-01
 
+### 🔒 `codebase-index-mcp`: `query_graph` enforces repo isolation (MCP-ISSUE-062)
+
+- Before this fix, `OR 1=1`, a UNION arm, a comma join, `"main".symbols` or a `pragma_*` function could
+  read other repos' rows from the central DB. Now:
+  - each graph table name resolves to a CTE filtered on a bound repo id;
+  - schema qualifiers are refused;
+  - an `EXPLAIN` bytecode audit allows reads only from tables on the allowlist.
+- The contract is unchanged. New `queryGraphIsolation.test.ts` (10 tests).
+
+### 🧭 `codebase-index-mcp`: incremental re-index no longer leaves dangling edges (MCP-ISSUE-063)
+
+- When a callee file shifted lines or was deleted, resolved edges from unchanged files kept a dead
+  `to_id`. Those files are now re-extracted in the same run, and a safety-net prune removes any edge
+  still left. On the live index, incremental now matches full exactly: 2035 symbols / 5187 edges on
+  both.
+- Removed the size/mtime quick check, which could never match a sha256 hash.
+
+### ⚠️ `codebase-index-mcp`: error wire codes follow the JSON-RPC code (MCP-ISSUE-064) — behaviour change
+
+- `McpError(InvalidParams)` → `VALIDATION_ERROR`, `InternalError` → `INTERNAL_ERROR`, others stay
+  `MCP_ERROR`. Previously every `McpError` was `MCP_ERROR`.
+- `orient` now recommends `rename_assist(emitPreview:true)` (MCP-ISSUE-060 is fixed) and has an
+  up-to-date docs-search caveat. New `orient.test.ts`.
+
+### 🧰 Installer, doctor and skills
+
+- `~/.claude.json`:
+  - re-read and merged just before an atomic write, then verified, with up to 3 retries;
+  - backups rotate to the newest 5.
+- VS Code `settings.json` with comments is edited in place. If a safe edit is impossible, the installer
+  prints the snippet to paste instead.
+- `mcp:update` re-points `dist/index.js` paths when the checkout moved, leaving env untouched.
+- `mcp:doctor`:
+  - compares both installed skill copies against a fresh render;
+  - warns about rendered server skills that no manifest key owns.
+- Skill rendering throws on an unknown `{{placeholder}}`. New `skills.test.mjs` checks every tool call
+  in every skill template against `contracts/*.json`.
+- Every skill was reviewed against contracts and code. Fixes include:
+  - bitbucket `create_pull_request` argument names;
+  - `query_docs` has 7 modes, not 6;
+  - postgres `allowFullTable`;
+  - `mcp-error-taxonomy` codes.
+- `index-conformance-full-vs-incremental` was merged into `incremental-indexing`, and
+  `codebase-index-scaffold` was removed.
+
+### 📚 Docs
+
+- Five-server wording throughout, with counts recomputed: 99 tools, 132 env vars, 50 `openWorldHint`
+  tools.
+- Corrected the symbol-id formula.
+- Documented a new-server bootstrap order that works: register with a temporary tool list, then
+  snapshot, then switch to `toolsFor`.
+- `docs:check` skips tracked files deleted in the working tree.
+
 ### 🔎 `postgres-mcp`: four review findings fixed before push (PG-REV-002)
 
 A code review of the 13 unpushed commits found four defects. Each one was reproduced or pinned by a

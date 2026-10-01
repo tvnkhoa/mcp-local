@@ -68,7 +68,7 @@ for packages. The rule and why it exists are in
 | `npm run test:packages` | `npm test --workspaces` |
 | `npm run test:scripts` | `node --test "scripts/**/*.test.mjs"` |
 | `npm run guard:all` | dependency + convention guards |
-| `npm run build:servers` / `typecheck:servers` / `test:servers` / `smoke:servers` | over all four servers |
+| `npm run build:servers` / `typecheck:servers` / `test:servers` / `smoke:servers` | over all five servers |
 | `npm run contracts:check` | boot all four over stdio, diff `tools/list` against `contracts/` |
 | `npm run generate:check` | fail on generated-file drift |
 | `npm run docs:check` | the documentation gate — links, documented tool arguments and names, capability claims, deprecated env names |
@@ -181,7 +181,7 @@ Two properties worth knowing:
 - **`@mcp/testing` routes through the real `dispatchToolCall`.** Validation, guards, error mapping
   and profile serialization are production code paths, so a test that passes there cannot pass for a
   reason the server would not reproduce.
-- **`contracts:check` is also the boot check.** It starts all four servers over a real stdio
+- **`contracts:check` is also the boot check.** It starts all five servers over a real stdio
   handshake with placeholder env, which is what catches a module that compiles but cannot load.
 
 Server test files were type-checked by **nothing** before S-39 — each server's build excludes

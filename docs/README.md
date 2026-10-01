@@ -1,6 +1,6 @@
 # Documentation
 
-Four MCP servers on a six-package platform. **This page is the entry point** — every document in the
+Five MCP servers on a six-package platform. **This page is the entry point** — every document in the
 repository is reachable from here in at most two hops.
 
 Every number in these documents should be re-derivable from a named command. Where one is not, treat
@@ -24,7 +24,7 @@ it as a bug and re-derive it — counts drift, commands do not.
 |---|---|---|
 | **[guides/](guides/README.md)** | Getting running | Onboarding |
 | **[development/](development/README.md)** | The working loop | Workflow · CI · Backlog |
-| **[servers/](servers/README.md)** | The four servers | Server development · Tool development · links to all four server READMEs |
+| **[servers/](servers/README.md)** | The five servers | Server development · Tool development · links to all five server READMEs |
 | **[architecture/](architecture/README.md)** | The shape, and why | As built · Target architecture (§9 reconciles them) |
 | **[reference/](reference/README.md)** | Normative lookups | Conventions · Folder convention · Dependency rules · Packages |
 | **[decisions/](decisions/README.md)** | The ADR log | 0001 native deps · 0002 SQL token lists · 0003 one `.gitignore` · 0004 T-SQL guardrails · 0005 the DDL lane |

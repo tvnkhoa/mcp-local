@@ -55,7 +55,7 @@ startup rather than on first call. It rejects:
 - `readOnly: true` together with `destructive: true`
 
 `createTool` is an alias for `defineTool`; both exist so `createTool` / `createResource` /
-`createPrompt` / `createServer` read as one vocabulary. All four servers call `defineTool`.
+`createPrompt` / `createServer` read as one vocabulary. All five servers call `defineTool`.
 
 ### Why two schemas
 
@@ -216,7 +216,7 @@ request id — the seam for that is `renderResult` on the server, not `rawResult
 ## 5. Errors
 
 Every failure leaves a server in that server's envelope, and the envelope is per-server, not
-platform-wide. Three of the four use `createErrorMapper`:
+platform-wide. Four of the five use `createErrorMapper` — every server except `codebase-index-mcp` (see below):
 
 ```ts
 export const mapError: (error: unknown) => MappedError = createErrorMapper({
