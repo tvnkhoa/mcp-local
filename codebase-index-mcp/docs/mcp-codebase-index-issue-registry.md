@@ -3267,3 +3267,16 @@ this afternoon failed at that harness, which is the highest rate observed so far
   - `npm run build`, `npm run test:integration` (41/41) and `npm run guard:no-llm-runtime` pass.
   - The live repos were not re-indexed in this change. The "after" count on the central DB is
     pending a full run.
+
+## MCP-ISSUE-066 — IDE state under `.vs/` consumed the whole 20 000-file scan budget: `filesIndexed: 1`
+
+- **Status:** ✅ FIXED 2026-10-01 (P1; found while re-indexing for MCP-ISSUE-065).
+- **Scenario:** `index_repository(repoId: "wec.social-ads", mode: "full")`. The repo has 1 054 tracked files, plus 25 194 untracked files in Visual Studio's `.vs/CopilotSnapshots`.
+- **Expected vs actual:** expected about 1 000 files indexed. Got `filesScanned: 20000, filesIndexed: 1, filesSkipped: 19999`.
+  - `.vs` and `.idea` were excluded only by `EXCLUDED_PATH_SEGMENTS`. That filter runs **after** the glob and after `maxFiles` truncates it.
+  - Since MCP-ISSUE-060 turned `dot: true` on (2026-09-17), the glob walks `.vs/`. The sorted list puts `.vs/…` ahead of `src/…`, so the snapshots filled every slot.
+  - This is the same failure the `.venv` follow-up to MCP-ISSUE-060 fixed; the IDE-state directories were missed then.
+- **Impact:** the repo's graph silently stopped updating. A truncated scan correctly refuses to prune, so the old 9 413 symbols survived and still looked healthy, with status `ok`. Any repo opened in Visual Studio or a JetBrains IDE was exposed.
+- **Fix:** `.vs` and `.idea` moved into `VENDOR_DIR_SEGMENTS`, which feeds both `INDEX_IGNORE_GLOBS` (walk level) and the segment filter. `.vscode` stays segment-only, because it is small and `search_regex(scanAll)` may want it.
+- **Guarded:** `fileFilter.test.ts` "a vendor tree is excluded at the GLOB" now lists `.vs` and `.idea`. It fails on the pre-fix code (`'.vs must be in INDEX_IGNORE_GLOBS…'`).
+- **Residual:** any other large directory that is excluded only by segment (`wwwroot`, `public`, `static`, `assets`, `logs`, `.vscode`) can starve the budget the same way. A structural fix would apply `hasExcludedPathSegment` before the `maxFiles` slice in `indexPipeline.ts`.

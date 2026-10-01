@@ -282,7 +282,7 @@ test("a vendor tree is excluded at the GLOB, not only by the post-walk filter", 
   // the real sources, and still consumed the entire 20,000-file budget — `filesIndexed: 3`,
   // `filesSkipped: 19997`. A truncated scan then correctly refuses to prune, so the previous run's
   // 9,156 stale rows survived too. Excluding a tree has to happen where the walk happens.
-  for (const dir of [".venv", "venv", "site-packages", "node_modules", ".tox", ".yarn", ".gradle"]) {
+  for (const dir of [".venv", "venv", "site-packages", "node_modules", ".tox", ".yarn", ".gradle", ".vs", ".idea"]) {
     assert.ok(
       INDEX_IGNORE_GLOBS.includes(`**/${dir}/**`),
       `${dir} must be in INDEX_IGNORE_GLOBS, not only in EXCLUDED_PATH_SEGMENTS`

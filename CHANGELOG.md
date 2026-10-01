@@ -10,6 +10,12 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased] - 2026-10-01
 
+### 🗂️ `codebase-index-mcp`: `.vs/` and `.idea/` excluded at the walk (MCP-ISSUE-066)
+
+- Visual Studio's `.vs/CopilotSnapshots` (25k files) sorted ahead of `src/` and filled the 20 000-file
+  scan cap: `wec.social-ads` indexed 1 file of ~1 000 and kept a stale graph. Both directories are now in
+  the glob ignore list, not only the post-walk filter.
+
 ### 🔒 `codebase-index-mcp`: `query_graph` enforces repo isolation (MCP-ISSUE-062)
 
 - Before this fix, `OR 1=1`, a UNION arm, a comma join, `"main".symbols` or a `pragma_*` function could

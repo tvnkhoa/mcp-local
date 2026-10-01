@@ -55,7 +55,13 @@ const VENDOR_DIR_SEGMENTS = [
   ".nuget",
   ".conda",
   ".next",
-  ".turbo"
+  ".turbo",
+  // IDE state (MCP-ISSUE-066). Same failure as `.venv` above, found again: `.vs`/`.idea` sat in
+  // the segment filter only, and Visual Studio's `.vs/CopilotSnapshots` (25 194 files in
+  // wec.social-ads) sorts ahead of `src/`, so a full run reported `filesIndexed: 1,
+  // filesSkipped: 19999`. `.vscode` stays segment-only: it is small and `search_regex` may want it.
+  ".vs",
+  ".idea"
 ];
 
 export const INDEX_IGNORE_GLOBS = [
@@ -76,8 +82,6 @@ const EXCLUDED_PATH_SEGMENTS = new Set([
   ".svn",
   ".hg",
   ".vscode",
-  ".vs",
-  ".idea",
   "wwwroot",
   "public",
   "static",

@@ -50,7 +50,7 @@ export async function scanRepoFiles(
   // MCP-ISSUE-060: `dot: true` here too, and deliberately in the same change as `regexSearch.ts`.
   // Fixing only one desynchronises search scope from index scope — `search_regex` would report hits
   // in files the graph has never seen, and every `enclosingSymbol` on them would be null with no
-  // explanation. `.git/**` is excluded by INDEX_IGNORE_GLOBS; `.vs`/`.idea` by EXCLUDED_PATH_SEGMENTS
+  // explanation. `.git/**`, `.vs/**` and `.idea/**` are excluded by INDEX_IGNORE_GLOBS; `.vscode` by EXCLUDED_PATH_SEGMENTS
   // downstream. Takes effect on the next index run for each repo.
   const globbed = (
     await glob("**/*", {
