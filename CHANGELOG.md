@@ -10,6 +10,19 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased] - 2026-10-01
 
+### 🧱 `postgres-mcp`: refuse a migration session that PgBouncer moves between backends (B-16.1, PG-DDL-002)
+
+- Both lanes now run `assertSessionPinned` right after taking the migration lock, and the DDL lane
+  runs it again before each step. It refuses with `DDL_POOLED_CONNECTION` or
+  `MIGRATION_POOLED_CONNECTION` when the backend pid changed or the backend no longer holds the
+  lock. Behind PgBouncer transaction pooling, a "held" lock is not exclusive: a second client took
+  it 3 times in 20.
+- New `scripts/pgbouncer-test.mjs` (`test:pgbouncer`, part of `smoke`) runs against a real
+  PgBouncer on Docker. Under load, 0 of 80 pooled attempts got through. Direct to Postgres, 20 of 20
+  succeeded.
+- `*_LOCKED` messages now explain how to find a lock that a refused pooled attempt left behind.
+- B-16.2 (checksum repair) is deferred by decision. B-16.3 is blocked on network access to `prod`.
+
 ### 🔒 `postgres-mcp`: one migration lock across processes and lanes (B-15.5) — B-15 complete
 
 - `migration_apply` now holds the DDL lane's session advisory lock, through the new

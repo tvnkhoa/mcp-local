@@ -124,5 +124,6 @@ refuse with `DDL_DRIFT`, naming which of the ledger, the schema or the files mov
   changes, and the next `migration_add` may try to undo them. The lane warns when
   `__EFMigrationsHistory` exists. It does not prevent the conflict.
 - **Cost:** session advisory locks and session-level timeouts do not survive PgBouncer in
-  transaction-pooling mode. The lane needs a direct connection, and nothing detects a pooled one
-  yet (B-16).
+  transaction-pooling mode, and the lane needs a direct connection. Since B-16.1 (PG-DDL-002), a
+  session that moves backend is refused (`*_POOLED_CONNECTION`). A pooler that never moves it is
+  still undetectable.

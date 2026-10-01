@@ -517,15 +517,19 @@ per tool, in the migration's replay style.
 `PG-SEC-002`, `PG-MIG-005/006`, `PG-WRT-007`, `PG-CMP-002` and `PG-DDL-001` in the postgres
 registry. This item holds what was knowingly left open.
 
-- **B-16.1 — PgBouncer is not detected.** Session advisory locks and session-level timeouts do not
-  survive transaction pooling, which makes `DDL_LOCKED` and the non-transactional path unreliable.
-  The cheap check: compare `pg_backend_pid()` across two statements on the session and refuse if
-  they differ. Until then the README states that a direct connection is required.
-- **B-16.2 — no checksum repair.** An applied file that is edited for a legitimate reason (a
+- **B-16.1 — PgBouncer is not detected.** ✅ MITIGATED 2026-10-01 (PG-DDL-002). Both lanes refuse a
+  session that moved backend, or whose backend no longer holds the lock (`*_POOLED_CONNECTION`).
+  Measured against a real PgBouncer, none of 80 pooled attempts got through, and there were no
+  false positives direct. Accepted, not solved: a pooler that always hands back the same backend
+  is undetectable from the client. A refused pooled attempt can also leave a lock behind on another
+  backend; the `*_LOCKED` message says how to find it.
+- **B-16.2 — no checksum repair.** ⏸ DEFERRED 2026-10-01 by decision: the workaround below is always
+  available, and repair would mean widening the ledger's `kind` constraint on every live database. An applied file that is edited for a legitimate reason (a
   comment, whitespace in the middle) blocks every file-mode plan until the file is restored.
   `ddl_preview { mode: "repair" }`, with an acknowledgement, would re-baseline it. Not built: the
   workaround (restore, then write a new migration) is always available.
-- **B-16.3 — snapshot v2 was measured on `dev` only.** It took 129 ms on the server, and the extension
+- **B-16.3 — snapshot v2 was measured on `dev` only.** ⛔ BLOCKED: `prod` (`172.31.x`, inside the
+  VPC) still times out from the build machine on 2026-10-01. It needs VPN or a bastion. It took 129 ms on the server, and the extension
   filter removed 145 of 146 routines. `prod` timed out from the build machine. Measure it before
   relying on `ddl_preview`'s cost there, although the lane never writes to prod.
 - **B-16.4 — the lint is lexical and fails open.** It recognises the common hazards. An unrecognised
@@ -1180,7 +1184,7 @@ tell the truth, or makes an existing gate capable of failing.
 | # | Item | Tier | Risk | Rev. | Complexity | Status |
 |---|---|---|---|---|---|---|
 | B-14 | The TypeScript lane reports a graph that is 77% dangling | P1 | **High** | R2 | L / extractor | 🔵 9 of 13 done 2026-08-18 · orphan `fromId` 77.0% → 0; edge types 2 → 7 |
-| B-16 | The DDL lane's known gaps after it shipped | P2 | **Med** | R1 | S each | 🔵 open 2026-10-01 · lane shipped (5 tools, 24 live scenarios); 6 follow-ups |
+| B-16 | The DDL lane's known gaps after it shipped | P2 | **Med** | R1 | S each | 🔵 16.1 mitigated (PG-DDL-002) · 16.2 deferred · 16.3 blocked on network · 16.4–16.6 accepted |
 | B-15 | The EF Core lane lacks lock_timeout, delta dry run, tests, rollback, cross-process lock | P2 | **Med** | R1 | M | ✅ 2026-10-01 · all 5 · found and fixed PG-MIG-007/008/009 on the way; migration-flow harness 0 → 20 scenarios |
 | B-13 | `findOwnerType` returns the enclosing class, not the owner | P1 | **Med** | R2 | M / AST | ✅ 2026-08-05 · AST prover; `requiredOwnerType` matches 3 of 3 |
 | B-01 | Diagnose C# `TYPE_REF` loss | P1 | Low | R1 | M | ✅ 2026-07-30 · `c68bda5` |

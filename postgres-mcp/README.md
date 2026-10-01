@@ -208,7 +208,7 @@ ddl_apply   { "previewId": "...", "approvalToken": "...",
 - **Đồng thời:**
   - Advisory lock `pg_try_advisory_lock` cho từng database: một process khác đang apply thì trả `DDL_LOCKED`, không chờ.
   - Trong cùng một process, lane DDL dùng chung mutex theo môi trường với write lane và EF lane.
-  - Lock này không hoạt động sau PgBouncer ở chế độ transaction pooling, nên lane cần kết nối trực tiếp.
+  - Lock này không hoạt động sau PgBouncer ở chế độ transaction pooling, nên lane cần kết nối trực tiếp. Nếu phát hiện session bị chuyển sang backend khác, hoặc lock không còn nằm trên backend hiện tại, server sẽ từ chối với `DDL_POOLED_CONNECTION` / `MIGRATION_POOLED_CONNECTION` (PG-DDL-002). Riêng trường hợp pooler luôn trả về đúng một backend thì không phát hiện được.
 - **Ghi vào `mcp_ops` lúc chạy** (qua default expression, trigger hay function mà migration gọi) bị phát hiện, migration bị rollback và trả `DDL_RESERVED_SCHEMA`.
 
 ### Limit và timeout

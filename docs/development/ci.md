@@ -91,7 +91,7 @@ What remains genuinely untested by CI: real query execution, real authentication
 pagination, and the EF Core migration tooling (which shells out to `dotnet`). Those are what
 `verify:live` is for, and they should be run before a release. `postgres-mcp`'s write, DDL and EF
 migration flows (`test:write-flow`, `test:ddl-flow`, `test:migration-flow`; the last uses a fake
-`dotnet ef`) are also outside CI, for a different reason: they need Docker
+`dotnet ef`) and the PgBouncer check (`test:pgbouncer`) are also outside CI, for a different reason: they need Docker
 for a throwaway Postgres, and the Windows runner has none. They need no credentials, run under
 `npm run smoke`, and skip with a message when Docker is absent.
 

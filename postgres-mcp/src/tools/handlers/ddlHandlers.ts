@@ -343,9 +343,9 @@ export async function handleDdlDryRun(
   return runExclusive(lockKey, async () => {
     const record = requirePreview(store, args.previewId);
     const env = connections.getEnvironment(record.environment, true);
-    const result = await withDdlSession(env.poolConfig, sessionTimeouts(config, record.plan), async (client) => {
+    const result = await withDdlSession(env.poolConfig, sessionTimeouts(config, record.plan), async (client, session) => {
       const fresh = await replanForExecution(client, record, config);
-      return dryRunPlan(client, fresh.plan);
+      return dryRunPlan(client, fresh.plan, session);
     });
     store.recordDryRun(record.previewId, result);
     const payload = {
@@ -391,12 +391,12 @@ export async function handleDdlApply(
     const pool = connections.getPool(record.environment, true);
     let outcome;
     try {
-      outcome = await withDdlSession(env.poolConfig, sessionTimeouts(config, record.plan), async (client) => {
+      outcome = await withDdlSession(env.poolConfig, sessionTimeouts(config, record.plan), async (client, session) => {
         await ensureHistory(client);
         const fresh = await replanForExecution(client, record, config);
         // From here on the ledger moves, so the preview can never be applied again, whatever happens.
         store.consume(record.previewId);
-        const applied = await applyPlan(client, fresh.plan, { environment: env.name, previewId: record.previewId, session: sessionTimeouts(config, record.plan) });
+        const applied = await applyPlan(client, fresh.plan, { environment: env.name, previewId: record.previewId, session: sessionTimeouts(config, record.plan), pid: session.pid });
         return { result: applied, pre: fresh.snapshot, post: await captureSchema(client) };
       });
     } catch (error) {

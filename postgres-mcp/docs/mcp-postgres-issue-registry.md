@@ -12,7 +12,7 @@ Resolution. Mirrors the format of `codebase-index-mcp/docs/mcp-codebase-index-is
 
 ## Index
 
-**30 entries** — all 30 resolved (some as documented guidance rather than code changes), **0 open**.
+**31 entries** — all 31 resolved (some as documented guidance rather than code changes), **0 open**.
 Statuses are copied from each entry's own `**Status:**` line; the entry is authoritative.
 
 | ID | Title | Status |
@@ -47,6 +47,7 @@ Statuses are copied from each entry's own `**Status:**` line; the entry is autho
 | `PG-MIG-009` | `dotnet ef database update` waited for locks with no limit | ✅ fixed 2026-10-01 (code) — `Options=-c lock_timeout` via Npgsql; dry run too; default 5 s |
 | `PG-CMP-002` | The schema snapshot saw only tables: a changed view, function, trigger or enum passed the drift guard | ✅ fixed 2026-09-30 (code) — snapshot v2 captures seven more object kinds |
 | `PG-DDL-001` | The DDL lane's apply hung forever behind a table lock it had not reached yet | ✅ fixed 2026-10-01 (code) — session timeouts set first; planning uses the plan's shortest lock wait |
+| `PG-DDL-002` | Behind PgBouncer transaction pooling, the migration lock is not exclusive | ✅ mitigated 2026-10-01 (code) — moved sessions refused; the client-side limit is accepted |
 
 > ID prefixes group by area: `ENV` environment resolution · `SEC` safety posture · `DOC`
 > documentation drift · `CMP` compare_environments · `MIG` EF Core migrations · `DIF` data_diff ·
@@ -1360,6 +1361,44 @@ as `write_apply` and `write_rollback`; covered by `src/services/concurrency/envM
 - **Also found by the same run and fixed with it:** when another apply had already run, the
   schema check fired before the ledger check, so the refusal said "the schema changed" instead of
   "another apply ran". The ledger is now checked first (`L/drift-ledger`).
+
+---
+
+## PG-DDL-002 — behind PgBouncer transaction pooling, the migration lock is not exclusive
+
+**Status:** ✅ mitigated 2026-10-01 (code, B-16.1). The symptom is detected and refused. **The
+underlying limit is accepted:** a client cannot prove it is not pooled. Covered by
+`scripts/pgbouncer-test.mjs`, which runs against a real PgBouncer.
+
+- **Scenario:** an environment whose connection string points at PgBouncer in transaction pooling
+  mode, and a `ddl_apply` or `migration_apply` against it.
+- **The hazard, measured:** a session advisory lock belongs to a Postgres backend, not to the
+  client connection. Through the pooler, a second client was able to "take" a lock that a first
+  client still held on **3 of 20** tries (`B/hazard`). Exclusivity, the whole point of the lock,
+  is gone. The DDL lane's session-level `lock_timeout` and `statement_timeout` are equally
+  unreliable on such a connection.
+- **Resolution:** `assertSessionPinned` (`services/concurrency/migrationLock.ts`) runs right after
+  the lock is taken in both lanes, and before every step of a DDL apply. It refuses with
+  `DDL_POOLED_CONNECTION` or `MIGRATION_POOLED_CONNECTION` in either of two cases: the backend pid
+  differs from the one that took the lock, or `pg_locks` shows the current backend no longer
+  holds it.
+- **Measured against PgBouncer (`POOL_MODE=transaction`, pool of 4, six clients of background
+  load):**
+  - Over 40 attempts per lane, **none got through**. The DDL lane gave 8 `DDL_POOLED_CONNECTION`
+    and 32 `DDL_LOCKED`; the EF lane gave 11 `MIGRATION_POOLED_CONNECTION` and 29
+    `MIGRATION_LOCKED`.
+  - Direct to Postgres under the same load, 20 of 20 succeeded, so there are no false positives.
+- **Why most refusals are `*_LOCKED`:** a refused attempt runs its unlock on whatever backend the
+  pooler gives it, which may not be the backend holding the lock, so the lock stays behind. Every
+  later attempt then sees the database as locked. That is the safe failure, but it is sticky: the
+  leftover lock outlives the request, until PgBouncer recycles that server connection
+  (`server_lifetime`), and it blocks direct connections too. The `*_LOCKED` message now says how
+  to find it: `select pid, application_name from pg_locks join pg_stat_activity using (pid) where
+  locktype = 'advisory'`. A DBA can then end that backend.
+- **What is not covered, and cannot be from the client:** a pooler that happens to hand the
+  session the same backend every time passes the check, and is indistinguishable from a direct
+  connection. A direct connection, or PgBouncer in session mode, remains the requirement. The
+  check makes a violation loud in the busy case instead of silent in every case.
 
 ---
 

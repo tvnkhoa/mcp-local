@@ -34,6 +34,7 @@ import { assertNoInternalWrites, internalTupleCount } from "../internalWriteGuar
 import { captureSchema, type SchemaSnapshot } from "../migration/schemaSnapshot.js";
 import { requireMigrationsDir, type DdlConfig } from "./ddlConfig.js";
 import { loadMigrations } from "./ddlFiles.js";
+import { assertSessionPinned, tryTakeMigrationLock } from "../concurrency/migrationLock.js";
 import { DDL_LOCK_KEY, deriveState, insertHistory, readHistory, type HistoryState, type Queryable } from "./ddlHistory.js";
 import { buildPlan, planDigest, type DdlPlan, type PlanRequest, type PlanStep } from "./ddlPlanner.js";
 import type { DryRunResult, DryRunStepResult, StepError } from "./ddlPreviewStore.js";
@@ -170,7 +171,11 @@ async function setSessionTimeouts(client: pg.Client, timeouts: SessionTimeouts):
  * `pg_get_expr` takes AccessShareLock on every table it reads, and this session has no
  * statement_timeout of its own. Found by `N/lock-timeout`, which hung until the request timed out.
  */
-export async function withDdlSession<T>(poolConfig: PoolConfig, timeouts: SessionTimeouts, fn: (client: pg.Client) => Promise<T>): Promise<T> {
+export async function withDdlSession<T>(
+  poolConfig: PoolConfig,
+  timeouts: SessionTimeouts,
+  fn: (client: pg.Client, session: { pid: number }) => Promise<T>
+): Promise<T> {
   const client = new pg.Client({
     ...poolConfig,
     application_name: "communicationhub-postgres-mcp:ddl",
@@ -179,15 +184,17 @@ export async function withDdlSession<T>(poolConfig: PoolConfig, timeouts: Sessio
   await client.connect();
   try {
     await setSessionTimeouts(client, timeouts);
-    const locked = await client.query<{ ok: boolean }>("select pg_try_advisory_lock($1, $2) as ok", [...DDL_LOCK_KEY]);
-    if (locked.rows[0]?.ok !== true) {
+    const locked = await tryTakeMigrationLock(client);
+    if (!locked.ok) {
       throw new PolicyViolationError(
         "DDL_LOCKED",
-        "Another session holds the DDL migration lock for this database. Wait for it to finish, then retry."
+        "Another session holds the DDL migration lock for this database. Wait for it to finish, then retry. If nothing is applying, a lock may have been left behind by a pooled connection (B-16.1): look for it with select pid, application_name from pg_locks join pg_stat_activity using (pid) where locktype = 'advisory'."
       );
     }
     try {
-      return await fn(client);
+      // B-16.1: refuse a pooled session before relying on the lock or the timeouts it carries.
+      await assertSessionPinned(client, locked.pid, "DDL_POOLED_CONNECTION");
+      return await fn(client, { pid: locked.pid });
     } finally {
       await client.query("select pg_advisory_unlock($1, $2)", [...DDL_LOCK_KEY]).catch(() => undefined);
     }
@@ -276,12 +283,15 @@ async function invalidIndexes(client: pg.Client): Promise<Set<string>> {
  * Non-transactional migrations cannot run inside a transaction at all, so they are skipped and
  * reported as skipped, never as passed.
  */
-export async function dryRunPlan(client: pg.Client, plan: DdlPlan): Promise<DryRunResult> {
+export async function dryRunPlan(client: pg.Client, plan: DdlPlan, session: { pid: number }): Promise<DryRunResult> {
   const steps: DryRunStepResult[] = [];
   let error: StepError | undefined;
   let skippedBefore = false;
 
   await client.query("begin");
+  // Inside the transaction: a transaction pins one backend even through a pooler, so one check
+  // here covers every step that follows.
+  await assertSessionPinned(client, session.pid, "DDL_POOLED_CONNECTION");
   try {
     for (const step of plan.steps) {
       const base = { version: step.version, name: step.name, action: step.action };
@@ -381,7 +391,7 @@ async function recordFailure(client: pg.Client, plan: DdlPlan, step: PlanStep, m
 export async function applyPlan(
   client: pg.Client,
   plan: DdlPlan,
-  meta: { environment: string; previewId: string; session: SessionTimeouts }
+  meta: { environment: string; previewId: string; session: SessionTimeouts; pid: number }
 ): Promise<ApplyResult> {
   const steps: ApplyStepResult[] = [];
   let error: ApplyResult["error"];
@@ -393,6 +403,15 @@ export async function applyPlan(
       continue;
     }
     const started = Date.now();
+    // Between steps the session is outside a transaction, which is exactly where a pooler may
+    // move it to another backend. A move stops the plan before the next step runs.
+    try {
+      await assertSessionPinned(client, meta.pid, "DDL_POOLED_CONNECTION");
+    } catch (pinError) {
+      error = toStepError(pinError, step, null);
+      steps.push({ ...base, status: "not_run" });
+      continue;
+    }
 
     if (step.action === "adopt") {
       const historyId = await insertHistory(
