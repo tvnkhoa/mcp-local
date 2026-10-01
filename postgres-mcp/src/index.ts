@@ -70,7 +70,8 @@ const connections = new ConnectionManager({
   poolMax: 10,
   idleTimeoutMs: 30_000,
   statementTimeoutMs: limits.defaultTimeoutMs,
-  applicationName: "communicationhub-postgres-mcp"
+  applicationName: "communicationhub-postgres-mcp",
+  onIdleError: (detail) => eventLog.error("pool_idle_client_error", detail)
 });
 
 // One shared HMAC secret for both write + migration approvals. Auto-generated per

@@ -14,6 +14,13 @@ export interface ConnectionManagerOptions {
   idleTimeoutMs: number;
   statementTimeoutMs: number;
   applicationName: string;
+  /**
+   * Called when an IDLE pooled connection fails (the server restarted, a failover, a network drop).
+   * pg-pool emits that as an `error` event on the pool, and an `error` event with no listener
+   * crashes the process — so every pool gets a listener, whether or not this is set. pg-pool has
+   * already discarded the broken client; the next query opens a fresh one.
+   */
+  onIdleError?: (detail: { environment: string; code: string | undefined; message: string }) => void;
 }
 
 /**
@@ -58,6 +65,11 @@ export class ConnectionManager {
       idleTimeoutMillis: this.options.idleTimeoutMs,
       statement_timeout: this.options.statementTimeoutMs,
       application_name: this.options.applicationName
+    });
+    pool.on("error", (error: Error & { code?: string }) => {
+      // pg's message here is about the socket ("Connection terminated unexpectedly"), never the
+      // connection string, so it is safe to log as is.
+      this.options.onIdleError?.({ environment: env.name, code: error.code, message: error.message });
     });
     this.pools.set(env.name, pool);
     return pool;

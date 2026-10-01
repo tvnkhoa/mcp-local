@@ -67,6 +67,10 @@ export async function assertSessionPinned(db: Queryable, pid: number, code: stri
 
 export async function withMigrationLock<T>(poolConfig: PoolConfig, fn: () => Promise<T>): Promise<T> {
   const client = new pg.Client({ ...poolConfig, application_name: "communicationhub-postgres-mcp:migration-lock" });
+  // This session sits IDLE for the whole `dotnet ef` run, which is exactly when a dropped connection
+  // arrives as an `error` event, and an unheard `error` event crashes the server mid-migration. Losing
+  // the session releases the lock early; the unlock below then fails, and it is already caught.
+  client.on("error", () => undefined);
   await client.connect();
   try {
     const locked = await tryTakeMigrationLock(client);

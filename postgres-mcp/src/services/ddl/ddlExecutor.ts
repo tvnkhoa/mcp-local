@@ -214,6 +214,10 @@ export async function withDdlSession<T>(
     application_name: "communicationhub-postgres-mcp:ddl",
     statement_timeout: 0
   });
+  // A connection lost between statements is emitted as an `error` event, which crashes the process
+  // when nothing listens. The failure is not lost by ignoring the event: the query in flight, or the
+  // next one, rejects with it, and that is where the plan stops and reports.
+  client.on("error", () => undefined);
   await client.connect();
   try {
     await setSessionTimeouts(client, timeouts);
