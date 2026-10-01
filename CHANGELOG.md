@@ -142,6 +142,34 @@ This is phase 0.3 of the DDL migration lane.
 - New `scripts/ddl-flow-test.mjs`, 7 scenarios against a throwaway Postgres 17. It is part of
   `npm run smoke`, and can be run alone with `test:ddl-flow`.
 
+### 🚀 `postgres-mcp`: `ddl_preview`, `ddl_dry_run`, `ddl_apply` (phase 1.4), 19 → 22 tools
+
+- **`ddl_preview`** plans against the live schema and the ledger, lints every step against the real
+  tables and row estimates, and returns an approval token. It runs in file mode (up, or down to a
+  target for rollback) or inline mode (`sql`). Arguments from the two modes cannot be mixed.
+- **`ddl_dry_run`** runs every transactional step in one transaction, each under a savepoint, then
+  rolls it back. CONCURRENTLY steps are reported as `skipped`.
+- **`ddl_apply`**:
+  - **Re-plans under `pg_try_advisory_lock`** on a dedicated session. Another session holding the
+    lock gives `DDL_LOCKED`.
+  - **Proves the plan is the approved one** (same digest). Otherwise it refuses with `DDL_DRIFT`,
+    naming whether the ledger, the schema or the files moved.
+  - **One transaction per migration,** committed together with its ledger row.
+  - **Requires `acknowledgeRisks`** for every `high` risk.
+  - **Is audited** to `mcp_ops.audit_log`, whatever the outcome.
+- **Every statement runs over the extended protocol.** Postgres then refuses a statement that hides
+  a second command (`42601`), which backs up the tokenizer if it ever disagrees with the server.
+- **A migration that writes to `mcp_ops` at run time** is rolled back with `DDL_RESERVED_SCHEMA`.
+  Examples are a volatile default, a trigger, or a function it calls. This reuses the write lane's
+  `pg_stat_xact` delta, moved to `services/internalWriteGuard.ts`.
+- **PG-DDL-001, found by the harness before shipping:** apply hung forever behind a table lock,
+  because re-planning reads the schema with no `lock_timeout`. The session's timeouts are now set
+  first, and planning uses the plan's shortest lock wait.
+- `write_preview`'s `DDL_NOT_ALLOWED` message now names `ddl_*` and `migration_*`. A new generic
+  `55P03` → `lock_timeout` error rule covers the other lanes.
+- `ddl-flow-test.mjs` goes from 7 to 24 scenarios. The runtime-write guard and the extended-protocol
+  refusal were both checked to fail without the fix. The workspace now has 99 tools.
+
 ## [Unreleased] - 2026-08-19d
 
 ### 🔧 What two simulated use cases found, and what it took to fix

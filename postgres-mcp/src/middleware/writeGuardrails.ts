@@ -279,7 +279,7 @@ export function validateWriteSql(inputSql: string, allowFullTable: boolean): Wri
   } else if (lead.startsWith("select") || lead.startsWith("with")) {
     return fail("NOT_A_WRITE", "Use run_read_query for SELECT / WITH ... SELECT statements.");
   } else {
-    return fail("DDL_NOT_ALLOWED", "DDL is not allowed here. Schema changes must go through the migration tools.");
+    return fail("DDL_NOT_ALLOWED", "DDL is not allowed here. Schema changes must go through the migration tools (ddl_* for raw SQL, migration_* for EF Core).");
   }
 
   // Note: we deliberately do NOT scan for a blocklist of DDL keywords here. The

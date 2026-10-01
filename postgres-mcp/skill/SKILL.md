@@ -73,18 +73,47 @@ Preview and dry-run before applying. Requires the configured .NET project paths.
 
 ## Raw-SQL DDL migrations (OFF unless `POSTGRES_DDL_ENABLED=true`)
 
-A migration lane independent of EF Core, for schema changes written as SQL. Available today:
+A migration lane independent of EF Core, for schema changes written as SQL.
+
+```
+ddl_status → ddl_create → ddl_preview → ddl_dry_run → ddl_apply
+```
 
 - `ddl_status(environment)` lists applied, pending, edited-since-applied and missing migrations. It
   is read-only and works on prod.
 - `ddl_create(name, up, down?)` writes `V<timestamp>__<name>.up.sql` / `.down.sql` into
   `POSTGRES_DDL_MIGRATIONS_DIR` and touches no database. Always write a `down` unless the change
   truly cannot be reverted.
-  - Only CREATE/ALTER/DROP/COMMENT ON are accepted. Data changes go through `write_preview`.
+  - Only CREATE/ALTER/DROP/COMMENT ON are accepted. Data changes go through `write_preview`:
+    add the column nullable, backfill it with `write_preview`, then SET NOT NULL.
   - For `CREATE INDEX CONCURRENTLY`, pass `noTransaction: true` and keep it alone in its migration.
+- `ddl_preview(environment)` plans the pending files and returns `previewId`, `approvalToken`, each
+  step's risks and `requiredAcknowledgements`. It executes nothing.
+  - For inline DDL with no file, pass `sql` instead.
+  - **To roll back**, pass `direction: "down"` and `target`: the version to return to, or `"0"` for
+    everything. Each reverted migration needs a `.down.sql`.
+- `ddl_dry_run(previewId)` runs the plan in a transaction and rolls it back. Run it before every
+  apply. It takes real locks while it runs. CONCURRENTLY steps are reported as `skipped`, not as
+  passed.
+- `ddl_apply(previewId, approvalToken, acknowledgeRisks?)` runs the plan.
 
-Applying migrations (`ddl_preview` → `ddl_dry_run` → `ddl_apply`) is not available yet. Do not try
-to apply DDL through `write_preview` or `run_read_query`: both refuse it.
+**Never fill in `acknowledgeRisks` yourself.** When `requiredAcknowledgements` is not empty, show
+the user each risk's message and wait for an explicit yes before passing the codes. They name data
+loss (`DROP_TABLE`, `DROP_COLUMN`), table rewrites and long locks (`ALTER_COLUMN_TYPE`,
+`SET_NOT_NULL`, `ADD_COLUMN_VOLATILE_DEFAULT`) and privilege changes (`SECURITY_DEFINER`). A down
+script that drops a column needs acknowledging too.
+
+When apply refuses:
+
+| Code | Meaning | What to do |
+|---|---|---|
+| `DDL_DRIFT` | The schema, ledger or files changed since the preview | Run `ddl_preview` again. Never retry the old token |
+| `DDL_LOCKED` | Another session is applying DDL to this database | Wait for it, then retry |
+| `DDL_LOCK_TIMEOUT` | A table is busy | Retry off-peak |
+| `DDL_CHECKSUM_MISMATCH` | An applied file was edited | Restore it, then write a new migration for the change |
+| `DDL_APPLY_FAILED` | The SQL itself failed | Read `error.detail` |
+
+Do not apply DDL through `write_preview` or `run_read_query`: both refuse it.
 
 ## Guardrails
 

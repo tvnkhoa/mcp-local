@@ -20,6 +20,17 @@ const statementTimeout: ErrorRule = (error) =>
     : undefined;
 
 /**
+ * Postgres `SQLSTATE 55P03` — `lock_timeout` expired, or `NOWAIT` found the lock taken. Reported
+ * as its own code so a caller can tell "something else holds the lock, retry later" from a real
+ * failure. The DDL lane maps it to `DDL_LOCK_TIMEOUT` with the migration named; this rule covers
+ * every other path.
+ */
+const lockTimeout: ErrorRule = (error) =>
+  stringProperty(error, "code") === "55P03"
+    ? { code: "lock_timeout", message: "Could not acquire a lock within lock_timeout. Retry once the conflicting session finishes." }
+    : undefined;
+
+/**
  * Any other failure that arrived with a message — in practice a `pg` driver error.
  *
  * The driver's message goes in `detail` and never in `message`, which is why this
@@ -57,7 +68,7 @@ const mapError: (error: unknown) => MappedError = createErrorMapper({
   mcpError: McpError,
   // Order preserved: SQLSTATE first, so a cancelled statement is reported as a
   // timeout rather than as a generic database failure.
-  rules: [statementTimeout, databaseFailure],
+  rules: [statementTimeout, lockTimeout, databaseFailure],
   fallback: () => ({ code: "internal_error", message: "Unexpected error." })
 });
 

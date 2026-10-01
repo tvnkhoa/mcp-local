@@ -36,11 +36,14 @@ npm run build; npm start
 
 <!-- BEGIN GENERATED: tool-list -->
 
-19 tools, namespaced `mcp__postgres-mcp__<tool>`:
+22 tools, namespaced `mcp__postgres-mcp__<tool>`:
 
 - `compare_environments`
 - `data_diff`
+- `ddl_apply`
 - `ddl_create`
+- `ddl_dry_run`
+- `ddl_preview`
 - `ddl_status`
 - `describe_table`
 - `get_table_relationships`
@@ -145,36 +148,85 @@ compare_environments { "source": "dev", "target": "staging", "includeRowCounts":
 
 `migration_apply` dùng chung một mutex theo từng môi trường với `write_apply` / `write_rollback`. Trên cùng một DB, migration và thao tác ghi dữ liệu chạy lần lượt: một lệnh ghi phải đợi migration đang chạy xong. Nếu hai lần apply cùng một preview được gọi đồng thời, lần sau sẽ nhận `PREVIEW_NOT_FOUND`. Mutex chỉ có hiệu lực trong một process server.
 
-## 6b. Luồng DDL (raw SQL) — đang xây dựng
+## 6b. Luồng DDL (raw SQL)
 
 Đây là lane migration bằng SQL thuần, độc lập với EF Core. Lane **TẮT** cho tới khi đặt `POSTGRES_DDL_ENABLED=true`. Lane ghi được vào đúng những môi trường mà write lane ghi được (`POSTGRES_WRITABLE_ENVIRONMENTS`); `prod` luôn chỉ đọc.
 
-Hiện có hai tool:
-
 ```jsonc
-ddl_status { "environment": "dev" }   // applied / pending / file đã bị sửa / file mất / sai thứ tự. Chỉ đọc, chạy được trên prod
-ddl_create { "name": "add_orders_note",
-             "up":   "alter table orders add column note text",
-             "down": "alter table orders drop column if exists note" }   // chỉ ghi file, không chạm DB
+ddl_status  { "environment": "dev" }                         // applied / pending / file bị sửa / file mất / sai thứ tự — chỉ đọc, chạy được trên prod
+ddl_create  { "name": "add_orders_note",
+              "up":   "alter table orders add column note text",
+              "down": "alter table orders drop column if exists note" }  // chỉ ghi file, không chạm DB
+ddl_preview { "environment": "dev" }                         // plan + risks + approvalToken; không thực thi gì
+ddl_dry_run { "previewId": "..." }                           // chạy trong 1 transaction rồi ROLLBACK
+ddl_apply   { "previewId": "...", "approvalToken": "...",
+              "acknowledgeRisks": ["DROP_COLUMN"] }          // chỉ khi preview có requiredAcknowledgements
 ```
 
+**Rollback** cũng đi qua `ddl_preview { "direction": "down", "target": "<version>" }`: revert mọi migration mới hơn `target`, từ mới về cũ, bằng file `.down.sql` của chúng (`"0"` nghĩa là revert tất cả). Rollback đi qua đúng preview → token → apply như chiều up, không có tool riêng.
+
+**Inline:** `ddl_preview { "sql": "create index concurrently …", "noTransaction": true, "label": "orders_idx" }` chạy DDL không cần file. Nếu sau đó lưu đúng SQL đó thành file bằng `ddl_create`, lần `up` kế tiếp sẽ **adopt** file (chỉ ghi vào ledger, không chạy lại).
+
+### Input
+
+| Tool | Tham số |
+|---|---|
+| `ddl_status` | `environment?`, `profile?` |
+| `ddl_create` | `name` (`^[a-z0-9_]{1,100}$`), `up`, `down?` (≤ 256 KB mỗi script), `noTransaction?`, `version?` (14 chữ số), `profile?` |
+| `ddl_preview` | Chế độ file: `direction?` (`up`\|`down`), `target?` (`^\d{14}$` hoặc `"0"`), `allowOutOfOrder?`. Chế độ inline: `sql`, `label?`, `noTransaction?`. Không được trộn tham số của hai chế độ (`DDL_INVALID_ARGS`). Luôn có `environment?`, `profile?`; `sql` của từng bước chỉ hiện ở `profile: "verbose"` |
+| `ddl_dry_run` | `previewId`, `profile?` |
+| `ddl_apply` | `previewId`, `approvalToken`, `acknowledgeRisks?` (≤ 50 mã), `profile?` |
+
+### Quy tắc
+
 - **Tên file:** `V<yyyymmddhhmmss>__<name>.up.sql` + `.down.sql` (tuỳ chọn), đặt trong `POSTGRES_DDL_MIGRATIONS_DIR`. `ddl_create` không bao giờ ghi đè file có sẵn.
+- **Checksum:** sha256 của nội dung file, bỏ qua BOM, CRLF và khoảng trắng ở cuối. File đã apply mà bị sửa thì mọi plan theo file đều bị chặn (`DDL_CHECKSUM_MISMATCH`). Khôi phục file gốc, rồi viết migration mới cho thay đổi.
 - **Lệnh được phép:** `CREATE` / `ALTER` / `DROP` trên table, index, view, materialized view, sequence, type, domain, schema, function (sql/plpgsql), procedure, trigger; cộng thêm `COMMENT ON` và `CREATE EXTENSION`.
 - **Lệnh bị từ chối:**
-  - DML: dữ liệu đi qua `write_preview`.
+  - DML: dữ liệu đi qua `write_preview`. Pattern chuẩn: thêm cột nullable (ddl) → backfill (`write_preview`) → `SET NOT NULL` (ddl).
   - `DO` / `CALL`.
   - `GRANT` / ROLE / `OWNER TO`.
   - `SET` / `BEGIN` và các lệnh điều khiển transaction.
   - VACUUM và các lệnh bảo trì.
   - Mọi tham chiếu tới `mcp_ops`.
-- **`CREATE INDEX CONCURRENTLY`:** truyền `noTransaction: true`. Khi đó migration chỉ được có một statement.
-- **Directive ở đầu file:** `-- mcp:no-transaction`, `-- mcp:lock-timeout-ms=N` (chỉ được hạ so với env), `-- mcp:statement-timeout-ms=N` (tối đa bằng `POSTGRES_DDL_MAX_STATEMENT_TIMEOUT_MS`).
+- **Transaction:** mỗi migration chạy trong một transaction riêng, cùng với dòng ledger của nó. Gặp lỗi đầu tiên thì dừng; các migration trước đó vẫn giữ nguyên trạng thái đã commit.
+- **`CONCURRENTLY`:** cần `-- mcp:no-transaction` (hoặc `noTransaction: true`), và migration chỉ được có đúng một statement. Dry run sẽ bỏ qua và báo `skipped`. Nếu build index thất bại để lại index INVALID, response sẽ chỉ tên index đó (`invalidIndexesLeft`).
+- **Risk:** `ddl_preview` báo risk của từng migration. Các mã mức `high` (`DROP_TABLE`, `DROP_COLUMN`, `ALTER_COLUMN_TYPE`, `SET_NOT_NULL`, `RENAME_*`, `ADD_COLUMN_VOLATILE_DEFAULT`, `SECURITY_DEFINER`, `CREATE_EXTENSION`, …) phải có trong `acknowledgeRisks`, nếu không sẽ bị `DDL_RISK_NOT_ACKNOWLEDGED`. `DROP SCHEMA … CASCADE` thì luôn bị chặn.
+- **Drift:** `ddl_apply` lập lại plan dưới advisory lock, rồi từ chối với `DDL_DRIFT` nếu ledger, schema hoặc file migration đã thay đổi kể từ lúc preview. Mỗi preview chỉ apply được một lần.
+- **Đồng thời:**
+  - Advisory lock `pg_try_advisory_lock` cho từng database: một process khác đang apply thì trả `DDL_LOCKED`, không chờ.
+  - Trong cùng một process, lane DDL dùng chung mutex theo môi trường với write lane và EF lane.
+  - Lock này không hoạt động sau PgBouncer ở chế độ transaction pooling, nên lane cần kết nối trực tiếp.
+- **Ghi vào `mcp_ops` lúc chạy** (qua default expression, trigger hay function mà migration gọi) bị phát hiện, migration bị rollback và trả `DDL_RESERVED_SCHEMA`.
 
-`ddl_preview` / `ddl_dry_run` / `ddl_apply` (có cả rollback qua `.down.sql`) sẽ được thêm ở phase sau.
+### Limit và timeout
+
+| Env | Mặc định | Ý nghĩa |
+|---|---|---|
+| `POSTGRES_DDL_LOCK_TIMEOUT_MS` | 5000 | `lock_timeout` cho mỗi migration. Directive `-- mcp:lock-timeout-ms=N` chỉ được hạ, không được nâng |
+| `POSTGRES_DDL_STATEMENT_TIMEOUT_MS` | 300000 | `statement_timeout` mặc định cho mỗi statement |
+| `POSTGRES_DDL_MAX_STATEMENT_TIMEOUT_MS` | 3600000 | Trần cho directive `-- mcp:statement-timeout-ms=N` |
+| `POSTGRES_DDL_PREVIEW_TTL_MS` | 3600000 | Thời gian sống của preview trong bộ nhớ |
+
+Ngoài ra: tối đa 256 KB và 200 statement cho mỗi migration. Giá trị vượt giới hạn bị từ chối (`DDL_DIRECTIVE_EXCEEDS_LIMIT`), không lặng lẽ bị kẹp về giới hạn. Bước lập plan lúc apply dùng lock wait ngắn nhất trong plan, nên một bảng đang bị khoá sẽ fail nhanh (`DDL_LOCK_TIMEOUT`) chứ không treo.
+
+### Ví dụ an toàn
+
+```sql
+-- V20261001093000__add_orders_note.up.sql
+alter table orders add column if not exists note text;
+
+-- V20261001093000__add_orders_note.down.sql
+alter table orders drop column if exists note;
+```
+
+Down script `drop column` cũng được tính là risk: lúc rollback, apply sẽ yêu cầu `acknowledgeRisks: ["DROP_COLUMN"]`.
 
 ## 7. Audit
 
-Mọi `write_apply` / `write_rollback` / `migration_apply` được ghi vào bảng `mcp_ops.audit_log` trên DB đích (tự tạo khi dùng lần đầu) và stderr JSON.
+Mọi `write_apply` / `write_rollback` / `migration_apply` / `ddl_apply` được ghi vào bảng `mcp_ops.audit_log` trên DB đích (tự tạo khi dùng lần đầu) và stderr JSON.
+
+Lane DDL còn có ledger riêng là `mcp_ops.ddl_history` (append-only), ghi lại mọi lần apply/revert, kể cả lần thất bại.
 
 Schema `mcp_ops` thuộc về server, không phải schema của ứng dụng:
 

@@ -16,6 +16,7 @@ import {
   type WriteTarget
 } from "../../middleware/writeGuardrails.js";
 import { runExclusive } from "../../services/concurrency/envMutex.js";
+import { assertNoInternalWrites, internalTupleCount } from "../../services/internalWriteGuard.js";
 import { recordAudit } from "../../services/write/auditLog.js";
 import {
   createWriteDigest,
@@ -297,39 +298,19 @@ async function resolveWriteTarget(client: PoolClient, sql: string, params: unkno
 }
 
 /**
- * Tuples written so far in internal schemas, as `pg_stat_xact_user_tables` counts them.
- *
- * Only a DIFFERENCE of two readings in one transaction means anything. The view reports the
- * backend's pending counters, and since PG15 those still hold writes from earlier transactions
- * on the same pooled connection until they are flushed — which never happens inside a
- * transaction block. The first attempt compared the reading against zero, and refused
- * `write_preview` on a connection whose previous transaction had written the audit row.
- */
-async function internalTupleCount(client: PoolClient): Promise<number> {
-  const result = await client.query<{ n: string | null }>(
-    `select sum(n_tup_ins + n_tup_upd + n_tup_del) as n
-     from pg_stat_xact_user_tables
-     where schemaname = any($1::text[])`,
-    [INTERNAL_SCHEMAS]
-  );
-  return Number(result.rows[0]?.n ?? 0);
-}
-
-/**
- * Refuse if the statement wrote a row in an internal schema since `baseline` was read. Call
- * it after the statement ran and before the transaction ends.
+ * Refuse if the statement wrote a row in an internal schema since `baseline` was read.
  *
  * The plan shows only the statement's own targets. A trigger on the target table runs code
- * the plan never shows, and that code can insert into or delete from `mcp_ops`. The per-table
- * tuple counters see those writes, however they were reached.
+ * the plan never shows, and that code can insert into or delete from `mcp_ops`.
+ * `internalWriteGuard` explains why only a same-transaction difference is trusted.
  */
-async function assertNoInternalSideEffects(client: PoolClient, baseline: number): Promise<void> {
-  if ((await internalTupleCount(client)) > baseline) {
-    throw new PolicyViolationError(
-      RESERVED_SCHEMA_CODE,
-      `${reservedSchemaMessage(INTERNAL_SCHEMAS.join(", "))} This statement reaches it indirectly — a trigger or rule on the target table writes there.`
-    );
-  }
+function assertNoInternalSideEffects(client: PoolClient, baseline: number): Promise<void> {
+  return assertNoInternalWrites(
+    client,
+    baseline,
+    RESERVED_SCHEMA_CODE,
+    `${reservedSchemaMessage(INTERNAL_SCHEMAS.join(", "))} This statement reaches it indirectly — a trigger or rule on the target table writes there.`
+  );
 }
 
 function assertEnabled(config: WriteConfig): void {

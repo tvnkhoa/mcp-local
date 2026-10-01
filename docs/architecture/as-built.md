@@ -27,13 +27,13 @@ packages/            the platform — npm workspace, compiled with tsc -b
   manifest tier 5    workspace tooling data: which servers exist, their env, their tools
 
 codebase-index-mcp/  43 tools   code graph indexing and analysis      (SQLite, tree-sitter)
-postgres-mcp/        19 tools   PostgreSQL, read-only by default      (writes/migrations/DDL gated)
+postgres-mcp/        22 tools   PostgreSQL, read-only by default      (writes/migrations/DDL gated)
 sqlserver-mcp/       12 tools   SQL Server, read-only by default      (routine exec gated)
 observe-mcp/         10 tools   OpenObserve logs and traces           (read-only)
 bitbucket-mcp/       12 tools   repos, pull requests, pipelines       (PR creation gated)
 ```
 
-**96 tools and 131 env variables** in total (env: 41 / 29 / 19 / 31 / 11), both counted from
+**99 tools and 131 env variables** in total (env: 41 / 29 / 19 / 31 / 11), both counted from
 `@mcp/manifest` rather than by hand:
 
 ```bash

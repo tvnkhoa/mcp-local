@@ -1,6 +1,9 @@
 import { createHash } from "node:crypto";
 
-import type { Pool } from "pg";
+import type { Pool, PoolClient } from "pg";
+
+/** A pool or a single client: the snapshot only issues queries, so either will do. */
+type Queryable = Pick<Pool | PoolClient, "query">;
 
 import { INTERNAL_SCHEMAS } from "../../middleware/internalSchemas.js";
 
@@ -102,7 +105,7 @@ function notExtensionOwned(catalog: string, oidExpr: string): string {
   return `not exists (select 1 from pg_depend d where d.classid = '${catalog}'::regclass and d.objid = ${oidExpr} and d.deptype = 'e')`;
 }
 
-async function captureObjects(pool: Pool, schemas: string[]): Promise<SchemaObjects> {
+async function captureObjects(pool: Queryable, schemas: string[]): Promise<SchemaObjects> {
   const [views, sequences, enums, domains, routines, triggers, extensions] = await Promise.all([
     pool.query<{ name: string; definition: string }>(
       `select n.nspname || '.' || c.relname as name,
@@ -189,7 +192,7 @@ async function captureObjects(pool: Pool, schemas: string[]): Promise<SchemaObje
  * Discover every non-system schema (so snapshots aren't silently limited to `public`).
  * The server's own schemas are excluded too — see INTERNAL_SCHEMAS for why (PG-MIG-005).
  */
-async function discoverUserSchemas(pool: Pool): Promise<string[]> {
+async function discoverUserSchemas(pool: Queryable): Promise<string[]> {
   const result = await pool.query<{ nspname: string }>(
     `
     select nspname
@@ -210,7 +213,7 @@ async function discoverUserSchemas(pool: Pool): Promise<string[]> {
  * the migration drift guard and compare_environments, which must not ignore tables
  * that live outside `public`. The server's own `mcp_ops` is not user schema and is left out.
  */
-export async function captureSchema(pool: Pool, schemas?: string[]): Promise<SchemaSnapshot> {
+export async function captureSchema(pool: Queryable, schemas?: string[]): Promise<SchemaSnapshot> {
   const targetSchemas =
     schemas && schemas.length > 0 ? schemas : await discoverUserSchemas(pool);
 

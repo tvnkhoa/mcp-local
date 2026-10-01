@@ -1,6 +1,6 @@
 {
   "server": "postgres-mcp",
-  "toolCount": 19,
+  "toolCount": 22,
   "tools": [
     {
       "annotations": {
@@ -91,6 +91,48 @@
     },
     {
       "annotations": {
+        "destructiveHint": true,
+        "idempotentHint": false,
+        "openWorldHint": true,
+        "readOnlyHint": false
+      },
+      "description": "Apply a ddl_preview's plan. Re-plans under a database advisory lock and refuses (DDL_DRIFT) if the schema, the ledger or the files changed since the preview. One transaction per migration, stopping at the first failure. High risks from the preview must be listed in acknowledgeRisks — only after a human has agreed to them.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "acknowledgeRisks": {
+            "description": "Risk codes from the preview's requiredAcknowledgements, confirmed by a human.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "approvalToken": {
+            "type": "string"
+          },
+          "previewId": {
+            "type": "string"
+          },
+          "profile": {
+            "enum": [
+              "nano",
+              "compact",
+              "standard",
+              "verbose"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "previewId",
+          "approvalToken"
+        ],
+        "type": "object"
+      },
+      "name": "ddl_apply"
+    },
+    {
+      "annotations": {
         "destructiveHint": false,
         "idempotentHint": false,
         "openWorldHint": false,
@@ -137,6 +179,93 @@
         "type": "object"
       },
       "name": "ddl_create"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": true,
+        "readOnlyHint": true
+      },
+      "description": "Run a ddl_preview's plan inside one transaction and roll it back, to catch failures before ddl_apply. Takes real locks while it runs (bounded by lock_timeout). Non-transactional migrations (CONCURRENTLY) are skipped and reported as skipped.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "previewId": {
+            "type": "string"
+          },
+          "profile": {
+            "enum": [
+              "nano",
+              "compact",
+              "standard",
+              "verbose"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "previewId"
+        ],
+        "type": "object"
+      },
+      "name": "ddl_dry_run"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": true,
+        "readOnlyHint": true
+      },
+      "description": "Plan DDL migrations against an environment and return an approval token. File mode applies pending files (direction \"up\", optional target) or reverts applied ones newest-first via their .down.sql (direction \"down\", target required; \"0\" = all). Inline mode takes sql instead. Reports per-migration risks and which ones ddl_apply must acknowledge. Executes nothing; refused on read-only environments (prod).",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "allowOutOfOrder": {
+            "description": "File mode: allow pending migrations older than the newest applied one.",
+            "type": "boolean"
+          },
+          "direction": {
+            "description": "File mode: \"up\" (default) applies pending migrations; \"down\" reverts applied ones.",
+            "enum": [
+              "up",
+              "down"
+            ],
+            "type": "string"
+          },
+          "environment": {
+            "type": "string"
+          },
+          "label": {
+            "description": "Inline mode: a name for the ledger (^[a-z0-9_]{1,100}$).",
+            "type": "string"
+          },
+          "noTransaction": {
+            "description": "Inline mode: run without a transaction (needed for CONCURRENTLY; one statement only).",
+            "type": "boolean"
+          },
+          "profile": {
+            "enum": [
+              "nano",
+              "compact",
+              "standard",
+              "verbose"
+            ],
+            "type": "string"
+          },
+          "sql": {
+            "description": "Inline mode: the DDL to run, instead of files. Same rules as a migration file.",
+            "type": "string"
+          },
+          "target": {
+            "description": "File mode: 14-digit version. Up: apply through it. Down: revert everything newer than it (\"0\" = everything).",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "ddl_preview"
     },
     {
       "annotations": {

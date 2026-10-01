@@ -215,7 +215,8 @@ test("tool lists match the committed contract snapshots exactly", () => {
   // 78 -> 90: sqlserver-mcp joined with 12.
   // 90 -> 94: bitbucket-mcp gained the four read-only Pipelines tools.
   // 94 -> 96: postgres-mcp gained ddl_status and ddl_create (DDL lane, phase 1.3).
-  assert.equal(total, 96, "the workspace advertises 96 tools; update this number deliberately");
+  // 96 -> 99: and ddl_preview, ddl_dry_run, ddl_apply (phase 1.4).
+  assert.equal(total, 99, "the workspace advertises 99 tools; update this number deliberately");
 });
 
 test("codebase-index advertises all 43 of its tools", () => {

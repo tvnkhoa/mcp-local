@@ -155,7 +155,7 @@ test("the existing guardrail verdicts are unchanged", () => {
     ok: false,
     error: {
       code: "DDL_NOT_ALLOWED",
-      message: "DDL is not allowed here. Schema changes must go through the migration tools."
+      message: "DDL is not allowed here. Schema changes must go through the migration tools (ddl_* for raw SQL, migration_* for EF Core)."
     }
   });
   assert.equal(validateWriteSql("update t set a = 1", false).ok, false);

@@ -1,8 +1,10 @@
 /**
  * Live test for the raw-SQL DDL lane, over real stdio MCP against a throwaway Postgres.
  *
- * Phase 1.3 covers the two tools that change no database state: `ddl_status`, which reads the
- * ledger, and `ddl_create`, which writes files. Preview, dry run and apply join in phase 1.4.
+ * Covers the whole lane: `ddl_status` and `ddl_create` (A–G), then preview, dry run and apply
+ * (H–W): drift in each of its three forms, the risk gate, lock_timeout, CONCURRENTLY outside a
+ * transaction, rollback through down scripts, inline-then-adopt, the advisory lock, and DDL that
+ * reaches mcp_ops at run time.
  *
  * Same posture as `write-flow-test.mjs`. It provisions a container and a temporary migrations
  * directory, removes both afterwards, and never touches a configured environment. It skips
@@ -22,7 +24,7 @@ import { Client as McpClient } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import pg from "pg";
 
-import { HISTORY_DDL } from "../dist/services/ddl/ddlHistory.js";
+import { DDL_LOCK_KEY, HISTORY_DDL } from "../dist/services/ddl/ddlHistory.js";
 import { checksumOf } from "../dist/services/ddl/ddlFiles.js";
 
 const CONTAINER = "postgres-mcp-ddl-flow-test";
@@ -251,6 +253,327 @@ async function main() {
       await status();
       const exists = (await db.query("select to_regclass('mcp_ops.ddl_history') is not null as present")).rows[0].present;
       check("G/status-is-read-only", exists === false, `ledgerCreatedByStatus=${String(exists)}`);
+    }
+
+    // ═══ phase 1.4: preview → dry run → apply ═══════════════════════════════
+
+    const preview = async (args) => callRaw("ddl_preview", { environment: "dev", profile: "standard", ...args });
+    const dryRun = async (p) => callRaw("ddl_dry_run", { previewId: p.previewId, profile: "standard" });
+    const apply = async (p, acknowledgeRisks) =>
+      callRaw("ddl_apply", { previewId: p.previewId, approvalToken: p.approvalToken, profile: "standard", ...(acknowledgeRisks ? { acknowledgeRisks } : {}) });
+    const create = async (args) => (await call("ddl_create", { profile: "standard", ...args })).payload;
+    const exists = async (regclass) => (await db.query("select to_regclass($1) is not null as present", [regclass])).rows[0].present;
+    const ledger = async () =>
+      (await db.query("select version, name, kind, direction, status, failed_statement, error_sqlstate from mcp_ops.ddl_history order by id")).rows;
+
+    // ── H. the first migration: preview, dry run, apply ─────────────────────
+    {
+      const { payload: p } = await preview({ direction: "up", target: first.version });
+      const { payload: d } = await dryRun(p);
+      const afterDry = await exists("public.orders");
+      const { isError, payload: a } = await apply(p);
+      const rows = await ledger();
+      const s = await status();
+      check(
+        "H/preview-dryrun-apply",
+        p.steps?.length === 1 &&
+          p.requiredAcknowledgements?.length === 0 &&
+          d.status === "ok" &&
+          afterDry === false &&
+          !isError &&
+          a.status === "applied" &&
+          a.schemaChanged === true &&
+          a.diff?.addedTables?.includes("public.orders") &&
+          a.dryRun === "ok" &&
+          (await exists("public.orders")) &&
+          rows.length === 1 &&
+          rows[0].status === "applied" &&
+          s.summary.applied === 1,
+        `steps=${String(p.steps?.length)} dry=${d.status} tableAfterDry=${String(afterDry)} apply=${a.status ?? a.code} ledger=${JSON.stringify(rows)}`
+      );
+    }
+
+    // ── I. CREATE INDEX CONCURRENTLY: skipped by the dry run, applied outside a transaction ──
+    {
+      const { payload: p } = await preview({ direction: "up" });
+      const { payload: d } = await dryRun(p);
+      const { isError, payload: a } = await apply(p);
+      const index = (await db.query("select indisvalid from pg_index where indexrelid = to_regclass('public.orders_note_idx')")).rows[0];
+      check(
+        "I/concurrently-non-transactional",
+        p.steps?.[0]?.mode === "non_transactional" &&
+          d.steps?.[0]?.status === "skipped" &&
+          !isError &&
+          a.status === "applied" &&
+          index?.indisvalid === true,
+        `mode=${String(p.steps?.[0]?.mode)} dry=${String(d.steps?.[0]?.status)} apply=${a.status ?? a.code} valid=${String(index?.indisvalid)} detail=${String(a.error?.detail ?? "")}`
+      );
+    }
+
+    // ── J. the schema changed between preview and apply ─────────────────────
+    const customers = await create({ name: "add_customers", up: "create table customers (id int primary key)", down: "drop table if exists customers" });
+    {
+      const { payload: p } = await preview({ direction: "up" });
+      await db.query("create table drift_t (a int)");
+      const { isError, payload: a } = await apply(p);
+      await db.query("drop table drift_t");
+      check(
+        "J/drift-schema",
+        isError && a.code === "DDL_DRIFT" && /schema changed/.test(a.message) && !(await exists("public.customers")),
+        `code=${String(a.code)} message=${String(a.message)}`
+      );
+    }
+
+    // ── K. a migration file changed between preview and apply ───────────────
+    {
+      const { payload: p } = await preview({ direction: "up" });
+      const file = path.join(dir, customers.files[0]);
+      const original = await readFile(file, "utf8");
+      await writeFile(file, `${original}comment on table customers is 'edited';\n`, "utf8");
+      const { isError, payload: a } = await apply(p);
+      await writeFile(file, original, "utf8");
+      check(
+        "K/drift-files",
+        isError && a.code === "DDL_DRIFT" && /files changed/.test(a.message) && !(await exists("public.customers")),
+        `code=${String(a.code)} message=${String(a.message)}`
+      );
+    }
+
+    // ── L. two previews of the same step: the second apply sees the ledger moved ──
+    {
+      const { payload: p1 } = await preview({ direction: "up" });
+      const { payload: p2 } = await preview({ direction: "up" });
+      const first1 = await apply(p1);
+      const second = await apply(p2);
+      check(
+        "L/drift-ledger",
+        !first1.isError && second.isError && second.payload.code === "DDL_DRIFT" && /ledger changed/.test(second.payload.message),
+        `first=${String(first1.payload.status)} second=${String(second.payload.code)}: ${String(second.payload.message)}`
+      );
+    }
+
+    // ── M. a high risk must be acknowledged ─────────────────────────────────
+    const dropNote = await create({
+      name: "drop_orders_note",
+      up: "drop index if exists orders_note_idx; alter table orders drop column note",
+      down: "alter table orders add column note text"
+    });
+    {
+      const { payload: p } = await preview({ direction: "up" });
+      const without = await apply(p);
+      const withAck = await apply(p, p.requiredAcknowledgements);
+      const column = (await db.query("select 1 from information_schema.columns where table_name = 'orders' and column_name = 'note'")).rows.length;
+      check(
+        "M/risk-acknowledgement",
+        JSON.stringify(p.requiredAcknowledgements) === JSON.stringify(["DROP_COLUMN"]) &&
+          without.isError &&
+          without.payload.code === "DDL_RISK_NOT_ACKNOWLEDGED" &&
+          !withAck.isError &&
+          withAck.payload.status === "applied" &&
+          column === 0,
+        `required=${JSON.stringify(p.requiredAcknowledgements)} without=${String(without.payload.code)} with=${String(withAck.payload.status ?? withAck.payload.code)}`
+      );
+    }
+
+    // ── N. lock_timeout at the statement: a reader blocks the ALTER, not the planning ──
+    const slow = await create({
+      name: "orders_add_flag",
+      up: "-- mcp:lock-timeout-ms=500\nalter table orders add column flag boolean",
+      down: "alter table orders drop column if exists flag"
+    });
+    {
+      const { payload: p } = await preview({ direction: "up" });
+      const holder = new pg.Client({ connectionString: CONN });
+      await holder.connect();
+      // ACCESS SHARE is what any SELECT takes. It does not stop the snapshot reading the catalog,
+      // but ADD COLUMN needs ACCESS EXCLUSIVE, so the migration's own 500 ms wait is what fires.
+      await holder.query("begin; lock table orders in access share mode");
+      const started = Date.now();
+      const { isError, payload: a } = await apply(p);
+      const elapsed = Date.now() - started;
+      await holder.query("rollback");
+      await holder.end();
+      const failed = (await ledger()).filter((r) => r.version === slow.version);
+      const column = (await db.query("select 1 from information_schema.columns where table_name = 'orders' and column_name = 'flag'")).rows.length;
+      check(
+        "N/lock-timeout",
+        isError &&
+          a.code === "DDL_LOCK_TIMEOUT" &&
+          a.status === "failed" &&
+          elapsed < 3000 &&
+          column === 0 &&
+          failed.length === 1 &&
+          failed[0].status === "failed" &&
+          failed[0].error_sqlstate === "55P03",
+        `code=${String(a.code)} elapsed=${String(elapsed)}ms ledger=${JSON.stringify(failed)}`
+      );
+    }
+
+    // ── N2. an exclusive lock on a table the snapshot reads: refused fast, before anything runs ──
+    {
+      const { payload: p } = await preview({ direction: "up" });
+      const holder = new pg.Client({ connectionString: CONN });
+      await holder.connect();
+      await holder.query("begin; lock table orders in access exclusive mode");
+      const started = Date.now();
+      const { isError, payload: a } = await apply(p);
+      const elapsed = Date.now() - started;
+      await holder.query("rollback");
+      await holder.end();
+      const attempts = (await ledger()).filter((r) => r.version === slow.version).length;
+      check(
+        "N2/lock-timeout-at-planning",
+        isError && a.code === "DDL_LOCK_TIMEOUT" && elapsed < 3000 && attempts === 1,
+        `code=${String(a.code)} elapsed=${String(elapsed)}ms ledgerAttempts=${String(attempts)} message=${String(a.message)}`
+      );
+    }
+
+    // ── O. a failed migration can be retried, and down reverts newest first ──
+    {
+      const { payload: retry } = await preview({ direction: "up" });
+      const retried = await apply(retry);
+      const { payload: p } = await preview({ direction: "down", target: customers.version });
+      const order = (p.steps ?? []).map((s) => `${s.version}:${s.action}`);
+      // Reverting orders_add_flag runs its down script, `drop column`: that needs acknowledging too.
+      const done = await apply(p, p.requiredAcknowledgements);
+      const note = (await db.query("select 1 from information_schema.columns where table_name = 'orders' and column_name = 'note'")).rows.length;
+      const flag = (await db.query("select 1 from information_schema.columns where table_name = 'orders' and column_name = 'flag'")).rows.length;
+      const s = await status();
+      check(
+        "O/retry-then-revert",
+        retried.payload.status === "applied" &&
+          JSON.stringify(order) === JSON.stringify([`${slow.version}:revert`, `${dropNote.version}:revert`]) &&
+          JSON.stringify(p.requiredAcknowledgements) === JSON.stringify(["DROP_COLUMN"]) &&
+          done.payload.status === "applied" &&
+          note === 1 &&
+          flag === 0 &&
+          s.applied.map((x) => x.version).at(-1) === customers.version &&
+          s.summary.pending === 2,
+        `retry=${String(retried.payload.status)} order=${JSON.stringify(order)} revert=${String(done.payload.status ?? done.payload.code)} note=${String(note)} flag=${String(flag)}`
+      );
+    }
+
+    // ── P. a migration with no down script cannot be reverted ───────────────
+    {
+      const noDown = await create({ name: "comment_orders", up: "comment on table orders is 'orders'" });
+      const { payload: up } = await preview({ direction: "up" });
+      await apply(up, up.requiredAcknowledgements);
+      const { isError, payload } = await preview({ direction: "down", target: customers.version });
+      check(
+        "P/no-down-script",
+        isError && payload.code === "DDL_NO_DOWN_SCRIPT" && payload.message.includes(noDown.version),
+        `code=${String(payload.code)} message=${String(payload.message)}`
+      );
+    }
+
+    // ── Q. an inline apply, then the same SQL saved as a file, is adopted — not run twice ──
+    {
+      const sql = "create table inline_t (a int)";
+      const { payload: p } = await preview({ sql, label: "inline_t" });
+      const inline = await apply(p);
+      const saved = await create({ name: "inline_t", up: sql, down: "drop table if exists inline_t" });
+      const { payload: up } = await preview({ direction: "up" });
+      const adopted = await apply(up);
+      const rows = (await ledger()).filter((r) => r.name === "inline_t");
+      const s = await status();
+      check(
+        "Q/inline-then-adopt",
+        inline.payload.status === "applied" &&
+          up.steps?.length === 1 &&
+          up.steps[0].action === "adopt" &&
+          adopted.payload.status === "applied" &&
+          adopted.payload.steps?.[0]?.status === "adopted" &&
+          JSON.stringify(rows.map((r) => r.kind)) === JSON.stringify(["inline", "adopted"]) &&
+          s.summary.inlineApplied === 0 &&
+          s.applied.some((x) => x.version === saved.version),
+        `inline=${String(inline.payload.status)} action=${String(up.steps?.[0]?.action)} adopted=${String(adopted.payload.steps?.[0]?.status)} kinds=${JSON.stringify(rows.map((r) => r.kind))}`
+      );
+    }
+
+    // ── R. prod is never writable ───────────────────────────────────────────
+    {
+      const r = await callRaw("ddl_preview", { environment: "prod", sql: "create table prod_t (a int)" });
+      check("R/prod-refused", r.isError && r.payload.code === "ENVIRONMENT_READ_ONLY", `code=${String(r.payload.code)}`);
+    }
+
+    // ── S. another session holding the DDL lock blocks apply, without waiting ──
+    {
+      const { payload: p } = await preview({ sql: "create table lock_t (a int)" });
+      const holder = new pg.Client({ connectionString: CONN });
+      await holder.connect();
+      await holder.query("select pg_advisory_lock($1, $2)", [...DDL_LOCK_KEY]);
+      const blocked = await apply(p);
+      await holder.query("select pg_advisory_unlock($1, $2)", [...DDL_LOCK_KEY]);
+      await holder.end();
+      const after = await apply(p);
+      check(
+        "S/advisory-lock",
+        blocked.isError && blocked.payload.code === "DDL_LOCKED" && !after.isError && (await exists("public.lock_t")),
+        `blocked=${String(blocked.payload.code)} retried=${String(after.payload.status ?? after.payload.code)}`
+      );
+    }
+
+    // ── T. a tampered token is refused, and a preview applies once ──────────
+    {
+      const { payload: p } = await preview({ sql: "create table once_t (a int)" });
+      const tampered = await callRaw("ddl_apply", { previewId: p.previewId, approvalToken: `${p.approvalToken.slice(0, -2)}xx` });
+      const ok1 = await apply(p);
+      const again = await apply(p);
+      check(
+        "T/token-and-reuse",
+        tampered.isError &&
+          /APPROVAL_TOKEN/.test(tampered.payload.code) &&
+          ok1.payload.status === "applied" &&
+          again.isError &&
+          again.payload.code === "PREVIEW_NOT_FOUND",
+        `tampered=${String(tampered.payload.code)} first=${String(ok1.payload.status)} again=${String(again.payload.code)}`
+      );
+    }
+
+    // ── U. a failing statement rolls back its whole migration ───────────────
+    {
+      const { payload: p } = await preview({ sql: "create table atom_t (a int); create table atom_t (a int)", label: "atom" });
+      const { isError, payload: a } = await apply(p);
+      const row = (await ledger()).filter((r) => r.name === "atom").at(-1);
+      check(
+        "U/transaction-atomic",
+        isError &&
+          a.code === "DDL_APPLY_FAILED" &&
+          a.error?.sqlState === "42P07" &&
+          !(await exists("public.atom_t")) &&
+          row?.status === "failed" &&
+          row?.failed_statement === 1,
+        `code=${String(a.code)} sqlState=${String(a.error?.sqlState)} table=${String(await exists("public.atom_t"))} ledger=${JSON.stringify(row)}`
+      );
+    }
+
+    // ── V. DDL that writes to mcp_ops at run time is rolled back ────────────
+    {
+      // The function body is opaque to the guardrail (it is a string); its effect is not.
+      await db.query(`create function sneak_default() returns int language plpgsql volatile as $f$
+        begin insert into mcp_ops.audit_log (tool, environment, status) values ('sneak', 'x', 'x'); return 1; end $f$`);
+      await db.query("insert into orders (id) values (1), (2)");
+      const before = Number((await db.query("select count(*)::int as n from mcp_ops.audit_log")).rows[0].n);
+      const { payload: p } = await preview({ sql: "alter table orders add column sneaky int default sneak_default()", label: "sneaky" });
+      const { isError, payload: a } = await apply(p);
+      const auditDelta = Number((await db.query("select count(*)::int as n from mcp_ops.audit_log where tool = 'sneak'")).rows[0].n);
+      const column = (await db.query("select 1 from information_schema.columns where table_name = 'orders' and column_name = 'sneaky'")).rows.length;
+      check(
+        "V/internal-write-rolled-back",
+        isError && a.code === "DDL_RESERVED_SCHEMA" && auditDelta === 0 && column === 0 && before > 0,
+        `code=${String(a.code)} sneakRows=${String(auditDelta)} column=${String(column)}`
+      );
+    }
+
+    // ── W. the dry run catches a failure that apply would hit ───────────────
+    {
+      const { payload: p } = await preview({ sql: "alter table no_such_table add column a int", label: "doomed" });
+      const { isError, payload: d } = await dryRun(p);
+      check(
+        "W/dry-run-catches-failure",
+        isError && d.code === "DDL_APPLY_FAILED" && d.error?.sqlState === "42P01" && d.status === "failed",
+        `code=${String(d.code)} sqlState=${String(d.error?.sqlState)}`
+      );
     }
   } finally {
     await mcp.close().catch(() => undefined);

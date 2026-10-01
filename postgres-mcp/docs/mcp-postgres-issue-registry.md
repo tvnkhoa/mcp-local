@@ -12,7 +12,7 @@ Resolution. Mirrors the format of `codebase-index-mcp/docs/mcp-codebase-index-is
 
 ## Index
 
-**26 entries** — all 26 resolved (some as documented guidance rather than code changes), **0 open**.
+**27 entries** — all 27 resolved (some as documented guidance rather than code changes), **0 open**.
 Statuses are copied from each entry's own `**Status:**` line; the entry is authoritative.
 
 | ID | Title | Status |
@@ -43,10 +43,12 @@ Statuses are copied from each entry's own `**Status:**` line; the entry is autho
 | `PG-WRT-007` | `write_preview` used the regex's guess at the target, not the table the statement writes | ✅ fixed 2026-09-30 (code) — target resolved from the EXPLAIN plan |
 | `PG-MIG-006` | `migration_apply` took no lock: two applies of one preview could both run, and writes could interleave | ✅ fixed 2026-09-30 (code) — shared per-environment mutex |
 | `PG-CMP-002` | The schema snapshot saw only tables: a changed view, function, trigger or enum passed the drift guard | ✅ fixed 2026-09-30 (code) — snapshot v2 captures seven more object kinds |
+| `PG-DDL-001` | The DDL lane's apply hung forever behind a table lock it had not reached yet | ✅ fixed 2026-10-01 (code) — session timeouts set first; planning uses the plan's shortest lock wait |
 
 > ID prefixes group by area: `ENV` environment resolution · `SEC` safety posture · `DOC`
 > documentation drift · `CMP` compare_environments · `MIG` EF Core migrations · `DIF` data_diff ·
-> `REV` code review sweeps · `PRV` preview payloads · `STA` status payloads · `WRT` data writes / rollback.
+> `REV` code review sweeps · `PRV` preview payloads · `STA` status payloads · `WRT` data writes / rollback ·
+> `DDL` raw-SQL DDL migrations.
 
 > **Environment names moved.** Most entries below are written against `environment:"default"`, which
 > **no longer exists** — as of 2026-08-05 the environments are `dev` (the default, and the same
@@ -1214,6 +1216,42 @@ as `write_apply` and `write_rollback`; covered by `src/services/concurrency/envM
   differently on different Postgres major versions. `compare_environments` between two servers on
   different major versions may therefore report views or routines as `changed` when they are not.
   The drift guard is not affected, because it compares a database with itself.
+
+---
+
+## PG-DDL-001 — the DDL lane's apply hung forever behind a table lock it had not reached yet
+
+**Status:** ✅ fixed 2026-10-01 (code), before the lane shipped. Covered by `N/lock-timeout` and
+`N2/lock-timeout-at-planning` in `scripts/ddl-flow-test.mjs`.
+
+- **Scenario:** phase 1.4 of the DDL lane. A migration with `-- mcp:lock-timeout-ms=500` is applied
+  while another session holds `ACCESS EXCLUSIVE` on its table.
+- **Expected vs actual:** the expected result was `DDL_LOCK_TIMEOUT` within about half a second.
+  Instead, `ddl_apply` never returned, and the harness's MCP request timed out after 60 s.
+- **Root cause:** `ddl_apply` re-plans before it runs anything, and re-planning takes a schema
+  snapshot. The snapshot's catalog functions take `AccessShareLock` on the tables they read, which
+  queues behind `ACCESS EXCLUSIVE`. The migration's `lock_timeout` is only set when its own step
+  starts, and the dedicated DDL session ran with `statement_timeout = 0` and no `lock_timeout` at
+  all. So the session waited for good, and no timeout was ever set that could end the wait.
+- **Resolution:** two changes.
+  - **Timeouts before anything runs.** `withDdlSession` sets session timeouts before anything else
+    runs. After a non-transactional step, they are restored to the session values, not with
+    `RESET`, which would have meant no limit for the post-apply snapshot.
+  - **The planning lock wait is the plan's shortest.** `sessionTimeouts(config, plan)` uses the
+    shortest lock wait any step of the approved plan asked for, so an operator who asked to fail
+    fast is not made to wait the 5 s default while the schema is read. `ddl_preview` also plans
+    inside a read-only transaction with `lock_timeout` set, rather than on bare pool connections
+    with the pool's 30 s statement timeout. A lock hit while reading the schema is reported as
+    `DDL_LOCK_TIMEOUT` with that explanation.
+- **Two cases, two scenarios:**
+  - `N`: an `ACCESS SHARE` holder blocks the `ALTER` but not the snapshot. The migration's own
+    500 ms wait fires (654 ms measured), and the ledger records a failed attempt with SQLSTATE
+    `55P03`.
+  - `N2`: an `ACCESS EXCLUSIVE` holder blocks the snapshot itself. Apply is refused before anything
+    runs (566 ms measured), and no ledger row is written.
+- **Also found by the same run and fixed with it:** when another apply had already run, the
+  schema check fired before the ledger check, so the refusal said "the schema changed" instead of
+  "another apply ran". The ledger is now checked first (`L/drift-ledger`).
 
 ---
 

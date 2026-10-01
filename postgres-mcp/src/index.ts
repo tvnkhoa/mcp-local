@@ -22,6 +22,7 @@ import { asErrorPayload, createMcpServer, runServer } from "@mcp/sdk";
 import { ConnectionManager } from "./repositories/connectionManager.js";
 import { toWireError } from "./middleware/errors.js";
 import { type DdlConfig } from "./services/ddl/ddlConfig.js";
+import { DdlPreviewStore } from "./services/ddl/ddlPreviewStore.js";
 import { type MigrationConfig } from "./services/migration/efRunner.js";
 import { buildSchemaResources } from "./resources/schemaResources.js";
 import { buildTools, type QueryLimits } from "./tools/index.js";
@@ -107,11 +108,12 @@ const ddlConfig: DdlConfig = {
   previewTtlMs: numberFromEnv("POSTGRES_DDL_PREVIEW_TTL_MS", 3_600_000),
   approvalSecret: APPROVAL_SECRET
 };
+const ddlStore = new DdlPreviewStore();
 
 const handle = createMcpServer({
   name: "communicationhub-postgres-mcp",
   version: "0.2.0",
-  tools: buildTools({ connections, writeStore, writeConfig, migrationConfig, ddlConfig, limits, logger: eventLog }),
+  tools: buildTools({ connections, writeStore, writeConfig, migrationConfig, ddlConfig, ddlStore, limits, logger: eventLog }),
   resources: buildSchemaResources(connections),
   /**
    * This server's error contract, not the platform's. Every failure — zod

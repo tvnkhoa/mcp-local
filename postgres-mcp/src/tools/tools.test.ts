@@ -25,6 +25,7 @@ import { assertRequiredKeysAdvertised, assertSchemaParity } from "@mcp/testing";
 import { ConnectionManager } from "../repositories/connectionManager.js";
 import { toWireError } from "../middleware/errors.js";
 import { type DdlConfig } from "../services/ddl/ddlConfig.js";
+import { DdlPreviewStore } from "../services/ddl/ddlPreviewStore.js";
 import { type MigrationConfig } from "../services/migration/efRunner.js";
 import { buildSchemaResources } from "../resources/schemaResources.js";
 import { buildTools, type PostgresDeps, type QueryLimits } from "./index.js";
@@ -86,6 +87,7 @@ function deps(overrides: Partial<PostgresDeps> = {}): PostgresDeps {
     writeConfig: WRITE_OFF,
     migrationConfig: MIGRATION_OFF,
     ddlConfig: DDL_OFF,
+    ddlStore: new DdlPreviewStore(),
     limits: LIMITS,
     logger: eventLog,
     ...overrides
@@ -113,7 +115,7 @@ async function bodyOf(name: string, args: Record<string, unknown>, overrides?: P
 
 // --- tools/list side of the contract ---------------------------------------
 
-test("the tool table is the 19 advertised tools, in registration order", () => {
+test("the tool table is the 22 advertised tools, in registration order", () => {
   const names = buildTools(deps()).map((tool) => tool.name);
   assert.deepEqual(names, [
     "health_check",
@@ -135,20 +137,23 @@ test("the tool table is the 19 advertised tools, in registration order", () => {
     "compare_environments",
     // Appended, so no tool that existed before the DDL lane changed position.
     "ddl_status",
-    "ddl_create"
+    "ddl_create",
+    "ddl_preview",
+    "ddl_dry_run",
+    "ddl_apply"
   ]);
 });
 
-test("only the five state-changing tools are not read-only", () => {
+test("only the six state-changing tools are not read-only", () => {
   const tools = buildTools(deps());
   assert.deepEqual(
     tools.filter((tool) => !tool.annotations.readOnly).map((tool) => tool.name),
-    ["write_apply", "write_rollback", "migration_add", "migration_apply", "ddl_create"]
+    ["write_apply", "write_rollback", "migration_add", "migration_apply", "ddl_create", "ddl_apply"]
   );
   // migration_add and ddl_create write files and touch no database, so they remove nothing.
   assert.deepEqual(
     tools.filter((tool) => tool.annotations.destructive).map((tool) => tool.name),
-    ["write_apply", "write_rollback", "migration_apply"]
+    ["write_apply", "write_rollback", "migration_apply", "ddl_apply"]
   );
   // list_environments reads process config only; every other tool reaches a
   // database that may not be on this machine.
@@ -280,7 +285,7 @@ test("with writes on, the shape guards still refuse before any database work", a
   });
   assert.deepEqual((await bodyOf("write_preview", { sql: "drop table t" }, on)).payload, {
     code: "DDL_NOT_ALLOWED",
-    message: "DDL is not allowed here. Schema changes must go through the migration tools."
+    message: "DDL is not allowed here. Schema changes must go through the migration tools (ddl_* for raw SQL, migration_* for EF Core)."
   });
   assert.deepEqual((await bodyOf("write_preview", { sql: "delete from mcp_ops.audit_log where id = 1" }, on)).payload, {
     code: "WRITE_RESERVED_SCHEMA",
@@ -299,7 +304,7 @@ test("with writes on, the shape guards still refuse before any database work", a
 
 // --- the DDL gate ------------------------------------------------------------
 
-test("both DDL tools refuse when POSTGRES_DDL_ENABLED is off", async () => {
+test("all five DDL tools refuse when POSTGRES_DDL_ENABLED is off", async () => {
   const expected = {
     code: "DDL_DISABLED",
     message:
@@ -307,6 +312,35 @@ test("both DDL tools refuse when POSTGRES_DDL_ENABLED is off", async () => {
   };
   assert.deepEqual((await bodyOf("ddl_status", {})).payload, expected);
   assert.deepEqual((await bodyOf("ddl_create", { name: "add_t", up: "create table t (a int)" })).payload, expected);
+  assert.deepEqual((await bodyOf("ddl_preview", { sql: "create table t (a int)" })).payload, expected);
+  assert.deepEqual((await bodyOf("ddl_dry_run", { previewId: "p" })).payload, expected);
+  assert.deepEqual((await bodyOf("ddl_apply", { previewId: "p", approvalToken: "t" })).payload, expected);
+});
+
+test("with DDL on, ddl_preview refuses bad arguments and bad SQL before any database work", async () => {
+  const on = { ddlConfig: { ...DDL_OFF, enabled: true } };
+  const cases: [Record<string, unknown>, string][] = [
+    [{ sql: "insert into t values (1)" }, "DDL_STATEMENT_NOT_ALLOWED"],
+    [{ sql: "create table mcp_ops.t (a int)" }, "DDL_RESERVED_SCHEMA"],
+    [{ sql: "create index concurrently i on t (a)" }, "DDL_NEEDS_NO_TRANSACTION"],
+    [{ sql: "create table t (a int)", direction: "up" }, "DDL_INVALID_ARGS"],
+    [{ sql: "create table t (a int)", target: "0" }, "DDL_INVALID_ARGS"],
+    [{ direction: "up", label: "x" }, "DDL_INVALID_ARGS"],
+    [{ direction: "down" }, "DDL_INVALID_ARGS"],
+    // No migrations directory: file mode cannot start.
+    [{ direction: "up" }, "DDL_MIGRATIONS_DIR_UNCONFIGURED"]
+  ];
+  for (const [args, code] of cases) {
+    assert.equal((await bodyOf("ddl_preview", args, on)).payload.code, code, JSON.stringify(args));
+  }
+  // The target pattern is part of the schema itself.
+  assert.equal((await bodyOf("ddl_preview", { direction: "down", target: "yesterday" }, on)).isError, true);
+});
+
+test("with DDL on, dry run and apply refuse an unknown preview before any database work", async () => {
+  const on = { ddlConfig: { ...DDL_OFF, enabled: true } };
+  assert.equal((await bodyOf("ddl_dry_run", { previewId: "nope" }, on)).payload.code, "PREVIEW_NOT_FOUND");
+  assert.equal((await bodyOf("ddl_apply", { previewId: "nope", approvalToken: "t" }, on)).payload.code, "PREVIEW_NOT_FOUND");
 });
 
 test("with DDL on, ddl_create refuses before touching the filesystem", async () => {
@@ -436,7 +470,7 @@ test("DELTA: an unknown tool now reports not_found instead of mcp_error", async 
 // and `docs:check` reads the advertised side only. Until now only codebase-index-mcp had this gate.
 
 test("every tool advertises exactly the parameters its zod schema accepts", () => {
-  assertSchemaParity(buildTools(deps()), { floor: 19 });
+  assertSchemaParity(buildTools(deps()), { floor: 22 });
 });
 
 test("a tool declaring additionalProperties:false advertises every required key", () => {
