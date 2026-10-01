@@ -15,6 +15,9 @@ All notable changes to this project will be documented in this file.
 - Visual Studio's `.vs/CopilotSnapshots` (25k files) sorted ahead of `src/` and filled the 20 000-file
   scan cap: `wec.social-ads` indexed 1 file of ~1 000 and kept a stale graph. Both directories are now in
   the glob ignore list, not only the post-walk filter.
+- Every excluded path segment is now dropped by the scan, before the 20 000-file cap.
+- `shouldIndexFile` sees the repo-relative path. Before, a repo checked out under a directory named
+  `assets`, `public`, `build` or similar indexed nothing and still reported `ok`.
 
 ### 🏷️ All five servers: one env-var naming convention, 29 names renamed, none broken
 

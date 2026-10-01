@@ -270,7 +270,10 @@ export async function runIndexPipeline(store: GraphStore, input: RunIndexInput):
             // content, so the prefix never matched and the branch never fired — it only cost a stat()
             // per file. The content-hash comparison below is the incremental skip, and it is exact.
             const bytes = await readFile(filePath);
-            const decision = shouldIndexFile(filePath, bytes, maxFileSizeBytes);
+            // Repo-relative, rooted with "/" so `/migrations/` still matches at the top level: the
+            // absolute path would make a repo living under an excluded name (`D:/assets/repo`) drop
+            // every file as `excluded_path` (MCP-ISSUE-066).
+            const decision = shouldIndexFile(`/${relativePath.replace(/\\/g, "/")}`, bytes, maxFileSizeBytes);
             
             return { filePath, relativePath, bytes, decision };
           })

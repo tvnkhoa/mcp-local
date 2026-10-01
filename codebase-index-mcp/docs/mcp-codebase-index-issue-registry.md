@@ -3290,4 +3290,7 @@ this afternoon failed at that harness, which is the highest rate observed so far
 - **Impact:** the repo's graph silently stopped updating. A truncated scan correctly refuses to prune, so the old 9 413 symbols survived and still looked healthy, with status `ok`. Any repo opened in Visual Studio or a JetBrains IDE was exposed.
 - **Fix:** `.vs` and `.idea` moved into `VENDOR_DIR_SEGMENTS`, which feeds both `INDEX_IGNORE_GLOBS` (walk level) and the segment filter. `.vscode` stays segment-only, because it is small and `search_regex(scanAll)` may want it.
 - **Guarded:** `fileFilter.test.ts` "a vendor tree is excluded at the GLOB" now lists `.vs` and `.idea`. It fails on the pre-fix code (`'.vs must be in INDEX_IGNORE_GLOBS…'`).
-- **Residual:** any other large directory that is excluded only by segment (`wwwroot`, `public`, `static`, `assets`, `logs`, `.vscode`) can starve the budget the same way. A structural fix would apply `hasExcludedPathSegment` before the `maxFiles` slice in `indexPipeline.ts`.
+- **Structural fix (same day):** the segment-only names (`wwwroot`, `public`, `static`, `assets`, `logs`, `.vscode`) can no longer starve the budget either.
+  - `scanRepoFiles` drops any path with an excluded segment **before** the caller applies `maxFiles`, testing the repo-relative path.
+  - The pipeline now hands `shouldIndexFile` the repo-relative path (rooted `/…`) instead of the absolute one. Before, a repo checked out under a directory with an excluded name, such as `D:/assets/repo`, lost every file as `excluded_path` and reported `ok` on an empty graph.
+  - Guarded by `fileScan.test.ts` (3 tests; 2 fail pre-fix) and `repoUnderExcludedName.test.ts` (fails pre-fix with an empty graph).

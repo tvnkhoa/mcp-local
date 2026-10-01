@@ -16,7 +16,7 @@ import path from "node:path";
 
 import { glob } from "glob";
 
-import { INDEX_IGNORE_GLOBS } from "./fileFilter.js";
+import { INDEX_IGNORE_GLOBS, hasExcludedPathSegment } from "./fileFilter.js";
 import { indexLog } from "./indexProgress.js";
 
 export interface FileScanInput {
@@ -35,7 +35,8 @@ export interface FileScanResult {
 }
 
 /**
- * Glob the repo, apply the dirty-file restriction, and pre-scan `.csproj` package references.
+ * Glob the repo, drop excluded path segments and apply the dirty-file restriction, then pre-scan
+ * `.csproj` package references.
  *
  * `maxFiles` is used only for the log line here; the cap itself is applied by the caller, which
  * needs the *unclamped* `files.length` to decide whether pruning is safe.
@@ -50,8 +51,8 @@ export async function scanRepoFiles(
   // MCP-ISSUE-060: `dot: true` here too, and deliberately in the same change as `regexSearch.ts`.
   // Fixing only one desynchronises search scope from index scope — `search_regex` would report hits
   // in files the graph has never seen, and every `enclosingSymbol` on them would be null with no
-  // explanation. `.git/**`, `.vs/**` and `.idea/**` are excluded by INDEX_IGNORE_GLOBS; `.vscode` by EXCLUDED_PATH_SEGMENTS
-  // downstream. Takes effect on the next index run for each repo.
+  // explanation. `.git/**`, `.vs/**` and `.idea/**` are excluded by INDEX_IGNORE_GLOBS; `.vscode` and the other segment-only names by
+  // the filter below, still before the `maxFiles` cap. Takes effect on the next index run.
   const globbed = (
     await glob("**/*", {
       cwd: input.repoPath,
@@ -79,13 +80,19 @@ export async function scanRepoFiles(
   // Dirty mode (ENH-A): restrict the scan to an explicit set of repo-relative POSIX
   // paths (the git working-tree delta). When set, pruning is suppressed by the caller so the
   // restricted set is never mistaken for "all files on disk".
-  const files = input.onlyRelativePaths
-    ? globbed.filter((abs) =>
-        input.onlyRelativePaths!.has(path.relative(input.repoPath, abs).replace(/\\/g, "/"))
-      )
-    : globbed;
+  //
+  // Excluded path segments are dropped HERE, before the caller applies `maxFiles` (MCP-ISSUE-066
+  // structural fix). The glob ignore list covers vendor and IDE-state trees, but segment-only
+  // exclusions (`wwwroot`, `public`, `static`, `assets`, `logs`, `.vscode`) used to survive the walk,
+  // and a large one could fill the whole budget before `shouldIndexFile` discarded it. Tested on the
+  // repo-relative path, so a repo that itself lives under e.g. `D:/assets/` is not emptied.
+  const files = globbed.filter((abs) => {
+    const relative = path.relative(input.repoPath, abs).replace(/\\/g, "/");
+    if (hasExcludedPathSegment(relative)) return false;
+    return input.onlyRelativePaths ? input.onlyRelativePaths.has(relative) : true;
+  });
 
-  indexLog(`[index-scan-complete] found ${String(files.length)} files${input.onlyRelativePaths ? ` (restricted from ${String(globbed.length)} by dirty file set)` : ""}, will process up to ${String(maxFiles)}`);
+  indexLog(`[index-scan-complete] found ${String(files.length)} files (${String(globbed.length - files.length)} dropped by excluded path or dirty set), will process up to ${String(maxFiles)}`);
 
   // Pre-scan: collect all PackageReference names from .csproj files so C# extractors
   // can widen namespace→nuget contract mapping beyond the hardcoded set. (ISSUE-006)
