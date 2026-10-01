@@ -1,127 +1,91 @@
 ---
 name: mcp-first-codebase-operations
-description: "Run mcp-local code exploration and impact analysis with MCP-first workflow, strict gates, and bounded fallback."
-argument-hint: "Provide repoId, target symbol/file intent, and expected output (analysis, impact, re-index, DB check, or risk triage)."
+description: "Execution playbook for the codebase-index MCP tools in this workspace: which argument each tool keys on (symbolId vs name vs filePath), how to chain them without wasted calls, profile choice, and the routing advice in `orient` that is known to be stale. Use when running analysis, impact, re-index, risk-triage or refactor calls against repoId codebase-index-mcp, mcp-local or wec.communication-hub. Policy (gates, fallback, budget, output contract) lives in .claude/rules/mcp-hard-mode.md and is not repeated here."
+argument-hint: "repoId, the target symbol/file, and the goal (analysis, impact, re-index, triage, refactor)."
 ---
 
 # MCP-First Codebase Operations
 
-## When to Use
+Two sources are already in context, and this file does not repeat them:
 
-- Investigating symbol usage, caller/callee paths, or blast radius
-- Running re-index and repository health checks
-- Performing risk triage before merge/release
-- Mapping tests to source and validating coverage surface
-- Running read-only Postgres checks for `postgres-mcp`
+- `.claude/rules/mcp-hard-mode.md` holds the gates, fallback conditions, call budget, output
+  contract, and the *One-Page Quick Reference* call sequences.
+- `orient(repoId: "<repoId>", intent: "<what you are doing>")` returns the routing table from
+  `src/services/analysis/orient.ts`. Call it first when the right tool is unclear.
 
-## mcp-local Guardrails
+This file adds what neither of those gives you: what each tool **keys on**, how to chain calls
+without a wasted one, and where `orient` is wrong.
 
-1. Use `repoId=codebase-index-mcp` or `repoId=mcp-local` by default for this workspace.
-2. Use `repoId=wec.communication-hub` only for benchmark/reference comparisons.
-3. Treat `.claude/rules/mcp-hard-mode.md` as policy source-of-truth for gates, blocked behaviors, and fallback rules.
-4. Use this skill as execution playbook; do not duplicate full policy blocks in task output.
+## What each tool keys on
 
-## Top 5 Starter Tools
+Calls fail or return nothing when a name is passed where an id is expected. Authority:
+`contracts/codebase-index.json`.
 
-For any new analysis session, these 5 tools cover most tasks:
+| Tool | Keys on | Get the key from |
+|---|---|---|
+| `search_symbols` | `query` (an identifier token), `strategy: "name"` first | — |
+| `get_symbol_context_pack` | **`name`** (no symbolId parameter) | the identifier itself |
+| `get_change_context`, `get_symbol_source`, `get_symbol_blame`, `find_field_accesses` | `symbolId` **or** `name` | `search_symbols` |
+| `get_call_chain`, `get_symbol_detail`, `trace_execution_flow` (`entrySymbolId`), `rename_assist` | `symbolId` | `search_symbols` / `find_symbol_at_line` |
+| `find_impact_files`, `get_file_summary`, `link_tests_to_source`, `find_symbol_at_line` | **`filePath`** (repo-relative). `find_impact_files` is file-scoped, not symbol-scoped | the symbol's `filePath` in a search result |
+| `get_file_context` | `filePath` or `filePaths[]` (≤ 50) | — |
+| `get_folder_summary` | `folderPath` | — |
+| `index_repository`, `watch_repo` | `repoId` + **exact** `repoPath` | `list_repositories` |
+| `detect_changes`, `change_impact` | `baseRef` / `headRef` (git refs) | — |
 
-1. `search_symbols` — find any symbol by name or intent
-2. `get_symbol_context_pack` — full context for a symbol in one call
-3. `find_impact_files` — blast radius for a change
-4. `get_change_context` — callers/callees for deep traversal
-5. `health_check` + `index_repository` — ensure index is fresh
+## Chains that avoid a wasted call
 
-## Tool Selection by Intent
+- **Symbol impact:** first `search_symbols(repoId: "codebase-index-mcp", query: "indexRepository", strategy: "name", limit: 5)`.
+  Take `filePath` and `symbolId` from the result. Then run
+  `find_impact_files(repoId: "codebase-index-mcp", filePath: "<filePath>", view: "surface")`, and
+  call `get_symbol_source` only for the callers you will actually cite.
+- **One-call context:** `get_symbol_context_pack(repoId: "codebase-index-mcp", name: "indexRepository", callerDepth: 1, calleeDepth: 1)`
+  covers what search plus change-context would. Use it when the name is unambiguous.
+- **Business phrase, no identifier yet:** run
+  `search_regex(repoId: "codebase-index-mcp", pattern: "<literal fragment>", filePathPrefix: "src/", limit: 20)`,
+  then `search_symbols` with the identifier it reveals.
+- **Re-index:** follow the Re-index flow in the rules file. `health_check` already returns
+  `actionHints[0].arguments` with the right `repoPath` and `mode`, so reuse them verbatim.
+  `mode: "dirty"` is the cheap refresh after edits, but it never prunes. Use `mode: "full"` after a
+  branch switch.
+- **Risk triage:** run `detect_changes(repoId: "codebase-index-mcp", policy: "release-gate", sortBy: "risk")`.
+  For each high-risk file, run `find_impact_files(view: "surface")`, then
+  `link_tests_to_source(repoId: "codebase-index-mcp", filePath: "<file>", minScore: 0.7)`.
+  Docs-only diffs score 0, so review them by reading.
+- **Rename:** run `rename_assist(repoId: "codebase-index-mcp", symbolId: "<id>", newName: "<new>", emitPreview: true)`,
+  then `refactor_replace_apply(previewId: "<id>", approvalToken: "<token>", includeLowConfidence: true)`.
+  The scan is repo-wide; pass `scopePaths` only to narrow it on purpose.
 
-| Intent | Use this tool | Instead of | Why |
-|--------|--------------|------------|-----|
-| Find symbol by name | `search_symbols` (name) | `get_symbol_context_pack` | Search first to get symbolId; pack needs symbolId |
-| Quick symbol + context | `get_symbol_context_pack` | `get_change_context` | Pack is one call; `get_change_context` needs BFS depth |
-| Get callers (deep) | `get_change_context` | `get_call_chain` | `get_call_chain` shows path, not caller list |
-| Understand a file | `get_file_summary` | `get_file_context` | Summary is lighter; use context only when you need all symbols+edges |
-| Orient in module | `get_folder_summary` | Reading individual files | Returns per-file stats without reading content |
-| Pre-refactor scoping | `find_impact_files` | `get_dependency_graph` | Impact is scoped by symbol; graph is broader and unfiltered |
-| HTTP routes | `route_map` | `find_entry_points` | `route_map` returns HTTP verbs+paths; entry_points returns all graph entries |
-| Raw SQL graph query | `query_graph` | structured tools | Use only when structured tools can't express the query |
+## `orient` advice that is stale
 
-## Profile Selection
+Trust these corrections over `orient` until `orient.ts` is updated:
 
-All read tools support `profile`. Pick by session load:
+- **rename:** `orient` still says *"do NOT use rename_assist(emitPreview:true) … 17–22% recall
+  (MCP-ISSUE-060, open)"*. That was fixed on 2026-09-17: the preview is repo-wide and matches
+  `refactor_replace_preview` hunk for hunk. Either path is fine.
+- **docs-search:** `orient` says no indexer writes `prose` sections. Since MCP-ISSUE-061 Stage 4
+  (2026-09-17), `parseMarkdownFile` does, so `query_docs(mode: "search")` matches body text. Two
+  conditions apply: the index must have been built after that change
+  (`index_repository(mode: "full", docsMode: "on")` after a restart), and
+  `CODEBASE_INDEX_DOCS_TOOLS_ENABLED` must be on. The 061 entry itself stays OPEN.
 
-| Profile | Use when |
-|---------|----------|
-| `nano` | >15 MCP calls per session, Plan mode orientation, quick routing only |
-| `compact` | Default — most analysis tasks |
-| `standard` | Single deep query where you need all fields |
-| `verbose` | Debugging unexpected results |
+## Profile choice
 
-For refactor tools: use `nano` first (no hunk content, just match count + affected files), then escalate to `compact` or `standard` to see hunk detail.
+| Profile | When |
+|---|---|
+| `nano` | routing only, or past ~15 calls in a session. Refactor previews give match count + files, no hunks |
+| `compact` | default for every read tool |
+| `standard` | one deep query where you need every field, e.g. full names in `get_call_chain` |
+| `verbose` | debugging unexpected output; the only pretty-printed profile |
 
-## Minimal Tool Set
+## Repo targets
 
-Use the smallest MCP set needed for the task and prefer focused calls with explicit limits.
-
-1. Health and indexing: `health_check`, `list_repositories`, `index_repository`, `watch_repo`
-2. Symbol and graph analysis: `search_symbols`, `get_symbol_context_pack`, `get_change_context`, `get_call_chain`, `find_symbol_at_line`
-3. Impact and scope: `find_impact_files`, `get_file_summary`, `get_file_context`, `detect_changes`, `dead_code_scan`
-4. Supplemental: `route_map`, `find_implementations`, `link_tests_to_source`
-5. Database validation (read-only): `mcp__postgres-mcp__health_check`, `mcp__postgres-mcp__run_read_query`
-
-## Execution Runbooks
-
-### 1. Analysis Runbook
-
-1. Orient scope with one light MCP call (`find_entry_points` or `get_folder_summary`).
-2. Resolve symbol with `search_symbols` (`name` first, then `intent` only if needed).
-3. Narrow blast radius with `find_impact_files` and summarize with `get_file_summary`.
-4. Read code only after MCP scope is sufficient.
-
-### 2. Re-index Runbook
-
-1. `health_check(repoId)`.
-2. `list_repositories` and copy exact registered `repoPath`.
-3. `index_repository(repoId, repoPath, mode: full, docsMode: on)`.
-4. `health_check(repoId)` and report run summary.
-
-### 3. Risk Triage Runbook
-
-1. Start with `detect_changes` (policy-based risk sort).
-2. For high-risk files, use `find_impact_files` (`surface`) to validate caller blast radius.
-3. Use `link_tests_to_source` (`minScore >= 0.7`) for coverage linkage.
-
-### 4. Watch Lifecycle Runbook
-
-1. Start watch only during active implementation/debug window.
-2. Stop watch immediately when feature task ends or context switches.
-3. Do not leave watch running during review/release-only sessions.
-
-### 5. Postgres Read-Check Runbook
-
-1. Run `mcp__postgres-mcp__health_check`.
-2. Run `mcp__postgres-mcp__run_read_query` with bounded `limit` and targeted SQL.
-3. If source changed, run `detect_changes` to prioritize impact follow-up.
-
-## Response Contract (Skill Output)
-
-1. List MCP calls used.
-2. Report whether fallback occurred.
-3. If fallback occurred, include issue ID updated in registry.
-4. State evidence sufficiency and residual uncertainty.
-5. State target repoId explicitly.
-
-## Verification Checklist
-
-- Hard-mode policy was consulted and followed.
-- MCP calls were minimal and fit the task-type runbook.
-- Fallback (if any) was justified and logged with issue ID.
-- Final answer included concise call trace and evidence statement.
-
-## Done Criteria
-
-- Skill remains execution-focused while policy remains in hard-mode instruction.
-- Workflow is MCP-first, minimal, and reproducible.
-- Evidence is sufficient without unnecessary context expansion.
+Use `codebase-index-mcp` and `mcp-local` for work in this workspace. Use `wec.communication-hub`
+only for benchmark/reference comparison, and for C# fidelity checks, where its graph is the
+measured baseline.
 
 ## Authoritative reference
 
-`.claude/rules/mcp-hard-mode.md` is the **policy source** and now carries the one-page runbook index. This skill is the entry point; the rule file is what governs.
+`.claude/rules/mcp-hard-mode.md` governs. `contracts/codebase-index.json` is authoritative for tool
+names and parameters. Tool behaviour history is in
+`codebase-index-mcp/docs/mcp-codebase-index-issue-registry.md`.

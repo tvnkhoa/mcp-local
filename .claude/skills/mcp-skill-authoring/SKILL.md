@@ -1,116 +1,94 @@
 ---
 name: mcp-skill-authoring
-description: "Register a new MCP server in this workspace so it auto-gets an installer + native skill, and write a strong operational SKILL.md the AI will actually invoke. Use when adding a server to packages/manifest/src/servers.ts, authoring <server>/skill/SKILL.md, or improving an existing operational skill's trigger/guardrails."
+description: "Add a new MCP server to this workspace's install/skill system (scaffold with npm run new:server, snapshot its contract, register it in packages/manifest/src/servers.ts + envSpecs, generate, install) and write or improve the operational <server>/skill/SKILL.md template that the installer renders into a native skill. Use when adding a server, editing any <server>/skill/SKILL.md, a skill fails to trigger on realistic phrasing, or after renaming tools/env vars that a skill names. Not for the authoring skills in .claude/skills/ themselves, and not for writing the server's tool code (docs/servers/tool-development.md)."
 ---
 
 # MCP Skill Authoring
 
-Use this when wiring a new MCP server into the workspace's install/skill system, or
-when writing/improving an operational skill so the model reliably auto-invokes it.
+**One manifest entry + one env spec + one template ⇒ installer, doctor, update/uninstall, contract
+snapshot, generated docs and a native skill all work for the server.**
 
-The workspace has a closed loop: **one manifest entry + one template ⇒ installer, doctor,
-uninstall/update, and a generated native skill all work for the new server.**
-
-## 0. Scaffold it first
+## 1. Scaffold
 
 ```bash
-npm run new:server -- --key myserver
+npm run new:server -- --key foo            # [--dir foo-mcp] [--display "Foo MCP"] [--desc "…"] [--no-verify] [--force]
 ```
 
-Writes `myserver-mcp/` from `templates/server/`, then installs, builds, typechecks, tests and
-smoke-tests it. The result already follows every convention the guards check, so start from it
-rather than copying an existing server.
+`--key` must match `^[a-z][a-z0-9-]*$`, and **`-mcp` is appended if missing** — `--key foo`
+yields key `foo-mcp`, dir `foo-mcp`, env prefix `FOO_*`, `FooConfig`. It copies `templates/server/`,
+runs `build:packages`, then `npm install` / build / typecheck / test / smoke in the new dir (skip with
+`--no-verify`). It does **not** register the server — the printed "Next" block lists the steps.
 
-Registration is **not** part of it — see step 1, and note the ordering: snapshot the contract
-before adding the manifest entry, because `servers.ts` throws for a server with no generated tool
-list.
+## 2. Register (order matters)
 
-## 1. Register the server (`packages/manifest/src/servers.ts`)
+`servers.ts` calls `toolsFor(key)`, which **throws at import** when `generated/toolLists.ts` has no
+entry; that list is generated from `contracts/<key>.json`; and `contract-snapshot.mjs` only snapshots
+servers already in `SERVERS`. So bootstrap the first snapshot like this:
 
-Append an object to `SERVERS`. It is typed (`ServerDescriptor`), so a missing field is a
-compile error rather than a runtime surprise in the installer.
+1. `packages/manifest/src/envSpecs/<camel>.ts` — the env contract (fields below).
+2. Append the entry to `SERVERS` in `packages/manifest/src/servers.ts` with a **temporary**
+   `tools: ["health_check"]` instead of `toolsFor("<key>")`, then `npm run build:packages`.
+3. `npm run contracts:update -- --server <key>` → `contracts/<key>.json`.
+4. `npm run generate:tools`, switch the entry to `tools: toolsFor("<key>")`, then `npm run generate:all`
+   (tool lists → `.env.example` → README generated blocks; it rebuilds packages).
+5. `npm run generate:check && npm run contracts:check`.
 
-Two fields are **not** written by hand (S-35, S-36):
+> "Snapshot, then register" fails with `No server matched` because the snapshotter reads the
+> manifest. The new-server "Next" block, `templates/server/README.md` and
+> `docs/servers/server-development.md` §2 all carry the bootstrap above.
 
-- **`env`** goes in `packages/manifest/src/envSpecs/<server>.ts`. Use `default` only for values
-  the installer should write into `~/.claude.json`; use `codeDefault` to document a fallback
-  without pinning it. Every field needs a `section`.
-- **`tools`** is generated from `contracts/`. Snapshot the new server first
-  (`npm run contracts:update -- --server <key>`), then `npm run generate:tools` — the manifest
-  throws at import time if a server has no generated tool list.
+Entry shape (`ServerDescriptor`, `packages/manifest/src/types.ts`): `key`, `displayName`, `dir`,
+`entry: "dist/index.js"`, `tagline`, `build: { install, guards: [] }` (guards = extra npm scripts
+after build, e.g. `guard:no-llm-runtime`), `smokeTest` (or `null`), `skillSource: "<dir>/skill"`,
+`tools`, `env`.
 
-Then `npm run generate:all` writes the server's `.env.example` and README blocks.
+**`EnvField`** — `name`, `required` (mandatory in the type), `secret`, `default` (**written into
+`~/.claude.json` and pins the value**), `codeDefault` (documentation only — use for tuning knobs;
+never both), `prompt` (asked interactively; also pins), `group` (+ `prefix`/`familyExamples` for an
+`*_ENV_*` family), `kind`/`enumValues` (what `mcp:doctor` validates without printing the value),
+`deprecatedAliases`, `section`, `note`. No secret gets a `default`; don't take a name another tool
+owns (`POSTGRES_USER` etc.).
 
-> Moved here from `scripts/lib/manifest.mjs` in S-34. That file is now a re-export shim awaiting
-> deletion — edit the package. After editing, run `npm run build:packages` so `scripts/` sees it.
+Edit `packages/manifest/`, not `scripts/lib/manifest.mjs` (a re-export shim), and run
+`npm run build:packages` after any manifest edit so `scripts/` sees it.
 
-```ts
-{
-  key: "my-mcp",                 // key in ~/.claude.json AND the skill dir name
-  displayName: "My MCP",
-  dir: "my-mcp",                 // package folder under the workspace root
-  entry: "dist/index.js",        // built entry point
-  tagline: "One line describing what it does.",
-  build: { install: true, guards: [] },   // guards: extra npm scripts to run after build
-  smokeTest: "node scripts/smoke-test.mjs", // or null
-  skillSource: "my-mcp/skill",   // folder holding the SKILL.md template
-  tools: ["tool_a", "tool_b"],   // rendered as mcp__my-mcp__tool_a ...
-  env: [ /* see env-field shape below */ ],
-}
+## 3. Write the template (`<dir>/skill/SKILL.md`)
+
+`scripts/lib/skills.mjs` substitutes `{{KEY}}` `{{DISPLAY_NAME}}` `{{TAGLINE}}` `{{ENTRY_PATH}}`
+`{{TOOL_NAMESPACE}}` (`mcp__<key>__*`) `{{TOOL_LIST}}` `{{ENV_TABLE}}`, and writes the project copy
+(`.claude/skills/<key>/`), the global copy (`~/.claude/skills/<key>/`, if Claude Code is detected) and
+a Copilot prompt (if VS Code is). The rendered copies are gitignored and **overwritten without
+warning** — edit only the template. A leftover unknown `{{PLACEHOLDER}}` makes the render throw, and
+`mcp:doctor` warns when an installed copy is stale against the template + manifest.
+
+1. **Frontmatter.** `name: {{KEY}}`. `description` is the only thing the model sees when deciding to
+   load: capability first, then `Triggers on: …` with the phrases a user actually types (verbs +
+   objects: "why did the build fail", "run T-SQL", "trace a request"), then the main gate ("Read-only
+   by default"). Keep it **one line with no embedded double quote** — the Copilot renderer reads it
+   with a regex that stops at `"`.
+2. **Step 0 — orient**: the cheapest discovery calls (`health_check`, `list_*`, `list_environments`).
+3. **Workflows** — 2–5 named sequences ("call A, then B with A's id"); a tool list cannot say this.
+4. **Guardrails** — what is off by default and the exact canonical env flag that opens it, hard
+   bounds, preview-before-apply, scoping rules (exact `repoPath`, `database`, `environment`).
+5. **Configuration** — `{{ENTRY_PATH}}` + `{{ENV_TABLE}}`. **Tool reference** — `{{TOOL_LIST}}`.
+
+Every `tool({ arg: … })` and backticked tool name is validated against `contracts/` by `docs:check`;
+deprecated env names fail its `env-names` check.
+
+## 4. Install and verify
+
+```bash
+node scripts/install-mcp.mjs --server <key> --yes --skip-smoke   # add --skip-skill against a scratch HOME
+npm run mcp:doctor -- --server <key>                             # build / config / env / skill / start
+npm run mcp:update -- --server <key>                             # after any template edit: rebuild + re-render + verify start
+npm run docs:check
 ```
 
-**Env-field shape** (drives interactive prompts, the doctor's checks, and the skill's env table):
+Restart the host agent (or `/mcp`) afterwards. Test the description: would "<realistic user
+request>" obviously match it? If two skills could match, tighten both.
 
-| Field | Meaning |
-|-------|---------|
-| `name` | env var name |
-| `required` | must be set for the server to work |
-| `secret` | sensitive — never echoed by doctor/summary |
-| `default` | written silently when the user gives no value |
-| `prompt` | if present, the installer asks for it interactively |
-| `group` | "at least one var in this group must be set" (e.g. auth alternatives) |
-| `prefix` | any present key starting with this satisfies the group (e.g. `POSTGRES_ENV_`) |
-| `note` | shown near the prompt and in the generated skill's env table |
+## Authoritative reference
 
-Only fields with a `prompt` are asked interactively; the rest with a `default` are written silently.
-
-## 2. Write the template (`<dir>/skill/SKILL.md`)
-
-The renderer (`scripts/lib/skills.mjs`) substitutes these placeholders:
-
-- `{{KEY}}` `{{DISPLAY_NAME}}` `{{TAGLINE}}`
-- `{{ENTRY_PATH}}` — absolute path to `dist/index.js`
-- `{{TOOL_NAMESPACE}}` — `mcp__<key>__*`
-- `{{TOOL_LIST}}` — bullet list of tools
-- `{{ENV_TABLE}}` — markdown env table from the manifest
-
-Structure a good operational skill as:
-
-1. **Frontmatter** — `name` = server key; `description` must be a strong trigger. Lead with the
-   capability, then list concrete phrasings ("Triggers on: …") the user is likely to type. This is
-   what makes the model auto-invoke the skill, so be specific and verb-first.
-2. **Step 0 — orient** — the cheapest discovery call(s) (`list_*`, `health_check`).
-3. **Core workflows** — 2-5 named recipes, each a short fenced tool sequence.
-4. **Guardrails** — read-only defaults, write/destructive gates, mandatory scoping, secret hygiene.
-   State what is OFF by default and which env flag turns it on.
-5. **Configuration (env)** — `{{ENTRY_PATH}}` + `{{ENV_TABLE}}`.
-6. **Tool reference** — `{{TOOL_LIST}}`.
-
-## 3. Verify
-
-```
-node scripts/install-mcp.mjs --server my-mcp --yes --skip-smoke   # test against a scratch HOME first
-node scripts/mcp-doctor.mjs --server my-mcp
-```
-
-`mcp-doctor` should report build/config/env/skill/start. Never print secret values in a skill or a
-doctor line — keys only.
-
-## Guardrails for this skill
-
-- Keep the manifest the single source of truth for env — do not duplicate env docs in the installer.
-- Descriptions are for auto-invocation: test that a realistic user phrasing would match.
-- Prefer editing an existing operational skill over adding a parallel one.
-- Related policy: `.claude/rules/mcp-base.md`, `.claude/rules/typescript-mcp.md`. For scaffolding the
-  server code itself, see `docs/servers/server-development.md` §1–2 (the `mcp-scaffold` skill it used to point
-  at was archived 2026-08-03 as superseded).
+`docs/servers/server-development.md` §1–3 and §6 (scaffold, manifest, env-field semantics, install
+and doctor). Types: `packages/manifest/src/types.ts`. Renderer: `scripts/lib/skills.mjs`.
+Scaffolder: `scripts/new-server.mjs`.

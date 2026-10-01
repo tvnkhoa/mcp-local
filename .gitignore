@@ -37,6 +37,7 @@ pnpm-debug.log*
 .claude/skills/postgres-mcp/
 .claude/skills/observe-mcp/
 .claude/skills/bitbucket-mcp/
+.claude/skills/sqlserver-mcp/
 
 # Local databases and runtime files
 *.db

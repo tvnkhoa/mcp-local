@@ -1,71 +1,71 @@
 ---
 name: {{KEY}}
-description: "Browse Bitbucket Cloud repositories, pull requests and CI pipelines, read PR diffs and build logs, and create pull requests via the {{DISPLAY_NAME}}. Triggers on: list repos/branches/PRs, view a pull request or its diff, open/create a PR, why did the build fail, pipeline status, CI log for a step. PR creation is gated and supports dryRun."
+description: "Bitbucket Cloud via the {{DISPLAY_NAME}}: list repos, branches and pull requests, read a PR and its diff, inspect CI pipeline runs and read a failed step's log, and open a PR (gated, dryRun first). Use for: why did the build/pipeline fail, CI status of a branch, show the build log, review PR #123, what changed in this PR, list open PRs, create/open a pull request from my branch. Not for local git history (use git) or Jira tickets. Read-only except create_pull_request; it cannot trigger, stop or re-run a pipeline."
 ---
 
 # {{DISPLAY_NAME}}
 
 {{TAGLINE}} Tools are exposed as `{{TOOL_NAMESPACE}}`.
 
-Use this to explore repositories, list and read pull requests and their diffs, inspect CI pipeline runs and read step logs, and create pull requests. Reads are always available; **creating a PR is gated** behind `BITBUCKET_WRITE_ENABLED=true`.
+`repoSlug` defaults to `BITBUCKET_DEFAULT_REPO`; the workspace is always `BITBUCKET_WORKSPACE` (no
+tool takes a workspace argument). Run `health_check` first if a call fails on auth.
 
-## Step 0 — Orient
+## Pick the tool
 
-```
-health_check                 // verify auth + connectivity
-list_repositories(workspace?)
-get_repository(repoSlug)
-list_branches(repoSlug)
-```
-`BITBUCKET_WORKSPACE` and (optionally) `BITBUCKET_DEFAULT_REPO` let you omit those args.
+| User asks | Call |
+|---|---|
+| "why did the build fail" / "CI log" | the pipeline recipe below |
+| "list open PRs" | `list_pull_requests(state: "OPEN")` — also `MERGED`, `DECLINED`, `SUPERSEDED` |
+| "review PR 123" / "what changed" | `get_pull_request(id)` then `get_pull_request_diff(id)` |
+| "which repos / branches" | `list_repositories(q?, role?)`, `list_branches(repoSlug, q?)` |
+| "open a PR" | the create recipe below |
 
-## Pull requests (read)
+`list_*` tools page with `page` / `pagelen` (max 100) and accept `sort`; `q` is BBQL on repos,
+branches and PRs (`name ~ "api"`).
 
-```
-list_pull_requests(repoSlug?, state?)     // OPEN / MERGED / DECLINED
-get_pull_request(repoSlug?, id)
-get_pull_request_diff(repoSlug?, id)      // unified diff for review
-```
-
-## Pipelines (read)
-
-Walk one CI failure end to end — do not stop at "the build failed", get to the log line:
+## Why did the build fail — walk it to the log line
 
 ```
-list_pipelines(repoSlug?, branch?, status?, pagelen?)            // newest first
-get_pipeline(repoSlug?, pipelineUuid)                            // uuid or build number
-list_pipeline_steps(repoSlug?, pipelineUuid)                     // which step failed -> stepUuid
-get_pipeline_step_log(repoSlug?, pipelineUuid, stepUuid, maxBytes?)
+list_pipelines(repoSlug?, branch: "<branch>", status: ["FAILED"])   // newest first
+list_pipeline_steps(repoSlug?, pipelineUuid)                        // find the failed step -> stepUuid
+get_pipeline_step_log(repoSlug?, pipelineUuid, stepUuid)            // tail of the log
 ```
-- `status: ["FAILED"]` + `branch` is the usual first call; several statuses are ORed.
-- **The filter vocabulary is not the response vocabulary.** A run reported as `SUCCESSFUL` is selected by `PASSED`. Filtering by `SUCCESSFUL` or `COMPLETED` returns nothing — upstream answers 200 with an empty page for a status it does not know, so an empty result can mean a wrong value rather than no runs. Verified live 2026-08-21.
-- There is no `q`/BBQL on this endpoint — it is silently ignored upstream, so the tool does not offer it.
-- `pipelineUuid` takes the uuid with or without braces, or a plain build number.
-- `get_pipeline_step_log` returns the **tail** (default 256 KiB, max 1 MiB) — that is where the error is. `truncated: true` means the head was dropped; raise `maxBytes` only if the failure is genuinely earlier.
-- Needs the `read:pipeline` scope on the token. A 403 here while the repo/PR tools work means exactly that — the error detail lists `required` vs `granted`, so quote it rather than guessing.
-- A step that has not started has no log and answers 404 — check `list_pipeline_steps` state first.
 
-## Create a pull request (gated)
+- **Filter vocabulary ≠ response vocabulary.** A run shown as `SUCCESSFUL` is selected with
+  `status: ["PASSED"]`; `SUCCESSFUL` / `COMPLETED` are not filter values. Upstream answers an
+  unknown value with an empty page, so an empty result can mean a wrong filter, not "no runs".
+- `pipelineUuid` takes the uuid with or without braces, or the plain build number.
+- The log is the **tail** (default 256 KiB, `maxBytes` up to 1 MiB) — that is where the error is.
+  `truncated: true` means the head was dropped; raise `maxBytes` only if the cause is earlier.
+- A step that has not started has no log and answers 404 — check its state in `list_pipeline_steps`.
+- A 403 on pipeline tools while repo/PR tools work = the token lacks `read:pipeline`. The error lists
+  `required` vs `granted`; quote it.
+- There is no `q` on pipelines (upstream ignores it), and no way to trigger/stop/re-run a build. Say so.
+
+## Create a pull request (OFF unless `BITBUCKET_WRITE_ENABLED=true`)
 
 ```
-create_pull_request(repoSlug?, title, source, destination, description?, dryRun?)
+list_branches(repoSlug?, q: 'name ~ "<branch>"')        // confirm the source branch exists
+create_pull_request(title, sourceBranch, destinationBranch?, description?, reviewers?, closeSourceBranch?, dryRun: true)
+// show the user the payload, get an explicit yes
+create_pull_request(... same args ..., dryRun: false)
 ```
-- **Always run with `dryRun: true` first** and show the user the payload; only then create for real.
-- Disabled unless `BITBUCKET_WRITE_ENABLED=true`. Requires scope `write:pullrequest`.
-- Confirm `source`/`destination` branch names against `list_branches` before creating.
+
+- `destinationBranch` defaults to the repo's main branch. `reviewers` are UUIDs or account_ids.
+- A PR is outward-facing: never skip the dryRun + confirmation. Needs `write:pullrequest`.
 
 ## Guardrails
 
-- Creating a PR is outward-facing — confirm with the user before the non-dryRun call.
-- Never echo tokens. Auth is env-only.
-- Reads use scopes `read:repository` / `read:pullrequest`, plus `read:pipeline` for the pipeline tools; PR creation additionally needs `write:pullrequest`.
-- Pipeline tools are read-only: there is no way to trigger, stop or re-run a build from here. Say so rather than improvising.
+- Never echo tokens or the `Authorization` header. Auth is env-only.
+- Scopes: `read:repository`, `read:pullrequest`, `read:pipeline`; `write:pullrequest` for PR creation
+  (Bitbucket names them with a `:bitbucket` suffix in the token UI).
 
 ## Configuration (env)
 
 Server entry: `node {{ENTRY_PATH}}`
 
-Auth: **either** `BITBUCKET_ACCESS_TOKEN` (Bearer) **or** `BITBUCKET_EMAIL` + `BITBUCKET_API_TOKEN` (Basic). The siliconstack workspace uses an Atlassian API token → Basic auth.
+Auth: **either** `BITBUCKET_ACCESS_TOKEN` (Bearer) **or** `BITBUCKET_EMAIL` + `BITBUCKET_API_TOKEN`
+(Basic). An Atlassian API token (`ATATT…`) is Basic auth — that is what the siliconstack workspace uses.
 
 {{ENV_TABLE}}
 

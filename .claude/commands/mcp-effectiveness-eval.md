@@ -3,7 +3,7 @@ description: "Compare code analysis WITHOUT MCP vs WITH the codebase-index MCP o
 argument-hint: "[repoId] [repoPath]"
 ---
 
-Use `$1` as `repoId` and `$2` as `repoPath` below (falling back to `list_repositories` if omitted). MCP tools are namespaced `mcp__codebase-index__<tool>`.
+Use `$1` as `repoId` and `$2` as `repoPath` below. If either is omitted, call `list_repositories` and take both from it. MCP tools are namespaced `mcp__codebase-index__<tool>`.
 
 # MCP Codebase-Index Effectiveness Evaluation (No LLM Mode)
 
@@ -11,14 +11,29 @@ Use `$1` as `repoId` and `$2` as `repoPath` below (falling back to `list_reposit
 
 This prompt is workspace-agnostic and can run on any repository.
 
-- Baseline track: only structural tools (`file_search`, `grep_search`, `list_dir`, `read_file`).
+- Baseline track: structural search/read only. In Claude Code these are **Glob**, **Grep**, **Read**
+  and a directory listing (`ls`); the names below (`file_search`, `grep_search`, `read_file`, list_dir)
+  are the VS Code equivalents of the same four.
 - MCP track: only `codebase-index` deterministic tools (`mcp__codebase-index__*`).
 - No semantic inference from LLM is allowed in either track.
+- This is a sanctioned baseline-first run (`.claude/rules/mcp-hard-mode.md` fallback condition 4), so
+  the baseline track needs no issue-registry entry — but a **MCP-track** miss that forces a fallback
+  does.
 
 Inputs:
 
 - `${repoId}`: repository id in index DB.
-- `${repoPath}`: absolute path of repository root.
+- `${repoPath}`: absolute path of repository root — the **exact** string `list_repositories`
+  returns (drive-letter casing and slash style included), or the allowlist rejects it.
+
+## Measuring
+
+Record per question and per track, from tool output only:
+
+- **steps** = tool calls made;
+- **files opened** = distinct files read in full or in part;
+- **output size** = characters returned by all tool results (≈ tokens × 4). Token saving is
+  `1 − MCP/Baseline` on this number — do not estimate it from impressions.
 
 ---
 
@@ -42,7 +57,7 @@ Run health first:
 }
 ```
 
-If repo is stale or missing, run full re-index before Q1-Q5:
+If repo is stale or missing, take the exact `repoPath` from `list_repositories` and run a full re-index before Q1-Q5:
 
 ```json
 {
@@ -225,6 +240,24 @@ Baseline:
 - run multiple `grep_search` attempts.
 - verify by opening matches.
 
+MCP step 0 — a business phrase is not an identifier, and `search_symbols` is a token matcher. Discover
+the identifier first with a narrow regex over the phrase's distinctive fragment:
+
+```json
+{
+  "tool": "search_regex",
+  "arguments": {
+    "repoId": "${repoId}",
+    "pattern": "<distinctive fragment, e.g. ConversationAssigned>",
+    "excludeTests": true,
+    "profile": "compact",
+    "limit": 20
+  }
+}
+```
+
+Take the enclosing-symbol names it returns as `<query>` below.
+
 MCP step 1 (`name`):
 
 ```json
@@ -257,7 +290,7 @@ MCP step 2 (`intent`) only if step 1 is empty/low confidence:
 }
 ```
 
-MCP step 3 retry once with top suggestion if still empty.
+MCP step 3 retry once with top suggestion if still empty (max two rewrites in total).
 
 No-LLM note:
 
@@ -268,14 +301,14 @@ No-LLM note:
 
 ## Scoring Table
 
-| # | Question | Baseline Steps | MCP Steps | Baseline Files Opened | MCP Files Opened | Baseline Accuracy | MCP Accuracy | Notes |
-|---|----------|----------------|----------|-----------------------|------------------|-------------------|--------------|-------|
-| Q1 | Entry points | | | | | | | |
-| Q2 | Caller / surface | | | | | | | |
-| Q3 | Blast radius | | | | | | | |
-| Q4 | Module understanding | | | | | | | |
-| Q5 | Symbol by description | | | | | | | |
-| Total | | | | | | | | |
+| # | Question | Baseline Steps | MCP Steps | Baseline Files Opened | MCP Files Opened | Baseline Output (chars) | MCP Output (chars) | Baseline Accuracy | MCP Accuracy | Notes |
+|---|----------|----------------|-----------|-----------------------|------------------|-------------------------|--------------------|-------------------|--------------|-------|
+| Q1 | Entry points | | | | | | | | | |
+| Q2 | Caller / surface | | | | | | | | | |
+| Q3 | Blast radius | | | | | | | | | |
+| Q4 | Module understanding | | | | | | | | | |
+| Q5 | Symbol by description | | | | | | | | | |
+| Total | | | | | | | | | | |
 
 Accuracy legend:
 
@@ -290,7 +323,7 @@ Accuracy legend:
 
 After Q1-Q5, write:
 
-1. Token saving estimate (%):
+1. Token saving (%), from the Output (chars) totals:
 2. Step reduction (%):
 3. Accuracy delta (Baseline vs MCP):
 4. Best-fit question types for MCP:
@@ -301,10 +334,10 @@ Suggested hybrid workflow (no LLM):
 
 1. `health_check`
 2. `find_entry_points` or `get_folder_summary`
-3. `search_symbols` (`name` then `intent` if needed)
+3. `search_regex` to discover an identifier when you only have a phrase, then `search_symbols` (`name`, then `intent` if needed)
 4. `get_file_summary` / `get_change_context`
 5. `find_impact_files`
-6. targeted `read_file` for final verification
+6. `get_symbol_source` for final verification; `read_file` only for non-symbol regions (config, text)
 
 ---
 
