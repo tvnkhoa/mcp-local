@@ -30,7 +30,7 @@ import pg, { type PoolConfig, type QueryConfig } from "pg";
 
 import { INTERNAL_SCHEMAS } from "../../middleware/internalSchemas.js";
 import { PolicyViolationError } from "../../middleware/errors.js";
-import { assertNoInternalWrites, internalTupleCount } from "../internalWriteGuard.js";
+import { assertNoInternalWrites, internalState } from "../internalWriteGuard.js";
 import { captureSchema, type SchemaSnapshot } from "../migration/schemaSnapshot.js";
 import { requireMigrationsDir, type DdlConfig } from "./ddlConfig.js";
 import { loadMigrations } from "./ddlFiles.js";
@@ -311,7 +311,7 @@ export async function dryRunPlan(client: pg.Client, plan: DdlPlan, session: { pi
       const started = Date.now();
       await client.query("savepoint ddl_step");
       await setTimeouts(client, step, true);
-      const baseline = await internalTupleCount(client);
+      const baseline = await internalState(client);
       let failure = await runStatements(client, step);
       if (failure === undefined) {
         try {
@@ -431,7 +431,7 @@ export async function applyPlan(
       let historyId: number | undefined;
       try {
         await setTimeouts(client, step, true);
-        const baseline = await internalTupleCount(client);
+        const baseline = await internalState(client);
         failure = await runStatements(client, step);
         if (failure === undefined) {
           // Before the ledger insert, which is the one write to mcp_ops that belongs here.

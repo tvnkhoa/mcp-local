@@ -117,17 +117,72 @@ export function withLockTimeout(connectionString: string, lockTimeoutMs: number)
     };
   }
   const setting = `-c lock_timeout=${String(lockTimeoutMs)}`;
-  const parts = trimmed.split(";").filter((p) => p.trim() !== "");
+  const parts = splitConnectionString(trimmed);
+  if (parts === null) {
+    return { connectionString, applied: false, note: "the connection string has an unbalanced quote; left as is" };
+  }
   const at = parts.findIndex((p) => /^\s*options\s*=/i.test(p));
   if (at >= 0) {
     const part = parts[at] as string;
     if (/lock_timeout/i.test(part)) {
       return { connectionString, applied: false, note: "the connection string already sets lock_timeout in Options; left as is" };
     }
-    parts[at] = `${part.trimEnd()} ${setting}`;
+    const eq = part.indexOf("=");
+    const key = part.slice(0, eq);
+    const value = part.slice(eq + 1).trim();
+    // A quoted value keeps its quotes: the setting goes INSIDE them. Appending after the closing
+    // quote produced `Options='-c a=b' -c lock_timeout=N`, which Npgsql cannot parse, so every
+    // dotnet ef call failed while the preview reported the timeout as applied. Found by review,
+    // finding 4 of the 2026-10-01 pass.
+    const quote = value[0] === "'" || value[0] === '"' ? value[0] : "";
+    const merged = quote !== "" && value.endsWith(quote) && value.length >= 2 ? `${value.slice(0, -1)} ${setting}${quote}` : `${value} ${setting}`;
+    parts[at] = `${key}=${merged}`;
     return { connectionString: `${parts.join(";")};`, applied: true, note: "merged into the existing Options" };
   }
   return { connectionString: `${[...parts, `Options=${setting}`].join(";")};`, applied: true };
+}
+
+/**
+ * Split a `key=value;` connection string on the `;` that separate pairs, but not on a `;` inside a
+ * quoted value (Npgsql quotes a value that contains one). Empty pairs are dropped. Returns null on
+ * an unbalanced quote, rather than guessing where the value ends.
+ */
+function splitConnectionString(value: string): string[] | null {
+  const parts: string[] = [];
+  let current = "";
+  let quote: string | null = null;
+  for (let i = 0; i < value.length; i += 1) {
+    const ch = value[i] as string;
+    if (quote !== null) {
+      current += ch;
+      if (ch === quote) {
+        if (value[i + 1] === quote) {
+          // A doubled quote inside a quoted value is an escaped quote.
+          current += quote;
+          i += 1;
+        } else {
+          quote = null;
+        }
+      }
+      continue;
+    }
+    if ((ch === "'" || ch === '"') && /=\s*$/.test(current)) {
+      quote = ch;
+      current += ch;
+      continue;
+    }
+    if (ch === ";") {
+      if (current.trim() !== "") parts.push(current.trim());
+      current = "";
+      continue;
+    }
+    current += ch;
+  }
+  if (quote !== null) {
+    return null;
+  }
+  if (current.trim() !== "") parts.push(current.trim());
+  return parts;
 }
 
 /** The full argv for `dotnet`: the subcommand, then the fixed project template. */

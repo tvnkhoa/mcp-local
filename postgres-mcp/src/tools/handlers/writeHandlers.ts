@@ -16,7 +16,7 @@ import {
   type WriteTarget
 } from "../../middleware/writeGuardrails.js";
 import { runExclusive } from "../../services/concurrency/envMutex.js";
-import { assertNoInternalWrites, internalTupleCount } from "../../services/internalWriteGuard.js";
+import { assertNoInternalWrites, internalState, type InternalState } from "../../services/internalWriteGuard.js";
 import { recordAudit } from "../../services/write/auditLog.js";
 import {
   createWriteDigest,
@@ -304,7 +304,7 @@ async function resolveWriteTarget(client: PoolClient, sql: string, params: unkno
  * the plan never shows, and that code can insert into or delete from `mcp_ops`.
  * `internalWriteGuard` explains why only a same-transaction difference is trusted.
  */
-function assertNoInternalSideEffects(client: PoolClient, baseline: number): Promise<void> {
+function assertNoInternalSideEffects(client: PoolClient, baseline: InternalState): Promise<void> {
   return assertNoInternalWrites(
     client,
     baseline,
@@ -355,7 +355,7 @@ export async function handleWritePreview(
   try {
     await client.query("begin");
     target = (await resolveWriteTarget(client, validated.sanitizedSql, params)) ?? validated.target;
-    const baseline = await internalTupleCount(client);
+    const baseline = await internalState(client);
     const result = await client.query(dryRunSql, params);
     rowsAffected = result.rowCount ?? 0;
     affectedSample = result.rows.slice(0, config.sampleLimit);
@@ -461,7 +461,7 @@ export async function handleWriteApply(
 
     try {
       await client.query("begin");
-      const baseline = await internalTupleCount(client);
+      const baseline = await internalState(client);
 
       // Capture rollback data inside the same committed transaction.
       //

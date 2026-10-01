@@ -337,7 +337,7 @@ export async function handleMigrationPreview(
   const { entries, pending, applied } = listing;
 
   if (args.targetMigration !== undefined) {
-    return previewRevert(args.targetMigration, { env, profile, preSnapshotId: preSnapshot.snapshotId, pending, applied }, config);
+    return previewRevert(args.targetMigration, { env, profile, preSnapshotId: preSnapshot.snapshotId, pending, applied, entries }, config);
   }
 
   if (pending.length === 0) {
@@ -396,7 +396,14 @@ export async function handleMigrationPreview(
  */
 async function previewRevert(
   target: string,
-  ctx: { env: { name: string; connectionString: string }; profile: ResponseProfile; preSnapshotId: string; pending: string[]; applied: string[] },
+  ctx: {
+    env: { name: string; connectionString: string };
+    profile: ResponseProfile;
+    preSnapshotId: string;
+    pending: string[];
+    applied: string[];
+    entries: EfMigrationListEntry[];
+  },
   config: MigrationConfig
 ): Promise<CallToolResult> {
   const { env, profile, applied } = ctx;
@@ -413,8 +420,35 @@ async function previewRevert(
     return asText({ environment: env.name, status: "nothing_to_revert", note: `'${target}' is already the latest applied migration.` }, profile);
   }
   const latest = applied[applied.length - 1] as string;
+
+  // `migrations script <latest> <target>` scripts the Down of EVERY migration in that id range,
+  // without looking at the database. `database update <target>` reverts only the ones actually
+  // applied. A pending migration inside the range, which a branch merge produces, would put
+  // Down SQL in the reviewed script, with its risks, that the apply never runs. Refuse rather
+  // than show a script that is not the one that executes. Found by review, finding 2 of the
+  // 2026-10-01 pass.
+  const entryIndex = (id: string): number => ctx.entries.findIndex((e) => e.id === id);
+  const inRange = ctx.entries.slice(target === "0" ? 0 : entryIndex(target) + 1, entryIndex(latest) + 1);
+  const pendingInRange = inRange.filter((e) => e.applied !== true).map((e) => e.id);
+  if (pendingInRange.length > 0) {
+    throw new PolicyViolationError(
+      "MIGRATION_REVERT_RANGE_HAS_PENDING",
+      `Pending migration(s) ${pendingInRange.join(", ")} lie inside the range being reverted. The scripted Down SQL would include them, but database update would skip them, so the preview would not show what runs. Apply them first (migration_preview without targetMigration), or revert to a target after them.`
+    );
+  }
+
   const script = efOk(await efMigrationsScriptRange(config, env.connectionString, latest, target), "migrations script").stdout.trim();
   const risks = lintEfScript(script);
+  // `blocked` means the same here as in the DDL lane: refused whatever is acknowledged. Before
+  // this check, only `high` codes reached requiredAcknowledgements, so a blocked Down such as
+  // DROP SCHEMA … CASCADE needed nothing but EF_REVERT. Found by review, finding 3.
+  const blocked = risks.find((r) => r.level === "blocked");
+  if (blocked !== undefined) {
+    throw new PolicyViolationError(
+      "MIGRATION_RISK_BLOCKED",
+      `The rollback's Down SQL contains a statement that is refused regardless of acknowledgement (${blocked.code}): ${blocked.message}`
+    );
+  }
   const requiredAcknowledgements = ["EF_REVERT", ...highCodes(risks)];
 
   const previewId = randomUUID();

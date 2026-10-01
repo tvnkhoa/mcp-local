@@ -12,7 +12,7 @@ Resolution. Mirrors the format of `codebase-index-mcp/docs/mcp-codebase-index-is
 
 ## Index
 
-**31 entries** — all 31 resolved (some as documented guidance rather than code changes), **0 open**.
+**32 entries** — all 32 resolved (some as documented guidance rather than code changes), **0 open**.
 Statuses are copied from each entry's own `**Status:**` line; the entry is authoritative.
 
 | ID | Title | Status |
@@ -48,6 +48,7 @@ Statuses are copied from each entry's own `**Status:**` line; the entry is autho
 | `PG-CMP-002` | The schema snapshot saw only tables: a changed view, function, trigger or enum passed the drift guard | ✅ fixed 2026-09-30 (code) — snapshot v2 captures seven more object kinds |
 | `PG-DDL-001` | The DDL lane's apply hung forever behind a table lock it had not reached yet | ✅ fixed 2026-10-01 (code) — session timeouts set first; planning uses the plan's shortest lock wait |
 | `PG-DDL-002` | Behind PgBouncer transaction pooling, the migration lock is not exclusive | ✅ mitigated 2026-10-01 (code) — moved sessions refused; the client-side limit is accepted |
+| `PG-REV-002` | Code-review sweep of the DDL and EF migration lanes (4 findings, 4 fixed) | ✅ fixed 2026-10-01 (code) — TRUNCATE bypass closed; rollback preview made honest; blocked enforced; quoted Options |
 
 > ID prefixes group by area: `ENV` environment resolution · `SEC` safety posture · `DOC`
 > documentation drift · `CMP` compare_environments · `MIG` EF Core migrations · `DIF` data_diff ·
@@ -1399,6 +1400,45 @@ underlying limit is accepted:** a client cannot prove it is not pooled. Covered 
   session the same backend every time passes the check, and is indistinguishable from a direct
   connection. A direct connection, or PgBouncer in session mode, remains the requirement. The
   check makes a violation loud in the busy case instead of silent in every case.
+
+---
+
+## PG-REV-002 — code-review sweep of the DDL and EF migration lanes (4 findings, 4 fixed)
+
+**Status:** ✅ fixed 2026-10-01 (code), before push. The review covered `origin/main..HEAD`: 13
+commits, phase 0.1 through B-16.1. Every finding was reproduced or pinned by a test before it
+was fixed.
+
+1. **(medium) The run-time `mcp_ops` guard could be bypassed with TRUNCATE.**
+   - `internalWriteGuard` compared only the `pg_stat_xact_user_tables` tuple counters.
+     `TRUNCATE`, `DROP` and a rewriting `ALTER` move none of them, and a plpgsql
+     `EXECUTE 'truncate ' || 'mcp_' || 'ops.ddl_history'` hides the schema name from every
+     textual check. A trigger on a write target, or a DDL migration's
+     `ADD COLUMN … DEFAULT f()`, could wipe the audit log or the ledger and still commit as clean.
+   - Reproduced. With the old guard, `V2/truncate-ledger-rolled-back` cut the applied ledger from
+     14 rows to 1, and `P2/truncate-into-internal-refused` was accepted.
+   - Fix: the reading now also fingerprints the internal schemas' catalog. That covers each
+     relation's oid, name, filenode, column count, kind and trigger flag, the trigger count, and
+     whether the schema exists. TRUNCATE assigns a new filenode, so it is caught. Both scenarios
+     now refuse. The first version of the fix itself failed every apply with `text || "char"` until
+     each part was cast; the harnesses caught that at once.
+2. **(medium) An EF rollback preview could show a different script from the one that runs.**
+   `migrations script <latest> <target>` scripts the Down of every migration in that id range,
+   while `database update <target>` reverts only the applied ones. A pending migration inside the
+   range, which a branch merge produces, put its Down SQL and its risks into the review, but never
+   ran. The preview now refuses with `MIGRATION_REVERT_RANGE_HAS_PENDING`
+   (`R2/revert-range-has-pending`).
+3. **(low) A `blocked` risk in an EF rollback needed no acknowledgement.** Only `high` codes
+   reached `requiredAcknowledgements`, so `DROP SCHEMA … CASCADE` in a Down passed with
+   `EF_REVERT` alone. It is now refused with `MIGRATION_RISK_BLOCKED`, as the DDL lane does
+   (`R3/blocked-down-refused`).
+4. **(low) `withLockTimeout` broke a quoted `Options` value.**
+   - It appended after the closing quote (`Options='-c a=b' -c lock_timeout=N`). Npgsql cannot
+     parse that, so every `dotnet ef` call would fail, while the preview reported the timeout as
+     applied.
+   - The connection string is now split with quotes respected, so a `;` inside a quoted value is
+     not a separator. The setting goes inside the quotes, and an unbalanced quote leaves the string
+     alone with `applied: false`. Two unit tests cover this.
 
 ---
 

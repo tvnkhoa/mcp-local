@@ -48,3 +48,24 @@ test("0 turns it off", () => {
   assert.equal(r.connectionString, NPGSQL);
   assert.match(r.note ?? "", /disabled/);
 });
+
+test("a quoted Options value gets the setting INSIDE its quotes, and a ; inside quotes is not a separator", () => {
+  // Review finding 4: appended after the closing quote, Npgsql could not parse the result.
+  assert.equal(
+    withLockTimeout(`${NPGSQL};Options='-c search_path=app'`, 5000).connectionString,
+    `${NPGSQL};Options='-c search_path=app -c lock_timeout=5000';`
+  );
+  assert.equal(
+    withLockTimeout(`${NPGSQL};Options="-c search_path=app"`, 5000).connectionString,
+    `${NPGSQL};Options="-c search_path=app -c lock_timeout=5000";`
+  );
+  const semicolon = withLockTimeout(`Host=db;Password='p;w''d';Username=u;Database=app`, 5000);
+  assert.equal(semicolon.connectionString, `Host=db;Password='p;w''d';Username=u;Database=app;Options=-c lock_timeout=5000;`);
+});
+
+test("an unbalanced quote leaves the string alone and says so", () => {
+  const broken = `${NPGSQL};Options='-c search_path=app`;
+  const r = withLockTimeout(broken, 5000);
+  assert.equal(r.applied, false);
+  assert.equal(r.connectionString, broken);
+});

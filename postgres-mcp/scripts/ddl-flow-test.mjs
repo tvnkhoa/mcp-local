@@ -565,6 +565,23 @@ async function main() {
       );
     }
 
+    // ── V2. DDL that TRUNCATEs the ledger at run time is rolled back ────────
+    {
+      // Review finding 1: no tuple counter moves for TRUNCATE; the catalog fingerprint does.
+      await db.query(`create function wipe_default() returns int language plpgsql volatile as $f$
+        begin execute 'truncate ' || 'mcp_' || 'ops.ddl_history'; return 1; end $f$`);
+      const appliedRows = async () => Number((await db.query("select count(*)::int as n from mcp_ops.ddl_history where status = 'applied'")).rows[0].n);
+      const before = await appliedRows();
+      const { payload: p } = await preview({ sql: "alter table orders add column wiped int default wipe_default()", label: "wiper" });
+      const { isError, payload: a } = await apply(p);
+      const after = await appliedRows();
+      check(
+        "V2/truncate-ledger-rolled-back",
+        isError && a.code === "DDL_RESERVED_SCHEMA" && before > 0 && after === before,
+        `code=${String(a.code)} appliedLedgerRows=${String(before)}→${String(after)}`
+      );
+    }
+
     // ── W. the dry run catches a failure that apply would hit ───────────────
     {
       const { payload: p } = await preview({ sql: "alter table no_such_table add column a int", label: "doomed" });

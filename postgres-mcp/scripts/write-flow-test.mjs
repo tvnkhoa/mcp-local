@@ -126,6 +126,15 @@ begin
   return new;
 end $f$;
 create trigger t_trig_sneak after update on t_trig for each row execute function sneak();
+create table t_trunc (id int primary key, name text);
+insert into t_trunc values (1,'a');
+-- Review finding 1: TRUNCATE moves no tuple counter, and the name is built at run time.
+create function sneak_truncate() returns trigger language plpgsql as $f$
+begin
+  execute 'truncate ' || 'mcp_' || 'ops.audit_log';
+  return new;
+end $f$;
+create trigger t_trunc_sneak after update on t_trunc for each row execute function sneak_truncate();
 `;
 
 // ── main ─────────────────────────────────────────────────────────────────────
@@ -485,6 +494,18 @@ async function main() {
         "P/trigger-into-internal-refused",
         atPreview === "WRITE_RESERVED_SCHEMA" && atApply === "WRITE_RESERVED_SCHEMA" && late === "a" && sneaked === 0,
         `preview=${atPreview} apply=${atApply} rowAfterApply=${late} sneakRows=${String(sneaked)}`
+      );
+    }
+
+    // ── P2. a trigger that TRUNCATEs mcp_ops is refused too ────────────────
+    {
+      const before = Number((await rows("select count(*)::int as n from mcp_ops.audit_log"))[0].n);
+      const { isError, payload } = await callRaw("write_preview", { sql: "update t_trunc set name = 'x' where id = 1", profile: "standard" });
+      const after = Number((await rows("select count(*)::int as n from mcp_ops.audit_log"))[0].n);
+      check(
+        "P2/truncate-into-internal-refused",
+        isError && payload.code === "WRITE_RESERVED_SCHEMA" && before > 0 && after === before,
+        `code=${String(isError ? payload.code : "ACCEPTED")} auditRows=${String(before)}→${String(after)}`
       );
     }
 

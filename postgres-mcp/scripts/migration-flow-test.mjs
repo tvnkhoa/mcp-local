@@ -503,6 +503,34 @@ async function main() {
       );
     }
 
+    // ── R2. a pending migration inside the revert range is refused (review finding 2) ──
+    {
+      // A branch merge: ordered between AddR's predecessor and AddR, never applied.
+      const at = ef.state.migrations.findIndex((m) => m.id === "20260111000000_AddR");
+      ef.state.migrations.splice(at, 0, { id: "20260110500000_MergedLate", sql: "CREATE TABLE ml_t (id int);", down: "DROP TABLE ml_t;" });
+      const r = await revertPreview(beforeR);
+      ef.state.migrations.splice(at, 1);
+      check(
+        "R2/revert-range-has-pending",
+        r.isError && r.payload.code === "MIGRATION_REVERT_RANGE_HAS_PENDING" && /20260110500000_MergedLate/.test(r.payload.message),
+        `code=${String(r.payload.code)}`
+      );
+    }
+
+    // ── R3. a blocked statement in the Down SQL is refused, not acknowledged (review finding 3) ──
+    {
+      ef.state.migrations.push({ id: "20260111500000_AddSchema", sql: "CREATE SCHEMA scratch;", down: "DROP SCHEMA scratch CASCADE;" });
+      const { payload: up } = await preview();
+      await apply(up);
+      const latestBefore = (await status()).payload.applied.at(-2);
+      const r = await revertPreview(latestBefore);
+      check(
+        "R3/blocked-down-refused",
+        r.isError && r.payload.code === "MIGRATION_RISK_BLOCKED" && /DROP_SCHEMA_CASCADE/.test(r.payload.message),
+        `code=${String(r.payload.code)} message=${String(r.payload.message ?? "")}`
+      );
+    }
+
     // ═══ B-15.5: the cross-process migration lock ═══════════════════════════
 
     const tryLock = async (client) => (await client.query("select pg_try_advisory_lock($1, $2) as ok", [...DDL_LOCK_KEY])).rows[0].ok;

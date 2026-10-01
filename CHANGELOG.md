@@ -10,6 +10,24 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased] - 2026-10-01
 
+### 🔎 `postgres-mcp`: four review findings fixed before push (PG-REV-002)
+
+A code review of the 13 unpushed commits found four defects. Each one was reproduced or pinned by a
+test before it was fixed.
+
+- **TRUNCATE could slip past the `mcp_ops` guard (medium).** The guard counted only tuples, and
+  `TRUNCATE` moves no tuple counter. A function that builds `'mcp_' || 'ops'` at run time wiped the
+  DDL ledger from 14 applied rows to 1 in the harness. The guard now also compares a fingerprint
+  of the internal schemas' catalog. New scenarios: `P2` (write lane) and `V2` (DDL lane).
+- **An EF rollback preview could include Down SQL that never runs (medium).** That happened when a
+  pending migration sat inside the revert range. Such a preview is now refused with
+  `MIGRATION_REVERT_RANGE_HAS_PENDING`.
+- **A blocked Down statement such as `DROP SCHEMA … CASCADE` passed with `EF_REVERT` alone (low).**
+  It is now refused with `MIGRATION_RISK_BLOCKED`.
+- **A quoted `Options` in the connection string came out broken (low).** The lock timeout is now
+  merged inside the quotes, and the string is split with quotes respected.
+- Harness totals: write-flow 22, ddl-flow 25, migration-flow 22.
+
 ### 🧱 `postgres-mcp`: refuse a migration session that PgBouncer moves between backends (B-16.1, PG-DDL-002)
 
 - Both lanes now run `assertSessionPinned` right after taking the migration lock, and the DDL lane
