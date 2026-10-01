@@ -156,6 +156,8 @@ compare_environments { "source": "dev", "target": "staging", "includeRowCounts":
 
 `lock_timeout`: mọi lần gọi `dotnet ef` đều nhận `Options=-c lock_timeout=N` ghép vào connection string. N lấy từ `POSTGRES_MIGRATION_LOCK_TIMEOUT_MS`, mặc định 5000; đặt `0` để tắt. Cần Npgsql 5 trở lên. Dry run cũng dùng cùng mức chờ này. Kết quả của `migration_preview` và `migration_apply` có trường `lockTimeout.applied` để báo mức chờ có thật sự được áp hay không. Hai trường hợp không được áp: connection string dạng `postgres://` URI (Npgsql không đọc được), hoặc connection string đã tự đặt `lock_timeout` (giữ nguyên lựa chọn của người vận hành).
 
+Giữa các process: `migration_apply` giữ cùng advisory lock với lane DDL (`pg_try_advisory_lock`, trên một session phụ), từ lúc kiểm tra drift cho tới khi chụp snapshot sau apply. Một lần apply ở process khác, dù ở lane EF hay lane DDL, sẽ bị từ chối ngay (`MIGRATION_LOCKED` / `DDL_LOCKED`) chứ không chờ. Preview vẫn còn hiệu lực, nên retry được bằng chính preview đó. Lock này cần kết nối trực tiếp, không hoạt động qua PgBouncer ở chế độ transaction pooling.
+
 `migration_apply` dùng chung một mutex theo từng môi trường với `write_apply` / `write_rollback`. Trên cùng một DB, migration và thao tác ghi dữ liệu chạy lần lượt: một lệnh ghi phải đợi migration đang chạy xong. Nếu hai lần apply cùng một preview được gọi đồng thời, lần sau sẽ nhận `PREVIEW_NOT_FOUND`. Mutex chỉ có hiệu lực trong một process server.
 
 ## 6b. Luồng DDL (raw SQL)

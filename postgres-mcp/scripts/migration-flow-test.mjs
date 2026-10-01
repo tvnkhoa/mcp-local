@@ -183,6 +183,7 @@ async function main() {
   });
   const { ConnectionManager } = await import("../dist/repositories/connectionManager.js");
   const handlers = await import("../dist/tools/handlers/migrationHandlers.js");
+  const { DDL_LOCK_KEY } = await import("../dist/services/ddl/ddlHistory.js");
 
   const db = new pg.Client({ connectionString: CONN });
   await db.connect();
@@ -499,6 +500,55 @@ async function main() {
         "R/rollback-drift",
         r.isError && r.payload.code === "MIGRATION_DRIFT" && /Applied migration set changed/.test(r.payload.message) && (await exists("public.r_t")),
         `code=${String(r.payload.code)} message=${String(r.payload.message)}`
+      );
+    }
+
+    // ═══ B-15.5: the cross-process migration lock ═══════════════════════════
+
+    const tryLock = async (client) => (await client.query("select pg_try_advisory_lock($1, $2) as ok", [...DDL_LOCK_KEY])).rows[0].ok;
+
+    // ── S. another process holding the lock (a ddl_apply elsewhere) blocks migration_apply ──
+    {
+      ef.state.migrations.push({ id: "20260112000000_AddS", sql: "CREATE TABLE s_t (id int primary key);", down: "DROP TABLE s_t;" });
+      const { payload: p } = await preview();
+      const holder = new pg.Client({ connectionString: CONN });
+      await holder.connect();
+      await holder.query("select pg_advisory_lock($1, $2)", [...DDL_LOCK_KEY]);
+      const before = ef.state.updateCalls;
+      const blocked = await apply(p);
+      const ranWhileBlocked = ef.state.updateCalls !== before;
+      await holder.query("select pg_advisory_unlock($1, $2)", [...DDL_LOCK_KEY]);
+      await holder.end();
+      // The refusal comes before anything runs, so the same preview is still good afterwards.
+      const retried = await apply(p);
+      check(
+        "S/blocked-by-ddl-lock",
+        blocked.isError && blocked.payload.code === "MIGRATION_LOCKED" && !ranWhileBlocked && retried.payload.status === "applied" && (await exists("public.s_t")),
+        `blocked=${String(blocked.payload.code)} ranWhileBlocked=${String(ranWhileBlocked)} retried=${String(retried.payload.status ?? retried.payload.code)}`
+      );
+    }
+
+    // ── T. while dotnet ef runs, the lock is held — and released afterwards ──
+    {
+      ef.state.migrations.push({ id: "20260113000000_AddT", sql: "CREATE TABLE t_t (id int primary key);", down: "DROP TABLE t_t;" });
+      const { payload: p } = await preview();
+      ef.state.updateDelayMs = 800;
+      const running = apply(p);
+      await new Promise((resolve) => setTimeout(resolve, 400));
+      const probe = new pg.Client({ connectionString: CONN });
+      await probe.connect();
+      const duringUpdate = await tryLock(probe);
+      const result = await running;
+      ef.state.updateDelayMs = 0;
+      const afterUpdate = await tryLock(probe);
+      if (afterUpdate) {
+        await probe.query("select pg_advisory_unlock($1, $2)", [...DDL_LOCK_KEY]);
+      }
+      await probe.end();
+      check(
+        "T/held-during-update",
+        duringUpdate === false && afterUpdate === true && result.payload.status === "applied",
+        `lockFreeDuringUpdate=${String(duringUpdate)} lockFreeAfter=${String(afterUpdate)} apply=${String(result.payload.status ?? result.payload.code)}`
       );
     }
 

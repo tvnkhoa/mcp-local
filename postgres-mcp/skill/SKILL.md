@@ -115,6 +115,7 @@ When apply refuses:
 |---|---|---|
 | `DDL_DRIFT` | The schema, ledger or files changed since the preview | Run `ddl_preview` again. Never retry the old token |
 | `DDL_LOCKED` | Another session is applying DDL to this database | Wait for it, then retry |
+| `MIGRATION_LOCKED` | `migration_apply` found another process applying a migration (in either lane) to this database | Wait for it, then retry with the same preview |
 | `DDL_LOCK_TIMEOUT` | A table is busy | Retry off-peak |
 | `DDL_CHECKSUM_MISMATCH` | An applied file was edited | Restore it, then write a new migration for the change |
 | `DDL_APPLY_FAILED` | The SQL itself failed | Read `error.detail` |

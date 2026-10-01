@@ -11,6 +11,7 @@ import { lintDdl, type RiskFinding } from "../../middleware/ddlRiskLint.js";
 import { quoteIdent } from "../../middleware/ident.js";
 import { issueApprovalToken, verifyApprovalToken } from "../../services/write/approval.js";
 import { runExclusive } from "../../services/concurrency/envMutex.js";
+import { withMigrationLock } from "../../services/concurrency/migrationLock.js";
 import { recordAudit } from "../../services/write/auditLog.js";
 import {
   assertMigrationEnabled,
@@ -496,45 +497,68 @@ export async function handleMigrationApply(
     const env = connections.getEnvironment(preview.environment, true);
     const pool = connections.getPool(preview.environment, true);
 
-    // Two independent freshness checks, run together (schema round-trip + dotnet subprocess):
-    //  1. Schema drift — the live schema must still match what was previewed.
-    //  2. Pending-set drift — the set of pending migrations must be unchanged. Adding a migration
-    //     between preview and apply leaves the schema untouched, so the snapshot guard alone would
-    //     miss it and `dotnet ef database update` would apply migrations that were never previewed.
-    const [preSnapshot, current] = await Promise.all([
-      captureSchema(pool),
-      listMigrations(config, env.connectionString)
-    ]);
-    if (preSnapshot.snapshotId !== preview.preSnapshotId) {
-      throw new PolicyViolationError(
-        "MIGRATION_DRIFT",
-        "Schema changed since migration_preview. Re-run migration_preview before applying."
-      );
-    }
-    if (preview.direction === "up" && current.pending.join(",") !== preview.pendingMigrations.join(",")) {
-      throw new PolicyViolationError(
-        "MIGRATION_DRIFT",
-        "Pending migration set changed since migration_preview. Re-run migration_preview before applying."
-      );
-    }
-    // A revert is decided by what is applied: one applied (or reverted) in between would change
-    // what `database update <target>` undoes, with the schema possibly unchanged.
-    if (preview.direction === "down" && current.applied.join(",") !== preview.appliedMigrations.join(",")) {
-      throw new PolicyViolationError(
-        "MIGRATION_DRIFT",
-        "Applied migration set changed since migration_preview. Re-run migration_preview before reverting."
-      );
-    }
+    // B-15.5: the cross-process migration lock, held from the drift check to the post-apply
+    // snapshot. The mutex above orders this process; this orders every process, and the DDL
+    // lane takes the same key, so a ddl_apply elsewhere cannot run while dotnet ef does.
+    return withMigrationLock(env.poolConfig, async () => {
+      // Two independent freshness checks, run together (schema round-trip + dotnet subprocess):
+      //  1. Schema drift — the live schema must still match what was previewed.
+      //  2. Pending-set drift — the set of pending migrations must be unchanged. Adding a migration
+      //     between preview and apply leaves the schema untouched, so the snapshot guard alone would
+      //     miss it and `dotnet ef database update` would apply migrations that were never previewed.
+      const [preSnapshot, current] = await Promise.all([
+        captureSchema(pool),
+        listMigrations(config, env.connectionString)
+      ]);
+      if (preSnapshot.snapshotId !== preview.preSnapshotId) {
+        throw new PolicyViolationError(
+          "MIGRATION_DRIFT",
+          "Schema changed since migration_preview. Re-run migration_preview before applying."
+        );
+      }
+      if (preview.direction === "up" && current.pending.join(",") !== preview.pendingMigrations.join(",")) {
+        throw new PolicyViolationError(
+          "MIGRATION_DRIFT",
+          "Pending migration set changed since migration_preview. Re-run migration_preview before applying."
+        );
+      }
+      // A revert is decided by what is applied: one applied (or reverted) in between would change
+      // what `database update <target>` undoes, with the schema possibly unchanged.
+      if (preview.direction === "down" && current.applied.join(",") !== preview.appliedMigrations.join(",")) {
+        throw new PolicyViolationError(
+          "MIGRATION_DRIFT",
+          "Applied migration set changed since migration_preview. Re-run migration_preview before reverting."
+        );
+      }
 
-    let updateResult: EfResult;
-    try {
-      updateResult = efOk(
-        preview.direction === "down" && preview.targetMigration !== undefined
-          ? await efDatabaseUpdateTo(config, env.connectionString, preview.targetMigration)
-          : await efDatabaseUpdate(config, env.connectionString),
-        "database update"
-      );
-    } catch (error) {
+      let updateResult: EfResult;
+      try {
+        updateResult = efOk(
+          preview.direction === "down" && preview.targetMigration !== undefined
+            ? await efDatabaseUpdateTo(config, env.connectionString, preview.targetMigration)
+            : await efDatabaseUpdate(config, env.connectionString),
+          "database update"
+        );
+      } catch (error) {
+        await recordAudit(pool, env.name, {
+          tool: "migration_apply",
+          environment: env.name,
+          statementType: "migration",
+          targetTable: null,
+          sqlHash: null,
+          rowsAffected: null,
+          status: "failed",
+          rollbackId: null,
+          detail: { direction: preview.direction, targetMigration: preview.targetMigration, error: String(error) }
+        });
+        throw error;
+      }
+
+      // Verify: capture post-snapshot and diff so the caller sees exactly what changed.
+      const postSnapshot = await captureSchema(pool);
+      const diff = diffSnapshots(preSnapshot, postSnapshot);
+      migrationPreviews.delete(args.previewId);
+
       await recordAudit(pool, env.name, {
         tool: "migration_apply",
         environment: env.name,
@@ -542,50 +566,32 @@ export async function handleMigrationApply(
         targetTable: null,
         sqlHash: null,
         rowsAffected: null,
-        status: "failed",
-        rollbackId: null,
-        detail: { direction: preview.direction, targetMigration: preview.targetMigration, error: String(error) }
-      });
-      throw error;
-    }
-
-    // Verify: capture post-snapshot and diff so the caller sees exactly what changed.
-    const postSnapshot = await captureSchema(pool);
-    const diff = diffSnapshots(preSnapshot, postSnapshot);
-    migrationPreviews.delete(args.previewId);
-
-    await recordAudit(pool, env.name, {
-      tool: "migration_apply",
-      environment: env.name,
-      statementType: "migration",
-      targetTable: null,
-      sqlHash: null,
-      rowsAffected: null,
-      status: "applied",
-      rollbackId: null,
-      detail: { direction: preview.direction, targetMigration: preview.targetMigration, preSnapshotId: preSnapshot.snapshotId, postSnapshotId: postSnapshot.snapshotId }
-    });
-
-    return asText(
-      {
-        environment: env.name,
         status: "applied",
-        direction: preview.direction,
-        targetMigration: preview.targetMigration,
-        preSnapshotId: preSnapshot.snapshotId,
-        postSnapshotId: postSnapshot.snapshotId,
-        // Derived from the snapshot IDs themselves (not `!diff.identical`) so this flag can
-        // never disagree with the two IDs shown right next to it — snapshotId is name-sensitive
-        // (it hashes the raw captured constraints) while `diff` is deliberately name-insensitive,
-        // so a rename-only change (e.g. a constraint recreated under a different name) would
-        // otherwise report schemaChanged:false alongside two different snapshot IDs.
-        schemaChanged: preSnapshot.snapshotId !== postSnapshot.snapshotId,
-        diff,
-        lockTimeout: describeLockTimeout(env.connectionString, config),
-        raw: verboseOnly(updateResult.stdout.trim(), args.profile ?? "compact")
-      },
-      args.profile ?? "compact"
-    );
+        rollbackId: null,
+        detail: { direction: preview.direction, targetMigration: preview.targetMigration, preSnapshotId: preSnapshot.snapshotId, postSnapshotId: postSnapshot.snapshotId }
+      });
+
+      return asText(
+        {
+          environment: env.name,
+          status: "applied",
+          direction: preview.direction,
+          targetMigration: preview.targetMigration,
+          preSnapshotId: preSnapshot.snapshotId,
+          postSnapshotId: postSnapshot.snapshotId,
+          // Derived from the snapshot IDs themselves (not `!diff.identical`) so this flag can
+          // never disagree with the two IDs shown right next to it — snapshotId is name-sensitive
+          // (it hashes the raw captured constraints) while `diff` is deliberately name-insensitive,
+          // so a rename-only change (e.g. a constraint recreated under a different name) would
+          // otherwise report schemaChanged:false alongside two different snapshot IDs.
+          schemaChanged: preSnapshot.snapshotId !== postSnapshot.snapshotId,
+          diff,
+          lockTimeout: describeLockTimeout(env.connectionString, config),
+          raw: verboseOnly(updateResult.stdout.trim(), args.profile ?? "compact")
+        },
+        args.profile ?? "compact"
+      );
+    });
   });
 }
 

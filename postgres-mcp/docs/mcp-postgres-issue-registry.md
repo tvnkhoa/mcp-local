@@ -1256,8 +1256,12 @@ as `write_apply` and `write_rollback`; covered by `src/services/concurrency/envM
   import it. `migration_apply` reads the preview's environment only to choose which lock to take.
   The preview lookup, token check and drift guard all run inside the lock. The second of two
   concurrent calls therefore waits, and then gets `PREVIEW_NOT_FOUND`. The lock still orders only
-  this process. A second server process is not stopped by it; the DDL lane's advisory lock
-  (phase 2.5 for EF) is what covers that.
+  this process. A second server process is not stopped by it. **Since 2026-10-01 (B-15.5)** a
+  second layer covers that: `migration_apply` also holds the DDL lane's advisory lock
+  (`services/concurrency/migrationLock.ts`), from the drift check to the post-apply snapshot. An
+  apply from another process, in either lane, refuses immediately with `MIGRATION_LOCKED` or
+  `DDL_LOCKED`. Covered by `S/blocked-by-ddl-lock` and `T/held-during-update` in
+  `scripts/migration-flow-test.mjs`. Both fail when the lock is removed.
 - **Cost:** on one environment, a data write now waits for a running migration to finish, which can
   take up to `POSTGRES_DOTNET_TIMEOUT_MS` (default 120 s). That wait is the purpose of the change:
   a write should not land on a table while its migration is running.

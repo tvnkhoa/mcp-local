@@ -540,7 +540,7 @@ registry. This item holds what was knowingly left open.
   The steps concerned (`CONCURRENTLY` index builds and detaches) cannot run user code that writes,
   which is why this is accepted.
 
-### B-15 · Give the EF Core lane what the DDL lane has — 🔵 OPEN, filed 2026-10-01
+### B-15 · Give the EF Core lane what the DDL lane has — ✅ DONE 2026-10-01, filed the same day
 
 Phase 2 of the DDL migration plan. Each sub-item is a gap that the DDL lane does not have.
 
@@ -566,9 +566,12 @@ Phase 2 of the DDL migration plan. Each sub-item is a gap that the DDL lane does
 - **B-15.4 — no rollback.** ✅ DONE 2026-10-01. The original description follows. Add `migration_preview { targetMigration }` →
   `dotnet ef database update <target>`. It should go through the same drift guard, and require an
   `EF_REVERT` acknowledgement.
-- **B-15.5 — no cross-process lock.** `migration_apply` takes the in-process mutex (PG-MIG-006) but
-  not the DDL advisory lock. It should hold that lock on a side session while `dotnet ef` runs, so a
-  DDL apply from another process refuses instead of interleaving.
+- **B-15.5 — no cross-process lock.** ✅ DONE 2026-10-01. `migration_apply` holds the DDL lane's
+  advisory lock on a side session (`services/concurrency/migrationLock.ts`), from the drift check
+  to the post-apply snapshot. A DDL or EF apply in another process is refused immediately with
+  `DDL_LOCKED` or `MIGRATION_LOCKED`, and the preview stays valid for a retry. `S` and `T` in
+  `migration-flow-test.mjs` fail without it. The original gap was that `migration_apply` took the
+  in-process mutex (PG-MIG-006) but not the advisory lock.
 
 ### B-04 · Raise the graph-accuracy floor to something that can fail — ✅ DONE 2026-08-18
 
@@ -1178,7 +1181,7 @@ tell the truth, or makes an existing gate capable of failing.
 |---|---|---|---|---|---|---|
 | B-14 | The TypeScript lane reports a graph that is 77% dangling | P1 | **High** | R2 | L / extractor | 🔵 9 of 13 done 2026-08-18 · orphan `fromId` 77.0% → 0; edge types 2 → 7 |
 | B-16 | The DDL lane's known gaps after it shipped | P2 | **Med** | R1 | S each | 🔵 open 2026-10-01 · lane shipped (5 tools, 24 live scenarios); 6 follow-ups |
-| B-15 | The EF Core lane lacks lock_timeout, delta dry run, tests, rollback, cross-process lock | P2 | **Med** | R1 | M | 🔵 4 of 5 · B-15.3 tests ✅ (PG-MIG-007) · B-15.2 delta dry run ✅ (PG-MIG-008) · B-15.1 lock_timeout ✅ (PG-MIG-009) · B-15.4 rollback ✅ |
+| B-15 | The EF Core lane lacks lock_timeout, delta dry run, tests, rollback, cross-process lock | P2 | **Med** | R1 | M | ✅ 2026-10-01 · all 5 · found and fixed PG-MIG-007/008/009 on the way; migration-flow harness 0 → 20 scenarios |
 | B-13 | `findOwnerType` returns the enclosing class, not the owner | P1 | **Med** | R2 | M / AST | ✅ 2026-08-05 · AST prover; `requiredOwnerType` matches 3 of 3 |
 | B-01 | Diagnose C# `TYPE_REF` loss | P1 | Low | R1 | M | ✅ 2026-07-30 · `c68bda5` |
 | B-01b | Fix C# `TYPE_REF` | P1 | — | — | unscoped | ✅ 2026-07-30 · `266d91b` `9574e3e` `f1c0160` `9b55de4` |

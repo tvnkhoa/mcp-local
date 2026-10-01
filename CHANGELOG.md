@@ -10,6 +10,20 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased] - 2026-10-01
 
+### 🔒 `postgres-mcp`: one migration lock across processes and lanes (B-15.5) — B-15 complete
+
+- `migration_apply` now holds the DDL lane's session advisory lock, through the new
+  `services/concurrency/migrationLock.ts`. It takes the lock on a side session before the drift
+  check and holds it through `dotnet ef database update` and the post-apply snapshot.
+- Both lanes use the same key, so a DDL apply and an EF apply from different server processes can
+  no longer interleave. The second is refused immediately with `MIGRATION_LOCKED` or `DDL_LOCKED`,
+  and its preview stays valid for a retry.
+- `migration-flow-test.mjs` goes from 18 to 20 scenarios. With the lock removed, `migration_apply`
+  ran while the lock was held elsewhere.
+- **B-15 is done:** lock_timeout, the delta dry run, tests, rollback and the cross-process lock.
+  On the way, the EF lane's harness grew from 0 to 20 scenarios and three defects were found and
+  fixed (PG-MIG-007/008/009).
+
 ### ↩️ `postgres-mcp`: rollback for the EF Core lane (B-15.4)
 
 - **`migration_preview { targetMigration }`** plans a revert to an applied migration, or `"0"`
