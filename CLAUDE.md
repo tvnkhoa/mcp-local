@@ -85,7 +85,7 @@ Narrower targets — prefer these over re-running the aggregate: `verify:package
 Each server's `.env.example`, the `<!-- BEGIN/END GENERATED -->` blocks in its `README.md`, and its
 `tools` list are **rendered from `@mcp/manifest`**. Edit the manifest, then `npm run generate:all`
 (`generate:check` fails on drift and runs inside `verify:all`). Env vars are declared once, in
-`packages/manifest/src/envSpecs/<server>.ts` — **125** across the five servers (41/23/19/31/11).
+`packages/manifest/src/envSpecs/<server>.ts` — **131** across the five servers (41/29/19/31/11).
 
 `observe-mcp/docs/service-catalog.json` is also generated, but by `catalog:refresh` against live
 OpenObserve; its `code` blocks are hand-written and preserved, so it is **not** part of

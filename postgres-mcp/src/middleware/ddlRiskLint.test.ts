@@ -1,0 +1,154 @@
+/**
+ * Tests for the DDL risk lint. Each code has a case that fires and a nearby case that must not.
+ * A lint that fires on everything trains people to acknowledge without reading.
+ */
+
+import assert from "node:assert/strict";
+import { test } from "node:test";
+
+import { validateDdlScript } from "./ddlGuardrails.js";
+import { LARGE_TABLE_ROWS, lintDdl, type LintContext, type LintResult } from "./ddlRiskLint.js";
+
+function lint(sql: string, context?: LintContext, noTransaction = false): LintResult {
+  const validated = validateDdlScript(sql, { noTransaction });
+  if (!validated.ok) {
+    assert.fail(`guardrail refused: ${validated.error.code}: ${validated.error.message}`);
+  }
+  return lintDdl(validated.statements, context);
+}
+
+/** `code:level` for every finding, excluding the informational MISSING_IF_EXISTS noise. */
+function codes(result: LintResult): string[] {
+  return result.findings.filter((f) => f.code !== "MISSING_IF_EXISTS").map((f) => `${f.code}:${f.level}`);
+}
+
+const EXISTING: LintContext = { existingTables: new Set(["public.orders", "app.customers"]) };
+
+// ── destructive ──────────────────────────────────────────────────────────────
+
+test("DROP TABLE of an existing table is high; of one created in the same plan it is not", () => {
+  assert.deepEqual(codes(lint("drop table if exists orders", EXISTING)), ["DROP_TABLE:high"]);
+  assert.deepEqual(codes(lint("create table tmp (a int); drop table tmp", EXISTING)), []);
+});
+
+test("CASCADE is high, and on a schema it is blocked", () => {
+  assert.deepEqual(codes(lint("drop view if exists v cascade")), ["DROP_CASCADE:high", "DROP_VIEW:warning"]);
+  const schema = lint("drop schema if exists reporting cascade");
+  assert.deepEqual(codes(schema), ["DROP_SCHEMA_CASCADE:blocked", "DROP_SCHEMA:high"]);
+  assert.equal(schema.blocked.length, 1);
+});
+
+test("dropping a column is high; dropping a constraint or a default is not", () => {
+  assert.deepEqual(codes(lint("alter table orders drop column note", EXISTING)), ["DROP_COLUMN:high"]);
+  assert.deepEqual(codes(lint("alter table orders drop note", EXISTING)), ["DROP_COLUMN:high"]);
+  assert.deepEqual(codes(lint("alter table orders drop constraint orders_note_check", EXISTING)), []);
+  assert.deepEqual(codes(lint("alter table orders alter column note drop default", EXISTING)), []);
+});
+
+test("DROP without IF EXISTS is an info finding", () => {
+  assert.deepEqual(
+    lint("drop view v").findings.map((f) => f.code),
+    ["MISSING_IF_EXISTS", "DROP_VIEW"]
+  );
+});
+
+// ── rewrites and long locks ──────────────────────────────────────────────────
+
+test("a column type change is high; a column that is merely called `type` is not a type change", () => {
+  assert.deepEqual(codes(lint("alter table orders alter column total type numeric(12,2)", EXISTING)), ["ALTER_COLUMN_TYPE:high"]);
+  assert.deepEqual(codes(lint("alter table orders alter total set data type bigint", EXISTING)), ["ALTER_COLUMN_TYPE:high"]);
+  assert.deepEqual(codes(lint("alter table orders alter column type set not null", EXISTING)), ["SET_NOT_NULL:high"]);
+});
+
+test("a volatile DEFAULT on ADD COLUMN is high; a stable one is not", () => {
+  assert.deepEqual(codes(lint("alter table orders add column token uuid default gen_random_uuid()", EXISTING)), ["ADD_COLUMN_VOLATILE_DEFAULT:high"]);
+  assert.deepEqual(codes(lint("alter table orders add column created timestamptz default now()", EXISTING)), []);
+});
+
+test("ADD COLUMN NOT NULL without DEFAULT warns on an existing table only", () => {
+  assert.deepEqual(codes(lint("alter table orders add column c int not null", EXISTING)), ["ADD_COLUMN_NOT_NULL_NO_DEFAULT:warning"]);
+  assert.deepEqual(codes(lint("alter table orders add column c int not null default 0", EXISTING)), []);
+  assert.deepEqual(codes(lint("create table fresh (a int); alter table fresh add column c int not null", EXISTING)), []);
+});
+
+test("a STORED generated column is high", () => {
+  assert.deepEqual(
+    codes(lint("alter table orders add column t2 numeric generated always as (total * 2) stored", EXISTING)),
+    ["ADD_COLUMN_STORED_GENERATED:high"]
+  );
+});
+
+test("renames are high, except a constraint rename", () => {
+  assert.deepEqual(codes(lint("alter table orders rename to purchase_orders", EXISTING)), ["RENAME_TABLE:high"]);
+  assert.deepEqual(codes(lint("alter table orders rename column note to memo", EXISTING)), ["RENAME_COLUMN:high"]);
+  assert.deepEqual(codes(lint("alter table orders rename constraint a to b", EXISTING)), []);
+});
+
+test("SET LOGGED/UNLOGGED and tablespace moves are high", () => {
+  assert.deepEqual(codes(lint("alter table orders set unlogged", EXISTING)), ["SET_LOGGED_UNLOGGED:high"]);
+  assert.deepEqual(codes(lint("alter table orders set tablespace fast", EXISTING)), ["SET_TABLESPACE:high"]);
+  assert.deepEqual(codes(lint("alter table all in tablespace a set tablespace b")), ["SET_TABLESPACE:high"]);
+});
+
+test("a non-concurrent index build warns, and is high on a large table", () => {
+  assert.deepEqual(codes(lint("create index on orders (note)", EXISTING)), ["CREATE_INDEX_NON_CONCURRENT:warning"]);
+  const large: LintContext = { ...EXISTING, rowEstimate: (t) => (t === "public.orders" ? LARGE_TABLE_ROWS * 2 : undefined) };
+  assert.deepEqual(codes(lint("create index i on only orders (note)", large)), ["CREATE_INDEX_NON_CONCURRENT:high"]);
+  assert.deepEqual(codes(lint("create index concurrently i on orders (note)", large, true)), []);
+  assert.deepEqual(codes(lint("create table fresh (a int); create index on fresh (a)", large)), []);
+});
+
+test("a validating constraint warns; NOT VALID does not", () => {
+  assert.deepEqual(
+    codes(lint("alter table orders add constraint fk foreign key (cid) references app.customers (id)", EXISTING)),
+    ["ADD_CONSTRAINT_VALIDATING:warning"]
+  );
+  assert.deepEqual(
+    codes(lint("alter table orders add constraint fk foreign key (cid) references app.customers (id) not valid", EXISTING)),
+    []
+  );
+  assert.deepEqual(codes(lint("alter table orders add constraint pos check (total >= 0)", EXISTING)), ["ADD_CONSTRAINT_VALIDATING:warning"]);
+});
+
+test("DETACH PARTITION without CONCURRENTLY warns", () => {
+  assert.deepEqual(codes(lint("alter table p detach partition p_2025")), ["DETACH_PARTITION_BLOCKING:warning"]);
+  assert.deepEqual(codes(lint("alter table p detach partition p_2025 concurrently", undefined, true)), []);
+});
+
+// ── privilege and ownership ──────────────────────────────────────────────────
+
+test("SECURITY DEFINER and CREATE EXTENSION are high", () => {
+  assert.deepEqual(
+    codes(lint("create function f() returns int language sql security definer as $$ select 1 $$")),
+    ["SECURITY_DEFINER:high"]
+  );
+  assert.deepEqual(codes(lint("alter function f() security definer")), ["SECURITY_DEFINER:high"]);
+  assert.deepEqual(codes(lint("create extension if not exists pg_trgm")), ["CREATE_EXTENSION:high"]);
+});
+
+test("ALTER TYPE … ADD VALUE is informational", () => {
+  assert.deepEqual(codes(lint("alter type mood add value 'happy'")), ["ALTER_TYPE_ADD_VALUE:info"]);
+});
+
+// ── context and aggregation ──────────────────────────────────────────────────
+
+test("a table outside existingTables gets no table-scoped finding", () => {
+  assert.deepEqual(codes(lint("alter table unknown_t drop column a", EXISTING)), []);
+  // No context at all: everything counts as existing.
+  assert.deepEqual(codes(lint("alter table unknown_t drop column a")), ["DROP_COLUMN:high"]);
+});
+
+test("names resolve through defaultSchema, and quoted names keep their case", () => {
+  const ctx: LintContext = { existingTables: new Set(["app.Orders"]), defaultSchema: "app" };
+  assert.deepEqual(codes(lint('alter table "Orders" drop column a', ctx)), ["DROP_COLUMN:high"]);
+  assert.deepEqual(codes(lint("alter table orders drop column a", ctx)), []);
+});
+
+test("requiredAcknowledgements lists each high code once, in first-seen order", () => {
+  const result = lint(
+    "alter table orders drop column a; alter table orders drop column b; drop table if exists orders; create extension if not exists x",
+    EXISTING
+  );
+  assert.deepEqual(result.requiredAcknowledgements, ["DROP_COLUMN", "DROP_TABLE", "CREATE_EXTENSION"]);
+  assert.deepEqual(result.findings.filter((f) => f.code === "DROP_COLUMN").map((f) => f.statementIndex), [0, 1]);
+});

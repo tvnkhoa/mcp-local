@@ -65,6 +65,67 @@ This is phase 0.3 of the DDL migration lane.
   compare equal.
 - Cost measured on `dev`: 129 ms server-side for the seven kinds plus the column scan.
 
+### 🧱 `postgres-mcp`: DDL guardrail and risk lint (phase 1.1, not wired to any tool yet)
+
+- `src/middleware/ddlGuardrails.ts` validates a migration script.
+  - **Allowlist.** CREATE, ALTER and DROP are accepted on eleven object kinds, plus COMMENT ON and
+    CREATE EXTENSION. Everything else is refused with a reason and a pointer to the right lane.
+  - **Reserved schema.** `mcp_ops` is refused wherever the script names it, quoted or not.
+  - **Transaction mode.** A `CONCURRENTLY` statement must be the only statement in a
+    no-transaction migration.
+  - **Header directives.** `-- mcp:no-transaction`, `-- mcp:lock-timeout-ms=N` and
+    `-- mcp:statement-timeout-ms=N`. An unknown or misplaced directive is an error.
+- **It has its own Postgres tokenizer** rather than `@mcp/shared`'s `scanSql`, which is right for
+  single statements but wrong for splitting a script:
+  - `scanSql` blanks quoted identifiers.
+  - It ends a nested comment early.
+  - It opens a dollar quote inside an identifier. In `create table foo$x$ (a int); drop table y;
+    -- $x$` it sees one statement. Postgres 17 runs both; checked against a live server.
+- `src/middleware/ddlRiskLint.ts` sorts findings into levels:
+  - 16 codes are `high` and must be acknowledged at apply. They cover data loss, table rewrites,
+    long locks and privilege changes.
+  - `DROP SCHEMA … CASCADE` is `blocked`.
+  - The rest are `warning` or `info`.
+  - Table-scoped rules fire only on tables that already exist, so a table created earlier in the
+    same plan does not trigger them.
+- 35 new unit tests.
+
+### 🗂️ `postgres-mcp`: DDL files, ledger, planner and config (phase 1.2, not wired to any tool yet)
+
+- `services/ddl/ddlFiles.ts` loads migration files.
+  - **Naming.** Files are `V<yyyymmddhhmmss>__<name>.up.sql`, with an optional `.down.sql`. Versions
+    are UTC timestamps, so two branches do not collide.
+  - **What is read.** Only regular files directly in the directory: no subdirectories, no symlinks.
+  - **Checksum.** sha256 over the text with any BOM removed, CRLF turned into LF, and trailing
+    whitespace dropped. A Windows checkout therefore never looks edited, and an inline apply
+    matches the file later written from it.
+  - **Writing.** New files are written with `wx`, so nothing is ever overwritten. If writing the
+    down file fails, the up file is removed again.
+- `services/ddl/ddlHistory.ts` holds the `mcp_ops.ddl_history` schema and the shared advisory-lock
+  key. Its `deriveState` is pure: a version's latest applied row decides its state, failed rows
+  never change it, and each adoption consumes one inline apply.
+- `services/ddl/ddlPlanner.ts` is pure; it plans and does not execute. It produces:
+  - **Status:** applied, pending, checksum mismatches, files missing from disk, and out-of-order
+    versions.
+  - **Up plans:** everything pending, or everything through a `target`. Out-of-order versions need
+    `allowOutOfOrder`. A file identical to an earlier inline apply is adopted, not run again.
+  - **Down plans:** newest first, back to an applied `target` or `"0"`, which reverts everything.
+    Every reverted migration needs a `.down.sql` file.
+  - **Inline plans.**
+  - **Refusals and checks.** An edited applied file blocks every file-mode plan. Each step is
+    validated by the 1.1 guardrail and linted, and the lint remembers tables created in earlier
+    steps.
+  - **Digest.** It binds the environment, the snapshot id, the history state and every step.
+- `services/ddl/ddlConfig.ts`:
+  - The `DDL_DISABLED` gate.
+  - The timeout policy: a directive may lower `lock_timeout` and may raise `statement_timeout` up to
+    the configured cap. A value outside those bounds is refused, never clamped.
+- **Six new env vars**, `POSTGRES_DDL_ENABLED`, `_MIGRATIONS_DIR`, `_LOCK_TIMEOUT_MS`,
+  `_STATEMENT_TIMEOUT_MS`, `_MAX_STATEMENT_TIMEOUT_MS` and `_PREVIEW_TTL_MS`, take postgres-mcp from
+  23 to 29 env vars and the workspace from 125 to 131. The vars are declared and documented, but
+  no code reads them until phase 1.3.
+- 26 new unit tests. The file tests run against a real temporary directory.
+
 ## [Unreleased] - 2026-08-19d
 
 ### 🔧 What two simulated use cases found, and what it took to fix

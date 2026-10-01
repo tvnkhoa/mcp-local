@@ -261,7 +261,7 @@ test("familyExamples belong to prefix fields and match the prefix", () => {
 });
 
 test("the env contract covers every server, and grew as S-35 intended", () => {
-  // 125 vars across five servers, up from the 41 the manifest declared before S-35. The count is
+  // 131 vars across five servers, up from the 41 the manifest declared before S-35. The count is
   // asserted so that dropping a declaration is a test failure rather than a quiet regression in
   // the generated docs. codebase-index gained CODEBASE_INDEX_VECTOR_ENABLED (MCP-ISSUE-035) and
   // CODEBASE_INDEX_MAX_TYPE_REF_EDGES_PER_FILE (MCP-ISSUE-038); postgres gained PGSSLMODE and
@@ -281,10 +281,13 @@ test("the env contract covers every server, and grew as S-35 intended", () => {
   // TrustServerCertificate=true — both of which disable verification. Declaring the CA-bundle path
   // puts the fix that keeps the certificate verified in the generated docs beside the two that
   // do not.
+  // postgres-mcp went 23 -> 29 with the raw-SQL DDL lane: POSTGRES_DDL_ENABLED, _MIGRATIONS_DIR,
+  // and four timeout/TTL knobs. Its environment scope is deliberately not among them — the lane
+  // writes where the write lane writes.
   const counts = Object.fromEntries(SERVERS.map((s) => [s.key, s.env.length]));
   assert.deepEqual(counts, {
     "codebase-index": 41,
-    "postgres-mcp": 23,
+    "postgres-mcp": 29,
     "observe-mcp": 31,
     "bitbucket-mcp": 11,
     "sqlserver-mcp": 19

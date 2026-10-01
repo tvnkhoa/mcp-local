@@ -1,5 +1,6 @@
 /**
- * `postgres-mcp`'s environment contract — 21 vars, all under one `POSTGRES_*` prefix.
+ * `postgres-mcp`'s environment contract — 29 vars: 27 under one `POSTGRES_*` prefix, plus the two
+ * Node / libpq runtime vars declared at the bottom (which this server's code does not read).
  *
  * S-43 converged three prefixes into one. Before it, this server read `CH_*` (5 vars, named for the
  * CommunicationHub app it was first written against), `PG_*` (12) and `MCP_DB_*` (4) — so an
@@ -127,6 +128,29 @@ export const postgresEnv: readonly EnvField[] = [
   { name: "POSTGRES_DOTNET_PROJECT", deprecatedAliases: ["CH_DOTNET_PROJECT"], required: false, section: "EF Core migrations (OFF unless enabled)", note: "Path to the EF Core project (the one holding the DbContext)." },
   { name: "POSTGRES_DOTNET_STARTUP_PROJECT", deprecatedAliases: ["CH_DOTNET_STARTUP_PROJECT"], required: false, section: "EF Core migrations (OFF unless enabled)", note: "Startup project passed to `dotnet ef --startup-project`." },
   { name: "POSTGRES_DOTNET_TIMEOUT_MS", deprecatedAliases: ["PG_DOTNET_TIMEOUT_MS"], required: false, codeDefault: "120000", section: "EF Core migrations (OFF unless enabled)", note: "Timeout for a `dotnet ef` invocation." },
+
+  // --- Raw-SQL DDL migrations (gated) ------------------------------------------
+  // No aliases: these names are new, so there is no legacy spelling to keep working. Environment
+  // scope is deliberately NOT configurable here — the lane writes where the write lane writes
+  // (POSTGRES_WRITABLE_ENVIRONMENTS), and prod never.
+  {
+    name: "POSTGRES_DDL_ENABLED",
+    required: false,
+    default: "false",
+    section: "Raw-SQL DDL migrations (OFF unless enabled)",
+    note: "Raw-SQL DDL migrations (ddl_*) OFF unless true. Parsed strictly: exact \"true\" or \"1\"."
+  },
+  {
+    name: "POSTGRES_DDL_MIGRATIONS_DIR",
+    required: false,
+    kind: "path",
+    section: "Raw-SQL DDL migrations (OFF unless enabled)",
+    note: "Directory of V<yyyymmddhhmmss>__<name>.up.sql / .down.sql files. Needed by file-based plans and ddl_create; inline SQL works without it."
+  },
+  { name: "POSTGRES_DDL_LOCK_TIMEOUT_MS", required: false, codeDefault: "5000", section: "Raw-SQL DDL migrations (OFF unless enabled)", note: "lock_timeout per migration. A file's -- mcp:lock-timeout-ms may lower it, never raise it." },
+  { name: "POSTGRES_DDL_STATEMENT_TIMEOUT_MS", required: false, codeDefault: "300000", section: "Raw-SQL DDL migrations (OFF unless enabled)", note: "Default statement_timeout per DDL statement — 5 minutes." },
+  { name: "POSTGRES_DDL_MAX_STATEMENT_TIMEOUT_MS", required: false, codeDefault: "3600000", section: "Raw-SQL DDL migrations (OFF unless enabled)", note: "Ceiling for -- mcp:statement-timeout-ms (e.g. a long CREATE INDEX CONCURRENTLY) — 1 hour." },
+  { name: "POSTGRES_DDL_PREVIEW_TTL_MS", required: false, codeDefault: "3600000", section: "Raw-SQL DDL migrations (OFF unless enabled)", note: "DDL-preview lifetime — 1 hour. Freshness at apply is checked by the drift guard, not this." },
 
   // --- Node / libpq runtime -----------------------------------------------------
   // Neither is a postgres-mcp variable, and neither is read by this server's code. Both are set by

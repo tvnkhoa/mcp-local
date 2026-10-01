@@ -15,6 +15,8 @@
  * stop reporting it.
  */
 
+import path from "node:path";
+
 import { createEnvReader, defaultEnvSource, type EnvReader } from "@mcp/core";
 
 import { resolveAliases } from "./aliases.js";
@@ -93,6 +95,17 @@ function stringFromEnv(key: string): string {
  */
 export function approvalSecretFromEnv(): string {
   return env().string("POSTGRES_WRITE_APPROVAL_SECRET", "");
+}
+
+/**
+ * `POSTGRES_DDL_MIGRATIONS_DIR` as an absolute path, or "" when unset.
+ *
+ * A relative value is resolved ONCE, here, against the working directory at start-up. Resolving it
+ * at each use would make the directory depend on whatever cwd the process happened to have then.
+ */
+export function ddlMigrationsDirFromEnv(): string {
+  const raw = stringFromEnv("POSTGRES_DDL_MIGRATIONS_DIR");
+  return raw === "" ? "" : path.resolve(raw);
 }
 
 /** `dotnet ef` project paths. Empty when unset; the migration gate reports that as unconfigured. */
