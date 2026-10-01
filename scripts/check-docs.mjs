@@ -56,7 +56,9 @@ function markdownFiles() {
     execSync(cmd, { cwd: R, encoding: "utf8" }).split("\n").map((s) => s.trim()).filter(Boolean);
   const tracked = run('git ls-files "*.md"');
   const untracked = run('git ls-files --others --exclude-standard "*.md"');
-  return [...new Set([...tracked, ...untracked])].sort();
+  // `git ls-files` still lists a tracked file deleted in the working tree; reading it would crash
+  // the whole check on any uncommitted deletion.
+  return [...new Set([...tracked, ...untracked])].filter((f) => fs.existsSync(path.join(R, f))).sort();
 }
 
 const HISTORICAL = (f) =>

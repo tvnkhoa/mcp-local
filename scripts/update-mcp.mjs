@@ -1,9 +1,10 @@
 #!/usr/bin/env node
 
 /**
- * Update one (or all) MCP server(s) in place: rebuild → regenerate & reinstall
- * the skill → verify the server starts. Does NOT change any env you already
- * configured in your agent config.
+ * Update one (or all) MCP server(s) in place: rebuild → re-point an already-registered
+ * entry at this checkout → regenerate & reinstall the skill → verify the server starts.
+ * Does NOT change any env you already configured in your agent config, and does not
+ * register a server that is not registered (that is `mcp:install`).
  *
  * Usage:
  *   node scripts/update-mcp.mjs --server observe-mcp
@@ -11,8 +12,10 @@
  */
 
 import { execSync } from "node:child_process";
-import { serverDirPath, serverEntryPath } from "./lib/manifest.mjs";
-import { detectAgents, readServerEntries } from "./lib/agents.mjs";
+import path from "node:path";
+import { WORKSPACE_ROOT, serverDirPath, serverEntryPath } from "./lib/manifest.mjs";
+import { toConfigPath } from "./lib/jsonc.mjs";
+import { detectAgents, readServerEntries, refreshServerPath } from "./lib/agents.mjs";
 import { installSkill } from "./lib/skills.mjs";
 import { verifyServer } from "./lib/verify.mjs";
 import { parseArgs, resolveServers } from "./lib/cli.mjs";
@@ -34,6 +37,23 @@ function existingEnv(agents, key) {
   return {};
 }
 
+/**
+ * Re-point registrations whose launch path is this server's entry in an older checkout (P4e).
+ *
+ * Only install used to write `args`, so moving the workspace left every agent launching a
+ * `dist/index.js` that no longer existed — and `update`, the command you run after a move, did not
+ * fix it. This rewrites that one path element and nothing else: env is not read, not merged and
+ * not re-prompted, so a tuned or credential-bearing entry survives byte-for-byte apart from it.
+ */
+function refreshRegistrations(server, agents) {
+  const entry = toConfigPath(serverEntryPath(server));
+  const suffix = toConfigPath(path.relative(WORKSPACE_ROOT, serverEntryPath(server)));
+  for (const agent of agents) {
+    const names = refreshServerPath(agent, server.key, entry, suffix);
+    if (names.length) ok(`${agent.name}: re-pointed ${names.join(", ")} at ${entry}`);
+  }
+}
+
 async function main() {
   banner("MCP Update");
   const agents = detectAgents();
@@ -51,6 +71,7 @@ async function main() {
       }
       ok("Rebuilt");
 
+      refreshRegistrations(server, agents);
       installSkill(server, agents);
 
       const env = existingEnv(agents, server.key);

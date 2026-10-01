@@ -10,9 +10,11 @@
  *
  * What it does NOT do, deliberately: register the server in `@mcp/manifest`. That is a separate,
  * reviewed decision, and it has an ordering constraint the scaffold cannot satisfy on its own —
- * `servers.ts` throws for a server with no generated tool list, the tool list comes from
- * `contracts/`, and a contract snapshot needs a built server. So the sequence is: scaffold, build,
- * snapshot, register, generate. The generated README spells it out.
+ * `servers.ts` throws for a server whose `toolsFor(key)` has no generated tool list, the tool list
+ * comes from `contracts/`, a contract snapshot needs a built server, and the snapshotter only sees
+ * servers already in `SERVERS`. So the sequence is: scaffold, build, register with a temporary
+ * `tools: ["health_check"]`, snapshot, generate, switch to `toolsFor`. The "Next" block below and
+ * the generated README spell it out.
  *
  * It also means a scaffolded-but-unregistered server cannot break `verify:all`, and deleting the
  * directory needs no cleanup anywhere else.
@@ -158,15 +160,18 @@ if (ARGS.verify === false) {
 section("Next");
 info("The server is NOT registered yet. In this order:");
 console.log(`
-  1. node scripts/contract-snapshot.mjs --server ${key}
-       writes contracts/${key}.json  (needs the build above)
-
-  2. add the manifest entry and env contract:
-       packages/manifest/src/servers.ts          one entry, tools: toolsFor("${key}")
+  1. add the manifest entry and env contract:
+       packages/manifest/src/servers.ts          one entry, with a TEMPORARY tools: ["health_check"]
+                                                 (toolsFor("${key}") throws until a snapshot exists)
        packages/manifest/src/envSpecs/${camel}.ts   the env contract
+     then: npm run build:packages
 
-  3. npm run generate:tools && npm run generate:all
-       derives tools/ .env.example / README blocks
+  2. npm run contracts:update -- --server ${key}
+       writes contracts/${key}.json  (needs the build above; only sees servers in SERVERS)
+
+  3. npm run generate:tools
+     switch the entry to tools: toolsFor("${key}"), then
+     npm run generate:all && npm run generate:check && npm run contracts:check
 
   4. node scripts/install-mcp.mjs --server ${key}
 `);

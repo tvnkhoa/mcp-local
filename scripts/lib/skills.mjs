@@ -14,7 +14,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { WORKSPACE_ROOT, serverEntryPath } from "./manifest.mjs";
-import { toConfigPath } from "./jsonc.mjs";
+import { toConfigPath, writeFileAtomic } from "./jsonc.mjs";
 import { ok, warn, info } from "./log.mjs";
 
 function envTable(server) {
@@ -43,7 +43,7 @@ export function renderSkillContent(server) {
   }
   const template = fs.readFileSync(src, "utf-8");
   const entry = toConfigPath(serverEntryPath(server));
-  return template
+  const rendered = template
     .replaceAll("{{KEY}}", server.key)
     .replaceAll("{{DISPLAY_NAME}}", server.displayName)
     .replaceAll("{{TAGLINE}}", server.tagline)
@@ -51,6 +51,86 @@ export function renderSkillContent(server) {
     .replaceAll("{{TOOL_NAMESPACE}}", `mcp__${server.key}__*`)
     .replaceAll("{{TOOL_LIST}}", toolList(server))
     .replaceAll("{{ENV_TABLE}}", envTable(server));
+  // A misspelt or retired placeholder would otherwise ship verbatim into every agent's context —
+  // `{{TOOL_LIST}}` typed as `{{TOOLS}}` installs a skill with no tool reference and no error.
+  const leftover = [...new Set(rendered.match(/\{\{[A-Z_]+\}\}/g) ?? [])];
+  if (leftover.length) {
+    throw new Error(`Skill template ${src} has unknown placeholder(s): ${leftover.join(", ")}`);
+  }
+  return rendered;
+}
+
+/** Where the Claude Code skill for `key` is installed: `{ global, project }` SKILL.md paths. */
+export function skillPaths(key) {
+  const roots = skillRoots();
+  return {
+    global: path.join(roots.global, key, "SKILL.md"),
+    project: path.join(roots.project, key, "SKILL.md"),
+  };
+}
+
+/**
+ * Whether the installed copy at `file` is what the template renders today:
+ * "missing" | "current" | "stale".
+ *
+ * Presence alone is not health. The skill is rendered from the template AND the manifest (tool
+ * list, env table, entry path), so editing any of them — or moving the checkout — leaves an
+ * installed copy that still exists and still loads, while telling the agent about tools, flags or
+ * paths that are no longer true. Line endings are ignored: a CRLF copy is not a different skill.
+ */
+export function skillStatus(server, file) {
+  if (!fs.existsSync(file)) return "missing";
+  const norm = (s) => s.replace(/\r\n/g, "\n");
+  return norm(fs.readFileSync(file, "utf-8")) === norm(renderSkillContent(server)) ? "current" : "stale";
+}
+
+/** The two directories server skills are installed under: `{ global, project }`. */
+export function skillRoots() {
+  return {
+    global: path.join(os.homedir(), ".claude", "skills"),
+    project: path.join(WORKSPACE_ROOT, ".claude", "skills"),
+  };
+}
+
+/**
+ * Whether `content` is a skill this renderer produced for `key`.
+ *
+ * There is no explicit marker in the output; the signature is what `renderSkillContent` itself
+ * writes: the template's frontmatter `name: {{KEY}}` and the `mcp__{{KEY}}__…` tool namespace from
+ * `{{TOOL_NAMESPACE}}` / `{{TOOL_LIST}}`. A hand-written skill that happens to mention an MCP tool
+ * does not also carry its own directory name as the namespace, so it is not mistaken for one.
+ */
+export function isRenderedServerSkill(content, key) {
+  const norm = content.replace(/\r\n/g, "\n");
+  return norm.startsWith(`---\nname: ${key}\n`) && norm.includes(`\`mcp__${key}__`);
+}
+
+/**
+ * Server skills left behind by a renamed or removed manifest key (P4d).
+ *
+ * `removeSkill` only ever runs for a key someone names, so a key the manifest stops declaring —
+ * S-44's `codebase-index-local`, say — leaves its rendered skill in place. It keeps loading, and
+ * keeps telling the agent about a tool namespace no server registers any more.
+ *
+ * Returns `[{ key, dir }]` for every directory under `roots` whose SKILL.md is a rendered server
+ * skill (see `isRenderedServerSkill`) and whose name is not in `knownKeys`. Authoring skills,
+ * the workspace's own `.claude/skills/*` and anything hand-made are not rendered, so they never match.
+ */
+export function findOrphanedSkills(knownKeys, roots = Object.values(skillRoots())) {
+  const known = new Set(knownKeys);
+  const orphans = [];
+  for (const root of roots) {
+    let items;
+    try { items = fs.readdirSync(root, { withFileTypes: true }); } catch { continue; }
+    for (const item of items) {
+      if (!item.isDirectory() || known.has(item.name)) continue;
+      const file = path.join(root, item.name, "SKILL.md");
+      let content;
+      try { content = fs.readFileSync(file, "utf-8"); } catch { continue; }
+      if (isRenderedServerSkill(content, item.name)) orphans.push({ key: item.name, dir: path.join(root, item.name) });
+    }
+  }
+  return orphans;
 }
 
 // Strip our YAML frontmatter, return the markdown body only.
@@ -88,15 +168,17 @@ export function installSkill(server, agents = []) {
   const writeSkillDir = (dir) => {
     fs.mkdirSync(dir, { recursive: true });
     const dest = path.join(dir, "SKILL.md");
-    fs.writeFileSync(dest, content, "utf-8");
+    writeFileAtomic(dest, content);
     written.push(dest);
   };
 
+  const paths = skillPaths(server.key);
+
   // Project copy — always.
-  writeSkillDir(path.join(WORKSPACE_ROOT, ".claude", "skills", server.key));
+  writeSkillDir(path.dirname(paths.project));
 
   if (agents.some((a) => a.type === "claude-code")) {
-    writeSkillDir(path.join(os.homedir(), ".claude", "skills", server.key));
+    writeSkillDir(path.dirname(paths.global));
   }
 
   const vscode = agents.find((a) => a.type === "vscode");
@@ -104,7 +186,7 @@ export function installSkill(server, agents = []) {
     const dir = vscodePromptDir(vscode);
     fs.mkdirSync(dir, { recursive: true });
     const dest = path.join(dir, `${server.key}.prompt.md`);
-    fs.writeFileSync(dest, vscodePromptContent(frontmatterDescription(content), skillBody(content)), "utf-8");
+    writeFileAtomic(dest, vscodePromptContent(frontmatterDescription(content), skillBody(content)));
     written.push(dest);
   }
 
@@ -125,8 +207,9 @@ export function removeSkill(key, agents = []) {
   const rm = (p, isDir) => {
     if (fs.existsSync(p)) { fs.rmSync(p, { recursive: isDir, force: true }); removed++; }
   };
-  rm(path.join(os.homedir(), ".claude", "skills", key), true);
-  rm(path.join(WORKSPACE_ROOT, ".claude", "skills", key), true);
+  const paths = skillPaths(key);
+  rm(path.dirname(paths.global), true);
+  rm(path.dirname(paths.project), true);
   for (const a of agents.filter((x) => x.type === "vscode")) {
     rm(path.join(vscodePromptDir(a), `${key}.prompt.md`), false);
   }

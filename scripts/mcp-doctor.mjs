@@ -7,8 +7,12 @@
  *   [build]  dist/index.js exists
  *   [config] registered in a detected agent, args path matches the built entry
  *   [env]    required / group env keys are PRESENT (keys only — never prints values)
- *   [skill]  operational skill installed in ~/.claude/skills/<key>/
+ *   [skill]  operational skill installed in ~/.claude/skills/<key>/ and .claude/skills/<key>/, and
+ *            identical to what the template + manifest render today (a stale copy is a WARN)
  *   [start]  server spawns and responds to `initialize`
+ *
+ * Then, once for the workspace: rendered server skills under ~/.claude/skills/ or .claude/skills/
+ * whose key the manifest no longer declares (a renamed or removed server) — a WARN, never a FAIL.
  *
  * A server registered several times under environment-suffixed keys (`<key>-<suffix>`) is a
  * supported setup, not a misconfiguration. Every instance is named in the [config] line, and
@@ -18,13 +22,13 @@
  */
 
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
-import { serverDirPath, serverEntryPath, evaluateEnv, evaluateEnvValues } from "./lib/manifest.mjs";
+import { SERVERS, serverDirPath, serverEntryPath, evaluateEnv, evaluateEnvValues } from "./lib/manifest.mjs";
 import { staleTargets } from "./lib/generate.mjs";
 import { toConfigPath } from "./lib/jsonc.mjs";
 import { detectAgents, readServerEntries } from "./lib/agents.mjs";
 import { verifyServer } from "./lib/verify.mjs";
+import { skillPaths, skillStatus, findOrphanedSkills } from "./lib/skills.mjs";
 import { findMissingEnvPaths } from "./lib/envPaths.mjs";
 import { parseArgs, resolveServers } from "./lib/cli.mjs";
 import { findStaleRunningServers } from "./lib/runningServers.mjs";
@@ -208,9 +212,30 @@ async function checkServer(server, agents) {
   }
 
   // skill
-  const skillPath = path.join(os.homedir(), ".claude", "skills", server.key, "SKILL.md");
-  if (fs.existsSync(skillPath)) checks.push(["skill", "pass", "installed (~/.claude/skills)"]);
-  else { checks.push(["skill", "warn", "not installed"]); fix.push(`node scripts/install-mcp.mjs --server ${server.key}`); }
+  // Both copies, and their CONTENT: a copy rendered from an older template or manifest still exists
+  // and still loads, so a presence check reported a skill describing renamed tools as healthy.
+  {
+    const paths = skillPaths(server.key);
+    let status;
+    try {
+      status = { global: skillStatus(server, paths.global), project: skillStatus(server, paths.project) };
+    } catch (e) {
+      status = null;
+      checks.push(["skill", "fail", `template does not render: ${e.message}`]);
+    }
+    if (status) {
+      const where = (s) => [status.global === s && "~/.claude/skills", status.project === s && ".claude/skills"].filter(Boolean).join(" + ");
+      if (status.global === "current" && status.project === "current") {
+        checks.push(["skill", "pass", "installed and current (~/.claude/skills + .claude/skills)"]);
+      } else {
+        const parts = [];
+        if (where("stale")) parts.push(`stale vs template: ${where("stale")}`);
+        if (where("missing")) parts.push(`not installed: ${where("missing")}`);
+        checks.push(["skill", "warn", parts.join("; ")]);
+        fix.push(`npm run mcp:update -- --server ${server.key}   # re-renders the skill`);
+      }
+    }
+  }
 
   // generated (S-35/S-36) — .env.example and the README's generated blocks are rendered from the
   // manifest, so a mismatch means someone edited the output instead of the source. A warning, not
@@ -271,6 +296,19 @@ async function main() {
       log("  Suggested fixes:", C.dim);
       [...new Set(fix)].forEach((f) => log(`    • ${f}`, C.dim));
     }
+  }
+
+  // Orphaned skills (P4d). Checked against EVERY manifest key, not the --server selection: a skill
+  // is orphaned only when no server owns it, and narrowing the run must not make one look orphaned.
+  const orphans = findOrphanedSkills(SERVERS.map((s) => s.key));
+  section("Orphaned skills");
+  if (orphans.length === 0) {
+    log(`  ${MARK.pass}  no rendered server skill without a manifest key`);
+  } else {
+    for (const o of orphans) log(`  ${MARK.warn}  ${o.key.padEnd(20)} ${o.dir}`);
+    console.log();
+    log("  Suggested fixes (removes the skill and any leftover registration under that key):", C.dim);
+    [...new Set(orphans.map((o) => o.key))].forEach((k) => log(`    • npm run mcp:uninstall -- --key ${k}`, C.dim));
   }
 
   section("Summary");
