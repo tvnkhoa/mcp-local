@@ -186,8 +186,8 @@ MCP tool calls then hit the updated build, so you can test directly without the 
   db-query-budgeting) plus `mcp-skill-authoring`. Each ends with an *Authoritative reference* naming
   the maintained doc that governs it. Operational "how to use server X" skills are generated per
   server and gitignored.
-- `codebase-index-mcp/.claude/skills/` — indexing internals (tree-sitter, incremental-indexing,
-  conformance, metadata-governance, unresolved-symbol-policy, …).
+- `codebase-index-mcp/.claude/skills/` — indexing internals (tree-sitter, incremental-indexing
+  with its full-vs-incremental conformance procedure, metadata-governance, unresolved-symbol-policy, …).
 - `.claude/commands/mcp-effectiveness-eval.md` — slash command benchmarking baseline vs MCP.
 
 ## References

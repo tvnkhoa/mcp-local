@@ -136,7 +136,7 @@ grep -nE '^  (kind|type):' src/types/index.ts
 
 - **Symbol kinds** (14, `src/types/index.ts:170`): `function | class | method | variable | module | interface | property | constructor | type | struct | record | record struct | impl | unknown`
 - **Edge types** (10, `src/types/index.ts:188`): `IMPORTS | CALLS | DEPENDS_ON | IMPLEMENTS | EXTENDS | TYPE_REF | PROPERTY_REF | PROPERTY_WRITE | PUBLISHES | CONSUMES`
-- **Stable IDs**: SHA-256 of `repoId:filePath:symbolName` truncated to 24 hex chars
+- **Stable IDs**: SHA-256 of `repoId:filePath:kind:name:row` truncated to 24 hex chars — `makeSymbolId` → `stableId` in `src/services/extractors/extractorPrimitives.ts`; `row` is the 0-indexed tree-sitter row (see *A symbol id is minted in one place* below)
 - **Multi-repo**: All tables are scoped by `repoId`; a single SQLite DB can hold multiple repos
 - **Confidence**: edges carry a 0.0–1.0 score; unresolved edges are tracked separately for diagnostics
 
@@ -222,7 +222,7 @@ nothing failed — the graph was simply wrong. `row` is the tree-sitter 0-indexe
 not the 1-indexed `line` stored on the record.
 
 **Worker pool.** Tree-sitter parsing runs in worker threads, `cpus/2` by default.
-`LARGE_FILE_THRESHOLD_BYTES=0` routes every non-markdown file to a worker. The per-file job timeout is
+`CODEBASE_INDEX_LARGE_FILE_THRESHOLD_BYTES=0` routes every non-markdown file to a worker. The per-file job timeout is
 `CODEBASE_INDEX_PARSE_JOB_TIMEOUT_MS` (20s).
 
 **Benchmark false positives.** `npm run benchmark:plan:check` needs telemetry on
