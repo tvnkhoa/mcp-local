@@ -116,7 +116,7 @@ export function buildExecTools(deps: SqlserverDeps): AnyToolDefinition[] {
     }
     return err(
       policyViolation(
-        `Routine "${name}" does not match SQLSERVER_EXEC_ALLOWLIST.`,
+        `Routine "${name}" does not match SQLSERVER_EXEC_ALLOWED_ROUTINES.`,
         { guard: "exec-allowlist", routine: name }
       )
     );

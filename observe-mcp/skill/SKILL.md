@@ -33,7 +33,7 @@ log_stats(groupBy: "service", time: "24h")        // volume by level (default) |
 - `level` is prefix-matched (`Error`, `ERROR`, `Warn` all work). `contains` = substring of the
   message; `sourceContext` = the emitting .NET class.
 - Always bound the window: `time` (`15m`, `1h`, `24h`, `7d`) or `start`/`end`. Caps:
-  `OBSERVE_MAX_SIZE` rows, `OBSERVE_MAX_LOOKBACK_MS` (7 days). Page with `offset` / `nextOffset`.
+  `OBSERVE_MAX_LIMIT` rows, `OBSERVE_MAX_LOOKBACK_MS` (7 days). Page with `offset` / `nextOffset`.
 
 ## Follow one request
 

@@ -275,7 +275,7 @@ Schema `mcp_ops` thuộc về server, không phải schema của ứng dụng:
 
 ## 8. Lưu ý bảo mật
 
-- Mặc định read-only. Ghi/migration phải bật cờ tường minh (`POSTGRES_WRITE_ENABLED` / `POSTGRES_MIGRATION_ENABLED`). Approval token được ký/xác minh hoàn toàn trong process: nếu không set `POSTGRES_WRITE_APPROVAL_SECRET`, MCP tự sinh secret ngẫu nhiên mỗi lần khởi động (token không thể giả mạo, không cần cấu hình). Chỉ set secret nếu muốn token còn hiệu lực qua restart.
+- Mặc định read-only. Ghi/migration phải bật cờ tường minh (`POSTGRES_WRITE_ENABLED` / `POSTGRES_MIGRATION_ENABLED`). Approval token được ký/xác minh hoàn toàn trong process: nếu không set `POSTGRES_APPROVAL_SECRET`, MCP tự sinh secret ngẫu nhiên mỗi lần khởi động (token không thể giả mạo, không cần cấu hình). Chỉ set secret nếu muốn token còn hiệu lực qua restart.
 - **prod không bao giờ ghi được** (ép read-only bất kể cấu hình).
 - Không commit secret vào repo. Không log raw SQL nhạy cảm (chỉ log hash).
 
@@ -300,16 +300,16 @@ Schema `mcp_ops` thuộc về server, không phải schema của ứng dụng:
 | `POSTGRES_MAX_LIMIT` | no | `2000` | renamed — still accepts `MCP_DB_MAX_LIMIT` |
 | `POSTGRES_DEFAULT_TIMEOUT_MS` | no | `30000` | renamed — still accepts `MCP_DB_DEFAULT_TIMEOUT_MS` |
 | `POSTGRES_MAX_TIMEOUT_MS` | no | `60000` | renamed — still accepts `MCP_DB_MAX_TIMEOUT_MS` |
-| `POSTGRES_EXPLAIN_COST_WARN` | no | `1000000` *(code)* | renamed — still accepts `PG_EXPLAIN_COST_WARN` · EXPLAIN cost above which a read query is flagged as expensive. |
+| `POSTGRES_EXPLAIN_COST_WARN_THRESHOLD` | no | `1000000` *(code)* | renamed — still accepts `POSTGRES_EXPLAIN_COST_WARN`, `PG_EXPLAIN_COST_WARN` · EXPLAIN cost above which a read query is flagged as expensive. |
 | `POSTGRES_WRITE_ENABLED` | no | `false` | renamed — still accepts `PG_WRITE_ENABLED` · Data writes (preview→apply→rollback) OFF unless true. Parsed strictly: exact "true" or "1". |
-| `POSTGRES_WRITE_APPROVAL_SECRET` | no | — | **secret** · renamed — still accepts `PG_WRITE_APPROVAL_SECRET` · Auto-generated per process if empty; set to keep tokens valid across restarts. |
+| `POSTGRES_APPROVAL_SECRET` | no | — | **secret** · renamed — still accepts `POSTGRES_WRITE_APPROVAL_SECRET`, `PG_WRITE_APPROVAL_SECRET` · Auto-generated per process if empty; set to keep tokens valid across restarts. |
 | `POSTGRES_WRITE_PREVIEW_TTL_MS` | no | `900000` *(code)* | renamed — still accepts `PG_WRITE_PREVIEW_TTL_MS` · Write-preview lifetime — 15 minutes. |
 | `POSTGRES_WRITE_SAMPLE_LIMIT` | no | `20` *(code)* | renamed — still accepts `PG_WRITE_SAMPLE_LIMIT` · Rows sampled into a write preview. |
 | `POSTGRES_MIGRATION_ENABLED` | no | `false` | renamed — still accepts `PG_MIGRATION_ENABLED` · EF Core migration tooling OFF unless true. Parsed strictly: exact "true" or "1". |
 | `POSTGRES_MIGRATION_PREVIEW_TTL_MS` | no | `3600000` *(code)* | renamed — still accepts `PG_MIGRATION_PREVIEW_TTL_MS` · Migration-preview lifetime — 1 hour. |
-| `POSTGRES_DOTNET_PROJECT` | no | — | renamed — still accepts `CH_DOTNET_PROJECT` · Path to the EF Core project (the one holding the DbContext). |
-| `POSTGRES_DOTNET_STARTUP_PROJECT` | no | — | renamed — still accepts `CH_DOTNET_STARTUP_PROJECT` · Startup project passed to `dotnet ef --startup-project`. |
-| `POSTGRES_DOTNET_TIMEOUT_MS` | no | `120000` *(code)* | renamed — still accepts `PG_DOTNET_TIMEOUT_MS` · Timeout for a `dotnet ef` invocation. |
+| `POSTGRES_MIGRATION_DOTNET_PROJECT` | no | — | renamed — still accepts `POSTGRES_DOTNET_PROJECT`, `CH_DOTNET_PROJECT` · Path to the EF Core project (the one holding the DbContext). |
+| `POSTGRES_MIGRATION_DOTNET_STARTUP_PROJECT` | no | — | renamed — still accepts `POSTGRES_DOTNET_STARTUP_PROJECT`, `CH_DOTNET_STARTUP_PROJECT` · Startup project passed to `dotnet ef --startup-project`. |
+| `POSTGRES_MIGRATION_DOTNET_TIMEOUT_MS` | no | `120000` *(code)* | renamed — still accepts `POSTGRES_DOTNET_TIMEOUT_MS`, `PG_DOTNET_TIMEOUT_MS` · Timeout for a `dotnet ef` invocation. |
 | `POSTGRES_MIGRATION_LOCK_TIMEOUT_MS` | no | `5000` *(code)* | lock_timeout for every `dotnet ef` session, via Npgsql `Options` (Npgsql 5+); also used by migration_dry_run. 0 = off (server default). |
 | `POSTGRES_DDL_ENABLED` | no | `false` | Raw-SQL DDL migrations (ddl_*) OFF unless true. Parsed strictly: exact "true" or "1". |
 | `POSTGRES_DDL_MIGRATIONS_DIR` | no | — | Directory of V<yyyymmddhhmmss>__<name>.up.sql / .down.sql files. Needed by file-based plans and ddl_create; inline SQL works without it. |

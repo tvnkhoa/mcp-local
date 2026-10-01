@@ -8,6 +8,7 @@ import {
   SERVERS,
   TOTAL_TOOL_COUNT,
   WORKSPACE_ROOT,
+  deprecatedEnvInUse,
   evaluateEnv,
   evaluateEnvValues,
   getServer,
@@ -410,4 +411,45 @@ test("evaluateEnvValues honours deprecated aliases, so a pre-rename config is no
   const findings = evaluateEnvValues(pg, { CH_APPSETTINGS_ROOTS: "not/absolute" });
   assert.equal(findings.length, 1);
   assert.equal(findings[0].name, "POSTGRES_APPSETTINGS_ROOTS");
+});
+
+function requireServer(key: string): ServerDescriptor {
+  const server = getServer(key);
+  assert.ok(server, `${key} is not in the manifest`);
+  return server;
+}
+
+test("deprecatedEnvInUse names each former name a config still sets, and its replacement", () => {
+  const postgres = requireServer("postgres-mcp");
+  const observe = requireServer("observe-mcp");
+  const byLegacy = (a: { legacy: string }, b: { legacy: string }) => a.legacy.localeCompare(b.legacy);
+  assert.deepEqual(deprecatedEnvInUse(postgres, ["POSTGRES_DOTNET_PROJECT", "PG_ENV_DEV", "POSTGRES_CONNECTION"]).sort(byLegacy), [
+    { legacy: "PG_ENV_DEV", canonical: "POSTGRES_ENV_DEV" },
+    { legacy: "POSTGRES_DOTNET_PROJECT", canonical: "POSTGRES_MIGRATION_DOTNET_PROJECT" }
+  ]);
+  assert.deepEqual(deprecatedEnvInUse(observe, ["OBSERVE_MAX_SIZE"]), [{ legacy: "OBSERVE_MAX_SIZE", canonical: "OBSERVE_MAX_LIMIT" }]);
+  assert.deepEqual(deprecatedEnvInUse(observe, ["OBSERVE_MAX_LIMIT"]), []);
+});
+
+test("every renamed var keeps its former name working, and the convention holds for the new names", () => {
+  // The 2026-10-01 naming pass. Row bounds are _DEFAULT_LIMIT / _MAX_LIMIT everywhere, and no
+  // server-owned name is abbreviated the ways the old ones were.
+  for (const server of SERVERS) {
+    for (const field of server.env) {
+      // A row bound spelled any other way, or the three abbreviations the pass removed. BATCH_SIZE and
+      // the like are sizes of something else and stay.
+      assert.doesNotMatch(field.name, /_(DEFAULT|MAX)_(SIZE|PAGELEN|RESULT_LIMIT)$|_(MSG|EXC|SUBTX)_/, `${server.key}: ${field.name} breaks the naming convention`);
+    }
+  }
+  const renamedPairs: Array<[string, string, string]> = [
+    ["bitbucket-mcp", "BITBUCKET_MAX_LIMIT", "BITBUCKET_MAX_PAGELEN"],
+    ["observe-mcp", "OBSERVE_DEFAULT_LIMIT", "OBSERVE_DEFAULT_SIZE"],
+    ["codebase-index", "CODEBASE_INDEX_NUGET_NAMESPACE_MAP", "NUGET_NAMESPACE_MAP"],
+    ["postgres-mcp", "POSTGRES_APPROVAL_SECRET", "POSTGRES_WRITE_APPROVAL_SECRET"],
+    ["sqlserver-mcp", "SQLSERVER_EXEC_ALLOWED_ROUTINES", "SQLSERVER_EXEC_ALLOWLIST"]
+  ];
+  for (const [key, name, former] of renamedPairs) {
+    const field = requireServer(key).env.find((f) => f.name === name);
+    assert.ok(field?.deprecatedAliases?.includes(former), `${key}: ${former} must stay an alias of ${name}`);
+  }
 });

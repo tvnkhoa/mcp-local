@@ -299,7 +299,7 @@ test("database and databases are mutually exclusive", async () => {
   assert.match(payload.message, /not both/);
 });
 
-test("a fan-out wider than SQLSERVER_MAX_FANOUT is refused before any connection is opened", async () => {
+test("a fan-out wider than SQLSERVER_MAX_FANOUT_DATABASES is refused before any connection is opened", async () => {
   const config = makeConfig({
     limits: { ...makeConfig().limits, maxFanout: 2 }
   });
@@ -356,7 +356,7 @@ test("the allowlist narrows exec to matching routines", async () => {
   });
   const { payload } = await bodyOf("execute_routine", { routine: "UpdateEverything" }, config);
   assert.equal(payload.code, "policy_violation");
-  assert.match(payload.message, /SQLSERVER_EXEC_ALLOWLIST/);
+  assert.match(payload.message, /SQLSERVER_EXEC_ALLOWED_ROUTINES/);
 });
 
 test("an empty allowlist does not narrow anything — the flag alone is the gate", async () => {

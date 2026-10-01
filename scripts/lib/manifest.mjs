@@ -49,6 +49,7 @@ export const {
   TOOL_LISTS,
   TOTAL_TOOL_COUNT,
   WORKSPACE_ROOT,
+  deprecatedEnvInUse,
   evaluateEnv,
   evaluateEnvValues,
   getServer,

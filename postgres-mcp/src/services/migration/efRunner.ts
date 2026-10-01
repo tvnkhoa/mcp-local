@@ -49,13 +49,13 @@ export function assertMigrationEnabled(config: MigrationConfig): void {
   if (!config.enabled) {
     throw new PolicyViolationError(
       "MIGRATION_DISABLED",
-      "Migration tools are disabled. Set POSTGRES_MIGRATION_ENABLED=true, POSTGRES_DOTNET_PROJECT and POSTGRES_DOTNET_STARTUP_PROJECT to enable."
+      "Migration tools are disabled. Set POSTGRES_MIGRATION_ENABLED=true, POSTGRES_MIGRATION_DOTNET_PROJECT and POSTGRES_MIGRATION_DOTNET_STARTUP_PROJECT to enable."
     );
   }
   if (!config.project || !config.startupProject) {
     throw new PolicyViolationError(
       "MIGRATION_PROJECT_UNCONFIGURED",
-      "POSTGRES_DOTNET_PROJECT and POSTGRES_DOTNET_STARTUP_PROJECT must be set for migration tools."
+      "POSTGRES_MIGRATION_DOTNET_PROJECT and POSTGRES_MIGRATION_DOTNET_STARTUP_PROJECT must be set for migration tools."
     );
   }
 }
@@ -94,7 +94,7 @@ export interface LockTimeoutResult {
  * keyword (Npgsql 5.0 or later).
  *
  * Before this, `database update` ran with no lock wait at all. A migration that needed a lock on
- * a busy table queued behind it until `POSTGRES_DOTNET_TIMEOUT_MS` killed the process. While it
+ * a busy table queued behind it until `POSTGRES_MIGRATION_DOTNET_TIMEOUT_MS` killed the process. While it
  * queued, it blocked every other session that needed the same table: an `ALTER TABLE` waiting for
  * ACCESS EXCLUSIVE stops reads too.
  *

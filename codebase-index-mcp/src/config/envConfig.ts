@@ -15,6 +15,10 @@ import {
   parseWatchConfigFromEnv
 } from "../middleware/indexGuardrails.js";
 import type { PerformanceProfile } from "../services/indexing/indexPipeline.js";
+import { resolveAliases } from "./aliases.js";
+
+// Former names first: INDEX_LOG_MODE below is read at module load.
+resolveAliases();
 
 export function numberFromEnv(name: string, fallback: number): number {
   const raw = process.env[name];
@@ -106,10 +110,10 @@ export function optionalStringFromEnv(name: string): string | undefined {
 }
 
 /**
- * `CODEBASE_INDEX_INDEX_LOG`, lowercased. Read once at module load, as it was when
+ * `CODEBASE_INDEX_LOG_MODE`, lowercased. Read once at module load, as it was when
  * `indexProgress.ts` owned it.
  */
-export const INDEX_LOG_MODE = (process.env.CODEBASE_INDEX_INDEX_LOG ?? "").toLowerCase();
+export const INDEX_LOG_MODE = (process.env.CODEBASE_INDEX_LOG_MODE ?? "").toLowerCase();
 
 /**
  * npm's own `npm_package_version`, set only when the process was started through an npm script.
@@ -144,9 +148,9 @@ export function allowedRootsFromEnv(): string[] {
   return parseAllowedRoots(process.env.CODEBASE_INDEX_ALLOWED_ROOTS);
 }
 
-/** `CODEBASE_INDEX_AUTO_WATCH_REPOS`. */
+/** `CODEBASE_INDEX_WATCH_AUTO_REPOS`. */
 export function autoWatchReposFromEnv(): ReturnType<typeof parseAutoWatchRepos> {
-  return parseAutoWatchRepos(process.env.CODEBASE_INDEX_AUTO_WATCH_REPOS);
+  return parseAutoWatchRepos(process.env.CODEBASE_INDEX_WATCH_AUTO_REPOS);
 }
 
 /** The whole watch config, which reads several `CODEBASE_INDEX_WATCH_*` variables. */

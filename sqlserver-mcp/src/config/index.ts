@@ -8,6 +8,8 @@
 
 import { createEnvReader, defaultEnvSource, type EnvReader } from "@mcp/core";
 
+import { resolveAliases } from "./aliases.js";
+
 import {
   buildEnvironmentRegistry,
   canonicalEnvName,
@@ -26,7 +28,12 @@ let reader: EnvReader | undefined;
  * its write gate. Reading lazily costs nothing and removes the ordering question. Keep it lazy.
  */
 function env(): EnvReader {
-  return (reader ??= createEnvReader(defaultEnvSource()));
+  if (reader === undefined) {
+    // Former names first, so the snapshot holds them under their canonical names.
+    resolveAliases();
+    reader = createEnvReader(defaultEnvSource());
+  }
+  return reader;
 }
 
 /** Bounds every query is held to, read once at startup. */
@@ -108,10 +115,10 @@ export function loadConfig(): SqlserverConfig {
       maxLimit: reader_.positiveNumber("SQLSERVER_MAX_LIMIT", 2000),
       defaultTimeoutMs: reader_.positiveNumber("SQLSERVER_DEFAULT_TIMEOUT_MS", 30_000),
       maxTimeoutMs: reader_.positiveNumber("SQLSERVER_MAX_TIMEOUT_MS", 60_000),
-      maxFanout: reader_.positiveNumber("SQLSERVER_MAX_FANOUT", 25)
+      maxFanout: reader_.positiveNumber("SQLSERVER_MAX_FANOUT_DATABASES", 25)
     },
     pools: {
-      poolMax: reader_.positiveNumber("SQLSERVER_POOL_MAX", 5),
+      poolMax: reader_.positiveNumber("SQLSERVER_POOL_MAX_CONNECTIONS", 5),
       maxPools: reader_.positiveNumber("SQLSERVER_MAX_POOLS", 12),
       idleTimeoutMs: reader_.positiveNumber("SQLSERVER_POOL_IDLE_TIMEOUT_MS", 30_000)
     },
@@ -119,7 +126,7 @@ export function loadConfig(): SqlserverConfig {
       // strictFlag, not boolean: exactly "true" or "1". Widening a gate that runs arbitrary
       // stored procedures is not a thing to do by accident.
       enabled: reader_.strictFlag("SQLSERVER_EXEC_ENABLED"),
-      allowlist: reader_.list("SQLSERVER_EXEC_ALLOWLIST"),
+      allowlist: reader_.list("SQLSERVER_EXEC_ALLOWED_ROUTINES"),
       timeoutMs: reader_.positiveNumber("SQLSERVER_EXEC_TIMEOUT_MS", 120_000)
     }
   };

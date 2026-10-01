@@ -40,7 +40,7 @@ Operational defaults (current implementation baseline):
 
 1. Watch policy is active-repo oriented (`WATCH_ACTIVE_ONLY=true` by default).
 2. Idle watcher is stopped by TTL (`WATCH_ACTIVE_TTL_MS`).
-3. Watchless by default: `CODEBASE_INDEX_WATCH_AUTO_START=false` for normal operation.
+3. Watchless by default: `CODEBASE_INDEX_WATCH_AUTO_START_ENABLED=false` for normal operation.
 4. Incremental re-index may fast-skip when indexed commit equals `HEAD` and working tree is clean.
 5. `watch_repo` manual start is allowed for short debug sessions and should be stopped immediately after diagnostics.
 

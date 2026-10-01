@@ -57,6 +57,34 @@ export function evaluateEnv(
 }
 
 /**
+ * Former names a config still sets, each paired with the name that replaced it.
+ *
+ * `evaluateEnv` deliberately accepts a former name, so a renamed variable never makes a working
+ * install look broken. That leaves nobody telling the operator the name is on its way out, so the
+ * doctor reports these as warnings. Names only, never values.
+ */
+export function deprecatedEnvInUse(
+  server: ServerDescriptor,
+  presentKeys: readonly string[]
+): Array<{ legacy: string; canonical: string }> {
+  const found: Array<{ legacy: string; canonical: string }> = [];
+  for (const field of server.env) {
+    for (const alias of field.deprecatedAliases ?? []) {
+      if (field.prefix !== undefined) {
+        for (const key of presentKeys) {
+          if (key.startsWith(alias)) {
+            found.push({ legacy: key, canonical: `${field.prefix}${key.slice(alias.length)}` });
+          }
+        }
+      } else if (presentKeys.includes(alias)) {
+        found.push({ legacy: alias, canonical: field.name });
+      }
+    }
+  }
+  return found;
+}
+
+/**
  * "Do the configured VALUES have the right shape?" — the check `evaluateEnv` deliberately does not make.
  *
  * `evaluateEnv` answers whether the required keys are present. That passed for a config whose keys were

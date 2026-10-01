@@ -35,9 +35,9 @@ export function mapUsingNamespaceToNugetContract(namespaceImport: string, knownP
     return "nuget:ssnet.communicationhub.messaging";
   }
 
-  // Config-driven overrides via NUGET_NAMESPACE_MAP env var.
+  // Config-driven overrides via CODEBASE_INDEX_NUGET_NAMESPACE_MAP env var.
   // Format: JSON array of { "prefix": "My.Namespace", "contractId": "nuget:my.package" }
-  const envMap = optionalStringFromEnv("NUGET_NAMESPACE_MAP");
+  const envMap = optionalStringFromEnv("CODEBASE_INDEX_NUGET_NAMESPACE_MAP");
   if (envMap) {
     try {
       const entries = JSON.parse(envMap) as { prefix: string; contractId: string }[];

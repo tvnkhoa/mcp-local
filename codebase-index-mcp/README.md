@@ -206,18 +206,18 @@ Refactor tools: `refactor_replace_preview` and `refactor_replace_apply` support 
 | `CODEBASE_INDEX_DOCS_TOOLS_ENABLED` | no | `true` *(code)* | false makes query_docs refuse with INVALID_PARAMS. On by default since MCP-ISSUE-061. |
 | `CODEBASE_INDEX_TELEMETRY_ENABLED` | no | `false` | — |
 | `CODEBASE_INDEX_TELEMETRY_SAMPLE_RATE` | no | `1` *(code)* | Ratio 0–1. Only meaningful when telemetry is enabled. |
-| `CODEBASE_INDEX_WATCH_AUTO_START` | no | `false` | Watchless by default, per the workspace's MCP hard-mode policy. |
+| `CODEBASE_INDEX_WATCH_AUTO_START_ENABLED` | no | `false` | renamed — still accepts `CODEBASE_INDEX_WATCH_AUTO_START` · Watchless by default, per the workspace's MCP hard-mode policy. |
 | `CODEBASE_INDEX_WATCH_ACTIVE_ONLY` | no | `true` *(code)* | Defaults to TRUE — only the active repo is watched. The one boolean here whose default is not false. |
 | `CODEBASE_INDEX_WATCH_ACTIVE_TTL_MS` | no | `900000` *(code)* | Idle watcher stop timeout. Clamped to 5s–24h. |
 | `CODEBASE_INDEX_WATCH_DEBOUNCE_MS` | no | `500` *(code)* | — |
 | `CODEBASE_INDEX_WATCH_BATCH_SIZE` | no | — | — |
 | `CODEBASE_INDEX_WATCH_MAX_FILES_PER_RUN` | no | — | — |
 | `CODEBASE_INDEX_WATCH_MAX_QUEUED_EVENTS` | no | — | — |
-| `CODEBASE_INDEX_AUTO_WATCH_REPOS` | no | — | Comma-separated repoIds to auto-watch at boot. Unset = none. |
+| `CODEBASE_INDEX_WATCH_AUTO_REPOS` | no | — | renamed — still accepts `CODEBASE_INDEX_AUTO_WATCH_REPOS` · Comma-separated repoIds to auto-watch at boot. Unset = none. |
 | `CODEBASE_INDEX_MAX_FILES_PER_RUN` | no | `20000` *(code)* | — |
 | `CODEBASE_INDEX_MAX_FILE_SIZE_BYTES` | no | `500000` *(code)* | — |
 | `CODEBASE_INDEX_LARGE_FILE_THRESHOLD_BYTES` | no | `0` *(code)* | 0 = no large-file special casing. |
-| `CODEBASE_INDEX_MAX_RESULT_LIMIT` | no | `500` *(code)* | Hard ceiling on any tool's `limit`. |
+| `CODEBASE_INDEX_MAX_LIMIT` | no | `500` *(code)* | renamed — still accepts `CODEBASE_INDEX_MAX_RESULT_LIMIT` · Hard ceiling on any tool's `limit`. |
 | `CODEBASE_INDEX_MAX_DEPTH` | no | `5` *(code)* | Hard ceiling on traversal `depth`. |
 | `CODEBASE_INDEX_LARGE_REPO_PROFILE` | no | `auto` *(code)* | Performance profile: auto \| standard/off \| large/balanced \| very-large/aggressive. |
 | `CODEBASE_INDEX_PARSE_WORKERS` | no | — | Worker-pool size. Unset = derived from CPU count. |
@@ -228,18 +228,18 @@ Refactor tools: `refactor_replace_preview` and `refactor_replace_apply` support 
 | `CODEBASE_INDEX_MIN_EDGE_CONFIDENCE` | no | — | Ratio 0–1. Drops low-confidence edges at extraction time. |
 | `CODEBASE_INDEX_MAX_STRING_LITERALS_PER_FILE` | no | — | — |
 | `CODEBASE_INDEX_MIN_STRING_LITERAL_LENGTH` | no | — | — |
-| `NUGET_NAMESPACE_MAP` | no | — | Extra NuGet package → namespace mappings for .NET dependency edges. |
-| `CODEBASE_INDEX_SUBTX_SIZE` | no | `20` *(code)* | Files per SQLite sub-transaction. |
+| `CODEBASE_INDEX_NUGET_NAMESPACE_MAP` | no | — | renamed — still accepts `NUGET_NAMESPACE_MAP` · Extra NuGet package → namespace mappings for .NET dependency edges. |
+| `CODEBASE_INDEX_SUBTRANSACTION_FILES` | no | `20` *(code)* | renamed — still accepts `CODEBASE_INDEX_SUBTX_SIZE` · Files per SQLite sub-transaction. |
 | `CODEBASE_INDEX_CHECKPOINT_EVERY_N_BATCHES` | no | `1` *(code)* | WAL checkpoint cadence. |
 | `CODEBASE_INDEX_MAX_UNRESOLVED_RESOLVE_ROWS` | no | — | Cap on unresolved pairs resolved after extraction. Profile-dependent when unset (0 = unlimited for standard/very-large, 120000 for large). |
-| `CODEBASE_INDEX_POST_RESOLVE_TYPE_REFS` | no | `true` *(code)* | — |
-| `CODEBASE_INDEX_POST_RESOLVE_PROPERTY_REFS` | no | `true` *(code)* | — |
+| `CODEBASE_INDEX_POST_RESOLVE_TYPE_REFS_ENABLED` | no | `true` *(code)* | renamed — still accepts `CODEBASE_INDEX_POST_RESOLVE_TYPE_REFS` |
+| `CODEBASE_INDEX_POST_RESOLVE_PROPERTY_REFS_ENABLED` | no | `true` *(code)* | renamed — still accepts `CODEBASE_INDEX_POST_RESOLVE_PROPERTY_REFS` |
 | `CODEBASE_INDEX_CROSS_REPO_NAMESPACES` | no | — | Namespaces treated as shared when resolving cross-repo edges. |
 | `CODEBASE_INDEX_VECTOR_ENABLED` | no | `true` *(code)* | false disables trigram vector search entirely (no in-memory fallback) — a control for isolating vector-assisted resolution. |
 | `CODEBASE_INDEX_REFACTOR_APPROVAL_SECRET` | no | — | **secret** · HMAC secret for refactor approval tokens. Auto-generated per process if unset; set it to keep tokens valid across restarts. |
 | `CODEBASE_INDEX_REFACTOR_PREVIEW_TTL_MS` | no | `1800000` *(code)* | Preview/token lifetime — 30 minutes. |
-| `CODEBASE_INDEX_REFACTOR_STRICT_APPROVAL` | no | `false` *(code)* | When true, startup fails unless CODEBASE_INDEX_REFACTOR_APPROVAL_SECRET is set. |
-| `CODEBASE_INDEX_INDEX_LOG` | no | — | Enables verbose index-progress logging on stderr. |
+| `CODEBASE_INDEX_REFACTOR_STRICT_APPROVAL_ENABLED` | no | `false` *(code)* | renamed — still accepts `CODEBASE_INDEX_REFACTOR_STRICT_APPROVAL` · When true, startup fails unless CODEBASE_INDEX_REFACTOR_APPROVAL_SECRET is set. |
+| `CODEBASE_INDEX_LOG_MODE` | no | — | renamed — still accepts `CODEBASE_INDEX_INDEX_LOG` · Enables verbose index-progress logging on stderr. |
 | `CODEBASE_INDEX_LLM_ENABLED` | no | `false` *(code)* | Runtime LLM invocation is prohibited by design. Setting this to true ABORTS STARTUP, and `guard:no-llm-runtime` statically verifies no LLM client is importable. Declared here so the constraint is documented, not so it can be turned on. |
 
 41 variables. Defaults marked *(code)* are the server's own fallback and are **not** written into your agent config — set them only to override.
@@ -341,7 +341,7 @@ The refactor flow is: `refactor_replace_preview` → `refactor_replace_apply` �
 - **Staleness**: incremental index fast-skips when indexed commit equals `HEAD` and working tree is clean. Read tools degrade gracefully on a stale index — `find_impact_files`/`get_change_context` embed a non-fatal `staleWarning` rather than erroring.
 - **Windows native build**: `better-sqlite3` requires Visual Studio C++ Build Tools. If build fails, install VS Build Tools.
 - **Docs lane**: disabled by default (`CODEBASE_INDEX_DOCS_INDEXING_ENABLED=false`). Use `docsMode: "off"` per run for fastest indexing.
-- **Watch**: keep `CODEBASE_INDEX_WATCH_AUTO_START=false`. Start watchers manually only during active debug sessions, stop immediately after.
+- **Watch**: keep `CODEBASE_INDEX_WATCH_AUTO_START_ENABLED=false`. Start watchers manually only during active debug sessions, stop immediately after.
 
 ## Further reading
 

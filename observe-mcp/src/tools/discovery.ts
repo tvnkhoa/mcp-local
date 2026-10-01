@@ -371,7 +371,7 @@ export function buildDiscoveryTools(limits: ObserveLimits, clients: ClientManage
       const stream = input.stream ?? env.logStream;
       const window = resolveWindow(input, limits, Date.now());
       // 200 rather than the shared `defaultSize`: an inventory is one row per
-      // service, so it wants a wide page. Clamped so a lowered OBSERVE_MAX_SIZE
+      // service, so it wants a wide page. Clamped so a lowered OBSERVE_MAX_LIMIT
       // still bounds the default, not just an explicit argument.
       const limit = Math.min(input.limit ?? 200, limits.maxSize);
       const include = new Set(input.include ?? []);

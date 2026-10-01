@@ -43,21 +43,21 @@ npm run build && node scripts/smoke-test.mjs
 | `OBSERVE_FRAMEWORK_NAMESPACE_PREFIXES` | no | `Microsoft.,System.,Npgsql,MassTransit,Quartz,Hangfire,Serilog,OpenTelemetry,Rebus,Ocelot,Elsa.,Grpc.,Amazon.,AWSSDK,Azure.,Polly,StackExchange.,MediatR,FluentValidation,Refit,IdentityServer,FFmpeg.` *(code)* | Comma-separated prefixes treated as framework/library noise. Necessary because by raw volume the top log scopes are all framework plumbing, which identifies nothing. A context matching neither list is reported as `unclassified`, never dropped. |
 | `OBSERVE_APP_NAME_FIELD` | no | `applicationname` *(code)* | Log column holding the application name when the OTLP resource does not (a Serilog enricher property). Used only for LOGS — the traces stream has no such column, and naming an absent column fails the query at plan time, so trace queries always use service_name. A logs stream without this column downgrades automatically on the first query and reports identity.resolved=false. |
 | `OBSERVE_UNKNOWN_SERVICE_SENTINEL` | no | `unknown_service:dotnet` *(code)* | The service_name value that means "the emitter never set service.name" (the OTel spec default). Rows carrying it are re-attributed via OBSERVE_APP_NAME_FIELD. Set to an empty string to disable resolution entirely and go back to raw service_name. |
-| `OBSERVE_DEFAULT_SIZE` | no | `100` | — |
-| `OBSERVE_MAX_SIZE` | no | `1000` | — |
+| `OBSERVE_DEFAULT_LIMIT` | no | `100` | renamed — still accepts `OBSERVE_DEFAULT_SIZE` |
+| `OBSERVE_MAX_LIMIT` | no | `1000` | renamed — still accepts `OBSERVE_MAX_SIZE` |
 | `OBSERVE_DEFAULT_LOOKBACK_MS` | no | `3600000` | 1 hour. |
 | `OBSERVE_MAX_LOOKBACK_MS` | no | `604800000` | 7 days. |
 | `OBSERVE_TIMEOUT_MS` | no | `30000` | — |
 | `OBSERVE_MAX_RETRIES` | no | `2` *(code)* | Retries for transient HTTP failures (network / 5xx / 429). 0 disables. |
 | `OBSERVE_LOG_COLUMNS` | no | — | Comma-separated columns instead of SELECT * (smaller/faster). Unset = SELECT *, which is schema-safe. A query naming a column the stream lacks auto-falls back to SELECT *. |
-| `OBSERVE_MSG_MAX_NANO` | no | `200` *(code)* | Caps the long `message` field per response profile. verbose keeps full text. |
-| `OBSERVE_MSG_MAX_COMPACT` | no | `400` *(code)* | — |
-| `OBSERVE_MSG_MAX_STANDARD` | no | `2000` *(code)* | — |
-| `OBSERVE_MSG_MAX_VERBOSE` | no | `unlimited` *(code)* | — |
-| `OBSERVE_EXC_MAX_NANO` | no | `0` *(code)* | Caps the `exception` field. 0 = drop the field entirely, which is what nano does. |
-| `OBSERVE_EXC_MAX_COMPACT` | no | `800` *(code)* | — |
-| `OBSERVE_EXC_MAX_STANDARD` | no | `6000` *(code)* | — |
-| `OBSERVE_EXC_MAX_VERBOSE` | no | `unlimited` *(code)* | — |
+| `OBSERVE_MESSAGE_MAX_CHARS_NANO` | no | `200` *(code)* | renamed — still accepts `OBSERVE_MSG_MAX_NANO` · Caps the long `message` field per response profile. verbose keeps full text. |
+| `OBSERVE_MESSAGE_MAX_CHARS_COMPACT` | no | `400` *(code)* | renamed — still accepts `OBSERVE_MSG_MAX_COMPACT` |
+| `OBSERVE_MESSAGE_MAX_CHARS_STANDARD` | no | `2000` *(code)* | renamed — still accepts `OBSERVE_MSG_MAX_STANDARD` |
+| `OBSERVE_MESSAGE_MAX_CHARS_VERBOSE` | no | `unlimited` *(code)* | renamed — still accepts `OBSERVE_MSG_MAX_VERBOSE` |
+| `OBSERVE_EXCEPTION_MAX_CHARS_NANO` | no | `0` *(code)* | renamed — still accepts `OBSERVE_EXC_MAX_NANO` · Caps the `exception` field. 0 = drop the field entirely, which is what nano does. |
+| `OBSERVE_EXCEPTION_MAX_CHARS_COMPACT` | no | `800` *(code)* | renamed — still accepts `OBSERVE_EXC_MAX_COMPACT` |
+| `OBSERVE_EXCEPTION_MAX_CHARS_STANDARD` | no | `6000` *(code)* | renamed — still accepts `OBSERVE_EXC_MAX_STANDARD` |
+| `OBSERVE_EXCEPTION_MAX_CHARS_VERBOSE` | no | `unlimited` *(code)* | renamed — still accepts `OBSERVE_EXC_MAX_VERBOSE` |
 | `NODE_TLS_REJECT_UNAUTHORIZED` | no | — | Set to 0 ONLY if the query host uses a self-signed/untrusted TLS certificate. This is a Node flag, not a server setting, and it disables certificate verification for the WHOLE process — every outbound TLS connection, not just OpenObserve. Prefer trusting the CA. |
 
 31 variables. Defaults marked *(code)* are the server's own fallback and are **not** written into your agent config — set them only to override.

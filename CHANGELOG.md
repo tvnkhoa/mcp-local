@@ -16,6 +16,33 @@ All notable changes to this project will be documented in this file.
   scan cap: `wec.social-ads` indexed 1 file of ~1 000 and kept a stale graph. Both directories are now in
   the glob ignore list, not only the post-walk filter.
 
+### 🏷️ All five servers: one env-var naming convention, 29 names renamed, none broken
+
+The names had drifted. One concept, the row bound, had four spellings (`_MAX_LIMIT`, `_MAX_SIZE`,
+`_MAX_PAGELEN`, `_MAX_RESULT_LIMIT`). The EF lane's variables did not say they were the EF lane's,
+the approval secret shared by three lanes was named for one of them, and four abbreviations had
+crept in. The convention is now in `docs/reference/conventions.md` §3, *Env-var naming*.
+
+- **Renamed:**
+  - codebase-index: `NUGET_NAMESPACE_MAP`, `_MAX_RESULT_LIMIT`, `_INDEX_LOG` (now
+    `CODEBASE_INDEX_LOG_MODE`, an enum, not a switch), `_SUBTX_SIZE`, `_AUTO_WATCH_REPOS`,
+    `_WATCH_AUTO_START`, `_POST_RESOLVE_{TYPE,PROPERTY}_REFS` and `_REFACTOR_STRICT_APPROVAL`.
+  - postgres: `POSTGRES_WRITE_APPROVAL_SECRET` → `POSTGRES_APPROVAL_SECRET`;
+    `POSTGRES_DOTNET_*` → `POSTGRES_MIGRATION_DOTNET_*`; `POSTGRES_EXPLAIN_COST_WARN` →
+    `…_THRESHOLD`.
+  - sqlserver: `_POOL_MAX`, `_EXEC_ALLOWLIST` and `_MAX_FANOUT`.
+  - observe: `_DEFAULT/_MAX_SIZE` → `_LIMIT`, `_MSG_MAX_*` → `_MESSAGE_MAX_CHARS_*` and
+    `_EXC_MAX_*` → `_EXCEPTION_MAX_CHARS_*`.
+  - bitbucket: `_DEFAULT/_MAX_PAGELEN` → `_LIMIT`.
+- **Every former name still works**, with a one-time stderr warning. Runtime alias resolution was
+  postgres-mcp's alone. It is now `@mcp/core`'s `resolveEnvAliases`, and each server has a
+  `src/config/aliases.ts` that runs before any configuration is read.
+- **`mcp:doctor` now warns** when a config still sets a former name, as `old → new`. Before, it
+  accepted the old name silently.
+- `envAliases.test.mjs` now covers all five servers. It also fails if a server's source still reads
+  a former name.
+- The count is unchanged at 136 (41 / 34 / 19 / 31 / 11): nothing was added or removed.
+
 ### 🔒 `codebase-index-mcp`: `query_graph` enforces repo isolation (MCP-ISSUE-062)
 
 - Before this fix, `OR 1=1`, a UNION arm, a comma join, `"main".symbols` or a `pragma_*` function could

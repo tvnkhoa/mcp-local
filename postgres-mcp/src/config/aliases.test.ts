@@ -118,15 +118,19 @@ test("every alias keeps its prefix's meaning — no legacy name maps to an unrel
   // A cheap sanity check on the table itself: the tail after the first underscore group should
   // still be recognisable. Catches a copy-paste that pairs POSTGRES_MAX_LIMIT with
   // MCP_DB_DEFAULT_LIMIT.
+  //
+  // That is S-43's rule, which only changed prefixes. The 2026-10-01 naming pass changed tails on
+  // purpose, and its former names are the `POSTGRES_*` ones in a table entry. So an S-43 name is
+  // compared with the name it was renamed to THEN: the `POSTGRES_*` former name where there is one.
   const tail = (n: string): string => n.replace(/^(POSTGRES|CH|PG|MCP_DB)_/, "");
   const exempt = new Set([
-    "POSTGRES_CONNECTION", // was CH_DB_CONNECTION — "DB_" dropped as redundant under POSTGRES_
-    "POSTGRES_DOTNET_TIMEOUT_MS" // was PG_DOTNET_TIMEOUT_MS — same tail, listed for symmetry
+    "POSTGRES_CONNECTION" // was CH_DB_CONNECTION — "DB_" dropped as redundant under POSTGRES_
   ]);
   for (const [name, legacyNames] of Object.entries(ENV_ALIASES)) {
     if (exempt.has(name)) continue;
-    for (const legacy of legacyNames) {
-      assert.equal(tail(name), tail(legacy), `${legacy} -> ${name} changes more than the prefix`);
+    const s43Target = legacyNames.find((l) => l.startsWith("POSTGRES_")) ?? name;
+    for (const legacy of legacyNames.filter((l) => !l.startsWith("POSTGRES_"))) {
+      assert.equal(tail(s43Target), tail(legacy), `${legacy} -> ${s43Target} changes more than the prefix`);
     }
   }
 });

@@ -77,7 +77,7 @@ export function codebaseIndexEnv(root: string): readonly EnvField[] {
 
     // --- Watch --------------------------------------------------------------------
     {
-      name: "CODEBASE_INDEX_WATCH_AUTO_START",
+      name: "CODEBASE_INDEX_WATCH_AUTO_START_ENABLED", deprecatedAliases: ["CODEBASE_INDEX_WATCH_AUTO_START"],
       required: false,
       default: "false",
       section: "Watch",
@@ -96,7 +96,7 @@ export function codebaseIndexEnv(root: string): readonly EnvField[] {
     { name: "CODEBASE_INDEX_WATCH_MAX_FILES_PER_RUN", required: false, section: "Watch" },
     { name: "CODEBASE_INDEX_WATCH_MAX_QUEUED_EVENTS", required: false, section: "Watch" },
     {
-      name: "CODEBASE_INDEX_AUTO_WATCH_REPOS",
+      name: "CODEBASE_INDEX_WATCH_AUTO_REPOS", deprecatedAliases: ["CODEBASE_INDEX_AUTO_WATCH_REPOS"],
       required: false,
       section: "Watch",
       note: "Comma-separated repoIds to auto-watch at boot. Unset = none."
@@ -106,7 +106,7 @@ export function codebaseIndexEnv(root: string): readonly EnvField[] {
     { name: "CODEBASE_INDEX_MAX_FILES_PER_RUN", required: false, codeDefault: "20000", section: "Indexing limits" },
     { name: "CODEBASE_INDEX_MAX_FILE_SIZE_BYTES", required: false, codeDefault: "500000", section: "Indexing limits" },
     { name: "CODEBASE_INDEX_LARGE_FILE_THRESHOLD_BYTES", required: false, codeDefault: "0", section: "Indexing limits", note: "0 = no large-file special casing." },
-    { name: "CODEBASE_INDEX_MAX_RESULT_LIMIT", required: false, codeDefault: "500", section: "Indexing limits", note: "Hard ceiling on any tool's `limit`." },
+    { name: "CODEBASE_INDEX_MAX_LIMIT", deprecatedAliases: ["CODEBASE_INDEX_MAX_RESULT_LIMIT"], required: false, codeDefault: "500", section: "Indexing limits", note: "Hard ceiling on any tool's `limit`." },
     { name: "CODEBASE_INDEX_MAX_DEPTH", required: false, codeDefault: "5", section: "Indexing limits", note: "Hard ceiling on traversal `depth`." },
     {
       name: "CODEBASE_INDEX_LARGE_REPO_PROFILE",
@@ -132,10 +132,10 @@ export function codebaseIndexEnv(root: string): readonly EnvField[] {
     { name: "CODEBASE_INDEX_MIN_EDGE_CONFIDENCE", required: false, section: "Parser tuning", note: "Ratio 0–1. Drops low-confidence edges at extraction time." },
     { name: "CODEBASE_INDEX_MAX_STRING_LITERALS_PER_FILE", required: false, section: "Parser tuning" },
     { name: "CODEBASE_INDEX_MIN_STRING_LITERAL_LENGTH", required: false, section: "Parser tuning" },
-    { name: "NUGET_NAMESPACE_MAP", required: false, section: "Parser tuning", note: "Extra NuGet package → namespace mappings for .NET dependency edges." },
+    { name: "CODEBASE_INDEX_NUGET_NAMESPACE_MAP", deprecatedAliases: ["NUGET_NAMESPACE_MAP"], required: false, section: "Parser tuning", note: "Extra NuGet package → namespace mappings for .NET dependency edges." },
 
     // --- Write batching -----------------------------------------------------------
-    { name: "CODEBASE_INDEX_SUBTX_SIZE", required: false, codeDefault: "20", section: "Write batching", note: "Files per SQLite sub-transaction." },
+    { name: "CODEBASE_INDEX_SUBTRANSACTION_FILES", deprecatedAliases: ["CODEBASE_INDEX_SUBTX_SIZE"], required: false, codeDefault: "20", section: "Write batching", note: "Files per SQLite sub-transaction." },
     { name: "CODEBASE_INDEX_CHECKPOINT_EVERY_N_BATCHES", required: false, codeDefault: "1", section: "Write batching", note: "WAL checkpoint cadence." },
 
     // --- Post-resolve phase -------------------------------------------------------
@@ -145,8 +145,8 @@ export function codebaseIndexEnv(root: string): readonly EnvField[] {
       section: "Post-resolve phase",
       note: "Cap on unresolved pairs resolved after extraction. Profile-dependent when unset (0 = unlimited for standard/very-large, 120000 for large)."
     },
-    { name: "CODEBASE_INDEX_POST_RESOLVE_TYPE_REFS", required: false, codeDefault: "true", section: "Post-resolve phase" },
-    { name: "CODEBASE_INDEX_POST_RESOLVE_PROPERTY_REFS", required: false, codeDefault: "true", section: "Post-resolve phase" },
+    { name: "CODEBASE_INDEX_POST_RESOLVE_TYPE_REFS_ENABLED", deprecatedAliases: ["CODEBASE_INDEX_POST_RESOLVE_TYPE_REFS"], required: false, codeDefault: "true", section: "Post-resolve phase" },
+    { name: "CODEBASE_INDEX_POST_RESOLVE_PROPERTY_REFS_ENABLED", deprecatedAliases: ["CODEBASE_INDEX_POST_RESOLVE_PROPERTY_REFS"], required: false, codeDefault: "true", section: "Post-resolve phase" },
     { name: "CODEBASE_INDEX_CROSS_REPO_NAMESPACES", required: false, section: "Post-resolve phase", note: "Namespaces treated as shared when resolving cross-repo edges." },
     {
       name: "CODEBASE_INDEX_VECTOR_ENABLED",
@@ -166,7 +166,7 @@ export function codebaseIndexEnv(root: string): readonly EnvField[] {
     },
     { name: "CODEBASE_INDEX_REFACTOR_PREVIEW_TTL_MS", required: false, codeDefault: "1800000", section: "Refactor approval", note: "Preview/token lifetime — 30 minutes." },
     {
-      name: "CODEBASE_INDEX_REFACTOR_STRICT_APPROVAL",
+      name: "CODEBASE_INDEX_REFACTOR_STRICT_APPROVAL_ENABLED", deprecatedAliases: ["CODEBASE_INDEX_REFACTOR_STRICT_APPROVAL"],
       required: false,
       codeDefault: "false",
       section: "Refactor approval",
@@ -174,7 +174,7 @@ export function codebaseIndexEnv(root: string): readonly EnvField[] {
     },
 
     // --- Diagnostics --------------------------------------------------------------
-    { name: "CODEBASE_INDEX_INDEX_LOG", required: false, section: "Diagnostics", note: "Enables verbose index-progress logging on stderr." },
+    { name: "CODEBASE_INDEX_LOG_MODE", deprecatedAliases: ["CODEBASE_INDEX_INDEX_LOG"], required: false, section: "Diagnostics", note: "Enables verbose index-progress logging on stderr." },
 
     // --- Hard block ---------------------------------------------------------------
     {

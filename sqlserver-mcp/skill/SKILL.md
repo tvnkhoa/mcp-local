@@ -45,7 +45,7 @@ list_tables(databases: [...])  ·  list_routines(databases: [...], namePattern: 
 
 One labelled slot per catalog, in order. A failing catalog gets `error` + `errorCode` in its own slot
 — check `failureCount`. `database` and `databases` are mutually exclusive; width is capped by
-`SQLSERVER_MAX_FANOUT`. **You supply the list** — the server does not know which catalogs are
+`SQLSERVER_MAX_FANOUT_DATABASES`. **You supply the list** — the server does not know which catalogs are
 tenants; if a table holds it, read that first. Prefer `databases` over hand-written `sys.tables`
 queries: you keep per-catalog labels and partial-failure handling.
 
@@ -74,7 +74,7 @@ execute_routine(routine, database?, schema?, parameters?)  // parameters: { Name
 **Treat every routine as a write.** The catalog records nothing about whether a procedure modifies
 data, so the tool is annotated destructive for all of them; a `Get…` name is not evidence. Get an
 explicit yes before calling it. Gates, in order: the flag, `SQLSERVER_READONLY_DATABASES` (refuses
-unconditionally), `SQLSERVER_EXEC_ALLOWLIST` if set. A refusal names its gate — report it, do not retry.
+unconditionally), `SQLSERVER_EXEC_ALLOWED_ROUTINES` if set. A refusal names its gate — report it, do not retry.
 
 ## Guardrails
 

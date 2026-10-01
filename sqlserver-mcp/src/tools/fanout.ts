@@ -58,7 +58,7 @@ export function resolveCatalogs(
   if (input.databases !== undefined && input.databases.length > maxFanout) {
     throw new PolicyViolationError(
       "fanout_limit_exceeded",
-      `Requested ${String(input.databases.length)} catalogs; SQLSERVER_MAX_FANOUT is ${String(maxFanout)}.`
+      `Requested ${String(input.databases.length)} catalogs; SQLSERVER_MAX_FANOUT_DATABASES is ${String(maxFanout)}.`
     );
   }
   return {

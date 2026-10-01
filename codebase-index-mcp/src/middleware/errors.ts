@@ -124,6 +124,6 @@ export function assertNoLlmRuntimePolicy(llmEnabled: boolean): void {
 
 export function assertRefactorApprovalPolicy(strictApproval: boolean, approvalSecret: string): void {
   if (strictApproval && approvalSecret.trim().length === 0) {
-    throw new Error("Startup blocked: CODEBASE_INDEX_REFACTOR_APPROVAL_SECRET is required when CODEBASE_INDEX_REFACTOR_STRICT_APPROVAL=true.");
+    throw new Error("Startup blocked: CODEBASE_INDEX_REFACTOR_APPROVAL_SECRET is required when CODEBASE_INDEX_REFACTOR_STRICT_APPROVAL_ENABLED=true.");
   }
 }

@@ -41,6 +41,9 @@ export {
 export type { EnvReader, EnvSource, NumberOptions } from "./env.js";
 export { createEnvReader, defaultEnvSource } from "./env.js";
 
+export type { EnvAliasTable } from "./envAliases.js";
+export { resolveEnvAliases } from "./envAliases.js";
+
 export type { EventLogger, LogFields, LogLevel, LogSink, Logger, LoggerOptions } from "./logging.js";
 export { LOG_LEVELS, createEventLogger, createLogger, createNullLogger, isLogLevel, parseLogLevel } from "./logging.js";
 

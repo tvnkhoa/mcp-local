@@ -12,7 +12,7 @@
  */
 
 export interface DescriptorLimits {
-  /** CODEBASE_INDEX_MAX_RESULT_LIMIT — upper bound on every `limit` parameter. */
+  /** CODEBASE_INDEX_MAX_LIMIT — upper bound on every `limit` parameter. */
   readonly maxResultLimit: number;
   /** CODEBASE_INDEX_MAX_DEPTH — upper bound on traversal depth. */
   readonly maxDepth: number;

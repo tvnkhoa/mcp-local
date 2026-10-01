@@ -136,8 +136,8 @@ export const observeEnv: readonly EnvField[] = [
   },
 
   // --- Result and time-window caps ---------------------------------------------
-  { name: "OBSERVE_DEFAULT_SIZE", required: false, default: "100", section: "Result and time-window caps" },
-  { name: "OBSERVE_MAX_SIZE", required: false, default: "1000", section: "Result and time-window caps" },
+  { name: "OBSERVE_DEFAULT_LIMIT", deprecatedAliases: ["OBSERVE_DEFAULT_SIZE"], required: false, default: "100", section: "Result and time-window caps" },
+  { name: "OBSERVE_MAX_LIMIT", deprecatedAliases: ["OBSERVE_MAX_SIZE"], required: false, default: "1000", section: "Result and time-window caps" },
   { name: "OBSERVE_DEFAULT_LOOKBACK_MS", required: false, default: "3600000", section: "Result and time-window caps", note: "1 hour." },
   { name: "OBSERVE_MAX_LOOKBACK_MS", required: false, default: "604800000", section: "Result and time-window caps", note: "7 days." },
   { name: "OBSERVE_TIMEOUT_MS", required: false, default: "30000", section: "Result and time-window caps" },
@@ -159,25 +159,25 @@ export const observeEnv: readonly EnvField[] = [
 
   // --- Per-profile field caps --------------------------------------------------
   {
-    name: "OBSERVE_MSG_MAX_NANO",
+    name: "OBSERVE_MESSAGE_MAX_CHARS_NANO", deprecatedAliases: ["OBSERVE_MSG_MAX_NANO"],
     required: false,
     codeDefault: "200",
     section: "Per-profile field caps (characters)",
     note: "Caps the long `message` field per response profile. verbose keeps full text."
   },
-  { name: "OBSERVE_MSG_MAX_COMPACT", required: false, codeDefault: "400", section: "Per-profile field caps (characters)" },
-  { name: "OBSERVE_MSG_MAX_STANDARD", required: false, codeDefault: "2000", section: "Per-profile field caps (characters)" },
-  { name: "OBSERVE_MSG_MAX_VERBOSE", required: false, codeDefault: "unlimited", section: "Per-profile field caps (characters)" },
+  { name: "OBSERVE_MESSAGE_MAX_CHARS_COMPACT", deprecatedAliases: ["OBSERVE_MSG_MAX_COMPACT"], required: false, codeDefault: "400", section: "Per-profile field caps (characters)" },
+  { name: "OBSERVE_MESSAGE_MAX_CHARS_STANDARD", deprecatedAliases: ["OBSERVE_MSG_MAX_STANDARD"], required: false, codeDefault: "2000", section: "Per-profile field caps (characters)" },
+  { name: "OBSERVE_MESSAGE_MAX_CHARS_VERBOSE", deprecatedAliases: ["OBSERVE_MSG_MAX_VERBOSE"], required: false, codeDefault: "unlimited", section: "Per-profile field caps (characters)" },
   {
-    name: "OBSERVE_EXC_MAX_NANO",
+    name: "OBSERVE_EXCEPTION_MAX_CHARS_NANO", deprecatedAliases: ["OBSERVE_EXC_MAX_NANO"],
     required: false,
     codeDefault: "0",
     section: "Per-profile field caps (characters)",
     note: "Caps the `exception` field. 0 = drop the field entirely, which is what nano does."
   },
-  { name: "OBSERVE_EXC_MAX_COMPACT", required: false, codeDefault: "800", section: "Per-profile field caps (characters)" },
-  { name: "OBSERVE_EXC_MAX_STANDARD", required: false, codeDefault: "6000", section: "Per-profile field caps (characters)" },
-  { name: "OBSERVE_EXC_MAX_VERBOSE", required: false, codeDefault: "unlimited", section: "Per-profile field caps (characters)" },
+  { name: "OBSERVE_EXCEPTION_MAX_CHARS_COMPACT", deprecatedAliases: ["OBSERVE_EXC_MAX_COMPACT"], required: false, codeDefault: "800", section: "Per-profile field caps (characters)" },
+  { name: "OBSERVE_EXCEPTION_MAX_CHARS_STANDARD", deprecatedAliases: ["OBSERVE_EXC_MAX_STANDARD"], required: false, codeDefault: "6000", section: "Per-profile field caps (characters)" },
+  { name: "OBSERVE_EXCEPTION_MAX_CHARS_VERBOSE", deprecatedAliases: ["OBSERVE_EXC_MAX_VERBOSE"], required: false, codeDefault: "unlimited", section: "Per-profile field caps (characters)" },
 
   // --- Node runtime ------------------------------------------------------------
   // Not an observe-mcp variable, but the hand-written .env.example documented it and the guidance

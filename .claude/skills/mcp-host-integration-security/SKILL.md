@@ -37,7 +37,7 @@ Never dump the process environment to "check" a config — test a var by name on
    scopes the tools use (pipelines need `read:pipeline:bitbucket`).
 4. **TLS is verified.** `NODE_TLS_REJECT_UNAUTHORIZED=0` disables verification for the *whole
    process*; prefer trusting the CA (`NODE_EXTRA_CA_CERTS` for the RDS bundle, `PGSSLMODE=verify-full`).
-5. **Approval secrets.** `POSTGRES_WRITE_APPROVAL_SECRET` / `CODEBASE_INDEX_REFACTOR_APPROVAL_SECRET`
+5. **Approval secrets.** `POSTGRES_APPROVAL_SECRET` / `CODEBASE_INDEX_REFACTOR_APPROVAL_SECRET`
    are auto-generated per process when unset — set them only to keep tokens valid across restarts,
    and then as secrets.
 6. **Installer changes.** A new field with `default` or `prompt` is *written* to the host config and

@@ -35,7 +35,7 @@ run_read_query(sql, explain: true)           // plan + estimated cost, does not 
   read-only transaction.
 - Bind values with `params` (`$1`, `$2`, …). Never concatenate user input into `sql`.
 - `limit` is clamped to `POSTGRES_MAX_LIMIT`, `timeoutMs` to `POSTGRES_MAX_TIMEOUT_MS`. EXPLAIN cost
-  above `POSTGRES_EXPLAIN_COST_WARN` adds a warning.
+  above `POSTGRES_EXPLAIN_COST_WARN_THRESHOLD` adds a warning.
 - `profile_table(table)` for null ratios / distinct counts; `compare_environments(source, target)` for
   schema drift; `data_diff(source, target, table)` for row-count + checksum equality.
 
@@ -65,7 +65,7 @@ write_rollback(rollbackId)
 
 ```
 migration_status(environment)
-migration_add(name)                          // needs POSTGRES_DOTNET_PROJECT (+ _STARTUP_PROJECT)
+migration_add(name)                          // needs POSTGRES_MIGRATION_DOTNET_PROJECT (+ _STARTUP_PROJECT)
 migration_preview(environment)               // pending SQL delta + approvalToken
 migration_dry_run(environment)
 migration_apply(previewId, approvalToken, environment, acknowledgeRisks?)

@@ -48,6 +48,6 @@ export const bitbucketEnv: readonly EnvField[] = [
   { name: "BITBUCKET_BASE_URL", required: false, codeDefault: "https://api.bitbucket.org/2.0", section: "HTTP" },
   { name: "BITBUCKET_TIMEOUT_MS", required: false, default: "30000", section: "HTTP", note: "Must be > 0, else the default applies." },
   { name: "BITBUCKET_MAX_RETRIES", required: false, default: "2", section: "HTTP", note: "Retries for transient failures (network / 429 / 5xx). 0 disables." },
-  { name: "BITBUCKET_DEFAULT_PAGELEN", required: false, codeDefault: "25", section: "HTTP" },
-  { name: "BITBUCKET_MAX_PAGELEN", required: false, codeDefault: "100", section: "HTTP" }
+  { name: "BITBUCKET_DEFAULT_LIMIT", deprecatedAliases: ["BITBUCKET_DEFAULT_PAGELEN"], required: false, codeDefault: "25", section: "HTTP" },
+  { name: "BITBUCKET_MAX_LIMIT", deprecatedAliases: ["BITBUCKET_MAX_PAGELEN"], required: false, codeDefault: "100", section: "HTTP" }
 ];

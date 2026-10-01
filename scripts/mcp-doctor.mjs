@@ -23,7 +23,7 @@
 
 import fs from "node:fs";
 import path from "node:path";
-import { SERVERS, serverDirPath, serverEntryPath, evaluateEnv, evaluateEnvValues, missingToolsMessage } from "./lib/manifest.mjs";
+import { SERVERS, serverDirPath, serverEntryPath, deprecatedEnvInUse, evaluateEnv, evaluateEnvValues, missingToolsMessage } from "./lib/manifest.mjs";
 import { staleTargets } from "./lib/generate.mjs";
 import { toConfigPath } from "./lib/jsonc.mjs";
 import { detectAgents, readServerEntries } from "./lib/agents.mjs";
@@ -194,6 +194,15 @@ async function checkServer(server, agents) {
         checks.push([scope, "warn", parts.join("; ")]);
       } else {
         checks.push([scope, "pass", "required env keys present"]);
+      }
+
+      // A former name still works — evaluateEnv counts it as present — so nothing else would say it
+      // is on its way out. Names only; the values are never read here.
+      const deprecated = deprecatedEnvInUse(server, presentKeys);
+      if (deprecated.length > 0) {
+        const deprecatedScope = instances.length === 1 ? "env names" : `env names ${inst.name}`;
+        checks.push([deprecatedScope, "warn", `deprecated: ${deprecated.map((d) => `${d.legacy} → ${d.canonical}`).join(", ")}`]);
+        fix.push(`rename the deprecated env keys in ${inst.name} (the old names still work for now)`);
       }
 
       // Presence was being treated as sufficient. It is not: a config whose keys are all correct and

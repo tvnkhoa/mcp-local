@@ -7,13 +7,13 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 
 /**
- * The S-43 alias table exists twice, and this is the check that keeps the copies honest.
+ * Every server's env alias table exists twice, and this is the check that keeps the copies honest.
  *
  * It has to exist twice: `@mcp/manifest` needs it to generate `.env.example`, the README table and
- * the installer prompts, while `postgres-mcp` needs it at runtime — and a server may not import the
- * workspace tooling packages (dependency rule 5, `servers/tooling-import`). ADR 0002 is about
- * exactly this shape of problem: three hand-copied SQL guardrail token lists drifted apart because
- * nothing compared them. So this test compares them.
+ * the installer prompts, while each server needs it at runtime (`src/config/aliases.ts`) — and a
+ * server may not import the workspace tooling packages (dependency rule 5, `servers/tooling-import`).
+ * ADR 0002 is about exactly this shape of problem: three hand-copied SQL guardrail token lists
+ * drifted apart because nothing compared them. So this test compares them, for all five servers.
  *
  * A root-level test rather than a server-level one, because only a script may import the manifest.
  */
@@ -24,20 +24,26 @@ const manifest = await import(pathToFileURL(path.join(ROOT, "packages/manifest/d
 const servers = manifest.SERVERS ?? manifest.servers;
 const postgres = servers.find((s) => s.key === "postgres-mcp");
 
+/** Server key → its directory. Every server keeps its table in the same place. */
+const SERVER_DIRS = {
+  "codebase-index": "codebase-index-mcp",
+  "postgres-mcp": "postgres-mcp",
+  "sqlserver-mcp": "sqlserver-mcp",
+  "observe-mcp": "observe-mcp",
+  "bitbucket-mcp": "bitbucket-mcp"
+};
+
 // Read the runtime table out of source rather than importing it: the server compiles to its own
 // dist/, which may not have been built when this runs.
-const aliasSource = fs.readFileSync(
-  path.join(ROOT, "postgres-mcp/src/config/aliases.ts"),
-  "utf8"
-);
-
-function parseTable(constName) {
-  const start = aliasSource.indexOf(`export const ${constName}`);
-  assert.notEqual(start, -1, `${constName} not found in aliases.ts`);
-  const open = aliasSource.indexOf("{", start);
-  const close = aliasSource.indexOf("\n};", open);
+function parseTable(source, constName) {
+  const start = source.indexOf(`export const ${constName}`);
+  if (start === -1) {
+    return {};
+  }
+  const open = source.indexOf("{", start);
+  const close = source.indexOf("\n};", open);
   assert.ok(close > open, `${constName} block not delimited as expected`);
-  const body = aliasSource.slice(open + 1, close);
+  const body = source.slice(open + 1, close);
   const table = {};
   for (const m of body.matchAll(/^\s*([A-Z0-9_]+):\s*\[([^\]]*)\]/gm)) {
     table[m[1]] = [...m[2].matchAll(/"([^"]+)"/g)].map((x) => x[1]);
@@ -45,44 +51,72 @@ function parseTable(constName) {
   return table;
 }
 
-const runtimeAliases = parseTable("ENV_ALIASES");
-const runtimePrefixAliases = parseTable("ENV_PREFIX_ALIASES");
+const runtime = Object.fromEntries(
+  Object.entries(SERVER_DIRS).map(([key, dir]) => {
+    const source = fs.readFileSync(path.join(ROOT, dir, "src/config/aliases.ts"), "utf8");
+    return [key, { names: parseTable(source, "ENV_ALIASES"), prefixes: parseTable(source, "ENV_PREFIX_ALIASES") }];
+  })
+);
+const runtimeAliases = runtime["postgres-mcp"].names;
+const runtimePrefixAliases = runtime["postgres-mcp"].prefixes;
 
-test("the runtime table was parsed at all", () => {
+test("every server is covered, and every runtime table was parsed at all", () => {
   // Guards against the regexes above silently matching nothing, which would make every
   // comparison below vacuously true.
-  assert.ok(Object.keys(runtimeAliases).length >= 15, "expected the full alias table");
+  assert.deepEqual(Object.keys(SERVER_DIRS).sort(), servers.map((s) => s.key).sort());
+  for (const server of servers) {
+    const declared = server.env.filter((f) => f.deprecatedAliases?.length && f.prefix === undefined).length;
+    assert.equal(Object.keys(runtime[server.key].names).length, declared, `${server.key}: runtime table size`);
+  }
+  assert.ok(Object.keys(runtimeAliases).length >= 15, "expected the full postgres alias table");
   assert.deepEqual(Object.keys(runtimePrefixAliases), ["POSTGRES_ENV_"]);
 });
 
-test("every manifest field with aliases has the same aliases at runtime", () => {
-  for (const field of postgres.env) {
-    if (!field.deprecatedAliases?.length) continue;
-    if (field.prefix !== undefined) {
-      assert.deepEqual(
-        runtimePrefixAliases[field.prefix],
-        [...field.deprecatedAliases],
-        `prefix aliases for ${field.name} differ between manifest and runtime`
-      );
-      continue;
+test("every manifest field with aliases has the same aliases at runtime, in every server", () => {
+  for (const server of servers) {
+    const table = runtime[server.key];
+    for (const field of server.env) {
+      if (!field.deprecatedAliases?.length) continue;
+      const actual = field.prefix !== undefined ? table.prefixes[field.prefix] : table.names[field.name];
+      assert.deepEqual(actual, [...field.deprecatedAliases], `${server.key}: aliases for ${field.name} differ between manifest and runtime`);
     }
-    assert.deepEqual(
-      runtimeAliases[field.name],
-      [...field.deprecatedAliases],
-      `aliases for ${field.name} differ between manifest and runtime`
-    );
   }
 });
 
-test("the runtime table declares nothing the manifest does not", () => {
-  const byName = new Map(postgres.env.map((f) => [f.name, f]));
-  for (const name of Object.keys(runtimeAliases)) {
-    const field = byName.get(name);
-    assert.ok(field, `runtime honours ${name}, which is not in the manifest`);
-    assert.ok(
-      field.deprecatedAliases?.length,
-      `runtime declares aliases for ${name}, but the manifest does not — generated docs would omit them`
-    );
+test("no runtime table declares anything its manifest does not", () => {
+  for (const server of servers) {
+    const byName = new Map(server.env.map((f) => [f.name, f]));
+    for (const name of Object.keys(runtime[server.key].names)) {
+      const field = byName.get(name);
+      assert.ok(field, `${server.key} honours ${name}, which is not in the manifest`);
+      assert.ok(field.deprecatedAliases?.length, `${server.key} declares aliases for ${name}, but the manifest does not — generated docs would omit them`);
+    }
+  }
+});
+
+test("no former name is read in a server's source outside its alias table", () => {
+  // The rename is only real if the server reads the new name. A config module that still asked for
+  // the old one would work only while the alias copied it across, and stop the day the alias goes.
+  // postgres-mcp's S-43 names have a stricter test of their own below.
+  for (const [key, dir] of Object.entries(SERVER_DIRS)) {
+    const former = servers.find((s) => s.key === key).env.flatMap((f) => (f.prefix === undefined ? f.deprecatedAliases ?? [] : []));
+    if (former.length === 0) continue;
+    const pattern = new RegExp(`(?<![A-Z0-9_])(${former.join("|")})(?![A-Z0-9_])`);
+    const offenders = [];
+    const walk = (d) => {
+      for (const name of fs.readdirSync(d)) {
+        const full = path.join(d, name);
+        if (fs.statSync(full).isDirectory()) { walk(full); continue; }
+        if (!name.endsWith(".ts") || name.endsWith(".test.ts")) continue;
+        const rel = path.relative(ROOT, full).replace(/\\/g, "/");
+        if (rel.endsWith("config/aliases.ts") || rel.endsWith("migration/efRunner.ts")) continue;
+        fs.readFileSync(full, "utf8").split("\n").forEach((line, i) => {
+          if (pattern.test(line)) offenders.push(`${rel}:${i + 1}  ${line.trim()}`);
+        });
+      }
+    };
+    walk(path.join(ROOT, dir, "src"));
+    assert.deepEqual(offenders, [], `former env names still read in source:\n${offenders.join("\n")}`);
   }
 });
 

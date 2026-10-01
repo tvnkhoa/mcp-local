@@ -550,7 +550,7 @@ Phase 2 of the DDL migration plan. Each sub-item is a gap that the DDL lane does
 
 - **B-15.1 — no `lock_timeout`.** ✅ DONE 2026-10-01 (PG-MIG-009). Not yet verified against a real
   Npgsql: do that with `verify:live`. The original description follows. `dotnet ef database update` runs with none, so a busy table holds
-  the apply until `POSTGRES_DOTNET_TIMEOUT_MS` (120 s) kills the process. Fix: merge
+  the apply until `POSTGRES_MIGRATION_DOTNET_TIMEOUT_MS` (120 s) kills the process. Fix: merge
   `Options=-c lock_timeout=N` into the connection string the child receives
   (`CH_DB_CONNECTION`, the outbound contract). This needs Npgsql 5 or later in the consuming project. Add a new `POSTGRES_MIGRATION_LOCK_TIMEOUT_MS`, which takes
   postgres-mcp from 29 to 30 env vars. Changing the default is a behaviour change and needs a

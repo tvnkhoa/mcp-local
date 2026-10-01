@@ -36,8 +36,8 @@ npm run build     # tsc → dist/
 | `BITBUCKET_BASE_URL` | no | `https://api.bitbucket.org/2.0` *(code)* | — |
 | `BITBUCKET_TIMEOUT_MS` | no | `30000` | Must be > 0, else the default applies. |
 | `BITBUCKET_MAX_RETRIES` | no | `2` | Retries for transient failures (network / 429 / 5xx). 0 disables. |
-| `BITBUCKET_DEFAULT_PAGELEN` | no | `25` *(code)* | — |
-| `BITBUCKET_MAX_PAGELEN` | no | `100` *(code)* | — |
+| `BITBUCKET_DEFAULT_LIMIT` | no | `25` *(code)* | renamed — still accepts `BITBUCKET_DEFAULT_PAGELEN` |
+| `BITBUCKET_MAX_LIMIT` | no | `100` *(code)* | renamed — still accepts `BITBUCKET_MAX_PAGELEN` |
 
 11 variables. Defaults marked *(code)* are the server's own fallback and are **not** written into your agent config — set them only to override.
 

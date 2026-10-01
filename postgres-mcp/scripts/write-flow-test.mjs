@@ -167,7 +167,7 @@ async function main() {
     POSTGRES_CONNECTION: CONN,
     PGSSLMODE: "disable",
     POSTGRES_WRITE_ENABLED: "true",
-    POSTGRES_WRITE_APPROVAL_SECRET: "write-flow-test-secret"
+    POSTGRES_APPROVAL_SECRET: "write-flow-test-secret"
   });
 
   const transport = new StdioClientTransport({

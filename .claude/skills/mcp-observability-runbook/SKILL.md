@@ -35,7 +35,7 @@ Events the SDK already emits — do not duplicate: `server_starting`, `server_re
 
 codebase-index extras: `CODEBASE_INDEX_TELEMETRY_ENABLED` (+ `_SAMPLE_RATE`) writes
 `[tool-telemetry] {toolName, elapsedMs, responseBytes, resultCount, profile, isError, errorCode}`
-lines to stderr; `CODEBASE_INDEX_INDEX_LOG` enables index-progress logging; `index_runs` records
+lines to stderr; `CODEBASE_INDEX_LOG_MODE` enables index-progress logging; `index_runs` records
 per-run metadata (`health_check` surfaces the latest).
 
 ## Triage runbook

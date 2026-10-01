@@ -12,8 +12,8 @@ export function resolvePostPhasePolicy(profile: PerformanceProfile): {
   resolveImplementsInPost: boolean;
 } {
   const configuredMaxRows = nonNegativeNumberFromEnv("CODEBASE_INDEX_MAX_UNRESOLVED_RESOLVE_ROWS");
-  const configuredResolveTypeRefs = parseOptionalBooleanEnv(process.env.CODEBASE_INDEX_POST_RESOLVE_TYPE_REFS);
-  const configuredResolvePropertyRefs = parseOptionalBooleanEnv(process.env.CODEBASE_INDEX_POST_RESOLVE_PROPERTY_REFS);
+  const configuredResolveTypeRefs = parseOptionalBooleanEnv(process.env.CODEBASE_INDEX_POST_RESOLVE_TYPE_REFS_ENABLED);
+  const configuredResolvePropertyRefs = parseOptionalBooleanEnv(process.env.CODEBASE_INDEX_POST_RESOLVE_PROPERTY_REFS_ENABLED);
 
   if (profile === "very-large") {
     return {

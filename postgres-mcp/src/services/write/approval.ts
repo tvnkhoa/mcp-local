@@ -81,7 +81,7 @@ export function verifyApprovalToken(
  * POSTGRES_WRITE_ENABLED=true, while apply still requires a real preview-issued, unforgeable
  * token (the "review before approve" gate is the preview→apply round-trip itself).
  *
- * An explicit POSTGRES_WRITE_APPROVAL_SECRET is still honored (e.g. if an operator wants
+ * An explicit POSTGRES_APPROVAL_SECRET is still honored (e.g. if an operator wants
  * tokens to stay valid across restarts), but it is no longer required.
  *
  * NOTE: deliberately NOT the `resolveApprovalSecret` exported by `@mcp/shared`, and

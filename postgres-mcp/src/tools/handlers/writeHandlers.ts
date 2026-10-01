@@ -317,7 +317,7 @@ function assertEnabled(config: WriteConfig): void {
   if (!config.enabled) {
     throw new PolicyViolationError(
       "WRITE_DISABLED",
-      "Data modification is disabled. Set POSTGRES_WRITE_ENABLED=true and POSTGRES_WRITE_APPROVAL_SECRET to enable."
+      "Data modification is disabled. Set POSTGRES_WRITE_ENABLED=true and POSTGRES_APPROVAL_SECRET to enable."
     );
   }
 }

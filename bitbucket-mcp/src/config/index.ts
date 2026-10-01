@@ -4,12 +4,16 @@ import { PolicyViolationError } from "../middleware/errors.js";
 
 import { createEnvReader, defaultEnvSource } from "@mcp/core";
 
+import { resolveAliases } from "./aliases.js";
+
 /**
  * The one env reader for this server. The four `*FromEnv` helpers below used to
  * be hand-copied here and in the sibling servers; they now delegate to
  * @mcp/core, which is the only module in the platform permitted to touch
  * `process.env`.
  */
+// Former names first: the snapshot below is taken once, here, at module load.
+resolveAliases();
 const env = createEnvReader(defaultEnvSource());
 
 export type BitbucketConfig = {
@@ -86,8 +90,8 @@ export function loadConfig(): BitbucketConfig {
   const defaultRepoRaw = process.env.BITBUCKET_DEFAULT_REPO?.trim();
 
   // Bitbucket caps pagelen at 100, so floor to an integer and never exceed that.
-  const defaultPagelen = Math.min(100, Math.floor(numberFromEnv("BITBUCKET_DEFAULT_PAGELEN", 25)));
-  const maxPagelen = Math.min(100, Math.max(defaultPagelen, Math.floor(numberFromEnv("BITBUCKET_MAX_PAGELEN", 100))));
+  const defaultPagelen = Math.min(100, Math.floor(numberFromEnv("BITBUCKET_DEFAULT_LIMIT", 25)));
+  const maxPagelen = Math.min(100, Math.max(defaultPagelen, Math.floor(numberFromEnv("BITBUCKET_MAX_LIMIT", 100))));
 
   return {
     baseUrl,

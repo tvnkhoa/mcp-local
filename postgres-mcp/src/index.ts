@@ -63,7 +63,7 @@ const limits: QueryLimits = {
   maxLimit: numberFromEnv("POSTGRES_MAX_LIMIT", 2000),
   defaultTimeoutMs: numberFromEnv("POSTGRES_DEFAULT_TIMEOUT_MS", 30_000),
   maxTimeoutMs: numberFromEnv("POSTGRES_MAX_TIMEOUT_MS", 60_000),
-  explainCostWarn: numberFromEnv("POSTGRES_EXPLAIN_COST_WARN", 1_000_000)
+  explainCostWarn: numberFromEnv("POSTGRES_EXPLAIN_COST_WARN_THRESHOLD", 1_000_000)
 };
 
 const connections = new ConnectionManager({
@@ -75,7 +75,7 @@ const connections = new ConnectionManager({
 });
 
 // One shared HMAC secret for both write + migration approvals. Auto-generated per
-// process when POSTGRES_WRITE_APPROVAL_SECRET is unset — the token is signed and verified
+// process when POSTGRES_APPROVAL_SECRET is unset — the token is signed and verified
 // entirely in-process against an in-memory preview store, so no client config is
 // needed to enable writes (POSTGRES_WRITE_ENABLED=true is the on switch).
 const APPROVAL_SECRET = resolveApprovalSecret(approvalSecretFromEnv());
@@ -91,7 +91,7 @@ const writeStore = new WritePreviewStore();
 const migrationConfig: MigrationConfig = {
   enabled: parseBoolEnv("POSTGRES_MIGRATION_ENABLED"),
   ...dotnetProjectsFromEnv(),
-  timeoutMs: numberFromEnv("POSTGRES_DOTNET_TIMEOUT_MS", 120_000),
+  timeoutMs: numberFromEnv("POSTGRES_MIGRATION_DOTNET_TIMEOUT_MS", 120_000),
   lockTimeoutMs: migrationLockTimeoutFromEnv(5000),
   approvalSecret: APPROVAL_SECRET,
   // Longer default (1h) than write previews: migration_apply against a prod-like env is

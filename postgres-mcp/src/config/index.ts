@@ -53,7 +53,7 @@ function env(): EnvReader {
  *
  * Body copied verbatim from `index.ts`, deliberately NOT replaced with
  * `envReader.positiveNumber`: that helper floors its result, and these values include
- * `POSTGRES_EXPLAIN_COST_WARN` and TTLs where a silent change of parsing is a change of behaviour. The
+ * `POSTGRES_EXPLAIN_COST_WARN_THRESHOLD` and TTLs where a silent change of parsing is a change of behaviour. The
  * point of S-41 is to move the read, not to re-decide what it means.
  *
  * The read goes through `env().raw` rather than `process.env` directly so that a caller which never
@@ -90,11 +90,11 @@ function stringFromEnv(key: string): string {
 }
 
 /**
- * The raw `POSTGRES_WRITE_APPROVAL_SECRET`, before `resolveApprovalSecret` decides whether to generate
+ * The raw `POSTGRES_APPROVAL_SECRET`, before `resolveApprovalSecret` decides whether to generate
  * one. Empty string when unset, which is what triggers per-process generation.
  */
 export function approvalSecretFromEnv(): string {
-  return env().string("POSTGRES_WRITE_APPROVAL_SECRET", "");
+  return env().string("POSTGRES_APPROVAL_SECRET", "");
 }
 
 /**
@@ -135,7 +135,7 @@ export function migrationLockTimeoutFromEnv(fallback: number): number {
 /** `dotnet ef` project paths. Empty when unset; the migration gate reports that as unconfigured. */
 export function dotnetProjectsFromEnv(): { project: string; startupProject: string } {
   return {
-    project: stringFromEnv("POSTGRES_DOTNET_PROJECT"),
-    startupProject: stringFromEnv("POSTGRES_DOTNET_STARTUP_PROJECT")
+    project: stringFromEnv("POSTGRES_MIGRATION_DOTNET_PROJECT"),
+    startupProject: stringFromEnv("POSTGRES_MIGRATION_DOTNET_STARTUP_PROJECT")
   };
 }

@@ -266,7 +266,7 @@ test("all three write tools refuse when POSTGRES_WRITE_ENABLED is off", async ()
   const expected = {
     code: "WRITE_DISABLED",
     message:
-      "Data modification is disabled. Set POSTGRES_WRITE_ENABLED=true and POSTGRES_WRITE_APPROVAL_SECRET to enable."
+      "Data modification is disabled. Set POSTGRES_WRITE_ENABLED=true and POSTGRES_APPROVAL_SECRET to enable."
   };
   assert.deepEqual((await bodyOf("write_preview", { sql: "update t set a=1 where id=1" })).payload, expected);
   assert.deepEqual((await bodyOf("write_apply", { previewId: "p", approvalToken: "t" })).payload, expected);
@@ -371,7 +371,7 @@ test("all five migration tools refuse when POSTGRES_MIGRATION_ENABLED is off", a
   const expected = {
     code: "MIGRATION_DISABLED",
     message:
-      "Migration tools are disabled. Set POSTGRES_MIGRATION_ENABLED=true, POSTGRES_DOTNET_PROJECT and POSTGRES_DOTNET_STARTUP_PROJECT to enable."
+      "Migration tools are disabled. Set POSTGRES_MIGRATION_ENABLED=true, POSTGRES_MIGRATION_DOTNET_PROJECT and POSTGRES_MIGRATION_DOTNET_STARTUP_PROJECT to enable."
   };
   for (const [name, args] of [
     ["migration_status", {}],
@@ -388,7 +388,7 @@ test("enabling migrations without a project still refuses, before spawning dotne
   const on = { migrationConfig: { ...MIGRATION_OFF, enabled: true } };
   assert.deepEqual((await bodyOf("migration_status", {}, on)).payload, {
     code: "MIGRATION_PROJECT_UNCONFIGURED",
-    message: "POSTGRES_DOTNET_PROJECT and POSTGRES_DOTNET_STARTUP_PROJECT must be set for migration tools."
+    message: "POSTGRES_MIGRATION_DOTNET_PROJECT and POSTGRES_MIGRATION_DOTNET_STARTUP_PROJECT must be set for migration tools."
   });
 });
 

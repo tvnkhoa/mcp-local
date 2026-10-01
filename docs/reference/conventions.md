@@ -89,6 +89,29 @@ A field carries either a `default` (which the installer *writes* into
 `~/.claude.json`, pinning it) or a `codeDefault` (documentation of what the server falls back to when
 unset, never written anywhere). Never both. No secret has a committed default.
 
+### Env-var naming
+
+Agreed with the operator on 2026-10-01, when about 30 names were brought into line:
+
+| Rule | Example |
+|---|---|
+| `<SERVER>_[<LANE>_]<NOUN>[_<UNIT>]`; a lane's vars carry the lane | `POSTGRES_MIGRATION_DOTNET_PROJECT`, `SQLSERVER_EXEC_ALLOWED_ROUTINES` |
+| A switch ends `_ENABLED`; a choice of modes is `_MODE` | `CODEBASE_INDEX_WATCH_AUTO_START_ENABLED`, `CODEBASE_INDEX_LOG_MODE` |
+| The unit is spelled out | `_MS`, `_BYTES`, `_CHARS` (`OBSERVE_MESSAGE_MAX_CHARS_COMPACT`) |
+| A row bound is `_DEFAULT_LIMIT` / `_MAX_LIMIT` on every server, whatever the backend calls it | `OBSERVE_MAX_LIMIT`, not `_MAX_SIZE`; `BITBUCKET_MAX_LIMIT`, not `_MAX_PAGELEN` |
+| A default/max pair only where the tool lets the caller pass the value | `POSTGRES_DEFAULT_TIMEOUT_MS` + `_MAX_TIMEOUT_MS`, but a single `OBSERVE_TIMEOUT_MS` |
+| No abbreviations | not `MSG`, `EXC`, `SUBTX`, `PAGELEN` |
+| A name shared by several lanes does not name one of them | `POSTGRES_APPROVAL_SECRET` signs write, EF and DDL tokens |
+| Another tool's convention is kept verbatim, with no alias and no default | `PGSSLMODE`, `NODE_TLS_REJECT_UNAUTHORIZED`, `NODE_EXTRA_CA_CERTS` |
+
+**Renaming never breaks an install.** The old name goes into the field's `deprecatedAliases`, and
+into the same server's `src/config/aliases.ts`, which `@mcp/core`'s `resolveEnvAliases` applies
+before any configuration is read: the canonical name wins, and a former name works with a one-time
+warning on stderr. `scripts/lib/envAliases.test.mjs` fails when a server's table and its manifest
+differ, or when a server's source still reads a former name. `mcp:doctor` reports a config that
+still sets one, as `old → new`. Documentation uses only the canonical name (`docs:check`
+`env-names`); historical documents keep the names they were written with.
+
 ## 4. Script vocabulary
 
 Every server answers to the same four, which is what makes the root aggregates work uniformly:

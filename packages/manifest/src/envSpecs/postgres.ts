@@ -87,8 +87,8 @@ export const postgresEnv: readonly EnvField[] = [
   { name: "POSTGRES_DEFAULT_TIMEOUT_MS", deprecatedAliases: ["MCP_DB_DEFAULT_TIMEOUT_MS"], required: false, default: "30000", section: "Query bounds" },
   { name: "POSTGRES_MAX_TIMEOUT_MS", deprecatedAliases: ["MCP_DB_MAX_TIMEOUT_MS"], required: false, default: "60000", section: "Query bounds" },
   {
-    name: "POSTGRES_EXPLAIN_COST_WARN",
-    deprecatedAliases: ["PG_EXPLAIN_COST_WARN"],
+    name: "POSTGRES_EXPLAIN_COST_WARN_THRESHOLD",
+    deprecatedAliases: ["POSTGRES_EXPLAIN_COST_WARN", "PG_EXPLAIN_COST_WARN"],
     required: false,
     codeDefault: "1000000",
     section: "Query bounds",
@@ -105,8 +105,8 @@ export const postgresEnv: readonly EnvField[] = [
     note: "Data writes (preview→apply→rollback) OFF unless true. Parsed strictly: exact \"true\" or \"1\"."
   },
   {
-    name: "POSTGRES_WRITE_APPROVAL_SECRET",
-    deprecatedAliases: ["PG_WRITE_APPROVAL_SECRET"],
+    name: "POSTGRES_APPROVAL_SECRET",
+    deprecatedAliases: ["POSTGRES_WRITE_APPROVAL_SECRET", "PG_WRITE_APPROVAL_SECRET"],
     required: false,
     secret: true,
     section: "Data writes (OFF unless enabled)",
@@ -125,9 +125,9 @@ export const postgresEnv: readonly EnvField[] = [
     note: "EF Core migration tooling OFF unless true. Parsed strictly: exact \"true\" or \"1\"."
   },
   { name: "POSTGRES_MIGRATION_PREVIEW_TTL_MS", deprecatedAliases: ["PG_MIGRATION_PREVIEW_TTL_MS"], required: false, codeDefault: "3600000", section: "EF Core migrations (OFF unless enabled)", note: "Migration-preview lifetime — 1 hour." },
-  { name: "POSTGRES_DOTNET_PROJECT", deprecatedAliases: ["CH_DOTNET_PROJECT"], required: false, section: "EF Core migrations (OFF unless enabled)", note: "Path to the EF Core project (the one holding the DbContext)." },
-  { name: "POSTGRES_DOTNET_STARTUP_PROJECT", deprecatedAliases: ["CH_DOTNET_STARTUP_PROJECT"], required: false, section: "EF Core migrations (OFF unless enabled)", note: "Startup project passed to `dotnet ef --startup-project`." },
-  { name: "POSTGRES_DOTNET_TIMEOUT_MS", deprecatedAliases: ["PG_DOTNET_TIMEOUT_MS"], required: false, codeDefault: "120000", section: "EF Core migrations (OFF unless enabled)", note: "Timeout for a `dotnet ef` invocation." },
+  { name: "POSTGRES_MIGRATION_DOTNET_PROJECT", deprecatedAliases: ["POSTGRES_DOTNET_PROJECT", "CH_DOTNET_PROJECT"], required: false, section: "EF Core migrations (OFF unless enabled)", note: "Path to the EF Core project (the one holding the DbContext)." },
+  { name: "POSTGRES_MIGRATION_DOTNET_STARTUP_PROJECT", deprecatedAliases: ["POSTGRES_DOTNET_STARTUP_PROJECT", "CH_DOTNET_STARTUP_PROJECT"], required: false, section: "EF Core migrations (OFF unless enabled)", note: "Startup project passed to `dotnet ef --startup-project`." },
+  { name: "POSTGRES_MIGRATION_DOTNET_TIMEOUT_MS", deprecatedAliases: ["POSTGRES_DOTNET_TIMEOUT_MS", "PG_DOTNET_TIMEOUT_MS"], required: false, codeDefault: "120000", section: "EF Core migrations (OFF unless enabled)", note: "Timeout for a `dotnet ef` invocation." },
   { name: "POSTGRES_MIGRATION_LOCK_TIMEOUT_MS", required: false, codeDefault: "5000", section: "EF Core migrations (OFF unless enabled)", note: "lock_timeout for every `dotnet ef` session, via Npgsql `Options` (Npgsql 5+); also used by migration_dry_run. 0 = off (server default)." },
 
   // --- Raw-SQL DDL migrations (gated) ------------------------------------------

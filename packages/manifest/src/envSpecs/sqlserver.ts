@@ -81,7 +81,7 @@ export const sqlserverEnv: readonly EnvField[] = [
   { name: "SQLSERVER_DEFAULT_TIMEOUT_MS", required: false, codeDefault: "30000", section: "Query bounds" },
   { name: "SQLSERVER_MAX_TIMEOUT_MS", required: false, codeDefault: "60000", section: "Query bounds" },
   {
-    name: "SQLSERVER_MAX_FANOUT",
+    name: "SQLSERVER_MAX_FANOUT_DATABASES", deprecatedAliases: ["SQLSERVER_MAX_FANOUT"],
     required: false,
     codeDefault: "25",
     section: "Query bounds",
@@ -89,7 +89,7 @@ export const sqlserverEnv: readonly EnvField[] = [
   },
 
   // --- Connection pools --------------------------------------------------------
-  { name: "SQLSERVER_POOL_MAX", required: false, codeDefault: "5", section: "Connection pools", note: "Connections per (environment, catalog) pool." },
+  { name: "SQLSERVER_POOL_MAX_CONNECTIONS", deprecatedAliases: ["SQLSERVER_POOL_MAX"], required: false, codeDefault: "5", section: "Connection pools", note: "Connections per (environment, catalog) pool." },
   {
     name: "SQLSERVER_MAX_POOLS",
     required: false,
@@ -108,7 +108,7 @@ export const sqlserverEnv: readonly EnvField[] = [
     note: "execute_routine is OFF unless true. Parsed strictly: exact \"true\" or \"1\". SQL Server records nothing about whether a procedure writes, so enabling this grants write capability regardless of which routines you intend to call."
   },
   {
-    name: "SQLSERVER_EXEC_ALLOWLIST",
+    name: "SQLSERVER_EXEC_ALLOWED_ROUTINES", deprecatedAliases: ["SQLSERVER_EXEC_ALLOWLIST"],
     required: false,
     codeDefault: "(empty = no narrowing)",
     section: "Stored-procedure execution (OFF unless enabled)",

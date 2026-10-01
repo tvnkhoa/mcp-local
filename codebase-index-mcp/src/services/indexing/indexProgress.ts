@@ -14,7 +14,7 @@ import { INDEX_LOG_MODE } from "../../config/envConfig.js";
  *   - Routine `[index-*]` narration is silenced by default (it was debug noise);
  *     the run ends with a single summary line.
  *
- * Log gating (CODEBASE_INDEX_INDEX_LOG):
+ * Log gating (CODEBASE_INDEX_LOG_MODE):
  *   - unset   → quiet: only warnings + the final summary line reach stderr.
  *   - verbose → restore full line-by-line `[index-*]` logs (CI / debugging a hang).
  *   - quiet   → suppress even the final summary line.
@@ -29,7 +29,7 @@ const SILENT = LOG_MODE === "quiet";
 /** Minimum gap between progress notifications, to avoid flooding the host. */
 const NOTIFY_THROTTLE_MS = 300;
 
-/** Routine progress narration. Silent unless CODEBASE_INDEX_INDEX_LOG=verbose. */
+/** Routine progress narration. Silent unless CODEBASE_INDEX_LOG_MODE=verbose. */
 export function indexLog(msg: string): void {
   if (!VERBOSE_LOG) return;
   process.stderr.write(msg.endsWith("\n") ? msg : `${msg}\n`);

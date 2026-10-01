@@ -34,13 +34,13 @@ test("database and databases are mutually exclusive", () => {
   );
 });
 
-test("a fan-out wider than SQLSERVER_MAX_FANOUT is refused, and the message names the limit", () => {
+test("a fan-out wider than SQLSERVER_MAX_FANOUT_DATABASES is refused, and the message names the limit", () => {
   assert.throws(
     () => resolveCatalogs({ databases: Array.from({ length: 26 }, (_, i) => `db${String(i)}`) }, 25),
     (error: unknown) =>
       error instanceof PolicyViolationError &&
       error.code === "fanout_limit_exceeded" &&
-      /Requested 26 catalogs; SQLSERVER_MAX_FANOUT is 25/.test(error.message)
+      /Requested 26 catalogs; SQLSERVER_MAX_FANOUT_DATABASES is 25/.test(error.message)
   );
 });
 

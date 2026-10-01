@@ -51,7 +51,7 @@ to anything but a human reading the body. Use `get_routine_definition` first.
 
 Three gates run in order — the feature flag, then `SQLSERVER_READONLY_DATABASES` (which refuses
 unconditionally, the analogue of `postgres-mcp`'s force-read-only `prod`), then
-`SQLSERVER_EXEC_ALLOWLIST` if one is set. The tool never accepts statement text; it takes a routine
+`SQLSERVER_EXEC_ALLOWED_ROUTINES` if one is set. The tool never accepts statement text; it takes a routine
 name and typed parameters, which the driver binds.
 
 ## Configuration (env)
@@ -70,12 +70,12 @@ name and typed parameters, which the driver binds.
 | `SQLSERVER_MAX_LIMIT` | no | `2000` *(code)* | Ceiling a call's maxRows is clamped to. T-SQL has no LIMIT, so the bound is applied by cancelling the row stream, never by rewriting the statement. |
 | `SQLSERVER_DEFAULT_TIMEOUT_MS` | no | `30000` *(code)* | — |
 | `SQLSERVER_MAX_TIMEOUT_MS` | no | `60000` *(code)* | — |
-| `SQLSERVER_MAX_FANOUT` | no | `25` *(code)* | Most catalogs one run_read_query call may address via `databases`. |
-| `SQLSERVER_POOL_MAX` | no | `5` *(code)* | Connections per (environment, catalog) pool. |
+| `SQLSERVER_MAX_FANOUT_DATABASES` | no | `25` *(code)* | renamed — still accepts `SQLSERVER_MAX_FANOUT` · Most catalogs one run_read_query call may address via `databases`. |
+| `SQLSERVER_POOL_MAX_CONNECTIONS` | no | `5` *(code)* | renamed — still accepts `SQLSERVER_POOL_MAX` · Connections per (environment, catalog) pool. |
 | `SQLSERVER_MAX_POOLS` | no | `12` *(code)* | Total pools held open, across every environment and catalog; least-recently-used are closed past this. One pool per catalog means an unbounded map is a connection leak. |
 | `SQLSERVER_POOL_IDLE_TIMEOUT_MS` | no | `30000` *(code)* | — |
 | `SQLSERVER_EXEC_ENABLED` | no | `false` | execute_routine is OFF unless true. Parsed strictly: exact "true" or "1". SQL Server records nothing about whether a procedure writes, so enabling this grants write capability regardless of which routines you intend to call. |
-| `SQLSERVER_EXEC_ALLOWLIST` | no | `(empty = no narrowing)` *(code)* | Comma-separated glob patterns over `schema.routine`, e.g. `dbo.Report_*,dbo.Get*`. `*` is the whole grammar. Empty does NOT deny — the flag above is the gate. |
+| `SQLSERVER_EXEC_ALLOWED_ROUTINES` | no | `(empty = no narrowing)` *(code)* | renamed — still accepts `SQLSERVER_EXEC_ALLOWLIST` · Comma-separated glob patterns over `schema.routine`, e.g. `dbo.Report_*,dbo.Get*`. `*` is the whole grammar. Empty does NOT deny — the flag above is the gate. |
 | `SQLSERVER_EXEC_TIMEOUT_MS` | no | `120000` *(code)* | — |
 | `NODE_EXTRA_CA_CERTS` | no | — | Absolute path to a PEM bundle added to Node's trust store. This is the fix for `TLS certificate verification failed` and the only one of the three that keeps the certificate verified. AWS RDS chains to an Amazon RDS CA that Node does not ship: download the bundle for your region from https://truststore.pki.rds.amazonaws.com/<region>/<region>-bundle.pem and point this at it. |
 | `NODE_TLS_REJECT_UNAUTHORIZED` | no | — | Node-level TLS switch. A blunt last resort: it disables verification for every TLS connection the process makes. Prefer NODE_EXTRA_CA_CERTS, which fixes the cause; failing that TrustServerCertificate=true, which at least scopes the damage to this connection. Both of those leave the traffic encrypted but unauthenticated — reachable by anyone who can get in the path. |

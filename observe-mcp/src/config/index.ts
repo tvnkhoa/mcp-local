@@ -5,6 +5,8 @@ import type { ResponseProfile } from "../middleware/responseFormatter.js";
 
 import { createEnvReader, defaultEnvSource } from "@mcp/core";
 
+import { resolveAliases } from "./aliases.js";
+
 /**
  * The one env reader for this server. The four `*FromEnv` helpers below used to
  * be hand-copied here and in the sibling servers; they now delegate to
@@ -16,6 +18,8 @@ import { createEnvReader, defaultEnvSource } from "@mcp/core";
  * result/window limits, response field caps, the namespace-classification
  * prefixes, and the shared credential fallback.
  */
+// Former names first: the snapshot below is taken once, here, at module load.
+resolveAliases();
 const env = createEnvReader(defaultEnvSource());
 
 /** Per-profile character caps for the long `message`/`exception` fields. Infinity = no cap; exception 0 = drop. */
@@ -155,10 +159,10 @@ const DEFAULT_UNKNOWN_SERVICE_SENTINEL = "unknown_service:dotnet";
 function buildFieldCaps(): Record<ResponseProfile, FieldCaps> {
   const INF = Number.POSITIVE_INFINITY;
   return {
-    nano: { message: nonNegFromEnv("OBSERVE_MSG_MAX_NANO", 200), exception: nonNegFromEnv("OBSERVE_EXC_MAX_NANO", 0) },
-    compact: { message: nonNegFromEnv("OBSERVE_MSG_MAX_COMPACT", 400), exception: nonNegFromEnv("OBSERVE_EXC_MAX_COMPACT", 800) },
-    standard: { message: nonNegFromEnv("OBSERVE_MSG_MAX_STANDARD", 2000), exception: nonNegFromEnv("OBSERVE_EXC_MAX_STANDARD", 6000) },
-    verbose: { message: nonNegFromEnv("OBSERVE_MSG_MAX_VERBOSE", INF), exception: nonNegFromEnv("OBSERVE_EXC_MAX_VERBOSE", INF) }
+    nano: { message: nonNegFromEnv("OBSERVE_MESSAGE_MAX_CHARS_NANO", 200), exception: nonNegFromEnv("OBSERVE_EXCEPTION_MAX_CHARS_NANO", 0) },
+    compact: { message: nonNegFromEnv("OBSERVE_MESSAGE_MAX_CHARS_COMPACT", 400), exception: nonNegFromEnv("OBSERVE_EXCEPTION_MAX_CHARS_COMPACT", 800) },
+    standard: { message: nonNegFromEnv("OBSERVE_MESSAGE_MAX_CHARS_STANDARD", 2000), exception: nonNegFromEnv("OBSERVE_EXCEPTION_MAX_CHARS_STANDARD", 6000) },
+    verbose: { message: nonNegFromEnv("OBSERVE_MESSAGE_MAX_CHARS_VERBOSE", INF), exception: nonNegFromEnv("OBSERVE_EXCEPTION_MAX_CHARS_VERBOSE", INF) }
   };
 }
 
@@ -244,8 +248,8 @@ export function resolveAuthHeader(source: AuthSource = {}, envName?: string): st
 }
 
 export function loadLimits(): ObserveLimits {
-  const defaultSize = numberFromEnv("OBSERVE_DEFAULT_SIZE", 100);
-  const maxSize = Math.max(defaultSize, numberFromEnv("OBSERVE_MAX_SIZE", 1000));
+  const defaultSize = numberFromEnv("OBSERVE_DEFAULT_LIMIT", 100);
+  const maxSize = Math.max(defaultSize, numberFromEnv("OBSERVE_MAX_LIMIT", 1000));
   const defaultLookbackMs = numberFromEnv("OBSERVE_DEFAULT_LOOKBACK_MS", 3_600_000);
   const maxLookbackMs = Math.max(defaultLookbackMs, numberFromEnv("OBSERVE_MAX_LOOKBACK_MS", 604_800_000));
 

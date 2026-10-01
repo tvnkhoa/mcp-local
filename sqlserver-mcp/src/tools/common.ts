@@ -66,7 +66,7 @@ export const schemaArg = z.string().min(1).max(128).optional();
  * The fan-out list, shared by every tool that offers one.
  *
  * The array bound (200) is an input sanity limit, not the policy: the refusal a caller actually
- * meets is `SQLSERVER_MAX_FANOUT` (default 25), checked in the handler so the message can name the
+ * meets is `SQLSERVER_MAX_FANOUT_DATABASES` (default 25), checked in the handler so the message can name the
  * configured number. Two bounds because a 10,000-element array should be rejected by shape before
  * anything reads config.
  */
