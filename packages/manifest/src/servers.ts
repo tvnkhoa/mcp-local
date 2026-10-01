@@ -35,16 +35,45 @@ import type { ServerDescriptor } from "./types.js";
  */
 const ROOT = toPosixPath(WORKSPACE_ROOT);
 
-/** Fails loudly rather than advertising a server with no tools, which would render an empty skill. */
-function toolsFor(key: string): readonly string[] {
+/**
+ * The shared "no generated list yet" value. Frozen so a consumer cannot push into it and make one
+ * pending server's list appear on another's.
+ */
+const NO_TOOLS: readonly string[] = Object.freeze([]);
+
+/**
+ * The generated tool list for `key`, or an empty list when `contracts/<key>.json` has not been
+ * snapshotted yet.
+ *
+ * This used to THROW, and that made the natural order for adding a server impossible: the throw
+ * fired while `servers.ts` was being imported, so every script that reads the manifest died —
+ * including `contract-snapshot.mjs`, the one script that creates the missing snapshot. The docs
+ * worked around it with a temporary `tools: ["health_check"]` that had to be swapped back by hand.
+ *
+ * Returning `[]` moves the failure from import time to the gates, where it belongs. The empty list
+ * is the marker — {@link serversMissingTools} reports it, and every gate that could otherwise ship
+ * it refuses: `contracts:check` (a MISSING snapshot, or one `generate:tools` has not consumed),
+ * `generate:docs` and so `generate:check`, the skill renderer and so `mcp:install` / `mcp:doctor`,
+ * and the manifest's own tests. A server can be registered without tools only long enough to be
+ * snapshotted; nothing publishes it in that state.
+ *
+ * Exported for the manifest's tests only; `index.ts` does not re-export it.
+ */
+export function toolsFor(key: string): readonly string[] {
   const tools = TOOL_LISTS[key];
-  if (tools === undefined || tools.length === 0) {
-    throw new Error(
-      `No generated tool list for "${key}". Run \`npm run generate:tools\` after adding the ` +
-        `server's contract snapshot (\`npm run contracts:update -- --server ${key}\`).`
-    );
-  }
-  return tools;
+  return tools === undefined || tools.length === 0 ? NO_TOOLS : tools;
+}
+
+/**
+ * The actionable message for a server whose tool list is empty — shared by every gate so they all
+ * name the same two commands.
+ */
+export function missingToolsMessage(key: string): string {
+  return (
+    `"${key}" has no generated tool list. Snapshot its contract, then regenerate: ` +
+    `\`npm run contracts:update -- --server ${key}\` (needs a built server), then ` +
+    "`npm run generate:all`."
+  );
 }
 
 export const SERVERS: readonly ServerDescriptor[] = [
@@ -120,4 +149,16 @@ export function getServer(key: string): ServerDescriptor | null {
 
 export function serverKeys(): string[] {
   return SERVERS.map((s) => s.key);
+}
+
+/**
+ * Keys of registered servers that advertise no tools — normally one registered with `toolsFor`
+ * before its contract was snapshotted. Every gate calls this; an empty result is the only
+ * shippable state.
+ *
+ * Takes the list as a parameter so the gates can be tested against a fake descriptor without
+ * registering a probe in the real manifest.
+ */
+export function serversMissingTools(servers: readonly ServerDescriptor[] = SERVERS): string[] {
+  return servers.filter((s) => s.tools.length === 0).map((s) => s.key);
 }

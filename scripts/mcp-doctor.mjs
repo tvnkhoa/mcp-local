@@ -23,7 +23,7 @@
 
 import fs from "node:fs";
 import path from "node:path";
-import { SERVERS, serverDirPath, serverEntryPath, evaluateEnv, evaluateEnvValues } from "./lib/manifest.mjs";
+import { SERVERS, serverDirPath, serverEntryPath, evaluateEnv, evaluateEnvValues, missingToolsMessage } from "./lib/manifest.mjs";
 import { staleTargets } from "./lib/generate.mjs";
 import { toConfigPath } from "./lib/jsonc.mjs";
 import { detectAgents, readServerEntries } from "./lib/agents.mjs";
@@ -85,6 +85,16 @@ function findOrphanedDistModules(server) {
 async function checkServer(server, agents) {
   const checks = [];
   const fix = [];
+
+  // tools — a server registered before its contract was snapshotted advertises nothing. The
+  // manifest no longer throws on import for that (so the snapshotter can run), which makes this
+  // the doctor's job to report.
+  if (server.tools.length === 0) {
+    checks.push(["tools", "fail", missingToolsMessage(server.key)]);
+    fix.push(`npm run contracts:update -- --server ${server.key} && npm run generate:all`);
+  } else {
+    checks.push(["tools", "pass", `${server.tools.length} tools in the generated list`]);
+  }
 
   // build
   const entry = serverEntryPath(server);

@@ -52,7 +52,9 @@ export const {
   evaluateEnv,
   evaluateEnvValues,
   getServer,
+  missingToolsMessage,
   serverDirPath,
   serverEntryPath,
-  serverKeys
+  serverKeys,
+  serversMissingTools
 } = manifest;

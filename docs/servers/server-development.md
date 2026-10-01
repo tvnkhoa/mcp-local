@@ -56,12 +56,15 @@ the server grows ([Folder Convention](../reference/folder-convention.md) §2).
 
 ### The scaffold deliberately does not register the server
 
-There is an ordering constraint it cannot satisfy: `servers.ts` **throws at import** for a server
-whose `toolsFor(key)` has no generated tool list, the tool list comes from `contracts/`, a contract
-snapshot needs a built server, and `contract-snapshot.mjs` only snapshots servers already in
-`SERVERS`. Neither "snapshot first" nor "register with `toolsFor` first" works, so the first
-registration uses a **temporary literal tool list**:
-**scaffold → build → register (temporary `tools`) → snapshot → generate → switch to `toolsFor`**.
+Registering is a reviewed decision, and it has an order: a contract snapshot needs a built server,
+`contract-snapshot.mjs` only snapshots servers already in `SERVERS`, and the tool list is generated
+from that snapshot. So: **scaffold → build → register with `toolsFor` → snapshot → generate**.
+
+Registering before the snapshot exists is safe because `toolsFor("<key>")` returns an empty list
+for a key with no generated tool list rather than throwing — so the manifest still loads and the
+snapshotter can run. The empty list is never shippable: `contracts:check`, `generate:check`
+(`generate:docs`), `mcp:doctor`, the installer's skill render and the manifest test all fail on it
+and name the two commands that fix it.
 
 That omission is also what makes a scratch server free: delete the directory and `verify:all` still
 exits 0, with nothing to clean up elsewhere.
@@ -73,12 +76,11 @@ exits 0, with nothing to clean up elsewhere.
 Four steps, in this order, because each produces what the next reads. The scaffold already built the
 server (unless you passed `--no-verify`, in which case run `npm run build` in its directory first).
 
-### Step 1 — declare it in the manifest, with a temporary tool list
+### Step 1 — declare it in the manifest
 
 `contract-snapshot.mjs` only snapshots servers already in `SERVERS`, so the server must be registered
-before it can be snapshotted. But `toolsFor("<key>")` **throws at import** until a snapshot exists —
-which would break every script that reads the manifest, the snapshotter included. So register it
-first with a literal placeholder:
+before it can be snapshotted. Register it with `toolsFor` from the start: until Step 3 it resolves
+to an empty list, and every gate reports that rather than letting it ship.
 
 **`packages/manifest/src/servers.ts`** — append one entry:
 
@@ -92,7 +94,7 @@ first with a literal placeholder:
   build: { install: true, guards: [] },   // guards = extra npm scripts run after build
   smokeTest: "node scripts/smoke-test.mjs",
   skillSource: "myserver-mcp/skill",
-  tools: ["health_check"],             // TEMPORARY — replaced by toolsFor("myserver-mcp") in Step 3
+  tools: toolsFor("myserver-mcp"),     // [] until Step 3 generates it; the gates refuse it until then
   env: myserverEnv
 }
 ```
@@ -144,14 +146,16 @@ npm run contracts:update -- --server myserver-mcp
 
 Writes `contracts/myserver-mcp.json` from a real stdio handshake.
 
-### Step 3 — generate, switch to `toolsFor`, install
+### Step 3 — generate
 
 ```bash
-npm run generate:tools        # contracts/ → packages/manifest/src/generated/toolLists.ts
-# now replace tools: ["health_check"] with tools: toolsFor("myserver-mcp") in servers.ts
-npm run generate:all          # tools → build:packages → .env.example → README blocks
+npm run generate:all          # tools (contracts/ → generated/toolLists.ts) → build:packages
+                              #   → .env.example → README blocks
 npm run generate:check && npm run contracts:check
 ```
+
+Until this runs, `contracts:check` reports the server as `NOTOOLS` (snapshot present, tool list not
+generated) and `generate:docs` refuses to render a README advertising zero tools.
 
 ### Step 4 — install and check
 
@@ -294,11 +298,11 @@ npm run benchmark:plan:check    # compact-mode token savings must stay ≥ 40%
 
 The suite is **discovered** from `package.json` rather than listed, so it cannot fall behind when
 someone adds a `test:*` script. `test:unit` runs first: a compile-level break should not wait behind
-32 harnesses that each need a build.
+40 harnesses that each need a build.
 
-> Nine harnesses in `codebase-index-mcp/scripts/test/` are wired to no npm script and therefore
-> never run. They were already unverified before the standard-structure move and nothing since has
-> fixed or worsened that.
+> Every harness in `codebase-index-mcp/scripts/test/` is wired to a `test:*` script. The nine that
+> were not were triaged on 2026-10-01: `test-route-map-roundtrip.mjs` was wired, the other eight
+> (assertion-free probes, several pointing at a misspelled external path) were deleted.
 
 ---
 

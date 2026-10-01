@@ -31,7 +31,7 @@ import { fileURLToPath } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 
-import { SERVERS } from "./lib/manifest.mjs";
+import { SERVERS, missingToolsMessage } from "./lib/manifest.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const CONTRACTS_DIR = path.join(ROOT, "contracts");
@@ -192,6 +192,11 @@ async function main() {
       fs.writeFileSync(file, serialized);
       const label = !existed ? "CREATE" : unchanged ? "SAME  " : "UPDATE";
       console.log(`${label} ${server.key.padEnd(22)} ${captured.toolCount} tools`);
+      if (server.tools.length === 0) {
+        // The registered-with-toolsFor, not-yet-snapshotted case: the snapshot exists now, the
+        // manifest's generated list does not until generate:tools + build:packages run.
+        console.log(`       ${"".padEnd(22)} next: npm run generate:all  (the manifest still lists no tools)`);
+      }
       continue;
     }
 
@@ -202,7 +207,12 @@ async function main() {
     }
     const committed = JSON.parse(fs.readFileSync(file, "utf8"));
     const diff = firstDifference(committed, captured);
-    if (diff === null) {
+    if (diff === null && server.tools.length === 0) {
+      // The snapshot is right but `generate:tools` has not consumed it, so the manifest still
+      // advertises nothing. A matching snapshot must not let that pass as healthy.
+      failed += 1;
+      console.error(`NOTOOLS ${server.key.padEnd(21)} ${missingToolsMessage(server.key)}`);
+    } else if (diff === null) {
       console.log(`OK     ${server.key.padEnd(22)} ${captured.toolCount} tools`);
     } else {
       drifted += 1;

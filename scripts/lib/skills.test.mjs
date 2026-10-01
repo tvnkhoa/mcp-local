@@ -130,6 +130,19 @@ for (const server of SERVERS) {
   });
 }
 
+test("renderSkillContent refuses a server with no generated tool list", () => {
+  // `toolsFor` returns [] for a server registered before its contract was snapshotted, instead of
+  // throwing at import. The renderer is what stops that reaching an installed skill: a SKILL.md
+  // naming no tools would load cleanly and mislead every agent that read it.
+  const fake = { ...SERVERS[0], key: "probe-mcp", tools: [] };
+  assert.throws(
+    () => renderSkillContent(fake),
+    (e) =>
+      /"probe-mcp" has no generated tool list/.test(e.message) &&
+      e.message.includes("npm run contracts:update -- --server probe-mcp")
+  );
+});
+
 test("renderSkillContent refuses a placeholder the renderer does not know", () => {
   const dir = fs.mkdtempSync(path.join(ROOT, "scripts", ".skill-test-"));
   try {

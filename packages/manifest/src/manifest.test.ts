@@ -15,6 +15,7 @@ import {
   serverEntryPath,
   serverKeys
 } from "./index.js";
+import { missingToolsMessage, serversMissingTools, toolsFor } from "./servers.js";
 import type { ServerDescriptor } from "./types.js";
 
 const byKey = (key: string): ServerDescriptor => {
@@ -217,6 +218,43 @@ test("tool lists match the committed contract snapshots exactly", () => {
   // 94 -> 96: postgres-mcp gained ddl_status and ddl_create (DDL lane, phase 1.3).
   // 96 -> 99: and ddl_preview, ddl_dry_run, ddl_apply (phase 1.4).
   assert.equal(total, 99, "the workspace advertises 99 tools; update this number deliberately");
+});
+
+// --- a server registered before its contract exists -----------------------------
+// `toolsFor` used to throw for a key with no generated list, at import time, which broke every
+// script that reads the manifest — the contract snapshotter included, so the natural order
+// (register -> snapshot -> generate) could not work. It now returns [] and the gates refuse.
+
+test("toolsFor returns an empty list for an unsnapshotted key instead of throwing", () => {
+  const tools = toolsFor("probe-not-snapshotted-mcp");
+  assert.deepEqual([...tools], []);
+  // Shared and frozen: a consumer cannot push into one pending server's list and have it appear
+  // on another's.
+  assert.ok(Object.isFrozen(tools));
+  assert.equal(toolsFor("another-unsnapshotted-mcp"), tools);
+  // A snapshotted key still gets its real list.
+  assert.ok(toolsFor("codebase-index").length > 0);
+});
+
+test("serversMissingTools reports exactly the servers that advertise nothing", () => {
+  const real = byKey("bitbucket-mcp");
+  const key = "probe-not-snapshotted-mcp";
+  const probe: ServerDescriptor = { ...real, key, tools: toolsFor(key) };
+  assert.deepEqual(serversMissingTools([real, probe]), [key]);
+  assert.deepEqual(serversMissingTools([real]), []);
+});
+
+test("no registered server ships without a generated tool list", () => {
+  // The gate for the real manifest. Registering a server is fine before its snapshot exists; this
+  // is what stops it being committed in that state.
+  const missing = serversMissingTools();
+  assert.deepEqual(missing, [], missing.map(missingToolsMessage).join(" | "));
+});
+
+test("missingToolsMessage names the two commands that fix it", () => {
+  const message = missingToolsMessage("probe-mcp");
+  assert.match(message, /npm run contracts:update -- --server probe-mcp/);
+  assert.match(message, /npm run generate:all/);
 });
 
 test("codebase-index advertises all 43 of its tools", () => {

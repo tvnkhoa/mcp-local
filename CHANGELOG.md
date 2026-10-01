@@ -27,6 +27,19 @@ All notable changes to this project will be documented in this file.
   both.
 - Removed the size/mtime quick check, which could never match a sha256 hash.
 
+### 🧩 `codebase-index-mcp`: `.csproj` / `.sln` project edges bind to real project symbols (MCP-ISSUE-065)
+
+- Every `<ProjectReference>` `DEPENDS_ON` edge held a 24-hex `to_id` that matched no symbol: 271 on
+  `wec.be`, 82 on `api-testing-studio`, 52 on `ssnet` and 5–13 on four other repos. The incremental
+  prune from MCP-ISSUE-063 also deleted those edges on every incremental run.
+- The reference is now resolved against the `.csproj` directory, and the edge targets the referenced
+  project's module symbol. That id no longer depends on path separator or casing. A reference outside
+  the repo or behind an MSBuild property becomes a `project:` token.
+- `.sln` edges also target the real project symbols. The `.sln` no longer mints its own copy of each
+  project as a `module` symbol.
+- `INDEX_VERSION` → `v3-project-refs`. Run a **full** re-index of C# repos to heal them. New
+  `dotnetProjectParser.test.ts` (6 tests).
+
 ### ⚠️ `codebase-index-mcp`: error wire codes follow the JSON-RPC code (MCP-ISSUE-064) — behaviour change
 
 - `McpError(InvalidParams)` → `VALIDATION_ERROR`, `InternalError` → `INTERNAL_ERROR`, others stay
@@ -60,8 +73,14 @@ All notable changes to this project will be documented in this file.
 - Five-server wording throughout, with counts recomputed: 99 tools, 132 env vars, 50 `openWorldHint`
   tools.
 - Corrected the symbol-id formula.
-- Documented a new-server bootstrap order that works: register with a temporary tool list, then
-  snapshot, then switch to `toolsFor`.
+- Adding a server now works in the natural order: register with `toolsFor` → `build:packages` →
+  `contracts:update -- --server <key>` → `generate:all`. `toolsFor` returns an empty list instead
+  of throwing at import time. Five gates refuse a server with no generated tool list:
+  - `contracts:check` (`NOTOOLS`)
+  - `generate:docs`
+  - `mcp:doctor`
+  - skill rendering
+  - a manifest test
 - `docs:check` skips tracked files deleted in the working tree.
 
 ### 🔎 `postgres-mcp`: four review findings fixed before push (PG-REV-002)

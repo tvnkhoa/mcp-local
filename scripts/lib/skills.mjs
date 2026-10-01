@@ -13,7 +13,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { WORKSPACE_ROOT, serverEntryPath } from "./manifest.mjs";
+import { WORKSPACE_ROOT, missingToolsMessage, serverEntryPath } from "./manifest.mjs";
 import { toConfigPath, writeFileAtomic } from "./jsonc.mjs";
 import { ok, warn, info } from "./log.mjs";
 
@@ -37,6 +37,12 @@ function toolList(server) {
 }
 
 export function renderSkillContent(server) {
+  // A server registered before its contract was snapshotted has `tools: []` (see `toolsFor` in
+  // packages/manifest/src/servers.ts). Rendering it would install a skill that names no tools and
+  // load without complaint — so `mcp:install` reports this instead and `mcp:doctor` fails.
+  if (server.tools.length === 0) {
+    throw new Error(missingToolsMessage(server.key));
+  }
   const src = path.join(WORKSPACE_ROOT, ...server.skillSource.split("/"), "SKILL.md");
   if (!fs.existsSync(src)) {
     throw new Error(`Skill template not found: ${src}`);

@@ -19,11 +19,20 @@
 
 import path from "node:path";
 
-import { WORKSPACE_ROOT } from "./lib/manifest.mjs";
+import { WORKSPACE_ROOT, missingToolsMessage, serversMissingTools } from "./lib/manifest.mjs";
 import { staleTargets, writeTargets } from "./lib/generate.mjs";
 import { err, ok, warn } from "./lib/log.mjs";
 
 const CHECK = process.argv.includes("--check");
+
+// A registered server with no generated tool list (snapshot not taken yet) would render a README
+// claiming "0 tools" — and in --check mode that block would compare equal to itself once written.
+// Refuse in both modes, so `generate:all` and `generate:check` both stop on it.
+const missing = serversMissingTools();
+if (missing.length > 0) {
+  for (const key of missing) err(missingToolsMessage(key));
+  process.exit(1);
+}
 
 if (CHECK) {
   const stale = staleTargets("docs");
