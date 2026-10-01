@@ -2,7 +2,7 @@
 /**
  * Aggregate test runner (migration-plan step S-03).
  *
- * This package has ~25 individually-invoked `test:*` scripts. CI needs one
+ * This package has ~40 individually-invoked `test:*` scripts. CI needs one
  * command, and so does anyone trying to check their work before committing.
  *
  * The list is DISCOVERED from package.json rather than written out here: a chain
@@ -61,7 +61,7 @@ const selected = [
 ]
   .filter((name) => !(name in EXCLUDED))
   // `test:unit` is the node:test suite over src/**/*.test.ts. It needs no build and no database,
-  // so it runs first when present — a compile-level break should not wait behind 26 harnesses.
+  // so it runs first when present — a compile-level break should not wait behind ~40 harnesses.
   .filter((name) => !(INTEGRATION_ONLY && name === "test:unit"))
   .sort((a, b) => (a === "test:unit" ? -1 : b === "test:unit" ? 1 : 0));
 

@@ -56,7 +56,8 @@
     "test:impact-join-parity": "node scripts/test/test-impact-join-parity.mjs",
     "test:server-envelopes": "node scripts/test/test-server-envelopes.mjs",
     "test:sqlite-guardrails": "node scripts/test/test-sqlite-guardrails.mjs",
-    "test:approval-token": "node scripts/test/test-approval-token.mjs"
+    "test:approval-token": "node scripts/test/test-approval-token.mjs",
+    "test:route-map-roundtrip": "node scripts/test/test-route-map-roundtrip.mjs"
   },
   "dependencies": {
     "@mcp/core": "file:../packages/core",

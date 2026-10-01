@@ -4,17 +4,10 @@
  * Covers ISSUE-007: route_map returning count:0 even when routes exist in DB.
  */
 import assert from "node:assert";
-import fs from "node:fs";
-import os from "node:os";
-import path from "node:path";
 
+import { makeTempDbPath } from "./_fixtures.mjs";
 import { GraphStore } from "../../dist/repositories/graphStore.js";
 import { extractGraphData } from "../../dist/services/extractors/treeSitterExtractor.js";
-
-function createTempDbPath() {
-  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "cbi-route-map-rtrip-"));
-  return path.join(tempDir, "test.db");
-}
 
 // IEndpointGroup pattern (matches wec.commnunication-hub/Conversations.cs style)
 const iEndpointGroupSource = `
@@ -66,7 +59,8 @@ static IResult DeleteItem() => Results.Ok();
 `;
 
 function run() {
-  const dbPath = createTempDbPath();
+  // Tracked by _fixtures: removed on exit even when an assertion throws first.
+  const dbPath = makeTempDbPath("cbi-route-map-rtrip-");
   const store = new GraphStore(dbPath);
   const repoId = "test-communication-hub";
 
@@ -192,7 +186,6 @@ function run() {
   console.log("[4] Empty controllerSymbolId LEFT JOIN: OK");
 
   store.close();
-  fs.rmSync(path.dirname(dbPath), { recursive: true });
 
   console.log("test-route-map-roundtrip: ALL PASS");
 }

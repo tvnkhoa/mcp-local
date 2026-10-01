@@ -115,7 +115,7 @@ in `index.ts`, which is what rule S1 describes.
 ```
 <server>/
   scripts/smoke-test.mjs    real stdio handshake + tools/list — same name in every server
-  scripts/test/             integration harnesses (codebase-index-mcp only, 42 files)
+  scripts/test/             integration harnesses (codebase-index-mcp only, 41 files)
   skill/SKILL.md            the operational-skill template the installer renders
   docs/                     everything except README.md and CLAUDE.md
   README.md                 hand-written, with two generated blocks
