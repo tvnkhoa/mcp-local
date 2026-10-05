@@ -18,7 +18,7 @@ wrong to a reviewer who did not see what forced them. Each one rejects the conve
 Decision 2 was amended and Decision 7 added on 2026-10-01, with four more env vars, when the lane
 was pointed at a repo with its own runner. Decision 2 was amended a second time on 2026-10-05,
 with one more env var (`POSTGRES_DDL_SESSION_ROLE`), after that repo's files were measured
-against it.
+against it, and Decision 7 the same day, when that repo began shipping down scripts.
 
 ## Decision 1 — a tokenizer of its own, not `@mcp/shared`'s `scanSql`
 
@@ -192,7 +192,8 @@ applied.
 
 Matching the runner is the whole contract, so each rule below is that runner's rule:
 
-- **Files** are psql-style `NNNN-name.sql`, ordered by file name, forward-only.
+- **Files** are psql-style `NNNN-name.sql`, ordered by file name. A file's down, when the repo
+  ships one, is `NNNN-name.down.sql` with the same prefix and slug (see the amendment below).
 - **The checksum** is sha256 of the file's **raw bytes**, as `sha256sum` computes it, not the
   normalized text this lane hashes in its own format. A recorded checksum that differs stops every
   plan (`DDL_CHECKSUM_MISMATCH`). The ledger is keyed by file name, so a file renamed after it
@@ -212,10 +213,31 @@ belongs to the repo, whose runner creates it after its own adoption guard (`DDL_
 One thing is **weaker**: a failed attempt leaves no row, because that ledger has no notion of
 failure. It is still in `mcp_ops.audit_log`.
 
-**Cost, accepted:** inline SQL, `ddl_create` and down migrations are unavailable in this mode, since
-the repo's ledger records files and its files have no down scripts. Anything the runner does beyond
+**Cost, accepted:** inline SQL and `ddl_create` are unavailable in this mode, since the repo's
+ledger records files. Anything the runner does beyond
 these rules, such as wec.aria's "skip 0028/0029 until pg-boss has booted", is not reproduced, and a
 file that relies on it is refused or fails visibly.
+
+**Amended 2026-10-05: down migrations, once the repo's runner has them.** This decision made the
+mode forward-only because the repo's files had no down scripts. From its 0021, wec.aria ships
+`NNNN-slug.down.sql` beside each file (its adr/0078), and its `db/migrate.sh --down NNNN` reverts
+every applied file above `NNNN`, newest first. Matching the runner is still the whole contract,
+so the lane now does the same, on its existing down path (Decision 4):
+
+- **Pairing.** A down pairs only with the up that has the same prefix AND slug. A down with no
+  such up is reported and ignored. A down is never a pending migration of its own.
+- **The plan is checked whole.** Every step needs its down, or nothing runs
+  (`DDL_NO_DOWN_SCRIPT`). An up edited since it ran stops the plan (`DDL_CHECKSUM_MISMATCH`),
+  because a down only undoes the up that actually ran. A down is linted, and needs the same
+  acknowledgements, as any script. An "irreversible" down, a DO that raises, needs `DO_BLOCK`.
+- **A down has no ledger checksum.** The ledger records what ran, and a down has not run until it
+  reverts. A down must also stay fixable after its up has applied: pinning its checksum at up time
+  would turn a corrected down into a refusal. Its checksum binds it to the approval digest
+  instead, so what was previewed is what reverts.
+- **The ledger row goes in the down's own transaction**, deleted by file name AND recorded
+  checksum. A row that moved since the plan was read rolls the down back (`DDL_DRIFT`). This is
+  stricter than the runner, which deletes the row after the down commits, because its down file
+  carries its own BEGIN / COMMIT. The end state is the same.
 
 ## Alternatives rejected
 

@@ -13,10 +13,13 @@
  * With POSTGRES_DDL_EXTERNAL_LEDGER the directory is a repo's own, written for psql and applied
  * until now by that repo's runner, so the layout is that repo's instead (the `psql` format):
  *
- *   0017-review-run-counts-its-window.sql
+ *   0021-tenant-location.sql
+ *   0021-tenant-location.down.sql   (optional, as the repo's runner reads it)
  *
- * Forward-only, applied in file-name order, and checksummed over the file's RAW bytes, exactly as
- * `sha256sum` does, because the ledger rows already there were written that way.
+ * Applied in file-name order, and checksummed over the file's RAW bytes, exactly as `sha256sum`
+ * does, because the ledger rows already there were written that way. A down is paired with the up
+ * of the same prefix and slug. Its checksum is not in the ledger, which records what ran; it binds
+ * the down to the approval digest, so what was previewed is what reverts.
  */
 
 import { createHash } from "node:crypto";
@@ -31,6 +34,8 @@ export const MIGRATION_NAME = /^[a-z0-9_]{1,100}$/;
 export const MIGRATION_VERSION = /^\d{14}$/;
 /** The psql format: a 4–14 digit prefix, a dash, a lower-case slug. */
 export const PSQL_MIGRATION_FILE = /^(\d{4,14})-([a-z0-9][a-z0-9-]{0,150})\.sql$/;
+/** Its down: the same prefix and slug, then `.down.sql`. A slug has no dot, so the two never overlap. */
+export const PSQL_DOWN_FILE = /^(\d{4,14})-([a-z0-9][a-z0-9-]{0,150})\.down\.sql$/;
 
 export type MigrationFileFormat = "mcp" | "psql";
 
@@ -110,11 +115,25 @@ async function readEntries(dir: string) {
 async function loadPsqlMigrations(dir: string): Promise<LoadedMigrations> {
   const entries = await readEntries(dir);
   const migrations: MigrationFile[] = [];
+  const downs: Array<{ version: string; name: string; script: MigrationScript }> = [];
   const ignoredFiles: string[] = [];
   const warnings: string[] = [];
 
   for (const entry of entries) {
     if (!entry.isFile()) {
+      continue;
+    }
+    const down = PSQL_DOWN_FILE.exec(entry.name);
+    if (down !== null) {
+      const bytes = await readFile(path.join(dir, entry.name));
+      if (bytes.byteLength > MAX_DDL_SCRIPT_BYTES) {
+        throw fileError("DDL_TOO_LARGE", `${entry.name} is over ${String(MAX_DDL_SCRIPT_BYTES)} bytes.`);
+      }
+      downs.push({
+        version: down[1] as string,
+        name: down[2] as string,
+        script: { file: entry.name, text: normalizeScript(bytes.toString("utf8")), checksum: createHash("sha256").update(bytes).digest("hex") }
+      });
       continue;
     }
     const match = PSQL_MIGRATION_FILE.exec(entry.name);
@@ -138,6 +157,17 @@ async function loadPsqlMigrations(dir: string): Promise<LoadedMigrations> {
     }
     const checksum = createHash("sha256").update(bytes).digest("hex");
     migrations.push({ version, name, up: { file: entry.name, text: normalizeScript(bytes.toString("utf8")), checksum } });
+  }
+
+  // A down pairs only with the up of the same prefix AND slug: a renamed up would otherwise get the
+  // down of a different migration.
+  for (const down of downs) {
+    const up = migrations.find((m) => m.version === down.version);
+    if (up === undefined || up.name !== down.name) {
+      warnings.push(`${down.script.file} has no matching ${down.version}-${down.name}.sql and is ignored.`);
+      continue;
+    }
+    up.down = down.script;
   }
 
   migrations.sort((a, b) => (a.up.file < b.up.file ? -1 : a.up.file > b.up.file ? 1 : 0));

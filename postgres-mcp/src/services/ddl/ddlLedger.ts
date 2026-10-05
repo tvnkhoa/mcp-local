@@ -135,6 +135,19 @@ function externalLedger(table: QualifiedName): DdlLedger {
         // Unreachable: the planner refuses inline mode with an external ledger.
         throw new PolicyViolationError("DDL_INLINE_UNSUPPORTED", "An external ledger records files only.");
       }
+      if (row.direction === "down") {
+        // A revert removes the up's row, as the repo's runner does, but in the down's own
+        // transaction rather than after it commits. The row must still be the one the plan read,
+        // file name AND checksum, or the whole migration rolls back.
+        const deleted = await db.query(`delete from ${quoted} where filename = $1 and checksum = $2`, [file, row.upChecksum]);
+        if (deleted.rowCount !== 1) {
+          throw new PolicyViolationError(
+            "DDL_DRIFT",
+            `The ledger ${label} no longer holds ${file} with the checksum this plan reverts. Its down was rolled back. Run ddl_preview again.`
+          );
+        }
+        return undefined;
+      }
       await db.query(`insert into ${quoted} (filename, checksum) values ($1, $2)`, [file, row.checksum]);
       return undefined;
     },

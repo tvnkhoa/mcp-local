@@ -97,6 +97,11 @@ export interface PlanStep {
   checksum: string;
   /** For `revert`: the up checksum recorded when the version was applied. */
   upChecksum: string | null;
+  /**
+   * For `revert` with an external ledger: the up file's name, which is what that ledger is keyed
+   * by. `file` is then the down script that runs.
+   */
+  ledgerFile?: string;
   sql: string;
   statements: DdlStatement[];
   timeouts: EffectiveTimeouts;
@@ -137,7 +142,7 @@ function fail(code: string, message: string): PlanResult {
 
 /** Validate, time and lint one script into a step. `createdInPlan` carries across steps. */
 function buildStep(
-  base: Pick<PlanStep, "version" | "name" | "action" | "file" | "upChecksum">,
+  base: Pick<PlanStep, "version" | "name" | "action" | "file" | "upChecksum" | "ledgerFile">,
   script: { sql: string; checksum: string },
   options: { noTransaction?: boolean },
   input: PlanInput,
@@ -312,9 +317,10 @@ export function buildPlan(input: PlanInput): PlanResult {
   }
 
   // ── down ──
-  if (input.config.externalLedger !== undefined) {
-    return fail("DDL_DOWN_UNSUPPORTED", "An external ledger is forward-only: its files have no down scripts. Write a new migration that undoes the change.");
-  }
+  // With an external ledger too: a repo whose runner reverts (NNNN-slug.down.sql) is reverted the
+  // way that runner does it. Every step needs its down, or nothing runs (DDL_NO_DOWN_SCRIPT), and an
+  // up edited since it ran stops the plan above (DDL_CHECKSUM_MISMATCH): a down only undoes the up
+  // that actually ran.
   const target = request.target;
   if (target === undefined) {
     return fail("DDL_INVALID_ARGS", "A down plan needs target: the version to revert back to, or \"0\" to revert everything.");
@@ -336,7 +342,7 @@ export function buildPlan(input: PlanInput): PlanResult {
       );
     }
     const built = buildStep(
-      { version: applied.version, name: applied.name, action: "revert", file: file.down.file, upChecksum: applied.checksum },
+      { version: applied.version, name: applied.name, action: "revert", file: file.down.file, upChecksum: applied.checksum, ledgerFile: applied.file ?? file.up.file },
       { sql: file.down.text, checksum: file.down.checksum },
       {},
       input,

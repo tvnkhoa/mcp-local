@@ -20,7 +20,7 @@ import { lintDdl, type RiskFinding } from "../../middleware/ddlRiskLint.js";
 import { PolicyViolationError } from "../../middleware/errors.js";
 import { asError, asText, type ResponseProfile } from "../../middleware/responseFormatter.js";
 import { runExclusive } from "../../services/concurrency/envMutex.js";
-import { applyPlan, dryRunPlan, planAgainst, replanForExecution, sessionTimeouts, withDdlSession } from "../../services/ddl/ddlExecutor.js";
+import { applyPlan, dryRunPlan, missingLedgerMessage, planAgainst, replanForExecution, sessionTimeouts, withDdlSession } from "../../services/ddl/ddlExecutor.js";
 import type { DdlPreviewStore } from "../../services/ddl/ddlPreviewStore.js";
 import { captureSchema, diffSnapshots } from "../../services/migration/schemaSnapshot.js";
 import { issueApprovalToken, verifyApprovalToken } from "../../services/write/approval.js";
@@ -64,12 +64,15 @@ export async function handleDdlStatus(
     warnings.push(EF_HISTORY_WARNING);
   }
   if (ledger.external && !read.present) {
-    warnings.push(`The external ledger ${ledger.label} does not exist here yet. ddl_apply refuses until the repo's own runner creates it.`);
+    warnings.push(missingLedgerMessage(ledger.label, env.name));
   }
 
+  // With no external ledger here, "pending" against this database means nothing: it is usually
+  // the wrong environment, and 20 pending would read as a fresh copy of the repo's database.
+  const ledgerMissing = ledger.external && !read.present;
   const summary = {
     applied: status.applied.length,
-    pending: status.pending.length,
+    pending: ledgerMissing ? null : status.pending.length,
     checksumMismatch: status.checksumMismatch.length,
     renamed: status.renamed.length,
     missingFiles: status.missingFiles.length,
@@ -78,7 +81,17 @@ export async function handleDdlStatus(
   };
 
   if (profile === "nano") {
-    return asText({ environment: env.name, ledger: ledger.label, summary, historyRows: read.rowCount }, profile);
+    // The cheapest call must not be the most misleading one: the missing-ledger warning survives nano.
+    return asText(
+      {
+        environment: env.name,
+        ledger: ledger.label,
+        summary,
+        historyRows: read.rowCount,
+        ...(ledgerMissing ? { historyTablePresent: false, warnings: [missingLedgerMessage(ledger.label, env.name)] } : {})
+      },
+      profile
+    );
   }
   return asText(
     {
@@ -284,7 +297,7 @@ export async function handleDdlPreview(
   try {
     await client.query("begin read only");
     await client.query("select set_config('lock_timeout', $1, true)", [String(config.lockTimeoutMs)]);
-    live = await planAgainst(client, request, config);
+    live = await planAgainst(client, request, config, env.name);
   } finally {
     await client.query("rollback").catch(() => undefined);
     client.release();

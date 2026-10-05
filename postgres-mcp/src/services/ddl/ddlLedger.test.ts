@@ -121,12 +121,61 @@ test("a file renamed after it was applied stops the plan: the repo's runner keys
   assert.match(result.ok ? "" : result.error.message, /0001-old-name\.sql \(now 0001-baseline\.sql\)/);
 });
 
-test("forward-only, files-only: down and inline plans are refused", () => {
+test("files-only: inline plans are refused", () => {
   const state = deriveExternalState([], "l");
-  const down = build({ state, request: { mode: "file", direction: "down", target: "0" } });
-  assert.equal(down.ok ? "" : down.error.code, "DDL_DOWN_UNSUPPORTED");
   const inline = build({ state, request: { mode: "inline", sql: "create table z (a int)" } });
   assert.equal(inline.ok ? "" : inline.error.code, "DDL_INLINE_UNSUPPORTED");
+});
+
+test("NNNN-slug.down.sql pairs with its up by prefix and slug, and is never a migration of its own", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "ddl-psql-down-"));
+  try {
+    await writeFile(path.join(dir, "0001-a.sql"), "create table a (x int);\n");
+    await writeFile(path.join(dir, "0001-a.down.sql"), "drop table a;\r\n");
+    await writeFile(path.join(dir, "0002-b.sql"), "create table b (x int);\n");
+    await writeFile(path.join(dir, "0002-c.down.sql"), "drop table c;\n");
+    await writeFile(path.join(dir, "0003-orphan.down.sql"), "drop table o;\n");
+    const result = await loadMigrations(dir, "psql");
+    assert.deepEqual(result.migrations.map((m) => [m.up.file, m.down?.file ?? null]), [["0001-a.sql", "0001-a.down.sql"], ["0002-b.sql", null]]);
+    // Bound by raw bytes, as the up is; what runs is normalized.
+    assert.equal(result.migrations[0]?.down?.checksum, sha("drop table a;\r\n"));
+    assert.equal(result.migrations[0]?.down?.text, "drop table a;\n");
+    assert.deepEqual(result.ignoredFiles, []);
+    assert.match(result.warnings.join(" "), /0002-c\.down\.sql has no matching 0002-c\.sql/);
+    assert.match(result.warnings.join(" "), /0003-orphan\.down\.sql has no matching 0003-orphan\.sql/);
+    assert.doesNotMatch(result.warnings.join(" "), /0001-a\.down\.sql/);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("a down plan reverts newest first, keys the ledger by the up file, and needs every down", () => {
+  const withDown = (file: LoadedMigrations["migrations"][number], text: string): LoadedMigrations["migrations"][number] => ({
+    ...file,
+    down: { file: file.up.file.replace(/\.sql$/, ".down.sql"), text, checksum: sha(text) }
+  });
+  const F3 = withDown(psqlFile("0003-third.sql", "create table t3 (a int);\n"), "drop table t3;\n");
+  const F4 = withDown(psqlFile("0004-fourth.sql", "create table t4 (a int);\n"), "do $$ begin raise exception 'irreversible: t4 holds data'; end $$;\n");
+  const rows = [F1, F2, F3, F4].map((f) => ({ filename: f.up.file, checksum: f.up.checksum }));
+  const state = deriveExternalState(rows, "l");
+  const files = loaded(F1, F2, F3, F4);
+
+  const result = buildPlan({ files, config: CONFIG, state, request: { mode: "file", direction: "down", target: "0002" } });
+  assert.ok(result.ok, result.ok ? "" : result.error.message);
+  assert.deepEqual(
+    result.plan.steps.map((s) => [s.action, s.file, s.ledgerFile, s.upChecksum === rows.find((r) => r.filename === s.ledgerFile)?.checksum]),
+    [["revert", "0004-fourth.down.sql", "0004-fourth.sql", true], ["revert", "0003-third.down.sql", "0003-third.sql", true]]
+  );
+  // A down gets the guardrail and acknowledgements of an up: an "irreversible" down is a DO block.
+  assert.ok(result.plan.requiredAcknowledgements.includes("DO_BLOCK"));
+  assert.ok(result.plan.requiredAcknowledgements.includes("DROP_TABLE"));
+
+  // 0002 has no down: reverting past it refuses the whole plan, before anything runs.
+  const past = buildPlan({ files, config: CONFIG, state, request: { mode: "file", direction: "down", target: "0001" } });
+  assert.equal(past.ok ? "" : past.error.code, "DDL_NO_DOWN_SCRIPT");
+  // A down whose up was edited since it ran: the up's checksum no longer matches, so nothing runs.
+  const edited = buildPlan({ files: loaded(F1, F2, F3, { ...F4, up: { ...F4.up, checksum: "edited" } }), config: CONFIG, state, request: { mode: "file", direction: "down", target: "0002" } });
+  assert.equal(edited.ok ? "" : edited.error.code, "DDL_CHECKSUM_MISMATCH");
 });
 
 test("the adoption guard refuses a populated schema with an empty ledger, and only that", () => {

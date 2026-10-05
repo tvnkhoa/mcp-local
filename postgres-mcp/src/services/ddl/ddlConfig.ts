@@ -38,7 +38,8 @@ export interface DdlConfig {
   /**
    * POSTGRES_DDL_EXTERNAL_LEDGER. When set, the repo's own ledger table (`filename`, `checksum`)
    * replaces `mcp_ops.ddl_history`, and the directory holds psql-style `NNNN-name.sql` files:
-   * forward-only, checksummed over their raw bytes, as the repo's runner reads them.
+   * checksummed over their raw bytes, each with an optional `NNNN-name.down.sql`, as the repo's
+   * runner reads them.
    */
   externalLedger?: QualifiedName;
   /** POSTGRES_DDL_OWNER_ROLES. The only roles `ALTER … OWNER TO` may name. Empty refuses it. */

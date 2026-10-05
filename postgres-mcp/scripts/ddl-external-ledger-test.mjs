@@ -385,14 +385,14 @@ async function main() {
       );
     }
 
-    // ── X6. forward-only and files-only ─────────────────────────────────────
+    // ── X6. files-only, and a down plan over files that have no down ─────────
     {
       const down = await callRaw("ddl_preview", { environment: "dev", direction: "down", target: "0" });
       const inline = await callRaw("ddl_preview", { environment: "dev", sql: "create table z (a int)" });
       const create = await callRaw("ddl_create", { name: "z", up: "create table z (a int)" });
       check(
-        "X6/down-inline-create-refused",
-        down.payload.code === "DDL_DOWN_UNSUPPORTED" && inline.payload.code === "DDL_INLINE_UNSUPPORTED" && create.payload.code === "DDL_CREATE_UNSUPPORTED",
+        "X6/no-down-script-inline-create-refused",
+        down.payload.code === "DDL_NO_DOWN_SCRIPT" && inline.payload.code === "DDL_INLINE_UNSUPPORTED" && create.payload.code === "DDL_CREATE_UNSUPPORTED",
         `down=${String(down.payload.code)} inline=${String(inline.payload.code)} create=${String(create.payload.code)}`
       );
     }
@@ -434,8 +434,15 @@ async function main() {
       const untouched = (await freshDb.query("select count(*)::int as n from pg_tables where schemaname = 'public'")).rows[0].n === 0;
       await freshDb.end();
       check(
-        "X7b/missing-ledger-refused-before-anything-runs",
-        !fresh.isError && freshApply.isError && freshApply.payload.code === "DDL_LEDGER_MISSING" && untouched,
+        "X7b/missing-ledger-refused-at-preview-naming-the-environment",
+        fresh.isError && fresh.payload.code === "DDL_LEDGER_MISSING" && /Environment 'fresh' has no public.schema_migration/.test(fresh.payload.message) && untouched &&
+          (await status("fresh")).warnings.some((w) => /Environment .fresh. has no public.schema_migration/.test(w)) &&
+          (await (async () => {
+            // nano too: the cheapest call must not read as a fresh database with everything pending.
+            const nano = (await callRaw("ddl_status", { environment: "fresh", profile: "nano" })).payload;
+            // pending is null, which the serializer omits: no count at all, rather than a wrong one.
+            return typeof nano.summary.pending !== "number" && nano.historyTablePresent === false && /Environment .fresh. has no/.test(nano.warnings?.[0] ?? "");
+          })()),
         `preview=${String(fresh.payload.code ?? "ok")} apply=${String(freshApply.payload.code)} untouched=${String(untouched)}`
       );
     }
@@ -476,6 +483,70 @@ async function main() {
         !applied.isError && applied.payload.status === "applied" && /retrieval_inspection/.test(String(kind?.column_default)),
         `status=${String(applied.payload.status)} default=${String(kind?.column_default)} error=${JSON.stringify(applied.payload.error)}`
       );
+    }
+
+    // ── X10. up, down, up again, as wec.aria's migrate.sh --down does it ────
+    // From 0021 on, wec.aria ships NNNN-slug.down.sql beside each file (adr/0078). A revert runs the
+    // down in its own transaction and removes the up's ledger row in it; the up then applies again.
+    {
+      const up = "0006-tenant-note.sql";
+      const down = "0006-tenant-note.down.sql";
+      await writeFile(path.join(dir, up), "begin;\nalter table public.review_run add column note text;\ncommit;\n");
+      await writeFile(path.join(dir, down), "begin;\nalter table public.review_run drop column note;\ncommit;\n");
+      const hasNote = async () => (await repo.query("select count(*)::int as n from information_schema.columns where table_name = 'review_run' and column_name = 'note'")).rows[0].n === 1;
+      const recorded = async () => (await repo.query("select count(*)::int as n from schema_migration where filename = $1", [up])).rows[0].n === 1;
+      const run = async (args) => {
+        const p = await callRaw("ddl_preview", { environment: "dev", ...args });
+        return p.isError ? p : callRaw("ddl_apply", { previewId: p.payload.previewId, approvalToken: p.payload.approvalToken, acknowledgeRisks: p.payload.requiredAcknowledgements });
+      };
+
+      const s = await status();
+      check(
+        "X10a/down-file-paired-not-pending-not-warned",
+        JSON.stringify(s.pending.map((p) => [p.version, p.hasDown])) === JSON.stringify([["0006", true]]) && !s.warnings.some((w) => w.includes(down)),
+        `pending=${JSON.stringify(s.pending)} warnings=${JSON.stringify(s.warnings.filter((w) => w.includes("0006")))}`
+      );
+      const first = await run({});
+      check("X10b/up-applies", !first.isError && first.payload.status === "applied" && (await hasNote()) && (await recorded()), `status=${String(first.payload.status)} code=${String(first.payload.code)}`);
+
+      // 0005 has no down: reverting past it is refused whole, and nothing is reverted.
+      const past = await callRaw("ddl_preview", { environment: "dev", direction: "down", target: "0004" });
+      check(
+        "X10c/down-past-a-file-without-down-refused-nothing-reverted",
+        past.isError && past.payload.code === "DDL_NO_DOWN_SCRIPT" && (await hasNote()) && (await recorded()),
+        `code=${String(past.payload.code)} message=${String(past.payload.message).slice(0, 120)}`
+      );
+
+      // A down stays fixable after its up ran: no ledger checksum pins it.
+      await writeFile(path.join(dir, down), "begin;\n-- fixed after the up ran\nalter table public.review_run drop column if exists note;\ncommit;\n");
+      const preview = await callRaw("ddl_preview", { environment: "dev", direction: "down", target: "0005", profile: "standard" });
+      const dry = preview.isError ? preview : await callRaw("ddl_dry_run", { previewId: preview.payload.previewId });
+      check(
+        "X10d/down-preview-and-dry-run",
+        !preview.isError && preview.payload.direction === "down" && preview.payload.steps.length === 1 && preview.payload.steps[0].file === down && !dry.isError && dry.payload.status === "ok" && (await hasNote()),
+        `code=${String(preview.payload.code)} steps=${JSON.stringify(preview.payload.steps?.map((x) => [x.file, x.action]))} dry=${String(dry.payload.status)}`
+      );
+      const reverted = preview.isError
+        ? preview
+        : await callRaw("ddl_apply", { previewId: preview.payload.previewId, approvalToken: preview.payload.approvalToken, acknowledgeRisks: preview.payload.requiredAcknowledgements });
+      check(
+        "X10e/down-reverts-and-removes-the-ledger-row",
+        !reverted.isError && reverted.payload.status === "applied" && !(await hasNote()) && !(await recorded()),
+        `status=${String(reverted.payload.status)} steps=${JSON.stringify(reverted.payload.steps?.map((x) => x.status))} error=${JSON.stringify(reverted.payload.error)}`
+      );
+      const again = await run({});
+      check("X10f/up-applies-again", !again.isError && again.payload.status === "applied" && (await hasNote()) && (await recorded()), `status=${String(again.payload.status)} code=${String(again.payload.code)}`);
+
+      // Another runner reverted 0006 between preview and apply (its row is gone): drift, and this
+      // down does not run a second time. (An edited row instead stops the re-plan earlier, with
+      // DDL_CHECKSUM_MISMATCH.)
+      const stale = await callRaw("ddl_preview", { environment: "dev", direction: "down", target: "0005" });
+      await repo.query("delete from schema_migration where filename = $1", [up]);
+      const drifted = stale.isError ? stale : await callRaw("ddl_apply", { previewId: stale.payload.previewId, approvalToken: stale.payload.approvalToken, acknowledgeRisks: stale.payload.requiredAcknowledgements });
+      check("X10g/ledger-moved-between-preview-and-apply-is-drift", !stale.isError && drifted.isError && drifted.payload.code === "DDL_DRIFT" && (await hasNote()), `preview=${String(stale.payload.code ?? "ok")} apply=${String(drifted.payload.code)}`);
+      await unlink(path.join(dir, up));
+      await unlink(path.join(dir, down));
+      await repo.query("alter table public.review_run drop column note");
     }
 
     // ── X8. POSTGRES_DDL_SESSION_ROLE, as wec.aria runs it ──────────────────

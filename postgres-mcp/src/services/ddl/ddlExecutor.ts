@@ -62,9 +62,9 @@ export interface LivePlan {
  * (on the pool) and again by dry run and apply (on the locked session), so the plan they execute
  * is built the same way as the one that was approved.
  */
-export async function planAgainst(db: Queryable, request: PlanRequest, config: DdlConfig): Promise<LivePlan> {
+export async function planAgainst(db: Queryable, request: PlanRequest, config: DdlConfig, environment?: string): Promise<LivePlan> {
   try {
-    return await planAgainstUnguarded(db, request, config);
+    return await planAgainstUnguarded(db, request, config, environment);
   } catch (error) {
     if (stringProp(error, "code") === "55P03") {
       throw new PolicyViolationError(
@@ -139,8 +139,23 @@ async function assertSessionRole(db: Queryable, role: string, ownerRoles: Readon
   }
 }
 
-async function planAgainstUnguarded(db: Queryable, request: PlanRequest, config: DdlConfig): Promise<LivePlan> {
+/** Why an environment without the external ledger is refused, naming it when known. */
+export function missingLedgerMessage(label: string, environment?: string): string {
+  const where = environment === undefined ? "This environment" : `Environment '${environment}'`;
+  return `${where} has no ${label}. POSTGRES_DDL_EXTERNAL_LEDGER, with the migrations directory and session role, describes one repo's database: if this is not it, pass that database's environment. If it is, create the ledger with the repo's own runner first; the lane never creates it.`;
+}
+
+async function planAgainstUnguarded(db: Queryable, request: PlanRequest, config: DdlConfig, environment?: string): Promise<LivePlan> {
   const ledger = ledgerFor(config);
+  // The ledger first. With an external ledger, the lane's whole configuration (the ledger, the
+  // migrations directory, the session role) describes ONE repo's database, while every environment
+  // of the server can be named. An environment without that ledger is almost always the wrong one,
+  // and saying so beats a session-role or schema error that hides it. The lane never creates the
+  // table, so nothing could be applied there anyway.
+  const read = await ledger.read(db);
+  if (ledger.external && !read.present) {
+    throw new PolicyViolationError("DDL_LEDGER_MISSING", missingLedgerMessage(ledger.label, environment));
+  }
   const ownerRoles = await ownerRoleAttributes(db, config.ownerRoles ?? []);
   if (config.sessionRole !== undefined) {
     await assertSessionRole(db, config.sessionRole, ownerRoles);
@@ -151,7 +166,6 @@ async function planAgainstUnguarded(db: Queryable, request: PlanRequest, config:
   };
   const loaded = request.mode === "file" ? await loadMigrations(requireMigrationsDir(config), ledger.format) : undefined;
   const snapshot = await captureSchema(db);
-  const read = await ledger.read(db);
   const state = read.state;
   const sentinel = config.adoptionSentinel;
   const adoption =
@@ -203,7 +217,7 @@ export async function replanForExecution(
   approved: { request: PlanRequest; environment: string; digest: string; preSnapshotId: string; historyStateId: string },
   config: DdlConfig
 ): Promise<LivePlan> {
-  const fresh = await planAgainst(db, approved.request, config);
+  const fresh = await planAgainst(db, approved.request, config, approved.environment);
   // The ledger first: when another apply ran, the schema moved too, and "another apply ran" is
   // the answer that tells the caller what happened.
   if (fresh.state.stateId !== approved.historyStateId) {
@@ -603,7 +617,7 @@ export async function applyPlan(client: pg.Client, plan: DdlPlan, meta: ApplyMet
       const historyId = await meta.ledger.recordApplied(
         client,
         { ...ledgerRow(plan, step, meta), status: "applied", failedStatement: null, errorSqlstate: null, durationMs: 0 },
-        step.file,
+        step.ledgerFile ?? step.file,
         HOST
       );
       steps.push({ ...base, status: "adopted", durationMs: 0, ...(historyId === undefined ? {} : { historyId }) });
@@ -629,7 +643,7 @@ export async function applyPlan(client: pg.Client, plan: DdlPlan, meta: ApplyMet
           historyId = await meta.ledger.recordApplied(
             client,
             { ...ledgerRow(plan, step, meta), status: "applied", failedStatement: null, errorSqlstate: null, durationMs: Date.now() - started },
-            step.file,
+            step.ledgerFile ?? step.file,
             HOST
           );
           await client.query("commit");
@@ -674,7 +688,7 @@ export async function applyPlan(client: pg.Client, plan: DdlPlan, meta: ApplyMet
     const historyId = await meta.ledger.recordApplied(
       client,
       { ...ledgerRow(plan, step, meta), status: "applied", failedStatement: null, errorSqlstate: null, durationMs: Date.now() - started },
-      step.file,
+      step.ledgerFile ?? step.file,
       HOST
     );
     steps.push({ ...base, status: done, durationMs: Date.now() - started, ...(historyId === undefined ? {} : { historyId }) });

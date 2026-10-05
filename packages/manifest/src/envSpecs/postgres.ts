@@ -157,7 +157,7 @@ export const postgresEnv: readonly EnvField[] = [
     required: false,
     kind: "string",
     section: "Raw-SQL DDL migrations (OFF unless enabled)",
-    note: "[schema.]table of a repo's own (filename, checksum) ledger, e.g. public.schema_migration. Replaces mcp_ops.ddl_history; the directory then holds psql-style NNNN-name.sql files, forward-only, sha256 over raw bytes. ADR 0005 Decision 7."
+    note: "[schema.]table of a repo's own (filename, checksum) ledger, e.g. public.schema_migration. Replaces mcp_ops.ddl_history; the directory then holds psql-style NNNN-name.sql files (and optional NNNN-name.down.sql), sha256 over raw bytes. ADR 0005 Decision 7."
   },
   {
     name: "POSTGRES_DDL_OWNER_ROLES",
