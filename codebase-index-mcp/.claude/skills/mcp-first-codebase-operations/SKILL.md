@@ -58,8 +58,7 @@ Calls fail or return nothing when a name is passed where an id is expected. Auth
 
 ## When `orient` disagrees with this file
 
-`orient.ts` was brought up to date on 2026-10-01: it recommends `rename_assist(emitPreview:true)`
-and knows the docs lane stores prose, and `orient.test.ts` pins both. Trust `orient` for routing.
+Trust `orient` for routing; `orient.test.ts` pins its recommendations.
 If it ever contradicts the registry again, the registry
 (`docs/mcp-codebase-index-issue-registry.md`) wins, and `orient.ts` is the thing to fix.
 

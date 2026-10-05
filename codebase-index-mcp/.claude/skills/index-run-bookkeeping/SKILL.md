@@ -97,7 +97,7 @@ dressed up as resolved.** Each way this broke is on file:
    `to_id`, `confidence` and `reason` in place. A token that provably points outside the repo is
    kept and tagged `reason = 'external boundary'` with confidence 0.1. It is not deleted. The resolve
    window is bounded by `CODEBASE_INDEX_MAX_UNRESOLVED_RESOLVE_ROWS`. The post-resolve passes can be
-   switched off with `CODEBASE_INDEX_POST_RESOLVE_TYPE_REFS_ENABLED` / `_PROPERTY_REFS`.
+   switched off with `CODEBASE_INDEX_POST_RESOLVE_TYPE_REFS_ENABLED` / `CODEBASE_INDEX_POST_RESOLVE_PROPERTY_REFS_ENABLED`.
 4. **Cross-repo** resolution runs **last** (`safeCrossRepoResolve`, after MCP-ISSUE-048). Its
    failures are counted in `index_runs.unresolved_no_candidate / _ambiguous / _boundary_blocked /
    _low_confidence`. Those four columns count **cross-repo** reasons only. They are not a per-file or

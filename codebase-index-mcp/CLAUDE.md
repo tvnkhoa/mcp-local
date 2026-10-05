@@ -54,9 +54,8 @@ Files on disk
 
 ### Layout
 
-`src/` follows the workspace standard structure — the same nine slots in every server. S-41 re-homed
-59 loose files into domain folders; the standard-structure refactor then folded those folders into
-the shared vocabulary, keeping their names as sub-domains under `services/`.
+`src/` follows the workspace standard structure — the same nine slots in every server, with domain
+sub-folders under `services/`.
 
 | Folder | Owns |
 |--------|------|
@@ -91,9 +90,7 @@ absent because this server declares no MCP prompts.
 `csharpExtractor`); `csharp*` / `js*` are that language's internals (`csharpSymbols`,
 `csharpTypeRefs`, `csharpScope`, `jsCalls`); bare `extractor*` is machinery shared across
 languages (`extractorEdges`, `extractorUtils`, `extractorPrimitives`, `extractorTypes`,
-`extractorRoutes`). Two files broke the rule by carrying the shared prefix while being
-language-specific — `extractorCSharpScope.ts` and `extractorJsCalls.ts` — and were renamed to
-`csharpScope.ts` and `jsCalls.ts` on 2026-08-03.
+`extractorRoutes`).
 
 ### Key source files
 
@@ -134,8 +131,8 @@ copy. Re-derive rather than trust it:
 grep -nE '^  (kind|type):' src/types/index.ts
 ```
 
-- **Symbol kinds** (14, `src/types/index.ts:170`): `function | class | method | variable | module | interface | property | constructor | type | struct | record | record struct | impl | unknown`
-- **Edge types** (10, `src/types/index.ts:188`): `IMPORTS | CALLS | DEPENDS_ON | IMPLEMENTS | EXTENDS | TYPE_REF | PROPERTY_REF | PROPERTY_WRITE | PUBLISHES | CONSUMES`
+- **Symbol kinds** (14): `function | class | method | variable | module | interface | property | constructor | type | struct | record | record struct | impl | unknown`
+- **Edge types** (10): `IMPORTS | CALLS | DEPENDS_ON | IMPLEMENTS | EXTENDS | TYPE_REF | PROPERTY_REF | PROPERTY_WRITE | PUBLISHES | CONSUMES`
 - **Stable IDs**: SHA-256 of `repoId:filePath:kind:name:row` truncated to 24 hex chars — `makeSymbolId` → `stableId` in `src/services/extractors/extractorPrimitives.ts`; `row` is the 0-indexed tree-sitter row (see *A symbol id is minted in one place* below)
 - **Multi-repo**: All tables are scoped by `repoId`; a single SQLite DB can hold multiple repos
 - **Confidence**: edges carry a 0.0–1.0 score; unresolved edges are tracked separately for diagnostics
@@ -148,11 +145,6 @@ grep -nE '^  (kind|type):' src/types/index.ts
   cannot be reproduced, and MCP-ISSUE-032 was exactly that failure.
 - Do not store raw sensitive source spans unless justified; prefer hashes and metadata.
 - Document the migration path and backward compatibility before changing an existing table.
-
-*(Guardrails absorbed from the `graph-schema-design` authoring skill, archived 2026-08-03. That skill
-prescribed nodes `Repository/Revision/File/Module/Symbol/IndexRun` and edges
-`CONTAINS/IMPORTS/EXPORTS/CALLS/DEPENDS_ON/CHANGED_IN` — three of those edges never existed and seven
-real ones were missing. The unions above are the measured truth.)*
 
 ### Refactor engine
 

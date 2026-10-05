@@ -46,9 +46,9 @@ and a concrete fix.
 - [ ] Every write path stays preview-gated with an HMAC `approvalToken`:
       `refactor_replace_apply`, `rename_assist(emitPreview: true)` → apply,
       `refactor_symbol_migration` and `change_value_representation` (`dryRun: false` needs
-      `previewId` + `approvalToken`, enforced since 2026-09-17). Run `npm run test:approval-token`
+      `previewId` + `approvalToken`). Run `npm run test:approval-token`
       and `npm run test:refactor-engine`.
-- [ ] `CODEBASE_INDEX_REFACTOR_APPROVAL_SECRET` / `_PREVIEW_TTL_MS` / `_STRICT_APPROVAL` defaults are
+- [ ] `CODEBASE_INDEX_REFACTOR_APPROVAL_SECRET` / `_PREVIEW_TTL_MS` / `_STRICT_APPROVAL_ENABLED` defaults are
       unchanged. A new env var is declared in `packages/manifest/src/envSpecs/codebaseIndex.ts`, not
       read ad hoc. Only `src/config/` may read `process.env`.
 - [ ] Harnesses never touch the real index DB (`npm run test:harness-db-isolation`).

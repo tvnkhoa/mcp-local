@@ -80,11 +80,8 @@ detect_circular_dependencies(repoId, mode: "module")
 
 ## MCP-First Rules
 
-1. Query MCP before reading files — `search_symbols` → `get_symbol_context_pack` → targeted file read
-2. Use `profile: "compact"` for most calls; `profile: "nano"` for high-volume queries
-3. Soft cap: 5 MCP calls per question; hard cap: 8 with fallback
-4. Baseline tools (`grep`, `read_file`) allowed only after 2 failed MCP attempts
-5. If fallback is used, log the gap to `codebase-index-mcp/docs/mcp-codebase-index-issue-registry.md`
+`.claude/rules/mcp-hard-mode.md` governs: enforcement gates, fallback conditions, call budget and
+mandatory issue logging.
 
 ## Tool Reference
 
@@ -101,8 +98,4 @@ detect_circular_dependencies(repoId, mode: "module")
 
 ## Response Contract
 
-Include in every analysis response:
-- MCP calls used (tool name + key args)
-- Whether fallback occurred and why
-- Gate status: Discovery / Scope / Confidence — passed or failed
-- Target repoId(s) explicitly stated
+Report per the *Output Contract* in `.claude/rules/mcp-hard-mode.md`.

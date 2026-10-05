@@ -8,7 +8,8 @@ description: "Use when building or updating MCP tools for codebase indexing, dep
 - Design for **incremental indexing** first; avoid full re-index on every run.
 - Prefer parser-based extraction (`tree-sitter`) over regex for symbols/imports/call edges.
 - Use binary sniff (null-byte check) + extension allowlist to skip binary/noisy/non-source files before parse.
-- Keep index schema explicit: nodes (repo/file/symbol/module) and edges (imports/calls/contains/depends_on).
+- Keep index schema explicit. The symbol-kind and edge-type unions in
+  `codebase-index-mcp/src/types/index.ts` are the schema; a new kind or edge type is added there.
 - Record index run metadata (version, commit SHA, startedAt, finishedAt, status, counters).
 
 ## MCP Tool Contract
@@ -22,8 +23,7 @@ description: "Use when building or updating MCP tools for codebase indexing, dep
 - Validate all inputs with schema and enforce hard bounds (`depth`, `limit`, `timeoutMs`).
 - Return deterministic error codes for unsupported language/parser/index state.
 - `contracts/codebase-index.json` is authoritative for names and parameters. Verify against it before
-  citing a tool here — this list previously named `get_module_flow` and `find_impact_surface`, neither
-  of which ever existed.
+  citing a tool here.
 
 ## Internal Security & Storage
 - Internal-only deployment; no external data exfiltration paths by default.
@@ -32,6 +32,7 @@ description: "Use when building or updating MCP tools for codebase indexing, dep
 - Do not log raw sensitive source blocks when unnecessary; prefer hashes and metadata.
 
 ## Operability
-- Add health/status endpoints or MCP health tool for index freshness.
-- Track performance metrics: files scanned, parse failures, edge count, elapsed time.
-- Document runbooks for full reindex, incremental reindex, and recovery from partial failure.
+- `health_check` reports index freshness and the latest run from `index_runs`. A new run counter or
+  health field follows the `index-run-bookkeeping` skill, so it is persisted, not only returned.
+- Reindex and recovery runbooks are the `incremental-indexing` and `index-release-checklist` skills;
+  change those rather than adding a runbook elsewhere.

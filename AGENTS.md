@@ -45,7 +45,7 @@ Full statements: [`CLAUDE.md`](CLAUDE.md) §"Critical Constraints" and
 
 ## Environment variables
 
-**Do not look for a list here.** All **98** are declared once, in
+**Do not look for a list here.** All **136** are declared once, in
 `packages/manifest/src/envSpecs/<server>.ts`, and rendered into two places that cannot drift:
 
 - `<server>/.env.example` — every variable the server reads, with its default
@@ -55,8 +55,7 @@ Full statements: [`CLAUDE.md`](CLAUDE.md) §"Critical Constraints" and
 node -e "import('@mcp/manifest').then(m => m.SERVERS.forEach(s => console.log(s.key, s.env.length)))"
 ```
 
-This file previously hand-listed 21 of the 98, which is how it came to name variables that S-43 had
-renamed. The generated tables are the single source of truth.
+The generated tables are the single source of truth.
 
 ## Per-server documentation
 

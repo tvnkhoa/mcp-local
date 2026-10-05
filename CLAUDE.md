@@ -129,9 +129,9 @@ change drive-letter casing or slash style, or the allowlist rejects it.
 (`docs/decisions/0005-ddl-migration-lane.md`), and its ledger is `mcp_ops.ddl_history`. `mcp_ops`
 belongs to the server: no tool may write to it, and it is not in schema snapshots.
 `POSTGRES_APPROVAL_SECRET` is auto-generated per process when unset — set it only to keep
-tokens valid across restarts. **`prod` is force read-only.** S-43 renamed
-all 21 vars to `POSTGRES_*`; every pre-rename name (`CH_*`, `PG_*`, `MCP_DB_*`) still works with a
-one-time deprecation warning.
+tokens valid across restarts. **`prod` is force read-only.** The pre-`POSTGRES_*`
+names (`CH_*`, `PG_*`, `MCP_DB_*`) still work with a one-time deprecation warning; write the canonical
+names.
 
 **Smoke test requires build.** `node scripts/smoke-test.mjs` runs `dist/index.js`, not source.
 
