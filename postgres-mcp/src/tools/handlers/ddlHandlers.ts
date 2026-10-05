@@ -114,7 +114,7 @@ function withDirective(sql: string, noTransaction: boolean): string {
 
 /** Validate one script for `ddl_create`, failing with the script's role in the message. */
 function checkScript(role: "up" | "down", sql: string, config: DdlConfig): { risks: RiskFinding[]; mode: string; statementCount: number; warnings: string[] } {
-  const validated = validateDdlScript(sql, { ownerRoles: config.ownerRoles ?? [] });
+  const validated = validateDdlScript(sql, { ownerRoles: config.ownerRoles ?? [], doBlocks: true });
   if (!validated.ok) {
     throw new PolicyViolationError(validated.error.code, `${role}: ${validated.error.message}`);
   }
@@ -267,7 +267,7 @@ export async function handleDdlPreview(
       throw new PolicyViolationError("DDL_INLINE_UNSUPPORTED", "Inline SQL is not accepted with an external ledger, which records files only. Add the file to the migrations directory.");
     }
     // Refuse a bad script before any database work, with the guardrail's own code.
-    const validated = validateDdlScript(request.sql, { noTransaction: request.noTransaction, ownerRoles: config.ownerRoles ?? [] });
+    const validated = validateDdlScript(request.sql, { noTransaction: request.noTransaction, ownerRoles: config.ownerRoles ?? [], doBlocks: true });
     if (!validated.ok) {
       throw new PolicyViolationError(validated.error.code, validated.error.message);
     }
@@ -316,6 +316,7 @@ export async function handleDdlPreview(
       environment: env.name,
       direction: live.plan.direction,
       kind: live.plan.kind,
+      ...(live.plan.sessionRole === null ? {} : { runsAs: live.plan.sessionRole }),
       expiresAt,
       preSnapshotId: live.snapshot.snapshotId,
       historyStateId: live.state.stateId,

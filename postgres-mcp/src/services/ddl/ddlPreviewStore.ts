@@ -15,6 +15,8 @@ export interface DryRunStepResult {
   name: string;
   action: "apply" | "adopt" | "revert";
   status: "ok" | "failed" | "skipped" | "not_run";
+  /** Row counts of the step's INSERT / UPDATE / DELETE statements, when it has any. */
+  rowsAffected?: Array<{ statementIndex: number; rows: number }>;
   durationMs?: number;
   reason?: string;
 }

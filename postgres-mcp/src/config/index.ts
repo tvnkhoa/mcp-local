@@ -109,12 +109,13 @@ export function ddlMigrationsDirFromEnv(): string {
 }
 
 /** The DDL lane's optional settings, raw and trimmed. `parseDdlLaneSettings` validates them. */
-export function ddlLaneSettingsFromEnv(): { externalLedger: string; ownerRoles: string; sessionSettings: string; adoptionSentinel: string } {
+export function ddlLaneSettingsFromEnv(): { externalLedger: string; ownerRoles: string; sessionSettings: string; adoptionSentinel: string; sessionRole: string } {
   return {
     externalLedger: stringFromEnv("POSTGRES_DDL_EXTERNAL_LEDGER"),
     ownerRoles: stringFromEnv("POSTGRES_DDL_OWNER_ROLES"),
     sessionSettings: stringFromEnv("POSTGRES_DDL_SESSION_SETTINGS"),
-    adoptionSentinel: stringFromEnv("POSTGRES_DDL_ADOPTION_SENTINEL")
+    adoptionSentinel: stringFromEnv("POSTGRES_DDL_ADOPTION_SENTINEL"),
+    sessionRole: stringFromEnv("POSTGRES_DDL_SESSION_ROLE")
   };
 }
 

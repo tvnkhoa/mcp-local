@@ -164,7 +164,14 @@ export const postgresEnv: readonly EnvField[] = [
     required: false,
     kind: "string",
     section: "Raw-SQL DDL migrations (OFF unless enabled)",
-    note: "Comma-separated roles ALTER … OWNER TO may name. Empty refuses every OWNER TO; a SUPERUSER/CREATEROLE/BYPASSRLS/REPLICATION role is refused even when listed."
+    note: "Comma-separated roles that ALTER … OWNER TO and CREATE SCHEMA … AUTHORIZATION may name. Empty refuses both; a SUPERUSER/CREATEROLE/BYPASSRLS/REPLICATION role is refused even when listed."
+  },
+  {
+    name: "POSTGRES_DDL_SESSION_ROLE",
+    required: false,
+    kind: "string",
+    section: "Raw-SQL DDL migrations (OFF unless enabled)",
+    note: "Role each migration's statements run as (SET LOCAL ROLE), so new objects are owned by it, not the login — what a runner gets from PGOPTIONS='-c role=…'. Must also be in POSTGRES_DDL_OWNER_ROLES; the login must be able to SET ROLE to it."
   },
   {
     name: "POSTGRES_DDL_SESSION_SETTINGS",

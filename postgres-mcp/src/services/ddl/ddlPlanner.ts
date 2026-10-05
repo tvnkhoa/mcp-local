@@ -111,6 +111,8 @@ export interface DdlPlan {
   warnings: string[];
   /** Distinct `high` codes across every step. `ddl_apply` must be given all of them. */
   requiredAcknowledgements: string[];
+  /** POSTGRES_DDL_SESSION_ROLE when the plan was made: the role its statements run as. In the digest. */
+  sessionRole: string | null;
 }
 
 export type PlanResult = { ok: true; plan: DdlPlan } | { ok: false; error: { code: string; message: string } };
@@ -146,6 +148,10 @@ function buildStep(
   const validated = validateDdlScript(sql, {
     ...options,
     psql: input.config.externalLedger !== undefined,
+    // A repo's own files keep a backfill in the transaction of the DDL it belongs to (ADR 0005,
+    // Decision 2). Inline scripts and the lane's own files send data changes to write_preview.
+    dataChanges: input.config.externalLedger !== undefined,
+    doBlocks: true,
     ownerRoles: input.config.ownerRoles ?? []
   });
   if (!validated.ok) {
@@ -183,13 +189,24 @@ function buildStep(
   };
 }
 
-function finish(direction: "up" | "down", kind: "file" | "inline", steps: PlanStep[], warnings: string[]): PlanResult {
+function finish(direction: "up" | "down", kind: "file" | "inline", steps: PlanStep[], initialWarnings: string[], sessionRole: string | null): PlanResult {
+  let warnings = initialWarnings;
   const requiredAcknowledgements = [
     ...new Set(steps.flatMap((s) => s.risks.filter((r) => r.level === "high").map((r) => r.code)))
   ];
+  // The dry run keeps every step in one transaction, and Postgres refuses a new enum value until
+  // the transaction that added it commits. Said here, before the dry run reports it.
+  const enumAt = steps.findIndex((s) => s.risks.some((r) => r.code === "ALTER_TYPE_ADD_VALUE"));
+  if (enumAt >= 0 && enumAt < steps.length - 1) {
+    const step = steps[enumAt] as PlanStep;
+    warnings = [
+      ...warnings,
+      `${step.file ?? `inline '${step.name}'`} adds an enum value. ddl_dry_run cannot check a later migration that uses it (it reports that step skipped, ENUM_VALUE_UNCOMMITTED); ddl_apply commits each migration first, so apply is not affected.`
+    ];
+  }
   return {
     ok: true,
-    plan: { direction, kind, steps, warnings: [...warnings, ...steps.flatMap((s) => s.warnings)], requiredAcknowledgements }
+    plan: { direction, kind, steps, warnings: [...warnings, ...steps.flatMap((s) => s.warnings)], requiredAcknowledgements, sessionRole }
   };
 }
 
@@ -216,7 +233,7 @@ export function buildPlan(input: PlanInput): PlanResult {
       input,
       createdInPlan
     );
-    return built.ok ? finish("up", "inline", [built.step], warnings) : built;
+    return built.ok ? finish("up", "inline", [built.step], warnings, input.config.sessionRole ?? null) : built;
   }
 
   const loaded = input.files;
@@ -291,7 +308,7 @@ export function buildPlan(input: PlanInput): PlanResult {
       }
       steps.push(built.step);
     }
-    return finish("up", "file", steps, warnings);
+    return finish("up", "file", steps, warnings, input.config.sessionRole ?? null);
   }
 
   // ── down ──
@@ -330,7 +347,7 @@ export function buildPlan(input: PlanInput): PlanResult {
     }
     steps.push(built.step);
   }
-  return finish("down", "file", steps, warnings);
+  return finish("down", "file", steps, warnings, input.config.sessionRole ?? null);
 }
 
 /**
@@ -343,6 +360,6 @@ export function planDigest(args: { environment: string; preSnapshotId: string; h
     [s.version ?? "inline", s.action, s.mode, s.checksum, String(s.timeouts.lockTimeoutMs), String(s.timeouts.statementTimeoutMs)].join(":")
   );
   return createHash("sha256")
-    .update([args.environment, args.preSnapshotId, args.historyStateId, args.plan.direction, args.plan.kind, ...steps].join("::"))
+    .update([args.environment, args.preSnapshotId, args.historyStateId, args.plan.direction, args.plan.kind, `role=${args.plan.sessionRole ?? ""}`, ...steps].join("::"))
     .digest("hex");
 }

@@ -109,6 +109,115 @@ const FILE_3 = [
   ""
 ].join("\r\n");
 
+const ROLE_FILE = [
+  "\\set ON_ERROR_STOP on",
+  "begin;",
+  "create schema if not exists review_jobs authorization aria_review;",
+  "create table public.tenant (id int primary key, location text);",
+  "insert into public.tenant values (1, 'syd'), (2, 'mel'), (3, '');",
+  "create table public.tenant_location (tenant_id int, location text);",
+  "do $$ begin insert into public.tenant_location select id, location from public.tenant where location <> ''; end $$;",
+  "update public.tenant set location = null where location = '';",
+  "alter table public.tenant drop column location;",
+  "commit;",
+  ""
+].join("\n");
+
+async function runSessionRoleScenario(baseEnv) {
+  const admin = new pg.Client({ connectionString: conn("probe") });
+  await admin.connect();
+  await admin.query("create database roles");
+  await admin.query(`create role deployer login nosuperuser password '${PASSWORD}'; create role outsider login nosuperuser password '${PASSWORD}'; grant aria to deployer`);
+  await admin.end();
+  const roles = new pg.Client({ connectionString: conn("roles") });
+  await roles.connect();
+  // aria creates the objects, deployer writes the ledger row and the audit log (mcp_ops).
+  await roles.query(`grant create on database roles to aria, deployer; grant create on schema public to aria; ${LEDGER_DDL}; grant select, insert on schema_migration to deployer, outsider`);
+
+  const roleDir = await mkdtemp(path.join(os.tmpdir(), "ddl-session-role-"));
+  await writeFile(path.join(roleDir, "0001-job-schema-and-tenant-location.sql"), ROLE_FILE);
+  const login = (user, db) => `postgres://${user}:${PASSWORD}@127.0.0.1:${String(PORT)}/${db}`;
+  const env = {
+    ...baseEnv,
+    POSTGRES_ENV_DEV: login("deployer", "roles"),
+    POSTGRES_ENV_OUTSIDER: login("outsider", "roles"),
+    POSTGRES_WRITABLE_ENVIRONMENTS: "dev,outsider",
+    POSTGRES_DDL_MIGRATIONS_DIR: roleDir,
+    POSTGRES_DDL_OWNER_ROLES: "aria,aria_review",
+    POSTGRES_DDL_SESSION_ROLE: "aria"
+  };
+  delete env.POSTGRES_ENV_ADOPT;
+  delete env.POSTGRES_ENV_FRESH;
+  delete env.POSTGRES_DDL_ADOPTION_SENTINEL;
+  const transport = new StdioClientTransport({ command: "node", args: ["dist/index.js"], stderr: "pipe", env });
+  const mcp = new McpClient({ name: "postgres-mcp-ddl-session-role-test", version: "0.1.0" });
+  await mcp.connect(transport);
+  const call = async (name, args) => {
+    const result = await mcp.callTool({ name, arguments: args });
+    const text = (Array.isArray(result.content) ? result.content : []).find((x) => x.type === "text")?.text ?? "null";
+    return { isError: result.isError === true, payload: JSON.parse(text) };
+  };
+
+  try {
+    // A login that cannot SET ROLE aria is refused before anything is planned.
+    const outsider = await call("ddl_preview", { environment: "outsider" });
+    check("X8a/login-not-member-of-session-role-refused", outsider.isError && outsider.payload.code === "DDL_SESSION_ROLE_NOT_MEMBER", `code=${String(outsider.payload.code)}`);
+
+    // aria is not yet a member of aria_review, so AUTHORIZATION aria_review cannot run as aria.
+    const blocked = await call("ddl_preview", { environment: "dev" });
+    check(
+      "X8b/authorization-to-a-role-aria-cannot-become-blocked",
+      blocked.isError && blocked.payload.code === "DDL_RISK_BLOCKED" && /runs as aria, which cannot SET ROLE aria_review/.test(blocked.payload.message),
+      `code=${String(blocked.payload.code)} message=${String(blocked.payload.message).slice(0, 140)}`
+    );
+
+    await roles.query("grant aria_review to aria");
+    const preview = await call("ddl_preview", { environment: "dev", profile: "standard" });
+    const p = preview.payload;
+    // No DROP_COLUMN: tenant is created earlier in the same plan, so it holds nothing anyone relied on.
+    const acks = ["PRIVILEGE_CHANGE", "DATA_CHANGE", "DO_BLOCK"];
+    check(
+      "X8c/preview-runs-as-aria-and-asks-for-every-acknowledgement",
+      !preview.isError && p.runsAs === "aria" && acks.every((code) => p.requiredAcknowledgements.includes(code)),
+      `runsAs=${String(p.runsAs)} ack=${JSON.stringify(p.requiredAcknowledgements)} code=${String(p.code)} message=${String(p.message ?? "").slice(0, 140)}`
+    );
+    const dry = await call("ddl_dry_run", { previewId: p.previewId });
+    const rows = dry.payload.steps?.[0]?.rowsAffected ?? [];
+    check(
+      "X8d/dry-run-reports-rows-per-data-change",
+      !dry.isError && dry.payload.status === "ok" && JSON.stringify(rows.map((r) => r.rows)) === JSON.stringify([3, 1]),
+      `status=${String(dry.payload.status)} rows=${JSON.stringify(rows)} error=${JSON.stringify(dry.payload.error)}`
+    );
+    const applied = await call("ddl_apply", { previewId: p.previewId, approvalToken: p.approvalToken, acknowledgeRisks: p.requiredAcknowledgements });
+    check("X8e/apply-applies", !applied.isError && applied.payload.status === "applied", `status=${String(applied.payload.status)} error=${JSON.stringify(applied.payload.error)}`);
+
+    const facts = (
+      await roles.query(
+        `select (select tableowner from pg_tables where schemaname = 'public' and tablename = 'tenant') as tenant_owner,
+                (select tableowner from pg_tables where schemaname = 'public' and tablename = 'tenant_location') as location_owner,
+                (select nspowner::regrole::text from pg_namespace where nspname = 'review_jobs') as schema_owner,
+                (select count(*)::int from public.tenant_location) as moved,
+                exists (select 1 from information_schema.columns where table_name = 'tenant' and column_name = 'location') as old_column,
+                exists (select 1 from schema_migration where filename = '0001-job-schema-and-tenant-location.sql') as recorded`
+      )
+    ).rows[0];
+    check(
+      "X8f/objects-owned-by-aria-schema-by-its-role-rows-moved-ledger-written",
+      facts.tenant_owner === "aria" &&
+        facts.location_owner === "aria" &&
+        facts.schema_owner === "aria_review" &&
+        facts.moved === 2 &&
+        facts.old_column === false &&
+        facts.recorded === true,
+      JSON.stringify(facts)
+    );
+  } finally {
+    await mcp.close().catch(() => undefined);
+    await roles.end().catch(() => undefined);
+    await rm(roleDir, { recursive: true, force: true }).catch(() => undefined);
+  }
+}
+
 async function main() {
   if (docker(["version", "--format", "{{.Server.Version}}"]).status !== 0) {
     console.log("SKIP: Docker is not available — the external-ledger test needs a throwaway Postgres.");
@@ -330,6 +439,51 @@ async function main() {
         `preview=${String(fresh.payload.code ?? "ok")} apply=${String(freshApply.payload.code)} untouched=${String(untouched)}`
       );
     }
+
+    // ── X9. an enum value added by one migration and used by the next ───────
+    // wec.aria's 0019 + 0020. The dry run keeps every step in one transaction, where Postgres
+    // refuses the new value (55P04); apply commits 0004 before 0005 runs. The dry run must call
+    // that step skipped, not failed, and apply must still apply both.
+    {
+      await repo.query("create type public.usage_kind as enum ('turn')");
+      const add = "0004-usage-kind-retrieval-inspection.sql";
+      const use = "0005-usage-events-kind.sql";
+      await writeFile(path.join(dir, add), "alter type public.usage_kind add value if not exists 'retrieval_inspection';\n");
+      await writeFile(path.join(dir, use), "alter table public.usage_events add column kind public.usage_kind default 'retrieval_inspection';\n");
+      const p = await callRaw("ddl_preview", { environment: "dev", profile: "standard" });
+      check(
+        "X9a/preview-warns-the-dry-run-cannot-check-the-later-step",
+        !p.isError && p.payload.warnings.some((w) => /0004-usage-kind-retrieval-inspection\.sql adds an enum value/.test(w)),
+        `code=${String(p.payload.code)} warnings=${JSON.stringify(p.payload.warnings)}`
+      );
+      const dry = p.isError ? p : await callRaw("ddl_dry_run", { previewId: p.payload.previewId });
+      const steps = dry.payload.steps ?? [];
+      check(
+        "X9b/dry-run-reports-the-enum-step-skipped-not-failed",
+        !dry.isError &&
+          dry.payload.status === "ok" &&
+          steps[0]?.status === "ok" &&
+          steps[1]?.status === "skipped" &&
+          /^ENUM_VALUE_UNCOMMITTED/.test(steps[1]?.reason ?? ""),
+        `status=${String(dry.payload.status)} steps=${JSON.stringify(steps.map((s) => [s.status, s.reason?.slice(0, 40)]))} error=${JSON.stringify(dry.payload.error)}`
+      );
+      const applied = p.isError
+        ? p
+        : await callRaw("ddl_apply", { previewId: p.payload.previewId, approvalToken: p.payload.approvalToken, acknowledgeRisks: p.payload.requiredAcknowledgements });
+      const kind = (await repo.query("select column_default from information_schema.columns where table_name = 'usage_events' and column_name = 'kind'")).rows[0];
+      check(
+        "X9c/apply-commits-each-migration-so-both-apply",
+        !applied.isError && applied.payload.status === "applied" && /retrieval_inspection/.test(String(kind?.column_default)),
+        `status=${String(applied.payload.status)} default=${String(kind?.column_default)} error=${JSON.stringify(applied.payload.error)}`
+      );
+    }
+
+    // ── X8. POSTGRES_DDL_SESSION_ROLE, as wec.aria runs it ──────────────────
+    // A second server: a personal, non-superuser login (`deployer`, a member of aria) and the
+    // statements run as aria. The file has the shapes of wec.aria's 0004 and 0018: a job-queue
+    // schema owned by its own role, then rows moved by a DO block and a backfill before the old
+    // column is dropped, all in one transaction.
+    await runSessionRoleScenario(serverEnv);
   } finally {
     await mcp.close().catch(() => undefined);
     await repo.end().catch(() => undefined);

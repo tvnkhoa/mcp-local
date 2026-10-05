@@ -90,8 +90,65 @@ async function ownerRoleAttributes(db: Queryable, roles: readonly string[]): Pro
   );
 }
 
+/**
+ * Which of `roles` the acting role (`acting`, else the login) may SET ROLE to: the SET option on
+ * PG16+, membership before it. Only roles that exist are asked about, since pg_has_role errors on
+ * an unknown name.
+ */
+async function settableRoles(db: Queryable, acting: string | undefined, roles: readonly string[]): Promise<Set<string>> {
+  if (roles.length === 0) {
+    return new Set();
+  }
+  const result = await db.query<{ rolname: string }>(
+    `select rolname from pg_roles
+     where rolname = any($1::text[])
+       and pg_has_role(coalesce($2::name, session_user), oid,
+                       case when current_setting('server_version_num')::int >= 160000 then 'SET' else 'MEMBER' end)`,
+    [roles, acting ?? null]
+  );
+  return new Set(result.rows.map((r) => r.rolname));
+}
+
+/**
+ * POSTGRES_DDL_SESSION_ROLE, checked against the target database before anything is planned: it
+ * exists, has none of the attributes refused for an owner role, and the login may SET ROLE to it.
+ * The config already required it to be in POSTGRES_DDL_OWNER_ROLES, so `ownerRoles` holds it.
+ */
+async function assertSessionRole(db: Queryable, role: string, ownerRoles: ReadonlyMap<string, OwnerRoleAttributes>): Promise<void> {
+  const attributes = ownerRoles.get(role);
+  if (attributes === undefined) {
+    throw new PolicyViolationError("DDL_SESSION_ROLE_UNKNOWN", `POSTGRES_DDL_SESSION_ROLE ${role}: no such role exists in this database.`);
+  }
+  const reaching = [
+    attributes.superuser ? "SUPERUSER" : undefined,
+    attributes.createRole ? "CREATEROLE" : undefined,
+    attributes.bypassRls ? "BYPASSRLS" : undefined,
+    attributes.replication ? "REPLICATION" : undefined
+  ].filter((a): a is string => a !== undefined);
+  if (reaching.length > 0) {
+    throw new PolicyViolationError(
+      "DDL_SESSION_ROLE_PRIVILEGED",
+      `POSTGRES_DDL_SESSION_ROLE ${role} is refused: it has ${reaching.join(", ")}, and every statement of every migration would run with it.`
+    );
+  }
+  if (!(await settableRoles(db, undefined, [role])).has(role)) {
+    throw new PolicyViolationError(
+      "DDL_SESSION_ROLE_NOT_MEMBER",
+      `POSTGRES_DDL_SESSION_ROLE ${role}: the login cannot SET ROLE ${role}. Grant ${role} to the login (outside the lane), or unset the variable.`
+    );
+  }
+}
+
 async function planAgainstUnguarded(db: Queryable, request: PlanRequest, config: DdlConfig): Promise<LivePlan> {
   const ledger = ledgerFor(config);
+  const ownerRoles = await ownerRoleAttributes(db, config.ownerRoles ?? []);
+  if (config.sessionRole !== undefined) {
+    await assertSessionRole(db, config.sessionRole, ownerRoles);
+  }
+  const actingRole = {
+    name: config.sessionRole ?? (await db.query<{ u: string }>("select session_user as u")).rows[0]?.u ?? "the login",
+    canBecome: await settableRoles(db, config.sessionRole, [...ownerRoles.keys()])
+  };
   const loaded = request.mode === "file" ? await loadMigrations(requireMigrationsDir(config), ledger.format) : undefined;
   const snapshot = await captureSchema(db);
   const read = await ledger.read(db);
@@ -120,7 +177,8 @@ async function planAgainstUnguarded(db: Queryable, request: PlanRequest, config:
     config,
     ...(adoption === undefined ? {} : { adoption }),
     lint: {
-      ownerRoles: await ownerRoleAttributes(db, config.ownerRoles ?? []),
+      ownerRoles,
+      actingRole,
       existingTables: new Set(snapshot.tables.map((t) => `${t.schema}.${t.table}`)),
       // reltuples is -1 for a table never vacuumed or analyzed: "unknown", not "empty".
       rowEstimate: (table) => {
@@ -242,9 +300,28 @@ export async function withDdlSession<T>(
 
 // ── statement execution ──────────────────────────────────────────────────────
 
-async function runStatement(client: pg.Client, text: string): Promise<void> {
+async function runStatement(client: pg.Client, text: string): Promise<number | null> {
   // QueryConfig's typings predate queryMode; pg 8.11+ honours it.
-  await client.query({ text, queryMode: "extended" } as QueryConfig);
+  const result = await client.query({ text, queryMode: "extended" } as QueryConfig);
+  return result.rowCount;
+}
+
+/**
+ * The plan's session role, through `set_config('role', …)` with a bound value: `SET LOCAL ROLE`
+ * when `local`, `SET ROLE` on the non-transactional path. `null` (no role configured) is a no-op.
+ * Only the migration's own statements run under it. Baselines, the internal-write check and the
+ * ledger row run as the login, as they did before the role existed.
+ */
+async function setRole(client: pg.Client, role: string | null, local: boolean): Promise<void> {
+  if (role !== null) {
+    await client.query("select set_config('role', $1, $2)", [role, local]);
+  }
+}
+
+async function resetRole(client: pg.Client, role: string | null, local: boolean): Promise<void> {
+  if (role !== null) {
+    await client.query("select set_config('role', 'none', $1)", [local]);
+  }
 }
 
 async function setTimeouts(client: pg.Client, step: PlanStep, local: boolean, config: DdlConfig): Promise<void> {
@@ -301,17 +378,54 @@ function toStepError(error: unknown, step: PlanStep, statementIndex: number | nu
   };
 }
 
-/** Run a step's statements in order; on failure, report which one and why. */
-async function runStatements(client: pg.Client, step: PlanStep): Promise<StepError | undefined> {
+export interface RowsAffected {
+  statementIndex: number;
+  rows: number;
+}
+
+/**
+ * Run a step's statements in order, as `role`; on failure, report which one and why. Returns the
+ * row count of every data change (INSERT / UPDATE / DELETE), which is what a backfill's reviewer
+ * needs to see.
+ *
+ * On the transactional path a failure leaves the role for the rollback to undo, since an aborted
+ * transaction accepts no further command. On the non-transactional path nothing would undo it, so
+ * it is reset here.
+ */
+async function runStatements(
+  client: pg.Client,
+  step: PlanStep,
+  role: string | null,
+  local: boolean
+): Promise<{ failure?: StepError; rowsAffected: RowsAffected[] }> {
+  const rowsAffected: RowsAffected[] = [];
+  try {
+    await setRole(client, role, local);
+  } catch (error) {
+    return { failure: toStepError(error, step, null), rowsAffected };
+  }
   for (const statement of step.statements) {
     try {
-      await runStatement(client, statement.text);
+      const rows = await runStatement(client, statement.text);
+      if (statement.kind === "data") {
+        rowsAffected.push({ statementIndex: statement.index, rows: rows ?? 0 });
+      }
     } catch (error) {
-      return toStepError(error, step, statement.index);
+      if (!local) {
+        await resetRole(client, role, false).catch(() => undefined);
+      }
+      return { failure: toStepError(error, step, statement.index), rowsAffected };
     }
   }
-  return undefined;
+  try {
+    await resetRole(client, role, local);
+  } catch (error) {
+    return { failure: toStepError(error, step, null), rowsAffected };
+  }
+  return { rowsAffected };
 }
+
+const withRows = (rowsAffected: RowsAffected[]): { rowsAffected?: RowsAffected[] } => (rowsAffected.length === 0 ? {} : { rowsAffected });
 
 async function invalidIndexes(client: pg.Client): Promise<Set<string>> {
   const result = await client.query<{ name: string }>("select indexrelid::regclass::text as name from pg_index where not indisvalid");
@@ -329,7 +443,10 @@ async function invalidIndexes(client: pg.Client): Promise<Set<string>> {
 export async function dryRunPlan(client: pg.Client, plan: DdlPlan, session: { pid: number }, config: DdlConfig): Promise<DryRunResult> {
   const steps: DryRunStepResult[] = [];
   let error: StepError | undefined;
-  let skippedBefore = false;
+  /** Why a later failure may not be real: the first kind of step the dry run could not run. */
+  let skippedBefore: string | undefined;
+  /** An earlier step that added an enum value, which stays unusable until that step commits. */
+  let addedEnumValue: string | undefined;
 
   await client.query("begin");
   // Inside the transaction: a transaction pins one backend even through a pooler, so one check
@@ -347,7 +464,7 @@ export async function dryRunPlan(client: pg.Client, plan: DdlPlan, session: { pi
         continue;
       }
       if (step.mode === "non_transactional") {
-        skippedBefore = true;
+        skippedBefore ??= "a non-transactional migration the dry run skipped";
         steps.push({ ...base, status: "skipped", reason: "NON_TRANSACTIONAL: cannot run inside the dry run's transaction" });
         continue;
       }
@@ -355,7 +472,8 @@ export async function dryRunPlan(client: pg.Client, plan: DdlPlan, session: { pi
       await client.query("savepoint ddl_step");
       await setTimeouts(client, step, true, config);
       const baseline = await internalState(client);
-      let failure = await runStatements(client, step);
+      const ran = await runStatements(client, step, plan.sessionRole, true);
+      let failure = ran.failure;
       if (failure === undefined) {
         try {
           await assertNoInternalWrites(client, baseline, "DDL_RESERVED_SCHEMA", INTERNAL_WRITE_MESSAGE);
@@ -365,14 +483,30 @@ export async function dryRunPlan(client: pg.Client, plan: DdlPlan, session: { pi
       }
       if (failure !== undefined) {
         await client.query("rollback to savepoint ddl_step");
-        error = skippedBefore
-          ? { ...failure, message: `${failure.message} It may depend on a non-transactional migration the dry run skipped.` }
-          : failure;
+        // 55P04: "unsafe use of new value" of an enum. Postgres refuses to use a value added in the
+        // same transaction, and the dry run runs every step in one. At apply, each migration
+        // commits first, so this is the dry run's own limit, not the step's. It is reported as
+        // skipped, never as passed, and the run goes on. A value added and used in ONE migration
+        // fails at apply too, which is why only an earlier step's ADD VALUE counts.
+        if (failure.sqlState === "55P04" && addedEnumValue !== undefined) {
+          skippedBefore ??= `${addedEnumValue}, which the dry run could not commit`;
+          steps.push({
+            ...base,
+            status: "skipped",
+            durationMs: Date.now() - started,
+            reason: `ENUM_VALUE_UNCOMMITTED: uses an enum value ${addedEnumValue} adds. Postgres allows that only after ${addedEnumValue} commits, as it will at apply; the dry run keeps every step in one transaction, so it cannot check this one. Dry-run again once ${addedEnumValue} is applied.`
+          });
+          continue;
+        }
+        error = skippedBefore === undefined ? failure : { ...failure, message: `${failure.message} It may depend on ${skippedBefore}.` };
         steps.push({ ...base, status: "failed", durationMs: Date.now() - started });
         continue;
       }
       await client.query("release savepoint ddl_step");
-      steps.push({ ...base, status: "ok", durationMs: Date.now() - started });
+      if (step.risks.some((r) => r.code === "ALTER_TYPE_ADD_VALUE")) {
+        addedEnumValue ??= step.file ?? `inline '${step.name}'`;
+      }
+      steps.push({ ...base, status: "ok", durationMs: Date.now() - started, ...withRows(ran.rowsAffected) });
     }
   } finally {
     await client.query("rollback").catch(() => undefined);
@@ -388,6 +522,8 @@ export interface ApplyStepResult {
   name: string;
   action: "apply" | "adopt" | "revert";
   status: "applied" | "adopted" | "reverted" | "failed" | "not_run";
+  /** Row counts of the step's INSERT / UPDATE / DELETE statements, when it has any. */
+  rowsAffected?: RowsAffected[];
   durationMs?: number;
   historyId?: number;
 }
@@ -480,10 +616,13 @@ export async function applyPlan(client: pg.Client, plan: DdlPlan, meta: ApplyMet
       await client.query("begin");
       let failure: StepError | undefined;
       let historyId: number | undefined;
+      let rowsAffected: RowsAffected[] = [];
       try {
         await setTimeouts(client, step, true, meta.config);
         const baseline = await internalState(client);
-        failure = await runStatements(client, step);
+        const ran = await runStatements(client, step, plan.sessionRole, true);
+        failure = ran.failure;
+        rowsAffected = ran.rowsAffected;
         if (failure === undefined) {
           // Before the ledger insert, which is the one write to mcp_ops that belongs here.
           await assertNoInternalWrites(client, baseline, "DDL_RESERVED_SCHEMA", INTERNAL_WRITE_MESSAGE);
@@ -505,14 +644,14 @@ export async function applyPlan(client: pg.Client, plan: DdlPlan, meta: ApplyMet
         steps.push({ ...base, status: "failed", durationMs: Date.now() - started });
         continue;
       }
-      steps.push({ ...base, status: done, durationMs: Date.now() - started, ...(historyId === undefined ? {} : { historyId }) });
+      steps.push({ ...base, status: done, durationMs: Date.now() - started, ...(historyId === undefined ? {} : { historyId }), ...withRows(rowsAffected) });
       continue;
     }
 
     // Non-transactional: one statement, session-level timeouts, no surrounding transaction.
     const invalidBefore = await invalidIndexes(client);
     await setTimeouts(client, step, false, meta.config);
-    const failure = await runStatements(client, step);
+    const { failure } = await runStatements(client, step, plan.sessionRole, false);
     // Back to the session's own timeouts, not to the server default: RESET would mean "no
     // lock_timeout" for the post-apply snapshot that follows.
     await setSessionTimeouts(client, meta.session).catch(() => undefined);

@@ -14,7 +14,7 @@ import { test } from "node:test";
 import { parseDdlLaneSettings, type DdlConfig, type DdlLaneSettings } from "./ddlConfig.js";
 import { loadMigrations, type LoadedMigrations } from "./ddlFiles.js";
 import { deriveExternalState } from "./ddlLedger.js";
-import { buildPlan, computeStatus, type PlanInput } from "./ddlPlanner.js";
+import { buildPlan, computeStatus, planDigest, type PlanInput } from "./ddlPlanner.js";
 
 const CONFIG: DdlConfig = {
   enabled: true,
@@ -147,6 +147,53 @@ test("OWNER TO a role outside POSTGRES_DDL_OWNER_ROLES is refused in a file", ()
   assert.match(result.ok ? "" : result.error.message, /^0002-second\.sql: Statement 3: OWNER TO aria is refused/);
 });
 
+test("a repo's own file may hold a backfill and a DO block; the lane's own format may not hold DML", () => {
+  // wec.aria's 0018 shape: a DO wrapping INSERT … SELECT, a backfill, then the drop, in one file.
+  const F3 = psqlFile(
+    "0003-move.sql",
+    "begin;\ncreate table t3 (a int);\ndo $$ begin insert into t3 select a from t1; end $$;\nupdate t1 set a = 0 where a is null;\nalter table t1 drop column a;\ncommit;\n"
+  );
+  const result = buildPlan({ files: loaded(F1, F2, F3), config: CONFIG, state: deriveExternalState([], "l"), request: { mode: "file", direction: "up" } });
+  assert.ok(result.ok, result.ok ? "" : result.error.message);
+  const step = result.plan.steps[2];
+  assert.deepEqual(step?.statements.map((s) => s.kind), ["table", "block", "data", "table"]);
+  assert.deepEqual(
+    result.plan.requiredAcknowledgements.filter((c) => c === "DO_BLOCK" || c === "DATA_CHANGE"),
+    ["DO_BLOCK", "DATA_CHANGE"]
+  );
+
+  const inline = buildPlan({
+    config: { ...CONFIG, externalLedger: undefined },
+    state: { applied: [], unadoptedInline: [], stateId: "s", maxId: 0 },
+    request: { mode: "inline", sql: "update t1 set a = 0" }
+  });
+  assert.match(inline.ok ? "" : inline.error.message, /write_preview/);
+});
+
+test("a plan that adds an enum value before a later migration warns that the dry run cannot check it", () => {
+  const F3 = psqlFile("0003-add-value.sql", "alter type public.usage_kind add value if not exists 'retrieval_inspection';\n");
+  const F4 = psqlFile("0004-use-value.sql", "alter table t1 add column kind public.usage_kind default 'retrieval_inspection';\n");
+  const state = deriveExternalState([{ filename: F1.up.file, checksum: F1.up.checksum }, { filename: F2.up.file, checksum: F2.up.checksum }], "l");
+  const both = buildPlan({ files: loaded(F1, F2, F3, F4), config: CONFIG, state, request: { mode: "file", direction: "up" } });
+  assert.ok(both.ok);
+  assert.ok(both.plan.warnings.some((w) => /0003-add-value\.sql adds an enum value\. ddl_dry_run cannot check/.test(w)), JSON.stringify(both.plan.warnings));
+  // The value-adding migration last, or alone: nothing later to warn about.
+  const alone = buildPlan({ files: loaded(F1, F2, F3, F4), config: CONFIG, state, request: { mode: "file", direction: "up", target: "0003" } });
+  assert.ok(alone.ok);
+  assert.ok(!alone.plan.warnings.some((w) => /enum value/.test(w)));
+});
+
+test("the session role is on the plan, and in its digest", () => {
+  const state = deriveExternalState([], "l");
+  const without = build({ state, request: { mode: "file", direction: "up" } });
+  const withRole = buildPlan({ files: loaded(F1, F2), config: { ...CONFIG, sessionRole: "aria" }, state, request: { mode: "file", direction: "up" } });
+  assert.ok(without.ok && withRole.ok);
+  assert.equal(without.plan.sessionRole, null);
+  assert.equal(withRole.plan.sessionRole, "aria");
+  const digest = (plan: typeof withRole.plan) => planDigest({ environment: "dev", preSnapshotId: "p", historyStateId: "h", plan });
+  assert.notEqual(digest(without.plan), digest(withRole.plan));
+});
+
 // ── settings ─────────────────────────────────────────────────────────────────
 
 test("lane settings parse, and a bad one fails closed with the variable named", () => {
@@ -154,20 +201,23 @@ test("lane settings parse, and a bad one fails closed with the variable named", 
     externalLedger: "public.schema_migration",
     ownerRoles: "aria, aria_billing",
     sessionSettings: "aria.expected_market=AU, app.flag = on",
-    adoptionSentinel: "chunks"
+    adoptionSentinel: "chunks",
+    sessionRole: "aria"
   });
   assert.equal(ok.configError, undefined);
   assert.deepEqual(ok.externalLedger, { schema: "public", name: "schema_migration" });
   assert.deepEqual(ok.adoptionSentinel, { schema: "public", name: "chunks" });
   assert.deepEqual(ok.ownerRoles, ["aria", "aria_billing"]);
+  assert.equal(ok.sessionRole, "aria");
   assert.deepEqual(ok.sessionSettings, [
     { name: "aria.expected_market", value: "AU" },
     { name: "app.flag", value: "on" }
   ]);
 
-  const none = parseDdlLaneSettings({ externalLedger: "", ownerRoles: "", sessionSettings: "", adoptionSentinel: "" });
+  const none = parseDdlLaneSettings({ externalLedger: "", ownerRoles: "", sessionSettings: "", adoptionSentinel: "", sessionRole: "" });
   assert.equal(none.configError, undefined);
   assert.equal(none.externalLedger, undefined);
+  assert.equal(none.sessionRole, undefined);
 
   for (const [raw, pattern] of [
     [{ externalLedger: "mcp_ops.ddl_history" }, /server's own schema/],
@@ -176,9 +226,12 @@ test("lane settings parse, and a bad one fails closed with the variable named", 
     [{ sessionSettings: "search_path=evil" }, /custom setting/],
     [{ sessionSettings: "role=postgres" }, /custom setting/],
     [{ sessionSettings: "aria.x=1,aria.x=2" }, /set twice/],
-    [{ adoptionSentinel: "a.b.c" }, /POSTGRES_DDL_ADOPTION_SENTINEL/]
+    [{ adoptionSentinel: "a.b.c" }, /POSTGRES_DDL_ADOPTION_SENTINEL/],
+    // Everything a migration creates is owned by the session role, so it must be allowlisted too.
+    [{ ownerRoles: "aria_review", sessionRole: "aria" }, /must also be listed in POSTGRES_DDL_OWNER_ROLES/],
+    [{ ownerRoles: "aria", sessionRole: "Aria" }, /POSTGRES_DDL_SESSION_ROLE: .Aria. is not a plain/]
   ] as Array<[Partial<DdlLaneSettings>, RegExp]>) {
-    const parsed = parseDdlLaneSettings({ externalLedger: "", ownerRoles: "", sessionSettings: "", adoptionSentinel: "", ...raw });
+    const parsed = parseDdlLaneSettings({ externalLedger: "", ownerRoles: "", sessionSettings: "", adoptionSentinel: "", sessionRole: "", ...raw });
     assert.match(parsed.configError ?? "", pattern, JSON.stringify(raw));
   }
 });

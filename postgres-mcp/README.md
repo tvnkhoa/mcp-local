@@ -197,17 +197,23 @@ ddl_apply   { "previewId": "...", "approvalToken": "...",
 - **Quyền và owner** (ADR 0005, Decision 2 đã sửa đổi): đều cần acknowledge `PRIVILEGE_CHANGE`.
   - `GRANT` / `REVOKE` trên một object có tên (table, sequence, function, procedure, routine, schema), cho role có tên hoặc `PUBLIC`.
   - `CREATE` / `ALTER` / `DROP POLICY`, và `ALTER TABLE … DISABLE ROW LEVEL SECURITY` / `NO FORCE …`.
-  - `ALTER <table|view|sequence|type|domain|schema|function|procedure> … OWNER TO <role>`: phải là action duy nhất của statement, và `<role>` phải nằm trong `POSTGRES_DDL_OWNER_ROLES` (mặc định rỗng = từ chối mọi `OWNER TO`). Lúc preview, role được đọc từ `pg_roles`: role không tồn tại thì bị `OWNER_ROLE_UNKNOWN`; role có `SUPERUSER` / `CREATEROLE` / `BYPASSRLS` / `REPLICATION` thì bị `OWNER_ROLE_PRIVILEGED`, dù có trong allowlist.
+  - `ALTER <table|view|sequence|type|domain|schema|function|procedure> … OWNER TO <role>`: phải là action duy nhất của statement, và `<role>` phải nằm trong `POSTGRES_DDL_OWNER_ROLES` (mặc định rỗng = từ chối mọi `OWNER TO`).
+  - `CREATE SCHEMA [IF NOT EXISTS] [name] AUTHORIZATION <role>`, với `<role>` trong `POSTGRES_DDL_OWNER_ROLES`. Không được có schema element đi kèm.
+  - Với cả hai dạng trên, lúc preview role được đọc từ `pg_roles`: role không tồn tại thì bị `OWNER_ROLE_UNKNOWN`; role có `SUPERUSER` / `CREATEROLE` / `BYPASSRLS` / `REPLICATION` thì bị `OWNER_ROLE_PRIVILEGED`, dù có trong allowlist; role mà migration không `SET ROLE` sang được thì bị `OWNER_ROLE_NOT_MEMBER`.
+- **Dữ liệu và `DO`** (ADR 0005, Decision 2 đã sửa đổi lần hai):
+  - `INSERT` / `UPDATE` / `DELETE` (kể cả `INSERT … SELECT`) chỉ được nhận trong file của repo có ledger riêng (`POSTGRES_DDL_EXTERNAL_LEDGER`), và cần acknowledge `DATA_CHANGE`. `ddl_dry_run` và `ddl_apply` báo số row của từng statement trong `rowsAffected`. Inline SQL và file của ledger `mcp_ops` vẫn từ chối DML; dùng `write_preview`.
+  - `DO [LANGUAGE plpgsql] $$ … $$` cần acknowledge `DO_BLOCK`. **Thân block không bị kiểm tra**: một `DO` đã acknowledge sẽ chạy mọi thứ bên trong, kể cả lệnh mà lane từ chối khi đứng riêng (ví dụ `CREATE ROLE`). Hãy đọc thân block trước khi acknowledge.
+- **Session role:** đặt `POSTGRES_DDL_SESSION_ROLE` thì statement của mỗi migration chạy dưới `SET ROLE <role>`, nên object mới thuộc về role đó chứ không thuộc login cá nhân (tương đương `PGOPTIONS='-c role=…'` của runner). Role phải nằm trong `POSTGRES_DDL_OWNER_ROLES`. Lúc preview, nếu role không tồn tại, có thuộc tính bị cấm, hoặc login không `SET ROLE` sang được, thì preview bị từ chối (`DDL_SESSION_ROLE_UNKNOWN` / `_PRIVILEGED` / `_NOT_MEMBER`). Dòng ledger và audit log vẫn được ghi bằng login. Preview trả `runsAs`, và role được tính vào approval digest.
 - **Lệnh bị từ chối:**
-  - DML: dữ liệu đi qua `write_preview`. Pattern chuẩn: thêm cột nullable (ddl) → backfill (`write_preview`) → `SET NOT NULL` (ddl).
-  - `DO` / `CALL`.
-  - ROLE, membership (`GRANT role TO role`), `WITH GRANT OPTION`, `GRANTED BY`, `ON ALL … IN SCHEMA`, `ON DATABASE` / `PARAMETER` / `LANGUAGE` / …, `ALTER DEFAULT PRIVILEGES`, `REASSIGN OWNED`, `CURRENT_USER` / `SESSION_USER` / `CURRENT_ROLE`.
+  - DML ngoài trường hợp ở trên: dữ liệu đi qua `write_preview`. Pattern chuẩn: thêm cột nullable (ddl) → backfill (`write_preview`) → `SET NOT NULL` (ddl). `MERGE`, `TRUNCATE`, `COPY`, `WITH …` và `SELECT` luôn bị từ chối.
+  - `DO` bằng ngôn ngữ khác `plpgsql`, và `CALL`.
+  - ROLE, membership (`GRANT role TO role`), `WITH GRANT OPTION`, `GRANTED BY`, `ON ALL … IN SCHEMA`, `ON DATABASE` / `PARAMETER` / `LANGUAGE` / …, `ALTER DEFAULT PRIVILEGES` (mọi dạng; REVOKE theo schema cũng không giúp được gì, vì nó chỉ gỡ được một GRANT theo schema trước đó), `REASSIGN OWNED`, `CURRENT_USER` / `SESSION_USER` / `CURRENT_ROLE`.
   - `SET` / `BEGIN` và các lệnh điều khiển transaction.
   - VACUUM và các lệnh bảo trì.
   - Mọi tham chiếu tới `mcp_ops`.
 - **Transaction:** mỗi migration chạy trong một transaction riêng, cùng với dòng ledger của nó. Gặp lỗi đầu tiên thì dừng; các migration trước đó vẫn giữ nguyên trạng thái đã commit.
-- **`CONCURRENTLY`:** cần `-- mcp:no-transaction` (hoặc `noTransaction: true`), và migration chỉ được có đúng một statement. Dry run sẽ bỏ qua và báo `skipped`. Nếu build index thất bại để lại index INVALID, response sẽ chỉ tên index đó (`invalidIndexesLeft`).
-- **Risk:** `ddl_preview` báo risk của từng migration. Các mã mức `high` (`DROP_TABLE`, `DROP_COLUMN`, `ALTER_COLUMN_TYPE`, `SET_NOT_NULL`, `RENAME_*`, `ADD_COLUMN_VOLATILE_DEFAULT`, `SECURITY_DEFINER`, `CREATE_EXTENSION`, …) phải có trong `acknowledgeRisks`, nếu không sẽ bị `DDL_RISK_NOT_ACKNOWLEDGED`. `DROP SCHEMA … CASCADE` thì luôn bị chặn.
+- **`CONCURRENTLY`:** cần `-- mcp:no-transaction` (hoặc `noTransaction: true`), và migration chỉ được có đúng một statement. Dry run sẽ bỏ qua và báo `skipped`. Tương tự, một migration dùng giá trị enum mà migration trước trong cùng plan vừa thêm sẽ được dry run báo `skipped` (`ENUM_VALUE_UNCOMMITTED`), vì Postgres chỉ cho dùng giá trị đó sau khi commit; apply thì commit từng migration nên không bị ảnh hưởng. Nếu build index thất bại để lại index INVALID, response sẽ chỉ tên index đó (`invalidIndexesLeft`).
+- **Risk:** `ddl_preview` báo risk của từng migration. Các mã mức `high` (`DROP_TABLE`, `DROP_COLUMN`, `ALTER_COLUMN_TYPE`, `SET_NOT_NULL`, `RENAME_*`, `ADD_COLUMN_VOLATILE_DEFAULT`, `SECURITY_DEFINER`, `CREATE_EXTENSION`, `PRIVILEGE_CHANGE`, `DATA_CHANGE`, `DO_BLOCK`, …) phải có trong `acknowledgeRisks`, nếu không sẽ bị `DDL_RISK_NOT_ACKNOWLEDGED`. `DROP SCHEMA … CASCADE` thì luôn bị chặn.
 - **Drift:** `ddl_apply` lập lại plan dưới advisory lock, rồi từ chối với `DDL_DRIFT` nếu ledger, schema hoặc file migration đã thay đổi kể từ lúc preview. Mỗi preview chỉ apply được một lần.
 - **Đồng thời:**
   - Advisory lock `pg_try_advisory_lock` cho từng database: một process khác đang apply thì trả `DDL_LOCKED`, không chờ.
@@ -318,12 +324,13 @@ Schema `mcp_ops` thuộc về server, không phải schema của ứng dụng:
 | `POSTGRES_DDL_MAX_STATEMENT_TIMEOUT_MS` | no | `3600000` *(code)* | Ceiling for -- mcp:statement-timeout-ms (e.g. a long CREATE INDEX CONCURRENTLY) — 1 hour. |
 | `POSTGRES_DDL_PREVIEW_TTL_MS` | no | `3600000` *(code)* | DDL-preview lifetime — 1 hour. Freshness at apply is checked by the drift guard, not this. |
 | `POSTGRES_DDL_EXTERNAL_LEDGER` | no | — | [schema.]table of a repo's own (filename, checksum) ledger, e.g. public.schema_migration. Replaces mcp_ops.ddl_history; the directory then holds psql-style NNNN-name.sql files, forward-only, sha256 over raw bytes. ADR 0005 Decision 7. |
-| `POSTGRES_DDL_OWNER_ROLES` | no | — | Comma-separated roles ALTER … OWNER TO may name. Empty refuses every OWNER TO; a SUPERUSER/CREATEROLE/BYPASSRLS/REPLICATION role is refused even when listed. |
+| `POSTGRES_DDL_OWNER_ROLES` | no | — | Comma-separated roles that ALTER … OWNER TO and CREATE SCHEMA … AUTHORIZATION may name. Empty refuses both; a SUPERUSER/CREATEROLE/BYPASSRLS/REPLICATION role is refused even when listed. |
+| `POSTGRES_DDL_SESSION_ROLE` | no | — | Role each migration's statements run as (SET LOCAL ROLE), so new objects are owned by it, not the login — what a runner gets from PGOPTIONS='-c role=…'. Must also be in POSTGRES_DDL_OWNER_ROLES; the login must be able to SET ROLE to it. |
 | `POSTGRES_DDL_SESSION_SETTINGS` | no | — | Comma-separated prefix.name=value custom settings, set transaction-locally before every migration (e.g. aria.expected_market=AU). Core settings are refused. |
 | `POSTGRES_DDL_ADOPTION_SENTINEL` | no | — | [schema.]relation whose presence means the schema already exists. An up plan against an EMPTY ledger is refused while it exists (DDL_ADOPTION_REQUIRED). |
 | `PGSSLMODE` | no | — | libpq's own TLS mode (`disable` \| `require` \| `verify-ca` \| `verify-full`), read by the driver, not by this server. Set it when the target requires TLS but the connection string does not say so. |
 | `NODE_TLS_REJECT_UNAUTHORIZED` | no | — | Set to 0 ONLY if the database host presents a self-signed/untrusted TLS certificate. This is a Node flag, not a server setting, and it disables certificate verification for the WHOLE process — every outbound TLS connection, not just Postgres. Prefer `PGSSLMODE=verify-full` with a trusted CA. |
 
-34 variables. Defaults marked *(code)* are the server's own fallback and are **not** written into your agent config — set them only to override.
+35 variables. Defaults marked *(code)* are the server's own fallback and are **not** written into your agent config — set them only to override.
 
 <!-- END GENERATED: env-table -->

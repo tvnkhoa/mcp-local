@@ -330,7 +330,11 @@ function readDirectives(lineComments: LineComment[], firstTokenStart: number): D
 
 // ── classification ───────────────────────────────────────────────────────────
 
-export type DdlVerb = "create" | "alter" | "drop" | "comment" | "grant" | "revoke";
+/**
+ * `insert` / `update` / `delete` only with `dataChanges`, and `do` only with `doBlocks`: options a
+ * caller turns on, so the EF lane's per-statement lint keeps seeing them as refused.
+ */
+export type DdlVerb = "create" | "alter" | "drop" | "comment" | "grant" | "revoke" | "insert" | "update" | "delete" | "do";
 
 export type DdlObjectKind =
   | "table"
@@ -348,7 +352,11 @@ export type DdlObjectKind =
   | "policy"
   | "comment"
   /** GRANT / REVOKE of privileges ON an object. Role membership is refused. */
-  | "privilege";
+  | "privilege"
+  /** INSERT / UPDATE / DELETE, with `dataChanges`. */
+  | "data"
+  /** An anonymous `DO` block, with `doBlocks`. Its body is not classified. */
+  | "block";
 
 export interface DdlStatement {
   index: number;
@@ -394,12 +402,21 @@ const SESSION_ROLE_WORDS = new Set(["current_user", "session_user", "current_rol
 /** Verbs that are refused outright, grouped by the reason a migration may not use them. */
 const REFUSED_VERBS: ReadonlyArray<{ verbs: readonly string[]; reason: string }> = [
   {
-    verbs: ["insert", "update", "delete", "merge", "truncate", "copy", "with", "select", "values", "table"],
+    verbs: ["insert", "update", "delete"],
     reason:
-      "Data changes go through write_preview, which previews row counts and can roll back. The usual shape: add the column nullable (ddl), backfill it (write_preview), then SET NOT NULL (ddl)."
+      "Data changes go through write_preview, which previews row counts and can roll back. The usual shape: add the column nullable (ddl), backfill it (write_preview), then SET NOT NULL (ddl). With a repo's own ledger (POSTGRES_DDL_EXTERNAL_LEDGER), a file migration may hold INSERT / UPDATE / DELETE behind DATA_CHANGE."
   },
   {
-    verbs: ["do", "call", "execute", "prepare", "load", "import"],
+    verbs: ["merge", "truncate", "copy", "with", "select", "values", "table"],
+    reason:
+      "Data changes go through write_preview, which previews row counts and can roll back. Where a migration may change data at all, only plain INSERT / UPDATE / DELETE are accepted."
+  },
+  {
+    verbs: ["do"],
+    reason: "This caller does not accept DO blocks. The DDL lane accepts them behind DO_BLOCK."
+  },
+  {
+    verbs: ["call", "execute", "prepare", "load", "import"],
     reason: "It runs code the guardrail cannot see into. For conditional DDL use IF [NOT] EXISTS."
   },
   {
@@ -445,13 +462,20 @@ function hasTopLevelSequence(tokens: Token[], words: readonly string[]): boolean
   return top.some((_, k) => words.every((w, offset) => top[k + offset]?.word === w && top[k + offset].at === top[k].at + offset));
 }
 
-function classify(tokens: Token[], index: number): DdlResult<{ verb: DdlVerb; kind: DdlObjectKind }> {
+function classify(tokens: Token[], index: number, options: StatementOptions): DdlResult<{ verb: DdlVerb; kind: DdlObjectKind }> {
   const where = `Statement ${String(index + 1)}`;
   const first = tokens[0];
   if (first?.type !== "word") {
     return fail("DDL_STATEMENT_NOT_ALLOWED", `${where} does not start with a keyword.`);
   }
   const verb = first.value;
+
+  if ((verb === "insert" || verb === "update" || verb === "delete") && options.dataChanges === true) {
+    return { ok: true, verb, kind: "data" };
+  }
+  if (verb === "do" && options.doBlocks === true) {
+    return { ok: true, verb, kind: "block" };
+  }
 
   if (verb === "comment") {
     return wordAt(tokens, 1) === "on"
@@ -500,7 +524,7 @@ function classify(tokens: Token[], index: number): DdlResult<{ verb: DdlVerb; ki
         : kindWord === "role" || kindWord === "user" || kindWord === "group"
           ? " Role management is outside the migration lane."
           : kindWord === "default"
-            ? " ALTER DEFAULT PRIVILEGES changes the privileges of objects created later, by anyone; it is outside the migration lane."
+            ? " ALTER DEFAULT PRIVILEGES changes the privileges of objects created later, by anyone; it is outside the migration lane. A per-schema REVOKE would not help either: it only undoes an earlier per-schema GRANT."
             : "";
     return fail(
       "DDL_STATEMENT_NOT_ALLOWED",
@@ -544,17 +568,52 @@ function checkOwnerTo(tokens: Token[], verb: DdlVerb, kind: DdlObjectKind, where
   if (!ownerAtEnd || ownerCount !== 1 || hasTopLevelComma(tokens)) {
     return refuse("OWNER TO must be the statement's only action, at its end: ALTER … name OWNER TO role.");
   }
-  const last = tokens[n - 1];
-  const role = roleName(last);
-  if (role === undefined || (last?.type === "word" && SESSION_ROLE_WORDS.has(role))) {
-    return refuse("OWNER TO must name a role. CURRENT_USER / SESSION_USER / CURRENT_ROLE would make the owner whoever runs the migration.");
+  return checkAllowlistedRole(tokens[n - 1], "OWNER TO", "the owner", where, ownerRoles);
+}
+
+/**
+ * A role named after `clause` (OWNER TO, AUTHORIZATION) must be one in POSTGRES_DDL_OWNER_ROLES.
+ * Both clauses hand objects to that role.
+ */
+function checkAllowlistedRole(token: Token | undefined, clause: string, who: string, where: string, ownerRoles: readonly string[]): DdlError | undefined {
+  const refuse = (message: string): DdlError => ({ code: "DDL_STATEMENT_NOT_ALLOWED", message: `${where}: ${message}` });
+  const role = roleName(token);
+  if (role === undefined || (token?.type === "word" && SESSION_ROLE_WORDS.has(role))) {
+    return refuse(`${clause} must name a role. CURRENT_USER / SESSION_USER / CURRENT_ROLE would make ${who} whoever runs the migration.`);
   }
   if (!ownerRoles.includes(role)) {
     return refuse(
       ownerRoles.length === 0
-        ? `OWNER TO ${role} is refused: no owner role is allowlisted. An operator can allow it with POSTGRES_DDL_OWNER_ROLES.`
-        : `OWNER TO ${role} is refused: it is not in POSTGRES_DDL_OWNER_ROLES (${ownerRoles.join(", ")}).`
+        ? `${clause} ${role} is refused: no owner role is allowlisted. An operator can allow it with POSTGRES_DDL_OWNER_ROLES.`
+        : `${clause} ${role} is refused: it is not in POSTGRES_DDL_OWNER_ROLES (${ownerRoles.join(", ")}).`
     );
+  }
+  return undefined;
+}
+
+/**
+ * `DO [LANGUAGE plpgsql] $$ … $$`. The body is one string token and is NOT classified: an
+ * acknowledged DO runs whatever it holds (ADR 0005, Decision 2). Only its shape and language are
+ * checked here, so a DO cannot carry an untrusted language.
+ */
+function checkDoBlock(tokens: Token[], where: string): DdlError | undefined {
+  const refuse = (message: string): DdlError => ({ code: "DDL_STATEMENT_NOT_ALLOWED", message: `${where}: ${message}` });
+  const rest = tokens.slice(1);
+  const isBody = (t: Token | undefined): boolean => t?.type === "string";
+  // `language plpgsql`, `language "plpgsql"` and `language 'plpgsql'` are all accepted by Postgres.
+  const isLanguage = (t: Token | undefined): t is Token => t !== undefined && (t.type === "word" || t.type === "quoted" || t.type === "string");
+  let language = "plpgsql";
+  if (rest.length === 1 && isBody(rest[0])) {
+    // The default language.
+  } else if (rest.length === 3 && wordAt(rest, 0) === "language" && isLanguage(rest[1]) && isBody(rest[2])) {
+    language = rest[1].value.toLowerCase();
+  } else if (rest.length === 3 && isBody(rest[0]) && wordAt(rest, 1) === "language" && isLanguage(rest[2])) {
+    language = rest[2].value.toLowerCase();
+  } else {
+    return refuse("expected DO [LANGUAGE plpgsql] $$ … $$.");
+  }
+  if (language !== "plpgsql") {
+    return refuse(`DO … LANGUAGE ${language} is not allowed. Only plpgsql blocks are accepted.`);
   }
   return undefined;
 }
@@ -596,8 +655,21 @@ function checkPrivilege(tokens: Token[], verb: "grant" | "revoke", where: string
 }
 
 export interface ShapeOptions {
-  /** Roles `ALTER … OWNER TO` may name (POSTGRES_DDL_OWNER_ROLES). Empty refuses every OWNER TO. */
+  /**
+   * Roles `ALTER … OWNER TO` and `CREATE SCHEMA … AUTHORIZATION` may name
+   * (POSTGRES_DDL_OWNER_ROLES). Empty refuses both.
+   */
   ownerRoles?: readonly string[];
+}
+
+export interface StatementOptions extends ShapeOptions {
+  /**
+   * Accept INSERT / UPDATE / DELETE (risk code DATA_CHANGE). The DDL lane turns it on only with a
+   * repo's own ledger, whose files keep a backfill in the same transaction as its DDL.
+   */
+  dataChanges?: boolean;
+  /** Accept `DO` blocks (risk code DO_BLOCK). Their bodies are not classified. */
+  doBlocks?: boolean;
 }
 
 /** Checks that depend on the statement's shape beyond its first words. */
@@ -607,6 +679,14 @@ function checkShape(tokens: Token[], verb: DdlVerb, kind: DdlObjectKind, index: 
 
   if (verb === "grant" || verb === "revoke") {
     return checkPrivilege(tokens, verb, where);
+  }
+  if (kind === "block") {
+    return checkDoBlock(tokens, where);
+  }
+  if (kind === "data") {
+    // A data change has no further shape rule: the reserved-schema check has already run, and
+    // what it writes at run time is caught by the internal-write guard.
+    return undefined;
   }
 
   if (hasTopLevelSequence(tokens, ["owner", "to"])) {
@@ -624,19 +704,37 @@ function checkShape(tokens: Token[], verb: DdlVerb, kind: DdlObjectKind, index: 
   }
 
   if (verb === "create" && kind === "schema") {
-    // Exactly `create schema [if not exists] name`. The long form can embed further
-    // statements — CREATE TABLE, CREATE VIEW, and GRANT — as schema elements.
+    // `create schema [if not exists] name [authorization role]`, or `… authorization role` with
+    // the name left out. Never the long form, which can embed further statements — CREATE TABLE,
+    // CREATE VIEW, and GRANT — as schema elements.
     let k = 2;
     if (wordAt(tokens, k) === "if" && wordAt(tokens, k + 1) === "not" && wordAt(tokens, k + 2) === "exists") {
       k += 3;
     }
     const rest = tokens.slice(k);
-    const nameOnly = rest.length === 1 && (rest[0]?.type === "word" || rest[0]?.type === "quoted");
-    if (!nameOnly) {
+    const isName = (t: Token | undefined): boolean => t?.type === "word" || t?.type === "quoted";
+    let authorization: Token | undefined;
+    let shapeOk = false;
+    if (rest.length === 1 && isName(rest[0]) && wordAt(rest, 0) !== "authorization") {
+      shapeOk = true;
+    } else if (rest.length === 3 && isName(rest[0]) && wordAt(rest, 1) === "authorization") {
+      authorization = rest[2];
+      shapeOk = true;
+    } else if (rest.length === 2 && wordAt(rest, 0) === "authorization") {
+      authorization = rest[1];
+      shapeOk = true;
+    }
+    if (!shapeOk) {
       return {
         code: "DDL_STATEMENT_NOT_ALLOWED",
-        message: `${where}: only CREATE SCHEMA [IF NOT EXISTS] name is allowed — no AUTHORIZATION, and no embedded schema elements (they can carry GRANT).`
+        message: `${where}: only CREATE SCHEMA [IF NOT EXISTS] name [AUTHORIZATION role] is allowed — no embedded schema elements (they can carry GRANT).`
       };
+    }
+    if (authorization !== undefined) {
+      const roleError = checkAllowlistedRole(authorization, "AUTHORIZATION", "the schema's owner", where, options.ownerRoles ?? []);
+      if (roleError !== undefined) {
+        return roleError;
+      }
     }
   }
 
@@ -743,7 +841,7 @@ export interface ValidatedDdl {
   warnings: string[];
 }
 
-export interface ValidateOptions extends ShapeOptions {
+export interface ValidateOptions extends StatementOptions {
   /** The inline form of the `-- mcp:no-transaction` directive. Either one turns it on. */
   noTransaction?: boolean;
   /**
@@ -855,7 +953,7 @@ export function validateDdlScript(sql: string, options: ValidateOptions = {}): D
       );
     }
 
-    const classified = classify(group, index);
+    const classified = classify(group, index, options);
     if (!classified.ok) {
       return classified;
     }

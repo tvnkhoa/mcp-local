@@ -85,8 +85,11 @@ ddl_dry_run(previewId)                       // runs in a transaction and rolls 
 ddl_apply(previewId, approvalToken, acknowledgeRisks?)
 ```
 
-- `up` accepts CREATE/ALTER/DROP/COMMENT ON only. Data changes go through `write_preview`: add the
-  column nullable, backfill with `write_preview`, then `SET NOT NULL`.
+- `up` accepts CREATE/ALTER/DROP/COMMENT ON, GRANT/REVOKE on named objects, and `DO` (`DO_BLOCK`).
+  Data changes go through `write_preview`: add the column nullable, backfill with `write_preview`,
+  then `SET NOT NULL`. The exception is a repo with its own ledger (`POSTGRES_DDL_EXTERNAL_LEDGER`),
+  whose files may hold INSERT/UPDATE/DELETE behind `DATA_CHANGE`; the dry run reports `rowsAffected`.
+- A `DO` body is not checked: read it to the user before they acknowledge `DO_BLOCK`.
 - `CREATE INDEX CONCURRENTLY` → `noTransaction: true`, alone in its migration; dry-run reports it
   `skipped`.
 - Roll back with `ddl_preview(direction: "down", target: "<version>" | "0")`; each reverted migration
@@ -106,8 +109,9 @@ ddl_apply(previewId, approvalToken, acknowledgeRisks?)
 
 - **Never fill in `acknowledgeRisks` yourself** (EF or DDL). Show each risk's message — data loss
   (`DROP_TABLE`, `DROP_COLUMN`, `EF_REVERT`), rewrites and long locks (`ALTER_COLUMN_TYPE`,
-  `SET_NOT_NULL`, `ADD_COLUMN_VOLATILE_DEFAULT`), privilege changes (`SECURITY_DEFINER`) — and wait for
-  an explicit yes.
+  `SET_NOT_NULL`, `ADD_COLUMN_VOLATILE_DEFAULT`), privilege changes (`SECURITY_DEFINER`,
+  `PRIVILEGE_CHANGE`), row changes (`DATA_CHANGE`), unchecked code (`DO_BLOCK`) — and wait for an
+  explicit yes.
 - Never echo connection strings, passwords or `PGPASSWORD`; report env vars by name only.
 - Smallest scope: explicit `environment`, explicit `LIMIT`, read-only unless asked.
 

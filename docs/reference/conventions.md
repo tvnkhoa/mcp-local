@@ -82,7 +82,7 @@ must be in the corpus).
 
 ---
 
-Env variables are **declared once**, in `packages/manifest/src/envSpecs/<server>.ts` — **136** across
+Env variables are **declared once**, in `packages/manifest/src/envSpecs/<server>.ts` — **137** across
 the five servers (41 / 34 / 19 / 31 / 11), counted by
 `node -e "import('@mcp/manifest').then(m => m.SERVERS.forEach(s => console.log(s.key, s.env.length)))"`.
 A field carries either a `default` (which the installer *writes* into

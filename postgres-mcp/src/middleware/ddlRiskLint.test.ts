@@ -10,7 +10,7 @@ import { validateDdlScript } from "./ddlGuardrails.js";
 import { LARGE_TABLE_ROWS, lintDdl, type LintContext, type LintResult } from "./ddlRiskLint.js";
 
 function lint(sql: string, context?: LintContext, noTransaction = false): LintResult {
-  const validated = validateDdlScript(sql, { noTransaction, ownerRoles: ["aria", "big"] });
+  const validated = validateDdlScript(sql, { noTransaction, ownerRoles: ["aria", "big", "aria_review"], dataChanges: true, doBlocks: true });
   if (!validated.ok) {
     assert.fail(`guardrail refused: ${validated.error.code}: ${validated.error.message}`);
   }
@@ -159,6 +159,38 @@ test("OWNER TO is PRIVILEGE_CHANGE, and blocked for a role that is missing or re
   assert.deepEqual(codes(lint("alter function f(int) owner to aria", { ownerRoles: new Map() })), ["PRIVILEGE_CHANGE:high", "OWNER_ROLE_UNKNOWN:blocked"]);
   // No database (ddl_create): the role cannot be checked, so only the acknowledgement remains.
   assert.deepEqual(codes(lint("alter function f(int) owner to big")), ["PRIVILEGE_CHANGE:high"]);
+});
+
+test("AUTHORIZATION gets the same role checks as OWNER TO", () => {
+  assert.deepEqual(codes(lint("create schema review_jobs authorization aria", ROLES)), ["PRIVILEGE_CHANGE:high"]);
+  assert.deepEqual(codes(lint("create schema review_jobs authorization big", ROLES)), ["PRIVILEGE_CHANGE:high", "OWNER_ROLE_PRIVILEGED:blocked"]);
+  assert.deepEqual(codes(lint("create schema review_jobs authorization aria", { ownerRoles: new Map() })), ["PRIVILEGE_CHANGE:high", "OWNER_ROLE_UNKNOWN:blocked"]);
+  assert.deepEqual(codes(lint("create schema review_jobs", ROLES)), []);
+});
+
+test("a role the acting role cannot SET ROLE to is blocked, naming both", () => {
+  const acting: LintContext = { ...ROLES, actingRole: { name: "aria", canBecome: new Set(["aria"]) } };
+  assert.deepEqual(codes(lint("alter table t owner to aria", acting)), ["PRIVILEGE_CHANGE:high"]);
+  const notMember = lint("create schema review_jobs authorization aria_review", {
+    ownerRoles: new Map([["aria_review", { superuser: false, createRole: false, bypassRls: false, replication: false }]]),
+    actingRole: { name: "aria", canBecome: new Set(["aria"]) }
+  });
+  assert.deepEqual(codes(notMember), ["PRIVILEGE_CHANGE:high", "OWNER_ROLE_NOT_MEMBER:blocked"]);
+  assert.match(notMember.blocked[0]?.message ?? "", /runs as aria, which cannot SET ROLE aria_review/);
+});
+
+test("data changes are DATA_CHANGE, and an UPDATE / DELETE with no WHERE says so", () => {
+  const insert = lint("insert into t select id from s");
+  assert.deepEqual(codes(insert), ["DATA_CHANGE:high"]);
+  assert.doesNotMatch(insert.findings[0]?.message ?? "", /every row/);
+  assert.match(lint("update t set a = 1").findings[0]?.message ?? "", /no WHERE: every row/);
+  assert.doesNotMatch(lint("update t set a = (select 1 where true) where id = 1").findings[0]?.message ?? "", /every row/);
+  assert.match(lint("delete from t").findings[0]?.message ?? "", /every row/);
+  assert.deepEqual(lint("insert into t values (1); update t set a = 2 where a = 1").requiredAcknowledgements, ["DATA_CHANGE"]);
+});
+
+test("a DO block is DO_BLOCK", () => {
+  assert.deepEqual(codes(lint("do $$ begin insert into t select 1; end $$")), ["DO_BLOCK:high"]);
 });
 
 test("ALTER TYPE … ADD VALUE is informational", () => {

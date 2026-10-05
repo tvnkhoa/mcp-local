@@ -2,7 +2,7 @@
 
 **Status** — Accepted
 **Step** — the DDL migration lane, phases 0.1–1.4 (backlog B-16)
-**Date** — 2026-10-01
+**Date** — 2026-10-01, amended 2026-10-05
 
 ## Context
 
@@ -16,7 +16,9 @@ The lane added five tools (`ddl_status`, `ddl_create`, `ddl_preview`, `ddl_dry_r
 `ddl_apply`), a ledger (`mcp_ops.ddl_history`), and six env vars. Six decisions below would look
 wrong to a reviewer who did not see what forced them. Each one rejects the conventional choice.
 Decision 2 was amended and Decision 7 added on 2026-10-01, with four more env vars, when the lane
-was pointed at a repo with its own runner.
+was pointed at a repo with its own runner. Decision 2 was amended a second time on 2026-10-05,
+with one more env var (`POSTGRES_DDL_SESSION_ROLE`), after that repo's files were measured
+against it.
 
 ## Decision 1 — a tokenizer of its own, not `@mcp/shared`'s `scanSql`
 
@@ -92,6 +94,53 @@ created later, by anyone), `REASSIGN OWNED`, and the session-role words, which m
 or owner whoever runs the migration. The operator chose this scope on 2026-10-01 over "GRANT /
 REVOKE only", which would have refused 0017 itself (it hands its function to `aria`) and the next
 aria file that uses a policy.
+
+**Amended again 2026-10-05: data in a repo's own files, DO, a session role, and job-queue
+schemas.** Measured over wec.aria's 18 files, the lane refused 6, among them its latest one, 0018.
+That file was applied with the repo's own runner instead. The operator ruled on four requests from
+that repo:
+
+- **INSERT / UPDATE / DELETE, behind a new `DATA_CHANGE` acknowledgement, in external-ledger mode
+  only.** A repo's file keeps a backfill in the same transaction as the DDL it serves. In 0018,
+  rows move into new tables before the old columns are dropped. Splitting that between this lane
+  and `write_preview` loses the single transaction, and a failure between the two halves leaves
+  the data in neither shape. The lane's own format and inline SQL still send DML to
+  `write_preview`, which can preview and roll back. `MERGE`, `TRUNCATE`, `COPY`, `WITH …` and
+  `SELECT` stay refused everywhere. Dry run and apply report each data change's row count.
+- **`DO [LANGUAGE plpgsql]`, behind `DO_BLOCK`. Its body is not classified.** The allowlist cannot
+  see into a plpgsql body. An acknowledged DO therefore runs whatever it holds, including what the
+  lane refuses on its own: `CREATE ROLE`, `SET ROLE`, dynamic SQL. **Cost, accepted:** the
+  acknowledgement is the only control on what a DO does. The reserved-schema write guard still
+  covers it, because it counts writes, not statements. Scanning the body for role-level words was
+  offered and declined, since `EXECUTE format(…)` gets around any scan. wec.aria instead keeps a
+  convention: a migration that creates a role runs through its own runner, never through this
+  lane.
+- **`POSTGRES_DDL_SESSION_ROLE`.** The statements of each migration run under `SET LOCAL ROLE`, or
+  `SET ROLE` on the non-transactional path, through `set_config` with a bound value. Objects are
+  then owned by that role, not by the personal login the lane connects as. That is what wec.aria's
+  runner gets from `PGOPTIONS='-c role=aria'`, and it closes the gap the first amendment named:
+  ownership falling to "whoever connected". The role must also be listed in
+  `POSTGRES_DDL_OWNER_ROLES`, because it owns everything the migration creates. At preview it must
+  exist, must have none of the four refused attributes, and the login must be able to SET ROLE to
+  it (`DDL_SESSION_ROLE_UNKNOWN` / `_PRIVILEGED` / `_NOT_MEMBER`). It is part of the plan digest.
+  The baselines, the internal-write check and the ledger row still run as the login.
+- **`CREATE SCHEMA [IF NOT EXISTS] [name] AUTHORIZATION <role>`, behind `PRIVILEGE_CHANGE`, only to
+  a role in `POSTGRES_DDL_OWNER_ROLES`.** A job-queue schema (pg-boss) is owned by its own role,
+  and the queue then creates its tables in that schema at run time, as that role. The bare
+  `CREATE SCHEMA name` form was already accepted. Embedded schema elements stay refused.
+- **`ALTER DEFAULT PRIVILEGES` stays refused, in every form.** The narrow form wec.aria asked for,
+  `FOR ROLE <owner role> IN SCHEMA … REVOKE …`, was approved and implemented, and then withdrawn
+  the same day, before release. Checked on PG 17: a per-schema REVOKE only undoes an earlier
+  per-schema GRANT. It cannot remove a global default or a built-in one, such as PUBLIC's EXECUTE
+  on functions. On aria_dev, `pg_default_acl` held only owner self-grants, so 0004's four revokes
+  changed nothing. The isolation they were meant to give comes from ownership plus the absence of
+  grants. The global form, which could remove a default, reaches every schema. A rule that does
+  nothing yet reads as a safeguard is worse than a refusal. wec.aria, the only consumer, agreed to
+  the withdrawal.
+
+For OWNER TO and AUTHORIZATION alike, the role the migration runs as must be able to SET ROLE to
+the target. The lint now checks this at preview (`OWNER_ROLE_NOT_MEMBER`), so the failure no longer
+waits for the dry run. Everything else the first amendment refused is still refused.
 
 ## Decision 3 — a non-transactional migration is exactly one statement
 

@@ -49,6 +49,7 @@ Statuses are copied from each entry's own `**Status:**` line; the entry is autho
 | `PG-DDL-001` | The DDL lane's apply hung forever behind a table lock it had not reached yet | ✅ fixed 2026-10-01 (code) — session timeouts set first; planning uses the plan's shortest lock wait |
 | `PG-DDL-002` | Behind PgBouncer transaction pooling, the migration lock is not exclusive | ✅ mitigated 2026-10-01 (code) — moved sessions refused; the client-side limit is accepted |
 | `PG-REV-002` | Code-review sweep of the DDL and EF migration lanes (4 findings, 4 fixed) | ✅ fixed 2026-10-01 (code) — TRUNCATE bypass closed; rollback preview made honest; blocked enforced; quoted Options |
+| `PG-DDL-003` | `ddl_dry_run` failed a migration that uses an enum value an earlier migration in the plan adds | ✅ fixed 2026-10-05 (code) — reported `skipped` (`ENUM_VALUE_UNCOMMITTED`), with a preview warning |
 
 > ID prefixes group by area: `ENV` environment resolution · `SEC` safety posture · `DOC`
 > documentation drift · `CMP` compare_environments · `MIG` EF Core migrations · `DIF` data_diff ·
@@ -1400,6 +1401,30 @@ underlying limit is accepted:** a client cannot prove it is not pooled. Covered 
   session the same backend every time passes the check, and is indistinguishable from a direct
   connection. A direct connection, or PgBouncer in session mode, remains the requirement. The
   check makes a violation loud in the busy case instead of silent in every case.
+
+---
+
+## PG-DDL-003 — `ddl_dry_run` failed a migration that uses an enum value an earlier migration adds
+
+**Status:** ✅ fixed 2026-10-05 (code). Covered by `test:ddl-external-ledger` X9 and a planner unit
+test. Reported by the wec.aria session on aria_dev.
+
+- **Scenario:** a plan of two pending files: wec.aria's 0019 runs `ALTER TYPE usage_kind ADD VALUE
+  'retrieval_inspection'`, and its 0020 uses that value.
+- **Tool/query:** `ddl_preview(environment: "aria_dev")`, then `ddl_dry_run(previewId)`.
+- **Expected vs actual:** expected the dry run to pass, since apply commits 0019 before 0020 runs.
+  Actual: `DDL_APPLY_FAILED` at 0020, statement 4, SQLSTATE 55P04, `unsafe use of new value
+  "retrieval_inspection" of enum type usage_kind`. A dry run of 0019 alone passed.
+- **Root cause:** the dry run runs every step in ONE transaction, under per-step savepoints, then
+  rolls back. Postgres refuses to use an enum value until the transaction that added it commits.
+  The preview already flagged `ALTER_TYPE_ADD_VALUE`; the dry run did not take it into account.
+- **Impact:** an artifact of the dry run that read as a broken migration. Apply was never affected.
+- **Fix:** a 55P04 failure in a step that follows a successful `ALTER TYPE … ADD VALUE` step is
+  reported `skipped` with reason `ENUM_VALUE_UNCOMMITTED`, never `passed`. The run goes on, and a
+  later failure says it may depend on the skipped step. A value added and used in the SAME
+  migration still fails, because it fails at apply too. `ddl_preview` warns when an enum-adding
+  step has later steps.
+- **Not done:** committing the dry run per step is not an option; it would no longer be a dry run.
 
 ---
 

@@ -134,7 +134,7 @@ test("statements outside the allowlist are refused with the reason", () => {
     ["with x as (select 1) delete from t", /write_preview/],
     ["update t set a = 1 where id = 1", /write_preview/],
     ["copy t from '/tmp/x'", /write_preview/],
-    ["do $$ begin execute 'drop table t'; end $$", /IF \[NOT\] EXISTS/],
+    ["do $$ begin execute 'drop table t'; end $$", /DO_BLOCK/],
     ["call p()", /cannot see into/],
     ["grant some_role to bob", /role membership/],
     ["grant select on t to bob with grant option", /WITH GRANT OPTION/],
@@ -143,6 +143,8 @@ test("statements outside the allowlist are refused with the reason", () => {
     ["vacuum t", /maintenance/],
     ["create role r", /Role management/],
     ["alter default privileges grant select on tables to r", /DEFAULT PRIVILEGES/],
+    // The per-schema REVOKE form too: it only undoes an earlier per-schema GRANT (checked on PG 17).
+    ["alter default privileges for role r in schema s revoke all on tables from public", /DEFAULT PRIVILEGES/],
     ["drop extension pg_trgm", /extension/],
     ["alter extension pg_trgm update", /extension/],
     ["create rule r as on insert to t do instead nothing", /not allowed/],
@@ -297,6 +299,63 @@ test("OWNER TO is accepted only as the sole action, and only to an allowlisted r
   for (const [sql, reason, options] of cases) {
     assert.match(refuse(sql, "DDL_STATEMENT_NOT_ALLOWED", options), reason, sql);
   }
+});
+
+test("CREATE SCHEMA … AUTHORIZATION is accepted only to an allowlisted role", () => {
+  const roles = { ownerRoles: ["aria", "aria_review"] };
+  for (const sql of [
+    "create schema if not exists review_jobs authorization aria_review",
+    "create schema review_jobs authorization aria_review",
+    "create schema authorization aria_review"
+  ]) {
+    accept(sql, roles);
+  }
+  const cases: Array<[string, RegExp, ValidateOptions]> = [
+    ["create schema s authorization aria_review", /no owner role is allowlisted/, {}],
+    ["create schema s authorization bob", /not in POSTGRES_DDL_OWNER_ROLES/, roles],
+    ["create schema s authorization current_user", /CURRENT_USER/, roles],
+    ["create schema s authorization aria_review create table t (a int)", /schema elements/, roles]
+  ];
+  for (const [sql, reason, options] of cases) {
+    assert.match(refuse(sql, "DDL_STATEMENT_NOT_ALLOWED", options), reason, sql);
+  }
+});
+
+
+test("data changes are accepted only with dataChanges, and only plain INSERT / UPDATE / DELETE", () => {
+  const on = { dataChanges: true };
+  // wec.aria's 0018 shape: move rows, then drop the old column, in one transaction.
+  const result = accept(
+    "create table tenant_location (tenant_id int, location text); insert into tenant_location select id, location from tenant; update tenant set location = null where location = ''; delete from tenant_location where location is null; alter table tenant drop column location",
+    on
+  );
+  assert.deepEqual(
+    result.statements.map((s) => `${s.verb}/${s.kind}`),
+    ["create/table", "insert/data", "update/data", "delete/data", "alter/table"]
+  );
+  assert.match(refuse("insert into t values (1)", "DDL_STATEMENT_NOT_ALLOWED"), /POSTGRES_DDL_EXTERNAL_LEDGER/);
+  for (const sql of ["with x as (select 1) delete from t", "merge into t using s on t.id = s.id when matched then delete", "truncate t", "select setval('s', 1)"]) {
+    assert.match(refuse(sql, "DDL_STATEMENT_NOT_ALLOWED", on), /only plain INSERT \/ UPDATE \/ DELETE/, sql);
+  }
+  // The reserved schema stays refused inside a data change.
+  refuse("insert into mcp_ops.audit_log select 1", "DDL_RESERVED_SCHEMA", on);
+});
+
+test("DO blocks are accepted only with doBlocks, in plpgsql, body unclassified", () => {
+  const on = { doBlocks: true };
+  for (const sql of [
+    "do $$ begin insert into t select 1; end $$",
+    "do language plpgsql $body$ begin null; end $body$",
+    "do $$ begin null; end $$ language 'plpgsql'",
+    // Not scanned: the operator chose to accept what an acknowledged DO holds (ADR 0005).
+    "do $$ begin if not exists (select 1 from pg_roles where rolname = 'r') then create role r nologin; end if; end $$"
+  ]) {
+    const result = accept(sql, on);
+    assert.equal(result.statements[0]?.kind, "block");
+  }
+  assert.match(refuse("do language plperlu $$ system('x') $$", "DDL_STATEMENT_NOT_ALLOWED", on), /LANGUAGE plperlu/);
+  assert.match(refuse("do $$ a $$ $$ b $$", "DDL_STATEMENT_NOT_ALLOWED", on), /expected DO/);
+  assert.match(refuse("do", "DDL_STATEMENT_NOT_ALLOWED", on), /expected DO/);
 });
 
 // ── psql mode ────────────────────────────────────────────────────────────────

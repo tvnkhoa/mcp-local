@@ -51,6 +51,12 @@ export interface LintContext {
    * database, as in `ddl_create`), OWNER TO is not checked against roles at all.
    */
   ownerRoles?: ReadonlyMap<string, OwnerRoleAttributes>;
+  /**
+   * The role statements run as (POSTGRES_DDL_SESSION_ROLE, else the login) and the owner roles it
+   * may SET ROLE to. Postgres requires that for OWNER TO and CREATE SCHEMA … AUTHORIZATION. When
+   * omitted, it is not checked and the dry run finds it.
+   */
+  actingRole?: { name: string; canBecome: ReadonlySet<string> };
 }
 
 export interface OwnerRoleAttributes {
@@ -195,7 +201,29 @@ export function lintDdl(statements: readonly DdlStatement[], context: LintContex
     }
     const n = tokens.length;
     if (verb === "alter" && n >= 3 && tokens[n - 3]?.type === "word" && tokens[n - 3]?.value === "owner" && tokens[n - 2]?.value === "to") {
-      lintOwnerTo(statement, context.ownerRoles, add);
+      const role = tokens[n - 1]?.value ?? "";
+      lintRoleTarget(statement, role, `OWNER TO ${role}: the new owner holds every privilege on the object, and a SECURITY DEFINER routine runs as it.`, context, add);
+    }
+    if (verb === "create" && kind === "schema") {
+      const at = topLevelWords(tokens).find((t) => t.word === "authorization");
+      const role = at === undefined ? undefined : tokens[at.at + 1]?.value;
+      if (role !== undefined) {
+        lintRoleTarget(statement, role, `AUTHORIZATION ${role}: the role owns the schema, and may create, alter and drop anything in it.`, context, add);
+      }
+    }
+
+    // ── data changes and DO blocks ──
+    if (kind === "data") {
+      const unbounded = (verb === "update" || verb === "delete") && !has("where");
+      add(
+        statement,
+        "high",
+        "DATA_CHANGE",
+        `${verb.toUpperCase()} changes rows inside the migration's transaction${unbounded ? ", with no WHERE: every row of the table" : ""}. ddl_dry_run reports the row count, and the change has no down migration.`
+      );
+    }
+    if (kind === "block") {
+      add(statement, "high", "DO_BLOCK", "DO runs a plpgsql block the guardrail does not classify: whatever it holds runs, including statements the lane would refuse on their own. Read the body.");
     }
 
     // SECURITY DEFINER can appear on CREATE or ALTER FUNCTION / PROCEDURE.
@@ -266,23 +294,26 @@ export function lintDdl(statements: readonly DdlStatement[], context: LintContex
 }
 
 /**
- * OWNER TO an allowlisted role (the guardrail refused every other). The new owner holds every
- * privilege on the object, and a SECURITY DEFINER routine runs as it, so a role with an attribute
- * that reaches past ordinary grants is refused whatever the operator listed.
+ * A statement that hands objects to an allowlisted role (OWNER TO, CREATE SCHEMA … AUTHORIZATION;
+ * the guardrail refused every other role). The role then holds every privilege on them, and a
+ * SECURITY DEFINER routine runs as it, so a role with an attribute that reaches past ordinary
+ * grants is refused whatever the operator listed.
  */
-function lintOwnerTo(
+function lintRoleTarget(
   statement: DdlStatement,
-  roles: ReadonlyMap<string, OwnerRoleAttributes> | undefined,
+  role: string,
+  message: string,
+  context: LintContext,
   add: (statement: DdlStatement, level: RiskLevel, code: string, message: string, target?: string) => void
 ): void {
-  const role = statement.tokens[statement.tokens.length - 1]?.value ?? "";
-  add(statement, "high", "PRIVILEGE_CHANGE", `OWNER TO ${role}: the new owner holds every privilege on the object, and a SECURITY DEFINER routine runs as it.`, role);
+  add(statement, "high", "PRIVILEGE_CHANGE", message, role);
+  const roles = context.ownerRoles;
   if (roles === undefined) {
     return;
   }
   const attributes = roles.get(role);
   if (attributes === undefined) {
-    add(statement, "blocked", "OWNER_ROLE_UNKNOWN", `OWNER TO ${role}: no such role exists in this database.`, role);
+    add(statement, "blocked", "OWNER_ROLE_UNKNOWN", `Role ${role}: no such role exists in this database.`, role);
     return;
   }
   const reaching = [
@@ -296,7 +327,18 @@ function lintOwnerTo(
       statement,
       "blocked",
       "OWNER_ROLE_PRIVILEGED",
-      `OWNER TO ${role} is refused: the role has ${reaching.join(", ")}, so an object it owns — a SECURITY DEFINER routine above all — would run past ordinary privileges.`,
+      `Role ${role} is refused: it has ${reaching.join(", ")}, so an object it owns — a SECURITY DEFINER routine above all — would run past ordinary privileges.`,
+      role
+    );
+    return;
+  }
+  const acting = context.actingRole;
+  if (acting !== undefined && !acting.canBecome.has(role)) {
+    add(
+      statement,
+      "blocked",
+      "OWNER_ROLE_NOT_MEMBER",
+      `Role ${role}: the migration runs as ${acting.name}, which cannot SET ROLE ${role}, and Postgres requires that here. Grant ${role} to ${acting.name} (outside the lane), or remove the clause.`,
       role
     );
   }

@@ -46,6 +46,12 @@ export interface DdlConfig {
   /** POSTGRES_DDL_SESSION_SETTINGS. Set (transaction-local) before every migration runs. */
   sessionSettings?: readonly SessionSetting[];
   /**
+   * POSTGRES_DDL_SESSION_ROLE. Each migration's statements run under `SET ROLE` to it, so what
+   * they create is owned by it rather than by the login. Must be one of `ownerRoles`; at preview it
+   * is also checked in `pg_roles` and against the login's membership.
+   */
+  sessionRole?: string;
+  /**
    * POSTGRES_DDL_ADOPTION_SENTINEL. A relation whose presence means the schema already exists. A
    * file-mode up plan against an EMPTY ledger refuses while it exists, instead of applying every
    * file onto a populated database.
@@ -80,6 +86,7 @@ export interface DdlLaneSettings {
   ownerRoles: string;
   sessionSettings: string;
   adoptionSentinel: string;
+  sessionRole: string;
 }
 
 function parseQualified(raw: string, variable: string): QualifiedName | string {
@@ -96,9 +103,9 @@ function parseQualified(raw: string, variable: string): QualifiedName | string {
  * parse is reported as `configError`, so the lane refuses rather than run with a setting quietly
  * dropped (an adoption guard that vanished on a typo is no guard).
  */
-export function parseDdlLaneSettings(raw: DdlLaneSettings): Pick<DdlConfig, "externalLedger" | "ownerRoles" | "sessionSettings" | "adoptionSentinel" | "configError"> {
+export function parseDdlLaneSettings(raw: DdlLaneSettings): Pick<DdlConfig, "externalLedger" | "ownerRoles" | "sessionSettings" | "adoptionSentinel" | "sessionRole" | "configError"> {
   const errors: string[] = [];
-  const out: Pick<DdlConfig, "externalLedger" | "ownerRoles" | "sessionSettings" | "adoptionSentinel"> = {};
+  const out: Pick<DdlConfig, "externalLedger" | "ownerRoles" | "sessionSettings" | "adoptionSentinel" | "sessionRole"> = {};
 
   if (raw.externalLedger !== "") {
     const ledger = parseQualified(raw.externalLedger, "POSTGRES_DDL_EXTERNAL_LEDGER");
@@ -147,6 +154,19 @@ export function parseDdlLaneSettings(raw: DdlLaneSettings): Pick<DdlConfig, "ext
     errors.push(`POSTGRES_DDL_SESSION_SETTINGS: at most ${String(MAX_SESSION_SETTINGS)} settings.`);
   }
   out.sessionSettings = settings;
+
+  // The session role must also be an owner role: everything a migration creates is owned by it,
+  // which is what OWNER TO hands over, so the same allowlist and the same pg_roles checks apply.
+  const sessionRole = raw.sessionRole.trim();
+  if (sessionRole !== "") {
+    if (!IDENTIFIER.test(sessionRole) || sessionRole.startsWith("pg_") || sessionRole === "public") {
+      errors.push(`POSTGRES_DDL_SESSION_ROLE: '${sessionRole}' is not a plain lower-case role name.`);
+    } else if (!roles.includes(sessionRole)) {
+      errors.push(`POSTGRES_DDL_SESSION_ROLE: '${sessionRole}' must also be listed in POSTGRES_DDL_OWNER_ROLES.`);
+    } else {
+      out.sessionRole = sessionRole;
+    }
+  }
 
   return errors.length === 0 ? out : { ...out, configError: errors.join(" ") };
 }
