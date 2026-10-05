@@ -1,5 +1,7 @@
 ---
 description: "Use when implementing or refactoring TypeScript Node.js MCP servers in this workspace. Covers ESM imports, schema validation, MCP tool contract clarity, and script compatibility."
+paths:
+  - "**/*.ts"
 ---
 > Scope: TypeScript sources across all MCP packages.
 

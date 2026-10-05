@@ -5,8 +5,9 @@ description: "Pre-merge security review of a change to any of this workspace's f
 
 # MCP Security Review
 
-Baseline policy is already loaded (`.claude/rules/mcp-base.md`, `typescript-mcp.md`,
-`db-guardrails.md`, `codebase-index.md`). This is the review procedure for this repo.
+Baseline policy is in `.claude/rules/`: `mcp-base.md` is always loaded; `typescript-mcp.md`,
+`db-guardrails.md` and `codebase-index.md` are path-scoped — read the ones the diff touches if they
+are not in context. This is the review procedure for this repo.
 
 ## 1. Scope the diff
 

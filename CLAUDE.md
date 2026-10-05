@@ -97,8 +97,8 @@ OpenObserve; its `code` blocks are hand-written and preserved, so it is **not** 
 `src/{tools,resources,prompts,middleware,services,repositories,config,types}/` plus `src/index.ts`.
 A slot exists only where the server has that concern.
 
-For `codebase-index-mcp` — data flow, the graph model, the refactor engine, the extractor naming
-rules and the per-file guidance — read **`codebase-index-mcp/CLAUDE.md`**. Do not keep a second copy
+For `codebase-index-mcp` — the graph model, the refactor engine, the extractor naming rules and
+its gotchas — read **`codebase-index-mcp/CLAUDE.md`**. Do not keep a second copy
 of the graph model here: the symbol-kind and edge-type unions live in
 `codebase-index-mcp/src/types/index.ts` and are the only authority.
 
@@ -177,10 +177,12 @@ MCP tool calls then hit the updated build, so you can test directly without the 
 
 ## Rules & Skills (`.claude/`)
 
-- **`.claude/rules/` is always-on policy and is already in your context.** `mcp-hard-mode` is the
-  single source of truth for MCP-first operating rules — tool selection, enforcement gates, fallback
-  conditions, the call budget, and mandatory issue logging. Do not restate it here or elsewhere.
-  Alongside it: `mcp-base`, `typescript-mcp`, `db-guardrails`, `codebase-index`.
+- **`.claude/rules/` is policy.** `mcp-hard-mode` and `mcp-base` are always in your context;
+  `mcp-hard-mode` is the single source of truth for MCP-first operating rules — tool selection,
+  enforcement gates, fallback conditions, the call budget, and mandatory issue logging. Do not
+  restate it here or elsewhere. `typescript-mcp` (`**/*.ts`), `db-guardrails` (`postgres-mcp/**`)
+  and `codebase-index` (`codebase-index-mcp/**`) load via `paths` frontmatter when you work on
+  matching files.
 - `.claude/skills/` — MCP **authoring** skills (security-review, tool-annotations, error-taxonomy,
   contract-conformance, observability, host-integration-security, db-tool-review) plus
   `mcp-skill-authoring`. Each ends with an *Authoritative reference* naming

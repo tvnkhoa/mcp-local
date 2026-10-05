@@ -10,8 +10,8 @@ Two narrow questions about a tool that reads data, each with its own checklist:
 1. **SQL construction and guardrails** — can caller input change the shape of a SQL statement?
 2. **Resource bounds** — can a caller make the tool return or wait for an unbounded amount?
 
-Policy is already loaded from `.claude/rules/db-guardrails.md` and `typescript-mcp.md`; this is the
-repo-specific checklist. Run the part the diff touches; a new tool needs both.
+Policy lives in `.claude/rules/db-guardrails.md` and `typescript-mcp.md` (path-scoped — read them if
+they are not in context); this is the repo-specific checklist. Run the part the diff touches; a new tool needs both.
 
 ---
 

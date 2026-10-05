@@ -1,5 +1,7 @@
 ---
 description: "Use when adding or changing database-related MCP tools, SQL validation, or query execution flow. Enforces least privilege and read-only-by-default posture."
+paths:
+  - "postgres-mcp/**"
 ---
 > Scope: `postgres-mcp/**` (TS + docs + config).
 

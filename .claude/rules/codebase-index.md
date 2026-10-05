@@ -1,5 +1,7 @@
 ---
 description: "Use when building or updating MCP tools for codebase indexing, dependency analysis, call-chain tracing, or architecture flow mapping. Covers parser strategy, graph modeling, and internal-storage guardrails."
+paths:
+  - "codebase-index-mcp/**"
 ---
 > Scope: `codebase-index-mcp/**` (TS + docs + config).
 
