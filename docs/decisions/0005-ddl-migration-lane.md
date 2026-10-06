@@ -124,6 +124,12 @@ that repo:
   exist, must have none of the four refused attributes, and the login must be able to SET ROLE to
   it (`DDL_SESSION_ROLE_UNKNOWN` / `_PRIVILEGED` / `_NOT_MEMBER`). It is part of the plan digest.
   The baselines, the internal-write check and the ledger row still run as the login.
+  **Refined 2026-10-06:** a session role that IS the login (`session_user`) is a preview warning,
+  not a refusal, even with those attributes: switching to oneself grants nothing, which is what
+  running with no session role already does, and that never checks the login. The same holds for
+  an OWNER TO / AUTHORIZATION target that is the login (`OWNER_ROLE_PRIVILEGED` at `warning`). A
+  local docker Postgres, whose `POSTGRES_USER` is a superuser owning the whole schema, was
+  otherwise untestable. A privileged role other than the login stays refused everywhere.
 - **`CREATE SCHEMA [IF NOT EXISTS] [name] AUTHORIZATION <role>`, behind `PRIVILEGE_CHANGE`, only to
   a role in `POSTGRES_DDL_OWNER_ROLES`.** A job-queue schema (pg-boss) is owned by its own role,
   and the queue then creates its tables in that schema at run time, as that role. The bare

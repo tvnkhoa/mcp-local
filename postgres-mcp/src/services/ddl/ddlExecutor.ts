@@ -114,7 +114,7 @@ async function settableRoles(db: Queryable, acting: string | undefined, roles: r
  * exists, has none of the attributes refused for an owner role, and the login may SET ROLE to it.
  * The config already required it to be in POSTGRES_DDL_OWNER_ROLES, so `ownerRoles` holds it.
  */
-async function assertSessionRole(db: Queryable, role: string, ownerRoles: ReadonlyMap<string, OwnerRoleAttributes>): Promise<void> {
+async function assertSessionRole(db: Queryable, role: string, login: string, ownerRoles: ReadonlyMap<string, OwnerRoleAttributes>): Promise<string | undefined> {
   const attributes = ownerRoles.get(role);
   if (attributes === undefined) {
     throw new PolicyViolationError("DDL_SESSION_ROLE_UNKNOWN", `POSTGRES_DDL_SESSION_ROLE ${role}: no such role exists in this database.`);
@@ -125,6 +125,13 @@ async function assertSessionRole(db: Queryable, role: string, ownerRoles: Readon
     attributes.bypassRls ? "BYPASSRLS" : undefined,
     attributes.replication ? "REPLICATION" : undefined
   ].filter((a): a is string => a !== undefined);
+  // The session role IS the login: SET ROLE grants nothing the connection does not already have,
+  // which is also what running with no session role at all does, and that never checks the
+  // login's own attributes. A local docker Postgres makes POSTGRES_USER a superuser that owns the
+  // whole schema, so refusing here made every local migration untestable. Reported, not refused.
+  if (reaching.length > 0 && role === login) {
+    return `POSTGRES_DDL_SESSION_ROLE ${role} is the login itself and has ${reaching.join(", ")}. Switching to it grants nothing new, so it is allowed here; on a shared database, connect as a login without those attributes.`;
+  }
   if (reaching.length > 0) {
     throw new PolicyViolationError(
       "DDL_SESSION_ROLE_PRIVILEGED",
@@ -137,6 +144,7 @@ async function assertSessionRole(db: Queryable, role: string, ownerRoles: Readon
       `POSTGRES_DDL_SESSION_ROLE ${role}: the login cannot SET ROLE ${role}. Grant ${role} to the login (outside the lane), or unset the variable.`
     );
   }
+  return undefined;
 }
 
 /** Why an environment without the external ledger is refused, naming it when known. */
@@ -157,11 +165,11 @@ async function planAgainstUnguarded(db: Queryable, request: PlanRequest, config:
     throw new PolicyViolationError("DDL_LEDGER_MISSING", missingLedgerMessage(ledger.label, environment));
   }
   const ownerRoles = await ownerRoleAttributes(db, config.ownerRoles ?? []);
-  if (config.sessionRole !== undefined) {
-    await assertSessionRole(db, config.sessionRole, ownerRoles);
-  }
+  const login = (await db.query<{ u: string }>("select session_user::text as u")).rows[0]?.u ?? "";
+  const sessionRoleWarning = config.sessionRole === undefined ? undefined : await assertSessionRole(db, config.sessionRole, login, ownerRoles);
   const actingRole = {
-    name: config.sessionRole ?? (await db.query<{ u: string }>("select session_user as u")).rows[0]?.u ?? "the login",
+    name: config.sessionRole ?? (login || "the login"),
+    login,
     canBecome: await settableRoles(db, config.sessionRole, [...ownerRoles.keys()])
   };
   const loaded = request.mode === "file" ? await loadMigrations(requireMigrationsDir(config), ledger.format) : undefined;
@@ -203,6 +211,9 @@ async function planAgainstUnguarded(db: Queryable, request: PlanRequest, config:
   });
   if (!result.ok) {
     throw new PolicyViolationError(result.error.code, result.error.message);
+  }
+  if (sessionRoleWarning !== undefined) {
+    result.plan.warnings.push(sessionRoleWarning);
   }
   return { plan: result.plan, snapshot, state, efHistoryTablePresent: extra.rows[0]?.ef === true };
 }

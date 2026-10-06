@@ -56,7 +56,7 @@ export interface LintContext {
    * may SET ROLE to. Postgres requires that for OWNER TO and CREATE SCHEMA … AUTHORIZATION. When
    * omitted, it is not checked and the dry run finds it.
    */
-  actingRole?: { name: string; canBecome: ReadonlySet<string> };
+  actingRole?: { name: string; canBecome: ReadonlySet<string>; /** The connecting login (session_user). */ login?: string };
 }
 
 export interface OwnerRoleAttributes {
@@ -322,6 +322,20 @@ function lintRoleTarget(
     attributes.bypassRls ? "BYPASSRLS" : undefined,
     attributes.replication ? "REPLICATION" : undefined
   ].filter((a): a is string => a !== undefined);
+  if (reaching.length > 0 && role === context.actingRole?.login) {
+    // The target IS the login running the statement: the object goes to the role that already
+    // runs it, so nothing is granted. A local docker Postgres, where POSTGRES_USER is a superuser
+    // that owns everything, is the case. Reported, not refused; a privileged role other than the
+    // login stays blocked below.
+    add(
+      statement,
+      "warning",
+      "OWNER_ROLE_PRIVILEGED",
+      `Role ${role} has ${reaching.join(", ")}, but it is the login itself, so handing it the object grants nothing new. On a shared database, connect as a login without those attributes.`,
+      role
+    );
+    return;
+  }
   if (reaching.length > 0) {
     add(
       statement,

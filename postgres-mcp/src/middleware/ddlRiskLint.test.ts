@@ -168,6 +168,18 @@ test("AUTHORIZATION gets the same role checks as OWNER TO", () => {
   assert.deepEqual(codes(lint("create schema review_jobs", ROLES)), []);
 });
 
+test("a privileged owner that IS the login is a warning; any other privileged owner stays blocked", () => {
+  // A local docker Postgres: the login is a superuser and owns everything.
+  const local: LintContext = { ...ROLES, actingRole: { name: "big", login: "big", canBecome: new Set(["aria", "big"]) } };
+  const self = lint("alter table t owner to big", local);
+  assert.deepEqual(codes(self), ["PRIVILEGE_CHANGE:high", "OWNER_ROLE_PRIVILEGED:warning"]);
+  assert.match(self.findings.find((f) => f.code === "OWNER_ROLE_PRIVILEGED")?.message ?? "", /it is the login itself/);
+  assert.deepEqual(codes(lint("create schema s authorization big", local)), ["PRIVILEGE_CHANGE:high", "OWNER_ROLE_PRIVILEGED:warning"]);
+  // The same privileged role, but not the login: handing it the object would escalate.
+  const other: LintContext = { ...ROLES, actingRole: { name: "aria", login: "deployer", canBecome: new Set(["aria", "big"]) } };
+  assert.deepEqual(codes(lint("alter table t owner to big", other)), ["PRIVILEGE_CHANGE:high", "OWNER_ROLE_PRIVILEGED:blocked"]);
+});
+
 test("a role the acting role cannot SET ROLE to is blocked, naming both", () => {
   const acting: LintContext = { ...ROLES, actingRole: { name: "aria", canBecome: new Set(["aria"]) } };
   assert.deepEqual(codes(lint("alter table t owner to aria", acting)), ["PRIVILEGE_CHANGE:high"]);

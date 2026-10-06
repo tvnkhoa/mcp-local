@@ -123,6 +123,86 @@ const ROLE_FILE = [
   ""
 ].join("\n");
 
+/**
+ * X11: a local docker Postgres, where POSTGRES_USER is a superuser that owns the whole schema and
+ * is also POSTGRES_DDL_SESSION_ROLE and the OWNER TO target (wec.aria's aria_local). Switching to,
+ * or handing objects to, the login itself grants nothing new, so it is warned about, not refused.
+ * A privileged role that is NOT the login stays blocked.
+ */
+async function runSuperuserLoginScenario(baseEnv) {
+  const admin = new pg.Client({ connectionString: conn("probe") });
+  await admin.connect();
+  await admin.query("create database local_su");
+  await admin.end();
+  const local = new pg.Client({ connectionString: conn("local_su") });
+  await local.connect();
+  await local.query(LEDGER_DDL);
+
+  const localDir = await mkdtemp(path.join(os.tmpdir(), "ddl-superuser-login-"));
+  const up = "0001-retrieval-inspection-record.sql";
+  await writeFile(path.join(localDir, up), "begin;\ncreate table public.retrieval_inspection_records (id int);\nalter table public.retrieval_inspection_records owner to probe;\ncommit;\n");
+  await writeFile(path.join(localDir, "0001-retrieval-inspection-record.down.sql"), "begin;\ndrop table public.retrieval_inspection_records;\ncommit;\n");
+  const env = {
+    ...baseEnv,
+    POSTGRES_ENV_DEV: conn("local_su"),
+    POSTGRES_WRITABLE_ENVIRONMENTS: "dev",
+    POSTGRES_DDL_MIGRATIONS_DIR: localDir,
+    // "probe" is the container's POSTGRES_USER: SUPERUSER, CREATEROLE, BYPASSRLS, REPLICATION.
+    POSTGRES_DDL_OWNER_ROLES: "probe,big",
+    POSTGRES_DDL_SESSION_ROLE: "probe"
+  };
+  delete env.POSTGRES_ENV_ADOPT;
+  delete env.POSTGRES_ENV_FRESH;
+  delete env.POSTGRES_DDL_ADOPTION_SENTINEL;
+  const transport = new StdioClientTransport({ command: "node", args: ["dist/index.js"], stderr: "pipe", env });
+  const mcp = new McpClient({ name: "postgres-mcp-ddl-superuser-login-test", version: "0.1.0" });
+  await mcp.connect(transport);
+  const call = async (name, args) => {
+    const result = await mcp.callTool({ name, arguments: args });
+    const text = (Array.isArray(result.content) ? result.content : []).find((x) => x.type === "text")?.text ?? "null";
+    return { isError: result.isError === true, payload: JSON.parse(text) };
+  };
+  const applyAll = async (args) => {
+    const p = await call("ddl_preview", { environment: "dev", profile: "standard", ...args });
+    return { p, a: p.isError ? p : await call("ddl_apply", { previewId: p.payload.previewId, approvalToken: p.payload.approvalToken, acknowledgeRisks: p.payload.requiredAcknowledgements }) };
+  };
+  const ledgerRows = async () => (await local.query("select count(*)::int as n from schema_migration")).rows[0].n;
+  const tableExists = async () => (await local.query("select to_regclass('public.retrieval_inspection_records') is not null as p")).rows[0].p;
+
+  try {
+    const first = await applyAll({});
+    const warnings = first.p.payload.warnings ?? [];
+    const ownerFinding = (first.p.payload.steps?.[0]?.risks ?? []).find((r) => r.code === "OWNER_ROLE_PRIVILEGED");
+    check(
+      "X11a/superuser-login-as-session-role-and-owner-is-warned-not-refused",
+      !first.p.isError &&
+        warnings.some((w) => /POSTGRES_DDL_SESSION_ROLE probe is the login itself/.test(w)) &&
+        (ownerFinding === undefined || ownerFinding.level === "warning") &&
+        !first.a.isError && first.a.payload.status === "applied" && (await tableExists()) && (await ledgerRows()) === 1,
+      `preview=${String(first.p.payload.code ?? "ok")} ${String(first.p.payload.message ?? "").slice(0, 100)} owner=${JSON.stringify(ownerFinding?.level)} apply=${String(first.a.payload.status ?? first.a.payload.code)}`
+    );
+    const down = await applyAll({ direction: "down", target: "0" });
+    const again = await applyAll({});
+    check(
+      "X11b/round-trip-down-then-up-on-the-superuser-login",
+      !down.a.isError && down.a.payload.status === "applied" && !again.a.isError && again.a.payload.status === "applied" && (await tableExists()) && (await ledgerRows()) === 1,
+      `down=${String(down.a.payload.status ?? down.a.payload.code)} up=${String(again.a.payload.status ?? again.a.payload.code)}`
+    );
+    // A privileged role that is not the login: still blocked.
+    await writeFile(path.join(localDir, "0002-hand-to-big.sql"), "alter table public.retrieval_inspection_records owner to big;\n");
+    const big = await call("ddl_preview", { environment: "dev" });
+    check(
+      "X11c/privileged-owner-other-than-the-login-still-blocked",
+      big.isError && big.payload.code === "DDL_RISK_BLOCKED" && /Role big is refused/.test(big.payload.message),
+      `code=${String(big.payload.code)} message=${String(big.payload.message).slice(0, 100)}`
+    );
+  } finally {
+    await mcp.close().catch(() => undefined);
+    await local.end().catch(() => undefined);
+    await rm(localDir, { recursive: true, force: true }).catch(() => undefined);
+  }
+}
+
 async function runSessionRoleScenario(baseEnv) {
   const admin = new pg.Client({ connectionString: conn("probe") });
   await admin.connect();
@@ -555,6 +635,9 @@ async function main() {
     // schema owned by its own role, then rows moved by a DO block and a backfill before the old
     // column is dropped, all in one transaction.
     await runSessionRoleScenario(serverEnv);
+
+    // ── X11. a superuser login that is its own session role and owner ──────
+    await runSuperuserLoginScenario(serverEnv);
   } finally {
     await mcp.close().catch(() => undefined);
     await repo.end().catch(() => undefined);
