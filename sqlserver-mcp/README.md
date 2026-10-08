@@ -65,7 +65,7 @@ name and typed parameters, which the driver binds.
 | `SQLSERVER_DEFAULT_ENVIRONMENT` | no | `the sole configured environment` *(code)* | Which environment a call means when it omits `environment`. |
 | `SQLSERVER_ALLOWED_ENVIRONMENTS` | no | `(empty = every configured environment)` *(code)* | Comma-separated. Empty means no restriction, not 'none allowed'. |
 | `SQLSERVER_ALLOWED_DATABASES` | no | `(empty = every catalog the login can see)` *(code)* | Comma-separated catalog allowlist. THE control that matters: one SQL Server login reaches every database on the instance, so without this the server's reach is the login's reach. Enforced in two places — the catalog a connection opens against, AND the first segment of any three-part name in a query, checked against the instance's real catalog list. |
-| `SQLSERVER_READONLY_DATABASES` | no | `(empty)` *(code)* | Catalogs where execute_routine is refused unconditionally, whatever SQLSERVER_EXEC_ENABLED says. The analogue of postgres-mcp's 'prod is always read-only'. |
+| `SQLSERVER_READONLY_DATABASES` | no | `(empty)` *(code)* | Catalogs where execute_routine and the write lane are refused unconditionally, whatever SQLSERVER_EXEC_ENABLED / SQLSERVER_WRITE_ENABLED say. The analogue of postgres-mcp's 'prod is always read-only'. |
 | `SQLSERVER_DEFAULT_LIMIT` | no | `500` *(code)* | Rows returned per recordset when a call does not say. |
 | `SQLSERVER_MAX_LIMIT` | no | `2000` *(code)* | Ceiling a call's maxRows is clamped to. T-SQL has no LIMIT, so the bound is applied by cancelling the row stream, never by rewriting the statement. |
 | `SQLSERVER_DEFAULT_TIMEOUT_MS` | no | `30000` *(code)* | — |
@@ -77,10 +77,16 @@ name and typed parameters, which the driver binds.
 | `SQLSERVER_EXEC_ENABLED` | no | `false` | execute_routine is OFF unless true. Parsed strictly: exact "true" or "1". SQL Server records nothing about whether a procedure writes, so enabling this grants write capability regardless of which routines you intend to call. |
 | `SQLSERVER_EXEC_ALLOWED_ROUTINES` | no | `(empty = no narrowing)` *(code)* | renamed — still accepts `SQLSERVER_EXEC_ALLOWLIST` · Comma-separated glob patterns over `schema.routine`, e.g. `dbo.Report_*,dbo.Get*`. `*` is the whole grammar. Empty does NOT deny — the flag above is the gate. |
 | `SQLSERVER_EXEC_TIMEOUT_MS` | no | `120000` *(code)* | — |
+| `SQLSERVER_WRITE_ENABLED` | no | `false` | write_preview / write_apply are OFF unless true. Parsed strictly: exact "true" or "1". The login also needs write permission on the catalog — a db_datareader login is refused by SQL Server itself. |
+| `SQLSERVER_WRITABLE_ENVIRONMENTS` | no | `(empty = none writable)` *(code)* | Comma-separated environment names the write lane may target, e.g. `dev`. Empty means NONE. prod and uat (and their aliases production/test/testing) are never writable, even if listed. |
+| `SQLSERVER_APPROVAL_SECRET` | no | — | **secret** · HMAC secret for write approval tokens. Auto-generated per process if empty; set it only to keep tokens valid across restarts. |
+| `SQLSERVER_WRITE_PREVIEW_TTL_MS` | no | `900000` *(code)* | Write-preview lifetime — 15 minutes. Previews are in memory and do not survive a restart. |
+| `SQLSERVER_WRITE_TIMEOUT_MS` | no | `60000` *(code)* | Batch timeout for preview and apply. Reaching it cancels the batch and rolls back. |
+| `SQLSERVER_WRITE_AUDIT_FILE` | no | — | Absolute path of a JSONL file each write_apply is appended to (environment, database, SQL hash, rowsAffected, status, time). Every apply is also logged to stderr as `write_audit`; nothing is written to the target database. |
 | `NODE_EXTRA_CA_CERTS` | no | — | Absolute path to a PEM bundle added to Node's trust store. This is the fix for `TLS certificate verification failed` and the only one of the three that keeps the certificate verified. AWS RDS chains to an Amazon RDS CA that Node does not ship: download the bundle for your region from https://truststore.pki.rds.amazonaws.com/<region>/<region>-bundle.pem and point this at it. |
 | `NODE_TLS_REJECT_UNAUTHORIZED` | no | — | Node-level TLS switch. A blunt last resort: it disables verification for every TLS connection the process makes. Prefer NODE_EXTRA_CA_CERTS, which fixes the cause; failing that TrustServerCertificate=true, which at least scopes the damage to this connection. Both of those leave the traffic encrypted but unauthenticated — reachable by anyone who can get in the path. |
 
-19 variables. Defaults marked *(code)* are the server's own fallback and are **not** written into your agent config — set them only to override.
+25 variables. Defaults marked *(code)* are the server's own fallback and are **not** written into your agent config — set them only to override.
 
 <!-- END GENERATED: env-table -->
 
@@ -91,7 +97,7 @@ Generated from `@mcp/manifest` — edit `packages/manifest/src/envSpecs/sqlserve
 
 <!-- BEGIN GENERATED: tool-list -->
 
-12 tools, namespaced `mcp__sqlserver-mcp__<tool>`:
+14 tools, namespaced `mcp__sqlserver-mcp__<tool>`:
 
 - `describe_table`
 - `execute_routine`
@@ -105,6 +111,8 @@ Generated from `@mcp/manifest` — edit `packages/manifest/src/envSpecs/sqlserve
 - `list_tables`
 - `profile_table`
 - `run_read_query`
+- `write_apply`
+- `write_preview`
 
 <!-- END GENERATED: tool-list -->
 

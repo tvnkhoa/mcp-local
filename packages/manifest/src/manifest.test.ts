@@ -218,7 +218,8 @@ test("tool lists match the committed contract snapshots exactly", () => {
   // 90 -> 94: bitbucket-mcp gained the four read-only Pipelines tools.
   // 94 -> 96: postgres-mcp gained ddl_status and ddl_create (DDL lane, phase 1.3).
   // 96 -> 99: and ddl_preview, ddl_dry_run, ddl_apply (phase 1.4).
-  assert.equal(total, 99, "the workspace advertises 99 tools; update this number deliberately");
+  // 99 -> 101: sqlserver-mcp write_preview, write_apply (ADR 0006).
+  assert.equal(total, 101, "the workspace advertises 101 tools; update this number deliberately");
 });
 
 // --- a server registered before its contract exists -----------------------------
@@ -331,13 +332,15 @@ test("the env contract covers every server, and grew as S-35 intended", () => {
   // _OWNER_ROLES, _SESSION_SETTINGS and _ADOPTION_SENTINEL, all optional and all failing closed.
   // 34 -> 35 with POSTGRES_DDL_SESSION_ROLE (ADR 0005, Decision 2's second amendment): the role a
   // migration's statements run as, so objects are not owned by the personal login.
+  // sqlserver-mcp 19 -> 25 with the write lane (ADR 0006): SQLSERVER_WRITE_ENABLED, _WRITABLE_ENVIRONMENTS,
+  // SQLSERVER_APPROVAL_SECRET, SQLSERVER_WRITE_PREVIEW_TTL_MS, _WRITE_TIMEOUT_MS and _WRITE_AUDIT_FILE.
   const counts = Object.fromEntries(SERVERS.map((s) => [s.key, s.env.length]));
   assert.deepEqual(counts, {
     "codebase-index": 41,
     "postgres-mcp": 35,
     "observe-mcp": 31,
     "bitbucket-mcp": 11,
-    "sqlserver-mcp": 19
+    "sqlserver-mcp": 25
   });
 });
 

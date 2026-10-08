@@ -7,6 +7,7 @@
  */
 
 import { createEnvReader, defaultEnvSource, type EnvReader } from "@mcp/core";
+import { resolveApprovalSecret } from "@mcp/shared";
 
 import { resolveAliases } from "./aliases.js";
 
@@ -67,6 +68,33 @@ export interface ExecConfig {
   readonly timeoutMs: number;
 }
 
+/**
+ * The data-write lane (`write_preview` → `write_apply`). ADR 0006.
+ *
+ * Two gates live here and both must pass: the flag, and the environment being named in
+ * `writableEnvironments`. `prod` and `uat` are never writable, whatever the list says — see
+ * {@link NEVER_WRITABLE_ENVIRONMENTS}.
+ */
+export interface WriteConfig {
+  readonly enabled: boolean;
+  /** Canonical environment names. Empty = no environment is writable (deny, not allow-all). */
+  readonly writableEnvironments: readonly string[];
+  readonly approvalSecret: string;
+  /** True when no secret was configured and a per-process one was generated. */
+  readonly approvalSecretGenerated: boolean;
+  readonly previewTtlMs: number;
+  readonly timeoutMs: number;
+  /** Optional JSONL file every apply is appended to, in addition to the stderr audit line. */
+  readonly auditFile: string | undefined;
+}
+
+/**
+ * Environments the write lane refuses unconditionally, after `canonicalEnvName` — so `production`,
+ * `test` and `testing` land here too. The analogue of `postgres-mcp`'s "prod is force read-only",
+ * widened to `uat` because the lane exists for seeding a development catalog and nothing else.
+ */
+export const NEVER_WRITABLE_ENVIRONMENTS: readonly string[] = ["prod", "uat"];
+
 export interface SqlserverConfig {
   readonly registry: EnvironmentRegistry;
   /** Environments whose connection string could not be parsed, reported by `list_environments`. */
@@ -74,11 +102,12 @@ export interface SqlserverConfig {
   readonly allowedEnvironments: readonly string[];
   /** Catalogs reachable at all. Empty = every catalog the login can see. */
   readonly allowedDatabases: readonly string[];
-  /** Catalogs where `execute_routine` is refused unconditionally. */
+  /** Catalogs where `execute_routine` and the write lane are refused unconditionally. */
   readonly readonlyDatabases: readonly string[];
   readonly limits: QueryLimits;
   readonly pools: PoolLimits;
   readonly exec: ExecConfig;
+  readonly write: WriteConfig;
 }
 
 /**
@@ -128,7 +157,23 @@ export function loadConfig(): SqlserverConfig {
       enabled: reader_.strictFlag("SQLSERVER_EXEC_ENABLED"),
       allowlist: reader_.list("SQLSERVER_EXEC_ALLOWED_ROUTINES"),
       timeoutMs: reader_.positiveNumber("SQLSERVER_EXEC_TIMEOUT_MS", 120_000)
-    }
+    },
+    write: loadWriteConfig(reader_)
+  };
+}
+
+function loadWriteConfig(reader_: EnvReader): WriteConfig {
+  const secret = resolveApprovalSecret(reader_.optionalString("SQLSERVER_APPROVAL_SECRET"));
+  const auditFile = reader_.optionalString("SQLSERVER_WRITE_AUDIT_FILE")?.trim();
+  return {
+    // strictFlag for the same reason as the exec lane: exactly "true" or "1".
+    enabled: reader_.strictFlag("SQLSERVER_WRITE_ENABLED"),
+    writableEnvironments: reader_.list("SQLSERVER_WRITABLE_ENVIRONMENTS").map(canonicalEnvName),
+    approvalSecret: secret.secret,
+    approvalSecretGenerated: secret.generated,
+    previewTtlMs: reader_.positiveNumber("SQLSERVER_WRITE_PREVIEW_TTL_MS", 900_000),
+    timeoutMs: reader_.positiveNumber("SQLSERVER_WRITE_TIMEOUT_MS", 60_000),
+    auditFile: auditFile === undefined || auditFile === "" ? undefined : auditFile
   };
 }
 
@@ -148,6 +193,11 @@ export function describeConfig(config: SqlserverConfig): Record<string, unknown>
     readonlyDatabases: config.readonlyDatabases,
     execEnabled: config.exec.enabled,
     execAllowlist: config.exec.allowlist.length > 0 ? config.exec.allowlist : "(no narrowing)",
+    writeEnabled: config.write.enabled,
+    writableEnvironments: config.write.writableEnvironments.filter(
+      (name) => !NEVER_WRITABLE_ENVIRONMENTS.includes(name)
+    ),
+    writeAuditFile: config.write.auditFile !== undefined,
     limits: config.limits,
     defaultConnection: maskConnection(
       (

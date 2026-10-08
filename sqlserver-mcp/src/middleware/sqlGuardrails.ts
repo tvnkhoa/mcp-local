@@ -136,6 +136,11 @@ function reject(code: string, message: string): GuardrailResult {
   return { ok: false, error: { code, message } };
 }
 
+/** True when the statement names a four-part (linked-server) object. Shared with the write lane. */
+export function hasFourPartName(sql: string): boolean {
+  return FOUR_PART_NAME.test(normalizeNames(sql));
+}
+
 /** Blank out literals, comments and bracketed identifiers using T-SQL rules. */
 export function stripStringsAndComments(sql: string): string {
   return scanSql(sql, TSQL_SCAN).cleaned;
@@ -192,7 +197,7 @@ export function validateReadOnlySql(inputSql: string, maxLength = 100_000): Guar
   }
 
   // On the bracket-preserving form: a bracketed segment still counts as a name part here.
-  if (FOUR_PART_NAME.test(normalizeNames(sql))) {
+  if (hasFourPartName(sql)) {
     return reject(
       "policy_violation",
       "Four-part names (server.database.schema.object) reach a linked server and are not allowed. " +

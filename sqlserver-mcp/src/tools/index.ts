@@ -4,11 +4,13 @@
  * Separated from `index.ts` on purpose: the entry point has start-up side effects (config load,
  * transport connect), so everything worth testing lives here and is exercised without a server.
  *
- * Two lanes, and the split is the security boundary:
+ * Three lanes, and the split is the security boundary:
  *
  *  - **read** — always on. Introspection plus a guardrailed SELECT path.
  *  - **exec** — off unless `SQLSERVER_EXEC_ENABLED=true`. Runs stored procedures, which on SQL
  *    Server may write without anything in the catalog saying so.
+ *  - **write** — off unless `SQLSERVER_WRITE_ENABLED=true`, and only for environments named in
+ *    `SQLSERVER_WRITABLE_ENVIRONMENTS` (never prod or uat). Previewed T-SQL batches. ADR 0006.
  */
 
 import { err, ok } from "@mcp/core";
@@ -22,6 +24,7 @@ import type { ConnectionManager } from "../repositories/connectionManager.js";
 import { buildExecTools } from "./execTools.js";
 import { buildQueryTools } from "./queryTools.js";
 import { buildReadTools } from "./readTools.js";
+import { buildWriteTools } from "./writeTools.js";
 import type { SqlserverDeps } from "./common.js";
 
 export type { SqlserverDeps };
@@ -78,7 +81,8 @@ export function buildTools(deps: SqlserverDeps): readonly AnyToolDefinition[] {
 
     ...buildReadTools(deps),
     ...buildQueryTools(deps),
-    ...buildExecTools(deps)
+    ...buildExecTools(deps),
+    ...buildWriteTools(deps)
   ]);
 }
 

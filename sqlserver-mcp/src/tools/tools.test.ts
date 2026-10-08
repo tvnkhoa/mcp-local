@@ -67,6 +67,15 @@ function makeConfig(overrides: Partial<SqlserverConfig> = {}): SqlserverConfig {
     },
     pools: { poolMax: 5, maxPools: 12, idleTimeoutMs: 30_000 },
     exec: { enabled: false, allowlist: [], timeoutMs: 120_000 },
+    write: {
+      enabled: false,
+      writableEnvironments: [],
+      approvalSecret: "test-secret",
+      approvalSecretGenerated: false,
+      previewTtlMs: 900_000,
+      timeoutMs: 1000,
+      auditFile: undefined
+    },
     ...overrides
   };
 }
@@ -104,11 +113,15 @@ test("health_check is present, as every server must have it", () => {
   assert.ok(names.includes("health_check"), `health_check missing; got ${names.join(", ")}`);
 });
 
-test("execute_routine is the only tool that is not read-only", () => {
+test("execute_routine and the write lane are the only tools that are not read-only", () => {
   const writers = makeTools()
     .filter((tool) => tool.annotations.readOnly !== true)
     .map((tool) => tool.name);
-  assert.deepEqual(writers, ["execute_routine"]);
+  assert.deepEqual(writers, ["execute_routine", "write_preview", "write_apply"]);
+  // write_apply commits, so a client must always ask; write_preview rolls back.
+  const byName = new Map(makeTools().map((tool) => [tool.name, tool]));
+  assert.equal(byName.get("write_apply")?.annotations.destructive, true);
+  assert.equal(byName.get("write_preview")?.annotations.destructive, false);
 });
 
 test("execute_routine declares itself destructive for every routine", () => {
@@ -997,4 +1010,145 @@ test("list_routines refuses an unknown schema exactly as list_tables does", () =
     const props = (tool.inputSchema as { properties: Record<string, unknown> }).properties;
     assert.ok("schema" in props, `${name} must take a schema to be able to refuse a bad one`);
   }
+});
+
+// --- the write lane (ADR 0006) ---------------------------------------------------
+
+const SEED_BATCH = `
+BEGIN TRY
+    BEGIN TRANSACTION;
+        DECLARE @PermissionId INT;
+        SELECT @PermissionId = Id FROM [dbo].[Permission] WHERE [Code] = 'globalConfiguration';
+        IF @PermissionId IS NULL
+            THROW 50000, 'Permission globalConfiguration not found', 1;
+        INSERT INTO [dbo].[Operation] ([Code]) SELECT 'x' WHERE NOT EXISTS (SELECT 1 FROM dbo.Operation WHERE Code = 'x');
+    COMMIT TRANSACTION;
+END TRY
+BEGIN CATCH
+    IF @@TRANCOUNT > 0 ROLLBACK TRANSACTION;
+    THROW;
+END CATCH;
+SELECT Id FROM dbo.Operation WHERE Code = 'x';`;
+
+function multiEnvRegistry() {
+  const source: Record<string, string> = {
+    SQLSERVER_ENV_DEV: "data source=h; initial catalog=AppDev; User Id=u; Password=p",
+    SQLSERVER_ENV_UAT: "data source=h; initial catalog=AppUat; User Id=u; Password=p",
+    SQLSERVER_ENV_PROD: "data source=h; initial catalog=AppProd; User Id=u; Password=p",
+    SQLSERVER_DEFAULT_ENVIRONMENT: "dev"
+  };
+  const env = {
+    raw: (name: string) => source[name],
+    string: (name: string, fallback: string) => source[name] ?? fallback,
+    optionalString: (name: string) => source[name],
+    presentKeys: (prefix?: string) =>
+      Object.keys(source).filter((key) => (prefix === undefined ? true : key.startsWith(prefix)))
+  } as never;
+  return buildEnvironmentRegistry(env).registry;
+}
+
+function writeConfig(overrides: Partial<SqlserverConfig["write"]> = {}, rest: Partial<SqlserverConfig> = {}) {
+  return makeConfig({
+    registry: multiEnvRegistry(),
+    write: {
+      enabled: true,
+      // uat and prod listed on purpose: the never-writable rule must win over the list.
+      writableEnvironments: ["dev", "uat", "prod"],
+      approvalSecret: "test-secret",
+      approvalSecretGenerated: false,
+      previewTtlMs: 900_000,
+      timeoutMs: 500,
+      auditFile: undefined,
+      ...overrides
+    },
+    ...rest
+  });
+}
+
+test("write_preview is refused while SQLSERVER_WRITE_ENABLED is off, naming the flag", async () => {
+  const { isError, payload } = await bodyOf("write_preview", { sql: SEED_BATCH }, writeConfig({ enabled: false }));
+  assert.equal(isError, true);
+  assert.equal(payload.code, "policy_violation");
+  assert.match(payload.message, /SQLSERVER_WRITE_ENABLED/);
+});
+
+test("write_apply is refused while SQLSERVER_WRITE_ENABLED is off", async () => {
+  const { isError, payload } = await bodyOf(
+    "write_apply",
+    { previewId: "p", approvalToken: "t" },
+    writeConfig({ enabled: false })
+  );
+  assert.equal(isError, true);
+  assert.match(payload.message, /SQLSERVER_WRITE_ENABLED/);
+});
+
+for (const environment of ["uat", "prod", "production", "test"]) {
+  test(`write_preview refuses environment "${environment}" even when it is listed as writable`, async () => {
+    const { isError, payload } = await bodyOf("write_preview", { sql: SEED_BATCH, environment }, writeConfig());
+    assert.equal(isError, true);
+    assert.equal(payload.code, "environment_never_writable");
+  });
+}
+
+test("write_preview refuses an environment missing from SQLSERVER_WRITABLE_ENVIRONMENTS", async () => {
+  const { isError, payload } = await bodyOf(
+    "write_preview",
+    { sql: SEED_BATCH, environment: "dev" },
+    writeConfig({ writableEnvironments: [] })
+  );
+  assert.equal(isError, true);
+  assert.equal(payload.code, "environment_not_writable");
+  assert.match(payload.message, /SQLSERVER_WRITABLE_ENVIRONMENTS/);
+});
+
+test("write_preview refuses a catalog in SQLSERVER_READONLY_DATABASES", async () => {
+  const { isError, payload } = await bodyOf(
+    "write_preview",
+    { sql: SEED_BATCH, database: "AppDev" },
+    writeConfig({}, { readonlyDatabases: ["appdev"] })
+  );
+  assert.equal(isError, true);
+  assert.equal(payload.code, "database_readonly");
+});
+
+test("write_preview respects SQLSERVER_ALLOWED_DATABASES", async () => {
+  const { isError, payload } = await bodyOf(
+    "write_preview",
+    { sql: SEED_BATCH, database: "Other" },
+    writeConfig({}, { allowedDatabases: ["AppDev"] })
+  );
+  assert.equal(isError, true);
+  assert.equal(payload.code, "database_not_allowed");
+});
+
+test("write_preview runs the guardrail before connecting", async () => {
+  const { isError, payload } = await bodyOf(
+    "write_preview",
+    { sql: "USE [CRM_Identity];\nGO\n" + SEED_BATCH },
+    writeConfig()
+  );
+  assert.equal(isError, true);
+  assert.match(payload.message, /GO is a client-side batch separator/);
+});
+
+test("a gated, guardrail-clean preview gets as far as the connection", async () => {
+  // Past every gate, it fails reaching the nonexistent host — a different code from every refusal.
+  const { isError, payload } = await bodyOf("write_preview", { sql: SEED_BATCH }, writeConfig());
+  assert.equal(isError, true);
+  assert.ok(
+    !["policy_violation", "environment_never_writable", "environment_not_writable", "database_readonly", "validation_error"].includes(
+      payload.code
+    ),
+    `unexpected refusal: ${payload.code}`
+  );
+});
+
+test("write_apply refuses an unknown previewId without touching the database", async () => {
+  const { isError, payload } = await bodyOf(
+    "write_apply",
+    { previewId: "does-not-exist", approvalToken: "x.y" },
+    writeConfig()
+  );
+  assert.equal(isError, true);
+  assert.equal(payload.code, "preview_not_found");
 });

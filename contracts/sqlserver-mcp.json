@@ -1,6 +1,6 @@
 {
   "server": "sqlserver-mcp",
-  "toolCount": 12,
+  "toolCount": 14,
   "tools": [
     {
       "annotations": {
@@ -585,6 +585,91 @@
       },
       "name": "run_read_query",
       "title": "Run read query"
+    },
+    {
+      "annotations": {
+        "destructiveHint": true,
+        "idempotentHint": false,
+        "openWorldHint": true,
+        "readOnlyHint": false
+      },
+      "description": "Commit a batch previewed by write_preview, using its previewId + approvalToken. Re-runs the exact previewed batch against the previewed environment and catalog, re-checks every gate, and rolls back instead of committing if rowsAffected differs from the preview. Single-use; no rollback tool exists, so read the preview first.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "approvalToken": {
+            "description": "From write_preview.",
+            "type": "string"
+          },
+          "previewId": {
+            "description": "From write_preview.",
+            "type": "string"
+          },
+          "profile": {
+            "description": "Response verbosity. Defaults to compact.",
+            "enum": [
+              "nano",
+              "compact",
+              "standard",
+              "verbose"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "previewId",
+          "approvalToken"
+        ],
+        "type": "object"
+      },
+      "name": "write_apply",
+      "title": "Apply write batch"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": true,
+        "readOnlyHint": false
+      },
+      "description": "Run a T-SQL write batch (DECLARE, INSERT/UPDATE/DELETE/MERGE, IF, TRY/CATCH, THROW, its own BEGIN TRAN/COMMIT) inside a transaction that is always rolled back, and return rowsAffected per statement, any SELECT recordsets (end the batch with a verify SELECT to see the would-be state), and a previewId + approvalToken for write_apply. DISABLED unless SQLSERVER_WRITE_ENABLED=true; only environments in SQLSERVER_WRITABLE_ENVIRONMENTS, never prod or uat. Refuses DDL, EXEC, USE, GO, cross-catalog names, and ROLLBACK except `ROLLBACK; THROW;` closing a CATCH block.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "database": {
+            "description": "Catalog to run against. Defaults to the catalog named by the connection string.",
+            "type": "string"
+          },
+          "environment": {
+            "description": "Configured environment name. Defaults to the configured default environment.",
+            "type": "string"
+          },
+          "maxRows": {
+            "description": "Row cap per returned recordset. Surplus rows are discarded, not cancelled.",
+            "type": "integer"
+          },
+          "profile": {
+            "description": "Response verbosity. Defaults to compact.",
+            "enum": [
+              "nano",
+              "compact",
+              "standard",
+              "verbose"
+            ],
+            "type": "string"
+          },
+          "sql": {
+            "description": "One T-SQL batch. No GO, no USE — `database` names the catalog.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "sql"
+        ],
+        "type": "object"
+      },
+      "name": "write_preview",
+      "title": "Preview write batch"
     }
   ]
 }

@@ -3,7 +3,7 @@
 Decisions with a rationale, kept so they are not re-litigated every six months.
 
 An ADR is written when a choice will look wrong to someone who does not know why it was made — and
-in this workspace, when the obvious alternative is the *conventional* one. All five below reject
+in this workspace, when the obvious alternative is the *conventional* one. All six below reject
 something a reasonable reviewer would suggest.
 
 **Reopening one needs a new ADR, not a backlog item.** `docs/development/backlog.md` lists the accepted debt
@@ -20,10 +20,11 @@ these cover precisely so it stays decided.
 | [0003](./0003-single-root-gitignore.md) | One root `.gitignore`; no per-server copies | Accepted | S-37 | the migration plan's own instruction to add two |
 | [0004](./0004-tsql-guardrail-policy.md) | The T-SQL guardrail policy for `sqlserver-mcp` | Accepted | — | reusing the Postgres scanner switches and token list for a fourth dialect |
 | [0005](./0005-ddl-migration-lane.md) | `postgres-mcp` applies raw-SQL DDL through its own lane, with its own tokenizer | Accepted | B-16 | splitting migrations with `scanSql`, a forbidden-token list for DDL, Flyway-style multi-statement no-transaction migrations, and wrapping an existing migration tool |
+| [0006](./0006-tsql-write-lane.md) | `sqlserver-mcp` gets a previewed write lane for T-SQL batches | Accepted | — | ad-hoc SQL through `execute_routine`, copying the Postgres single-statement lane, refusing a batch's own transaction control, and an audit table in the target catalog |
 
 ---
 
-## The five, in brief
+## The six, in brief
 
 Each summary is one paragraph by design. **The ADR file is the single home for its reasoning** — this
 page previously restated all three at 20–35 lines each, which meant two copies of every argument and
@@ -70,6 +71,15 @@ refuses two commands. The other choices: a verb-and-object allowlist, not a forb
 a non-transactional migration of exactly one statement, so there is no dirty state; rollback as a
 direction of `ddl_preview`, not a separate tool; the write lane's environment list; and freshness
 proven by re-planning to the same digest.
+
+### [0006 — The T-SQL write lane](./0006-tsql-write-lane.md)
+
+`write_preview` runs a whole batch — `DECLARE`, `TRY/CATCH`, its own `BEGIN TRAN … COMMIT` — in a
+transaction the server rolls back; `write_apply` re-runs the exact batch and commits only if
+`rowsAffected` matches. Off by default, never `prod`/`uat`. The subtle part is that T-SQL
+transactions do not nest: the runner opens one extra level per `COMMIT` in the text (and refuses
+loops that could repeat one), allows `ROLLBACK` only as `ROLLBACK; THROW` closing a top-level
+`CATCH`, and checks `@@TRANCOUNT` after the batch as the run-time backstop.
 
 ## Writing one
 

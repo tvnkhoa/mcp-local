@@ -56,6 +56,26 @@ export const executesRoutine: ToolAnnotations = {
   openWorld: true
 };
 
+/**
+ * `write_preview` executes the batch and rolls it back. It changes nothing durable, but it takes
+ * the batch's locks for its duration and fires any trigger on the tables it touches, so it is not
+ * `readOnly` in the sense a client auto-approves.
+ */
+export const previewsWrite: ToolAnnotations = {
+  readOnly: false,
+  idempotent: false,
+  destructive: false,
+  openWorld: true
+};
+
+/** `write_apply` commits. Destructive, so a client always asks first. */
+export const appliesWrite: ToolAnnotations = {
+  readOnly: false,
+  idempotent: false,
+  destructive: true,
+  openWorld: true
+};
+
 // --- zod fragments ------------------------------------------------------------
 
 export const environmentArg = z.string().min(1).max(64).optional();

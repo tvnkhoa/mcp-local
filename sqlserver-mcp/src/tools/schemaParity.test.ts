@@ -50,7 +50,16 @@ function makeConfig(): SqlserverConfig {
       maxFanout: 25
     },
     pools: { poolMax: 5, maxPools: 12, idleTimeoutMs: 30_000 },
-    exec: { enabled: false, allowlist: [], timeoutMs: 120_000 }
+    exec: { enabled: false, allowlist: [], timeoutMs: 120_000 },
+    write: {
+      enabled: false,
+      writableEnvironments: [],
+      approvalSecret: "test-secret",
+      approvalSecretGenerated: false,
+      previewTtlMs: 900_000,
+      timeoutMs: 1000,
+      auditFile: undefined
+    }
   };
 }
 

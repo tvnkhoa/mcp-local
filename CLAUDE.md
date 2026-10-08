@@ -13,7 +13,7 @@ env flag.
 |---|---|---|
 | `codebase-index-mcp/` | Code graph indexing and analysis. Most work happens here | No runtime LLM, by hard policy — see *Critical Constraints* |
 | `postgres-mcp/` | PostgreSQL. `SELECT` / `WITH … SELECT` only | `prod` is force read-only regardless of config |
-| `sqlserver-mcp/` | Microsoft SQL Server, T-SQL guardrails | **The unit of work is a catalog, not the server** |
+| `sqlserver-mcp/` | Microsoft SQL Server, T-SQL guardrails; gated write lane | **The unit of work is a catalog, not the server** |
 | `observe-mcp/` | OpenObserve logs/traces for CommunicationHub / CRM | **Service identity is resolved, not raw** |
 | `bitbucket-mcp/` | Repos, PRs and **pipelines**; creates PRs | The four pipeline tools are read-only — no trigger/stop |
 
@@ -27,7 +27,11 @@ Four details that cost time if you learn them the hard way:
   transaction, so the deployment control is a `db_datareader` login plus `SQLSERVER_ALLOWED_DATABASES`.
   Stored-procedure execution is off unless `SQLSERVER_EXEC_ENABLED=true` and is annotated destructive
   for **every** routine, because the catalog records nothing about whether a procedure writes.
-  `docs/decisions/0004-tsql-guardrail-policy.md`.
+  `docs/decisions/0004-tsql-guardrail-policy.md`. Data writes are a separate lane —
+  `write_preview` → `write_apply` over a whole T-SQL batch, off unless `SQLSERVER_WRITE_ENABLED=true`
+  and the environment is in `SQLSERVER_WRITABLE_ENVIRONMENTS` (never prod/uat). T-SQL transactions
+  do not nest, so preview safety rests on rules about `COMMIT`/`ROLLBACK` placement plus a
+  `@@TRANCOUNT` check — read `docs/decisions/0006-tsql-write-lane.md` before touching it.
 - **observe-mcp.** These apps emit down two OTLP paths, and rows from the Serilog sink arrive as
   `unknown_service:dotnet` with the real name in `applicationname` — so every logs tool matches
   `COALESCE(NULLIF(service_name, sentinel), applicationname, service_name)` and echoes an `identity`
@@ -85,7 +89,7 @@ Narrower targets — prefer these over re-running the aggregate: `verify:package
 Each server's `.env.example`, the `<!-- BEGIN/END GENERATED -->` blocks in its `README.md`, and its
 `tools` list are **rendered from `@mcp/manifest`**. Edit the manifest, then `npm run generate:all`
 (`generate:check` fails on drift and runs inside `verify:all`). Env vars are declared once, in
-`packages/manifest/src/envSpecs/<server>.ts` — **137** across the five servers (41/35/19/31/11).
+`packages/manifest/src/envSpecs/<server>.ts` — **143** across the five servers (41/35/25/31/11).
 
 `observe-mcp/docs/service-catalog.json` is also generated, but by `catalog:refresh` against live
 OpenObserve; its `code` blocks are hand-written and preserved, so it is **not** part of
@@ -202,7 +206,7 @@ MCP tool calls then hit the updated build, so you can test directly without the 
 | `docs/development/workflow.md` | the loop, the test layers, the gate, what CI does *not* cover |
 | `docs/reference/conventions.md` | every rule, sorted by what enforces it |
 | `docs/development/backlog.md` | what is left (B-01…B-16), **and** the accepted debt that is deliberately not in it |
-| `docs/decisions/` | five ADRs: native deps (0001), SQL token lists (0002), single-root gitignore (0003), T-SQL guardrails (0004), the DDL lane (0005) |
+| `docs/decisions/` | six ADRs: native deps (0001), SQL token lists (0002), single-root gitignore (0003), T-SQL guardrails (0004), the DDL lane (0005), the T-SQL write lane (0006) |
 | `codebase-index-mcp/docs/mcp-codebase-index-issue-registry.md` | measured defects, their fixes, and the before/after evidence |
 
 **History lives in `docs/archive/` and nothing there is maintained — do not read a current state out

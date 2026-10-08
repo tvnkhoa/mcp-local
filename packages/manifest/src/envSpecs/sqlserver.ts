@@ -72,7 +72,7 @@ export const sqlserverEnv: readonly EnvField[] = [
     required: false,
     codeDefault: "(empty)",
     section: "Access control",
-    note: "Catalogs where execute_routine is refused unconditionally, whatever SQLSERVER_EXEC_ENABLED says. The analogue of postgres-mcp's 'prod is always read-only'."
+    note: "Catalogs where execute_routine and the write lane are refused unconditionally, whatever SQLSERVER_EXEC_ENABLED / SQLSERVER_WRITE_ENABLED say. The analogue of postgres-mcp's 'prod is always read-only'."
   },
 
   // --- Query bounds ------------------------------------------------------------
@@ -115,6 +115,39 @@ export const sqlserverEnv: readonly EnvField[] = [
     note: "Comma-separated glob patterns over `schema.routine`, e.g. `dbo.Report_*,dbo.Get*`. `*` is the whole grammar. Empty does NOT deny — the flag above is the gate."
   },
   { name: "SQLSERVER_EXEC_TIMEOUT_MS", required: false, codeDefault: "120000", section: "Stored-procedure execution (OFF unless enabled)" },
+
+  // --- Data writes (gated) -------------------------------------------------------
+  // ADR 0006. A previewed T-SQL batch: write_preview runs it and rolls back, write_apply re-runs
+  // the exact batch and commits. Separate from the exec lane: different capability, different flag.
+  {
+    name: "SQLSERVER_WRITE_ENABLED",
+    required: false,
+    default: "false",
+    section: "Data writes (OFF unless enabled)",
+    note: "write_preview / write_apply are OFF unless true. Parsed strictly: exact \"true\" or \"1\". The login also needs write permission on the catalog — a db_datareader login is refused by SQL Server itself."
+  },
+  {
+    name: "SQLSERVER_WRITABLE_ENVIRONMENTS",
+    required: false,
+    codeDefault: "(empty = none writable)",
+    section: "Data writes (OFF unless enabled)",
+    note: "Comma-separated environment names the write lane may target, e.g. `dev`. Empty means NONE. prod and uat (and their aliases production/test/testing) are never writable, even if listed."
+  },
+  {
+    name: "SQLSERVER_APPROVAL_SECRET",
+    required: false,
+    secret: true,
+    section: "Data writes (OFF unless enabled)",
+    note: "HMAC secret for write approval tokens. Auto-generated per process if empty; set it only to keep tokens valid across restarts."
+  },
+  { name: "SQLSERVER_WRITE_PREVIEW_TTL_MS", required: false, codeDefault: "900000", section: "Data writes (OFF unless enabled)", note: "Write-preview lifetime — 15 minutes. Previews are in memory and do not survive a restart." },
+  { name: "SQLSERVER_WRITE_TIMEOUT_MS", required: false, codeDefault: "60000", section: "Data writes (OFF unless enabled)", note: "Batch timeout for preview and apply. Reaching it cancels the batch and rolls back." },
+  {
+    name: "SQLSERVER_WRITE_AUDIT_FILE",
+    required: false,
+    section: "Data writes (OFF unless enabled)",
+    note: "Absolute path of a JSONL file each write_apply is appended to (environment, database, SQL hash, rowsAffected, status, time). Every apply is also logged to stderr as `write_audit`; nothing is written to the target database."
+  },
 
   // --- Node runtime -------------------------------------------------------------
   // Not a sqlserver-mcp variable and not read by this server's code, but declared for the same

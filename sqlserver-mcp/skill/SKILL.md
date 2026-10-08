@@ -1,6 +1,6 @@
 ---
 name: {{KEY}}
-description: "Microsoft SQL Server via the {{DISPLAY_NAME}}: read-only T-SQL, list the databases (catalogs) on an instance, inspect tables/views/indexes/foreign keys, read a stored procedure/function/view definition, map which databases reference each other, profile a table, run one query across many tenant catalogs, and - only when enabled - execute a stored procedure. Use for: query SQL Server / MSSQL / RDS SQL Server, run T-SQL, what does this stored procedure do, which procs changed recently, list databases, find cross-database dependencies, same query across all tenant DBs. Not for PostgreSQL (use postgres-mcp) or logs (observe-mcp). Read-only by default."
+description: "Microsoft SQL Server via the {{DISPLAY_NAME}}: read-only T-SQL, list the databases (catalogs) on an instance, inspect tables/views/indexes/foreign keys, read a stored procedure/function/view definition, map which databases reference each other, profile a table, run one query across many tenant catalogs, and - only when enabled - execute a stored procedure or preview/apply a T-SQL write batch (seed, insert, update on a dev catalog). Use for: query SQL Server / MSSQL / RDS SQL Server, run T-SQL, what does this stored procedure do, which procs changed recently, list databases, find cross-database dependencies, same query across all tenant DBs. Not for PostgreSQL (use postgres-mcp) or logs (observe-mcp). Read-only by default."
 ---
 
 # {{DISPLAY_NAME}}
@@ -75,6 +75,23 @@ execute_routine(routine, database?, schema?, parameters?)  // parameters: { Name
 data, so the tool is annotated destructive for all of them; a `Get…` name is not evidence. Get an
 explicit yes before calling it. Gates, in order: the flag, `SQLSERVER_READONLY_DATABASES` (refuses
 unconditionally), `SQLSERVER_EXEC_ALLOWED_ROUTINES` if set. A refusal names its gate — report it, do not retry.
+
+## Write batch — OFF unless `SQLSERVER_WRITE_ENABLED=true`, dev-type environments only
+
+```
+write_preview(sql, database?, environment?)   // runs the batch, ALWAYS rolls back; returns rowsAffected,
+                                              // recordsets, previewId + approvalToken
+write_apply(previewId, approvalToken)         // re-runs that exact batch and commits
+```
+
+One batch, no `GO`, no `USE` — `database` names the catalog. End it with a verify `SELECT` to see the
+would-be state. Its own `BEGIN TRAN … COMMIT` and `BEGIN CATCH … ROLLBACK; THROW; END CATCH` are
+fine; any other `ROLLBACK`, DDL, `EXEC`, and names in other catalogs are refused. **Show the user the
+preview and get an explicit yes before `write_apply`** — it commits, and there is no rollback tool.
+`write_apply` refuses with `write_drift` if `rowsAffected` changed since the preview: re-preview.
+Gates: the flag, `SQLSERVER_WRITABLE_ENVIRONMENTS` (prod/uat never), `SQLSERVER_ALLOWED_DATABASES`,
+`SQLSERVER_READONLY_DATABASES`. A refusal names its gate in `code` — report it, do not retry. A
+`db_datareader` login is refused by SQL Server itself, whatever the flags say.
 
 ## Guardrails
 

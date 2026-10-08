@@ -92,6 +92,13 @@ function toColumnMeta(meta: unknown): ColumnMeta[] {
 export interface BoundedOptions {
   readonly maxRows: number;
   readonly timeoutMs: number;
+  /**
+   * What reaching `maxRows` does. `true` (the default) cancels the request — right for a read,
+   * where the rest of the stream is only more rows. The write lane passes `false`: cancelling a
+   * batch at its verify SELECT would leave the writes before it unfinished, so surplus rows are
+   * read and discarded instead, and the recordset is still marked `truncated`.
+   */
+  readonly cancelAtRowCap?: boolean;
 }
 
 /**
@@ -140,6 +147,10 @@ export async function runBounded(
       recordsets.push(current);
     }
     if (current.rows.length >= options.maxRows) {
+      if (options.cancelAtRowCap === false) {
+        current.truncated = true;
+        return;
+      }
       if (cancelReason === undefined) {
         current.truncated = true;
         cancelReason = "rowCap";
@@ -197,7 +208,7 @@ export async function runBounded(
       truncated: set.truncated
     })),
     rowsAffected: settled?.rowsAffected ?? [],
-    truncated: cancelReason === "rowCap",
+    truncated: cancelReason === "rowCap" || recordsets.some((set) => set.truncated),
     timedOut: cancelReason === "timeout",
     elapsedMs: Date.now() - startedAt,
     output:
