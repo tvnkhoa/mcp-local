@@ -26,6 +26,27 @@ export type BitbucketConfig = {
   authHeader: string;
   /** create_pull_request is refused unless this is true (BITBUCKET_WRITE_ENABLED). */
   writeEnabled: boolean;
+  /**
+   * merge_pull_request is refused unless this is true (BITBUCKET_MERGE_ENABLED).
+   * Separate from writeEnabled: a merge moves a shared branch and cannot be undone
+   * without a revert, which opening a PR or commenting cannot do.
+   */
+  mergeEnabled: boolean;
+  /** commit_files_apply is refused unless this is true (BITBUCKET_COMMIT_ENABLED). */
+  commitEnabled: boolean;
+  /** create_branch / delete_branch are refused (except dryRun) unless true (BITBUCKET_BRANCH_ENABLED). */
+  branchEnabled: boolean;
+  /**
+   * `repo:branch-glob` patterns commit_files may write that nobody checks out
+   * locally (BITBUCKET_COMMIT_BRANCHES). Empty = no branch is writable.
+   */
+  commitBranches: readonly string[];
+  /**
+   * Patterns for branches that ARE checked out in a shared worktree, e.g.
+   * `wec.aria:develop` (BITBUCKET_COMMIT_SHARED_BRANCHES). Writable too, but the
+   * result carries the local reconcile steps the worktree then needs.
+   */
+  commitSharedBranches: readonly string[];
   timeoutMs: number;
   /** Retry attempts for transient HTTP failures (network / 5xx / 429). 0 disables retries. */
   maxRetries: number;
@@ -44,6 +65,14 @@ function stringFromEnv(key: string, fallback: string): string {
 /** Like numberFromEnv but permits 0 (unlike sizes which must be positive). */
 function nonNegFromEnv(key: string, fallback: number): number {
   return env.nonNegativeInteger(key, fallback);
+}
+
+/** Comma-separated list; blanks dropped. */
+function listFromEnv(key: string): readonly string[] {
+  return stringFromEnv(key, "")
+    .split(",")
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0);
 }
 
 /** Feature flag: ON only when the value is exactly "true" or "1". */
@@ -99,6 +128,11 @@ export function loadConfig(): BitbucketConfig {
     defaultRepo: defaultRepoRaw && defaultRepoRaw.length > 0 ? defaultRepoRaw : undefined,
     authHeader: resolveAuthHeader(),
     writeEnabled: parseBoolEnv("BITBUCKET_WRITE_ENABLED"),
+    mergeEnabled: parseBoolEnv("BITBUCKET_MERGE_ENABLED"),
+    commitEnabled: parseBoolEnv("BITBUCKET_COMMIT_ENABLED"),
+    branchEnabled: parseBoolEnv("BITBUCKET_BRANCH_ENABLED"),
+    commitBranches: listFromEnv("BITBUCKET_COMMIT_BRANCHES"),
+    commitSharedBranches: listFromEnv("BITBUCKET_COMMIT_SHARED_BRANCHES"),
     timeoutMs: numberFromEnv("BITBUCKET_TIMEOUT_MS", 30_000),
     maxRetries: nonNegFromEnv("BITBUCKET_MAX_RETRIES", 2),
     defaultPagelen,
@@ -114,6 +148,11 @@ export function describeConfig(config: BitbucketConfig): Record<string, unknown>
     defaultRepo: config.defaultRepo ?? null,
     auth: maskSecret(config.authHeader),
     writeEnabled: config.writeEnabled,
+    mergeEnabled: config.mergeEnabled,
+    commitEnabled: config.commitEnabled,
+    branchEnabled: config.branchEnabled,
+    commitBranches: config.commitBranches,
+    commitSharedBranches: config.commitSharedBranches,
     timeoutMs: config.timeoutMs,
     maxRetries: config.maxRetries,
     defaultPagelen: config.defaultPagelen,

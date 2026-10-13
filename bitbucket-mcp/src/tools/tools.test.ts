@@ -51,7 +51,7 @@ function recordingClient(overrides: Record<string, unknown> = {}) {
 
 // --- tools/list side of the contract ---------------------------------------
 
-test("the tool table is the 19 advertised tools, in registration order", () => {
+test("the tool table is the 26 advertised tools, in registration order", () => {
   const names = buildTools(CONFIG, STUB_CLIENT).map((tool) => tool.name);
   assert.deepEqual(names, [
     "health_check",
@@ -61,6 +61,7 @@ test("the tool table is the 19 advertised tools, in registration order", () => {
     "list_pull_requests",
     "get_pull_request",
     "get_pull_request_diff",
+    "list_pull_request_comments",
     "list_pipelines",
     "get_pipeline",
     "list_pipeline_steps",
@@ -72,18 +73,37 @@ test("the tool table is the 19 advertised tools, in registration order", () => {
     "get_file_at_ref",
     "get_file_history",
     "search_code",
-    "create_pull_request"
+    "commit_files_preview",
+    "create_pull_request",
+    "add_pull_request_comment",
+    "merge_pull_request",
+    "commit_files_apply",
+    "create_branch",
+    "delete_branch"
   ]);
 });
 
-test("create_pull_request is the only tool not marked read-only", () => {
+test("exactly six tools write, all last, and only merge and delete_branch are destructive", () => {
   const tools = buildTools(CONFIG, STUB_CLIENT);
   const writers = tools.filter((tool) => !tool.annotations.readOnly).map((tool) => tool.name);
-  assert.deepEqual(writers, ["create_pull_request"]);
-  // Creating a PR adds; it never removes.
-  const create = tools.find((tool) => tool.name === "create_pull_request");
-  assert.equal(create?.annotations.destructive, false);
-  assert.equal(create?.annotations.idempotent, false);
+  assert.deepEqual(writers, [
+    "create_pull_request",
+    "add_pull_request_comment",
+    "merge_pull_request",
+    "commit_files_apply",
+    "create_branch",
+    "delete_branch"
+  ]);
+  assert.deepEqual(tools.slice(-6).map((t) => t.name), writers, "every read-only tool precedes the writers");
+  // Opening a PR, commenting or adding a commit adds; a merge moves a shared branch for good.
+  for (const name of ["create_pull_request", "add_pull_request_comment", "commit_files_apply", "create_branch"]) {
+    const tool = tools.find((t) => t.name === name);
+    assert.equal(tool?.annotations.destructive, false, name);
+    assert.equal(tool?.annotations.idempotent, false, name);
+  }
+  for (const name of ["merge_pull_request", "delete_branch"]) {
+    assert.equal(tools.find((t) => t.name === name)?.annotations.destructive, true, name);
+  }
 });
 
 // --- error envelope: { code, message, detail? }, always verbose -------------
@@ -240,7 +260,7 @@ test("DELTA: an unknown tool now reports not_found instead of mcp_error", async 
 
 test("every tool advertises exactly the parameters its zod schema accepts", () => {
   // The floor must equal the tool count, or the gate is slack by the difference.
-  assertSchemaParity(buildTools(CONFIG, STUB_CLIENT), { floor: 19 });
+  assertSchemaParity(buildTools(CONFIG, STUB_CLIENT), { floor: 26 });
 });
 
 test("a tool declaring additionalProperties:false advertises every required key", () => {
@@ -249,7 +269,7 @@ test("a tool declaring additionalProperties:false advertises every required key"
 
 // --- the pipeline group, through dispatch -------------------------------------
 
-test("every pipeline tool is read-only, so create_pull_request stays the only writer", async () => {
+test("every pipeline tool is read-only", async () => {
   const pipelineNames = [
     "list_pipelines",
     "get_pipeline",

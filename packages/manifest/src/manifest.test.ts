@@ -220,7 +220,9 @@ test("tool lists match the committed contract snapshots exactly", () => {
   // 96 -> 99: and ddl_preview, ddl_dry_run, ddl_apply (phase 1.4).
   // 99 -> 101: sqlserver-mcp write_preview, write_apply (ADR 0006).
   // 101 -> 108: bitbucket-mcp gained seven read-only commit/compare/source tools.
-  assert.equal(total, 108, "the workspace advertises 108 tools; update this number deliberately");
+  // 108 -> 111: bitbucket-mcp list/add PR comments and merge_pull_request.
+  // 111 -> 115: bitbucket-mcp commit_files_preview/apply, create_branch, delete_branch.
+  assert.equal(total, 115, "the workspace advertises 115 tools; update this number deliberately");
 });
 
 // --- a server registered before its contract exists -----------------------------
@@ -340,7 +342,7 @@ test("the env contract covers every server, and grew as S-35 intended", () => {
     "codebase-index": 41,
     "postgres-mcp": 35,
     "observe-mcp": 31,
-    "bitbucket-mcp": 11,
+    "bitbucket-mcp": 16,
     "sqlserver-mcp": 25
   });
 });

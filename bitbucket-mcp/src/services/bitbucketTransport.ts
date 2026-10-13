@@ -21,7 +21,7 @@ import {
   truncateForLog as truncate
 } from "@mcp/shared";
 
-export type HttpMethod = "GET" | "POST";
+export type HttpMethod = "GET" | "POST" | "DELETE";
 
 export type ListParams = {
   q?: string;
@@ -57,6 +57,20 @@ export class BitbucketTransport {
 
   post<T>(path: string, jsonBody: unknown): Promise<T> {
     return this.request<T>("POST", path, jsonBody);
+  }
+
+  /** DELETE; answers 204 with no body. Retried only on 429, like every non-GET. */
+  async delete(path: string): Promise<void> {
+    await this.attemptWithRetries("DELETE", path, undefined, "application/json");
+  }
+
+  /**
+   * Form-encoded POST that returns the raw outcome, `Location` included — the
+   * create-commit endpoint answers 201 with the new commit's URL there and
+   * nothing useful in the body. Retried only on 429, like every POST.
+   */
+  postForm(path: string, form: URLSearchParams): Promise<HttpOutcome> {
+    return this.attemptWithRetries("POST", path, form, "application/json");
   }
 
   /** Text request (e.g. the PR diff endpoint returns text/plain, not JSON). Unbounded. */
@@ -153,6 +167,14 @@ export class BitbucketTransport {
     // The timeout must cover the body read too — a server can send headers and
     // then stall the body — so clearTimeout only fires once we are fully done.
     try {
+      // A URLSearchParams body is sent form-encoded (the create-commit endpoint);
+      // anything else defined is JSON.
+      const isForm = jsonBody instanceof URLSearchParams;
+      const contentType = isForm
+        ? "application/x-www-form-urlencoded"
+        : jsonBody !== undefined
+          ? "application/json"
+          : undefined;
       let response: Response;
       try {
         response = await fetch(url, {
@@ -163,9 +185,11 @@ export class BitbucketTransport {
             ...(extraHeaders ?? {}),
             Authorization: this.config.authHeader,
             Accept: accept,
-            ...(jsonBody !== undefined ? { "Content-Type": "application/json" } : {})
+            ...(contentType ? { "Content-Type": contentType } : {})
           },
-          body: jsonBody !== undefined ? JSON.stringify(jsonBody) : undefined,
+          body: isForm ? jsonBody.toString() : jsonBody !== undefined ? JSON.stringify(jsonBody) : undefined,
+          // A redirect would re-send the body and the auth header elsewhere.
+          redirect: method === "GET" ? "follow" : "error",
           signal: controller.signal
         });
       } catch (error) {
@@ -188,7 +212,8 @@ export class BitbucketTransport {
       return {
         status: response.status,
         body,
-        contentRange: response.headers.get("content-range")
+        contentRange: response.headers.get("content-range"),
+        location: response.headers.get("location")
       };
     } finally {
       clearTimeout(timer);

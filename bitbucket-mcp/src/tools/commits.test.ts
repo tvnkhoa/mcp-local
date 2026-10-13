@@ -8,6 +8,7 @@ import { test } from "node:test";
 
 import type { Call } from "./harness.test.js";
 import { bodyOf, recording } from "./harness.test.js";
+import { BitbucketHttpError } from "../middleware/errors.js";
 import { AHEAD_BEHIND_CAP } from "./compare.js";
 
 const SHA_A = "a".repeat(40);
@@ -142,4 +143,43 @@ test("compare_refs statOnly:false returns the bounded diff; an oversized maxDiff
 
   const big = await bodyOf("compare_refs", { repoSlug: "r", base: "a", head: "b", maxDiffBytes: 2_000_000 }, undefined, client);
   assert.equal(big.payload.code, "validation_error");
+});
+
+test("compare_refs path: a file is filtered upstream; a directory by prefix here, and its diff names the matched files", async () => {
+  const stat = {
+    size: 3,
+    values: [
+      { status: "modified", lines_added: 1, lines_removed: 0, new: { path: "docs/adr/1.md" }, old: { path: "docs/adr/1.md" } },
+      { status: "renamed", lines_added: 0, lines_removed: 0, new: { path: "notes/2.md" }, old: { path: "docs/adr/2.md" } },
+      { status: "added", lines_added: 4, lines_removed: 0, new: { path: "docs/adrx/3.md" }, old: null }
+    ]
+  };
+  const answers = {
+    getBranch: (_s: unknown, name: string) => ({ target: { hash: name === "develop" ? SHA_A : SHA_B } }),
+    getMergeBase: { hash: SHA_B },
+    listCommits: { values: [] },
+    getDiffBounded: { text: "diff", truncated: false, bytesRead: 4 }
+  };
+  {
+    const { client, calls } = recording({ ...answers, getSrcMeta: { type: "commit_file" }, getDiffstat: { size: 1, values: stat.values.slice(0, 1) } });
+    const { payload } = await bodyOf("compare_refs", { repoSlug: "r", base: "master", head: "develop", path: "docs/adr/1.md", statOnly: false }, undefined, client);
+    assert.equal(payload.pathKind, "file");
+    assert.deepEqual((argsOf(calls, "getDiffstat")[0]?.[2] as { paths: string[] }).paths, ["docs/adr/1.md"]);
+    assert.deepEqual(argsOf(calls, "getDiffBounded")[0]?.[3], ["docs/adr/1.md"]);
+  }
+  {
+    const { client, calls } = recording({ ...answers, getSrcMeta: { type: "commit_directory" }, getDiffstat: stat });
+    const { payload } = await bodyOf("compare_refs", { repoSlug: "r", base: "master", head: "develop", path: "docs/adr/", statOnly: false }, undefined, client);
+    assert.equal(payload.pathKind, "directory");
+    // docs/adrx is not inside docs/adr; a file renamed out of it is.
+    assert.deepEqual(payload.files.map((f: { path: string }) => f.path), ["docs/adr/1.md", "notes/2.md"]);
+    assert.equal(payload.filesTotal, 2);
+    assert.equal((argsOf(calls, "getDiffstat")[0]?.[2] as { paths?: string[] }).paths, undefined, "a directory is not sent upstream");
+    assert.deepEqual(argsOf(calls, "getDiffBounded")[0]?.[3], ["docs/adr/1.md", "notes/2.md"]);
+  }
+  {
+    const { client } = recording({ ...answers, getSrcMeta: new BitbucketHttpError(404, "nf") });
+    const { payload } = await bodyOf("compare_refs", { repoSlug: "r", base: "master", head: "develop", path: "nope" }, undefined, client);
+    assert.equal(payload.code, "path_not_found");
+  }
 });

@@ -1,13 +1,15 @@
 import type { BitbucketConfig } from "../config/index.js";
 import { BitbucketHttpError } from "../middleware/errors.js";
 import type { BoundedText } from "./boundedBody.js";
-import { BitbucketTransport, qs, type ListParams } from "./bitbucketTransport.js";
+import { qs, type ListParams } from "./bitbucketTransport.js";
+import { BitbucketWrites } from "./bitbucketWrites.js";
 import { rangeStartOffset } from "./httpRange.js";
 
 import { encodePathSegment as enc } from "@mcp/shared";
 
 export type { ListParams } from "./bitbucketTransport.js";
 export type { BoundedText } from "./boundedBody.js";
+export type { CreatePullRequestBody } from "./bitbucketWrites.js";
 
 /** A Bitbucket Cloud paginated collection response. */
 export type Paginated<T = Record<string, unknown>> = {
@@ -31,15 +33,10 @@ export type ListPullRequestsParams = ListParams & {
 };
 
 /**
- * Pipelines do NOT filter like the other collections.
- *
- * Verified against the live API on 2026-08-21: the pipelines endpoint **ignores
- * `q` entirely** — `q=build_number > 3` and even `q=totally_not_a_field="zzz"`
- * both return every run with no error. Filtering is by dedicated parameters
- * instead: `target.branch`, and a `status` that may repeat (Bitbucket ORs the
- * repeats; a comma-separated list matches nothing).
- *
- * So this type deliberately has no `q`. Advertising one would advertise a no-op.
+ * Pipelines do NOT filter like the other collections. Verified live on 2026-08-21:
+ * the endpoint **ignores `q` entirely** (even `q=totally_not_a_field="zzz"` returns every
+ * run). It filters by `target.branch` and a repeatable `status` (repeats are ORed; a
+ * comma-separated list matches nothing). So there is deliberately no `q`: it would be a no-op.
  */
 export type ListPipelinesParams = {
   sort?: string;
@@ -49,15 +46,6 @@ export type ListPipelinesParams = {
   branch?: string;
   /** Sent as one repeated `status` parameter per entry. */
   status?: readonly string[];
-};
-
-export type CreatePullRequestBody = {
-  title: string;
-  description?: string;
-  source: { branch: { name: string } };
-  destination?: { branch: { name: string } };
-  close_source_branch?: boolean;
-  reviewers?: Array<{ uuid?: string; account_id?: string }>;
 };
 
 /**
@@ -81,13 +69,12 @@ export type ListCommitsParams = CursorParams & {
 /**
  * Thin HTTP client for the Bitbucket Cloud REST API v2.0 — the endpoint
  * catalogue. How a request is made (auth, timeout, retries, bounded reads) is
- * `BitbucketTransport`. Non-2xx responses raise BitbucketHttpError.
+ * `BitbucketTransport`; every write endpoint is inherited from `BitbucketWrites`.
+ * Non-2xx responses raise BitbucketHttpError.
  */
-export class BitbucketClient {
-  private readonly http: BitbucketTransport;
-
+export class BitbucketClient extends BitbucketWrites {
   constructor(config: BitbucketConfig) {
-    this.http = new BitbucketTransport(config);
+    super(config);
   }
 
   // --- repositories --------------------------------------------------------
@@ -143,14 +130,10 @@ export class BitbucketClient {
     return this.http.getText(`${this.http.repoBase(repoSlug)}/pullrequests/${id}/diff`);
   }
 
-  /** Relative path of the create-PR endpoint (also used to render dry-run previews). */
-  createPullRequestPath(repoSlug: string): string {
-    return `${this.http.repoBase(repoSlug)}/pullrequests`;
-  }
-
-  /** POST .../pullrequests — create a pull request. */
-  createPullRequest(repoSlug: string, body: CreatePullRequestBody): Promise<Record<string, unknown>> {
-    return this.http.post<Record<string, unknown>>(this.createPullRequestPath(repoSlug), body);
+  /** GET .../pullrequests/{id}/comments — one page of a PR's comments, oldest first. */
+  listPullRequestComments(repoSlug: string, id: number, params: ListParams = {}): Promise<Paginated> {
+    const query = this.http.listQuery({ ...params, sort: params.sort ?? "created_on" });
+    return this.http.get<Paginated>(`${this.http.repoBase(repoSlug)}/pullrequests/${id}/comments${qs(query)}`);
   }
 
   // --- commits and refs comparison -----------------------------------------
@@ -185,9 +168,14 @@ export class BitbucketClient {
    * commit against its first parent) or `x..y`, where Bitbucket's `x` is the
    * NEW side — see `buildCompareSpec` in tools/refs.ts.
    */
-  getDiffstat(repoSlug: string, spec: string, params: { page?: number; pagelen?: number } = {}): Promise<Paginated> {
+  getDiffstat(
+    repoSlug: string,
+    spec: string,
+    params: { page?: number; pagelen?: number; paths?: readonly string[] } = {}
+  ): Promise<Paginated> {
     const query = this.http.listQuery(params);
     query.set("fields", "size,page,next,values.status,values.lines_added,values.lines_removed,values.old.path,values.new.path");
+    appendPaths(query, params.paths);
     return this.http.get<Paginated>(`${this.http.repoBase(repoSlug)}/diffstat/${spec}${qs(query)}`);
   }
 
@@ -197,8 +185,10 @@ export class BitbucketClient {
   }
 
   /** GET .../diff/{spec} — unified diff as text, read up to `maxBytes`. */
-  getDiffBounded(repoSlug: string, spec: string, maxBytes: number): Promise<BoundedText> {
-    return this.http.getTextBounded(`${this.http.repoBase(repoSlug)}/diff/${spec}`, maxBytes);
+  getDiffBounded(repoSlug: string, spec: string, maxBytes: number, paths?: readonly string[]): Promise<BoundedText> {
+    const query = new URLSearchParams();
+    appendPaths(query, paths);
+    return this.http.getTextBounded(`${this.http.repoBase(repoSlug)}/diff/${spec}${qs(query)}`, maxBytes);
   }
 
   /** GET .../commit/{sha}/statuses — build statuses reported against a commit (any CI). */
@@ -333,6 +323,17 @@ export class BitbucketClient {
     // therefore deleted the genuine first line of every log smaller than
     // maxBytes, which is the common case. The start offset is the only proof.
     return { text: result.body, partial: rangeStartOffset(result.contentRange) > 0 };
+  }
+}
+
+/**
+ * Repeated `path` parameters. Verified live on 2026-10-13: diffstat and diff
+ * match each one as an exact FILE path — a directory matches nothing, and `q`
+ * is ignored — so directory filtering is done by the caller.
+ */
+function appendPaths(query: URLSearchParams, paths: readonly string[] | undefined): void {
+  for (const path of paths ?? []) {
+    query.append("path", path);
   }
 }
 

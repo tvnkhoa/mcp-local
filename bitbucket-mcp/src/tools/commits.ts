@@ -265,31 +265,53 @@ function authorMatches(c: Record<string, unknown>, needle: string): boolean {
   );
 }
 
+/** Diffstat rows examined when filtering by a directory, which upstream cannot do. */
+export const DIFFSTAT_SCAN_MAX = 5000;
+
+export type DiffstatFilter = { file?: string; dir?: string };
+
 /**
  * Page a diffstat (`spec` = one SHA, or a compare spec) up to `maxFiles` rows.
- * Totals cover the returned rows; `filesTotal` is upstream's count of all files.
+ * A `file` filter is applied upstream (`path=`, exact match); a `dir` filter
+ * here, by prefix, over at most DIFFSTAT_SCAN_MAX rows — upstream matches
+ * directories against nothing. Totals cover the returned rows.
  */
 export async function collectDiffstat(
   client: BitbucketClient,
   repoSlug: string,
   spec: string,
-  maxFiles: number
+  maxFiles: number,
+  filter: DiffstatFilter = {}
 ): Promise<Record<string, unknown>> {
+  const prefix = filter.dir === undefined ? null : `${filter.dir}/`;
+  const inDir = (p: unknown): boolean => prefix !== null && typeof p === "string" && p.startsWith(prefix);
   const files: Record<string, unknown>[] = [];
-  let filesTotal: number | null = null;
-  let page = 1;
-  for (;;) {
-    const res = await client.getDiffstat(repoSlug, spec, { page, pagelen: 100 });
-    filesTotal ??= num(res.size);
-    for (const d of res.values ?? []) {
+  let upstreamTotal: number | null = null;
+  let matched = 0;
+  let scanned = 0;
+  let scanCapReached = false;
+  for (let page = 1; ; page++) {
+    const res = await client.getDiffstat(repoSlug, spec, { page, pagelen: 100, paths: filter.file ? [filter.file] : undefined });
+    upstreamTotal ??= num(res.size);
+    const rows = res.values ?? [];
+    for (const d of rows) {
+      scanned += 1;
+      const row = normalizeDiffstat(d);
+      if (prefix !== null && !inDir(row.path) && !inDir(row.oldPath)) {
+        continue;
+      }
+      matched += 1;
       if (files.length < maxFiles) {
-        files.push(normalizeDiffstat(d));
+        files.push(row);
       }
     }
-    if (!res.next || files.length >= maxFiles || (res.values ?? []).length === 0) {
+    if (!res.next || rows.length === 0 || (prefix === null && files.length >= maxFiles)) {
       break;
     }
-    page += 1;
+    if (prefix !== null && scanned >= DIFFSTAT_SCAN_MAX) {
+      scanCapReached = true;
+      break;
+    }
   }
   let added = 0;
   let removed = 0;
@@ -297,11 +319,12 @@ export async function collectDiffstat(
     added += typeof f.linesAdded === "number" ? f.linesAdded : 0;
     removed += typeof f.linesRemoved === "number" ? f.linesRemoved : 0;
   }
-  const total = filesTotal ?? files.length;
+  const total = prefix === null ? (upstreamTotal ?? files.length) : matched;
   return {
     files,
     totals: { files: files.length, linesAdded: added, linesRemoved: removed },
     filesTotal: total,
-    filesTruncated: total > files.length
+    filesTruncated: total > files.length,
+    ...(scanCapReached ? { scanCapReached, scanned } : {})
   };
 }

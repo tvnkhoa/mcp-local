@@ -15,9 +15,11 @@ import { z } from "zod";
 import type { BitbucketClient, CreatePullRequestBody } from "../services/bitbucketClient.js";
 import { describeConfig, type BitbucketConfig } from "../config/index.js";
 import { mapError, PolicyViolationError } from "../middleware/errors.js";
+import { buildCommitFilesTools } from "./commitFiles.js";
 import { buildCommitTools } from "./commits.js";
 import { buildCompareTools } from "./compare.js";
 import { buildPipelineTools } from "./pipelines.js";
+import { buildPullRequestTools } from "./pullRequests.js";
 import { buildSourceTools } from "./source.js";
 import { UUID_RE, bool, get, num, pageInfo, resolveRepo, str } from "./shared.js";
 import {
@@ -26,13 +28,9 @@ import {
 } from "./shared.js";
 
 /**
- * Render any failure in this server's `{ code, message, detail? }` envelope.
- *
- * `mapError` handles everything this server itself throws. What it does not know
- * is `PlatformError`, which the shared dispatch layer raises for failures that
- * happen before a handler runs — an unknown tool being the main one. Those would
- * otherwise collapse to `internal_error`, hiding a perfectly good code, so they
- * are unwrapped to their own code and message here.
+ * Render any failure as `{ code, message, detail? }`. `mapError` covers what this server
+ * throws; a dispatch-layer `PlatformError` (e.g. unknown tool) keeps its own code instead of
+ * collapsing to `internal_error`.
  */
 export function toWireError(error: unknown): { code: string; message: string; detail?: string } {
   if (isPlatformError(error)) {
@@ -325,10 +323,9 @@ export function buildTools(config: BitbucketConfig, client: BitbucketClient): re
     }
   });
 
-  // Registration order is the order `tools/list` advertises: `registerTool` only
-  // flattens and rejects a duplicate name. The helpers below are hoisted.
-  // The pipeline, commit, compare and source groups sit after the pull-request
-  // reads and before the one write tool, so every read-only tool is contiguous.
+  // `tools/list` order (registerTool never reorders): every read first, writers last.
+  const pr = buildPullRequestTools(config, client);
+  const cf = buildCommitFilesTools(config, client);
   return registerTool([
     healthCheckTool,
     listRepositoriesTool,
@@ -337,11 +334,15 @@ export function buildTools(config: BitbucketConfig, client: BitbucketClient): re
     listPullRequestsTool,
     getPullRequestTool,
     getPullRequestDiffTool,
+    ...pr.reads,
     ...buildPipelineTools(config, client),
     ...buildCommitTools(config, client),
     ...buildCompareTools(config, client),
     ...buildSourceTools(config, client),
-    createPullRequestTool
+    ...cf.reads,
+    createPullRequestTool,
+    ...pr.writes,
+    ...cf.writes
   ]);
 
   // --- helpers --------------------------------------------------------------

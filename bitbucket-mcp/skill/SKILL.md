@@ -1,6 +1,6 @@
 ---
 name: {{KEY}}
-description: "Bitbucket Cloud via the {{DISPLAY_NAME}}: list repos, branches, commits and pull requests, read a commit or PR and its diff, compare two branches (ahead/behind, changed files), read a file as it was at a branch/tag/SHA in any workspace repo without cloning, file history, workspace code search, build status of a commit, inspect CI pipeline runs and read a failed step's log, and open a PR (gated, dryRun first). Use for: why did the build/pipeline fail, is this commit green, what changed on origin since <sha/date>, how far is develop ahead of master, who changed this file, read the docs in another repo (e.g. wec.knowledge-base), search code across repos, review PR #123, create/open a pull request. Prefer local git when the repo is checked out; not for Jira tickets. Read-only except create_pull_request; it cannot push, commit, merge, or trigger/stop/re-run a pipeline."
+description: "Bitbucket Cloud via the {{DISPLAY_NAME}}: repos, branches, commits and pull requests; a commit or PR and its diff; compare two branches (ahead/behind, changed files); a file at a branch/tag/SHA in any workspace repo without cloning; file history; workspace code search; a commit's build status; CI pipeline runs and a failed step's log; and, gated and previewed first, open/comment on/merge a PR (merge commit only), commit files server-side without a local index, and create/delete scratch branches. Use for: why did the build fail, is this commit green, what changed on origin since <sha/date>, how far is develop ahead of master, who changed this file, read docs in another repo (e.g. wec.knowledge-base), search code across repos, review/comment on PR #123, open or merge a pull request, commit only my files, make a sandbox branch. Prefer local git when the repo is checked out; not for Jira. It never force-pushes, rebases or squashes, and cannot trigger/stop/re-run a pipeline."
 ---
 
 # {{DISPLAY_NAME}}
@@ -16,7 +16,12 @@ tool takes a workspace argument). Run `health_check` first if a call fails on au
 |---|---|
 | "why did the build fail" / "CI log" | the pipeline recipe below |
 | "list open PRs" | `list_pull_requests(state: "OPEN")` — also `MERGED`, `DECLINED`, `SUPERSEDED` |
-| "review PR 123" / "what changed" | `get_pull_request(id)` then `get_pull_request_diff(id)` |
+| "review PR 123" / "what changed" | `get_pull_request(id)`, `get_pull_request_diff(id)`, `list_pull_request_comments(id)` |
+| "comment on PR 123" | `add_pull_request_comment(id, body, path?, line?, dryRun: true)` → confirm → `dryRun: false` |
+| "merge PR 123" | the merge recipe below |
+| "commit only my files" / "commit without touching the shared worktree" | the server-side commit recipe below |
+| "make / remove a scratch branch" | `create_branch(name, fromRef)` / `delete_branch(name)` — both preview first |
+| "diff of one file/dir between two refs" | `compare_refs(base, head, path, statOnly: false)` |
 | "which repos / branches" | `list_repositories(q?, role?)`, `list_branches(repoSlug, q?)` |
 | "what changed on origin since X" | `list_commits(include?, exclude?, path?, since?, author?)` |
 | "show commit abc123" / "files in that commit" | `get_commit(sha)` |
@@ -75,13 +80,56 @@ create_pull_request(... same args ..., dryRun: false)
 
 - `destinationBranch` defaults to the repo's main branch. `reviewers` are UUIDs or account_ids.
 - A PR is outward-facing: never skip the dryRun + confirmation. Needs `write:pullrequest`.
+- `add_pull_request_comment` is gated the same way (`BITBUCKET_WRITE_ENABLED`): a comment is visible to
+  everyone on the PR, so show the text and get a yes first. Inline = `path` + `line` (new side) or
+  `oldLine` (removed side); a reply = `parentId`.
+
+## Merge a pull request (OFF unless `BITBUCKET_MERGE_ENABLED=true`)
+
+```
+merge_pull_request(id)                                              // preview: dryRun is the DEFAULT
+// show the user title, source -> destination and sourceCommit; get an explicit yes
+merge_pull_request(id, dryRun: false, expectedSourceCommit: "<sourceCommit from the preview>")
+```
+
+- **Merge commit only** — there is no squash/fast-forward option, by design: history is keyed on SHAs.
+- **The repository has no server-side branch restriction**, so this tool is the only thing holding
+  "no rewrite, merge commit only". Never suggest squash, rebase or force push as a workaround.
+- `source_moved` = the PR got new commits since the preview: preview again, show what changed.
+  `pr_not_open` = already merged/declined. `pending: true` = Bitbucket merges asynchronously; check
+  `get_pull_request`.
+
+## Server-side commit (OFF unless `BITBUCKET_COMMIT_ENABLED=true`)
+
+```
+compare_refs(base: "<branch>", head: "<branch>")                   // head.sha = the branch head now
+commit_files_preview(branch, parent: "<that sha>", message, files)   // each file: {path, content} or {path, delete: true}
+// show the user the changes list; get an explicit yes
+commit_files_apply(previewId, approvalToken)
+```
+
+- The commit is built on Bitbucket from the content you send — no local index, so nobody else's
+  staged work can be swept in. Text only; 50 files, 512 KiB each, 1 MiB total.
+- **Never forces.** `parent_not_head` = someone committed first: rebuild on the new head and preview
+  again. Never suggest a force push or a rebase instead.
+- Only branches on `BITBUCKET_COMMIT_BRANCHES` (nobody checks them out) or
+  `BITBUCKET_COMMIT_SHARED_BRANCHES` (a shared worktree has them checked out). For a shared branch
+  the result has `reconcile.script`: give it to the user to run in that worktree **before anyone
+  commits there**. It stops without changing anything if the worktree does not match.
+- For an isolated branch: `create_branch` first (dryRun, then `dryRun: false`), commit, open a PR,
+  and after the merge `delete_branch` (preview returns `head`; pass it as `expectedHead`).
+  These never touch master/main/develop, the main branch or a shared branch, and `delete_branch`
+  refuses while an open PR uses the branch. Gated by `BITBUCKET_BRANCH_ENABLED`.
 
 ## Guardrails
 
 - Never echo tokens or the `Authorization` header. Auth is env-only.
-- Scopes: `read:repository`, `read:pullrequest`, `read:pipeline`; `write:pullrequest` for PR creation
-  (Bitbucket names them with a `:bitbucket` suffix in the token UI). A repository access token sees
-  only its own repo: another repo or `search_code` answers 403.
+- Scopes: `read:repository`, `read:pullrequest`, `read:pipeline`; `write:pullrequest` for PR
+  create/comment/merge; `write:repository` for commits and branches (Bitbucket names them with a
+  `:bitbucket` suffix in the token UI). A 403 lists `required` vs `granted` — quote it. A repository
+  access token sees only its own repo: another repo or `search_code` answers 403.
+- The repositories have **no server-side branch restriction**: merge-commit-only, never-force and the
+  branch allowlists are enforced only by these tools. Do not route around them.
 
 ## Configuration (env)
 

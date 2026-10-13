@@ -1,7 +1,187 @@
 {
   "server": "bitbucket-mcp",
-  "toolCount": 19,
+  "toolCount": 26,
   "tools": [
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": true,
+        "readOnlyHint": false
+      },
+      "description": "Add a comment to a pull request: general, inline on the diff (path + line on the new side, or oldLine on the removed side), or a reply (parentId). Disabled unless BITBUCKET_WRITE_ENABLED=true; dryRun:true previews the request without calling the API. A comment is visible to everyone on the PR — confirm the text with the user first.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "body": {
+            "description": "Comment text (Markdown)",
+            "type": "string"
+          },
+          "dryRun": {
+            "description": "Preview the request without posting",
+            "type": "boolean"
+          },
+          "id": {
+            "description": "Pull request id",
+            "minimum": 1,
+            "type": "integer"
+          },
+          "line": {
+            "description": "Line in the NEW version of `path` (inline comment)",
+            "minimum": 1,
+            "type": "integer"
+          },
+          "oldLine": {
+            "description": "Line in the OLD version of `path`, for a removed line",
+            "minimum": 1,
+            "type": "integer"
+          },
+          "parentId": {
+            "description": "Reply to this comment id",
+            "minimum": 1,
+            "type": "integer"
+          },
+          "path": {
+            "description": "File path for an inline comment",
+            "type": "string"
+          },
+          "profile": {
+            "enum": [
+              "nano",
+              "compact",
+              "standard",
+              "verbose"
+            ],
+            "type": "string"
+          },
+          "repoSlug": {
+            "description": "Repo slug (default: BITBUCKET_DEFAULT_REPO)",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "body"
+        ],
+        "type": "object"
+      },
+      "name": "add_pull_request_comment"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": true,
+        "readOnlyHint": false
+      },
+      "description": "Create the commit a commit_files_preview planned, from its previewId + approvalToken — the exact previewed content, nothing else. Re-checks that the parent is still the branch head, and Bitbucket asserts it again (refusing with 400/409). Never forces. Disabled unless BITBUCKET_COMMIT_ENABLED=true. For a shared branch the result includes a reconcile script for the local worktree: it refuses unless local HEAD is still the parent and every committed path matches, then moves the branch and resets only those index entries, leaving everyone else's staged work alone.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "approvalToken": {
+            "description": "From commit_files_preview",
+            "type": "string"
+          },
+          "previewId": {
+            "description": "From commit_files_preview",
+            "type": "string"
+          },
+          "profile": {
+            "enum": [
+              "nano",
+              "compact",
+              "standard",
+              "verbose"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "previewId",
+          "approvalToken"
+        ],
+        "type": "object"
+      },
+      "name": "commit_files_apply"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": true,
+        "readOnlyHint": true
+      },
+      "description": "Plan ONE commit on a branch from text files (add/modify) and deletions — server-side, so no local index is involved and no one else's staged work can be swept in. Checks the branch is allowlisted (BITBUCKET_COMMIT_BRANCHES, or BITBUCKET_COMMIT_SHARED_BRANCHES for a branch checked out in a shared worktree), that `parent` IS the branch head (no force, ever — the repo has no server-side protection, so this check is the guard), and what each path does. Returns previewId + approvalToken for commit_files_apply (15 minutes, single use). Changes nothing; works with commits disabled.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "author": {
+            "description": "Optional \"Name <email>\" (default: the token's user)",
+            "type": "string"
+          },
+          "branch": {
+            "description": "Branch to commit on; created from `parent` if it does not exist (non-shared branches only)",
+            "type": "string"
+          },
+          "files": {
+            "description": "Up to 50 changes; text only, 512 KiB per file, 1024 KiB total",
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "content": {
+                  "description": "Full new text content (add or modify)",
+                  "type": "string"
+                },
+                "delete": {
+                  "description": "true to delete the path (omit content)",
+                  "type": "boolean"
+                },
+                "path": {
+                  "description": "Repo-relative path",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "path"
+              ],
+              "type": "object"
+            },
+            "maxItems": 50,
+            "minItems": 1,
+            "type": "array"
+          },
+          "message": {
+            "description": "Commit message",
+            "type": "string"
+          },
+          "parent": {
+            "description": "The commit you built on. Must be the branch head now",
+            "type": "string"
+          },
+          "profile": {
+            "enum": [
+              "nano",
+              "compact",
+              "standard",
+              "verbose"
+            ],
+            "type": "string"
+          },
+          "repoSlug": {
+            "description": "Repo slug (default: BITBUCKET_DEFAULT_REPO)",
+            "type": "string"
+          }
+        },
+        "required": [
+          "branch",
+          "parent",
+          "message",
+          "files"
+        ],
+        "type": "object"
+      },
+      "name": "commit_files_preview"
+    },
     {
       "annotations": {
         "destructiveHint": false,
@@ -9,7 +189,7 @@
         "openWorldHint": true,
         "readOnlyHint": true
       },
-      "description": "Compare two refs (branch, tag or SHA) like `git diff base...head` plus `git rev-list --left-right --count`: merge base, how many commits head is ahead of / behind base (capped at 500, shown as \"≥500\"), and the files head changed since the merge base. statOnly:false adds the unified diff, cut at maxDiffBytes (default 256 KiB, max 1 MiB; see diffTruncated).",
+      "description": "Compare two refs (branch, tag or SHA) like `git diff base...head` plus `git rev-list --left-right --count`: merge base, how many commits head is ahead of / behind base (capped at 500, shown as \"≥500\"), and the files head changed since the merge base. statOnly:false adds the unified diff, cut at maxDiffBytes (default 256 KiB, max 1 MiB; see diffTruncated). `path` (a file or a directory) limits files, totals and the diff to it, like `git diff base...head -- path`; ahead/behind stay branch-wide. A directory is filtered over at most 5000 changed files.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -32,6 +212,10 @@
             "maximum": 500,
             "minimum": 1,
             "type": "integer"
+          },
+          "path": {
+            "description": "Only this file or directory (repo-relative)",
+            "type": "string"
           },
           "profile": {
             "enum": [
@@ -58,6 +242,51 @@
         "type": "object"
       },
       "name": "compare_refs"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": true,
+        "readOnlyHint": false
+      },
+      "description": "Create a branch at a ref (branch, tag or SHA) on the remote, without a local checkout or push. Only names on BITBUCKET_COMMIT_BRANCHES; never a shared branch, the main branch, or master/main/develop. dryRun defaults to TRUE. Disabled unless BITBUCKET_BRANCH_ENABLED=true. The repository has no server-side branch restriction; this tool's allowlist and refusals are the only guard.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "dryRun": {
+            "description": "Default true. false creates",
+            "type": "boolean"
+          },
+          "fromRef": {
+            "description": "Branch, tag or SHA the new branch points at",
+            "type": "string"
+          },
+          "name": {
+            "description": "New branch name, e.g. sandbox/my-test",
+            "type": "string"
+          },
+          "profile": {
+            "enum": [
+              "nano",
+              "compact",
+              "standard",
+              "verbose"
+            ],
+            "type": "string"
+          },
+          "repoSlug": {
+            "description": "Repo slug (default: BITBUCKET_DEFAULT_REPO)",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "fromRef"
+        ],
+        "type": "object"
+      },
+      "name": "create_branch"
     },
     {
       "annotations": {
@@ -122,6 +351,50 @@
         "type": "object"
       },
       "name": "create_pull_request"
+    },
+    {
+      "annotations": {
+        "destructiveHint": true,
+        "idempotentHint": false,
+        "openWorldHint": true,
+        "readOnlyHint": false
+      },
+      "description": "Delete a branch on the remote. Only names on BITBUCKET_COMMIT_BRANCHES; never a shared branch, the main branch, or master/main/develop. Refused while an OPEN pull request has the branch as source or destination. dryRun defaults to TRUE and returns the current head; dryRun:false needs expectedHead set to it, so a branch that moved is never deleted. Disabled unless BITBUCKET_BRANCH_ENABLED=true. The repository has no server-side branch restriction; this tool's allowlist and refusals are the only guard.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "dryRun": {
+            "description": "Default true. false deletes",
+            "type": "boolean"
+          },
+          "expectedHead": {
+            "description": "Required with dryRun:false: head from the preview",
+            "type": "string"
+          },
+          "name": {
+            "description": "Branch to delete",
+            "type": "string"
+          },
+          "profile": {
+            "enum": [
+              "nano",
+              "compact",
+              "standard",
+              "verbose"
+            ],
+            "type": "string"
+          },
+          "repoSlug": {
+            "description": "Repo slug (default: BITBUCKET_DEFAULT_REPO)",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "type": "object"
+      },
+      "name": "delete_branch"
     },
     {
       "annotations": {
@@ -763,6 +1036,53 @@
         "openWorldHint": true,
         "readOnlyHint": true
       },
+      "description": "List a pull request's comments, oldest first: author, text, inline position (path + line) when the comment is on the diff, and parentId for replies. Deleted comments are flagged, not hidden.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "description": "Pull request id",
+            "minimum": 1,
+            "type": "integer"
+          },
+          "page": {
+            "minimum": 1,
+            "type": "integer"
+          },
+          "pagelen": {
+            "description": "Page size (default 25, max 100)",
+            "maximum": 100,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "profile": {
+            "enum": [
+              "nano",
+              "compact",
+              "standard",
+              "verbose"
+            ],
+            "type": "string"
+          },
+          "repoSlug": {
+            "description": "Repo slug (default: BITBUCKET_DEFAULT_REPO)",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "type": "object"
+      },
+      "name": "list_pull_request_comments"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": true,
+        "readOnlyHint": true
+      },
       "description": "List pull requests of a repository. Defaults to OPEN; pass state to filter (OPEN/MERGED/DECLINED/SUPERSEDED).",
       "inputSchema": {
         "additionalProperties": false,
@@ -862,6 +1182,59 @@
         "type": "object"
       },
       "name": "list_repositories"
+    },
+    {
+      "annotations": {
+        "destructiveHint": true,
+        "idempotentHint": false,
+        "openWorldHint": true,
+        "readOnlyHint": false
+      },
+      "description": "Merge a pull request with a MERGE COMMIT — never squash or fast-forward, and there is no option to change that: both rewrite or skip the SHAs history is keyed on. The repository has no server-side branch restriction; this tool's merge-commit-only rule is the only guard. dryRun defaults to TRUE: the preview checks the PR is open and returns its source commit. To merge, call again with dryRun:false and expectedSourceCommit set to that commit; the merge is refused if the PR moved since. Disabled unless BITBUCKET_MERGE_ENABLED=true.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "closeSourceBranch": {
+            "description": "Delete the source branch after merging",
+            "type": "boolean"
+          },
+          "dryRun": {
+            "description": "Default true. false merges",
+            "type": "boolean"
+          },
+          "expectedSourceCommit": {
+            "description": "Required with dryRun:false: sourceCommit from the preview",
+            "type": "string"
+          },
+          "id": {
+            "description": "Pull request id",
+            "minimum": 1,
+            "type": "integer"
+          },
+          "message": {
+            "description": "Merge commit message (default: Bitbucket's)",
+            "type": "string"
+          },
+          "profile": {
+            "enum": [
+              "nano",
+              "compact",
+              "standard",
+              "verbose"
+            ],
+            "type": "string"
+          },
+          "repoSlug": {
+            "description": "Repo slug (default: BITBUCKET_DEFAULT_REPO)",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "type": "object"
+      },
+      "name": "merge_pull_request"
     },
     {
       "annotations": {

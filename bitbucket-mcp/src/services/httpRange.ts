@@ -6,11 +6,15 @@
  * worth testing on its own — it was got wrong once already.
  */
 
-/** One HTTP attempt's outcome. `contentRange` is only set on a ranged response. */
+/**
+ * One HTTP attempt's outcome. `contentRange` is only set on a ranged response;
+ * `location` on a create that answers with one (a new commit's URL).
+ */
 export interface HttpOutcome {
   status: number;
   body: string;
   contentRange: string | null;
+  location?: string | null;
 }
 
 /**

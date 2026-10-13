@@ -15,7 +15,7 @@ env flag.
 | `postgres-mcp/` | PostgreSQL. `SELECT` / `WITH … SELECT` only | `prod` is force read-only regardless of config |
 | `sqlserver-mcp/` | Microsoft SQL Server, T-SQL guardrails; gated write lane | **The unit of work is a catalog, not the server** |
 | `observe-mcp/` | OpenObserve logs/traces for CommunicationHub / CRM | **Service identity is resolved, not raw** |
-| `bitbucket-mcp/` | Repos, commits, source, PRs and **pipelines**; creates PRs | Pipeline tools are read-only — no trigger/stop. Bitbucket's `x..y` is head-first, the reverse of git: build it only via `buildCompareSpec` |
+| `bitbucket-mcp/` | Repos, commits, source, PRs and **pipelines**; gated PR create/comment/merge, server-side commits, scratch branches | The repos have no server-side branch protection, so merge-commit-only and never-force live in the tools. Pipelines are read-only. Bitbucket's `x..y` is head-first: build it only via `buildCompareSpec` |
 
 Four details that cost time if you learn them the hard way:
 
@@ -89,7 +89,7 @@ Narrower targets — prefer these over re-running the aggregate: `verify:package
 Each server's `.env.example`, the `<!-- BEGIN/END GENERATED -->` blocks in its `README.md`, and its
 `tools` list are **rendered from `@mcp/manifest`**. Edit the manifest, then `npm run generate:all`
 (`generate:check` fails on drift and runs inside `verify:all`). Env vars are declared once, in
-`packages/manifest/src/envSpecs/<server>.ts` — **143** across the five servers (41/35/25/31/11).
+`packages/manifest/src/envSpecs/<server>.ts` — **148** across the five servers (41/35/25/31/16).
 
 `observe-mcp/docs/service-catalog.json` is also generated, but by `catalog:refresh` against live
 OpenObserve; its `code` blocks are hand-written and preserved, so it is **not** part of

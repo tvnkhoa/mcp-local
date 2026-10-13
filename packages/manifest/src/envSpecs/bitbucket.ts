@@ -23,7 +23,7 @@ export const bitbucketEnv: readonly EnvField[] = [
     group: "bitbucket-auth",
     section: "Auth (Bearer token OR email + API token)",
     prompt: "Access token for Bearer auth (blank to use email + API token)",
-    note: "Auth: this (Bearer) OR BITBUCKET_EMAIL + BITBUCKET_API_TOKEN (Basic). Scopes: read:repository, read:pullrequest, read:pipeline, write:pullrequest. A repository access token reads only its own repo: other repos and search_code need a workspace token or an API token."
+    note: "Auth: this (Bearer) OR BITBUCKET_EMAIL + BITBUCKET_API_TOKEN (Basic). Scopes: read:repository, read:pullrequest, read:pipeline, write:pullrequest; write:repository for commit_files and create/delete_branch. A repository access token reads only its own repo: other repos and search_code need a workspace token or an API token."
   },
   {
     name: "BITBUCKET_EMAIL",
@@ -41,7 +41,40 @@ export const bitbucketEnv: readonly EnvField[] = [
     required: false,
     default: "false",
     section: "Write gate",
-    note: "create_pull_request is DISABLED unless true. The tool is still advertised; the gate is enforced when it is called."
+    note: "create_pull_request and add_pull_request_comment are DISABLED unless true. The tools are still advertised; the gate is enforced when they are called."
+  },
+  {
+    name: "BITBUCKET_MERGE_ENABLED",
+    required: false,
+    default: "false",
+    section: "Write gate",
+    note: "merge_pull_request is DISABLED unless true (dryRun still works). Merge commit only; the repo has no server-side branch protection, so this tool is the only guard."
+  },
+  {
+    name: "BITBUCKET_COMMIT_ENABLED",
+    required: false,
+    default: "false",
+    section: "Write gate",
+    note: "commit_files_apply is DISABLED unless true (commit_files_preview still works). Never force-pushes; refused unless the parent is the branch head."
+  },
+  {
+    name: "BITBUCKET_BRANCH_ENABLED",
+    required: false,
+    default: "false",
+    section: "Write gate",
+    note: "create_branch / delete_branch are DISABLED unless true (dryRun still works). Only names on BITBUCKET_COMMIT_BRANCHES; never a shared or main branch."
+  },
+  {
+    name: "BITBUCKET_COMMIT_BRANCHES",
+    required: false,
+    section: "Write gate",
+    note: "Comma-separated repo:branch globs that commit_files, create_branch and delete_branch may write — branches nobody checks out locally, e.g. wec.aria:sandbox/*. Empty = none."
+  },
+  {
+    name: "BITBUCKET_COMMIT_SHARED_BRANCHES",
+    required: false,
+    section: "Write gate",
+    note: "Comma-separated repo:branch globs checked out in a shared worktree, e.g. wec.aria:develop. Writable; the result carries the local reconcile steps."
   },
 
   // --- HTTP --------------------------------------------------------------------

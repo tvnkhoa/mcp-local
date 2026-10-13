@@ -19,6 +19,11 @@ export const CONFIG: BitbucketConfig = {
   defaultRepo: null,
   authHeader: "Bearer dummy",
   writeEnabled: false,
+  mergeEnabled: false,
+  commitEnabled: false,
+  branchEnabled: false,
+  commitBranches: [],
+  commitSharedBranches: [],
   timeoutMs: 1000,
   maxRetries: 0,
   defaultPagelen: 25,
@@ -29,8 +34,9 @@ export const CONFIG: BitbucketConfig = {
 export const CLIENT_METHODS = [
   "getRepository", "listRepositories", "listBranches", "getBranch", "getTag",
   "listPullRequests", "getPullRequest", "getPullRequestDiff", "createPullRequest",
+  "listPullRequestComments", "addPullRequestComment", "mergePullRequest",
   "listCommits", "getCommit", "getDiffstat", "getMergeBase", "getDiffBounded", "listCommitStatuses",
-  "getSrcMeta", "listSrcDir", "getSrcBounded", "listFileHistory", "searchCode",
+  "getSrcMeta", "listSrcDir", "getSrcBounded", "listFileHistory", "searchCode", "createCommit", "createBranch", "deleteBranch",
   "listPipelines", "getPipeline", "listPipelineSteps", "getPipelineStepLog"
 ] as const;
 
@@ -41,7 +47,12 @@ const reject = async (): Promise<never> => {
 /** Every method rejects: no test here should reach the network. */
 export const STUB_CLIENT = {
   ...Object.fromEntries(CLIENT_METHODS.map((m) => [m, reject])),
-  createPullRequestPath: (repoSlug: string) => `/repositories/snapshot-ws/${repoSlug}/pullrequests`
+  createPullRequestPath: (repoSlug: string) => `/repositories/snapshot-ws/${repoSlug}/pullrequests`,
+  pullRequestCommentsPath: (repoSlug: string, id: number) =>
+    `/repositories/snapshot-ws/${repoSlug}/pullrequests/${String(id)}/comments`,
+  mergePullRequestPath: (repoSlug: string, id: number) =>
+    `/repositories/snapshot-ws/${repoSlug}/pullrequests/${String(id)}/merge`,
+  branchesPath: (repoSlug: string) => `/repositories/snapshot-ws/${repoSlug}/refs/branches`
 } as unknown as BitbucketClient;
 
 export type Call = { method: string; args: unknown[] };
