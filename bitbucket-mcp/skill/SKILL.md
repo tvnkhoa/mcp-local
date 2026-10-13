@@ -1,6 +1,6 @@
 ---
 name: {{KEY}}
-description: "Bitbucket Cloud via the {{DISPLAY_NAME}}: list repos, branches and pull requests, read a PR and its diff, inspect CI pipeline runs and read a failed step's log, and open a PR (gated, dryRun first). Use for: why did the build/pipeline fail, CI status of a branch, show the build log, review PR #123, what changed in this PR, list open PRs, create/open a pull request from my branch. Not for local git history (use git) or Jira tickets. Read-only except create_pull_request; it cannot trigger, stop or re-run a pipeline."
+description: "Bitbucket Cloud via the {{DISPLAY_NAME}}: list repos, branches, commits and pull requests, read a commit or PR and its diff, compare two branches (ahead/behind, changed files), read a file as it was at a branch/tag/SHA in any workspace repo without cloning, file history, workspace code search, build status of a commit, inspect CI pipeline runs and read a failed step's log, and open a PR (gated, dryRun first). Use for: why did the build/pipeline fail, is this commit green, what changed on origin since <sha/date>, how far is develop ahead of master, who changed this file, read the docs in another repo (e.g. wec.knowledge-base), search code across repos, review PR #123, create/open a pull request. Prefer local git when the repo is checked out; not for Jira tickets. Read-only except create_pull_request; it cannot push, commit, merge, or trigger/stop/re-run a pipeline."
 ---
 
 # {{DISPLAY_NAME}}
@@ -18,10 +18,32 @@ tool takes a workspace argument). Run `health_check` first if a call fails on au
 | "list open PRs" | `list_pull_requests(state: "OPEN")` — also `MERGED`, `DECLINED`, `SUPERSEDED` |
 | "review PR 123" / "what changed" | `get_pull_request(id)` then `get_pull_request_diff(id)` |
 | "which repos / branches" | `list_repositories(q?, role?)`, `list_branches(repoSlug, q?)` |
+| "what changed on origin since X" | `list_commits(include?, exclude?, path?, since?, author?)` |
+| "show commit abc123" / "files in that commit" | `get_commit(sha)` |
+| "is this SHA green" | `get_commit_statuses(sha)` — every CI, not just Pipelines |
+| "develop vs master" / "ahead/behind" | `compare_refs(base, head)` — `statOnly:false` for the diff |
+| "read X in repo Y" / "file at that commit" | `get_file_at_ref(repoSlug, ref?, path)` — `path: ""` lists the root |
+| "who changed this file" | `get_file_history(path, ref?)` — there is no blame endpoint |
+| "where is X used across repos" | `search_code(query, repoSlug?)` |
 | "open a PR" | the create recipe below |
 
 `list_*` tools page with `page` / `pagelen` (max 100) and accept `sort`; `q` is BBQL on repos,
-branches and PRs (`name ~ "api"`).
+branches and PRs (`name ~ "api"`). `list_commits`, directory listings and `get_file_history` page with
+`cursor` instead: pass `nextCursor` back unchanged.
+
+## Commits, compare and source — what to know
+
+- When the repo is checked out locally, `git` is cheaper and exact. These tools say what the
+  **remote** has, and they let an agent read a repo it has not cloned.
+- `compare_refs(base, head)` is three-dot: the files head changed since its merge base.
+  `ahead`/`behind` stop counting at 500 and show `"≥500"`.
+- `list_commits` `since`/`author` filter client-side over at most 1000 commits a call; if
+  `scanCapReached` is true, continue with `nextCursor` before saying "none". `since` uses the author date.
+- Content is cut at `maxBytes` (`truncated: true`); binary files return metadata only.
+- `search_code` covers each repo's **default branch only**, as last indexed, and ignores
+  `BITBUCKET_DEFAULT_REPO`. Terms are tokenized; quote a phrase. `code_search_unavailable` means the
+  workspace has not enabled it — fall back to `get_file_at_ref`.
+- `ref` defaults to the repo's main branch (often `master`, not `develop`) — pass it when it matters.
 
 ## Why did the build fail — walk it to the log line
 
@@ -58,7 +80,8 @@ create_pull_request(... same args ..., dryRun: false)
 
 - Never echo tokens or the `Authorization` header. Auth is env-only.
 - Scopes: `read:repository`, `read:pullrequest`, `read:pipeline`; `write:pullrequest` for PR creation
-  (Bitbucket names them with a `:bitbucket` suffix in the token UI).
+  (Bitbucket names them with a `:bitbucket` suffix in the token UI). A repository access token sees
+  only its own repo: another repo or `search_code` answers 403.
 
 ## Configuration (env)
 

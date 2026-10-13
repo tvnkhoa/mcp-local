@@ -23,7 +23,7 @@ export const bitbucketEnv: readonly EnvField[] = [
     group: "bitbucket-auth",
     section: "Auth (Bearer token OR email + API token)",
     prompt: "Access token for Bearer auth (blank to use email + API token)",
-    note: "Auth: this (Bearer) OR BITBUCKET_EMAIL + BITBUCKET_API_TOKEN (Basic). Scopes: read:repository, read:pullrequest, write:pullrequest."
+    note: "Auth: this (Bearer) OR BITBUCKET_EMAIL + BITBUCKET_API_TOKEN (Basic). Scopes: read:repository, read:pullrequest, read:pipeline, write:pullrequest. A repository access token reads only its own repo: other repos and search_code need a workspace token or an API token."
   },
   {
     name: "BITBUCKET_EMAIL",

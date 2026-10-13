@@ -15,7 +15,7 @@ env flag.
 | `postgres-mcp/` | PostgreSQL. `SELECT` / `WITH … SELECT` only | `prod` is force read-only regardless of config |
 | `sqlserver-mcp/` | Microsoft SQL Server, T-SQL guardrails; gated write lane | **The unit of work is a catalog, not the server** |
 | `observe-mcp/` | OpenObserve logs/traces for CommunicationHub / CRM | **Service identity is resolved, not raw** |
-| `bitbucket-mcp/` | Repos, PRs and **pipelines**; creates PRs | The four pipeline tools are read-only — no trigger/stop |
+| `bitbucket-mcp/` | Repos, commits, source, PRs and **pipelines**; creates PRs | Pipeline tools are read-only — no trigger/stop. Bitbucket's `x..y` is head-first, the reverse of git: build it only via `buildCompareSpec` |
 
 Four details that cost time if you learn them the hard way:
 

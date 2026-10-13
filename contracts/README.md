@@ -55,23 +55,23 @@ Reproducibility is the whole value; a snapshot that varies per machine is noise.
 | `codebase-index` | 43 | **yes** — migrated to `@mcp/sdk` (S-31…S-33) |
 | `postgres-mcp` | 22 | **yes** — migrated to `@mcp/sdk` (S-25) |
 | `observe-mcp` | 10 | **yes** — migrated to `@mcp/sdk` (S-24) |
-| `bitbucket-mcp` | 12 | **yes** — migrated to `@mcp/sdk` (S-23) |
-| `sqlserver-mcp` | 12 | **yes** — built on `@mcp/sdk` |
-| **Total** | **99** | all five |
+| `bitbucket-mcp` | 19 | **yes** — migrated to `@mcp/sdk` (S-23) |
+| `sqlserver-mcp` | 14 | **yes** — built on `@mcp/sdk` |
+| **Total** | **108** | all five |
 
 Servers on `@mcp/sdk` advertise MCP annotation hints (`readOnlyHint` / `idempotentHint` /
 `destructiveHint` / `openWorldHint`), which the SDK derives from each tool's declared annotations.
 In every migration so far this was an **additive** contract change, reviewed via the snapshot diff: names,
 descriptions and input schemas stayed byte-identical.
 
-Clients use these hints to decide what may be auto-approved. Across the workspace the 14 tools marked
+Clients use these hints to decide what may be auto-approved. Across the workspace the 16 tools marked
 **not read-only** are:
 
 | Server | Not read-only | Of which destructive |
 |---|---|---|
 | `bitbucket-mcp` | `create_pull_request` | — |
 | `postgres-mcp` | `write_apply`, `write_rollback`, `migration_apply`, `migration_add`, `ddl_apply`, `ddl_create` | `write_apply`, `write_rollback`, `migration_apply`, `ddl_apply` |
-| `sqlserver-mcp` | `execute_routine` | `execute_routine` |
+| `sqlserver-mcp` | `execute_routine`, `write_preview`, `write_apply` | `execute_routine`, `write_apply` |
 | `codebase-index` | `index_repository`, `watch_repo`, `refactor_replace_apply`, `refactor_replace_rollback`, `refactor_symbol_migration`, `change_value_representation` | all but `watch_repo` |
 
 `migration_add` and `ddl_create` write a new migration file and change no database; `execute_routine`
@@ -88,13 +88,13 @@ Two of those deserve the note, because a reviewer will read them as too strict o
   with `dryRun:true` (the default) but **apply** with `dryRun:false` plus a prior call's
   `previewId` + `approvalToken`, so one tool carries both and is annotated destructive.
 
-`openWorldHint: true` follows where the call goes — **50 of 99** tools reach a database or remote API:
+`openWorldHint: true` follows where the call goes — **59 of 108** tools reach a database or remote API:
 
 | Server | Open-world | Closed-world (answered from local config or files) |
 |---|---|---|
-| `bitbucket-mcp` | 12 / 12 | — |
+| `bitbucket-mcp` | 19 / 19 | — |
 | `postgres-mcp` | 19 / 22 | `list_environments`, `migration_add`, `ddl_create` |
-| `sqlserver-mcp` | 10 / 12 | `list_environments`, `health_check` |
+| `sqlserver-mcp` | 12 / 14 | `list_environments`, `health_check` |
 | `observe-mcp` | 9 / 10 | `list_environments` |
 | `codebase-index` | 0 / 43 | all — it reads only the local repository and its SQLite index |
 

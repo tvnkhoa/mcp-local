@@ -1,10 +1,10 @@
 # bitbucket-mcp
 
-MCP server cho **Bitbucket Cloud** — đọc repository / pull request / pipeline và **tạo pull request**. Read-only mặc định; việc tạo PR bị khóa sau một env flag.
+MCP server cho **Bitbucket Cloud** — đọc repository / commit / source / pull request / pipeline và **tạo pull request**. Read-only mặc định; việc tạo PR bị khóa sau một env flag.
 
 Server này chỉ dùng bốn nhóm quyền của Bitbucket:
 
-- `read:repository:bitbucket` → `list_repositories`, `get_repository`, `list_branches`
+- `read:repository:bitbucket` → `list_repositories`, `get_repository`, `list_branches`, `list_commits`, `get_commit`, `get_commit_statuses`, `compare_refs`, `get_file_at_ref`, `get_file_history`, `search_code`
 - `read:pullrequest:bitbucket` → `list_pull_requests`, `get_pull_request`, `get_pull_request_diff`
 - `read:pipeline:bitbucket` → `list_pipelines`, `get_pipeline`, `list_pipeline_steps`, `get_pipeline_step_log`
 - `write:pullrequest:bitbucket` → `create_pull_request`
@@ -29,7 +29,7 @@ npm run build     # tsc → dist/
 |---|---|---|---|
 | `BITBUCKET_WORKSPACE` | **yes** | — | The ID in bitbucket.org/<workspace>/… |
 | `BITBUCKET_DEFAULT_REPO` | no | — | Lets you omit `repoSlug` on every call. |
-| `BITBUCKET_ACCESS_TOKEN` | one of `bitbucket-auth` | — | **secret** · Auth: this (Bearer) OR BITBUCKET_EMAIL + BITBUCKET_API_TOKEN (Basic). Scopes: read:repository, read:pullrequest, write:pullrequest. |
+| `BITBUCKET_ACCESS_TOKEN` | one of `bitbucket-auth` | — | **secret** · Auth: this (Bearer) OR BITBUCKET_EMAIL + BITBUCKET_API_TOKEN (Basic). Scopes: read:repository, read:pullrequest, read:pipeline, write:pullrequest. A repository access token reads only its own repo: other repos and search_code need a workspace token or an API token. |
 | `BITBUCKET_EMAIL` | one of `bitbucket-auth` | — | Basic auth needs BOTH this and BITBUCKET_API_TOKEN. An Atlassian API token (ATATT…) is a Basic credential, not a Bearer one. |
 | `BITBUCKET_API_TOKEN` | one of `bitbucket-auth` | — | **secret** |
 | `BITBUCKET_WRITE_ENABLED` | no | `false` | create_pull_request is DISABLED unless true. The tool is still advertised; the gate is enforced when it is called. |
@@ -45,7 +45,9 @@ npm run build     # tsc → dist/
 
 Thay thế (khi không dùng access token): đặt `BITBUCKET_EMAIL` + `BITBUCKET_API_TOKEN` (Atlassian API token) → server dùng Basic auth. Access token (Bearer) được ưu tiên nếu cả hai được set.
 
-> Tạo Access Token trong Bitbucket: **Repository/Workspace settings → Access tokens**, chọn scope `read:repository`, `read:pullrequest`, `write:pullrequest`.
+> Tạo Access Token trong Bitbucket: **Repository/Workspace settings → Access tokens**, chọn scope `read:repository`, `read:pullrequest`, `read:pipeline`, `write:pullrequest`.
+>
+> Repository Access Token chỉ đọc được **đúng repo đó**: `get_file_at_ref` sang repo khác (vd `wec.knowledge-base`) và `search_code` toàn workspace sẽ trả 403. Cần Workspace Access Token hoặc Atlassian API token (Basic).
 
 ## Chạy
 
@@ -80,9 +82,14 @@ Restart MCP (`/mcp` trong Claude Code) để nạp bản build mới.
 
 <!-- BEGIN GENERATED: tool-list -->
 
-12 tools, namespaced `mcp__bitbucket-mcp__<tool>`:
+19 tools, namespaced `mcp__bitbucket-mcp__<tool>`:
 
+- `compare_refs`
 - `create_pull_request`
+- `get_commit`
+- `get_commit_statuses`
+- `get_file_at_ref`
+- `get_file_history`
 - `get_pipeline`
 - `get_pipeline_step_log`
 - `get_pull_request`
@@ -90,10 +97,12 @@ Restart MCP (`/mcp` trong Claude Code) để nạp bản build mới.
 - `get_repository`
 - `health_check`
 - `list_branches`
+- `list_commits`
 - `list_pipeline_steps`
 - `list_pipelines`
 - `list_pull_requests`
 - `list_repositories`
+- `search_code`
 
 <!-- END GENERATED: tool-list -->
 
@@ -106,6 +115,13 @@ Restart MCP (`/mcp` trong Claude Code) để nạp bản build mới.
 | `list_pull_requests` | read:pullrequest | Liệt kê PR (mặc định `OPEN`; lọc theo `state`) |
 | `get_pull_request` | read:pullrequest | Chi tiết một PR theo `id` |
 | `get_pull_request_diff` | read:pullrequest | Diff dạng text của PR |
+| `list_commits` | read:repository | Commit trên remote (`include`/`exclude`/`path`); `since`/`author` lọc phía client, quét tối đa 1000 commit/lần; phân trang bằng `cursor` |
+| `get_commit` | read:repository | Một commit: message, parents, và từng file +/- (`maxFiles`, mặc định 200, tối đa 500) |
+| `get_commit_statuses` | read:repository | Build status của một SHA từ mọi CI (Pipelines, Azure DevOps…) |
+| `compare_refs` | read:repository | So sánh `base`…`head`: merge base, ahead/behind (chặn ở ≥500), file thay đổi; `statOnly:false` thêm diff (mặc định 256 KiB, tối đa 1 MiB) |
+| `get_file_at_ref` | read:repository | File hoặc thư mục tại một branch/tag/SHA ở **bất kỳ repo nào** trong workspace (`maxBytes`, mặc định 256 KiB, tối đa 1 MiB) |
+| `get_file_history` | read:repository | Các commit đã sửa một file, theo dõi qua rename (thay cho blame) |
+| `search_code` | read:repository | Code search toàn workspace hoặc một repo — **chỉ default branch**, theo lần index gần nhất |
 | `list_pipelines` | read:pipeline | Liệt kê pipeline run (mới nhất trước); lọc `branch` và `status[]` (nhiều status = OR) |
 | `get_pipeline` | read:pipeline | Một run theo UUID (không cần ngoặc) hoặc theo build number |
 | `list_pipeline_steps` | read:pipeline | Các step của một run — tìm step nào fail và lấy `stepUuid` |
@@ -130,6 +146,37 @@ create_pull_request {
 - `dryRun:true` luôn chạy được kể cả khi write đang tắt — trả về `{ method, path, body }` để bạn kiểm tra trước.
 - `dryRun:false` cần `BITBUCKET_WRITE_ENABLED=true`, nếu không sẽ trả lỗi `WRITE_DISABLED`.
 - `reviewers`: chuỗi bắt đầu bằng `{` được coi là `uuid`, còn lại là `account_id`.
+
+### Commit, so sánh ref, đọc file ở repo khác
+
+```jsonc
+// commit trên develop mà master chưa có, chạm vào một path
+list_commits { "repoSlug": "wec.aria", "include": ["develop"], "exclude": ["master"], "path": "packages/db" }
+
+// commit từ một ngày, của một người — lọc phía client; dùng nextCursor để đi tiếp
+list_commits { "repoSlug": "wec.aria", "since": "2026-10-07", "author": "koi", "pagelen": 20 }
+
+// một commit và các file nó đổi (như git show --stat)
+get_commit { "repoSlug": "wec.aria", "sha": "b2dce2fd01b7" }
+
+// develop đi trước/sau master bao nhiêu, đổi những file nào
+compare_refs { "repoSlug": "wec.aria", "base": "master", "head": "develop" }
+
+// đọc tài liệu ở repo khác, không cần clone (ref bỏ trống = main branch)
+get_file_at_ref { "repoSlug": "wec.knowledge-base", "path": "glossary/business-terms.md" }
+
+// SHA này đã xanh chưa
+get_commit_statuses { "repoSlug": "wec.aria", "sha": "b2dce2fd01b742570618a44c8249680dd35b4fe5" }
+```
+
+- **Thứ tự `x..y` của Bitbucket ngược với git**: `diffstat/<head>..<base>` mới là "head có gì mà base chưa có". Tool nhận `base`/`head` có tên nên không cần nhớ; đã xác minh trên wec.aria ngày 2026-10-13 (develop..master liệt kê file develop thêm, chiều ngược lại rỗng). Response có field `semantics` ghi rõ.
+- Ref được **resolve sang SHA trước** (branch → tag → SHA rút gọn) và echo lại `resolvedSha`: branch có `/` (vd `docs/phase-0b`) không lẫn với path, và `/src/<branch>/…` trả 403 với API token.
+- Nội dung file đọc bằng `?format=raw`. Đã xác minh 2026-10-13: `/src/<sha>/<path>` không có `format` trả **403** với Atlassian API token, còn `format=meta` và `format=raw` trả 200.
+- Mọi body lớn (file, diff) được đọc theo stream và **cắt ở `maxBytes`** — `truncated: true` khi bị cắt. File binary chỉ trả metadata.
+- `list_commits`, thư mục và `get_file_history` phân trang bằng **`cursor`** (truyền lại `nextCursor` y nguyên), không phải số trang: Bitbucket dùng `page=2&ctx=…` hoặc token như `page=E8Ux`.
+- `since` so với **author date** và chỉ gần đúng qua merge; quét dừng khi cả một trang cũ hơn `since`. `scanCapReached: true` nghĩa là còn commit chưa quét — gọi tiếp với `nextCursor`.
+- `search_code` không dùng `BITBUCKET_DEFAULT_REPO`: bỏ `repoSlug` là tìm cả workspace. Từ khoá bị tách token (`aria-migrate-check` khớp cả `aria`); dùng `"cụm chính xác"` khi cần.
+- Khi repo đã clone sẵn trên máy, `git` local rẻ hơn và chính xác hơn; các tool này trả lời "remote đang có gì".
 
 ### Debug một build fail
 

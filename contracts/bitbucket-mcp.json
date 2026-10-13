@@ -1,7 +1,64 @@
 {
   "server": "bitbucket-mcp",
-  "toolCount": 12,
+  "toolCount": 19,
   "tools": [
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": true,
+        "readOnlyHint": true
+      },
+      "description": "Compare two refs (branch, tag or SHA) like `git diff base...head` plus `git rev-list --left-right --count`: merge base, how many commits head is ahead of / behind base (capped at 500, shown as \"≥500\"), and the files head changed since the merge base. statOnly:false adds the unified diff, cut at maxDiffBytes (default 256 KiB, max 1 MiB; see diffTruncated).",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "base": {
+            "description": "The ref compared against, e.g. master or origin's develop",
+            "type": "string"
+          },
+          "head": {
+            "description": "The ref whose changes are listed, e.g. a feature branch",
+            "type": "string"
+          },
+          "maxDiffBytes": {
+            "description": "Diff bytes to return when statOnly is false (default 262144, max 1048576)",
+            "maximum": 1048576,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "maxFiles": {
+            "description": "File rows to return (default 200, max 500)",
+            "maximum": 500,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "profile": {
+            "enum": [
+              "nano",
+              "compact",
+              "standard",
+              "verbose"
+            ],
+            "type": "string"
+          },
+          "repoSlug": {
+            "description": "Repo slug (default: BITBUCKET_DEFAULT_REPO)",
+            "type": "string"
+          },
+          "statOnly": {
+            "description": "Default true: files and counts only, no diff text",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "base",
+          "head"
+        ],
+        "type": "object"
+      },
+      "name": "compare_refs"
+    },
     {
       "annotations": {
         "destructiveHint": false,
@@ -65,6 +122,200 @@
         "type": "object"
       },
       "name": "create_pull_request"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": true,
+        "readOnlyHint": true
+      },
+      "description": "One commit: full message, parents, author, date, and its per-file changes against its first parent (path, status, lines added/removed), like `git show --stat`. Files are capped by maxFiles (default 200, max 500); filesTotal and filesTruncated say when that cut.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "maxFiles": {
+            "description": "File rows to return (default 200, max 500)",
+            "maximum": 500,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "profile": {
+            "enum": [
+              "nano",
+              "compact",
+              "standard",
+              "verbose"
+            ],
+            "type": "string"
+          },
+          "repoSlug": {
+            "description": "Repo slug (default: BITBUCKET_DEFAULT_REPO)",
+            "type": "string"
+          },
+          "sha": {
+            "description": "Commit SHA (7–40 hex)",
+            "type": "string"
+          }
+        },
+        "required": [
+          "sha"
+        ],
+        "type": "object"
+      },
+      "name": "get_commit"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": true,
+        "readOnlyHint": true
+      },
+      "description": "Build statuses reported against one commit by any CI (Bitbucket Pipelines, Azure DevOps, …): key, name, state (SUCCESSFUL/FAILED/INPROGRESS/STOPPED), url. Answers \"is this exact SHA green?\" before a push or merge.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "page": {
+            "minimum": 1,
+            "type": "integer"
+          },
+          "pagelen": {
+            "description": "Page size (default 25, max 100)",
+            "maximum": 100,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "profile": {
+            "enum": [
+              "nano",
+              "compact",
+              "standard",
+              "verbose"
+            ],
+            "type": "string"
+          },
+          "repoSlug": {
+            "description": "Repo slug (default: BITBUCKET_DEFAULT_REPO)",
+            "type": "string"
+          },
+          "sha": {
+            "description": "Commit SHA (7–40 hex)",
+            "type": "string"
+          }
+        },
+        "required": [
+          "sha"
+        ],
+        "type": "object"
+      },
+      "name": "get_commit_statuses"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": true,
+        "readOnlyHint": true
+      },
+      "description": "Read a file, or list a directory, as it was at a branch, tag or SHA — like `git show <ref>:<path>` — in any repository of the workspace, without a clone. Text is cut at maxBytes (default 256 KiB, max 1 MiB; see truncated). Binary files and submodules return metadata only. path \"\" lists the repo root. The ref is resolved to a SHA first and echoed as resolvedSha.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "cursor": {
+            "description": "nextCursor from the previous response, passed back unchanged",
+            "type": "string"
+          },
+          "maxBytes": {
+            "description": "File bytes to return (default 262144, max 1048576)",
+            "maximum": 1048576,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "pagelen": {
+            "description": "Page size (default 25, max 100)",
+            "maximum": 100,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "path": {
+            "description": "Repo-relative path with forward slashes; \"\" for the root",
+            "type": "string"
+          },
+          "profile": {
+            "enum": [
+              "nano",
+              "compact",
+              "standard",
+              "verbose"
+            ],
+            "type": "string"
+          },
+          "ref": {
+            "description": "Branch, tag or commit SHA (default: the repository's main branch)",
+            "type": "string"
+          },
+          "repoSlug": {
+            "description": "Repo slug (default: BITBUCKET_DEFAULT_REPO)",
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "type": "object"
+      },
+      "name": "get_file_at_ref"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": true,
+        "readOnlyHint": true
+      },
+      "description": "Commits that changed one file, newest first, following renames — like `git log --follow -- <path>`. Bitbucket Cloud has no blame endpoint; this answers \"who changed this file, and when\". Line-level blame needs a local clone.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "cursor": {
+            "description": "nextCursor from the previous response, passed back unchanged",
+            "type": "string"
+          },
+          "pagelen": {
+            "description": "Commits per page (default 25, max 50)",
+            "maximum": 50,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "path": {
+            "description": "Repo-relative file path",
+            "type": "string"
+          },
+          "profile": {
+            "enum": [
+              "nano",
+              "compact",
+              "standard",
+              "verbose"
+            ],
+            "type": "string"
+          },
+          "ref": {
+            "description": "Branch, tag or commit SHA (default: the repository's main branch)",
+            "type": "string"
+          },
+          "repoSlug": {
+            "description": "Repo slug (default: BITBUCKET_DEFAULT_REPO)",
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "type": "object"
+      },
+      "name": "get_file_history"
     },
     {
       "annotations": {
@@ -330,6 +581,75 @@
         "openWorldHint": true,
         "readOnlyHint": true
       },
+      "description": "List commits on the remote, newest first: reachable from `include` (default: every branch) and not from `exclude`, optionally only those touching `path`. Like `git log exclude..include -- path`. `since` and `author` are filtered client-side over at most 1000 commits per call (see scanned/scanCapReached; continue with nextCursor); `since` compares the author date and is approximate across merges. Pages by cursor, not page number. Prefer local git when the repo is checked out.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "author": {
+            "description": "Case-insensitive substring of the author name or email",
+            "type": "string"
+          },
+          "cursor": {
+            "description": "nextCursor from the previous response, passed back unchanged",
+            "type": "string"
+          },
+          "exclude": {
+            "description": "Branches, tags or SHAs whose history is excluded (max 10)",
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 10,
+            "minItems": 1,
+            "type": "array"
+          },
+          "include": {
+            "description": "Branches, tags or SHAs to start from (max 10)",
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 10,
+            "minItems": 1,
+            "type": "array"
+          },
+          "pagelen": {
+            "description": "Commits to return (default 30, max 100)",
+            "maximum": 100,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "path": {
+            "description": "Only commits touching this repo-relative file or directory",
+            "type": "string"
+          },
+          "profile": {
+            "enum": [
+              "nano",
+              "compact",
+              "standard",
+              "verbose"
+            ],
+            "type": "string"
+          },
+          "repoSlug": {
+            "description": "Repo slug (default: BITBUCKET_DEFAULT_REPO)",
+            "type": "string"
+          },
+          "since": {
+            "description": "Only commits with an author date at or after this ISO date/time",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "list_commits"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": true,
+        "readOnlyHint": true
+      },
       "description": "List the steps of one pipeline run with per-step state, result and duration — this is how you find which step failed, and the stepUuid to read its log.",
       "inputSchema": {
         "additionalProperties": false,
@@ -542,6 +862,52 @@
         "type": "object"
       },
       "name": "list_repositories"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": true,
+        "readOnlyHint": true
+      },
+      "description": "Search code across the workspace's repositories (Bitbucket code search), or one repo with repoSlug. Searches each repository's DEFAULT BRANCH only, as last indexed — not other branches and not unpushed work. Returns repo, path, the commit it was indexed at, and up to 20 matching lines per file. Does not fall back to BITBUCKET_DEFAULT_REPO: omit repoSlug to search everything. Bitbucket query syntax applies (e.g. ext:ts, path:src, \"exact phrase\").",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "page": {
+            "minimum": 1,
+            "type": "integer"
+          },
+          "pagelen": {
+            "description": "Page size (default 25, max 100)",
+            "maximum": 100,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "profile": {
+            "enum": [
+              "nano",
+              "compact",
+              "standard",
+              "verbose"
+            ],
+            "type": "string"
+          },
+          "query": {
+            "description": "Search terms, e.g. pnpm gate ext:yaml",
+            "type": "string"
+          },
+          "repoSlug": {
+            "description": "Limit to one repository (no default)",
+            "type": "string"
+          }
+        },
+        "required": [
+          "query"
+        ],
+        "type": "object"
+      },
+      "name": "search_code"
     }
   ]
 }

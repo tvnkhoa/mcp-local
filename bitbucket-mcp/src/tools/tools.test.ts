@@ -15,65 +15,12 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { createNullLogger } from "@mcp/core";
-import { asErrorPayload, createToolRegistry, dispatchToolCall } from "@mcp/sdk";
 import { assertRequiredKeysAdvertised, assertSchemaParity } from "@mcp/testing";
 
 import type { BitbucketClient } from "../services/bitbucketClient.js";
 import type { BitbucketConfig } from "../config/index.js";
-import { buildTools, toWireError } from "./index.js";
-
-const logger = createNullLogger("test");
-
-const CONFIG: BitbucketConfig = {
-  baseUrl: "https://contract-snapshot.invalid",
-  workspace: "snapshot-ws",
-  defaultRepo: null,
-  authHeader: "Bearer dummy",
-  writeEnabled: false,
-  timeoutMs: 1000,
-  maxRetries: 0,
-  defaultPagelen: 25,
-  maxPagelen: 100
-} as unknown as BitbucketConfig;
-
-/** Every method rejects: no test here should reach the network. */
-const STUB_CLIENT = {
-  getRepository: async () => {
-    throw new Error("network not available in tests");
-  },
-  listRepositories: async () => {
-    throw new Error("network not available in tests");
-  },
-  listBranches: async () => {
-    throw new Error("network not available in tests");
-  },
-  listPullRequests: async () => {
-    throw new Error("network not available in tests");
-  },
-  getPullRequest: async () => {
-    throw new Error("network not available in tests");
-  },
-  getPullRequestDiff: async () => {
-    throw new Error("network not available in tests");
-  },
-  createPullRequest: async () => {
-    throw new Error("network not available in tests");
-  },
-  listPipelines: async () => {
-    throw new Error("network not available in tests");
-  },
-  getPipeline: async () => {
-    throw new Error("network not available in tests");
-  },
-  listPipelineSteps: async () => {
-    throw new Error("network not available in tests");
-  },
-  getPipelineStepLog: async () => {
-    throw new Error("network not available in tests");
-  },
-  createPullRequestPath: (repoSlug: string) => `/repositories/snapshot-ws/${repoSlug}/pullrequests`
-} as unknown as BitbucketClient;
+import { CONFIG, STUB_CLIENT, bodyOf, call } from "./harness.test.js";
+import { buildTools } from "./index.js";
 
 /**
  * A client that records what it was called with and answers instead of throwing.
@@ -102,33 +49,9 @@ function recordingClient(overrides: Record<string, unknown> = {}) {
   return { client, calls };
 }
 
-function call(
-  name: string,
-  args: Record<string, unknown>,
-  config: BitbucketConfig = CONFIG,
-  client: BitbucketClient = STUB_CLIENT
-): Promise<{ isError?: boolean; content: readonly { text: string }[] }> {
-  const registry = createToolRegistry(buildTools(config, client));
-  return dispatchToolCall(registry, name, args, {
-    logger,
-    // Identical to the wiring in index.ts — the envelope is what is under test.
-    formatError: (error) => asErrorPayload(toWireError(error), "verbose")
-  });
-}
-
-const bodyOf = async (
-  name: string,
-  args: Record<string, unknown>,
-  config?: BitbucketConfig,
-  client?: BitbucketClient
-) => {
-  const result = await call(name, args, config, client);
-  return { isError: result.isError, payload: JSON.parse(result.content[0]?.text ?? "null") };
-};
-
 // --- tools/list side of the contract ---------------------------------------
 
-test("the tool table is the 12 advertised tools, in registration order", () => {
+test("the tool table is the 19 advertised tools, in registration order", () => {
   const names = buildTools(CONFIG, STUB_CLIENT).map((tool) => tool.name);
   assert.deepEqual(names, [
     "health_check",
@@ -142,6 +65,13 @@ test("the tool table is the 12 advertised tools, in registration order", () => {
     "get_pipeline",
     "list_pipeline_steps",
     "get_pipeline_step_log",
+    "list_commits",
+    "get_commit",
+    "get_commit_statuses",
+    "compare_refs",
+    "get_file_at_ref",
+    "get_file_history",
+    "search_code",
     "create_pull_request"
   ]);
 });
@@ -310,7 +240,7 @@ test("DELTA: an unknown tool now reports not_found instead of mcp_error", async 
 
 test("every tool advertises exactly the parameters its zod schema accepts", () => {
   // The floor must equal the tool count, or the gate is slack by the difference.
-  assertSchemaParity(buildTools(CONFIG, STUB_CLIENT), { floor: 12 });
+  assertSchemaParity(buildTools(CONFIG, STUB_CLIENT), { floor: 19 });
 });
 
 test("a tool declaring additionalProperties:false advertises every required key", () => {

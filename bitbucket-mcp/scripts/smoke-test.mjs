@@ -278,11 +278,105 @@ async function main() {
     } else {
       console.log("\nNo pipeline runs in this repo — skipped the run-scoped pipeline calls.");
     }
+
+    // 9. Commits, compare and source (read-only).
+    await commitsAndSource(client, repoSlug);
   } else {
     console.log("\nNo repo available (empty workspace and no BITBUCKET_DEFAULT_REPO) — skipped repo-scoped calls.");
   }
 
   await client.close();
+}
+
+/** Call a tool and parse its JSON body; `null` body when the text is not JSON. */
+async function callJson(client, name, args) {
+  const result = await client.callTool({ name, arguments: { ...args, profile: "standard" } });
+  let body = null;
+  try {
+    body = JSON.parse(textOf(result));
+  } catch {
+    /* ignore */
+  }
+  return { isError: result.isError === true, body, text: textOf(result) };
+}
+
+function verdict(label, okay, detail) {
+  console.log(`\n${label}: ${okay ? "OK" : "BROKEN"} — ${detail}`);
+  if (!okay) {
+    process.exitCode = 1;
+  }
+}
+
+async function commitsAndSource(client, repoSlug) {
+  const repo = await callJson(client, "get_repository", { repoSlug });
+  const mainBranch = repo.body?.repository?.mainBranch;
+
+  const commits = await callJson(client, "list_commits", { repoSlug, pagelen: 3 });
+  const sha = commits.body?.commits?.[0]?.sha;
+  verdict("LIST_COMMITS", !commits.isError && typeof sha === "string", `${commits.body?.commits?.length ?? 0} commit(s), next=${commits.body?.nextCursor ?? "none"}`);
+  if (!sha) {
+    return;
+  }
+
+  const commit = await callJson(client, "get_commit", { repoSlug, sha: sha.slice(0, 12), maxFiles: 5 });
+  verdict("GET_COMMIT", commit.body?.commit?.sha === sha && Array.isArray(commit.body?.files), `${commit.body?.filesTotal ?? "?"} file(s) in ${sha.slice(0, 12)}`);
+
+  const statuses = await callJson(client, "get_commit_statuses", { repoSlug, sha });
+  verdict("GET_COMMIT_STATUSES", !statuses.isError, `${statuses.body?.statuses?.length ?? 0} status(es)`);
+
+  // 9a. Compare order. Bitbucket's `x..y` is head-first, the reverse of git,
+  // and a swapped spec still answers 200 — only the content can tell. So:
+  // comparing a non-merge commit with its parent must list exactly that
+  // commit's files with ahead 1 / behind 0, and the swapped call none of them.
+  const recent = await callJson(client, "list_commits", { repoSlug, pagelen: 30 });
+  const single = (recent.body?.commits ?? []).find((c) => c.parents?.length === 1);
+  if (!single) {
+    console.log("\nCOMPARE_REFS order: skipped (no non-merge commit in the last 30)");
+  } else {
+    const own = await callJson(client, "get_commit", { repoSlug, sha: single.sha, maxFiles: 500 });
+    const fwd = await callJson(client, "compare_refs", { repoSlug, base: single.parents[0], head: single.sha, maxFiles: 500 });
+    const back = await callJson(client, "compare_refs", { repoSlug, base: single.sha, head: single.parents[0], maxFiles: 500 });
+    const sortedPaths = (r) => (r.body?.files ?? []).map((f) => `${f.path}:${f.status}`).sort().join("|");
+    const okay =
+      !fwd.isError &&
+      sortedPaths(fwd) === sortedPaths(own) &&
+      fwd.body?.ahead?.count === 1 &&
+      fwd.body?.behind?.count === 0 &&
+      (back.body?.files ?? []).length === 0 &&
+      back.body?.behind?.count === 1;
+    verdict("COMPARE_REFS order", okay, `${single.sha.slice(0, 12)} vs its parent: ${fwd.body?.files?.length ?? "?"} file(s) = get_commit's ${own.body?.files?.length ?? "?"}; swapped: ${back.body?.files?.length ?? "?"} file(s)`);
+  }
+
+  const branches = await callJson(client, "list_branches", { repoSlug, sort: "-target.date", pagelen: 10 });
+  const head = branches.body?.branches?.map((b) => b.name).find((n) => n && n !== mainBranch);
+  if (mainBranch && head) {
+    // Swapping base and head must swap ahead and behind.
+    const fwd = await callJson(client, "compare_refs", { repoSlug, base: mainBranch, head, maxFiles: 1 });
+    const back = await callJson(client, "compare_refs", { repoSlug, base: head, head: mainBranch, maxFiles: 1 });
+    const mirrored =
+      fwd.body?.ahead?.display === back.body?.behind?.display &&
+      fwd.body?.behind?.display === back.body?.ahead?.display;
+    verdict("COMPARE_REFS mirror", !fwd.isError && mirrored, `${head} vs ${mainBranch}: ahead ${fwd.body?.ahead?.display}, behind ${fwd.body?.behind?.display}`);
+  }
+
+  // 9b. Source: root listing, a small read that must truncate, file history.
+  const root = await callJson(client, "get_file_at_ref", { repoSlug, path: "", pagelen: 50 });
+  const file = (root.body?.entries ?? []).find((e) => e.type === "file" && (e.size ?? 0) > 64);
+  verdict("GET_FILE_AT_REF root", root.body?.kind === "directory", `${root.body?.entries?.length ?? 0} entr(ies) at ${root.body?.ref}`);
+  if (file) {
+    const read = await callJson(client, "get_file_at_ref", { repoSlug, path: file.path, maxBytes: 64 });
+    verdict("GET_FILE_AT_REF truncation", read.body?.truncated === true && read.body?.returnedBytes <= 64, `${file.path}: ${read.body?.returnedBytes} of ${file.size} bytes`);
+    const history = await callJson(client, "get_file_history", { repoSlug, path: file.path, pagelen: 2 });
+    verdict("GET_FILE_HISTORY", !history.isError && typeof history.body?.history?.[0]?.sha === "string", `${history.body?.history?.length ?? 0} commit(s) for ${file.path}`);
+  }
+
+  // 9c. Code search may be off for a workspace: a warning, not a failure.
+  const search = await callJson(client, "search_code", { query: "README", repoSlug, pagelen: 1 });
+  if (search.body?.code === "code_search_unavailable") {
+    console.log(`\nSEARCH_CODE: WARNING — ${search.body.message}`);
+  } else {
+    verdict("SEARCH_CODE", !search.isError, `${search.body?.size ?? 0} hit(s)`);
+  }
 }
 
 main().catch((error) => {

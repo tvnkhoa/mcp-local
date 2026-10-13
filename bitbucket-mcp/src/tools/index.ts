@@ -15,7 +15,10 @@ import { z } from "zod";
 import type { BitbucketClient, CreatePullRequestBody } from "../services/bitbucketClient.js";
 import { describeConfig, type BitbucketConfig } from "../config/index.js";
 import { mapError, PolicyViolationError } from "../middleware/errors.js";
+import { buildCommitTools } from "./commits.js";
+import { buildCompareTools } from "./compare.js";
 import { buildPipelineTools } from "./pipelines.js";
+import { buildSourceTools } from "./source.js";
 import { UUID_RE, bool, get, num, pageInfo, resolveRepo, str } from "./shared.js";
 import {
   pageArg, pagelenArg, profileArg, qArg, repoSlugArg, sortArg,
@@ -322,12 +325,10 @@ export function buildTools(config: BitbucketConfig, client: BitbucketClient): re
     }
   });
 
-  // Registration order is the order clients see in `tools/list`. The helper
-  // functions below are declarations, so they are hoisted and usable here.
-  // Order is the order `tools/list` advertises. `registerTool` only flattens and
-  // rejects a duplicate name; it does not reorder.
-  // The pipeline group sits after the pull-request reads and before the one
-  // write tool, so every read-only tool is contiguous in `tools/list`.
+  // Registration order is the order `tools/list` advertises: `registerTool` only
+  // flattens and rejects a duplicate name. The helpers below are hoisted.
+  // The pipeline, commit, compare and source groups sit after the pull-request
+  // reads and before the one write tool, so every read-only tool is contiguous.
   return registerTool([
     healthCheckTool,
     listRepositoriesTool,
@@ -337,6 +338,9 @@ export function buildTools(config: BitbucketConfig, client: BitbucketClient): re
     getPullRequestTool,
     getPullRequestDiffTool,
     ...buildPipelineTools(config, client),
+    ...buildCommitTools(config, client),
+    ...buildCompareTools(config, client),
+    ...buildSourceTools(config, client),
     createPullRequestTool
   ]);
 

@@ -219,7 +219,8 @@ test("tool lists match the committed contract snapshots exactly", () => {
   // 94 -> 96: postgres-mcp gained ddl_status and ddl_create (DDL lane, phase 1.3).
   // 96 -> 99: and ddl_preview, ddl_dry_run, ddl_apply (phase 1.4).
   // 99 -> 101: sqlserver-mcp write_preview, write_apply (ADR 0006).
-  assert.equal(total, 101, "the workspace advertises 101 tools; update this number deliberately");
+  // 101 -> 108: bitbucket-mcp gained seven read-only commit/compare/source tools.
+  assert.equal(total, 108, "the workspace advertises 108 tools; update this number deliberately");
 });
 
 // --- a server registered before its contract exists -----------------------------
