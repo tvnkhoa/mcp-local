@@ -24,7 +24,9 @@ import { findFieldReferences, type FieldAnswer, type FieldCandidate, type FieldP
 import { getRepoLanguageService } from "../../services/typeResolution/languageServiceHost.js";
 import type { HandlerContext } from "./handlerContext.js";
 
-const TS_JS_FILE = /\.(?:[cm]?[jt]sx?)$/i;
+// .vue is in the family: the Vue lane indexes defineProps members as graph properties, and a .vue-only
+// property must not send a TS-family field back to the graph's lower bound (release E live check).
+const TS_JS_FILE = /\.(?:[cm]?[jt]sx?|vue)$/i;
 const TS_JS_LANGUAGES = ["typescript", "javascript"] as const;
 
 export type ExactFieldArgs = {

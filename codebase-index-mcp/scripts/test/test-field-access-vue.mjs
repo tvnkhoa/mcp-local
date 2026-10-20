@@ -156,6 +156,10 @@ const at = (rows) => (rows ?? []).map((r) => `${r.file}:${r.line}`);
 const ask = async (client, repoId, extra = {}) =>
   js(await client.callTool({ name: "find_field_accesses", arguments: { repoId, name: "proposed_tag_change", ownerName: "document_list_entry_schema", profile: "compact", ...extra } }));
 
+// A prop declared only in a .vue file: the Vue lane indexes it as a graph `property`, and that must not
+// send the field back to the graph's lower bound (release E live check: kb_version_ids fell back).
+writeFileSync(join(repoA, "packages/portal/src/BadgeOnly.vue"), `<script setup lang="ts">\nconst props = defineProps<{ badge_only_count: number }>()\n</script>\n\n<template>\n  <span>{{ props.badge_only_count }}</span>\n</template>\n`, "utf8");
+
 await withServer({}, "vue", async (client) => {
   for (const [id, path] of [[idA, repoA], [idB, repoB]]) {
     const indexed = js(await client.callTool({ name: "index_repository", arguments: { repoId: id, repoPath: path, mode: "full" } }));
@@ -165,7 +169,7 @@ await withServer({}, "vue", async (client) => {
   const res = await ask(client, idA);
   assert(res?.engine === "typescript-language-service", "answered by the TypeScript LanguageService", JSON.stringify(res)?.slice(0, 400));
   assert(res?.coverage?.confidence === "exact", "coverage is exact", JSON.stringify(res?.coverage));
-  assert(res?.typeResolution?.vue?.status === "in-program" && res.typeResolution.vue.vueFiles === 1 && res.typeResolution.vue.languageCore === "3.3.11", "the .vue file is in the Vue program (Volar, pinned language-core)", JSON.stringify(res?.typeResolution?.vue));
+  assert(res?.typeResolution?.vue?.status === "in-program" && res.typeResolution.vue.vueFiles === 2 && res.typeResolution.vue.languageCore === "3.3.11", "the .vue file is in the Vue program (Volar, pinned language-core)", JSON.stringify(res?.typeResolution?.vue));
   assert(res?.declaration?.file === "packages/contracts/src/entities/document-list.ts" && res?.declaration?.line === 5, "declaration is the contract key", JSON.stringify(res?.declaration));
   const reads = at(res?.reads);
   const writes = at(res?.writes);
@@ -181,6 +185,9 @@ await withServer({}, "vue", async (client) => {
   const untyped = (res?.nonMatches ?? []).filter((n) => n.kind === "untyped-object-key");
   assert(untyped.length === 1 && untyped[0].file === "packages/api/src/commhub.ts" && untyped[0].line === 6 && untyped[0].container === "toCommHubWire", "the wire key with no declared field is an untyped-object-key non-match", JSON.stringify(res?.nonMatches));
   assert(!(res?.nonMatches ?? []).some((n) => n.file === "packages/core/src/build.ts"), "the parse write is not also a non-match", JSON.stringify(res?.nonMatches));
+
+  const vueOnly = js(await client.callTool({ name: "find_field_accesses", arguments: { repoId: idA, name: "badge_only_count", profile: "compact" } }));
+  assert(vueOnly?.engine === "typescript-language-service", "a .vue-only prop (a graph property after the Vue lane) is still answered by the TypeScript lane", JSON.stringify(vueOnly)?.slice(0, 400));
 
   const warm = await ask(client, idA, { mode: "read", profile: "nano" });
   assert(warm?.coverage === "exact" && warm?.readCount === 2 && warm?.typeResolution?.cold === false, "warm nano call: counts and the coverage word", JSON.stringify(warm)?.slice(0, 400));
