@@ -14,7 +14,7 @@
         "additionalProperties": false,
         "properties": {
           "gate": {
-            "description": "The owner's words, verbatim, as they typed them or chose them in an AskUserQuestion in THIS session (join several answers from one message with ||). Passed as --gate=…; board.mjs finds the message and proves the words are in it. The wrapper never takes --words/--session/--uuid.",
+            "description": "The owner's words, verbatim, as they typed them or chose them in an AskUserQuestion in THIS session (join several answers from one message with ||; each part at least 8 characters). Passed as --gate=…; board.mjs finds the message and proves the words are in it. The wrapper never takes --words/--session/--uuid.",
             "maxLength": 4000,
             "type": "string"
           },
@@ -66,7 +66,7 @@
         "additionalProperties": false,
         "properties": {
           "gate": {
-            "description": "The owner's words, verbatim, as they typed them or chose them in an AskUserQuestion in THIS session (join several answers from one message with ||). Passed as --gate=…; board.mjs finds the message and proves the words are in it. The wrapper never takes --words/--session/--uuid.",
+            "description": "The owner's words, verbatim, as they typed them or chose them in an AskUserQuestion in THIS session (join several answers from one message with ||; each part at least 8 characters). Passed as --gate=…; board.mjs finds the message and proves the words are in it. The wrapper never takes --words/--session/--uuid.",
             "maxLength": 4000,
             "type": "string"
           },
@@ -290,7 +290,7 @@
             "type": "string"
           },
           "gate": {
-            "description": "The owner's words, verbatim, as they typed them or chose them in an AskUserQuestion in THIS session (join several answers from one message with ||). Passed as --gate=…; board.mjs finds the message and proves the words are in it. The wrapper never takes --words/--session/--uuid.",
+            "description": "The owner's words, verbatim, as they typed them or chose them in an AskUserQuestion in THIS session (join several answers from one message with ||; each part at least 8 characters). Passed as --gate=…; board.mjs finds the message and proves the words are in it. The wrapper never takes --words/--session/--uuid.",
             "maxLength": 4000,
             "type": "string"
           },
@@ -517,7 +517,7 @@
     },
     {
       "annotations": {
-        "destructiveHint": false,
+        "destructiveHint": true,
         "idempotentHint": false,
         "openWorldHint": false,
         "readOnlyHint": false
@@ -540,7 +540,7 @@
             "type": "string"
           },
           "gate": {
-            "description": "The owner's words, verbatim, as they typed them or chose them in an AskUserQuestion in THIS session (join several answers from one message with ||). Passed as --gate=…; board.mjs finds the message and proves the words are in it. The wrapper never takes --words/--session/--uuid.",
+            "description": "The owner's words, verbatim, as they typed them or chose them in an AskUserQuestion in THIS session (join several answers from one message with ||; each part at least 8 characters). Passed as --gate=…; board.mjs finds the message and proves the words are in it. The wrapper never takes --words/--session/--uuid.",
             "maxLength": 4000,
             "type": "string"
           },
@@ -996,7 +996,7 @@
         "additionalProperties": false,
         "properties": {
           "gate": {
-            "description": "The owner's words, verbatim, as they typed them or chose them in an AskUserQuestion in THIS session (join several answers from one message with ||). Passed as --gate=…; board.mjs finds the message and proves the words are in it. The wrapper never takes --words/--session/--uuid.",
+            "description": "The owner's words, verbatim, as they typed them or chose them in an AskUserQuestion in THIS session (join several answers from one message with ||; each part at least 8 characters). Passed as --gate=…; board.mjs finds the message and proves the words are in it. The wrapper never takes --words/--session/--uuid.",
             "maxLength": 4000,
             "type": "string"
           },

@@ -64,7 +64,7 @@ test("a write tool with BOARD_WRITE_ENABLED=false is refused before any process 
   for (const name of ["claim", "advance", "acknowledge", "release"]) {
     const args: Record<string, unknown> =
       name === "advance" ? { unit: "screen--review-intent", phase: "P0", session: SESSION }
-      : name === "acknowledge" ? { unit: "screen--review-intent", sha: "abcdef1", gate: "ok", session: SESSION }
+      : name === "acknowledge" ? { unit: "screen--review-intent", sha: "abcdef1", gate: "Acknowledge (Recommended)", session: SESSION }
       : name === "release" ? { target: "screen--review-intent", session: SESSION }
       : { unit: "screen--review-intent", session: SESSION };
     const { isError, payload } = await call(off, name, args);
@@ -85,10 +85,10 @@ test("read tools work with writes disabled", async () => {
 test("every gate-passing tool without a session UUID is refused", async () => {
   const base: Record<string, Record<string, unknown>> = {
     advance: { unit: "screen--review-intent", phase: "P1", gate: "Đồng ý (Recommended)" },
-    weigh: { unit: "screen--review-intent", weight: "light", yes: [], why: "owner chose light", gate: "light" },
-    new_unit: { kind: "screen", route: "/review/intent", weight: "light", yes: [], gate: "light" },
-    acknowledge: { unit: "screen--review-intent", sha: "abcdef1", gate: "Acknowledge" },
-    discover: { unit: "screen--review-intent", id: "d1", owner: true, gate: "leave it" }
+    weigh: { unit: "screen--review-intent", weight: "light", yes: [], why: "owner chose light", gate: "Light is enough" },
+    new_unit: { kind: "screen", route: "/review/intent", weight: "light", yes: [], gate: "Light is enough" },
+    acknowledge: { unit: "screen--review-intent", sha: "abcdef1", gate: "Acknowledge (Recommended)" },
+    discover: { unit: "screen--review-intent", id: "d1", owner: true, gate: "leave it as it is" }
   };
   assert.deepEqual(Object.keys(base).sort(), [...GATE_PASSING_TOOLS].sort());
   for (const [name, args] of Object.entries(base)) {
@@ -106,9 +106,9 @@ test("every gate-passing tool without a session UUID is refused", async () => {
 });
 
 test("a gate tool passes the session as --as and the words as --gate, nothing else", async () => {
-  const { isError, payload } = await call(config, "advance", { unit: "screen--review-intent", phase: "P1", gate: "Approve", session: SESSION });
+  const { isError, payload } = await call(config, "advance", { unit: "screen--review-intent", phase: "P1", gate: "Approve (Recommended)", session: SESSION });
   assert.equal(isError, false);
-  assert.deepEqual(argvOf(payload.text), ["advance", "screen--review-intent", "P1", "--gate=Approve", `--as=${SESSION}`]);
+  assert.deepEqual(argvOf(payload.text), ["advance", "screen--review-intent", "P1", "--gate=Approve (Recommended)", `--as=${SESSION}`]);
 });
 
 test("owner dispositions and over-budget need the owner's words", async () => {
@@ -131,11 +131,11 @@ test("each write tool maps its typed input to the CLI's exact flags", async () =
     ["queue_spec", { unit: "screen--review-intent", spec: "SPEC-066" }, ["queue-spec", "screen--review-intent", "SPEC-066"]],
     ["amend", { unit: "screen--review-intent", phase: "P4", why: "re-cut" }, ["amend", "screen--review-intent", "P4", "--why=re-cut"]],
     ["weigh", { unit: "screen--review-intent", weight: "full", yes: ["route", "spec"], why: "w" }, ["weigh", "screen--review-intent", "full", "--yes=route,spec", "--why=w"]],
-    ["acknowledge", { offBoard: true, gate: "ack all" }, ["acknowledge", "--off-board", "--gate=ack all"]],
-    ["acknowledge", { unit: "screen--review-intent", sha: "abcdef1", gate: "ok" }, ["acknowledge", "screen--review-intent", "abcdef1", "--gate=ok"]],
+    ["acknowledge", { offBoard: true, gate: "acknowledge them all" }, ["acknowledge", "--off-board", "--gate=acknowledge them all"]],
+    ["acknowledge", { unit: "screen--review-intent", sha: "abcdef1", gate: "Acknowledge (Recommended)" }, ["acknowledge", "screen--review-intent", "abcdef1", "--gate=Acknowledge (Recommended)"]],
     ["discover", { unit: "screen--review-intent", text: "a site missed" }, ["discover", "screen--review-intent", "--text=a site missed"]],
     ["discover", { unit: "screen--review-intent", id: "d2", left: "why", revisit: "2026-11-02" }, ["discover", "screen--review-intent", "d2", "--left=why", "--revisit=2026-11-02"]],
-    ["discover", { unit: "screen--review-intent", id: "d2", owner: true, gate: "để lại" }, ["discover", "screen--review-intent", "d2", "--owner", "--gate=để lại"]],
+    ["discover", { unit: "screen--review-intent", id: "d2", owner: true, gate: "để lại như cũ" }, ["discover", "screen--review-intent", "d2", "--owner", "--gate=để lại như cũ"]],
     ["discover", { unit: "screen--review-intent", id: "d3", sameAs: "screen--documents#d1" }, ["discover", "screen--review-intent", "d3", "--same-as=screen--documents#d1"]],
     ["reserve", { kind: "docs15" }, ["reserve", "docs15"]],
     ["notes_write", { unit: "screen--review-intent" }, ["notes", "screen--review-intent", "--write"]],
@@ -216,4 +216,26 @@ test("a non-absolute BOARD_REPO_ROOT is refused before any process runs", async 
 test("an unknown tool reports not_found", async () => {
   const { payload } = await call(config, "prune_shots", {});
   assert.deepEqual(payload, { code: "not_found", message: "Unknown tool: prune_shots." });
+});
+
+// --- blank / short owner words (a blank part makes board.mjs search for "" and prove nothing) ---
+
+test("gate words with a blank or short ||-part are refused before any process runs", async () => {
+  for (const gate of ["||", " || ", "|| ||", "a||", "ok", "Đồng ý", "Approve all || ok", "|| Approve (Recommended)", "Approve (Recommended) ||"]) {
+    for (const [name, args] of [
+      ["advance", { unit: "screen--review-intent", phase: "P1" }],
+      ["acknowledge", { unit: "screen--review-intent", sha: "abcdef1" }],
+      ["discover", { unit: "screen--review-intent", id: "d1", owner: true }],
+      ["weigh", { unit: "screen--review-intent", weight: "light", yes: [], why: "owner chose light" }],
+      ["new_unit", { kind: "screen", route: "/review/intent", weight: "light", yes: [] }]
+    ] as const) {
+      const { isError, payload } = await call(config, name, { ...args, gate, session: SESSION });
+      assert.equal(isError, true, `${name} accepted gate ${JSON.stringify(gate)}`);
+      assert.equal(payload.code, "validation_error", `${name} / ${JSON.stringify(gate)}`);
+      assert.match(payload.detail, /gate/u);
+    }
+  }
+  // Every part at least 8 characters passes.
+  const okCall = await call(config, "advance", { unit: "screen--review-intent", phase: "P1", gate: "Đồng ý cả hai || Giữ nguyên", session: SESSION });
+  assert.equal(okCall.isError, false, JSON.stringify(okCall.payload));
 });

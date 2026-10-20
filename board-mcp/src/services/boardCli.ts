@@ -7,6 +7,11 @@
  * owner's transcripts under the home directory, and git from PATH).
  *
  * Nothing here knows a board rule. It runs the CLI and classifies the exit.
+ *
+ * Timeout: past BOARD_CALL_TIMEOUT_MS (default 120 s — board.mjs's README measures `status` /
+ * `check` at 56–120 s on a cold history cache) the child gets SIGTERM. A write killed inside
+ * board.mjs's `with_lock` leaves its mutex directory behind; board.mjs breaks a lock older than
+ * 30 s, so the next write may wait up to that long.
  */
 
 import { execFile } from "node:child_process";
@@ -32,7 +37,7 @@ export function createBoardRunner(config: BoardConfig): BoardRunner {
         {
           cwd: config.repoRoot,
           timeout: config.callTimeoutMs,
-          killSignal: "SIGKILL",
+          killSignal: "SIGTERM",
           maxBuffer: MAX_OUTPUT_BYTES,
           windowsHide: true,
           encoding: "utf8",
@@ -44,12 +49,17 @@ export function createBoardRunner(config: BoardConfig): BoardRunner {
             return;
           }
           const e = error as NodeJS.ErrnoException & { code?: number | string; killed?: boolean; signal?: string | null };
+          // Node also kills the child when output passes maxBuffer — that is not a timeout.
+          if (e.code === "ERR_CHILD_PROCESS_STDIO_MAXBUFFER") {
+            resolve({ exitCode: null, stdout: "", stderr: `board.mjs printed more than ${MAX_OUTPUT_BYTES} bytes; the run was stopped.`, timedOut: false });
+            return;
+          }
           const timedOut = e.killed === true && e.signal !== null && e.signal !== undefined;
           if (typeof e.code === "number") {
             resolve({ exitCode: e.code, stdout, stderr, timedOut });
             return;
           }
-          // Spawn failure (ENOENT on the cwd, maxBuffer exceeded…): no exit code to classify.
+          // Spawn failure (ENOENT on the cwd…): no exit code to classify.
           resolve({ exitCode: null, stdout, stderr: stderr || `${e.code ?? "spawn_error"}: ${e.message}`, timedOut });
         }
       );
@@ -60,6 +70,13 @@ export function createBoardRunner(config: BoardConfig): BoardRunner {
 const tail = (s: string, max = 2000): string => (s.length > max ? `…${s.slice(-max)}` : s);
 
 const trimEnd = (s: string): string => s.replace(/\s+$/u, "");
+
+/** The text of the LAST stderr line starting `board: `, without the prefix, or null. */
+export function refusalLine(stderr: string): string | null {
+  const lines = stderr.split(/\r?\n/u).filter((l) => l.startsWith(REFUSAL_PREFIX));
+  const last = lines.at(-1);
+  return last === undefined ? null : trimEnd(last.slice(REFUSAL_PREFIX.length));
+}
 
 /** stdout parsed as JSON, or undefined. Only an object or array counts — a bare number is text. */
 export function parseJsonOutput(stdout: string): unknown {
@@ -83,7 +100,7 @@ export interface InterpretOptions {
 /**
  * Classify one run:
  *   exit 0                                  → { ok: true, text, json? }
- *   non-zero, stderr starts `board: `       → { ok: false, refused: true, why }
+ *   exit 1, a stderr line starting `board: ` → { ok: false, refused: true, why: the last such line }
  *   exit 1, no stderr, findings command     → { ok: false, text } (the findings)
  *   killed by the timeout                   → `timeout` error
  *   anything else                           → `upstream_error`
@@ -97,12 +114,15 @@ export function interpretRun(run: BoardRun, options: InterpretOptions): Result<B
     const json = options.parseJson === true ? parseJsonOutput(run.stdout) : undefined;
     return ok(json === undefined ? { ok: true, text } : { ok: true, json, text });
   }
-  const stderr = run.stderr.replace(/^﻿/u, "").trimStart();
-  if (run.exitCode !== null && stderr.startsWith(REFUSAL_PREFIX)) {
+  const stderr = run.stderr.replace(/^﻿/u, "");
+  // board.mjs refuses with `console.error(\`board: ${msg}\`)` then exit(1). Git or Node may print
+  // warnings first, so the LAST line starting `board: ` is the refusal — and only on exit 1.
+  const refusal = run.exitCode === 1 ? refusalLine(stderr) : null;
+  if (refusal !== null) {
     return ok({
       ok: false,
       refused: true,
-      why: trimEnd(stderr.slice(REFUSAL_PREFIX.length)),
+      why: refusal,
       text,
       hint: "The board refused — its own rule, not the wrapper's. Read `why`; fix what it names and call again."
     });

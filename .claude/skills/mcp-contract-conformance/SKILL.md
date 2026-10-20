@@ -39,7 +39,7 @@ the snapshot depend on the snapshotting machine.
 
 ```bash
 cd <server> && npm run build && cd ..
-npm run contracts:check                          # all five; red = drift
+npm run contracts:check                          # all six; red = drift
 npm run contracts:update -- --server <key>       # only after deciding the drift is intended
 git diff contracts/                              # this IS the review
 npm run generate:all && npm run generate:check

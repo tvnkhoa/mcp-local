@@ -1,6 +1,6 @@
 # Servers
 
-The five MCP servers, and how to add or change one.
+The six MCP servers, and how to add or change one.
 
 ## Building and changing
 
@@ -9,7 +9,7 @@ The five MCP servers, and how to add or change one.
 | [Server development](server-development.md) | Scaffolding, registering, and operating a server — including the ordering constraint that makes registration a separate step |
 | [Tool development](tool-development.md) | Declaring, gating, testing and snapshotting a tool |
 
-## The five servers
+## The six servers
 
 Each server's own `README.md` is its reference — the tool catalogue and env table there are
 **generated from `@mcp/manifest`**, so they cannot drift. This table links out rather than restating
@@ -22,8 +22,9 @@ them.
 | `sqlserver-mcp` | `sqlserver-mcp/` | Read-only T-SQL across the catalogs of one instance; gated stored-procedure execution. The unit of work is a catalog, not the server. | [README](../../sqlserver-mcp/README.md) · [ADR 0004](../decisions/0004-tsql-guardrail-policy.md) |
 | `observe-mcp` | `observe-mcp/` | Read-only log/trace search over OpenObserve. | [README](../../observe-mcp/README.md) · [issue registry](../../observe-mcp/docs/mcp-observe-issue-registry.md) |
 | `bitbucket-mcp` | `bitbucket-mcp/` | Read repositories, pull requests and pipelines, and **create PRs** (write gated). | [README](../../bitbucket-mcp/README.md) |
+| `board-mcp` | `board-mcp/` | Thin wrapper over wec.aria's pipeline board CLI (`checks/board/board.mjs`): read the board; claim, advance and record when writes are enabled. Gate words need the caller's session UUID. | [README](../../board-mcp/README.md) |
 
-Counts (99 tools, 137 env vars) come from the manifest, not from this page —
+Counts (138 tools, 152 env vars) come from the manifest, not from this page —
 [Architecture › As built](../architecture/as-built.md) §1 names the command.
 
 ## Operational skills

@@ -37,9 +37,9 @@ export const boardEnv: readonly EnvField[] = [
   {
     name: "BOARD_CALL_TIMEOUT_MS",
     required: false,
-    codeDefault: "30000",
+    codeDefault: "120000",
     kind: "number",
     section: "Limits",
-    note: "Per-call timeout for one board.mjs run; the child is killed past it. status and check take about 3 s on a warm cache."
+    note: "Per-call timeout for one board.mjs run; the child gets SIGTERM past it. status and check take ~3 s on a warm history cache and 56–120 s on a cold one. A write killed mid-lock leaves board.mjs's mutex held up to 30 s."
   }
 ];

@@ -161,7 +161,7 @@ there in at most two hops — this page does not repeat its index.
 |---|---|
 | [`docs/guides/`](docs/guides/README.md) | Getting running — start with [onboarding](docs/guides/onboarding.md) |
 | [`docs/development/`](docs/development/README.md) | The working loop: workflow, CI, backlog |
-| [`docs/servers/`](docs/servers/README.md) | The five servers, and how to add or change one |
+| [`docs/servers/`](docs/servers/README.md) | The six servers, and how to add or change one |
 | [`docs/architecture/`](docs/architecture/README.md) | The shape, and the design reasoning behind it |
 | [`docs/reference/`](docs/reference/README.md) | Conventions, folder rules, dependency rules, packages |
 | [`docs/decisions/`](docs/decisions/README.md) | The ADR log |

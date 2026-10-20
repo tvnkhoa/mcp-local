@@ -1,6 +1,6 @@
 ---
 name: mcp-security-review
-description: "Pre-merge security review of a change to any of this workspace's five MCP servers or shared packages: read-only defaults and env-flag write gates, declared guards, preview/apply/rollback with HMAC approval, prod/allowlist scoping, input validation, secrets and logging, error leakage, and the guard/contract gates that must stay green. Use before merging a server or packages/ diff that adds a tool, touches a gate, a guard, config/env, SQL, file paths, or an upstream client. It is the umbrella review — it hands SQL-construction and bounds detail to db-tool-review, hints to mcp-tool-annotations and host config to mcp-host-integration-security."
+description: "Pre-merge security review of a change to any of this workspace's six MCP servers or shared packages: read-only defaults and env-flag write gates, declared guards, preview/apply/rollback with HMAC approval, prod/allowlist scoping, input validation, secrets and logging, error leakage, and the guard/contract gates that must stay green. Use before merging a server or packages/ diff that adds a tool, touches a gate, a guard, config/env, SQL, file paths, or an upstream client. It is the umbrella review — it hands SQL-construction and bounds detail to db-tool-review, hints to mcp-tool-annotations and host config to mcp-host-integration-security."
 ---
 
 # MCP Security Review

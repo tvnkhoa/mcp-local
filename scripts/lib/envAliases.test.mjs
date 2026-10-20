@@ -13,7 +13,7 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..")
  * the installer prompts, while each server needs it at runtime (`src/config/aliases.ts`) — and a
  * server may not import the workspace tooling packages (dependency rule 5, `servers/tooling-import`).
  * ADR 0002 is about exactly this shape of problem: three hand-copied SQL guardrail token lists
- * drifted apart because nothing compared them. So this test compares them, for all five servers.
+ * drifted apart because nothing compared them. So this test compares them, for every server.
  *
  * A root-level test rather than a server-level one, because only a script may import the manifest.
  */
@@ -30,7 +30,8 @@ const SERVER_DIRS = {
   "postgres-mcp": "postgres-mcp",
   "sqlserver-mcp": "sqlserver-mcp",
   "observe-mcp": "observe-mcp",
-  "bitbucket-mcp": "bitbucket-mcp"
+  "bitbucket-mcp": "bitbucket-mcp",
+  "board-mcp": "board-mcp"
 };
 
 // Read the runtime table out of source rather than importing it: the server compiles to its own

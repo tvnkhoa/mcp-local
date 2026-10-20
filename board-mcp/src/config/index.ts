@@ -9,17 +9,24 @@ import path from "node:path";
 
 import { createEnvReader, defaultEnvSource, type EnvReader, type EnvSource } from "@mcp/core";
 
+import { resolveAliases } from "./aliases.js";
+
 let reader: EnvReader | undefined;
 
 /** The environment snapshot, taken on first read rather than at import (see PG-ENV-002). */
 function env(): EnvReader {
-  return (reader ??= createEnvReader(defaultEnvSource()));
+  if (reader === undefined) {
+    // Former names are copied onto canonical ones BEFORE the snapshot (none exist yet).
+    resolveAliases();
+    reader = createEnvReader(defaultEnvSource());
+  }
+  return reader;
 }
 
 /** Where board.mjs lives, relative to the repo root. */
 export const BOARD_CLI_RELATIVE = "checks/board/board.mjs";
 
-export const DEFAULT_CALL_TIMEOUT_MS = 30_000;
+export const DEFAULT_CALL_TIMEOUT_MS = 120_000;
 /** A call longer than this is refused at load: the board's own mutex breaks a stale lock at 30 s. */
 export const MAX_CALL_TIMEOUT_MS = 600_000;
 

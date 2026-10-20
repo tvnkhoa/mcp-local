@@ -9,7 +9,7 @@
 
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -40,6 +40,7 @@ test("write path on a scratch copy: claim, refusal to a second session, gate ref
     return;
   }
   const root = scratchCopy(source);
+  t.after(() => rmSync(root, { recursive: true, force: true, maxRetries: 3 }));
   assert.notEqual(path.resolve(root), path.resolve(source), "never the live board");
   const units = readdirSync(path.join(root, "checks", "board", "units")).filter((f) => f.endsWith(".json"));
   assert.ok(units.length > 0);
@@ -56,7 +57,7 @@ test("write path on a scratch copy: claim, refusal to a second session, gate ref
   assert.match(second.payload.why, new RegExp(`held by ${SESSION}`, "u"));
 
   // No transcript of this scratch repo holds these words, and --as scopes the search to SESSION.
-  const gate = await call(config, "advance", { unit, phase: "P1", gate: "Đồng ý `x` $y || z", session: SESSION });
+  const gate = await call(config, "advance", { unit, phase: "P1", gate: "Đồng ý `x` $y || giữ nguyên", session: SESSION });
   assert.equal(gate.payload.refused, true, JSON.stringify(gate.payload));
   assert.match(gate.payload.why, new RegExp(`--gate: no user message in session ${SESSION}`, "u"));
   assert.ok(gate.payload.why.includes("Đồng ý `x` $y"), "the words reached board.mjs intact");

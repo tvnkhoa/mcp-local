@@ -18,7 +18,7 @@ Enforcement posture:
 Primary targets in this workspace:
 
 1. `codebase-index-mcp` — the code-graph server itself
-2. `mcp-local` — the whole workspace: all five servers and the shared packages
+2. `mcp-local` — the whole workspace: all six servers and the shared packages
 
 Reference and benchmark target (optional):
 

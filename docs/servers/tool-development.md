@@ -55,7 +55,7 @@ startup rather than on first call. It rejects:
 - `readOnly: true` together with `destructive: true`
 
 `createTool` is an alias for `defineTool`; both exist so `createTool` / `createResource` /
-`createPrompt` / `createServer` read as one vocabulary. All five servers call `defineTool`.
+`createPrompt` / `createServer` read as one vocabulary. All six servers call `defineTool`.
 
 ### Why two schemas
 

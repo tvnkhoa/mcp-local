@@ -5,7 +5,7 @@ description: "Review how this workspace's MCP servers are wired into a host agen
 
 # MCP Host Integration Security
 
-All five servers are **local stdio processes** launched by the host — no network listener, no HTTP
+All six servers are **local stdio processes** launched by the host — no network listener, no HTTP
 transport. Four of them make outbound calls (databases, OpenObserve, Bitbucket) with credentials from
 their env. The trust boundary is therefore the host config that spawns them and the env it hands over.
 

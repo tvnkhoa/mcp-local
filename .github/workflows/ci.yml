@@ -43,6 +43,8 @@ jobs:
             postgres-mcp/package-lock.json
             observe-mcp/package-lock.json
             bitbucket-mcp/package-lock.json
+            sqlserver-mcp/package-lock.json
+            board-mcp/package-lock.json
 
       - name: Install workspace packages
         run: npm ci
@@ -82,7 +84,7 @@ jobs:
       - name: Test servers
         run: npm run test:servers
 
-      # Boots all four servers over a real stdio handshake with placeholder env
+      # Boots all six servers over a real stdio handshake with placeholder env
       # and diffs tools/list against the committed snapshots. This is both the
       # contract gate and the credential-free boot check — it is what catches a
       # module that compiles but cannot load.

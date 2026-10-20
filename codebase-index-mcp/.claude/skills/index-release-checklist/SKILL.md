@@ -16,7 +16,7 @@ hard failure and report it, because later steps assume the earlier ones held.
 | 4 | No-LLM | `npm run guard:no-llm-runtime` (server) | exit 0. **Hard policy, never waived** |
 | 5 | Smoke from `dist/` | `npm run smoke` (server) | handshake, `health_check`, index and graph queries all succeed |
 | 6 | Token budget | `npm run benchmark:plan:check` (server) | compact savings ≥ 40%, no per-tool byte regression. CI runs this, `verify:all` does not |
-| 7 | Workspace gate | `npm run verify:all` (root), **once** (~3 min) | green. Includes `contracts:check` (boots all five servers), `generate:check` and `docs:check`. Re-run only the narrow target that failed |
+| 7 | Workspace gate | `npm run verify:all` (root), **once** (~3 min) | green. Includes `contracts:check` (boots all six servers), `generate:check` and `docs:check`. Re-run only the narrow target that failed |
 | 8 | Contract intent | `git diff contracts/codebase-index.json` | every tool/schema change is intended, and README, the skill template and `orient.ts` agree with it |
 | 9 | Conformance | `incremental-indexing` → *Verification: full vs incremental* | `ready` |
 | 10 | Security | `index-security-review` | `pass`, or only `low` findings |

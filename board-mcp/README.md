@@ -24,7 +24,7 @@ npm run dev            # tsx, no build
 |---|---|---|---|
 | `BOARD_REPO_ROOT` | **yes** | — | Absolute path; the CLI runs with this as its cwd. e.g. D:/1.SourceCode/crm/wec.aria |
 | `BOARD_WRITE_ENABLED` | no | `false` | The board's write subcommands (new, claim, advance, acknowledge, …) are DISABLED unless exactly true or 1. The tools are still advertised; the gate is enforced when they are called. |
-| `BOARD_CALL_TIMEOUT_MS` | no | `30000` *(code)* | Per-call timeout for one board.mjs run; the child is killed past it. status and check take about 3 s on a warm cache. |
+| `BOARD_CALL_TIMEOUT_MS` | no | `120000` *(code)* | Per-call timeout for one board.mjs run; the child gets SIGTERM past it. status and check take ~3 s on a warm history cache and 56–120 s on a cold one. A write killed mid-lock leaves board.mjs's mutex held up to 30 s. |
 
 3 variables. Defaults marked *(code)* are the server's own fallback and are **not** written into your agent config — set them only to override.
 
@@ -83,13 +83,16 @@ snapshot boots the server with a placeholder that is not a path.
 Every board tool answers `{ ok, json?, text, refused?, why?, hint? }`:
 
 - **exit 0** → `ok: true`, `text` = stdout.
-- **non-zero exit, stderr starting `board: `** → `ok: false, refused: true, why: <the CLI's sentence>`.
+- **exit 1 with a stderr line starting `board: `** → `ok: false, refused: true, why: <the CLI's sentence>`
+  — the LAST such line, since git or Node may print warnings before it.
   A refusal is the board's rule; read `why`, fix what it names, call again.
 - **`check` / `gate` exit 1 with no `board: ` line** → `ok: false` with the findings in `text` —
   a report, not a failure.
 - **any other non-zero exit** (a stack trace, git failing) → MCP error `upstream_error`, stderr tail
-  in `detail`. Past `BOARD_CALL_TIMEOUT_MS` the child is killed → `timeout`. A board command killed
-  mid-write can leave board.mjs's mutex directory behind; board.mjs breaks a stale one after 30 s.
+  in `detail`. Output past 8 MiB is stopped → `upstream_error`. Past `BOARD_CALL_TIMEOUT_MS`
+  (default 120 s: board.mjs measures `status` / `check` at 56–120 s on a cold history cache) the
+  child gets SIGTERM → `timeout`. A write killed inside board.mjs's `with_lock` leaves its mutex
+  directory behind; board.mjs breaks a lock older than 30 s, so the next write may wait that long.
 - `status` with `unit` adds `unitFile`: the **raw** `checks/board/units/<id>.json`. Raw only —
   phase, waits and claims are what `text` says; deriving them here would duplicate `rules.mjs`.
 
@@ -124,7 +127,10 @@ CLI under a label are not this session's.
 | `discover` | the `owner: true` disposition |
 
 The owner's words go in as `gate` → `--gate=<words>` (join several answers from one message with
-`||`). The wrapper **never** accepts `--words`, `--session` or `--uuid` from the model: board.mjs
+`||`). **Every `||` part must be at least 8 characters after trimming.** board.mjs searches for the
+first part and drops blank parts from its proof, so `"||"` would make it search for `""` — the
+newest owner message — and prove nothing; a fragment like `ok` sits in nearly every message. A
+genuine answer shorter than 8 characters is recorded from the CLI. The wrapper **never** accepts `--words`, `--session` or `--uuid` from the model: board.mjs
 finds the message itself. This server never writes a unit file or a claim — board.mjs does.
 
 **What this proves, and what it does not.** board.mjs proves the OWNER typed those words (or chose

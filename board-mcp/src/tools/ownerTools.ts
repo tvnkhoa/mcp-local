@@ -49,7 +49,8 @@ export function buildOwnerWordTools(config: BoardConfig, run: BoardRunner): read
       title: "New unit",
       description:
         "Make a unit (board.mjs new). kind=screen: `route` + `weight` + `yes`. kind=family: `route` only (a family walks every phase). kind=horizontal: `name` + `paths` + `weight` + `yes`, optionally `after` | `before` and `about`. A weight lighter than the rubric recommends needs `gate` (the owner's words).",
-      annotations: ADDS,
+      // Overwrites: `before` rewires another unit's `after` (the named unit now follows this one).
+      annotations: OVERWRITES,
       inputSchema: schema.object(
         {
           kind: schema.enumOf(["screen", "family", "horizontal"], "Unit kind."),

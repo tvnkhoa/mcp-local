@@ -31,9 +31,21 @@ test("any other non-zero exit is an upstream_error, not a refusal", () => {
   const r = interpretRun({ exitCode: 1, stdout: "", stderr: "fatal: bad revision 'a7b3422e..HEAD'\nError: Command failed", timedOut: false }, { command: "status" });
   assert.equal(r.ok, false);
   if (!r.ok) assert.equal(r.error.code, "upstream_error");
-  // A refusal line that is not FIRST does not make the run a refusal.
-  const late = interpretRun({ exitCode: 1, stdout: "", stderr: "warning\nboard: x", timedOut: false }, { command: "claim" });
-  assert.equal(late.ok, false);
+  // A `board: ` line on any exit code but 1 is not a refusal.
+  const two = interpretRun({ exitCode: 2, stdout: "", stderr: "board: x is held", timedOut: false }, { command: "claim" });
+  assert.equal(two.ok, false);
+  if (!two.ok) assert.equal(two.error.code, "upstream_error");
+});
+
+test("warnings before the refusal are skipped: the LAST `board: ` line is the why", () => {
+  const stderr = "warning: in the working copy of 'x', LF will be replaced by CRLF\n(node:123) ExperimentalWarning: something\nboard: first\nboard: screen--x is not claimed by s — board.mjs claim screen--x --as=s\n";
+  const r = interpretRun({ exitCode: 1, stdout: "", stderr, timedOut: false }, { command: "advance" });
+  assert.ok(r.ok);
+  assert.equal(r.value.refused, true);
+  assert.equal(r.value.why, "screen--x is not claimed by s — board.mjs claim screen--x --as=s");
+  // An indented source line quoting `board: ` inside a stack trace is not a refusal line.
+  const crash = interpretRun({ exitCode: 1, stdout: "", stderr: "file:///x/io.mjs:50\n      throw new Error(`board: the mutex`)\n\nError: board: the mutex at x is held", timedOut: false }, { command: "claim" });
+  assert.equal(crash.ok, false);
 });
 
 test("check/gate exit 1 with no refusal line is a findings report, not an error", () => {
@@ -87,7 +99,7 @@ test("arg quoting round-trip: Vietnamese, backticks, $, \\\\, ||, quotes and %VA
     "C:\\Program Files\\Git\\ \\\\server\\share\\ trailing\\",
     "a \"quoted\" 'word' & | ; < > ^ %PATH% !x! \t tab",
     "ends with a backslash before a quote\\\"",
-    "x || y || z"
+    "first part || second part || third part"
   ];
   for (const gate of words) {
     const { isError, payload } = await call(config, "advance", { unit: "screen--review-intent", phase: "P1", gate, session: SESSION });

@@ -4,7 +4,7 @@ Guidance for Claude Code when working in this repository.
 
 ## Workspace Overview
 
-Five independent MCP servers — **not** a monorepo with shared packages. Each has its own
+Six independent MCP servers — **not** a monorepo with shared packages. Each has its own
 `package.json`, `tsconfig.json` and `dist/`. All are TypeScript 5.7+ ESM (`"type": "module"`) on
 `@modelcontextprotocol/sdk`. Every server is read-only by default; each write path is behind its own
 env flag.
@@ -16,6 +16,7 @@ env flag.
 | `sqlserver-mcp/` | Microsoft SQL Server, T-SQL guardrails; gated write lane | **The unit of work is a catalog, not the server** |
 | `observe-mcp/` | OpenObserve logs/traces for CommunicationHub / CRM | **Service identity is resolved, not raw** |
 | `bitbucket-mcp/` | Repos, commits, source, PRs and **pipelines**; gated PR create/comment/merge, server-side commits, scratch branches | The repos have no server-side branch protection, so merge-commit-only and never-force live in the tools. Pipelines are read-only. Bitbucket's `x..y` is head-first: build it only via `buildCompareSpec` |
+| `board-mcp/` | Thin wrapper over wec.aria's pipeline board CLI (`checks/board/board.mjs`); read always, writes gated by `BOARD_WRITE_ENABLED` | **A thin wrapper, not a second board**: execFile with an args array, no rule re-implemented. Gate words go in as `--gate` with the caller's session UUID as `--as`, which proves the owner typed them in that session — not that the caller is that session |
 
 Four details that cost time if you learn them the hard way:
 
@@ -49,7 +50,7 @@ Four details that cost time if you learn them the hard way:
 ## Commands
 
 ```bash
-# per server — all five answer to the same four scripts
+# per server — all six answer to the same four scripts
 cd <server> && npm run build | typecheck | test | smoke     # plus start, dev
 
 # codebase-index-mcp extras
@@ -72,7 +73,7 @@ npm run verify:live    # the live smoke tests. NEEDS REAL CREDENTIALS.
 ```
 
 `verify:all` is deliberately **credential-free**, so it means the same thing on a fresh clone as in
-CI. `contracts:check` inside it boots all five servers over a real stdio handshake with placeholder
+CI. `contracts:check` inside it boots all six servers over a real stdio handshake with placeholder
 env — that is what catches a module that compiles but cannot load.
 
 CI (`.github/workflows/ci.yml`, Windows + Node 22) runs the same steps **plus** `install:servers` and
@@ -89,7 +90,7 @@ Narrower targets — prefer these over re-running the aggregate: `verify:package
 Each server's `.env.example`, the `<!-- BEGIN/END GENERATED -->` blocks in its `README.md`, and its
 `tools` list are **rendered from `@mcp/manifest`**. Edit the manifest, then `npm run generate:all`
 (`generate:check` fails on drift and runs inside `verify:all`). Env vars are declared once, in
-`packages/manifest/src/envSpecs/<server>.ts` — **152** across the five servers (45/35/25/31/16).
+`packages/manifest/src/envSpecs/<server>.ts` — **155** across the six servers (45/35/25/31/16/3).
 
 `observe-mcp/docs/service-catalog.json` is also generated, but by `catalog:refresh` against live
 OpenObserve; its `code` blocks are hand-written and preserved, so it is **not** part of
@@ -97,7 +98,7 @@ OpenObserve; its `code` blocks are hand-written and preserved, so it is **not** 
 
 ## Architecture
 
-**Standard structure (all five servers):**
+**Standard structure (all six servers):**
 `src/{tools,resources,prompts,middleware,services,repositories,config,types}/` plus `src/index.ts`.
 A slot exists only where the server has that concern.
 

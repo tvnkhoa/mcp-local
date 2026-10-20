@@ -57,7 +57,8 @@ at a verify gate run `notes_write(unit, session)` first.
 - This proves the owner typed the words in that session's transcript — not that the caller is that session.
 - Not offered: `prune-shots`, `precheck.mjs`, `shoot.mjs`, `release --force` (the owner's, from the CLI).
 - `check` / `gate` returning `ok: false` without `refused` is a findings report, not a failure.
-- A call is killed after `BOARD_CALL_TIMEOUT_MS` (default 30 s).
+- A call gets SIGTERM after `BOARD_CALL_TIMEOUT_MS` (default 120 s; a cold `status`/`check` takes up to ~120 s).
+- `gate`: every `||` part at least 8 characters, verbatim — a blank or two-letter part is refused.
 
 ## Response profiles
 
