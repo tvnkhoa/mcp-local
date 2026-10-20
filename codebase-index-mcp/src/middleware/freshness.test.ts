@@ -28,7 +28,7 @@ type Harness = {
   cleanup: () => void;
 };
 
-function harness(opts: { budgetMs: number; autoFinish?: boolean }): Harness {
+function harness(opts: { budgetMs: number; autoFinish?: boolean; refuse?: string }): Harness {
   const lockDir = mkdtempSync(path.join(tmpdir(), "cim-fresh-"));
   let tree: RepoTreeState = { head: "aaa111", dirty: [] };
   let indexed: string | null = "aaa111";
@@ -44,6 +44,7 @@ function harness(opts: { budgetMs: number; autoFinish?: boolean }): Harness {
     getIndexedCommit: () => indexed,
     readTree: () => tree,
     markTriggered: (runId) => triggered.push(runId),
+    ...(opts.refuse !== undefined && { refuseRefresh: () => opts.refuse ?? null }),
     run: async (_repoId, _repoPath, mode) => {
       runs.push({ mode });
       if (!opts.autoFinish) await new Promise<void>((resolve) => (release = resolve));
@@ -181,4 +182,15 @@ test("applyFreshness: an exact TypeScript answer scopes the note to its index-de
   assert.ok(out.freshness.appliesTo.startsWith("index-derived parts only"));
   const nano = applyFreshness({ engine: "typescript-language-service", coverage: "exact" }, note) as { coverage: string };
   assert.equal(nano.coverage, "exact", "nano's bare word too");
+});
+
+test("release F: a process told it must not write over a newer build answers stale and runs nothing", async () => {
+  const h = harness({ budgetMs: 1000, autoFinish: true, refuse: "written by a newer build (v7-x)." });
+  try {
+    h.setTree({ head: "bbb222", dirty: [] });
+    const note = await h.gate.ensureFresh("r");
+    assert.equal(note.state, "stale");
+    assert.match(note.reason ?? "", /newer build/);
+    assert.equal(h.runs.length, 0);
+  } finally { h.cleanup(); }
 });

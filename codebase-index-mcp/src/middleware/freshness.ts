@@ -51,6 +51,11 @@ export type FreshnessGateOptions = {
   getIndexedCommit: (repoId: string) => string | null;
   readTree: (repoPath: string) => RepoTreeState;
   run: (repoId: string, repoPath: string, mode: IndexMode) => Promise<IndexRunResult>;
+  /**
+   * Why this process must not refresh the repo at all, or null. Release F: a server still running an
+   * older build refreshed over a newer build's index (several processes share one DB).
+   */
+  refuseRefresh?: (repoId: string) => string | null;
   /** Tag a finished run as query-triggered, for `health_check`. Best-effort. */
   markTriggered?: (runId: string) => void;
   /**
@@ -289,6 +294,12 @@ export function createFreshnessGate(opts: FreshnessGateOptions): FreshnessGate {
     // A deleted or reverted file that was indexed while dirty is not dirty any more, so dirty mode
     // would never look at it again: only an incremental run (re-hash everything, prune the gone) clears it.
     const mode: "incremental" | "dirty" = headMoved || vanished.length > 0 ? "incremental" : "dirty";
+    const refusal = opts.refuseRefresh?.(repoId) ?? null;
+    if (refusal) {
+      const note: FreshnessNote = { state: "stale", mode, reason: `${refusal} This answer comes from the index as that build wrote it.` };
+      lastCheck.set(repoId, { at: started, note });
+      return note;
+    }
     const lockFile = lockFileFor(opts.lockDir, repoId);
     if (!tryAcquireLock(lockFile, staleLockMs, started)) {
       const note: FreshnessNote = {

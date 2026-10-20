@@ -23,6 +23,7 @@ import type { IndexMode, IndexRunResult } from "../../types/index.js";
 import {
   buildSkippedRunSummary,
   evaluateIncrementalSkip,
+  newerBuildRefusal,
   resolvePerformanceProfileDecision,
   safeCrossRepoResolve
 } from "./runPolicy.js";
@@ -84,6 +85,10 @@ export function createIndexRunner(options: IndexRunnerOptions): RunIndexAndResol
     maxFiles: number,
     batchSize: number
   ): Promise<IndexRunResult> {
+  // Never write over an index a newer build wrote (several server processes share one DB).
+  const refusal = newerBuildRefusal(store.getLatestRun(repoId)?.indexVersion);
+  if (refusal) throw new Error(`index_repository refused: ${refusal}`);
+
   const yieldToEventLoop = async (): Promise<void> => {
     await new Promise<void>((resolve) => setImmediate(resolve));
   };

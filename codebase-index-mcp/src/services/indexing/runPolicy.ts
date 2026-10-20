@@ -35,6 +35,26 @@ export interface PerformanceProfileDecision {
   symbolCount: number;
 }
 
+/** The generation number of an INDEX_VERSION (v7-text-json-html-svg is 7), or null for a foreign shape. */
+export function indexGeneration(version: string | null | undefined): number | null {
+  const m = /^v(\d+)\b/.exec(version ?? "");
+  return m ? Number(m[1]) : null;
+}
+
+/**
+ * Release F: several server processes share one index DB, and each refreshes on query (R1). A
+ * process still running an older build re-indexed wec.aria in its own older format over a newer
+ * build's run — backslash paths and a missing lane came back. A server must never write over an
+ * index a NEWER build wrote; it says so, and the fix is restarting that server.
+ * Returns the refusal reason, or null when this build may write.
+ */
+export function newerBuildRefusal(latestRunVersion: string | null | undefined, own: string = INDEX_VERSION): string | null {
+  const theirs = indexGeneration(latestRunVersion);
+  const ours = indexGeneration(own);
+  if (theirs === null || ours === null || theirs <= ours) return null;
+  return `this repo's index was written by a newer codebase-index build (${String(latestRunVersion)}); this server runs ${own} and will not write over it. Restart this MCP server to load the newer build.`;
+}
+
 /**
  * Zero-metric IndexRunSummary for a run that did no work (dirty mode with a clean tree,
  * or an incremental run that skipped). Shared so the two skip paths can't drift as the

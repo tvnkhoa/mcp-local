@@ -23,6 +23,7 @@ import { GraphStore } from "./repositories/graphStore.js";
 import { assertPathAllowed, clamp } from "./middleware/indexGuardrails.js";
 import { WatchManager } from "./services/watch/watchManager.js";
 import { createIndexRunner } from "./services/indexing/indexRunner.js";
+import { newerBuildRefusal } from "./services/indexing/runPolicy.js";
 import { armWatchInactivityTimer, startAutoWatchers } from "./services/watch/watchLifecycle.js";
 import {
   allowedRootsFromEnv,
@@ -145,6 +146,7 @@ const freshnessGate = createFreshnessGate({
   getIndexedCommit: (repoId) => store.getLatestRun(repoId)?.commitSha ?? null,
   readTree: (repoPath) => readWorkingTreeState(repoPath),
   run: (repoId, repoPath, mode) => runIndexUnserialized(repoId, repoPath, mode, DOCS_INDEXING_ENABLED, MAX_FILES_PER_RUN, 200),
+  refuseRefresh: (repoId) => newerBuildRefusal(store.getLatestRun(repoId)?.indexVersion),
   markTriggered: (runId) => store.markRunTrigger(runId, "query")
 });
 

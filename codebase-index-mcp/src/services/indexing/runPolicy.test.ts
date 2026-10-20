@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import type { GraphStore } from "../../repositories/graphStore.js";
-import { evaluateIncrementalSkip, resolvePerformanceProfileDecision } from "./runPolicy.js";
+import { evaluateIncrementalSkip, indexGeneration, newerBuildRefusal, resolvePerformanceProfileDecision } from "./runPolicy.js";
 import { currentAnnotationKey } from "./indexPipeline.js";
 
 /**
@@ -119,4 +119,14 @@ test("never skips when the stored annotation scan differs from the current one",
   const decision = evaluateIncrementalSkip(store, "repo", "/nowhere");
   assert.equal(decision.shouldSkip, false);
   assert.match(decision.reason, /citation patterns or the annotation scanner/);
+});
+
+test("release F: an older build refuses to write over a newer build, never the other way", () => {
+  assert.equal(indexGeneration("v7-text-json-html-svg"), 7);
+  assert.equal(indexGeneration("weird"), null);
+  const refusal = newerBuildRefusal("v7-text-json-html-svg", "v6-vue-components") ?? "";
+  assert.ok(refusal.includes("newer codebase-index build (v7-text-json-html-svg); this server runs v6-vue-components"), refusal);
+  assert.equal(newerBuildRefusal("v6-vue-components", "v7-text-json-html-svg"), null, "a newer build upgrades an older index");
+  assert.equal(newerBuildRefusal("v7-a", "v7-b"), null, "same generation");
+  assert.equal(newerBuildRefusal(null, "v7-a"), null, "no run yet");
 });
