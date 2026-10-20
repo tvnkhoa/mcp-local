@@ -65,6 +65,14 @@ export type FieldCandidate = {
   writeCount: number;
 };
 
+/**
+ * This field's references in Volar's generated code that have no source mapping, in a file where
+ * every mention of the name IS covered by a mapped site: code-generation duplicates (a `v-if`
+ * condition repeated inside an event handler), not missed sites. A file where some mention is not
+ * covered is a gap instead, and is not listed here.
+ */
+export type UnmappedGenerated = { file: string; count: number; note: string };
+
 export type FieldGap = { file: string; line: number | null; reason: string };
 export type FieldNonMatch = { file: string; line: number; kind: string; container: string | null };
 
@@ -88,7 +96,7 @@ export type FieldAnswerMeta = {
 };
 
 export type VueMeta =
-  | { status: "in-program"; languageCore: string; repoVersion: string | null; tsconfig: string | null; vueFiles: number; rootFiles: number; programFiles: number; cold: boolean; coldMs: number | null; unmappedGenerated: number }
+  | { status: "in-program"; languageCore: string; repoVersion: string | null; tsconfig: string | null; vueFiles: number; rootFiles: number; programFiles: number; cold: boolean; coldMs: number | null; unmappedGenerated: number; unmappedGeneratedFiles?: UnmappedGenerated[] }
   | { status: "fallback"; reason: string; repoVersion: string | null; vueFiles: number };
 
 export type FieldAnswer =
@@ -230,7 +238,8 @@ function answer(svc: RepoLanguageService, lane: VueLane, field: string, pick: Fi
       programFiles: pass.programFiles,
       cold: vueCold,
       coldMs: vp.coldMs,
-      unmappedGenerated: pass.unmappedGenerated
+      unmappedGenerated: pass.unmappedGenerated,
+      ...(pass.unmappedFiles.length > 0 && { unmappedGeneratedFiles: pass.unmappedFiles })
     };
   }
 
@@ -415,7 +424,7 @@ type VuePassInput = {
  * union program missed), `.vue` declarations as groups of their own, the Zod parse pass, dynamic
  * access and untyped keys inside `.vue` — every generated position mapped back to the real file.
  */
-function runVuePass(input: VuePassInput): { gaps: FieldGap[]; nonMatches: FieldNonMatch[]; programFiles: number; unmappedGenerated: number } {
+function runVuePass(input: VuePassInput): { gaps: FieldGap[]; nonMatches: FieldNonMatch[]; programFiles: number; unmappedGenerated: number; unmappedFiles: UnmappedGenerated[] } {
   const { vp, budget, field, groups, groupOfKey, isRepoFile, rel } = input;
   const program = vp.program(budget);
   const caseInsensitive = !ts.sys.useCaseSensitiveFileNames;
@@ -562,6 +571,7 @@ function runVuePass(input: VuePassInput): { gaps: FieldGap[]; nonMatches: FieldN
   const gaps: FieldGap[] = [];
   const root = input.repoPath.replace(/\\/g, "/").replace(/\/$/, "");
   let unmappedGenerated = 0;
+  const unmappedFiles: UnmappedGenerated[] = [];
   for (const relVue of input.vueFiles) {
     const abs = `${root}/${relVue.replace(/\\/g, "/")}`;
     const text = vp.sourceText(abs);
@@ -577,9 +587,11 @@ function runVuePass(input: VuePassInput): { gaps: FieldGap[]; nonMatches: FieldN
     if (count === 0) continue;
     const seen = covered.get(canon(abs)) ?? new Set<number>();
     const lines = [...new Set(mentions.filter((o) => !seen.has(o)).map((o) => lineAt(text, o).line))];
-    if (lines.length > 0) {
+    if (lines.length === 0) {
+      unmappedFiles.push({ file: relVue, count, note: "every mention of the name in this file is covered by a mapped site, so the unmapped reference(s) are code-generation duplicates, not missed sites" });
+    } else {
       gaps.push({ file: relVue, line: lines[0]!, reason: `${String(count)} reference(s) in Volar's generated code for this file have no source mapping, and the name on line(s) ${listLines(lines)} is not accounted for by a mapped site` });
     }
   }
-  return { gaps, nonMatches, programFiles: program.getSourceFiles().length, unmappedGenerated };
+  return { gaps, nonMatches, programFiles: program.getSourceFiles().length, unmappedGenerated, unmappedFiles };
 }

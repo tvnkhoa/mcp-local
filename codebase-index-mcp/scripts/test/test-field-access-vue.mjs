@@ -170,6 +170,10 @@ await withServer({}, "vue", async (client) => {
   assert(res?.engine === "typescript-language-service", "answered by the TypeScript LanguageService", JSON.stringify(res)?.slice(0, 400));
   assert(res?.coverage?.confidence === "exact", "coverage is exact", JSON.stringify(res?.coverage));
   assert(res?.typeResolution?.vue?.status === "in-program" && res.typeResolution.vue.vueFiles === 2 && res.typeResolution.vue.languageCore === "3.3.11", "the .vue file is in the Vue program (Volar, pinned language-core)", JSON.stringify(res?.typeResolution?.vue));
+  // Release E acceptance note (1): an unmapped generated hit is either a named gap or named here, as a
+  // duplicate in a file whose every mention is covered — never a bare count.
+  const unmapped = res?.typeResolution?.vue;
+  assert((unmapped?.unmappedGenerated ?? 0) === 0 || (unmapped?.unmappedGeneratedFiles ?? []).reduce((n, f) => n + f.count, 0) + (res?.coverage?.gaps ?? []).filter((g) => /no source mapping/.test(g.reason)).length > 0, "every unmapped generated hit is accounted for, as a named duplicate file or a gap", JSON.stringify(unmapped));
   assert(res?.declaration?.file === "packages/contracts/src/entities/document-list.ts" && res?.declaration?.line === 5, "declaration is the contract key", JSON.stringify(res?.declaration));
   const reads = at(res?.reads);
   const writes = at(res?.writes);
