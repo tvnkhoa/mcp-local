@@ -58,7 +58,9 @@ export function pruneAndResolve(
 
   progress.phase("pruning");
   if (scanWasComplete) {
-    const currentPaths = selectedFiles.map((f) => path.relative(input.repoPath, f));
+    // Forward slashes, as the pipeline writes them (MCP-ISSUE-079). A row stored with backslashes by an
+    // older build is therefore "not in this scan" and pruned — never kept alongside its new twin.
+    const currentPaths = selectedFiles.map((f) => path.relative(input.repoPath, f).replace(/\\/g, "/"));
     const pruned = store.pruneStaleFiles(input.repoId, currentPaths);
     filesPruned = pruned;
     if (pruned > 0) {

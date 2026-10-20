@@ -12,6 +12,9 @@ import { extractProtoSymbolsImpl } from "./protoExtractor.js";
 import { extractCss } from "./cssExtractor.js";
 import { extractJavaScriptRoutesImpl, extractJavaScriptSymbolsImpl } from "./jsExtractor.js";
 import { extractVueFileImpl } from "./vueExtractor.js";
+import { extractPlainText } from "./plainTextExtractor.js";
+import { applyModuleSignature, extractJson } from "./jsonExtractor.js";
+import { extractHtml } from "./htmlExtractor.js";
 import {
   emitEndpointContractSymbolsFromCSharpSignaturesImpl,
   emitEndpointContractSymbolsImpl,
@@ -132,6 +135,24 @@ export function extractGraphData(input: ExtractInput): ExtractOutput {
     // confidence floor have nothing to act on, and tokens must survive to the post-phase resolver.
     const css = extractCss(input.source, input);
     return { symbols: dedupeSymbols([...symbols, ...css.symbols]), edges: css.edges };
+  }
+
+  // MCP-ISSUE-076/077: the non-code lanes. No grammar and, like CSS, no edge policy — a module symbol,
+  // the literal lane for text and JSON, and markup/manifest tokens the post-phase resolvers bind.
+  if (input.language === "text") {
+    return { symbols, edges: [], literals: extractPlainText(input, resolveLiteralPolicy(input.performanceProfile ?? "standard")) };
+  }
+  if (input.language === "json") {
+    const json = extractJson(input, moduleSymbolId, resolveLiteralPolicy(input.performanceProfile ?? "standard"));
+    applyModuleSignature(symbols, moduleSymbolId, json.moduleSignature);
+    return { symbols, edges: json.edges, literals: json.literals };
+  }
+  if (input.language === "html") {
+    return { symbols, edges: extractHtml(input, moduleSymbolId).edges };
+  }
+  if (input.language === "svg") {
+    // An asset node: the module symbol is the whole point — imports and template `src` resolve to it.
+    return { symbols, edges: [] };
   }
 
   const parser = getOrCreateParserForLanguage(input.language, input.filePath);

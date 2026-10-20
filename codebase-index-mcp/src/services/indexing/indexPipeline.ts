@@ -44,7 +44,7 @@ import { ExtractionWorkerPool } from "../extractors/extractionWorkerPool.js";
 import { extractDotnetProjectData } from "../extractors/dotnetProjectParser.js";
 import { createIndexProgress, indexLog, indexWarn, type IndexProgress } from "./indexProgress.js";
 import { resolveIndexRunLimits } from "./runLimits.js";
-import { scanRepoFiles } from "./fileScan.js";
+import { scanRepoFiles, toPosixRelative } from "./fileScan.js";
 import {
   assessRunHealth,
   buildRunSummary,
@@ -108,7 +108,11 @@ export type RunIndexInput = {
 // v6: MCP-ISSUE-074 — `.vue` files are indexed (component symbol, USES_COMPONENT, template edges, and
 // their <style> blocks through the CSS lane); a repo whose .vue files were skipped as
 // unknown_extension needs a full run to pick them up.
-export const INDEX_VERSION = "v6-vue-components";
+// v7: release F — the text / JSON / HTML / SVG lanes (MCP-ISSUE-076, 077), git-cleared source under
+// `bin/`-style segments (078), and forward-slash paths in every table (079). Symbol ids hash the path,
+// so a Windows-indexed repo gets new ids for every symbol: the next run (full, or incremental — no
+// stored hash matches a forward-slash path) re-extracts everything and prunes the backslash rows.
+export const INDEX_VERSION = "v7-text-json-html-svg";
 
 export async function runIndexPipeline(store: GraphStore, input: RunIndexInput): Promise<IndexRunSummary> {
   const identity: RunIdentity = {
@@ -137,7 +141,7 @@ export async function runIndexPipeline(store: GraphStore, input: RunIndexInput):
   const progress = input.progress ?? createIndexProgress(input.repoId);
   progress.phase("scanning");
 
-  const { files, knownPackageNames, droppedByPath } = await scanRepoFiles(input, maxFiles, includeDocs);
+  const { files, knownPackageNames, droppedByPath, gitAware } = await scanRepoFiles(input, maxFiles, includeDocs);
 
   const c: RunCounters = {
     filesScanned: 0, filesIndexed: 0, filesSkipped: 0, symbolsUpserted: 0, edgesUpserted: 0,
@@ -322,7 +326,9 @@ export async function runIndexPipeline(store: GraphStore, input: RunIndexInput):
         const chunk = batchFiles.slice(i, i + concurrencyLimit);
         const chunkResults = await Promise.allSettled(
           chunk.map(async (filePath) => {
-            const relativePath = path.relative(input.repoPath, filePath);
+            // Forward slashes, always (MCP-ISSUE-079): this is the path every row and every symbol id is
+            // built from, so it has one spelling on every platform.
+            const relativePath = toPosixRelative(input.repoPath, filePath);
             // There used to be a size/mtime "quick check" here, comparing `${size}-${mtimeMs}` as a
             // prefix of the stored `content_hash`. That column is a sha256 hex digest of the redacted
             // content, so the prefix never matched and the branch never fired — it only cost a stat()
@@ -331,7 +337,9 @@ export async function runIndexPipeline(store: GraphStore, input: RunIndexInput):
             // Repo-relative, rooted with "/" so `/migrations/` still matches at the top level: the
             // absolute path would make a repo living under an excluded name (`D:/assets/repo`) drop
             // every file as `excluded_path` (MCP-ISSUE-066).
-            const decision = shouldIndexFile(`/${relativePath.replace(/\\/g, "/")}`, bytes, maxFileSizeBytes, maxMarkdownBytes);
+            // `gitCleared`: the scan admitted the file through git's own list (MCP-ISSUE-078), so a
+            // build-named segment no longer rules it out on its own.
+            const decision = shouldIndexFile(`/${relativePath}`, bytes, maxFileSizeBytes, maxMarkdownBytes, { gitCleared: gitAware });
             
             return { filePath, relativePath, bytes, decision };
           })
@@ -707,7 +715,7 @@ export async function runIndexPipeline(store: GraphStore, input: RunIndexInput):
   function queueDependentFiles(): number {
     if (input.mode === "full") return 0;
 
-    const scannedByRelative = new Map(files.map((f) => [path.relative(input.repoPath, f), f]));
+    const scannedByRelative = new Map(files.map((f) => [toPosixRelative(input.repoPath, f), f]));
     // Mirrors `pruneAndResolve`: deletions are only knowable when the scan saw the whole repo.
     const scanWasComplete = files.length <= maxFiles && !input.onlyRelativePaths;
     const doomed = scanWasComplete

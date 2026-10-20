@@ -328,6 +328,15 @@ export function createIndexRunner(options: IndexRunnerOptions): RunIndexAndResol
     } catch { /* non-fatal */ }
   })();
 
+  // MCP-ISSUE-076: package.json → package.json for dependencies on a package of this repo. Recomputed
+  // whole every run (a pure function of the npm: tokens and the declared names); non-fatal.
+  (() => {
+    try {
+      const workspace = store.resolveWorkspacePackageEdges(repoId);
+      if (workspace > 0) indexLog(`[index-post] repoId=${repoId} workspace package edges=${String(workspace)}`);
+    } catch { /* non-fatal */ }
+  })();
+
   if (postPolicy.resolveTypeRefs) {
     progress.phase("resolving types");
     indexLog(`[index-post] repoId=${repoId} resolving type references...`);

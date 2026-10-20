@@ -34,6 +34,7 @@ import type { ExtractInput } from "./extractorTypes.js";
 
 import { CSS_CLASS_UNRESOLVED_REASON, classNamesFromStatic, cssClassToken } from "./cssExtractor.js";
 import { BUILTIN_SKIP_NAMES, emitPropertyAccessEdge, shouldSkipJavaScriptMemberCall, stripQuotes } from "./extractorUtils.js";
+import { localAssetSpec } from "./htmlExtractor.js";
 
 export type VueImportBinding = {
   specifier: string;
@@ -163,6 +164,7 @@ function walkNode(ctx: VueTemplateContext, node: TemplateNode, outerLocals: Read
   for (const prop of props) {
     if (prop.type === NODE_ATTRIBUTE) {
       if (prop.name === "class" && prop.value) emitClassUses(ctx, classNamesFromStatic(prop.value.content));
+      if (ASSET_URL_ATTRIBUTES.has(prop.name) && prop.value) emitAssetImport(ctx, prop.value.content);
       if (childToken && isChildProp(prop.name)) {
         const value = prop.value?.content;
         pushEdge(ctx, `${childToken}#${camelize(prop.name)}`, "PROPERTY_WRITE", 0.5, "unresolved component token", value === undefined ? "true" : JSON.stringify(value));
@@ -212,6 +214,26 @@ function walkNode(ctx: VueTemplateContext, node: TemplateNode, outerLocals: Read
   }
 
   for (const child of node.children ?? []) walkNode(ctx, child, scope);
+}
+
+/** Static attributes Vue's `transformAssetUrls` compiles into an import when the value is a module path. */
+const ASSET_URL_ATTRIBUTES = new Set(["src", "href", "xlink:href"]);
+
+/**
+ * MCP-ISSUE-077: `<img src="./icon.svg">` / `<use href="@/assets/sprite.svg#x">` → `IMPORTS import:<spec>`
+ * from the component, bound to the svg asset node by the import resolver after the run. Vue compiles
+ * exactly these (a `.`, `~` or `@` prefixed static URL) into `import _imports_0 from '…'`, so this is the
+ * same edge a script `import` of the svg makes. Root-absolute `/x.svg` is a public URL, not a module, and
+ * only `.svg` targets are emitted: other assets are never graph nodes.
+ */
+function emitAssetImport(ctx: VueTemplateContext, raw: string): void {
+  const value = raw.trim();
+  if (!/^[.~@]/.test(value)) return;
+  const spec = localAssetSpec(value, false);
+  if (!spec || !/\.svg$/i.test(spec)) return;
+  const toId = `import:${spec}`;
+  if (ctx.edges.some((e) => e.fromId === ctx.componentId && e.toId === toId && e.type === "IMPORTS")) return;
+  ctx.edges.push({ repoId: ctx.input.repoId, fromId: ctx.componentId, toId, type: "IMPORTS" });
 }
 
 function isChildProp(name: string): boolean {

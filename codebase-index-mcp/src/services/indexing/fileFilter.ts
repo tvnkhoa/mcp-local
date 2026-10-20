@@ -89,39 +89,96 @@ const EXCLUDED_PATH_SEGMENTS = new Set([
   "logs"
 ]);
 
-const EXCLUDED_EXTENSIONS = new Set([
-  ".txt",
-  ".pdf",
-  ".doc",
-  ".docx",
-  ".jpg",
-  ".jpeg",
-  ".png",
-  ".gif",
-  ".svg",
-  ".ico",
-  ".woff",
-  ".woff2",
-  ".ttf",
-  ".eot",
-  ".mp4",
-  ".mp3",
-  ".wav",
-  ".zip",
-  ".tar",
-  ".gz",
-  ".lock",
-  ".log",
-  ".env",
-  ".env.local",
-  ".env.production",
-  ".gitignore",
-  ".gitattributes",
-  ".editorconfig",
-  ".prettierrc",
-  ".eslintrc",
-  ".babelrc"
+/**
+ * MCP-ISSUE-078: build-output directory names that are ALSO ordinary source-folder names. `bin/` is
+ * where a Node package keeps its CLI entry (wec.aria `packages/dep-lint/bin/depcruise-guarded.mjs`), and
+ * `build/` / `out/` / `target/` hold scripts as often as output. In a git repo the ignore rules are
+ * the authority (MCP-ISSUE-070): a file under one of these that git tracks, or would track, is the
+ * repo's own, and is excluded only when its language is not source. .NET `bin/`/`obj/` are ignored by
+ * every .NET ignore template, so a C# repo loses nothing. Outside git (or with
+ * `CODEBASE_INDEX_RESPECT_GITIGNORE=false`) the segment rule stands as before. They stay in the glob
+ * ignore list either way: the git-cleared files are added from git's own list (`fileScan.ts`), so a
+ * 30 000-file `obj/` tree is still never walked.
+ */
+const GIT_DEFERRED_BUILD_SEGMENTS = new Set(["bin", "obj", "build", "out", "target"]);
+
+/**
+ * MCP-ISSUE-077: asset directories an `.svg` asset node may live in. Every other file type under them
+ * stays excluded (`assets/` is where bundled vendor CSS/JS and generated sprites accumulate); an svg
+ * becomes a module-only node that imports and template `src` attributes resolve to.
+ */
+const SVG_ASSET_SEGMENTS = new Set(["assets", "public", "static"]);
+
+/** Languages that are code: a git-cleared file under a build-named segment is indexed only in one of these. */
+const SOURCE_LANGUAGES = new Set(["typescript", "javascript", "vue", "python", "csharp", "proto", "css", "html"]);
+
+export type PathExclusionOptions = {
+  /**
+   * The scan proved the file visible to git (tracked, or untracked and not ignored). Lets a
+   * build-named segment (`bin`, `obj`, …) defer to git — see GIT_DEFERRED_BUILD_SEGMENTS.
+   */
+  gitCleared?: boolean;
+};
+
+/**
+ * True when the only excluded directory segments of `filePath` are build-named ones a git-aware scan
+ * may clear (`bin/`, `obj/`, …) — the candidates `fileScan.ts` adds back from git's file list.
+ */
+export function hasOnlyGitDeferredSegments(filePath: string): boolean {
+  const dirs = filePath.replace(/\\/g, "/").split("/").slice(0, -1);
+  const excluded = dirs.filter((seg) => EXCLUDED_PATH_SEGMENTS.has(seg));
+  return excluded.length > 0 && excluded.every((seg) => GIT_DEFERRED_BUILD_SEGMENTS.has(seg));
+}
+
+/**
+ * The path-segment rule the INDEXER applies. `hasExcludedPathSegment` is the strict form, still used
+ * by `search_regex(scanAll)`. Two exceptions to "any excluded segment excludes":
+ *  - an `.svg` under `assets/`, `public/` or `static/` (an asset node, MCP-ISSUE-077);
+ *  - a source file under a build-named directory that git cleared (MCP-ISSUE-078).
+ */
+export function isExcludedByPath(filePath: string, options: PathExclusionOptions = {}): boolean {
+  const segments = filePath.replace(/\\/g, "/").split("/");
+  const basename = segments[segments.length - 1] ?? "";
+  // A FILE named like an excluded directory (`logs`, `build`) keeps the old rule.
+  if (EXCLUDED_PATH_SEGMENTS.has(basename)) return true;
+  const isSvg = /\.svg$/i.test(basename);
+  const language = languageForPath(basename);
+  const sourceClearedByGit = options.gitCleared === true && language !== null && SOURCE_LANGUAGES.has(language);
+  for (const seg of segments.slice(0, -1)) {
+    if (!EXCLUDED_PATH_SEGMENTS.has(seg)) continue;
+    if (isSvg && SVG_ASSET_SEGMENTS.has(seg)) continue;
+    if (sourceClearedByGit && GIT_DEFERRED_BUILD_SEGMENTS.has(seg)) continue;
+    return true;
+  }
+  return false;
+}
+
+/**
+ * Binary assets: never text, never a graph node. Reported as `binary_asset` (MCP-ISSUE-077), so the
+ * skip report says WHY a `.png` is absent. `.svg` is not here — it is text, and an asset node
+ * (language `svg`).
+ */
+const BINARY_ASSET_EXTENSIONS = new Set([
+  ".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx",
+  ".jpg", ".jpeg", ".png", ".gif", ".ico", ".webp", ".avif", ".bmp", ".tif", ".tiff",
+  ".woff", ".woff2", ".ttf", ".otf", ".eot",
+  ".mp4", ".webm", ".mov", ".mp3", ".wav", ".ogg",
+  ".zip", ".tar", ".gz", ".tgz", ".7z",
+  ".bin", ".exe", ".dll", ".so", ".dylib", ".wasm"
 ]);
+
+/** True for a binary asset by extension (`.png`, `.pdf`, `.woff2`, …) — reported as `binary_asset`. */
+export function isBinaryAssetPath(filePath: string): boolean {
+  return BINARY_ASSET_EXTENSIONS.has(extname(filePath).toLowerCase());
+}
+
+/**
+ * Text that is never worth a node. Dotfile names (`.env`, `.gitignore`) used to be listed here too,
+ * but `extname(".env")` is "" and `extname(".env.local")` is ".local", so those entries never matched:
+ * the secret check (`isSecretBearingFile`) is what keeps credentials out, and the dotfile configs are
+ * plain text now (TEXT_FILENAMES).
+ */
+const EXCLUDED_EXTENSIONS = new Set([".lock", ".log"]);
 
 /**
  * MCP-ISSUE-060 follow-up: files whose whole purpose is to hold a secret.
@@ -140,7 +197,9 @@ export function isSecretBearingFile(basename: string): boolean {
   if (/\.(example|sample|template|dist)$/.test(name)) return false;
   if (name === ".env" || name.startsWith(".env.")) return true;
   if (SECRET_FILENAMES.has(name)) return true;
-  return /\.(pem|pfx|p12|jks|keystore|asc|ppk)$/.test(name) || /(^|\.)id_(rsa|dsa|ecdsa|ed25519)$/.test(name);
+  // A saved login session (wec.aria `*.session`, a browser storage state) is a bearer credential.
+  if (name.endsWith(".session")) return true;
+  return /\.(pem|pfx|p12|jks|keystore|asc|ppk|key|p8)$/.test(name) || /(^|\.)id_(rsa|dsa|ecdsa|ed25519)$/.test(name);
 }
 
 const SECRET_FILENAMES = new Set([
@@ -203,8 +262,82 @@ const LANGUAGE_BY_EXTENSION: Record<string, string> = {
   // Protocol Buffers / gRPC
   ".proto": "proto",
   // Stylesheets (MCP-ISSUE-075) — postcss lane, not tree-sitter. SCSS/Less are a different grammar.
-  ".css": "css"
+  ".css": "css",
+  // JSON (MCP-ISSUE-076): package.json and tsconfig*.json get edges (jsonExtractor.ts); every other
+  // .json is text level — a module symbol, and its string values in the literal lane.
+  ".json": "json",
+  // Plain text (MCP-ISSUE-076, plainTextExtractor.ts): in the index, so search_regex finds it without
+  // scanAll and search_literals finds its strings. A module symbol and no other symbol.
+  ".jsonl": "text",
+  ".ndjson": "text",
+  ".yaml": "text",
+  ".yml": "text",
+  ".toml": "text",
+  ".sh": "text",
+  ".bash": "text",
+  ".envsh": "text",
+  ".conf": "text",
+  ".template": "text",
+  ".txt": "text",
+  ".example": "text",
+  ".sample": "text",
+  ".code-workspace": "text",
+  ".dockerfile": "text",
+  ".mk": "text",
+  // HTML (MCP-ISSUE-077): <script src> / <link href> / <img src> become IMPORTS edges.
+  ".html": "html",
+  ".htm": "html",
+  // SVG asset nodes (MCP-ISSUE-077): a module symbol that imports and template src attributes resolve to.
+  ".svg": "svg"
 };
+
+/**
+ * Files whose NAME is the type: no extension, or a dotfile, which `extname` reports as "". Plain text.
+ * `.npmrc` is deliberately absent: it carries registry auth tokens and is secret-bearing.
+ */
+const TEXT_FILENAMES = new Set([
+  "dockerfile",
+  "containerfile",
+  "makefile",
+  "gnumakefile",
+  "jenkinsfile",
+  "procfile",
+  ".editorconfig",
+  ".gitattributes",
+  ".gitignore",
+  ".gitmodules",
+  ".dockerignore",
+  ".npmignore",
+  ".prettierignore",
+  ".eslintignore",
+  ".nvmrc",
+  ".node-version",
+  ".tool-versions",
+  ".prettierrc",
+  ".eslintrc",
+  ".babelrc",
+  ".browserslistrc",
+  ".stylelintrc"
+]);
+
+/** The language a path would be indexed as, from its extension or its whole name; null when unmapped. */
+export function languageForPath(filePath: string): string | null {
+  const basename = (filePath.replace(/\\/g, "/").split("/").pop() ?? "").toLowerCase();
+  const byExtension = LANGUAGE_BY_EXTENSION[extname(basename)];
+  if (byExtension) return byExtension;
+  if (TEXT_FILENAMES.has(basename)) return "text";
+  // `Dockerfile.dev`, `Makefile.local`: the name, then a variant suffix.
+  if (/^(dockerfile|containerfile|makefile)\./.test(basename)) return "text";
+  return null;
+}
+
+/** Text formats whose one-line form is normal, so the minified heuristic does not apply. */
+const MINIFIED_EXEMPT_EXTENSIONS = new Set([".json", ".jsonl", ".ndjson", ".svg"]);
+
+/** True for a path the `likely_minified` rule does not apply to (one-line JSON, JSONL, SVG). Shared with search_regex. */
+export function isMinifiedCheckExempt(filePath: string): boolean {
+  return MINIFIED_EXEMPT_EXTENSIONS.has(extname(filePath).toLowerCase());
+}
 
 // ISSUE-024: shared test-path classifier — dùng chung cho link_tests_to_source và
 // search_symbols (rank penalty / excludeTests). Giữ một regex duy nhất để 2 nơi không drift.
@@ -287,13 +420,20 @@ export function shouldIndexFile(
   filePath: string,
   bytes: Uint8Array,
   maxFileSizeBytes = 500_000,
-  maxMarkdownBytes = DEFAULT_MAX_MARKDOWN_BYTES
+  maxMarkdownBytes = DEFAULT_MAX_MARKDOWN_BYTES,
+  pathOptions: PathExclusionOptions = {}
 ): FilterDecision {
   const normalized = filePath.replace(/\\/g, "/");
   const normalizedLower = normalized.toLowerCase();
   const segments = normalized.split("/");
 
-  if (hasExcludedPathSegment(normalized)) {
+  // A binary asset is named as one wherever it sits (`assets/photo.png` too): the reason a .png is not
+  // in the graph is that it is binary, not which folder it is in (MCP-ISSUE-077).
+  if (isBinaryAssetPath(normalized)) {
+    return { include: false, reason: "binary_asset", language: null };
+  }
+
+  if (isExcludedByPath(normalized, pathOptions)) {
     return { include: false, reason: "excluded_path", language: null };
   }
 
@@ -324,7 +464,7 @@ export function shouldIndexFile(
   }
 
   // Detect language early to make filename exclusion language-aware
-  const knownLanguage = LANGUAGE_BY_EXTENSION[extension];
+  const knownLanguage = languageForPath(normalized);
 
   // Only exclude README/CHANGELOG/etc for non-markdown files (allow markdown docs)
   if (
@@ -334,8 +474,9 @@ export function shouldIndexFile(
     return { include: false, reason: "excluded_filename", language: null };
   }
 
+  // Its own reason (MCP-ISSUE-076), so the skip report names what was refused as a credential.
   if (isSecretBearingFile(basename)) {
-    return { include: false, reason: "excluded_filename", language: null };
+    return { include: false, reason: "secret_file", language: null };
   }
 
   const MAX_FILE_SIZE = knownLanguage === "markdown" ? maxMarkdownBytes : maxFileSizeBytes;
@@ -348,7 +489,7 @@ export function shouldIndexFile(
   }
 
   // Detect minified files (very long lines)
-  if (isLikelyMinified(bytes)) {
+  if (!MINIFIED_EXEMPT_EXTENSIONS.has(extension) && isLikelyMinified(bytes)) {
     return { include: false, reason: "likely_minified", language: null };
   }
 

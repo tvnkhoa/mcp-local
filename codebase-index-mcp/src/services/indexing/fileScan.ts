@@ -11,12 +11,13 @@
  * before the first extraction, not accumulated as the batches go by.
  */
 
+import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 
 import { glob } from "glob";
 
-import { INDEX_IGNORE_GLOBS, hasExcludedPathSegment } from "./fileFilter.js";
+import { INDEX_IGNORE_GLOBS, hasOnlyGitDeferredSegments, isBinaryAssetPath, isExcludedByPath } from "./fileFilter.js";
 import { tallySkip, type SkipTally } from "./skipReport.js";
 import { listGitVisibleFiles } from "../git/gitHelpers.js";
 import { indexLog } from "./indexProgress.js";
@@ -38,6 +39,8 @@ export interface FileScanResult {
   readonly knownPackageNames: Set<string>;
   /** Files the walk dropped for an excluded path segment (`assets/`, `public/`…), by extension. */
   readonly droppedByPath: SkipTally;
+  /** Git decided visibility, so build-named segments deferred to it (MCP-ISSUE-078). */
+  readonly gitAware: boolean;
 }
 
 /**
@@ -97,11 +100,15 @@ export async function scanRepoFiles(
   // put every core symbol in the graph twice (gate.ts:260 and dist-runtime/tools/gate.js:250). Git's
   // own answer decides; a non-git repo keeps the plain walk.
   const visible = input.respectGitignore === false || input.onlyRelativePaths ? null : listGitVisibleFiles(input.repoPath);
+  // MCP-ISSUE-078: whether build-named segments (`bin/`, `obj/`, …) defer to git. A dirty run's set
+  // comes from git itself (`collectDirtyFiles`: tracked changes plus untracked-not-ignored), so it is
+  // git-cleared by construction.
+  const gitAware = input.respectGitignore !== false && (visible !== null || input.onlyRelativePaths !== undefined);
   const files = globbed.filter((abs) => {
-    const relative = path.relative(input.repoPath, abs).replace(/\\/g, "/");
-    if (hasExcludedPathSegment(relative)) {
+    const relative = toPosixRelative(input.repoPath, abs);
+    if (isExcludedByPath(relative)) {
       // A dirty-mode run walks only its delta; counting the rest of the tree here would misreport it.
-      if (!input.onlyRelativePaths) tallySkip(droppedByPath, "excluded_path", relative);
+      if (!input.onlyRelativePaths) tallySkip(droppedByPath, isBinaryAssetPath(relative) ? "binary_asset" : "excluded_path", relative);
       return false;
     }
     if (visible && !visible.has(relative)) {
@@ -110,6 +117,31 @@ export async function scanRepoFiles(
     }
     return input.onlyRelativePaths ? input.onlyRelativePaths.has(relative) : true;
   });
+
+  // The glob never walks `bin/`/`obj/`/`build/`/`out/`/`target/` (a .NET `obj/` holds tens of thousands
+  // of files). In a git repo the source files git reports under them are added back from git's own
+  // list instead — tracked or untracked-not-ignored, present on disk, a source language, and no other
+  // excluded segment (`node_modules`, `dist` and `.git` stay out whatever git says).
+  if (gitAware) {
+    const gitListed = visible ?? input.onlyRelativePaths ?? new Set<string>();
+    const added: string[] = [];
+    for (const relative of gitListed) {
+      if (!hasOnlyGitDeferredSegments(relative)) continue;
+      if (isExcludedByPath(relative, { gitCleared: true })) {
+        if (!input.onlyRelativePaths) tallySkip(droppedByPath, isBinaryAssetPath(relative) ? "binary_asset" : "excluded_path", relative);
+        continue;
+      }
+      const absolute = path.join(input.repoPath, relative);
+      if (!existsSync(absolute)) continue;
+      added.push(absolute);
+    }
+    if (added.length > 0) {
+      files.push(...added);
+      // Same code-unit order as the glob result (see the sort comment above), so processing order —
+      // and with it every order-sensitive count — stays a property of the tree.
+      files.sort();
+    }
+  }
 
   indexLog(`[index-scan-complete] found ${String(files.length)} files (${String(globbed.length - files.length)} dropped by excluded path or dirty set), will process up to ${String(maxFiles)}`);
 
@@ -146,5 +178,14 @@ export async function scanRepoFiles(
     indexLog("[index-scan] docs lane disabled for this run (markdown/docs indexing skipped)");
   }
 
-  return { files, knownPackageNames, droppedByPath };
+  return { files, knownPackageNames, droppedByPath, gitAware };
+}
+
+/**
+ * A repo-relative path with forward slashes — the ONE spelling every table stores (MCP-ISSUE-079).
+ * `path.relative` gives backslashes on Windows; normalizing here, where the run's paths are born, is
+ * what makes `files.path`, `symbols.file_path` and the ids minted from them agree across platforms.
+ */
+export function toPosixRelative(repoPath: string, absolutePath: string): string {
+  return path.relative(repoPath, absolutePath).replace(/\\/g, "/");
 }

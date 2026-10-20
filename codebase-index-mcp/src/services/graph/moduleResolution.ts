@@ -124,7 +124,7 @@ export function readTsconfigAliases(repoPath: string): PathAliases {
  * the ordinary case, which means the alias support would have been dead in almost every real repo
  * while appearing to work in a test that omitted `include`.
  */
-function stripJsonComments(text: string): string {
+export function stripJsonComments(text: string): string {
   let out = "";
   let inString = false;
   let index = 0;
@@ -234,6 +234,10 @@ export function resolveModuleSpecifier(
   aliases: PathAliases = EMPTY_ALIASES
 ): string | null {
   const bases: string[] = [];
+  // A bundler query or fragment is not part of the file name: `./icon.svg?raw`, `./sprite.svg#home`
+  // (MCP-ISSUE-077 — the svg asset nodes are what these reach).
+  specifier = specifier.replace(/[?#].*$/, "");
+  if (!specifier) return null;
 
   if (isRelativeSpecifier(specifier)) {
     const fromDir = fromFile.replace(/\\/g, "/").split("/").slice(0, -1).join("/");

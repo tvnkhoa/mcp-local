@@ -69,8 +69,11 @@ async function main() {
   }
   console.log("SYMBOL_HIT_OK:", { count: symbolHitJson.count, firstFile: symbolHitJson.matches[0]?.filePath });
 
-  // 2. scanAll: a JSON file (never indexed) is only matched when scanAll=true.
-  const jsonPattern = "compilerOptions"; // present in tsconfig.json, a non-indexed file
+  // 2. JSON is indexed since release F (MCP-ISSUE-076, language `json`), so the default (index-backed)
+  // mode finds tsconfig.json without scanAll — this used to assert the opposite — and scanAll still does.
+  // This repo tracks no file of an unmapped extension any more, so the scanAll-only contrast is not
+  // reproducible here.
+  const jsonPattern = "compilerOptions"; // present in tsconfig.json
   const defaultScan = readJsonTextContent(
     await client.callTool({ name: "search_regex", arguments: { repoId, pattern: jsonPattern, limit: 200 } })
   ).json;
@@ -79,8 +82,8 @@ async function main() {
   ).json;
   const defaultJsonHits = (defaultScan?.matches ?? []).filter((m) => m.filePath.endsWith(".json")).length;
   const scanAllJsonHits = (scanAllScan?.matches ?? []).filter((m) => m.filePath.endsWith(".json")).length;
-  if (defaultJsonHits !== 0) {
-    throw new Error(`Expected 0 .json matches without scanAll, got ${defaultJsonHits} (json files should not be indexed)`);
+  if (defaultJsonHits < 1) {
+    throw new Error(`Expected >=1 .json match without scanAll, got ${defaultJsonHits} (json files are indexed, MCP-ISSUE-076)`);
   }
   if (scanAllJsonHits < 1) {
     throw new Error("Expected >=1 .json match with scanAll=true (tsconfig.json contains 'compilerOptions')");

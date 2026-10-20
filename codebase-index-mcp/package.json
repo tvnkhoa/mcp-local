@@ -64,7 +64,9 @@
     "test:field-access-exact": "node scripts/test/test-field-access-exact.mjs",
     "test:vue-components": "node scripts/test/test-vue-components.mjs",
     "test:css-symbols": "node scripts/test/test-css-symbols.mjs",
-    "test:field-access-vue": "node scripts/test/test-field-access-vue.mjs"
+    "test:field-access-vue": "node scripts/test/test-field-access-vue.mjs",
+    "test:text-json-lane": "node scripts/test/test-text-json-lane.mjs",
+    "test:html-svg": "node scripts/test/test-html-svg.mjs"
   },
   "dependencies": {
     "@mcp/core": "file:../packages/core",
