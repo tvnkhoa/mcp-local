@@ -1,0 +1,1057 @@
+{
+  "server": "board-mcp",
+  "toolCount": 23,
+  "tools": [
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": false
+      },
+      "description": "The owner's word that a commit which moved a landed unit's files needs no phase walked again (board.mjs acknowledge). `unit` + `sha`, or `offBoard: true` for every OFF-BOARD commit on every landed unit (or on `unit`). Always needs `gate`.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "gate": {
+            "description": "The owner's words, verbatim, as they typed them or chose them in an AskUserQuestion in THIS session (join several answers from one message with ||). Passed as --gate=…; board.mjs finds the message and proves the words are in it. The wrapper never takes --words/--session/--uuid.",
+            "maxLength": 4000,
+            "type": "string"
+          },
+          "offBoard": {
+            "description": "Every OFF-BOARD commit on landed units, in one pass (→ --off-board).",
+            "type": "boolean"
+          },
+          "profile": {
+            "description": "Response verbosity. Defaults to compact.",
+            "enum": [
+              "nano",
+              "compact",
+              "standard",
+              "verbose"
+            ],
+            "type": "string"
+          },
+          "session": {
+            "description": "Your Claude Code session id — a lowercase UUID, the name of your transcript file. Passed as --as=<uuid>: a claim is named by it, and --gate searches only this session's transcript. Required; a label is refused.",
+            "type": "string"
+          },
+          "sha": {
+            "description": "The commit (4–40 hex).",
+            "type": "string"
+          },
+          "unit": {
+            "description": "The landed unit (required unless offBoard; optional with offBoard).",
+            "type": "string"
+          }
+        },
+        "required": [
+          "gate",
+          "session"
+        ],
+        "type": "object"
+      },
+      "name": "acknowledge",
+      "title": "Acknowledge a commit (owner)"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": false
+      },
+      "description": "Mark the unit's CURRENT phase done (board.mjs advance) — the only way a phase becomes done. At a gate phase pass `gate`: the owner's words, which board.mjs proves are in an owner message of THIS session's transcript. `overBudget` (P3) also needs `gate`. Then commit the work, its evidence and the unit file together.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "gate": {
+            "description": "The owner's words, verbatim, as they typed them or chose them in an AskUserQuestion in THIS session (join several answers from one message with ||). Passed as --gate=…; board.mjs finds the message and proves the words are in it. The wrapper never takes --words/--session/--uuid.",
+            "maxLength": 4000,
+            "type": "string"
+          },
+          "overBudget": {
+            "description": "P3 only: ## UX over Run 2's budget, with the owner's words in `gate` (→ --over-budget).",
+            "type": "boolean"
+          },
+          "phase": {
+            "description": "The current phase id, e.g. P4 or H2. No phase is skipped.",
+            "type": "string"
+          },
+          "profile": {
+            "description": "Response verbosity. Defaults to compact.",
+            "enum": [
+              "nano",
+              "compact",
+              "standard",
+              "verbose"
+            ],
+            "type": "string"
+          },
+          "session": {
+            "description": "Your Claude Code session id — a lowercase UUID, the name of your transcript file. Passed as --as=<uuid>: a claim is named by it, and --gate searches only this session's transcript. Required; a label is refused.",
+            "type": "string"
+          },
+          "unit": {
+            "description": "A unit id, e.g. screen--review-intent.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "unit",
+          "phase",
+          "session"
+        ],
+        "type": "object"
+      },
+      "name": "advance",
+      "title": "Advance a phase"
+    },
+    {
+      "annotations": {
+        "destructiveHint": true,
+        "idempotentHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": false
+      },
+      "description": "Re-record a done, NON-gate phase whose evidence was re-written, without a round (board.mjs amend). A gate is never amended — reopen it.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "phase": {
+            "description": "The done, non-gate phase.",
+            "type": "string"
+          },
+          "profile": {
+            "description": "Response verbosity. Defaults to compact.",
+            "enum": [
+              "nano",
+              "compact",
+              "standard",
+              "verbose"
+            ],
+            "type": "string"
+          },
+          "session": {
+            "description": "Your Claude Code session id — a lowercase UUID, the name of your transcript file. Passed as --as=<uuid>: a claim is named by it, and --gate searches only this session's transcript. Required; a label is refused.",
+            "type": "string"
+          },
+          "unit": {
+            "description": "A unit id, e.g. screen--review-intent.",
+            "type": "string"
+          },
+          "why": {
+            "description": "What changed in its evidence (→ --why).",
+            "maxLength": 4000,
+            "type": "string"
+          }
+        },
+        "required": [
+          "unit",
+          "phase",
+          "why",
+          "session"
+        ],
+        "type": "object"
+      },
+      "name": "amend",
+      "title": "Amend a done non-gate phase"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "description": "The weight rubric for a kind, and — with `yes` — the weight it recommends (board.mjs assess). `yes: []` means every answer was no.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "kind": {
+            "description": "Unit kind. A family walks every phase and has no rubric.",
+            "enum": [
+              "screen",
+              "horizontal"
+            ],
+            "type": "string"
+          },
+          "profile": {
+            "description": "Response verbosity. Defaults to compact.",
+            "enum": [
+              "nano",
+              "compact",
+              "standard",
+              "verbose"
+            ],
+            "type": "string"
+          },
+          "yes": {
+            "description": "Rubric question ids answered yes. Omit to print the questions only; [] = every answer no.",
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 20,
+            "type": "array"
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "type": "object"
+      },
+      "name": "assess",
+      "title": "Weight rubric"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "description": "Every unit file against the rules — what CI runs (board.mjs check). Findings come back as `ok: false` with the listing in `text`; that is a report, not a failure of the tool.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "profile": {
+            "description": "Response verbosity. Defaults to compact.",
+            "enum": [
+              "nano",
+              "compact",
+              "standard",
+              "verbose"
+            ],
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "check",
+      "title": "Board check"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": false
+      },
+      "description": "Take a unit's files for this session, or refresh the claim (board.mjs claim). Refused while another session holds an overlapping file, or the unit waits.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "profile": {
+            "description": "Response verbosity. Defaults to compact.",
+            "enum": [
+              "nano",
+              "compact",
+              "standard",
+              "verbose"
+            ],
+            "type": "string"
+          },
+          "session": {
+            "description": "Your Claude Code session id — a lowercase UUID, the name of your transcript file. Passed as --as=<uuid>: a claim is named by it, and --gate searches only this session's transcript. Required; a label is refused.",
+            "type": "string"
+          },
+          "unit": {
+            "description": "A unit id, e.g. screen--review-intent.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "unit",
+          "session"
+        ],
+        "type": "object"
+      },
+      "name": "claim",
+      "title": "Claim a unit"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": false
+      },
+      "description": "Record a discovery (`text`), or dispose of one (`id`) — board.mjs discover. One disposition at most: `fixed` (sha), `to` (unit | SPEC-NNN | BACKLOG§n), `left` + `revisit`, `owner: true` + `gate` (the owner's words), `sameAs` (<unit>#<id>) or `cleared`. A gate and a unit's last phase refuse while one is open.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "cleared": {
+            "description": "Disposition: what no longer finds it (→ --cleared).",
+            "maxLength": 4000,
+            "type": "string"
+          },
+          "fixed": {
+            "description": "Disposition: the commit that fixed it (→ --fixed).",
+            "type": "string"
+          },
+          "gate": {
+            "description": "The owner's words, verbatim, as they typed them or chose them in an AskUserQuestion in THIS session (join several answers from one message with ||). Passed as --gate=…; board.mjs finds the message and proves the words are in it. The wrapper never takes --words/--session/--uuid.",
+            "maxLength": 4000,
+            "type": "string"
+          },
+          "id": {
+            "description": "An existing discovery to dispose of, e.g. d2. Omit to record a new one with `text`.",
+            "type": "string"
+          },
+          "left": {
+            "description": "Disposition: why it stays as it is (→ --left); needs `revisit`.",
+            "maxLength": 4000,
+            "type": "string"
+          },
+          "owner": {
+            "description": "Disposition: the owner decided — needs `gate` (→ --owner).",
+            "type": "boolean"
+          },
+          "profile": {
+            "description": "Response verbosity. Defaults to compact.",
+            "enum": [
+              "nano",
+              "compact",
+              "standard",
+              "verbose"
+            ],
+            "type": "string"
+          },
+          "revisit": {
+            "description": "With `left`: YYYY-MM-DD, a unit id, SPEC-NNN or BACKLOG§n (→ --revisit).",
+            "type": "string"
+          },
+          "sameAs": {
+            "description": "Disposition: the same thing as <unit>#<id> (→ --same-as).",
+            "type": "string"
+          },
+          "session": {
+            "description": "Your Claude Code session id — a lowercase UUID, the name of your transcript file. Passed as --as=<uuid>: a claim is named by it, and --gate searches only this session's transcript. Required; a label is refused.",
+            "type": "string"
+          },
+          "text": {
+            "description": "What was found (→ --text).",
+            "maxLength": 4000,
+            "type": "string"
+          },
+          "to": {
+            "description": "Disposition: a unit not past its first phase, SPEC-NNN or BACKLOG§n (→ --to).",
+            "type": "string"
+          },
+          "unit": {
+            "description": "A unit id, e.g. screen--review-intent.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "unit",
+          "session"
+        ],
+        "type": "object"
+      },
+      "name": "discover",
+      "title": "Record or dispose of a discovery"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "description": "The newest message the OWNER wrote, in this repo's transcripts, that contains `words` — prints its --session and --uuid (board.mjs find). Use it to check that words will pass a gate before calling a gate tool with them.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "profile": {
+            "description": "Response verbosity. Defaults to compact.",
+            "enum": [
+              "nano",
+              "compact",
+              "standard",
+              "verbose"
+            ],
+            "type": "string"
+          },
+          "words": {
+            "description": "The owner's words, verbatim. Must not start with '-'.",
+            "maxLength": 2000,
+            "type": "string"
+          }
+        },
+        "required": [
+          "words"
+        ],
+        "type": "object"
+      },
+      "name": "find",
+      "title": "Find the owner's words"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "description": "The last gate run (checks/.last-gate.json) split into failures naming this unit's files and another session's (board.mjs gate). Runs no gate. `ok: false` means some failure names the unit's files.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "profile": {
+            "description": "Response verbosity. Defaults to compact.",
+            "enum": [
+              "nano",
+              "compact",
+              "standard",
+              "verbose"
+            ],
+            "type": "string"
+          },
+          "unit": {
+            "description": "A unit id.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "unit"
+        ],
+        "type": "object"
+      },
+      "name": "gate",
+      "title": "Last gate run, split"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "description": "Report readiness for board-mcp: connectivity, non-secret configuration, and version.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "profile": {
+            "description": "Response verbosity. Defaults to compact.",
+            "enum": [
+              "nano",
+              "compact",
+              "standard",
+              "verbose"
+            ],
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "health_check",
+      "title": "Health check"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": false
+      },
+      "description": "Take a hotspot or a shared spec for one edit (board.mjs hold); `release` it after the commit. Prints DIRTY when the file already carries changes that are not yours.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "path": {
+            "description": "Repo-relative path of the hotspot or shared spec.",
+            "maxLength": 512,
+            "type": "string"
+          },
+          "profile": {
+            "description": "Response verbosity. Defaults to compact.",
+            "enum": [
+              "nano",
+              "compact",
+              "standard",
+              "verbose"
+            ],
+            "type": "string"
+          },
+          "session": {
+            "description": "Your Claude Code session id — a lowercase UUID, the name of your transcript file. Passed as --as=<uuid>: a claim is named by it, and --gate searches only this session's transcript. Required; a label is refused.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "path",
+          "session"
+        ],
+        "type": "object"
+      },
+      "name": "hold",
+      "title": "Hold a shared file"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "description": "Every discovery left or parked, the due ones first (board.mjs left).",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "profile": {
+            "description": "Response verbosity. Defaults to compact.",
+            "enum": [
+              "nano",
+              "compact",
+              "standard",
+              "verbose"
+            ],
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "left",
+      "title": "Discoveries left or parked"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": false
+      },
+      "description": "Make a unit (board.mjs new). kind=screen: `route` + `weight` + `yes`. kind=family: `route` only (a family walks every phase). kind=horizontal: `name` + `paths` + `weight` + `yes`, optionally `after` | `before` and `about`. A weight lighter than the rubric recommends needs `gate` (the owner's words).",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "about": {
+            "description": "horizontal: one line on the wave (→ --about).",
+            "maxLength": 500,
+            "type": "string"
+          },
+          "after": {
+            "description": "horizontal: queue after this unit (→ --after).",
+            "type": "string"
+          },
+          "before": {
+            "description": "horizontal: insert before this unit (→ --before).",
+            "type": "string"
+          },
+          "gate": {
+            "description": "The owner's words, verbatim, as they typed them or chose them in an AskUserQuestion in THIS session (join several answers from one message with ||). Passed as --gate=…; board.mjs finds the message and proves the words are in it. The wrapper never takes --words/--session/--uuid.",
+            "maxLength": 4000,
+            "type": "string"
+          },
+          "kind": {
+            "description": "Unit kind.",
+            "enum": [
+              "screen",
+              "family",
+              "horizontal"
+            ],
+            "type": "string"
+          },
+          "name": {
+            "description": "horizontal: the pattern's name, e.g. dates (→ --horizontal=dates).",
+            "type": "string"
+          },
+          "paths": {
+            "description": "horizontal: repo-relative paths it owns (→ --paths=a,b).",
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 100,
+            "type": "array"
+          },
+          "profile": {
+            "description": "Response verbosity. Defaults to compact.",
+            "enum": [
+              "nano",
+              "compact",
+              "standard",
+              "verbose"
+            ],
+            "type": "string"
+          },
+          "route": {
+            "description": "screen / family: the route, e.g. /review/intent.",
+            "type": "string"
+          },
+          "session": {
+            "description": "Your Claude Code session id — a lowercase UUID, the name of your transcript file. Passed as --as=<uuid>: a claim is named by it, and --gate searches only this session's transcript. Required; a label is refused.",
+            "type": "string"
+          },
+          "weight": {
+            "description": "screen / horizontal: the weight the owner picked.",
+            "enum": [
+              "light",
+              "standard",
+              "full"
+            ],
+            "type": "string"
+          },
+          "yes": {
+            "description": "Rubric question ids answered yes; [] = every answer no (--yes=none). `assess` lists them.",
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 20,
+            "type": "array"
+          }
+        },
+        "required": [
+          "kind",
+          "session"
+        ],
+        "type": "object"
+      },
+      "name": "new_unit",
+      "title": "New unit"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "description": "The horizontal queue in order, and the unit to claim next (board.mjs next).",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "profile": {
+            "description": "Response verbosity. Defaults to compact.",
+            "enum": [
+              "nano",
+              "compact",
+              "standard",
+              "verbose"
+            ],
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "next",
+      "title": "Board queue"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "description": "The owner's messages in `session`'s transcript since the unit's phase began, as ## Owner notes rows (board.mjs notes, read form — writes nothing). `notes_write` puts them into the verify file.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "profile": {
+            "description": "Response verbosity. Defaults to compact.",
+            "enum": [
+              "nano",
+              "compact",
+              "standard",
+              "verbose"
+            ],
+            "type": "string"
+          },
+          "session": {
+            "description": "Your Claude Code session id — a lowercase UUID, the name of your transcript file. Passed as --as=<uuid>: a claim is named by it, and --gate searches only this session's transcript. Required; a label is refused.",
+            "type": "string"
+          },
+          "since": {
+            "description": "ISO time to read from; default: when the unit's last phase was done.",
+            "type": "string"
+          },
+          "unit": {
+            "description": "A unit id.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "unit",
+          "session"
+        ],
+        "type": "object"
+      },
+      "name": "notes",
+      "title": "Owner notes (read)"
+    },
+    {
+      "annotations": {
+        "destructiveHint": true,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": false
+      },
+      "description": "Copy the owner's messages since the phase began from `session`'s transcript into the current verify file's ## Owner notes (board.mjs notes --write). Replaces that section.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "profile": {
+            "description": "Response verbosity. Defaults to compact.",
+            "enum": [
+              "nano",
+              "compact",
+              "standard",
+              "verbose"
+            ],
+            "type": "string"
+          },
+          "session": {
+            "description": "Your Claude Code session id — a lowercase UUID, the name of your transcript file. Passed as --as=<uuid>: a claim is named by it, and --gate searches only this session's transcript. Required; a label is refused.",
+            "type": "string"
+          },
+          "since": {
+            "description": "ISO time to read from; default: when the unit's last phase was done.",
+            "type": "string"
+          },
+          "unit": {
+            "description": "A unit id, e.g. screen--review-intent.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "unit",
+          "session"
+        ],
+        "type": "object"
+      },
+      "name": "notes_write",
+      "title": "Write the owner's notes"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": false
+      },
+      "description": "A new spec waits on a LANDED unit; the next reopen takes every waiting spec onto one round (board.mjs queue-spec).",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "profile": {
+            "description": "Response verbosity. Defaults to compact.",
+            "enum": [
+              "nano",
+              "compact",
+              "standard",
+              "verbose"
+            ],
+            "type": "string"
+          },
+          "session": {
+            "description": "Your Claude Code session id — a lowercase UUID, the name of your transcript file. Passed as --as=<uuid>: a claim is named by it, and --gate searches only this session's transcript. Required; a label is refused.",
+            "type": "string"
+          },
+          "spec": {
+            "description": "SPEC-NNN.",
+            "type": "string"
+          },
+          "unit": {
+            "description": "A unit id, e.g. screen--review-intent.",
+            "type": "string"
+          },
+          "why": {
+            "description": "Optional reason (→ --why).",
+            "maxLength": 4000,
+            "type": "string"
+          }
+        },
+        "required": [
+          "unit",
+          "spec",
+          "session"
+        ],
+        "type": "object"
+      },
+      "name": "queue_spec",
+      "title": "Queue a spec on a landed unit"
+    },
+    {
+      "annotations": {
+        "destructiveHint": true,
+        "idempotentHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": false
+      },
+      "description": "Give back this session's claim on a unit, or its hold on a path (board.mjs release). Releasing another session's claim (--force) is the owner's, from the CLI — not offered here.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "profile": {
+            "description": "Response verbosity. Defaults to compact.",
+            "enum": [
+              "nano",
+              "compact",
+              "standard",
+              "verbose"
+            ],
+            "type": "string"
+          },
+          "session": {
+            "description": "Your Claude Code session id — a lowercase UUID, the name of your transcript file. Passed as --as=<uuid>: a claim is named by it, and --gate searches only this session's transcript. Required; a label is refused.",
+            "type": "string"
+          },
+          "target": {
+            "description": "A unit id or a held path.",
+            "maxLength": 512,
+            "type": "string"
+          }
+        },
+        "required": [
+          "target",
+          "session"
+        ],
+        "type": "object"
+      },
+      "name": "release",
+      "title": "Release a claim or hold"
+    },
+    {
+      "annotations": {
+        "destructiveHint": true,
+        "idempotentHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": false
+      },
+      "description": "Walk a unit again from a done phase (board.mjs reopen) — the round's records move into `rounds`, its evidence is renamed *.round-<k>.*. Pass `phase`, or `rebuild: true` for the build phase. At a verify gate, ## Owner notes must be written first (`notes_write`).",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "phase": {
+            "description": "The phase to walk again from.",
+            "type": "string"
+          },
+          "profile": {
+            "description": "Response verbosity. Defaults to compact.",
+            "enum": [
+              "nano",
+              "compact",
+              "standard",
+              "verbose"
+            ],
+            "type": "string"
+          },
+          "rebuild": {
+            "description": "Reopen at the build phase (→ --rebuild) instead of naming it.",
+            "type": "boolean"
+          },
+          "session": {
+            "description": "Your Claude Code session id — a lowercase UUID, the name of your transcript file. Passed as --as=<uuid>: a claim is named by it, and --gate searches only this session's transcript. Required; a label is refused.",
+            "type": "string"
+          },
+          "unit": {
+            "description": "A unit id, e.g. screen--review-intent.",
+            "type": "string"
+          },
+          "why": {
+            "description": "What moved, and why the phases are walked again (→ --why).",
+            "maxLength": 4000,
+            "type": "string"
+          }
+        },
+        "required": [
+          "unit",
+          "why",
+          "session"
+        ],
+        "type": "object"
+      },
+      "name": "reopen",
+      "title": "Reopen a unit"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": false
+      },
+      "description": "The next docs/15 row number or migration number, held seven days so two sessions never take the same one (board.mjs reserve).",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "kind": {
+            "description": "Which number.",
+            "enum": [
+              "docs15",
+              "migration"
+            ],
+            "type": "string"
+          },
+          "profile": {
+            "description": "Response verbosity. Defaults to compact.",
+            "enum": [
+              "nano",
+              "compact",
+              "standard",
+              "verbose"
+            ],
+            "type": "string"
+          },
+          "session": {
+            "description": "Your Claude Code session id — a lowercase UUID, the name of your transcript file. Passed as --as=<uuid>: a claim is named by it, and --gate searches only this session's transcript. Required; a label is refused.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "session"
+        ],
+        "type": "object"
+      },
+      "name": "reserve",
+      "title": "Reserve a shared number"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "description": "Where every unit is and what is next (board.mjs status), or one unit with `unit`. With `unit`, also returns `unitFile`: the RAW checks/board/units/<id>.json — never interpreted; phase, waits and claims are what `text` says.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "profile": {
+            "description": "Response verbosity. Defaults to compact.",
+            "enum": [
+              "nano",
+              "compact",
+              "standard",
+              "verbose"
+            ],
+            "type": "string"
+          },
+          "unit": {
+            "description": "A unit id, e.g. screen--review-intent. Omit for every unit.",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "status",
+      "title": "Board status"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": false
+      },
+      "description": "A new file joins a unit this session has claimed (board.mjs touch).",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "path": {
+            "description": "Repo-relative path.",
+            "maxLength": 512,
+            "type": "string"
+          },
+          "profile": {
+            "description": "Response verbosity. Defaults to compact.",
+            "enum": [
+              "nano",
+              "compact",
+              "standard",
+              "verbose"
+            ],
+            "type": "string"
+          },
+          "session": {
+            "description": "Your Claude Code session id — a lowercase UUID, the name of your transcript file. Passed as --as=<uuid>: a claim is named by it, and --gate searches only this session's transcript. Required; a label is refused.",
+            "type": "string"
+          },
+          "unit": {
+            "description": "A unit id, e.g. screen--review-intent.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "unit",
+          "path",
+          "session"
+        ],
+        "type": "object"
+      },
+      "name": "touch",
+      "title": "Add a file to a claimed unit"
+    },
+    {
+      "annotations": {
+        "destructiveHint": true,
+        "idempotentHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": false
+      },
+      "description": "Change a unit's weight (board.mjs weigh). Heavier adds phases (one before a phase already done walks the unit again from it); lighter drops the phases still to do. Lighter than the rubric recommends needs `gate`.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "gate": {
+            "description": "The owner's words, verbatim, as they typed them or chose them in an AskUserQuestion in THIS session (join several answers from one message with ||). Passed as --gate=…; board.mjs finds the message and proves the words are in it. The wrapper never takes --words/--session/--uuid.",
+            "maxLength": 4000,
+            "type": "string"
+          },
+          "profile": {
+            "description": "Response verbosity. Defaults to compact.",
+            "enum": [
+              "nano",
+              "compact",
+              "standard",
+              "verbose"
+            ],
+            "type": "string"
+          },
+          "session": {
+            "description": "Your Claude Code session id — a lowercase UUID, the name of your transcript file. Passed as --as=<uuid>: a claim is named by it, and --gate searches only this session's transcript. Required; a label is refused.",
+            "type": "string"
+          },
+          "unit": {
+            "description": "A unit id, e.g. screen--review-intent.",
+            "type": "string"
+          },
+          "weight": {
+            "description": "The new weight.",
+            "enum": [
+              "light",
+              "standard",
+              "full"
+            ],
+            "type": "string"
+          },
+          "why": {
+            "description": "Why the weight changes (→ --why).",
+            "maxLength": 4000,
+            "type": "string"
+          },
+          "yes": {
+            "description": "Rubric question ids answered yes; [] = every answer no (--yes=none). `assess` lists them.",
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 20,
+            "type": "array"
+          }
+        },
+        "required": [
+          "unit",
+          "weight",
+          "yes",
+          "why",
+          "session"
+        ],
+        "type": "object"
+      },
+      "name": "weigh",
+      "title": "Change a unit's weight"
+    }
+  ]
+}

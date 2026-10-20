@@ -19,6 +19,7 @@
 import { toPosixPath } from "@mcp/core";
 
 import { bitbucketEnv } from "./envSpecs/bitbucket.js";
+import { boardEnv } from "./envSpecs/board-mcp.js";
 import { codebaseIndexEnv } from "./envSpecs/codebaseIndex.js";
 import { observeEnv } from "./envSpecs/observe.js";
 import { postgresEnv } from "./envSpecs/postgres.js";
@@ -140,6 +141,19 @@ export const SERVERS: readonly ServerDescriptor[] = [
     skillSource: "bitbucket-mcp/skill",
     tools: toolsFor("bitbucket-mcp"),
     env: bitbucketEnv
+  },
+
+  {
+    key: "board-mcp",
+    displayName: "Board MCP",
+    dir: "board-mcp",
+    entry: "dist/index.js",
+    tagline: "Thin wrapper over wec.aria's pipeline board CLI (checks/board/board.mjs): read the board, and — when enabled — claim, advance and record.",
+    build: { install: true, guards: [] },
+    smokeTest: "node scripts/smoke-test.mjs",
+    skillSource: "board-mcp/skill",
+    tools: toolsFor("board-mcp"),
+    env: boardEnv
   }
 ];
 

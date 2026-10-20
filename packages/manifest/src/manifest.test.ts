@@ -222,7 +222,8 @@ test("tool lists match the committed contract snapshots exactly", () => {
   // 101 -> 108: bitbucket-mcp gained seven read-only commit/compare/source tools.
   // 108 -> 111: bitbucket-mcp list/add PR comments and merge_pull_request.
   // 111 -> 115: bitbucket-mcp commit_files_preview/apply, create_branch, delete_branch.
-  assert.equal(total, 115, "the workspace advertises 115 tools; update this number deliberately");
+  // 115 -> 138: board-mcp joined with 23 (health_check + 8 read + 14 write, one per board.mjs subcommand).
+  assert.equal(total, 138, "the workspace advertises 138 tools; update this number deliberately");
 });
 
 // --- a server registered before its contract exists -----------------------------
@@ -342,13 +343,15 @@ test("the env contract covers every server, and grew as S-35 intended", () => {
   // 42 -> 44 with CODEBASE_INDEX_QUERY_REFRESH_ENABLED / _BUDGET_MS (R1): read tools refresh a stale
   // index before answering, within a budget.
   // 44 -> 45 with CODEBASE_INDEX_RESPECT_GITIGNORE (release B.1): gitignored build output stays out.
+  // board-mcp arrived with 3: BOARD_REPO_ROOT, BOARD_WRITE_ENABLED, BOARD_CALL_TIMEOUT_MS.
   const counts = Object.fromEntries(SERVERS.map((s) => [s.key, s.env.length]));
   assert.deepEqual(counts, {
     "codebase-index": 45,
     "postgres-mcp": 35,
     "observe-mcp": 31,
     "bitbucket-mcp": 16,
-    "sqlserver-mcp": 25
+    "sqlserver-mcp": 25,
+    "board-mcp": 3
   });
 });
 
