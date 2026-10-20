@@ -337,9 +337,11 @@ test("the env contract covers every server, and grew as S-35 intended", () => {
   // migration's statements run as, so objects are not owned by the personal login.
   // sqlserver-mcp 19 -> 25 with the write lane (ADR 0006): SQLSERVER_WRITE_ENABLED, _WRITABLE_ENVIRONMENTS,
   // SQLSERVER_APPROVAL_SECRET, SQLSERVER_WRITE_PREVIEW_TTL_MS, _WRITE_TIMEOUT_MS and _WRITE_AUDIT_FILE.
+  // codebase-index 41 -> 42 with CODEBASE_INDEX_MAX_MARKDOWN_BYTES (MCP-ISSUE-068): markdown's own size
+  // cap, so a large decision log is indexed by section instead of skipped whole.
   const counts = Object.fromEntries(SERVERS.map((s) => [s.key, s.env.length]));
   assert.deepEqual(counts, {
-    "codebase-index": 41,
+    "codebase-index": 42,
     "postgres-mcp": 35,
     "observe-mcp": 31,
     "bitbucket-mcp": 16,
