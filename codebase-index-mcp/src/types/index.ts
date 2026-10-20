@@ -548,7 +548,7 @@ export type EdgeProvenance = {
  * the same kind: a `<ProjectReference>` / `.sln` entry naming a project outside the repo or behind an
  * MSBuild property; an in-repo project edge carries the target's real module symbol id instead.
  */
-export const UNRESOLVED_SYMBOL_TOKEN_PREFIXES = ["callee:", "property:", "type:", "iface:", "base:", "import:", "cssvar:", "cssclass:"] as const;
+export const UNRESOLVED_SYMBOL_TOKEN_PREFIXES = ["callee:", "property:", "type:", "iface:", "base:", "import:", "cssvar:", "cssclass:", "component:"] as const;
 
 /**
  * SQL predicate form of {@link UNRESOLVED_SYMBOL_TOKEN_PREFIXES}, for filtering in the query rather
