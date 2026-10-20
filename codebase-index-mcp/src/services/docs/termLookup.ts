@@ -16,7 +16,16 @@
 
 import { listHeadings, type DocHeading } from "../analysis/docSection.js";
 
-export type RegistryRow = { line: number; section: string | null; sectionLine: number | null; cells: string[]; text: string };
+/**
+ * How the registry defines a name, strongest first (wec.aria's review of release D's reverse queue):
+ * a table row's first cell (several names split on `,` and `/`); a heading naming it in backticks
+ * (`### 4.12 task_type`); a backticked name inside another cell of a row (an element field described
+ * in its parent's row); a backticked name in prose (a name a mapping section mints).
+ */
+export type DefinitionKind = "row" | "heading" | "nested" | "prose";
+const KIND_RANK: Record<DefinitionKind, number> = { row: 0, heading: 1, nested: 2, prose: 3 };
+
+export type RegistryRow = { line: number; section: string | null; sectionLine: number | null; definedBy: DefinitionKind; text: string };
 export type RegistryMention = { line: number; section: string | null; text: string };
 export type SchemaKey = { key: string; filePath: string; line: number; owner: string | null };
 
@@ -32,13 +41,45 @@ function tableCells(line: string): string[] | null {
   const t = line.trim();
   if (!t.startsWith("|")) return null;
   if (/^\|?\s*:?-{2,}/.test(t)) return null;
-  return t.replace(/^\|/, "").replace(/\|\s*$/, "").split("|").map((c) => c.trim());
+  // `\|` is a pipe inside a cell (`string \| null`), not a separator.
+  return t.replace(/^\|/, "").replace(/(?<!\\)\|\s*$/, "").split(/(?<!\\)\|/).map((c) => c.trim());
 }
 
-/** First cell as a bare identifier (`` `kb_version_ids` `` → kb_version_ids), or null. */
-function definedName(cells: readonly string[]): string | null {
-  const first = cellKey(cells[0] ?? "");
-  return /^[A-Za-z_$][\w$]*$/.test(first) ? first : null;
+const IDENT = /^[A-Za-z_$][\w$]*$/;
+
+/** First-cell names: `` `a`, `b` `` and `a / b` define each. */
+function definedNames(cells: readonly string[]): string[] {
+  return cellKey(cells[0] ?? "").split(/\s*[,/]\s*/).filter((n) => IDENT.test(n));
+}
+
+/** Identifiers inside backtick spans: `` `{ document_id, then_version_id }` `` names both. */
+function backtickedNames(text: string): string[] {
+  const out: string[] = [];
+  for (const m of text.matchAll(/`([^`]+)`/g)) {
+    for (const tok of m[1]!.split(/[^\w$]+/)) if (IDENT.test(tok)) out.push(tok);
+  }
+  return out;
+}
+
+/** Every name one line defines, each with its strongest kind. */
+function lineDefinitions(text: string, isHeading: boolean): Map<string, DefinitionKind> {
+  const out = new Map<string, DefinitionKind>();
+  const put = (name: string, kind: DefinitionKind) => {
+    const had = out.get(name);
+    if (!had || KIND_RANK[kind] < KIND_RANK[had]) out.set(name, kind);
+  };
+  if (isHeading) {
+    for (const n of backtickedNames(text)) put(n, "heading");
+    return out;
+  }
+  const cells = tableCells(text);
+  if (cells) {
+    for (const n of definedNames(cells)) put(n, "row");
+    for (const c of cells.slice(1)) for (const n of backtickedNames(c)) put(n, "nested");
+    return out;
+  }
+  for (const n of backtickedNames(text)) put(n, "prose");
+  return out;
 }
 
 function sectionAt(headings: readonly DocHeading[], line: number): DocHeading | null {
@@ -74,31 +115,44 @@ function proseLines(lines: readonly string[]): { line: number; text: string }[] 
 export function registryEntries(lines: readonly string[], term: string, maxMentions: number): { definitions: RegistryRow[]; mentions: RegistryMention[]; mentionCount: number } {
   const headings = listHeadings(lines);
   const word = new RegExp(`(?<![\\w$])${escapeRegex(term)}(?![\\w$])`);
+  const headingLines = new Set(headings.map((h) => h.line));
   const definitions: RegistryRow[] = [];
   const mentions: RegistryMention[] = [];
   let mentionCount = 0;
   for (const { line, text } of proseLines(lines)) {
     if (!word.test(text)) continue;
     const sec = sectionAt(headings, line);
-    const cells = tableCells(text);
-    if (cells && definedName(cells) === term) {
-      definitions.push({ line, section: sec?.text ?? null, sectionLine: sec?.line ?? null, cells, text: text.trim().slice(0, MAX_TEXT) });
+    const kind = lineDefinitions(text, headingLines.has(line)).get(term);
+    if (kind) {
+      definitions.push({ line, section: sec?.text ?? null, sectionLine: sec?.line ?? null, definedBy: kind, text: text.trim().slice(0, MAX_TEXT) });
       continue;
     }
-    if (headings.some((h) => h.line === line)) continue;
+    if (headingLines.has(line)) continue;
     mentionCount++;
     if (mentions.length < maxMentions) mentions.push({ line, section: sec?.text ?? null, text: text.trim().slice(0, MAX_TEXT) });
   }
-  return { definitions, mentions, mentionCount };
+  // A nested or prose naming defines the name only when no row or heading does; beside one, it is a
+  // mention (docs/10 §3.7's `citations` row names `kb_version_ids`, which §3.13's row defines).
+  const strong = definitions.filter((d) => d.definedBy === "row" || d.definedBy === "heading");
+  if (strong.length === 0 || strong.length === definitions.length) {
+    definitions.sort((a, b) => KIND_RANK[a.definedBy] - KIND_RANK[b.definedBy] || a.line - b.line);
+    return { definitions, mentions, mentionCount };
+  }
+  const demoted = definitions.filter((d) => !strong.includes(d));
+  mentionCount += demoted.length;
+  const allMentions = [...mentions, ...demoted.map((d) => ({ line: d.line, section: d.section, text: d.text }))].sort((a, b) => a.line - b.line);
+  return { definitions: strong.sort((a, b) => KIND_RANK[a.definedBy] - KIND_RANK[b.definedBy] || a.line - b.line), mentions: allMentions.slice(0, maxMentions), mentionCount };
 }
 
-/** Every name the registry defines (first cell of a table row), with its line — for the reverse report. */
-export function registryDefinedNames(lines: readonly string[]): Map<string, number> {
-  const out = new Map<string, number>();
+/** Every name the registry defines, with its strongest kind and that line — for the reverse report. */
+export function registryDefinedNames(lines: readonly string[]): Map<string, { kind: DefinitionKind; line: number }> {
+  const headingLines = new Set(listHeadings(lines).map((h) => h.line));
+  const out = new Map<string, { kind: DefinitionKind; line: number }>();
   for (const { line, text } of proseLines(lines)) {
-    const cells = tableCells(text);
-    const name = cells ? definedName(cells) : null;
-    if (name && !out.has(name)) out.set(name, line);
+    for (const [name, kind] of lineDefinitions(text, headingLines.has(line))) {
+      const had = out.get(name);
+      if (!had || KIND_RANK[kind] < KIND_RANK[had.kind]) out.set(name, { kind, line });
+    }
   }
   return out;
 }
@@ -157,39 +211,57 @@ export function ownerMatchesSection(owner: string | null, section: string | null
 }
 
 const SNAKE = /^[a-z][a-z0-9]*(?:_[a-z0-9]+)+$/;
+const LOWER_WORD = /^[a-z][a-z0-9]*$/;
 
 export type ReverseRow = { key: string; confidence: "high" | "medium"; reason: string; declaredAt: { filePath: string; line: number; owner: string | null }[] };
 
+export type ReverseReport = {
+  keysScanned: number;
+  /** Keys the registry defines, by the strongest way it does. */
+  defined: Record<DefinitionKind, number>;
+  ignored: number;
+  missing: ReverseRow[];
+};
+
 /**
- * Snake_case schema keys with no registry row. `high`: the registry never names it; `medium`: it is
- * named in prose or another cell but has no row of its own (often a key that belongs to a nested
- * shape the registry documents inline).
+ * Schema keys with no registry definition of any kind. Scanned: every snake_case key, and every
+ * lower-case key of a schema that has at least one snake_case key (`wants` beside `aria_did`).
+ * `high`: the registry never names it; `medium`: it is named, bare, but nothing defines it.
+ * `ignore` is the repo's `termIgnore` — names it cannot rename (an external API's `json_schema`).
  */
-export function reverseReport(keys: readonly SchemaKey[], registryLines: readonly string[]): { keysScanned: number; defined: number; missing: ReverseRow[] } {
+export function reverseReport(keys: readonly SchemaKey[], registryLines: readonly string[], ignore: readonly string[] = []): ReverseReport {
   const defined = registryDefinedNames(registryLines);
   const text = proseLines(registryLines).map((l) => l.text).join("\n");
+  const snakeOwners = new Set(keys.filter((k) => SNAKE.test(k.key)).map((k) => `${k.filePath}#${k.owner ?? ""}`));
+  const ignored = new Set(ignore);
   const byKey = new Map<string, SchemaKey[]>();
   for (const k of keys) {
-    if (!SNAKE.test(k.key)) continue;
+    if (!SNAKE.test(k.key) && !(LOWER_WORD.test(k.key) && snakeOwners.has(`${k.filePath}#${k.owner ?? ""}`))) continue;
     const list = byKey.get(k.key) ?? [];
     list.push(k);
     byKey.set(k.key, list);
   }
   const missing: ReverseRow[] = [];
-  let definedCount = 0;
+  const definedCount: Record<DefinitionKind, number> = { row: 0, heading: 0, nested: 0, prose: 0 };
+  let ignoredCount = 0;
   for (const [key, decls] of byKey) {
-    if (defined.has(key)) {
-      definedCount++;
+    if (ignored.has(key)) {
+      ignoredCount++;
+      continue;
+    }
+    const def = defined.get(key);
+    if (def) {
+      definedCount[def.kind]++;
       continue;
     }
     const named = new RegExp(`(?<![\\w$])${escapeRegex(key)}(?![\\w$])`).test(text);
     missing.push({
       key,
       confidence: named ? "medium" : "high",
-      reason: named ? "named in the registry, but no table row defines it" : "the registry never names it",
+      reason: named ? "named in the registry, but never in a row, a heading or backticks" : "the registry never names it",
       declaredAt: decls.slice(0, 5).map((d) => ({ filePath: d.filePath, line: d.line, owner: d.owner }))
     });
   }
   missing.sort((a, b) => (a.confidence === b.confidence ? a.key.localeCompare(b.key) : a.confidence === "high" ? -1 : 1));
-  return { keysScanned: byKey.size, defined: definedCount, missing };
+  return { keysScanned: byKey.size, defined: definedCount, ignored: ignoredCount, missing };
 }

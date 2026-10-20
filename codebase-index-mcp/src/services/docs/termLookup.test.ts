@@ -67,10 +67,48 @@ describe("termLookup", () => {
     assert.equal(ownerMatchesSection("turn_schema", "3.13 Audit event"), false);
   });
 
+  it("recognises the four definition shapes wec.aria's registry uses", () => {
+    const reg = [
+      "### 3.68 Usage summary",
+      "| Field | Type | Notes |",
+      "|---|---|---|",
+      "| `proposed_by`, `proposed_by_username` | string, string \\| null | who |",
+      "| `periods` | array | Every period: `period_start`, `period_end` (exclusive) |",
+      "| `documents` | array | `{ document_id, then_version_id }` |",
+      "### 4.12 `task_type`",
+      "`vehicles_truncated` is a boolean and is the only name this section mints.",
+      "hard_gate_reasons appears bare."
+    ];
+    const kind = (k: string) => registryEntries(reg, k, 5).definitions[0]?.definedBy;
+    assert.equal(kind("proposed_username") ?? null, null);
+    assert.equal(kind("proposed_by_username"), "row");
+    assert.equal(kind("proposed_by"), "row");
+    assert.equal(kind("period_end"), "nested");
+    assert.equal(kind("then_version_id"), "nested");
+    assert.equal(kind("task_type"), "heading");
+    assert.equal(kind("vehicles_truncated"), "prose");
+    assert.equal(kind("hard_gate_reasons") ?? null, null);
+
+    const src = [
+      "import { z } from 'zod'",
+      "export const handover_schema = z.object({",
+      "  aria_did: z.string(),",
+      "  wants: z.string(),",
+      "  json_schema: z.string(),",
+      "})",
+      "export const plain_schema = z.object({",
+      "  kind: z.string(),",
+      "})"
+    ].join("\n");
+    const rep = reverseReport(schemaKeys(src, "core/summarise.ts"), reg, ["json_schema"]);
+    assert.deepEqual(rep.missing.map((m) => m.key), ["aria_did", "wants"], "wants is scanned beside aria_did; kind (no snake key in its schema) is not; json_schema is ignored");
+    assert.equal(rep.ignored, 1);
+  });
+
   it("reverse report: snake_case keys with no defining row, never-named first", () => {
     const rep = reverseReport(schemaKeys(CONTRACT, "contracts/audit.ts"), REGISTRY);
     assert.equal(rep.keysScanned, 3, "kind is not snake_case with an underscore");
-    assert.equal(rep.defined, 1);
+    assert.deepEqual(rep.defined, { row: 1, heading: 0, nested: 0, prose: 0 });
     assert.deepEqual(rep.missing.map((m) => [m.key, m.confidence]), [["staff_user_id", "high"], ["tool_names", "medium"]]);
   });
 });

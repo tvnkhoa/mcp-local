@@ -70,7 +70,7 @@ try {
 
   const rev = await docs({});
   const keys = (rev?.missing ?? []).map((m) => `${m.key}:${m.confidence}`);
-  assert(JSON.stringify(keys) === JSON.stringify(["staff_user_id:high", "tool_names:medium"]) && rev?.definedInRegistry === 1, "reverse report: never-named first, test-file keys excluded", JSON.stringify(rev));
+  assert(JSON.stringify(keys) === JSON.stringify(["staff_user_id:high", "tool_names:medium"]) && rev?.definedInRegistry?.row === 1, "reverse report: never-named first, test-file keys excluded", JSON.stringify(rev));
 } finally {
   await Promise.race([client.close().catch(() => {}), new Promise((r) => setTimeout(r, 3000))]);
 }

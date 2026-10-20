@@ -522,19 +522,20 @@ function readTerm(ctx: HandlerContext, repoId: string, term: string | undefined,
   const scanMeta = { schemaFilesScanned: scan.filesScanned, ...(scan.capped && { schemaScanCapped: TERM_SCAN_MAX_FILES }) };
 
   if (!term) {
-    const report = reverseReport(scan.keys, registryLines);
+    const report = reverseReport(scan.keys, registryLines, load.config?.termIgnore ?? []);
     return {
       repoId,
       mode: "term",
       registryDoc,
       keysScanned: report.keysScanned,
       definedInRegistry: report.defined,
+      ...(report.ignored > 0 && { ignored: report.ignored }),
       missingCount: report.missing.length,
       returned: Math.min(limit, report.missing.length),
       ...(report.missing.length > limit && { truncated: true }),
       missing: report.missing.slice(0, limit),
       ...scanMeta,
-      note: "a review queue, not a verdict: snake_case Zod shape keys (non-test files) with no registry table row whose first cell is the key. 'high' = the registry never names it; 'medium' = named, but no row defines it."
+      note: "a review queue, not a verdict: Zod shape keys (non-test files; every snake_case key, plus every lower-case key of a schema that has one) the registry does not define as a row's first cell, a backticked heading, a backticked name in another cell of a row (nested), or a backticked name in prose. definedInRegistry counts each kind. 'high' = never named; 'medium' = named bare only. termIgnore in citations.json skips names."
     };
   }
 
@@ -549,7 +550,7 @@ function readTerm(ctx: HandlerContext, repoId: string, term: string | undefined,
     mode: "term",
     term,
     registryDoc,
-    definedIn: entries.definitions.map((d) => ({ line: d.line, section: d.section, sectionLine: d.sectionLine, text: d.text })),
+    definedIn: entries.definitions.map((d) => ({ line: d.line, definedBy: d.definedBy, section: d.section, sectionLine: d.sectionLine, text: d.text })),
     mentionCount: entries.mentionCount,
     mentions: entries.mentions,
     schemaKeys,
