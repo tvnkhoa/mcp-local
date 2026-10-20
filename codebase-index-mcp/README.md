@@ -216,6 +216,8 @@ Refactor tools: `refactor_replace_preview` and `refactor_replace_apply` support 
 | `CODEBASE_INDEX_WATCH_AUTO_REPOS` | no | — | renamed — still accepts `CODEBASE_INDEX_AUTO_WATCH_REPOS` · Comma-separated repoIds to auto-watch at boot. Unset = none. |
 | `CODEBASE_INDEX_MAX_FILES_PER_RUN` | no | `20000` *(code)* | — |
 | `CODEBASE_INDEX_MAX_FILE_SIZE_BYTES` | no | `500000` *(code)* | — |
+| `CODEBASE_INDEX_QUERY_REFRESH_ENABLED` | no | `true` *(code)* | Read tools re-index a stale repo (HEAD moved or tree dirty) before answering. false = answer from the stored index with a staleness note. |
+| `CODEBASE_INDEX_QUERY_REFRESH_BUDGET_MS` | no | `5000` *(code)* | How long a read tool waits for that refresh (1-120000). A longer run is never aborted: it finishes in the background and later queries use it. |
 | `CODEBASE_INDEX_MAX_MARKDOWN_BYTES` | no | `4000000` *(code)* | Size cap for markdown; the docs lane splits it by section, so it is higher than the code cap. |
 | `CODEBASE_INDEX_LARGE_FILE_THRESHOLD_BYTES` | no | `0` *(code)* | 0 = no large-file special casing. |
 | `CODEBASE_INDEX_MAX_LIMIT` | no | `500` *(code)* | renamed — still accepts `CODEBASE_INDEX_MAX_RESULT_LIMIT` · Hard ceiling on any tool's `limit`. |
@@ -243,7 +245,7 @@ Refactor tools: `refactor_replace_preview` and `refactor_replace_apply` support 
 | `CODEBASE_INDEX_LOG_MODE` | no | — | renamed — still accepts `CODEBASE_INDEX_INDEX_LOG` · Enables verbose index-progress logging on stderr. |
 | `CODEBASE_INDEX_LLM_ENABLED` | no | `false` *(code)* | Runtime LLM invocation is prohibited by design. Setting this to true ABORTS STARTUP, and `guard:no-llm-runtime` statically verifies no LLM client is importable. Declared here so the constraint is documented, not so it can be turned on. |
 
-42 variables. Defaults marked *(code)* are the server's own fallback and are **not** written into your agent config — set them only to override.
+44 variables. Defaults marked *(code)* are the server's own fallback and are **not** written into your agent config — set them only to override.
 
 <!-- END GENERATED: env-table -->
 

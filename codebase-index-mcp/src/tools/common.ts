@@ -24,6 +24,11 @@ export interface CodebaseIndexDeps {
    * manager, the env constants and `asText` through it.
    */
   readonly buildContext: () => HandlerContext;
+  /**
+   * R1: bring the repo's index up to the current tree (within a budget) before a read tool runs,
+   * recording the outcome for `asText`. Absent in tests and tools that build deps by hand.
+   */
+  readonly ensureFresh?: (repoId: string) => Promise<void>;
 }
 
 /**

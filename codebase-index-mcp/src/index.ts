@@ -45,6 +45,8 @@ import type { HandlerContext } from "./tools/handlers/handlerContext.js";
 import { createCodebaseIndexServer } from "./server.js";
 import { buildTools } from "./tools/index.js";
 import { DEFAULT_MAX_MARKDOWN_BYTES } from "./services/indexing/fileFilter.js";
+import { applyFreshness, createFreshnessGate } from "./middleware/freshness.js";
+import { collectDirtyFiles, resolveHeadCommitSha } from "./services/git/gitHelpers.js";
 
 const dbPath = stringFromEnv("CODEBASE_INDEX_DB_PATH", "./codebase-index.db");
 const allowedRoots = allowedRootsFromEnv();
@@ -82,6 +84,9 @@ const REFACTOR_STRICT_APPROVAL = booleanFromEnv("CODEBASE_INDEX_REFACTOR_STRICT_
 const REFACTOR_APPROVAL_SECRET = stringFromEnv("CODEBASE_INDEX_REFACTOR_APPROVAL_SECRET", "");
 const REFACTOR_PREVIEW_TTL_MS = numberFromEnv("CODEBASE_INDEX_REFACTOR_PREVIEW_TTL_MS", 30 * 60 * 1000);
 const REFACTOR_LOW_CONFIDENCE_THRESHOLD = 0.8;
+/** R1: read tools refresh a stale index before answering, within this budget (the run is never aborted). */
+const QUERY_REFRESH_ENABLED = booleanFromEnv("CODEBASE_INDEX_QUERY_REFRESH_ENABLED", true);
+const QUERY_REFRESH_BUDGET_MS = clamp(numberFromEnv("CODEBASE_INDEX_QUERY_REFRESH_BUDGET_MS", 5_000), 1, 120_000);
 const SERVER_VERSION = resolveServerVersion(MODULE_DIR);
 
 const toolContextStorage = new AsyncLocalStorage<ToolRequestContext>();
@@ -99,7 +104,7 @@ const store = new GraphStore(dbPath);
  * progress sink is per-request, and the profile override was read from the env on
  * every run before the extraction. Resolving either eagerly would change behaviour.
  */
-const runIndexAndResolve = createIndexRunner({
+const runIndexUnserialized = createIndexRunner({
   store,
   limits: {
     subtxSize: SUBTX_SIZE,
@@ -113,6 +118,32 @@ const runIndexAndResolve = createIndexRunner({
   resolveProgressNotifier: () => toolContextStorage.getStore()?.progressNotifier,
   resolvePerformanceProfileOverride: () => performanceProfileOverrideFromEnv()
 });
+
+/**
+ * R1 freshness gate. It owns the per-repo run queue, so every index run in this process —
+ * index_repository, the watcher, and the gate's own refreshes — goes through `serialize` and two
+ * never write one repo at once. The gate itself is handed the UNSERIALIZED runner: it serializes
+ * internally, and passing the wrapped one would make a refresh wait on itself.
+ */
+const freshnessGate = createFreshnessGate({
+  enabled: QUERY_REFRESH_ENABLED,
+  budgetMs: QUERY_REFRESH_BUDGET_MS,
+  lockDir: path.dirname(path.resolve(dbPath)),
+  getRepoPath: (repoId) => store.getRepository(repoId)?.repoPath ?? null,
+  getIndexedCommit: (repoId) => store.getLatestRun(repoId)?.commitSha ?? null,
+  readTree: (repoPath) => ({ head: resolveHeadCommitSha(repoPath), dirty: [...collectDirtyFiles(repoPath)] }),
+  run: (repoId, repoPath, mode) => runIndexUnserialized(repoId, repoPath, mode, DOCS_INDEXING_ENABLED, MAX_FILES_PER_RUN, 200),
+  markTriggered: (runId) => store.markRunTrigger(runId, "query")
+});
+
+const runIndexAndResolve: typeof runIndexUnserialized = (repoId, ...rest) =>
+  freshnessGate.serialize(repoId, () => runIndexUnserialized(repoId, ...rest));
+
+async function ensureFresh(repoId: string): Promise<void> {
+  const note = await freshnessGate.ensureFresh(repoId);
+  const requestContext = toolContextStorage.getStore();
+  if (requestContext) requestContext.freshness = note;
+}
 
 const watchManager = new WatchManager(
   watchConfig,
@@ -138,7 +169,8 @@ const watchInactivityTimers = new Map<string, NodeJS.Timeout>();
  * emit happens exactly once per response whichever side produced it.
  */
 function asText(payload: unknown, profile: ResponseProfile = "standard"): CallToolResult {
-  return asTextCore(payload, profile, toolContextStorage.getStore(), TELEMETRY_ENABLED, TELEMETRY_SAMPLE_RATE);
+  const requestContext = toolContextStorage.getStore();
+  return asTextCore(applyFreshness(payload, requestContext?.freshness), profile, requestContext, TELEMETRY_ENABLED, TELEMETRY_SAMPLE_RATE);
 }
 
 function buildHandlerContext(): HandlerContext {
@@ -180,7 +212,7 @@ const handle = createCodebaseIndexServer({
   version: "0.1.0",
   limits,
   store,
-  tools: buildTools({ limits, buildContext: buildHandlerContext }),
+  tools: buildTools({ limits, buildContext: buildHandlerContext, ensureFresh }),
   buildHandlerContext,
   toolContextStorage,
   renderResult: asText,

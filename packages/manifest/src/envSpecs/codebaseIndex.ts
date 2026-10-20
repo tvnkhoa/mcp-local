@@ -105,6 +105,8 @@ export function codebaseIndexEnv(root: string): readonly EnvField[] {
     // --- Indexing limits ----------------------------------------------------------
     { name: "CODEBASE_INDEX_MAX_FILES_PER_RUN", required: false, codeDefault: "20000", section: "Indexing limits" },
     { name: "CODEBASE_INDEX_MAX_FILE_SIZE_BYTES", required: false, codeDefault: "500000", section: "Indexing limits" },
+    { name: "CODEBASE_INDEX_QUERY_REFRESH_ENABLED", required: false, codeDefault: "true", kind: "boolean", section: "Indexing limits", note: "Read tools re-index a stale repo (HEAD moved or tree dirty) before answering. false = answer from the stored index with a staleness note." },
+    { name: "CODEBASE_INDEX_QUERY_REFRESH_BUDGET_MS", required: false, codeDefault: "5000", section: "Indexing limits", note: "How long a read tool waits for that refresh (1-120000). A longer run is never aborted: it finishes in the background and later queries use it." },
     { name: "CODEBASE_INDEX_MAX_MARKDOWN_BYTES", required: false, codeDefault: "4000000", section: "Indexing limits", note: "Size cap for markdown; the docs lane splits it by section, so it is higher than the code cap." },
     { name: "CODEBASE_INDEX_LARGE_FILE_THRESHOLD_BYTES", required: false, codeDefault: "0", section: "Indexing limits", note: "0 = no large-file special casing." },
     { name: "CODEBASE_INDEX_MAX_LIMIT", deprecatedAliases: ["CODEBASE_INDEX_MAX_RESULT_LIMIT"], required: false, codeDefault: "500", section: "Indexing limits", note: "Hard ceiling on any tool's `limit`." },

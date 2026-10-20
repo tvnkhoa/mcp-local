@@ -186,7 +186,8 @@ export function getLatestRun(db: Database.Database, repoId: string): IndexRunSum
         vector_symbols_indexed as vectorSymbolsIndexed,
         health_reasons as healthReasonsJson,
         skip_reason as skipReason,
-        skipped_by_reason as skippedByReasonJson
+        skipped_by_reason as skippedByReasonJson,
+        triggered_by as triggeredBy
       from index_runs
       where repo_id = ?
       order by finished_at desc, started_at desc, rowid desc
@@ -222,6 +223,12 @@ export function getLatestRun(db: Database.Database, repoId: string): IndexRunSum
     }
   }
   delete withSkips.skippedByReasonJson;
+  if (row.triggeredBy === null) delete row.triggeredBy;
 
   return row;
+}
+
+/** Tag a recorded run with what started it (R1: "query"). Separate from `recordRun`, which the runner owns. */
+export function markRunTrigger(db: Database.Database, runId: string, trigger: string): void {
+  db.prepare(`update index_runs set triggered_by = ? where run_id = ?`).run(trigger, runId);
 }

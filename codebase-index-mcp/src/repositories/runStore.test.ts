@@ -3,7 +3,7 @@ import test from "node:test";
 import Database from "better-sqlite3";
 
 import { initGraphSchema, runGraphMigrations } from "./schema.js";
-import { recordRun, getLatestRun } from "./runStore.js";
+import { recordRun, getLatestRun, markRunTrigger } from "./runStore.js";
 import type { IndexRunSummary, SkipBucket } from "../types/index.js";
 
 /**
@@ -133,4 +133,13 @@ test("skippedByReason round-trips, and its absence reads as absent rather than e
   assert.equal(latest?.runId, "run-none");
   assert.equal(latest?.skippedByReason, undefined);
   assert.equal("skippedByReasonJson" in (latest ?? {}), false, "the raw JSON column alias must not leak");
+});
+
+test("a query-triggered run says so, and an untagged run carries no triggeredBy", () => {
+  const conn = db();
+  recordRun(conn, summary({ runId: "plain" }));
+  assert.equal(getLatestRun(conn, "r")?.triggeredBy, undefined);
+  recordRun(conn, summary({ runId: "by-query", finishedAt: "2026-08-04T00:00:20.000Z" }));
+  markRunTrigger(conn, "by-query", "query");
+  assert.equal(getLatestRun(conn, "r")?.triggeredBy, "query");
 });

@@ -470,6 +470,7 @@ export function runGraphMigrations(db: Database.Database, vectorEnabled: boolean
     ensureRunColumnText("health_reasons");
     ensureRunColumnText("skip_reason");
     ensureRunColumnText("skipped_by_reason");
+    ensureRunColumnText("triggered_by");
 
     // Add commit_sha for staleness detection.
     if (!runCols.some((c) => c.name === "commit_sha")) {

@@ -339,9 +339,11 @@ test("the env contract covers every server, and grew as S-35 intended", () => {
   // SQLSERVER_APPROVAL_SECRET, SQLSERVER_WRITE_PREVIEW_TTL_MS, _WRITE_TIMEOUT_MS and _WRITE_AUDIT_FILE.
   // codebase-index 41 -> 42 with CODEBASE_INDEX_MAX_MARKDOWN_BYTES (MCP-ISSUE-068): markdown's own size
   // cap, so a large decision log is indexed by section instead of skipped whole.
+  // 42 -> 44 with CODEBASE_INDEX_QUERY_REFRESH_ENABLED / _BUDGET_MS (R1): read tools refresh a stale
+  // index before answering, within a budget.
   const counts = Object.fromEntries(SERVERS.map((s) => [s.key, s.env.length]));
   assert.deepEqual(counts, {
-    "codebase-index": 42,
+    "codebase-index": 44,
     "postgres-mcp": 35,
     "observe-mcp": 31,
     "bitbucket-mcp": 16,

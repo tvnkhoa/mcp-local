@@ -259,7 +259,10 @@ async function main() {
   if (!healthAfterIndexJson?.latestRun?.runId) {
     throw new Error("health_check did not return latestRun after indexing");
   }
-  if (healthAfterIndexJson.latestRun.runId !== indexPayload.json.runId) {
+  // R1: a read query on a dirty tree refreshes the index itself, so the latest run may be a later,
+  // query-triggered one — that is the gate working. Anything else is still a mismatch.
+  const latestIsQueryRefresh = healthAfterIndexJson.latestRun.triggeredBy === "query";
+  if (healthAfterIndexJson.latestRun.runId !== indexPayload.json.runId && !latestIsQueryRefresh) {
     throw new Error(
       `Expected health_check.latestRun.runId to match index runId (${indexPayload.json.runId}), got ${healthAfterIndexJson.latestRun.runId}`
     );

@@ -62,7 +62,11 @@ async function main() {
     env: {
       ...process.env,
       CODEBASE_INDEX_ALLOWED_ROOTS: process.env.CODEBASE_INDEX_ALLOWED_ROOTS ?? repoPath,
-      CODEBASE_INDEX_DB_PATH: process.env.CODEBASE_INDEX_DB_PATH ?? makeTempDbPath("cbi-refactor-")
+      CODEBASE_INDEX_DB_PATH: process.env.CODEBASE_INDEX_DB_PATH ?? makeTempDbPath("cbi-refactor-"),
+      // This compares profile SIZES across calls. With the R1 freshness gate on, a dirty working tree
+      // makes the first call refresh and carry a `freshness` block the next call does not, so the
+      // byte comparison measures the tree, not the profiles. test:query-refresh covers the gate.
+      CODEBASE_INDEX_QUERY_REFRESH_ENABLED: "false"
     },
     stderr: "pipe"
   });

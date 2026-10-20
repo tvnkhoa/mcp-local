@@ -61,6 +61,8 @@ export type IndexRunSummary = {
    * kept the file's previous extraction. Absent on a run that skipped nothing.
    */
   skippedByReason?: SkipBucket[];
+  /** "query" when the R1 freshness gate started this run; absent for index_repository / watcher runs. */
+  triggeredBy?: string;
   elapsedMs: number;
   crossRepoAttempts?: number;
   crossRepoResolved?: number;

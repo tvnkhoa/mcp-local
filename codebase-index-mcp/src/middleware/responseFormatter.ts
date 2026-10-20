@@ -1,5 +1,6 @@
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { normalizePayload as normalizeShared, type ResponseProfile } from "@mcp/core";
+import type { FreshnessNote } from "./freshness.js";
 
 export type { ResponseProfile };
 
@@ -85,6 +86,8 @@ export type ToolRequestContext = {
    * `notifications/progress` updates. Fire-and-forget.
    */
   progressNotifier?: (progress: number, total: number | undefined, message: string) => void;
+  /** Set by the R1 freshness gate before a read tool runs; folded into the payload by `asText`. */
+  freshness?: FreshnessNote;
 };
 
 export type ToolTelemetryEvent = {

@@ -28,7 +28,9 @@ export type { CodebaseIndexDeps } from "./common.js";
  * is the mistake worth catching by construction.
  */
 export function buildTools(deps: CodebaseIndexDeps): readonly AnyToolDefinition[] {
-  return withRepoIdGuard(
+  return withFreshnessGate(
+    deps,
+    withRepoIdGuard(
     deps,
     registerTool([
       buildReadMetadataTools(deps),
@@ -37,7 +39,34 @@ export function buildTools(deps: CodebaseIndexDeps): readonly AnyToolDefinition[
       buildIndexingWatchTools(deps),
       buildRefactorTools(deps)
     ])
+    )
   );
+}
+
+/**
+ * R1 — read tools answer from a current index. Wraps the HANDLER (it runs after validation and the
+ * repo guard, so an unknown repo or a malformed call never triggers a re-index) of every read-only
+ * tool that takes a `repoId`; `index_repository`, `health_check` and `watch_repo` manage the index
+ * themselves and are left alone. See `middleware/freshness.ts`.
+ */
+function withFreshnessGate(deps: CodebaseIndexDeps, tools: readonly AnyToolDefinition[]): readonly AnyToolDefinition[] {
+  const ensureFresh = deps.ensureFresh;
+  if (!ensureFresh) return tools;
+  return tools.map((tool) => {
+    if (REPO_ID_MAY_BE_UNKNOWN.has(tool.name)) return tool;
+    if (tool.annotations?.readOnly !== true) return tool;
+    const props = (tool.inputSchema as { properties?: Record<string, unknown> }).properties ?? {};
+    if (!("repoId" in props)) return tool;
+    const inner = tool.handler;
+    return {
+      ...tool,
+      handler: async (input: unknown, ctx: unknown) => {
+        const repoId = (input as { repoId?: unknown }).repoId;
+        if (typeof repoId === "string" && repoId.length > 0) await ensureFresh(repoId);
+        return (inner as (i: unknown, c: unknown) => unknown)(input, ctx);
+      }
+    } as AnyToolDefinition;
+  });
 }
 
 /**
