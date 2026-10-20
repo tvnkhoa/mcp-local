@@ -25,8 +25,12 @@ import { unwrapExpression } from "./fieldClassify.js";
 const PARSE_METHODS = new Set(["parse", "safeParse", "parseAsync", "safeParseAsync", "decode", "safeDecode"]);
 const PARSE_TEXT = /\.(?:safeParse|parse|parseAsync|safeParseAsync|decode|safeDecode)\s*\(/;
 
-/** `file:pos` key — the identity of a definition site across the pass. */
-export const siteKey = (fileName: string, pos: number): string => `${fileName}:${String(pos)}`;
+/**
+ * `file:pos` key — the identity of a site across passes and across the union and Vue programs. The
+ * file name is case-folded on a case-insensitive file system: the two programs can spell the same
+ * file differently (a root file vs. a module resolved through `realpath`).
+ */
+export const siteKey = (fileName: string, pos: number): string => `${ts.sys.useCaseSensitiveFileNames ? fileName : fileName.toLowerCase()}:${String(pos)}`;
 
 export type ParseWrite = { sf: ts.SourceFile; pos: number; groupIndex: number; how: string; schemaExpression: string };
 export type ParseGap = { sf: ts.SourceFile; pos: number; groupIndex: number; reason: string };

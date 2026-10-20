@@ -139,6 +139,9 @@ test("findFieldReferences: per-declaration answer with the Zod parse pass, gaps 
     assert.ok(gapAt.includes("src/writer.ts:14"), `parse(param) is a named gap: ${gapAt.join(",")}`);
     assert.ok(gapAt.includes("src/reader.ts:10"), `a[key] is a named gap: ${gapAt.join(",")}`);
     assert.ok(gapAt.includes("src/View.vue:1"), `.vue mention is a named gap: ${gapAt.join(",")}`);
+    // No `vue` package in this fixture: the Vue lane refuses (template types would be any) and says why.
+    assert.ok(answer.gaps.find((g) => g.file === "src/View.vue")?.reason.includes("'vue' package does not resolve"), JSON.stringify(answer.gaps));
+    assert.equal(answer.meta.vue?.status, "fallback");
 
     // Pick by file + line selects the homonym interface instead.
     const reply = ok(findFieldReferences(svc, "kb_ids", { declarationFile: "src/homonyms.ts", declarationLine: 1 }));

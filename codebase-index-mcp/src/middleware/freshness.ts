@@ -334,6 +334,19 @@ export function applyFreshness(payload: unknown, note: FreshnessNote | undefined
   const out: Record<string, unknown> = { ...(payload as Record<string, unknown>), freshness: note };
   if (note.state === "refreshed") return out;
   const coverage = out.coverage;
+  // R3 exact: the TypeScript LanguageService reads every file from disk, so the reads and writes ARE
+  // current; only which files are in its program comes from the index. The note is scoped to that
+  // part and kept out of `coverage`, where "previous index" would contradict `exact`.
+  const typed = coverage && typeof coverage === "object" && !Array.isArray(coverage) && (coverage as { engine?: unknown }).engine === "typescript-language-service";
+  if (typed || out.engine === "typescript-language-service") {
+    const reason = (note.reason ?? note.state).replace(/[;.]?\s*this answer comes from the previous index\.?/i, "").trim();
+    out.freshness = {
+      ...note,
+      reason,
+      appliesTo: "index-derived parts only: which TS/JS files are in the TypeScript program (the indexed file list; a file added since the last run is missing). The sites themselves are read from the files on disk and are current."
+    };
+    return out;
+  }
   const gap = `index not current: ${note.reason ?? note.state}`;
   if (coverage === "high") out.coverage = "medium";
   else if (coverage && typeof coverage === "object" && !Array.isArray(coverage)) {

@@ -169,3 +169,16 @@ test("applyFreshness: a not-current answer never keeps coverage high, and says w
   const refreshed = applyFreshness({ coverage: "high" }, { state: "refreshed", runId: "x" }) as { coverage: string; freshness: unknown };
   assert.equal(refreshed.coverage, "high", "a refreshed answer is current: coverage stands");
 });
+
+test("applyFreshness: an exact TypeScript answer scopes the note to its index-derived part", () => {
+  const note = { state: "stale" as const, mode: "incremental" as const, reason: "the refresh run failed; this answer comes from the previous index." };
+  const typed = { engine: "typescript-language-service", coverage: { confidence: "exact", engine: "typescript-language-service", knownGaps: [], gaps: [] } };
+  const out = applyFreshness(typed, note) as { coverage: { confidence: string; knownGaps: string[] }; freshness: { reason: string; appliesTo: string } };
+  assert.equal(out.coverage.confidence, "exact");
+  assert.deepEqual(out.coverage.knownGaps, [], "coverage carries no 'previous index' line");
+  assert.ok(!/previous index/i.test(JSON.stringify(out)), JSON.stringify(out));
+  assert.equal(out.freshness.reason, "the refresh run failed");
+  assert.ok(out.freshness.appliesTo.startsWith("index-derived parts only"));
+  const nano = applyFreshness({ engine: "typescript-language-service", coverage: "exact" }, note) as { coverage: string };
+  assert.equal(nano.coverage, "exact", "nano's bare word too");
+});
