@@ -3,6 +3,10 @@ import { McpError, ErrorCode } from "@modelcontextprotocol/sdk/types.js";
 import { applyResultBudget, resolveResponseProfile, DEFAULT_RESULT_BUDGET_TOKENS } from "../../middleware/responseFormatter.js";
 import { listHeadings, matchHeadings, nearestHeadings, extractSection } from "../../services/analysis/docSection.js";
 import { assertSafeRepoFilePath } from "../../services/refactor/refactorUtils.js";
+import { CITATIONS_CONFIG_PATH, loadCitationConfig } from "../../services/docs/citationConfig.js";
+import { findCitations } from "../../services/docs/annotationScanner.js";
+import { CitationResolver } from "../../services/docs/citationResolver.js";
+import type { CitationRow } from "../../repositories/annotationsStore.js";
 import { notFound } from "@mcp/core";
 import fs from "node:fs";
 import { fileIndexedNote } from "../../middleware/inputGuards.js";
@@ -346,6 +350,92 @@ function readDocSection(store: GraphStore, repoId: string, filePath: string, hea
   const [target, ...others] = matches;
   const section = extractSection(lines, headings, target!, maxTokens, others.slice(0, 10));
   return { repoId, mode: "section", filePath: relative, headingPrefix, ...section };
+}
+
+/**
+ * query_docs{ mode:"search" } beside the doc rows: code comments that match, with the enclosing
+ * symbol (release C). A separate list, because comment and doc relevance scores are not comparable.
+ */
+function codeCommentsFor(store: GraphStore, repoId: string, query: string): { codeComments?: unknown[] } {
+  const hits = store.searchComments(repoId, query, 5);
+  if (hits.length === 0) return {};
+  return {
+    codeComments: hits.map((h) => {
+      const sym = store.findSymbolAtLine(repoId, h.filePath, h.startLine);
+      return {
+        filePath: h.filePath,
+        startLine: h.startLine,
+        endLine: h.endLine,
+        text: h.text.length > 600 ? `${h.text.slice(0, 600)}…` : h.text,
+        enclosingSymbol: sym ? { symbolId: sym.symbolId, name: sym.name, kind: sym.kind } : null
+      };
+    })
+  };
+}
+
+/**
+ * query_docs{ mode:"cites" } (R5/R6). With `target`: run the repo's citation patterns over it to get
+ * the spec, resolve that to a file and anchor (row text for a table row), and list every citation of
+ * it. With `filePath`: that file's citations, each resolved.
+ */
+function readCitations(store: GraphStore, repoId: string, target: string | undefined, filePath: string | undefined, limit: number): unknown {
+  const repo = store.getRepository(repoId);
+  if (!repo) throw notFound(`unknown repoId '${repoId}'.`, { repoId });
+  const load = loadCitationConfig(repo.repoPath);
+  const configNote = !load.present
+    ? { note: `this repo has no ${CITATIONS_CONFIG_PATH}, so no citation patterns are configured; see codebase-index-mcp/docs/citations-config.md.` }
+    : load.errors.length > 0
+      ? { configErrors: load.errors }
+      : {};
+  const resolver = new CitationResolver(repo.repoPath);
+  const withSymbol = (r: CitationRow) => {
+    const sym = /\.mdx?$/i.test(r.filePath) ? null : store.findSymbolAtLine(repoId, r.filePath, r.line);
+    return {
+      filePath: r.filePath,
+      line: r.line,
+      patternId: r.patternId,
+      raw: r.raw,
+      ...(sym && { enclosingSymbol: { symbolId: sym.symbolId, name: sym.name, kind: sym.kind } })
+    };
+  };
+
+  if (target) {
+    const hits = load.config ? findCitations([{ line: 0, text: target }], load.config.citations) : [];
+    const specs = hits.map((h) => ({ targetSpec: h.targetSpec, anchorValue: h.anchorValue }));
+    const asPath = target.replace(/\\/g, "/");
+    const byPath = hits.length === 0;
+    const { rows, total } = store.citationsTo(repoId, byPath ? { filePath: asPath } : { specs }, limit);
+    const resolved = hits.map((h) => ({ patternId: h.patternId, ...resolver.resolve(h) }));
+    return {
+      repoId,
+      mode: "cites",
+      target,
+      ...(byPath ? { matchedAs: "filePath" } : { resolved }),
+      // A path target also answers "which doc sections mention this file" — decision rows that name it.
+      ...(byPath && (() => {
+        const mentionedIn = store.docSectionsMentioning(repoId, asPath, limit);
+        return mentionedIn.length > 0 ? { mentionedIn } : {};
+      })()),
+      citedByCount: total,
+      returned: rows.length,
+      ...(total > rows.length && { truncated: true }),
+      citedBy: rows.map(withSymbol),
+      ...configNote,
+      ...(total === 0 && byPath && load.config && {
+        hint: "no configured pattern matched the target, and no citation points at it as a file path. Use the repo's shorthand (see .codebase-index/citations.json) or an exact repo-relative path."
+      })
+    };
+  }
+
+  const rows = store.citationsFrom(repoId, filePath!, limit);
+  return {
+    repoId,
+    mode: "cites",
+    from: filePath,
+    count: rows.length,
+    citations: rows.map((r) => ({ ...withSymbol(r), ...resolver.resolve(r) })),
+    ...configNote
+  };
 }
 
 // ── find_impact_files ─────────────────────────────────────────────────────────
@@ -702,7 +792,7 @@ export function handleQueryGraph(
  * `search` already had, which is also the convention every other read tool here follows.
  */
 export function handleQueryDocs(
-  args: { repoId: string; mode: "search" | "stale" | "coverage" | "drift" | "links" | "behind" | "language" | "section"; query?: string; headingPrefix?: string; symbolIds?: string[]; filePath?: string; limit: number; maxTokens?: number; minSimilarity?: number; minDaysBehind?: number; minRatioPercent?: number; includeSymbols: boolean; includeCodeMentions: boolean; includeArchived?: boolean; matchMode?: "auto" | "strict" | "phrase"; maxPerFile?: number; contentTypes?: string[]; profile: string },
+  args: { repoId: string; mode: "search" | "stale" | "coverage" | "drift" | "links" | "behind" | "language" | "section" | "cites"; query?: string; headingPrefix?: string; target?: string; includeCodeComments?: boolean; symbolIds?: string[]; filePath?: string; limit: number; maxTokens?: number; minSimilarity?: number; minDaysBehind?: number; minRatioPercent?: number; includeSymbols: boolean; includeCodeMentions: boolean; includeArchived?: boolean; matchMode?: "auto" | "strict" | "phrase"; maxPerFile?: number; contentTypes?: string[]; profile: string },
   ctx: HandlerContext
 ): CallToolResult {
   if (!ctx.constants.DOCS_TOOLS_ENABLED) {
@@ -731,10 +821,15 @@ export function handleQueryDocs(
           degraded: "docs_fts could not be queried, so these are unranked substring matches. Run index_repository with docsMode='on' to rebuild it."
         }),
         results,
+        ...(args.includeCodeComments !== false && codeCommentsFor(store, args.repoId, args.query!)),
         ...(matched.length === 0 && { hint: "no documentation matched — ensure the docs lane was indexed for this repo (index_repository with docsMode='on') and try broader query terms." })
       },
       profile
     );
+  }
+
+  if (args.mode === "cites") {
+    return ctx.asText(readCitations(store, args.repoId, args.target, args.filePath, args.limit), profile);
   }
 
   if (args.mode === "section") {

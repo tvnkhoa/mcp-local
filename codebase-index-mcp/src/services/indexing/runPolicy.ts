@@ -17,7 +17,7 @@ import { randomUUID } from "node:crypto";
 
 import { hasWorkingTreeChanges, resolveHeadCommitSha } from "../git/gitHelpers.js";
 import type { GraphStore } from "../../repositories/graphStore.js";
-import { INDEX_VERSION, type PerformanceProfile } from "./indexPipeline.js";
+import { INDEX_VERSION, currentAnnotationKey, type PerformanceProfile } from "./indexPipeline.js";
 import type { IndexMode, IndexRunResult, ResolutionStats } from "../../types/index.js";
 
 export interface IncrementalSkipDecision {
@@ -121,6 +121,17 @@ export function evaluateIncrementalSkip(
     return {
       shouldSkip: false,
       reason: "the index holds working-tree content from a dirty run",
+      headCommitSha: resolveHeadCommitSha(repoPath),
+      indexVersion: latestRun.indexVersion ?? INDEX_VERSION
+    };
+  }
+
+  // Release C: a new annotation scanner or an edited citations.json must reach unchanged files, which
+  // only a run that is not skipped can do.
+  if (store.getAnnotationKey(repoId) !== currentAnnotationKey(repoPath)) {
+    return {
+      shouldSkip: false,
+      reason: "citation patterns or the annotation scanner changed since the last full scan",
       headCommitSha: resolveHeadCommitSha(repoPath),
       indexVersion: latestRun.indexVersion ?? INDEX_VERSION
     };

@@ -64,7 +64,7 @@ export function listHeadings(lines: readonly string[]): DocHeading[] {
 
 /** Case-insensitive, and blind to inline markup, so `` `tenant`, not `dealer` `` matches "tenant, not". */
 function normalizeHeading(s: string): string {
-  return s.replace(/[`*_]/g, "").replace(/\s+/g, " ").trim().toLowerCase();
+  return s.replace(/[`*_~]/g, "").replace(/\s+/g, " ").trim().toLowerCase();
 }
 
 export function matchHeadings(headings: readonly DocHeading[], prefix: string): DocHeading[] {

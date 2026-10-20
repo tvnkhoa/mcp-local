@@ -21,6 +21,17 @@ import process from "node:process";
 
 import { shouldIndexFile, type FilterDecision } from "./fileFilter.js";
 import { tallySkip } from "./skipReport.js";
+import { loadCitationConfig } from "../docs/citationConfig.js";
+import { commentLines, extractComments, findCitations, markdownProseLines, scansComments } from "../docs/annotationScanner.js";
+import type { FileAnnotations } from "../../repositories/annotationsStore.js";
+
+/** Bump when the comment or citation scanner's OUTPUT changes, so stored annotations are re-scanned. */
+export const ANNOTATION_SCANNER_VERSION = "a1";
+
+/** The annotation key a run over this repo would record now: scanner version + citations.json hash. */
+export function currentAnnotationKey(repoPath: string): string {
+  return `${ANNOTATION_SCANNER_VERSION}:${loadCitationConfig(repoPath).config?.hash ?? "none"}`;
+}
 import { GraphStore } from "../../repositories/graphStore.js";
 import { resolveHeadCommitSha, resolveCurrentBranch } from "../git/gitHelpers.js";
 import { redactSensitive } from "../../middleware/indexGuardrails.js";
@@ -87,7 +98,8 @@ export type RunIndexInput = {
 // v2: ISSUE-023 string-literal lane — bump buộc evaluateIncrementalSkip không skip để repo cũ repopulate lane.
 // v3: MCP-ISSUE-065 — .csproj module ids are separator/case-canonical, ProjectReference and .sln
 // DEPENDS_ON edges target them (or a `project:` token), and the .sln proxy module symbols are gone.
-export const INDEX_VERSION = "v3-project-refs";
+// v4: markdown file-path mentions accept any repo-relative path (release C); unchanged files need a full run to pick it up.
+export const INDEX_VERSION = "v4-path-mentions";
 
 export async function runIndexPipeline(store: GraphStore, input: RunIndexInput): Promise<IndexRunSummary> {
   const identity: RunIdentity = {
@@ -125,6 +137,24 @@ export async function runIndexPipeline(store: GraphStore, input: RunIndexInput):
     skipped: new Map(droppedByPath)
   };
   const languageStats = new Map<string, { scanned: number; indexed: number }>();
+
+  // Release C: citations (repo shorthand from .codebase-index/citations.json) and code comments.
+  // The key names the scan that produced what is stored; a different key re-scans unchanged files
+  // too, so an edited citations.json takes effect on the next run, not only on files that changed.
+  const citationLoad = loadCitationConfig(input.repoPath);
+  const annotationKey = `${ANNOTATION_SCANNER_VERSION}:${citationLoad.config?.hash ?? "none"}`; // = currentAnnotationKey
+  const rescanAnnotations = store.getAnnotationKey(input.repoId) !== annotationKey;
+  const annotationsByPath = new Map<string, FileAnnotations>();
+  const annotationOnly: Array<{ path: string; annotations: FileAnnotations }> = [];
+  const annotate = (language: string, content: string): FileAnnotations | null => {
+    const cfg = citationLoad.config;
+    if (language === "markdown") {
+      return { citations: cfg?.scanMarkdown ? findCitations(markdownProseLines(content), cfg.citations) : [], comments: [], language };
+    }
+    if (!scansComments(language)) return null;
+    const comments = extractComments(content, language);
+    return { citations: cfg?.scanCodeComments ? findCitations(commentLines(comments), cfg.citations) : [], comments, language };
+  };
 
   const selectedFiles = files.slice(0, maxFiles);
   // The batch loop walks `workQueue`, not `selectedFiles`: an incremental run appends the files that
@@ -334,9 +364,16 @@ export async function runIndexPipeline(store: GraphStore, input: RunIndexInput):
             if (previousHash === contentHash) {
               c.filesSkipped += 1;
               tallySkip(c.skipped, "unchanged", relativePath);
+              if (rescanAnnotations) {
+                const annotations = annotate(language, safeContent);
+                if (annotations) annotationOnly.push({ path: relativePath, annotations });
+              }
               continue;
             }
           }
+
+          const fileAnnotations = annotate(language, safeContent);
+          if (fileAnnotations) annotationsByPath.set(relativePath, fileAnnotations);
 
           const isDotnetProject = decision.language === "csproj" || decision.language === "sln";
           if (isDotnetProject) {
@@ -448,6 +485,11 @@ export async function runIndexPipeline(store: GraphStore, input: RunIndexInput):
             store.replaceEdgesForFile(input.repoId, item.file.path, item.extracted.edges);
             store.replaceRoutesForFile(input.repoId, item.file.path, item.extracted.routes ?? []);
             store.replaceLiteralsForFile(input.repoId, item.file.path, item.extracted.literals ?? []);
+            store.replaceAnnotationsForFile(
+              input.repoId,
+              item.file.path,
+              annotationsByPath.get(item.file.path) ?? { citations: [], comments: [], language: item.file.language }
+            );
             // Docs lane (markdown files). Replace-per-file, matching the four lines above.
             // MCP-ISSUE-049: this was two upserts and no delete, which made `doc_mentions`
             // append-only — a corrected mention_type inserted a row instead of replacing one.
@@ -462,6 +504,13 @@ export async function runIndexPipeline(store: GraphStore, input: RunIndexInput):
           }
         });
         subtxCount += 1;
+      }
+      // Unchanged files whose annotations are re-scanned (new scanner or citations.json): only those rows.
+      if (annotationOnly.length > 0) {
+        store.runInTransaction(() => {
+          for (const item of annotationOnly) store.replaceAnnotationsForFile(input.repoId, item.path, item.annotations);
+        });
+        annotationOnly.length = 0;
       }
       const writeMs = Date.now() - writeStart;
 
@@ -510,6 +559,11 @@ export async function runIndexPipeline(store: GraphStore, input: RunIndexInput):
     // as "degraded" would describe the wrong thing.
     const health = assessRunHealth(c, input.mode);
     const runStatus = wasCancelled ? "cancelled" : health.degraded ? "degraded" : "ok";
+    // Record the annotation scan only when it covered the whole repo: a dirty run or a capped or
+    // cancelled one saw a subset, and the next complete run must still re-scan the rest.
+    if (!wasCancelled && input.mode !== "dirty" && files.length <= maxFiles) {
+      store.setAnnotationKey(input.repoId, annotationKey);
+    }
     for (const reason of health.reasons) {
       indexWarn(`[index-degraded] ${reason}`);
     }

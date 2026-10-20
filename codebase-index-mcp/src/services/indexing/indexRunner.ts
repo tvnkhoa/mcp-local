@@ -240,6 +240,8 @@ export function createIndexRunner(options: IndexRunnerOptions): RunIndexAndResol
   await yieldToEventLoop();
   try { store.rebuildLiteralsFts(); } catch { /* non-fatal */ }
   await yieldToEventLoop();
+  try { store.rebuildCommentsFts(); } catch { /* non-fatal */ }
+  await yieldToEventLoop();
   if (docsEnabled) {
     indexLog(`[index-post] repoId=${repoId} rebuilding docs FTS...`);
     try { store.rebuildDocsFts(); } catch { /* non-fatal */ }

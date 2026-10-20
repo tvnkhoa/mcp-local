@@ -21,6 +21,7 @@ import type Database from "better-sqlite3";
 
 import type { EdgeRecord, FileRecord, RouteRecord, SymbolRecord } from "../types/index.js";
 import { getEdgeDefaults } from "../services/impact/impactAnalyzer.js";
+import { deleteAnnotationsForFileImpl } from "./annotationsStore.js";
 
 /** Prepared statements for the hot per-file write path, prepared once per connection. */
 export interface WriteStatements {
@@ -346,6 +347,7 @@ export function pruneFiles(db: Database.Database, repoId: string, relativePaths:
       db.prepare(`delete from docs where repo_id = ? and file_path = ?`).run(repoId, filePath);
       db.prepare(`delete from routes where repo_id = ? and file_path = ?`).run(repoId, filePath);
       db.prepare(`delete from string_literals where repo_id = ? and file_path = ?`).run(repoId, filePath);
+      deleteAnnotationsForFileImpl(db, repoId, filePath);
       db.prepare(`delete from files where repo_id = ? and path = ?`).run(repoId, filePath);
     }
   });

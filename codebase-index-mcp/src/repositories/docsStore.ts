@@ -312,7 +312,7 @@ export function resolveMentionsImpl(db: Database.Database, repoId: string): numb
     } else if (mention.mention_type === "filepath") {
       const normalizedMention = mention.mention_text
         .replace(/\\/g, "/")
-        .replace(/\.(ts|js|tsx|jsx|cs)$/, "")
+        .replace(/\.(ts|tsx|mts|cts|js|jsx|mjs|cjs|cs|py)$/, "")
         .replace(/^src\//, "")
         .toLowerCase();
 

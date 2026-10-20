@@ -140,6 +140,20 @@ import {
   listRepositoriesImpl
 } from "../services/impact/impactAnalyzer.js";
 import { initGraphSchema, runGraphMigrations } from "./schema.js";
+import {
+  replaceAnnotationsForFileImpl,
+  rebuildCommentsFtsImpl,
+  getAnnotationKeyImpl,
+  setAnnotationKeyImpl,
+  citationsFromImpl,
+  citationsToImpl,
+  searchCommentsImpl,
+  annotationCountsImpl,
+  docSectionsMentioningImpl,
+  type FileAnnotations,
+  type CitationRow,
+  type CommentHit
+} from "./annotationsStore.js";
 import { recordRun as recordRunImpl, getLatestRun as getLatestRunImpl, markRunTrigger as markRunTriggerImpl, getLatestWorkRunMode as getLatestWorkRunModeImpl } from "./runStore.js";
 import {
   type WriteContext,
@@ -325,6 +339,42 @@ export class GraphStore {
 
   searchLiterals(repoId: string, query: string, limit: number, filePathFilter: string | null = null): LiteralSearchResult[] {
     return searchLiteralsImpl(this.db, repoId, query, limit, filePathFilter);
+  }
+
+  replaceAnnotationsForFile(repoId: string, filePath: string, a: FileAnnotations): void {
+    replaceAnnotationsForFileImpl(this.db, repoId, filePath, a);
+  }
+
+  rebuildCommentsFts(): void {
+    rebuildCommentsFtsImpl(this.db);
+  }
+
+  getAnnotationKey(repoId: string): string | null {
+    return getAnnotationKeyImpl(this.db, repoId);
+  }
+
+  setAnnotationKey(repoId: string, key: string): void {
+    setAnnotationKeyImpl(this.db, repoId, key);
+  }
+
+  citationsFrom(repoId: string, filePath: string, limit: number): CitationRow[] {
+    return citationsFromImpl(this.db, repoId, filePath, limit);
+  }
+
+  citationsTo(repoId: string, target: { specs?: { targetSpec: string; anchorValue: string | null }[]; filePath?: string }, limit: number): { rows: CitationRow[]; total: number } {
+    return citationsToImpl(this.db, repoId, target, limit);
+  }
+
+  searchComments(repoId: string, query: string, limit: number): CommentHit[] {
+    return searchCommentsImpl(this.db, repoId, query, limit);
+  }
+
+  docSectionsMentioning(repoId: string, filePath: string, limit: number): { filePath: string; line: number | null; headingPath: string }[] {
+    return docSectionsMentioningImpl(this.db, repoId, filePath, limit);
+  }
+
+  annotationCounts(repoId: string): { citationsByPattern: Record<string, number>; comments: number } {
+    return annotationCountsImpl(this.db, repoId);
   }
 
   getLatestWorkRunMode(repoId: string): string | null {

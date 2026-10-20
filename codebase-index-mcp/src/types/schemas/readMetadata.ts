@@ -55,7 +55,11 @@ export const getFileSummarySchema = z
 export const queryDocsSchema = (MAX_RESULT_LIMIT: number) => z
   .object({
     repoId: z.string().min(1).max(200),
-    mode: z.enum(["search", "stale", "coverage", "drift", "links", "behind", "language", "section"]),
+    mode: z.enum(["search", "stale", "coverage", "drift", "links", "behind", "language", "section", "cites"]),
+    /** mode="cites": what is cited — the repo's own shorthand ("15 #737", "adr/0021") or a file path. */
+    target: z.string().min(1).max(300).optional(),
+    /** mode="search": also search code comments, returned as `codeComments` beside the doc results. */
+    includeCodeComments: z.boolean().default(true),
     query: z.string().min(1).max(200).optional(),
     /** mode="section": the heading to read, matched as a case-insensitive prefix, markup ignored. */
     headingPrefix: z.string().min(1).max(300).optional(),
@@ -137,6 +141,7 @@ export const queryDocsSchema = (MAX_RESULT_LIMIT: number) => z
       if (v.mode === "stale") return Boolean(v.symbolIds);
       if (v.mode === "coverage") return Boolean(v.filePath);
       if (v.mode === "section") return Boolean(v.filePath) && Boolean(v.headingPrefix);
+      if (v.mode === "cites") return Boolean(v.target) || Boolean(v.filePath);
       return true;
     },
     (v) => ({
@@ -144,6 +149,7 @@ export const queryDocsSchema = (MAX_RESULT_LIMIT: number) => z
         v.mode === "search" ? "query is required for mode=search"
         : v.mode === "stale" ? "symbolIds is required for mode=stale"
         : v.mode === "section" ? "filePath and headingPrefix are required for mode=section"
+        : v.mode === "cites" ? "target (what is cited) or filePath (whose citations) is required for mode=cites"
         : "filePath is required for mode=coverage",
       path: [v.mode === "section" ? "headingPrefix" : "query"]
     })

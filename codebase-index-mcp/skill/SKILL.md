@@ -75,6 +75,7 @@ refactor_replace_rollback(rollbackId)
 |---|---|---|
 | `search` | full-text over headings, prose and code blocks | `query` |
 | `section` | one section by heading prefix, current text from disk, cut at a block boundary to `maxTokens` | `filePath`, `headingPrefix` |
+| `cites` | the repo's own citations (`15 #737`, `adr/0021`, invariant markers — patterns from `.codebase-index/citations.json`): what a target is, and every doc and code comment citing it; or a file's own citations | `target` or `filePath` |
 | `links` | broken doc-to-doc links, orphans, hubs | — |
 | `behind` | docs whose last commit predates the code they mention | — |
 | `stale` | docs mentioning these (changed) symbols | `symbolIds` |

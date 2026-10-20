@@ -244,6 +244,38 @@ export function initGraphSchema(db: Database.Database): void {
         content_rowid='rowid'
       );
 
+      -- Release C (R5/R6): a repo's citation shorthand, from markdown prose and code comments. The
+      -- target is the substituted spec from .codebase-index/citations.json, resolved at query time.
+      create table if not exists citations (
+        repo_id text not null,
+        file_path text not null,
+        line integer not null,
+        pattern_id text not null,
+        raw_text text not null,
+        target_spec text not null,
+        anchor_kind text not null,
+        anchor_value text,
+        anchor_column integer not null default 1
+      );
+      create index if not exists idx_citations_repo_file on citations(repo_id, file_path);
+      create index if not exists idx_citations_repo_target on citations(repo_id, target_spec, anchor_value);
+
+      -- Release C: code comments as searchable prose (query_docs search, includeCodeComments).
+      create table if not exists code_comments (
+        repo_id text not null,
+        file_path text not null,
+        start_line integer not null,
+        end_line integer not null,
+        text text not null,
+        language text
+      );
+      create index if not exists idx_code_comments_repo_file on code_comments(repo_id, file_path);
+      create virtual table if not exists comments_fts using fts5(
+        text,
+        content='code_comments',
+        content_rowid='rowid'
+      );
+
       create table if not exists refactor_previews (
         preview_id text primary key,
         repo_id text not null,
@@ -350,6 +382,12 @@ export function initGraphSchema(db: Database.Database): void {
  *   created alongside the always-present `vec_symbol_map`.
  */
 export function runGraphMigrations(db: Database.Database, vectorEnabled: boolean): void {
+    // Release C: which annotation scan (scanner version + citations.json hash) the stored citations and
+    // comments came from. A different key makes the next run re-scan unchanged files too.
+    const repoCols = db.prepare("pragma table_info(repositories)").all() as { name: string }[];
+    if (repoCols.length > 0 && !repoCols.some((c) => c.name === "annotation_key")) {
+      db.exec("alter table repositories add column annotation_key text");
+    }
     // Add signature column to symbols if missing (backward-compatible with existing DBs)
     const symbolsCols = db.prepare("pragma table_info(symbols)").all() as { name: string }[];
     if (!symbolsCols.some((c) => c.name === "signature")) {

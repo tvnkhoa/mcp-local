@@ -244,8 +244,11 @@ function extractMentionsFromText(text: string, docId: string, repoId: string, me
     });
   }
 
-  // File paths: src/file.ts, path/to/module.tsx
-  const filePathRegex = /(?:^|\s|"|\()((?:(?:codebase-index-mcp|postgres-mcp)\/)?src\/[a-zA-Z0-9_\/-]+\.(?:ts|js|tsx|jsx|py|go|java|rb|rs|php|cs))/g;
+  // File paths: any repo-relative path with at least one folder and a code extension. This accepted
+  // only `src/…` (optionally under two hard-coded server names), so a repo laid out as
+  // `packages/core/turn/index.ts` — wec.aria's decision rows cite paths like that — had no path
+  // mentions at all, and "which rows cite this file" was unanswerable (release C).
+  const filePathRegex = /(?:^|\s|"|'|`|\(|\[)((?:[A-Za-z0-9_.-]+\/)+[A-Za-z0-9_.-]+\.(?:ts|tsx|mts|cts|js|jsx|mjs|cjs|vue|py|go|java|rb|rs|php|cs|sql))(?![\w/])/g;
   while ((match = filePathRegex.exec(text)) !== null) {
     const filePath = match[1];
     mentions.push({

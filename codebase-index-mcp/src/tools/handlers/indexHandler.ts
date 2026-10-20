@@ -1,3 +1,4 @@
+import { loadCitationConfig } from "../../services/docs/citationConfig.js";
 import { freshnessStateDir, readDirtyLedger, vanishedDirtyPaths } from "../../middleware/freshness.js";
 import { readWorkingTreeState } from "../../services/git/gitHelpers.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
@@ -180,6 +181,7 @@ export function handleHealthCheck(
     },
     latestRun,
     staleness,
+    ...(repo && { citations: citationStatus(store, repoId!, repo.repoPath) }),
     watch: {
       autoStartEnabled: constants.WATCH_AUTO_START,
       activeOnly: constants.WATCH_ACTIVE_ONLY,
@@ -444,6 +446,25 @@ export function handleDetectChanges(
 
 const CHANGE_IMPACT_SOURCE_PROBE_CAP = 100;
 
+/**
+ * Release C: whether the repo configures citation patterns, which entries were rejected and why, and
+ * what the index holds — so a misspelt regex is a health finding, not a silent zero.
+ */
+function citationStatus(store: HandlerContext["store"], repoId: string, repoPath: string): unknown {
+  const load = loadCitationConfig(repoPath);
+  const counts = store.annotationCounts(repoId);
+  return {
+    configPresent: load.present,
+    patterns: load.config?.citations.map((c) => c.id) ?? [],
+    ...(load.errors.length > 0 && { configErrors: load.errors }),
+    stored: counts.citationsByPattern,
+    codeComments: counts.comments
+  };
+}
+
+/** Citations listed per changed file in change_impact's `citationsTouched`. */
+const CHANGE_IMPACT_CITATIONS_PER_FILE = 20;
+
 export function handleChangeImpact(
   args: {
     repoId: string;
@@ -569,6 +590,18 @@ export function handleChangeImpact(
   };
   const testCoverage = { dependentFiles: dependentCount, covered, uncovered: dependentCount - covered, ...(sourceProbeTruncated ? { probeTruncatedAt: CHANGE_IMPACT_SOURCE_PROBE_CAP } : {}) };
 
+  // Release C (R6): what cites a changed file — an invariant marker naming its test file, a decision
+  // row or a code comment pointing at it. "Which invariants does this diff touch" is this list
+  // filtered to the invariant patterns.
+  const citationsTouched: { changedFile: string; citedBy: { filePath: string; line: number; patternId: string; raw: string }[] }[] = [];
+  for (const changed of core.changedFiles) {
+    const { rows } = store.citationsTo(args.repoId, { filePath: changed }, CHANGE_IMPACT_CITATIONS_PER_FILE);
+    if (rows.length > 0) {
+      citationsTouched.push({ changedFile: changed, citedBy: rows.map((r) => ({ filePath: r.filePath, line: r.line, patternId: r.patternId, raw: r.raw })) });
+    }
+  }
+  const citations = citationsTouched.length > 0 ? { citationsTouched } : {};
+
   if (profile === "nano") {
     return ctx.asText(
       {
@@ -578,6 +611,7 @@ export function handleChangeImpact(
         riskSummary,
         residualRisk: residualRisk.note,
         coverage: coverage.confidence,
+        ...(citationsTouched.length > 0 && { citationsTouchedCount: citationsTouched.reduce((n, c) => n + c.citedBy.length, 0) }),
         note: core.note
       },
       profile
@@ -597,6 +631,7 @@ export function handleChangeImpact(
         testCoverage,
         residualRisk,
         coverage,
+        ...citations,
         indexMeta: buildIndexMeta(store, args.repoId),
         note: core.note
       },
@@ -615,6 +650,7 @@ export function handleChangeImpact(
       impacts: core.impacts,
       riskSummary,
       testsToRun,
+      ...citations,
       testCoverage,
       residualRisk,
       coverage,

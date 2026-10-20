@@ -3,6 +3,7 @@ import test from "node:test";
 
 import type { GraphStore } from "../../repositories/graphStore.js";
 import { evaluateIncrementalSkip, resolvePerformanceProfileDecision } from "./runPolicy.js";
+import { currentAnnotationKey } from "./indexPipeline.js";
 
 /**
  * The decisions a run makes before doing any work.
@@ -20,10 +21,13 @@ function stubStore(parts: {
   latestRun?: { commitSha?: string | null; indexVersion?: string } | null;
   snapshot?: { fileCount: number; symbolCount: number };
   latestWorkMode?: string | null;
+  annotationKey?: string | null;
 }): GraphStore {
   return {
     getLatestRun: () => parts.latestRun ?? null,
     getLatestWorkRunMode: () => parts.latestWorkMode ?? null,
+    // An annotation key that matches a repo with no citations.json, so these tests reach the git checks.
+    getAnnotationKey: () => parts.annotationKey === undefined ? currentAnnotationKey("/nowhere") : parts.annotationKey,
     getRepoSchemaSnapshot: () => parts.snapshot ?? { fileCount: 0, symbolCount: 0 }
   } as unknown as GraphStore;
 }
@@ -107,4 +111,12 @@ test("never skips after a dirty run: the index holds working-tree content a clea
   const decision = evaluateIncrementalSkip(store, "repo", "/nowhere");
   assert.equal(decision.shouldSkip, false);
   assert.match(decision.reason, /working-tree content/);
+});
+
+test("never skips when the stored annotation scan differs from the current one", async () => {
+  const { INDEX_VERSION } = await import("./indexPipeline.js");
+  const store = stubStore({ latestRun: { commitSha: "abc", indexVersion: INDEX_VERSION }, annotationKey: null });
+  const decision = evaluateIncrementalSkip(store, "repo", "/nowhere");
+  assert.equal(decision.shouldSkip, false);
+  assert.match(decision.reason, /citation patterns or the annotation scanner/);
 });
