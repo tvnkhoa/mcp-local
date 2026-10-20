@@ -17,7 +17,8 @@
  * the base options — references still resolve through imports, but a value whose type depends on
  * the missing lib can degrade to an error type. `.mjs`/`.js` are included with `checkJs` off, so a
  * reference through an untyped (`any`) value is invisible there (the spike measured 25 % of `.mjs`
- * declarations as `any`). `.vue` is NOT in the program: it is a named gap until the Volar lane.
+ * declarations as `any`). `.vue` files are NOT in this program: they get their own Vue-aware program
+ * (`vueProgram.ts`, the Volar lane), built lazily beside this one when the repo has `.vue` files.
  *
  * Module resolution is the repo's own (`exports` conditions, pnpm symlinks): the host supplies
  * `realpath`, so a workspace package reached through a symlink has one identity in the program, and
@@ -35,10 +36,11 @@ import path from "node:path";
 import ts from "typescript";
 
 import type { AnswerBudget } from "./caps.js";
+import { detectRepoVueVersion, loadVolar, planVueProgram, versionMismatch, VueProgram } from "./vueProgram.js";
 
 export const MAX_CACHED_HOSTS = 2;
 
-/** TS/JS extensions that go into the program. `.vue` is deliberately absent (named gap). */
+/** TS/JS extensions that go into the union program. `.vue` goes into the Vue program instead. */
 export const PROGRAM_EXTENSIONS = [".ts", ".mts", ".cts", ".tsx", ".js", ".mjs", ".cjs", ".jsx"] as const;
 
 /** Directories never in the program — build output, dependencies, deliberately non-compiling fixtures. */
@@ -117,6 +119,15 @@ export function resolveCompilerOptions(repoPath: string): { options: ts.Compiler
 
 type Snapshot = { mtimeMs: number; version: number; snapshot: ts.IScriptSnapshot | undefined };
 
+/**
+ * The repo's Vue lane. `fallback` keeps every `.vue` mentioning the name a named gap, with `reason`:
+ * the plugin could not load, or the repo's Vue language-core major differs from ours.
+ */
+export type VueLane =
+  | { state: "none" }
+  | { state: "fallback"; reason: string; vueFiles: string[]; repoVersion: { version: string; source: string } | null }
+  | { state: "ready"; program: VueProgram; vueFiles: string[]; ourVersion: string; repoVersion: { version: string; source: string } | null };
+
 export type RepoProgramInput = {
   repoId: string;
   repoPath: string;
@@ -139,6 +150,7 @@ export class RepoLanguageService {
   private projectVersion = 1;
   private readonly snapshots = new Map<string, Snapshot>();
   private budget: AnswerBudget | null = null;
+  private vueState: { runKey: string; lane: VueLane } | null = null;
 
   constructor(readonly repoId: string, readonly repoPath: string, runKey: string, relativeFiles: readonly string[]) {
     this.runKey = runKey;
@@ -165,6 +177,43 @@ export class RepoLanguageService {
     this.projectVersion++;
   }
 
+  /**
+   * The Vue lane for the current run, planned on first use after a (re)index: `.vue` files from disk,
+   * the version gate, and the Vue program — refreshed in place when its tsconfig is unchanged.
+   */
+  vueLane(): VueLane {
+    if (this.vueState && this.vueState.runKey === this.runKey) return this.vueState.lane;
+    const previous = this.vueState?.lane;
+    const vueFiles = collectProgramFilesFromDisk(this.repoPath, [".vue"]);
+    let lane: VueLane;
+    if (vueFiles.length === 0) {
+      lane = { state: "none" };
+    } else {
+      const loaded = loadVolar();
+      const plan = planVueProgram(this.repoPath, vueFiles, this.tsconfig);
+      const repoVersion = detectRepoVueVersion(this.repoPath, plan.configDirs);
+      const mismatch = "api" in loaded ? versionMismatch(loaded.api.version, repoVersion?.version ?? null) : null;
+      if ("error" in loaded) lane = { state: "fallback", reason: loaded.error, vueFiles, repoVersion };
+      else if (mismatch) lane = { state: "fallback", reason: mismatch, vueFiles, repoVersion };
+      else if (previous?.state === "ready" && previous.program.tsconfig === plan.tsconfig && sameList(previous.program.plan.configDirs, plan.configDirs)) {
+        previous.program.refresh(vueFiles, this.rootFiles);
+        lane = { ...previous, vueFiles, repoVersion };
+      } else {
+        const program = new VueProgram(loaded.api, this.repoPath, plan, this.rootFiles, () => this.budget?.token.isCancellationRequested() ?? false);
+        if (program.vueTypes) {
+          lane = { state: "ready", program, vueFiles, ourVersion: loaded.api.version, repoVersion };
+        } else {
+          program.dispose();
+          const from = path.relative(this.repoPath, plan.tsconfig ? path.dirname(plan.tsconfig) : this.repoPath).replace(/\\/g, "/") || ".";
+          lane = { state: "fallback", reason: `the 'vue' package does not resolve from ${from} (dependencies not installed?); template expressions would be untyped`, vueFiles, repoVersion };
+        }
+      }
+    }
+    if (previous?.state === "ready" && (lane.state !== "ready" || lane.program !== previous.program)) previous.program.dispose();
+    this.vueState = { runKey: this.runKey, lane };
+    return lane;
+  }
+
   /** The program, building it when cold. The budget is consulted by the LS between files. */
   program(budget: AnswerBudget): ts.Program {
     this.budget = budget;
@@ -189,6 +238,8 @@ export class RepoLanguageService {
   dispose(): void {
     this.ls.dispose();
     this.snapshots.clear();
+    if (this.vueState?.lane.state === "ready") this.vueState.lane.program.dispose();
+    this.vueState = null;
   }
 
   private readSnapshot(fileName: string): Snapshot {
@@ -238,6 +289,10 @@ function scriptKindOf(f: string): ts.ScriptKind {
   if (f.endsWith(".tsx")) return ts.ScriptKind.TSX;
   if (f.endsWith(".json")) return ts.ScriptKind.JSON;
   return ts.ScriptKind.TS;
+}
+
+function sameList(a: readonly string[], b: readonly string[]): boolean {
+  return a.length === b.length && a.every((x, i) => x === b[i]);
 }
 
 function statMtime(file: string): number {
