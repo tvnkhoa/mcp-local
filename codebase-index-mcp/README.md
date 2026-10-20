@@ -102,7 +102,7 @@ npm install && npm run build
 |------|-------------|
 | `get_change_context` | Callers and callees for a symbol (BFS); crosses MassTransit-style message-bus hops (`PUBLISHES`). Use when you need deep caller traversal; otherwise prefer `get_symbol_context_pack`. |
 | `find_impact_files` | Files impacted by changing a symbol. Use before `refactor_replace_preview` to scope blast radius. A stale index returns a non-fatal `staleWarning` field, not an error. `view="surface"` returns one row per caller→symbol pair with `edgeTypes[]` (an array, not a scalar `edgeType`) and honors `groupBy`. |
-| `find_field_accesses` | Read/write callsites of a property (field) with their enclosing symbol — the "who reads vs writes this field" audit. Partitions `reads`/`writes`, `mode=read\|write\|all`. Accepts a property `symbolId` or resolvable `name`. Prefer over grepping a field name. |
+| `find_field_accesses` | Read/write callsites of a property (field) with their enclosing symbol — the "who reads vs writes this field" audit. Partitions `reads`/`writes`, `mode=read\|write\|all`. Accepts a property `symbolId` or resolvable `name`. C# from the graph; **TS/JS fields (Zod keys, field bags, interface/class properties) from a TypeScript LanguageService** — coverage `exact`, `X.parse({...})` writes included, unattributable sites listed by file (`.vue`, dynamic `obj[key]`, unfollowable parse arguments); same-named declarations come back as `candidates` (pick with `declarationFile`/`declarationLine` or `ownerName`); a time/memory cap breach is coverage `gap` with no list. Prefer over grepping a field name. |
 | `get_dependency_graph` | Graph edges for a file or symbol |
 | `get_call_chain` | Call path between two symbols. Shows path, not caller list. Crosses MassTransit-style message-bus hops (`PUBLISHES`). Every profile carries hop identity (`symbolId`/name/file), so no follow-up call is needed to resolve an id. |
 | `get_cross_repo_impact` | Impact across multiple indexed repos |
@@ -243,10 +243,13 @@ Refactor tools: `refactor_replace_preview` and `refactor_replace_apply` support 
 | `CODEBASE_INDEX_REFACTOR_APPROVAL_SECRET` | no | — | **secret** · HMAC secret for refactor approval tokens. Auto-generated per process if unset; set it to keep tokens valid across restarts. |
 | `CODEBASE_INDEX_REFACTOR_PREVIEW_TTL_MS` | no | `1800000` *(code)* | Preview/token lifetime — 30 minutes. |
 | `CODEBASE_INDEX_REFACTOR_STRICT_APPROVAL_ENABLED` | no | `false` *(code)* | renamed — still accepts `CODEBASE_INDEX_REFACTOR_STRICT_APPROVAL` · When true, startup fails unless CODEBASE_INDEX_REFACTOR_APPROVAL_SECRET is set. |
+| `CODEBASE_INDEX_TS_LS_ENABLED` | no | `true` *(code)* | find_field_accesses answers TS/JS fields from a TypeScript LanguageService (coverage `exact`). Lazy: no program is built until such a query; C# fields keep the graph answer. false = the graph's lower bound. |
+| `CODEBASE_INDEX_TS_LS_COLD_START_MS` | no | `60000` *(code)* | Budget for one answer, cold (program build) or warm. A breach returns coverage `gap` and no list; the built program stays warm for the next call. |
+| `CODEBASE_INDEX_TS_LS_MAX_RSS_MB` | no | `2500` *(code)* | Process RSS ceiling while answering. A breach returns coverage `gap` and drops the repo's program. |
 | `CODEBASE_INDEX_LOG_MODE` | no | — | renamed — still accepts `CODEBASE_INDEX_INDEX_LOG` · Enables verbose index-progress logging on stderr. |
 | `CODEBASE_INDEX_LLM_ENABLED` | no | `false` *(code)* | Runtime LLM invocation is prohibited by design. Setting this to true ABORTS STARTUP, and `guard:no-llm-runtime` statically verifies no LLM client is importable. Declared here so the constraint is documented, not so it can be turned on. |
 
-45 variables. Defaults marked *(code)* are the server's own fallback and are **not** written into your agent config — set them only to override.
+48 variables. Defaults marked *(code)* are the server's own fallback and are **not** written into your agent config — set them only to override.
 
 <!-- END GENERATED: env-table -->
 

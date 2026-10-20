@@ -459,6 +459,18 @@ export class GraphStore {
     return row != null;
   }
 
+  /**
+   * R3 exact: every indexed path of a repo with one of the given languages — the root files of the
+   * repo's TypeScript LanguageService program. Paths as stored (either separator).
+   */
+  listIndexedFilePaths(repoId: string, languages: readonly string[]): string[] {
+    if (languages.length === 0) return [];
+    const rows = this.db
+      .prepare(`select path from files where repo_id = ? and language in (${languages.map(() => "?").join(", ")}) order by path`)
+      .all(repoId, ...languages) as { path: string }[];
+    return rows.map((r) => r.path);
+  }
+
   /** Every C# type name declared in this repo — the owner prover's static-receiver test (B-13). */
   listCSharpTypeNames(repoId: string): string[] {
     return listCSharpTypeNamesImpl(this.db, repoId);

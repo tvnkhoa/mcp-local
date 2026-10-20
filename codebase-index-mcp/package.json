@@ -59,7 +59,8 @@
     "test:server-envelopes": "node scripts/test/test-server-envelopes.mjs",
     "test:sqlite-guardrails": "node scripts/test/test-sqlite-guardrails.mjs",
     "test:approval-token": "node scripts/test/test-approval-token.mjs",
-    "test:route-map-roundtrip": "node scripts/test/test-route-map-roundtrip.mjs"
+    "test:route-map-roundtrip": "node scripts/test/test-route-map-roundtrip.mjs",
+    "test:field-access-exact": "node scripts/test/test-field-access-exact.mjs"
   },
   "dependencies": {
     "@mcp/core": "file:../packages/core",
@@ -76,13 +77,13 @@
     "tree-sitter-c-sharp": "^0.21.3",
     "tree-sitter-javascript": "^0.21.4",
     "tree-sitter-typescript": "^0.23.2",
+    "typescript": "5.9.3",
     "zod": "^3.24.1"
   },
   "devDependencies": {
     "@mcp/testing": "file:../packages/testing",
     "@types/better-sqlite3": "^7.6.13",
     "@types/node": "^22.10.5",
-    "tsx": "^4.19.2",
-    "typescript": "^5.7.2"
+    "tsx": "^4.19.2"
   }
 }

@@ -323,7 +323,7 @@ export function buildRefactorTools(deps: CodebaseIndexDeps): AnyToolDefinition[]
 
   const findFieldAccesses = defineTool({
     name: "find_field_accesses",
-    description: "List every read/write callsite of a property (field) with its enclosing symbol — the 'who reads vs who writes this field' audit for wrong-level-resolution checks. Reads the PROPERTY_REF (read) / PROPERTY_WRITE (write) edges. Provide a property symbolId or a resolvable name. mode=read|write|all (default all). Returns reads/writes partitioned, each with enclosingName/filePath/line, plus a coverage block. Use this instead of grepping a field name across the repo. excludeTests=true drops test-path results entirely.",
+    description: "List every read/write callsite of a property (field) with its enclosing symbol — the 'who reads vs who writes this field' audit for wrong-level-resolution checks. Provide a property symbolId or a resolvable name. mode=read|write|all (default all). Returns reads/writes partitioned, each with enclosing name/file/line, plus a coverage block. Use this instead of grepping a field name across the repo. excludeTests=true drops test-path results entirely. C# fields: the PROPERTY_REF (read) / PROPERTY_WRITE (write) graph edges. TS/JS fields (Zod shape keys, field bags spread into a Zod shape, interface/class properties): the TypeScript LanguageService (engine 'typescript-language-service') — reads, writes, destructuring, z.infer types, and writes hidden in `Schema.parse({...})` literals; coverage 'exact' with the sites it cannot attribute listed by file in coverage.gaps (.vue files, unfollowable parse arguments, dynamic obj[key]); coverage 'gap' and no list when a time/memory cap is hit. Same-named declarations come back as `candidates` (homonym functions/variables as `nonMatches`): re-ask with declarationFile (+ declarationLine) or ownerName (the schema, interface or class name) to get one candidate's sites. The first TS/JS call per repo builds the program (seconds to tens of seconds); later calls are warm.",
     input: schemas.findFieldAccessesSchema(limits.maxResultLimit),
     inputSchema: {
       type: "object",
@@ -333,6 +333,9 @@ export function buildRefactorTools(deps: CodebaseIndexDeps): AnyToolDefinition[]
         repoId: { type: "string" },
         symbolId: { type: "string" },
         name: { type: "string" },
+        declarationFile: { type: "string", description: "TS/JS: repo-relative file of the declaration to answer, from a previous response's candidates." },
+        declarationLine: { type: "integer", minimum: 1, description: "TS/JS: line of that declaration (with declarationFile)." },
+        ownerName: { type: "string", description: "TS/JS: the schema, field bag, interface or class that declares the field, e.g. \"audit_event_schema\"." },
         mode: { type: "string", enum: ["read", "write", "all"] },
         limit: { type: "integer", minimum: 1, maximum: limits.maxResultLimit },
         excludeTests: { type: "boolean" },

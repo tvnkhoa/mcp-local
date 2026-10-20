@@ -16,6 +16,10 @@ export const findFieldAccessesSchema = (MAX_RESULT_LIMIT: number) => z
     repoId: z.string().min(1).max(200),
     symbolId: z.string().min(1).max(200).optional(),
     name: z.string().min(1).max(200).optional(),
+    // R3 exact: pick one of several same-named TS/JS declarations (the response lists them as candidates).
+    declarationFile: z.string().min(1).max(500).optional(),
+    declarationLine: z.number().int().min(1).optional(),
+    ownerName: z.string().min(1).max(200).optional(),
     mode: z.enum(["read", "write", "all"]).default("all"),
     limit: z.number().int().min(1).max(MAX_RESULT_LIMIT).default(100),
     // MCP-ISSUE-056: interface dispatch fans hardest into test doubles, so the call-graph tools

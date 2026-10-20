@@ -18,6 +18,7 @@ import { isTestPath } from "../../services/indexing/fileFilter.js";
 import { buildCallableHint } from "../../services/analysis/callableHint.js";
 import { findDocsBehindCode } from "../../services/analysis/docFreshness.js";
 import { GraphStore } from "../../repositories/graphStore.js";
+import { tryExactFieldAccesses } from "./fieldAccessExact.js";
 import type { HandlerContext } from "./handlerContext.js";
 
 // ── Staleness Gate ────────────────────────────────────────────────────────────
@@ -199,11 +200,15 @@ export function handleGetCallChain(
 // instead of falling back to grep. Accepts a property symbolId or a resolvable name.
 
 export function handleFindFieldAccesses(
-  args: { repoId: string; symbolId?: string; name?: string; mode: "read" | "write" | "all"; limit: number; excludeTests: boolean; profile: string },
+  args: { repoId: string; symbolId?: string; name?: string; declarationFile?: string; declarationLine?: number; ownerName?: string; mode: "read" | "write" | "all"; limit: number; excludeTests: boolean; profile: string },
   ctx: HandlerContext
 ): CallToolResult {
   const { store } = ctx;
   const profile = resolveResponseProfile(args.profile as Parameters<typeof resolveResponseProfile>[0]);
+
+  // R3 exact: a TS/JS field is answered by the TypeScript LanguageService when the lane is on.
+  const exact = tryExactFieldAccesses(args, ctx, profile, staleWarningFor(args.repoId, store));
+  if (exact) return exact;
 
   let symbolId = args.symbolId;
   if (!symbolId && args.name) {
