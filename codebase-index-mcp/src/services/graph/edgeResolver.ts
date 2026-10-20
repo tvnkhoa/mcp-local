@@ -11,3 +11,4 @@ export * from "./edgeResolverImports.js";
 export * from "./edgeResolverCalls.js";
 export * from "./edgeResolverRefs.js";
 export * from "./edgeResolverContracts.js";
+export * from "./edgeResolverCss.js";

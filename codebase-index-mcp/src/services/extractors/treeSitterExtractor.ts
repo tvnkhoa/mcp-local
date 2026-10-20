@@ -9,6 +9,7 @@ import type { ExtractInput, ExtractOutput } from "./extractorTypes.js";
 import { parseMarkdownFile } from "./markdownParser.js";
 import { extractPythonSymbolsAndRoutesImpl } from "./pythonExtractor.js";
 import { extractProtoSymbolsImpl } from "./protoExtractor.js";
+import { extractCss } from "./cssExtractor.js";
 import { extractJavaScriptRoutesImpl, extractJavaScriptSymbolsImpl } from "./jsExtractor.js";
 import {
   emitEndpointContractSymbolsFromCSharpSignaturesImpl,
@@ -100,6 +101,13 @@ export function extractGraphData(input: ExtractInput): ExtractOutput {
       edges: proto.edges,
       edgePolicyDrops: proto.drops
     };
+  }
+
+  if (input.language === "css") {
+    // MCP-ISSUE-075: postcss lane. No edge policy — CSS emits no CALLS/TYPE_REF, so the caps and the
+    // confidence floor have nothing to act on, and tokens must survive to the post-phase resolver.
+    const css = extractCss(input.source, input);
+    return { symbols: dedupeSymbols([...symbols, ...css.symbols]), edges: css.edges };
   }
 
   const parser = getOrCreateParserForLanguage(input.language, input.filePath);
