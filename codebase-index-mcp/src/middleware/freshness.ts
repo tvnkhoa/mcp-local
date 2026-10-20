@@ -66,6 +66,17 @@ export type FreshnessGateOptions = {
 
 const LOCK_PREFIX = "refresh-";
 
+/** The folder beside the index DB that holds refresh locks and dirty-run ledgers (created on demand). */
+export function freshnessStateDir(dbPath: string): string {
+  const dir = path.join(path.dirname(path.resolve(dbPath)), ".codebase-index-state");
+  try {
+    fs.mkdirSync(dir, { recursive: true });
+  } catch {
+    // Unwritable: lock and ledger writes fail soft, and the gate degrades to "refreshing" notes.
+  }
+  return dir;
+}
+
 function lockFileFor(lockDir: string, repoId: string): string {
   return path.join(lockDir, `${LOCK_PREFIX}${repoId.replace(/[^\w.-]/g, "_")}.lock`);
 }

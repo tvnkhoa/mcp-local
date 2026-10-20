@@ -45,7 +45,7 @@ import type { HandlerContext } from "./tools/handlers/handlerContext.js";
 import { createCodebaseIndexServer } from "./server.js";
 import { buildTools } from "./tools/index.js";
 import { DEFAULT_MAX_MARKDOWN_BYTES } from "./services/indexing/fileFilter.js";
-import { applyFreshness, createFreshnessGate, recordDirtyLedger } from "./middleware/freshness.js";
+import { applyFreshness, createFreshnessGate, freshnessStateDir, recordDirtyLedger } from "./middleware/freshness.js";
 import { readWorkingTreeState } from "./services/git/gitHelpers.js";
 
 const dbPath = stringFromEnv("CODEBASE_INDEX_DB_PATH", "./codebase-index.db");
@@ -128,7 +128,12 @@ const runIndexUnserialized = createIndexRunner({
  * never write one repo at once. The gate itself is handed the UNSERIALIZED runner: it serializes
  * internally, and passing the wrapped one would make a refresh wait on itself.
  */
-const FRESHNESS_LOCK_DIR = path.dirname(path.resolve(dbPath));
+/**
+ * R1 shared state (refresh locks, dirty-run ledgers) lives in a folder beside the index DB, not loose in
+ * the DB's directory: the workspace keeps its DB at the repo root, where a bare `dirty-<repo>.json`
+ * showed up as an untracked file.
+ */
+const FRESHNESS_LOCK_DIR = freshnessStateDir(dbPath);
 const freshnessGate = createFreshnessGate({
   enabled: QUERY_REFRESH_ENABLED,
   budgetMs: QUERY_REFRESH_BUDGET_MS,

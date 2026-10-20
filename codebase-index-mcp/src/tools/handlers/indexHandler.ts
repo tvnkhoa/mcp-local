@@ -1,5 +1,4 @@
-import path from "node:path";
-import { readDirtyLedger, vanishedDirtyPaths } from "../../middleware/freshness.js";
+import { freshnessStateDir, readDirtyLedger, vanishedDirtyPaths } from "../../middleware/freshness.js";
 import { readWorkingTreeState } from "../../services/git/gitHelpers.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { McpError, ErrorCode } from "@modelcontextprotocol/sdk/types.js";
@@ -79,7 +78,7 @@ export function handleHealthCheck(
   if (repo) {
     try {
       const tree = readWorkingTreeState(repo.repoPath);
-      if (tree.head) indexedFromOldTree = vanishedDirtyPaths(readDirtyLedger(path.dirname(path.resolve(constants.dbPath)), repoId!), tree.head, tree.dirty);
+      if (tree.head) indexedFromOldTree = vanishedDirtyPaths(readDirtyLedger(freshnessStateDir(constants.dbPath), repoId!), tree.head, tree.dirty);
     } catch {
       // not a git repo
     }
@@ -138,6 +137,8 @@ export function handleHealthCheck(
                 ? "No successful index run exists for this repo."
                 : pendingReindex.length > 0
                   ? "Files written by the refactor engine have not been re-indexed — the graph may hold names that exist in no file on disk."
+                  : indexedFromOldTree.length > 0 && staleness?.isStale !== true
+                    ? `${String(indexedFromOldTree.length)} file(s) were indexed from a working tree that has since changed (deleted or reverted); the next incremental run clears them.`
                   : codebaseStatus === "stale"
                     ? "Indexed commit does not match HEAD."
                     : codebaseStatus === "dirty"

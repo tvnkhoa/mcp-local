@@ -42,6 +42,8 @@ pnpm-debug.log*
 
 # Local databases and runtime files
 *.db
+# codebase-index R1 refresh locks and dirty-run ledgers, kept beside the index DB
+.codebase-index-state/
 *.db-shm
 *.db-wal
 # Database backups. `*.db` does not match a suffixed copy such as
