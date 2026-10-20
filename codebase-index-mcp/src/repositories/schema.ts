@@ -17,6 +17,7 @@ import type Database from "better-sqlite3";
 import { indexLog } from "../services/indexing/indexProgress.js";
 import { isTestPath } from "../services/indexing/fileFilter.js";
 import { ensureVectorSchema } from "./vectorStore.js";
+import { migratePathSeparators } from "./pathSeparatorMigration.js";
 
 /**
  * Expose `isTestPath` to SQL as `is_test_path(path) -> 0 | 1` (MCP-ISSUE-056, code review 2026-08-10).
@@ -627,4 +628,9 @@ export function runGraphMigrations(db: Database.Database, vectorEnabled: boolean
       create index if not exists idx_edges_repo_from_to on edges(repo_id, from_id, to_id);
       create index if not exists idx_edges_repo_type_to_from on edges(repo_id, type, to_id, from_id);
     `);
+    // MCP-ISSUE-079: forward-slash paths in every per-file table, once per database.
+    const migratedPaths = migratePathSeparators(db);
+    if (migratedPaths > 0) {
+      indexLog(`[schema-migrate] rewrote ${String(migratedPaths)} backslash file path(s) to forward slashes; the next run re-extracts them`);
+    }
 }

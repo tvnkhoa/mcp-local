@@ -162,11 +162,14 @@ test("shouldIndexFile: an unknown extension is excluded, not guessed", () => {
   assert.equal(decision.language, null);
 });
 
-test("shouldIndexFile: the exclusion order is path, then generated, then extension", () => {
+test("shouldIndexFile: the exclusion order is binary asset, path, then generated, then extension", () => {
   // Path wins over everything, so a .ts inside dist/ is excluded for the path reason rather than
   // being indexed as TypeScript.
   assert.equal(shouldIndexFile("dist/app.ts", bytes("x")).reason, "excluded_path");
-  assert.equal(shouldIndexFile("src/photo.png", bytes("x")).reason, "excluded_extension");
+  assert.equal(shouldIndexFile("src/server.log", bytes("x")).reason, "excluded_extension");
+  // A binary asset is named as one before any path rule (MCP-ISSUE-077): the folder is not why it is absent.
+  assert.equal(shouldIndexFile("src/photo.png", bytes("x")).reason, "binary_asset");
+  assert.equal(shouldIndexFile("dist/photo.png", bytes("x")).reason, "binary_asset");
 });
 
 test("shouldIndexFile: EF Core Designer.cs snapshots are excluded as generated", () => {
@@ -274,7 +277,7 @@ test("the documentation twins of those files are NOT excluded", () => {
 test("shouldIndexFile refuses a secret-bearing file outright", () => {
   const decision = shouldIndexFile(".env", Buffer.from("DB_PASSWORD=hunter2"));
   assert.equal(decision.include, false);
-  assert.equal(decision.reason, "excluded_filename");
+  assert.equal(decision.reason, "secret_file");
 });
 
 test("a vendor tree is excluded at the GLOB, not only by the post-walk filter", () => {

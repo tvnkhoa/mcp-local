@@ -8,7 +8,8 @@ import {
   isTestPath,
   isBinary,
   isLikelyMinified,
-  hasExcludedPathSegment,
+  isMinifiedCheckExempt,
+  isExcludedByPath,
   isSecretBearingFile,
   INDEX_IGNORE_GLOBS,
   DEFAULT_MAX_MARKDOWN_BYTES
@@ -194,7 +195,7 @@ export function searchRegexImpl(
       .map((p) => normalizeRelativePath(p))
       // MCP-ISSUE-060 follow-up: scanAll reads from DISK, not from the index, so "the indexer skips
       // it" is not protection here. A credentials file must not be greppable on request.
-      .filter((p) => !hasExcludedPathSegment(p) && !isSecretBearingFile(p.split("/").pop() ?? p))
+      .filter((p) => !isExcludedByPath(p) && !isSecretBearingFile(p.split("/").pop() ?? p))
       .map((p) => ({ path: p, language: null }));
   } else {
     candidates = store.listIndexedFiles(repoId).map((f) => ({ path: normalizeRelativePath(f.path), language: f.language }));
@@ -250,7 +251,7 @@ export function searchRegexImpl(
       continue;
     }
     if (buf.length === 0) continue;
-    if (isBinary(buf) || isLikelyMinified(buf)) continue;
+    if (isBinary(buf) || (!isMinifiedCheckExempt(file.path) && isLikelyMinified(buf))) continue;
     filesScanned++;
 
     const content = buf.toString("utf8");
