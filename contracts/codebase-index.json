@@ -1468,7 +1468,7 @@
         "openWorldHint": false,
         "readOnlyHint": true
       },
-      "description": "Unified docs tool. mode=search: full-text search across indexed documentation sections (requires query); mode=stale: find docs that mention changed symbols (requires symbolIds); mode=coverage: show which exported symbols are documented (requires filePath); mode=drift: CANDIDATES for doc staleness — docs naming an identifier the graph does not have, paired with the closest symbol name that does exist. Review them; a near miss is often a rename but can also be a sibling (callEdgesResolved vs callEdgesUnresolved). Naming-convention and plural variants are already filtered out. Tune with minSimilarity (default 0.75). mode=links: the doc-to-doc link graph — broken links, orphan documents and the most-linked hubs; mode=behind: documents whose last commit predates the last commit of the code they mention, from git, ordered by how far behind, with archived/superseded excluded (includeArchived opts them back in); mode=language: documents not yet normalized to English, by non-ASCII LETTER share per chunk (typography like em-dashes and arrows does not count) — both a retrieval guard and a progress meter for the normalization work. Most modes return { repoId, mode, count, results }. Requires docs lane enabled. includeSymbols=true (mode=search only) additionally pads the result set with matching CODE symbols — off by default, because a docs search answering with symbols is rarely what was asked. mode=stale counts PROSE mentions only; includeCodeMentions=true also counts identifiers appearing inside fenced code samples. mode=search matches headings, prose sections and code blocks by default — pass contentTypes to narrow.",
+      "description": "Unified docs tool. mode=search: full-text search across indexed documentation sections (requires query); mode=stale: find docs that mention changed symbols (requires symbolIds); mode=coverage: show which exported symbols are documented (requires filePath); mode=drift: CANDIDATES for doc staleness — docs naming an identifier the graph does not have, paired with the closest symbol name that does exist. Review them; a near miss is often a rename but can also be a sibling (callEdgesResolved vs callEdgesUnresolved). Naming-convention and plural variants are already filtered out. Tune with minSimilarity (default 0.75). mode=links: the doc-to-doc link graph — broken links, orphan documents and the most-linked hubs; mode=behind: documents whose last commit predates the last commit of the code they mention, from git, ordered by how far behind, with archived/superseded excluded (includeArchived opts them back in); mode=language: documents not yet normalized to English, by non-ASCII LETTER share per chunk (typography like em-dashes and arrows does not count) — both a retrieval guard and a progress meter for the normalization work; mode=section: read ONE section of a document by heading (requires filePath + headingPrefix) — a case-insensitive prefix of the heading text, inline markup ignored, an exact heading winning over longer ones. Returns the section from the file as it is on disk (current even when the index is behind) up to the next heading of the same or higher level, its subsections' headings, and other headings the prefix also matched; maxTokens (default 10000) cuts it at a line boundary and reports truncatedAtLine. Use this instead of reading a line range: a heading survives edits above it, a line number does not. No match is an error listing the nearest headings. Most modes return { repoId, mode, count, results }. Requires docs lane enabled. includeSymbols=true (mode=search only) additionally pads the result set with matching CODE symbols — off by default, because a docs search answering with symbols is rarely what was asked. mode=stale counts PROSE mentions only; includeCodeMentions=true also counts identifiers appearing inside fenced code samples. mode=search matches headings, prose sections and code blocks by default — pass contentTypes to narrow.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -1487,6 +1487,10 @@
             "type": "array"
           },
           "filePath": {
+            "type": "string"
+          },
+          "headingPrefix": {
+            "description": "mode=section only: the heading to read, as a case-insensitive prefix of its text (backticks/bold ignored), e.g. '3.7' or 'Retrieval'.",
             "type": "string"
           },
           "includeArchived": {
@@ -1522,7 +1526,7 @@
             "type": "integer"
           },
           "maxTokens": {
-            "description": "mode=search only: approximate payload budget for results (default 10000). Caps response SIZE where limit caps row COUNT; drops lowest-ranked results and reports truncated + resultsDropped.",
+            "description": "mode=search and mode=section: approximate payload budget (default 10000). On search it caps response SIZE where limit caps row COUNT, dropping lowest-ranked results (truncated + resultsDropped); on section it cuts the section at a line boundary (truncated + truncatedAtLine).",
             "maximum": 50000,
             "minimum": 200,
             "type": "integer"
@@ -1553,7 +1557,8 @@
               "drift",
               "links",
               "behind",
-              "language"
+              "language",
+              "section"
             ],
             "type": "string"
           },

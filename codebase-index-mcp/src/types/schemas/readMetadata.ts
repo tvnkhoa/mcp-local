@@ -55,8 +55,10 @@ export const getFileSummarySchema = z
 export const queryDocsSchema = (MAX_RESULT_LIMIT: number) => z
   .object({
     repoId: z.string().min(1).max(200),
-    mode: z.enum(["search", "stale", "coverage", "drift", "links", "behind", "language"]),
+    mode: z.enum(["search", "stale", "coverage", "drift", "links", "behind", "language", "section"]),
     query: z.string().min(1).max(200).optional(),
+    /** mode="section": the heading to read, matched as a case-insensitive prefix, markup ignored. */
+    headingPrefix: z.string().min(1).max(300).optional(),
     symbolIds: z.array(z.string().min(1).max(200)).min(1).max(100).optional(),
     filePath: z.string().min(1).optional(),
     limit: z.number().int().min(1).max(MAX_RESULT_LIMIT).default(20),
@@ -134,11 +136,16 @@ export const queryDocsSchema = (MAX_RESULT_LIMIT: number) => z
       if (v.mode === "search") return Boolean(v.query);
       if (v.mode === "stale") return Boolean(v.symbolIds);
       if (v.mode === "coverage") return Boolean(v.filePath);
+      if (v.mode === "section") return Boolean(v.filePath) && Boolean(v.headingPrefix);
       return true;
     },
     (v) => ({
-      message: v.mode === "search" ? "query is required for mode=search" : v.mode === "stale" ? "symbolIds is required for mode=stale" : "filePath is required for mode=coverage",
-      path: ["query"]
+      message:
+        v.mode === "search" ? "query is required for mode=search"
+        : v.mode === "stale" ? "symbolIds is required for mode=stale"
+        : v.mode === "section" ? "filePath and headingPrefix are required for mode=section"
+        : "filePath is required for mode=coverage",
+      path: [v.mode === "section" ? "headingPrefix" : "query"]
     })
   );
 

@@ -1,6 +1,10 @@
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { McpError, ErrorCode } from "@modelcontextprotocol/sdk/types.js";
-import { applyResultBudget, resolveResponseProfile } from "../../middleware/responseFormatter.js";
+import { applyResultBudget, resolveResponseProfile, DEFAULT_RESULT_BUDGET_TOKENS } from "../../middleware/responseFormatter.js";
+import { listHeadings, matchHeadings, nearestHeadings, extractSection } from "../../services/analysis/docSection.js";
+import { assertSafeRepoFilePath } from "../../services/refactor/refactorUtils.js";
+import { notFound } from "@mcp/core";
+import fs from "node:fs";
 import { fileIndexedNote } from "../../middleware/inputGuards.js";
 import { validateReadOnlyGraphSql, validateAllowedTables, QUERY_GRAPH_TABLE_SCOPES, QueryGraphScopeError } from "../../middleware/sqliteGuardrails.js";
 import { buildStaleWarning, getRepoStaleness, collectDirtyFiles, countCommitsBehind } from "../../services/git/gitHelpers.js";
@@ -310,6 +314,38 @@ function noPropertySymbolResult(
     },
     profile
   );
+}
+
+/**
+ * query_docs{ mode:"section" }. The file is read from disk, so the section is current even when the
+ * index is not; the index is only consulted for the repo's root.
+ */
+function readDocSection(store: GraphStore, repoId: string, filePath: string, headingPrefix: string, maxTokens: number): unknown {
+  const repo = store.getRepository(repoId);
+  if (!repo) throw notFound(`unknown repoId '${repoId}'.`, { repoId });
+  const relative = filePath.replace(/\\/g, "/");
+  let absolute: string;
+  try {
+    absolute = assertSafeRepoFilePath(repo.repoPath, relative);
+  } catch {
+    throw new McpError(ErrorCode.InvalidParams, `query_docs: filePath '${relative}' is outside the repository.`);
+  }
+  if (!fs.existsSync(absolute)) throw notFound(`no file '${relative}' in repo '${repoId}'.`, { repoId, filePath: relative });
+
+  const lines = fs.readFileSync(absolute, "utf8").split(/\r?\n/);
+  const headings = listHeadings(lines);
+  const matches = matchHeadings(headings, headingPrefix);
+  if (matches.length === 0) {
+    const nearest = nearestHeadings(headings, headingPrefix).map((h) => `${"#".repeat(h.level)} ${h.text} (line ${String(h.line)})`);
+    throw notFound(
+      `no heading in '${relative}' starts with '${headingPrefix}'. ` +
+        (nearest.length > 0 ? `Nearest headings: ${nearest.join("; ")}` : "The file has no headings."),
+      { repoId, filePath: relative, headingPrefix }
+    );
+  }
+  const [target, ...others] = matches;
+  const section = extractSection(lines, headings, target!, maxTokens, others.slice(0, 10));
+  return { repoId, mode: "section", filePath: relative, headingPrefix, ...section };
 }
 
 // ── find_impact_files ─────────────────────────────────────────────────────────
@@ -666,7 +702,7 @@ export function handleQueryGraph(
  * `search` already had, which is also the convention every other read tool here follows.
  */
 export function handleQueryDocs(
-  args: { repoId: string; mode: "search" | "stale" | "coverage" | "drift" | "links" | "behind" | "language"; query?: string; symbolIds?: string[]; filePath?: string; limit: number; maxTokens?: number; minSimilarity?: number; minDaysBehind?: number; minRatioPercent?: number; includeSymbols: boolean; includeCodeMentions: boolean; includeArchived?: boolean; matchMode?: "auto" | "strict" | "phrase"; maxPerFile?: number; contentTypes?: string[]; profile: string },
+  args: { repoId: string; mode: "search" | "stale" | "coverage" | "drift" | "links" | "behind" | "language" | "section"; query?: string; headingPrefix?: string; symbolIds?: string[]; filePath?: string; limit: number; maxTokens?: number; minSimilarity?: number; minDaysBehind?: number; minRatioPercent?: number; includeSymbols: boolean; includeCodeMentions: boolean; includeArchived?: boolean; matchMode?: "auto" | "strict" | "phrase"; maxPerFile?: number; contentTypes?: string[]; profile: string },
   ctx: HandlerContext
 ): CallToolResult {
   if (!ctx.constants.DOCS_TOOLS_ENABLED) {
@@ -699,6 +735,10 @@ export function handleQueryDocs(
       },
       profile
     );
+  }
+
+  if (args.mode === "section") {
+    return ctx.asText(readDocSection(store, args.repoId, args.filePath!, args.headingPrefix!, args.maxTokens ?? DEFAULT_RESULT_BUDGET_TOKENS), profile);
   }
 
   if (args.mode === "language") {
