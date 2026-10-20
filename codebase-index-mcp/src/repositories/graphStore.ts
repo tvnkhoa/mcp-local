@@ -459,6 +459,15 @@ export class GraphStore {
     return row != null;
   }
 
+  /** Indexed file paths of the given languages, forward-slashed and sorted (R4 schema-key scan). */
+  listFilesByLanguage(repoId: string, languages: readonly string[]): string[] {
+    if (languages.length === 0) return [];
+    const rows = this.db
+      .prepare(`select path from files where repo_id = ? and language in (${languages.map(() => "?").join(",")}) order by path`)
+      .all(repoId, ...languages) as { path: string }[];
+    return rows.map((r) => r.path.replace(/\\/g, "/"));
+  }
+
   /** Every C# type name declared in this repo — the owner prover's static-receiver test (B-13). */
   listCSharpTypeNames(repoId: string): string[] {
     return listCSharpTypeNamesImpl(this.db, repoId);

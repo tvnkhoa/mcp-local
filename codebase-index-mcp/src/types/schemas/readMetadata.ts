@@ -55,7 +55,7 @@ export const getFileSummarySchema = z
 export const queryDocsSchema = (MAX_RESULT_LIMIT: number) => z
   .object({
     repoId: z.string().min(1).max(200),
-    mode: z.enum(["search", "stale", "coverage", "drift", "links", "behind", "language", "section", "cites"]),
+    mode: z.enum(["search", "stale", "coverage", "drift", "links", "behind", "language", "section", "cites", "term"]),
     /** mode="cites": what is cited — the repo's own shorthand ("15 #737", "adr/0021") or a file path. */
     target: z.string().min(1).max(300).optional(),
     /** mode="search": also search code comments, returned as `codeComments` beside the doc results. */

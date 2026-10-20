@@ -6,6 +6,7 @@ import { assertSafeRepoFilePath } from "../../services/refactor/refactorUtils.js
 import { CITATIONS_CONFIG_PATH, loadCitationConfig } from "../../services/docs/citationConfig.js";
 import { findCitations } from "../../services/docs/annotationScanner.js";
 import { CitationResolver } from "../../services/docs/citationResolver.js";
+import { ownerMatchesSection, registryEntries, reverseReport, schemaKeys, type SchemaKey } from "../../services/docs/termLookup.js";
 import type { CitationRow } from "../../repositories/annotationsStore.js";
 import { notFound } from "@mcp/core";
 import fs from "node:fs";
@@ -453,6 +454,107 @@ function readCitations(store: GraphStore, repoId: string, target: string | undef
   };
 }
 
+const TERM_SCAN_MAX_FILES = 5000;
+const TERM_SCAN_MAX_BYTES = 512 * 1024;
+/** Per-file keys by mtime+size: reading ~800 files is the whole cost of a term call (7 s cold on wec.aria). */
+const schemaKeyCache = new Map<string, { mtimeMs: number; size: number; keys: SchemaKey[] }>();
+
+/** Zod shape keys across the repo's non-test TS/JS files, read from disk (R4). */
+function scanSchemaKeys(store: GraphStore, repoId: string, repoPath: string): { keys: SchemaKey[]; filesScanned: number; capped: boolean } {
+  const files = store.listFilesByLanguage(repoId, ["typescript", "javascript"]).filter((f) => !isTestPath(f));
+  const keys: SchemaKey[] = [];
+  let filesScanned = 0;
+  for (const file of files.slice(0, TERM_SCAN_MAX_FILES)) {
+    try {
+      const absolute = assertSafeRepoFilePath(repoPath, file);
+      const st = fs.statSync(absolute);
+      if (st.size > TERM_SCAN_MAX_BYTES) continue;
+      const cached = schemaKeyCache.get(absolute);
+      const fileKeys = cached && cached.mtimeMs === st.mtimeMs && cached.size === st.size ? cached.keys : schemaKeys(fs.readFileSync(absolute, "utf8"), file);
+      if (cached?.keys !== fileKeys) {
+        if (schemaKeyCache.size >= TERM_SCAN_MAX_FILES * 2) schemaKeyCache.clear();
+        schemaKeyCache.set(absolute, { mtimeMs: st.mtimeMs, size: st.size, keys: fileKeys });
+      }
+      filesScanned++;
+      keys.push(...fileKeys);
+    } catch {
+      continue;
+    }
+  }
+  return { keys, filesScanned, capped: files.length > TERM_SCAN_MAX_FILES };
+}
+
+/**
+ * query_docs{ mode:"term" } (R4). With `query`: the registry rows that define the name, the lines
+ * that mention it, and the Zod shapes that declare it. Without: the reverse report — snake_case
+ * schema keys the registry has no row for. The registry is the `registryDoc` of citations.json.
+ */
+function readTerm(store: GraphStore, repoId: string, term: string | undefined, limit: number): unknown {
+  const repo = store.getRepository(repoId);
+  if (!repo) throw notFound(`unknown repoId '${repoId}'.`, { repoId });
+  const load = loadCitationConfig(repo.repoPath);
+  const registryDoc = load.config?.registryDoc ?? null;
+  if (!registryDoc) {
+    return {
+      repoId,
+      mode: "term",
+      ...(term && { term }),
+      registryDoc: null,
+      note: load.present
+        ? `${CITATIONS_CONFIG_PATH} names no registryDoc, so there is no canonical-name registry to read; add "registryDoc": "<path>" (codebase-index-mcp/docs/citations-config.md).`
+        : `this repo has no ${CITATIONS_CONFIG_PATH}, so no canonical-name registry is configured; see codebase-index-mcp/docs/citations-config.md.`
+    };
+  }
+  let registryLines: string[];
+  try {
+    registryLines = fs.readFileSync(assertSafeRepoFilePath(repo.repoPath, registryDoc), "utf8").split(/\r?\n/);
+  } catch {
+    throw notFound(`registryDoc '${registryDoc}' (from ${CITATIONS_CONFIG_PATH}) is not readable in repo '${repoId}'.`, { repoId, filePath: registryDoc });
+  }
+  const scan = scanSchemaKeys(store, repoId, repo.repoPath);
+  const scanMeta = { schemaFilesScanned: scan.filesScanned, ...(scan.capped && { schemaScanCapped: TERM_SCAN_MAX_FILES }) };
+
+  if (!term) {
+    const report = reverseReport(scan.keys, registryLines);
+    return {
+      repoId,
+      mode: "term",
+      registryDoc,
+      keysScanned: report.keysScanned,
+      definedInRegistry: report.defined,
+      missingCount: report.missing.length,
+      returned: Math.min(limit, report.missing.length),
+      ...(report.missing.length > limit && { truncated: true }),
+      missing: report.missing.slice(0, limit),
+      ...scanMeta,
+      note: "a review queue, not a verdict: snake_case Zod shape keys (non-test files) with no registry table row whose first cell is the key. 'high' = the registry never names it; 'medium' = named, but no row defines it."
+    };
+  }
+
+  const entries = registryEntries(registryLines, term, limit);
+  const declared = scan.keys.filter((k) => k.key === term);
+  return {
+    repoId,
+    mode: "term",
+    term,
+    registryDoc,
+    definedIn: entries.definitions.map((d) => ({ line: d.line, section: d.section, sectionLine: d.sectionLine, text: d.text })),
+    mentionCount: entries.mentionCount,
+    mentions: entries.mentions,
+    schemaKeys: declared.map((k) => {
+      const section = entries.definitions.find((d) => ownerMatchesSection(k.owner, d.section))?.section;
+      return { filePath: k.filePath, line: k.line, owner: k.owner, ...(section && { registrySection: section }) };
+    }),
+    ...scanMeta,
+    ...(entries.definitions.length === 0 && {
+      hint: declared.length > 0
+        ? `the code declares '${term}' but ${registryDoc} has no table row defining it — a candidate for the registry.`
+        : `'${term}' is neither defined in ${registryDoc} nor declared as a Zod shape key. The name is matched exactly (case-sensitive).`
+    }),
+    next: `find_field_accesses(name:"${term}") for its reads and writes.`
+  };
+}
+
 // ── find_impact_files ─────────────────────────────────────────────────────────
 
 export function handleFindImpactFiles(
@@ -807,7 +909,7 @@ export function handleQueryGraph(
  * `search` already had, which is also the convention every other read tool here follows.
  */
 export function handleQueryDocs(
-  args: { repoId: string; mode: "search" | "stale" | "coverage" | "drift" | "links" | "behind" | "language" | "section" | "cites"; query?: string; headingPrefix?: string; target?: string; includeCodeComments?: boolean; symbolIds?: string[]; filePath?: string; limit: number; maxTokens?: number; minSimilarity?: number; minDaysBehind?: number; minRatioPercent?: number; includeSymbols: boolean; includeCodeMentions: boolean; includeArchived?: boolean; matchMode?: "auto" | "strict" | "phrase"; maxPerFile?: number; contentTypes?: string[]; profile: string },
+  args: { repoId: string; mode: "search" | "stale" | "coverage" | "drift" | "links" | "behind" | "language" | "section" | "cites" | "term"; query?: string; headingPrefix?: string; target?: string; includeCodeComments?: boolean; symbolIds?: string[]; filePath?: string; limit: number; maxTokens?: number; minSimilarity?: number; minDaysBehind?: number; minRatioPercent?: number; includeSymbols: boolean; includeCodeMentions: boolean; includeArchived?: boolean; matchMode?: "auto" | "strict" | "phrase"; maxPerFile?: number; contentTypes?: string[]; profile: string },
   ctx: HandlerContext
 ): CallToolResult {
   if (!ctx.constants.DOCS_TOOLS_ENABLED) {
@@ -841,6 +943,10 @@ export function handleQueryDocs(
       },
       profile
     );
+  }
+
+  if (args.mode === "term") {
+    return ctx.asText(readTerm(store, args.repoId, args.query, args.limit), profile);
   }
 
   if (args.mode === "cites") {

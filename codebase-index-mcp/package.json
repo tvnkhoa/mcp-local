@@ -33,6 +33,7 @@
     "test:issue-052-qualified-call": "node scripts/test/test-issue-052-qualified-call.mjs",
     "test:bus-edges": "node scripts/test/test-bus-edges.mjs",
     "test:citations": "node scripts/test/test-citations.mjs",
+    "test:docs-term": "node scripts/test/test-docs-term.mjs",
     "test:search-ranking": "node scripts/test/test-search-ranking.mjs",
     "test:interface-dispatch": "node scripts/test/test-interface-dispatch.mjs",
     "test:call-chain-interface": "node scripts/test/test-call-chain-interface.mjs",
