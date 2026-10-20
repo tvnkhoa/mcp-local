@@ -212,6 +212,44 @@ export function collectGitChangedFiles(repoPath: string): Set<string> {
 }
 
 /**
+ * Parse `git status --porcelain=v2 --branch -z --untracked-files=all`: HEAD's sha plus every staged,
+ * unstaged, unmerged and untracked path (both sides of a rename). Pure, so it is unit-tested.
+ */
+export function parseStatusPorcelainV2(out: string): { head: string | null; dirty: string[] } {
+  let head: string | null = null;
+  const dirty: string[] = [];
+  const entries = out.split("\0");
+  for (let i = 0; i < entries.length; i++) {
+    const e = entries[i] ?? "";
+    if (e.startsWith("# branch.oid ")) {
+      const oid = e.slice("# branch.oid ".length).trim();
+      head = /^[0-9a-f]{7,64}$/.test(oid) ? oid : null; // "(initial)" before the first commit
+      continue;
+    }
+    // Fields before the path: 1 → 8, 2 → 9 (+ orig path as the next entry), u → 10, ? → 1.
+    const before = e[0] === "1" ? 8 : e[0] === "2" ? 9 : e[0] === "u" ? 10 : e[0] === "?" ? 1 : -1;
+    if (before < 0) continue;
+    const parts = e.split(" ");
+    const p = parts.slice(before).join(" ");
+    if (p) dirty.push(p.replace(/\\/g, "/"));
+    if (e[0] === "2") {
+      const orig = entries[++i];
+      if (orig) dirty.push(orig.replace(/\\/g, "/"));
+    }
+  }
+  return { head, dirty: [...new Set(dirty)] };
+}
+
+/**
+ * HEAD plus the working-tree delta in ONE git spawn. The R1 freshness gate runs this before every
+ * read query; the four-spawn version (rev-parse + collectDirtyFiles) cost ~330 ms on wec.aria on
+ * Windows, this ~110 ms.
+ */
+export function readWorkingTreeState(repoPath: string): { head: string | null; dirty: string[] } {
+  return parseStatusPorcelainV2(runGit(repoPath, ["-c", "core.quotePath=false", "status", "--porcelain=v2", "--branch", "-z", "--untracked-files=all"]));
+}
+
+/**
  * Full working-tree delta as repo-relative POSIX paths: unstaged + staged + untracked.
  * Unlike `collectGitChangedFiles` (unstaged-vs-HEAD only) this is the complete set of
  * files `index_repository(mode="dirty")` must re-index. Returns an empty set on a

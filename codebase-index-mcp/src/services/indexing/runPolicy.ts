@@ -113,6 +113,19 @@ export function evaluateIncrementalSkip(
     };
   }
 
+  // A clean tree at the indexed commit proves nothing when the last run that did work was `dirty`:
+  // the index then holds working-tree content, and a file indexed while dirty and since deleted or
+  // reverted is still in the graph. Skipping here is how wec.aria's release-B acceptance found a
+  // deleted probe file still answering with coverage "high".
+  if (store.getLatestWorkRunMode(repoId) === "dirty") {
+    return {
+      shouldSkip: false,
+      reason: "the index holds working-tree content from a dirty run",
+      headCommitSha: resolveHeadCommitSha(repoPath),
+      indexVersion: latestRun.indexVersion ?? INDEX_VERSION
+    };
+  }
+
   const headCommitSha = resolveHeadCommitSha(repoPath);
   if (!headCommitSha) {
     return {

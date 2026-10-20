@@ -53,7 +53,11 @@ export type FreshnessGateOptions = {
   run: (repoId: string, repoPath: string, mode: IndexMode) => Promise<IndexRunResult>;
   /** Tag a finished run as query-triggered, for `health_check`. Best-effort. */
   markTriggered?: (runId: string) => void;
-  /** How long a tree check is reused before git is asked again. */
+  /**
+   * How long a tree check is reused before git is asked again. Default 0: a reused "fresh" verdict
+   * served a deleted file's symbols silently for its whole lifetime (R1, release B.1). Only the
+   * "another process is refreshing" note is cached, for 1 s, so a busy caller does not hammer git.
+   */
   checkTtlMs?: number;
   /** A lock older than this, or held by a dead pid, is broken. */
   staleLockMs?: number;
@@ -111,6 +115,63 @@ function releaseLock(file: string): void {
   }
 }
 
+/**
+ * Which paths the index holds from the WORKING TREE rather than from HEAD — the dirty-run ledger.
+ *
+ * A dirty-mode run re-indexes only what is dirty now. A file indexed while dirty and then deleted or
+ * reverted is never dirty again, so no dirty run looks at it, and its symbols stay in the graph as
+ * current (wec.aria acceptance of release B: an untracked probe file, deleted, was still found with
+ * coverage "high"). The ledger remembers those paths beside the indexed HEAD; when one of them is no
+ * longer dirty, the gate runs `incremental` instead, which re-hashes every file and prunes the gone.
+ *
+ * Kept as a file beside the index DB, not in memory, so every server process sharing the DB — one per
+ * Claude session — sees the paths another one indexed.
+ */
+export type DirtyLedger = { head: string; paths: string[] };
+
+function ledgerFileFor(lockDir: string, repoId: string): string {
+  return path.join(lockDir, `dirty-${repoId.replace(/[^\w.-]/g, "_")}.json`);
+}
+
+export function readDirtyLedger(lockDir: string, repoId: string): DirtyLedger | null {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(ledgerFileFor(lockDir, repoId), "utf8")) as DirtyLedger;
+    return typeof parsed.head === "string" && Array.isArray(parsed.paths) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function writeDirtyLedger(lockDir: string, repoId: string, ledger: DirtyLedger): void {
+  try {
+    fs.writeFileSync(ledgerFileFor(lockDir, repoId), JSON.stringify(ledger));
+  } catch {
+    // Best-effort: a missing ledger costs at most one extra incremental run later.
+  }
+}
+
+const sameCommit = (a: string, b: string): boolean => a.startsWith(b) || b.startsWith(a);
+
+/** Ledger paths that are no longer dirty at this HEAD: indexed from a working tree that is gone. */
+export function vanishedDirtyPaths(ledger: DirtyLedger | null, head: string, dirty: readonly string[]): string[] {
+  if (!ledger || !sameCommit(ledger.head, head)) return [];
+  const now = new Set(dirty);
+  return ledger.paths.filter((p) => !now.has(p));
+}
+
+/**
+ * Update the ledger after ANY index run (the gate's or index_repository's). A `dirty` run adds the
+ * paths it indexed; `incremental`/`full` read every file from disk, so afterwards the index holds
+ * the working tree for exactly the paths that are dirty now.
+ */
+export function recordDirtyLedger(lockDir: string, repoId: string, mode: IndexMode, tree: RepoTreeState): void {
+  if (!tree.head) return;
+  const prev = readDirtyLedger(lockDir, repoId);
+  const paths =
+    mode === "dirty" && prev && sameCommit(prev.head, tree.head) ? [...new Set([...prev.paths, ...tree.dirty])] : [...tree.dirty];
+  writeDirtyLedger(lockDir, repoId, { head: tree.head, paths: paths.sort() });
+}
+
 /** The tree identity a refresh covers: HEAD plus each dirty file's size and mtime. */
 function treeKey(repoPath: string, tree: RepoTreeState): string {
   const parts = [...tree.dirty].sort().map((rel) => {
@@ -132,12 +193,12 @@ export type FreshnessGate = {
 
 export function createFreshnessGate(opts: FreshnessGateOptions): FreshnessGate {
   const now = opts.now ?? Date.now;
-  const checkTtlMs = opts.checkTtlMs ?? 3_000;
+  const checkTtlMs = opts.checkTtlMs ?? 0;
   const staleLockMs = opts.staleLockMs ?? 15 * 60_000;
   /** Tree key each repo's last completed refresh covered. */
   const coveredKey = new Map<string, string>();
   const lastCheck = new Map<string, { at: number; note: FreshnessNote }>();
-  type Flight = { mode: "incremental" | "dirty"; startedAt: number; promise: Promise<IndexRunResult | null> };
+  type Flight = { mode: "incremental" | "dirty"; startedAt: number; promise: Promise<IndexRunResult | null>; cleanup?: number };
   const inflight = new Map<string, Flight>();
   const runChain = new Map<string, Promise<unknown>>();
 
@@ -170,7 +231,10 @@ export function createFreshnessGate(opts: FreshnessGateOptions): FreshnessGate {
         state: "refreshing",
         mode: flight.mode,
         elapsedMs: now() - started,
-        reason: `${flight.mode === "incremental" ? "an" : "a"} ${flight.mode} re-index is still running after the ${String(opts.budgetMs)} ms query budget; it continues in the background and a later query will use it. This answer comes from the previous index.`
+        reason:
+          `${flight.mode === "incremental" ? "an" : "a"} ${flight.mode} re-index is still running after the ${String(opts.budgetMs)} ms query budget` +
+          (flight.cleanup ? ` (${String(flight.cleanup)} file(s) indexed from an earlier working tree were deleted or reverted since)` : "") +
+          "; it continues in the background and a later query will use it. This answer comes from the previous index."
       };
     }
     if (outcome === null) {
@@ -188,7 +252,7 @@ export function createFreshnessGate(opts: FreshnessGateOptions): FreshnessGate {
     if (running) return waitBudget(repoId, running);
 
     const cached = lastCheck.get(repoId);
-    if (cached && started - cached.at < checkTtlMs) return cached.note;
+    if (cached && started - cached.at < (cached.note.state === "fresh" ? checkTtlMs : Math.max(checkTtlMs, 1_000))) return cached.note;
 
     const repoPath = opts.getRepoPath(repoId);
     if (!repoPath) return { state: "fresh" };
@@ -202,15 +266,18 @@ export function createFreshnessGate(opts: FreshnessGateOptions): FreshnessGate {
     if (!tree.head) return { state: "fresh" };
 
     const indexed = opts.getIndexedCommit(repoId);
-    const headMoved = !indexed || (!tree.head.startsWith(indexed) && !indexed.startsWith(tree.head));
+    const headMoved = !indexed || !sameCommit(tree.head, indexed);
+    const vanished = headMoved ? [] : vanishedDirtyPaths(readDirtyLedger(opts.lockDir, repoId), tree.head, tree.dirty);
     const key = treeKey(repoPath, tree);
-    if (!headMoved && (tree.dirty.length === 0 || coveredKey.get(repoId) === key)) {
+    if (!headMoved && vanished.length === 0 && (tree.dirty.length === 0 || coveredKey.get(repoId) === key)) {
       const note: FreshnessNote = { state: "fresh" };
       lastCheck.set(repoId, { at: started, note });
       return note;
     }
 
-    const mode: "incremental" | "dirty" = headMoved ? "incremental" : "dirty";
+    // A deleted or reverted file that was indexed while dirty is not dirty any more, so dirty mode
+    // would never look at it again: only an incremental run (re-hash everything, prune the gone) clears it.
+    const mode: "incremental" | "dirty" = headMoved || vanished.length > 0 ? "incremental" : "dirty";
     const lockFile = lockFileFor(opts.lockDir, repoId);
     if (!tryAcquireLock(lockFile, staleLockMs, started)) {
       const note: FreshnessNote = {
@@ -225,6 +292,7 @@ export function createFreshnessGate(opts: FreshnessGateOptions): FreshnessGate {
     const promise = serialize(repoId, () => opts.run(repoId, repoPath, mode))
       .then((result) => {
         coveredKey.set(repoId, key);
+        recordDirtyLedger(opts.lockDir, repoId, mode, tree);
         try {
           opts.markTriggered?.(result.runId);
         } catch {
@@ -238,7 +306,7 @@ export function createFreshnessGate(opts: FreshnessGateOptions): FreshnessGate {
         inflight.delete(repoId);
         lastCheck.delete(repoId);
       });
-    const flight: Flight = { mode, startedAt: started, promise };
+    const flight: Flight = { mode, startedAt: started, promise, ...(vanished.length > 0 && { cleanup: vanished.length }) };
     inflight.set(repoId, flight);
     return waitBudget(repoId, flight);
   };

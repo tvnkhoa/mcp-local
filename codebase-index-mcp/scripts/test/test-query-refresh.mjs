@@ -11,7 +11,7 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { execFileSync } from "child_process";
-import { mkdirSync, writeFileSync } from "fs";
+import { mkdirSync, rmSync, writeFileSync } from "fs";
 import { join } from "path";
 import { makeTempDir } from "./_fixtures.mjs";
 import { attachServerStderr } from "./_serverStderr.mjs";
@@ -108,6 +108,57 @@ try {
     seen = JSON.stringify(r).includes("deltaFour");
   }
   assert(seen, "the run was not aborted: a later query answers from it");
+} finally {
+  await Promise.race([client.close().catch(() => {}), new Promise((r) => setTimeout(r, 3000))]);
+}
+
+// 5. Deleted / reverted working-tree files leave no phantom (wec.aria release-B acceptance, R1 rejected:
+//    an untracked file indexed by a dirty refresh, then deleted, was still found with coverage "high").
+//    A fresh server process, so the cleanup must come from the shared ledger, not this process' memory.
+const exact = (r, name) => (r?.symbols ?? r?.results ?? []).some((s) => s.name === name);
+const conf = (r) => (typeof r?.coverage === "string" ? r.coverage : r?.coverage?.confidence);
+async function settle(client, name) {
+  // Ask until the answer is current (no `refreshing`), then return it.
+  for (let i = 0; i < 60; i++) {
+    const r = js(await client.callTool({ name: "search_symbols", arguments: { repoId, query: name, strategy: "name", profile: "standard" } }));
+    if (r?.freshness?.state !== "refreshing") return r;
+    await sleep(250);
+  }
+  return null;
+}
+client = await connect(tmpDir, 30_000, "test-query-refresh-phantom");
+try {
+  // Untracked: create → found → delete → gone.
+  writeFileSync(join(tmpDir, "probe.ts"), "export function probeUntrackedZq7(): number {\n  return 7;\n}\n");
+  assert(exact(await settle(client, "probeUntrackedZq7"), "probeUntrackedZq7"), "untracked file: its symbol is found");
+  rmSync(join(tmpDir, "probe.ts"));
+  const hc = js(await client.callTool({ name: "health_check", arguments: { repoId } }));
+  const why = (hc?.codebaseState?.reasons ?? []).join(" | ");
+  assert(/indexed from a working tree that has since changed/.test(why) && hc?.codebaseState?.status !== "ready", "health_check names the deleted dirty file before any query cleans it", why || JSON.stringify(hc?.codebaseState));
+  const afterDelete = await settle(client, "probeUntrackedZq7");
+  assert(!exact(afterDelete, "probeUntrackedZq7"), "untracked file deleted: its symbol is gone", JSON.stringify(afterDelete)?.slice(0, 300));
+  assert(afterDelete?.freshness?.state === "refreshed" && afterDelete?.freshness?.mode === "incremental", "via an incremental cleanup run", JSON.stringify(afterDelete?.freshness));
+
+  // Tracked: edit → found → revert → gone.
+  writeFileSync(join(tmpDir, "a.ts"), "export function alphaOne(): number {\n  return 1;\n}\nexport function editedTrackedZq8(): number {\n  return 8;\n}\n");
+  assert(exact(await settle(client, "editedTrackedZq8"), "editedTrackedZq8"), "tracked edit: its symbol is found");
+  git(tmpDir, "checkout", "--", "a.ts");
+  const afterRevert = await settle(client, "editedTrackedZq8");
+  assert(!exact(afterRevert, "editedTrackedZq8"), "tracked edit reverted: its symbol is gone", JSON.stringify(afterRevert)?.slice(0, 300));
+  assert(exact(await settle(client, "alphaOne"), "alphaOne"), "and the file's committed symbols are intact");
+} finally {
+  await Promise.race([client.close().catch(() => {}), new Promise((r) => setTimeout(r, 3000))]);
+}
+
+// 6. While a cleanup is pending and over budget, the answer is not "high".
+client = await connect(tmpDir, 1, "test-query-refresh-phantom-budget");
+try {
+  writeFileSync(join(tmpDir, "probe2.ts"), "export function probeTwoZq9(): number {\n  return 9;\n}\n");
+  await settle(client, "probeTwoZq9");
+  rmSync(join(tmpDir, "probe2.ts"));
+  const pending = js(await client.callTool({ name: "search_symbols", arguments: { repoId, query: "probeTwoZq9", strategy: "name", profile: "standard" } }));
+  assert(pending?.freshness?.state === "refreshing" || !exact(pending, "probeTwoZq9"), "a pending cleanup is reported, or already done");
+  if (pending?.freshness?.state === "refreshing") assert(conf(pending) !== "high", "and its coverage is not high", JSON.stringify(pending?.coverage));
 } finally {
   await Promise.race([client.close().catch(() => {}), new Promise((r) => setTimeout(r, 3000))]);
 }

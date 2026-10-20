@@ -140,7 +140,7 @@ import {
   listRepositoriesImpl
 } from "../services/impact/impactAnalyzer.js";
 import { initGraphSchema, runGraphMigrations } from "./schema.js";
-import { recordRun as recordRunImpl, getLatestRun as getLatestRunImpl, markRunTrigger as markRunTriggerImpl } from "./runStore.js";
+import { recordRun as recordRunImpl, getLatestRun as getLatestRunImpl, markRunTrigger as markRunTriggerImpl, getLatestWorkRunMode as getLatestWorkRunModeImpl } from "./runStore.js";
 import {
   type WriteContext,
   prepareWriteStatements,
@@ -325,6 +325,10 @@ export class GraphStore {
 
   searchLiterals(repoId: string, query: string, limit: number, filePathFilter: string | null = null): LiteralSearchResult[] {
     return searchLiteralsImpl(this.db, repoId, query, limit, filePathFilter);
+  }
+
+  getLatestWorkRunMode(repoId: string): string | null {
+    return getLatestWorkRunModeImpl(this.db, repoId);
   }
 
   markRunTrigger(runId: string, trigger: string): void {

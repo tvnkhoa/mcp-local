@@ -19,9 +19,11 @@ import { evaluateIncrementalSkip, resolvePerformanceProfileDecision } from "./ru
 function stubStore(parts: {
   latestRun?: { commitSha?: string | null; indexVersion?: string } | null;
   snapshot?: { fileCount: number; symbolCount: number };
+  latestWorkMode?: string | null;
 }): GraphStore {
   return {
     getLatestRun: () => parts.latestRun ?? null,
+    getLatestWorkRunMode: () => parts.latestWorkMode ?? null,
     getRepoSchemaSnapshot: () => parts.snapshot ?? { fileCount: 0, symbolCount: 0 }
   } as unknown as GraphStore;
 }
@@ -95,4 +97,14 @@ test("auto thresholds are exact, and either file or symbol count can trip them",
   assert.equal(at(1, 20_000), "large");
   assert.equal(at(2_999, 19_999), "standard");
   assert.equal(at(1, 1), "standard");
+});
+
+test("never skips after a dirty run: the index holds working-tree content a clean tree no longer has", async () => {
+  // wec.aria, release-B acceptance: an untracked file indexed by a dirty run, then deleted, left a
+  // clean tree at the indexed commit — and the fast skip kept the phantom symbol forever.
+  const { INDEX_VERSION } = await import("./indexPipeline.js");
+  const store = stubStore({ latestRun: { commitSha: "abc", indexVersion: INDEX_VERSION }, latestWorkMode: "dirty" });
+  const decision = evaluateIncrementalSkip(store, "repo", "/nowhere");
+  assert.equal(decision.shouldSkip, false);
+  assert.match(decision.reason, /working-tree content/);
 });

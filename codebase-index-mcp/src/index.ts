@@ -45,8 +45,8 @@ import type { HandlerContext } from "./tools/handlers/handlerContext.js";
 import { createCodebaseIndexServer } from "./server.js";
 import { buildTools } from "./tools/index.js";
 import { DEFAULT_MAX_MARKDOWN_BYTES } from "./services/indexing/fileFilter.js";
-import { applyFreshness, createFreshnessGate } from "./middleware/freshness.js";
-import { collectDirtyFiles, resolveHeadCommitSha } from "./services/git/gitHelpers.js";
+import { applyFreshness, createFreshnessGate, recordDirtyLedger } from "./middleware/freshness.js";
+import { readWorkingTreeState } from "./services/git/gitHelpers.js";
 
 const dbPath = stringFromEnv("CODEBASE_INDEX_DB_PATH", "./codebase-index.db");
 const allowedRoots = allowedRootsFromEnv();
@@ -125,19 +125,29 @@ const runIndexUnserialized = createIndexRunner({
  * never write one repo at once. The gate itself is handed the UNSERIALIZED runner: it serializes
  * internally, and passing the wrapped one would make a refresh wait on itself.
  */
+const FRESHNESS_LOCK_DIR = path.dirname(path.resolve(dbPath));
 const freshnessGate = createFreshnessGate({
   enabled: QUERY_REFRESH_ENABLED,
   budgetMs: QUERY_REFRESH_BUDGET_MS,
-  lockDir: path.dirname(path.resolve(dbPath)),
+  lockDir: FRESHNESS_LOCK_DIR,
   getRepoPath: (repoId) => store.getRepository(repoId)?.repoPath ?? null,
   getIndexedCommit: (repoId) => store.getLatestRun(repoId)?.commitSha ?? null,
-  readTree: (repoPath) => ({ head: resolveHeadCommitSha(repoPath), dirty: [...collectDirtyFiles(repoPath)] }),
+  readTree: (repoPath) => readWorkingTreeState(repoPath),
   run: (repoId, repoPath, mode) => runIndexUnserialized(repoId, repoPath, mode, DOCS_INDEXING_ENABLED, MAX_FILES_PER_RUN, 200),
   markTriggered: (runId) => store.markRunTrigger(runId, "query")
 });
 
-const runIndexAndResolve: typeof runIndexUnserialized = (repoId, ...rest) =>
-  freshnessGate.serialize(repoId, () => runIndexUnserialized(repoId, ...rest));
+const runIndexAndResolve: typeof runIndexUnserialized = (repoId, repoPath, mode, ...rest) =>
+  freshnessGate.serialize(repoId, async () => {
+    const result = await runIndexUnserialized(repoId, repoPath, mode, ...rest);
+    // index_repository and the watcher keep the dirty-run ledger current too (see freshness.ts).
+    try {
+      recordDirtyLedger(FRESHNESS_LOCK_DIR, repoId, mode, readWorkingTreeState(repoPath));
+    } catch {
+      // not a git repo
+    }
+    return result;
+  });
 
 async function ensureFresh(repoId: string): Promise<void> {
   const note = await freshnessGate.ensureFresh(repoId);

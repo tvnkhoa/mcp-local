@@ -232,3 +232,14 @@ export function getLatestRun(db: Database.Database, repoId: string): IndexRunSum
 export function markRunTrigger(db: Database.Database, runId: string, trigger: string): void {
   db.prepare(`update index_runs set triggered_by = ? where run_id = ?`).run(trigger, runId);
 }
+
+/**
+ * Mode of the most recent run that did WORK (no `skip_reason`): after a `dirty` run the index holds
+ * working-tree content, so a later clean tree at the same HEAD does not prove it matches HEAD.
+ */
+export function getLatestWorkRunMode(db: Database.Database, repoId: string): string | null {
+  const row = db
+    .prepare(`select mode from index_runs where repo_id = ? and skip_reason is null order by finished_at desc, started_at desc, rowid desc limit 1`)
+    .get(repoId) as { mode: string } | undefined;
+  return row?.mode ?? null;
+}

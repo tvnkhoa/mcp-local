@@ -1,3 +1,6 @@
+import path from "node:path";
+import { readDirtyLedger, vanishedDirtyPaths } from "../../middleware/freshness.js";
+import { readWorkingTreeState } from "../../services/git/gitHelpers.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { McpError, ErrorCode } from "@modelcontextprotocol/sdk/types.js";
 import { getRepoStaleness, getRepoWorkingTreeState } from "../../services/git/gitHelpers.js";
@@ -69,6 +72,19 @@ export function handleHealthCheck(
   // containing a symbol that exists in no file on disk.
   const pendingReindex = repoId ? store.getPendingReindexFiles(repoId) : [];
 
+  // R1 (release B.1): the fourth signal. Files a dirty run indexed from the working tree, since
+  // deleted or reverted, leave a clean tree at the indexed HEAD — and their symbols in the graph.
+  // wec.aria's acceptance found health_check saying "up-to-date" in exactly that state.
+  let indexedFromOldTree: string[] = [];
+  if (repo) {
+    try {
+      const tree = readWorkingTreeState(repo.repoPath);
+      if (tree.head) indexedFromOldTree = vanishedDirtyPaths(readDirtyLedger(path.dirname(path.resolve(constants.dbPath)), repoId!), tree.head, tree.dirty);
+    } catch {
+      // not a git repo
+    }
+  }
+
   const reasons: string[] = [];
   if (repoId && !repo) reasons.push("repository not registered; run index_repository first");
   if (repoId && repo && !latestRun) reasons.push("repository has no indexed run yet");
@@ -76,6 +92,9 @@ export function handleHealthCheck(
   if (workingTree?.isDirty === true) reasons.push("working tree has uncommitted changes");
   if (pendingReindex.length > 0) {
     reasons.push(`${String(pendingReindex.length)} file(s) written by the refactor engine are not re-indexed`);
+  }
+  if (indexedFromOldTree.length > 0) {
+    reasons.push(`${String(indexedFromOldTree.length)} file(s) were indexed from a working tree that has since changed (deleted or reverted): ${indexedFromOldTree.slice(0, 5).join(", ")}`);
   }
 
   let codebaseStatus: "unknown" | "needs_index" | "stale" | "dirty" | "ready" = "unknown";
@@ -85,7 +104,7 @@ export function handleHealthCheck(
     codebaseStatus = "needs_index";
   } else if (staleness?.isStale === true) {
     codebaseStatus = "stale";
-  } else if (pendingReindex.length > 0) {
+  } else if (pendingReindex.length > 0 || indexedFromOldTree.length > 0) {
     // Ranked above "dirty": a clean tree with a pending set is exactly the rollback case, and it is
     // the one where nothing else in this response would report a problem.
     codebaseStatus = "stale";
