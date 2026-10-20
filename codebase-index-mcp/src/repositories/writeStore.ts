@@ -128,7 +128,8 @@ export function endIndexSession(db: Database.Database): void {
 export function deduplicateResolvedEdges(db: Database.Database, repoId: string): number {
   const PLACEHOLDERS = `(
       to_id LIKE 'callee:%' OR to_id LIKE 'import:%' OR
-      to_id LIKE 'property:%' OR to_id LIKE 'iface:%' OR to_id LIKE 'type:%'
+      to_id LIKE 'property:%' OR to_id LIKE 'iface:%' OR to_id LIKE 'type:%' OR
+      to_id LIKE 'component:%'
     )`;
   const result = db
     .prepare(

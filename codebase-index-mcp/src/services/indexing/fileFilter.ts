@@ -188,6 +188,11 @@ const LANGUAGE_BY_EXTENSION: Record<string, string> = {
   ".jsx": "javascript",
   ".mjs": "javascript",
   ".cjs": "javascript",
+  // Vue single-file components (MCP-ISSUE-074). Their own tag, not `typescript`: a `.vue` file is
+  // template + script + style, `files.language` is what search_regex / dead_code_scan filter on, and a
+  // caller asking for "the Vue components" must be able to say so. The script blocks still go through
+  // the TypeScript lane (vueExtractor.ts).
+  ".vue": "vue",
   // Python (FastAPI route extraction)
   ".py": "python",
   // .NET / C# (wec.communication-hub)

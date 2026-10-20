@@ -136,6 +136,29 @@ export function handleFindImplementations(
         }
       : {};
 
+  // MCP-ISSUE-074: a Vue component implements nothing — say so rather than return an empty list that
+  // reads like a missing IMPLEMENTS edge, and name the relation that does answer "who uses it".
+  const components =
+    rows.length === 0
+      ? ctx.store
+          .getSymbolCandidates(args.repoId, args.interfaceName.replace(/\.vue$/i, ""), 5, "name", { kind: "component" })
+          .filter((c) => c.kind === "component")
+      : [];
+  if (components.length > 0) {
+    return ctx.asText(
+      {
+        repoId: args.repoId,
+        interfaceName: args.interfaceName,
+        count: 0,
+        notApplicable:
+          `'${args.interfaceName}' is a Vue component, not an interface: find_implementations is not applicable for a Vue component (components have no IMPLEMENTS relation). ` +
+          `Who renders it is a USES_COMPONENT edge — use find_impact_files(filePath) or get_call_chain(symbolId, direction: "callers") on the component symbol.`,
+        components: components.map((c) => ({ symbolId: c.symbolId, name: c.name, kind: c.kind, filePath: c.filePath, line: c.line }))
+      },
+      profile
+    );
+  }
+
   const coverage = buildCoverageBlock({
     resultCount: rows.length,
     expectedNonZero: true,

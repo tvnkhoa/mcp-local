@@ -135,7 +135,7 @@ npm install && npm run build
 
 ## Graph Model
 
-**Edge types and semantics** (12, from the `EdgeType` union in `src/types/index.ts`):
+**Edge types and semantics** (13, from the `EdgeType` union in `src/types/index.ts`):
 
 | Edge | Meaning | Note |
 |------|---------|------|
@@ -151,6 +151,7 @@ npm install && npm run build
 | `CONSUMES` | An `IConsumer<T>`/handler of message contract T | Resolved to the in-repo contract type when present |
 | `USES_CSS_VAR` | A `var(--x)` reference → every `css_variable` definition of `--x` | Resolved by name repo-wide (one edge per definition); traversed by `get_call_chain` / `find_impact_files` |
 | `USES_CSS_CLASS` | A markup use of a class (Vue template `class` / `:class`) → the `css_class` symbols | Emitted by the Vue lane; resolved like `USES_CSS_VAR` |
+| `USES_COMPONENT` | A Vue template renders a component (`<AppCard>`, `<app-card>`, each imported `<component :is>` branch) → that file's `component` symbol | Resolved through the script's import specifier; traversed by `get_call_chain` / `find_impact_files`; un-imported tags and dynamic `:is` branches are kept as labelled `component:` gaps |
 
 **Confidence scores**: Values are `0.0–1.0`. Below `0.7` means low confidence — verify with a file read before acting on it.
 
@@ -350,6 +351,7 @@ The refactor flow is: `refactor_replace_preview` → `refactor_replace_apply` �
 - **Staleness**: incremental index fast-skips when indexed commit equals `HEAD` and working tree is clean. Read tools degrade gracefully on a stale index — `find_impact_files`/`get_change_context` embed a non-fatal `staleWarning` rather than erroring.
 - **Windows native build**: `better-sqlite3` requires Visual Studio C++ Build Tools. If build fails, install VS Build Tools.
 - **CSS lane** (MCP-ISSUE-075): `.css` files are parsed with `postcss`, not tree-sitter. Custom properties become `css_variable` symbols (one per definition site, named `--x`), class selectors `css_class` symbols (one per name per file, named `.x`); `var(--x)` is a `USES_CSS_VAR` edge, so `search_symbols("--text-tertiary")` plus `get_call_chain(direction:"callers")` answers "who uses this token". `dead_code_scan` never reports CSS symbols. SCSS/Less are not indexed.
+- **Vue lane** (MCP-ISSUE-074): `.vue` files are indexed as language `vue`. `@vue/compiler-sfc` (3.5.44, pure JS) splits the blocks; `<script>` / `<script setup>` go through the TypeScript lane at their real `.vue` lines; each file gets one `component` symbol whose `defineProps` / `defineModel` props and `defineEmits` events (as `onX` listener members) are its `property` children. Templates give `USES_COMPONENT` (child components, per `:is` branch), `PROPERTY_WRITE` for `:prop` / `@event` / `v-model` bindings on a child (bound expression in `assignedExpression`), `CALLS` for `@event` handlers, inline expressions (`@click="save(x)"`, `{{ fmt(x) }}`) and `$emit`, `PROPERTY_REF` for own-prop reads — the template line is in the edge `reason`. `<style>` blocks go through the CSS lane; `class` / literal `:class` names become `USES_CSS_CLASS`. `dead_code_scan` counts template use as use; `find_implementations` on a component says it is not applicable.
 - **Docs lane**: disabled by default (`CODEBASE_INDEX_DOCS_INDEXING_ENABLED=false`). Use `docsMode: "off"` per run for fastest indexing.
 - **Watch**: keep `CODEBASE_INDEX_WATCH_AUTO_START_ENABLED=false`. Start watchers manually only during active debug sessions, stop immediately after.
 

@@ -376,6 +376,7 @@ export function getUnresolvedStats(db: Database.Database, repoId: string): Unres
     SELECT
       SUM(CASE WHEN reason = 'unresolved callee token' OR reason = 'unresolved import token'
                     OR reason = 'unresolved type token' OR reason = 'unresolved property token'
+                    OR reason = 'unresolved component token'
                THEN 1 ELSE 0 END) as trulyUnresolved,
       SUM(CASE WHEN reason = 'external boundary' THEN 1 ELSE 0 END) as externalBoundary
       ,SUM(CASE WHEN type = 'IMPORTS' THEN 1 ELSE 0 END) as importsTotal
@@ -383,7 +384,7 @@ export function getUnresolvedStats(db: Database.Database, repoId: string): Unres
     FROM edges
     WHERE repo_id = ?
       AND (to_id LIKE 'callee:%' OR to_id LIKE 'import:%'
-           OR to_id LIKE 'type:%' OR to_id LIKE 'property:%')
+           OR to_id LIKE 'type:%' OR to_id LIKE 'property:%' OR to_id LIKE 'component:%')
   `).get(repoId) as { trulyUnresolved: number | null; externalBoundary: number | null; importsTotal: number | null; importsClassified: number | null } | undefined;
 
   const bridgeRow = db.prepare(`
