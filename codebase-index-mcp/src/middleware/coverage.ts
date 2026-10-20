@@ -83,6 +83,18 @@ export type CoverageInput = {
     nameOnly: number;
     minConfidence: number;
   };
+  /**
+   * Accesses the graph cannot see for this query's language, e.g. TS/JS property edges cover only
+   * `this.<member>`. Measured on wec.aria: `find_field_accesses(kb_version_ids)` returned 0 reads,
+   * 0 writes and `high` for a Zod field read across two packages. A language gap caps confidence at
+   * `medium`, and an empty result under one is `low` — the count is not one the graph can vouch for.
+   */
+  languageGaps?: string[];
+  /**
+   * Present when the index is behind HEAD or the tree is dirty (the `staleWarning` the handler
+   * already computes): the answer describes an older tree, so it cannot be `high`.
+   */
+  staleness?: { commitsBehind: number | null; dirtyCount: number } | null;
 };
 
 function unresolvedTotal(gh: CoverageInput["graphHealth"]): number {
@@ -184,12 +196,30 @@ export function buildCoverageBlock(input: CoverageInput): CoverageBlock {
     );
   }
 
-  const { gaps, fallback } = gapsFor(input.kind, lowOrEmpty, input.query);
-  const knownGaps = [...gaps, ...provGaps];
+  const languageGaps = input.languageGaps ?? [];
+  if (languageGaps.length > 0) {
+    if (confidence === "high") confidence = "medium";
+    if (empty) confidence = "low";
+  }
+
+  const staleGaps: string[] = [];
+  if (input.staleness) {
+    if (confidence === "high") confidence = "medium";
+    const behind = input.staleness.commitsBehind;
+    staleGaps.push(
+      `index is ${behind === null ? "an unknown number of" : String(behind)} commit(s) behind HEAD with ` +
+        `${String(input.staleness.dirtyCount)} dirty file(s) — results describe the indexed tree, not the current one.`
+    );
+  }
+
+  const { gaps, fallback } = gapsFor(input.kind, lowOrEmpty || languageGaps.length > 0, input.query);
+  const knownGaps = [...gaps, ...languageGaps, ...provGaps, ...staleGaps];
   const provFallback =
     provGaps.length > 0
       ? "confirm the suspect hops with get_symbol_source before relying on this traversal."
-      : null;
+      : staleGaps.length > 0
+        ? "re-index (index_repository mode='incremental') before relying on this result."
+        : null;
   return {
     confidence,
     knownGaps,

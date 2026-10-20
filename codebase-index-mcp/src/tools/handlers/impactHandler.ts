@@ -199,9 +199,14 @@ export function handleFindFieldAccesses(
 
   let symbolId = args.symbolId;
   if (!symbolId && args.name) {
-    // Prefer an actual property symbol when several share the name.
-    const candidates = store.getSymbolCandidates(args.repoId, args.name, 10);
-    symbolId = (candidates.find((c) => c.kind === "property") ?? candidates[0])?.symbolId;
+    // Only a property symbol answers "who reads/writes this field"; an exact name beats a substring.
+    // A non-property match used to be taken silently (`candidates[0]`), so a field the graph has no
+    // property for — a Zod `z.object` key — was answered by whatever shared its name, as `high`.
+    const name = args.name;
+    const candidates = store.getSymbolCandidates(args.repoId, name, 25);
+    const properties = candidates.filter((c) => c.kind === "property");
+    symbolId = (properties.find((c) => c.name === name) ?? properties[0])?.symbolId;
+    if (!symbolId) return noPropertySymbolResult(args.repoId, name, candidates, store, ctx, profile);
   }
   if (!symbolId) throw new McpError(ErrorCode.InvalidParams, "find_field_accesses: provide symbolId or a resolvable name.");
 
@@ -214,8 +219,15 @@ export function handleFindFieldAccesses(
 
   const reads = result.accesses.filter((a) => a.mode === "read");
   const writes = result.accesses.filter((a) => a.mode === "write");
-  const coverage = buildCoverageBlock({ resultCount: result.accesses.length, kind: "field_accesses", query: result.property.name });
   const staleWarning = staleWarningFor(args.repoId, store);
+  const coverage = buildCoverageBlock({
+    resultCount: result.accesses.length,
+    expectedNonZero: true,
+    kind: "field_accesses",
+    query: result.property.name,
+    languageGaps: propertyEdgeGaps(result.property.filePath),
+    staleness: staleWarning
+  });
 
   // MCP-ISSUE-047: `getSymbolCandidates` matches by case-insensitive substring, so `name:"owner"`
   // resolves to `Owner`, `OwnerId` or `AssignedOwnerName` and the response reports only the winner.
@@ -240,6 +252,64 @@ export function handleFindFieldAccesses(
   }
 
   return ctx.asText({ property: result.property, mode: args.mode, readCount: reads.length, writeCount: writes.length, accesses: result.accesses, coverage, indexMeta: buildIndexMeta(store, args.repoId), ...(nameResolution && { nameResolution }), ...(staleWarning && { staleWarning }) }, profile);
+}
+
+/**
+ * Accesses the property edges cannot see for the file's language. C# has receiver-typed property
+ * edges (`csharpPropertyEdges.ts`); the TS/JS lane emits them only for `this.<member>`
+ * (`jsTypeRefs.ts`), so `obj.field`, destructuring and `z.infer` types are invisible there.
+ */
+const JS_TS_FILE = /\.(?:[cm]?[jt]sx?|vue)$/i;
+function propertyEdgeGaps(filePath: string): string[] {
+  if (!JS_TS_FILE.test(filePath)) return [];
+  return [
+    "TS/JS property edges cover only `this.<member>` accesses; reads and writes through any other receiver " +
+      "(`obj.field`, destructuring, spread, `z.infer` types) are not in the graph, so these counts are a lower bound."
+  ];
+}
+
+/**
+ * No property symbol carries this name. Answered as an honest empty result rather than an error, so
+ * the caller sees why the graph cannot count it and which same-named symbols exist to pin instead.
+ */
+function noPropertySymbolResult(
+  repoId: string,
+  name: string,
+  candidates: ReturnType<GraphStore["getSymbolCandidates"]>,
+  store: GraphStore,
+  ctx: HandlerContext,
+  profile: ReturnType<typeof resolveResponseProfile>
+): CallToolResult {
+  const staleWarning = staleWarningFor(repoId, store);
+  const coverage = buildCoverageBlock({
+    resultCount: 0,
+    expectedNonZero: true,
+    kind: "field_accesses",
+    query: name,
+    languageGaps: [
+      `no symbol of kind 'property' named '${name}' is indexed. TS/JS object-literal keys (e.g. Zod \`z.object({...})\` fields) ` +
+        "are not indexed as properties, so their reads and writes cannot be counted from the graph."
+    ],
+    staleness: staleWarning
+  });
+  const otherMatches = candidates
+    .slice(0, 5)
+    .map((c) => ({ symbolId: c.symbolId, name: c.name, kind: c.kind, filePath: c.filePath, line: c.line }));
+  return ctx.asText(
+    {
+      property: null,
+      queriedName: name,
+      readCount: 0,
+      writeCount: 0,
+      coverage: profile === "nano" ? coverage.confidence : coverage,
+      ...(otherMatches.length > 0 && {
+        otherMatches,
+        hint: "none of these is a property; pass one as symbolId only if it really is the field you mean."
+      }),
+      ...(staleWarning && { staleWarning })
+    },
+    profile
+  );
 }
 
 // ── find_impact_files ─────────────────────────────────────────────────────────
