@@ -24,6 +24,7 @@ import { tallySkip } from "./skipReport.js";
 import { loadCitationConfig } from "../docs/citationConfig.js";
 import { commentLines, extractComments, extractPropertyStrings, findCitations, markdownProseLines, scansComments } from "../docs/annotationScanner.js";
 import type { FileAnnotations } from "../../repositories/annotationsStore.js";
+import { maskVueToScripts } from "../extractors/vueSfc.js";
 
 /**
  * Bump when the comment or citation scanner's OUTPUT changes, so stored annotations are re-scanned.
@@ -102,7 +103,9 @@ export type RunIndexInput = {
 // v3: MCP-ISSUE-065 — .csproj module ids are separator/case-canonical, ProjectReference and .sln
 // DEPENDS_ON edges target them (or a `project:` token), and the .sln proxy module symbols are gone.
 // v4: markdown file-path mentions accept any repo-relative path (release C); unchanged files need a full run to pick it up.
-export const INDEX_VERSION = "v4-path-mentions";
+// v5: MCP-ISSUE-074 — `.vue` files are indexed (component symbol, USES_COMPONENT, template edges); a
+// repo whose .vue files were skipped as unknown_extension needs a full run to pick them up.
+export const INDEX_VERSION = "v5-vue-components";
 
 export async function runIndexPipeline(store: GraphStore, input: RunIndexInput): Promise<IndexRunSummary> {
   const identity: RunIdentity = {
@@ -151,6 +154,12 @@ export async function runIndexPipeline(store: GraphStore, input: RunIndexInput):
   const annotationOnly: Array<{ path: string; annotations: FileAnnotations }> = [];
   const annotate = (language: string, content: string): FileAnnotations | null => {
     const cfg = citationLoad.config;
+    if (language === "vue") {
+      // MCP-ISSUE-074: only the script blocks are C-like. Template prose (`it's`) read as source opens
+      // string literals that swallow the comments after it; the mask keeps every line number.
+      const scripts = annotate("typescript", maskVueToScripts(content));
+      return scripts ? { ...scripts, language } : null;
+    }
     if (language === "markdown") {
       return { citations: cfg?.scanMarkdown ? findCitations(markdownProseLines(content), cfg.citations) : [], comments: [], language };
     }

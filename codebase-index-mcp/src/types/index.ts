@@ -211,7 +211,14 @@ export type SymbolRecord = {
   symbolId: string;
   filePath: string;
   name: string;
-  kind: "function" | "class" | "method" | "variable" | "module" | "interface" | "property" | "constructor" | "type" | "struct" | "record" | "record struct" | "impl" | "unknown";
+  /**
+   * `component` is a Vue single-file component (MCP-ISSUE-074): one per `.vue` file, named after the
+   * file, with its `defineProps` / `defineEmits` / `defineModel` members as `property` children. A
+   * distinct kind rather than `class`, because every class-kind list in the query layer means "a type
+   * that can implement, extend and own methods" — a component does none of that, and `find_implementations`
+   * says so instead of returning an empty answer that reads like a missing edge.
+   */
+  kind: "function" | "class" | "method" | "variable" | "module" | "interface" | "property" | "constructor" | "type" | "struct" | "record" | "record struct" | "impl" | "component" | "unknown";
   line: number;
   /** Last line of the symbol's source span (1-indexed). Optional: null on indexes built before end-line tracking. */
   endLine?: number;
@@ -236,8 +243,13 @@ export type EdgeRecord = {
    * `EXTENDS` is class inheritance and is deliberately NOT folded into `IMPLEMENTS` (MCP-ISSUE-037).
    * C# allows one base class and many interfaces, and several tools read `IMPLEMENTS` as "satisfies an
    * interface contract" — merging them would make those answers wrong without changing their shape.
+   *
+   * `USES_COMPONENT` (MCP-ISSUE-074) is a Vue template rendering a component: from the using file's
+   * `component` symbol to the rendered component's. Not `IMPORTS` — an import that is never rendered is
+   * not a use, and a component rendered through `<component :is>` may be imported for several branches —
+   * and not `CALLS`, which `dead_code_scan` and the call-graph tools read as an invocation of a callable.
    */
-  type: "IMPORTS" | "CALLS" | "DEPENDS_ON" | "IMPLEMENTS" | "EXTENDS" | "TYPE_REF" | "PROPERTY_REF" | "PROPERTY_WRITE" | "PUBLISHES" | "CONSUMES";
+  type: "IMPORTS" | "CALLS" | "DEPENDS_ON" | "IMPLEMENTS" | "EXTENDS" | "TYPE_REF" | "PROPERTY_REF" | "PROPERTY_WRITE" | "PUBLISHES" | "CONSUMES" | "USES_COMPONENT";
   confidence?: number;
   reason?: string;
   /** ENH-029-B: RHS source text captured at PROPERTY_WRITE sites (assigned literal/expression). */
@@ -250,8 +262,11 @@ export type EdgeRecord = {
  * crosses the call graph references this single source so the surface stays consistent — adding
  * a future flow edge here updates trace_execution_flow, get_call_chain, and get_change_context
  * at once instead of needing the literal duplicated across queries.
+ *
+ * USES_COMPONENT (MCP-ISSUE-074) is such a flow edge: rendering a Vue component runs its setup and
+ * its template, so "who reaches this component" walks the same way as "who reaches this function".
  */
-export const CALL_TRAVERSAL_EDGE_TYPES = ["CALLS", "PUBLISHES"] as const;
+export const CALL_TRAVERSAL_EDGE_TYPES = ["CALLS", "PUBLISHES", "USES_COMPONENT"] as const;
 /** SQL `in (...)` value list form of CALL_TRAVERSAL_EDGE_TYPES (constant literals, safe to inline). */
 export const CALL_TRAVERSAL_EDGE_SQL_LIST = CALL_TRAVERSAL_EDGE_TYPES.map((t) => `'${t}'`).join(", ");
 

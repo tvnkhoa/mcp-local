@@ -10,6 +10,7 @@ import { parseMarkdownFile } from "./markdownParser.js";
 import { extractPythonSymbolsAndRoutesImpl } from "./pythonExtractor.js";
 import { extractProtoSymbolsImpl } from "./protoExtractor.js";
 import { extractJavaScriptRoutesImpl, extractJavaScriptSymbolsImpl } from "./jsExtractor.js";
+import { extractVueFileImpl } from "./vueExtractor.js";
 import {
   emitEndpointContractSymbolsFromCSharpSignaturesImpl,
   emitEndpointContractSymbolsImpl,
@@ -99,6 +100,29 @@ export function extractGraphData(input: ExtractInput): ExtractOutput {
       symbols: dedupeSymbols(symbols),
       edges: proto.edges,
       edgePolicyDrops: proto.drops
+    };
+  }
+
+  if (input.language === "vue") {
+    // MCP-ISSUE-074: a single-file component. The lane parses its own blocks with the TypeScript
+    // grammar through `parseTypeScriptGuarded`, which applies the same size/timeout guards as below.
+    if (Buffer.byteLength(input.source, "utf8") > TREE_SITTER_MAX_BUFFER) {
+      return { symbols, edges: [] };
+    }
+    const vue = extractVueFileImpl(
+      input,
+      symbols,
+      edges,
+      moduleSymbolId,
+      (source, tsx) => parseTypeScriptGuarded(source, input.filePath, tsx),
+      resolveLiteralPolicy(input.performanceProfile ?? "standard")
+    );
+    const applied = applyEdgePolicy(edges, symbols, edgePolicy);
+    return {
+      symbols: dedupeSymbols(symbols),
+      edges: applied.edges,
+      edgePolicyDrops: applied.drops,
+      literals: vue.literals
     };
   }
 
@@ -227,6 +251,31 @@ function getOrCreateParserForLanguage(language: string, filePath?: string): Pars
 
   parserCache.set(cacheKey, parser);
   return parser;
+}
+
+/**
+ * Parse TypeScript for the Vue lane (a masked script, or one template expression) with the pipeline's
+ * protections: adaptive `bufferSize`, the per-file timeout, and the null-tree check — a timeout throws
+ * `ParseTimeoutError` exactly as an ordinary `.ts` file's would, so the run counts it the same way.
+ * The caller has already applied the `TREE_SITTER_MAX_BUFFER` guard to the whole file.
+ */
+function parseTypeScriptGuarded(source: string, filePath: string, tsx: boolean): Parser.Tree {
+  const parser = getOrCreateParserForLanguage("typescript", tsx ? "component.tsx" : undefined);
+  if (!parser) {
+    throw new Error("typescript grammar unavailable");
+  }
+  parser.setTimeoutMicros(PARSE_TIMEOUT_MS * 1000);
+  let tree: Parser.Tree | null;
+  try {
+    tree = parser.parse(source, undefined, { bufferSize: getTreeSitterBufferSize(Buffer.byteLength(source, "utf8")) });
+  } finally {
+    parser.setTimeoutMicros(0);
+  }
+  if (!tree) {
+    parser.reset();
+    throw new ParseTimeoutError(filePath, PARSE_TIMEOUT_MS);
+  }
+  return tree;
 }
 
 function getTreeSitterBufferSize(sourceBytes: number): number {

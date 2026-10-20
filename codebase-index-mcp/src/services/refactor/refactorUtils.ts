@@ -110,6 +110,7 @@ export function inferLanguageFromPath(filePath: string): string {
   if (ext === ".js" || ext === ".jsx" || ext === ".mjs" || ext === ".cjs") return "javascript";
   if (ext === ".cs") return "csharp";
   if (ext === ".py") return "python";
+  if (ext === ".vue") return "vue";
   if (ext === ".java") return "java";
   return ext.replace(/^\./, "") || "unknown";
 }

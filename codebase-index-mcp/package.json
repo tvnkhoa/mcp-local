@@ -61,13 +61,15 @@
     "test:sqlite-guardrails": "node scripts/test/test-sqlite-guardrails.mjs",
     "test:approval-token": "node scripts/test/test-approval-token.mjs",
     "test:route-map-roundtrip": "node scripts/test/test-route-map-roundtrip.mjs",
-    "test:field-access-exact": "node scripts/test/test-field-access-exact.mjs"
+    "test:field-access-exact": "node scripts/test/test-field-access-exact.mjs",
+    "test:vue-components": "node scripts/test/test-vue-components.mjs"
   },
   "dependencies": {
     "@mcp/core": "file:../packages/core",
     "@mcp/sdk": "file:../packages/sdk",
     "@mcp/shared": "file:../packages/shared",
     "@modelcontextprotocol/sdk": "^1.12.0",
+    "@vue/compiler-sfc": "3.5.41",
     "better-sqlite3": "^11.8.1",
     "chokidar": "^4.0.3",
     "glob": "^11.0.1",

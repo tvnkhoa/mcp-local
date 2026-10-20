@@ -17,7 +17,7 @@
 import type { GraphStore } from "../../repositories/graphStore.js";
 
 /** Symbol kinds that own callables rather than being one. */
-const CONTAINER_KINDS = new Set(["class", "interface", "struct", "record", "record struct", "module", "impl", "type"]);
+const CONTAINER_KINDS = new Set(["class", "interface", "struct", "record", "record struct", "module", "impl", "type", "component"]);
 
 /** Symbol kinds a CALLS traversal can actually start from. */
 const CALLABLE_KINDS = new Set(["function", "method", "constructor"]);

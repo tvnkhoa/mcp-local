@@ -193,8 +193,13 @@ export function applyTypeRefEdgeCap(edges: EdgeRecord[], maxTypeRefEdgesPerFile:
  *
  * It stayed invisible because the extractor emitted ~148 TYPE_REF edges in total before MCP-ISSUE-034, so
  * losing the unresolved ones cost nothing measurable.
+ *
+ * `USES_COMPONENT` (MCP-ISSUE-074) for the same reason: a tag in a template is a certain fact, and its
+ * labelled gaps (`<component :is>` branches, un-imported tags) carry a low confidence to say "not
+ * linked", not "not there". The `large` profile's 0.4 floor deleted every one of them — the gap the
+ * index-run-bookkeeping rule says must be kept and labelled. Bounded by the template text itself.
  */
-const CONFIDENCE_FILTER_EXEMPT_TYPES = new Set(["TYPE_REF"]);
+const CONFIDENCE_FILTER_EXEMPT_TYPES = new Set(["TYPE_REF", "USES_COMPONENT"]);
 
 export function applyEdgeConfidenceFilter(
   edges: EdgeRecord[],

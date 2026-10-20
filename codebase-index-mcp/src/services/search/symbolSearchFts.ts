@@ -15,7 +15,8 @@ import { indexLog, indexWarn } from "../indexing/indexProgress.js";
 // edgeless namesakes (constructor shares the class name, module shares the file name).
 // `record` / `record struct` are class-like (CQRS commands/queries are records) — they were
 // indexed as `class` before ISSUE-015, so list them here to keep the same ranking parity.
-export const RANKED_KIND_BONUS = ["method", "function", "class", "interface", "struct", "record", "record struct"];
+// `component` is a Vue SFC (MCP-ISSUE-074) — what "AppCard" means in a Vue repo, ahead of its module.
+export const RANKED_KIND_BONUS = ["method", "function", "class", "interface", "struct", "record", "record struct", "component"];
 
 // ISSUE-024: rank penalty cho test paths khi ranked=true. Phải lớn hơn RANKED_KIND_BONUS (0.03)
 // cộng vài bậc position penalty (0.01/bậc) để production thắng stub cùng coverage, nhưng đủ nhỏ
@@ -26,7 +27,7 @@ export const TEST_PATH_PENALTY = 0.08;
 // names tie (e.g. class before its same-named constructor). `col` is the qualified column.
 export const kindPriorityOrder = (col: string): string =>
   `case ${col}
-     when 'class' then 0 when 'record' then 0 when 'interface' then 1
+     when 'class' then 0 when 'record' then 0 when 'component' then 0 when 'interface' then 1
      when 'struct' then 2 when 'record struct' then 2
      when 'method' then 3 when 'function' then 4
      when 'constructor' then 8 when 'module' then 9

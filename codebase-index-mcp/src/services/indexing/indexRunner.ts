@@ -307,6 +307,12 @@ export function createIndexRunner(options: IndexRunnerOptions): RunIndexAndResol
     (batchSize) => { try { return store.resolveImportEdges(repoId, batchSize); } catch { return 0; } },
     postPolicy.maxUnresolvedRows
   );
+  // MCP-ISSUE-074: Vue template tokens go through the same module resolver as imports. Not budgeted by
+  // maxUnresolvedRows — one row per rendered tag or bound prop, bounded by the template text itself.
+  const componentEdgesResolved = (() => { try { return store.resolveComponentEdges(repoId); } catch { return 0; } })();
+  if (componentEdgesResolved > 0) {
+    indexLog(`[index-post] repoId=${repoId} resolved ${String(componentEdgesResolved)} vue component edge(s)`);
+  }
   importResolveMs = Date.now() - importStart;
   await yieldToEventLoop();
 

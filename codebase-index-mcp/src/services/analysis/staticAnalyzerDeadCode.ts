@@ -21,7 +21,9 @@ import {
 /** A symbol declared in one of these is wired by the runtime; never a dead-code candidate. */
 const BOOTSTRAP_FILE_NAMES = [
   "Program.cs", "Startup.cs", "main.ts", "main.js", "index.ts", "index.js",
-  "App.tsx", "App.ts", "server.ts", "server.js"
+  "App.tsx", "App.ts", "server.ts", "server.js",
+  // The Vue root component is mounted by `createApp(App)` (MCP-ISSUE-074).
+  "App.vue"
 ];
 
 export function getDeadCodeCandidates(
@@ -137,6 +139,17 @@ export function getDeadCodeCandidates(
       and not exists (
         select 1 from edges e where e.repo_id = s.repo_id and e.type = 'PUBLISHES' and e.to_id = s.symbol_id
       )
+      -- MCP-ISSUE-074: a Vue component is used when a template renders it (USES_COMPONENT), and also
+      -- when its FILE is imported — a router's component: () => import("./X.vue") or createApp(App)
+      -- reaches the module symbol, never the component one.
+      and not exists (
+        select 1 from edges e where e.repo_id = s.repo_id and e.type = 'USES_COMPONENT' and e.to_id = s.symbol_id
+      )
+      and (s.kind != 'component' or not exists (
+        select 1 from symbols m
+        join edges e on e.repo_id = m.repo_id and e.type = 'IMPORTS' and e.to_id = m.symbol_id
+        where m.repo_id = s.repo_id and m.file_path = s.file_path and m.kind = 'module'
+      ))
       -- Keyset pagination, not OFFSET. With OFFSET, SQLite re-evaluates and discards the skipped rows
       -- on every page, so the NOT EXISTS predicates above were re-run for the whole prefix each time —
       -- quadratic in the number of candidates, which is what kept a 67k-symbol repo past the request
