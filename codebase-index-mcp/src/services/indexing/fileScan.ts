@@ -17,6 +17,7 @@ import path from "node:path";
 import { glob } from "glob";
 
 import { INDEX_IGNORE_GLOBS, hasExcludedPathSegment } from "./fileFilter.js";
+import { tallySkip, type SkipTally } from "./skipReport.js";
 import { indexLog } from "./indexProgress.js";
 
 export interface FileScanInput {
@@ -32,6 +33,8 @@ export interface FileScanResult {
   readonly files: string[];
   /** NuGet package ids declared by any `.csproj` in the scan. */
   readonly knownPackageNames: Set<string>;
+  /** Files the walk dropped for an excluded path segment (`assets/`, `public/`…), by extension. */
+  readonly droppedByPath: SkipTally;
 }
 
 /**
@@ -86,9 +89,14 @@ export async function scanRepoFiles(
   // exclusions (`wwwroot`, `public`, `static`, `assets`, `logs`, `.vscode`) used to survive the walk,
   // and a large one could fill the whole budget before `shouldIndexFile` discarded it. Tested on the
   // repo-relative path, so a repo that itself lives under e.g. `D:/assets/` is not emptied.
+  const droppedByPath: SkipTally = new Map();
   const files = globbed.filter((abs) => {
     const relative = path.relative(input.repoPath, abs).replace(/\\/g, "/");
-    if (hasExcludedPathSegment(relative)) return false;
+    if (hasExcludedPathSegment(relative)) {
+      // A dirty-mode run walks only its delta; counting the rest of the tree here would misreport it.
+      if (!input.onlyRelativePaths) tallySkip(droppedByPath, "excluded_path", relative);
+      return false;
+    }
     return input.onlyRelativePaths ? input.onlyRelativePaths.has(relative) : true;
   });
 
@@ -127,5 +135,5 @@ export async function scanRepoFiles(
     indexLog("[index-scan] docs lane disabled for this run (markdown/docs indexing skipped)");
   }
 
-  return { files, knownPackageNames };
+  return { files, knownPackageNames, droppedByPath };
 }

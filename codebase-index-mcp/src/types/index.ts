@@ -12,6 +12,9 @@ export type IndexMode = "full" | "incremental" | "dirty";
  */
 export type IndexRunStatus = "running" | "ok" | "degraded" | "failed" | "cancelled";
 
+/** One row of `IndexRunSummary.skippedByReason`. `extension` is the basename when there is none (`Dockerfile`). */
+export type SkipBucket = { reason: string; extension: string; count: number };
+
 export type IndexRunSummary = {
   runId: string;
   repoId: string;
@@ -48,6 +51,16 @@ export type IndexRunSummary = {
    * as the `edgesDropped*` counters above: a bound that does not name itself cannot be acted on.
    */
   healthReasons?: string[];
+  /**
+   * Files this run did not index, grouped by (reason, extension), largest first.
+   *
+   * `filesSkipped` alone said 1 554 on wec.aria and nothing about which: 187 `.vue`, 117 `.sql`, and
+   * a 1.41 MB decision log over the size cap were all inside that one number. Entries with reason
+   * `excluded_path` were dropped by the walk before `filesScanned` and are not part of
+   * `filesSkipped`; every other entry is, and those sum to it. `unchanged` means an incremental run
+   * kept the file's previous extraction. Absent on a run that skipped nothing.
+   */
+  skippedByReason?: SkipBucket[];
   elapsedMs: number;
   crossRepoAttempts?: number;
   crossRepoResolved?: number;

@@ -10,7 +10,8 @@ import {
   INDEX_IGNORE_GLOBS,
   isSecretBearingFile,
   isTestPath,
-  shouldIndexFile
+  shouldIndexFile,
+  DEFAULT_MAX_MARKDOWN_BYTES
 } from "./fileFilter.js";
 
 /**
@@ -302,4 +303,22 @@ test("every glob-ignored vendor tree is also segment-excluded, and vice versa", 
       `${glob} is glob-ignored but ${m[1]} is not a excluded path segment`
     );
   }
+});
+
+test("shouldIndexFile: markdown has its own size cap, so a large decision log is indexed", () => {
+  // wec.aria's docs/15-decision-log.md is 1.41 MB; under the shared 500 KB cap it was invisible to
+  // every docs mode while being the repo's most-linked document.
+  // Real prose has lines; one 1.4 MB line would (correctly) be judged minified instead.
+  const lines = (n: number): Uint8Array => bytes("| 737 | a decision row |\n".repeat(Math.ceil(n / 25)));
+  const big = lines(1_410_000);
+  assert.deepEqual(shouldIndexFile("docs/15-decision-log.md", big, 500_000), { include: true, reason: "extension_match", language: "markdown" });
+  assert.equal(shouldIndexFile("src/huge.ts", big, 500_000).reason, "file_too_large", "code keeps the shared cap");
+  const tooBig = lines(DEFAULT_MAX_MARKDOWN_BYTES + 100);
+  assert.equal(shouldIndexFile("docs/huge.md", tooBig, 500_000).reason, "file_too_large", "markdown still has a ceiling");
+  assert.equal(shouldIndexFile("docs/x.md", big, 500_000, 1_000_000).reason, "file_too_large", "the markdown cap is configurable");
+});
+
+test("shouldIndexFile: source maps and tsbuildinfo are named as generated, not unknown", () => {
+  assert.equal(shouldIndexFile("packages/web/app.js.map", bytes("{}")).reason, "excluded_generated");
+  assert.equal(shouldIndexFile("tsconfig.tsbuildinfo", bytes("{}")).reason, "excluded_generated");
 });

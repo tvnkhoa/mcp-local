@@ -37,6 +37,8 @@ export interface IndexRunnerLimits {
   readonly largeFileThresholdBytes: number;
   /** Hard cap on file size; larger files are skipped. */
   readonly maxFileSizeBytes: number;
+  /** Cap for markdown files; omitted means the `fileFilter` default. */
+  readonly maxMarkdownBytes?: number;
   readonly parseWorkers: number;
   readonly parseJobTimeoutMs: number;
 }
@@ -212,6 +214,7 @@ export function createIndexRunner(options: IndexRunnerOptions): RunIndexAndResol
     checkpointEveryNBatches: limits.checkpointEveryNBatches,
     largeFileThresholdBytes: limits.largeFileThresholdBytes,
     maxFileSizeBytes: limits.maxFileSizeBytes,
+    ...(limits.maxMarkdownBytes !== undefined && { maxMarkdownBytes: limits.maxMarkdownBytes }),
     parseWorkers: limits.parseWorkers,
     parseJobTimeoutMs: limits.parseJobTimeoutMs,
     onlyRelativePaths: dirtyFileSet,

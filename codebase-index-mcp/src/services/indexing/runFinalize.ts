@@ -15,6 +15,7 @@ import path from "node:path";
 import type { GraphStore } from "../../repositories/graphStore.js";
 import { indexLog, indexWarn, type IndexProgress } from "./indexProgress.js";
 import type { IndexMode, IndexRunSummary } from "../../types/index.js";
+import { toSkipBuckets, type SkipTally } from "./skipReport.js";
 
 export interface FinalizeInput {
   readonly repoId: string;
@@ -156,6 +157,8 @@ export interface RunCounters {
   edgesDroppedByConfidence: number;
   edgesDroppedByCallCap: number;
   edgesDroppedByTypeRefCap: number;
+  /** Files not indexed, by reason and extension — see `IndexRunSummary.skippedByReason`. */
+  skipped: SkipTally;
 }
 
 export interface RunIdentity {
@@ -269,6 +272,7 @@ export function buildRunSummary(
     ...(counters.edgesDroppedByCallCap > 0 ? { edgesDroppedByCallCap: counters.edgesDroppedByCallCap } : {}),
     ...(counters.edgesDroppedByTypeRefCap > 0 ? { edgesDroppedByTypeRefCap: counters.edgesDroppedByTypeRefCap } : {}),
     ...(healthReasons !== undefined && healthReasons.length > 0 ? { healthReasons } : {}),
+    ...(counters.skipped.size > 0 ? { skippedByReason: toSkipBuckets(counters.skipped) } : {}),
     elapsedMs,
     ...(vectorSymbolsIndexed === undefined ? {} : { vectorSymbolsIndexed })
   };

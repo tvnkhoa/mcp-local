@@ -11,6 +11,7 @@
  */
 
 import { clamp } from "../../middleware/indexGuardrails.js";
+import { DEFAULT_MAX_MARKDOWN_BYTES } from "./fileFilter.js";
 
 export interface IndexRunLimits {
   readonly maxFiles: number;
@@ -20,6 +21,8 @@ export interface IndexRunLimits {
   readonly checkpointEveryNBatches: number;
   readonly largeFileThresholdBytes: number;
   readonly maxFileSizeBytes: number;
+  /** Cap for markdown, which the docs lane splits by section — see `shouldIndexFile`. */
+  readonly maxMarkdownBytes: number;
   readonly parseWorkers: number;
   readonly parseJobTimeoutMs: number;
   /** Parallel file reads per chunk. Fixed, not configurable — see note below. */
@@ -34,6 +37,7 @@ export interface RunLimitsInput {
   readonly checkpointEveryNBatches?: number;
   readonly largeFileThresholdBytes?: number;
   readonly maxFileSizeBytes?: number;
+  readonly maxMarkdownBytes?: number;
   readonly parseWorkers?: number;
   readonly parseJobTimeoutMs?: number;
 }
@@ -55,6 +59,7 @@ export function resolveIndexRunLimits(input: RunLimitsInput): IndexRunLimits {
     checkpointEveryNBatches: Math.max(1, input.checkpointEveryNBatches ?? 1),
     largeFileThresholdBytes: Math.max(0, input.largeFileThresholdBytes ?? 512 * 1024),
     maxFileSizeBytes: Math.max(10_000, input.maxFileSizeBytes ?? 500_000),
+    maxMarkdownBytes: Math.max(10_000, input.maxMarkdownBytes ?? DEFAULT_MAX_MARKDOWN_BYTES),
     parseWorkers: clamp(input.parseWorkers ?? 2, 0, 32),
     parseJobTimeoutMs: clamp(input.parseJobTimeoutMs ?? 20_000, 1_000, 120_000),
     // Not env-tunable: this bounds concurrent open file handles, and the failure mode of raising

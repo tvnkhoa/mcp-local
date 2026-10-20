@@ -10,7 +10,8 @@ import {
   isLikelyMinified,
   hasExcludedPathSegment,
   isSecretBearingFile,
-  INDEX_IGNORE_GLOBS
+  INDEX_IGNORE_GLOBS,
+  DEFAULT_MAX_MARKDOWN_BYTES
 } from "../indexing/fileFilter.js";
 import { assertSafeRepoFilePath, normalizeRelativePath } from "../refactor/refactorUtils.js";
 import { numberFromEnv } from "../../config/envConfig.js";
@@ -24,6 +25,8 @@ const MAX_FILES_SCANNED = 5_000;
 // Honor the same env knob the indexer uses (index.ts) so search and index agree on which
 // files are in scope — a file the indexer kept must not be silently skipped here.
 const MAX_FILE_SIZE_BYTES = numberFromEnv("CODEBASE_INDEX_MAX_FILE_SIZE_BYTES", 500_000);
+const MAX_MARKDOWN_BYTES = numberFromEnv("CODEBASE_INDEX_MAX_MARKDOWN_BYTES", DEFAULT_MAX_MARKDOWN_BYTES);
+const MARKDOWN_FILE = /\.mdx?$/i;
 
 /**
  * The three reads this module makes against the graph (S-29).
@@ -223,7 +226,9 @@ export function searchRegexImpl(
     } catch {
       continue; // vanished between glob and read
     }
-    if (size > maxFileSize) continue;
+    // A caller-supplied cap applies to every file; otherwise markdown has its own, as in the indexer.
+    const cap = opts.maxFileSizeBytes ?? (MARKDOWN_FILE.test(file.path) ? MAX_MARKDOWN_BYTES : maxFileSize);
+    if (size > cap) continue;
 
     let buf: Buffer;
     try {

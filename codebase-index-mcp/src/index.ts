@@ -44,6 +44,7 @@ import { assertNoLlmRuntimePolicy, assertRefactorApprovalPolicy } from "./middle
 import type { HandlerContext } from "./tools/handlers/handlerContext.js";
 import { createCodebaseIndexServer } from "./server.js";
 import { buildTools } from "./tools/index.js";
+import { DEFAULT_MAX_MARKDOWN_BYTES } from "./services/indexing/fileFilter.js";
 
 const dbPath = stringFromEnv("CODEBASE_INDEX_DB_PATH", "./codebase-index.db");
 const allowedRoots = allowedRootsFromEnv();
@@ -61,6 +62,8 @@ const CHECKPOINT_EVERY_N_BATCHES = numberFromEnv("CODEBASE_INDEX_CHECKPOINT_EVER
 const LARGE_FILE_THRESHOLD_BYTES = numberFromEnv("CODEBASE_INDEX_LARGE_FILE_THRESHOLD_BYTES", 0);
 /** Hard cap on file size. Default 500KB. Raise (e.g. 2_000_000) for repos with large generated files worth indexing. */
 const MAX_FILE_SIZE_BYTES = numberFromEnv("CODEBASE_INDEX_MAX_FILE_SIZE_BYTES", 500_000);
+/** Markdown has its own cap: the docs lane splits it by section, and a repo's decision log is often its largest file. */
+const MAX_MARKDOWN_BYTES = numberFromEnv("CODEBASE_INDEX_MAX_MARKDOWN_BYTES", DEFAULT_MAX_MARKDOWN_BYTES);
 const DEFAULT_PARSE_WORKERS = Math.max(1, Math.floor(os.cpus().length / 2));
 const PARSE_WORKERS = numberFromEnv("CODEBASE_INDEX_PARSE_WORKERS", DEFAULT_PARSE_WORKERS);
 const PARSE_JOB_TIMEOUT_MS = numberFromEnv("CODEBASE_INDEX_PARSE_JOB_TIMEOUT_MS", 20_000);
@@ -103,6 +106,7 @@ const runIndexAndResolve = createIndexRunner({
     checkpointEveryNBatches: CHECKPOINT_EVERY_N_BATCHES,
     largeFileThresholdBytes: LARGE_FILE_THRESHOLD_BYTES,
     maxFileSizeBytes: MAX_FILE_SIZE_BYTES,
+    maxMarkdownBytes: MAX_MARKDOWN_BYTES,
     parseWorkers: PARSE_WORKERS,
     parseJobTimeoutMs: PARSE_JOB_TIMEOUT_MS
   },

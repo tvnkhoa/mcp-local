@@ -20,6 +20,7 @@ import path from "node:path";
 import process from "node:process";
 
 import { shouldIndexFile, type FilterDecision } from "./fileFilter.js";
+import { tallySkip } from "./skipReport.js";
 import { GraphStore } from "../../repositories/graphStore.js";
 import { resolveHeadCommitSha, resolveCurrentBranch } from "../git/gitHelpers.js";
 import { redactSensitive } from "../../middleware/indexGuardrails.js";
@@ -57,6 +58,8 @@ export type RunIndexInput = {
   largeFileThresholdBytes?: number;
   /** Hard cap on file size (bytes) — files larger than this are skipped. Default 500KB. Env: CODEBASE_INDEX_MAX_FILE_SIZE_BYTES. */
   maxFileSizeBytes?: number;
+  /** Cap for markdown files (bytes). Env: CODEBASE_INDEX_MAX_MARKDOWN_BYTES. */
+  maxMarkdownBytes?: number;
   /** Number of extraction workers for large-file lane. Default 2. */
   parseWorkers?: number;
   /** Per-job timeout for worker-lane extraction in milliseconds. Default 20s. */
@@ -101,7 +104,7 @@ export async function runIndexPipeline(store: GraphStore, input: RunIndexInput):
 
   const {
     maxFiles, includeDocs, batchSize, subtxSize, checkpointEveryNBatches,
-    largeFileThresholdBytes, maxFileSizeBytes, parseWorkers, parseJobTimeoutMs, concurrencyLimit
+    largeFileThresholdBytes, maxFileSizeBytes, maxMarkdownBytes, parseWorkers, parseJobTimeoutMs, concurrencyLimit
   } = resolveIndexRunLimits(input);
   const workerPool = parseWorkers > 0 ? new ExtractionWorkerPool(parseWorkers, parseJobTimeoutMs) : null;
 
@@ -111,12 +114,13 @@ export async function runIndexPipeline(store: GraphStore, input: RunIndexInput):
   const progress = input.progress ?? createIndexProgress(input.repoId);
   progress.phase("scanning");
 
-  const { files, knownPackageNames } = await scanRepoFiles(input, maxFiles, includeDocs);
+  const { files, knownPackageNames, droppedByPath } = await scanRepoFiles(input, maxFiles, includeDocs);
 
   const c: RunCounters = {
     filesScanned: 0, filesIndexed: 0, filesSkipped: 0, symbolsUpserted: 0, edgesUpserted: 0,
     docsUpserted: 0, mentionsUpserted: 0, parseFailures: 0, parseTimeouts: 0,
-    edgesDroppedByConfidence: 0, edgesDroppedByCallCap: 0, edgesDroppedByTypeRefCap: 0
+    edgesDroppedByConfidence: 0, edgesDroppedByCallCap: 0, edgesDroppedByTypeRefCap: 0,
+    skipped: new Map(droppedByPath)
   };
   const languageStats = new Map<string, { scanned: number; indexed: number }>();
 
@@ -273,7 +277,7 @@ export async function runIndexPipeline(store: GraphStore, input: RunIndexInput):
             // Repo-relative, rooted with "/" so `/migrations/` still matches at the top level: the
             // absolute path would make a repo living under an excluded name (`D:/assets/repo`) drop
             // every file as `excluded_path` (MCP-ISSUE-066).
-            const decision = shouldIndexFile(`/${relativePath.replace(/\\/g, "/")}`, bytes, maxFileSizeBytes);
+            const decision = shouldIndexFile(`/${relativePath.replace(/\\/g, "/")}`, bytes, maxFileSizeBytes, maxMarkdownBytes);
             
             return { filePath, relativePath, bytes, decision };
           })
@@ -301,11 +305,13 @@ export async function runIndexPipeline(store: GraphStore, input: RunIndexInput):
           const language = decision.language;
           if (!decision.include || !language) {
             c.filesSkipped += 1;
+            tallySkip(c.skipped, decision.reason, relativePath);
             continue;
           }
 
           if (!includeDocs && language === "markdown") {
             c.filesSkipped += 1;
+            tallySkip(c.skipped, "docs_disabled", relativePath);
             continue;
           }
 
@@ -325,6 +331,7 @@ export async function runIndexPipeline(store: GraphStore, input: RunIndexInput):
             const previousHash = store.getFileHash(input.repoId, relativePath);
             if (previousHash === contentHash) {
               c.filesSkipped += 1;
+              tallySkip(c.skipped, "unchanged", relativePath);
               continue;
             }
           }

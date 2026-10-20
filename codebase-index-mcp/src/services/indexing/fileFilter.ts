@@ -262,7 +262,26 @@ export function isLikelyMinified(bytes: Uint8Array): boolean {
   return text.length / lines.length > 500;
 }
 
-export function shouldIndexFile(filePath: string, bytes: Uint8Array, maxFileSizeBytes = 500_000): FilterDecision {
+/**
+ * Markdown gets its own size cap. The docs lane splits a document by section, so a large one costs
+ * nothing per query; rejecting it whole is what hurt. On wec.aria, `docs/15-decision-log.md` (1.41 MB,
+ * the most-linked document in the repo and the target of ~380 greps) was over the shared 500 KB cap
+ * and absent from every docs mode. Env: `CODEBASE_INDEX_MAX_MARKDOWN_BYTES`.
+ */
+export const DEFAULT_MAX_MARKDOWN_BYTES = 4_000_000;
+
+/**
+ * Build output that is text but never source: source maps and TypeScript's incremental build info.
+ * Reported as `excluded_generated` rather than `unknown_extension`, so the skip report names them.
+ */
+const GENERATED_EXTENSIONS = new Set([".map", ".tsbuildinfo"]);
+
+export function shouldIndexFile(
+  filePath: string,
+  bytes: Uint8Array,
+  maxFileSizeBytes = 500_000,
+  maxMarkdownBytes = DEFAULT_MAX_MARKDOWN_BYTES
+): FilterDecision {
   const normalized = filePath.replace(/\\/g, "/");
   const normalizedLower = normalized.toLowerCase();
   const segments = normalized.split("/");
@@ -293,6 +312,10 @@ export function shouldIndexFile(filePath: string, bytes: Uint8Array, maxFileSize
     return { include: false, reason: "excluded_extension", language: null };
   }
 
+  if (GENERATED_EXTENSIONS.has(extension)) {
+    return { include: false, reason: "excluded_generated", language: null };
+  }
+
   // Detect language early to make filename exclusion language-aware
   const knownLanguage = LANGUAGE_BY_EXTENSION[extension];
 
@@ -308,7 +331,7 @@ export function shouldIndexFile(filePath: string, bytes: Uint8Array, maxFileSize
     return { include: false, reason: "excluded_filename", language: null };
   }
 
-  const MAX_FILE_SIZE = maxFileSizeBytes;
+  const MAX_FILE_SIZE = knownLanguage === "markdown" ? maxMarkdownBytes : maxFileSizeBytes;
   if (bytes.length > MAX_FILE_SIZE) {
     return { include: false, reason: "file_too_large", language: null };
   }

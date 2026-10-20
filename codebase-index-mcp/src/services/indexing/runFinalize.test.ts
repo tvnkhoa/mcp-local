@@ -31,6 +31,7 @@ function counters(parts: Partial<RunCounters> = {}): RunCounters {
     edgesDroppedByConfidence: 0,
     edgesDroppedByCallCap: 0,
     edgesDroppedByTypeRefCap: 0,
+    skipped: new Map(),
     ...parts
   };
 }

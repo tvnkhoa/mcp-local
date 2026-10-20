@@ -4,7 +4,7 @@ import Database from "better-sqlite3";
 
 import { initGraphSchema, runGraphMigrations } from "./schema.js";
 import { recordRun, getLatestRun } from "./runStore.js";
-import type { IndexRunSummary } from "../types/index.js";
+import type { IndexRunSummary, SkipBucket } from "../types/index.js";
 
 /**
  * What `index_runs` actually stores (MCP-ISSUE-048).
@@ -116,4 +116,21 @@ test("a legacy row with no callEdgesAttempted falls back to the old alias column
 
   const latest = getLatestRun(conn, "r");
   assert.equal(latest?.callEdgesAttempted, 4_242);
+});
+
+test("skippedByReason round-trips, and its absence reads as absent rather than empty", () => {
+  const conn = db();
+  const skipped: SkipBucket[] = [
+    { reason: "unknown_extension", extension: ".vue", count: 187 },
+    { reason: "file_too_large", extension: ".md", count: 1 },
+    { reason: "unknown_extension", extension: "Dockerfile", count: 5 }
+  ];
+  recordRun(conn, summary({ runId: "run-skips", skippedByReason: skipped }));
+  assert.deepEqual(getLatestRun(conn, "r")?.skippedByReason, skipped);
+
+  recordRun(conn, summary({ runId: "run-none", finishedAt: "2026-08-04T00:00:20.000Z" }));
+  const latest = getLatestRun(conn, "r");
+  assert.equal(latest?.runId, "run-none");
+  assert.equal(latest?.skippedByReason, undefined);
+  assert.equal("skippedByReasonJson" in (latest ?? {}), false, "the raw JSON column alias must not leak");
 });
