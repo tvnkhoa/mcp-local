@@ -191,6 +191,7 @@ export function handleSearchRegex(
     scanAll: boolean;
     contextLines: number;
     limit: number;
+    outputMode?: "matches" | "files";
     profile: string;
   },
   ctx: HandlerContext
@@ -209,7 +210,8 @@ export function handleSearchRegex(
       excludeTests: args.excludeTests,
       scanAll: args.scanAll,
       contextLines: args.contextLines,
-      limit: args.limit
+      limit: args.limit,
+      outputMode: args.outputMode
     });
   } catch (err) {
     const e = err as RegexSearchError;
@@ -221,7 +223,7 @@ export function handleSearchRegex(
 
   const { matches, filesScanned, filesEligible, truncated, truncationReason } = result;
   const staleWarning = buildStaleWarning(args.repoId, store, "match lines/text are read live from disk and are current; only enclosingSymbol is resolved from the index and may be off — re-index for accurate enclosing symbols.");
-  const coverage = buildCoverageBlock({ resultCount: matches.length, kind: "search", query: args.pattern });
+  const coverage = buildCoverageBlock({ resultCount: result.files ? result.files.length : matches.length, kind: "search", query: args.pattern });
   // MCP-ISSUE-058(a): a capped scan that found nothing is NOT "absent" — say so, in words, naming the
   // number of files never opened. The generic 0-results gap ("wrong strategy, too-narrow filter, or a
   // stale index") actively misled here, because none of those was the cause.
@@ -238,6 +240,18 @@ export function handleSearchRegex(
     coverage.suggestFallback ??= "narrow the scope with filePathPrefix / language / pathExclude so the whole candidate set fits under the cap.";
   }
   const truncation = truncated ? { truncated, truncationReason, filesEligible, filesUnscanned: unscanned } : {};
+
+  if (result.files) {
+    const files = profile === "nano" ? result.files.map((f) => ({ filePath: f.filePath, matchCount: f.matchCount })) : result.files;
+    return ctx.asText(
+      {
+        pattern: args.pattern, outputMode: "files", fileCount: files.length, filesScanned, files, ...truncation,
+        coverage: profile === "nano" && coverage.knownGaps.length === 0 ? coverage.confidence : coverage,
+        ...(staleWarning && { staleWarning })
+      },
+      profile
+    );
+  }
 
   if (profile === "nano") {
     const top = matches.slice(0, 10).map((m) => ({ filePath: m.filePath, line: m.line, matchText: m.matchText }));

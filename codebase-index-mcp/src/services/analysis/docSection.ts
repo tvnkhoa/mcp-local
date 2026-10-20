@@ -75,18 +75,47 @@ export function matchHeadings(headings: readonly DocHeading[], prefix: string): 
   return exact.length > 0 ? [...exact, ...matches.filter((h) => !exact.includes(h))] : matches;
 }
 
-/** Headings that contain the prefix anywhere, then the top-level outline — what to say on a miss. */
+function bigrams(s: string): Map<string, number> {
+  const out = new Map<string, number>();
+  for (let i = 0; i < s.length - 1; i++) {
+    const g = s.slice(i, i + 2);
+    out.set(g, (out.get(g) ?? 0) + 1);
+  }
+  return out;
+}
+
+/** Sørensen–Dice over character bigrams: robust to typos and word order, cheap at document size. */
+function dice(a: string, b: string): number {
+  if (a.length < 2 || b.length < 2) return a === b ? 1 : 0;
+  const ga = bigrams(a);
+  let overlap = 0;
+  for (const [g, n] of bigrams(b)) overlap += Math.min(n, ga.get(g) ?? 0);
+  return (2 * overlap) / (a.length - 1 + (b.length - 1));
+}
+
+/**
+ * The headings most like the prefix, best first — what to say on a miss.
+ *
+ * The first cut returned headings *containing* the prefix, else the document's opening outline; on
+ * a real miss that was just the first ten headings whatever was asked (wec.aria acceptance, release
+ * A). Each heading is scored against the prefix and against the heading's own leading span of the
+ * same length, so "retreival" still finds "3.7 Retrieval" and "3.7" ranks "3.7 …" over "13.7 …".
+ */
 export function nearestHeadings(headings: readonly DocHeading[], prefix: string, max = 10): DocHeading[] {
   const p = normalizeHeading(prefix);
-  const words = p.split(" ").filter((w) => w.length > 2);
-  const containing = headings.filter((h) => {
-    const t = normalizeHeading(h.text);
-    return t.includes(p) || (words.length > 0 && words.every((w) => t.includes(w)));
-  });
-  if (containing.length > 0) return containing.slice(0, max);
-  const top = Math.min(...headings.map((h) => h.level));
-  return headings.filter((h) => h.level <= top + 1).slice(0, max);
+  return headings
+    .map((h, order) => {
+      const t = normalizeHeading(h.text);
+      const score = Math.max(dice(p, t), dice(p, t.slice(0, p.length + 2)), t.includes(p) ? 0.9 : 0);
+      return { h, order, score };
+    })
+    .sort((a, b) => b.score - a.score || a.order - b.order)
+    .slice(0, max)
+    .map((x) => x.h);
 }
+
+/** A line that ends a markdown block when followed by more text: blank, outside a fence. */
+const BLANK = /^\s*$/;
 
 export function extractSection(lines: readonly string[], headings: readonly DocHeading[], target: DocHeading, maxTokens: number, otherMatches: DocHeading[]): DocSectionResult {
   const after = headings.filter((h) => h.line > target.line);
@@ -98,15 +127,24 @@ export function extractSection(lines: readonly string[], headings: readonly DocH
   const kept: string[] = [];
   let used = 0;
   let truncatedAtLine: number | undefined;
+  // Cut at the last block boundary (a blank line outside a fence) that fits, so a table or a code
+  // sample is returned whole or not at all. Cutting at the overflowing line returned a table header
+  // with no rows (wec.aria acceptance, release A). Only a single block larger than the whole budget
+  // falls back to a line cut.
+  let lastBoundary = 0; // kept.length at the last block boundary past the heading
+  let fence: string | null = null;
   for (let n = target.line; n <= endLine; n++) {
     const line = lines[n - 1] ?? "";
-    // Always keep the heading line itself; past it, stop at the first line that would overflow.
     if (kept.length > 0 && used + line.length + 1 > budgetChars) {
-      truncatedAtLine = n;
+      if (lastBoundary > 1) kept.length = lastBoundary;
+      truncatedAtLine = target.line + kept.length;
       break;
     }
     kept.push(line);
     used += line.length + 1;
+    const f = FENCE.exec(line);
+    if (f) fence = fence === null ? f[1]![0]! : f[1]![0] === fence ? null : fence;
+    else if (fence === null && BLANK.test(line) && kept.length > 1) lastBoundary = kept.length;
   }
   const text = kept.join("\n").replace(/\s+$/, "");
   return {

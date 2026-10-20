@@ -81,8 +81,40 @@ test("the budget cuts at a line boundary and says where", () => {
   assert.ok(s.text.length <= 200 * 4);
 });
 
-test("on a miss, the nearest headings are those containing the words, else the outline", () => {
+test("on a miss, headings are ranked by likeness to what was asked, not listed in document order", () => {
+  // Release A listed the first ten headings whatever the prefix was (wec.aria acceptance nit a).
   const headings = listHeadings(DOC);
-  assert.deepEqual(nearestHeadings(headings, "retrieval").map((h) => h.line), [17]);
+  assert.equal(nearestHeadings(headings, "retrieval")[0]?.line, 17);
+  assert.equal(nearestHeadings(headings, "retreival")[0]?.line, 17, "a typo still finds it");
+  assert.equal(nearestHeadings(headings, "setext head")[0]?.line, 23);
   assert.ok(nearestHeadings(headings, "zzz").length > 0, "never an empty hint when the file has headings");
+});
+
+test("the budget never cuts inside a table: it stops at the last block boundary", () => {
+  // Release A cut docs/10 at a line inside a table and returned a header with no rows (nit b).
+  const doc = [
+    "## Rules",
+    "",
+    "Intro paragraph.",
+    "",
+    "| # | Rule |",
+    "|---|---|",
+    ...Array.from({ length: 40 }, (_, i) => `| ${String(i)} | rule text ${"y".repeat(30)} |`),
+    "",
+    "After the table."
+  ];
+  const headings = listHeadings(doc);
+  const s = extractSection(doc, headings, headings[0]!, 200, []);
+  assert.equal(s.truncated, true);
+  assert.ok(!s.text.includes("| # | Rule |"), "the table is left out whole, not started");
+  assert.ok(s.text.includes("Intro paragraph."));
+  assert.equal(s.truncatedAtLine, 5, "reading on starts at the table header");
+});
+
+test("a single block larger than the whole budget still falls back to a line cut", () => {
+  const doc = ["## Big", ...Array.from({ length: 100 }, (_, i) => `line ${String(i)} ${"z".repeat(40)}`)];
+  const headings = listHeadings(doc);
+  const s = extractSection(doc, headings, headings[0]!, 200, []);
+  assert.equal(s.truncated, true);
+  assert.ok(s.text.split("\n").length > 1, "more than the heading is returned");
 });

@@ -63,7 +63,7 @@ export function buildSearchTools(deps: CodebaseIndexDeps): AnyToolDefinition[] {
 
   const searchRegex = defineTool({
     name: "search_regex",
-    description: "Search repo source by REGEX and get matches with context lines + the enclosing symbol. Use this instead of baseline grep for arbitrary pattern searches (TODO/FIXME sweeps, API-usage hunts, call-site patterns, config keys). Scans indexed files by default; set scanAll=true to also walk non-code text files (json/yaml/etc). Flags limited to [ims] (g is implicit). filePathPrefix (string OR array of prefixes, OR-semantics) / language / excludeTests narrow scope; pathExclude (minimatch glob or array, e.g. \"**/Tests/**\") subtracts subtrees; contextLines controls surrounding lines (returned in every profile except nano). Results cap at `limit` and a per-file cap — `truncated`/`truncationReason` flag when capped.",
+    description: "Search repo source by REGEX and get matches with context lines + the enclosing symbol. Use this instead of baseline grep for arbitrary pattern searches (TODO/FIXME sweeps, API-usage hunts, call-site patterns, config keys). Scans indexed files by default; set scanAll=true to also walk non-code text files (json/yaml/etc). Flags limited to [ims] (g is implicit). filePathPrefix (string OR array of prefixes, OR-semantics) / language / excludeTests narrow scope; pathExclude (minimatch glob or array, e.g. \"**/Tests/**\") subtracts subtrees; contextLines controls surrounding lines (returned in every profile except nano). Results cap at `limit` and a per-file cap — `truncated`/`truncationReason` flag when capped. outputMode=\"files\" is the `grep -l` answer: one row per matching file ({filePath, matchCount, firstLine}) with `limit` counting FILES — use it for \"which files mention X\" on a broad pattern, where match rows would spend the whole limit on the first few files.",
     input: schemas.searchRegexSchema(limits.maxResultLimit),
     inputSchema: {
       type: "object",
@@ -84,6 +84,7 @@ export function buildSearchTools(deps: CodebaseIndexDeps): AnyToolDefinition[] {
         language: { type: "string" },
         excludeTests: { type: "boolean" },
         scanAll: { type: "boolean" },
+        outputMode: { type: "string", enum: ["matches", "files"], description: "matches (default): one row per match with context and enclosing symbol. files: one row per matching file, limit counts files — the grep -l answer." },
         contextLines: { type: "integer", minimum: 0, maximum: 10 },
         limit: { type: "integer", minimum: 1, maximum: limits.maxResultLimit },
         profile: PROFILE_PROP

@@ -134,8 +134,10 @@ async function run(repoId, dbPath) {
     let regexError = null;
     let truncated = false;
     try {
-      const res = store.searchRegex(repoId, { pattern: re.source, limit: 500, contextLines: 0 });
-      regexFiles = new Set(res.matches.map((m) => m.filePath.replace(/\\/g, '/')));
+      // The one call an agent asking "which files" should make: outputMode "files" (release B). A
+      // build without it (release A) ignores the option and answers with match rows, capped at 500.
+      const res = store.searchRegex(repoId, { pattern: re.source, limit: 500, contextLines: 0, outputMode: 'files' });
+      regexFiles = new Set((res.files ?? res.matches).map((m) => m.filePath.replace(/\\/g, '/')));
       truncated = Boolean(res.truncated);
     } catch (e) { regexError = String(e.message ?? e).slice(0, 120); }
     const covered = [...base].filter((f) => regexFiles.has(f)).length;

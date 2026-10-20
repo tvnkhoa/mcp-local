@@ -61,6 +61,12 @@ export type RegexSearchOptions = {
   contextLines?: number;
   limit: number;
   maxFileSizeBytes?: number;
+  /**
+   * "files": one row per matching file (the `grep -l` answer), `limit` counting FILES. A broad
+   * pattern used to spend its 500-match budget on the first few files: 9 of 51 replayed wec.aria
+   * greps missed for that reason alone.
+   */
+  outputMode?: "matches" | "files";
 };
 
 export type RegexSearchMatch = {
@@ -74,8 +80,13 @@ export type RegexSearchMatch = {
   language: string | null;
 };
 
+/** One matching file, `outputMode: "files"`. `matchCount` stops counting at the per-file cap. */
+export type RegexSearchFile = { filePath: string; matchCount: number; firstLine: number; language: string | null };
+
 export type RegexSearchResult = {
   matches: RegexSearchMatch[];
+  /** Present only for `outputMode: "files"`, where `matches` is empty. */
+  files?: RegexSearchFile[];
   filesScanned: number;
   /** Files matching the scope filters, before the scan cap — see MCP-ISSUE-058(a). */
   filesEligible: number;
@@ -199,6 +210,8 @@ export function searchRegexImpl(
     .sort((a, b) => a.path.localeCompare(b.path));
 
   const matches: RegexSearchMatch[] = [];
+  const filesMode = opts.outputMode === "files";
+  const files: RegexSearchFile[] = [];
   let filesScanned = 0;
   let truncationReason: RegexSearchResult["truncationReason"] = null;
 
@@ -241,6 +254,25 @@ export function searchRegexImpl(
     filesScanned++;
 
     const content = buf.toString("utf8");
+    if (filesMode) {
+      if (files.length >= opts.limit) {
+        truncationReason = "limit_reached";
+        break;
+      }
+      regex.lastIndex = 0;
+      let count = 0;
+      let firstIdx = -1;
+      let fm: RegExpExecArray | null;
+      while (count < PER_FILE_MATCH_CAP && (fm = regex.exec(content)) !== null) {
+        if (firstIdx < 0) firstIdx = fm.index;
+        count++;
+        if (fm.index === regex.lastIndex) regex.lastIndex++;
+      }
+      if (count > 0) {
+        files.push({ filePath: file.path, matchCount: count, firstLine: lineIndexForOffset(buildLineStarts(content), firstIdx) + 1, language: file.language });
+      }
+      continue;
+    }
     const lines = content.split(/\r?\n/);
     const lineStarts = buildLineStarts(content);
     // One findSymbolAtLine query per distinct line, not per match (multiple matches share a line).
@@ -288,6 +320,7 @@ export function searchRegexImpl(
 
   return {
     matches,
+    ...(filesMode && { files }),
     filesScanned,
     // MCP-ISSUE-058(a): how many files were IN SCOPE, so a caller can tell "absent" from "not looked
     // at". `count: 0, filesScanned: 5000` on a 7528-file repo was read as "the symbol does not exist

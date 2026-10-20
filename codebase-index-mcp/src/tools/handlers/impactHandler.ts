@@ -339,7 +339,7 @@ function readDocSection(store: GraphStore, repoId: string, filePath: string, hea
     const nearest = nearestHeadings(headings, headingPrefix).map((h) => `${"#".repeat(h.level)} ${h.text} (line ${String(h.line)})`);
     throw notFound(
       `no heading in '${relative}' starts with '${headingPrefix}'. ` +
-        (nearest.length > 0 ? `Nearest headings: ${nearest.join("; ")}` : "The file has no headings."),
+        (nearest.length > 0 ? `Closest headings: ${nearest.join("; ")}` : "The file has no headings."),
       { repoId, filePath: relative, headingPrefix }
     );
   }
