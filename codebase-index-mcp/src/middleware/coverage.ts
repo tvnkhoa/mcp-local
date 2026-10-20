@@ -165,11 +165,14 @@ function gapsFor(kind: CoverageKind, lowOrEmpty: boolean, query: string | undefi
  * R3 exact: coverage for an answer from the TypeScript LanguageService rather than the graph.
  *
  * Two words the graph tools never use. `exact` — the type checker resolved every reference in the
- * program within the caps; what it could NOT see is listed file by file in `gaps` (`.vue` files,
- * parse arguments it cannot follow, dynamic `obj[key]` sites), so the caller knows precisely where
+ * program within the caps; what it could NOT see is listed file by file in `gaps` (parse arguments
+ * it cannot follow, dynamic `obj[key]` sites, `.vue` files when the Vue lane cannot run), so the
+ * caller knows precisely where
  * to look by hand. `gap` — a cap was breached and the answer is withheld entirely: a partial list
  * labelled exact is the one failure this lane must never produce. A stale index lowers `exact` to
- * `high`, because files added since the last index run are not in the program.
+ * `high`, because files added since the last index run are not in the program. The freshness gate's
+ * note never lands in this block (`applyFreshness` scopes it to the index-derived part), where
+ * "this answer comes from the previous index" would contradict `exact`.
  */
 export type TypedCoverageBlock = {
   confidence: "exact" | "high" | "gap";

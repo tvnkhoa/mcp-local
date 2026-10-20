@@ -7,7 +7,8 @@
  *   core       — a writer via `audit_event_schema.parse({...literal})` and one via a variable initializer;
  *   api        — a reader by property access, a destructuring read, a same-named FUNCTION (homonym),
  *                and an `obj[key]` dynamic access (a named gap);
- *   portal     — a .vue file mentioning the field (a named gap: Vue is not in the program yet).
+ *   portal     — a .vue file mentioning the field: a named gap, because this fixture has no `vue` package
+ *                and the Vue lane refuses to type templates without it (test-field-access-vue covers the lane).
  * Then a second server with CODEBASE_INDEX_TS_LS_COLD_START_MS=1: coverage "gap" and NO list.
  */
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -140,6 +141,7 @@ await withServer({}, "exact", async (client) => {
   const gaps = at(res?.coverage?.gaps);
   assert(gaps.includes("packages/api/src/dynamic.ts:4"), "obj[key] is a named gap", gaps.join(", "));
   assert(gaps.includes("packages/portal/src/View.vue:2"), ".vue file is a named gap", gaps.join(", "));
+  assert((res?.coverage?.gaps ?? []).find((g) => g.file === "packages/portal/src/View.vue")?.reason.includes("does not resolve"), "and the gap says why the Vue lane did not run", JSON.stringify(res?.coverage?.gaps));
   assert(res?.typeResolution?.cold === true && res.typeResolution.coldMs > 0 && res.typeResolution.programFiles > 0, "timings and program size are reported", JSON.stringify(res?.typeResolution));
 
   const warm = js(await client.callTool({ name: "find_field_accesses", arguments: { repoId, name: "kb_version_ids", ownerName: "audit_event_schema", mode: "write", profile: "compact" } }));
