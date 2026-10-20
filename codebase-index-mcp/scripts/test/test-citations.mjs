@@ -32,8 +32,10 @@ mkdirSync(join(repo, ".codebase-index"), { recursive: true });
 mkdirSync(join(repo, "docs", "adr"), { recursive: true });
 mkdirSync(join(repo, "src"), { recursive: true });
 mkdirSync(join(repo, "test"), { recursive: true });
-const config = (extra = []) => JSON.stringify({
+// Format v1.1: `scan.codeStrings` opts the `owner: '…'` literal in checks/steps.mjs into the scan.
+const config = (extra = [], scan = { codeStrings: ["owner"] }) => JSON.stringify({
   version: 1,
+  scan,
   citations: [
     { id: "decision-row", pattern: "(?<![\\w/-])`?(?:docs/)?15`? #(\\d{1,4}[a-z]?)(?!\\w)", target: "docs/15-decision-log.md", anchor: { kind: "tableRow", column: 1, value: "{1}" } },
     { id: "adr", pattern: "\\badr/(\\d{4})\\b", target: "docs/adr/{1}-*.md", anchor: { kind: "file" } },
@@ -46,6 +48,10 @@ writeFileSync(join(repo, ".codebase-index", "citations.json"), config());
 writeFileSync(join(repo, "docs", "15-decision-log.md"), "# 15 — Decision log\n\n| # | Date | Decision |\n|---|---|---|\n| 1 | 2026-10-01 | First |\n| 2 | 2026-10-02 | **Retry once, then escalate** (src/turn.ts) |\n");
 writeFileSync(join(repo, "docs", "adr", "0021-boundaries.md"), "# ADR-0021 — Package boundaries\n\nKnowledge imports contracts only (`15` #2).\n");
 writeFileSync(join(repo, "src", "turn.ts"), "export function runTurn(): number {\n  // A stage threw before the reply, so retry once (docs/15 #2).\n  return 1;\n}\n");
+mkdirSync(join(repo, "checks"), { recursive: true });
+// The `owner:` literal on line 3 cites row 2 (codeStrings). `note:` is another property, and the
+// comment cites a different row, so neither one adds to the '15 #2' list.
+writeFileSync(join(repo, "checks", "steps.mjs"), "// Gate steps (see docs/15 #1).\nexport const STEPS = [\n  { id: 'retry', owner: 'docs/15 #2 (retry rule)', note: 'docs/15 #2 is not an owner' },\n];\n");
 writeFileSync(join(repo, "test", "tools.test.ts"), "import { it } from 'node:test';\nit('has no identity key', () => {});\n");
 writeFileSync(join(repo, "CLAUDE.md"), "# Rules\n\nNo identity key in tools. <!--inv:by=test:test/tools.test.ts#has no identity key-->\nSee adr/0021.\n");
 writeFileSync(join(repo, "NOTES.md"), "# Notes\n\nNothing cites anything here.\n");
@@ -71,7 +77,9 @@ try {
   const r0 = row?.resolved?.[0];
   assert(r0?.status === "resolved" && posix(r0.file) === "docs/15-decision-log.md" && r0.line === 6 && /Retry once/.test(r0.text ?? ""), "shorthand '15 #2' resolves to its table row, with the row text", JSON.stringify(r0));
   const citers = (row?.citedBy ?? []).map((c) => posix(c.filePath)).sort();
-  assert(JSON.stringify(citers) === JSON.stringify(["docs/adr/0021-boundaries.md", "src/turn.ts"]), "every citer is listed: a doc (backticked form) and a code comment", JSON.stringify(row?.citedBy));
+  assert(JSON.stringify(citers) === JSON.stringify(["checks/steps.mjs", "docs/adr/0021-boundaries.md", "src/turn.ts"]), "every citer is listed: a doc (backticked form), a code comment and an owner string", JSON.stringify(row?.citedBy));
+  const fromOwner = (row?.citedBy ?? []).filter((c) => posix(c.filePath) === "checks/steps.mjs");
+  assert(fromOwner.length === 1 && fromOwner[0].line === 3, "codeStrings: the `owner:` literal is a citer at its own line (3); the `note:` literal is not", JSON.stringify(fromOwner));
   const fromCode = (row?.citedBy ?? []).find((c) => posix(c.filePath) === "src/turn.ts");
   assert(fromCode?.enclosingSymbol?.name === "runTurn" && fromCode?.line === 2, "a code-comment citation carries its line and enclosing symbol", JSON.stringify(fromCode));
 
@@ -100,7 +108,7 @@ try {
   assert(cc && posix(cc.filePath) === "src/turn.ts" && cc.enclosingSymbol?.name === "runTurn", "comment prose is searchable, with its enclosing symbol", JSON.stringify(prose?.codeComments));
 
   const health = js(await client.callTool({ name: "health_check", arguments: { repoId } }));
-  assert(health?.citations?.configPresent === true && health?.citations?.stored?.["decision-row"] === 2 && health?.citations?.stored?.inv === 1, "health_check reports the config and the stored citations", JSON.stringify(health?.citations));
+  assert(health?.citations?.configPresent === true && health?.citations?.stored?.["decision-row"] === 4 && health?.citations?.stored?.inv === 1, "health_check reports the config and the stored citations", JSON.stringify(health?.citations));
 
   // change_impact: editing the invariant's test file names the invariant.
   writeFileSync(join(repo, "test", "tools.test.ts"), "import { it } from 'node:test';\nit('has no identity key', () => { /* changed */ });\n");
@@ -120,6 +128,15 @@ try {
   await client.callTool({ name: "index_repository", arguments: { repoId, repoPath: repo, mode: "incremental" } });
   const todo = await docs({ mode: "cites", target: "TODO-42" });
   assert((todo?.citedBy ?? []).some((c) => posix(c.filePath) === "NOTES.md"), "an edited citations.json re-scans unchanged files", JSON.stringify(todo)?.slice(0, 300));
+
+  // Without scan.codeStrings the same, unchanged steps.mjs cites nothing from its strings.
+  writeFileSync(join(repo, ".codebase-index", "citations.json"), config([], {}));
+  git(repo, "add", ".");
+  git(repo, "commit", "-q", "-m", "no codeStrings");
+  await client.callTool({ name: "index_repository", arguments: { repoId, repoPath: repo, mode: "incremental" } });
+  const off = await docs({ mode: "cites", target: "15 #2" });
+  const offCiters = (off?.citedBy ?? []).map((c) => posix(c.filePath)).sort();
+  assert(JSON.stringify(offCiters) === JSON.stringify(["docs/adr/0021-boundaries.md", "src/turn.ts"]), "without codeStrings, string literals are not scanned (steps.mjs is no citer)", JSON.stringify(off?.citedBy));
 } finally {
   await Promise.race([client.close().catch(() => {}), new Promise((r) => setTimeout(r, 3000))]);
 }
