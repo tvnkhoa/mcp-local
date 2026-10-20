@@ -1,0 +1,306 @@
+{
+ "frozenAt": "2026-10-20",
+ "repoPath": "D:/1.SourceCode/crm/wec.aria",
+ "repoHead": "fd7b01a67820",
+ "ranks": [
+  {
+   "rank": 1,
+   "name": "snake_case names",
+   "take": 13,
+   "docs": false
+  },
+  {
+   "rank": 2,
+   "name": "markdown structure + citations",
+   "take": 9,
+   "docs": true
+  },
+  {
+   "rank": 3,
+   "name": "code identifiers",
+   "take": 16,
+   "docs": false
+  },
+  {
+   "rank": 4,
+   "name": "English prose",
+   "take": 4,
+   "docs": true
+  },
+  {
+   "rank": 5,
+   "name": "CSS + Vue",
+   "take": 5,
+   "docs": false
+  },
+  {
+   "rank": 6,
+   "name": "routes + board/json state",
+   "take": 4,
+   "docs": false
+  },
+  {
+   "rank": 7,
+   "name": "test names",
+   "take": 1,
+   "docs": false
+  }
+ ],
+ "patterns": [
+  {
+   "rank": 1,
+   "pattern": "tenant_directory_entry_schema = ",
+   "baselineFilesAtFreeze": 1
+  },
+  {
+   "rank": 1,
+   "pattern": "export.*usage_summary\\|function build\\|input\\b.*:",
+   "baselineFilesAtFreeze": 162
+  },
+  {
+   "rank": 1,
+   "pattern": "errored\\|abstained\\|internal_error\\|reply_to_customer\\|runTurn\\|log\\.\\|console\\.",
+   "baselineFilesAtFreeze": 522
+  },
+  {
+   "rank": 1,
+   "pattern": "export.*run_now\\|export const REVIEW_RUN_QUEUE\\|export async function run_now",
+   "baselineFilesAtFreeze": 1
+  },
+  {
+   "rank": 1,
+   "pattern": "tenant_profile\\|market_tenant",
+   "baselineFilesAtFreeze": 147
+  },
+  {
+   "rank": 1,
+   "pattern": "market_from_caller",
+   "baselineFilesAtFreeze": 24
+  },
+  {
+   "rank": 1,
+   "pattern": "export function use_version_evidence",
+   "baselineFilesAtFreeze": 1
+  },
+  {
+   "rank": 1,
+   "pattern": "export const approver_recordable",
+   "baselineFilesAtFreeze": 1
+  },
+  {
+   "rank": 1,
+   "pattern": "absent_ports|TurnFault|fault:",
+   "baselineFilesAtFreeze": 67
+  },
+  {
+   "rank": 1,
+   "pattern": "console_handler",
+   "baselineFilesAtFreeze": 1
+  },
+  {
+   "rank": 1,
+   "pattern": "const llm\\|const meter\\|fake_llm\\|stop_reason\\|usage",
+   "baselineFilesAtFreeze": 534
+  },
+  {
+   "rank": 1,
+   "pattern": "weight\\|period\\|usage_in_period\\|quota",
+   "baselineFilesAtFreeze": 458
+  },
+  {
+   "rank": 1,
+   "pattern": "knowledge_gap",
+   "baselineFilesAtFreeze": 71
+  },
+  {
+   "rank": 2,
+   "pattern": "^| 72[01] | [^|]*|",
+   "baselineFilesAtFreeze": 2869
+  },
+  {
+   "rank": 2,
+   "pattern": "0018-tenant-location\\|db/migrations",
+   "baselineFilesAtFreeze": 243
+  },
+  {
+   "rank": 2,
+   "pattern": "copy:c2[4-9]\\|copy:c3[0-9]\\|### 9\\|§UX 9\\|^## UX\\|^### ",
+   "baselineFilesAtFreeze": 24
+  },
+  {
+   "rank": 2,
+   "pattern": "^| 125\\b\\|^| 125 ",
+   "baselineFilesAtFreeze": 2869
+  },
+  {
+   "rank": 2,
+   "pattern": "^| 689 ",
+   "baselineFilesAtFreeze": 2869
+  },
+  {
+   "rank": 2,
+   "pattern": "^| *6[5-9][0-9] \\|^| *7[0-9][0-9] ",
+   "baselineFilesAtFreeze": 2869
+  },
+  {
+   "rank": 2,
+   "pattern": "§24",
+   "baselineFilesAtFreeze": 16
+  },
+  {
+   "rank": 2,
+   "pattern": "^| 347 |",
+   "baselineFilesAtFreeze": 2869
+  },
+  {
+   "rank": 2,
+   "pattern": "^| 7[0-9] \\|^### 7[0-9]\\b\\|^#### 7",
+   "baselineFilesAtFreeze": 2869
+  },
+  {
+   "rank": 3,
+   "pattern": "kind: 'version'\\|kind: 'preview'\\|scopeFor\\b",
+   "baselineFilesAtFreeze": 10
+  },
+  {
+   "rank": 3,
+   "pattern": "AssertionError\\|Error:\\|❯ test/",
+   "baselineFilesAtFreeze": 16
+  },
+  {
+   "rank": 3,
+   "pattern": "^\\.meta\\|ExplainerButton\\|ExplainerDrawer",
+   "baselineFilesAtFreeze": 66
+  },
+  {
+   "rank": 3,
+   "pattern": "^\\s+(FAILED|UNRUN)|FAIL-OPEN|PASSED —|^gate: ",
+   "baselineFilesAtFreeze": 16
+  },
+  {
+   "rank": 3,
+   "pattern": "import { computed",
+   "baselineFilesAtFreeze": 107
+  },
+  {
+   "rank": 3,
+   "pattern": "terminateEscalated\\|export",
+   "baselineFilesAtFreeze": 949
+  },
+  {
+   "rank": 3,
+   "pattern": "recordInspection",
+   "baselineFilesAtFreeze": 10
+  },
+  {
+   "rank": 3,
+   "pattern": "DocumentsExplainer\\|PublishExplainer\\|RollbackExplainer\\|IngestExplainer",
+   "baselineFilesAtFreeze": 51
+  },
+  {
+   "rank": 3,
+   "pattern": "RampPill|authored",
+   "baselineFilesAtFreeze": 120
+  },
+  {
+   "rank": 3,
+   "pattern": "RouteRequest\\|^import",
+   "baselineFilesAtFreeze": 18
+  },
+  {
+   "rank": 3,
+   "pattern": "Tests |FAIL|AssertionError",
+   "baselineFilesAtFreeze": 210
+  },
+  {
+   "rank": 3,
+   "pattern": "ApproveSubmit\\b",
+   "baselineFilesAtFreeze": 37
+  },
+  {
+   "rank": 3,
+   "pattern": "submit\\|return\\|Return\\|stage\\|tags\\|Tag[A-Z]\\|label\\|>[A-Z][a-z].*<",
+   "baselineFilesAtFreeze": 1794
+  },
+  {
+   "rank": 3,
+   "pattern": "introspect\\|createVerifier\\|verifier",
+   "baselineFilesAtFreeze": 326
+  },
+  {
+   "rank": 3,
+   "pattern": "settings? (screen|page|tab)|portal.{0,20}setting|setting.{0,30}portal|built with the settings|/settings",
+   "baselineFilesAtFreeze": 10
+  },
+  {
+   "rank": 3,
+   "pattern": "const panel = \\|const read = \\|const menu = ",
+   "baselineFilesAtFreeze": 109
+  },
+  {
+   "rank": 4,
+   "pattern": "lists proposed whatever its age",
+   "baselineFilesAtFreeze": 2
+  },
+  {
+   "rank": 4,
+   "pattern": "Stored reading\\|Reading lookup\\|'3\\.\\|Version check frame\\|Heading suggestion",
+   "baselineFilesAtFreeze": 8
+  },
+  {
+   "rank": 4,
+   "pattern": "What a card is",
+   "baselineFilesAtFreeze": 3
+  },
+  {
+   "rank": 4,
+   "pattern": "writes both records exactly once",
+   "baselineFilesAtFreeze": 2
+  },
+  {
+   "rank": 5,
+   "pattern": "styles/severity.css",
+   "baselineFilesAtFreeze": 13
+  },
+  {
+   "rank": 5,
+   "pattern": "SCREENS.md::## 0.\" --add \"packages/portal/SCREENS.md::## 3.\"",
+   "baselineFilesAtFreeze": 1
+  },
+  {
+   "rank": 5,
+   "pattern": "<Tag\\|\\.verdict\\b\\|\\.verdict {\\|\\.by\\b",
+   "baselineFilesAtFreeze": 99
+  },
+  {
+   "rank": 5,
+   "pattern": "^  <\\|^</template\\|<Transition\\|v-if=\"!",
+   "baselineFilesAtFreeze": 39
+  },
+  {
+   "rank": 5,
+   "pattern": "\\-\\-gray-[0-9]*:\\|--border-split\\|--border-base\\|--surface:\\|--surface-alt\\|--text-secondary:\\|--text-disabled",
+   "baselineFilesAtFreeze": 95
+  },
+  {
+   "rank": 6,
+   "pattern": "claim",
+   "baselineFilesAtFreeze": 781
+  },
+  {
+   "rank": 6,
+   "pattern": "release|expire|stale claim|another session",
+   "baselineFilesAtFreeze": 321
+  },
+  {
+   "rank": 6,
+   "pattern": "path: '/knowledge\\|'/knowledge/[a-z]*'",
+   "baselineFilesAtFreeze": 20
+  },
+  {
+   "rank": 6,
+   "pattern": "clip: rect\\|clip-path: inset",
+   "baselineFilesAtFreeze": 19
+  }
+ ]
+}
