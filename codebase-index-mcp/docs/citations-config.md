@@ -64,7 +64,8 @@ The example paths are illustrative; wec.aria writes its own.
 | Field | Required | Meaning |
 |---|---|---|
 | `version` | yes | Always `1`, for format v1.1 too. Any other value refuses the whole file, with a `health_check` reason. |
-| `registryDoc` | no | The repo's name registry (R4). `query_docs{mode:"term"}` answers a name from this document: a table row whose **first cell** is the name defines it, any other line only mentions it. Without a name, the same mode lists the snake_case Zod shape keys that no row defines. |
+| `registryDoc` | no | The repo's name registry (R4). `query_docs{mode:"term"}` answers a name from this document: a name is defined by a table row's **first cell** (several names split on `,` and `/`), a heading that names it in backticks, a backticked name in another cell of a row (`nested`), or a backticked name in prose (`prose`); the last two count only when no row or heading defines the name. Any other line only mentions it. Without a name, the same mode lists the snake_case Zod shape keys that no row defines. |
+| `termIgnore` | no | Names the term reverse report skips: keys the repo cannot rename, such as an external API's own parameter name (`["json_schema"]`). Additive, format v1.1. |
 | `scan.markdown` | no, default `true` | Look for citations in markdown prose and tables. Fenced code blocks are skipped. |
 | `scan.codeComments` | no, default `true` | Look for citations in comments of indexed code (TS/JS, C#, and Vue `<script>` once Vue lands). |
 | `scan.codeStrings` | no, default `[]` (v1.1) | Property names whose assigned string literal is scanned with the same patterns, e.g. `["owner"]` for `owner: 'docs/15 #116'`. See *String literals* below. At most 20 names, each an identifier (`^[A-Za-z_$][\w$]*$`); an invalid or surplus name is ignored and named in `health_check`, the rest still apply. |

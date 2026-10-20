@@ -201,7 +201,9 @@ const LANGUAGE_BY_EXTENSION: Record<string, string> = {
   ".sln": "sln",
   ".slnx": "sln",
   // Protocol Buffers / gRPC
-  ".proto": "proto"
+  ".proto": "proto",
+  // Stylesheets (MCP-ISSUE-075) — postcss lane, not tree-sitter. SCSS/Less are a different grammar.
+  ".css": "css"
 };
 
 // ISSUE-024: shared test-path classifier — dùng chung cho link_tests_to_source và

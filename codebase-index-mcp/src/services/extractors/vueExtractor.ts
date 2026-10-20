@@ -16,7 +16,8 @@
  * 4. **Template** — `vueTemplate.ts`: `USES_COMPONENT`, prop and listener bindings, handlers and
  *    inline expressions.
  *
- * `<style>` blocks are not read here; the split exposes them for the CSS lane.
+ * 5. **Style** — each `<style>` block through the CSS lane (`extractCss`) at its line offset; the
+ *    template's `class` / literal `:class` names become `USES_CSS_CLASS` edges.
  */
 
 import type Parser from "tree-sitter";
@@ -26,6 +27,7 @@ import type { ExtractInput } from "./extractorTypes.js";
 
 import { extractJavaScriptSymbolsImpl } from "./jsExtractor.js";
 import { extractStringLiteralsImpl } from "./literalExtractor.js";
+import { extractCss } from "./cssExtractor.js";
 import { findEnclosingSymbolId, makeSymbolId, stripQuotes } from "./extractorUtils.js";
 import { maskOutsideRanges, splitVueSfc, type VueSfcSplit } from "./vueSfc.js";
 import { extractVueTemplateEdges, type VueImportBinding } from "./vueTemplate.js";
@@ -146,6 +148,18 @@ export function extractVueFileImpl(
         parse,
         edges
       });
+    }
+
+    // `<style>` blocks go through the CSS lane at their own line offset (MCP-ISSUE-075). A block postcss
+    // cannot read (SCSS/Less-only syntax) is skipped on its own; the script and template above stand.
+    for (const style of sfc.styles) {
+      try {
+        const css = extractCss(style.content, input, style.startLine - 1, { scoped: style.scoped, moduleSymbolId });
+        symbols.push(...css.symbols);
+        edges.push(...css.edges);
+      } catch {
+        // CssSyntaxError on a non-CSS dialect: no CSS symbols for this block.
+      }
     }
   } finally {
     // Same reason as `keepTreeAlive` in treeSitterExtractor (MCP-ISSUE-032): nodes do not keep their

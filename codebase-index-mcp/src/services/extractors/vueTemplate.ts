@@ -32,6 +32,7 @@ import type Parser from "tree-sitter";
 import type { EdgeRecord } from "../../types/index.js";
 import type { ExtractInput } from "./extractorTypes.js";
 
+import { CSS_CLASS_UNRESOLVED_REASON, classNamesFromStatic, cssClassToken } from "./cssExtractor.js";
 import { BUILTIN_SKIP_NAMES, emitPropertyAccessEdge, shouldSkipJavaScriptMemberCall, stripQuotes } from "./extractorUtils.js";
 
 export type VueImportBinding = {
@@ -161,6 +162,7 @@ function walkNode(ctx: VueTemplateContext, node: TemplateNode, outerLocals: Read
 
   for (const prop of props) {
     if (prop.type === NODE_ATTRIBUTE) {
+      if (prop.name === "class" && prop.value) emitClassUses(ctx, classNamesFromStatic(prop.value.content));
       if (childToken && isChildProp(prop.name)) {
         const value = prop.value?.content;
         pushEdge(ctx, `${childToken}#${camelize(prop.name)}`, "PROPERTY_WRITE", 0.5, "unresolved component token", value === undefined ? "true" : JSON.stringify(value));
@@ -174,6 +176,7 @@ function walkNode(ctx: VueTemplateContext, node: TemplateNode, outerLocals: Read
     switch (prop.name) {
       case "bind":
         if (isDynamic && arg === "is") break; // read by resolveDynamicIs
+        if (arg === "class" && exp) emitClassUses(ctx, classLiterals(ctx, exp.content));
         if (childToken && arg && isChildProp(arg)) {
           pushEdge(ctx, `${childToken}#${camelize(arg)}`, "PROPERTY_WRITE", 0.5, "unresolved component token", clip(exp?.content ?? "true"));
         }
@@ -244,6 +247,80 @@ function pushEdge(
     reason,
     ...(assignedExpression !== undefined ? { assignedExpression } : {})
   });
+}
+
+// ── class / :class → USES_CSS_CLASS (the CSS lane's markup half, MCP-ISSUE-075) ────────────
+
+/**
+ * `class="a b"` and the LITERAL parts of `:class` become `USES_CSS_CLASS` → `cssclass:.a`, bound to the
+ * `css_class` definitions by `resolveCssEdges` after the run. A dynamic class (`:class="cls"`, a
+ * template string with a substitution, a computed) names no class until runtime, so it is NOT
+ * emitted: the name is not knowable from the text, and a token built from the expression could only
+ * ever be wrong.
+ */
+function emitClassUses(ctx: VueTemplateContext, names: string[]): void {
+  for (const name of names) {
+    ctx.edges.push({
+      repoId: ctx.input.repoId,
+      fromId: ctx.componentId,
+      toId: cssClassToken(name),
+      type: "USES_CSS_CLASS",
+      confidence: 0.5,
+      reason: CSS_CLASS_UNRESOLVED_REASON
+    });
+  }
+}
+
+/** Class names spelled literally in a `:class` expression: strings, arrays of them, object keys, ternary/logical branches. */
+function classLiterals(ctx: VueTemplateContext, expression: string): string[] {
+  const tree = ctx.parse(`(${expression})`, false);
+  const out: string[] = [];
+  const visitNode = (node: Parser.SyntaxNode | null): void => {
+    if (!node) return;
+    switch (node.type) {
+      case "string":
+        out.push(...classNamesFromStatic(stripQuotes(node.text)));
+        return;
+      case "template_string":
+        if (!node.namedChildren.some((c) => c.type === "template_substitution")) out.push(...classNamesFromStatic(node.text.slice(1, -1)));
+        return;
+      case "object":
+        for (const entry of node.namedChildren) {
+          const key = entry.type === "pair" ? entry.childForFieldName("key") : entry.type === "shorthand_property_identifier" ? entry : null;
+          if (key && (key.type === "property_identifier" || key.type === "shorthand_property_identifier")) out.push(...classNamesFromStatic(key.text));
+          else if (key?.type === "string") out.push(...classNamesFromStatic(stripQuotes(key.text)));
+        }
+        return;
+      case "array":
+      case "parenthesized_expression":
+      case "expression_statement":
+      case "program":
+        for (const child of node.namedChildren) visitNode(child);
+        return;
+      case "ternary_expression":
+        visitNode(node.childForFieldName("consequence"));
+        visitNode(node.childForFieldName("alternative"));
+        return;
+      case "binary_expression": {
+        const operator = node.childForFieldName("operator")?.text;
+        if (operator === "&&") {
+          visitNode(node.childForFieldName("right"));
+        } else if (operator === "||" || operator === "??") {
+          visitNode(node.childForFieldName("left"));
+          visitNode(node.childForFieldName("right"));
+        }
+        return;
+      }
+      default:
+        return; // dynamic — not knowable from the text
+    }
+  };
+  try {
+    visitNode(tree.rootNode);
+  } finally {
+    if (tree.rootNode.endIndex < 0) throw new Error("unreachable: negative endIndex");
+  }
+  return [...new Set(out)];
 }
 
 // ── <component :is> ─────────────────────────────────────────────────────────────────────────

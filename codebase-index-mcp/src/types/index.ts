@@ -218,7 +218,11 @@ export type SymbolRecord = {
    * that can implement, extend and own methods" — a component does none of that, and `find_implementations`
    * says so instead of returning an empty answer that reads like a missing edge.
    */
-  kind: "function" | "class" | "method" | "variable" | "module" | "interface" | "property" | "constructor" | "type" | "struct" | "record" | "record struct" | "impl" | "component" | "unknown";
+  kind: "function" | "class" | "method" | "variable" | "module" | "interface" | "property" | "constructor" | "type" | "struct" | "record" | "record struct" | "impl" | "component" | "unknown"
+    /** MCP-ISSUE-075: a CSS custom-property definition (`--text-tertiary`), one symbol per definition site. */
+    | "css_variable"
+    /** MCP-ISSUE-075: a CSS class selector (`.btn`), one symbol per name per file. */
+    | "css_class";
   line: number;
   /** Last line of the symbol's source span (1-indexed). Optional: null on indexes built before end-line tracking. */
   endLine?: number;
@@ -249,7 +253,11 @@ export type EdgeRecord = {
    * not a use, and a component rendered through `<component :is>` may be imported for several branches —
    * and not `CALLS`, which `dead_code_scan` and the call-graph tools read as an invocation of a callable.
    */
-  type: "IMPORTS" | "CALLS" | "DEPENDS_ON" | "IMPLEMENTS" | "EXTENDS" | "TYPE_REF" | "PROPERTY_REF" | "PROPERTY_WRITE" | "PUBLISHES" | "CONSUMES" | "USES_COMPONENT";
+  type: "IMPORTS" | "CALLS" | "DEPENDS_ON" | "IMPLEMENTS" | "EXTENDS" | "TYPE_REF" | "PROPERTY_REF" | "PROPERTY_WRITE" | "PUBLISHES" | "CONSUMES" | "USES_COMPONENT"
+    /** MCP-ISSUE-075: `var(--x)` → the `css_variable` definition(s); `cssvar:<name>` until resolved. */
+    | "USES_CSS_VAR"
+    /** MCP-ISSUE-075: a markup use of a class (Vue template) → the `css_class` symbol(s); `cssclass:<.name>` until resolved. */
+    | "USES_CSS_CLASS";
   confidence?: number;
   reason?: string;
   /** ENH-029-B: RHS source text captured at PROPERTY_WRITE sites (assigned literal/expression). */
@@ -265,8 +273,12 @@ export type EdgeRecord = {
  *
  * USES_COMPONENT (MCP-ISSUE-074) is such a flow edge: rendering a Vue component runs its setup and
  * its template, so "who reaches this component" walks the same way as "who reaches this function".
+ *
+ * MCP-ISSUE-075: the two CSS edge types are here so "who uses `--text-tertiary`" is a plain
+ * `get_call_chain(direction:"callers")` / `find_impact_files` question. They originate only at CSS
+ * symbols and (via the Vue lane) at components, so a traversal from C# or plain TS never meets them.
  */
-export const CALL_TRAVERSAL_EDGE_TYPES = ["CALLS", "PUBLISHES", "USES_COMPONENT"] as const;
+export const CALL_TRAVERSAL_EDGE_TYPES = ["CALLS", "PUBLISHES", "USES_COMPONENT", "USES_CSS_VAR", "USES_CSS_CLASS"] as const;
 /** SQL `in (...)` value list form of CALL_TRAVERSAL_EDGE_TYPES (constant literals, safe to inline). */
 export const CALL_TRAVERSAL_EDGE_SQL_LIST = CALL_TRAVERSAL_EDGE_TYPES.map((t) => `'${t}'`).join(", ");
 
@@ -536,7 +548,7 @@ export type EdgeProvenance = {
  * the same kind: a `<ProjectReference>` / `.sln` entry naming a project outside the repo or behind an
  * MSBuild property; an in-repo project edge carries the target's real module symbol id instead.
  */
-export const UNRESOLVED_SYMBOL_TOKEN_PREFIXES = ["callee:", "property:", "type:", "iface:", "base:", "import:"] as const;
+export const UNRESOLVED_SYMBOL_TOKEN_PREFIXES = ["callee:", "property:", "type:", "iface:", "base:", "import:", "cssvar:", "cssclass:"] as const;
 
 /**
  * SQL predicate form of {@link UNRESOLVED_SYMBOL_TOKEN_PREFIXES}, for filtering in the query rather

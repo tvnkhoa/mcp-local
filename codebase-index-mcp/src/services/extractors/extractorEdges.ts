@@ -198,8 +198,10 @@ export function applyTypeRefEdgeCap(edges: EdgeRecord[], maxTypeRefEdgesPerFile:
  * labelled gaps (`<component :is>` branches, un-imported tags) carry a low confidence to say "not
  * linked", not "not there". The `large` profile's 0.4 floor deleted every one of them — the gap the
  * index-run-bookkeeping rule says must be kept and labelled. Bounded by the template text itself.
+ * The two CSS edge types (MCP-ISSUE-075) likewise: a `.vue` file goes through the edge policy, and a
+ * `cssvar:` / `cssclass:` token is a certain name awaiting the post-phase, never a doubtful one.
  */
-const CONFIDENCE_FILTER_EXEMPT_TYPES = new Set(["TYPE_REF", "USES_COMPONENT"]);
+const CONFIDENCE_FILTER_EXEMPT_TYPES = new Set(["TYPE_REF", "USES_COMPONENT", "USES_CSS_VAR", "USES_CSS_CLASS"]);
 
 export function applyEdgeConfidenceFilter(
   edges: EdgeRecord[],

@@ -52,7 +52,9 @@ import {
   resolveExtendsEdges as resolveExtendsEdgesImpl,
   resolveImplementsEdges as resolveImplementsEdgesImpl,
   resolvePublishesConsumesEdges as resolvePublishesConsumesEdgesImpl,
-  resolveComponentEdges as resolveComponentEdgesImpl
+  resolveComponentEdges as resolveComponentEdgesImpl,
+  resolveCssEdges as resolveCssEdgesImpl,
+  type CssResolutionStats
 } from "../services/graph/edgeResolver.js";
 import {
   linkTestsToSource as linkTestsToSourceImpl,
@@ -686,6 +688,11 @@ export class GraphStore {
   /** MCP-ISSUE-074: bind Vue `component:<specifier>[#member]` tokens once every file is in the graph. */
   resolveComponentEdges(repoId: string): number {
     return resolveComponentEdgesImpl(this.db, repoId);
+  }
+
+  /** MCP-ISSUE-075: bind `cssvar:` / `cssclass:` tokens to their CSS definitions, repo-wide, by name. */
+  resolveCssEdges(repoId: string): CssResolutionStats {
+    return resolveCssEdgesImpl(this.db, repoId);
   }
 
   buildCallResolutionContext(repoId: string): ReturnType<typeof buildCallResolutionContextImpl> {

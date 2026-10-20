@@ -202,6 +202,9 @@ export function resolveUnlinkedEdges(db: Database.Database, repoId: string): Res
         and e.to_id not like 'base:%'
         -- MCP-ISSUE-074: Vue template tokens are owned by resolveComponentEdges.
         and e.to_id not like 'component:%'
+        -- MCP-ISSUE-075: CSS tokens are owned by resolveCssEdges and never cross a repo boundary.
+        and e.to_id not like 'cssvar:%'
+        and e.to_id not like 'cssclass:%'
         and not exists (
           select 1 from symbols s where s.repo_id = ? and s.symbol_id = e.to_id
         )

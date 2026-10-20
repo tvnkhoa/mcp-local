@@ -103,9 +103,12 @@ export type RunIndexInput = {
 // v3: MCP-ISSUE-065 — .csproj module ids are separator/case-canonical, ProjectReference and .sln
 // DEPENDS_ON edges target them (or a `project:` token), and the .sln proxy module symbols are gone.
 // v4: markdown file-path mentions accept any repo-relative path (release C); unchanged files need a full run to pick it up.
-// v5: MCP-ISSUE-074 — `.vue` files are indexed (component symbol, USES_COMPONENT, template edges); a
-// repo whose .vue files were skipped as unknown_extension needs a full run to pick them up.
-export const INDEX_VERSION = "v5-vue-components";
+// v5: MCP-ISSUE-075 CSS lane — `.css` files are indexed (css_variable / css_class, USES_CSS_VAR); an
+// unchanged repo needs a full run to pick them up.
+// v6: MCP-ISSUE-074 — `.vue` files are indexed (component symbol, USES_COMPONENT, template edges, and
+// their <style> blocks through the CSS lane); a repo whose .vue files were skipped as
+// unknown_extension needs a full run to pick them up.
+export const INDEX_VERSION = "v6-vue-components";
 
 export async function runIndexPipeline(store: GraphStore, input: RunIndexInput): Promise<IndexRunSummary> {
   const identity: RunIdentity = {

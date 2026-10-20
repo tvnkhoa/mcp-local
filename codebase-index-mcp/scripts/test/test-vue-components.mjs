@@ -74,7 +74,9 @@ function pickView() {
 </template>
 
 <style scoped>
-.app { color: red; }
+.app {
+  color: var(--accent);
+}
 </style>
 `,
   "src/components/AppCard.vue": `<script setup lang="ts">
@@ -92,13 +94,18 @@ function neverUsed() {
 </script>
 
 <template>
-  <section>
+  <section :class="['card', { pinned: model }, dynamicClass]">
     <h2 @click="onHeaderClick">{{ title }}</h2>
     <p>{{ props.subtitle }}</p>
     <button @click="$emit('pin', 1)">pin</button>
     <slot />
   </section>
 </template>
+
+<style scoped>
+.card { border: 1px solid var(--accent); }
+.pinned { outline: 0; }
+</style>
 `,
   "src/components/ReadFailure.vue": `<script setup>
 defineProps({ reason: { type: String, required: true } })
@@ -129,6 +136,10 @@ defineProps<{ x: number }>()
 </script>
 
 <template><i>unused</i></template>
+`,
+  "src/styles/tokens.css": `:root {
+  --accent: #333;
+}
 `,
   "src/lib/format.ts": `export function formatTitle(s: string): string {
   return s.trim();
@@ -248,6 +259,23 @@ try {
     where e.repo_id = :repoId and e.type = 'PROPERTY_REF' and t.kind = 'property' and f.file_path like '%AppCard.vue'`);
   assert(propReads.some((r) => r.fromName === "AppCard" && r.prop === "title" && r.reason.includes(`line ${lineOf("src/components/AppCard.vue", "{{ title }}")})`)), "{{ title }} → PROPERTY_REF to the own prop at the interpolation line", short(propReads));
   assert(propReads.some((r) => r.fromName === "neverUsed" && r.prop === "title"), "props.title in script → PROPERTY_REF to the prop", short(propReads));
+
+  // ── CSS (MCP-ISSUE-075 lane, wired through the SFC split) ───────────────────────────────
+  const varUsers = await sql(`select f.name as fromName, f.kind as fromKind, f.file_path as fromFile, f.line as fromLine from edges e
+    join symbols f on f.symbol_id = e.from_id and f.repo_id = e.repo_id
+    join symbols t on t.symbol_id = e.to_id and t.repo_id = e.repo_id
+    where e.repo_id = :repoId and e.type = 'USES_CSS_VAR' and t.name = '--accent' and t.kind = 'css_variable' order by f.file_path`);
+  const appStyleLine = lineOf("src/App.vue", ".app {");
+  assert(varUsers.some((u) => posix(u.fromFile) === "src/App.vue" && u.fromName === ".app" && u.fromLine === appStyleLine),
+    `who uses --accent: App.vue's <style> rule .app at its .vue line (${appStyleLine})`, short(varUsers));
+  assert(varUsers.some((u) => posix(u.fromFile) === "src/components/AppCard.vue" && u.fromName === ".card"), "who uses --accent: AppCard.vue's .card", short(varUsers));
+
+  const classUses = await sql(`select f.name as fromName, t.name as cls, posix_file from (select e.*, t.file_path as posix_file from edges e join symbols t on t.symbol_id = e.to_id and t.repo_id = e.repo_id where e.repo_id = :repoId and e.type = 'USES_CSS_CLASS') x
+    join symbols f on f.symbol_id = x.from_id and f.repo_id = x.repo_id
+    join symbols t on t.symbol_id = x.to_id and t.repo_id = x.repo_id order by t.name`);
+  const classNames = [...new Set(classUses.map((c) => `${c.fromName}:${c.cls}`))].sort();
+  assert(JSON.stringify(classNames) === JSON.stringify(["App:.app", "AppCard:.card", "AppCard:.pinned"]),
+    "template class=\"app\" and literal :class (array string, object key) → USES_CSS_CLASS to the <style> classes; the dynamic entry is not emitted", short(classUses));
 
   // ── Cross-tool ───────────────────────────────────────────────────────────────────────────
   const impact = await call("find_impact_files", { filePath: "src/components/ReadFailure.vue", profile: "standard" });

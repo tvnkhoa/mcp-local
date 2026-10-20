@@ -61,7 +61,11 @@ export function getDeadCodeCandidates(
 } {
   const conditions: string[] = [
     "s.repo_id = ?",
-    "s.kind not in ('module', 'property', 'constructor', 'type', 'interface')"
+    // MCP-ISSUE-075: CSS symbols are never dead-code candidates. A class or custom property is used
+    // from markup, from JS (`classList.add`, `style.setProperty`) and from third-party templates the
+    // graph cannot see, so "no incoming edge" is not evidence of anything. Excluded outright rather
+    // than reported in a bucket: a CSS-unused report needs its own semantics, not this scan's.
+    "s.kind not in ('module', 'property', 'constructor', 'type', 'interface', 'css_variable', 'css_class')"
   ];
   const params: unknown[] = [repoId];
 

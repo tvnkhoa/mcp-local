@@ -33,6 +33,8 @@ const citationSchema = z.object({
 const configSchema = z.object({
   version: z.literal(1),
   registryDoc: z.string().min(1).max(300).optional(),
+  /** Names the term reverse report skips: keys the repo cannot rename (an external API's json_schema). */
+  termIgnore: z.array(z.string().min(1).max(100)).max(500).optional(),
   // codeStrings entries are checked one by one below, so one bad name does not refuse the file.
   scan: z
     .object({ markdown: z.boolean().optional(), codeComments: z.boolean().optional(), codeStrings: z.array(z.unknown()).max(200).optional() })
@@ -51,6 +53,7 @@ export type CompiledCitation = {
 
 export type CitationConfig = {
   registryDoc: string | null;
+  termIgnore: string[];
   scanMarkdown: boolean;
   scanCodeComments: boolean;
   /**
@@ -142,6 +145,7 @@ export function parseCitationConfig(raw: string): CitationConfigLoad {
   return {
     config: {
       registryDoc: top.data.registryDoc ?? null,
+      termIgnore: top.data.termIgnore ?? [],
       scanMarkdown: top.data.scan?.markdown ?? true,
       scanCodeComments: top.data.scan?.codeComments ?? true,
       codeStrings,

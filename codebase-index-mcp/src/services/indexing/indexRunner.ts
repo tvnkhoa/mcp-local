@@ -316,6 +316,18 @@ export function createIndexRunner(options: IndexRunnerOptions): RunIndexAndResol
   importResolveMs = Date.now() - importStart;
   await yieldToEventLoop();
 
+  // MCP-ISSUE-075: CSS variable/class tokens. Unconditional and unbudgeted — CSS edges are few, the
+  // pass is one indexed scan per edge type, and it also re-fans earlier resolutions so an incremental
+  // run lands on the same graph as a full one. Non-fatal: a failure leaves labelled tokens behind.
+  (() => {
+    try {
+      const css = store.resolveCssEdges(repoId);
+      if (css.tokensResolved + css.tokensUnresolved > 0) {
+        indexLog(`[index-post] repoId=${repoId} css tokens resolved=${String(css.tokensResolved)} unresolved=${String(css.tokensUnresolved)} edges=${String(css.edgesWritten)}`);
+      }
+    } catch { /* non-fatal */ }
+  })();
+
   if (postPolicy.resolveTypeRefs) {
     progress.phase("resolving types");
     indexLog(`[index-post] repoId=${repoId} resolving type references...`);
