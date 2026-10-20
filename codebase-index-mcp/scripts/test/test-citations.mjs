@@ -86,7 +86,11 @@ try {
 
   const from = await docs({ mode: "cites", filePath: "CLAUDE.md" });
   const inv = (from?.citations ?? []).find((c) => c.patternId === "inv");
-  assert(inv?.status === "resolved" && inv?.line === 2 && posix(inv?.file) === "test/tools.test.ts", "a file's own citations resolve: the inv marker's testName anchor finds the it() line", JSON.stringify(inv));
+  // `line` is where the citation sits in CLAUDE.md; `targetLine` is where it points. Release C spread
+  // the resolution over the row and reported the target's line as `line` (wec.aria acceptance).
+  assert(inv?.status === "resolved" && inv?.line === 3 && inv?.targetLine === 2 && posix(inv?.targetFile) === "test/tools.test.ts", "a file's own citation keeps its own line (3) and resolves its target line (it() at 2)", JSON.stringify(inv));
+  const adrCite = (from?.citations ?? []).find((c) => c.patternId === "adr");
+  assert(adrCite?.line === 4 && adrCite?.targetLine === 1 && posix(adrCite?.targetFile) === "docs/adr/0021-boundaries.md", "a file-anchor citation: line 4 in CLAUDE.md, target line 1", JSON.stringify(adrCite));
 
   const none = await docs({ mode: "cites", target: "15 #99" });
   assert(none?.resolved?.[0]?.status === "anchor_not_found" && none?.citedByCount === 0, "an unknown row is anchor_not_found, never a guess", JSON.stringify(none?.resolved));

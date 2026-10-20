@@ -433,7 +433,22 @@ function readCitations(store: GraphStore, repoId: string, target: string | undef
     mode: "cites",
     from: filePath,
     count: rows.length,
-    citations: rows.map((r) => ({ ...withSymbol(r), ...resolver.resolve(r) })),
+    // `line` is where the citation SITS in this file; where it points is `targetLine`. Spreading the
+    // resolution over the row overwrote one with the other (wec.aria acceptance of release C).
+    citations: rows.map((r) => {
+      const res = resolver.resolve(r);
+      return {
+        ...withSymbol(r),
+        status: res.status,
+        targetSpec: res.targetSpec,
+        anchorKind: res.anchorKind,
+        anchorValue: res.anchorValue,
+        ...(res.file !== undefined && { targetFile: res.file }),
+        ...(res.line !== undefined && { targetLine: res.line }),
+        ...(res.text !== undefined && { targetText: res.text }),
+        ...(res.candidates !== undefined && { candidates: res.candidates })
+      };
+    }),
     ...configNote
   };
 }
