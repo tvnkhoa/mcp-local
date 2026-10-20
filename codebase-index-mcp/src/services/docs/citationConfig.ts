@@ -1,6 +1,6 @@
 /**
- * `.codebase-index/citations.json` — a repo's own citation shorthand (format v1,
- * `docs/citations-config.md`). Read by the indexer; the repo writes it, the server holds no pattern of
+ * `.codebase-index/citations.json` — a repo's own citation shorthand (format v1.1: `version: 1` plus
+ * the additive `scan.codeStrings`; `docs/citations-config.md`). Read by the indexer; the repo writes it, the server holds no pattern of
  * its own. wec.aria cites `docs/15 #737`, `adr/0057`, `SPEC-022`, `09 #10`; another repo cites
  * something else.
  */
@@ -12,6 +12,10 @@ import path from "node:path";
 import { z } from "zod";
 
 export const CITATIONS_CONFIG_PATH = ".codebase-index/citations.json";
+
+/** `scan.codeStrings` (format v1.1): at most this many property names. */
+export const MAX_CODE_STRINGS = 20;
+const IDENTIFIER = /^[A-Za-z_$][\w$]*$/;
 
 const anchorSchema = z.object({
   kind: z.enum(["file", "heading", "tableRow", "testName"]),
@@ -29,7 +33,10 @@ const citationSchema = z.object({
 const configSchema = z.object({
   version: z.literal(1),
   registryDoc: z.string().min(1).max(300).optional(),
-  scan: z.object({ markdown: z.boolean().optional(), codeComments: z.boolean().optional() }).optional(),
+  // codeStrings entries are checked one by one below, so one bad name does not refuse the file.
+  scan: z
+    .object({ markdown: z.boolean().optional(), codeComments: z.boolean().optional(), codeStrings: z.array(z.unknown()).max(200).optional() })
+    .optional(),
   citations: z.array(z.unknown()).max(100)
 });
 
@@ -46,6 +53,11 @@ export type CitationConfig = {
   registryDoc: string | null;
   scanMarkdown: boolean;
   scanCodeComments: boolean;
+  /**
+   * Format v1.1, additive: property names whose assigned string literal is scanned with the same
+   * patterns — `owner: '…docs/15 #116…'`. Empty (the default) scans no string at all.
+   */
+  codeStrings: string[];
   citations: CompiledCitation[];
   /** sha256 of the raw file — a change re-scans every file, not only changed ones. */
   hash: string;
@@ -114,11 +126,25 @@ export function parseCitationConfig(raw: string): CitationConfigLoad {
     seen.add(c.id);
     citations.push({ id: c.id, regex, target: c.target, anchor: { kind: c.anchor.kind, ...(c.anchor.value && { value: c.anchor.value }), column: c.anchor.column ?? 1 } });
   });
+  const codeStrings: string[] = [];
+  (top.data.scan?.codeStrings ?? []).forEach((name, index) => {
+    if (typeof name !== "string" || !IDENTIFIER.test(name)) {
+      errors.push(`scan.codeStrings[${String(index)}]: ${JSON.stringify(name)} is not an identifier — entry ignored`);
+      return;
+    }
+    if (codeStrings.includes(name)) return;
+    if (codeStrings.length >= MAX_CODE_STRINGS) {
+      errors.push(`scan.codeStrings[${String(index)}] (${name}): more than ${String(MAX_CODE_STRINGS)} names — entry ignored`);
+      return;
+    }
+    codeStrings.push(name);
+  });
   return {
     config: {
       registryDoc: top.data.registryDoc ?? null,
       scanMarkdown: top.data.scan?.markdown ?? true,
       scanCodeComments: top.data.scan?.codeComments ?? true,
+      codeStrings,
       citations,
       hash: createHash("sha256").update(raw).digest("hex").slice(0, 16)
     },

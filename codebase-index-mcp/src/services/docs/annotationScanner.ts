@@ -2,7 +2,8 @@
  * Release C (R5, R6, comments-as-prose) — what a file says ABOUT other things, read from its text:
  *
  *   - citations: a repo's own shorthand (`docs/15 #737`, `adr/0057`, `<!--inv:by=test:…-->`), matched
- *     by the patterns in `.codebase-index/citations.json`, in markdown prose and in code comments;
+ *     by the patterns in `.codebase-index/citations.json`, in markdown prose, in code comments and
+ *     (format v1.1, opt-in `scan.codeStrings`) in string literals assigned to named properties;
  *   - code comments: the prose of a code file, so a docs search reaches "a stage threw" written in a
  *     comment, not only in a markdown file.
  *
@@ -163,4 +164,220 @@ export function findCitations(lines: readonly { line: number; text: string }[], 
 /** Comment chunks as lines with their real line numbers, for `findCitations`. */
 export function commentLines(chunks: readonly CommentChunk[]): { line: number; text: string }[] {
   return chunks.flatMap((c) => c.text.split("\n").map((text, k) => ({ line: c.startLine + k, text })));
+}
+
+type TextLine = { line: number; text: string };
+
+/** Characters that, right before `=`, make it a comparison or compound operator, not an assignment. */
+const NOT_ASSIGNMENT = new Set(["=", "!", "<", ">", "+", "-", "*", "/", "%", "&", "|", "^", "?", ":"]);
+
+/**
+ * Format v1.1 `scan.codeStrings`: the string literals ASSIGNED TO one of `propertyNames`, as lines with
+ * their real line numbers, for `findCitations`. "Assigned" is lexical — the literal is the first token
+ * after `name:` (object-literal property, `"name":` key) or `name =` (class field, member or variable
+ * assignment, C# initializer, Python keyword argument). Every other string stays unscanned.
+ *
+ * Comments are skipped (a string inside a comment is the comment's, and counted there only). A
+ * template literal's static parts are scanned, each `${…}` cutting the line so two parts never join
+ * into a match neither holds; a multi-line literal reports each line at its own number. C# verbatim
+ * (`@"…"`), interpolated (`$"…"`) and raw (`"""…"""`) strings and Python prefixed/triple-quoted
+ * strings are read with their own rules. Known limit, shared with `extractComments`: a JS regex literal
+ * holding a quote (`/'/`) is not recognised as a regex.
+ */
+export function extractPropertyStrings(source: string, language: string, propertyNames: readonly string[]): TextLine[] {
+  if (propertyNames.length === 0 || !scansComments(language)) return [];
+  const names = new Set(propertyNames);
+  const python = HASH_COMMENT.has(language);
+  const csharp = language === "csharp";
+  const templates = language === "typescript" || language === "javascript";
+  const n = source.length;
+  const out: TextLine[] = [];
+  let i = 0;
+  let line = 1;
+
+  /** The property a literal starting at `start` is assigned to, or null. */
+  const assignedTo = (start: number): string | null => {
+    let j = start - 1;
+    while (j >= 0 && /\s/.test(source[j]!)) j--;
+    const op = source[j];
+    if (op === "=") {
+      if (NOT_ASSIGNMENT.has(source[j - 1] ?? "")) return null;
+    } else if (op !== ":") {
+      return null;
+    } else if (source[j - 1] === ":") {
+      return null; // `::`
+    }
+    j--;
+    while (j >= 0 && /\s/.test(source[j]!)) j--;
+    if (op === ":" && source[j] === "?") j--; // `owner?: '…'`
+    const q = source[j];
+    if (op === ":" && (q === '"' || q === "'")) {
+      const open = source.lastIndexOf(q, j - 1);
+      return open < 0 ? null : source.slice(open + 1, j);
+    }
+    const end = j + 1;
+    while (j >= 0 && /[\w$]/.test(source[j]!)) j--;
+    return end > j + 1 ? source.slice(j + 1, end) : null;
+  };
+
+  const skipLineComment = () => {
+    while (i < n && source[i] !== "\n") i++;
+  };
+  const skipBlockComment = () => {
+    const close = source.indexOf("*/", i + 2);
+    const end = close < 0 ? n : close + 2;
+    for (let k = i; k < end; k++) if (source[k] === "\n") line++;
+    i = end;
+  };
+
+  /**
+   * Reads the literal whose opening quote is at `i` (any prefix already consumed), leaves `i` after it,
+   * keeps `line` current, and returns its text as segments with their starting line.
+   */
+  const readString = (prefix: string): TextLine[] => {
+    const quote = source[i]!;
+    let run = 1;
+    while (source[i + run] === quote) run++;
+    // Triple-quoted: Python ''' / """, C# raw """ (three or more). An empty "" is a run of 2.
+    const verbatim = csharp && prefix.includes("@");
+    const triple = (python && run >= 3) || (csharp && !verbatim && quote === '"' && run >= 3);
+    const raw = (python && /r/i.test(prefix)) || verbatim || (csharp && triple);
+    if (run === 2 && !triple) {
+      i += 2;
+      return [];
+    }
+    const width = triple ? (python ? 3 : run) : 1;
+    i += width;
+    const startLine = line;
+    let text = "";
+    while (i < n) {
+      const ch = source[i]!;
+      if (ch === quote) {
+        if (verbatim && !triple && source[i + 1] === quote) {
+          text += quote;
+          i += 2;
+          continue;
+        }
+        if (width === 1 || source.startsWith(quote.repeat(width), i)) {
+          i += width;
+          break;
+        }
+      }
+      if (ch === "\\" && !(csharp && raw)) {
+        const nx = source[i + 1] ?? "";
+        if (nx === "\n") line++;
+        text += raw || !/["'`\\]/.test(nx) ? ch + nx : nx;
+        i += 2;
+        continue;
+      }
+      if (ch === "\n") {
+        line++;
+        if (width === 1 && !verbatim) {
+          i++;
+          break; // unterminated single-line literal: stop at end of line
+        }
+      }
+      text += ch;
+      i++;
+    }
+    return [{ line: startLine, text }];
+  };
+
+  /** Skips a `${…}` expression from `i` (just after `${`) to just after its closing brace. */
+  const skipExpression = () => {
+    let depth = 1;
+    while (i < n) {
+      const ch = source[i]!;
+      const next = source[i + 1];
+      if (ch === "\n") line++;
+      if (ch === "/" && next === "/") skipLineComment();
+      else if (ch === "/" && next === "*") skipBlockComment();
+      else if (ch === "`") readTemplate();
+      else if (ch === '"' || ch === "'") readString("");
+      else {
+        if (ch === "{") depth++;
+        if (ch === "}" && --depth === 0) {
+          i++;
+          return;
+        }
+        i++;
+      }
+    }
+  };
+
+  /** A template literal from its opening backtick at `i`: its static parts, `${…}` cutting between them. */
+  const readTemplate = (): TextLine[] => {
+    const segs: TextLine[] = [];
+    i++;
+    let segLine = line;
+    let text = "";
+    while (i < n) {
+      const ch = source[i]!;
+      if (ch === "`") {
+        i++;
+        break;
+      }
+      if (ch === "\\") {
+        const nx = source[i + 1] ?? "";
+        if (nx === "\n") line++;
+        text += /[`\\$]/.test(nx) ? nx : ch + nx;
+        i += 2;
+        continue;
+      }
+      if (ch === "$" && source[i + 1] === "{") {
+        segs.push({ line: segLine, text });
+        i += 2;
+        skipExpression();
+        segLine = line;
+        text = "";
+        continue;
+      }
+      if (ch === "\n") line++;
+      text += ch;
+      i++;
+    }
+    segs.push({ line: segLine, text });
+    return segs;
+  };
+
+  const emit = (segs: readonly TextLine[]) => {
+    for (const seg of segs) {
+      seg.text.split("\n").forEach((t, k) => {
+        const text = t.replace(/\r$/, "");
+        if (text.trim()) out.push({ line: seg.line + k, text });
+      });
+    }
+  };
+
+  while (i < n) {
+    const ch = source[i]!;
+    const next = source[i + 1];
+    if (ch === "\n") {
+      line++;
+      i++;
+      continue;
+    }
+    if (python ? ch === "#" : ch === "/" && next === "/") {
+      skipLineComment();
+      continue;
+    }
+    if (!python && ch === "/" && next === "*") {
+      skipBlockComment();
+      continue;
+    }
+    if (ch === '"' || ch === "'" || (ch === "`" && templates)) {
+      // A prefix glued to the quote: Python r/b/f/u, C# @ and $. It is part of the literal.
+      let start = i;
+      if (python) while (start > 0 && /[rRbBfFuU]/.test(source[start - 1]!) && i - start < 2) start--;
+      if (csharp) while (start > 0 && (source[start - 1] === "@" || source[start - 1] === "$")) start--;
+      if (start < i && start > 0 && /[\w$]/.test(source[start - 1]!) && python) start = i; // part of a longer identifier
+      const prefix = source.slice(start, i);
+      const name = assignedTo(start);
+      const segs = ch === "`" ? readTemplate() : readString(prefix);
+      if (name !== null && names.has(name)) emit(segs);
+      continue;
+    }
+    i++;
+  }
+  return out;
 }

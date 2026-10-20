@@ -22,11 +22,14 @@ import process from "node:process";
 import { shouldIndexFile, type FilterDecision } from "./fileFilter.js";
 import { tallySkip } from "./skipReport.js";
 import { loadCitationConfig } from "../docs/citationConfig.js";
-import { commentLines, extractComments, findCitations, markdownProseLines, scansComments } from "../docs/annotationScanner.js";
+import { commentLines, extractComments, extractPropertyStrings, findCitations, markdownProseLines, scansComments } from "../docs/annotationScanner.js";
 import type { FileAnnotations } from "../../repositories/annotationsStore.js";
 
-/** Bump when the comment or citation scanner's OUTPUT changes, so stored annotations are re-scanned. */
-export const ANNOTATION_SCANNER_VERSION = "a1";
+/**
+ * Bump when the comment or citation scanner's OUTPUT changes, so stored annotations are re-scanned.
+ * a2: citations.json format v1.1 — `scan.codeStrings` property-string literals.
+ */
+export const ANNOTATION_SCANNER_VERSION = "a2";
 
 /** The annotation key a run over this repo would record now: scanner version + citations.json hash. */
 export function currentAnnotationKey(repoPath: string): string {
@@ -153,7 +156,14 @@ export async function runIndexPipeline(store: GraphStore, input: RunIndexInput):
     }
     if (!scansComments(language)) return null;
     const comments = extractComments(content, language);
-    return { citations: cfg?.scanCodeComments ? findCitations(commentLines(comments), cfg.citations) : [], comments, language };
+    const citations = cfg?.scanCodeComments ? findCitations(commentLines(comments), cfg.citations) : [];
+    // Format v1.1: string literals assigned to an opted-in property (`owner: '…docs/15 #116…'`).
+    // Comments are skipped by that lexer, so nothing found above is counted twice.
+    if (cfg && cfg.codeStrings.length > 0) {
+      citations.push(...findCitations(extractPropertyStrings(content, language, cfg.codeStrings), cfg.citations));
+      citations.sort((a, b) => a.line - b.line);
+    }
+    return { citations, comments, language };
   };
 
   const selectedFiles = files.slice(0, maxFiles);
