@@ -13,6 +13,8 @@ export interface HandlerConstants {
   WATCH_ACTIVE_TTL_MS: number;
   DOCS_INDEXING_ENABLED: boolean;
   DOCS_TOOLS_ENABLED: boolean;
+  /** R1: read tools refresh a stale index themselves. */
+  QUERY_REFRESH_ENABLED?: boolean;
   LLM_ENABLED: boolean;
   REFACTOR_STRICT_APPROVAL: boolean;
   REFACTOR_APPROVAL_SECRET: string;

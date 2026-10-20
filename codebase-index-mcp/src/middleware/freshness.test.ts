@@ -93,11 +93,18 @@ test("a run that outlives the budget is not aborted: the answer says refreshing,
     assert.equal(first.state, "refreshing");
     assert.match(first.reason ?? "", /continues in the background/);
 
-    const second = h.gate.ensureFresh("r"); // joins the in-flight run, does not start another
-    h.finishRun();
-    assert.equal((await second).state, "refreshed");
+    // A call that joins a run already past its budget answers at once — measured live, each call
+    // during a 20 s refresh used to wait another full budget.
+    const t0 = Date.now();
+    const second = await h.gate.ensureFresh("r");
+    assert.equal(second.state, "refreshing");
+    assert.ok(Date.now() - t0 < 15, `joining an overdue run must not wait (${String(Date.now() - t0)} ms)`);
     assert.equal(h.runs.length, 1, "one run, however many callers");
-    assert.deepEqual(await h.gate.ensureFresh("r"), { state: "fresh" });
+
+    h.finishRun();
+    await new Promise((r) => setTimeout(r, 5));
+    assert.deepEqual(await h.gate.ensureFresh("r"), { state: "fresh" }, "the finished run serves the next query");
+    assert.equal(h.runs.length, 1);
   } finally { h.cleanup(); }
 });
 

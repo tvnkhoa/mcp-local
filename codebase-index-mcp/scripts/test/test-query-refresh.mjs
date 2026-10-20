@@ -92,6 +92,10 @@ try {
   writeFileSync(join(tmpDir, "d.ts"), "export function deltaFour(): number {\n  return 4;\n}\n");
   git(tmpDir, "add", ".");
   git(tmpDir, "commit", "-q", "-m", "four");
+  // Behind HEAD, before any read query: health_check must not send the caller to re-index by hand.
+  const behind = js(await client.callTool({ name: "health_check", arguments: { repoId } }));
+  const hint = (behind?.actionHints ?? []).find((h) => h.action === "index_repository");
+  assert(hint && hint.recommended === false && hint.urgency === "low" && /automatically/.test(hint.note ?? ""), "health_check: a stale index is not a manual re-index while the gate is on", JSON.stringify(hint));
   const first = js(await client.callTool({ name: "search_regex", arguments: { repoId, pattern: "deltaFour", profile: "standard" } }));
   assert(first?.freshness?.state === "refreshing", "over budget: freshness.state = refreshing", JSON.stringify(first?.freshness));
   const conf = typeof first?.coverage === "string" ? first.coverage : first?.coverage?.confidence;

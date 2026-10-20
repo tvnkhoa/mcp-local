@@ -137,7 +137,8 @@ export function createFreshnessGate(opts: FreshnessGateOptions): FreshnessGate {
   /** Tree key each repo's last completed refresh covered. */
   const coveredKey = new Map<string, string>();
   const lastCheck = new Map<string, { at: number; note: FreshnessNote }>();
-  const inflight = new Map<string, { mode: "incremental" | "dirty"; promise: Promise<IndexRunResult | null> }>();
+  type Flight = { mode: "incremental" | "dirty"; startedAt: number; promise: Promise<IndexRunResult | null> };
+  const inflight = new Map<string, Flight>();
   const runChain = new Map<string, Promise<unknown>>();
 
   const serialize = <T>(repoId: string, fn: () => Promise<T>): Promise<T> => {
@@ -149,9 +150,11 @@ export function createFreshnessGate(opts: FreshnessGateOptions): FreshnessGate {
 
   const waitBudget = async (
     repoId: string,
-    flight: { mode: "incremental" | "dirty"; promise: Promise<IndexRunResult | null> },
-    started: number
+    flight: Flight
   ): Promise<FreshnessNote> => {
+    // The budget runs from the RUN's start, not this call's: a call that joins a run already past its
+    // budget answers at once. Measured live: every call during a 20 s refresh waited another 5 s.
+    const started = flight.startedAt;
     // A spent budget answers at once. Racing a 0 ms timer is not enough: the run starts in a
     // microtask and its first stretch can finish before the timers phase, so a zero budget waited.
     const remaining = opts.budgetMs - (now() - started);
@@ -182,7 +185,7 @@ export function createFreshnessGate(opts: FreshnessGateOptions): FreshnessGate {
     const started = now();
 
     const running = inflight.get(repoId);
-    if (running) return waitBudget(repoId, running, started);
+    if (running) return waitBudget(repoId, running);
 
     const cached = lastCheck.get(repoId);
     if (cached && started - cached.at < checkTtlMs) return cached.note;
@@ -235,9 +238,9 @@ export function createFreshnessGate(opts: FreshnessGateOptions): FreshnessGate {
         inflight.delete(repoId);
         lastCheck.delete(repoId);
       });
-    const flight = { mode, promise };
+    const flight: Flight = { mode, startedAt: started, promise };
     inflight.set(repoId, flight);
-    return waitBudget(repoId, flight, started);
+    return waitBudget(repoId, flight);
   };
 
   return { ensureFresh, serialize };

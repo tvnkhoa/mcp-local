@@ -95,7 +95,11 @@ export function handleHealthCheck(
     codebaseStatus = "ready";
   }
 
-  const shouldReindex = codebaseStatus === "needs_index" || codebaseStatus === "stale" || codebaseStatus === "dirty";
+  // R1: with the freshness gate on, a stale or dirty index is refreshed by the next read query, so a
+  // manual index_repository is optional. Saying "high" here sent callers to re-index by hand (seen live
+  // right after release B: the hint said high while the gate was already refreshing).
+  const selfRefreshing = constants.QUERY_REFRESH_ENABLED === true && (codebaseStatus === "stale" || codebaseStatus === "dirty");
+  const shouldReindex = !selfRefreshing && (codebaseStatus === "needs_index" || codebaseStatus === "stale" || codebaseStatus === "dirty");
   const shouldEnableWatch = Boolean(repoId && repo && workingTree?.isDirty === true && !watchRunning);
   const actionHints =
     repoId && repo
@@ -103,8 +107,9 @@ export function handleHealthCheck(
           {
             action: "index_repository",
             recommended: shouldReindex,
-            urgency:
-              codebaseStatus === "stale" || codebaseStatus === "needs_index"
+            urgency: selfRefreshing
+              ? "low"
+              : codebaseStatus === "stale" || codebaseStatus === "needs_index"
                 ? "high"
                 : codebaseStatus === "dirty"
                   ? "medium"
@@ -119,6 +124,9 @@ export function handleHealthCheck(
                     : codebaseStatus === "dirty"
                       ? "Working tree changed after latest index run."
                       : "Index appears up-to-date.",
+            ...(selfRefreshing && {
+              note: "Read tools refresh this index automatically on the next query (CODEBASE_INDEX_QUERY_REFRESH_ENABLED). Call index_repository only to force it now."
+            }),
             // `dirty` is sufficient and far cheaper for the refactor case: the pending set is unioned
             // into the changed-file set, so those files are re-indexed even with a clean tree.
             arguments: {
