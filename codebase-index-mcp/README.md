@@ -135,7 +135,7 @@ npm install && npm run build
 
 ## Graph Model
 
-**Edge types and semantics** (10, from the `EdgeType` union in `src/types/index.ts`):
+**Edge types and semantics** (12, from the `EdgeType` union in `src/types/index.ts`):
 
 | Edge | Meaning | Note |
 |------|---------|------|
@@ -149,6 +149,8 @@ npm install && npm run build
 | `EXTENDS` | Class or interface inheritance | |
 | `PUBLISHES` | A `Publish<T>`/`Send<T>` callsite for message contract T | Resolved to the consumer of T (heuristic, by contract name); crosses the bus in trace/call-chain |
 | `CONSUMES` | An `IConsumer<T>`/handler of message contract T | Resolved to the in-repo contract type when present |
+| `USES_CSS_VAR` | A `var(--x)` reference → every `css_variable` definition of `--x` | Resolved by name repo-wide (one edge per definition); traversed by `get_call_chain` / `find_impact_files` |
+| `USES_CSS_CLASS` | A markup use of a class (Vue template `class` / `:class`) → the `css_class` symbols | Emitted by the Vue lane; resolved like `USES_CSS_VAR` |
 
 **Confidence scores**: Values are `0.0–1.0`. Below `0.7` means low confidence — verify with a file read before acting on it.
 
@@ -347,6 +349,7 @@ The refactor flow is: `refactor_replace_preview` → `refactor_replace_apply` �
 - **No-LLM policy**: `CODEBASE_INDEX_LLM_ENABLED=true` causes startup rejection. `npm run guard:no-llm-runtime` statically enforces this.
 - **Staleness**: incremental index fast-skips when indexed commit equals `HEAD` and working tree is clean. Read tools degrade gracefully on a stale index — `find_impact_files`/`get_change_context` embed a non-fatal `staleWarning` rather than erroring.
 - **Windows native build**: `better-sqlite3` requires Visual Studio C++ Build Tools. If build fails, install VS Build Tools.
+- **CSS lane** (MCP-ISSUE-075): `.css` files are parsed with `postcss`, not tree-sitter. Custom properties become `css_variable` symbols (one per definition site, named `--x`), class selectors `css_class` symbols (one per name per file, named `.x`); `var(--x)` is a `USES_CSS_VAR` edge, so `search_symbols("--text-tertiary")` plus `get_call_chain(direction:"callers")` answers "who uses this token". `dead_code_scan` never reports CSS symbols. SCSS/Less are not indexed.
 - **Docs lane**: disabled by default (`CODEBASE_INDEX_DOCS_INDEXING_ENABLED=false`). Use `docsMode: "off"` per run for fastest indexing.
 - **Watch**: keep `CODEBASE_INDEX_WATCH_AUTO_START_ENABLED=false`. Start watchers manually only during active debug sessions, stop immediately after.
 

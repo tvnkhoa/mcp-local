@@ -102,7 +102,9 @@ export type RunIndexInput = {
 // v3: MCP-ISSUE-065 — .csproj module ids are separator/case-canonical, ProjectReference and .sln
 // DEPENDS_ON edges target them (or a `project:` token), and the .sln proxy module symbols are gone.
 // v4: markdown file-path mentions accept any repo-relative path (release C); unchanged files need a full run to pick it up.
-export const INDEX_VERSION = "v4-path-mentions";
+// v5: MCP-ISSUE-075 CSS lane — `.css` files are indexed (css_variable / css_class, USES_CSS_VAR); an
+// unchanged repo needs a full run to pick them up.
+export const INDEX_VERSION = "v5-css-lane";
 
 export async function runIndexPipeline(store: GraphStore, input: RunIndexInput): Promise<IndexRunSummary> {
   const identity: RunIdentity = {

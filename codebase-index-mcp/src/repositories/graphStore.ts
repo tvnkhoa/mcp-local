@@ -51,7 +51,9 @@ import {
   resolveBaseClassDispatch as resolveBaseClassDispatchImpl,
   resolveExtendsEdges as resolveExtendsEdgesImpl,
   resolveImplementsEdges as resolveImplementsEdgesImpl,
-  resolvePublishesConsumesEdges as resolvePublishesConsumesEdgesImpl
+  resolvePublishesConsumesEdges as resolvePublishesConsumesEdgesImpl,
+  resolveCssEdges as resolveCssEdgesImpl,
+  type CssResolutionStats
 } from "../services/graph/edgeResolver.js";
 import {
   linkTestsToSource as linkTestsToSourceImpl,
@@ -680,6 +682,11 @@ export class GraphStore {
 
   resolveImportEdges(repoId: string, maxUnresolvedRows = 0): number {
     return resolveImportEdgesImpl(this.db, repoId, maxUnresolvedRows);
+  }
+
+  /** MCP-ISSUE-075: bind `cssvar:` / `cssclass:` tokens to their CSS definitions, repo-wide, by name. */
+  resolveCssEdges(repoId: string): CssResolutionStats {
+    return resolveCssEdgesImpl(this.db, repoId);
   }
 
   buildCallResolutionContext(repoId: string): ReturnType<typeof buildCallResolutionContextImpl> {

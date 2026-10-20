@@ -211,7 +211,11 @@ export type SymbolRecord = {
   symbolId: string;
   filePath: string;
   name: string;
-  kind: "function" | "class" | "method" | "variable" | "module" | "interface" | "property" | "constructor" | "type" | "struct" | "record" | "record struct" | "impl" | "unknown";
+  kind: "function" | "class" | "method" | "variable" | "module" | "interface" | "property" | "constructor" | "type" | "struct" | "record" | "record struct" | "impl" | "unknown"
+    /** MCP-ISSUE-075: a CSS custom-property definition (`--text-tertiary`), one symbol per definition site. */
+    | "css_variable"
+    /** MCP-ISSUE-075: a CSS class selector (`.btn`), one symbol per name per file. */
+    | "css_class";
   line: number;
   /** Last line of the symbol's source span (1-indexed). Optional: null on indexes built before end-line tracking. */
   endLine?: number;
@@ -237,7 +241,11 @@ export type EdgeRecord = {
    * C# allows one base class and many interfaces, and several tools read `IMPLEMENTS` as "satisfies an
    * interface contract" — merging them would make those answers wrong without changing their shape.
    */
-  type: "IMPORTS" | "CALLS" | "DEPENDS_ON" | "IMPLEMENTS" | "EXTENDS" | "TYPE_REF" | "PROPERTY_REF" | "PROPERTY_WRITE" | "PUBLISHES" | "CONSUMES";
+  type: "IMPORTS" | "CALLS" | "DEPENDS_ON" | "IMPLEMENTS" | "EXTENDS" | "TYPE_REF" | "PROPERTY_REF" | "PROPERTY_WRITE" | "PUBLISHES" | "CONSUMES"
+    /** MCP-ISSUE-075: `var(--x)` → the `css_variable` definition(s); `cssvar:<name>` until resolved. */
+    | "USES_CSS_VAR"
+    /** MCP-ISSUE-075: a markup use of a class (Vue template) → the `css_class` symbol(s); `cssclass:<.name>` until resolved. */
+    | "USES_CSS_CLASS";
   confidence?: number;
   reason?: string;
   /** ENH-029-B: RHS source text captured at PROPERTY_WRITE sites (assigned literal/expression). */
@@ -250,8 +258,12 @@ export type EdgeRecord = {
  * crosses the call graph references this single source so the surface stays consistent — adding
  * a future flow edge here updates trace_execution_flow, get_call_chain, and get_change_context
  * at once instead of needing the literal duplicated across queries.
+ *
+ * MCP-ISSUE-075: the two CSS edge types are here so "who uses `--text-tertiary`" is a plain
+ * `get_call_chain(direction:"callers")` / `find_impact_files` question. They originate only at CSS
+ * symbols and (via the Vue lane) at components, so a traversal from C# or plain TS never meets them.
  */
-export const CALL_TRAVERSAL_EDGE_TYPES = ["CALLS", "PUBLISHES"] as const;
+export const CALL_TRAVERSAL_EDGE_TYPES = ["CALLS", "PUBLISHES", "USES_CSS_VAR", "USES_CSS_CLASS"] as const;
 /** SQL `in (...)` value list form of CALL_TRAVERSAL_EDGE_TYPES (constant literals, safe to inline). */
 export const CALL_TRAVERSAL_EDGE_SQL_LIST = CALL_TRAVERSAL_EDGE_TYPES.map((t) => `'${t}'`).join(", ");
 
@@ -521,7 +533,7 @@ export type EdgeProvenance = {
  * the same kind: a `<ProjectReference>` / `.sln` entry naming a project outside the repo or behind an
  * MSBuild property; an in-repo project edge carries the target's real module symbol id instead.
  */
-export const UNRESOLVED_SYMBOL_TOKEN_PREFIXES = ["callee:", "property:", "type:", "iface:", "base:", "import:"] as const;
+export const UNRESOLVED_SYMBOL_TOKEN_PREFIXES = ["callee:", "property:", "type:", "iface:", "base:", "import:", "cssvar:", "cssclass:"] as const;
 
 /**
  * SQL predicate form of {@link UNRESOLVED_SYMBOL_TOKEN_PREFIXES}, for filtering in the query rather

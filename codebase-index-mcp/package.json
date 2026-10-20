@@ -61,7 +61,8 @@
     "test:sqlite-guardrails": "node scripts/test/test-sqlite-guardrails.mjs",
     "test:approval-token": "node scripts/test/test-approval-token.mjs",
     "test:route-map-roundtrip": "node scripts/test/test-route-map-roundtrip.mjs",
-    "test:field-access-exact": "node scripts/test/test-field-access-exact.mjs"
+    "test:field-access-exact": "node scripts/test/test-field-access-exact.mjs",
+    "test:css-symbols": "node scripts/test/test-css-symbols.mjs"
   },
   "dependencies": {
     "@mcp/core": "file:../packages/core",
@@ -72,6 +73,7 @@
     "chokidar": "^4.0.3",
     "glob": "^11.0.1",
     "minimatch": "^10.0.1",
+    "postcss": "8.5.29",
     "sqlite-vec": "0.1.9",
     "sqlite-vec-windows-x64": "0.1.9",
     "tree-sitter": "^0.21.1",
