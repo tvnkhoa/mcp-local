@@ -60,6 +60,8 @@ export type RunIndexInput = {
   maxFileSizeBytes?: number;
   /** Cap for markdown files (bytes). Env: CODEBASE_INDEX_MAX_MARKDOWN_BYTES. */
   maxMarkdownBytes?: number;
+  /** Skip files .gitignore excludes (default true). Env: CODEBASE_INDEX_RESPECT_GITIGNORE. */
+  respectGitignore?: boolean;
   /** Number of extraction workers for large-file lane. Default 2. */
   parseWorkers?: number;
   /** Per-job timeout for worker-lane extraction in milliseconds. Default 20s. */

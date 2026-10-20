@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -55,6 +56,26 @@ test("the dirty-file restriction still applies on top of the exclusion", async (
       false
     );
     assert.deepEqual(rel(root, files), ["src/f1.ts"]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("gitignored output is not walked, and is named in the skip tally; untracked-not-ignored is", async () => {
+  // wec.aria (release B acceptance): packages/core/dist-runtime/ is gitignored, yet was indexed, so
+  // every core symbol appeared twice. Git decides what is source.
+  const root = makeRepo({ "src": 2, "dist-runtime/tools": 3 });
+  try {
+    writeFileSync(path.join(root, ".gitignore"), "dist-runtime/\n");
+    execFileSync("git", ["init", "-q"], { cwd: root });
+    execFileSync("git", ["add", ".gitignore", "src/f0.ts"], { cwd: root });
+    // src/f1.ts stays untracked but not ignored: it is new work, and must be indexed.
+    const { files, droppedByPath } = await scanRepoFiles({ repoId: "r", repoPath: root, mode: "full" }, 100, false);
+    assert.deepEqual(rel(root, files).filter((p) => p.endsWith(".ts")), ["src/f0.ts", "src/f1.ts"]);
+    assert.equal(droppedByPath.get("gitignored\u0000.ts"), 3);
+
+    const off = await scanRepoFiles({ repoId: "r", repoPath: root, mode: "full", respectGitignore: false }, 100, false);
+    assert.equal(rel(root, off.files).filter((p) => p.startsWith("dist-runtime/")).length, 3, "the opt-out restores the plain walk");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

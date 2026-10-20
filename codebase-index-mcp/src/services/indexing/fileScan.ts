@@ -18,6 +18,7 @@ import { glob } from "glob";
 
 import { INDEX_IGNORE_GLOBS, hasExcludedPathSegment } from "./fileFilter.js";
 import { tallySkip, type SkipTally } from "./skipReport.js";
+import { listGitVisibleFiles } from "../git/gitHelpers.js";
 import { indexLog } from "./indexProgress.js";
 
 export interface FileScanInput {
@@ -26,6 +27,8 @@ export interface FileScanInput {
   readonly mode: string;
   /** Dirty mode (ENH-A): repo-relative POSIX paths to restrict the scan to. */
   readonly onlyRelativePaths?: Set<string>;
+  /** Skip files .gitignore excludes (default true; no effect outside git). Env: CODEBASE_INDEX_RESPECT_GITIGNORE. */
+  readonly respectGitignore?: boolean;
 }
 
 export interface FileScanResult {
@@ -90,11 +93,19 @@ export async function scanRepoFiles(
   // and a large one could fill the whole budget before `shouldIndexFile` discarded it. Tested on the
   // repo-relative path, so a repo that itself lives under e.g. `D:/assets/` is not emptied.
   const droppedByPath: SkipTally = new Map();
+  // Release B.1 (wec.aria acceptance): gitignored build output was indexed — `packages/core/dist-runtime`
+  // put every core symbol in the graph twice (gate.ts:260 and dist-runtime/tools/gate.js:250). Git's
+  // own answer decides; a non-git repo keeps the plain walk.
+  const visible = input.respectGitignore === false || input.onlyRelativePaths ? null : listGitVisibleFiles(input.repoPath);
   const files = globbed.filter((abs) => {
     const relative = path.relative(input.repoPath, abs).replace(/\\/g, "/");
     if (hasExcludedPathSegment(relative)) {
       // A dirty-mode run walks only its delta; counting the rest of the tree here would misreport it.
       if (!input.onlyRelativePaths) tallySkip(droppedByPath, "excluded_path", relative);
+      return false;
+    }
+    if (visible && !visible.has(relative)) {
+      tallySkip(droppedByPath, "gitignored", relative);
       return false;
     }
     return input.onlyRelativePaths ? input.onlyRelativePaths.has(relative) : true;

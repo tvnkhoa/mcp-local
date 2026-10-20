@@ -3329,3 +3329,48 @@ this afternoon failed at that harness, which is the highest rate observed so far
   - Every bucket outside `excluded_path` sums exactly to `filesSkipped`.
   - docs/15 is in the docs lane as 712 sections.
 - **Guarded:** `fileFilter.test.ts` (markdown cap, generated extensions), `skipReport.test.ts`, and the `runStore.test.ts` round-trip.
+
+## MCP-ISSUE-069 — a deleted or reverted dirty file survived as a phantom, reported as current
+
+- **Status:** ✅ FIXED 2026-10-20 (P1; found by wec.aria's acceptance of release B, which rejected R1).
+- **Scenario:** on wec.aria, with a clean tree at HEAD:
+  - Create an untracked `zz-r1-probe.mjs` with `export function r1_probe_acceptance_zq7()`. `search_symbols` finds it, via the R1 gate's dirty-mode refresh.
+  - Delete the file.
+  - `search_symbols` still finds it, with no freshness block and later `coverage: "high"`. `health_check` says "index is up-to-date".
+- **Causes (three):**
+  - Dirty mode re-reads only what is dirty NOW. A file that stopped being dirty — deleted, or reverted — is never looked at again.
+  - `evaluateIncrementalSkip` trusted a clean tree at the indexed commit. After a dirty run the index holds working-tree content, so that proves nothing. An explicit `index_repository(mode:"incremental")` skipped too.
+  - The gate cached a "fresh" verdict for 3 s, serving the phantom silently inside that window.
+- **Fix:**
+  - A dirty-run ledger beside the index DB (shared by every server process) records the paths the index holds from the working tree. When one is no longer dirty, the gate runs `incremental`, which re-hashes every file and prunes the gone. `index_repository` and the watcher keep the ledger current.
+  - The skip gate never skips when the last run that did work was `dirty`.
+  - No reused "fresh" verdict. The tree is read with one `git status --porcelain=v2 --branch -z`: about 110 ms on wec.aria, against about 330 ms for the previous four spawns.
+  - `health_check` names files indexed from a working tree that has since changed, and does not report `ready`.
+- **Guarded:**
+  - `test:query-refresh` (19 checks): untracked create → found → delete → gone; tracked edit → found → revert → gone, with committed symbols intact; `health_check` names the pending file; an over-budget cleanup is not "high".
+  - `runPolicy.test.ts` (the skip rule) and `statusPorcelain.test.ts` (the parser).
+
+## MCP-ISSUE-070 — gitignored build output was indexed, so symbols appeared twice
+
+- **Status:** ✅ FIXED 2026-10-20 (P2; found by wec.aria's acceptance of release B).
+- **Scenario:** wec.aria's `.gitignore` excludes `dist-runtime/`, yet `packages/core/dist-runtime/**` was in the graph.
+  - Every core symbol showed twice (`gate.ts:260` and `dist-runtime/tools/gate.js:250`), so results and `change_impact` were doubled.
+  - The walk honoured only the server's own ignore globs and path segments, never the repo's `.gitignore`. The dirty set already did (`--exclude-standard`), so the two scopes disagreed.
+- **Fix:**
+  - In a git repo the scan keeps only what `git ls-files --cached --others --exclude-standard` shows.
+  - The rest is tallied as `gitignored` in `skippedByReason`.
+  - Outside git, the plain walk is unchanged.
+  - Opt-out: `CODEBASE_INDEX_RESPECT_GITIGNORE=false`.
+  - Previously indexed gitignored files are pruned by the next complete (full or incremental) run.
+- **Guarded:** `fileScan.test.ts`: a gitignored `dist-runtime/` is dropped and tallied; untracked-not-ignored is kept; the opt-out restores the walk.
+
+## MCP-ISSUE-071 — `search_symbols` padded an exact name match with 49 vector near-neighbours
+
+- **Status:** ✅ FIXED 2026-10-20 (P2; found by wec.aria's acceptance of release B).
+- **Scenario:** `search_symbols(strategy:"name", limit:50)` for one exact, unique name returned 50 rows, 49 of them `matchType:"fuzzy"`. Agents read rows 2-50 as matches.
+- **Cause:** fewer than 3 full-text hits triggers vector padding up to `limit`. MCP-ISSUE-058(b) labelled the rows, but they still shared the result list.
+- **Fix:**
+  - `symbols` holds only rows that match by name, and `count` counts only those.
+  - Near-neighbours go to a separate `nearby` field, at most 5.
+  - With no name match, `symbols` is empty, `nearby` holds the neighbours, and coverage stays `low` with "not found, here is what is nearby".
+- **Guarded:** `searchSymbolsNearby.test.ts` (3 tests).

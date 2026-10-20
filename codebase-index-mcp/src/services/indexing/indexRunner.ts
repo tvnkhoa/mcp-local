@@ -39,6 +39,8 @@ export interface IndexRunnerLimits {
   readonly maxFileSizeBytes: number;
   /** Cap for markdown files; omitted means the `fileFilter` default. */
   readonly maxMarkdownBytes?: number;
+  /** Skip files .gitignore excludes; omitted means true. */
+  readonly respectGitignore?: boolean;
   readonly parseWorkers: number;
   readonly parseJobTimeoutMs: number;
 }
@@ -215,6 +217,7 @@ export function createIndexRunner(options: IndexRunnerOptions): RunIndexAndResol
     largeFileThresholdBytes: limits.largeFileThresholdBytes,
     maxFileSizeBytes: limits.maxFileSizeBytes,
     ...(limits.maxMarkdownBytes !== undefined && { maxMarkdownBytes: limits.maxMarkdownBytes }),
+    ...(limits.respectGitignore !== undefined && { respectGitignore: limits.respectGitignore }),
     parseWorkers: limits.parseWorkers,
     parseJobTimeoutMs: limits.parseJobTimeoutMs,
     onlyRelativePaths: dirtyFileSet,

@@ -250,6 +250,26 @@ export function readWorkingTreeState(repoPath: string): { head: string | null; d
 }
 
 /**
+ * Every file git would show for this directory — tracked, plus untracked that no .gitignore excludes —
+ * as POSIX paths relative to `repoPath` (which may be a subdirectory of the repo). `null` outside git,
+ * so the caller falls back to the plain walk.
+ */
+export function listGitVisibleFiles(repoPath: string): Set<string> | null {
+  try {
+    const out = execFileSync("git", ["-c", "core.quotePath=false", "ls-files", "-z", "--cached", "--others", "--exclude-standard"], {
+      cwd: repoPath,
+      encoding: "utf8",
+      timeout: 30_000,
+      maxBuffer: 256 * 1024 * 1024,
+      windowsHide: true
+    });
+    return new Set(out.split("\0").filter(Boolean).map((p) => p.replace(/\\/g, "/")));
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Full working-tree delta as repo-relative POSIX paths: unstaged + staged + untracked.
  * Unlike `collectGitChangedFiles` (unstaged-vs-HEAD only) this is the complete set of
  * files `index_repository(mode="dirty")` must re-index. Returns an empty set on a

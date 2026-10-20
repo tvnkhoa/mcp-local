@@ -341,9 +341,10 @@ test("the env contract covers every server, and grew as S-35 intended", () => {
   // cap, so a large decision log is indexed by section instead of skipped whole.
   // 42 -> 44 with CODEBASE_INDEX_QUERY_REFRESH_ENABLED / _BUDGET_MS (R1): read tools refresh a stale
   // index before answering, within a budget.
+  // 44 -> 45 with CODEBASE_INDEX_RESPECT_GITIGNORE (release B.1): gitignored build output stays out.
   const counts = Object.fromEntries(SERVERS.map((s) => [s.key, s.env.length]));
   assert.deepEqual(counts, {
-    "codebase-index": 44,
+    "codebase-index": 45,
     "postgres-mcp": 35,
     "observe-mcp": 31,
     "bitbucket-mcp": 16,

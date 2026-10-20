@@ -71,7 +71,13 @@ export function handleSearchSymbols(
     args.limit,
     strategyUsed
   );
-  const results = args.excludeTests ? resultsRaw.filter((s) => !isTestPath(s.filePath)) : resultsRaw;
+  const filtered = args.excludeTests ? resultsRaw.filter((s) => !isTestPath(s.filePath)) : resultsRaw;
+  // Release B.1 (wec.aria acceptance): vector near-neighbours padded a name query to `limit` — 49 of 50
+  // rows fuzzy for one exact, unique name — and agents read row 2 onwards as matches. Rows that match
+  // by name are the answer; near-neighbours go in `nearby`, at most five, never mixed in. When nothing
+  // matches by name, `symbols` is empty and `nearby` is all there is (coverage says "not found").
+  const results = filtered.filter((s) => s.matchType !== "fuzzy");
+  const nearbyRaw = filtered.filter((s) => s.matchType === "fuzzy").slice(0, NEARBY_MAX);
   const suggestions = results.length === 0 ? store.getSearchSuggestions(args.query, args.repoId ?? null, 5) : [];
   // When name-search still comes back empty, point the agent at the intent path explicitly.
   const suggestion =
@@ -85,23 +91,13 @@ export function handleSearchSymbols(
   // query — it is a list of things that sound similar. The filed case returned 50 such rows for a
   // symbol that does not exist in the repo, at confidence "high" with no gap noted. Say it plainly,
   // and never claim "high" for a set with no index match in it.
-  const fuzzyCount = results.filter((r) => r.matchType === "fuzzy").length;
-  if (fuzzyCount > 0) {
-    const allFuzzy = fuzzyCount === results.length;
-    if (allFuzzy) {
-      coverage.confidence = "low";
-      coverage.knownGaps = [
-        `no symbol matched '${args.query}' by name — all ${String(fuzzyCount)} result(s) are vector near-neighbours (matchType:"fuzzy") and may share no name token with the query. Treat this as "not found, here is what is nearby".`,
-        ...coverage.knownGaps
-      ];
-      coverage.suggestFallback ??= `confirm with search_regex(pattern:"${args.query}") before concluding the symbol exists.`;
-    } else {
-      if (coverage.confidence === "high") coverage.confidence = "medium";
-      coverage.knownGaps = [
-        `${String(fuzzyCount)} of ${String(results.length)} result(s) are vector near-neighbours (matchType:"fuzzy"), not name matches.`,
-        ...coverage.knownGaps
-      ];
-    }
+  if (results.length === 0 && nearbyRaw.length > 0) {
+    coverage.confidence = "low";
+    coverage.knownGaps = [
+      `no symbol matched '${args.query}' by name — the ${String(nearbyRaw.length)} row(s) in \`nearby\` are vector near-neighbours and may share no name token with the query. Treat this as "not found, here is what is nearby".`,
+      ...coverage.knownGaps
+    ];
+    coverage.suggestFallback ??= `confirm with search_regex(pattern:"${args.query}") before concluding the symbol exists.`;
   }
 
   // MCP-ISSUE-060: `symbolId` at EVERY profile. `compact` is the documented default and this is the
@@ -118,21 +114,26 @@ export function handleSearchSymbols(
     ...(s.matchType ? { matchType: s.matchType } : {})
   });
 
+  const nearby = nearbyRaw.length > 0 ? { nearby: nearbyRaw.map(row) } : {};
+
   if (profile === "nano") {
     const topSymbols = results.slice(0, 10).map(row);
-    return ctx.asText({ query: args.query, strategy: strategyUsed, autoRouted: autoRouted || undefined, count: results.length, topSymbols, hasMore: results.length > topSymbols.length, suggestions: suggestions.slice(0, 3), suggestion, isStale: staleness?.isStale ?? null, coverage: coverage.knownGaps.length > 0 ? coverage : coverage.confidence }, profile);
+    return ctx.asText({ query: args.query, strategy: strategyUsed, autoRouted: autoRouted || undefined, count: results.length, topSymbols, hasMore: results.length > topSymbols.length, ...nearby, suggestions: suggestions.slice(0, 3), suggestion, isStale: staleness?.isStale ?? null, coverage: coverage.knownGaps.length > 0 ? coverage : coverage.confidence }, profile);
   }
 
   if (profile === "compact") {
-    return ctx.asText({ query: args.query, strategy: strategyUsed, autoRouted: autoRouted || undefined, count: results.length, symbols: results.map(row), suggestions, suggestion, staleness, coverage }, profile);
+    return ctx.asText({ query: args.query, strategy: strategyUsed, autoRouted: autoRouted || undefined, count: results.length, symbols: results.map(row), ...nearby, suggestions, suggestion, staleness, coverage }, profile);
   }
 
   if (profile === "verbose") {
-    return ctx.asText({ query: args.query, strategy: strategyUsed, autoRouted: autoRouted || undefined, count: results.length, symbols: results, suggestions, suggestion, staleness, coverage, summary: { repoFilter: args.repoId ?? null, languageFilter: args.language ?? null, kindFilter: args.kind ?? null, filePathFilter: args.filePath ?? null } }, profile);
+    return ctx.asText({ query: args.query, strategy: strategyUsed, autoRouted: autoRouted || undefined, count: results.length, symbols: results, ...(nearbyRaw.length > 0 && { nearby: nearbyRaw }), suggestions, suggestion, staleness, coverage, summary: { repoFilter: args.repoId ?? null, languageFilter: args.language ?? null, kindFilter: args.kind ?? null, filePathFilter: args.filePath ?? null } }, profile);
   }
 
-  return ctx.asText({ query: args.query, strategy: strategyUsed, autoRouted: autoRouted || undefined, count: results.length, symbols: results, suggestions, suggestion, staleness, coverage }, profile);
+  return ctx.asText({ query: args.query, strategy: strategyUsed, autoRouted: autoRouted || undefined, count: results.length, symbols: results, ...(nearbyRaw.length > 0 && { nearby: nearbyRaw }), suggestions, suggestion, staleness, coverage }, profile);
 }
+
+/** How many vector near-neighbours a name query returns beside (never inside) its matches. */
+const NEARBY_MAX = 5;
 
 // ── search_literals ───────────────────────────────────────────────────────────
 // ISSUE-023 — search string-literal content ({ value, file, line, enclosingSymbol })

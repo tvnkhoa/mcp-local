@@ -145,7 +145,9 @@ async function main() {
   // resolve null and skip every assertion below. Only standard/verbose return full records.
   const searchResult = await client.callTool({ name: "search_symbols", arguments: { repoId, query: "getImpactFilesImpl", strategy: "name", profile: "standard", limit: 1 } });
   const searchJson = readJson(searchResult).json;
-  const symbolId = searchJson?.symbols?.[0]?.symbolId ?? searchJson?.candidates?.[0]?.symbolId ?? null;
+  // The 100-file sample need not contain this name. Any callable id will do here, and since release
+  // B.1 a vector near-neighbour comes back in `nearby`, no longer padded into `symbols`.
+  const symbolId = searchJson?.symbols?.[0]?.symbolId ?? searchJson?.nearby?.[0]?.symbolId ?? searchJson?.candidates?.[0]?.symbolId ?? null;
 
   // Assert rather than skip. A silent skip here hid a broken lookup indefinitely.
   assert(typeof symbolId === "string", "resolved a callable symbolId for get_call_chain");

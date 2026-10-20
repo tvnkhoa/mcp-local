@@ -86,6 +86,8 @@ const REFACTOR_PREVIEW_TTL_MS = numberFromEnv("CODEBASE_INDEX_REFACTOR_PREVIEW_T
 const REFACTOR_LOW_CONFIDENCE_THRESHOLD = 0.8;
 /** R1: read tools refresh a stale index before answering, within this budget (the run is never aborted). */
 const QUERY_REFRESH_ENABLED = booleanFromEnv("CODEBASE_INDEX_QUERY_REFRESH_ENABLED", true);
+/** Index only what git shows (tracked + untracked-not-ignored). false = the plain directory walk. */
+const RESPECT_GITIGNORE = booleanFromEnv("CODEBASE_INDEX_RESPECT_GITIGNORE", true);
 const QUERY_REFRESH_BUDGET_MS = clamp(numberFromEnv("CODEBASE_INDEX_QUERY_REFRESH_BUDGET_MS", 5_000), 1, 120_000);
 const SERVER_VERSION = resolveServerVersion(MODULE_DIR);
 
@@ -112,6 +114,7 @@ const runIndexUnserialized = createIndexRunner({
     largeFileThresholdBytes: LARGE_FILE_THRESHOLD_BYTES,
     maxFileSizeBytes: MAX_FILE_SIZE_BYTES,
     maxMarkdownBytes: MAX_MARKDOWN_BYTES,
+    respectGitignore: RESPECT_GITIGNORE,
     parseWorkers: PARSE_WORKERS,
     parseJobTimeoutMs: PARSE_JOB_TIMEOUT_MS
   },
