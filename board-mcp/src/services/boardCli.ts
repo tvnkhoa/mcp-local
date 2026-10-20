@@ -27,7 +27,16 @@ export const MAX_OUTPUT_BYTES = 8 * 1024 * 1024;
 /** The prefix board.mjs puts on every refusal (`console.error(\`board: ${e.message}\`)`). */
 export const REFUSAL_PREFIX = "board: ";
 
-export function createBoardRunner(config: BoardConfig): BoardRunner {
+export interface RunnerOptions {
+  /**
+   * The child's environment. Omitted (the server always omits it): the child inherits this
+   * process's. A test passes one to point board.mjs's home directory — and so its transcripts — at
+   * a scratch folder.
+   */
+  readonly env?: NodeJS.ProcessEnv;
+}
+
+export function createBoardRunner(config: BoardConfig, options: RunnerOptions = {}): BoardRunner {
   const cli = boardCliPath(config);
   return (args) =>
     new Promise<BoardRun>((resolve) => {
@@ -36,6 +45,7 @@ export function createBoardRunner(config: BoardConfig): BoardRunner {
         [cli, ...args],
         {
           cwd: config.repoRoot,
+          ...(options.env === undefined ? {} : { env: options.env }),
           timeout: config.callTimeoutMs,
           killSignal: "SIGTERM",
           maxBuffer: MAX_OUTPUT_BYTES,

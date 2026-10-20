@@ -14,6 +14,7 @@ import { createNullLogger } from "@mcp/core";
 import { asErrorPayload, createToolRegistry, dispatchToolCall } from "@mcp/sdk";
 
 import { boardRepoRootFromEnv, type BoardConfig } from "../config/index.js";
+import type { BoardRunner } from "../types/index.js";
 import { buildTools, toWireError } from "./index.js";
 
 const STUB = `
@@ -44,8 +45,8 @@ export function configFor(root: string, overrides: Partial<BoardConfig> = {}): B
 const logger = createNullLogger("test");
 
 /** Dispatch a call exactly as `index.ts` wires it. */
-export async function call(config: BoardConfig, name: string, args: Record<string, unknown>) {
-  const registry = createToolRegistry(buildTools(config));
+export async function call(config: BoardConfig, name: string, args: Record<string, unknown>, run?: BoardRunner) {
+  const registry = createToolRegistry(buildTools(config, run));
   const result = await dispatchToolCall(registry, name, args, {
     logger,
     formatError: (error) => asErrorPayload(toWireError(error), "verbose")

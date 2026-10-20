@@ -58,7 +58,7 @@ at a verify gate run `notes_write(unit, session)` first.
 - Not offered: `prune-shots`, `precheck.mjs`, `shoot.mjs`, `release --force` (the owner's, from the CLI).
 - `check` / `gate` returning `ok: false` without `refused` is a findings report, not a failure.
 - A call gets SIGTERM after `BOARD_CALL_TIMEOUT_MS` (default 120 s; a cold `status`/`check` takes up to ~120 s).
-- `gate`: every `||` part at least 8 characters, verbatim — a blank or two-letter part is refused.
+- `gate`: no `||` part may be blank (refused here). A part under 8 characters counts only if it is a whole line of the owner's message — board.mjs's rule, so quote more of what they typed.
 
 ## Response profiles
 

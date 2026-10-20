@@ -47,23 +47,22 @@ export const repoPath = () =>
 /** Rubric question ids, e.g. route, layout. `[]` means every answer was no (`--yes=none`). */
 export const yesIds = () => z.array(z.string().regex(/^[a-z][a-z0-9_-]*$/u, "a rubric question id")).max(20);
 
-/** The owner's words for a gate. board.mjs splits on `||` itself; every part must be in one message. */
-export const MIN_GATE_PART_CHARS = 8;
-
 /**
  * The owner's words for a gate.
  *
- * board.mjs splits `--gate` on `||`: it searches for the FIRST part, and proves every non-empty
- * part. A blank first part (`"||"`, `" || x"`) makes it search for "" — which matches the newest
- * owner message in the session — and blank parts are dropped from the proof, so `"||"` would pass
- * any gate. So EVERY part must be non-blank, and at least MIN_GATE_PART_CHARS (8) characters after
- * trimming: owner words are a sentence or a chosen option's label, and a two-letter fragment ("ok")
- * sits in nearly every message. A shorter genuine answer is passed from the CLI.
+ * board.mjs splits `--gate` on `||` and proves every part against one owner message. A blank part
+ * proves nothing (every message contains ""), so this refuses one — `"||"`, `" || "`, `"a||"` —
+ * before any process starts. board.mjs refuses it too since wec.aria 704eb34f (docs/15 #755); this
+ * check is defence in depth.
+ *
+ * Whether a SHORT part proves anything is the CLI's rule, not this server's: board.mjs accepts a
+ * part under 8 characters only as a whole line of the owner's message ("Đồng ý" alone on a line),
+ * which only it can see. So "ok" passes here and board.mjs decides.
  */
 export const gateWords = () =>
   text(4000).refine(
-    (s) => s.split("||").every((part) => [...part.trim()].length >= MIN_GATE_PART_CHARS),
-    `every ||-separated part must be at least ${MIN_GATE_PART_CHARS} characters after trimming — the owner's words, verbatim, never blank`
+    (s) => s.split("||").every((part) => part.trim() !== ""),
+    "every ||-separated part must hold words — a blank part proves nothing"
   );
 
 /** `session`: validated as a UUID by the `session_uuid` guard, so a bad value is a refusal. */
@@ -73,7 +72,7 @@ export const SESSION_DESCRIPTION =
   "Your Claude Code session id — a lowercase UUID, the name of your transcript file. Passed as --as=<uuid>: a claim is named by it, and --gate searches only this session's transcript. Required; a label is refused.";
 
 export const GATE_DESCRIPTION =
-  "The owner's words, verbatim, as they typed them or chose them in an AskUserQuestion in THIS session (join several answers from one message with ||; each part at least 8 characters). Passed as --gate=…; board.mjs finds the message and proves the words are in it. The wrapper never takes --words/--session/--uuid.";
+  "The owner's words, verbatim, as they typed them or chose them in an AskUserQuestion in THIS session (join several answers from one message with ||; no part may be blank). Passed as --gate=…; board.mjs finds the message and proves the words are in it — a part under 8 characters only as a whole line of that message. The wrapper never takes --words/--session/--uuid.";
 
 export const SHA = /^[0-9a-f]{4,40}$/u;
 

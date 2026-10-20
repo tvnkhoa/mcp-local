@@ -218,10 +218,10 @@ test("an unknown tool reports not_found", async () => {
   assert.deepEqual(payload, { code: "not_found", message: "Unknown tool: prune_shots." });
 });
 
-// --- blank / short owner words (a blank part makes board.mjs search for "" and prove nothing) ---
+// --- blank owner words (a blank part proves nothing; short words are the CLI's call) ---
 
-test("gate words with a blank or short ||-part are refused before any process runs", async () => {
-  for (const gate of ["||", " || ", "|| ||", "a||", "ok", "Đồng ý", "Approve all || ok", "|| Approve (Recommended)", "Approve (Recommended) ||"]) {
+test("gate words with a blank ||-part are refused before any process runs", async () => {
+  for (const gate of ["||", " || ", "|| ||", "a||", "|| Approve (Recommended)", "Approve (Recommended) ||  "]) {
     for (const [name, args] of [
       ["advance", { unit: "screen--review-intent", phase: "P1" }],
       ["acknowledge", { unit: "screen--review-intent", sha: "abcdef1" }],
@@ -235,7 +235,12 @@ test("gate words with a blank or short ||-part are refused before any process ru
       assert.match(payload.detail, /gate/u);
     }
   }
-  // Every part at least 8 characters passes.
-  const okCall = await call(config, "advance", { unit: "screen--review-intent", phase: "P1", gate: "Đồng ý cả hai || Giữ nguyên", session: SESSION });
-  assert.equal(okCall.isError, false, JSON.stringify(okCall.payload));
+});
+
+test("short gate words pass through to board.mjs unchanged — the whole-line rule is the CLI's", async () => {
+  for (const gate of ["ok", "Đồng ý", "Duyệt || ok", "Đồng ý cả hai || Giữ nguyên"]) {
+    const { isError, payload } = await call(config, "advance", { unit: "screen--review-intent", phase: "P1", gate, session: SESSION });
+    assert.equal(isError, false, `${JSON.stringify(gate)}: ${JSON.stringify(payload)}`);
+    assert.deepEqual(argvOf(payload.text), ["advance", "screen--review-intent", "P1", `--gate=${gate}`, `--as=${SESSION}`]);
+  }
 });

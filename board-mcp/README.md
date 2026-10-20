@@ -114,7 +114,8 @@ starts *refusing* unknown flags before it supports `--json`, these five calls wi
 `io.is_session_id`). It is passed as `--as=<uuid>` — a claim is named by it, and `--gate` then
 searches **only that session's transcript**. A label, an upper-case id or anything else is refused
 (`session_uuid` guard); a missing one is a `validation_error`. Claims a session made through the
-CLI under a label are not this session's.
+CLI under a label are not this session's. Requiring the UUID on every write tool, not only the
+gate-passing ones, was agreed with wec.aria (the board's owner).
 
 **Gate-passing tools** — the calls that can carry the owner's words past a gate:
 
@@ -127,10 +128,12 @@ CLI under a label are not this session's.
 | `discover` | the `owner: true` disposition |
 
 The owner's words go in as `gate` → `--gate=<words>` (join several answers from one message with
-`||`). **Every `||` part must be at least 8 characters after trimming.** board.mjs searches for the
-first part and drops blank parts from its proof, so `"||"` would make it search for `""` — the
-newest owner message — and prove nothing; a fragment like `ok` sits in nearly every message. A
-genuine answer shorter than 8 characters is recorded from the CLI. The wrapper **never** accepts `--words`, `--session` or `--uuid` from the model: board.mjs
+`||`). **This server refuses a blank `||` part** (`"||"`, `" || "`, `"a||"`): every message
+contains `""`, so a blank part proves nothing. board.mjs refuses it too since wec.aria 704eb34f
+(docs/15 #755); the check here is defence in depth. **Whether short words prove anything is the
+CLI's rule**, not this server's: board.mjs accepts a part under 8 characters only as a whole line of
+the owner's message (`Đồng ý` alone on a line), which only it can see — so `"ok"` is passed through
+and board.mjs decides. The wrapper **never** accepts `--words`, `--session` or `--uuid` from the model: board.mjs
 finds the message itself. This server never writes a unit file or a claim — board.mjs does.
 
 **What this proves, and what it does not.** board.mjs proves the OWNER typed those words (or chose
