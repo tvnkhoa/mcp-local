@@ -19,6 +19,7 @@ import { isTestPath } from "../../services/indexing/fileFilter.js";
 import { buildCallableHint } from "../../services/analysis/callableHint.js";
 import { findDocsBehindCode } from "../../services/analysis/docFreshness.js";
 import { GraphStore } from "../../repositories/graphStore.js";
+import { exactFieldAnswer, tryExactFieldAccesses } from "./fieldAccessExact.js";
 import type { HandlerContext } from "./handlerContext.js";
 
 // ── Staleness Gate ────────────────────────────────────────────────────────────
@@ -200,11 +201,15 @@ export function handleGetCallChain(
 // instead of falling back to grep. Accepts a property symbolId or a resolvable name.
 
 export function handleFindFieldAccesses(
-  args: { repoId: string; symbolId?: string; name?: string; mode: "read" | "write" | "all"; limit: number; excludeTests: boolean; profile: string },
+  args: { repoId: string; symbolId?: string; name?: string; declarationFile?: string; declarationLine?: number; ownerName?: string; mode: "read" | "write" | "all"; limit: number; excludeTests: boolean; profile: string },
   ctx: HandlerContext
 ): CallToolResult {
   const { store } = ctx;
   const profile = resolveResponseProfile(args.profile as Parameters<typeof resolveResponseProfile>[0]);
+
+  // R3 exact: a TS/JS field is answered by the TypeScript LanguageService when the lane is on.
+  const exact = tryExactFieldAccesses(args, ctx, profile, staleWarningFor(args.repoId, store));
+  if (exact) return exact;
 
   let symbolId = args.symbolId;
   if (!symbolId && args.name) {
@@ -461,7 +466,7 @@ const schemaKeyCache = new Map<string, { mtimeMs: number; size: number; keys: Sc
 
 /** Zod shape keys across the repo's non-test TS/JS files, read from disk (R4). */
 function scanSchemaKeys(store: GraphStore, repoId: string, repoPath: string): { keys: SchemaKey[]; filesScanned: number; capped: boolean } {
-  const files = store.listFilesByLanguage(repoId, ["typescript", "javascript"]).filter((f) => !isTestPath(f));
+  const files = store.listIndexedFilePaths(repoId, ["typescript", "javascript"]).map((f) => f.replace(/\\/g, "/")).filter((f) => !isTestPath(f));
   const keys: SchemaKey[] = [];
   let filesScanned = 0;
   for (const file of files.slice(0, TERM_SCAN_MAX_FILES)) {
@@ -489,7 +494,8 @@ function scanSchemaKeys(store: GraphStore, repoId: string, repoPath: string): { 
  * that mention it, and the Zod shapes that declare it. Without: the reverse report — snake_case
  * schema keys the registry has no row for. The registry is the `registryDoc` of citations.json.
  */
-function readTerm(store: GraphStore, repoId: string, term: string | undefined, limit: number): unknown {
+function readTerm(ctx: HandlerContext, repoId: string, term: string | undefined, limit: number): unknown {
+  const { store } = ctx;
   const repo = store.getRepository(repoId);
   if (!repo) throw notFound(`unknown repoId '${repoId}'.`, { repoId });
   const load = loadCitationConfig(repo.repoPath);
@@ -533,6 +539,10 @@ function readTerm(store: GraphStore, repoId: string, term: string | undefined, l
 
   const entries = registryEntries(registryLines, term, limit);
   const declared = scan.keys.filter((k) => k.key === term);
+  const schemaKeys = declared.map((k) => {
+    const section = entries.definitions.find((d) => ownerMatchesSection(k.owner, d.section))?.section;
+    return { filePath: k.filePath, line: k.line, owner: k.owner, ...(section && { registrySection: section }) };
+  });
   return {
     repoId,
     mode: "term",
@@ -541,17 +551,44 @@ function readTerm(store: GraphStore, repoId: string, term: string | undefined, l
     definedIn: entries.definitions.map((d) => ({ line: d.line, section: d.section, sectionLine: d.sectionLine, text: d.text })),
     mentionCount: entries.mentionCount,
     mentions: entries.mentions,
-    schemaKeys: declared.map((k) => {
-      const section = entries.definitions.find((d) => ownerMatchesSection(k.owner, d.section))?.section;
-      return { filePath: k.filePath, line: k.line, owner: k.owner, ...(section && { registrySection: section }) };
-    }),
+    schemaKeys,
     ...scanMeta,
+    usages: termUsages(ctx, repoId, term, schemaKeys, limit),
     ...(entries.definitions.length === 0 && {
       hint: declared.length > 0
         ? `the code declares '${term}' but ${registryDoc} has no table row defining it — a candidate for the registry.`
         : `'${term}' is neither defined in ${registryDoc} nor declared as a Zod shape key. The name is matched exactly (case-sensitive).`
     }),
-    next: `find_field_accesses(name:"${term}") for its reads and writes.`
+    next: `find_field_accesses(name:"${term}") for the full site list, or with ownerName to pick another declaration.`
+  };
+}
+
+/**
+ * The term's typed reads and writes (R3 exact), for the schema key the registry row matches — or
+ * the only one. Several unmatched keys answer with the candidates, as find_field_accesses does.
+ */
+function termUsages(ctx: HandlerContext, repoId: string, term: string, keys: { filePath: string; line: number; registrySection?: string }[], limit: number): unknown {
+  const chosen = keys.find((k) => k.registrySection) ?? (keys.length === 1 ? keys[0] : undefined);
+  const answer = exactFieldAnswer(ctx, repoId, term, chosen ? { declarationFile: chosen.filePath, declarationLine: chosen.line } : {});
+  if (!answer) return { status: "unavailable", note: "the TypeScript lane is off (CODEBASE_INDEX_TS_LS_ENABLED) or the repo has no indexed TS/JS files." };
+  if (answer.status === "cap_breach") return { status: "cap_breach", coverage: "gap", accessesWithheld: true, breach: answer.breach };
+  const gaps = { gapCount: answer.gaps.length, gaps: answer.gaps.slice(0, limit) };
+  if (answer.status !== "ok") {
+    return { status: answer.status, candidates: "candidates" in answer ? answer.candidates.map((c) => ({ id: c.id, ownerName: c.ownerName, readCount: c.readCount, writeCount: c.writeCount })) : [], ...gaps };
+  }
+  const site = (x: (typeof answer.sites)[number]) => ({ filePath: x.file, line: x.line, how: x.how, ...(x.enclosingName && { enclosingName: x.enclosingName }) });
+  const writes = answer.sites.filter((x) => x.kind === "WRITE");
+  const reads = answer.sites.filter((x) => x.kind === "READ");
+  return {
+    status: "ok",
+    coverage: "exact",
+    declaration: { id: answer.selected.id, ownerName: answer.selected.ownerName },
+    writeCount: writes.length,
+    readCount: reads.length,
+    writes: writes.slice(0, limit).map(site),
+    reads: reads.slice(0, limit).map(site),
+    ...((writes.length > limit || reads.length > limit) && { truncated: true }),
+    ...gaps
   };
 }
 
@@ -946,7 +983,7 @@ export function handleQueryDocs(
   }
 
   if (args.mode === "term") {
-    return ctx.asText(readTerm(store, args.repoId, args.query, args.limit), profile);
+    return ctx.asText(readTerm(ctx, args.repoId, args.query, args.limit), profile);
   }
 
   if (args.mode === "cites") {

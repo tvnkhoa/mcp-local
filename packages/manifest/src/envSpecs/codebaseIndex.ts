@@ -177,6 +177,11 @@ export function codebaseIndexEnv(root: string): readonly EnvField[] {
       note: "When true, startup fails unless CODEBASE_INDEX_REFACTOR_APPROVAL_SECRET is set."
     },
 
+    // --- Typed field references (R3 exact) ----------------------------------------
+    { name: "CODEBASE_INDEX_TS_LS_ENABLED", required: false, codeDefault: "true", kind: "boolean", section: "Typed field references", note: "find_field_accesses answers TS/JS fields from a TypeScript LanguageService (coverage `exact`). Lazy: no program is built until such a query; C# fields keep the graph answer. false = the graph's lower bound." },
+    { name: "CODEBASE_INDEX_TS_LS_COLD_START_MS", required: false, codeDefault: "60000", section: "Typed field references", note: "Budget for one answer, cold (program build) or warm. A breach returns coverage `gap` and no list; the built program stays warm for the next call." },
+    { name: "CODEBASE_INDEX_TS_LS_MAX_RSS_MB", required: false, codeDefault: "2500", section: "Typed field references", note: "Process RSS ceiling while answering. A breach returns coverage `gap` and drops the repo's program." },
+
     // --- Diagnostics --------------------------------------------------------------
     { name: "CODEBASE_INDEX_LOG_MODE", deprecatedAliases: ["CODEBASE_INDEX_INDEX_LOG"], required: false, section: "Diagnostics", note: "Enables verbose index-progress logging on stderr." },
 

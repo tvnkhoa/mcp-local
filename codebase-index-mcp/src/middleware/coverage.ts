@@ -161,6 +161,61 @@ function gapsFor(kind: CoverageKind, lowOrEmpty: boolean, query: string | undefi
   }
 }
 
+/**
+ * R3 exact: coverage for an answer from the TypeScript LanguageService rather than the graph.
+ *
+ * Two words the graph tools never use. `exact` — the type checker resolved every reference in the
+ * program within the caps; what it could NOT see is listed file by file in `gaps` (`.vue` files,
+ * parse arguments it cannot follow, dynamic `obj[key]` sites), so the caller knows precisely where
+ * to look by hand. `gap` — a cap was breached and the answer is withheld entirely: a partial list
+ * labelled exact is the one failure this lane must never produce. A stale index lowers `exact` to
+ * `high`, because files added since the last index run are not in the program.
+ */
+export type TypedCoverageBlock = {
+  confidence: "exact" | "high" | "gap";
+  engine: "typescript-language-service";
+  knownGaps: string[];
+  gaps: { file: string; line: number | null; reason: string }[];
+  suggestFallback: string | null;
+};
+
+export function buildTypedCoverageBlock(input: {
+  gaps: { file: string; line: number | null; reason: string }[];
+  breach?: { kind: string; detail: string } | null;
+  staleness?: { commitsBehind: number | null; dirtyCount: number } | null;
+}): TypedCoverageBlock {
+  if (input.breach) {
+    return {
+      confidence: "gap",
+      engine: "typescript-language-service",
+      knownGaps: [
+        `the TypeScript LanguageService exceeded its ${input.breach.kind === "memory" ? "memory" : "time"} cap — ${input.breach.detail}. No accesses are returned: a partial list would read as complete.`
+      ],
+      gaps: [],
+      suggestFallback:
+        input.breach.kind === "time"
+          ? "retry: the program stays warm after a cold build, so the next call usually answers in well under a second; or raise CODEBASE_INDEX_TS_LS_COLD_START_MS."
+          : "raise CODEBASE_INDEX_TS_LS_MAX_RSS_MB, or disable the lane (CODEBASE_INDEX_TS_LS_ENABLED=false) to get the graph's lower bound."
+    };
+  }
+  const knownGaps: string[] = [];
+  if (input.gaps.length > 0) knownGaps.push(`${String(input.gaps.length)} site(s) the type checker cannot attribute are listed in coverage.gaps, by file.`);
+  if (input.staleness) {
+    const behind = input.staleness.commitsBehind;
+    knownGaps.push(
+      `index is ${behind === null ? "an unknown number of" : String(behind)} commit(s) behind HEAD with ${String(input.staleness.dirtyCount)} dirty file(s) — ` +
+        "files added since the last index run are not in the program."
+    );
+  }
+  return {
+    confidence: input.staleness ? "high" : "exact",
+    engine: "typescript-language-service",
+    knownGaps,
+    gaps: input.gaps,
+    suggestFallback: input.staleness ? "re-index (index_repository mode='incremental') for an exact answer." : null
+  };
+}
+
 export function buildCoverageBlock(input: CoverageInput): CoverageBlock {
   const empty = input.resultCount === 0;
   // An empty result surfaces gaps + a fallback hint (the dangerous "looks authoritative" case).

@@ -190,3 +190,19 @@ function parsePerformanceProfileEnv(raw: string | undefined): PerformanceProfile
 export function performanceProfileOverrideFromEnv(): PerformanceProfile | "auto" {
   return parsePerformanceProfileEnv(process.env.CODEBASE_INDEX_LARGE_REPO_PROFILE);
 }
+
+/**
+ * R3 exact: the TypeScript LanguageService lane of `find_field_accesses`.
+ *
+ * `CODEBASE_INDEX_TS_LS_ENABLED` defaults to true: the lane only ever runs for a TS/JS field, is
+ * lazy (no program is built until such a query arrives) and replaces an answer the graph can only
+ * give as a lower bound. `_COLD_START_MS` is the budget for one answer (cold or warm) and
+ * `_MAX_RSS_MB` the process RSS ceiling; a breach is a coverage gap, never a partial list.
+ */
+export function tsLanguageServiceConfigFromEnv(): { enabled: boolean; budgetMs: number; maxRssMb: number } {
+  return {
+    enabled: booleanFromEnv("CODEBASE_INDEX_TS_LS_ENABLED", true),
+    budgetMs: numberFromEnv("CODEBASE_INDEX_TS_LS_COLD_START_MS", 60_000),
+    maxRssMb: numberFromEnv("CODEBASE_INDEX_TS_LS_MAX_RSS_MB", 2_500)
+  };
+}

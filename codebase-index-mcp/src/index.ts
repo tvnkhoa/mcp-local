@@ -32,6 +32,7 @@ import {
   performanceProfileOverrideFromEnv,
   ratioFromEnvName,
   stringFromEnv,
+  tsLanguageServiceConfigFromEnv,
   watchConfigFromEnv
 } from "./config/envConfig.js";
 import {
@@ -89,6 +90,8 @@ const QUERY_REFRESH_ENABLED = booleanFromEnv("CODEBASE_INDEX_QUERY_REFRESH_ENABL
 /** Index only what git shows (tracked + untracked-not-ignored). false = the plain directory walk. */
 const RESPECT_GITIGNORE = booleanFromEnv("CODEBASE_INDEX_RESPECT_GITIGNORE", true);
 const QUERY_REFRESH_BUDGET_MS = clamp(numberFromEnv("CODEBASE_INDEX_QUERY_REFRESH_BUDGET_MS", 5_000), 1, 120_000);
+/** R3 exact: the TypeScript LanguageService lane of find_field_accesses (lazy; TS/JS fields only). */
+const TS_LS = tsLanguageServiceConfigFromEnv();
 const SERVER_VERSION = resolveServerVersion(MODULE_DIR);
 
 const toolContextStorage = new AsyncLocalStorage<ToolRequestContext>();
@@ -209,6 +212,7 @@ function buildHandlerContext(): HandlerContext {
       DOCS_INDEXING_ENABLED,
       DOCS_TOOLS_ENABLED,
       QUERY_REFRESH_ENABLED,
+      TS_LS,
       LLM_ENABLED,
       REFACTOR_STRICT_APPROVAL,
       REFACTOR_APPROVAL_SECRET,

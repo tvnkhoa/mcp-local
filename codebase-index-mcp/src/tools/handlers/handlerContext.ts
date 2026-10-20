@@ -15,6 +15,11 @@ export interface HandlerConstants {
   DOCS_TOOLS_ENABLED: boolean;
   /** R1: read tools refresh a stale index themselves. */
   QUERY_REFRESH_ENABLED?: boolean;
+  /**
+   * R3 exact: TypeScript LanguageService lane for TS/JS fields in find_field_accesses. Absent (as in
+   * handler unit tests that build a bare context) means the lane is off and the graph answers.
+   */
+  TS_LS?: { enabled: boolean; budgetMs: number; maxRssMb: number };
   LLM_ENABLED: boolean;
   REFACTOR_STRICT_APPROVAL: boolean;
   REFACTOR_APPROVAL_SECRET: string;

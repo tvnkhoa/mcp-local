@@ -343,10 +343,12 @@ test("the env contract covers every server, and grew as S-35 intended", () => {
   // 42 -> 44 with CODEBASE_INDEX_QUERY_REFRESH_ENABLED / _BUDGET_MS (R1): read tools refresh a stale
   // index before answering, within a budget.
   // 44 -> 45 with CODEBASE_INDEX_RESPECT_GITIGNORE (release B.1): gitignored build output stays out.
+  // 45 -> 48 with CODEBASE_INDEX_TS_LS_ENABLED / _COLD_START_MS / _MAX_RSS_MB (R3 exact): find_field_accesses
+  // answers TS/JS fields from a TypeScript LanguageService, within a time and memory cap.
   // board-mcp arrived with 3: BOARD_REPO_ROOT, BOARD_WRITE_ENABLED, BOARD_CALL_TIMEOUT_MS.
   const counts = Object.fromEntries(SERVERS.map((s) => [s.key, s.env.length]));
   assert.deepEqual(counts, {
-    "codebase-index": 45,
+    "codebase-index": 48,
     "postgres-mcp": 35,
     "observe-mcp": 31,
     "bitbucket-mcp": 16,
