@@ -80,6 +80,9 @@ try {
   assert(JSON.stringify(citers) === JSON.stringify(["checks/steps.mjs", "docs/adr/0021-boundaries.md", "src/turn.ts"]), "every citer is listed: a doc (backticked form), a code comment and an owner string", JSON.stringify(row?.citedBy));
   const fromOwner = (row?.citedBy ?? []).filter((c) => posix(c.filePath) === "checks/steps.mjs");
   assert(fromOwner.length === 1 && fromOwner[0].line === 3, "codeStrings: the `owner:` literal is a citer at its own line (3); the `note:` literal is not", JSON.stringify(fromOwner));
+  // Paths are stored with the scan's separator; the response must always be forward-slashed (wec.aria
+  // release D: `checks\gate\steps.mjs` came back raw and a forward-slash filter missed it).
+  assert((row?.citedBy ?? []).every((c) => !c.filePath.includes("\\")), "citedBy paths are forward-slashed as returned", JSON.stringify(row?.citedBy?.map((c) => c.filePath)));
   const fromCode = (row?.citedBy ?? []).find((c) => posix(c.filePath) === "src/turn.ts");
   assert(fromCode?.enclosingSymbol?.name === "runTurn" && fromCode?.line === 2, "a code-comment citation carries its line and enclosing symbol", JSON.stringify(fromCode));
 

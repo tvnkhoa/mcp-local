@@ -369,7 +369,7 @@ function codeCommentsFor(store: GraphStore, repoId: string, query: string): { co
     codeComments: hits.map((h) => {
       const sym = store.findSymbolAtLine(repoId, h.filePath, h.startLine);
       return {
-        filePath: h.filePath,
+        filePath: h.filePath.replace(/\\/g, "/"),
         startLine: h.startLine,
         endLine: h.endLine,
         text: h.text.length > 600 ? `${h.text.slice(0, 600)}…` : h.text,
@@ -397,7 +397,8 @@ function readCitations(store: GraphStore, repoId: string, target: string | undef
   const withSymbol = (r: CitationRow) => {
     const sym = /\.mdx?$/i.test(r.filePath) ? null : store.findSymbolAtLine(repoId, r.filePath, r.line);
     return {
-      filePath: r.filePath,
+      // Stored with the scan's separator; a response path is always forward-slashed.
+      filePath: r.filePath.replace(/\\/g, "/"),
       line: r.line,
       patternId: r.patternId,
       raw: r.raw,
