@@ -1,6 +1,6 @@
 ---
 name: {{KEY}}
-description: "Code graph and docs analysis via the {{DISPLAY_NAME}} (indexed SQLite graph, no LLM): find a symbol/function/class, who calls X, what X calls, blast radius of changing a file or symbol, which tests to run after my change, rename or bulk refactor with preview+rollback, dead code, circular deps, HTTP routes/endpoints, implementations of an interface, regex/literal search with the enclosing symbol, read a symbol's source, risk triage before merge; and search the docs, where is X documented, broken doc links, stale/outdated docs. Use before grep/read_file for any code-structure question. Not for semantic 'what does this mean' questions with no identifier (find the identifier first with search_regex) or for files outside indexed repos."
+description: "Code graph and docs analysis via the {{DISPLAY_NAME}} (indexed SQLite graph, no LLM): find a symbol/function/class, who calls X, what X calls, blast radius of changing a file or symbol, which tests to run after my change, rename or bulk refactor with preview+rollback, dead code, circular deps, HTTP routes/endpoints, implementations of an interface, regex/literal search with the enclosing symbol, which files mention X (grep -l), read a symbol's source, read one doc section by heading (instead of sed -n line ranges), risk triage before merge; and search the docs, where is X documented, broken doc links, stale/outdated docs. Use before grep/read_file for any code-structure question. Not for semantic 'what does this mean' questions with no identifier (find the identifier first with search_regex) or for files outside indexed repos."
 ---
 
 # {{DISPLAY_NAME}}
@@ -19,10 +19,11 @@ orient(repoId, intent: "<what you are trying to do>", seed?: "<identifier>")
   `CODEBASE_INDEX_ALLOWED_ROOTS` allowlist.
 - `orient` is the router: it returns the recommended tools, arguments and caveats for an intent, from
   the server's own table. Ask it rather than guessing a tool.
-- `shouldReindex: true` → `index_repository(repoId, repoPath, mode: "incremental")`;
-  `mode: "dirty"` re-indexes just the working-tree changes; `mode: "full"` after a parser upgrade.
-  `docsMode` defaults to `auto` = the server setting (docs on). A stale index is not fatal: impact
-  tools answer with a `staleWarning`.
+- **You do not need to re-index before asking.** Every read tool first brings the index up to the
+  current HEAD and working tree (incremental / dirty) within a few seconds. A response carrying
+  `freshness.state: "refreshing"` came from the previous index while the refresh finishes in the
+  background, and its `coverage` is capped below `high`; ask again shortly. `mode: "full"` is only
+  needed after a parser upgrade.
 
 ## Pick the tool
 
@@ -31,6 +32,8 @@ orient(repoId, intent: "<what you are trying to do>", seed?: "<identifier>")
 | Where is `Foo` defined / what is it | `search_symbols(query: "Foo", strategy: "name")` → `get_symbol_context_pack(repoId, name: "Foo")` |
 | Show me its code | `get_symbol_source(repoId, symbolId \| name)` — not `read_file` |
 | Grep a pattern | `search_regex(repoId, pattern, filePathPrefix?, language?)` — returns the enclosing symbol; `scanAll: true` adds json/yaml |
+| Which files mention X (`grep -l`) | `search_regex(repoId, pattern, outputMode: "files")` — one row per file, `limit` counts files |
+| Read one section of a doc | `query_docs(repoId, mode: "section", filePath, headingPrefix, maxTokens?)` — by heading, never by line range; not `sed -n` |
 | Find user-facing text / error messages | `search_literals(repoId, query)` |
 | Who calls / what does it call | `get_call_chain(repoId, symbolId, direction: "callers" \| "callees", depth)` |
 | Execution flow from an entry point | `trace_execution_flow(repoId, entrySymbolId)` — a **callable** id, not a class |
@@ -71,6 +74,7 @@ refactor_replace_rollback(rollbackId)
 | Mode | Answers | Needs |
 |---|---|---|
 | `search` | full-text over headings, prose and code blocks | `query` |
+| `section` | one section by heading prefix, current text from disk, cut at a block boundary to `maxTokens` | `filePath`, `headingPrefix` |
 | `links` | broken doc-to-doc links, orphans, hubs | — |
 | `behind` | docs whose last commit predates the code they mention | — |
 | `stale` | docs mentioning these (changed) symbols | `symbolIds` |

@@ -167,7 +167,7 @@ export function createFreshnessGate(opts: FreshnessGateOptions): FreshnessGate {
         state: "refreshing",
         mode: flight.mode,
         elapsedMs: now() - started,
-        reason: `a ${flight.mode} re-index is still running after the ${String(opts.budgetMs)} ms query budget; it continues in the background and a later query will use it. This answer comes from the previous index.`
+        reason: `${flight.mode === "incremental" ? "an" : "a"} ${flight.mode} re-index is still running after the ${String(opts.budgetMs)} ms query budget; it continues in the background and a later query will use it. This answer comes from the previous index.`
       };
     }
     if (outcome === null) {
