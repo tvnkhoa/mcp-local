@@ -24,7 +24,7 @@ them.
 | `bitbucket-mcp` | `bitbucket-mcp/` | Read repositories, pull requests and pipelines, and **create PRs** (write gated). | [README](../../bitbucket-mcp/README.md) |
 | `board-mcp` | `board-mcp/` | Thin wrapper over wec.aria's pipeline board CLI (`checks/board/board.mjs`): read the board; claim, advance and record when writes are enabled. Gate words need the caller's session UUID. | [README](../../board-mcp/README.md) |
 
-Counts (138 tools, 152 env vars) come from the manifest, not from this page —
+Counts (138 tools, 155 env vars) come from the manifest, not from this page —
 [Architecture › As built](../architecture/as-built.md) §1 names the command.
 
 ## Operational skills

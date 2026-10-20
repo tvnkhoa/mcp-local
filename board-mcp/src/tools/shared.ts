@@ -128,7 +128,9 @@ export async function callBoard(
   // defect, and dispatch turns it into internal_error.
   const outcome = await run([command, ...args]);
   const result = interpretRun(outcome, { command, findingsExit: options.findingsExit, parseJson: options.parseJson });
-  if (result.ok && result.value.refused === true && options.refusalHint !== undefined) {
+  // The owner-words hint only for a refusal about the words (wec.aria acceptance): a "not on disk"
+  // refusal of the same tool keeps the generic hint, which tells the caller to read `why`.
+  if (result.ok && result.value.refused === true && options.refusalHint !== undefined && /--gate|words|owner/i.test(result.value.why ?? "")) {
     return { ok: true, value: { ...result.value, hint: options.refusalHint } };
   }
   return result;
