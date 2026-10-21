@@ -114,7 +114,7 @@ npm install && npm run build
 | `dead_code_scan` | Find symbols with no callers. Note: runtime-wired symbols may appear dead. |
 | `detect_circular_dependencies` | Find import cycles |
 | `detect_changes` | Risk-scored change analysis with policy presets (`quick-triage`, `strict-review`, `release-gate`) |
-| `link_tests_to_source` | Map test files to source symbols (use `minScore >= 0.7`) |
+| `link_tests_to_source` | Map test files to source symbols (use `minScore >= 0.7`). `forWorkingTreeDiff: true` answers "which tests does my uncommitted change need": dirty files → reverse import/component/workspace-package closure → tests (each with `why`), plus one vitest command per package from its config read lexically. Nothing is executed. |
 
 ### Refactoring
 | Tool | Description |
@@ -356,6 +356,7 @@ The refactor flow is: `refactor_replace_preview` → `refactor_replace_apply` �
 - **HTML and SVG** (MCP-ISSUE-077): `.html` pages are language `html` with `IMPORTS` edges for what they load; `.svg` files are module-only asset nodes (also under `assets/`, `public/`, `static/`), reached by TS/JS imports (`?raw` / `?url` queries ignored) and Vue template `src` / `href` — so "who uses icon.svg" is `find_impact_files(filePath: "…/icon.svg")`. Binary assets (png, jpg, pdf, fonts, …) are skipped as `binary_asset`.
 - **Build-named folders** (MCP-ISSUE-078): in a git repo, `bin/`, `obj/`, `build/`, `out/` and `target/` defer to git — a tracked (or untracked, not ignored) source file under one is indexed; everything else under them stays out. `node_modules`, `dist` and `.git` are always excluded.
 - **Paths** (MCP-ISSUE-079): every stored path uses forward slashes on every platform; a database written by an older build on Windows is migrated once at start-up and its files are re-extracted by the next run.
+- **Tests for a diff** (MCP-ISSUE-080): `link_tests_to_source(repoId, forWorkingTreeDiff: true)` takes the dirty files (staged, unstaged, untracked — the same `git status` read as the freshness gate), walks back over `IMPORTS`, `USES_COMPONENT` and bare imports of the repo's own workspace packages (mapped through that package's `package.json` `exports`) up to `maxDepth` (6) hops and `maxFiles` (2000) files, and lists the test files reached, every changed test file itself (`why: "changed itself"`) and name links with score ≥ `minScore` (0.7 in this mode; the rest are counted in `belowMinScore`). For each package it finds the vitest/vite config vitest would load, reads `include` / `exclude` / `root` / `test.projects` lexically (never executes it; an unreadable value is named and the package dir is used) and emits e.g. `corepack pnpm --filter @aria/core exec vitest run test/audit.test.ts` (package manager from the lockfile). A test no config admits goes to `excluded` with the reason; a `node:test` file gets runner `unknown` and a `node --test` hint. Nothing is run.
 - **Docs lane**: disabled by default (`CODEBASE_INDEX_DOCS_INDEXING_ENABLED=false`). Use `docsMode: "off"` per run for fastest indexing.
 - **Watch**: keep `CODEBASE_INDEX_WATCH_AUTO_START_ENABLED=false`. Start watchers manually only during active debug sessions, stop immediately after.
 

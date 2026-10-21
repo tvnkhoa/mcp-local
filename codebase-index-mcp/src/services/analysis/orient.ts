@@ -166,7 +166,8 @@ const INTENT_RULES: IntentRule[] = [
     id: "tests",
     keywords: ["test coverage", "which tests", "tests to run", "covering tests", "what tests"],
     recommendedTools: [
-      { tool: "change_impact", why: "ranked tests-to-run for the current diff + residual-risk note" },
+      { tool: "link_tests_to_source", why: "uncommitted change: tests reaching the dirty files (imports, components, workspace packages) + a vitest command per package", args: { forWorkingTreeDiff: true } },
+      { tool: "change_impact", why: "ranked tests-to-run for a committed range (baseRef) + residual-risk note" },
       { tool: "link_tests_to_source", why: "test→source links for a specific file" }
     ],
     caveats: ["test links are heuristic; low-score links may be missed (raise/lower testLinkMinScore)."]

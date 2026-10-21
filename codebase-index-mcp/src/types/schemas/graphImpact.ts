@@ -167,13 +167,23 @@ export const linkTestsToSourceSchema = (MAX_RESULT_LIMIT: number) => z
     filePath: z.string().max(500).optional(),
     limit: z.number().int().min(1).max(MAX_RESULT_LIMIT).default(100),
     maxCandidates: z.number().int().min(1).max(20).default(3),
-    minScore: z.number().min(0).max(1).default(0.4),
+    // No schema default: 0.4 for the pair listing, 0.7 for forWorkingTreeDiff (R11) — the handler
+    // picks by mode, so an explicit value always wins.
+    minScore: z.number().min(0).max(1).optional(),
     // MCP-ISSUE-056/058(c): drop test files from the SOURCE side of each pair. A test-to-test link
     // is never the answer to "what covers this file".
     excludeTests: z.boolean().default(false),
+    // R11 (MCP-ISSUE-080): tests for the working-tree diff, plus a vitest command per package.
+    forWorkingTreeDiff: z.boolean().default(false),
+    maxDepth: z.number().int().min(1).max(12).default(6),
+    maxFiles: z.number().int().min(1).max(20000).default(2000),
     profile: responseProfileSchema.default("compact")
   })
-  .strict();
+  .strict()
+  .refine((v) => !(v.forWorkingTreeDiff && v.filePath), {
+    message: "filePath and forWorkingTreeDiff are exclusive: the diff names the files",
+    path: ["filePath"]
+  });
 
 // Trace execution flow
 export const traceExecutionFlowSchema = z

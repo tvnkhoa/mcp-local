@@ -1367,7 +1367,7 @@
         "openWorldHint": false,
         "readOnlyHint": true
       },
-      "description": "Link tests to likely source files using deterministic naming heuristics plus IMPORTS/CALLS tracing. excludeTests=true drops test-path results entirely.",
+      "description": "Link tests to likely source files using deterministic naming heuristics plus IMPORTS/CALLS tracing. excludeTests=true drops test-path results entirely. forWorkingTreeDiff=true answers 'which tests does my uncommitted change need': the dirty files (staged, unstaged, untracked) → reverse closure over IMPORTS, USES_COMPONENT and workspace-package imports (maxDepth, maxFiles; truncation reported) → the tests reached, every changed test file itself, and name links with score >= minScore (default 0.7 in this mode; lower ones are dropped and counted in belowMinScore). Each test carries `why`. Per package it reads the nearest vitest/vite config lexically (include, exclude, root, test.projects; never executed — an unreadable value is named and the package dir is used) and emits one command, e.g. `corepack pnpm --filter <pkg> exec vitest run <files>`; tests no include admits are listed in `excluded` with the reason. A node:test file gets runner 'unknown' and a `node --test` hint. Nothing is executed.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -1376,6 +1376,10 @@
           },
           "filePath": {
             "type": "string"
+          },
+          "forWorkingTreeDiff": {
+            "description": "Tests for the working-tree diff plus a vitest command per package. Exclusive with filePath.",
+            "type": "boolean"
           },
           "limit": {
             "maximum": 500,
@@ -1387,7 +1391,20 @@
             "minimum": 1,
             "type": "integer"
           },
+          "maxDepth": {
+            "description": "forWorkingTreeDiff: reverse-import hops from a changed file (default 6).",
+            "maximum": 12,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "maxFiles": {
+            "description": "forWorkingTreeDiff: files the closure may reach before it stops and reports truncation (default 2000).",
+            "maximum": 20000,
+            "minimum": 1,
+            "type": "integer"
+          },
           "minScore": {
+            "description": "Score floor for name/score links. Default 0.4; 0.7 with forWorkingTreeDiff.",
             "maximum": 1,
             "minimum": 0,
             "type": "number"
