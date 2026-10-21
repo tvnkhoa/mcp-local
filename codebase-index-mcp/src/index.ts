@@ -22,7 +22,8 @@ import { runServer } from "@mcp/sdk";
 import { GraphStore } from "./repositories/graphStore.js";
 import { assertPathAllowed, clamp } from "./middleware/indexGuardrails.js";
 import { WatchManager } from "./services/watch/watchManager.js";
-import { createIndexRunner } from "./services/indexing/indexRunner.js";
+import { createIndexRunner, type IndexRunnerLimits } from "./services/indexing/indexRunner.js";
+import { RefreshWorkerClient } from "./services/indexing/refreshWorkerClient.js";
 import { newerBuildRefusal } from "./services/indexing/runPolicy.js";
 import { armWatchInactivityTimer, startAutoWatchers } from "./services/watch/watchLifecycle.js";
 import {
@@ -48,7 +49,7 @@ import { createCodebaseIndexServer } from "./server.js";
 import { buildTools } from "./tools/index.js";
 import { DEFAULT_MAX_MARKDOWN_BYTES } from "./services/indexing/fileFilter.js";
 import { applyFreshness, createFreshnessGate, freshnessStateDir, recordDirtyLedger } from "./middleware/freshness.js";
-import { readWorkingTreeState } from "./services/git/gitHelpers.js";
+import { readWorkingTreeState, readWorkingTreeStateAsync } from "./services/git/gitHelpers.js";
 
 const dbPath = stringFromEnv("CODEBASE_INDEX_DB_PATH", "./codebase-index.db");
 const allowedRoots = allowedRootsFromEnv();
@@ -121,18 +122,19 @@ const store = new GraphStore(dbPath);
  * progress sink is per-request, and the profile override was read from the env on
  * every run before the extraction. Resolving either eagerly would change behaviour.
  */
+const RUNNER_LIMITS: IndexRunnerLimits = {
+  subtxSize: SUBTX_SIZE,
+  checkpointEveryNBatches: CHECKPOINT_EVERY_N_BATCHES,
+  largeFileThresholdBytes: LARGE_FILE_THRESHOLD_BYTES,
+  maxFileSizeBytes: MAX_FILE_SIZE_BYTES,
+  maxMarkdownBytes: MAX_MARKDOWN_BYTES,
+  respectGitignore: RESPECT_GITIGNORE,
+  parseWorkers: PARSE_WORKERS,
+  parseJobTimeoutMs: PARSE_JOB_TIMEOUT_MS
+};
 const runIndexUnserialized = createIndexRunner({
   store,
-  limits: {
-    subtxSize: SUBTX_SIZE,
-    checkpointEveryNBatches: CHECKPOINT_EVERY_N_BATCHES,
-    largeFileThresholdBytes: LARGE_FILE_THRESHOLD_BYTES,
-    maxFileSizeBytes: MAX_FILE_SIZE_BYTES,
-    maxMarkdownBytes: MAX_MARKDOWN_BYTES,
-    respectGitignore: RESPECT_GITIGNORE,
-    parseWorkers: PARSE_WORKERS,
-    parseJobTimeoutMs: PARSE_JOB_TIMEOUT_MS
-  },
+  limits: RUNNER_LIMITS,
   resolveProgressNotifier: () => toolContextStorage.getStore()?.progressNotifier,
   resolvePerformanceProfileOverride: () => performanceProfileOverrideFromEnv()
 });
@@ -140,8 +142,9 @@ const runIndexUnserialized = createIndexRunner({
 /**
  * R1 freshness gate. It owns the per-repo run queue, so every index run in this process —
  * index_repository, the watcher, and the gate's own refreshes — goes through `serialize` and two
- * never write one repo at once. The gate itself is handed the UNSERIALIZED runner: it serializes
- * internally, and passing the wrapped one would make a refresh wait on itself.
+ * never write one repo at once. The gate itself is handed an UNSERIALIZED runner (since release I1b,
+ * the refresh worker's): it serializes internally, and passing the wrapped one would make a refresh
+ * wait on itself.
  */
 /**
  * R1 shared state (refresh locks, dirty-run ledgers) lives in a folder beside the index DB, not loose in
@@ -149,14 +152,25 @@ const runIndexUnserialized = createIndexRunner({
  * showed up as an untracked file.
  */
 const FRESHNESS_LOCK_DIR = freshnessStateDir(dbPath);
+/**
+ * Release I1b: the gate's refresh runs execute in a worker thread on their own connection to the same
+ * DB, so a 25 s dirty run never holds this thread's event loop (see refreshWorkerClient.ts). The run
+ * is the same `createIndexRunner` run, newer-build guard included. index_repository and the watcher
+ * stay on this thread (they stream progress through the request).
+ */
+const refreshWorker = new RefreshWorkerClient({
+  dbPath,
+  limits: RUNNER_LIMITS,
+  onRunLanded: () => store.invalidateProcessCaches()
+});
 const freshnessGate = createFreshnessGate({
   enabled: QUERY_REFRESH_ENABLED,
   budgetMs: QUERY_REFRESH_BUDGET_MS,
   lockDir: FRESHNESS_LOCK_DIR,
   getRepoPath: (repoId) => store.getRepository(repoId)?.repoPath ?? null,
   getIndexedCommit: (repoId) => store.getLatestRun(repoId)?.commitSha ?? null,
-  readTree: (repoPath) => readWorkingTreeState(repoPath),
-  run: (repoId, repoPath, mode) => runIndexUnserialized(repoId, repoPath, mode, DOCS_INDEXING_ENABLED, MAX_FILES_PER_RUN, 200),
+  readTree: (repoPath) => readWorkingTreeStateAsync(repoPath),
+  run: (repoId, repoPath, mode) => refreshWorker.run(repoId, repoPath, mode, DOCS_INDEXING_ENABLED, MAX_FILES_PER_RUN, 200),
   refuseRefresh: (repoId) => newerBuildRefusal(store.getLatestRun(repoId)?.indexVersion),
   markTriggered: (runId) => store.markRunTrigger(runId, "query")
 });
@@ -265,6 +279,12 @@ handle.lifecycle.onShutdown({
   }
 });
 handle.lifecycle.onShutdown({
+  name: "refresh-worker",
+  run: async () => {
+    await refreshWorker.dispose();
+  }
+});
+handle.lifecycle.onShutdown({
   name: "watchers",
   run: async () => {
     for (const timer of watchInactivityTimers.values()) {
@@ -276,7 +296,11 @@ handle.lifecycle.onShutdown({
 });
 
 runServer(handle, {
-  onStarted: () => startAutoWatchers(buildHandlerContext(), AUTO_WATCH_REPOS),
+  onStarted: () => {
+    // Release I1b: the refresh worker opens its connection now, not inside the first query's budget.
+    if (QUERY_REFRESH_ENABLED) refreshWorker.warm();
+    return startAutoWatchers(buildHandlerContext(), AUTO_WATCH_REPOS);
+  },
   // The store and the watchers are acquired above, before start() — so unlike the other
   // three servers this one must run its shutdown hooks on a failed start-up.
   stopOnCrash: true,

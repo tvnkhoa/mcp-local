@@ -16,7 +16,10 @@ languages (`extractorEdges`, `extractorUtils`, `extractorPrimitives`, `extractor
 > `extractionWorkerPool.ts` spawns its worker with `new URL("./extractionWorker.js",
 > import.meta.url)`, so those two files must stay in the same folder. The same holds for
 > `typeResolution/fieldWorkerClient.ts` and `fieldWorker.js` (release I1: the TypeScript / Volar
-> programs of `find_field_accesses` live in that worker, never on the server thread).
+> programs of `find_field_accesses` live in that worker, never on the server thread), and for
+> `indexing/refreshWorkerClient.ts` and `refreshWorker.js` (release I1b: the R1 freshness gate's
+> refresh runs there, on a second SQLite connection to the same DB; a cache the server thread keeps
+> about the index must be cleared from `onRunLanded`, as the vector-search memo is).
 
 > The integration harnesses in `scripts/test/` import compiled modules by path
 > (`dist/repositories/graphStore.js`, …). Moving a source file moves its `dist/` twin, so those

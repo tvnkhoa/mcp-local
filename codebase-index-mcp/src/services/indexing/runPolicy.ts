@@ -55,6 +55,19 @@ export function newerBuildRefusal(latestRunVersion: string | null | undefined, o
   return `this repo's index was written by a newer codebase-index build (${String(latestRunVersion)}); this server runs ${own} and will not write over it. Restart this MCP server to load the newer build.`;
 }
 
+/** Unresolved call rows from which a non-full run still drops the edge indexes for its resolve. */
+export const BULK_RESOLVE_INDEX_DROP_MIN_ROWS = 50_000;
+
+/**
+ * Whether the call-resolve pass drops the four secondary `edges` indexes first (release I1b).
+ * A full run does, as before; a dirty or incremental run only when it resolves a bulk population.
+ * The indexes are DB-wide, so a drop slows every concurrent reader in every server process, and
+ * rebuilding them over the whole table outweighs maintaining them through a few thousand UPDATEs.
+ */
+export function shouldDropEdgeIndexesForResolve(mode: IndexMode, unresolvedRows: number): boolean {
+  return mode === "full" || unresolvedRows >= BULK_RESOLVE_INDEX_DROP_MIN_ROWS;
+}
+
 /**
  * Zero-metric IndexRunSummary for a run that did no work (dirty mode with a clean tree,
  * or an incremental run that skipped). Shared so the two skip paths can't drift as the

@@ -194,3 +194,64 @@ test("release F: a process told it must not write over a newer build answers sta
     assert.equal(h.runs.length, 0);
   } finally { h.cleanup(); }
 });
+
+test("release I1b: an async tree read; two calls racing through it start one run, not two", async () => {
+  const lockDir = mkdtempSync(path.join(tmpdir(), "cim-fresh-"));
+  const runs: IndexMode[] = [];
+  let release: (() => void) | null = null;
+  try {
+    const gate = createFreshnessGate({
+      enabled: true,
+      budgetMs: 30,
+      lockDir,
+      getRepoPath: () => lockDir,
+      getIndexedCommit: () => "aaa111",
+      // Resolves on a later tick, as the server's execFile-based read does.
+      readTree: () => new Promise<RepoTreeState>((resolve) => setTimeout(() => resolve({ head: "bbb222", dirty: [] }), 5)),
+      run: async (_repoId, _repoPath, mode) => {
+        runs.push(mode);
+        await new Promise<void>((resolve) => (release = resolve));
+        return { runId: "run-1" } as IndexRunResult;
+      }
+    });
+    const [a, b] = await Promise.all([gate.ensureFresh("r"), gate.ensureFresh("r")]);
+    assert.deepEqual(runs, ["incremental"], "one run for both callers");
+    assert.equal(a.state, "refreshing");
+    assert.equal(b.state, "refreshing");
+    assert.doesNotMatch(b.reason ?? "", /another server process/, "the second caller joined this process's run");
+    (release as (() => void) | null)?.();
+  } finally {
+    rmSync(lockDir, { recursive: true, force: true });
+  }
+});
+
+test("release I1b: a refresh run that fails (the worker crashed) answers stale and releases the lock", async () => {
+  const lockDir = mkdtempSync(path.join(tmpdir(), "cim-fresh-"));
+  let fail = true;
+  const runs: IndexMode[] = [];
+  try {
+    const gate = createFreshnessGate({
+      enabled: true,
+      budgetMs: 1000,
+      lockDir,
+      getRepoPath: () => lockDir,
+      getIndexedCommit: () => (fail ? "aaa111" : "bbb222"),
+      readTree: () => ({ head: "bbb222", dirty: [] }),
+      run: async (_repoId, _repoPath, mode) => {
+        runs.push(mode);
+        if (fail) throw new Error("the refresh worker crashed: boom");
+        return { runId: "run-2" } as IndexRunResult;
+      }
+    });
+    const note = await gate.ensureFresh("r");
+    assert.equal(note.state, "stale");
+    assert.match(note.reason ?? "", /refresh run failed/);
+    assert.equal(fs.existsSync(path.join(lockDir, "refresh-r.lock")), false, "the lock is released");
+    // The next query retries (here the index caught up meanwhile, so it is simply fresh).
+    fail = false;
+    assert.equal((await gate.ensureFresh("r")).state, "fresh");
+    assert.equal(runs.length, 1);
+  } finally {
+    rmSync(lockDir, { recursive: true, force: true });
+  }
+});
