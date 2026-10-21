@@ -155,6 +155,19 @@ async function withServer(extraEnv, label, fn) {
 const at = (rows) => (rows ?? []).map((r) => `${r.file}:${r.line}`);
 const ask = async (client, repoId, extra = {}) =>
   js(await client.callTool({ name: "find_field_accesses", arguments: { repoId, name: "proposed_tag_change", ownerName: "document_list_entry_schema", profile: "compact", ...extra } }));
+// Release I1: a cold call waits only what is left of the 5 s budget (this fixture's dirty .vue file
+// spends some of it on the R1 refresh), then answers "still building". On a loaded machine the Volar
+// program misses that window, so the first answer is polled as a caller would; the gap itself is
+// test-field-access-worker's contract, not this harness's.
+const building = (r) => r?.coverage?.confidence === "gap" && /type program still building/.test(r?.coverage?.knownGaps?.[0] ?? "");
+async function askSettled(client, repoId) {
+  let r = await ask(client, repoId);
+  for (let i = 0; i < 60 && building(r); i++) {
+    await new Promise((done) => setTimeout(done, 1000));
+    r = await ask(client, repoId);
+  }
+  return r;
+}
 
 // A prop declared only in a .vue file: the Vue lane indexes it as a graph `property`, and that must not
 // send the field back to the graph's lower bound (release E live check: kb_version_ids fell back).
@@ -166,7 +179,7 @@ await withServer({}, "vue", async (client) => {
     assert(indexed && !indexed.error, `index_repository ${id}`, JSON.stringify(indexed)?.slice(0, 300));
   }
 
-  const res = await ask(client, idA);
+  const res = await askSettled(client, idA);
   assert(res?.engine === "typescript-language-service", "answered by the TypeScript LanguageService", JSON.stringify(res)?.slice(0, 400));
   assert(res?.coverage?.confidence === "exact", "coverage is exact", JSON.stringify(res?.coverage));
   assert(res?.typeResolution?.vue?.status === "in-program" && res.typeResolution.vue.vueFiles === 2 && res.typeResolution.vue.languageCore === "3.3.11", "the .vue file is in the Vue program (Volar, pinned language-core)", JSON.stringify(res?.typeResolution?.vue));
@@ -196,7 +209,7 @@ await withServer({}, "vue", async (client) => {
   const warm = await ask(client, idA, { mode: "read", profile: "nano" });
   assert(warm?.coverage === "exact" && warm?.readCount === 2 && warm?.typeResolution?.cold === false, "warm nano call: counts and the coverage word", JSON.stringify(warm)?.slice(0, 400));
 
-  const mm = await ask(client, idB);
+  const mm = await askSettled(client, idB);
   assert(mm?.coverage?.confidence === "exact" && mm?.typeResolution?.vue?.status === "fallback", "a Vue major mismatch: the lane falls back", JSON.stringify(mm?.typeResolution?.vue));
   const mmGap = (mm?.coverage?.gaps ?? []).find((g) => g.file === "packages/portal/src/TagRowMarks.vue");
   assert(mmGap?.line === 7 && mmGap.reason.includes("vue language-core major mismatch (ours 3.3.11, repo 2.2.10)"), "and the .vue file is a named gap with the reason", JSON.stringify(mm?.coverage?.gaps));
