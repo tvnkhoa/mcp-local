@@ -60,6 +60,7 @@ import {
   type CssResolutionStats,
   type SqlResolutionStats
 } from "../services/graph/edgeResolver.js";
+import { getSqlDefinitionInfo as getSqlDefinitionInfoImpl, type SqlDefinitionInfo } from "../services/graph/sqlDefinitions.js";
 import {
   linkTestsToSource as linkTestsToSourceImpl,
   getDeadCodeCandidates as getDeadCodeCandidatesImpl,
@@ -724,6 +725,15 @@ export class GraphStore {
   /** MCP-ISSUE-082: bind `sql<kind>:` tokens by name (labelled name_resolved) and rewrite the migration order. */
   resolveSqlEdges(repoId: string): SqlResolutionStats {
     return resolveSqlEdgesImpl(this.db, repoId);
+  }
+
+  /**
+   * Release I3: for each SQL definition symbol whose name has several definition sites, whether it is
+   * the current one and where else the name is defined (`alsoDefinedAt`). Derived at read time by the
+   * same function the resolver binds with; absent for non-SQL symbols and single-site names.
+   */
+  getSqlDefinitionInfo(repoId: string, symbolIds: readonly string[]): Map<string, SqlDefinitionInfo> {
+    return getSqlDefinitionInfoImpl(this.db, repoId, symbolIds);
   }
 
   /**

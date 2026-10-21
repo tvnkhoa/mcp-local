@@ -271,7 +271,9 @@ export type EdgeRecord = {
      * `resolveSqlEdges` binds it BY NAME — so a resolved edge says `name_resolved` and never more than
      * 0.6. `SQL_USES`: a view/function/policy/index/trigger/ALTER reads, writes or alters an object.
      * `SQL_REFERENCES`: a foreign key. `SQL_GRANT`: GRANT/REVOKE/owner to object and role.
-     * `SQL_QUERY`: a TS/JS query literal → the table, column or function it names.
+     * `SQL_QUERY`: a TS/JS query literal → the table, column or function it names; for an IMPORTED
+     * query const, the caller → the const's `variable` symbol and → the const's targets (release I4).
+     * A name defined at several sites binds to its current definition only (release I3).
      * `SQL_MIGRATION_ORDER`: migration file → its predecessor by filename sequence.
      */
     | "SQL_USES" | "SQL_REFERENCES" | "SQL_GRANT" | "SQL_QUERY" | "SQL_MIGRATION_ORDER";
@@ -594,7 +596,9 @@ export type EdgeProvenance = {
 export const UNRESOLVED_SYMBOL_TOKEN_PREFIXES = [
   "callee:", "property:", "type:", "iface:", "base:", "import:", "cssvar:", "cssclass:", "component:",
   // MCP-ISSUE-082: SQL lane tokens no definition matched.
-  "sqltable:", "sqlcolumn:", "sqlfunc:", "sqlrole:", "sqltype:", "sqlschema:", "sqlindex:", "sqlseq:", "sqlpolicy:", "sqltrigger:"
+  "sqltable:", "sqlcolumn:", "sqlfunc:", "sqlrole:", "sqltype:", "sqlschema:", "sqlindex:", "sqlseq:", "sqlpolicy:", "sqltrigger:",
+  // Release I4: an imported query const the resolver could not follow (not in the repo, not SQL).
+  "sqlconst:"
 ] as const;
 
 /**

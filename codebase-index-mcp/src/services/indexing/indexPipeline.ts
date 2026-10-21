@@ -119,7 +119,11 @@ export type RunIndexInput = {
 // v9: MCP-ISSUE-082 (release H) — `.sql` files are indexed (sql_* symbols, SQL_* edges, named parse gaps)
 // and TS/JS query literals emit name-resolved SQL_QUERY edges; a repo whose .sql files were skipped
 // as unknown_extension needs a full run to pick them up.
-export const INDEX_VERSION = "v9-sql-lane";
+// v10: release I3/I4 (MCP-ISSUE-082 follow-up) — a SQL name binds to its CURRENT definition only
+// (latest migration; `archive/` superseded by the baseline; `.down.sql` never current), and
+// `.query(IMPORTED_CONST)` emits a `sqlconst:` anchor the resolver follows to the declaring module.
+// Unchanged TS files need a run to emit the anchors.
+export const INDEX_VERSION = "v10-sql-current-definition";
 
 export async function runIndexPipeline(store: GraphStore, input: RunIndexInput): Promise<IndexRunSummary> {
   const identity: RunIdentity = {

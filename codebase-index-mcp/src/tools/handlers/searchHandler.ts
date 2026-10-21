@@ -14,6 +14,7 @@ import { buildCoverageBlock } from "../../middleware/coverage.js";
 import { isTestPath } from "../../services/indexing/fileFilter.js";
 import { RegexSearchError } from "../../services/search/regexSearch.js";
 import type { HandlerContext } from "./handlerContext.js";
+import type { SqlDefinitionInfo } from "../../services/graph/sqlDefinitions.js";
 
 /**
  * ISSUE-019 — A multi-word / natural-language query under strategy='name' returns 0
@@ -76,7 +77,23 @@ export function handleSearchSymbols(
   // rows fuzzy for one exact, unique name — and agents read row 2 onwards as matches. Rows that match
   // by name are the answer; near-neighbours go in `nearby`, at most five, never mixed in. When nothing
   // matches by name, `symbols` is empty and `nearby` is all there is (coverage says "not found").
-  const results = filtered.filter((s) => s.matchType !== "fuzzy");
+  // Release I3: a SQL definition row says whether it is the current definition of its name and where
+  // else the name is defined (references bind to the current one only).
+  const sqlInfo = new Map<string, SqlDefinitionInfo>();
+  const sqlRowsByRepo = new Map<string, string[]>();
+  for (const s of filtered) {
+    if (!s.kind.startsWith("sql_") || s.matchType === "fuzzy") continue;
+    sqlRowsByRepo.set(s.repoId, [...(sqlRowsByRepo.get(s.repoId) ?? []), s.symbolId]);
+  }
+  for (const [repoId, ids] of sqlRowsByRepo) {
+    for (const [id, info] of ctx.store.getSqlDefinitionInfo(repoId, ids)) sqlInfo.set(id, info);
+  }
+  const results = filtered
+    .filter((s) => s.matchType !== "fuzzy")
+    .map((s) => {
+      const info = sqlInfo.get(s.symbolId);
+      return info ? { ...s, sqlDefinition: info } : s;
+    });
   const nearbyRaw = filtered.filter((s) => s.matchType === "fuzzy").slice(0, NEARBY_MAX);
   const suggestions = results.length === 0 ? store.getSearchSuggestions(args.query, args.repoId ?? null, 5) : [];
   // When name-search still comes back empty, point the agent at the intent path explicitly.
@@ -111,7 +128,8 @@ export function handleSearchSymbols(
     kind: s.kind,
     filePath: s.filePath,
     line: s.line,
-    ...(s.matchType ? { matchType: s.matchType } : {})
+    ...(s.matchType ? { matchType: s.matchType } : {}),
+    ...("sqlDefinition" in s && s.sqlDefinition ? { sqlDefinition: s.sqlDefinition } : {})
   });
 
   const nearby = nearbyRaw.length > 0 ? { nearby: nearbyRaw.map(row) } : {};
@@ -326,7 +344,9 @@ export function handleGetSymbolDetail(
   // MCP-ISSUE-056: filter the FAR end of each edge — outgoing by target, incoming by source — and do
   // it in the query, so `limit` is not spent on rows that are about to be discarded.
   const detail = ctx.store.getSymbolDetail(args.repoId, args.symbolId, args.limit, args.excludeTests);
-  return ctx.asText(detail, profile);
+  // Release I3: current-vs-superseded and `alsoDefinedAt` for a SQL definition defined at several sites.
+  const sqlDefinition = detail.symbol?.kind.startsWith("sql_") ? ctx.store.getSqlDefinitionInfo(args.repoId, [args.symbolId]).get(args.symbolId) : undefined;
+  return ctx.asText(sqlDefinition ? { ...detail, sqlDefinition } : detail, profile);
 }
 
 // ── get_symbol_context_pack ───────────────────────────────────────────────────

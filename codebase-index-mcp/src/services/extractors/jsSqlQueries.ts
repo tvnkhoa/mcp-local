@@ -6,10 +6,16 @@
  * Two places a query's text is read from, both static:
  *
  * 1. **The first argument of `<x>.query(…)` / `<x>.query<T>(…)`** — a string literal, a template
- *    literal, a `+` concatenation of them, or an identifier naming a `const` of the SAME file whose
- *    value is one of those. Anything else (an imported const, `read.statement`, a function call) is
- *    not followed here: following imports is not trivial, and the const's own declaration is read
- *    by (2) where it is written. Clause: `ts query literal` / `ts query const NAME`.
+ *    literal, a `+` concatenation of them, an identifier naming a `const` of the SAME file whose
+ *    value is one of those, or a member of a same-file const object literal (`read.statement` where
+ *    `const read = { statement: \`select …\` }`). Clause: `ts query literal` / `ts query const NAME via
+ *    NAME (file:line)` / `ts query const read.statement via read.statement (file:line)` — the
+ *    `via CONST (file:line)` names where the text was read, the same spelling an imported const uses.
+ *    An IMPORTED identifier (`import { INSERT_X } from './x-sql.js'`, renamed `import { A as B }`, or
+ *    `ns.INSERT_X` through `import * as ns`) cannot be read from this file: it becomes an anchor
+ *    token `sqlconst:<specifier>#<exported name>`, clause `ts query imported const B (line N)`, that
+ *    `resolveSqlEdges` follows to the declaring module's const (release I4). A function call or any
+ *    other expression is not followed.
  * 2. **A SQL-shaped `const`** — `const INSERT_X = \`insert into …\`` — anywhere in the file, from the
  *    const's own symbol (an exported const is a `variable` symbol; otherwise the enclosing symbol).
  *    In a codebase that keeps its statements in `*-sql.ts` files and passes them by name, this is the
@@ -36,7 +42,7 @@ import type { ExtractInput } from "./extractorTypes.js";
 import { findEnclosingSymbolId, makeSymbolId } from "./extractorPrimitives.js";
 import { lexSql } from "./sqlLexer.js";
 import { scanSqlReferences } from "./sqlQueryScan.js";
-import { SQL_TOKEN_CONFIDENCE, SQL_TOKEN_PREFIX, SQL_UNRESOLVED_REASON_PREFIX } from "./sqlExtractor.js";
+import { SQL_CONST_TOKEN_PREFIX, SQL_IMPORTED_CONST_CLAUSE, SQL_TOKEN_CONFIDENCE, SQL_TOKEN_PREFIX, SQL_UNRESOLVED_REASON_PREFIX } from "./sqlExtractor.js";
 
 const SQL_SHAPE = /^\s*(?:select\b|insert\s+into\b|update\s+\S+\s+set\b|update\b|delete\s+from\b|with\b|merge\s+into\b|truncate\b)/i;
 const WRAPPERS = new Set(["parenthesized_expression", "as_expression", "satisfies_expression", "non_null_expression"]);
@@ -53,8 +59,10 @@ export function extractJavaScriptSqlQueries(
   edges: EdgeRecord[],
   moduleSymbolId: string
 ): void {
-  // Cheap gate: a file with neither a `.query(` nor a SQL verb in a string cannot contribute.
-  if (!/\.query\s*(?:<[^>]*>)?\s*\(/.test(input.source) && !/['"`]\s*(?:select|insert|update|delete|with|merge|truncate)\b/i.test(input.source)) return;
+  // Cheap gate: a file with neither a `.query(` nor a SQL verb in a string cannot contribute. The type
+  // arguments may nest (`.query<Record<string, unknown>>(`) — a `[^>]*` here dropped every such file
+  // whose SQL lives in another module (release I4: wec.aria's store-notifications.ts).
+  if (!/\.query\s*(?:<[^()]{0,300}?>)?\s*\(/.test(input.source) &&!/['"`]\s*(?:select|insert|update|delete|with|merge|truncate)\b/i.test(input.source)) return;
 
   const knownIds = new Set(symbols.map((s) => s.symbolId));
   const consts = new Map<string, { value: Parser.SyntaxNode; declarator: Parser.SyntaxNode; declaration: Parser.SyntaxNode }>();
@@ -64,6 +72,26 @@ export function extractJavaScriptSqlQueries(
       const name = declarator.childForFieldName("name");
       const value = declarator.childForFieldName("value");
       if (name?.type === "identifier" && value && !consts.has(name.text)) consts.set(name.text, { value, declarator, declaration });
+    }
+  }
+
+  // Value imports by local name: `import { A as B } from './x'` → B ↦ (./x, A); `import * as ns` → ns ↦
+  // (./x, *). Type-only imports name no value.
+  const imports = new Map<string, { specifier: string; imported: string }>();
+  for (const statement of root.descendantsOfType(["import_statement"])) {
+    if (/^import\s+type\b/.test(statement.text)) continue;
+    const source = statement.childForFieldName("source");
+    const specifier = source ? source.text.slice(1, -1) : "";
+    if (!specifier) continue;
+    for (const spec of statement.descendantsOfType(["import_specifier"])) {
+      if (/^type\s/.test(spec.text)) continue;
+      const imported = spec.childForFieldName("name")?.text;
+      const local = spec.childForFieldName("alias")?.text ?? imported;
+      if (imported && local) imports.set(local, { specifier, imported });
+    }
+    for (const ns of statement.descendantsOfType(["namespace_import"])) {
+      const local = ns.namedChildren.find((c) => c.type === "identifier")?.text;
+      if (local) imports.set(local, { specifier, imported: "*" });
     }
   }
 
@@ -155,6 +183,40 @@ export function extractJavaScriptSqlQueries(
     }
   };
 
+  /** An imported query const at a `.query(` site: the anchor the resolver follows. */
+  const anchor = (fromId: string, local: string, specifier: string, imported: string, at: Parser.SyntaxNode): void => {
+    const toId = `${SQL_CONST_TOKEN_PREFIX}${specifier}#${imported}`;
+    const key = `${fromId}\u0000${toId}`;
+    if (edgeKeys.has(key)) return;
+    edgeKeys.add(key);
+    edges.push({
+      repoId: input.repoId,
+      fromId,
+      toId,
+      type: "SQL_QUERY",
+      confidence: SQL_TOKEN_CONFIDENCE,
+      reason: `${SQL_UNRESOLVED_REASON_PREFIX}${SQL_IMPORTED_CONST_CLAUSE}${local} (line ${String(at.startPosition.row + 1)})`
+    });
+  };
+
+  /** `obj.prop` where `obj` is a same-file const object literal with a static `prop`. */
+  const evalMember = (node: Parser.SyntaxNode): StaticText | null => {
+    const object = node.childForFieldName("object");
+    const property = node.childForFieldName("property");
+    if (object?.type !== "identifier" || !property) return null;
+    let value = consts.get(object.text)?.value ?? null;
+    while (value && WRAPPERS.has(value.type) && value.namedChildren[0]) value = value.namedChildren[0];
+    if (value?.type !== "object") return null;
+    for (const pair of value.namedChildren.filter((c) => c.type === "pair")) {
+      const key = pair.childForFieldName("key");
+      const keyText = key?.type === "string" ? key.text.slice(1, -1) : key?.text;
+      if (keyText !== property.text) continue;
+      const v = pair.childForFieldName("value");
+      return v ? evalNode(v, 1) : null;
+    }
+    return null;
+  };
+
   // (1) `.query(` call sites.
   for (const call of root.descendantsOfType(["call_expression"])) {
     let fn = call.childForFieldName("function");
@@ -167,9 +229,26 @@ export function extractJavaScriptSqlQueries(
     if (!first) continue;
     const fromId = findEnclosingSymbolId(call, input) ?? moduleSymbolId;
     if (first.type === "identifier") {
-      if (!consts.has(first.text)) continue;
+      if (!consts.has(first.text)) {
+        const imported = imports.get(first.text);
+        if (imported && imported.imported !== "*") anchor(fromId, first.text, imported.specifier, imported.imported, call);
+        continue;
+      }
       const text = evalConst(first.text, 0);
-      if (text) scan(text, fromId, `ts query const ${first.text}`, call);
+      if (text) scan(text, fromId, `ts query const ${first.text} via ${first.text} (${input.filePath}:${String(consts.get(first.text)!.declaration.startPosition.row + 1)})`, call);
+      continue;
+    }
+    if (first.type === "member_expression") {
+      const object = first.childForFieldName("object");
+      const property = first.childForFieldName("property");
+      if (object?.type !== "identifier" || !property) continue;
+      if (!consts.has(object.text)) {
+        const ns = imports.get(object.text);
+        if (ns?.imported === "*") anchor(fromId, `${object.text}.${property.text}`, ns.specifier, property.text, call);
+        continue;
+      }
+      const member = evalMember(first);
+      if (member) scan(member, fromId, `ts query const ${object.text}.${property.text} via ${object.text}.${property.text} (${input.filePath}:${String(consts.get(object.text)!.declaration.startPosition.row + 1)})`, call);
       continue;
     }
     const text = evalNode(first, 0);

@@ -93,3 +93,69 @@ test("TS → SQL: query literals and SQL-shaped consts emit SQL_QUERY tokens; ${
   assert.equal(gap.line, 9);
   assert.match(gap.name, /dynamic table name/);
 });
+
+const TS_IMPORTS = `import { INSERT_AUDIT as INSERT_DECISION, PAGE_SIZE } from './store-sql.js'
+import type { Row } from './store-sql.js'
+import * as sql from './more-sql.js'
+const read = { statement: \`select id, title from documents\`, label: 'read' } as const
+
+export async function decide(client: any) {
+  await client.query(INSERT_DECISION, [1])
+}
+export async function page(client: any) {
+  return client.query(PAGE_SIZE)
+}
+export async function viaNamespace(client: any) {
+  return client.query<Row>(sql.SELECT_X, [])
+}
+export async function viaMember(client: any) {
+  return client.query(read.statement)
+}
+export async function notAQuery(client: any) {
+  return client.query(read.label)
+}
+`;
+
+test("TS → SQL (release I4): an imported const at .query( is an anchor from the caller; a same-file member is read", () => {
+  const out = extractGraphData({ repoId: "r", filePath: "src/store.ts", language: "typescript", source: TS_IMPORTS });
+  const q = out.edges.filter((e) => e.type === "SQL_QUERY");
+  const from = (name: string) => q.filter((e) => e.fromId === out.symbols.find((s) => s.name === name)!.symbolId);
+  assert.deepEqual(from("decide").map((e) => [e.toId, e.reason]), [
+    ["sqlconst:./store-sql.js#INSERT_AUDIT", "unresolved sql token: ts query imported const INSERT_DECISION (line 7)"]
+  ], "a renamed import anchors on the EXPORTED name, the clause keeps the local one");
+  assert.deepEqual(from("page").map((e) => e.toId), ["sqlconst:./store-sql.js#PAGE_SIZE"], "whether it is SQL is the resolver's question");
+  assert.deepEqual(from("viaNamespace").map((e) => [e.toId, e.reason]), [
+    ["sqlconst:./more-sql.js#SELECT_X", "unresolved sql token: ts query imported const sql.SELECT_X (line 13)"]
+  ]);
+  assert.deepEqual(from("viaMember").map((e) => e.toId).sort(), ["sqlcolumn:documents.id", "sqlcolumn:documents.title", "sqltable:documents"]);
+  assert.match(from("viaMember")[0]!.reason!, /^unresolved sql token: ts query const read\.statement /);
+  assert.deepEqual(from("notAQuery"), [], "a non-SQL member gives nothing");
+});
+
+test("TS → SQL (release I4): nested type arguments do not hide a file whose only SQL is imported", () => {
+  const source = `import { SELECT_RETURNS } from './store-sql-notifications.js'
+export async function returnedToMe(client: any) {
+  const result = await client.query<Record<string, unknown>>(
+    SELECT_RETURNS,
+    [1],
+  )
+  return result.rows
+}
+`;
+  const out = extractGraphData({ repoId: "r", filePath: "src/store-notifications.ts", language: "typescript", source });
+  assert.deepEqual(out.edges.filter((e) => e.type === "SQL_QUERY").map((e) => [e.toId, e.reason]), [
+    ["sqlconst:./store-sql-notifications.js#SELECT_RETURNS", "unresolved sql token: ts query imported const SELECT_RETURNS (line 3)"]
+  ]);
+});
+
+test("TS → SQL: a same-file const at .query( says where its text is, 'via NAME (file:line)'", () => {
+  const source = `export const INSERT_AUDIT = \`insert into audit_events (id) values ($1)\`
+export async function recordAudit(client: any) {
+  await client.query(INSERT_AUDIT, [1])
+}
+`;
+  const out = extractGraphData({ repoId: "r", filePath: "src/db.ts", language: "typescript", source });
+  const fn = out.symbols.find((s) => s.name === "recordAudit")!;
+  const reasons = out.edges.filter((e) => e.type === "SQL_QUERY" && e.fromId === fn.symbolId).map((e) => e.reason);
+  assert.ok(reasons.length > 0 && reasons.every((r) => /^unresolved sql token: ts query const INSERT_AUDIT via INSERT_AUDIT \(src\/db\.ts:1\) /.test(r ?? "")), JSON.stringify(reasons));
+});

@@ -26,8 +26,9 @@
  * `sql_view`, `sql_index`, `sql_function`, `sql_type`, `sql_role`, `sql_schema`, `sql_sequence`,
  * `sql_policy`, `sql_trigger` — **one symbol per DEFINITION SITE**. A table created in
  * `archive/0004` and again in the `0001` baseline is two symbols, and `ALTER TABLE t ADD COLUMN c` puts
- * a `sql_column` at the ALTER — so "where is column c defined" lists every site, and a by-name
- * reference fans out to all of them (the resolver says how many).
+ * a `sql_column` at the ALTER — so "where is column c defined" lists every site. A by-name reference
+ * binds to ONE of them, the current definition (release I3, `graph/sqlDefinitions.ts`); the others
+ * are reported as `alsoDefinedAt`, and each keeps the outbound edges of its own body.
  *
  * `sql_statement` — a statement that TOUCHES an object without defining it: `ALTER TABLE`, `GRANT`,
  * `REVOKE`, `DROP`, top-level DML, `ALTER TYPE`, `ALTER POLICY`. Its own symbol so "who touches table
@@ -91,6 +92,17 @@ export const SQL_TOKEN_PREFIX: Record<SqlTokenKind, string> = {
   policy: "sqlpolicy:",
   trigger: "sqltrigger:"
 };
+
+/**
+ * Release I4: `<x>.query(B)` where `B` is IMPORTED — the anchor token `sqlconst:<specifier>#<exported
+ * name>`, from the calling symbol. `resolveSqlEdges` follows it to the declaring module's const and
+ * gives the caller that const's SQL targets; the anchor itself binds to the const's `variable` symbol.
+ */
+export const SQL_CONST_TOKEN_PREFIX = "sqlconst:";
+/** Clause of an anchor, and the head of every edge derived from one (`… via A (file:line) …`). */
+export const SQL_IMPORTED_CONST_CLAUSE = "ts query imported const ";
+/** Clause head of a SQL-shaped const's own declaration scan (`jsSqlQueries.ts` rule 2). */
+export const SQL_CONST_DECLARATION_CLAUSE = "ts sql const ";
 
 /** Reason prefix of an edge whose token no definition has (yet) matched. */
 export const SQL_UNRESOLVED_REASON_PREFIX = "unresolved sql token: ";
