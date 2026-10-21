@@ -17,6 +17,7 @@ import type { EdgeRecord, SymbolRecord } from "../../types/index.js";
 import type { ExtractInput } from "./extractorTypes.js";
 
 import { extractJavaScriptCalls, extractJavaScriptHeritage, extractJavaScriptImports } from "./jsEdges.js";
+import { extractJavaScriptHttpConsumers } from "./jsHttpConsumers.js";
 import { extractJavaScriptSymbols } from "./jsSymbols.js";
 import { extractJavaScriptPropertyEdges, extractJavaScriptTypeRefs } from "./jsTypeRefs.js";
 
@@ -36,4 +37,5 @@ export function extractJavaScriptSymbolsImpl(
   extractJavaScriptHeritage(input, root, edges);
   extractJavaScriptTypeRefs(input, root, edges, moduleSymbolId);
   extractJavaScriptPropertyEdges(input, root, edges, moduleSymbolId);
+  extractJavaScriptHttpConsumers(input, root, symbols, edges, moduleSymbolId);
 }

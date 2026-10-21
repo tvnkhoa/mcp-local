@@ -1,7 +1,9 @@
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { McpError, ErrorCode } from "@modelcontextprotocol/sdk/types.js";
 import { toNugetContractId, resolveResponseProfile } from "../../middleware/responseFormatter.js";
+import type { SymbolRecord } from "../../types/index.js";
 import type { HandlerContext } from "./handlerContext.js";
+import { describeEndpointLink } from "./crossRepoEndpoints.js";
 
 // ── get_cross_repo_impact ─────────────────────────────────────────────────────
 
@@ -10,6 +12,7 @@ export function handleGetCrossRepoImpact(
     repoId: string;
     symbolId?: string;
     name?: string;
+    filePath?: string;
     direction: "outbound" | "inbound";
     limit: number;
     profile: string;
@@ -19,54 +22,110 @@ export function handleGetCrossRepoImpact(
   const { store } = ctx;
   const profile = resolveResponseProfile(args.profile as Parameters<typeof resolveResponseProfile>[0]);
 
-  let symbolId = args.symbolId;
-  if (!symbolId && args.name) {
-    const candidates = store.searchSymbols(args.name, args.repoId, null, null, null, 1, "name");
-    symbolId = candidates[0]?.symbolId;
-  }
-  if (!symbolId) {
-    throw new McpError(ErrorCode.InvalidParams, "get_cross_repo_impact: symbol not found. Provide symbolId or a resolvable name.");
+  // ── What is being asked about: one symbol (plus the endpoint contracts it stands for), or a file.
+  let symbol: SymbolRecord | null = null;
+  let targetIds: string[];
+  let endpointContracts: { symbolId: string; signature: string }[] = [];
+  const filePath = args.filePath?.replace(/\\/g, "/");
+  if (filePath && !args.symbolId && !args.name) {
+    targetIds = store.getSymbolIdsInFile(args.repoId, filePath, MAX_FILE_SYMBOLS);
+    if (targetIds.length === 0) {
+      throw new McpError(ErrorCode.InvalidParams, `get_cross_repo_impact: no symbols indexed for file '${filePath}' in repo '${args.repoId}'. Use the repo-relative path with forward slashes.`);
+    }
+  } else {
+    let symbolId = args.symbolId;
+    if (!symbolId && args.name) {
+      const candidates = store.searchSymbols(args.name, args.repoId, null, null, null, 1, "name");
+      symbolId = candidates[0]?.symbolId;
+    }
+    if (!symbolId) {
+      throw new McpError(ErrorCode.InvalidParams, "get_cross_repo_impact: symbol not found. Provide symbolId, a resolvable name, or filePath.");
+    }
+    symbol = store.getSymbolDetail(args.repoId, symbolId, 1).symbol;
+    if (!symbol) {
+      throw new McpError(ErrorCode.InvalidParams, `get_cross_repo_impact: symbol '${symbolId}' not found in repo '${args.repoId}'.`);
+    }
+    // R9: a controller action is not itself the link target; the endpoint contract minted for its
+    // route is. Query both, so "who calls this action" does not need the caller to know that.
+    endpointContracts = store.findEndpointContractSymbols(args.repoId, symbolId);
+    targetIds = [...new Set([symbolId, ...endpointContracts.map((c) => c.symbolId)])];
   }
 
-  const symbol = store.getSymbolDetail(args.repoId, symbolId, 1).symbol;
-  if (!symbol) {
-    throw new McpError(ErrorCode.InvalidParams, `get_cross_repo_impact: symbol '${symbolId}' not found in repo '${args.repoId}'.`);
-  }
-
-  const impactRows = store.getCrossRepoImpact(args.repoId, symbolId, args.direction, args.limit).map((row) => {
-    const { edgeReason, ...rest } = row;
-    const signature = row.relatedSignature ?? "";
-    const isNugetContract = signature.startsWith("nuget:");
-    const isEndpointContract = signature.startsWith("endpoint:");
+  const tableCache = new Map<string, { tool: string; at: string } | null>();
+  const impactRows = store.getCrossRepoImpact(args.repoId, targetIds, args.direction, args.limit).map((row) => {
+    const { edgeReason, targetSignature, ...rest } = row;
+    // The contract lives on the TO side of the link whichever way the query runs.
+    const contractSignature = (args.direction === "outbound" ? row.relatedSignature : targetSignature) ?? "";
+    const isNugetContract = contractSignature.startsWith("nuget:");
+    const isEndpointContract = contractSignature.startsWith("endpoint:");
     // MCP-ISSUE-045: a link the type resolver guessed from a bare name is not a symbol-id match, and
     // reporting it as one gave a BCL type the strongest reason string the tool has. The originating
     // edge's `reason` is the only place that distinction survives.
     const isBareNameMatch = (edgeReason ?? "").includes("name-match");
+    const endpoint = isEndpointContract
+      ? describeEndpointLink(
+          store,
+          {
+            fromRepoId: row.fromRepoId,
+            fromSymbolId: row.fromSymbolId,
+            providerSignature: contractSignature,
+            consumerName: args.direction === "inbound" ? row.relatedName : row.targetName,
+            consumerFilePath: args.direction === "inbound" ? row.relatedFilePath : (symbol?.filePath ?? filePath ?? null)
+          },
+          tableCache
+        )
+      : null;
     return {
       ...rest,
       contractType: isNugetContract ? "nuget" : isEndpointContract ? "endpoint" : "symbol",
       resolutionReason: isNugetContract
         ? "nuget_contract_signature_match"
-        : isEndpointContract
-          ? "endpoint_contract_signature_match"
+        : endpoint
+          ? endpoint.matchKind === "wildcard"
+            ? "endpoint_contract_wildcard_match"
+            : endpoint.matchKind === "gateway_prefix"
+              ? "endpoint_contract_gateway_prefix_match"
+              : "endpoint_contract_signature_match"
           : isBareNameMatch
             ? "cross_repo_bare_name_match"
-            : "symbol_id_exact_match"
+            : "symbol_id_exact_match",
+      ...(endpoint ? { endpoint } : {})
     };
   });
+
+  // An action or controller whose consumers were asked for in the wrong direction.
+  const hint =
+    impactRows.length === 0 && args.direction === "outbound" && endpointContracts.length > 0
+      ? "this symbol serves HTTP endpoint(s); its consumers are inbound links — rerun with direction:'inbound'"
+      : impactRows.length === 0 && args.direction === "inbound" && endpointContracts.length > 0
+        ? "no indexed repo links to this endpoint. Cross-repo links are written when the CONSUMER repo is indexed, so a consumer indexed before this provider needs a re-index"
+        : null;
+  const subject = symbol ?? { filePath, symbolCount: targetIds.length };
 
   if (profile === "nano") {
     return ctx.asText({
       repoId: args.repoId,
-      symbol: { symbolId: symbol.symbolId, name: symbol.name, kind: symbol.kind },
+      ...(symbol ? { symbol: { symbolId: symbol.symbolId, name: symbol.name, kind: symbol.kind } } : { filePath }),
       direction: args.direction,
       impactCount: impactRows.length,
-      relatedRepos: [...new Set(impactRows.map((x) => (args.direction === "outbound" ? x.toRepoId : x.fromRepoId)))].slice(0, 10)
+      relatedRepos: [...new Set(impactRows.map((x) => (args.direction === "outbound" ? x.toRepoId : x.fromRepoId)))].slice(0, 10),
+      ...(hint ? { hint } : {})
     }, profile);
   }
 
-  return ctx.asText({ repoId: args.repoId, symbol, direction: args.direction, impactCount: impactRows.length, impacts: impactRows }, profile);
+  return ctx.asText({
+    repoId: args.repoId,
+    ...(symbol ? { symbol } : { file: subject }),
+    ...(endpointContracts.length > 0 ? { endpointContracts: endpointContracts.map((c) => c.signature) } : {}),
+    direction: args.direction,
+    impactCount: impactRows.length,
+    impacts: impactRows,
+    ...(hint ? { hint } : {})
+  }, profile);
 }
+
+/** Symbols considered for a file-level query; a file with more is answered for its first ones by line. */
+const MAX_FILE_SYMBOLS = 1000;
 
 // ── find_package_consumers ────────────────────────────────────────────────────
 

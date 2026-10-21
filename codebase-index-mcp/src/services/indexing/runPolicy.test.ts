@@ -3,7 +3,7 @@ import test from "node:test";
 
 import type { GraphStore } from "../../repositories/graphStore.js";
 import { evaluateIncrementalSkip, indexGeneration, newerBuildRefusal, resolvePerformanceProfileDecision } from "./runPolicy.js";
-import { currentAnnotationKey } from "./indexPipeline.js";
+import { currentAnnotationKey, INDEX_VERSION } from "./indexPipeline.js";
 
 /**
  * The decisions a run makes before doing any work.
@@ -129,4 +129,7 @@ test("release F: an older build refuses to write over a newer build, never the o
   assert.equal(newerBuildRefusal("v6-vue-components", "v7-text-json-html-svg"), null, "a newer build upgrades an older index");
   assert.equal(newerBuildRefusal("v7-a", "v7-b"), null, "same generation");
   assert.equal(newerBuildRefusal(null, "v7-a"), null, "no run yet");
+  // Release G (R9, MCP-ISSUE-081): the declared-HTTP-consumer lane is generation 8.
+  assert.equal(indexGeneration(INDEX_VERSION), 8);
+  assert.equal(newerBuildRefusal("v7-text-json-html-svg", INDEX_VERSION), null, "v8 upgrades a v7 index");
 });

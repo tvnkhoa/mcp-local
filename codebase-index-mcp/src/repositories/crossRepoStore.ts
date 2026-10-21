@@ -110,15 +110,10 @@ export function getCrossRepoDepsImpl(
     .all(fromRepoId, fromSymbolId, limit) as { toRepoId: string; toSymbolId: string; type: string }[];
 }
 
+
 // ── Get cross-repo impact ──────────────────────────────────────────────
 
-export function getCrossRepoImpactImpl(
-  db: Database.Database,
-  repoId: string,
-  symbolId: string,
-  direction: "outbound" | "inbound",
-  limit: number
-): {
+export type CrossRepoImpactRow = {
   fromRepoId: string;
   fromSymbolId: string;
   toRepoId: string;
@@ -127,54 +122,38 @@ export function getCrossRepoImpactImpl(
   relatedName: string | null;
   relatedKind: string | null;
   relatedFilePath: string | null;
+  relatedLine: number | null;
   relatedSignature: string | null;
+  /** The queried side's symbol — one of the ids passed in (an action expands to its endpoint symbols, R9). */
+  targetName: string | null;
+  targetSignature: string | null;
   /** `edges.reason` for the edge this row was derived from — distinguishes a bare-name guess from a real match (MCP-ISSUE-045). */
   edgeReason: string | null;
-}[] {
-  if (direction === "outbound") {
-    return db
-      .prepare(
-        `
-        select
-          c.from_repo_id as fromRepoId,
-          c.from_symbol_id as fromSymbolId,
-          c.to_repo_id as toRepoId,
-          c.to_symbol_id as toSymbolId,
-          c.type as type,
-          s.name as relatedName,
-          s.kind as relatedKind,
-          s.file_path as relatedFilePath,
-          s.signature as relatedSignature,
-          (
-            select e.reason from edges e
-            where e.repo_id = c.from_repo_id
-              and e.from_id = c.from_symbol_id
-              and e.to_id = c.to_symbol_id
-              and e.type = c.type
-            limit 1
-          ) as edgeReason
-        from cross_repo_deps c
-        left join symbols s
-          on s.repo_id = c.to_repo_id and s.symbol_id = c.to_symbol_id
-        where c.from_repo_id = ? and c.from_symbol_id = ?
-        order by c.to_repo_id, c.to_symbol_id
-        limit ?
-        `
-      )
-      .all(repoId, symbolId, limit) as {
-      fromRepoId: string;
-      fromSymbolId: string;
-      toRepoId: string;
-      toSymbolId: string;
-      type: string;
-      relatedName: string | null;
-      relatedKind: string | null;
-      relatedFilePath: string | null;
-      relatedSignature: string | null;
-      edgeReason: string | null;
-    }[];
-  }
+};
 
+/**
+ * Cross-repo rows for one or more symbols on the queried side. Several ids because a controller
+ * action is not itself the link target: its endpoint contract symbol is (R9, MCP-ISSUE-081).
+ *
+ * `edgeReason` matches the originating edge by `to_id = to_symbol_id` (a symbol-id link) or by the
+ * target's contract signature (an exact `nuget:`/`endpoint:` link). A wildcard endpoint link has a
+ * token that equals neither, so its reason is recovered by the handler, which re-runs the matcher.
+ */
+export function getCrossRepoImpactImpl(
+  db: Database.Database,
+  repoId: string,
+  symbolIds: readonly string[],
+  direction: "outbound" | "inbound",
+  limit: number
+): CrossRepoImpactRow[] {
+  if (symbolIds.length === 0) return [];
+  const ph = symbolIds.map(() => "?").join(", ");
+  const outbound = direction === "outbound";
+  // outbound: the queried symbol is the FROM side, the related symbol the TO side; inbound swaps.
+  const relatedRepo = outbound ? "c.to_repo_id" : "c.from_repo_id";
+  const relatedId = outbound ? "c.to_symbol_id" : "c.from_symbol_id";
+  const targetRepo = outbound ? "c.from_repo_id" : "c.to_repo_id";
+  const targetId = outbound ? "c.from_symbol_id" : "c.to_symbol_id";
   return db
     .prepare(
       `
@@ -187,36 +166,32 @@ export function getCrossRepoImpactImpl(
         s.name as relatedName,
         s.kind as relatedKind,
         s.file_path as relatedFilePath,
+        s.line as relatedLine,
         s.signature as relatedSignature,
+        t.name as targetName,
+        t.signature as targetSignature,
         (
           select e.reason from edges e
+          left join symbols ps on ps.repo_id = c.to_repo_id and ps.symbol_id = c.to_symbol_id
           where e.repo_id = c.from_repo_id
             and e.from_id = c.from_symbol_id
-            and e.to_id = c.to_symbol_id
             and e.type = c.type
+            and (e.to_id = c.to_symbol_id or e.to_id = ps.signature)
           limit 1
         ) as edgeReason
       from cross_repo_deps c
       left join symbols s
-        on s.repo_id = c.from_repo_id and s.symbol_id = c.from_symbol_id
-      where c.to_repo_id = ? and c.to_symbol_id = ?
-      order by c.from_repo_id, c.from_symbol_id
+        on s.repo_id = ${relatedRepo} and s.symbol_id = ${relatedId}
+      left join symbols t
+        on t.repo_id = ${targetRepo} and t.symbol_id = ${targetId}
+      where ${targetRepo} = ? and ${targetId} in (${ph})
+      order by ${relatedRepo}, ${relatedId}, ${targetId}
       limit ?
       `
     )
-    .all(repoId, symbolId, limit) as {
-    fromRepoId: string;
-    fromSymbolId: string;
-    toRepoId: string;
-    toSymbolId: string;
-    type: string;
-    relatedName: string | null;
-    relatedKind: string | null;
-    relatedFilePath: string | null;
-    relatedSignature: string | null;
-    edgeReason: string | null;
-  }[];
+    .all(repoId, ...symbolIds, limit) as CrossRepoImpactRow[];
 }
+
 
 // ── Find package consumers ─────────────────────────────────────────────
 //

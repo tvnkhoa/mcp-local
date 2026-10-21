@@ -257,7 +257,11 @@ export function buildGraphImpactTools(deps: CodebaseIndexDeps): AnyToolDefinitio
 
   const getCrossRepoImpact = defineTool({
     name: "get_cross_repo_impact",
-    description: "Expose cross-repo dependencies for a symbol from cross_repo_deps. Supports outbound or inbound direction.",
+    description:
+      "Expose cross-repo dependencies for a symbol (or every symbol of a file, via filePath) from cross_repo_deps. Supports outbound or inbound direction. " +
+      "HTTP endpoints link across repos: a controller action (or its file) with direction:'inbound' lists the consumers whose endpoint matches its route — " +
+      "C# HttpClient calls and declared JS/TS route sources (`source: 'scheme:GET /path'`), with the consumer's file:line, route and tool name and the match kind " +
+      "(exact, wildcard on path parameters, or gateway_prefix when the consumer path carries a gateway prefix the provider does not declare).",
     input: schemas.crossRepoImpactSchema(limits.maxResultLimit),
     inputSchema: {
       type: "object",
@@ -267,6 +271,7 @@ export function buildGraphImpactTools(deps: CodebaseIndexDeps): AnyToolDefinitio
         repoId: { type: "string" },
         symbolId: { type: "string" },
         name: { type: "string" },
+        filePath: { type: "string", description: "Repo-relative file: query every symbol it declares (its endpoint contracts included)." },
         direction: { type: "string", enum: ["outbound", "inbound"] },
         limit: { type: "integer", minimum: 1, maximum: limits.maxResultLimit },
         profile: PROFILE_PROP
