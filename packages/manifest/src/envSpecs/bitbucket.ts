@@ -68,13 +68,13 @@ export const bitbucketEnv: readonly EnvField[] = [
     name: "BITBUCKET_COMMIT_BRANCHES",
     required: false,
     section: "Write gate",
-    note: "Comma-separated repo:branch globs that commit_files, create_branch and delete_branch may write — branches nobody checks out locally, e.g. wec.aria:sandbox/*. Empty = none."
+    note: "Comma-separated repo:branch globs that commit_files, create_branch and delete_branch may write — branches nobody checks out locally, e.g. my-repo:sandbox/*. Empty = none."
   },
   {
     name: "BITBUCKET_COMMIT_SHARED_BRANCHES",
     required: false,
     section: "Write gate",
-    note: "Comma-separated repo:branch globs checked out in a shared worktree, e.g. wec.aria:develop. Writable; the result carries the local reconcile steps."
+    note: "Comma-separated repo:branch globs checked out in a shared worktree, e.g. my-repo:develop. Writable; the result carries the local reconcile steps."
   },
 
   // --- HTTP --------------------------------------------------------------------

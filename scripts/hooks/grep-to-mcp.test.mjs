@@ -121,3 +121,16 @@ test("the hook process stays quiet outside CLAUDE_PROJECT_DIR, and falls back to
   const inside = run({ cwd: "D:/x/wec.aria", tool_input: { command: 'grep -n "^## 3.7" docs/10-canonical-model.md' } }, "D:/x/wec.aria");
   assert.match(JSON.parse(inside).hookSpecificOutput.additionalContext, /query_docs/);
 });
+
+test("quiet for a grep that filters a pipe (no path after a `|`), including inside $( … )", () => {
+  // wec.aria's live case: the hook suggested query_docs on its own test-run filter.
+  assert.equal(w('node --test x.mjs 2>&1 | grep -E "^# (tests|pass|fail)"'), null);
+  assert.equal(w("git log --oneline | grep kb_version_ids"), null);
+  assert.equal(w('n=$(git status --porcelain | grep -c "^ M")'), null);
+  assert.equal(w("cat docs/10-canonical-model.md | rg kb_version_ids"), null);
+  // Controls: a grep that names its files still searches the repo, before or after a pipe or ||.
+  assert.match(w("grep -n kb_version_ids packages/core/audit/index.ts"), /search_symbols/);
+  assert.match(w("git status | head -1; grep -rn kb_version_ids packages"), /search_symbols/);
+  assert.match(w("false || grep -rn kb_version_ids packages"), /search_symbols/, "|| is an OR, not a pipe");
+  assert.match(w("echo x | grep -rn kb_version_ids packages"), /search_symbols/, "a piped grep WITH a path still reads files");
+});

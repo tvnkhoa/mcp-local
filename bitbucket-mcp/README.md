@@ -10,7 +10,7 @@ Server này chỉ dùng bốn nhóm quyền của Bitbucket:
 - `write:pullrequest:bitbucket` → `create_pull_request`, `add_pull_request_comment`, `merge_pull_request`
 - `write:repository:bitbucket` → `commit_files_apply`, `create_branch`, `delete_branch` — thiếu scope này Bitbucket trả 403 kèm `required`/`granted`; API token không thêm scope được, phải tạo token mới
 
-> Token thiếu scope này sẽ trả **403** cho các tool pipeline, kèm detail liệt kê `required` / `granted` — đã xác nhận trên workspace `siliconstack` ngày 2026-08-21. Cần cấp lại token có `read:pipeline`.
+> Token thiếu scope này sẽ trả **403** cho các tool pipeline, kèm detail liệt kê `required` / `granted` — đã xác nhận trên một workspace thật ngày 2026-08-21. Cần cấp lại token có `read:pipeline`.
 
 Không có dependency HTTP ngoài — dùng `fetch` (undici) của Node. Cùng khuôn với `observe-mcp` (client HTTP + retry/timeout + error taxonomy) và cơ chế write-gating bằng env flag của `postgres-mcp`.
 
@@ -37,8 +37,8 @@ npm run build     # tsc → dist/
 | `BITBUCKET_MERGE_ENABLED` | no | `false` | merge_pull_request is DISABLED unless true (dryRun still works). Merge commit only; the repo has no server-side branch protection, so this tool is the only guard. |
 | `BITBUCKET_COMMIT_ENABLED` | no | `false` | commit_files_apply is DISABLED unless true (commit_files_preview still works). Never force-pushes; refused unless the parent is the branch head. |
 | `BITBUCKET_BRANCH_ENABLED` | no | `false` | create_branch / delete_branch are DISABLED unless true (dryRun still works). Only names on BITBUCKET_COMMIT_BRANCHES; never a shared or main branch. |
-| `BITBUCKET_COMMIT_BRANCHES` | no | — | Comma-separated repo:branch globs that commit_files, create_branch and delete_branch may write — branches nobody checks out locally, e.g. wec.aria:sandbox/*. Empty = none. |
-| `BITBUCKET_COMMIT_SHARED_BRANCHES` | no | — | Comma-separated repo:branch globs checked out in a shared worktree, e.g. wec.aria:develop. Writable; the result carries the local reconcile steps. |
+| `BITBUCKET_COMMIT_BRANCHES` | no | — | Comma-separated repo:branch globs that commit_files, create_branch and delete_branch may write — branches nobody checks out locally, e.g. my-repo:sandbox/*. Empty = none. |
+| `BITBUCKET_COMMIT_SHARED_BRANCHES` | no | — | Comma-separated repo:branch globs checked out in a shared worktree, e.g. my-repo:develop. Writable; the result carries the local reconcile steps. |
 | `BITBUCKET_BASE_URL` | no | `https://api.bitbucket.org/2.0` *(code)* | — |
 | `BITBUCKET_TIMEOUT_MS` | no | `30000` | Must be > 0, else the default applies. |
 | `BITBUCKET_MAX_RETRIES` | no | `2` | Retries for transient failures (network / 429 / 5xx). 0 disables. |
@@ -53,7 +53,7 @@ Thay thế (khi không dùng access token): đặt `BITBUCKET_EMAIL` + `BITBUCKE
 
 > Tạo Access Token trong Bitbucket: **Repository/Workspace settings → Access tokens**, chọn scope `read:repository`, `read:pullrequest`, `read:pipeline`, `write:pullrequest`.
 >
-> Repository Access Token chỉ đọc được **đúng repo đó**: `get_file_at_ref` sang repo khác (vd `wec.knowledge-base`) và `search_code` toàn workspace sẽ trả 403. Cần Workspace Access Token hoặc Atlassian API token (Basic).
+> Repository Access Token chỉ đọc được **đúng repo đó**: `get_file_at_ref` sang repo khác (vd `other-repo`) và `search_code` toàn workspace sẽ trả 403. Cần Workspace Access Token hoặc Atlassian API token (Basic).
 
 ## Chạy
 
@@ -171,25 +171,25 @@ create_pull_request {
 
 ```jsonc
 // commit trên develop mà master chưa có, chạm vào một path
-list_commits { "repoSlug": "wec.aria", "include": ["develop"], "exclude": ["master"], "path": "packages/db" }
+list_commits { "repoSlug": "my-repo", "include": ["develop"], "exclude": ["master"], "path": "packages/db" }
 
 // commit từ một ngày, của một người — lọc phía client; dùng nextCursor để đi tiếp
-list_commits { "repoSlug": "wec.aria", "since": "2026-10-07", "author": "koi", "pagelen": 20 }
+list_commits { "repoSlug": "my-repo", "since": "2026-10-07", "author": "alice", "pagelen": 20 }
 
 // một commit và các file nó đổi (như git show --stat)
-get_commit { "repoSlug": "wec.aria", "sha": "b2dce2fd01b7" }
+get_commit { "repoSlug": "my-repo", "sha": "b2dce2fd01b7" }
 
 // develop đi trước/sau master bao nhiêu, đổi những file nào
-compare_refs { "repoSlug": "wec.aria", "base": "master", "head": "develop" }
+compare_refs { "repoSlug": "my-repo", "base": "master", "head": "develop" }
 
 // đọc tài liệu ở repo khác, không cần clone (ref bỏ trống = main branch)
-get_file_at_ref { "repoSlug": "wec.knowledge-base", "path": "glossary/business-terms.md" }
+get_file_at_ref { "repoSlug": "other-repo", "path": "glossary/business-terms.md" }
 
 // SHA này đã xanh chưa
-get_commit_statuses { "repoSlug": "wec.aria", "sha": "b2dce2fd01b742570618a44c8249680dd35b4fe5" }
+get_commit_statuses { "repoSlug": "my-repo", "sha": "b2dce2fd01b742570618a44c8249680dd35b4fe5" }
 ```
 
-- **Thứ tự `x..y` của Bitbucket ngược với git**: `diffstat/<head>..<base>` mới là "head có gì mà base chưa có". Tool nhận `base`/`head` có tên nên không cần nhớ; đã xác minh trên wec.aria ngày 2026-10-13 (develop..master liệt kê file develop thêm, chiều ngược lại rỗng). Response có field `semantics` ghi rõ.
+- **Thứ tự `x..y` của Bitbucket ngược với git**: `diffstat/<head>..<base>` mới là "head có gì mà base chưa có". Tool nhận `base`/`head` có tên nên không cần nhớ; đã xác minh trên một repo thật ngày 2026-10-13 (develop..master liệt kê file develop thêm, chiều ngược lại rỗng). Response có field `semantics` ghi rõ.
 - Ref được **resolve sang SHA trước** (branch → tag → SHA rút gọn) và echo lại `resolvedSha`: branch có `/` (vd `docs/phase-0b`) không lẫn với path, và `/src/<branch>/…` trả 403 với API token.
 - Nội dung file đọc bằng `?format=raw`. Đã xác minh 2026-10-13: `/src/<sha>/<path>` không có `format` trả **403** với Atlassian API token, còn `format=meta` và `format=raw` trả 200.
 - Mọi body lớn (file, diff) được đọc theo stream và **cắt ở `maxBytes`** — `truncated: true` khi bị cắt. File binary chỉ trả metadata.
@@ -240,15 +240,15 @@ get_pipeline_step_log {
 
 ```jsonc
 // comment inline trên diff — xem trước, rồi gửi
-add_pull_request_comment { "repoSlug": "wec.aria", "id": 12, "body": "…", "path": "src/a.ts", "line": 42, "dryRun": true }
+add_pull_request_comment { "repoSlug": "my-repo", "id": 12, "body": "…", "path": "src/a.ts", "line": 42, "dryRun": true }
 
 // merge: bước 1 là preview (mặc định), trả về sourceCommit
-merge_pull_request { "repoSlug": "wec.aria", "id": 12 }
+merge_pull_request { "repoSlug": "my-repo", "id": 12 }
 // bước 2: merge đúng commit vừa review
-merge_pull_request { "repoSlug": "wec.aria", "id": 12, "dryRun": false, "expectedSourceCommit": "f02e5cfc8fb6" }
+merge_pull_request { "repoSlug": "my-repo", "id": 12, "dryRun": false, "expectedSourceCommit": "f02e5cfc8fb6" }
 ```
 
-- **Chỉ merge commit, không có tuỳ chọn nào khác.** Squash hay fast-forward viết lại hoặc bỏ qua các SHA mà board của wec.aria dựa vào.
+- **Chỉ merge commit, không có tuỳ chọn nào khác.** Squash hay fast-forward viết lại hoặc bỏ qua các SHA mà công cụ phía sau (vd một board theo dõi commit) dựa vào.
 - **Repo không có branch restriction phía server** (owner xác nhận ngày 2026-10-13: không bật được trên develop/master). Vì vậy luật "không viết lại lịch sử, chỉ merge commit" **chỉ do tool giữ** — tool là lớp bảo vệ duy nhất; người hoặc công cụ khác vẫn có thể squash hay force push.
 - `dryRun` mặc định là `true`. Merge thật cần `BITBUCKET_MERGE_ENABLED=true` **và** `expectedSourceCommit` khớp commit hiện tại của PR; nếu PR đã có commit mới sau lần preview thì bị từ chối (`source_moved`). PR không ở trạng thái `OPEN` → `pr_not_open`.
 - `BITBUCKET_MERGE_ENABLED` tách khỏi `BITBUCKET_WRITE_ENABLED`: bật quyền tạo PR/comment không kéo theo quyền merge.
@@ -260,23 +260,23 @@ Dành cho nhiều session dùng chung một worktree: commit được tạo trê
 
 ```jsonc
 // 1. nhánh tạm (dryRun mặc định — gọi lại với dryRun:false)
-create_branch { "repoSlug": "wec.aria", "name": "sandbox/my-change", "fromRef": "develop", "dryRun": false }
+create_branch { "repoSlug": "my-repo", "name": "sandbox/my-change", "fromRef": "develop", "dryRun": false }
 
 // 2. lên kế hoạch commit — parent PHẢI là head hiện tại của nhánh
 commit_files_preview {
-  "repoSlug": "wec.aria", "branch": "sandbox/my-change", "parent": "<sha head>",
+  "repoSlug": "my-repo", "branch": "sandbox/my-change", "parent": "<sha head>",
   "message": "…", "files": [{ "path": "docs/a.md", "content": "…" }, { "path": "old.md", "delete": true }]
 }
 // 3. tạo đúng commit đã preview
 commit_files_apply { "previewId": "…", "approvalToken": "…" }
 
 // 4. sau khi merge PR: xoá nhánh (preview trả head, rồi xoá đúng head đó)
-delete_branch { "repoSlug": "wec.aria", "name": "sandbox/my-change", "dryRun": false, "expectedHead": "<head>" }
+delete_branch { "repoSlug": "my-repo", "name": "sandbox/my-change", "dryRun": false, "expectedHead": "<head>" }
 ```
 
 - **Không bao giờ force.** Server MCP kiểm parent == head trước khi gửi, và Bitbucket tự kiểm lần nữa. Đã xác minh 2026-10-13: parent cũ bị từ chối với **400** "The parent commit specified (…) is not the head of branch …" (tài liệu ghi 409) và không ghi gì; cả hai đều được báo thành lỗi `parent_not_head`.
 - **Repo không có branch restriction phía server**, nên allowlist và các lần từ chối của tool là lớp bảo vệ duy nhất.
-- Allowlist: `BITBUCKET_COMMIT_BRANCHES` cho nhánh không ai checkout local (vd `wec.aria:sandbox/*`); `BITBUCKET_COMMIT_SHARED_BRANCHES` cho nhánh đang checkout trong worktree chung (vd `wec.aria:develop`). Mẫu là `repo:glob`, `*` khớp cả `/`.
+- Allowlist: `BITBUCKET_COMMIT_BRANCHES` cho nhánh không ai checkout local (vd `my-repo:sandbox/*`); `BITBUCKET_COMMIT_SHARED_BRANCHES` cho nhánh đang checkout trong worktree chung (vd `my-repo:develop`). Mẫu là `repo:glob`, `*` khớp cả `/`.
 - create/delete_branch **không bao giờ** đụng `master`, `main`, `develop`, main branch của repo hay nhánh dùng chung, dù allowlist nói gì.
 - **Nhánh dùng chung:** commit nằm trên origin còn worktree vẫn ở parent và path vẫn dirty; `git merge --ff-only` sẽ từ chối. `commit_files_apply` trả `reconcile.script` (bash) để chạy trong worktree đó: dừng mà không đổi gì nếu HEAD local khác parent hoặc nội dung file khác commit; nếu khớp thì `git update-ref` nhánh và `git reset` **chỉ** các path đã commit — file người khác đã stage giữ nguyên.
 - Chỉ file text (có NUL bị từ chối), tối đa 50 file, 512 KiB/file, 1 MiB/commit. Apply chỉ nhận `previewId` + `approvalToken`, nên thứ được commit đúng là thứ đã review; token mất hiệu lực khi server khởi động lại.

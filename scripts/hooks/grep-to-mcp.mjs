@@ -31,10 +31,13 @@ import { fileURLToPath } from "node:url";
  * the pattern instead of reading as a pipe. Bash keeps `\` in "..." except before $ ` " \.
  */
 function segments(s) {
-  const segs = [[]];
+  // Each segment remembers whether a single `|` led into it: such a segment reads the previous
+  // command's output (`node --test x | grep -E "^# pass"`), not files. `||` is an OR, not a pipe.
+  const segs = [{ tokens: [], piped: false }];
   let cur = "";
   let q = null;
-  const flush = () => { if (cur) { segs[segs.length - 1].push(cur); cur = ""; } };
+  const flush = () => { if (cur) { segs[segs.length - 1].tokens.push(cur); cur = ""; } };
+  const split = (piped) => { flush(); if (segs[segs.length - 1].tokens.length) segs.push({ tokens: [], piped }); else segs[segs.length - 1].piped = piped; };
   for (let i = 0; i < s.length; i++) {
     const c = s[i];
     if (q) {
@@ -44,12 +47,18 @@ function segments(s) {
       continue;
     }
     if (c === '"' || c === "'") { q = c; continue; }
-    if (c === "|" || c === ";" || c === "&" || c === "\n") { flush(); if (segs[segs.length - 1].length) segs.push([]); continue; }
+    if (c === "|") {
+      const orOperator = s[i + 1] === "|";
+      if (orOperator) i++;
+      split(!orOperator);
+      continue;
+    }
+    if (c === ";" || c === "&" || c === "\n" || c === "(" || c === ")") { split(false); continue; }
     if (/\s/.test(c)) { flush(); continue; }
     cur += c;
   }
   flush();
-  return segs.filter((t) => t.length > 0);
+  return segs.filter((t) => t.tokens.length > 0);
 }
 
 /** Directory-changing commands whose first argument is the new working directory. */
@@ -61,7 +70,7 @@ const CD = new Set(["cd", "pushd", "Set-Location", "sl", "chdir"]);
  */
 export function parseShellSearch(command) {
   const cd = [];
-  for (const t of segments(String(command))) {
+  for (const { tokens: t, piped } of segments(String(command))) {
     const tool = t[0];
     if (CD.has(tool)) {
       const dir = t.slice(1).find((x) => !x.startsWith("-"));
@@ -86,6 +95,8 @@ export function parseShellSearch(command) {
       if (pattern === null) pattern = a;
       else paths.push(a);
     }
+    // After a `|` with no path, grep filters the previous command's output: not a repo search.
+    if (piped && paths.length === 0) continue;
     if (pattern) return { tool, pattern, paths, filesOnly, cd };
   }
   return null;
