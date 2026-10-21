@@ -103,6 +103,12 @@ try {
   const adrCite = (from?.citations ?? []).find((c) => c.patternId === "adr");
   assert(adrCite?.line === 4 && adrCite?.targetLine === 1 && posix(adrCite?.targetFile) === "docs/adr/0021-boundaries.md", "a file-anchor citation: line 4 in CLAUDE.md, target line 1", JSON.stringify(adrCite));
 
+  // orient (release I2 follow-up): a citation target in another spelling is rewritten to the repo's own
+  // shorthand when its citations.json makes that unambiguous.
+  const or = js(await client.callTool({ name: "orient", arguments: { repoId, intent: "who cites decision #2", profile: "compact" } }));
+  const orTool = or?.recommendedTools?.[0];
+  assert(orTool?.tool === "query_docs" && orTool?.args?.mode === "cites" && orTool?.args?.target === "15 #2", "orient rewrites 'decision #2' to the repo's '15 #2'", JSON.stringify(or)?.slice(0, 400));
+
   const none = await docs({ mode: "cites", target: "15 #99" });
   assert(none?.resolved?.[0]?.status === "anchor_not_found" && none?.citedByCount === 0, "an unknown row is anchor_not_found, never a guess", JSON.stringify(none?.resolved));
 
