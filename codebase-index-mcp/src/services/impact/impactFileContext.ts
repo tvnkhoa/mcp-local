@@ -74,7 +74,10 @@ export function getFileSummaryImpl(
           `
           select distinct sf.file_path as fromFilePath, e.type as edgeType
           from edges e
-          inner join symbols sf on sf.repo_id = e.repo_id and sf.symbol_id = e.from_id
+          -- CROSS JOIN pins edges as the outer loop (release I1b). With no sqlite_stat1 the planner
+          -- put symbols outside — every symbol of the repo × every edge of the repo — and this one
+          -- query took 105 s for a 4-symbol file of wec.aria; edges-first, it is milliseconds.
+          cross join symbols sf on sf.repo_id = e.repo_id and sf.symbol_id = e.from_id
           where e.repo_id = ? and e.to_id in (${symbolIds.map(() => "?").join(",")})
             and sf.file_path != ?
           order by sf.file_path

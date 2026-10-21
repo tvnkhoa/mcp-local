@@ -602,6 +602,14 @@ function clearVectorSearchCache(): void {
   searchCache.clear();
 }
 
+/**
+ * Release I1b: the R1 refresh runs in a worker thread with its own connection, so its vector rebuild
+ * clears the WORKER's memo, not this thread's. The server thread calls this after a worker run lands.
+ */
+export function invalidateVectorSearchCache(): void {
+  clearVectorSearchCache();
+}
+
 function searchUncached(
   db: Database.Database,
   repoId: string,

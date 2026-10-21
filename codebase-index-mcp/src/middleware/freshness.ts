@@ -49,7 +49,8 @@ export type FreshnessGateOptions = {
   getRepoPath: (repoId: string) => string | null;
   /** Commit the latest recorded run indexed, or null. */
   getIndexedCommit: (repoId: string) => string | null;
-  readTree: (repoPath: string) => RepoTreeState;
+  /** May be async (release I1b: the server reads git without blocking its event loop). */
+  readTree: (repoPath: string) => RepoTreeState | Promise<RepoTreeState>;
   run: (repoId: string, repoPath: string, mode: IndexMode) => Promise<IndexRunResult>;
   /**
    * Why this process must not refresh the repo at all, or null. Release F: a server still running an
@@ -275,11 +276,14 @@ export function createFreshnessGate(opts: FreshnessGateOptions): FreshnessGate {
 
     let tree: RepoTreeState;
     try {
-      tree = opts.readTree(repoPath);
+      tree = await opts.readTree(repoPath);
     } catch {
       return { state: "fresh" }; // not a git repo: nothing to compare against
     }
     if (!tree.head) return { state: "fresh" };
+    // The tree read may have yielded: a concurrent call for this repo can have started a run meanwhile.
+    const startedMeanwhile = inflight.get(repoId);
+    if (startedMeanwhile) return waitBudget(repoId, startedMeanwhile);
 
     const indexed = opts.getIndexedCommit(repoId);
     const headMoved = !indexed || !sameCommit(tree.head, indexed);

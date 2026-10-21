@@ -1,4 +1,6 @@
-import { execFileSync } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
+import fs from "node:fs";
+import path from "node:path";
 
 import type { GraphStore } from "../../repositories/graphStore.js";
 
@@ -71,8 +73,77 @@ export function runGitLinesOrNull(repoPath: string, args: string[]): string[] | 
 }
 
 export function resolveHeadCommitSha(repoPath: string): string | null {
+  const fromFiles = readHeadShaFromFiles(repoPath);
+  if (fromFiles) return fromFiles;
   try {
     return runGit(repoPath, ["rev-parse", "HEAD"]).trim();
+  } catch {
+    return null;
+  }
+}
+
+const SHA_RE = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/;
+
+/**
+ * HEAD's commit read from the git directory's files, with no process spawn (release I1b), or null
+ * when that is not certain — the caller then asks `git rev-parse HEAD` as before.
+ *
+ * Why: every read tool checks staleness, and `execFileSync("git", …)` holds the event loop for the
+ * whole spawn. With the R1 refresh's parse workers busy, one `rev-parse` held the server thread for
+ * up to 1.9 s (CPU profile of test:freshness-worker). A file read is microseconds.
+ *
+ * Handles a `.git` directory or a `.git` file (`gitdir:` — worktrees, submodules) found at or above
+ * `repoPath`, a detached HEAD, a symbolic HEAD resolved through a loose ref (in the git dir, then its
+ * `commondir`) or `packed-refs`. Anything else — a ref that is itself symbolic, reftable storage, an
+ * unborn branch — returns null.
+ */
+export function readHeadShaFromFiles(repoPath: string): string | null {
+  try {
+    let dir = path.resolve(repoPath);
+    let gitDir: string | null = null;
+    for (;;) {
+      const dotGit = path.join(dir, ".git");
+      const st = fs.statSync(dotGit, { throwIfNoEntry: false });
+      if (st?.isDirectory()) {
+        gitDir = dotGit;
+        break;
+      }
+      if (st?.isFile()) {
+        const m = /^gitdir:\s*(.+?)\s*$/m.exec(fs.readFileSync(dotGit, "utf8"));
+        if (!m) return null;
+        gitDir = path.resolve(dir, m[1]);
+        break;
+      }
+      const parent = path.dirname(dir);
+      if (parent === dir) return null;
+      dir = parent;
+    }
+    const head = fs.readFileSync(path.join(gitDir, "HEAD"), "utf8").trim();
+    if (SHA_RE.test(head)) return head;
+    const ref = /^ref:\s*(refs\/\S+)$/.exec(head)?.[1];
+    if (!ref) return null;
+    let commonDir = gitDir;
+    try {
+      commonDir = path.resolve(gitDir, fs.readFileSync(path.join(gitDir, "commondir"), "utf8").trim());
+    } catch {
+      // Not a linked worktree: refs live in the git dir itself.
+    }
+    for (const base of commonDir === gitDir ? [gitDir] : [gitDir, commonDir]) {
+      const loose = path.join(base, ...ref.split("/"));
+      if (!fs.existsSync(loose)) continue;
+      const value = fs.readFileSync(loose, "utf8").trim();
+      return SHA_RE.test(value) ? value : null; // a symbolic ref chain: let git resolve it
+    }
+    const packed = fs.readFileSync(path.join(commonDir, "packed-refs"), "utf8");
+    for (const line of packed.split(/\r?\n/)) {
+      if (line.startsWith("#") || line.startsWith("^")) continue;
+      const space = line.indexOf(" ");
+      if (space > 0 && line.slice(space + 1) === ref) {
+        const sha = line.slice(0, space);
+        return SHA_RE.test(sha) ? sha : null;
+      }
+    }
+    return null;
   } catch {
     return null;
   }
@@ -245,8 +316,29 @@ export function parseStatusPorcelainV2(out: string): { head: string | null; dirt
  * read query; the four-spawn version (rev-parse + collectDirtyFiles) cost ~330 ms on wec.aria on
  * Windows, this ~110 ms.
  */
+const WORKING_TREE_STATUS_ARGS = ["-c", "core.quotePath=false", "status", "--porcelain=v2", "--branch", "-z", "--untracked-files=all"];
+
 export function readWorkingTreeState(repoPath: string): { head: string | null; dirty: string[] } {
-  return parseStatusPorcelainV2(runGit(repoPath, ["-c", "core.quotePath=false", "status", "--porcelain=v2", "--branch", "-z", "--untracked-files=all"]));
+  return parseStatusPorcelainV2(runGit(repoPath, WORKING_TREE_STATUS_ARGS));
+}
+
+/**
+ * The same read without blocking the event loop (release I1b). The gate runs it before every read
+ * query, and `git status` on wec.be takes ~300 ms: synchronously, that was a 300 ms stall of every
+ * other call in flight, on every query. Same bounds as {@link runGit}; rejects where it throws.
+ */
+export function readWorkingTreeStateAsync(repoPath: string): Promise<{ head: string | null; dirty: string[] }> {
+  return new Promise((resolve, reject) => {
+    execFile(
+      "git",
+      WORKING_TREE_STATUS_ARGS,
+      { cwd: repoPath, encoding: "utf8", timeout: GIT_TIMEOUT_MS, maxBuffer: GIT_MAX_BUFFER_BYTES, windowsHide: true },
+      (error, stdout) => {
+        if (error) reject(error);
+        else resolve(parseStatusPorcelainV2(stdout.trim()));
+      }
+    );
+  });
 }
 
 /**

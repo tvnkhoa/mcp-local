@@ -25,7 +25,8 @@ import {
   evaluateIncrementalSkip,
   newerBuildRefusal,
   resolvePerformanceProfileDecision,
-  safeCrossRepoResolve
+  safeCrossRepoResolve,
+  shouldDropEdgeIndexesForResolve
 } from "./runPolicy.js";
 
 /** Tuning knobs the pipeline needs, all sourced from env at start-up. */
@@ -272,8 +273,14 @@ export function createIndexRunner(options: IndexRunnerOptions): RunIndexAndResol
 
       // Optimization: drop secondary edge indexes before bulk resolve to speed up UPDATEs.
       // Each UPDATE otherwise must maintain 4 secondary indexes on the edges table.
-      indexLog(`[index-post] repoId=${repoId} dropping edge indexes for bulk resolve...`);
-      store.dropEdgeIndexesForBulkWrite();
+      // Release I1b: only for a bulk resolve. The indexes are DB-wide (every repo, every server
+      // process), so dropping them for a dirty run's few thousand rows made every concurrent reader
+      // full-scan `edges` — a get_file_summary on the server thread took 104 s during a wec.aria
+      // dirty refresh — and rebuilding them over the whole table cost more than the UPDATEs saved.
+      if (shouldDropEdgeIndexesForResolve(mode, ctx.unresolvedRows.length)) {
+        indexLog(`[index-post] repoId=${repoId} dropping edge indexes for bulk resolve...`);
+        store.dropEdgeIndexesForBulkWrite();
+      }
 
       const BATCH_SIZE = 5_000;
       let total = 0;
@@ -295,7 +302,7 @@ export function createIndexRunner(options: IndexRunnerOptions): RunIndexAndResol
       return total;
     } catch { return 0; }
     finally {
-      // Always rebuild indexes after resolve, even on error
+      // Always rebuild indexes after resolve, even on error (`create if not exists`: a no-op when kept).
       indexLog(`[index-post] repoId=${repoId} rebuilding edge indexes after resolve...`);
       try { store.rebuildEdgeIndexes(); } catch { /* non-fatal */ }
       callResolveMs = Date.now() - callStart;

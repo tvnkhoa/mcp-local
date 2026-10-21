@@ -2,7 +2,14 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import type { GraphStore } from "../../repositories/graphStore.js";
-import { evaluateIncrementalSkip, indexGeneration, newerBuildRefusal, resolvePerformanceProfileDecision } from "./runPolicy.js";
+import {
+  BULK_RESOLVE_INDEX_DROP_MIN_ROWS,
+  evaluateIncrementalSkip,
+  indexGeneration,
+  newerBuildRefusal,
+  resolvePerformanceProfileDecision,
+  shouldDropEdgeIndexesForResolve
+} from "./runPolicy.js";
 import { currentAnnotationKey, INDEX_VERSION } from "./indexPipeline.js";
 
 /**
@@ -134,4 +141,13 @@ test("release F: an older build refuses to write over a newer build, never the o
   assert.equal(indexGeneration(INDEX_VERSION), 10);
   assert.equal(newerBuildRefusal("v9-sql-lane", INDEX_VERSION), null, "v10 upgrades a v9 index");
   assert.ok((newerBuildRefusal(INDEX_VERSION, "v9-sql-lane") ?? "").includes(INDEX_VERSION), "a v9 build refuses to write over a v10 index");
+});
+
+test("release I1b: only a full run or a bulk resolve drops the DB-wide edge indexes", () => {
+  assert.equal(shouldDropEdgeIndexesForResolve("full", 0), true, "full runs keep the bulk-write optimisation");
+  // A wec.aria dirty run resolves ~6 000 call rows; dropping the indexes made every concurrent reader
+  // full-scan `edges` and cost more to rebuild than it saved.
+  assert.equal(shouldDropEdgeIndexesForResolve("dirty", 6_000), false);
+  assert.equal(shouldDropEdgeIndexesForResolve("incremental", BULK_RESOLVE_INDEX_DROP_MIN_ROWS - 1), false);
+  assert.equal(shouldDropEdgeIndexesForResolve("incremental", BULK_RESOLVE_INDEX_DROP_MIN_ROWS), true);
 });

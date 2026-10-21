@@ -214,6 +214,7 @@ import {
   deleteVectorsByRepo,
   getVectorStats,
   isVectorEnabled,
+  invalidateVectorSearchCache,
 } from "./vectorStore.js";
 
 // TRIVIAL_CALLEE_TOKENS, TRIVIAL_CALLEE_IN_CLAUSE → impactAnalyzer.ts
@@ -267,6 +268,14 @@ export class GraphStore {
 
   close(): void {
     this.db.close();
+  }
+
+  /**
+   * Drop this process's memos that an index run written through ANOTHER connection (the R1 refresh
+   * worker, release I1b) leaves stale. Everything else the server thread reads comes from SQL.
+   */
+  invalidateProcessCaches(): void {
+    invalidateVectorSearchCache();
   }
 
   runInTransaction(fn: () => void): void {
