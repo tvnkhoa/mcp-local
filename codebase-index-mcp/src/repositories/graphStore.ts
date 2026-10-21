@@ -101,8 +101,15 @@ import {
   packageContractExistsImpl,
   countPublisherSelfReferencesImpl,
   findSimilarPackageContractIdsImpl,
-  getPackageBridgeStatsImpl
+  getPackageBridgeStatsImpl,
+  type CrossRepoImpactRow
 } from "./crossRepoStore.js";
+import {
+  getEndpointDependenciesImpl,
+  findEndpointContractSymbolsImpl,
+  getSymbolIdsInFileImpl,
+  findImportingFilesImpl
+} from "./endpointStore.js";
 import {
   buildFtsQuery,
   buildIntentFtsQuery,
@@ -511,22 +518,27 @@ export class GraphStore {
 
   getCrossRepoImpact(
     repoId: string,
-    symbolId: string,
+    symbolIds: string | readonly string[],
     direction: "outbound" | "inbound",
     limit: number
-  ): {
-    fromRepoId: string;
-    fromSymbolId: string;
-    toRepoId: string;
-    toSymbolId: string;
-    type: string;
-    relatedName: string | null;
-    relatedKind: string | null;
-    relatedFilePath: string | null;
-    relatedSignature: string | null;
-    edgeReason: string | null;
-  }[] {
-    return getCrossRepoImpactImpl(this.db, repoId, symbolId, direction, limit);
+  ): CrossRepoImpactRow[] {
+    return getCrossRepoImpactImpl(this.db, repoId, typeof symbolIds === "string" ? [symbolIds] : symbolIds, direction, limit);
+  }
+
+  getEndpointDependencies(repoId: string, fromSymbolId: string): { toId: string; reason: string | null }[] {
+    return getEndpointDependenciesImpl(this.db, repoId, fromSymbolId);
+  }
+
+  findEndpointContractSymbols(repoId: string, symbolId: string): { symbolId: string; signature: string }[] {
+    return findEndpointContractSymbolsImpl(this.db, repoId, symbolId);
+  }
+
+  getSymbolIdsInFile(repoId: string, filePath: string, limit: number): string[] {
+    return getSymbolIdsInFileImpl(this.db, repoId, filePath, limit);
+  }
+
+  findImportingFiles(repoId: string, filePath: string, limit: number): string[] {
+    return findImportingFilesImpl(this.db, repoId, filePath, limit);
   }
 
   findPackageConsumers(

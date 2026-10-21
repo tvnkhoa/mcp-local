@@ -112,7 +112,11 @@ export type RunIndexInput = {
 // `bin/`-style segments (078), and forward-slash paths in every table (079). Symbol ids hash the path,
 // so a Windows-indexed repo gets new ids for every symbol: the next run (full, or incremental — no
 // stored hash matches a forward-slash path) re-extracts everything and prunes the backslash rows.
-export const INDEX_VERSION = "v7-text-json-html-svg";
+// v8: MCP-ISSUE-081 (R9) — declared JS/TS HTTP consumers (`source: 'scheme:METHOD /path'`) emit
+// `DEPENDS_ON endpoint:` edges. The endpoint id format is UNCHANGED (wildcards live in the matcher), so
+// a provider repo does not need re-indexing; a consumer repo needs a run to emit the new edges, and
+// cross-repo links are written by the consumer's run, so index the provider first.
+export const INDEX_VERSION = "v8-http-consumers";
 
 export async function runIndexPipeline(store: GraphStore, input: RunIndexInput): Promise<IndexRunSummary> {
   const identity: RunIdentity = {

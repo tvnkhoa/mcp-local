@@ -67,7 +67,8 @@
     "test:field-access-vue": "node scripts/test/test-field-access-vue.mjs",
     "test:text-json-lane": "node scripts/test/test-text-json-lane.mjs",
     "test:html-svg": "node scripts/test/test-html-svg.mjs",
-    "test:tests-for-diff": "node scripts/test/test-tests-for-diff.mjs"
+    "test:tests-for-diff": "node scripts/test/test-tests-for-diff.mjs",
+    "test:http-consumers": "node scripts/test/test-http-consumers.mjs"
   },
   "dependencies": {
     "@mcp/core": "file:../packages/core",

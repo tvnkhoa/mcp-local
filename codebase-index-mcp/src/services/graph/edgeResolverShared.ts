@@ -18,6 +18,7 @@ import {
   isVectorEnabled,
 } from "../../repositories/vectorStore.js";
 import { normalizeFilePath } from "./moduleResolution.js";
+import { HTTP_CONSUMER_REASON_PREFIX, pickEndpointProviders } from "./endpointMatch.js";
 
 /**
  * Bulk-tag all import edges whose namespace belongs to a known external namespace (System, Microsoft, etc.)
@@ -185,7 +186,7 @@ export function resolveUnlinkedEdges(db: Database.Database, repoId: string): Res
   const unlinked = db
     .prepare(
       `
-      select distinct e.from_id as fromId, e.to_id as toId, e.type
+      select distinct e.from_id as fromId, e.to_id as toId, e.type, e.reason
       from edges e
       where e.repo_id = ?
         and e.to_id not like 'import:%'
@@ -217,7 +218,7 @@ export function resolveUnlinkedEdges(db: Database.Database, repoId: string): Res
       limit 5000
       `
     )
-    .all(repoId, repoId) as { fromId: string; toId: string; type: string }[];
+    .all(repoId, repoId) as { fromId: string; toId: string; type: string; reason: string | null }[];
 
   if (unlinked.length === 0) {
     return stats;
@@ -267,6 +268,11 @@ export function resolveUnlinkedEdges(db: Database.Database, repoId: string): Res
     }
   }
 
+  // R9 (MCP-ISSUE-081): an endpoint token with no exact provider gets the segment matcher —
+  // parameter wildcards first, then (declared consumers only) a gateway prefix. Keyed per row
+  // because tier 3 depends on the edge's reason, not only on the token.
+  const endpointCandidatesByRow = resolveEndpointCandidates(db, repoId, unlinked, candidatesByToId);
+
   const upsertStmt = db.prepare(
     `
     insert into cross_repo_deps (from_repo_id, from_symbol_id, to_repo_id, to_symbol_id, type)
@@ -296,7 +302,12 @@ export function resolveUnlinkedEdges(db: Database.Database, repoId: string): Res
   const tx = db.transaction(() => {
     for (const row of unlinked) {
       stats.attempts += 1;
-      const candidates = candidatesByToId.get(row.toId) ?? [];
+      const endpointMatch = endpointCandidatesByRow.get(endpointRowKey(row));
+      if (endpointMatch === "ambiguous") {
+        stats.unresolvedByReason.ambiguous_candidates += 1;
+        continue;
+      }
+      const candidates = candidatesByToId.get(row.toId) ?? endpointMatch ?? [];
       if (candidates.length === 0) {
         stats.unresolvedByReason.no_candidate += 1;
         continue;
@@ -322,4 +333,53 @@ export function resolveUnlinkedEdges(db: Database.Database, repoId: string): Res
   tx();
 
   return stats;
+}
+
+type ContractCandidate = { toRepoId: string; toSymbolId: string };
+type UnlinkedRow = { fromId: string; toId: string; type: string; reason: string | null };
+
+function endpointRowKey(row: UnlinkedRow): string {
+  return `${row.fromId}\u0000${row.toId}\u0000${row.type}`;
+}
+
+/**
+ * Tiered endpoint matching (R9, MCP-ISSUE-081) for the rows the exact signature lookup left without
+ * a candidate.
+ *
+ * Returns, per unlinked row, the provider candidates of the best tier, or `"ambiguous"` when a
+ * gateway-prefix match is not unique — a guessed gateway is never linked (`endpointMatch.ts`).
+ * Exact and wildcard tiers hand their candidates to the caller's existing contract tie-break
+ * (largest provider repo); the provider query is ordered so that pick is stable.
+ */
+function resolveEndpointCandidates(
+  db: Database.Database,
+  repoId: string,
+  unlinked: readonly UnlinkedRow[],
+  exactCandidates: ReadonlyMap<string, ContractCandidate[]>
+): Map<string, ContractCandidate[] | "ambiguous"> {
+  const out = new Map<string, ContractCandidate[] | "ambiguous">();
+  const pending = unlinked.filter((r) => r.toId.startsWith("endpoint:") && !exactCandidates.has(r.toId));
+  if (pending.length === 0) return out;
+
+  const providers = db
+    .prepare(
+      `select repo_id as toRepoId, symbol_id as toSymbolId, signature as contractId
+       from symbols
+       where repo_id != ? and signature like 'endpoint:%'
+       order by repo_id, symbol_id`
+    )
+    .all(repoId) as { toRepoId: string; toSymbolId: string; contractId: string }[];
+  if (providers.length === 0) return out;
+
+  for (const row of pending) {
+    const declared = (row.reason ?? "").startsWith(HTTP_CONSUMER_REASON_PREFIX);
+    const picked = pickEndpointProviders(row.toId, providers, declared);
+    if (!picked) continue;
+    if (picked.kind === "gateway_prefix" && new Set(picked.matches.map((m) => m.contractId)).size > 1) {
+      out.set(endpointRowKey(row), "ambiguous");
+      continue;
+    }
+    out.set(endpointRowKey(row), picked.matches.map((m) => ({ toRepoId: m.toRepoId, toSymbolId: m.toSymbolId })));
+  }
+  return out;
 }

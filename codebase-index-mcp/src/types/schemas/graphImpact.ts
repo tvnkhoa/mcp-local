@@ -140,13 +140,14 @@ export const crossRepoImpactSchema = (MAX_RESULT_LIMIT: number) => z
     repoId: z.string().min(1).max(200),
     symbolId: z.string().min(1).max(200).optional(),
     name: z.string().min(1).max(200).optional(),
+    filePath: z.string().min(1).max(1000).optional(),
     direction: z.enum(["outbound", "inbound"]).default("outbound"),
     limit: z.number().int().min(1).max(MAX_RESULT_LIMIT).default(50),
     profile: responseProfileSchema.default("compact")
   })
   .strict()
-  .refine((v) => Boolean(v.symbolId || v.name), {
-    message: "symbolId or name is required",
+  .refine((v) => Boolean(v.symbolId || v.name || v.filePath), {
+    message: "symbolId, name or filePath is required",
     path: ["symbolId"]
   });
 
