@@ -123,7 +123,12 @@ export type RunIndexInput = {
 // profile; a file last extracted under the `large` (100) or `very-large` (50) profile stored fewer
 // literal rows. The bump only lifts the fast skip: an unchanged file keeps its hash, so a full run is
 // what re-extracts it with the new cap.
-export const INDEX_VERSION = "v10-literal-cap";
+// v10: release I3/I4 (MCP-ISSUE-082 follow-up) — a SQL name binds to its CURRENT definition only
+// (latest migration; `archive/` superseded by the baseline; `.down.sql` never current), and
+// `.query(IMPORTED_CONST)` emits a `sqlconst:` anchor the resolver follows to the declaring module.
+// Unchanged TS files need a run to emit the anchors.
+// Both are release I and share generation 10.
+export const INDEX_VERSION = "v10-release-i";
 
 export async function runIndexPipeline(store: GraphStore, input: RunIndexInput): Promise<IndexRunSummary> {
   const identity: RunIdentity = {

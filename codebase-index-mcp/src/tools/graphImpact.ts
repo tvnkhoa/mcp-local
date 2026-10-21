@@ -60,7 +60,7 @@ export function buildGraphImpactTools(deps: CodebaseIndexDeps): AnyToolDefinitio
 
   const getCallChain = defineTool({
     name: "get_call_chain",
-    description: "Trace a call path from a symbolId (direction=callers or callees). Shows the path, not a caller list — use get_change_context for caller lists. Requires a callable symbolId (function/method), not a class. Use profile='nano' for path summary, 'compact' (default) for full edge list. excludeTests=true drops test-path results entirely.",
+    description: "Trace a call path from a symbolId (direction=callers or callees). Shows the path, not a caller list — use get_change_context for caller lists. Requires a callable symbolId (function/method), not a class. Use profile='nano' for path summary, 'compact' (default) for full edge list. excludeTests=true drops test-path results entirely. A SQL name defined at several sites (a table in archive/ and the baseline, a replaced function) binds its references to the CURRENT definition only; `sqlDefinition` says whether this site is current and lists `alsoDefinedAt` (file:line).",
     input: schemas.getCallChainSchema(limits.maxDepth, limits.maxResultLimit),
     inputSchema: {
       type: "object",

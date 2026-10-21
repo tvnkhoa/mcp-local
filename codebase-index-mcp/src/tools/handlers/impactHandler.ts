@@ -190,7 +190,11 @@ export function handleGetCallChain(
   // MCP-ISSUE-061 Stage 2: an empty chain on a container symbol used to be documented in the rules
   // file instead of reported here. Computed only when the traversal found nothing.
   const containerHint = rows.length === 0 ? buildCallableHint(store, args.repoId, args.symbolId) : null;
-  const hintBlock = containerHint ? { hint: containerHint } : {};
+  // Release I3: a SQL name defined at several sites binds its references to the CURRENT one. Say which
+  // this is and where else the name is defined — a superseded site's empty caller list is otherwise
+  // indistinguishable from "nothing touches this".
+  const sqlDefinition = store.getSqlDefinitionInfo(args.repoId, [args.symbolId]).get(args.symbolId);
+  const hintBlock = { ...(containerHint ? { hint: containerHint } : {}), ...(sqlDefinition ? { sqlDefinition } : {}) };
 
   if (profile === "nano") {
     const pathNodes = rows.slice(0, 10).map((e) => ({ ...farEnd(e), ...via(e), ...sqlHop(e), confidence: e.confidence ?? null }));

@@ -130,8 +130,8 @@ test("release F: an older build refuses to write over a newer build, never the o
   assert.equal(newerBuildRefusal("v7-a", "v7-b"), null, "same generation");
   assert.equal(newerBuildRefusal(null, "v7-a"), null, "no run yet");
   // Release G (R9, MCP-ISSUE-081) was generation 8; release H (MCP-ISSUE-082, the SQL lane) 9; release
-  // I6b (one literal cap for every profile) is 10.
+  // I (I6b one literal cap, I3/I4 one current SQL definition + imported query consts) is 10.
   assert.equal(indexGeneration(INDEX_VERSION), 10);
   assert.equal(newerBuildRefusal("v9-sql-lane", INDEX_VERSION), null, "v10 upgrades a v9 index");
-  assert.ok((newerBuildRefusal(INDEX_VERSION, "v9-sql-lane") ?? "").includes("v10-literal-cap"), "a v9 build refuses to write over a v10 index");
+  assert.ok((newerBuildRefusal(INDEX_VERSION, "v9-sql-lane") ?? "").includes(INDEX_VERSION), "a v9 build refuses to write over a v10 index");
 });
