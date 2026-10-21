@@ -120,7 +120,7 @@ export function extractGraphData(input: ExtractInput): ExtractOutput {
       edges,
       moduleSymbolId,
       (source, tsx) => parseTypeScriptGuarded(source, input.filePath, tsx),
-      resolveLiteralPolicy(input.performanceProfile ?? "standard")
+      LITERAL_POLICY
     );
     const applied = applyEdgePolicy(edges, symbols, edgePolicy);
     return {
@@ -148,10 +148,10 @@ export function extractGraphData(input: ExtractInput): ExtractOutput {
   // MCP-ISSUE-076/077: the non-code lanes. No grammar and, like CSS, no edge policy — a module symbol,
   // the literal lane for text and JSON, and markup/manifest tokens the post-phase resolvers bind.
   if (input.language === "text") {
-    return { symbols, edges: [], literals: extractPlainText(input, resolveLiteralPolicy(input.performanceProfile ?? "standard")) };
+    return { symbols, edges: [], literals: extractPlainText(input, LITERAL_POLICY) };
   }
   if (input.language === "json") {
-    const json = extractJson(input, moduleSymbolId, resolveLiteralPolicy(input.performanceProfile ?? "standard"));
+    const json = extractJson(input, moduleSymbolId, LITERAL_POLICY);
     applyModuleSignature(symbols, moduleSymbolId, json.moduleSignature);
     return { symbols, edges: json.edges, literals: json.literals };
   }
@@ -193,13 +193,13 @@ export function extractGraphData(input: ExtractInput): ExtractOutput {
     if (input.language === "javascript" || input.language === "typescript") {
       extractJavaScriptSymbolsImpl(input, root, symbols, edges, moduleSymbolId);
       routes.push(...extractJavaScriptRoutesImpl(input, symbols, moduleSymbolId));
-      literals = extractStringLiteralsImpl(input, root, resolveLiteralPolicy(input.performanceProfile ?? "standard"));
+      literals = extractStringLiteralsImpl(input, root, LITERAL_POLICY);
     } else if (input.language === "csharp") {
       extractCSharpSymbolsImpl(input, root, symbols, edges, moduleSymbolId, input.knownPackageNames);
       routes.push(...extractCSharpRoutesImpl(input, root, symbols));
       emitEndpointContractSymbolsImpl(input, symbols, routes);
       emitEndpointContractSymbolsFromCSharpSignaturesImpl(input, symbols);
-      literals = extractStringLiteralsImpl(input, root, resolveLiteralPolicy(input.performanceProfile ?? "standard"));
+      literals = extractStringLiteralsImpl(input, root, LITERAL_POLICY);
     }
 
     const applied = applyEdgePolicy(edges, symbols, edgePolicy);
@@ -244,14 +244,29 @@ function keepTreeAlive(tree: Parser.Tree): void {
   }
 }
 
-/** ISSUE-023: literal-lane policy per performance profile (mirror defaultEdgePolicy). */
-function resolveLiteralPolicy(profile: "standard" | "large" | "very-large"): { minLength: number; maxPerFile: number } {
-  const maxPerFile = profile === "very-large" ? 50 : profile === "large" ? 100 : 200;
-  return {
-    minLength: OVERRIDE_MIN_STRING_LITERAL_LENGTH ?? 6,
-    maxPerFile: OVERRIDE_MAX_STRING_LITERALS_PER_FILE ?? maxPerFile
-  };
-}
+/**
+ * ISSUE-023: the literal-lane policy — ONE value for every performance profile (release I6b,
+ * MCP-ISSUE-076 follow-up).
+ *
+ * It used to follow the profile (200 standard / 100 large / 50 very-large, mirroring
+ * defaultEdgePolicy). But `auto` picks the profile per RUN — `large` for a cold-start full run with a
+ * high maxFiles, `standard` once the repo has rows — so the same unchanged file stored different
+ * literal rows depending on which run last extracted it: a full-vs-incremental mismatch with no
+ * incremental cause. Literal rows are a per-file fact of the source, so the cap is too. The edge
+ * policy still varies by profile; it changes edges, never literal rows (a literal's enclosing symbol
+ * comes from symbols, which no profile changes).
+ *
+ * 200 is the old standard cap, which every incremental run of a repo under 3000 files / 20000 symbols
+ * already used. The cost on a large or very-large repo is bounded: at most 200 rows per file (one row per distinct value), and the rows
+ * kept are the same first 200 in a deterministic order (reading order for code; identifier-shaped
+ * values first for text/JSON, see `LiteralCollector`).
+ */
+export const DEFAULT_MAX_STRING_LITERALS_PER_FILE = 200;
+
+const LITERAL_POLICY: { minLength: number; maxPerFile: number } = {
+  minLength: OVERRIDE_MIN_STRING_LITERAL_LENGTH ?? 6,
+  maxPerFile: OVERRIDE_MAX_STRING_LITERALS_PER_FILE ?? DEFAULT_MAX_STRING_LITERALS_PER_FILE
+};
 
 /**
  * `.tsx` is tagged `typescript` by `fileFilter`, but the two dialects are separate grammars and the

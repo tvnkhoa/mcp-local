@@ -69,7 +69,8 @@
     "test:html-svg": "node scripts/test/test-html-svg.mjs",
     "test:tests-for-diff": "node scripts/test/test-tests-for-diff.mjs",
     "test:http-consumers": "node scripts/test/test-http-consumers.mjs",
-    "test:sql-lane": "node scripts/test/test-sql-lane.mjs"
+    "test:sql-lane": "node scripts/test/test-sql-lane.mjs",
+    "test:literal-cap-profiles": "node scripts/test/test-literal-cap-profiles.mjs"
   },
   "dependencies": {
     "@mcp/core": "file:../packages/core",

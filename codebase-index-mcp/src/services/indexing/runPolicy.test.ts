@@ -129,8 +129,9 @@ test("release F: an older build refuses to write over a newer build, never the o
   assert.equal(newerBuildRefusal("v6-vue-components", "v7-text-json-html-svg"), null, "a newer build upgrades an older index");
   assert.equal(newerBuildRefusal("v7-a", "v7-b"), null, "same generation");
   assert.equal(newerBuildRefusal(null, "v7-a"), null, "no run yet");
-  // Release G (R9, MCP-ISSUE-081) was generation 8; release H (MCP-ISSUE-082, the SQL lane) is 9.
-  assert.equal(indexGeneration(INDEX_VERSION), 9);
-  assert.equal(newerBuildRefusal("v8-http-consumers", INDEX_VERSION), null, "v9 upgrades a v8 index");
-  assert.ok((newerBuildRefusal(INDEX_VERSION, "v8-http-consumers") ?? "").includes("v9-sql-lane"), "a v8 build refuses to write over a v9 index");
+  // Release G (R9, MCP-ISSUE-081) was generation 8; release H (MCP-ISSUE-082, the SQL lane) 9; release
+  // I6b (one literal cap for every profile) is 10.
+  assert.equal(indexGeneration(INDEX_VERSION), 10);
+  assert.equal(newerBuildRefusal("v9-sql-lane", INDEX_VERSION), null, "v10 upgrades a v9 index");
+  assert.ok((newerBuildRefusal(INDEX_VERSION, "v9-sql-lane") ?? "").includes("v10-literal-cap"), "a v9 build refuses to write over a v10 index");
 });

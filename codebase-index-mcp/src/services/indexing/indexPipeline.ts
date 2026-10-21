@@ -119,7 +119,11 @@ export type RunIndexInput = {
 // v9: MCP-ISSUE-082 (release H) — `.sql` files are indexed (sql_* symbols, SQL_* edges, named parse gaps)
 // and TS/JS query literals emit name-resolved SQL_QUERY edges; a repo whose .sql files were skipped
 // as unknown_extension needs a full run to pick them up.
-export const INDEX_VERSION = "v9-sql-lane";
+// v10: release I6b (MCP-ISSUE-076 follow-up) — one per-file literal cap (200) for every performance
+// profile; a file last extracted under the `large` (100) or `very-large` (50) profile stored fewer
+// literal rows. The bump only lifts the fast skip: an unchanged file keeps its hash, so a full run is
+// what re-extracts it with the new cap.
+export const INDEX_VERSION = "v10-literal-cap";
 
 export async function runIndexPipeline(store: GraphStore, input: RunIndexInput): Promise<IndexRunSummary> {
   const identity: RunIdentity = {
