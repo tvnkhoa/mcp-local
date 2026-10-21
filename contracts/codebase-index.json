@@ -768,6 +768,7 @@
             "type": "integer"
           },
           "name": {
+            "description": "An exact symbol name. Every declaration of that name is considered: the one carrying an endpoint contract (a controller action) is preferred, and nameResolution says how it was picked; if several remain the answer is status \"ambiguous\" with every candidate (symbolId, file, line, endpointContracts) and no count. Pass symbolId to pin one.",
             "type": "string"
           },
           "profile": {

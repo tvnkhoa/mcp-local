@@ -26,6 +26,7 @@ export function handleGetCrossRepoImpact(
   let symbol: SymbolRecord | null = null;
   let targetIds: string[];
   let endpointContracts: { symbolId: string; signature: string }[] = [];
+  let nameResolution: NameResolution | null = null;
   const filePath = args.filePath?.replace(/\\/g, "/");
   if (filePath && !args.symbolId && !args.name) {
     targetIds = store.getSymbolIdsInFile(args.repoId, filePath, MAX_FILE_SYMBOLS);
@@ -35,8 +36,23 @@ export function handleGetCrossRepoImpact(
   } else {
     let symbolId = args.symbolId;
     if (!symbolId && args.name) {
-      const candidates = store.searchSymbols(args.name, args.repoId, null, null, null, 1, "name");
-      symbolId = candidates[0]?.symbolId;
+      const picked = pickByName(store, args.repoId, args.name);
+      if (picked.kind === "ambiguous") {
+        return ctx.asText(
+          {
+            repoId: args.repoId,
+            direction: args.direction,
+            queriedName: args.name,
+            status: "ambiguous",
+            impactCount: null,
+            candidates: picked.candidates,
+            hint: "several symbols carry this name and none (or more than one) is a route with an endpoint contract; re-ask with the symbolId of the one you mean. No count is given for an arbitrary pick."
+          },
+          profile
+        );
+      }
+      symbolId = picked.symbolId;
+      nameResolution = picked.note;
     }
     if (!symbolId) {
       throw new McpError(ErrorCode.InvalidParams, "get_cross_repo_impact: symbol not found. Provide symbolId, a resolvable name, or filePath.");
@@ -108,6 +124,7 @@ export function handleGetCrossRepoImpact(
       ...(symbol ? { symbol: { symbolId: symbol.symbolId, name: symbol.name, kind: symbol.kind } } : { filePath }),
       direction: args.direction,
       impactCount: impactRows.length,
+      ...(nameResolution ? { nameResolution } : {}),
       relatedRepos: [...new Set(impactRows.map((x) => (args.direction === "outbound" ? x.toRepoId : x.fromRepoId)))].slice(0, 10),
       ...(hint ? { hint } : {})
     }, profile);
@@ -119,9 +136,43 @@ export function handleGetCrossRepoImpact(
     ...(endpointContracts.length > 0 ? { endpointContracts: endpointContracts.map((c) => c.signature) } : {}),
     direction: args.direction,
     impactCount: impactRows.length,
+    ...(nameResolution ? { nameResolution } : {}),
     impacts: impactRows,
     ...(hint ? { hint } : {})
   }, profile);
+}
+
+type NameCandidate = { symbolId: string; name: string; kind: string; filePath: string; line: number; endpointContracts: string[] };
+type NameResolution = { queriedName: string; pickedBy: "only_exact_match" | "only_endpoint_carrier" | "substring_match"; candidates?: NameCandidate[] };
+type NamePick = { kind: "picked"; symbolId: string; note: NameResolution | null } | { kind: "ambiguous"; candidates: NameCandidate[] };
+
+/**
+ * Release G.1 (wec.aria acceptance): a name used to resolve to search's first hit. For
+ * "GetListOwnedVehicle" that was the IVehicleService declaration, so the answer was "0 consumers" —
+ * a confident zero, while the controller action of that name is what Aria calls. Exact-name matches
+ * are now all considered; the one(s) carrying an endpoint contract (a route) are preferred; more
+ * than one left is `ambiguous` with every candidate, never a count for an arbitrary pick.
+ */
+function pickByName(store: HandlerContext["store"], repoId: string, name: string): NamePick {
+  const found = store.searchSymbols(name, repoId, null, null, null, 25, "name");
+  const exact = found.filter((c) => c.name === name);
+  if (exact.length === 0) {
+    const first = found[0];
+    if (!first) return { kind: "picked", symbolId: "", note: null };
+    return { kind: "picked", symbolId: first.symbolId, note: { queriedName: name, pickedBy: "substring_match" } };
+  }
+  const candidates: NameCandidate[] = exact.map((c) => ({
+    symbolId: c.symbolId,
+    name: c.name,
+    kind: c.kind,
+    filePath: c.filePath.replace(/\\/g, "/"),
+    line: c.line,
+    endpointContracts: store.findEndpointContractSymbols(repoId, c.symbolId).map((e) => e.signature)
+  }));
+  if (candidates.length === 1) return { kind: "picked", symbolId: candidates[0]!.symbolId, note: null };
+  const carriers = candidates.filter((c) => c.endpointContracts.length > 0);
+  if (carriers.length === 1) return { kind: "picked", symbolId: carriers[0]!.symbolId, note: { queriedName: name, pickedBy: "only_endpoint_carrier", candidates } };
+  return { kind: "ambiguous", candidates };
 }
 
 /** Symbols considered for a file-level query; a file with more is answered for its first ones by line. */

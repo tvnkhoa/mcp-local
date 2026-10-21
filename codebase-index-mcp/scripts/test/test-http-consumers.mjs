@@ -93,6 +93,40 @@ namespace Customer.Api.Controllers
     }
 }
 `,
+  // Release G.1: the action's name is also declared by an interface and a service (wec.be's
+  // GetListOwnedVehicle has three declarations), and two plain classes share a routeless name.
+  "src/Customer.Api/Services/IVehicleService.cs": `namespace Customer.Api.Services
+{
+    public interface IVehicleService
+    {
+        object GetOwnedVehicles(int customerId);
+    }
+}
+`,
+  "src/Customer.Api/Services/VehicleService.cs": `namespace Customer.Api.Services
+{
+    public class VehicleService : IVehicleService
+    {
+        public object GetOwnedVehicles(int customerId)
+        {
+            return null;
+        }
+    }
+}
+`,
+  "src/Customer.Api/Services/Recalc.cs": `namespace Customer.Api.Services
+{
+    public class PriceRecalc
+    {
+        public void Recompute() { }
+    }
+
+    public class StockRecalc
+    {
+        public void Recompute() { }
+    }
+}
+`,
   "src/Order.Api/Controllers/OrderController.cs": `using Microsoft.AspNetCore.Mvc;
 
 namespace Order.Api.Controllers
@@ -240,6 +274,16 @@ try {
   // An action nobody calls: no rows, and no false link via its sibling's {customerId}.
   const notes = await call("get_cross_repo_impact", { repoId: beId, symbolId: methodId("GetNotes"), direction: "inbound" });
   assert(notes?.impactCount === 0, "GetNotes ({customerId}/notes) has no consumer — the wildcard binds parameters only", JSON.stringify(notes)?.slice(0, 300));
+
+  // Release G.1: a NAME shared by an interface, a service and a controller action answers through the
+  // action (the one carrying an endpoint contract), says how it picked, and never a bare 0.
+  const byName = await call("get_cross_repo_impact", { repoId: beId, name: "GetOwnedVehicles", direction: "inbound" });
+  assert(byName?.symbol?.filePath?.replace(/\\/g, "/") === "src/Customer.Api/Controllers/VehicleController.cs" && byName?.impactCount === 1
+    && byName?.nameResolution?.pickedBy === "only_endpoint_carrier" && byName.nameResolution.candidates?.length === 3,
+    "by name: the controller action is picked over the interface and service, with the 3 candidates listed", JSON.stringify(byName)?.slice(0, 600));
+  const amb = await call("get_cross_repo_impact", { repoId: beId, name: "Recompute", direction: "inbound" });
+  assert(amb?.status === "ambiguous" && (amb?.impactCount ?? null) === null && amb?.candidates?.length === 2 && amb.candidates.every((c) => c.symbolId && c.filePath && c.line && Array.isArray(c.endpointContracts)),
+    "by name with two routeless declarations: ambiguous with both candidates, no count", JSON.stringify(amb)?.slice(0, 500));
 
   // File-level query.
   const byFile = await call("get_cross_repo_impact", { repoId: beId, filePath: "src/Customer.Api/Controllers/CustomerController.cs", direction: "inbound" });

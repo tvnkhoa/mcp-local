@@ -270,7 +270,7 @@ export function buildGraphImpactTools(deps: CodebaseIndexDeps): AnyToolDefinitio
       properties: {
         repoId: { type: "string" },
         symbolId: { type: "string" },
-        name: { type: "string" },
+        name: { type: "string", description: "An exact symbol name. Every declaration of that name is considered: the one carrying an endpoint contract (a controller action) is preferred, and nameResolution says how it was picked; if several remain the answer is status \"ambiguous\" with every candidate (symbolId, file, line, endpointContracts) and no count. Pass symbolId to pin one." },
         filePath: { type: "string", description: "Repo-relative file: query every symbol it declares (its endpoint contracts included)." },
         direction: { type: "string", enum: ["outbound", "inbound"] },
         limit: { type: "integer", minimum: 1, maximum: limits.maxResultLimit },
