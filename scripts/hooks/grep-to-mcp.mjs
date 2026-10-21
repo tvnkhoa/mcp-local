@@ -52,14 +52,26 @@ function segments(s) {
   return segs.filter((t) => t.length > 0);
 }
 
-/** The first grep/rg/sed segment of a shell command, as { tool, pattern, paths, filesOnly }. */
+/** Directory-changing commands whose first argument is the new working directory. */
+const CD = new Set(["cd", "pushd", "Set-Location", "sl", "chdir"]);
+
+/**
+ * The first grep/rg/sed segment of a shell command, as { tool, pattern, paths, filesOnly, cd }.
+ * `cd` lists every directory the command changed into before that segment, in order.
+ */
 export function parseShellSearch(command) {
+  const cd = [];
   for (const t of segments(String(command))) {
     const tool = t[0];
+    if (CD.has(tool)) {
+      const dir = t.slice(1).find((x) => !x.startsWith("-"));
+      if (dir) cd.push(dir);
+      continue;
+    }
     if (tool === "sed") {
       const range = t.find((x) => /^\d+,\d+p$/.test(x));
       const file = t.slice(1).reverse().find((x) => !x.startsWith("-") && x !== range);
-      if (range && file) return { tool, pattern: null, paths: [file], filesOnly: false, range };
+      if (range && file) return { tool, pattern: null, paths: [file], filesOnly: false, range, cd };
       continue;
     }
     if (tool !== "grep" && tool !== "rg") continue;
@@ -74,20 +86,79 @@ export function parseShellSearch(command) {
       if (pattern === null) pattern = a;
       else paths.push(a);
     }
-    if (pattern) return { tool, pattern, paths, filesOnly };
+    if (pattern) return { tool, pattern, paths, filesOnly, cd };
   }
   return null;
 }
 
 const NOT_INDEXED = /\.(jsonl?|log|txt|csv|lock)$|node_modules|scratchpad|[\\/]Temp[\\/]|\.claude[\\/]projects/i;
 
+/** A shell glob: the path names many files, so it cannot be a query_docs `filePath`. */
+const GLOB = /[*?[{]/;
+
+/**
+ * `p` as a comparable absolute path, resolved against `base`: forward slashes, `~` / `$HOME` /
+ * `$CLAUDE_PROJECT_DIR` expanded, Git Bash's `/d/...` read as `d:/...`, and lower-cased when it
+ * carries a drive letter (Windows paths are case-insensitive and the drive's case is not stable).
+ * Returns null when `p` starts with a variable it cannot expand — unknown, so not judged.
+ */
+function resolveLoose(p, base, env = process.env) {
+  let s = String(p).replace(/\\/g, "/");
+  const home = (env.HOME || env.USERPROFILE || os.homedir()).replace(/\\/g, "/");
+  s = s.replace(/^~(?=\/|$)/, home).replace(/^\$\{?HOME\}?(?=\/|$)/, home);
+  if (env.CLAUDE_PROJECT_DIR) s = s.replace(/^\$\{?CLAUDE_PROJECT_DIR\}?(?=\/|$)/, env.CLAUDE_PROJECT_DIR.replace(/\\/g, "/"));
+  if (s.startsWith("$")) return null;
+  s = s.replace(/^\/([a-zA-Z])(?=\/|$)/, "$1:");
+  const absolute = /^[a-zA-Z]:\//.test(s) || /^[a-zA-Z]:$/.test(s) || s.startsWith("/");
+  if (!absolute) {
+    if (!base) return null;
+    s = `${base.replace(/\/+$/, "")}/${s}`;
+  }
+  s = path.posix.normalize(s.replace(/^([a-zA-Z]):(?!\/)/, "$1:/")).replace(/\/+$/, "");
+  return /^[a-zA-Z]:/.test(s) ? s.toLowerCase() : s;
+}
+
+function isInside(child, parent) {
+  return child === parent || child.startsWith(`${parent}/`);
+}
+
+/**
+ * True when the search reads outside the project, so a suggestion naming the project's repoId
+ * would point at files the index does not hold: a `cd` that leaves the project (or one whose target
+ * cannot be resolved), or a target path that resolves outside it.
+ *
+ * `where.projectDir` is CLAUDE_PROJECT_DIR, or the event cwd when that is absent; `where.cwd` is the
+ * event cwd (what relative paths are relative to). Without a projectDir there is nothing to judge
+ * against, and the search is treated as inside — the hook's behaviour before this check existed.
+ */
+export function readsOutsideProject(search, where = {}) {
+  const env = where.env ?? process.env;
+  const project = where.projectDir ? resolveLoose(where.projectDir, null, env) : null;
+  if (!project) return false;
+  let cwd = (where.cwd ? resolveLoose(where.cwd, null, env) : null) ?? project;
+  for (const dir of search.cd ?? []) {
+    const next = resolveLoose(dir, cwd, env);
+    if (next === null || !isInside(next, project)) return true;
+    cwd = next;
+  }
+  return search.paths.some((p) => {
+    const abs = resolveLoose(p, cwd, env);
+    return abs !== null && !isInside(abs, project);
+  });
+}
+
 /**
  * What to suggest for one search, or null to stay quiet. Quiet is the default: a hook that comments
  * on every grep is a hook agents learn to skip past.
+ *
+ * `where` ({ projectDir, cwd }) enables the location check: quiet when the search reads outside the
+ * project (see readsOutsideProject). Quiet, too, for a glob path — `*\/SKILL.md` is not a filePath.
  */
-export function suggestionFor(search, repoId) {
+export function suggestionFor(search, repoId, where) {
   if (!search) return null;
   if (search.paths.some((p) => NOT_INDEXED.test(p))) return null;
+  if (search.paths.some((p) => GLOB.test(p))) return null;
+  if (where && readsOutsideProject(search, where)) return null;
   const mdPath = search.paths.find((p) => /\.mdx?$/i.test(p));
 
   if (search.tool === "sed") {
@@ -135,7 +206,10 @@ async function main() {
   // The project root, not the session cwd: a session working in packages/core would otherwise name
   // repoId "core" (wec.aria's install of R12, 3e11fe68).
   const repoId = process.env.GREP_TO_MCP_REPO_ID || path.basename(process.env.CLAUDE_PROJECT_DIR || event.cwd || process.cwd());
-  const note = suggestionFor(search, repoId);
+  // Outside the project (a `cd ~/.claude/skills && grep …`, a path under the home directory) the
+  // index named by repoId does not hold the files, so a suggestion would point at nothing.
+  const where = { projectDir: process.env.CLAUDE_PROJECT_DIR || event.cwd, cwd: event.cwd || process.env.CLAUDE_PROJECT_DIR };
+  const note = suggestionFor(search, repoId, where);
   if (!note || !underBudget(event.session_id ?? "unknown", Number(process.env.GREP_TO_MCP_MAX) || 5)) return;
   process.stdout.write(JSON.stringify({ hookSpecificOutput: { hookEventName: "PreToolUse", additionalContext: note } }));
 }
