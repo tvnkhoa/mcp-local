@@ -18,7 +18,7 @@
 //
 //   node scripts/adoption/replay.mjs perf-shapes <transcriptsDir>
 //   node scripts/adoption/replay.mjs perf <repoId> [--repeats 5] [--out <prefix>] [--via stdio,handler]
-//                                     [--max <n> | --only <id,id>] [--work-dir <dir>] [--reuse-index]
+//                                     [--max <n> | --only <id,id>] [--work-dir <dir>] [--reuse-index] [--repo-path <dir>]
 //   node scripts/adoption/replay.mjs perf-compare <runA.json> <runB.json>
 //
 // ── perf: grep vs MCP — METHODOLOGY, FROZEN (release I7). Change it only with a new baseline. ──────
@@ -268,6 +268,9 @@ else if (cmd === 'run') {
   await run(a, i > 0 ? process.argv[i + 1] : DEFAULT_DB);
 } else if (cmd === 'perf-shapes') perfShapes(a);
 else if (cmd === 'perf') {
+  // --repo-path: measure a CLEAN clone (same HEAD) for the clean-tree column; the patterns and their
+  // baseline stay the frozen sample's. The tree state of whichever path is measured is recorded.
+  const withRepoPath = (sample, repoPath) => (repoPath ? { ...sample, repoPath: repoPath.replace(/\\/g, '/') } : sample);
   const { perf } = await import('./perf.mjs');
   const opt = (name, dflt) => { const i = process.argv.indexOf(name); return i > 0 ? process.argv[i + 1] : dflt; };
   const repeats = Number(opt('--repeats', '5'));
@@ -275,7 +278,7 @@ else if (cmd === 'perf') {
   const via = opt('--via', 'stdio,handler').split(',').filter((v) => v === 'stdio' || v === 'handler');
   if (via.length === 0) throw new Error('--via takes stdio, handler or both');
   await perf({
-    repoId: a, sample: JSON.parse(fs.readFileSync(SAMPLE_FILE, 'utf8')), trackedTextFiles, baselineFiles, toJsRegex, repeats, via,
+    repoId: a, sample: withRepoPath(JSON.parse(fs.readFileSync(SAMPLE_FILE, 'utf8')), opt('--repo-path', null)), trackedTextFiles, baselineFiles, toJsRegex, repeats, via,
     outPrefix: opt('--out', null), maxN: Number(opt('--max', '0')) || null,
     only: opt('--only', null)?.split(',').map(Number) ?? null,
     workDir: opt('--work-dir', path.join(os.tmpdir(), 'codebase-index-perf', a)),
