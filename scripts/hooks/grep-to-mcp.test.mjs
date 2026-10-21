@@ -50,3 +50,16 @@ test("the hook process never blocks: exit 0, JSON with additionalContext and no 
   const garbage = execFileSync(process.execPath, [HOOK], { input: "not json" }).toString();
   assert.equal(garbage, "", "malformed input: silent, still exit 0");
 });
+
+test("repoId comes from the project root, not a subfolder cwd (wec.aria's R12 install)", () => {
+  const run = (cwd, projectDir) => {
+    const env = { ...process.env, GREP_TO_MCP_MAX: "5", TMP: os.tmpdir() };
+    delete env.GREP_TO_MCP_REPO_ID;
+    delete env.CLAUDE_PROJECT_DIR;
+    if (projectDir) env.CLAUDE_PROJECT_DIR = projectDir;
+    const event = { session_id: `r-${String(Date.now())}-${String(Math.random())}`, cwd, tool_name: "Grep", tool_input: { pattern: "kb_version_ids" } };
+    return JSON.parse(execFileSync(process.execPath, [HOOK], { input: JSON.stringify(event), env }).toString()).hookSpecificOutput.additionalContext;
+  };
+  assert.match(run("D:/x/wec.aria/packages/core", "D:/x/wec.aria"), /repoId: "wec\.aria"/);
+  assert.match(run("D:/x/wec.aria", undefined), /repoId: "wec\.aria"/, "no CLAUDE_PROJECT_DIR: the event cwd");
+});

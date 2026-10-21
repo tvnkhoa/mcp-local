@@ -17,7 +17,8 @@
  *     { "matcher": "Bash|PowerShell", "hooks": [{ "type": "command", "command": "node \"$CLAUDE_PROJECT_DIR/.claude/hooks/grep-to-mcp.mjs\"", "timeout": 5 }] }
  *   ] }
  *
- * Env: GREP_TO_MCP_REPO_ID — the repoId to name in suggestions (default: the project folder name).
+ * Env: GREP_TO_MCP_REPO_ID — the repoId to name in suggestions (default: the folder name of
+ * CLAUDE_PROJECT_DIR, then of the event cwd).
  *      GREP_TO_MCP_MAX — suggestions per session before it goes quiet (default 5).
  */
 import fs from "node:fs";
@@ -131,7 +132,9 @@ async function main() {
       : event.tool_name === "Bash" || event.tool_name === "PowerShell"
         ? parseShellSearch(input.command ?? "")
         : null;
-  const repoId = process.env.GREP_TO_MCP_REPO_ID || path.basename(event.cwd ?? process.cwd());
+  // The project root, not the session cwd: a session working in packages/core would otherwise name
+  // repoId "core" (wec.aria's install of R12, 3e11fe68).
+  const repoId = process.env.GREP_TO_MCP_REPO_ID || path.basename(process.env.CLAUDE_PROJECT_DIR || event.cwd || process.cwd());
   const note = suggestionFor(search, repoId);
   if (!note || !underBudget(event.session_id ?? "unknown", Number(process.env.GREP_TO_MCP_MAX) || 5)) return;
   process.stdout.write(JSON.stringify({ hookSpecificOutput: { hookEventName: "PreToolUse", additionalContext: note } }));
