@@ -21,6 +21,7 @@ import { findDocsBehindCode } from "../../services/analysis/docFreshness.js";
 import { GraphStore } from "../../repositories/graphStore.js";
 import { exactFieldAnswer, tryExactFieldAccesses } from "./fieldAccessExact.js";
 import type { HandlerContext } from "./handlerContext.js";
+import { isNameOnlyEdgeReason } from "../../types/index.js";
 
 // ── Staleness Gate ────────────────────────────────────────────────────────────
 // Stale index is a warning, not a fatal — every other read tool (search_symbols,
@@ -160,6 +161,17 @@ export function handleGetCallChain(
   // them from direct static calls, matching trace_execution_flow. (ISSUE-020/022)
   const via = (e: (typeof rows)[number]) =>
     e.type === "PUBLISHES" ? { via: "bus" } : e.reason === "interface-dispatch" ? { via: "interface" } : {};
+  /**
+   * MCP-ISSUE-082: a SQL hop carries its label at every profile. "Who touches table X" is answered by
+   * these rows, and each one was bound BY NAME — the reason (`name_resolved: grant select to r | …`)
+   * says which clause and which privileges, the kind and line say which ALTER / GRANT / policy / TS
+   * query site it is. A bare `{name, filePath, confidence}` would hide that the hop is a name match.
+   */
+  const sqlHop = (e: (typeof rows)[number]) => {
+    if (!e.type.startsWith("SQL_")) return {};
+    const far = direction === "callees" ? { kind: e.toKind ?? null, line: e.toLine ?? null } : { kind: e.fromKind ?? null, line: e.fromLine ?? null };
+    return { edgeType: e.type, ...far, provenance: isNameOnlyEdgeReason(e.reason) ? "name_resolved" : "unresolved_token", reason: e.reason ?? null };
+  };
 
   /**
    * MCP-ISSUE-060: truncation is reported at EVERY profile, not only at nano.
@@ -181,14 +193,15 @@ export function handleGetCallChain(
   const hintBlock = containerHint ? { hint: containerHint } : {};
 
   if (profile === "nano") {
-    const pathNodes = rows.slice(0, 10).map((e) => ({ ...farEnd(e), ...via(e), confidence: e.confidence ?? null }));
+    const pathNodes = rows.slice(0, 10).map((e) => ({ ...farEnd(e), ...via(e), ...sqlHop(e), confidence: e.confidence ?? null }));
     return ctx.asText({ repoId: args.repoId, symbolId: args.symbolId, direction, ...chainTruncation, path: pathNodes, hasMore: rows.length > pathNodes.length, coverage: coverage.confidence, ...hintBlock }, profile);
   }
   if (profile === "compact") {
     const edges = rows.map((e) => ({
       fromId: e.fromId, fromName: e.fromName ?? null, fromFilePath: e.fromFilePath ?? null,
       toId: e.toId, toName: e.toName ?? null, toFilePath: e.toFilePath ?? null,
-      type: e.type, ...via(e), confidence: e.confidence ?? null
+      type: e.type, ...via(e), confidence: e.confidence ?? null,
+      ...(e.type.startsWith("SQL_") ? { fromKind: e.fromKind ?? null, fromLine: e.fromLine ?? null, toKind: e.toKind ?? null, toLine: e.toLine ?? null, provenance: isNameOnlyEdgeReason(e.reason) ? "name_resolved" : "unresolved_token", reason: e.reason ?? null } : {})
     }));
     return ctx.asText({ repoId: args.repoId, symbolId: args.symbolId, direction, depth: args.depth, ...chainTruncation, edges, coverage, ...hintBlock }, profile);
   }

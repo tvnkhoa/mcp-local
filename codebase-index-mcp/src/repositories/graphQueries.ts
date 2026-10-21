@@ -70,7 +70,8 @@ export function getCallEdges(db: Database.Database, repoId: string, symbolId: st
   return db
     .prepare(
       `
-      select e.repo_id as repoId, e.from_id as fromId, e.to_id as toId, e.type, e.confidence, e.reason,${RESOLVED_ENDPOINT_COLUMNS}
+      select e.repo_id as repoId, e.from_id as fromId, e.to_id as toId, e.type, e.confidence, e.reason,${RESOLVED_ENDPOINT_COLUMNS},
+        sf.line as fromLine, st.line as toLine, sf.kind as fromKind, st.kind as toKind
       from edges e${RESOLVED_ENDPOINT_JOINS}
       where e.repo_id = ? and ${endpointColumn} = ? and e.type in (${CALL_TRAVERSAL_EDGE_SQL_LIST})
       ${testClause}

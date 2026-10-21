@@ -116,7 +116,10 @@ export type RunIndexInput = {
 // `DEPENDS_ON endpoint:` edges. The endpoint id format is UNCHANGED (wildcards live in the matcher), so
 // a provider repo does not need re-indexing; a consumer repo needs a run to emit the new edges, and
 // cross-repo links are written by the consumer's run, so index the provider first.
-export const INDEX_VERSION = "v8-http-consumers";
+// v9: MCP-ISSUE-082 (release H) — `.sql` files are indexed (sql_* symbols, SQL_* edges, named parse gaps)
+// and TS/JS query literals emit name-resolved SQL_QUERY edges; a repo whose .sql files were skipped
+// as unknown_extension needs a full run to pick them up.
+export const INDEX_VERSION = "v9-sql-lane";
 
 export async function runIndexPipeline(store: GraphStore, input: RunIndexInput): Promise<IndexRunSummary> {
   const identity: RunIdentity = {

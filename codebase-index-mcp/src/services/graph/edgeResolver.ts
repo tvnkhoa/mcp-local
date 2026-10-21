@@ -13,4 +13,5 @@ export * from "./edgeResolverRefs.js";
 export * from "./edgeResolverContracts.js";
 export * from "./edgeResolverComponents.js";
 export * from "./edgeResolverCss.js";
+export * from "./edgeResolverSql.js";
 export * from "./edgeResolverPackages.js";

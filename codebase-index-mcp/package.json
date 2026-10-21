@@ -68,7 +68,8 @@
     "test:text-json-lane": "node scripts/test/test-text-json-lane.mjs",
     "test:html-svg": "node scripts/test/test-html-svg.mjs",
     "test:tests-for-diff": "node scripts/test/test-tests-for-diff.mjs",
-    "test:http-consumers": "node scripts/test/test-http-consumers.mjs"
+    "test:http-consumers": "node scripts/test/test-http-consumers.mjs",
+    "test:sql-lane": "node scripts/test/test-sql-lane.mjs"
   },
   "dependencies": {
     "@mcp/core": "file:../packages/core",
@@ -82,6 +83,7 @@
     "chokidar": "^4.0.3",
     "glob": "^11.0.1",
     "minimatch": "^10.0.1",
+    "pgsql-ast-parser": "12.0.2",
     "postcss": "8.5.29",
     "sqlite-vec": "0.1.9",
     "sqlite-vec-windows-x64": "0.1.9",

@@ -7,7 +7,7 @@
 
 import type Database from "better-sqlite3";
 import type { EdgeProvenance, EdgeRecord, GraphHealth, ReliabilitySummary, ResolvedEdge, SymbolRecord } from "../../types/index.js";
-import { CALL_TRAVERSAL_EDGE_SQL_LIST, CALL_TRAVERSAL_EDGE_TYPES, NAME_ONLY_EDGE_REASONS } from "../../types/index.js";
+import { CALL_TRAVERSAL_EDGE_SQL_LIST, CALL_TRAVERSAL_EDGE_TYPES, isNameOnlyEdgeReason } from "../../types/index.js";
 import { expandInterfaceSiblingsImpl } from "../graph/interfaceSiblings.js";
 
 export function getRenameImpactImpl(
@@ -144,7 +144,7 @@ export function traceExecutionFlowImpl(
           // MCP-ISSUE-052: accumulate provenance as we walk. One name-only hop can contribute an
           // entire false subtree, so the count matters more than the average.
           provTotal++;
-          if (row.edgeReason && NAME_ONLY_EDGE_REASONS.has(row.edgeReason)) provNameOnly++;
+          if (isNameOnlyEdgeReason(row.edgeReason)) provNameOnly++;
           if (row.confidence !== null && row.confidence < provMinConfidence) provMinConfidence = row.confidence;
         }
         if (!visitedSymbols.has(row.toId) && resultNodes.length < maxNodes) {

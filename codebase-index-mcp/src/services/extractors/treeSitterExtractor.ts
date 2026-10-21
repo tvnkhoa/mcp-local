@@ -10,6 +10,7 @@ import { parseMarkdownFile } from "./markdownParser.js";
 import { extractPythonSymbolsAndRoutesImpl } from "./pythonExtractor.js";
 import { extractProtoSymbolsImpl } from "./protoExtractor.js";
 import { extractCss } from "./cssExtractor.js";
+import { extractSql } from "./sqlExtractor.js";
 import { extractJavaScriptRoutesImpl, extractJavaScriptSymbolsImpl } from "./jsExtractor.js";
 import { extractVueFileImpl } from "./vueExtractor.js";
 import { extractPlainText } from "./plainTextExtractor.js";
@@ -135,6 +136,13 @@ export function extractGraphData(input: ExtractInput): ExtractOutput {
     // confidence floor have nothing to act on, and tokens must survive to the post-phase resolver.
     const css = extractCss(input.source, input);
     return { symbols: dedupeSymbols([...symbols, ...css.symbols]), edges: css.edges };
+  }
+
+  if (input.language === "sql") {
+    // MCP-ISSUE-082: statement splitter + pgsql-ast-parser + token readers. No edge policy, like CSS:
+    // every edge is a token the post-phase resolver binds by name, and none is CALLS/TYPE_REF.
+    const sql = extractSql(input, moduleSymbolId);
+    return { symbols: dedupeSymbols([...symbols, ...sql.symbols]), edges: sql.edges };
   }
 
   // MCP-ISSUE-076/077: the non-code lanes. No grammar and, like CSS, no edge policy — a module symbol,

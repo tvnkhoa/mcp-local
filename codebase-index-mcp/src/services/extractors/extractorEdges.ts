@@ -201,7 +201,9 @@ export function applyTypeRefEdgeCap(edges: EdgeRecord[], maxTypeRefEdgesPerFile:
  * The two CSS edge types (MCP-ISSUE-075) likewise: a `.vue` file goes through the edge policy, and a
  * `cssvar:` / `cssclass:` token is a certain name awaiting the post-phase, never a doubtful one.
  */
-const CONFIDENCE_FILTER_EXEMPT_TYPES = new Set(["TYPE_REF", "USES_COMPONENT", "USES_CSS_VAR", "USES_CSS_CLASS"]);
+// MCP-ISSUE-082: `SQL_QUERY` tokens from a TS query literal are the same kind of fact — a name the
+// post-phase binds — and the `very-large` 0.5 floor sits exactly on their token confidence.
+const CONFIDENCE_FILTER_EXEMPT_TYPES = new Set(["TYPE_REF", "USES_COMPONENT", "USES_CSS_VAR", "USES_CSS_CLASS", "SQL_QUERY", "SQL_USES", "SQL_REFERENCES", "SQL_GRANT"]);
 
 export function applyEdgeConfidenceFilter(
   edges: EdgeRecord[],

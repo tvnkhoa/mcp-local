@@ -235,7 +235,7 @@ export function buildSearchTools(deps: CodebaseIndexDeps): AnyToolDefinition[] {
       "Requires :repoId named parameter in SQL and blocks write/admin statements.",
       "Allowed tables: repositories, files, symbols, edges, index_runs, routes, cross_repo_deps, refactor_previews, refactor_preview_hunks, refactor_applies, refactor_apply_changes, refactor_apply_hunks, refactor_rollbacks, vec_symbol_map.",
       "Key columns — symbols: (repo_id, symbol_id, name, kind, file_path, line, signature);",
-      "edges: (repo_id, from_id, to_id, type, confidence, reason) — type values: CALLS, IMPORTS, TYPE_REF, DEPENDS_ON, PROPERTY_REF, PROPERTY_WRITE, IMPLEMENTS, EXTENDS, PUBLISHES, CONSUMES, USES_COMPONENT, USES_CSS_VAR, USES_CSS_CLASS;",
+      "edges: (repo_id, from_id, to_id, type, confidence, reason) — type values: CALLS, IMPORTS, TYPE_REF, DEPENDS_ON, PROPERTY_REF, PROPERTY_WRITE, IMPLEMENTS, EXTENDS, PUBLISHES, CONSUMES, USES_COMPONENT, USES_CSS_VAR, USES_CSS_CLASS, SQL_USES, SQL_REFERENCES, SQL_GRANT, SQL_QUERY, SQL_MIGRATION_ORDER;",
       "cross_repo_deps: (from_repo_id, from_symbol_id, to_repo_id, to_symbol_id, type);",
       "routes: (repo_id, file_path, controller_symbol_id, handler_symbol_id, http_method, route_template, line).",
       "Note: 'package_consumers' is not a table — query edges WHERE type='DEPENDS_ON' AND to_id LIKE 'nuget:%' instead."

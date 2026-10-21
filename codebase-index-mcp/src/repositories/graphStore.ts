@@ -55,8 +55,10 @@ import {
   resolvePublishesConsumesEdges as resolvePublishesConsumesEdgesImpl,
   resolveComponentEdges as resolveComponentEdgesImpl,
   resolveCssEdges as resolveCssEdgesImpl,
+  resolveSqlEdges as resolveSqlEdgesImpl,
   resolveWorkspacePackageEdges as resolveWorkspacePackageEdgesImpl,
-  type CssResolutionStats
+  type CssResolutionStats,
+  type SqlResolutionStats
 } from "../services/graph/edgeResolver.js";
 import {
   linkTestsToSource as linkTestsToSourceImpl,
@@ -717,6 +719,26 @@ export class GraphStore {
   /** MCP-ISSUE-075: bind `cssvar:` / `cssclass:` tokens to their CSS definitions, repo-wide, by name. */
   resolveCssEdges(repoId: string): CssResolutionStats {
     return resolveCssEdgesImpl(this.db, repoId);
+  }
+
+  /** MCP-ISSUE-082: bind `sql<kind>:` tokens by name (labelled name_resolved) and rewrite the migration order. */
+  resolveSqlEdges(repoId: string): SqlResolutionStats {
+    return resolveSqlEdgesImpl(this.db, repoId);
+  }
+
+  /**
+   * MCP-ISSUE-082: what health_check reports for the SQL lane — indexed .sql files, the statements no
+   * reader recognised (`sql_gap`, with file:line and first words) and the TS query sites whose table
+   * name is a `${…}` substitution. Null when the repo has neither.
+   */
+  getSqlLaneStats(repoId: string): { sqlFiles: number; gaps: number; gapSamples: { filePath: string; line: number; name: string }[] } | null {
+    const files = (this.db.prepare(`select count(*) as n from files where repo_id = ? and language = 'sql'`).get(repoId) as { n: number }).n;
+    const gaps = (this.db.prepare(`select count(*) as n from symbols where repo_id = ? and kind = 'sql_gap'`).get(repoId) as { n: number }).n;
+    if (files === 0 && gaps === 0) return null;
+    const gapSamples = this.db
+      .prepare(`select file_path as filePath, line, name from symbols where repo_id = ? and kind = 'sql_gap' order by file_path, line limit 20`)
+      .all(repoId) as { filePath: string; line: number; name: string }[];
+    return { sqlFiles: files, gaps, gapSamples };
   }
 
   buildCallResolutionContext(repoId: string): ReturnType<typeof buildCallResolutionContextImpl> {

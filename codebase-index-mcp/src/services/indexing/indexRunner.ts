@@ -333,6 +333,18 @@ export function createIndexRunner(options: IndexRunnerOptions): RunIndexAndResol
     } catch { /* non-fatal */ }
   })();
 
+  // MCP-ISSUE-082: SQL tokens (migrations and TS query literals) bound by name, plus the migration
+  // order. Unconditional and unbudgeted like CSS — it rebuilds the whole bound set from tokens each
+  // run, which is what keeps an incremental run equal to a full one. Non-fatal.
+  (() => {
+    try {
+      const sql = store.resolveSqlEdges(repoId);
+      if (sql.tokensResolved + sql.tokensUnresolved + sql.tokensAmbiguous + sql.migrationOrderEdges > 0) {
+        indexLog(`[index-post] repoId=${repoId} sql tokens resolved=${String(sql.tokensResolved)} unresolved=${String(sql.tokensUnresolved)} ambiguous=${String(sql.tokensAmbiguous)} edges=${String(sql.edgesWritten)} migrationOrder=${String(sql.migrationOrderEdges)}`);
+      }
+    } catch { /* non-fatal */ }
+  })();
+
   // MCP-ISSUE-076: package.json → package.json for dependencies on a package of this repo. Recomputed
   // whole every run (a pure function of the npm: tokens and the declared names); non-fatal.
   (() => {
