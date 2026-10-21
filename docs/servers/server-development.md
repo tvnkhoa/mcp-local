@@ -172,9 +172,10 @@ The `mcp-skill-authoring` skill carries the same sequence.
 ## 3. Write the operational skill
 
 `<server>/skill/SKILL.md` is the **committed source of truth**; the installer renders it into
-`~/.claude/skills/<key>/` (global) and `.claude/skills/<key>/` (project), both gitignored because
-they carry machine-specific paths. That render is the default — see §6 for why, and for the
-`--skip-skill` opt-out.
+`~/.claude/skills/<key>/` (global) and this workspace's `.claude/skills/<key>/` — or, with
+`--skill project`, into `<repo>/.claude/skills/<key>/` only. The workspace copies are gitignored
+because they carry machine-specific paths. That render is the default — see §6 for why, for
+placement, and for the `--skill none` / `--skip-skill` opt-out.
 
 Placeholders in `{{DOUBLE_BRACES}}` are filled from the manifest: `{{KEY}}`, `{{DISPLAY_NAME}}`,
 `{{TAGLINE}}`, `{{TOOL_NAMESPACE}}`, the tool list, the env table.
@@ -319,16 +320,49 @@ npm run mcp:uninstall -- --server <key>        # remove config + skill (config b
 `install` and `doctor` act on **all** servers when given no target; `update` and `uninstall`
 **require** `--server <key>` or `--all`.
 
-Install flags: `--server <key>` (repeatable), `--yes` / `-y`, `--skip-smoke`,
-`--skip-skill` / `--no-skill`.
+Install flags: `--server <key>` (repeatable), `--yes` / `-y`, `--skip-smoke`, `--skip-build`,
+`--scope user|local|project`, `--skill none|project|user`, `--repo <path>`, `--skip-skill` /
+`--no-skill` (= `--skill none`).
+
+### Scope: where the server is registered and where its skill goes
+
+| `--scope` | Written to | Reaches |
+|---|---|---|
+| `user` | every detected agent (`~/.claude.json` `mcpServers` for Claude Code) | every project |
+| `local` | `~/.claude.json` `projects["<repo>"].mcpServers` — every spelling Claude Code holds for the repo | that repo, this machine |
+| `project` | `<repo>/.mcp.json` (no `.backup.*` siblings: the repo's history covers it) | that repo; absolute paths make it machine-specific, and secrets in it would be committed |
+
+`--skill user` writes `~/.claude/skills/<key>/` + the workspace copy (+ a Copilot prompt when VS Code
+is present); `--skill project` writes `<repo>/.claude/skills/<key>/` only; `--skill none` nothing.
+Interactive runs ask for all three; `--yes` takes the plan. Local scope is written directly, with the
+same fresh-read / read-back as user scope, rather than through `claude mcp add`: env values would
+otherwise travel on a command line and through cmd.exe quoting.
+
+**Defaults.** A descriptor with `repoBound: { envVar }` serves one repo — board-mcp
+(`BOARD_REPO_ROOT`). At user scope its tools and skill triggers reached every project, and with
+writes on, a session elsewhere could act on that repo's board. So it defaults to `local` +
+`project`, the repo defaulting to the env var's value. Every other server: `user` + `user`.
+
+**The guarantee: a placement is never silently undone.** Install first looks for what exists — user
+entries in every agent, local entries in every `projects[...]`, and `.mcp.json` /
+`.claude/skills/<key>/` in each repo Claude Code has opened (plus the repo env var and `--repo`;
+never a disk scan). Without `--scope` / `--skill` it **keeps** what it finds and says so; only a flag
+or an interactive answer moves a server. A move to local/project then offers to remove the Claude
+Code user entry and the user-tier skill (with `--yes`, removed only when the move was asked for by
+flag); other placements are reported, not deleted. `mcp:update` refreshes registrations and
+re-renders the skill **where they are**; `mcp:doctor` reports the scope it finds (and warns when a
+repo-bound server sits at user scope); `mcp:uninstall` removes every scope, or one with `--scope`
+(`--repo` narrows local/project). A `.claude/skills/<key>/SKILL.md` the installer did not render is
+never overwritten or deleted. Pinned end to end against a temp HOME in
+`scripts/installScope.test.mjs`.
 
 ### Why the installer writes the skill by default
 
 Registering a server without its skill leaves the agent holding the tools and none of the
 sequences or guardrails — which tool for which intent, what is gated, what must be previewed
 first. So step 4/6 installs it unless you opt out, and the write is already scoped to what each
-agent can actually use (`scripts/lib/skills.mjs`): the project copy always, `~/.claude/skills/`
-only when Claude Code is detected, a Copilot prompt only when VS Code is, nothing at all for
+agent can actually use (`scripts/lib/skills.mjs`): at `--skill user`, the workspace copy always,
+`~/.claude/skills/` only when Claude Code is detected, a Copilot prompt only when VS Code is, nothing at all for
 agents with no skill system.
 
 `--skip-skill` is the escape hatch for the one invasive part — the write into `~/.claude`. Use it
@@ -343,9 +377,9 @@ in the committed template, never in the rendered copy.
 | Check | Passes when |
 |---|---|
 | `build` | `dist/index.js` exists — plus a `dist` sub-check that no `dist/**/*.js` lacks a matching source |
-| `config` | registered in a detected agent, with `args` pointing at the built entry |
+| `config` | registered in a detected agent — or at local / project scope, which it names — with `args` pointing at the built entry |
 | `env` | required keys and group members are **present** (keys only — never values) |
-| `skill` | the operational skill is installed under `~/.claude/skills/<key>/` |
+| `skill` | the operational skill is installed and current — under `~/.claude/skills/<key>/`, or in the repo it was placed in |
 | `start` | the process spawns and answers `initialize` |
 
 Plus a warning when a generated file is stale.

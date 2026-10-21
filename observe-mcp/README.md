@@ -66,6 +66,21 @@ npm run build && node scripts/smoke-test.mjs
 
 Provide exactly one of `OBSERVE_AUTH_BASIC` **or** `OBSERVE_USERNAME`+`OBSERVE_PASSWORD`.
 
+The credentials are shared across environments; an environment can override them inside its
+`OBSERVE_ENV_*` value. Environments come from the flat `OBSERVE_BASE_URL` / `OBSERVE_ORG` /
+`OBSERVE_LOG_STREAM` trio (named by `OBSERVE_PRIMARY_ENV_NAME`, default `default`) and/or
+`OBSERVE_ENV_<NAME>` = `baseUrl=…;org=…;logStream=…;traceStream=…`. Every tool takes an optional
+`environment`, and each response echoes the one that answered.
+
+### Service catalog
+
+`docs/service-catalog.json` is a dated 7-day capture of the services seen, per lane, with the owning
+code project (`code.repoId` + `code.project`; `code.match: "folder-only"` is ambiguous — let the log
+row's `sourceContext` decide). `discover_services(source: "catalog")` reads it offline; act on live
+data. Its fields (`logsUnder`, `lanes`, `note`) are dated observations: `npm run catalog:verify`
+re-tests them, `catalog:refresh` rewrites the capture (needs live credentials), `catalog:check`
+validates it offline.
+
 ## Tools
 
 <!-- BEGIN GENERATED: tool-list -->

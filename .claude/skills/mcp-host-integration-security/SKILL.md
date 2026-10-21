@@ -13,9 +13,9 @@ their env. The trust boundary is therefore the host config that spawns them and 
 
 | What | Where | Rule |
 |---|---|---|
-| Secrets and all env values | the host config (`~/.claude.json` for Claude Code), written by `scripts/install-mcp.mjs` | Env-only. Never in a committed file, a `default` in `envSpecs/`, a skill, or a log line |
+| Secrets and all env values | the host config (`~/.claude.json` for Claude Code — user or local scope), written by `scripts/install-mcp.mjs` | Env-only. Never in a committed file, a `default` in `envSpecs/`, a skill, or a log line. `--scope project` writes `<repo>/.mcp.json`, which is committed: the installer warns when a `secret` field has a value |
 | Env contract (names, `secret`, `default`, `group`) | `packages/manifest/src/envSpecs/<server>.ts` | `secret: true` keeps a value out of doctor/install output. **No secret gets a `default`** |
-| Rendered skills | `~/.claude/skills/<key>/`, `.claude/skills/<key>/` | Gitignored (machine paths). Must never contain a value — keys only |
+| Rendered skills | `~/.claude/skills/<key>/`, `.claude/skills/<key>/`, or `<repo>/.claude/skills/<key>/` (`--skill project`) | Workspace copies gitignored (machine paths); a project copy may be committed in its repo. Must never contain a value — keys only |
 | Health report | `npm run mcp:doctor` | Reports presence and shape (`kind`) of values, never the value |
 
 Never dump the process environment to "check" a config — test a var by name only.
@@ -54,7 +54,7 @@ npm run test:scripts                      # installer, env-preserve, skip-skill,
 npm run docs:check
 ```
 
-Test an installer change against a scratch `HOME` with `--skip-skill`, not your real `~/.claude`.
+Test an installer change against a scratch `HOME` (and `USERPROFILE`, `APPDATA`) and a temp repo, as `scripts/installScope.test.mjs` does — never your real `~/.claude`.
 
 ## Output
 

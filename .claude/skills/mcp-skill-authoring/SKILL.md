@@ -44,7 +44,9 @@ check, the skill renderer refuses (so `mcp:install` installs no skill), and the 
 Entry shape (`ServerDescriptor`, `packages/manifest/src/types.ts`): `key`, `displayName`, `dir`,
 `entry: "dist/index.js"`, `tagline`, `build: { install, guards: [] }` (guards = extra npm scripts
 after build, e.g. `guard:no-llm-runtime`), `smokeTest` (or `null`), `skillSource: "<dir>/skill"`,
-`tools`, `env`.
+`tools`, `env`, and optionally `repoBound: { envVar }` for a server that serves one repo (board-mcp:
+`BOARD_REPO_ROOT`) — the installer then defaults to Claude Code local scope + a project skill in that
+repo instead of user scope + `~/.claude/skills/`.
 
 **`EnvField`** — `name`, `required` (mandatory in the type), `secret`, `default` (**written into
 `~/.claude.json` and pins the value**), `codeDefault` (documentation only — use for tuning knobs;
@@ -59,11 +61,14 @@ Edit `packages/manifest/`, not `scripts/lib/manifest.mjs` (a re-export shim), an
 ## 3. Write the template (`<dir>/skill/SKILL.md`)
 
 `scripts/lib/skills.mjs` substitutes `{{KEY}}` `{{DISPLAY_NAME}}` `{{TAGLINE}}` `{{ENTRY_PATH}}`
-`{{TOOL_NAMESPACE}}` (`mcp__<key>__*`) `{{TOOL_LIST}}` `{{ENV_TABLE}}`, and writes the project copy
+`{{TOOL_NAMESPACE}}` (`mcp__<key>__*`) `{{TOOL_LIST}}` `{{ENV_TABLE}}`. Where the render goes is
+chosen at install (`--skill user|project|none`): `user` writes the workspace copy
 (`.claude/skills/<key>/`), the global copy (`~/.claude/skills/<key>/`, if Claude Code is detected) and
-a Copilot prompt (if VS Code is). The rendered copies are gitignored and **overwritten without
-warning** — edit only the template. A leftover unknown `{{PLACEHOLDER}}` makes the render throw, and
-`mcp:doctor` warns when an installed copy is stale against the template + manifest.
+a Copilot prompt (if VS Code is); `project` writes `<repo>/.claude/skills/<key>/` only. Rendered
+copies are **overwritten without warning** — edit only the template (a hand-written SKILL.md at the
+same path is left alone). Re-runs and `mcp:update` re-render where the skill already is, never move
+it. A leftover unknown `{{PLACEHOLDER}}` makes the render throw, and `mcp:doctor` warns when an
+installed copy is stale against the template + manifest.
 
 1. **Frontmatter.** `name: {{KEY}}`. `description` is the only thing the model sees when deciding to
    load: capability first, then `Triggers on: …` with the phrases a user actually types (verbs +
@@ -74,7 +79,13 @@ warning** — edit only the template. A leftover unknown `{{PLACEHOLDER}}` makes
 3. **Workflows** — 2–5 named sequences ("call A, then B with A's id"); a tool list cannot say this.
 4. **Guardrails** — what is off by default and the exact canonical env flag that opens it, hard
    bounds, preview-before-apply, scoping rules (exact `repoPath`, `database`, `environment`).
-5. **Configuration** — `{{ENTRY_PATH}}` + `{{ENV_TABLE}}`. **Tool reference** — `{{TOOL_LIST}}`.
+5. **Setup pointer** — one line, "Setup, env vars and troubleshooting: see `<dir>/README.md`". Env
+   tables, install notes and troubleshooting live in the README, not the skill. **Tool reference** —
+   `{{TOOL_LIST}}`.
+
+A user-tier skill loads in every project, so keep it lean: description ≤ 400 chars, rendered body ≤
+6 KB, nothing specific to one repo, no workflow that only repeats a tool's own description.
+`scripts/lib/skills.test.mjs` pins the limits and the README pointer (repo-bound servers exempt).
 
 Every `tool({ arg: … })` and backticked tool name is validated against `contracts/` by `docs:check`;
 deprecated env names fail its `env-names` check.
@@ -82,7 +93,7 @@ deprecated env names fail its `env-names` check.
 ## 4. Install and verify
 
 ```bash
-node scripts/install-mcp.mjs --server <key> --yes --skip-smoke   # add --skip-skill against a scratch HOME
+node scripts/install-mcp.mjs --server <key> --yes --skip-smoke   # + --scope/--skill/--repo; --skill none against a scratch HOME
 npm run mcp:doctor -- --server <key>                             # build / config / env / skill / start
 npm run mcp:update -- --server <key>                             # after any template edit: rebuild + re-render + verify start
 npm run docs:check

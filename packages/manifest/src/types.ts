@@ -141,6 +141,17 @@ export interface ServerDescriptor {
    */
   readonly tools: readonly string[];
   readonly env: readonly EnvField[];
+  /**
+   * Present = the server serves ONE repository, named by the env var `envVar` (an absolute path),
+   * and is meaningless anywhere else.
+   *
+   * It changes the installer's defaults: register at Claude Code's `local` scope for that repo and
+   * write the skill into `<repo>/.claude/skills/`, instead of user scope plus `~/.claude/skills/`.
+   * At user scope its tools and skill triggers reach every project on the machine — and with writes
+   * enabled, a session in an unrelated repo could act on this one's state. The repo defaults from
+   * the configured value of `envVar`.
+   */
+  readonly repoBound?: { readonly envVar: string };
 }
 
 /** What {@link import("./env.js").evaluateEnv} reports about a server's environment. */

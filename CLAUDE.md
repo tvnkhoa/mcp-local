@@ -157,9 +157,12 @@ npm run mcp:uninstall -- --server <key>    # remove config + skill (config backe
 npm run mcp:update -- --all
 ```
 
-Each server gets a **native Claude Code skill** rendered from its `<server>/skill/SKILL.md` template
-into `~/.claude/skills/<key>/` and `.claude/skills/<key>/`. Those generated dirs are gitignored; the
-template is the committed source. Registration writes to `~/.claude.json`.
+Each server gets a **native Claude Code skill** rendered from its `<server>/skill/SKILL.md` template;
+the template is the committed source. **Placement is chosen at install**: `--scope user|local|project`
+(registration: `~/.claude.json`, its per-repo `projects[...]`, or `<repo>/.mcp.json`) and
+`--skill none|project|user` (`<repo>/.claude/skills/<key>/` or `~/.claude/skills/<key>/`), with
+`--repo <path>`. A `repoBound` server (board-mcp) defaults to local + project; the rest to user + user.
+Re-runs, `mcp:update` and `mcp:doctor` **keep the placement they find** — never back to user scope.
 
 Adding a server: `npm run new:server -- --key <name>` (scaffolds from `templates/server/`, then
 builds/tests/smokes it), then append it to `packages/manifest/src/servers.ts` and add its env contract

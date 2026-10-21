@@ -128,6 +128,20 @@ for (const server of SERVERS) {
     assert.ok(!description.includes('"'), "a description with an inner double quote breaks the VS Code prompt export");
     assert.ok(description.length <= 1024, `description is ${String(description.length)} chars; skills allow 1024`);
   });
+
+  // A user-tier skill loads in every project: its description rides in every session's skill
+  // listing and its body in every session that triggers it. Setup, env tables and troubleshooting
+  // belong in the server README. A repo-bound server's skill lives in its one repo, so is exempt.
+  if (!server.repoBound) {
+    test(`${server.key}: the user-tier skill stays lean (description <= 400 chars, body <= 6 KB)`, () => {
+      const md = renderSkillContent(server);
+      const description = /^description:\s*"([^\n]*)"\s*$/m.exec(md)?.[1] ?? "";
+      assert.ok(description.length <= 400, `description is ${String(description.length)} chars; keep it <= 400`);
+      const body = md.slice(md.indexOf("\n---", 3) + 4);
+      assert.ok(Buffer.byteLength(body) <= 6144, `rendered body is ${String(Buffer.byteLength(body))} bytes; keep it <= 6 KB`);
+      assert.match(md, new RegExp(`see \`${server.dir}/README\\.md\``), "point at the README for setup and env");
+    });
+  }
 }
 
 test("renderSkillContent refuses a server with no generated tool list", () => {

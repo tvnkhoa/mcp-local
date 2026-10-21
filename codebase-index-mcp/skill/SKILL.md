@@ -1,6 +1,6 @@
 ---
 name: {{KEY}}
-description: "Code graph and docs analysis via the {{DISPLAY_NAME}} (indexed SQLite graph, no LLM): find a symbol/function/class, who calls X, what X calls, blast radius of changing a file or symbol, which tests to run after my change, rename or bulk refactor with preview+rollback, dead code, circular deps, HTTP routes/endpoints, implementations of an interface, regex/literal search with the enclosing symbol, which files mention X (grep -l), read a symbol's source, read one doc section by heading (instead of sed -n line ranges), risk triage before merge; and search the docs, where is X documented, broken doc links, stale/outdated docs. Use before grep/read_file for any code-structure question. Not for semantic 'what does this mean' questions with no identifier (find the identifier first with search_regex) or for files outside indexed repos."
+description: "Code graph + docs index, no LLM. Use before grep/read for code structure: where is X defined, callers/callees of X, blast radius of a change, which tests to run, rename/bulk refactor with preview+rollback, dead code, cycles, HTTP routes, implementations, grep with enclosing symbol, files mentioning X, a doc section by heading, where is X documented, stale docs. Not for files outside indexed repos."
 ---
 
 # {{DISPLAY_NAME}}
@@ -15,95 +15,68 @@ health_check(repoId)                      // staleness, dirty tree, shouldReinde
 orient(repoId, intent: "<what you are trying to do>", seed?: "<identifier>")
 ```
 
-- Reuse `repoPath` **verbatim** — changing drive-letter case or slash style fails the
-  `CODEBASE_INDEX_ALLOWED_ROOTS` allowlist.
-- `orient` is the router: it returns the recommended tools, arguments and caveats for an intent, from
-  the server's own table. Ask it rather than guessing a tool.
-- **You do not need to re-index before asking.** Every read tool first brings the index up to the
-  current HEAD and working tree (incremental / dirty) within a few seconds. A response carrying
-  `freshness.state: "refreshing"` came from the previous index while the refresh finishes in the
-  background, and its `coverage` is capped below `high`; ask again shortly. `mode: "full"` is only
-  needed after a parser upgrade.
+- Reuse `repoPath` **verbatim** — another drive-letter case or slash style fails the allowlist.
+- `orient` is the router: recommended tools, arguments and caveats for an intent. Ask it rather than
+  guessing.
+- No need to re-index before asking: read tools refresh to HEAD + working tree first. A response with
+  `freshness.state: "refreshing"` came from the previous index — ask again shortly. `mode: "full"` is
+  only needed after a parser upgrade.
 
 ## Pick the tool
 
 | Question | Tool |
 |---|---|
-| Where is `Foo` defined / what is it | `search_symbols(query: "Foo", strategy: "name")` → `get_symbol_context_pack(repoId, name: "Foo")` |
-| Show me its code | `get_symbol_source(repoId, symbolId \| name)` — not `read_file` |
-| Grep a pattern | `search_regex(repoId, pattern, filePathPrefix?, language?)` — returns the enclosing symbol; `scanAll: true` adds json/yaml |
-| Which files mention X (`grep -l`) | `search_regex(repoId, pattern, outputMode: "files")` — one row per file, `limit` counts files |
-| Read one section of a doc | `query_docs(repoId, mode: "section", filePath, headingPrefix, maxTokens?)` — by heading, never by line range; not `sed -n` |
-| Find user-facing text / error messages | `search_literals(repoId, query)` |
-| Who calls / what does it call | `get_call_chain(repoId, symbolId, direction: "callers" \| "callees", depth)` |
-| Execution flow from an entry point | `trace_execution_flow(repoId, entrySymbolId)` — a **callable** id, not a class |
-| What breaks if I change this file | `find_impact_files(repoId, filePath, view: "files" \| "surface")` |
-| Which tests to run after my edit | `change_impact(repoId)` — working-tree diff → ranked `testsToRun` |
+| Where is `Foo` defined | `search_symbols(query: "Foo", strategy: "name")` → `get_symbol_context_pack(repoId, name: "Foo")` |
+| Show its code | `get_symbol_source(repoId, symbolId \| name)` — not `read_file` |
+| Grep a pattern | `search_regex(repoId, pattern, filePathPrefix?)` — with the enclosing symbol |
+| Which files mention X | `search_regex(repoId, pattern, outputMode: "files")` |
+| One doc section | `query_docs(repoId, mode: "section", filePath, headingPrefix)` — by heading, not line range |
+| Who calls / what it calls | `get_call_chain(repoId, symbolId, direction: "callers" \| "callees", depth)` |
+| What breaks if I change a file | `find_impact_files(repoId, filePath, view: "files" \| "surface")` |
+| Tests to run after my edit | `change_impact(repoId)` |
 | Risk triage before merge | `detect_changes(repoId, policy: "release-gate")` |
 | Stack trace line → symbol | `find_symbol_at_line(repoId, filePath, line)` |
-| Implementations / field reads+writes | `find_implementations(repoId, interfaceName)`, `find_field_accesses(repoId, name, mode)` |
-| HTTP endpoints | `route_map(repoId, httpMethod?)` |
-| Mirror an existing C# feature | `get_feature_bundle(repoId, seedSymbol: "ConversationNote")` |
-| Dead code / cycles | `dead_code_scan(repoId)`, `detect_circular_dependencies(repoId)` |
-| Anything else over the graph | `query_graph(repoId, sql)` — read-only, SQL must use `:repoId` |
+| Mirror an existing feature | `get_feature_bundle(repoId, seedSymbol: "<ExistingFeature>")` |
+| Anything else over the graph | `query_graph(repoId, sql)` — read-only, uses `:repoId` |
 
 `search_symbols` is a token matcher, not semantic search: pass an exact identifier. With only a
-business phrase, discover the identifier via `search_regex` first; fall back to `strategy: "intent"`
-only when `"name"` returns nothing.
+business phrase, find the identifier with `search_regex` first; `strategy: "intent"` only when
+`"name"` returns nothing.
 
 ## Safe refactor (preview → apply → rollback)
 
 ```
-rename_assist(repoId, symbolId, newName, emitPreview: true)           // rename: repo-wide textual scan
-refactor_replace_preview(repoId, find, replaceExpression, findMode: "literal" | "regex",
-                         scope: { includePaths: ["src"] })            // bulk edit; $1 / $<name> backrefs in regex mode
+rename_assist(repoId, symbolId, newName, emitPreview: true)        // repo-wide textual scan
+refactor_replace_preview(repoId, find, replaceExpression, findMode: "literal" | "regex")
 // both return previewId + approvalToken + hunks + riskFlags — show the user, then:
 refactor_replace_apply(previewId, approvalToken, includeLowConfidence?)
 refactor_replace_rollback(rollbackId)
 ```
 
-- Top-level identifiers have no owner type, so their hunks are low-confidence: pass
-  `includeLowConfidence: true` on apply for them. `ambiguous_target` sites are never applied.
-- `refactor_symbol_migration` / `change_value_representation`: run with `dryRun: true` (the default),
-  then pass `previewId` + `approvalToken` back with `dryRun: false`.
-- Tokens expire after `CODEBASE_INDEX_REFACTOR_PREVIEW_TTL_MS` (30 min) — re-run the preview, never
-  reuse an old token. Refactors are rule-based (`llmInvolved: false`).
+- Top-level identifiers have no owner type, so their hunks are low-confidence: apply with
+  `includeLowConfidence: true`. `ambiguous_target` sites are never applied.
+- `refactor_symbol_migration` / `change_value_representation`: `dryRun: true` first, then pass
+  `previewId` + `approvalToken` back with `dryRun: false`.
+- Tokens expire (30 min) — re-preview, never reuse an old token.
 
-## Documentation — `query_docs(repoId, mode, …)`
+## Docs
 
-| Mode | Answers | Needs |
-|---|---|---|
-| `search` | full-text over headings, prose and code blocks | `query` |
-| `section` | one section by heading prefix, current text from disk, cut at a block boundary to `maxTokens` | `filePath`, `headingPrefix` |
-| `cites` | the repo's own citations (`15 #737`, `adr/0021`, invariant markers — patterns from `.codebase-index/citations.json`): what a target is, and every doc and code comment citing it; or a file's own citations | `target` or `filePath` |
-| `links` | broken doc-to-doc links, orphans, hubs | — |
-| `behind` | docs whose last commit predates the code they mention | — |
-| `stale` | docs mentioning these (changed) symbols | `symbolIds` |
-| `drift` | docs naming identifiers the graph lacks + nearest real symbol — **candidates**, review them | — |
-| `coverage` | which exported symbols of a file are documented | `filePath` |
-| `language` | docs not yet normalized to English | — |
-
-`search` rows carry `headingPath` and `matchTier`: `strict` matched every token, `broad` came from the
-OR top-up — a page of `broad` rows means "nothing exact". `maxPerFile` defaults to 1;
-`matchMode: "phrase"` requires adjacency; archived docs are excluded unless `includeArchived: true`.
-An index built before the docs lane existed answers empty: re-index with `mode: "full"`.
+`query_docs(repoId, mode, …)`: `search` (needs `query`), `section`, `cites`, `links` (broken links,
+orphans), `behind` / `stale` (docs older than the code they mention), `drift` (identifiers the graph
+lacks — candidates to review), `coverage`, `language`. In `search` rows, `matchTier: "broad"` on every
+row means "nothing exact". An index built before the docs lane answers empty: re-index with
+`mode: "full"`.
 
 ## Guardrails
 
-- **No-LLM policy (hard):** `CODEBASE_INDEX_LLM_ENABLED=true` aborts startup; never relax it.
-- `watch_repo` is for an active coding session only — `action: "stop"` when done.
-- `compact` is the default profile; `nano` for big lists, `standard`/`verbose` only for edge detail.
-- `link_tests_to_source` links at score 0.55 are name-similarity only — pass `minScore: 0.7`.
-- `find_impact_files(view: "surface")` confidence 0.75 is a TYPE_REF, not a direct call; say so.
+- No LLM, by policy — never relax it.
+- `watch_repo` only during an active coding session; `action: "stop"` when done.
+- `compact` is the default profile; `nano` for big lists.
+- `link_tests_to_source`: pass `minScore: 0.7` (0.55 links are name-similarity only).
+- `find_impact_files(view: "surface")` at confidence 0.75 is a TYPE_REF, not a direct call; say so.
 - `dead_code_scan` misses runtime wiring (DI, reflection, route registration) — check before deleting.
-- In this workspace the MCP-first call budget and fallback logging are in
-  `.claude/rules/mcp-hard-mode.md`; follow it, do not restate it.
 
-## Configuration (env)
-
-Server entry: `node {{ENTRY_PATH}}`
-
-{{ENV_TABLE}}
+Setup, env vars and troubleshooting: see `codebase-index-mcp/README.md`.
 
 ## Tool reference
 

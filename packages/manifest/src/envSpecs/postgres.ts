@@ -178,7 +178,7 @@ export const postgresEnv: readonly EnvField[] = [
     required: false,
     kind: "string",
     section: "Raw-SQL DDL migrations (OFF unless enabled)",
-    note: "Comma-separated prefix.name=value custom settings, set transaction-locally before every migration (e.g. aria.expected_market=AU). Core settings are refused."
+    note: "Comma-separated prefix.name=value custom settings, set transaction-locally before every migration (e.g. app.tenant_id=42). Core settings are refused."
   },
   {
     name: "POSTGRES_DDL_ADOPTION_SENTINEL",

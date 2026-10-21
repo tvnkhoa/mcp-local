@@ -71,16 +71,16 @@ npm run mcp:update -- --all
 npm run mcp:uninstall -- --all
 ```
 
-Known keys: `codebase-index`, `postgres-mcp`, `observe-mcp`, `bitbucket-mcp`.
+Known keys: `codebase-index`, `postgres-mcp`, `sqlserver-mcp`, `observe-mcp`, `bitbucket-mcp`, `board-mcp`.
 
 ### Command flags
 
 | Command | Flags |
 |---------|-------|
-| `install` | `--server <key>` (repeatable), `--yes` / `-y` (non-interactive, use defaults), `--skip-smoke`, `--skip-skill` / `--no-skill` (register MCP config only — `mcp:update` installs the skill later) |
-| `doctor` | `--server <key>`, `--skip-start` (skip the spawn/`initialize` check) |
-| `update` | `--server <key>`, `--all` |
-| `uninstall` | `--server <key>`, `--all` |
+| `install` | `--server <key>` (repeatable), `--yes` / `-y` (non-interactive, use defaults), `--skip-smoke`, `--skip-build`, `--scope user|local|project`, `--skill none|project|user`, `--repo <path>`, `--skip-skill` / `--no-skill` (= `--skill none`) |
+| `doctor` | `--server <key>`, `--skip-start` (skip the spawn/`initialize` check), `--repo <path>` |
+| `update` | `--server <key>`, `--all`, `--skip-build`, `--repo <path>` |
+| `uninstall` | `--server <key>`, `--all`, `--key <raw key>`, `--scope user|local|project`, `--repo <path>` |
 
 ### Typical flows
 
@@ -100,11 +100,31 @@ npm run mcp:update -- --all
 
 ## What install writes
 
-- **MCP config** into each detected agent (`~/.claude.json` for Claude Code) — this is where
-  env values (including secrets) live, per the workspace convention.
-- **Native skills** rendered from each `<server>/skill/SKILL.md` template into
-  `~/.claude/skills/<key>/` (global) and `.claude/skills/<key>/` (project). These generated
-  dirs are gitignored (machine-specific paths); the committed source of truth is the template.
+- **MCP config** — where depends on `--scope` (asked interactively; flags win):
+
+  | Scope | Written to | Reaches |
+  |---|---|---|
+  | `user` | every detected agent; `~/.claude.json` `mcpServers` for Claude Code | every project |
+  | `local` | `~/.claude.json` `projects["<repo>"].mcpServers` (what `claude mcp add -s local` writes) | that repo, this machine |
+  | `project` | `<repo>/.mcp.json` — absolute paths, so machine-specific; secrets would be committed | that repo |
+
+  This is where env values (including secrets) live, per the workspace convention.
+- **Native skills** rendered from each `<server>/skill/SKILL.md` template — `--skill user`:
+  `~/.claude/skills/<key>/` plus this workspace's `.claude/skills/<key>/`; `--skill project`:
+  `<repo>/.claude/skills/<key>/` only; `--skill none`: nothing. The committed source of truth is
+  the template.
+
+Defaults: a server marked `repoBound` in `packages/manifest/src/servers.ts` (board-mcp — it serves
+one repo) → `local` + `project`, the repo defaulting to its repo env var (`BOARD_REPO_ROOT`);
+every other server → `user` + `user`. **A re-run keeps the placement it finds**: a local/project
+registration or a project skill is never moved back to user scope or `~/.claude/skills/` unless you
+pass `--scope` / `--skill`. `mcp:update` re-renders the skill where it is, `mcp:doctor` names the
+scope it finds, and `mcp:uninstall` removes every scope (or the one given by `--scope`).
+
+```bash
+# board-mcp for one repo only, its skill committed there
+node scripts/install-mcp.mjs --server board-mcp --scope local --skill project --repo D:/1.SourceCode/crm/wec.aria
+```
 
 Restart your code agent after install/update/uninstall so the config change takes effect.
 
