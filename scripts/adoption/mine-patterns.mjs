@@ -64,6 +64,25 @@ export const cls = (p) => {
 };
 /** Every grep/rg/Grep pattern in the transcripts under `dir`, in transcript order. */
 export function collectPatterns(dir) {
+  return collectInvocations(dir).map((x) => x.pattern);
+}
+
+/**
+ * The output shape an invocation asked for: "files" (Grep tool files_with_matches — its default — or
+ * count; grep/rg -l / -c / --files-with-matches / --count) or "lines" (everything else).
+ */
+export const outputShapeOf = (tool, input) => {
+  if (tool === 'Grep') return !input.output_mode || input.output_mode === 'files_with_matches' || input.output_mode === 'count' ? 'files' : 'lines';
+  const t = tokens(String(input)); t.shift();
+  for (const a of t) {
+    if (a === '--files-with-matches' || a === '--count' || a === '--files-without-match') return 'files';
+    if (/^-[a-zA-Z]+$/.test(a) && /[lc]/.test(a.slice(1))) return 'files';
+  }
+  return 'lines';
+};
+
+/** Every grep/rg/Grep invocation as { pattern, shape }, in transcript order (see `outputShapeOf`). */
+export function collectInvocations(dir) {
   const out = [];
   for (const f of transcriptFiles(dir)) {
   for (const line of fs.readFileSync(f, 'utf8').split('\n')) {
@@ -72,12 +91,12 @@ export function collectPatterns(dir) {
     const content = o.message?.content; if (!Array.isArray(content)) continue;
     for (const c of content) {
       if (c.type !== 'tool_use') continue;
-      if (c.name === 'Grep' && c.input?.pattern) { out.push(c.input.pattern); continue; }
+      if (c.name === 'Grep' && c.input?.pattern) { out.push({ pattern: c.input.pattern, shape: outputShapeOf('Grep', c.input) }); continue; }
       if (c.name !== 'Bash' && c.name !== 'PowerShell') continue;
       for (const seg of String(c.input.command || '').split(/&&|\|\||;|\n|\$\(/)) {
         const s = seg.trim();
         if (!/^(grep|rg)\b/.test(s)) continue;
-        for (const p of patternOf(s)) out.push(p);
+        for (const p of patternOf(s)) out.push({ pattern: p, shape: outputShapeOf('shell', s) });
       }
     }
   }

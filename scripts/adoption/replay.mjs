@@ -15,13 +15,76 @@
 //     search whose top 5 include a file the baseline finds.
 // No MCP transport is involved, so this measures the tools, not the host. Needs `npm run build` in
 // codebase-index-mcp first.
+//
+//   node scripts/adoption/replay.mjs perf-shapes <transcriptsDir>
+//   node scripts/adoption/replay.mjs perf <repoId> [--repeats 5] [--out <prefix>] [--via stdio,handler]
+//                                     [--max <n> | --only <id,id>] [--work-dir <dir>] [--reuse-index]
+//   node scripts/adoption/replay.mjs perf-compare <runA.json> <runB.json>
+//
+// ── perf: grep vs MCP — METHODOLOGY, FROZEN (release I7). Change it only with a new baseline. ──────
+// Every frozen pattern (replay-sample.json, ids 1..51 in file order) is run both ways.
+//
+// GREP SIDE — what an agent runs, over the TRACKED files of the sample's repoPath:
+//   `git grep <-n|-l> -I -P -e <pattern>` (git grep, not rg; PCRE, so \b \s \d read as the replay's JS
+//   regex reads them; grep's BRE `\|` is translated to `|` exactly as the replay's toJsRegex does;
+//   -I skips binaries). Follow-up rule, applied mechanically by rank class:
+//     - doc ranks (docs: true → r2 markdown/citations, r4 prose): `git grep -n`, then ONE region read
+//       of the first hit, `sed -n 'L,L+29p' <file>` (Git for Windows' usr/bin/sed). 2 commands when
+//       there is a hit, 1 when there is none.
+//     - every other rank: the output shape the pattern was ORIGINALLY asked with, frozen in
+//       replay-perf-shapes.json (`perf-shapes` derives it once from the transcripts: Grep tool
+//       files_with_matches/count or grep/rg -l/-c → "files" → `git grep -l`; else "lines" →
+//       `git grep -n`; majority vote over the pattern's invocations, a tie is "lines"). 1 command.
+//   Timing: one discarded pass first (warms the filesystem cache), then `repeats` timed passes of the
+//   whole sequence, each command spawned (spawnSync) and wall-clocked; the pattern's number is the
+//   median. Output = the raw stdout bytes of every command in the sequence, summed.
+//
+// MCP SIDE — the one call `run` makes: search_regex { pattern, limit 500, contextLines 0,
+//   outputMode "files" } (default profile: compact). For doc ranks the `query_docs` search `run` also
+//   credits is measured beside it (warm only) and reported under `docs`; it is not added to the MCP
+//   time/tokens, and MCP calls stay 1. Output = the JSON text the call returns.
+//   Two lanes over the same index DB:
+//     - stdio — THE HEADLINE: the BUILT server (codebase-index-mcp/dist/index.js) spawned over stdio
+//       with the MCP SDK client. The R1 freshness gate applies, so this is what an agent gets.
+//       COLD = the first tools/call after spawn + initialize, one fresh server per pattern (spawn and
+//       handshake reported apart as coldStartupMs). WARM = one server for the whole run: one
+//       discarded call per pattern, then `repeats` timed calls; median.
+//     - handler — A DIAGNOSTIC, labelled "handler only (no freshness gate)": the built handler module
+//       called in-process through the server's own zod schema and serializer. COLD = the call in a
+//       fresh child node process (import + DB open excluded; process wall = coldProcessMs). WARM as
+//       above.
+//   Index: a temp DB (--work-dir, default <os tmp>/codebase-index-perf/<repoId>) holding ONLY the repo,
+//   built at the start of every run by the built server (index_repository mode full, docsMode on;
+//   --reuse-index skips the rebuild). perf never opens the central DB.
+//   Server env: CODEBASE_INDEX_DB_PATH=<temp db>, CODEBASE_INDEX_ALLOWED_ROOTS=<repoPath>, watch
+//   auto-start off, telemetry off, GIT_OPTIONAL_LOCKS=0; CODEBASE_INDEX_QUERY_REFRESH_ENABLED /
+//   _QUERY_REFRESH_BUDGET_MS / _PERFORMANCE_PROFILE / _MAX_LIMIT pass through from the caller's
+//   environment and are recorded in the result.
+//
+// SIZE: tokens ≈ ceil(bytes / 4) on both sides — an estimate, not a tokenizer.
+// CALLS: MCP 1; grep = the commands in the sequence (1 or 2).
+// COMPLETENESS: recall vs the grep-equivalent baseline exactly as `run` computes it (hit = recall
+//   >= 0.9, or for doc ranks a query_docs top-5 file in the baseline). "+context" is set when any MCP
+//   row carries a field grep cannot produce: enclosingSymbol, section / sectionTitle / heading /
+//   headingPath / breadcrumb, target / resolvedTarget / resolvedPath (perf-lib CONTEXT_FIELDS).
+// WINS: per pattern, score = log2(grep ms / MCP warm ms) + log2((grep tok + 1) / (MCP tok + 1))
+//   − 2 if the MCP call misses + 1 if +context; the 5 lowest are grep's clearest wins, the 5 highest
+//   MCP's, each with the components that decided it.
+// STATISTICS: median and p90 by linear interpolation, over the per-pattern medians.
+// TREE + LOAD: HEAD and the dirty-file count (`git status --porcelain`, GIT_OPTIONAL_LOCKS=0) are
+//   recorded at start and end. The script NEVER changes the repo to make it clean or dirty: whoever
+//   runs it states the tree state. CPU busy % (2 s os.cpus sample), Win32 LoadPercentage and the six
+//   busiest processes are recorded at start and end. Run on an otherwise quiet machine.
+// STABILITY: run perf twice and compare with `perf-compare`; a re-run's medians should land within
+//   ±20% of the reference run's.
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
-import { cls, collectPatterns } from './mine-patterns.mjs';
+import { cls, collectInvocations, collectPatterns } from './mine-patterns.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(HERE, '../..');
@@ -111,6 +174,25 @@ function freeze(transcriptsDir, repoPath, force) {
   console.log(`froze ${sample.patterns.length} patterns at ${head}: ` + RANKS.map((r) => `r${r.rank}=${byRank.get(r.rank).length}/${r.take}`).join(' '));
 }
 
+/**
+ * Freeze the output shape each sample pattern was originally asked with (`outputShapeOf` in
+ * mine-patterns.mjs) into replay-perf-shapes.json: majority vote over its invocations, tie = "lines".
+ */
+function perfShapes(transcriptsDir) {
+  const sample = JSON.parse(fs.readFileSync(SAMPLE_FILE, 'utf8'));
+  const inv = collectInvocations(transcriptsDir);
+  const shapes = {};
+  for (const p of sample.patterns) {
+    const v = inv.filter((x) => x.pattern === p.pattern);
+    const files = v.filter((x) => x.shape === 'files').length;
+    shapes[p.pattern] = { shape: files * 2 > v.length ? 'files' : 'lines', files, invocations: v.length };
+  }
+  const out = { derivedAt: new Date().toISOString().slice(0, 10), transcripts: path.basename(transcriptsDir), rule: 'majority of invocations asked for files (Grep files_with_matches/count, grep/rg -l/-c); tie = lines', shapes };
+  fs.writeFileSync(path.join(HERE, 'replay-perf-shapes.json'), JSON.stringify(out, null, 1) + '\n');
+  const n = Object.values(shapes).filter((x) => x.shape === 'files').length;
+  console.log(`froze shapes for ${sample.patterns.length} patterns: ${n} files, ${sample.patterns.length - n} lines`);
+}
+
 function docsQueryOf(p) {
   return p.replace(/\\[bswdBSWD]/g, ' ').replace(/[\^$.*+?()[\]{}|\\#>`]/g, ' ').replace(/\s+/g, ' ').trim();
 }
@@ -182,7 +264,25 @@ if (cmd === 'freeze') freeze(a, b, process.argv.includes('--force'));
 else if (cmd === 'run') {
   const i = process.argv.indexOf('--db');
   await run(a, i > 0 ? process.argv[i + 1] : DEFAULT_DB);
+} else if (cmd === 'perf-shapes') perfShapes(a);
+else if (cmd === 'perf') {
+  const { perf } = await import('./perf.mjs');
+  const opt = (name, dflt) => { const i = process.argv.indexOf(name); return i > 0 ? process.argv[i + 1] : dflt; };
+  const repeats = Number(opt('--repeats', '5'));
+  if (!Number.isInteger(repeats) || repeats < 1) throw new Error('--repeats must be a positive integer');
+  const via = opt('--via', 'stdio,handler').split(',').filter((v) => v === 'stdio' || v === 'handler');
+  if (via.length === 0) throw new Error('--via takes stdio, handler or both');
+  await perf({
+    repoId: a, sample: JSON.parse(fs.readFileSync(SAMPLE_FILE, 'utf8')), trackedTextFiles, baselineFiles, toJsRegex, repeats, via,
+    outPrefix: opt('--out', null), maxN: Number(opt('--max', '0')) || null,
+    only: opt('--only', null)?.split(',').map(Number) ?? null,
+    workDir: opt('--work-dir', path.join(os.tmpdir(), 'codebase-index-perf', a)),
+    reuseIndex: process.argv.includes('--reuse-index')
+  });
+} else if (cmd === 'perf-compare') {
+  const { compare } = await import('./perf.mjs');
+  compare(a, b);
 } else {
-  console.error('usage: replay.mjs freeze <transcriptsDir> <repoPath> [--force] | run <repoId> [--db <path>] [--json]');
+  console.error('usage: replay.mjs freeze <transcriptsDir> <repoPath> [--force] | run <repoId> [--db <path>] [--json] | perf-shapes <transcriptsDir> | perf <repoId> [--repeats 5] [--out <prefix>] [--via stdio,handler] [--max n | --only ids] [--work-dir dir] [--reuse-index] | perf-compare <a.json> <b.json>');
   process.exit(2);
 }

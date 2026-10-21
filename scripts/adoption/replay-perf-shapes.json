@@ -1,0 +1,262 @@
+{
+ "derivedAt": "2026-10-21",
+ "transcripts": "D--1-SourceCode-crm-wec-aria",
+ "rule": "majority of invocations asked for files (Grep files_with_matches/count, grep/rg -l/-c); tie = lines",
+ "shapes": {
+  "tenant_directory_entry_schema = ": {
+   "shape": "lines",
+   "files": 0,
+   "invocations": 1
+  },
+  "export.*usage_summary\\|function build\\|input\\b.*:": {
+   "shape": "lines",
+   "files": 0,
+   "invocations": 1
+  },
+  "errored\\|abstained\\|internal_error\\|reply_to_customer\\|runTurn\\|log\\.\\|console\\.": {
+   "shape": "lines",
+   "files": 0,
+   "invocations": 1
+  },
+  "export.*run_now\\|export const REVIEW_RUN_QUEUE\\|export async function run_now": {
+   "shape": "lines",
+   "files": 0,
+   "invocations": 1
+  },
+  "tenant_profile\\|market_tenant": {
+   "shape": "lines",
+   "files": 0,
+   "invocations": 1
+  },
+  "market_from_caller": {
+   "shape": "files",
+   "files": 1,
+   "invocations": 1
+  },
+  "export function use_version_evidence": {
+   "shape": "lines",
+   "files": 0,
+   "invocations": 1
+  },
+  "export const approver_recordable": {
+   "shape": "lines",
+   "files": 0,
+   "invocations": 1
+  },
+  "absent_ports|TurnFault|fault:": {
+   "shape": "lines",
+   "files": 0,
+   "invocations": 2
+  },
+  "console_handler": {
+   "shape": "lines",
+   "files": 0,
+   "invocations": 1
+  },
+  "const llm\\|const meter\\|fake_llm\\|stop_reason\\|usage": {
+   "shape": "lines",
+   "files": 0,
+   "invocations": 1
+  },
+  "weight\\|period\\|usage_in_period\\|quota": {
+   "shape": "lines",
+   "files": 0,
+   "invocations": 1
+  },
+  "knowledge_gap": {
+   "shape": "lines",
+   "files": 0,
+   "invocations": 5
+  },
+  "^| 72[01] | [^|]*|": {
+   "shape": "lines",
+   "files": 0,
+   "invocations": 2
+  },
+  "0018-tenant-location\\|db/migrations": {
+   "shape": "files",
+   "files": 1,
+   "invocations": 1
+  },
+  "copy:c2[4-9]\\|copy:c3[0-9]\\|### 9\\|§UX 9\\|^## UX\\|^### ": {
+   "shape": "lines",
+   "files": 0,
+   "invocations": 1
+  },
+  "^| 125\\b\\|^| 125 ": {
+   "shape": "lines",
+   "files": 0,
+   "invocations": 1
+  },
+  "^| 689 ": {
+   "shape": "lines",
+   "files": 0,
+   "invocations": 1
+  },
+  "^| *6[5-9][0-9] \\|^| *7[0-9][0-9] ": {
+   "shape": "lines",
+   "files": 0,
+   "invocations": 1
+  },
+  "§24": {
+   "shape": "lines",
+   "files": 0,
+   "invocations": 1
+  },
+  "^| 347 |": {
+   "shape": "lines",
+   "files": 0,
+   "invocations": 2
+  },
+  "^| 7[0-9] \\|^### 7[0-9]\\b\\|^#### 7": {
+   "shape": "lines",
+   "files": 0,
+   "invocations": 1
+  },
+  "kind: 'version'\\|kind: 'preview'\\|scopeFor\\b": {
+   "shape": "files",
+   "files": 1,
+   "invocations": 1
+  },
+  "AssertionError\\|Error:\\|❯ test/": {
+   "shape": "lines",
+   "files": 0,
+   "invocations": 1
+  },
+  "^\\.meta\\|ExplainerButton\\|ExplainerDrawer": {
+   "shape": "lines",
+   "files": 0,
+   "invocations": 1
+  },
+  "^\\s+(FAILED|UNRUN)|FAIL-OPEN|PASSED —|^gate: ": {
+   "shape": "lines",
+   "files": 0,
+   "invocations": 1
+  },
+  "import { computed": {
+   "shape": "lines",
+   "files": 0,
+   "invocations": 1
+  },
+  "terminateEscalated\\|export": {
+   "shape": "lines",
+   "files": 0,
+   "invocations": 1
+  },
+  "recordInspection": {
+   "shape": "lines",
+   "files": 0,
+   "invocations": 3
+  },
+  "DocumentsExplainer\\|PublishExplainer\\|RollbackExplainer\\|IngestExplainer": {
+   "shape": "files",
+   "files": 1,
+   "invocations": 1
+  },
+  "RampPill|authored": {
+   "shape": "lines",
+   "files": 0,
+   "invocations": 1
+  },
+  "RouteRequest\\|^import": {
+   "shape": "lines",
+   "files": 0,
+   "invocations": 1
+  },
+  "Tests |FAIL|AssertionError": {
+   "shape": "lines",
+   "files": 0,
+   "invocations": 1
+  },
+  "ApproveSubmit\\b": {
+   "shape": "lines",
+   "files": 0,
+   "invocations": 1
+  },
+  "submit\\|return\\|Return\\|stage\\|tags\\|Tag[A-Z]\\|label\\|>[A-Z][a-z].*<": {
+   "shape": "lines",
+   "files": 0,
+   "invocations": 1
+  },
+  "introspect\\|createVerifier\\|verifier": {
+   "shape": "files",
+   "files": 2,
+   "invocations": 2
+  },
+  "settings? (screen|page|tab)|portal.{0,20}setting|setting.{0,30}portal|built with the settings|/settings": {
+   "shape": "lines",
+   "files": 0,
+   "invocations": 1
+  },
+  "const panel = \\|const read = \\|const menu = ": {
+   "shape": "lines",
+   "files": 0,
+   "invocations": 1
+  },
+  "lists proposed whatever its age": {
+   "shape": "lines",
+   "files": 1,
+   "invocations": 4
+  },
+  "Stored reading\\|Reading lookup\\|'3\\.\\|Version check frame\\|Heading suggestion": {
+   "shape": "lines",
+   "files": 0,
+   "invocations": 1
+  },
+  "What a card is": {
+   "shape": "lines",
+   "files": 0,
+   "invocations": 1
+  },
+  "writes both records exactly once": {
+   "shape": "files",
+   "files": 2,
+   "invocations": 2
+  },
+  "styles/severity.css": {
+   "shape": "files",
+   "files": 2,
+   "invocations": 2
+  },
+  "SCREENS.md::## 0.\" --add \"packages/portal/SCREENS.md::## 3.\"": {
+   "shape": "lines",
+   "files": 0,
+   "invocations": 1
+  },
+  "<Tag\\|\\.verdict\\b\\|\\.verdict {\\|\\.by\\b": {
+   "shape": "lines",
+   "files": 0,
+   "invocations": 1
+  },
+  "^  <\\|^</template\\|<Transition\\|v-if=\"!": {
+   "shape": "lines",
+   "files": 0,
+   "invocations": 1
+  },
+  "\\-\\-gray-[0-9]*:\\|--border-split\\|--border-base\\|--surface:\\|--surface-alt\\|--text-secondary:\\|--text-disabled": {
+   "shape": "lines",
+   "files": 0,
+   "invocations": 1
+  },
+  "claim": {
+   "shape": "lines",
+   "files": 0,
+   "invocations": 1
+  },
+  "release|expire|stale claim|another session": {
+   "shape": "lines",
+   "files": 0,
+   "invocations": 1
+  },
+  "path: '/knowledge\\|'/knowledge/[a-z]*'": {
+   "shape": "lines",
+   "files": 0,
+   "invocations": 1
+  },
+  "clip: rect\\|clip-path: inset": {
+   "shape": "files",
+   "files": 1,
+   "invocations": 1
+  }
+ }
+}
