@@ -183,35 +183,20 @@ function shellArg(s: string): string {
   return /^[\w@%+=:,./-]+$/.test(s) ? s : `"${s.replace(/"/g, '\\"')}"`;
 }
 
-/** The command line for one group. Pure; unit-tested. */
-export function buildVitestCommand(pm: PackageManager, pkgName: string | null, runDir: string, root: string, files: readonly string[]): string {
-  const rootArg = root !== runDir ? ` --root ${shellArg(relTo(runDir, root))}` : "";
+/**
+ * The command line for one group. Pure; unit-tested.
+ *
+ * Always the package's own vitest binary, run from the package directory — never a package manager.
+ * wec.aria's acceptance of R11: `pnpm --filter … exec` rewrites tracked config (storeDir) and creates a
+ * store inside a worktree other sessions share, which is why that repo forbids running pnpm at all; an
+ * agent that copies the emitted command must not be able to dirty the tree. The binary needs the
+ * package's node_modules to be installed already, and that is the caller's business.
+ */
+export function buildVitestCommand(runDir: string, root: string, files: readonly string[]): string {
+  const rootArg = root !== runDir ? ` --root ${shellArg(relTo(runDir, root) || ".")}` : "";
   const fileArgs = files.map(shellArg).join(" ");
-  const cp = pm.corepack ? "corepack " : "";
-  if (pkgName && runDir !== "") {
-    switch (pm.manager) {
-      case "pnpm":
-        return `${cp}pnpm --filter ${shellArg(pkgName)} exec vitest run${rootArg} ${fileArgs}`;
-      case "yarn":
-        return `${cp}yarn workspace ${shellArg(pkgName)} exec vitest run${rootArg} ${fileArgs}`;
-      case "npm":
-        return `npm exec --workspace=${shellArg(pkgName)} -- vitest run${rootArg} ${fileArgs}`;
-      default:
-        break;
-    }
-  }
-  if (runDir === "") {
-    switch (pm.manager) {
-      case "pnpm":
-        return `${cp}pnpm exec vitest run${rootArg} ${fileArgs}`;
-      case "yarn":
-        return `${cp}yarn exec vitest run${rootArg} ${fileArgs}`;
-      default:
-        return `npx vitest run${rootArg} ${fileArgs}`;
-    }
-  }
-  // No workspace package name (or bun): run from the repo root with an explicit root.
-  return `npx vitest run --root ${shellArg(root || ".")} ${files.map((f) => shellArg(f)).join(" ")}`;
+  const bin = "./node_modules/.bin/vitest";
+  return runDir === "" ? `${bin} run${rootArg} ${fileArgs}` : `cd ${shellArg(runDir)} && ${bin} run${rootArg} ${fileArgs}`;
 }
 
 /**
@@ -356,7 +341,7 @@ export function planTestRuns(testFiles: readonly string[], fs: PlanFs): TestRunP
   const out = [...groups.values()].sort((a, b) => a.packageDir.localeCompare(b.packageDir));
   for (const g of out) {
     g.files.sort();
-    g.command = buildVitestCommand(pm, g.package, g.packageDir, g.root, g.files);
+    g.command = buildVitestCommand(g.packageDir, g.root, g.files);
   }
   const configs = [...configCache.values()]
     .filter((c) => c.file)

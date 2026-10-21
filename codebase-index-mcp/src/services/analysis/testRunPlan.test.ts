@@ -49,9 +49,11 @@ test("tests are grouped per package with one command each; files relative to the
   assert.equal(plan.groups.length, 2);
   const core = plan.groups.find((g) => g.package === "@demo/core")!;
   assert.deepEqual(core.files, ["test/ledger.test.ts"]);
-  assert.equal(core.command, "corepack pnpm --filter @demo/core exec vitest run test/ledger.test.ts");
+  assert.equal(core.command, "cd packages/core && ./node_modules/.bin/vitest run test/ledger.test.ts");
   const ui = plan.groups.find((g) => g.package === "@demo/ui")!;
-  assert.equal(ui.command, "corepack pnpm --filter @demo/ui exec vitest run src/panel.dom.test.ts");
+  assert.equal(ui.command, "cd packages/ui && ./node_modules/.bin/vitest run src/panel.dom.test.ts");
+  // wec.aria acceptance: a pnpm repo still gets no package-manager command.
+  assert.ok(plan.groups.every((g) => !/(pnpm|yarn|npm|npx|corepack)/.test(g.command)), JSON.stringify(plan.groups.map((g) => g.command)));
 
   const reasons = Object.fromEntries(plan.excluded.map((e) => [e.testFile, e.reason]));
   assert.match(reasons["packages/core/test/ledger.dom.test.ts"]!, /excluded by "\*\*\/\*\.dom\.test\.ts"/);
@@ -72,7 +74,7 @@ test("an unreadable include falls back to the package dir and says so", () => {
   assert.equal(plan.groups.length, 1);
   assert.equal(plan.groups[0]!.configStatus, "unreadable");
   assert.match(plan.groups[0]!.notes.join(), /not statically readable \(include: identifier patterns\)/);
-  assert.equal(plan.groups[0]!.command, "npx vitest run x/a.test.ts");
+  assert.equal(plan.groups[0]!.command, "./node_modules/.bin/vitest run x/a.test.ts");
 });
 
 test("test.projects: a file goes in when any inline project includes it", () => {
@@ -100,13 +102,11 @@ test("a package with no vitest and no node:test import gets runner unknown with 
   assert.equal(plan.other[0]!.hint, undefined);
 });
 
-test("command building per package manager", () => {
-  const pnpm = { manager: "pnpm" as const, lockfile: "pnpm-lock.yaml", corepack: false };
-  assert.equal(buildVitestCommand(pnpm, "@a/b", "packages/b", "packages/b", ["t/x.test.ts"]), "pnpm --filter @a/b exec vitest run t/x.test.ts");
-  assert.equal(buildVitestCommand(pnpm, "@a/b", "packages/b", "packages/b/web", ["x.test.ts"]), "pnpm --filter @a/b exec vitest run --root web x.test.ts");
-  assert.equal(buildVitestCommand({ manager: "npm", lockfile: null, corepack: false }, "@a/b", "packages/b", "packages/b", ["x.test.ts"]), "npm exec --workspace=@a/b -- vitest run x.test.ts");
-  assert.equal(buildVitestCommand({ manager: "yarn", lockfile: "yarn.lock", corepack: true }, "b", "b", "b", ["x.test.ts"]), "corepack yarn workspace b exec vitest run x.test.ts");
-  assert.equal(buildVitestCommand(pnpm, null, "apps/web", "apps/web", ["my file.test.ts"]), 'npx vitest run --root apps/web "my file.test.ts"');
+test("command building: the package's own vitest binary, never a package manager", () => {
+  assert.equal(buildVitestCommand("packages/b", "packages/b", ["t/x.test.ts"]), "cd packages/b && ./node_modules/.bin/vitest run t/x.test.ts");
+  assert.equal(buildVitestCommand("packages/b", "packages/b/web", ["x.test.ts"]), "cd packages/b && ./node_modules/.bin/vitest run --root web x.test.ts");
+  assert.equal(buildVitestCommand("", "", ["x.test.ts"]), "./node_modules/.bin/vitest run x.test.ts");
+  assert.equal(buildVitestCommand("apps/web", "apps/web", ["my file.test.ts"]), 'cd apps/web && ./node_modules/.bin/vitest run "my file.test.ts"');
 });
 
 test("workspace specifiers resolve through package.json exports", () => {

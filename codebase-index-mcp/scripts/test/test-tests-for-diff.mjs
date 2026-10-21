@@ -171,10 +171,10 @@ try {
   assert((a?.excluded ?? []).some((e) => e.testFile === "packages/core/test/ledger.dom.test.ts"), "A: … and listed in `excluded`", short(a?.excluded));
   const cmds = a?.runPlan?.commands ?? [];
   const coreCmd = cmds.find((c) => c.package === "@fx/core");
-  assert(coreCmd?.command === "corepack pnpm --filter @fx/core exec vitest run test/format.test.ts test/ledger.test.ts", "A: one core command, files relative to the package root", short(coreCmd));
+  assert(coreCmd?.command === "cd packages/core && ./node_modules/.bin/vitest run test/format.test.ts test/ledger.test.ts", "A: one core command, files relative to the package root", short(coreCmd));
   assert(coreCmd?.configFile === "packages/core/vitest.config.ts" && coreCmd?.configStatus === "read", "A: the core command names the config it read", short(coreCmd));
   const uiCmd = cmds.find((c) => c.package === "@fx/ui");
-  assert(uiCmd?.command === "corepack pnpm --filter @fx/ui exec vitest run src/useLedger.dom.test.ts", "A: one ui command under the dom config", short(uiCmd));
+  assert(uiCmd?.command === "cd packages/ui && ./node_modules/.bin/vitest run src/useLedger.dom.test.ts", "A: one ui command under the dom config", short(uiCmd));
   assert(cmds.length === 2, "A: exactly two commands (one per package)", short(cmds.map((c) => c.command)));
   assert(!testOf(a, "packages/ui/src/auditLedgerWriterFlow.dom.test.ts"), "A: a 0.42/0.5 name link is NOT listed", short(a?.tests?.map((t) => t.testFile)));
   assert(a?.minScore === 0.7 && a?.belowMinScore >= 1, "A: it is dropped and counted in belowMinScore (minScore 0.7)", short({ minScore: a?.minScore, belowMinScore: a?.belowMinScore }));
@@ -192,7 +192,7 @@ try {
   assert(panel && panel.depth === 2 && /via packages\/ui\/src\/Panel\.vue/.test(panel.why[0]), "B: a .vue edit reaches the test through Panel.vue", short(panel));
   assert(/USES_COMPONENT|imports packages\/ui\/src\/Badge\.vue/.test(panel?.why?.[0] ?? ""), "B: the last hop is the component edge or the .vue import", short(panel?.why));
   const bCmd = (b?.runPlan?.commands ?? []).find((c) => c.package === "@fx/ui");
-  assert(bCmd?.command === "corepack pnpm --filter @fx/ui exec vitest run src/panel.dom.test.ts", "B: the ui command", short(b?.runPlan));
+  assert(bCmd?.command === "cd packages/ui && ./node_modules/.bin/vitest run src/panel.dom.test.ts", "B: the ui command", short(b?.runPlan));
   reset();
 
   // ── C. an edited test file ──
@@ -201,7 +201,7 @@ try {
   const self = testOf(c, "packages/core/test/ledger.test.ts");
   assert(self && self.why.includes("changed itself") && self.depth === 0, "C: a changed test file is listed as 'changed itself'", short(c?.tests));
   const cCmd = (c?.runPlan?.commands ?? []).find((x) => x.package === "@fx/core");
-  assert(cCmd?.command === "corepack pnpm --filter @fx/core exec vitest run test/ledger.test.ts", "C: … with its command", short(c?.runPlan));
+  assert(cCmd?.command === "cd packages/core && ./node_modules/.bin/vitest run test/ledger.test.ts", "C: … with its command", short(c?.runPlan));
   reset();
 
   // ── input contract ──
