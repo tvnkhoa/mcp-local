@@ -276,7 +276,7 @@ export function buildRefactorTools(deps: CodebaseIndexDeps): AnyToolDefinition[]
 
   const changeImpact = defineTool({
     name: "change_impact",
-    description: "Composite 'what did my change affect and which tests cover it' for the working-tree diff (or a commit range): maps changed files → static dependents → covering tests, returning a ranked testsToRun list (by source risk × link score) plus a residualRisk note for changed files with no linked test. Use after editing to run a trusted targeted test subset instead of the whole suite. Defaults baseRef to the indexed commit (working-tree diff when no new commits).",
+    description: "Composite 'what did my change affect and which tests cover it' for the working-tree diff (or a commit range): maps changed files → static dependents → covering tests, returning a ranked testsToRun list (ranked by source risk × link score; each row also carries linkScore, and a changed test file is listed as a test to run, reason 'changed itself') plus a residualRisk note for changed files with no linked test. Use after editing to run a trusted targeted test subset instead of the whole suite. Defaults baseRef to the indexed commit (working-tree diff when no new commits).",
     input: schemas.changeImpactSchema(limits.maxResultLimit),
     inputSchema: {
       type: "object",
@@ -289,7 +289,7 @@ export function buildRefactorTools(deps: CodebaseIndexDeps): AnyToolDefinition[]
         includeUntracked: { type: "boolean" },
         maxFiles: { type: "integer", minimum: 1, maximum: 500 },
         impactLimit: { type: "integer", minimum: 1, maximum: limits.maxResultLimit },
-        testLinkMinScore: { type: "number", minimum: 0, maximum: 1 },
+        testLinkMinScore: { type: "number", minimum: 0, maximum: 1, description: "Minimum LINK score for a test to be listed (default 0.7; below it a link is name similarity only). Each row reports linkScore and the risk-weighted ranking score separately." },
         testLinkMaxCandidates: { type: "integer", minimum: 1, maximum: 20 },
         maxTestsToRun: { type: "integer", minimum: 1, maximum: 500 },
         profile: PROFILE_PROP
