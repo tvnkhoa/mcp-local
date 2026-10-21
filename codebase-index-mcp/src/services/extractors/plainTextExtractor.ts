@@ -40,8 +40,8 @@ const TOKEN_LIKE = /^\S{1,80}$/;
  * so both spell `literalId` exactly as `literalExtractor.ts` does.
  *
  * The per-file cap is applied AFTER ranking, not in reading order. A data file is mostly prose
- * (`notes`, `input`, `must_not_contain` sentences), and in reading order the cap — 100 per file under
- * the `large` profile — ran out at line 9 of wec.aria's `evals/cases/guardrails.jsonl`, so the case
+ * (`notes`, `input`, `must_not_contain` sentences), and in reading order the cap — then 100 per file
+ * under the `large` profile; one cap for every profile since release I6b — ran out at line 9 of wec.aria's `evals/cases/guardrails.jsonl`, so the case
  * ids after it (`gd-020` is on line 20) never reached the lane. Identifier-shaped values are what a
  * literal search is for, so they go first; prose fills what is left, both in reading order.
  */

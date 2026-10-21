@@ -192,6 +192,174 @@ const INTENT_RULES: IntentRule[] = [
   }
 ];
 
+/**
+ * Release I2 (MCP-ISSUE-083) — compound rules. A keyword rule above fires on any one phrase and the
+ * table ranks by hit count, so a question naming TWO things ("tests" + "my diff", "cites" + "#737")
+ * lost to whichever single-phrase rule shared a word with it (`where is` → find-symbol, `what breaks`
+ * → blast-radius, `adr` → docs-search), or matched nothing. A compound rule needs one signal from
+ * EVERY group, and a matched compound rule ranks ahead of every keyword rule, in table order.
+ *
+ * The signals are generic shapes, never repo names: an endpoint / controller / route path plus a
+ * consumer or other-repo word; tests plus a working-tree word; a definition word plus a numbered doc
+ * (`docs/10`) or a registry; a citation verb plus a decision number, an ADR or a markdown file.
+ *
+ * Matching runs on {@link normalizeIntent}: lower-case with diacritics folded, so Vietnamese matches
+ * with or without its marks ("trích dẫn" and "trich dan" are the same text here).
+ *
+ * `seed` reads the question once more — the folded, case-preserving text — for the argument the first
+ * tool keys on (an action name, a canonical name, a citation target). Still a pure function of the
+ * string: regular expressions only, no model, no I/O.
+ */
+type CompoundRule = {
+  rule: IntentRule;
+  all: RegExp[][];
+  seed?: (folded: string) => { args: Record<string, unknown>; why?: string } | null;
+};
+
+/** A route path such as `/customers/global-search` — a leading slash after a space, quote or paren. */
+const ROUTE_PATH = /(?:^|[\s"'`(])(\/[a-z0-9_{][\w\-{}:./]*)/i;
+
+/** The last two-hump segment (PascalCase / camelCase) of the first identifier that has one. */
+function identifierSeed(folded: string): { name: string; qualified: string } | null {
+  for (const token of folded.match(/[A-Za-z_][\w.]*/g) ?? []) {
+    const segments = token.split(".").filter(Boolean);
+    const humped = segments.filter((seg) => /^[A-Z][a-z0-9]+[A-Z]/.test(seg) || /^[a-z][a-z0-9]*[A-Z]/.test(seg));
+    const last = humped[humped.length - 1];
+    if (last) return { name: last, qualified: segments.join(".") };
+  }
+  return null;
+}
+
+function routePathSeed(folded: string): string | null {
+  const m = ROUTE_PATH.exec(folded);
+  if (!m?.[1]) return null;
+  const path = m[1].replace(/[.,;:?!]+$/, "");
+  // A file path ("/src/app.ts") is not a route.
+  if (/\.[a-z0-9]{1,5}$/i.test(path) || !/[a-z]/i.test(path)) return null;
+  return path;
+}
+
+const COMPOUND_RULES: CompoundRule[] = [
+  {
+    // R11: "tests for my diff". Before: nothing matched it (fallback), or the keyword `tests` rule did.
+    rule: {
+      id: "tests-for-diff",
+      keywords: [],
+      recommendedTools: [
+        { tool: "link_tests_to_source", why: "tests reaching the working-tree diff (imports, components, workspace packages), with one test-runner command per package — returned to run yourself, nothing is executed", args: { forWorkingTreeDiff: true } },
+        { tool: "change_impact", why: "the committed equivalent: ranked tests-to-run for a baseRef range + residual-risk note" }
+      ],
+      caveats: [
+        "forWorkingTreeDiff reads the diff from git, so it takes no filePath (the two are exclusive); minScore defaults to 0.7 in this mode.",
+        "the per-package commands are returned, never run."
+      ]
+    },
+    all: [
+      [/\btests?\b/, /\bspecs?\b/],
+      [
+        /\buncommitted\b/, /\bunstaged\b/, /\bdiff\b/, /\bedit(?:ed|s)?\b/, /\bjust (?:changed|modified|touched|wrote)\b/,
+        /\b(?:my|current|local|pending|staged|working[- ]tree) changes?\b/, /\bworking[- ]tree\b/,
+        /\bthay doi\b/, /\bvua sua\b/, /\bchua commit\b/, /\bdang sua\b/
+      ]
+    ]
+  },
+  {
+    // R5: "who cites decision #737", "what does CLAUDE.md cite". Before: `adr` sent it to docs-search.
+    rule: {
+      id: "doc-citations",
+      keywords: [],
+      recommendedTools: [
+        { tool: "query_docs", why: "the repo's own citations (.codebase-index/citations.json) in markdown, code comments and opted-in string literals — target lists everything citing it, filePath lists what that file cites, each resolved to file:line", args: { mode: "cites" } }
+      ],
+      caveats: [
+        "target is matched with the repo's own citation patterns, so write the shorthand the repo writes (wec.aria cites a decision as '15 #737'); a target no pattern matches is tried as a file path. A repo with no citations.json has no citations."
+      ]
+    },
+    all: [
+      [/\bcit(?:e|es|ed|ing)\b/, /\bcitations?\b/, /\breferenc(?:es|ed|ing)\b/, /\btrich dan\b/, /\bdan chieu\b/],
+      [/#\d+/, /\badr[/\- ]?\d+/, /\bdocs?\/\d+/, /\.mdx?\b/, /\bdecisions?\b/, /\bspec-\d+/]
+    ],
+    seed: (folded) => {
+      const outgoing = /\b(?:what|which)\b.*?\b(?:does|do)\s+(\S+?)\s+cite\b/i.exec(folded);
+      if (outgoing?.[1]) return { args: { filePath: outgoing[1].replace(/^[`'"]|[`'"]$/g, "") } };
+      const target =
+        /\bdocs?\/\d+[\w.-]*\s*#\d+[a-z]?/i.exec(folded) ??
+        /\badr[/-]\d+/i.exec(folded) ??
+        /\bspec-\d+/i.exec(folded) ??
+        /(?:\bdecisions?\s+)?#\d+[a-z]?/i.exec(folded) ??
+        /[\w.\-/]+\.mdx?\b/i.exec(folded);
+      return target ? { args: { target: target[0] } } : null;
+    }
+  },
+  {
+    // R4: "where is kb_version_ids defined in docs/10". Before: `where is` sent it to find-symbol.
+    rule: {
+      id: "doc-term",
+      keywords: [],
+      recommendedTools: [
+        { tool: "query_docs", why: "one canonical name answered from the repo's registry doc (registryDoc in .codebase-index/citations.json): the table rows that define it with their section, the lines that only mention it, and the Zod keys that declare it", args: { mode: "term" } },
+        { tool: "find_field_accesses", why: "reads and writes of the name in code" }
+      ],
+      caveats: [
+        "query is matched exactly against the first cell of the registry's table rows; without query, mode:'term' is the reverse report (Zod keys the registry does not define).",
+        "a repo with no registryDoc in citations.json has no registry to answer from — use query_docs mode:'search'."
+      ]
+    },
+    all: [
+      [/\bdefin(?:e|ed|es|ing|ition)\b/, /\bcanonical\b/, /\bregistry\b/, /\bglossary\b/, /\bten nay\b/, /\bten chuan\b/, /\bdinh nghia\b/],
+      [/\bdocs?\/\d+/, /\bcanonical\b/, /\bregistry\b/, /\bglossary\b/]
+    ],
+    seed: (folded) => {
+      const snake = /\b[A-Za-z][A-Za-z0-9]*(?:_[A-Za-z0-9]+)+\b/.exec(folded);
+      if (snake) return { args: { query: snake[0] } };
+      const ticked = /`([^`\s]+)`/.exec(folded);
+      return ticked?.[1] ? { args: { query: ticked[1] } } : null;
+    }
+  },
+  {
+    // R9: "what breaks in Aria if VehicleController.GetListOwnedVehicle changes". Before: blast-radius,
+    // whose same-repo find_impact_files cannot see an HTTP consumer in another repo.
+    rule: {
+      id: "endpoint-consumers",
+      keywords: [],
+      recommendedTools: [
+        { tool: "get_cross_repo_impact", why: "with direction:'inbound' on a controller action (name or symbolId, or its file via filePath) it lists the consumers in other repos whose endpoint matches the action's route — HttpClient calls and declared JS/TS route sources — with file:line, route and match kind", args: { direction: "inbound" } },
+        { tool: "route_map", why: "find the action that serves a route path, when you have the path rather than the action" },
+        { tool: "find_impact_files", why: "same-repo dependents of the action, which the cross-repo view does not list" }
+      ],
+      caveats: [
+        "a name shared by several symbols answers through the one that carries an endpoint contract; with more than one carrier it returns status 'ambiguous' listing every candidate — pass the chosen symbolId then.",
+        "cross-repo links are written by the consumer repo's run: index the provider first, then the consumer."
+      ]
+    },
+    all: [
+      [/\bendpoints?\b/, /controllers?\b/, /\broutes?\b/, /\bapi (?:call|route|endpoint)s?\b/, ROUTE_PATH],
+      [
+        /\bbreaks?\b/, /\bbroken\b/, /\bwho calls\b/, /\bcallers?\b/, /\bconsumers?\b/, /\bwho (?:uses|consumes|depends)\b/,
+        /\bimpact\b/, /\baffect(?:s|ed)?\b/, /\bother repos?\b/, /\banother (?:repo|service|app)\b/, /\bcross[- ]repo\b/,
+        /\bhong\b/, /\bai goi\b/, /\banh huong\b/
+      ]
+    ],
+    seed: (folded) => {
+      const ident = identifierSeed(folded);
+      if (ident) {
+        const why = ident.qualified !== ident.name
+          ? `seed: ${ident.qualified} → name '${ident.name}' (pass its symbolId instead if the name is shared)`
+          : `seed: name '${ident.name}'`;
+        return { args: { name: ident.name }, why };
+      }
+      const route = routePathSeed(folded);
+      if (route) {
+        return {
+          args: { name: `<the action serving ${route}>` },
+          why: `seed: route ${route} — resolve it to its action with route_map, then pass that action's name or symbolId`
+        };
+      }
+      return null;
+    }
+  }
+];
+
 const FALLBACK: IntentRule = {
   id: "fallback",
   keywords: [],
@@ -204,9 +372,37 @@ const FALLBACK: IntentRule = {
 
 export type ClassifyResult = { matches: IntentRule[]; fallback: boolean };
 
-/** Deterministic keyword scoring — rules are ranked by number of distinct keyword hits. */
+/** Diacritics folded (NFD minus combining marks; `đ` is a letter of its own, not a mark), case kept. */
+export function foldDiacritics(text: string): string {
+  return text.normalize("NFD").replace(/[̀-ͯ]/g, "").replace(/đ/g, "d").replace(/Đ/g, "D");
+}
+
+/** The text every rule matches against: diacritics folded, lower-case. */
+export function normalizeIntent(text: string): string {
+  return foldDiacritics(text).toLowerCase();
+}
+
+function applySeed(compound: CompoundRule, folded: string): IntentRule {
+  const seeded = compound.seed?.(folded);
+  if (!seeded) return compound.rule;
+  const [first, ...rest] = compound.rule.recommendedTools;
+  if (!first) return compound.rule;
+  const why = seeded.why ? `${first.why}. ${seeded.why}` : first.why;
+  return { ...compound.rule, recommendedTools: [{ ...first, why, args: { ...first.args, ...seeded.args } }, ...rest] };
+}
+
+/**
+ * Deterministic classification. Compound rules whose every group matches come first, in table order;
+ * then the keyword rules, ranked by number of distinct keyword hits (ties keep table order).
+ */
 export function classifyIntent(intent: string): ClassifyResult {
-  const text = intent.toLowerCase();
+  const folded = foldDiacritics(intent);
+  const text = folded.toLowerCase();
+
+  const compound = COMPOUND_RULES
+    .filter((c) => c.all.every((group) => group.some((re) => re.test(text))))
+    .map((c) => applySeed(c, folded));
+
   const scored = INTENT_RULES.map((rule) => {
     const hits = rule.keywords.filter((k) => text.includes(k)).length;
     return { rule, hits };
@@ -214,8 +410,9 @@ export function classifyIntent(intent: string): ClassifyResult {
     .filter((s) => s.hits > 0)
     .sort((a, b) => b.hits - a.hits);
 
-  if (scored.length === 0) {
+  const matches = [...compound, ...scored.map((s) => s.rule)];
+  if (matches.length === 0) {
     return { matches: [FALLBACK], fallback: true };
   }
-  return { matches: scored.map((s) => s.rule), fallback: false };
+  return { matches, fallback: false };
 }

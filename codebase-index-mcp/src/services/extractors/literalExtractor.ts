@@ -8,7 +8,7 @@ import { findEnclosingCSharpSymbolId, findEnclosingSymbolId, stableId } from "./
  * messages, log templates…) với { value, file, line, enclosingSymbolId } để audit
  * "mọi user-facing text repo này emit" là MỘT call MCP thay vì grep + full Read.
  *
- * Policy: min length + cap per file (per performance profile), dedup theo normalized
+ * Policy: min length + cap per file (one value for every performance profile — release I6b), dedup theo normalized
  * value trong file (literal_id không chứa line — giữ line đầu tiên), skip value quá dài
  * (embedded blob), skip literal trong C# attribute (JSONKEY lane đã cover) và trong
  * import/require (noise thuần).

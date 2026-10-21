@@ -118,9 +118,9 @@ const transport = new StdioClientTransport({
   command: "node",
   args: ["dist/index.js"],
   // The profile is pinned because `auto` picks `large` for a cold-start full run (maxFiles ≥ 8000) and
-  // `standard` once the repo has rows, and the two have different per-file literal caps (100 / 200). An
-  // unchanged file extracted under one and compared against a full run under the other differs in
-  // literal rows for a reason that has nothing to do with incremental indexing.
+  // `standard` once the repo has rows. The literal cap no longer differs between them (release I6b —
+  // test:literal-cap-profiles guards that), but the edge policy still does, and this harness compares
+  // every edge between runs.
   env: { ...process.env, CODEBASE_INDEX_ALLOWED_ROOTS: repoDir, CODEBASE_INDEX_DB_PATH: join(tmpDir, "index.db"), CODEBASE_INDEX_LLM_ENABLED: "false", CODEBASE_INDEX_LARGE_REPO_PROFILE: "standard" },
   stderr: "pipe"
 });

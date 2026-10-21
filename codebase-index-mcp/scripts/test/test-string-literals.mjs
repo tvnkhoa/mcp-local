@@ -93,9 +93,9 @@ function runCap() {
   const out = extractGraphData({ repoId: "r", filePath: "src/Big.cs", language: "csharp", source });
   assert(
     (out.literals ?? []).length === 200,
-    `standard-profile cap must hold at 200/file (got: ${(out.literals ?? []).length})`
+    `the per-file cap (one value for every profile) must hold at 200/file (got: ${(out.literals ?? []).length})`
   );
-  console.log("[ok] per-file cap (standard profile: 200)");
+  console.log("[ok] per-file cap (200, every profile)");
 }
 
 function runStoreAndSearch() {
