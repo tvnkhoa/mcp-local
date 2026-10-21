@@ -79,7 +79,13 @@ installed copy is stale against the template + manifest.
 3. **Workflows** — 2–5 named sequences ("call A, then B with A's id"); a tool list cannot say this.
 4. **Guardrails** — what is off by default and the exact canonical env flag that opens it, hard
    bounds, preview-before-apply, scoping rules (exact `repoPath`, `database`, `environment`).
-5. **Configuration** — `{{ENTRY_PATH}}` + `{{ENV_TABLE}}`. **Tool reference** — `{{TOOL_LIST}}`.
+5. **Setup pointer** — one line, "Setup, env vars and troubleshooting: see `<dir>/README.md`". Env
+   tables, install notes and troubleshooting live in the README, not the skill. **Tool reference** —
+   `{{TOOL_LIST}}`.
+
+A user-tier skill loads in every project, so keep it lean: description ≤ 400 chars, rendered body ≤
+6 KB, nothing specific to one repo, no workflow that only repeats a tool's own description.
+`scripts/lib/skills.test.mjs` pins the limits and the README pointer (repo-bound servers exempt).
 
 Every `tool({ arg: … })` and backticked tool name is validated against `contracts/` by `docs:check`;
 deprecated env names fail its `env-names` check.

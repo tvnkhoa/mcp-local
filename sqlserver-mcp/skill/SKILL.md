@@ -1,6 +1,6 @@
 ---
 name: {{KEY}}
-description: "Microsoft SQL Server via the {{DISPLAY_NAME}}: read-only T-SQL, list the databases (catalogs) on an instance, inspect tables/views/indexes/foreign keys, read a stored procedure/function/view definition, map which databases reference each other, profile a table, run one query across many tenant catalogs, and - only when enabled - execute a stored procedure or preview/apply a T-SQL write batch (seed, insert, update on a dev catalog). Use for: query SQL Server / MSSQL / RDS SQL Server, run T-SQL, what does this stored procedure do, which procs changed recently, list databases, find cross-database dependencies, same query across all tenant DBs. Not for PostgreSQL (use postgres-mcp) or logs (observe-mcp). Read-only by default."
+description: "SQL Server / MSSQL / RDS: read-only T-SQL, list catalogs, tables/indexes/FKs, read a stored procedure or view, cross-database dependencies, one query across many tenant DBs; when enabled, run a proc or preview/apply a T-SQL write batch. Use for: run T-SQL, what does this proc do, which procs changed, list databases. Not for PostgreSQL (postgres-mcp) or logs (observe-mcp). Read-only by default."
 ---
 
 # {{DISPLAY_NAME}}
@@ -8,112 +8,88 @@ description: "Microsoft SQL Server via the {{DISPLAY_NAME}}: read-only T-SQL, li
 {{TAGLINE}} Tools are exposed as `{{TOOL_NAMESPACE}}`.
 
 **The unit of work is a *catalog*, not the server.** One login reaches every database on the
-instance, so almost every tool takes an optional `database` (omitted = the catalog the connection
-string names). Catalog names are deployment-specific — never guess one; `list_databases` first.
+instance, so almost every tool takes an optional `database` (omitted = the connection's catalog).
+Catalog names are deployment-specific — never guess one; `list_databases` first.
 
 ## Step 0 — Orient
 
 ```
-list_environments()                       // configured environments
-health_check()                            // connectivity, version, linkedServerCount
+list_environments()
+health_check()
 list_databases(environment?)              // WHICH CATALOGS EXIST — always start here
-list_tables(database, namePattern?)       // tables + views, approximate row counts
-describe_table(database, table, schema?)  // columns, defaults, indexes, FKs both directions
+list_tables(database, namePattern?)
+describe_table(database, table, schema?)  // columns, indexes, FKs both directions
 ```
 
 ## Read data
 
 ```
-run_read_query(sql: "select ... where Id = @p1", parameters: [42], database?, maxRows?, timeoutMs?)
+run_read_query(sql: "select ... where Id = @p1", parameters: [42], database?, maxRows?)
 ```
 
-- One `SELECT` / `WITH … SELECT`. Bind values with `parameters` (positional → `@p1`, `@p2`, …);
-  never concatenate a value into `sql`.
-- **Three-part names are allowed and are how you join catalogs**: `OtherDb.dbo.Thing`. Four-part
-  names (linked servers) are refused.
-- No `LIMIT` in T-SQL, and do **not** add `TOP` for a bound: the server cancels the stream at
-  `maxRows` (clamped to `SQLSERVER_MAX_LIMIT`) and reports `truncated: true`. Rows come back as
-  positional arrays in `recordsets[].rows` with `columns[]`, so duplicate column names survive.
-- `profile_table(database, table)` — null ratio + distinct count per column, exact row count.
+- One `SELECT` / `WITH … SELECT`. Bind values with `parameters` (→ `@p1`, `@p2`, …); never
+  concatenate a value into `sql`.
+- **Three-part names join catalogs**: `OtherDb.dbo.Thing`. Four-part names (linked servers) are refused.
+- Do **not** add `TOP` for a bound: the server cancels the stream at `maxRows` and reports
+  `truncated: true`. Rows are positional arrays in `recordsets[].rows` with `columns[]`.
 
 ### One statement across many catalogs
 
 ```
 run_read_query(sql, databases: ["TenantA", "TenantB"])
-list_tables(databases: [...])  ·  list_routines(databases: [...], namePattern: "Report[_]%")
+list_routines(databases: [...], namePattern: "Report[_]%")
 ```
 
-One labelled slot per catalog, in order. A failing catalog gets `error` + `errorCode` in its own slot
-— check `failureCount`. `database` and `databases` are mutually exclusive; width is capped by
-`SQLSERVER_MAX_FANOUT_DATABASES`. **You supply the list** — the server does not know which catalogs are
-tenants; if a table holds it, read that first. Prefer `databases` over hand-written `sys.tables`
-queries: you keep per-catalog labels and partial-failure handling.
+One labelled slot per catalog; a failing catalog gets `error` + `errorCode` in its own slot — check
+`failureCount`. `database` and `databases` are mutually exclusive. **You supply the list** — the
+server does not know which catalogs are tenants.
 
 ## Understand an unfamiliar schema
 
-Most logic on a mature instance lives in procedures and views.
-
 ```
-list_routines(database, type: "procedure", namePattern: "Report[_]%")
-list_routines(database, modifiedAfter: "2026-08-19")   // what changed — start an incident here
+list_routines(database, modifiedAfter: "<date>")       // what changed — start an incident here
 get_routine_definition(database, routine, schema?)     // body + parameter contract
 find_cross_database_references(database)               // which OTHER catalogs it reaches into
 ```
 
-`find_cross_database_references` returns the dependency graph between catalogs grouped by target;
-per-reference rows need `includeReferences: true` (or `profile: "standard"`). Read its `coverage`:
-references built in dynamic SQL (`sp_executesql`, `EXEC(@sql)`) are invisible to the catalog.
+References built in dynamic SQL (`sp_executesql`, `EXEC(@sql)`) are invisible to the catalog — read
+the `coverage` field.
 
-## Execute a stored procedure — OFF unless `SQLSERVER_EXEC_ENABLED=true`
+## Execute a stored procedure — off unless `SQLSERVER_EXEC_ENABLED=true`
 
 ```
 get_routine_definition(database, routine)              // ALWAYS read it first, tell the user what it does
 execute_routine(routine, database?, schema?, parameters?)  // parameters: { Name: value } — no @ prefix
 ```
 
-**Treat every routine as a write.** The catalog records nothing about whether a procedure modifies
-data, so the tool is annotated destructive for all of them; a `Get…` name is not evidence. Get an
-explicit yes before calling it. Gates, in order: the flag, `SQLSERVER_READONLY_DATABASES` (refuses
-unconditionally), `SQLSERVER_EXEC_ALLOWED_ROUTINES` if set. A refusal names its gate — report it, do not retry.
+**Treat every routine as a write** — the catalog does not record whether a procedure modifies data;
+a `Get…` name is not evidence. Get an explicit yes first. A refusal names its gate — report it, do
+not retry.
 
-## Write batch — OFF unless `SQLSERVER_WRITE_ENABLED=true`, dev-type environments only
+## Write batch — off unless `SQLSERVER_WRITE_ENABLED=true`, dev-type environments only
 
 ```
-write_preview(sql, database?, environment?)   // runs the batch, ALWAYS rolls back; returns rowsAffected,
-                                              // recordsets, previewId + approvalToken
+write_preview(sql, database?, environment?)   // runs the batch, ALWAYS rolls back; previewId + approvalToken
 write_apply(previewId, approvalToken)         // re-runs that exact batch and commits
 ```
 
-One batch, no `GO`, no `USE` — `database` names the catalog. End it with a verify `SELECT` to see the
-would-be state. Its own `BEGIN TRAN … COMMIT` and `BEGIN CATCH … ROLLBACK; THROW; END CATCH` are
-fine; any other `ROLLBACK`, DDL, `EXEC`, and names in other catalogs are refused. **Show the user the
-preview and get an explicit yes before `write_apply`** — it commits, and there is no rollback tool.
-`write_apply` refuses with `write_drift` if `rowsAffected` changed since the preview: re-preview.
-Gates: the flag, `SQLSERVER_WRITABLE_ENVIRONMENTS` (prod/uat never), `SQLSERVER_ALLOWED_DATABASES`,
-`SQLSERVER_READONLY_DATABASES`. A refusal names its gate in `code` — report it, do not retry. A
-`db_datareader` login is refused by SQL Server itself, whatever the flags say.
+One batch, no `GO`, no `USE`. End it with a verify `SELECT`. Its own `BEGIN TRAN … COMMIT` and
+`BEGIN CATCH … ROLLBACK; THROW; END CATCH` are fine; any other `ROLLBACK`, DDL, `EXEC` and names in
+other catalogs are refused. **Show the preview and get an explicit yes before `write_apply`** — it
+commits, and there is no rollback tool.
+`write_apply` refuses with `write_drift` if `rowsAffected` changed since the preview: re-preview. A refusal names its gate in
+`code` — report it, do not retry.
 
 ## Guardrails
 
-- Refused in `run_read_query`: non-`SELECT`, a second statement, `EXEC`, `SELECT … INTO`,
-  `OPENQUERY`/`OPENROWSET`/`OPENDATASOURCE`, `DBCC`, `BACKUP`, `WAITFOR`, `xp_cmdshell`, four-part
-  names. Bracketed reserved words as columns (`[Update]`) are fine.
-- `SQLSERVER_ALLOWED_DATABASES`, when set, bounds every catalog a call names **and** every catalog a
-  three-part name reaches.
-- T-SQL has no read-only transaction: the guard is syntactic. The real control is a login with only
-  `db_datareader` — recommend that when the user is configuring this.
-- Never echo a connection string or password. Never fix TLS errors by disabling verification —
-  RDS needs its CA bundle via `NODE_EXTRA_CA_CERTS`.
-- Profiles: `compact` default; `nano` for inventories on a big catalog; `standard` for dropped fields.
+- `run_read_query` refuses non-`SELECT`, a second statement, `EXEC`, `SELECT … INTO`,
+  `OPENQUERY`/`OPENROWSET`, `DBCC`, `WAITFOR`, four-part names. `[Update]` as a column is fine.
+- T-SQL has no read-only transaction: the guard is syntactic. The real control is a
+  `db_datareader` login — recommend it when the user is configuring this.
+- Never echo a connection string or password. Never fix a TLS error by disabling verification.
+- Profiles: `compact` default; `nano` for inventories on a big catalog.
 
-## Configuration (env)
-
-Server entry: `node {{ENTRY_PATH}}`
-
-A connection source is required — **one** of `SQLSERVER_CONNECTION` or `SQLSERVER_ENV_*`. Integrated
-Security is not supported; supply a SQL login.
-
-{{ENV_TABLE}}
+Setup, connection sources, env vars and troubleshooting (TLS / CA bundle): see `sqlserver-mcp/README.md`.
 
 ## Tool reference
 
