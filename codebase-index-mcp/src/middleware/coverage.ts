@@ -187,6 +187,22 @@ export function buildTypedCoverageBlock(input: {
   breach?: { kind: string; detail: string } | null;
   staleness?: { commitsBehind: number | null; dirtyCount: number } | null;
 }): TypedCoverageBlock {
+  if (input.breach?.kind === "building" || input.breach?.kind === "worker") {
+    const building = input.breach.kind === "building";
+    return {
+      confidence: "gap",
+      engine: "typescript-language-service",
+      knownGaps: [
+        building
+          ? `${input.breach.detail}. No accesses are returned: a partial list would read as complete.`
+          : `the TypeScript worker failed — ${input.breach.detail}. It is restarted on the next call. No accesses are returned.`
+      ],
+      gaps: [],
+      suggestFallback: building
+        ? "retry in a few seconds: the build continues in the background and the next call after it finishes answers exact (warm calls take well under a second)."
+        : "retry; if it keeps failing, disable the lane (CODEBASE_INDEX_TS_LS_ENABLED=false) to get the graph's lower bound."
+    };
+  }
   if (input.breach) {
     return {
       confidence: "gap",

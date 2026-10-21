@@ -68,7 +68,7 @@ test("find_field_accesses is honest about TS fields the graph cannot count", asy
     const ctx = ctxFor(store);
 
     // A Zod key is not a property symbol; a same-named function exists. It must NOT be substituted.
-    const zod = payloadOf(handleFindFieldAccesses({ repoId: REPO, name: "kb_version_ids", mode: "all", limit: 50, excludeTests: false, profile: "compact" }, ctx));
+    const zod = payloadOf(await handleFindFieldAccesses({ repoId: REPO, name: "kb_version_ids", mode: "all", limit: 50, excludeTests: false, profile: "compact" }, ctx));
     assert.equal(zod.property, null, "no property symbol: nothing may be substituted for it");
     const zodCoverage = zod.coverage as { confidence: string; knownGaps: string[] };
     assert.equal(zodCoverage.confidence, "low");
@@ -77,7 +77,7 @@ test("find_field_accesses is honest about TS fields the graph cannot count", asy
     assert.ok(others.some((o) => o.name === "kb_version_ids_of"), `same-named symbols are listed, not used: ${JSON.stringify(others)}`);
 
     // A TS class property the graph DOES see (`this.count`) is still only a lower bound.
-    const counter = payloadOf(handleFindFieldAccesses({ repoId: REPO, name: "count", mode: "all", limit: 50, excludeTests: false, profile: "compact" }, ctx));
+    const counter = payloadOf(await handleFindFieldAccesses({ repoId: REPO, name: "count", mode: "all", limit: 50, excludeTests: false, profile: "compact" }, ctx));
     assert.equal((counter.property as { name: string }).name, "count");
     const counterCoverage = counter.coverage as { confidence: string; knownGaps: string[] };
     assert.notEqual(counterCoverage.confidence, "high", JSON.stringify(counter));

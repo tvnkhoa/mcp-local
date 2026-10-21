@@ -153,7 +153,7 @@ export function buildReadMetadataTools(deps: CodebaseIndexDeps): AnyToolDefiniti
     },
     annotations: readsGraph,
     rawResult: true,
-    handler: (input) => ok(raw(handleQueryDocs(input, buildContext())))
+    handler: async (input) => ok(raw(await handleQueryDocs(input, buildContext())))
   });
 
   const orient = defineTool({

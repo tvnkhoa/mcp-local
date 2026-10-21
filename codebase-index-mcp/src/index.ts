@@ -91,8 +91,11 @@ const QUERY_REFRESH_ENABLED = booleanFromEnv("CODEBASE_INDEX_QUERY_REFRESH_ENABL
 /** Index only what git shows (tracked + untracked-not-ignored). false = the plain directory walk. */
 const RESPECT_GITIGNORE = booleanFromEnv("CODEBASE_INDEX_RESPECT_GITIGNORE", true);
 const QUERY_REFRESH_BUDGET_MS = clamp(numberFromEnv("CODEBASE_INDEX_QUERY_REFRESH_BUDGET_MS", 5_000), 1, 120_000);
-/** R3 exact: the TypeScript LanguageService lane of find_field_accesses (lazy; TS/JS fields only). */
-const TS_LS = tsLanguageServiceConfigFromEnv();
+/**
+ * R3 exact: the TypeScript LanguageService lane of find_field_accesses (lazy; TS/JS fields only).
+ * Release I1: answered in a worker thread; one call waits for it at most the R1 query budget.
+ */
+const TS_LS = { ...tsLanguageServiceConfigFromEnv(), waitMs: QUERY_REFRESH_BUDGET_MS };
 const SERVER_VERSION = resolveServerVersion(MODULE_DIR);
 
 const toolContextStorage = new AsyncLocalStorage<ToolRequestContext>();

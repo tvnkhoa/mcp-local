@@ -7,6 +7,11 @@
  * sites the checker cannot attribute listed by file, or — on a cap breach — coverage `gap` and no
  * list at all.
  *
+ * Where it runs (release I1): in the type-resolution worker thread (`fieldWorkerClient.ts`), so a cold
+ * program build never blocks this server's event loop. A call waits for its answer at most the R1
+ * query budget (`CODEBASE_INDEX_QUERY_REFRESH_BUDGET_MS`); past that it answers coverage `gap`, kind
+ * `building`, with no list, and the build carries on in the background.
+ *
  * When it runs: the lane is on (`CODEBASE_INDEX_TS_LS_ENABLED`, default true), the repo has indexed
  * TS/JS files, and the field is a TS/JS one — a `symbolId` in a TS/JS file, or a `name` with no
  * exact-name property symbol outside TS/JS (a C# property keeps the graph answer, which is
@@ -20,8 +25,8 @@ import { buildTypedCoverageBlock } from "../../middleware/coverage.js";
 import type { resolveResponseProfile } from "../../middleware/responseFormatter.js";
 import type { StaleWarning } from "../../services/git/gitHelpers.js";
 import { isTestPath } from "../../services/indexing/fileFilter.js";
-import { findFieldReferences, type FieldAnswer, type FieldCandidate, type FieldPick, type FieldSite } from "../../services/typeResolution/fieldReferences.js";
-import { getRepoLanguageService } from "../../services/typeResolution/languageServiceHost.js";
+import type { FieldAnswer, FieldCandidate, FieldPick, FieldSite } from "../../services/typeResolution/fieldReferences.js";
+import { getFieldWorkerClient } from "../../services/typeResolution/fieldWorkerClient.js";
 import type { HandlerContext } from "./handlerContext.js";
 
 // .vue is in the family: the Vue lane indexes defineProps members as graph properties, and a .vue-only
@@ -41,13 +46,26 @@ export type ExactFieldArgs = {
   excludeTests: boolean;
 };
 
+type TsLsConfig = NonNullable<NonNullable<HandlerContext["constants"]>["TS_LS"]>;
+
+/** One field query, answered by the worker within the call's wait budget. */
+function askWorker(cfg: TsLsConfig, input: { repoId: string; repoPath: string; runKey: string; relativeFiles: readonly string[] }, field: string, pick: FieldPick): Promise<FieldAnswer> {
+  return getFieldWorkerClient().ask({
+    program: input,
+    field,
+    pick,
+    caps: { budgetMs: cfg.budgetMs, maxRssMb: cfg.maxRssMb },
+    waitMs: cfg.waitMs ?? cfg.budgetMs
+  });
+}
+
 /** The TS lane's answer, or null when the graph should answer instead. */
-export function tryExactFieldAccesses(
+export async function tryExactFieldAccesses(
   args: ExactFieldArgs,
   ctx: HandlerContext,
   profile: ReturnType<typeof resolveResponseProfile>,
   staleWarning: StaleWarning | null
-): CallToolResult | null {
+): Promise<CallToolResult | null> {
   const cfg = ctx.constants?.TS_LS;
   if (!cfg?.enabled) return null;
   const { store } = ctx;
@@ -68,8 +86,7 @@ export function tryExactFieldAccesses(
 
   const relativeFiles = store.listIndexedFilePaths(args.repoId, TS_JS_LANGUAGES);
   if (relativeFiles.length === 0) return null;
-  const svc = getRepoLanguageService({ repoId: args.repoId, repoPath: repo.repoPath, runKey: store.getLatestRun(args.repoId)?.runId ?? "none", relativeFiles });
-  const answer = findFieldReferences(svc, field, cleanPick(pick), { budgetMs: cfg.budgetMs, maxRssMb: cfg.maxRssMb });
+  const answer = await askWorker(cfg, { repoId: args.repoId, repoPath: repo.repoPath, runKey: store.getLatestRun(args.repoId)?.runId ?? "none", relativeFiles }, field, cleanPick(pick));
   if (answer.status === "no_declaration" && graphProperties.length > 0) return null;
   return ctx.asText(renderAnswer(answer, args, profile, staleWarning), profile);
 }
@@ -78,15 +95,14 @@ export function tryExactFieldAccesses(
  * The TS lane's raw answer for one field and pick, for callers that render it themselves
  * (`query_docs{mode:"term"}`). Null when the lane is off or the repo has no TS/JS files.
  */
-export function exactFieldAnswer(ctx: HandlerContext, repoId: string, field: string, pick: FieldPick): FieldAnswer | null {
+export async function exactFieldAnswer(ctx: HandlerContext, repoId: string, field: string, pick: FieldPick): Promise<FieldAnswer | null> {
   const cfg = ctx.constants?.TS_LS;
   if (!cfg?.enabled) return null;
   const repo = ctx.store.getRepository(repoId);
   if (!repo) return null;
   const relativeFiles = ctx.store.listIndexedFilePaths(repoId, TS_JS_LANGUAGES);
   if (relativeFiles.length === 0) return null;
-  const svc = getRepoLanguageService({ repoId, repoPath: repo.repoPath, runKey: ctx.store.getLatestRun(repoId)?.runId ?? "none", relativeFiles });
-  return findFieldReferences(svc, field, cleanPick(pick), { budgetMs: cfg.budgetMs, maxRssMb: cfg.maxRssMb });
+  return askWorker(cfg, { repoId, repoPath: repo.repoPath, runKey: ctx.store.getLatestRun(repoId)?.runId ?? "none", relativeFiles }, field, cleanPick(pick));
 }
 
 function cleanPick(p: { declarationFile?: string; declarationLine?: number; ownerName?: string }): { declarationFile?: string; declarationLine?: number; ownerName?: string } {
