@@ -110,7 +110,7 @@ const GIT_DEFERRED_BUILD_SEGMENTS = new Set(["bin", "obj", "build", "out", "targ
 const SVG_ASSET_SEGMENTS = new Set(["assets", "public", "static"]);
 
 /** Languages that are code: a git-cleared file under a build-named segment is indexed only in one of these. */
-const SOURCE_LANGUAGES = new Set(["typescript", "javascript", "vue", "python", "csharp", "proto", "css", "html"]);
+const SOURCE_LANGUAGES = new Set(["typescript", "javascript", "vue", "python", "csharp", "proto", "css", "html", "sql"]);
 
 export type PathExclusionOptions = {
   /**
@@ -263,6 +263,8 @@ const LANGUAGE_BY_EXTENSION: Record<string, string> = {
   ".proto": "proto",
   // Stylesheets (MCP-ISSUE-075) — postcss lane, not tree-sitter. SCSS/Less are a different grammar.
   ".css": "css",
+  // PostgreSQL (MCP-ISSUE-082) — sqlExtractor.ts: pgsql-ast-parser plus token readers, not tree-sitter.
+  ".sql": "sql",
   // JSON (MCP-ISSUE-076): package.json and tsconfig*.json get edges (jsonExtractor.ts); every other
   // .json is text level — a module symbol, and its string values in the literal lane.
   ".json": "json",

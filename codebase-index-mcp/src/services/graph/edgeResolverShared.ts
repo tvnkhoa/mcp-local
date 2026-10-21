@@ -206,6 +206,8 @@ export function resolveUnlinkedEdges(db: Database.Database, repoId: string): Res
         -- MCP-ISSUE-075: CSS tokens are owned by resolveCssEdges and never cross a repo boundary.
         and e.to_id not like 'cssvar:%'
         and e.to_id not like 'cssclass:%'
+        -- MCP-ISSUE-082: SQL tokens are owned by resolveSqlEdges and bind within the repo only.
+        and e.to_id not like 'sql%:%'
         -- MCP-ISSUE-076: npm dependency tokens are kept labelled; the workspace pass owns them, and
         -- one per dependency would otherwise crowd this 5000-row window as 'type:' tokens once did.
         and e.to_id not like 'npm:%'

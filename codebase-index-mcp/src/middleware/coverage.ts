@@ -12,7 +12,7 @@
  * by find_impact_files / get_change_context, extending the same idea to tools that lack it.
  */
 
-import { NAME_ONLY_EDGE_REASONS } from "../types/index.js";
+import { isNameOnlyEdgeReason } from "../types/index.js";
 
 export type CoverageConfidence = "high" | "medium" | "low";
 
@@ -28,7 +28,7 @@ export function summarizeEdgeProvenance(
   let nameOnly = 0;
   let minConfidence = 1;
   for (const e of edges) {
-    if (e.reason && NAME_ONLY_EDGE_REASONS.has(e.reason)) nameOnly++;
+    if (isNameOnlyEdgeReason(e.reason)) nameOnly++;
     if (typeof e.confidence === "number" && e.confidence < minConfidence) minConfidence = e.confidence;
   }
   return { total: edges.length, nameOnly, minConfidence };

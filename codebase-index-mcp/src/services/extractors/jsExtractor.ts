@@ -18,6 +18,7 @@ import type { ExtractInput } from "./extractorTypes.js";
 
 import { extractJavaScriptCalls, extractJavaScriptHeritage, extractJavaScriptImports } from "./jsEdges.js";
 import { extractJavaScriptHttpConsumers } from "./jsHttpConsumers.js";
+import { extractJavaScriptSqlQueries } from "./jsSqlQueries.js";
 import { extractJavaScriptSymbols } from "./jsSymbols.js";
 import { extractJavaScriptPropertyEdges, extractJavaScriptTypeRefs } from "./jsTypeRefs.js";
 
@@ -38,4 +39,5 @@ export function extractJavaScriptSymbolsImpl(
   extractJavaScriptTypeRefs(input, root, edges, moduleSymbolId);
   extractJavaScriptPropertyEdges(input, root, edges, moduleSymbolId);
   extractJavaScriptHttpConsumers(input, root, symbols, edges, moduleSymbolId);
+  extractJavaScriptSqlQueries(input, root, symbols, edges, moduleSymbolId);
 }

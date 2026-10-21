@@ -183,6 +183,11 @@ export function handleHealthCheck(
     latestRun,
     staleness,
     ...(repo && { citations: citationStatus(store, repoId!, repo.repoPath) }),
+    // MCP-ISSUE-082: the SQL lane's named gaps — a statement no reader recognised is listed, never dropped.
+    ...(repo && (() => {
+      const sqlLane = store.getSqlLaneStats(repoId!);
+      return sqlLane ? { sqlLane } : {};
+    })()),
     watch: {
       autoStartEnabled: constants.WATCH_AUTO_START,
       activeOnly: constants.WATCH_ACTIVE_ONLY,

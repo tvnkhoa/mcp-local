@@ -65,7 +65,9 @@ export function getDeadCodeCandidates(
     // from markup, from JS (`classList.add`, `style.setProperty`) and from third-party templates the
     // graph cannot see, so "no incoming edge" is not evidence of anything. Excluded outright rather
     // than reported in a bucket: a CSS-unused report needs its own semantics, not this scan's.
-    "s.kind not in ('module', 'property', 'constructor', 'type', 'interface', 'css_variable', 'css_class')"
+    // MCP-ISSUE-082: SQL symbols likewise — a table is used by the database and by every query string
+    // the graph reads only by name; "no incoming edge" says nothing about a migration's objects.
+    "s.kind not in ('module', 'property', 'constructor', 'type', 'interface', 'css_variable', 'css_class') and substr(s.kind, 1, 4) != 'sql_'"
   ];
   const params: unknown[] = [repoId];
 

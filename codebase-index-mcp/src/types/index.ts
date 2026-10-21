@@ -222,7 +222,15 @@ export type SymbolRecord = {
     /** MCP-ISSUE-075: a CSS custom-property definition (`--text-tertiary`), one symbol per definition site. */
     | "css_variable"
     /** MCP-ISSUE-075: a CSS class selector (`.btn`), one symbol per name per file. */
-    | "css_class";
+    | "css_class"
+    /**
+     * MCP-ISSUE-082: the SQL lane (`services/extractors/sqlExtractor.ts`). One symbol per definition
+     * site; the signature starts with the qualified name. `sql_statement` is a statement that touches
+     * objects without defining one (ALTER, GRANT, REVOKE, DROP, top-level DML); `sql_gap` is a
+     * statement no reader recognised, named by its first words.
+     */
+    | "sql_table" | "sql_column" | "sql_view" | "sql_index" | "sql_function" | "sql_type" | "sql_role"
+    | "sql_schema" | "sql_sequence" | "sql_policy" | "sql_trigger" | "sql_statement" | "sql_gap";
   line: number;
   /** Last line of the symbol's source span (1-indexed). Optional: null on indexes built before end-line tracking. */
   endLine?: number;
@@ -257,7 +265,16 @@ export type EdgeRecord = {
     /** MCP-ISSUE-075: `var(--x)` → the `css_variable` definition(s); `cssvar:<name>` until resolved. */
     | "USES_CSS_VAR"
     /** MCP-ISSUE-075: a markup use of a class (Vue template) → the `css_class` symbol(s); `cssclass:<.name>` until resolved. */
-    | "USES_CSS_CLASS";
+    | "USES_CSS_CLASS"
+    /**
+     * MCP-ISSUE-082, the SQL lane. Every target is a `sql<kind>:<name>` token until
+     * `resolveSqlEdges` binds it BY NAME — so a resolved edge says `name_resolved` and never more than
+     * 0.6. `SQL_USES`: a view/function/policy/index/trigger/ALTER reads, writes or alters an object.
+     * `SQL_REFERENCES`: a foreign key. `SQL_GRANT`: GRANT/REVOKE/owner to object and role.
+     * `SQL_QUERY`: a TS/JS query literal → the table, column or function it names.
+     * `SQL_MIGRATION_ORDER`: migration file → its predecessor by filename sequence.
+     */
+    | "SQL_USES" | "SQL_REFERENCES" | "SQL_GRANT" | "SQL_QUERY" | "SQL_MIGRATION_ORDER";
   confidence?: number;
   reason?: string;
   /** ENH-029-B: RHS source text captured at PROPERTY_WRITE sites (assigned literal/expression). */
@@ -277,8 +294,16 @@ export type EdgeRecord = {
  * MCP-ISSUE-075: the two CSS edge types are here so "who uses `--text-tertiary`" is a plain
  * `get_call_chain(direction:"callers")` / `find_impact_files` question. They originate only at CSS
  * symbols and (via the Vue lane) at components, so a traversal from C# or plain TS never meets them.
+ *
+ * MCP-ISSUE-082: the four SQL edge types that point AT an object are here for the same reason — "who
+ * touches table X" is `get_call_chain(direction:"callers")` on the table, and lists the ALTERs,
+ * GRANTs, policies, views, functions and TS query sites. `SQL_MIGRATION_ORDER` is not: a migration
+ * does not reach its predecessor, it runs after it.
  */
-export const CALL_TRAVERSAL_EDGE_TYPES = ["CALLS", "PUBLISHES", "USES_COMPONENT", "USES_CSS_VAR", "USES_CSS_CLASS"] as const;
+export const CALL_TRAVERSAL_EDGE_TYPES = [
+  "CALLS", "PUBLISHES", "USES_COMPONENT", "USES_CSS_VAR", "USES_CSS_CLASS",
+  "SQL_USES", "SQL_REFERENCES", "SQL_GRANT", "SQL_QUERY"
+] as const;
 /** SQL `in (...)` value list form of CALL_TRAVERSAL_EDGE_TYPES (constant literals, safe to inline). */
 export const CALL_TRAVERSAL_EDGE_SQL_LIST = CALL_TRAVERSAL_EDGE_TYPES.map((t) => `'${t}'`).join(", ");
 
@@ -325,6 +350,11 @@ export type ResolvedEdgeRecord = EdgeRecord & {
   fromFilePath: string | null;
   toName: string | null;
   toFilePath: string | null;
+  /** MCP-ISSUE-082: endpoint lines and kinds, selected by `getCallEdges` only (a SQL hop's site). */
+  fromLine?: number | null;
+  toLine?: number | null;
+  fromKind?: string | null;
+  toKind?: string | null;
 };
 
 /** ISSUE-023: string literal được index làm lane riêng (KHÔNG vào symbols — tránh phá ranking + dead_code_scan). */
@@ -523,6 +553,19 @@ export const NAME_ONLY_EDGE_REASONS: ReadonlySet<string> = new Set([
   "resolved interface method (unproven receiver)"
 ]);
 
+/**
+ * MCP-ISSUE-082: every edge the SQL lane binds is bound by NAME (a table name in a TS query literal,
+ * an ALTER naming a table created in another file), so its reason starts with this prefix and the
+ * rest varies (`name_resolved: alter | sqltable:audit_events`). A prefix, not set members.
+ */
+export const NAME_RESOLVED_REASON_PREFIX = "name_resolved";
+
+/** True when `reason` marks an edge resolved by name only — {@link NAME_ONLY_EDGE_REASONS} or the SQL lane's prefix. */
+export function isNameOnlyEdgeReason(reason: string | null | undefined): boolean {
+  if (!reason) return false;
+  return NAME_ONLY_EDGE_REASONS.has(reason) || reason.startsWith(NAME_RESOLVED_REASON_PREFIX);
+}
+
 /** Provenance roll-up for the edges underneath a traversal result. */
 export type EdgeProvenance = {
   /** Edges considered. */
@@ -548,7 +591,11 @@ export type EdgeProvenance = {
  * the same kind: a `<ProjectReference>` / `.sln` entry naming a project outside the repo or behind an
  * MSBuild property; an in-repo project edge carries the target's real module symbol id instead.
  */
-export const UNRESOLVED_SYMBOL_TOKEN_PREFIXES = ["callee:", "property:", "type:", "iface:", "base:", "import:", "cssvar:", "cssclass:", "component:"] as const;
+export const UNRESOLVED_SYMBOL_TOKEN_PREFIXES = [
+  "callee:", "property:", "type:", "iface:", "base:", "import:", "cssvar:", "cssclass:", "component:",
+  // MCP-ISSUE-082: SQL lane tokens no definition matched.
+  "sqltable:", "sqlcolumn:", "sqlfunc:", "sqlrole:", "sqltype:", "sqlschema:", "sqlindex:", "sqlseq:", "sqlpolicy:", "sqltrigger:"
+] as const;
 
 /**
  * SQL predicate form of {@link UNRESOLVED_SYMBOL_TOKEN_PREFIXES}, for filtering in the query rather
