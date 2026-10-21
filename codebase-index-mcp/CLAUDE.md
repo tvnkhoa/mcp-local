@@ -14,7 +14,9 @@ languages (`extractorEdges`, `extractorUtils`, `extractorPrimitives`, `extractor
 `extractorRoutes`).
 
 > `extractionWorkerPool.ts` spawns its worker with `new URL("./extractionWorker.js",
-> import.meta.url)`, so those two files must stay in the same folder.
+> import.meta.url)`, so those two files must stay in the same folder. The same holds for
+> `typeResolution/fieldWorkerClient.ts` and `fieldWorker.js` (release I1: the TypeScript / Volar
+> programs of `find_field_accesses` live in that worker, never on the server thread).
 
 > The integration harnesses in `scripts/test/` import compiled modules by path
 > (`dist/repositories/graphStore.js`, …). Moving a source file moves its `dist/` twin, so those

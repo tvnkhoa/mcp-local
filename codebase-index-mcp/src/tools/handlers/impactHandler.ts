@@ -213,15 +213,15 @@ export function handleGetCallChain(
 // PROPERTY_REF/PROPERTY_WRITE edges, so wrong-level-resolution audits stay in MCP
 // instead of falling back to grep. Accepts a property symbolId or a resolvable name.
 
-export function handleFindFieldAccesses(
+export async function handleFindFieldAccesses(
   args: { repoId: string; symbolId?: string; name?: string; declarationFile?: string; declarationLine?: number; ownerName?: string; mode: "read" | "write" | "all"; limit: number; excludeTests: boolean; profile: string },
   ctx: HandlerContext
-): CallToolResult {
+): Promise<CallToolResult> {
   const { store } = ctx;
   const profile = resolveResponseProfile(args.profile as Parameters<typeof resolveResponseProfile>[0]);
 
   // R3 exact: a TS/JS field is answered by the TypeScript LanguageService when the lane is on.
-  const exact = tryExactFieldAccesses(args, ctx, profile, staleWarningFor(args.repoId, store));
+  const exact = await tryExactFieldAccesses(args, ctx, profile, staleWarningFor(args.repoId, store));
   if (exact) return exact;
 
   let symbolId = args.symbolId;
@@ -508,7 +508,7 @@ function scanSchemaKeys(store: GraphStore, repoId: string, repoPath: string): { 
  * that mention it, and the Zod shapes that declare it. Without: the reverse report — snake_case
  * schema keys the registry has no row for. The registry is the `registryDoc` of citations.json.
  */
-function readTerm(ctx: HandlerContext, repoId: string, term: string | undefined, limit: number): unknown {
+async function readTerm(ctx: HandlerContext, repoId: string, term: string | undefined, limit: number): Promise<unknown> {
   const { store } = ctx;
   const repo = store.getRepository(repoId);
   if (!repo) throw notFound(`unknown repoId '${repoId}'.`, { repoId });
@@ -568,7 +568,7 @@ function readTerm(ctx: HandlerContext, repoId: string, term: string | undefined,
     mentions: entries.mentions,
     schemaKeys,
     ...scanMeta,
-    usages: termUsages(ctx, repoId, term, schemaKeys, limit),
+    usages: await termUsages(ctx, repoId, term, schemaKeys, limit),
     ...(entries.definitions.length === 0 && {
       hint: declared.length > 0
         ? `the code declares '${term}' but ${registryDoc} has no table row defining it — a candidate for the registry.`
@@ -582,11 +582,11 @@ function readTerm(ctx: HandlerContext, repoId: string, term: string | undefined,
  * The term's typed reads and writes (R3 exact), for the schema key the registry row matches — or
  * the only one. Several unmatched keys answer with the candidates, as find_field_accesses does.
  */
-function termUsages(ctx: HandlerContext, repoId: string, term: string, keys: { filePath: string; line: number; registrySection?: string }[], limit: number): unknown {
+async function termUsages(ctx: HandlerContext, repoId: string, term: string, keys: { filePath: string; line: number; registrySection?: string }[], limit: number): Promise<unknown> {
   const chosen = keys.find((k) => k.registrySection) ?? (keys.length === 1 ? keys[0] : undefined);
-  const answer = exactFieldAnswer(ctx, repoId, term, chosen ? { declarationFile: chosen.filePath, declarationLine: chosen.line } : {});
+  const answer = await exactFieldAnswer(ctx, repoId, term, chosen ? { declarationFile: chosen.filePath, declarationLine: chosen.line } : {});
   if (!answer) return { status: "unavailable", note: "the TypeScript lane is off (CODEBASE_INDEX_TS_LS_ENABLED) or the repo has no indexed TS/JS files." };
-  if (answer.status === "cap_breach") return { status: "cap_breach", coverage: "gap", accessesWithheld: true, breach: answer.breach };
+  if (answer.status === "cap_breach") return { status: answer.breach.kind === "building" ? "building" : "cap_breach", coverage: "gap", accessesWithheld: true, breach: answer.breach };
   const gaps = { gapCount: answer.gaps.length, gaps: answer.gaps.slice(0, limit) };
   if (answer.status !== "ok") {
     return { status: answer.status, candidates: "candidates" in answer ? answer.candidates.map((c) => ({ id: c.id, ownerName: c.ownerName, readCount: c.readCount, writeCount: c.writeCount })) : [], ...gaps };
@@ -960,10 +960,10 @@ export function handleQueryGraph(
  * just requested. All three now return `{ repoId, mode, count, results, ...hint }` — the shape
  * `search` already had, which is also the convention every other read tool here follows.
  */
-export function handleQueryDocs(
+export async function handleQueryDocs(
   args: { repoId: string; mode: "search" | "stale" | "coverage" | "drift" | "links" | "behind" | "language" | "section" | "cites" | "term"; query?: string; headingPrefix?: string; target?: string; includeCodeComments?: boolean; symbolIds?: string[]; filePath?: string; limit: number; maxTokens?: number; minSimilarity?: number; minDaysBehind?: number; minRatioPercent?: number; includeSymbols: boolean; includeCodeMentions: boolean; includeArchived?: boolean; matchMode?: "auto" | "strict" | "phrase"; maxPerFile?: number; contentTypes?: string[]; profile: string },
   ctx: HandlerContext
-): CallToolResult {
+): Promise<CallToolResult> {
   if (!ctx.constants.DOCS_TOOLS_ENABLED) {
     throw new McpError(ErrorCode.InvalidParams, "query_docs: docs lane is disabled. Set CODEBASE_INDEX_DOCS_TOOLS_ENABLED=true to enable docs tools.");
   }
@@ -998,7 +998,7 @@ export function handleQueryDocs(
   }
 
   if (args.mode === "term") {
-    return ctx.asText(readTerm(ctx, args.repoId, args.query, args.limit), profile);
+    return ctx.asText(await readTerm(ctx, args.repoId, args.query, args.limit), profile);
   }
 
   if (args.mode === "cites") {

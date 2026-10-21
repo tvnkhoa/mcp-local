@@ -91,6 +91,12 @@ export type FieldAnswerMeta = {
   warmMs: number | null;
   totalMs: number;
   rssMb: number;
+  /** The answering worker's V8 heap in MB (what the memory cap measures there); set by `fieldWorker.ts`. */
+  workerHeapMb?: number;
+  /** The server thread's V8 heap in MB when the answer arrived; set by `fieldWorkerClient.ts`. */
+  mainHeapMb?: number;
+  /** Server-side wall-clock of the call: request posted to the worker → answer received (messaging included). */
+  roundTripMs?: number;
   /** The Vue lane: `in-program` (Volar), `fallback` (`.vue` stays named gaps, with the reason) or absent (no `.vue`). */
   vue?: VueMeta;
 };
@@ -103,7 +109,14 @@ export type FieldAnswer =
   | { status: "ok"; field: string; selected: FieldCandidate; candidates: FieldCandidate[]; sites: FieldSite[]; nonMatches: FieldNonMatch[]; gaps: FieldGap[]; meta: FieldAnswerMeta }
   | { status: "ambiguous" | "pick_not_found"; field: string; candidates: FieldCandidate[]; nonMatches: FieldNonMatch[]; gaps: FieldGap[]; meta: FieldAnswerMeta }
   | { status: "no_declaration"; field: string; nonMatches: FieldNonMatch[]; gaps: FieldGap[]; meta: FieldAnswerMeta }
-  | { status: "cap_breach"; field: string; breach: { kind: TsLsCapBreach["kind"]; detail: string }; meta: Pick<FieldAnswerMeta, "engine" | "cold" | "totalMs" | "rssMb" | "rootFiles"> };
+  | { status: "cap_breach"; field: string; breach: FieldWithheld; meta: Pick<FieldAnswerMeta, "engine" | "cold" | "totalMs" | "rssMb"> & Partial<Pick<FieldAnswerMeta, "rootFiles" | "workerHeapMb" | "mainHeapMb" | "roundTripMs">> };
+
+/**
+ * Why an answer was withheld (coverage `gap`, no list). `time` / `memory`: a cap was breached.
+ * `building`: the worker had not answered within the call's wait budget — the cold program build is
+ * still running in the background (release I1). `worker`: the worker thread failed and is restarted.
+ */
+export type FieldWithheld = { kind: TsLsCapBreach["kind"] | "building" | "worker"; detail: string };
 
 type Group = {
   decls: FieldDeclaration[];

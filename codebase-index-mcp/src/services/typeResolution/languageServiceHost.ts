@@ -25,6 +25,9 @@
  * no `customConditions` are added — a runtime condition (wec.aria's `aria-runtime`) would resolve
  * contracts to stale `dist/` JavaScript.
  *
+ * Where it runs (release I1): inside the type-resolution worker (`fieldWorker.ts`), so this cache and
+ * every program it holds live in the worker's heap; the server thread never builds a program.
+ *
  * Invalidation: the cache entry carries the repo's latest index run id. When it changes, the root-file
  * list is re-read and every cached snapshot is re-stamped by mtime, so the LanguageService re-parses
  * only the files that changed — not the whole program.

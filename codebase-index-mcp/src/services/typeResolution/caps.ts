@@ -6,9 +6,13 @@
  * - **time** (`CODEBASE_INDEX_TS_LS_COLD_START_MS`, default 60 000): the whole answer — program
  *   build on a cold call, `findReferences`, the Zod parse pass and the gap scan — must finish inside
  *   it. Measured on wec.aria: 16.7 s cold, warm calls 4-65 ms.
- * - **memory** (`CODEBASE_INDEX_TS_LS_MAX_RSS_MB`, default 2 500): the process RSS. It is the whole
- *   server's RSS (SQLite's mmap included), not only the program's — the only figure the OS bounds.
- *   Measured on wec.aria: ~1.06 GB peak with the program built.
+ * - **memory** (`CODEBASE_INDEX_TS_LS_MAX_RSS_MB`, default 2 500): what the answering thread may hold.
+ *   In the server the lane runs in its own worker thread (`fieldWorker.ts`, release I1), which sets
+ *   {@link setMemoryMeter} to that worker's V8 heap (used heap + external + malloced) — the memory
+ *   the programs actually occupy, and the figure a breach can free by discarding the worker. The
+ *   same cap is the worker's `resourceLimits.maxOldGenerationSizeMb`, a hard backstop V8 enforces.
+ *   Outside a worker (unit tests, the live-check script) the meter stays the process RSS.
+ *   Measured on wec.aria: ~1.06 GB process RSS peak with the program built.
  *
  * A breach is never a partial answer. The LanguageService checks the cancellation token between
  * files inside `findReferences`, so a breach there throws {@link TsLsCapBreach} instead of returning
@@ -48,6 +52,21 @@ export function currentRssMb(): number {
   return Math.round(process.memoryUsage().rss / MB);
 }
 
+/** What the memory cap is measured against: a label for the breach detail and a reading in MB. */
+export type MemoryMeter = { label: string; readMb: () => number };
+
+let memoryMeter: MemoryMeter = { label: "process RSS", readMb: currentRssMb };
+
+/** The worker sets its own heap as the measure; the default is the process RSS. */
+export function setMemoryMeter(meter: MemoryMeter): void {
+  memoryMeter = meter;
+}
+
+/** The current reading of the memory cap's measure. */
+export function currentMemoryMb(): number {
+  return memoryMeter.readMb();
+}
+
 /**
  * One budget for one answer. `check(phase)` throws {@link TsLsCapBreach} once either cap is past;
  * `token` is the same check in the shape the LanguageService host asks for, so a breach inside
@@ -64,7 +83,7 @@ export class AnswerBudget {
     return Math.round(performance.now() - this.startedAt);
   }
 
-  /** Throws when a cap is past. RSS is sampled at most every 100 ms — `memoryUsage()` is a syscall. */
+  /** Throws when a cap is past. Memory is sampled at most every 100 ms — `memoryUsage()` is a syscall. */
   check(phase: string): void {
     if (this.breach) throw this.breach;
     const elapsed = this.elapsedMs();
@@ -75,9 +94,9 @@ export class AnswerBudget {
     const now = performance.now();
     if (now - this.lastRssCheckAt >= 100) {
       this.lastRssCheckAt = now;
-      const rss = currentRssMb();
-      if (rss > this.caps.maxRssMb) {
-        this.breach = new TsLsCapBreach("memory", `${phase}: process RSS ${String(rss)} MB, cap ${String(this.caps.maxRssMb)} MB (CODEBASE_INDEX_TS_LS_MAX_RSS_MB)`);
+      const used = memoryMeter.readMb();
+      if (used > this.caps.maxRssMb) {
+        this.breach = new TsLsCapBreach("memory", `${phase}: ${memoryMeter.label} ${String(used)} MB, cap ${String(this.caps.maxRssMb)} MB (CODEBASE_INDEX_TS_LS_MAX_RSS_MB)`);
         throw this.breach;
       }
     }

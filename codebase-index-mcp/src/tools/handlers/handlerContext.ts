@@ -19,7 +19,13 @@ export interface HandlerConstants {
    * R3 exact: TypeScript LanguageService lane for TS/JS fields in find_field_accesses. Absent (as in
    * handler unit tests that build a bare context) means the lane is off and the graph answers.
    */
-  TS_LS?: { enabled: boolean; budgetMs: number; maxRssMb: number };
+  TS_LS?: {
+    enabled: boolean;
+    budgetMs: number;
+    maxRssMb: number;
+    /** Release I1: how long one call waits for the worker before answering `gap` (building). Defaults to budgetMs. */
+    waitMs?: number;
+  };
   LLM_ENABLED: boolean;
   REFACTOR_STRICT_APPROVAL: boolean;
   REFACTOR_APPROVAL_SECRET: string;

@@ -65,6 +65,7 @@
     "test:vue-components": "node scripts/test/test-vue-components.mjs",
     "test:css-symbols": "node scripts/test/test-css-symbols.mjs",
     "test:field-access-vue": "node scripts/test/test-field-access-vue.mjs",
+    "test:field-access-worker": "node scripts/test/test-field-access-worker.mjs",
     "test:text-json-lane": "node scripts/test/test-text-json-lane.mjs",
     "test:html-svg": "node scripts/test/test-html-svg.mjs",
     "test:tests-for-diff": "node scripts/test/test-tests-for-diff.mjs",
