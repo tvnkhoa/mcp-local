@@ -66,9 +66,13 @@ export function renderSkillContent(server) {
   return rendered;
 }
 
-/** Where the Claude Code skill for `key` is installed: `{ global, project }` SKILL.md paths. */
-export function skillPaths(key) {
-  const roots = skillRoots();
+/**
+ * Where the user-tier Claude Code skill for `key` is installed: `{ global, project }` SKILL.md
+ * paths — `~/.claude/skills/<key>/` and this workspace's own `.claude/skills/<key>/`. A skill placed
+ * in another repo (`--skill project`) is at {@link repoSkillPath}.
+ */
+export function skillPaths(key, ctx = {}) {
+  const roots = skillRoots(ctx);
   return {
     global: path.join(roots.global, key, "SKILL.md"),
     project: path.join(roots.project, key, "SKILL.md"),
@@ -90,12 +94,20 @@ export function skillStatus(server, file) {
   return norm(fs.readFileSync(file, "utf-8")) === norm(renderSkillContent(server)) ? "current" : "stale";
 }
 
-/** The two directories server skills are installed under: `{ global, project }`. */
-export function skillRoots() {
+/**
+ * The two user-tier skill directories: `{ global, project }`. `ctx.home` / `ctx.workspaceRoot`
+ * exist so tests can point both at a temp directory.
+ */
+export function skillRoots({ home = os.homedir(), workspaceRoot = WORKSPACE_ROOT } = {}) {
   return {
-    global: path.join(os.homedir(), ".claude", "skills"),
-    project: path.join(WORKSPACE_ROOT, ".claude", "skills"),
+    global: path.join(home, ".claude", "skills"),
+    project: path.join(workspaceRoot, ".claude", "skills"),
   };
+}
+
+/** The project-scope skill of `key` in `repo`: `<repo>/.claude/skills/<key>/SKILL.md`. */
+export function repoSkillPath(repo, key) {
+  return path.join(repo, ".claude", "skills", key, "SKILL.md");
 }
 
 /**
@@ -161,30 +173,60 @@ function vscodePromptDir(agent) {
   return path.join(path.dirname(agent.configPath), "prompts");
 }
 
-// Install the skill for the detected agents:
-//   - project copy (<workspace>/.claude/skills/<key>/) — always, useful for the repo
-//   - global Claude Code skill (~/.claude/skills/<key>/) — only if Claude Code is present
-//   - VS Code Copilot prompt (Code/User/prompts/<key>.prompt.md) — only if VS Code is present
-//   - Claude Desktop / OpenCode have no skill system → nothing (no junk dirs)
-// `agents` defaults to [] (project copy only) for callers without agent context.
-export function installSkill(server, agents = []) {
+/** Where a skill goes: `none`, `project` (one repo's .claude/skills) or `user` (every project). */
+export const SKILL_SCOPES = ["none", "project", "user"];
+
+/**
+ * Install the skill. `opts.skill` picks the tier:
+ *
+ *   "user" (default) — the user tier, as before scopes existed:
+ *     - the workspace copy (<workspace>/.claude/skills/<key>/)
+ *     - the global Claude Code skill (~/.claude/skills/<key>/) — only if Claude Code is present
+ *     - a VS Code Copilot prompt (Code/User/prompts/<key>.prompt.md) — only if VS Code is present
+ *     - Claude Desktop / OpenCode have no skill system → nothing (no junk dirs)
+ *   "project" — `<opts.repo>/.claude/skills/<key>/SKILL.md` only. Nothing global, so the skill's
+ *     triggers reach sessions in that repo and nowhere else.
+ *   "none" — nothing.
+ *
+ * A project copy that exists but was not rendered by us (hand-written) is never overwritten.
+ * `agents` defaults to [] (workspace copy only) for callers without agent context.
+ */
+export function installSkill(server, agents = [], opts = {}) {
+  const { skill = "user", repo = null, home, workspaceRoot } = opts;
+  if (skill === "none") return [];
   const content = renderSkillContent(server);
   const written = [];
 
-  const writeSkillDir = (dir) => {
-    fs.mkdirSync(dir, { recursive: true });
-    const dest = path.join(dir, "SKILL.md");
+  const writeSkillFile = (dest) => {
+    fs.mkdirSync(path.dirname(dest), { recursive: true });
     writeFileAtomic(dest, content);
     written.push(dest);
   };
 
-  const paths = skillPaths(server.key);
+  if (skill === "project") {
+    if (!repo) throw new Error(`--skill project needs a target repo (--repo <path>) for ${server.key}`);
+    const dest = repoSkillPath(repo, server.key);
+    const before = fs.existsSync(dest) ? fs.readFileSync(dest, "utf-8") : null;
+    if (before !== null && !isRenderedServerSkill(before, server.key)) {
+      warn(`${dest} exists and was not rendered by this installer — left as it is.`);
+      return [];
+    }
+    writeSkillFile(dest);
+    ok(`Skill installed: ${server.key} (project scope)`);
+    ok(`  → ${dest}`);
+    if (before !== null && before.replace(/\r\n/g, "\n") !== content.replace(/\r\n/g, "\n")) {
+      info(`  The copy changed — if ${toConfigPath(repo)} commits .claude/skills/, review and commit it there.`);
+    }
+    return written;
+  }
 
-  // Project copy — always.
-  writeSkillDir(path.dirname(paths.project));
+  const paths = skillPaths(server.key, { home, workspaceRoot });
+
+  // Workspace copy — always.
+  writeSkillFile(paths.project);
 
   if (agents.some((a) => a.type === "claude-code")) {
-    writeSkillDir(path.dirname(paths.global));
+    writeSkillFile(paths.global);
   }
 
   const vscode = agents.find((a) => a.type === "vscode");
@@ -206,18 +248,42 @@ export function installSkill(server, agents = []) {
   return written;
 }
 
-// Remove installed skill artifacts for <key>: both skill dirs and, for any
-// detected VS Code agent, the Copilot prompt file.
-export function removeSkill(key, agents = []) {
+/**
+ * Remove installed skill artifacts for <key>.
+ *
+ *   opts.scopes  which tiers to remove: "user" (both user-tier dirs and, for any detected VS Code
+ *                agent, the Copilot prompt) and/or "project" (the copy in each of `opts.repos`).
+ *                Default: both.
+ *   opts.repos   repos whose `.claude/skills/<key>/` to remove. A copy there that this installer
+ *                did not render is left alone.
+ */
+export function removeSkill(key, agents = [], opts = {}) {
+  const { scopes = ["user", "project"], repos = [], home, workspaceRoot } = opts;
   let removed = 0;
   const rm = (p, isDir) => {
     if (fs.existsSync(p)) { fs.rmSync(p, { recursive: isDir, force: true }); removed++; }
   };
-  const paths = skillPaths(key);
-  rm(path.dirname(paths.global), true);
-  rm(path.dirname(paths.project), true);
-  for (const a of agents.filter((x) => x.type === "vscode")) {
-    rm(path.join(vscodePromptDir(a), `${key}.prompt.md`), false);
+  if (scopes.includes("user")) {
+    const paths = skillPaths(key, { home, workspaceRoot });
+    rm(path.dirname(paths.global), true);
+    rm(path.dirname(paths.project), true);
+    for (const a of agents.filter((x) => x.type === "vscode")) {
+      rm(path.join(vscodePromptDir(a), `${key}.prompt.md`), false);
+    }
+  }
+  if (scopes.includes("project")) {
+    for (const repo of repos) {
+      const file = repoSkillPath(repo, key);
+      let content;
+      try { content = fs.readFileSync(file, "utf-8"); } catch { continue; }
+      if (!isRenderedServerSkill(content, key)) {
+        warn(`${file} was not rendered by this installer — left in place.`);
+        continue;
+      }
+      rm(file, false);
+      try { fs.rmdirSync(path.dirname(file)); } catch { /* not empty: other files stay */ }
+      info(`  ${file} removed — if ${toConfigPath(repo)} commits .claude/skills/, commit the deletion there.`);
+    }
   }
   if (removed) ok(`Skill removed: ${key} (${removed} location${removed > 1 ? "s" : ""})`);
   else warn(`No installed skill found for ${key}`);

@@ -153,7 +153,10 @@ export const SERVERS: readonly ServerDescriptor[] = [
     smokeTest: "node scripts/smoke-test.mjs",
     skillSource: "board-mcp/skill",
     tools: toolsFor("board-mcp"),
-    env: boardEnv
+    env: boardEnv,
+    // Only the repo holding checks/board/board.mjs has a board. Installed at user scope its tools
+    // and skill reached every repo, and with writes on, a session elsewhere could claim on it.
+    repoBound: { envVar: "BOARD_REPO_ROOT" }
   }
 ];
 

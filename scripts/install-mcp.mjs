@@ -3,8 +3,8 @@
 /**
  * Unified installer for every MCP server in this workspace.
  *
- * For each selected server: install deps → build (+ guards) → detect agents →
- * prompt for env → write MCP config into each agent → generate & install the
+ * For each selected server: install deps → build (+ guards) → detect agents → prompt for env →
+ * choose where to register it and where its skill goes → write MCP config → generate & install the
  * native Claude Code skill → verify the server starts → smoke test.
  *
  * Usage:
@@ -12,13 +12,26 @@
  *   node scripts/install-mcp.mjs --server postgres-mcp # one server
  *   node scripts/install-mcp.mjs --yes                 # non-interactive (defaults)
  *   node scripts/install-mcp.mjs --skip-smoke          # skip smoke tests
- *   node scripts/install-mcp.mjs --skip-skill          # register MCP config only, write no skill
+ *   node scripts/install-mcp.mjs --skill none          # register MCP config only, write no skill
+ *   node scripts/install-mcp.mjs --server board-mcp --scope local --skill project --repo D:/x/repo
  *
- * Flags: --server <key> (repeatable), --yes/-y, --skip-smoke, --skip-skill/--no-skill
+ * Flags: --server <key> (repeatable), --yes/-y, --skip-smoke, --skip-build,
+ *        --scope user|local|project   where Claude Code registers the server
+ *        --skill none|project|user    whether to write the skill, and where
+ *        --repo <path>                the target repo for local/project
+ *        --skip-skill/--no-skill      alias of --skill none
  *
- * Skills are installed by default: without one the agent has the tools but none of the
- * sequences or guardrails that make them usable. --skip-skill exists for operators who
- * curate ~/.claude themselves; `npm run mcp:update -- --server <key>` installs it later.
+ * Scope (Claude Code):
+ *   user     ~/.claude.json — every project on this machine
+ *   local    ~/.claude.json projects["<repo>"] — one repo, private to you (`claude mcp add -s local`)
+ *   project  <repo>/.mcp.json — one repo, shared through it; absolute paths make it machine-specific
+ * Skill: user = ~/.claude/skills/<key>/ + the workspace copy; project = <repo>/.claude/skills/<key>/.
+ *
+ * Defaults: a repo-bound server (`repoBound` in packages/manifest/src/servers.ts — board-mcp) →
+ * local + project skill, the repo defaulting to its repo env var (BOARD_REPO_ROOT); every other
+ * server → user + user skill. A RE-RUN keeps whatever placement it finds — a local/project
+ * registration or a project skill is never silently moved back to user scope or ~/.claude/skills.
+ * Only --scope / --skill (or an interactive answer) moves a server.
  */
 
 import { execSync } from "node:child_process";
@@ -26,20 +39,34 @@ import fs from "node:fs";
 import path from "node:path";
 import { serverDirPath, serverEntryPath, evaluateEnv } from "./lib/manifest.mjs";
 import { toConfigPath } from "./lib/jsonc.mjs";
-import { detectAgents, configureAgent, readServerEntry } from "./lib/agents.mjs";
-import { installSkill } from "./lib/skills.mjs";
+import {
+  detectAgents, configureAgent, configureLocal, projectMcpJson, readLocalEntries, readServerEntry, unconfigureAgent,
+} from "./lib/agents.mjs";
+import { installSkill, isRenderedServerSkill, SKILL_SCOPES } from "./lib/skills.mjs";
+import {
+  SCOPES, candidateRepos, describePlacement, findPlacements, planPlacement, repoBoundValue, shadowedBy, superseded,
+} from "./lib/placement.mjs";
 import { verifyServer } from "./lib/verify.mjs";
 import { parseArgs, resolveServers } from "./lib/cli.mjs";
 import { C, log, section, banner, ok, warn, err, info, step, ask } from "./lib/log.mjs";
 
-const ARGS = parseArgs(process.argv.slice(2), {
-  yes: ["--yes", "-y"],
-  skipSmoke: ["--skip-smoke"],
-  skipSkill: ["--skip-skill", "--no-skill"],
-});
+const ARGS = parseArgs(
+  process.argv.slice(2),
+  {
+    yes: ["--yes", "-y"],
+    skipSmoke: ["--skip-smoke"],
+    skipBuild: ["--skip-build"],
+    skipSkill: ["--skip-skill", "--no-skill"],
+  },
+  { scope: ["--scope"], skill: ["--skill"], repo: ["--repo"] }
+);
 
 // ---- Build ----
 function buildServer(server) {
+  if (ARGS.skipBuild) {
+    step("Skipped (--skip-build) — using the dist/ already there");
+    return;
+  }
   const dir = serverDirPath(server);
   if (server.build.install && !fs.existsSync(path.join(dir, "node_modules"))) {
     info("Installing npm dependencies...");
@@ -57,7 +84,7 @@ function buildServer(server) {
 }
 
 /**
- * What this server is configured with right now, across every detected agent.
+ * What this server is configured with right now, across every detected agent and every scope.
  *
  * `configureAgent` replaces a server's entry wholesale (`[key]: mcpConfig`), so whatever
  * `collectEnv` returns IS the new env — anything omitted is deleted. Until this existed, `collectEnv`
@@ -67,14 +94,21 @@ function buildServer(server) {
  * because it only asserts that required keys are *present* — and they were, at the wrong values.
  *
  * Found the hard way during the S-44 key rename, which is uninstall-then-install and so hit this on
- * every key it touched.
+ * every key it touched. Local-scope and `.mcp.json` registrations count too: a server moved to a
+ * repo by hand still carries the values it was configured with.
  */
 function existingEnvFor(server, agents) {
+  const entries = [];
+  for (const agent of agents) entries.push(readServerEntry(agent, server.key));
+  const cc = agents.find((a) => a.type === "claude-code");
+  if (cc) entries.push(...readLocalEntries(cc, server.key).map((l) => l.entry));
+  for (const repo of candidateRepos(server, agents, ARGS.repo ? [ARGS.repo] : [])) {
+    entries.push(readServerEntry(projectMcpJson(repo), server.key));
+  }
   const merged = {};
-  // Later agents win only for keys earlier ones did not set, so a value is never silently
+  // Later entries win only for keys earlier ones did not set, so a value is never silently
   // downgraded by an agent that happens to be scanned later.
-  for (const agent of agents) {
-    const entry = readServerEntry(agent, server.key);
+  for (const entry of entries) {
     const env = entry?.env ?? entry?.environment ?? null;
     if (!env) continue;
     for (const [k, v] of Object.entries(env)) {
@@ -140,45 +174,152 @@ async function collectEnv(server, agents) {
   return env;
 }
 
+// ---- Placement: registration scope, skill, target repo ----
+
+/** Ask until the answer is one of `options` (three tries, then the default). */
+async function choose(question, options, def) {
+  for (let i = 0; i < 3; i++) {
+    const a = String(await ask(`${question} (${options.join(" | ")})`, def, ARGS.yes)).trim().toLowerCase();
+    if (options.includes(a)) return a;
+    warn(`'${a}' is not one of: ${options.join(", ")}`);
+  }
+  return def;
+}
+
+async function choosePlacement(server, agents, env) {
+  const repos = candidateRepos(server, agents, ARGS.repo ? [ARGS.repo] : []);
+  const existing = findPlacements(server, { agents, repos });
+  for (const p of [...existing.registrations, ...existing.skills]) step(`Found: ${describePlacement(p)}`);
+
+  const flags = {
+    scope: ARGS.scope ?? undefined,
+    skill: ARGS.skipSkill ? "none" : ARGS.skill ?? undefined,
+    repo: ARGS.repo ? path.resolve(ARGS.repo) : undefined,
+  };
+  const envRepo = repoBoundValue(server, [{ env }]);
+  const plan = planPlacement(server, { flags, existing, envRepo, cwd: process.env.INIT_CWD || process.cwd() });
+  plan.notes.forEach((n) => info(n));
+
+  if (!ARGS.scope) {
+    step("Where should Claude Code register this server?");
+    step("  user    — every project on this machine (~/.claude.json)");
+    step("  local   — one repo only, private to you (~/.claude.json, per project; `claude mcp add -s local`)");
+    step("  project — one repo, shared through <repo>/.mcp.json (absolute paths: machine-specific)");
+    if (server.repoBound) step(`  ${server.key} serves one repo (${server.repoBound.envVar}) — local is the default.`);
+    plan.scope = await choose("Registration scope", SCOPES, plan.scope);
+  }
+  if (!ARGS.skill && !ARGS.skipSkill) {
+    step("Where should the skill go? none | project (<repo>/.claude/skills) | user (~/.claude/skills, every project)");
+    plan.skill = await choose("Skill", SKILL_SCOPES, plan.skill);
+  }
+  if ((plan.scope !== "user" || plan.skill === "project") && !ARGS.repo) {
+    plan.repo = path.resolve(await ask("Target repo (absolute path)", toConfigPath(plan.repo), ARGS.yes));
+  }
+  if (plan.scope !== "user" || plan.skill === "project") {
+    if (!fs.existsSync(plan.repo) || !fs.statSync(plan.repo).isDirectory()) {
+      throw new Error(`target repo does not exist: ${plan.repo} (pass --repo <path>)`);
+    }
+  }
+  return { plan, existing };
+}
+
+/**
+ * Offer to remove what the plan supersedes. Interactive: asked, default yes. With --yes: removed
+ * only when the move was asked for explicitly (--scope / --skill); a plain re-run never removes.
+ */
+async function retireSuperseded(server, plan, existing) {
+  const explicit = Boolean(ARGS.scope || ARGS.skill || ARGS.skipSkill);
+  for (const { kind, placement } of superseded(plan, existing)) {
+    const what = describePlacement(placement);
+    let remove;
+    if (ARGS.yes) {
+      remove = explicit;
+      if (!remove) warn(`Still present: ${what} — re-run with --scope/--skill to move it, or remove it by hand.`);
+    } else {
+      remove = (await ask(`Remove the superseded ${what}? (y/n)`, "y", false)).toLowerCase().startsWith("y");
+    }
+    if (!remove) continue;
+    if (kind === "registration") {
+      unconfigureAgent(placement.agent, placement.name);
+    } else {
+      let content = "";
+      try { content = fs.readFileSync(placement.file, "utf-8"); } catch { /* gone */ }
+      if (content && !isRenderedServerSkill(content, server.key)) {
+        warn(`${placement.file} was not rendered by this installer — left in place.`);
+        continue;
+      }
+      fs.rmSync(path.dirname(placement.file), { recursive: true, force: true });
+      ok(`Removed ${placement.file}`);
+    }
+  }
+  for (const p of shadowedBy(plan, existing)) {
+    warn(`Also present and left alone: ${describePlacement(p)} — remove it with  npm run mcp:uninstall -- --server ${server.key} --scope ${p.scope} --repo "${toConfigPath(p.repo)}"`);
+  }
+}
+
+function registerServer(server, agents, plan, mcpConfig) {
+  if (plan.scope === "user") {
+    if (agents.length === 0) warn("No code agents detected — configure MCP config manually.");
+    for (const agent of agents) configureAgent(agent, server.key, mcpConfig);
+    return;
+  }
+  const others = agents.filter((a) => a.type !== "claude-code");
+  if (others.length) {
+    info(`${others.map((a) => a.name).join(", ")}: no per-repo scope here — not registered (add it by hand if you want it there).`);
+  }
+  if (plan.scope === "local") {
+    const cc = agents.find((a) => a.type === "claude-code");
+    if (!cc) { warn("Claude Code not detected — local scope not written. Use --scope project, or install Claude Code first."); return; }
+    configureLocal(cc, plan.repo, server.key, mcpConfig);
+    return;
+  }
+  // project
+  warn(`${path.join(plan.repo, ".mcp.json")} holds absolute paths (${mcpConfig.args[0]}) — it works on this machine only.`);
+  const secrets = server.env.filter((f) => f.secret && mcpConfig.env[f.name]).map((f) => f.name);
+  if (secrets.length) warn(`.mcp.json is meant to be committed and now holds secret value(s): ${secrets.join(", ")} — use --scope local instead if that repo is shared.`);
+  configureAgent(projectMcpJson(plan.repo), server.key, mcpConfig);
+}
+
 // ---- Install one server ----
 async function installOne(server, agents) {
   banner(server.displayName);
 
-  section("1/6  Build");
+  section("1/7  Build");
   buildServer(server);
 
-  section("2/6  Environment");
+  section("2/7  Environment");
   const env = await collectEnv(server, agents);
 
-  section("3/6  Configure agents");
-  if (agents.length === 0) {
-    warn("No code agents detected — configure MCP config manually.");
-    if (!ARGS.skipSkill) info("The project skill copy under .claude/skills/ is still written.");
-  }
+  section("3/7  Scope and skill");
+  const { plan, existing } = await choosePlacement(server, agents, env);
+  ok(`Register: ${plan.scope}${plan.scope === "user" ? "" : ` (${toConfigPath(plan.repo)})`}   Skill: ${plan.skill}${plan.skill === "project" ? ` (${toConfigPath(plan.repo)})` : ""}`);
+
+  section("4/7  Configure agents");
   const mcpConfig = {
     command: "node",
     args: [toConfigPath(serverEntryPath(server))],
     env,
   };
-  for (const agent of agents) configureAgent(agent, server.key, mcpConfig);
+  registerServer(server, agents, plan, mcpConfig);
+  await retireSuperseded(server, plan, existing);
 
-  section("4/6  Install skill");
-  if (ARGS.skipSkill) {
-    step("Skipped (--skip-skill)");
-    info(`Install it later with  npm run mcp:update -- --server ${server.key}`);
+  section("5/7  Install skill");
+  if (plan.skill === "none") {
+    step(ARGS.skipSkill ? "Skipped (--skip-skill)" : "Skipped (--skill none)");
+    info(`Install it later with  node scripts/install-mcp.mjs --server ${server.key} --skill project|user`);
   } else {
     try {
-      installSkill(server, agents);
+      installSkill(server, agents, { skill: plan.skill, repo: plan.repo });
     } catch (e) {
       err(`Skill install failed: ${e.message}`);
     }
   }
 
-  section("5/6  Verify server starts");
+  section("6/7  Verify server starts");
   const res = await verifyServer(serverEntryPath(server), env);
   res.ok ? ok(`MCP server healthy (${res.message})`) : warn(`Verify: ${res.message}`);
 
-  section("6/6  Smoke test");
+  section("7/7  Smoke test");
   if (ARGS.skipSmoke) {
     step("Skipped (--skip-smoke)");
   } else if (server.smokeTest) {
@@ -192,13 +333,20 @@ async function installOne(server, agents) {
     step("No smoke test defined");
   }
 
-  return { key: server.key, verified: res.ok };
+  return { key: server.key, verified: res.ok, plan };
+}
+
+function validateFlags() {
+  if (ARGS.scope && !SCOPES.includes(ARGS.scope)) throw new Error(`--scope must be one of: ${SCOPES.join(", ")}`);
+  if (ARGS.skill && !SKILL_SCOPES.includes(ARGS.skill)) throw new Error(`--skill must be one of: ${SKILL_SCOPES.join(", ")}`);
+  if (ARGS.skipSkill && ARGS.skill && ARGS.skill !== "none") throw new Error(`--skip-skill means --skill none; it conflicts with --skill ${ARGS.skill}`);
 }
 
 async function main() {
   banner("MCP Workspace — Unified Installer");
+  try { validateFlags(); } catch (e) { err(e.message); process.exit(1); }
   if (ARGS.yes) info("Non-interactive mode (--yes): using defaults");
-  if (ARGS.skipSkill) info("Skill install disabled (--skip-skill): MCP config only");
+  if (ARGS.skipSkill) info("Skill install disabled (--skip-skill = --skill none): MCP config only");
 
   const servers = resolveServers(ARGS.servers, { allowAllDefault: true });
   info(`Installing: ${servers.map((s) => s.key).join(", ")}`);
@@ -221,16 +369,17 @@ async function main() {
 
   section("Summary");
   for (const r of results) {
+    const where = r.plan ? `  [scope ${r.plan.scope}, skill ${r.plan.skill}${r.plan.scope !== "user" || r.plan.skill === "project" ? `, ${toConfigPath(r.plan.repo)}` : ""}]` : "";
     if (r.error) err(`${r.key}: FAILED (${r.error})`);
-    else if (r.verified) ok(`${r.key}: installed + verified`);
-    else warn(`${r.key}: installed (verify inconclusive — check env)`);
+    else if (r.verified) ok(`${r.key}: installed + verified${where}`);
+    else warn(`${r.key}: installed (verify inconclusive — check env)${where}`);
   }
   console.log();
   log("Next steps:", C.bright);
   log("  1. Restart your code agent(s) so the new MCP config + skills load.", C.reset);
   log("  2. Run  npm run mcp:doctor  to confirm everything is healthy.", C.reset);
-  if (ARGS.skipSkill) {
-    log("  3. Skills were skipped (--skip-skill) — run  npm run mcp:update -- --all  to install them.", C.reset);
+  if (results.some((r) => r.plan?.skill === "none")) {
+    log("  3. Skills were skipped — re-run with  --skill project|user  to install them.", C.reset);
   } else {
     log("  3. The AI now auto-loads each server's skill (.claude/skills/<key>/SKILL.md).", C.reset);
   }

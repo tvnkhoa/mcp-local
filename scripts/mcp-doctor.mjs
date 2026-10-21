@@ -5,10 +5,14 @@
  *
  * Per server, checks:
  *   [build]  dist/index.js exists
- *   [config] registered in a detected agent, args path matches the built entry
+ *   [config] registered in a detected agent — at user scope, or at Claude Code's local scope / in a
+ *            repo's .mcp.json (the scope found is named) — args path matches the built entry
+ *   [scope]  a repo-bound server (manifest `repoBound`) registered at user scope: a WARN, since its
+ *            tools then reach every project
  *   [env]    required / group env keys are PRESENT (keys only — never prints values)
- *   [skill]  operational skill installed in ~/.claude/skills/<key>/ and .claude/skills/<key>/, and
- *            identical to what the template + manifest render today (a stale copy is a WARN)
+ *   [skill]  operational skill installed — in ~/.claude/skills/<key>/ + .claude/skills/<key>/, or in
+ *            a repo's .claude/skills/<key>/ (named) — and identical to what the template + manifest
+ *            render today (a stale copy is a WARN). A project placement is reported, never "missing".
  *   [start]  server spawns and responds to `initialize`
  *
  * Then, once for the workspace: rendered server skills under ~/.claude/skills/ or .claude/skills/
@@ -18,7 +22,7 @@
  * supported setup, not a misconfiguration. Every instance is named in the [config] line, and
  * [env] and [start] run once per instance, because each carries its own credentials.
  *
- * Usage: node scripts/mcp-doctor.mjs [--server <key>] [--skip-start]
+ * Usage: node scripts/mcp-doctor.mjs [--server <key>] [--skip-start] [--repo <path>]
  */
 
 import fs from "node:fs";
@@ -29,12 +33,13 @@ import { toConfigPath } from "./lib/jsonc.mjs";
 import { detectAgents, readServerEntries } from "./lib/agents.mjs";
 import { verifyServer } from "./lib/verify.mjs";
 import { skillPaths, skillStatus, findOrphanedSkills } from "./lib/skills.mjs";
+import { candidateRepos, findPlacements, repoBoundValue } from "./lib/placement.mjs";
 import { findMissingEnvPaths } from "./lib/envPaths.mjs";
 import { parseArgs, resolveServers } from "./lib/cli.mjs";
 import { findStaleRunningServers } from "./lib/runningServers.mjs";
 import { C, log, section, banner, ok, warn, err, info } from "./lib/log.mjs";
 
-const ARGS = parseArgs(process.argv.slice(2), { skipStart: ["--skip-start"] });
+const ARGS = parseArgs(process.argv.slice(2), { skipStart: ["--skip-start"] }, { repo: ["--repo"] });
 const selected = () => resolveServers(ARGS.servers, { allowAllDefault: true });
 
 const MARK = { pass: `${C.green}PASS${C.reset}`, warn: `${C.yellow}WARN${C.reset}`, fail: `${C.red}FAIL${C.reset}` };
@@ -153,8 +158,22 @@ async function checkServer(server, agents) {
     const found = readServerEntries(agent, server.key);
     if (found.length) { instances = found; agentName = agent.name; break; }
   }
+  // Local scope (Claude Code projects[...]) and repo .mcp.json registrations. A server moved there
+  // on purpose is installed, not missing — report the scope it was found at.
+  const placements = findPlacements(server, { agents, repos: candidateRepos(server, agents, ARGS.repo ? [ARGS.repo] : []) });
+  const scoped = placements.registrations.filter((r) => r.scope !== "user");
+  const scopedLabel = scoped.map((r) => `${r.scope} scope (${toConfigPath(r.repo)})`).join(", ");
+  if (instances.length === 0 && scoped.length > 0) {
+    instances = scoped.map((r) => ({ name: `${server.key} [${r.scope}]`, entry: r.entry, suffixed: false, scoped: true }));
+    agentName = "Claude Code";
+  }
+  if (server.repoBound && placements.registrations.some((r) => r.scope === "user")) {
+    const repo = repoBoundValue(server, placements.registrations.map((r) => r.entry)) ?? "<repo>";
+    checks.push(["scope", "warn", `repo-bound (${server.repoBound.envVar}) but registered at user scope — its tools reach every project`]);
+    fix.push(`node scripts/install-mcp.mjs --server ${server.key} --scope local --skill project --repo "${repo}"`);
+  }
   if (instances.length === 0) {
-    checks.push(["config", "warn", "not registered in any detected agent"]);
+    checks.push(["config", "warn", "not registered in any detected agent or scope"]);
     fix.push(`node scripts/install-mcp.mjs --server ${server.key}`);
   } else {
     // Windows paths are case-insensitive and drive-letter casing is not stable,
@@ -165,9 +184,11 @@ async function checkServer(server, agents) {
       return !argsStr.replace(/\\/g, "/").toLowerCase().includes(entryNorm.toLowerCase());
     });
     // Instances are named, never just counted — see readServerEntries().
-    const label = instances.length === 1 && !instances[0].suffixed
-      ? `registered in ${agentName}`
-      : `registered in ${agentName} as ${instances.map((i) => i.name).join(", ")}`;
+    const label = instances[0].scoped
+      ? `registered in ${agentName} at ${scopedLabel}`
+      : (instances.length === 1 && !instances[0].suffixed
+        ? `registered in ${agentName}`
+        : `registered in ${agentName} as ${instances.map((i) => i.name).join(", ")}`) + (scoped.length ? `; also at ${scopedLabel}` : "");
     if (mismatched.length === 0) {
       checks.push(["config", "pass", label]);
     } else {
@@ -235,14 +256,25 @@ async function checkServer(server, agents) {
   // and still loads, so a presence check reported a skill describing renamed tools as healthy.
   {
     const paths = skillPaths(server.key);
+    const projectSkills = placements.skills.filter((s) => s.scope === "project");
     let status;
+    let projectStatus = [];
     try {
       status = { global: skillStatus(server, paths.global), project: skillStatus(server, paths.project) };
+      projectStatus = projectSkills.map((s) => ({ file: s.file, status: skillStatus(server, s.file) }));
     } catch (e) {
       status = null;
       checks.push(["skill", "fail", `template does not render: ${e.message}`]);
     }
-    if (status) {
+    if (status && projectSkills.length > 0) {
+      // Placed in a repo on purpose: the user-tier copies are not expected, and their absence is
+      // not "missing". Name every copy found and whether it is current.
+      const userTier = [status.global !== "missing" && `~/.claude/skills (${status.global})`, status.project !== "missing" && `workspace .claude/skills (${status.project})`].filter(Boolean);
+      const parts = projectStatus.map((p) => `project ${toConfigPath(p.file)} (${p.status})`).concat(userTier);
+      const stale = projectStatus.some((p) => p.status === "stale") || status.global === "stale" || status.project === "stale";
+      checks.push(["skill", stale ? "warn" : "pass", `installed at ${parts.join(", ")}`]);
+      if (stale) fix.push(`npm run mcp:update -- --server ${server.key}   # re-renders the skill where it is`);
+    } else if (status) {
       const where = (s) => [status.global === s && "~/.claude/skills", status.project === s && ".claude/skills"].filter(Boolean).join(" + ");
       if (status.global === "current" && status.project === "current") {
         checks.push(["skill", "pass", "installed and current (~/.claude/skills + .claude/skills)"]);

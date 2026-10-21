@@ -12,6 +12,7 @@ import {
   editJsoncText,
   stripJsoncComments,
   stripTrailingCommas,
+  toConfigPath,
 } from "./jsonc.mjs";
 import { ok, warn, err, info } from "./log.mjs";
 
@@ -266,7 +267,7 @@ export function configureAgent(agent, key, mcpConfig) {
     return false;
   }
 
-  const b = backup(agent.configPath);
+  const b = agent.noBackup ? null : backup(agent.configPath);
   if (b) info(`Backup: ${b}`);
   let result;
   try {
@@ -301,7 +302,7 @@ export function unconfigureAgent(agent, key) {
   });
   if (!present(cfg)) return false;
 
-  const b = backup(agent.configPath);
+  const b = agent.noBackup ? null : backup(agent.configPath);
   if (b) info(`Backup: ${b}`);
   let result;
   try {
@@ -345,7 +346,7 @@ export function unconfigureAgent(agent, key) {
  *
  * Returns the names of the rewritten entries ([] when nothing needed it, or on failure).
  */
-export function refreshServerPath(agent, key, entryPath, entrySuffix) {
+export function refreshServerPath(agent, key, entryPath, entrySuffix, { local = false } = {}) {
   let cfg;
   try { cfg = loadConfig(agent.configPath); } catch { return []; }
   const norm = (s) => String(s).replace(/\\/g, "/").toLowerCase();
@@ -355,7 +356,7 @@ export function refreshServerPath(agent, key, entryPath, entrySuffix) {
 
   // [{ keys, index }] — the array holding the path, and the element to replace.
   const targets = [];
-  for (const { bucket, name, entry } of locateEntries(cfg, key)) {
+  for (const { bucket, name, entry } of locateEntries(cfg, key, bucketsFor(cfg, local))) {
     const field = Array.isArray(entry.args) ? "args" : Array.isArray(entry.command) ? "command" : null;
     if (!field) continue;
     entry[field].forEach((a, index) => {
@@ -375,7 +376,7 @@ export function refreshServerPath(agent, key, entryPath, entrySuffix) {
   const expected = apply(structuredClone(cfg));
   const arrays = [...new Map(targets.map((t) => [JSON.stringify(t.keys), t.keys])).values()];
 
-  const b = backup(agent.configPath);
+  const b = agent.noBackup ? null : backup(agent.configPath);
   if (b) info(`Backup: ${b}`);
   let result;
   try {
@@ -411,12 +412,12 @@ export function refreshServerPath(agent, key, entryPath, entrySuffix) {
  * Returns `[{ name, renamed: [{ legacy, canonical }] }]` per rewritten entry ([] when nothing
  * needed it, or on failure).
  */
-export function renameEnvKeys(agent, key, renamesFor) {
+export function renameEnvKeys(agent, key, renamesFor, { local = false } = {}) {
   let cfg;
   try { cfg = loadConfig(agent.configPath); } catch { return []; }
 
   const plans = [];
-  for (const { bucket, name, entry } of locateEntries(cfg, key)) {
+  for (const { bucket, name, entry } of locateEntries(cfg, key, bucketsFor(cfg, local))) {
     const field = entry.env && typeof entry.env === "object" ? "env" : entry.environment && typeof entry.environment === "object" ? "environment" : null;
     if (!field) continue;
     const present = Object.keys(entry[field]).filter((k) => entry[field][k] !== "" && entry[field][k] != null);
@@ -439,7 +440,7 @@ export function renameEnvKeys(agent, key, renamesFor) {
   };
   const expected = apply(structuredClone(cfg));
 
-  const b = backup(agent.configPath);
+  const b = agent.noBackup ? null : backup(agent.configPath);
   if (b) info(`Backup: ${b}`);
   let result;
   try {
@@ -467,9 +468,19 @@ export function renameEnvKeys(agent, key, renamesFor) {
 }
 
 /** Every server-shaped entry named `key` or `<key>-<suffix>`: [{ bucket, name, entry }]. */
-function locateEntries(cfg, key) {
+/**
+ * The buckets to search: the root ones (user scope), or — `local` — Claude Code's per-project
+ * `projects["<path>"].mcpServers`, which is where `claude mcp add -s local` writes.
+ */
+function bucketsFor(cfg, local) {
+  if (!local) return BUCKETS;
+  const projects = cfg?.projects && typeof cfg.projects === "object" ? Object.keys(cfg.projects) : [];
+  return projects.map((p) => ["projects", p, "mcpServers"]);
+}
+
+function locateEntries(cfg, key, buckets = BUCKETS) {
   const found = new Map();
-  for (const bucket of BUCKETS) {
+  for (const bucket of buckets) {
     const obj = at(cfg, bucket);
     if (!obj || typeof obj !== "object") continue;
     for (const name of Object.keys(obj)) {
@@ -477,7 +488,10 @@ function locateEntries(cfg, key) {
       const entry = obj[name];
       // `cfg.mcp` also holds non-server settings, so require something server-shaped.
       if (!entry || typeof entry !== "object" || (!entry.command && !entry.args)) continue;
-      if (!found.has(name)) found.set(name, { bucket, name, entry });
+      // Keyed by name alone for the root buckets (one entry per name, first bucket wins); local
+      // buckets are per project, so the same name may legitimately appear in each.
+      const id = bucket[0] === "projects" ? `${bucket[1]}::${name}` : name;
+      if (!found.has(id)) found.set(id, { bucket, name, entry });
     }
   }
   return [...found.values()];
@@ -528,4 +542,130 @@ export function readServerEntries(agent, key) {
   return found.sort((a, b) =>
     a.suffixed === b.suffixed ? a.name.localeCompare(b.name) : (a.suffixed ? 1 : -1)
   );
+}
+
+// ---- Claude Code local scope ---------------------------------------------------------------------
+//
+// `claude mcp add -s local`, run in a repo, writes the server under `projects["<repo>"].mcpServers`
+// in ~/.claude.json: private to this machine and visible only in sessions opened in that repo. The
+// functions below read and write that bucket directly, with the same fresh-read / atomic write /
+// read-back as the user-scope writes above, rather than shelling out to the `claude` CLI: env
+// values (tokens, connection strings) would otherwise travel through a command line and, on
+// Windows, through cmd.exe quoting.
+
+/** `p` as a comparable path: absolute, forward slashes, no trailing slash, case-folded on Windows. */
+export function comparablePath(p) {
+  const s = toConfigPath(path.resolve(String(p))).replace(/\/+$/, "");
+  return process.platform === "win32" || /^[a-zA-Z]:/.test(s) ? s.toLowerCase() : s;
+}
+
+/**
+ * The keys under `projects` that name `repo`. Claude Code keys a project by the cwd it was opened
+ * in, so one repo can hold several spellings (`D:/x/repo` and `d:/x/repo`) — each one applies to
+ * the sessions opened under that spelling, which is why writes go to all of them.
+ */
+function projectKeysFor(cfg, repo) {
+  const want = comparablePath(repo);
+  const projects = cfg?.projects && typeof cfg.projects === "object" ? Object.keys(cfg.projects) : [];
+  return projects.filter((k) => comparablePath(k) === want);
+}
+
+/** Every local-scope registration of exactly `key`: `[{ repo, entry }]`, `repo` as Claude Code stored it. */
+export function readLocalEntries(agent, key) {
+  let cfg;
+  try { cfg = loadConfig(agent.configPath); } catch { return []; }
+  const out = [];
+  for (const [repo, project] of Object.entries(cfg.projects ?? {})) {
+    const entry = project?.mcpServers?.[key];
+    if (entry && typeof entry === "object") out.push({ repo, entry });
+  }
+  return out;
+}
+
+/**
+ * Register `key` at local scope for `repo` — the effect of `claude mcp add -s local` run in `repo`.
+ * Writes every existing spelling of the project key; creates the forward-slash one when Claude Code
+ * has never opened the repo. Replaces the entry wholesale, like {@link configureAgent}.
+ */
+export function configureLocal(agent, repo, key, mcpConfig) {
+  try {
+    loadConfig(agent.configPath);
+  } catch (parseErr) {
+    warn(`Cannot parse ${agent.configPath}: ${parseErr.message} — local scope not written`);
+    return false;
+  }
+  const b = agent.noBackup ? null : backup(agent.configPath);
+  if (b) info(`Backup: ${b}`);
+  let result;
+  try {
+    result = commit(agent, {
+      mutate: (cfg) => {
+        cfg.projects = cfg.projects && typeof cfg.projects === "object" ? cfg.projects : {};
+        const keys = projectKeysFor(cfg, repo);
+        if (keys.length === 0) keys.push(toConfigPath(path.resolve(repo)));
+        for (const k of keys) {
+          const project = cfg.projects[k] && typeof cfg.projects[k] === "object" ? cfg.projects[k] : {};
+          cfg.projects[k] = { ...project, mcpServers: { ...(project.mcpServers ?? {}), [key]: mcpConfig } };
+        }
+        return cfg;
+      },
+      check: (cfg) => {
+        const keys = projectKeysFor(cfg, repo);
+        return keys.length > 0 && keys.every((k) => isDeepStrictEqual(cfg.projects[k]?.mcpServers?.[key], asJson(mcpConfig)));
+      },
+    });
+  } catch (e) {
+    warn(`${agent.name}: could not update ${agent.configPath}: ${e.message}`);
+    return false;
+  }
+  if (result !== "ok") {
+    err(`${agent.name}: the local-scope entry for '${key}' did not stick in ${agent.configPath} — another process keeps overwriting it. Close that agent and re-run.`);
+    return false;
+  }
+  ok(`Configured ${agent.name} at local scope for ${toConfigPath(repo)}`);
+  return true;
+}
+
+/**
+ * Remove the local-scope registration of `key` for `repo`, or for every project when `repo` is
+ * null. Returns the project keys it was removed from ([] when there was none, or on failure).
+ */
+export function unconfigureLocal(agent, key, repo = null) {
+  let cfg;
+  try { cfg = loadConfig(agent.configPath); } catch { return []; }
+  const holding = (c) => Object.keys(c.projects ?? {}).filter((k) =>
+    c.projects[k]?.mcpServers && typeof c.projects[k].mcpServers === "object" && key in c.projects[k].mcpServers &&
+    (repo === null || comparablePath(k) === comparablePath(repo)));
+  const targets = holding(cfg);
+  if (targets.length === 0) return [];
+  const b = agent.noBackup ? null : backup(agent.configPath);
+  if (b) info(`Backup: ${b}`);
+  let result;
+  try {
+    result = commit(agent, {
+      mutate: (c) => {
+        for (const k of holding(c)) delete c.projects[k].mcpServers[key];
+        return c;
+      },
+      check: (c) => holding(c).length === 0,
+    });
+  } catch (e) {
+    warn(`${agent.name}: could not update ${agent.configPath}: ${e.message}`);
+    return [];
+  }
+  if (result !== "ok") {
+    err(`${agent.name}: '${key}' is back in a project of ${agent.configPath} after ${String(WRITE_ATTEMPTS)} writes — another process keeps restoring it.`);
+    return [];
+  }
+  for (const k of targets) ok(`Removed '${key}' from ${agent.name} (local scope, ${k})`);
+  return targets;
+}
+
+/**
+ * A repo's `.mcp.json` as an agent-shaped target, so `configureAgent` / `unconfigureAgent` /
+ * `readServerEntry` work on it unchanged. Project scope: the file is meant to be committed, so it
+ * gets no `.backup.*` siblings — git is its history.
+ */
+export function projectMcpJson(repo) {
+  return { name: `.mcp.json (${toConfigPath(repo)})`, type: "claude-code", configPath: path.join(repo, ".mcp.json"), noBackup: true };
 }
