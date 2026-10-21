@@ -308,6 +308,20 @@ function toAbsolute(repoPath: string, relativeFiles: readonly string[]): string[
   return relativeFiles.filter(isProgramFile).map((rel) => `${root}/${rel.replace(/\\/g, "/")}`);
 }
 
+/**
+ * The repo root as the file system spells it. Files the program reaches through module resolution
+ * come back realpath'd, so a root given in another spelling — a Windows 8.3 short name such as
+ * `C:\Users\RUNNER~1` on a CI runner, or a symlinked checkout — would put one file under two
+ * names and every repo-relative path outside the root.
+ */
+function canonicalRepoPath(repoPath: string): string {
+  try {
+    return fs.realpathSync.native(repoPath);
+  } catch {
+    return repoPath;
+  }
+}
+
 // ── LRU cache ────────────────────────────────────────────────────────────────
 
 const cache = new Map<string, RepoLanguageService>();
@@ -317,15 +331,16 @@ const cache = new Map<string, RepoLanguageService>();
  * a third repo evicts the least recently used one (its program is disposed).
  */
 export function getRepoLanguageService(input: RepoProgramInput): RepoLanguageService {
+  const repoPath = canonicalRepoPath(input.repoPath);
   const existing = cache.get(input.repoId);
-  if (existing && existing.repoPath === input.repoPath) {
+  if (existing && existing.repoPath === repoPath) {
     cache.delete(input.repoId);
     cache.set(input.repoId, existing);
     if (existing.runKey !== input.runKey) existing.refresh(input.runKey, input.relativeFiles);
     return existing;
   }
   if (existing) dropRepoLanguageService(input.repoId);
-  const created = new RepoLanguageService(input.repoId, input.repoPath, input.runKey, input.relativeFiles);
+  const created = new RepoLanguageService(input.repoId, repoPath, input.runKey, input.relativeFiles);
   cache.set(input.repoId, created);
   while (cache.size > MAX_CACHED_HOSTS) {
     const oldest = cache.keys().next().value as string;
