@@ -229,7 +229,9 @@ async function run(repoId, dbPath) {
       const q = docsQueryOf(s.pattern);
       if (q.length >= 2) {
         try {
-          const r = JSON.parse(handleQueryDocs({ repoId, mode: 'search', query: q.slice(0, 200), limit: 5, includeSymbols: false, includeCodeMentions: false, profile: 'compact' }, ctx).content[0].text);
+          // handleQueryDocs is async since release I1; reading .content synchronously threw, and the catch
+          // below scored every doc-rank pattern as a docs miss.
+          const r = JSON.parse((await handleQueryDocs({ repoId, mode: 'search', query: q.slice(0, 200), limit: 5, includeSymbols: false, includeCodeMentions: false, profile: 'compact' }, ctx)).content[0].text);
           docsHit = (r.results ?? []).some((x) => base.has(String(x.filePath).replace(/\\/g, '/')));
         } catch { docsHit = false; }
       }
