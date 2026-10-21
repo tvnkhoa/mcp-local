@@ -19,6 +19,7 @@
  */
 
 import Database from "better-sqlite3";
+import { computeTestsForDiff, type TestsForDiffOptions } from "../services/analysis/testsForDiff.js";
 import { createRequire } from "node:module";
 import { indexWarn } from "../services/indexing/indexProgress.js";
 
@@ -587,6 +588,11 @@ export class GraphStore {
     reasons: string[];
   }[] {
     return linkTestsToSourceImpl(this.db, repoId, filePath, limit, maxCandidates, minScore, sourceTokensCache);
+  }
+
+  /** R11: tests for the working-tree diff (closure + name links + per-package run plan). */
+  testsForWorkingTreeDiff(opts: Omit<TestsForDiffOptions, "db">): ReturnType<typeof computeTestsForDiff> {
+    return computeTestsForDiff({ ...opts, db: this.db });
   }
 
   getDeadCodeCandidates(

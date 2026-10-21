@@ -2,6 +2,8 @@ import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { resolveResponseProfile } from "../../middleware/responseFormatter.js";
 import { buildCoverageBlock } from "../../middleware/coverage.js";
 import { isTestPath } from "../../services/indexing/fileFilter.js";
+import { readWorkingTreeState, runGit } from "../../services/git/gitHelpers.js";
+import { McpError, ErrorCode } from "@modelcontextprotocol/sdk/types.js";
 import type { HandlerContext } from "./handlerContext.js";
 import { dropTestRows } from "./testFilter.js";
 
@@ -182,12 +184,24 @@ export function handleFindImplementations(
 // ── link_tests_to_source ──────────────────────────────────────────────────────
 
 export function handleLinkTestsToSource(
-  args: { repoId: string; filePath?: string; limit: number; maxCandidates: number; minScore: number; excludeTests: boolean; profile: string },
+  args: {
+    repoId: string;
+    filePath?: string;
+    limit: number;
+    maxCandidates: number;
+    minScore?: number;
+    excludeTests: boolean;
+    forWorkingTreeDiff?: boolean;
+    maxDepth?: number;
+    maxFiles?: number;
+    profile: string;
+  },
   ctx: HandlerContext
 ): CallToolResult {
   const { store } = ctx;
   const profile = resolveResponseProfile(args.profile as Parameters<typeof resolveResponseProfile>[0]);
-  const allLinks = store.linkTestsToSource(args.repoId, args.filePath ?? null, args.limit, args.maxCandidates, args.minScore);
+  if (args.forWorkingTreeDiff === true) return handleTestsForWorkingTreeDiff(args, profile, ctx);
+  const allLinks = store.linkTestsToSource(args.repoId, args.filePath ?? null, args.limit, args.maxCandidates, args.minScore ?? 0.4);
   // MCP-ISSUE-056: filter the SOURCE side only — the test side is the point of this tool. Defensive
   // rather than load-bearing: the candidate `sourceFiles` set inside the analyzer is already built as
   // `!isTestPath(x) && !isNonCodePath(x)`, so this drops nothing today. Kept so the parameter cannot
@@ -208,4 +222,73 @@ export function handleLinkTestsToSource(
     return ctx.asText({ repoId: args.repoId, count: links.length, links: links.map((x) => ({ testFile: x.testFile, sourceFile: x.sourceFile, score: x.score, reasons: x.reasons })), ...emptyHint }, profile);
   }
   return ctx.asText({ repoId: args.repoId, count: links.length, links, ...emptyHint }, profile);
+}
+
+// ── link_tests_to_source(forWorkingTreeDiff: true) — R11, MCP-ISSUE-080 ─────────────────────────
+
+/** Name/score links probed per changed source file; the floor (minScore) is applied by the service. */
+const DIFF_NAME_LINK_LIMIT = 50;
+
+function handleTestsForWorkingTreeDiff(
+  args: { repoId: string; filePath?: string; limit: number; maxCandidates: number; minScore?: number; maxDepth?: number; maxFiles?: number },
+  profile: ReturnType<typeof resolveResponseProfile>,
+  ctx: HandlerContext
+): CallToolResult {
+  const { store } = ctx;
+  if (args.filePath) {
+    throw new McpError(ErrorCode.InvalidParams, "link_tests_to_source: filePath and forWorkingTreeDiff are exclusive — the diff names the files.");
+  }
+  const repo = store.getRepository(args.repoId);
+  if (!repo) {
+    throw new McpError(ErrorCode.InvalidParams, `link_tests_to_source: unknown repoId '${args.repoId}'. Run index_repository first.`);
+  }
+  let dirty: string[];
+  let head: string | null;
+  try {
+    const tree = readWorkingTreeState(repo.repoPath);
+    head = tree.head;
+    // git reports paths from the repository top level; the index is rooted at repoPath, which may be
+    // a subdirectory of it.
+    const prefix = runGit(repo.repoPath, ["rev-parse", "--show-prefix"]).trim().replace(/\\/g, "/");
+    dirty = tree.dirty.filter((p) => !prefix || p.startsWith(prefix)).map((p) => p.slice(prefix.length));
+  } catch {
+    throw new McpError(ErrorCode.InvalidParams, `link_tests_to_source: forWorkingTreeDiff needs a git working tree, and '${repo.repoPath}' is not one.`);
+  }
+
+  const minScore = args.minScore ?? 0.7;
+  const sourceTokensCache = new Map<string, Set<string>>();
+  const result = store.testsForWorkingTreeDiff({
+    repoId: args.repoId,
+    repoPath: repo.repoPath,
+    dirty,
+    maxDepth: args.maxDepth ?? 6,
+    maxFiles: args.maxFiles ?? 2000,
+    minScore,
+    limit: args.limit,
+    linkTests: (sourceFile) => store.linkTestsToSource(args.repoId, sourceFile, DIFF_NAME_LINK_LIMIT, args.maxCandidates, 0, sourceTokensCache)
+  });
+  const hint =
+    dirty.length === 0
+      ? { hint: "the working tree is clean: there is no diff to find tests for. Use change_impact(baseRef) for a committed range." }
+      : result.testCount === 0
+        ? { hint: "no test reaches the changed files through imports, components or workspace packages, and no name link clears minScore — see coverage.knownGaps before concluding they are untested." }
+        : {};
+
+  if (profile === "nano") {
+    return ctx.asText(
+      {
+        repoId: args.repoId,
+        mode: "forWorkingTreeDiff",
+        changedFileCount: result.changedFiles.count,
+        testCount: result.testCount,
+        commands: result.runPlan.commands.map((c) => c.command),
+        excludedCount: result.excluded.length,
+        belowMinScore: result.belowMinScore,
+        coverage: result.coverage.confidence,
+        ...hint
+      },
+      profile
+    );
+  }
+  return ctx.asText({ repoId: args.repoId, mode: "forWorkingTreeDiff", head, ...result, ...hint }, profile);
 }

@@ -118,6 +118,11 @@ try {
   const ci = js(await client.callTool({ name: "change_impact", arguments: { repoId, profile: "compact" } }));
   const touched = (ci?.citationsTouched ?? []).find((t) => posix(t.changedFile) === "test/tools.test.ts");
   assert(touched && touched.citedBy.some((c) => c.patternId === "inv" && posix(c.filePath) === "CLAUDE.md"), "change_impact: a test-file edit lists the invariant that names it", JSON.stringify(ci?.citationsTouched));
+  // Release G (R11, wec.aria acceptance): an edited test is a test to run, not "no linked test", and
+  // every listed link clears the 0.7 floor on its own link score.
+  const self = (ci?.testsToRun ?? []).find((t) => posix(t.testFile) === "test/tools.test.ts");
+  assert(self?.reasons?.includes("changed itself") && !(ci?.residualRisk?.untestedChangedFiles ?? []).some((f) => posix(f) === "test/tools.test.ts"), "change_impact: an edited test file is listed as 'changed itself', not untested", JSON.stringify({ testsToRun: ci?.testsToRun, residualRisk: ci?.residualRisk }));
+  assert((ci?.testsToRun ?? []).every((t) => typeof t.linkScore === "number" && t.linkScore >= 0.7), "change_impact: every row carries linkScore >= 0.7", JSON.stringify(ci?.testsToRun));
   git(repo, "checkout", "--", "test/tools.test.ts");
 
   // A committed config change re-scans UNCHANGED files: NOTES.md is never edited.

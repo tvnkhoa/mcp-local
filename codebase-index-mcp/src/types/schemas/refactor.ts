@@ -42,7 +42,8 @@ export const changeImpactSchema = (MAX_RESULT_LIMIT: number) => z
     includeUntracked: z.boolean().default(true),
     maxFiles: z.number().int().min(1).max(500).default(100),
     impactLimit: z.number().int().min(1).max(MAX_RESULT_LIMIT).default(20),
-    testLinkMinScore: z.number().min(0).max(1).default(0.4),
+    /** Release G (R11): the floor is on the LINK score; below 0.7 a link is name similarity only. */
+    testLinkMinScore: z.number().min(0).max(1).default(0.7),
     testLinkMaxCandidates: z.number().int().min(1).max(20).default(3),
     maxTestsToRun: z.number().int().min(1).max(500).default(50),
     profile: responseProfileSchema.default("compact")

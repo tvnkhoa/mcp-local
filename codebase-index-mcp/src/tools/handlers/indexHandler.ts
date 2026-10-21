@@ -1,4 +1,5 @@
 import { loadCitationConfig } from "../../services/docs/citationConfig.js";
+import { isTestPath } from "../../services/indexing/fileFilter.js";
 import { freshnessStateDir, readDirtyLedger, vanishedDirtyPaths } from "../../middleware/freshness.js";
 import { readWorkingTreeState } from "../../services/git/gitHelpers.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
@@ -516,7 +517,14 @@ export function handleChangeImpact(
   const probed = probeOrder.slice(0, CHANGE_IMPACT_SOURCE_PROBE_CAP);
   const sourceProbeTruncated = probeOrder.length > probed.length;
 
-  const testMap = new Map<string, { testFile: string; coveredSources: Set<string>; score: number; reasons: Set<string> }>();
+  // `score` ranks (source risk × link score); `linkScore` is the link's own strength. Release G (R11,
+  // wec.aria acceptance): a row reading `score: 0.076` was a 0.76 link on a 10%-risk file, and read as
+  // a 0.076 link. Both are reported, and the floor applies to the link.
+  const testMap = new Map<string, { testFile: string; coveredSources: Set<string>; score: number; linkScore: number; reasons: Set<string> }>();
+  // A changed test file is itself a test to run, never "no linked test".
+  for (const changed of core.changedFiles) {
+    if (isTestPath(changed)) testMap.set(changed, { testFile: changed, coveredSources: new Set([changed]), score: 1, linkScore: 1, reasons: new Set(["changed itself"]) });
+  }
   const coveredSources = new Set<string>();
   // Shared across every probe so each source file's distinctive tokens (name-affinity, ISSUE-017)
   // are computed at most once for the whole request, not re-tokenized over the full source set on
@@ -535,15 +543,18 @@ export function handleChangeImpact(
       if (existing) {
         existing.coveredSources.add(link.sourceFile);
         existing.score = Math.max(existing.score, weighted);
+        existing.linkScore = Math.max(existing.linkScore, link.score);
         for (const r of link.reasons ?? []) existing.reasons.add(r);
       } else {
-        testMap.set(link.testFile, { testFile: link.testFile, coveredSources: new Set([link.sourceFile]), score: weighted, reasons: new Set(link.reasons ?? []) });
+        testMap.set(link.testFile, { testFile: link.testFile, coveredSources: new Set([link.sourceFile]), score: weighted, linkScore: link.score, reasons: new Set(link.reasons ?? []) });
       }
     }
   }
+  for (const changed of core.changedFiles) if (testMap.get(changed)?.reasons.has("changed itself")) coveredSources.add(changed);
 
+  const round3 = (n: number): number => Math.round(n * 1000) / 1000;
   const testsToRun = [...testMap.values()]
-    .map((t) => ({ testFile: t.testFile, coveredSources: [...t.coveredSources], score: Math.round(t.score * 1000) / 1000, reasons: [...t.reasons] }))
+    .map((t) => ({ testFile: t.testFile, coveredSources: [...t.coveredSources], score: round3(t.score), linkScore: round3(t.linkScore), reasons: [...t.reasons] }))
     .sort((a, b) => b.score - a.score || b.coveredSources.length - a.coveredSources.length || a.testFile.localeCompare(b.testFile))
     .slice(0, args.maxTestsToRun);
 
@@ -607,7 +618,7 @@ export function handleChangeImpact(
       {
         repoId: args.repoId,
         changedFileCount: core.totalChangedFileCount, changedFilesReturned: core.changedFiles.length, changedFilesDroppedByLimit: Math.max(0, core.totalChangedFileCount - core.changedFiles.length),
-        topTestsToRun: testsToRun.slice(0, 10).map((t) => ({ testFile: t.testFile, score: t.score })),
+        topTestsToRun: testsToRun.slice(0, 10).map((t) => ({ testFile: t.testFile, score: t.score, linkScore: t.linkScore })),
         riskSummary,
         residualRisk: residualRisk.note,
         coverage: coverage.confidence,
@@ -627,7 +638,7 @@ export function handleChangeImpact(
         changedFileCount: core.totalChangedFileCount, changedFilesReturned: core.changedFiles.length, changedFilesDroppedByLimit: Math.max(0, core.totalChangedFileCount - core.changedFiles.length),
         changedFiles: core.changedFiles,
         riskSummary,
-        testsToRun: testsToRun.map((t) => ({ testFile: t.testFile, coveredSources: t.coveredSources, score: t.score })),
+        testsToRun: testsToRun.map((t) => ({ testFile: t.testFile, coveredSources: t.coveredSources, score: t.score, linkScore: t.linkScore, reasons: t.reasons })),
         testCoverage,
         residualRisk,
         coverage,

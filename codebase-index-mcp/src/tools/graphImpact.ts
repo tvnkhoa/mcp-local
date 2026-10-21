@@ -228,7 +228,10 @@ export function buildGraphImpactTools(deps: CodebaseIndexDeps): AnyToolDefinitio
 
   const linkTestsToSource = defineTool({
     name: "link_tests_to_source",
-    description: "Link tests to likely source files using deterministic naming heuristics plus IMPORTS/CALLS tracing. excludeTests=true drops test-path results entirely.",
+    description:
+      "Link tests to likely source files using deterministic naming heuristics plus IMPORTS/CALLS tracing. excludeTests=true drops test-path results entirely. " +
+      "forWorkingTreeDiff=true answers 'which tests does my uncommitted change need': the dirty files (staged, unstaged, untracked) → reverse closure over IMPORTS, USES_COMPONENT and workspace-package imports (maxDepth, maxFiles; truncation reported) → the tests reached, every changed test file itself, and name links with score >= minScore (default 0.7 in this mode; lower ones are dropped and counted in belowMinScore). Each test carries `why`. " +
+      "Per package it reads the nearest vitest/vite config lexically (include, exclude, root, test.projects; never executed — an unreadable value is named and the package dir is used) and emits one command, e.g. `corepack pnpm --filter <pkg> exec vitest run <files>`; tests no include admits are listed in `excluded` with the reason. A node:test file gets runner 'unknown' and a `node --test` hint. Nothing is executed.",
     input: schemas.linkTestsToSourceSchema(limits.maxResultLimit),
     inputSchema: {
       type: "object",
@@ -239,8 +242,11 @@ export function buildGraphImpactTools(deps: CodebaseIndexDeps): AnyToolDefinitio
         filePath: { type: "string" },
         limit: { type: "integer", minimum: 1, maximum: limits.maxResultLimit },
         maxCandidates: { type: "integer", minimum: 1, maximum: 20 },
-        minScore: { type: "number", minimum: 0, maximum: 1 },
+        minScore: { type: "number", minimum: 0, maximum: 1, description: "Score floor for name/score links. Default 0.4; 0.7 with forWorkingTreeDiff." },
         excludeTests: { type: "boolean" },
+        forWorkingTreeDiff: { type: "boolean", description: "Tests for the working-tree diff plus a vitest command per package. Exclusive with filePath." },
+        maxDepth: { type: "integer", minimum: 1, maximum: 12, description: "forWorkingTreeDiff: reverse-import hops from a changed file (default 6)." },
+        maxFiles: { type: "integer", minimum: 1, maximum: 20000, description: "forWorkingTreeDiff: files the closure may reach before it stops and reports truncation (default 2000)." },
         profile: PROFILE_PROP
       }
     },
