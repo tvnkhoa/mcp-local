@@ -95,10 +95,18 @@ const QUERY_REFRESH_BUDGET_MS = clamp(numberFromEnv("CODEBASE_INDEX_QUERY_REFRES
  * R3 exact: the TypeScript LanguageService lane of find_field_accesses (lazy; TS/JS fields only).
  * Release I1: answered in a worker thread; one call waits for it at most the R1 query budget.
  */
-const TS_LS = { ...tsLanguageServiceConfigFromEnv(), waitMs: QUERY_REFRESH_BUDGET_MS };
 const SERVER_VERSION = resolveServerVersion(MODULE_DIR);
 
 const toolContextStorage = new AsyncLocalStorage<ToolRequestContext>();
+// One budget per call: the worker waits for what the freshness gate left, never a second full budget.
+const TS_LS = {
+  ...tsLanguageServiceConfigFromEnv(),
+  waitMs: QUERY_REFRESH_BUDGET_MS,
+  remainingWaitMs: (): number => {
+    const started = toolContextStorage.getStore()?.startedAt;
+    return Math.max(250, QUERY_REFRESH_BUDGET_MS - (started === undefined ? 0 : Date.now() - started));
+  }
+};
 
 assertNoLlmRuntimePolicy(LLM_ENABLED);
 assertRefactorApprovalPolicy(REFACTOR_STRICT_APPROVAL, REFACTOR_APPROVAL_SECRET);

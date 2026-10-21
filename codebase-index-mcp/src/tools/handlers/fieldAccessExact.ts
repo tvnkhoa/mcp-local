@@ -55,7 +55,7 @@ function askWorker(cfg: TsLsConfig, input: { repoId: string; repoPath: string; r
     field,
     pick,
     caps: { budgetMs: cfg.budgetMs, maxRssMb: cfg.maxRssMb },
-    waitMs: cfg.waitMs ?? cfg.budgetMs
+    waitMs: cfg.remainingWaitMs?.() ?? cfg.waitMs ?? cfg.budgetMs
   });
 }
 

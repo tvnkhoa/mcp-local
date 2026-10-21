@@ -25,6 +25,12 @@ export interface HandlerConstants {
     maxRssMb: number;
     /** Release I1: how long one call waits for the worker before answering `gap` (building). Defaults to budgetMs. */
     waitMs?: number;
+    /**
+     * What is left of the call's wait budget once the R1 freshness gate has taken its share. On a dirty
+     * tree the gate can spend the whole budget first; without this the worker wait was added on top
+     * (live release I: a cold field call answered at 11.5 s against a 5 s budget).
+     */
+    remainingWaitMs?: () => number;
   };
   LLM_ENABLED: boolean;
   REFACTOR_STRICT_APPROVAL: boolean;
