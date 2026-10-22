@@ -171,7 +171,10 @@ export function isDecisiveCurrent(current: SqlDefinitionSite, sites: readonly Sq
     const o = rankOf(site);
     // Release L3: the EF model (tier 4) against a `.sql` site is two lanes neither of which can prove the other
     // stale — never decisive; two snapshots (two DbContexts) mapping one table tie, and are not decisive either.
+    // Release M2: against an EF MIGRATION (a `.cs` site) it is one lane — the snapshot is the model after every
+    // migration, so it wins decisively.
     if (c[0] !== o[0]) {
+      if (c[0] === 4 && /\.cs$/i.test(site.filePath)) continue;
       if (c[0] === 4 || o[0] === 4) return false;
       continue;
     }

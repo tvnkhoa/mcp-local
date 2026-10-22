@@ -56,7 +56,10 @@ test("sqlDefinitionRank (M2): an EF migration's Up() is tier 3 by timestamp, its
   assert.equal(pickCurrentSqlDefinition([earlier, rollback, later])!.symbolId, "L");
   assert.equal(isDecisiveCurrent(later, [earlier, rollback, later]), true, "a later migration timestamp is decisive");
   const snapshot = site("S", "src/Migrations/AppDbContextModelSnapshot.cs", 400, "conversations — table (9 columns) [EF AppDbContext: App.Conversation]");
-  assert.equal(pickCurrentSqlDefinition([snapshot, site("M", mig, 9, "conversations — table (2 columns)")])!.symbolId, "S", "the snapshot stays current for a name it maps");
+  const migrationColumn = site("M", mig, 9, "conversations — table (2 columns)");
+  assert.equal(pickCurrentSqlDefinition([snapshot, migrationColumn])!.symbolId, "S", "the snapshot stays current for a name it maps");
+  assert.equal(isDecisiveCurrent(snapshot, [snapshot, migrationColumn]), true, "snapshot over a migration: one lane, decisive (a doc mention drops the migration site)");
+  assert.equal(isDecisiveCurrent(snapshot, [snapshot, site("Q", "db/migrations/0004-x.sql", 3)]), false, "snapshot over a .sql file: two lanes, never decisive (L3)");
 });
 
 test("sqlNameStates + getSqlDefinitionInfo: a dropped table and its columns, a re-create, an index on a dropped table", () => {
