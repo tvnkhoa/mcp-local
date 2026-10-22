@@ -152,14 +152,22 @@ function readEntityBlock(statements: Parser.SyntaxNode[], param: string, entity:
     const row = head.node.startPosition.row;
     const target = ownerTable.owned;
     if (chain.root !== param) {
-      // `NpgsqlIndexBuilderExtensions.HasMethod(b.HasIndex("X"), "gin")`: the index method of an index the
-      // block already declared (same columns). Any other static call on the builder is a gap.
+      // A provider extension over something the block already declared annotates it:
+      // `NpgsqlIndexBuilderExtensions.HasMethod(b.HasIndex("X"), "gin")` is the index method (kept);
+      // `HasOperators`, SQL Server `IsClustered` / `IncludeProperties` and
+      // `SqlServerPropertyBuilderExtensions.UseIdentityColumn(b.Property<int>("Id"))` add nothing the graph models,
+      // and are not gaps either — the index or column itself is modelled (wec.be: 322 identity calls). A provider
+      // call over something NOT declared, or any other static call on the builder, is a gap.
       const inner = head.args[0]?.type === "invocation_expression" ? flattenChain(head.args[0]) : null;
-      if (inner && inner.root === param && inner.calls[0]?.name === "HasIndex" && /IndexBuilderExtensions$/.test(chain.root)) {
-        const cols = inner.calls[0].args.map((a) => stringArg(a)).filter((x): x is string => x !== null).join("|");
+      const innerHead = inner && inner.root === param ? inner.calls[0] : undefined;
+      if (innerHead?.name === "HasIndex" && /IndexBuilderExtensions$/.test(chain.root)) {
+        const cols = innerHead.args.map((a) => stringArg(a)).filter((x): x is string => x !== null).join("|");
         const idx = entity.indexes.find((i) => i.columns.join("|") === cols);
-        if (head.name === "HasMethod" && idx) idx.method = stringArg(head.args[1]);
-        else if (head.name !== "HasOperators" || !idx) entity.gaps.push({ construct: `${chain.root}.${head.name}`, row });
+        if (!idx) entity.gaps.push({ construct: `${chain.root}.${head.name}`, row });
+        else if (head.name === "HasMethod") idx.method = stringArg(head.args[1]);
+      } else if ((innerHead?.name === "Property" || innerHead?.name === "PrimitiveCollection") && /PropertyBuilderExtensions$/.test(chain.root)) {
+        const prop = stringArg(innerHead.args[0]);
+        if (!(target ? target.columns : entity.columns).some((c) => c.property === prop)) entity.gaps.push({ construct: `${chain.root}.${head.name}`, row });
       } else if (statement.text.includes(`${param}.`)) {
         entity.gaps.push({ construct: `${chain.root}.${head.name}`, row });
       }

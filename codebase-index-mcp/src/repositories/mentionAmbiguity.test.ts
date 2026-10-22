@@ -218,3 +218,25 @@ test("release L2: stale puts resolved rows first and folds ambiguous rows into o
   assert.equal(paged.rows.length, 1, "limit pages resolved rows");
   assert.equal(paged.groups!.length, 2, "groups are not paged by limit");
 });
+
+test("release L3: an EF snapshot symbol yields to its code twin — the mapped property, or the DbSet of the entity", () => {
+  const conn = db();
+  const snap = "Migrations/AppDbContextModelSnapshot.cs";
+  sym(conn, "prop", "TotalMs", "property", "Model/Run.cs");
+  sym(conn, "col", "TotalMs", "sql_column", snap);
+  sym(conn, "cls", "Package", "class", "Model/Package.cs");
+  sym(conn, "table", "Packages", "sql_table", snap);
+  sym(conn, "lonely", "audit_rows", "sql_table", snap);
+  conn.prepare(`insert into symbols (repo_id, symbol_id, file_path, name, kind, line, signature) values ('r', 'dbset', 'Data/AppDbContext.cs', 'Packages', 'property', 9, 'public DbSet<Package> Packages { get; set; }')`).run();
+  const map = (from: string, to: string): void => {
+    conn.prepare(`insert into edges (repo_id, from_id, to_id, type, confidence, reason) values ('r', ?, ?, 'EF_MAPS', 0.95, 'ef_resolved x')`).run(from, to);
+  };
+  map("col", "prop");
+  map("table", "cls");
+  doc(conn, "d1", "a doc");
+  for (const t of ["TotalMs", "Packages", "audit_rows"]) mention(conn, "d1", t);
+  resolveMentionsImpl(conn, "r");
+  assert.equal(row(conn, "d1", "TotalMs")?.symbolId, "prop", "the column maps to this property: one concept, not a tie");
+  assert.equal(row(conn, "d1", "Packages")?.symbolId, "dbset", "the table's entity is Package, and DbSet<Package> Packages is its twin");
+  assert.equal(row(conn, "d1", "audit_rows")?.symbolId, "lonely", "an EF table with no code twin of that name binds itself");
+});

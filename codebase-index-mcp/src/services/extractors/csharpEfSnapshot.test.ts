@@ -29,6 +29,8 @@ namespace App.Infrastructure.Migrations
                     b.HasIndex("TenantId", "Channel").IsUnique().HasFilter("tenant_id IS NOT NULL").HasDatabaseName("ix_conv_tenant_channel");
                     b.HasIndex("Channel").HasDatabaseName("ix_conv_channel_gin");
                     NpgsqlIndexBuilderExtensions.HasMethod(b.HasIndex("Channel"), "gin");
+                    SqlServerPropertyBuilderExtensions.UseIdentityColumn(b.Property<Guid>("Id"));
+                    SqlServerPropertyBuilderExtensions.UseIdentityColumn(b.Property<int>("Undeclared"));
                     b.ToTable("conversations", null, t =>
                         {
                             t.HasCheckConstraint("ck_conv_channel", "channel IN ('sms','email')");
@@ -96,7 +98,7 @@ test("release L3: the snapshot's tables, columns (owned ones join their table), 
   const maps = out.edges.filter((e) => e.type === "EF_MAPS").map((e) => e.toId);
   assert.ok(maps.includes("efentity:App.Domain.Conversation") && maps.includes("efprop:App.Domain.Assignment#HandledBy"));
   // Not-seen constructs are gaps, never silent drops.
-  assert.deepEqual(out.symbols.filter((s) => s.kind === "sql_gap").map((s) => s.name).sort(), ["gap: HasDiscriminator App.Domain.Note", "gap: OwnsMany App.Domain.Conversation"]);
+  assert.deepEqual(out.symbols.filter((s) => s.kind === "sql_gap").map((s) => s.name).sort(), ["gap: HasDiscriminator App.Domain.Note", "gap: OwnsMany App.Domain.Conversation", "gap: SqlServerPropertyBuilderExtensions.UseIdentityColumn App.Domain.Conversation"]);
   assert.ok(out.edges.every((e) => e.type !== "EF_MAPS" || e.confidence === 0.5), "tokens until the post-phase binds them");
 });
 

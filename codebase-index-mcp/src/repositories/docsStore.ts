@@ -335,7 +335,31 @@ export function resolveMentionsImpl(db: Database.Database, repoId: string, scope
       .map((s) => ({ symbolId: s.symbol_id, kind: s.kind, name: s.name, signature: s.signature, filePath: s.file_path, line: s.line }))
   );
 
-  type Candidate = { id: string; rank: number; test: boolean; supersededBy?: string };
+  // Release L3 (MCP-ISSUE-096): an EF snapshot symbol and the code it maps to are one concept. A column's twin is the
+  // property its EF_MAPS edge binds to; a table's twins are its entity class and every `DbSet<Entity>` property. When
+  // a twin is a candidate too, the EF symbol is dropped — otherwise each such name turned ambiguous (property vs
+  // column, rank "other" both): 105 bound mentions on api-testing-studio, 10 on wec.be.
+  const efTwins = new Map<string, string[]>();
+  {
+    const maps = db
+      .prepare(`select e.from_id as fromId, e.to_id as toId, t.name as toName from edges e join symbols t on t.repo_id = e.repo_id and t.symbol_id = e.to_id where e.repo_id = ? and e.type = 'EF_MAPS' and e.confidence >= 0.9`)
+      .all(repoId) as { fromId: string; toId: string; toName: string }[];
+    if (maps.length > 0) {
+      const dbSets = new Map<string, string[]>();
+      for (const sym of allSymbols) {
+        if (sym.kind !== "property" || !sym.signature) continue;
+        const m = /\bDbSet<\s*([\w.]+)\s*>/.exec(sym.signature);
+        if (!m) continue;
+        const entity = m[1]!.slice(m[1]!.lastIndexOf(".") + 1);
+        const list = dbSets.get(entity);
+        if (list) list.push(sym.symbol_id);
+        else dbSets.set(entity, [sym.symbol_id]);
+      }
+      for (const m of maps) efTwins.set(m.fromId, [m.toId, ...(dbSets.get(m.toName) ?? [])]);
+    }
+  }
+
+  type Candidate = { id: string; rank: number; test: boolean; supersededBy?: string; efTwins?: string[] };
   const add = (map: Map<string, Candidate[]>, key: string, c: Candidate): void => {
     const list = map.get(key);
     if (!list) map.set(key, [c]);
@@ -355,7 +379,8 @@ export function resolveMentionsImpl(db: Database.Database, repoId: string, scope
 
   for (const sym of allSymbols) {
     const superseded = supersededBy.get(sym.symbol_id);
-    const candidate: Candidate = { id: sym.symbol_id, rank: kindRank(sym.kind), test: isTestPath(sym.file_path), ...(superseded && { supersededBy: superseded }) };
+    const twins = efTwins.get(sym.symbol_id);
+    const candidate: Candidate = { id: sym.symbol_id, rank: kindRank(sym.kind), test: isTestPath(sym.file_path), ...(superseded && { supersededBy: superseded }), ...(twins && { efTwins: twins }) };
     add(byName, sym.name, candidate);
     const nameLower = sym.name.toLowerCase();
     add(byLower, nameLower, candidate);
@@ -394,6 +419,9 @@ export function resolveMentionsImpl(db: Database.Database, repoId: string, scope
     // stays, so the pool never empties; only superseded sites matching keeps them all, as the all-test rule does.
     const inPool = new Set(pool.map((c) => c.id));
     pool = pool.filter((c) => !(c.supersededBy && inPool.has(c.supersededBy)));
+    // Release L3: an EF symbol whose code twin is a candidate (see `efTwins`) — the twin stays, so the pool never empties.
+    const afterSuperseded = new Set(pool.map((c) => c.id));
+    pool = pool.filter((c) => !(c.efTwins && c.efTwins.some((t) => afterSuperseded.has(t))));
     if (ranked) {
       const best = Math.min(...pool.map((c) => c.rank));
       pool = pool.filter((c) => c.rank === best);
