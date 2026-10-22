@@ -3,7 +3,7 @@ import test from "node:test";
 import Database from "better-sqlite3";
 
 import { initGraphSchema, runGraphMigrations } from "./schema.js";
-import { recordRun, getLatestRun, markRunTrigger } from "./runStore.js";
+import { recordRun, getLatestRun, markRunTrigger, markRunTreeDirty, getLatestWorkRunTreeDirty, getLatestWorkRunMode, INDEX_RUNS_KEPT_PER_REPO } from "./runStore.js";
 import type { IndexRunSummary, SkipBucket } from "../types/index.js";
 
 /**
@@ -153,4 +153,23 @@ test("a scoped run's scope round-trips; a full run has none (release J)", () => 
   const scope = "scoped: 4 changed, 12 dependent file(s) re-extracted";
   recordRun(conn, summary({ runId: "dirty", mode: "dirty", scope, finishedAt: "2026-08-04T00:00:20.000Z" }));
   assert.equal(getLatestRun(conn, "r")?.scope, scope);
+});
+
+test("release M: index_runs keeps the latest 200 rows per repo, and always the latest WORK run behind any number of skips", () => {
+  const conn = db();
+  const at = (i: number) => new Date(Date.UTC(2026, 9, 1) + i * 60_000).toISOString();
+  // One dirty-tree full run, then many fast-skips: the R1 gate must still see the full run's tree_dirty.
+  recordRun(conn, summary({ runId: "work", mode: "full", startedAt: at(0), finishedAt: at(0), indexVersion: "v14" }));
+  markRunTreeDirty(conn, "work");
+  for (let i = 1; i <= INDEX_RUNS_KEPT_PER_REPO + 50; i += 1) {
+    recordRun(conn, summary({ runId: `skip-${String(i)}`, mode: "incremental", startedAt: at(i), finishedAt: at(i), indexVersion: "v14", skipReason: "head unchanged" } as Partial<IndexRunSummary>));
+  }
+  recordRun(conn, summary({ runId: "other-repo", repoId: "o", startedAt: at(0), finishedAt: at(0) }));
+  const count = (repo: string) => (conn.prepare("select count(*) as n from index_runs where repo_id = ?").get(repo) as { n: number }).n;
+  assert.equal(count("r"), INDEX_RUNS_KEPT_PER_REPO + 1, "the cap, plus the latest work run kept behind it");
+  assert.equal(count("o"), 1, "per repo");
+  assert.equal(getLatestRun(conn, "r")?.runId, `skip-${String(INDEX_RUNS_KEPT_PER_REPO + 50)}`, "the F guard's row (latest) is untouched");
+  assert.equal(getLatestWorkRunTreeDirty(conn, "r"), true, "the skip gate still reads the dirty full run");
+  assert.equal(getLatestWorkRunMode(conn, "r"), "full");
+  assert.equal((conn.prepare("select count(*) as n from index_runs where run_id = 'skip-1'").get() as { n: number }).n, 0, "the oldest skips went");
 });

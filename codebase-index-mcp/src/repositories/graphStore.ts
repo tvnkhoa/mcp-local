@@ -241,6 +241,9 @@ import {
 // parseRiskFlags → refactorStore.ts
 // createEmptyResolutionStats → edgeResolver.ts
 
+/** Release M: `journal_size_limit` of every store connection (server thread and refresh worker) — 64 MB. */
+export const WAL_SIZE_LIMIT_BYTES = 64 * 1024 * 1024;
+
 export class GraphStore {
   private readonly db: Database.Database;
   private readonly runInTransactionInternal: (fn: () => void) => void;
@@ -265,6 +268,10 @@ export class GraphStore {
     this.db.pragma("page_size = 4096"); // Standard 4KB page size
     this.db.pragma("busy_timeout = 30000"); // 30s timeout — handles checkpoint contention on large repos
     this.db.pragma(`wal_autocheckpoint = ${String(this.autoCheckpointPages)}`); // Raise WAL checkpoint threshold (default 1000 pages)
+    // Release M: bound the WAL file at rest. Scoped runs checkpoint PASSIVE and the server thread does not
+    // auto-checkpoint (release J), so nothing truncated the file: it stayed at its peak (88 MB on the central DB).
+    // With a limit, SQLite truncates the file to it whenever a completed checkpoint lets the WAL restart.
+    this.db.pragma(`journal_size_limit = ${String(WAL_SIZE_LIMIT_BYTES)}`);
     // Increase mmap size to reduce I/O contention during large batch writes
     this.db.pragma("mmap_size = 268435456"); // 256MB mmap
     this.runInTransactionInternal = this.db.transaction((fn: () => void) => fn());

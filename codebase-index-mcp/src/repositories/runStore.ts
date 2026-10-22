@@ -123,6 +123,25 @@ export function recordRun(db: Database.Database, summary: IndexRunSummary & { cr
       summary.skippedByReason && summary.skippedByReason.length > 0 ? JSON.stringify(summary.skippedByReason) : null,
       summary.scope ?? null
     );
+  pruneRuns(db, summary.repoId);
+}
+
+/** Release M: run rows kept per repo. Every reader of `index_runs` reads the latest row (or the latest WORK row). */
+export const INDEX_RUNS_KEPT_PER_REPO = 200;
+
+/**
+ * Release M: `index_runs` grew without bound (api-testing-studio 307 rows, CommHub 237). Keep the latest
+ * {@link INDEX_RUNS_KEPT_PER_REPO} per repo — and always the latest run that did WORK (`skip_reason is null`),
+ * which the R1 skip gate reads (`getLatestWorkRunTreeDirty`, `getLatestWorkRunMode`) even behind 200 fast-skips.
+ * Same order as `getLatestRun`, so the cap can never remove what a reader would have picked.
+ */
+function pruneRuns(db: Database.Database, repoId: string): void {
+  db.prepare(
+    `delete from index_runs
+     where repo_id = ?
+       and rowid in (select rowid from index_runs where repo_id = ? order by finished_at desc, started_at desc, rowid desc limit -1 offset ?)
+       and rowid <> coalesce((select rowid from index_runs where repo_id = ? and skip_reason is null order by finished_at desc, started_at desc, rowid desc limit 1), -1)`
+  ).run(repoId, repoId, INDEX_RUNS_KEPT_PER_REPO, repoId);
 }
 
 export function getLatestRun(db: Database.Database, repoId: string): IndexRunSummary | null {
