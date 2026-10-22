@@ -146,8 +146,10 @@ async function main() {
   console.log("COMPACT_CONTEXT_OK:", { withCtx: ctxCompact.matches[0]?.beforeContext?.length ?? 0 });
 
   // 7. ISSUE-028: filePathPrefix array (OR-semantics) returns hits from multiple subtrees.
+  // A rare token present in both: `import` filled the 500-row page from scripts/ alone (paths sort
+  // scripts/ before src/) once scripts/ passed 500 import lines — release K's new harness tipped it.
   const multiPrefix = readJsonTextContent(
-    await client.callTool({ name: "search_regex", arguments: { repoId, pattern: "import", filePathPrefix: ["src/", "scripts/"], limit: 500 } })
+    await client.callTool({ name: "search_regex", arguments: { repoId, pattern: "searchRegexImpl", filePathPrefix: ["src/", "scripts/"], limit: 500 } })
   ).json;
   const fromSrc = multiPrefix.matches.some((m) => m.filePath.startsWith("src/"));
   const fromScripts = multiPrefix.matches.some((m) => m.filePath.startsWith("scripts/"));
