@@ -50,6 +50,11 @@ export function resolveBaseClassDispatch(db: Database.Database, repoId: string):
   // subclasses would otherwise multiply every call on it.
   const MAX_SUBCLASS_DISPATCH_FANOUT = 10;
 
+  // Release L (MCP-ISSUE-094): rebuilt whole every run. It only ever inserted, so on a scoped run the edges of
+  // callers outside the run's dedup scope accumulated duplicates a full run does not have (15 on one
+  // wec.communication-hub scenario).
+  db.prepare(`delete from edges where repo_id = ? and type = 'CALLS' and reason = 'base-class-dispatch'`).run(repoId);
+
   const virtualCalls = db
     .prepare(
       // The `abstract `/`virtual ` test is on the stored signature. A modifier is always followed by a
@@ -125,8 +130,12 @@ export function resolveBaseClassDispatch(db: Database.Database, repoId: string):
   }
   if (overrideByFileAndName.size === 0) return 0;
   const insertStmt = db.prepare(
-    `insert or ignore into edges (repo_id, from_id, to_id, type, confidence, reason)
-     values (?, ?, ?, 'CALLS', 0.7, 'base-class-dispatch')`
+    // A caller that already has a CALLS edge to the override keeps it (a direct resolution wins), so the result
+    // does not depend on which rows a later dedup pass looks at. `edges` has no unique key: `insert or ignore`
+    // ignored nothing.
+    `insert into edges (repo_id, from_id, to_id, type, confidence, reason)
+     select ?, ?, ?, 'CALLS', 0.7, 'base-class-dispatch'
+     where not exists (select 1 from edges where repo_id = ? and from_id = ? and to_id = ? and type = 'CALLS')`
   );
 
   let count = 0;
@@ -139,8 +148,7 @@ export function resolveBaseClassDispatch(db: Database.Database, repoId: string):
         const override = { symbolId: overrideId };
         // The base's own edge is left untouched: the fan-out ADDS reachability rather than moving it.
         // Moving it would trade one false "dead" for another.
-        insertStmt.run(repoId, call.fromId, override.symbolId);
-        count += 1;
+        count += insertStmt.run(repoId, call.fromId, override.symbolId, repoId, call.fromId, override.symbolId).changes;
       }
     }
   });

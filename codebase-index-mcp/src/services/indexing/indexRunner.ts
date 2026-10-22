@@ -486,6 +486,10 @@ export function createIndexRunner(options: IndexRunnerOptions): RunIndexAndResol
     const implementsStart = Date.now();
     try { store.resolveImplementsEdges(repoId); } catch { /* non-fatal */ }
     try { store.resolveExtendsEdges(repoId); } catch { /* non-fatal */ }
+    // Release L (MCP-ISSUE-094): the interface-dispatch fan-out, rebuilt whole from the resolved CALLS and
+    // IMPLEMENTS edges — so a scoped run lands on the set a full run does. Before base-class dispatch, which
+    // reads it.
+    try { callResolveStats.dispatchInserted = store.rebuildInterfaceDispatchEdges(repoId); } catch { /* non-fatal */ }
     // MCP-ISSUE-037: must come AFTER call resolution above, because it reads final CALLS edges. The base
     // of a template-method class calls its own abstract member in the same file, so extraction already
     // resolved that edge and it never passes through the unresolved-token lane.

@@ -47,6 +47,7 @@ import {
   resolveImportEdges as resolveImportEdgesImpl,
   findImportersOfRemovedPath as findImportersOfRemovedPathImpl,
   resolveCallEdgesBatch as resolveCallEdgesBatchImpl,
+  rebuildInterfaceDispatchEdges as rebuildInterfaceDispatchEdgesImpl,
   buildCallResolutionContext as buildCallResolutionContextImpl,
   resolveTypeRefEdges as resolveTypeRefEdgesImpl,
   resolvePropertyEdges as resolvePropertyEdgesImpl,
@@ -969,6 +970,11 @@ export class GraphStore {
    */
   resolveExtendsEdges(repoId: string): number {
     return resolveExtendsEdgesImpl(this.db, repoId);
+  }
+
+  /** Release L (MCP-ISSUE-094): rebuild the interface-dispatch fan-out whole, after IMPLEMENTS resolution. */
+  rebuildInterfaceDispatchEdges(repoId: string): number {
+    return rebuildInterfaceDispatchEdgesImpl(this.db, repoId);
   }
 
   resolveBaseClassDispatch(repoId: string): number {

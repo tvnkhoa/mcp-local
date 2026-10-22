@@ -148,6 +148,8 @@ function runResolutionAndQuery() {
   store.resolveImplementsEdges(repoId);
   const ctx = store.buildCallResolutionContext(repoId);
   while (store.resolveCallEdgesBatch(repoId, ctx, 5000) > 0) { /* drain */ }
+  // Release L (MCP-ISSUE-094): the fan-out is a post-pass, rebuilt whole after IMPLEMENTS resolution.
+  store.rebuildInterfaceDispatchEdges(repoId);
 
   const implMethod = impl.symbols.find((s) => s.kind === "method" && s.name === "PublishConversationNotificationAsync");
   const implClass = impl.symbols.find((s) => s.kind === "class" && s.name === "NotificationPublisher");

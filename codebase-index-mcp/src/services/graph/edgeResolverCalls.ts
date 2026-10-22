@@ -49,10 +49,9 @@ export interface CallResolutionContext {
   interfaceByName: Map<string, { symbolId: string; filePath: string }>;
   /** ISSUE-022: symbolIds của mọi interface — detect bare-name match trúng interface method để fan-out. */
   interfaceIdSet: Set<string>;
-  implementorFilesByIfaceId: Map<string, string[]>;
   /**
    * MCP-ISSUE-037: subclass files per base-class symbolId — the class-inheritance counterpart of
-   * `implementorFilesByIfaceId`. Populated from resolved `EXTENDS` edges.
+   * the implementor map `rebuildInterfaceDispatchEdges` builds. Populated from resolved `EXTENDS` edges.
    */
   subclassFilesByBaseId: Map<string, string[]>;
   /**
@@ -66,7 +65,6 @@ export interface CallResolutionContext {
    */
   virtualMethodIds: Set<string>;
   updateStmt: Statement;
-  insertDispatchStmt: Statement;
   /** All unresolved rows pre-fetched once — sliced per batch in memory */
   unresolvedRows: { fromId: string; toId: string; fromFile: string }[];
   /** Current offset into unresolvedRows for batching */
@@ -97,27 +95,6 @@ export function buildCallResolutionContext(db: Database.Database, repoId: string
   for (const r of interfaceRows) {
     if (!interfaceByName.has(r.name)) interfaceByName.set(r.name, { symbolId: r.symbolId, filePath: r.filePath });
     interfaceIdSet.add(r.symbolId);
-  }
-
-  // record / record struct are class-like implementors too (ISSUE-013/ISSUE-022).
-  const implEdgeRows = db
-    .prepare(
-      // This feeds `implementorFilesByIfaceId`, which is capped by MAX_INTERFACE_DISPATCH_FANOUT at the
-      // point of use. Unordered, an interface with more implementors than the cap contributed a
-      // different arbitrary subset each run — the largest single source of run-to-run edge drift, at 99
-      // of the 120 edges that appeared in one run and not the next.
-      `select distinct e.to_id as ifaceId, s.file_path as filePath
-       from edges e
-       inner join symbols s on s.repo_id = e.repo_id and s.symbol_id = e.from_id
-       where e.repo_id = ? and e.type = 'IMPLEMENTS' and s.kind in ('class', 'struct', 'record', 'record struct')
-       order by e.to_id, s.file_path`
-    )
-    .all(repoId) as { ifaceId: string; filePath: string }[];
-  const implementorFilesByIfaceId = new Map<string, string[]>();
-  for (const r of implEdgeRows) {
-    const list = implementorFilesByIfaceId.get(r.ifaceId) ?? [];
-    list.push(r.filePath);
-    implementorFilesByIfaceId.set(r.ifaceId, list);
   }
 
   // MCP-ISSUE-037: the class-inheritance mirror of the two structures above. `EXTENDS` is resolved before
@@ -164,17 +141,6 @@ export function buildCallResolutionContext(db: Database.Database, repoId: string
   const updateStmt = db.prepare(
     `update edges set to_id = ?, confidence = ?, reason = ? where repo_id = ? and from_id = ? and to_id = ?`
   );
-  const insertDispatchStmt = db.prepare(
-    `
-    insert into edges (repo_id, from_id, to_id, type, confidence, reason)
-    select ?, ?, ?, 'CALLS', ?, ?
-    where not exists (
-      select 1 from edges
-      where repo_id = ? and from_id = ? and to_id = ? and type = 'CALLS'
-    )
-    `
-  );
-
   // Pre-fetch ALL unresolved rows once — avoids re-scanning edges table per batch.
   // Filter only on to_id prefix — do NOT filter by reason, because 'qualified call'
   // reason is set at extraction time while to_id is still a callee: placeholder.
@@ -200,7 +166,7 @@ export function buildCallResolutionContext(db: Database.Database, repoId: string
     )
     .all({ repoId, supersededReason: SUPERSEDED_REASON }) as { fromId: string; toId: string; fromFile: string }[];
 
-  return { candidateMap, interfaceByName, interfaceIdSet, implementorFilesByIfaceId, subclassFilesByBaseId, virtualMethodIds, updateStmt, insertDispatchStmt, unresolvedRows, offset: 0, importedFilesByFile };
+  return { candidateMap, interfaceByName, interfaceIdSet, subclassFilesByBaseId, virtualMethodIds, updateStmt, unresolvedRows, offset: 0, importedFilesByFile };
 }
 
 export type ResolvedUpdate = { fromId: string; oldToId: string; newToId: string; confidence: number; reason: string };
@@ -301,15 +267,10 @@ export function resolveCallEdgesBatch(
 
   if (batch.length === 0) return 0;
 
-  const { candidateMap, interfaceByName, interfaceIdSet, implementorFilesByIfaceId } = ctx;
-  // ISSUE-022: cap fan-out per call-site — MediatR-style interfaces can have hundreds of
-  // implementors; beyond this the dispatch edges are noise, not signal.
-  const MAX_INTERFACE_DISPATCH_FANOUT = 10;
+  const { candidateMap, interfaceByName, interfaceIdSet } = ctx;
 
-  // Phase 1: resolve all rows in memory → collect updates and inserts
-  type InsertRow = { fromId: string; toId: string; confidence: number; reason: string };
+  // Phase 1: resolve all rows in memory → collect updates
   const updates: ResolvedUpdate[] = [];
-  const inserts: InsertRow[] = [];
   // Tokens with no named candidate, tagged external boundary after the loop (their order in `updates`
   // is unchanged from when they waited here for the vector fallback release J removed).
   const noCandidate: { fromId: string; oldToId: string }[] = [];
@@ -317,7 +278,6 @@ export function resolveCallEdgesBatch(
   for (const row of batch) {
     const calleeName = row.toId.slice(7);
     let dispatchMethodName: string | null = null;
-    let dispatchInterfaceId: string | null = null;
     /**
      * MCP-ISSUE-060: HOW the interface was arrived at. `receiver_type` means extraction handed us
      * the receiver and it named an interface. `name` means we matched a bare method name and only
@@ -354,7 +314,6 @@ export function resolveCallEdgesBatch(
           if (ifaceMethod) {
             match = ifaceMethod;
             dispatchMethodName = memberName;
-            dispatchInterfaceId = iface.symbolId;
           }
         }
       }
@@ -409,7 +368,6 @@ export function resolveCallEdgesBatch(
     // knew the receiver type. Detected via parent_symbol_id ∈ interface set.
     if (match && !dispatchMethodName && match.kind === "method" && match.parentSymbolId && interfaceIdSet.has(match.parentSymbolId)) {
       dispatchMethodName = calleeName.split(".").pop() ?? calleeName;
-      dispatchInterfaceId = match.parentSymbolId;
       // MCP-ISSUE-060: `match` here came from a name lookup, not from a proven receiver. Measured on
       // `wec.be`: 986 of 2070 `resolved interface method` edges targeted a method name declared by two
       // or more DIFFERENT interfaces (`CreateAsync` by 35 of them), and every one of those was labelled
@@ -446,16 +404,8 @@ export function resolveCallEdgesBatch(
               : NAME_ONLY_REASON;
       updates.push({ fromId: row.fromId, oldToId: row.toId, newToId: match.symbolId, confidence, reason });
 
-      if (dispatchMethodName && dispatchInterfaceId) {
-        const implementorFiles = (implementorFilesByIfaceId.get(dispatchInterfaceId) ?? []).slice(0, MAX_INTERFACE_DISPATCH_FANOUT);
-        for (const implFilePath of implementorFiles) {
-          const implMethod = (candidateMap.get(dispatchMethodName) ?? []).find(
-            (c) => c.filePath === implFilePath && c.kind === "method"
-          );
-          if (!implMethod || implMethod.symbolId === match.symbolId) continue;
-          inserts.push({ fromId: row.fromId, toId: implMethod.symbolId, confidence: 0.7, reason: "interface-dispatch" });
-        }
-      }
+      // Release L (MCP-ISSUE-094): the interface-dispatch fan-out is no longer written here. It is rebuilt
+      // whole by `rebuildInterfaceDispatchEdges` after IMPLEMENTS resolution, from the edges this call wrote.
 
     } else {
       const rawName = calleeName.split(".").pop() ?? calleeName;
@@ -482,12 +432,11 @@ export function resolveCallEdgesBatch(
   // Batch boundaries are extended above so a caller's bare and qualified rows are never split.
   suppressBareCallsShadowedByQualified(updates);
 
-  if (updates.length === 0 && inserts.length === 0) return 0;
+  if (updates.length === 0) return 0;
 
   // Phase 2: use temp table + single UPDATE JOIN for bulk resolution
   // This is dramatically faster than N individual UPDATE statements on large repos
   let count = 0;
-  const { insertDispatchStmt } = ctx;
 
   db.exec(`
     create temp table if not exists _resolve_batch (
@@ -506,7 +455,7 @@ export function resolveCallEdgesBatch(
     `insert into _resolve_batch (from_id, old_to_id, new_to_id, confidence, reason) values (?, ?, ?, ?, ?)`
   );
 
-  // Single transaction: fill temp table + UPDATE JOIN + dispatch inserts
+  // Single transaction: fill temp table + UPDATE JOIN
   // Avoids multiple transaction open/close overhead on large batches
   const batchTx = db.transaction(() => {
     for (const u of updates) {
@@ -533,22 +482,72 @@ export function resolveCallEdgesBatch(
     count += updates.length;
     if (stats) stats.rowsUpdated += result.changes;
 
-    // Handle dispatch inserts in same transaction
-    if (inserts.length > 0) {
-      for (const ins of inserts) {
-        const r = insertDispatchStmt.run(
-          repoId, ins.fromId, ins.toId, ins.confidence, ins.reason,
-          repoId, ins.fromId, ins.toId
-        );
-        // NOT added to `count`: a dispatch edge is newly created, never part of the attempted
-        // population, so counting it as a resolution broke the partition.
-        if (r.changes > 0 && stats) stats.dispatchInserted += 1;
-      }
-    }
-
     db.exec(`delete from _resolve_batch`);
   });
   batchTx();
 
+  return count;
+}
+
+/** ISSUE-022: fan-out cap per call site — MediatR-style interfaces can have hundreds of implementors. */
+const MAX_INTERFACE_DISPATCH_FANOUT = 10;
+
+/**
+ * Release L (MCP-ISSUE-094): rebuild every `interface-dispatch` CALLS edge of the repo from scratch — a pure
+ * function of (CALLS edges resolved to an interface method, resolved IMPLEMENTS, method symbols).
+ *
+ * The fan-out used to be written inline while a call row resolved, from the IMPLEMENTS edges resolved AT THAT
+ * MOMENT. A full run resolves IMPLEMENTS before calls (`runFinalize`); a scoped run does not, so an implementor
+ * in a re-extracted file was still an `iface:` token and missing from the fan-out — and a caller outside the
+ * run's scope never re-fanned at all. On wec.communication-hub a scoped run lost 407 of these edges. Rebuilt
+ * after IMPLEMENTS resolution, every run lands on the same set a full run does.
+ *
+ * An edge is skipped when the caller already has a CALLS edge to that implementation (a direct resolution
+ * wins), so the result does not depend on which rows a later dedup pass looks at.
+ */
+export function rebuildInterfaceDispatchEdges(db: Database.Database, repoId: string): number {
+  db.prepare(`delete from edges where repo_id = ? and type = 'CALLS' and reason = 'interface-dispatch'`).run(repoId);
+  const calls = db
+    .prepare(
+      `select distinct e.from_id as fromId, s.symbol_id as methodId, s.name as name, s.parent_symbol_id as ifaceId
+       from edges e
+       inner join symbols s on s.repo_id = e.repo_id and s.symbol_id = e.to_id
+       inner join symbols i on i.repo_id = s.repo_id and i.symbol_id = s.parent_symbol_id and i.kind = 'interface'
+       where e.repo_id = ? and e.type = 'CALLS' and e.reason in (?, ?) and s.kind = 'method'
+       order by e.from_id, s.symbol_id`
+    )
+    .all(repoId, INTERFACE_METHOD_REASON, INTERFACE_METHOD_UNPROVEN_REASON) as { fromId: string; methodId: string; name: string; ifaceId: string }[];
+  if (calls.length === 0) return 0;
+  const implementorFiles = new Map<string, string[]>();
+  for (const r of db
+    .prepare(
+      `select distinct e.to_id as ifaceId, s.file_path as filePath
+       from edges e
+       inner join symbols s on s.repo_id = e.repo_id and s.symbol_id = e.from_id
+       where e.repo_id = ? and e.type = 'IMPLEMENTS' and s.kind in ('class', 'struct', 'record', 'record struct')
+       order by e.to_id, s.file_path`
+    )
+    .all(repoId) as { ifaceId: string; filePath: string }[]) {
+    const list = implementorFiles.get(r.ifaceId);
+    if (list) list.push(r.filePath);
+    else implementorFiles.set(r.ifaceId, [r.filePath]);
+  }
+  const candidateMap = buildNamedCandidateMap(db, repoId, ["function", "method", "constructor", "class"]);
+  const insert = db.prepare(
+    `insert into edges (repo_id, from_id, to_id, type, confidence, reason)
+     select ?, ?, ?, 'CALLS', 0.7, 'interface-dispatch'
+     where not exists (select 1 from edges where repo_id = ? and from_id = ? and to_id = ? and type = 'CALLS')`
+  );
+  let count = 0;
+  const tx = db.transaction(() => {
+    for (const call of calls) {
+      for (const filePath of (implementorFiles.get(call.ifaceId) ?? []).slice(0, MAX_INTERFACE_DISPATCH_FANOUT)) {
+        const impl = (candidateMap.get(call.name) ?? []).find((c) => c.filePath === filePath && c.kind === "method");
+        if (!impl || impl.symbolId === call.methodId) continue;
+        count += insert.run(repoId, call.fromId, impl.symbolId, repoId, call.fromId, impl.symbolId).changes;
+      }
+    }
+  });
+  tx();
   return count;
 }

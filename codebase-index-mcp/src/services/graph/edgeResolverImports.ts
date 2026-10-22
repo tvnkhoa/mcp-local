@@ -122,6 +122,7 @@ export function resolveImportEdges(db: Database.Database, repoId: string, maxUnr
   const aliases = repoPath ? readTsconfigAliases(repoPath) : EMPTY_ALIASES;
 
   const importResolveCache = new Map<string, string | null>();
+  const namespaceResolveCache = new Map<string, { id: string; confidence: number; reason: string } | null>();
 
   let count = 0;
   const tx = db.transaction(() => {
@@ -146,11 +147,13 @@ export function resolveImportEdges(db: Database.Database, repoId: string, maxUnr
           continue;
         }
 
-        const cacheKey = `ns|${importPath}`;
-        if (importResolveCache.has(cacheKey)) {
-          const cachedModuleId = importResolveCache.get(cacheKey);
-          if (cachedModuleId) {
-            updateStmt.run(cachedModuleId, 0.8, "resolved csharp namespace", repoId, row.fromId, row.toId);
+        // Release L (MCP-ISSUE-093): the answer is cached WITH its confidence and reason. The first row of a
+        // namespace used to get 0.78 and every cached repeat 0.8, so the value depended on which rows a run
+        // processed — a scoped run re-resolving a subset disagreed with a full run on wec.communication-hub.
+        const hit = namespaceResolveCache.get(importPath);
+        if (hit !== undefined) {
+          if (hit) {
+            updateStmt.run(hit.id, hit.confidence, hit.reason, repoId, row.fromId, row.toId);
             count += 1;
           }
           continue;
@@ -158,7 +161,8 @@ export function resolveImportEdges(db: Database.Database, repoId: string, maxUnr
 
         // Try exact namespace match first, then prefix match (longest prefix wins)
         let matchedModuleId: string | undefined;
-        if (namespaceToModuleId.has(importPath)) {
+        const exact = namespaceToModuleId.has(importPath);
+        if (exact) {
           matchedModuleId = namespaceToModuleId.get(importPath);
         } else {
           // Try progressively shorter namespace prefixes
@@ -179,9 +183,17 @@ export function resolveImportEdges(db: Database.Database, repoId: string, maxUnr
           matchedModuleId = namespacePathToModuleId.get(importPath);
         }
 
-        importResolveCache.set(cacheKey, matchedModuleId ?? null);
-        if (matchedModuleId) {
-          updateStmt.run(matchedModuleId, 0.78, namespacePathToModuleId.has(importPath) ? "resolved csharp namespace (path fallback)" : "resolved csharp namespace", repoId, row.fromId, row.toId);
+        // An exact namespace match is 0.8; a prefix or folder-path match is 0.78 — for every row alike.
+        const answer = matchedModuleId
+          ? {
+              id: matchedModuleId,
+              confidence: exact ? 0.8 : 0.78,
+              reason: !exact && namespacePathToModuleId.has(importPath) ? "resolved csharp namespace (path fallback)" : "resolved csharp namespace"
+            }
+          : null;
+        namespaceResolveCache.set(importPath, answer);
+        if (answer) {
+          updateStmt.run(answer.id, answer.confidence, answer.reason, repoId, row.fromId, row.toId);
           count += 1;
         }
         continue;
