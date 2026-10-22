@@ -25,6 +25,9 @@ import { GraphStore } from "../../repositories/graphStore.js";
 import type { IndexMode, IndexRunResult } from "../../types/index.js";
 import { createIndexRunner, type IndexRunnerLimits, type RunIndexAndResolve } from "./indexRunner.js";
 
+/** Release J: below this many files a refresh parses on this thread; above, the parse workers pay off. */
+const REFRESH_INLINE_PARSE_MAX_FILES = 150;
+
 export type RefreshWorkerRequest = {
   /** `warm`: open the connection and load the runner now, answer nothing (posted at server start). */
   kind: "run" | "warm";
@@ -52,7 +55,13 @@ if (parentPort) {
     const store = new GraphStore(request.dbPath);
     runner = {
       dbPath: request.dbPath,
-      run: createIndexRunner({ store, limits: request.limits, resolvePerformanceProfileOverride: () => performanceProfileOverrideFromEnv() })
+      // Release J: off the server thread, a small refresh parses inline; the grammars stay loaded in
+      // this long-lived worker, so only its first refresh pays for them.
+      run: createIndexRunner({
+        store,
+        limits: { ...request.limits, inlineParseMaxFiles: REFRESH_INLINE_PARSE_MAX_FILES },
+        resolvePerformanceProfileOverride: () => performanceProfileOverrideFromEnv()
+      })
     };
     return runner.run;
   };

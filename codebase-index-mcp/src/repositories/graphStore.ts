@@ -211,11 +211,21 @@ import {
   batchUpsertSymbolVectors,
   vectorSearchSymbols,
   rebuildVectorIndexForRepo,
+  syncVectorsForFiles,
   deleteVectorsByRepo,
   getVectorStats,
   isVectorEnabled,
   invalidateVectorSearchCache,
 } from "./vectorStore.js";
+import {
+  findNameDependentFiles as findNameDependentFilesImpl,
+  ftsForgetFile as ftsForgetFileImpl,
+  ftsIndexFile as ftsIndexFileImpl,
+  ftsIntegrityCheck as ftsIntegrityCheckImpl,
+  resetMentionResolution as resetMentionResolutionImpl,
+  symbolRowKeysForFiles as symbolRowKeysForFilesImpl,
+  type SymbolRowsByFile
+} from "./scopedRunStore.js";
 
 // TRIVIAL_CALLEE_TOKENS, TRIVIAL_CALLEE_IN_CLAUSE → impactAnalyzer.ts
 // parseRiskFlags → refactorStore.ts
@@ -1123,6 +1133,36 @@ export class GraphStore {
 
   rebuildVectorIndex(repoId: string): number {
     return rebuildVectorIndexForRepo(this.db, repoId);
+  }
+
+  // ── Release J: scoped runs (scopedRunStore.ts) ──────────────────────────
+
+  syncVectorsForFiles(repoId: string, filePaths: readonly string[]): number {
+    return syncVectorsForFiles(this.db, repoId, filePaths);
+  }
+
+  symbolRowKeysForFiles(repoId: string, filePaths: readonly string[]): SymbolRowsByFile {
+    return symbolRowKeysForFilesImpl(this.db, repoId, filePaths);
+  }
+
+  findNameDependentFiles(repoId: string, names: ReadonlySet<string>, pathKeys: ReadonlySet<string>, exclude: ReadonlySet<string>): string[] {
+    return findNameDependentFilesImpl(this.db, repoId, names, pathKeys, exclude);
+  }
+
+  ftsForgetFile(repoId: string, filePath: string): void {
+    ftsForgetFileImpl(this.db, repoId, filePath);
+  }
+
+  ftsIndexFile(repoId: string, filePath: string): void {
+    ftsIndexFileImpl(this.db, repoId, filePath);
+  }
+
+  ftsIntegrityCheck(): void {
+    ftsIntegrityCheckImpl(this.db);
+  }
+
+  resetMentionResolution(repoId: string): number {
+    return resetMentionResolutionImpl(this.db, repoId);
   }
 
   deleteVectorsByRepo(repoId: string): void {

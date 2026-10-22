@@ -220,8 +220,11 @@ export function resolveMentionsImpl(db: Database.Database, repoId: string): numb
     }
   };
 
+  // Ordered (release J, MCP-ISSUE-085): every map below is first-wins among equal ranks, and the
+  // unordered scan made that rowid order — which a scoped run changes by re-inserting the files it
+  // re-extracts, so the same mention resolved to a different same-named symbol than in a full run.
   const allSymbols = db
-    .prepare(`select symbol_id, name, kind, file_path from symbols where repo_id = ?`)
+    .prepare(`select symbol_id, name, kind, file_path from symbols where repo_id = ? order by file_path, line, symbol_id`)
     .all(repoId) as { symbol_id: string; name: string; kind: string; file_path: string }[];
 
   const nameMap = new Map<string, string>();

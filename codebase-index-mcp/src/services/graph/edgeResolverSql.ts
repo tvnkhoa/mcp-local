@@ -155,22 +155,32 @@ export function resolveSqlEdges(db: Database.Database, repoId: string): SqlResol
   // rebuilt below from the anchor and the const's current text.
   const rows = db
     .prepare(
-      `select from_id as fromId, to_id as toId, type, reason from edges
+      `select from_id as fromId, to_id as toId, type, reason, rowid as rid from edges
        where repo_id = ? and type in (${typeList})
-         and (to_id like 'sql%:%' or reason like 'name_resolved%')
-       order by from_id, type, to_id`
+         and (to_id like 'sql%:%' or reason like 'name_resolved%')`
     )
-    .all(repoId) as { fromId: string; toId: string; type: string; reason: string | null }[];
+    .all(repoId) as { fromId: string; toId: string; type: string; reason: string | null; rid: number }[];
   if (rows.length === 0) {
     stats.migrationOrderEdges = writeMigrationOrder(db, repoId);
     return stats;
   }
 
+  // Ordered by the TOKEN, not `to_id` (release J, MCP-ISSUE-085). The maps below are first-wins, and
+  // `to_id` is the token only until the edge is bound: a run that found an unchanged file's edges
+  // already bound ordered them by target id instead, so two imported consts feeding one column swapped
+  // which one named the edge. A full run sees every edge as a token, so this is the order it always had.
+  const parsedRows = rows
+    .map((row) => ({ row, parsed: parseSqlEdge(row.toId, row.reason) }))
+    .filter((x): x is { row: (typeof rows)[number]; parsed: { clause: string; token: string } } => x.parsed !== null)
+    .sort((a, b) =>
+      a.row.fromId < b.row.fromId ? -1 : a.row.fromId > b.row.fromId ? 1
+        : a.row.type < b.row.type ? -1 : a.row.type > b.row.type ? 1
+          : a.parsed.token < b.parsed.token ? -1 : a.parsed.token > b.parsed.token ? 1
+            : a.row.rid - b.row.rid
+    );
   const items = new Map<string, WorkItem>();
   const anchors = new Map<string, Anchor>();
-  for (const row of rows) {
-    const parsed = parseSqlEdge(row.toId, row.reason);
-    if (!parsed) continue;
+  for (const { row, parsed } of parsedRows) {
     if (parsed.token.startsWith(SQL_CONST_TOKEN_PREFIX)) {
       if (row.type === "SQL_QUERY") anchors.set(`${row.fromId}\u0000${parsed.token}`, { fromId: row.fromId, token: parsed.token, clause: parsed.clause });
       continue;
@@ -366,7 +376,8 @@ function followConstAnchors(db: Database.Database, repoId: string, anchors: Anch
     `select e.to_id as toId, s.file_path as filePath from edges e left join symbols s on s.repo_id = e.repo_id and s.symbol_id = e.to_id
      where e.repo_id = ? and e.from_id = ? and e.type = 'IMPORTS'`
   );
-  const constEdges = db.prepare(`select to_id as toId, reason from edges where repo_id = ? and from_id = ? and type = 'SQL_QUERY'`);
+  // In extraction order (first-wins below): a re-extracted file keeps its rows' relative order.
+  const constEdges = db.prepare(`select to_id as toId, reason from edges where repo_id = ? and from_id = ? and type = 'SQL_QUERY' order by rowid`);
 
   const findConst = (file: string, name: string): { symbolId: string; filePath: string; line: number } | "ambiguous" | null => {
     const own = variablesIn.all(repoId, file, name) as { symbolId: string; filePath: string; line: number }[];

@@ -671,6 +671,48 @@ export function rebuildVectorIndexForRepo(db: Database.Database, repoId: string)
   );
 }
 
+/**
+ * Release J: a scoped run's vector update — the rows `rebuildVectorIndexForRepo` would end with, reached
+ * without re-hashing the whole repo (0.6 s on wec.aria per run). A vector is a pure function of one
+ * symbol's name and signature and the KNN is rowid-independent (`knnDeterministic`), so dropping the
+ * vectors of symbols that no longer exist and upserting the touched files' symbols is equivalent.
+ */
+export function syncVectorsForFiles(db: Database.Database, repoId: string, filePaths: readonly string[]): number {
+  if (!vectorsAllowed()) return 0;
+  clearVectorSearchCache();
+  const stale = db
+    .prepare(
+      `SELECT m.symbol_id AS symbolId, m.vec_rowid AS vecRowid FROM vec_symbol_map m
+       WHERE m.repo_id = ? AND NOT EXISTS (SELECT 1 FROM symbols s WHERE s.repo_id = m.repo_id AND s.symbol_id = m.symbol_id)`
+    )
+    .all(repoId) as { symbolId: string; vecRowid: number | null }[];
+  if (stale.length > 0) {
+    const deleteVec = _vectorEnabled ? db.prepare(`DELETE FROM vec_symbols WHERE rowid = ?`) : null;
+    const deleteMap = db.prepare(`DELETE FROM vec_symbol_map WHERE repo_id = ? AND symbol_id = ?`);
+    db.transaction(() => {
+      for (const s of stale) {
+        if (deleteVec && s.vecRowid != null) deleteVec.run(s.vecRowid);
+        deleteMap.run(repoId, s.symbolId);
+        inMemoryVectors.delete(`${repoId}:${s.symbolId}`);
+        inMemoryRepoIndex.get(repoId)?.delete(s.symbolId);
+      }
+    })();
+  }
+  if (filePaths.length === 0) return 0;
+  const symbols = db
+    .prepare(
+      `SELECT symbol_id AS symbolId, name, signature FROM symbols
+       WHERE repo_id = ? AND kind IN ('function', 'method', 'class', 'interface', 'struct')
+         AND file_path IN (SELECT value FROM json_each(?))`
+    )
+    .all(repoId, JSON.stringify(filePaths)) as { symbolId: string; name: string; signature: string | null }[];
+  return batchUpsertSymbolVectors(
+    db,
+    repoId,
+    symbols.map((s) => ({ symbolId: s.symbolId, name: s.name, signature: s.signature ?? undefined }))
+  );
+}
+
 export function deleteVectorsByRepo(db: Database.Database, repoId: string): void {
   // Any change to this repo's vectors invalidates every memoized answer for it. Cleared wholesale rather
   // than per-repo because the key encodes the repo and a full clear cannot leave a stale entry behind.

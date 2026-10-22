@@ -143,3 +143,14 @@ test("a query-triggered run says so, and an untagged run carries no triggeredBy"
   markRunTrigger(conn, "by-query", "query");
   assert.equal(getLatestRun(conn, "r")?.triggeredBy, "query");
 });
+
+test("a scoped run's scope round-trips; a full run has none (release J)", () => {
+  const conn = db();
+  recordRun(conn, summary({ runId: "full" }));
+  const full = getLatestRun(conn, "r");
+  assert.equal(full?.scope, undefined);
+  assert.equal("scope" in (full ?? {}), false, "absent, not null");
+  const scope = "scoped: 4 changed, 12 dependent file(s) re-extracted";
+  recordRun(conn, summary({ runId: "dirty", mode: "dirty", scope, finishedAt: "2026-08-04T00:00:20.000Z" }));
+  assert.equal(getLatestRun(conn, "r")?.scope, scope);
+});

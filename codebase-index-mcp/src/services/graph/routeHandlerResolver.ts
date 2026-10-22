@@ -85,6 +85,7 @@ export function resolveRouteHandlersImpl(db: Database.Database, repoId: string):
       and m.kind = 'method'
       and m.name = @handlerName
       and p.name = @controllerName
+    order by m.file_path, m.line, m.symbol_id
     `
   );
   const updateStmt = db.prepare(`update routes set handler_symbol_id = @symbolId where rowid = @rowid`);

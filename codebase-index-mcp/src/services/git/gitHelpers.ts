@@ -368,14 +368,16 @@ export function listGitVisibleFiles(repoPath: string): Set<string> | null {
  * non-git repo or clean tree.
  */
 export function collectDirtyFiles(repoPath: string): Set<string> {
-  // `-c core.quotePath=false` so non-ASCII paths come back verbatim (not C-quoted/octal-escaped);
-  // otherwise dirty-mode's onlyRelativePaths filter never matches them and the edited file is
-  // silently skipped from re-index.
-  const noQuote = ["-c", "core.quotePath=false"];
-  const unstaged = runGitLines(repoPath, [...noQuote, "diff", "--name-only", "HEAD"]);
-  const staged = runGitLines(repoPath, [...noQuote, "diff", "--cached", "--name-only"]);
-  const untracked = runGitLines(repoPath, [...noQuote, "ls-files", "--others", "--exclude-standard"]);
-  return new Set([...unstaged, ...staged, ...untracked].map((x) => x.replace(/\\/g, "/")));
+  // Release J: one `git status --porcelain=v2` (the R1 gate's read) instead of two `git diff
+  // --name-only` and an `ls-files`. The diffs ran with git's rename detection, which names only the
+  // NEW path of a staged rename — so after `git mv` the old path never reached the dirty run, and its
+  // file stayed indexed beside the new one (found by the release J conformance scenario `rename-file`).
+  // Porcelain v2 reports both sides; `core.quotePath=false` keeps non-ASCII paths verbatim.
+  try {
+    return new Set(readWorkingTreeState(repoPath).dirty);
+  } catch {
+    return new Set();
+  }
 }
 
 /**

@@ -119,6 +119,14 @@ export type IndexRunSummary = {
   unresolvedImportsCappedByPolicy?: boolean;
   resolveCallsCoverage?: number;
   performanceProfile?: "standard" | "large" | "very-large";
+  /**
+   * Release J (MCP-ISSUE-085): how a `dirty` / `incremental` run was scoped — `scoped: N changed, M
+   * dependent file(s) re-extracted` — or, on a full run a scoped one escalated to, `full (escalated from
+   * dirty: <reason>)`. Absent on an ordinary full run and on a skipped one.
+   */
+  scope?: string;
+  /** Set by the pipeline when a scoped run cannot be exact; the runner then runs `full`. Never stored. */
+  scopeEscalation?: string;
 };
 
 /**

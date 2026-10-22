@@ -37,6 +37,7 @@ export function currentAnnotationKey(repoPath: string): string {
   return `${ANNOTATION_SCANNER_VERSION}:${loadCitationConfig(repoPath).config?.hash ?? "none"}`;
 }
 import { GraphStore } from "../../repositories/graphStore.js";
+import { changedSymbolNames, pathKeysFor, symbolRowKey, type SymbolRowsByFile } from "../../repositories/scopedRunStore.js";
 import { resolveHeadCommitSha, resolveCurrentBranch } from "../git/gitHelpers.js";
 import { redactSensitive } from "../../middleware/indexGuardrails.js";
 import { extractGraphData, isParseTimeoutError } from "../extractors/treeSitterExtractor.js";
@@ -81,6 +82,8 @@ export type RunIndexInput = {
   parseWorkers?: number;
   /** Per-job timeout for worker-lane extraction in milliseconds. Default 20s. */
   parseJobTimeoutMs?: number;
+  /** Release J: a non-full run extracting at most this many files parses inline (see IndexRunnerLimits). */
+  inlineParseMaxFiles?: number;
   onProgress?: (progress: IndexProgressSnapshot) => void;
   /**
    * Progress reporter (log gating + MCP notifications/progress). When supplied
@@ -130,6 +133,20 @@ export type RunIndexInput = {
 // Both are release I and share generation 10.
 export const INDEX_VERSION = "v10-release-i";
 
+/**
+ * Release J: files whose change alters how every other file resolves — module resolution (tsconfig paths,
+ * package `exports`) or the citation patterns. A scoped run that writes one escalates to a full run.
+ */
+export const SCOPE_FORCES_FULL_RUN = /(^|\/)(tsconfig[^/]*\.json|jsconfig[^/]*\.json|package\.json|citations\.json)$/;
+
+/**
+ * Release J: above this many dependent files a scoped run escalates to a full run. Re-extracting a
+ * dependent costs about what a full run spends per file, and a full run also skips the dependent
+ * search and the per-file FTS bookkeeping, so somewhere below the repo's size a full run is cheaper
+ * and certainly no less exact. Measured on wec.aria (MCP-ISSUE-085): see the registry entry.
+ */
+export const SCOPE_MAX_DEPENDENT_FILES = 600;
+
 export async function runIndexPipeline(store: GraphStore, input: RunIndexInput): Promise<IndexRunSummary> {
   const identity: RunIdentity = {
     runId: randomUUID(),
@@ -149,7 +166,14 @@ export async function runIndexPipeline(store: GraphStore, input: RunIndexInput):
     maxFiles, includeDocs, batchSize, subtxSize, checkpointEveryNBatches,
     largeFileThresholdBytes, maxFileSizeBytes, maxMarkdownBytes, parseWorkers, parseJobTimeoutMs, concurrencyLimit
   } = resolveIndexRunLimits(input);
-  const workerPool = parseWorkers > 0 ? new ExtractionWorkerPool(parseWorkers, parseJobTimeoutMs) : null;
+  // Created on first use: a scoped run small enough to parse inline never pays the workers' start-up.
+  let workerPool: ExtractionWorkerPool | null = null;
+  const poolForBatch = (queued: number): ExtractionWorkerPool | null => {
+    if (parseWorkers <= 0) return null;
+    if (input.mode !== "full" && input.inlineParseMaxFiles !== undefined && queued <= input.inlineParseMaxFiles) return null;
+    workerPool ??= new ExtractionWorkerPool(parseWorkers, parseJobTimeoutMs);
+    return workerPool;
+  };
 
   // When the caller passes a progress controller it keeps ownership (stops it after
   // its own post-phase). Otherwise we own the one we create and stop it here.
@@ -211,6 +235,46 @@ export async function runIndexPipeline(store: GraphStore, input: RunIndexInput):
   const forcedPaths = new Set<string>();
   let dependentsQueued = false;
 
+  // Release J (MCP-ISSUE-085): a scoped run keeps each touched file's symbol rows from before and
+  // after it, so `queueDependentFiles` can name what changed (K) and re-extract the files whose
+  // resolution depends on it; and it keeps the FTS tables in step per file instead of rebuilding them.
+  const scoped = input.mode !== "full";
+  const rowsBefore: SymbolRowsByFile = new Map();
+  const rowsAfter: SymbolRowsByFile = new Map();
+  /** Files that appeared or disappeared this run: their basenames are module-resolution keys. */
+  const appearedOrGone = new Set<string>();
+  /** Dirty-mode files deleted from the working tree, pruned here (a dirty run never prunes otherwise). */
+  const deletedInTree: string[] = [];
+  let scopeEscalation: string | null = null;
+  let dependentFiles = 0;
+  const captureBefore = (paths: readonly string[]): void => {
+    const fresh = paths.filter((p) => !rowsBefore.has(p));
+    if (fresh.length === 0) return;
+    const rows = store.symbolRowKeysForFiles(input.repoId, fresh);
+    for (const p of fresh) {
+      rowsBefore.set(p, rows.get(p) ?? new Map());
+      if (store.getFileHash(input.repoId, p) === null) appearedOrGone.add(p);
+    }
+  };
+
+  if (scoped && input.onlyRelativePaths) {
+    for (const rel of input.onlyRelativePaths) {
+      if (store.getFileHash(input.repoId, rel) !== null && !existsSync(path.join(input.repoPath, rel))) deletedInTree.push(rel);
+    }
+    if (deletedInTree.length > 0) {
+      captureBefore(deletedInTree);
+      store.runInTransaction(() => {
+        for (const rel of deletedInTree) {
+          rowsAfter.set(rel, new Map());
+          appearedOrGone.add(rel);
+          store.ftsForgetFile(input.repoId, rel);
+        }
+        store.pruneFiles(input.repoId, deletedInTree);
+      });
+      indexLog(`[index-dirty] removed ${String(deletedInTree.length)} file(s) deleted from the working tree`);
+    }
+  }
+
   indexLog(`[index-ready] processing ${String(totalFiles)} files in ${String(totalBatches)} batches (batchSize=${String(batchSize)})`);
   progress.phase("indexing");
   progress.update({ totalFiles, filesScanned: 0, symbols: 0 });
@@ -230,6 +294,7 @@ export async function runIndexPipeline(store: GraphStore, input: RunIndexInput):
       }
 
       const batchFiles = workQueue.slice(offset, batchEnd);
+      const batchPool = poolForBatch(workQueue.length);
       const extractStart = Date.now();
       const pendingWrites: Array<{
         file: {
@@ -434,13 +499,13 @@ export async function runIndexPipeline(store: GraphStore, input: RunIndexInput):
           }
 
           const shouldUseWorkerLane =
-            workerPool !== null &&
+            batchPool !== null &&
             language !== "markdown" &&
             Buffer.byteLength(safeContent, "utf8") >= largeFileThresholdBytes;
 
           if (shouldUseWorkerLane) {
             largeExtractionJobs.push(
-              workerPool.extract({
+              batchPool.extract({
                 repoId: input.repoId,
                 filePath: relativePath,
                 language,
@@ -524,8 +589,10 @@ export async function runIndexPipeline(store: GraphStore, input: RunIndexInput):
       let subtxCount = 0;
       for (let writeOffset = 0; writeOffset < pendingWrites.length; writeOffset += subtxSize) {
         const chunk = pendingWrites.slice(writeOffset, writeOffset + subtxSize);
+        if (scoped) captureBefore(chunk.map((item) => item.file.path));
         store.runInTransaction(() => {
           for (const item of chunk) {
+            if (scoped) store.ftsForgetFile(input.repoId, item.file.path);
             store.upsertFile(item.file);
             store.replaceSymbolsForFile(input.repoId, item.file.path, item.extracted.symbols);
             store.replaceEdgesForFile(input.repoId, item.file.path, item.extracted.edges);
@@ -547,6 +614,10 @@ export async function runIndexPipeline(store: GraphStore, input: RunIndexInput):
                 item.extracted.mentions ?? []
               );
             }
+            if (scoped) {
+              store.ftsIndexFile(input.repoId, item.file.path);
+              rowsAfter.set(item.file.path, new Map(item.extracted.symbols.map((s) => [symbolRowKey(s), s.name])));
+            }
           }
         });
         subtxCount += 1;
@@ -554,7 +625,11 @@ export async function runIndexPipeline(store: GraphStore, input: RunIndexInput):
       // Unchanged files whose annotations are re-scanned (new scanner or citations.json): only those rows.
       if (annotationOnly.length > 0) {
         store.runInTransaction(() => {
-          for (const item of annotationOnly) store.replaceAnnotationsForFile(input.repoId, item.path, item.annotations);
+          for (const item of annotationOnly) {
+            if (scoped) store.ftsForgetFile(input.repoId, item.path);
+            store.replaceAnnotationsForFile(input.repoId, item.path, item.annotations);
+            if (scoped) store.ftsIndexFile(input.repoId, item.path);
+          }
         });
         annotationOnly.length = 0;
       }
@@ -594,7 +669,8 @@ export async function runIndexPipeline(store: GraphStore, input: RunIndexInput):
     }
 
     const pruneCounts = pruneAndResolve(store, input, progress, files, selectedFiles, maxFiles);
-    const vectorSymbolsIndexed = rebuildVectorIndex(store, input.repoId, progress);
+    // A deleted file's vectors go with the stale sweep inside the sync, so the written paths suffice.
+    const vectorSymbolsIndexed = rebuildVectorIndex(store, input.repoId, progress, scoped ? [...writtenPaths] : undefined);
 
     const finishedAt = new Date().toISOString();
     const elapsedMs = Date.now() - started;
@@ -621,8 +697,17 @@ export async function runIndexPipeline(store: GraphStore, input: RunIndexInput):
       // report longer than the run. Keep it under a name that says what it measures; `indexRunner`
       // overwrites `elapsedMs` with the whole-run figure.
       extractPhaseMs: elapsedMs,
-      filesPruned: pruneCounts.filesPruned,
-      edgesPruned: pruneCounts.edgesPruned
+      filesPruned: pruneCounts.filesPruned + deletedInTree.length,
+      edgesPruned: pruneCounts.edgesPruned,
+      // Release J: how a non-full run was scoped, or why it must be redone as a full run.
+      ...(scoped
+        ? {
+            scope: scopeEscalation
+              ? `escalated to full: ${scopeEscalation}`
+              : `scoped: ${String(writtenPaths.size - forcedPaths.size)} changed, ${String(dependentFiles)} dependent file(s) re-extracted`
+          }
+        : {}),
+      ...(scopeEscalation ? { scopeEscalation } : {})
     };
 
     // Note: recordRun is called by the caller (index.ts) after computing resolution metrics
@@ -660,8 +745,8 @@ export async function runIndexPipeline(store: GraphStore, input: RunIndexInput):
     }
     throw error;
   } finally {
-    if (workerPool) {
-      await workerPool.dispose();
+    if (workerPool !== null) {
+      await (workerPool as ExtractionWorkerPool).dispose();
     }
   }
 
@@ -737,11 +822,34 @@ export async function runIndexPipeline(store: GraphStore, input: RunIndexInput):
     const doomed = scanWasComplete
       ? store.listIndexedFiles(input.repoId).map((f) => f.path).filter((p) => !scannedByRelative.has(p))
       : [];
-    if (writtenPaths.size === 0 && doomed.length === 0) return 0;
+    if (writtenPaths.size === 0 && doomed.length === 0 && deletedInTree.length === 0) return 0;
 
     const doomedSet = new Set(doomed);
+    const candidates = new Set(store.findDanglingEdgeSourceFiles(input.repoId, doomed));
+
+    // Release J (MCP-ISSUE-085): the files whose RESOLVED edges are still valid ids but would resolve
+    // differently now — see scopedRunStore.ts. K and the path keys come from every file this run
+    // changed, and from the files about to be pruned.
+    const configChange = [...rowsBefore.keys(), ...doomed].find((p) => SCOPE_FORCES_FULL_RUN.test(p));
+    if (configChange) {
+      scopeEscalation = `${configChange} changed: it can change how every file resolves`;
+      return 0;
+    }
+    const names = new Set<string>();
+    for (const [p, before] of rowsBefore) for (const n of changedSymbolNames(before, rowsAfter.get(p) ?? new Map())) names.add(n);
+    for (const rows of store.symbolRowKeysForFiles(input.repoId, doomed).values()) for (const n of rows.values()) names.add(n);
+    const pathKeys = new Set([...appearedOrGone, ...doomed].flatMap(pathKeysFor));
+    const exclude = new Set([...writtenPaths, ...doomed, ...deletedInTree]);
+    for (const p of store.findNameDependentFiles(input.repoId, names, pathKeys, exclude)) candidates.add(p);
+    for (const p of exclude) candidates.delete(p);
+    dependentFiles = candidates.size;
+    if (candidates.size > SCOPE_MAX_DEPENDENT_FILES) {
+      scopeEscalation = `${String(candidates.size)} dependent files > ${String(SCOPE_MAX_DEPENDENT_FILES)}`;
+      return 0;
+    }
+
     let added = 0;
-    for (const relativePath of store.findDanglingEdgeSourceFiles(input.repoId, doomed)) {
+    for (const relativePath of [...candidates].sort()) {
       if (writtenPaths.has(relativePath) || doomedSet.has(relativePath) || forcedPaths.has(relativePath)) continue;
       // Dirty mode scans only the changed files, so a dependent outside that set is resolved from
       // disk. One that no longer exists is left to the prune; its edges go with it.

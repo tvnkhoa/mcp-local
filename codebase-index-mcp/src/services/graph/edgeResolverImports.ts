@@ -63,7 +63,9 @@ export function resolveImportEdges(db: Database.Database, repoId: string, maxUnr
   // Build a map of all file paths in this repo → module symbolId
   const fileToModuleId = new Map<string, string>();
   const moduleRows = db
-    .prepare(`select file_path as filePath, symbol_id as symbolId from symbols where repo_id = ? and kind = 'module'`)
+    // Ordered (release J, MCP-ISSUE-085): this map is last-wins and the alias map below first-wins, so an
+    // unordered scan made them rowid order, which a scoped run's re-extraction changes.
+    .prepare(`select file_path as filePath, symbol_id as symbolId from symbols where repo_id = ? and kind = 'module' order by file_path, line, symbol_id`)
     .all(repoId) as { filePath: string; symbolId: string }[];
   for (const row of moduleRows) {
     // Normalize path separators
@@ -98,7 +100,8 @@ export function resolveImportEdges(db: Database.Database, repoId: string, maxUnr
     .prepare(
       `select name, symbol_id as symbolId, file_path as filePath
        from symbols
-       where repo_id = ? and kind = 'module' and name like '%.%'`
+       where repo_id = ? and kind = 'module' and name like '%.%'
+       order by file_path, line, symbol_id`
     )
     .all(repoId) as { name: string; symbolId: string; filePath: string }[];
   for (const row of nsRows) {

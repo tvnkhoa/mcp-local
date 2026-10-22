@@ -36,7 +36,7 @@ export function recordRun(db: Database.Database, summary: IndexRunSummary & { cr
         files_pruned, edges_pruned, edges_deduplicated,
         symbols_in_graph, edges_in_graph, extract_phase_ms,
         call_edges_attempted, call_edges_unresolved,
-        vector_symbols_indexed, health_reasons, skip_reason, skipped_by_reason
+        vector_symbols_indexed, health_reasons, skip_reason, skipped_by_reason, scope
       ) values (
         ?, ?, ?, ?, ?, ?,
         ?, ?, ?, ?,
@@ -56,7 +56,7 @@ export function recordRun(db: Database.Database, summary: IndexRunSummary & { cr
         ?, ?, ?,
         ?, ?, ?,
         ?, ?,
-        ?, ?, ?, ?
+        ?, ?, ?, ?, ?
       )
       `
     )
@@ -120,7 +120,8 @@ export function recordRun(db: Database.Database, summary: IndexRunSummary & { cr
       summary.vectorSymbolsIndexed ?? 0,
       summary.healthReasons && summary.healthReasons.length > 0 ? JSON.stringify(summary.healthReasons) : null,
       summary.skipReason ?? null,
-      summary.skippedByReason && summary.skippedByReason.length > 0 ? JSON.stringify(summary.skippedByReason) : null
+      summary.skippedByReason && summary.skippedByReason.length > 0 ? JSON.stringify(summary.skippedByReason) : null,
+      summary.scope ?? null
     );
 }
 
@@ -187,7 +188,8 @@ export function getLatestRun(db: Database.Database, repoId: string): IndexRunSum
         health_reasons as healthReasonsJson,
         skip_reason as skipReason,
         skipped_by_reason as skippedByReasonJson,
-        triggered_by as triggeredBy
+        triggered_by as triggeredBy,
+        scope
       from index_runs
       where repo_id = ?
       order by finished_at desc, started_at desc, rowid desc
@@ -223,6 +225,8 @@ export function getLatestRun(db: Database.Database, repoId: string): IndexRunSum
     }
   }
   delete withSkips.skippedByReasonJson;
+  // Absent on a full or skipped run, never null (release J).
+  if (row.scope == null) delete row.scope;
   if (row.triggeredBy === null) delete row.triggeredBy;
 
   return row;

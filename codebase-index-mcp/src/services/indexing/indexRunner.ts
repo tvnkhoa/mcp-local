@@ -18,7 +18,7 @@ import { createIndexProgress, indexLog, type ProgressNotifier } from "./indexPro
 import { resolvePostPhasePolicy } from "../../config/performanceConfig.js";
 import { collectDirtyFiles, resolveCurrentBranch, resolveHeadCommitSha } from "../git/gitHelpers.js";
 import type { GraphStore } from "../../repositories/graphStore.js";
-import { runIndexPipeline, INDEX_VERSION, type PerformanceProfile } from "./indexPipeline.js";
+import { runIndexPipeline, INDEX_VERSION, SCOPE_FORCES_FULL_RUN, type PerformanceProfile } from "./indexPipeline.js";
 import type { IndexMode, IndexRunResult } from "../../types/index.js";
 import {
   buildSkippedRunSummary,
@@ -45,6 +45,13 @@ export interface IndexRunnerLimits {
   readonly respectGitignore?: boolean;
   readonly parseWorkers: number;
   readonly parseJobTimeoutMs: number;
+  /**
+   * Release J: a non-full run with at most this many files to extract parses them on this thread instead
+   * of starting the parse workers, whose start-up (each loads the extractor modules) cost ~3 s of a
+   * 5-file wec.aria refresh. Set by the refresh worker only — it is off the server thread — so absent
+   * means never inline.
+   */
+  readonly inlineParseMaxFiles?: number;
 }
 
 export interface IndexRunnerOptions {
@@ -84,7 +91,9 @@ export function createIndexRunner(options: IndexRunnerOptions): RunIndexAndResol
     mode: IndexMode,
     docsEnabled: boolean,
     maxFiles: number,
-    batchSize: number
+    batchSize: number,
+    /** Release J: set on the full run a scoped run escalated to; recorded as that run's `scope`. */
+    escalatedBecause?: string
   ): Promise<IndexRunResult> {
   // Never write over an index a newer build wrote (several server processes share one DB).
   const refusal = newerBuildRefusal(store.getLatestRun(repoId)?.indexVersion);
@@ -92,6 +101,12 @@ export function createIndexRunner(options: IndexRunnerOptions): RunIndexAndResol
 
   const yieldToEventLoop = async (): Promise<void> => {
     await new Promise<void>((resolve) => setImmediate(resolve));
+  };
+
+  /** Release J: redo a scoped run as a full one, and say why on the full run's record. */
+  const escalateToFull = (reason: string): Promise<IndexRunResult> => {
+    indexLog(`[index-scope] repoId=${repoId} ${mode} run escalated to full: ${reason}`);
+    return runIndexAndResolve(repoId, repoPath, "full", docsEnabled, maxFiles, batchSize, `full (escalated from ${mode}: ${reason})`);
   };
 
   /**
@@ -162,6 +177,9 @@ export function createIndexRunner(options: IndexRunnerOptions): RunIndexAndResol
       return noOp;
     }
     indexLog(`[index-dirty] repoId=${repoId} re-indexing ${String(dirtyFileSet.size)} working-tree-changed file(s)`);
+    // Release J: a config edit can change how every file resolves; known now, so go straight to full.
+    const config = [...dirtyFileSet].find((p) => SCOPE_FORCES_FULL_RUN.test(p));
+    if (config) return escalateToFull(`${config} changed: it can change how every file resolves`);
   }
 
   if (mode === "incremental") {
@@ -226,9 +244,16 @@ export function createIndexRunner(options: IndexRunnerOptions): RunIndexAndResol
     ...(limits.respectGitignore !== undefined && { respectGitignore: limits.respectGitignore }),
     parseWorkers: limits.parseWorkers,
     parseJobTimeoutMs: limits.parseJobTimeoutMs,
+    ...(limits.inlineParseMaxFiles !== undefined && { inlineParseMaxFiles: limits.inlineParseMaxFiles }),
     onlyRelativePaths: dirtyFileSet,
     progress
   });
+  // Release J: the pipeline found a scoped run cannot be exact (a config file, or too many dependents)
+  // after writing the changed files; a full run over the same tree is.
+  if (summary.scopeEscalation) {
+    progress.stop(`↻ index ${repoId} · ${mode} run escalated to full · ${summary.scopeEscalation}`);
+    return escalateToFull(summary.scopeEscalation);
+  }
   const resolvePhaseStart = Date.now();
   let ftsRebuildMs = 0;
   let buildContextMs = 0;
@@ -240,20 +265,24 @@ export function createIndexRunner(options: IndexRunnerOptions): RunIndexAndResol
   let implementsResolveMs = 0;
 
   progress.phase("finalizing");
-  indexLog(`[index-post] repoId=${repoId} rebuilding FTS indexes...`);
-  const ftsStart = Date.now();
-  try { store.rebuildFts(); } catch { /* non-fatal */ }
-  await yieldToEventLoop();
-  try { store.rebuildLiteralsFts(); } catch { /* non-fatal */ }
-  await yieldToEventLoop();
-  try { store.rebuildCommentsFts(); } catch { /* non-fatal */ }
-  await yieldToEventLoop();
-  if (docsEnabled) {
-    indexLog(`[index-post] repoId=${repoId} rebuilding docs FTS...`);
-    try { store.rebuildDocsFts(); } catch { /* non-fatal */ }
+  // Release J: a scoped run kept the FTS tables in step per file as it wrote (scopedRunStore.ts); the
+  // rebuild re-reads every repo in the shared DB, so only a full run pays for it.
+  if (mode === "full") {
+    indexLog(`[index-post] repoId=${repoId} rebuilding FTS indexes...`);
+    const ftsStart = Date.now();
+    try { store.rebuildFts(); } catch { /* non-fatal */ }
     await yieldToEventLoop();
+    try { store.rebuildLiteralsFts(); } catch { /* non-fatal */ }
+    await yieldToEventLoop();
+    try { store.rebuildCommentsFts(); } catch { /* non-fatal */ }
+    await yieldToEventLoop();
+    if (docsEnabled) {
+      indexLog(`[index-post] repoId=${repoId} rebuilding docs FTS...`);
+      try { store.rebuildDocsFts(); } catch { /* non-fatal */ }
+      await yieldToEventLoop();
+    }
+    ftsRebuildMs = Date.now() - ftsStart;
   }
-  ftsRebuildMs = Date.now() - ftsStart;
 
   progress.phase("resolving calls");
   indexLog(`[index-post] repoId=${repoId} resolving call edges...`);
@@ -452,8 +481,18 @@ export function createIndexRunner(options: IndexRunnerOptions): RunIndexAndResol
 
   const mentionsStart = Date.now();
   indexLog(`[index-post] repoId=${repoId} resolving mentions...`);
+  // Release J: a resolved mention keeps its symbol_id and resolveMentions revisits only null rows, by
+  // keys K cannot bound (prefix, suffix, file path) — so a scoped run re-resolves all of them, exactly
+  // as a full run's freshly extracted (all-null) rows are.
   const mentionsResolved = docsEnabled
-    ? (() => { try { return store.resolveMentions(repoId); } catch { return 0; } })()
+    ? (() => {
+        try {
+          if (mode !== "full") store.resetMentionResolution(repoId);
+          return store.resolveMentions(repoId);
+        } catch {
+          return 0;
+        }
+      })()
     : 0;
   const mentionsElapsed = Date.now() - mentionsStart;
   indexLog(`[index-post] repoId=${repoId} resolved ${mentionsResolved} mentions in ${mentionsElapsed}ms`);
@@ -530,7 +569,8 @@ export function createIndexRunner(options: IndexRunnerOptions): RunIndexAndResol
     // Clamped as a backstop; with a pair-level numerator it should no longer be reachable.
     resolveCallsCoverage:
       callEdgesAttempted > 0 ? Math.min(1, callEdgesResolved / callEdgesAttempted) : 1,
-    performanceProfile
+    performanceProfile,
+    ...(escalatedBecause ? { scope: escalatedBecause } : {})
   };
   store.recordRun(fullSummary);
   // Whatever the refactor engine wrote has now been through the graph (MCP-ISSUE-042).
