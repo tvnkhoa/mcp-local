@@ -175,7 +175,7 @@ import {
   type CitationRow,
   type CommentHit
 } from "./annotationsStore.js";
-import { recordRun as recordRunImpl, getLatestRun as getLatestRunImpl, markRunTrigger as markRunTriggerImpl, getLatestWorkRunMode as getLatestWorkRunModeImpl } from "./runStore.js";
+import { recordRun as recordRunImpl, getLatestRun as getLatestRunImpl, markRunTrigger as markRunTriggerImpl, getLatestWorkRunMode as getLatestWorkRunModeImpl, markRunTreeDirty as markRunTreeDirtyImpl, getLatestWorkRunTreeDirty as getLatestWorkRunTreeDirtyImpl } from "./runStore.js";
 import {
   type WriteContext,
   prepareWriteStatements,
@@ -448,6 +448,15 @@ export class GraphStore {
 
   markRunTrigger(runId: string, trigger: string): void {
     markRunTriggerImpl(this.db, runId, trigger);
+  }
+
+  /** Release L (MCP-ISSUE-095): see `markRunTreeDirty` in runStore.ts. */
+  markRunTreeDirty(runId: string): void {
+    markRunTreeDirtyImpl(this.db, runId);
+  }
+
+  getLatestWorkRunTreeDirty(repoId: string): boolean {
+    return getLatestWorkRunTreeDirtyImpl(this.db, repoId);
   }
 
   searchRegex(repoId: string, opts: RegexSearchOptions): RegexSearchResult {

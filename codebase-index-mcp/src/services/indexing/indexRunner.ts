@@ -223,6 +223,10 @@ export function createIndexRunner(options: IndexRunnerOptions): RunIndexAndResol
     }
   }
 
+  // Release L (MCP-ISSUE-095): a full / incremental run over a dirty tree indexes working-tree content; recorded so
+  // the next incremental run does not fast-skip once the tree is clean again. A dirty run is that by definition.
+  const treeDirtyAtStart = mode !== "dirty" && collectDirtyFiles(repoPath).size > 0;
+
   const profileDecision = resolvePerformanceProfileDecision(
     store,
     resolvePerformanceProfileOverride(),
@@ -667,6 +671,7 @@ export function createIndexRunner(options: IndexRunnerOptions): RunIndexAndResol
     ...(escalatedBecause ? { scope: escalatedBecause } : {})
   };
   store.recordRun(fullSummary);
+  if (treeDirtyAtStart) store.markRunTreeDirty(fullSummary.runId);
   // Whatever the refactor engine wrote has now been through the graph (MCP-ISSUE-042).
   store.clearPendingReindexFiles(repoId);
   const recordElapsed = Date.now() - recordStart;

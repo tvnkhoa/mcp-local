@@ -515,6 +515,8 @@ export function runGraphMigrations(db: Database.Database, vectorEnabled: boolean
     ensureRunColumnText("skipped_by_reason");
     ensureRunColumnText("triggered_by");
     ensureRunColumnText("scope");
+    // Release L (MCP-ISSUE-095): whether a full / incremental run indexed a dirty working tree.
+    ensureRunColumn("tree_dirty");
 
     // Add commit_sha for staleness detection.
     if (!runCols.some((c) => c.name === "commit_sha")) {

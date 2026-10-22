@@ -150,7 +150,8 @@ export function evaluateIncrementalSkip(
   // the index then holds working-tree content, and a file indexed while dirty and since deleted or
   // reverted is still in the graph. Skipping here is how wec.aria's release-B acceptance found a
   // deleted probe file still answering with coverage "high".
-  if (store.getLatestWorkRunMode(repoId) === "dirty") {
+  // Release L (MCP-ISSUE-095): the same holds after a full or incremental run that indexed a dirty tree.
+  if (store.getLatestWorkRunMode(repoId) === "dirty" || store.getLatestWorkRunTreeDirty(repoId)) {
     return {
       shouldSkip: false,
       reason: "the index holds working-tree content from a dirty run",

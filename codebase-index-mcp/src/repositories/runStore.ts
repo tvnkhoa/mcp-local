@@ -233,6 +233,23 @@ export function getLatestRun(db: Database.Database, repoId: string): IndexRunSum
 }
 
 /** Tag a recorded run with what started it (R1: "query"). Separate from `recordRun`, which the runner owns. */
+/**
+ * Release L (MCP-ISSUE-095): a full or incremental run that indexed a DIRTY working tree holds working-tree content
+ * exactly as a dirty run does — an untracked file indexed and since deleted is still in the graph once the tree is
+ * clean again. Set after the run is recorded, like `triggered_by`.
+ */
+export function markRunTreeDirty(db: Database.Database, runId: string): void {
+  db.prepare(`update index_runs set tree_dirty = 1 where run_id = ?`).run(runId);
+}
+
+/** Release L: whether the most recent run that did WORK indexed a dirty working tree. */
+export function getLatestWorkRunTreeDirty(db: Database.Database, repoId: string): boolean {
+  const row = db
+    .prepare(`select tree_dirty as treeDirty from index_runs where repo_id = ? and skip_reason is null order by finished_at desc, started_at desc, rowid desc limit 1`)
+    .get(repoId) as { treeDirty: number } | undefined;
+  return row?.treeDirty === 1;
+}
+
 export function markRunTrigger(db: Database.Database, runId: string, trigger: string): void {
   db.prepare(`update index_runs set triggered_by = ? where run_id = ?`).run(trigger, runId);
 }

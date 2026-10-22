@@ -28,11 +28,13 @@ function stubStore(parts: {
   latestRun?: { commitSha?: string | null; indexVersion?: string } | null;
   snapshot?: { fileCount: number; symbolCount: number };
   latestWorkMode?: string | null;
+  latestWorkTreeDirty?: boolean;
   annotationKey?: string | null;
 }): GraphStore {
   return {
     getLatestRun: () => parts.latestRun ?? null,
     getLatestWorkRunMode: () => parts.latestWorkMode ?? null,
+    getLatestWorkRunTreeDirty: () => parts.latestWorkTreeDirty ?? false,
     // An annotation key that matches a repo with no citations.json, so these tests reach the git checks.
     getAnnotationKey: () => parts.annotationKey === undefined ? currentAnnotationKey("/nowhere") : parts.annotationKey,
     getRepoSchemaSnapshot: () => parts.snapshot ?? { fileCount: 0, symbolCount: 0 }
@@ -115,6 +117,16 @@ test("never skips after a dirty run: the index holds working-tree content a clea
   // clean tree at the indexed commit — and the fast skip kept the phantom symbol forever.
   const { INDEX_VERSION } = await import("./indexPipeline.js");
   const store = stubStore({ latestRun: { commitSha: "abc", indexVersion: INDEX_VERSION }, latestWorkMode: "dirty" });
+  const decision = evaluateIncrementalSkip(store, "repo", "/nowhere");
+  assert.equal(decision.shouldSkip, false);
+  assert.match(decision.reason, /working-tree content/);
+});
+
+test("release L: never skips after a full or incremental run that indexed a dirty tree", async () => {
+  // MCP-ISSUE-095, wec.aria conformance `sql-supersede`: an incremental run indexed an untracked migration; once it
+  // was deleted the tree was clean at the indexed commit, and the next incremental run fast-skipped over it.
+  const { INDEX_VERSION } = await import("./indexPipeline.js");
+  const store = stubStore({ latestRun: { commitSha: "abc", indexVersion: INDEX_VERSION }, latestWorkMode: "incremental", latestWorkTreeDirty: true });
   const decision = evaluateIncrementalSkip(store, "repo", "/nowhere");
   assert.equal(decision.shouldSkip, false);
   assert.match(decision.reason, /working-tree content/);
