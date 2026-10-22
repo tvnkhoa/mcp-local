@@ -3989,3 +3989,91 @@ this afternoon failed at that harness, which is the highest rate observed so far
   - `mentionAmbiguity.test.ts` "an EF snapshot symbol yields to its code twin";
   - `csharpEfSnapshot.test.ts`: identity over a declared property is not a gap, identity over an undeclared one is;
   - CommHub conformance, 6 scenarios EQUAL on the build with this fix.
+
+## MCP-ISSUE-097 — a dropped SQL object read as a live definition
+
+- **Status:** ✅ FIXED 2026-10-22 (release M1, e3214f5).
+- **Scenario:** wec.aria `0018-tenant-location.sql:102` runs `drop table if exists public.tenant_opening_hours`,
+  and `:104-111` drops 7 `tenant_profile` columns. The index still answered with the baseline's
+  `create table` as the current definition. Every grant, `insert into` and TS query naming the table bound to it
+  as if it existed. CommHub's EF migrations drop 26 indexes and 14 columns in `Up()`, and nothing in the graph
+  said so.
+- **Expected vs actual:** a name whose latest migration event is a drop is reported as dropped. Before the fix it
+  was indistinguishable from a live one.
+- **Fix:**
+  - **Drop sites.** A new symbol kind, `sql_drop`, records one dropped object per drop site. The sites come from:
+    - `.sql` DROP TABLE / VIEW / INDEX / FUNCTION / TYPE / SEQUENCE / TRIGGER / POLICY;
+    - `ALTER TABLE … DROP COLUMN`, one site per column at its own line;
+    - EF `Up()` `DropTable` / `DropColumn` / `DropIndex`;
+    - DROPs inside `migrationBuilder.Sql`.
+  - **Order.** Drop sites are ordered with the definitions of their name by the I3 rank (`sqlDefinitions.ts`).
+    - The latest event decides. A re-create after a drop makes the name live again; drop → re-create → drop
+      leaves it dropped.
+    - A table drop cascades to the table's columns, policies, triggers and indexes.
+    - The state is derived, not stored. It shows as `sqlDefinition.dropped = { at, symbolId, via? }` in
+      `search_symbols` / `get_symbol_detail`; a `sql_drop` itself gets `dropSite { drops, recreatedAt }`.
+  - **References keep binding, labelled `name_resolved (dropped at file:line): …`.** A name with drops and no
+    definition stays a token labelled `unresolved sql token (dropped at file:line): …`.
+  - **Doc mentions bind as before.** A drop candidate yields to a definition of its name, and of several drop
+    sites the latest one stands. `query_docs stale` adds `dropped` for dropped targets.
+- **Evidence:**
+  - Ground truth, all ABSENT in the database:
+    - wec.aria: 25 dropped objects in aria_dev — the table, its 5 columns and its index via the cascade, the 7
+      `tenant_profile` columns, 4 `market_id` columns, `usage_events.provider_request_id`, 2 policies and 4 types;
+    - CommHub: 40 dropped objects in env dev.
+  - Delta from v13 to v14:
+    - wec.aria: +137 `sql_drop`; the edges are unchanged in number and the dropped targets are relabelled;
+      bound mentions stay at 12 762.
+    - Other repos only gain drop sites.
+- **Limits (labelled, not fixed):**
+  - `CREATE … IF NOT EXISTS` over a live object counts as a re-definition.
+  - `RenameColumn` / `RenameTable` are not modelled as drop + create.
+- **Guarded:**
+  - `sqlDrops.test.ts`: the state machine, the cascade, the EF tiers and the resolver labels;
+  - `csharpEfMigration.test.ts`: one drop site per column at its line;
+  - wec.aria conformance `drop-recreate`, steps 1 and 2 EQUAL in both modes.
+
+## MCP-ISSUE-098 — raw SQL in EF migrations was invisible (`migrationBuilder.Sql`)
+
+- **Status:** ✅ FIXED 2026-10-22 (release M2, e3214f5 + 0847136).
+- **Scenario:** CommHub creates 7 indexes outside the EF model through `migrationBuilder.Sql`. Examples are
+  partial unique indexes such as `ux_conversations_manual_open_thread … WHERE … channel = 'sms'` and the
+  expression index `lower(name)`. The L3 ground truth listed all 7 as "in the DB, not in the graph".
+- **Fix:** `csharpEfMigration.ts` reads the `Up()` and `Down()` of a class deriving from `Migration`.
+  - **Static string arguments.** The lane reads a string argument when it is a literal (regular, verbatim or
+    raw), an interpolated string whose holes are `const string` fields of the class, or a `+` of those.
+  - **One reader.** The text goes through the `.sql` lane's own `extractSql`, laid out on the `.cs` file's
+    lines.
+  - **Rank.** `Up()` is tier 3, sequenced by the migration timestamp. `Down()` is tier 0, marked `[EF down]`.
+    The ModelSnapshot stays tier 4. Against a migration site it now wins *decisively*, because they are one
+    lane. Without that, a migration `ADD COLUMN` made `bridge_message_id` mentions ambiguous.
+  - **Gaps.** Anything not static is a `sql_gap` at its line. CommHub has 1:
+    `{AgentManualSourceType}` is `static readonly`.
+  - **Index signatures.** The `.sql` lane's index signature now carries the columns, a non-btree method and the
+    filter.
+- **Evidence:**
+  - All 7 indexes match `pg_indexes` on env dev in name, uniqueness, columns and filter.
+    `ux_conversations_manual_open_thread` resolves to `20261021084540_ScopeManualOpenThreadIndexToSms.cs:29`.
+  - Indexes and ALTERs on `conversations` bind to the snapshot table.
+  - CommHub conformance is 7/7 EQUAL, including `ef-sql-index`.
+  - CommHub delta: +23 `sql_index`, +90 `sql_statement`, +58 `sql_drop`, +1 gap; bound mentions go from 752 to 763.
+- **Limit:** EF `CreateTable` / `CreateIndex` in migrations stay unmodelled; the snapshot is the model.
+
+## MCP-ISSUE-099 — `index_runs` and the WAL file grew without bound
+
+- **Status:** ✅ FIXED 2026-10-22 (release M, 4230e83).
+- **Scenario:** `index_runs` had no prune: 805 rows on the central DB, of which api-testing-studio had 307 and
+  CommHub 237. The WAL file stood at 88 MB, up from about 1 MB before release L. Two things kept it there:
+  - the server thread does not auto-checkpoint (release J);
+  - scoped runs checkpoint PASSIVE.
+
+  So nothing ever truncated the file after its peak.
+- **Fix:**
+  - **`index_runs` cap.** `recordRun` keeps the latest 200 rows per repo, plus always the latest run that did
+    work. The F guard (latest row) and the R1 skip gate (latest work row) therefore read what they read before.
+  - **WAL limit.** Every store connection sets `journal_size_limit` to 64 MB, so SQLite truncates the WAL to
+    that whenever a completed checkpoint lets it restart.
+- **Guarded:** `runStore.test.ts` "index_runs keeps the latest 200 rows per repo, and always the latest WORK run
+  behind any number of skips".
+- **Not covered:** the WAL size *during* one long write transaction is inherent to WAL. The `refactor_*`
+  tables have no time prune: 56 previews, under 1 MB, left as they are.

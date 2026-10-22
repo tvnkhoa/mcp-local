@@ -8,6 +8,38 @@ All notable changes to this project will be documented in this file.
 > introducing commit named so each claim is checkable. They are backfill, not a record written at
 > the time.
 
+## [Unreleased] - 2026-10-22 (release M)
+
+### ⚠️ `codebase-index-mcp`: a dropped SQL object is reported as dropped (MCP-ISSUE-097). Behaviour change for repos with SQL migrations
+
+- **New symbol kind `sql_drop`.** It records one dropped object per drop site, from four sources:
+  - `.sql` DROP statements;
+  - `ALTER TABLE … DROP COLUMN`, one site per column;
+  - EF `Up()` `DropTable` / `DropColumn` / `DropIndex`;
+  - DROPs inside `migrationBuilder.Sql`.
+- **The latest event decides.** A re-create after a drop makes the name live again. A table drop cascades to the table's columns, policies, triggers and indexes.
+- **Where it shows.**
+  - `search_symbols` / `get_symbol_detail` give `sqlDefinition.dropped = { at, symbolId, via? }`.
+  - References still bind, labelled `name_resolved (dropped at file:line)`. A name with drops and no definition stays a token labelled `dropped at`.
+  - Doc mentions bind as before, and `query_docs stale` marks dropped targets.
+- **Ground truth.** All dropped objects are absent in the databases: 25 on wec.aria (aria_dev) and 40 on CommHub (env dev).
+
+### ⚠️ `codebase-index-mcp`: raw SQL in EF migrations enters the graph (MCP-ISSUE-098). Behaviour change for EF repos
+
+- **What is read.** `migrationBuilder.Sql` strings in a migration's `Up()` / `Down()` go through the `.sql` lane's reader, at the `.cs` file's lines. A string qualifies when it is a literal, an interpolation of `const string` fields, or a `+` of those; anything else becomes a `sql_gap`.
+- **Ranking.**
+  - `Up()` ranks by the migration timestamp.
+  - `Down()` is a rollback and never current.
+  - The ModelSnapshot stays the current site of every name it maps.
+- **CommHub.** All 7 raw-SQL indexes match `pg_indexes` on dev in name, uniqueness, columns and filter.
+- **Index signatures.** The `.sql` lane's index signature now carries the columns, a non-btree method and the filter.
+- **`INDEX_VERSION` → `v14-release-m`.** A v13 server refuses to write over a v14 index, so reconnect every codebase-index process. Then run `index_repository` with `mode: "full"`; a scoped refresh keeps unchanged files' v13 rows.
+
+### `codebase-index-mcp`: `index_runs` and the WAL file are bounded (MCP-ISSUE-099)
+
+- **`index_runs`.** It keeps the latest 200 runs per repo, plus always the latest run that did work, so the F guard and the R1 skip gate read what they read before.
+- **WAL.** Every store connection sets `journal_size_limit` to 64 MB. The WAL had stayed at its 88 MB peak.
+
 ## [Unreleased] - 2026-10-22 (release L)
 
 ### ⚠️ `codebase-index-mcp`: EF Core models enter the graph (MCP-ISSUE-092). Behaviour change for C# repos with a `ModelSnapshot`
