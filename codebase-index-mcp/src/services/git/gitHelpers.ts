@@ -311,6 +311,87 @@ export function parseStatusPorcelainV2(out: string): { head: string | null; dirt
   return { head, dirty: [...new Set(dirty)] };
 }
 
+/** One porcelain-v2 entry: `1` changed, `2` renamed or copied (with its old path), `u` unmerged, `?` untracked. */
+export type StatusEntry = { code: "1" | "2" | "u" | "?"; path: string; origPath?: string };
+
+/** The entries of `git status --porcelain=v2 --branch -z`, one per entry git printed, in git's order. */
+export function parseStatusPorcelainV2Entries(out: string): { head: string | null; entries: StatusEntry[] } {
+  let head: string | null = null;
+  const result: StatusEntry[] = [];
+  const raw = out.split("\0");
+  for (let i = 0; i < raw.length; i++) {
+    const e = raw[i] ?? "";
+    if (e.startsWith("# branch.oid ")) {
+      const oid = e.slice("# branch.oid ".length).trim();
+      head = /^[0-9a-f]{7,64}$/.test(oid) ? oid : null; // "(initial)" before the first commit
+      continue;
+    }
+    // Fields before the path: 1 → 8, 2 → 9 (+ orig path as the next entry), u → 10, ? → 1.
+    const code = e[0];
+    const before = code === "1" ? 8 : code === "2" ? 9 : code === "u" ? 10 : code === "?" ? 1 : -1;
+    if (before < 0) continue;
+    const p = e.split(" ").slice(before).join(" ").replace(/\\/g, "/");
+    const origPath = code === "2" ? raw[++i]?.replace(/\\/g, "/") : undefined;
+    if (p) result.push({ code: code as StatusEntry["code"], path: p, ...(origPath && { origPath }) });
+  }
+  return { head, entries: result };
+}
+
+/**
+ * MCP-ISSUE-086 (release K1): `health_check`'s one git read — async, so the server thread never waits on
+ * a child process. No `--untracked-files` flag: the same untracked mode as the `git status --porcelain`
+ * (v1) it replaces, so an untracked directory is still ONE entry (`newdir/`) and `changedEntries` keeps
+ * its value. HEAD comes from `# branch.oid` in the same read.
+ */
+const HEALTH_STATUS_ARGS = ["-c", "core.quotePath=false", "status", "--porcelain=v2", "--branch", "-z"];
+
+export function readStatusEntriesAsync(repoPath: string): Promise<{ head: string | null; entries: StatusEntry[] }> {
+  return new Promise((resolve, reject) => {
+    execFile(
+      "git",
+      HEALTH_STATUS_ARGS,
+      { cwd: repoPath, encoding: "utf8", timeout: GIT_TIMEOUT_MS, maxBuffer: GIT_MAX_BUFFER_BYTES, windowsHide: true },
+      (error, stdout) => {
+        if (error) reject(error);
+        else resolve(parseStatusPorcelainV2Entries(stdout.trim()));
+      }
+    );
+  });
+}
+
+/** {@link getRepoWorkingTreeState}'s answer from porcelain-v2 entries (`null`: git could not be read). */
+export function summarizeWorkingTree(entries: readonly StatusEntry[] | null): ReturnType<typeof getRepoWorkingTreeState> {
+  if (!entries) {
+    return {
+      isDirty: null,
+      hasTrackedChanges: null,
+      hasUntrackedChanges: null,
+      changedEntries: 0,
+      note: "non-git repo or unable to read working tree status"
+    };
+  }
+  const hasUntrackedChanges = entries.some((e) => e.code === "?");
+  const hasTrackedChanges = entries.some((e) => e.code !== "?");
+  const isDirty = hasTrackedChanges || hasUntrackedChanges;
+  return {
+    isDirty,
+    hasTrackedChanges,
+    hasUntrackedChanges,
+    changedEntries: entries.length,
+    note: isDirty ? "working tree has pending changes" : "working tree is clean"
+  };
+}
+
+/**
+ * Which of `paths` git still reports as changed. An untracked directory comes back collapsed
+ * (`newdir/`) and every file under it is untracked, so a path under one counts.
+ */
+export function stillDirty(entries: readonly StatusEntry[], paths: readonly string[]): string[] {
+  const exact = new Set(entries.flatMap((e) => (e.origPath ? [e.path, e.origPath] : [e.path])));
+  const dirs = entries.filter((e) => e.code === "?" && e.path.endsWith("/")).map((e) => e.path);
+  return paths.filter((p) => exact.has(p) || dirs.some((d) => p.startsWith(d)));
+}
+
 /**
  * HEAD plus the working-tree delta in ONE git spawn. The R1 freshness gate runs this before every
  * read query; the four-spawn version (rev-parse + collectDirtyFiles) cost ~330 ms on wec.aria on
@@ -399,7 +480,9 @@ export function countCommitsBehind(repoPath: string, indexedSha: string | null):
 
 export function getRepoStaleness(
   repoId: string,
-  store: GraphStore
+  store: GraphStore,
+  /** HEAD already read (K1: from health_check's one async `git status`); `undefined` resolves it here. */
+  knownHead?: string | null
 ): {
   repoId: string;
   indexedCommitSha: string | null;
@@ -424,13 +507,13 @@ export function getRepoStaleness(
     return {
       repoId,
       indexedCommitSha: null,
-      headCommitSha: resolveHeadCommitSha(repo.repoPath),
+      headCommitSha: knownHead !== undefined ? knownHead : resolveHeadCommitSha(repo.repoPath),
       isStale: null,
       note: "no indexed run yet"
     };
   }
 
-  const headCommitSha = resolveHeadCommitSha(repo.repoPath);
+  const headCommitSha = knownHead !== undefined ? knownHead : resolveHeadCommitSha(repo.repoPath);
   if (!headCommitSha) {
     return {
       repoId,

@@ -289,6 +289,7 @@ export class GraphStore {
    */
   invalidateProcessCaches(): void {
     invalidateVectorSearchCache();
+    this.unresolvedStatsCache.clear();
   }
 
   runInTransaction(fn: () => void): void {
@@ -1188,9 +1189,22 @@ export class GraphStore {
     return getVectorStats(this.db, repoId);
   }
 
-  getUnresolvedStats(repoId: string): UnresolvedStats {
-    return getUnresolvedStatsImpl(this.db, repoId);
+  /**
+   * MCP-ISSUE-086 (release K1): `health_check` runs this aggregate over every token edge of the repo —
+   * ~91 000 rows and 130-220 ms on wec.be, on the server thread, every call. Edges change only through an
+   * index run, so with `runKey` (the latest run's id) the answer is kept until a run from ANY process
+   * records a new latest run, or the refresh worker lands one (`invalidateProcessCaches`).
+   */
+  getUnresolvedStats(repoId: string, runKey?: string): UnresolvedStats {
+    if (runKey === undefined) return getUnresolvedStatsImpl(this.db, repoId);
+    const hit = this.unresolvedStatsCache.get(repoId);
+    if (hit?.runKey === runKey) return hit.stats;
+    const stats = getUnresolvedStatsImpl(this.db, repoId);
+    this.unresolvedStatsCache.set(repoId, { runKey, stats });
+    return stats;
   }
+
+  private readonly unresolvedStatsCache = new Map<string, { runKey: string; stats: UnresolvedStats }>();
 
   /**
    * CALLS edges still pointing at a `callee:` placeholder — the measured remainder after resolution.

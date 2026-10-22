@@ -62,7 +62,7 @@ export function buildReadMetadataTools(deps: CodebaseIndexDeps): AnyToolDefiniti
     },
     annotations: readsGraph,
     rawResult: true,
-    handler: (input) => ok(raw(handleHealthCheck(input, buildContext())))
+    handler: async (input) => ok(raw(await handleHealthCheck(input, buildContext())))
   });
 
   const listRepositories = defineTool({

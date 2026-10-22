@@ -1,10 +1,10 @@
 import { loadCitationConfig } from "../../services/docs/citationConfig.js";
 import { isTestPath } from "../../services/indexing/fileFilter.js";
 import { freshnessStateDir, readDirtyLedger, vanishedDirtyPaths } from "../../middleware/freshness.js";
-import { readWorkingTreeState } from "../../services/git/gitHelpers.js";
+import { readStatusEntriesAsync, stillDirty, summarizeWorkingTree, type StatusEntry } from "../../services/git/gitHelpers.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { McpError, ErrorCode } from "@modelcontextprotocol/sdk/types.js";
-import { getRepoStaleness, getRepoWorkingTreeState } from "../../services/git/gitHelpers.js";
+import { getRepoStaleness } from "../../services/git/gitHelpers.js";
 import { assertPathAllowed, clamp } from "../../middleware/indexGuardrails.js";
 import { resolveResponseProfile } from "../../middleware/responseFormatter.js";
 import { resolveDetectChangesPolicy } from "../../services/analysis/policyResolver.js";
@@ -50,22 +50,34 @@ function asInvalidParamsOnBadRef<T>(run: () => T): T {
 
 // ── health_check ─────────────────────────────────────────────────────────────
 
-export function handleHealthCheck(
+export async function handleHealthCheck(
   args: { repoId?: string },
   ctx: HandlerContext
-): CallToolResult {
+): Promise<CallToolResult> {
   const { store, watchManager, activeWatchRef, constants } = ctx;
   const { repoId } = args;
 
-  const latestRun = repoId ? store.getLatestRun(repoId) : null;
-  const staleness = repoId ? getRepoStaleness(repoId, store) : null;
   const repo = repoId ? store.getRepository(repoId) : null;
+  // MCP-ISSUE-086 (release K1): ONE git read, async. It used to be two synchronous `git status` runs
+  // (porcelain v1 for the working-tree block, v2 for the dirty ledger) that held the server thread
+  // ~570 ms on wec.be and ~300 ms on wec.aria — every other call in flight waited. HEAD comes from the
+  // same read. `null`: not a git repo, or git failed — the same answers the sync reads gave then.
+  let status: { head: string | null; entries: StatusEntry[] } | null = null;
+  if (repo) {
+    try {
+      status = await readStatusEntriesAsync(repo.repoPath);
+    } catch {
+      status = null;
+    }
+  }
+  const latestRun = repoId ? store.getLatestRun(repoId) : null;
+  const staleness = repoId ? getRepoStaleness(repoId, store, repo ? (status?.head ?? null) : undefined) : null;
   const watchStatuses = repoId ? watchManager.getStatus(repoId) : [];
   const watchRunning = watchStatuses.length > 0;
-  const workingTree = repo ? getRepoWorkingTreeState(repo.repoPath) : null;
+  const workingTree = repo ? summarizeWorkingTree(status?.entries ?? null) : null;
   const packageBridge = repoId ? store.getPackageBridgeStats(repoId) : null;
   const vectorStats = repoId ? store.getVectorStats(repoId) : null;
-  const unresolvedStats = repoId ? store.getUnresolvedStats(repoId) : null;
+  const unresolvedStats = repoId ? store.getUnresolvedStats(repoId, latestRun?.runId) : null;
 
   // MCP-ISSUE-042: the third staleness signal. The other two are git-based and a refactor rollback
   // defeats both — it restores the pre-apply bytes, so HEAD matches and the tree is clean, while the
@@ -77,13 +89,9 @@ export function handleHealthCheck(
   // deleted or reverted, leave a clean tree at the indexed HEAD — and their symbols in the graph.
   // wec.aria's acceptance found health_check saying "up-to-date" in exactly that state.
   let indexedFromOldTree: string[] = [];
-  if (repo) {
-    try {
-      const tree = readWorkingTreeState(repo.repoPath);
-      if (tree.head) indexedFromOldTree = vanishedDirtyPaths(readDirtyLedger(freshnessStateDir(constants.dbPath), repoId!), tree.head, tree.dirty);
-    } catch {
-      // not a git repo
-    }
+  if (repo && status?.head) {
+    const ledger = readDirtyLedger(freshnessStateDir(constants.dbPath), repoId!);
+    indexedFromOldTree = vanishedDirtyPaths(ledger, status.head, stillDirty(status.entries, ledger?.paths ?? []));
   }
 
   const reasons: string[] = [];
