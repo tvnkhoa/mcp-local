@@ -14,6 +14,8 @@ All notable changes to this project will be documented in this file.
 
 - A backtick or `code_call` mention whose deciding lookup finds more than one symbol of the best kind rank
   no longer binds to the first by path. It keeps no symbol and records `candidate_count` / `candidate_ids`.
+  Before the tie check, candidates in test code are dropped whenever one in real code exists; then kind
+  rank decides; whatever is still tied is ambiguous (owner decision).
   The dotted-prefix lookup stops picking too. On wec.aria 6,719 backtick + 50 `code_call` mentions are
   ambiguous (6,593 + 46 of them were release J's picks); bound backtick mentions 14,972 → 8,253.
 - What callers see: `query_docs stale` also lists a doc whose ambiguous mention has a changed symbol among
@@ -25,7 +27,9 @@ All notable changes to this project will be documented in this file.
 
 ### `codebase-index-mcp`: faster refresh, `health_check` off the server thread, renames in `detect_changes`
 
-- **A 1-file refresh answers in ~1 s** (MCP-ISSUE-088; was ~2.3 s): the worker reuses the gate's
+- **A 1-file refresh answers in ~1.4 s on wec.aria with peer edits present** (MCP-ISSUE-088; was ~2.3 s; a
+  dirty file that did not change since the last refresh is not re-extracted, and a refresh that changed
+  nothing skips every pass but cross-repo): the worker reuses the gate's
   `git status`, posts the answer before its checkpoint, and a scoped run limits its repo-wide passes
   (call re-resolution, CSS, SQL, mention resets) to what the change can affect — equal to a full run on 13
   wec.aria scenarios. Two older scoped-run defects fixed on the way: deleting a file was the one change
