@@ -513,7 +513,11 @@ export async function runIndexPipeline(store: GraphStore, input: RunIndexInput):
           const safeContent = redactSensitive(raw);
           const contentHash = hashOf(safeContent);
 
-          if (input.mode === "incremental" && !forcedPaths.has(relativePath)) {
+          // Release K3: dirty mode too. A file that stays dirty across runs (a peer session's edit) was
+          // re-extracted by every refresh — on wec.aria, 5 such files made every 1-file refresh a 6-file one
+          // and dragged the SQL / CSS passes in. Its rows are a function of its content, which the stored
+          // hash says has not changed since the run that wrote them.
+          if ((input.mode === "incremental" || input.mode === "dirty") && !forcedPaths.has(relativePath)) {
             const previousHash = store.getFileHash(input.repoId, relativePath);
             if (previousHash === contentHash) {
               c.filesSkipped += 1;

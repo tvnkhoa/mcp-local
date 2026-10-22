@@ -135,6 +135,53 @@ test("deleting a file that others import and call, with a doc naming it twice, l
   );
 });
 
+test("a doc mention bound to real code over test code moves to the test symbol when the real one is deleted", async () => {
+  // Release K4, owner rule: test-code candidates are dropped while a real one exists, kept when all are
+  // tests. `widget` binds to src/widget.ts; deleting that declaration must bind it to the test helper in
+  // the scoped run exactly as a full run does.
+  await assertScopedEqualsFull(
+    "test-path-rule",
+    {
+      "src/widget.ts": "export function widget(): number {\n  return 1;\n}\n\nexport const keep = 1;\n",
+      "test/widget.test.ts": "export function widget(): number {\n  return 2;\n}\n",
+      "docs/notes.md": "# Notes\n\nThe `widget` helper.\n"
+    },
+    (root) => writeTree(root, { "src/widget.ts": "export const keep = 1;\n" })
+  );
+});
+
+test("files that stay dirty across refreshes are not re-extracted, and the graph still equals a full run", async () => {
+  // Release K3: a peer session's uncommitted edits stay in the tree; every refresh re-extracted them.
+  // A dirty file whose content hash matches the run that indexed it is skipped, as incremental mode does.
+  const repo = makeRepo({
+    "src/a.ts": "export function alpha(): number {\n  return 1;\n}\n",
+    "src/b.ts": "export function beta(): number {\n  return alpha();\n}\n",
+    "src/c.ts": "export const gamma = 3;\n"
+  });
+  const work = mkdtempSync(path.join(tmpdir(), "cim-scoped-db-"));
+  try {
+    const scopedDb = path.join(work, "scoped.db");
+    const fullDb = path.join(work, "full.db");
+    await index(scopedDb, "r", repo, "full");
+    // The peer's edits, indexed once by a refresh.
+    writeTree(repo, {
+      "src/a.ts": "export function alpha(): number {\n  return 10;\n}\n\nexport function alphaTwo(): number {\n  return alpha();\n}\n",
+      "src/c.ts": "export const gamma = 30;\n"
+    });
+    await index(scopedDb, "r", repo, "dirty");
+    // Then this session's 1-file add: only it is re-extracted.
+    writeTree(repo, { "src/probe.ts": "export function probe(): number {\n  return beta();\n}\n" });
+    assert.match((await index(scopedDb, "r", repo, "dirty")) ?? "", /^scoped: 1 changed, /, "the two static dirty files are skipped by hash");
+    await index(fullDb, "r", repo, "full");
+    const a = snapshot(scopedDb, "r");
+    const b = snapshot(fullDb, "r");
+    for (const table of Object.keys(b)) assert.deepEqual(a[table], b[table], `static-dirty: ${table} differs from a full run`);
+  } finally {
+    rmSync(repo, { recursive: true, force: true });
+    rmSync(work, { recursive: true, force: true });
+  }
+});
+
 test("a dirty run reads every .csproj's package names, so a .cs file extracts as in a full run", async () => {
   // `using Acme.Things;` becomes a nuget:acme contract edge only when some project references `Acme`.
   // The dirty run sees just the edited .cs file; it used to pre-scan only dirty .csproj files.

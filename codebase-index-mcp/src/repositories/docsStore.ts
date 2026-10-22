@@ -4,6 +4,7 @@ import nodePath from "node:path";
 import type Database from "better-sqlite3";
 import type { DocRecord, DocMentionRecord } from "../types/index.js";
 import { indexLog, indexWarn } from "../services/indexing/indexProgress.js";
+import { isTestPath } from "../services/indexing/fileFilter.js";
 
 /**
  * MCP-ISSUE-061(c): `findStaleDocsImpl` and `findDocCoverageImpl` each hardcoded `limit 200` while
@@ -218,8 +219,10 @@ export const MENTION_CANDIDATES_SHOWN = 20;
  *
  * A backtick / code_call mention is decided by the first of these steps that has a candidate: the exact
  * name, the lower-cased name, a dotted symbol's last segment (`Codec.Parse` for `Parse`), a dotted
- * symbol's leading part. The name steps keep only the best kind rank (class < interface < function <
- * method < variable < other). A filepath mention binds to the file's module symbol (release J).
+ * symbol's leading part. Within the deciding step (release K4, owner decision): candidates in test code
+ * (`isTestPath`, the rule search ranks by) are dropped whenever one outside test code exists; then the
+ * name steps keep only the best kind rank (class < interface < function < method < variable < other).
+ * A filepath mention binds to the file's module symbol (release J).
  *
  * Release K4 (MCP-ISSUE-089): the deciding step having MORE than one candidate is an answer — "ambiguous,
  * N candidates" — not a licence to pick. Release J made the pick deterministic (the first by path); on
@@ -263,38 +266,33 @@ export function resolveMentionsImpl(db: Database.Database, repoId: string): numb
     .prepare(`select symbol_id, name, kind, file_path from symbols where repo_id = ? order by file_path, line, symbol_id`)
     .all(repoId) as { symbol_id: string; name: string; kind: string; file_path: string }[];
 
-  type Ranked = { rank: number; ids: string[] };
-  const keepBest = (map: Map<string, Ranked>, key: string, rank: number, id: string): void => {
-    const e = map.get(key);
-    if (!e || rank < e.rank) map.set(key, { rank, ids: [id] });
-    else if (rank === e.rank && !e.ids.includes(id)) e.ids.push(id);
-  };
-  const push = (map: Map<string, string[]>, key: string, id: string): void => {
+  type Candidate = { id: string; rank: number; test: boolean };
+  const add = (map: Map<string, Candidate[]>, key: string, c: Candidate): void => {
     const list = map.get(key);
-    if (!list) map.set(key, [id]);
-    else if (!list.includes(id)) list.push(id);
+    if (!list) map.set(key, [c]);
+    else if (!list.some((x) => x.id === c.id)) list.push(c);
   };
-  const byName = new Map<string, Ranked>();
-  const byLower = new Map<string, Ranked>();
+  const byName = new Map<string, Candidate[]>();
+  const byLower = new Map<string, Candidate[]>();
   /**
    * MCP-ISSUE-049: a bare `Parse` must not bind to whichever `X.Parse` came first — that sent five archived
    * docs to "stale" for a symbol they never mention. Since K4 every step answers the same way: one
    * candidate binds, several make the mention ambiguous.
    */
-  const bySuffix = new Map<string, string[]>();
-  const byPrefix = new Map<string, string[]>();
+  const bySuffix = new Map<string, Candidate[]>();
+  const byPrefix = new Map<string, Candidate[]>();
   const filePathMap = new Map<string, string>();
   const filePathSuffixMap = new Map<string, string>();
 
   for (const sym of allSymbols) {
-    const rank = kindRank(sym.kind);
-    keepBest(byName, sym.name, rank, sym.symbol_id);
+    const candidate: Candidate = { id: sym.symbol_id, rank: kindRank(sym.kind), test: isTestPath(sym.file_path) };
+    add(byName, sym.name, candidate);
     const nameLower = sym.name.toLowerCase();
-    keepBest(byLower, nameLower, rank, sym.symbol_id);
+    add(byLower, nameLower, candidate);
     const dotIdx = nameLower.lastIndexOf(".");
     if (dotIdx >= 0) {
-      push(bySuffix, nameLower.slice(dotIdx + 1), sym.symbol_id);
-      push(byPrefix, nameLower.slice(0, dotIdx), sym.symbol_id);
+      add(bySuffix, nameLower.slice(dotIdx + 1), candidate);
+      add(byPrefix, nameLower.slice(0, dotIdx), candidate);
     }
 
     const normalizedPath = sym.file_path
@@ -312,9 +310,22 @@ export function resolveMentionsImpl(db: Database.Database, repoId: string): numb
     }
   }
 
-  /** The deciding step's answer: one id binds, several are ambiguous, none falls through. */
-  const decide = (ids: readonly string[] | undefined): { bind: string } | { ambiguous: readonly string[] } | null =>
-    !ids || ids.length === 0 ? null : ids.length === 1 ? { bind: ids[0]! } : { ambiguous: ids };
+  /**
+   * The deciding step's answer: one candidate binds, several are ambiguous, none falls through. Order
+   * (owner decision, release K4): drop test-code candidates when a non-test one exists — real code over
+   * test code; all-test keeps them all — then, on the name steps, the best kind rank; whatever is still
+   * tied is ambiguous.
+   */
+  const decide = (list: readonly Candidate[] | undefined, ranked: boolean): { bind: string } | { ambiguous: readonly string[] } | null => {
+    if (!list || list.length === 0) return null;
+    const real = list.filter((c) => !c.test);
+    let pool = real.length > 0 ? real : list;
+    if (ranked) {
+      const best = Math.min(...pool.map((c) => c.rank));
+      pool = pool.filter((c) => c.rank === best);
+    }
+    return pool.length === 1 ? { bind: pool[0]!.id } : { ambiguous: pool.map((c) => c.id) };
+  };
 
   const bindStmt = db.prepare(
     `update or replace doc_mentions set symbol_id = ?, candidate_count = null, candidate_ids = null
@@ -334,10 +345,10 @@ export function resolveMentionsImpl(db: Database.Database, repoId: string): numb
       if (mention.mention_type === "backtick" || mention.mention_type === "code_call") {
         const lower = mention.mention_text.toLowerCase();
         outcome =
-          decide(byName.get(mention.mention_text)?.ids) ??
-          decide(byLower.get(lower)?.ids) ??
-          decide(bySuffix.get(lower)) ??
-          decide(byPrefix.get(lower));
+          decide(byName.get(mention.mention_text), true) ??
+          decide(byLower.get(lower), true) ??
+          decide(bySuffix.get(lower), false) ??
+          decide(byPrefix.get(lower), false);
       } else if (mention.mention_type === "filepath") {
         const normalizedMention = mention.mention_text
           .replace(/\\/g, "/")

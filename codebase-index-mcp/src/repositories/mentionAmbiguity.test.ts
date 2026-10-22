@@ -132,3 +132,19 @@ test("a scoped run unbinds a mention whose target was one of the run's old ids, 
   resolveMentionsImpl(conn, "r");
   assert.equal(row(conn, "d1", "Store")?.symbolId, null, "and nothing re-binds it — as a full run decides");
 });
+
+test("owner rule: real code over test code, then kind rank, then ambiguous; all-test candidates keep the normal rule", () => {
+  const conn = db();
+  sym(conn, "src-block", "block", "function", ".claude/scripts/write-gate.mjs");
+  sym(conn, "test-block-a", "block", "function", "packages/portal/test/text-contrast.test.ts");
+  sym(conn, "test-scope", "scope", "function", "packages/ingest/test/topic-hold-live.test.ts"); // a better kind rank, but test code
+  sym(conn, "src-scope", "scope", "property", "packages/ingest/src/store.ts");
+  sym(conn, "t1", "turn", "function", "packages/a/test/one.test.ts");
+  sym(conn, "t2", "turn", "function", "packages/b/test/two.test.ts");
+  doc(conn, "d1", "a doc");
+  for (const t of ["block", "scope", "turn"]) mention(conn, "d1", t);
+  resolveMentionsImpl(conn, "r");
+  assert.equal(row(conn, "d1", "block")?.symbolId, "src-block", "the test candidate is dropped, one real one binds");
+  assert.equal(row(conn, "d1", "scope")?.symbolId, "src-scope", "the filter runs BEFORE kind rank: a test function no longer beats a property");
+  assert.equal(row(conn, "d1", "turn")?.candidateCount, 2, "all candidates in test code: the normal rule, still tied");
+});
