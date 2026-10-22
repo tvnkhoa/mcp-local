@@ -1,5 +1,10 @@
 /**
- * CALLS edges — the batched resolver, its context object, and the vector-lookup fallback. The largest of the five and the only one that consults the vector store.
+ * CALLS edges — the batched resolver and its context object. The largest of the five.
+ *
+ * Release J removed the vector (nearest-name) fallback this lane had for tokens with no named candidate.
+ * Every edge it had written was a guess, nearly all into test files (wec.aria 47, ssnet 329, mcp-local
+ * 199, this repo 105, wec.be 12 — MCP-ISSUE-084), and its probe stopped after 100 fruitless lookups, so
+ * which tokens it reached depended on which rows a run resolved. Such a token is an external boundary.
  *
  * Split out of `edgeResolver.ts` in S-41 (it was 1424 lines, past the
  * 600-line hard cap). Bodies are unchanged; what moved is which file they live in.
@@ -14,20 +19,9 @@ import {
   isKnownExternalNamespace,
   isKnownCrossRepoNamespace,
   stripGenerics,
-  vectorSearchSymbols,
-  isVectorEnabled,
 } from "../../repositories/vectorStore.js";
 import { buildNamedCandidateMap, pickBestNamedCandidate } from "./edgeResolverShared.js";
 import { buildImportedFilesByFile, normalizeFilePath } from "./moduleResolution.js";
-import { indexWarn } from "../indexing/indexProgress.js";
-
-/**
- * How many fruitless vector lookups to tolerate before concluding the lane cannot pay on this repo.
- *
- * 100 x ~31ms is about 3 seconds of probing — enough to find a hit if hits exist (they cluster, since a
- * near-miss token usually has several siblings), cheap enough that being wrong costs little.
- */
-const VECTOR_PROBE_SIZE = 100;
 
 /**
  * The two `reason` labels that mean "this target came from the callee's NAME alone, across files".
@@ -77,20 +71,6 @@ export interface CallResolutionContext {
   unresolvedRows: { fromId: string; toId: string; fromFile: string }[];
   /** Current offset into unresolvedRows for batching */
   offset: number;
-  /**
-   * Adaptive cutoff for the vector fallback, carried across batches.
-   *
-   * The lane is expensive and, on some repos, worthless. Measured on `wec.communication-hub`: 968 distinct
-   * tokens reach it, each KNN costs ~31ms, and **zero** clear the `distance < 0.35` gate — 30 seconds of
-   * the resolve phase producing not one edge. Confirmed by differencing a full run with
-   * `CODEBASE_INDEX_VECTOR_ENABLED` on and off: byte-identical CALLS reasons, 11331 rows tagged
-   * `external boundary` either way.
-   *
-   * Rather than disable the lane (it can pay on a repo whose unresolved tokens are in-repo near-misses) or
-   * leave it unbounded, it measures itself: after `VECTOR_PROBE_SIZE` lookups with no hit, it stops. The
-   * capability survives where it works; the waste is capped at a few seconds where it does not.
-   */
-  vectorProbe: { attempted: number; hits: number; abandoned: boolean };
   /**
    * Per-file set of repo files that file imports, used to scope name candidates.
    *
@@ -220,7 +200,7 @@ export function buildCallResolutionContext(db: Database.Database, repoId: string
     )
     .all({ repoId, supersededReason: SUPERSEDED_REASON }) as { fromId: string; toId: string; fromFile: string }[];
 
-  return { candidateMap, interfaceByName, interfaceIdSet, implementorFilesByIfaceId, subclassFilesByBaseId, virtualMethodIds, updateStmt, insertDispatchStmt, unresolvedRows, offset: 0, vectorProbe: { attempted: 0, hits: 0, abandoned: false }, importedFilesByFile };
+  return { candidateMap, interfaceByName, interfaceIdSet, implementorFilesByIfaceId, subclassFilesByBaseId, virtualMethodIds, updateStmt, insertDispatchStmt, unresolvedRows, offset: 0, importedFilesByFile };
 }
 
 export type ResolvedUpdate = { fromId: string; oldToId: string; newToId: string; confidence: number; reason: string };
@@ -328,10 +308,11 @@ export function resolveCallEdgesBatch(
 
   // Phase 1: resolve all rows in memory → collect updates and inserts
   type InsertRow = { fromId: string; toId: string; confidence: number; reason: string };
-  type PendingVectorLookup = { fromId: string; oldToId: string; normalized: string };
   const updates: ResolvedUpdate[] = [];
   const inserts: InsertRow[] = [];
-  const pendingVectorLookups: PendingVectorLookup[] = [];
+  // Tokens with no named candidate, tagged external boundary after the loop (their order in `updates`
+  // is unchanged from when they waited here for the vector fallback release J removed).
+  const noCandidate: { fromId: string; oldToId: string }[] = [];
 
   for (const row of batch) {
     const calleeName = row.toId.slice(7);
@@ -488,62 +469,16 @@ export function resolveCallEdgesBatch(
         // Tag as external boundary with slightly higher confidence than pure external
         updates.push({ fromId: row.fromId, oldToId: row.toId, newToId: row.toId, confidence: 0.15, reason: "external boundary (DI field)" });
       } else {
-        // Collect unresolved tokens for deferred batch vector fallback (after main loop).
-        // Calling vectorSearchSymbols per-row is extremely slow on large repos (~40ms/call).
-        pendingVectorLookups.push({ fromId: row.fromId, oldToId: row.toId, normalized });
+        noCandidate.push({ fromId: row.fromId, oldToId: row.toId });
       }
     }
   }
 
-  // Deferred batch vector fallback: resolve remaining unmatched edges via vector search.
-  // This runs once per batch instead of per-row, dramatically reducing SQLite vec0 queries.
-  if (pendingVectorLookups.length > 0 && isVectorEnabled()) {
-    // Build a dedup map to avoid searching the same token multiple times
-    const tokenToResult = new Map<string, { symbolId: string; distance: number } | null>();
-    for (const pending of pendingVectorLookups) {
-      if (!tokenToResult.has(pending.normalized)) {
-        tokenToResult.set(pending.normalized, null); // placeholder
-      }
-    }
-    // Single pass: one vector search per unique token (not per edge)
-    for (const token of tokenToResult.keys()) {
-      // The adaptive cutoff. `abandoned` persists across batches via ctx, so a repo whose vector lane
-      // pays nothing stops paying after the probe rather than once per batch.
-      if (ctx.vectorProbe.abandoned) break;
-      const vecResults = vectorSearchSymbols(db, repoId, token, 3);
-      ctx.vectorProbe.attempted += 1;
-      if (vecResults.length > 0 && vecResults[0].distance < 0.35) {
-        ctx.vectorProbe.hits += 1;
-        tokenToResult.set(token, vecResults[0]);
-      }
-      if (ctx.vectorProbe.hits === 0 && ctx.vectorProbe.attempted >= VECTOR_PROBE_SIZE) {
-        ctx.vectorProbe.abandoned = true;
-        // Warn, not log: a capability switching itself off is exactly the kind of silent degradation that
-        // produced MCP-ISSUE-038, so it has to be visible in the default quiet mode.
-        indexWarn(
-          `[index-resolve] vector fallback abandoned for ${repoId}: ${String(VECTOR_PROBE_SIZE)} lookups, 0 matches under the confidence gate. ` +
-            `Remaining unresolved callees are tagged external boundary without a vector attempt.`
-        );
-      }
-    }
-    // Apply results back to edges
-    for (const pending of pendingVectorLookups) {
-      const result = tokenToResult.get(pending.normalized);
-      if (result) {
-        updates.push({ fromId: pending.fromId, oldToId: pending.oldToId, newToId: result.symbolId, confidence: 0.52, reason: "resolved callee vector-fallback" });
-      } else {
-        // No user-defined candidate AND no vector match — tag as external boundary
-        updates.push({ fromId: pending.fromId, oldToId: pending.oldToId, newToId: pending.oldToId, confidence: 0.1, reason: "external boundary" });
-      }
-    }
-  } else if (pendingVectorLookups.length > 0) {
-    // Vector not enabled — tag all pending (no-candidate) items as external boundary
-    for (const pending of pendingVectorLookups) {
-      updates.push({ fromId: pending.fromId, oldToId: pending.oldToId, newToId: pending.oldToId, confidence: 0.1, reason: "external boundary" });
-    }
+  for (const pending of noCandidate) {
+    updates.push({ fromId: pending.fromId, oldToId: pending.oldToId, newToId: pending.oldToId, confidence: 0.1, reason: "external boundary" });
   }
 
-  // MCP-ISSUE-052: runs after the vector lane so it sees every resolution this caller produced.
+  // MCP-ISSUE-052: runs last so it sees every resolution this caller produced.
   // Batch boundaries are extended above so a caller's bare and qualified rows are never split.
   suppressBareCallsShadowedByQualified(updates);
 

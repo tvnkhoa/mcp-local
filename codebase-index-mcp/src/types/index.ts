@@ -545,6 +545,8 @@ export type RefactorRollbackRecord = {
 export const NAME_ONLY_EDGE_REASONS: ReadonlySet<string> = new Set([
   "resolved callee by name",
   "resolved callee by name (ambiguous)",
+  // No longer written (release J removed the vector fallback, MCP-ISSUE-084), but an index built
+  // before it keeps these rows until its next full run, and they are still guesses.
   "resolved callee vector-fallback",
   "resolved property by name",
   // The receiver's type was never proven — only the member name matched. MCP-ISSUE-052.

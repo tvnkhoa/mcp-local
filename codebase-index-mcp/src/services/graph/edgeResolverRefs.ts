@@ -9,24 +9,18 @@ import type Database from "better-sqlite3";
 import type { Statement } from "better-sqlite3";
 import type { ResolutionStats } from "../../types/index.js";
 import { findProviderSymbolByName } from "../../repositories/crossRepoStore.js";
-import { indexWarn } from "../indexing/indexProgress.js";
 import {
   isKnownExternalToken,
   isKnownExternalTypeName,
   isKnownExternalNamespace,
   isKnownCrossRepoNamespace,
   stripGenerics,
-  vectorSearchSymbols,
-  isVectorEnabled,
 } from "../../repositories/vectorStore.js";
 import { buildNamedCandidateMap, pickBestNamedCandidate } from "./edgeResolverShared.js";
 
-/** Mirrors VECTOR_PROBE_SIZE in the CALLS lane: ~3s of probing before concluding the lane cannot pay. */
-const TYPE_VECTOR_PROBE_SIZE = 100;
-
 /**
- * @param skipExpensiveFallbacks skip the cross-repo provider search and the vector search, keeping only the
- *   in-memory name match.
+ * @param skipExpensiveFallbacks skip the cross-repo provider search, keeping only the in-memory name match.
+ *   (Release J removed the vector fallback that followed it; see the CALLS lane, MCP-ISSUE-084.)
  *
  *   This is the second half of the MCP-ISSUE-038 remedy, and the halves are separable on purpose. Keeping
  *   the EDGES is what `dead_code_scan` needs: its predicate is
@@ -69,8 +63,7 @@ export function resolveTypeRefEdges(db: Database.Database, repoId: string, maxUn
   /**
    * Memoized fallback lookup, keyed by type name.
    *
-   * Both fallbacks below — the cross-repo provider search and the vector similarity search — depend
-   * only on the type name, so the same answer was being recomputed for every occurrence. The primary
+   * The fallback below — the cross-repo provider search — depends only on the type name, so the same answer was being recomputed for every occurrence. The primary
    * `pickBestNamedCandidate` match is deliberately NOT memoized: it takes `row.fromFile` to prefer a
    * same-file declaration, so it is genuinely per-row.
    *
@@ -81,8 +74,6 @@ export function resolveTypeRefEdges(db: Database.Database, repoId: string, maxUn
    * `typeResolveMs` from 5214 to 111950. Distinct names are a few hundred against a few thousand rows.
    */
   const fallbackCache = new Map<string, { symbolId: string; confidence: number; reason: string } | null>();
-  // Per-call state, so one repo abandoning the lane cannot affect the next.
-  const vectorProbe = { attempted: 0, hits: 0, abandoned: false };
 
   function resolveFallback(
     typeName: string,
@@ -124,25 +115,6 @@ export function resolveTypeRefEdges(db: Database.Database, repoId: string, maxUn
       isFrameworkType || isTooGenericToCrossRepos(typeName) ? null : findProviderSymbolByName(db, repoId, typeName);
     if (crossRepoMatch) {
       result = { symbolId: crossRepoMatch.symbolId, confidence: 0.65, reason: "resolved type cross-repo name-match" };
-    } else if (isVectorEnabled() && !vectorProbe.abandoned) {
-      // Vector fallback for internal types that didn't match exactly.
-      //
-      // Same adaptive cutoff as the CALLS lane: each KNN costs ~31ms, and on a repo whose unresolved types
-      // are all framework names none of them clears the 0.30 gate. Memoizing by name (above) removes the
-      // repeats but not the first lookup of each distinct name, and MCP-ISSUE-034 raised the distinct count
-      // by 2.9x — so the lane's floor cost rose with the very change that made TYPE_REF useful.
-      const vecResults = vectorSearchSymbols(db, repoId, typeName, 3);
-      vectorProbe.attempted += 1;
-      if (vecResults.length > 0 && vecResults[0].distance < 0.30) {
-        vectorProbe.hits += 1;
-        result = { symbolId: vecResults[0].symbolId, confidence: 0.5, reason: "resolved type vector-fallback" };
-      }
-      if (vectorProbe.hits === 0 && vectorProbe.attempted >= TYPE_VECTOR_PROBE_SIZE) {
-        vectorProbe.abandoned = true;
-        indexWarn(
-          `[index-resolve] type vector fallback abandoned for ${repoId}: ${String(TYPE_VECTOR_PROBE_SIZE)} lookups, 0 matches under the confidence gate.`
-        );
-      }
     }
 
     fallbackCache.set(rawTypeName, result);
