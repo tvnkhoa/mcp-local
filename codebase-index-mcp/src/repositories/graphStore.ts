@@ -80,6 +80,7 @@ import {
   resolveMentionsImpl,
   searchDocsImpl,
   findStaleDocsImpl,
+  type StaleDocsResult,
   findDocCoverageImpl,
   findDriftingDocsImpl,
   findDocLinksImpl,
@@ -1048,26 +1049,8 @@ export class GraphStore {
     return searchDocsImpl(this.db, repoId, query, limit, buildFtsQuery, buildIntentFtsQuery, includeSymbols, contentTypes, includeArchived, matchMode, maxPerFile);
   }
 
-  findStaleDocs(
-    repoId: string,
-    symbolIds: string[],
-    includeCodeMentions = false,
-    limit?: number
-  ): {
-    rows: {
-      docId: string;
-      filePath: string;
-      headingPath: string;
-      text: string | null;
-      mentionText: string;
-      mentionType: string;
-      symbolName: string | null;
-      match?: "ambiguous";
-      candidateCount?: number;
-    }[];
-    total: number;
-  } {
-    return findStaleDocsImpl(this.db, repoId, symbolIds, includeCodeMentions, limit);
+  findStaleDocs(repoId: string, symbolIds: string[], includeCodeMentions = false, limit?: number, grouped = false): StaleDocsResult {
+    return findStaleDocsImpl(this.db, repoId, symbolIds, includeCodeMentions, limit, grouped);
   }
 
   findNonEnglishDocs(repoId: string, minRatioPercent?: number, limit?: number): ReturnType<typeof findNonEnglishDocsImpl> {

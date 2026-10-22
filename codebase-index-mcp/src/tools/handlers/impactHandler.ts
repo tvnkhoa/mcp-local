@@ -19,6 +19,7 @@ import { isTestPath } from "../../services/indexing/fileFilter.js";
 import { buildCallableHint } from "../../services/analysis/callableHint.js";
 import { findDocsBehindCode } from "../../services/analysis/docFreshness.js";
 import { GraphStore } from "../../repositories/graphStore.js";
+import type { StaleAmbiguousGroup } from "../../repositories/docsStore.js";
 import { exactFieldAnswer, tryExactFieldAccesses } from "./fieldAccessExact.js";
 import type { HandlerContext } from "./handlerContext.js";
 import { isNameOnlyEdgeReason } from "../../types/index.js";
@@ -512,6 +513,28 @@ function scanSchemaKeys(store: GraphStore, repoId: string, repoPath: string): { 
  * that mention it, and the Zod shapes that declare it. Without: the reverse report — snake_case
  * schema keys the registry has no row for. The registry is the `registryDoc` of citations.json.
  */
+/**
+ * Release L2 (MCP-ISSUE-091): label an ambiguous stale group whose mention text the repo's registry doc defines —
+ * `requested_action` is a canonical FIELD (docs/10 §4.23), and the two same-named parsers are code named after it.
+ * A label only: candidacy and counts are unchanged. No registry, an unreadable one, or no definition: no label.
+ */
+function withRegistryTerms(store: HandlerContext["store"], repoId: string, groups: readonly StaleAmbiguousGroup[]): (StaleAmbiguousGroup & { registryTerm?: { doc: string; line: number; section: string | null; definedBy: string } })[] {
+  if (groups.length === 0) return [];
+  const repo = store.getRepository(repoId);
+  const registryDoc = repo ? loadCitationConfig(repo.repoPath).config?.registryDoc ?? null : null;
+  if (!repo || !registryDoc) return [...groups];
+  let lines: string[];
+  try {
+    lines = fs.readFileSync(assertSafeRepoFilePath(repo.repoPath, registryDoc), "utf8").split(/\r?\n/);
+  } catch {
+    return [...groups];
+  }
+  return groups.map((g) => {
+    const def = registryEntries(lines, g.mentionText, 0).definitions[0];
+    return def ? { ...g, registryTerm: { doc: registryDoc, line: def.line, section: def.section, definedBy: def.definedBy } } : g;
+  });
+}
+
 async function readTerm(ctx: HandlerContext, repoId: string, term: string | undefined, limit: number): Promise<unknown> {
   const { store } = ctx;
   const repo = store.getRepository(repoId);
@@ -965,7 +988,7 @@ export function handleQueryGraph(
  * `search` already had, which is also the convention every other read tool here follows.
  */
 export async function handleQueryDocs(
-  args: { repoId: string; mode: "search" | "stale" | "coverage" | "drift" | "links" | "behind" | "language" | "section" | "cites" | "term"; query?: string; headingPrefix?: string; target?: string; includeCodeComments?: boolean; symbolIds?: string[]; filePath?: string; limit: number; maxTokens?: number; minSimilarity?: number; minDaysBehind?: number; minRatioPercent?: number; includeSymbols: boolean; includeCodeMentions: boolean; includeArchived?: boolean; matchMode?: "auto" | "strict" | "phrase"; maxPerFile?: number; contentTypes?: string[]; profile: string },
+  args: { repoId: string; mode: "search" | "stale" | "coverage" | "drift" | "links" | "behind" | "language" | "section" | "cites" | "term"; query?: string; headingPrefix?: string; target?: string; includeCodeComments?: boolean; symbolIds?: string[]; filePath?: string; limit: number; maxTokens?: number; minSimilarity?: number; minDaysBehind?: number; minRatioPercent?: number; includeSymbols: boolean; includeCodeMentions: boolean; expandAmbiguous?: boolean; includeArchived?: boolean; matchMode?: "auto" | "strict" | "phrase"; maxPerFile?: number; contentTypes?: string[]; profile: string },
   ctx: HandlerContext
 ): Promise<CallToolResult> {
   if (!ctx.constants.DOCS_TOOLS_ENABLED) {
@@ -1140,21 +1163,29 @@ export async function handleQueryDocs(
     // MCP-ISSUE-061(c): `count` used to be `results.length` after an undisclosed 200-row cap, i.e. a
     // page length presented as a total. It is now the true row count, with `returned` and
     // `droppedByLimit` describing the page — the shape MCP-ISSUE-060 settled for `detect_changes`.
-    const { rows: results, total } = store.findStaleDocs(
-      args.repoId,
-      args.symbolIds!,
-      args.includeCodeMentions,
-      args.limit
-    );
+    const grouped = !args.expandAmbiguous;
+    const stale = store.findStaleDocs(args.repoId, args.symbolIds!, args.includeCodeMentions, args.limit, grouped);
+    const { rows: results, total } = stale;
+    // Release L2: `results` pages the resolved rows (grouped) or every row (expanded); either way the page is
+    // compared with what it pages, so droppedByLimit is never a count of rows a group already accounts for.
+    const paged = grouped ? stale.resolvedCount : total;
+    const ambiguousGroups = grouped ? withRegistryTerms(store, args.repoId, stale.groups ?? []) : undefined;
     return ctx.asText(
       {
         repoId: args.repoId,
         mode: "stale",
         symbolIds: args.symbolIds,
         count: total,
+        resolvedCount: stale.resolvedCount,
+        ambiguousCount: stale.ambiguousCount,
         returned: results.length,
-        ...(total > results.length && { droppedByLimit: total - results.length }),
+        ...(paged > results.length && { droppedByLimit: paged - results.length }),
         results,
+        ...(ambiguousGroups && ambiguousGroups.length > 0 && { ambiguousGroups }),
+        ...((stale.groupsDropped ?? 0) > 0 && { ambiguousGroupsDropped: stale.groupsDropped, ambiguousRowsInDroppedGroups: stale.rowsInDroppedGroups }),
+        ...(ambiguousGroups && ambiguousGroups.length > 0 && {
+          ambiguousGroupsNote: "each group is one mention text shared equally by several symbols, one of them changed; the docs may describe another of them. expandAmbiguous=true lists every row."
+        }),
         // Release K4: a row with match "ambiguous" is a doc whose mention lists one of these symbols among
         // several equal candidates — it may or may not mean this one.
         ...(results.some((r) => r.match === "ambiguous") && {

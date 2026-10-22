@@ -186,3 +186,35 @@ test("release L1: a repo with no numbered migration drops nothing (unknown layou
   resolveMentionsImpl(conn, "r");
   assert.equal(row(conn, "d1", "accounts")?.candidateCount, 2, "tiers differ, but no numbered layout: as in K, ambiguous");
 });
+
+test("release L2: stale puts resolved rows first and folds ambiguous rows into one group per text; counts add up", () => {
+  const conn = db();
+  sym(conn, "changed", "requested_action", "function", "wire/commhub.ts");
+  sym(conn, "rival", "requested_action", "function", "wire/console.ts");
+  sym(conn, "check-a", "check", "function", "a.ts");
+  sym(conn, "check-b", "check", "function", "b.ts");
+  sym(conn, "only", "PanelState", "type", "panel.ts");
+  for (const d of ["a1", "a2", "a3", "b1", "c1"]) doc(conn, d, "a doc");
+  for (const d of ["a1", "a2", "a3"]) mention(conn, d, "requested_action");
+  mention(conn, "b1", "check");
+  mention(conn, "c1", "PanelState");
+  mention(conn, "a1", "PanelState");
+  resolveMentionsImpl(conn, "r");
+  const ids = ["changed", "check-a", "only"];
+
+  const flat = findStaleDocsImpl(conn, "r", ids, false, 50);
+  assert.equal(flat.total, 6);
+  assert.deepEqual(flat.rows.map((r) => r.match ?? "resolved"), ["resolved", "resolved", "ambiguous", "ambiguous", "ambiguous", "ambiguous"], "resolved rows first");
+
+  const g = findStaleDocsImpl(conn, "r", ids, false, 50, true);
+  assert.equal(g.total, 6);
+  assert.equal(g.resolvedCount, 2);
+  assert.deepEqual(g.rows.map((r) => r.symbolName), ["PanelState", "PanelState"], "rows page only resolved rows");
+  assert.deepEqual(g.groups!.map((x) => [x.mentionText, x.rows, x.sections, x.listsSymbolIds]), [["requested_action", 3, 3, ["changed"]], ["check", 1, 1, ["check-a"]]], "sections desc, then text");
+  assert.equal(g.resolvedCount + g.groups!.reduce((n, x) => n + x.rows, 0), g.total, "every row accounted for");
+  assert.equal(g.groups![0]!.samples.length, 3);
+
+  const paged = findStaleDocsImpl(conn, "r", ids, false, 1, true);
+  assert.equal(paged.rows.length, 1, "limit pages resolved rows");
+  assert.equal(paged.groups!.length, 2, "groups are not paged by limit");
+});

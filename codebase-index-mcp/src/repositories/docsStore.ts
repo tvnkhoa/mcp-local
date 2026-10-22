@@ -32,6 +32,20 @@ type StaleDocRow = {
   candidateCount?: number;
 };
 
+/**
+ * Release L2: `grouped` pages only resolved rows in `rows` and folds the ambiguous ones into `groups`;
+ * flat (`expandAmbiguous`) pages every row, resolved first.
+ */
+export type StaleDocsResult = {
+  rows: StaleDocRow[];
+  total: number;
+  resolvedCount: number;
+  ambiguousCount: number;
+  groups?: StaleAmbiguousGroup[];
+  groupsDropped?: number;
+  rowsInDroppedGroups?: number;
+};
+
 type DocCoverageRow = {
   symbolId: string;
   name: string;
@@ -846,9 +860,10 @@ export function findStaleDocsImpl(
   repoId: string,
   symbolIds: string[],
   includeCodeMentions = false,
-  limit = DOCS_PAGE_LIMIT
-): { rows: StaleDocRow[]; total: number } {
-  if (symbolIds.length === 0) return { rows: [], total: 0 };
+  limit = DOCS_PAGE_LIMIT,
+  grouped = false
+): StaleDocsResult {
+  if (symbolIds.length === 0) return { rows: [], total: 0, resolvedCount: 0, ambiguousCount: 0, ...(grouped && { groups: [], groupsDropped: 0, rowsInDroppedGroups: 0 }) };
   const ph = symbolIds.map(() => "?").join(",");
   const typeFilter = includeCodeMentions ? "" : "and dm.mention_type != 'code_call'";
   // Release K4 (MCP-ISSUE-089): a mention bound to a changed symbol, OR an ambiguous one that lists it
@@ -868,6 +883,9 @@ export function findStaleDocsImpl(
     )
     .get(repoId, ...symbolIds, ...symbolIds) as { total: number };
 
+  // Release L2 (MCP-ISSUE-091): resolved rows first. Ordered by file alone, the 21 `requested_action` rows of
+  // one changed commit interleaved with — and, under a limit, crowded out — the rows that name a changed
+  // symbol for certain.
   const raw = db
     .prepare(
       `
@@ -877,8 +895,8 @@ export function findStaleDocsImpl(
       from doc_mentions dm
       inner join docs d on d.repo_id = dm.repo_id and d.doc_id = dm.doc_id
       left join symbols s on s.repo_id = dm.repo_id and s.symbol_id = dm.symbol_id
-      ${where}
-      order by d.file_path, d.heading_path
+      ${where} ${grouped ? "and dm.candidate_count is null" : ""}
+      order by dm.candidate_count is not null, d.file_path, d.heading_path
       limit ?
       `
     )
@@ -887,8 +905,71 @@ export function findStaleDocsImpl(
     candidateCount === null ? row : { ...row, match: "ambiguous" as const, candidateCount }
   );
 
-  return { rows, total };
+  const ambiguous = db
+    .prepare(
+      `
+      select dm.doc_id as docId, d.file_path as filePath, d.heading_path as headingPath, dm.mention_text as mentionText,
+             dm.candidate_count as candidateCount, dm.candidate_ids as candidateIds
+      from doc_mentions dm
+      inner join docs d on d.repo_id = dm.repo_id and d.doc_id = dm.doc_id
+      ${where} and dm.candidate_count is not null
+      order by d.file_path, d.heading_path
+      `
+    )
+    .all(repoId, ...symbolIds, ...symbolIds) as { docId: string; filePath: string; headingPath: string; mentionText: string; candidateCount: number; candidateIds: string }[];
+  const ambiguousCount = ambiguous.length;
+  const resolvedCount = total - ambiguousCount;
+  if (!grouped) return { rows, total, resolvedCount, ambiguousCount };
+
+  const requested = new Set(symbolIds);
+  const byText = new Map<string, typeof ambiguous>();
+  for (const a of ambiguous) {
+    const list = byText.get(a.mentionText);
+    if (list) list.push(a);
+    else byText.set(a.mentionText, [a]);
+  }
+  const all: StaleAmbiguousGroup[] = [...byText].map(([mentionText, list]) => {
+    const lists = new Set<string>();
+    for (const a of list) for (const id of JSON.parse(a.candidateIds) as string[]) if (requested.has(id)) lists.add(id);
+    return {
+      mentionText,
+      rows: list.length,
+      sections: new Set(list.map((a) => a.docId)).size,
+      docs: new Set(list.map((a) => a.filePath)).size,
+      candidateCount: Math.max(...list.map((a) => a.candidateCount)),
+      listsSymbolIds: [...lists].sort(),
+      samples: list.slice(0, STALE_GROUP_SAMPLES).map((a) => ({ filePath: a.filePath, headingPath: a.headingPath }))
+    };
+  });
+  all.sort((a, b) => b.sections - a.sections || b.rows - a.rows || (a.mentionText < b.mentionText ? -1 : a.mentionText > b.mentionText ? 1 : 0));
+  return {
+    rows,
+    total,
+    resolvedCount,
+    ambiguousCount,
+    groups: all.slice(0, STALE_GROUP_CEILING),
+    groupsDropped: Math.max(0, all.length - STALE_GROUP_CEILING),
+    rowsInDroppedGroups: all.slice(STALE_GROUP_CEILING).reduce((n, g) => n + g.rows, 0)
+  };
 }
+
+/** Release L2: samples listed per ambiguous group, and the most groups one response carries (the rest are counted). */
+export const STALE_GROUP_SAMPLES = 3;
+export const STALE_GROUP_CEILING = 100;
+
+/** Release L2 (MCP-ISSUE-091): every ambiguous stale row of one mention text, as one entry. */
+export type StaleAmbiguousGroup = {
+  mentionText: string;
+  /** Rows folded into this group — `resolvedCount` + Σ rows = `count`. */
+  rows: number;
+  /** Distinct doc sections among them, and distinct doc files. */
+  sections: number;
+  docs: number;
+  candidateCount: number;
+  /** Which of the requested symbolIds the candidate lists name. */
+  listsSymbolIds: string[];
+  samples: { filePath: string; headingPath: string }[];
+};
 
 // ── Find doc coverage ──────────────────────────────────────────────────
 

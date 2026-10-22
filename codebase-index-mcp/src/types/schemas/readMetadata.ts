@@ -78,6 +78,12 @@ export const queryDocsSchema = (MAX_RESULT_LIMIT: number) => z
      */
     includeCodeMentions: z.boolean().default(false),
     /**
+     * Release L2 (MCP-ISSUE-091): mode="stale" folds ambiguous rows into one group per mention text by default —
+     * 21 rows for `requested_action` (two same-named parsers) flooded one commit's 67. true returns every row flat,
+     * resolved rows first.
+     */
+    expandAmbiguous: z.boolean().default(false),
+    /**
      * MCP-ISSUE-058(d): which doc section kinds mode="search" may answer with. A search for a type
      * name that answers with a mermaid diagram matching two unrelated words is a false positive.
      *
