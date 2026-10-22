@@ -3747,3 +3747,245 @@ this afternoon failed at that harness, which is the highest rate observed so far
 - **Guarded:** `mentionAmbiguity.test.ts` (the rule incl. kind rank, suffix and prefix; re-decision every run; every reader; the scoped reset's old-id clause), `runPolicy.test.ts` (generation 12); the live F refusal: a v11 server on a v12 index answers `stale` and refuses `index_repository`, the latest run stays v12.
 - **Owner decision (010c16b): real code over test code, then kind rank.** Within the deciding step, candidates in test code (`isTestPath`, the search ranking rule) are dropped whenever a non-test one exists (all-test candidates keep the normal rule); then the name steps keep the best kind rank; still tied is ambiguous. Stated in the `query_docs` description. Effect on wec.aria vs K4 without it: 403 ambiguous → bound (`LANDED` → `checks/board/rules.mjs`, `block` → `.claude/scripts/write-gate.mjs`), 161 re-pointed from test to real code, 448 bound → ambiguous (kind rank had picked a test symbol over equal-rank real ones: `scope` → ambiguous 21, `created_at` → ambiguous 17). After the full re-index 0f712015: backtick 8 206 bound / 6 766 ambiguous, `code_call` 80 / 47, filepath 3 226. Guarded by `mentionAmbiguity.test.ts` and `scopedRunConformance.test.ts` "test-path-rule" (deleting the real `widget` binds the mention to the test one, as a full run does). Accepted live by the reviewer (`query_docs` search on SPEC-081 §6: `HoldPreview` 2, `preview_count` 2, `scope` 21, `tenant_id` 50; the real-code mentions stay resolved).
 - **Not done:** an archived SQL definition is still a candidate beside the current one (`tenant_profile`: baseline and `archive/0012`), where the SQL lane already knows which is current (MCP-ISSUE-082 I3); one same-named pair can dominate `stale` (`requested_action`, 21 rows from two functions).
+
+## MCP-ISSUE-090 — a superseded SQL definition stayed a doc-mention candidate beside the current one
+
+- **Status:** ✅ FIXED 2026-10-22 (release L1, fb9ae6b).
+- **Scenario:** after K4, `tenant_profile` (38 prose mentions on wec.aria) was ambiguous between `0001-baseline.sql` and `archive/0012-tenant-profile.sql`. Those are two definition sites of one name, and the SQL lane already knows which is current (MCP-ISSUE-082 I3).
+- **Tool/query attempted:**
+  - `query_docs` search and stale on wec.aria;
+  - a replay of `resolveMentions` over the stored mentions (`l1measure.mjs`, work file).
+- **Expected vs actual:** expected the mention to bind to the current definition; got "ambiguous, 2".
+- **Fix:**
+  - **Rule:** in the mention resolver's deciding step, after the test-path filter and before kind rank, a superseded SQL definition is dropped when its name's current definition (the same `tokenKind|schema|rest` key as I3) is also a candidate AND wins **decisively**. Decisive means it wins:
+    - on tier: `.down.sql` < unnumbered < `archive/` < numbered < EF snapshot;
+    - or, within one tier, on the migration number.
+  - **Not decisive:** a win decided only by the tie-break (file name, path, line) drops nothing.
+  - **Only superseded sites match:** all of them are kept, like the all-test rule.
+  - **Unknown layout → no change:** a repo with no numbered `.sql` migration drops nothing.
+  - `SqlDefinitionInfo` gains `decisive`. The new functions `supersededSqlDefinitions`, `isDecisiveCurrent` and `hasNumberedSqlLayout` are in `graph/sqlDefinitions.ts`.
+  - `INDEX_VERSION` → `v13-release-l` (stored mention rows change).
+  - **Deferred by the owner,** because no indexed repo uses them:
+    - Flyway `V<n>__` / `U<n>__`;
+    - 14-digit timestamps;
+    - `old/`, `legacy/` and `deprecated/` segments;
+    - a per-repo `sql.json`.
+- **Measured.** On a scratch copy of the central DB, every backtick / `code_call` mention was re-decided from scratch with the L1 build and compared with the stored K rows.
+  - **wec.aria:** 286 superseded definitions recognised.
+    - Bound 8 286 → 9 536; ambiguous 6 813 → 5 563 (1 250 moved to bound).
+    - 2 796 are still ambiguous, with shorter lists.
+    - 0 re-pointed, 0 other changes.
+  - **Spot checks:**
+
+    | name | mentions | binds to |
+    |---|---|---|
+    | `tenant_profile` | 38 | `0001-baseline.sql:1042` |
+    | `usage_events` | 80 | `0001:1064` |
+    | `aria_ingest` (role) | 72 | `0001:62` |
+    | `audit_events` | 69 | `0001:562` |
+    | `identity_level` | 52 | `sql_column 0001:569` |
+    | `usage_in_period` (decided by number) | | `0043:20` |
+    | `aria_notify_change` (decided by number) | | `0042:84` |
+    | `usage_dashboard_rows` (decided by number) | | `0043:44` |
+
+  - **Every other indexed repo:** 0 superseded definitions recognised, so 0 mentions and 0 SQL edges changed. wec.be has 90 `sql_*` symbols, all in unnumbered files.
+  - **Ground truth:** checked by the reviewer through postgres-mcp `aria_dev`, read-only, applied through 0045. All 28 multi-site names match the index's current site: 6 functions by `prosrc` md5, 22 tables by columns after later ALTERs.
+- **Guarded:**
+  - `mentionAmbiguity.test.ts`: baseline vs archive; number vs `.down`; same-number and same-file tie-breaks stay ambiguous; only-superseded keeps all; unnumbered-only drops nothing.
+  - `edgeResolverSql.test.ts`: `decisive`.
+  - `runPolicy.test.ts`: generation 13.
+  - Conformance scenario `sql-supersede`: a new migration re-creates a mentioned table, then is deleted; scoped = full at each step.
+- **Open item, not in L:** a table or column DROPped by a later migration still binds as a definition (for example `tenant_opening_hours`, dropped at 0018:102). It should be labelled.
+
+## MCP-ISSUE-091 — `query_docs stale` was flooded by one ambiguous same-named pair
+
+- **Status:** ✅ FIXED 2026-10-22 (release L2, 15ae216).
+- **Scenario:** on wec.aria b4ec95bc, 21 of 67 stale rows were `requested_action`, from two same-named parser functions in `wire/commhub.ts` and `wire/console.ts`.
+  - In file order they interleaved with the rows that name a changed symbol for certain.
+  - Under a `limit` they crowded those rows out.
+- **Fix:** option (a) plus the read-time registry label, as the reviewer chose.
+  - `results` pages the resolved rows only, and lists them first.
+  - `ambiguousGroups` has one entry per mention text:
+    - fields: `rows`, `sections`, `docs`, `candidateCount`, `listsSymbolIds` and 3 samples;
+    - ordered by sections, then text;
+    - at most 100 groups; `ambiguousGroupsDropped` and `ambiguousRowsInDroppedGroups` count the rest.
+  - `count` = `resolvedCount` + `ambiguousCount`, the same number as before.
+  - A group whose text the registry doc defines carries `registryTerm {doc, line, section, definedBy}`. It is a label only.
+  - `expandAmbiguous: true` returns every row flat, resolved first.
+  - No storage change and no index bump.
+- **Not chosen:**
+  - (b) a per-name cap: c64ed243 would still show about 70 ambiguous rows, and the overflow has no list.
+  - (c) dropping registry-defined names from candidacy: it would hide real docs and needs a storage change. 3 of the 4 measured floods were generic words (`check`, `failed`, `text`).
+- **Measured** on the K-state central DB. The changed symbols are all non-module symbols in the commit's changed code files.
+
+  | commit | rows | resolved | groups | largest groups |
+  |---|---|---|---|---|
+  | b4ec95bc | 67 | 32 | 6 | `requested_action` 21, `ThreadMessage` 5, `Citation` 3, `narrow` 3, `WriteProposal` 2, `VerifierClaim` 1 |
+  | c64ed243 | 642 | 354 | 29 | |
+  | 1bf4b7df | 47 | 7 | 6 | `check` 27 |
+
+  For each commit:
+  - the rows per group equal the old rows per mention text;
+  - 0 groups are dropped;
+  - `expandAmbiguous` returns exactly the old row set, resolved first.
+- **Guarded:**
+  - `mentionAmbiguity.test.ts` "release L2": order, groups, counts add up, and `limit` pages only resolved rows.
+  - `test:issue-049-shapes`.
+
+## MCP-ISSUE-092 — an EF Core repo had no tables in the graph
+
+- **Status:** ✅ FIXED 2026-10-22 (release L3, 32643d7).
+- **Scenario:** wec.communication-hub keeps its relational model only in EF Core: 62 migration `.cs` files, 61 `.Designer.cs` files, one `ApplicationDbContextModelSnapshot.cs` and no `.sql`. `search_symbols conversations`, a doc mention of a table and `get_call_chain` on a table all returned nothing.
+- **Fix:**
+  - **Extractor, `services/extractors/csharpEfSnapshot.ts`.** It runs on a class that derives `ModelSnapshot` and has `[DbContext(typeof(X))]`, decided from the AST, not the file name. It yields:
+    - a `sql_table` per mapped table;
+    - a `sql_column` per column. Owned types split into the owner's table join it, and the repeated owned key is one column;
+    - a `sql_index` with uniqueness, filter and Npgsql method;
+    - a `sql_sequence`;
+    - a `sql_statement` per check constraint;
+    - `SQL_REFERENCES` / `SQL_USES` tokens that the SQL resolver binds;
+    - `EF_MAPS` tokens.
+  - Signatures end `[EF <Context>: <CLR type>]`.
+  - Migrations and Designer.cs define nothing.
+  - A construct CommHub does not use becomes a `sql_gap`: `OwnsMany`, TPH, `ToView`, `SplitToTable`, `HasData`, alternate or principal keys, comments, a default schema, and any unknown builder call.
+  - **Resolver, `services/graph/edgeResolverEf.ts`.**
+    - `EF_MAPS` binds a table to its CLR class by namespace-qualified name. The namespace is read from the class's file, because file-scoped namespaces are not symbols.
+    - It binds a column to its property on the class, or on a base class reached through resolved `EXTENDS` edges.
+    - A bound edge has confidence 0.95. Otherwise it stays a token labelled as a shadow property, ambiguous, or unresolved.
+    - Every run re-decides each edge from its token, after inheritance resolution.
+  - **Rank:** a snapshot site is tier 4 in the current-definition order. It is decisive within EF. It is not decisive against a `.sql` site, or when a second DbContext maps the same table.
+  - **`get_persistence_mapping`** gains:
+    - `snapshot`: the column as the snapshot states it;
+    - `snapshotDisagrees`: where a configuration file and the snapshot differ. Neither overrides the other.
+  - **New edge type `EF_MAPS`.** It is not a flow edge.
+  - **`INDEX_VERSION`:** shared with L1 (v13).
+- **Measured on CommHub (86288a2):**
+  - 22 tables, 291 columns, 46 indexes, 24 checks, 5 FKs, 1 sequence, 0 gaps.
+  - +384 symbols (5 381 → 5 765) and +484 edges (58 805 → 59 289).
+  - `EF_MAPS` is bound for 312 of 313. The one remaining token is `ConversationNote#ConversationId`, a shadow FK property.
+  - Full run on the scratch clone at 86288a2, two runs each on the same machine: K 13.6 s and 13.2 s; final L 12.6 s and 15.0 s. The difference is within noise.
+  - Warm 1-file refresh bar (search_symbols after a 1-file add / delete / edit / revert, 6 rounds, 5 warm):
+    - final L: median 1 290 ms, min 1 210, max 1 442, n = 20;
+    - K: median 1 300 ms, min 1 105, max 1 675;
+    - both builds: every call answered refreshed with the right result, and 0 server-thread samples exceeded 100 ms.
+- **Ground truth.** Env `dev` (CommunicationHubDb), read-only. `__EFMigrationsHistory` is at `20261021084540_ScopeManualOpenThreadIndexToSms`, which is the repo's newest migration.
+  - **(1) Extractor vs an independent line-based reading of the snapshot text:** 0 differences across 22 tables, 291 columns (type and nullability), 46 indexes (uniqueness, method, filter), 24 checks and 5 FKs.
+  - **(3) DB vs snapshot:** columns, types, nullability, checks and FKs are identical. This holds after the owner removed the shared-DB drift on `conversations`.
+    - 7 DB indexes are outside the EF model. Each was created by raw SQL in a migration:
+
+      | migration | indexes |
+      |---|---|
+      | 20260805042256 | `ux_conversation_reasons_name_lower` |
+      | 20260805110155_ReconcileInvariantIndexes | `ix_conversations_manual_thread_lookup`, `ix_conversations_osb_thread_lookup`, `ix_conversations_tenant_crm_customer_id`, `ux_conversations_calllog_open_thread`, `ux_conversations_osb_open_thread` |
+      | 20261021084540 | `ux_conversations_manual_open_thread` |
+
+    - 31 DB tables are outside the EF model, because the DB is shared.
+  - **(2) Snapshot vs migrations:** no column differs, so no column needed checking against its migration. The 7 raw-SQL indexes are explained by their migrations.
+- **Guarded:**
+  - `csharpEfSnapshot.test.ts`: every construct CommHub uses, two gaps, and Designer / migration / no-[DbContext] files define nothing.
+  - `edgeResolverEf.test.ts`: namespace, base walk, shadow, ambiguous, idempotent, and unbinding after a rename.
+  - Conformance: `ef-shift`, `ef-rename-property`, `ef-add-column`. All are EQUAL in both modes once MCP-ISSUE-093 and MCP-ISSUE-094 are fixed. The first run was DIFFERENT only in C# rows that predate L.
+- **Not done:** `migrationBuilder.Sql("…")` strings are not read, so raw-SQL indexes and functions in EF migrations stay outside the graph.
+
+## MCP-ISSUE-093 — a C# namespace import's confidence depended on which rows the run resolved
+
+- **Status:** ✅ FIXED 2026-10-22 (release L).
+- **Scenario:** the first conformance on wec.communication-hub. A scoped run and a full run disagreed on `IMPORTS` "resolved csharp namespace" edges: 0.78 in one, 0.8 in the other. It happened on every scenario, including on the K build.
+- **Cause:** `resolveImportEdges` cached a namespace's module id but not its confidence.
+  - The first row of a namespace was written at 0.78.
+  - Every cached repeat was written at 0.8.
+  - Which row came first depended on the rows the run processed, and a scoped run processes a subset.
+- **Fix:** the cache keeps the whole answer, `{id, confidence, reason}`.
+  - An exact namespace match is 0.8.
+  - A prefix or folder-path fallback is 0.78.
+  - Every row of a namespace now gets the same value.
+- **Effect:** stored confidences change in every C# repo (see the per-repo deltas in the release L report). `INDEX_VERSION` v13 covers the change.
+- **Guarded:** CommHub conformance, every scenario EQUAL in both modes.
+
+## MCP-ISSUE-094 — C# dispatch fan-out differed between a scoped run and a full run
+
+- **Status:** ✅ FIXED 2026-10-22 (release L).
+- **Scenario:** CommHub conformance on both the K and the L build.
+  - `ef-add-column`: a scoped run lost 407 `interface-dispatch` CALLS edges.
+  - `ef-shift` on K: a scoped run gained 15 `base-class-dispatch` rows.
+  - K's conformance covered wec.aria (TS) only, so C# scoped runs had never been compared with full runs.
+- **Causes:**
+  1. **`interface-dispatch` used whatever IMPLEMENTS edges were resolved at the time.** It was written inline while a call row resolved, from the IMPLEMENTS edges resolved at that moment.
+     - A full run resolves IMPLEMENTS first (`runFinalize`, full mode only).
+     - A scoped run resolves them only in the post-phase, after calls. So an implementor in a re-extracted file was still an `iface:` token and missing from the fan-out.
+     - A caller outside the run's scope never re-fanned, so an implementor added later was never reached.
+  2. **`base-class-dispatch` only ever inserted.** It used `insert or ignore` on a table with no unique key, so it ignored nothing.
+     - A full run's repo-wide dedup removed the duplicates.
+     - A scoped run dedups only re-extracted files, so callers outside that set accumulated a duplicate per run.
+- **Fix: both fan-outs are rebuilt whole every run**, each as a pure function of the resolved edges.
+  - `rebuildInterfaceDispatchEdges` runs after IMPLEMENTS / EXTENDS resolution. Its input is the CALLS edges resolved to an interface method, plus resolved IMPLEMENTS and method symbols.
+  - `resolveBaseClassDispatch` first deletes its own edges, then rebuilds.
+  - Both skip a pair the caller already has a CALLS edge for, so a direct resolution wins. The result therefore does not depend on which rows a dedup pass looks at.
+  - The inline fan-out and its context fields are removed from the call resolver.
+- **Measured:** CommHub conformance, 6 scenarios, all EQUAL in dirty and incremental mode on L. All three dispatch scenarios are DIFFERENT on the K build, which has neither fix:
+
+  | scenario | what it does | L | K |
+  |---|---|---|---|
+  | `dispatch-implementor-shift` | 3 lines on an `IInboxCardProjectionService` implementor | EQUAL | DIFF: 24 / 23 rows, `interface-dispatch` and `base-class-dispatch` |
+  | `dispatch-new-implementor` | a new implementor in a new file | EQUAL; 13 dispatch edges reach it | DIFF; 0 dispatch edges reach it |
+  | `dispatch-base-shift` | 3 lines on `ValueObject.cs`, an abstract base | EQUAL | DIFF: 13 / 25 rows |
+
+  `ef-shift`, `ef-rename-property` and `ef-add-column` are EQUAL on L.
+- **Guarded:**
+  - `dispatchRebuild.test.ts`: idempotent; a direct edge wins; a new implementor is reached without re-resolving the caller; a token IMPLEMENTS is not an implementor; base-class dispatch never duplicates.
+  - `test:interface-dispatch`, which now calls the rebuild after draining.
+  - `test:base-class-dispatch`, `test:call-chain-interface`, `test:issue-052-qualified-call`.
+  - Conformance scenarios `dispatch-implementor-shift`, `dispatch-new-implementor`, `dispatch-base-shift`.
+
+## MCP-ISSUE-095 — an incremental run fast-skipped over a deleted file that an earlier run indexed from a dirty tree
+
+- **Status:** ✅ FIXED 2026-10-22 (release L).
+- **Scenario:** wec.aria conformance `sql-supersede`, step 2, the incremental leg.
+  1. An untracked migration `0099-l1-probe.sql` was indexed by an incremental run.
+  2. The file was deleted, which left a clean tree at the indexed commit.
+  3. The next incremental run fast-skipped.
+  4. The file, its 4 symbols and 38 doc mentions bound to it stayed in the graph. The run was DIFFERENT from the full run.
+- **Cause:** release B.1 refused the fast skip only when the last run that did work was `dirty`. A full or incremental run over a dirty tree also holds working-tree content, and nothing recorded that it did.
+- **Fix:**
+  - `index_runs.tree_dirty` is a new integer column. A full or incremental run that starts on a dirty working tree sets it after it is recorded, through `markRunTreeDirty`, in the same way `triggered_by` is set.
+  - `evaluateIncrementalSkip` refuses the skip when the latest work run is `dirty` OR has `tree_dirty`.
+  - Cost: one `git status` per full or incremental run.
+- **The dirty leg of the same step was a harness gap, not a defect.**
+  - In production the R1 gate notices that a dirty-ledger path has vanished. It records the path as pending re-index (`markPendingReindex`), and the next dirty run prunes it.
+  - The conformance harness calls the runner directly, so it now records the pending path itself, as the gate does.
+- **Guarded:**
+  - `runPolicy.test.ts`: "never skips after a full or incremental run that indexed a dirty tree".
+  - Conformance `sql-supersede`, step 2, in both modes.
+
+## MCP-ISSUE-096 — the EF lane turned bound doc mentions ambiguous in other C# repos, and over-reported gaps
+
+- **Status:** ✅ FIXED 2026-10-22 (release L3, 4ce86e8).
+- **Scenario:** the per-repo K-vs-L delta of release L. Every repo was full-indexed by both builds into scratch DBs, with the live checkouts read-only.
+  - **(a) Bound doc mentions dropped** in C# repos with an EF snapshot:
+
+    | repo | bound before | bound after |
+    |---|---|---|
+    | api-testing-studio | 1 497 | 1 392 |
+    | wec.document-management | | −19 |
+    | wec.notification | | −15 |
+    | wec.be | | −10 |
+
+    Every lost mention was a tie between a property and a new snapshot symbol of the same name:
+    - `property + sql_column` (63), e.g. `TotalMs`, `ConditionGroupId`;
+    - `property + sql_table` (52), e.g. `Packages`, `Settings`.
+
+    Both sides have kind rank "other", so the K4 rule left the mention ambiguous.
+  - **(b) wec.be gained 523 `sql_gap` symbols.**
+    - 322 were `SqlServerPropertyBuilderExtensions.UseIdentityColumn(b.Property<int>("Id"))` over a property the block had already declared.
+    - A few were SQL Server index extensions (`IsClustered`, `IncludeProperties`).
+- **Fix:**
+  - **(a) An EF symbol yields to its code twin.** The twins are:
+    - for a column: the property its `EF_MAPS` edge binds to;
+    - for a table: its entity class, and every `DbSet<Entity>` property.
+
+    When a twin is also a candidate, the EF symbol is dropped. The twin stays, so the pool never empties. An EF table with no code twin of that name, such as CommHub's `conversations`, still binds itself.
+  - **(b) A provider extension over a column or index the block declared annotates it and is not a gap.** `HasMethod` is still kept as the index method. A provider call over something undeclared, or any other static call on the builder, stays a gap. The real unsupported constructs on wec.be stay gaps: `ToView`, `HasBaseType`, TPT (`UseTptMappingStrategy`), entities without `ToTable`, and `HasDefaultSchema`.
+- **Guarded:**
+  - `mentionAmbiguity.test.ts` "an EF snapshot symbol yields to its code twin";
+  - `csharpEfSnapshot.test.ts`: identity over a declared property is not a gap, identity over an undeclared one is;
+  - CommHub conformance, 6 scenarios EQUAL on the build with this fix.

@@ -8,6 +8,47 @@ All notable changes to this project will be documented in this file.
 > introducing commit named so each claim is checkable. They are backfill, not a record written at
 > the time.
 
+## [Unreleased] - 2026-10-22 (release L)
+
+### ⚠️ `codebase-index-mcp`: EF Core models enter the graph (MCP-ISSUE-092). Behaviour change for C# repos with a `ModelSnapshot`
+
+- **New symbols.** A `<Context>ModelSnapshot.cs` class (`: ModelSnapshot`, `[DbContext]`) now yields `sql_table`, `sql_column`, `sql_index`, `sql_sequence` and check-constraint symbols. Migrations and `.Designer.cs` files still define nothing.
+- **New edges.** FK and index edges, plus a new `EF_MAPS` edge from each table to its CLR class and from each column to its property (bases included).
+- **What SQL readers get.** Search, mentions, `get_call_chain` and `query_graph` now treat an EF table like a SQL table.
+- **`get_persistence_mapping`.** It gains `snapshot` and `snapshotDisagrees`.
+- **Unsupported constructs.** Constructs not supported yet are listed as `sql_gap`, never dropped silently.
+- **wec.communication-hub:**
+  - +384 symbols and +484 edges; `EF_MAPS` binds 312 of 313;
+  - the extractor matches the snapshot text exactly;
+  - the dev database matches the model, except 7 raw-SQL indexes created by migrations.
+
+### ⚠️ `codebase-index-mcp`: a superseded SQL definition stops competing with the current one in doc mentions (MCP-ISSUE-090). Behaviour change
+
+- **When a candidate is dropped.** An `archive/`, `.down.sql` or older-migration definition is dropped from a mention's candidates when the current definition of that name is also a candidate and wins on tier or migration number.
+- **When nothing changes:**
+  - a tie-break win drops nothing;
+  - a repo without numbered migrations is unchanged.
+- **Effect on wec.aria.** 1 250 mentions move from ambiguous to bound (`tenant_profile` → the baseline). No other indexed repo changes.
+- **`INDEX_VERSION` → `v13-release-l`** (shared with the EF lane). A v12 server refuses to write over a v13 index, so reconnect every codebase-index process.
+
+### ⚠️ `codebase-index-mcp`: C# refreshes land on the graph a full run builds (MCP-ISSUE-093, 094). Stored output changes in every C# repo
+
+- **Namespace imports.** A C# namespace import's confidence no longer depends on which rows a run touched. An exact namespace match is 0.8; a prefix or path fallback is 0.78.
+- **`interface-dispatch`.** The fan-out is rebuilt whole after IMPLEMENTS resolution. A scoped refresh on wec.communication-hub used to lose hundreds of these edges, so callers and impact answers missed implementations.
+- **`base-class-dispatch`.** It is rebuilt whole and no longer accumulates duplicates.
+- **Direct edges win.** Neither fan-out writes an edge where the caller already has a direct CALLS edge to that method.
+- **Verified.** wec.communication-hub conformance shows 6 scenarios equal to a full run. After upgrading, re-index C# repos with `mode: "full"`.
+- **Incremental fast-skip (every repo, MCP-ISSUE-095).** An incremental run no longer fast-skips after a full or incremental run that indexed a dirty working tree (new `index_runs.tree_dirty`). An untracked file indexed that way and later deleted used to stay in the graph.
+
+### `codebase-index-mcp`: `query_docs stale` lists the certain rows first (MCP-ISSUE-091)
+
+- **Resolved rows first.** `results` holds only the rows naming a changed symbol for certain.
+- **Ambiguous rows grouped.** They are folded into `ambiguousGroups`, one per mention text, with:
+  - counts and samples;
+  - a `registryTerm` label when the registry doc defines the name.
+- **Counts.** `count` is unchanged.
+- **Flat rows.** `expandAmbiguous: true` returns every row flat, as before but with resolved rows first.
+
 ## [Unreleased] - 2026-10-22 (release K)
 
 ### ⚠️ `codebase-index-mcp`: a doc mention several symbols match equally is reported as ambiguous (MCP-ISSUE-089) — behaviour change
