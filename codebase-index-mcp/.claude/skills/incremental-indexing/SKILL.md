@@ -38,7 +38,15 @@ description: "Change how codebase-index-mcp decides what to re-index, and prove 
    A `SCOPE_FORCES_FULL_RUN` file (`tsconfig*`, `jsconfig*`, `package.json`, `citations.json`) or more
    than `SCOPE_MAX_DEPENDENT_FILES` (600) dependents escalates to a full run (`escalateToFull`).
    `index_runs.scope` records which. FTS is kept per file (`ftsForgetFile` / `ftsIndexFile`); only a
-   full run rebuilds it. Mention resolution is reset for a non-full run.
+   full run rebuilds it.
+3b. **Scoped post-phase** (release K3, MCP-ISSUE-088). The pipeline hands the runner `ScopeInputs`
+   (re-extracted files incl. dependents, removed files, K, path keys, old ids, and whether a written or
+   removed file had or has SQL / CSS rows). A scoped run then re-resolves only the call rows of
+   re-extracted files or naming a K symbol, runs the CSS / SQL passes only when their lane was touched
+   (SQL also when a path key or K name meets a `sqlconst:` anchor), and unbinds only the bound doc
+   mentions it can have changed (`resetMentionsForScope`); unbound and ambiguous mentions are re-decided
+   every run. Cross-repo and dedup stay repo-wide. A new skip condition needs a conformance case that
+   FAILS when the condition is removed — see MCP-ISSUE-088 for the ones that exist.
 4. **Prune** (`pruneAndResolve`, `runFinalize.ts`). This runs `pruneStaleFiles` + `pruneOrphanedEdges`
    only when the scan was complete (not `dirty`, not capped). `pruneOrphanedEdges` checks `from_id`
    only.

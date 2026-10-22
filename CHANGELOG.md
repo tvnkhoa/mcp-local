@@ -8,7 +8,35 @@ All notable changes to this project will be documented in this file.
 > introducing commit named so each claim is checkable. They are backfill, not a record written at
 > the time.
 
-## [Unreleased] - 2026-10-22
+## [Unreleased] - 2026-10-22 (release K)
+
+### ⚠️ `codebase-index-mcp`: a doc mention several symbols match equally is reported as ambiguous (MCP-ISSUE-089) — behaviour change
+
+- A backtick or `code_call` mention whose deciding lookup finds more than one symbol of the best kind rank
+  no longer binds to the first by path. It keeps no symbol and records `candidate_count` / `candidate_ids`.
+  The dotted-prefix lookup stops picking too. On wec.aria 6,719 backtick + 50 `code_call` mentions are
+  ambiguous (6,593 + 46 of them were release J's picks); bound backtick mentions 14,972 → 8,253.
+- What callers see: `query_docs stale` also lists a doc whose ambiguous mention has a changed symbol among
+  its candidates (`match: "ambiguous"`); `coverage` adds `ambiguousMentionCount`; `drift` leaves ambiguous
+  mentions out and reports `ambiguousExcluded`; `search` lists `ambiguousMentions`; `behind` reports
+  `ambiguousMentionsSkipped`.
+- **`INDEX_VERSION` → `v12-release-k`.** A v11 server refuses to write over a v12 index; reconnect every
+  codebase-index process.
+
+### `codebase-index-mcp`: faster refresh, `health_check` off the server thread, renames in `detect_changes`
+
+- **A 1-file refresh answers in ~1 s** (MCP-ISSUE-088; was ~2.3 s): the worker reuses the gate's
+  `git status`, posts the answer before its checkpoint, and a scoped run limits its repo-wide passes
+  (call re-resolution, CSS, SQL, mention resets) to what the change can affect — equal to a full run on 13
+  wec.aria scenarios. Two older scoped-run defects fixed on the way: deleting a file was the one change
+  that never re-extracted its callers, and a doc naming a mention twice stored two rows.
+- **`health_check`** reads git once, asynchronously, and caches its unresolved-edge counts per run
+  (MCP-ISSUE-086): ~600 ms → ~0 ms of server-thread block on wec.be. Output unchanged.
+- **`detect_changes` / `change_impact`** list both paths of a rename (`renamedFrom` / `renamedTo`), mark
+  each path `added` / `modified` / `deleted`, and score a removed path from the files that still import
+  it (MCP-ISSUE-087).
+
+## [Unreleased] - 2026-10-22 (release J)
 
 ### ⚠️ `codebase-index-mcp`: the resolver's vector fallback is removed (MCP-ISSUE-084) — behaviour change, every repo
 
