@@ -5,6 +5,7 @@ import type Database from "better-sqlite3";
 import type { DocRecord, DocMentionRecord } from "../types/index.js";
 import { indexLog, indexWarn } from "../services/indexing/indexProgress.js";
 import { isTestPath } from "../services/indexing/fileFilter.js";
+import { supersededSqlDefinitions } from "../services/graph/sqlDefinitions.js";
 
 /**
  * MCP-ISSUE-061(c): `findStaleDocsImpl` and `findDocCoverageImpl` each hardcoded `limit 200` while
@@ -309,10 +310,18 @@ export function resolveMentionsImpl(db: Database.Database, repoId: string, scope
   // Canonical order (release J, MCP-ISSUE-085): candidate lists come out path, line, id — the same in a
   // scoped run as in a full one, whatever order the rows were inserted in.
   const allSymbols = db
-    .prepare(`select symbol_id, name, kind, file_path from symbols where repo_id = ? order by file_path, line, symbol_id`)
-    .all(repoId) as { symbol_id: string; name: string; kind: string; file_path: string }[];
+    .prepare(`select symbol_id, name, kind, signature, file_path, line from symbols where repo_id = ? order by file_path, line, symbol_id`)
+    .all(repoId) as { symbol_id: string; name: string; kind: string; signature: string | null; file_path: string; line: number }[];
 
-  type Candidate = { id: string; rank: number; test: boolean };
+  // Release L1: a superseded SQL definition (archive/, .down.sql, an older migration) → its name's current
+  // definition, only where the current one wins decisively and the repo has a numbered-migration layout.
+  const supersededBy = supersededSqlDefinitions(
+    allSymbols
+      .filter((s) => s.kind.startsWith("sql_"))
+      .map((s) => ({ symbolId: s.symbol_id, kind: s.kind, name: s.name, signature: s.signature, filePath: s.file_path, line: s.line }))
+  );
+
+  type Candidate = { id: string; rank: number; test: boolean; supersededBy?: string };
   const add = (map: Map<string, Candidate[]>, key: string, c: Candidate): void => {
     const list = map.get(key);
     if (!list) map.set(key, [c]);
@@ -331,7 +340,8 @@ export function resolveMentionsImpl(db: Database.Database, repoId: string, scope
   const filePathSuffixMap = new Map<string, string>();
 
   for (const sym of allSymbols) {
-    const candidate: Candidate = { id: sym.symbol_id, rank: kindRank(sym.kind), test: isTestPath(sym.file_path) };
+    const superseded = supersededBy.get(sym.symbol_id);
+    const candidate: Candidate = { id: sym.symbol_id, rank: kindRank(sym.kind), test: isTestPath(sym.file_path), ...(superseded && { supersededBy: superseded }) };
     add(byName, sym.name, candidate);
     const nameLower = sym.name.toLowerCase();
     add(byLower, nameLower, candidate);
@@ -366,6 +376,10 @@ export function resolveMentionsImpl(db: Database.Database, repoId: string, scope
     if (!list || list.length === 0) return null;
     const real = list.filter((c) => !c.test);
     let pool = real.length > 0 ? real : list;
+    // Release L1: drop a superseded SQL definition when its current definition is in the pool too. The current one
+    // stays, so the pool never empties; only superseded sites matching keeps them all, as the all-test rule does.
+    const inPool = new Set(pool.map((c) => c.id));
+    pool = pool.filter((c) => !(c.supersededBy && inPool.has(c.supersededBy)));
     if (ranked) {
       const best = Math.min(...pool.map((c) => c.rank));
       pool = pool.filter((c) => c.rank === best);

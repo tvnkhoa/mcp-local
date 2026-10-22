@@ -129,6 +129,64 @@ export function pickCurrentSqlDefinition<T extends SqlDefinitionSite>(sites: rea
   return best;
 }
 
+/**
+ * Release L1: does `current` win DECISIVELY over every other site of its name — on tier, or within one tier on
+ * the migration number (both numbered, numbers different)? A win decided only by the tie-break (file name, path,
+ * line: two `CREATE OR REPLACE` in one file, two copies with the same number) is not decisive. I3 still binds
+ * references to the tie-break winner (a total order is needed for edges); L1 only drops a superseded mention
+ * candidate when the win is decisive, so a wrong "current" can never become a silent wrong binding.
+ */
+export function isDecisiveCurrent(current: SqlDefinitionSite, sites: readonly SqlDefinitionSite[]): boolean {
+  const c = sqlDefinitionRank(current.filePath, current.line);
+  for (const site of sites) {
+    if (site.symbolId === current.symbolId) continue;
+    const o = sqlDefinitionRank(site.filePath, site.line);
+    if (c[0] !== o[0]) continue;
+    if (c[1] >= 0 && o[1] >= 0 && c[1] !== o[1]) continue;
+    return false;
+  }
+  return true;
+}
+
+/** Release L1: does the repo's SQL follow a numbered-migration layout at all (a `.sql` file named `NNNN-…`)? */
+export function hasNumberedSqlLayout(filePaths: Iterable<string>): boolean {
+  for (const p of filePaths) {
+    const base = p.replace(/\\/g, "/").split("/").pop() ?? "";
+    if (/\.sql$/i.test(base) && MIGRATION_NUMBER.test(base)) return true;
+  }
+  return false;
+}
+
+/** The definition symbols the superseded-candidate filter needs. */
+export type SqlDefinitionRow = { symbolId: string; kind: string; name: string; signature: string | null; filePath: string; line: number };
+
+/**
+ * Release L1: superseded definition id → the current definition id of its name, for every name whose current
+ * definition wins decisively. Empty when the repo has no numbered-migration layout ("unknown layout → no change").
+ */
+export function supersededSqlDefinitions(rows: readonly SqlDefinitionRow[]): Map<string, string> {
+  const out = new Map<string, string>();
+  const groups = new Map<string, SqlDefinitionRow[]>();
+  for (const r of rows) {
+    const tokenKind = sqlTokenKindOfSymbol(r.kind);
+    if (!tokenKind) continue;
+    const key = sqlNameKey(tokenKind, sqlQualifiedName(r.name, r.signature));
+    if (!key) continue;
+    const k = `${tokenKind}|${key.schema ?? ""}|${key.rest}`;
+    const list = groups.get(k);
+    if (list) list.push(r);
+    else groups.set(k, [r]);
+  }
+  if (!hasNumberedSqlLayout([...groups.values()].flat().map((r) => r.filePath))) return out;
+  for (const sites of groups.values()) {
+    if (sites.length < 2) continue;
+    const current = pickCurrentSqlDefinition(sites)!;
+    if (!isDecisiveCurrent(current, sites)) continue;
+    for (const s of sites) if (s.symbolId !== current.symbolId) out.set(s.symbolId, current.symbolId);
+  }
+  return out;
+}
+
 /** `file:line` — the spelling `alsoDefinedAt` and the via-clauses use. */
 export function siteLabel(site: { filePath: string; line: number }): string {
   return `${site.filePath}:${String(site.line)}`;
@@ -142,6 +200,8 @@ export type SqlDefinitionInfo = {
   /** The current definition (`file:line`) and its id. */
   currentDefinition: string;
   currentSymbolId: string;
+  /** Release L1: the current definition wins on tier or migration number, not only on the tie-break (file name, path, line). */
+  decisive: boolean;
   /** Every definition site but this one, `file:line`, lowest-ranked first (so the current one is last when this site is superseded). */
   alsoDefinedAt: string[];
   note: string;
@@ -188,6 +248,7 @@ export function getSqlDefinitionInfo(db: Database.Database, repoId: string, symb
       definitions: sites.length,
       currentDefinition: siteLabel(current),
       currentSymbolId: current.symbolId,
+      decisive: isDecisiveCurrent(current, sites),
       alsoDefinedAt: others.map(siteLabel),
       note: isCurrent
         ? `current of ${String(sites.length)} definitions: references to this name bind here; the other sites keep their own outbound edges`

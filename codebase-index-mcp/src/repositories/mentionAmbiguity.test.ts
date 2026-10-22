@@ -148,3 +148,41 @@ test("owner rule: real code over test code, then kind rank, then ambiguous; all-
   assert.equal(row(conn, "d1", "scope")?.symbolId, "src-scope", "the filter runs BEFORE kind rank: a test function no longer beats a property");
   assert.equal(row(conn, "d1", "turn")?.candidateCount, 2, "all candidates in test code: the normal rule, still tied");
 });
+
+test("release L1: a superseded SQL definition is dropped when its current one is a candidate and wins decisively", () => {
+  const conn = db();
+  // tenant_profile on wec.aria: the baseline (current) and the archive/ site it superseded — dropped on tier.
+  sym(conn, "tp-base", "tenant_profile", "sql_table", "db/migrations/0001-baseline.sql", 1042);
+  sym(conn, "tp-arch", "tenant_profile", "sql_table", "db/migrations/archive/0012-tenant-profile.sql", 96);
+  // A function replaced by a later numbered migration and restored by its .down.sql — dropped on tier and number.
+  sym(conn, "f-base", "usage_in_period", "sql_function", "db/migrations/0001-baseline.sql", 469);
+  sym(conn, "f-43", "usage_in_period", "sql_function", "db/migrations/0043-errored.sql", 20);
+  sym(conn, "f-down", "usage_in_period", "sql_function", "db/migrations/0043-errored.down.sql", 6);
+  // Decided only by the tie-break (same number, two files; two sites in one file) — not decisive, stays ambiguous.
+  sym(conn, "same-a", "pair_table", "sql_table", "db/migrations/0005-a.sql", 1);
+  sym(conn, "same-b", "pair_table", "sql_table", "db/migrations/0005-b.sql", 1);
+  sym(conn, "line-1", "twice_fn", "sql_function", "db/migrations/0007-x.sql", 1);
+  sym(conn, "line-2", "twice_fn", "sql_function", "db/migrations/0007-x.sql", 40);
+  // The current site lives in test code, so the test filter removes it: only superseded sites remain, and all stay.
+  sym(conn, "only-test", "fixture_table", "sql_table", "packages/db/test/0009-fixture.sql", 1);
+  sym(conn, "only-a1", "fixture_table", "sql_table", "db/migrations/archive/0001-fixture.sql", 1);
+  sym(conn, "only-a2", "fixture_table", "sql_table", "db/migrations/archive/0002-fixture.sql", 1);
+  doc(conn, "d1", "a doc");
+  for (const t of ["tenant_profile", "usage_in_period", "pair_table", "twice_fn", "fixture_table"]) mention(conn, "d1", t);
+  resolveMentionsImpl(conn, "r");
+  assert.equal(row(conn, "d1", "tenant_profile")?.symbolId, "tp-base", "baseline beats archive/ on tier");
+  assert.equal(row(conn, "d1", "usage_in_period")?.symbolId, "f-43", "0043 beats 0001 on number and the .down.sql on tier");
+  assert.equal(row(conn, "d1", "pair_table")?.candidateCount, 2, "same number in two files: a tie-break, not decisive");
+  assert.equal(row(conn, "d1", "twice_fn")?.candidateCount, 2, "two sites in one file: a tie-break, not decisive");
+  assert.deepEqual(JSON.parse(row(conn, "d1", "fixture_table")?.candidateIds ?? "[]"), ["only-a1", "only-a2"], "only superseded sites match: all kept");
+});
+
+test("release L1: a repo with no numbered migration drops nothing (unknown layout)", () => {
+  const conn = db();
+  sym(conn, "schema", "accounts", "sql_table", "db/schema.sql", 1);
+  sym(conn, "down", "accounts", "sql_table", "db/rollback.down.sql", 1);
+  doc(conn, "d1", "a doc");
+  mention(conn, "d1", "accounts");
+  resolveMentionsImpl(conn, "r");
+  assert.equal(row(conn, "d1", "accounts")?.candidateCount, 2, "tiers differ, but no numbered layout: as in K, ambiguous");
+});

@@ -141,7 +141,10 @@ export type RunIndexInput = {
 // v12: release K4 (MCP-ISSUE-089) — a doc mention several symbols match equally keeps symbol_id NULL and
 // records candidate_count / candidate_ids instead of binding to the first by path; stored mention rows
 // change for unchanged docs (on the next run: unbound rows are re-decided every run).
-export const INDEX_VERSION = "v12-release-k";
+// v13: release L — L1 (MCP-ISSUE-090) drops a superseded SQL definition from a mention's candidates when
+// the current one is a candidate and wins decisively (stored mention rows change for unchanged docs);
+// L3 (MCP-ISSUE-092) adds the EF ModelSnapshot lane (new sql_* symbols and EF_MAPS edges in C# repos).
+export const INDEX_VERSION = "v13-release-l";
 
 /**
  * Release J: files whose change alters how every other file resolves — module resolution (tsconfig paths,

@@ -159,6 +159,7 @@ test("resolveSqlEdges: CREATE OR REPLACE keeps each version's reads; grants, com
     definitions: 4,
     currentDefinition: "db/migrations/0043-errored.sql:20",
     currentSymbolId: "F_43",
+    decisive: true,
     alsoDefinedAt: ["db/migrations/0043-errored.down.sql:6", "db/migrations/archive/0010-quota.sql:341", "db/migrations/0001-baseline.sql:469"],
     note: info.get("F_43")!.note
   });
@@ -166,6 +167,7 @@ test("resolveSqlEdges: CREATE OR REPLACE keeps each version's reads; grants, com
   assert.equal(info.get("F_BASE")?.currentDefinition, "db/migrations/0043-errored.sql:20");
   assert.ok(info.get("F_BASE")!.alsoDefinedAt.includes("db/migrations/0043-errored.sql:20"));
   assert.deepEqual(info.get("UE")?.alsoDefinedAt, ["db/migrations/archive/0005-usage.sql:119"]);
+  assert.equal(info.get("UE")?.decisive, true, "release L1: the baseline beats archive/ on tier");
 
   // Idempotent: a second run (an incremental run with nothing changed) lands on the same set.
   resolveSqlEdges(d, "r");
