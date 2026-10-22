@@ -30,6 +30,7 @@ All notable changes to this project will be documented in this file.
   - a repo without numbered migrations is unchanged.
 - **Effect on wec.aria.** 1 250 mentions move from ambiguous to bound (`tenant_profile` → the baseline). No other indexed repo changes.
 - **`INDEX_VERSION` → `v13-release-l`** (shared with the EF lane). A v12 server refuses to write over a v13 index, so reconnect every codebase-index process.
+- **Run `index_repository` with `mode: "full"` on every repo after upgrading.** A query-triggered refresh after the version bump is scoped: it re-extracts only files that changed, and unchanged files keep their v12 rows. Until a FULL run, an EF repo has no tables and no `EF_MAPS`, and v12-era C# edges stay as they were.
 
 ### ⚠️ `codebase-index-mcp`: C# refreshes land on the graph a full run builds (MCP-ISSUE-093, 094). Stored output changes in every C# repo
 
