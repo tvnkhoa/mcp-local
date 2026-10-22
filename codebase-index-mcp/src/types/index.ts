@@ -127,6 +127,25 @@ export type IndexRunSummary = {
   scope?: string;
   /** Set by the pipeline when a scoped run cannot be exact; the runner then runs `full`. Never stored. */
   scopeEscalation?: string;
+  /** Release K3: what a scoped run touched, for the runner's post-phase. Never stored or returned. */
+  scopeInputs?: ScopeInputs;
+};
+
+/**
+ * Release K3 (MCP-ISSUE-088): the inputs a non-full run's post-phase passes are scoped by.
+ * `reextracted`: every file written this run, its dependents included; `removed`: files deleted from
+ * the working tree or pruned; `names` / `pathKeys`: K and the module-resolution keys (release J);
+ * `lanes`: whether any of those files had (before the write) or has (after it) rows of a lane whose pass
+ * rebinds by name across the repo.
+ */
+export type ScopeInputs = {
+  reextracted: string[];
+  removed: string[];
+  names: string[];
+  pathKeys: string[];
+  /** The ids the re-extracted and removed files' symbols had before this run (re-minted ones included). */
+  oldIds: string[];
+  lanes: { sql: boolean; css: boolean };
 };
 
 /**

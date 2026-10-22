@@ -186,6 +186,10 @@ export function initGraphSchema(db: Database.Database): void {
         mention_type text not null,
         confidence real not null,
         mention_text text not null,
+        -- Release K4 (MCP-ISSUE-089): an ambiguous mention (symbol_id null) and its candidates. Also added by
+        -- runGraphMigrations for an existing database.
+        candidate_count integer,
+        candidate_ids text,
         primary key (repo_id, doc_id, symbol_id, mention_type, mention_text)
       );
 
@@ -553,6 +557,17 @@ export function runGraphMigrations(db: Database.Database, vectorEnabled: boolean
     ensureDocColumn("superseded_by", "text");
     ensureDocColumn("start_line", "integer");
     ensureDocColumn("end_line", "integer");
+
+    // Release K4 (MCP-ISSUE-089): a mention several symbols match equally keeps symbol_id NULL and records
+    // its candidates here — how many, and the first 20 ids in canonical order (path, line, id).
+    const mentionCols = db.prepare("pragma table_info(doc_mentions)").all() as { name: string }[];
+    const ensureMentionColumn = (name: string, sqlType: string) => {
+      if (!mentionCols.some((c) => c.name === name)) {
+        db.exec(`alter table doc_mentions add column ${name} ${sqlType}`);
+      }
+    };
+    ensureMentionColumn("candidate_count", "integer");
+    ensureMentionColumn("candidate_ids", "text");
 
     const edgeCols = db.prepare("pragma table_info(edges)").all() as { name: string }[];
     const ensureEdgeColumn = (name: string, sqlType: string, defaultExpr?: string) => {

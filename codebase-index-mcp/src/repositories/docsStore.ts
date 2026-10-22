@@ -25,6 +25,9 @@ type StaleDocRow = {
   mentionText: string;
   mentionType: string;
   symbolName: string | null;
+  /** Release K4: present only on an ambiguous mention that lists one of the symbols among its candidates. */
+  match?: "ambiguous";
+  candidateCount?: number;
 };
 
 type DocCoverageRow = {
@@ -35,6 +38,8 @@ type DocCoverageRow = {
   signature: string | null;
   hasDocs: boolean;
   mentionCount: number;
+  /** Release K4: ambiguous mentions that list this symbol among their candidates (not in `mentionCount`). */
+  ambiguousMentionCount?: number;
 };
 
 // ── Docs CRUD ──────────────────────────────────────────────────────────
@@ -122,8 +127,18 @@ export function upsertDocMentionsImpl(db: Database.Database, mentions: DocMentio
     `
   );
 
+  /**
+   * Release K: one row per (doc, type, text, symbol). A section naming `Date` twice extracted two rows with
+   * a NULL symbol_id — and NULLs never conflict in the primary key — so an unbound mention kept both while a
+   * bound one collapsed to one under `update or replace`; a scoped run that unbound it then held one row
+   * where a full run held two (release K conformance, `mention-prefix-delete`).
+   */
   const writeRows = (rows: DocMentionRecord[]) => {
+    const seen = new Set<string>();
     for (const row of rows) {
+      const key = [row.repoId, row.docId, row.mentionType, row.mentionText, row.symbolId ?? ""].join("\u0001");
+      if (seen.has(key)) continue;
+      seen.add(key);
       stmt.run(row);
     }
   };
@@ -191,6 +206,28 @@ function ftsFailureKind(e: unknown): "corrupt" | "unavailable" {
 
 // ── Resolve doc mentions ───────────────────────────────────────────────
 
+/**
+ * Release K4: how many of an ambiguous mention's candidates a response lists; `candidateCount` is exact.
+ * Storage keeps the WHOLE list: `query_docs stale` matches a changed symbol against it, and a stored cap
+ * would silently drop the docs whose mention lists that symbol 21st.
+ */
+export const MENTION_CANDIDATES_SHOWN = 20;
+
+/**
+ * Bind doc mentions (still unbound: `symbol_id` null) to symbols. Returns how many were bound.
+ *
+ * A backtick / code_call mention is decided by the first of these steps that has a candidate: the exact
+ * name, the lower-cased name, a dotted symbol's last segment (`Codec.Parse` for `Parse`), a dotted
+ * symbol's leading part. The name steps keep only the best kind rank (class < interface < function <
+ * method < variable < other). A filepath mention binds to the file's module symbol (release J).
+ *
+ * Release K4 (MCP-ISSUE-089): the deciding step having MORE than one candidate is an answer — "ambiguous,
+ * N candidates" — not a licence to pick. Release J made the pick deterministic (the first by path); on
+ * wec.aria 6 593 backtick mentions were such picks. The mention keeps `symbol_id` null and records
+ * `candidate_count` and every candidate id in `candidate_ids` (canonical order), so every reader
+ * can say "ambiguous" instead of naming one symbol or saying nothing. Unbound and ambiguous rows are both
+ * re-decided on every run, so they always reflect the current symbols.
+ */
 export function resolveMentionsImpl(db: Database.Database, repoId: string): number {
   const unresolved = db
     .prepare(
@@ -220,55 +257,44 @@ export function resolveMentionsImpl(db: Database.Database, repoId: string): numb
     }
   };
 
-  // Ordered (release J, MCP-ISSUE-085): every map below is first-wins among equal ranks, and the
-  // unordered scan made that rowid order — which a scoped run changes by re-inserting the files it
-  // re-extracts, so the same mention resolved to a different same-named symbol than in a full run.
+  // Canonical order (release J, MCP-ISSUE-085): candidate lists come out path, line, id — the same in a
+  // scoped run as in a full one, whatever order the rows were inserted in.
   const allSymbols = db
     .prepare(`select symbol_id, name, kind, file_path from symbols where repo_id = ? order by file_path, line, symbol_id`)
     .all(repoId) as { symbol_id: string; name: string; kind: string; file_path: string }[];
 
-  const nameMap = new Map<string, string>();
-  const nameMapRank = new Map<string, number>();
-  const nameLowerMap = new Map<string, string>();
-  const nameLowerMapRank = new Map<string, number>();
-  const nameSuffixMap = new Map<string, string>();
-  const namePrefixMap = new Map<string, string>();
+  type Ranked = { rank: number; ids: string[] };
+  const keepBest = (map: Map<string, Ranked>, key: string, rank: number, id: string): void => {
+    const e = map.get(key);
+    if (!e || rank < e.rank) map.set(key, { rank, ids: [id] });
+    else if (rank === e.rank && !e.ids.includes(id)) e.ids.push(id);
+  };
+  const push = (map: Map<string, string[]>, key: string, id: string): void => {
+    const list = map.get(key);
+    if (!list) map.set(key, [id]);
+    else if (!list.includes(id)) list.push(id);
+  };
+  const byName = new Map<string, Ranked>();
+  const byLower = new Map<string, Ranked>();
+  /**
+   * MCP-ISSUE-049: a bare `Parse` must not bind to whichever `X.Parse` came first — that sent five archived
+   * docs to "stale" for a symbol they never mention. Since K4 every step answers the same way: one
+   * candidate binds, several make the mention ambiguous.
+   */
+  const bySuffix = new Map<string, string[]>();
+  const byPrefix = new Map<string, string[]>();
   const filePathMap = new Map<string, string>();
   const filePathSuffixMap = new Map<string, string>();
-  /**
-   * MCP-ISSUE-049: how many DISTINCT dotted symbols share each unqualified suffix.
-   *
-   * The suffix map below is what let a bare `` `Parse` `` in a doc resolve to
-   * `ConversationLoopCorrelationCodec.Parse` — and `query_docs{ mode:"stale" }` then reported five
-   * archived docs as stale references to a symbol they never mention, because the word `Parse`
-   * appeared inside a quoted C# snippet. A suffix that several symbols share cannot identify one of
-   * them, so ambiguity is now tracked and an ambiguous bare suffix resolves to nothing.
-   */
-  const nameSuffixCount = new Map<string, Set<string>>();
 
   for (const sym of allSymbols) {
     const rank = kindRank(sym.kind);
-
-    const existingRank = nameMapRank.get(sym.name) ?? Infinity;
-    if (rank < existingRank) {
-      nameMap.set(sym.name, sym.symbol_id);
-      nameMapRank.set(sym.name, rank);
-    }
-
+    keepBest(byName, sym.name, rank, sym.symbol_id);
     const nameLower = sym.name.toLowerCase();
-    const existingLowerRank = nameLowerMapRank.get(nameLower) ?? Infinity;
-    if (rank < existingLowerRank) {
-      nameLowerMap.set(nameLower, sym.symbol_id);
-      nameLowerMapRank.set(nameLower, rank);
-    }
+    keepBest(byLower, nameLower, rank, sym.symbol_id);
     const dotIdx = nameLower.lastIndexOf(".");
     if (dotIdx >= 0) {
-      const suffix = nameLower.slice(dotIdx + 1);
-      if (!nameSuffixMap.has(suffix)) nameSuffixMap.set(suffix, sym.symbol_id);
-      if (!nameSuffixCount.has(suffix)) nameSuffixCount.set(suffix, new Set());
-      nameSuffixCount.get(suffix)!.add(nameLower);
-      const prefix = nameLower.slice(0, dotIdx);
-      if (!namePrefixMap.has(prefix)) namePrefixMap.set(prefix, sym.symbol_id);
+      push(bySuffix, nameLower.slice(dotIdx + 1), sym.symbol_id);
+      push(byPrefix, nameLower.slice(0, dotIdx), sym.symbol_id);
     }
 
     const normalizedPath = sym.file_path
@@ -286,60 +312,58 @@ export function resolveMentionsImpl(db: Database.Database, repoId: string): numb
     }
   }
 
-  const updateStmt = db.prepare(
-    `update or replace doc_mentions set symbol_id = ? where repo_id = ? and doc_id = ? and mention_type = ? and mention_text = ? and symbol_id is null`
+  /** The deciding step's answer: one id binds, several are ambiguous, none falls through. */
+  const decide = (ids: readonly string[] | undefined): { bind: string } | { ambiguous: readonly string[] } | null =>
+    !ids || ids.length === 0 ? null : ids.length === 1 ? { bind: ids[0]! } : { ambiguous: ids };
+
+  const bindStmt = db.prepare(
+    `update or replace doc_mentions set symbol_id = ?, candidate_count = null, candidate_ids = null
+     where repo_id = ? and doc_id = ? and mention_type = ? and mention_text = ? and symbol_id is null`
+  );
+  const ambiguousStmt = db.prepare(
+    `update doc_mentions set candidate_count = ?, candidate_ids = ?
+     where repo_id = ? and doc_id = ? and mention_type = ? and mention_text = ? and symbol_id is null`
   );
 
   let count = 0;
-  const updates: Array<[string, string, string, string, string]> = [];
-
-  for (const mention of unresolved) {
-    let resolvedSymbolId: string | undefined;
-
-    if (mention.mention_type === "backtick" || mention.mention_type === "code_call") {
-      const lower = mention.mention_text.toLowerCase();
-      // Exact name (case-sensitive, then insensitive): the mention names the symbol.
-      resolvedSymbolId = nameMap.get(mention.mention_text) ?? nameLowerMap.get(lower);
-
-      // An UNQUALIFIED suffix can only identify a symbol if exactly one dotted symbol carries it.
-      // Picking `nameSuffixMap`'s arbitrary first entry when several share the suffix is a guess
-      // reported as a fact. (This is a correctness guard in its own right; it is not what caused
-      // MCP-ISSUE-049's false positives — those resolved by exact name, because C# members are
-      // stored under their bare name. The cause was mentions harvested from fenced code blocks;
-      // see `extractMentionsFromCode` and the `code_call` type.)
-      if (resolvedSymbolId === undefined) {
-        const sharing = nameSuffixCount.get(lower);
-        if (sharing?.size === 1) resolvedSymbolId = nameSuffixMap.get(lower);
+  const tx = db.transaction(() => {
+    // Every unbound row is re-decided below; an earlier run's candidate list must not outlive it.
+    db.prepare(`update doc_mentions set candidate_count = null, candidate_ids = null where repo_id = ? and symbol_id is null and candidate_count is not null`).run(repoId);
+    for (const mention of unresolved) {
+      let outcome: ReturnType<typeof decide> = null;
+      if (mention.mention_type === "backtick" || mention.mention_type === "code_call") {
+        const lower = mention.mention_text.toLowerCase();
+        outcome =
+          decide(byName.get(mention.mention_text)?.ids) ??
+          decide(byLower.get(lower)?.ids) ??
+          decide(bySuffix.get(lower)) ??
+          decide(byPrefix.get(lower));
+      } else if (mention.mention_type === "filepath") {
+        const normalizedMention = mention.mention_text
+          .replace(/\\/g, "/")
+          .replace(/\.(ts|tsx|mts|cts|js|jsx|mjs|cjs|cs|py)$/, "")
+          .replace(/^src\//, "")
+          .toLowerCase();
+        const id = filePathMap.get(normalizedMention) ?? filePathSuffixMap.get(normalizedMention);
+        outcome = id ? { bind: id } : null;
       }
-      resolvedSymbolId ??= namePrefixMap.get(lower);
-    } else if (mention.mention_type === "filepath") {
-      const normalizedMention = mention.mention_text
-        .replace(/\\/g, "/")
-        .replace(/\.(ts|tsx|mts|cts|js|jsx|mjs|cjs|cs|py)$/, "")
-        .replace(/^src\//, "")
-        .toLowerCase();
-
-      resolvedSymbolId = filePathMap.get(normalizedMention);
-
-      if (!resolvedSymbolId) {
-        resolvedSymbolId = filePathSuffixMap.get(normalizedMention);
-      }
-    }
-
-    if (resolvedSymbolId) {
-      updates.push([resolvedSymbolId, repoId, mention.doc_id, mention.mention_type, mention.mention_text]);
-    }
-  }
-
-  if (updates.length > 0) {
-    const tx = db.transaction(() => {
-      for (const args of updates) {
-        updateStmt.run(...args);
+      if (!outcome) continue;
+      if ("bind" in outcome) {
+        bindStmt.run(outcome.bind, repoId, mention.doc_id, mention.mention_type, mention.mention_text);
         count += 1;
+      } else {
+        ambiguousStmt.run(
+          outcome.ambiguous.length,
+          JSON.stringify(outcome.ambiguous),
+          repoId,
+          mention.doc_id,
+          mention.mention_type,
+          mention.mention_text
+        );
       }
-    });
-    tx();
-  }
+    }
+  });
+  tx();
 
   return count;
 }
@@ -629,6 +653,21 @@ export function searchDocsImpl(
       symbolName: string | null;
     }[];
 
+    // Release K4: an ambiguous mention names no single symbol; it is listed with its candidate count.
+    const ambiguousRows = db
+      .prepare(
+        `select doc_id as docId, mention_text as mentionText, candidate_count as candidateCount
+         from doc_mentions where repo_id = ? and doc_id in (${ph}) and symbol_id is null and candidate_count is not null
+         order by mention_text`
+      )
+      .all(repoId, ...docIds) as { docId: string; mentionText: string; candidateCount: number }[];
+    const ambiguousByDoc = new Map<string, { mentionText: string; ambiguous: true; candidateCount: number }[]>();
+    for (const row of ambiguousRows) {
+      const list = ambiguousByDoc.get(row.docId) ?? [];
+      list.push({ mentionText: row.mentionText, ambiguous: true, candidateCount: row.candidateCount });
+      ambiguousByDoc.set(row.docId, list);
+    }
+
     const mentionsByDoc = new Map<
       string,
       { symbolId: string; symbolName: string | null; mentionText: string }[]
@@ -654,7 +693,8 @@ export function searchDocsImpl(
             : rankOf(doc.docId) < strictCount
               ? "strict"
               : "broad") as "strict" | "broad" | "fallback",
-          resolvedMentions: mentionsByDoc.get(doc.docId) ?? []
+          resolvedMentions: mentionsByDoc.get(doc.docId) ?? [],
+          ...(ambiguousByDoc.has(doc.docId) && { ambiguousMentions: ambiguousByDoc.get(doc.docId)! })
         }))
     );
   }
@@ -733,7 +773,11 @@ export function findStaleDocsImpl(
   if (symbolIds.length === 0) return { rows: [], total: 0 };
   const ph = symbolIds.map(() => "?").join(",");
   const typeFilter = includeCodeMentions ? "" : "and dm.mention_type != 'code_call'";
-  const where = `where dm.repo_id = ? and dm.symbol_id in (${ph}) ${typeFilter}`;
+  // Release K4 (MCP-ISSUE-089): a mention bound to a changed symbol, OR an ambiguous one that lists it
+  // among its candidates — under release J the latter counted only when the arbitrary pick was it.
+  const where = `where dm.repo_id = ? ${typeFilter} and (dm.symbol_id in (${ph})
+    or (dm.symbol_id is null and dm.candidate_count is not null
+        and exists (select 1 from json_each(dm.candidate_ids) j where j.value in (${ph}))))`;
 
   const { total } = db
     .prepare(
@@ -744,13 +788,14 @@ export function findStaleDocsImpl(
       ${where}
       `
     )
-    .get(repoId, ...symbolIds) as { total: number };
+    .get(repoId, ...symbolIds, ...symbolIds) as { total: number };
 
-  const rows = db
+  const raw = db
     .prepare(
       `
       select dm.doc_id as docId, d.file_path as filePath, d.heading_path as headingPath,
-             d.text, dm.mention_text as mentionText, dm.mention_type as mentionType, s.name as symbolName
+             d.text, dm.mention_text as mentionText, dm.mention_type as mentionType, s.name as symbolName,
+             dm.candidate_count as candidateCount
       from doc_mentions dm
       inner join docs d on d.repo_id = dm.repo_id and d.doc_id = dm.doc_id
       left join symbols s on s.repo_id = dm.repo_id and s.symbol_id = dm.symbol_id
@@ -759,7 +804,10 @@ export function findStaleDocsImpl(
       limit ?
       `
     )
-    .all(repoId, ...symbolIds, Math.max(1, limit)) as StaleDocRow[];
+    .all(repoId, ...symbolIds, ...symbolIds, Math.max(1, limit)) as (StaleDocRow & { candidateCount: number | null })[];
+  const rows: StaleDocRow[] = raw.map(({ candidateCount, ...row }) =>
+    candidateCount === null ? row : { ...row, match: "ambiguous" as const, candidateCount }
+  );
 
   return { rows, total };
 }
@@ -806,6 +854,22 @@ export function findDocCoverageImpl(
     hasDocs: boolean;
     mentionCount: number;
   }[];
+
+  // Release K4: ambiguous mentions listing a symbol do not document it (no single target), but they are
+  // reported beside the count rather than dropped.
+  const ambiguous = db
+    .prepare(
+      `select j.value as symbolId, count(*) as n
+       from doc_mentions dm, json_each(dm.candidate_ids) j
+       where dm.repo_id = ? and dm.symbol_id is null and dm.candidate_count is not null
+         and j.value in (select symbol_id from symbols where repo_id = ? and replace(file_path, char(92), '/') = replace(?, char(92), '/'))
+       group by j.value`
+    )
+    .all(repoId, repoId, filePath) as { symbolId: string; n: number }[];
+  if (ambiguous.length > 0) {
+    const bySymbol = new Map(ambiguous.map((a) => [a.symbolId, a.n]));
+    return { rows: rows.map((r) => (bySymbol.has(r.symbolId) ? { ...r, ambiguousMentionCount: bySymbol.get(r.symbolId)! } : r)), total };
+  }
 
   return { rows, total };
 }
@@ -1154,8 +1218,16 @@ export function findDriftingDocsImpl(
   total: number;
   scanned: number;
   suppressed: { nonProductionTarget: number; plainWord: number; liveLiteral: number };
+  /** Release K4: distinct ambiguous mention texts left out — they match several symbols, they are not missing. */
+  ambiguousExcluded: number;
 } {
   const typeFilter = includeCodeMentions ? "" : "and dm.mention_type != 'code_call'";
+  const { ambiguousExcluded } = db
+    .prepare(
+      `select count(distinct dm.mention_text || char(0) || dm.mention_type) as ambiguousExcluded from doc_mentions dm
+       where dm.repo_id = ? and dm.symbol_id is null and dm.candidate_count is not null and length(dm.mention_text) >= 4 ${typeFilter}`
+    )
+    .get(repoId) as { ambiguousExcluded: number };
 
   const unresolved = db
     .prepare(
@@ -1163,7 +1235,7 @@ export function findDriftingDocsImpl(
       select dm.mention_text as mentionText, dm.mention_type as mentionType,
              count(distinct dm.doc_id) as docCount
       from doc_mentions dm
-      where dm.repo_id = ? and dm.symbol_id is null and length(dm.mention_text) >= 4 ${typeFilter}
+      where dm.repo_id = ? and dm.symbol_id is null and dm.candidate_count is null and length(dm.mention_text) >= 4 ${typeFilter}
       group by dm.mention_text, dm.mention_type
       order by docCount desc
       `
@@ -1171,7 +1243,7 @@ export function findDriftingDocsImpl(
     .all(repoId) as { mentionText: string; mentionType: string; docCount: number }[];
 
   const suppressed = { nonProductionTarget: 0, plainWord: 0, liveLiteral: 0 };
-  if (unresolved.length === 0) return { rows: [], total: 0, scanned: 0, suppressed };
+  if (unresolved.length === 0) return { rows: [], total: 0, scanned: 0, suppressed, ambiguousExcluded };
 
   const symbols = db
     .prepare(`select symbol_id as symbolId, name, kind, file_path as filePath from symbols where repo_id = ? and kind != 'module'`)
@@ -1203,7 +1275,7 @@ export function findDriftingDocsImpl(
     select distinct d.doc_id as docId, d.file_path as filePath, d.heading_path as headingPath
     from doc_mentions dm
     inner join docs d on d.repo_id = dm.repo_id and d.doc_id = dm.doc_id
-    where dm.repo_id = ? and dm.mention_text = ? and dm.symbol_id is null ${typeFilter}
+    where dm.repo_id = ? and dm.mention_text = ? and dm.symbol_id is null and dm.candidate_count is null ${typeFilter}
     limit 10
     `
   );
@@ -1336,7 +1408,8 @@ export function findDriftingDocsImpl(
     rows: rows.slice(0, Math.max(1, limit)),
     total: rows.length,
     scanned: unresolved.length,
-    suppressed
+    suppressed,
+    ambiguousExcluded
   };
 }
 
@@ -1378,4 +1451,23 @@ export function levenshteinDistance(a: string, b: string): number {
   }
 
   return dp[m][n];
+}
+
+/**
+ * Release K4: the ambiguous mentions doc freshness cannot compare — no single symbol, so no single code
+ * file — counted with the same filters as {@link listDocMentionTargetsImpl}, so it can say so.
+ */
+export function countAmbiguousMentionTargetsImpl(db: Database.Database, repoId: string, includeArchived = false): number {
+  const archiveFilter = includeArchived
+    ? ""
+    : `and d.file_path not in (select file_path from docs where repo_id = ? and doc_status in ('archived','superseded'))`;
+  const params: string[] = includeArchived ? [repoId] : [repoId, repoId];
+  const row = db
+    .prepare(
+      `select count(*) as n from doc_mentions dm
+       inner join docs d on d.repo_id = dm.repo_id and d.doc_id = dm.doc_id
+       where dm.repo_id = ? and dm.symbol_id is null and dm.candidate_count is not null and dm.mention_type != 'code_call' ${archiveFilter}`
+    )
+    .get(...params) as { n: number };
+  return row.n;
 }

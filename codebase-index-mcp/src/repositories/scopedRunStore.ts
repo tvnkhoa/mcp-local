@@ -47,6 +47,12 @@ export type SymbolRowShape = {
   line?: number | null;
 };
 
+/** The symbol id a {@link symbolRowKey} starts with. */
+export function symbolIdOfRowKey(key: string): string {
+  const cut = key.indexOf("\u0001");
+  return cut < 0 ? key : key.slice(0, cut);
+}
+
 /** Everything a resolver reads off a symbol row (id, kind, name, file, parent, signature, line). */
 export function symbolRowKey(r: SymbolRowShape): string {
   return [r.symbolId, r.kind, r.name, r.filePath, r.parentSymbolId ?? "", r.signature ?? "", String(r.line ?? "")].join("\u0001");
@@ -159,4 +165,114 @@ export function ftsIntegrityCheck(db: Database.Database): void {
  */
 export function resetMentionResolution(db: Database.Database, repoId: string): number {
   return db.prepare(`update doc_mentions set symbol_id = null where repo_id = ? and symbol_id is not null`).run(repoId).changes;
+}
+
+/** Release K3: the name-bound lanes whose post-phase pass a scoped run may skip (see `ScopeInputs`). */
+export type LaneFlags = { sql: boolean; css: boolean };
+
+const SQL_FILE = /\.sql$/i;
+const CSS_FILE = /\.(css|scss|sass|less)$/i;
+const CSS_EDGE_TYPES = new Set(["USES_CSS_VAR", "USES_CSS_CLASS"]);
+const CSS_SYMBOL_KINDS = new Set(["css_variable", "css_class"]);
+
+/** What `paths` hold NOW in the index: SQL or CSS edges from their symbols, or SQL / CSS symbols. */
+export function laneRowsForFiles(db: Database.Database, repoId: string, paths: readonly string[]): LaneFlags {
+  const flags: LaneFlags = {
+    sql: paths.some((p) => SQL_FILE.test(p)),
+    css: paths.some((p) => CSS_FILE.test(p))
+  };
+  if (paths.length === 0 || (flags.sql && flags.css)) return flags;
+  const json = JSON.stringify(paths);
+  const row = db
+    .prepare(
+      `select
+         exists(select 1 from symbols s join edges e on e.repo_id = s.repo_id and e.from_id = s.symbol_id
+                where s.repo_id = ? and s.file_path in (select value from json_each(?)) and e.type like 'SQL\\_%' escape '\\') as sqlEdge,
+         exists(select 1 from symbols where repo_id = ? and file_path in (select value from json_each(?)) and kind like 'sql\\_%' escape '\\') as sqlSymbol,
+         exists(select 1 from symbols s join edges e on e.repo_id = s.repo_id and e.from_id = s.symbol_id
+                where s.repo_id = ? and s.file_path in (select value from json_each(?)) and e.type in ('USES_CSS_VAR', 'USES_CSS_CLASS')) as cssEdge,
+         exists(select 1 from symbols where repo_id = ? and file_path in (select value from json_each(?)) and kind in ('css_variable', 'css_class')) as cssSymbol`
+    )
+    .get(repoId, json, repoId, json, repoId, json, repoId, json) as { sqlEdge: number; sqlSymbol: number; cssEdge: number; cssSymbol: number };
+  return { sql: flags.sql || row.sqlEdge === 1 || row.sqlSymbol === 1, css: flags.css || row.cssEdge === 1 || row.cssSymbol === 1 };
+}
+
+/** The same question of a file's freshly extracted rows (the "has, after the write" side). */
+export function laneRowsOfExtraction(
+  filePath: string,
+  symbols: readonly { kind: string }[],
+  edges: readonly { type: string }[]
+): LaneFlags {
+  return {
+    sql: SQL_FILE.test(filePath) || symbols.some((x) => x.kind.startsWith("sql_")) || edges.some((e) => e.type.startsWith("SQL_")),
+    css: CSS_FILE.test(filePath) || symbols.some((x) => CSS_SYMBOL_KINDS.has(x.kind)) || edges.some((e) => CSS_EDGE_TYPES.has(e.type))
+  };
+}
+
+/**
+ * The token parts of every `sqlconst:<specifier>#<name>` anchor (MCP-ISSUE-082 I4): still a token, or bound
+ * with the token kept in its reason. The SQL pass follows an anchor through the module its specifier
+ * names (and one barrel hop), so a file whose path keys or symbol names meet these parts can change a
+ * binding without holding a SQL row itself.
+ */
+export function sqlAnchorTokenParts(db: Database.Database, repoId: string): Set<string> {
+  const parts = new Set<string>();
+  const rows = db
+    .prepare(
+      `select to_id as toId, reason from edges
+       where repo_id = ? and type = 'SQL_QUERY' and (to_id like 'sqlconst:%' or reason like '%sqlconst:%')`
+    )
+    .all(repoId) as { toId: string; reason: string | null }[];
+  for (const r of rows) {
+    const token = r.toId.startsWith("sqlconst:") ? r.toId : /sqlconst:\S+/.exec(r.reason ?? "")?.[0];
+    if (token) for (const p of tokenParts(token)) parts.add(p);
+  }
+  return parts;
+}
+
+/**
+ * Release K3 (b) / K4: on a scoped run, unbind only the BOUND mentions whose answer can have changed;
+ * unbound and ambiguous rows are re-decided by every `resolveMentions` anyway. A bound mention can
+ * change when its target was one of the re-extracted or removed files' symbols (`oldIds`, re-minted ids
+ * included), when its text meets a changed name in any form the resolver keys on (exact, lower-case, a
+ * dotted name's last segment or leading part), or — a filepath mention — when a file with one of its
+ * path keys appeared or vanished. Returns how many rows were unbound.
+ */
+export function resetMentionsForScope(
+  db: Database.Database,
+  repoId: string,
+  scope: { names: readonly string[]; oldIds: readonly string[]; pathKeys: readonly string[] }
+): number {
+  const forms = new Set<string>();
+  for (const name of scope.names) {
+    const lower = name.toLowerCase();
+    forms.add(lower);
+    const dot = lower.lastIndexOf(".");
+    if (dot >= 0) {
+      forms.add(lower.slice(dot + 1));
+      forms.add(lower.slice(0, dot));
+    }
+  }
+  const oldIds = new Set(scope.oldIds);
+  const pathKeys = new Set(scope.pathKeys.map((k) => k.toLowerCase()));
+  const bound = db
+    .prepare(`select doc_id as docId, mention_type as type, mention_text as text, symbol_id as symbolId from doc_mentions where repo_id = ? and symbol_id is not null`)
+    .all(repoId) as { docId: string; type: string; text: string; symbolId: string }[];
+  const unbind = db.prepare(
+    `update or replace doc_mentions set symbol_id = null where repo_id = ? and doc_id = ? and mention_type = ? and mention_text = ? and symbol_id = ?`
+  );
+  let n = 0;
+  const tx = db.transaction(() => {
+    for (const m of bound) {
+      const hit =
+        oldIds.has(m.symbolId) ||
+        ((m.type === "backtick" || m.type === "code_call") && forms.has(m.text.toLowerCase())) ||
+        (m.type === "filepath" && pathKeysFor(m.text.replace(/\\/g, "/")).some((k) => pathKeys.has(k.toLowerCase())));
+      if (!hit) continue;
+      unbind.run(repoId, m.docId, m.type, m.text, m.symbolId);
+      n += 1;
+    }
+  });
+  tx();
+  return n;
 }

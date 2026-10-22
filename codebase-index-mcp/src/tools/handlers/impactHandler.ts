@@ -1051,6 +1051,8 @@ export async function handleQueryDocs(
         docsCompared: report.filesCompared,
         results: report.rows,
         ...(report.note && { note: report.note }),
+        // Release K4: mentions several symbols match equally have no single code file to compare against.
+        ...(report.ambiguousMentionsSkipped !== undefined && { ambiguousMentionsSkipped: report.ambiguousMentionsSkipped }),
         ...(report.total === 0 && !report.note && {
           hint: "no document is behind the code it mentions. A doc committed before its code is not proof of staleness either — a typo fix bumps a source file without invalidating prose — so this is a review queue, not a verdict."
         })
@@ -1097,7 +1099,7 @@ export async function handleQueryDocs(
     // MCP-ISSUE-061 Stage 3. Unresolved mentions were already stored (`symbol_id is null`) and never
     // read back; this reads them, but only where a near-miss symbol exists — see findDriftingDocsImpl
     // for why the raw list is dominated by tool names rather than renames.
-    const { rows, total, scanned, suppressed } = store.findDriftingDocs(
+    const { rows, total, scanned, suppressed, ambiguousExcluded } = store.findDriftingDocs(
       args.repoId,
       args.minSimilarity,
       args.limit,
@@ -1115,6 +1117,12 @@ export async function handleQueryDocs(
         // class. Reported rather than dropped quietly, so the queue's size is never a mystery.
         ...(suppressed.plainWord + suppressed.nonProductionTarget + suppressed.liveLiteral > 0 && {
           suppressedAsNoise: suppressed
+        }),
+        // Release K4 (MCP-ISSUE-089): an ambiguous mention matches several symbols — it is not missing,
+        // so it is not drift. Counted, not silently dropped.
+        ...(ambiguousExcluded > 0 && {
+          ambiguousExcluded,
+          ambiguousNote: "mentions that match several symbols equally are not drift; query_docs mode 'search' with includeSymbols lists them with their candidate counts"
         }),
         minSimilarity: args.minSimilarity ?? 0.75,
         results: rows,
@@ -1147,6 +1155,12 @@ export async function handleQueryDocs(
         returned: results.length,
         ...(total > results.length && { droppedByLimit: total - results.length }),
         results,
+        // Release K4: a row with match "ambiguous" is a doc whose mention lists one of these symbols among
+        // several equal candidates — it may or may not mean this one.
+        ...(results.some((r) => r.match === "ambiguous") && {
+          ambiguousRows: results.filter((r) => r.match === "ambiguous").length,
+          ambiguousNote: "rows with match 'ambiguous' mention a name several symbols share equally; the doc may describe another of them"
+        }),
         ...(total === 0 && {
           hint: args.includeCodeMentions
             ? "no doc mentions reference these symbols — the docs lane may not be indexed for this repo (index_repository with docsMode='on'), or nothing documents them."
@@ -1171,6 +1185,10 @@ export async function handleQueryDocs(
       documented: results.filter((r) => r.hasDocs).length,
       ...(total > results.length && { documentedScope: "returned page only" }),
       results,
+      // Release K4: mentions that list a symbol among several equal candidates do not count as documenting it.
+      ...(results.some((r) => (r.ambiguousMentionCount ?? 0) > 0) && {
+        ambiguousNote: "ambiguousMentionCount: doc mentions naming this symbol's name, shared equally with other symbols — not counted in mentionCount/hasDocs"
+      }),
       ...(total === 0 && { hint: "no symbols found for this file — check the path against list_repositories/get_file_summary, and that the file was indexed." })
     },
     profile

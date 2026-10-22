@@ -66,8 +66,8 @@ export class RefreshWorkerClient {
   }
 
   /** Same signature as the in-process runner, so the gate cannot tell the difference. */
-  readonly run: RunIndexAndResolve = (repoId, repoPath, mode, docsEnabled, maxFiles, batchSize) =>
-    this.request(repoId, repoPath, mode, docsEnabled, maxFiles, batchSize);
+  readonly run: RunIndexAndResolve = (repoId, repoPath, mode, docsEnabled, maxFiles, batchSize, extras) =>
+    this.request(repoId, repoPath, mode, docsEnabled, maxFiles, batchSize, extras?.knownDirtyPaths);
 
   /**
    * Spawn the worker and have it open its connection and load the indexer now, so the first refresh
@@ -100,7 +100,9 @@ export class RefreshWorkerClient {
     mode: IndexMode,
     docsEnabled: boolean,
     maxFiles: number,
-    batchSize: number
+    batchSize: number,
+    /** Release K3 (P1): the gate's dirty set, so the worker's dirty run does not read git again. */
+    dirtyPaths?: readonly string[]
   ): Promise<IndexRunResult> {
     return new Promise<IndexRunResult>((resolve, reject) => {
       let worker: RefreshWorkerLike;
@@ -112,7 +114,19 @@ export class RefreshWorkerClient {
       }
       const id = this.nextId++;
       this.pending.set(id, { repoId, resolve, reject });
-      worker.postMessage({ kind: "run", id, dbPath: this.options.dbPath, limits: this.options.limits, repoId, repoPath, mode, docsEnabled, maxFiles, batchSize });
+      worker.postMessage({
+        kind: "run",
+        id,
+        dbPath: this.options.dbPath,
+        limits: this.options.limits,
+        repoId,
+        repoPath,
+        mode,
+        docsEnabled,
+        maxFiles,
+        batchSize,
+        ...(dirtyPaths && { dirtyPaths: [...dirtyPaths] })
+      });
     });
   }
 

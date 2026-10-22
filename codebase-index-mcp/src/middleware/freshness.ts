@@ -51,7 +51,12 @@ export type FreshnessGateOptions = {
   getIndexedCommit: (repoId: string) => string | null;
   /** May be async (release I1b: the server reads git without blocking its event loop). */
   readTree: (repoPath: string) => RepoTreeState | Promise<RepoTreeState>;
-  run: (repoId: string, repoPath: string, mode: IndexMode) => Promise<IndexRunResult>;
+  /**
+   * `dirtyPaths` (release K3, P1): the tree the gate just read, handed to a dirty run so it does not read
+   * git again. The same porcelain-v2 read the run would make, so the run indexes exactly what the gate
+   * keys freshness and the dirty ledger on.
+   */
+  run: (repoId: string, repoPath: string, mode: IndexMode, dirtyPaths?: readonly string[]) => Promise<IndexRunResult>;
   /**
    * Why this process must not refresh the repo at all, or null. Release F: a server still running an
    * older build refreshed over a newer build's index (several processes share one DB).
@@ -336,7 +341,7 @@ export function createFreshnessGate(opts: FreshnessGateOptions): FreshnessGate {
 
     const promise = serialize(repoId, () => {
       if (cleanupByDirty) opts.markPendingReindex?.(repoId, vanished);
-      return opts.run(repoId, repoPath, mode);
+      return opts.run(repoId, repoPath, mode, mode === "dirty" ? tree.dirty : undefined);
     })
       .then((result) => {
         coveredKey.set(repoId, key);

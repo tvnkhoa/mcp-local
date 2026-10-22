@@ -51,16 +51,27 @@ export type RefreshWorkerRequest = {
   docsEnabled: boolean;
   maxFiles: number;
   batchSize: number;
+  /** Release K3 (P1): the freshness gate's dirty set for a dirty run (see `RunExtras.knownDirtyPaths`). */
+  dirtyPaths?: string[];
 };
 
 export type RefreshWorkerMessage =
   | { type: "result"; id: number; result: IndexRunResult }
   | { type: "error"; id: number; error: string };
 
+/** `endIndexSession`, best-effort: a checkpoint that cannot run now runs on a later one. */
+function endSession(store: GraphStore, truncate: boolean): void {
+  try {
+    store.endIndexSession(truncate);
+  } catch {
+    // Non-fatal: the WAL is checkpointed by the next run's session end.
+  }
+}
+
 if (parentPort) {
   const port = parentPort;
   /** One connection and one runner for the worker's life; the DB path and limits never change in a process. */
-  let runner: { dbPath: string; run: RunIndexAndResolve } | null = null;
+  let runner: { dbPath: string; run: RunIndexAndResolve; store: GraphStore } | null = null;
   let parsePool: ExtractionWorkerPool | null = null;
   let parsePoolIdle: NodeJS.Timeout | undefined;
   const warmParsePool = (limits: IndexRunnerLimits): ExtractionWorkerPool => {
@@ -77,21 +88,24 @@ if (parentPort) {
     }, REFRESH_PARSE_POOL_IDLE_MS);
     parsePoolIdle.unref();
   };
-  const runnerFor = (request: RefreshWorkerRequest): RunIndexAndResolve => {
-    if (runner && runner.dbPath === request.dbPath) return runner.run;
+  const runnerFor = (request: RefreshWorkerRequest): { run: RunIndexAndResolve; store: GraphStore } => {
+    if (runner && runner.dbPath === request.dbPath) return runner;
     const store = new GraphStore(request.dbPath);
     runner = {
       dbPath: request.dbPath,
+      store,
       // Release J: off the server thread, a small refresh parses inline; the grammars stay loaded in
       // this long-lived worker, so only its first refresh pays for them.
       run: createIndexRunner({
         store,
         limits: { ...request.limits, inlineParseMaxFiles: REFRESH_INLINE_PARSE_MAX_FILES },
         resolvePerformanceProfileOverride: () => performanceProfileOverrideFromEnv(),
+        // Release K3 (P2): the checkpoint runs after the result is posted — see below.
+        deferSessionEnd: true,
         ...(request.limits.parseWorkers > 0 && { sharedParsePool: () => warmParsePool(request.limits) })
       })
     };
-    return runner.run;
+    return runner;
   };
   port.on("message", (request: RefreshWorkerRequest) => {
     if (request.kind === "warm") {
@@ -107,12 +121,22 @@ if (parentPort) {
       return;
     }
     void (async () => {
+      let active: { run: RunIndexAndResolve; store: GraphStore } | null = null;
       try {
-        const run = runnerFor(request);
-        const result = await run(request.repoId, request.repoPath, request.mode, request.docsEnabled, request.maxFiles, request.batchSize);
+        active = runnerFor(request);
+        const result = await active.run(request.repoId, request.repoPath, request.mode, request.docsEnabled, request.maxFiles, request.batchSize, {
+          ...(request.dirtyPaths && { knownDirtyPaths: request.dirtyPaths })
+        });
         port.postMessage({ type: "result", id: request.id, result } satisfies RefreshWorkerMessage);
+        // Release K3 (P2): the run is committed and the answer is on its way; NOW the end-of-session
+        // checkpoint, ~280 ms that used to sit in front of every refreshed answer. It is synchronous, so
+        // no other message this worker receives starts a run before it returns; the server thread's
+        // connection never checkpoints (release J), so it is the only checkpointer of this run's WAL.
+        endSession(active.store, result.mode === "full");
       } catch (error) {
         port.postMessage({ type: "error", id: request.id, error: error instanceof Error ? error.message : String(error) } satisfies RefreshWorkerMessage);
+        // A failed run still began a session: restore the connection's checkpoint threshold.
+        if (active) endSession(active.store, false);
       } finally {
         if (parsePool) releaseParsePoolWhenIdle();
       }

@@ -20,6 +20,7 @@ import { collectDirtyFiles, resolveCurrentBranch, resolveHeadCommitSha } from ".
 import type { GraphStore } from "../../repositories/graphStore.js";
 import type { ExtractionWorkerPool } from "../extractors/extractionWorkerPool.js";
 import { runIndexPipeline, INDEX_VERSION, SCOPE_FORCES_FULL_RUN, type PerformanceProfile } from "./indexPipeline.js";
+import { pathKeysFor, tokenParts } from "../../repositories/scopedRunStore.js";
 import type { IndexMode, IndexRunResult } from "../../types/index.js";
 import {
   buildSkippedRunSummary,
@@ -77,7 +78,23 @@ export interface IndexRunnerOptions {
    * run starts its own, and their start-up — each loads the extractor modules — was ~3 s of a refresh.
    */
   readonly sharedParsePool?: () => ExtractionWorkerPool;
+  /**
+   * Release K3 (P2): leave the end-of-session checkpoint to the caller. The refresh worker posts the
+   * result first and checkpoints after, so the answer never waits on it (it was ~280 ms of a refresh).
+   */
+  readonly deferSessionEnd?: boolean;
 }
+
+/** Per-run extras, internal to the runner and its refresh worker. */
+export type RunExtras = {
+  /** Release J: set on the full run a scoped run escalated to; recorded as that run's `scope`. */
+  escalatedBecause?: string;
+  /**
+   * Release K3 (P1): the dirty set the freshness gate already read (`readWorkingTreeStateAsync`, the
+   * same porcelain-v2 read as `collectDirtyFiles`), so a dirty run does not run `git status` again.
+   */
+  knownDirtyPaths?: readonly string[];
+};
 
 export type RunIndexAndResolve = (
   repoId: string,
@@ -85,11 +102,12 @@ export type RunIndexAndResolve = (
   mode: IndexMode,
   docsEnabled: boolean,
   maxFiles: number,
-  batchSize: number
+  batchSize: number,
+  extras?: RunExtras
 ) => Promise<IndexRunResult>;
 
 export function createIndexRunner(options: IndexRunnerOptions): RunIndexAndResolve {
-  const { store, limits, resolveProgressNotifier, resolvePerformanceProfileOverride, sharedParsePool } = options;
+  const { store, limits, resolveProgressNotifier, resolvePerformanceProfileOverride, sharedParsePool, deferSessionEnd } = options;
 
   return async function runIndexAndResolve(
     repoId: string,
@@ -98,9 +116,9 @@ export function createIndexRunner(options: IndexRunnerOptions): RunIndexAndResol
     docsEnabled: boolean,
     maxFiles: number,
     batchSize: number,
-    /** Release J: set on the full run a scoped run escalated to; recorded as that run's `scope`. */
-    escalatedBecause?: string
+    extras: RunExtras = {}
   ): Promise<IndexRunResult> {
+  const { escalatedBecause } = extras;
   // Never write over an index a newer build wrote (several server processes share one DB).
   const refusal = newerBuildRefusal(store.getLatestRun(repoId)?.indexVersion);
   if (refusal) throw new Error(`index_repository refused: ${refusal}`);
@@ -112,7 +130,7 @@ export function createIndexRunner(options: IndexRunnerOptions): RunIndexAndResol
   /** Release J: redo a scoped run as a full one, and say why on the full run's record. */
   const escalateToFull = (reason: string): Promise<IndexRunResult> => {
     indexLog(`[index-scope] repoId=${repoId} ${mode} run escalated to full: ${reason}`);
-    return runIndexAndResolve(repoId, repoPath, "full", docsEnabled, maxFiles, batchSize, `full (escalated from ${mode}: ${reason})`);
+    return runIndexAndResolve(repoId, repoPath, "full", docsEnabled, maxFiles, batchSize, { escalatedBecause: `full (escalated from ${mode}: ${reason})` });
   };
 
   /**
@@ -159,7 +177,7 @@ export function createIndexRunner(options: IndexRunnerOptions): RunIndexAndResol
   // untracked). Sub-second refresh for "what I just edited" without a full/incremental scan.
   let dirtyFileSet: Set<string> | undefined;
   if (mode === "dirty") {
-    dirtyFileSet = collectDirtyFiles(repoPath);
+    dirtyFileSet = extras.knownDirtyPaths ? new Set(extras.knownDirtyPaths) : collectDirtyFiles(repoPath);
     // MCP-ISSUE-042: union in files the refactor engine wrote. After a rollback the tree is clean
     // again, so git contributes nothing and this set is the only reason `mode:"dirty"` has work to do.
     const pending = store.getPendingReindexFiles(repoId);
@@ -261,6 +279,8 @@ export function createIndexRunner(options: IndexRunnerOptions): RunIndexAndResol
     progress.stop(`↻ index ${repoId} · ${mode} run escalated to full · ${summary.scopeEscalation}`);
     return escalateToFull(summary.scopeEscalation);
   }
+  // Release K3: present on a scoped (non-escalated) run; absent means "run every pass repo-wide".
+  const scopeInputs = mode !== "full" ? summary.scopeInputs : undefined;
   const resolvePhaseStart = Date.now();
   let ftsRebuildMs = 0;
   let buildContextMs = 0;
@@ -303,6 +323,14 @@ export function createIndexRunner(options: IndexRunnerOptions): RunIndexAndResol
       const ctxStart = Date.now();
       const ctx = store.buildCallResolutionContext(repoId);
       buildContextMs = Date.now() - ctxStart;
+      // Release K3 (P3a): a scoped run re-resolves only the rows whose answer can have changed — rows of
+      // re-extracted files (the changed ones and their dependents, all fresh tokens), and rows whose
+      // callee names a symbol in K. Any other unresolved row has the same candidates as last run.
+      if (scopeInputs) {
+        const files = new Set(scopeInputs.reextracted);
+        const names = new Set(scopeInputs.names);
+        ctx.unresolvedRows = ctx.unresolvedRows.filter((r) => files.has(r.fromFile) || tokenParts(r.toId).some((p) => names.has(p)));
+      }
       callEdgesAttempted = ctx.unresolvedRows.length;
       indexLog(`[index-post] repoId=${repoId} pre-fetched ${String(ctx.unresolvedRows.length)} unresolved call edges`);
       if (ctx.unresolvedRows.length === 0) return 0;
@@ -369,6 +397,9 @@ export function createIndexRunner(options: IndexRunnerOptions): RunIndexAndResol
   // run lands on the same graph as a full one. Non-fatal: a failure leaves labelled tokens behind.
   (() => {
     try {
+      // Release K3 (P3c): the pass rebinds every CSS token by name; nothing it reads changed unless a
+      // file this run wrote or removed had or has CSS rows.
+      if (scopeInputs && !scopeInputs.lanes.css) return;
       const css = store.resolveCssEdges(repoId);
       if (css.tokensResolved + css.tokensUnresolved > 0) {
         indexLog(`[index-post] repoId=${repoId} css tokens resolved=${String(css.tokensResolved)} unresolved=${String(css.tokensUnresolved)} edges=${String(css.edgesWritten)}`);
@@ -381,6 +412,14 @@ export function createIndexRunner(options: IndexRunnerOptions): RunIndexAndResol
   // run, which is what keeps an incremental run equal to a full one. Non-fatal.
   (() => {
     try {
+      // Release K3 (P3c): likewise for SQL, plus the `sqlconst:` anchors, which bind through a module
+      // (and one barrel hop) that may hold no SQL row of its own: a written or removed file whose path
+      // keys, or a K name, meet an anchor's token parts.
+      if (scopeInputs && !scopeInputs.lanes.sql) {
+        const anchorParts = store.sqlAnchorTokenParts(repoId);
+        const keys = [...scopeInputs.reextracted, ...scopeInputs.removed].flatMap(pathKeysFor).concat(scopeInputs.names);
+        if (!keys.some((k) => anchorParts.has(k))) return;
+      }
       const sql = store.resolveSqlEdges(repoId);
       if (sql.tokensResolved + sql.tokensUnresolved + sql.tokensAmbiguous + sql.migrationOrderEdges > 0) {
         indexLog(`[index-post] repoId=${repoId} sql tokens resolved=${String(sql.tokensResolved)} unresolved=${String(sql.tokensUnresolved)} ambiguous=${String(sql.tokensAmbiguous)} edges=${String(sql.edgesWritten)} migrationOrder=${String(sql.migrationOrderEdges)}`);
@@ -494,7 +533,10 @@ export function createIndexRunner(options: IndexRunnerOptions): RunIndexAndResol
   const mentionsResolved = docsEnabled
     ? (() => {
         try {
-          if (mode !== "full") store.resetMentionResolution(repoId);
+          // Release K3 (b): a scoped run unbinds only the bound mentions it can have changed (see
+          // resetMentionsForScope); an escalated or otherwise unscoped non-full run still unbinds all.
+          if (scopeInputs) store.resetMentionsForScope(repoId, scopeInputs);
+          else if (mode !== "full") store.resetMentionResolution(repoId);
           return store.resolveMentions(repoId);
         } catch {
           return 0;
@@ -530,8 +572,9 @@ export function createIndexRunner(options: IndexRunnerOptions): RunIndexAndResol
     }
   })();
 
+  const { scopeInputs: _scopeInputs, ...summaryToRecord } = summary;
   const fullSummary = {
-    ...summary,
+    ...summaryToRecord,
     // Spans the whole run, including the post-phase below. The pipeline's own figure is preserved as
     // `extractPhaseMs`, so nothing is lost and no contained phase can exceed the total.
     elapsedMs: Date.now() - runStartedMs,
@@ -586,7 +629,7 @@ export function createIndexRunner(options: IndexRunnerOptions): RunIndexAndResol
   indexLog(`[index-post] repoId=${repoId} recorded run metadata in ${recordElapsed}ms`);
 
   // Re-enable WAL auto-checkpoint and force a full checkpoint to shrink WAL file
-  store.endIndexSession(mode === "full");
+  if (!deferSessionEnd) store.endIndexSession(mode === "full");
 
   indexLog(`[index-post-done] repoId=${repoId} crossRepo=${String(crossStats.resolved)} calls=${String(callEdgesResolved)} imports=${String(importEdgesResolved)} mentions=${String(mentionsResolved)}`);
 

@@ -6,11 +6,14 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
+import { readDirtyLedger, recordDirtyLedger } from "../../middleware/freshness.js";
 import {
+  collectDirtyFiles,
   getRepoWorkingTreeState,
   parseStatusPorcelainV2,
   parseStatusPorcelainV2Entries,
   readStatusEntriesAsync,
+  readWorkingTreeStateAsync,
   stillDirty,
   summarizeWorkingTree
 } from "./gitHelpers.js";
@@ -101,4 +104,41 @@ test("porcelain v2 entries keep one entry per rename, with its old path", () => 
       { code: "?", path: "newdir/" }
     ]
   });
+});
+
+/**
+ * Release K3 (P1): a dirty refresh now indexes the set the freshness gate read (`readWorkingTreeStateAsync`)
+ * instead of reading git again (`collectDirtyFiles`). A path one sees and the other skips would loop
+ * (the gate refreshes forever) or go stale (the ledger records what the run never indexed), so the two
+ * reads — and the ledger the gate writes from its read — must be the same set on every kind of change.
+ */
+test("the gate's tree read, the run's dirty set and the dirty ledger are one set", async () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "cim-k3p1-"));
+  const lockDir = mkdtempSync(path.join(tmpdir(), "cim-k3p1-state-"));
+  const git = (...a: string[]) => execFileSync("git", a, { cwd: dir, encoding: "utf8" });
+  try {
+    git("init", "-q");
+    git("config", "user.email", "t@t");
+    git("config", "user.name", "t");
+    for (const f of ["a.ts", "b.ts", "c.ts"]) writeFileSync(path.join(dir, f), `export const ${f[0]} = 1;\n`);
+    git("add", ".");
+    git("commit", "-qm", "init");
+    writeFileSync(path.join(dir, "a.ts"), "export const a = 2;\n"); // modified
+    git("mv", "b.ts", "b2.ts"); // staged rename
+    mkdirSync(path.join(dir, "newdir"));
+    writeFileSync(path.join(dir, "newdir", "x.ts"), "x\n"); // untracked directory
+    writeFileSync(path.join(dir, "newdir", "y.ts"), "y\n");
+    rmSync(path.join(dir, "c.ts")); // deleted
+
+    const gate = await readWorkingTreeStateAsync(dir);
+    const run = [...collectDirtyFiles(dir)].sort();
+    assert.deepEqual([...gate.dirty].sort(), run, "the run's own read and the gate's read agree");
+    assert.deepEqual(run, ["a.ts", "b.ts", "b2.ts", "c.ts", "newdir/x.ts", "newdir/y.ts"], "every kind of change, file by file");
+
+    recordDirtyLedger(lockDir, "r", "dirty", gate);
+    assert.deepEqual(readDirtyLedger(lockDir, "r")?.paths, run, "the ledger records exactly what the run indexed");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+    rmSync(lockDir, { recursive: true, force: true });
+  }
 });

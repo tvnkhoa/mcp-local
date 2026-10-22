@@ -118,6 +118,23 @@ test("a second same-named declaration re-decides an unchanged caller's resolved 
   );
 });
 
+test("deleting a file that others import and call, with a doc naming it twice, lands as a full run does", async () => {
+  // Release K: a dirty run whose ONLY change was a deleted file never queued its dependents (the hook ran
+  // after the last extraction batch, and there was none), so caller.ts kept edges into nothing that the
+  // safety net then deleted — a full run keeps them as tokens. And the doc's two `helper` rows: one bound
+  // row in the scoped run once unbound, two NULL rows in the full run. Found on wec.aria by the
+  // `mention-prefix-delete` conformance case.
+  await assertScopedEqualsFull(
+    "delete-only",
+    {
+      "src/util.ts": "export function helper(): number {\n  return 1;\n}\n",
+      "src/caller.ts": "import { helper } from \"./util\";\n\nexport function main(): number {\n  return helper();\n}\n",
+      "docs/notes.md": "# Notes\n\nCall `helper` first; `helper` is cheap.\n"
+    },
+    (root) => rmSync(path.join(root, "src/util.ts"))
+  );
+});
+
 test("a dirty run reads every .csproj's package names, so a .cs file extracts as in a full run", async () => {
   // `using Acme.Things;` becomes a nuget:acme contract edge only when some project references `Acme`.
   // The dirty run sees just the edited .cs file; it used to pre-scan only dirty .csproj files.

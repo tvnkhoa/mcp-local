@@ -71,6 +71,7 @@ import {
   findSimilarInterfaceNames as findSimilarInterfaceNamesImpl
 } from "../services/analysis/staticAnalyzer.js";
 import {
+  countAmbiguousMentionTargetsImpl,
   upsertDocsImpl,
   upsertDocMentionsImpl,
   replaceDocsForFileImpl,
@@ -219,6 +220,9 @@ import {
   invalidateVectorSearchCache,
 } from "./vectorStore.js";
 import {
+  resetMentionsForScope as resetMentionsForScopeImpl,
+  laneRowsForFiles as laneRowsForFilesImpl,
+  sqlAnchorTokenParts as sqlAnchorTokenPartsImpl,
   findNameDependentFiles as findNameDependentFilesImpl,
   ftsForgetFile as ftsForgetFileImpl,
   ftsIndexFile as ftsIndexFileImpl,
@@ -743,6 +747,21 @@ export class GraphStore {
     return resolveImportEdgesImpl(this.db, repoId, maxUnresolvedRows);
   }
 
+  /** Release K3 (b) / K4: unbind only the bound mentions a scoped run can have changed. */
+  resetMentionsForScope(repoId: string, scope: { names: readonly string[]; oldIds: readonly string[]; pathKeys: readonly string[] }): number {
+    return resetMentionsForScopeImpl(this.db, repoId, scope);
+  }
+
+  /** Release K3: SQL / CSS rows the files hold now (see `ScopeInputs.lanes`). */
+  laneRowsForFiles(repoId: string, paths: readonly string[]): { sql: boolean; css: boolean } {
+    return laneRowsForFilesImpl(this.db, repoId, paths);
+  }
+
+  /** Release K3: token parts of the repo's `sqlconst:` anchors. */
+  sqlAnchorTokenParts(repoId: string): Set<string> {
+    return sqlAnchorTokenPartsImpl(this.db, repoId);
+  }
+
   /** MCP-ISSUE-087: files whose unresolved import tokens resolve to a path the index no longer holds. */
   findImportersOfRemovedPath(repoId: string, removedPath: string): { fromFile: string; specifier: string }[] {
     return findImportersOfRemovedPathImpl(this.db, repoId, removedPath);
@@ -1036,6 +1055,8 @@ export class GraphStore {
       mentionText: string;
       mentionType: string;
       symbolName: string | null;
+      match?: "ambiguous";
+      candidateCount?: number;
     }[];
     total: number;
   } {
@@ -1044,6 +1065,11 @@ export class GraphStore {
 
   findNonEnglishDocs(repoId: string, minRatioPercent?: number, limit?: number): ReturnType<typeof findNonEnglishDocsImpl> {
     return findNonEnglishDocsImpl(this.db, repoId, minRatioPercent, limit);
+  }
+
+  /** Release K4: ambiguous mentions doc freshness skips (no single symbol file to compare). */
+  countAmbiguousMentionTargets(repoId: string, includeArchived = false): number {
+    return countAmbiguousMentionTargetsImpl(this.db, repoId, includeArchived);
   }
 
   listDocMentionTargets(repoId: string, includeArchived?: boolean): ReturnType<typeof listDocMentionTargetsImpl> {
@@ -1076,6 +1102,7 @@ export class GraphStore {
       signature: string | null;
       hasDocs: boolean;
       mentionCount: number;
+      ambiguousMentionCount?: number;
     }[];
     total: number;
   } {

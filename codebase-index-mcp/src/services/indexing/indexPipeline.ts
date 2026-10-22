@@ -37,7 +37,7 @@ export function currentAnnotationKey(repoPath: string): string {
   return `${ANNOTATION_SCANNER_VERSION}:${loadCitationConfig(repoPath).config?.hash ?? "none"}`;
 }
 import { GraphStore } from "../../repositories/graphStore.js";
-import { changedSymbolNames, pathKeysFor, symbolRowKey, type SymbolRowsByFile } from "../../repositories/scopedRunStore.js";
+import { symbolIdOfRowKey, laneRowsOfExtraction, changedSymbolNames, pathKeysFor, symbolRowKey, type SymbolRowsByFile } from "../../repositories/scopedRunStore.js";
 import { resolveHeadCommitSha, resolveCurrentBranch } from "../git/gitHelpers.js";
 import { redactSensitive } from "../../middleware/indexGuardrails.js";
 import { extractGraphData, isParseTimeoutError } from "../extractors/treeSitterExtractor.js";
@@ -138,7 +138,10 @@ export type RunIndexInput = {
 // changes for unchanged files, and the bump is what lets the release F guard stop a v10 process from
 // writing those shapes back over a J index. An unchanged file keeps its hash, so the stored rows
 // change on a FULL run.
-export const INDEX_VERSION = "v11-release-j";
+// v12: release K4 (MCP-ISSUE-089) — a doc mention several symbols match equally keeps symbol_id NULL and
+// records candidate_count / candidate_ids instead of binding to the first by path; stored mention rows
+// change for unchanged docs (on the next run: unbound rows are re-decided every run).
+export const INDEX_VERSION = "v12-release-k";
 
 /**
  * Release J: files whose change alters how every other file resolves — module resolution (tsconfig paths,
@@ -264,9 +267,20 @@ export async function runIndexPipeline(store: GraphStore, input: RunIndexInput):
   const deletedInTree: string[] = [];
   let scopeEscalation: string | null = null;
   let dependentFiles = 0;
+  /** Release K3: whether a file this run writes or removes had, or has, SQL / CSS rows (see `ScopeInputs`). */
+  const lanes = { sql: false, css: false };
+  const noteLanes = (l: { sql: boolean; css: boolean }): void => {
+    lanes.sql ||= l.sql;
+    lanes.css ||= l.css;
+  };
+  let scopeNames: string[] = [];
+  let scopePathKeys: string[] = [];
+  let scopeDoomed: string[] = [];
+  const scopeOldIds = new Set<string>();
   const captureBefore = (paths: readonly string[]): void => {
     const fresh = paths.filter((p) => !rowsBefore.has(p));
     if (fresh.length === 0) return;
+    noteLanes(store.laneRowsForFiles(input.repoId, fresh));
     const rows = store.symbolRowKeysForFiles(input.repoId, fresh);
     for (const p of fresh) {
       rowsBefore.set(p, rows.get(p) ?? new Map());
@@ -302,6 +316,18 @@ export async function runIndexPipeline(store: GraphStore, input: RunIndexInput):
     // Each batch steps to where it ENDED, fixed before the batch runs, so files appended after a
     // short last batch start exactly there instead of being stepped over.
     let batchEnd = 0;
+    // Release K: a dirty run whose only change is a deleted file has nothing to extract, so the hook
+    // "after the last batch" below never fired and the files that called or imported it kept edges into
+    // nothing (the safety net then deleted them, where a full run keeps them as tokens). Found by the
+    // release K conformance case `mention-prefix-delete`; present since release J.
+    if (scoped && workQueue.length === 0 && deletedInTree.length > 0) {
+      dependentsQueued = true;
+      const added = queueDependentFiles();
+      if (added > 0) {
+        totalFiles = workQueue.length;
+        totalBatches = Math.ceil(added / batchSize);
+      }
+    }
     for (let offset = 0; offset < workQueue.length; offset = batchEnd) {
       batchEnd = Math.min(offset + batchSize, workQueue.length);
       if (input.abortSignal?.aborted) {
@@ -634,6 +660,7 @@ export async function runIndexPipeline(store: GraphStore, input: RunIndexInput):
             if (scoped) {
               store.ftsIndexFile(input.repoId, item.file.path);
               rowsAfter.set(item.file.path, new Map(item.extracted.symbols.map((s) => [symbolRowKey(s), s.name])));
+              noteLanes(laneRowsOfExtraction(item.file.path, item.extracted.symbols, item.extracted.edges));
             }
           }
         });
@@ -726,7 +753,19 @@ export async function runIndexPipeline(store: GraphStore, input: RunIndexInput):
                 `scoped: ${String(writtenPaths.size - forcedPaths.size + deletedInTree.length + pruneCounts.filesPruned)} changed, ${String(dependentFiles)} dependent file(s) re-extracted`
           }
         : {}),
-      ...(scopeEscalation ? { scopeEscalation } : {})
+      ...(scopeEscalation ? { scopeEscalation } : {}),
+      ...(scoped && !scopeEscalation
+        ? {
+            scopeInputs: {
+              reextracted: [...writtenPaths],
+              removed: [...deletedInTree, ...scopeDoomed],
+              names: scopeNames,
+              pathKeys: scopePathKeys,
+              oldIds: [...new Set([...scopeOldIds, ...[...rowsBefore.values()].flatMap((rows) => [...rows.keys()].map(symbolIdOfRowKey))])],
+              lanes: { ...lanes }
+            }
+          }
+        : {})
     };
 
     // Note: recordRun is called by the caller (index.ts) after computing resolution metrics
@@ -856,8 +895,17 @@ export async function runIndexPipeline(store: GraphStore, input: RunIndexInput):
     }
     const names = new Set<string>();
     for (const [p, before] of rowsBefore) for (const n of changedSymbolNames(before, rowsAfter.get(p) ?? new Map())) names.add(n);
-    for (const rows of store.symbolRowKeysForFiles(input.repoId, doomed).values()) for (const n of rows.values()) names.add(n);
+    for (const rows of store.symbolRowKeysForFiles(input.repoId, doomed).values()) {
+      for (const [key, n] of rows) {
+        names.add(n);
+        scopeOldIds.add(symbolIdOfRowKey(key));
+      }
+    }
     const pathKeys = new Set([...appearedOrGone, ...doomed].flatMap(pathKeysFor));
+    scopeNames = [...names];
+    scopePathKeys = [...pathKeys];
+    scopeDoomed = doomed;
+    noteLanes(store.laneRowsForFiles(input.repoId, doomed));
     const exclude = new Set([...writtenPaths, ...doomed, ...deletedInTree]);
     for (const p of store.findNameDependentFiles(input.repoId, names, pathKeys, exclude)) candidates.add(p);
     for (const p of exclude) candidates.delete(p);

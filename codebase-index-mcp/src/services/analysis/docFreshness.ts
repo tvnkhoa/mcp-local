@@ -91,7 +91,7 @@ export function findDocsBehindCode(
   store: GraphStore,
   repoId: string,
   options: { minDaysBehind?: number; limit?: number; includeArchived?: boolean } = {}
-): { rows: DocBehindRow[]; total: number; filesCompared: number; note?: string } {
+): { rows: DocBehindRow[]; total: number; filesCompared: number; note?: string; ambiguousMentionsSkipped?: number } {
   const minDaysBehind = options.minDaysBehind ?? 1;
   const limit = Math.max(1, options.limit ?? 50);
 
@@ -155,5 +155,7 @@ export function findDocsBehindCode(
   }
 
   rows.sort((a, b) => b.daysBehind - a.daysBehind);
-  return { rows: rows.slice(0, limit), total: rows.length, filesCompared: compared };
+  // Release K4 (MCP-ISSUE-089): an ambiguous mention has no single symbol, so no code file to compare.
+  const ambiguousMentionsSkipped = store.countAmbiguousMentionTargets(repoId, options.includeArchived);
+  return { rows: rows.slice(0, limit), total: rows.length, filesCompared: compared, ...(ambiguousMentionsSkipped > 0 && { ambiguousMentionsSkipped }) };
 }
