@@ -128,7 +128,7 @@ test("a scoped run unbinds a mention whose target was one of the run's old ids, 
 
   // The method is deleted. Its name is in K; the mention text is only its prefix.
   conn.prepare(`delete from symbols where symbol_id = 'old-id'`).run();
-  assert.equal(resetMentionsForScope(conn, "r", { names: [], oldIds: ["old-id"], pathKeys: [] }), 1, "unbound by the old-id rule alone");
+  assert.equal(resetMentionsForScope(conn, "r", { names: [], oldIds: ["old-id"], pathKeys: [] }).size, 1, "unbound by the old-id rule alone");
   resolveMentionsImpl(conn, "r");
   assert.equal(row(conn, "d1", "Store")?.symbolId, null, "and nothing re-binds it — as a full run decides");
 });

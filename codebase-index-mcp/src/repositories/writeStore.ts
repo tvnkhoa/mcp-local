@@ -152,6 +152,34 @@ export function deduplicateResolvedEdges(db: Database.Database, repoId: string):
 }
 
 /**
+ * Release K3 (d): {@link deduplicateResolvedEdges} among the edges FROM these files' symbols only. Two
+ * rows duplicate each other only when they share `from_id`, and on a scoped run that skips the CSS / SQL
+ * passes the only rows written or rewritten are those of re-extracted files (an unchanged file whose
+ * token could now bind to a changed name is a dependent, so it is re-extracted too).
+ */
+export function deduplicateResolvedEdgesForFiles(db: Database.Database, repoId: string, filePaths: readonly string[]): number {
+  if (filePaths.length === 0) return 0;
+  const PLACEHOLDERS = `(
+      to_id LIKE 'callee:%' OR to_id LIKE 'import:%' OR
+      to_id LIKE 'property:%' OR to_id LIKE 'iface:%' OR to_id LIKE 'type:%' OR
+      to_id LIKE 'component:%'
+    )`;
+  const FROM = `from_id IN (SELECT symbol_id FROM symbols WHERE repo_id = ? AND file_path IN (SELECT value FROM json_each(?)))`;
+  const json = JSON.stringify(filePaths);
+  return db
+    .prepare(
+      `DELETE FROM edges
+       WHERE repo_id = ? AND NOT ${PLACEHOLDERS} AND ${FROM}
+         AND rowid NOT IN (
+           SELECT MAX(rowid) FROM edges
+           WHERE repo_id = ? AND NOT ${PLACEHOLDERS} AND ${FROM}
+           GROUP BY repo_id, from_id, to_id, type, assigned_expression
+         )`
+    )
+    .run(repoId, repoId, json, repoId, repoId, json).changes;
+}
+
+/**
  * Drop secondary edge indexes before bulk resolve to speed up writes.
  * Call rebuildEdgeIndexes() after bulk write is done.
  */

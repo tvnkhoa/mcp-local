@@ -71,6 +71,7 @@ import {
   findSimilarInterfaceNames as findSimilarInterfaceNamesImpl
 } from "../services/analysis/staticAnalyzer.js";
 import {
+  type MentionResolveScope,
   countAmbiguousMentionTargetsImpl,
   upsertDocsImpl,
   upsertDocMentionsImpl,
@@ -179,6 +180,7 @@ import {
   beginIndexSession as beginIndexSessionImpl,
   endIndexSession as endIndexSessionImpl,
   deduplicateResolvedEdges as deduplicateResolvedEdgesImpl,
+  deduplicateResolvedEdgesForFiles as deduplicateResolvedEdgesForFilesImpl,
   dropEdgeIndexesForBulkWrite as dropEdgeIndexesForBulkWriteImpl,
   rebuildEdgeIndexes as rebuildEdgeIndexesImpl,
   upsertFile as upsertFileImpl,
@@ -324,6 +326,11 @@ export class GraphStore {
   setAutoCheckpointPages(pages: number): void {
     this.autoCheckpointPages = pages;
     this.db.pragma(`wal_autocheckpoint = ${String(pages)}`);
+  }
+
+  /** Release K3 (d): dedup only among edges from these files' symbols (see indexRunner). */
+  deduplicateResolvedEdgesForFiles(repoId: string, filePaths: readonly string[]): number {
+    return deduplicateResolvedEdgesForFilesImpl(this.db, repoId, filePaths);
   }
 
   deduplicateResolvedEdges(repoId: string): number {
@@ -748,7 +755,7 @@ export class GraphStore {
   }
 
   /** Release K3 (b) / K4: unbind only the bound mentions a scoped run can have changed. */
-  resetMentionsForScope(repoId: string, scope: { names: readonly string[]; oldIds: readonly string[]; pathKeys: readonly string[] }): number {
+  resetMentionsForScope(repoId: string, scope: { names: readonly string[]; oldIds: readonly string[]; pathKeys: readonly string[] }): Set<string> {
     return resetMentionsForScopeImpl(this.db, repoId, scope);
   }
 
@@ -988,8 +995,8 @@ export class GraphStore {
    * - Filepath mentions: extract module path, find symbols from that file
    * - Heading mentions: low priority, keyword matching with fuzzy logic
    */
-  resolveMentions(repoId: string): number {
-    return resolveMentionsImpl(this.db, repoId);
+  resolveMentions(repoId: string, scope?: MentionResolveScope): number {
+    return resolveMentionsImpl(this.db, repoId, scope);
   }
 
   // stringSimilarity, levenshteinDistance → docsStore.ts

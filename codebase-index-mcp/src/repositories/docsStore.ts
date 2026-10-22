@@ -231,21 +231,67 @@ export const MENTION_CANDIDATES_SHOWN = 20;
  * can say "ambiguous" instead of naming one symbol or saying nothing. Unbound and ambiguous rows are both
  * re-decided on every run, so they always reflect the current symbols.
  */
-export function resolveMentionsImpl(db: Database.Database, repoId: string): number {
-  const unresolved = db
+/**
+ * Release K3: which unbound rows a scoped run re-decides. Any other unbound or ambiguous row keeps its
+ * answer — its candidates can only change when a symbol with a name in one of these forms, or a file
+ * with one of these path keys, appeared, vanished or was re-minted (and those rows are in scope).
+ */
+export type MentionResolveScope = {
+  /** Lower-cased name forms of K (exact, dotted last segment, dotted leading part). */
+  forms: ReadonlySet<string>;
+  /** Path keys of files that appeared or vanished (filepath mentions). */
+  pathKeys: ReadonlySet<string>;
+  /** Doc files re-extracted this run: their rows are fresh. */
+  docFiles: readonly string[];
+  /** Rows unbound this run by {@link resetMentionsForScope} (doc id, type, text). */
+  resetKeys: ReadonlySet<string>;
+};
+
+export const mentionRowKey = (docId: string, type: string, text: string): string => `${docId}\u0001${type}\u0001${text}`;
+
+export function resolveMentionsImpl(db: Database.Database, repoId: string, scope?: MentionResolveScope): number {
+  if (scope && scope.forms.size === 0 && scope.pathKeys.size === 0 && scope.docFiles.length === 0 && scope.resetKeys.size === 0) return 0;
+  // A scoped run reads only the candidate rows (an unchanged refresh used to read every unbound row).
+  const scopeFilter = scope
+    ? `and (lower(mention_text) in (select value from json_each(?))
+          or doc_id in (select doc_id from docs where repo_id = doc_mentions.repo_id and file_path in (select value from json_each(?)))
+          or (doc_id || char(1) || mention_type || char(1) || mention_text) in (select value from json_each(?))${scope.pathKeys.size > 0 ? " or mention_type = 'filepath'" : ""})`
+    : "";
+  const params: unknown[] = scope ? [repoId, JSON.stringify([...scope.forms]), JSON.stringify(scope.docFiles), JSON.stringify([...scope.resetKeys])] : [repoId];
+  let unresolved = db
     .prepare(
       `
       select doc_id, symbol_id, mention_type, mention_text
       from doc_mentions
-      where repo_id = ? and symbol_id is null
+      where repo_id = ? and symbol_id is null ${scopeFilter}
       `
     )
-    .all(repoId) as {
+    .all(...params) as {
     doc_id: string;
     symbol_id: string | null;
     mention_type: string;
     mention_text: string;
   }[];
+
+  if (scope) {
+    const freshDocs = new Set(
+      scope.docFiles.length === 0
+        ? []
+        : (db.prepare(`select doc_id as docId from docs where repo_id = ? and file_path in (select value from json_each(?))`).all(repoId, JSON.stringify(scope.docFiles)) as { docId: string }[]).map((d) => d.docId)
+    );
+    const pathKeyOf = (text: string): string[] => {
+      const segments = text.replace(/\\/g, "/").split("/");
+      const base = (segments[segments.length - 1] ?? "").replace(/\.[^.]+$/, "").toLowerCase();
+      return base === "index" && segments.length > 1 ? [base, segments[segments.length - 2]!.toLowerCase()] : [base];
+    };
+    unresolved = unresolved.filter(
+      (m) =>
+        freshDocs.has(m.doc_id) ||
+        scope.resetKeys.has(mentionRowKey(m.doc_id, m.mention_type, m.mention_text)) ||
+        ((m.mention_type === "backtick" || m.mention_type === "code_call") && scope.forms.has(m.mention_text.toLowerCase())) ||
+        (m.mention_type === "filepath" && pathKeyOf(m.mention_text).some((k) => scope.pathKeys.has(k)))
+    );
+  }
 
   if (unresolved.length === 0) return 0;
 
@@ -336,10 +382,14 @@ export function resolveMentionsImpl(db: Database.Database, repoId: string): numb
      where repo_id = ? and doc_id = ? and mention_type = ? and mention_text = ? and symbol_id is null`
   );
 
+  // A row re-decided to "no candidate" must not keep an earlier run's candidate list.
+  const clearStmt = db.prepare(
+    `update doc_mentions set candidate_count = null, candidate_ids = null
+     where repo_id = ? and doc_id = ? and mention_type = ? and mention_text = ? and symbol_id is null and candidate_count is not null`
+  );
+
   let count = 0;
   const tx = db.transaction(() => {
-    // Every unbound row is re-decided below; an earlier run's candidate list must not outlive it.
-    db.prepare(`update doc_mentions set candidate_count = null, candidate_ids = null where repo_id = ? and symbol_id is null and candidate_count is not null`).run(repoId);
     for (const mention of unresolved) {
       let outcome: ReturnType<typeof decide> = null;
       if (mention.mention_type === "backtick" || mention.mention_type === "code_call") {
@@ -358,7 +408,10 @@ export function resolveMentionsImpl(db: Database.Database, repoId: string): numb
         const id = filePathMap.get(normalizedMention) ?? filePathSuffixMap.get(normalizedMention);
         outcome = id ? { bind: id } : null;
       }
-      if (!outcome) continue;
+      if (!outcome) {
+        clearStmt.run(repoId, mention.doc_id, mention.mention_type, mention.mention_text);
+        continue;
+      }
       if ("bind" in outcome) {
         bindStmt.run(outcome.bind, repoId, mention.doc_id, mention.mention_type, mention.mention_text);
         count += 1;

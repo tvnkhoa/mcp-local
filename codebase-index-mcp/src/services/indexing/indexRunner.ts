@@ -20,7 +20,7 @@ import { collectDirtyFiles, resolveCurrentBranch, resolveHeadCommitSha } from ".
 import type { GraphStore } from "../../repositories/graphStore.js";
 import type { ExtractionWorkerPool } from "../extractors/extractionWorkerPool.js";
 import { runIndexPipeline, INDEX_VERSION, SCOPE_FORCES_FULL_RUN, type PerformanceProfile } from "./indexPipeline.js";
-import { pathKeysFor, tokenParts } from "../../repositories/scopedRunStore.js";
+import { mentionNameForms, pathKeysFor, tokenParts } from "../../repositories/scopedRunStore.js";
 import type { IndexMode, IndexRunResult } from "../../types/index.js";
 import {
   buildSkippedRunSummary,
@@ -281,6 +281,11 @@ export function createIndexRunner(options: IndexRunnerOptions): RunIndexAndResol
   }
   // Release K3: present on a scoped (non-escalated) run; absent means "run every pass repo-wide".
   const scopeInputs = mode !== "full" ? summary.scopeInputs : undefined;
+  // Release K3: a scoped run that wrote and removed nothing left the graph as the last run left it, and
+  // every pass below but cross-repo (which re-links against the other repos' current state) is a pure
+  // function of it — re-running them reproduces what is stored. The refresh after a server restart, or
+  // after a peer touched a file without changing it, is such a run.
+  const unchanged = scopeInputs !== undefined && scopeInputs.reextracted.length === 0 && scopeInputs.removed.length === 0;
   const resolvePhaseStart = Date.now();
   let ftsRebuildMs = 0;
   let buildContextMs = 0;
@@ -317,6 +322,7 @@ export function createIndexRunner(options: IndexRunnerOptions): RunIndexAndResol
   const callResolveStats = { rowsUpdated: 0, dispatchInserted: 0 };
   const callEdgesResolved = await (async () => {
     const callStart = Date.now();
+    if (unchanged) return 0;
     try {
       // Build lookup maps ONCE, then process in batches to avoid blocking event loop
       indexLog(`[index-post] repoId=${repoId} building call resolution context...`);
@@ -377,7 +383,7 @@ export function createIndexRunner(options: IndexRunnerOptions): RunIndexAndResol
   progress.phase("resolving imports");
   indexLog(`[index-post] repoId=${repoId} resolving import edges...`);
   const importStart = Date.now();
-  const importEdgesResolved = await resolveInBatches(
+  const importEdgesResolved = unchanged ? 0 : await resolveInBatches(
     repoId,
     "import",
     (batchSize) => { try { return store.resolveImportEdges(repoId, batchSize); } catch { return 0; } },
@@ -385,7 +391,7 @@ export function createIndexRunner(options: IndexRunnerOptions): RunIndexAndResol
   );
   // MCP-ISSUE-074: Vue template tokens go through the same module resolver as imports. Not budgeted by
   // maxUnresolvedRows — one row per rendered tag or bound prop, bounded by the template text itself.
-  const componentEdgesResolved = (() => { try { return store.resolveComponentEdges(repoId); } catch { return 0; } })();
+  const componentEdgesResolved = unchanged ? 0 : (() => { try { return store.resolveComponentEdges(repoId); } catch { return 0; } })();
   if (componentEdgesResolved > 0) {
     indexLog(`[index-post] repoId=${repoId} resolved ${String(componentEdgesResolved)} vue component edge(s)`);
   }
@@ -431,12 +437,13 @@ export function createIndexRunner(options: IndexRunnerOptions): RunIndexAndResol
   // whole every run (a pure function of the npm: tokens and the declared names); non-fatal.
   (() => {
     try {
+      if (unchanged) return;
       const workspace = store.resolveWorkspacePackageEdges(repoId);
       if (workspace > 0) indexLog(`[index-post] repoId=${repoId} workspace package edges=${String(workspace)}`);
     } catch { /* non-fatal */ }
   })();
 
-  if (postPolicy.resolveTypeRefs) {
+  if (postPolicy.resolveTypeRefs && !unchanged) {
     progress.phase("resolving types");
     indexLog(`[index-post] repoId=${repoId} resolving type references...`);
     const typeStart = Date.now();
@@ -450,7 +457,7 @@ export function createIndexRunner(options: IndexRunnerOptions): RunIndexAndResol
   }
   await yieldToEventLoop();
 
-  if (postPolicy.resolvePropertyRefs) {
+  if (postPolicy.resolvePropertyRefs && !unchanged) {
     indexLog(`[index-post] repoId=${repoId} resolving property references...`);
     const propertyStart = Date.now();
     (() => { try { store.resolvePropertyEdges(repoId, postPolicy.maxUnresolvedRows); } catch { /* non-fatal */ } })();
@@ -465,6 +472,7 @@ export function createIndexRunner(options: IndexRunnerOptions): RunIndexAndResol
   // addressability, never the index run.
   (() => {
     try {
+      if (unchanged) return;
       const rebound = store.resolveRouteHandlers(repoId);
       if (rebound > 0) indexLog(`[index-post] repoId=${repoId} rebound ${String(rebound)} route handler(s) across partial-class files`);
     } catch { /* non-fatal */ }
@@ -472,7 +480,7 @@ export function createIndexRunner(options: IndexRunnerOptions): RunIndexAndResol
 
   await yieldToEventLoop();
 
-  const shouldResolveImplementsInPost = effectiveResolveImplementsInPost;
+  const shouldResolveImplementsInPost = effectiveResolveImplementsInPost && !unchanged;
   if (shouldResolveImplementsInPost) {
     indexLog(`[index-post] repoId=${repoId} resolving interface implementations...`);
     const implementsStart = Date.now();
@@ -521,7 +529,17 @@ export function createIndexRunner(options: IndexRunnerOptions): RunIndexAndResol
   // Post-resolve dedup: remove duplicate resolved edges that arise when both simple and
   // qualified edges resolve to the same symbolId (e.g. callee:Save + callee:IRepo.Save → same target).
   indexLog(`[index-post] repoId=${repoId} deduplicating resolved edges...`);
-  const dedupCount = (() => { try { return store.deduplicateResolvedEdges(repoId); } catch { return 0; } })();
+  // Release K3 (d): repo-wide only when a repo-wide rebinding pass (CSS / SQL) ran; otherwise the only
+  // rows written or rewritten are the re-extracted files', and a duplicate shares its from_id.
+  const dedupCount = (() => {
+    try {
+      if (unchanged) return 0;
+      if (scopeInputs && !scopeInputs.lanes.css && !scopeInputs.lanes.sql) return store.deduplicateResolvedEdgesForFiles(repoId, scopeInputs.reextracted);
+      return store.deduplicateResolvedEdges(repoId);
+    } catch {
+      return 0;
+    }
+  })();
   indexLog(`[index-post] repoId=${repoId} removed ${dedupCount} duplicate resolved edges`);
   await yieldToEventLoop();
 
@@ -535,8 +553,18 @@ export function createIndexRunner(options: IndexRunnerOptions): RunIndexAndResol
         try {
           // Release K3 (b): a scoped run unbinds only the bound mentions it can have changed (see
           // resetMentionsForScope); an escalated or otherwise unscoped non-full run still unbinds all.
-          if (scopeInputs) store.resetMentionsForScope(repoId, scopeInputs);
-          else if (mode !== "full") store.resetMentionResolution(repoId);
+          if (scopeInputs) {
+            // Release K3: unbind only the bound rows the run can have changed, and re-decide only them,
+            // the fresh rows of re-extracted docs, and unbound rows whose text meets a changed name.
+            const resetKeys = store.resetMentionsForScope(repoId, scopeInputs);
+            return store.resolveMentions(repoId, {
+              forms: mentionNameForms(scopeInputs.names),
+              pathKeys: new Set(scopeInputs.pathKeys.map((k) => k.toLowerCase())),
+              docFiles: scopeInputs.reextracted,
+              resetKeys
+            });
+          }
+          if (mode !== "full") store.resetMentionResolution(repoId);
           return store.resolveMentions(repoId);
         } catch {
           return 0;

@@ -238,13 +238,9 @@ export function sqlAnchorTokenParts(db: Database.Database, repoId: string): Set<
  * dotted name's last segment or leading part), or — a filepath mention — when a file with one of its
  * path keys appeared or vanished. Returns how many rows were unbound.
  */
-export function resetMentionsForScope(
-  db: Database.Database,
-  repoId: string,
-  scope: { names: readonly string[]; oldIds: readonly string[]; pathKeys: readonly string[] }
-): number {
+export function mentionNameForms(names: readonly string[]): Set<string> {
   const forms = new Set<string>();
-  for (const name of scope.names) {
+  for (const name of names) {
     const lower = name.toLowerCase();
     forms.add(lower);
     const dot = lower.lastIndexOf(".");
@@ -253,15 +249,30 @@ export function resetMentionsForScope(
       forms.add(lower.slice(0, dot));
     }
   }
+  return forms;
+}
+
+export function resetMentionsForScope(
+  db: Database.Database,
+  repoId: string,
+  scope: { names: readonly string[]; oldIds: readonly string[]; pathKeys: readonly string[] }
+): Set<string> {
+  const forms = mentionNameForms(scope.names);
   const oldIds = new Set(scope.oldIds);
   const pathKeys = new Set(scope.pathKeys.map((k) => k.toLowerCase()));
+  if (forms.size === 0 && oldIds.size === 0 && pathKeys.size === 0) return new Set();
+  // Narrowed in SQL (an unchanged refresh used to read every bound row); filepath rows are checked below.
   const bound = db
-    .prepare(`select doc_id as docId, mention_type as type, mention_text as text, symbol_id as symbolId from doc_mentions where repo_id = ? and symbol_id is not null`)
-    .all(repoId) as { docId: string; type: string; text: string; symbolId: string }[];
+    .prepare(
+      `select doc_id as docId, mention_type as type, mention_text as text, symbol_id as symbolId from doc_mentions
+       where repo_id = ? and symbol_id is not null
+         and (symbol_id in (select value from json_each(?)) or lower(mention_text) in (select value from json_each(?))${pathKeys.size > 0 ? " or mention_type = 'filepath'" : ""})`
+    )
+    .all(repoId, JSON.stringify([...oldIds]), JSON.stringify([...forms])) as { docId: string; type: string; text: string; symbolId: string }[];
   const unbind = db.prepare(
     `update or replace doc_mentions set symbol_id = null where repo_id = ? and doc_id = ? and mention_type = ? and mention_text = ? and symbol_id = ?`
   );
-  let n = 0;
+  const reset = new Set<string>();
   const tx = db.transaction(() => {
     for (const m of bound) {
       const hit =
@@ -270,9 +281,9 @@ export function resetMentionsForScope(
         (m.type === "filepath" && pathKeysFor(m.text.replace(/\\/g, "/")).some((k) => pathKeys.has(k.toLowerCase())));
       if (!hit) continue;
       unbind.run(repoId, m.docId, m.type, m.text, m.symbolId);
-      n += 1;
+      reset.add(`${m.docId}\u0001${m.type}\u0001${m.text}`);
     }
   });
   tx();
-  return n;
+  return reset;
 }
