@@ -3692,3 +3692,12 @@ this afternoon failed at that harness, which is the highest rate observed so far
 - **Scenario:** `services/impact/changeAnalysis.ts` (working-tree mode and the `base..head` range) lists changed files with `git diff --name-only`, which reports a rename by its new path only; the old path's symbols are not part of the change set, so their callers are missing from the impact.
 - **Expected vs actual:** expected both paths of a `git mv`; got the new one.
 - **Enhancement proposal:** `git diff --name-status -M` (or `readWorkingTreeState` for the working tree) and add the old path of every `R` entry.
+
+## MCP-ISSUE-088 — a refreshed answer waits ~2.3 s around a 0.35 s run
+
+- **Status:** 🟡 OPEN (found 2026-10-22 by the wec.aria reviewer during the release J re-check of bf9c437).
+- **Scenario:** after a 1-file add, delete or revert in wec.aria, the first query answers `refreshed` in 2.7–3.3 s while the dirty run itself records 0.34–0.97 s in `index_runs`. About 1.3 s goes before the run starts (gate: `git status`, ledger, lock, worker hand-off) and about 1 s after it (landing: worker → server message, cache invalidation, the answer's own query).
+- **Tool/query attempted:** `search_symbols` timed by the reviewer's probe sequence; `index_runs.elapsed_ms` read back for the same runs.
+- **Expected vs actual:** expected the wait ≈ run time plus a small constant; got a fixed ~2.3 s that is now most of the wait.
+- **Impact:** every refreshed answer pays it; the 5 s budget hides it but the warm bar ("refreshed within budget") leaves little room.
+- **Enhancement proposal:** profile gate start → run start and run end → answer on the server thread and in the worker (timestamps on both sides of each hop), alongside MCP-ISSUE-086's synchronous `git status`. In the clone measurements (`probe.mjs`) a dirty run with 0 dependents also spent ~1.5 s in resolve; check whether that fixed resolve cost is part of the same gap.
