@@ -24,16 +24,18 @@ type Harness = {
   setIndexed: (sha: string | null) => void;
   finishRun: () => void;
   triggered: string[];
+  pending: string[][];
   lockDir: string;
   cleanup: () => void;
 };
 
-function harness(opts: { budgetMs: number; autoFinish?: boolean; refuse?: string }): Harness {
+function harness(opts: { budgetMs: number; autoFinish?: boolean; refuse?: string; pending?: boolean }): Harness {
   const lockDir = mkdtempSync(path.join(tmpdir(), "cim-fresh-"));
   let tree: RepoTreeState = { head: "aaa111", dirty: [] };
   let indexed: string | null = "aaa111";
   const runs: { mode: IndexMode }[] = [];
   const triggered: string[] = [];
+  const pending: string[][] = [];
   let release: (() => void) | null = null;
   const gate = createFreshnessGate({
     enabled: true,
@@ -44,6 +46,7 @@ function harness(opts: { budgetMs: number; autoFinish?: boolean; refuse?: string
     getIndexedCommit: () => indexed,
     readTree: () => tree,
     markTriggered: (runId) => triggered.push(runId),
+    ...(opts.pending && { markPendingReindex: (_repoId: string, paths: string[]) => pending.push(paths) }),
     ...(opts.refuse !== undefined && { refuseRefresh: () => opts.refuse ?? null }),
     run: async (_repoId, _repoPath, mode) => {
       runs.push({ mode });
@@ -56,6 +59,7 @@ function harness(opts: { budgetMs: number; autoFinish?: boolean; refuse?: string
     gate,
     runs,
     triggered,
+    pending,
     lockDir,
     setTree: (t) => (tree = t),
     setIndexed: (sha) => (indexed = sha),
@@ -254,4 +258,36 @@ test("release I1b: a refresh run that fails (the worker crashed) answers stale a
   } finally {
     rmSync(lockDir, { recursive: true, force: true });
   }
+});
+
+test("a file indexed while dirty, then deleted: a dirty run over that path cleans it, not a whole-repo incremental", async () => {
+  // Release J, wec.aria's live check: removing one untracked probe ran `incremental` (re-hash every
+  // file), 3.2 s warm and 6.5 s cold, against 0.4 s for the dirty run that added it.
+  const h = harness({ budgetMs: 1000, autoFinish: true, pending: true });
+  try {
+    fs.writeFileSync(path.join(h.lockDir, "probe.ts"), "export const p = 1;\n");
+    fs.writeFileSync(path.join(h.lockDir, "kept.ts"), "export const k = 1;\n");
+    h.setTree({ head: "aaa111", dirty: ["kept.ts", "probe.ts"] });
+    assert.equal((await h.gate.ensureFresh("r")).mode, "dirty");
+
+    h.setTree({ head: "aaa111", dirty: ["kept.ts"] }); // probe.ts deleted
+    const note = await h.gate.ensureFresh("r");
+    assert.equal(note.state, "refreshed");
+    assert.equal(note.mode, "dirty", "the cleanup is a dirty run");
+    assert.deepEqual(h.pending, [["probe.ts"]], "the vanished path is handed to that run");
+    assert.deepEqual(await h.gate.ensureFresh("r"), { state: "fresh" }, "and the ledger lets go of it: no run loop");
+    assert.deepEqual(h.runs.map((r) => r.mode), ["dirty", "dirty"]);
+  } finally { h.cleanup(); }
+});
+
+test("without a pending-reindex hook, a vanished path still falls back to an incremental run", async () => {
+  const h = harness({ budgetMs: 1000, autoFinish: true });
+  try {
+    fs.writeFileSync(path.join(h.lockDir, "probe.ts"), "export const p = 1;\n");
+    h.setTree({ head: "aaa111", dirty: ["probe.ts"] });
+    await h.gate.ensureFresh("r");
+    h.setTree({ head: "aaa111", dirty: [] });
+    assert.equal((await h.gate.ensureFresh("r")).mode, "incremental");
+    assert.deepEqual(await h.gate.ensureFresh("r"), { state: "fresh" });
+  } finally { h.cleanup(); }
 });

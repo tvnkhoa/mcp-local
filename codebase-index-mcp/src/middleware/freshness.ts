@@ -60,6 +60,12 @@ export type FreshnessGateOptions = {
   /** Tag a finished run as query-triggered, for `health_check`. Best-effort. */
   markTriggered?: (runId: string) => void;
   /**
+   * Release J: record paths the next dirty run must re-index although git no longer lists them (the
+   * same set the refactor engine fills after a rollback; the run clears it when it succeeds). Without
+   * it, a vanished ledger path falls back to an `incremental` run.
+   */
+  markPendingReindex?: (repoId: string, paths: string[]) => void;
+  /**
    * How long a tree check is reused before git is asked again. Default 0: a reused "fresh" verdict
    * served a deleted file's symbols silently for its whole lifetime (R1, release B.1). Only the
    * "another process is refreshing" note is cached, for 1 s, so a busy caller does not hammer git.
@@ -139,7 +145,9 @@ function releaseLock(file: string): void {
  * reverted is never dirty again, so no dirty run looks at it, and its symbols stay in the graph as
  * current (wec.aria acceptance of release B: an untracked probe file, deleted, was still found with
  * coverage "high"). The ledger remembers those paths beside the indexed HEAD; when one of them is no
- * longer dirty, the gate runs `incremental` instead, which re-hashes every file and prunes the gone.
+ * longer dirty, the gate hands it to the next dirty run as a pending re-index (`markPendingReindex`):
+ * the run removes a path gone from disk and re-extracts a reverted one. Until release J that was an
+ * `incremental` run — a whole-repo re-hash, 3-6 s on wec.aria to remove one file.
  *
  * Kept as a file beside the index DB, not in memory, so every server process sharing the DB — one per
  * Claude session — sees the paths another one indexed.
@@ -181,11 +189,20 @@ export function vanishedDirtyPaths(ledger: DirtyLedger | null, head: string, dir
  * paths it indexed; `incremental`/`full` read every file from disk, so afterwards the index holds
  * the working tree for exactly the paths that are dirty now.
  */
-export function recordDirtyLedger(lockDir: string, repoId: string, mode: IndexMode, tree: RepoTreeState): void {
+export function recordDirtyLedger(
+  lockDir: string,
+  repoId: string,
+  mode: IndexMode,
+  tree: RepoTreeState,
+  /** The run also re-indexed the ledger paths that were no longer dirty: they leave the ledger. */
+  clearedVanished = false
+): void {
   if (!tree.head) return;
   const prev = readDirtyLedger(lockDir, repoId);
   const paths =
-    mode === "dirty" && prev && sameCommit(prev.head, tree.head) ? [...new Set([...prev.paths, ...tree.dirty])] : [...tree.dirty];
+    mode === "dirty" && !clearedVanished && prev && sameCommit(prev.head, tree.head)
+      ? [...new Set([...prev.paths, ...tree.dirty])]
+      : [...tree.dirty];
   writeDirtyLedger(lockDir, repoId, { head: tree.head, paths: paths.sort() });
 }
 
@@ -295,9 +312,11 @@ export function createFreshnessGate(opts: FreshnessGateOptions): FreshnessGate {
       return note;
     }
 
-    // A deleted or reverted file that was indexed while dirty is not dirty any more, so dirty mode
-    // would never look at it again: only an incremental run (re-hash everything, prune the gone) clears it.
-    const mode: "incremental" | "dirty" = headMoved || vanished.length > 0 ? "incremental" : "dirty";
+    // A deleted or reverted file that was indexed while dirty is not dirty any more, so git alone would
+    // never show it to a dirty run again. It is handed over as a pending re-index; with no way to do
+    // that, an incremental run (re-hash everything, prune the gone) clears it.
+    const cleanupByDirty = vanished.length > 0 && opts.markPendingReindex !== undefined;
+    const mode: "incremental" | "dirty" = headMoved || (vanished.length > 0 && !cleanupByDirty) ? "incremental" : "dirty";
     const refusal = opts.refuseRefresh?.(repoId) ?? null;
     if (refusal) {
       const note: FreshnessNote = { state: "stale", mode, reason: `${refusal} This answer comes from the index as that build wrote it.` };
@@ -315,10 +334,13 @@ export function createFreshnessGate(opts: FreshnessGateOptions): FreshnessGate {
       return note;
     }
 
-    const promise = serialize(repoId, () => opts.run(repoId, repoPath, mode))
+    const promise = serialize(repoId, () => {
+      if (cleanupByDirty) opts.markPendingReindex?.(repoId, vanished);
+      return opts.run(repoId, repoPath, mode);
+    })
       .then((result) => {
         coveredKey.set(repoId, key);
-        recordDirtyLedger(opts.lockDir, repoId, mode, tree);
+        recordDirtyLedger(opts.lockDir, repoId, mode, tree, cleanupByDirty);
         try {
           opts.markTriggered?.(result.runId);
         } catch {

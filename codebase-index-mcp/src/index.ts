@@ -175,7 +175,8 @@ const freshnessGate = createFreshnessGate({
   readTree: (repoPath) => readWorkingTreeStateAsync(repoPath),
   run: (repoId, repoPath, mode) => refreshWorker.run(repoId, repoPath, mode, DOCS_INDEXING_ENABLED, MAX_FILES_PER_RUN, 200),
   refuseRefresh: (repoId) => newerBuildRefusal(store.getLatestRun(repoId)?.indexVersion),
-  markTriggered: (runId) => store.markRunTrigger(runId, "query")
+  markTriggered: (runId) => store.markRunTrigger(runId, "query"),
+  markPendingReindex: (repoId, paths) => store.recordPendingReindexFiles(repoId, paths, "freshness: indexed while dirty, since deleted or reverted")
 });
 
 const runIndexAndResolve: typeof runIndexUnserialized = (repoId, repoPath, mode, ...rest) =>

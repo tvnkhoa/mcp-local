@@ -52,6 +52,11 @@ All notable changes to this project will be documented in this file.
   worker, no per-batch checkpoint. The server thread no longer stalls at landing: its connection left
   a WAL checkpoint the worker's run stopped short of to the gate's next small commit (473 ms traced);
   it now never auto-checkpoints, and 7 of 7 live runs showed no server-thread block over 100 ms.
+- **Deleting or reverting a file** indexed while dirty is cleaned by a dirty run over that path, not a
+  whole-repo incremental re-hash (6.5 s cold / 3.2 s warm on wec.aria for one untracked file).
+- **`INDEX_VERSION` → `v11-release-j`.** A v10 server refuses to write over a J index (release F guard);
+  reconnect every codebase-index process. The vector edges and the old mention order leave a repo's
+  stored rows on its next `mode: "full"` run.
 - **Behaviour change, full runs too:** doc mentions that several symbols or files match now resolve in a
   fixed order (path, line, id) instead of the order rows were inserted — on wec.aria 3,674 of 31,351
   rows. Two rules follow from it: **a file-path mention resolves to the file's module symbol** (it often

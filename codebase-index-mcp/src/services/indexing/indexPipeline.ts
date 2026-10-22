@@ -133,7 +133,12 @@ export type RunIndexInput = {
 // `.query(IMPORTED_CONST)` emits a `sqlconst:` anchor the resolver follows to the declaring module.
 // Unchanged TS files need a run to emit the anchors.
 // Both are release I and share generation 10.
-export const INDEX_VERSION = "v10-release-i";
+// v11: release J (MCP-ISSUE-084/085) — the resolver's vector fallback is gone, doc mentions resolve in
+// a canonical order (a file-path mention → the module symbol), SQL rows resolve in token order. Output
+// changes for unchanged files, and the bump is what lets the release F guard stop a v10 process from
+// writing those shapes back over a J index. An unchanged file keeps its hash, so the stored rows
+// change on a FULL run.
+export const INDEX_VERSION = "v11-release-j";
 
 /**
  * Release J: files whose change alters how every other file resolves — module resolution (tsconfig paths,
@@ -717,7 +722,8 @@ export async function runIndexPipeline(store: GraphStore, input: RunIndexInput):
         ? {
             scope: scopeEscalation
               ? `escalated to full: ${scopeEscalation}`
-              : `scoped: ${String(writtenPaths.size - forcedPaths.size)} changed, ${String(dependentFiles)} dependent file(s) re-extracted`
+              : // A file deleted or pruned this run is a change too (the reviewer's probe: a deleted file read "0 changed").
+                `scoped: ${String(writtenPaths.size - forcedPaths.size + deletedInTree.length + pruneCounts.filesPruned)} changed, ${String(dependentFiles)} dependent file(s) re-extracted`
           }
         : {}),
       ...(scopeEscalation ? { scopeEscalation } : {})

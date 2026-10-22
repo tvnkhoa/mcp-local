@@ -137,10 +137,11 @@ test("release F: an older build refuses to write over a newer build, never the o
   assert.equal(newerBuildRefusal("v7-a", "v7-b"), null, "same generation");
   assert.equal(newerBuildRefusal(null, "v7-a"), null, "no run yet");
   // Release G (R9, MCP-ISSUE-081) was generation 8; release H (MCP-ISSUE-082, the SQL lane) 9; release
-  // I (I6b one literal cap, I3/I4 one current SQL definition + imported query consts) is 10.
-  assert.equal(indexGeneration(INDEX_VERSION), 10);
-  assert.equal(newerBuildRefusal("v9-sql-lane", INDEX_VERSION), null, "v10 upgrades a v9 index");
-  assert.ok((newerBuildRefusal(INDEX_VERSION, "v9-sql-lane") ?? "").includes(INDEX_VERSION), "a v9 build refuses to write over a v10 index");
+  // I (I6b one literal cap, I3/I4 one current SQL definition + imported query consts) is 10; release J
+  // (no vector fallback, canonical mention and SQL order, MCP-ISSUE-084/085) is 11.
+  assert.equal(indexGeneration(INDEX_VERSION), 11);
+  assert.equal(newerBuildRefusal("v10-release-i", INDEX_VERSION), null, "v11 upgrades a v10 index");
+  assert.ok((newerBuildRefusal(INDEX_VERSION, "v10-release-i") ?? "").includes(INDEX_VERSION), "a v10 build refuses to write over a v11 index");
 });
 
 test("release I1b: only a full run or a bulk resolve drops the DB-wide edge indexes", () => {

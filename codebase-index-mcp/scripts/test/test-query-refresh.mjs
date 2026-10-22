@@ -137,7 +137,13 @@ try {
   assert(/indexed from a working tree that has since changed/.test(why) && hc?.codebaseState?.status !== "ready", "health_check names the deleted dirty file before any query cleans it", why || JSON.stringify(hc?.codebaseState));
   const afterDelete = await settle(client, "probeUntrackedZq7");
   assert(!exact(afterDelete, "probeUntrackedZq7"), "untracked file deleted: its symbol is gone", JSON.stringify(afterDelete)?.slice(0, 300));
-  assert(afterDelete?.freshness?.state === "refreshed" && afterDelete?.freshness?.mode === "incremental", "via an incremental cleanup run", JSON.stringify(afterDelete?.freshness));
+  // Release J: the cleanup is a dirty run over the vanished path, not a whole-repo incremental re-hash
+  // (3-6 s on wec.aria to remove one file), and its scope counts the removed file as a change.
+  assert(afterDelete?.freshness?.state === "refreshed" && afterDelete?.freshness?.mode === "dirty", "via a dirty cleanup run", JSON.stringify(afterDelete?.freshness));
+  const cleanupRun = js(await client.callTool({ name: "health_check", arguments: { repoId } }))?.latestRun;
+  assert(/^scoped: 1 changed/.test(cleanupRun?.scope ?? ""), "the cleanup run's scope counts the deleted file", JSON.stringify(cleanupRun?.scope));
+  const again = js(await client.callTool({ name: "search_symbols", arguments: { repoId, query: "probeUntrackedZq7", strategy: "name", profile: "standard" } }));
+  assert(again?.freshness?.state === undefined || again?.freshness?.state === "fresh", "and the next query is fresh: the ledger let go of the path", JSON.stringify(again?.freshness));
 
   // Tracked: edit → found → revert → gone.
   writeFileSync(join(tmpDir, "a.ts"), "export function alphaOne(): number {\n  return 1;\n}\nexport function editedTrackedZq8(): number {\n  return 8;\n}\n");
@@ -145,6 +151,7 @@ try {
   git(tmpDir, "checkout", "--", "a.ts");
   const afterRevert = await settle(client, "editedTrackedZq8");
   assert(!exact(afterRevert, "editedTrackedZq8"), "tracked edit reverted: its symbol is gone", JSON.stringify(afterRevert)?.slice(0, 300));
+  assert(afterRevert?.freshness?.mode === "dirty", "via a dirty cleanup run", JSON.stringify(afterRevert?.freshness));
   assert(exact(await settle(client, "alphaOne"), "alphaOne"), "and the file's committed symbols are intact");
 } finally {
   await Promise.race([client.close().catch(() => {}), new Promise((r) => setTimeout(r, 3000))]);
