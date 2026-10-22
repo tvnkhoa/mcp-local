@@ -45,6 +45,7 @@ import type {
 import {
   resolveUnlinkedEdges as resolveUnlinkedEdgesImpl,
   resolveImportEdges as resolveImportEdgesImpl,
+  findImportersOfRemovedPath as findImportersOfRemovedPathImpl,
   resolveCallEdgesBatch as resolveCallEdgesBatchImpl,
   buildCallResolutionContext as buildCallResolutionContextImpl,
   resolveTypeRefEdges as resolveTypeRefEdgesImpl,
@@ -740,6 +741,11 @@ export class GraphStore {
 
   resolveImportEdges(repoId: string, maxUnresolvedRows = 0): number {
     return resolveImportEdgesImpl(this.db, repoId, maxUnresolvedRows);
+  }
+
+  /** MCP-ISSUE-087: files whose unresolved import tokens resolve to a path the index no longer holds. */
+  findImportersOfRemovedPath(repoId: string, removedPath: string): { fromFile: string; specifier: string }[] {
+    return findImportersOfRemovedPathImpl(this.db, repoId, removedPath);
   }
 
   /** MCP-ISSUE-074: bind Vue `component:<specifier>[#member]` tokens once every file is in the graph. */

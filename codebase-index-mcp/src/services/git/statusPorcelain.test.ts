@@ -97,7 +97,7 @@ test("porcelain v2 entries keep one entry per rename, with its old path", () => 
   assert.deepEqual(parseStatusPorcelainV2Entries(out), {
     head: SHA,
     entries: [
-      { code: "2", path: "src/renamed.ts", origPath: "src/original.ts" },
+      { code: "2", path: "src/renamed.ts", origPath: "src/original.ts", xy: "R." },
       { code: "?", path: "newdir/" }
     ]
   });

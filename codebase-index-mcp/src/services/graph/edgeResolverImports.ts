@@ -353,3 +353,43 @@ export function resolveImportsCrossRepo(db: Database.Database, repoId: string, m
 }
 
 // ── Call edge resolution context (pre-built once, reused across batches) ──────
+
+/**
+ * MCP-ISSUE-087 (release K2): the files still importing a path the index no longer holds — the old side
+ * of a rename, or a deleted file — read from their unresolved `import:` tokens. Each token is resolved
+ * with the import lane's own resolver and tsconfig aliases, against the indexed files PLUS the removed
+ * path, so a hit is a token that would bind to that path if it still existed. Rows are in file order.
+ */
+export function findImportersOfRemovedPath(
+  db: Database.Database,
+  repoId: string,
+  removedPath: string
+): { fromFile: string; specifier: string }[] {
+  const rows = db
+    .prepare(
+      `select distinct sf.file_path as fromFile, e.to_id as toId
+       from edges e
+       inner join symbols sf on sf.repo_id = e.repo_id and sf.symbol_id = e.from_id
+       where e.repo_id = ? and e.type = 'IMPORTS' and e.to_id like 'import:%'
+       order by sf.file_path, e.to_id`
+    )
+    .all(repoId) as { fromFile: string; toId: string }[];
+  if (rows.length === 0) return [];
+  const knownFiles = new Set(loadIndexedFilePaths(db, repoId));
+  knownFiles.add(removedPath);
+  const repoPath = loadRepoPath(db, repoId);
+  const aliases = repoPath ? readTsconfigAliases(repoPath) : EMPTY_ALIASES;
+  const hits: { fromFile: string; specifier: string }[] = [];
+  const seen = new Set<string>();
+  for (const row of rows) {
+    const specifier = row.toId.slice("import:".length);
+    if (!(specifier.startsWith(".") || looksLikeModulePath(specifier))) continue;
+    const fromFile = row.fromFile.replace(/\\/g, "/");
+    if (resolveModuleSpecifier(fromFile, specifier, knownFiles, aliases) !== removedPath) continue;
+    const key = `${fromFile}\0${specifier}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    hits.push({ fromFile, specifier });
+  }
+  return hits;
+}

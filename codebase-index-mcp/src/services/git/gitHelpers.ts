@@ -312,7 +312,8 @@ export function parseStatusPorcelainV2(out: string): { head: string | null; dirt
 }
 
 /** One porcelain-v2 entry: `1` changed, `2` renamed or copied (with its old path), `u` unmerged, `?` untracked. */
-export type StatusEntry = { code: "1" | "2" | "u" | "?"; path: string; origPath?: string };
+/** `xy`: the two-letter index/worktree status (`.M`, `A.`, `D.`, `R.`, `UU`, …); absent for `?`. */
+export type StatusEntry = { code: "1" | "2" | "u" | "?"; path: string; origPath?: string; xy?: string };
 
 /** The entries of `git status --porcelain=v2 --branch -z`, one per entry git printed, in git's order. */
 export function parseStatusPorcelainV2Entries(out: string): { head: string | null; entries: StatusEntry[] } {
@@ -332,7 +333,8 @@ export function parseStatusPorcelainV2Entries(out: string): { head: string | nul
     if (before < 0) continue;
     const p = e.split(" ").slice(before).join(" ").replace(/\\/g, "/");
     const origPath = code === "2" ? raw[++i]?.replace(/\\/g, "/") : undefined;
-    if (p) result.push({ code: code as StatusEntry["code"], path: p, ...(origPath && { origPath }) });
+    const xy = code === "?" ? undefined : e.split(" ")[1];
+    if (p) result.push({ code: code as StatusEntry["code"], path: p, ...(origPath && { origPath }), ...(xy && { xy }) });
   }
   return { head, entries: result };
 }
@@ -602,4 +604,30 @@ export function buildStaleWarning(
     // Can't determine staleness (e.g. non-git repo) — no warning.
   }
   return null;
+}
+
+/** One `git diff --name-status` entry: `A`/`M`/`D`/`T`/`U`, or `R`/`C` with the old path. */
+export type NameStatusEntry = { status: string; path: string; origPath?: string };
+
+/**
+ * Parse `git diff --name-status -z`: a status token (`M`, `R100`, `C75`, …) then one path, or two for
+ * a rename or copy (old, then new). MCP-ISSUE-087: `--name-only` printed only the new side of a rename.
+ */
+export function parseNameStatusZ(out: string): NameStatusEntry[] {
+  const parts = out.split("\0");
+  const result: NameStatusEntry[] = [];
+  for (let i = 0; i < parts.length; i++) {
+    const token = parts[i]?.trim() ?? "";
+    if (!token) continue;
+    const status = token[0] ?? "";
+    if (status === "R" || status === "C") {
+      const from = parts[++i];
+      const to = parts[++i];
+      if (from && to) result.push({ status, path: to.replace(/\\/g, "/"), origPath: from.replace(/\\/g, "/") });
+    } else {
+      const p = parts[++i];
+      if (p) result.push({ status, path: p.replace(/\\/g, "/") });
+    }
+  }
+  return result;
 }

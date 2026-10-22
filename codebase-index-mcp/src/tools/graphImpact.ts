@@ -153,7 +153,7 @@ export function buildGraphImpactTools(deps: CodebaseIndexDeps): AnyToolDefinitio
 
   const detectChanges = defineTool({
     name: "detect_changes",
-    description: "Detect changed files from git, estimate graph impact, and compute deterministic risk scores (high/medium/low) for review prioritization. Supports policy presets (quick-triage|strict-review|release-gate|custom). Defaults baseRef to latest indexed commit when available.",
+    description: "Detect changed files from git, estimate graph impact, and compute deterministic risk scores (high/medium/low) for review prioritization. Supports policy presets (quick-triage|strict-review|release-gate|custom). Defaults baseRef to latest indexed commit when available. Each changed path says added/modified/deleted; a rename lists both paths (renamedFrom/renamedTo), and a removed path's dependents are the files whose imports still resolve to it. Range mode pairs renames at git's default similarity (-M, 50%): a move rewritten past that reads as a delete plus an add.",
     input: schemas.detectChangesSchema(limits.maxResultLimit),
     inputSchema: {
       type: "object",
