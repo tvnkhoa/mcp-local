@@ -152,10 +152,11 @@ test("release F: an older build refuses to write over a newer build, never the o
   // I (I6b one literal cap, I3/I4 one current SQL definition + imported query consts) is 10; release J
   // (no vector fallback, canonical mention and SQL order, MCP-ISSUE-084/085) was 11; release K (ambiguous
   // doc mentions keep no pick, MCP-ISSUE-089) was 12; release L (superseded SQL mention candidates, the EF
-  // snapshot lane, MCP-ISSUE-090/092) is 13.
-  assert.equal(indexGeneration(INDEX_VERSION), 13);
-  assert.equal(newerBuildRefusal("v12-release-k", INDEX_VERSION), null, "v13 upgrades a v12 index");
-  assert.ok((newerBuildRefusal(INDEX_VERSION, "v12-release-k") ?? "").includes(INDEX_VERSION), "a v12 build refuses to write over a v13 index");
+  // snapshot lane, MCP-ISSUE-090/092) was 13; release M (sql_drop sites, the EF migration Sql lane, enriched index
+  // signatures) is 14.
+  assert.equal(indexGeneration(INDEX_VERSION), 14);
+  assert.equal(newerBuildRefusal("v13-release-l", INDEX_VERSION), null, "v14 upgrades a v13 index");
+  assert.ok((newerBuildRefusal(INDEX_VERSION, "v13-release-l") ?? "").includes(INDEX_VERSION), "a v13 build refuses to write over a v14 index");
 });
 
 test("release I1b: only a full run or a bulk resolve drops the DB-wide edge indexes", () => {

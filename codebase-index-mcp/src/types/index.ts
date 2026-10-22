@@ -254,10 +254,11 @@ export type SymbolRecord = {
      * MCP-ISSUE-082: the SQL lane (`services/extractors/sqlExtractor.ts`). One symbol per definition
      * site; the signature starts with the qualified name. `sql_statement` is a statement that touches
      * objects without defining one (ALTER, GRANT, REVOKE, DROP, top-level DML); `sql_gap` is a
-     * statement no reader recognised, named by its first words.
+     * statement no reader recognised, named by its first words. `sql_drop` (release M1) is one dropped
+     * object at one drop site — not a definition; `graph/sqlDefinitions.ts` orders it with the definitions.
      */
     | "sql_table" | "sql_column" | "sql_view" | "sql_index" | "sql_function" | "sql_type" | "sql_role"
-    | "sql_schema" | "sql_sequence" | "sql_policy" | "sql_trigger" | "sql_statement" | "sql_gap";
+    | "sql_schema" | "sql_sequence" | "sql_policy" | "sql_trigger" | "sql_statement" | "sql_gap" | "sql_drop";
   line: number;
   /** Last line of the symbol's source span (1-indexed). Optional: null on indexes built before end-line tracking. */
   endLine?: number;

@@ -37,11 +37,28 @@
  * `alsoDefinedAt` is not persisted. It is this same pure function of the `symbols` table, applied at
  * read time by `get_call_chain`, `search_symbols` and `get_symbol_detail` — the resolver binds with
  * it at the end of every run, so the two cannot disagree and there is nothing to migrate or go stale.
+ *
+ * ## Dropped objects (release M1)
+ *
+ * A `sql_drop` symbol is a drop SITE — `DROP TABLE x`, one column of `ALTER TABLE t DROP COLUMN …`, an EF
+ * `migrationBuilder.DropIndex` in `Up()`. It is ranked with the definitions of its name by the same order, and
+ * the LATEST event decides: a drop after every definition makes the name `dropped` (`{ at: file:line }` on every
+ * definition site); a definition after the drop is a re-create, and the name is alive again. A table drop also
+ * drops, from where it stands, the table's columns, policies, triggers and indexes (`via: "table <name>"`). On a
+ * tie (same file and line) the definition wins. Like `alsoDefinedAt`, the state is derived at read time and by
+ * the resolver at the end of every run — nothing is stored.
+ *
+ * ## EF migrations (release M2)
+ *
+ * SQL read out of an EF migration's `migrationBuilder.Sql` strings lives in a numbered `.cs` file
+ * (`20260805110155_X.cs`): tier 3, sequenced by that timestamp — or tier 0 when it came from `Down()`, which the
+ * signature says right after its separator (`[EF down]`). The ModelSnapshot is tier 4 and stays current for every
+ * name it defines.
  */
 
 import type Database from "better-sqlite3";
 
-import { SQL_SIGNATURE_SEPARATOR, type SqlTokenKind } from "../extractors/sqlExtractor.js";
+import { SQL_DROP_DETAIL, SQL_SIGNATURE_SEPARATOR, type SqlTokenKind } from "../extractors/sqlExtractor.js";
 
 /** Which symbol kinds define a name of each token kind. */
 export const DEFINING_KINDS: Record<SqlTokenKind, string[]> = {
@@ -91,22 +108,30 @@ export function sqlQualifiedName(name: string, signature: string | null | undefi
 
 const MIGRATION_NUMBER = /^(\d+)[-_.]/;
 const DOWN_FILE = /\.down\.sql$/i;
+/** Release M2: SQL read from an EF migration's `Down()` — `[EF down]` right after the signature's separator. */
+const EF_DOWN = /^(?:[^\n]* — )?\[EF down\] /;
 
-export type SqlDefinitionSite = { symbolId: string; filePath: string; line: number };
+export type SqlDefinitionSite = { symbolId: string; filePath: string; line: number; signature?: string | null };
 type Rank = [tier: number, seq: number, base: string, path: string, line: number];
 
-export function sqlDefinitionRank(filePath: string, line: number): Rank {
+export function sqlDefinitionRank(filePath: string, line: number, signature?: string | null): Rank {
   const path = filePath.replace(/\\/g, "/");
   const slash = path.lastIndexOf("/");
   const base = path.slice(slash + 1);
   const dirs = slash < 0 ? [] : path.slice(0, slash).toLowerCase().split("/");
   const m = MIGRATION_NUMBER.exec(base);
   const seq = m ? Number(m[1]) : -1;
-  // Release L3: a definition outside a `.sql` file comes from the EF snapshot lane — the model itself, tier 4.
-  if (!/\.sql$/i.test(base)) return [4, -1, base, path, line];
+  if (!/\.sql$/i.test(base)) {
+    // Release M2: a numbered `.cs` file is an EF migration — its Up() is history (tier 3), its Down() a rollback.
+    if (m) return [signature && EF_DOWN.test(signature) ? 0 : 3, seq, base, path, line];
+    // Release L3: otherwise the EF snapshot lane — the model itself, tier 4.
+    return [4, -1, base, path, line];
+  }
   const tier = DOWN_FILE.test(base) ? 0 : !m ? 1 : dirs.includes("archive") ? 2 : 3;
   return [tier, seq, base, path, line];
 }
+
+const rankOf = (s: SqlDefinitionSite): Rank => sqlDefinitionRank(s.filePath, s.line, s.signature);
 
 function compareRank(a: Rank, b: Rank): number {
   for (let i = 0; i < a.length; i += 1) {
@@ -123,7 +148,7 @@ export function pickCurrentSqlDefinition<T extends SqlDefinitionSite>(sites: rea
   let best: T | null = null;
   let bestRank: Rank | null = null;
   for (const site of sites) {
-    const rank = sqlDefinitionRank(site.filePath, site.line);
+    const rank = rankOf(site);
     if (!bestRank || compareRank(rank, bestRank) > 0) {
       best = site;
       bestRank = rank;
@@ -140,10 +165,10 @@ export function pickCurrentSqlDefinition<T extends SqlDefinitionSite>(sites: rea
  * candidate when the win is decisive, so a wrong "current" can never become a silent wrong binding.
  */
 export function isDecisiveCurrent(current: SqlDefinitionSite, sites: readonly SqlDefinitionSite[]): boolean {
-  const c = sqlDefinitionRank(current.filePath, current.line);
+  const c = rankOf(current);
   for (const site of sites) {
     if (site.symbolId === current.symbolId) continue;
-    const o = sqlDefinitionRank(site.filePath, site.line);
+    const o = rankOf(site);
     // Release L3: the EF model (tier 4) against a `.sql` site is two lanes neither of which can prove the other
     // stale — never decisive; two snapshots (two DbContexts) mapping one table tie, and are not decisive either.
     if (c[0] !== o[0]) {
@@ -156,17 +181,28 @@ export function isDecisiveCurrent(current: SqlDefinitionSite, sites: readonly Sq
   return true;
 }
 
-/** Release L1: does the repo's SQL follow a numbered-migration layout at all (a `.sql` file named `NNNN-…`)? */
+/**
+ * Release L1: does the repo's SQL follow a numbered-migration layout at all (a `.sql` file named `NNNN-…`)?
+ * Release M2: an EF migration (`20260805110155_X.cs`) that carries SQL counts too.
+ */
 export function hasNumberedSqlLayout(filePaths: Iterable<string>): boolean {
   for (const p of filePaths) {
     const base = p.replace(/\\/g, "/").split("/").pop() ?? "";
-    if (/\.sql$/i.test(base) && MIGRATION_NUMBER.test(base)) return true;
+    if (/\.(sql|cs)$/i.test(base) && MIGRATION_NUMBER.test(base)) return true;
   }
   return false;
 }
 
 /** The definition symbols the superseded-candidate filter needs. */
 export type SqlDefinitionRow = { symbolId: string; kind: string; name: string; signature: string | null; filePath: string; line: number };
+
+/** `kind|schema|rest` — the group a definition or a drop of one name belongs to, or null when it has none. */
+export function sqlGroupKey(row: { kind: string; name: string; signature: string | null }): string | null {
+  const tokenKind = row.kind === "sql_drop" ? sqlDropTokenKind(row.signature) : sqlTokenKindOfSymbol(row.kind);
+  if (!tokenKind) return null;
+  const key = sqlNameKey(tokenKind, sqlQualifiedName(row.name, row.signature));
+  return key ? `${tokenKind}|${key.schema ?? ""}|${key.rest}` : null;
+}
 
 /**
  * Release L1: superseded definition id → the current definition id of its name, for every name whose current
@@ -176,11 +212,9 @@ export function supersededSqlDefinitions(rows: readonly SqlDefinitionRow[]): Map
   const out = new Map<string, string>();
   const groups = new Map<string, SqlDefinitionRow[]>();
   for (const r of rows) {
-    const tokenKind = sqlTokenKindOfSymbol(r.kind);
-    if (!tokenKind) continue;
-    const key = sqlNameKey(tokenKind, sqlQualifiedName(r.name, r.signature));
-    if (!key) continue;
-    const k = `${tokenKind}|${key.schema ?? ""}|${key.rest}`;
+    if (!sqlTokenKindOfSymbol(r.kind)) continue;
+    const k = sqlGroupKey(r);
+    if (!k) continue;
     const list = groups.get(k);
     if (list) list.push(r);
     else groups.set(k, [r]);
@@ -200,6 +234,107 @@ export function siteLabel(site: { filePath: string; line: number }): string {
   return `${site.filePath}:${String(site.line)}`;
 }
 
+// ─── dropped objects (release M1) ───────────────────────────────────────────────────────────────
+
+/** The token kind a `sql_drop` dropped (`<qualified> — dropped <kind>: …`), or null. */
+export function sqlDropTokenKind(signature: string | null | undefined): SqlTokenKind | null {
+  if (!signature) return null;
+  const at = signature.indexOf(SQL_SIGNATURE_SEPARATOR);
+  const detail = at < 0 ? signature : signature.slice(at + SQL_SIGNATURE_SEPARATOR.length);
+  const m = SQL_DROP_DETAIL.exec(detail);
+  return m && m[1]! in DEFINING_KINDS ? (m[1] as SqlTokenKind) : null;
+}
+
+export type SqlDropped = { at: string; symbolId: string; via?: string };
+
+/** The table an index definition is on (`… — [EF down] unique index on public.t (a, b) …`), or null. */
+function indexTable(signature: string | null | undefined): string | null {
+  if (!signature) return null;
+  const at = signature.indexOf(SQL_SIGNATURE_SEPARATOR);
+  const detail = at < 0 ? signature : signature.slice(at + SQL_SIGNATURE_SEPARATOR.length);
+  return /^(?:\[EF down\] )?(?:unique )?index on ([^\s(]+)/.exec(detail)?.[1] ?? null;
+}
+
+/**
+ * The latest event among a name's definitions, its own drops and the drops of the table that owns it
+ * (`cascade`): a drop → the name is dropped there; a definition → alive (null). A definition wins a tie.
+ */
+export function sqlDropState(
+  defs: readonly SqlDefinitionSite[],
+  drops: readonly SqlDefinitionSite[],
+  cascade: readonly { site: SqlDefinitionSite; via: string }[] = []
+): SqlDropped | null {
+  let bestRank: Rank | null = null;
+  let best: SqlDropped | null = null;
+  for (const d of defs) {
+    const r = rankOf(d);
+    if (!bestRank || compareRank(r, bestRank) > 0) {
+      bestRank = r;
+      best = null;
+    }
+  }
+  const consider = (site: SqlDefinitionSite, via?: string): void => {
+    const r = rankOf(site);
+    if (!bestRank || compareRank(r, bestRank) > 0) {
+      bestRank = r;
+      best = { at: siteLabel(site), symbolId: site.symbolId, ...(via && { via }) };
+    }
+  };
+  for (const d of drops) consider(d);
+  for (const c of cascade) consider(c.site, c.via);
+  return best;
+}
+
+/** Group key → `table|schema|rest` of the table whose drop cascades to it (columns, policies, triggers, indexes). */
+function cascadeTableKey(groupKey: string, currentIndexSignature?: string | null): string | null {
+  const [kind, schema, rest] = groupKey.split("|") as [string, string, string];
+  if (kind === "column" || kind === "policy" || kind === "trigger") {
+    const dot = rest.lastIndexOf(".");
+    return dot < 0 ? null : `table|${schema}|${rest.slice(0, dot)}`;
+  }
+  if (kind === "index") {
+    const table = indexTable(currentIndexSignature);
+    const key = table ? sqlNameKey("table", table) : null;
+    return key ? `table|${key.schema ?? ""}|${key.rest}` : null;
+  }
+  return null;
+}
+
+export type SqlNameState = {
+  defs: SqlDefinitionSite[];
+  drops: SqlDefinitionSite[];
+  current: SqlDefinitionSite | null;
+  dropped: SqlDropped | null;
+};
+
+/**
+ * Release M1: the dropped state of every name the rows mention, repo-wide — for the resolver and the mention pass.
+ * `rows` are SQL definition and `sql_drop` symbols (others are ignored). Only names with at least one drop of their
+ * own or of their table are returned.
+ */
+export function sqlNameStates(rows: readonly SqlDefinitionRow[]): Map<string, SqlNameState> {
+  const groups = new Map<string, { defs: SqlDefinitionSite[]; drops: SqlDefinitionSite[] }>();
+  for (const r of rows) {
+    const isDrop = r.kind === "sql_drop";
+    if (!isDrop && !sqlTokenKindOfSymbol(r.kind)) continue;
+    const k = sqlGroupKey(r);
+    if (!k) continue;
+    let g = groups.get(k);
+    if (!g) groups.set(k, (g = { defs: [], drops: [] }));
+    (isDrop ? g.drops : g.defs).push({ symbolId: r.symbolId, filePath: r.filePath, line: r.line, signature: r.signature });
+  }
+  const out = new Map<string, SqlNameState>();
+  for (const [k, g] of groups) {
+    const current = pickCurrentSqlDefinition(g.defs);
+    const tableKey = cascadeTableKey(k, current?.signature);
+    const tableDrops = tableKey && tableKey !== k ? groups.get(tableKey)?.drops ?? [] : [];
+    if (g.drops.length === 0 && tableDrops.length === 0) continue;
+    const via = tableKey ? `table ${tableKey.split("|").slice(1).filter(Boolean).join(".")}` : "";
+    out.set(k, { defs: g.defs, drops: g.drops, current, dropped: sqlDropState(g.defs, g.drops, tableDrops.map((site) => ({ site, via }))) });
+  }
+  return out;
+}
+
 export type SqlDefinitionInfo = {
   /** Is THIS symbol the current definition of its name? */
   current: boolean;
@@ -212,6 +347,10 @@ export type SqlDefinitionInfo = {
   decisive: boolean;
   /** Every definition site but this one, `file:line`, lowest-ranked first (so the current one is last when this site is superseded). */
   alsoDefinedAt: string[];
+  /** Release M1: the name's latest event is a drop (its own, or its table's — `via`). Absent when the name is alive. */
+  dropped?: SqlDropped;
+  /** Release M1, on a `sql_drop` symbol: the definition it dropped (the latest one ranked before it) and a re-create after it. */
+  dropSite?: { drops: string | null; recreatedAt: string | null };
   note: string;
 };
 
@@ -219,7 +358,8 @@ type SymbolRow = { symbolId: string; kind: string; name: string; signature: stri
 
 /**
  * `alsoDefinedAt` for each SQL definition symbol in `symbolIds` whose name has more than one
- * definition site. Symbols that are not SQL definitions, or are defined once, are absent from the map.
+ * definition site, and (release M1) `dropped` for one whose name is dropped — even at a single site. A `sql_drop`
+ * symbol gets `dropSite`. Symbols that are not SQL, or are defined once and alive, are absent from the map.
  */
 export function getSqlDefinitionInfo(db: Database.Database, repoId: string, symbolIds: readonly string[]): Map<string, SqlDefinitionInfo> {
   const out = new Map<string, SqlDefinitionInfo>();
@@ -228,39 +368,74 @@ export function getSqlDefinitionInfo(db: Database.Database, repoId: string, symb
     `select symbol_id as symbolId, kind, name, signature, file_path as filePath, line from symbols where repo_id = ? and symbol_id = ?`
   );
   // `kind in (…) and name = ?` rides idx_symbols_repo_kind_name; a `like` on kind would not.
-  const siblingsByName = db.prepare(
+  const byKindsAndName = db.prepare(
     `select symbol_id as symbolId, kind, name, signature, file_path as filePath, line from symbols
      where repo_id = ? and kind in (select value from json_each(?)) and name = ?`
   );
+  const siteOf = (s: SymbolRow): SqlDefinitionSite => ({ symbolId: s.symbolId, filePath: s.filePath, line: s.line, signature: s.signature });
+  const inGroup = (key: string) => (s: SymbolRow): boolean => sqlGroupKey(s) === key;
   for (const symbolId of new Set(symbolIds)) {
     const row = one.get(repoId, symbolId) as SymbolRow | undefined;
     if (!row) continue;
-    const tokenKind = sqlTokenKindOfSymbol(row.kind);
+    const isDrop = row.kind === "sql_drop";
+    const tokenKind = isDrop ? sqlDropTokenKind(row.signature) : sqlTokenKindOfSymbol(row.kind);
     if (!tokenKind) continue;
-    const key = sqlNameKey(tokenKind, sqlQualifiedName(row.name, row.signature));
+    const key = sqlGroupKey(row);
     if (!key) continue;
     const kinds = DEFINING_KINDS[tokenKind];
-    const sites = (siblingsByName.all(repoId, JSON.stringify(kinds), row.name) as SymbolRow[]).filter((s) => {
-      if (!kinds.includes(s.kind)) return false;
-      const k = sqlNameKey(tokenKind, sqlQualifiedName(s.name, s.signature));
-      return k !== null && k.schema === key.schema && k.rest === key.rest;
-    });
-    if (sites.length < 2) continue;
-    const current = pickCurrentSqlDefinition(sites)!;
+    const sites = (byKindsAndName.all(repoId, JSON.stringify(kinds), row.name) as SymbolRow[]).filter(inGroup(key));
+    const drops = (byKindsAndName.all(repoId, JSON.stringify(["sql_drop"]), row.name) as SymbolRow[]).filter(inGroup(key));
+    const current = pickCurrentSqlDefinition(sites);
+    const tableKey = cascadeTableKey(key, current?.signature);
+    let tableDrops: SymbolRow[] = [];
+    if (tableKey && tableKey !== key) {
+      const tableName = tableKey.split("|")[2]!;
+      tableDrops = (byKindsAndName.all(repoId, JSON.stringify(["sql_drop"]), tableName) as SymbolRow[]).filter(inGroup(tableKey));
+    }
+    const via = tableKey ? `table ${tableKey.split("|").slice(1).filter(Boolean).join(".")}` : "";
+    const dropped = drops.length > 0 || tableDrops.length > 0
+      ? sqlDropState(sites.map(siteOf), drops.map(siteOf), tableDrops.map((s) => ({ site: siteOf(s), via })))
+      : null;
+    const decisive = current ? isDecisiveCurrent(current, sites) : false;
+
+    if (isDrop) {
+      const self = rankOf(siteOf(row));
+      const before = pickCurrentSqlDefinition(sites.filter((s) => compareRank(rankOf(siteOf(s)), self) < 0));
+      const after = sites.filter((s) => compareRank(rankOf(siteOf(s)), self) > 0).sort((a, b) => compareRank(rankOf(siteOf(a)), rankOf(siteOf(b))))[0];
+      out.set(symbolId, {
+        current: false,
+        definitions: sites.length,
+        currentDefinition: current ? siteLabel(current) : "",
+        currentSymbolId: current?.symbolId ?? "",
+        decisive,
+        alsoDefinedAt: sites.map(siteLabel),
+        ...(dropped && { dropped }),
+        dropSite: { drops: before ? siteLabel(before) : null, recreatedAt: after ? siteLabel(after) : null },
+        note: after
+          ? `drop site: re-created at ${siteLabel(after)}${dropped ? `, dropped again at ${dropped.at}` : ", alive"}`
+          : before
+            ? `drop site: drops ${siteLabel(before)}; nothing re-creates it`
+            : "drop site: no definition of this name ranks before it in the index"
+      });
+      continue;
+    }
+    if (sites.length < 2 && !dropped) continue;
     const others = sites
       .filter((s) => s.symbolId !== row.symbolId)
-      .sort((a, b) => compareRank(sqlDefinitionRank(a.filePath, a.line), sqlDefinitionRank(b.filePath, b.line)));
-    const isCurrent = current.symbolId === row.symbolId;
+      .sort((a, b) => compareRank(rankOf(a), rankOf(b)));
+    const isCurrent = current!.symbolId === row.symbolId;
+    const droppedNote = dropped ? `; DROPPED at ${dropped.at}${dropped.via ? ` (${dropped.via})` : ""} — the name no longer exists after that migration` : "";
     out.set(symbolId, {
       current: isCurrent,
       definitions: sites.length,
-      currentDefinition: siteLabel(current),
-      currentSymbolId: current.symbolId,
-      decisive: isDecisiveCurrent(current, sites),
+      currentDefinition: siteLabel(current!),
+      currentSymbolId: current!.symbolId,
+      decisive,
       alsoDefinedAt: others.map(siteLabel),
-      note: isCurrent
+      ...(dropped && { dropped }),
+      note: (isCurrent
         ? `current of ${String(sites.length)} definitions: references to this name bind here; the other sites keep their own outbound edges`
-        : `superseded by ${siteLabel(current)}: references to this name bind to the current definition; this site keeps only its own outbound edges`
+        : `superseded by ${siteLabel(current!)}: references to this name bind to the current definition; this site keeps only its own outbound edges`) + droppedNote
     });
   }
   return out;

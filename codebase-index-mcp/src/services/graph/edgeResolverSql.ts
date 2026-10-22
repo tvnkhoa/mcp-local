@@ -82,7 +82,7 @@ import {
   type SqlTokenKind
 } from "../extractors/sqlExtractor.js";
 import { EMPTY_ALIASES, loadIndexedFilePaths, loadRepoPath, readTsconfigAliases, resolveModuleSpecifier, type PathAliases } from "./moduleResolution.js";
-import { DEFINING_KINDS, pickCurrentSqlDefinition, siteLabel, sqlNameKey, sqlQualifiedName } from "./sqlDefinitions.js";
+import { DEFINING_KINDS, pickCurrentSqlDefinition, siteLabel, sqlNameKey, sqlNameStates, sqlQualifiedName } from "./sqlDefinitions.js";
 
 export { sqlNameKey } from "./sqlDefinitions.js";
 
@@ -139,7 +139,7 @@ function parseSqlEdge(toId: string, reason: string | null): { clause: string; to
 
 type WorkItem = { fromId: string; type: string; token: string; clause: string };
 type Anchor = { fromId: string; token: string; clause: string };
-type Def = { symbolId: string; schema: string | null; filePath: string; line: number };
+type Def = { symbolId: string; schema: string | null; filePath: string; line: number; signature: string | null };
 /** The current definition of one (kind, schema, rest) group and how many sites the group has. */
 type Current = { symbolId: string; count: number };
 
@@ -210,10 +210,17 @@ export function resolveSqlEdges(db: Database.Database, repoId: string): SqlResol
       let byRest = defs.get(tokenKindName);
       if (!byRest) defs.set(tokenKindName, (byRest = new Map()));
       const list = byRest.get(key.rest) ?? [];
-      list.push({ symbolId: row.symbolId, schema: key.schema, filePath: row.filePath, line: row.line });
+      list.push({ symbolId: row.symbolId, schema: key.schema, filePath: row.filePath, line: row.line, signature: row.signature });
       byRest.set(key.rest, list);
     }
   }
+  // Release M1: every name with a drop of its own or of its table — the latest event says whether it is dropped.
+  // `defRows` carries the `sql_drop` symbols too (kind `sql_drop` is in the `sql_%` range; no DEFINING_KINDS entry).
+  const nameStates = sqlNameStates(defRows);
+  const droppedAt = (kind: SqlTokenKind, schema: string | null, rest: string): string | null => {
+    const d = nameStates.get(`${kind}|${schema ?? ""}|${rest}`)?.dropped;
+    return d ? `dropped at ${d.at}${d.via ? ` via ${d.via}` : ""}` : null;
+  };
   /** kind → rest → schema → current. */
   const current = new Map<SqlTokenKind, Map<string, Map<string | null, Current>>>();
   /** Every CURRENT definition of a kind in a schema (null = default), for schema-wide grants. */
@@ -295,12 +302,14 @@ export function resolveSqlEdges(db: Database.Database, repoId: string): SqlResol
       const groups = key ? current.get(parsed.kind)?.get(key.rest) : undefined;
       let match: Current | null = key ? groups?.get(key.schema) ?? null : null;
       let mode: "exact-schema" | "search_path" = "exact-schema";
+      let matchedSchema: string | null = key ? key.schema : null;
       let ambiguous: string[] = [];
       if (key && !match && key.schema === null && groups) {
         const otherSchemas = [...groups.keys()].filter((s): s is string => s !== null);
         if (otherSchemas.length === 1) {
           match = groups.get(otherSchemas[0]!)!;
           mode = "search_path";
+          matchedSchema = otherSchemas[0]!;
         } else if (otherSchemas.length > 1) {
           ambiguous = otherSchemas.sort().map((s) => `${s}.${key.rest}`);
         }
@@ -319,7 +328,12 @@ export function resolveSqlEdges(db: Database.Database, repoId: string): SqlResol
       if (!match && wide.length === 0) {
         if (ambiguous.length > 0) stats.tokensAmbiguous += 1;
         else stats.tokensUnresolved += 1;
-        const label = ambiguous.length > 0 ? `unresolved sql token (ambiguous: ${ambiguous.join(", ")}): ` : SQL_UNRESOLVED_REASON_PREFIX;
+        // Release M1: a name with drops and no definition (an EF-created index a later migration dropped) stays a
+        // token, labelled where it was dropped.
+        const dropOnly = key && ambiguous.length === 0 ? droppedAt(parsed.kind, key.schema, key.rest) : null;
+        const label = ambiguous.length > 0
+          ? `unresolved sql token (ambiguous: ${ambiguous.join(", ")}): `
+          : dropOnly ? `unresolved sql token (${dropOnly}): ` : SQL_UNRESOLVED_REASON_PREFIX;
         write(item.fromId, item.token, item.type, SQL_TOKEN_CONFIDENCE, `${label}${item.clause}`);
         continue;
       }
@@ -327,6 +341,8 @@ export function resolveSqlEdges(db: Database.Database, repoId: string): SqlResol
       const notes: string[] = [];
       if (mode === "search_path") notes.push("search_path");
       if (match && match.count > 1) notes.push(`current of ${String(match.count)} definitions`);
+      const dropped = match && key ? droppedAt(parsed.kind, matchedSchema, key.rest) : null;
+      if (dropped) notes.push(dropped);
       if (wide.length > 0) notes.push(`schema-wide, ${String(wide.length)} objects`);
       const reason = `name_resolved${notes.length > 0 ? ` (${notes.join(", ")})` : ""}: ${item.clause} | ${item.token}`;
       const confidence = mode === "search_path" ? SQL_SEARCH_PATH_CONFIDENCE : SQL_NAME_RESOLVED_CONFIDENCE;

@@ -71,7 +71,7 @@ import { readQName, scanSqlReferences, skipParens, type SqlRef } from "./sqlQuer
 
 export const SQL_SYMBOL_KINDS = [
   "sql_table", "sql_column", "sql_view", "sql_index", "sql_function", "sql_type", "sql_role", "sql_schema",
-  "sql_sequence", "sql_policy", "sql_trigger", "sql_statement", "sql_gap"
+  "sql_sequence", "sql_policy", "sql_trigger", "sql_statement", "sql_gap", "sql_drop"
 ] as const;
 export type SqlSymbolKind = (typeof SQL_SYMBOL_KINDS)[number];
 
@@ -112,6 +112,8 @@ export const SQL_TOKEN_CONFIDENCE = 0.5;
 export const SQL_SIGNATURE_SEPARATOR = " — ";
 
 const MAX_SIGNATURE = 200;
+/** Release M2: an index signature carries its columns and filter (the ground truth compares them), so it may run longer. */
+const MAX_INDEX_SIGNATURE = 500;
 const MAX_STATEMENT_NAME = 140;
 /** The AST parser is a chart parser; a statement this long goes to the token readers directly. */
 const MAX_AST_STATEMENT_CHARS = 40_000;
@@ -170,6 +172,10 @@ type FileContext = {
   edgeKeys: Set<string>;
   /** Appended to every symbol's signature while reading statements inside a DO body. */
   detailSuffix: string;
+  /** Release M2: put right after the qualified name's separator — `[EF down] ` for an EF migration's Down(), so clipping never hides it. */
+  detailPrefix: string;
+  /** Release M1: `sql_drop` ids already emitted (a name dropped twice in one statement is one site). */
+  dropIds: Set<string>;
   /** First schema of the last `SET search_path`, when it is not `public` / `pg_catalog`. */
   searchPath: string | null;
   /** Tables defined in this file, by qualified name → symbol id (for column parents). */
@@ -179,7 +185,10 @@ type FileContext = {
   stats: SqlExtractStats;
 };
 
-export function extractSql(input: ExtractInput, moduleSymbolId: string): SqlExtractResult {
+/** Release M2: how an embedded caller (EF `migrationBuilder.Sql`) labels what it hands in. */
+export type SqlExtractOptions = { detailPrefix?: string; detailSuffix?: string };
+
+export function extractSql(input: ExtractInput, moduleSymbolId: string, options: SqlExtractOptions = {}): SqlExtractResult {
   const lines = new LineIndex(input.source);
   const ctx: FileContext = {
     input,
@@ -190,7 +199,9 @@ export function extractSql(input: ExtractInput, moduleSymbolId: string): SqlExtr
     symbols: [],
     edges: [],
     edgeKeys: new Set(),
-    detailSuffix: "",
+    detailSuffix: options.detailSuffix ?? "",
+    detailPrefix: options.detailPrefix ?? "",
+    dropIds: new Set(),
     searchPath: null,
     tables: new Map(),
     columns: new Map(),
@@ -228,7 +239,7 @@ function defineSymbol(
 ): string {
   const line = ctx.lines.lineAt(offset);
   const symbolId = makeSymbolId(ctx.idInput, kind, name, line - 1);
-  const described = `${detail}${ctx.detailSuffix}`;
+  const described = `${ctx.detailPrefix}${detail}${ctx.detailSuffix}`;
   const signature = qualified !== null ? `${qualified}${SQL_SIGNATURE_SEPARATOR}${described}` : described;
   ctx.symbols.push({
     repoId: ctx.input.repoId,
@@ -238,10 +249,45 @@ function defineSymbol(
     kind,
     line,
     endLine: ctx.lines.lineAt(Math.max(offset, endOffset - 1)),
-    signature: clip(signature),
+    signature: clip(signature, kind === "sql_index" ? MAX_INDEX_SIGNATURE : MAX_SIGNATURE),
     ...(parentSymbolId ? { parentSymbolId } : {})
   });
   return symbolId;
+}
+
+/** The signature head of a `sql_drop`: `<qualified> — dropped <token kind>: …` (`sqlDefinitions.ts` parses it back). */
+export const SQL_DROP_DETAIL = /^(?:\[EF down\] )?dropped (\w+): /;
+
+/**
+ * Release M1: one dropped object at one drop site — `DROP TABLE a, b` is two, `ALTER TABLE t DROP COLUMN x, DROP
+ * COLUMN y` is two (at each column's own line). Not a definition: nothing binds to it as one. `graph/sqlDefinitions.ts`
+ * orders it with the definitions of its name, and the latest event decides whether the name is dropped.
+ */
+function dropSite(ctx: FileContext, kind: SqlTokenKind, written: string, offset: number, endOffset: number, how: string, parentId?: string): void {
+  if (!written) return;
+  const parts = written.split(".");
+  const bare = parts[parts.length - 1]!;
+  const qualified = kind === "role" || kind === "schema" ? written : qualify(ctx, written);
+  const id = makeSymbolId(ctx.idInput, "sql_drop", `${kind}:${qualified}`, ctx.lines.lineAt(offset) - 1);
+  if (ctx.dropIds.has(id)) return;
+  ctx.dropIds.add(id);
+  const line = ctx.lines.lineAt(offset);
+  ctx.symbols.push({
+    repoId: ctx.input.repoId,
+    symbolId: id,
+    filePath: ctx.input.filePath,
+    name: bare,
+    kind: "sql_drop",
+    line,
+    endLine: ctx.lines.lineAt(Math.max(offset, endOffset - 1)),
+    signature: clip(`${qualified}${SQL_SIGNATURE_SEPARATOR}${ctx.detailPrefix}dropped ${kind}: ${how}${ctx.detailSuffix}`),
+    ...(parentId ? { parentSymbolId: parentId } : {})
+  });
+}
+
+/** Index columns and filter as written (source text, whitespace flattened), for the index signature. */
+function indexShape(columns: string[], method: string | null, where: string | null): string {
+  return ` (${columns.join(", ")})${method && method.toLowerCase() !== "btree" ? ` using ${method.toLowerCase()}` : ""}${where ? ` where ${clip(where, 300)}` : ""}`;
 }
 
 function ref(ctx: FileContext, fromId: string, kind: SqlTokenKind, name: string, type: SqlEdgeType, clause: string): void {
@@ -421,7 +467,14 @@ function handleAst(ctx: FileContext, statement: SqlStatement, ast: Statement): b
     case "create index": {
       const table = qnameText(ast.table);
       const indexName = ast.indexName?.name ?? `${ast.table.name}_index_l${String(statement.line)}`;
-      const indexId = defineSymbol(ctx, "sql_index", indexName, statement.start, statement.end, qualify(ctx, ast.indexName ? (ast.table.schema ? `${ast.table.schema}.${indexName}` : indexName) : indexName), `${ast.unique ? "unique index" : "index"} on ${table}`);
+      const sourceOf = (node: { _location?: { start: number; end: number } } | undefined | null): string | null =>
+        node?._location ? statement.text.slice(node._location.start, node._location.end).replace(/\s+/g, " ").trim() : null;
+      const shape = indexShape(
+        ast.expressions.map((e) => `${sourceOf(e.expression) ?? "?"}${e.opclass ? ` ${qnameText(e.opclass)}` : ""}`),
+        ast.using?.name ?? null,
+        sourceOf(ast.where)
+      );
+      const indexId = defineSymbol(ctx, "sql_index", indexName, statement.start, statement.end, qualify(ctx, ast.indexName ? (ast.table.schema ? `${ast.table.schema}.${indexName}` : indexName) : indexName), `${ast.unique ? "unique index" : "index"} on ${table}${shape}`);
       ref(ctx, indexId, "table", table, "SQL_USES", "index on");
       for (const e of ast.expressions) {
         if (e.expression.type === "ref") ref(ctx, indexId, "column", `${table}.${e.expression.name}`, "SQL_USES", "index column");
@@ -467,9 +520,14 @@ function handleAst(ctx: FileContext, statement: SqlStatement, ast: Statement): b
             defineColumnAst(ctx, statement, qualifiedTable, change.column, ctx.tables.get(qualifiedTable));
             break;
           case "alter column":
-          case "drop column":
             ref(ctx, id, "column", `${table}.${change.column.name}`, "SQL_USES", change.type);
             break;
+          case "drop column": {
+            ref(ctx, id, "column", `${table}.${change.column.name}`, "SQL_USES", change.type);
+            const at = locOffset(ctx, statement, change.column);
+            dropSite(ctx, "column", `${table}.${change.column.name}`, at, at + change.column.name.length, `alter table ${table} drop column`, id);
+            break;
+          }
           case "rename column":
             ref(ctx, id, "column", `${table}.${change.column.name}`, "SQL_USES", `rename column to ${change.to.name}`);
             break;
@@ -521,11 +579,14 @@ function handleAst(ctx: FileContext, statement: SqlStatement, ast: Statement): b
       const kind: SqlTokenKind = ast.type === "drop table" ? "table" : ast.type === "drop index" ? "index" : ast.type === "drop sequence" ? "sequence" : ast.type === "drop type" ? "type" : "trigger";
       const id = statementSymbol(ctx, statement, `${ast.type} ${ast.names.map(qnameText).join(", ")}`, ast.type);
       for (const n of ast.names) ref(ctx, id, kind, qnameText(n), "SQL_USES", ast.type);
+      // `drop trigger t ON tbl` is not something this parser reads; it reaches `dropTrigger` with its table.
+      if (kind !== "trigger") for (const n of ast.names) dropSite(ctx, kind, qnameText(n), statement.start, statement.end, ast.type, id);
       return true;
     }
     case "drop function": {
       const id = statementSymbol(ctx, statement, `drop function ${qnameText(ast.name)}`, "drop function");
       ref(ctx, id, "function", qnameText(ast.name), "SQL_USES", "drop function");
+      dropSite(ctx, "function", qnameText(ast.name), statement.start, statement.end, "drop function", id);
       return true;
     }
     case "truncate table": {
@@ -1031,6 +1092,7 @@ function policyTouch(ctx: FileContext, statement: SqlStatement, verb: string): b
   const id = statementSymbol(ctx, statement, `${verb} ${nameTok.value} on ${tableName}`, `${verb} [token-read]`);
   ref(ctx, id, "table", tableName, "SQL_USES", verb);
   ref(ctx, id, "policy", `${tableName}.${nameTok.value}`, "SQL_USES", verb);
+  if (verb === "drop policy") dropSite(ctx, "policy", `${tableName}.${nameTok.value}`, statement.start, statement.end, verb, id);
   return true;
 }
 
@@ -1064,6 +1126,7 @@ function dropTrigger(ctx: FileContext, statement: SqlStatement): boolean {
   const id = statementSymbol(ctx, statement, `drop trigger ${nameTok.value} on ${tableName}`, "drop trigger [token-read]");
   ref(ctx, id, "table", tableName, "SQL_USES", "drop trigger");
   ref(ctx, id, "trigger", `${tableName}.${nameTok.value}`, "SQL_USES", "drop trigger");
+  dropSite(ctx, "trigger", `${tableName}.${nameTok.value}`, statement.start, statement.end, "drop trigger", id);
   return true;
 }
 
@@ -1161,9 +1224,20 @@ function createIndexTokens(ctx: FileContext, statement: SqlStatement, i: number)
   const table = q.parts.join(".");
   const unique = t.slice(0, i).some((x) => isWord(x, "unique"));
   const indexName = nameTok?.value ?? `${q.parts[q.parts.length - 1]!}_index_l${String(statement.line)}`;
-  const indexId = defineSymbol(ctx, "sql_index", indexName, statement.start, statement.end, qualify(ctx, q.parts.length > 1 ? `${q.parts[0]!}.${indexName}` : indexName), `${unique ? "unique index" : "index"} on ${table} [token-read]`);
-  ref(ctx, indexId, "table", table, "SQL_USES", "index on");
   const open = t.findIndex((x, k) => k >= q.next && isPunct(x, "("));
+  const usingAt = t.findIndex((x, k) => k >= q.next && (open < 0 || k < open) && isWord(x, "using"));
+  const close = open >= 0 ? skipParens(t, open) : -1;
+  const whereAt = close >= 0 ? t.findIndex((x, k) => k >= close && isWord(x, "where")) : -1;
+  const text = (from: number, to: number): string => ctx.source.slice(from, to).replace(/\s+/g, " ").trim();
+  const shape = open >= 0
+    ? indexShape(
+      topLevelItems(t, open).filter((item) => item.length > 0).map((item) => text(item[0]!.start, item[item.length - 1]!.end)),
+      usingAt >= 0 ? (t[usingAt + 1]?.value ?? null) : null,
+      whereAt >= 0 && whereAt + 1 < t.length ? text(t[whereAt + 1]!.start, t[t.length - 1]!.end) : null
+    )
+    : "";
+  const indexId = defineSymbol(ctx, "sql_index", indexName, statement.start, statement.end, qualify(ctx, q.parts.length > 1 ? `${q.parts[0]!}.${indexName}` : indexName), `${unique ? "unique index" : "index"} on ${table}${shape} [token-read]`);
+  ref(ctx, indexId, "table", table, "SQL_USES", "index on");
   if (open >= 0) {
     for (const item of topLevelItems(t, open)) {
       if (item.length >= 1 && (item[0]!.kind === "word" || item[0]!.kind === "qident") && !isPunct(item[1], "(")) {
@@ -1229,6 +1303,8 @@ function alterTableTokens(ctx: FileContext, statement: SqlStatement): boolean {
       const col = a[k];
       if (col && (col.kind === "word" || col.kind === "qident") && !isWord(col, "constraint", "to")) {
         ref(ctx, id, "column", `${table}.${col.value}`, "SQL_USES", `${a[0]!.value} column`);
+        // `drop constraint` is excluded above; `alter`/`rename column` are not drops.
+        if (isWord(a[0], "drop")) dropSite(ctx, "column", `${table}.${col.value}`, col.start, col.end, `alter table ${table} drop column`, id);
       }
       continue;
     }
@@ -1290,7 +1366,10 @@ function dropTokens(ctx: FileContext, statement: SqlStatement, kind: SqlTokenKin
   }
   if (names.length === 0) return false;
   const id = statementSymbol(ctx, statement, `drop ${t[1]!.value} ${names.join(", ")}`, `drop ${t[1]!.value} [token-read]`);
-  for (const n of names) ref(ctx, id, kind, n, "SQL_USES", `drop ${t[1]!.value}`);
+  for (const n of names) {
+    ref(ctx, id, kind, n, "SQL_USES", `drop ${t[1]!.value}`);
+    dropSite(ctx, kind, n, statement.start, statement.end, `drop ${t[1]!.value}`, id);
+  }
   return true;
 }
 

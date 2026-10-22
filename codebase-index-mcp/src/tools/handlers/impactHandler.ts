@@ -1170,11 +1170,21 @@ export async function handleQueryDocs(
     // compared with what it pages, so droppedByLimit is never a count of rows a group already accounts for.
     const paged = grouped ? stale.resolvedCount : total;
     const ambiguousGroups = grouped ? withRegistryTerms(store, args.repoId, stale.groups ?? []) : undefined;
+    // Release M1: a mention bound to a dropped SQL object is marked — derived here from the symbols, never stored.
+    const dropped = Object.fromEntries(
+      [...store.getSqlDefinitionInfo(args.repoId, args.symbolIds!)]
+        .filter(([, info]) => info.dropped)
+        .map(([id, info]) => [id, info.dropped!])
+    );
     return ctx.asText(
       {
         repoId: args.repoId,
         mode: "stale",
         symbolIds: args.symbolIds,
+        ...(Object.keys(dropped).length > 0 && {
+          dropped,
+          droppedNote: "these symbols are SQL objects a later migration dropped: the docs mentioning them describe something that no longer exists"
+        }),
         count: total,
         resolvedCount: stale.resolvedCount,
         ambiguousCount: stale.ambiguousCount,

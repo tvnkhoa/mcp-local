@@ -11,6 +11,7 @@ import { extractPythonSymbolsAndRoutesImpl } from "./pythonExtractor.js";
 import { extractProtoSymbolsImpl } from "./protoExtractor.js";
 import { extractCss } from "./cssExtractor.js";
 import { extractSql } from "./sqlExtractor.js";
+import { extractEfMigrationImpl } from "./csharpEfMigration.js";
 import { extractEfSnapshotImpl } from "./csharpEfSnapshot.js";
 import { extractJavaScriptRoutesImpl, extractJavaScriptSymbolsImpl } from "./jsExtractor.js";
 import { extractVueFileImpl } from "./vueExtractor.js";
@@ -203,7 +204,8 @@ export function extractGraphData(input: ExtractInput): ExtractOutput {
       routes.push(...extractCSharpRoutesImpl(input, root, symbols));
       emitEndpointContractSymbolsImpl(input, symbols, routes);
       emitEndpointContractSymbolsFromCSharpSignaturesImpl(input, symbols);
-      extractEfSnapshotImpl(input, root, symbols, laneEdges);
+      // Release M2: a migration's `migrationBuilder.Sql` strings and Up() drop operations — never in the snapshot file.
+      if (!extractEfSnapshotImpl(input, root, symbols, laneEdges)) extractEfMigrationImpl(input, root, moduleSymbolId, symbols, laneEdges);
       literals = extractStringLiteralsImpl(input, root, LITERAL_POLICY);
     }
 

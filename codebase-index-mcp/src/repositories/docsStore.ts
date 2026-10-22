@@ -5,7 +5,7 @@ import type Database from "better-sqlite3";
 import type { DocRecord, DocMentionRecord } from "../types/index.js";
 import { indexLog, indexWarn } from "../services/indexing/indexProgress.js";
 import { isTestPath } from "../services/indexing/fileFilter.js";
-import { supersededSqlDefinitions } from "../services/graph/sqlDefinitions.js";
+import { pickCurrentSqlDefinition, sqlGroupKey, sqlTokenKindOfSymbol, supersededSqlDefinitions, type SqlDefinitionSite } from "../services/graph/sqlDefinitions.js";
 
 /**
  * MCP-ISSUE-061(c): `findStaleDocsImpl` and `findDocCoverageImpl` each hardcoded `limit 200` while
@@ -359,7 +359,12 @@ export function resolveMentionsImpl(db: Database.Database, repoId: string, scope
     }
   }
 
-  type Candidate = { id: string; rank: number; test: boolean; supersededBy?: string; efTwins?: string[] };
+  /**
+   * Release M1: a `sql_drop` candidate (`dropOf`) yields to a definition of the same name (`defines`) in the pool, so
+   * a drop and a re-create never make a mention ambiguous; a mention whose name has only drops binds to the drop.
+   * Whether a bound definition is dropped is derived when it is read, not stored here.
+   */
+  type Candidate = { id: string; rank: number; test: boolean; supersededBy?: string; efTwins?: string[]; dropOf?: string; defines?: string; dropSite?: SqlDefinitionSite };
   const add = (map: Map<string, Candidate[]>, key: string, c: Candidate): void => {
     const list = map.get(key);
     if (!list) map.set(key, [c]);
@@ -380,7 +385,17 @@ export function resolveMentionsImpl(db: Database.Database, repoId: string, scope
   for (const sym of allSymbols) {
     const superseded = supersededBy.get(sym.symbol_id);
     const twins = efTwins.get(sym.symbol_id);
-    const candidate: Candidate = { id: sym.symbol_id, rank: kindRank(sym.kind), test: isTestPath(sym.file_path), ...(superseded && { supersededBy: superseded }), ...(twins && { efTwins: twins }) };
+    const sqlKey = sym.kind === "sql_drop" || sqlTokenKindOfSymbol(sym.kind) ? sqlGroupKey(sym) : null;
+    const candidate: Candidate = {
+      id: sym.symbol_id,
+      rank: kindRank(sym.kind),
+      test: isTestPath(sym.file_path),
+      ...(superseded && { supersededBy: superseded }),
+      ...(twins && { efTwins: twins }),
+      ...(sqlKey && (sym.kind === "sql_drop"
+        ? { dropOf: sqlKey, dropSite: { symbolId: sym.symbol_id, filePath: sym.file_path, line: sym.line, signature: sym.signature } }
+        : { defines: sqlKey }))
+    };
     add(byName, sym.name, candidate);
     const nameLower = sym.name.toLowerCase();
     add(byLower, nameLower, candidate);
@@ -422,6 +437,15 @@ export function resolveMentionsImpl(db: Database.Database, repoId: string, scope
     // Release L3: an EF symbol whose code twin is a candidate (see `efTwins`) — the twin stays, so the pool never empties.
     const afterSuperseded = new Set(pool.map((c) => c.id));
     pool = pool.filter((c) => !(c.efTwins && c.efTwins.some((t) => afterSuperseded.has(t))));
+    // Release M1: a drop site yields to a definition of its name — the definition stays, so the pool never empties.
+    const defined = new Set(pool.map((c) => c.defines).filter((k): k is string => k !== undefined));
+    pool = pool.filter((c) => !(c.dropOf && defined.has(c.dropOf)));
+    // …and of several drop sites of one name (`drop policy if exists p` in many migrations), the latest stands for it.
+    const latestDrop = new Map<string, string>();
+    for (const key of new Set(pool.map((c) => c.dropOf).filter((k): k is string => k !== undefined))) {
+      latestDrop.set(key, pickCurrentSqlDefinition(pool.filter((c) => c.dropOf === key).map((c) => c.dropSite!))!.symbolId);
+    }
+    pool = pool.filter((c) => !c.dropOf || latestDrop.get(c.dropOf) === c.id);
     if (ranked) {
       const best = Math.min(...pool.map((c) => c.rank));
       pool = pool.filter((c) => c.rank === best);
