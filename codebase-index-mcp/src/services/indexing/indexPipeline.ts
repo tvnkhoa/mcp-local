@@ -84,6 +84,8 @@ export type RunIndexInput = {
   parseJobTimeoutMs?: number;
   /** Release J: a non-full run extracting at most this many files parses inline (see IndexRunnerLimits). */
   inlineParseMaxFiles?: number;
+  /** Release J: warm parse workers owned by the caller — used instead of starting a pool, never disposed here. */
+  sharedWorkerPool?: ExtractionWorkerPool;
   onProgress?: (progress: IndexProgressSnapshot) => void;
   /**
    * Progress reporter (log gating + MCP notifications/progress). When supplied
@@ -171,6 +173,7 @@ export async function runIndexPipeline(store: GraphStore, input: RunIndexInput):
   const poolForBatch = (queued: number): ExtractionWorkerPool | null => {
     if (parseWorkers <= 0) return null;
     if (input.mode !== "full" && input.inlineParseMaxFiles !== undefined && queued <= input.inlineParseMaxFiles) return null;
+    if (input.sharedWorkerPool) return input.sharedWorkerPool;
     workerPool ??= new ExtractionWorkerPool(parseWorkers, parseJobTimeoutMs);
     return workerPool;
   };
@@ -181,7 +184,16 @@ export async function runIndexPipeline(store: GraphStore, input: RunIndexInput):
   const progress = input.progress ?? createIndexProgress(input.repoId);
   progress.phase("scanning");
 
-  const { files, knownPackageNames, droppedByPath, gitAware } = await scanRepoFiles(input, maxFiles, includeDocs);
+  const { files, knownPackageNames, droppedByPath, gitAware } = await scanRepoFiles(
+    {
+      ...input,
+      ...(input.onlyRelativePaths && {
+        indexedCsprojPaths: store.listIndexedFiles(input.repoId).map((f) => f.path).filter((p) => p.endsWith(".csproj"))
+      })
+    },
+    maxFiles,
+    includeDocs
+  );
 
   const c: RunCounters = {
     filesScanned: 0, filesIndexed: 0, filesSkipped: 0, symbolsUpserted: 0, edgesUpserted: 0,
@@ -638,7 +650,8 @@ export async function runIndexPipeline(store: GraphStore, input: RunIndexInput):
       // Checkpoint every N completed batches to reduce WAL pressure without over-flushing.
       completedBatches += 1;
       let checkpointMs = 0;
-      if (completedBatches % checkpointEveryNBatches === 0) {
+      // A scoped run writes a few batches at most; its one PASSIVE checkpoint comes at the end of the run.
+      if (!scoped && completedBatches % checkpointEveryNBatches === 0) {
         const cpStart = Date.now();
         store.checkpoint();
         checkpointMs = Date.now() - cpStart;

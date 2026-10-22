@@ -18,6 +18,7 @@ import { createIndexProgress, indexLog, type ProgressNotifier } from "./indexPro
 import { resolvePostPhasePolicy } from "../../config/performanceConfig.js";
 import { collectDirtyFiles, resolveCurrentBranch, resolveHeadCommitSha } from "../git/gitHelpers.js";
 import type { GraphStore } from "../../repositories/graphStore.js";
+import type { ExtractionWorkerPool } from "../extractors/extractionWorkerPool.js";
 import { runIndexPipeline, INDEX_VERSION, SCOPE_FORCES_FULL_RUN, type PerformanceProfile } from "./indexPipeline.js";
 import type { IndexMode, IndexRunResult } from "../../types/index.js";
 import {
@@ -71,6 +72,11 @@ export interface IndexRunnerOptions {
    * timing rather than freezing the value at start-up.
    */
   readonly resolvePerformanceProfileOverride: () => PerformanceProfile | "auto";
+  /**
+   * Release J: parse workers that outlive one run (the refresh worker keeps them warm). Without it each
+   * run starts its own, and their start-up — each loads the extractor modules — was ~3 s of a refresh.
+   */
+  readonly sharedParsePool?: () => ExtractionWorkerPool;
 }
 
 export type RunIndexAndResolve = (
@@ -83,7 +89,7 @@ export type RunIndexAndResolve = (
 ) => Promise<IndexRunResult>;
 
 export function createIndexRunner(options: IndexRunnerOptions): RunIndexAndResolve {
-  const { store, limits, resolveProgressNotifier, resolvePerformanceProfileOverride } = options;
+  const { store, limits, resolveProgressNotifier, resolvePerformanceProfileOverride, sharedParsePool } = options;
 
   return async function runIndexAndResolve(
     repoId: string,
@@ -245,6 +251,7 @@ export function createIndexRunner(options: IndexRunnerOptions): RunIndexAndResol
     parseWorkers: limits.parseWorkers,
     parseJobTimeoutMs: limits.parseJobTimeoutMs,
     ...(limits.inlineParseMaxFiles !== undefined && { inlineParseMaxFiles: limits.inlineParseMaxFiles }),
+    ...(sharedParsePool && { sharedWorkerPool: sharedParsePool() }),
     onlyRelativePaths: dirtyFileSet,
     progress
   });
@@ -579,7 +586,7 @@ export function createIndexRunner(options: IndexRunnerOptions): RunIndexAndResol
   indexLog(`[index-post] repoId=${repoId} recorded run metadata in ${recordElapsed}ms`);
 
   // Re-enable WAL auto-checkpoint and force a full checkpoint to shrink WAL file
-  store.endIndexSession();
+  store.endIndexSession(mode === "full");
 
   indexLog(`[index-post-done] repoId=${repoId} crossRepo=${String(crossStats.resolved)} calls=${String(callEdgesResolved)} imports=${String(importEdgesResolved)} mentions=${String(mentionsResolved)}`);
 

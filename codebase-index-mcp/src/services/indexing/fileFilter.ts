@@ -76,6 +76,25 @@ export const INDEX_IGNORE_GLOBS = [
   "**/pnpm-lock.yaml"
 ];
 
+/** glob's own default: `nocase` is on for Windows and macOS. */
+const WALK_NOCASE = process.platform === "win32" || process.platform === "darwin";
+const walkCase = (s: string): string => (WALK_NOCASE ? s.toLowerCase() : s);
+const WALK_IGNORED_DIRS = new Set([...VENDOR_DIR_SEGMENTS, ".git", ".svn", ".hg"].map(walkCase));
+const WALK_IGNORED_FILES = new Set(["package-lock.json", "yarn.lock", "pnpm-lock.yaml"].map(walkCase));
+
+/**
+ * Release J: whether the indexer's walk (`glob` with {@link INDEX_IGNORE_GLOBS}) would skip this
+ * repo-relative path — the same answer without walking the tree, for a dirty run that already knows
+ * its few paths. Keep the two in step; `fileScan.test.ts` holds them against each other.
+ */
+export function isIgnoredByIndexWalk(relativePath: string): boolean {
+  const norm = walkCase(relativePath);
+  const segments = norm.split("/");
+  const base = segments[segments.length - 1] ?? "";
+  if (segments.slice(0, -1).some((s) => WALK_IGNORED_DIRS.has(s))) return true;
+  return base.endsWith(".log") || base.endsWith(".lock") || WALK_IGNORED_FILES.has(base);
+}
+
 const EXCLUDED_PATH_SEGMENTS = new Set([
   ...VENDOR_DIR_SEGMENTS,
   ".git",

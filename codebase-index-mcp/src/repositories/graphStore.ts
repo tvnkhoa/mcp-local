@@ -301,8 +301,8 @@ export class GraphStore {
     beginIndexSessionImpl(this.db);
   }
 
-  endIndexSession(): void {
-    endIndexSessionImpl(this.db);
+  endIndexSession(truncate = true): void {
+    endIndexSessionImpl(this.db, truncate);
   }
 
   deduplicateResolvedEdges(repoId: string): number {

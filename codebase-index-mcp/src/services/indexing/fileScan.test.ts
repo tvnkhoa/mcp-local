@@ -80,3 +80,33 @@ test("gitignored output is not walked, and is named in the skip tally; untracked
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+test("a dirty run's restricted scan keeps exactly what the full walk would (release J)", async () => {
+  // The dirty run no longer walks the tree: `isIgnoredByIndexWalk` stands in for the glob's ignore list.
+  // Every path here is dirty, so the full walk's answer restricted to them is what the dirty scan must return.
+  const files = [
+    "src/a.ts",
+    "src/node_modules/pkg/index.ts",
+    "deep/x/.git/hooks/h.ts",
+    "src/build.log",
+    "src/yarn.lock",
+    "src/package-lock.json",
+    "src/.hidden/b.ts",
+    "packages/p/vendor-like/c.ts",
+    "docs/readme.md"
+  ];
+  const root = mkdtempSync(path.join(tmpdir(), "fileScan-dirty-"));
+  try {
+    for (const f of files) {
+      mkdirSync(path.dirname(path.join(root, f)), { recursive: true });
+      writeFileSync(path.join(root, f), "export {};\n");
+    }
+    const all = new Set(files);
+    const walked = rel(root, (await scanRepoFiles({ repoId: "r", repoPath: root, mode: "full", respectGitignore: false }, 100, true)).files);
+    const dirty = rel(root, (await scanRepoFiles({ repoId: "r", repoPath: root, mode: "dirty", onlyRelativePaths: all }, 100, true)).files);
+    assert.deepEqual(dirty, walked);
+    assert.ok(dirty.includes("src/a.ts") && !dirty.includes("src/node_modules/pkg/index.ts") && !dirty.includes("src/build.log"));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});

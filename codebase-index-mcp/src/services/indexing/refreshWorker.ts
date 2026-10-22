@@ -22,11 +22,22 @@ import { parentPort } from "node:worker_threads";
 
 import { performanceProfileOverrideFromEnv } from "../../config/envConfig.js";
 import { GraphStore } from "../../repositories/graphStore.js";
+import { ExtractionWorkerPool } from "../extractors/extractionWorkerPool.js";
 import type { IndexMode, IndexRunResult } from "../../types/index.js";
 import { createIndexRunner, type IndexRunnerLimits, type RunIndexAndResolve } from "./indexRunner.js";
 
-/** Release J: below this many files a refresh parses on this thread; above, the parse workers pay off. */
-const REFRESH_INLINE_PARSE_MAX_FILES = 150;
+/**
+ * Release J: a refresh of at most this many files parses on this thread; a larger one (its dependents
+ * included) goes to the warm parse workers below.
+ */
+const REFRESH_INLINE_PARSE_MAX_FILES = 8;
+/**
+ * Release J: parse workers kept warm across refreshes, so a refresh never waits ~3 s for their start-up.
+ * Fewer than a full run's `cpus/2` — every Claude session runs a server, and each keeps these resident —
+ * and released after a quiet spell; the next refresh starts them again.
+ */
+const REFRESH_PARSE_WORKERS = 3;
+const REFRESH_PARSE_POOL_IDLE_MS = 10 * 60_000;
 
 export type RefreshWorkerRequest = {
   /** `warm`: open the connection and load the runner now, answer nothing (posted at server start). */
@@ -50,6 +61,22 @@ if (parentPort) {
   const port = parentPort;
   /** One connection and one runner for the worker's life; the DB path and limits never change in a process. */
   let runner: { dbPath: string; run: RunIndexAndResolve } | null = null;
+  let parsePool: ExtractionWorkerPool | null = null;
+  let parsePoolIdle: NodeJS.Timeout | undefined;
+  const warmParsePool = (limits: IndexRunnerLimits): ExtractionWorkerPool => {
+    if (parsePoolIdle) clearTimeout(parsePoolIdle);
+    parsePool ??= new ExtractionWorkerPool(Math.max(1, Math.min(REFRESH_PARSE_WORKERS, limits.parseWorkers)), limits.parseJobTimeoutMs);
+    return parsePool;
+  };
+  const releaseParsePoolWhenIdle = (): void => {
+    if (parsePoolIdle) clearTimeout(parsePoolIdle);
+    parsePoolIdle = setTimeout(() => {
+      const pool = parsePool;
+      parsePool = null;
+      void pool?.dispose();
+    }, REFRESH_PARSE_POOL_IDLE_MS);
+    parsePoolIdle.unref();
+  };
   const runnerFor = (request: RefreshWorkerRequest): RunIndexAndResolve => {
     if (runner && runner.dbPath === request.dbPath) return runner.run;
     const store = new GraphStore(request.dbPath);
@@ -60,7 +87,8 @@ if (parentPort) {
       run: createIndexRunner({
         store,
         limits: { ...request.limits, inlineParseMaxFiles: REFRESH_INLINE_PARSE_MAX_FILES },
-        resolvePerformanceProfileOverride: () => performanceProfileOverrideFromEnv()
+        resolvePerformanceProfileOverride: () => performanceProfileOverrideFromEnv(),
+        ...(request.limits.parseWorkers > 0 && { sharedParsePool: () => warmParsePool(request.limits) })
       })
     };
     return runner.run;
@@ -69,6 +97,10 @@ if (parentPort) {
     if (request.kind === "warm") {
       try {
         runnerFor(request);
+        if (request.limits.parseWorkers > 0) {
+          warmParsePool(request.limits);
+          releaseParsePoolWhenIdle();
+        }
       } catch {
         // The first run reports whatever failed here.
       }
@@ -81,6 +113,8 @@ if (parentPort) {
         port.postMessage({ type: "result", id: request.id, result } satisfies RefreshWorkerMessage);
       } catch (error) {
         port.postMessage({ type: "error", id: request.id, error: error instanceof Error ? error.message : String(error) } satisfies RefreshWorkerMessage);
+      } finally {
+        if (parsePool) releaseParsePoolWhenIdle();
       }
     })();
   });

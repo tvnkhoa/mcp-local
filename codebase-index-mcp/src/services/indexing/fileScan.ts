@@ -11,13 +11,13 @@
  * before the first extraction, not accumulated as the batches go by.
  */
 
-import { existsSync } from "node:fs";
+import { existsSync, statSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 
 import { glob } from "glob";
 
-import { INDEX_IGNORE_GLOBS, hasOnlyGitDeferredSegments, isBinaryAssetPath, isExcludedByPath } from "./fileFilter.js";
+import { INDEX_IGNORE_GLOBS, hasOnlyGitDeferredSegments, isBinaryAssetPath, isExcludedByPath, isIgnoredByIndexWalk } from "./fileFilter.js";
 import { tallySkip, type SkipTally } from "./skipReport.js";
 import { listGitVisibleFiles } from "../git/gitHelpers.js";
 import { indexLog } from "./indexProgress.js";
@@ -30,6 +30,12 @@ export interface FileScanInput {
   readonly onlyRelativePaths?: Set<string>;
   /** Skip files .gitignore excludes (default true; no effect outside git). Env: CODEBASE_INDEX_RESPECT_GITIGNORE. */
   readonly respectGitignore?: boolean;
+  /**
+   * Release J: the repo-relative `.csproj` paths already indexed. A dirty run sees only its changed
+   * files, but C# extraction reads every project's PackageReference names, so it pre-scans these too —
+   * otherwise a dirty run extracted a `.cs` file differently from a full run.
+   */
+  readonly indexedCsprojPaths?: readonly string[];
 }
 
 export interface FileScanResult {
@@ -62,16 +68,31 @@ export async function scanRepoFiles(
   // in files the graph has never seen, and every `enclosingSymbol` on them would be null with no
   // explanation. `.git/**`, `.vs/**` and `.idea/**` are excluded by INDEX_IGNORE_GLOBS; `.vscode` and the other segment-only names by
   // the filter below, still before the `maxFiles` cap. Takes effect on the next index run.
-  const globbed = (
-    await glob("**/*", {
-      cwd: input.repoPath,
-      nodir: true,
-      dot: true,
-      absolute: true,
-      windowsPathsNoEscape: true,
-      ignore: INDEX_IGNORE_GLOBS
-    })
-  ).sort();
+  // Release J: a dirty run knows its paths; walking the whole tree to keep a handful of them cost ~1 s
+  // per refresh on wec.aria. `isIgnoredByIndexWalk` gives the walk's answer for one path.
+  const isFile = (abs: string): boolean => {
+    try {
+      return statSync(abs).isFile();
+    } catch {
+      return false;
+    }
+  };
+  const globbed = input.onlyRelativePaths
+    ? [...input.onlyRelativePaths]
+        .filter((rel) => !isIgnoredByIndexWalk(rel))
+        .map((rel) => path.join(input.repoPath, rel))
+        .filter(isFile)
+        .sort()
+    : (
+        await glob("**/*", {
+          cwd: input.repoPath,
+          nodir: true,
+          dot: true,
+          absolute: true,
+          windowsPathsNoEscape: true,
+          ignore: INDEX_IGNORE_GLOBS
+        })
+      ).sort();
   // `glob` returns directory-order results, which differ between calls on the same unchanged tree —
   // verified over three consecutive calls, first divergence at index 11. Processing order then
   // decided which cross-file C# type references were already resolvable, so two identical runs
@@ -148,7 +169,12 @@ export async function scanRepoFiles(
   // Pre-scan: collect all PackageReference names from .csproj files so C# extractors
   // can widen namespace→nuget contract mapping beyond the hardcoded set. (ISSUE-006)
   const knownPackageNames = new Set<string>();
-  const csprojFiles = files.filter((f) => f.endsWith(".csproj"));
+  const csprojFiles = [
+    ...new Set([
+      ...files.filter((f) => f.endsWith(".csproj")),
+      ...(input.onlyRelativePaths ? (input.indexedCsprojPaths ?? []).map((rel) => path.join(input.repoPath, rel)).filter(isFile) : [])
+    ])
+  ];
   if (csprojFiles.length > 0) {
     const pkgRefRe = /<PackageReference\s+Include="([^"]+)"/gi;
     for (const csprojPath of csprojFiles) {
