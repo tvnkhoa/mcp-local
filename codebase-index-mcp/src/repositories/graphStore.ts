@@ -243,6 +243,9 @@ export class GraphStore {
 
   // getEdgeDefaults, buildReliabilitySummary, normalizePath, resolveCanonicalFilePath → impactAnalyzer.ts
 
+  /** This connection's `wal_autocheckpoint`; an index session restores it (see `setAutoCheckpointPages`). */
+  private autoCheckpointPages = 8000;
+
   constructor(dbPath: string) {
     this.db = new Database(dbPath);
     this.db.pragma("journal_mode = WAL");
@@ -251,7 +254,7 @@ export class GraphStore {
     this.db.pragma("temp_store = MEMORY");
     this.db.pragma("page_size = 4096"); // Standard 4KB page size
     this.db.pragma("busy_timeout = 30000"); // 30s timeout — handles checkpoint contention on large repos
-    this.db.pragma("wal_autocheckpoint = 8000"); // Raise WAL checkpoint threshold (default 1000 pages)
+    this.db.pragma(`wal_autocheckpoint = ${String(this.autoCheckpointPages)}`); // Raise WAL checkpoint threshold (default 1000 pages)
     // Increase mmap size to reduce I/O contention during large batch writes
     this.db.pragma("mmap_size = 268435456"); // 256MB mmap
     this.runInTransactionInternal = this.db.transaction((fn: () => void) => fn());
@@ -302,7 +305,19 @@ export class GraphStore {
   }
 
   endIndexSession(truncate = true): void {
-    endIndexSessionImpl(this.db, truncate);
+    endIndexSessionImpl(this.db, truncate, this.autoCheckpointPages);
+  }
+
+  /**
+   * Release J: `0` stops this connection from checkpointing on its own commits. The server thread's
+   * connection is set so once the refresh worker writes the index: a scoped run's PASSIVE checkpoint
+   * can stop short while readers are active, and the next small server-thread commit (the gate's
+   * `markRunTrigger` at landing) then crossed the threshold and ran the rest of the checkpoint inside
+   * that commit — a 473 ms server-thread stall, measured live. Checkpoints stay with the index runs.
+   */
+  setAutoCheckpointPages(pages: number): void {
+    this.autoCheckpointPages = pages;
+    this.db.pragma(`wal_autocheckpoint = ${String(pages)}`);
   }
 
   deduplicateResolvedEdges(repoId: string): number {

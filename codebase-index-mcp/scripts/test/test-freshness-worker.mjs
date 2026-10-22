@@ -187,7 +187,11 @@ try {
   assert(smallTimes.every((s) => s.ok && s.ms < 1000), "(a) every search on the other repo answered, each in < 1 s", JSON.stringify(smallTimes));
   assert(landed && landed.text.includes("dirtyEdit_7"), "(a) after landing, the dirty edit is found", landed?.text.slice(0, 200));
 
-  const windowLags = lags.slice(lagFloor).filter((l) => l.at >= t0 && l.at <= t1);
+  const inWindow = lags.slice(lagFloor).filter((l) => l.at >= t0 && l.at <= t1);
+  const windowLags = inWindow.filter((l) => !l.heartbeat);
+  const heartbeats = inWindow.length - windowLags.length;
+  // A maximum over an empty list is 0: without heartbeats "no block" and "no sampler" read the same.
+  assert(heartbeats > 0, "(b) the lag sampler reported from inside the refresh window", `${String(heartbeats)} heartbeats`);
   const maxLag = Math.max(0, ...windowLags.map((l) => l.blockedMs));
   const maxProbe = Math.max(0, ...probes);
   console.log(`  info  main-thread ticks late > 100 ms during the refresh: ${windowLags.length}, max ${maxLag} ms; list_repositories probes n=${probes.length}, max ${maxProbe} ms`);

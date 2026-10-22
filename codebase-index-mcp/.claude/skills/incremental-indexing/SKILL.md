@@ -10,8 +10,8 @@ description: "Change how codebase-index-mcp decides what to re-index, and prove 
 | `mode` | Files considered | Pruning | Notes |
 |---|---|---|---|
 | `full` | every file the scan sees | yes, if the scan was not capped by `maxFiles` | also clears and rebuilds this repo's outbound `cross_repo_deps` |
-| `incremental` | every file; unchanged hashes are skipped | yes, if the scan was not capped | fast-skips the whole run when the gate below passes |
-| `dirty` | only working-tree-changed files, plus files the refactor engine wrote (`pendingReindex`) | **no** (subset scan) | cheapest refresh. Use `full` after a branch switch |
+| `incremental` | every file; unchanged hashes are skipped, then the scope widens (step 3a) | yes, if the scan was not capped | fast-skips the whole run when the gate below passes |
+| `dirty` | working-tree-changed files (porcelain v2: both sides of a rename), plus files the refactor engine wrote (`pendingReindex`), then the scope widens (step 3a) | only files deleted from the working tree | the R1 gate's refresh. Use `full` after a branch switch |
 
 ## The decision path
 
@@ -30,7 +30,15 @@ description: "Change how codebase-index-mcp decides what to re-index, and prove 
    **Read it before relying on it:** it does a `startsWith` against a sha256 hex digest.
 3. **Per-file replace** (`repositories/writeStore.ts`). `replaceSymbolsForFile` deletes the edges
    **emitted from** the file and its symbols, then inserts the new ones. Edges in *other* files that
-   point *into* this file are not touched.
+   point *into* this file are not touched — which is why step 3a exists.
+3a. **Scope** (release J, MCP-ISSUE-085; `indexPipeline.ts`, `repositories/scopedRunStore.ts`). A
+   non-full run computes K — the names of symbol rows the changed files added, removed or altered
+   (`symbolRowKeysForFiles` before vs after) — plus path keys for a file that appeared, vanished or
+   moved, and re-extracts every file whose resolution can depend on them (`findNameDependentFiles`).
+   A `SCOPE_FORCES_FULL_RUN` file (`tsconfig*`, `jsconfig*`, `package.json`, `citations.json`) or more
+   than `SCOPE_MAX_DEPENDENT_FILES` (600) dependents escalates to a full run (`escalateToFull`).
+   `index_runs.scope` records which. FTS is kept per file (`ftsForgetFile` / `ftsIndexFile`); only a
+   full run rebuilds it. Mention resolution is reset for a non-full run.
 4. **Prune** (`pruneAndResolve`, `runFinalize.ts`). This runs `pruneStaleFiles` + `pruneOrphanedEdges`
    only when the scan was complete (not `dirty`, not capped). `pruneOrphanedEdges` checks `from_id`
    only.
@@ -43,9 +51,13 @@ description: "Change how codebase-index-mcp decides what to re-index, and prove 
 Check these first when the two disagree:
 
 - **Inbound edges into a re-indexed file.** A symbol id includes its `row` (`makeSymbolId`), so an
-  edit that shifts declarations re-mints their ids. A resolved edge from an *unchanged* file still
-  holds the old `to_id`. Neither step 3 nor step 4 removes it. Measure it with query I2 in
+  edit that shifts declarations re-mints their ids, and a resolver never revisits a resolved edge. Step
+  3a re-extracts the unchanged files that hold such edges; if a scenario still drifts, K or the
+  dependent query missed a dependency. Measure it with query I2 in
   *Verification: full vs incremental* below.
+- **First-wins maps in row order.** A resolver that keeps the first of several equal candidates must
+  iterate in a canonical order (`ORDER BY` path, line, id), not rowid: a scoped run re-inserts the
+  files it re-extracts, so rowid order differs from a full run's (MCP-ISSUE-085 fixes (a), (c)).
 - **Capped scans.** If the repo has more files than `maxFiles`, pruning and full-mode IMPLEMENTS
   resolution are skipped, and an `[index-prune-skipped]` line is logged.
 - **Cross-repo links** are rebuilt on `full` runs only.
@@ -59,8 +71,9 @@ npm run verify:enhancements           # live stdio run over this repo, includes 
 npm run smoke
 ```
 
-There is no wired harness that compares full with incremental. Run the procedure below before you
-merge.
+`src/services/indexing/scopedRunConformance.test.ts` compares a scoped run with a full run on small
+fixtures (drift/ambiguity, `.csproj` packages, other repos untouched). It does not replace the
+procedure below on a real repo; run that before you merge.
 
 ## Verification: full vs incremental
 
@@ -68,8 +81,8 @@ Prove that an incremental or dirty run leaves the graph equal to a full run on t
 This is a measurement with a ready/blocked verdict; the whole release gate is
 `index-release-checklist`.
 
-**No wired harness does this.** `scripts/test/` has none, so the procedure runs through MCP tools
-against a live index.
+**No integration harness does this on a real repo.** `scripts/test/` has none, so the procedure runs
+through MCP tools against a live index.
 Use `repoId: "codebase-index-mcp"` and the exact `repoPath` from `list_repositories`.
 
 Index runs have been reproducible since MCP-ISSUE-032 closed, so two full runs on the same build
@@ -114,7 +127,8 @@ inbound edges from unchanged files pointing at an id that no longer exists.
 
 Expected asymmetries. These are not defects, but name them in the report:
 
-- `dirty` never prunes.
+- `dirty` prunes only files deleted from the working tree; the stale-file prune (step 4) needs a
+  complete scan.
 - `cross_repo_deps` is rebuilt on full runs only.
 - A capped scan (more files than `maxFiles`) skips pruning and logs `[index-prune-skipped]`.
 

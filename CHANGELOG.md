@@ -8,6 +8,58 @@ All notable changes to this project will be documented in this file.
 > introducing commit named so each claim is checkable. They are backfill, not a record written at
 > the time.
 
+## [Unreleased] - 2026-10-22
+
+### ⚠️ `codebase-index-mcp`: the resolver's vector fallback is removed (MCP-ISSUE-084) — behaviour change, every repo
+
+- **What is gone:** when a CALLS or TYPE_REF token had no named candidate, the resolver asked the
+  trigram vector index for the nearest symbol name and bound the edge to it (`resolved callee
+  vector-fallback`, 0.52; `resolved type vector-fallback`, 0.5). Such a token is now an external
+  boundary (0.1), as it already was whenever the lane's probe gave up.
+- **Why:** the edges it wrote were guesses, nearly all into test files. Counts in the central index on
+  2026-10-22: wec.aria 47 (35 contract and entity modules "calling" a `ratio` helper in
+  `portal/test/focus-ring.test.ts`, 10 into `v` in a test), ssnet 329 TYPE_REFs all into `Test1`,
+  mcp-local 199, codebase-index-mcp 105 (all into `isTestish`), wec.be 12. It also cost ~7.7 s per
+  wec.aria run, and its probe stopped after 100 fruitless lookups, so which tokens it reached depended
+  on which rows a run resolved — a scoped refresh could not reproduce a full run.
+- **wec.be loses these, some plausible** — whoever owns that repo may want them back as a feature:
+  `AmenitySettingService.{Delete,DeletemMultiple,GetDetail,Update}Async` → class `AmenitySetting`;
+  `LoyaltyService.UpdateLoyaltyAccountAsync` (×2), `UpdateNewTotalAsync`,
+  `Preconditions.ValidationLoyaltyAccount` → class `LoyaltyAccount`; `ValidationLoyaltyProgram` → class
+  `LoyaltyProgram`; `GetOverallCallEffiency.GetOverallCallEffiencyAsync` (×2) → the same-named method in
+  `CRCController.cs`; `AssetService.ValidateAssetAsync` → `ValidationFactory.CreateValidator`.
+- **When:** the rows go on each repo's next full run. Proof on wec.aria: a full run on the previous build
+  and one on this build, same tree, differ in exactly those 47 edges.
+- **Unchanged:** semantic search. `search_symbols` still pads a thin FTS answer with vector neighbours
+  labelled `fuzzy` (`symbolSearchVector.test.ts`).
+
+### 🔁 `codebase-index-mcp`: a dirty or incremental refresh lands on the graph a full run builds (MCP-ISSUE-085)
+
+- **The defect (in the R1 refresh path since release B):** a resolver overwrites an edge's token with
+  the target's id, and later runs revisit only token rows, so an unchanged file's resolved edge was never
+  re-decided. A second `foo` elsewhere did not make its `foo` ambiguous; a deleted target left it pointing
+  where a full run would not. The live index drifts accordingly until its next full run.
+- **The fix:** a scoped run names what changed (K: the names of symbol rows added, removed or altered;
+  path keys for a file that appeared, vanished or moved) and re-extracts every file whose resolution can
+  depend on it. A config edit (`tsconfig*`, `jsconfig*`, `package.json`, `citations.json`) or more than
+  600 dependent files escalates to a full run. `index_runs.scope` says which happened.
+- **Also:** the FTS tables are kept in step per file instead of rebuilt for every repo in the shared DB;
+  a file deleted from the working tree is removed by the dirty run (it was left until HEAD moved); a
+  `git mv` no longer leaves the old path indexed; a dirty run reads every `.csproj`'s package names, as a
+  full run does.
+- **Faster:** a 4-file wec.aria refresh runs in ~3 s and lands inside the 5 s query budget (it was
+  19.4 s, landing at 21.8 s): no whole-tree walk for a dirty run, warm parse workers in the refresh
+  worker, no per-batch checkpoint. The server thread no longer stalls at landing: its connection left
+  a WAL checkpoint the worker's run stopped short of to the gate's next small commit (473 ms traced);
+  it now never auto-checkpoints, and 7 of 7 live runs showed no server-thread block over 100 ms.
+- **Behaviour change, full runs too:** doc mentions that several symbols or files match now resolve in a
+  fixed order (path, line, id) instead of the order rows were inserted — on wec.aria 3,674 of 31,351
+  rows. Two rules follow from it: **a file-path mention resolves to the file's module symbol** (it often
+  named whichever function of the file was inserted first); a backtick name with several equal-rank
+  candidates resolves to the first by path. The second is still a pick, not an answer — reporting such a
+  mention as ambiguous is tracked as a follow-up (MCP-ISSUE-085 "Not done"): on wec.aria 6,593 of
+  14,972 resolved backtick mentions (558 names) sit on such a tie.
+
 ## [Unreleased] - 2026-10-01
 
 ### 🗂️ `codebase-index-mcp`: `.vs/` and `.idea/` excluded at the walk (MCP-ISSUE-066)

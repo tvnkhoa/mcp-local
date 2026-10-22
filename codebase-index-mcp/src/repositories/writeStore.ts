@@ -112,9 +112,9 @@ export function beginIndexSession(db: Database.Database): void {
  * `truncate: false` (release J, a scoped run): a PASSIVE checkpoint instead — the TRUNCATE that shrinks
  * the WAL after a bulk write cost ~0.25 s of a few-file refresh, and auto-checkpoint is restored anyway.
  */
-export function endIndexSession(db: Database.Database, truncate = true): void {
+export function endIndexSession(db: Database.Database, truncate = true, autoCheckpointPages = 8000): void {
   try {
-    db.pragma("wal_autocheckpoint = 8000"); // Restore threshold
+    db.pragma(`wal_autocheckpoint = ${String(autoCheckpointPages)}`); // Restore this connection's threshold
     db.pragma(truncate ? "wal_checkpoint(TRUNCATE)" : "wal_checkpoint(PASSIVE)"); // TRUNCATE shrinks the WAL file
   } catch {
     // Non-fatal

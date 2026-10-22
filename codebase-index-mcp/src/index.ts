@@ -163,6 +163,9 @@ const refreshWorker = new RefreshWorkerClient({
   limits: RUNNER_LIMITS,
   onRunLanded: () => store.invalidateProcessCaches()
 });
+// Release J: with the refresh worker writing the index, this thread's small commits must never run a
+// WAL checkpoint the worker's PASSIVE checkpoint left behind (a measured 473 ms stall at landing).
+store.setAutoCheckpointPages(0);
 const freshnessGate = createFreshnessGate({
   enabled: QUERY_REFRESH_ENABLED,
   budgetMs: QUERY_REFRESH_BUDGET_MS,

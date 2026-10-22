@@ -3640,3 +3640,54 @@ this afternoon failed at that harness, which is the highest rate observed so far
 - **Live** (built server over MCP stdio, `orient` without repoId): all 16 first tools as required — R9 `get_cross_repo_impact {"direction":"inbound","name":"GetListOwnedVehicle"}`, `{… "name":"<the action serving /customers/global-search>"}`, `{… "name":"GetHistory"}`, `{"direction":"inbound"}`; R11 `link_tests_to_source {"forWorkingTreeDiff":true}` ×4; R4 `query_docs {"mode":"term","query":…}` with `kb_version_ids`, `proposed_tag_change`, `claim_kind`, `tenant_id`; R5 `query_docs {"mode":"cites",…}` with `target` `decision #737`, `adr/0021`, `docs/15 #116` and `filePath` `CLAUDE.md`.
 - **Guarded:** `orient.test.ts` — the 16 phrasings verbatim (first tool, key argument, seed), the Vietnamese ones without diacritics, and 11 regression phrasings for the keyword rules.
 - **Not done:** `decision #N` is not rewritten to a repo's shorthand (orient has no repo config); a route-path seed is a placeholder, not resolved to its action (that is `route_map`'s job, listed second).
+
+## MCP-ISSUE-084 — the resolver's vector fallback bound unmatched tokens to near-name guesses
+
+- **Status:** ✅ FIXED 2026-10-22 (release J of the wec.aria adoption plan; owner decision: remove it, no env flag).
+- **Scenario:** when a CALLS or TYPE_REF token had no named candidate, `edgeResolverCalls` / the type lane asked the trigram vector index for the nearest symbol name and bound the edge to it (`resolved callee vector-fallback`, 0.52; `resolved type vector-fallback`, 0.5). The probe gave up after 100 fruitless lookups, so which tokens it reached depended on which rows a run visited — a scoped run could not reproduce a full one (it blocked MCP-ISSUE-085's conformance bar).
+- **Tool/query attempted:** `query_graph` over `edges` grouped by `reason`, central index, 2026-10-22.
+- **Expected vs actual:** expected an unmatched token to stay a labelled boundary; got guesses, nearly all into test files: wec.aria 47 (35 contract/entity modules "calling" `ratio` in `portal/test/focus-ring.test.ts`, 10 into `v` in a test), ssnet 329 TYPE_REFs all into `Test1`, mcp-local 199, codebase-index-mcp 105 (all into `isTestish`), wec.be 12 (some plausible — listed in CHANGELOG 2026-10-22).
+- **Fix:** the fallback is deleted from the calls and type lanes; such a token is `external boundary` (0.1), as it already was whenever the probe gave up. `NAME_ONLY_EDGE_REASONS` keeps the old reason string (with a comment) so a stored row from an older build is still refused `high`. Semantic search is unchanged: `search_symbols` still pads a thin FTS answer with `fuzzy` vector neighbours (`symbolSearchVector.test.ts`).
+- **Measured:** old build (25e09d3) vs new, full run, same wec.aria tree: the graphs differ in exactly the 47 vector edges, which revert to tokens at 0.1 `external boundary`. Full run 25.2 s → 19.2 s.
+- **Not done:** wec.be's plausible edges (`AmenitySettingService.*Async` → `AmenitySetting`, `LoyaltyService` → `LoyaltyAccount`, …) are lost; bringing them back would be a named rule, not a nearest-neighbour guess.
+
+## MCP-ISSUE-085 — a dirty or incremental refresh did not land on the graph a full run builds
+
+- **Status:** ✅ FIXED 2026-10-22 (release J, I1c).
+- **Scenario:** the R1 freshness gate refreshes a repo with a `dirty` run before answering. A resolver overwrites an edge's token with the target's id, and later runs revisit only token rows, so an unchanged file's resolved edge was never re-decided: a second `foo` elsewhere did not make its `foo` ambiguous, a deleted or renamed target left it pointing where a full run would not, a declaration shifted by an edit re-minted ids that unchanged files still held. The live index drifted from a full run until the next one (defect present since release B).
+- **Tool/query attempted:** a scoped run and a full run on the same tree, every `symbols` / `edges` / `doc_mentions` row compared by key (work-file harness, not shipped).
+- **Expected vs actual:** expected equal; got thousands of differing rows on the shift scenario alone.
+- **Fix** (`repositories/scopedRunStore.ts`, `services/indexing/indexPipeline.ts`, `indexRunner.ts`):
+  - **K and path keys.** A scoped run computes K, the names of symbol rows added, removed or altered (`symbolRowKeysForFiles` before vs after), plus path keys for a file that appeared, vanished or moved, and re-extracts every file whose resolution can depend on them (`findNameDependentFiles`).
+  - **Escalation.** A config edit (`SCOPE_FORCES_FULL_RUN`: `tsconfig*`, `jsconfig*`, `package.json`, `citations.json`) or more than `SCOPE_MAX_DEPENDENT_FILES = 600` dependents runs a full run instead (`escalateToFull`). `index_runs.scope` records `scoped: N changed, M dependent file(s) re-extracted` or the escalation reason.
+  - **FTS per file** (`ftsForgetFile` / `ftsIndexFile`) instead of a rebuild of every repo's FTS in the shared DB; the rebuild stays for full runs. Mention resolution is reset for a non-full run (`resetMentionResolution`).
+  - **Found on the way (fixed):** (a) SQL lane rows were processed in rowid order — now by parsed token, rowid for ties; (b) `collectDirtyFiles` used porcelain v1 `git status` and lost the old path of a `git mv` — now `readWorkingTreeState` (porcelain v2), and a file deleted from the working tree is removed by the dirty run; (c) first-wins maps iterated in rowid order (docsStore mentions, the module/namespace maps in `edgeResolverImports`, `routeHandlerResolver` candidates) — now a canonical `ORDER BY`; (d) a dirty run did not read `.csproj` package names (`indexedCsprojPaths`), so C# package edges differed.
+  - **Performance:** no whole-tree glob for a dirty run (`isIgnoredByIndexWalk`, proven equal to the glob on wec.aria's 33 806 paths), warm parse workers in the refresh worker (`REFRESH_PARSE_WORKERS = 3`, released after 10 idle min; ≤ 8 files parse inline), no per-batch checkpoint, PASSIVE end-of-session checkpoint for scoped runs.
+  - **Server-thread stall at landing:** the server thread's connection kept `wal_autocheckpoint = 8000`, so when the worker's PASSIVE checkpoint stopped short, the gate's next small commit (`markRunTrigger`) ran the rest of it on the server thread — traced at 473 ms. The server connection now runs with `wal_autocheckpoint = 0` (`GraphStore.setAutoCheckpointPages`), and an index session restores the connection's own value, not 8000 (`writeStore.test.ts`). A/B on the same build, p90 edit: without the line, 1 of 2 runs blocked 447 ms; with it, 0 blocks > 100 ms in 7 of 7 runs (15–17 lag heartbeats each, worst 74 ms; the sampler caught the ~1.8 s start-up block in every run, so it can report).
+  - `INDEX_VERSION` unchanged: extraction output is the same; the canonical mention order changes stored rows on the next full run.
+- **Measured** (wec.aria @ 58584fa7, clone, new build):
+  - Conformance — 9 scenarios, dirty AND incremental each equal to a full run on every compared table, FTS integrity ok, I1 = I2 = 0: shift (549 dependents), add-captures-unresolved, add-makes-ambiguous (cross-package), delete, rename-symbol, rename-file, sql-redefine, vue, chain.
+  - K replay over the last 50 commits: 4 force a full run; the other 46 — changed files median 4 / p90 11 / max 56, K median 1 / p90 30 / max 124, dependents median 3 / p90 119 / max 274; 20 of 46 re-mint ids.
+  - Live refresh through the gate (server over stdio, 50 ms `list_repositories` probes, lag sampler with heartbeats): 4-file code edit (e4848d3c^) run 3.0–3.08 s, first call answered `refreshed` at 3.84–3.9 s (morning); 3.54–3.59 s / 4.34–4.39 s (afternoon, 3 runs — ambient: a same-build A/B ran equally slow). p90 edit (10 files, 135 dependents, b4ec95bc^): median run 5.2 s / landing 6.7 s (morning), 6.09 s / 7.31 s (afternoon, 7 runs). Warm call 120–140 ms; wec.be during a refresh 220–360 ms. Doc-only edit (555b0631^) 2.2 s, landing 2.9 s. The 4-file edit was 19.4 s / 21.8 s on 25e09d3.
+  - Canonical mention order (D1 option A): 3 674 of 31 351 `doc_mentions` rows change on wec.aria — filepath 999 (a file-path mention now resolves to the file's module symbol), backtick 2 675.
+- **Guarded:** `scopedRunConformance.test.ts` (drift/ambiguous case, `.csproj` package case, other repos' rows and FTS untouched — each fails on the pre-fix code), `fileScan.test.ts` (`isIgnoredByIndexWalk`), `runStore.test.ts` (`scope` round-trip), `writeStore.test.ts`; harnesses `test:query-refresh`, `test:freshness-worker` (now asserts lag heartbeats in its window).
+- **Not done:**
+  - **(B) backtick equal-rank ties.** A backtick name with several same-name symbols of the best kind rank resolves to the first by path — a pick, not an answer. On wec.aria after (A): 6 593 of 14 972 resolved backtick mentions (558 distinct names: `turn`, `ids`, `tenant_profile`, `HoldPreview`, `model_id`, …) and 46 of 126 `code_call` mentions sit on such a tie. Proposal: store them as ambiguous with the candidate count.
+  - p90 is over the 5 s budget (accepted by the reviewer); the first call answers `refreshing` and the next one lands.
+  - The replay of dirty runs on real commit pairs (I7: clean-2, dirty-1, dirty-2) is deferred by the owner.
+
+## MCP-ISSUE-086 — `health_check` ran `git status` twice, synchronously, on the server thread
+
+- **Status:** 🟡 OPEN (found 2026-10-22 during release J; pre-existing — present on 25e09d3).
+- **Scenario:** `health_check(repoId)` reads the working tree twice with a synchronous `git status`, blocking the server thread: ~650 ms on wec.be, ~270 ms on wec.aria. Every other tool call queued behind it waits that long.
+- **Tool/query attempted:** server-thread lag sampler and CPU profile around `health_check` (work-file harness).
+- **Expected vs actual:** expected a non-blocking read; got two synchronous `git status` runs.
+- **Impact:** a `health_check` while an agent works in another repo stalls that agent's calls for up to ~0.65 s.
+- **Enhancement proposal:** one `readWorkingTreeStateAsync` per call, read once and shared by both consumers.
+
+## MCP-ISSUE-087 — `detect_changes` loses the old path of a rename
+
+- **Status:** 🟡 OPEN (found 2026-10-22 during release J, same mechanism as MCP-ISSUE-085 fix (b)).
+- **Scenario:** `services/impact/changeAnalysis.ts` (working-tree mode and the `base..head` range) lists changed files with `git diff --name-only`, which reports a rename by its new path only; the old path's symbols are not part of the change set, so their callers are missing from the impact.
+- **Expected vs actual:** expected both paths of a `git mv`; got the new one.
+- **Enhancement proposal:** `git diff --name-status -M` (or `readWorkingTreeState` for the working tree) and add the old path of every `R` entry.

@@ -36,7 +36,7 @@ or `ensureRunColumnText`.
 | Failures | `parse_failures`, `parse_timeouts`, `edges_dropped_by_confidence/_call_cap/_type_ref_cap` |
 | Resolution | `call_edges_attempted/resolved/unresolved`, `resolve_calls_coverage`, `import_edges_resolved`, `unresolved_calls_total`, cross-repo `cross_repo_*` and `unresolved_no_candidate/ambiguous/boundary_blocked/low_confidence` |
 | Timing | `extract_phase_ms`, `resolve_phase_ms`, `build_context_ms`, `call_resolve_ms`, `import_resolve_ms`, `type_resolve_ms`, `property_resolve_ms`, `implements_resolve_ms`, `fts_rebuild_ms` |
-| Verdict | `health_reasons` (from `assessRunHealth`), `skip_reason` |
+| Verdict | `health_reasons` (from `assessRunHealth`), `skip_reason`, `scope` (a non-full run: `scoped: N changed, M dependent file(s) re-extracted`, or why it escalated to full — release J) |
 
 **Gaps, stated plainly:** there is no parser- or grammar-version column and no rule-version column.
 `index_version` is the only provenance for extraction output. There is also no "who triggered it"
@@ -95,7 +95,9 @@ dressed up as resolved.** Each way this broke is on file:
 3. **Resolution** (`services/graph/`) runs `edgeResolverCalls.ts`, `edgeResolverImports.ts`,
    `edgeResolverRefs.ts` and `edgeResolverContracts.ts` (IMPLEMENTS / EXTENDS / bus). Each rewrites
    `to_id`, `confidence` and `reason` in place. A token that provably points outside the repo is
-   kept and tagged `reason = 'external boundary'` with confidence 0.1. It is not deleted. The resolve
+   kept and tagged `reason = 'external boundary'` with confidence 0.1. It is not deleted. A token
+   with no named candidate is a boundary too: the vector fallback that bound it to the nearest symbol
+   name was removed in release J (MCP-ISSUE-084), so no resolver binds by similarity. The resolve
    window is bounded by `CODEBASE_INDEX_MAX_UNRESOLVED_RESOLVE_ROWS`. The post-resolve passes can be
    switched off with `CODEBASE_INDEX_POST_RESOLVE_TYPE_REFS_ENABLED` / `CODEBASE_INDEX_POST_RESOLVE_PROPERTY_REFS_ENABLED`.
 4. **Cross-repo** resolution runs **last** (`safeCrossRepoResolve`, after MCP-ISSUE-048). Its
