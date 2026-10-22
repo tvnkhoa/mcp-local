@@ -67,8 +67,10 @@ npm run verify:all     # the full gate: packages + servers + contracts + generat
 npm run verify:live    # live smoke tests. NEEDS REAL CREDENTIALS; not in CI — run before a release
 ```
 
-**`verify:all` takes ~10 minutes** (codebase-index alone runs ~58 sequential harnesses). Run it
-**once per release**, piped to a file (`npm run verify:all > <scratch>/verify.log 2>&1`), and read
+**`verify:all` takes ~10 minutes** (codebase-index alone runs ~58 sequential harnesses). **Do not
+run it for a change confined to one server** — only when the change reaches other servers (shared
+`packages/*`, `scripts/*`, root config, or several servers). When it is warranted, run it once,
+piped to a file (`npm run verify:all > <scratch>/verify.log 2>&1`), and read
 that file for follow-ups — never re-run it to grep output. It is `&&`-chained, so a pass from the last
 step (`docs:check`) proves every earlier one. If it fails but the narrow target passes, read the
 durations already printed before re-running: a slow harness under load is a timeout, not a defect.
