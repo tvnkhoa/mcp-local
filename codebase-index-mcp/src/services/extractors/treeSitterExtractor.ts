@@ -11,6 +11,7 @@ import { extractPythonSymbolsAndRoutesImpl } from "./pythonExtractor.js";
 import { extractProtoSymbolsImpl } from "./protoExtractor.js";
 import { extractCss } from "./cssExtractor.js";
 import { extractSql } from "./sqlExtractor.js";
+import { extractEfSnapshotImpl } from "./csharpEfSnapshot.js";
 import { extractJavaScriptRoutesImpl, extractJavaScriptSymbolsImpl } from "./jsExtractor.js";
 import { extractVueFileImpl } from "./vueExtractor.js";
 import { extractPlainText } from "./plainTextExtractor.js";
@@ -190,6 +191,9 @@ export function extractGraphData(input: ExtractInput): ExtractOutput {
   try {
     // Extract based on language
     let literals: ExtractOutput["literals"];
+    // Release L3: the EF snapshot lane emits sql_* tokens and EF_MAPS tokens the post-phase binds; like the SQL
+    // lane they bypass the edge policy (its confidence floor would drop an unresolved token).
+    const laneEdges: EdgeRecord[] = [];
     if (input.language === "javascript" || input.language === "typescript") {
       extractJavaScriptSymbolsImpl(input, root, symbols, edges, moduleSymbolId);
       routes.push(...extractJavaScriptRoutesImpl(input, symbols, moduleSymbolId));
@@ -199,10 +203,12 @@ export function extractGraphData(input: ExtractInput): ExtractOutput {
       routes.push(...extractCSharpRoutesImpl(input, root, symbols));
       emitEndpointContractSymbolsImpl(input, symbols, routes);
       emitEndpointContractSymbolsFromCSharpSignaturesImpl(input, symbols);
+      extractEfSnapshotImpl(input, root, symbols, laneEdges);
       literals = extractStringLiteralsImpl(input, root, LITERAL_POLICY);
     }
 
     const applied = applyEdgePolicy(edges, symbols, edgePolicy);
+    applied.edges.push(...laneEdges);
 
     return {
       symbols: dedupeSymbols(symbols),

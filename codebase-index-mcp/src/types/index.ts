@@ -303,7 +303,13 @@ export type EdgeRecord = {
      * A name defined at several sites binds to its current definition only (release I3).
      * `SQL_MIGRATION_ORDER`: migration file → its predecessor by filename sequence.
      */
-    | "SQL_USES" | "SQL_REFERENCES" | "SQL_GRANT" | "SQL_QUERY" | "SQL_MIGRATION_ORDER";
+    | "SQL_USES" | "SQL_REFERENCES" | "SQL_GRANT" | "SQL_QUERY" | "SQL_MIGRATION_ORDER"
+    /**
+     * Release L3 (MCP-ISSUE-092), the EF snapshot lane: a `sql_table` → its CLR entity class, a `sql_column` →
+     * its property. `efentity:<Full.Type>` / `efprop:<Full.Type>#<Prop>` until `resolveEfMapEdges` binds it by
+     * namespace-qualified name. Not a flow edge.
+     */
+    | "EF_MAPS";
   confidence?: number;
   reason?: string;
   /** ENH-029-B: RHS source text captured at PROPERTY_WRITE sites (assigned literal/expression). */

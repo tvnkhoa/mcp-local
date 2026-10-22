@@ -498,6 +498,18 @@ export function createIndexRunner(options: IndexRunnerOptions): RunIndexAndResol
   }
   await yieldToEventLoop();
 
+  // Release L3 (MCP-ISSUE-092): EF snapshot tables / columns → their CLR class / property. It runs AFTER
+  // inheritance resolution: a column's property may live on a base class, reached through resolved EXTENDS
+  // edges. Every edge is re-decided from its token each run (one row per mapped column), so a scoped run
+  // equals a full one; an unchanged refresh changed nothing it reads. Non-fatal.
+  (() => {
+    try {
+      if (unchanged) return;
+      const ef = store.resolveEfMapEdges(repoId, repoPath);
+      if (ef.resolved + ef.unresolved > 0) indexLog(`[index-post] repoId=${repoId} ef maps resolved=${String(ef.resolved)} unresolved=${String(ef.unresolved)} ambiguous=${String(ef.ambiguous)}`);
+    } catch { /* non-fatal */ }
+  })();
+
   // MCP-ISSUE-048: cross-repo resolution runs LAST, not first.
   //
   // It used to run before the call/type/implements resolvers, so it saw a graph full of unresolved

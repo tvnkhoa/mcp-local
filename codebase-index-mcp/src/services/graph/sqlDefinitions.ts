@@ -17,6 +17,7 @@
  * | 1 | a `.sql` file whose name has no leading number (seed, check fixture, `schema.sql`) | not part of the migration history |
  * | 2 | a numbered file under an `archive/` path segment | superseded: the baseline was cut from these |
  * | 3 | a numbered migration anywhere else (`0001-baseline.sql`, `0043-x.sql`) | the history that is applied |
+ * | 4 | an EF Core `<Context>ModelSnapshot.cs` (release L3) | the current model, restated after every migration |
  *
  * So `0001-baseline` beats every `archive/` file whatever its number, `0043` beats `0001`, and a
  * later `CREATE OR REPLACE` in the same file beats an earlier one (line). Within a tier the number is
@@ -101,6 +102,8 @@ export function sqlDefinitionRank(filePath: string, line: number): Rank {
   const dirs = slash < 0 ? [] : path.slice(0, slash).toLowerCase().split("/");
   const m = MIGRATION_NUMBER.exec(base);
   const seq = m ? Number(m[1]) : -1;
+  // Release L3: a definition outside a `.sql` file comes from the EF snapshot lane — the model itself, tier 4.
+  if (!/\.sql$/i.test(base)) return [4, -1, base, path, line];
   const tier = DOWN_FILE.test(base) ? 0 : !m ? 1 : dirs.includes("archive") ? 2 : 3;
   return [tier, seq, base, path, line];
 }
@@ -141,7 +144,12 @@ export function isDecisiveCurrent(current: SqlDefinitionSite, sites: readonly Sq
   for (const site of sites) {
     if (site.symbolId === current.symbolId) continue;
     const o = sqlDefinitionRank(site.filePath, site.line);
-    if (c[0] !== o[0]) continue;
+    // Release L3: the EF model (tier 4) against a `.sql` site is two lanes neither of which can prove the other
+    // stale — never decisive; two snapshots (two DbContexts) mapping one table tie, and are not decisive either.
+    if (c[0] !== o[0]) {
+      if (c[0] === 4 || o[0] === 4) return false;
+      continue;
+    }
     if (c[1] >= 0 && o[1] >= 0 && c[1] !== o[1]) continue;
     return false;
   }

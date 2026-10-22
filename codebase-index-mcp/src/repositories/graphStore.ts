@@ -62,6 +62,7 @@ import {
   type SqlResolutionStats
 } from "../services/graph/edgeResolver.js";
 import { getSqlDefinitionInfo as getSqlDefinitionInfoImpl, type SqlDefinitionInfo } from "../services/graph/sqlDefinitions.js";
+import { resolveEfMapEdges as resolveEfMapEdgesImpl, type EfResolutionStats } from "../services/graph/edgeResolverEf.js";
 import {
   linkTestsToSource as linkTestsToSourceImpl,
   getDeadCodeCandidates as getDeadCodeCandidatesImpl,
@@ -793,6 +794,22 @@ export class GraphStore {
   /** MCP-ISSUE-082: bind `sql<kind>:` tokens by name (labelled name_resolved) and rewrite the migration order. */
   resolveSqlEdges(repoId: string): SqlResolutionStats {
     return resolveSqlEdgesImpl(this.db, repoId);
+  }
+
+  /** Release L3: the EF snapshot lane's column symbols whose CLR property is `property` (any owner, any case). */
+  efSnapshotColumns(repoId: string, property: string): { symbolId: string; filePath: string; line: number; signature: string }[] {
+    return this.db
+      .prepare(
+        `select symbol_id as symbolId, file_path as filePath, line, signature from symbols
+         where repo_id = ? and kind = 'sql_column' and signature like '% [EF %' and lower(signature) like '%.' || lower(?) || ']'
+         order by file_path, line`
+      )
+      .all(repoId, property) as { symbolId: string; filePath: string; line: number; signature: string }[];
+  }
+
+  /** Release L3: bind the EF snapshot lane's `EF_MAPS` tokens (see `resolveEfMapEdges`). */
+  resolveEfMapEdges(repoId: string, repoPath: string): EfResolutionStats {
+    return resolveEfMapEdgesImpl(this.db, repoId, repoPath);
   }
 
   /**

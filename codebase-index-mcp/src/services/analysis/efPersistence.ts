@@ -284,6 +284,24 @@ function findProjectionTrapsInFile(content: string, filePath: string, property: 
   return warnings;
 }
 
+export type EfSnapshotColumn = { ownerType: string; property: string; table: string; column: string; columnType: string; required: boolean; maxLength: number | null; filePath: string; line: number };
+
+/** Parse a snapshot column's signature: `<table>.<col> — column <type> (<traits>) [EF <Ctx>: <Ns.Owner>.<Prop>]`. */
+function parseSnapshotColumn(row: { filePath: string; line: number; signature: string }): EfSnapshotColumn | null {
+  // Traits are greedy up to the last `) [EF`: a default such as `sql "gen_random_uuid()"` holds parentheses.
+  const m = /^(.+)\.([^.\s]+) — column (\S+(?: \S+)*?)(?: \((.*)\))? \[EF [^:]+: (.+)\.([^.\]]+)\]$/.exec(row.signature);
+  if (!m) return null;
+  const traits = (m[4] ?? "").split(", ");
+  const max = traits.find((t) => t.startsWith("max "));
+  return {
+    ownerType: m[5]!, property: m[6]!, table: m[1]!, column: m[2]!, columnType: m[3]!,
+    required: traits.includes("not null"), maxLength: max ? Number(max.slice(4)) : null, filePath: row.filePath, line: row.line
+  };
+}
+
+const simpleName = (type: string): string => type.slice(Math.max(type.lastIndexOf("."), type.lastIndexOf("+")) + 1).toLowerCase();
+const SNAPSHOT_FILE = /(ModelSnapshot|\.Designer)\.cs$/;
+
 export type PersistenceMappingResult = {
   repoId: string;
   property: string;
@@ -301,6 +319,13 @@ export type PersistenceMappingResult = {
   checkConstraints: EfCheckConstraint[];
   /** CHECK constraints found in the same files that do NOT name this property's column. Only populated when asked for. */
   unrelatedCheckConstraints: EfCheckConstraint[];
+  /**
+   * Release L3 (MCP-ISSUE-092): the column as the EF ModelSnapshot states it — the indexed `sql_column` facts,
+   * the model EF migrates the database to. Present when the repo has a snapshot mapping this property.
+   */
+  snapshot?: EfSnapshotColumn[];
+  /** Release L3: where a configuration file and the snapshot state the same owner's column differently. Neither overrides the other. */
+  snapshotDisagrees?: { ownerType: string; field: "columnName" | "maxLength"; configuration: string | number | null; snapshot: string | number | null; filePath: string; line: number }[];
   projectionWarnings: EfProjectionWarning[];
   filesScanned: number;
 };
@@ -413,10 +438,27 @@ export function getPersistenceMapping(
     }
   }
 
+  // Release L3: the snapshot's statement of the same column, and every place a configuration file disagrees.
+  const snapshot = store
+    .efSnapshotColumns(repoId, property)
+    .map(parseSnapshotColumn)
+    .filter((c): c is EfSnapshotColumn => c !== null)
+    .filter((c) => !requestedOwnerLower || simpleName(c.ownerType) === requestedOwnerLower || c.ownerType.toLowerCase() === requestedOwnerLower);
+  const snapshotDisagrees: NonNullable<PersistenceMappingResult["snapshotDisagrees"]> = [];
+  for (const m of mappings) {
+    if (SNAPSHOT_FILE.test(m.filePath) || !m.ownerType) continue;
+    const s = snapshot.find((c) => simpleName(c.ownerType) === m.ownerType!.toLowerCase());
+    if (!s) continue;
+    if (m.columnName !== null && m.columnName !== s.column) snapshotDisagrees.push({ ownerType: m.ownerType, field: "columnName", configuration: m.columnName, snapshot: s.column, filePath: m.filePath, line: m.line });
+    if (m.maxLength !== null && m.maxLength !== s.maxLength) snapshotDisagrees.push({ ownerType: m.ownerType, field: "maxLength", configuration: m.maxLength, snapshot: s.maxLength, filePath: m.filePath, line: m.line });
+  }
+
   return {
     repoId,
     property,
     resolvedProperty,
+    ...(snapshot.length > 0 && { snapshot }),
+    ...(snapshotDisagrees.length > 0 && { snapshotDisagrees }),
     requestedOwnerType: requestedOwner,
     mappings: mappings.sort((a, b) => a.filePath.localeCompare(b.filePath) || a.line - b.line),
     ownersWithMapping: [...ownersWithMapping].sort((a, b) => a.localeCompare(b)),

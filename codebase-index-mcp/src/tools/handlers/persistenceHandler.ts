@@ -66,6 +66,8 @@ export function handleGetPersistenceMapping(
       checkConstraintCount: result.checkConstraints.length,
       projectionWarningCount: result.projectionWarnings.length,
       ownersWithMapping: result.ownersWithMapping,
+      ...(result.snapshot && { snapshotColumns: result.snapshot.length }),
+      ...(result.snapshotDisagrees && { snapshotDisagrees: result.snapshotDisagrees.length }),
       ...(ownerMismatch !== null && ownerMismatch)
     }, profile);
   }
@@ -87,6 +89,8 @@ export function handleGetPersistenceMapping(
         line: m.line
       })),
       ownersWithMapping: result.ownersWithMapping,
+      ...(result.snapshot && { snapshot: result.snapshot }),
+      ...(result.snapshotDisagrees && { snapshotDisagrees: result.snapshotDisagrees }),
       checkConstraints: result.checkConstraints,
       // Drop `snippet` (160 chars) and `detail` (prose) — the code + location is the actionable part.
       projectionWarnings: result.projectionWarnings.map((w) => ({
