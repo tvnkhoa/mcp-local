@@ -52,6 +52,19 @@ export function defaultEnvFile(server) {
   return path.join(httpStateDir(), `${server.key}.env.json`);
 }
 
+/**
+ * R4-4': where install-mcp keeps the stdio entry it replaced, so a `*-stdio` profile in
+ * ~/.claude/mcp/build-profiles.mjs can still build a per-session stdio server after the switch.
+ */
+export function stdioSnapshotFile(server) {
+  return path.join(os.homedir(), ".claude", "mcp", "stdio", `${server.key}.json`);
+}
+
+/** A stdio entry: it has a command and is not an http registration. */
+export function isStdioEntry(entry) {
+  return entry !== null && typeof entry === "object" && typeof entry.command === "string" && entry.type !== "http";
+}
+
 export function defaultLogFile(server) {
   return path.join(httpStateDir(), `${server.key}.log`);
 }

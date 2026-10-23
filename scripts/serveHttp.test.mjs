@@ -105,3 +105,32 @@ test("install --transport http, a re-run, and back to stdio", () => {
   assert.equal(back.env.CODEBASE_INDEX_HTTP_PORT, undefined);
   assert.equal(back.env.CODEBASE_INDEX_ALLOWED_ROOTS, served.CODEBASE_INDEX_ALLOWED_ROOTS);
 });
+
+test("R4-4': the replaced stdio entry is kept, and a second http run never overwrites it", () => {
+  const home = path.join(TMP, "home-snapshot");
+  fs.mkdirSync(home, { recursive: true });
+  fs.writeFileSync(path.join(home, ".claude.json"), JSON.stringify({ mcpServers: {}, projects: {} }));
+  const env = { ...process.env, HOME: home, USERPROFILE: home, APPDATA: path.join(TMP, "appdata-snapshot"), INIT_CWD: ROOT };
+  delete env.CLAUDE_CONFIG_DIR;
+  const probe = spawnSync(process.execPath, ["-e", "process.stdout.write(require('os').homedir())"], { env, encoding: "utf8" });
+  assert.equal(path.resolve(probe.stdout), path.resolve(home), "refusing to run against the real home");
+  const install = (...args) => {
+    const r = spawnSync(process.execPath, [path.join(ROOT, "scripts/install-mcp.mjs"), "--yes", "--skip-build", "--skip-smoke", "--skill", "none", "--server", "codebase-index", ...args], { env, encoding: "utf8", timeout: 120_000, input: "" });
+    assert.equal(r.status, 0, `${r.stdout}\n${r.stderr}`);
+  };
+  const snapshot = path.join(home, ".claude", "mcp", "stdio", "codebase-index.json");
+
+  install("--transport", "stdio");
+  const stdioEntry = JSON.parse(fs.readFileSync(path.join(home, ".claude.json"), "utf8")).mcpServers["codebase-index"];
+  assert.equal(fs.existsSync(snapshot), false, "a stdio install writes no snapshot");
+
+  install("--transport", "http");
+  const first = JSON.parse(fs.readFileSync(snapshot, "utf8"));
+  assert.deepEqual(first, stdioEntry, "the snapshot is the stdio entry that was replaced");
+  assert.equal(first.command, "node");
+  assert.equal(first.type, undefined);
+
+  install("--transport", "http");
+  const second = JSON.parse(fs.readFileSync(snapshot, "utf8"));
+  assert.deepEqual(second, stdioEntry, "the second http run found an http entry and left the snapshot alone");
+});

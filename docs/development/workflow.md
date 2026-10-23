@@ -304,7 +304,9 @@ node scripts/install-mcp.mjs --server codebase-index --transport stdio  # back t
 
 - The installer moves the server's env into `~/.claude/mcp/http/codebase-index.env.json`, adding
   `CODEBASE_INDEX_HTTP_PORT` (default 7341) and a generated `CODEBASE_INDEX_HTTP_TOKEN`; the Claude Code
-  entry becomes `{ type: "http", url, headers: { Authorization } }`. Re-runs keep both.
+  entry becomes `{ type: "http", url, headers: { Authorization } }`. Re-runs keep both. The stdio entry it
+  replaced is kept in `~/.claude/mcp/stdio/codebase-index.json` (never overwritten by an http one), which is
+  where the `code-stdio` profile of `~/.claude/mcp/build-profiles.mjs` takes its entry from.
 - The server listens only when started with `--transport http`; an HTTP port in a stdio entry's env is
   ignored. It binds 127.0.0.1, refuses a foreign `Host`/`Origin` (403) and a missing token (401).
 - Shared across clients: the store, the watchers and the refresh worker. Per client: the protocol

@@ -39,7 +39,9 @@
  * collected below goes to ~/.claude/mcp/http/<key>.env.json with the port and a generated token
  * added (an existing token is kept), and the Claude Code registration becomes
  * { type: "http", url: "http://127.0.0.1:<port>/mcp", headers: { Authorization } } — no command, no
- * env. The process itself is started by scripts/serve-http.mjs (or its logon task); this installer
+ * env. The stdio entry it replaces is kept in ~/.claude/mcp/stdio/<key>.json (only ever a stdio
+ * entry, so a re-run leaves it alone) for the `*-stdio` profiles of ~/.claude/mcp/build-profiles.mjs.
+ * The process itself is started by scripts/serve-http.mjs (or its logon task); this installer
  * never starts or registers it.
  */
 
@@ -59,7 +61,7 @@ import {
 import { verifyServer } from "./lib/verify.mjs";
 import { parseArgs, resolveServers } from "./lib/cli.mjs";
 import { C, log, section, banner, ok, warn, err, info, step, ask } from "./lib/log.mjs";
-import { defaultEnvFile, httpClientEntry, httpEnvNames, readEnvFile, writeEnvFile } from "./serve-http.mjs";
+import { defaultEnvFile, httpClientEntry, httpEnvNames, isStdioEntry, readEnvFile, stdioSnapshotFile, writeEnvFile } from "./serve-http.mjs";
 
 const DEFAULT_HTTP_PORT = "7341";
 
@@ -321,6 +323,15 @@ function registerHttp(server, agents, plan, env) {
   if (!cc) {
     warn("Claude Code not detected — http registration not written.");
   } else {
+    // R4-4': keep the stdio entry being replaced, for the `*-stdio` MCP profiles. Only a stdio entry
+    // is ever written there, so a re-run (which finds the http entry) leaves the snapshot alone.
+    const replaced = readServerEntry(cc, server.key);
+    if (isStdioEntry(replaced)) {
+      const snapshot = stdioSnapshotFile(server);
+      fs.mkdirSync(path.dirname(snapshot), { recursive: true });
+      fs.writeFileSync(snapshot, `${JSON.stringify(replaced, null, 2)}\n`, { encoding: "utf-8", mode: 0o600 });
+      ok(`Kept the stdio entry in ${toConfigPath(snapshot)}`);
+    }
     configureAgent(cc, server.key, httpClientEntry(env[names.port], env[names.token]));
   }
   const others = agents.filter((a) => a.type !== "claude-code");
