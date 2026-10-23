@@ -289,6 +289,31 @@ Registered repoIds: **`mcp-local`** (this workspace) and **`codebase-index-mcp`*
 
 Keep `watch_repo` off unless actively debugging, and stop it immediately after.
 
+### One shared codebase-index over HTTP (R4)
+
+By default every Claude session spawns its own `codebase-index` over stdio, so the index runtime sits in
+memory once per session. Served over HTTP instead, one process on `127.0.0.1` answers them all:
+
+```bash
+node scripts/install-mcp.mjs --server codebase-index --transport http   # env file + http registration
+node scripts/serve-http.mjs --server codebase-index                      # run it (foreground)
+node scripts/serve-http.mjs --server codebase-index --task print         # the logon task; --task register adds it
+npm run mcp:doctor -- --server codebase-index                            # [http]: 401 without the token, initialize with it
+node scripts/install-mcp.mjs --server codebase-index --transport stdio  # back to one process per session
+```
+
+- The installer moves the server's env into `~/.claude/mcp/http/codebase-index.env.json`, adding
+  `CODEBASE_INDEX_HTTP_PORT` (default 7341) and a generated `CODEBASE_INDEX_HTTP_TOKEN`; the Claude Code
+  entry becomes `{ type: "http", url, headers: { Authorization } }`. Re-runs keep both.
+- The server listens only when started with `--transport http`; an HTTP port in a stdio entry's env is
+  ignored. It binds 127.0.0.1, refuses a foreign `Host`/`Origin` (403) and a missing token (401).
+- Shared across clients: the store, the watchers and the refresh worker. Per client: the protocol
+  session and refactor previews — a preview made by one session is refused to another
+  (`PREVIEW_OWNED_BY_ANOTHER_SESSION`). A client leaving does not stop a watcher or the process.
+- **Dev cycle changes:** after `npm run build`, `/mcp` reconnects to the *running* process; it does not
+  restart it. Stop and start `serve-http` (or `schtasks /End` then `/Run` on the task) to load a new build.
+  `mcp:doctor`'s `[running]` check reports a served process older than `dist/`.
+
 ---
 
 ## 10. Before you commit

@@ -161,7 +161,8 @@ Adding a server: `npm run new:server -- --key <name>`, then append it to
 > does it for you). `scripts/lib/manifest.mjs` is a re-export shim (S-34); edit the package.
 
 **Local dev cycle:** `cd codebase-index-mcp && npm run build`, then restart the server with `/mcp`;
-tool calls hit the new build directly.
+tool calls hit the new build directly. Served over HTTP (`scripts/serve-http.mjs`, one process for every
+session), `/mcp` only reconnects: restart the served process to load the build — `docs/development/workflow.md` §9.
 
 ## Rules & Skills (`.claude/`)
 

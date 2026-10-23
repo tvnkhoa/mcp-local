@@ -82,8 +82,8 @@ must be in the corpus).
 
 ---
 
-Env variables are **declared once**, in `packages/manifest/src/envSpecs/<server>.ts` — **158** across
-the six servers (48 / 35 / 25 / 31 / 16 / 3), counted by
+Env variables are **declared once**, in `packages/manifest/src/envSpecs/<server>.ts` — **160** across
+the six servers (50 / 35 / 25 / 31 / 16 / 3), counted by
 `node -e "import('@mcp/manifest').then(m => m.SERVERS.forEach(s => console.log(s.key, s.env.length)))"`.
 A field carries either a `default` (which the installer *writes* into
 `~/.claude.json`, pinning it) or a `codeDefault` (documentation of what the server falls back to when
