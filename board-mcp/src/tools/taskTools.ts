@@ -92,6 +92,35 @@ export function buildTaskTools(config: BoardConfig, run: BoardRunner): readonly 
     }),
 
     defineTool({
+      name: "rescope",
+      title: "Widen a task unit's scope",
+      description:
+        "The leader widens an assigned task unit's scope (board.mjs rescope): add-only, and only between assign and report (T1) — never at T0, never once reported. Refused unless `session` leads today. The added paths fall under accept's unreported-commit check from the assign's HEAD on; the assign is not re-baselined.",
+      annotations: ADDS,
+      inputSchema: schema.object(
+        {
+          unit: field.unit("A task unit id, task--…"),
+          add: schema.array(schema.string(), "Repo-relative paths the member may now also change (→ --add=a,b). Add-only; a path containing ',' cannot be expressed.", { minItems: 1, maxItems: 100 }),
+          why: schema.string("What made the scope too narrow (→ --why).", { maxLength: 2000 }),
+          session: field.session(),
+          profile: schema.profile()
+        },
+        { required: ["unit", "add", "why", "session"] }
+      ),
+      input: z
+        .object({
+          unit: unitId(),
+          add: z.array(repoPath()).min(1).max(100),
+          why: text(2000),
+          session: sessionField(),
+          profile: responseProfileSchema.optional()
+        })
+        .strict(),
+      guards,
+      handler: async (a) => callBoard(run, "rescope", [a.unit, ...flag("add", a.add.join(",")), ...flag("why", a.why), ...asFlag(a.session)])
+    }),
+
+    defineTool({
       name: "report",
       title: "Report a task unit",
       description:

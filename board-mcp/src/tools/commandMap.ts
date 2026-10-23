@@ -35,6 +35,7 @@ export const MAPPED: Readonly<Record<string, readonly string[]>> = {
   // the leader/member day (task.mjs)
   lead: ["lead"],
   assign: ["assign"],
+  rescope: ["rescope"],
   report: ["report"],
   accept: ["accept"]
 };

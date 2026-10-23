@@ -2,7 +2,7 @@
  * The tool list against board.mjs itself.
  *
  * Parses the keys of `const commands = { … }` in board.mjs and of the objects `more_commands`
- * (more.mjs) and `task_commands` (task.mjs) return, and requires every one to be MAPPED to a tool or EXCLUDED with a reason —
+ * (more.mjs), `task_commands` (task.mjs) and `rescope_commands` (rescope.mjs) return, and requires every one to be MAPPED to a tool or EXCLUDED with a reason —
  * so a subcommand wec.aria adds fails here until this server decides what to do with it.
  *
  * Needs the real CLI: BOARD_REPO_ROOT, else the default wec.aria checkout. Neither exists in this
@@ -34,7 +34,10 @@ export function cliCommands(root: string): string[] {
   // task.mjs (wec.aria e66c0bdf) spreads `task_commands` into `commands` the way more.mjs does.
   const taskFile = path.join(root, "checks", "board", "task.mjs");
   const task = existsSync(taskFile) ? objectKeys(readFileSync(taskFile, "utf8").replace(/\r\n/gu, "\n"), /^export function task_commands\(/mu, 4) : [];
-  return [...objectKeys(board, /^const commands = \{/mu, 2), ...objectKeys(more, /^export function more_commands\(/mu, 4), ...task].sort();
+  // rescope.mjs (wec.aria 7d2d814b) is spread into `task_commands` the same way.
+  const rescopeFile = path.join(root, "checks", "board", "rescope.mjs");
+  const rescope = existsSync(rescopeFile) ? objectKeys(readFileSync(rescopeFile, "utf8").replace(/\r\n/gu, "\n"), /^export function rescope_commands\(/mu, 4) : [];
+  return [...objectKeys(board, /^const commands = \{/mu, 2), ...objectKeys(more, /^export function more_commands\(/mu, 4), ...task, ...rescope].sort();
 }
 
 test("parsing finds the commands a known snapshot of board.mjs declares", () => {

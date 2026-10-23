@@ -12,7 +12,7 @@ import path from "node:path";
 import type { BoardConfig } from "../config/index.js";
 
 /** Same shape the tools validate; repeated here so this module cannot be handed a path. */
-const UNIT_ID = /^(screen|family|horizontal)--[a-z0-9][a-z0-9-]*$/u;
+const UNIT_ID = /^(screen|family|horizontal|task)--[a-z0-9][a-z0-9-]*$/u;
 
 export async function readUnitFile(config: BoardConfig, unit: string): Promise<unknown> {
   if (!UNIT_ID.test(unit)) return undefined;

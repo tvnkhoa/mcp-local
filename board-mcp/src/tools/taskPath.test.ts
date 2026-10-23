@@ -83,6 +83,24 @@ test("task tools on a scratch board: four refusals, then lead → assign → cla
   await refusal("claim", { unit: "task--demo", session: OTHER }, /only its assignee claims it/u);
   await okCall("claim", { unit: "task--demo", session: MEMBER });
 
+  // rescope: the leader's, task units only, add-only, between assign and report.
+  await okCall("new_unit", { kind: "task", name: "idle", paths: ["src/a.txt"], session: LEADER });
+  await refusal("rescope", { unit: "task--demo", add: ["src/b.txt"], why: "needs b", session: OTHER }, /rescope is the leader's/u);
+  await refusal("rescope", { unit: "task--idle", add: ["src/b.txt"], why: "needs b", session: LEADER }, /assign first/u);
+  const horizontal = await okCall("new_unit", { kind: "horizontal", name: "wide", paths: ["src/a.txt"], weight: "standard", yes: [], session: LEADER });
+  const horizontalId = /(horizontal--[a-z0-9-]+)/u.exec(String(horizontal.text))?.[1] ?? "horizontal--wide";
+  await refusal("rescope", { unit: horizontalId, add: ["src/b.txt"], why: "needs b", session: LEADER }, /rescope widens task units only/u);
+  const rescoped = await okCall("rescope", { unit: "task--demo", add: ["src/b.txt"], why: "a derived file", session: LEADER });
+  assert.match(rescoped.text, /task--demo rescoped by aaaaaaaa.*src\/a\.txt, src\/b\.txt/u);
+  const widened = (await okCall("status", { unit: "task--demo" })).unitFile as {
+    assigned: { scope: string[] };
+    touches: string[];
+    events: { what: string; add?: string[] }[];
+  };
+  assert.deepEqual(widened.assigned.scope, ["src/a.txt", "src/b.txt"]);
+  assert.ok(widened.touches.includes("src/b.txt"));
+  assert.deepEqual(widened.events.find((e) => e.what === "rescope")?.add, ["src/b.txt"]);
+
   writeFileSync(path.join(root, "src", "a.txt"), "a2\n");
   git("commit", "-qam", "in scope");
   const sha = git("rev-parse", "--short", "HEAD");
@@ -92,6 +110,7 @@ test("task tools on a scratch board: four refusals, then lead → assign → cla
   await refusal("report", { ...report, session: OTHER }, /only the assignee reports/u);
   const reported = await okCall("report", { ...report, session: MEMBER });
   assert.match(reported.text, /T2 Verify[\s\S]*src\/a\.txt/u);
+  await refusal("rescope", { unit: "task--demo", add: ["src/c.txt"], why: "too late", session: LEADER }, /rescope only at T1/u);
 
   // Self-accept: the member is made leader and accepts its own work.
   lock(MEMBER);

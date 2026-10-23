@@ -1,6 +1,6 @@
 {
   "server": "board-mcp",
-  "toolCount": 27,
+  "toolCount": 28,
   "tools": [
     {
       "annotations": {
@@ -1112,6 +1112,61 @@
       },
       "name": "report",
       "title": "Report a task unit"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": false
+      },
+      "description": "The leader widens an assigned task unit's scope (board.mjs rescope): add-only, and only between assign and report (T1) — never at T0, never once reported. Refused unless `session` leads today. The added paths fall under accept's unreported-commit check from the assign's HEAD on; the assign is not re-baselined.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "add": {
+            "description": "Repo-relative paths the member may now also change (→ --add=a,b). Add-only; a path containing ',' cannot be expressed.",
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 100,
+            "minItems": 1,
+            "type": "array"
+          },
+          "profile": {
+            "description": "Response verbosity. Defaults to compact.",
+            "enum": [
+              "nano",
+              "compact",
+              "standard",
+              "verbose"
+            ],
+            "type": "string"
+          },
+          "session": {
+            "description": "Your Claude Code session id — a lowercase UUID, the name of your transcript file. Passed as --as=<uuid>: a claim is named by it, and --gate searches only this session's transcript. Required; a label is refused.",
+            "type": "string"
+          },
+          "unit": {
+            "description": "A task unit id, task--…",
+            "type": "string"
+          },
+          "why": {
+            "description": "What made the scope too narrow (→ --why).",
+            "maxLength": 2000,
+            "type": "string"
+          }
+        },
+        "required": [
+          "unit",
+          "add",
+          "why",
+          "session"
+        ],
+        "type": "object"
+      },
+      "name": "rescope",
+      "title": "Widen a task unit's scope"
     },
     {
       "annotations": {

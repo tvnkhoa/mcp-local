@@ -49,7 +49,8 @@ at a verify gate run `notes_write(unit, session)` first.
 ruled_out, done_when, worktree, gate_by, session)`. The member `claim`s it, builds, and
 `report(unit, state: "done", shas, evidence, left, session)`. The leader then
 `accept(unit, verdict: "accepted" | "rejected", why, [gate], session)`. `status(today: true, [by])` is
-the day's activity. board.mjs refuses a non-leader's assign/accept, another session's claim or report, and
+the day's activity. The leader widens a task's scope with `rescope(unit, add: [paths], why, session)` — add-only,
+only between assign and report. board.mjs refuses a non-leader's assign/accept, another session's claim or report, and
 any accept by the assignee or a past claimant.
 
 **Discoveries:** `discover(unit, text, session)` the moment something is found; dispose with

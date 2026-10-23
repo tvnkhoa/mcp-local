@@ -43,7 +43,7 @@ snapshot boots the server with a placeholder that is not a path.
 
 <!-- BEGIN GENERATED: tool-list -->
 
-27 tools, namespaced `mcp__board-mcp__<tool>`:
+28 tools, namespaced `mcp__board-mcp__<tool>`:
 
 - `accept`
 - `acknowledge`
@@ -68,6 +68,7 @@ snapshot boots the server with a placeholder that is not a path.
 - `release`
 - `reopen`
 - `report`
+- `rescope`
 - `reserve`
 - `status`
 - `touch`
@@ -86,7 +87,7 @@ snapshot boots the server with a placeholder that is not a path.
 | `new_unit` | `new <route> [--family]` · `new --horizontal=… --paths=…` · `new --task=… --paths=…` | write |
 | `weigh` `claim` `touch` `hold` `release` `advance` `reopen` `queue_spec` `amend` `acknowledge` `discover` `reserve` | the subcommand of the same name (`queue-spec`) | write |
 | `notes_write` | `notes <unit> --as=<uuid> --write` | write |
-| `lead` `assign` `report` `accept` | the subcommand of the same name (task.mjs, wec.aria e66c0bdf) | write |
+| `lead` `assign` `rescope` `report` `accept` | the subcommand of the same name (task.mjs, wec.aria e66c0bdf) | write |
 
 ### Task units — the leader/member day
 
@@ -96,7 +97,9 @@ SessionStart hook's coordinator lock); `assign` (the leader: `to`, `goal`, `scop
 `done_when`, `worktree`, `gate_by`) moves T0 → T1; only the assignee may `claim` and `report` it
 (`state: done` with `shas` + `evidence` → T2 — board.mjs reads each sha's numstat and refuses one
 outside the scope); `accept` (the leader, never the assignee or a session that ever claimed it)
-lands it or sends it back to T1. `status` with `today: true` lists the day's activity, `by` one
+lands it or sends it back to T1. `rescope` (the leader: `unit`, `add[]`, `why`) widens an assigned
+unit's scope, add-only and only between assign and report; the added paths fall under accept's
+unreported-commit check from the assign's HEAD on. `status` with `today: true` lists the day's activity, `by` one
 session's. Every rule is board.mjs's; the tools only map fields to flags.
 
 **`session` is asserted, not proven.** board.mjs's leader / assignee / self-accept checks stop a

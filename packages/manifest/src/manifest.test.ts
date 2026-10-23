@@ -224,7 +224,8 @@ test("tool lists match the committed contract snapshots exactly", () => {
   // 111 -> 115: bitbucket-mcp commit_files_preview/apply, create_branch, delete_branch.
   // 115 -> 138: board-mcp joined with 23 (health_check + 8 read + 14 write, one per board.mjs subcommand).
   // 138 -> 142: board-mcp lead, assign, report, accept — task units for the leader/member day (BM-b).
-  assert.equal(total, 142, "the workspace advertises 142 tools; update this number deliberately");
+  // 142 -> 143: board-mcp rescope — the leader widens an assigned task unit's scope at T1 (RS).
+  assert.equal(total, 143, "the workspace advertises 143 tools; update this number deliberately");
 });
 
 // --- a server registered before its contract exists -----------------------------
