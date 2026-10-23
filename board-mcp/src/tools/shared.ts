@@ -33,12 +33,12 @@ export const text = (max = 4000) =>
 export const positional = (max = 512) =>
   text(max).refine((s) => !s.startsWith("-"), "must not start with '-' (board.mjs would read it as a flag)");
 
-/** A unit id as board.mjs names them: `screen--…`, `family--…`, `horizontal--…`. */
-export const UNIT_ID = /^(screen|family|horizontal)--[a-z0-9][a-z0-9-]*$/u;
-export const unitId = () => z.string().max(200).regex(UNIT_ID, "a unit id: screen--…, family--… or horizontal--…");
+/** A unit id as board.mjs names them: `screen--…`, `family--…`, `horizontal--…`, `task--…`. */
+export const UNIT_ID = /^(screen|family|horizontal|task)--[a-z0-9][a-z0-9-]*$/u;
+export const unitId = () => z.string().max(200).regex(UNIT_ID, "a unit id: screen--…, family--…, horizontal--… or task--…");
 
-/** A phase id: P0…P6, F0…F5, H0…H3 (board.json is the authority; this only bounds the shape). */
-export const phaseId = () => z.string().regex(/^[PFH]\d{1,2}$/u, "a phase id such as P4, F2 or H1");
+/** A phase id: P0…P6, F0…F5, H0…H3, T0…T3 (board.json is the authority; this only bounds the shape). */
+export const phaseId = () => z.string().regex(/^[PFHT]\d{1,2}$/u, "a phase id such as P4, F2, H1 or T1");
 
 /** A repo-relative path for touch / hold / release. */
 export const repoPath = () =>

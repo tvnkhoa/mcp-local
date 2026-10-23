@@ -1,7 +1,66 @@
 {
   "server": "board-mcp",
-  "toolCount": 23,
+  "toolCount": 27,
   "tools": [
+    {
+      "annotations": {
+        "destructiveHint": true,
+        "idempotentHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": false
+      },
+      "description": "The leader accepts (T2, T3 → landed) or rejects (back to T1 with the reason) a reported task unit (board.mjs accept). Refused to a session that does not lead today, is the assignee, or ever claimed the unit; refused while a commit since the assign changed the scope unreported. A gate_by=owner unit needs `gate`: the owner's words typed in THIS (the leader's) session.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "gate": {
+            "description": "The owner's words, verbatim, as they typed them or chose them in an AskUserQuestion in THIS session (join several answers from one message with ||; no part may be blank). Passed as --gate=…; board.mjs finds the message and proves the words are in it — a part under 8 characters only as a whole line of that message. The wrapper never takes --words/--session/--uuid.",
+            "maxLength": 4000,
+            "type": "string"
+          },
+          "profile": {
+            "description": "Response verbosity. Defaults to compact.",
+            "enum": [
+              "nano",
+              "compact",
+              "standard",
+              "verbose"
+            ],
+            "type": "string"
+          },
+          "session": {
+            "description": "Your Claude Code session id — a lowercase UUID, the name of your transcript file. Passed as --as=<uuid>: a claim is named by it, and --gate searches only this session's transcript. Required; a label is refused.",
+            "type": "string"
+          },
+          "unit": {
+            "description": "A task unit id, task--…",
+            "type": "string"
+          },
+          "verdict": {
+            "description": "→ --verdict.",
+            "enum": [
+              "accepted",
+              "rejected"
+            ],
+            "type": "string"
+          },
+          "why": {
+            "description": "What the leader checked, or what is wrong (→ --why).",
+            "maxLength": 4000,
+            "type": "string"
+          }
+        },
+        "required": [
+          "unit",
+          "verdict",
+          "why",
+          "session"
+        ],
+        "type": "object"
+      },
+      "name": "accept",
+      "title": "Accept or reject a task unit"
+    },
     {
       "annotations": {
         "destructiveHint": false,
@@ -202,6 +261,92 @@
       },
       "name": "assess",
       "title": "Weight rubric"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": false
+      },
+      "description": "The leader assigns a task unit at T0 to a member session with its brief (board.mjs assign): T0 Brief → T1 Build. Refused unless `session` leads today. Only the assignee may then claim and report it.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "done_when": {
+            "description": "The evidence that makes it done (→ --done-when).",
+            "maxLength": 2000,
+            "type": "string"
+          },
+          "gate_by": {
+            "description": "Who passes the acceptance gate (→ --gate-by). owner: accept needs the owner's words typed in the leader's session.",
+            "enum": [
+              "owner",
+              "leader"
+            ],
+            "type": "string"
+          },
+          "goal": {
+            "description": "What the member delivers (→ --goal).",
+            "maxLength": 2000,
+            "type": "string"
+          },
+          "profile": {
+            "description": "Response verbosity. Defaults to compact.",
+            "enum": [
+              "nano",
+              "compact",
+              "standard",
+              "verbose"
+            ],
+            "type": "string"
+          },
+          "ruled_out": {
+            "description": "What the member is not to try; 'none' is an answer (→ --ruled-out).",
+            "maxLength": 2000,
+            "type": "string"
+          },
+          "scope": {
+            "description": "Repo-relative paths the member may change, within the unit's files (→ --scope=a,b). The overlap is symmetric: a wider directory passes.",
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 100,
+            "type": "array"
+          },
+          "session": {
+            "description": "Your Claude Code session id — a lowercase UUID, the name of your transcript file. Passed as --as=<uuid>: a claim is named by it, and --gate searches only this session's transcript. Required; a label is refused.",
+            "type": "string"
+          },
+          "to": {
+            "description": "The member's session id, a lowercase UUID (→ --to). Never the leader's own.",
+            "type": "string"
+          },
+          "unit": {
+            "description": "A task unit id, task--…",
+            "type": "string"
+          },
+          "worktree": {
+            "description": "'shared', or '<path>@<sha>' for the member's own worktree (→ --worktree).",
+            "maxLength": 512,
+            "type": "string"
+          }
+        },
+        "required": [
+          "unit",
+          "to",
+          "goal",
+          "scope",
+          "ruled_out",
+          "done_when",
+          "worktree",
+          "gate_by",
+          "session"
+        ],
+        "type": "object"
+      },
+      "name": "assign",
+      "title": "Assign a task unit"
     },
     {
       "annotations": {
@@ -493,6 +638,40 @@
         "destructiveHint": false,
         "idempotentHint": true,
         "openWorldHint": false,
+        "readOnlyHint": false
+      },
+      "description": "Record this session as the leader of the working day (board.mjs lead; the day runs 04:00–04:00 local). Refused when the SessionStart hook's coordinator lock names another session, or another session already leads — replacing it (--force) is the owner's, on the CLI.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "profile": {
+            "description": "Response verbosity. Defaults to compact.",
+            "enum": [
+              "nano",
+              "compact",
+              "standard",
+              "verbose"
+            ],
+            "type": "string"
+          },
+          "session": {
+            "description": "Your Claude Code session id — a lowercase UUID, the name of your transcript file. Passed as --as=<uuid>: a claim is named by it, and --gate searches only this session's transcript. Required; a label is refused.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "session"
+        ],
+        "type": "object"
+      },
+      "name": "lead",
+      "title": "Lead today"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
         "readOnlyHint": true
       },
       "description": "Every discovery left or parked, the due ones first (board.mjs left).",
@@ -522,7 +701,7 @@
         "openWorldHint": false,
         "readOnlyHint": false
       },
-      "description": "Make a unit (board.mjs new). kind=screen: `route` + `weight` + `yes`. kind=family: `route` only (a family walks every phase). kind=horizontal: `name` + `paths` + `weight` + `yes`, optionally `after` | `before` and `about`. A weight lighter than the rubric recommends needs `gate` (the owner's words).",
+      "description": "Make a unit (board.mjs new). kind=screen: `route` + `weight` + `yes`. kind=family: `route` only (a family walks every phase). kind=horizontal: `name` + `paths` + `weight` + `yes`, optionally `after` | `before` and `about`. kind=task: `name` + `paths` only — a member's item, moved by assign / report / accept, no weight. A weight lighter than the rubric recommends needs `gate` (the owner's words).",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -549,16 +728,17 @@
             "enum": [
               "screen",
               "family",
-              "horizontal"
+              "horizontal",
+              "task"
             ],
             "type": "string"
           },
           "name": {
-            "description": "horizontal: the pattern's name, e.g. dates (→ --horizontal=dates).",
+            "description": "horizontal: the pattern's name, e.g. dates (→ --horizontal=dates); task: the item's name (→ --task=<name>).",
             "type": "string"
           },
           "paths": {
-            "description": "horizontal: repo-relative paths it owns (→ --paths=a,b).",
+            "description": "horizontal / task: repo-relative paths it owns (→ --paths=a,b).",
             "items": {
               "type": "string"
             },
@@ -872,6 +1052,74 @@
         "openWorldHint": false,
         "readOnlyHint": false
       },
+      "description": "The assignee reports its task unit (board.mjs report). state=done (needs `shas` and `evidence`): T1 → T2 Verify; blocked / needs_owner stay at T1. board.mjs reads each sha's numstat itself and refuses a merge, an unknown sha, or one touching a file outside the assigned scope.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "evidence": {
+            "description": "The output file the leader reads, absolute or repo-relative; must be on disk (→ --evidence). Required when done.",
+            "maxLength": 1024,
+            "type": "string"
+          },
+          "left": {
+            "description": "What is left; 'none' is an answer (→ --left).",
+            "maxLength": 2000,
+            "type": "string"
+          },
+          "profile": {
+            "description": "Response verbosity. Defaults to compact.",
+            "enum": [
+              "nano",
+              "compact",
+              "standard",
+              "verbose"
+            ],
+            "type": "string"
+          },
+          "session": {
+            "description": "Your Claude Code session id — a lowercase UUID, the name of your transcript file. Passed as --as=<uuid>: a claim is named by it, and --gate searches only this session's transcript. Required; a label is refused.",
+            "type": "string"
+          },
+          "shas": {
+            "description": "The commits to accept, short or full (→ --shas=a,b). Required when done.",
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 50,
+            "type": "array"
+          },
+          "state": {
+            "description": "→ --state.",
+            "enum": [
+              "done",
+              "blocked",
+              "needs_owner"
+            ],
+            "type": "string"
+          },
+          "unit": {
+            "description": "A task unit id, task--…",
+            "type": "string"
+          }
+        },
+        "required": [
+          "unit",
+          "state",
+          "left",
+          "session"
+        ],
+        "type": "object"
+      },
+      "name": "report",
+      "title": "Report a task unit"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": false
+      },
       "description": "The next docs/15 row number or migration number, held seven days so two sessions never take the same one (board.mjs reserve).",
       "inputSchema": {
         "additionalProperties": false,
@@ -915,10 +1163,14 @@
         "openWorldHint": false,
         "readOnlyHint": true
       },
-      "description": "Where every unit is and what is next (board.mjs status), or one unit with `unit`. With `unit`, also returns `unitFile`: the RAW checks/board/units/<id>.json — never interpreted; phase, waits and claims are what `text` says.",
+      "description": "Where every unit is and what is next (board.mjs status), or one unit with `unit`. With `unit`, also returns `unitFile`: the RAW checks/board/units/<id>.json — never interpreted; phase, waits and claims are what `text` says. `today: true` (→ --today): one line per unit with a claim, assign, report or accept in today's working day (04:00–04:00 local) — `by` keeps one session's.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
+          "by": {
+            "description": "With today: only what this session id (a lowercase UUID) did (→ --by).",
+            "type": "string"
+          },
           "profile": {
             "description": "Response verbosity. Defaults to compact.",
             "enum": [
@@ -928,6 +1180,10 @@
               "verbose"
             ],
             "type": "string"
+          },
+          "today": {
+            "description": "Only today's activity, one line per unit (→ --today). Not with `unit`.",
+            "type": "boolean"
           },
           "unit": {
             "description": "A unit id, e.g. screen--review-intent. Omit for every unit.",

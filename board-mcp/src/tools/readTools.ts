@@ -16,7 +16,7 @@ import { annotations, defineTool, schema, type AnyToolDefinition } from "@mcp/sd
 import { z } from "zod";
 
 import type { BoardConfig } from "../config/index.js";
-import { repoRootGuard, sessionUuidGuard } from "../middleware/guards.js";
+import { repoRootGuard, SESSION_ID, sessionUuidGuard } from "../middleware/guards.js";
 import { responseProfileSchema } from "../middleware/responseFormatter.js";
 import { readUnitFile } from "../services/unitFile.js";
 import type { BoardRunner } from "../types/index.js";
@@ -33,15 +33,27 @@ export function buildReadTools(config: BoardConfig, run: BoardRunner): readonly 
       name: "status",
       title: "Board status",
       description:
-        "Where every unit is and what is next (board.mjs status), or one unit with `unit`. With `unit`, also returns `unitFile`: the RAW checks/board/units/<id>.json — never interpreted; phase, waits and claims are what `text` says.",
+        "Where every unit is and what is next (board.mjs status), or one unit with `unit`. With `unit`, also returns `unitFile`: the RAW checks/board/units/<id>.json — never interpreted; phase, waits and claims are what `text` says. `today: true` (→ --today): one line per unit with a claim, assign, report or accept in today's working day (04:00–04:00 local) — `by` keeps one session's.",
       annotations: annotations.read(),
       inputSchema: schema.object({
         unit: schema.string("A unit id, e.g. screen--review-intent. Omit for every unit."),
+        today: schema.boolean("Only today's activity, one line per unit (→ --today). Not with `unit`."),
+        by: schema.string("With today: only what this session id (a lowercase UUID) did (→ --by)."),
         profile: schema.profile()
       }),
-      input: z.object({ unit: unitId().optional(), profile: responseProfileSchema.optional() }).strict(),
+      input: z
+        .object({
+          unit: unitId().optional(),
+          today: z.boolean().optional(),
+          by: z.string().regex(SESSION_ID, "a lowercase session UUID").optional(),
+          profile: responseProfileSchema.optional()
+        })
+        .strict()
+        .refine((a) => !(a.today === true && a.unit !== undefined), { path: ["unit"], message: "today or unit, not both" })
+        .refine((a) => a.by === undefined || a.today === true, { path: ["by"], message: "by needs today: true" }),
       guards,
       handler: async (args) => {
+        if (args.today === true) return callBoard(run, "status", ["--today", ...flag("by", args.by), ...JSON_FLAG], { parseJson: true });
         const result = await callBoard(run, "status", [...(args.unit === undefined ? [] : [args.unit]), ...JSON_FLAG], { parseJson: true });
         if (!result.ok || args.unit === undefined || result.value.ok !== true) return result;
         const unitFile = await readUnitFile(config, args.unit);

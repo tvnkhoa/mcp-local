@@ -1,5 +1,5 @@
 /**
- * The board-mcp tool table: health_check, the read tools, the write tools.
+ * The board-mcp tool table: health_check, the read tools, the write tools, the task-unit tools.
  *
  * A thin wrapper over `node checks/board/board.mjs <cmd> …` (see `commandMap.ts` for which
  * subcommand each tool runs and which are excluded). Separated from `index.ts` so the table can be
@@ -19,6 +19,7 @@ import type { BoardRunner } from "../types/index.js";
 import { GATE_PASSING_TOOLS } from "./commandMap.js";
 import { buildOwnerWordTools } from "./ownerTools.js";
 import { buildReadTools } from "./readTools.js";
+import { buildTaskTools } from "./taskTools.js";
 import { buildWriteTools } from "./writeTools.js";
 
 /**
@@ -50,6 +51,7 @@ export function buildTools(config: BoardConfig, run: BoardRunner = createBoardRu
     }),
     buildReadTools(config, run),
     buildWriteTools(config, run),
-    buildOwnerWordTools(config, run)
+    buildOwnerWordTools(config, run),
+    buildTaskTools(config, run)
   ]);
 }

@@ -88,7 +88,8 @@ test("every gate-passing tool without a session UUID is refused", async () => {
     weigh: { unit: "screen--review-intent", weight: "light", yes: [], why: "owner chose light", gate: "Light is enough" },
     new_unit: { kind: "screen", route: "/review/intent", weight: "light", yes: [], gate: "Light is enough" },
     acknowledge: { unit: "screen--review-intent", sha: "abcdef1", gate: "Acknowledge (Recommended)" },
-    discover: { unit: "screen--review-intent", id: "d1", owner: true, gate: "leave it as it is" }
+    discover: { unit: "screen--review-intent", id: "d1", owner: true, gate: "leave it as it is" },
+    accept: { unit: "task--board-kind", verdict: "accepted", why: "read the numstat", gate: "Chấp nhận (Recommended)" }
   };
   assert.deepEqual(Object.keys(base).sort(), [...GATE_PASSING_TOOLS].sort());
   for (const [name, args] of Object.entries(base)) {

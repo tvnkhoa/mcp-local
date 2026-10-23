@@ -48,15 +48,15 @@ export function buildOwnerWordTools(config: BoardConfig, run: BoardRunner): read
       name: "new_unit",
       title: "New unit",
       description:
-        "Make a unit (board.mjs new). kind=screen: `route` + `weight` + `yes`. kind=family: `route` only (a family walks every phase). kind=horizontal: `name` + `paths` + `weight` + `yes`, optionally `after` | `before` and `about`. A weight lighter than the rubric recommends needs `gate` (the owner's words).",
+        "Make a unit (board.mjs new). kind=screen: `route` + `weight` + `yes`. kind=family: `route` only (a family walks every phase). kind=horizontal: `name` + `paths` + `weight` + `yes`, optionally `after` | `before` and `about`. kind=task: `name` + `paths` only — a member's item, moved by assign / report / accept, no weight. A weight lighter than the rubric recommends needs `gate` (the owner's words).",
       // Overwrites: `before` rewires another unit's `after` (the named unit now follows this one).
       annotations: OVERWRITES,
       inputSchema: schema.object(
         {
-          kind: schema.enumOf(["screen", "family", "horizontal"], "Unit kind."),
+          kind: schema.enumOf(["screen", "family", "horizontal", "task"], "Unit kind."),
           route: schema.string("screen / family: the route, e.g. /review/intent."),
-          name: schema.string("horizontal: the pattern's name, e.g. dates (→ --horizontal=dates)."),
-          paths: schema.array(schema.string(), "horizontal: repo-relative paths it owns (→ --paths=a,b).", { maxItems: 100 }),
+          name: schema.string("horizontal: the pattern's name, e.g. dates (→ --horizontal=dates); task: the item's name (→ --task=<name>)."),
+          paths: schema.array(schema.string(), "horizontal / task: repo-relative paths it owns (→ --paths=a,b).", { maxItems: 100 }),
           weight: schema.enumOf(["light", "standard", "full"], "screen / horizontal: the weight the owner picked."),
           yes: field.yes(),
           after: field.unit("horizontal: queue after this unit (→ --after)."),
@@ -70,7 +70,7 @@ export function buildOwnerWordTools(config: BoardConfig, run: BoardRunner): read
       ),
       input: z
         .object({
-          kind: z.enum(["screen", "family", "horizontal"]),
+          kind: z.enum(["screen", "family", "horizontal", "task"]),
           route: positional(200).refine((s) => s.startsWith("/"), "a route starts with /").optional(),
           name: z.string().regex(/^[a-z0-9][a-z0-9-]*$/u, "lowercase letters, digits and -").max(100).optional(),
           paths: z.array(repoPath()).min(1).max(100).optional(),
@@ -88,16 +88,19 @@ export function buildOwnerWordTools(config: BoardConfig, run: BoardRunner): read
           const need = (cond: boolean, path: string, message: string) => {
             if (!cond) ctx.addIssue({ code: z.ZodIssueCode.custom, path: [path], message });
           };
-          if (a.kind === "horizontal") {
-            need(a.name !== undefined, "name", "required for kind=horizontal");
-            need(a.paths !== undefined, "paths", "required for kind=horizontal");
-            need(a.route === undefined, "route", "not for kind=horizontal — use name + paths");
+          if (a.kind === "horizontal" || a.kind === "task") {
+            need(a.name !== undefined, "name", `required for kind=${a.kind}`);
+            need(a.paths !== undefined, "paths", `required for kind=${a.kind}`);
+            need(a.route === undefined, "route", `not for kind=${a.kind} — use name + paths`);
             need(!(a.after !== undefined && a.before !== undefined), "before", "after or before, not both");
           } else {
             need(a.route !== undefined, "route", `required for kind=${a.kind}`);
-            for (const k of ["name", "paths", "after", "before", "about"] as const) need(a[k] === undefined, k, "only for kind=horizontal");
+            for (const k of ["name", "paths", "after", "before", "about"] as const) need(a[k] === undefined, k, "only for kind=horizontal or task");
           }
-          if (a.kind === "family") {
+          if (a.kind === "task") {
+            for (const k of ["after", "before", "about"] as const) need(a[k] === undefined, k, "only for kind=horizontal");
+            for (const k of ["weight", "yes", "gate"] as const) need(a[k] === undefined, k, "a task unit carries no weight");
+          } else if (a.kind === "family") {
             for (const k of ["weight", "yes", "gate"] as const) need(a[k] === undefined, k, "a family walks every phase — no weight");
           } else {
             need(a.weight !== undefined, "weight", `required for kind=${a.kind}`);
@@ -106,6 +109,7 @@ export function buildOwnerWordTools(config: BoardConfig, run: BoardRunner): read
         }),
       guards,
       handler: async (a) => {
+        if (a.kind === "task") return callBoard(run, "new", [`--task=${a.name ?? ""}`, `--paths=${(a.paths ?? []).join(",")}`, ...asFlag(a.session)]);
         const args =
           a.kind === "horizontal"
             ? [`--horizontal=${a.name ?? ""}`, `--paths=${(a.paths ?? []).join(",")}`, ...flag("after", a.after), ...flag("before", a.before), ...flag("about", a.about)]

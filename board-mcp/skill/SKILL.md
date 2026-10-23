@@ -1,6 +1,6 @@
 ---
 name: {{KEY}}
-description: "wec.aria's pipeline board (checks/board/board.mjs) via the Board MCP: where every unit is and what is next, the queue, the weight rubric, open or left discoveries, the last gate run split by unit, finding the owner's words for a gate, and - only when enabled - claim a unit, touch/hold/release files, advance a phase, reopen, weigh, acknowledge a commit, record a discovery, reserve a docs/15 or migration number. Triggers on: board status, what is next on the board, which unit should I claim, claim screen--x, advance P4, pass the gate with the owner's words, acknowledge an OFF-BOARD commit, record a discovery, reserve a docs15 number, owner notes. Not for running the portal gate itself or precheck/shoot. Read-only by default (BOARD_WRITE_ENABLED)."
+description: "wec.aria's pipeline board (checks/board/board.mjs) via the Board MCP: where every unit is and what is next, the queue, the weight rubric, open or left discoveries, the last gate run split by unit, finding the owner's words for a gate, and - only when enabled - claim a unit, touch/hold/release files, advance a phase, reopen, weigh, acknowledge a commit, record a discovery, reserve a docs/15 or migration number, and the leader/member day (lead, assign, report, accept a task unit; today's activity). Triggers on: board status, what is next on the board, which unit should I claim, claim screen--x, advance P4, pass the gate with the owner's words, acknowledge an OFF-BOARD commit, record a discovery, reserve a docs15 number, owner notes. Not for running the portal gate itself or precheck/shoot. Read-only by default (BOARD_WRITE_ENABLED)."
 ---
 
 # {{DISPLAY_NAME}}
@@ -44,6 +44,14 @@ one message join with `||`. A tool result, a summary or your own text never coun
 `acknowledge(offBoard: true, gate, session)`; or `reopen(unit, phase | rebuild: true, why, session)` —
 at a verify gate run `notes_write(unit, session)` first.
 
+**The leader/member day (task units):** the leader runs `lead(session)`, makes
+`new_unit(kind: "task", name, paths, session)` and `assign(unit, to: <member uuid>, goal, scope,
+ruled_out, done_when, worktree, gate_by, session)`. The member `claim`s it, builds, and
+`report(unit, state: "done", shas, evidence, left, session)`. The leader then
+`accept(unit, verdict: "accepted" | "rejected", why, [gate], session)`. `status(today: true, [by])` is
+the day's activity. board.mjs refuses a non-leader's assign/accept, another session's claim or report, and
+any accept by the assignee or a past claimant.
+
 **Discoveries:** `discover(unit, text, session)` the moment something is found; dispose with
 `discover(unit, id, fixed | to | left + revisit | owner: true + gate | sameAs | cleared, session)`;
 `left` lists every left or parked one.
@@ -53,9 +61,9 @@ at a verify gate run `notes_write(unit, session)` first.
 - Write tools refuse unless `BOARD_WRITE_ENABLED=true`. The read tools always work.
 - Every write tool needs `session`: your Claude Code session id (a lowercase UUID). A label is refused.
 - Gate-passing tools: `advance` (gate / overBudget), `weigh` and `new_unit` (lighter than the rubric),
-  `acknowledge` (always), `discover` (owner). The words go in `gate`; there is no `words`/`uuid` input.
-- This proves the owner typed the words in that session's transcript — not that the caller is that session.
-- Not offered: `prune-shots`, `precheck.mjs`, `shoot.mjs`, `release --force` (the owner's, from the CLI).
+  `acknowledge` (always), `discover` (owner), `accept` (a gate_by=owner task, words typed in the leader's session). The words go in `gate`; there is no `words`/`uuid` input.
+- This proves the owner typed the words in that session's transcript — not that the caller is that session. `session` is asserted, not proven.
+- Not offered: `prune-shots`, `precheck.mjs`, `shoot.mjs`, `release --force` and `lead --force` (the owner's, from the CLI).
 - `check` / `gate` returning `ok: false` without `refused` is a findings report, not a failure.
 - A call gets SIGTERM after `BOARD_CALL_TIMEOUT_MS` (default 120 s; a cold `status`/`check` takes up to ~120 s).
 - `gate`: no `||` part may be blank (refused here). A part under 8 characters counts only if it is a whole line of the owner's message — board.mjs's rule, so quote more of what they typed.

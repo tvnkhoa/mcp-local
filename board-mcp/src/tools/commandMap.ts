@@ -1,8 +1,8 @@
 /**
  * Every board.mjs subcommand, and what this server does with it.
  *
- * `commandMap.test.ts` parses the `commands` object in board.mjs and the `more_commands` object in
- * more.mjs and diffs their keys against MAPPED + EXCLUDED. A subcommand wec.aria adds fails that
+ * `commandMap.test.ts` parses the `commands` object in board.mjs, the `more_commands` object in
+ * more.mjs and the `task_commands` object in task.mjs, and diffs their keys against MAPPED + EXCLUDED. A subcommand wec.aria adds fails that
  * test until it is mapped to a tool here or excluded with a reason — so the wrapper can never
  * silently fall behind the CLI.
  */
@@ -31,7 +31,12 @@ export const MAPPED: Readonly<Record<string, readonly string[]>> = {
   amend: ["amend"],
   acknowledge: ["acknowledge"],
   discover: ["discover"],
-  reserve: ["reserve"]
+  reserve: ["reserve"],
+  // the leader/member day (task.mjs)
+  lead: ["lead"],
+  assign: ["assign"],
+  report: ["report"],
+  accept: ["accept"]
 };
 
 /** CLI subcommands deliberately not exposed, with the reason. */
@@ -57,6 +62,8 @@ export const UNMAPPED_FLAGS: Readonly<Record<string, string>> = {
     "Never accepted from the model. The owner's words go in as --gate=<words> with --as=<session uuid>; board.mjs finds the message itself, in that session's transcript only.",
   "release --force":
     "Releases another session's claim — 'the owner's call' in board.mjs, with no proof of the owner. Left to the CLI, run by the owner.",
+  "lead --force":
+    "Replaces another session's lead record for the day — 'the owner's call' in board.mjs, with no proof of the owner. Left to the CLI, run by the owner after moving the coordinator lock.",
   "notes --session":
     "notes is passed --as=<session uuid> instead, which board.mjs reads the same way (io.is_session_id)."
 };
@@ -67,5 +74,6 @@ export const GATE_PASSING_TOOLS: readonly string[] = [
   "weigh", // a weight lighter than the rubric recommends
   "new_unit", // a weight lighter than the rubric recommends
   "acknowledge", // always the owner's words
-  "discover" // --owner disposition
+  "discover", // --owner disposition
+  "accept" // a gate_by=owner task unit: the owner's words, typed in the leader's session
 ];

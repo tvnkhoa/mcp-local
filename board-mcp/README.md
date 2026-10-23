@@ -38,12 +38,14 @@ snapshot boots the server with a placeholder that is not a path.
 
 <!-- BEGIN GENERATED: tool-list -->
 
-23 tools, namespaced `mcp__board-mcp__<tool>`:
+27 tools, namespaced `mcp__board-mcp__<tool>`:
 
+- `accept`
 - `acknowledge`
 - `advance`
 - `amend`
 - `assess`
+- `assign`
 - `check`
 - `claim`
 - `discover`
@@ -51,6 +53,7 @@ snapshot boots the server with a placeholder that is not a path.
 - `gate`
 - `health_check`
 - `hold`
+- `lead`
 - `left`
 - `new_unit`
 - `next`
@@ -59,6 +62,7 @@ snapshot boots the server with a placeholder that is not a path.
 - `queue_spec`
 - `release`
 - `reopen`
+- `report`
 - `reserve`
 - `status`
 - `touch`
@@ -68,15 +72,31 @@ snapshot boots the server with a placeholder that is not a path.
 
 | Tool | board.mjs | Kind |
 |---|---|---|
-| `status` | `status [<unit>]` | read |
+| `status` | `status [<unit>]` · `status --today [--by=<uuid>]` | read |
 | `next` / `left` / `check` | `next` / `left` / `check` | read |
 | `assess` | `assess --kind=… [--yes=…]` | read |
 | `gate` | `gate <unit>` | read |
 | `find` | `find <words>` | read |
 | `notes` | `notes <unit> --as=<uuid> [--since]` | read |
-| `new_unit` | `new <route> [--family]` · `new --horizontal=… --paths=…` | write |
+| `new_unit` | `new <route> [--family]` · `new --horizontal=… --paths=…` · `new --task=… --paths=…` | write |
 | `weigh` `claim` `touch` `hold` `release` `advance` `reopen` `queue_spec` `amend` `acknowledge` `discover` `reserve` | the subcommand of the same name (`queue-spec`) | write |
 | `notes_write` | `notes <unit> --as=<uuid> --write` | write |
+| `lead` `assign` `report` `accept` | the subcommand of the same name (task.mjs, wec.aria e66c0bdf) | write |
+
+### Task units — the leader/member day
+
+A `task--<slug>` unit is one member's item on the working day (`new_unit` kind `task`: `name` +
+`paths`, no weight). `lead` records the session that leads today (board.mjs checks it against the
+SessionStart hook's coordinator lock); `assign` (the leader: `to`, `goal`, `scope`, `ruled_out`,
+`done_when`, `worktree`, `gate_by`) moves T0 → T1; only the assignee may `claim` and `report` it
+(`state: done` with `shas` + `evidence` → T2 — board.mjs reads each sha's numstat and refuses one
+outside the scope); `accept` (the leader, never the assignee or a session that ever claimed it)
+lands it or sends it back to T1. `status` with `today: true` lists the day's activity, `by` one
+session's. Every rule is board.mjs's; the tools only map fields to flags.
+
+**`session` is asserted, not proven.** board.mjs's leader / assignee / self-accept checks stop a
+session's mistake — assigning as a member, accepting its own work — not a session that passes
+another session's id. Only the owner's words at a gate are proven, in the transcript.
 
 ### Output
 
@@ -126,6 +146,7 @@ gate-passing ones, was agreed with wec.aria (the board's owner).
 | `new_unit` | a weight lighter than the rubric recommends |
 | `acknowledge` | always (one sha, or `offBoard: true`) |
 | `discover` | the `owner: true` disposition |
+| `accept` | a `gate_by: owner` task unit — the owner's words typed in the leader's own session |
 
 The owner's words go in as `gate` → `--gate=<words>` (join several answers from one message with
 `||`). **This server refuses a blank `||` part** (`"||"`, `" || "`, `"a||"`): every message
@@ -148,10 +169,11 @@ session: any process that knows a session id can name it.
 | `precheck.mjs` | A separate script (headless Chrome over a unit's routes), not a board.mjs subcommand. |
 | `shoot.mjs` | A separate script (playwright-core screenshots; may open a window for sign-in), not a subcommand. |
 | `release --force` | Releases another session's claim — "the owner's call" with no proof of the owner. Run it from the CLI. |
+| `lead --force` | Replaces another session's lead record for the day — the owner's, after moving the coordinator lock. Run it from the CLI. |
 | `--words --session --uuid` | Never from the model; `--gate` + `--as=<uuid>` instead. |
 
-`src/tools/commandMap.ts` holds this list, and `commandMap.test.ts` parses the `commands` and
-`more_commands` keys out of board.mjs / more.mjs: a subcommand wec.aria adds fails that test until
+`src/tools/commandMap.ts` holds this list, and `commandMap.test.ts` parses the `commands`,
+`more_commands` and `task_commands` keys out of board.mjs / more.mjs / task.mjs: a subcommand wec.aria adds fails that test until
 it is mapped or excluded with a reason. The test needs a wec.aria checkout (`BOARD_REPO_ROOT`, or
 `D:/1.SourceCode/crm/wec.aria`) and skips without one, as in this workspace's CI.
 
@@ -165,3 +187,7 @@ it is mapped or excluded with a reason. The test needs a wec.aria checkout (`BOA
 - `writePath.test.ts` — the REAL board.mjs on a scratch git repo (board code + units copied into a
   temp dir): claim, a second session refused, a gate refused without the owner's words, release.
   **No write subcommand ever runs against wec.aria itself** — its board is shared by several sessions.
+- `taskPath.test.ts` — the task tools on the REAL board.mjs in a scratch repo, with `BOARD_LIVE_DIR`,
+  `HANDOVER_DIR` and a home of its own set for the child: assign by a non-leader, claim of another's
+  assigned unit, report by a non-assignee and self-accept refused; lead → assign → claim → report →
+  accept → `status` today. Skips when the board under test has no `task.mjs`.
