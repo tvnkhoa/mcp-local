@@ -65,6 +65,7 @@ any accept by the assignee or a past claimant.
 - This proves the owner typed the words in that session's transcript — not that the caller is that session. `session` is asserted, not proven.
 - Not offered: `prune-shots`, `precheck.mjs`, `shoot.mjs`, `release --force` and `lead --force` (the owner's, from the CLI).
 - `check` / `gate` returning `ok: false` without `refused` is a findings report, not a failure.
+- After board-mcp is upgraded, restart the session: `/mcp` alone keeps the old parameters of tools you already have (e.g. `status` without `today`/`by`).
 - A call gets SIGTERM after `BOARD_CALL_TIMEOUT_MS` (default 120 s; a cold `status`/`check` takes up to ~120 s).
 - `gate`: no `||` part may be blank (refused here). A part under 8 characters counts only if it is a whole line of the owner's message — board.mjs's rule, so quote more of what they typed.
 

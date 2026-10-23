@@ -16,6 +16,11 @@ npm run smoke          # stdio handshake + read-only calls (needs a build; force
 npm run dev            # tsx, no build
 ```
 
+**After an upgrade, restart the Claude Code session — `/mcp` is not enough.** A reconnect starts the
+new server, but the session keeps the OLD schema of tools it already holds: seen live on 23 Oct 2026,
+`status` still lacked `today`/`by` after `/mcp` (a call passing `today` still worked — the server had it).
+New tools appear; changed parameters of existing ones need a new session.
+
 ## Configuration (env)
 
 <!-- BEGIN GENERATED: env-table -->
