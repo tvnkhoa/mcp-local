@@ -88,6 +88,8 @@ export type ToolRequestContext = {
   progressNotifier?: (progress: number, total: number | undefined, message: string) => void;
   /** Set by the R1 freshness gate before a read tool runs; folded into the payload by `asText`. */
   freshness?: FreshnessNote;
+  /** R4: the HTTP client session the call arrived on; absent on stdio. Scopes refactor previews. */
+  clientSessionId?: string;
 };
 
 export type ToolTelemetryEvent = {

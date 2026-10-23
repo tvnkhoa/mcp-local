@@ -32,6 +32,7 @@ import type {
   AnyToolDefinition,
   CallWrapper,
   McpServerHandle,
+  McpServerOptions,
   ResourceProvider,
   ToolCallResult
 } from "@mcp/sdk";
@@ -71,6 +72,8 @@ export interface CodebaseIndexServerOptions {
   /** The entry point's own serializer — it emits telemetry as a side effect. */
   readonly renderResult: (payload: unknown, profile: ResponseProfile) => CallToolResult;
   readonly telemetry: TelemetryConfig;
+  /** R4: stdio by default; http serves every client from this one process. */
+  readonly transport?: McpServerOptions["transport"];
 }
 
 /**
@@ -162,7 +165,8 @@ export function createCodebaseIndexServer(options: CodebaseIndexServerOptions): 
       toolName: context.toolName,
       startedAt: Date.now(),
       args,
-      ...(context.progressToken === undefined ? {} : { progressNotifier: context.reportProgress })
+      ...(context.progressToken === undefined ? {} : { progressNotifier: context.reportProgress }),
+      ...(context.clientSessionId === undefined ? {} : { clientSessionId: context.clientSessionId })
     };
 
     return toolContextStorage.run(requestContext, async () => {
@@ -188,6 +192,7 @@ export function createCodebaseIndexServer(options: CodebaseIndexServerOptions): 
     // handler converted to return a plain payload, which would otherwise lose that emit with
     // no test or snapshot able to show it.
     renderResult: (payload, profile) => asWireResult(options.renderResult(payload, profile as ResponseProfile)),
-    wrapCall
+    wrapCall,
+    ...(options.transport === undefined ? {} : { transport: options.transport })
   });
 }

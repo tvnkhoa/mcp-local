@@ -34,6 +34,7 @@ import {
   performanceProfileOverrideFromEnv,
   ratioFromEnvName,
   stringFromEnv,
+  transportFromEnv,
   tsLanguageServiceConfigFromEnv,
   watchConfigFromEnv
 } from "./config/envConfig.js";
@@ -226,7 +227,9 @@ function asText(payload: unknown, profile: ResponseProfile = "standard"): CallTo
 }
 
 function buildHandlerContext(): HandlerContext {
+  const clientSessionId = toolContextStorage.getStore()?.clientSessionId;
   return {
+    ...(clientSessionId === undefined ? {} : { clientSessionId }),
     store,
     watchManager,
     activeWatchRef,
@@ -270,7 +273,9 @@ const handle = createCodebaseIndexServer({
   buildHandlerContext,
   toolContextStorage,
   renderResult: asText,
-  telemetry: { enabled: TELEMETRY_ENABLED, sampleRate: TELEMETRY_SAMPLE_RATE }
+  telemetry: { enabled: TELEMETRY_ENABLED, sampleRate: TELEMETRY_SAMPLE_RATE },
+  // R4: one process, many clients — the store, watchers and refresh worker below are shared by all.
+  transport: transportFromEnv()
 });
 
 // Registered before start(), and store-before-watchers on purpose: hooks run in reverse, so

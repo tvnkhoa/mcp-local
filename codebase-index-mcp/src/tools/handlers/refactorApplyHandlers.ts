@@ -20,7 +20,7 @@ import {
 import type { RefactorApplyHunkRecord, RefactorRollbackRecord } from "../../types/index.js";
 import { resolveResponseProfile } from "../../middleware/responseFormatter.js";
 import type { HandlerContext } from "./handlerContext.js";
-import { applyPreviewExclusively } from "./refactorApplyGate.js";
+import { applyPreviewExclusively, assertPreviewOwner } from "./refactorApplyGate.js";
 
 export async function handleRefactorReplaceApply(
   args: {
@@ -39,6 +39,7 @@ export async function handleRefactorReplaceApply(
   if (!preview) {
     throw new McpError(ErrorCode.InvalidParams, `refactor_replace_apply: preview '${args.previewId}' not found.`);
   }
+  assertPreviewOwner(preview.preview, ctx, "refactor_replace_apply");
   if (Date.parse(preview.preview.expiresAt) < Date.now()) {
     throw new PolicyViolationError("PREVIEW_EXPIRED", "refactor_replace_apply: preview expired. Create a fresh preview before apply.");
   }

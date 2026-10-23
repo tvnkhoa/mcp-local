@@ -407,6 +407,12 @@ export function runGraphMigrations(db: Database.Database, vectorEnabled: boolean
       db.exec("alter table symbols add column end_line integer");
     }
 
+    // R4: the HTTP client session that owns a refactor preview (null = stdio / pre-R4).
+    const previewCols = db.prepare("pragma table_info(refactor_previews)").all() as { name: string }[];
+    if (previewCols.length > 0 && !previewCols.some((c) => c.name === "client_session")) {
+      db.exec("alter table refactor_previews add column client_session text");
+    }
+
     // MCP-ISSUE-055: the registration-site handler name, so a partial-class handler declared in a
     // sibling file still has a name even when its symbol id could not be resolved.
     const routesCols = db.prepare("pragma table_info(routes)").all() as { name: string }[];

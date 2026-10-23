@@ -43,8 +43,9 @@ export function saveRefactorPreviewImpl(
       insert into refactor_previews (
         preview_id, repo_id, find_pattern, replace_expression, mode,
         ambiguity_threshold_percent, created_at, expires_at, digest, status,
-        total_matches, affected_file_count, risk_ambiguous_count, risk_cross_type_count, risk_generated_count
-      ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        total_matches, affected_file_count, risk_ambiguous_count, risk_cross_type_count, risk_generated_count,
+        client_session
+      ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       on conflict(preview_id) do update set
         repo_id = excluded.repo_id,
         find_pattern = excluded.find_pattern,
@@ -59,7 +60,8 @@ export function saveRefactorPreviewImpl(
         affected_file_count = excluded.affected_file_count,
         risk_ambiguous_count = excluded.risk_ambiguous_count,
         risk_cross_type_count = excluded.risk_cross_type_count,
-        risk_generated_count = excluded.risk_generated_count
+        risk_generated_count = excluded.risk_generated_count,
+        client_session = excluded.client_session
       `
     ).run(
       previewRow.previewId,
@@ -76,7 +78,8 @@ export function saveRefactorPreviewImpl(
       previewRow.affectedFileCount,
       previewRow.riskAmbiguousCount,
       previewRow.riskCrossTypeCount,
-      previewRow.riskGeneratedCount
+      previewRow.riskGeneratedCount,
+      previewRow.clientSession ?? null
     );
 
     db.prepare(`delete from refactor_preview_hunks where preview_id = ?`).run(previewRow.previewId);
@@ -138,7 +141,8 @@ export function getRefactorPreviewImpl(
         affected_file_count as affectedFileCount,
         risk_ambiguous_count as riskAmbiguousCount,
         risk_cross_type_count as riskCrossTypeCount,
-        risk_generated_count as riskGeneratedCount
+        risk_generated_count as riskGeneratedCount,
+        client_session as clientSession
       from refactor_previews
       where preview_id = ?
       limit 1

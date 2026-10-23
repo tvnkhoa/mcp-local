@@ -28,6 +28,7 @@ import type {
 import type { RefactorPreviewRecord, RefactorPreviewHunkRecord } from "../../types/index.js";
 import { resolveResponseProfile } from "../../middleware/responseFormatter.js";
 import type { HandlerContext } from "./handlerContext.js";
+import { previewOwnerOf } from "./refactorApplyGate.js";
 
 export function handleRenameAssist(
   args: { repoId: string; symbolId: string; newName: string; limit: number; emitPreview?: boolean; wholeWord?: boolean; scopePaths?: string[]; profile: string },
@@ -188,7 +189,8 @@ function createReplacePreview(
     mode: args.mode, ambiguityThresholdPercent: args.ambiguityThresholdPercent,
     createdAt: now.toISOString(), expiresAt, digest, status: "ready",
     totalMatches: effectiveHunks.length, affectedFileCount: effectiveAffectedFiles.length,
-    riskAmbiguousCount: riskCounts.ambiguous, riskCrossTypeCount: riskCounts.crossType, riskGeneratedCount: riskCounts.generated
+    riskAmbiguousCount: riskCounts.ambiguous, riskCrossTypeCount: riskCounts.crossType, riskGeneratedCount: riskCounts.generated,
+    clientSession: previewOwnerOf(ctx)
   };
 
   const hunkRecords: RefactorPreviewHunkRecord[] = effectiveHunks.map((hunk, index) => ({

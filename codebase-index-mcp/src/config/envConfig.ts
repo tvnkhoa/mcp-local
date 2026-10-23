@@ -199,6 +199,28 @@ export function performanceProfileOverrideFromEnv(): PerformanceProfile | "auto"
  * give as a lower bound. `_COLD_START_MS` is the budget for one answer (cold or warm) and
  * `_MAX_RSS_MB` the process RSS ceiling; a breach is a coverage gap, never a partial list.
  */
+/**
+ * R4: how this process is reached. stdio unless started with `--transport http` (what
+ * `scripts/serve-http.mjs` passes), so an HTTP port left in a stdio registration's env never turns
+ * a per-session server into a listener. http needs both `CODEBASE_INDEX_HTTP_PORT` and
+ * `CODEBASE_INDEX_HTTP_TOKEN`; a missing one is a start-up failure, not a silent stdio fallback.
+ */
+export function transportFromEnv(
+  argv: readonly string[] = process.argv.slice(2)
+): { kind: "stdio" } | { kind: "http"; port: number; token: string } {
+  const flag = argv.findIndex((a) => a === "--transport" || a.startsWith("--transport="));
+  const value = flag < 0 ? "stdio" : argv[flag]!.includes("=") ? argv[flag]!.split("=")[1] : argv[flag + 1];
+  if (value === "stdio") return { kind: "stdio" };
+  if (value !== "http") throw new Error(`--transport must be stdio or http, got ${String(value)}`);
+  const port = Number(process.env.CODEBASE_INDEX_HTTP_PORT ?? "");
+  const token = process.env.CODEBASE_INDEX_HTTP_TOKEN ?? "";
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    throw new Error("--transport http needs CODEBASE_INDEX_HTTP_PORT (1-65535)");
+  }
+  if (token === "") throw new Error("--transport http needs CODEBASE_INDEX_HTTP_TOKEN");
+  return { kind: "http", port, token };
+}
+
 export function tsLanguageServiceConfigFromEnv(): { enabled: boolean; budgetMs: number; maxRssMb: number } {
   return {
     enabled: booleanFromEnv("CODEBASE_INDEX_TS_LS_ENABLED", true),
