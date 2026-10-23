@@ -4,6 +4,7 @@ import { test } from "node:test";
 
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import type { Logger } from "@mcp/core";
 import { createNullLogger, ok } from "@mcp/core";
 import { z } from "zod";
 
@@ -25,12 +26,12 @@ const whoami = defineTool({
 });
 
 /** An http server whose `whoami` answers with the CallContext's clientSessionId. */
-async function startServer(extra: { maxSessions?: number } = {}) {
+async function startServer(extra: { maxSessions?: number } = {}, log: Logger = logger) {
   const handle = createMcpServer({
     name: "http-test",
     version: "0.0.1",
     tools: [whoami],
-    logger,
+    logger: log,
     protectStdout: false,
     handleSignals: false,
     transport: { kind: "http", port: 0, token: TOKEN, ...extra },
@@ -171,4 +172,31 @@ test("http: a client closing its session runs no shutdown hook; the cap refuses 
     await handle.stop();
   }
   assert.equal(hookRan, true);
+});
+
+test("http: an initialize refused before a session id is assigned closes its server (FX-R2)", async () => {
+  const events: string[] = [];
+  const capture: Logger = {
+    level: "debug",
+    debug: () => undefined,
+    info: (message) => { events.push(message); },
+    warn: () => undefined,
+    error: () => undefined,
+    child: () => capture
+  };
+  const handle = await startServer({}, capture);
+  try {
+    const port = handle.httpPort()!;
+    // The protocol SDK refuses (406) a POST that does not accept text/event-stream — after our
+    // gate, before any session id exists.
+    const status = await rawPost(port, { authorization: `Bearer ${TOKEN}`, accept: "application/json" });
+    assert.equal(status, 406);
+    assert.ok(events.includes("http_session_abandoned"), `expected http_session_abandoned in ${events.join(", ")}`);
+    assert.equal(events.includes("http_session_opened"), false);
+    // The process still serves a well-formed client afterwards.
+    const client = await connect(port);
+    await client.close();
+  } finally {
+    await handle.stop();
+  }
 });

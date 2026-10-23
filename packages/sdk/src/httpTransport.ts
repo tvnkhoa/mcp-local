@@ -162,8 +162,21 @@ export async function startHttpTransport(
         logger.info("http_session_closed", { sessionId, reason: "transport_closed", sessions: sessions.size });
       }
     };
-    await server.connect(transport);
-    await transport.handleRequest(req, res, body);
+    // An initialize refused before a session id is assigned (a bad Accept header, a malformed
+    // request, a throw) leaves a server nobody can reach again: close it rather than leak it.
+    const abandon = async (reason: string): Promise<void> => {
+      logger.info("http_session_abandoned", { reason });
+      await server.close().catch(() => undefined);
+    };
+    try {
+      await server.connect(transport);
+      await transport.handleRequest(req, res, body);
+    } catch (cause) {
+      await abandon("initialize_threw");
+      throw cause;
+    }
+    const sessionId = transport.sessionId;
+    if (sessionId === undefined || !sessions.has(sessionId)) await abandon("initialize_refused");
   };
 
   const handle = async (req: http.IncomingMessage, res: http.ServerResponse): Promise<void> => {
