@@ -1105,9 +1105,12 @@ timeout set near 5 s turns the ceiling into a failure.
 result freshness-bound (the read returned at the budget, not at completion). Pick by measuring both
 against a refreshing repo; do not reason it.
 
-**Files affected** the freshness-wait path in `codebase-index-mcp/src/` (find it with `search_regex`
-for the budget constant), its env spec in `packages/manifest/src/envSpecs/codebase-index.ts` if the cap
-becomes a variable
+**Files affected** `codebase-index-mcp/src/index.ts` — the constant `QUERY_REFRESH_BUDGET_MS` (default
+5000, read from the env var `CODEBASE_INDEX_QUERY_REFRESH_BUDGET_MS`, declared in
+`packages/manifest/src/envSpecs/codebaseIndex.ts`) is the `budgetMs` handed to the freshness gate that
+every read tool waits on via `ensureFresh`. The same constant also bounds `find_field_accesses`'s wait for
+the type-resolution worker, so a lower cap reaches it too. Today it can already be lowered per
+deployment by setting the variable; the proposal is a lower default under `--transport http`, or the label.
 
 **Risk** — **Low.** Read-path timing and one response field.
 
