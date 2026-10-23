@@ -28,6 +28,8 @@ import type { Entry } from "./collect.js";
 import { redirectConsoleToStderr } from "./console.js";
 import type { DispatchDeps } from "./dispatch.js";
 import { dispatchToolCall } from "./dispatch.js";
+import type { HttpTransportHandle, HttpTransportOptions } from "./httpTransport.js";
+import { startHttpTransport, validateHttpTransportOptions } from "./httpTransport.js";
 import type { Lifecycle } from "./lifecycle.js";
 import { createLifecycle } from "./lifecycle.js";
 import type { PromptDefinition, PromptProvider } from "./prompts.js";
@@ -86,13 +88,23 @@ export interface McpServerOptions {
    * pre- or post-dispatch policy can live. See {@link CallWrapper}.
    */
   readonly wrapCall?: CallWrapper;
+  /**
+   * How the server is reached. stdio (the default) serves the one client that spawned it; http
+   * serves many from one long-running process on 127.0.0.1, one protocol session per client over
+   * the same registry and services — see `httpTransport.ts`.
+   */
+  readonly transport?: TransportOptions;
 }
+
+export type TransportOptions = { readonly kind: "stdio" } | ({ readonly kind: "http" } & HttpTransportOptions);
 
 export interface McpServerHandle {
   readonly server: Server;
   readonly registry: ToolRegistry;
   readonly lifecycle: Lifecycle;
   readonly logger: Logger;
+  /** The bound port once an http transport has started; undefined on stdio. */
+  httpPort(): number | undefined;
   start(): Promise<void>;
   stop(reason?: string): Promise<void>;
 }
@@ -124,20 +136,11 @@ export function createMcpServer(options: McpServerOptions): McpServerHandle {
       : registerPrompt(options.prompts)
     : (options.prompts as PromptProvider | undefined);
 
-  const server = new Server(
-    { name: options.name, version: options.version },
-    {
-      capabilities: {
-        tools: {},
-        ...(resources === undefined ? {} : { resources: {} }),
-        ...(prompts === undefined ? {} : { prompts: {} })
-      }
-    }
-  );
-
-  server.setRequestHandler(ListToolsRequestSchema, async () => ({
-    tools: registry.list().map((descriptor) => ({ ...descriptor }))
-  }));
+  const transportOptions = options.transport ?? { kind: "stdio" };
+  if (transportOptions.kind === "http") {
+    // Fail at construction, not at the first request: a server must never start half-configured.
+    validateHttpTransportOptions(transportOptions);
+  }
 
   const dispatchDeps: DispatchDeps = {
     logger,
@@ -149,110 +152,137 @@ export function createMcpServer(options: McpServerOptions): McpServerHandle {
 
   const wrapCall = options.wrapCall;
 
-  server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
-    const toolName = request.params.name;
-    const args = (request.params.arguments ?? {}) as Record<string, unknown>;
-    const next = (): Promise<ToolCallResult> => dispatchToolCall(registry, toolName, args, dispatchDeps);
-
-    if (wrapCall === undefined) {
-      return { ...(await next()) };
-    }
-
-    // Only read off the request when a wrapper exists to receive it: `_meta` is
-    // untyped by the protocol schema and this is the one narrowing of it.
-    const progressToken = (request.params._meta as { progressToken?: string | number } | undefined)
-      ?.progressToken;
-
-    const context: CallContext = {
-      toolName,
-      args,
-      ...(progressToken === undefined ? {} : { progressToken }),
-      reportProgress: (progress, total, message) => {
-        if (progressToken === undefined) {
-          return;
+  /**
+   * One protocol `Server` with every handler attached. stdio needs exactly one; http builds one per
+   * client session. Everything a handler reaches — registry, providers, dispatch deps — is created
+   * once, above, and shared.
+   */
+  const buildProtocolServer = (): Server => {
+    const server = new Server(
+      { name: options.name, version: options.version },
+      {
+        capabilities: {
+          tools: {},
+          ...(resources === undefined ? {} : { resources: {} }),
+          ...(prompts === undefined ? {} : { prompts: {} })
         }
-        void extra
-          .sendNotification({
-            method: "notifications/progress",
-            params: { progressToken, progress, ...(total === undefined ? {} : { total }), message }
-          })
-          // Best-effort by contract: a dropped progress frame must never fail
-          // the tool call that produced it.
-          .catch(() => undefined);
       }
-    };
+    );
 
-    try {
-      return { ...(await wrapCall(context, next)) };
-    } catch (cause) {
-      // dispatchToolCall never rejects, so this can only be the wrapper itself.
-      // Letting it escape would turn a server-side bug into a protocol error the
-      // client cannot interpret, which is the one thing this layer guarantees
-      // against.
-      logger.error("wrap_call_failed", { tool: toolName, detail: String(cause) });
-      return { ...asFatalError() };
-    }
-  });
-
-  if (resources !== undefined) {
-    server.setRequestHandler(ListResourcesRequestSchema, async (request) => ({
-      // The cursor is forwarded, not interpreted: paging is the provider's business.
-      resources: (await resources.list(request.params?.cursor)).map((descriptor) => ({ ...descriptor }))
+    server.setRequestHandler(ListToolsRequestSchema, async () => ({
+      tools: registry.list().map((descriptor) => ({ ...descriptor }))
     }));
 
-    server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
-      const uri = request.params.uri;
-      const contents = await resources.read(uri);
-      if (contents === undefined) {
-        // Distinct from a read that failed: the URI is not one this server
-        // routes at all, which is an invalid parameter rather than an internal
-        // fault. Anything the provider throws propagates instead.
-        throw new McpError(ErrorCode.InvalidParams, `Unsupported resource URI: ${uri}`);
+    server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
+      const toolName = request.params.name;
+      const args = (request.params.arguments ?? {}) as Record<string, unknown>;
+      const next = (): Promise<ToolCallResult> => dispatchToolCall(registry, toolName, args, dispatchDeps);
+
+      if (wrapCall === undefined) {
+        return { ...(await next()) };
       }
-      return { contents: contents.map((content) => ({ ...content })) };
-    });
-  }
 
-  if (prompts !== undefined) {
-    server.setRequestHandler(ListPromptsRequestSchema, async (request) => ({
-      // Cursor forwarded, not interpreted — the provider owns paging, as with resources.
-      prompts: (await prompts.list(request.params?.cursor)).map((descriptor) => ({
-        ...descriptor,
-        ...(descriptor.arguments === undefined
-          ? {}
-          : { arguments: descriptor.arguments.map((argument) => ({ ...argument })) })
-      }))
-    }));
+      // Only read off the request when a wrapper exists to receive it: `_meta` is
+      // untyped by the protocol schema and this is the one narrowing of it.
+      const progressToken = (request.params._meta as { progressToken?: string | number } | undefined)
+        ?.progressToken;
 
-    server.setRequestHandler(GetPromptRequestSchema, async (request) => {
-      const name = request.params.name;
-      let result;
-      try {
-        result = await prompts.get(name, request.params.arguments ?? {});
-      } catch (cause) {
-        /**
-         * A user-audience `PlatformError` is a bad request, not a server fault —
-         * a missing required argument being the one `createPrompt` itself raises.
-         * Mapping it to invalid-params keeps the client's own retry logic viable;
-         * anything else is a genuine failure and propagates as it is.
-         */
-        if (isPlatformError(cause) && cause.audience === "user") {
-          throw new McpError(ErrorCode.InvalidParams, cause.message);
+      const context: CallContext = {
+        toolName,
+        args,
+        ...(progressToken === undefined ? {} : { progressToken }),
+        ...(extra.sessionId === undefined ? {} : { clientSessionId: extra.sessionId }),
+        reportProgress: (progress, total, message) => {
+          if (progressToken === undefined) {
+            return;
+          }
+          void extra
+            .sendNotification({
+              method: "notifications/progress",
+              params: { progressToken, progress, ...(total === undefined ? {} : { total }), message }
+            })
+            // Best-effort by contract: a dropped progress frame must never fail
+            // the tool call that produced it.
+            .catch(() => undefined);
         }
-        throw cause;
-      }
-      if (result === undefined) {
-        // Same distinction resources draw: a name this server does not serve is
-        // an invalid parameter, not an internal fault.
-        throw new McpError(ErrorCode.InvalidParams, `Unknown prompt: ${name}`);
-      }
-      return {
-        ...(result.description === undefined ? {} : { description: result.description }),
-        messages: result.messages.map((message) => ({ ...message, content: { ...message.content } }))
       };
-    });
-  }
 
+      try {
+        return { ...(await wrapCall(context, next)) };
+      } catch (cause) {
+        // dispatchToolCall never rejects, so this can only be the wrapper itself.
+        // Letting it escape would turn a server-side bug into a protocol error the
+        // client cannot interpret, which is the one thing this layer guarantees
+        // against.
+        logger.error("wrap_call_failed", { tool: toolName, detail: String(cause) });
+        return { ...asFatalError() };
+      }
+    });
+
+    if (resources !== undefined) {
+      server.setRequestHandler(ListResourcesRequestSchema, async (request) => ({
+        // The cursor is forwarded, not interpreted: paging is the provider's business.
+        resources: (await resources.list(request.params?.cursor)).map((descriptor) => ({ ...descriptor }))
+      }));
+
+      server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
+        const uri = request.params.uri;
+        const contents = await resources.read(uri);
+        if (contents === undefined) {
+          // Distinct from a read that failed: the URI is not one this server
+          // routes at all, which is an invalid parameter rather than an internal
+          // fault. Anything the provider throws propagates instead.
+          throw new McpError(ErrorCode.InvalidParams, `Unsupported resource URI: ${uri}`);
+        }
+        return { contents: contents.map((content) => ({ ...content })) };
+      });
+    }
+
+    if (prompts !== undefined) {
+      server.setRequestHandler(ListPromptsRequestSchema, async (request) => ({
+        // Cursor forwarded, not interpreted — the provider owns paging, as with resources.
+        prompts: (await prompts.list(request.params?.cursor)).map((descriptor) => ({
+          ...descriptor,
+          ...(descriptor.arguments === undefined
+            ? {}
+            : { arguments: descriptor.arguments.map((argument) => ({ ...argument })) })
+        }))
+      }));
+
+      server.setRequestHandler(GetPromptRequestSchema, async (request) => {
+        const name = request.params.name;
+        let result;
+        try {
+          result = await prompts.get(name, request.params.arguments ?? {});
+        } catch (cause) {
+          /**
+           * A user-audience `PlatformError` is a bad request, not a server fault —
+           * a missing required argument being the one `createPrompt` itself raises.
+           * Mapping it to invalid-params keeps the client's own retry logic viable;
+           * anything else is a genuine failure and propagates as it is.
+           */
+          if (isPlatformError(cause) && cause.audience === "user") {
+            throw new McpError(ErrorCode.InvalidParams, cause.message);
+          }
+          throw cause;
+        }
+        if (result === undefined) {
+          // Same distinction resources draw: a name this server does not serve is
+          // an invalid parameter, not an internal fault.
+          throw new McpError(ErrorCode.InvalidParams, `Unknown prompt: ${name}`);
+        }
+        return {
+          ...(result.description === undefined ? {} : { description: result.description }),
+          messages: result.messages.map((message) => ({ ...message, content: { ...message.content } }))
+        };
+      });
+    }
+
+    return server;
+  };
+
+  const server = buildProtocolServer();
+  let http: HttpTransportHandle | undefined;
   let restoreConsole: (() => void) | undefined;
   let detachSignals: (() => void) | undefined;
 
@@ -261,6 +291,8 @@ export function createMcpServer(options: McpServerOptions): McpServerHandle {
     registry,
     lifecycle,
     logger,
+
+    httpPort: () => http?.port(),
 
     async start() {
       if (options.protectStdout !== false) {
@@ -277,6 +309,14 @@ export function createMcpServer(options: McpServerOptions): McpServerHandle {
         toolsRegistered: stats.registered,
         toolsLegacy: stats.legacy
       });
+
+      if (transportOptions.kind === "http") {
+        http = await startHttpTransport(transportOptions, buildProtocolServer, logger);
+        const started = http;
+        lifecycle.onShutdown({ name: "transport", run: () => started.close() });
+        logger.info("server_ready", { name: options.name, transport: "http", port: started.port() });
+        return;
+      }
 
       const transport = new StdioServerTransport();
       lifecycle.onShutdown({

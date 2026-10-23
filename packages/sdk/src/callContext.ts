@@ -26,6 +26,12 @@ export interface CallContext {
    */
   readonly progressToken?: string | number;
   /**
+   * The protocol session the call arrived on — set on the http transport only, where one process
+   * serves many clients. State a client must not see another client's (a refactor preview it may
+   * apply, say) is keyed by this. Absent on stdio, where the process has exactly one client.
+   */
+  readonly clientSessionId?: string;
+  /**
    * Fire-and-forget progress update. A no-op when {@link progressToken} is
    * absent, and never throws — progress must not be able to fail a tool call.
    */
