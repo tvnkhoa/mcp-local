@@ -318,7 +318,8 @@ node scripts/install-mcp.mjs --server codebase-index --transport stdio  # back t
 - **After switching a server's transport (stdio ↔ http), restart each Claude session.** `/mcp` reconnect
   only re-dials the new entry; it does not reap the old stdio child, which stays alive under the session
   (seen on the R4 rollout: a stdio `dist/index.js` still running after the http switch) and keeps its own
-  index runtime in memory.
+  index runtime in memory. To tell which process answered, compare `health_check.server.pid` /
+  `buildAt` with the served process.
 
 ---
 

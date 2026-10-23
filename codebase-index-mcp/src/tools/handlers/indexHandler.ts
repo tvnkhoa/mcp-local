@@ -1,3 +1,6 @@
+import { statSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { transportFromEnv } from "../../config/envConfig.js";
 import { loadCitationConfig } from "../../services/docs/citationConfig.js";
 import { isTestPath } from "../../services/indexing/fileFilter.js";
 import { freshnessStateDir, readDirtyLedger, vanishedDirtyPaths } from "../../middleware/freshness.js";
@@ -49,6 +52,28 @@ function asInvalidParamsOnBadRef<T>(run: () => T): T {
 }
 
 // ── health_check ─────────────────────────────────────────────────────────────
+
+// Module-level on purpose: this module loads at start-up, so the timestamp is the process's own
+// start without an OS call. Compared with the served process, `pid` / `buildAt` expose a session
+// still talking to an old stdio child after a `/mcp` transport switch or an upgrade.
+const PROCESS_STARTED_AT = new Date().toISOString();
+
+/** ISO mtime of the running entry (`dist/index.js`, two levels up from this file); null if unreadable. */
+function entryBuildAt(): string | null {
+  try {
+    return statSync(fileURLToPath(new URL("../../index.js", import.meta.url))).mtime.toISOString();
+  } catch {
+    return null;
+  }
+}
+
+/** Which process answered. Small enough for every response profile. */
+export function buildServerInfo(
+  transport: "stdio" | "http" = transportFromEnv().kind,
+  buildAt: string | null = entryBuildAt()
+): { pid: number; startedAt: string; transport: "stdio" | "http"; buildAt: string | null } {
+  return { pid: process.pid, startedAt: PROCESS_STARTED_AT, transport, buildAt };
+}
 
 export async function handleHealthCheck(
   args: { repoId?: string },
@@ -182,6 +207,7 @@ export async function handleHealthCheck(
   return ctx.asText({
     status: "ok",
     serverVersion: constants.SERVER_VERSION,
+    server: buildServerInfo(),
     dbPath: constants.dbPath,
     allowedRootCount: constants.allowedRoots.length,
     docsLane: {
