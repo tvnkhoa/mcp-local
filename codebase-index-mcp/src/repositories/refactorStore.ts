@@ -216,8 +216,8 @@ export function recordRefactorApplyImpl(
       `
       insert into refactor_applies (
         apply_id, rollback_id, preview_id, repo_id, status,
-        created_at, completed_at, total_files, total_replacements, conflict_count
-      ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        created_at, completed_at, total_files, total_replacements, conflict_count, client_session
+      ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `
     ).run(
       applyRow.applyId,
@@ -229,7 +229,8 @@ export function recordRefactorApplyImpl(
       applyRow.completedAt,
       applyRow.totalFiles,
       applyRow.totalReplacements,
-      applyRow.conflictCount
+      applyRow.conflictCount,
+      applyRow.clientSession ?? null
     );
 
     const insertChange = db.prepare(
@@ -349,7 +350,8 @@ export function getApplyByRollbackIdImpl(
         completed_at as completedAt,
         total_files as totalFiles,
         total_replacements as totalReplacements,
-        conflict_count as conflictCount
+        conflict_count as conflictCount,
+        client_session as clientSession
       from refactor_applies
       where rollback_id = ?
       limit 1

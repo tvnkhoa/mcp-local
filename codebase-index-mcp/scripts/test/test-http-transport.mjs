@@ -151,6 +151,16 @@ try {
   check("A applies its own preview", !own.isError, own.content[0].text.slice(0, 300));
   check("A's apply wrote the file", fs.readFileSync(path.join(repo, "src", "greet.ts"), "utf8").includes("welcomeUser"));
 
+  // ── rollbacks are per session too (FX-R1) ──────────────────────────────────
+  const rollbackId = own.isError ? undefined : payload(own).rollbackId;
+  check("A's apply returned a rollbackId", typeof rollbackId === "string", own.content[0].text.slice(0, 300));
+  const undoneByB = await b.client.callTool({ name: "refactor_replace_rollback", arguments: { rollbackId } });
+  check("B rolling back A's apply is refused", undoneByB.isError === true && undoneByB.content[0].text.includes("APPLY_OWNED_BY_ANOTHER_SESSION"), undoneByB.content[0].text.slice(0, 300));
+  check("B's refused rollback restored nothing", fs.readFileSync(path.join(repo, "src", "greet.ts"), "utf8").includes("welcomeUser"));
+  const undoneByA = await a.client.callTool({ name: "refactor_replace_rollback", arguments: { rollbackId } });
+  check("A rolls back its own apply", !undoneByA.isError, undoneByA.content[0].text.slice(0, 300));
+  check("A's rollback restored the file", fs.readFileSync(path.join(repo, "src", "greet.ts"), "utf8").includes("greetUser"));
+
   // ── one client leaving does not stop the other ─────────────────────────────
   await a.transport.terminateSession();
   await a.client.close();

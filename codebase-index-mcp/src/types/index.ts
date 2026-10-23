@@ -538,6 +538,8 @@ export type RefactorApplyRecord = {
   totalFiles: number;
   totalReplacements: number;
   conflictCount: number;
+  /** R4: the HTTP client session that applied; only it may roll back. Null on stdio and pre-R4. */
+  clientSession?: string | null;
 };
 
 export type RefactorApplyChangeRecord = {

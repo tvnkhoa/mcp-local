@@ -28,6 +28,17 @@ export function assertPreviewOwner(preview: RefactorPreviewRecord, ctx: HandlerC
   }
 }
 
+/** The same rule for refactor_replace_rollback: only the session that applied may undo it. */
+export function assertApplyOwner(apply: RefactorApplyRecord, ctx: HandlerContext, toolName: string): void {
+  const owner = apply.clientSession ?? null;
+  if (owner !== null && owner !== ctx.clientSessionId) {
+    throw new PolicyViolationError(
+      "APPLY_OWNED_BY_ANOTHER_SESSION",
+      `${toolName}: rollback '${apply.rollbackId}' undoes an apply made by another client session; only that session may roll it back.`
+    );
+  }
+}
+
 export function previewOwnerOf(ctx: HandlerContext): string | null {
   return ctx.clientSessionId ?? null;
 }
@@ -67,7 +78,7 @@ export function applyPreviewExclusively(
   previewId: string,
   hunks: RefactorPreviewHunkRecord[],
   expectedApplyFiles: Set<string>,
-  opts: { maxFilesPerBatch: number; stopOnFirstConflict: boolean; includeLowConfidence: boolean; lowConfidenceThreshold: number }
+  opts: { maxFilesPerBatch: number; stopOnFirstConflict: boolean; includeLowConfidence: boolean; lowConfidenceThreshold: number; clientSession: string | null }
 ): Promise<ExclusiveApplyResult> {
   return runExclusiveApply(() => {
     const applyId = `apply_${randomUUID()}`;
@@ -85,7 +96,8 @@ export function applyPreviewExclusively(
     const applyRecord: RefactorApplyRecord = {
       applyId, rollbackId, previewId, repoId,
       status: deriveApplyStatus(applyOutcome.changes), createdAt: new Date().toISOString(), completedAt: new Date().toISOString(),
-      totalFiles: appliedFiles.length, totalReplacements: appliedFiles.reduce((sum, item) => sum + item.replacementCount, 0), conflictCount
+      totalFiles: appliedFiles.length, totalReplacements: appliedFiles.reduce((sum, item) => sum + item.replacementCount, 0), conflictCount,
+      clientSession: opts.clientSession
     };
     store.recordRefactorApply(applyRecord, applyOutcome.changes, applyOutcome.appliedHunks);
     store.markRefactorPreviewStatus(previewId, mapPreviewStatusFromApplyStatus(applyRecord.status));

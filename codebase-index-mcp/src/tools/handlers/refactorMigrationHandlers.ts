@@ -173,7 +173,7 @@ export async function handleRefactorSymbolMigration(
       const expectedApplyFiles = collectExpectedApplyFiles(hunkRecords, includeLowConfidence, constants.REFACTOR_LOW_CONFIDENCE_THRESHOLD);
       const applied = await applyPreviewExclusively(
         store, repo.repoPath, args.repoId, previewId, hunkRecords, expectedApplyFiles,
-        { maxFilesPerBatch: 50, stopOnFirstConflict: true, includeLowConfidence, lowConfidenceThreshold: constants.REFACTOR_LOW_CONFIDENCE_THRESHOLD }
+        { maxFilesPerBatch: 50, stopOnFirstConflict: true, includeLowConfidence, lowConfidenceThreshold: constants.REFACTOR_LOW_CONFIDENCE_THRESHOLD, clientSession: previewOwnerOf(ctx) }
       );
       resultRow.applyId = applied.applyId;
       resultRow.rollbackId = applied.rollbackId;
@@ -292,7 +292,7 @@ export async function handleChangeValueRepresentation(
     const expectedApplyFiles = collectExpectedApplyFiles(hunkRecords, includeLowConfidence, constants.REFACTOR_LOW_CONFIDENCE_THRESHOLD);
     const applied = await applyPreviewExclusively(
       store, repo.repoPath, args.repoId, previewId, hunkRecords, expectedApplyFiles,
-      { maxFilesPerBatch: 50, stopOnFirstConflict: true, includeLowConfidence, lowConfidenceThreshold: constants.REFACTOR_LOW_CONFIDENCE_THRESHOLD }
+      { maxFilesPerBatch: 50, stopOnFirstConflict: true, includeLowConfidence, lowConfidenceThreshold: constants.REFACTOR_LOW_CONFIDENCE_THRESHOLD, clientSession: previewOwnerOf(ctx) }
     );
     result.applyId = applied.applyId;
     result.rollbackId = applied.rollbackId;
