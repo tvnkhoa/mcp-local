@@ -1089,6 +1089,37 @@ confirm a clean tree reports nothing.
 
 ---
 
+### B-17 · Cap the freshness budget below 5 s in shared/http mode — 🔵 OPEN, filed 2026-10-23
+
+Found on the R4 rollout (`codebase-index` served over HTTP, `scripts/serve-http.mjs`). The 5 s freshness
+budget lets a read wait on a repo that is refreshing, and one read was measured at **5011 ms** — the
+ceiling itself — on such a repo. Over HTTP every session shares the one refresh worker, so another
+session's refresh can put a read there; the result does not say it waited.
+
+**Purpose** Keep a read from sitting at the ceiling, or make it say so when it does.
+
+**Why** An agent cannot tell a 5 s read that was slow from one that was freshness-bound, and a client
+timeout set near 5 s turns the ceiling into a failure.
+
+**Proposal** Either cap the budget below 5 s when the server runs with `--transport http`, or label the
+result freshness-bound (the read returned at the budget, not at completion). Pick by measuring both
+against a refreshing repo; do not reason it.
+
+**Files affected** the freshness-wait path in `codebase-index-mcp/src/` (find it with `search_regex`
+for the budget constant), its env spec in `packages/manifest/src/envSpecs/codebase-index.ts` if the cap
+becomes a variable
+
+**Risk** — **Low.** Read-path timing and one response field.
+
+**Rollback** — R1.
+
+**Validation** Against a repo that is refreshing, time a read before and after: it stays under the new cap,
+or carries the label. A repo that is not refreshing is unchanged.
+
+**Complexity** — **S**
+
+---
+
 ## Explicitly NOT in this backlog
 
 Each of these is a recorded decision with a rationale. Reopening one needs a new ADR, not a backlog

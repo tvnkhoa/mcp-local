@@ -315,6 +315,10 @@ node scripts/install-mcp.mjs --server codebase-index --transport stdio  # back t
 - **Dev cycle changes:** after `npm run build`, `/mcp` reconnects to the *running* process; it does not
   restart it. Stop and start `serve-http` (or `schtasks /End` then `/Run` on the task) to load a new build.
   `mcp:doctor`'s `[running]` check reports a served process older than `dist/`.
+- **After switching a server's transport (stdio ↔ http), restart each Claude session.** `/mcp` reconnect
+  only re-dials the new entry; it does not reap the old stdio child, which stays alive under the session
+  (seen on the R4 rollout: a stdio `dist/index.js` still running after the http switch) and keeps its own
+  index runtime in memory.
 
 ---
 

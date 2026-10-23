@@ -162,7 +162,7 @@ Adding a server: `npm run new:server -- --key <name>`, then append it to
 
 **Local dev cycle:** `cd codebase-index-mcp && npm run build`, then restart the server with `/mcp`;
 tool calls hit the new build directly. Served over HTTP (`scripts/serve-http.mjs`, one process for every
-session), `/mcp` only reconnects: restart the served process to load the build — `docs/development/workflow.md` §9.
+session), `/mcp` only reconnects: restart the served process to load the build, and restart each Claude session after switching a server's transport (`/mcp` leaves the old stdio child running) — `docs/development/workflow.md` §9.
 
 ## Rules & Skills (`.claude/`)
 
