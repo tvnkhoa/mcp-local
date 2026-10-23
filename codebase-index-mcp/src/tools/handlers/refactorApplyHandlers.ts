@@ -20,7 +20,7 @@ import {
 import type { RefactorApplyHunkRecord, RefactorRollbackRecord } from "../../types/index.js";
 import { resolveResponseProfile } from "../../middleware/responseFormatter.js";
 import type { HandlerContext } from "./handlerContext.js";
-import { applyPreviewExclusively } from "./refactorApplyGate.js";
+import { applyPreviewExclusively, assertApplyOwner, assertPreviewOwner, previewOwnerOf } from "./refactorApplyGate.js";
 
 export async function handleRefactorReplaceApply(
   args: {
@@ -39,6 +39,7 @@ export async function handleRefactorReplaceApply(
   if (!preview) {
     throw new McpError(ErrorCode.InvalidParams, `refactor_replace_apply: preview '${args.previewId}' not found.`);
   }
+  assertPreviewOwner(preview.preview, ctx, "refactor_replace_apply");
   if (Date.parse(preview.preview.expiresAt) < Date.now()) {
     throw new PolicyViolationError("PREVIEW_EXPIRED", "refactor_replace_apply: preview expired. Create a fresh preview before apply.");
   }
@@ -58,7 +59,7 @@ export async function handleRefactorReplaceApply(
   // committed change and detects it (FILE_CHANGED_BY_CONCURRENT_APPLY) instead of interleaving.
   const { applyId, rollbackId, applyOutcome, applyRecord, beforeChangedFiles, afterChangedFiles } = await applyPreviewExclusively(
     store, repo.repoPath, preview.preview.repoId, preview.preview.previewId, preview.hunks, expectedApplyFiles,
-    { maxFilesPerBatch: args.maxFilesPerBatch, stopOnFirstConflict: args.stopOnFirstConflict, includeLowConfidence: args.includeLowConfidence, lowConfidenceThreshold: constants.REFACTOR_LOW_CONFIDENCE_THRESHOLD }
+    { maxFilesPerBatch: args.maxFilesPerBatch, stopOnFirstConflict: args.stopOnFirstConflict, includeLowConfidence: args.includeLowConfidence, lowConfidenceThreshold: constants.REFACTOR_LOW_CONFIDENCE_THRESHOLD, clientSession: previewOwnerOf(ctx) }
   );
   const newlyChangedFiles = [...afterChangedFiles].filter((x) => !beforeChangedFiles.has(x));
   const unexpectedChangedFiles = newlyChangedFiles.filter((x) => !expectedApplyFiles.has(x));
@@ -124,6 +125,7 @@ export function handleRefactorReplaceRollback(
   if (!payload) {
     throw new McpError(ErrorCode.InvalidParams, `refactor_replace_rollback: rollbackId '${args.rollbackId}' not found.`);
   }
+  assertApplyOwner(payload.apply, ctx, "refactor_replace_rollback");
   const repo = store.getRepository(payload.apply.repoId);
   if (!repo) {
     throw new McpError(ErrorCode.InvalidParams, `refactor_replace_rollback: repo '${payload.apply.repoId}' not found.`);

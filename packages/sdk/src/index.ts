@@ -79,7 +79,10 @@ export { redirectConsoleToStderr } from "./console.js";
 export type { HealthCheckOptions, HealthCheckPayload, HealthStatus } from "./healthTool.js";
 export { createHealthCheckTool } from "./healthTool.js";
 
-export type { McpServerHandle, McpServerOptions } from "./createServer.js";
+export type { McpServerHandle, McpServerOptions, TransportOptions } from "./createServer.js";
+
+export type { HttpTransportHandle, HttpTransportOptions } from "./httpTransport.js";
+export { HTTP_LOOPBACK_HOST, HTTP_MCP_PATH, validateHttpTransportOptions } from "./httpTransport.js";
 export { createMcpServer, createServer } from "./createServer.js";
 
 export type { RunServerOptions } from "./runServer.js";

@@ -197,7 +197,7 @@ skill renderer, contract snapshotter, server runner and all three generators rea
 | `TOOL_LISTS`, `TOTAL_TOOL_COUNT` | generated from `contracts/` |
 
 Env contracts live in `src/envSpecs/<server>.ts`, one file per server, so a change to one server's
-contract has a diff that says so. **158 fields across six servers** —
+contract has a diff that says so. **160 fields across six servers** —
 `codebase-index` 48 · `postgres-mcp` 35 · `sqlserver-mcp` 25 · `observe-mcp` 31 · `bitbucket-mcp` 16 · `board-mcp` 3:
 
 ```bash

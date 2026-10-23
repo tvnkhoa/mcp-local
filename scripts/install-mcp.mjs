@@ -20,6 +20,8 @@
  *        --skill none|project|user    whether to write the skill, and where
  *        --repo <path>                the target repo for local/project
  *        --skip-skill/--no-skill      alias of --skill none
+ *        --transport stdio|http       http (R4): one served process for every session — see below
+ *        --port <n>                   the http port (default 7341, or the one already set)
  *
  * Scope (Claude Code):
  *   user     ~/.claude.json — every project on this machine
@@ -32,9 +34,19 @@
  * server → user + user skill. A RE-RUN keeps whatever placement it finds — a local/project
  * registration or a project skill is never silently moved back to user scope or ~/.claude/skills.
  * Only --scope / --skill (or an interactive answer) moves a server.
+ *
+ * --transport http (only a server declaring *_HTTP_PORT / *_HTTP_TOKEN; user scope only): the env
+ * collected below goes to ~/.claude/mcp/http/<key>.env.json with the port and a generated token
+ * added (an existing token is kept), and the Claude Code registration becomes
+ * { type: "http", url: "http://127.0.0.1:<port>/mcp", headers: { Authorization } } — no command, no
+ * env. The stdio entry it replaces is kept in ~/.claude/mcp/stdio/<key>.json (only ever a stdio
+ * entry, so a re-run leaves it alone) for the `*-stdio` profiles of ~/.claude/mcp/build-profiles.mjs.
+ * The process itself is started by scripts/serve-http.mjs (or its logon task); this installer
+ * never starts or registers it.
  */
 
 import { execSync } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { serverDirPath, serverEntryPath, evaluateEnv } from "./lib/manifest.mjs";
@@ -49,6 +61,9 @@ import {
 import { verifyServer } from "./lib/verify.mjs";
 import { parseArgs, resolveServers } from "./lib/cli.mjs";
 import { C, log, section, banner, ok, warn, err, info, step, ask } from "./lib/log.mjs";
+import { defaultEnvFile, httpClientEntry, httpEnvNames, isStdioEntry, readEnvFile, stdioSnapshotFile, writeEnvFile } from "./serve-http.mjs";
+
+const DEFAULT_HTTP_PORT = "7341";
 
 const ARGS = parseArgs(
   process.argv.slice(2),
@@ -58,7 +73,7 @@ const ARGS = parseArgs(
     skipBuild: ["--skip-build"],
     skipSkill: ["--skip-skill", "--no-skill"],
   },
-  { scope: ["--scope"], skill: ["--skill"], repo: ["--repo"] }
+  { scope: ["--scope"], skill: ["--skill"], repo: ["--repo"], transport: ["--transport"], port: ["--port"] }
 );
 
 // ---- Build ----
@@ -104,6 +119,15 @@ function existingEnvFor(server, agents) {
   if (cc) entries.push(...readLocalEntries(cc, server.key).map((l) => l.entry));
   for (const repo of candidateRepos(server, agents, ARGS.repo ? [ARGS.repo] : [])) {
     entries.push(readServerEntry(projectMcpJson(repo), server.key));
+  }
+  // An http registration carries no env: its values live in the served process's env file.
+  if (httpEnvNames(server)) {
+    try {
+      const served = readEnvFile(defaultEnvFile(server));
+      if (served) entries.push({ env: served });
+    } catch (e) {
+      warn(`${defaultEnvFile(server)}: ${e.message} — ignored`);
+    }
   }
   const merged = {};
   // Later entries win only for keys earlier ones did not set, so a value is never silently
@@ -280,6 +304,43 @@ function registerServer(server, agents, plan, mcpConfig) {
   configureAgent(projectMcpJson(plan.repo), server.key, mcpConfig);
 }
 
+/**
+ * R4: write the served process's env file and register Claude Code against the URL.
+ * `env` gains the port and token in place, so step 6 verifies the build with the same values.
+ */
+function registerHttp(server, agents, plan, env) {
+  const names = httpEnvNames(server);
+  if (plan.scope !== "user") throw new Error("--transport http registers at user scope only (one process serves every repo)");
+  env[names.port] = ARGS.port ?? env[names.port] ?? DEFAULT_HTTP_PORT;
+  if (!env[names.token]) {
+    env[names.token] = randomBytes(32).toString("hex");
+    info(`Generated ${names.token}`);
+  }
+  const envFile = defaultEnvFile(server);
+  writeEnvFile(envFile, env);
+  ok(`Wrote ${toConfigPath(envFile)} (${String(Object.keys(env).length)} values)`);
+  const cc = agents.find((a) => a.type === "claude-code");
+  if (!cc) {
+    warn("Claude Code not detected — http registration not written.");
+  } else {
+    // R4-4': keep the stdio entry being replaced, for the `*-stdio` MCP profiles. Only a stdio entry
+    // is ever written there, so a re-run (which finds the http entry) leaves the snapshot alone.
+    const replaced = readServerEntry(cc, server.key);
+    if (isStdioEntry(replaced)) {
+      const snapshot = stdioSnapshotFile(server);
+      fs.mkdirSync(path.dirname(snapshot), { recursive: true });
+      fs.writeFileSync(snapshot, `${JSON.stringify(replaced, null, 2)}\n`, { encoding: "utf-8", mode: 0o600 });
+      ok(`Kept the stdio entry in ${toConfigPath(snapshot)}`);
+    }
+    configureAgent(cc, server.key, httpClientEntry(env[names.port], env[names.token]));
+  }
+  const others = agents.filter((a) => a.type !== "claude-code");
+  if (others.length) info(`${others.map((a) => a.name).join(", ")}: left as they are (http is registered for Claude Code only).`);
+  step(`Start it:            node scripts/serve-http.mjs --server ${server.key}`);
+  step(`Start it at logon:   node scripts/serve-http.mjs --server ${server.key} --task print   (then --task register)`);
+  step(`Back to stdio:       node scripts/install-mcp.mjs --server ${server.key} --transport stdio`);
+}
+
 // ---- Install one server ----
 async function installOne(server, agents) {
   banner(server.displayName);
@@ -295,12 +356,19 @@ async function installOne(server, agents) {
   ok(`Register: ${plan.scope}${plan.scope === "user" ? "" : ` (${toConfigPath(plan.repo)})`}   Skill: ${plan.skill}${plan.skill === "project" ? ` (${toConfigPath(plan.repo)})` : ""}`);
 
   section("4/7  Configure agents");
-  const mcpConfig = {
-    command: "node",
-    args: [toConfigPath(serverEntryPath(server))],
-    env,
-  };
-  registerServer(server, agents, plan, mcpConfig);
+  if (ARGS.transport === "http") {
+    registerHttp(server, agents, plan, env);
+  } else {
+    // A stdio entry never carries the served process's port and token, even when an env file has them.
+    const names = httpEnvNames(server);
+    if (names) { delete env[names.port]; delete env[names.token]; }
+    const mcpConfig = {
+      command: "node",
+      args: [toConfigPath(serverEntryPath(server))],
+      env,
+    };
+    registerServer(server, agents, plan, mcpConfig);
+  }
   await retireSuperseded(server, plan, existing);
 
   section("5/7  Install skill");
@@ -340,6 +408,14 @@ function validateFlags() {
   if (ARGS.scope && !SCOPES.includes(ARGS.scope)) throw new Error(`--scope must be one of: ${SCOPES.join(", ")}`);
   if (ARGS.skill && !SKILL_SCOPES.includes(ARGS.skill)) throw new Error(`--skill must be one of: ${SKILL_SCOPES.join(", ")}`);
   if (ARGS.skipSkill && ARGS.skill && ARGS.skill !== "none") throw new Error(`--skip-skill means --skill none; it conflicts with --skill ${ARGS.skill}`);
+  if (ARGS.transport && !["stdio", "http"].includes(ARGS.transport)) throw new Error("--transport must be stdio or http");
+  if (ARGS.transport === "http" && ARGS.scope && ARGS.scope !== "user") throw new Error("--transport http registers at user scope only");
+  if (ARGS.port && !(/^\d+$/.test(ARGS.port) && Number(ARGS.port) >= 1 && Number(ARGS.port) <= 65535)) throw new Error("--port must be 1-65535");
+  if (ARGS.transport === "http") {
+    for (const server of resolveServers(ARGS.servers, { allowAllDefault: true })) {
+      if (!httpEnvNames(server)) throw new Error(`${server.key} cannot be served over http — pass --server for one that can (codebase-index)`);
+    }
+  }
 }
 
 async function main() {

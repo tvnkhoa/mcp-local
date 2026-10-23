@@ -503,6 +503,11 @@ export type RefactorPreviewRecord = {
   riskAmbiguousCount: number;
   riskCrossTypeCount: number;
   riskGeneratedCount: number;
+  /**
+   * R4: the HTTP client session that created the preview; only it may apply it. Null on stdio and
+   * for previews written before R4, which any caller may apply as before.
+   */
+  clientSession?: string | null;
 };
 
 export type RefactorPreviewHunkRecord = {
@@ -533,6 +538,8 @@ export type RefactorApplyRecord = {
   totalFiles: number;
   totalReplacements: number;
   conflictCount: number;
+  /** R4: the HTTP client session that applied; only it may roll back. Null on stdio and pre-R4. */
+  clientSession?: string | null;
 };
 
 export type RefactorApplyChangeRecord = {

@@ -47,7 +47,7 @@ test("value flags take `--flag v` and `--flag=v`, and do not swallow --server", 
 
 test("the installer declares the flags and treats --skip-skill as --skill none", () => {
   assert.match(installer, /skipSkill:\s*\["--skip-skill",\s*"--no-skill"\]/, "expected both tokens in boolFlags");
-  assert.match(installer, /\{ scope: \["--scope"\], skill: \["--skill"\], repo: \["--repo"\] \}/, "expected the value flags");
+  assert.match(installer, /\{ scope: \["--scope"\], skill: \["--skill"\], repo: \["--repo"\][^}]*\}/, "expected the value flags");
   assert.match(installer, /skill: ARGS\.skipSkill \? "none"/, "--skip-skill must map to --skill none");
   assert.match(installer, /if \(plan\.skill === "none"\)[\s\S]{0,400}installSkill\(server, agents, \{ skill: plan\.skill, repo: plan\.repo \}\)/, "the skill step must be guarded");
 });

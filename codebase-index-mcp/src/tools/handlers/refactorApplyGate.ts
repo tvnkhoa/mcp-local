@@ -8,10 +8,40 @@
 
 import { randomUUID } from "node:crypto";
 import { executeRefactorApplyPlan } from "../../services/refactor/refactorEngine.js";
-import { deriveApplyStatus, mapPreviewStatusFromApplyStatus } from "../../services/refactor/refactorUtils.js";
-import type { RefactorPreviewHunkRecord, RefactorApplyRecord } from "../../types/index.js";
+import { PolicyViolationError, deriveApplyStatus, mapPreviewStatusFromApplyStatus } from "../../services/refactor/refactorUtils.js";
+import type { RefactorPreviewHunkRecord, RefactorApplyRecord, RefactorPreviewRecord } from "../../types/index.js";
 import { collectGitChangedFiles } from "../../services/git/gitHelpers.js";
 import type { HandlerContext } from "./handlerContext.js";
+
+/**
+ * R4: one served process, many clients. A preview belongs to the client session that created it —
+ * stamp it with {@link previewOwnerOf} when saving, check it with this before applying. A preview
+ * with no owner (stdio, or written before R4) stays appliable by anyone, as it always was.
+ */
+export function assertPreviewOwner(preview: RefactorPreviewRecord, ctx: HandlerContext, toolName: string): void {
+  const owner = preview.clientSession ?? null;
+  if (owner !== null && owner !== ctx.clientSessionId) {
+    throw new PolicyViolationError(
+      "PREVIEW_OWNED_BY_ANOTHER_SESSION",
+      `${toolName}: preview '${preview.previewId}' was created by another client session; only that session may apply it. Create your own preview.`
+    );
+  }
+}
+
+/** The same rule for refactor_replace_rollback: only the session that applied may undo it. */
+export function assertApplyOwner(apply: RefactorApplyRecord, ctx: HandlerContext, toolName: string): void {
+  const owner = apply.clientSession ?? null;
+  if (owner !== null && owner !== ctx.clientSessionId) {
+    throw new PolicyViolationError(
+      "APPLY_OWNED_BY_ANOTHER_SESSION",
+      `${toolName}: rollback '${apply.rollbackId}' undoes an apply made by another client session; only that session may roll it back.`
+    );
+  }
+}
+
+export function previewOwnerOf(ctx: HandlerContext): string | null {
+  return ctx.clientSessionId ?? null;
+}
 
 // Serializes the read-modify-write phase of refactor applies. Two concurrent applies that touch the
 // same file would otherwise interleave: the first write shifts offsets / changes the file hash, so
@@ -48,7 +78,7 @@ export function applyPreviewExclusively(
   previewId: string,
   hunks: RefactorPreviewHunkRecord[],
   expectedApplyFiles: Set<string>,
-  opts: { maxFilesPerBatch: number; stopOnFirstConflict: boolean; includeLowConfidence: boolean; lowConfidenceThreshold: number }
+  opts: { maxFilesPerBatch: number; stopOnFirstConflict: boolean; includeLowConfidence: boolean; lowConfidenceThreshold: number; clientSession: string | null }
 ): Promise<ExclusiveApplyResult> {
   return runExclusiveApply(() => {
     const applyId = `apply_${randomUUID()}`;
@@ -66,7 +96,8 @@ export function applyPreviewExclusively(
     const applyRecord: RefactorApplyRecord = {
       applyId, rollbackId, previewId, repoId,
       status: deriveApplyStatus(applyOutcome.changes), createdAt: new Date().toISOString(), completedAt: new Date().toISOString(),
-      totalFiles: appliedFiles.length, totalReplacements: appliedFiles.reduce((sum, item) => sum + item.replacementCount, 0), conflictCount
+      totalFiles: appliedFiles.length, totalReplacements: appliedFiles.reduce((sum, item) => sum + item.replacementCount, 0), conflictCount,
+      clientSession: opts.clientSession
     };
     store.recordRefactorApply(applyRecord, applyOutcome.changes, applyOutcome.appliedHunks);
     store.markRefactorPreviewStatus(previewId, mapPreviewStatusFromApplyStatus(applyRecord.status));

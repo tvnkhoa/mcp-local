@@ -25,7 +25,7 @@ import type { RefactorSymbolMigrationInput } from "../../services/refactor/refac
 import type { RefactorPreviewRecord, RefactorPreviewHunkRecord } from "../../types/index.js";
 import { resolveResponseProfile } from "../../middleware/responseFormatter.js";
 import type { HandlerContext } from "./handlerContext.js";
-import { applyPreviewExclusively } from "./refactorApplyGate.js";
+import { applyPreviewExclusively, assertPreviewOwner, previewOwnerOf } from "./refactorApplyGate.js";
 
 /**
  * The approval gate these two tools were missing. MCP-ISSUE-060, open since 2026-08-25.
@@ -68,6 +68,7 @@ function assertApprovedApply(
   if (!stored) {
     throw new McpError(ErrorCode.InvalidParams, `${toolName}: preview '${args.previewId}' not found. Previews expire; create a fresh one.`);
   }
+  assertPreviewOwner(stored.preview, ctx, toolName);
   if (Date.parse(stored.preview.expiresAt) < Date.now()) {
     throw new PolicyViolationError("PREVIEW_EXPIRED", `${toolName}: preview expired. Create a fresh preview before apply.`);
   }
@@ -137,7 +138,8 @@ export async function handleRefactorSymbolMigration(
       previewId, repoId: args.repoId, findPattern: migration.fromSymbol, replaceExpression: migration.toSymbol,
       mode: "symbol-aware", ambiguityThresholdPercent: 1, createdAt: now.toISOString(), expiresAt, digest, status: "ready",
       totalMatches: previewResult.hunks.length, affectedFileCount: previewResult.affectedFiles.length,
-      riskAmbiguousCount: riskCounts.ambiguous, riskCrossTypeCount: riskCounts.crossType, riskGeneratedCount: riskCounts.generated
+      riskAmbiguousCount: riskCounts.ambiguous, riskCrossTypeCount: riskCounts.crossType, riskGeneratedCount: riskCounts.generated,
+      clientSession: previewOwnerOf(ctx)
     };
     store.saveRefactorPreview(previewRecord, hunkRecords);
 
@@ -171,7 +173,7 @@ export async function handleRefactorSymbolMigration(
       const expectedApplyFiles = collectExpectedApplyFiles(hunkRecords, includeLowConfidence, constants.REFACTOR_LOW_CONFIDENCE_THRESHOLD);
       const applied = await applyPreviewExclusively(
         store, repo.repoPath, args.repoId, previewId, hunkRecords, expectedApplyFiles,
-        { maxFilesPerBatch: 50, stopOnFirstConflict: true, includeLowConfidence, lowConfidenceThreshold: constants.REFACTOR_LOW_CONFIDENCE_THRESHOLD }
+        { maxFilesPerBatch: 50, stopOnFirstConflict: true, includeLowConfidence, lowConfidenceThreshold: constants.REFACTOR_LOW_CONFIDENCE_THRESHOLD, clientSession: previewOwnerOf(ctx) }
       );
       resultRow.applyId = applied.applyId;
       resultRow.rollbackId = applied.rollbackId;
@@ -247,7 +249,8 @@ export async function handleChangeValueRepresentation(
     previewId, repoId: args.repoId, findPattern: findLabel, replaceExpression: replaceLabel,
     mode: "symbol-aware", ambiguityThresholdPercent: 1, createdAt: now.toISOString(), expiresAt, digest, status: "ready",
     totalMatches: hunkRecords.length, affectedFileCount: previewResult.affectedFiles.length,
-    riskAmbiguousCount: riskCounts.ambiguous, riskCrossTypeCount: riskCounts.crossType, riskGeneratedCount: riskCounts.generated
+    riskAmbiguousCount: riskCounts.ambiguous, riskCrossTypeCount: riskCounts.crossType, riskGeneratedCount: riskCounts.generated,
+    clientSession: previewOwnerOf(ctx)
   };
   store.saveRefactorPreview(previewRecord, hunkRecords);
 
@@ -289,7 +292,7 @@ export async function handleChangeValueRepresentation(
     const expectedApplyFiles = collectExpectedApplyFiles(hunkRecords, includeLowConfidence, constants.REFACTOR_LOW_CONFIDENCE_THRESHOLD);
     const applied = await applyPreviewExclusively(
       store, repo.repoPath, args.repoId, previewId, hunkRecords, expectedApplyFiles,
-      { maxFilesPerBatch: 50, stopOnFirstConflict: true, includeLowConfidence, lowConfidenceThreshold: constants.REFACTOR_LOW_CONFIDENCE_THRESHOLD }
+      { maxFilesPerBatch: 50, stopOnFirstConflict: true, includeLowConfidence, lowConfidenceThreshold: constants.REFACTOR_LOW_CONFIDENCE_THRESHOLD, clientSession: previewOwnerOf(ctx) }
     );
     result.applyId = applied.applyId;
     result.rollbackId = applied.rollbackId;

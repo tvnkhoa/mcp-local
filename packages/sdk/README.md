@@ -100,6 +100,15 @@ await handle.start();
 `createMcpServer` wires the stdio transport, registers `tools/list` and
 `tools/call`, redirects `console.*` to stderr, and installs signal handlers.
 
+`transport: { kind: "http", port, token }` serves streamable HTTP instead, so one long-running
+process can serve every client (R4, `src/httpTransport.ts`). It binds `127.0.0.1` only — the host is
+not an option — refuses a foreign `Host` or `Origin` with 403 (DNS-rebinding protection) and a
+missing or wrong bearer token with 401, and gives each client session its own protocol `Server` over
+the one registry. A `wrapCall` hook sees the session as `context.clientSessionId` (absent on stdio);
+key anything one client must not see of another's by it. Closing a session never runs a shutdown
+hook. `maxSessions` (32) and `sessionIdleMs` (8 h) bound the sessions; `httpPort()` reads the bound
+port back (pass `port: 0` in tests).
+
 `runServer` is the entry-point tail — start, report, exit — and the one reviewed
 place that calls `process.exit`:
 

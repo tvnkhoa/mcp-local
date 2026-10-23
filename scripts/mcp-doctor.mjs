@@ -14,6 +14,9 @@
  *            a repo's .claude/skills/<key>/ (named) — and identical to what the template + manifest
  *            render today (a stale copy is a WARN). A project placement is reported, never "missing".
  *   [start]  server spawns and responds to `initialize`
+ *   [http]   an http registration (R4, `install-mcp --transport http`): the URL is loopback, the
+ *            port answers 401 without the token and `initialize` with it. Its env is read from the
+ *            served process's env file (~/.claude/mcp/http/<key>.env.json), not from the entry.
  *
  * Then, once for the workspace: rendered server skills under ~/.claude/skills/ or .claude/skills/
  * whose key the manifest no longer declares (a renamed or removed server) — a WARN, never a FAIL.
@@ -38,6 +41,7 @@ import { findMissingEnvPaths } from "./lib/envPaths.mjs";
 import { parseArgs, resolveServers } from "./lib/cli.mjs";
 import { findStaleRunningServers } from "./lib/runningServers.mjs";
 import { C, log, section, banner, ok, warn, err, info } from "./lib/log.mjs";
+import { defaultEnvFile, readEnvFile } from "./serve-http.mjs";
 
 const ARGS = parseArgs(process.argv.slice(2), { skipStart: ["--skip-start"] }, { repo: ["--repo"] });
 const selected = () => resolveServers(ARGS.servers, { allowAllDefault: true });
@@ -85,6 +89,57 @@ function findOrphanedDistModules(server) {
   };
   walk(distRoot);
   return orphans.sort();
+}
+
+const isHttp = (inst) => inst.entry?.type === "http";
+
+/** An instance's env: the entry's own, or for an http registration the served process's env file. */
+function envOf(server, inst) {
+  if (!isHttp(inst)) return inst.entry.env || inst.entry.environment || {};
+  try {
+    return readEnvFile(defaultEnvFile(server)) ?? {};
+  } catch {
+    return {};
+  }
+}
+
+/**
+ * Probe a served http registration. Never prints the token: the verdict names status codes only.
+ * 401 without the token proves something of ours is listening (the gate runs before routing);
+ * `initialize` with it proves it is an MCP server answering this registration's token.
+ */
+async function probeHttp(entry, expectedName) {
+  let url;
+  try {
+    url = new URL(entry.url);
+  } catch {
+    return ["fail", "url is not a URL"];
+  }
+  if (url.hostname !== "127.0.0.1" && url.hostname !== "localhost") return ["fail", `${url.hostname} is not loopback`];
+  const headers = { "content-type": "application/json", accept: "application/json, text/event-stream" };
+  const body = JSON.stringify({
+    jsonrpc: "2.0", id: 1, method: "initialize",
+    params: { protocolVersion: "2025-03-26", capabilities: {}, clientInfo: { name: "mcp-doctor", version: "0" } }
+  });
+  const post = (extra) => fetch(url, { method: "POST", headers: { ...headers, ...extra }, body, signal: AbortSignal.timeout(5_000) });
+  try {
+    const anonymous = await post({});
+    await anonymous.body?.cancel();
+    if (anonymous.status !== 401) return ["fail", `port ${url.port} answered ${anonymous.status} without a token (expected 401)`];
+    const authed = await post(entry.headers ?? {});
+    const text = await authed.text();
+    if (authed.status !== 200 || !text.includes("serverInfo")) {
+      return ["fail", `port ${url.port} answered ${authed.status} to initialize with the registered token`];
+    }
+    const sessionId = authed.headers.get("mcp-session-id");
+    if (sessionId) {
+      await fetch(url, { method: "DELETE", headers: { ...(entry.headers ?? {}), "mcp-session-id": sessionId }, signal: AbortSignal.timeout(5_000) }).catch(() => undefined);
+    }
+    const named = text.includes(`"name":"${expectedName}"`);
+    return [named ? "pass" : "warn", `port ${url.port}: 401 without the token, initialize answered${named ? "" : ` (server name is not ${expectedName})`}`];
+  } catch (e) {
+    return ["fail", `port ${url.port} not answering (${e.name === "TimeoutError" ? "timeout" : e.cause?.code ?? e.message})`];
+  }
 }
 
 async function checkServer(server, agents) {
@@ -179,6 +234,7 @@ async function checkServer(server, agents) {
     // Windows paths are case-insensitive and drive-letter casing is not stable,
     // so compare case-insensitively after normalizing slashes.
     const mismatched = instances.filter((i) => {
+      if (isHttp(i)) return false; // a URL, not a path: checked under [http]
       const args = i.entry.args || i.entry.command; // opencode uses command[]
       const argsStr = Array.isArray(args) ? args.join(" ") : String(args);
       return !argsStr.replace(/\\/g, "/").toLowerCase().includes(entryNorm.toLowerCase());
@@ -204,7 +260,7 @@ async function checkServer(server, agents) {
     checks.push(["env", "warn", "skipped (no config)"]);
   } else {
     for (const inst of instances) {
-      const envObj = inst.entry.env || inst.entry.environment || {};
+      const envObj = envOf(server, inst);
       const presentKeys = Object.keys(envObj).filter((k) => envObj[k] !== "" && envObj[k] != null);
       const { missingRequired, unsatisfiedGroups } = evaluateEnv(server, presentKeys);
       const scope = instances.length === 1 ? "env" : `env ${inst.name}`;
@@ -301,6 +357,13 @@ async function checkServer(server, agents) {
     fix.push("npm run generate:all   # then commit the result");
   }
 
+  // http (R4)
+  for (const inst of instances.filter(isHttp)) {
+    const [status, msg] = await probeHttp(inst.entry, server.dir);
+    checks.push([instances.length === 1 ? "http" : `http ${inst.name}`, status, msg]);
+    if (status !== "pass") fix.push(`node scripts/serve-http.mjs --server ${server.key}   # or: schtasks /Run /TN "mcp-local\\${server.key}-http"`);
+  }
+
   // start
   if (ARGS.skipStart) {
     checks.push(["start", "warn", "skipped (--skip-start)"]);
@@ -310,7 +373,7 @@ async function checkServer(server, agents) {
     // second, differently-credentialed instance as healthy without ever launching it.
     const toStart = instances.length ? instances : [{ name: server.key, entry: {} }];
     for (const inst of toStart) {
-      const envObj = inst.entry.env || inst.entry.environment || {};
+      const envObj = envOf(server, inst);
       const res = await verifyServer(entry, envObj);
       const scope = toStart.length === 1 ? "start" : `start ${inst.name}`;
       checks.push([scope, res.ok ? "pass" : "fail", res.message]);

@@ -57,4 +57,9 @@ export interface HandlerContext {
   ) => Promise<IndexRunResult>;
   asText: (payload: unknown, profile?: ResponseProfile) => CallToolResult;
   constants: HandlerConstants;
+  /**
+   * R4: the HTTP client session of the call being handled. A refactor preview records it and only
+   * that session may apply the preview. Absent on stdio (one client per process) and in unit tests.
+   */
+  clientSessionId?: string;
 }
