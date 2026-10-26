@@ -15,10 +15,14 @@
  *   - **One protocol `Server` per client session.** The tool registry and everything behind it are
  *     shared; the protocol state (initialize handshake, pending requests, notifications) is not.
  *
- * Sessions end on DELETE, on an idle timeout, or at shutdown. Ending one never touches the
- * process's shutdown hooks: a client going away is not the server going away.
+ * A session ends one of five ways: the client DELETEs it; it sits idle past the timeout; the
+ * client process exits (its pid, resolved once from the loopback socket, is no longer alive — a
+ * killed client never sends DELETE); it is the least recently used when the cap is hit and has been
+ * idle a few minutes; or the server shuts down. Ending one never touches the process's shutdown
+ * hooks: a client going away is not the server going away.
  */
 
+import { execFile } from "node:child_process";
 import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import http from "node:http";
 import type { AddressInfo } from "node:net";
@@ -36,7 +40,9 @@ export const HTTP_MCP_PATH = "/mcp";
 
 const MIN_TOKEN_CHARS = 32;
 const DEFAULT_MAX_SESSIONS = 32;
-const DEFAULT_SESSION_IDLE_MS = 60 * 60 * 1000;
+const DEFAULT_SESSION_IDLE_MS = 8 * 60 * 60 * 1000;
+/** A full server evicts its least recently used session only if it has been quiet this long. */
+const DEFAULT_EVICT_MIN_IDLE_MS = 5 * 60 * 1000;
 const DEFAULT_MAX_BODY_BYTES = 4 * 1024 * 1024;
 
 export interface HttpTransportOptions {
@@ -49,10 +55,23 @@ export interface HttpTransportOptions {
    * A request with no `Origin` header (every non-browser client) is not affected.
    */
   readonly allowedOrigins?: readonly string[];
-  /** Concurrent client sessions; one more is refused with 503. Default 32. */
+  /**
+   * Concurrent client sessions. At the cap, the least recently used session is evicted if it has
+   * been idle `evictMinIdleMs`; otherwise one more is refused with 503. Default 32.
+   */
   readonly maxSessions?: number;
-  /** A session with no request for this long is closed. Default 60 min. */
+  /** A session with no request for this long is closed. Default 8 h. */
   readonly sessionIdleMs?: number;
+  /** Minimum idle time before a session may be evicted to make room. Default 5 min. */
+  readonly evictMinIdleMs?: number;
+  /** Reaper period. Default min(60 s, idle / 2), at least 1 s. */
+  readonly reapIntervalMs?: number;
+  /**
+   * Which pid owns the client end of a loopback connection (`remotePort` -> `serverPort`), or null
+   * when unknown. Default: `netstat` on win32, null elsewhere. A pid that is later found dead closes
+   * its session. Risk, accepted: a pid reused within a session's life keeps it until idle or eviction.
+   */
+  readonly resolveClientPid?: (remotePort: number, serverPort: number) => Promise<number | null>;
   readonly maxBodyBytes?: number;
 }
 
@@ -66,6 +85,41 @@ interface Session {
   readonly transport: StreamableHTTPServerTransport;
   readonly server: Server;
   lastSeen: number;
+  /** Owner of the client socket at initialize; null while unresolved or when unknown. */
+  clientPid: number | null;
+}
+
+/** Pid of the row `127.0.0.1:<remotePort>` -> `127.0.0.1:<serverPort>` ESTABLISHED in `netstat -ano -p TCP` output. */
+export function parseNetstatClientPid(output: string, remotePort: number, serverPort: number): number | null {
+  const local = `${HTTP_LOOPBACK_HOST}:${String(remotePort)}`;
+  const foreign = `${HTTP_LOOPBACK_HOST}:${String(serverPort)}`;
+  for (const line of output.split(/\r?\n/)) {
+    const cols = line.trim().split(/\s+/);
+    if (cols.length >= 5 && cols[0] === "TCP" && cols[1] === local && cols[2] === foreign && cols[3] === "ESTABLISHED") {
+      const pid = Number(cols[4]);
+      return Number.isInteger(pid) && pid > 0 ? pid : null;
+    }
+  }
+  return null;
+}
+
+function resolveClientPidViaNetstat(remotePort: number, serverPort: number): Promise<number | null> {
+  if (process.platform !== "win32") return Promise.resolve(null);
+  return new Promise((resolve) => {
+    execFile("netstat", ["-ano", "-p", "TCP"], { windowsHide: true, timeout: 10_000, maxBuffer: 16 * 1024 * 1024 }, (error, stdout) => {
+      resolve(error === null ? parseNetstatClientPid(stdout, remotePort, serverPort) : null);
+    });
+  });
+}
+
+/** Signal 0 only probes: ESRCH means gone, EPERM means alive but not ours. */
+function pidAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (cause) {
+    return (cause as NodeJS.ErrnoException).code === "EPERM";
+  }
 }
 
 /** Refuse a configuration that would listen unsafely, before anything binds. */
@@ -124,6 +178,8 @@ export async function startHttpTransport(
   const maxSessions = options.maxSessions ?? DEFAULT_MAX_SESSIONS;
   const idleMs = options.sessionIdleMs ?? DEFAULT_SESSION_IDLE_MS;
   const maxBodyBytes = options.maxBodyBytes ?? DEFAULT_MAX_BODY_BYTES;
+  const evictMinIdleMs = options.evictMinIdleMs ?? DEFAULT_EVICT_MIN_IDLE_MS;
+  const resolveClientPid = options.resolveClientPid ?? resolveClientPidViaNetstat;
   const tokenDigest = digest(options.token);
   const sessions = new Map<string, Session>();
   let boundPort = options.port;
@@ -147,10 +203,14 @@ export async function startHttpTransport(
 
   const openSession = async (req: http.IncomingMessage, res: http.ServerResponse, body: unknown): Promise<void> => {
     const server = buildServer();
+    // Started before the handshake while the socket is surely open; never awaited by the response path.
+    const remotePort = req.socket.remotePort;
+    const pidLookup: Promise<number | null> =
+      remotePort === undefined ? Promise.resolve(null) : resolveClientPid(remotePort, boundPort).catch(() => null);
     const transport = new StreamableHTTPServerTransport({
       sessionIdGenerator: () => randomUUID(),
       onsessioninitialized: (sessionId) => {
-        sessions.set(sessionId, { transport, server, lastSeen: Date.now() });
+        sessions.set(sessionId, { transport, server, lastSeen: Date.now(), clientPid: null });
         logger.info("http_session_opened", { sessionId, sessions: sessions.size });
       }
     });
@@ -176,7 +236,14 @@ export async function startHttpTransport(
       throw cause;
     }
     const sessionId = transport.sessionId;
-    if (sessionId === undefined || !sessions.has(sessionId)) await abandon("initialize_refused");
+    if (sessionId === undefined || !sessions.has(sessionId)) {
+      await abandon("initialize_refused");
+      return;
+    }
+    void pidLookup.then((pid) => {
+      const session = sessions.get(sessionId);
+      if (session !== undefined) session.clientPid = pid;
+    });
   };
 
   const handle = async (req: http.IncomingMessage, res: http.ServerResponse): Promise<void> => {
@@ -232,8 +299,19 @@ export async function startHttpTransport(
 
     if (req.method === "POST" && isInitializeRequest(body)) {
       if (sessions.size >= maxSessions) {
-        sendJsonRpcError(res, 503, -32000, `Too many sessions (max ${String(maxSessions)})`);
-        return;
+        let oldestId: string | undefined;
+        let oldestSeen = Infinity;
+        for (const [id, session] of sessions) {
+          if (session.lastSeen < oldestSeen) {
+            oldestSeen = session.lastSeen;
+            oldestId = id;
+          }
+        }
+        if (oldestId === undefined || Date.now() - oldestSeen < evictMinIdleMs) {
+          sendJsonRpcError(res, 503, -32000, `Too many sessions (max ${String(maxSessions)})`);
+          return;
+        }
+        await closeSession(oldestId, "evicted_lru");
       }
       await openSession(req, res, body);
       return;
@@ -261,8 +339,9 @@ export async function startHttpTransport(
     const cutoff = Date.now() - idleMs;
     for (const [sessionId, session] of sessions) {
       if (session.lastSeen < cutoff) void closeSession(sessionId, "idle");
+      else if (session.clientPid !== null && !pidAlive(session.clientPid)) void closeSession(sessionId, "client_exited");
     }
-  }, Math.min(60_000, Math.max(1_000, Math.floor(idleMs / 2))));
+  }, options.reapIntervalMs ?? Math.min(60_000, Math.max(1_000, Math.floor(idleMs / 2))));
   reaper.unref();
 
   return {

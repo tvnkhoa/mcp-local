@@ -106,8 +106,11 @@ not an option — refuses a foreign `Host` or `Origin` with 403 (DNS-rebinding p
 missing or wrong bearer token with 401, and gives each client session its own protocol `Server` over
 the one registry. A `wrapCall` hook sees the session as `context.clientSessionId` (absent on stdio);
 key anything one client must not see of another's by it. Closing a session never runs a shutdown
-hook. `maxSessions` (32) and `sessionIdleMs` (60 min) bound the sessions; `httpPort()` reads the bound
-port back (pass `port: 0` in tests).
+hook. `maxSessions` (32) and `sessionIdleMs` (8 h) bound the sessions; `httpPort()` reads the bound
+port back (pass `port: 0` in tests). A session also ends when its client process exits (the pid
+owning the loopback socket is resolved once, via `netstat` on Windows, and checked by the reaper;
+a killed client never sends DELETE), and at the cap the least recently used session is evicted
+if it has been idle 5 min — otherwise the new one gets 503.
 
 `runServer` is the entry-point tail — start, report, exit — and the one reviewed
 place that calls `process.exit`:

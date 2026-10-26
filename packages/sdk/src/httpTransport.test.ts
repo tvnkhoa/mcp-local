@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import http from "node:http";
 import { test } from "node:test";
 
@@ -9,8 +10,10 @@ import { createNullLogger, ok } from "@mcp/core";
 import { z } from "zod";
 
 import { createMcpServer } from "./createServer.js";
+import type { HttpTransportOptions } from "./httpTransport.js";
 import { annotations, defineTool } from "./defineTool.js";
 import { asText } from "./responses.js";
+import { parseNetstatClientPid } from "./httpTransport.js";
 import { EMPTY_OBJECT_SCHEMA } from "./schema.js";
 
 const TOKEN = "t".repeat(40);
@@ -26,7 +29,7 @@ const whoami = defineTool({
 });
 
 /** An http server whose `whoami` answers with the CallContext's clientSessionId. */
-async function startServer(extra: { maxSessions?: number } = {}, log: Logger = logger) {
+async function startServer(extra: Partial<Omit<HttpTransportOptions, "port" | "token">> = {}, log: Logger = logger) {
   const handle = createMcpServer({
     name: "http-test",
     version: "0.0.1",
@@ -196,6 +199,120 @@ test("http: an initialize refused before a session id is assigned closes its ser
     // The process still serves a well-formed client afterwards.
     const client = await connect(port);
     await client.close();
+  } finally {
+    await handle.stop();
+  }
+});
+
+/** Wait until `check` holds, polling; fails the test after `ms`. */
+async function until(check: () => boolean, ms = 5000): Promise<void> {
+  const deadline = Date.now() + ms;
+  while (!check()) {
+    if (Date.now() > deadline) assert.fail("condition not reached in time");
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+}
+
+/** Sessions opened and not yet closed, as the transport logged them. */
+function liveSessions(events: { message: string }[]): number {
+  return events.filter((e) => e.message === "http_session_opened").length - events.filter((e) => e.message === "http_session_closed").length;
+}
+
+function capturingLogger(events: { message: string; fields: unknown }[]): Logger {
+  const capture: Logger = {
+    level: "debug",
+    debug: () => undefined,
+    info: (message, fields) => { events.push({ message, fields }); },
+    warn: () => undefined,
+    error: () => undefined,
+    child: () => capture
+  };
+  return capture;
+}
+
+test("http: parseNetstatClientPid picks the client-side row of the loopback pair", () => {
+  const out = [
+    "  Proto  Local Address          Foreign Address        State           PID",
+    "  TCP    127.0.0.1:3100         127.0.0.1:54321        ESTABLISHED     111",
+    "  TCP    127.0.0.1:54321        127.0.0.1:3100         ESTABLISHED     222",
+    "  TCP    127.0.0.1:54322        127.0.0.1:3100         TIME_WAIT       0"
+  ].join("\r\n");
+  assert.equal(parseNetstatClientPid(out, 54321, 3100), 222);
+  assert.equal(parseNetstatClientPid(out, 54322, 3100), null);
+  assert.equal(parseNetstatClientPid(out, 1, 3100), null);
+});
+
+test("http: a session whose client pid is dead is closed by the reaper; an unknown pid keeps it", async () => {
+  const dead = spawnSync(process.execPath, ["-e", "0"]).pid!;
+  const events: { message: string; fields: unknown }[] = [];
+  const pids = [dead, null];
+  const handle = await startServer(
+    { reapIntervalMs: 50, resolveClientPid: () => Promise.resolve(pids.shift() ?? null) },
+    capturingLogger(events)
+  );
+  try {
+    const port = handle.httpPort()!;
+    const gone = await connect(port);
+    const kept = await connect(port);
+    await until(() => events.some((e) => e.message === "http_session_closed"));
+    const closed = events.filter((e) => e.message === "http_session_closed").map((e) => (e.fields as { reason: string }).reason);
+    assert.deepEqual(closed, ["client_exited"]);
+    // Give the reaper a few more passes: the null-pid session must survive them.
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    assert.equal(liveSessions(events), 1);
+    assert.equal(sessionOf(await kept.callTool({ name: "whoami", arguments: {} })) !== null, true);
+    await gone.close().catch(() => undefined);
+    await kept.close();
+  } finally {
+    await handle.stop();
+  }
+});
+
+test("http: a live pid keeps its session", async () => {
+  const events: { message: string; fields: unknown }[] = [];
+  const handle = await startServer({ reapIntervalMs: 50, resolveClientPid: () => Promise.resolve(process.pid) }, capturingLogger(events));
+  try {
+    const client = await connect(handle.httpPort()!);
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    assert.equal(liveSessions(events), 1);
+    await client.close();
+  } finally {
+    await handle.stop();
+  }
+});
+
+test("http: at the cap the oldest session idle long enough is evicted for the new one", async () => {
+  const events: { message: string; fields: unknown }[] = [];
+  const handle = await startServer({ maxSessions: 2, evictMinIdleMs: 100, resolveClientPid: () => Promise.resolve(null) }, capturingLogger(events));
+  try {
+    const port = handle.httpPort()!;
+    const a = await connect(port);
+    const aSession = sessionOf(await a.callTool({ name: "whoami", arguments: {} }));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    const b = await connect(port);
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    const c = await connect(port);
+    assert.equal(liveSessions(events), 2);
+    const evicted = events.filter((e) => e.message === "http_session_closed").map((e) => e.fields as { sessionId: string; reason: string });
+    assert.deepEqual(evicted.map((e) => e.reason), ["evicted_lru"]);
+    assert.equal(evicted[0]!.sessionId, aSession);
+    assert.equal(sessionOf(await c.callTool({ name: "whoami", arguments: {} })) !== null, true);
+    await b.close();
+    await c.close();
+  } finally {
+    await handle.stop();
+  }
+});
+
+test("http: at the cap with every session fresh, the new one is still 503", async () => {
+  const events: { message: string; fields: unknown }[] = [];
+  const handle = await startServer({ maxSessions: 1, evictMinIdleMs: 60_000, resolveClientPid: () => Promise.resolve(null) }, capturingLogger(events));
+  try {
+    const port = handle.httpPort()!;
+    const a = await connect(port);
+    await assert.rejects(connect(port));
+    assert.equal(liveSessions(events), 1);
+    await a.close();
   } finally {
     await handle.stop();
   }
