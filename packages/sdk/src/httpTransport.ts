@@ -36,7 +36,7 @@ export const HTTP_MCP_PATH = "/mcp";
 
 const MIN_TOKEN_CHARS = 32;
 const DEFAULT_MAX_SESSIONS = 32;
-const DEFAULT_SESSION_IDLE_MS = 8 * 60 * 60 * 1000;
+const DEFAULT_SESSION_IDLE_MS = 60 * 60 * 1000;
 const DEFAULT_MAX_BODY_BYTES = 4 * 1024 * 1024;
 
 export interface HttpTransportOptions {
@@ -51,7 +51,7 @@ export interface HttpTransportOptions {
   readonly allowedOrigins?: readonly string[];
   /** Concurrent client sessions; one more is refused with 503. Default 32. */
   readonly maxSessions?: number;
-  /** A session with no request for this long is closed. Default 8 h. */
+  /** A session with no request for this long is closed. Default 60 min. */
   readonly sessionIdleMs?: number;
   readonly maxBodyBytes?: number;
 }

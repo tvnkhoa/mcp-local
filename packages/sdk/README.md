@@ -106,7 +106,7 @@ not an option — refuses a foreign `Host` or `Origin` with 403 (DNS-rebinding p
 missing or wrong bearer token with 401, and gives each client session its own protocol `Server` over
 the one registry. A `wrapCall` hook sees the session as `context.clientSessionId` (absent on stdio);
 key anything one client must not see of another's by it. Closing a session never runs a shutdown
-hook. `maxSessions` (32) and `sessionIdleMs` (8 h) bound the sessions; `httpPort()` reads the bound
+hook. `maxSessions` (32) and `sessionIdleMs` (60 min) bound the sessions; `httpPort()` reads the bound
 port back (pass `port: 0` in tests).
 
 `runServer` is the entry-point tail — start, report, exit — and the one reviewed
