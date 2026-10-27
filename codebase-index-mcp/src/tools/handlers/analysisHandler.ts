@@ -2,7 +2,7 @@ import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { resolveResponseProfile } from "../../middleware/responseFormatter.js";
 import { buildCoverageBlock } from "../../middleware/coverage.js";
 import { isTestPath } from "../../services/indexing/fileFilter.js";
-import { readWorkingTreeState, runGit } from "../../services/git/gitHelpers.js";
+import { readWorkingTreeState } from "../../services/git/gitHelpers.js";
 import { McpError, ErrorCode } from "@modelcontextprotocol/sdk/types.js";
 import type { HandlerContext } from "./handlerContext.js";
 import { dropTestRows } from "./testFilter.js";
@@ -247,10 +247,8 @@ function handleTestsForWorkingTreeDiff(
   try {
     const tree = readWorkingTreeState(repo.repoPath);
     head = tree.head;
-    // git reports paths from the repository top level; the index is rooted at repoPath, which may be
-    // a subdirectory of it.
-    const prefix = runGit(repo.repoPath, ["rev-parse", "--show-prefix"]).trim().replace(/\\/g, "/");
-    dirty = tree.dirty.filter((p) => !prefix || p.startsWith(prefix)).map((p) => p.slice(prefix.length));
+    // Already repoPath-relative: readWorkingTreeState strips the git root prefix (MCP-ISSUE-107).
+    dirty = tree.dirty;
   } catch {
     throw new McpError(ErrorCode.InvalidParams, `link_tests_to_source: forWorkingTreeDiff needs a git working tree, and '${repo.repoPath}' is not one.`);
   }
