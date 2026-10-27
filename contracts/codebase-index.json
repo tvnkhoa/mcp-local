@@ -2061,7 +2061,7 @@
         "openWorldHint": false,
         "readOnlyHint": false
       },
-      "description": "Drop a registered repository from the index: deletes every row keyed by repoId (symbols, edges, files, docs, runs, routes, literals, citations, comments, vectors, refactor history, cross-repo links) and its state files (run markers, dirty ledger, lock). Refuses an unknown repoId, a repo an index run is in progress for, and — unless force=true — a repo whose repoPath still exists on disk. Never touches the repository's files. Use for a deleted worktree or a retired repoId.",
+      "description": "Drop a registered repository from the index: deletes every row keyed by repoId (symbols, edges, files, docs, runs, routes, literals, citations, comments, vectors, refactor history, cross-repo links) and its state files (run markers, dirty ledger, lock). Refuses an unknown repoId, a repo an index run is in progress for, and — unless force=true — a repo whose repoPath still exists on disk. IRREVERSIBLE: nothing restores the removed rows except a fresh index_repository (mode full) of the repo. Never touches the repository's files. A watcher running in ANOTHER server process leaves no signal until it runs, so it is not detected (stop it first). Use for a deleted worktree or a retired repoId.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {

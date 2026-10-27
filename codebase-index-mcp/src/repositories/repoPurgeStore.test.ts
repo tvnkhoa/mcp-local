@@ -11,7 +11,8 @@ import { PURGED_BY_CROSS_REPO_COLUMNS, PURGED_BY_REPO_ID, PURGE_EXEMPT } from ".
 
 /** MCP-ISSUE-105: remove_repository's purge. */
 
-const REPO_COLUMN = /^(repo_id|from_repo_id|to_repo_id)$/;
+/** Any column that names a repo: `repo_id`, `from_repo_id`, `source_repo_id`, ... */
+const REPO_COLUMN = /repo_id$/;
 /** Tables reached through a parent's key; the test fills the key as `<column>-<repo>`, as the parent row gets it. */
 const CHILDREN = ["refactor_preview_hunks", "refactor_apply_changes", "refactor_apply_hunks", "refactor_rollbacks"];
 
@@ -65,6 +66,11 @@ test("every table with a repo column is either purged or exempt with a reason", 
         found.push(`${t.name}.${c.name}`);
         const exempt = (PURGE_EXEMPT[`${t.name}.${c.name}`] ?? "").length > 0;
         assert.ok(purged.has(t.name) !== exempt, `${t.name}.${c.name}: ${exempt ? "both purged and exempt" : "neither purged nor exempt with a reason"}`);
+        // the delete must name THIS column: a table purged by `repo_id` that grows `source_repo_id` is not covered
+        if (!exempt) {
+          const crossCols: readonly string[] = (PURGED_BY_CROSS_REPO_COLUMNS as Record<string, readonly string[]>)[t.name] ?? ["repo_id"];
+          assert.ok(crossCols.includes(c.name), `${t.name}.${c.name}: the purge of ${t.name} does not delete by this column`);
+        }
       }
     }
     assert.ok(found.includes("edges.repo_id") && found.includes("cross_repo_deps.to_repo_id"), `found: ${found.join(", ")}`);
@@ -110,5 +116,19 @@ test("a cross-repo link INTO the removed repo goes too, one between two other re
     link.run("other", "kept");
     store.purgeRepository("gone");
     assert.equal((db.prepare(`select count(*) as n from cross_repo_deps`).get() as { n: number }).n, 1);
+  });
+});
+
+test("a purge that fails after the transaction leaves the repo registered, so a retry reaches what is left", () => {
+  withStore((store, db) => {
+    store.ensureRepository("half", "D:/gone");
+    db.prepare(`insert into symbols (repo_id, symbol_id, name, kind, file_path, line) values ('half', 's1', 'n', 'function', 'a.ts', 1)`).run();
+    db.exec(`drop table vec_symbol_map`); // the step after the transaction now throws
+    assert.throws(() => store.purgeRepository("half"));
+    assert.ok(store.getRepository("half"), "still registered");
+    db.exec(`create table vec_symbol_map (repo_id text not null, symbol_id text not null, vec_rowid integer, primary key (repo_id, symbol_id))`);
+    store.purgeRepository("half");
+    assert.equal(store.getRepository("half"), null);
+    assert.equal((db.prepare(`select count(*) as n from symbols where repo_id = 'half'`).get() as { n: number }).n, 0);
   });
 });

@@ -4404,3 +4404,34 @@ this afternoon failed at that harness, which is the highest rate observed so far
   Guarded: `freshness.test.ts` — a real full index killed after its first batch; a gate of another process answers
   not-fresh, runs `full` once, then `fresh`, and the repaired index has the same symbol / edge / unresolved / file
   counts as a clean full run; dead marker with / without a mode, live marker.
+
+### Review fixes to MCP-ISSUE-105 (F1) and MCP-ISSUE-101 F4 (2026-10-27)
+
+- **remove_repository takes the repo's refresh lock first.** A gate takes that lock before it writes its run marker, so
+  the marker check alone could pass while a gate was about to run; the purge then went ahead, the run wrote orphan
+  rows, and the old `removeRepoStateFiles` unlinked that process's live lock. Now: `tryAcquireLock` first (refuse when
+  held, by this or another process), then the marker check, the purge, and `releaseLock`. `removeRepoStateFiles` no
+  longer touches the lock. An `index_repository` / watcher run of another process takes only a marker, so it is covered
+  by the marker check except in the instant between that check and the purge.
+- **A watcher of another server process is not detected.** It writes nothing until it runs; the tool description says
+  so (stop it first). The in-process watcher is refused.
+- **The `repositories` row is deleted last**, after the vectors and the FTS rebuilds, so a failure part-way leaves a
+  repo the call can be retried on instead of orphan rows no retry can reach. The schema guard now matches any column
+  ending in `repo_id` and checks the purge deletes by that very column. The description says the removal is
+  irreversible (only a fresh full `index_repository` restores it).
+- **F4: the repair is bounded.** The attempt is counted in `repair-<repoId>.json` BEFORE the run starts (a killed repair
+  counts); after `MAX_REPAIR_ATTEMPTS` (2) the gate stops starting runs and answers `stale`: "repair failed 2 times; run
+  index_repository mode full". Any successful full run, by any caller, clears the flag.
+- **F4: a dead DIRTY run is not repaired by a whole-repo full run.** Its marker records its paths (up to 2000). The
+  repair clears those files' stored hashes (`invalidateFileHashes`) and runs a scoped run over them: they are
+  re-extracted, so the resolve passes run (the `unchanged` shortcut is never reached). The flag keeps the most thorough
+  dead mode (full > incremental > dirty) and the union of dirty paths; a dirty marker without paths, or more than the
+  bound, is a full repair. Dead full / incremental markers stay a full repair.
+- **F4: an expired marker (older than `staleRunMs`) with a live pid is remembered too**, for its mode, so a later death
+  of that holder cannot leave "fresh".
+- **Guarded:** `freshness.test.ts` — attempts cap (two runs, then stale with the instruction; a full run clears it); a
+  killed repair counts; expired-marker flag; mode/paths merge; a real dirty run over 400 edited files killed after its
+  first batch is repaired by ONE scoped (`dirty`) run and the index has the same symbol / edge / unresolved / file
+  counts as a clean full run of the edited tree. `removeRepository.test.ts` — a held lock refuses and is left alone,
+  the lock is released after a refusal and after the purge. `repoPurgeStore.test.ts` — a failure after the
+  transaction keeps the repo registered and a retry succeeds.

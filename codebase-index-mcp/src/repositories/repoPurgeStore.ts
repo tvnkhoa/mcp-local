@@ -58,7 +58,11 @@ const CHILD_TABLES: ReadonlyArray<{ table: string; key: string; parent: string; 
 
 export type PurgeCounts = Record<string, number>;
 
-/** Delete every row of `repoId` in one transaction, then rebuild the FTS tables that mirrored it. */
+/**
+ * Delete every row of `repoId`, then rebuild the FTS tables that mirrored it. The `repositories` row goes LAST,
+ * after the vectors and the FTS rebuilds succeeded: while it exists the repo is still known, so a failure part-way
+ * leaves a repo `remove_repository` can be retried on, never orphan rows no retry can reach.
+ */
 export function purgeRepositoryImpl(db: Database.Database, repoId: string): PurgeCounts {
   const counts: PurgeCounts = {};
   db.transaction(() => {
@@ -69,7 +73,7 @@ export function purgeRepositoryImpl(db: Database.Database, repoId: string): Purg
         .run(repoId).changes;
     }
     for (const table of PURGED_BY_REPO_ID) {
-      if (table === "vec_symbol_map") continue; // below, with the vectors it indexes
+      if (table === "vec_symbol_map" || table === "repositories") continue; // below: after the vectors they index / last
       counts[table] = db.prepare(`delete from ${table} where repo_id = ?`).run(repoId).changes;
     }
     for (const [table, cols] of Object.entries(PURGED_BY_CROSS_REPO_COLUMNS)) {
@@ -83,5 +87,6 @@ export function purgeRepositoryImpl(db: Database.Database, repoId: string): Purg
   rebuildDocsFtsImpl(db);
   rebuildLiteralsFtsImpl(db);
   rebuildCommentsFtsImpl(db);
+  counts.repositories = db.prepare(`delete from repositories where repo_id = ?`).run(repoId).changes;
   return counts;
 }

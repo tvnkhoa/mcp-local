@@ -190,6 +190,7 @@ import {
   upsertFile as upsertFileImpl,
   ensureRepository as ensureRepositoryImpl,
   getFileHash as getFileHashImpl,
+  invalidateFileHashes as invalidateFileHashesImpl,
   replaceSymbolsForFile as replaceSymbolsForFileImpl,
   pruneStaleFiles as pruneStaleFilesImpl,
   pruneFiles as pruneFilesImpl,
@@ -366,6 +367,11 @@ export class GraphStore {
 
   ensureRepository(repoId: string, repoPath: string): void {
     ensureRepositoryImpl(this.db, repoId, repoPath);
+  }
+
+  /** MCP-ISSUE-101 F4: clear these files' stored hashes so the next scoped run re-extracts them. */
+  invalidateFileHashes(repoId: string, filePaths: readonly string[]): number {
+    return invalidateFileHashesImpl(this.db, repoId, filePaths);
   }
 
   getFileHash(repoId: string, filePath: string): string | null {

@@ -484,23 +484,26 @@ const CHILD = `
 import { GraphStore } from ${JSON.stringify(pathToFileURL(path.resolve("src/repositories/graphStore.ts")).href)};
 import { createFreshnessGate } from ${JSON.stringify(pathToFileURL(path.resolve("src/middleware/freshness.ts")).href)};
 import { runIndexPipeline } from ${JSON.stringify(pathToFileURL(path.resolve("src/services/indexing/indexPipeline.ts")).href)};
-const [dbPath, lockDir, repoPath] = process.argv.slice(2);
+import fs from "node:fs";
+const [dbPath, lockDir, repoPath, runMode = "full", pathsFile] = process.argv.slice(2);
+const only = pathsFile ? JSON.parse(fs.readFileSync(pathsFile, "utf8")) : undefined;
 const store = new GraphStore(dbPath);
 store.ensureRepository("r", repoPath);
 const gate = createFreshnessGate({ enabled: true, budgetMs: 0, lockDir, getRepoPath: () => repoPath, getIndexedCommit: () => null, readTree: () => ({ head: null, dirty: [] }), run: async () => { throw new Error("unused"); } });
 let told = false;
 await gate.serialize("r", () => runIndexPipeline(store, {
-  repoId: "r", repoPath, mode: "full", maxFiles: 5000, batchSize: 10, subtxSize: 5, parseWorkers: 0,
+  repoId: "r", repoPath, mode: runMode, maxFiles: 5000, batchSize: 10, subtxSize: 5, parseWorkers: 0,
+  ...(only && { onlyRelativePaths: new Set(only) }),
   onProgress: () => { if (!told) { told = true; process.stdout.write("midrun\\n"); } }
-}), "full");
+}), runMode, only);
 store.close();
 process.stdout.write("done\\n");
 `;
 
-function startChild(lockDir: string, repoDir: string): { child: ChildProcess; lines: string[]; waitFor: (line: string) => Promise<void> } {
+function startChild(lockDir: string, repoDir: string, extra: string[] = []): { child: ChildProcess; lines: string[]; waitFor: (line: string) => Promise<void> } {
   const script = path.join(lockDir, "child.mts");
   fs.writeFileSync(script, CHILD);
-  const child = spawn(process.execPath, ["--import", "tsx", script, path.join(lockDir, "x.db"), lockDir, repoDir.replace(/\\/g, "/")], {
+  const child = spawn(process.execPath, ["--import", "tsx", script, path.join(lockDir, "x.db"), lockDir, repoDir.replace(/\\/g, "/"), ...extra], {
     stdio: ["ignore", "pipe", "pipe"]
   });
   const lines: string[] = [];
@@ -648,7 +651,7 @@ test("MCP-ISSUE-101 F4: a dead marker that names its mode asks for a full repair
     assert.equal(readRepairNeeded(dir, "live"), null);
     fs.writeFileSync(path.join(dir, "running-dead-999999-1.json"), JSON.stringify({ pid: 999999, at: 5, mode: "dirty", repoId: "dead" }));
     liveRunMarkers(dir, "dead", 60_000, Date.now());
-    assert.deepEqual(readRepairNeeded(dir, "dead"), { mode: "dirty", pid: 999999, at: 5 });
+    assert.deepEqual(readRepairNeeded(dir, "dead"), { mode: "full", pid: 999999, at: 5 }, "a dirty run with no recorded paths is repaired as a full one");
     clearRepairNeeded(dir, "dead");
     assert.equal(readRepairNeeded(dir, "dead"), null);
   } finally { rmSync(dir, { recursive: true, force: true }); }
@@ -836,4 +839,140 @@ test("MCP-ISSUE-101 F3: a change inside a dirty submodule moves the key and reac
     await h.gate.ensureFresh("r");
     assert.equal(h.runs.length, 2, "nothing changed: no run");
   } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("MCP-ISSUE-101 F4: a repair that keeps failing is tried twice, then the gate answers stale and says what to run", async () => {
+  const h = harness({ budgetMs: 1000, autoFinish: true, status: () => "failed" });
+  try {
+    fs.writeFileSync(path.join(h.lockDir, "running-r-999999-1.json"), JSON.stringify({ pid: 999999, at: 1, mode: "full", repoId: "r" }));
+    const first = await h.gate.ensureFresh("r");
+    assert.equal(first.state, "stale", "the run failed");
+    assert.equal((await h.gate.ensureFresh("r")).state, "stale");
+    assert.deepEqual(h.runs.map((r) => r.mode), ["full", "full"], "two repair attempts");
+    assert.equal(readRepairNeeded(h.lockDir, "r")?.attempts, 2);
+    const third = await h.gate.ensureFresh("r");
+    assert.equal(third.state, "stale");
+    assert.match(third.reason ?? "", /repair failed 2 times; run index_repository mode full/);
+    assert.equal(h.runs.length, 2, "no third run");
+    // an index_repository full run of any caller clears the flag and the gate is fresh again
+    await h.gate.serialize("r", async () => ({ status: "ok" }), "full");
+    assert.equal(readRepairNeeded(h.lockDir, "r"), null);
+    assert.deepEqual(await h.gate.ensureFresh("r"), { state: "fresh" });
+  } finally { h.cleanup(); }
+});
+
+test("MCP-ISSUE-101 F4: a killed repair is counted too (the attempt is written before the run starts)", async () => {
+  const h = harness({ budgetMs: 1000 }); // the fake run never finishes until released
+  try {
+    fs.writeFileSync(path.join(h.lockDir, "running-r-999999-1.json"), JSON.stringify({ pid: 999999, at: 1, mode: "incremental", repoId: "r" }));
+    void h.gate.ensureFresh("r");
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.equal(readRepairNeeded(h.lockDir, "r")?.attempts, 1, "counted while still running");
+    h.finishRun();
+  } finally { h.cleanup(); }
+});
+
+test("MCP-ISSUE-101 F4: a marker older than staleRunMs whose holder is still alive is remembered, so its later death cannot leave fresh", () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "cim-expired-"));
+  try {
+    fs.writeFileSync(path.join(dir, `running-r-${String(process.pid)}-1.json`), JSON.stringify({ pid: process.pid, at: 1_000, mode: "full", repoId: "r" }));
+    assert.deepEqual(liveRunMarkers(dir, "r", 60_000, 1_000_000), [], "ignored as a live run");
+    assert.equal(readRepairNeeded(dir, "r")?.mode, "full", "but remembered for its mode");
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("MCP-ISSUE-101 F4: the repair flag keeps the most thorough dead mode, the union of dirty paths, and the attempts", () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "cim-merge-"));
+  try {
+    const dead = (n: number, body: object): void => fs.writeFileSync(path.join(dir, `running-r-999999-${String(n)}.json`), JSON.stringify({ pid: 999999, at: n, repoId: "r", ...body }));
+    dead(1, { mode: "dirty", paths: ["a.ts"] });
+    dead(2, { mode: "dirty", paths: ["b.ts"] });
+    liveRunMarkers(dir, "r", 60_000, Date.now());
+    assert.deepEqual(readRepairNeeded(dir, "r")?.paths, ["a.ts", "b.ts"]);
+    assert.equal(readRepairNeeded(dir, "r")?.mode, "dirty");
+    dead(3, { mode: "dirty" }); // no paths recorded: cannot be repaired scoped
+    liveRunMarkers(dir, "r", 60_000, Date.now());
+    assert.equal(readRepairNeeded(dir, "r")?.mode, "full");
+    dead(4, { mode: "incremental" });
+    liveRunMarkers(dir, "r", 60_000, Date.now());
+    assert.equal(readRepairNeeded(dir, "r")?.mode, "full");
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("MCP-ISSUE-101 F4: a killed DIRTY run is repaired by a scoped run (hashes cleared, resolve runs) and the index equals a full run", async () => {
+  const h = harness({ budgetMs: 1000, autoFinish: true });
+  const repo = bigRepo();
+  const cleanDir = mkdtempSync(path.join(tmpdir(), "cim-clean-"));
+  const limits = { subtxSize: 5, checkpointEveryNBatches: 1, largeFileThresholdBytes: 512 * 1024, maxFileSizeBytes: 500 * 1024, parseWorkers: 0, parseJobTimeoutMs: 20_000 };
+  const dbPath = path.join(h.lockDir, "x.db");
+  const shape = (db: Database.Database): Record<string, number> => {
+    const n = (sql: string): number => (db.prepare(sql).get() as { n: number }).n;
+    return {
+      symbols: n("select count(*) as n from symbols where repo_id = 'r'"),
+      edges: n("select count(*) as n from edges where repo_id = 'r'"),
+      unresolved: n("select count(*) as n from edges where repo_id = 'r' and to_id like 'callee:%'"),
+      files: n("select count(*) as n from files where repo_id = 'r'")
+    };
+  };
+  try {
+    // 1. a complete index of the tree
+    const first = new GraphStore(dbPath);
+    first.ensureRepository("r", repo);
+    await createIndexRunner({ store: first, limits, resolvePerformanceProfileOverride: () => "standard" })("r", repo, "full", false, 5000, 50);
+    first.close();
+    // 2. every file changes
+    const edited: string[] = [];
+    for (let i = 0; i < 400; i++) {
+      fs.writeFileSync(path.join(repo, `src/c${String(i)}.ts`), `import { helper } from "./util";\n\nexport function mainEdited${String(i)}(): number {\n  return helper() + 1;\n}\n`);
+      edited.push(`src/c${String(i)}.ts`);
+    }
+    // 3. a dirty run over them is killed after its first batch
+    const pathsFile = path.join(h.lockDir, "paths.json");
+    fs.writeFileSync(pathsFile, JSON.stringify(edited));
+    const c = startChild(h.lockDir, repo, ["dirty", pathsFile]);
+    await c.waitFor("midrun");
+    c.child.kill("SIGKILL");
+    await new Promise((resolve) => c.child.once("exit", resolve));
+
+    // 4. another process's gate sees a clean tree at the indexed HEAD, and repairs
+    const store = new GraphStore(dbPath);
+    const run = createIndexRunner({ store, limits, resolvePerformanceProfileOverride: () => "standard" });
+    const modes: string[] = [];
+    const gate = createFreshnessGate({
+      enabled: true,
+      budgetMs: 120_000,
+      lockDir: h.lockDir,
+      getRepoPath: () => repo,
+      getIndexedCommit: () => "aaa111",
+      readTree: () => ({ head: "aaa111", dirty: [] }),
+      invalidateFileHashes: (id, paths) => void store.invalidateFileHashes(id, paths),
+      run: async (id, p, mode, dirtyPaths) => {
+        modes.push(mode);
+        return run(id, p, mode, false, 5000, 50, dirtyPaths ? { knownDirtyPaths: dirtyPaths } : undefined);
+      }
+    });
+    const note = await gate.ensureFresh("r");
+    assert.notEqual(note.state, "fresh", JSON.stringify(note));
+    assert.deepEqual(modes, ["dirty"], "a scoped repair over the recorded paths, not a whole-repo full run");
+    assert.deepEqual(await gate.ensureFresh("r"), { state: "fresh" });
+
+    const clean = new GraphStore(path.join(cleanDir, "y.db"));
+    clean.ensureRepository("r", repo);
+    await createIndexRunner({ store: clean, limits, resolvePerformanceProfileOverride: () => "standard" })("r", repo, "full", false, 5000, 50);
+    const probe = new Database(dbPath);
+    const probeClean = new Database(path.join(cleanDir, "y.db"));
+    try {
+      assert.deepEqual(shape(probe), shape(probeClean), "the repaired index equals a full run of the edited tree");
+      assert.ok((shape(probe).edges ?? 0) > 400);
+    } finally {
+      probe.close();
+      probeClean.close();
+      clean.close();
+      store.close();
+    }
+  } finally {
+    h.cleanup();
+    rmSync(cleanDir, { recursive: true, force: true });
+    rmSync(repo, { recursive: true, force: true });
+  }
 });

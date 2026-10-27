@@ -75,9 +75,34 @@ test("a vanished repo is removed with its lock, ledger and dead markers; a names
     for (const f of [...mine, ...others]) writeFileSync(path.join(stateDir, f), JSON.stringify({ pid: 999999, at: 0 }));
     const out = call(ctx, { repoId: "wt" });
     // the dead marker is swept by the live-run check before the purge, so it is gone but not listed
-    assert.deepEqual(out.stateFilesRemoved, ["dirty-wt.json", "refresh-wt.lock", "repair-wt.json"]);
+    assert.deepEqual(out.stateFilesRemoved, ["dirty-wt.json", "repair-wt.json"]);
+    assert.ok(!existsSync(path.join(stateDir, "refresh-wt.lock")), "the dead holder's lock was broken and released");
     for (const f of mine) assert.ok(!existsSync(path.join(stateDir, f)), f);
     for (const f of others) assert.ok(existsSync(path.join(stateDir, f)), f);
     assert.equal(ctx.store.getRepository("wt"), null);
+  });
+});
+
+test("a repo whose refresh lock is held by a live process is refused, and its lock and rows are left alone", () => {
+  withCtx((ctx, dir, stateDir) => {
+    ctx.store.ensureRepository("locked", path.join(dir, "missing"));
+    const lock = path.join(stateDir, "refresh-locked.lock");
+    // a gate that took the lock but has not written its run marker yet
+    writeFileSync(lock, JSON.stringify({ pid: process.pid, at: Date.now() }));
+    assert.throws(() => call(ctx, { repoId: "locked", force: true }), (e: unknown) => e instanceof McpError && /holds its lock/.test(e.message));
+    assert.ok(existsSync(lock), "someone else's live lock is never unlinked");
+    assert.ok(ctx.store.getRepository("locked"));
+  });
+});
+
+test("the lock the removal takes is released when it refuses and when it succeeds", () => {
+  withCtx((ctx, dir, stateDir) => {
+    ctx.store.ensureRepository("r1", path.join(dir, "missing"));
+    writeFileSync(path.join(stateDir, `running-r1-${String(process.pid)}-1.json`), JSON.stringify({ pid: process.pid, at: Date.now(), mode: "full" }));
+    assert.throws(() => call(ctx, { repoId: "r1" }), (e: unknown) => e instanceof McpError && /in progress/.test(e.message));
+    assert.ok(!existsSync(path.join(stateDir, "refresh-r1.lock")), "released after a refusal");
+    rmSync(path.join(stateDir, `running-r1-${String(process.pid)}-1.json`));
+    assert.equal(call(ctx, { repoId: "r1" }).removed, true);
+    assert.ok(!existsSync(path.join(stateDir, "refresh-r1.lock")), "released after the purge");
   });
 });
