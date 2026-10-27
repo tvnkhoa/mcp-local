@@ -2,6 +2,7 @@ import { execFile, execFileSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 
+import { defaultGitExcludesFile } from "../../config/envConfig.js";
 import type { GraphStore } from "../../repositories/graphStore.js";
 
 /**
@@ -823,8 +824,7 @@ export function excludeRulesChangedSince(repoPath: string, sinceMs: number): str
   } catch {
     global = null; // unset: git uses the XDG default
   }
-  const home = process.env.HOME ?? process.env.USERPROFILE ?? "";
-  global ??= process.env.XDG_CONFIG_HOME ? path.join(process.env.XDG_CONFIG_HOME, "git", "ignore") : home ? path.join(home, ".config", "git", "ignore") : null;
+  global ??= defaultGitExcludesFile();
   if (global) candidates.push(path.resolve(repoPath, global));
   for (const file of candidates) {
     try {

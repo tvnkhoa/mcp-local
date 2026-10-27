@@ -9,6 +9,7 @@
  */
 
 import { randomBytes } from "node:crypto";
+import path from "node:path";
 import {
   parseAllowedRoots,
   parseAutoWatchRepos,
@@ -123,6 +124,18 @@ export const INDEX_LOG_MODE = (process.env.CODEBASE_INDEX_LOG_MODE ?? "").toLowe
  * is still an environment read, and rule 10 does not carve out exceptions for whose variable it is.
  */
 export const NPM_PACKAGE_VERSION = (process.env.npm_package_version ?? "").trim();
+
+/**
+ * MCP-ISSUE-106: git's default `core.excludesFile` when the user set none — `$XDG_CONFIG_HOME/git/ignore`, else
+ * `~/.config/git/ignore` (HOME, then USERPROFILE) — or null without either. Git's variables, not this server's,
+ * read here for the same reason as `npm_package_version`. Read at call time.
+ */
+export function defaultGitExcludesFile(): string | null {
+  const xdg = process.env.XDG_CONFIG_HOME;
+  if (xdg) return path.join(xdg, "git", "ignore");
+  const home = process.env.HOME ?? process.env.USERPROFILE ?? "";
+  return home ? path.join(home, ".config", "git", "ignore") : null;
+}
 
 // ── Named accessors, so `index.ts` never touches process.env ─────────────────
 // Each one pairs a variable name with the parser that already owned its meaning. The parsers are
