@@ -333,11 +333,31 @@ test("MCP-ISSUE-101: an unchanged dirty tree is fresh with no run; a touch alone
     fs.utimesSync(file, t, t);
     assert.deepEqual(await h.gate.ensureFresh("r"), { state: "fresh" }, "touched, same bytes: still covered");
     assert.equal(h.runs.length, 1);
-    fs.writeFileSync(file, "export const a = 2;\n"); // same size, new content
-    fs.utimesSync(file, t, t); // and the same mtime: only the content says it changed
+    // A different SIZE, so the (size, mtime, ctime) hash cache cannot hit whatever the filesystem clock does.
+    fs.writeFileSync(file, "export const a = 22;\n");
     assert.equal((await h.gate.ensureFresh("r")).state, "refreshed", "a content change refreshes");
     assert.deepEqual(await h.gate.ensureFresh("r"), { state: "fresh" });
     assert.equal(h.runs.length, 2, "exactly one more run");
+  } finally { h.cleanup(); }
+});
+
+test("MCP-ISSUE-101: a same-size edit with the mtime set back is seen through ctime — KNOWN RESIDUAL: within one filesystem timestamp tick it is not", async () => {
+  const h = harness({ budgetMs: 1000, autoFinish: true, keyStore: new Map() });
+  try {
+    const file = path.join(h.lockDir, "edited.ts");
+    fs.writeFileSync(file, "export const a = 1;\n");
+    h.setTree({ head: "aaa111", dirty: ["edited.ts"] });
+    assert.equal((await h.gate.ensureFresh("r")).state, "refreshed");
+    const t = new Date(Date.now() + 60_000);
+    fs.utimesSync(file, t, t);
+    await h.gate.ensureFresh("r"); // the hash cache now holds this stamp
+    // Wait out the timestamp tick, so the write below gets a later ctime than the cached stamp.
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    fs.writeFileSync(file, "export const a = 2;\n"); // same size, new content
+    fs.utimesSync(file, t, t); // and the same mtime: only ctime (moved by the write and by utimes) says it changed
+    assert.equal((await h.gate.ensureFresh("r")).state, "refreshed", "ctime is part of the cache identity");
+    // The residual, not asserted because it depends on the filesystem clock: an edit that keeps size AND mtime
+    // and lands in the same ctime tick as the stamp the cache holds hits the cache and is not re-hashed.
   } finally { h.cleanup(); }
 });
 
