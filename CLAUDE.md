@@ -85,8 +85,16 @@ handshake with placeholder env, which catches a module that compiles but cannot 
 (`.github/workflows/ci.yml`, Windows + Node 22) adds `install:servers` and `benchmark:plan:check` and
 drops `test:scripts` — `docs/development/ci.md`.
 
+**A `packages/*` change uses the reduced gate** (owner, 27 Oct: "lần sau dùng bản rút gọn"): `verify:packages`,
+every server's build + typecheck, every server's tests except codebase-index's harness suite, codebase-index's
+touched `test:*`, `contracts:check`, `generate:check`, `docs:check`. `verify:all` only before a release or
+when the owner asks; when several rows land the same day, gate once after the last merge, before the push.
+
 **In a git worktree**, junction every server's `node_modules` (and the root's) to the main tree's up
-front, or the run is wasted; remove the junctions with `cmd /c rmdir` **before** `git worktree remove`.
+front, or the run is wasted. Junction per entry: the workspace's `node_modules/@mcp/*` entries must point
+at the **worktree's** `packages/*`, not the main tree's, or the run builds and tests main's packages — so
+link the other `node_modules` entries to main one by one and `@mcp/<pkg>` to the worktree's `packages/<pkg>`.
+Remove every junction one at a time with `cmd /c rmdir` (never `rm -r`, which follows it into main) **before** `git worktree remove`.
 `test:scripts`' skills test only counts when run from the main tree.
 
 ### Generated files — do not hand-edit (S-35, S-36)
