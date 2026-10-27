@@ -200,7 +200,7 @@ export function handleSearchLiterals(
 
 /** MCP-ISSUE-100: the one sentence a partial search_regex answer must carry. */
 function buildRegexTruncationWarning(
-  r: { truncationReason: string | null; filesScanned: number; filesUnscanned: number; nextAfterPath: string | null; nextAfterPathCutMidFile: boolean; perFileCapFiles: string[] },
+  r: { truncationReason: string | null; filesScanned: number; filesUnscanned: number; nextAfterPath: string | null; nextSkipMatches: number; perFileCapFiles: string[] },
   filesMode: boolean
 ): string {
   const parts: string[] = [];
@@ -212,12 +212,21 @@ function buildRegexTruncationWarning(
   if (r.perFileCapFiles.length > 0) {
     parts.push(`per-file match cap hit in ${String(r.perFileCapFiles.length)} file(s) (e.g. ${r.perFileCapFiles[0]}): further matches there are not returned.`);
   }
-  const remedy = [`raise limit`, ...(filesMode ? [] : [`outputMode:"files"`]), `narrow scope (filePathPrefix / language / pathExclude)`];
-  if (r.nextAfterPath !== null) {
-    remedy.push(`resume with afterPath:"${r.nextAfterPath}"`);
+  const stoppedEarly = r.truncationReason === "limit_reached" || r.truncationReason === "files_cap_reached";
+  const remedy: string[] = [];
+  if (stoppedEarly) {
+    remedy.push(`raise limit`, ...(filesMode ? [] : [`outputMode:"files"`]), `narrow scope (filePathPrefix / language / pathExclude)`);
+    if (r.nextAfterPath !== null || r.nextSkipMatches > 0) {
+      remedy.push(
+        `resume with ${r.nextAfterPath !== null ? `afterPath:"${r.nextAfterPath}"` : "no afterPath"}${r.nextSkipMatches > 0 ? `, skipMatches:${String(r.nextSkipMatches)}` : ""}`
+      );
+    }
   }
-  parts.push(`Remedy: ${remedy.join(", ")}.`);
-  if (r.nextAfterPathCutMidFile) parts.push(`afterPath skips the rest of ${r.nextAfterPath ?? ""}, which was cut mid-file; query it alone with filePathPrefix.`);
+  if (r.perFileCapFiles.length > 0) {
+    // The per-file cap is fixed: a larger limit does not lift it.
+    remedy.push(`for the per-file cap, narrow the pattern or search that file alone (filePathPrefix) — raising limit does not lift it`);
+  }
+  parts.push(`Remedy: ${remedy.join("; ")}.`);
   return parts.join(" ");
 }
 
@@ -235,6 +244,7 @@ export function handleSearchRegex(
     limit: number;
     outputMode?: "matches" | "files";
     afterPath?: string;
+    skipMatches?: number;
     profile: string;
   },
   ctx: HandlerContext
@@ -255,7 +265,8 @@ export function handleSearchRegex(
       contextLines: args.contextLines,
       limit: args.limit,
       outputMode: args.outputMode,
-      afterPath: args.afterPath
+      afterPath: args.afterPath,
+      skipMatches: args.skipMatches
     });
   } catch (err) {
     const e = err as RegexSearchError;
@@ -265,7 +276,7 @@ export function handleSearchRegex(
     throw err;
   }
 
-  const { matches, filesScanned, filesEligible, truncated, truncationReason, filesUnscanned, nextAfterPath } = result;
+  const { matches, filesScanned, filesEligible, truncated, truncationReason, filesUnscanned, nextAfterPath, nextSkipMatches } = result;
   const staleWarning = buildStaleWarning(args.repoId, store, "match lines/text are read live from disk and are current; only enclosingSymbol is resolved from the index and may be off — re-index for accurate enclosing symbols.");
   const coverage = buildCoverageBlock({ resultCount: result.files ? result.files.length : matches.length, kind: "search", query: args.pattern, truncated });
   // MCP-ISSUE-058(a): a capped scan that found nothing is NOT "absent" — say so, in words, naming the
@@ -292,10 +303,21 @@ export function handleSearchRegex(
         filesEligible,
         filesUnscanned: unscanned,
         ...(result.perFileCapFiles.length > 0 && { perFileCapFiles: result.perFileCapFiles }),
-        ...(nextAfterPath !== null && { nextAfterPath })
+        ...(nextAfterPath !== null && { nextAfterPath }),
+        ...(nextSkipMatches > 0 && { nextSkipMatches })
       }
     : {};
-  const completeness = { complete: !truncated, ...(truncated && { warning: buildRegexTruncationWarning(result, args.outputMode === "files") }) };
+  // MCP-ISSUE-100: an afterPath past every in-scope file searched nothing — say so instead of "complete, 0 results".
+  const resumeEcho = args.afterPath ? { afterPath: args.afterPath, ...(args.skipMatches ? { skipMatches: args.skipMatches } : {}) } : {};
+  const completeness = {
+    complete: !truncated,
+    ...resumeEcho,
+    ...(truncated
+      ? { warning: buildRegexTruncationWarning(result, args.outputMode === "files") }
+      : result.afterPathRemovedAll
+        ? { warning: `afterPath "${args.afterPath ?? ""}" sorts after every in-scope file: nothing was searched. Check it is the nextAfterPath of a truncated response.` }
+        : {})
+  };
 
   if (result.files) {
     const files = profile === "nano" ? result.files.map((f) => ({ filePath: f.filePath, matchCount: f.matchCount })) : result.files;

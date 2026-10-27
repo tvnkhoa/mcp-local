@@ -54,6 +54,7 @@ export const searchRegexSchema = (MAX_RESULT_LIMIT: number) => z
     limit: z.number().int().min(1).max(MAX_RESULT_LIMIT).default(50),
     outputMode: z.enum(["matches", "files"]).default("matches"),
     afterPath: z.string().min(1).max(500).optional(),
+    skipMatches: z.number().int().min(0).max(1_000_000).optional(),
     profile: responseProfileSchema.default("compact")
   })
   .strict();

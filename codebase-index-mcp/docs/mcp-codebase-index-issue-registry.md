@@ -4093,11 +4093,19 @@ this afternoon failed at that harness, which is the highest rate observed so far
   - **Resume.** New input `afterPath`: files are path-sorted, only those after it are searched. A scan that
     stopped early returns `nextAfterPath`. `filesUnscanned` is exact (files after the stop point), not
     `eligible − scanned`.
-  - A file cut by `limit` mid-way is the resume point; its tail is not covered, and the warning says so.
+  - **Mid-file cursor (follow-up).** A file cut by `limit` after n matches resumes at it: `nextAfterPath` is the
+    path before it (omitted when it is the first file) and `nextSkipMatches: n`, passed back as
+    `afterPath` + `skipMatches`. The first file after `afterPath` is re-read and its first n matches skipped, so a
+    loop loses nothing, repeats nothing and ends even when one file holds more matches than `limit`. The
+    per-file cap counts skipped matches too.
+  - **Cap detection (follow-up).** The per-file cap is reported only when a match beyond it exists (a file with
+    exactly 200 is not capped), and its remedy does not say "raise limit": the cap is fixed.
+  - **`afterPath` echo (follow-up).** `afterPath` / `skipMatches` are echoed; an `afterPath` that sorts past every
+    in-scope file warns instead of answering `complete:true` with nothing.
   - `perFileCapFiles` (first 20) names the files where the per-file cap hid matches; no resume point for that
     reason alone, the scan itself reached the end.
-- **Guarded:** `regexSearchTruncation.test.ts` (pages via `afterPath` equal the full scan; per-file cap; every
-  profile), `regexSearchFiles.test.ts`.
+- **Guarded:** `regexSearchTruncation.test.ts` (pages via `afterPath` equal the full scan; mid-file cursor loop;
+  exact-cap file; afterPath past the end; per-file cap; every profile), `regexSearchFiles.test.ts`.
 
 ## MCP-ISSUE-102 — a linked git worktree beside its main checkout could not be indexed
 
@@ -4115,5 +4123,10 @@ this afternoon failed at that harness, which is the highest rate observed so far
   widened. It is indexed under the caller's repoId with its own HEAD. `list_repositories` and `health_check`
   report `worktreeOf`: the repoId of the registered main checkout owning that common dir, or null.
 - **Guarded:** `indexGuardrailsWorktree.test.ts` (temp repo + `git worktree add`: accepted with its branch's HEAD;
-  unregistered sibling refused; forged `.git` files refused; unrelated root refused; `worktreeOf`).
+  unregistered sibling refused; forged `.git` files refused; unrelated root refused; `worktreeOf`; junctioned `.git` directory refused; symlinked `.git` refused, skipped on
+  EPERM; worktree subdirectory refused).
+- **Hardening (follow-up, review finding):** outside the roots only a linked worktree is accepted. `.git` is read
+  with `lstat`: a symlink or junction is never followed, and a `.git` directory (real or junctioned to an allowed
+  repo's) is refused, since a directory carries no back-link. The back-link is compared with
+  `<realpath(repoPath)>/.git` without resolving `.git` itself. A subdirectory of a worktree is refused.
 - **Not covered:** a worktree whose main checkout is not registered is accepted but reports `worktreeOf: null`.

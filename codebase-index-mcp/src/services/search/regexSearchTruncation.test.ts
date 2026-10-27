@@ -71,13 +71,57 @@ test("files mode: limit hit resumes the same way, and an unread file is not coun
   });
 });
 
-test("limit reached inside one file: resume skips its tail and says so", () => {
+test("limit reached inside one file: the cursor is the previous path plus the matches already returned", () => {
   withRepo({ "a.ts": "hit\n".repeat(10), "b.ts": "hit\n" }, (store) => {
     const r = searchRegexImpl(store, "r", { pattern: "hit", limit: 3 });
     assert.equal(r.truncationReason, "limit_reached");
-    assert.equal(r.nextAfterPath, "a.ts");
-    assert.equal(r.nextAfterPathCutMidFile, true);
+    assert.equal(r.nextAfterPath, null, "a.ts is the first file: nothing precedes it");
+    assert.equal(r.nextSkipMatches, 3);
     assert.equal(r.filesUnscanned, 1);
+  });
+});
+
+test("a cursor loop over a file with more matches than the limit collects every match once, and terminates", () => {
+  withRepo({ "a.ts": "x\n", "b.ts": "hit\n".repeat(30), "c.ts": "hit\n".repeat(4) }, (store) => {
+    const seen: string[] = [];
+    let after: string | undefined;
+    let skip: number | undefined;
+    let pages = 0;
+    for (; pages < 50; pages++) {
+      const r = searchRegexImpl(store, "r", { pattern: "hit", limit: 7, afterPath: after, skipMatches: skip });
+      seen.push(...r.matches.map((m) => `${m.filePath}:${String(m.line)}`));
+      if (r.truncationReason !== "limit_reached") break;
+      after = r.nextAfterPath ?? undefined;
+      skip = r.nextSkipMatches > 0 ? r.nextSkipMatches : undefined;
+    }
+    const full = searchRegexImpl(store, "r", { pattern: "hit", limit: 500 });
+    assert.deepEqual(seen, full.matches.map((m) => `${m.filePath}:${String(m.line)}`));
+    assert.equal(seen.length, 34);
+    assert.ok(pages < 10, "no endless loop");
+  });
+});
+
+test("a file with exactly the per-file cap of matches is not reported as capped; one more is", () => {
+  withRepo({ "a.ts": "hit\n".repeat(200), "b.ts": "hit\n".repeat(201) }, (store) => {
+    for (const outputMode of ["files", "matches"] as const) {
+      const exact = searchRegexImpl(fakeStoreFor(store, ["a.ts"]), "r", { pattern: "hit", limit: 1000, outputMode });
+      assert.equal(exact.truncated, false, outputMode);
+      const over = searchRegexImpl(fakeStoreFor(store, ["b.ts"]), "r", { pattern: "hit", limit: 1000, outputMode });
+      assert.equal(over.truncationReason, "per_file_cap", outputMode);
+    }
+  });
+});
+
+function fakeStoreFor(base: RegexSearchStore, files: string[]): RegexSearchStore {
+  return { ...base, listIndexedFiles: () => files.map((p) => ({ path: p, language: "typescript" })) };
+}
+
+test("afterPath past every in-scope file reports it removed them all", () => {
+  withRepo(ONE_HIT_PER_FILE, (store) => {
+    const r = searchRegexImpl(store, "r", { pattern: "hit", limit: 5, afterPath: "zzz.ts" });
+    assert.equal(r.afterPathRemovedAll, true);
+    assert.equal(searchRegexImpl(store, "r", { pattern: "hit", limit: 5, afterPath: "a.ts" }).afterPathRemovedAll, false);
+    assert.equal(searchRegexImpl(store, "r", { pattern: "hit", limit: 5 }).afterPathRemovedAll, false);
   });
 });
 
@@ -104,7 +148,7 @@ test("untruncated search has no truncation fields set", () => {
   });
 });
 
-function runHandler(store: RegexSearchStore, args: { limit: number; profile: string; outputMode?: "matches" | "files"; afterPath?: string }): Record<string, unknown> {
+function runHandler(store: RegexSearchStore, args: { limit: number; profile: string; outputMode?: "matches" | "files"; afterPath?: string; skipMatches?: number }): Record<string, unknown> {
   const ctx = {
     store: { searchRegex: (id: string, o: Parameters<typeof searchRegexImpl>[2]) => searchRegexImpl(store, id, o), getRepository: store.getRepository },
     asText: (payload: unknown) => ({ content: [{ type: "text", text: JSON.stringify(payload) }] })
@@ -131,6 +175,17 @@ test("handler: every profile carries complete/warning/nextAfterPath on truncatio
     const files = runHandler(store, { limit: 2, profile: "nano", outputMode: "files" });
     assert.equal(files.complete, false);
     assert.equal(files.nextAfterPath, "b.ts");
+  });
+});
+
+test("handler: afterPath past the end is echoed with a warning; a cut resume carries nextSkipMatches", () => {
+  withRepo({ "a.ts": "hit\n".repeat(10) }, (store) => {
+    const past = runHandler(store, { limit: 5, profile: "compact", afterPath: "zzz.ts" });
+    assert.equal(past.afterPath, "zzz.ts");
+    assert.match(String(past.warning), /sorts after every in-scope file/);
+    const cut = runHandler(store, { limit: 4, profile: "nano" });
+    assert.equal(cut.nextSkipMatches, 4);
+    assert.match(String(cut.warning), /skipMatches:4/);
   });
 });
 

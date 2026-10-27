@@ -2219,7 +2219,7 @@
         "openWorldHint": false,
         "readOnlyHint": true
       },
-      "description": "Search repo source by REGEX and get matches with context lines + the enclosing symbol. Use this instead of baseline grep for arbitrary pattern searches (TODO/FIXME sweeps, API-usage hunts, call-site patterns, config keys). Scans indexed files by default; set scanAll=true to also walk non-code text files (json/yaml/etc). Flags limited to [ims] (g is implicit). filePathPrefix (string OR array of prefixes, OR-semantics) / language / excludeTests narrow scope; pathExclude (minimatch glob or array, e.g. \"**/Tests/**\") subtracts subtrees; contextLines controls surrounding lines (returned in every profile except nano). Results cap at `limit` and a per-file cap; on ANY cap the response has complete:false, a `warning` naming filesScanned/filesUnscanned and the remedy, and (when the scan stopped early) `nextAfterPath` — pass it back as `afterPath` to resume. complete:true means every in-scope file was searched to the end. outputMode=\"files\" is the `grep -l` answer: one row per matching file ({filePath, matchCount, firstLine}) with `limit` counting FILES — use it for \"which files mention X\" on a broad pattern, where match rows would spend the whole limit on the first few files.",
+      "description": "Search repo source by REGEX and get matches with context lines + the enclosing symbol. Use this instead of baseline grep for arbitrary pattern searches (TODO/FIXME sweeps, API-usage hunts, call-site patterns, config keys). Scans indexed files by default; set scanAll=true to also walk non-code text files (json/yaml/etc). Flags limited to [ims] (g is implicit). filePathPrefix (string OR array of prefixes, OR-semantics) / language / excludeTests narrow scope; pathExclude (minimatch glob or array, e.g. \"**/Tests/**\") subtracts subtrees; contextLines controls surrounding lines (returned in every profile except nano). Results cap at `limit` and a per-file cap; on ANY cap the response has complete:false, a `warning` naming filesScanned/filesUnscanned and the remedy, and (when the scan stopped early) `nextAfterPath` — pass it back as `afterPath` (with `nextSkipMatches` as `skipMatches`) to resume. complete:true means every in-scope file was searched to the end. outputMode=\"files\" is the `grep -l` answer: one row per matching file ({filePath, matchCount, firstLine}) with `limit` counting FILES — use it for \"which files mention X\" on a broad pattern, where match rows would spend the whole limit on the first few files.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -2302,6 +2302,11 @@
           },
           "scanAll": {
             "type": "boolean"
+          },
+          "skipMatches": {
+            "description": "With afterPath: skip this many matches of the first file after it. Pass the previous response's nextSkipMatches (set when limit cut a file mid-way), so the resume loses and repeats nothing.",
+            "minimum": 0,
+            "type": "integer"
           }
         },
         "required": [
