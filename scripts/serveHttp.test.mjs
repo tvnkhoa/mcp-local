@@ -17,7 +17,7 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { getServer } from "./lib/manifest.mjs";
-import { httpClientEntry, httpEnvNames, readEnvFile, taskCreateArgs, taskXml, writeEnvFile } from "./serve-http.mjs";
+import { httpClientEntry, httpEnvNames, readEnvFile, taskCreateArgs, taskDeniedHint, taskXml, writeEnvFile } from "./serve-http.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), "serve-http-test-"));
@@ -67,6 +67,12 @@ test("the task is registered from XML: logon + daily 08:00, battery-proof, no ti
     "the --log path is whole"
   );
   assert.deepEqual(taskCreateArgs(server, { xmlFile: "C:/t.xml" }), ["/Create", "/TN", "mcp-local\\codebase-index-http", "/XML", "C:/t.xml", "/F"]);
+});
+
+test("a denied register names the elevated-task cause and the one-time delete", () => {
+  const hint = taskDeniedHint(getServer("codebase-index"));
+  assert.match(hint, /Access is denied/);
+  assert.match(hint, /ELEVATED prompt: schtasks \/Delete \/TN "mcp-local\\codebase-index-http" \/F/);
 });
 
 test("--task print prints and registers nothing; a server without http vars is refused", () => {

@@ -157,6 +157,15 @@ export function taskCreateArgs(server, { xmlFile }) {
   return ["/Create", "/TN", taskName(server), "/XML", xmlFile, "/F"];
 }
 
+/**
+ * "Access is denied" on /Create /F is not the XML: a task first registered from an elevated prompt
+ * keeps an ACL that gives its user read only, so a non-elevated session can neither replace nor
+ * delete it (a task this script created is the user's to replace). Remove it once, elevated.
+ */
+export function taskDeniedHint(server) {
+  return `If this was "Access is denied" and ${taskName(server)} already exists, it was created elevated and a normal prompt cannot replace it. Once, from an ELEVATED prompt: schtasks /Delete /TN "${taskName(server)}" /F — then re-run --task register.`;
+}
+
 function runTask(server, mode, envFile, logFile) {
   if (mode === "print" || mode === "register") {
     const xml = taskXml(server, { envFile, logFile });
@@ -169,6 +178,8 @@ function runTask(server, mode, envFile, logFile) {
       fs.writeFileSync(xmlFile, Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from(xml, "utf16le")]));
       try {
         execFileSync("schtasks", args, { stdio: "inherit" });
+      } catch (e) {
+        throw new Error(`${e.message}\n${taskDeniedHint(server)}`, { cause: e });
       } finally {
         fs.rmSync(xmlFile, { force: true });
       }

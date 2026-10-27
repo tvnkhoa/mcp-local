@@ -313,7 +313,9 @@ node scripts/install-mcp.mjs --server codebase-index --transport stdio  # back t
   not stopped or refused on battery, no execution limit. The flag form refuses to start on battery, kills the
   server when the laptop leaves AC (the 26 Oct outage), caps a run at 72 h and cuts `/TR` at 261
   characters (the `--log` path). It does not run all day by design: a shutdown ends the server, the next
-  logon or morning starts it. No repetition, restart loop or service.
+  logon or morning starts it. No repetition, restart loop or service. A task first registered from an
+  elevated prompt has an ACL that gives its user read only, so a normal prompt gets "Access is denied" on
+  `/F` (and on `/Delete`): delete it once from an elevated prompt, then `--task register` replaces it freely.
 - The server listens only when started with `--transport http`; an HTTP port in a stdio entry's env is
   ignored. It binds 127.0.0.1, refuses a foreign `Host`/`Origin` (403) and a missing token (401).
 - Shared across clients: the store, the watchers and the refresh worker. Per client: the protocol
