@@ -175,7 +175,7 @@ import {
   type CitationRow,
   type CommentHit
 } from "./annotationsStore.js";
-import { recordRun as recordRunImpl, getLatestRun as getLatestRunImpl, markRunTrigger as markRunTriggerImpl, getLatestWorkRunMode as getLatestWorkRunModeImpl, markRunTreeDirty as markRunTreeDirtyImpl, getLatestWorkRunTreeDirty as getLatestWorkRunTreeDirtyImpl } from "./runStore.js";
+import { recordRun as recordRunImpl, getLatestRun as getLatestRunImpl, markRunTrigger as markRunTriggerImpl, getLatestWorkRunMode as getLatestWorkRunModeImpl, markRunTreeDirty as markRunTreeDirtyImpl, getLatestWorkRunTreeDirty as getLatestWorkRunTreeDirtyImpl, markRunTreeKey as markRunTreeKeyImpl, getLatestRunTreeKey as getLatestRunTreeKeyImpl } from "./runStore.js";
 import {
   type WriteContext,
   prepareWriteStatements,
@@ -455,6 +455,15 @@ export class GraphStore {
 
   markRunTrigger(runId: string, trigger: string): void {
     markRunTriggerImpl(this.db, runId, trigger);
+  }
+
+  /** MCP-ISSUE-101: see `markRunTreeKey` / `getLatestRunTreeKey` in runStore.ts. */
+  markRunTreeKey(runId: string, treeKey: string): void {
+    markRunTreeKeyImpl(this.db, runId, treeKey);
+  }
+
+  getLatestRunTreeKey(repoId: string): string | null {
+    return getLatestRunTreeKeyImpl(this.db, repoId);
   }
 
   /** Release L (MCP-ISSUE-095): see `markRunTreeDirty` in runStore.ts. */

@@ -4109,6 +4109,41 @@ this afternoon failed at that harness, which is the highest rate observed so far
 - **Guarded:** `regexSearchTruncation.test.ts` (pages via `afterPath` equal the full scan; mid-file cursor loop;
   exact-cap file; afterPath past the end; per-file cap; every profile), `regexSearchFiles.test.ts`.
 
+## MCP-ISSUE-101 — every query on a dirty tree re-ran the refresh
+
+- **Status:** 🟡 PART 1 FIXED 2026-10-27 (wec.aria request, C2a); part 2 (scoped post-phase resolve, C2b) open.
+- **Scenario:** live on wec.aria (~3,000 files), every read query on a dirty tree started a dirty run (~7.4 s:
+  extract 4.3 s, resolve 3.0 s) and answered from the old index; the next query did it again. The gate's covered
+  key was HEAD + each dirty file's size and mtime, held in one process's memory, so:
+  - a touch without a content change re-ran it;
+  - every other server process (one per Claude session) on the same DB never saw it and ran its own.
+
+  The watcher did a whole-repo `incremental` run per batch.
+- **Fix (part 1):**
+  - **Content key.** The key is HEAD + the sorted dirty paths + a sha256 of each dirty file's bytes (`deleted` when
+    gone; a file above the index size cap is keyed by its size). Only dirty files are hashed; there is no mtime
+    pre-check (removed on purpose for correctness, see `incremental-indexing`).
+  - **Persisted, shared.** `index_runs.tree_key` (runGraphMigrations) is set on a successful run's record by the
+    gate (on the server thread, after the refresh worker's result), by `index_repository` and by the watcher.
+    Every process reads the LATEST run's key: a later run that recorded none (failed, cancelled, an older build)
+    vouches for nothing, so the next check runs.
+  - **Narrow dirty run.** At the key's HEAD, a gate run re-indexes only the files the key does not vouch for:
+    dirty files new or changed since, plus key files no longer dirty (reverted or deleted). Without a key at this
+    HEAD, every dirty file, as before.
+  - **Watcher.** A batch hands its changed and deleted paths, plus the dirty files the key does not vouch for, to
+    a `dirty` run as `knownDirtyPaths`; the run removes deleted files itself, with their dependents in scope. A
+    batch that dropped events at `maxQueuedEvents` says so (`overflowed`) and falls back to `incremental`,
+    pruning first, as before.
+  - **Honest outcome.** A refresh run that ends `failed` or `cancelled` answers `state: "stale"` with that status
+    in `reason`, and records no key.
+- **Guarded:** `freshness.test.ts` (unchanged dirty tree → fresh, no run; touch → no run; same size and mtime,
+  new content → one run; a second gate on the same key store → fresh, no run; narrowed dirty paths; cancelled →
+  stale, no key), `watchManager.test.ts` (batch paths, no pre-prune; overflow fallback), `runStore.test.ts`
+  (latest run's key only), `test:query-refresh` §7 (a second server process on the same dirty tree: fresh and
+  `latestRun.runId` unchanged; touch → no run; content change → one dirty run, then fresh).
+- **Not covered (part 2):** the post-phase resolve of a dirty run still runs repo-wide (call context, imports,
+  types, properties).
+
 ## MCP-ISSUE-102 — a linked git worktree beside its main checkout could not be indexed
 
 - **Status:** ✅ FIXED 2026-10-27 (wec.aria request, C3).

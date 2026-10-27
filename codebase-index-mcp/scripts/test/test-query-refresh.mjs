@@ -11,7 +11,7 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { execFileSync } from "child_process";
-import { mkdirSync, rmSync, writeFileSync } from "fs";
+import { mkdirSync, rmSync, utimesSync, writeFileSync } from "fs";
 import { join } from "path";
 import { makeTempDir } from "./_fixtures.mjs";
 import { attachServerStderr } from "./_serverStderr.mjs";
@@ -166,6 +166,38 @@ try {
   const pending = js(await client.callTool({ name: "search_symbols", arguments: { repoId, query: "probeTwoZq9", strategy: "name", profile: "standard" } }));
   assert(pending?.freshness?.state === "refreshing" || !exact(pending, "probeTwoZq9"), "a pending cleanup is reported, or already done");
   if (pending?.freshness?.state === "refreshing") assert(conf(pending) !== "high", "and its coverage is not high", JSON.stringify(pending?.coverage));
+} finally {
+  await Promise.race([client.close().catch(() => {}), new Promise((r) => setTimeout(r, 3000))]);
+}
+
+// 7. MCP-ISSUE-101: the covered key is content-hashed and lives in the index DB. A dirty tree a run covered is
+//    fresh for ANOTHER server process with no run; a touch runs nothing; a content change runs once.
+const latestRunId = async (c) => js(await c.callTool({ name: "health_check", arguments: { repoId } }))?.latestRun?.runId;
+client = await connect(tmpDir, 30_000, "test-query-refresh-key-a");
+let runAfterA;
+try {
+  writeFileSync(join(tmpDir, "keyed.ts"), "export function keyedZq10(): number {\n  return 10;\n}\n");
+  assert(exact(await settle(client, "keyedZq10"), "keyedZq10"), "process A: the dirty file is indexed");
+  runAfterA = await latestRunId(client);
+} finally {
+  await Promise.race([client.close().catch(() => {}), new Promise((r) => setTimeout(r, 3000))]);
+}
+client = await connect(tmpDir, 30_000, "test-query-refresh-key-b");
+try {
+  const b = js(await client.callTool({ name: "search_symbols", arguments: { repoId, query: "keyedZq10", strategy: "name", profile: "standard" } }));
+  assert(exact(b, "keyedZq10") && b?.freshness === undefined, "process B: same dirty tree answers fresh", JSON.stringify(b?.freshness));
+  const runB = await latestRunId(client);
+  assert(runAfterA && runB === runAfterA, "process B: no run started", `${String(runAfterA)} vs ${String(runB)}`);
+  const t = new Date(Date.now() + 60_000);
+  utimesSync(join(tmpDir, "keyed.ts"), t, t);
+  const touched = js(await client.callTool({ name: "search_symbols", arguments: { repoId, query: "keyedZq10", strategy: "name", profile: "standard" } }));
+  assert(touched?.freshness === undefined && (await latestRunId(client)) === runAfterA, "touched, same bytes: fresh, no run", JSON.stringify(touched?.freshness));
+  writeFileSync(join(tmpDir, "keyed.ts"), "export function keyedZq11(): number {\n  return 10;\n}\n");
+  const edited = await settle(client, "keyedZq11");
+  assert(exact(edited, "keyedZq11") && edited?.freshness?.mode === "dirty", "a content change: one dirty run", JSON.stringify(edited?.freshness));
+  const runAfterEdit = await latestRunId(client);
+  const again = js(await client.callTool({ name: "search_symbols", arguments: { repoId, query: "keyedZq11", strategy: "name", profile: "standard" } }));
+  assert(again?.freshness === undefined && (await latestRunId(client)) === runAfterEdit, "and the next query is fresh with no second run", JSON.stringify(again?.freshness));
 } finally {
   await Promise.race([client.close().catch(() => {}), new Promise((r) => setTimeout(r, 3000))]);
 }

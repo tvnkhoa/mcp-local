@@ -4,7 +4,12 @@ import chokidar, { type FSWatcher } from "chokidar";
 
 import type { RepoWatchStatus, WatchConfig } from "../../types/index.js";
 
-type RunIndexer = (repoId: string, repoPath: string, config: WatchConfig) => Promise<void>;
+/**
+ * MCP-ISSUE-101: what one debounced batch saw. `overflowed`: events were dropped at `maxQueuedEvents`, so the lists
+ * are incomplete and the indexer must not trust them.
+ */
+export type WatchBatch = { changed: string[]; deleted: string[]; overflowed: boolean };
+type RunIndexer = (repoId: string, repoPath: string, config: WatchConfig, batch: WatchBatch) => Promise<void>;
 type PruneDeleted = (repoId: string, deletedRelativePaths: string[]) => number;
 type WatchActivityMode = "changed" | "deleted";
 type WatchActivity = {
@@ -23,6 +28,7 @@ type RepoWatchState = {
   timer: NodeJS.Timeout | null;
   runningIndex: boolean;
   rerunRequested: boolean;
+  overflowed: boolean;
 };
 
 export class WatchManager {
@@ -81,7 +87,8 @@ export class WatchManager {
       deleted: new Set<string>(),
       timer: null,
       runningIndex: false,
-      rerunRequested: false
+      rerunRequested: false,
+      overflowed: false
     };
 
     state.watcher
@@ -146,6 +153,8 @@ export class WatchManager {
     const queuedCount = state.changed.size + state.deleted.size;
     if (queuedCount >= this.config.maxQueuedEvents && !state.changed.has(relativePath) && !state.deleted.has(relativePath)) {
       state.status.lastError = `watch queue limit reached (${String(this.config.maxQueuedEvents)}); dropping new events`;
+      state.overflowed = true;
+      this.scheduleFlush(repoId, repoPath);
       return;
     }
 
@@ -196,23 +205,27 @@ export class WatchManager {
 
     const deleted = [...state.deleted];
     const changed = [...state.changed];
-    if (deleted.length === 0 && changed.length === 0) {
+    const overflowed = state.overflowed;
+    if (deleted.length === 0 && changed.length === 0 && !overflowed) {
       return;
     }
 
     state.deleted.clear();
     state.changed.clear();
+    state.overflowed = false;
     state.status.queuedChanged = 0;
     state.status.queuedDeleted = 0;
     state.runningIndex = true;
 
     try {
-      if (deleted.length > 0) {
+      // A dirty run removes the deleted paths itself, re-extracting their dependents; only the incremental
+      // fallback for an overflowed batch needs them pruned first.
+      if (overflowed && deleted.length > 0) {
         const pruned = this.pruneDeleted(repoId, deleted);
         state.status.filesPruned += pruned;
       }
 
-      await this.runIndexer(repoId, repoPath, this.config);
+      await this.runIndexer(repoId, repoPath, this.config, { changed, deleted, overflowed });
       state.status.batchesProcessed += 1;
       state.status.lastRunAt = new Date().toISOString();
       state.status.lastError = null;
@@ -223,7 +236,7 @@ export class WatchManager {
       state.runningIndex = false;
       if (state.rerunRequested) {
         state.rerunRequested = false;
-        if (state.changed.size > 0 || state.deleted.size > 0) {
+        if (state.changed.size > 0 || state.deleted.size > 0 || state.overflowed) {
           this.scheduleFlush(repoId, repoPath);
         }
       }

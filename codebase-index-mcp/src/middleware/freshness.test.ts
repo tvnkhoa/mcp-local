@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { applyFreshness, createFreshnessGate, tryAcquireLock, type RepoTreeState } from "./freshness.js";
+import { applyFreshness, computeTreeKey, createFreshnessGate, pathsChangedSince, tryAcquireLock, type RepoTreeState } from "./freshness.js";
 import type { IndexMode, IndexRunResult } from "../types/index.js";
 
 /**
@@ -19,7 +19,7 @@ import type { IndexMode, IndexRunResult } from "../types/index.js";
 
 type Harness = {
   gate: ReturnType<typeof createFreshnessGate>;
-  runs: { mode: IndexMode }[];
+  runs: { mode: IndexMode; dirtyPaths?: readonly string[] }[];
   setTree: (t: RepoTreeState) => void;
   setIndexed: (sha: string | null) => void;
   finishRun: () => void;
@@ -29,11 +29,23 @@ type Harness = {
   cleanup: () => void;
 };
 
-function harness(opts: { budgetMs: number; autoFinish?: boolean; refuse?: string; pending?: boolean }): Harness {
-  const lockDir = mkdtempSync(path.join(tmpdir(), "cim-fresh-"));
+type HarnessOpts = {
+  budgetMs: number;
+  autoFinish?: boolean;
+  refuse?: string;
+  pending?: boolean;
+  /** MCP-ISSUE-101: the index DB's `tree_key` column, shared by every gate (process) handed the same map. */
+  keyStore?: Map<string, string>;
+  /** Repo folder to share with another harness (another process on the same tree). */
+  repoDir?: string;
+  status?: () => IndexRunResult["status"];
+};
+
+function harness(opts: HarnessOpts): Harness {
+  const lockDir = opts.repoDir ?? mkdtempSync(path.join(tmpdir(), "cim-fresh-"));
   let tree: RepoTreeState = { head: "aaa111", dirty: [] };
   let indexed: string | null = "aaa111";
-  const runs: { mode: IndexMode }[] = [];
+  const runs: { mode: IndexMode; dirtyPaths?: readonly string[] }[] = [];
   const triggered: string[] = [];
   const pending: string[][] = [];
   let release: (() => void) | null = null;
@@ -48,11 +60,15 @@ function harness(opts: { budgetMs: number; autoFinish?: boolean; refuse?: string
     markTriggered: (runId) => triggered.push(runId),
     ...(opts.pending && { markPendingReindex: (_repoId: string, paths: string[]) => pending.push(paths) }),
     ...(opts.refuse !== undefined && { refuseRefresh: () => opts.refuse ?? null }),
-    run: async (_repoId, _repoPath, mode) => {
-      runs.push({ mode });
+    ...(opts.keyStore && {
+      getCoveredKey: (repoId: string) => opts.keyStore?.get(repoId) ?? null,
+      recordCoveredKey: (repoId: string, _runId: string, key: string) => opts.keyStore?.set(repoId, key)
+    }),
+    run: async (_repoId, _repoPath, mode, dirtyPaths) => {
+      runs.push({ mode, ...(dirtyPaths && { dirtyPaths: [...dirtyPaths] }) });
       if (!opts.autoFinish) await new Promise<void>((resolve) => (release = resolve));
       indexed = tree.head;
-      return { runId: `run-${String(runs.length)}` } as IndexRunResult;
+      return { runId: `run-${String(runs.length)}`, ...(opts.status && { status: opts.status() }) } as IndexRunResult;
     }
   });
   return {
@@ -290,4 +306,90 @@ test("without a pending-reindex hook, a vanished path still falls back to an inc
     assert.equal((await h.gate.ensureFresh("r")).mode, "incremental");
     assert.deepEqual(await h.gate.ensureFresh("r"), { state: "fresh" });
   } finally { h.cleanup(); }
+});
+
+// MCP-ISSUE-101: on wec.aria every query on a dirty tree paid a ~7.4 s dirty run — the covered key was size+mtime,
+// in memory, so a touch re-ran it and no other server process could reuse it.
+
+test("MCP-ISSUE-101: an unchanged dirty tree is fresh with no run; a touch alone runs nothing; a content change runs once", async () => {
+  const h = harness({ budgetMs: 1000, autoFinish: true, keyStore: new Map() });
+  try {
+    const file = path.join(h.lockDir, "edited.ts");
+    fs.writeFileSync(file, "export const a = 1;\n");
+    h.setTree({ head: "aaa111", dirty: ["edited.ts"] });
+    assert.equal((await h.gate.ensureFresh("r")).state, "refreshed");
+    assert.deepEqual(await h.gate.ensureFresh("r"), { state: "fresh" }, "second check on the same tree");
+    const t = new Date(Date.now() + 60_000);
+    fs.utimesSync(file, t, t);
+    assert.deepEqual(await h.gate.ensureFresh("r"), { state: "fresh" }, "touched, same bytes: still covered");
+    assert.equal(h.runs.length, 1);
+    fs.writeFileSync(file, "export const a = 2;\n"); // same size, new content
+    fs.utimesSync(file, t, t); // and the same mtime: only the content says it changed
+    assert.equal((await h.gate.ensureFresh("r")).state, "refreshed", "a content change refreshes");
+    assert.deepEqual(await h.gate.ensureFresh("r"), { state: "fresh" });
+    assert.equal(h.runs.length, 2, "exactly one more run");
+  } finally { h.cleanup(); }
+});
+
+test("MCP-ISSUE-101: the covered key is shared — a second gate (another process) on the same DB answers fresh without a run", async () => {
+  const keyStore = new Map<string, string>();
+  const a = harness({ budgetMs: 1000, autoFinish: true, keyStore });
+  const b = harness({ budgetMs: 1000, autoFinish: true, keyStore, repoDir: a.lockDir });
+  try {
+    fs.writeFileSync(path.join(a.lockDir, "x.ts"), "export const x = 1;\n");
+    a.setTree({ head: "aaa111", dirty: ["x.ts"] });
+    b.setTree({ head: "aaa111", dirty: ["x.ts"] });
+    assert.equal((await a.gate.ensureFresh("r")).state, "refreshed");
+    assert.deepEqual(await b.gate.ensureFresh("r"), { state: "fresh" }, "process B reuses process A's key");
+    assert.equal(b.runs.length, 0);
+  } finally { a.cleanup(); }
+});
+
+test("MCP-ISSUE-101: a dirty run re-indexes only the files the covered key does not vouch for", async () => {
+  const h = harness({ budgetMs: 1000, autoFinish: true, keyStore: new Map() });
+  try {
+    for (const n of ["p", "q", "r"]) fs.writeFileSync(path.join(h.lockDir, `${n}.ts`), `export const ${n} = 1;\n`);
+    h.setTree({ head: "aaa111", dirty: ["p.ts", "q.ts", "r.ts"] });
+    await h.gate.ensureFresh("r");
+    assert.deepEqual(h.runs[0]?.dirtyPaths, ["p.ts", "q.ts", "r.ts"], "no key yet: every dirty file");
+    fs.writeFileSync(path.join(h.lockDir, "q.ts"), "export const q = 2;\n");
+    fs.writeFileSync(path.join(h.lockDir, "s.ts"), "export const s = 1;\n");
+    h.setTree({ head: "aaa111", dirty: ["p.ts", "q.ts", "r.ts", "s.ts"] });
+    await h.gate.ensureFresh("r");
+    assert.deepEqual(h.runs[1]?.dirtyPaths, ["q.ts", "s.ts"], "only the changed and the new file");
+  } finally { h.cleanup(); }
+});
+
+test("MCP-ISSUE-101: a run that ends failed or cancelled answers stale and records no key; the next query runs again", async () => {
+  let status: IndexRunResult["status"] = "cancelled";
+  const keyStore = new Map<string, string>();
+  const h = harness({ budgetMs: 1000, autoFinish: true, keyStore, status: () => status });
+  try {
+    fs.writeFileSync(path.join(h.lockDir, "f.ts"), "export const f = 1;\n");
+    h.setTree({ head: "aaa111", dirty: ["f.ts"] });
+    const note = await h.gate.ensureFresh("r");
+    assert.equal(note.state, "stale");
+    assert.match(note.reason ?? "", /ended cancelled/);
+    assert.equal(keyStore.size, 0, "no key for a run that covered nothing");
+    status = "ok";
+    assert.equal((await h.gate.ensureFresh("r")).state, "refreshed");
+    assert.equal(h.runs.length, 2);
+  } finally { h.cleanup(); }
+});
+
+test("MCP-ISSUE-101: pathsChangedSince — another HEAD vouches for nothing; reverted files are named", async () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "cim-key-"));
+  try {
+    fs.writeFileSync(path.join(dir, "a.ts"), "a");
+    fs.writeFileSync(path.join(dir, "b.ts"), "b");
+    const before = await computeTreeKey(dir, { head: "h1", dirty: ["b.ts", "a.ts", "gone.ts"] });
+    assert.deepEqual(Object.keys(before.files), ["a.ts", "b.ts", "gone.ts"]);
+    assert.equal(before.files["gone.ts"], "deleted");
+    const now = await computeTreeKey(dir, { head: "h1", dirty: ["a.ts"] });
+    assert.deepEqual(pathsChangedSince(before, now), ["b.ts", "gone.ts"], "no longer dirty: re-index from disk");
+    assert.equal(pathsChangedSince(before, { ...now, head: "h2" }), null);
+    assert.equal(pathsChangedSince(null, now), null);
+    const big = await computeTreeKey(dir, { head: "h1", dirty: ["a.ts"] }, 0);
+    assert.equal(big.files["a.ts"], "size:1", "above the hash cap: keyed by size");
+  } finally { rmSync(dir, { recursive: true, force: true }); }
 });

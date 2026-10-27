@@ -17,6 +17,7 @@
  * Claude sessions share one worktree and one index DB) by a lock file beside the DB.
  */
 
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 
@@ -62,6 +63,15 @@ export type FreshnessGateOptions = {
    * older build refreshed over a newer build's index (several processes share one DB).
    */
   refuseRefresh?: (repoId: string) => string | null;
+  /**
+   * MCP-ISSUE-101: the serialized {@link TreeKey} the index's latest run covered (`index_runs.tree_key`), shared
+   * by every process on the DB. Absent: the gate keeps the key in memory, for this process only.
+   */
+  getCoveredKey?: (repoId: string) => string | null;
+  /** MCP-ISSUE-101: persist the key a successful run covered, on that run's record. Best-effort. */
+  recordCoveredKey?: (repoId: string, runId: string, key: string) => void;
+  /** A dirty file larger than this is keyed by its size, not hashed: the index never reads it (its size cap is lower). */
+  hashMaxBytes?: number;
   /** Tag a finished run as query-triggered, for `health_check`. Best-effort. */
   markTriggered?: (runId: string) => void;
   /**
@@ -211,17 +221,58 @@ export function recordDirtyLedger(
   writeDirtyLedger(lockDir, repoId, { head: tree.head, paths: paths.sort() });
 }
 
-/** The tree identity a refresh covers: HEAD plus each dirty file's size and mtime. */
-function treeKey(repoPath: string, tree: RepoTreeState): string {
-  const parts = [...tree.dirty].sort().map((rel) => {
-    try {
-      const st = fs.statSync(path.join(repoPath, rel));
-      return `${rel}:${String(st.size)}:${String(st.mtimeMs)}`;
-    } catch {
-      return `${rel}:deleted`;
-    }
-  });
-  return `${tree.head ?? "nogit"}|${parts.join(",")}`;
+/**
+ * MCP-ISSUE-101: the tree identity a run covers — HEAD plus a content hash of each dirty file (`deleted` when it is
+ * gone). Only the dirty files are hashed: a clean file's content is HEAD's. Before this the key was each dirty
+ * file's size and mtime, held in memory, so a touch re-ran the refresh and no other process could reuse it; on
+ * wec.aria every query on a dirty tree paid a ~7.4 s dirty run.
+ */
+export type TreeKey = { head: string; files: Record<string, string> };
+
+/** Above any index size cap: a file the index skips is keyed by its size (crossing the cap changes the size). */
+export const DEFAULT_HASH_MAX_BYTES = 32 * 1024 * 1024;
+
+async function hashFile(abs: string, maxBytes: number): Promise<string> {
+  try {
+    const st = await fs.promises.stat(abs);
+    if (!st.isFile()) return "deleted";
+    if (st.size > maxBytes) return `size:${String(st.size)}`;
+    return createHash("sha256").update(await fs.promises.readFile(abs)).digest("hex").slice(0, 32);
+  } catch {
+    return "deleted";
+  }
+}
+
+export async function computeTreeKey(repoPath: string, tree: RepoTreeState, maxBytes = DEFAULT_HASH_MAX_BYTES): Promise<TreeKey> {
+  const paths = [...new Set(tree.dirty)].sort();
+  const hashes = await Promise.all(paths.map((rel) => hashFile(path.join(repoPath, rel), maxBytes)));
+  return { head: tree.head ?? "nogit", files: Object.fromEntries(paths.map((rel, i) => [rel, hashes[i] as string])) };
+}
+
+export function serializeTreeKey(key: TreeKey): string {
+  return JSON.stringify(key);
+}
+
+export function parseTreeKey(raw: string | null | undefined): TreeKey | null {
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw) as TreeKey;
+    return typeof parsed.head === "string" && parsed.files && typeof parsed.files === "object" ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The paths whose indexed content may differ from the tree: dirty files new or changed since `covered`, and covered
+ * files that are no longer dirty (reverted or deleted). Null when `covered` is at another HEAD (or absent): then
+ * every dirty file is in question.
+ */
+export function pathsChangedSince(covered: TreeKey | null, current: TreeKey): string[] | null {
+  if (!covered || !sameCommit(covered.head, current.head)) return null;
+  const out = Object.keys(current.files).filter((p) => covered.files[p] !== current.files[p]);
+  for (const p of Object.keys(covered.files)) if (!(p in current.files)) out.push(p);
+  return out.sort();
 }
 
 export type FreshnessGate = {
@@ -234,8 +285,16 @@ export function createFreshnessGate(opts: FreshnessGateOptions): FreshnessGate {
   const now = opts.now ?? Date.now;
   const checkTtlMs = opts.checkTtlMs ?? 0;
   const staleLockMs = opts.staleLockMs ?? 15 * 60_000;
-  /** Tree key each repo's last completed refresh covered. */
+  const hashMaxBytes = opts.hashMaxBytes ?? DEFAULT_HASH_MAX_BYTES;
+  /** Without `getCoveredKey`: the key each repo's last completed refresh in THIS process covered. */
   const coveredKey = new Map<string, string>();
+  const readCovered = (repoId: string): TreeKey | null => {
+    try {
+      return parseTreeKey(opts.getCoveredKey ? opts.getCoveredKey(repoId) : coveredKey.get(repoId));
+    } catch {
+      return null;
+    }
+  };
   const lastCheck = new Map<string, { at: number; note: FreshnessNote }>();
   type Flight = { mode: "incremental" | "dirty"; startedAt: number; promise: Promise<IndexRunResult | null>; cleanup?: number };
   const inflight = new Map<string, Flight>();
@@ -279,6 +338,10 @@ export function createFreshnessGate(opts: FreshnessGateOptions): FreshnessGate {
     if (outcome === null) {
       return { state: "stale", mode: flight.mode, reason: "the refresh run failed; this answer comes from the previous index." };
     }
+    // MCP-ISSUE-101: a run that ended failed or cancelled (superseded) covered nothing; say so, never "refreshed".
+    if (outcome.status === "failed" || outcome.status === "cancelled") {
+      return { state: "stale", mode: flight.mode, runId: outcome.runId, reason: `the refresh run ended ${outcome.status}; this answer comes from the previous index.` };
+    }
     lastCheck.delete(repoId);
     return { state: "refreshed", mode: flight.mode, elapsedMs: now() - started, runId: outcome.runId };
   };
@@ -303,15 +366,16 @@ export function createFreshnessGate(opts: FreshnessGateOptions): FreshnessGate {
       return { state: "fresh" }; // not a git repo: nothing to compare against
     }
     if (!tree.head) return { state: "fresh" };
-    // The tree read may have yielded: a concurrent call for this repo can have started a run meanwhile.
+    const key = await computeTreeKey(repoPath, tree, hashMaxBytes);
+    // The tree read and the hashing may have yielded: a concurrent call for this repo can have started a run meanwhile.
     const startedMeanwhile = inflight.get(repoId);
     if (startedMeanwhile) return waitBudget(repoId, startedMeanwhile);
 
     const indexed = opts.getIndexedCommit(repoId);
     const headMoved = !indexed || !sameCommit(tree.head, indexed);
     const vanished = headMoved ? [] : vanishedDirtyPaths(readDirtyLedger(opts.lockDir, repoId), tree.head, tree.dirty);
-    const key = treeKey(repoPath, tree);
-    if (!headMoved && vanished.length === 0 && (tree.dirty.length === 0 || coveredKey.get(repoId) === key)) {
+    const changed = headMoved ? null : pathsChangedSince(readCovered(repoId), key);
+    if (!headMoved && vanished.length === 0 && (tree.dirty.length === 0 || changed?.length === 0)) {
       const note: FreshnessNote = { state: "fresh" };
       lastCheck.set(repoId, { at: started, note });
       return note;
@@ -341,10 +405,18 @@ export function createFreshnessGate(opts: FreshnessGateOptions): FreshnessGate {
 
     const promise = serialize(repoId, () => {
       if (cleanupByDirty) opts.markPendingReindex?.(repoId, vanished);
-      return opts.run(repoId, repoPath, mode, mode === "dirty" ? tree.dirty : undefined);
+      // MCP-ISSUE-101: only the files whose content the covered key does not vouch for (all dirty files without one).
+      return opts.run(repoId, repoPath, mode, mode === "dirty" ? (changed ?? tree.dirty) : undefined);
     })
       .then((result) => {
-        coveredKey.set(repoId, key);
+        if (result.status === "failed" || result.status === "cancelled") return result;
+        const serialized = serializeTreeKey(key);
+        coveredKey.set(repoId, serialized);
+        try {
+          opts.recordCoveredKey?.(repoId, result.runId, serialized);
+        } catch {
+          // Best-effort: the next check runs again, it never answers stale.
+        }
         recordDirtyLedger(opts.lockDir, repoId, mode, tree, cleanupByDirty);
         try {
           opts.markTriggered?.(result.runId);

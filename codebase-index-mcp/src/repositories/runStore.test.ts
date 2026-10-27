@@ -3,7 +3,7 @@ import test from "node:test";
 import Database from "better-sqlite3";
 
 import { initGraphSchema, runGraphMigrations } from "./schema.js";
-import { recordRun, getLatestRun, markRunTrigger, markRunTreeDirty, getLatestWorkRunTreeDirty, getLatestWorkRunMode, INDEX_RUNS_KEPT_PER_REPO } from "./runStore.js";
+import { recordRun, getLatestRun, markRunTrigger, markRunTreeDirty, getLatestWorkRunTreeDirty, getLatestWorkRunMode, INDEX_RUNS_KEPT_PER_REPO, markRunTreeKey, getLatestRunTreeKey } from "./runStore.js";
 import type { IndexRunSummary, SkipBucket } from "../types/index.js";
 
 /**
@@ -172,4 +172,15 @@ test("release M: index_runs keeps the latest 200 rows per repo, and always the l
   assert.equal(getLatestWorkRunTreeDirty(conn, "r"), true, "the skip gate still reads the dirty full run");
   assert.equal(getLatestWorkRunMode(conn, "r"), "full");
   assert.equal((conn.prepare("select count(*) as n from index_runs where run_id = 'skip-1'").get() as { n: number }).n, 0, "the oldest skips went");
+});
+
+test("MCP-ISSUE-101: the tree key is the LATEST run's — a later run that recorded none vouches for nothing", () => {
+  const conn = db();
+  assert.equal(getLatestRunTreeKey(conn, "r"), null);
+  recordRun(conn, summary({ runId: "keyed" }));
+  markRunTreeKey(conn, "keyed", "{\"head\":\"h\",\"files\":{}}");
+  assert.equal(getLatestRunTreeKey(conn, "r"), "{\"head\":\"h\",\"files\":{}}");
+  assert.equal(getLatestRunTreeKey(conn, "other"), null, "per repo");
+  recordRun(conn, summary({ runId: "unkeyed", status: "failed", finishedAt: "2026-08-04T00:00:20.000Z" }));
+  assert.equal(getLatestRunTreeKey(conn, "r"), null);
 });

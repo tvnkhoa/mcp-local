@@ -49,7 +49,7 @@ import type { HandlerContext } from "./tools/handlers/handlerContext.js";
 import { createCodebaseIndexServer } from "./server.js";
 import { buildTools } from "./tools/index.js";
 import { DEFAULT_MAX_MARKDOWN_BYTES } from "./services/indexing/fileFilter.js";
-import { applyFreshness, createFreshnessGate, freshnessStateDir, recordDirtyLedger } from "./middleware/freshness.js";
+import { applyFreshness, computeTreeKey, createFreshnessGate, freshnessStateDir, parseTreeKey, pathsChangedSince, recordDirtyLedger, serializeTreeKey, type TreeKey } from "./middleware/freshness.js";
 import { readWorkingTreeState, readWorkingTreeStateAsync } from "./services/git/gitHelpers.js";
 
 const dbPath = stringFromEnv("CODEBASE_INDEX_DB_PATH", "./codebase-index.db");
@@ -176,13 +176,35 @@ const freshnessGate = createFreshnessGate({
   readTree: (repoPath) => readWorkingTreeStateAsync(repoPath),
   run: (repoId, repoPath, mode, dirtyPaths) => refreshWorker.run(repoId, repoPath, mode, DOCS_INDEXING_ENABLED, MAX_FILES_PER_RUN, 200, dirtyPaths ? { knownDirtyPaths: dirtyPaths } : undefined),
   refuseRefresh: (repoId) => newerBuildRefusal(store.getLatestRun(repoId)?.indexVersion),
+  getCoveredKey: (repoId) => store.getLatestRunTreeKey(repoId),
+  recordCoveredKey: (_repoId, runId, key) => store.markRunTreeKey(runId, key),
+  hashMaxBytes: MAX_FILE_SIZE_BYTES,
   markTriggered: (runId) => store.markRunTrigger(runId, "query"),
   markPendingReindex: (repoId, paths) => store.recordPendingReindexFiles(repoId, paths, "freshness: indexed while dirty, since deleted or reverted")
 });
 
+/** MCP-ISSUE-101: the tree a run is about to index, keyed before it starts (a file edited mid-run then differs). */
+async function treeKeyNow(repoPath: string): Promise<TreeKey | null> {
+  try {
+    const tree = await readWorkingTreeStateAsync(repoPath);
+    return tree.head ? await computeTreeKey(repoPath, tree, MAX_FILE_SIZE_BYTES) : null;
+  } catch {
+    return null; // not a git repo
+  }
+}
+
 const runIndexAndResolve: typeof runIndexUnserialized = (repoId, repoPath, mode, ...rest) =>
   freshnessGate.serialize(repoId, async () => {
+    const key = await treeKeyNow(repoPath);
     const result = await runIndexUnserialized(repoId, repoPath, mode, ...rest);
+    // MCP-ISSUE-101: index_repository and the watcher leave the index covering the whole tree, as a gate run does.
+    if (key && result.status !== "failed" && result.status !== "cancelled") {
+      try {
+        store.markRunTreeKey(result.runId, serializeTreeKey(key));
+      } catch {
+        // Best-effort: without it the next query re-runs, it never answers stale.
+      }
+    }
     // index_repository and the watcher keep the dirty-run ledger current too (see freshness.ts).
     try {
       recordDirtyLedger(FRESHNESS_LOCK_DIR, repoId, mode, readWorkingTreeState(repoPath));
@@ -200,9 +222,18 @@ async function ensureFresh(repoId: string): Promise<void> {
 
 const watchManager = new WatchManager(
   watchConfig,
-  async (repoId, repoPath, config) => {
+  async (repoId, repoPath, config, batch) => {
     assertPathAllowed(repoPath, allowedRoots);
-    await runIndexAndResolve(repoId, repoPath, "incremental", DOCS_INDEXING_ENABLED, config.maxFilesPerRun, config.batchSize);
+    // MCP-ISSUE-101: the batch's paths, plus every dirty file the covered key does not vouch for, re-index in dirty
+    // mode — not a whole-repo incremental re-hash. A batch that dropped events cannot name what changed.
+    if (batch.overflowed) {
+      await runIndexAndResolve(repoId, repoPath, "incremental", DOCS_INDEXING_ENABLED, config.maxFilesPerRun, config.batchSize);
+      return;
+    }
+    const key = await treeKeyNow(repoPath);
+    const unvouched = key ? pathsChangedSince(parseTreeKey(store.getLatestRunTreeKey(repoId)), key) ?? Object.keys(key.files) : [];
+    const paths = [...new Set([...batch.changed, ...batch.deleted, ...unvouched])].sort();
+    await runIndexAndResolve(repoId, repoPath, "dirty", DOCS_INDEXING_ENABLED, config.maxFilesPerRun, config.batchSize, { knownDirtyPaths: paths });
   },
   (repoId, deletedRelativePaths) => store.pruneFiles(repoId, deletedRelativePaths),
   ({ repoId }) => {

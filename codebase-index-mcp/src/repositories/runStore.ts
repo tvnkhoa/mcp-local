@@ -269,6 +269,25 @@ export function getLatestWorkRunTreeDirty(db: Database.Database, repoId: string)
   return row?.treeDirty === 1;
 }
 
+/**
+ * MCP-ISSUE-101: the tree key (freshness.ts `TreeKey`, serialized) a successful run covered. Set after the run is
+ * recorded, like `triggered_by`.
+ */
+export function markRunTreeKey(db: Database.Database, runId: string, treeKey: string): void {
+  db.prepare(`update index_runs set tree_key = ? where run_id = ?`).run(treeKey, runId);
+}
+
+/**
+ * MCP-ISSUE-101: the tree key of the repo's most recent run, or null. Only the LATEST run counts: a later run that
+ * recorded no key (failed, cancelled, an older build) leaves the index in a state no key vouches for.
+ */
+export function getLatestRunTreeKey(db: Database.Database, repoId: string): string | null {
+  const row = db
+    .prepare(`select tree_key as treeKey from index_runs where repo_id = ? order by finished_at desc, started_at desc, rowid desc limit 1`)
+    .get(repoId) as { treeKey: string | null } | undefined;
+  return row?.treeKey ?? null;
+}
+
 export function markRunTrigger(db: Database.Database, runId: string, trigger: string): void {
   db.prepare(`update index_runs set triggered_by = ? where run_id = ?`).run(trigger, runId);
 }

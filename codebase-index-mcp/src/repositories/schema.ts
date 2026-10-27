@@ -529,6 +529,8 @@ export function runGraphMigrations(db: Database.Database, vectorEnabled: boolean
     ensureRunColumnText("scope");
     // Release L (MCP-ISSUE-095): whether a full / incremental run indexed a dirty working tree.
     ensureRunColumn("tree_dirty");
+    // MCP-ISSUE-101: the working tree a run covered (HEAD + content hash of each dirty file), shared by every process.
+    ensureRunColumnText("tree_key");
 
     // Add commit_sha for staleness detection.
     if (!runCols.some((c) => c.name === "commit_sha")) {
