@@ -100,6 +100,8 @@ const child = spawn(process.execPath, [path.join(ROOT, "dist", "index.js"), "--t
     CODEBASE_INDEX_DB_PATH: path.join(tmp, "index.db"),
     CODEBASE_INDEX_HTTP_PORT: String(port),
     CODEBASE_INDEX_HTTP_TOKEN: TOKEN,
+    // MCP-ISSUE-104: HTTP refuses to start without one (scripts/serve-http.mjs supplies it in production).
+    CODEBASE_INDEX_REFACTOR_APPROVAL_SECRET: "test-http-transport-secret-0123456789abcdef",
     CODEBASE_INDEX_WATCH_AUTO_START_ENABLED: "false"
   },
   stdio: ["ignore", "ignore", "pipe"]

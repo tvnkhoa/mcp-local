@@ -25,6 +25,7 @@
  */
 
 import { execFileSync, spawn } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -83,6 +84,42 @@ export function readEnvFile(file) {
 export function writeEnvFile(file, env) {
   fs.mkdirSync(path.dirname(file), { recursive: true });
   fs.writeFileSync(file, `${JSON.stringify({ env }, null, 2)}\n`, { encoding: "utf-8", mode: 0o600 });
+}
+
+/** MCP-ISSUE-104: the server's refactor approval secret var, or null when it has none. */
+export function approvalSecretEnvName(server) {
+  return server.env.find((f) => f.name.endsWith("_REFACTOR_APPROVAL_SECRET"))?.name ?? null;
+}
+
+export function approvalSecretFile(server) {
+  return path.join(httpStateDir(), `${server.key}.approval-secret`);
+}
+
+/**
+ * MCP-ISSUE-104: the served process's refactor approval secret, created once and reused, so tokens and
+ * previews outlive a restart. The file is the user's alone: mode 0600, and on Windows (which ignores the mode)
+ * icacls drops inherited entries and grants only the current user. A file that cannot be locked down is
+ * removed and the supervisor refuses to serve.
+ */
+export function ensureApprovalSecret(file, { user = currentUser(), platform = process.platform } = {}) {
+  if (fs.existsSync(file)) {
+    const secret = fs.readFileSync(file, "utf-8").trim();
+    if (secret.length >= 32) return secret;
+    throw new Error(`${file} holds no usable secret — delete it and restart to generate a new one`);
+  }
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  const secret = randomBytes(32).toString("hex");
+  fs.writeFileSync(file, `${secret}
+`, { encoding: "utf-8", mode: 0o600, flag: "wx" });
+  if (platform === "win32") {
+    try {
+      execFileSync("icacls", [file, "/inheritance:r", "/grant:r", `${user}:F`], { stdio: "ignore" });
+    } catch (e) {
+      fs.rmSync(file, { force: true });
+      throw new Error(`could not restrict ${file} to ${user}: ${e.message}`, { cause: e });
+    }
+  }
+  return secret;
 }
 
 /** The client registration for a served server: URL plus header, never the server's env. */
@@ -204,10 +241,13 @@ function serve(server, envFile, logFile) {
   if (!env[names.port] || !env[names.token]) {
     throw new Error(`${envFile} must set ${names.port} and ${names.token}`);
   }
+  // MCP-ISSUE-104: a secret the env file sets wins; otherwise the persisted one (the server refuses HTTP without).
+  const secretName = approvalSecretEnvName(server);
+  const secretEnv = secretName && !env[secretName] ? { [secretName]: ensureApprovalSecret(approvalSecretFile(server)) } : {};
   const stderr = logFile ? fs.openSync(logFile, "a") : "inherit";
   // Inherit PATH and the like; every server setting comes from the env file and wins.
   const child = spawn(process.execPath, [serverEntryPath(server), "--transport", "http"], {
-    env: { ...process.env, ...env },
+    env: { ...process.env, ...env, ...secretEnv },
     stdio: ["ignore", "ignore", stderr]
   });
   info(`${server.key}: serving on http://127.0.0.1:${env[names.port]}/mcp (pid ${child.pid})`);

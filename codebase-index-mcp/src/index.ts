@@ -36,6 +36,7 @@ import {
   ratioFromEnvName,
   stringFromEnv,
   transportFromEnv,
+  refactorApprovalSecret,
   tsLanguageServiceConfigFromEnv,
   watchConfigFromEnv
 } from "./config/envConfig.js";
@@ -86,7 +87,7 @@ const DOCS_INDEXING_ENABLED = booleanFromEnv("CODEBASE_INDEX_DOCS_INDEXING_ENABL
 const DOCS_TOOLS_ENABLED = booleanFromEnv("CODEBASE_INDEX_DOCS_TOOLS_ENABLED", true);
 const LLM_ENABLED = booleanFromEnv("CODEBASE_INDEX_LLM_ENABLED", false);
 const REFACTOR_STRICT_APPROVAL = booleanFromEnv("CODEBASE_INDEX_REFACTOR_STRICT_APPROVAL_ENABLED", false);
-const REFACTOR_APPROVAL_SECRET = stringFromEnv("CODEBASE_INDEX_REFACTOR_APPROVAL_SECRET", "");
+const REFACTOR_APPROVAL_SECRET_ENV = stringFromEnv("CODEBASE_INDEX_REFACTOR_APPROVAL_SECRET", "");
 const REFACTOR_PREVIEW_TTL_MS = numberFromEnv("CODEBASE_INDEX_REFACTOR_PREVIEW_TTL_MS", 30 * 60 * 1000);
 const REFACTOR_LOW_CONFIDENCE_THRESHOLD = 0.8;
 /** R1: read tools refresh a stale index before answering, within this budget (the run is never aborted). */
@@ -112,7 +113,9 @@ const TS_LS = {
 };
 
 assertNoLlmRuntimePolicy(LLM_ENABLED);
-assertRefactorApprovalPolicy(REFACTOR_STRICT_APPROVAL, REFACTOR_APPROVAL_SECRET);
+assertRefactorApprovalPolicy(REFACTOR_STRICT_APPROVAL, REFACTOR_APPROVAL_SECRET_ENV);
+// MCP-ISSUE-104: never a constant. HTTP without one refuses to start; stdio gets a per-process random secret.
+const REFACTOR_APPROVAL_SECRET = refactorApprovalSecret(REFACTOR_APPROVAL_SECRET_ENV, transportFromEnv().kind).secret;
 
 const store = new GraphStore(dbPath);
 

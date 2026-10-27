@@ -17,7 +17,7 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { getServer } from "./lib/manifest.mjs";
-import { httpClientEntry, httpEnvNames, readEnvFile, taskCreateArgs, taskDeniedHint, taskXml, writeEnvFile } from "./serve-http.mjs";
+import { approvalSecretEnvName, approvalSecretFile, ensureApprovalSecret, httpClientEntry, httpEnvNames, readEnvFile, taskCreateArgs, taskDeniedHint, taskXml, writeEnvFile } from "./serve-http.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), "serve-http-test-"));
@@ -155,4 +155,31 @@ test("R4-4': the replaced stdio entry is kept, and a second http run never overw
   install("--transport", "http");
   const second = JSON.parse(fs.readFileSync(snapshot, "utf8"));
   assert.deepEqual(second, stdioEntry, "the second http run found an http entry and left the snapshot alone");
+});
+
+test("MCP-ISSUE-104: the approval secret is created once, reused, and readable by the user alone", () => {
+  assert.equal(approvalSecretEnvName(getServer("codebase-index")), "CODEBASE_INDEX_REFACTOR_APPROVAL_SECRET");
+  assert.equal(approvalSecretEnvName(getServer("observe-mcp")), null);
+  assert.match(approvalSecretFile(getServer("codebase-index")), /[\\/]\.claude[\\/]mcp[\\/]http[\\/]codebase-index\.approval-secret$/);
+
+  const file = path.join(TMP, "secret-dir", "codebase-index.approval-secret");
+  const first = ensureApprovalSecret(file);
+  assert.match(first, /^[0-9a-f]{64}$/);
+  assert.equal(ensureApprovalSecret(file), first, "a restart reuses the stored secret");
+  if (process.platform === "win32") {
+    const acl = spawnSync("icacls", [file], { encoding: "utf8" }).stdout;
+    const entries = acl
+      .split(/\r?\n/)
+      .map((l) => l.replace(file, "").trim())
+      .filter((l) => /:\(/.test(l));
+    const user = os.userInfo().username.toLowerCase();
+    assert.equal(entries.length, 1, `only one ACL entry: ${acl}`);
+    assert.ok(entries[0].toLowerCase().split(":")[0].split("\\").pop() === user, `the entry is the user's: ${entries[0]}`);
+    assert.ok(!/\(I\)/.test(acl), "no inherited entries");
+  } else {
+    assert.equal(fs.statSync(file).mode & 0o077, 0, "no group / other bits");
+  }
+
+  fs.writeFileSync(file, "short\n");
+  assert.throws(() => ensureApprovalSecret(file), /no usable secret/);
 });
