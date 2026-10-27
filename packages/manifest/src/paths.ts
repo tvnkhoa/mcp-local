@@ -2,7 +2,7 @@
  * Where the workspace is, and where each server's files are inside it.
  */
 
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -54,8 +54,55 @@ function findWorkspaceRoot(start: string): string {
   }
 }
 
+/** The `name` in a directory's `package.json`, or null when unreadable. */
+function packageName(dir: string): string | null {
+  try {
+    const pkg = JSON.parse(readFileSync(path.join(dir, "package.json"), "utf8")) as { name?: unknown };
+    return typeof pkg.name === "string" ? pkg.name : null;
+  } catch {
+    return null;
+  }
+}
+
+/** The env var that names the workspace root outright. */
+export const WORKSPACE_ROOT_ENV = "MCP_WORKSPACE_ROOT";
+
+/**
+ * Which workspace the caller means, as opposed to where this module happens to live.
+ *
+ * In a git worktree whose `node_modules/@mcp/manifest` is a junction into the main tree, Node resolves the
+ * module to the MAIN tree, so a root script's `generate` / `check` would read and write main's files
+ * (a worktree run once rewrote main's README). The root therefore follows the caller, in this order:
+ *
+ *   1. `MCP_WORKSPACE_ROOT`, when set — an explicit choice, validated by the markers; a bad value throws.
+ *   2. The workspace root found from `cwd`, when it is a *different* tree of the same project (same root
+ *      `package.json` name, so an unrelated repo with the same marker files never hijacks it).
+ *   3. The root found from the module.
+ */
+export function resolveWorkspaceRoot(opts: { moduleDir?: string; cwd?: string; env?: Record<string, string | undefined> } = {}): string {
+  const moduleDir = opts.moduleDir ?? MODULE_DIR;
+  const cwd = opts.cwd ?? process.cwd();
+  const override = (opts.env ?? process.env)[WORKSPACE_ROOT_ENV];
+  if (override) {
+    const dir = path.resolve(override);
+    if (!ROOT_MARKERS.every((marker) => existsSync(path.join(dir, marker)))) {
+      throw new Error(`${WORKSPACE_ROOT_ENV}=${override} is not a workspace root: it lacks ${ROOT_MARKERS.join(" or ")}.`);
+    }
+    return dir;
+  }
+  const own = findWorkspaceRoot(moduleDir);
+  let fromCwd: string;
+  try {
+    fromCwd = findWorkspaceRoot(cwd);
+  } catch {
+    return own;
+  }
+  const name = packageName(own);
+  return path.resolve(fromCwd) !== path.resolve(own) && name !== null && packageName(fromCwd) === name ? fromCwd : own;
+}
+
 /** The workspace root — the directory holding the root `package.json` and `tsconfig.base.json`. */
-export const WORKSPACE_ROOT = findWorkspaceRoot(MODULE_DIR);
+export const WORKSPACE_ROOT = resolveWorkspaceRoot();
 
 /** Absolute path to a server's built entry point. */
 export function serverEntryPath(server: ServerDescriptor): string {

@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
@@ -8,10 +9,12 @@ import {
   SERVERS,
   TOTAL_TOOL_COUNT,
   WORKSPACE_ROOT,
+  WORKSPACE_ROOT_ENV,
   deprecatedEnvInUse,
   evaluateEnv,
   evaluateEnvValues,
   getServer,
+  resolveWorkspaceRoot,
   serverDirPath,
   serverEntryPath,
   serverKeys
@@ -473,5 +476,57 @@ test("every renamed var keeps its former name working, and the convention holds 
   for (const [key, name, former] of renamedPairs) {
     const field = requireServer(key).env.find((f) => f.name === name);
     assert.ok(field?.deprecatedAliases?.includes(former), `${key}: ${former} must stay an alias of ${name}`);
+  }
+});
+
+// --- resolveWorkspaceRoot: the root follows the caller's tree ----------------------------------
+// A worktree whose @mcp/manifest is a junction into the main tree loads this module from MAIN, so the
+// module's own root is main's. The caller's tree must win, or `generate` rewrites main.
+
+function fakeTree(parent: string, name: string, pkgName = "mcp-local"): string {
+  const root = path.join(parent, name);
+  mkdirSync(path.join(root, "packages", "manifest", "src"), { recursive: true });
+  writeFileSync(path.join(root, "package.json"), JSON.stringify({ name: pkgName }));
+  writeFileSync(path.join(root, "tsconfig.base.json"), "{}");
+  return root;
+}
+
+test("resolveWorkspaceRoot follows the caller's worktree, not the junctioned module's main tree", () => {
+  const tmp = mkdtempSync(path.join(os.tmpdir(), "ws-root-"));
+  try {
+    const main = fakeTree(tmp, "main");
+    const worktree = fakeTree(tmp, "wt");
+    const moduleDir = path.join(main, "packages", "manifest", "src");
+    assert.equal(resolveWorkspaceRoot({ moduleDir, cwd: path.join(worktree, "packages", "manifest"), env: {} }), worktree);
+    assert.equal(resolveWorkspaceRoot({ moduleDir, cwd: main, env: {} }), main);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test("resolveWorkspaceRoot keeps the module's root for an unrelated repo or a cwd outside any workspace", () => {
+  const tmp = mkdtempSync(path.join(os.tmpdir(), "ws-root-"));
+  try {
+    const main = fakeTree(tmp, "main");
+    const other = fakeTree(tmp, "other", "some-other-repo");
+    const moduleDir = path.join(main, "packages", "manifest", "src");
+    assert.equal(resolveWorkspaceRoot({ moduleDir, cwd: other, env: {} }), main);
+    assert.equal(resolveWorkspaceRoot({ moduleDir, cwd: path.parse(tmp).root, env: {} }), main);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test("MCP_WORKSPACE_ROOT wins over the cwd, and a value that is not a workspace root throws", () => {
+  const tmp = mkdtempSync(path.join(os.tmpdir(), "ws-root-"));
+  try {
+    const main = fakeTree(tmp, "main");
+    const a = fakeTree(tmp, "a");
+    const b = fakeTree(tmp, "b");
+    const moduleDir = path.join(main, "packages", "manifest", "src");
+    assert.equal(resolveWorkspaceRoot({ moduleDir, cwd: b, env: { [WORKSPACE_ROOT_ENV]: a } }), a);
+    assert.throws(() => resolveWorkspaceRoot({ moduleDir, cwd: b, env: { [WORKSPACE_ROOT_ENV]: tmp } }), /not a workspace root/);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
   }
 });

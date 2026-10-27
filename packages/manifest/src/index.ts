@@ -12,6 +12,6 @@
 export type { EnvEvaluation, EnvField, ServerBuild, ServerDescriptor } from "./types.js";
 export { SERVERS, getServer, missingToolsMessage, serverKeys, serversMissingTools } from "./servers.js";
 export { deprecatedEnvInUse, evaluateEnv, evaluateEnvValues } from "./env.js";
-export { WORKSPACE_ROOT, serverDirPath, serverEntryPath } from "./paths.js";
+export { WORKSPACE_ROOT, WORKSPACE_ROOT_ENV, resolveWorkspaceRoot, serverDirPath, serverEntryPath } from "./paths.js";
 /** Generated from `contracts/` — see `scripts/generate-tools.mjs`. */
 export { TOOL_LISTS, TOTAL_TOOL_COUNT } from "./generated/toolLists.js";
