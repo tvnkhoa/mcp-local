@@ -4111,7 +4111,8 @@ this afternoon failed at that harness, which is the highest rate observed so far
 
 ## MCP-ISSUE-101 — every query on a dirty tree re-ran the refresh
 
-- **Status:** 🟡 PART 1 FIXED 2026-10-27 (wec.aria request, C2a); part 2 (scoped post-phase resolve, C2b) open.
+- **Status:** 🟡 PART 1 FIXED 2026-10-27 (wec.aria request, C2a); PART 2 FIXED 2026-10-27 (C2b, retargeted to the
+  scoped mention resolve by measurement, owner-approved); part 3 (C2c: dependents re-extracted after a row shift) open.
 - **Scenario:** live on wec.aria (~3,000 files), every read query on a dirty tree started a dirty run (~7.4 s:
   extract 4.3 s, resolve 3.0 s) and answered from the old index; the next query did it again. The gate's covered
   key was HEAD + each dirty file's size and mtime, held in one process's memory, so:
@@ -4150,8 +4151,40 @@ this afternoon failed at that harness, which is the highest rate observed so far
   only Y → incremental, and X's new symbol is indexed (real runner); ledger cleared for re-read paths), `watchManager.test.ts` (batch paths, no pre-prune; overflow fallback), `runStore.test.ts`
   (latest run's key only), `test:query-refresh` §7 (a second server process on the same dirty tree: fresh and
   `latestRun.runId` unchanged; touch → no run; content change → one dirty run, then fresh).
-- **Not covered (part 2):** the post-phase resolve of a dirty run still runs repo-wide (call context, imports,
-  types, properties).
+- **Part 2 — measured first.** Setup: a scratch clone of wec.aria at 6e011462 (2,994 files indexed) and a scratch
+  DB. The edit inserts 3 blank lines above each file, the conformance procedure's row-shift edit, so every id in
+  the file re-mints.
+
+  | | 1 file (`usage-period.ts`) | 6 files |
+  |---|---|---|
+  | dirty run, before | 10.1 s (extract 6.1, resolve 3.3) | 26.1 s (extract 14.3, resolve 10.9) |
+  | scoped mention resolve, before | 2,121 ms | 9,148 ms |
+  | the 4 briefed passes (call ctx + calls + imports + types + properties) | 0.5 s | 1.0 s |
+  | full run's whole resolve phase | 3.0 s | 3.8 s |
+
+  The cost was not where the request assumed: the call-context / import / type / property passes cost ≤1 s. The
+  scoped mention resolve cost more than a full run's whole resolve phase. Re-extracting the dependents (203 / 568
+  files whose resolved edges point into re-minted ids) costs the rest.
+- **Fix (part 2):** `resolveMentionsImpl` (`docsStore.ts`). The scoped select's docs subquery read
+  `repo_id = doc_mentions.repo_id`, which made it CORRELATED: it re-ran once per unbound mention (17,690 on
+  wec.aria). In isolation it took 4,189 ms; with `repo_id` bound as a parameter it takes 37 ms and returns the same
+  8,764 rows. The per-row bind/clear UPDATEs needed no batching: the whole scoped resolve is now 733 ms (6 files).
+- **After** (same edits, same machine; extract times vary ±30% with machine load):
+
+  | | 1 file | 6 files |
+  |---|---|---|
+  | dirty run | 9.7 s (extract 7.4, resolve **1.7**) | 21.0 s (extract 17.4, resolve **2.8**) |
+  | scoped mention resolve | — | **733 ms** (was 9,148) |
+
+- **Conformance** (`incremental-indexing` procedure, stricter form): every row of `files`, `symbols`, `edges`,
+  `doc_mentions`, `string_literals`, `code_comments` and `routes`, plus S1–S3, compared for dirty (B′) and
+  incremental (B) against a full run (C) on the same edited tree. Both before and after the fix, for 1 file and
+  6 files: equal, I1 = 0, I2 empty → **ready**.
+- **Not done, on purpose:** scoping the four briefed passes (≤1 s of the run) — backlog, not worth the
+  conformance risk today.
+- **Not covered (part 3, C2c):** a row-shifting edit still re-extracts every file whose resolved edges point into
+  the re-minted ids. That costs 5–17 s here and keeps a 1–6 file dirty run over the 5 s budget. The next step is to
+  re-map ids on a pure row shift instead of re-parsing the dependents.
 
 ## MCP-ISSUE-102 — a linked git worktree beside its main checkout could not be indexed
 

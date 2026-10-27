@@ -267,12 +267,14 @@ export const mentionRowKey = (docId: string, type: string, text: string): string
 export function resolveMentionsImpl(db: Database.Database, repoId: string, scope?: MentionResolveScope): number {
   if (scope && scope.forms.size === 0 && scope.pathKeys.size === 0 && scope.docFiles.length === 0 && scope.resetKeys.size === 0) return 0;
   // A scoped run reads only the candidate rows (an unchanged refresh used to read every unbound row).
+  // MCP-ISSUE-101: the docs subquery takes repo_id as a parameter. Written as `doc_mentions.repo_id` it was CORRELATED
+  // and re-ran once per unbound mention: 4.2 s of a 6-file dirty run on wec.aria (17,690 unbound rows), 37 ms now.
   const scopeFilter = scope
     ? `and (lower(mention_text) in (select value from json_each(?))
-          or doc_id in (select doc_id from docs where repo_id = doc_mentions.repo_id and file_path in (select value from json_each(?)))
+          or doc_id in (select doc_id from docs where repo_id = ? and file_path in (select value from json_each(?)))
           or (doc_id || char(1) || mention_type || char(1) || mention_text) in (select value from json_each(?))${scope.pathKeys.size > 0 ? " or mention_type = 'filepath'" : ""})`
     : "";
-  const params: unknown[] = scope ? [repoId, JSON.stringify([...scope.forms]), JSON.stringify(scope.docFiles), JSON.stringify([...scope.resetKeys])] : [repoId];
+  const params: unknown[] = scope ? [repoId, JSON.stringify([...scope.forms]), repoId, JSON.stringify(scope.docFiles), JSON.stringify([...scope.resetKeys])] : [repoId];
   let unresolved = db
     .prepare(
       `
