@@ -11,6 +11,8 @@ import { GraphStore } from "../../repositories/graphStore.js";
 import { createIndexRunner } from "./indexRunner.js";
 import { runIndexPipeline } from "./indexPipeline.js";
 import { stableId } from "../extractors/extractorPrimitives.js";
+import { readWorkingTreeStateAsync } from "../git/gitHelpers.js";
+import { computeTreeKey } from "../../middleware/freshness.js";
 import type { IndexMode } from "../../types/index.js";
 
 /**
@@ -40,7 +42,7 @@ function makeRepo(files: Record<string, string>): string {
   return root;
 }
 
-async function index(dbPath: string, repoId: string, repoPath: string, mode: IndexMode): Promise<string | undefined> {
+async function index(dbPath: string, repoId: string, repoPath: string, mode: IndexMode, extras: { knownDirtyPaths?: string[] } = {}): Promise<string | undefined> {
   const store = new GraphStore(dbPath);
   try {
     const run = createIndexRunner({
@@ -48,7 +50,7 @@ async function index(dbPath: string, repoId: string, repoPath: string, mode: Ind
       limits: { subtxSize: 20, checkpointEveryNBatches: 1, largeFileThresholdBytes: 512 * 1024, maxFileSizeBytes: 500 * 1024, parseWorkers: 0, parseJobTimeoutMs: 20_000 },
       resolvePerformanceProfileOverride: () => "standard"
     });
-    return (await run(repoId, repoPath.replace(/\\/g, "/"), mode, true, 1000, 50)).scope;
+    return (await run(repoId, repoPath.replace(/\\/g, "/"), mode, true, 1000, 50, extras)).scope;
   } finally {
     store.close();
   }
@@ -583,4 +585,81 @@ test("G1: a dirty run with no tree key since the base walks the tree", async () 
     }
   );
   assert.match(scope, /tree walk: a dirty run over a dirty tree recorded no tree key/, scope);
+});
+
+// MCP-ISSUE-107: a repo registered at a subdirectory of its git root (`codebase-index-mcp` inside `mcp-local`). git
+// prints root-relative paths; the index stores repoPath-relative ones. Before the fix a dirty run re-read nothing and
+// the gate still recorded the tree as covered.
+
+const G2_FILES: Record<string, string> = {
+  "outside.ts": "export const outside = 1;\n",
+  "sub/src/util.ts": "export function helper(): number {\n  return 1;\n}\n",
+  "sub/src/caller.ts": 'import { helper } from "./util";\n\nexport function main(): number {\n  return helper();\n}\n'
+};
+
+/** Index `<root>/sub` full, run `edit` on the root, then compare `run` with a full run of `<root>/sub`. Returns its scope. */
+async function assertSubdirRunEqualsFull(name: string, edit: (root: string) => void, run: (dbPath: string, sub: string) => Promise<string | undefined>): Promise<string> {
+  const root = makeRepo(G2_FILES);
+  const sub = path.join(root, "sub");
+  const work = mkdtempSync(path.join(tmpdir(), "cim-g2-db-"));
+  try {
+    const scopedDb = path.join(work, "scoped.db");
+    const fullDb = path.join(work, "full.db");
+    await index(scopedDb, "r", sub, "full");
+    edit(root);
+    const scope = (await run(scopedDb, sub)) ?? "";
+    await index(fullDb, "r", sub, "full");
+    const a = snapshot(scopedDb, "r");
+    const b = snapshot(fullDb, "r");
+    for (const table of Object.keys(b)) assert.deepEqual(a[table], b[table], `${name}: ${table} differs from a full run (${scope})`);
+    return scope;
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+    rmSync(work, { recursive: true, force: true });
+  }
+}
+
+const renameHelper = (root: string): void =>
+  writeTree(root, {
+    "sub/src/util.ts": "export function helperRenamed(): number {\n  return 1;\n}\n",
+    "outside.ts": "export const outside = 2;\n"
+  });
+
+test("G2: the gate's dirty run on a subdirectory repo re-reads its dirty file (paths from the gate's own tree read)", async () => {
+  const scope = await assertSubdirRunEqualsFull("subdir-gate-dirty", renameHelper, async (dbPath, sub) => {
+    const tree = await readWorkingTreeStateAsync(sub.replace(/\\/g, "/"));
+    assert.deepEqual(tree.dirty, ["src/util.ts"], "repoPath-relative, and nothing from outside repoPath");
+    return index(dbPath, "r", sub, "dirty", { knownDirtyPaths: tree.dirty });
+  });
+  assert.match(scope, /^scoped: 1 changed/, scope);
+});
+
+test("G2: index_repository mode dirty on a subdirectory repo re-reads its dirty file", async () => {
+  const scope = await assertSubdirRunEqualsFull("subdir-dirty", renameHelper, (dbPath, sub) => index(dbPath, "r", sub, "dirty"));
+  assert.match(scope, /^scoped: 1 changed/, scope);
+});
+
+test("G2: the tree key of a subdirectory repo names its dirty file with a content hash", async () => {
+  const root = makeRepo(G2_FILES);
+  try {
+    renameHelper(root);
+    const sub = path.join(root, "sub").replace(/\\/g, "/");
+    const key = await computeTreeKey(sub, await readWorkingTreeStateAsync(sub));
+    assert.deepEqual(Object.keys(key.files), ["src/util.ts"]);
+    assert.match(key.files["src/util.ts"] ?? "", /^[0-9a-f]{16,}$/, "hashed, not `deleted`");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("G2: an incremental run on a subdirectory repo after a commit is git-scoped to repoPath's paths", async () => {
+  const scope = await assertSubdirRunEqualsFull(
+    "subdir-incremental",
+    (root) => {
+      renameHelper(root);
+      commitAll(root, "both sides");
+    },
+    (dbPath, sub) => index(dbPath, "r", sub, "incremental")
+  );
+  assert.match(scope, /git-scoped from [0-9a-f]{12}: 1 path\(s\) \(1 from the diff, 0 indexed dirty since\)/, scope);
 });

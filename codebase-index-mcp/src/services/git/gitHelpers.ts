@@ -348,7 +348,8 @@ export function getRepoWorkingTreeState(repoPath: string): {
 
 export function hasWorkingTreeChanges(repoPath: string): boolean | null {
   try {
-    const lines = runGitLines(repoPath, ["status", "--porcelain", "--untracked-files=all"]);
+    // MCP-ISSUE-107: `-- .` keeps a subdirectory repo from reading changes elsewhere in its git root as its own.
+    const lines = runGitLines(repoPath, ["status", "--porcelain", "--untracked-files=all", "--", "."]);
     return lines.length > 0;
   } catch {
     return null;
@@ -426,18 +427,23 @@ export function parseStatusPorcelainV2Entries(out: string): { head: string | nul
  */
 const HEALTH_STATUS_ARGS = ["-c", "core.quotePath=false", "status", "--porcelain=v2", "--branch", "-z"];
 
-export function readStatusEntriesAsync(repoPath: string): Promise<{ head: string | null; entries: StatusEntry[] }> {
-  return new Promise((resolve, reject) => {
-    execFile(
-      "git",
-      HEALTH_STATUS_ARGS,
-      { cwd: repoPath, encoding: "utf8", timeout: GIT_TIMEOUT_MS, maxBuffer: GIT_MAX_BUFFER_BYTES, windowsHide: true },
-      (error, stdout) => {
-        if (error) reject(error);
-        else resolve(parseStatusPorcelainV2Entries(stdout.trim()));
-      }
-    );
-  });
+/** Paths are repoPath-relative (MCP-ISSUE-107), as the dirty ledger's are, so `stillDirty` compares like with like. */
+export async function readStatusEntriesAsync(repoPath: string): Promise<{ head: string | null; entries: StatusEntry[] }> {
+  const [status, prefix] = await Promise.all([
+    new Promise<{ head: string | null; entries: StatusEntry[] }>((resolve, reject) => {
+      execFile(
+        "git",
+        HEALTH_STATUS_ARGS,
+        { cwd: repoPath, encoding: "utf8", timeout: GIT_TIMEOUT_MS, maxBuffer: GIT_MAX_BUFFER_BYTES, windowsHide: true },
+        (error, stdout) => {
+          if (error) reject(error);
+          else resolve(parseStatusPorcelainV2Entries(stdout.trim()));
+        }
+      );
+    }),
+    gitPathPrefixAsync(repoPath)
+  ]);
+  return relativeEntries(status, prefix);
 }
 
 /** {@link getRepoWorkingTreeState}'s answer from porcelain-v2 entries (`null`: git could not be read). */
@@ -480,8 +486,66 @@ export function stillDirty(entries: readonly StatusEntry[], paths: readonly stri
  */
 const WORKING_TREE_STATUS_ARGS = ["-c", "core.quotePath=false", "status", "--porcelain=v2", "--branch", "-z", "--untracked-files=all"];
 
+/**
+ * MCP-ISSUE-107: `repoPath`'s place under its git root (`sub/dir/`, or `""` at the root), cached per path. git prints
+ * status and diff paths from the root, the index stores them from repoPath: a repo registered at a subdirectory
+ * (`codebase-index-mcp` inside `mcp-local`) got root-relative dirty paths, its dirty run re-read nothing, and the gate
+ * recorded the tree as covered. Throws outside git.
+ */
+const prefixCache = new Map<string, string>();
+
+export function gitPathPrefix(repoPath: string): string {
+  let prefix = prefixCache.get(repoPath);
+  if (prefix === undefined) {
+    prefix = runGit(repoPath, ["rev-parse", "--show-prefix"]).replace(/\\/g, "/");
+    prefixCache.set(repoPath, prefix);
+  }
+  return prefix;
+}
+
+function gitPathPrefixAsync(repoPath: string): Promise<string> {
+  const cached = prefixCache.get(repoPath);
+  if (cached !== undefined) return Promise.resolve(cached);
+  return new Promise((resolve, reject) => {
+    execFile("git", ["rev-parse", "--show-prefix"], { cwd: repoPath, encoding: "utf8", timeout: GIT_TIMEOUT_MS, windowsHide: true }, (error, stdout) => {
+      if (error) return reject(error);
+      const prefix = stdout.trim().replace(/\\/g, "/");
+      prefixCache.set(repoPath, prefix);
+      resolve(prefix);
+    });
+  });
+}
+
+/** A root-relative git path as repoPath-relative, or null when it lies outside repoPath. */
+export function underPrefix(p: string, prefix: string): string | null {
+  if (!prefix) return p;
+  return p.startsWith(prefix) && p.length > prefix.length ? p.slice(prefix.length) : null;
+}
+
+function relativeTree(tree: { head: string | null; dirty: string[] }, prefix: string): { head: string | null; dirty: string[] } {
+  if (!prefix) return tree;
+  return { head: tree.head, dirty: tree.dirty.flatMap((p) => underPrefix(p, prefix) ?? []) };
+}
+
+function relativeEntries(status: { head: string | null; entries: StatusEntry[] }, prefix: string): { head: string | null; entries: StatusEntry[] } {
+  if (!prefix) return status;
+  const entries: StatusEntry[] = [];
+  for (const e of status.entries) {
+    const p = underPrefix(e.path, prefix);
+    const orig = e.origPath === undefined ? null : underPrefix(e.origPath, prefix);
+    // A rename across the boundary is an add (moved in) or a delete (moved out) from repoPath's side.
+    if (p !== null) {
+      const { origPath: _drop, ...rest } = e;
+      entries.push(orig !== null ? { ...rest, path: p, origPath: orig } : { ...rest, path: p });
+    } else if (orig !== null) {
+      entries.push({ code: "1", path: orig, xy: "D." });
+    }
+  }
+  return { head: status.head, entries };
+}
+
 export function readWorkingTreeState(repoPath: string): { head: string | null; dirty: string[] } {
-  return parseStatusPorcelainV2(runGit(repoPath, WORKING_TREE_STATUS_ARGS));
+  return relativeTree(parseStatusPorcelainV2(runGit(repoPath, WORKING_TREE_STATUS_ARGS)), gitPathPrefix(repoPath));
 }
 
 /**
@@ -489,18 +553,22 @@ export function readWorkingTreeState(repoPath: string): { head: string | null; d
  * query, and `git status` on wec.be takes ~300 ms: synchronously, that was a 300 ms stall of every
  * other call in flight, on every query. Same bounds as {@link runGit}; rejects where it throws.
  */
-export function readWorkingTreeStateAsync(repoPath: string): Promise<{ head: string | null; dirty: string[] }> {
-  return new Promise((resolve, reject) => {
-    execFile(
-      "git",
-      WORKING_TREE_STATUS_ARGS,
-      { cwd: repoPath, encoding: "utf8", timeout: GIT_TIMEOUT_MS, maxBuffer: GIT_MAX_BUFFER_BYTES, windowsHide: true },
-      (error, stdout) => {
-        if (error) reject(error);
-        else resolve(parseStatusPorcelainV2(stdout.trim()));
-      }
-    );
-  });
+export async function readWorkingTreeStateAsync(repoPath: string): Promise<{ head: string | null; dirty: string[] }> {
+  const [tree, prefix] = await Promise.all([
+    new Promise<{ head: string | null; dirty: string[] }>((resolve, reject) => {
+      execFile(
+        "git",
+        WORKING_TREE_STATUS_ARGS,
+        { cwd: repoPath, encoding: "utf8", timeout: GIT_TIMEOUT_MS, maxBuffer: GIT_MAX_BUFFER_BYTES, windowsHide: true },
+        (error, stdout) => {
+          if (error) reject(error);
+          else resolve(parseStatusPorcelainV2(stdout.trim()));
+        }
+      );
+    }),
+    gitPathPrefixAsync(repoPath)
+  ]);
+  return relativeTree(tree, prefix);
 }
 
 /**
@@ -715,12 +783,13 @@ export function parseNameStatusZ(out: string): NameStatusEntry[] {
  * MCP-ISSUE-106: what changed in the commits between `fromSha` and HEAD, or null when git cannot say (the commit was
  * gc'd, a shallow clone never had it, HEAD is unborn, git is missing). Renames are detected (`-M`) so the old path is
  * named for the prune; `--no-ext-diff` / `--no-textconv` keep a user's diff config from changing what is printed.
- * Neither side has to be an ancestor of the other: a checkout of an older commit is a diff like any other.
+ * Neither side has to be an ancestor of the other: a checkout of an older commit is a diff like any other. `--relative`:
+ * paths are repoPath-relative and nothing outside repoPath is listed (MCP-ISSUE-107).
  */
 export function diffNameStatusSince(repoPath: string, fromSha: string): NameStatusEntry[] | null {
   try {
     runGit(repoPath, ["cat-file", "-e", `${fromSha}^{commit}`]);
-    const out = execFileSync("git", ["diff", "-z", "--name-status", "-M", "--no-ext-diff", "--no-textconv", fromSha, "HEAD", "--"], {
+    const out = execFileSync("git", ["diff", "-z", "--name-status", "-M", "--relative", "--no-ext-diff", "--no-textconv", fromSha, "HEAD", "--"], {
       cwd: repoPath,
       encoding: "utf8",
       timeout: GIT_TIMEOUT_MS,
@@ -731,4 +800,38 @@ export function diffNameStatusSince(repoPath: string, fromSha: string): NameStat
   } catch {
     return null;
   }
+}
+
+/**
+ * MCP-ISSUE-106: the first ignore-rule file outside the tree — `.git/info/exclude` (per worktree, via `--git-path`)
+ * or the user's `core.excludesFile` (default `$XDG_CONFIG_HOME/git/ignore`, else `~/.config/git/ignore`) — whose mtime
+ * is at or after `sinceMs`, or null. A diff never shows these, yet they change which untracked files git lists.
+ * "unknown" when git cannot be asked. A file deleted since is not seen (no mtime to compare): a known gap.
+ */
+export function excludeRulesChangedSince(repoPath: string, sinceMs: number): string | null {
+  if (!Number.isFinite(sinceMs)) return "unknown";
+  const candidates: string[] = [];
+  try {
+    const infoExclude = runGit(repoPath, ["rev-parse", "--git-path", "info/exclude"]);
+    candidates.push(path.resolve(repoPath, infoExclude));
+  } catch {
+    return "unknown";
+  }
+  let global: string | null = null;
+  try {
+    global = runGit(repoPath, ["config", "--path", "--get", "core.excludesFile"]) || null;
+  } catch {
+    global = null; // unset: git uses the XDG default
+  }
+  const home = process.env.HOME ?? process.env.USERPROFILE ?? "";
+  global ??= process.env.XDG_CONFIG_HOME ? path.join(process.env.XDG_CONFIG_HOME, "git", "ignore") : home ? path.join(home, ".config", "git", "ignore") : null;
+  if (global) candidates.push(path.resolve(repoPath, global));
+  for (const file of candidates) {
+    try {
+      if (fs.statSync(file).mtimeMs >= sinceMs) return file.split(path.sep).join("/");
+    } catch {
+      // absent: nothing to compare
+    }
+  }
+  return null;
 }

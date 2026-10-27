@@ -15,7 +15,7 @@
 
 import { randomUUID } from "node:crypto";
 
-import { collectDirtyFiles, diffNameStatusSince, hasWorkingTreeChanges, resolveHeadCommitSha, runGit, type NameStatusEntry } from "../git/gitHelpers.js";
+import { collectDirtyFiles, diffNameStatusSince, excludeRulesChangedSince, hasWorkingTreeChanges, resolveHeadCommitSha, type NameStatusEntry } from "../git/gitHelpers.js";
 import { parseTreeKey } from "../../middleware/freshness.js";
 import type { GraphStore } from "../../repositories/graphStore.js";
 import { INDEX_VERSION, SCOPE_FORCES_FULL_RUN, currentAnnotationKey, type PerformanceProfile } from "./indexPipeline.js";
@@ -337,8 +337,11 @@ export type GitScopeInputs = {
   pending: readonly string[];
   /** False when the scan does not take its file list from git (`respectGitignore: false`). */
   gitScan: boolean;
-  /** The repo root is above repoPath: git prints root-relative paths, the index stores repoPath-relative ones. */
-  subdirectory: boolean;
+  /**
+   * The ignore-rule file outside the tree (`.git/info/exclude`, `core.excludesFile`) written at or after this ISO time,
+   * or null. A diff cannot see those, and they change which files git lists.
+   */
+  excludeRulesChangedSince: (startedAt: string) => string | null;
   annotationKeyCurrent: boolean;
   indexVersion?: string;
   maxPaths?: number;
@@ -359,12 +362,13 @@ export type GitScopePlan =
  * run is itself a base: it re-read that whole union, so the induction holds back to the last full walk.
  *
  * Anything this cannot vouch for walks the tree: a non-ok or unkeyed run since the base (a cancelled run wrote an
- * unknown subset), a base at another INDEX_VERSION, a commit git no longer has, an ignore-rule or config change, or
- * more than `maxPaths` paths.
+ * unknown subset), a base at another INDEX_VERSION, a commit git no longer has, an ignore-rule or config change
+ * (including `.git/info/exclude` and `core.excludesFile`, by mtime against the base run's start), or more than
+ * `maxPaths` paths. Paths are repoPath-relative throughout (MCP-ISSUE-107), so a repo registered at a subdirectory of
+ * its git root is scoped like any other.
  */
 export function planGitScopedIncremental(i: GitScopeInputs): GitScopePlan {
   if (!i.gitScan) return { kind: "walk", reason: "the scan does not take its file list from git" };
-  if (i.subdirectory) return { kind: "walk", reason: "repoPath is a subdirectory of its git repo" };
   if (!i.annotationKeyCurrent) return { kind: "walk", reason: "the annotation key changed: unchanged files must be re-scanned" };
   const carried = new Set<string>();
   let base: WorkRunTrace | null = null;
@@ -381,6 +385,8 @@ export function planGitScopedIncremental(i: GitScopeInputs): GitScopePlan {
   if (!base) return { kind: "walk", reason: "no complete run on record to diff against" };
   if (!base.commitSha) return { kind: "walk", reason: "the last complete run recorded no commit" };
   if (base.indexVersion !== (i.indexVersion ?? INDEX_VERSION)) return { kind: "walk", reason: `index version changed (${base.indexVersion ?? "none"})` };
+  const excludes = base.startedAt ? i.excludeRulesChangedSince(base.startedAt) : "an unknown file";
+  if (excludes) return { kind: "walk", reason: `${excludes} changed since the last complete run: it can change which files are indexed` };
   const diff = i.diffSince(base.commitSha);
   if (!diff) return { kind: "walk", reason: `git cannot diff ${base.commitSha.slice(0, 12)}..HEAD (gc'd, shallow, or unborn HEAD)` };
   const paths = new Set<string>();
@@ -409,19 +415,13 @@ export function planGitScopedIncrementalFor(
   repoPath: string,
   opts: { respectGitignore?: boolean } = {}
 ): GitScopePlan {
-  let prefix: string;
-  try {
-    prefix = runGit(repoPath, ["rev-parse", "--show-prefix"]);
-  } catch {
-    return { kind: "walk", reason: "not a git repository" };
-  }
   return planGitScopedIncremental({
     runs: store.listRecentWorkRuns(repoId, GIT_SCOPE_RUN_LOOKBACK),
     diffSince: (sha) => diffNameStatusSince(repoPath, sha),
     dirtyNow: [...collectDirtyFiles(repoPath)],
     pending: store.getPendingReindexFiles(repoId).map((e) => e.filePath),
     gitScan: opts.respectGitignore !== false,
-    subdirectory: prefix !== "",
+    excludeRulesChangedSince: (startedAt) => excludeRulesChangedSince(repoPath, Date.parse(startedAt)),
     annotationKeyCurrent: store.getAnnotationKey(repoId) === currentAnnotationKey(repoPath)
   });
 }

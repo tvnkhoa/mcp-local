@@ -1,12 +1,12 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 
 import type { WorkRunTrace } from "../../repositories/runStore.js";
-import { diffNameStatusSince, type NameStatusEntry } from "../git/gitHelpers.js";
+import { diffNameStatusSince, excludeRulesChangedSince, readStatusEntriesAsync, readWorkingTreeState, type NameStatusEntry } from "../git/gitHelpers.js";
 import { INDEX_VERSION } from "./indexPipeline.js";
 import { planGitScopedIncremental, type GitScopeInputs } from "./runPolicy.js";
 
@@ -18,6 +18,7 @@ import { planGitScopedIncremental, type GitScopeInputs } from "./runPolicy.js";
 const run = (over: Partial<WorkRunTrace> = {}): WorkRunTrace => ({
   mode: "incremental",
   status: "ok",
+  startedAt: "2026-10-27T00:00:00.000Z",
   commitSha: "a".repeat(40),
   indexVersion: INDEX_VERSION,
   treeKey: JSON.stringify({ head: "a".repeat(40), files: {} }),
@@ -34,7 +35,7 @@ function inputs(over: Partial<GitScopeInputs> = {}, diff: NameStatusEntry[] | nu
     dirtyNow: [],
     pending: [],
     gitScan: true,
-    subdirectory: false,
+    excludeRulesChangedSince: () => null,
     annotationKeyCurrent: true,
     ...over
   };
@@ -90,7 +91,8 @@ test("the base is the newest complete run, and git diffs from its commit", () =>
 
 for (const [name, over, diff] of [
   ["respectGitignore:false", { gitScan: false }, []],
-  ["a subdirectory repoPath", { subdirectory: true }, []],
+  [".git/info/exclude written since the base started", { excludeRulesChangedSince: () => ".git/info/exclude" }, []],
+  ["a base with no start time", { runs: [run({ startedAt: null })] }, []],
   ["a stale annotation key", { annotationKeyCurrent: false }, []],
   ["no run on record", { runs: [] }, []],
   ["only dirty runs on record", { runs: [run({ mode: "dirty" })] }, []],
@@ -147,6 +149,52 @@ test("diffNameStatusSince: adds, edits, deletes, renames; backwards; null for an
       ["A gone.ts", "D new.ts", "M keep.ts", "R to.ts->from.ts"]
     );
     assert.equal(diffNameStatusSince(dir, "0".repeat(40)), null);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("subdirectory repo: status entries, the dirty set and the diff are repoPath-relative; outside paths dropped (MCP-ISSUE-107)", async () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "g2-sub-"));
+  const git = (...args: string[]): string => execFileSync("git", args, { cwd: dir, encoding: "utf8" }).trim();
+  try {
+    git("init", "-q");
+    git("config", "user.email", "t@example.com");
+    git("config", "user.name", "t");
+    mkdirSync(path.join(dir, "sub"));
+    writeFileSync(path.join(dir, "out.ts"), "1\n");
+    writeFileSync(path.join(dir, "sub", "in.ts"), "1\n");
+    writeFileSync(path.join(dir, "sub", "moved.ts"), "export const moved = 'a long enough body for rename detection';\n");
+    git("add", "out.ts", "sub/in.ts", "sub/moved.ts");
+    git("commit", "-q", "-m", "one");
+    const first = git("rev-parse", "HEAD");
+    writeFileSync(path.join(dir, "out.ts"), "2\n");
+    writeFileSync(path.join(dir, "sub", "in.ts"), "2\n");
+    git("mv", "sub/moved.ts", "away.ts");
+    const sub = path.join(dir, "sub");
+    assert.deepEqual(readWorkingTreeState(sub).dirty.sort(), ["in.ts", "moved.ts"]);
+    const { entries } = await readStatusEntriesAsync(sub);
+    assert.deepEqual(entries.map((e) => `${e.code} ${e.path}${e.origPath ? `<-${e.origPath}` : ""}`).sort(), ["1 in.ts", "1 moved.ts"]);
+    git("commit", "-q", "-am", "two");
+    assert.deepEqual(diffNameStatusSince(sub, first)?.map((e) => `${e.status} ${e.path}`).sort(), ["D moved.ts", "M in.ts"]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("excludeRulesChangedSince: .git/info/exclude written after the base started is named; before it, not", () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "g2-excl-"));
+  try {
+    execFileSync("git", ["init", "-q"], { cwd: dir });
+    const exclude = path.join(dir, ".git", "info", "exclude");
+    mkdirSync(path.dirname(exclude), { recursive: true });
+    writeFileSync(exclude, "# none\n");
+    const old = new Date(Date.now() - 60_000);
+    utimesSync(exclude, old, old);
+    assert.equal(excludeRulesChangedSince(dir, Date.now() - 30_000)?.endsWith(".git/info/exclude") ?? false, false);
+    writeFileSync(exclude, "secret/\n");
+    assert.match(excludeRulesChangedSince(dir, Date.now() - 30_000) ?? "", /\.git\/info\/exclude$/);
+    assert.equal(excludeRulesChangedSince(dir, Number.NaN), "unknown");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

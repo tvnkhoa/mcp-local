@@ -4362,8 +4362,9 @@ this afternoon failed at that harness, which is the highest rate observed so far
   it re-read that whole union — so the induction reaches back to the last full walk. No schema change.
   The run's `scope` says which way it went: `…; git-scoped from <sha>: N path(s) (D from the diff, K indexed dirty
   since)` or `…; tree walk: <reason>`.
-- **Walks the tree, as before, when:** `respectGitignore: false` (the scan is not git's list); repoPath is a
-  subdirectory of its git repo (git prints root-relative paths); the annotation key changed; any run since the base
+- **Walks the tree, as before, when:** `respectGitignore: false` (the scan is not git's list); the annotation key
+  changed; `.git/info/exclude` or `core.excludesFile` has an mtime at or after the base run's start
+  (`excludeRulesChangedSince`); any run since the base
   is not `ok` (a cancelled run wrote an unknown subset) or ran over a dirty tree without a tree key; no base, or one
   without a commit or at another `INDEX_VERSION`; git cannot diff from the base commit (gc'd, shallow, unborn
   HEAD); a `.gitignore`, `.gitattributes`, `.codebase-index/*` or `SCOPE_FORCES_FULL_RUN` path is in the set; more
@@ -4371,8 +4372,9 @@ this afternoon failed at that harness, which is the highest rate observed so far
 - **Git vs the indexer's own rules:** the full walk keeps only files `git ls-files --cached --others
   --exclude-standard` lists, then applies its own exclusions. So the indexed set is a subset of git's visible set,
   and every way a visible file can change content or appear shows up in the diff or the dirty set. What git cannot
-  report is a change to the visible set itself, which is why an ignore-rule change walks. Not detected: an edit to
-  `.git/info/exclude` or `core.excludesFile` (no tracked file changes); run `full` after one.
+  report is a change to the visible set itself, which is why an ignore-rule change walks, and why the two ignore files
+  outside the tree are checked by mtime. Known gap: deleting one of those files (nothing left to stat), or writing it
+  and setting its mtime back; run `full` after either.
 - **Measured** (scratch clone of wec.aria at 6e011462, 2,994 files; refresh-worker limits; each run on a copy of
   one full base DB; before = ee4d38a, after = this change; two runs each, alternating):
 
@@ -4389,7 +4391,30 @@ this afternoon failed at that harness, which is the highest rate observed so far
   backwards; a `.gitignore` change (walks); an untracked file after a commit; a file indexed dirty and reverted
   since (re-read through the tree key — fails with the tree-key union removed); a dirty run without a tree key
   (walks).
-- **Found on the way (not fixed here):** `git status --porcelain` paths are repo-root-relative, so `mode: "dirty"`
-  on a repo registered at a subdirectory of its git root (`codebase-index-mcp` inside `mcp-local`) names paths
-  that do not exist under repoPath, and its edited files are not re-read. Seen in the code and in git's output; not
-  reproduced through a run.
+- **Found on the way:** MCP-ISSUE-107 (a repo at a subdirectory of its git root), fixed in the next commit. Since
+  then such a repo is git-scoped like any other.
+
+## MCP-ISSUE-107 — a repo registered at a subdirectory of its git root answered "fresh" on stale content
+
+- **Status:** ✅ FIXED 2026-10-27 (G2, found while doing MCP-ISSUE-106).
+- **Scenario:** `git status --porcelain` prints paths from the git root, but the index stores them relative to
+  repoPath. For a repo registered at a subdirectory (`codebase-index-mcp` inside `mcp-local`), every dirty path came
+  back as `codebase-index-mcp/src/…`. The dirty run (from the gate's `knownDirtyPaths` or from `collectDirtyFiles`)
+  found no such file under repoPath and re-read nothing. The tree key (MCP-ISSUE-101) hashed the same missing paths
+  as `deleted` and was recorded, so the gate answered `fresh` on the old content. Dirty files elsewhere in the git
+  root also counted as this repo's changes.
+- **Fix:** `gitPathPrefix` (`gitHelpers.ts`, `rev-parse --show-prefix`, cached per repoPath) and `underPrefix`.
+  `readWorkingTreeState` / `readWorkingTreeStateAsync` (the gate, the tree key, the dirty ledger, `collectDirtyFiles`)
+  and `readStatusEntriesAsync` (`health_check`, `stillDirty` against the ledger) return repoPath-relative paths and
+  drop paths outside it. A rename across the boundary keeps only the side inside repoPath. `diffNameStatusSince`
+  passes `--relative`. `hasWorkingTreeChanges` (the fast skip) passes `-- .`. `link_tests_to_source` used to strip
+  the prefix itself; it no longer does, or the prefix would be stripped twice.
+- **Effect on stored keys:** a tree key recorded before the fix names root-relative paths. The first gate check after
+  the upgrade sees a different key and runs once. A 106 plan that carries such a path finds no file and skips it. A
+  dirty run that read nothing before the fix left the commit's content indexed, and any file still dirty is in the
+  dirty set again.
+- **Guarded:** `scopedRunConformance.test.ts` "G2: …", a repo at `<root>/sub` with a change outside it too: the gate's
+  dirty run (paths from `readWorkingTreeStateAsync`) and `mode:"dirty"` each equal a full run; the tree key names
+  `src/util.ts` with a hash; an incremental run after a commit is git-scoped to 1 path. With the prefix strip and
+  `--relative` removed, all four fail. `gitScopedIncremental.test.ts` covers status entries, the dirty set and the
+  diff in a subdirectory, including a rename out of it.
