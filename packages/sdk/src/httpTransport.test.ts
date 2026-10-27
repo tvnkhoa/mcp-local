@@ -441,24 +441,33 @@ test("http: resolveProcessStartTime reads this process's start time and refuses 
 });
 
 test("http: a call that does not ask for the client identity never waits for a slow lookup", async () => {
-  const slowMs = 2500;
+  // No wall clock: the start-time lookup stays pending until the test releases it, so "quick did not wait"
+  // means quick answered while the lookup had not resolved at all. No real PowerShell either.
+  let release: (startTime: string) => void = () => undefined;
+  const lookup = new Promise<string>((resolve) => {
+    release = resolve;
+  });
+  let resolved = false;
   const handle = await startServer({
     resolveClientPid: () => Promise.resolve(process.pid),
-    resolveProcessStartTime: () => new Promise((resolve) => setTimeout(() => resolve("1000"), slowMs))
+    resolveProcessStartTime: () => lookup.then((startTime) => ((resolved = true), startTime))
   });
   try {
     const client = await connect(handle.httpPort()!);
-    const started = Date.now();
     const result = await client.callTool({ name: "quick", arguments: {} });
-    const quickMs = Date.now() - started;
     assert.equal(result.isError, undefined);
-    assert.ok(quickMs < 1000, `quick took ${String(quickMs)} ms`);
-    // The identity is still there for a call that asks: it waits for the lookup, then answers.
-    const identity = identityOf(await client.callTool({ name: "whoami", arguments: {} }));
-    assert.ok(Date.now() - started >= slowMs - 200);
+    assert.equal(resolved, false, "quick answered while the identity lookup was still pending");
+    // A call that asks waits for the lookup: still unanswered while it is pending, answered once it resolves.
+    let answered = false;
+    const asking = client.callTool({ name: "whoami", arguments: {} }).then((r) => ((answered = true), r));
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    assert.equal(answered, false, "whoami waits for the pending lookup");
+    release("1000");
+    const identity = identityOf(await asking);
     assert.match(identity ?? "", new RegExp(`^pid:${String(process.pid)}@1000/`));
     await client.close();
   } finally {
+    release("1000");
     await handle.stop();
   }
 });
