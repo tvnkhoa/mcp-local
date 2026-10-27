@@ -33,6 +33,8 @@ import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 
 import type { Logger } from "@mcp/core";
 
+import { fileHttpSessionStore } from "./httpSessionStore.js";
+
 /** The only address this transport binds. Not configurable, by design. */
 export const HTTP_LOOPBACK_HOST = "127.0.0.1";
 /** The one path served. Anything else is 404. */
@@ -73,6 +75,12 @@ export interface HttpTransportOptions {
    */
   readonly resolveClientPid?: (remotePort: number, serverPort: number) => Promise<number | null>;
   readonly maxBodyBytes?: number;
+  /**
+   * MCP-ISSUE-103: where to keep `session id → sha256(bearer)` across restarts (see `httpSessionStore.ts`). Set, a
+   * request whose session id this process does not know is re-adopted iff its bearer hashes to the one
+   * recorded when that id was initialized; otherwise it is a 404 as before. Unset: no re-adoption.
+   */
+  readonly sessionStoreFile?: string;
 }
 
 export interface HttpTransportHandle {
@@ -193,10 +201,19 @@ export async function startHttpTransport(
     return match !== null && timingSafeEqual(digest(match[1]!.trim()), tokenDigest);
   };
 
+  const store = options.sessionStoreFile ? fileHttpSessionStore(options.sessionStoreFile, idleMs) : null;
+  /** The presented bearer's sha256, hex: what a session is bound to. */
+  const bearerDigestHex = (header: string | undefined): string | null => {
+    const match = /^Bearer\s+(.+)$/i.exec(header ?? "");
+    return match === null ? null : digest(match[1]!.trim()).toString("hex");
+  };
+
   const closeSession = async (sessionId: string, reason: string): Promise<void> => {
     const session = sessions.get(sessionId);
     if (session === undefined) return;
     sessions.delete(sessionId);
+    // A shutdown keeps the record: the restarted process re-adopts the session for the same bearer.
+    if (reason !== "shutdown") store?.delete(sessionId);
     logger.info("http_session_closed", { sessionId, reason, sessions: sessions.size });
     await session.server.close().catch(() => undefined);
   };
@@ -211,6 +228,8 @@ export async function startHttpTransport(
       sessionIdGenerator: () => randomUUID(),
       onsessioninitialized: (sessionId) => {
         sessions.set(sessionId, { transport, server, lastSeen: Date.now(), clientPid: null });
+        const bearer = bearerDigestHex(req.headers.authorization);
+        if (bearer !== null) store?.set(sessionId, bearer);
         logger.info("http_session_opened", { sessionId, sessions: sessions.size });
       }
     });
@@ -219,6 +238,7 @@ export async function startHttpTransport(
       const sessionId = transport.sessionId;
       if (sessionId !== undefined && sessions.has(sessionId)) {
         sessions.delete(sessionId);
+        store?.delete(sessionId);
         logger.info("http_session_closed", { sessionId, reason: "transport_closed", sessions: sessions.size });
       }
     };
@@ -244,6 +264,45 @@ export async function startHttpTransport(
       const session = sessions.get(sessionId);
       if (session !== undefined) session.clientPid = pid;
     });
+  };
+
+  /**
+   * MCP-ISSUE-103: a session id this process does not know (it was opened before a restart), re-adopted only
+   * for the bearer recorded when it was initialized. The SDK (1.29.0) has no public resume API: the transport
+   * is marked initialized under the old id through its private fields, which `httpTransport.test.ts` pins to
+   * the installed SDK version so an upgrade that moves them fails loudly. Anything unexpected → undefined (404).
+   */
+  const adoptSession = async (sessionId: string, req: http.IncomingMessage): Promise<Session | undefined> => {
+    const recorded = store?.get(sessionId) ?? null;
+    const presented = bearerDigestHex(req.headers.authorization);
+    if (recorded === null || presented === null || recorded.length !== presented.length) return undefined;
+    if (!timingSafeEqual(Buffer.from(recorded, "hex"), Buffer.from(presented, "hex"))) {
+      logger.info("http_session_adopt_refused", { sessionId, reason: "bearer_mismatch" });
+      return undefined;
+    }
+    if (sessions.size >= maxSessions) return undefined;
+    const server = buildServer();
+    const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: () => sessionId });
+    const inner = (transport as unknown as { _webStandardTransport?: { sessionId?: string; _initialized?: unknown } })._webStandardTransport;
+    if (inner === undefined || typeof inner._initialized !== "boolean") {
+      logger.warn("http_session_adopt_unsupported", { sessionId });
+      await server.close().catch(() => undefined);
+      return undefined;
+    }
+    inner.sessionId = sessionId;
+    inner._initialized = true;
+    transport.onclose = () => {
+      if (sessions.get(sessionId)?.transport === transport) {
+        sessions.delete(sessionId);
+        store?.delete(sessionId);
+        logger.info("http_session_closed", { sessionId, reason: "transport_closed", sessions: sessions.size });
+      }
+    };
+    await server.connect(transport);
+    const session: Session = { transport, server, lastSeen: Date.now(), clientPid: null };
+    sessions.set(sessionId, session);
+    logger.info("http_session_adopted", { sessionId, sessions: sessions.size });
+    return session;
   };
 
   const handle = async (req: http.IncomingMessage, res: http.ServerResponse): Promise<void> => {
@@ -285,7 +344,7 @@ export async function startHttpTransport(
     const header = req.headers["mcp-session-id"];
     const sessionId = Array.isArray(header) ? header[0] : header;
     if (sessionId !== undefined) {
-      const session = sessions.get(sessionId);
+      const session = sessions.get(sessionId) ?? (await adoptSession(sessionId, req));
       if (session === undefined) {
         // The spec's answer to an unknown or expired session: the client re-initializes.
         sendJsonRpcError(res, 404, -32001, "Session not found");

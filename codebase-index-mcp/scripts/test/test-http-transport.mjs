@@ -176,6 +176,90 @@ try {
   child.kill();
 }
 
+
+// ── MCP-ISSUE-103: a restart keeps a session for the bearer that opened it ─────
+{
+  const TOKEN_ROTATED = "r4-rotated-token-".padEnd(48, "y");
+  const port2 = await freePort();
+  const dbDir = path.join(tmp, "restart-db");
+  fs.mkdirSync(dbDir, { recursive: true });
+  const spawnServer = (token) => {
+    const proc = spawn(process.execPath, [path.join(ROOT, "dist", "index.js"), "--transport", "http"], {
+      env: {
+        ...process.env,
+        CODEBASE_INDEX_ALLOWED_ROOTS: tmp,
+        CODEBASE_INDEX_DB_PATH: path.join(dbDir, "index.db"),
+        CODEBASE_INDEX_HTTP_PORT: String(port2),
+        CODEBASE_INDEX_HTTP_TOKEN: token,
+        CODEBASE_INDEX_REFACTOR_APPROVAL_SECRET: "test-http-restart-secret-0123456789abcdef",
+        CODEBASE_INDEX_WATCH_AUTO_START_ENABLED: "false"
+      },
+      stdio: ["ignore", "ignore", "pipe"]
+    });
+    proc.stderr.on("data", (d) => { stderr += d; });
+    return proc;
+  };
+  const stop = (proc) => new Promise((resolve) => { if (proc.exitCode !== null) resolve(); else { proc.once("exit", resolve); proc.kill(); } });
+  const greet = () => fs.readFileSync(path.join(repo, "src", "greet.ts"), "utf8");
+  let srv = spawnServer(TOKEN);
+  try {
+    await waitForServer(port2, srv);
+    const c = await connect(port2);
+    const sid = c.transport.sessionId;
+    payload(await c.client.callTool({ name: "index_repository", arguments: { repoId: "r4b", repoPath: repo, mode: "full", docsMode: "on" } }));
+    const before = payload(await c.client.callTool({
+      name: "refactor_replace_preview", arguments: { repoId: "r4b", find: "greetUser", replaceExpression: "helloUser", mode: "text" }
+    }));
+    check("restart: a preview before the restart", typeof before.previewId === "string", JSON.stringify(before).slice(0, 300));
+    const kept = payload(await c.client.callTool({
+      name: "refactor_replace_preview", arguments: { repoId: "r4b", find: "greetUser", replaceExpression: "heyUser", mode: "text" }
+    }));
+
+    await stop(srv);
+    srv = spawnServer(TOKEN);
+    await waitForServer(port2, srv);
+
+    // The same client object, same session id, same bearer: no re-initialize.
+    const applied = await c.client.callTool({
+      name: "refactor_replace_apply", arguments: { previewId: before.previewId, approvalToken: before.approvalToken, includeLowConfidence: true }
+    });
+    check("restart: same bearer + old session id is re-adopted, and the pre-restart preview applies", !applied.isError, applied.content[0].text.slice(0, 300));
+    check("restart: the apply wrote the file", greet().includes("helloUser"));
+    check("restart: still the same session id", c.transport.sessionId === sid);
+    const rolled = applied.isError
+      ? { isError: true, content: [{ text: "no apply" }] }
+      : await c.client.callTool({ name: "refactor_replace_rollback", arguments: { rollbackId: payload(applied).rollbackId } });
+    check("restart: ... and rolls back", !rolled.isError, rolled.content[0].text.slice(0, 300));
+    check("restart: the rollback restored the file", greet().includes("greetUser") && !greet().includes("helloUser"));
+    await c.client.close().catch(() => undefined);
+
+    // The bearer rotated across the restart: the old id is not this bearer's.
+    await stop(srv);
+    srv = spawnServer(TOKEN_ROTATED);
+    await waitForServer(port2, srv);
+    const status = await rawStatus(port2, {
+      authorization: `Bearer ${TOKEN_ROTATED}`, "mcp-session-id": sid, "mcp-protocol-version": "2025-06-18"
+    });
+    check("restart: a different bearer + the old session id → 404", status === 404, `status ${String(status)}`);
+    const other = new Client({ name: "r4-rotated", version: "0" });
+    const otherTransport = new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${port2}/mcp`), {
+      requestInit: { headers: { authorization: `Bearer ${TOKEN_ROTATED}` } }
+    });
+    await other.connect(otherTransport);
+    check("restart: the different bearer got a new session", otherTransport.sessionId !== sid);
+    const refused = await other.callTool({
+      name: "refactor_replace_apply", arguments: { previewId: kept.previewId, approvalToken: kept.approvalToken, includeLowConfidence: true }
+    });
+    check("restart: its apply of the old session's preview is refused", refused.isError === true && refused.content[0].text.includes("PREVIEW_OWNED_BY_ANOTHER_SESSION"), refused.content[0].text.slice(0, 300));
+    check("restart: the refused apply wrote nothing", !greet().includes("heyUser"));
+    await other.close().catch(() => undefined);
+  } catch (error) {
+    failures.push(`restart section crashed: ${error.stack ?? error}\n     server stderr tail: ${stderr.slice(-1500)}`);
+  } finally {
+    await stop(srv);
+  }
+}
+
 if (failures.length > 0) {
   console.error(`test-http-transport: ${failures.length} failure(s), ${passed} passed`);
   for (const f of failures) console.error(`  ✗ ${f}`);

@@ -312,7 +312,8 @@ const handle = createCodebaseIndexServer({
   renderResult: asText,
   telemetry: { enabled: TELEMETRY_ENABLED, sampleRate: TELEMETRY_SAMPLE_RATE },
   // R4: one process, many clients — the store, watchers and refresh worker below are shared by all.
-  transport: transportFromEnv()
+  // MCP-ISSUE-103: over HTTP, sessions survive a restart for the bearer that opened them (the store sits beside the DB).
+  transport: ((t) => (t.kind === "http" ? { ...t, sessionStoreFile: path.join(FRESHNESS_LOCK_DIR, "http-sessions.json") } : t))(transportFromEnv())
 });
 
 // Registered before start(), and store-before-watchers on purpose: hooks run in reverse, so
