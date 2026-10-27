@@ -160,22 +160,27 @@ function realOrNull(p: string): string | null {
 /**
  * MCP-ISSUE-102: the git common dir of `repoPath`, as a realpath, read from files (no spawn), or null.
  *
- * - `<repoPath>/.git` is a directory: that directory (a main checkout).
- * - `<repoPath>/.git` is a file: a linked worktree, accepted ONLY if the back-link holds — its `gitdir:`
+ * - `<repoPath>/.git` is a symlink or junction: null, always. It would make the repo whatever it points at.
+ * - `<repoPath>/.git` is a directory: that directory (a main checkout) — unless `linkedOnly`, which the
+ *   allowed-roots guard sets: outside the roots only a linked worktree can be accepted, and a real or
+ *   junctioned `.git` directory has no back-link to prove anything.
+ * - `<repoPath>/.git` is a regular file: a linked worktree, accepted ONLY if the back-link holds — its `gitdir:`
  *   target sits in `<common>/worktrees/<name>` and that entry's own `gitdir` file names back this
  *   `<repoPath>/.git`, i.e. repoPath is a REGISTERED worktree of that common dir. A planted `.git` file
  *   that merely points into someone else's repository fails the back-check and yields null.
  *
  * Only `repoPath` itself is inspected, never a parent: a subfolder of a checkout is not a repo root.
  */
-export function resolveGitCommonDir(repoPath: string): string | null {
+export function resolveGitCommonDir(repoPath: string, opts: { linkedOnly?: boolean } = {}): string | null {
   try {
     const root = realOrNull(repoPath);
     if (!root) return null;
     const dotGit = path.join(root, ".git");
-    const st = fs.statSync(dotGit, { throwIfNoEntry: false });
-    if (st?.isDirectory()) return realOrNull(dotGit);
-    if (!st?.isFile()) return null;
+    // lstat, not stat: a symlink or junction must be seen as one, never followed.
+    const st = fs.lstatSync(dotGit, { throwIfNoEntry: false });
+    if (!st || st.isSymbolicLink()) return null;
+    if (st.isDirectory()) return opts.linkedOnly ? null : realOrNull(dotGit);
+    if (!st.isFile()) return null;
     const m = /^gitdir:\s*(.+?)\s*$/m.exec(fs.readFileSync(dotGit, "utf8"));
     if (!m) return null;
     const gitDir = realOrNull(path.resolve(root, m[1]));
@@ -183,8 +188,11 @@ export function resolveGitCommonDir(repoPath: string): string | null {
     const common = realOrNull(path.resolve(gitDir, fs.readFileSync(path.join(gitDir, "commondir"), "utf8").trim()));
     if (!common) return null;
     if (!samePath(path.dirname(gitDir), path.join(common, "worktrees"))) return null;
-    const back = realOrNull(path.resolve(gitDir, fs.readFileSync(path.join(gitDir, "gitdir"), "utf8").trim()));
-    return back && samePath(back, realOrNull(dotGit) ?? dotGit) ? common : null;
+    // The entry's `gitdir` must name THIS .git file. Only its directory is resolved: resolving the file
+    // itself would follow a symlinked .git, which is refused above anyway.
+    const backRaw = path.resolve(gitDir, fs.readFileSync(path.join(gitDir, "gitdir"), "utf8").trim());
+    const backDir = realOrNull(path.dirname(backRaw));
+    return backDir && samePath(path.join(backDir, path.basename(backRaw)), dotGit) ? common : null;
   } catch {
     return null;
   }

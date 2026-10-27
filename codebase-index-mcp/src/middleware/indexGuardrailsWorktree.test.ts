@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -93,5 +93,48 @@ test("worktreeOf names the registered main checkout, null for the main itself", 
     assert.equal(findWorktreeOwner(all[1], all), "app");
     assert.equal(findWorktreeOwner(all[0], all), null);
     assert.equal(findWorktreeOwner(all[1], [all[1]]), null, "no registered owner");
+  });
+});
+
+test("a .git directory or junction into the allowed repo does not open a path outside the roots", () => {
+  fixture(({ sandbox, main }) => {
+    const viaJunction = path.join(sandbox, "via-junction");
+    mkdirSync(viaJunction);
+    try {
+      symlinkSync(path.join(main, ".git"), path.join(viaJunction, ".git"), "junction");
+    } catch (e) {
+      return void console.log(`skip junction: ${(e as Error).message}`);
+    }
+    assert.throws(() => assertPathAllowed(viaJunction, [main]), /outside allowed roots/);
+    assert.equal(resolveGitCommonDir(viaJunction), null, "never followed, even for the non-guard reader");
+    // A real .git directory outside the roots is a different repository: refused by the guard too.
+    const own = path.join(sandbox, "own-repo");
+    mkdirSync(own);
+    git(own, "init", "-q");
+    assert.throws(() => assertPathAllowed(own, [main]), /outside allowed roots/);
+  });
+});
+
+test("a symlinked .git file is refused (skipped when symlinks need privileges)", (t) => {
+  fixture(({ sandbox, main, wt }) => {
+    const link = path.join(sandbox, "via-symlink");
+    mkdirSync(link);
+    try {
+      symlinkSync(path.join(wt, ".git"), path.join(link, ".git"), "file");
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code === "EPERM") return void t.skip("symlink creation needs privileges (EPERM)");
+      throw e;
+    }
+    // The link targets a REAL registered worktree's .git file; its back-link names wt, not this dir.
+    assert.throws(() => assertPathAllowed(link, [main]), /outside allowed roots/);
+    assert.equal(resolveGitCommonDir(link), null);
+  });
+});
+
+test("a subdirectory of a registered worktree is refused (only the worktree root counts)", () => {
+  fixture(({ main, wt }) => {
+    const sub = path.join(wt, "sub");
+    mkdirSync(sub);
+    assert.throws(() => assertPathAllowed(sub, [main]), /outside allowed roots/);
   });
 });

@@ -49,7 +49,7 @@ export function assertPathAllowed(repoPath: string, allowedRoots: string[]): voi
  * already allowed. The roots themselves are never widened.
  */
 function isRegisteredWorktreeOfAllowedRepo(repoPath: string, allowedRoots: string[]): boolean {
-  const common = resolveGitCommonDir(repoPath);
+  const common = resolveGitCommonDir(repoPath, { linkedOnly: true });
   if (!common) return false;
   return allowedRoots.some((root) => {
     try {
