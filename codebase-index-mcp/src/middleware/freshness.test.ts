@@ -491,10 +491,12 @@ const store = new GraphStore(dbPath);
 store.ensureRepository("r", repoPath);
 const gate = createFreshnessGate({ enabled: true, budgetMs: 0, lockDir, getRepoPath: () => repoPath, getIndexedCommit: () => null, readTree: () => ({ head: null, dirty: [] }), run: async () => { throw new Error("unused"); } });
 let told = false;
+let ticks = 0;
+const killAfter = Number(process.argv[7] ?? 1);
 await gate.serialize("r", () => runIndexPipeline(store, {
   repoId: "r", repoPath, mode: runMode, maxFiles: 5000, batchSize: 10, subtxSize: 5, parseWorkers: 0,
   ...(only && { onlyRelativePaths: new Set(only) }),
-  onProgress: () => { if (!told) { told = true; process.stdout.write("midrun\\n"); } }
+  onProgress: () => { ticks += 1; if (!told && ticks >= killAfter) { told = true; process.stdout.write("midrun\\n"); } }
 }), runMode, only);
 store.close();
 process.stdout.write("done\\n");
@@ -654,7 +656,9 @@ test("MCP-ISSUE-101 F4: a dead marker that names its mode asks for a full repair
     assert.equal(readRepairNeeded(dir, "live"), null);
     fs.writeFileSync(path.join(dir, "running-dead-999999-1.json"), JSON.stringify({ pid: 999999, at: 5, mode: "dirty", repoId: "dead" }));
     liveRunMarkers(dir, "dead", 60_000, Date.now());
-    assert.deepEqual(readRepairNeeded(dir, "dead"), { mode: "full", pid: 999999, at: 5 }, "a dirty run with no recorded paths is repaired as a full one");
+    assert.equal(readRepairNeeded(dir, "dead")?.mode, "dirty");
+    assert.equal(readRepairNeeded(dir, "dead")?.pid, 999999);
+    assert.equal(readRepairNeeded(dir, "dead")?.at, 5);
     clearRepairNeeded(dir, "dead");
     assert.equal(readRepairNeeded(dir, "dead"), null);
   } finally { rmSync(dir, { recursive: true, force: true }); }
@@ -884,25 +888,77 @@ test("MCP-ISSUE-101 F4: a marker older than staleRunMs whose holder is still ali
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
-test("MCP-ISSUE-101 F4: the repair flag keeps the most thorough dead mode, the union of dirty paths, and the attempts", () => {
+test("MCP-ISSUE-101 F4: every dead run leaves its own flag file, so concurrent deaths are not lost; the flag mode is the most thorough one", () => {
   const dir = mkdtempSync(path.join(tmpdir(), "cim-merge-"));
   try {
     const dead = (n: number, body: object): void => fs.writeFileSync(path.join(dir, `running-r-999999-${String(n)}.json`), JSON.stringify({ pid: 999999, at: n, repoId: "r", ...body }));
-    dead(1, { mode: "dirty", paths: ["a.ts"] });
-    dead(2, { mode: "dirty", paths: ["b.ts"] });
+    dead(1, { mode: "dirty" });
+    dead(2, { mode: "dirty" });
     liveRunMarkers(dir, "r", 60_000, Date.now());
-    assert.deepEqual(readRepairNeeded(dir, "r")?.paths, ["a.ts", "b.ts"]);
-    assert.equal(readRepairNeeded(dir, "r")?.mode, "dirty");
-    dead(3, { mode: "dirty" }); // no paths recorded: cannot be repaired scoped
+    const flags = readRepairNeeded(dir, "r");
+    assert.equal(flags?.flags.length, 2, "two dead runs, two flags");
+    assert.equal(flags?.mode, "dirty");
+    dead(3, { mode: "incremental" });
     liveRunMarkers(dir, "r", 60_000, Date.now());
-    assert.equal(readRepairNeeded(dir, "r")?.mode, "full");
-    dead(4, { mode: "incremental" });
-    liveRunMarkers(dir, "r", 60_000, Date.now());
-    assert.equal(readRepairNeeded(dir, "r")?.mode, "full");
+    assert.equal(readRepairNeeded(dir, "r")?.flags.length, 3);
+    assert.equal(readRepairNeeded(dir, "r")?.mode, "incremental");
+    assert.ok(!fs.readdirSync(dir).some((n) => n.endsWith(".tmp")), "written by rename: no temp file is left");
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
-test("MCP-ISSUE-101 F4: a killed DIRTY run is repaired by a scoped run (hashes cleared, resolve runs) and the index equals a full run", async () => {
+test("MCP-ISSUE-101 F4: a flag file that cannot be parsed counts as a full repair, never as nothing wrong", async () => {
+  const h = harness({ budgetMs: 1000, autoFinish: true });
+  try {
+    fs.writeFileSync(path.join(h.lockDir, "repair-r-999999-1700000000000-1.json"), "{\"mode\":\"dir"); // half-written
+    assert.equal(readRepairNeeded(h.lockDir, "r")?.mode, "full");
+    const note = await h.gate.ensureFresh("r");
+    assert.notEqual(note.state, "fresh", JSON.stringify(note));
+    assert.deepEqual(h.runs.map((r) => r.mode), ["full"]);
+    assert.equal(readRepairNeeded(h.lockDir, "r"), null, "cleared by the finished repair");
+  } finally { h.cleanup(); }
+});
+
+test("MCP-ISSUE-101 F4: a repair clears only the flags it started with; a run that died meanwhile stays flagged", async () => {
+  const h = harness({ budgetMs: 1000 }); // the fake run waits until released
+  try {
+    fs.writeFileSync(path.join(h.lockDir, "running-r-999999-1.json"), JSON.stringify({ pid: 999999, at: 1, mode: "full", repoId: "r" }));
+    const first = h.gate.ensureFresh("r"); // starts the repair run, which waits
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    // another process's run dies while the repair works
+    fs.writeFileSync(path.join(h.lockDir, "repair-r-424242-1700000000001-1.json"), JSON.stringify({ repoId: "r", mode: "full", pid: 424242, at: 2 }));
+    h.finishRun();
+    await first;
+    const left = readRepairNeeded(h.lockDir, "r");
+    assert.equal(left?.flags.length, 1, "only the flag written during the run is left");
+    assert.equal(left?.pid, 424242);
+    // and a full run that began after that flag clears it
+    await h.gate.serialize("r", async () => ({ status: "ok" }), "full");
+    assert.equal(readRepairNeeded(h.lockDir, "r"), null);
+  } finally { h.cleanup(); }
+});
+
+test("MCP-ISSUE-101 F4: a full run does not clear a flag written while it ran (snapshot taken at its start)", async () => {
+  const h = harness({ budgetMs: 1000, autoFinish: true });
+  try {
+    fs.writeFileSync(path.join(h.lockDir, "repair-r-111-1700000000000-1.json"), JSON.stringify({ repoId: "r", mode: "full", pid: 111, at: 1 }));
+    await h.gate.serialize("r", async () => {
+      fs.writeFileSync(path.join(h.lockDir, "repair-r-222-1700000000001-1.json"), JSON.stringify({ repoId: "r", mode: "full", pid: 222, at: 2 }));
+      return { status: "ok" };
+    }, "full");
+    assert.deepEqual(readRepairNeeded(h.lockDir, "r")?.flags, ["repair-r-222-1700000000001-1.json"]);
+  } finally { h.cleanup(); }
+});
+
+test("MCP-ISSUE-101 F4: repair flags of `a` and `a-b` do not mix", () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "cim-repair-ab-"));
+  try {
+    fs.writeFileSync(path.join(dir, "repair-a-b-1-2-3.json"), JSON.stringify({ repoId: "a-b", mode: "full", pid: 1, at: 1 }));
+    assert.equal(readRepairNeeded(dir, "a"), null);
+    assert.equal(readRepairNeeded(dir, "a-b")?.flags.length, 1);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("MCP-ISSUE-101 F4: a killed DIRTY run — dependents included — is repaired by a full run and the index equals a clean full run", async () => {
   const h = harness({ budgetMs: 1000, autoFinish: true });
   const repo = bigRepo();
   const cleanDir = mkdtempSync(path.join(tmpdir(), "cim-clean-"));
@@ -923,19 +979,21 @@ test("MCP-ISSUE-101 F4: a killed DIRTY run is repaired by a scoped run (hashes c
     first.ensureRepository("r", repo);
     await createIndexRunner({ store: first, limits, resolvePerformanceProfileOverride: () => "standard" })("r", repo, "full", false, 5000, 50);
     first.close();
-    // 2. every file changes
-    const edited: string[] = [];
-    for (let i = 0; i < 400; i++) {
-      fs.writeFileSync(path.join(repo, `src/c${String(i)}.ts`), `import { helper } from "./util";\n\nexport function mainEdited${String(i)}(): number {\n  return helper() + 1;\n}\n`);
-      edited.push(`src/c${String(i)}.ts`);
-    }
-    // 3. a dirty run over them is killed after its first batch
+    // 2. ONE file changes and its rows shift: every file importing it is a dependent the dirty run queues after it
+    fs.writeFileSync(path.join(repo, "src/util.ts"), "// moved\n// down\nexport function helper(): number {\n  return 1;\n}\n");
+    const edited = ["src/util.ts"];
+    // 3. the dirty run is killed after a few progress ticks, i.e. once some of those dependents were re-extracted
     const pathsFile = path.join(h.lockDir, "paths.json");
     fs.writeFileSync(pathsFile, JSON.stringify(edited));
-    const c = startChild(h.lockDir, repo, ["dirty", pathsFile]);
+    const c = startChild(h.lockDir, repo, ["dirty", pathsFile, "2"]);
     await c.waitFor("midrun");
     c.child.kill("SIGKILL");
     await new Promise((resolve) => c.child.once("exit", resolve));
+    const killed = new Database(dbPath);
+    try {
+      const util = killed.prepare("select content_hash as h from files where repo_id = 'r' and path = 'src/util.ts'").get() as { h: string };
+      assert.ok(util.h.length > 0, "the dirty run had written util.ts");
+    } finally { killed.close(); }
 
     // 4. another process's gate sees a clean tree at the indexed HEAD, and repairs
     const store = new GraphStore(dbPath);
@@ -948,7 +1006,6 @@ test("MCP-ISSUE-101 F4: a killed DIRTY run is repaired by a scoped run (hashes c
       getRepoPath: () => repo,
       getIndexedCommit: () => "aaa111",
       readTree: () => ({ head: "aaa111", dirty: [] }),
-      invalidateFileHashes: (id, paths) => void store.invalidateFileHashes(id, paths),
       run: async (id, p, mode, dirtyPaths) => {
         modes.push(mode);
         return run(id, p, mode, false, 5000, 50, dirtyPaths ? { knownDirtyPaths: dirtyPaths } : undefined);
@@ -956,7 +1013,7 @@ test("MCP-ISSUE-101 F4: a killed DIRTY run is repaired by a scoped run (hashes c
     });
     const note = await gate.ensureFresh("r");
     assert.notEqual(note.state, "fresh", JSON.stringify(note));
-    assert.deepEqual(modes, ["dirty"], "a scoped repair over the recorded paths, not a whole-repo full run");
+    assert.deepEqual(modes, ["full"], "a dead dirty run is repaired by a full run: the dependents it queued cannot be reconstructed");
     assert.deepEqual(await gate.ensureFresh("r"), { state: "fresh" });
 
     const clean = new GraphStore(path.join(cleanDir, "y.db"));

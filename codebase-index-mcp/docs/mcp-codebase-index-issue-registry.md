@@ -4510,3 +4510,21 @@ this afternoon failed at that harness, which is the highest rate observed so far
   counts as a clean full run of the edited tree. `removeRepository.test.ts` — a held lock refuses and is left alone,
   the lock is released after a refusal and after the purge. `repoPurgeStore.test.ts` — a failure after the
   transaction keeps the repo registered and a retry succeeds.
+
+### F4 second review (2026-10-27): the scoped repair of a dead dirty run is withdrawn
+
+- **A dead `dirty` run is repaired by a FULL run again** (the scoped repair in the review fixes above is superseded). The
+  marker recorded only the dirty paths from the run's start. The run also queued DEPENDENT files later
+  (`queueDependentFiles`), rewrote them with unresolved tokens under an unchanged hash, and computed the names of what
+  it replaced from the half-written rows, so neither set can be reconstructed afterwards and a scoped run over the
+  recorded paths never revisits them. The recording and `store.invalidateFileHashes` were removed; the marker no longer
+  carries paths. The cost: a killed dirty run costs one full run after the restart.
+- **The repair state is one file per dead run** (`repair-<repo>-<pid>-<ms>-<seq>.json`) and one per started repair
+  (`repairtry-…`), written by temp file + rename; nothing is read-modify-written, so a concurrent death or attempt is not
+  lost. A flag file that exists but cannot be parsed counts as a full repair. A finished repair, and a full run through
+  `serialize`, clear only the flags that existed when they started (a run that died meanwhile stays flagged); the attempt
+  count goes when no flag is left. `remove_repository` removes both kinds.
+- **Guarded:** `freshness.test.ts` — a dirty run that edits one file (every importer is a dependent), killed after two
+  progress ticks, is repaired by one `full` run and equals a clean full run through `createIndexRunner`, unresolved
+  counts included; two dead runs leave two flags; a half-written flag is a full repair; a flag written during a repair or
+  a full run survives it; `a` / `a-b` flags do not mix.

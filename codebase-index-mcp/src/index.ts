@@ -184,7 +184,6 @@ const freshnessGate = createFreshnessGate({
   recordCoveredKey: (_repoId, runId, key) => store.markRunTreeKey(runId, key),
   hashMaxBytes: MAX_FILE_SIZE_BYTES,
   markTriggered: (runId) => store.markRunTrigger(runId, "query"),
-  invalidateFileHashes: (repoId, paths) => void store.invalidateFileHashes(repoId, paths),
   markPendingReindex: (repoId, paths) => store.recordPendingReindexFiles(repoId, paths, "freshness: indexed while dirty, since deleted or reverted"),
   // MCP-ISSUE-101 part 5: an index fully built by another INDEX_VERSION is not current.
   getFullRunVersion: (repoId) => store.getLatestFullRunVersion(repoId),
@@ -221,7 +220,7 @@ const runIndexAndResolve: typeof runIndexUnserialized = (repoId, repoPath, mode,
       // not a git repo
     }
     return result;
-  }, mode, rest[3]?.knownDirtyPaths);
+  }, mode);
 
 async function ensureFresh(repoId: string): Promise<void> {
   const note = await freshnessGate.ensureFresh(repoId);

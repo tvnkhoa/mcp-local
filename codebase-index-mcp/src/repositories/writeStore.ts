@@ -507,14 +507,3 @@ export function replaceRoutesForFile(ctx: WriteContext, repoId: string, filePath
     writeRows(rows);
   })(routes);
 }
-
-/**
- * MCP-ISSUE-101 F4: forget the stored content hash of these files, so the next incremental or dirty run finds them
- * changed, re-extracts them and therefore resolves their edges. A dead dirty run wrote them without that last step.
- */
-export function invalidateFileHashes(db: Database.Database, repoId: string, filePaths: readonly string[]): number {
-  if (filePaths.length === 0) return 0;
-  return db
-    .prepare(`update files set content_hash = '' where repo_id = ? and path in (select value from json_each(?))`)
-    .run(repoId, JSON.stringify(filePaths)).changes;
-}
