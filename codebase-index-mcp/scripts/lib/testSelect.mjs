@@ -7,7 +7,11 @@
  *
  * Fail safe in every direction: a changed file no glob covers selects the WHOLE suite, a script with
  * no entry is always selected, and a base that cannot be resolved runs everything. Only paths the map
- * names as `skip` (other servers, pure docs) are ignored, and the output says so.
+ * names as `skip` (other servers, pure docs) or `none` are ignored, and the output says so.
+ *
+ * `none` lists root files no harness ever loads (`serve-http.mjs`, `.github/**`, …) — one explicit
+ * path per entry, a `<dir>/**` only for a directory outside `scripts/`, `packages/` and the package,
+ * so a new root script still runs the whole suite until someone decides it is inert.
  *
  * Map paths are relative to the git top level (the workspace root), forward slashes. Globs know `**`
  * (any depth, including none), `*` (within one segment) and `?`; a pattern with no `/` matches at the
@@ -83,7 +87,10 @@ export function selectForChanges({ changed, map, suite }) {
     const res = globs.map(globToRegExp);
     return (file) => res.some((re) => re.test(file));
   };
-  const skips = Object.entries(map.skip ?? {}).map(([reason, globs]) => ({ reason, test: matcher(globs) }));
+  const skips = [
+    ...Object.entries(map.skip ?? {}).map(([reason, globs]) => ({ reason, test: matcher(globs) })),
+    { reason: "@none", test: matcher(map.none ?? []) }
+  ];
   const unit = matcher(map.unit ?? []);
   const harnesses = Object.entries(map.harnesses ?? {}).map(([name, entries]) => ({ name, test: matcher(expand(entries, groups)) }));
   const always = new Set(map.always ?? []);
@@ -137,7 +144,14 @@ export function checkMap({ map, suite, exists }) {
   for (const name of [...always, ...Object.keys(harnesses)]) {
     if (!suite.includes(name)) problems.push(`${name}: in test-map.json but not a script in the suite`);
   }
-  const literals = [...(map.unit ?? []), ...Object.values(map.skip ?? {}).flat(), ...Object.values(groups).flat()];
+  const literals = [...(map.unit ?? []), ...Object.values(map.skip ?? {}).flat(), ...Object.values(groups).flat(), ...(map.none ?? [])];
+  for (const entry of map.none ?? []) {
+    if (!/[*?]/.test(entry)) continue;
+    const dir = /^([^*?]+)\/\*\*$/.exec(entry)?.[1];
+    if (dir === undefined || /^(scripts|packages|codebase-index-mcp)(\/|$)/.test(dir)) {
+      problems.push(`${entry}: none takes explicit paths (a <dir>/** only outside scripts/, packages/ and the package)`);
+    }
+  }
   for (const [name, entries] of Object.entries(harnesses)) {
     if (entries.length === 0) problems.push(`${name}: empty entry — every harness depends on something`);
     for (const entry of entries) {

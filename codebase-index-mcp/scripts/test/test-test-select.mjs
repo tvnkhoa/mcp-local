@@ -90,4 +90,17 @@ assert.deepEqual(pg.selected.map((s) => s.name), ["test:unit", "guard:no-llm-run
 const selfIndexed = real(["codebase-index-mcp/docs/backlog.md"]).selected.map((s) => s.name);
 assert.ok(selfIndexed.includes("test:search-regex") && !selfIndexed.includes("test:bus-edges"), "a doc inside the package reaches the harnesses that index the package itself, not the fixture ones");
 
+// 6. `none`: explicit root files no harness loads are skipped as @none; an unlisted root script still runs everything.
+const inert = real(["scripts/serve-http.mjs", ".github/workflows/ci.yml"]);
+assert.equal(inert.whole, false);
+assert.deepEqual(inert.skipped, [{ file: "scripts/serve-http.mjs", reason: "@none" }, { file: ".github/workflows/ci.yml", reason: "@none" }]);
+assert.deepEqual(inert.selected.map((s) => s.name), ["test:unit", "guard:no-llm-runtime"]);
+assert.equal(real(["scripts/serve-http.mjs", "scripts/run-servers.mjs"]).whole, true, "an unlisted root script beside a none file still selects the whole suite");
+const broad = checkMap({ map: { none: ["scripts/**", "scripts/*.mjs", "packages/sdk/**", ".github/**"], harnesses: {} }, suite: [], exists: () => true });
+assert.deepEqual(
+  broad.map((p) => p.split(":")[0]),
+  ["scripts/**", "scripts/*.mjs", "packages/sdk/**"],
+  "none refuses broad globs over scripts/, packages/ and non-<dir>/** patterns; .github/** is allowed"
+);
+
 console.log(`test-test-select: all checks passed (${String(suite.length)} suite scripts mapped)`);

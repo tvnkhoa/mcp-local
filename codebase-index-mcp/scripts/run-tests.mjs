@@ -61,7 +61,7 @@ function selectChanged() {
   const map = JSON.parse(fs.readFileSync(path.join(ROOT, "scripts", "test-map.json"), "utf8"));
   const result = selectForChanges({ changed: changes.files, map, suite });
   console.log(`--changed: base ${changes.base.slice(0, 12)}${base === undefined ? " (merge-base HEAD origin/main)" : ""}, ${String(changes.files.length)} changed file(s)`);
-  for (const { file, reason } of result.skipped) console.log(`  skipped (${reason}): ${file}`);
+  for (const { file, reason } of result.skipped) console.log(`  skipped: ${file} (${reason})`);
   for (const file of result.unitOnly) console.log(`  test:unit only: ${file}`);
   for (const file of result.uncovered) console.log(`  not in test-map.json → WHOLE SUITE: ${file}`);
   console.log(`selected ${String(result.selected.length)}/${String(suite.length)}:`);

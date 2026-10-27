@@ -1,5 +1,5 @@
 {
-  "$comment": "Which codebase-index harnesses a change needs: run-tests.mjs --changed. Paths are relative to the workspace root. A changed file that no glob here covers runs the WHOLE suite; skip lists only other servers and pure docs. test:test-select fails when a suite script has no entry. Rules: scripts/lib/testSelect.mjs.",
+  "$comment": "Which codebase-index harnesses a change needs: run-tests.mjs --changed. Paths are relative to the workspace root. A changed file that no glob here covers runs the WHOLE suite; skip lists only other servers and pure docs; none lists, one explicit path each, root files no harness loads. test:test-select fails when a suite script has no entry. Rules: scripts/lib/testSelect.mjs.",
   "always": [
     "test:unit",
     "guard:no-llm-runtime"
@@ -19,6 +19,14 @@
       ".claude/**/*.md"
     ]
   },
+  "none": [
+    "scripts/serve-http.mjs",
+    "scripts/worktree.mjs",
+    "scripts/heavy-lock.mjs",
+    "scripts/mcp-doctor.mjs",
+    "scripts/install-mcp.mjs",
+    ".github/**"
+  ],
   "unit": [
     "codebase-index-mcp/src/**/*.test.ts"
   ],
