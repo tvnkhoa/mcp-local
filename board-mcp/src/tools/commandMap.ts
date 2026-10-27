@@ -42,6 +42,8 @@ export const MAPPED: Readonly<Record<string, readonly string[]>> = {
 
 /** CLI subcommands deliberately not exposed, with the reason. */
 export const EXCLUDED: Readonly<Record<string, string>> = {
+  reassign:
+    "A rescope.mjs handler, not a subcommand of its own: the CLI reaches it as `assign --reassign`, which the `assign` tool's `reassign` + `why` params send.",
   "prune-shots":
     "Deletes evidence/<unit>/shots directories (rmSync recursive) with --write. CLI housekeeping for the owner, not a pipeline step; a model has no reason to run it."
 };

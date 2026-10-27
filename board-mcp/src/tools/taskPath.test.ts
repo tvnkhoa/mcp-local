@@ -83,8 +83,18 @@ test("task tools on a scratch board: four refusals, then lead → assign → cla
   await refusal("claim", { unit: "task--demo", session: OTHER }, /only its assignee claims it/u);
   await okCall("claim", { unit: "task--demo", session: MEMBER });
 
-  // rescope: the leader's, task units only, add-only, between assign and report.
+  // assign reassign (wec.aria 6e9f4564): a T1 unit moves to another session; four refusals.
+  const reassign = (unit: string, to: string) => ({ unit, to, reassign: true, why: "member gone", session: LEADER });
+  await refusal("assign", reassign("task--demo", OTHER), /holds task--demo's claim since/u);
   await okCall("new_unit", { kind: "task", name: "idle", paths: ["src/a.txt"], session: LEADER });
+  await refusal("assign", reassign("task--idle", OTHER), /never assigned — assign it, without --reassign/u);
+  await okCall("new_unit", { kind: "task", name: "moved", paths: ["src/a.txt"], session: LEADER });
+  await okCall("assign", { ...brief, unit: "task--moved", session: LEADER });
+  await refusal("assign", reassign("task--moved", MEMBER), /is already assigned to/u);
+  const moved = await okCall("assign", reassign("task--moved", OTHER));
+  assert.match(moved.text, /task--moved reassigned by aaaaaaaa.* to cccccccc/u);
+
+  // rescope: the leader's, task units only, add-only, between assign and report.
   await refusal("rescope", { unit: "task--demo", add: ["src/b.txt"], why: "needs b", session: OTHER }, /rescope is the leader's/u);
   await refusal("rescope", { unit: "task--idle", add: ["src/b.txt"], why: "needs b", session: LEADER }, /assign first/u);
   const horizontal = await okCall("new_unit", { kind: "horizontal", name: "wide", paths: ["src/a.txt"], weight: "standard", yes: [], session: LEADER });
@@ -111,6 +121,7 @@ test("task tools on a scratch board: four refusals, then lead → assign → cla
   const reported = await okCall("report", { ...report, session: MEMBER });
   assert.match(reported.text, /T2 Verify[\s\S]*src\/a\.txt/u);
   await refusal("rescope", { unit: "task--demo", add: ["src/c.txt"], why: "too late", session: LEADER }, /rescope only at T1/u);
+  await refusal("assign", reassign("task--demo", OTHER), /reassign only at T1/u);
 
   // Self-accept: the member is made leader and accepts its own work.
   lock(MEMBER);

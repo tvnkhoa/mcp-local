@@ -19,7 +19,7 @@ import type { BoardConfig } from "../config/index.js";
 import { SESSION_ID } from "../middleware/guards.js";
 import { responseProfileSchema } from "../middleware/responseFormatter.js";
 import type { BoardRunner } from "../types/index.js";
-import { ADDS, asFlag, callBoard, field, flag, GATE_REFUSAL_HINT, gateWords, OVERWRITES, repoPath, sessionField, SHA, text, unitId, writeGuards } from "./shared.js";
+import { ADDS, asFlag, bool, callBoard, field, flag, GATE_REFUSAL_HINT, gateWords, OVERWRITES, repoPath, sessionField, SHA, text, unitId, writeGuards } from "./shared.js";
 
 /** `shared`, or `<path>@<sha>` — board.mjs's own shape for a brief's worktree. */
 const WORKTREE = /^(shared|[^,\s]+@[0-9a-f]{7,40})$/u;
@@ -45,13 +45,15 @@ export function buildTaskTools(config: BoardConfig, run: BoardRunner): readonly 
       name: "assign",
       title: "Assign a task unit",
       description:
-        "The leader assigns a task unit at T0 to a member session with its brief (board.mjs assign): T0 Brief → T1 Build. Refused unless `session` leads today. Only the assignee may then claim and report it.",
+        "The leader assigns a task unit at T0 to a member session with its brief (board.mjs assign): T0 Brief → T1 Build. Refused unless `session` leads today. Only the assignee may then claim and report it. reassign=true (with `why`) instead hands a T1 unit to another session when its member is gone: only `to`, `why` and `session` are sent — the unit keeps its brief, scope and assign HEAD; refused at T0 / T2 / landed, or while a live claim holds the unit.",
       annotations: ADDS,
       inputSchema: schema.object(
         {
           unit: field.unit("A task unit id, task--…"),
           to: schema.string("The member's session id, a lowercase UUID (→ --to). Never the leader's own."),
-          goal: schema.string("What the member delivers (→ --goal).", { maxLength: 2000 }),
+          reassign: schema.boolean("Hand a T1 unit to another session (→ --reassign). Then goal, scope, ruled_out, done_when, worktree and gate_by are not sent; `why` is required."),
+          why: schema.string("Why the unit moves (→ --why). Required with reassign; not sent otherwise.", { maxLength: 2000 }),
+          goal: schema.string("What the member delivers (→ --goal). Required unless reassign.", { maxLength: 2000 }),
           scope: schema.array(schema.string(), "Repo-relative paths the member may change, within the unit's files (→ --scope=a,b). The overlap is symmetric: a wider directory passes.", { maxItems: 100 }),
           ruled_out: schema.string("What the member is not to try; 'none' is an answer (→ --ruled-out).", { maxLength: 2000 }),
           done_when: schema.string("The evidence that makes it done (→ --done-when).", { maxLength: 2000 }),
@@ -60,35 +62,50 @@ export function buildTaskTools(config: BoardConfig, run: BoardRunner): readonly 
           session: field.session(),
           profile: schema.profile()
         },
-        { required: ["unit", "to", "goal", "scope", "ruled_out", "done_when", "worktree", "gate_by", "session"] }
+        { required: ["unit", "to", "session"] }
       ),
       input: z
         .object({
           unit: unitId(),
           to: uuid("to"),
-          goal: text(2000),
-          scope: z.array(repoPath()).min(1).max(100),
-          ruled_out: text(2000),
-          done_when: text(2000),
-          worktree: z.string().max(512).regex(WORKTREE, "'shared' or '<path>@<sha>'"),
-          gate_by: z.enum(["owner", "leader"]),
+          reassign: z.boolean().optional(),
+          why: text(2000).optional(),
+          goal: text(2000).optional(),
+          scope: z.array(repoPath()).min(1).max(100).optional(),
+          ruled_out: text(2000).optional(),
+          done_when: text(2000).optional(),
+          worktree: z.string().max(512).regex(WORKTREE, "'shared' or '<path>@<sha>'").optional(),
+          gate_by: z.enum(["owner", "leader"]).optional(),
           session: sessionField(),
           profile: responseProfileSchema.optional()
         })
-        .strict(),
+        .strict()
+        .superRefine((a, ctx) => {
+          const need = (cond: boolean, path: string, message: string) => {
+            if (!cond) ctx.addIssue({ code: z.ZodIssueCode.custom, path: [path], message });
+          };
+          if (a.reassign === true) need(a.why !== undefined, "why", "required with reassign");
+          else for (const k of ["goal", "scope", "ruled_out", "done_when", "worktree", "gate_by"] as const) need(a[k] !== undefined, k, "required unless reassign");
+        }),
       guards,
       handler: async (a) =>
-        callBoard(run, "assign", [
-          a.unit,
-          ...flag("to", a.to),
-          ...flag("goal", a.goal),
-          ...flag("scope", a.scope.join(",")),
-          ...flag("ruled-out", a.ruled_out),
-          ...flag("done-when", a.done_when),
-          ...flag("worktree", a.worktree),
-          ...flag("gate-by", a.gate_by),
-          ...asFlag(a.session)
-        ])
+        callBoard(
+          run,
+          "assign",
+          a.reassign === true
+            ? [a.unit, ...bool("reassign", true), ...flag("to", a.to), ...flag("why", a.why), ...asFlag(a.session)]
+            : [
+                a.unit,
+                ...flag("to", a.to),
+                ...flag("goal", a.goal),
+                ...flag("scope", a.scope?.join(",")),
+                ...flag("ruled-out", a.ruled_out),
+                ...flag("done-when", a.done_when),
+                ...flag("worktree", a.worktree),
+                ...flag("gate-by", a.gate_by),
+                ...asFlag(a.session)
+              ]
+        )
     }),
 
     defineTool({

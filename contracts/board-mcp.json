@@ -269,7 +269,7 @@
         "openWorldHint": false,
         "readOnlyHint": false
       },
-      "description": "The leader assigns a task unit at T0 to a member session with its brief (board.mjs assign): T0 Brief → T1 Build. Refused unless `session` leads today. Only the assignee may then claim and report it.",
+      "description": "The leader assigns a task unit at T0 to a member session with its brief (board.mjs assign): T0 Brief → T1 Build. Refused unless `session` leads today. Only the assignee may then claim and report it. reassign=true (with `why`) instead hands a T1 unit to another session when its member is gone: only `to`, `why` and `session` are sent — the unit keeps its brief, scope and assign HEAD; refused at T0 / T2 / landed, or while a live claim holds the unit.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -287,7 +287,7 @@
             "type": "string"
           },
           "goal": {
-            "description": "What the member delivers (→ --goal).",
+            "description": "What the member delivers (→ --goal). Required unless reassign.",
             "maxLength": 2000,
             "type": "string"
           },
@@ -300,6 +300,10 @@
               "verbose"
             ],
             "type": "string"
+          },
+          "reassign": {
+            "description": "Hand a T1 unit to another session (→ --reassign). Then goal, scope, ruled_out, done_when, worktree and gate_by are not sent; `why` is required.",
+            "type": "boolean"
           },
           "ruled_out": {
             "description": "What the member is not to try; 'none' is an answer (→ --ruled-out).",
@@ -326,6 +330,11 @@
             "description": "A task unit id, task--…",
             "type": "string"
           },
+          "why": {
+            "description": "Why the unit moves (→ --why). Required with reassign; not sent otherwise.",
+            "maxLength": 2000,
+            "type": "string"
+          },
           "worktree": {
             "description": "'shared', or '<path>@<sha>' for the member's own worktree (→ --worktree).",
             "maxLength": 512,
@@ -335,12 +344,6 @@
         "required": [
           "unit",
           "to",
-          "goal",
-          "scope",
-          "ruled_out",
-          "done_when",
-          "worktree",
-          "gate_by",
           "session"
         ],
         "type": "object"
