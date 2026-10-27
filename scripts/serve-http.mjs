@@ -9,9 +9,14 @@
  *   node scripts/serve-http.mjs --server codebase-index --task register # ... and registered
  *   node scripts/serve-http.mjs --server codebase-index --task unregister
  *
- *   node scripts/serve-http.mjs --server codebase-index --restart       # kill the tree on its port, /Run the task, wait for the new listener
+ *   node scripts/serve-http.mjs --server codebase-index --restart       # deploy, kill the tree on its port, /Run the task, wait for the new listener
+ *   node scripts/serve-http.mjs --server codebase-index --deploy-only   # deploy only; the running process is untouched
  *
  * Flags: --config <path> (default ~/.claude/mcp/http/<key>.env.json), --log <path>.
+ *
+ * The served process never runs from the working tree's dist (V-A): it runs from a deploy copy under
+ * ~/.claude/mcp/deploy/<key>/<sha>-<n>/ that `--restart` / `--deploy-only` make, so a build in the tree
+ * changes nothing live until the next `--restart`. See `deployServer`.
  *
  * The served process takes its whole env from the env file, `{ "env": { ... } }`, which
  * `install-mcp --transport http` writes: the same values a stdio registration would carry, plus
@@ -34,8 +39,9 @@ import path from "node:path";
 import process from "node:process";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
-import { serverEntryPath } from "./lib/manifest.mjs";
+import { WORKSPACE_ROOT, serverEntryPath } from "./lib/manifest.mjs";
 import { parseArgs, resolveServers } from "./lib/cli.mjs";
+import { linkDir, linkEntries, removeTree } from "./lib/junctions.mjs";
 import { err, info, ok } from "./lib/log.mjs";
 
 const SCRIPT = fileURLToPath(import.meta.url);
@@ -286,6 +292,215 @@ export async function restartServer(server, port, { exec = defaultExec, sleep = 
   throw new Error(`${server.key}: no new listener on port ${port} within ${timeoutMs} ms of /Run ${taskName(server)}`);
 }
 
+export function defaultDeployRoot() {
+  return path.join(os.homedir(), ".claude", "mcp", "deploy");
+}
+
+/** Files a server reads at run time from outside its dist/, relative to the server dir. */
+const RUNTIME_EXTRAS = { "observe-mcp": ["docs/service-catalog.json"] };
+
+/** How many deploys `pruneDeploys` keeps, newest first; the current and the running one are never removed. */
+export const DEPLOYS_KEPT = 2;
+
+/** `{ "@mcp/core": "<root>/packages/core", ... }` from each packages/<dir>/package.json. */
+function workspacePackages(root) {
+  const out = {};
+  const dir = path.join(root, "packages");
+  if (!fs.existsSync(dir)) return out;
+  for (const name of fs.readdirSync(dir)) {
+    const pj = path.join(dir, name, "package.json");
+    if (fs.existsSync(pj)) out[JSON.parse(fs.readFileSync(pj, "utf-8")).name] = path.join(dir, name);
+  }
+  return out;
+}
+
+/** The workspace packages `pkgJson` reaches through its dependencies, transitively, sorted. */
+export function packageClosure(pkgJson, packages) {
+  const seen = new Set();
+  const visit = (pj) => {
+    for (const dep of Object.keys(pj.dependencies ?? {})) {
+      if (!packages[dep] || seen.has(dep)) continue;
+      seen.add(dep);
+      visit(JSON.parse(fs.readFileSync(path.join(packages[dep], "package.json"), "utf-8")));
+    }
+  };
+  visit(pkgJson);
+  return [...seen].sort();
+}
+
+/** Builds `node_modules/@mcp` as a real dir whose entries point at the deploy's own package copies. */
+function mcpScope(names, deployDir) {
+  return (dest) => {
+    fs.mkdirSync(dest, { recursive: true });
+    for (const name of names) {
+      const short = name.slice("@mcp/".length);
+      linkDir(path.join(deployDir, "packages", short), path.join(dest, short));
+    }
+  };
+}
+
+function gitSha(root) {
+  try {
+    return execFileSync("git", ["-C", root, "rev-parse", "--short=12", "HEAD"], { encoding: "utf-8" }).trim();
+  } catch {
+    return "nogit";
+  }
+}
+
+function gitDirty(root, paths) {
+  try {
+    return execFileSync("git", ["-C", root, "status", "--porcelain", "--", ...paths], { encoding: "utf-8" }).trim() !== "";
+  } catch {
+    return null;
+  }
+}
+
+/** Every deploy of one server, `{ dir, sha, n }`, newest (highest n) first. */
+export function listDeploys(keyDir) {
+  if (!fs.existsSync(keyDir)) return [];
+  const out = [];
+  for (const e of fs.readdirSync(keyDir, { withFileTypes: true })) {
+    const m = e.isDirectory() && e.name.match(/^(.+)-(\d+)$/);
+    if (m) out.push({ dir: path.join(keyDir, e.name), sha: m[1], n: Number(m[2]) });
+  }
+  return out.sort((a, b) => b.n - a.n);
+}
+
+function readJson(file) {
+  try {
+    return JSON.parse(fs.readFileSync(file, "utf-8"));
+  } catch {
+    return null;
+  }
+}
+
+function writeJsonAtomic(file, value) {
+  const tmp = `${file}.${process.pid}.tmp`;
+  fs.writeFileSync(tmp, `${JSON.stringify(value, null, 2)}\n`, "utf-8");
+  fs.renameSync(tmp, file);
+}
+
+/** The deploy the next start serves (`current.json`), or null. */
+export function currentDeploy(server, { deployRoot = defaultDeployRoot() } = {}) {
+  const cur = readJson(path.join(deployRoot, server.key, "current.json"));
+  return cur && typeof cur.entry === "string" && fs.existsSync(cur.entry) ? cur : null;
+}
+
+/** What the supervisor last spawned (`running.json`: dir, sha, entry, pid, startedAt), or null. */
+export function runningDeploy(server, { deployRoot = defaultDeployRoot() } = {}) {
+  return readJson(path.join(deployRoot, server.key, "running.json"));
+}
+
+/**
+ * Copy the server's runtime closure out of the working tree:
+ *
+ *   <deployRoot>/<key>/<sha>-<n>/
+ *     <server dir>/dist, package.json (+ RUNTIME_EXTRAS)   copied
+ *     <server dir>/node_modules/                          real dir: each entry a junction to the tree's,
+ *                                                         except @mcp/* -> this deploy's packages/*
+ *     packages/<pkg>/dist, package.json                   copied, every workspace package it reaches
+ *     node_modules/                                       the root's entries the same way (the copied
+ *                                                         packages resolve their deps through it)
+ *     deploy.json
+ *
+ * Third-party code stays junctioned (only `npm install` changes it); everything `npm run build` writes
+ * is copied. Marks the deploy current, then prunes. Returns the deploy record.
+ */
+export function deployServer(server, { workspaceRoot = WORKSPACE_ROOT, deployRoot = defaultDeployRoot(), sha = gitSha(workspaceRoot), now = () => new Date() } = {}) {
+  const srcServer = path.join(workspaceRoot, server.dir);
+  const pkgJson = JSON.parse(fs.readFileSync(path.join(srcServer, "package.json"), "utf-8"));
+  const packages = workspacePackages(workspaceRoot);
+  const closure = packageClosure(pkgJson, packages);
+  const required = [path.join(srcServer, "dist", "index.js"), ...closure.map((name) => path.join(packages[name], "dist"))];
+  const missing = required.filter((p) => !fs.existsSync(p));
+  if (missing.length) {
+    throw new Error(`${server.key}: not built — missing ${missing.join(", ")}. Run npm run build:packages, then npm run build in ${server.dir}`);
+  }
+
+  const keyDir = path.join(deployRoot, server.key);
+  fs.mkdirSync(keyDir, { recursive: true });
+  const n = (listDeploys(keyDir)[0]?.n ?? 0) + 1;
+  const dir = path.join(keyDir, `${sha}-${n}`);
+  fs.mkdirSync(dir);
+  try {
+    const destServer = path.join(dir, server.dir);
+    fs.mkdirSync(destServer);
+    fs.cpSync(path.join(srcServer, "dist"), path.join(destServer, "dist"), { recursive: true });
+    fs.copyFileSync(path.join(srcServer, "package.json"), path.join(destServer, "package.json"));
+    for (const rel of RUNTIME_EXTRAS[server.dir] ?? []) {
+      if (!fs.existsSync(path.join(srcServer, rel))) continue;
+      fs.mkdirSync(path.dirname(path.join(destServer, rel)), { recursive: true });
+      fs.copyFileSync(path.join(srcServer, rel), path.join(destServer, rel));
+    }
+    for (const name of closure) {
+      const dest = path.join(dir, "packages", name.slice("@mcp/".length));
+      fs.mkdirSync(dest, { recursive: true });
+      fs.cpSync(path.join(packages[name], "dist"), path.join(dest, "dist"), { recursive: true });
+      fs.copyFileSync(path.join(packages[name], "package.json"), path.join(dest, "package.json"));
+    }
+    const override = { "@mcp": mcpScope(closure, dir) };
+    linkEntries(path.join(srcServer, "node_modules"), path.join(destServer, "node_modules"), { override });
+    linkEntries(path.join(workspaceRoot, "node_modules"), path.join(dir, "node_modules"), { override });
+  } catch (e) {
+    removeTree(dir);
+    throw e;
+  }
+  const record = {
+    key: server.key,
+    sha,
+    n,
+    dir,
+    entry: path.join(dir, server.dir, "dist", "index.js"),
+    source: workspaceRoot,
+    dirty: gitDirty(workspaceRoot, [server.dir, ...closure.map((name) => path.relative(workspaceRoot, packages[name]))]),
+    packages: closure,
+    createdAt: now().toISOString()
+  };
+  writeJsonAtomic(path.join(dir, "deploy.json"), record);
+  writeJsonAtomic(path.join(keyDir, "current.json"), record);
+  return { ...record, pruned: pruneDeploys(server, { deployRoot }) };
+}
+
+/**
+ * Keep the newest `keep` deploys; delete the rest with `removeTree`, which unlinks every junction and
+ * never walks into it. The current deploy and the running one are never removed, and a deploy still
+ * locked by a live process (Windows) is left for the next prune. Returns the dirs removed.
+ */
+export function pruneDeploys(server, { deployRoot = defaultDeployRoot(), keep = DEPLOYS_KEPT } = {}) {
+  const keyDir = path.join(deployRoot, server.key);
+  const spared = new Set([runningDeploy(server, { deployRoot })?.dir, currentDeploy(server, { deployRoot })?.dir]);
+  const removed = [];
+  for (const d of listDeploys(keyDir).slice(keep)) {
+    if (spared.has(d.dir)) continue;
+    try {
+      removeTree(d.dir);
+      removed.push(d.dir);
+    } catch (e) {
+      err(`${server.key}: could not remove old deploy ${d.dir} (${e.code ?? e.message}); the next deploy retries`);
+    }
+  }
+  return removed;
+}
+
+/**
+ * The entry the supervisor spawns: the current deploy's or, when there is none yet, the working tree's
+ * (the caller warns), so a first start before any deploy still serves.
+ */
+export function resolveServeEntry(server, { deployRoot = defaultDeployRoot() } = {}) {
+  const deploy = currentDeploy(server, { deployRoot });
+  return deploy ? { entry: deploy.entry, deploy } : { entry: serverEntryPath(server), deploy: null };
+}
+
+/** mcp:doctor's `[deploy]` verdict from `currentDeploy` and `runningDeploy`: `[status, message]`. */
+export function deployCheck(current, running) {
+  if (!running) return ["warn", "the supervisor has not recorded a start since deploys began — --restart serves a deploy copy"];
+  const ran = `pid ${running.pid}`;
+  if (!running.dir) return ["warn", `${ran} serves the working tree's dist, so a build there changes it live`];
+  const what = `${ran} runs ${running.sha} from ${running.dir}`;
+  if (current && current.dir !== running.dir) return ["warn", `${what}; deploy ${current.sha}-${current.n} is waiting for --restart`];
+  return ["pass", what];
+}
+
 function serve(server, envFile, logFile) {
   const names = httpEnvNames(server);
   const env = readEnvFile(envFile);
@@ -299,12 +514,23 @@ function serve(server, envFile, logFile) {
   const secretName = approvalSecretEnvName(server);
   const secretEnv = secretName && !env[secretName] ? { [secretName]: ensureApprovalSecret(approvalSecretFile(server)) } : {};
   const stderr = logFile ? fs.openSync(logFile, "a") : "inherit";
+  const { entry, deploy } = resolveServeEntry(server);
+  if (!deploy) err(`${server.key}: no deploy yet — serving from the working tree; --deploy-only or --restart makes one`);
   // Inherit PATH and the like; every server setting comes from the env file and wins.
-  const child = spawn(process.execPath, [serverEntryPath(server), "--transport", "http"], {
+  const child = spawn(process.execPath, [entry, "--transport", "http"], {
     env: { ...process.env, ...env, ...secretEnv },
     stdio: ["ignore", "ignore", stderr]
   });
-  info(`${server.key}: serving on http://127.0.0.1:${env[names.port]}/mcp (pid ${child.pid})`);
+  const keyDir = path.join(defaultDeployRoot(), server.key);
+  fs.mkdirSync(keyDir, { recursive: true });
+  writeJsonAtomic(path.join(keyDir, "running.json"), {
+    dir: deploy?.dir ?? null,
+    sha: deploy?.sha ?? null,
+    entry,
+    pid: child.pid,
+    startedAt: new Date().toISOString()
+  });
+  info(`${server.key}: serving on http://127.0.0.1:${env[names.port]}/mcp (pid ${child.pid}) from ${deploy ? deploy.dir : "the working tree"}`);
   for (const signal of ["SIGINT", "SIGTERM"]) process.on(signal, () => child.kill(signal));
   child.on("exit", (code, signal) => {
     if (code !== 0) err(`${server.key}: exited ${signal ?? code}${logFile ? ` — see ${logFile}` : ""}`);
@@ -313,7 +539,7 @@ function serve(server, envFile, logFile) {
 }
 
 async function main() {
-  const args = parseArgs(process.argv.slice(2), { restart: ["--restart"] }, { config: ["--config"], log: ["--log"], task: ["--task"] });
+  const args = parseArgs(process.argv.slice(2), { restart: ["--restart"], deployOnly: ["--deploy-only"] }, { config: ["--config"], log: ["--log"], task: ["--task"] });
   if (args.servers.length !== 1) throw new Error("pass exactly one --server <key>");
   const [server] = resolveServers(args.servers);
   if (httpEnvNames(server) === null) {
@@ -321,9 +547,13 @@ async function main() {
   }
   const envFile = path.resolve(args.config ?? defaultEnvFile(server));
   const logFile = args.log ? path.resolve(args.log) : null;
-  if (args.restart) {
+  if (args.restart || args.deployOnly) {
     const port = readEnvFile(envFile)?.[httpEnvNames(server).port];
-    if (!port) throw new Error(`${envFile} must set ${httpEnvNames(server).port}`);
+    if (args.restart && !port) throw new Error(`${envFile} must set ${httpEnvNames(server).port}`);
+    const d = deployServer(server);
+    const pruned = d.pruned.length ? `; removed ${d.pruned.length} older` : "";
+    ok(`${server.key}: deployed ${d.sha}${d.dirty ? " (uncommitted changes)" : ""} to ${d.dir}${pruned}`);
+    if (args.deployOnly) return;
     const { oldPid, newPid } = await restartServer(server, port);
     ok(`${server.key}: restarted, pid ${oldPid ?? "none"} -> ${newPid}`);
     return;

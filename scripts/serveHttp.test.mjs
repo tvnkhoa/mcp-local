@@ -17,11 +17,12 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { getServer } from "./lib/manifest.mjs";
-import { approvalSecretEnvName, approvalSecretFile, ensureApprovalSecret, httpClientEntry, httpEnvNames, parseListenerPid, readEnvFile, restartServer, taskCreateArgs, taskDeniedHint, taskXml, writeEnvFile } from "./serve-http.mjs";
+import { isLink, removeTree } from "./lib/junctions.mjs";
+import { approvalSecretEnvName, approvalSecretFile, deployCheck, deployServer, ensureApprovalSecret, httpClientEntry, httpEnvNames, listDeploys, parseListenerPid, readEnvFile, resolveServeEntry, restartServer, taskCreateArgs, taskDeniedHint, taskXml, writeEnvFile } from "./serve-http.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), "serve-http-test-"));
-test.after(() => fs.rmSync(TMP, { recursive: true, force: true }));
+test.after(() => removeTree(TMP)); // it holds junctions: unlink them, never walk them
 
 test("only a server declaring both http vars can be served", () => {
   assert.deepEqual(httpEnvNames(getServer("codebase-index")), {
@@ -229,4 +230,98 @@ test("--restart does not accept the old pid or a stale start time as the new lis
     restartServer(server, 7341, { exec, sleep: async () => { clock += 100; }, now: () => clock, timeoutMs: 1000 }),
     /no new listener on port 7341/
   );
+});
+
+/**
+ * V-A: a temp workspace with one server `srv` -> @mcp/sdk -> @mcp/core (and an @mcp/unused it never
+ * reaches), third-party deps in the server's and the root's node_modules, @mcp/* linked as npm links them.
+ */
+function fakeWorkspace() {
+  const root = fs.mkdtempSync(path.join(TMP, "ws-"));
+  const write = (rel, text) => {
+    fs.mkdirSync(path.dirname(path.join(root, rel)), { recursive: true });
+    fs.writeFileSync(path.join(root, rel), text);
+  };
+  const pkg = (dir, name, deps = {}) => write(`${dir}/package.json`, JSON.stringify({ name, type: "module", main: "dist/index.js", dependencies: deps }));
+  pkg("packages/core", "@mcp/core");
+  write("packages/core/dist/index.js", 'export const core = "core-v1";\n');
+  pkg("packages/sdk", "@mcp/sdk", { "@mcp/core": "*" });
+  write("packages/sdk/dist/index.js", 'export { core } from "@mcp/core";\nexport { dep } from "rootdep";\n');
+  pkg("packages/unused", "@mcp/unused");
+  write("packages/unused/dist/index.js", "");
+  pkg("srv", "srv", { "@mcp/sdk": "file:../packages/sdk", localdep: "1" });
+  write("srv/dist/index.js", 'import { core, dep } from "@mcp/sdk";\nimport { local } from "localdep";\nconsole.log(["srv-v1", core, dep, local].join(" "));\n');
+  pkg("srv/node_modules/localdep", "localdep");
+  write("srv/node_modules/localdep/index.js", 'export const local = "local";\n');
+  write("srv/node_modules/.package-lock.json", "{}");
+  pkg("node_modules/rootdep", "rootdep");
+  write("node_modules/rootdep/index.js", 'export const dep = "rootdep";\n');
+  for (const nm of ["srv/node_modules/@mcp", "node_modules/@mcp"]) fs.mkdirSync(path.join(root, nm), { recursive: true });
+  fs.symlinkSync(path.join(root, "packages/sdk"), path.join(root, "srv/node_modules/@mcp/sdk"), "junction");
+  for (const p of ["core", "sdk", "unused"]) fs.symlinkSync(path.join(root, "packages", p), path.join(root, "node_modules/@mcp", p), "junction");
+  return { root, server: { key: "srv", dir: "srv" }, deployRoot: path.join(root, "..", `${path.basename(root)}-deploy`) };
+}
+
+const runEntry = (entry) => spawnSync(process.execPath, [entry], { encoding: "utf-8" });
+
+test("V-A: the deploy copies built output, junctions third-party deps, and runs without the tree's dist", () => {
+  const { root, server, deployRoot } = fakeWorkspace();
+  const d = deployServer(server, { workspaceRoot: root, deployRoot, sha: "abc123" });
+  assert.equal(d.dir, path.join(deployRoot, "srv", "abc123-1"));
+  assert.deepEqual(d.packages, ["@mcp/core", "@mcp/sdk"]);
+  assert.ok(!fs.existsSync(path.join(d.dir, "packages", "unused")), "a package the server never reaches is not copied");
+  assert.ok(!isLink(path.join(d.dir, "srv", "dist")) && fs.existsSync(path.join(d.dir, "srv", "dist", "index.js")));
+  assert.ok(isLink(path.join(d.dir, "srv", "node_modules", "localdep")), "third-party code is a junction");
+  assert.ok(!isLink(path.join(d.dir, "srv", "node_modules", "@mcp")), "@mcp is a real dir");
+  assert.equal(fs.realpathSync(path.join(d.dir, "srv", "node_modules", "@mcp", "sdk")), fs.realpathSync(path.join(d.dir, "packages", "sdk")));
+  assert.equal(fs.realpathSync(path.join(d.dir, "node_modules", "@mcp", "core")), fs.realpathSync(path.join(d.dir, "packages", "core")));
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(deployRoot, "srv", "current.json"), "utf-8")).dir, d.dir);
+
+  const before = runEntry(d.entry);
+  assert.equal(before.status, 0, before.stderr);
+  assert.equal(before.stdout.trim(), "srv-v1 core-v1 rootdep local");
+
+  // A rebuild in the tree — the server's dist and a package's — changes nothing in the deploy...
+  fs.writeFileSync(path.join(root, "srv/dist/index.js"), 'console.log("srv-v2");\n');
+  fs.writeFileSync(path.join(root, "packages/core/dist/index.js"), 'export const core = "core-v2";\n');
+  assert.equal(runEntry(d.entry).stdout.trim(), "srv-v1 core-v1 rootdep local");
+  // ...until the next deploy.
+  const d2 = deployServer(server, { workspaceRoot: root, deployRoot, sha: "abc123" });
+  assert.equal(d2.n, 2);
+  assert.equal(runEntry(d2.entry).stdout.trim(), "srv-v2");
+  assert.equal(resolveServeEntry(server, { deployRoot }).entry, d2.entry);
+});
+
+test("V-A: only the newest 2 deploys stay, the running one is spared, and pruning never deletes through a junction", () => {
+  const { root, server, deployRoot } = fakeWorkspace();
+  const first = deployServer(server, { workspaceRoot: root, deployRoot, sha: "s1" });
+  fs.writeFileSync(path.join(deployRoot, "srv", "running.json"), JSON.stringify({ dir: first.dir, sha: "s1", pid: 1 }));
+  deployServer(server, { workspaceRoot: root, deployRoot, sha: "s2" });
+  deployServer(server, { workspaceRoot: root, deployRoot, sha: "s3" });
+  assert.deepEqual(listDeploys(path.join(deployRoot, "srv")).map((x) => `${x.sha}-${x.n}`), ["s3-3", "s2-2", "s1-1"], "the running deploy survives");
+
+  fs.writeFileSync(path.join(deployRoot, "srv", "running.json"), JSON.stringify({ dir: null, pid: 2 }));
+  const last = deployServer(server, { workspaceRoot: root, deployRoot, sha: "s4" });
+  assert.equal(last.pruned.length, 2);
+  assert.deepEqual(listDeploys(path.join(deployRoot, "srv")).map((x) => `${x.sha}-${x.n}`), ["s4-4", "s3-3"]);
+  // Every junction target is intact: the tree's node_modules, the root's, and the packages.
+  for (const rel of ["srv/node_modules/localdep/index.js", "node_modules/rootdep/index.js", "packages/core/dist/index.js", "packages/sdk/package.json", "srv/dist/index.js"]) {
+    assert.ok(fs.existsSync(path.join(root, rel)), `${rel} survived the prune`);
+  }
+});
+
+test("V-A: an unbuilt server is refused and leaves no deploy behind; no deploy yet serves the tree", () => {
+  const { root, server, deployRoot } = fakeWorkspace();
+  fs.rmSync(path.join(root, "packages/core/dist"), { recursive: true });
+  assert.throws(() => deployServer(server, { workspaceRoot: root, deployRoot, sha: "x" }), /not built — missing .*core/);
+  assert.deepEqual(listDeploys(path.join(deployRoot, "srv")), []);
+  assert.equal(resolveServeEntry(getServer("codebase-index"), { deployRoot }).deploy, null);
+});
+
+test("V-A: doctor's [deploy] verdict names the running copy and a deploy waiting for --restart", () => {
+  const cur = { dir: "D/b-2", sha: "b", n: 2 };
+  assert.deepEqual(deployCheck(cur, { dir: "D/b-2", sha: "b", pid: 9 }), ["pass", "pid 9 runs b from D/b-2"]);
+  assert.match(deployCheck(cur, { dir: "D/a-1", sha: "a", pid: 9 })[1], /deploy b-2 is waiting for --restart/);
+  assert.match(deployCheck(null, { dir: null, pid: 9 })[1], /working tree's dist/);
+  assert.equal(deployCheck(cur, null)[0], "warn");
 });

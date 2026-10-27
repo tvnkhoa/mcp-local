@@ -331,10 +331,19 @@ node scripts/install-mcp.mjs --server codebase-index --transport stdio  # back t
   (`PREVIEW_OWNED_BY_ANOTHER_SESSION`; MCP-ISSUE-108, below). A client leaving does not stop a watcher or the
   process.
 - **Dev cycle changes:** after `npm run build`, `/mcp` reconnects to the *running* process; it does not
-  restart it. Run `node scripts/serve-http.mjs --server <key> --restart` to load a new build: it kills the
-  tree that owns the port, `schtasks /Run`s the task, waits for a new listener and prints `old -> new` pid
-  (`schtasks /End` does not stop the supervisor).
-  `mcp:doctor`'s `[running]` check reports a served process older than `dist/`.
+  restart it. Run `node scripts/serve-http.mjs --server <key> --restart` to load a new build: it deploys
+  (below), kills the tree that owns the port, `schtasks /Run`s the task, waits for a new listener and prints
+  `old -> new` pid (`schtasks /End` does not stop the supervisor).
+- **The served process runs from a deploy copy, not the working tree** (V-A). `--restart` (or
+  `--deploy-only`, which leaves the running process alone) copies the server's `dist/` and `package.json`
+  and the `dist/` of every `@mcp/*` package it reaches to `~/.claude/mcp/deploy/<key>/<sha>-<n>/`;
+  third-party `node_modules` entries are junctions to the tree's, `@mcp/*` point at the copies. The
+  supervisor serves the deploy named in `current.json` and records what it spawned in `running.json`; with no
+  deploy yet it serves the tree and says so. So an `npm run build` in the shared tree changes nothing live
+  until the next `--restart`. The newest two deploys are kept, plus the running one; older ones are removed
+  link by link (a junction is unlinked, never walked). `mcp:doctor`'s `[deploy]` check names the running
+  copy and its sha, and warns when a newer deploy waits for `--restart` or the process serves the tree;
+  `[running]` still reports a process started from the tree's `dist/` that is older than it.
 
 #### After the served process restarts
 
