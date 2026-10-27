@@ -499,6 +499,9 @@ test("MCP-ISSUE-101: a dirty run handed its paths takes the re-read ones out of 
  * A second PROCESS on the same DB and state dir runs a real full index through its own gate's `serialize`
  * (as index_repository and the watcher do). It prints `midrun` from the pipeline's first progress tick, when
  * the first batch is committed and nothing is resolved yet, and `done` when the run ends.
+ *
+ * With `GO_FILE` set it holds the run right after `midrun` until that file exists (or 60 s pass), so a test can
+ * query "while the run is in progress" without racing a fast run on a loaded machine.
  */
 const CHILD = `
 import { GraphStore } from ${JSON.stringify(pathToFileURL(path.resolve("src/repositories/graphStore.ts")).href)};
@@ -513,20 +516,31 @@ const gate = createFreshnessGate({ enabled: true, budgetMs: 0, lockDir, getRepoP
 let told = false;
 let ticks = 0;
 const killAfter = Number(process.argv[7] ?? 1);
+const goFile = process.env.GO_FILE;
+const holdUntilGo = () => {
+  const nap = new Int32Array(new SharedArrayBuffer(4));
+  for (const until = Date.now() + 60_000; Date.now() < until && !fs.existsSync(goFile); ) Atomics.wait(nap, 0, 0, 20);
+};
 await gate.serialize("r", () => runIndexPipeline(store, {
   repoId: "r", repoPath, mode: runMode, maxFiles: 5000, batchSize: 10, subtxSize: 5, parseWorkers: 0,
   ...(only && { onlyRelativePaths: new Set(only) }),
-  onProgress: () => { ticks += 1; if (!told && ticks >= killAfter) { told = true; process.stdout.write("midrun\\n"); } }
+  onProgress: () => { ticks += 1; if (!told && ticks >= killAfter) { told = true; process.stdout.write("midrun\\n"); if (goFile) holdUntilGo(); } }
 }), runMode, only);
 store.close();
 process.stdout.write("done\\n");
 `;
 
-function startChild(lockDir: string, repoDir: string, extra: string[] = []): { child: ChildProcess; lines: string[]; waitFor: (line: string) => Promise<void> } {
+function startChild(
+  lockDir: string,
+  repoDir: string,
+  extra: string[] = [],
+  goFile?: string
+): { child: ChildProcess; lines: string[]; waitFor: (line: string) => Promise<void> } {
   const script = path.join(lockDir, "child.mts");
   fs.writeFileSync(script, CHILD);
   const child = spawn(process.execPath, ["--import", "tsx", script, path.join(lockDir, "x.db"), lockDir, repoDir.replace(/\\/g, "/"), ...extra], {
-    stdio: ["ignore", "pipe", "pipe"]
+    stdio: ["ignore", "pipe", "pipe"],
+    ...(goFile === undefined ? {} : { env: { ...process.env, GO_FILE: goFile } })
   });
   const lines: string[] = [];
   const waiters: Array<{ line: string; resolve: () => void }> = [];
@@ -561,10 +575,13 @@ test("MCP-ISSUE-101 part 5: a query from another process while a full index runs
   const repo = bigRepo();
   try {
     assert.deepEqual(await h.gate.ensureFresh("r"), { state: "fresh" }, "clean tree at HEAD, nothing running");
-    const c = startChild(h.lockDir, repo);
+    // The child holds its run after `midrun` until the go file exists, so the query lands mid-run on any machine.
+    const go = path.join(h.lockDir, "go");
+    const c = startChild(h.lockDir, repo, [], go);
     await c.waitFor("midrun");
     const mid = await h.gate.ensureFresh("r");
     const finished = c.lines.includes("done");
+    fs.writeFileSync(go, "");
     assert.ok(!finished, "the child's run is still going when the query is answered");
     assert.equal(mid.state, "refreshing", JSON.stringify(mid));
     assert.match(mid.reason ?? "", /index run of this repo is in progress \(pid \d+/);
