@@ -32,8 +32,8 @@ description: "Change how codebase-index-mcp decides what to re-index, and prove 
    **emitted from** the file and its symbols, then inserts the new ones. Edges in *other* files that
    point *into* this file are not touched â€” which is why step 3a exists.
 3a. **Scope** (release J, MCP-ISSUE-085 and 101; `indexPipeline.ts`, `repositories/scopedRunStore.ts`). A
-   non-full run computes K — the names of symbol rows the changed files added, removed or altered
-   (`symbolRowKeysForFiles` before vs after) — plus path keys for a file that appeared, vanished or
+   non-full run computes K â€” the names of symbol rows the changed files added, removed or altered
+   (`symbolRowKeysForFiles` before vs after) â€” plus path keys for a file that appeared, vanished or
    moved, and re-extracts every file whose resolution can depend on them (`findNameDependentFiles`).
    A row that merely shifted is **not** in K: `pairShiftedSymbols` pairs old and new rows by logical key,
    and `remapSymbolIds` re-points the old ids in every row outside the written files, inside the write's
