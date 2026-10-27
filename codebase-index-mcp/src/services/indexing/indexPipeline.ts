@@ -48,7 +48,7 @@ import { ExtractionWorkerPool } from "../extractors/extractionWorkerPool.js";
 import { extractDotnetProjectData } from "../extractors/dotnetProjectParser.js";
 import { createIndexProgress, indexLog, indexWarn, type IndexProgress } from "./indexProgress.js";
 import { resolveIndexRunLimits } from "./runLimits.js";
-import { scanRepoFiles, toPosixRelative } from "./fileScan.js";
+import { existsWithExactCase, scanRepoFiles, toPosixRelative } from "./fileScan.js";
 import {
   assessRunHealth,
   buildRunSummary,
@@ -301,7 +301,8 @@ export async function runIndexPipeline(store: GraphStore, input: RunIndexInput):
 
   if (scoped && input.onlyRelativePaths) {
     for (const rel of input.onlyRelativePaths) {
-      if (store.getFileHash(input.repoId, rel) !== null && !existsSync(path.join(input.repoPath, rel))) deletedInTree.push(rel);
+      // Exact spelling: after a case-only rename the old name still "exists" on Windows and macOS.
+      if (store.getFileHash(input.repoId, rel) !== null && !existsWithExactCase(input.repoPath, rel)) deletedInTree.push(rel);
     }
     if (deletedInTree.length > 0) {
       captureBefore(deletedInTree);

@@ -663,3 +663,17 @@ test("G2: an incremental run on a subdirectory repo after a commit is git-scoped
   );
   assert.match(scope, /git-scoped from [0-9a-f]{12}: 1 path\(s\) \(1 from the diff, 0 indexed dirty since\)/, scope);
 });
+
+// G1 review: a case-only rename. On a case-insensitive filesystem the old spelling still "exists", so a scoped run
+// re-read it under the old name and never pruned it; a full run lists the real name and prunes.
+test("G1 review: a committed case-only rename is git-scoped and lands as a full run does", async () => {
+  const scope = await assertIncrementalAfterMoveEqualsFull("case-rename", (root) => {
+    git(root, "mv", "src/caller.ts", "src/Caller.ts");
+    commitAll(root, "case");
+  });
+  assert.match(scope, /git-scoped from [0-9a-f]{12}: 2 path\(s\)/, scope);
+});
+
+test("G1 review: a staged case-only rename lands as a full run does, dirty and incremental", async () => {
+  await assertScopedEqualsFull("case-rename-staged", G1_BASE, (root) => git(root, "mv", "src/caller.ts", "src/Caller.ts"));
+});

@@ -11,7 +11,7 @@
  * before the first extraction, not accumulated as the batches go by.
  */
 
-import { existsSync, statSync } from "node:fs";
+import { existsSync, readdirSync, statSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 
@@ -79,7 +79,7 @@ export async function scanRepoFiles(
   };
   const globbed = input.onlyRelativePaths
     ? [...input.onlyRelativePaths]
-        .filter((rel) => !isIgnoredByIndexWalk(rel))
+        .filter((rel) => !isIgnoredByIndexWalk(rel) && existsWithExactCase(input.repoPath, rel))
         .map((rel) => path.join(input.repoPath, rel))
         .filter(isFile)
         .sort()
@@ -214,4 +214,25 @@ export async function scanRepoFiles(
  */
 export function toPosixRelative(repoPath: string, absolutePath: string): string {
   return path.relative(repoPath, absolutePath).replace(/\\/g, "/");
+}
+
+/**
+ * Whether `rel` exists under `root` spelled exactly so, segment by segment. On a case-insensitive filesystem
+ * (Windows, macOS) `existsSync("src/caller.ts")` is true after `git mv src/caller.ts src/Caller.ts`, so a scoped
+ * run (dirty, or git-scoped incremental: MCP-ISSUE-106) re-read the old spelling and never pruned it, where the walk,
+ * which lists the real names, does. One `readdir` per segment, for the scoped run's few paths only.
+ */
+export function existsWithExactCase(root: string, rel: string): boolean {
+  if (!existsSync(path.join(root, rel))) return false;
+  let dir = root;
+  for (const segment of rel.split("/")) {
+    if (!segment) continue;
+    try {
+      if (!readdirSync(dir).includes(segment)) return false;
+    } catch {
+      return false;
+    }
+    dir = path.join(dir, segment);
+  }
+  return true;
 }
