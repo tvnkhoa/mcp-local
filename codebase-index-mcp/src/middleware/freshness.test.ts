@@ -5,9 +5,12 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn, type ChildProcess } from "node:child_process";
+import { pathToFileURL } from "node:url";
 
-import { applyFreshness, computeTreeKey, createFreshnessGate, pathsChangedSince, readDirtyLedger, recordDirtyLedger, tryAcquireLock, UNREADABLE, watcherRunPlan, type RepoTreeState, type TreeKey } from "./freshness.js";
+import Database from "better-sqlite3";
+
+import { applyFreshness, computeTreeKey, createFreshnessGate, liveRunMarkers, pathsChangedSince, readDirtyLedger, recordDirtyLedger, tryAcquireLock, UNREADABLE, watcherRunPlan, type RepoTreeState, type TreeKey } from "./freshness.js";
 import { GraphStore } from "../repositories/graphStore.js";
 import { createIndexRunner } from "../services/indexing/indexRunner.js";
 import { readWorkingTreeState } from "../services/git/gitHelpers.js";
@@ -466,4 +469,190 @@ test("MCP-ISSUE-101: a dirty run handed its paths takes the re-read ones out of 
     recordDirtyLedger(dir, "r", "dirty", { head: "h1", dirty: ["c.ts"] }, ["c.ts"]);
     assert.deepEqual(readDirtyLedger(dir, "r")?.paths, ["a.ts", "c.ts"], "a path the run did not re-read stays");
   } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+// ── MCP-ISSUE-101 part 5: no "fresh" while any process is running an index of the repo ────────────────────
+
+/**
+ * A second PROCESS on the same DB and state dir runs a real full index through its own gate's `serialize`
+ * (as index_repository and the watcher do). It prints `midrun` from the pipeline's first progress tick, when
+ * the first batch is committed and nothing is resolved yet, and `done` when the run ends.
+ */
+const CHILD = `
+import { GraphStore } from ${JSON.stringify(pathToFileURL(path.resolve("src/repositories/graphStore.ts")).href)};
+import { createFreshnessGate } from ${JSON.stringify(pathToFileURL(path.resolve("src/middleware/freshness.ts")).href)};
+import { runIndexPipeline } from ${JSON.stringify(pathToFileURL(path.resolve("src/services/indexing/indexPipeline.ts")).href)};
+const [dbPath, lockDir, repoPath] = process.argv.slice(2);
+const store = new GraphStore(dbPath);
+store.ensureRepository("r", repoPath);
+const gate = createFreshnessGate({ enabled: true, budgetMs: 0, lockDir, getRepoPath: () => repoPath, getIndexedCommit: () => null, readTree: () => ({ head: null, dirty: [] }), run: async () => { throw new Error("unused"); } });
+let told = false;
+await gate.serialize("r", () => runIndexPipeline(store, {
+  repoId: "r", repoPath, mode: "full", maxFiles: 5000, batchSize: 10, subtxSize: 5, parseWorkers: 0,
+  onProgress: () => { if (!told) { told = true; process.stdout.write("midrun\\n"); } }
+}));
+store.close();
+process.stdout.write("done\\n");
+`;
+
+function startChild(lockDir: string, repoDir: string): { child: ChildProcess; lines: string[]; waitFor: (line: string) => Promise<void> } {
+  const script = path.join(lockDir, "child.mts");
+  fs.writeFileSync(script, CHILD);
+  const child = spawn(process.execPath, ["--import", "tsx", script, path.join(lockDir, "x.db"), lockDir, repoDir.replace(/\\/g, "/")], {
+    stdio: ["ignore", "pipe", "pipe"]
+  });
+  const lines: string[] = [];
+  const waiters: Array<{ line: string; resolve: () => void }> = [];
+  child.stdout!.on("data", (b: Buffer) => {
+    for (const l of b.toString().split(/\r?\n/).filter(Boolean)) {
+      lines.push(l);
+      for (const w of waiters.filter((x) => x.line === l)) w.resolve();
+    }
+  });
+  const waitFor = (line: string): Promise<void> =>
+    lines.includes(line)
+      ? Promise.resolve()
+      : new Promise((resolve, reject) => {
+          waiters.push({ line, resolve });
+          child.once("exit", (code) => (lines.includes(line) ? resolve() : reject(new Error(`child exited ${String(code)} before "${line}"`))));
+        });
+  return { child, lines, waitFor };
+}
+
+function bigRepo(): string {
+  const dir = mkdtempSync(path.join(tmpdir(), "cim-fresh-repo-"));
+  fs.mkdirSync(path.join(dir, "src"));
+  fs.writeFileSync(path.join(dir, "src/util.ts"), "export function helper(): number {\n  return 1;\n}\n");
+  for (let i = 0; i < 400; i++) {
+    fs.writeFileSync(path.join(dir, `src/c${String(i)}.ts`), `import { helper } from "./util";\n\nexport function main${String(i)}(): number {\n  return helper();\n}\n`);
+  }
+  return dir;
+}
+
+test("MCP-ISSUE-101 part 5: a query from another process while a full index runs answers refreshing, then fresh", async () => {
+  const h = harness({ budgetMs: 1000, autoFinish: true });
+  const repo = bigRepo();
+  try {
+    assert.deepEqual(await h.gate.ensureFresh("r"), { state: "fresh" }, "clean tree at HEAD, nothing running");
+    const c = startChild(h.lockDir, repo);
+    await c.waitFor("midrun");
+    const mid = await h.gate.ensureFresh("r");
+    const finished = c.lines.includes("done");
+    assert.ok(!finished, "the child's run is still going when the query is answered");
+    assert.equal(mid.state, "refreshing", JSON.stringify(mid));
+    assert.match(mid.reason ?? "", /index run of this repo is in progress \(pid \d+/);
+    assert.match(mid.reason ?? "", /partly re-written index/);
+    assert.equal(h.runs.length, 0, "the gate does not start a run of its own over the other process's");
+    await c.waitFor("done");
+    await new Promise((resolve) => c.child.once("exit", resolve));
+    assert.deepEqual(await h.gate.ensureFresh("r"), { state: "fresh" }, "the marker is gone with the run");
+  } finally {
+    h.cleanup();
+    rmSync(repo, { recursive: true, force: true });
+  }
+});
+
+test("MCP-ISSUE-101 part 5: a marker left by a killed process is not a run in progress", async () => {
+  const h = harness({ budgetMs: 1000, autoFinish: true });
+  const repo = bigRepo();
+  try {
+    const c = startChild(h.lockDir, repo);
+    await c.waitFor("midrun");
+    c.child.kill("SIGKILL");
+    await new Promise((resolve) => c.child.once("exit", resolve));
+    assert.ok(fs.readdirSync(h.lockDir).some((n) => n.startsWith("running-r-")), "the killed run left its marker");
+    assert.deepEqual(await h.gate.ensureFresh("r"), { state: "fresh" });
+    assert.ok(!fs.readdirSync(h.lockDir).some((n) => n.startsWith("running-r-")), "the dead pid's marker is removed");
+  } finally {
+    h.cleanup();
+    rmSync(repo, { recursive: true, force: true });
+  }
+});
+
+test("MCP-ISSUE-101 part 5: a marker older than staleRunMs is ignored even if its pid is alive (pid reuse)", async () => {
+  const lockDir = mkdtempSync(path.join(tmpdir(), "cim-fresh-"));
+  try {
+    fs.writeFileSync(path.join(lockDir, "running-r-1-1.json"), JSON.stringify({ pid: process.pid, at: 1_000 }));
+    assert.deepEqual(liveRunMarkers(lockDir, "r", 60_000, 2_000), [{ pid: process.pid, at: 1_000 }]);
+    assert.deepEqual(liveRunMarkers(lockDir, "r", 60_000, 100_000), []);
+    assert.deepEqual(fs.readdirSync(lockDir), []);
+  } finally {
+    rmSync(lockDir, { recursive: true, force: true });
+  }
+});
+
+test("MCP-ISSUE-101 part 5: a run in this process (index_repository through serialize) is in progress for its queries too", async () => {
+  const h = harness({ budgetMs: 1000, autoFinish: true });
+  try {
+    let release!: () => void;
+    const run = h.gate.serialize("r", () => new Promise<void>((resolve) => (release = resolve)));
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal((await h.gate.ensureFresh("r")).state, "refreshing");
+    release();
+    await run;
+    assert.deepEqual(await h.gate.ensureFresh("r"), { state: "fresh" });
+  } finally {
+    h.cleanup();
+  }
+});
+
+test("MCP-ISSUE-101 part 5: an index last fully built by another INDEX_VERSION answers refreshing with the reason", async () => {
+  let version: string | null = "v14-release-m";
+  const lockDir = mkdtempSync(path.join(tmpdir(), "cim-fresh-"));
+  let tree: RepoTreeState = { head: "aaa111", dirty: [] };
+  let indexed = "aaa111";
+  const gate = createFreshnessGate({
+    enabled: true,
+    budgetMs: 1000,
+    lockDir,
+    getRepoPath: () => lockDir,
+    getIndexedCommit: () => indexed,
+    readTree: () => tree,
+    getFullRunVersion: () => version,
+    buildVersion: "v15-tiebreak-path",
+    run: async () => {
+      indexed = tree.head!;
+      return { runId: "run-1" } as IndexRunResult;
+    }
+  });
+  try {
+    const clean = await gate.ensureFresh("r");
+    assert.equal(clean.state, "refreshing");
+    assert.match(clean.reason ?? "", /last fully built by v14-release-m; this server runs v15-tiebreak-path/);
+    assert.match(clean.reason ?? "", /mode "full"/);
+    // A scoped refresh does not make the index current: still flagged after it.
+    tree = { head: "bbb222", dirty: [] };
+    const after = await gate.ensureFresh("r");
+    assert.equal(after.state, "refreshing", JSON.stringify(after));
+    assert.equal(after.runId, "run-1");
+    // A full run at this build's version clears it.
+    version = "v15-tiebreak-path";
+    assert.deepEqual(await gate.ensureFresh("r"), { state: "fresh" });
+    // No full run on record (a new repo mid first run): nothing to compare.
+    version = null;
+    assert.deepEqual(await gate.ensureFresh("r"), { state: "fresh" });
+  } finally {
+    rmSync(lockDir, { recursive: true, force: true });
+  }
+});
+
+test("MCP-ISSUE-101 part 5: getLatestFullRunVersion reads the latest ok FULL run, not a later scoped one", () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "cim-fresh-db-"));
+  const store = new GraphStore(path.join(dir, "x.db"));
+  try {
+    const db = new Database(path.join(dir, "x.db"));
+    const insert = db.prepare(
+      `insert into index_runs (run_id, repo_id, mode, status, started_at, finished_at, files_scanned, files_indexed, files_skipped,
+         symbols_upserted, edges_upserted, parse_failures, elapsed_ms, index_version) values (?, 'r', ?, ?, ?, ?, 0, 0, 0, 0, 0, 0, 0, ?)`
+    );
+    insert.run("a", "full", "ok", "2026-10-27T01:00:00Z", "2026-10-27T01:01:00Z", "v14-release-m");
+    insert.run("b", "full", "failed", "2026-10-27T02:00:00Z", "2026-10-27T02:01:00Z", "v15-tiebreak-path");
+    insert.run("c", "dirty", "ok", "2026-10-27T03:00:00Z", "2026-10-27T03:01:00Z", "v15-tiebreak-path");
+    db.close();
+    assert.equal(store.getLatestFullRunVersion("r"), "v14-release-m");
+    assert.equal(store.getLatestFullRunVersion("other"), null);
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

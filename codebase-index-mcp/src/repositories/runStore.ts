@@ -288,6 +288,20 @@ export function getLatestRunTreeKey(db: Database.Database, repoId: string): stri
   return row?.treeKey ?? null;
 }
 
+/**
+ * MCP-ISSUE-101 part 5: the `index_version` of the repo's latest successful FULL run, or null. A scoped run records
+ * the build's version too but re-resolves only what it touched, so only a full run says which rules built the index.
+ */
+export function getLatestFullRunVersion(db: Database.Database, repoId: string): string | null {
+  const row = db
+    .prepare(
+      `select index_version as v from index_runs where repo_id = ? and mode = 'full' and status = 'ok' and index_version is not null
+       order by finished_at desc, started_at desc, rowid desc limit 1`
+    )
+    .get(repoId) as { v: string } | undefined;
+  return row?.v ?? null;
+}
+
 export function markRunTrigger(db: Database.Database, runId: string, trigger: string): void {
   db.prepare(`update index_runs set triggered_by = ? where run_id = ?`).run(trigger, runId);
 }

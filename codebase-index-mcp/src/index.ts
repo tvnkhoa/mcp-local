@@ -25,6 +25,7 @@ import { WatchManager } from "./services/watch/watchManager.js";
 import { createIndexRunner, type IndexRunnerLimits } from "./services/indexing/indexRunner.js";
 import { RefreshWorkerClient } from "./services/indexing/refreshWorkerClient.js";
 import { newerBuildRefusal } from "./services/indexing/runPolicy.js";
+import { INDEX_VERSION } from "./services/indexing/indexPipeline.js";
 import { armWatchInactivityTimer, startAutoWatchers } from "./services/watch/watchLifecycle.js";
 import {
   allowedRootsFromEnv,
@@ -180,7 +181,10 @@ const freshnessGate = createFreshnessGate({
   recordCoveredKey: (_repoId, runId, key) => store.markRunTreeKey(runId, key),
   hashMaxBytes: MAX_FILE_SIZE_BYTES,
   markTriggered: (runId) => store.markRunTrigger(runId, "query"),
-  markPendingReindex: (repoId, paths) => store.recordPendingReindexFiles(repoId, paths, "freshness: indexed while dirty, since deleted or reverted")
+  markPendingReindex: (repoId, paths) => store.recordPendingReindexFiles(repoId, paths, "freshness: indexed while dirty, since deleted or reverted"),
+  // MCP-ISSUE-101 part 5: an index fully built by another INDEX_VERSION is not current.
+  getFullRunVersion: (repoId) => store.getLatestFullRunVersion(repoId),
+  buildVersion: INDEX_VERSION
 });
 
 /** MCP-ISSUE-101: the tree a run is about to index, keyed before it starts (a file edited mid-run then differs). */

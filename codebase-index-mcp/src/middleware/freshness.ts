@@ -88,6 +88,18 @@ export type FreshnessGateOptions = {
   checkTtlMs?: number;
   /** A lock older than this, or held by a dead pid, is broken. */
   staleLockMs?: number;
+  /**
+   * MCP-ISSUE-101 part 5: a run marker (see `serialize`) older than this counts as left by a crashed run even
+   * when its pid is alive (pid reuse). Default 6 h; a dead pid is never counted.
+   */
+  staleRunMs?: number;
+  /**
+   * MCP-ISSUE-101 part 5: the `index_version` of the repo's latest successful FULL run, and this build's. Only a
+   * full run re-resolves every file, so a scoped run after a version bump does not count. When they differ, a
+   * "fresh" or "refreshed" answer is downgraded to "refreshing" with the reason.
+   */
+  getFullRunVersion?: (repoId: string) => string | null;
+  buildVersion?: string;
   now?: () => number;
 };
 
@@ -142,6 +154,64 @@ export function tryAcquireLock(file: string, staleMs: number, now: number): bool
     }
   }
   return false;
+}
+
+/**
+ * MCP-ISSUE-101 part 5: one marker file per index run in progress, written by `serialize` in whichever process
+ * runs it (gate refresh, index_repository, watcher) and removed when the run ends. A full run commits in
+ * batches and resolves edges only after the last one, so while a marker is live another process's query
+ * reads a partly re-written index — it must not be told "fresh".
+ */
+function runMarkerPrefix(repoId: string): string {
+  return `running-${repoId.replace(/[^\w.-]/g, "_")}-`;
+}
+
+let runMarkerSeq = 0;
+
+function writeRunMarker(lockDir: string, repoId: string, at: number): string | null {
+  const file = path.join(lockDir, `${runMarkerPrefix(repoId)}${String(process.pid)}-${String(++runMarkerSeq)}.json`);
+  try {
+    fs.writeFileSync(file, JSON.stringify({ pid: process.pid, at }));
+    return file;
+  } catch {
+    return null; // unwritable state dir: the gate degrades as it does for locks
+  }
+}
+
+function removeRunMarker(file: string | null): void {
+  if (!file) return;
+  try {
+    fs.unlinkSync(file);
+  } catch {
+    // already gone
+  }
+}
+
+/** The live run markers for a repo: pid alive and younger than `staleMs`. Dead or stale ones are removed. */
+export function liveRunMarkers(lockDir: string, repoId: string, staleMs: number, now: number): Array<{ pid: number; at: number }> {
+  const prefix = runMarkerPrefix(repoId);
+  let names: string[];
+  try {
+    names = fs.readdirSync(lockDir).filter((n) => n.startsWith(prefix) && n.endsWith(".json"));
+  } catch {
+    return [];
+  }
+  const live: Array<{ pid: number; at: number }> = [];
+  for (const name of names) {
+    const file = path.join(lockDir, name);
+    let m: { pid?: number; at?: number } = {};
+    try {
+      m = JSON.parse(fs.readFileSync(file, "utf8")) as { pid?: number; at?: number };
+    } catch {
+      continue; // being written, or just removed
+    }
+    if (typeof m.pid === "number" && typeof m.at === "number" && pidAlive(m.pid) && now - m.at <= staleMs) {
+      live.push({ pid: m.pid, at: m.at });
+    } else {
+      removeRunMarker(file);
+    }
+  }
+  return live;
 }
 
 function releaseLock(file: string): void {
@@ -337,6 +407,7 @@ export function createFreshnessGate(opts: FreshnessGateOptions): FreshnessGate {
   const now = opts.now ?? Date.now;
   const checkTtlMs = opts.checkTtlMs ?? 0;
   const staleLockMs = opts.staleLockMs ?? 15 * 60_000;
+  const staleRunMs = opts.staleRunMs ?? 6 * 60 * 60_000;
   const hashMaxBytes = opts.hashMaxBytes ?? DEFAULT_HASH_MAX_BYTES;
   /** Without `getCoveredKey`: the key each repo's last completed refresh in THIS process covered. */
   const coveredKey = new Map<string, string>();
@@ -354,7 +425,16 @@ export function createFreshnessGate(opts: FreshnessGateOptions): FreshnessGate {
 
   const serialize = <T>(repoId: string, fn: () => Promise<T>): Promise<T> => {
     const prev = runChain.get(repoId) ?? Promise.resolve();
-    const next = prev.then(fn, fn);
+    // MCP-ISSUE-101 part 5: every run says it is running, for the gates of every process on this DB.
+    const marked = async (): Promise<T> => {
+      const marker = writeRunMarker(opts.lockDir, repoId, now());
+      try {
+        return await fn();
+      } finally {
+        removeRunMarker(marker);
+      }
+    };
+    const next = prev.then(marked, marked);
     runChain.set(repoId, next.catch(() => undefined));
     return next;
   };
@@ -398,12 +478,46 @@ export function createFreshnessGate(opts: FreshnessGateOptions): FreshnessGate {
     return { state: "refreshed", mode: flight.mode, elapsedMs: now() - started, runId: outcome.runId };
   };
 
+  /** MCP-ISSUE-101 part 5: an index built before this build's resolution rules is not current, whatever the tree says. */
+  const versionWarning = (repoId: string): string | null => {
+    if (!opts.getFullRunVersion || !opts.buildVersion) return null;
+    let indexed: string | null;
+    try {
+      indexed = opts.getFullRunVersion(repoId);
+    } catch {
+      return null;
+    }
+    if (!indexed || indexed === opts.buildVersion) return null;
+    return `this repo's index was last fully built by ${indexed}; this server runs ${opts.buildVersion}, which resolves edges differently. Answers can differ from a current index until index_repository runs with mode "full".`;
+  };
+
   const ensureFresh = async (repoId: string): Promise<FreshnessNote> => {
     if (!opts.enabled) return { state: "fresh" };
+    const note = await ensureFreshTree(repoId);
+    const warning = versionWarning(repoId);
+    if (!warning) return note;
+    if (note.state === "fresh" || note.state === "refreshed") return { ...note, state: "refreshing", reason: warning };
+    return { ...note, reason: `${note.reason ?? ""} Also: ${warning}`.trim() };
+  };
+
+  const ensureFreshTree = async (repoId: string): Promise<FreshnessNote> => {
     const started = now();
 
     const running = inflight.get(repoId);
     if (running) return waitBudget(repoId, running);
+
+    // MCP-ISSUE-101 part 5: a run of this repo in any process (index_repository, a watcher, another gate).
+    const markers = liveRunMarkers(opts.lockDir, repoId, staleRunMs, started);
+    if (markers.length > 0) {
+      const oldest = Math.min(...markers.map((m) => m.at));
+      return {
+        state: "refreshing",
+        elapsedMs: started - oldest,
+        reason:
+          `an index run of this repo is in progress (pid ${markers.map((m) => String(m.pid)).join(", ")}, for ${String(Math.round((started - oldest) / 1000))} s); ` +
+          "until it ends, this answer comes from a partly re-written index — files it has re-extracted lack their resolved edges until its resolve phase."
+      };
+    }
 
     const cached = lastCheck.get(repoId);
     if (cached && started - cached.at < (cached.note.state === "fresh" ? checkTtlMs : Math.max(checkTtlMs, 1_000))) return cached.note;

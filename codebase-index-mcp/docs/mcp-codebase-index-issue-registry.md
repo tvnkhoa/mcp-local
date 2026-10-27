@@ -4298,6 +4298,27 @@ this afternoon failed at that harness, which is the highest rate observed so far
   and the dirty tree (`middleware/freshness.ts`, `ensureFresh`), never `INDEX_VERSION`. Only the gate's own
   refreshes take the lock (`freshness.ts:447`); an explicit `index_repository` takes none. Another process's
   query on a clean tree is therefore answered `fresh` from the partial index.
+- **Part 5 (C2e, owner-approved 2026-10-27): no `fresh` while a run is in progress or the index predates this
+  build.**
+  - `serialize`, which wraps every run (gate refresh, `index_repository`, watcher), writes a marker
+    `running-<repo>-<pid>-<n>.json` to the state dir and removes it when the run ends.
+  - Every process's gate checks the markers before anything else. While one is live (pid alive and younger
+    than `staleRunMs`, 6 h by default) it answers `refreshing` and says that the index is partly re-written.
+    A dead pid's or an expired marker is removed and ignored.
+  - The gate also downgrades `fresh` / `refreshed` to `refreshing` when the latest successful FULL run's
+    `index_version` (`getLatestFullRunVersion`) differs from this build's. A scoped run records the new
+    version but re-resolves only what it touched, so it does not count.
+  - **Guarded:** `freshness.test.ts`.
+    - A second process runs a real full index; the query between its first batch and its end answers
+      `refreshing`, then `fresh`. It FAILS without the marker check.
+    - A killed holder's marker is ignored and removed.
+    - A marker past `staleRunMs` with a live pid is ignored.
+    - A run in this process counts too.
+    - Version mismatch: `refreshing` before a full run at this version, through a scoped refresh, and `fresh`
+      after. It FAILS without the check.
+    - The reader skips failed and scoped runs.
+  - **Not covered:** a run in a process that does not go through `serialize` (scripts, or another tool driving
+    `runIndexPipeline` directly) writes no marker.
 
 ## MCP-ISSUE-102 — a linked git worktree beside its main checkout could not be indexed
 
