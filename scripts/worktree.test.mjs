@@ -15,7 +15,7 @@ import path from "node:path";
 import test from "node:test";
 
 import { isLink, removeTree } from "./lib/junctions.mjs";
-import { addWorktree, listWorktrees, mainRoot, nodeModulesDirs, removeWorktree, validName, worktreePath } from "./worktree.mjs";
+import { addWorktree, findLinks, listWorktrees, mainRoot, nodeModulesDirs, removeWorktree, validName, worktreePath } from "./worktree.mjs";
 
 const TMP = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "worktree-test-")));
 test.after(() => removeTree(TMP)); // it holds junctions: unlink them, never walk them
@@ -109,4 +109,41 @@ test("--force removes a dirty worktree and still never deletes through a junctio
   removeWorktree("c", { cwd: root, force: true });
   assert.ok(!fs.existsSync(wt));
   assertMainIntact(root);
+});
+
+test("a node_modules only the worktree has is unlinked too, and its target survives", () => {
+  const root = fakeRepo("repo-wtonly");
+  const wt = addWorktree("d", { cwd: root }).path;
+  fs.mkdirSync(path.join(wt, "extra", "node_modules"), { recursive: true });
+  fs.writeFileSync(path.join(wt, "extra", "package.json"), "{}\n");
+  fs.symlinkSync(path.join(root, "node_modules", "rootdep"), path.join(wt, "extra", "node_modules", "rootdep"), "junction");
+  const r = removeWorktree("d", { cwd: root, force: true });
+  assert.ok(r.unlinked.includes("extra"));
+  assert.ok(!fs.existsSync(wt));
+  assertMainIntact(root);
+});
+
+test("any other link left in the worktree makes remove refuse before git runs; main is untouched", () => {
+  const root = fakeRepo("repo-stray-link");
+  const wt = addWorktree("e", { cwd: root }).path;
+  const link = path.join(wt, "srv", "handmade");
+  fs.symlinkSync(path.join(root, "srv", "node_modules"), link, "junction");
+  assert.deepEqual(findLinks(wt).filter((p) => !p.includes("node_modules")), [link]);
+  assert.throws(() => removeWorktree("e", { cwd: root, force: true }), (e) => /still holds links/.test(e.message) && e.message.includes(link));
+  assert.ok(fs.existsSync(wt), "git was never asked to remove it");
+  assertMainIntact(root);
+  fs.unlinkSync(link);
+  removeWorktree("e", { cwd: root, force: true });
+  assert.ok(!fs.existsSync(wt));
+  assertMainIntact(root);
+});
+
+test("a sibling dir that is not a registered worktree is refused and its node_modules left alone", () => {
+  const root = fakeRepo("repo-sibling");
+  const stray = worktreePath(root, "f");
+  fs.mkdirSync(path.join(stray, "node_modules", "real"), { recursive: true });
+  fs.writeFileSync(path.join(stray, "package.json"), "{}\n");
+  fs.writeFileSync(path.join(stray, "node_modules", "real", "index.js"), "keep\n");
+  assert.throws(() => removeWorktree("f", { cwd: root, force: true }), /not a registered worktree/);
+  assert.equal(fs.readFileSync(path.join(stray, "node_modules", "real", "index.js"), "utf-8"), "keep\n");
 });

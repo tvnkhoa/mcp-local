@@ -15,6 +15,8 @@
  *
  * `remove` unlinks those junctions one by one (scripts/lib/junctions.mjs `removeTree`, which never walks
  * a link) before `git worktree remove`, so nothing in the main tree is reachable while anything deletes.
+ * Git deletes THROUGH a junction it meets, so any link left anywhere in the worktree (an lstat walk) makes
+ * remove refuse, as does a path that is not a registered worktree of this repo.
  * It refuses a worktree with uncommitted or untracked changes unless --force. The branch is kept: it may
  * hold commits not merged yet.
  */
@@ -127,15 +129,46 @@ export function addWorktree(name, { cwd = process.cwd(), base = "HEAD", dirs } =
   }
 }
 
+/**
+ * Every symlink or junction under `root`, found by an lstat walk that never follows one and skips
+ * `.git`. `git worktree remove` deletes THROUGH a junction (Git 2.50 for Windows, with or without
+ * --force), so remove refuses while this is non-empty.
+ */
+export function findLinks(root) {
+  const links = [];
+  const walk = (dir) => {
+    for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+      const p = path.join(dir, e.name);
+      if (dir === root && e.name === ".git") continue;
+      if (isLink(p)) links.push(p);
+      else if (e.isDirectory()) walk(p);
+    }
+  };
+  walk(root);
+  return links;
+}
+
+const samePath = (a, b) => (process.platform === "win32" ? path.resolve(a).toLowerCase() === path.resolve(b).toLowerCase() : path.resolve(a) === path.resolve(b));
+
 export function removeWorktree(name, { cwd = process.cwd(), force = false, dirs } = {}) {
   if (!validName(name)) throw new Error(`bad worktree name ${JSON.stringify(name)}`);
   const main = mainRoot(cwd);
   const wt = worktreePath(main, name);
   if (!fs.existsSync(wt)) throw new Error(`no worktree at ${wt}`);
+  // Before touching anything: a stray sibling dir of the same name is not ours, and neither is its node_modules.
+  if (!listWorktrees({ cwd: main }).some((w) => !samePath(w.path, main) && samePath(w.path, wt))) {
+    throw new Error(`${wt} is not a registered worktree of ${main} — refusing to touch it`);
+  }
   if (path.resolve(cwd).toLowerCase().startsWith(wt.toLowerCase())) throw new Error(`run remove from outside ${wt}`);
   const dirty = git(wt, ["status", "--porcelain"]);
   if (dirty && !force) throw new Error(`${wt} has uncommitted changes — commit or stash them, or pass --force:\n${dirty}`);
-  const unlinked = unlinkNodeModules(wt, dirs ?? nodeModulesDirs(main));
+  // Main's dirs and the worktree's own: a node_modules may exist only on the worktree's branch.
+  const all = [...new Set([...(dirs ?? nodeModulesDirs(main)), ...nodeModulesDirs(wt)])];
+  const unlinked = unlinkNodeModules(wt, all);
+  const left = findLinks(wt);
+  if (left.length) {
+    throw new Error(`${wt} still holds links that git worktree remove would delete through — unlink each (never rm -r), then retry:\n${left.join("\n")}`);
+  }
   git(main, ["worktree", "remove", ...(force ? ["--force"] : []), wt]);
   return { path: wt, unlinked };
 }
