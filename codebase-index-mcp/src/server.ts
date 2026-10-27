@@ -166,7 +166,8 @@ export function createCodebaseIndexServer(options: CodebaseIndexServerOptions): 
       startedAt: Date.now(),
       args,
       ...(context.progressToken === undefined ? {} : { progressNotifier: context.reportProgress }),
-      ...(context.clientSessionId === undefined ? {} : { clientSessionId: context.clientSessionId })
+      ...(context.clientSessionId === undefined ? {} : { clientSessionId: context.clientSessionId }),
+      ...(context.clientIdentity === undefined ? {} : { clientIdentity: context.clientIdentity })
     };
 
     return toolContextStorage.run(requestContext, async () => {

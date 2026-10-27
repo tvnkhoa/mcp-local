@@ -24,6 +24,7 @@
 
 import { execFile } from "node:child_process";
 import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
+import { readFile } from "node:fs/promises";
 import http from "node:http";
 import type { AddressInfo } from "node:net";
 
@@ -74,6 +75,12 @@ export interface HttpTransportOptions {
    * its session. Risk, accepted: a pid reused within a session's life keeps it until idle or eviction.
    */
   readonly resolveClientPid?: (remotePort: number, serverPort: number) => Promise<number | null>;
+  /**
+   * MCP-ISSUE-108: when a live process started, as an opaque string, or null when it cannot be read. Paired with
+   * the client pid it names the client process across a server restart (a reused pid has another start time).
+   * Default: {@link resolveProcessStartTime}.
+   */
+  readonly resolveProcessStartTime?: (pid: number) => Promise<string | null>;
   readonly maxBodyBytes?: number;
   /**
    * MCP-ISSUE-103: where to keep `session id → sha256(bearer)` across restarts (see `httpSessionStore.ts`). Set, a
@@ -86,6 +93,11 @@ export interface HttpTransportOptions {
 export interface HttpTransportHandle {
   port(): number;
   sessionCount(): number;
+  /**
+   * MCP-ISSUE-108: the stable identity of the client process behind a session — pid, its start time and the
+   * bearer — or undefined when any part cannot be resolved (the caller then falls back to the session id).
+   */
+  clientIdentity(sessionId: string): Promise<string | undefined>;
   close(): Promise<void>;
 }
 
@@ -95,6 +107,8 @@ interface Session {
   lastSeen: number;
   /** Owner of the client socket at initialize; null while unresolved or when unknown. */
   clientPid: number | null;
+  /** MCP-ISSUE-108: see {@link HttpTransportHandle.clientIdentity}; null when unresolvable. */
+  readonly identity: Promise<string | null>;
   /** MCP-ISSUE-103: when this session's store record was last refreshed (throttled, see `STORE_TOUCH_EVERY_MS`). */
   storeTouchedAt?: number;
 }
@@ -123,6 +137,50 @@ function resolveClientPidViaNetstat(remotePort: number, serverPort: number): Pro
       resolve(error === null ? parseNetstatClientPid(stdout, remotePort, serverPort) : null);
     });
   });
+}
+
+/**
+ * MCP-ISSUE-108: a process's start time, as an opaque string; null when unknown. win32 asks PowerShell for the
+ * start time in ticks (null for a process it may not inspect), Linux reads the start field of /proc/<pid>/stat,
+ * anything else is null. Never throws.
+ */
+export function resolveProcessStartTime(pid: number): Promise<string | null> {
+  if (!Number.isInteger(pid) || pid <= 0) return Promise.resolve(null);
+  if (process.platform === "linux") {
+    return readFile(`/proc/${String(pid)}/stat`, "utf8").then(
+      // Field 22, counted after the parenthesised command name (which may itself hold spaces).
+      (stat) => stat.slice(stat.lastIndexOf(")") + 2).split(" ")[19] ?? null,
+      () => null
+    );
+  }
+  if (process.platform !== "win32") return Promise.resolve(null);
+  return new Promise((resolve) => {
+    execFile(
+      "powershell.exe",
+      ["-NoProfile", "-NonInteractive", "-Command", `(Get-Process -Id ${String(pid)} -ErrorAction Stop).StartTime.ToUniversalTime().Ticks`],
+      { windowsHide: true, timeout: 15_000 },
+      (error, stdout) => {
+        const ticks = stdout.trim();
+        resolve(error === null && /^\d+$/.test(ticks) ? ticks : null);
+      }
+    );
+  });
+}
+
+/**
+ * MCP-ISSUE-108: the owner key of a client process — pid, start time and (over HTTP) a prefix of the bearer's
+ * sha256 — or null when the pid or its start time is unknown. Null is fail-closed: the caller keys on the
+ * session id instead, which does not survive a restart.
+ */
+export async function clientIdentityOf(
+  pid: number | null,
+  bearerDigestHex: string | null,
+  startTimeOf: (pid: number) => Promise<string | null>
+): Promise<string | null> {
+  if (pid === null) return null;
+  const started = await startTimeOf(pid).catch(() => null);
+  if (started === null || started === "") return null;
+  return `pid:${String(pid)}@${started}${bearerDigestHex === null ? "" : `/${bearerDigestHex.slice(0, 16)}`}`;
 }
 
 /** Signal 0 only probes: ESRCH means gone, EPERM means alive but not ours. */
@@ -193,6 +251,7 @@ export async function startHttpTransport(
   const maxBodyBytes = options.maxBodyBytes ?? DEFAULT_MAX_BODY_BYTES;
   const evictMinIdleMs = options.evictMinIdleMs ?? DEFAULT_EVICT_MIN_IDLE_MS;
   const resolveClientPid = options.resolveClientPid ?? resolveClientPidViaNetstat;
+  const startTimeOf = options.resolveProcessStartTime ?? resolveProcessStartTime;
   const tokenDigest = digest(options.token);
   const sessions = new Map<string, Session>();
   let boundPort = options.port;
@@ -231,10 +290,11 @@ export async function startHttpTransport(
     const remotePort = req.socket.remotePort;
     const pidLookup: Promise<number | null> =
       remotePort === undefined ? Promise.resolve(null) : resolveClientPid(remotePort, boundPort).catch(() => null);
+    const identity = pidLookup.then((pid) => clientIdentityOf(pid, bearerDigestHex(req.headers.authorization), startTimeOf));
     const transport = new StreamableHTTPServerTransport({
       sessionIdGenerator: () => randomUUID(),
       onsessioninitialized: (sessionId) => {
-        sessions.set(sessionId, { transport, server, lastSeen: Date.now(), clientPid: null, storeTouchedAt: Date.now() });
+        sessions.set(sessionId, { transport, server, lastSeen: Date.now(), clientPid: null, identity, storeTouchedAt: Date.now() });
         const bearer = bearerDigestHex(req.headers.authorization);
         if (bearer !== null) store?.set(sessionId, bearer);
         logger.info("http_session_opened", { sessionId, sessions: sessions.size });
@@ -306,7 +366,15 @@ export async function startHttpTransport(
       }
     };
     await server.connect(transport);
-    const session: Session = { transport, server, lastSeen: Date.now(), clientPid: null };
+    // MCP-ISSUE-108: the adopting request's socket names the client process, as an initialize's does.
+    const remotePort = req.socket.remotePort;
+    const pidLookup: Promise<number | null> =
+      remotePort === undefined ? Promise.resolve(null) : resolveClientPid(remotePort, boundPort).catch(() => null);
+    const identity = pidLookup.then((pid) => clientIdentityOf(pid, presented, startTimeOf));
+    const session: Session = { transport, server, lastSeen: Date.now(), clientPid: null, identity };
+    void pidLookup.then((pid) => {
+      if (sessions.get(sessionId) === session) session.clientPid = pid;
+    });
     sessions.set(sessionId, session);
     store?.touch(sessionId);
     session.storeTouchedAt = Date.now();
@@ -419,6 +487,14 @@ export async function startHttpTransport(
   return {
     port: () => boundPort,
     sessionCount: () => sessions.size,
+    async clientIdentity(sessionId) {
+      const session = sessions.get(sessionId);
+      if (session === undefined) return undefined;
+      const identity = await session.identity.catch(() => null);
+      // A client that has exited no longer owns anything; its pid may be about to be reused.
+      if (identity === null || (session.clientPid !== null && !pidAlive(session.clientPid))) return undefined;
+      return identity;
+    },
     async close() {
       clearInterval(reaper);
       for (const sessionId of [...sessions.keys()]) await closeSession(sessionId, "shutdown");

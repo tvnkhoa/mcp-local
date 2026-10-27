@@ -32,6 +32,13 @@ export interface CallContext {
    */
   readonly clientSessionId?: string;
   /**
+   * MCP-ISSUE-108: the client *process* the call came from — its pid and start time (plus, over http, the
+   * bearer) — which, unlike {@link clientSessionId}, survives a server restart: a client that silently
+   * re-initializes after one gets a new session id but keeps its identity. On stdio it names the server's
+   * parent process. Absent when it cannot be resolved; key on {@link clientSessionId} then (fail closed).
+   */
+  readonly clientIdentity?: string;
+  /**
    * Fire-and-forget progress update. A no-op when {@link progressToken} is
    * absent, and never throws — progress must not be able to fail a tool call.
    */

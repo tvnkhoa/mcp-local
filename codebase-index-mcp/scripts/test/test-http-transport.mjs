@@ -4,14 +4,17 @@
  * Spawns `dist/index.js --transport http` against a scratch repo and an isolated DB, then pins:
  *   - the gate: no token → 401, a foreign Host or Origin → 403;
  *   - two clients answered concurrently by one process (search_symbols + query_docs);
- *   - a refactor preview belongs to the session that made it: B applying A's preview is refused
- *     with PREVIEW_OWNED_BY_ANOTHER_SESSION, and A's own apply goes through;
- *   - a client closing its session leaves the process serving the other.
+ *   - a refactor preview belongs to the client process that made it (MCP-ISSUE-108): a peer process
+ *     applying A's preview is refused with PREVIEW_OWNED_BY_ANOTHER_SESSION, and A's own apply goes through;
+ *   - a client closing its session leaves the process serving the other;
+ *   - across a restart: the old session id is re-adopted (MCP-ISSUE-103), a NEW session of the same
+ *     client process still applies its pre-restart preview (MCP-ISSUE-108), a peer process and another
+ *     bearer are refused.
  *
  * Usage: npm run build && node scripts/test/test-http-transport.mjs
  */
 
-import { execFileSync, spawn } from "node:child_process";
+import { execFile, execFileSync, spawn } from "node:child_process";
 import fs from "node:fs";
 import http from "node:http";
 import net from "node:net";
@@ -81,6 +84,16 @@ async function waitForServer(port, child) {
 
 const payload = (result) => JSON.parse(result.content[0].text);
 
+/** MCP-ISSUE-108: run tool calls from a peer client in another process (_httpPeerClient.mjs); returns their results. */
+function peerCalls(port, calls, token = TOKEN) {
+  return new Promise((resolve, reject) => {
+    execFile(process.execPath, [path.join(ROOT, "scripts", "test", "_httpPeerClient.mjs")], {
+      env: { ...process.env, PEER_REQUEST: JSON.stringify({ port, token, calls }) }, timeout: 60_000
+    }, (error, stdout, stderrText) => (error ? reject(new Error(`peer failed: ${error.message}\n${stderrText}`)) : resolve(JSON.parse(stdout))));
+  });
+}
+const refusedAs = (result, code) => result.isError === true && result.content[0].text.includes(code);
+
 // ── scratch repo ─────────────────────────────────────────────────────────────
 const tmp = makeTempDir("cbi-http-");
 const repo = path.join(tmp, "repo");
@@ -141,11 +154,11 @@ try {
   }));
   check("A got a preview", typeof preview.previewId === "string" && typeof preview.approvalToken === "string", JSON.stringify(preview).slice(0, 300));
 
-  const stolen = await b.client.callTool({
+  const [stolen] = await peerCalls(port, [{
     name: "refactor_replace_apply", arguments: { previewId: preview.previewId, approvalToken: preview.approvalToken, includeLowConfidence: true }
-  });
-  check("B applying A's preview is refused", stolen.isError === true && stolen.content[0].text.includes("PREVIEW_OWNED_BY_ANOTHER_SESSION"), stolen.content[0].text.slice(0, 300));
-  check("B's refusal wrote nothing", fs.readFileSync(path.join(repo, "src", "greet.ts"), "utf8").includes("greetUser"));
+  }]);
+  check("a peer process applying A's preview is refused", refusedAs(stolen, "PREVIEW_OWNED_BY_ANOTHER_SESSION"), stolen.content[0].text.slice(0, 300));
+  check("the peer's refusal wrote nothing", fs.readFileSync(path.join(repo, "src", "greet.ts"), "utf8").includes("greetUser"));
 
   const own = await a.client.callTool({
     name: "refactor_replace_apply", arguments: { previewId: preview.previewId, approvalToken: preview.approvalToken, includeLowConfidence: true }
@@ -156,9 +169,9 @@ try {
   // ── rollbacks are per session too (FX-R1) ──────────────────────────────────
   const rollbackId = own.isError ? undefined : payload(own).rollbackId;
   check("A's apply returned a rollbackId", typeof rollbackId === "string", own.content[0].text.slice(0, 300));
-  const undoneByB = await b.client.callTool({ name: "refactor_replace_rollback", arguments: { rollbackId } });
-  check("B rolling back A's apply is refused", undoneByB.isError === true && undoneByB.content[0].text.includes("APPLY_OWNED_BY_ANOTHER_SESSION"), undoneByB.content[0].text.slice(0, 300));
-  check("B's refused rollback restored nothing", fs.readFileSync(path.join(repo, "src", "greet.ts"), "utf8").includes("welcomeUser"));
+  const [undoneByPeer] = await peerCalls(port, [{ name: "refactor_replace_rollback", arguments: { rollbackId } }]);
+  check("a peer process rolling back A's apply is refused", refusedAs(undoneByPeer, "APPLY_OWNED_BY_ANOTHER_SESSION"), undoneByPeer.content[0].text.slice(0, 300));
+  check("the peer's refused rollback restored nothing", fs.readFileSync(path.join(repo, "src", "greet.ts"), "utf8").includes("welcomeUser"));
   const undoneByA = await a.client.callTool({ name: "refactor_replace_rollback", arguments: { rollbackId } });
   check("A rolls back its own apply", !undoneByA.isError, undoneByA.content[0].text.slice(0, 300));
   check("A's rollback restored the file", fs.readFileSync(path.join(repo, "src", "greet.ts"), "utf8").includes("greetUser"));
@@ -214,6 +227,14 @@ try {
     const kept = payload(await c.client.callTool({
       name: "refactor_replace_preview", arguments: { repoId: "r4b", find: "greetUser", replaceExpression: "heyUser", mode: "text" }
     }));
+    // MCP-ISSUE-108: applied after the restart from a NEW session of this process, the way Claude Code reconnects.
+    const renewed = payload(await c.client.callTool({
+      name: "refactor_replace_preview", arguments: { repoId: "r4b", find: "greetUser", replaceExpression: "hiUser", mode: "text" }
+    }));
+    const [peerBefore] = await peerCalls(port2, [{
+      name: "refactor_replace_apply", arguments: { previewId: renewed.previewId, approvalToken: renewed.approvalToken, includeLowConfidence: true }
+    }]);
+    check("restart: before it, a peer process is refused this process's preview", refusedAs(peerBefore, "PREVIEW_OWNED_BY_ANOTHER_SESSION"), peerBefore.content[0].text.slice(0, 300));
 
     await stop(srv);
     srv = spawnServer(TOKEN);
@@ -232,6 +253,26 @@ try {
     check("restart: ... and rolls back", !rolled.isError, rolled.content[0].text.slice(0, 300));
     check("restart: the rollback restored the file", greet().includes("greetUser") && !greet().includes("helloUser"));
     await c.client.close().catch(() => undefined);
+
+    // MCP-ISSUE-108: the same process opens a NEW session (no old id sent) and still owns its pre-restart preview.
+    const fresh = await connect(port2);
+    check("restart: the new session has a new id", fresh.transport.sessionId !== sid);
+    const renewedApply = await fresh.client.callTool({
+      name: "refactor_replace_apply", arguments: { previewId: renewed.previewId, approvalToken: renewed.approvalToken, includeLowConfidence: true }
+    });
+    check("restart: a new session of the same process applies the pre-restart preview", !renewedApply.isError, renewedApply.content[0].text.slice(0, 300));
+    check("restart: that apply wrote the file", greet().includes("hiUser"));
+    const renewedRollback = renewedApply.isError
+      ? { isError: true, content: [{ text: "no apply" }] }
+      : await fresh.client.callTool({ name: "refactor_replace_rollback", arguments: { rollbackId: payload(renewedApply).rollbackId } });
+    check("restart: ... and rolls it back", !renewedRollback.isError, renewedRollback.content[0].text.slice(0, 300));
+    check("restart: that rollback restored the file", greet().includes("greetUser") && !greet().includes("hiUser"));
+    await fresh.client.close().catch(() => undefined);
+    const [peerAfter] = await peerCalls(port2, [{
+      name: "refactor_replace_apply", arguments: { previewId: kept.previewId, approvalToken: kept.approvalToken, includeLowConfidence: true }
+    }]);
+    check("restart: after it, a peer process is still refused", refusedAs(peerAfter, "PREVIEW_OWNED_BY_ANOTHER_SESSION"), peerAfter.content[0].text.slice(0, 300));
+    check("restart: the peer's refusal wrote nothing", !greet().includes("heyUser"));
 
     // The bearer rotated across the restart: the old id is not this bearer's.
     await stop(srv);

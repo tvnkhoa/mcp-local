@@ -319,8 +319,9 @@ node scripts/install-mcp.mjs --server codebase-index --transport stdio  # back t
 - The server listens only when started with `--transport http`; an HTTP port in a stdio entry's env is
   ignored. It binds 127.0.0.1, refuses a foreign `Host`/`Origin` (403) and a missing token (401).
 - Shared across clients: the store, the watchers and the refresh worker. Per client: the protocol
-  session and refactor previews — a preview made by one session is refused to another
-  (`PREVIEW_OWNED_BY_ANOTHER_SESSION`). A client leaving does not stop a watcher or the process.
+  session and refactor previews — a preview made by one client process is refused to another
+  (`PREVIEW_OWNED_BY_ANOTHER_SESSION`; MCP-ISSUE-108, below). A client leaving does not stop a watcher or the
+  process.
 - **Dev cycle changes:** after `npm run build`, `/mcp` reconnects to the *running* process; it does not
   restart it. Stop and start `serve-http` (or `schtasks /End` then `/Run` on the task) to load a new build.
   `mcp:doctor`'s `[running]` check reports a served process older than `dist/`.
@@ -330,9 +331,18 @@ node scripts/install-mcp.mjs --server codebase-index --transport stdio  # back t
 - **No `/mcp` is needed** (MCP-ISSUE-103). At initialize the transport records each session id with the
   sha256 of the bearer that opened it, in `<state dir>/http-sessions.json`. The state dir is
   `.codebase-index-state` beside the index DB. After a restart, a request carrying that id and that bearer is
-  re-adopted, and refactor previews and rollbacks made before the restart still apply. A different bearer
-  (the token rotated) gets 404 and must re-initialize; its session cannot touch the old session's previews.
-  Every client shares the one bearer, so this proves the caller holds the server's token, nothing more.
+  re-adopted. A different bearer (the token rotated) gets 404 and must re-initialize. Every client shares the
+  one bearer, so this proves the caller holds the server's token, nothing more.
+- **Previews survive because ownership is per client process** (MCP-ISSUE-108), not because the session does.
+  Claude Code does not resend its old session id after a restart; it silently initializes a new session. A
+  refactor preview or rollback is owned by the client process — its pid (resolved from the loopback socket),
+  that process's start time (so a reused pid is someone else) and the bearer — so the new session of the same
+  Claude process still applies and rolls back what it made before the restart. Another Claude session is
+  another process and is refused, before and after a restart. If the pid or its start time cannot be resolved,
+  the owner falls back to the session id, which a restart does not keep (fail closed). Resuming a conversation
+  in a new Claude process (`claude --resume` / `--continue`, or any restart of Claude) is a new pid: it cannot
+  apply the old process's previews; make new ones (previews expire after 30 min anyway). Over stdio the owner
+  is the server's parent process.
 - **The approval secret persists** (MCP-ISSUE-104). `serve-http` creates
   `~/.claude/mcp/http/codebase-index.approval-secret` on first start: 64 hex characters, owner-only
   (`icacls /inheritance:r /grant:r <user>:F` on Windows). It reuses the file and passes it as

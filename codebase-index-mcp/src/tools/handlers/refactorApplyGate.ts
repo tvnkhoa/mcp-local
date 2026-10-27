@@ -14,13 +14,17 @@ import { collectGitChangedFiles } from "../../services/git/gitHelpers.js";
 import type { HandlerContext } from "./handlerContext.js";
 
 /**
- * R4: one served process, many clients. A preview belongs to the client session that created it —
- * stamp it with {@link previewOwnerOf} when saving, check it with this before applying. A preview
- * with no owner (stdio, or written before R4) stays appliable by anyone, as it always was.
+ * R4: one served process, many clients. A preview belongs to the client that created it — stamp it
+ * with {@link previewOwnerOf} when saving, check it with this before applying. A preview with no
+ * owner (written before R4, or on stdio when the parent process is unresolvable) stays appliable by
+ * anyone, as it always was.
+ *
+ * MCP-ISSUE-108: the owner is the client *process* when it resolves, so a client that re-initializes a
+ * new session after a server restart keeps its previews; otherwise it is the session id, which a
+ * restart does not keep (fail closed). A row stamped with a session id (before 108) still matches it.
  */
 export function assertPreviewOwner(preview: RefactorPreviewRecord, ctx: HandlerContext, toolName: string): void {
-  const owner = preview.clientSession ?? null;
-  if (owner !== null && owner !== ctx.clientSessionId) {
+  if (!ownedByCaller(preview.clientSession ?? null, ctx)) {
     throw new PolicyViolationError(
       "PREVIEW_OWNED_BY_ANOTHER_SESSION",
       `${toolName}: preview '${preview.previewId}' was created by another client session; only that session may apply it. Create your own preview.`
@@ -30,8 +34,7 @@ export function assertPreviewOwner(preview: RefactorPreviewRecord, ctx: HandlerC
 
 /** The same rule for refactor_replace_rollback: only the session that applied may undo it. */
 export function assertApplyOwner(apply: RefactorApplyRecord, ctx: HandlerContext, toolName: string): void {
-  const owner = apply.clientSession ?? null;
-  if (owner !== null && owner !== ctx.clientSessionId) {
+  if (!ownedByCaller(apply.clientSession ?? null, ctx)) {
     throw new PolicyViolationError(
       "APPLY_OWNED_BY_ANOTHER_SESSION",
       `${toolName}: rollback '${apply.rollbackId}' undoes an apply made by another client session; only that session may roll it back.`
@@ -40,7 +43,11 @@ export function assertApplyOwner(apply: RefactorApplyRecord, ctx: HandlerContext
 }
 
 export function previewOwnerOf(ctx: HandlerContext): string | null {
-  return ctx.clientSessionId ?? null;
+  return ctx.clientIdentity ?? ctx.clientSessionId ?? null;
+}
+
+function ownedByCaller(owner: string | null, ctx: HandlerContext): boolean {
+  return owner === null || owner === ctx.clientIdentity || owner === ctx.clientSessionId;
 }
 
 // Serializes the read-modify-write phase of refactor applies. Two concurrent applies that touch the

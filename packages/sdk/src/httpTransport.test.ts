@@ -13,7 +13,7 @@ import { createMcpServer } from "./createServer.js";
 import type { HttpTransportOptions } from "./httpTransport.js";
 import { annotations, defineTool } from "./defineTool.js";
 import { asText } from "./responses.js";
-import { parseNetstatClientPid } from "./httpTransport.js";
+import { parseNetstatClientPid, resolveProcessStartTime } from "./httpTransport.js";
 import { EMPTY_OBJECT_SCHEMA } from "./schema.js";
 
 const TOKEN = "t".repeat(40);
@@ -39,7 +39,9 @@ async function startServer(extra: Partial<Omit<HttpTransportOptions, "port" | "t
     handleSignals: false,
     transport: { kind: "http", port: 0, token: TOKEN, ...extra },
     wrapCall: async (context, next) =>
-      context.toolName === "whoami" ? asText({ session: context.clientSessionId ?? null }, "compact") : next()
+      context.toolName === "whoami"
+        ? asText({ session: context.clientSessionId ?? null, identity: context.clientIdentity ?? null }, "compact")
+        : next()
   });
   await handle.start();
   return handle;
@@ -92,6 +94,11 @@ function rawPost(port: number, headers: Record<string, string>): Promise<number>
 function sessionOf(result: unknown): string | null {
   const text = (result as { content: { text: string }[] }).content[0]!.text;
   return (JSON.parse(text) as { session: string | null }).session;
+}
+
+function identityOf(result: unknown): string | null {
+  const text = (result as { content: { text: string }[] }).content[0]!.text;
+  return (JSON.parse(text) as { identity?: string | null }).identity ?? null;
 }
 
 test("http: refuses a short token and a bad port at construction", () => {
@@ -247,7 +254,8 @@ test("http: a session whose client pid is dead is closed by the reaper; an unkno
   const events: { message: string; fields: unknown }[] = [];
   const pids = [dead, null];
   const handle = await startServer(
-    { reapIntervalMs: 50, resolveClientPid: () => Promise.resolve(pids.shift() ?? null) },
+    // No start-time lookup: a PowerShell spawn slows the handshake past the 50 ms reaper (the session would close mid-connect).
+    { reapIntervalMs: 50, resolveClientPid: () => Promise.resolve(pids.shift() ?? null), resolveProcessStartTime: () => Promise.resolve(null) },
     capturingLogger(events)
   );
   try {
@@ -316,4 +324,103 @@ test("http: at the cap with every session fresh, the new one is still 503", asyn
   } finally {
     await handle.stop();
   }
+});
+
+// ── MCP-ISSUE-108: a client's identity is its process, not its session ─────────────────────────────────
+
+/** Ask once over a fresh session: [session id, identity]. */
+async function whoamiOnce(port: number, token = TOKEN): Promise<[string | null, string | null]> {
+  const client = await connect(port, token);
+  try {
+    const result = await client.callTool({ name: "whoami", arguments: {} });
+    return [sessionOf(result), identityOf(result)];
+  } finally {
+    await client.close();
+  }
+}
+
+test("http: a new session from the same client process after a restart has the same identity", async () => {
+  const opts = { resolveClientPid: () => Promise.resolve(process.pid), resolveProcessStartTime: () => Promise.resolve("1000") };
+  let handle = await startServer(opts);
+  const [sessionA, identityA] = await whoamiOnce(handle.httpPort()!);
+  await handle.stop();
+  handle = await startServer(opts);
+  try {
+    // No old session id is sent: the client re-initializes, as Claude Code does after a restart.
+    const [sessionB, identityB] = await whoamiOnce(handle.httpPort()!);
+    assert.notEqual(sessionB, sessionA);
+    assert.equal(typeof identityA, "string");
+    assert.equal(identityB, identityA);
+    assert.match(identityA!, new RegExp(`^pid:${String(process.pid)}@1000/[0-9a-f]{16}$`));
+  } finally {
+    await handle.stop();
+  }
+});
+
+test("http: another client process, a reused pid (new start time) and another bearer each get another identity", async () => {
+  const base = await startServer({ resolveClientPid: () => Promise.resolve(process.pid), resolveProcessStartTime: () => Promise.resolve("1000") });
+  const [, mine] = await whoamiOnce(base.httpPort()!);
+  await base.stop();
+  // process.ppid is a second live process: a peer client.
+  const peer = await startServer({ resolveClientPid: () => Promise.resolve(process.ppid), resolveProcessStartTime: () => Promise.resolve("1000") });
+  const [, other] = await whoamiOnce(peer.httpPort()!);
+  await peer.stop();
+  const reused = await startServer({ resolveClientPid: () => Promise.resolve(process.pid), resolveProcessStartTime: () => Promise.resolve("2000") });
+  const [, reborn] = await whoamiOnce(reused.httpPort()!);
+  await reused.stop();
+  const otherToken = "u".repeat(40);
+  const rotated = createMcpServer({
+    name: "http-test", version: "0.0.1", tools: [whoami], logger, protectStdout: false, handleSignals: false,
+    transport: {
+      kind: "http", port: 0, token: otherToken,
+      resolveClientPid: () => Promise.resolve(process.pid), resolveProcessStartTime: () => Promise.resolve("1000")
+    },
+    wrapCall: async (context, next) =>
+      context.toolName === "whoami" ? asText({ session: null, identity: context.clientIdentity ?? null }, "compact") : next()
+  });
+  await rotated.start();
+  const [, rebeared] = await whoamiOnce(rotated.httpPort()!, otherToken);
+  await rotated.stop();
+  for (const identity of [other, reborn, rebeared]) {
+    assert.equal(typeof identity, "string");
+    assert.notEqual(identity, mine);
+  }
+});
+
+test("http: an unresolvable pid or start time leaves no identity (fail closed to the session id)", async () => {
+  for (const opts of [
+    { resolveClientPid: () => Promise.resolve(null), resolveProcessStartTime: () => Promise.resolve("1000") },
+    { resolveClientPid: () => Promise.resolve(process.pid), resolveProcessStartTime: () => Promise.resolve(null) },
+    { resolveClientPid: () => Promise.reject(new Error("netstat")), resolveProcessStartTime: () => Promise.resolve("1000") },
+    { resolveClientPid: () => Promise.resolve(process.pid), resolveProcessStartTime: () => Promise.reject(new Error("ps")) }
+  ]) {
+    const handle = await startServer(opts);
+    try {
+      const [session, identity] = await whoamiOnce(handle.httpPort()!);
+      assert.equal(identity, null);
+      assert.equal(typeof session, "string");
+    } finally {
+      await handle.stop();
+    }
+  }
+});
+
+test("http: a client whose process has exited has no identity", async () => {
+  const dead = spawnSync(process.execPath, ["-e", "0"]).pid!;
+  const handle = await startServer({ resolveClientPid: () => Promise.resolve(dead), resolveProcessStartTime: () => Promise.resolve("1000") });
+  try {
+    assert.equal((await whoamiOnce(handle.httpPort()!))[1], null);
+  } finally {
+    await handle.stop();
+  }
+});
+
+test("http: resolveProcessStartTime reads this process's start time and refuses a bad pid", async () => {
+  const mine = await resolveProcessStartTime(process.pid);
+  if (process.platform === "win32" || process.platform === "linux") {
+    assert.match(mine ?? "", /^\d+$/);
+    assert.equal(await resolveProcessStartTime(process.pid), mine);
+  }
+  assert.equal(await resolveProcessStartTime(0), null);
+  assert.equal(await resolveProcessStartTime(-1), null);
 });

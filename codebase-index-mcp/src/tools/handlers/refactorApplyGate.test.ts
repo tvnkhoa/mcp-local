@@ -1,0 +1,76 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+
+import type { RefactorApplyRecord, RefactorPreviewRecord } from "../../types/index.js";
+import type { HandlerContext } from "./handlerContext.js";
+import { assertApplyOwner, assertPreviewOwner, previewOwnerOf } from "./refactorApplyGate.js";
+
+/**
+ * MCP-ISSUE-108: a preview belongs to the client process (pid + start time), not to the protocol session —
+ * Claude Code re-initializes a new session after a server restart instead of resending its old id.
+ */
+
+const ME = "pid:100@638000000000000000/aaaaaaaaaaaaaaaa";
+const PEER = "pid:200@638000000000000000/aaaaaaaaaaaaaaaa";
+const PID_REUSED = "pid:100@639000000000000000/aaaaaaaaaaaaaaaa";
+
+function ctx(clientSessionId?: string, clientIdentity?: string): HandlerContext {
+  return {
+    ...(clientSessionId === undefined ? {} : { clientSessionId }),
+    ...(clientIdentity === undefined ? {} : { clientIdentity })
+  } as HandlerContext;
+}
+
+function preview(owner: string | null): RefactorPreviewRecord {
+  return { previewId: "preview_1", clientSession: owner } as RefactorPreviewRecord;
+}
+
+function apply(owner: string | null): RefactorApplyRecord {
+  return { rollbackId: "rollback_1", clientSession: owner } as RefactorApplyRecord;
+}
+
+const refusedPreview = (owner: string | null, caller: HandlerContext): void =>
+  assert.throws(() => assertPreviewOwner(preview(owner), caller, "refactor_replace_apply"), { code: "PREVIEW_OWNED_BY_ANOTHER_SESSION" });
+const refusedApply = (owner: string | null, caller: HandlerContext): void =>
+  assert.throws(() => assertApplyOwner(apply(owner), caller, "refactor_replace_rollback"), { code: "APPLY_OWNED_BY_ANOTHER_SESSION" });
+
+test("the owner is the client identity when it resolves, else the session id, else nobody", () => {
+  assert.equal(previewOwnerOf(ctx("session-a", ME)), ME);
+  assert.equal(previewOwnerOf(ctx("session-a")), "session-a");
+  assert.equal(previewOwnerOf(ctx()), null);
+});
+
+test("a new session of the same client process applies and rolls back its pre-restart preview", () => {
+  const owner = previewOwnerOf(ctx("session-a", ME));
+  assert.doesNotThrow(() => assertPreviewOwner(preview(owner), ctx("session-b", ME), "refactor_replace_apply"));
+  assert.doesNotThrow(() => assertApplyOwner(apply(owner), ctx("session-b", ME), "refactor_replace_rollback"));
+});
+
+test("another client process is refused, in the same server life and after a restart", () => {
+  const owner = previewOwnerOf(ctx("session-a", ME));
+  refusedPreview(owner, ctx("session-p", PEER));
+  refusedApply(owner, ctx("session-p", PEER));
+  refusedPreview(owner, ctx("session-q", PEER));
+});
+
+test("a reused pid with another start time is refused", () => {
+  const owner = previewOwnerOf(ctx("session-a", ME));
+  refusedPreview(owner, ctx("session-r", PID_REUSED));
+  refusedApply(owner, ctx("session-r", PID_REUSED));
+});
+
+test("fail closed: an unresolvable identity owns by session id, which another session cannot match", () => {
+  const owner = previewOwnerOf(ctx("session-a"));
+  assert.doesNotThrow(() => assertPreviewOwner(preview(owner), ctx("session-a"), "refactor_replace_apply"));
+  refusedPreview(owner, ctx("session-b"));
+  refusedPreview(owner, ctx("session-b", ME));
+  refusedApply(owner, ctx("session-b"));
+  // ... and a caller whose identity is unresolvable never matches an identity-owned preview.
+  refusedPreview(previewOwnerOf(ctx("session-a", ME)), ctx("session-b"));
+});
+
+test("a row stamped with a session id before MCP-ISSUE-108 still opens to that session, and an unowned one to anyone", () => {
+  assert.doesNotThrow(() => assertPreviewOwner(preview("session-a"), ctx("session-a", ME), "refactor_replace_apply"));
+  refusedPreview("session-a", ctx("session-b", ME));
+  assert.doesNotThrow(() => assertPreviewOwner(preview(null), ctx("session-b", PEER), "refactor_replace_apply"));
+});

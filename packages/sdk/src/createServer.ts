@@ -29,7 +29,7 @@ import { redirectConsoleToStderr } from "./console.js";
 import type { DispatchDeps } from "./dispatch.js";
 import { dispatchToolCall } from "./dispatch.js";
 import type { HttpTransportHandle, HttpTransportOptions } from "./httpTransport.js";
-import { startHttpTransport, validateHttpTransportOptions } from "./httpTransport.js";
+import { clientIdentityOf, resolveProcessStartTime, startHttpTransport, validateHttpTransportOptions } from "./httpTransport.js";
 import type { Lifecycle } from "./lifecycle.js";
 import { createLifecycle } from "./lifecycle.js";
 import type { PromptDefinition, PromptProvider } from "./prompts.js";
@@ -187,11 +187,13 @@ export function createMcpServer(options: McpServerOptions): McpServerHandle {
       const progressToken = (request.params._meta as { progressToken?: string | number } | undefined)
         ?.progressToken;
 
+      const clientIdentity = extra.sessionId === undefined ? await stdioIdentity : await http?.clientIdentity(extra.sessionId);
       const context: CallContext = {
         toolName,
         args,
         ...(progressToken === undefined ? {} : { progressToken }),
         ...(extra.sessionId === undefined ? {} : { clientSessionId: extra.sessionId }),
+        ...(clientIdentity === undefined ? {} : { clientIdentity }),
         reportProgress: (progress, total, message) => {
           if (progressToken === undefined) {
             return;
@@ -283,6 +285,8 @@ export function createMcpServer(options: McpServerOptions): McpServerHandle {
 
   const server = buildProtocolServer();
   let http: HttpTransportHandle | undefined;
+  /** MCP-ISSUE-108: on stdio the one client is the parent process; resolved once, at start. */
+  let stdioIdentity: Promise<string | undefined> = Promise.resolve(undefined);
   let restoreConsole: (() => void) | undefined;
   let detachSignals: (() => void) | undefined;
 
@@ -318,6 +322,7 @@ export function createMcpServer(options: McpServerOptions): McpServerHandle {
         return;
       }
 
+      stdioIdentity = clientIdentityOf(process.ppid, null, resolveProcessStartTime).then((identity) => identity ?? undefined);
       const transport = new StdioServerTransport();
       lifecycle.onShutdown({
         name: "transport",

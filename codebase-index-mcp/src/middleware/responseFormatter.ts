@@ -90,6 +90,8 @@ export type ToolRequestContext = {
   freshness?: FreshnessNote;
   /** R4: the HTTP client session the call arrived on; absent on stdio. Scopes refactor previews. */
   clientSessionId?: string;
+  /** MCP-ISSUE-108: the client process the call came from, when resolvable. Owns refactor previews. */
+  clientIdentity?: string;
 };
 
 export type ToolTelemetryEvent = {

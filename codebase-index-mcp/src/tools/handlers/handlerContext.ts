@@ -62,4 +62,10 @@ export interface HandlerContext {
    * that session may apply the preview. Absent on stdio (one client per process) and in unit tests.
    */
   clientSessionId?: string;
+  /**
+   * MCP-ISSUE-108: the client process of the call (pid + start time, see the SDK's CallContext). When present it,
+   * not the session id, owns a refactor preview, so a preview survives a server restart after which the client
+   * re-initialized a new session. Absent when unresolvable: ownership falls back to {@link clientSessionId}.
+   */
+  clientIdentity?: string;
 }

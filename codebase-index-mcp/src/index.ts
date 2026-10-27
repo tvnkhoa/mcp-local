@@ -265,8 +265,10 @@ function asText(payload: unknown, profile: ResponseProfile = "standard"): CallTo
 
 function buildHandlerContext(): HandlerContext {
   const clientSessionId = toolContextStorage.getStore()?.clientSessionId;
+  const clientIdentity = toolContextStorage.getStore()?.clientIdentity;
   return {
     ...(clientSessionId === undefined ? {} : { clientSessionId }),
+    ...(clientIdentity === undefined ? {} : { clientIdentity }),
     store,
     watchManager,
     activeWatchRef,
