@@ -28,19 +28,32 @@ const whoami = defineTool({
   handler: () => ok({})
 });
 
-/** An http server whose `whoami` answers with the CallContext's clientSessionId. */
+/** MCP-ISSUE-108: a call that never asks for the client identity, so it must never wait for it. */
+const quick = defineTool({
+  name: "quick",
+  description: "Answer without resolving the client identity.",
+  input: z.object({}).strict(),
+  inputSchema: EMPTY_OBJECT_SCHEMA,
+  annotations: annotations.read(),
+  handler: () => ok({ quick: true })
+});
+
+/** An http server whose `whoami` answers with the CallContext's clientSessionId and resolved client identity. */
 async function startServer(extra: Partial<Omit<HttpTransportOptions, "port" | "token">> = {}, log: Logger = logger) {
   const handle = createMcpServer({
     name: "http-test",
     version: "0.0.1",
-    tools: [whoami],
+    tools: [whoami, quick],
     logger: log,
     protectStdout: false,
     handleSignals: false,
     transport: { kind: "http", port: 0, token: TOKEN, ...extra },
     wrapCall: async (context, next) =>
       context.toolName === "whoami"
-        ? asText({ session: context.clientSessionId ?? null, identity: context.clientIdentity ?? null }, "compact")
+        ? asText(
+            { session: context.clientSessionId ?? null, identity: (await context.resolveClientIdentity?.()) ?? null },
+            "compact"
+          )
         : next()
   });
   await handle.start();
@@ -117,7 +130,7 @@ test("http: handshake, tools/list and a call over streamable HTTP on 127.0.0.1",
     assert.ok(port > 0);
     const client = await connect(port);
     const tools = await client.listTools();
-    assert.deepEqual(tools.tools.map((t) => t.name), ["whoami"]);
+    assert.deepEqual(tools.tools.map((t) => t.name), ["whoami", "quick"]);
     const session = sessionOf(await client.callTool({ name: "whoami", arguments: {} }));
     assert.match(session ?? "", /^[0-9a-f-]{36}$/);
     await client.close();
@@ -376,7 +389,9 @@ test("http: another client process, a reused pid (new start time) and another be
       resolveClientPid: () => Promise.resolve(process.pid), resolveProcessStartTime: () => Promise.resolve("1000")
     },
     wrapCall: async (context, next) =>
-      context.toolName === "whoami" ? asText({ session: null, identity: context.clientIdentity ?? null }, "compact") : next()
+      context.toolName === "whoami"
+        ? asText({ session: null, identity: (await context.resolveClientIdentity?.()) ?? null }, "compact")
+        : next()
   });
   await rotated.start();
   const [, rebeared] = await whoamiOnce(rotated.httpPort()!, otherToken);
@@ -423,4 +438,27 @@ test("http: resolveProcessStartTime reads this process's start time and refuses 
   }
   assert.equal(await resolveProcessStartTime(0), null);
   assert.equal(await resolveProcessStartTime(-1), null);
+});
+
+test("http: a call that does not ask for the client identity never waits for a slow lookup", async () => {
+  const slowMs = 2500;
+  const handle = await startServer({
+    resolveClientPid: () => Promise.resolve(process.pid),
+    resolveProcessStartTime: () => new Promise((resolve) => setTimeout(() => resolve("1000"), slowMs))
+  });
+  try {
+    const client = await connect(handle.httpPort()!);
+    const started = Date.now();
+    const result = await client.callTool({ name: "quick", arguments: {} });
+    const quickMs = Date.now() - started;
+    assert.equal(result.isError, undefined);
+    assert.ok(quickMs < 1000, `quick took ${String(quickMs)} ms`);
+    // The identity is still there for a call that asks: it waits for the lookup, then answers.
+    const identity = identityOf(await client.callTool({ name: "whoami", arguments: {} }));
+    assert.ok(Date.now() - started >= slowMs - 200);
+    assert.match(identity ?? "", new RegExp(`^pid:${String(process.pid)}@1000/`));
+    await client.close();
+  } finally {
+    await handle.stop();
+  }
 });

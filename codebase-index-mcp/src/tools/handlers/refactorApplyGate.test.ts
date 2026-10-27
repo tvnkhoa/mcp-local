@@ -3,7 +3,7 @@ import test from "node:test";
 
 import type { RefactorApplyRecord, RefactorPreviewRecord } from "../../types/index.js";
 import type { HandlerContext } from "./handlerContext.js";
-import { assertApplyOwner, assertPreviewOwner, previewOwnerOf } from "./refactorApplyGate.js";
+import { OWNERSHIP_TOOLS, assertApplyOwner, assertPreviewOwner, previewOwnerOf } from "./refactorApplyGate.js";
 
 /**
  * MCP-ISSUE-108: a preview belongs to the client process (pid + start time), not to the protocol session —
@@ -73,4 +73,12 @@ test("a row stamped with a session id before MCP-ISSUE-108 still opens to that s
   assert.doesNotThrow(() => assertPreviewOwner(preview("session-a"), ctx("session-a", ME), "refactor_replace_apply"));
   refusedPreview("session-a", ctx("session-b", ME));
   assert.doesNotThrow(() => assertPreviewOwner(preview(null), ctx("session-b", PEER), "refactor_replace_apply"));
+});
+
+test("only the preview / apply / rollback tools wait for the client identity; a read tool never does", () => {
+  assert.deepEqual([...OWNERSHIP_TOOLS].sort(), [
+    "change_value_representation", "refactor_replace_apply", "refactor_replace_preview", "refactor_replace_rollback",
+    "refactor_symbol_migration", "rename_assist"
+  ]);
+  for (const read of ["search_symbols", "search_regex", "query_docs", "health_check", "index_repository"]) assert.equal(OWNERSHIP_TOOLS.has(read), false);
 });

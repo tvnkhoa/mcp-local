@@ -4433,8 +4433,13 @@ this afternoon failed at that harness, which is the highest rate observed so far
   - The owner of a preview / apply (`client_session`) is now the client *process*:
     `pid:<pid>@<start time>/<bearer sha256 prefix>`. The SDK transport resolves the pid from the loopback socket at
     initialize (and at re-adoption), then the process's start time (`resolveProcessStartTime`: PowerShell ticks on
-    win32, `/proc/<pid>/stat` on Linux), and hands it to handlers as `CallContext.clientIdentity`. A reused pid has
-    another start time; another bearer is another owner. Over stdio the owner is the server's parent process.
+    win32, `/proc/<pid>/stat` on Linux). netstat and PowerShell run by absolute path under `%SystemRoot%\System32`.
+    A reused pid has another start time; another bearer is another owner. Over stdio the owner is the server's
+    parent process.
+  - Lazy (leader review: the first call of every session waited 2.1–2.5 s, worst case ~25 s): the lookup starts
+    at initialize, but `CallContext.resolveClientIdentity()` is awaited only by the tools in `OWNERSHIP_TOOLS`
+    (`refactorApplyGate.ts`: rename_assist, the refactor_replace trio, refactor_symbol_migration,
+    change_value_representation). Every other call goes ahead without waiting.
   - Fail closed: an unresolvable pid or start time, or a client process that has exited, leaves no identity, and
     the owner is the session id, which a restart does not keep.
   - `refactorApplyGate.ts`: `previewOwnerOf` stamps the identity (else the session id); the check accepts a match on
@@ -4442,7 +4447,8 @@ this afternoon failed at that harness, which is the highest rate observed so far
 - **Guarded:**
   - `packages/sdk/src/httpTransport.test.ts`: a new session from the same pid and start time after a restart has the
     same identity; another pid, a reused pid with another start time and another bearer each differ; an
-    unresolvable pid / start time (null or throwing) and an exited client give none.
+    unresolvable pid / start time (null or throwing) and an exited client give none; with a 2.5 s start-time stub, a
+    call that does not ask for the identity answers in under 1 s (FAILS with the eager await).
   - `refactorApplyGate.test.ts`: identity owner, new session of the same process allowed; peer, reused pid and an
     unresolvable caller refused; session-id rows and unowned rows as before.
   - `test:http-transport` (real restart): a NEW session of the same process applies and rolls back its pre-restart
@@ -4451,3 +4457,4 @@ this afternoon failed at that harness, which is the highest rate observed so far
 - **Limits:** `claude --resume` or any new Claude process is a new pid and loses its previews (they expire after
   30 min anyway). The pid comes from `netstat`, so only win32 resolves an HTTP client today; elsewhere ownership
   stays per session. The start time is read once per session (one PowerShell spawn, ~0.5 s, in the background).
+  Isolation is now per OS process: a host that runs several MCP sessions in one process shares ownership between them.

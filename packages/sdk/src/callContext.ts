@@ -35,9 +35,13 @@ export interface CallContext {
    * MCP-ISSUE-108: the client *process* the call came from — its pid and start time (plus, over http, the
    * bearer) — which, unlike {@link clientSessionId}, survives a server restart: a client that silently
    * re-initializes after one gets a new session id but keeps its identity. On stdio it names the server's
-   * parent process. Absent when it cannot be resolved; key on {@link clientSessionId} then (fail closed).
+   * parent process. Resolves to undefined when it cannot be resolved; key on {@link clientSessionId} then
+   * (fail closed).
+   *
+   * A function, not a value: the lookup starts at initialize but can take seconds (netstat, then PowerShell),
+   * so only a call that needs ownership awaits it; every other call goes ahead without waiting.
    */
-  readonly clientIdentity?: string;
+  readonly resolveClientIdentity?: () => Promise<string | undefined>;
   /**
    * Fire-and-forget progress update. A no-op when {@link progressToken} is
    * absent, and never throws — progress must not be able to fail a tool call.

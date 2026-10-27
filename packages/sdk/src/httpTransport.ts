@@ -27,12 +27,14 @@ import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import http from "node:http";
 import type { AddressInfo } from "node:net";
+import path from "node:path";
 
 import type { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 
 import type { Logger } from "@mcp/core";
+import { defaultEnvSource } from "@mcp/core";
 
 import { fileHttpSessionStore } from "./httpSessionStore.js";
 
@@ -130,10 +132,15 @@ export function parseNetstatClientPid(output: string, remotePort: number, server
   return null;
 }
 
+/** A Windows system binary by absolute path, so a same-named file earlier on PATH is never run. */
+function windowsSystemExe(...relativeToSystem32: string[]): string {
+  return path.win32.join(defaultEnvSource()["SystemRoot"] ?? "C:\\Windows", "System32", ...relativeToSystem32);
+}
+
 function resolveClientPidViaNetstat(remotePort: number, serverPort: number): Promise<number | null> {
   if (process.platform !== "win32") return Promise.resolve(null);
   return new Promise((resolve) => {
-    execFile("netstat", ["-ano", "-p", "TCP"], { windowsHide: true, timeout: 10_000, maxBuffer: 16 * 1024 * 1024 }, (error, stdout) => {
+    execFile(windowsSystemExe("NETSTAT.EXE"), ["-ano", "-p", "TCP"], { windowsHide: true, timeout: 10_000, maxBuffer: 16 * 1024 * 1024 }, (error, stdout) => {
       resolve(error === null ? parseNetstatClientPid(stdout, remotePort, serverPort) : null);
     });
   });
@@ -156,7 +163,7 @@ export function resolveProcessStartTime(pid: number): Promise<string | null> {
   if (process.platform !== "win32") return Promise.resolve(null);
   return new Promise((resolve) => {
     execFile(
-      "powershell.exe",
+      windowsSystemExe("WindowsPowerShell", "v1.0", "powershell.exe"),
       ["-NoProfile", "-NonInteractive", "-Command", `(Get-Process -Id ${String(pid)} -ErrorAction Stop).StartTime.ToUniversalTime().Ticks`],
       { windowsHide: true, timeout: 15_000 },
       (error, stdout) => {

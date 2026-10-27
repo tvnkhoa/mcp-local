@@ -50,6 +50,7 @@ import {
 } from "./middleware/responseFormatter.js";
 import type { DescriptorLimits } from "./tools/limits.js";
 import { maybeAutoActivateWatchFromArgs } from "./services/watch/watchLifecycle.js";
+import { OWNERSHIP_TOOLS } from "./tools/handlers/refactorApplyGate.js";
 
 export interface TelemetryConfig {
   readonly enabled: boolean;
@@ -166,11 +167,15 @@ export function createCodebaseIndexServer(options: CodebaseIndexServerOptions): 
       startedAt: Date.now(),
       args,
       ...(context.progressToken === undefined ? {} : { progressNotifier: context.reportProgress }),
-      ...(context.clientSessionId === undefined ? {} : { clientSessionId: context.clientSessionId }),
-      ...(context.clientIdentity === undefined ? {} : { clientIdentity: context.clientIdentity })
+      ...(context.clientSessionId === undefined ? {} : { clientSessionId: context.clientSessionId })
     };
 
     return toolContextStorage.run(requestContext, async () => {
+      // MCP-ISSUE-108: only a tool that owns or checks a preview waits for the client identity.
+      if (OWNERSHIP_TOOLS.has(context.toolName)) {
+        const clientIdentity = await context.resolveClientIdentity?.();
+        if (clientIdentity !== undefined) requestContext.clientIdentity = clientIdentity;
+      }
       try {
         await maybeAutoActivateWatchFromArgs(context.toolName, args, options.buildHandlerContext());
       } catch (error) {

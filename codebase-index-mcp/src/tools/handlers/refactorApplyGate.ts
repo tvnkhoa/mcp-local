@@ -42,6 +42,20 @@ export function assertApplyOwner(apply: RefactorApplyRecord, ctx: HandlerContext
   }
 }
 
+/**
+ * MCP-ISSUE-108: the tools that stamp or check an owner, and so the only ones that wait for the client identity
+ * (a netstat + PowerShell lookup at a session's start, seconds in the worst case). A tool missing here would
+ * stamp the session id instead: stricter, never looser.
+ */
+export const OWNERSHIP_TOOLS: ReadonlySet<string> = new Set([
+  "rename_assist",
+  "refactor_replace_preview",
+  "refactor_replace_apply",
+  "refactor_replace_rollback",
+  "refactor_symbol_migration",
+  "change_value_representation"
+]);
+
 export function previewOwnerOf(ctx: HandlerContext): string | null {
   return ctx.clientIdentity ?? ctx.clientSessionId ?? null;
 }

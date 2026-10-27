@@ -187,13 +187,14 @@ export function createMcpServer(options: McpServerOptions): McpServerHandle {
       const progressToken = (request.params._meta as { progressToken?: string | number } | undefined)
         ?.progressToken;
 
-      const clientIdentity = extra.sessionId === undefined ? await stdioIdentity : await http?.clientIdentity(extra.sessionId);
+      const sessionId = extra.sessionId;
       const context: CallContext = {
         toolName,
         args,
         ...(progressToken === undefined ? {} : { progressToken }),
         ...(extra.sessionId === undefined ? {} : { clientSessionId: extra.sessionId }),
-        ...(clientIdentity === undefined ? {} : { clientIdentity }),
+        resolveClientIdentity: () =>
+          sessionId === undefined ? stdioIdentity : (http?.clientIdentity(sessionId) ?? Promise.resolve(undefined)),
         reportProgress: (progress, total, message) => {
           if (progressToken === undefined) {
             return;
