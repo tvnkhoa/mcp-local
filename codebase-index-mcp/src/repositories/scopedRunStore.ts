@@ -197,8 +197,10 @@ export function idsAtRiskFromIdOrder(
   shifted: readonly ShiftedSymbol[],
   freshIds: ReadonlySet<string>
 ): Set<string> {
+  // `shifted` carries every pair, the unmoved ones too (old id = new id): they are fixed participants, since
+  // a moved id can pass an unmoved namesake's in a written file. Only a moved pair's name can flip.
   const oldOf = new Map(shifted.map((s) => [s.newId, s.oldId]));
-  const names = [...new Set(shifted.map((s) => s.name))];
+  const names = [...new Set(shifted.filter((s) => s.oldId !== s.newId).map((s) => s.name))];
   const atRisk = new Set<string>();
   if (names.length === 0) return atRisk;
   const rows = db

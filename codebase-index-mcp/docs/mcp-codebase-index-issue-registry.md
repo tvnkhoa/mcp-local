@@ -4208,6 +4208,21 @@ this afternoon failed at that harness, which is the highest rate observed so far
     files with resolved edges into those ids are re-extracted. Kind families: the type kinds (class, struct,
     record, interface, type) form one, and every other kind stands alone, because the pick ranks each allowed
     kind apart.
+- **Review follow-up (part 3).**
+  - Guard (a) skipped unmoved pairs. A moved id can pass the id of an unmoved namesake in the same file, e.g.
+    `class B { get() }` pushed past `class A { get() }`, which turns an `o.get()` by-name tie into a different
+    edge. Every pair now takes part, the unmoved ones as fixed participants.
+  - The re-point ran in its own transaction after the batch commit. A crash or cancel in between left other
+    files' edges into ids that were gone, behind a content hash that was already current. It now runs inside the
+    write's transaction, file by file. (A later run that writes anything still sweeps dangling edges repo-wide
+    through `findDanglingEdgeSourceFiles`.)
+  - `interfaceSiblings.ts` orders by id across names under a cap (`IMPLEMENTOR_CAP`, `limit 10`), but only at
+    query time. Its callers are the impact and context-pack tools, never the index run. It reads the stored
+    graph, and conformance proves that graph equal to a full run's, so it answers the same. The index-time
+    fan-out caps (`MAX_INTERFACE_DISPATCH_FANOUT`, `MAX_SUBCLASS_DISPATCH_FANOUT`) cut lists ordered by
+    `file_path`, which a shift does not move.
+  - **Not covered, pre-existing:** a run cancelled after its batch commit but before `queueDependentFiles`
+    never re-extracts the K-name dependents (no dangling edge marks them). That was true before part 3 too.
 - **After** (same clone and machine; before = 2f26f46 on the same edit):
 
   | edit | dependents before → after | dirty run before → after |
@@ -4230,7 +4245,9 @@ this afternoon failed at that harness, which is the highest rate observed so far
   with 0 dependents (fails without the re-point); rename and removal re-extract; a signature change re-extracts;
   guard (a) id flip vs no flip (fails without the guard); swapped C# overloads; guard (b) alone, overloads that
   trade line order but keep id order (fails without the guard). The doc's ambiguous mention lists its candidates
-  by line.
+  by line. Review follow-up: an unmoved same-file namesake (fails without the fixed participants); a 6-file
+  shift fixture; a run cancelled right after the shifted file's write leaves no dangling edge (fails with the
+  re-point outside the transaction). `cross_repo_deps` is now in the snapshot.
 - **Not done, needs the owner:** making the tie-break shift-invariant, e.g. on `(file_path, symbol_id)`.
   `usage-period.ts` would then drop to 0 dependents. It changes which candidate wins every by-name tie, so it is
   a resolver output change and needs an `INDEX_VERSION` bump (a full re-index of every repo).

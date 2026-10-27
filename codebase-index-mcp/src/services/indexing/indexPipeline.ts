@@ -39,7 +39,7 @@ export function currentAnnotationKey(repoPath: string): string {
 import { GraphStore } from "../../repositories/graphStore.js";
 import {
   symbolIdOfRowKey, laneRowsOfExtraction, changedSymbolNames, pairShiftedSymbols, pathKeysFor, symbolRowKey,
-  type ShiftedSymbol, type SymbolRowsByFile
+  type ShiftedSymbol, type SymbolRowsByFile, type SymbolShift
 } from "../../repositories/scopedRunStore.js";
 import { resolveHeadCommitSha, resolveCurrentBranch } from "../git/gitHelpers.js";
 import { redactSensitive } from "../../middleware/indexGuardrails.js";
@@ -267,6 +267,8 @@ export async function runIndexPipeline(store: GraphStore, input: RunIndexInput):
   const scoped = input.mode !== "full";
   const rowsBefore: SymbolRowsByFile = new Map();
   const rowsAfter: SymbolRowsByFile = new Map();
+  /** MCP-ISSUE-101 part 3: each written file's before/after pairing, made (and its ids re-pointed) in the write's transaction. */
+  const shifts = new Map<string, SymbolShift>();
   /** Files that appeared or disappeared this run: their basenames are module-resolution keys. */
   const appearedOrGone = new Set<string>();
   /** Dirty-mode files deleted from the working tree, pruned here (a dirty run never prunes otherwise). */
@@ -670,6 +672,11 @@ export async function runIndexPipeline(store: GraphStore, input: RunIndexInput):
             if (scoped) {
               store.ftsIndexFile(input.repoId, item.file.path);
               rowsAfter.set(item.file.path, new Map(item.extracted.symbols.map((s) => [symbolRowKey(s), s.name])));
+              // Re-pointed in the same transaction as the write: a crash between the two would leave other
+              // files' edges into ids that no longer exist, behind a content hash that is already current.
+              const shift = pairShiftedSymbols(rowsBefore.get(item.file.path) ?? new Map(), rowsAfter.get(item.file.path)!);
+              shifts.set(item.file.path, shift);
+              store.remapSymbolIds(input.repoId, shift.pairs, [...writtenPaths]);
               noteLanes(laneRowsOfExtraction(item.file.path, item.extracted.symbols, item.extracted.edges));
             }
           }
@@ -906,22 +913,19 @@ export async function runIndexPipeline(store: GraphStore, input: RunIndexInput):
     // re-pointed at the new one everywhere outside the written files, and its name stays out of K —
     // unless the move changes an order a resolver keeps the first of: within the file (guard b: its names go
     // to K) or among the repo's same-named ids (guard a: the files with edges into the ids at risk). Without this a 3-line insertion re-extracted every caller.
+    // Every pair takes part in guard (a), the unmoved ones too: a moved id can pass an unmoved namesake's.
     const names = new Set<string>();
-    const shifted: ShiftedSymbol[] = [];
+    const paired: ShiftedSymbol[] = [];
     const freshIds = new Set<string>();
     for (const [p, before] of rowsBefore) {
       const after = rowsAfter.get(p) ?? new Map<string, string>();
       for (const key of after.keys()) freshIds.add(symbolIdOfRowKey(key));
-      const shift = pairShiftedSymbols(before, after);
+      const shift = shifts.get(p) ?? pairShiftedSymbols(before, after);
       for (const n of changedSymbolNames(shift.unpairedBefore, shift.unpairedAfter)) names.add(n);
-      for (const pair of shift.pairs) {
-        if (pair.oldId === pair.newId) continue;
-        shifted.push(pair);
-        if (!shift.orderKept) names.add(pair.name);
-      }
+      paired.push(...shift.pairs);
+      if (!shift.orderKept) for (const pair of shift.pairs) if (pair.oldId !== pair.newId) names.add(pair.name);
     }
-    const idOrderAtRisk = store.idsAtRiskFromIdOrder(input.repoId, shifted, freshIds);
-    if (shifted.length > 0) store.runInTransaction(() => store.remapSymbolIds(input.repoId, shifted, [...writtenPaths]));
+    const idOrderAtRisk = store.idsAtRiskFromIdOrder(input.repoId, paired, freshIds);
     const candidates = new Set(store.findDanglingEdgeSourceFiles(input.repoId, doomed));
     for (const p of store.findFilesWithEdgesInto(input.repoId, idOrderAtRisk, writtenPaths)) candidates.add(p);
     for (const rows of store.symbolRowKeysForFiles(input.repoId, doomed).values()) {

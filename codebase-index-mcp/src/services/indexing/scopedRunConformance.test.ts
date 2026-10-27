@@ -9,6 +9,7 @@ import Database from "better-sqlite3";
 
 import { GraphStore } from "../../repositories/graphStore.js";
 import { createIndexRunner } from "./indexRunner.js";
+import { runIndexPipeline } from "./indexPipeline.js";
 import { stableId } from "../extractors/extractorPrimitives.js";
 import type { IndexMode } from "../../types/index.js";
 
@@ -66,6 +67,10 @@ function snapshot(dbPath: string, repoId: string): Record<string, string[]> {
         .map((r) => JSON.stringify(r))
         .sort();
     }
+    // No repo_id column: the links this repo makes or receives.
+    out.cross_repo_deps = (db.prepare(`select * from cross_repo_deps where from_repo_id = ? or to_repo_id = ?`).raw().all(repoId, repoId) as unknown[][])
+      .map((r) => JSON.stringify(r))
+      .sort();
     return out;
   } finally {
     db.close();
@@ -328,4 +333,86 @@ test("guard (b) alone: overloads that trade line order but keep their id order r
     (root) => writeTree(root, { "src/Lib.cs": lib(strFoo + "\n".repeat(gap) + intFoo) })
   );
   assert.match(scopes.dirty, /^scoped: 1 changed/);
+});
+
+test("guard (a) counts an unmoved namesake in the written file: class B's get moves past class A's", async () => {
+  // Leader's review probe: A.get keeps its row (and id); blank lines push B.get to a row whose id sorts on
+  // the other side of A.get's. caller.ts's `o.get()` is a by-name tie between the two, so it must re-extract.
+  const idAt = (row: number): string => stableId(`r:src/a.ts:method:get:${String(row)}`);
+  const mk = (gap: number): string =>
+    `export class A {\n  get(): number { return 1; }\n}\n${"\n".repeat(gap)}export class B {\n  get(): number { return 2; }\n}\n`;
+  const before = idAt(1) < idAt(4);
+  const gap = Array.from({ length: 80 }, (_, k) => k + 1).find((k) => idAt(1) < idAt(4 + k) !== before);
+  assert.ok(gap !== undefined);
+  const scopes = await assertScopedEqualsFull(
+    "same-file-unmoved-namesake",
+    { "src/a.ts": mk(0), "src/caller.ts": "export function main(o: any): number {\n  return o.get();\n}\n" },
+    (root) => writeTree(root, { "src/a.ts": mk(gap) })
+  );
+  assert.ok(dependents(scopes.dirty) >= 1 && dependents(scopes.incremental) >= 1, `${scopes.dirty} / ${scopes.incremental}`);
+});
+
+test("a 6-file row shift with cross-file callers lands as a full run does", async () => {
+  const files: Record<string, string> = {};
+  for (let i = 0; i < 6; i++) {
+    const next = (i + 1) % 6;
+    files[`src/m${String(i)}.ts`] =
+      `import { f${String(next)}, K${String(next)} } from "./m${String(next)}";\n\n` +
+      `export function f${String(i)}(): number {\n  return 1;\n}\n\nexport class K${String(i)} {\n  run(): number {\n    return f${String(next)}() + new K${String(next)}().run();\n  }\n}\n`;
+  }
+  files["src/main.ts"] = 'import { f0, K3 } from "./m0";\n\nexport function main(): number {\n  return f0() + new K3().run();\n}\n';
+  await assertScopedEqualsFull("six-file-shift", files, (root) => {
+    for (let i = 0; i < 6; i++) shiftDown(root, `src/m${String(i)}.ts`, i + 2);
+  });
+});
+
+test("a run cancelled right after the shifted file's write leaves no edge into an id that is gone", async () => {
+  // The re-point runs in the write's own transaction. When it ran later, with the dependents, a run stopped
+  // after the batch commit left caller.ts's edges into util.ts's old ids, behind a content hash already current.
+  const repo = makeRepo({ "src/util.ts": UTIL, "src/caller.ts": CALLER });
+  const work = mkdtempSync(path.join(tmpdir(), "cim-scoped-db-"));
+  try {
+    const dbPath = path.join(work, "scoped.db");
+    await index(dbPath, "r", repo, "full");
+    shiftDown(repo, "src/util.ts", 3);
+    const store = new GraphStore(dbPath);
+    const abort = new AbortController();
+    try {
+      await runIndexPipeline(store, {
+        repoId: "r",
+        repoPath: repo.replace(/\\/g, "/"),
+        mode: "dirty",
+        maxFiles: 1000,
+        batchSize: 50,
+        parseWorkers: 0,
+        onlyRelativePaths: new Set(["src/util.ts"]),
+        abortSignal: abort.signal,
+        onProgress: (p) => {
+          if (p.filesIndexed >= 1) abort.abort();
+        }
+      });
+    } finally {
+      store.close();
+    }
+    const db = new Database(dbPath, { readonly: true });
+    try {
+      const dangling = db
+        .prepare(`select count(*) n from edges where repo_id = 'r' and to_id not like '%:%' and to_id not in (select symbol_id from symbols where repo_id = 'r')`)
+        .get() as { n: number };
+      assert.equal(dangling.n, 0);
+      const intoUtil = db
+        .prepare(
+          `select count(*) n from edges e join symbols s on s.repo_id = e.repo_id and s.symbol_id = e.from_id
+           join symbols t on t.repo_id = e.repo_id and t.symbol_id = e.to_id
+           where e.repo_id = 'r' and s.file_path = 'src/caller.ts' and t.file_path = 'src/util.ts'`
+        )
+        .get() as { n: number };
+      assert.ok(intoUtil.n >= 1, "caller.ts still resolves into util.ts, at the new ids");
+    } finally {
+      db.close();
+    }
+  } finally {
+    rmSync(repo, { recursive: true, force: true });
+    rmSync(work, { recursive: true, force: true });
+  }
 });
