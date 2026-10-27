@@ -17,7 +17,7 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { getServer } from "./lib/manifest.mjs";
-import { approvalSecretEnvName, approvalSecretFile, ensureApprovalSecret, httpClientEntry, httpEnvNames, readEnvFile, taskCreateArgs, taskDeniedHint, taskXml, writeEnvFile } from "./serve-http.mjs";
+import { approvalSecretEnvName, approvalSecretFile, ensureApprovalSecret, httpClientEntry, httpEnvNames, parseListenerPid, readEnvFile, restartServer, taskCreateArgs, taskDeniedHint, taskXml, writeEnvFile } from "./serve-http.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), "serve-http-test-"));
@@ -186,4 +186,47 @@ test("MCP-ISSUE-104: the approval secret is created once, reused, and readable b
   // A start that stopped between creating the (empty, restricted) file and writing the secret: start over.
   fs.writeFileSync(file, "");
   assert.match(ensureApprovalSecret(file), /^[0-9a-f]{64}$/);
+});
+
+const NETSTAT = (pid) => `Active Connections\r\n\r\n  Proto  Local Address          Foreign Address        State           PID\r\n  TCP    127.0.0.1:7341         0.0.0.0:0              LISTENING       ${pid}\r\n  TCP    127.0.0.1:7342         0.0.0.0:0              LISTENING       999\r\n`;
+
+test("parseListenerPid picks the LISTENING pid for exactly that port", () => {
+  assert.equal(parseListenerPid(NETSTAT(111), 7341), 111);
+  assert.equal(parseListenerPid(NETSTAT(111), "7342"), 999);
+  assert.equal(parseListenerPid(NETSTAT(111), 734), null);
+});
+
+test("--restart kills the supervisor tree, runs the task and returns old -> new pid", async () => {
+  const server = getServer("codebase-index");
+  const calls = [];
+  let listener = 111;
+  let clock = 1000;
+  const exec = (cmd, args) => {
+    calls.push([cmd, ...args]);
+    if (cmd === "netstat") return NETSTAT(listener ?? 0).replace(/LISTENING\s+0/, "TIME_WAIT      0");
+    if (cmd === "taskkill") { listener = null; return ""; }
+    if (cmd === "schtasks") { listener = 222; return ""; }
+    if (args.join(" ").includes("ParentProcessId")) return "50\r\n";
+    return "5000\r\n"; // start time, after `startedAt`
+  };
+  const out = await restartServer(server, 7341, { exec, sleep: async () => { clock += 10; }, now: () => clock });
+  assert.deepEqual(out, { oldPid: 111, newPid: 222 });
+  assert.deepEqual(calls.find((c) => c[0] === "taskkill"), ["taskkill", "/T", "/F", "/PID", "50"]);
+  const run = calls.find((c) => c[0] === "schtasks");
+  assert.deepEqual(run, ["schtasks", "/Run", "/TN", "mcp-local\\codebase-index-http"]);
+  assert.ok(calls.findIndex((c) => c[0] === "taskkill") < calls.findIndex((c) => c[0] === "schtasks"));
+});
+
+test("--restart does not accept the old pid or a stale start time as the new listener", async () => {
+  const server = getServer("codebase-index");
+  let clock = 1000;
+  const exec = (cmd, args) => {
+    if (cmd === "netstat") return NETSTAT(333);
+    if (cmd === "powershell") return args.join(" ").includes("ParentProcessId") ? "0" : "10"; // started before the restart
+    return "";
+  };
+  await assert.rejects(
+    restartServer(server, 7341, { exec, sleep: async () => { clock += 100; }, now: () => clock, timeoutMs: 1000 }),
+    /no new listener on port 7341/
+  );
 });

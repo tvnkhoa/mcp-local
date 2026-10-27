@@ -9,6 +9,8 @@
  *   node scripts/serve-http.mjs --server codebase-index --task register # ... and registered
  *   node scripts/serve-http.mjs --server codebase-index --task unregister
  *
+ *   node scripts/serve-http.mjs --server codebase-index --restart       # kill the tree on its port, /Run the task, wait for the new listener
+ *
  * Flags: --config <path> (default ~/.claude/mcp/http/<key>.env.json), --log <path>.
  *
  * The served process takes its whole env from the env file, `{ "env": { ... } }`, which
@@ -235,6 +237,55 @@ function runTask(server, mode, envFile, logFile) {
   throw new Error(`--task must be print, register or unregister, got ${mode}`);
 }
 
+/** `netstat -ano -p TCP` output: the pid LISTENING on `port`, or null. */
+export function parseListenerPid(netstatOut, port) {
+  for (const line of netstatOut.split(/\r?\n/)) {
+    const m = line.trim().match(/^TCP\s+\S+:(\d+)\s+\S+\s+LISTENING\s+(\d+)$/i);
+    if (m && m[1] === String(port)) return Number(m[2]);
+  }
+  return null;
+}
+
+const defaultExec = (cmd, args) => execFileSync(cmd, args, { encoding: "utf-8" });
+const defaultSleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+function psNumber(exec, script) {
+  const n = Number(exec("powershell", ["-NoProfile", "-NonInteractive", "-Command", script]).trim());
+  return Number.isFinite(n) && n > 0 ? n : null;
+}
+
+function listenerOn(exec, port) {
+  return parseListenerPid(exec("netstat", ["-ano", "-p", "TCP"]), port);
+}
+
+/**
+ * `--restart`: `schtasks /End` does not stop the supervisor, so stop the tree that owns the port instead:
+ * the listener's parent (the serve-http supervisor; the listener itself when it has none) with `taskkill /T`,
+ * then `schtasks /Run` and wait for a NEW listener, one with another pid whose start time is after the
+ * restart began. Every command goes through `exec(cmd, argsArray)`, so the test stubs the machine.
+ * Resolves `{ oldPid, newPid }`.
+ */
+export async function restartServer(server, port, { exec = defaultExec, sleep = defaultSleep, now = Date.now, timeoutMs = 60000 } = {}) {
+  const oldPid = listenerOn(exec, port);
+  if (oldPid !== null) {
+    const parent = psNumber(exec, `(Get-CimInstance Win32_Process -Filter "ProcessId=${oldPid}").ParentProcessId`);
+    const target = parent !== null && parent !== process.pid ? parent : oldPid;
+    exec("taskkill", ["/T", "/F", "/PID", String(target)]);
+    for (let i = 0; i < 50 && listenerOn(exec, port) !== null; i++) await sleep(200);
+  }
+  const startedAt = now();
+  exec("schtasks", ["/Run", "/TN", taskName(server)]);
+  while (now() < startedAt + timeoutMs) {
+    const pid = listenerOn(exec, port);
+    if (pid !== null && pid !== oldPid) {
+      const start = psNumber(exec, `[DateTimeOffset]::new((Get-Process -Id ${pid}).StartTime).ToUnixTimeMilliseconds()`);
+      if (start !== null && start >= startedAt) return { oldPid, newPid: pid };
+    }
+    await sleep(500);
+  }
+  throw new Error(`${server.key}: no new listener on port ${port} within ${timeoutMs} ms of /Run ${taskName(server)}`);
+}
+
 function serve(server, envFile, logFile) {
   const names = httpEnvNames(server);
   const env = readEnvFile(envFile);
@@ -261,8 +312,8 @@ function serve(server, envFile, logFile) {
   });
 }
 
-function main() {
-  const args = parseArgs(process.argv.slice(2), {}, { config: ["--config"], log: ["--log"], task: ["--task"] });
+async function main() {
+  const args = parseArgs(process.argv.slice(2), { restart: ["--restart"] }, { config: ["--config"], log: ["--log"], task: ["--task"] });
   if (args.servers.length !== 1) throw new Error("pass exactly one --server <key>");
   const [server] = resolveServers(args.servers);
   if (httpEnvNames(server) === null) {
@@ -270,6 +321,13 @@ function main() {
   }
   const envFile = path.resolve(args.config ?? defaultEnvFile(server));
   const logFile = args.log ? path.resolve(args.log) : null;
+  if (args.restart) {
+    const port = readEnvFile(envFile)?.[httpEnvNames(server).port];
+    if (!port) throw new Error(`${envFile} must set ${httpEnvNames(server).port}`);
+    const { oldPid, newPid } = await restartServer(server, port);
+    ok(`${server.key}: restarted, pid ${oldPid ?? "none"} -> ${newPid}`);
+    return;
+  }
   if (args.task) {
     runTask(server, args.task, envFile, logFile ?? defaultLogFile(server));
     return;
@@ -278,10 +336,8 @@ function main() {
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {
-  try {
-    main();
-  } catch (e) {
+  main().catch((e) => {
     err(e.message);
     process.exit(1);
-  }
+  });
 }

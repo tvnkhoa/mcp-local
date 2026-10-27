@@ -323,7 +323,9 @@ node scripts/install-mcp.mjs --server codebase-index --transport stdio  # back t
   (`PREVIEW_OWNED_BY_ANOTHER_SESSION`; MCP-ISSUE-108, below). A client leaving does not stop a watcher or the
   process.
 - **Dev cycle changes:** after `npm run build`, `/mcp` reconnects to the *running* process; it does not
-  restart it. Stop and start `serve-http` (or `schtasks /End` then `/Run` on the task) to load a new build.
+  restart it. Run `node scripts/serve-http.mjs --server <key> --restart` to load a new build: it kills the
+  tree that owns the port, `schtasks /Run`s the task, waits for a new listener and prints `old -> new` pid
+  (`schtasks /End` does not stop the supervisor).
   `mcp:doctor`'s `[running]` check reports a served process older than `dist/`.
 
 #### After the served process restarts
