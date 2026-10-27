@@ -10,7 +10,7 @@ description: "Change how codebase-index-mcp decides what to re-index, and prove 
 | `mode` | Files considered | Pruning | Notes |
 |---|---|---|---|
 | `full` | every file the scan sees | yes, if the scan was not capped by `maxFiles` | also clears and rebuilds this repo's outbound `cross_repo_deps` |
-| `incremental` | every file; unchanged hashes are skipped, then the scope widens (step 3a) | yes, if the scan was not capped | fast-skips the whole run when the gate below passes |
+| `incremental` | after a HEAD move, what git names (MCP-ISSUE-106, `planGitScopedIncremental`): the diff from the last complete run's commit, plus the dirty set, plus every path indexed dirty since; then the scope widens (step 3a). Otherwise (its `scope` ends `tree walk: <reason>`) every file, unchanged hashes skipped | git-scoped: only files deleted since the base commit; a walk: yes, if the scan was not capped | fast-skips the whole run when the gate below passes |
 | `dirty` | working-tree-changed files (porcelain v2: both sides of a rename), plus files the refactor engine wrote (`pendingReindex`), then the scope widens (step 3a) | only files deleted from the working tree | the R1 gate's refresh. Use `full` after a branch switch |
 
 ## The decision path

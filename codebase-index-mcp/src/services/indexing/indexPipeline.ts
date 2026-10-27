@@ -48,7 +48,7 @@ import { ExtractionWorkerPool } from "../extractors/extractionWorkerPool.js";
 import { extractDotnetProjectData } from "../extractors/dotnetProjectParser.js";
 import { createIndexProgress, indexLog, indexWarn, type IndexProgress } from "./indexProgress.js";
 import { resolveIndexRunLimits } from "./runLimits.js";
-import { scanRepoFiles, toPosixRelative } from "./fileScan.js";
+import { existsWithExactCase, scanRepoFiles, toPosixRelative, type DirListings } from "./fileScan.js";
 import {
   assessRunHealth,
   buildRunSummary,
@@ -105,6 +105,8 @@ export type RunIndexInput = {
    * index_repository(mode="dirty") to re-index just the git working-tree delta.
    */
   onlyRelativePaths?: Set<string>;
+  /** The commit the caller scoped the run to (MCP-ISSUE-106), recorded instead of HEAD as read at the start. */
+  commitSha?: string;
 };
 
 // v2: ISSUE-023 string-literal lane — bump buộc evaluateIncrementalSkip không skip để repo cũ repopulate lane.
@@ -170,7 +172,7 @@ export async function runIndexPipeline(store: GraphStore, input: RunIndexInput):
   const identity: RunIdentity = {
     runId: randomUUID(),
     repoId: input.repoId,
-    commitSha: resolveHeadCommitSha(input.repoPath),
+    commitSha: input.commitSha ?? resolveHeadCommitSha(input.repoPath),
     branch: resolveCurrentBranch(input.repoPath),
     indexVersion: INDEX_VERSION,
     mode: input.mode,
@@ -201,9 +203,12 @@ export async function runIndexPipeline(store: GraphStore, input: RunIndexInput):
   const progress = input.progress ?? createIndexProgress(input.repoId);
   progress.phase("scanning");
 
+  /** One readdir per directory per run, for the scoped filter and the prune below (`existsWithExactCase`). */
+  const dirListings: DirListings = new Map();
   const { files, knownPackageNames, droppedByPath, gitAware } = await scanRepoFiles(
     {
       ...input,
+      dirListings,
       ...(input.onlyRelativePaths && {
         indexedCsprojPaths: store.listIndexedFiles(input.repoId).map((f) => f.path).filter((p) => p.endsWith(".csproj"))
       })
@@ -301,7 +306,8 @@ export async function runIndexPipeline(store: GraphStore, input: RunIndexInput):
 
   if (scoped && input.onlyRelativePaths) {
     for (const rel of input.onlyRelativePaths) {
-      if (store.getFileHash(input.repoId, rel) !== null && !existsSync(path.join(input.repoPath, rel))) deletedInTree.push(rel);
+      // Exact spelling: after a case-only rename the old name still "exists" on Windows and macOS.
+      if (store.getFileHash(input.repoId, rel) !== null && !existsWithExactCase(input.repoPath, rel, dirListings)) deletedInTree.push(rel);
     }
     if (deletedInTree.length > 0) {
       captureBefore(deletedInTree);
@@ -746,9 +752,9 @@ export async function runIndexPipeline(store: GraphStore, input: RunIndexInput):
     // as "degraded" would describe the wrong thing.
     const health = assessRunHealth(c, input.mode);
     const runStatus = wasCancelled ? "cancelled" : health.degraded ? "degraded" : "ok";
-    // Record the annotation scan only when it covered the whole repo: a dirty run or a capped or
+    // Record the annotation scan only when it covered the whole repo: a dirty or git-scoped run, or a capped or
     // cancelled one saw a subset, and the next complete run must still re-scan the rest.
-    if (!wasCancelled && input.mode !== "dirty" && files.length <= maxFiles) {
+    if (!wasCancelled && !input.onlyRelativePaths && files.length <= maxFiles) {
       store.setAnnotationKey(input.repoId, annotationKey);
     }
     for (const reason of health.reasons) {

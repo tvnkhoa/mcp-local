@@ -14,7 +14,7 @@
  * The decision functions it calls (skip? which profile?) live in `runPolicy.ts`.
  */
 
-import { createIndexProgress, indexLog, type ProgressNotifier } from "./indexProgress.js";
+import { createIndexProgress, indexLog, indexWarn, type ProgressNotifier } from "./indexProgress.js";
 import { resolvePostPhasePolicy } from "../../config/performanceConfig.js";
 import { collectDirtyFiles, resolveCurrentBranch, resolveHeadCommitSha } from "../git/gitHelpers.js";
 import type { GraphStore } from "../../repositories/graphStore.js";
@@ -25,6 +25,7 @@ import type { IndexMode, IndexRunResult } from "../../types/index.js";
 import {
   buildSkippedRunSummary,
   evaluateIncrementalSkip,
+  planGitScopedIncrementalFor,
   newerBuildRefusal,
   resolvePerformanceProfileDecision,
   safeCrossRepoResolve,
@@ -176,6 +177,10 @@ export function createIndexRunner(options: IndexRunnerOptions): RunIndexAndResol
   // Dirty mode (ENH-A): re-index only the git working-tree delta (unstaged + staged +
   // untracked). Sub-second refresh for "what I just edited" without a full/incremental scan.
   let dirtyFileSet: Set<string> | undefined;
+  /** MCP-ISSUE-106: how an incremental run chose its files, appended to its `scope`. */
+  let gitScope: string | undefined;
+  /** MCP-ISSUE-106: the HEAD the git-scoped plan diffed to; the run records it. */
+  let plannedHead: string | undefined;
   if (mode === "dirty") {
     dirtyFileSet = extras.knownDirtyPaths ? new Set(extras.knownDirtyPaths) : collectDirtyFiles(repoPath);
     // MCP-ISSUE-042: union in files the refactor engine wrote. After a rollback the tree is clean
@@ -221,6 +226,18 @@ export function createIndexRunner(options: IndexRunnerOptions): RunIndexAndResol
       indexLog(`[index-skip] repoId=${repoId} reason=${skipDecision.reason}`);
       return skippedSummary;
     }
+    // MCP-ISSUE-106: after a HEAD move the run read and hashed every file to find the few that changed (13.6 s
+    // for none on wec.aria). Git names them: the run is scoped like a dirty run — deletes pruned, dependents
+    // re-extracted — unless the plan cannot vouch for the result, and then it walks the tree as before.
+    const plan = planGitScopedIncrementalFor(store, repoId, repoPath, { ...(limits.respectGitignore !== undefined && { respectGitignore: limits.respectGitignore }) });
+    if (plan.kind === "scoped") {
+      dirtyFileSet = plan.paths;
+      plannedHead = plan.headSha;
+      gitScope = `git-scoped from ${plan.baseSha.slice(0, 12)}: ${String(plan.paths.size)} path(s) (${String(plan.diffPaths)} from the diff, ${String(plan.carriedDirty)} indexed dirty since)`;
+    } else {
+      gitScope = `tree walk: ${plan.reason}`;
+    }
+    indexLog(`[index-scope] repoId=${repoId} incremental ${gitScope}`);
   }
 
   // Release L (MCP-ISSUE-095): a full / incremental run over a dirty tree indexes working-tree content; recorded so
@@ -275,6 +292,7 @@ export function createIndexRunner(options: IndexRunnerOptions): RunIndexAndResol
     ...(limits.inlineParseMaxFiles !== undefined && { inlineParseMaxFiles: limits.inlineParseMaxFiles }),
     ...(sharedParsePool && { sharedWorkerPool: sharedParsePool() }),
     onlyRelativePaths: dirtyFileSet,
+    ...(plannedHead && { commitSha: plannedHead }),
     progress
   });
   // Release J: the pipeline found a scoped run cannot be exact (a config file, or too many dependents)
@@ -283,6 +301,7 @@ export function createIndexRunner(options: IndexRunnerOptions): RunIndexAndResol
     progress.stop(`↻ index ${repoId} · ${mode} run escalated to full · ${summary.scopeEscalation}`);
     return escalateToFull(summary.scopeEscalation);
   }
+  if (gitScope) summary.scope = summary.scope ? `${summary.scope}; ${gitScope}` : gitScope;
   // Release K3: present on a scoped (non-escalated) run; absent means "run every pass repo-wide".
   const scopeInputs = mode !== "full" ? summary.scopeInputs : undefined;
   // Release K3: a scoped run that wrote and removed nothing left the graph as the last run left it, and
@@ -670,6 +689,14 @@ export function createIndexRunner(options: IndexRunnerOptions): RunIndexAndResol
     performanceProfile,
     ...(escalatedBecause ? { scope: escalatedBecause } : {})
   };
+  // G1 review 2: an incremental run read its files from whatever HEAD was checked out at the time. If HEAD is not the
+  // commit the run started at, some reads came from another tree: record no commit, so neither the fast skip nor
+  // the next git-scoped plan trusts this run as a base (both then read every file).
+  if (mode === "incremental" && fullSummary.commitSha && resolveHeadCommitSha(repoPath) !== fullSummary.commitSha) {
+    indexWarn(`[index-scope] repoId=${repoId} HEAD moved during the run (started at ${fullSummary.commitSha.slice(0, 12)}): no commit recorded`);
+    fullSummary.commitSha = null;
+    fullSummary.scope = `${fullSummary.scope ? `${fullSummary.scope}; ` : ""}HEAD moved during the run: no commit recorded`;
+  }
   store.recordRun(fullSummary);
   if (treeDirtyAtStart) store.markRunTreeDirty(fullSummary.runId);
   // Whatever the refactor engine wrote has now been through the graph (MCP-ISSUE-042).

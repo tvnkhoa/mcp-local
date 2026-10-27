@@ -316,3 +316,30 @@ export function getLatestWorkRunMode(db: Database.Database, repoId: string): str
     .get(repoId) as { mode: string } | undefined;
   return row?.mode ?? null;
 }
+
+/** MCP-ISSUE-106: one work run as the git-scoped incremental plan reads it (see `planGitScopedIncremental`). */
+export type WorkRunTrace = {
+  mode: string;
+  status: string;
+  startedAt: string | null;
+  finishedAt: string | null;
+  commitSha: string | null;
+  indexVersion: string | null;
+  treeKey: string | null;
+  treeDirty: boolean;
+};
+
+/**
+ * MCP-ISSUE-106: the repo's work runs (fast-skips left out), newest first, at most `limit`. Same order as
+ * `getLatestRun`.
+ */
+export function listRecentWorkRuns(db: Database.Database, repoId: string, limit: number): WorkRunTrace[] {
+  const rows = db
+    .prepare(
+      `select mode, status, started_at as startedAt, finished_at as finishedAt, commit_sha as commitSha, index_version as indexVersion, tree_key as treeKey, tree_dirty as treeDirty
+       from index_runs where repo_id = ? and skip_reason is null
+       order by finished_at desc, started_at desc, rowid desc limit ?`
+    )
+    .all(repoId, limit) as Array<Omit<WorkRunTrace, "treeDirty"> & { treeDirty: number | null }>;
+  return rows.map((r) => ({ ...r, treeDirty: r.treeDirty === 1 }));
+}

@@ -161,6 +161,7 @@ import {
   listRepositoriesImpl
 } from "../services/impact/impactAnalyzer.js";
 import { initGraphSchema, runGraphMigrations } from "./schema.js";
+import { purgeRepositoryImpl, type PurgeCounts } from "./repoPurgeStore.js";
 import {
   replaceAnnotationsForFileImpl,
   rebuildCommentsFtsImpl,
@@ -175,7 +176,7 @@ import {
   type CitationRow,
   type CommentHit
 } from "./annotationsStore.js";
-import { recordRun as recordRunImpl, getLatestRun as getLatestRunImpl, markRunTrigger as markRunTriggerImpl, getLatestWorkRunMode as getLatestWorkRunModeImpl, markRunTreeDirty as markRunTreeDirtyImpl, getLatestWorkRunTreeDirty as getLatestWorkRunTreeDirtyImpl, markRunTreeKey as markRunTreeKeyImpl, getLatestRunTreeKey as getLatestRunTreeKeyImpl, getLatestFullRunVersion as getLatestFullRunVersionImpl } from "./runStore.js";
+import { recordRun as recordRunImpl, getLatestRun as getLatestRunImpl, markRunTrigger as markRunTriggerImpl, getLatestWorkRunMode as getLatestWorkRunModeImpl, markRunTreeDirty as markRunTreeDirtyImpl, getLatestWorkRunTreeDirty as getLatestWorkRunTreeDirtyImpl, markRunTreeKey as markRunTreeKeyImpl, getLatestRunTreeKey as getLatestRunTreeKeyImpl, getLatestFullRunVersion as getLatestFullRunVersionImpl, listRecentWorkRuns as listRecentWorkRunsImpl, type WorkRunTrace } from "./runStore.js";
 import {
   type WriteContext,
   prepareWriteStatements,
@@ -470,6 +471,11 @@ export class GraphStore {
     return getLatestRunTreeKeyImpl(this.db, repoId);
   }
 
+  /** MCP-ISSUE-106: see `listRecentWorkRuns` in runStore.ts. */
+  listRecentWorkRuns(repoId: string, limit: number): WorkRunTrace[] {
+    return listRecentWorkRunsImpl(this.db, repoId, limit);
+  }
+
   /** MCP-ISSUE-101 part 5: see `getLatestFullRunVersion` in runStore.ts. */
   getLatestFullRunVersion(repoId: string): string | null {
     return getLatestFullRunVersionImpl(this.db, repoId);
@@ -757,6 +763,11 @@ export class GraphStore {
 
   runReadOnlyGraphQuery(sql: string, namedParams: Record<string, string | number | boolean | null>, limit: number, timeoutMs?: number): { columns: string[]; rows: Record<string, unknown>[]; rowCount: number; truncated: boolean; elapsedMs: number; timedOut: boolean } {
     return runReadOnlyGraphQueryImpl(this.db, sql, namedParams, limit, timeoutMs);
+  }
+
+  /** MCP-ISSUE-105: delete every row of one repo in every table; returns rows removed per table. */
+  purgeRepository(repoId: string): PurgeCounts {
+    return purgeRepositoryImpl(this.db, repoId);
   }
 
   rebuildFts(): void {

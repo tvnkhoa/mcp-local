@@ -10,12 +10,16 @@ import { readDirtyLedger, recordDirtyLedger } from "../../middleware/freshness.j
 import {
   collectDirtyFiles,
   getRepoWorkingTreeState,
+  gitPathPrefix,
+  hasWorkingTreeChanges,
   parseStatusPorcelainV2,
   parseStatusPorcelainV2Entries,
   readStatusEntriesAsync,
+  readWorkingTreeState,
   readWorkingTreeStateAsync,
   stillDirty,
-  summarizeWorkingTree
+  summarizeWorkingTree,
+  underPrefix
 } from "./gitHelpers.js";
 
 /**
@@ -140,5 +144,46 @@ test("the gate's tree read, the run's dirty set and the dirty ledger are one set
   } finally {
     rmSync(dir, { recursive: true, force: true });
     rmSync(lockDir, { recursive: true, force: true });
+  }
+});
+
+test("MCP-ISSUE-107: a repo at a subdirectory of its git root reads repoPath-relative paths and nothing outside it", async () => {
+  const root = mkdtempSync(path.join(tmpdir(), "cim-107-"));
+  const sub = path.join(root, "sub");
+  const git = (...a: string[]) => execFileSync("git", a, { cwd: root, encoding: "utf8" });
+  try {
+    git("init", "-q");
+    git("config", "user.email", "t@t");
+    git("config", "user.name", "t");
+    mkdirSync(sub);
+    for (const f of ["sub/x.ts", "sub/old.ts", "sub/leaves.ts", "outside.ts", "arrives.ts"]) writeFileSync(path.join(root, f), `// ${f}\n`);
+    git("add", ".");
+    git("commit", "-qm", "init");
+    assert.equal(gitPathPrefix(sub), "sub/");
+    assert.equal(underPrefix("sub/x.ts", "sub/"), "x.ts");
+    assert.equal(underPrefix("subway.ts", "sub/"), null, "a sibling sharing the prefix's letters is outside");
+
+    writeFileSync(path.join(root, "outside.ts"), "// changed\n"); // dirty outside sub/ only
+    assert.deepEqual(readWorkingTreeState(sub).dirty, [], "a change elsewhere in the git root is not this repo's");
+    assert.equal(hasWorkingTreeChanges(sub), false, "the fast skip ignores it too");
+
+    writeFileSync(path.join(sub, "x.ts"), "// changed\n");
+    assert.deepEqual(readWorkingTreeState(sub).dirty, ["x.ts"]);
+    assert.deepEqual((await readWorkingTreeStateAsync(sub)).dirty, ["x.ts"]);
+    assert.deepEqual([...collectDirtyFiles(sub)], ["x.ts"]);
+    assert.equal(hasWorkingTreeChanges(sub), true);
+
+    git("mv", "sub/old.ts", "sub/new.ts"); // inside: origin stays repoPath-relative
+    git("mv", "sub/leaves.ts", "left.ts"); // out of sub/: a delete from sub/'s side
+    git("mv", "arrives.ts", "sub/arrived.ts"); // into sub/: an add, no origin
+    const { entries } = await readStatusEntriesAsync(sub);
+    const byPath = new Map(entries.map((e) => [e.path, e]));
+    assert.deepEqual([...byPath.keys()].sort(), ["arrived.ts", "leaves.ts", "new.ts", "x.ts"]);
+    assert.equal(byPath.get("new.ts")?.origPath, "old.ts");
+    assert.equal(byPath.get("arrived.ts")?.origPath, undefined);
+    assert.equal(byPath.get("leaves.ts")?.xy, "D.");
+    assert.deepEqual(readWorkingTreeState(sub).dirty.sort(), ["arrived.ts", "leaves.ts", "new.ts", "old.ts", "x.ts"]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
   }
 });

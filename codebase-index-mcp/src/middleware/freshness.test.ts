@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -10,9 +10,11 @@ import { pathToFileURL } from "node:url";
 
 import Database from "better-sqlite3";
 
-import { applyFreshness, computeTreeKey, createFreshnessGate, liveRunMarkers, pathsChangedSince, readDirtyLedger, recordDirtyLedger, tryAcquireLock, UNREADABLE, watcherRunPlan, type RepoTreeState, type TreeKey } from "./freshness.js";
+import { parseStatusPorcelainV2 } from "../services/git/gitHelpers.js";
+import { applyFreshness, computeTreeKey, createFreshnessGate, clearRepairNeeded, liveRunMarkers, pathsChangedSince, readDirtyLedger, readRepairNeeded, recordDirtyLedger, removeRepoStateFiles, tryAcquireLock, UNREADABLE, watcherRunPlan, type RepoTreeState, type TreeKey } from "./freshness.js";
 import { GraphStore } from "../repositories/graphStore.js";
 import { createIndexRunner } from "../services/indexing/indexRunner.js";
+import { runIndexPipeline } from "../services/indexing/indexPipeline.js";
 import { readWorkingTreeState } from "../services/git/gitHelpers.js";
 import type { IndexMode, IndexRunResult } from "../types/index.js";
 
@@ -331,11 +333,31 @@ test("MCP-ISSUE-101: an unchanged dirty tree is fresh with no run; a touch alone
     fs.utimesSync(file, t, t);
     assert.deepEqual(await h.gate.ensureFresh("r"), { state: "fresh" }, "touched, same bytes: still covered");
     assert.equal(h.runs.length, 1);
-    fs.writeFileSync(file, "export const a = 2;\n"); // same size, new content
-    fs.utimesSync(file, t, t); // and the same mtime: only the content says it changed
+    // A different SIZE, so the (size, mtime, ctime) hash cache cannot hit whatever the filesystem clock does.
+    fs.writeFileSync(file, "export const a = 22;\n");
     assert.equal((await h.gate.ensureFresh("r")).state, "refreshed", "a content change refreshes");
     assert.deepEqual(await h.gate.ensureFresh("r"), { state: "fresh" });
     assert.equal(h.runs.length, 2, "exactly one more run");
+  } finally { h.cleanup(); }
+});
+
+test("MCP-ISSUE-101: a same-size edit with the mtime set back is seen through ctime — KNOWN RESIDUAL: within one filesystem timestamp tick it is not", async () => {
+  const h = harness({ budgetMs: 1000, autoFinish: true, keyStore: new Map() });
+  try {
+    const file = path.join(h.lockDir, "edited.ts");
+    fs.writeFileSync(file, "export const a = 1;\n");
+    h.setTree({ head: "aaa111", dirty: ["edited.ts"] });
+    assert.equal((await h.gate.ensureFresh("r")).state, "refreshed");
+    const t = new Date(Date.now() + 60_000);
+    fs.utimesSync(file, t, t);
+    await h.gate.ensureFresh("r"); // the hash cache now holds this stamp
+    // Wait out the timestamp tick, so the write below gets a later ctime than the cached stamp.
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    fs.writeFileSync(file, "export const a = 2;\n"); // same size, new content
+    fs.utimesSync(file, t, t); // and the same mtime: only ctime (moved by the write and by utimes) says it changed
+    assert.equal((await h.gate.ensureFresh("r")).state, "refreshed", "ctime is part of the cache identity");
+    // The residual, not asserted because it depends on the filesystem clock: an edit that keeps size AND mtime
+    // and lands in the same ctime tick as the stamp the cache holds hits the cache and is not re-hashed.
   } finally { h.cleanup(); }
 });
 
@@ -482,23 +504,28 @@ const CHILD = `
 import { GraphStore } from ${JSON.stringify(pathToFileURL(path.resolve("src/repositories/graphStore.ts")).href)};
 import { createFreshnessGate } from ${JSON.stringify(pathToFileURL(path.resolve("src/middleware/freshness.ts")).href)};
 import { runIndexPipeline } from ${JSON.stringify(pathToFileURL(path.resolve("src/services/indexing/indexPipeline.ts")).href)};
-const [dbPath, lockDir, repoPath] = process.argv.slice(2);
+import fs from "node:fs";
+const [dbPath, lockDir, repoPath, runMode = "full", pathsFile] = process.argv.slice(2);
+const only = pathsFile ? JSON.parse(fs.readFileSync(pathsFile, "utf8")) : undefined;
 const store = new GraphStore(dbPath);
 store.ensureRepository("r", repoPath);
 const gate = createFreshnessGate({ enabled: true, budgetMs: 0, lockDir, getRepoPath: () => repoPath, getIndexedCommit: () => null, readTree: () => ({ head: null, dirty: [] }), run: async () => { throw new Error("unused"); } });
 let told = false;
+let ticks = 0;
+const killAfter = Number(process.argv[7] ?? 1);
 await gate.serialize("r", () => runIndexPipeline(store, {
-  repoId: "r", repoPath, mode: "full", maxFiles: 5000, batchSize: 10, subtxSize: 5, parseWorkers: 0,
-  onProgress: () => { if (!told) { told = true; process.stdout.write("midrun\\n"); } }
-}));
+  repoId: "r", repoPath, mode: runMode, maxFiles: 5000, batchSize: 10, subtxSize: 5, parseWorkers: 0,
+  ...(only && { onlyRelativePaths: new Set(only) }),
+  onProgress: () => { ticks += 1; if (!told && ticks >= killAfter) { told = true; process.stdout.write("midrun\\n"); } }
+}), runMode, only);
 store.close();
 process.stdout.write("done\\n");
 `;
 
-function startChild(lockDir: string, repoDir: string): { child: ChildProcess; lines: string[]; waitFor: (line: string) => Promise<void> } {
+function startChild(lockDir: string, repoDir: string, extra: string[] = []): { child: ChildProcess; lines: string[]; waitFor: (line: string) => Promise<void> } {
   const script = path.join(lockDir, "child.mts");
   fs.writeFileSync(script, CHILD);
-  const child = spawn(process.execPath, ["--import", "tsx", script, path.join(lockDir, "x.db"), lockDir, repoDir.replace(/\\/g, "/")], {
+  const child = spawn(process.execPath, ["--import", "tsx", script, path.join(lockDir, "x.db"), lockDir, repoDir.replace(/\\/g, "/"), ...extra], {
     stdio: ["ignore", "pipe", "pipe"]
   });
   const lines: string[] = [];
@@ -561,12 +588,100 @@ test("MCP-ISSUE-101 part 5: a marker left by a killed process is not a run in pr
     c.child.kill("SIGKILL");
     await new Promise((resolve) => c.child.once("exit", resolve));
     assert.ok(fs.readdirSync(h.lockDir).some((n) => n.startsWith("running-r-")), "the killed run left its marker");
-    assert.deepEqual(await h.gate.ensureFresh("r"), { state: "fresh" });
+    assert.deepEqual(liveRunMarkers(h.lockDir, "r", 60_000, Date.now()), [], "not live");
     assert.ok(!fs.readdirSync(h.lockDir).some((n) => n.startsWith("running-r-")), "the dead pid's marker is removed");
+    assert.deepEqual(readRepairNeeded(h.lockDir, "r")?.mode, "full", "but it is remembered: the index was left part-written");
   } finally {
     h.cleanup();
     rmSync(repo, { recursive: true, force: true });
   }
+});
+
+test("MCP-ISSUE-101 F4: after a FULL run was killed mid-way, a query from another gate is never fresh, and the repair equals a full run", async () => {
+  const h = harness({ budgetMs: 1000, autoFinish: true });
+  const repo = bigRepo();
+  const cleanDir = mkdtempSync(path.join(tmpdir(), "cim-clean-"));
+  const dbPath = path.join(h.lockDir, "x.db");
+  const shape = (db: Database.Database): Record<string, number> => {
+    const n = (sql: string): number => (db.prepare(sql).get() as { n: number }).n;
+    return {
+      symbols: n("select count(*) as n from symbols where repo_id = 'r'"),
+      edges: n("select count(*) as n from edges where repo_id = 'r'"),
+      unresolved: n("select count(*) as n from edges where repo_id = 'r' and to_id like 'callee:%'"),
+      files: n("select count(*) as n from files where repo_id = 'r'")
+    };
+  };
+  // The runner, not the bare pipeline: the edge-resolve passes live in the runner, so only through it does "unresolved" mean something.
+  const limits = { subtxSize: 5, checkpointEveryNBatches: 1, largeFileThresholdBytes: 512 * 1024, maxFileSizeBytes: 500 * 1024, parseWorkers: 0, parseJobTimeoutMs: 20_000 };
+  const runnerFor = (store: GraphStore) => createIndexRunner({ store, limits, resolvePerformanceProfileOverride: () => "standard" });
+  const fullRun = (store: GraphStore): Promise<unknown> => runnerFor(store)("r", repo, "full", false, 5000, 50);
+  try {
+    const c = startChild(h.lockDir, repo);
+    await c.waitFor("midrun");
+    c.child.kill("SIGKILL");
+    await new Promise((resolve) => c.child.once("exit", resolve));
+
+    // another process's gate: the tree is clean and HEAD is the indexed commit, so only the dead marker tells
+    const store = new GraphStore(dbPath);
+    const modes: string[] = [];
+    const gate = createFreshnessGate({
+      enabled: true,
+      budgetMs: 120_000,
+      lockDir: h.lockDir,
+      getRepoPath: () => repo,
+      getIndexedCommit: () => "aaa111",
+      readTree: () => ({ head: "aaa111", dirty: [] }),
+      run: async (_id, _path, mode) => {
+        modes.push(mode);
+        return runnerFor(store)("r", repo, mode, false, 5000, 50);
+      }
+    });
+    const first = await gate.ensureFresh("r");
+    assert.notEqual(first.state, "fresh", JSON.stringify(first));
+    assert.deepEqual(modes, ["full"], "the repair is a full run");
+    assert.deepEqual(await gate.ensureFresh("r"), { state: "fresh" }, "repaired once, then fresh");
+    assert.deepEqual(modes, ["full"]);
+    assert.equal(readRepairNeeded(h.lockDir, "r"), null);
+
+    const clean = new GraphStore(path.join(cleanDir, "y.db"));
+    clean.ensureRepository("r", repo);
+    await fullRun(clean);
+    const probe = new Database(dbPath);
+    const probeClean = new Database(path.join(cleanDir, "y.db"));
+    try {
+      assert.deepEqual(shape(probe), shape(probeClean), "the repaired index equals a full run of the same tree");
+      assert.ok((shape(probe).edges ?? 0) > 400, "and the run really resolved edges");
+      assert.ok((shape(probeClean).unresolved ?? 0) < (shape(probeClean).edges ?? 0), "calls to helper() resolved: unresolved is below the edge total");
+    } finally {
+      probe.close();
+      probeClean.close();
+      clean.close();
+      store.close();
+    }
+  } finally {
+    h.cleanup();
+    rmSync(cleanDir, { recursive: true, force: true });
+    rmSync(repo, { recursive: true, force: true });
+  }
+});
+
+test("MCP-ISSUE-101 F4: a dead marker that names its mode asks for a full repair; one without a mode (older build) and a live one do not", () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "cim-repair-"));
+  try {
+    fs.writeFileSync(path.join(dir, "running-old-999999-1.json"), JSON.stringify({ pid: 999999, at: 1 }));
+    assert.deepEqual(liveRunMarkers(dir, "old", 60_000, Date.now()), []);
+    assert.equal(readRepairNeeded(dir, "old"), null);
+    fs.writeFileSync(path.join(dir, `running-live-${String(process.pid)}-1.json`), JSON.stringify({ pid: process.pid, at: Date.now(), mode: "full" }));
+    assert.equal(liveRunMarkers(dir, "live", 60_000, Date.now()).length, 1);
+    assert.equal(readRepairNeeded(dir, "live"), null);
+    fs.writeFileSync(path.join(dir, "running-dead-999999-1.json"), JSON.stringify({ pid: 999999, at: 5, mode: "dirty", repoId: "dead" }));
+    liveRunMarkers(dir, "dead", 60_000, Date.now());
+    assert.equal(readRepairNeeded(dir, "dead")?.mode, "dirty");
+    assert.equal(readRepairNeeded(dir, "dead")?.pid, 999999);
+    assert.equal(readRepairNeeded(dir, "dead")?.at, 5);
+    clearRepairNeeded(dir, "dead");
+    assert.equal(readRepairNeeded(dir, "dead"), null);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
 test("MCP-ISSUE-101 part 5: a marker older than staleRunMs is ignored even if its pid is alive (pid reuse)", async () => {
@@ -655,4 +770,312 @@ test("MCP-ISSUE-101 part 5: getLatestFullRunVersion reads the latest ok FULL run
     store.close();
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test("MCP-ISSUE-101 F2: a dirty path that stays unreadable stops forcing runs after N checks, and the answer still reports it", async () => {
+  const h = harness({ budgetMs: 1000, autoFinish: true });
+  const bad = "bad\0name.ts"; // stat throws a non-ENOENT error: keyed UNREADABLE
+  try {
+    h.setTree({ head: "aaa111", dirty: [bad] });
+    for (let i = 0; i < 3; i++) await h.gate.ensureFresh("r");
+    const settled = h.runs.length;
+    assert.ok(settled >= 1 && settled <= 3, `${String(settled)} runs while the path was being given up on`);
+    for (let i = 0; i < 4; i++) {
+      const note = await h.gate.ensureFresh("r");
+      assert.equal(note.state, "fresh");
+      assert.deepEqual(note.unreadable, [bad]);
+    }
+    assert.equal(h.runs.length, settled, "a capped path starts no further run");
+    const answer = applyFreshness({ coverage: { confidence: "high", knownGaps: [] } }, await h.gate.ensureFresh("r")) as { coverage: { knownGaps: string[] }; freshness: { unreadable: string[] } };
+    assert.match(answer.coverage.knownGaps[0] ?? "", /could not be read/);
+    assert.deepEqual(answer.freshness.unreadable, [bad]);
+    // another dirty file still triggers its run
+    h.setTree({ head: "aaa111", dirty: [bad, "ok.ts"] });
+    writeFileSync(path.join(h.lockDir, "ok.ts"), "x");
+    await h.gate.ensureFresh("r");
+    assert.equal(h.runs.length, settled + 1);
+    assert.deepEqual(h.runs.at(-1)?.dirtyPaths, ["ok.ts"]);
+  } finally { h.cleanup(); }
+});
+
+test("run markers are matched per exact repoId: `a` does not see the run of `a-b`, and an old-form marker still counts for its repo", () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "cim-markers-"));
+  try {
+    const live = { pid: process.pid, at: Date.now() };
+    writeFileSync(path.join(dir, `running-a-b-${String(process.pid)}-1.json`), JSON.stringify({ ...live, repoId: "a-b" }));
+    assert.deepEqual(liveRunMarkers(dir, "a", 60_000, Date.now()), []);
+    assert.equal(liveRunMarkers(dir, "a-b", 60_000, Date.now()).length, 1);
+    // written before markers named their repo: matched on the name alone
+    writeFileSync(path.join(dir, `running-a-${String(process.pid)}-2.json`), JSON.stringify(live));
+    assert.equal(liveRunMarkers(dir, "a", 60_000, Date.now()).length, 1);
+    assert.equal(liveRunMarkers(dir, "a-b", 60_000, Date.now()).length, 1);
+    // two ids that sanitize to one name: the marker's own repoId decides, and the other repo's file is left alone
+    writeFileSync(path.join(dir, `running-x_y-${String(process.pid)}-3.json`), JSON.stringify({ ...live, repoId: "x/y" }));
+    assert.deepEqual(liveRunMarkers(dir, "x y", 60_000, Date.now()), []);
+    assert.equal(liveRunMarkers(dir, "x/y", 60_000, Date.now()).length, 1);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("a live run of `a-b` does not make the gate of `a` answer refreshing", async () => {
+  const h = harness({ budgetMs: 1000, autoFinish: true });
+  try {
+    writeFileSync(path.join(h.lockDir, `running-a-b-${String(process.pid)}-1.json`), JSON.stringify({ pid: process.pid, at: Date.now(), repoId: "a-b" }));
+    assert.deepEqual(await h.gate.ensureFresh("a"), { state: "fresh" });
+    assert.equal((await h.gate.ensureFresh("a-b")).state, "refreshing");
+  } finally { h.cleanup(); }
+});
+
+test("MCP-ISSUE-101 F3: a change inside a dirty submodule moves the key and reaches the dirty run as its own file", async () => {
+  const root = mkdtempSync(path.join(tmpdir(), "cim-sub-"));
+  const git = (cwd: string, ...args: string[]): string =>
+    execFileSync("git", ["-c", "protocol.file.allow=always", "-c", "user.name=t", "-c", "user.email=t@t", ...args], { cwd, encoding: "utf8" });
+  const subSrc = path.join(root, "subsrc");
+  const parent = path.join(root, "parent");
+  mkdirSync(subSrc);
+  mkdirSync(parent);
+  git(subSrc, "init", "-q");
+  writeFileSync(path.join(subSrc, "a.ts"), "export const a = 1;\n");
+  git(subSrc, "add", "a.ts");
+  git(subSrc, "commit", "-q", "-m", "s");
+  git(parent, "init", "-q");
+  git(parent, "submodule", "add", "-q", subSrc, "sub");
+  git(parent, "commit", "-q", "-m", "p");
+  try {
+    writeFileSync(path.join(parent, "sub", "a.ts"), "export const a = 2;\n");
+    const tree = (): RepoTreeState => parseStatusPorcelainV2(git(parent, "status", "--porcelain=v2", "--branch", "-z", "--untracked-files=all")) as RepoTreeState;
+    assert.deepEqual(tree().dirty, ["sub"], "git reports the dirty submodule as ONE directory entry");
+    const k1 = await computeTreeKey(parent, tree());
+    assert.match(k1.files["sub"] ?? "", /^submodule:[0-9a-f]{40}$/);
+    assert.ok(k1.files["sub/a.ts"] && k1.files["sub/a.ts"] !== "deleted", "the dirty file inside is keyed");
+    writeFileSync(path.join(parent, "sub", "a.ts"), "export const a = 3;\n");
+    const k2 = await computeTreeKey(parent, tree());
+    assert.notEqual(k2.files["sub/a.ts"], k1.files["sub/a.ts"]);
+    assert.deepEqual(pathsChangedSince(k1, k2), ["sub/a.ts"], "the edit inside the submodule is seen");
+    writeFileSync(path.join(parent, "sub", "b.ts"), "export const b = 1;\n");
+    assert.deepEqual(pathsChangedSince(k2, await computeTreeKey(parent, tree())), ["sub/b.ts"], "a new untracked file inside is seen");
+
+    // through the gate: the run gets the files inside, never the directory entry
+    const h = harness({ budgetMs: 1000, autoFinish: true, repoDir: parent });
+    h.setTree({ head: "aaa111", dirty: ["sub"] });
+    await h.gate.ensureFresh("r");
+    assert.deepEqual(h.runs.at(-1)?.dirtyPaths, ["sub/a.ts", "sub/b.ts"]);
+    writeFileSync(path.join(parent, "sub", "a.ts"), "export const a = 4;\n");
+    await h.gate.ensureFresh("r");
+    assert.equal(h.runs.length, 2);
+    assert.deepEqual(h.runs.at(-1)?.dirtyPaths, ["sub/a.ts"]);
+    await h.gate.ensureFresh("r");
+    assert.equal(h.runs.length, 2, "nothing changed: no run");
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("MCP-ISSUE-101 F4: a repair that keeps failing is tried twice, then the gate answers stale and says what to run", async () => {
+  const h = harness({ budgetMs: 1000, autoFinish: true, status: () => "failed" });
+  try {
+    fs.writeFileSync(path.join(h.lockDir, "running-r-999999-1.json"), JSON.stringify({ pid: 999999, at: 1, mode: "full", repoId: "r" }));
+    const first = await h.gate.ensureFresh("r");
+    assert.equal(first.state, "stale", "the run failed");
+    assert.equal((await h.gate.ensureFresh("r")).state, "stale");
+    assert.deepEqual(h.runs.map((r) => r.mode), ["full", "full"], "two repair attempts");
+    assert.equal(readRepairNeeded(h.lockDir, "r")?.attempts, 2);
+    const third = await h.gate.ensureFresh("r");
+    assert.equal(third.state, "stale");
+    assert.match(third.reason ?? "", /repair failed 2 times; run index_repository mode full/);
+    assert.equal(h.runs.length, 2, "no third run");
+    // an index_repository full run of any caller clears the flag and the gate is fresh again
+    await h.gate.serialize("r", async () => ({ status: "ok" }), "full");
+    assert.equal(readRepairNeeded(h.lockDir, "r"), null);
+    assert.deepEqual(await h.gate.ensureFresh("r"), { state: "fresh" });
+  } finally { h.cleanup(); }
+});
+
+test("MCP-ISSUE-101 F4: a killed repair is counted too (the attempt is written before the run starts)", async () => {
+  const h = harness({ budgetMs: 1000 }); // the fake run never finishes until released
+  try {
+    fs.writeFileSync(path.join(h.lockDir, "running-r-999999-1.json"), JSON.stringify({ pid: 999999, at: 1, mode: "incremental", repoId: "r" }));
+    void h.gate.ensureFresh("r");
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.equal(readRepairNeeded(h.lockDir, "r")?.attempts, 1, "counted while still running");
+    h.finishRun();
+  } finally { h.cleanup(); }
+});
+
+test("MCP-ISSUE-101 F4: a marker older than staleRunMs whose holder is still alive is remembered, so its later death cannot leave fresh", () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "cim-expired-"));
+  try {
+    fs.writeFileSync(path.join(dir, `running-r-${String(process.pid)}-1.json`), JSON.stringify({ pid: process.pid, at: 1_000, mode: "full", repoId: "r" }));
+    assert.deepEqual(liveRunMarkers(dir, "r", 60_000, 1_000_000), [], "ignored as a live run");
+    assert.equal(readRepairNeeded(dir, "r")?.mode, "full", "but remembered for its mode");
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("MCP-ISSUE-101 F4: every dead run leaves its own flag file, so concurrent deaths are not lost; the flag mode is the most thorough one", () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "cim-merge-"));
+  try {
+    const dead = (n: number, body: object): void => fs.writeFileSync(path.join(dir, `running-r-999999-${String(n)}.json`), JSON.stringify({ pid: 999999, at: n, repoId: "r", ...body }));
+    dead(1, { mode: "dirty" });
+    dead(2, { mode: "dirty" });
+    liveRunMarkers(dir, "r", 60_000, Date.now());
+    const flags = readRepairNeeded(dir, "r");
+    assert.equal(flags?.flags.length, 2, "two dead runs, two flags");
+    assert.equal(flags?.mode, "dirty");
+    dead(3, { mode: "incremental" });
+    liveRunMarkers(dir, "r", 60_000, Date.now());
+    assert.equal(readRepairNeeded(dir, "r")?.flags.length, 3);
+    assert.equal(readRepairNeeded(dir, "r")?.mode, "incremental");
+    assert.ok(!fs.readdirSync(dir).some((n) => n.endsWith(".tmp")), "written by rename: no temp file is left");
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("MCP-ISSUE-101 F4: a flag file that cannot be parsed counts as a full repair, never as nothing wrong", async () => {
+  const h = harness({ budgetMs: 1000, autoFinish: true });
+  try {
+    fs.writeFileSync(path.join(h.lockDir, "repair-r-999999-1700000000000-1.json"), "{\"mode\":\"dir"); // half-written
+    assert.equal(readRepairNeeded(h.lockDir, "r")?.mode, "full");
+    const note = await h.gate.ensureFresh("r");
+    assert.notEqual(note.state, "fresh", JSON.stringify(note));
+    assert.deepEqual(h.runs.map((r) => r.mode), ["full"]);
+    assert.equal(readRepairNeeded(h.lockDir, "r"), null, "cleared by the finished repair");
+  } finally { h.cleanup(); }
+});
+
+test("MCP-ISSUE-101 F4: a repair clears only the flags it started with; a run that died meanwhile stays flagged", async () => {
+  const h = harness({ budgetMs: 1000 }); // the fake run waits until released
+  try {
+    fs.writeFileSync(path.join(h.lockDir, "running-r-999999-1.json"), JSON.stringify({ pid: 999999, at: 1, mode: "full", repoId: "r" }));
+    const first = h.gate.ensureFresh("r"); // starts the repair run, which waits
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    // another process's run dies while the repair works
+    fs.writeFileSync(path.join(h.lockDir, "repair-r-424242-1700000000001-1.json"), JSON.stringify({ repoId: "r", mode: "full", pid: 424242, at: 2 }));
+    h.finishRun();
+    await first;
+    const left = readRepairNeeded(h.lockDir, "r");
+    assert.equal(left?.flags.length, 1, "only the flag written during the run is left");
+    assert.equal(left?.pid, 424242);
+    // and a full run that began after that flag clears it
+    await h.gate.serialize("r", async () => ({ status: "ok" }), "full");
+    assert.equal(readRepairNeeded(h.lockDir, "r"), null);
+  } finally { h.cleanup(); }
+});
+
+test("MCP-ISSUE-101 F4: a full run does not clear a flag written while it ran (snapshot taken at its start)", async () => {
+  const h = harness({ budgetMs: 1000, autoFinish: true });
+  try {
+    fs.writeFileSync(path.join(h.lockDir, "repair-r-111-1700000000000-1.json"), JSON.stringify({ repoId: "r", mode: "full", pid: 111, at: 1 }));
+    await h.gate.serialize("r", async () => {
+      fs.writeFileSync(path.join(h.lockDir, "repair-r-222-1700000000001-1.json"), JSON.stringify({ repoId: "r", mode: "full", pid: 222, at: 2 }));
+      return { status: "ok" };
+    }, "full");
+    assert.deepEqual(readRepairNeeded(h.lockDir, "r")?.flags, ["repair-r-222-1700000000001-1.json"]);
+  } finally { h.cleanup(); }
+});
+
+test("MCP-ISSUE-101 F4: repair flags of `a` and `a-b` do not mix", () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "cim-repair-ab-"));
+  try {
+    fs.writeFileSync(path.join(dir, "repair-a-b-1-2-3.json"), JSON.stringify({ repoId: "a-b", mode: "full", pid: 1, at: 1 }));
+    assert.equal(readRepairNeeded(dir, "a"), null);
+    assert.equal(readRepairNeeded(dir, "a-b")?.flags.length, 1);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("MCP-ISSUE-101 F4: a killed DIRTY run — dependents included — is repaired by a full run and the index equals a clean full run", async () => {
+  const h = harness({ budgetMs: 1000, autoFinish: true });
+  const repo = bigRepo();
+  const cleanDir = mkdtempSync(path.join(tmpdir(), "cim-clean-"));
+  const limits = { subtxSize: 5, checkpointEveryNBatches: 1, largeFileThresholdBytes: 512 * 1024, maxFileSizeBytes: 500 * 1024, parseWorkers: 0, parseJobTimeoutMs: 20_000 };
+  const dbPath = path.join(h.lockDir, "x.db");
+  const shape = (db: Database.Database): Record<string, number> => {
+    const n = (sql: string): number => (db.prepare(sql).get() as { n: number }).n;
+    return {
+      symbols: n("select count(*) as n from symbols where repo_id = 'r'"),
+      edges: n("select count(*) as n from edges where repo_id = 'r'"),
+      unresolved: n("select count(*) as n from edges where repo_id = 'r' and to_id like 'callee:%'"),
+      files: n("select count(*) as n from files where repo_id = 'r'")
+    };
+  };
+  try {
+    // 1. a complete index of the tree
+    const first = new GraphStore(dbPath);
+    first.ensureRepository("r", repo);
+    await createIndexRunner({ store: first, limits, resolvePerformanceProfileOverride: () => "standard" })("r", repo, "full", false, 5000, 50);
+    first.close();
+    // 2. ONE file changes and its rows shift: every file importing it is a dependent the dirty run queues after it
+    fs.writeFileSync(path.join(repo, "src/util.ts"), "// moved\n// down\nexport function helper(): number {\n  return 1;\n}\n");
+    const edited = ["src/util.ts"];
+    // 3. the dirty run is killed after a few progress ticks, i.e. once some of those dependents were re-extracted
+    const pathsFile = path.join(h.lockDir, "paths.json");
+    fs.writeFileSync(pathsFile, JSON.stringify(edited));
+    const c = startChild(h.lockDir, repo, ["dirty", pathsFile, "2"]);
+    await c.waitFor("midrun");
+    c.child.kill("SIGKILL");
+    await new Promise((resolve) => c.child.once("exit", resolve));
+    const killed = new Database(dbPath);
+    try {
+      const util = killed.prepare("select content_hash as h from files where repo_id = 'r' and path = 'src/util.ts'").get() as { h: string };
+      assert.ok(util.h.length > 0, "the dirty run had written util.ts");
+    } finally { killed.close(); }
+
+    // 4. another process's gate sees a clean tree at the indexed HEAD, and repairs
+    const store = new GraphStore(dbPath);
+    const run = createIndexRunner({ store, limits, resolvePerformanceProfileOverride: () => "standard" });
+    const modes: string[] = [];
+    const gate = createFreshnessGate({
+      enabled: true,
+      budgetMs: 120_000,
+      lockDir: h.lockDir,
+      getRepoPath: () => repo,
+      getIndexedCommit: () => "aaa111",
+      readTree: () => ({ head: "aaa111", dirty: [] }),
+      run: async (id, p, mode, dirtyPaths) => {
+        modes.push(mode);
+        return run(id, p, mode, false, 5000, 50, dirtyPaths ? { knownDirtyPaths: dirtyPaths } : undefined);
+      }
+    });
+    const note = await gate.ensureFresh("r");
+    assert.notEqual(note.state, "fresh", JSON.stringify(note));
+    assert.deepEqual(modes, ["full"], "a dead dirty run is repaired by a full run: the dependents it queued cannot be reconstructed");
+    assert.deepEqual(await gate.ensureFresh("r"), { state: "fresh" });
+
+    const clean = new GraphStore(path.join(cleanDir, "y.db"));
+    clean.ensureRepository("r", repo);
+    await createIndexRunner({ store: clean, limits, resolvePerformanceProfileOverride: () => "standard" })("r", repo, "full", false, 5000, 50);
+    const probe = new Database(dbPath);
+    const probeClean = new Database(path.join(cleanDir, "y.db"));
+    try {
+      assert.deepEqual(shape(probe), shape(probeClean), "the repaired index equals a full run of the edited tree");
+      assert.ok((shape(probe).edges ?? 0) > 400);
+    } finally {
+      probe.close();
+      probeClean.close();
+      clean.close();
+      store.close();
+    }
+  } finally {
+    h.cleanup();
+    rmSync(cleanDir, { recursive: true, force: true });
+    rmSync(repo, { recursive: true, force: true });
+  }
+});
+
+test("MCP-ISSUE-101 F4: a dead marker is unlinked only after its repair flag is on disk; a failed write keeps it for the next check", () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "cim-sweep-"));
+  try {
+    const marker = path.join(dir, "running-r-999999-1.json");
+    fs.writeFileSync(marker, JSON.stringify({ pid: 999999, at: 1, mode: "full", repoId: "r" }));
+    assert.deepEqual(liveRunMarkers(dir, "r", 60_000, Date.now(), () => false), [], "the failing writer: not a live run");
+    assert.ok(fs.existsSync(marker), "the marker is kept: it is the only memory of the dead run");
+    assert.equal(readRepairNeeded(dir, "r"), null);
+    liveRunMarkers(dir, "r", 60_000, Date.now()); // the next check, with a working state dir
+    assert.equal(readRepairNeeded(dir, "r")?.mode, "full");
+    assert.ok(!fs.existsSync(marker), "swept once the flag exists");
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("remove_repository's state sweep also removes orphan .tmp flag files of that repo, and only that repo's", () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "cim-tmp-"));
+  try {
+    for (const f of ["repair-r-1-2-3.json.77.tmp", "repairtry-r-1-2-4.json.77.tmp", "repair-r-b-1-2-3.json.77.tmp"]) fs.writeFileSync(path.join(dir, f), "{");
+    assert.deepEqual(removeRepoStateFiles(dir, "r"), ["repair-r-1-2-3.json.77.tmp", "repairtry-r-1-2-4.json.77.tmp"]);
+    assert.deepEqual(fs.readdirSync(dir), ["repair-r-b-1-2-3.json.77.tmp"]);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
 });

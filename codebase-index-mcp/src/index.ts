@@ -220,7 +220,7 @@ const runIndexAndResolve: typeof runIndexUnserialized = (repoId, repoPath, mode,
       // not a git repo
     }
     return result;
-  });
+  }, mode);
 
 async function ensureFresh(repoId: string): Promise<void> {
   const note = await freshnessGate.ensureFresh(repoId);

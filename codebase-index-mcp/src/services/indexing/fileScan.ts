@@ -11,7 +11,7 @@
  * before the first extraction, not accumulated as the batches go by.
  */
 
-import { existsSync, statSync } from "node:fs";
+import { existsSync, readdirSync, statSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 
@@ -28,6 +28,8 @@ export interface FileScanInput {
   readonly mode: string;
   /** Dirty mode (ENH-A): repo-relative POSIX paths to restrict the scan to. */
   readonly onlyRelativePaths?: Set<string>;
+  /** The run's directory cache for `existsWithExactCase`, shared with the pipeline's prune. */
+  readonly dirListings?: DirListings;
   /** Skip files .gitignore excludes (default true; no effect outside git). Env: CODEBASE_INDEX_RESPECT_GITIGNORE. */
   readonly respectGitignore?: boolean;
   /**
@@ -79,7 +81,7 @@ export async function scanRepoFiles(
   };
   const globbed = input.onlyRelativePaths
     ? [...input.onlyRelativePaths]
-        .filter((rel) => !isIgnoredByIndexWalk(rel))
+        .filter((rel) => !isIgnoredByIndexWalk(rel) && existsWithExactCase(input.repoPath, rel, input.dirListings))
         .map((rel) => path.join(input.repoPath, rel))
         .filter(isFile)
         .sort()
@@ -214,4 +216,42 @@ export async function scanRepoFiles(
  */
 export function toPosixRelative(repoPath: string, absolutePath: string): string {
   return path.relative(repoPath, absolutePath).replace(/\\/g, "/");
+}
+
+/**
+ * Whether `rel` exists under `root` spelled exactly so, segment by segment. On a case-insensitive filesystem
+ * (Windows, macOS) `existsSync("src/caller.ts")` is true after `git mv src/caller.ts src/Caller.ts`, so a scoped
+ * run (dirty, or git-scoped incremental: MCP-ISSUE-106) re-read the old spelling and never pruned it, where the walk,
+ * which lists the real names, does.
+ *
+ * `listings` is the run's directory cache, shared by the scan's filter and the pipeline's prune, so each directory
+ * is read once per run however many dirty paths sit in it (a readdir of a 3,000-entry directory is ~1 ms on
+ * Windows). Names compare in NFC: macOS HFS+ returns NFD, git and the index hold NFC, and a mismatch would read
+ * a non-ASCII file as deleted.
+ */
+export type DirListings = Map<string, Set<string> | null>;
+
+export function existsWithExactCase(
+  root: string,
+  rel: string,
+  listings: DirListings = new Map(),
+  readdir: (dir: string) => string[] = readdirSync
+): boolean {
+  if (!existsSync(path.join(root, rel))) return false;
+  let dir = root;
+  for (const segment of rel.split("/")) {
+    if (!segment) continue;
+    let names = listings.get(dir);
+    if (names === undefined) {
+      try {
+        names = new Set(readdir(dir).map((n) => n.normalize("NFC")));
+      } catch {
+        names = null;
+      }
+      listings.set(dir, names);
+    }
+    if (!names?.has(segment.normalize("NFC"))) return false;
+    dir = path.join(dir, segment);
+  }
+  return true;
 }

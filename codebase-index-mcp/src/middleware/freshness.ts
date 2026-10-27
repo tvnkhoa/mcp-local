@@ -17,10 +17,13 @@
  * Claude sessions share one worktree and one index DB) by a lock file beside the DB.
  */
 
+import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
+import { promisify } from "node:util";
 
+import { parseStatusPorcelainV2 } from "../services/git/gitHelpers.js";
 import type { IndexMode, IndexRunResult } from "../types/index.js";
 
 export type FreshnessState = "fresh" | "refreshed" | "refreshing" | "stale";
@@ -28,11 +31,16 @@ export type FreshnessState = "fresh" | "refreshed" | "refreshing" | "stale";
 export type FreshnessNote = {
   state: FreshnessState;
   /** What the gate ran, or found running. */
-  mode?: "incremental" | "dirty";
+  mode?: "full" | "incremental" | "dirty";
   elapsedMs?: number;
   runId?: string;
   /** Why the answer may not reflect the current tree. Absent when `state` is fresh/refreshed. */
   reason?: string;
+  /**
+   * MCP-ISSUE-101 F2: dirty paths the gate gave up on — unreadable on several consecutive checks, so they no
+   * longer force a run. The index holds an older copy of each (or none); the answer says so.
+   */
+  unreadable?: string[];
 };
 
 export type RepoTreeState = {
@@ -72,6 +80,8 @@ export type FreshnessGateOptions = {
   recordCoveredKey?: (repoId: string, runId: string, key: string) => void;
   /** A dirty file larger than this is keyed by its size, not hashed: the index never reads it (its size cap is lower). */
   hashMaxBytes?: number;
+  /** F2: a path unreadable on this many consecutive checks stops forcing runs (default {@link DEFAULT_UNREADABLE_CHECKS}). */
+  unreadableChecks?: number;
   /** Tag a finished run as query-triggered, for `health_check`. Best-effort. */
   markTriggered?: (runId: string) => void;
   /**
@@ -116,7 +126,7 @@ export function freshnessStateDir(dbPath: string): string {
   return dir;
 }
 
-function lockFileFor(lockDir: string, repoId: string): string {
+export function lockFileFor(lockDir: string, repoId: string): string {
   return path.join(lockDir, `${LOCK_PREFIX}${repoId.replace(/[^\w.-]/g, "_")}.lock`);
 }
 
@@ -166,12 +176,31 @@ function runMarkerPrefix(repoId: string): string {
   return `running-${repoId.replace(/[^\w.-]/g, "_")}-`;
 }
 
+/**
+ * A marker's file name is `<prefix><pid>-<seq>.json`. Matching on the prefix alone let repo `a` see the markers of
+ * `a-b` (`running-a-b-…` starts with `running-a-`) and answer `refreshing` for another repo's run; the tail must be
+ * exactly two numbers. A marker written by this build also names its repoId, which settles two ids that sanitize
+ * to the same string; one written before that (no repoId) is matched on its name alone.
+ */
+function isRunMarkerName(prefix: string, name: string): boolean {
+  return name.startsWith(prefix) && /^\d+-\d+\.json$/.test(name.slice(prefix.length));
+}
+
+function markerNamesOtherRepo(file: string, repoId: string): boolean {
+  try {
+    const m = JSON.parse(fs.readFileSync(file, "utf8")) as { repoId?: unknown };
+    return typeof m.repoId === "string" && m.repoId !== repoId;
+  } catch {
+    return false;
+  }
+}
+
 let runMarkerSeq = 0;
 
-function writeRunMarker(lockDir: string, repoId: string, at: number): string | null {
+function writeRunMarker(lockDir: string, repoId: string, at: number, mode?: IndexMode): string | null {
   const file = path.join(lockDir, `${runMarkerPrefix(repoId)}${String(process.pid)}-${String(++runMarkerSeq)}.json`);
   try {
-    fs.writeFileSync(file, JSON.stringify({ pid: process.pid, at }));
+    fs.writeFileSync(file, JSON.stringify({ pid: process.pid, at, repoId, ...(mode && { mode }) }));
     return file;
   } catch {
     return null; // unwritable state dir: the gate degrades as it does for locks
@@ -187,34 +216,212 @@ function removeRunMarker(file: string | null): void {
   }
 }
 
+/**
+ * MCP-ISSUE-101 F4: a run that died mid-way (its pid is gone, its marker is still there) left the index part-written:
+ * a full or incremental run commits files in batches and resolves edges only at the end, and a file whose hash was
+ * stored is skipped by the next scoped run, which then finds nothing re-extracted and skips the resolve passes too.
+ * HEAD still equals the last ok run's commit, so without this the gate answers "fresh". The sweep of a dead marker
+ * that names its mode leaves a repair flag; the gate answers "refreshing" and starts a FULL run, and a successful
+ * full run clears the flags it started with.
+ *
+ * Every mode is repaired by a full run, a dead `dirty` run included: besides its own paths it queued DEPENDENT files
+ * (`queueDependentFiles`) whose rows it rewrote with unresolved tokens under an unchanged hash, and it computed the
+ * names of what it replaced from the half-written rows, so neither set can be reconstructed afterwards. A scoped
+ * repair over the recorded dirty paths was tried and does not cover them.
+ *
+ * The state is one file per dead run (`repair-<repo>-<pid>-<ms>-<seq>.json`, written by temp file + rename) and one
+ * file per started repair (`repairtry-…`), never a file that two processes read-modify-write: a concurrent death or
+ * attempt cannot be lost. A flag file that exists but cannot be parsed counts as a flag (a full repair), never as
+ * "nothing wrong".
+ */
+export type RepairNeeded = {
+  /** The most thorough mode of the dead runs: full > incremental > dirty. */
+  mode: IndexMode;
+  pid: number;
+  at: number;
+  /** Repairs the gate has started for these flags; a repair that is killed or fails leaves its try file. */
+  attempts: number;
+  /** The flag files this read saw: a repair clears exactly these, never one written while it ran. */
+  flags: string[];
+};
+
+/** After this many repairs that failed or were killed, the gate stops starting runs and answers stale. */
+export const MAX_REPAIR_ATTEMPTS = 2;
+
+const MODE_RANK: Record<string, number> = { full: 3, incremental: 2, dirty: 1 };
+
+let repairSeq = 0;
+
+function repairPrefix(kind: "repair" | "repairtry", repoId: string): string {
+  return `${kind}-${repoId.replace(/[^\w.-]/g, "_")}-`;
+}
+
+function isRepairName(prefix: string, name: string): boolean {
+  return name.startsWith(prefix) && /^\d+-\d+-\d+\.json$/.test(name.slice(prefix.length));
+}
+
+/** Write `body` to `file` through a temp file and a rename, so no reader ever sees a partial file. */
+function writeFileAtomic(file: string, body: string): boolean {
+  const tmp = `${file}.${String(process.pid)}.tmp`;
+  try {
+    fs.writeFileSync(tmp, body);
+    fs.renameSync(tmp, file);
+    return true;
+  } catch {
+    try {
+      fs.unlinkSync(tmp);
+    } catch {
+      // nothing to clean
+    }
+    return false;
+  }
+}
+
+function newRepairFile(lockDir: string, kind: "repair" | "repairtry", repoId: string, body: object): boolean {
+  const file = path.join(lockDir, `${repairPrefix(kind, repoId)}${String(process.pid)}-${String(Date.now())}-${String(++repairSeq)}.json`);
+  return writeFileAtomic(file, JSON.stringify({ ...body, repoId }));
+}
+
+function repairNames(lockDir: string, kind: "repair" | "repairtry", repoId: string): string[] {
+  const prefix = repairPrefix(kind, repoId);
+  try {
+    return fs.readdirSync(lockDir).filter((n) => isRepairName(prefix, n) && !markerNamesOtherRepo(path.join(lockDir, n), repoId));
+  } catch {
+    return [];
+  }
+}
+
+/** True when the flag is on disk. */
+function markRepairNeeded(lockDir: string, repoId: string, dead: { mode: IndexMode; pid: number; at: number }): boolean {
+  return newRepairFile(lockDir, "repair", repoId, dead);
+}
+
+/** The gate is about to start a repair run: count it first, so a repair that is killed still counts. */
+function bumpRepairAttempts(lockDir: string, repoId: string): void {
+  newRepairFile(lockDir, "repairtry", repoId, { at: Date.now() });
+}
+
+export function readRepairNeeded(lockDir: string, repoId: string): RepairNeeded | null {
+  const flags = repairNames(lockDir, "repair", repoId);
+  if (flags.length === 0) return null;
+  let mode: IndexMode = "dirty";
+  let pid = 0;
+  let at = 0;
+  for (const name of flags) {
+    let m: { mode?: unknown; pid?: unknown; at?: unknown } = {};
+    try {
+      m = JSON.parse(fs.readFileSync(path.join(lockDir, name), "utf8")) as typeof m;
+    } catch {
+      m = { mode: "full" }; // unreadable or half-written: the safe reading is a full repair
+    }
+    const flagMode: IndexMode = m.mode === "full" || m.mode === "incremental" || m.mode === "dirty" ? m.mode : "full";
+    if ((MODE_RANK[flagMode] ?? 0) > (MODE_RANK[mode] ?? 0)) mode = flagMode;
+    if (typeof m.pid === "number") pid = m.pid;
+    if (typeof m.at === "number" && m.at >= at) at = m.at;
+  }
+  return { mode, pid, at, attempts: repairNames(lockDir, "repairtry", repoId).length, flags };
+}
+
+/** Clear the given flags (those a repair started with) and, once none is left, the attempt count. */
+export function clearRepairNeeded(lockDir: string, repoId: string, flags?: readonly string[]): void {
+  for (const name of flags ?? repairNames(lockDir, "repair", repoId)) {
+    try {
+      fs.unlinkSync(path.join(lockDir, name));
+    } catch {
+      // already gone
+    }
+  }
+  if (repairNames(lockDir, "repair", repoId).length > 0) return;
+  for (const name of repairNames(lockDir, "repairtry", repoId)) {
+    try {
+      fs.unlinkSync(path.join(lockDir, name));
+    } catch {
+      // already gone
+    }
+  }
+}
+
 /** The live run markers for a repo: pid alive and younger than `staleMs`. Dead or stale ones are removed. */
-export function liveRunMarkers(lockDir: string, repoId: string, staleMs: number, now: number): Array<{ pid: number; at: number }> {
+export function liveRunMarkers(
+  lockDir: string,
+  repoId: string,
+  staleMs: number,
+  now: number,
+  /** Injectable for tests: how a dead run's repair flag is written. */
+  writeFlag: typeof markRepairNeeded = markRepairNeeded
+): Array<{ pid: number; at: number }> {
   const prefix = runMarkerPrefix(repoId);
   let names: string[];
   try {
-    names = fs.readdirSync(lockDir).filter((n) => n.startsWith(prefix) && n.endsWith(".json"));
+    names = fs.readdirSync(lockDir).filter((n) => isRunMarkerName(prefix, n));
   } catch {
     return [];
   }
   const live: Array<{ pid: number; at: number }> = [];
   for (const name of names) {
     const file = path.join(lockDir, name);
-    let m: { pid?: number; at?: number } = {};
+    if (markerNamesOtherRepo(file, repoId)) continue;
+    let m: { pid?: number; at?: number; mode?: IndexMode } = {};
     try {
-      m = JSON.parse(fs.readFileSync(file, "utf8")) as { pid?: number; at?: number };
+      m = JSON.parse(fs.readFileSync(file, "utf8")) as typeof m;
     } catch {
       continue; // being written, or just removed
     }
     if (typeof m.pid === "number" && typeof m.at === "number" && pidAlive(m.pid) && now - m.at <= staleMs) {
       live.push({ pid: m.pid, at: m.at });
     } else {
+      // F4: a holder that died mid-run left the index part-written; so may one that outlived `staleMs` and dies
+      // later, so an expired marker is remembered too (a marker of an older build names no mode: skipped).
+      // The marker is the only memory of the dead run until the flag is on disk: if the write fails (an unwritable
+      // state dir) it stays, and the next check sweeps it again — dropping it first would answer "fresh" for good.
+      if (typeof m.pid === "number" && typeof m.mode === "string") {
+        if (!writeFlag(lockDir, repoId, { mode: m.mode, pid: m.pid, at: typeof m.at === "number" ? m.at : 0 })) continue;
+      }
       removeRunMarker(file);
     }
   }
   return live;
 }
 
-function releaseLock(file: string): void {
+/** Default age past which a run marker counts as left by a crashed run (see `FreshnessGateOptions.staleRunMs`). */
+export const DEFAULT_STALE_RUN_MS = 6 * 60 * 60_000;
+
+/**
+ * MCP-ISSUE-105: delete the state files of one repo — dirty ledger, repair flag, run markers. The refresh lock is
+ * NOT removed here: the caller holds it (`tryAcquireLock`) and releases it itself, and a lock someone else holds
+ * is never ours to unlink. A marker
+ * is matched on its exact `<pid>-<seq>.json` tail, so a repo whose id extends this one's is left alone.
+ * Returns the file names removed.
+ */
+export function removeRepoStateFiles(lockDir: string, repoId: string): string[] {
+  const prefix = runMarkerPrefix(repoId);
+  const isMarker = (name: string): boolean => isRunMarkerName(prefix, name) && !markerNamesOtherRepo(path.join(lockDir, name), repoId);
+  const orphanTmp = (name: string): boolean =>
+    ["repair", "repairtry"].some((kind) => {
+      const pre = repairPrefix(kind as "repair" | "repairtry", repoId);
+      return name.startsWith(pre) && /^\d+-\d+-\d+\.json\.\d+\.tmp$/.test(name.slice(pre.length));
+    });
+  const exact = new Set([path.basename(ledgerFileFor(lockDir, repoId)), ...repairNames(lockDir, "repair", repoId), ...repairNames(lockDir, "repairtry", repoId)]);
+  let names: string[];
+  try {
+    names = fs.readdirSync(lockDir);
+  } catch {
+    return [];
+  }
+  const removed: string[] = [];
+  for (const name of names) {
+    if (!exact.has(name) && !isMarker(name) && !orphanTmp(name)) continue;
+    try {
+      fs.unlinkSync(path.join(lockDir, name));
+      removed.push(name);
+    } catch {
+      // already gone
+    }
+  }
+  return removed.sort();
+}
+
+export function releaseLock(file: string): void {
   try {
     const holder = JSON.parse(fs.readFileSync(file, "utf8")) as { pid?: number };
     if (holder.pid === process.pid) fs.unlinkSync(file);
@@ -311,6 +518,14 @@ export const DEFAULT_HASH_MAX_BYTES = 32 * 1024 * 1024;
  * about it. Only ENOENT / ENOTDIR mean `deleted`.
  */
 export const UNREADABLE = "unreadable";
+/**
+ * MCP-ISSUE-101 F2: what the gate keys a path that stayed {@link UNREADABLE} for {@link DEFAULT_UNREADABLE_CHECKS}
+ * consecutive checks. Stable, so the covered key matches it and the path stops forcing a dirty run that cannot
+ * index it; the first readable hash differs from it, so recovery is noticed.
+ */
+export const UNREADABLE_CAPPED = "unreadable-capped";
+export const DEFAULT_UNREADABLE_CHECKS = 3;
+const execFileAsync = promisify(execFile);
 const HASH_CONCURRENCY = 16;
 const HASH_CACHE_MAX = 4096;
 
@@ -339,18 +554,81 @@ async function hashFile(abs: string, maxBytes: number): Promise<string> {
   }
 }
 
-export async function computeTreeKey(repoPath: string, tree: RepoTreeState, maxBytes = DEFAULT_HASH_MAX_BYTES): Promise<TreeKey> {
-  const paths = [...new Set(tree.dirty)].sort();
-  const hashes = new Array<string>(paths.length);
-  let next = 0;
-  const worker = async (): Promise<void> => {
-    while (next < paths.length) {
-      const i = next++;
-      hashes[i] = await hashFile(path.join(repoPath, paths[i] as string), maxBytes);
+/** A dirty directory entry that holds its own `.git` is a submodule: its HEAD plus its own dirty files. */
+const SUBMODULE_GIT_TIMEOUT_MS = 15_000;
+const MAX_SUBMODULE_DEPTH = 3;
+
+async function gitOut(cwd: string, args: string[]): Promise<string> {
+  const { stdout } = await execFileAsync("git", ["-c", "core.quotePath=false", ...args], {
+    cwd,
+    timeout: SUBMODULE_GIT_TIMEOUT_MS,
+    maxBuffer: 64 * 1024 * 1024,
+    windowsHide: true
+  });
+  return stdout;
+}
+
+/** Null when `abs` is not a submodule (no `.git` inside); {@link UNREADABLE} when git cannot be read there. */
+async function readSubmodule(abs: string): Promise<{ key: string; dirty: string[] } | null> {
+  try {
+    await fs.promises.stat(path.join(abs, ".git"));
+  } catch {
+    return null;
+  }
+  try {
+    const head = (await gitOut(abs, ["rev-parse", "HEAD"])).trim();
+    const status = parseStatusPorcelainV2(await gitOut(abs, ["status", "--porcelain=v2", "--branch", "-z", "--untracked-files=all"]));
+    return { key: `submodule:${head}`, dirty: status.dirty };
+  } catch {
+    return { key: UNREADABLE, dirty: [] };
+  }
+}
+
+async function keyEntry(abs: string, maxBytes: number): Promise<{ hash: string; dirty?: string[] }> {
+  try {
+    if ((await fs.promises.stat(abs)).isDirectory()) {
+      const sub = await readSubmodule(abs);
+      return sub ? { hash: sub.key, dirty: sub.dirty } : { hash: "dir" };
     }
-  };
-  await Promise.all(Array.from({ length: Math.min(HASH_CONCURRENCY, paths.length) }, worker));
-  return { head: tree.head ?? "nogit", files: Object.fromEntries(paths.map((rel, i) => [rel, hashes[i] as string])) };
+  } catch {
+    // gone or unreadable: hashFile classifies it
+  }
+  return { hash: await hashFile(abs, maxBytes) };
+}
+
+/**
+ * MCP-ISSUE-101 F3. A dirty directory entry git reports (with `--untracked-files=all` only a submodule can be one)
+ * used to be keyed as the constant `dir`, so a change inside a dirty submodule never moved the key and was never
+ * seen. The indexer walks a submodule's files like any other, so the entry is keyed by the submodule's HEAD and
+ * EXPANDED into the files that are dirty inside it (`sub/x.ts`, each content-hashed like a file of the repo): a
+ * change in the submodule's working tree moves the key and hands the dirty run its files. A submodule that moved to
+ * another commit is seen as a changed key but its changed files are not known without a diff, so that case is
+ * left to an incremental run (registry, MCP-ISSUE-101 F3).
+ */
+export async function computeTreeKey(repoPath: string, tree: RepoTreeState, maxBytes = DEFAULT_HASH_MAX_BYTES): Promise<TreeKey> {
+  const files: Record<string, string> = {};
+  let queue = [...new Set(tree.dirty)].sort();
+  for (let depth = 0; queue.length > 0 && depth <= MAX_SUBMODULE_DEPTH; depth++) {
+    const entries = new Array<{ hash: string; dirty?: string[] }>(queue.length);
+    let next = 0;
+    const level = queue;
+    const worker = async (): Promise<void> => {
+      while (next < level.length) {
+        const i = next++;
+        entries[i] = await keyEntry(path.join(repoPath, level[i] as string), maxBytes);
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(HASH_CONCURRENCY, level.length) }, worker));
+    const more: string[] = [];
+    level.forEach((rel, i) => {
+      const entry = entries[i] as { hash: string; dirty?: string[] };
+      files[rel] = entry.hash;
+      for (const d of entry.dirty ?? []) more.push(`${rel.replace(/\/+$/, "")}/${d}`);
+    });
+    queue = [...new Set(more)].filter((p) => !(p in files)).sort();
+  }
+  const sorted = Object.fromEntries(Object.keys(files).sort().map((rel) => [rel, files[rel] as string]));
+  return { head: tree.head ?? "nogit", files: sorted };
 }
 
 export function serializeTreeKey(key: TreeKey): string {
@@ -400,15 +678,36 @@ export function watcherRunPlan(
 export type FreshnessGate = {
   ensureFresh: (repoId: string) => Promise<FreshnessNote>;
   /** Wraps any index run so runs for one repo in this process never overlap. */
-  serialize: <T>(repoId: string, fn: () => Promise<T>) => Promise<T>;
+  serialize: <T>(repoId: string, fn: () => Promise<T>, mode?: IndexMode) => Promise<T>;
 };
 
 export function createFreshnessGate(opts: FreshnessGateOptions): FreshnessGate {
   const now = opts.now ?? Date.now;
   const checkTtlMs = opts.checkTtlMs ?? 0;
   const staleLockMs = opts.staleLockMs ?? 15 * 60_000;
-  const staleRunMs = opts.staleRunMs ?? 6 * 60 * 60_000;
+  const staleRunMs = opts.staleRunMs ?? DEFAULT_STALE_RUN_MS;
   const hashMaxBytes = opts.hashMaxBytes ?? DEFAULT_HASH_MAX_BYTES;
+  const unreadableChecks = opts.unreadableChecks ?? DEFAULT_UNREADABLE_CHECKS;
+  /** F2: per repo, how many consecutive checks each path was unreadable; and the paths now capped. */
+  const unreadableStreaks = new Map<string, Map<string, number>>();
+  const cappedPaths = new Map<string, string[]>();
+  /** Swap the key's long-unreadable paths for {@link UNREADABLE_CAPPED} (in place); a readable path resets its count. */
+  const capUnreadable = (repoId: string, key: TreeKey): void => {
+    const prev = unreadableStreaks.get(repoId);
+    const streaks = new Map<string, number>();
+    const capped: string[] = [];
+    for (const [p, h] of Object.entries(key.files)) {
+      if (h !== UNREADABLE) continue;
+      const n = (prev?.get(p) ?? 0) + 1;
+      streaks.set(p, n);
+      if (n >= unreadableChecks) {
+        key.files[p] = UNREADABLE_CAPPED;
+        capped.push(p);
+      }
+    }
+    unreadableStreaks.set(repoId, streaks);
+    cappedPaths.set(repoId, capped.sort());
+  };
   /** Without `getCoveredKey`: the key each repo's last completed refresh in THIS process covered. */
   const coveredKey = new Map<string, string>();
   const readCovered = (repoId: string): TreeKey | null => {
@@ -419,17 +718,23 @@ export function createFreshnessGate(opts: FreshnessGateOptions): FreshnessGate {
     }
   };
   const lastCheck = new Map<string, { at: number; note: FreshnessNote }>();
-  type Flight = { mode: "incremental" | "dirty"; startedAt: number; promise: Promise<IndexRunResult | null>; cleanup?: number };
+  type Flight = { mode: "full" | "incremental" | "dirty"; startedAt: number; promise: Promise<IndexRunResult | null>; cleanup?: number };
   const inflight = new Map<string, Flight>();
   const runChain = new Map<string, Promise<unknown>>();
 
-  const serialize = <T>(repoId: string, fn: () => Promise<T>): Promise<T> => {
+  const serialize = <T>(repoId: string, fn: () => Promise<T>, mode?: IndexMode): Promise<T> => {
     const prev = runChain.get(repoId) ?? Promise.resolve();
     // MCP-ISSUE-101 part 5: every run says it is running, for the gates of every process on this DB.
     const marked = async (): Promise<T> => {
-      const marker = writeRunMarker(opts.lockDir, repoId, now());
+      const marker = writeRunMarker(opts.lockDir, repoId, now(), mode);
+      // F4: only the flags that exist now are this run's to clear; a run that dies while this one works leaves its own.
+      const flagsAtStart = mode === "full" ? repairNames(opts.lockDir, "repair", repoId) : [];
       try {
-        return await fn();
+        const result = await fn();
+        // F4: a full run that finished owes the index nothing any more.
+        const status = (result as { status?: unknown } | null | undefined)?.status;
+        if (mode === "full" && status !== "failed" && status !== "cancelled") clearRepairNeeded(opts.lockDir, repoId, flagsAtStart);
+        return result;
       } finally {
         removeRunMarker(marker);
       }
@@ -493,7 +798,9 @@ export function createFreshnessGate(opts: FreshnessGateOptions): FreshnessGate {
 
   const ensureFresh = async (repoId: string): Promise<FreshnessNote> => {
     if (!opts.enabled) return { state: "fresh" };
-    const note = await ensureFreshTree(repoId);
+    const checked = await ensureFreshTree(repoId);
+    const capped = cappedPaths.get(repoId) ?? [];
+    const note: FreshnessNote = capped.length > 0 ? { ...checked, unreadable: capped } : checked;
     const warning = versionWarning(repoId);
     if (!warning) return note;
     if (note.state === "fresh" || note.state === "refreshed") return { ...note, state: "refreshing", reason: warning };
@@ -519,8 +826,18 @@ export function createFreshnessGate(opts: FreshnessGateOptions): FreshnessGate {
       };
     }
 
+    // F4: a run that died mid-way (see RepairNeeded) leaves the index part-written whatever HEAD and the tree say.
+    const repair = readRepairNeeded(opts.lockDir, repoId);
+    if (repair && (repair.attempts ?? 0) >= MAX_REPAIR_ATTEMPTS) {
+      // The repair was started this many times and each was killed or failed: another run would only repeat it.
+      return {
+        state: "stale",
+        mode: repair.mode,
+        reason: `the index was left part-written by a ${repair.mode} run that died, and the repair failed ${String(repair.attempts)} times; run index_repository mode full. This answer comes from a part-written index.`
+      };
+    }
     const cached = lastCheck.get(repoId);
-    if (cached && started - cached.at < (cached.note.state === "fresh" ? checkTtlMs : Math.max(checkTtlMs, 1_000))) return cached.note;
+    if (!repair && cached && started - cached.at < (cached.note.state === "fresh" ? checkTtlMs : Math.max(checkTtlMs, 1_000))) return cached.note;
 
     const repoPath = opts.getRepoPath(repoId);
     if (!repoPath) return { state: "fresh" };
@@ -533,15 +850,20 @@ export function createFreshnessGate(opts: FreshnessGateOptions): FreshnessGate {
     }
     if (!tree.head) return { state: "fresh" };
     const key = await computeTreeKey(repoPath, tree, hashMaxBytes);
+    capUnreadable(repoId, key);
     // The tree read and the hashing may have yielded: a concurrent call for this repo can have started a run meanwhile.
     const startedMeanwhile = inflight.get(repoId);
     if (startedMeanwhile) return waitBudget(repoId, startedMeanwhile);
 
+    // F3: a submodule entry is expanded into its own dirty files (see computeTreeKey); the entry itself is not a file.
+    const isSubmoduleEntry = (p: string): boolean => key.files[p] === "dir" || (key.files[p] ?? "").startsWith("submodule:");
+    const dirtyNow = Object.keys(key.files).filter((p) => !isSubmoduleEntry(p));
+    const treeNow: RepoTreeState = { head: tree.head, dirty: dirtyNow };
     const indexed = opts.getIndexedCommit(repoId);
     const headMoved = !indexed || !sameCommit(tree.head, indexed);
-    const vanished = headMoved ? [] : vanishedDirtyPaths(readDirtyLedger(opts.lockDir, repoId), tree.head, tree.dirty);
+    const vanished = headMoved ? [] : vanishedDirtyPaths(readDirtyLedger(opts.lockDir, repoId), tree.head, dirtyNow);
     const changed = headMoved ? null : pathsChangedSince(readCovered(repoId), key);
-    if (!headMoved && vanished.length === 0 && (tree.dirty.length === 0 || changed?.length === 0)) {
+    if (!repair && !headMoved && vanished.length === 0 && (Object.keys(key.files).length === 0 || changed?.length === 0)) {
       const note: FreshnessNote = { state: "fresh" };
       lastCheck.set(repoId, { at: started, note });
       return note;
@@ -551,7 +873,11 @@ export function createFreshnessGate(opts: FreshnessGateOptions): FreshnessGate {
     // never show it to a dirty run again. It is handed over as a pending re-index; with no way to do
     // that, an incremental run (re-hash everything, prune the gone) clears it.
     const cleanupByDirty = vanished.length > 0 && opts.markPendingReindex !== undefined;
-    const mode: "incremental" | "dirty" = headMoved || (vanished.length > 0 && !cleanupByDirty) ? "incremental" : "dirty";
+    // F3: a submodule that moved to another commit changed files nobody listed; only a full re-hash finds them.
+    const submoduleMoved = (changed ?? []).some((p) => (key.files[p] ?? "").startsWith("submodule:"));
+    const scopedMode: "incremental" | "dirty" = headMoved || submoduleMoved || (vanished.length > 0 && !cleanupByDirty) ? "incremental" : "dirty";
+    // A run that died mid-way, whatever its mode, is repaired by a full one (see RepairNeeded).
+    const mode: "full" | "incremental" | "dirty" = repair ? "full" : scopedMode;
     const refusal = opts.refuseRefresh?.(repoId) ?? null;
     if (refusal) {
       const note: FreshnessNote = { state: "stale", mode, reason: `${refusal} This answer comes from the index as that build wrote it.` };
@@ -569,13 +895,16 @@ export function createFreshnessGate(opts: FreshnessGateOptions): FreshnessGate {
       return note;
     }
 
+    // MCP-ISSUE-101: only the files whose content the covered key does not vouch for (all dirty files without one).
+    const runPaths = mode === "dirty" ? (changed?.filter((p) => !isSubmoduleEntry(p)) ?? dirtyNow) : undefined;
+    if (repair) bumpRepairAttempts(opts.lockDir, repoId);
     const promise = serialize(repoId, () => {
       if (cleanupByDirty) opts.markPendingReindex?.(repoId, vanished);
-      // MCP-ISSUE-101: only the files whose content the covered key does not vouch for (all dirty files without one).
-      return opts.run(repoId, repoPath, mode, mode === "dirty" ? (changed ?? tree.dirty) : undefined);
-    })
+      return opts.run(repoId, repoPath, mode, runPaths);
+    }, mode)
       .then((result) => {
         if (result.status === "failed" || result.status === "cancelled") return result;
+        if (repair) clearRepairNeeded(opts.lockDir, repoId, repair.flags);
         const serialized = serializeTreeKey(key);
         coveredKey.set(repoId, serialized);
         try {
@@ -583,7 +912,7 @@ export function createFreshnessGate(opts: FreshnessGateOptions): FreshnessGate {
         } catch {
           // Best-effort: the next check runs again, it never answers stale.
         }
-        recordDirtyLedger(opts.lockDir, repoId, mode, tree, cleanupByDirty);
+        recordDirtyLedger(opts.lockDir, repoId, mode, treeNow, cleanupByDirty);
         try {
           opts.markTriggered?.(result.runId);
         } catch {
@@ -610,7 +939,19 @@ export function createFreshnessGate(opts: FreshnessGateOptions): FreshnessGate {
  * known-current, and never let `coverage` say `high` about a tree it has not seen.
  */
 export function applyFreshness(payload: unknown, note: FreshnessNote | undefined): unknown {
-  if (!note || note.state === "fresh" || !payload || typeof payload !== "object" || Array.isArray(payload)) return payload;
+  if (!note || !payload || typeof payload !== "object" || Array.isArray(payload)) return payload;
+  if (note.state === "fresh") {
+    // F2: the tree is as current as the gate can make it, but a path it could not read is not in the index.
+    if (!note.unreadable?.length) return payload;
+    const out: Record<string, unknown> = { ...(payload as Record<string, unknown>), freshness: note };
+    const gap = `${String(note.unreadable.length)} changed file(s) could not be read for indexing (${note.unreadable.slice(0, 3).join(", ")}${note.unreadable.length > 3 ? ", ..." : ""}); the index holds an older copy or none`;
+    const coverage = out.coverage;
+    if (coverage && typeof coverage === "object" && !Array.isArray(coverage)) {
+      const c = coverage as { knownGaps?: unknown };
+      out.coverage = { ...c, knownGaps: [...(Array.isArray(c.knownGaps) ? (c.knownGaps as unknown[]) : []), gap] };
+    }
+    return out;
+  }
   const out: Record<string, unknown> = { ...(payload as Record<string, unknown>), freshness: note };
   if (note.state === "refreshed") return out;
   const coverage = out.coverage;

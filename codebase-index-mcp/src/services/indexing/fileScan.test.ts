@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { scanRepoFiles } from "./fileScan.js";
+import { existsWithExactCase, scanRepoFiles, type DirListings } from "./fileScan.js";
 
 /**
  * MCP-ISSUE-066 structural fix. The caller truncates `files` to `maxFiles`, so anything the scan
@@ -106,6 +106,44 @@ test("a dirty run's restricted scan keeps exactly what the full walk would (rele
     const dirty = rel(root, (await scanRepoFiles({ repoId: "r", repoPath: root, mode: "dirty", onlyRelativePaths: all }, 100, true)).files);
     assert.deepEqual(dirty, walked);
     assert.ok(dirty.includes("src/a.ts") && !dirty.includes("src/node_modules/pkg/index.ts") && !dirty.includes("src/build.log"));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("existsWithExactCase: each directory is read once per run, across many paths and both passes (filter, prune)", () => {
+  const root = mkdtempSync(path.join(tmpdir(), "cim-exactcase-"));
+  try {
+    mkdirSync(path.join(root, "src", "a"), { recursive: true });
+    for (const n of ["one.ts", "two.ts", "three.ts"]) writeFileSync(path.join(root, "src", "a", n), "x\n");
+    writeFileSync(path.join(root, "src", "Caller.ts"), "x\n");
+    const reads = new Map<string, number>();
+    const readdir = (dir: string): string[] => {
+      reads.set(dir, (reads.get(dir) ?? 0) + 1);
+      return readdirSync(dir);
+    };
+    const listings: DirListings = new Map();
+    const paths = ["src/a/one.ts", "src/a/two.ts", "src/a/three.ts", "src/Caller.ts", "src/caller.ts"];
+    for (let pass = 0; pass < 2; pass++) {
+      assert.deepEqual(
+        paths.map((p) => existsWithExactCase(root, p, listings, readdir)),
+        [true, true, true, true, false],
+        "the old spelling of a case-only rename does not exist"
+      );
+    }
+    assert.deepEqual([...reads.values()], [1, 1, 1], `one read each for root, src, src/a: ${JSON.stringify([...reads])}`);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("existsWithExactCase: names compare in NFC, so an NFD listing (macOS HFS+) still finds a non-ASCII file", () => {
+  const root = mkdtempSync(path.join(tmpdir(), "cim-exactcase-nfc-"));
+  try {
+    const nfc = "café.ts";
+    writeFileSync(path.join(root, nfc), "x\n");
+    const nfdListing = (): string[] => [nfc.normalize("NFD")];
+    assert.equal(existsWithExactCase(root, nfc, new Map(), nfdListing), true);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

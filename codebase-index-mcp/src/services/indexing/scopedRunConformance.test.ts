@@ -11,6 +11,8 @@ import { GraphStore } from "../../repositories/graphStore.js";
 import { createIndexRunner } from "./indexRunner.js";
 import { runIndexPipeline } from "./indexPipeline.js";
 import { stableId } from "../extractors/extractorPrimitives.js";
+import { readWorkingTreeStateAsync } from "../git/gitHelpers.js";
+import { computeTreeKey } from "../../middleware/freshness.js";
 import type { IndexMode } from "../../types/index.js";
 
 /**
@@ -40,7 +42,7 @@ function makeRepo(files: Record<string, string>): string {
   return root;
 }
 
-async function index(dbPath: string, repoId: string, repoPath: string, mode: IndexMode): Promise<string | undefined> {
+async function index(dbPath: string, repoId: string, repoPath: string, mode: IndexMode, extras: { knownDirtyPaths?: string[] } = {}): Promise<string | undefined> {
   const store = new GraphStore(dbPath);
   try {
     const run = createIndexRunner({
@@ -48,7 +50,7 @@ async function index(dbPath: string, repoId: string, repoPath: string, mode: Ind
       limits: { subtxSize: 20, checkpointEveryNBatches: 1, largeFileThresholdBytes: 512 * 1024, maxFileSizeBytes: 500 * 1024, parseWorkers: 0, parseJobTimeoutMs: 20_000 },
       resolvePerformanceProfileOverride: () => "standard"
     });
-    return (await run(repoId, repoPath.replace(/\\/g, "/"), mode, true, 1000, 50)).scope;
+    return (await run(repoId, repoPath.replace(/\\/g, "/"), mode, true, 1000, 50, extras)).scope;
   } finally {
     store.close();
   }
@@ -435,4 +437,322 @@ test("a run cancelled right after the shifted file's write leaves no edge into a
     rmSync(repo, { recursive: true, force: true });
     rmSync(work, { recursive: true, force: true });
   }
+});
+
+// MCP-ISSUE-106: an incremental run after a HEAD move re-reads only what git names (the diff from the last complete
+// run's commit, the dirty set, and every path indexed while dirty since). Each case moves HEAD and must land on the
+// rows a full run builds on the same tree — or walk the tree, where git cannot vouch for the change.
+
+const G1_BASE: Record<string, string> = {
+  "src/util.ts": "export function helper(): number {\n  return 1;\n}\n\nexport function spare(): number {\n  return 2;\n}\n",
+  "src/caller.ts": 'import { helper } from "./util";\n\nexport function main(): number {\n  return helper();\n}\n',
+  "src/old-name.ts": 'import { spare } from "./util";\n\nexport function useSpare(): number {\n  return spare();\n}\n',
+  "src/doomed.ts": 'import { helper } from "./util";\n\nexport function doomed(): number {\n  return helper() + 1;\n}\n',
+  "docs/notes.md": "# Notes\n\n`helper` and `useSpare` and `doomed`.\n"
+};
+
+const commitAll = (root: string, message: string): void => {
+  git(root, "add", "-A");
+  git(root, "commit", "-q", "-m", message);
+};
+
+/** Record a tree key naming `paths` on the latest run, as the server's wrapper (index.ts) does after every run. */
+function markLatestTreeKey(dbPath: string, paths: string[]): void {
+  const s = new GraphStore(dbPath);
+  try {
+    const latest = s.getLatestRun("r");
+    assert.ok(latest);
+    s.markRunTreeKey(latest.runId, JSON.stringify({ head: latest.commitSha, files: Object.fromEntries(paths.map((p) => [p, "x"])) }));
+  } finally {
+    s.close();
+  }
+}
+
+/** Index G1_BASE full, run `before` then `move` (which moves HEAD), then compare an incremental run with a full run. Returns its scope. */
+async function assertIncrementalAfterMoveEqualsFull(
+  name: string,
+  move: (root: string) => void,
+  before?: (root: string, dbPath: string) => Promise<void>
+): Promise<string> {
+  const repo = makeRepo(G1_BASE);
+  const work = mkdtempSync(path.join(tmpdir(), "cim-g1-db-"));
+  try {
+    const scopedDb = path.join(work, "scoped.db");
+    const fullDb = path.join(work, "full.db");
+    await index(scopedDb, "r", repo, "full");
+    if (before) await before(repo, scopedDb);
+    move(repo);
+    const scope = (await index(scopedDb, "r", repo, "incremental")) ?? "";
+    await index(fullDb, "r", repo, "full");
+    const a = snapshot(scopedDb, "r");
+    const b = snapshot(fullDb, "r");
+    for (const table of Object.keys(b)) assert.deepEqual(a[table], b[table], `${name}: ${table} differs from a full run (${scope})`);
+    ftsIntegrity(scopedDb);
+    return scope;
+  } finally {
+    rmSync(repo, { recursive: true, force: true });
+    rmSync(work, { recursive: true, force: true });
+  }
+}
+
+test("G1: a commit that adds, modifies, deletes and renames files is git-scoped and lands as a full run does", async () => {
+  const scope = await assertIncrementalAfterMoveEqualsFull("commit-amdr", (root) => {
+    writeTree(root, {
+      "src/util.ts": "export function helper(): number {\n  return 10;\n}\n\nexport function spare(): number {\n  return 2;\n}\n",
+      "src/added.ts": 'import { helper } from "./util";\n\nexport function added(): number {\n  return helper();\n}\n'
+    });
+    rmSync(path.join(root, "src/doomed.ts"));
+    git(root, "mv", "src/old-name.ts", "src/new-name.ts");
+    commitAll(root, "amdr");
+  });
+  assert.match(scope, /git-scoped from [0-9a-f]{12}: 5 path\(s\) \(5 from the diff, 0 indexed dirty since\)/, scope);
+});
+
+test("G1: a merge commit is git-scoped and lands as a full run does", async () => {
+  const scope = await assertIncrementalAfterMoveEqualsFull("merge", (root) => {
+    git(root, "checkout", "-q", "-b", "side");
+    writeTree(root, { "src/side.ts": 'import { spare } from "./util";\n\nexport function side(): number {\n  return spare();\n}\n' });
+    commitAll(root, "side");
+    git(root, "checkout", "-q", "-");
+    writeTree(root, { "src/caller.ts": 'import { helper } from "./util";\n\nexport function main(): number {\n  return helper() * 2;\n}\n' });
+    commitAll(root, "main");
+    git(root, "merge", "-q", "--no-ff", "-m", "merge", "side");
+  });
+  assert.match(scope, /git-scoped from [0-9a-f]{12}: 2 path\(s\)/, scope);
+});
+
+test("G1: HEAD moved backwards (checkout of an older commit) is git-scoped and lands as a full run does", async () => {
+  const scope = await assertIncrementalAfterMoveEqualsFull(
+    "backwards",
+    (root) => git(root, "checkout", "-q", "HEAD~1"),
+    async (root, dbPath) => {
+      writeTree(root, { "src/later.ts": 'import { helper } from "./util";\n\nexport function later(): number {\n  return helper();\n}\n' });
+      rmSync(path.join(root, "src/doomed.ts"));
+      commitAll(root, "later");
+      await index(dbPath, "r", root, "incremental");
+    }
+  );
+  assert.match(scope, /git-scoped from [0-9a-f]{12}: 2 path\(s\)/, scope);
+});
+
+test("G1: a .gitignore change walks the tree, and lands as a full run does", async () => {
+  const scope = await assertIncrementalAfterMoveEqualsFull("gitignore", (root) => {
+    writeTree(root, { ".gitignore": "src/doomed.ts\n" });
+    git(root, "rm", "-q", "--cached", "src/doomed.ts");
+    commitAll(root, "ignore doomed");
+  });
+  assert.match(scope, /tree walk: \.gitignore changed/, scope);
+});
+
+test("G1: an untracked new file after a commit is git-scoped and lands as a full run does", async () => {
+  const scope = await assertIncrementalAfterMoveEqualsFull("untracked", (root) => {
+    writeTree(root, { "src/caller.ts": 'import { helper } from "./util";\n\nexport function main(): number {\n  return helper() + 3;\n}\n' });
+    commitAll(root, "edit");
+    writeTree(root, { "src/fresh.ts": 'import { spare } from "./util";\n\nexport function fresh(): number {\n  return spare();\n}\n' });
+  });
+  assert.match(scope, /git-scoped from [0-9a-f]{12}: 2 path\(s\) \(1 from the diff, 0 indexed dirty since\)/, scope);
+});
+
+test("G1: a file indexed dirty by an earlier dirty run and reverted since is re-read through the tree keys", async () => {
+  // The hole: util.ts's edit is indexed by a dirty run, then reverted, and HEAD moves on another file. The edit is
+  // in neither the diff nor the dirty set — only the dirty run's tree key names src/util.ts.
+  const scope = await assertIncrementalAfterMoveEqualsFull(
+    "reverted-dirty",
+    (root) => {
+      git(root, "checkout", "-q", "--", "src/util.ts");
+      writeTree(root, { "src/caller.ts": 'import { helper } from "./util";\n\nexport function main(): number {\n  return helper() + 4;\n}\n' });
+      commitAll(root, "other");
+    },
+    async (root, dbPath) => {
+      writeTree(root, { "src/util.ts": "export function helperRenamed(): number {\n  return 1;\n}\n\nexport function spare(): number {\n  return 2;\n}\n" });
+      await index(dbPath, "r", root, "dirty");
+      markLatestTreeKey(dbPath, ["src/util.ts"]);
+    }
+  );
+  assert.match(scope, /git-scoped from [0-9a-f]{12}: 2 path\(s\) \(1 from the diff, 1 indexed dirty since\)/, scope);
+});
+
+test("G1: a dirty run with no tree key since the base walks the tree", async () => {
+  const scope = await assertIncrementalAfterMoveEqualsFull(
+    "unkeyed-dirty",
+    (root) => {
+      git(root, "checkout", "-q", "--", "src/util.ts");
+      git(root, "commit", "-q", "--allow-empty", "-m", "noop");
+    },
+    async (root, dbPath) => {
+      writeTree(root, { "src/util.ts": "export function helperRenamed(): number {\n  return 1;\n}\n" });
+      await index(dbPath, "r", root, "dirty");
+    }
+  );
+  assert.match(scope, /tree walk: a dirty run over a dirty tree recorded no tree key/, scope);
+});
+
+// MCP-ISSUE-107: a repo registered at a subdirectory of its git root (`codebase-index-mcp` inside `mcp-local`). git
+// prints root-relative paths; the index stores repoPath-relative ones. Before the fix a dirty run re-read nothing and
+// the gate still recorded the tree as covered.
+
+const G2_FILES: Record<string, string> = {
+  "outside.ts": "export const outside = 1;\n",
+  "sub/src/util.ts": "export function helper(): number {\n  return 1;\n}\n",
+  "sub/src/caller.ts": 'import { helper } from "./util";\n\nexport function main(): number {\n  return helper();\n}\n'
+};
+
+/** Index `<root>/sub` full, run `edit` on the root, then compare `run` with a full run of `<root>/sub`. Returns its scope. */
+async function assertSubdirRunEqualsFull(name: string, edit: (root: string) => void, run: (dbPath: string, sub: string) => Promise<string | undefined>): Promise<string> {
+  const root = makeRepo(G2_FILES);
+  const sub = path.join(root, "sub");
+  const work = mkdtempSync(path.join(tmpdir(), "cim-g2-db-"));
+  try {
+    const scopedDb = path.join(work, "scoped.db");
+    const fullDb = path.join(work, "full.db");
+    await index(scopedDb, "r", sub, "full");
+    edit(root);
+    const scope = (await run(scopedDb, sub)) ?? "";
+    await index(fullDb, "r", sub, "full");
+    const a = snapshot(scopedDb, "r");
+    const b = snapshot(fullDb, "r");
+    for (const table of Object.keys(b)) assert.deepEqual(a[table], b[table], `${name}: ${table} differs from a full run (${scope})`);
+    return scope;
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+    rmSync(work, { recursive: true, force: true });
+  }
+}
+
+const renameHelper = (root: string): void =>
+  writeTree(root, {
+    "sub/src/util.ts": "export function helperRenamed(): number {\n  return 1;\n}\n",
+    "outside.ts": "export const outside = 2;\n"
+  });
+
+test("G2: the gate's dirty run on a subdirectory repo re-reads its dirty file (paths from the gate's own tree read)", async () => {
+  const scope = await assertSubdirRunEqualsFull("subdir-gate-dirty", renameHelper, async (dbPath, sub) => {
+    const tree = await readWorkingTreeStateAsync(sub.replace(/\\/g, "/"));
+    assert.deepEqual(tree.dirty, ["src/util.ts"], "repoPath-relative, and nothing from outside repoPath");
+    return index(dbPath, "r", sub, "dirty", { knownDirtyPaths: tree.dirty });
+  });
+  assert.match(scope, /^scoped: 1 changed/, scope);
+});
+
+test("G2: index_repository mode dirty on a subdirectory repo re-reads its dirty file", async () => {
+  const scope = await assertSubdirRunEqualsFull("subdir-dirty", renameHelper, (dbPath, sub) => index(dbPath, "r", sub, "dirty"));
+  assert.match(scope, /^scoped: 1 changed/, scope);
+});
+
+test("G2: the tree key of a subdirectory repo names its dirty file with a content hash", async () => {
+  const root = makeRepo(G2_FILES);
+  try {
+    renameHelper(root);
+    const sub = path.join(root, "sub").replace(/\\/g, "/");
+    const key = await computeTreeKey(sub, await readWorkingTreeStateAsync(sub));
+    assert.deepEqual(Object.keys(key.files), ["src/util.ts"]);
+    assert.match(key.files["src/util.ts"] ?? "", /^[0-9a-f]{16,}$/, "hashed, not `deleted`");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("G2: an incremental run on a subdirectory repo after a commit is git-scoped to repoPath's paths", async () => {
+  const scope = await assertSubdirRunEqualsFull(
+    "subdir-incremental",
+    (root) => {
+      renameHelper(root);
+      commitAll(root, "both sides");
+    },
+    (dbPath, sub) => index(dbPath, "r", sub, "incremental")
+  );
+  assert.match(scope, /git-scoped from [0-9a-f]{12}: 1 path\(s\) \(1 from the diff, 0 indexed dirty since\)/, scope);
+});
+
+// G1 review: a case-only rename. On a case-insensitive filesystem the old spelling still "exists", so a scoped run
+// re-read it under the old name and never pruned it; a full run lists the real name and prunes.
+test("G1 review: a committed case-only rename is git-scoped and lands as a full run does", async () => {
+  const scope = await assertIncrementalAfterMoveEqualsFull("case-rename", (root) => {
+    git(root, "mv", "src/caller.ts", "src/Caller.ts");
+    commitAll(root, "case");
+  });
+  assert.match(scope, /git-scoped from [0-9a-f]{12}: 2 path\(s\)/, scope);
+});
+
+test("G1 review: a staged case-only rename lands as a full run does, dirty and incremental", async () => {
+  await assertScopedEqualsFull("case-rename-staged", G1_BASE, (root) => git(root, "mv", "src/caller.ts", "src/Caller.ts"));
+});
+
+test("G1 review: HEAD moved during a git-scoped run records no commit, so the next run cannot fast-skip over the gap", async () => {
+  // Plan at C2 (util v2), a checkout of C3 (util v3) lands before the files are read, and C2 is checked out again
+  // after the run. Recorded as C2, the index would hold util v3 at a clean C2, and the fast skip would vouch for it.
+  const repo = makeRepo(G1_BASE);
+  const work = mkdtempSync(path.join(tmpdir(), "cim-g1-race-"));
+  const utilV = (n: number): string => `export function helper(): number {\n  return ${String(n)};\n}\n\nexport function spare${String(n)}(): number {\n  return 2;\n}\n`;
+  const head = (): string => execFileSync("git", ["-C", repo, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+  try {
+    const scopedDb = path.join(work, "scoped.db");
+    const fullDb = path.join(work, "full.db");
+    await index(scopedDb, "r", repo, "full");
+    writeTree(repo, { "src/util.ts": utilV(2) });
+    commitAll(repo, "c2");
+    const c2 = head();
+    writeTree(repo, { "src/util.ts": utilV(3) });
+    commitAll(repo, "c3");
+    const c3 = head();
+    git(repo, "checkout", "-q", c2);
+
+    const store = new GraphStore(scopedDb);
+    let raced = false;
+    try {
+      const run = createIndexRunner({
+        store,
+        limits: { subtxSize: 20, checkpointEveryNBatches: 1, largeFileThresholdBytes: 512 * 1024, maxFileSizeBytes: 500 * 1024, parseWorkers: 0, parseJobTimeoutMs: 20_000 },
+        resolvePerformanceProfileOverride: () => "standard",
+        resolveProgressNotifier: () => () => {
+          if (raced) return;
+          raced = true;
+          git(repo, "checkout", "-q", c3);
+        }
+      });
+      const result = await run("r", repo.replace(/\\/g, "/"), "incremental", true, 1000, 50);
+      assert.ok(raced, "the checkout landed during the run");
+      assert.match(result.scope ?? "", /HEAD moved during the run: no commit recorded/, result.scope);
+      assert.equal(store.getLatestRun("r")?.commitSha ?? null, null);
+    } finally {
+      store.close();
+    }
+
+    git(repo, "checkout", "-q", c2);
+    const scope = (await index(scopedDb, "r", repo, "incremental")) ?? "";
+    assert.match(scope, /tree walk: the last complete run recorded no commit/, scope);
+    await index(fullDb, "r", repo, "full");
+    const a = snapshot(scopedDb, "r");
+    const b = snapshot(fullDb, "r");
+    for (const table of Object.keys(b)) assert.deepEqual(a[table], b[table], `race: ${table} differs from a full run (${scope})`);
+  } finally {
+    rmSync(repo, { recursive: true, force: true });
+    rmSync(work, { recursive: true, force: true });
+  }
+});
+
+test("G1 review: a dirty run that finished inside the base run's window (another process) is still carried", async () => {
+  // Runs are listed by finish time. A dirty run from another process that finished while a long full run was still
+  // going sorts below that base, and its dirty paths dropped out of the carry. Simulated by moving the full run's
+  // finish time past the dirty run's, keeping its start before it.
+  const scope = await assertIncrementalAfterMoveEqualsFull(
+    "overlapping-dirty",
+    (root) => {
+      git(root, "checkout", "-q", "--", "src/util.ts");
+      writeTree(root, { "src/caller.ts": 'import { helper } from "./util";\n\nexport function main(): number {\n  return helper() + 5;\n}\n' });
+      commitAll(root, "other");
+    },
+    async (root, dbPath) => {
+      writeTree(root, { "src/util.ts": "export function helperRenamed(): number {\n  return 1;\n}\n\nexport function spare(): number {\n  return 2;\n}\n" });
+      await index(dbPath, "r", root, "dirty");
+      markLatestTreeKey(dbPath, ["src/util.ts"]);
+      const db = new Database(dbPath);
+      try {
+        db.prepare(`update index_runs set finished_at = ? where repo_id = 'r' and mode = 'full'`).run(new Date(Date.now() + 60_000).toISOString());
+      } finally {
+        db.close();
+      }
+    }
+  );
+  assert.match(scope, /git-scoped from [0-9a-f]{12}: 2 path\(s\) \(1 from the diff, 1 indexed dirty since\)/, scope);
 });
