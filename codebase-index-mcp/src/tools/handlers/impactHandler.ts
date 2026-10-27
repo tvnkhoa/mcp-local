@@ -12,7 +12,7 @@ import { notFound } from "@mcp/core";
 import fs from "node:fs";
 import { fileIndexedNote } from "../../middleware/inputGuards.js";
 import { validateReadOnlyGraphSql, validateAllowedTables, QUERY_GRAPH_TABLE_SCOPES, QueryGraphScopeError } from "../../middleware/sqliteGuardrails.js";
-import { buildStaleWarning, getRepoStaleness, collectDirtyFiles, countCommitsBehind } from "../../services/git/gitHelpers.js";
+import { buildStaleWarning, findWorktreeOwner, getRepoStaleness, collectDirtyFiles, countCommitsBehind } from "../../services/git/gitHelpers.js";
 import type { StaleWarning } from "../../services/git/gitHelpers.js";
 import { buildCoverageBlock, summarizeEdgeProvenance } from "../../middleware/coverage.js";
 import { isTestPath } from "../../services/indexing/fileFilter.js";
@@ -764,7 +764,9 @@ export function handleListRepositories(args: { profile?: string }, ctx: HandlerC
   // tool came to answer at a profile it never advertised. Unreachable through the tool now that the
   // schema default applies; kept for direct callers (harnesses) and aligned so the two agree.
   const profile = resolveResponseProfile((args.profile ?? "compact") as Parameters<typeof resolveResponseProfile>[0]);
-  const repos = ctx.store.listRepositories();
+  // MCP-ISSUE-102: `worktreeOf` names the registered main checkout a linked worktree belongs to.
+  const registered = ctx.store.listRepositories();
+  const repos = registered.map((r) => ({ ...r, worktreeOf: findWorktreeOwner(r, registered) }));
   if (profile === "nano") {
     return ctx.asText({
       count: repos.length,

@@ -7,7 +7,7 @@ import { freshnessStateDir, readDirtyLedger, vanishedDirtyPaths } from "../../mi
 import { readStatusEntriesAsync, stillDirty, summarizeWorkingTree, type StatusEntry } from "../../services/git/gitHelpers.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { McpError, ErrorCode } from "@modelcontextprotocol/sdk/types.js";
-import { getRepoStaleness } from "../../services/git/gitHelpers.js";
+import { findWorktreeOwner, getRepoStaleness } from "../../services/git/gitHelpers.js";
 import { assertPathAllowed, clamp } from "../../middleware/indexGuardrails.js";
 import { resolveResponseProfile } from "../../middleware/responseFormatter.js";
 import { resolveDetectChangesPolicy } from "../../services/analysis/policyResolver.js";
@@ -216,6 +216,7 @@ export async function handleHealthCheck(
     },
     latestRun,
     staleness,
+    ...(repo && { worktreeOf: findWorktreeOwner({ repoId: repoId!, repoPath: repo.repoPath }, store.listRepositories()) }),
     ...(repo && { citations: citationStatus(store, repoId!, repo.repoPath) }),
     // MCP-ISSUE-082: the SQL lane's named gaps — a statement no reader recognised is listed, never dropped.
     ...(repo && (() => {

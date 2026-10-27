@@ -149,6 +149,77 @@ export function readHeadShaFromFiles(repoPath: string): string | null {
   }
 }
 
+function realOrNull(p: string): string | null {
+  try {
+    return fs.realpathSync.native(p);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * MCP-ISSUE-102: the git common dir of `repoPath`, as a realpath, read from files (no spawn), or null.
+ *
+ * - `<repoPath>/.git` is a directory: that directory (a main checkout).
+ * - `<repoPath>/.git` is a file: a linked worktree, accepted ONLY if the back-link holds — its `gitdir:`
+ *   target sits in `<common>/worktrees/<name>` and that entry's own `gitdir` file names back this
+ *   `<repoPath>/.git`, i.e. repoPath is a REGISTERED worktree of that common dir. A planted `.git` file
+ *   that merely points into someone else's repository fails the back-check and yields null.
+ *
+ * Only `repoPath` itself is inspected, never a parent: a subfolder of a checkout is not a repo root.
+ */
+export function resolveGitCommonDir(repoPath: string): string | null {
+  try {
+    const root = realOrNull(repoPath);
+    if (!root) return null;
+    const dotGit = path.join(root, ".git");
+    const st = fs.statSync(dotGit, { throwIfNoEntry: false });
+    if (st?.isDirectory()) return realOrNull(dotGit);
+    if (!st?.isFile()) return null;
+    const m = /^gitdir:\s*(.+?)\s*$/m.exec(fs.readFileSync(dotGit, "utf8"));
+    if (!m) return null;
+    const gitDir = realOrNull(path.resolve(root, m[1]));
+    if (!gitDir) return null;
+    const common = realOrNull(path.resolve(gitDir, fs.readFileSync(path.join(gitDir, "commondir"), "utf8").trim()));
+    if (!common) return null;
+    if (!samePath(path.dirname(gitDir), path.join(common, "worktrees"))) return null;
+    const back = realOrNull(path.resolve(gitDir, fs.readFileSync(path.join(gitDir, "gitdir"), "utf8").trim()));
+    return back && samePath(back, realOrNull(dotGit) ?? dotGit) ? common : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Windows paths compare case-insensitively; realpath.native has already fixed the spelling of each side. */
+export function samePath(a: string, b: string): boolean {
+  return process.platform === "win32" ? a.toLowerCase() === b.toLowerCase() : a === b;
+}
+
+/** True when `child` is `parent` or lies under it (both realpaths). */
+export function isPathInside(child: string, parent: string): boolean {
+  const rel = path.relative(parent, child);
+  return rel === "" || (rel !== ".." && !rel.startsWith(`..${path.sep}`) && !path.isAbsolute(rel));
+}
+
+/**
+ * MCP-ISSUE-102: `worktreeOf` for a registered repo — the repoId of the OTHER registered repo that is the
+ * main checkout owning this repo's git common dir, or null (it is a main checkout itself, or none is registered).
+ */
+export function findWorktreeOwner(
+  repo: { repoId: string; repoPath: string },
+  all: readonly { repoId: string; repoPath: string }[]
+): string | null {
+  const common = resolveGitCommonDir(repo.repoPath);
+  if (!common) return null;
+  for (const other of all) {
+    if (other.repoId === repo.repoId) continue;
+    const root = realOrNull(other.repoPath);
+    if (!root) continue;
+    if (samePath(path.join(root, ".git"), common)) return other.repoId;
+  }
+  return null;
+}
+
 export function resolveCurrentBranch(repoPath: string): string | null {
   try {
     const name = runGit(repoPath, ["rev-parse", "--abbrev-ref", "HEAD"]).trim();

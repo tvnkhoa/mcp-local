@@ -1,5 +1,8 @@
 import path from "node:path";
 
+import fs from "node:fs";
+
+import { isPathInside, resolveGitCommonDir } from "../services/git/gitHelpers.js";
 import type { WatchConfig } from "../types/index.js";
 
 const SECRET_PATTERNS: RegExp[] = [
@@ -34,9 +37,27 @@ export function assertPathAllowed(repoPath: string, allowedRoots: string[]): voi
     return normalizedRepoPath === normalizedRoot || normalizedRepoPath.startsWith(`${normalizedRoot}${path.sep}`);
   });
 
-  if (!isAllowed) {
+  if (!isAllowed && !isRegisteredWorktreeOfAllowedRepo(normalizedRepoPath, allowedRoots)) {
     throw new Error("repoPath is outside allowed roots.");
   }
+}
+
+/**
+ * MCP-ISSUE-102: a linked git worktree usually sits BESIDE its main checkout, so the prefix check refuses
+ * it. Accept it when its git common dir (proved by the `worktrees/<name>/gitdir` back-link, see
+ * `resolveGitCommonDir`) lies inside an allowed root — it then belongs to a repository the operator
+ * already allowed. The roots themselves are never widened.
+ */
+function isRegisteredWorktreeOfAllowedRepo(repoPath: string, allowedRoots: string[]): boolean {
+  const common = resolveGitCommonDir(repoPath);
+  if (!common) return false;
+  return allowedRoots.some((root) => {
+    try {
+      return isPathInside(common, fs.realpathSync.native(root));
+    } catch {
+      return false;
+    }
+  });
 }
 
 export function redactSensitive(input: string): string {

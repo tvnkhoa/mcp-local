@@ -258,6 +258,13 @@ Refactor tools: `refactor_replace_preview` and `refactor_replace_apply` support 
 
 <!-- END GENERATED: env-table -->
 
+**Git worktrees.** A linked worktree usually sits beside its main checkout, outside the allowed root. It is accepted
+without widening `CODEBASE_INDEX_ALLOWED_ROOTS` when its git common dir lies inside an allowed root **and** the
+worktree is registered there (the entry `<common>/worktrees/<name>/gitdir` names the worktree's `.git` back). A
+`.git` file that only points into an allowed repository is refused. Index it under its own `repoId`: it gets its
+own HEAD, and `list_repositories` / `health_check` report `worktreeOf` (the `repoId` of the registered main
+checkout, or null). MCP-ISSUE-102.
+
 ## MCP Host Configuration
 
 ### Profile A — Workspace-local (portable)
