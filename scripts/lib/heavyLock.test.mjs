@@ -33,18 +33,22 @@ function writeHolder(lockPath, holder) {
 
 const quiet = () => {};
 
-/** A child that takes the lock, holds it, and prints when it held it and whether the file was still its own. */
-function holdInChild(lockPath, holdMs = 400) {
+/**
+ * A child that takes the lock, holds it, and appends "enter <pid>" / "exit <pid>" to a journal while
+ * holding it. The journal orders holds by the file system, not by Date.now(): two processes' clocks can
+ * disagree by a millisecond on Windows, which made a timestamp comparison flake.
+ */
+function holdInChild(lockPath, journal, holdMs = 400) {
   const script = `
     const { acquireHeavyLock } = await import(${JSON.stringify(MODULE)});
-    const { readFileSync } = await import("node:fs");
+    const { appendFileSync, readFileSync } = await import("node:fs");
     const lock = await acquireHeavyLock({ cmd: "child", pollMs: 25, log: () => {} });
-    const start = Date.now();
+    appendFileSync(${JSON.stringify(journal)}, "enter " + process.pid + "\\n");
     await new Promise((r) => setTimeout(r, ${String(holdMs)}));
-    const end = Date.now();
     const mine = JSON.parse(readFileSync(process.env.MCP_HEAVY_LOCK_PATH, "utf8")).token === lock.token;
+    appendFileSync(${JSON.stringify(journal)}, "exit " + process.pid + "\\n");
     lock.release();
-    console.log(JSON.stringify({ start, end, mine }));
+    console.log(JSON.stringify({ mine }));
   `;
   return new Promise((resolve, reject) => {
     const child = spawn(process.execPath, ["--input-type=module", "-e", script], { env: cleanEnv(lockPath) });
@@ -56,23 +60,32 @@ function holdInChild(lockPath, holdMs = 400) {
   });
 }
 
+/** Each enter is followed by the same pid's exit before anyone else enters. */
+function assertSerial(journal, holders) {
+  const lines = fs.readFileSync(journal, "utf8").trim().split("\n");
+  assert.equal(lines.length, holders * 2, lines.join(" | "));
+  for (let i = 0; i < lines.length; i += 2) {
+    const [verb, pid] = lines[i].split(" ");
+    assert.ok(verb === "enter" && lines[i + 1] === `exit ${pid}`, `holds overlap: ${lines.join(" | ")}`);
+  }
+}
+
 test("two processes serialise: their holds never overlap", async () => {
   const lockPath = tempLock();
-  const [a, b] = await Promise.all([holdInChild(lockPath), holdInChild(lockPath)]);
-  assert.ok(a.end <= b.start || b.end <= a.start, `holds overlap: ${JSON.stringify({ a, b })}`);
+  const journal = `${lockPath}.journal`;
+  await Promise.all([holdInChild(lockPath, journal), holdInChild(lockPath, journal)]);
+  assertSerial(journal, 2);
   assert.equal(fs.existsSync(lockPath), false, "the last holder removes the lock");
 });
 
 test("concurrent breakers of one stale lock end with exactly one holder at a time", async () => {
   const lockPath = tempLock();
+  const journal = `${lockPath}.journal`;
   writeHolder(lockPath, { pid: spawnSync(process.execPath, ["-e", ""]).pid, startedAt: new Date().toISOString() });
-  const holds = await Promise.all([1, 2, 3, 4].map(() => holdInChild(lockPath, 200)));
+  const holds = await Promise.all([1, 2, 3, 4].map(() => holdInChild(lockPath, journal, 200)));
   for (const h of holds) assert.equal(h.mine, true, "no holder's lock was deleted or replaced under it");
-  const sorted = [...holds].sort((x, y) => x.start - y.start);
-  for (let i = 1; i < sorted.length; i++) {
-    assert.ok(sorted[i - 1].end <= sorted[i].start, `holds overlap: ${JSON.stringify(sorted)}`);
-  }
-  assert.deepEqual(fs.readdirSync(path.dirname(lockPath)), [], "no lock and no moved-aside file is left behind");
+  assertSerial(journal, 4);
+  assert.deepEqual(fs.readdirSync(path.dirname(lockPath)), ["heavy-check.lock.journal"], "no lock and no moved-aside file is left behind");
 });
 
 test("a slow breaker that reaches the lock after another waiter replaced it puts the live lock back", () => {
