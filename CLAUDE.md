@@ -90,11 +90,13 @@ every server's build + typecheck, every server's tests except codebase-index's h
 touched `test:*`, `contracts:check`, `generate:check`, `docs:check`. `verify:all` only before a release or
 when the owner asks; when several rows land the same day, gate once after the last merge, before the push.
 
-**In a git worktree**, junction every server's `node_modules` (and the root's) to the main tree's up
-front, or the run is wasted. Junction per entry: the workspace's `node_modules/@mcp/*` entries must point
-at the **worktree's** `packages/*`, not the main tree's, or the run builds and tests main's packages — so
-link the other `node_modules` entries to main one by one and `@mcp/<pkg>` to the worktree's `packages/<pkg>`.
-Remove every junction one at a time with `cmd /c rmdir` (never `rm -r`, which follows it into main) **before** `git worktree remove`.
+**In a git worktree**, use `node scripts/worktree.mjs add <name> [--base <sha>]` (creates
+`../mcp-local-wt-<name>` on branch `wt/<name>`), `list`, and `remove <name> [--force]`. `add` makes each
+`node_modules` a real dir of per-entry junctions to the main tree's, with `@mcp/*` pointing at the
+**worktree's** `packages/*` (a whole-dir junction would build and test main's packages). `remove` unlinks
+every junction as a link before `git worktree remove`, refuses uncommitted changes without `--force`, and
+keeps the branch. Never `rm -r` a worktree or a node_modules in one (it follows junctions into main), and
+never `npm install` in one (it writes through the junctions).
 `test:scripts`' skills test only counts when run from the main tree.
 
 ### Generated files — do not hand-edit (S-35, S-36)
