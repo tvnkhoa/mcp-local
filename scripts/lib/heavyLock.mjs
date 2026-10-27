@@ -107,6 +107,34 @@ function tryCreate(file, content) {
   }
 }
 
+/**
+ * Remove the lock judged stale — and only that one. Two waiters can judge the same file stale; a
+ * compare-then-unlink lets the slower one delete the faster one's NEW lock (two holders). A rename is
+ * atomic, so exactly one waiter moves any given file aside; the mover then checks that what it moved
+ * is what it judged, and if it moved a live lock instead it links it back (`link` fails rather than
+ * overwrite, so a third waiter's lock is never clobbered either).
+ */
+export function breakStale(file, judged, log) {
+  const aside = `${file}.${String(process.pid)}.${randomUUID()}.stale`;
+  try {
+    fs.renameSync(file, aside);
+  } catch (error) {
+    if (error.code === "ENOENT") return; // another waiter broke it first
+    throw error;
+  }
+  try {
+    if (readRaw(aside) === judged) return;
+    try {
+      fs.linkSync(aside, file);
+    } catch (error) {
+      if (error.code !== "EEXIST") throw error;
+      log(`heavy-check lock: could not restore a live lock moved aside (${describeHolder(parseHolder(readRaw(aside) ?? ""))})`);
+    }
+  } finally {
+    fs.rmSync(aside, { force: true });
+  }
+}
+
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 /**
@@ -149,8 +177,7 @@ export async function acquireHeavyLock({
     const stale = staleReason(holder);
     if (stale !== null) {
       log(`heavy-check lock: breaking ${describeHolder(holder)} — ${stale}`);
-      // Unlink only the holder just judged stale: a waiter that broke it first may already hold a new one.
-      if (readRaw(file) === raw) fs.rmSync(file, { force: true });
+      breakStale(file, raw, log);
       continue;
     }
     if (Date.now() >= deadline) {
