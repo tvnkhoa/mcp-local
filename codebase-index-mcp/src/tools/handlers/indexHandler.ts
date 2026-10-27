@@ -1,9 +1,9 @@
-import { statSync } from "node:fs";
+import { existsSync, statSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { transportFromEnv } from "../../config/envConfig.js";
 import { loadCitationConfig } from "../../services/docs/citationConfig.js";
 import { isTestPath } from "../../services/indexing/fileFilter.js";
-import { freshnessStateDir, readDirtyLedger, vanishedDirtyPaths } from "../../middleware/freshness.js";
+import { DEFAULT_STALE_RUN_MS, freshnessStateDir, liveRunMarkers, lockFileFor, readDirtyLedger, releaseLock, removeRepoStateFiles, tryAcquireLock, vanishedDirtyPaths } from "../../middleware/freshness.js";
 import { readStatusEntriesAsync, stillDirty, summarizeWorkingTree, type StatusEntry } from "../../services/git/gitHelpers.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { McpError, ErrorCode } from "@modelcontextprotocol/sdk/types.js";
@@ -274,6 +274,48 @@ export async function handleHealthCheck(
       : null,
     actionHints
   }, "compact");
+}
+
+// ── remove_repository ─────────────────────────────────────────────────────────
+
+/** A refresh lock older than this is broken by the next taker (the gate's own default). */
+const REMOVE_LOCK_STALE_MS = 15 * 60_000;
+
+/**
+ * MCP-ISSUE-105: drop a registered repo's rows and state files; refuses the cases listed in the tool description.
+ *
+ * The repo's refresh lock is taken FIRST and held to the end: a gate takes that lock before it writes its run marker,
+ * so with the lock ours no gate of any process can start a run between the marker check and the purge. (An
+ * index_repository or watcher run of another process takes no lock, only a marker; the marker check covers it unless
+ * it starts in the instant between the check and the purge.) A watcher of ANOTHER process leaves no signal at all
+ * until it runs, so it is not refused here — see the tool description.
+ */
+export function handleRemoveRepository(args: { repoId: string; force: boolean }, ctx: HandlerContext): CallToolResult {
+  const { store, activeWatchRef, constants } = ctx;
+  const repo = store.getRepository(args.repoId);
+  if (!repo) throw new McpError(ErrorCode.InvalidParams, `remove_repository: unknown repoId '${args.repoId}'; list_repositories names the registered ones.`);
+  if (activeWatchRef.current === args.repoId) {
+    throw new McpError(ErrorCode.InvalidRequest, `remove_repository: a watcher is running for '${args.repoId}'; stop it with watch_repo(action:'stop') first.`);
+  }
+  if (!args.force && existsSync(repo.repoPath)) {
+    throw new McpError(ErrorCode.InvalidRequest, `remove_repository: repoPath '${repo.repoPath}' still exists on disk; pass force:true to drop the index of a live checkout.`);
+  }
+  const stateDir = freshnessStateDir(constants.dbPath);
+  const lockFile = lockFileFor(stateDir, args.repoId);
+  if (!tryAcquireLock(lockFile, REMOVE_LOCK_STALE_MS, Date.now())) {
+    throw new McpError(ErrorCode.InvalidRequest, `remove_repository: a refresh of '${args.repoId}' holds its lock (this or another server process); retry when it ends.`);
+  }
+  try {
+    const runs = liveRunMarkers(stateDir, args.repoId, DEFAULT_STALE_RUN_MS, Date.now());
+    if (runs.length > 0) {
+      throw new McpError(ErrorCode.InvalidRequest, `remove_repository: an index run of '${args.repoId}' is in progress (pid ${runs.map((r) => String(r.pid)).join(", ")}); retry when it ends.`);
+    }
+    const rowsRemoved = store.purgeRepository(args.repoId);
+    const stateFilesRemoved = removeRepoStateFiles(stateDir, args.repoId);
+    return ctx.asText({ repoId: args.repoId, repoPath: repo.repoPath, removed: true, rowsRemoved, stateFilesRemoved }, "compact");
+  } finally {
+    releaseLock(lockFile);
+  }
 }
 
 // ── index_repository ──────────────────────────────────────────────────────────
