@@ -67,11 +67,11 @@ test("a repo with a running watcher is refused", () => {
   });
 });
 
-test("a vanished repo is removed with its lock, ledger and dead markers; a namesake's lock and ledger stay", () => {
+test("a vanished repo is removed with its lock, ledger and dead markers; a namesake's lock, ledger and marker stay", () => {
   withCtx((ctx, dir, stateDir) => {
     ctx.store.ensureRepository("wt", path.join(dir, "missing"));
     const mine = ["refresh-wt.lock", "dirty-wt.json", "running-wt-999999-1.json"];
-    const others = ["refresh-wt-b.lock", "dirty-wt-b.json"];
+    const others = ["refresh-wt-b.lock", "dirty-wt-b.json", "running-wt-b-999999-1.json"];
     for (const f of [...mine, ...others]) writeFileSync(path.join(stateDir, f), JSON.stringify({ pid: 999999, at: 0 }));
     const out = call(ctx, { repoId: "wt" });
     // the dead marker is swept by the live-run check before the purge, so it is gone but not listed

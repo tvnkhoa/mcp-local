@@ -4361,9 +4361,7 @@ this afternoon failed at that harness, which is the highest rate observed so far
   keyed table for two repos, after the purge none of the removed one and all of the other; a cross-repo link INTO
   the removed repo goes. `removeRepository.test.ts` — each refusal, `force`, the state files (a namesake's lock and
   ledger stay).
-- **Not covered:** a run marker's prefix match is by repoId prefix (`running-wt-` also matches `running-wt-b-…`), so a
-  live run of `wt-b-…` can over-refuse the removal of `wt`; a sibling's dead marker is swept as a side effect.
-  A process that has the repo open in memory (vector cache) is cleared only in the calling process.
+- **Not covered:** a process that has the repo open in memory (vector cache) is cleared only in the calling process.
 
 ## MCP-ISSUE-101 follow-ups (row 5: F2–F4)
 
@@ -4374,3 +4372,9 @@ this afternoon failed at that harness, which is the highest rate observed so far
   forcing runs. The note carries `unreadable: [paths]`; `applyFreshness` adds a `coverage.knownGaps` line on a fresh
   answer too. A readable hash differs from the capped value, so recovery starts a run. Guarded: `freshness.test.ts`
   (F2). **Not covered:** the count is per process, so a restart re-pays up to N runs.
+- **Run markers matched by prefix (found with F1). ✅ FIXED 2026-10-27.** `liveRunMarkers` matched `running-<id>-` as a
+  prefix, so a run of `wec.aria-wt-x` made the gate of `wec.aria` answer `refreshing` (and a dead sibling marker was
+  swept). The name tail must now be exactly `<pid>-<seq>.json`, and a marker also records its `repoId`, which decides
+  two ids that sanitize to one name; a marker written before that (no `repoId`) is matched on its name alone.
+  `remove_repository` uses the same match. Guarded: `freshness.test.ts` (repoIds `a` / `a-b`, old form, `x/y` vs `x y`,
+  the gate).

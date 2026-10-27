@@ -173,12 +173,31 @@ function runMarkerPrefix(repoId: string): string {
   return `running-${repoId.replace(/[^\w.-]/g, "_")}-`;
 }
 
+/**
+ * A marker's file name is `<prefix><pid>-<seq>.json`. Matching on the prefix alone let repo `a` see the markers of
+ * `a-b` (`running-a-b-…` starts with `running-a-`) and answer `refreshing` for another repo's run; the tail must be
+ * exactly two numbers. A marker written by this build also names its repoId, which settles two ids that sanitize
+ * to the same string; one written before that (no repoId) is matched on its name alone.
+ */
+function isRunMarkerName(prefix: string, name: string): boolean {
+  return name.startsWith(prefix) && /^\d+-\d+\.json$/.test(name.slice(prefix.length));
+}
+
+function markerNamesOtherRepo(file: string, repoId: string): boolean {
+  try {
+    const m = JSON.parse(fs.readFileSync(file, "utf8")) as { repoId?: unknown };
+    return typeof m.repoId === "string" && m.repoId !== repoId;
+  } catch {
+    return false;
+  }
+}
+
 let runMarkerSeq = 0;
 
 function writeRunMarker(lockDir: string, repoId: string, at: number): string | null {
   const file = path.join(lockDir, `${runMarkerPrefix(repoId)}${String(process.pid)}-${String(++runMarkerSeq)}.json`);
   try {
-    fs.writeFileSync(file, JSON.stringify({ pid: process.pid, at }));
+    fs.writeFileSync(file, JSON.stringify({ pid: process.pid, at, repoId }));
     return file;
   } catch {
     return null; // unwritable state dir: the gate degrades as it does for locks
@@ -199,13 +218,14 @@ export function liveRunMarkers(lockDir: string, repoId: string, staleMs: number,
   const prefix = runMarkerPrefix(repoId);
   let names: string[];
   try {
-    names = fs.readdirSync(lockDir).filter((n) => n.startsWith(prefix) && n.endsWith(".json"));
+    names = fs.readdirSync(lockDir).filter((n) => isRunMarkerName(prefix, n));
   } catch {
     return [];
   }
   const live: Array<{ pid: number; at: number }> = [];
   for (const name of names) {
     const file = path.join(lockDir, name);
+    if (markerNamesOtherRepo(file, repoId)) continue;
     let m: { pid?: number; at?: number } = {};
     try {
       m = JSON.parse(fs.readFileSync(file, "utf8")) as { pid?: number; at?: number };
@@ -231,7 +251,7 @@ export const DEFAULT_STALE_RUN_MS = 6 * 60 * 60_000;
  */
 export function removeRepoStateFiles(lockDir: string, repoId: string): string[] {
   const prefix = runMarkerPrefix(repoId);
-  const isMarker = (name: string): boolean => name.startsWith(prefix) && /^\d+-\d+\.json$/.test(name.slice(prefix.length));
+  const isMarker = (name: string): boolean => isRunMarkerName(prefix, name) && !markerNamesOtherRepo(path.join(lockDir, name), repoId);
   const exact = new Set([path.basename(lockFileFor(lockDir, repoId)), path.basename(ledgerFileFor(lockDir, repoId))]);
   let names: string[];
   try {

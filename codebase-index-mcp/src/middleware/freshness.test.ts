@@ -682,3 +682,30 @@ test("MCP-ISSUE-101 F2: a dirty path that stays unreadable stops forcing runs af
     assert.deepEqual(h.runs.at(-1)?.dirtyPaths, ["ok.ts"]);
   } finally { h.cleanup(); }
 });
+
+test("run markers are matched per exact repoId: `a` does not see the run of `a-b`, and an old-form marker still counts for its repo", () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "cim-markers-"));
+  try {
+    const live = { pid: process.pid, at: Date.now() };
+    writeFileSync(path.join(dir, `running-a-b-${String(process.pid)}-1.json`), JSON.stringify({ ...live, repoId: "a-b" }));
+    assert.deepEqual(liveRunMarkers(dir, "a", 60_000, Date.now()), []);
+    assert.equal(liveRunMarkers(dir, "a-b", 60_000, Date.now()).length, 1);
+    // written before markers named their repo: matched on the name alone
+    writeFileSync(path.join(dir, `running-a-${String(process.pid)}-2.json`), JSON.stringify(live));
+    assert.equal(liveRunMarkers(dir, "a", 60_000, Date.now()).length, 1);
+    assert.equal(liveRunMarkers(dir, "a-b", 60_000, Date.now()).length, 1);
+    // two ids that sanitize to one name: the marker's own repoId decides, and the other repo's file is left alone
+    writeFileSync(path.join(dir, `running-x_y-${String(process.pid)}-3.json`), JSON.stringify({ ...live, repoId: "x/y" }));
+    assert.deepEqual(liveRunMarkers(dir, "x y", 60_000, Date.now()), []);
+    assert.equal(liveRunMarkers(dir, "x/y", 60_000, Date.now()).length, 1);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("a live run of `a-b` does not make the gate of `a` answer refreshing", async () => {
+  const h = harness({ budgetMs: 1000, autoFinish: true });
+  try {
+    writeFileSync(path.join(h.lockDir, `running-a-b-${String(process.pid)}-1.json`), JSON.stringify({ pid: process.pid, at: Date.now(), repoId: "a-b" }));
+    assert.deepEqual(await h.gate.ensureFresh("a"), { state: "fresh" });
+    assert.equal((await h.gate.ensureFresh("a-b")).state, "refreshing");
+  } finally { h.cleanup(); }
+});
