@@ -277,10 +277,9 @@ function writeFileAtomic(file: string, body: string): boolean {
   }
 }
 
-function newRepairFile(lockDir: string, kind: "repair" | "repairtry", repoId: string, body: object): void {
+function newRepairFile(lockDir: string, kind: "repair" | "repairtry", repoId: string, body: object): boolean {
   const file = path.join(lockDir, `${repairPrefix(kind, repoId)}${String(process.pid)}-${String(Date.now())}-${String(++repairSeq)}.json`);
-  // Best-effort: without it the gate answers as it did before this existed.
-  writeFileAtomic(file, JSON.stringify({ ...body, repoId }));
+  return writeFileAtomic(file, JSON.stringify({ ...body, repoId }));
 }
 
 function repairNames(lockDir: string, kind: "repair" | "repairtry", repoId: string): string[] {
@@ -292,8 +291,9 @@ function repairNames(lockDir: string, kind: "repair" | "repairtry", repoId: stri
   }
 }
 
-function markRepairNeeded(lockDir: string, repoId: string, dead: { mode: IndexMode; pid: number; at: number }): void {
-  newRepairFile(lockDir, "repair", repoId, dead);
+/** True when the flag is on disk. */
+function markRepairNeeded(lockDir: string, repoId: string, dead: { mode: IndexMode; pid: number; at: number }): boolean {
+  return newRepairFile(lockDir, "repair", repoId, dead);
 }
 
 /** The gate is about to start a repair run: count it first, so a repair that is killed still counts. */
@@ -342,7 +342,14 @@ export function clearRepairNeeded(lockDir: string, repoId: string, flags?: reado
 }
 
 /** The live run markers for a repo: pid alive and younger than `staleMs`. Dead or stale ones are removed. */
-export function liveRunMarkers(lockDir: string, repoId: string, staleMs: number, now: number): Array<{ pid: number; at: number }> {
+export function liveRunMarkers(
+  lockDir: string,
+  repoId: string,
+  staleMs: number,
+  now: number,
+  /** Injectable for tests: how a dead run's repair flag is written. */
+  writeFlag: typeof markRepairNeeded = markRepairNeeded
+): Array<{ pid: number; at: number }> {
   const prefix = runMarkerPrefix(repoId);
   let names: string[];
   try {
@@ -365,8 +372,10 @@ export function liveRunMarkers(lockDir: string, repoId: string, staleMs: number,
     } else {
       // F4: a holder that died mid-run left the index part-written; so may one that outlived `staleMs` and dies
       // later, so an expired marker is remembered too (a marker of an older build names no mode: skipped).
+      // The marker is the only memory of the dead run until the flag is on disk: if the write fails (an unwritable
+      // state dir) it stays, and the next check sweeps it again — dropping it first would answer "fresh" for good.
       if (typeof m.pid === "number" && typeof m.mode === "string") {
-        markRepairNeeded(lockDir, repoId, { mode: m.mode, pid: m.pid, at: typeof m.at === "number" ? m.at : 0 });
+        if (!writeFlag(lockDir, repoId, { mode: m.mode, pid: m.pid, at: typeof m.at === "number" ? m.at : 0 })) continue;
       }
       removeRunMarker(file);
     }
@@ -387,6 +396,11 @@ export const DEFAULT_STALE_RUN_MS = 6 * 60 * 60_000;
 export function removeRepoStateFiles(lockDir: string, repoId: string): string[] {
   const prefix = runMarkerPrefix(repoId);
   const isMarker = (name: string): boolean => isRunMarkerName(prefix, name) && !markerNamesOtherRepo(path.join(lockDir, name), repoId);
+  const orphanTmp = (name: string): boolean =>
+    ["repair", "repairtry"].some((kind) => {
+      const pre = repairPrefix(kind as "repair" | "repairtry", repoId);
+      return name.startsWith(pre) && /^\d+-\d+-\d+\.json\.\d+\.tmp$/.test(name.slice(pre.length));
+    });
   const exact = new Set([path.basename(ledgerFileFor(lockDir, repoId)), ...repairNames(lockDir, "repair", repoId), ...repairNames(lockDir, "repairtry", repoId)]);
   let names: string[];
   try {
@@ -396,7 +410,7 @@ export function removeRepoStateFiles(lockDir: string, repoId: string): string[] 
   }
   const removed: string[] = [];
   for (const name of names) {
-    if (!exact.has(name) && !isMarker(name)) continue;
+    if (!exact.has(name) && !isMarker(name) && !orphanTmp(name)) continue;
     try {
       fs.unlinkSync(path.join(lockDir, name));
       removed.push(name);

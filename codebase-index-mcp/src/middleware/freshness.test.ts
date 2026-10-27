@@ -11,7 +11,7 @@ import { pathToFileURL } from "node:url";
 import Database from "better-sqlite3";
 
 import { parseStatusPorcelainV2 } from "../services/git/gitHelpers.js";
-import { applyFreshness, computeTreeKey, createFreshnessGate, clearRepairNeeded, liveRunMarkers, pathsChangedSince, readDirtyLedger, readRepairNeeded, recordDirtyLedger, tryAcquireLock, UNREADABLE, watcherRunPlan, type RepoTreeState, type TreeKey } from "./freshness.js";
+import { applyFreshness, computeTreeKey, createFreshnessGate, clearRepairNeeded, liveRunMarkers, pathsChangedSince, readDirtyLedger, readRepairNeeded, recordDirtyLedger, removeRepoStateFiles, tryAcquireLock, UNREADABLE, watcherRunPlan, type RepoTreeState, type TreeKey } from "./freshness.js";
 import { GraphStore } from "../repositories/graphStore.js";
 import { createIndexRunner } from "../services/indexing/indexRunner.js";
 import { runIndexPipeline } from "../services/indexing/indexPipeline.js";
@@ -1035,4 +1035,27 @@ test("MCP-ISSUE-101 F4: a killed DIRTY run — dependents included — is repair
     rmSync(cleanDir, { recursive: true, force: true });
     rmSync(repo, { recursive: true, force: true });
   }
+});
+
+test("MCP-ISSUE-101 F4: a dead marker is unlinked only after its repair flag is on disk; a failed write keeps it for the next check", () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "cim-sweep-"));
+  try {
+    const marker = path.join(dir, "running-r-999999-1.json");
+    fs.writeFileSync(marker, JSON.stringify({ pid: 999999, at: 1, mode: "full", repoId: "r" }));
+    assert.deepEqual(liveRunMarkers(dir, "r", 60_000, Date.now(), () => false), [], "the failing writer: not a live run");
+    assert.ok(fs.existsSync(marker), "the marker is kept: it is the only memory of the dead run");
+    assert.equal(readRepairNeeded(dir, "r"), null);
+    liveRunMarkers(dir, "r", 60_000, Date.now()); // the next check, with a working state dir
+    assert.equal(readRepairNeeded(dir, "r")?.mode, "full");
+    assert.ok(!fs.existsSync(marker), "swept once the flag exists");
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("remove_repository's state sweep also removes orphan .tmp flag files of that repo, and only that repo's", () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "cim-tmp-"));
+  try {
+    for (const f of ["repair-r-1-2-3.json.77.tmp", "repairtry-r-1-2-4.json.77.tmp", "repair-r-b-1-2-3.json.77.tmp"]) fs.writeFileSync(path.join(dir, f), "{");
+    assert.deepEqual(removeRepoStateFiles(dir, "r"), ["repair-r-1-2-3.json.77.tmp", "repairtry-r-1-2-4.json.77.tmp"]);
+    assert.deepEqual(fs.readdirSync(dir), ["repair-r-b-1-2-3.json.77.tmp"]);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
 });
