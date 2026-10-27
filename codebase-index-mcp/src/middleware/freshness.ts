@@ -214,6 +214,37 @@ export function liveRunMarkers(lockDir: string, repoId: string, staleMs: number,
   return live;
 }
 
+/** Default age past which a run marker counts as left by a crashed run (see `FreshnessGateOptions.staleRunMs`). */
+export const DEFAULT_STALE_RUN_MS = 6 * 60 * 60_000;
+
+/**
+ * MCP-ISSUE-105: delete every state file of one repo — refresh lock, dirty ledger, run markers. A marker
+ * is matched on its exact `<pid>-<seq>.json` tail, so a repo whose id extends this one's is left alone.
+ * Returns the file names removed.
+ */
+export function removeRepoStateFiles(lockDir: string, repoId: string): string[] {
+  const prefix = runMarkerPrefix(repoId);
+  const isMarker = (name: string): boolean => name.startsWith(prefix) && /^\d+-\d+\.json$/.test(name.slice(prefix.length));
+  const exact = new Set([path.basename(lockFileFor(lockDir, repoId)), path.basename(ledgerFileFor(lockDir, repoId))]);
+  let names: string[];
+  try {
+    names = fs.readdirSync(lockDir);
+  } catch {
+    return [];
+  }
+  const removed: string[] = [];
+  for (const name of names) {
+    if (!exact.has(name) && !isMarker(name)) continue;
+    try {
+      fs.unlinkSync(path.join(lockDir, name));
+      removed.push(name);
+    } catch {
+      // already gone
+    }
+  }
+  return removed.sort();
+}
+
 function releaseLock(file: string): void {
   try {
     const holder = JSON.parse(fs.readFileSync(file, "utf8")) as { pid?: number };
@@ -407,7 +438,7 @@ export function createFreshnessGate(opts: FreshnessGateOptions): FreshnessGate {
   const now = opts.now ?? Date.now;
   const checkTtlMs = opts.checkTtlMs ?? 0;
   const staleLockMs = opts.staleLockMs ?? 15 * 60_000;
-  const staleRunMs = opts.staleRunMs ?? 6 * 60 * 60_000;
+  const staleRunMs = opts.staleRunMs ?? DEFAULT_STALE_RUN_MS;
   const hashMaxBytes = opts.hashMaxBytes ?? DEFAULT_HASH_MAX_BYTES;
   /** Without `getCoveredKey`: the key each repo's last completed refresh in THIS process covered. */
   const coveredKey = new Map<string, string>();

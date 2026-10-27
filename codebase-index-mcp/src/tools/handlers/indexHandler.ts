@@ -1,9 +1,9 @@
-import { statSync } from "node:fs";
+import { existsSync, statSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { transportFromEnv } from "../../config/envConfig.js";
 import { loadCitationConfig } from "../../services/docs/citationConfig.js";
 import { isTestPath } from "../../services/indexing/fileFilter.js";
-import { freshnessStateDir, readDirtyLedger, vanishedDirtyPaths } from "../../middleware/freshness.js";
+import { DEFAULT_STALE_RUN_MS, freshnessStateDir, liveRunMarkers, readDirtyLedger, removeRepoStateFiles, vanishedDirtyPaths } from "../../middleware/freshness.js";
 import { readStatusEntriesAsync, stillDirty, summarizeWorkingTree, type StatusEntry } from "../../services/git/gitHelpers.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { McpError, ErrorCode } from "@modelcontextprotocol/sdk/types.js";
@@ -275,6 +275,30 @@ export async function handleHealthCheck(
     actionHints
   }, "compact");
 }
+
+// ── remove_repository ─────────────────────────────────────────────────────────
+
+/** MCP-ISSUE-105: drop a registered repo's rows and state files; refuses the cases listed in the tool description. */
+export function handleRemoveRepository(args: { repoId: string; force: boolean }, ctx: HandlerContext): CallToolResult {
+  const { store, activeWatchRef, constants } = ctx;
+  const repo = store.getRepository(args.repoId);
+  if (!repo) throw new McpError(ErrorCode.InvalidParams, `remove_repository: unknown repoId '${args.repoId}'; list_repositories names the registered ones.`);
+  if (activeWatchRef.current === args.repoId) {
+    throw new McpError(ErrorCode.InvalidRequest, `remove_repository: a watcher is running for '${args.repoId}'; stop it with watch_repo(action:'stop') first.`);
+  }
+  const stateDir = freshnessStateDir(constants.dbPath);
+  const runs = liveRunMarkers(stateDir, args.repoId, DEFAULT_STALE_RUN_MS, Date.now());
+  if (runs.length > 0) {
+    throw new McpError(ErrorCode.InvalidRequest, `remove_repository: an index run of '${args.repoId}' is in progress (pid ${runs.map((r) => String(r.pid)).join(", ")}); retry when it ends.`);
+  }
+  if (!args.force && existsSync(repo.repoPath)) {
+    throw new McpError(ErrorCode.InvalidRequest, `remove_repository: repoPath '${repo.repoPath}' still exists on disk; pass force:true to drop the index of a live checkout.`);
+  }
+  const rowsRemoved = store.purgeRepository(args.repoId);
+  const stateFilesRemoved = removeRepoStateFiles(stateDir, args.repoId);
+  return ctx.asText({ repoId: args.repoId, repoPath: repo.repoPath, removed: true, rowsRemoved, stateFilesRemoved }, "compact");
+}
+
 
 // ── index_repository ──────────────────────────────────────────────────────────
 

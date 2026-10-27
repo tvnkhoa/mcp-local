@@ -19,7 +19,7 @@ npm install && npm run build
 
 <!-- BEGIN GENERATED: tool-list -->
 
-43 tools, namespaced `mcp__codebase-index__<tool>`:
+44 tools, namespaced `mcp__codebase-index__<tool>`:
 
 - `change_impact`
 - `change_value_representation`
@@ -57,6 +57,7 @@ npm install && npm run build
 - `refactor_replace_preview`
 - `refactor_replace_rollback`
 - `refactor_symbol_migration`
+- `remove_repository`
 - `rename_assist`
 - `route_map`
 - `search_literals`

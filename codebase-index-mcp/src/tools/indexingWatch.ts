@@ -18,7 +18,7 @@ import type { AnyToolDefinition } from "@mcp/sdk";
 import { defineTool } from "@mcp/sdk";
 
 import { handleGetFeatureBundle } from "./handlers/bundleHandler.js";
-import { handleIndexRepository, handleWatchRepo } from "./handlers/indexHandler.js";
+import { handleIndexRepository, handleRemoveRepository, handleWatchRepo } from "./handlers/indexHandler.js";
 import { handleGetPersistenceMapping } from "./handlers/persistenceHandler.js";
 import * as schemas from "../types/schemas/toolSchemas.js";
 
@@ -28,6 +28,7 @@ import {
   raw,
   readsGraph,
   rebuildsIndex,
+  removesRepository,
   type CodebaseIndexDeps
 } from "./common.js";
 
@@ -54,6 +55,24 @@ export function buildIndexingWatchTools(deps: CodebaseIndexDeps): AnyToolDefinit
     annotations: rebuildsIndex,
     rawResult: true,
     handler: async (input) => ok(raw(await handleIndexRepository(input, buildContext())))
+  });
+
+  const removeRepository = defineTool({
+    name: "remove_repository",
+    description: "Drop a registered repository from the index: deletes every row keyed by repoId (symbols, edges, files, docs, runs, routes, literals, citations, comments, vectors, refactor history, cross-repo links) and its state files (run markers, dirty ledger, lock). Refuses an unknown repoId, a repo an index run is in progress for, and — unless force=true — a repo whose repoPath still exists on disk. Never touches the repository's files. Use for a deleted worktree or a retired repoId.",
+    input: schemas.removeRepositorySchema,
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      required: ["repoId"],
+      properties: {
+        repoId: { type: "string" },
+        force: { type: "boolean", description: "Remove although repoPath still exists on disk. Default false." }
+      }
+    },
+    annotations: removesRepository,
+    rawResult: true,
+    handler: (input) => ok(raw(handleRemoveRepository(input, buildContext())))
   });
 
   const watchRepo = defineTool({
@@ -121,5 +140,5 @@ export function buildIndexingWatchTools(deps: CodebaseIndexDeps): AnyToolDefinit
     handler: (input) => ok(raw(handleGetPersistenceMapping(input, buildContext())))
   });
 
-  return [indexRepository, watchRepo, getFeatureBundle, getPersistenceMapping];
+  return [indexRepository, removeRepository, watchRepo, getFeatureBundle, getPersistenceMapping];
 }

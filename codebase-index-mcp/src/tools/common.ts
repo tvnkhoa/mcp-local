@@ -85,6 +85,20 @@ export const rebuildsIndex: ToolAnnotations = {
 };
 
 /**
+ * `remove_repository`.
+ *
+ * Destructive, unlike a re-index: it deletes a repo's rows and state files for good and nothing rebuilds
+ * them unless the repo is registered and indexed again. Not idempotent in the MCP sense either: the second
+ * call names an unknown repoId and is refused. It never touches the repository on disk.
+ */
+export const removesRepository: ToolAnnotations = {
+  readOnly: false,
+  idempotent: false,
+  destructive: true,
+  openWorld: false
+};
+
+/**
  * `watch_repo`.
  *
  * Not read-only — it starts and stops a filesystem watcher, which is server state. Not

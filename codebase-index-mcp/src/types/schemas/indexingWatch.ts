@@ -58,3 +58,11 @@ export const getPersistenceMappingSchema = z
     profile: responseProfileSchema.default("compact")
   })
   .strict();
+
+// Remove repository (MCP-ISSUE-105)
+export const removeRepositorySchema = z
+  .object({
+    repoId: z.string().min(1).max(200),
+    force: z.boolean().default(false)
+  })
+  .strict();

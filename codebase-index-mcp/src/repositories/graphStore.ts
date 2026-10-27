@@ -161,6 +161,7 @@ import {
   listRepositoriesImpl
 } from "../services/impact/impactAnalyzer.js";
 import { initGraphSchema, runGraphMigrations } from "./schema.js";
+import { purgeRepositoryImpl, type PurgeCounts } from "./repoPurgeStore.js";
 import {
   replaceAnnotationsForFileImpl,
   rebuildCommentsFtsImpl,
@@ -757,6 +758,11 @@ export class GraphStore {
 
   runReadOnlyGraphQuery(sql: string, namedParams: Record<string, string | number | boolean | null>, limit: number, timeoutMs?: number): { columns: string[]; rows: Record<string, unknown>[]; rowCount: number; truncated: boolean; elapsedMs: number; timedOut: boolean } {
     return runReadOnlyGraphQueryImpl(this.db, sql, namedParams, limit, timeoutMs);
+  }
+
+  /** MCP-ISSUE-105: delete every row of one repo in every table; returns rows removed per table. */
+  purgeRepository(repoId: string): PurgeCounts {
+    return purgeRepositoryImpl(this.db, repoId);
   }
 
   rebuildFts(): void {
