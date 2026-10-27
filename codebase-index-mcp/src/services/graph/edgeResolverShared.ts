@@ -110,7 +110,7 @@ export function buildNamedCandidateMap(
           `select symbol_id as symbolId, name, file_path as filePath, kind, parent_symbol_id as parentSymbolId
            from symbols
            where repo_id = ? and kind in (${allowedKinds.map(() => "?").join(", ")})
-           order by name, symbol_id`
+           order by name, file_path, symbol_id`
         )
         .all(repoId, ...allowedKinds) as { symbolId: string; name: string; filePath: string; kind: string; parentSymbolId: string | null }[]
     : db
@@ -118,7 +118,7 @@ export function buildNamedCandidateMap(
           `select symbol_id as symbolId, name, file_path as filePath, kind, parent_symbol_id as parentSymbolId
            from symbols
            where repo_id = ?
-           order by name, symbol_id`
+           order by name, file_path, symbol_id`
         )
         .all(repoId) as { symbolId: string; name: string; filePath: string; kind: string; parentSymbolId: string | null }[];
 
@@ -129,6 +129,16 @@ export function buildNamedCandidateMap(
     byName.set(row.name, list);
   }
   return byName;
+}
+
+/**
+ * The tie-break between equally scored same-named candidates: file path, then symbol id. MCP-ISSUE-101
+ * part 4: the id alone hashes the declaration's row, so a line shift in one file re-minted it past a
+ * namesake's in another and flipped every tie between them (199 calls on wec.aria for one blank-line
+ * edit). The path does not move; only namesakes in one file still order by id.
+ */
+export function tieBreakBefore(a: { filePath: string; symbolId: string }, b: { filePath: string; symbolId: string }): boolean {
+  return a.filePath < b.filePath || (a.filePath === b.filePath && a.symbolId < b.symbolId);
 }
 
 export function pickBestNamedCandidate<T extends { symbolId: string; filePath: string; kind: string }>(
@@ -168,9 +178,9 @@ export function pickBestNamedCandidate<T extends { symbolId: string; filePath: s
     const score = sameFilePenalty + kindPenalty;
     // Ties are common — two same-named classes in different files score identically — and `score <
     // bestScore` alone resolved them by input order. Every caller now orders its query, but relying on
-    // that leaves the next caller free to reintroduce the bug; breaking the tie on symbolId here makes
-    // the function's result a property of its arguments rather than of their arrangement.
-    if (score < bestScore || (score === bestScore && candidate.symbolId < best.symbolId)) {
+    // that leaves the next caller free to reintroduce the bug; breaking the tie here makes the function's
+    // result a property of its arguments rather than of their arrangement.
+    if (score < bestScore || (score === bestScore && tieBreakBefore(candidate, best))) {
       best = candidate;
       bestScore = score;
     }
@@ -368,7 +378,7 @@ function resolveEndpointCandidates(
       `select repo_id as toRepoId, symbol_id as toSymbolId, signature as contractId
        from symbols
        where repo_id != ? and signature like 'endpoint:%'
-       order by repo_id, symbol_id`
+       order by repo_id, file_path, symbol_id`
     )
     .all(repoId) as { toRepoId: string; toSymbolId: string; contractId: string }[];
   if (providers.length === 0) return out;

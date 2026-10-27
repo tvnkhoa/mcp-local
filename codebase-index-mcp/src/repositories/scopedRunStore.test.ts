@@ -139,18 +139,19 @@ test("guard (b) ignores different names that share a line; two equal logical key
   assert.equal(duplicateKey.unpairedBefore.size, 2);
 });
 
-test("guard (a): only a shift that moves an id past a same-family namesake puts ids at risk", () => {
+test("guard (a): only a shift that moves an id past a same-file, same-family namesake puts ids at risk", () => {
   withStore((store, db) => {
     store.ensureRepository("r", "/r");
     const insert = db.prepare(`insert into symbols (repo_id, symbol_id, file_path, name, kind, line) values ('r', ?, ?, ?, ?, 1)`);
-    insert.run("m", "b.ts", "helper", "function"); // the namesake
-    insert.run("z", "c.ts", "helper", "class"); // another family: never tied with a function
+    insert.run("m", "a.ts", "helper", "function"); // the same-file namesake (an overload, a redeclared name)
+    insert.run("p", "b.ts", "helper", "function"); // another file: the tie breaks on the path, which did not move
+    insert.run("z", "a.ts", "helper", "class"); // another family: never tied with a function
     insert.run("n", "a.ts", "helper", "function"); // the shifted symbol, now
-    // old "k" < "m" < new "n": the order against b.ts's helper flipped; against c.ts's class it does not count.
+    // old "k" < "m" < new "n": flipped against a.ts's other helper (b.ts's "p" is above both; the class does not count).
     assert.deepEqual([...idsAtRiskFromIdOrder(db, "r", [{ oldId: "k", newId: "n", name: "helper" }], new Set(["n"]))].sort(), ["m", "n"]);
-    // old "l" and new "a" both sort before "m": the order is unchanged, nothing at risk.
-    db.prepare(`update symbols set symbol_id = 'a' where symbol_id = 'n'`).run();
-    assert.deepEqual([...idsAtRiskFromIdOrder(db, "r", [{ oldId: "l", newId: "a", name: "helper" }], new Set(["a"]))], []);
+    // old "q" > "p", new "n" < "p": flipped against b.ts's helper only (a.ts's "x" is above both) — another file, nothing at risk.
+    db.prepare(`update symbols set symbol_id = 'x' where symbol_id = 'm'`).run();
+    assert.deepEqual([...idsAtRiskFromIdOrder(db, "r", [{ oldId: "q", newId: "n", name: "helper" }], new Set(["n"]))], []);
   });
 });
 

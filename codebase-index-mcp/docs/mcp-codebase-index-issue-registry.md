@@ -4113,7 +4113,8 @@ this afternoon failed at that harness, which is the highest rate observed so far
 
 - **Status:** 🟡 PART 1 FIXED 2026-10-27 (wec.aria request, C2a); PART 2 FIXED 2026-10-27 (C2b, retargeted to the
   scoped mention resolve by measurement, owner-approved); PART 3 FIXED 2026-10-27 (C2c: a row shift re-points ids
-  instead of re-extracting dependents, except where an id tie-break makes the shift visible; see *Part 3*).
+  instead of re-extracting dependents); PART 4 FIXED 2026-10-27 (C2d: ties break on the path, so a shift cannot
+  flip them across files; `INDEX_VERSION` v15). Open: a query during a full re-index reads a half-written index.
 - **Scenario:** live on wec.aria (~3,000 files), every read query on a dirty tree started a dirty run (~7.4 s:
   extract 4.3 s, resolve 3.0 s) and answered from the old index; the next query did it again. The gate's covered
   key was HEAD + each dirty file's size and mtime, held in one process's memory, so:
@@ -4248,9 +4249,55 @@ this afternoon failed at that harness, which is the highest rate observed so far
   by line. Review follow-up: an unmoved same-file namesake (fails without the fixed participants); a 6-file
   shift fixture; a run cancelled right after the shifted file's write leaves no dangling edge (fails with the
   re-point outside the transaction). `cross_repo_deps` is now in the snapshot.
-- **Not done, needs the owner:** making the tie-break shift-invariant, e.g. on `(file_path, symbol_id)`.
-  `usage-period.ts` would then drop to 0 dependents. It changes which candidate wins every by-name tie, so it is
-  a resolver output change and needs an `INDEX_VERSION` bump (a full re-index of every repo).
+- **Part 4 (C2d, owner-approved 2026-10-27): the tie-break no longer moves with a line.** Equally scored
+  same-named candidates break the tie on `(file_path, symbol_id)`, not on `symbol_id` alone:
+  - `tieBreakBefore` in `pickBestNamedCandidate`;
+  - the candidate map's `order by name, file_path, symbol_id` (`buildNamedCandidateMap`), which also orders the
+    `.find()` picks over it;
+  - the first-row lookups by name: `interfaceByName` (calls), base classes, interfaces and contracts
+    (contracts), CSS definitions, interface siblings, the cross-repo type match and the endpoint providers.
+
+  The same-parent and same-file lookups (`findMemberMethod`, EF members, overrides) and the SQL pick (ranked by
+  path and line) are unchanged. Guard (a) now compares only same-file namesakes: across files the path decides,
+  and a shift does not move it. `INDEX_VERSION` becomes `v15-tiebreak-path`.
+  - **Output change** (scratch wec.aria clone, a full run at v14 vs at v15, same tree): 0 symbols differ. 2,418 of
+    47,698 edges change target, and all of them are by-name picks:
+
+    | type | reason | edges |
+    |---|---|---|
+    | CALLS | resolved callee by name (ambiguous) | 1,938 |
+    | CALLS | resolved interface method (unproven receiver) | 61 |
+    | TYPE_REF | resolved type by name | 361 |
+    | PROPERTY_WRITE | resolved property by name | 35 |
+    | PROPERTY_REF | resolved method group | 23 |
+
+    The winner of a tie is now the path that sorts first, so `checks/…` often wins over `packages/…`. Examples:
+    - `packages/review/src/cadence.ts:86` `start`: `packages/ingest/server/main.ts:666` → `checks/exec/entrypoint.mjs:166`
+    - `packages/portal/src/lib/past-cache.ts:12` `compare`: `checks/docs/reachable.mjs:90` → `checks/board/weight.mjs:32`
+
+    That is no more correct than before, only stable. The edges keep their 0.7 "ambiguous" confidence.
+  - **After** (clone, base = a v15 full run):
+
+    | edit | dependents part 3 → part 4 | dirty run |
+    |---|---|---|
+    | 1 file `usage-period.ts` | 147 → **0** | **0.73 s** |
+    | 1 file `core/ports/index.ts` | 2 → 0 | 0.77 s |
+    | 6 files | 212 → **0** | **1.6 s** |
+    | rename / remove / signature | 7 / 1 / 2 | 1.5 / 1.0 / 0.9 s |
+
+    Conformance is ready for all six, dirty and incremental against full, on every row.
+  - **Guarded:** `scopedRunConformance.test.ts`. A shift past a namesake's id in another file re-extracts nothing
+    and equals a full run; it FAILS with the id-only tie-break. A shift that flips the id order of two overloads in
+    one file re-extracts the caller; it FAILS without guard (a). `scopedRunStore.test.ts`: guard (a) is same-file
+    only.
+- **Found while checking the re-index (not fixed, needs the owner):** what a query sees during a full re-index.
+  A full run commits in batches (`indexPipeline.ts` write loop, `subtxSize`), and the re-extracted files'
+  outbound edges are raw `callee:` / `type:` tokens until the resolve phase. A reader on another connection
+  therefore sees a half-written index. The probe (30 callers of one function) counted resolved callers
+  30 → 25 → … → 0 while the run was going, and 30 again at the end. The gate does not notice. It checks only HEAD
+  and the dirty tree (`middleware/freshness.ts`, `ensureFresh`), never `INDEX_VERSION`. Only the gate's own
+  refreshes take the lock (`freshness.ts:447`); an explicit `index_repository` takes none. Another process's
+  query on a clean tree is therefore answered `fresh` from the partial index.
 
 ## MCP-ISSUE-102 — a linked git worktree beside its main checkout could not be indexed
 

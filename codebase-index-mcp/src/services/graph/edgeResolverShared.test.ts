@@ -55,9 +55,10 @@ test("a kind absent from the priority list ranks last but is still selectable", 
   assert.equal(ranked?.symbolId, "known");
 });
 
-test("a tie is broken by symbolId, not by input order", () => {
+test("a tie is broken by file path, then symbolId, not by input order", () => {
   // The regression this exists for. Both candidates score identically — different file from the
-  // caller, same kind — so before the symbolId tie-break the winner was whichever came first.
+  // caller, same kind — so before the tie-break the winner was whichever came first. MCP-ISSUE-101
+  // part 4: the path comes first, because a line shift re-mints the id but never moves the path.
   const forwards = pickBestNamedCandidate(
     [c("aaa", "one.ts", "class"), c("bbb", "two.ts", "class")],
     "caller.ts",
@@ -70,6 +71,10 @@ test("a tie is broken by symbolId, not by input order", () => {
   );
   assert.equal(forwards?.symbolId, "aaa");
   assert.equal(backwards?.symbolId, "aaa", "reversing the input must not change the winner");
+
+  // The path decides even against the id: "zzz" in a.ts beats "aaa" in b.ts. Within one file, the id.
+  assert.equal(pickBestNamedCandidate([c("aaa", "b.ts", "class"), c("zzz", "a.ts", "class")], "caller.ts", KINDS)?.symbolId, "zzz");
+  assert.equal(pickBestNamedCandidate([c("zzz", "a.ts", "class"), c("mmm", "a.ts", "class")], "caller.ts", KINDS)?.symbolId, "mmm");
 });
 
 test("order independence holds across every permutation of a tied set", () => {
@@ -80,7 +85,7 @@ test("order independence holds across every permutation of a tied set", () => {
   ];
   for (const p of permutations) {
     const winner = pickBestNamedCandidate(p.map((i) => all[i]), "caller.ts", KINDS);
-    assert.equal(winner?.symbolId, "aaa", `permutation ${JSON.stringify(p)} picked ${winner?.symbolId}`);
+    assert.equal(winner?.symbolId, "ccc", `permutation ${JSON.stringify(p)} picked ${winner?.symbolId} (a.ts sorts first)`);
   }
 });
 

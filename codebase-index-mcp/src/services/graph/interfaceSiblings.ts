@@ -85,7 +85,7 @@ export function expandInterfaceSiblingsImpl(
              and s.kind in ('class', 'struct', 'record', 'record struct')
            -- Ordered before the cap: which implementors survive IMPLEMENTOR_CAP decided which
            -- sibling edges got created, and that was an arbitrary choice. MCP-ISSUE-032.
-           order by s.symbol_id, s.file_path
+           order by s.file_path, s.symbol_id
            limit ?`
         )
         .all(repoId, parent.symbolId, `iface:${parent.name}`, IMPLEMENTOR_CAP) as { symbolId: string; filePath: string }[];
@@ -109,14 +109,14 @@ export function expandInterfaceSiblingsImpl(
         .all(repoId, parent.symbolId) as { toId: string }[];
       for (const edge of ifaceEdges) {
         const iface = edge.toId.startsWith("iface:")
-          ? // Name lookup, so more than one file can declare `IFoo`. Ordered by symbol_id to pick the
-            // same one every time; unordered, `limit 1` meant the sibling edges pointed at a different
-            // declaration from run to run.
+          ? // Name lookup, so more than one file can declare `IFoo`. Ordered to pick the same one every
+            // time; unordered, `limit 1` meant the sibling edges pointed at a different declaration from
+            // run to run. File first (MCP-ISSUE-101 part 4): a line shift re-mints the id, not the path.
             (db
               .prepare(
                 `select symbol_id as symbolId, file_path as filePath from symbols
                  where repo_id = ? and name = ? and kind = 'interface'
-                 order by symbol_id
+                 order by file_path, symbol_id
                  limit 1`
               )
               .get(repoId, edge.toId.slice("iface:".length)) as { symbolId: string; filePath: string } | undefined)

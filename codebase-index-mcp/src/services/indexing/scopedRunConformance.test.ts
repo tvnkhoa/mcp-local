@@ -280,25 +280,45 @@ test("a signature change alone (no row moves) re-extracts the callers", async ()
   assert.ok(dependents(scopes.dirty) >= 1 && dependents(scopes.incremental) >= 1, `${scopes.dirty} / ${scopes.incremental}`);
 });
 
-test("guard (a): a shift that moves an id past a same-named namesake's re-extracts the tied callers", async () => {
-  // caller.ts imports neither helper, so its call is a by-name tie that the lower symbol_id wins. Pick shifts
-  // of a.ts's helper that do and do not move its id past b.ts's; only the first may re-extract the caller.
+test("a shift that moves an id past a namesake's in ANOTHER file re-extracts nothing: the tie breaks on the path", async () => {
+  // caller.ts imports neither helper, so its call is a by-name tie. Before MCP-ISSUE-101 part 4 the lower
+  // symbol_id won, so this shift flipped the winner; now src/a.ts wins on its path whatever its id.
   const idAt = (rel: string, row: number): string => stableId(`r:${rel}:function:helper:${String(row)}`);
   const other = idAt("src/b.ts", 0);
   const before = idAt("src/a.ts", 0) < other;
-  const shifts = Array.from({ length: 60 }, (_, k) => k + 1);
-  const flips = shifts.find((k) => idAt("src/a.ts", k) < other !== before);
-  const keeps = shifts.find((k) => idAt("src/a.ts", k) < other === before);
-  assert.ok(flips !== undefined && keeps !== undefined);
-  const base = {
-    "src/a.ts": "export function helper(): number {\n  return 1;\n}\n",
-    "src/b.ts": "export function helper(): number {\n  return 2;\n}\n",
-    "src/caller.ts": "export function main(): number {\n  return helper();\n}\n"
-  };
-  const flipped = await assertScopedEqualsFull("id-order-flip", base, (root) => shiftDown(root, "src/a.ts", flips));
-  assert.ok(dependents(flipped.dirty) >= 1 && dependents(flipped.incremental) >= 1, `${flipped.dirty} / ${flipped.incremental}`);
-  const kept = await assertScopedEqualsFull("id-order-kept", base, (root) => shiftDown(root, "src/a.ts", keeps));
-  assert.equal(dependents(kept.dirty), 0, kept.dirty);
+  const flips = Array.from({ length: 60 }, (_, k) => k + 1).find((k) => idAt("src/a.ts", k) < other !== before);
+  assert.ok(flips !== undefined);
+  const scopes = await assertScopedEqualsFull(
+    "id-order-flip-cross-file",
+    {
+      "src/a.ts": "export function helper(): number {\n  return 1;\n}\n",
+      "src/b.ts": "export function helper(): number {\n  return 2;\n}\n",
+      "src/caller.ts": "export function main(): number {\n  return helper();\n}\n"
+    },
+    (root) => shiftDown(root, "src/a.ts", flips)
+  );
+  assert.equal(dependents(scopes.dirty), 0, scopes.dirty);
+  assert.equal(dependents(scopes.incremental), 0, scopes.incremental);
+});
+
+test("guard (a): a shift that flips the id order of two overloads in one file re-extracts the caller", async () => {
+  // Both Foo overloads move down together, so their line order holds (guard (b) is silent), but the shift is
+  // chosen so their ids trade order. The receiver-typed call binds to the first Foo by (file_path, id).
+  const idAt = (row: number): string => stableId(`r:src/Lib.cs:method:Foo:${String(row)}`);
+  const before = idAt(2) < idAt(3);
+  const flips = Array.from({ length: 80 }, (_, k) => k + 1).find((k) => idAt(2 + k) < idAt(3 + k) !== before);
+  assert.ok(flips !== undefined);
+  const lib = "namespace App {\n  public class Lib {\n    public int Foo(int x) { return x; }\n    public int Foo(string s) { return 0; }\n  }\n}\n";
+  const scopes = await assertScopedEqualsFull(
+    "id-order-flip-same-file",
+    {
+      "src/Lib.cs": lib,
+      "src/Use.cs": 'namespace App {\n  public class Use {\n    public int Run(Lib l) { return l.Foo(1); }\n  }\n}\n'
+    },
+    // Inside the class: the file and namespace symbols keep their rows, so only the overloads move.
+    (root) => writeTree(root, { "src/Lib.cs": lib.replace("public class Lib {\n", `public class Lib {\n${"\n".repeat(flips)}`) })
+  );
+  assert.ok(dependents(scopes.dirty) >= 1 && dependents(scopes.incremental) >= 1, `${scopes.dirty} / ${scopes.incremental}`);
 });
 
 test("two same-named C# overloads swapped in place re-extract the callers", async () => {

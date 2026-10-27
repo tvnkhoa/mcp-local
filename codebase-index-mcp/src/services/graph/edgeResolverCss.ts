@@ -59,7 +59,7 @@ export function resolveCssEdges(db: Database.Database, repoId: string): CssResol
 
     const defsByName = new Map<string, string[]>();
     const defRows = db
-      .prepare(`select name, symbol_id as symbolId from symbols where repo_id = ? and kind = ? order by name, symbol_id`)
+      .prepare(`select name, symbol_id as symbolId from symbols where repo_id = ? and kind = ? order by name, file_path, symbol_id`)
       .all(repoId, spec.kind) as { name: string; symbolId: string }[];
     for (const row of defRows) {
       const list = defsByName.get(row.name) ?? [];

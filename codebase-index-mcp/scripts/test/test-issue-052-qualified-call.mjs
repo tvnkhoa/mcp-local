@@ -109,7 +109,9 @@ const store = new GraphStore(dbPath);
 store.ensureRepository(REPO_ID, "/tmp/issue-052");
 
 indexFile(store, "src/Application/Common/Messaging/ConversationLoopCorrelationCodec.cs", codecSource);
-indexFile(store, "src/Infrastructure/BackgroundJobs/OutboundMetadataResolver.cs", outboundSource);
+// The wrong `Parse` must win the bare by-name tie for this to test the suppression. Since MCP-ISSUE-101
+// part 4 the tie breaks on the file path, so its file sorts before the codec's (`src/Application/…`).
+indexFile(store, "src/Adapters/BackgroundJobs/OutboundMetadataResolver.cs", outboundSource);
 indexFile(store, "src/Application/Common/Messaging/ConversationReplyTargetResolver.cs", callerSource);
 indexFile(store, "src/Application/Common/Messaging/MixedCaller.cs", mixedCallerSource);
 

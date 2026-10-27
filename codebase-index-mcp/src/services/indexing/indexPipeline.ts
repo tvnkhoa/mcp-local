@@ -147,7 +147,10 @@ export type RunIndexInput = {
 // v13: release L — L1 (MCP-ISSUE-090) drops a superseded SQL definition from a mention's candidates when
 // the current one is a candidate and wins decisively (stored mention rows change for unchanged docs);
 // L3 (MCP-ISSUE-092) adds the EF ModelSnapshot lane (new sql_* symbols and EF_MAPS edges in C# repos).
-export const INDEX_VERSION = "v14-release-m";
+// v15: MCP-ISSUE-101 part 4 — equally scored same-named candidates break the tie on (file_path,
+// symbol_id), not symbol_id alone (`tieBreakBefore`, the first-row lookups by name): resolved CALLS /
+// TYPE_REF / … targets change for unchanged files, so existing indexes must re-resolve on a FULL run.
+export const INDEX_VERSION = "v15-tiebreak-path";
 
 /**
  * Release J: files whose change alters how every other file resolves — module resolution (tsconfig paths,

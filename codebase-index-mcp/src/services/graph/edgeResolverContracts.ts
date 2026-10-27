@@ -190,7 +190,7 @@ export function resolveExtendsEdges(db: Database.Database, repoId: string): numb
       select name, symbol_id as symbolId
       from symbols
       where repo_id = ? and kind in ('class', 'struct', 'record', 'record struct') and name in (${placeholders})
-      order by name, symbol_id
+      order by name, file_path, symbol_id
       `
     )
     .all(repoId, ...baseNames) as { name: string; symbolId: string }[];
@@ -269,7 +269,7 @@ export function resolveImplementsEdges(db: Database.Database, repoId: string): n
           select name, symbol_id as symbolId
           from symbols
           where repo_id = ? and kind = 'interface' and name in (${namePlaceholders})
-          order by name, symbol_id
+          order by name, file_path, symbol_id
           `
         )
         .all(repoId, ...interfaceNames) as { name: string; symbolId: string }[];
@@ -347,7 +347,7 @@ export function resolvePublishesConsumesEdges(db: Database.Database, repoId: str
     const rows = db
       // Same first-row-wins hazard as the interface lookup above: a contract name declared in more than
       // one place resolved to a different symbol per run.
-      .prepare(`select name, symbol_id as symbolId from symbols where repo_id = ? and kind in ('class','struct','record','record struct','interface') and name in (${ph}) order by name, symbol_id`)
+      .prepare(`select name, symbol_id as symbolId from symbols where repo_id = ? and kind in ('class','struct','record','record struct','interface') and name in (${ph}) order by name, file_path, symbol_id`)
       .all(repoId, ...contractNames) as { name: string; symbolId: string }[];
     for (const r of rows) if (!contractSymbolByName.has(r.name)) contractSymbolByName.set(r.name, r.symbolId);
   }

@@ -176,12 +176,13 @@ export function pairShiftedSymbols(before: ReadonlyMap<string, string>, after: R
 }
 
 /**
- * Guard (a): resolvers keep the first of several equal candidates in `symbol_id` order
- * (`pickBestNamedCandidate`'s tie-break, the first-row lookups by name), so a re-minted id that moves
- * past another same-named symbol's id can change a full run's answer — and does: wec.aria's
- * `usage-period.ts` `get` against `theme.ts` `get` decides 199 "by name (ambiguous)" calls. A tie is only
- * possible within one kind family: the pick ranks each allowed kind apart, and the first-row lookups span
- * the type kinds (class, struct, record, interface, type).
+ * Guard (a): resolvers keep the first of several equal candidates in `(file_path, symbol_id)` order
+ * (`tieBreakBefore` in `pickBestNamedCandidate`, the first-row lookups by name), so a re-minted id that
+ * moves past a same-named symbol's id IN THE SAME FILE can change a full run's answer (overloads, a
+ * redeclared name). Across files the path decides and does not move: MCP-ISSUE-101 part 4 retired that
+ * half, which on wec.aria re-extracted 147 files for one blank-line edit. A tie is only possible within one
+ * kind family: the pick ranks each allowed kind apart, and the first-row lookups span the type kinds
+ * (class, struct, record, interface, type).
  *
  * Returns the ids (as they are now) whose incoming resolved edges can change: a shifted symbol whose order
  * against some same-family namesake flipped, and that namesake. An edge into any other candidate keeps its
@@ -204,12 +205,12 @@ export function idsAtRiskFromIdOrder(
   const atRisk = new Set<string>();
   if (names.length === 0) return atRisk;
   const rows = db
-    .prepare(`select name, kind, symbol_id as symbolId from symbols where repo_id = ? and name in (select value from json_each(?))`)
-    .all(repoId, JSON.stringify(names)) as { name: string; kind: string; symbolId: string }[];
+    .prepare(`select name, kind, file_path as filePath, symbol_id as symbolId from symbols where repo_id = ? and name in (select value from json_each(?))`)
+    .all(repoId, JSON.stringify(names)) as { name: string; kind: string; filePath: string; symbolId: string }[];
   const byGroup = new Map<string, string[]>();
   for (const r of rows) {
     if (freshIds.has(r.symbolId) && !oldOf.has(r.symbolId)) continue;
-    const key = `${r.name}:${TYPE_KIND_FAMILY.has(r.kind) ? "type" : r.kind}`;
+    const key = JSON.stringify([r.filePath, r.name, TYPE_KIND_FAMILY.has(r.kind) ? "type" : r.kind]);
     const g = byGroup.get(key) ?? [];
     g.push(r.symbolId);
     byGroup.set(key, g);

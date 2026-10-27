@@ -88,7 +88,7 @@ export function buildCallResolutionContext(db: Database.Database, repoId: string
   const interfaceRows = db
     // `interfaceByName` keeps the first row per name, so ordering decides which declaration of a
     // duplicated interface name wins.
-    .prepare(`select symbol_id as symbolId, name, file_path as filePath from symbols where repo_id = ? and kind = 'interface' order by name, symbol_id`)
+    .prepare(`select symbol_id as symbolId, name, file_path as filePath from symbols where repo_id = ? and kind = 'interface' order by name, file_path, symbol_id`)
     .all(repoId) as { symbolId: string; name: string; filePath: string }[];
   const interfaceByName = new Map<string, { symbolId: string; filePath: string }>();
   const interfaceIdSet = new Set<string>();
