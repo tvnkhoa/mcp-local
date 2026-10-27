@@ -105,6 +105,8 @@ export type RunIndexInput = {
    * index_repository(mode="dirty") to re-index just the git working-tree delta.
    */
   onlyRelativePaths?: Set<string>;
+  /** The commit the caller scoped the run to (MCP-ISSUE-106), recorded instead of HEAD as read at the start. */
+  commitSha?: string;
 };
 
 // v2: ISSUE-023 string-literal lane — bump buộc evaluateIncrementalSkip không skip để repo cũ repopulate lane.
@@ -170,7 +172,7 @@ export async function runIndexPipeline(store: GraphStore, input: RunIndexInput):
   const identity: RunIdentity = {
     runId: randomUUID(),
     repoId: input.repoId,
-    commitSha: resolveHeadCommitSha(input.repoPath),
+    commitSha: input.commitSha ?? resolveHeadCommitSha(input.repoPath),
     branch: resolveCurrentBranch(input.repoPath),
     indexVersion: INDEX_VERSION,
     mode: input.mode,

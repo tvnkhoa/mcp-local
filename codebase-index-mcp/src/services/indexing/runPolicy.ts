@@ -329,8 +329,13 @@ const GIT_SCOPE_FORCES_WALK = /(^|\/)(\.gitignore|\.gitattributes)$|(^|\/)\.code
 export type GitScopeInputs = {
   /** Work runs, newest first (`listRecentWorkRuns`). */
   runs: readonly WorkRunTrace[];
-  /** `git diff --name-status <base> HEAD` for the base this function picks; called at most once. Null: git cannot diff. */
-  diffSince: (sha: string) => NameStatusEntry[] | null;
+  /**
+   * HEAD, resolved once (G1 review 2). The diff runs to this sha and the run records it, so a checkout after the
+   * plan cannot make the run claim a commit whose files it never listed. Null: unborn or unreadable.
+   */
+  headSha: string | null;
+  /** `git diff --name-status <base> <headSha>` for the base this function picks; called at most once. Null: git cannot diff. */
+  diffSince: (sha: string, headSha: string) => NameStatusEntry[] | null;
   /** The working tree's dirty set now: staged, unstaged, untracked (both sides of a rename). */
   dirtyNow: readonly string[];
   /** Files the refactor engine wrote (MCP-ISSUE-042), re-read whatever git says. */
@@ -348,7 +353,7 @@ export type GitScopeInputs = {
 };
 
 export type GitScopePlan =
-  | { kind: "scoped"; baseSha: string; paths: Set<string>; diffPaths: number; carriedDirty: number }
+  | { kind: "scoped"; baseSha: string; headSha: string; paths: Set<string>; diffPaths: number; carriedDirty: number }
   | { kind: "walk"; reason: string };
 
 /**
@@ -387,7 +392,8 @@ export function planGitScopedIncremental(i: GitScopeInputs): GitScopePlan {
   if (base.indexVersion !== (i.indexVersion ?? INDEX_VERSION)) return { kind: "walk", reason: `index version changed (${base.indexVersion ?? "none"})` };
   const excludes = base.startedAt ? i.excludeRulesChangedSince(base.startedAt) : "an unknown file";
   if (excludes) return { kind: "walk", reason: `${excludes} changed since the last complete run: it can change which files are indexed` };
-  const diff = i.diffSince(base.commitSha);
+  if (!i.headSha) return { kind: "walk", reason: "HEAD cannot be resolved" };
+  const diff = i.diffSince(base.commitSha, i.headSha);
   if (!diff) return { kind: "walk", reason: `git cannot diff ${base.commitSha.slice(0, 12)}..HEAD (gc'd, shallow, or unborn HEAD)` };
   const paths = new Set<string>();
   for (const e of diff) {
@@ -405,7 +411,7 @@ export function planGitScopedIncremental(i: GitScopeInputs): GitScopePlan {
   }
   const cap = i.maxPaths ?? GIT_SCOPE_MAX_PATHS;
   if (paths.size > cap) return { kind: "walk", reason: `${String(paths.size)} paths changed (cap ${String(cap)})` };
-  return { kind: "scoped", baseSha: base.commitSha, paths, diffPaths, carriedDirty: carried.size };
+  return { kind: "scoped", baseSha: base.commitSha, headSha: i.headSha, paths, diffPaths, carriedDirty: carried.size };
 }
 
 /** {@link planGitScopedIncremental} over the store and git. */
@@ -417,7 +423,8 @@ export function planGitScopedIncrementalFor(
 ): GitScopePlan {
   return planGitScopedIncremental({
     runs: store.listRecentWorkRuns(repoId, GIT_SCOPE_RUN_LOOKBACK),
-    diffSince: (sha) => diffNameStatusSince(repoPath, sha),
+    headSha: resolveHeadCommitSha(repoPath),
+    diffSince: (sha, head) => diffNameStatusSince(repoPath, sha, head),
     dirtyNow: [...collectDirtyFiles(repoPath)],
     pending: store.getPendingReindexFiles(repoId).map((e) => e.filePath),
     gitScan: opts.respectGitignore !== false,

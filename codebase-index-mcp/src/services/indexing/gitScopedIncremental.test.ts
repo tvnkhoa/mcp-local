@@ -31,6 +31,7 @@ const key = (...paths: string[]): string => JSON.stringify({ head: "a".repeat(40
 function inputs(over: Partial<GitScopeInputs> = {}, diff: NameStatusEntry[] | null = []): GitScopeInputs {
   return {
     runs: [run()],
+    headSha: "f".repeat(40),
     diffSince: () => diff,
     dirtyNow: [],
     pending: [],
@@ -79,14 +80,16 @@ test("scoped: every path a dirty run indexed since the base is re-read, and the 
 
 test("the base is the newest complete run, and git diffs from its commit", () => {
   let asked: string | null = null;
-  planGitScopedIncremental({
+  const plan = planGitScopedIncremental({
     ...inputs({ runs: [run({ mode: "dirty", commitSha: "c".repeat(40) }), run({ mode: "full", commitSha: "b".repeat(40) })] }),
-    diffSince: (sha) => {
-      asked = sha;
+    diffSince: (sha, head) => {
+      asked = `${sha}..${head}`;
       return [];
     }
   });
-  assert.equal(asked, "b".repeat(40));
+  // G1 review 2: diffed to the HEAD resolved once, and that sha is what the run records.
+  assert.equal(asked, `${"b".repeat(40)}..${"f".repeat(40)}`);
+  assert.equal(plan.kind === "scoped" ? plan.headSha : null, "f".repeat(40));
 });
 
 for (const [name, over, diff] of [
@@ -103,6 +106,7 @@ for (const [name, over, diff] of [
   ["a base without a commit", { runs: [run({ commitSha: null })] }, []],
   ["a base at another INDEX_VERSION", { runs: [run({ indexVersion: "v1-old" })] }, []],
   ["a commit git cannot diff", {}, null],
+  ["an unresolvable HEAD", { headSha: null }, []],
   ["a .gitignore change", {}, [{ status: "M", path: "src/.gitignore" }]],
   ["a .codebase-index config change", {}, [{ status: "M", path: ".codebase-index/citations.json" }]],
   ["a dirty tsconfig", { dirtyNow: ["tsconfig.json"] }, []],

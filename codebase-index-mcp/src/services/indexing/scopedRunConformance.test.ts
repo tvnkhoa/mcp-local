@@ -677,3 +677,56 @@ test("G1 review: a committed case-only rename is git-scoped and lands as a full 
 test("G1 review: a staged case-only rename lands as a full run does, dirty and incremental", async () => {
   await assertScopedEqualsFull("case-rename-staged", G1_BASE, (root) => git(root, "mv", "src/caller.ts", "src/Caller.ts"));
 });
+
+test("G1 review: HEAD moved during a git-scoped run records no commit, so the next run cannot fast-skip over the gap", async () => {
+  // Plan at C2 (util v2), a checkout of C3 (util v3) lands before the files are read, and C2 is checked out again
+  // after the run. Recorded as C2, the index would hold util v3 at a clean C2, and the fast skip would vouch for it.
+  const repo = makeRepo(G1_BASE);
+  const work = mkdtempSync(path.join(tmpdir(), "cim-g1-race-"));
+  const utilV = (n: number): string => `export function helper(): number {\n  return ${String(n)};\n}\n\nexport function spare${String(n)}(): number {\n  return 2;\n}\n`;
+  const head = (): string => execFileSync("git", ["-C", repo, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+  try {
+    const scopedDb = path.join(work, "scoped.db");
+    const fullDb = path.join(work, "full.db");
+    await index(scopedDb, "r", repo, "full");
+    writeTree(repo, { "src/util.ts": utilV(2) });
+    commitAll(repo, "c2");
+    const c2 = head();
+    writeTree(repo, { "src/util.ts": utilV(3) });
+    commitAll(repo, "c3");
+    const c3 = head();
+    git(repo, "checkout", "-q", c2);
+
+    const store = new GraphStore(scopedDb);
+    let raced = false;
+    try {
+      const run = createIndexRunner({
+        store,
+        limits: { subtxSize: 20, checkpointEveryNBatches: 1, largeFileThresholdBytes: 512 * 1024, maxFileSizeBytes: 500 * 1024, parseWorkers: 0, parseJobTimeoutMs: 20_000 },
+        resolvePerformanceProfileOverride: () => "standard",
+        resolveProgressNotifier: () => () => {
+          if (raced) return;
+          raced = true;
+          git(repo, "checkout", "-q", c3);
+        }
+      });
+      const result = await run("r", repo.replace(/\\/g, "/"), "incremental", true, 1000, 50);
+      assert.ok(raced, "the checkout landed during the run");
+      assert.match(result.scope ?? "", /HEAD moved during the run: no commit recorded/, result.scope);
+      assert.equal(store.getLatestRun("r")?.commitSha ?? null, null);
+    } finally {
+      store.close();
+    }
+
+    git(repo, "checkout", "-q", c2);
+    const scope = (await index(scopedDb, "r", repo, "incremental")) ?? "";
+    assert.match(scope, /tree walk: the last complete run recorded no commit/, scope);
+    await index(fullDb, "r", repo, "full");
+    const a = snapshot(scopedDb, "r");
+    const b = snapshot(fullDb, "r");
+    for (const table of Object.keys(b)) assert.deepEqual(a[table], b[table], `race: ${table} differs from a full run (${scope})`);
+  } finally {
+    rmSync(repo, { recursive: true, force: true });
+    rmSync(work, { recursive: true, force: true });
+  }
+});

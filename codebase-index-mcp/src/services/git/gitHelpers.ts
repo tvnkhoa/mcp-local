@@ -786,10 +786,10 @@ export function parseNameStatusZ(out: string): NameStatusEntry[] {
  * Neither side has to be an ancestor of the other: a checkout of an older commit is a diff like any other. `--relative`:
  * paths are repoPath-relative and nothing outside repoPath is listed (MCP-ISSUE-107).
  */
-export function diffNameStatusSince(repoPath: string, fromSha: string): NameStatusEntry[] | null {
+export function diffNameStatusSince(repoPath: string, fromSha: string, toSha = "HEAD"): NameStatusEntry[] | null {
   try {
     runGit(repoPath, ["cat-file", "-e", `${fromSha}^{commit}`]);
-    const out = execFileSync("git", ["diff", "-z", "--name-status", "-M", "--relative", "--no-ext-diff", "--no-textconv", fromSha, "HEAD", "--"], {
+    const out = execFileSync("git", ["diff", "-z", "--name-status", "-M", "--relative", "--no-ext-diff", "--no-textconv", fromSha, toSha, "--"], {
       cwd: repoPath,
       encoding: "utf8",
       timeout: GIT_TIMEOUT_MS,
