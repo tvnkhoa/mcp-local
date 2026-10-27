@@ -1,0 +1,12 @@
+## MCP-ISSUE-079 — stored paths mixed `\` and `/`
+
+- **Status:** ✅ FIXED 2026-10-20 (release F; release E note 2).
+- **Scenario:** on Windows the pipeline stored `path.relative` output, so `files.path`, `symbols.file_path` and every per-file table held `packages\portal\…`, while other writers produced `packages/console/src/AskRow.vue`. Readers coped by matching both spellings (`isFileIndexed`, `normalizeFilePath`), and symbol ids — which hash the path — differed by platform.
+- **Fix:**
+  - **At the source**: `fileScan.toPosixRelative` is the run's relative-path function; the pipeline's `relativePath` — from which `files.path`, every `file_path` and every id are minted (`makeSymbolId`, the module id, literal / doc ids, and the enclosing-symbol lookup that builds edge `fromId`s, which reads the same `input.filePath`) — the dependents map and the prune's current-path list all use it. `edges` has no path column.
+  - **Existing rows**: a one-time migration in `runGraphMigrations` (`repositories/pathSeparatorMigration.ts`, keyed in a new `schema_migrations` table) rewrites `\` → `/` in `files`, `symbols`, `string_literals`, `citations`, `code_comments`, `docs`, `routes`, `pending_reindex_files`, drops a backslash file whose forward-slash twin exists (with its edges), and empties the migrated files' `content_hash` so the next run (incremental included) re-extracts them and re-mints their ids. A migration and not only the prune, because the `.csproj` module id is separator-canonical (MCP-ISSUE-065): the new row has the old row's id, and writing it beside the old one is a primary-key collision that fails the run (reproduced in the harness while building this). A backslash row written after the migration is still pruned as "not in this scan".
+  - `isFileIndexed` keeps matching both separators (harmless).
+  - Every Windows-indexed symbol id changes: `INDEX_VERSION` bump; the migration forces the re-extraction.
+- **Live:** wec.aria full run — 0 backslash rows in `files`, `symbols`, `string_literals`, `code_comments`, `citations`, `docs`, `routes` (the pre-change build: 2048 / 12 402 / 33 216 / 13 056 / 15 254 / 11 252 / 14 — every row).
+- **Guarded:** `pathSeparatorMigration.test.ts` (rewrite, twin drop incl. its edges, hash cleared, csproj id kept, runs once); `test:text-json-lane` (`instr(path, char(92)) = 0` across seven tables after every run — full, no-op, incremental, dirty, full; a seeded legacy backslash row is pruned and the file stored once); `test:html-svg` (same invariant).
+

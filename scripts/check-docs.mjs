@@ -62,7 +62,7 @@ function markdownFiles() {
 }
 
 const HISTORICAL = (f) =>
-  f.startsWith("docs/archive/") || f === "CHANGELOG.md" || f.includes("issue-registry");
+  f.startsWith("docs/archive/") || f === "CHANGELOG.md" || f.includes("issue-registry") || f.includes("codebase-index-mcp/docs/issues/");
 
 /** Blank out fenced blocks and inline code, preserving offsets so line numbers stay true. */
 function stripCode(text) {

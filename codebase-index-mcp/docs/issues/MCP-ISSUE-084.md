@@ -1,0 +1,10 @@
+## MCP-ISSUE-084 — the resolver's vector fallback bound unmatched tokens to near-name guesses
+
+- **Status:** ✅ FIXED 2026-10-22 (release J of the wec.aria adoption plan; owner decision: remove it, no env flag).
+- **Scenario:** when a CALLS or TYPE_REF token had no named candidate, `edgeResolverCalls` / the type lane asked the trigram vector index for the nearest symbol name and bound the edge to it (`resolved callee vector-fallback`, 0.52; `resolved type vector-fallback`, 0.5). The probe gave up after 100 fruitless lookups, so which tokens it reached depended on which rows a run visited — a scoped run could not reproduce a full one (it blocked MCP-ISSUE-085's conformance bar).
+- **Tool/query attempted:** `query_graph` over `edges` grouped by `reason`, central index, 2026-10-22.
+- **Expected vs actual:** expected an unmatched token to stay a labelled boundary; got guesses, nearly all into test files: wec.aria 47 (35 contract/entity modules "calling" `ratio` in `portal/test/focus-ring.test.ts`, 10 into `v` in a test), ssnet 329 TYPE_REFs all into `Test1`, mcp-local 199, codebase-index-mcp 105 (all into `isTestish`), wec.be 12 (some plausible — listed in CHANGELOG 2026-10-22).
+- **Fix:** the fallback is deleted from the calls and type lanes; such a token is `external boundary` (0.1), as it already was whenever the probe gave up. `NAME_ONLY_EDGE_REASONS` keeps the old reason string (with a comment) so a stored row from an older build is still refused `high`. Semantic search is unchanged: `search_symbols` still pads a thin FTS answer with `fuzzy` vector neighbours (`symbolSearchVector.test.ts`).
+- **Measured:** old build (25e09d3) vs new, full run, same wec.aria tree: the graphs differ in exactly the 47 vector edges, which revert to tokens at 0.1 `external boundary`. Full run 25.2 s → 19.2 s.
+- **Not done:** wec.be's plausible edges (`AmenitySettingService.*Async` → `AmenitySetting`, `LoyaltyService` → `LoyaltyAccount`, …) are lost; bringing them back would be a named rule, not a nearest-neighbour guess.
+

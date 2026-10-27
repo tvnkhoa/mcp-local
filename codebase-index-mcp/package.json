@@ -15,6 +15,7 @@
     "test:integration": "node scripts/run-tests.mjs --integration-only",
     "smoke": "node scripts/smoke-test.mjs",
     "guard:no-llm-runtime": "node scripts/guard-no-llm-runtime.mjs",
+    "test:issue-index": "node scripts/test/test-issue-index.mjs",
     "test:setup-config": "node scripts/test/test-setup-config.mjs",
     "test:harness-db-isolation": "node scripts/test/test-harness-db-isolation.mjs",
     "test:endpoint-bridge": "node scripts/test/test-endpoint-bridge.mjs",
