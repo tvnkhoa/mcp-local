@@ -33,6 +33,11 @@ export type FreshnessNote = {
   runId?: string;
   /** Why the answer may not reflect the current tree. Absent when `state` is fresh/refreshed. */
   reason?: string;
+  /**
+   * MCP-ISSUE-101 F2: dirty paths the gate gave up on — unreadable on several consecutive checks, so they no
+   * longer force a run. The index holds an older copy of each (or none); the answer says so.
+   */
+  unreadable?: string[];
 };
 
 export type RepoTreeState = {
@@ -72,6 +77,8 @@ export type FreshnessGateOptions = {
   recordCoveredKey?: (repoId: string, runId: string, key: string) => void;
   /** A dirty file larger than this is keyed by its size, not hashed: the index never reads it (its size cap is lower). */
   hashMaxBytes?: number;
+  /** F2: a path unreadable on this many consecutive checks stops forcing runs (default {@link DEFAULT_UNREADABLE_CHECKS}). */
+  unreadableChecks?: number;
   /** Tag a finished run as query-triggered, for `health_check`. Best-effort. */
   markTriggered?: (runId: string) => void;
   /**
@@ -342,6 +349,13 @@ export const DEFAULT_HASH_MAX_BYTES = 32 * 1024 * 1024;
  * about it. Only ENOENT / ENOTDIR mean `deleted`.
  */
 export const UNREADABLE = "unreadable";
+/**
+ * MCP-ISSUE-101 F2: what the gate keys a path that stayed {@link UNREADABLE} for {@link DEFAULT_UNREADABLE_CHECKS}
+ * consecutive checks. Stable, so the covered key matches it and the path stops forcing a dirty run that cannot
+ * index it; the first readable hash differs from it, so recovery is noticed.
+ */
+export const UNREADABLE_CAPPED = "unreadable-capped";
+export const DEFAULT_UNREADABLE_CHECKS = 3;
 const HASH_CONCURRENCY = 16;
 const HASH_CACHE_MAX = 4096;
 
@@ -440,6 +454,27 @@ export function createFreshnessGate(opts: FreshnessGateOptions): FreshnessGate {
   const staleLockMs = opts.staleLockMs ?? 15 * 60_000;
   const staleRunMs = opts.staleRunMs ?? DEFAULT_STALE_RUN_MS;
   const hashMaxBytes = opts.hashMaxBytes ?? DEFAULT_HASH_MAX_BYTES;
+  const unreadableChecks = opts.unreadableChecks ?? DEFAULT_UNREADABLE_CHECKS;
+  /** F2: per repo, how many consecutive checks each path was unreadable; and the paths now capped. */
+  const unreadableStreaks = new Map<string, Map<string, number>>();
+  const cappedPaths = new Map<string, string[]>();
+  /** Swap the key's long-unreadable paths for {@link UNREADABLE_CAPPED} (in place); a readable path resets its count. */
+  const capUnreadable = (repoId: string, key: TreeKey): void => {
+    const prev = unreadableStreaks.get(repoId);
+    const streaks = new Map<string, number>();
+    const capped: string[] = [];
+    for (const [p, h] of Object.entries(key.files)) {
+      if (h !== UNREADABLE) continue;
+      const n = (prev?.get(p) ?? 0) + 1;
+      streaks.set(p, n);
+      if (n >= unreadableChecks) {
+        key.files[p] = UNREADABLE_CAPPED;
+        capped.push(p);
+      }
+    }
+    unreadableStreaks.set(repoId, streaks);
+    cappedPaths.set(repoId, capped.sort());
+  };
   /** Without `getCoveredKey`: the key each repo's last completed refresh in THIS process covered. */
   const coveredKey = new Map<string, string>();
   const readCovered = (repoId: string): TreeKey | null => {
@@ -524,7 +559,9 @@ export function createFreshnessGate(opts: FreshnessGateOptions): FreshnessGate {
 
   const ensureFresh = async (repoId: string): Promise<FreshnessNote> => {
     if (!opts.enabled) return { state: "fresh" };
-    const note = await ensureFreshTree(repoId);
+    const checked = await ensureFreshTree(repoId);
+    const capped = cappedPaths.get(repoId) ?? [];
+    const note: FreshnessNote = capped.length > 0 ? { ...checked, unreadable: capped } : checked;
     const warning = versionWarning(repoId);
     if (!warning) return note;
     if (note.state === "fresh" || note.state === "refreshed") return { ...note, state: "refreshing", reason: warning };
@@ -564,6 +601,7 @@ export function createFreshnessGate(opts: FreshnessGateOptions): FreshnessGate {
     }
     if (!tree.head) return { state: "fresh" };
     const key = await computeTreeKey(repoPath, tree, hashMaxBytes);
+    capUnreadable(repoId, key);
     // The tree read and the hashing may have yielded: a concurrent call for this repo can have started a run meanwhile.
     const startedMeanwhile = inflight.get(repoId);
     if (startedMeanwhile) return waitBudget(repoId, startedMeanwhile);
@@ -641,7 +679,19 @@ export function createFreshnessGate(opts: FreshnessGateOptions): FreshnessGate {
  * known-current, and never let `coverage` say `high` about a tree it has not seen.
  */
 export function applyFreshness(payload: unknown, note: FreshnessNote | undefined): unknown {
-  if (!note || note.state === "fresh" || !payload || typeof payload !== "object" || Array.isArray(payload)) return payload;
+  if (!note || !payload || typeof payload !== "object" || Array.isArray(payload)) return payload;
+  if (note.state === "fresh") {
+    // F2: the tree is as current as the gate can make it, but a path it could not read is not in the index.
+    if (!note.unreadable?.length) return payload;
+    const out: Record<string, unknown> = { ...(payload as Record<string, unknown>), freshness: note };
+    const gap = `${String(note.unreadable.length)} changed file(s) could not be read for indexing (${note.unreadable.slice(0, 3).join(", ")}${note.unreadable.length > 3 ? ", ..." : ""}); the index holds an older copy or none`;
+    const coverage = out.coverage;
+    if (coverage && typeof coverage === "object" && !Array.isArray(coverage)) {
+      const c = coverage as { knownGaps?: unknown };
+      out.coverage = { ...c, knownGaps: [...(Array.isArray(c.knownGaps) ? (c.knownGaps as unknown[]) : []), gap] };
+    }
+    return out;
+  }
   const out: Record<string, unknown> = { ...(payload as Record<string, unknown>), freshness: note };
   if (note.state === "refreshed") return out;
   const coverage = out.coverage;

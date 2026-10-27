@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -655,4 +655,30 @@ test("MCP-ISSUE-101 part 5: getLatestFullRunVersion reads the latest ok FULL run
     store.close();
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test("MCP-ISSUE-101 F2: a dirty path that stays unreadable stops forcing runs after N checks, and the answer still reports it", async () => {
+  const h = harness({ budgetMs: 1000, autoFinish: true });
+  const bad = "bad\0name.ts"; // stat throws a non-ENOENT error: keyed UNREADABLE
+  try {
+    h.setTree({ head: "aaa111", dirty: [bad] });
+    for (let i = 0; i < 3; i++) await h.gate.ensureFresh("r");
+    const settled = h.runs.length;
+    assert.ok(settled >= 1 && settled <= 3, `${String(settled)} runs while the path was being given up on`);
+    for (let i = 0; i < 4; i++) {
+      const note = await h.gate.ensureFresh("r");
+      assert.equal(note.state, "fresh");
+      assert.deepEqual(note.unreadable, [bad]);
+    }
+    assert.equal(h.runs.length, settled, "a capped path starts no further run");
+    const answer = applyFreshness({ coverage: { confidence: "high", knownGaps: [] } }, await h.gate.ensureFresh("r")) as { coverage: { knownGaps: string[] }; freshness: { unreadable: string[] } };
+    assert.match(answer.coverage.knownGaps[0] ?? "", /could not be read/);
+    assert.deepEqual(answer.freshness.unreadable, [bad]);
+    // another dirty file still triggers its run
+    h.setTree({ head: "aaa111", dirty: [bad, "ok.ts"] });
+    writeFileSync(path.join(h.lockDir, "ok.ts"), "x");
+    await h.gate.ensureFresh("r");
+    assert.equal(h.runs.length, settled + 1);
+    assert.deepEqual(h.runs.at(-1)?.dirtyPaths, ["ok.ts"]);
+  } finally { h.cleanup(); }
 });

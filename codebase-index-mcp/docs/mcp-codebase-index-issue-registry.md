@@ -4364,3 +4364,13 @@ this afternoon failed at that harness, which is the highest rate observed so far
 - **Not covered:** a run marker's prefix match is by repoId prefix (`running-wt-` also matches `running-wt-b-…`), so a
   live run of `wt-b-…` can over-refuse the removal of `wt`; a sibling's dead marker is swept as a side effect.
   A process that has the repo open in memory (vector cache) is cleared only in the calling process.
+
+## MCP-ISSUE-101 follow-ups (row 5: F2–F4)
+
+- **F2 — a dirty file that stays unreadable forced a run on every check. ✅ FIXED 2026-10-27.** A path keyed
+  `UNREADABLE` (EBUSY, EACCES, a lock) is never vouched for, so each gate check started a dirty run that could not
+  index it. The gate now counts consecutive unreadable checks per repo and path (in memory, per process); at
+  `unreadableChecks` (default 3) the path is keyed `UNREADABLE_CAPPED`, which the covered key matches, so it stops
+  forcing runs. The note carries `unreadable: [paths]`; `applyFreshness` adds a `coverage.knownGaps` line on a fresh
+  answer too. A readable hash differs from the capped value, so recovery starts a run. Guarded: `freshness.test.ts`
+  (F2). **Not covered:** the count is per process, so a restart re-pays up to N runs.
