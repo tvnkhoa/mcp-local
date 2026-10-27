@@ -103,4 +103,23 @@ assert.deepEqual(
   "none refuses broad globs over scripts/, packages/ and non-<dir>/** patterns; .github/** is allowed"
 );
 
+// 7. No catch-all coverage: a new file anywhere in the package that no harness names runs the whole suite.
+const fresh = real(["codebase-index-mcp/scripts/lib/new.mjs"]);
+assert.equal(fresh.whole, true, "a new unmapped file in the package selects the whole suite");
+assert.deepEqual(fresh.uncovered, ["codebase-index-mcp/scripts/lib/new.mjs"]);
+const lint = checkMap({
+  map: {
+    skip: { docs: ["docs/**"] },
+    unit: ["cim/src/**/*.test.ts"],
+    harnesses: { "test:a": ["codebase-index-mcp/**"], "test:b": ["**"], "test:c": ["docs/adr/**"], "test:d": ["cim/src/x.test.ts"], "test:e": ["cim/src/**"] }
+  },
+  suite: ["test:a", "test:b", "test:c", "test:d", "test:e"],
+  exists: () => true
+});
+assert.ok(lint.some((p) => p.startsWith("test:a: codebase-index-mcp/** is a catch-all")), "a package-root ** is refused");
+assert.ok(lint.some((p) => p.startsWith("test:b: ** is a catch-all")), "a bare ** is refused");
+assert.ok(lint.some((p) => p.startsWith("test:c: docs/adr/** is shadowed by docs/**")), "a glob a skip rule takes first is refused");
+assert.ok(lint.some((p) => p.startsWith("test:d: cim/src/x.test.ts is shadowed by cim/src/**/*.test.ts")), "a path the unit rule takes first is refused");
+assert.ok(!lint.some((p) => p.startsWith("test:e")), "a narrower directory glob is fine");
+
 console.log(`test-test-select: all checks passed (${String(suite.length)} suite scripts mapped)`);

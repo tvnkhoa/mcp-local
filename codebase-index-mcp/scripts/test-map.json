@@ -43,7 +43,11 @@
       "tsconfig*.json"
     ],
     "self": [
-      "codebase-index-mcp/**"
+      "codebase-index-mcp/*.md",
+      "codebase-index-mcp/docs/**",
+      "codebase-index-mcp/.claude/**",
+      "codebase-index-mcp/skill/**",
+      "codebase-index-mcp/.env.example"
     ]
   },
   "harnesses": {

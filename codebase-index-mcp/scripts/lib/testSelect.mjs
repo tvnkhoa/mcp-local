@@ -16,6 +16,11 @@
  * Map paths are relative to the git top level (the workspace root), forward slashes. Globs know `**`
  * (any depth, including none), `*` (within one segment) and `?`; a pattern with no `/` matches at the
  * top level only. An entry starting with `@` names a group in `groups`.
+ *
+ * A harness glob may not be a catch-all (`**`, `codebase-index-mcp/**`): it would cover every file,
+ * and the whole-suite fail safe would never fire for a new file in the package. Nor may a `skip`,
+ * `none` or `unit` rule shadow a harness glob — those are checked first, so the harness would
+ * never be selected by it.
  */
 
 import { execFileSync } from "node:child_process";
@@ -145,6 +150,16 @@ export function checkMap({ map, suite, exists }) {
     if (!suite.includes(name)) problems.push(`${name}: in test-map.json but not a script in the suite`);
   }
   const literals = [...(map.unit ?? []), ...Object.values(map.skip ?? {}).flat(), ...Object.values(groups).flat(), ...(map.none ?? [])];
+  const earlier = [...Object.values(map.skip ?? {}).flat(), ...(map.none ?? []), ...(map.unit ?? [])].map((glob) => ({ glob, re: globToRegExp(glob) }));
+  for (const [name, entries] of Object.entries(harnesses)) {
+    for (const glob of expand(entries, groups)) {
+      if (CATCH_ALL.test(glob)) problems.push(`${name}: ${glob} is a catch-all — it would hide every unmapped file from the whole-suite fail safe`);
+      // A path the glob can match, wildcards filled in: if a rule checked earlier takes it, the glob is dead.
+      const sample = glob.replace(/\*\*/g, "x").replace(/[*?]/g, "x");
+      const shadow = earlier.find(({ re }) => re.test(sample));
+      if (shadow !== undefined) problems.push(`${name}: ${glob} is shadowed by ${shadow.glob}, which is checked first`);
+    }
+  }
   for (const entry of map.none ?? []) {
     if (!/[*?]/.test(entry)) continue;
     const dir = /^([^*?]+)\/\*\*$/.exec(entry)?.[1];
@@ -165,6 +180,10 @@ export function checkMap({ map, suite, exists }) {
   }
   return problems;
 }
+
+// `**`, `*/**`, `codebase-index-mcp/**` (and a trailing `/*`): every file at the root or in the package.
+// A whole top-level directory such as `packages/**` is a real dependency, not a catch-all.
+const CATCH_ALL = /^(?:codebase-index-mcp\/|\*\/)?\*\*(?:\/\*\*?)?$/;
 
 function git(args, cwd) {
   return execFileSync("git", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
