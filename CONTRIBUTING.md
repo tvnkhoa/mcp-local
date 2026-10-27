@@ -182,7 +182,8 @@ Read the diff for these, in this order:
 
 Three registries, all checked into the repo:
 
-- `codebase-index-mcp/docs/mcp-codebase-index-issue-registry.md`
+- `codebase-index-mcp/docs/mcp-codebase-index-issue-registry.md` — one file per entry: create
+  `codebase-index-mcp/docs/issues/MCP-ISSUE-<n>.md`, then run `node scripts/issue-index.mjs` there
 - `postgres-mcp/docs/mcp-postgres-issue-registry.md`
 - `observe-mcp/docs/mcp-observe-issue-registry.md`
 

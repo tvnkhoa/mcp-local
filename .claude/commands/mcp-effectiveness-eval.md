@@ -18,7 +18,7 @@ This prompt is workspace-agnostic and can run on any repository.
 - No semantic inference from LLM is allowed in either track.
 - This is a sanctioned baseline-first run (`.claude/rules/mcp-hard-mode.md` fallback condition 4), so
   the baseline track needs no issue-registry entry — but a **MCP-track** miss that forces a fallback
-  does.
+  does (a new `codebase-index-mcp/docs/issues/MCP-ISSUE-<n>.md`, then `node scripts/issue-index.mjs`).
 
 Inputs:
 

@@ -144,7 +144,7 @@ list_repositories(profile: "nano")
 ```
 MCP tool returns empty or confidence < 0.7
   → rewrite query with different token, retry once
-  → still insufficient → log to `codebase-index-mcp/docs/mcp-codebase-index-issue-registry.md`
+  → still insufficient → log it: create `codebase-index-mcp/docs/issues/MCP-ISSUE-<n>.md`, then run `node scripts/issue-index.mjs`
   → then fall back to grep/read_file for this turn
 ```
 

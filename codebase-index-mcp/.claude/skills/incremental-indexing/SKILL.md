@@ -156,8 +156,8 @@ Expected asymmetries. These are not defects, but name them in the report:
 - **`blocked`**: list each mismatching query with its counts (B / B′ / C). Name the likely mechanism
   from *Where incremental can drift from full* above.
 
-If the run uses baseline fallback, log it in `docs/mcp-codebase-index-issue-registry.md`, as
-`.claude/rules/mcp-hard-mode.md` requires.
+If the run uses baseline fallback, log it as a new file `docs/issues/MCP-ISSUE-<n>.md` and run
+`node scripts/issue-index.mjs`, as `.claude/rules/mcp-hard-mode.md` requires.
 
 ## Authoritative reference
 

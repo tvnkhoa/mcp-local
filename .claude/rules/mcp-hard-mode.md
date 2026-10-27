@@ -233,8 +233,10 @@ When fallback is used:
 3. Return to MCP path immediately after identifier is found.
 
 ## Mandatory Issue Logging on Fallback
-When fallback is used, add or update an entry in:
-- `codebase-index-mcp/docs/mcp-codebase-index-issue-registry.md`
+When fallback is used, add or update an entry: one file per entry,
+`codebase-index-mcp/docs/issues/MCP-ISSUE-<n>.md` (starts `## MCP-ISSUE-<n> — <title>`), then run
+`node scripts/issue-index.mjs` in `codebase-index-mcp/` to refresh the generated list in
+`codebase-index-mcp/docs/mcp-codebase-index-issue-registry.md` (the registry keeps the index; do not edit its list by hand).
 
 Record minimum fields:
 - Scenario
