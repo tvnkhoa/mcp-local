@@ -132,7 +132,7 @@ export function httpClientEntry(port, token) {
   return { type: "http", url: `http://127.0.0.1:${port}/mcp`, headers: { Authorization: `Bearer ${token}` } };
 }
 
-function taskName(server) {
+export function taskName(server) {
   return `mcp-local\\${server.key}-http`;
 }
 

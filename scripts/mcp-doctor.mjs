@@ -41,7 +41,8 @@ import { findMissingEnvPaths } from "./lib/envPaths.mjs";
 import { parseArgs, resolveServers } from "./lib/cli.mjs";
 import { findStaleRunningServers } from "./lib/runningServers.mjs";
 import { C, log, section, banner, ok, warn, err, info } from "./lib/log.mjs";
-import { defaultEnvFile, readEnvFile } from "./serve-http.mjs";
+import { defaultEnvFile, httpEnvNames, readEnvFile, taskName } from "./serve-http.mjs";
+import { checkTaskWritable } from "./lib/taskAcl.mjs";
 
 const ARGS = parseArgs(process.argv.slice(2), { skipStart: ["--skip-start"] }, { repo: ["--repo"] });
 const selected = () => resolveServers(ARGS.servers, { allowAllDefault: true });
@@ -362,6 +363,13 @@ async function checkServer(server, agents) {
     const [status, msg] = await probeHttp(inst.entry, server.dir);
     checks.push([instances.length === 1 ? "http" : `http ${inst.name}`, status, msg]);
     if (status !== "pass") fix.push(`node scripts/serve-http.mjs --server ${server.key}   # or: schtasks /Run /TN "mcp-local\\${server.key}-http"`);
+  }
+
+  // The logon task's ACL: one created elevated cannot be replaced or deleted from a normal prompt.
+  if (httpEnvNames(server) !== null) {
+    const task = checkTaskWritable(taskName(server));
+    checks.push(["task", task.status, task.message]);
+    if (task.fix) fix.push(task.fix);
   }
 
   // start
