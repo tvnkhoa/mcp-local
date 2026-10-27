@@ -568,11 +568,12 @@ export function resolveApprovalSecret(secret: string, strictApproval: boolean): 
   if (secret.trim().length > 0) {
     return secret;
   }
-  if (strictApproval) {
-    throw new PolicyViolationError(
-      "APPROVAL_SECRET_REQUIRED",
-      "Approval secret is required in strict approval mode. Set CODEBASE_INDEX_REFACTOR_APPROVAL_SECRET."
-    );
-  }
-  return "dev-insecure-secret";
+  // MCP-ISSUE-104: there is no fallback. This returned the constant "dev-insecure-secret", so anyone could mint
+  // an apply token; startup now always supplies a secret (refactorApprovalSecret in config/envConfig.ts).
+  throw new PolicyViolationError(
+    "APPROVAL_SECRET_REQUIRED",
+    strictApproval
+      ? "Approval secret is required in strict approval mode. Set CODEBASE_INDEX_REFACTOR_APPROVAL_SECRET."
+      : "No refactor approval secret: set CODEBASE_INDEX_REFACTOR_APPROVAL_SECRET, or let startup generate one."
+  );
 }

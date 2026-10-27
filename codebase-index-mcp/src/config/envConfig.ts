@@ -8,6 +8,7 @@
  * is exactly the question S-35 had to answer by proxying a live boot because no file could.
  */
 
+import { randomBytes } from "node:crypto";
 import {
   parseAllowedRoots,
   parseAutoWatchRepos,
@@ -227,4 +228,23 @@ export function tsLanguageServiceConfigFromEnv(): { enabled: boolean; budgetMs: 
     budgetMs: numberFromEnv("CODEBASE_INDEX_TS_LS_COLD_START_MS", 60_000),
     maxRssMb: numberFromEnv("CODEBASE_INDEX_TS_LS_MAX_RSS_MB", 2_500)
   };
+}
+
+/**
+ * MCP-ISSUE-104: the HMAC secret for refactor approval tokens. Unset, it used to fall back to a constant in
+ * the source, so anyone could mint an apply token. Now: set, it is used; unset over HTTP (one process shared by
+ * every session, restarted by the supervisor), startup refuses — `scripts/serve-http.mjs` supplies a persisted
+ * one; unset over stdio, a random secret for this process (its previews die with it anyway).
+ */
+export function refactorApprovalSecret(
+  envValue: string,
+  transport: "stdio" | "http"
+): { secret: string; source: "env" | "per-process" } {
+  if (envValue.trim().length > 0) return { secret: envValue, source: "env" };
+  if (transport === "http") {
+    throw new Error(
+      "--transport http needs CODEBASE_INDEX_REFACTOR_APPROVAL_SECRET (a refactor approval token must outlive a restart and must not be guessable). scripts/serve-http.mjs creates and passes one; set it yourself when serving another way."
+    );
+  }
+  return { secret: randomBytes(32).toString("hex"), source: "per-process" };
 }

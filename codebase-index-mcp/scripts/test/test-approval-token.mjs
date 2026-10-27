@@ -12,7 +12,12 @@
  * Usage: npm run build && node scripts/test/test-approval-token.mjs
  */
 
+import { spawnSync } from "node:child_process";
 import { createHmac } from "node:crypto";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 import {
   issueApprovalToken,
@@ -20,6 +25,7 @@ import {
   resolveApprovalSecret,
   PolicyViolationError
 } from "../../dist/services/refactor/refactorUtils.js";
+import { refactorApprovalSecret } from "../../dist/config/envConfig.js";
 
 const SECRET = "test-secret-0123456789";
 const PREVIEW = "prev-abc-123";
@@ -136,15 +142,51 @@ check(
 );
 
 // --- resolveApprovalSecret keeps THIS server's policy ------------------------
-// Deliberately NOT shared: postgres-mcp generates a random per-process secret,
-// this server throws in strict mode and otherwise returns a fixed dev secret.
+// Deliberately NOT shared with postgres-mcp. MCP-ISSUE-104: there is no fallback any more — the constant
+// "dev-insecure-secret" it returned let anyone mint an apply token; startup supplies the secret instead.
 check("configured secret is returned", resolveApprovalSecret("configured", false), "configured");
-check("non-strict fallback is the dev secret", resolveApprovalSecret("", false), "dev-insecure-secret");
+check(
+  "non-strict mode refuses an empty secret too (no constant fallback)",
+  rejection("non-strict empty", () => resolveApprovalSecret("", false))?.code,
+  "APPROVAL_SECRET_REQUIRED"
+);
+{
+  // A token minted with the old constant is refused by a server whose secret startup generated.
+  const stdio = refactorApprovalSecret("", "stdio");
+  check("stdio without a secret gets a per-process random one", [stdio.source, /^[0-9a-f]{64}$/.test(stdio.secret)], ["per-process", true]);
+  check("two processes get different secrets", refactorApprovalSecret("", "stdio").secret !== stdio.secret, true);
+  const forged = issueApprovalToken(PREVIEW, DIGEST, FUTURE, "dev-insecure-secret");
+  check(
+    "a token minted with the old constant is refused",
+    rejection("forged", () => verifyApprovalToken(forged, PREVIEW, DIGEST, FUTURE, resolveApprovalSecret(stdio.secret, false)))?.code,
+    "INVALID_APPROVAL_TOKEN"
+  );
+  let httpError = "";
+  try {
+    refactorApprovalSecret("", "http");
+  } catch (e) {
+    httpError = e.message;
+  }
+  check("http without a secret refuses to start", /--transport http needs CODEBASE_INDEX_REFACTOR_APPROVAL_SECRET/.test(httpError), true);
+  check("an env secret wins in either transport", refactorApprovalSecret("from-env", "http"), { secret: "from-env", source: "env" });
+}
 check(
   "strict mode refuses to invent a secret",
   rejection("strict approval", () => resolveApprovalSecret("", true))?.code,
   "APPROVAL_SECRET_REQUIRED"
 );
+
+// --- MCP-ISSUE-104: the built server refuses to start over HTTP without a secret ----
+{
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "cim-approval-"));
+  const env = { ...process.env, CODEBASE_INDEX_ALLOWED_ROOTS: dir, CODEBASE_INDEX_DB_PATH: path.join(dir, "x.db"), CODEBASE_INDEX_HTTP_PORT: "1", CODEBASE_INDEX_HTTP_TOKEN: "t" };
+  delete env.CODEBASE_INDEX_REFACTOR_APPROVAL_SECRET;
+  const run = spawnSync(process.execPath, [fileURLToPath(new URL("../../dist/index.js", import.meta.url)), "--transport", "http"], { env, encoding: "utf8", timeout: 60_000 });
+  check("dist/index.js --transport http with no secret exits non-zero", run.status !== 0 && run.status !== null, true);
+  check("... saying which variable it needs", /CODEBASE_INDEX_REFACTOR_APPROVAL_SECRET/.test(run.stderr ?? ""), true);
+  check("... before creating the index DB", fs.existsSync(path.join(dir, "x.db")), false);
+  fs.rmSync(dir, { recursive: true, force: true });
+}
 
 // --- report ------------------------------------------------------------------
 console.log(`\nResults: ${passed} passed, ${failures.length} failed`);
