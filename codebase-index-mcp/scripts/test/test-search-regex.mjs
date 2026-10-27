@@ -128,7 +128,10 @@ async function main() {
   if (truncated.truncated !== true || truncated.truncationReason !== "limit_reached") {
     throw new Error("search_regex(limit=3) did not surface truncated/truncationReason=limit_reached");
   }
-  console.log("TRUNCATION_OK:", { count: truncated.matches.length, reason: truncated.truncationReason });
+  if (truncated.complete !== false || typeof truncated.warning !== "string" || typeof truncated.nextAfterPath !== "string") {
+  throw new Error("search_regex(limit=3) did not surface complete:false + warning + nextAfterPath");
+}
+console.log("TRUNCATION_OK:", { count: truncated.matches.length, reason: truncated.truncationReason });
 
   // 6. ISSUE-027: compact (default) profile returns the contextLines window per match.
   const ctxCompact = readJsonTextContent(

@@ -68,6 +68,11 @@ export type RegexSearchOptions = {
    * greps missed for that reason alone.
    */
   outputMode?: "matches" | "files";
+  /**
+   * Resume point (MCP-ISSUE-100): only files whose path sorts after this one are searched. Files are
+   * scanned in path order, so a truncated result's `nextAfterPath` continues exactly where it stopped.
+   */
+  afterPath?: string;
 };
 
 export type RegexSearchMatch = {
@@ -93,7 +98,15 @@ export type RegexSearchResult = {
   filesEligible: number;
   truncated: boolean;
   /** Why truncation stopped the scan, when it did — surfaced so callers never silently cap. */
-  truncationReason: "limit_reached" | "files_cap_reached" | null;
+  truncationReason: "limit_reached" | "files_cap_reached" | "per_file_cap" | null;
+  /** In-scope files (after `afterPath`) never opened because the scan stopped early. */
+  filesUnscanned: number;
+  /** Pass as `afterPath` to continue a scan that stopped early; null when the scan reached the last file. */
+  nextAfterPath: string | null;
+  /** True when `nextAfterPath` is a file whose later matches were cut by `limit` and are NOT covered by the resume. */
+  nextAfterPathCutMidFile: boolean;
+  /** Files (first ${PER_FILE_CAP_REPORT_MAX}) where the per-file match cap hid further matches. */
+  perFileCapFiles: string[];
 };
 
 export class RegexSearchError extends Error {
@@ -209,20 +222,33 @@ export function searchRegexImpl(
     .filter((f) => (opts.excludeTests ? !isTestPath(f.path) : true))
     .filter((f) => (excludeGlobs.length ? !excludeGlobs.some((g) => minimatch(f.path, g, { nocase: true, dot: true })) : true))
     .sort((a, b) => a.path.localeCompare(b.path));
+  const afterPath = opts.afterPath ? normalizeRelativePath(opts.afterPath) : null;
+  if (afterPath !== null) {
+    const from = selected.findIndex((f) => f.path.localeCompare(afterPath) > 0);
+    selected.splice(0, from < 0 ? selected.length : from);
+  }
 
   const matches: RegexSearchMatch[] = [];
   const filesMode = opts.outputMode === "files";
   const files: RegexSearchFile[] = [];
   let filesScanned = 0;
   let truncationReason: RegexSearchResult["truncationReason"] = null;
+  let filesUnscanned = 0;
+  let nextAfterPath: string | null = null;
+  let nextAfterPathCutMidFile = false;
+  const perFileCapFiles: string[] = [];
+  const notePerFileCap = (p: string): void => {
+    if (perFileCapFiles.length < 20) perFileCapFiles.push(p);
+    truncationReason ??= "per_file_cap";
+  };
 
-  for (const file of selected) {
-    if (matches.length >= opts.limit) {
-      truncationReason = "limit_reached";
-      break;
-    }
-    if (filesScanned >= MAX_FILES_SCANNED) {
-      truncationReason = "files_cap_reached";
+  for (let i = 0; i < selected.length; i++) {
+    const file = selected[i];
+    const stopReason = (filesMode ? files.length : matches.length) >= opts.limit ? "limit_reached" : filesScanned >= MAX_FILES_SCANNED ? "files_cap_reached" : null;
+    if (stopReason) {
+      truncationReason = stopReason;
+      filesUnscanned = selected.length - i;
+      nextAfterPath = i > 0 ? selected[i - 1].path : afterPath;
       break;
     }
 
@@ -256,10 +282,6 @@ export function searchRegexImpl(
 
     const content = buf.toString("utf8");
     if (filesMode) {
-      if (files.length >= opts.limit) {
-        truncationReason = "limit_reached";
-        break;
-      }
       regex.lastIndex = 0;
       let count = 0;
       let firstIdx = -1;
@@ -269,6 +291,7 @@ export function searchRegexImpl(
         count++;
         if (fm.index === regex.lastIndex) regex.lastIndex++;
       }
+      if (count >= PER_FILE_MATCH_CAP) notePerFileCap(file.path);
       if (count > 0) {
         files.push({ filePath: file.path, matchCount: count, firstLine: lineIndexForOffset(buildLineStarts(content), firstIdx) + 1, language: file.language });
       }
@@ -285,9 +308,16 @@ export function searchRegexImpl(
     while ((m = regex.exec(content)) !== null) {
       if (matches.length >= opts.limit) {
         truncationReason = "limit_reached";
+        // This file is only partly read: resume after it, and say its tail is not covered.
+        filesUnscanned = selected.length - i - 1;
+        nextAfterPath = file.path;
+        nextAfterPathCutMidFile = true;
         break;
       }
-      if (perFileMatches >= PER_FILE_MATCH_CAP) break;
+      if (perFileMatches >= PER_FILE_MATCH_CAP) {
+        notePerFileCap(file.path);
+        break;
+      }
 
       const startIdx = m.index;
       const startLine = lineIndexForOffset(lineStarts, startIdx);
@@ -317,6 +347,7 @@ export function searchRegexImpl(
       // Guard against zero-width matches looping forever (e.g. pattern `a*` or `^` with m flag).
       if (m.index === regex.lastIndex) regex.lastIndex++;
     }
+    if (nextAfterPathCutMidFile) break;
   }
 
   return {
@@ -328,6 +359,10 @@ export function searchRegexImpl(
     // in that repo" — it meant 2528 files were never opened.
     filesEligible: selected.length,
     truncated: truncationReason !== null,
-    truncationReason
+    truncationReason,
+    filesUnscanned,
+    nextAfterPath,
+    nextAfterPathCutMidFile,
+    perFileCapFiles
   };
 }

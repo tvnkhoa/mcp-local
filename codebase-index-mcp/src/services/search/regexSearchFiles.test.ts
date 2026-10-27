@@ -40,7 +40,8 @@ test("files mode returns one row per matching file, and limit counts files, not 
     assert.deepEqual(byFile.files?.map((f) => f.filePath), ["a.ts", "b.ts", "d.ts"]);
     assert.equal(byFile.files?.[1]?.firstLine, 2);
     assert.equal(byFile.files?.[0]?.matchCount, 200, "per-file counting stops at the per-file cap");
-    assert.equal(byFile.truncated, false);
+    // a.ts hits the per-file cap: MCP-ISSUE-100 makes that a truncation instead of a silent one.
+    assert.equal(byFile.truncationReason, "per_file_cap");
 
     const capped = searchRegexImpl(store, "r", { pattern: "usage", limit: 2, outputMode: "files" });
     assert.equal(capped.files?.length, 2);

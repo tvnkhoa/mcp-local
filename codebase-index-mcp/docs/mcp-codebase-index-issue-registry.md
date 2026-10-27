@@ -4077,3 +4077,24 @@ this afternoon failed at that harness, which is the highest rate observed so far
   behind any number of skips".
 - **Not covered:** the WAL size *during* one long write transaction is inherent to WAL. The `refactor_*`
   tables have no time prune: 56 previews, under 1 MB, left as they are.
+
+## MCP-ISSUE-100 — a capped `search_regex` looked complete
+
+- **Status:** ✅ FIXED 2026-10-27 (wec.aria request, C1).
+- **Scenario:** `search_regex` stopped at the match `limit`, at the per-file cap (200) or at the 5,000-file scan
+  cap, and the response read as a full answer. Only `files_cap_reached` produced a `knownGap`; `truncated` was
+  not passed to `buildCoverageBlock`; the per-file cap was silent. A caller read "0 matches in the rest" for files
+  that were never opened.
+- **Fix:**
+  - **Every cap says so.** Limit, scan cap and per-file cap each set `truncated`, and the response carries
+    `complete:false` plus a top-level `warning` (files scanned, files NOT searched, the remedy: raise `limit`,
+    `outputMode:"files"`, narrow scope, or resume). `complete:true` otherwise. Coverage is lowered through
+    `truncated`. All four profiles, nano included, keep `complete` / `warning` / `nextAfterPath`.
+  - **Resume.** New input `afterPath`: files are path-sorted, only those after it are searched. A scan that
+    stopped early returns `nextAfterPath`. `filesUnscanned` is exact (files after the stop point), not
+    `eligible − scanned`.
+  - A file cut by `limit` mid-way is the resume point; its tail is not covered, and the warning says so.
+  - `perFileCapFiles` (first 20) names the files where the per-file cap hid matches; no resume point for that
+    reason alone, the scan itself reached the end.
+- **Guarded:** `regexSearchTruncation.test.ts` (pages via `afterPath` equal the full scan; per-file cap; every
+  profile), `regexSearchFiles.test.ts`.

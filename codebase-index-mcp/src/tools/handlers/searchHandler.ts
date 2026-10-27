@@ -198,6 +198,29 @@ export function handleSearchLiterals(
 // the enclosing symbol. A first-class grep-by-pattern lane so agents stay MCP-first
 // instead of falling back to baseline grep/read for arbitrary text searches.
 
+/** MCP-ISSUE-100: the one sentence a partial search_regex answer must carry. */
+function buildRegexTruncationWarning(
+  r: { truncationReason: string | null; filesScanned: number; filesUnscanned: number; nextAfterPath: string | null; nextAfterPathCutMidFile: boolean; perFileCapFiles: string[] },
+  filesMode: boolean
+): string {
+  const parts: string[] = [];
+  if (r.truncationReason === "limit_reached" || r.truncationReason === "files_cap_reached") {
+    parts.push(
+      `PARTIAL: stopped at the ${r.truncationReason === "limit_reached" ? "limit" : "scan cap"} — ${String(r.filesScanned)} file(s) scanned, ${String(r.filesUnscanned)} NOT searched; absence of a match is not proven.`
+    );
+  }
+  if (r.perFileCapFiles.length > 0) {
+    parts.push(`per-file match cap hit in ${String(r.perFileCapFiles.length)} file(s) (e.g. ${r.perFileCapFiles[0]}): further matches there are not returned.`);
+  }
+  const remedy = [`raise limit`, ...(filesMode ? [] : [`outputMode:"files"`]), `narrow scope (filePathPrefix / language / pathExclude)`];
+  if (r.nextAfterPath !== null) {
+    remedy.push(`resume with afterPath:"${r.nextAfterPath}"`);
+  }
+  parts.push(`Remedy: ${remedy.join(", ")}.`);
+  if (r.nextAfterPathCutMidFile) parts.push(`afterPath skips the rest of ${r.nextAfterPath ?? ""}, which was cut mid-file; query it alone with filePathPrefix.`);
+  return parts.join(" ");
+}
+
 export function handleSearchRegex(
   args: {
     repoId: string;
@@ -211,6 +234,7 @@ export function handleSearchRegex(
     contextLines: number;
     limit: number;
     outputMode?: "matches" | "files";
+    afterPath?: string;
     profile: string;
   },
   ctx: HandlerContext
@@ -230,7 +254,8 @@ export function handleSearchRegex(
       scanAll: args.scanAll,
       contextLines: args.contextLines,
       limit: args.limit,
-      outputMode: args.outputMode
+      outputMode: args.outputMode,
+      afterPath: args.afterPath
     });
   } catch (err) {
     const e = err as RegexSearchError;
@@ -240,13 +265,13 @@ export function handleSearchRegex(
     throw err;
   }
 
-  const { matches, filesScanned, filesEligible, truncated, truncationReason } = result;
+  const { matches, filesScanned, filesEligible, truncated, truncationReason, filesUnscanned, nextAfterPath } = result;
   const staleWarning = buildStaleWarning(args.repoId, store, "match lines/text are read live from disk and are current; only enclosingSymbol is resolved from the index and may be off — re-index for accurate enclosing symbols.");
-  const coverage = buildCoverageBlock({ resultCount: result.files ? result.files.length : matches.length, kind: "search", query: args.pattern });
+  const coverage = buildCoverageBlock({ resultCount: result.files ? result.files.length : matches.length, kind: "search", query: args.pattern, truncated });
   // MCP-ISSUE-058(a): a capped scan that found nothing is NOT "absent" — say so, in words, naming the
   // number of files never opened. The generic 0-results gap ("wrong strategy, too-narrow filter, or a
   // stale index") actively misled here, because none of those was the cause.
-  const unscanned = Math.max(0, filesEligible - filesScanned);
+  const unscanned = filesUnscanned;
   if (truncationReason === "files_cap_reached" && unscanned > 0) {
     coverage.knownGaps = [
       `scan cap reached: ${String(filesScanned)} of ${String(filesEligible)} in-scope file(s) were read, ${String(unscanned)} were NOT searched. ` +
@@ -258,13 +283,25 @@ export function handleSearchRegex(
     if (coverage.confidence === "high") coverage.confidence = "medium";
     coverage.suggestFallback ??= "narrow the scope with filePathPrefix / language / pathExclude so the whole candidate set fits under the cap.";
   }
-  const truncation = truncated ? { truncated, truncationReason, filesEligible, filesUnscanned: unscanned } : {};
+  // MCP-ISSUE-100: ANY cap (match limit, scan cap, per-file cap) makes the answer partial, and every profile
+  // says so — complete / warning / nextAfterPath survive nano, which drops most other fields.
+  const truncation = truncated
+    ? {
+        truncated,
+        truncationReason,
+        filesEligible,
+        filesUnscanned: unscanned,
+        ...(result.perFileCapFiles.length > 0 && { perFileCapFiles: result.perFileCapFiles }),
+        ...(nextAfterPath !== null && { nextAfterPath })
+      }
+    : {};
+  const completeness = { complete: !truncated, ...(truncated && { warning: buildRegexTruncationWarning(result, args.outputMode === "files") }) };
 
   if (result.files) {
     const files = profile === "nano" ? result.files.map((f) => ({ filePath: f.filePath, matchCount: f.matchCount })) : result.files;
     return ctx.asText(
       {
-        pattern: args.pattern, outputMode: "files", fileCount: files.length, filesScanned, files, ...truncation,
+        pattern: args.pattern, outputMode: "files", fileCount: files.length, filesScanned, files, ...completeness, ...truncation,
         coverage: profile === "nano" && coverage.knownGaps.length === 0 ? coverage.confidence : coverage,
         ...(staleWarning && { staleWarning })
       },
@@ -276,7 +313,7 @@ export function handleSearchRegex(
     const top = matches.slice(0, 10).map((m) => ({ filePath: m.filePath, line: m.line, matchText: m.matchText }));
     return ctx.asText(
       {
-        pattern: args.pattern, count: matches.length, filesScanned, matches: top, hasMore: matches.length > top.length, ...truncation,
+        pattern: args.pattern, count: matches.length, filesScanned, matches: top, hasMore: matches.length > top.length, ...completeness, ...truncation,
         // MCP-ISSUE-058(a): nano collapses coverage to a bare confidence string, which threw the gap
         // text away exactly when it mattered most. Keep the full block whenever there is a gap.
         coverage: coverage.knownGaps.length > 0 ? coverage : coverage.confidence
@@ -291,6 +328,7 @@ export function handleSearchRegex(
         pattern: args.pattern,
         count: matches.length,
         filesScanned,
+        ...completeness,
         matches: matches.map((m) => ({
           filePath: m.filePath,
           line: m.line,
@@ -314,6 +352,7 @@ export function handleSearchRegex(
       pattern: args.pattern,
       count: matches.length,
       filesScanned,
+      ...completeness,
       matches,
       ...truncation,
       coverage,
