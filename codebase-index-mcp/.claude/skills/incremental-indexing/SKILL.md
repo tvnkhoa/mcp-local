@@ -31,14 +31,24 @@ description: "Change how codebase-index-mcp decides what to re-index, and prove 
 3. **Per-file replace** (`repositories/writeStore.ts`). `replaceSymbolsForFile` deletes the edges
    **emitted from** the file and its symbols, then inserts the new ones. Edges in *other* files that
    point *into* this file are not touched â€” which is why step 3a exists.
-3a. **Scope** (release J, MCP-ISSUE-085; `indexPipeline.ts`, `repositories/scopedRunStore.ts`). A
-   non-full run computes K â€” the names of symbol rows the changed files added, removed or altered
-   (`symbolRowKeysForFiles` before vs after) â€” plus path keys for a file that appeared, vanished or
+3a. **Scope** (release J, MCP-ISSUE-085 and 101; `indexPipeline.ts`, `repositories/scopedRunStore.ts`). A
+   non-full run computes K — the names of symbol rows the changed files added, removed or altered
+   (`symbolRowKeysForFiles` before vs after) — plus path keys for a file that appeared, vanished or
    moved, and re-extracts every file whose resolution can depend on them (`findNameDependentFiles`).
+   A row that merely shifted is **not** in K: `pairShiftedSymbols` pairs old and new rows by logical key,
+   and `remapSymbolIds` re-points the old ids in every row outside the written files, inside the write's
+   transaction (`SYMBOL_ID_COLUMNS_EXEMPT` lists the columns that are not re-pointed). A rename, removal,
+   signature change or unpairable row stays in K. Two id-order guards still add dependents: (b) a shift that
+   changes the (line, id) order among one name in a file, (a) a shift that flips the id order of same-file
+   namesakes (`idsAtRiskFromIdOrder`). Ties across files break on `(file_path, symbol_id)`, so a shift
+   does not move them (`INDEX_VERSION` v15).
    A `SCOPE_FORCES_FULL_RUN` file (`tsconfig*`, `jsconfig*`, `package.json`, `citations.json`) or more
    than `SCOPE_MAX_DEPENDENT_FILES` (600) dependents escalates to a full run (`escalateToFull`).
    `index_runs.scope` records which. FTS is kept per file (`ftsForgetFile` / `ftsIndexFile`); only a
-   full run rebuilds it.
+   full run rebuilds it. `index_runs.tree_key` (HEAD + dirty paths + content hashes) lets a `dirty` run
+   re-read only the files the key does not vouch for; a run that records none vouches for nothing.
+   The R1 gate answers `refreshing`, never `fresh`, while any process holds a `running-<repo>-<pid>` marker
+   (`serialize`) or the latest successful full run's `index_version` is not this build's.
 3b. **Scoped post-phase** (release K3, MCP-ISSUE-088). The pipeline hands the runner `ScopeInputs`
    (re-extracted files incl. dependents, removed files, K, path keys, old ids, and whether a written or
    removed file had or has SQL / CSS rows). A scoped run then re-resolves only the call rows of
@@ -60,11 +70,11 @@ Check these first when the two disagree:
 
 - **Inbound edges into a re-indexed file.** A symbol id includes its `row` (`makeSymbolId`), so an
   edit that shifts declarations re-mints their ids, and a resolver never revisits a resolved edge. Step
-  3a re-extracts the unchanged files that hold such edges; if a scenario still drifts, K or the
-  dependent query missed a dependency. Measure it with query I2 in
+  3a re-points those ids and re-extracts the unchanged files that hold edges into unpaired rows; if a
+  scenario still drifts, the pairing, a guard or K missed a dependency. Measure it with query I2 in
   *Verification: full vs incremental* below.
 - **First-wins maps in row order.** A resolver that keeps the first of several equal candidates must
-  iterate in a canonical order (`ORDER BY` path, line, id), not rowid: a scoped run re-inserts the
+  iterate in a canonical order (`ORDER BY` path, line, id; by-name ties on path, then id), not rowid: a scoped run re-inserts the
   files it re-extracts, so rowid order differs from a full run's (MCP-ISSUE-085 fixes (a), (c)).
 - **Capped scans.** If the repo has more files than `maxFiles`, pruning and full-mode IMPLEMENTS
   resolution are skipped, and an `[index-prune-skipped]` line is logged.

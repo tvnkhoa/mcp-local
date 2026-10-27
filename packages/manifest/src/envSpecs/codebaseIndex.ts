@@ -166,7 +166,7 @@ export function codebaseIndexEnv(root: string): readonly EnvField[] {
       required: false,
       secret: true,
       section: "Refactor approval",
-      note: "HMAC secret for refactor approval tokens. Auto-generated per process if unset; set it to keep tokens valid across restarts."
+      note: "HMAC secret for refactor approval tokens. Unset over stdio: a random secret per process. Unset over HTTP: startup refuses; scripts/serve-http.mjs creates one once in ~/.claude/mcp/http/codebase-index.approval-secret (user-only ACL) and passes it, so previews and tokens survive a restart."
     },
     { name: "CODEBASE_INDEX_REFACTOR_PREVIEW_TTL_MS", required: false, codeDefault: "1800000", section: "Refactor approval", note: "Preview/token lifetime — 30 minutes." },
     {

@@ -324,6 +324,29 @@ node scripts/install-mcp.mjs --server codebase-index --transport stdio  # back t
 - **Dev cycle changes:** after `npm run build`, `/mcp` reconnects to the *running* process; it does not
   restart it. Stop and start `serve-http` (or `schtasks /End` then `/Run` on the task) to load a new build.
   `mcp:doctor`'s `[running]` check reports a served process older than `dist/`.
+
+#### After the served process restarts
+
+- **No `/mcp` is needed** (MCP-ISSUE-103). At initialize the transport records each session id with the
+  sha256 of the bearer that opened it, in `<state dir>/http-sessions.json`. The state dir is
+  `.codebase-index-state` beside the index DB. After a restart, a request carrying that id and that bearer is
+  re-adopted, and refactor previews and rollbacks made before the restart still apply. A different bearer
+  (the token rotated) gets 404 and must re-initialize; its session cannot touch the old session's previews.
+  Every client shares the one bearer, so this proves the caller holds the server's token, nothing more.
+- **The approval secret persists** (MCP-ISSUE-104). `serve-http` creates
+  `~/.claude/mcp/http/codebase-index.approval-secret` on first start: 64 hex characters, owner-only
+  (`icacls /inheritance:r /grant:r <user>:F` on Windows). It reuses the file and passes it as
+  `CODEBASE_INDEX_REFACTOR_APPROVAL_SECRET` unless the env file sets one, so approval tokens outlive a
+  restart. Over HTTP the server refuses to start without a secret; over stdio it generates one per process.
+  Deleting the file invalidates every outstanding token.
+- **Watchers are not restored, by policy.** The index is watchless by default
+  (`CODEBASE_INDEX_WATCH_AUTO_START_ENABLED=false`, *Watch Usage Playbook* in `.claude/rules/mcp-hard-mode.md`).
+  A `watch_repo` started before the restart is gone; start it again if the debug session still needs it.
+- **In-flight runs are not resumed.** A run cut off by the restart wrote no run record, so the next query's
+  freshness gate sees the tree as unindexed and starts its refresh again. Its marker
+  (`running-<repo>-<pid>-<n>.json`) names a dead pid and is ignored (MCP-ISSUE-101 part 5). The exception is an
+  explicit `index_repository` with `mode: "full"` on a clean tree: the gate cannot tell it was cut off, so run
+  it again.
 - **After switching a server's transport (stdio ↔ http), restart each Claude session.** `/mcp` reconnect
   only re-dials the new entry; it does not reap the old stdio child, which stays alive under the session
   (seen on the R4 rollout: a stdio `dist/index.js` still running after the http switch) and keeps its own
