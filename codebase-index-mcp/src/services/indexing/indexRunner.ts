@@ -25,6 +25,7 @@ import type { IndexMode, IndexRunResult } from "../../types/index.js";
 import {
   buildSkippedRunSummary,
   evaluateIncrementalSkip,
+  planGitScopedIncrementalFor,
   newerBuildRefusal,
   resolvePerformanceProfileDecision,
   safeCrossRepoResolve,
@@ -176,6 +177,8 @@ export function createIndexRunner(options: IndexRunnerOptions): RunIndexAndResol
   // Dirty mode (ENH-A): re-index only the git working-tree delta (unstaged + staged +
   // untracked). Sub-second refresh for "what I just edited" without a full/incremental scan.
   let dirtyFileSet: Set<string> | undefined;
+  /** MCP-ISSUE-106: how an incremental run chose its files, appended to its `scope`. */
+  let gitScope: string | undefined;
   if (mode === "dirty") {
     dirtyFileSet = extras.knownDirtyPaths ? new Set(extras.knownDirtyPaths) : collectDirtyFiles(repoPath);
     // MCP-ISSUE-042: union in files the refactor engine wrote. After a rollback the tree is clean
@@ -221,6 +224,17 @@ export function createIndexRunner(options: IndexRunnerOptions): RunIndexAndResol
       indexLog(`[index-skip] repoId=${repoId} reason=${skipDecision.reason}`);
       return skippedSummary;
     }
+    // MCP-ISSUE-106: after a HEAD move the run read and hashed every file to find the few that changed (13.6 s
+    // for none on wec.aria). Git names them: the run is scoped like a dirty run — deletes pruned, dependents
+    // re-extracted — unless the plan cannot vouch for the result, and then it walks the tree as before.
+    const plan = planGitScopedIncrementalFor(store, repoId, repoPath, { ...(limits.respectGitignore !== undefined && { respectGitignore: limits.respectGitignore }) });
+    if (plan.kind === "scoped") {
+      dirtyFileSet = plan.paths;
+      gitScope = `git-scoped from ${plan.baseSha.slice(0, 12)}: ${String(plan.paths.size)} path(s) (${String(plan.diffPaths)} from the diff, ${String(plan.carriedDirty)} indexed dirty since)`;
+    } else {
+      gitScope = `tree walk: ${plan.reason}`;
+    }
+    indexLog(`[index-scope] repoId=${repoId} incremental ${gitScope}`);
   }
 
   // Release L (MCP-ISSUE-095): a full / incremental run over a dirty tree indexes working-tree content; recorded so
@@ -283,6 +297,7 @@ export function createIndexRunner(options: IndexRunnerOptions): RunIndexAndResol
     progress.stop(`↻ index ${repoId} · ${mode} run escalated to full · ${summary.scopeEscalation}`);
     return escalateToFull(summary.scopeEscalation);
   }
+  if (gitScope) summary.scope = summary.scope ? `${summary.scope}; ${gitScope}` : gitScope;
   // Release K3: present on a scoped (non-escalated) run; absent means "run every pass repo-wide".
   const scopeInputs = mode !== "full" ? summary.scopeInputs : undefined;
   // Release K3: a scoped run that wrote and removed nothing left the graph as the last run left it, and

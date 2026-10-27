@@ -710,3 +710,25 @@ export function parseNameStatusZ(out: string): NameStatusEntry[] {
   }
   return result;
 }
+
+/**
+ * MCP-ISSUE-106: what changed in the commits between `fromSha` and HEAD, or null when git cannot say (the commit was
+ * gc'd, a shallow clone never had it, HEAD is unborn, git is missing). Renames are detected (`-M`) so the old path is
+ * named for the prune; `--no-ext-diff` / `--no-textconv` keep a user's diff config from changing what is printed.
+ * Neither side has to be an ancestor of the other: a checkout of an older commit is a diff like any other.
+ */
+export function diffNameStatusSince(repoPath: string, fromSha: string): NameStatusEntry[] | null {
+  try {
+    runGit(repoPath, ["cat-file", "-e", `${fromSha}^{commit}`]);
+    const out = execFileSync("git", ["diff", "-z", "--name-status", "-M", "--no-ext-diff", "--no-textconv", fromSha, "HEAD", "--"], {
+      cwd: repoPath,
+      encoding: "utf8",
+      timeout: GIT_TIMEOUT_MS,
+      maxBuffer: GIT_MAX_BUFFER_BYTES,
+      windowsHide: true
+    });
+    return parseNameStatusZ(out);
+  } catch {
+    return null;
+  }
+}

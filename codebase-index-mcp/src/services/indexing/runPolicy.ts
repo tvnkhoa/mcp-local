@@ -15,9 +15,11 @@
 
 import { randomUUID } from "node:crypto";
 
-import { hasWorkingTreeChanges, resolveHeadCommitSha } from "../git/gitHelpers.js";
+import { collectDirtyFiles, diffNameStatusSince, hasWorkingTreeChanges, resolveHeadCommitSha, runGit, type NameStatusEntry } from "../git/gitHelpers.js";
+import { parseTreeKey } from "../../middleware/freshness.js";
 import type { GraphStore } from "../../repositories/graphStore.js";
-import { INDEX_VERSION, currentAnnotationKey, type PerformanceProfile } from "./indexPipeline.js";
+import { INDEX_VERSION, SCOPE_FORCES_FULL_RUN, currentAnnotationKey, type PerformanceProfile } from "./indexPipeline.js";
+import type { WorkRunTrace } from "../../repositories/runStore.js";
 import type { IndexMode, IndexRunResult, ResolutionStats } from "../../types/index.js";
 
 export interface IncrementalSkipDecision {
@@ -306,4 +308,120 @@ export function safeCrossRepoResolve(store: GraphStore, repoId: string): Resolut
       }
     };
   }
+}
+
+/**
+ * MCP-ISSUE-106: above this many paths a git-scoped incremental run walks the whole tree instead. The scoped run
+ * re-extracts each path plus its dependents (escalating past `SCOPE_DEPENDENTS_CAP`); a diff this large is a branch
+ * switch, where the hash walk is the cheaper way to find what really differs.
+ */
+export const GIT_SCOPE_MAX_PATHS = 500;
+
+/** How far back `planGitScopedIncremental` looks for the run it diffs against. */
+export const GIT_SCOPE_RUN_LOOKBACK = 50;
+
+/**
+ * Paths whose change alters WHICH files are indexed (git's ignore rules, the index's own config) or how every file
+ * resolves (`SCOPE_FORCES_FULL_RUN`): a diff cannot name the files such a change affects.
+ */
+const GIT_SCOPE_FORCES_WALK = /(^|\/)(\.gitignore|\.gitattributes)$|(^|\/)\.codebase-index\//;
+
+export type GitScopeInputs = {
+  /** Work runs, newest first (`listRecentWorkRuns`). */
+  runs: readonly WorkRunTrace[];
+  /** `git diff --name-status <base> HEAD` for the base this function picks; called at most once. Null: git cannot diff. */
+  diffSince: (sha: string) => NameStatusEntry[] | null;
+  /** The working tree's dirty set now: staged, unstaged, untracked (both sides of a rename). */
+  dirtyNow: readonly string[];
+  /** Files the refactor engine wrote (MCP-ISSUE-042), re-read whatever git says. */
+  pending: readonly string[];
+  /** False when the scan does not take its file list from git (`respectGitignore: false`). */
+  gitScan: boolean;
+  /** The repo root is above repoPath: git prints root-relative paths, the index stores repoPath-relative ones. */
+  subdirectory: boolean;
+  annotationKeyCurrent: boolean;
+  indexVersion?: string;
+  maxPaths?: number;
+};
+
+export type GitScopePlan =
+  | { kind: "scoped"; baseSha: string; paths: Set<string>; diffPaths: number; carriedDirty: number }
+  | { kind: "walk"; reason: string };
+
+/**
+ * MCP-ISSUE-106: the files an incremental run must re-read, from git instead of hashing every file.
+ *
+ * The base is the newest ok `full`/`incremental` run. After it the index holds its commit's content for every file
+ * but the ones it found dirty (its tree key), which it read from the working tree. Every later run must be an ok
+ * `dirty` run, which wrote only the paths in its own tree key. So the files whose indexed content can differ from
+ * disk are: what changed between the base commit and HEAD, what is dirty now, and every path any of those runs
+ * indexed while dirty — a file dirty then and since reverted is in neither of the first two. A scoped incremental
+ * run is itself a base: it re-read that whole union, so the induction holds back to the last full walk.
+ *
+ * Anything this cannot vouch for walks the tree: a non-ok or unkeyed run since the base (a cancelled run wrote an
+ * unknown subset), a base at another INDEX_VERSION, a commit git no longer has, an ignore-rule or config change, or
+ * more than `maxPaths` paths.
+ */
+export function planGitScopedIncremental(i: GitScopeInputs): GitScopePlan {
+  if (!i.gitScan) return { kind: "walk", reason: "the scan does not take its file list from git" };
+  if (i.subdirectory) return { kind: "walk", reason: "repoPath is a subdirectory of its git repo" };
+  if (!i.annotationKeyCurrent) return { kind: "walk", reason: "the annotation key changed: unchanged files must be re-scanned" };
+  const carried = new Set<string>();
+  let base: WorkRunTrace | null = null;
+  for (const run of i.runs) {
+    if (run.status !== "ok") return { kind: "walk", reason: `a ${run.mode} run since the last complete one ended ${run.status}` };
+    const key = parseTreeKey(run.treeKey);
+    if (!key && (run.mode === "dirty" || run.treeDirty)) return { kind: "walk", reason: `a ${run.mode} run over a dirty tree recorded no tree key` };
+    for (const p of Object.keys(key?.files ?? {})) carried.add(p);
+    if (run.mode === "full" || run.mode === "incremental") {
+      base = run;
+      break;
+    }
+  }
+  if (!base) return { kind: "walk", reason: "no complete run on record to diff against" };
+  if (!base.commitSha) return { kind: "walk", reason: "the last complete run recorded no commit" };
+  if (base.indexVersion !== (i.indexVersion ?? INDEX_VERSION)) return { kind: "walk", reason: `index version changed (${base.indexVersion ?? "none"})` };
+  const diff = i.diffSince(base.commitSha);
+  if (!diff) return { kind: "walk", reason: `git cannot diff ${base.commitSha.slice(0, 12)}..HEAD (gc'd, shallow, or unborn HEAD)` };
+  const paths = new Set<string>();
+  for (const e of diff) {
+    paths.add(e.path);
+    if (e.origPath) paths.add(e.origPath);
+  }
+  const diffPaths = paths.size;
+  for (const p of carried) paths.add(p);
+  for (const p of i.dirtyNow) paths.add(p);
+  for (const p of i.pending) paths.add(p);
+  for (const p of paths) {
+    if (GIT_SCOPE_FORCES_WALK.test(p) || SCOPE_FORCES_FULL_RUN.test(p)) {
+      return { kind: "walk", reason: `${p} changed: it can change which files are indexed or how they resolve` };
+    }
+  }
+  const cap = i.maxPaths ?? GIT_SCOPE_MAX_PATHS;
+  if (paths.size > cap) return { kind: "walk", reason: `${String(paths.size)} paths changed (cap ${String(cap)})` };
+  return { kind: "scoped", baseSha: base.commitSha, paths, diffPaths, carriedDirty: carried.size };
+}
+
+/** {@link planGitScopedIncremental} over the store and git. */
+export function planGitScopedIncrementalFor(
+  store: GraphStore,
+  repoId: string,
+  repoPath: string,
+  opts: { respectGitignore?: boolean } = {}
+): GitScopePlan {
+  let prefix: string;
+  try {
+    prefix = runGit(repoPath, ["rev-parse", "--show-prefix"]);
+  } catch {
+    return { kind: "walk", reason: "not a git repository" };
+  }
+  return planGitScopedIncremental({
+    runs: store.listRecentWorkRuns(repoId, GIT_SCOPE_RUN_LOOKBACK),
+    diffSince: (sha) => diffNameStatusSince(repoPath, sha),
+    dirtyNow: [...collectDirtyFiles(repoPath)],
+    pending: store.getPendingReindexFiles(repoId).map((e) => e.filePath),
+    gitScan: opts.respectGitignore !== false,
+    subdirectory: prefix !== "",
+    annotationKeyCurrent: store.getAnnotationKey(repoId) === currentAnnotationKey(repoPath)
+  });
 }

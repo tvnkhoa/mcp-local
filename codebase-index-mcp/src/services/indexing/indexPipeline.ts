@@ -746,9 +746,9 @@ export async function runIndexPipeline(store: GraphStore, input: RunIndexInput):
     // as "degraded" would describe the wrong thing.
     const health = assessRunHealth(c, input.mode);
     const runStatus = wasCancelled ? "cancelled" : health.degraded ? "degraded" : "ok";
-    // Record the annotation scan only when it covered the whole repo: a dirty run or a capped or
+    // Record the annotation scan only when it covered the whole repo: a dirty or git-scoped run, or a capped or
     // cancelled one saw a subset, and the next complete run must still re-scan the rest.
-    if (!wasCancelled && input.mode !== "dirty" && files.length <= maxFiles) {
+    if (!wasCancelled && !input.onlyRelativePaths && files.length <= maxFiles) {
       store.setAnnotationKey(input.repoId, annotationKey);
     }
     for (const reason of health.reasons) {

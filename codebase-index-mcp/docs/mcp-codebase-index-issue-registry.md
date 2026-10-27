@@ -4343,3 +4343,53 @@ this afternoon failed at that harness, which is the highest rate observed so far
   repo's) is refused, since a directory carries no back-link. The back-link is compared with
   `<realpath(repoPath)>/.git` without resolving `.git` itself. A subdirectory of a worktree is refused.
 - **Not covered:** a worktree whose main checkout is not registered is accepted but reports `worktreeOf: null`.
+
+## MCP-ISSUE-106 — an incremental run after a HEAD move read and hashed every file
+
+- **Status:** ✅ FIXED 2026-10-27 (wec.aria request, G1).
+- **Scenario:** after a pull, merge or checkout the fast skip cannot fire (HEAD ≠ the indexed commit), so the run
+  read and sha256-hashed every file the scan listed to find the changed ones (`indexPipeline.ts`, the content-hash
+  skip). On wec.aria (~3,000 files) a HEAD move with 0 changed files cost 13.6 s of extract live, and a 12-file
+  merge 10.8 s.
+- **Fix:** `planGitScopedIncremental` (`runPolicy.ts`) names the files from git, and the runner hands them to the
+  pipeline as `onlyRelativePaths` — the same scoped path a dirty run takes (deletes pruned, dependents
+  re-extracted, ids re-pointed). The set is
+  `git diff -M --name-status <base> HEAD` (both sides of a rename; `diffNameStatusSince`, `gitHelpers.ts`) ∪ the
+  porcelain-v2 dirty set (untracked included) ∪ the pending re-index set ∪ every path a run since the base indexed
+  while dirty. The base is the newest ok `full`/`incremental` run; every later run must be an ok `dirty` run. The
+  dirty paths come from `index_runs.tree_key` (MCP-ISSUE-101), which names each run's dirty files: a file indexed
+  dirty and reverted since is in neither the diff nor the dirty set. A scoped incremental run is itself a base —
+  it re-read that whole union — so the induction reaches back to the last full walk. No schema change.
+  The run's `scope` says which way it went: `…; git-scoped from <sha>: N path(s) (D from the diff, K indexed dirty
+  since)` or `…; tree walk: <reason>`.
+- **Walks the tree, as before, when:** `respectGitignore: false` (the scan is not git's list); repoPath is a
+  subdirectory of its git repo (git prints root-relative paths); the annotation key changed; any run since the base
+  is not `ok` (a cancelled run wrote an unknown subset) or ran over a dirty tree without a tree key; no base, or one
+  without a commit or at another `INDEX_VERSION`; git cannot diff from the base commit (gc'd, shallow, unborn
+  HEAD); a `.gitignore`, `.gitattributes`, `.codebase-index/*` or `SCOPE_FORCES_FULL_RUN` path is in the set; more
+  than `GIT_SCOPE_MAX_PATHS` (500) paths.
+- **Git vs the indexer's own rules:** the full walk keeps only files `git ls-files --cached --others
+  --exclude-standard` lists, then applies its own exclusions. So the indexed set is a subset of git's visible set,
+  and every way a visible file can change content or appear shows up in the diff or the dirty set. What git cannot
+  report is a change to the visible set itself, which is why an ignore-rule change walks. Not detected: an edit to
+  `.git/info/exclude` or `core.excludesFile` (no tracked file changes); run `full` after one.
+- **Measured** (scratch clone of wec.aria at 6e011462, 2,994 files; refresh-worker limits; each run on a copy of
+  one full base DB; before = ee4d38a, after = this change; two runs each, alternating):
+
+  | HEAD move | before | after | rows vs a full run |
+  |---|---|---|---|
+  | empty commit (0 files) | 5.7 / 6.0 s (extract 5.2 / 5.4 s) | 0.8 / 1.0 s (extract 26 / 38 ms) | equal, both |
+  | 51f82d5b (11 files; 123 dependents) | 16.2 / 16.4 s (extract 12.5 / 12.9 s) | 11.0 / 9.4 s (extract 7.8 / 6.4 s) | equal, both |
+
+  Equal = every row of files/symbols/edges/doc_mentions/string_literals/code_comments/routes, plus S1–S3, I1 = 0,
+  I2 empty. What is left of the 11-file run is the dependents' re-extraction (release J), not file selection.
+- **Guarded:** `gitScopedIncremental.test.ts` (the plan's set and each walk condition; `diffNameStatusSince`
+  forward, backward and on an unknown commit, over a real temp repo). `scopedRunConformance.test.ts` "G1: …"
+  (incremental vs full, every row): a commit that adds, modifies, deletes and renames; a merge commit; HEAD moved
+  backwards; a `.gitignore` change (walks); an untracked file after a commit; a file indexed dirty and reverted
+  since (re-read through the tree key — fails with the tree-key union removed); a dirty run without a tree key
+  (walks).
+- **Found on the way (not fixed here):** `git status --porcelain` paths are repo-root-relative, so `mode: "dirty"`
+  on a repo registered at a subdirectory of its git root (`codebase-index-mcp` inside `mcp-local`) names paths
+  that do not exist under repoPath, and its edited files are not re-read. Seen in the code and in git's output; not
+  reproduced through a run.

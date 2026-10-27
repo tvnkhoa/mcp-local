@@ -175,7 +175,7 @@ import {
   type CitationRow,
   type CommentHit
 } from "./annotationsStore.js";
-import { recordRun as recordRunImpl, getLatestRun as getLatestRunImpl, markRunTrigger as markRunTriggerImpl, getLatestWorkRunMode as getLatestWorkRunModeImpl, markRunTreeDirty as markRunTreeDirtyImpl, getLatestWorkRunTreeDirty as getLatestWorkRunTreeDirtyImpl, markRunTreeKey as markRunTreeKeyImpl, getLatestRunTreeKey as getLatestRunTreeKeyImpl, getLatestFullRunVersion as getLatestFullRunVersionImpl } from "./runStore.js";
+import { recordRun as recordRunImpl, getLatestRun as getLatestRunImpl, markRunTrigger as markRunTriggerImpl, getLatestWorkRunMode as getLatestWorkRunModeImpl, markRunTreeDirty as markRunTreeDirtyImpl, getLatestWorkRunTreeDirty as getLatestWorkRunTreeDirtyImpl, markRunTreeKey as markRunTreeKeyImpl, getLatestRunTreeKey as getLatestRunTreeKeyImpl, getLatestFullRunVersion as getLatestFullRunVersionImpl, listRecentWorkRuns as listRecentWorkRunsImpl, type WorkRunTrace } from "./runStore.js";
 import {
   type WriteContext,
   prepareWriteStatements,
@@ -468,6 +468,11 @@ export class GraphStore {
 
   getLatestRunTreeKey(repoId: string): string | null {
     return getLatestRunTreeKeyImpl(this.db, repoId);
+  }
+
+  /** MCP-ISSUE-106: see `listRecentWorkRuns` in runStore.ts. */
+  listRecentWorkRuns(repoId: string, limit: number): WorkRunTrace[] {
+    return listRecentWorkRunsImpl(this.db, repoId, limit);
   }
 
   /** MCP-ISSUE-101 part 5: see `getLatestFullRunVersion` in runStore.ts. */
