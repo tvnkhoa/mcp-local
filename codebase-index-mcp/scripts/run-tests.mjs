@@ -17,6 +17,7 @@
  *   node scripts/run-tests.mjs --integration-only # skip the node:test unit suite
  *   node scripts/run-tests.mjs --list             # show what would run
  *   node scripts/run-tests.mjs --bail             # stop at the first failure
+ *   node scripts/run-tests.mjs --no-lock          # skip the machine-wide heavy-check lock (CI=true skips it too)
  */
 
 import { spawnSync } from "node:child_process";
@@ -25,6 +26,7 @@ import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
 
+import { holdHeavyLockOrExit } from "../../scripts/lib/heavyLock.mjs";
 import { failureExcerpt } from "./lib/failureExcerpt.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -81,6 +83,10 @@ if (needsBuild && !fs.existsSync(path.join(ROOT, "dist", "index.js"))) {
   console.error("dist/index.js not found — run `npm run build` first.");
   process.exit(2);
 }
+
+// The latency bounds in these harnesses assume the suite has the machine to itself; another session's
+// gate running alongside is what made test:freshness-worker flake (277 ms > 250) — scripts/lib/heavyLock.mjs.
+await holdHeavyLockOrExit({ cmd: `codebase-index run-tests ${argv.join(" ")}`.trim(), noLock: argv.includes("--no-lock") });
 
 const npm = process.platform === "win32" ? "npm.cmd" : "npm";
 const failures = [];

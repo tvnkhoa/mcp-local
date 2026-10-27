@@ -13,6 +13,7 @@
  *   node scripts/run-servers.mjs test --continue     # run all, then report
  *   node scripts/run-servers.mjs smoke --server postgres-mcp
  *   node scripts/run-servers.mjs install             # npm ci in each server
+ *   node scripts/run-servers.mjs test --no-lock      # skip the heavy-check lock (CI=true skips it too)
  */
 
 import { spawnSync } from "node:child_process";
@@ -21,6 +22,7 @@ import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
 
+import { holdHeavyLockOrExit } from "./lib/heavyLock.mjs";
 import { SERVERS } from "./lib/manifest.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -45,6 +47,11 @@ if (targets.length === 0) {
 }
 
 const npm = process.platform === "win32" ? "npm.cmd" : "npm";
+
+// Only the test suites are heavy enough to collide with another session's gate (scripts/lib/heavyLock.mjs).
+if (script === "test") {
+  await holdHeavyLockOrExit({ cmd: `run-servers ${argv.join(" ")}`, noLock: argv.includes("--no-lock") });
+}
 
 /** `install` is not a package script — it is `npm ci`, with a fallback. */
 function argsFor(server, cwd) {

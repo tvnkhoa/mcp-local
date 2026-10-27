@@ -184,6 +184,14 @@ Two properties worth knowing:
 - **`contracts:check` is also the boot check.** It starts all six servers over a real stdio
   handshake with placeholder env, which is what catches a module that compiles but cannot load.
 
+**One heavy run per machine.** `verify:all`, `verify:packages`, `verify:servers`, `run-servers.mjs test`
+and codebase-index's `run-tests.mjs` take a machine-wide lock, `~/.claude/locks/heavy-check.lock`
+(`scripts/lib/heavyLock.mjs`): two sessions' gates side by side made the latency bounds flake
+(`test:freshness-worker` 277 ms against 250). A second caller prints the holder and waits, up to 30 min
+(`MCP_HEAVY_LOCK_TIMEOUT_MS`), then exits 75; a holder whose pid is gone or that is older than 3 h is
+broken. Nested entry points inherit the hold through `MCP_HEAVY_LOCK_TOKEN`. `CI=true` or `--no-lock`
+skips it, so CI is never held.
+
 Server test files were type-checked by **nothing** before S-39 — each server's build excludes
 `*.test.ts` and the root `tsconfig.test.json` covers `packages/` only. Each server now has its own
 `tsconfig.test.json` and `typecheck` runs both passes.

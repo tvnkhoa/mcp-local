@@ -27,8 +27,10 @@
     "typecheck:servers": "node scripts/run-servers.mjs typecheck --continue",
     "test:servers": "node scripts/run-servers.mjs test --continue",
     "smoke:servers": "node scripts/run-servers.mjs smoke --continue",
-    "verify:servers": "npm run build:servers && npm run typecheck:servers && npm run test:servers",
-    "verify:packages": "npm run build:packages && npm run typecheck:tests && npm run test:packages && npm run test:scripts && npm run guard:all",
+    "verify:servers": "node scripts/heavy-lock.mjs -- npm run verify:servers:steps",
+    "verify:servers:steps": "npm run build:servers && npm run typecheck:servers && npm run test:servers",
+    "verify:packages": "node scripts/heavy-lock.mjs -- npm run verify:packages:steps",
+    "verify:packages:steps": "npm run build:packages && npm run typecheck:tests && npm run test:packages && npm run test:scripts && npm run guard:all",
     "contracts:update": "node scripts/contract-snapshot.mjs",
     "contracts:check": "node scripts/contract-snapshot.mjs --check",
     "generate:tools": "node scripts/generate-tools.mjs",
@@ -38,7 +40,8 @@
     "generate:check": "node scripts/generate-tools.mjs --check && node scripts/generate-env.mjs --check && node scripts/generate-docs.mjs --check",
     "docs:check": "node scripts/check-docs.mjs",
     "new:server": "node scripts/new-server.mjs",
-    "verify:all": "npm run verify:packages && npm run verify:servers && npm run contracts:check && npm run generate:check && npm run docs:check",
+    "verify:all": "node scripts/heavy-lock.mjs -- npm run verify:all:steps",
+    "verify:all:steps": "npm run verify:packages && npm run verify:servers && npm run contracts:check && npm run generate:check && npm run docs:check",
     "verify:live": "npm run smoke:servers"
   }
 }
