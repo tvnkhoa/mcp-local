@@ -5,7 +5,12 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { applyFreshness, computeTreeKey, createFreshnessGate, pathsChangedSince, tryAcquireLock, type RepoTreeState } from "./freshness.js";
+import { execFileSync } from "node:child_process";
+
+import { applyFreshness, computeTreeKey, createFreshnessGate, pathsChangedSince, readDirtyLedger, recordDirtyLedger, tryAcquireLock, UNREADABLE, watcherRunPlan, type RepoTreeState, type TreeKey } from "./freshness.js";
+import { GraphStore } from "../repositories/graphStore.js";
+import { createIndexRunner } from "../services/indexing/indexRunner.js";
+import { readWorkingTreeState } from "../services/git/gitHelpers.js";
 import type { IndexMode, IndexRunResult } from "../types/index.js";
 
 /**
@@ -391,5 +396,74 @@ test("MCP-ISSUE-101: pathsChangedSince — another HEAD vouches for nothing; rev
     assert.equal(pathsChangedSince(null, now), null);
     const big = await computeTreeKey(dir, { head: "h1", dirty: ["a.ts"] }, 0);
     assert.equal(big.files["a.ts"], "size:1", "above the hash cap: keyed by size");
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("MCP-ISSUE-101: an unreadable dirty file is never vouched for, whatever was recorded", () => {
+  const covered: TreeKey = { head: "h1", files: { "a.ts": UNREADABLE, "b.ts": "x" } };
+  assert.deepEqual(pathsChangedSince(covered, { head: "h1", files: { "a.ts": UNREADABLE, "b.ts": "x" } }), ["a.ts"]);
+});
+
+test("MCP-ISSUE-101: watcherRunPlan — dirty over batch + unvouched at the indexed HEAD; incremental when HEAD moved", () => {
+  const key: TreeKey = { head: "c2", files: { "y.ts": "h-y", "z.ts": "h-z" } };
+  const batch = { changed: ["y.ts"], deleted: ["gone.ts"], overflowed: false };
+  assert.deepEqual(watcherRunPlan(batch, key, { head: "c2", files: { "z.ts": "h-z" } }, "c2"), { mode: "dirty", paths: ["gone.ts", "y.ts"] });
+  assert.deepEqual(watcherRunPlan(batch, key, null, "c2"), { mode: "dirty", paths: ["gone.ts", "y.ts", "z.ts"] }, "no key: every dirty file");
+  assert.deepEqual(watcherRunPlan(batch, key, null, "c1"), { mode: "incremental" }, "HEAD moved since the indexed commit");
+  assert.deepEqual(watcherRunPlan(batch, key, { head: "c1", files: {} }, "c2"), { mode: "incremental" }, "the key is at another HEAD");
+  assert.deepEqual(watcherRunPlan({ ...batch, overflowed: true }, key, null, "c2"), { mode: "incremental" });
+  assert.deepEqual(watcherRunPlan(batch, null, null, "c2"), { mode: "incremental" }, "outside git");
+});
+
+test("MCP-ISSUE-101: HEAD moved with no watcher running, then a watcher batch names only Y — X is re-indexed all the same", async () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "cim-watchhead-"));
+  const git = (...args: string[]): void => {
+    execFileSync("git", ["-C", dir, "-c", "user.email=t@t", "-c", "user.name=t", ...args], { stdio: "ignore" });
+  };
+  const dbPath = path.join(dir, ".index", "i.db");
+  fs.mkdirSync(path.dirname(dbPath));
+  fs.writeFileSync(path.join(dir, ".gitignore"), ".index/\n");
+  fs.writeFileSync(path.join(dir, "x.ts"), "export function xOld(): number {\n  return 1;\n}\n");
+  fs.writeFileSync(path.join(dir, "y.ts"), "export function yOne(): number {\n  return 1;\n}\n");
+  git("init", "-q");
+  git("add", ".");
+  git("commit", "-q", "-m", "c1");
+  const repoPath = dir.replace(/\\/g, "/");
+  const store = new GraphStore(dbPath);
+  try {
+    store.ensureRepository("w", repoPath);
+    const run = createIndexRunner({
+      store,
+      limits: { subtxSize: 20, checkpointEveryNBatches: 1, largeFileThresholdBytes: 512 * 1024, maxFileSizeBytes: 500 * 1024, parseWorkers: 0, parseJobTimeoutMs: 20_000 },
+      resolvePerformanceProfileOverride: () => "standard"
+    });
+    await run("w", repoPath, "full", false, 1000, 50);
+    // A pull the watcher never saw: X changes in a new commit.
+    fs.writeFileSync(path.join(dir, "x.ts"), "export function xNew(): number {\n  return 2;\n}\n");
+    git("commit", "-q", "-am", "c2");
+    // Then the watcher sees one edit, to Y.
+    fs.writeFileSync(path.join(dir, "y.ts"), "export function yTwo(): number {\n  return 2;\n}\n");
+    const key = await computeTreeKey(repoPath, readWorkingTreeState(repoPath));
+    const plan = watcherRunPlan({ changed: ["y.ts"], deleted: [], overflowed: false }, key, null, store.getLatestRun("w")?.commitSha ?? null);
+    assert.deepEqual(plan, { mode: "incremental" });
+    await run("w", repoPath, plan.mode, false, 1000, 50);
+    const db = (store as unknown as { db: { prepare: (sql: string) => { all: (...a: unknown[]) => { name: string }[] } } }).db;
+    const xs = db.prepare(`select name from symbols where repo_id = ? and file_path = 'x.ts' and kind = 'function'`).all("w").map((r) => r.name);
+    assert.deepEqual(xs, ["xNew"], "the commit's change to X is in the index");
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("MCP-ISSUE-101: a dirty run handed its paths takes the re-read ones out of the ledger", () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "cim-ledger-"));
+  try {
+    recordDirtyLedger(dir, "r", "dirty", { head: "h1", dirty: ["a.ts", "b.ts"] });
+    // b.ts was reverted and a watcher dirty run re-read it; a.ts is still dirty.
+    recordDirtyLedger(dir, "r", "dirty", { head: "h1", dirty: ["a.ts"] }, ["a.ts", "b.ts"]);
+    assert.deepEqual(readDirtyLedger(dir, "r")?.paths, ["a.ts"]);
+    recordDirtyLedger(dir, "r", "dirty", { head: "h1", dirty: ["c.ts"] }, ["c.ts"]);
+    assert.deepEqual(readDirtyLedger(dir, "r")?.paths, ["a.ts", "c.ts"], "a path the run did not re-read stays");
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });

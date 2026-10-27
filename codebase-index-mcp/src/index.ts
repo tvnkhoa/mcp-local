@@ -49,7 +49,7 @@ import type { HandlerContext } from "./tools/handlers/handlerContext.js";
 import { createCodebaseIndexServer } from "./server.js";
 import { buildTools } from "./tools/index.js";
 import { DEFAULT_MAX_MARKDOWN_BYTES } from "./services/indexing/fileFilter.js";
-import { applyFreshness, computeTreeKey, createFreshnessGate, freshnessStateDir, parseTreeKey, pathsChangedSince, recordDirtyLedger, serializeTreeKey, type TreeKey } from "./middleware/freshness.js";
+import { applyFreshness, computeTreeKey, createFreshnessGate, freshnessStateDir, parseTreeKey, recordDirtyLedger, serializeTreeKey, watcherRunPlan, type TreeKey } from "./middleware/freshness.js";
 import { readWorkingTreeState, readWorkingTreeStateAsync } from "./services/git/gitHelpers.js";
 
 const dbPath = stringFromEnv("CODEBASE_INDEX_DB_PATH", "./codebase-index.db");
@@ -207,7 +207,8 @@ const runIndexAndResolve: typeof runIndexUnserialized = (repoId, repoPath, mode,
     }
     // index_repository and the watcher keep the dirty-run ledger current too (see freshness.ts).
     try {
-      recordDirtyLedger(FRESHNESS_LOCK_DIR, repoId, mode, readWorkingTreeState(repoPath));
+      // MCP-ISSUE-101: a dirty run handed its paths re-read them, so a reverted one leaves the ledger now.
+      recordDirtyLedger(FRESHNESS_LOCK_DIR, repoId, mode, readWorkingTreeState(repoPath), rest[3]?.knownDirtyPaths ?? false);
     } catch {
       // not a git repo
     }
@@ -224,16 +225,14 @@ const watchManager = new WatchManager(
   watchConfig,
   async (repoId, repoPath, config, batch) => {
     assertPathAllowed(repoPath, allowedRoots);
-    // MCP-ISSUE-101: the batch's paths, plus every dirty file the covered key does not vouch for, re-index in dirty
-    // mode — not a whole-repo incremental re-hash. A batch that dropped events cannot name what changed.
-    if (batch.overflowed) {
+    // MCP-ISSUE-101: a dirty run over the batch's paths plus the dirty files the covered key does not vouch for — not
+    // a whole-repo incremental re-hash — unless HEAD moved or the batch dropped events (see watcherRunPlan).
+    const plan = watcherRunPlan(batch, await treeKeyNow(repoPath), parseTreeKey(store.getLatestRunTreeKey(repoId)), store.getLatestRun(repoId)?.commitSha ?? null);
+    if (plan.mode === "incremental") {
       await runIndexAndResolve(repoId, repoPath, "incremental", DOCS_INDEXING_ENABLED, config.maxFilesPerRun, config.batchSize);
       return;
     }
-    const key = await treeKeyNow(repoPath);
-    const unvouched = key ? pathsChangedSince(parseTreeKey(store.getLatestRunTreeKey(repoId)), key) ?? Object.keys(key.files) : [];
-    const paths = [...new Set([...batch.changed, ...batch.deleted, ...unvouched])].sort();
-    await runIndexAndResolve(repoId, repoPath, "dirty", DOCS_INDEXING_ENABLED, config.maxFilesPerRun, config.batchSize, { knownDirtyPaths: paths });
+    await runIndexAndResolve(repoId, repoPath, "dirty", DOCS_INDEXING_ENABLED, config.maxFilesPerRun, config.batchSize, { knownDirtyPaths: plan.paths });
   },
   (repoId, deletedRelativePaths) => store.pruneFiles(repoId, deletedRelativePaths),
   ({ repoId }) => {

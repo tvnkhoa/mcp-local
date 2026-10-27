@@ -4123,6 +4123,9 @@ this afternoon failed at that harness, which is the highest rate observed so far
   - **Content key.** The key is HEAD + the sorted dirty paths + a sha256 of each dirty file's bytes (`deleted` when
     gone; a file above the index size cap is keyed by its size). Only dirty files are hashed; there is no mtime
     pre-check (removed on purpose for correctness, see `incremental-indexing`).
+    Review follow-up: hashing runs at most 16 files at a time, and a hash is reused in-process while the file's
+    (size, mtime, ctime) is unchanged. ctime moves on any write, even one that sets mtime back. Only ENOENT /
+    ENOTDIR mean `deleted`; any other read error (EMFILE, EACCES) gives `unreadable`, which the key never vouches for.
   - **Persisted, shared.** `index_runs.tree_key` (runGraphMigrations) is set on a successful run's record by the
     gate (on the server thread, after the refresh worker's result), by `index_repository` and by the watcher.
     Every process reads the LATEST run's key: a later run that recorded none (failed, cancelled, an older build)
@@ -4134,11 +4137,17 @@ this afternoon failed at that harness, which is the highest rate observed so far
     a `dirty` run as `knownDirtyPaths`; the run removes deleted files itself, with their dependents in scope. A
     batch that dropped events at `maxQueuedEvents` says so (`overflowed`) and falls back to `incremental`,
     pruning first, as before.
+    Review follow-up (`watcherRunPlan`): the batch runs `dirty` only at the HEAD the index holds. When HEAD moved
+    since the latest run's commit, or the stored key is at another HEAD, it runs `incremental`. Example: a
+    `git pull` with no watcher running, then one edit — the files the commit changed are in neither list, and the
+    run would have recorded the new HEAD with a key that vouched for them. A dirty run handed its paths takes the
+    ones it re-read out of the dirty ledger, so a reverted file the watcher re-indexed costs no extra gate run.
   - **Honest outcome.** A refresh run that ends `failed` or `cancelled` answers `state: "stale"` with that status
     in `reason`, and records no key.
 - **Guarded:** `freshness.test.ts` (unchanged dirty tree → fresh, no run; touch → no run; same size and mtime,
   new content → one run; a second gate on the same key store → fresh, no run; narrowed dirty paths; cancelled →
-  stale, no key), `watchManager.test.ts` (batch paths, no pre-prune; overflow fallback), `runStore.test.ts`
+  stale, no key; `unreadable` never vouched; `watcherRunPlan`; HEAD moved by a commit to X, then a batch naming
+  only Y → incremental, and X's new symbol is indexed (real runner); ledger cleared for re-read paths), `watchManager.test.ts` (batch paths, no pre-prune; overflow fallback), `runStore.test.ts`
   (latest run's key only), `test:query-refresh` §7 (a second server process on the same dirty tree: fresh and
   `latestRun.runId` unchanged; touch → no run; content change → one dirty run, then fresh).
 - **Not covered (part 2):** the post-phase resolve of a dirty run still runs repo-wide (call context, imports,

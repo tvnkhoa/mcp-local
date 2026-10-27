@@ -209,21 +209,25 @@ export function recordDirtyLedger(
   repoId: string,
   mode: IndexMode,
   tree: RepoTreeState,
-  /** The run also re-indexed the ledger paths that were no longer dirty: they leave the ledger. */
-  clearedVanished = false
+  /**
+   * The run also re-indexed the ledger paths that were no longer dirty: they leave the ledger. `true` for all of
+   * them; a list (MCP-ISSUE-101: the paths a watcher or index_repository dirty run re-read) for those only.
+   */
+  clearedVanished: boolean | readonly string[] = false
 ): void {
   if (!tree.head) return;
   const prev = readDirtyLedger(lockDir, repoId);
+  const reread = new Set(Array.isArray(clearedVanished) ? clearedVanished : []);
   const paths =
-    mode === "dirty" && !clearedVanished && prev && sameCommit(prev.head, tree.head)
-      ? [...new Set([...prev.paths, ...tree.dirty])]
+    mode === "dirty" && clearedVanished !== true && prev && sameCommit(prev.head, tree.head)
+      ? [...new Set([...prev.paths.filter((p) => !reread.has(p)), ...tree.dirty])]
       : [...tree.dirty];
   writeDirtyLedger(lockDir, repoId, { head: tree.head, paths: paths.sort() });
 }
 
 /**
  * MCP-ISSUE-101: the tree identity a run covers — HEAD plus a content hash of each dirty file (`deleted` when it is
- * gone). Only the dirty files are hashed: a clean file's content is HEAD's. Before this the key was each dirty
+ * gone, `dir` for a directory entry, {@link UNREADABLE} when it could not be read). Only the dirty files are hashed: a clean file's content is HEAD's. Before this the key was each dirty
  * file's size and mtime, held in memory, so a touch re-ran the refresh and no other process could reuse it; on
  * wec.aria every query on a dirty tree paid a ~7.4 s dirty run.
  */
@@ -232,20 +236,50 @@ export type TreeKey = { head: string; files: Record<string, string> };
 /** Above any index size cap: a file the index skips is keyed by its size (crossing the cap changes the size). */
 export const DEFAULT_HASH_MAX_BYTES = 32 * 1024 * 1024;
 
+/**
+ * A file that could not be read (EMFILE, EACCES, a lock): never equal to anything, so the key vouches for nothing
+ * about it. Only ENOENT / ENOTDIR mean `deleted`.
+ */
+export const UNREADABLE = "unreadable";
+const HASH_CONCURRENCY = 16;
+const HASH_CACHE_MAX = 4096;
+
+/**
+ * Hashes reused while a file's (size, mtime, ctime) is unchanged, in this process. ctime is part of the identity:
+ * a write moves it even when the mtime is set back (`utimes` moves it too), so a same-size, same-mtime edit is
+ * still re-hashed.
+ */
+const hashCache = new Map<string, { stamp: string; hash: string }>();
+
 async function hashFile(abs: string, maxBytes: number): Promise<string> {
   try {
     const st = await fs.promises.stat(abs);
-    if (!st.isFile()) return "deleted";
+    if (!st.isFile()) return "dir";
     if (st.size > maxBytes) return `size:${String(st.size)}`;
-    return createHash("sha256").update(await fs.promises.readFile(abs)).digest("hex").slice(0, 32);
-  } catch {
-    return "deleted";
+    const stamp = `${String(st.size)}:${String(st.mtimeMs)}:${String(st.ctimeMs)}`;
+    const cached = hashCache.get(abs);
+    if (cached?.stamp === stamp) return cached.hash;
+    const hash = createHash("sha256").update(await fs.promises.readFile(abs)).digest("hex").slice(0, 32);
+    if (hashCache.size >= HASH_CACHE_MAX) hashCache.clear();
+    hashCache.set(abs, { stamp, hash });
+    return hash;
+  } catch (e) {
+    const code = (e as NodeJS.ErrnoException).code;
+    return code === "ENOENT" || code === "ENOTDIR" ? "deleted" : UNREADABLE;
   }
 }
 
 export async function computeTreeKey(repoPath: string, tree: RepoTreeState, maxBytes = DEFAULT_HASH_MAX_BYTES): Promise<TreeKey> {
   const paths = [...new Set(tree.dirty)].sort();
-  const hashes = await Promise.all(paths.map((rel) => hashFile(path.join(repoPath, rel), maxBytes)));
+  const hashes = new Array<string>(paths.length);
+  let next = 0;
+  const worker = async (): Promise<void> => {
+    while (next < paths.length) {
+      const i = next++;
+      hashes[i] = await hashFile(path.join(repoPath, paths[i] as string), maxBytes);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(HASH_CONCURRENCY, paths.length) }, worker));
   return { head: tree.head ?? "nogit", files: Object.fromEntries(paths.map((rel, i) => [rel, hashes[i] as string])) };
 }
 
@@ -270,9 +304,27 @@ export function parseTreeKey(raw: string | null | undefined): TreeKey | null {
  */
 export function pathsChangedSince(covered: TreeKey | null, current: TreeKey): string[] | null {
   if (!covered || !sameCommit(covered.head, current.head)) return null;
-  const out = Object.keys(current.files).filter((p) => covered.files[p] !== current.files[p]);
+  const out = Object.keys(current.files).filter((p) => current.files[p] === UNREADABLE || covered.files[p] !== current.files[p]);
   for (const p of Object.keys(covered.files)) if (!(p in current.files)) out.push(p);
   return out.sort();
+}
+
+/**
+ * MCP-ISSUE-101: what a watcher batch runs. A `dirty` run over the batch's paths plus every dirty file the covered
+ * key does not vouch for — but only at the HEAD the index holds: when HEAD moved since the indexed commit, or the
+ * key is at another HEAD, files changed between the two commits are in neither list (a `git pull` with no watcher
+ * running), so the run is `incremental`. A batch that dropped events, or a tree outside git, is `incremental` too.
+ */
+export function watcherRunPlan(
+  batch: { changed: readonly string[]; deleted: readonly string[]; overflowed: boolean },
+  key: TreeKey | null,
+  covered: TreeKey | null,
+  indexedCommit: string | null
+): { mode: "incremental" } | { mode: "dirty"; paths: string[] } {
+  if (batch.overflowed || !key || !indexedCommit || !sameCommit(key.head, indexedCommit)) return { mode: "incremental" };
+  if (covered && !sameCommit(covered.head, key.head)) return { mode: "incremental" };
+  const unvouched = pathsChangedSince(covered, key) ?? Object.keys(key.files);
+  return { mode: "dirty", paths: [...new Set([...batch.changed, ...batch.deleted, ...unvouched])].sort() };
 }
 
 export type FreshnessGate = {
