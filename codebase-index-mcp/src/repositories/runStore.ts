@@ -322,6 +322,7 @@ export type WorkRunTrace = {
   mode: string;
   status: string;
   startedAt: string | null;
+  finishedAt: string | null;
   commitSha: string | null;
   indexVersion: string | null;
   treeKey: string | null;
@@ -335,7 +336,7 @@ export type WorkRunTrace = {
 export function listRecentWorkRuns(db: Database.Database, repoId: string, limit: number): WorkRunTrace[] {
   const rows = db
     .prepare(
-      `select mode, status, started_at as startedAt, commit_sha as commitSha, index_version as indexVersion, tree_key as treeKey, tree_dirty as treeDirty
+      `select mode, status, started_at as startedAt, finished_at as finishedAt, commit_sha as commitSha, index_version as indexVersion, tree_key as treeKey, tree_dirty as treeDirty
        from index_runs where repo_id = ? and skip_reason is null
        order by finished_at desc, started_at desc, rowid desc limit ?`
     )

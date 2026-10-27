@@ -730,3 +730,29 @@ test("G1 review: HEAD moved during a git-scoped run records no commit, so the ne
     rmSync(work, { recursive: true, force: true });
   }
 });
+
+test("G1 review: a dirty run that finished inside the base run's window (another process) is still carried", async () => {
+  // Runs are listed by finish time. A dirty run from another process that finished while a long full run was still
+  // going sorts below that base, and its dirty paths dropped out of the carry. Simulated by moving the full run's
+  // finish time past the dirty run's, keeping its start before it.
+  const scope = await assertIncrementalAfterMoveEqualsFull(
+    "overlapping-dirty",
+    (root) => {
+      git(root, "checkout", "-q", "--", "src/util.ts");
+      writeTree(root, { "src/caller.ts": 'import { helper } from "./util";\n\nexport function main(): number {\n  return helper() + 5;\n}\n' });
+      commitAll(root, "other");
+    },
+    async (root, dbPath) => {
+      writeTree(root, { "src/util.ts": "export function helperRenamed(): number {\n  return 1;\n}\n\nexport function spare(): number {\n  return 2;\n}\n" });
+      await index(dbPath, "r", root, "dirty");
+      markLatestTreeKey(dbPath, ["src/util.ts"]);
+      const db = new Database(dbPath);
+      try {
+        db.prepare(`update index_runs set finished_at = ? where repo_id = 'r' and mode = 'full'`).run(new Date(Date.now() + 60_000).toISOString());
+      } finally {
+        db.close();
+      }
+    }
+  );
+  assert.match(scope, /git-scoped from [0-9a-f]{12}: 2 path\(s\) \(1 from the diff, 1 indexed dirty since\)/, scope);
+});

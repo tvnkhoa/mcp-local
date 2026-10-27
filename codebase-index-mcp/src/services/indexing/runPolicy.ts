@@ -376,21 +376,38 @@ export function planGitScopedIncremental(i: GitScopeInputs): GitScopePlan {
   if (!i.gitScan) return { kind: "walk", reason: "the scan does not take its file list from git" };
   if (!i.annotationKeyCurrent) return { kind: "walk", reason: "the annotation key changed: unchanged files must be re-scanned" };
   const carried = new Set<string>();
-  let base: WorkRunTrace | null = null;
-  for (const run of i.runs) {
-    if (run.status !== "ok") return { kind: "walk", reason: `a ${run.mode} run since the last complete one ended ${run.status}` };
+  /** A run's dirty paths join the carry; null when the run cannot be vouched for. */
+  const carry = (run: WorkRunTrace): string | null => {
+    if (run.status !== "ok") return `a ${run.mode} run since the last complete one ended ${run.status}`;
     const key = parseTreeKey(run.treeKey);
-    if (!key && (run.mode === "dirty" || run.treeDirty)) return { kind: "walk", reason: `a ${run.mode} run over a dirty tree recorded no tree key` };
+    if (!key && (run.mode === "dirty" || run.treeDirty)) return `a ${run.mode} run over a dirty tree recorded no tree key`;
     for (const p of Object.keys(key?.files ?? {})) carried.add(p);
+    return null;
+  };
+  let base: WorkRunTrace | null = null;
+  let at = 0;
+  for (; at < i.runs.length; at++) {
+    const run = i.runs[at]!;
+    const refused = carry(run);
+    if (refused) return { kind: "walk", reason: refused };
     if (run.mode === "full" || run.mode === "incremental") {
       base = run;
       break;
     }
   }
   if (!base) return { kind: "walk", reason: "no complete run on record to diff against" };
+  // G1 review 3: runs are listed by finish time, so a run from another process that finished INSIDE the base's
+  // window sorts below it, yet it may have written after the base read the same file. Carry those too.
+  if (!base.startedAt) return { kind: "walk", reason: "the last complete run recorded no start time" };
+  for (const run of i.runs.slice(at + 1)) {
+    if (!run.finishedAt || run.finishedAt <= base.startedAt) break;
+    if (run.mode !== "dirty") return { kind: "walk", reason: `a ${run.mode} run overlapped the last complete one` };
+    const refused = carry(run);
+    if (refused) return { kind: "walk", reason: refused };
+  }
   if (!base.commitSha) return { kind: "walk", reason: "the last complete run recorded no commit" };
   if (base.indexVersion !== (i.indexVersion ?? INDEX_VERSION)) return { kind: "walk", reason: `index version changed (${base.indexVersion ?? "none"})` };
-  const excludes = base.startedAt ? i.excludeRulesChangedSince(base.startedAt) : "an unknown file";
+  const excludes = i.excludeRulesChangedSince(base.startedAt);
   if (excludes) return { kind: "walk", reason: `${excludes} changed since the last complete run: it can change which files are indexed` };
   if (!i.headSha) return { kind: "walk", reason: "HEAD cannot be resolved" };
   const diff = i.diffSince(base.commitSha, i.headSha);

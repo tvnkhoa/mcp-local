@@ -19,6 +19,7 @@ const run = (over: Partial<WorkRunTrace> = {}): WorkRunTrace => ({
   mode: "incremental",
   status: "ok",
   startedAt: "2026-10-27T00:00:00.000Z",
+  finishedAt: "2026-10-27T00:00:00.000Z",
   commitSha: "a".repeat(40),
   indexVersion: INDEX_VERSION,
   treeKey: JSON.stringify({ head: "a".repeat(40), files: {} }),
@@ -78,6 +79,21 @@ test("scoped: every path a dirty run indexed since the base is re-read, and the 
   if (plan.kind === "scoped") assert.deepEqual([...plan.paths].sort(), ["src/at-base.ts", "src/early.ts", "src/late.ts"]);
 });
 
+test("G1 review 3: a dirty run that finished inside the base's window is carried; one that finished before it is not", () => {
+  const base = run({ mode: "full", startedAt: "2026-10-27T10:00:00.000Z", finishedAt: "2026-10-27T10:05:00.000Z" });
+  const plan = planGitScopedIncremental(
+    inputs({
+      runs: [
+        base,
+        run({ mode: "dirty", startedAt: "2026-10-27T10:01:00.000Z", finishedAt: "2026-10-27T10:02:00.000Z", treeKey: key("src/inside.ts") }),
+        run({ mode: "dirty", startedAt: "2026-10-27T09:58:00.000Z", finishedAt: "2026-10-27T09:59:00.000Z", treeKey: key("src/before.ts") })
+      ]
+    })
+  );
+  assert.equal(plan.kind, "scoped");
+  if (plan.kind === "scoped") assert.deepEqual([...plan.paths], ["src/inside.ts"]);
+});
+
 test("the base is the newest complete run, and git diffs from its commit", () => {
   let asked: string | null = null;
   const plan = planGitScopedIncremental({
@@ -96,6 +112,9 @@ for (const [name, over, diff] of [
   ["respectGitignore:false", { gitScan: false }, []],
   [".git/info/exclude written since the base started", { excludeRulesChangedSince: () => ".git/info/exclude" }, []],
   ["a base with no start time", { runs: [run({ startedAt: null })] }, []],
+  ["an unkeyed dirty run inside the base's window", { runs: [run({ startedAt: "2026-10-27T10:00:00.000Z" }), run({ mode: "dirty", treeKey: null, finishedAt: "2026-10-27T10:01:00.000Z" })] }, []],
+  ["a cancelled run inside the base's window", { runs: [run({ startedAt: "2026-10-27T10:00:00.000Z" }), run({ mode: "dirty", status: "cancelled", finishedAt: "2026-10-27T10:01:00.000Z" })] }, []],
+  ["another complete run inside the base's window", { runs: [run({ startedAt: "2026-10-27T10:00:00.000Z" }), run({ mode: "full", finishedAt: "2026-10-27T10:01:00.000Z" })] }, []],
   ["a stale annotation key", { annotationKeyCurrent: false }, []],
   ["no run on record", { runs: [] }, []],
   ["only dirty runs on record", { runs: [run({ mode: "dirty" })] }, []],
