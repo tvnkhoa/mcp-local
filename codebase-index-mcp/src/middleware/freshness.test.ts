@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -10,6 +11,7 @@ import { pathToFileURL } from "node:url";
 
 import Database from "better-sqlite3";
 
+import { parseStatusPorcelainV2 } from "../services/git/gitHelpers.js";
 import { applyFreshness, computeTreeKey, createFreshnessGate, liveRunMarkers, pathsChangedSince, readDirtyLedger, recordDirtyLedger, tryAcquireLock, UNREADABLE, watcherRunPlan, type RepoTreeState, type TreeKey } from "./freshness.js";
 import { GraphStore } from "../repositories/graphStore.js";
 import { createIndexRunner } from "../services/indexing/indexRunner.js";
@@ -708,4 +710,47 @@ test("a live run of `a-b` does not make the gate of `a` answer refreshing", asyn
     assert.deepEqual(await h.gate.ensureFresh("a"), { state: "fresh" });
     assert.equal((await h.gate.ensureFresh("a-b")).state, "refreshing");
   } finally { h.cleanup(); }
+});
+
+test("MCP-ISSUE-101 F3: a change inside a dirty submodule moves the key and reaches the dirty run as its own file", async () => {
+  const root = mkdtempSync(path.join(tmpdir(), "cim-sub-"));
+  const git = (cwd: string, ...args: string[]): string =>
+    execFileSync("git", ["-c", "protocol.file.allow=always", "-c", "user.name=t", "-c", "user.email=t@t", ...args], { cwd, encoding: "utf8" });
+  const subSrc = path.join(root, "subsrc");
+  const parent = path.join(root, "parent");
+  mkdirSync(subSrc);
+  mkdirSync(parent);
+  git(subSrc, "init", "-q");
+  writeFileSync(path.join(subSrc, "a.ts"), "export const a = 1;\n");
+  git(subSrc, "add", "a.ts");
+  git(subSrc, "commit", "-q", "-m", "s");
+  git(parent, "init", "-q");
+  git(parent, "submodule", "add", "-q", subSrc, "sub");
+  git(parent, "commit", "-q", "-m", "p");
+  try {
+    writeFileSync(path.join(parent, "sub", "a.ts"), "export const a = 2;\n");
+    const tree = (): RepoTreeState => parseStatusPorcelainV2(git(parent, "status", "--porcelain=v2", "--branch", "-z", "--untracked-files=all")) as RepoTreeState;
+    assert.deepEqual(tree().dirty, ["sub"], "git reports the dirty submodule as ONE directory entry");
+    const k1 = await computeTreeKey(parent, tree());
+    assert.match(k1.files["sub"] ?? "", /^submodule:[0-9a-f]{40}$/);
+    assert.ok(k1.files["sub/a.ts"] && k1.files["sub/a.ts"] !== "deleted", "the dirty file inside is keyed");
+    writeFileSync(path.join(parent, "sub", "a.ts"), "export const a = 3;\n");
+    const k2 = await computeTreeKey(parent, tree());
+    assert.notEqual(k2.files["sub/a.ts"], k1.files["sub/a.ts"]);
+    assert.deepEqual(pathsChangedSince(k1, k2), ["sub/a.ts"], "the edit inside the submodule is seen");
+    writeFileSync(path.join(parent, "sub", "b.ts"), "export const b = 1;\n");
+    assert.deepEqual(pathsChangedSince(k2, await computeTreeKey(parent, tree())), ["sub/b.ts"], "a new untracked file inside is seen");
+
+    // through the gate: the run gets the files inside, never the directory entry
+    const h = harness({ budgetMs: 1000, autoFinish: true, repoDir: parent });
+    h.setTree({ head: "aaa111", dirty: ["sub"] });
+    await h.gate.ensureFresh("r");
+    assert.deepEqual(h.runs.at(-1)?.dirtyPaths, ["sub/a.ts", "sub/b.ts"]);
+    writeFileSync(path.join(parent, "sub", "a.ts"), "export const a = 4;\n");
+    await h.gate.ensureFresh("r");
+    assert.equal(h.runs.length, 2);
+    assert.deepEqual(h.runs.at(-1)?.dirtyPaths, ["sub/a.ts"]);
+    await h.gate.ensureFresh("r");
+    assert.equal(h.runs.length, 2, "nothing changed: no run");
+  } finally { rmSync(root, { recursive: true, force: true }); }
 });

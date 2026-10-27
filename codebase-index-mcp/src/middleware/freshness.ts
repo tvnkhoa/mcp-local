@@ -17,10 +17,13 @@
  * Claude sessions share one worktree and one index DB) by a lock file beside the DB.
  */
 
+import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
+import { promisify } from "node:util";
 
+import { parseStatusPorcelainV2 } from "../services/git/gitHelpers.js";
 import type { IndexMode, IndexRunResult } from "../types/index.js";
 
 export type FreshnessState = "fresh" | "refreshed" | "refreshing" | "stale";
@@ -376,6 +379,7 @@ export const UNREADABLE = "unreadable";
  */
 export const UNREADABLE_CAPPED = "unreadable-capped";
 export const DEFAULT_UNREADABLE_CHECKS = 3;
+const execFileAsync = promisify(execFile);
 const HASH_CONCURRENCY = 16;
 const HASH_CACHE_MAX = 4096;
 
@@ -404,18 +408,81 @@ async function hashFile(abs: string, maxBytes: number): Promise<string> {
   }
 }
 
-export async function computeTreeKey(repoPath: string, tree: RepoTreeState, maxBytes = DEFAULT_HASH_MAX_BYTES): Promise<TreeKey> {
-  const paths = [...new Set(tree.dirty)].sort();
-  const hashes = new Array<string>(paths.length);
-  let next = 0;
-  const worker = async (): Promise<void> => {
-    while (next < paths.length) {
-      const i = next++;
-      hashes[i] = await hashFile(path.join(repoPath, paths[i] as string), maxBytes);
+/** A dirty directory entry that holds its own `.git` is a submodule: its HEAD plus its own dirty files. */
+const SUBMODULE_GIT_TIMEOUT_MS = 15_000;
+const MAX_SUBMODULE_DEPTH = 3;
+
+async function gitOut(cwd: string, args: string[]): Promise<string> {
+  const { stdout } = await execFileAsync("git", ["-c", "core.quotePath=false", ...args], {
+    cwd,
+    timeout: SUBMODULE_GIT_TIMEOUT_MS,
+    maxBuffer: 64 * 1024 * 1024,
+    windowsHide: true
+  });
+  return stdout;
+}
+
+/** Null when `abs` is not a submodule (no `.git` inside); {@link UNREADABLE} when git cannot be read there. */
+async function readSubmodule(abs: string): Promise<{ key: string; dirty: string[] } | null> {
+  try {
+    await fs.promises.stat(path.join(abs, ".git"));
+  } catch {
+    return null;
+  }
+  try {
+    const head = (await gitOut(abs, ["rev-parse", "HEAD"])).trim();
+    const status = parseStatusPorcelainV2(await gitOut(abs, ["status", "--porcelain=v2", "--branch", "-z", "--untracked-files=all"]));
+    return { key: `submodule:${head}`, dirty: status.dirty };
+  } catch {
+    return { key: UNREADABLE, dirty: [] };
+  }
+}
+
+async function keyEntry(abs: string, maxBytes: number): Promise<{ hash: string; dirty?: string[] }> {
+  try {
+    if ((await fs.promises.stat(abs)).isDirectory()) {
+      const sub = await readSubmodule(abs);
+      return sub ? { hash: sub.key, dirty: sub.dirty } : { hash: "dir" };
     }
-  };
-  await Promise.all(Array.from({ length: Math.min(HASH_CONCURRENCY, paths.length) }, worker));
-  return { head: tree.head ?? "nogit", files: Object.fromEntries(paths.map((rel, i) => [rel, hashes[i] as string])) };
+  } catch {
+    // gone or unreadable: hashFile classifies it
+  }
+  return { hash: await hashFile(abs, maxBytes) };
+}
+
+/**
+ * MCP-ISSUE-101 F3. A dirty directory entry git reports (with `--untracked-files=all` only a submodule can be one)
+ * used to be keyed as the constant `dir`, so a change inside a dirty submodule never moved the key and was never
+ * seen. The indexer walks a submodule's files like any other, so the entry is keyed by the submodule's HEAD and
+ * EXPANDED into the files that are dirty inside it (`sub/x.ts`, each content-hashed like a file of the repo): a
+ * change in the submodule's working tree moves the key and hands the dirty run its files. A submodule that moved to
+ * another commit is seen as a changed key but its changed files are not known without a diff, so that case is
+ * left to an incremental run (registry, MCP-ISSUE-101 F3).
+ */
+export async function computeTreeKey(repoPath: string, tree: RepoTreeState, maxBytes = DEFAULT_HASH_MAX_BYTES): Promise<TreeKey> {
+  const files: Record<string, string> = {};
+  let queue = [...new Set(tree.dirty)].sort();
+  for (let depth = 0; queue.length > 0 && depth <= MAX_SUBMODULE_DEPTH; depth++) {
+    const entries = new Array<{ hash: string; dirty?: string[] }>(queue.length);
+    let next = 0;
+    const level = queue;
+    const worker = async (): Promise<void> => {
+      while (next < level.length) {
+        const i = next++;
+        entries[i] = await keyEntry(path.join(repoPath, level[i] as string), maxBytes);
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(HASH_CONCURRENCY, level.length) }, worker));
+    const more: string[] = [];
+    level.forEach((rel, i) => {
+      const entry = entries[i] as { hash: string; dirty?: string[] };
+      files[rel] = entry.hash;
+      for (const d of entry.dirty ?? []) more.push(`${rel.replace(/\/+$/, "")}/${d}`);
+    });
+    queue = [...new Set(more)].filter((p) => !(p in files)).sort();
+  }
+  const sorted = Object.fromEntries(Object.keys(files).sort().map((rel) => [rel, files[rel] as string]));
+  return { head: tree.head ?? "nogit", files: sorted };
 }
 
 export function serializeTreeKey(key: TreeKey): string {
@@ -626,11 +693,15 @@ export function createFreshnessGate(opts: FreshnessGateOptions): FreshnessGate {
     const startedMeanwhile = inflight.get(repoId);
     if (startedMeanwhile) return waitBudget(repoId, startedMeanwhile);
 
+    // F3: a submodule entry is expanded into its own dirty files (see computeTreeKey); the entry itself is not a file.
+    const isSubmoduleEntry = (p: string): boolean => key.files[p] === "dir" || (key.files[p] ?? "").startsWith("submodule:");
+    const dirtyNow = Object.keys(key.files).filter((p) => !isSubmoduleEntry(p));
+    const treeNow: RepoTreeState = { head: tree.head, dirty: dirtyNow };
     const indexed = opts.getIndexedCommit(repoId);
     const headMoved = !indexed || !sameCommit(tree.head, indexed);
-    const vanished = headMoved ? [] : vanishedDirtyPaths(readDirtyLedger(opts.lockDir, repoId), tree.head, tree.dirty);
+    const vanished = headMoved ? [] : vanishedDirtyPaths(readDirtyLedger(opts.lockDir, repoId), tree.head, dirtyNow);
     const changed = headMoved ? null : pathsChangedSince(readCovered(repoId), key);
-    if (!headMoved && vanished.length === 0 && (tree.dirty.length === 0 || changed?.length === 0)) {
+    if (!headMoved && vanished.length === 0 && (Object.keys(key.files).length === 0 || changed?.length === 0)) {
       const note: FreshnessNote = { state: "fresh" };
       lastCheck.set(repoId, { at: started, note });
       return note;
@@ -640,7 +711,9 @@ export function createFreshnessGate(opts: FreshnessGateOptions): FreshnessGate {
     // never show it to a dirty run again. It is handed over as a pending re-index; with no way to do
     // that, an incremental run (re-hash everything, prune the gone) clears it.
     const cleanupByDirty = vanished.length > 0 && opts.markPendingReindex !== undefined;
-    const mode: "incremental" | "dirty" = headMoved || (vanished.length > 0 && !cleanupByDirty) ? "incremental" : "dirty";
+    // F3: a submodule that moved to another commit changed files nobody listed; only a full re-hash finds them.
+    const submoduleMoved = (changed ?? []).some((p) => (key.files[p] ?? "").startsWith("submodule:"));
+    const mode: "incremental" | "dirty" = headMoved || submoduleMoved || (vanished.length > 0 && !cleanupByDirty) ? "incremental" : "dirty";
     const refusal = opts.refuseRefresh?.(repoId) ?? null;
     if (refusal) {
       const note: FreshnessNote = { state: "stale", mode, reason: `${refusal} This answer comes from the index as that build wrote it.` };
@@ -661,7 +734,7 @@ export function createFreshnessGate(opts: FreshnessGateOptions): FreshnessGate {
     const promise = serialize(repoId, () => {
       if (cleanupByDirty) opts.markPendingReindex?.(repoId, vanished);
       // MCP-ISSUE-101: only the files whose content the covered key does not vouch for (all dirty files without one).
-      return opts.run(repoId, repoPath, mode, mode === "dirty" ? (changed ?? tree.dirty) : undefined);
+      return opts.run(repoId, repoPath, mode, mode === "dirty" ? (changed?.filter((p) => !isSubmoduleEntry(p)) ?? dirtyNow) : undefined);
     })
       .then((result) => {
         if (result.status === "failed" || result.status === "cancelled") return result;
@@ -672,7 +745,7 @@ export function createFreshnessGate(opts: FreshnessGateOptions): FreshnessGate {
         } catch {
           // Best-effort: the next check runs again, it never answers stale.
         }
-        recordDirtyLedger(opts.lockDir, repoId, mode, tree, cleanupByDirty);
+        recordDirtyLedger(opts.lockDir, repoId, mode, treeNow, cleanupByDirty);
         try {
           opts.markTriggered?.(result.runId);
         } catch {

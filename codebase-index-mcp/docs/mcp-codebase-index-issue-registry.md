@@ -4378,3 +4378,13 @@ this afternoon failed at that harness, which is the highest rate observed so far
   two ids that sanitize to one name; a marker written before that (no `repoId`) is matched on its name alone.
   `remove_repository` uses the same match. Guarded: `freshness.test.ts` (repoIds `a` / `a-b`, old form, `x/y` vs `x y`,
   the gate).
+- **F3 — a change inside a dirty submodule was unseen. ✅ FIXED 2026-10-27.** Checked first: the indexer DOES index a
+  submodule's files (its walk ignores only `.git` directories, and a submodule's `.git` is a file), and
+  `git status --porcelain=v2 --untracked-files=all` reports a dirty submodule as ONE entry (`sub`). That entry was keyed
+  as the constant `dir`, and `fileScan` drops a directory from a dirty run, so an edit inside it neither moved the key
+  nor reached the run. `computeTreeKey` now keys it `submodule:<HEAD>` and expands it into the files dirty inside
+  (`sub/x.ts`, content-hashed, to depth 3), read with the submodule's own `git status`; the gate hands the run those
+  files and keeps the entry out of the dirty ledger. A submodule that moved to another commit changes its key but not the
+  list of changed files, so that case runs an `incremental`. Guarded: `freshness.test.ts` (real `git submodule add`:
+  one entry, the key, an edit, a new untracked file, the gate's run list, no run when unchanged). **Not covered:** a
+  submodule whose git cannot be read is keyed `unreadable` (and capped by F2); a nested submodule beyond depth 3.
