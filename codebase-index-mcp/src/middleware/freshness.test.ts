@@ -589,8 +589,10 @@ test("MCP-ISSUE-101 F4: after a FULL run was killed mid-way, a query from anothe
       files: n("select count(*) as n from files where repo_id = 'r'")
     };
   };
-  const fullRun = (store: GraphStore): Promise<unknown> =>
-    runIndexPipeline(store, { repoId: "r", repoPath: repo, mode: "full", maxFiles: 5000, batchSize: 10, subtxSize: 5, parseWorkers: 0 });
+  // The runner, not the bare pipeline: the edge-resolve passes live in the runner, so only through it does "unresolved" mean something.
+  const limits = { subtxSize: 5, checkpointEveryNBatches: 1, largeFileThresholdBytes: 512 * 1024, maxFileSizeBytes: 500 * 1024, parseWorkers: 0, parseJobTimeoutMs: 20_000 };
+  const runnerFor = (store: GraphStore) => createIndexRunner({ store, limits, resolvePerformanceProfileOverride: () => "standard" });
+  const fullRun = (store: GraphStore): Promise<unknown> => runnerFor(store)("r", repo, "full", false, 5000, 50);
   try {
     const c = startChild(h.lockDir, repo);
     await c.waitFor("midrun");
@@ -609,7 +611,7 @@ test("MCP-ISSUE-101 F4: after a FULL run was killed mid-way, a query from anothe
       readTree: () => ({ head: "aaa111", dirty: [] }),
       run: async (_id, _path, mode) => {
         modes.push(mode);
-        return runIndexPipeline(store, { repoId: "r", repoPath: repo, mode, maxFiles: 5000, batchSize: 10, subtxSize: 5, parseWorkers: 0 }) as unknown as IndexRunResult;
+        return runnerFor(store)("r", repo, mode, false, 5000, 50);
       }
     });
     const first = await gate.ensureFresh("r");
@@ -627,6 +629,7 @@ test("MCP-ISSUE-101 F4: after a FULL run was killed mid-way, a query from anothe
     try {
       assert.deepEqual(shape(probe), shape(probeClean), "the repaired index equals a full run of the same tree");
       assert.ok((shape(probe).edges ?? 0) > 400, "and the run really resolved edges");
+      assert.ok((shape(probeClean).unresolved ?? 0) < (shape(probeClean).edges ?? 0), "calls to helper() resolved: unresolved is below the edge total");
     } finally {
       probe.close();
       probeClean.close();
