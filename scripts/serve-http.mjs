@@ -20,8 +20,8 @@
  * packages/sdk/src/httpTransport.ts. A second copy on the same port fails with EADDRINUSE, which is
  * what keeps it to one process.
  *
- * `--task register` runs `schtasks /Create` for a per-user ONLOGON task (no elevation, replaced if
- * present). It is the only thing here that changes the machine, and only when asked by name.
+ * `--task register` runs `schtasks /Create /XML` for a per-user task at logon and daily 08:00 (no
+ * elevation, replaced if present). It is the only thing here that changes the machine, and only when asked by name.
  */
 
 import { execFileSync, spawn } from "node:child_process";
@@ -94,22 +94,85 @@ function taskName(server) {
   return `mcp-local\\${server.key}-http`;
 }
 
+const xmlEscape = (s) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+
 /**
- * The schtasks arguments for the logon task. `conhost --headless` keeps a console window from
- * opening at every logon; the process still gets a console, which node needs for its stdio.
+ * The task definition, registered from XML because `schtasks /Create` flags cannot express it: the
+ * flag form refuses to start on battery, is killed when the laptop leaves AC, has a 72 h execution
+ * limit and cuts /TR at 261 characters. Triggers: logon of the current user, plus daily 08:00 with
+ * StartWhenAvailable so a missed 08:00 runs on wake. No repetition, no restart-on-failure: a shutdown
+ * ends the server and the next logon or morning starts it. `conhost --headless` keeps a console
+ * window from opening; the process still gets a console, which node needs for its stdio.
  */
-export function taskCreateArgs(server, { envFile, logFile, node = process.execPath, script = SCRIPT }) {
-  const command = `conhost.exe --headless "${node}" "${script}" --server ${server.key} --config "${envFile}" --log "${logFile}"`;
-  return ["/Create", "/TN", taskName(server), "/SC", "ONLOGON", "/RL", "LIMITED", "/F", "/TR", command];
+export function taskXml(server, { envFile, logFile, node = process.execPath, script = SCRIPT, user = currentUser() }) {
+  const args = `--headless "${node}" "${script}" --server ${server.key} --config "${envFile}" --log "${logFile}"`;
+  const u = xmlEscape(user);
+  return `<?xml version="1.0" encoding="UTF-16"?>
+<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <Triggers>
+    <LogonTrigger>
+      <Enabled>true</Enabled>
+      <UserId>${u}</UserId>
+    </LogonTrigger>
+    <CalendarTrigger>
+      <StartBoundary>2026-01-01T08:00:00</StartBoundary>
+      <Enabled>true</Enabled>
+      <ScheduleByDay>
+        <DaysInterval>1</DaysInterval>
+      </ScheduleByDay>
+    </CalendarTrigger>
+  </Triggers>
+  <Principals>
+    <Principal id="Author">
+      <UserId>${u}</UserId>
+      <LogonType>InteractiveToken</LogonType>
+      <RunLevel>LeastPrivilege</RunLevel>
+    </Principal>
+  </Principals>
+  <Settings>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <StartWhenAvailable>true</StartWhenAvailable>
+    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
+    <Enabled>true</Enabled>
+  </Settings>
+  <Actions Context="Author">
+    <Exec>
+      <Command>conhost.exe</Command>
+      <Arguments>${xmlEscape(args)}</Arguments>
+    </Exec>
+  </Actions>
+</Task>
+`;
+}
+
+function currentUser() {
+  const name = os.userInfo().username;
+  return process.env.USERDOMAIN ? `${process.env.USERDOMAIN}\\${name}` : name;
+}
+
+/** The schtasks arguments that register the task from an XML file (no elevation, replaced if present). */
+export function taskCreateArgs(server, { xmlFile }) {
+  return ["/Create", "/TN", taskName(server), "/XML", xmlFile, "/F"];
 }
 
 function runTask(server, mode, envFile, logFile) {
   if (mode === "print" || mode === "register") {
-    const args = taskCreateArgs(server, { envFile, logFile });
-    info(`schtasks ${args.map((a) => (/\s/.test(a) ? `"${a.replace(/"/g, '\\"')}"` : a)).join(" ")}`);
+    const xml = taskXml(server, { envFile, logFile });
+    const xmlFile = path.join(os.tmpdir(), `${server.key}-http-task.xml`);
+    const args = taskCreateArgs(server, { xmlFile });
+    info(`schtasks ${args.map((a) => (/\s/.test(a) ? `"${a}"` : a)).join(" ")}`);
+    info(xml);
     if (mode === "register") {
-      execFileSync("schtasks", args, { stdio: "inherit" });
-      ok(`Registered ${taskName(server)} (runs at logon). Start it now with: schtasks /Run /TN "${taskName(server)}"`);
+      // schtasks reads UTF-16 LE with a BOM.
+      fs.writeFileSync(xmlFile, Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from(xml, "utf16le")]));
+      try {
+        execFileSync("schtasks", args, { stdio: "inherit" });
+      } finally {
+        fs.rmSync(xmlFile, { force: true });
+      }
+      ok(`Registered ${taskName(server)} (at logon and daily 08:00). Start it now with: schtasks /Run /TN "${taskName(server)}"`);
     }
     return;
   }

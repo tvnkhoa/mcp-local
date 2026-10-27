@@ -307,6 +307,13 @@ node scripts/install-mcp.mjs --server codebase-index --transport stdio  # back t
   entry becomes `{ type: "http", url, headers: { Authorization } }`. Re-runs keep both. The stdio entry it
   replaced is kept in `~/.claude/mcp/stdio/codebase-index.json` (never overwritten by an http one), which is
   where the `code-stdio` profile of `~/.claude/mcp/build-profiles.mjs` takes its entry from.
+- **The logon task** (`--task register`) is registered from an XML definition (`schtasks /Create /XML`, no
+  elevation), not from `schtasks` flags. Triggers: the current user's logon, plus daily 08:00 with
+  `StartWhenAvailable` (a missed 08:00 runs on wake). Settings: `IgnoreNew` for a second instance, and
+  not stopped or refused on battery, no execution limit. The flag form refuses to start on battery, kills the
+  server when the laptop leaves AC (the 26 Oct outage), caps a run at 72 h and cuts `/TR` at 261
+  characters (the `--log` path). It does not run all day by design: a shutdown ends the server, the next
+  logon or morning starts it. No repetition, restart loop or service.
 - The server listens only when started with `--transport http`; an HTTP port in a stdio entry's env is
   ignored. It binds 127.0.0.1, refuses a foreign `Host`/`Origin` (403) and a missing token (401).
 - Shared across clients: the store, the watchers and the refresh worker. Per client: the protocol

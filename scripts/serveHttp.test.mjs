@@ -4,8 +4,8 @@
  * Pinned: only a server declaring *_HTTP_PORT / *_HTTP_TOKEN can be served; the client registration
  * carries the URL and the header and never the server's env; the env file keeps the stdio values
  * plus the port and a generated token, and a re-run keeps the token; going back to stdio leaves the
- * port and token out of the stdio entry; the logon task is per-user ONLOGON and only printed unless
- * asked to register.
+ * port and token out of the stdio entry; the task (XML: logon + daily 08:00, not stopped on battery) is
+ * only printed unless asked to register.
  */
 
 import assert from "node:assert/strict";
@@ -17,7 +17,7 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { getServer } from "./lib/manifest.mjs";
-import { httpClientEntry, httpEnvNames, readEnvFile, taskCreateArgs, writeEnvFile } from "./serve-http.mjs";
+import { httpClientEntry, httpEnvNames, readEnvFile, taskCreateArgs, taskXml, writeEnvFile } from "./serve-http.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), "serve-http-test-"));
@@ -48,16 +48,32 @@ test("the env file round-trips and refuses a shape it does not know", () => {
   assert.throws(() => readEnvFile(file));
 });
 
-test("the logon task is per-user, at logon, headless, and names the env file and log", () => {
-  const args = taskCreateArgs(getServer("codebase-index"), { envFile: "C:/e.json", logFile: "C:/l.log", node: "N", script: "S" });
-  assert.deepEqual(args.slice(0, 9), ["/Create", "/TN", "mcp-local\\codebase-index-http", "/SC", "ONLOGON", "/RL", "LIMITED", "/F", "/TR"]);
-  assert.equal(args[9], 'conhost.exe --headless "N" "S" --server codebase-index --config "C:/e.json" --log "C:/l.log"');
+test("the task is registered from XML: logon + daily 08:00, battery-proof, no time limit, full args", () => {
+  const server = getServer("codebase-index");
+  const longLog = `C:/${"deep/".repeat(60)}codebase-index.log`;
+  const xml = taskXml(server, { envFile: "C:/e.json", logFile: longLog, node: "N", script: "S", user: "HOST\\me" });
+  assert.match(xml, /<LogonTrigger>\s*<Enabled>true<\/Enabled>\s*<UserId>HOST\\me<\/UserId>/);
+  assert.match(xml, /<CalendarTrigger>\s*<StartBoundary>[^<]*T08:00:00<\/StartBoundary>[\s\S]*<DaysInterval>1<\/DaysInterval>/);
+  assert.match(xml, /<StartWhenAvailable>true<\/StartWhenAvailable>/);
+  assert.match(xml, /<MultipleInstancesPolicy>IgnoreNew<\/MultipleInstancesPolicy>/);
+  assert.match(xml, /<DisallowStartIfOnBatteries>false<\/DisallowStartIfOnBatteries>/);
+  assert.match(xml, /<StopIfGoingOnBatteries>false<\/StopIfGoingOnBatteries>/);
+  assert.match(xml, /<ExecutionTimeLimit>PT0S<\/ExecutionTimeLimit>/);
+  assert.doesNotMatch(xml, /<Repetition>|<RestartOnFailure>/);
+  assert.match(xml, /<Command>conhost\.exe<\/Command>/);
+  assert.ok(longLog.length > 261);
+  assert.ok(
+    xml.includes(`<Arguments>--headless &quot;N&quot; &quot;S&quot; --server codebase-index --config &quot;C:/e.json&quot; --log &quot;${longLog}&quot;</Arguments>`),
+    "the --log path is whole"
+  );
+  assert.deepEqual(taskCreateArgs(server, { xmlFile: "C:/t.xml" }), ["/Create", "/TN", "mcp-local\\codebase-index-http", "/XML", "C:/t.xml", "/F"]);
 });
 
 test("--task print prints and registers nothing; a server without http vars is refused", () => {
   const print = spawnSync(process.execPath, [path.join(ROOT, "scripts/serve-http.mjs"), "--server", "codebase-index", "--task", "print"], { encoding: "utf8" });
   assert.equal(print.status, 0, print.stderr);
-  assert.match(print.stdout, /schtasks \/Create \/TN mcp-local\\codebase-index-http \/SC ONLOGON/);
+  assert.match(print.stdout, /schtasks \/Create \/TN mcp-local\\codebase-index-http \/XML \S+ \/F/);
+  assert.match(print.stdout, /<LogonTrigger>/);
   const refused = spawnSync(process.execPath, [path.join(ROOT, "scripts/serve-http.mjs"), "--server", "postgres-mcp"], { encoding: "utf8" });
   assert.equal(refused.status, 1);
   assert.match(`${refused.stdout}${refused.stderr}`, /cannot be served over HTTP/);
