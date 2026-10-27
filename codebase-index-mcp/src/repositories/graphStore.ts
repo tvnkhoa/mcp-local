@@ -234,6 +234,10 @@ import {
   ftsIntegrityCheck as ftsIntegrityCheckImpl,
   resetMentionResolution as resetMentionResolutionImpl,
   symbolRowKeysForFiles as symbolRowKeysForFilesImpl,
+  idsAtRiskFromIdOrder as idsAtRiskFromIdOrderImpl,
+  findFilesWithEdgesInto as findFilesWithEdgesIntoImpl,
+  remapSymbolIds as remapSymbolIdsImpl,
+  type ShiftedSymbol,
   type SymbolRowsByFile
 } from "./scopedRunStore.js";
 
@@ -1234,6 +1238,19 @@ export class GraphStore {
 
   findNameDependentFiles(repoId: string, names: ReadonlySet<string>, pathKeys: ReadonlySet<string>, exclude: ReadonlySet<string>): string[] {
     return findNameDependentFilesImpl(this.db, repoId, names, pathKeys, exclude);
+  }
+
+  /** MCP-ISSUE-101 part 3: see `idsAtRiskFromIdOrder` / `remapSymbolIds` in scopedRunStore.ts. */
+  idsAtRiskFromIdOrder(repoId: string, shifted: readonly ShiftedSymbol[], freshIds: ReadonlySet<string>): Set<string> {
+    return idsAtRiskFromIdOrderImpl(this.db, repoId, shifted, freshIds);
+  }
+
+  findFilesWithEdgesInto(repoId: string, ids: ReadonlySet<string>, exclude: ReadonlySet<string>): string[] {
+    return findFilesWithEdgesIntoImpl(this.db, repoId, ids, exclude);
+  }
+
+  remapSymbolIds(repoId: string, shifted: readonly ShiftedSymbol[], writtenPaths: readonly string[]): number {
+    return remapSymbolIdsImpl(this.db, repoId, shifted, writtenPaths);
   }
 
   ftsForgetFile(repoId: string, filePath: string): void {

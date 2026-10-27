@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -9,6 +9,7 @@ import Database from "better-sqlite3";
 
 import { GraphStore } from "../../repositories/graphStore.js";
 import { createIndexRunner } from "./indexRunner.js";
+import { stableId } from "../extractors/extractorPrimitives.js";
 import type { IndexMode } from "../../types/index.js";
 
 /**
@@ -57,7 +58,7 @@ function snapshot(dbPath: string, repoId: string): Record<string, string[]> {
   const db = new Database(dbPath, { readonly: true });
   try {
     const out: Record<string, string[]> = {};
-    for (const table of ["files", "symbols", "edges", "doc_mentions", "string_literals", "code_comments"]) {
+    for (const table of ["files", "symbols", "edges", "doc_mentions", "string_literals", "code_comments", "routes"]) {
       const cols = (db.prepare(`select name from pragma_table_info(?)`).all(table) as { name: string }[])
         .map((c) => c.name)
         .filter((c) => !/_at$/.test(c));
@@ -80,8 +81,13 @@ function ftsIntegrity(dbPath: string): void {
   }
 }
 
-/** Index `base`, apply `edit`, then compare a scoped run of each mode against a full run on the edited tree. */
-async function assertScopedEqualsFull(name: string, base: Record<string, string>, edit: (root: string) => void): Promise<void> {
+/** Index `base`, apply `edit`, then compare a scoped run of each mode against a full run on the edited tree. Returns each mode's scope. */
+async function assertScopedEqualsFull(
+  name: string,
+  base: Record<string, string>,
+  edit: (root: string) => void
+): Promise<Record<"dirty" | "incremental", string>> {
+  const scopes = { dirty: "", incremental: "" };
   for (const mode of ["dirty", "incremental"] as const) {
     const repo = makeRepo(base);
     const work = mkdtempSync(path.join(tmpdir(), "cim-scoped-db-"));
@@ -92,6 +98,7 @@ async function assertScopedEqualsFull(name: string, base: Record<string, string>
       edit(repo);
       const scope = await index(scopedDb, "r", repo, mode);
       assert.match(scope ?? "", /^scoped: /, `${name}/${mode}: ran scoped (${String(scope)})`);
+      scopes[mode] = scope ?? "";
       await index(fullDb, "r", repo, "full");
       const a = snapshot(scopedDb, "r");
       const b = snapshot(fullDb, "r");
@@ -102,6 +109,7 @@ async function assertScopedEqualsFull(name: string, base: Record<string, string>
       rmSync(work, { recursive: true, force: true });
     }
   }
+  return scopes;
 }
 
 test("a second same-named declaration re-decides an unchanged caller's resolved edge, as a full run does", async () => {
@@ -230,4 +238,94 @@ test("a scoped run leaves another repo's rows and full-text answers in the share
   } finally {
     for (const d of [other, repo, work]) rmSync(d, { recursive: true, force: true });
   }
+});
+
+
+// MCP-ISSUE-101 part 3: a declaration an edit only moved keeps its identity — its old id is re-pointed and its
+// callers are NOT re-extracted — unless the move changes an order a resolver keeps the first of.
+
+const dependents = (scope: string): number => Number(/(\d+) dependent/.exec(scope)?.[1] ?? NaN);
+const shiftDown = (root: string, rel: string, lines: number): void => {
+  const file = path.join(root, rel);
+  writeFileSync(file, "\n".repeat(lines) + readFileSync(file, "utf8"));
+};
+const UTIL = "export function helper(): number {\n  return 1;\n}\n\nexport class Box {\n  open(): number {\n    return helper();\n  }\n}\n";
+const CALLER = 'import { helper, Box } from "./util";\n\nexport function main(): number {\n  return helper() + new Box().open();\n}\n';
+
+test("a row shift re-points the callers' edges instead of re-extracting them, and lands as a full run does", async () => {
+  const scopes = await assertScopedEqualsFull("shift", { "src/util.ts": UTIL, "src/caller.ts": CALLER }, (root) => shiftDown(root, "src/util.ts", 3));
+  assert.equal(dependents(scopes.dirty), 0, scopes.dirty);
+  assert.equal(dependents(scopes.incremental), 0, scopes.incremental);
+});
+
+test("renaming or removing an exported symbol still re-extracts its callers", async () => {
+  for (const [name, edited] of [
+    ["rename", UTIL.replace("function helper", "function helper2").replace("return helper()", "return helper2()")],
+    ["remove", UTIL.replace("export function helper(): number {\n  return 1;\n}\n\n", "").replace("return helper()", "return 1")]
+  ] as const) {
+    const scopes = await assertScopedEqualsFull(name, { "src/util.ts": UTIL, "src/caller.ts": CALLER }, (root) => writeTree(root, { "src/util.ts": "\n\n" + edited }));
+    assert.ok(dependents(scopes.dirty) >= 1 && dependents(scopes.incremental) >= 1, `${name}: ${scopes.dirty} / ${scopes.incremental}`);
+  }
+});
+
+test("a signature change alone (no row moves) re-extracts the callers", async () => {
+  const scopes = await assertScopedEqualsFull("signature", { "src/util.ts": UTIL, "src/caller.ts": CALLER }, (root) =>
+    writeTree(root, { "src/util.ts": UTIL.replace("helper(): number", "helper(x?: number): number") })
+  );
+  assert.ok(dependents(scopes.dirty) >= 1 && dependents(scopes.incremental) >= 1, `${scopes.dirty} / ${scopes.incremental}`);
+});
+
+test("guard (a): a shift that moves an id past a same-named namesake's re-extracts the tied callers", async () => {
+  // caller.ts imports neither helper, so its call is a by-name tie that the lower symbol_id wins. Pick shifts
+  // of a.ts's helper that do and do not move its id past b.ts's; only the first may re-extract the caller.
+  const idAt = (rel: string, row: number): string => stableId(`r:${rel}:function:helper:${String(row)}`);
+  const other = idAt("src/b.ts", 0);
+  const before = idAt("src/a.ts", 0) < other;
+  const shifts = Array.from({ length: 60 }, (_, k) => k + 1);
+  const flips = shifts.find((k) => idAt("src/a.ts", k) < other !== before);
+  const keeps = shifts.find((k) => idAt("src/a.ts", k) < other === before);
+  assert.ok(flips !== undefined && keeps !== undefined);
+  const base = {
+    "src/a.ts": "export function helper(): number {\n  return 1;\n}\n",
+    "src/b.ts": "export function helper(): number {\n  return 2;\n}\n",
+    "src/caller.ts": "export function main(): number {\n  return helper();\n}\n"
+  };
+  const flipped = await assertScopedEqualsFull("id-order-flip", base, (root) => shiftDown(root, "src/a.ts", flips));
+  assert.ok(dependents(flipped.dirty) >= 1 && dependents(flipped.incremental) >= 1, `${flipped.dirty} / ${flipped.incremental}`);
+  const kept = await assertScopedEqualsFull("id-order-kept", base, (root) => shiftDown(root, "src/a.ts", keeps));
+  assert.equal(dependents(kept.dirty), 0, kept.dirty);
+});
+
+test("two same-named C# overloads swapped in place re-extract the callers", async () => {
+  // Each overload takes the other's row and so the other's id; pairing by signature alone would swap the
+  // callers' targets. Both guards fire: the name's (line, id) order and its id order flip.
+  const lib = (first: string, second: string): string => `namespace App {\n  public class Lib {\n    ${first}\n    ${second}\n  }\n}\n`;
+  const intFoo = "public int Foo(int x) { return x; }";
+  const strFoo = "public int Foo(string s) { return 0; }";
+  const scopes = await assertScopedEqualsFull(
+    "overload-swap",
+    {
+      "src/Lib.cs": lib(intFoo, strFoo),
+      "src/Use.cs": 'namespace App {\n  public class Use {\n    public int Run(Lib l) { return l.Foo(1) + l.Foo("a"); }\n  }\n}\n'
+    },
+    (root) => writeTree(root, { "src/Lib.cs": lib(strFoo, intFoo) })
+  );
+  assert.ok(dependents(scopes.dirty) >= 1 && dependents(scopes.incremental) >= 1, `${scopes.dirty} / ${scopes.incremental}`);
+});
+
+test("guard (b) alone: overloads that trade line order but keep their id order re-extract, so an ambiguous mention's candidates follow the lines", async () => {
+  // Foo(string) moves above Foo(int) with a gap, chosen so the two ids keep their relative order (guard (a)
+  // is silent). The doc's ambiguous `Foo` lists its candidates in (path, line, id) order, which flipped.
+  const idAt = (row: number): string => stableId(`r:src/Lib.cs:method:Foo:${String(row)}`);
+  const lib = (body: string): string => `namespace App {\n  public class Lib {\n${body}  }\n}\n`;
+  const intFoo = "    public int Foo(int x) { return x; }\n";
+  const strFoo = "    public int Foo(string s) { return 0; }\n";
+  const gap = Array.from({ length: 80 }, (_, g) => g + 1).find((g) => idAt(2) < idAt(3) === idAt(3 + g) < idAt(2));
+  assert.ok(gap !== undefined);
+  const scopes = await assertScopedEqualsFull(
+    "overload-line-order",
+    { "src/Lib.cs": lib(intFoo + strFoo), "docs/notes.md": "# Notes\n\nCall `Foo` once.\n" },
+    (root) => writeTree(root, { "src/Lib.cs": lib(strFoo + "\n".repeat(gap) + intFoo) })
+  );
+  assert.match(scopes.dirty, /^scoped: 1 changed/);
 });

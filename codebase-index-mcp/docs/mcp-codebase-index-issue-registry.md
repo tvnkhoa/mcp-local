@@ -4112,7 +4112,8 @@ this afternoon failed at that harness, which is the highest rate observed so far
 ## MCP-ISSUE-101 — every query on a dirty tree re-ran the refresh
 
 - **Status:** 🟡 PART 1 FIXED 2026-10-27 (wec.aria request, C2a); PART 2 FIXED 2026-10-27 (C2b, retargeted to the
-  scoped mention resolve by measurement, owner-approved); part 3 (C2c: dependents re-extracted after a row shift) open.
+  scoped mention resolve by measurement, owner-approved); PART 3 FIXED 2026-10-27 (C2c: a row shift re-points ids
+  instead of re-extracting dependents, except where an id tie-break makes the shift visible; see *Part 3*).
 - **Scenario:** live on wec.aria (~3,000 files), every read query on a dirty tree started a dirty run (~7.4 s:
   extract 4.3 s, resolve 3.0 s) and answered from the old index; the next query did it again. The gate's covered
   key was HEAD + each dirty file's size and mtime, held in one process's memory, so:
@@ -4182,9 +4183,57 @@ this afternoon failed at that harness, which is the highest rate observed so far
   6 files: equal, I1 = 0, I2 empty → **ready**.
 - **Not done, on purpose:** scoping the four briefed passes (≤1 s of the run) — backlog, not worth the
   conformance risk today.
-- **Not covered (part 3, C2c):** a row-shifting edit still re-extracts every file whose resolved edges point into
-  the re-minted ids. That costs 5–17 s here and keeps a 1–6 file dirty run over the 5 s budget. The next step is to
-  re-map ids on a pure row shift instead of re-parsing the dependents.
+- **Part 3 — measured first** (same clone, 1-file shift of `usage-period.ts`, 204 files, extract 8.1 s). The
+  main-thread profile: tree-sitter parse and walk of the 203 dependents ~4.5 s (files under 256 KiB parse inline,
+  not in workers), write transactions 0.8 s, WAL pragma 0.6 s, per-file FTS 0.3 s. Nothing there to tune; the
+  re-extraction itself had to go.
+- **Fix (part 3):** `queueDependentFiles` (`indexPipeline.ts`) and `scopedRunStore.ts`. No id format or
+  `INDEX_VERSION` change.
+  - **Pairing** (`pairShiftedSymbols`): a written file's rows before and after pair by logical key (the parent
+    chain plus kind, name and signature), in (line, id) order. These stay unpaired and keep their names in K, as
+    before: a different count per key, two equal keys on one line, or a parent that does not map. A rename, a
+    removal or a signature change is therefore unpaired.
+  - **Re-point** (`remapSymbolIds`): each paired old id becomes the new one in every row outside the written files,
+    through a temp map in one statement per column, so a swap (old A = new B) is applied once. The columns are
+    `edges.to_id` / `from_id`, `symbols.parent_symbol_id`, `routes.controller_symbol_id` / `handler_symbol_id`,
+    `string_literals.enclosing_symbol_id`, `cross_repo_deps` both sides (through a sentinel, it has a primary key),
+    and `doc_mentions.candidate_ids`. Exempt, with the reason in `SYMBOL_ID_COLUMNS_EXEMPT`: `symbols.symbol_id`,
+    `symbols_fts`, `vec_symbol_map`, and `doc_mentions.symbol_id` (unbound by `oldIds` and re-resolved).
+  - **Guard (b), within the file:** resolvers take the first in (line, id) order among one name (EF members,
+    overrides, the canonical candidate lists) and among a file's component / module symbols. When a shift changes
+    that order, the pair's names go to K.
+  - **Guard (a), across the repo:** `pickBestNamedCandidate` and the first-row lookups break ties on
+    `symbol_id`, so a re-minted id that passes a same-family namesake's id changes a full run's answer.
+    `idsAtRiskFromIdOrder` returns the shifted ids whose order flipped and the namesakes they flipped against. The
+    files with resolved edges into those ids are re-extracted. Kind families: the type kinds (class, struct,
+    record, interface, type) form one, and every other kind stands alone, because the pick ranks each allowed
+    kind apart.
+- **After** (same clone and machine; before = 2f26f46 on the same edit):
+
+  | edit | dependents before → after | dirty run before → after |
+  |---|---|---|
+  | 1 file, `core/ports/index.ts` (113 inbound files, no id ties) | 79 → **2** | 5.7 s → **1.4 s** |
+  | 1 file, `usage-period.ts` | 203 → 147 | 9.7 s → 7.6 s |
+  | 6 files | 568 → 212 | 21.0 s → 11.2 s |
+
+  `usage-period.ts` stays over budget for a real reason. Its `get` function ties with `portal/src/lib/theme.ts`'s
+  `get` in 199 "resolved callee by name (ambiguous)" calls from 147 files, and the shift moves its id past
+  theme.ts's. A full run then picks the other `get` for all of them. With guard (a) disabled, the 1-file run
+  differs from a full run by 196 CALLS edges. The id hash is observable through that tie-break.
+- **Conformance** (every row of the seven tables, plus S1–S3, I1/I2), dirty and incremental against full, on the
+  clone: a 1-file shift of each of the two files, a 6-file shift, a rename of the exported `Clock`, a removed
+  `AriaIdPrefix` (rows after it shift), and a signature-only change of `local_date`. All **ready**. wec.aria has no
+  overloads, so the swapped-overload cases are fixtures.
+- **Guarded:** `scopedRunStore.test.ts`: every symbol-id column of the schema (from `pragma table_info`) is
+  re-pointed or exempt with a reason; pairing (shift, rename / removal / signature, same-line duplicate key); guard
+  (b) on swapped overloads; guard (a) by kind family; the swap re-point. `scopedRunConformance.test.ts`: a shift
+  with 0 dependents (fails without the re-point); rename and removal re-extract; a signature change re-extracts;
+  guard (a) id flip vs no flip (fails without the guard); swapped C# overloads; guard (b) alone, overloads that
+  trade line order but keep id order (fails without the guard). The doc's ambiguous mention lists its candidates
+  by line.
+- **Not done, needs the owner:** making the tie-break shift-invariant, e.g. on `(file_path, symbol_id)`.
+  `usage-period.ts` would then drop to 0 dependents. It changes which candidate wins every by-name tie, so it is
+  a resolver output change and needs an `INDEX_VERSION` bump (a full re-index of every repo).
 
 ## MCP-ISSUE-102 — a linked git worktree beside its main checkout could not be indexed
 

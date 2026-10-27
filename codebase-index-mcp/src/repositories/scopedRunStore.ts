@@ -66,6 +66,267 @@ export function changedSymbolNames(before: ReadonlyMap<string, string>, after: R
   return names;
 }
 
+/** A {@link symbolRowKey} read back into its columns. */
+export function parseSymbolRowKey(key: string): SymbolRowShape & { line: number | null } {
+  const [symbolId = "", kind = "", name = "", filePath = "", parent = "", signature = "", line = ""] = key.split("\u0001");
+  return { symbolId, kind, name, filePath, parentSymbolId: parent || null, signature: signature || null, line: line === "" ? null : Number(line) };
+}
+
+/** A declaration an edit only moved: same parent chain, kind, name and signature, new row, so a new id. */
+export type ShiftedSymbol = { oldId: string; newId: string; name: string };
+
+export type SymbolShift = {
+  /** Every declaration that kept its identity, including those whose id did not change. */
+  pairs: ShiftedSymbol[];
+  /** Guard (b): the paired declarations keep their (line, id) order within the file. */
+  orderKept: boolean;
+  /** The rows of each side no pair accounts for — what K is computed from, as before. */
+  unpairedBefore: Map<string, string>;
+  unpairedAfter: Map<string, string>;
+};
+
+/**
+ * MCP-ISSUE-101 part 3: pair one file's symbol rows before and after an edit that only moved them.
+ *
+ * A row's logical key is its parent chain plus its own kind, name and signature; equal keys pair in
+ * (line, id) order. Two equal keys on one line, a different count on each side, or a parent that does
+ * not map to the pair's parent leave the rows unpaired (they stay in K). Everything a resolver reads
+ * off a paired row is then unchanged except the id and the line. The caller re-points the old ids, and
+ * under guards (a) and (b) the row needs no dependent re-extracted.
+ */
+export function pairShiftedSymbols(before: ReadonlyMap<string, string>, after: ReadonlyMap<string, string>): SymbolShift {
+  const parse = (rows: ReadonlyMap<string, string>) => [...rows.keys()].map((key) => ({ key, ...parseSymbolRowKey(key) }));
+  type Row = ReturnType<typeof parse>[number];
+  const logicalKeys = (rows: Row[]): Map<string, string | null> => {
+    const byId = new Map(rows.map((r) => [r.symbolId, r]));
+    const memo = new Map<string, string | null>();
+    const keyOf = (r: Row, depth: number): string | null => {
+      const known = memo.get(r.symbolId);
+      if (known !== undefined) return known;
+      let parentKey = "";
+      if (r.parentSymbolId) {
+        const parent = byId.get(r.parentSymbolId);
+        parentKey = parent && depth < 64 ? (keyOf(parent, depth + 1) ?? "\u0000") : "\u0000";
+      }
+      const k = parentKey.includes("\u0000") ? null : `${parentKey}\u0002${r.kind}\u0001${r.name}\u0001${r.signature ?? ""}`;
+      memo.set(r.symbolId, k);
+      return k;
+    };
+    for (const r of rows) keyOf(r, 0);
+    return memo;
+  };
+  const groups = (rows: Row[]): Map<string, Row[]> => {
+    const lk = logicalKeys(rows);
+    const out = new Map<string, Row[]>();
+    for (const r of rows) {
+      const k = lk.get(r.symbolId);
+      if (k == null) continue;
+      const g = out.get(k) ?? [];
+      g.push(r);
+      out.set(k, g);
+    }
+    for (const g of out.values()) g.sort((a, b) => (a.line ?? 0) - (b.line ?? 0) || (a.symbolId < b.symbolId ? -1 : a.symbolId > b.symbolId ? 1 : 0));
+    return out;
+  };
+  const beforeRows = parse(before);
+  const afterRows = parse(after);
+  const beforeGroups = groups(beforeRows);
+  const afterGroups = groups(afterRows);
+  const sameLine = (g: Row[]): boolean => g.some((r, i) => i > 0 && r.line === g[i - 1]!.line);
+
+  let pairs: Array<{ o: Row; n: Row }> = [];
+  for (const [k, og] of beforeGroups) {
+    const ng = afterGroups.get(k);
+    if (!ng || ng.length !== og.length || sameLine(og) || sameLine(ng)) continue;
+    og.forEach((o, i) => pairs.push({ o, n: ng[i]! }));
+  }
+  // A child pairs only if its parent pairs with the new row's parent; dropping a parent can drop its children.
+  for (let changed = true; changed; ) {
+    const map = new Map(pairs.map((p) => [p.o.symbolId, p.n.symbolId]));
+    const kept = pairs.filter((p) => (p.o.parentSymbolId ? map.get(p.o.parentSymbolId) === p.n.parentSymbolId : !p.n.parentSymbolId));
+    changed = kept.length !== pairs.length;
+    pairs = kept;
+  }
+
+  // Guard (b): within one file, resolvers take the first in (line, id) order among the same name
+  // (EF members, overrides, the canonical (file_path, line, id) lists) and among a file's component /
+  // module symbols (the component owner). Different names on one line may swap ids freely.
+  const orderGroups = new Map<string, Array<{ o: Row; n: Row }>>();
+  for (const p of pairs) {
+    for (const g of [`name:${p.o.name}`, ...(p.o.kind === "component" || p.o.kind === "module" ? ["kind:owner"] : [])]) {
+      const list = orderGroups.get(g) ?? [];
+      list.push(p);
+      orderGroups.set(g, list);
+    }
+  }
+  const lineIdLess = (x: Row, y: Row): boolean => (x.line ?? 0) < (y.line ?? 0) || ((x.line ?? 0) === (y.line ?? 0) && x.symbolId < y.symbolId);
+  const orderKept = [...orderGroups.values()].every((group) => {
+    const byOld = [...group].sort((x, y) => (lineIdLess(x.o, y.o) ? -1 : 1));
+    return byOld.every((p, i) => i === 0 || lineIdLess(byOld[i - 1]!.n, p.n));
+  });
+
+  const pairedOld = new Set(pairs.map((p) => p.o.key));
+  const pairedNew = new Set(pairs.map((p) => p.n.key));
+  return {
+    pairs: pairs.map((p) => ({ oldId: p.o.symbolId, newId: p.n.symbolId, name: p.o.name })),
+    orderKept,
+    unpairedBefore: new Map([...before].filter(([k]) => !pairedOld.has(k))),
+    unpairedAfter: new Map([...after].filter(([k]) => !pairedNew.has(k)))
+  };
+}
+
+/**
+ * Guard (a): resolvers keep the first of several equal candidates in `symbol_id` order
+ * (`pickBestNamedCandidate`'s tie-break, the first-row lookups by name), so a re-minted id that moves
+ * past another same-named symbol's id can change a full run's answer — and does: wec.aria's
+ * `usage-period.ts` `get` against `theme.ts` `get` decides 199 "by name (ambiguous)" calls. A tie is only
+ * possible within one kind family: the pick ranks each allowed kind apart, and the first-row lookups span
+ * the type kinds (class, struct, record, interface, type).
+ *
+ * Returns the ids (as they are now) whose incoming resolved edges can change: a shifted symbol whose order
+ * against some same-family namesake flipped, and that namesake. An edge into any other candidate keeps its
+ * winner — the winner's order against every rival is unchanged. Unresolved tokens are not at risk: the
+ * candidate sets are unchanged, so order cannot turn "no pick" into a pick. `freshIds` are the written
+ * files' ids now; one that no pair accounts for is skipped (its name is in K already).
+ */
+const TYPE_KIND_FAMILY = new Set(["class", "struct", "record", "record struct", "interface", "type"]);
+
+export function idsAtRiskFromIdOrder(
+  db: Database.Database,
+  repoId: string,
+  shifted: readonly ShiftedSymbol[],
+  freshIds: ReadonlySet<string>
+): Set<string> {
+  const oldOf = new Map(shifted.map((s) => [s.newId, s.oldId]));
+  const names = [...new Set(shifted.map((s) => s.name))];
+  const atRisk = new Set<string>();
+  if (names.length === 0) return atRisk;
+  const rows = db
+    .prepare(`select name, kind, symbol_id as symbolId from symbols where repo_id = ? and name in (select value from json_each(?))`)
+    .all(repoId, JSON.stringify(names)) as { name: string; kind: string; symbolId: string }[];
+  const byGroup = new Map<string, string[]>();
+  for (const r of rows) {
+    if (freshIds.has(r.symbolId) && !oldOf.has(r.symbolId)) continue;
+    const key = `${r.name}:${TYPE_KIND_FAMILY.has(r.kind) ? "type" : r.kind}`;
+    const g = byGroup.get(key) ?? [];
+    g.push(r.symbolId);
+    byGroup.set(key, g);
+  }
+  for (const ids of byGroup.values()) {
+    for (const s of ids) {
+      const sOld = oldOf.get(s);
+      if (sOld === undefined) continue;
+      for (const t of ids) {
+        if (t === s) continue;
+        const tOld = oldOf.get(t) ?? t;
+        if (tOld < sOld !== t < s) {
+          atRisk.add(s);
+          atRisk.add(t);
+        }
+      }
+    }
+  }
+  return atRisk;
+}
+
+/** Files (other than `exclude`) holding a resolved edge into one of `ids`. */
+export function findFilesWithEdgesInto(db: Database.Database, repoId: string, ids: ReadonlySet<string>, exclude: ReadonlySet<string>): string[] {
+  if (ids.size === 0) return [];
+  const rows = db
+    .prepare(
+      `select distinct src.file_path as filePath from edges e
+       join symbols src on src.repo_id = e.repo_id and src.symbol_id = e.from_id
+       where e.repo_id = ? and e.to_id in (select value from json_each(?))`
+    )
+    .all(repoId, JSON.stringify([...ids])) as { filePath: string }[];
+  return rows.map((r) => r.filePath).filter((p) => !exclude.has(p)).sort();
+}
+
+/**
+ * Every column that can hold a symbol id, and what a shift does to it. `remapSymbolIds` re-points the
+ * REMAPPED ones; an EXEMPT column needs no re-point, for the reason given. `scopedRunStore.test.ts`
+ * fails on a symbol-id column of the schema that is in neither list, so a new table cannot miss it.
+ */
+export const SYMBOL_ID_COLUMNS_REMAPPED = [
+  "edges.to_id",
+  "edges.from_id",
+  "symbols.parent_symbol_id",
+  "routes.controller_symbol_id",
+  "routes.handler_symbol_id",
+  "string_literals.enclosing_symbol_id",
+  "cross_repo_deps.from_symbol_id",
+  "cross_repo_deps.to_symbol_id",
+  "doc_mentions.candidate_ids"
+] as const;
+
+export const SYMBOL_ID_COLUMNS_EXEMPT: Readonly<Record<string, string>> = {
+  "symbols.symbol_id": "the id itself: the written file's rows were replaced with the new ids",
+  "symbols_fts.symbol_id": "kept per file: ftsForgetFile / ftsIndexFile re-index the written file, and no other file's FTS row names its ids",
+  "vec_symbol_map.symbol_id": "rebuildVectorIndex re-embeds the written files and sweeps map rows whose symbol is gone",
+  "doc_mentions.symbol_id": "a scoped run unbinds every mention bound to a written file's old id (resetMentionsForScope, oldIds) and re-resolves it"
+};
+
+/**
+ * Re-point every reference to a shifted symbol's old id at its new id, outside the written files, whose
+ * rows already carry the new ids. One statement per column, through a temp map, so a swap (old A = new B)
+ * is applied once per row. `cross_repo_deps` has a primary key, so it goes through a sentinel.
+ */
+export function remapSymbolIds(db: Database.Database, repoId: string, shifted: readonly ShiftedSymbol[], writtenPaths: readonly string[]): number {
+  const moved = shifted.filter((s) => s.oldId !== s.newId);
+  if (moved.length === 0) return 0;
+  db.exec(`create temp table if not exists symbol_id_remap (old_id text primary key, new_id text not null)`);
+  db.exec(`delete from symbol_id_remap`);
+  const insert = db.prepare(`insert into symbol_id_remap (old_id, new_id) values (?, ?)`);
+  for (const s of moved) insert.run(s.oldId, s.newId);
+  const written = JSON.stringify(writtenPaths);
+  const newOf = (col: string): string => `(select new_id from symbol_id_remap where old_id = ${col})`;
+  const isOld = (col: string): string => `${col} in (select old_id from symbol_id_remap)`;
+  const notWrittenFile = `file_path not in (select value from json_each(?))`;
+  const writtenSymbols = `(select symbol_id from symbols where repo_id = ? and file_path in (select value from json_each(?)))`;
+  let changes = 0;
+  for (const col of ["to_id", "from_id"]) {
+    changes += db
+      .prepare(`update edges set ${col} = ${newOf(`edges.${col}`)} where repo_id = ? and ${isOld(col)} and from_id not in ${writtenSymbols}`)
+      .run(repoId, repoId, written).changes;
+  }
+  changes += db
+    .prepare(`update symbols set parent_symbol_id = ${newOf("symbols.parent_symbol_id")} where repo_id = ? and ${isOld("parent_symbol_id")} and ${notWrittenFile}`)
+    .run(repoId, written).changes;
+  for (const col of ["controller_symbol_id", "handler_symbol_id"]) {
+    changes += db.prepare(`update routes set ${col} = ${newOf(`routes.${col}`)} where repo_id = ? and ${isOld(col)} and ${notWrittenFile}`).run(repoId, written).changes;
+  }
+  changes += db
+    .prepare(
+      `update string_literals set enclosing_symbol_id = ${newOf("string_literals.enclosing_symbol_id")} where repo_id = ? and ${isOld("enclosing_symbol_id")} and ${notWrittenFile}`
+    )
+    .run(repoId, written).changes;
+  for (const [col, repoCol] of [["from_symbol_id", "from_repo_id"], ["to_symbol_id", "to_repo_id"]] as const) {
+    const marked = db
+      .prepare(`update or ignore cross_repo_deps set ${col} = 'remap\u0001' || ${newOf(`cross_repo_deps.${col}`)} where ${repoCol} = ? and ${isOld(col)}`)
+      .run(repoId).changes;
+    // A row the sentinel step ignored, or one already holding the new id, is the same link: one stays.
+    db.prepare(`delete from cross_repo_deps where ${repoCol} = ? and ${isOld(col)}`).run(repoId);
+    db.prepare(`update or replace cross_repo_deps set ${col} = substr(${col}, 7) where ${repoCol} = ? and ${col} like 'remap\u0001%'`).run(repoId);
+    changes += marked;
+  }
+  // An ambiguous mention keeps its candidates as a JSON array of ids; a scoped run does not re-decide it.
+  const remap = new Map(moved.map((s) => [s.oldId, s.newId]));
+  const ambiguous = db
+    .prepare(
+      `select rowid, candidate_ids as ids from doc_mentions
+       where repo_id = ? and candidate_ids is not null
+         and exists (select 1 from json_each(doc_mentions.candidate_ids) where value in (select old_id from symbol_id_remap))`
+    )
+    .all(repoId) as { rowid: number; ids: string }[];
+  const setIds = db.prepare(`update doc_mentions set candidate_ids = ? where rowid = ?`);
+  for (const m of ambiguous) {
+    setIds.run(JSON.stringify((JSON.parse(m.ids) as string[]).map((id) => remap.get(id) ?? id)), m.rowid);
+    changes += 1;
+  }
+  db.exec(`delete from symbol_id_remap`);
+  return changes;
+}
+
 /** The module-resolution keys of a file that appeared or disappeared: its basename, and its directory for an index file. */
 export function pathKeysFor(filePath: string): string[] {
   const segments = filePath.split("/");

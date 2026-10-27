@@ -37,7 +37,10 @@ export function currentAnnotationKey(repoPath: string): string {
   return `${ANNOTATION_SCANNER_VERSION}:${loadCitationConfig(repoPath).config?.hash ?? "none"}`;
 }
 import { GraphStore } from "../../repositories/graphStore.js";
-import { symbolIdOfRowKey, laneRowsOfExtraction, changedSymbolNames, pathKeysFor, symbolRowKey, type SymbolRowsByFile } from "../../repositories/scopedRunStore.js";
+import {
+  symbolIdOfRowKey, laneRowsOfExtraction, changedSymbolNames, pairShiftedSymbols, pathKeysFor, symbolRowKey,
+  type ShiftedSymbol, type SymbolRowsByFile
+} from "../../repositories/scopedRunStore.js";
 import { resolveHeadCommitSha, resolveCurrentBranch } from "../git/gitHelpers.js";
 import { redactSensitive } from "../../middleware/indexGuardrails.js";
 import { extractGraphData, isParseTimeoutError } from "../extractors/treeSitterExtractor.js";
@@ -890,7 +893,6 @@ export async function runIndexPipeline(store: GraphStore, input: RunIndexInput):
     if (writtenPaths.size === 0 && doomed.length === 0 && deletedInTree.length === 0) return 0;
 
     const doomedSet = new Set(doomed);
-    const candidates = new Set(store.findDanglingEdgeSourceFiles(input.repoId, doomed));
 
     // Release J (MCP-ISSUE-085): the files whose RESOLVED edges are still valid ids but would resolve
     // differently now — see scopedRunStore.ts. K and the path keys come from every file this run
@@ -900,8 +902,28 @@ export async function runIndexPipeline(store: GraphStore, input: RunIndexInput):
       scopeEscalation = `${configChange} changed: it can change how every file resolves`;
       return 0;
     }
+    // MCP-ISSUE-101 part 3: a declaration the edit only moved keeps its identity, so its old id is
+    // re-pointed at the new one everywhere outside the written files, and its name stays out of K —
+    // unless the move changes an order a resolver keeps the first of: within the file (guard b: its names go
+    // to K) or among the repo's same-named ids (guard a: the files with edges into the ids at risk). Without this a 3-line insertion re-extracted every caller.
     const names = new Set<string>();
-    for (const [p, before] of rowsBefore) for (const n of changedSymbolNames(before, rowsAfter.get(p) ?? new Map())) names.add(n);
+    const shifted: ShiftedSymbol[] = [];
+    const freshIds = new Set<string>();
+    for (const [p, before] of rowsBefore) {
+      const after = rowsAfter.get(p) ?? new Map<string, string>();
+      for (const key of after.keys()) freshIds.add(symbolIdOfRowKey(key));
+      const shift = pairShiftedSymbols(before, after);
+      for (const n of changedSymbolNames(shift.unpairedBefore, shift.unpairedAfter)) names.add(n);
+      for (const pair of shift.pairs) {
+        if (pair.oldId === pair.newId) continue;
+        shifted.push(pair);
+        if (!shift.orderKept) names.add(pair.name);
+      }
+    }
+    const idOrderAtRisk = store.idsAtRiskFromIdOrder(input.repoId, shifted, freshIds);
+    if (shifted.length > 0) store.runInTransaction(() => store.remapSymbolIds(input.repoId, shifted, [...writtenPaths]));
+    const candidates = new Set(store.findDanglingEdgeSourceFiles(input.repoId, doomed));
+    for (const p of store.findFilesWithEdgesInto(input.repoId, idOrderAtRisk, writtenPaths)) candidates.add(p);
     for (const rows of store.symbolRowKeysForFiles(input.repoId, doomed).values()) {
       for (const [key, n] of rows) {
         names.add(n);
