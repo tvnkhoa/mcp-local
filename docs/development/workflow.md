@@ -192,6 +192,14 @@ and codebase-index's `run-tests.mjs` take a machine-wide lock, `~/.claude/locks/
 broken. Nested entry points inherit the hold through `MCP_HEAVY_LOCK_TOKEN`. `CI=true` or `--no-lock`
 skips it, so CI is never held.
 
+**Only the harnesses a change needs.** `node scripts/run-tests.mjs --changed [<base>]` in
+`codebase-index-mcp/` (base: the merge-base with `origin/main`; add `--list` to preview) selects harnesses
+from the files changed since `<base>`, committed or not, through the checked-in map
+`codebase-index-mcp/scripts/test-map.json` (harness → path globs, workspace-relative). It fails safe: a
+changed file no glob covers runs the whole suite, `test:unit` and `guard:no-llm-runtime` always run, and
+only the map's `skip` paths — other servers and pure docs — are left out, each printed with its reason.
+`test:test-select` fails when a `test:*` script has no map entry. It is a pre-commit shortcut, not the gate.
+
 Server test files were type-checked by **nothing** before S-39 — each server's build excludes
 `*.test.ts` and the root `tsconfig.test.json` covers `packages/` only. Each server now has its own
 `tsconfig.test.json` and `typecheck` runs both passes.

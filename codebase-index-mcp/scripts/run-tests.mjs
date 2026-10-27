@@ -17,6 +17,8 @@
  *   node scripts/run-tests.mjs --integration-only # skip the node:test unit suite
  *   node scripts/run-tests.mjs --list             # show what would run
  *   node scripts/run-tests.mjs --bail             # stop at the first failure
+ *   node scripts/run-tests.mjs --changed [<base>] # only what the change since <base> needs (default: merge-base
+ *                                                 # with origin/main) — scripts/test-map.json; add --list to preview
  *   node scripts/run-tests.mjs --no-lock          # skip the machine-wide heavy-check lock (CI=true skips it too)
  */
 
@@ -28,6 +30,7 @@ import { fileURLToPath } from "node:url";
 
 import { holdHeavyLockOrExit } from "../../scripts/lib/heavyLock.mjs";
 import { failureExcerpt } from "./lib/failureExcerpt.mjs";
+import { changedFiles, EXCLUDED, selectForChanges, suiteScripts } from "./lib/testSelect.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const argv = process.argv.slice(2);
@@ -37,37 +40,37 @@ const INTEGRATION_ONLY = argv.includes("--integration-only");
 
 const scripts = JSON.parse(fs.readFileSync(path.join(ROOT, "package.json"), "utf8")).scripts ?? {};
 
-/**
- * Non-`test:*` scripts that are nonetheless part of the suite.
- * `guard:no-llm-runtime` enforces the hard no-LLM policy and must never be
- * optional; `verify:enhancements` is a test script that predates the naming
- * convention.
- */
-const EXTRA = ["guard:no-llm-runtime", "verify:enhancements"];
+const suite = suiteScripts(scripts).filter((name) => !(INTEGRATION_ONLY && name === "test:unit"));
 
 /**
- * Deliberately excluded, with the reason. Anything added here must be run
- * somewhere else — see `.github/workflows/ci.yml`.
+ * `--changed [<base>]`: only the harnesses whose paths in scripts/test-map.json the change touches
+ * (row V-E). Every fail-safe lives in testSelect.mjs; here it is printed, so a run says what it left
+ * out and why.
  */
-const EXCLUDED = {
-  "benchmark:plan:check": "a performance gate, not a correctness test; run as its own CI step",
-  // Discovery would otherwise find the alias that invokes THIS runner, and recurse until the
-  // process table gives up. `test:integration` is a name for "everything except the unit suite",
-  // which is a flag here, not a script to spawn.
-  "test:integration": "an alias for this runner (--integration-only); spawning it would recurse"
-};
+function selectChanged() {
+  const i = argv.indexOf("--changed");
+  const next = argv[i + 1];
+  const base = next !== undefined && !next.startsWith("--") ? next : undefined;
+  let changes;
+  try {
+    changes = changedFiles({ cwd: ROOT, base });
+  } catch (error) {
+    console.log(`--changed: cannot resolve the base (${String(error.message).split("\n")[0]}) — running the whole suite`);
+    return suite;
+  }
+  const map = JSON.parse(fs.readFileSync(path.join(ROOT, "scripts", "test-map.json"), "utf8"));
+  const result = selectForChanges({ changed: changes.files, map, suite });
+  console.log(`--changed: base ${changes.base.slice(0, 12)}${base === undefined ? " (merge-base HEAD origin/main)" : ""}, ${String(changes.files.length)} changed file(s)`);
+  for (const { file, reason } of result.skipped) console.log(`  skipped (${reason}): ${file}`);
+  for (const file of result.unitOnly) console.log(`  test:unit only: ${file}`);
+  for (const file of result.uncovered) console.log(`  not in test-map.json → WHOLE SUITE: ${file}`);
+  console.log(`selected ${String(result.selected.length)}/${String(suite.length)}:`);
+  for (const { name, why } of result.selected) console.log(`  ${name} ← ${why}`);
+  console.log("");
+  return result.selected.map(({ name }) => name);
+}
 
-const selected = [
-  ...EXTRA.filter((name) => name in scripts),
-  ...Object.keys(scripts)
-    .filter((name) => name.startsWith("test:"))
-    .sort()
-]
-  .filter((name) => !(name in EXCLUDED))
-  // `test:unit` is the node:test suite over src/**/*.test.ts. It needs no build and no database,
-  // so it runs first when present — a compile-level break should not wait behind ~40 harnesses.
-  .filter((name) => !(INTEGRATION_ONLY && name === "test:unit"))
-  .sort((a, b) => (a === "test:unit" ? -1 : b === "test:unit" ? 1 : 0));
+const selected = argv.includes("--changed") ? selectChanged() : suite;
 
 if (LIST_ONLY) {
   console.log(`${selected.length} script(s):`);

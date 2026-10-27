@@ -76,7 +76,8 @@
     "test:sql-lane": "node scripts/test/test-sql-lane.mjs",
     "test:literal-cap-profiles": "node scripts/test/test-literal-cap-profiles.mjs",
     "test:detect-changes-rename": "node scripts/test/test-detect-changes-rename.mjs",
-    "test:http-transport": "node scripts/test/test-http-transport.mjs"
+    "test:http-transport": "node scripts/test/test-http-transport.mjs",
+    "test:test-select": "node scripts/test/test-test-select.mjs"
   },
   "dependencies": {
     "@mcp/core": "file:../packages/core",

@@ -1,0 +1,297 @@
+{
+  "$comment": "Which codebase-index harnesses a change needs: run-tests.mjs --changed. Paths are relative to the workspace root. A changed file that no glob here covers runs the WHOLE suite; skip lists only other servers and pure docs. test:test-select fails when a suite script has no entry. Rules: scripts/lib/testSelect.mjs.",
+  "always": [
+    "test:unit",
+    "guard:no-llm-runtime"
+  ],
+  "skip": {
+    "other server": [
+      "postgres-mcp/**",
+      "sqlserver-mcp/**",
+      "observe-mcp/**",
+      "bitbucket-mcp/**",
+      "board-mcp/**"
+    ],
+    "docs": [
+      "docs/**",
+      "*.md",
+      "packages/*/README.md",
+      ".claude/**/*.md"
+    ]
+  },
+  "unit": [
+    "codebase-index-mcp/src/**/*.test.ts"
+  ],
+  "groups": {
+    "dist": [
+      "codebase-index-mcp/src/**",
+      "codebase-index-mcp/package.json",
+      "codebase-index-mcp/package-lock.json",
+      "codebase-index-mcp/tsconfig*.json",
+      "codebase-index-mcp/scripts/test/_*.mjs",
+      "packages/**",
+      "package.json",
+      "package-lock.json",
+      "tsconfig*.json"
+    ],
+    "self": [
+      "codebase-index-mcp/**"
+    ]
+  },
+  "harnesses": {
+    "test:approval-token": [
+      "codebase-index-mcp/scripts/test/test-approval-token.mjs",
+      "@dist"
+    ],
+    "test:base-class-dispatch": [
+      "codebase-index-mcp/scripts/test/test-base-class-dispatch.mjs",
+      "@dist"
+    ],
+    "test:benchmark-fixture": [
+      "codebase-index-mcp/scripts/test/test-benchmark-fixture.mjs",
+      "codebase-index-mcp/scripts/benchmark-plan-mode.mjs",
+      "codebase-index-mcp/src/repositories/graphStore.ts"
+    ],
+    "test:bus-edges": [
+      "codebase-index-mcp/scripts/test/test-bus-edges.mjs",
+      "@dist"
+    ],
+    "test:call-chain-interface": [
+      "codebase-index-mcp/scripts/test/test-call-chain-interface.mjs",
+      "@dist"
+    ],
+    "test:change-value-representation": [
+      "codebase-index-mcp/scripts/test/test-change-value-representation.mjs",
+      "@dist"
+    ],
+    "test:citations": [
+      "codebase-index-mcp/scripts/test/test-citations.mjs",
+      "@dist"
+    ],
+    "test:csharp-inheritance-bridge": [
+      "codebase-index-mcp/scripts/test/test-csharp-inheritance-bridge.mjs",
+      "@dist"
+    ],
+    "test:csharp-type-refs": [
+      "codebase-index-mcp/scripts/test/test-csharp-type-refs.mjs",
+      "@dist"
+    ],
+    "test:csharp-using-bridge": [
+      "codebase-index-mcp/scripts/test/test-csharp-using-bridge.mjs",
+      "@dist"
+    ],
+    "test:css-symbols": [
+      "codebase-index-mcp/scripts/test/test-css-symbols.mjs",
+      "@dist"
+    ],
+    "test:detect-changes-rename": [
+      "codebase-index-mcp/scripts/test/test-detect-changes-rename.mjs",
+      "@dist"
+    ],
+    "test:docs-term": [
+      "codebase-index-mcp/scripts/test/test-docs-term.mjs",
+      "@dist"
+    ],
+    "test:endpoint-bridge": [
+      "codebase-index-mcp/scripts/test/test-endpoint-bridge.mjs",
+      "@dist"
+    ],
+    "test:endpoint-fallback-context": [
+      "codebase-index-mcp/scripts/test/test-endpoint-fallback-context.mjs",
+      "@dist"
+    ],
+    "test:failure-excerpt": [
+      "codebase-index-mcp/scripts/test/test-failure-excerpt.mjs",
+      "codebase-index-mcp/scripts/lib/failureExcerpt.mjs"
+    ],
+    "test:field-access-exact": [
+      "codebase-index-mcp/scripts/test/test-field-access-exact.mjs",
+      "@dist"
+    ],
+    "test:field-access-rhs": [
+      "codebase-index-mcp/scripts/test/test-field-access-rhs.mjs",
+      "@dist"
+    ],
+    "test:field-access-vue": [
+      "codebase-index-mcp/scripts/test/test-field-access-vue.mjs",
+      "@dist"
+    ],
+    "test:field-access-worker": [
+      "codebase-index-mcp/scripts/test/test-field-access-worker.mjs",
+      "@dist"
+    ],
+    "test:freshness-worker": [
+      "codebase-index-mcp/scripts/test/test-freshness-worker.mjs",
+      "@dist"
+    ],
+    "test:harness-db-isolation": [
+      "codebase-index-mcp/scripts/test/test-harness-db-isolation.mjs",
+      "@dist"
+    ],
+    "test:html-svg": [
+      "codebase-index-mcp/scripts/test/test-html-svg.mjs",
+      "@dist"
+    ],
+    "test:http-consumers": [
+      "codebase-index-mcp/scripts/test/test-http-consumers.mjs",
+      "@dist"
+    ],
+    "test:http-transport": [
+      "codebase-index-mcp/scripts/test/test-http-transport.mjs",
+      "@dist"
+    ],
+    "test:impact-join-parity": [
+      "codebase-index-mcp/scripts/test/test-impact-join-parity.mjs",
+      "@dist"
+    ],
+    "test:interface-dispatch": [
+      "codebase-index-mcp/scripts/test/test-interface-dispatch.mjs",
+      "@dist"
+    ],
+    "test:issue-049-shapes": [
+      "codebase-index-mcp/scripts/test/test-issue-049-shapes.mjs",
+      "@dist",
+      "@self"
+    ],
+    "test:issue-052-qualified-call": [
+      "codebase-index-mcp/scripts/test/test-issue-052-qualified-call.mjs",
+      "@dist"
+    ],
+    "test:issue-index": [
+      "codebase-index-mcp/scripts/test/test-issue-index.mjs",
+      "codebase-index-mcp/scripts/issue-index.mjs",
+      "codebase-index-mcp/docs/issues/**",
+      "codebase-index-mcp/docs/mcp-codebase-index-issue-registry.md"
+    ],
+    "test:issue-refinements": [
+      "codebase-index-mcp/scripts/test/test-issue-refinements.mjs",
+      "@dist"
+    ],
+    "test:link-tests-boost": [
+      "codebase-index-mcp/scripts/test/test-link-tests-boost.mjs",
+      "@dist"
+    ],
+    "test:literal-cap-profiles": [
+      "codebase-index-mcp/scripts/test/test-literal-cap-profiles.mjs",
+      "@dist"
+    ],
+    "test:minimal-api-guard": [
+      "codebase-index-mcp/scripts/test/test-minimal-api-guard.mjs",
+      "@dist"
+    ],
+    "test:node-identity": [
+      "codebase-index-mcp/scripts/test/test-node-identity.mjs",
+      "@dist"
+    ],
+    "test:nuget-bridge": [
+      "codebase-index-mcp/scripts/test/test-nuget-bridge.mjs",
+      "@dist"
+    ],
+    "test:owner-prover": [
+      "codebase-index-mcp/scripts/test/test-owner-prover.mjs",
+      "@dist"
+    ],
+    "test:persistence-mapping": [
+      "codebase-index-mcp/scripts/test/test-persistence-mapping.mjs",
+      "@dist"
+    ],
+    "test:profile-responses": [
+      "codebase-index-mcp/scripts/test/test-profile-responses.mjs",
+      "@dist",
+      "@self"
+    ],
+    "test:query-refresh": [
+      "codebase-index-mcp/scripts/test/test-query-refresh.mjs",
+      "@dist"
+    ],
+    "test:refactor-engine": [
+      "codebase-index-mcp/scripts/test/test-refactor-engine.mjs",
+      "@dist"
+    ],
+    "test:refactor-profiles": [
+      "codebase-index-mcp/scripts/test/test-refactor-preview-profiles.mjs",
+      "@dist",
+      "@self"
+    ],
+    "test:route-map-roundtrip": [
+      "codebase-index-mcp/scripts/test/test-route-map-roundtrip.mjs",
+      "@dist"
+    ],
+    "test:search-ranking": [
+      "codebase-index-mcp/scripts/test/test-search-ranking.mjs",
+      "@dist"
+    ],
+    "test:search-regex": [
+      "codebase-index-mcp/scripts/test/test-search-regex.mjs",
+      "@dist",
+      "@self"
+    ],
+    "test:server-envelopes": [
+      "codebase-index-mcp/scripts/test/test-server-envelopes.mjs",
+      "@dist"
+    ],
+    "test:setup-config": [
+      "codebase-index-mcp/scripts/test/test-setup-config.mjs",
+      "scripts/lib/agents.mjs",
+      "scripts/lib/jsonc.mjs",
+      "scripts/lib/log.mjs"
+    ],
+    "test:sql-lane": [
+      "codebase-index-mcp/scripts/test/test-sql-lane.mjs",
+      "@dist"
+    ],
+    "test:sqlite-guardrails": [
+      "codebase-index-mcp/scripts/test/test-sqlite-guardrails.mjs",
+      "@dist"
+    ],
+    "test:string-literals": [
+      "codebase-index-mcp/scripts/test/test-string-literals.mjs",
+      "@dist"
+    ],
+    "test:test-select": [
+      "codebase-index-mcp/scripts/test/test-test-select.mjs",
+      "codebase-index-mcp/scripts/run-tests.mjs",
+      "codebase-index-mcp/scripts/lib/testSelect.mjs",
+      "codebase-index-mcp/scripts/test-map.json",
+      "codebase-index-mcp/package.json",
+      "scripts/lib/heavyLock.mjs"
+    ],
+    "test:tests-for-diff": [
+      "codebase-index-mcp/scripts/test/test-tests-for-diff.mjs",
+      "@dist"
+    ],
+    "test:text-json-lane": [
+      "codebase-index-mcp/scripts/test/test-text-json-lane.mjs",
+      "@dist"
+    ],
+    "test:typescript-edges": [
+      "codebase-index-mcp/scripts/test/test-typescript-edges.mjs",
+      "@dist"
+    ],
+    "test:typescript-symbols": [
+      "codebase-index-mcp/scripts/test/test-typescript-symbols.mjs",
+      "@dist"
+    ],
+    "test:unknown-input-honesty": [
+      "codebase-index-mcp/scripts/test/test-unknown-input-honesty.mjs",
+      "@dist"
+    ],
+    "test:value-contract-impact": [
+      "codebase-index-mcp/scripts/test/test-value-contract-impact.mjs",
+      "@dist"
+    ],
+    "test:vue-components": [
+      "codebase-index-mcp/scripts/test/test-vue-components.mjs",
+      "@dist"
+    ],
+    "test:wiring-note": [
+      "codebase-index-mcp/scripts/test/test-wiring-note.mjs",
+      "@dist"
+    ],
+    "verify:enhancements": [
+      "codebase-index-mcp/scripts/verify-enhancements.mjs",
+      "@dist",
+      "@self"
+    ]
+  }
+}
