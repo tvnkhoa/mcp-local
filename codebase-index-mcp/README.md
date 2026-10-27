@@ -243,7 +243,7 @@ Refactor tools: `refactor_replace_preview` and `refactor_replace_apply` support 
 | `CODEBASE_INDEX_POST_RESOLVE_PROPERTY_REFS_ENABLED` | no | `true` *(code)* | renamed — still accepts `CODEBASE_INDEX_POST_RESOLVE_PROPERTY_REFS` |
 | `CODEBASE_INDEX_CROSS_REPO_NAMESPACES` | no | — | Namespaces treated as shared when resolving cross-repo edges. |
 | `CODEBASE_INDEX_VECTOR_ENABLED` | no | `true` *(code)* | false disables trigram vector search entirely (no in-memory fallback) — a control for isolating vector-assisted resolution. |
-| `CODEBASE_INDEX_REFACTOR_APPROVAL_SECRET` | no | — | **secret** · HMAC secret for refactor approval tokens. Auto-generated per process if unset; set it to keep tokens valid across restarts. |
+| `CODEBASE_INDEX_REFACTOR_APPROVAL_SECRET` | no | — | **secret** · HMAC secret for refactor approval tokens. Unset over stdio: a random secret per process. Unset over HTTP: startup refuses; scripts/serve-http.mjs creates one once in ~/.claude/mcp/http/codebase-index.approval-secret (user-only ACL) and passes it, so previews and tokens survive a restart. |
 | `CODEBASE_INDEX_REFACTOR_PREVIEW_TTL_MS` | no | `1800000` *(code)* | Preview/token lifetime — 30 minutes. |
 | `CODEBASE_INDEX_REFACTOR_STRICT_APPROVAL_ENABLED` | no | `false` *(code)* | renamed — still accepts `CODEBASE_INDEX_REFACTOR_STRICT_APPROVAL` · When true, startup fails unless CODEBASE_INDEX_REFACTOR_APPROVAL_SECRET is set. |
 | `CODEBASE_INDEX_TS_LS_ENABLED` | no | `true` *(code)* | find_field_accesses answers TS/JS fields from a TypeScript LanguageService (coverage `exact`). Lazy: no program is built until such a query; C# fields keep the graph answer. false = the graph's lower bound. |
