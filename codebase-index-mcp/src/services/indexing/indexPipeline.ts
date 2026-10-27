@@ -48,7 +48,7 @@ import { ExtractionWorkerPool } from "../extractors/extractionWorkerPool.js";
 import { extractDotnetProjectData } from "../extractors/dotnetProjectParser.js";
 import { createIndexProgress, indexLog, indexWarn, type IndexProgress } from "./indexProgress.js";
 import { resolveIndexRunLimits } from "./runLimits.js";
-import { existsWithExactCase, scanRepoFiles, toPosixRelative } from "./fileScan.js";
+import { existsWithExactCase, scanRepoFiles, toPosixRelative, type DirListings } from "./fileScan.js";
 import {
   assessRunHealth,
   buildRunSummary,
@@ -203,9 +203,12 @@ export async function runIndexPipeline(store: GraphStore, input: RunIndexInput):
   const progress = input.progress ?? createIndexProgress(input.repoId);
   progress.phase("scanning");
 
+  /** One readdir per directory per run, for the scoped filter and the prune below (`existsWithExactCase`). */
+  const dirListings: DirListings = new Map();
   const { files, knownPackageNames, droppedByPath, gitAware } = await scanRepoFiles(
     {
       ...input,
+      dirListings,
       ...(input.onlyRelativePaths && {
         indexedCsprojPaths: store.listIndexedFiles(input.repoId).map((f) => f.path).filter((p) => p.endsWith(".csproj"))
       })
@@ -304,7 +307,7 @@ export async function runIndexPipeline(store: GraphStore, input: RunIndexInput):
   if (scoped && input.onlyRelativePaths) {
     for (const rel of input.onlyRelativePaths) {
       // Exact spelling: after a case-only rename the old name still "exists" on Windows and macOS.
-      if (store.getFileHash(input.repoId, rel) !== null && !existsWithExactCase(input.repoPath, rel)) deletedInTree.push(rel);
+      if (store.getFileHash(input.repoId, rel) !== null && !existsWithExactCase(input.repoPath, rel, dirListings)) deletedInTree.push(rel);
     }
     if (deletedInTree.length > 0) {
       captureBefore(deletedInTree);

@@ -4473,7 +4473,9 @@ this afternoon failed at that harness, which is the highest rate observed so far
   1. *Case-only rename.* After `git mv src/caller.ts src/Caller.ts`, a case-insensitive filesystem still reports
      the old name as existing, so a scoped run (dirty mode too) re-read the old spelling and never pruned it.
      `existsWithExactCase` (`fileScan.ts`) checks each path segment against its parent directory's `readdir`. It is
-     used both when filtering the scoped paths and when deciding which files were deleted from the tree.
+     used both when filtering the scoped paths and when deciding which files were deleted from the tree. Both share
+     a per-run directory cache, so each directory is read once per run (dirty mode has no path cap). Names compare in
+     NFC: macOS HFS+ lists NFD, and without that a non-ASCII file would read as deleted (`fileScan.test.ts`).
   2. *HEAD race.* The plan diffed base..HEAD, but the run recorded HEAD as read when the pipeline started. HEAD is
      now resolved once: the diff runs to that sha and the run records it. An incremental run that ends with HEAD
      elsewhere records no commit, so neither the fast skip nor the next plan uses it as a base. The test checks out
