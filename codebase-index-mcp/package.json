@@ -49,6 +49,7 @@
     "test:link-tests-boost": "node scripts/test/test-link-tests-boost.mjs",
     "test:field-access-rhs": "node scripts/test/test-field-access-rhs.mjs",
     "test:query-refresh": "node scripts/test/test-query-refresh.mjs",
+    "test:failure-excerpt": "node scripts/test/test-failure-excerpt.mjs",
     "test:freshness-worker": "node scripts/test/test-freshness-worker.mjs",
     "test:change-value-representation": "node scripts/test/test-change-value-representation.mjs",
     "test:owner-prover": "node scripts/test/test-owner-prover.mjs",

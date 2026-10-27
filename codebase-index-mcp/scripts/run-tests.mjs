@@ -25,6 +25,8 @@ import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
 
+import { failureExcerpt } from "./lib/failureExcerpt.mjs";
+
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const argv = process.argv.slice(2);
 const LIST_ONLY = argv.includes("--list");
@@ -115,16 +117,12 @@ for (const [index, name] of selected.entries()) {
 
   const how = result.status === null ? `killed by ${String(result.signal)}` : `exit ${String(result.status)}`;
   console.error(`FAIL ${label} (${elapsed}) — ${how}`);
-  // Only the tail: these scripts are chatty, and the failure is at the end.
-  const output = `${result.stdout ?? ""}${result.stderr ?? ""}`.trimEnd();
+  // Every `not ok` with its assertion block, then the tail: these scripts are chatty, and a node:test
+  // suite's tail is its summary, not the failing test's name.
   console.error(
-    output === ""
-      ? "       (no output)"
-      : output
-          .split("\n")
-          .slice(-25)
-          .map((line) => `       ${line}`)
-          .join("\n")
+    failureExcerpt(`${result.stdout ?? ""}${result.stderr ?? ""}`)
+      .map((line) => `       ${line}`)
+      .join("\n")
   );
   failures.push(name);
   if (BAIL) break;
