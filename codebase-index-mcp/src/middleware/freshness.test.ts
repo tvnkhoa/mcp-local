@@ -11,9 +11,10 @@ import { pathToFileURL } from "node:url";
 import Database from "better-sqlite3";
 
 import { parseStatusPorcelainV2 } from "../services/git/gitHelpers.js";
-import { applyFreshness, computeTreeKey, createFreshnessGate, liveRunMarkers, pathsChangedSince, readDirtyLedger, recordDirtyLedger, tryAcquireLock, UNREADABLE, watcherRunPlan, type RepoTreeState, type TreeKey } from "./freshness.js";
+import { applyFreshness, computeTreeKey, createFreshnessGate, clearRepairNeeded, liveRunMarkers, pathsChangedSince, readDirtyLedger, readRepairNeeded, recordDirtyLedger, tryAcquireLock, UNREADABLE, watcherRunPlan, type RepoTreeState, type TreeKey } from "./freshness.js";
 import { GraphStore } from "../repositories/graphStore.js";
 import { createIndexRunner } from "../services/indexing/indexRunner.js";
+import { runIndexPipeline } from "../services/indexing/indexPipeline.js";
 import { readWorkingTreeState } from "../services/git/gitHelpers.js";
 import type { IndexMode, IndexRunResult } from "../types/index.js";
 
@@ -491,7 +492,7 @@ let told = false;
 await gate.serialize("r", () => runIndexPipeline(store, {
   repoId: "r", repoPath, mode: "full", maxFiles: 5000, batchSize: 10, subtxSize: 5, parseWorkers: 0,
   onProgress: () => { if (!told) { told = true; process.stdout.write("midrun\\n"); } }
-}));
+}), "full");
 store.close();
 process.stdout.write("done\\n");
 `;
@@ -562,12 +563,95 @@ test("MCP-ISSUE-101 part 5: a marker left by a killed process is not a run in pr
     c.child.kill("SIGKILL");
     await new Promise((resolve) => c.child.once("exit", resolve));
     assert.ok(fs.readdirSync(h.lockDir).some((n) => n.startsWith("running-r-")), "the killed run left its marker");
-    assert.deepEqual(await h.gate.ensureFresh("r"), { state: "fresh" });
+    assert.deepEqual(liveRunMarkers(h.lockDir, "r", 60_000, Date.now()), [], "not live");
     assert.ok(!fs.readdirSync(h.lockDir).some((n) => n.startsWith("running-r-")), "the dead pid's marker is removed");
+    assert.deepEqual(readRepairNeeded(h.lockDir, "r")?.mode, "full", "but it is remembered: the index was left part-written");
   } finally {
     h.cleanup();
     rmSync(repo, { recursive: true, force: true });
   }
+});
+
+test("MCP-ISSUE-101 F4: after a FULL run was killed mid-way, a query from another gate is never fresh, and the repair equals a full run", async () => {
+  const h = harness({ budgetMs: 1000, autoFinish: true });
+  const repo = bigRepo();
+  const cleanDir = mkdtempSync(path.join(tmpdir(), "cim-clean-"));
+  const dbPath = path.join(h.lockDir, "x.db");
+  const shape = (db: Database.Database): Record<string, number> => {
+    const n = (sql: string): number => (db.prepare(sql).get() as { n: number }).n;
+    return {
+      symbols: n("select count(*) as n from symbols where repo_id = 'r'"),
+      edges: n("select count(*) as n from edges where repo_id = 'r'"),
+      unresolved: n("select count(*) as n from edges where repo_id = 'r' and to_id like 'callee:%'"),
+      files: n("select count(*) as n from files where repo_id = 'r'")
+    };
+  };
+  const fullRun = (store: GraphStore): Promise<unknown> =>
+    runIndexPipeline(store, { repoId: "r", repoPath: repo, mode: "full", maxFiles: 5000, batchSize: 10, subtxSize: 5, parseWorkers: 0 });
+  try {
+    const c = startChild(h.lockDir, repo);
+    await c.waitFor("midrun");
+    c.child.kill("SIGKILL");
+    await new Promise((resolve) => c.child.once("exit", resolve));
+
+    // another process's gate: the tree is clean and HEAD is the indexed commit, so only the dead marker tells
+    const store = new GraphStore(dbPath);
+    const modes: string[] = [];
+    const gate = createFreshnessGate({
+      enabled: true,
+      budgetMs: 120_000,
+      lockDir: h.lockDir,
+      getRepoPath: () => repo,
+      getIndexedCommit: () => "aaa111",
+      readTree: () => ({ head: "aaa111", dirty: [] }),
+      run: async (_id, _path, mode) => {
+        modes.push(mode);
+        return runIndexPipeline(store, { repoId: "r", repoPath: repo, mode, maxFiles: 5000, batchSize: 10, subtxSize: 5, parseWorkers: 0 }) as unknown as IndexRunResult;
+      }
+    });
+    const first = await gate.ensureFresh("r");
+    assert.notEqual(first.state, "fresh", JSON.stringify(first));
+    assert.deepEqual(modes, ["full"], "the repair is a full run");
+    assert.deepEqual(await gate.ensureFresh("r"), { state: "fresh" }, "repaired once, then fresh");
+    assert.deepEqual(modes, ["full"]);
+    assert.equal(readRepairNeeded(h.lockDir, "r"), null);
+
+    const clean = new GraphStore(path.join(cleanDir, "y.db"));
+    clean.ensureRepository("r", repo);
+    await fullRun(clean);
+    const probe = new Database(dbPath);
+    const probeClean = new Database(path.join(cleanDir, "y.db"));
+    try {
+      assert.deepEqual(shape(probe), shape(probeClean), "the repaired index equals a full run of the same tree");
+      assert.ok((shape(probe).edges ?? 0) > 400, "and the run really resolved edges");
+    } finally {
+      probe.close();
+      probeClean.close();
+      clean.close();
+      store.close();
+    }
+  } finally {
+    h.cleanup();
+    rmSync(cleanDir, { recursive: true, force: true });
+    rmSync(repo, { recursive: true, force: true });
+  }
+});
+
+test("MCP-ISSUE-101 F4: a dead marker that names its mode asks for a full repair; one without a mode (older build) and a live one do not", () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "cim-repair-"));
+  try {
+    fs.writeFileSync(path.join(dir, "running-old-999999-1.json"), JSON.stringify({ pid: 999999, at: 1 }));
+    assert.deepEqual(liveRunMarkers(dir, "old", 60_000, Date.now()), []);
+    assert.equal(readRepairNeeded(dir, "old"), null);
+    fs.writeFileSync(path.join(dir, `running-live-${String(process.pid)}-1.json`), JSON.stringify({ pid: process.pid, at: Date.now(), mode: "full" }));
+    assert.equal(liveRunMarkers(dir, "live", 60_000, Date.now()).length, 1);
+    assert.equal(readRepairNeeded(dir, "live"), null);
+    fs.writeFileSync(path.join(dir, "running-dead-999999-1.json"), JSON.stringify({ pid: 999999, at: 5, mode: "dirty", repoId: "dead" }));
+    liveRunMarkers(dir, "dead", 60_000, Date.now());
+    assert.deepEqual(readRepairNeeded(dir, "dead"), { mode: "dirty", pid: 999999, at: 5 });
+    clearRepairNeeded(dir, "dead");
+    assert.equal(readRepairNeeded(dir, "dead"), null);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
 test("MCP-ISSUE-101 part 5: a marker older than staleRunMs is ignored even if its pid is alive (pid reuse)", async () => {

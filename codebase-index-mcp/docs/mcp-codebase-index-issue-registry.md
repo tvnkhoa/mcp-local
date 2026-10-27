@@ -4388,3 +4388,19 @@ this afternoon failed at that harness, which is the highest rate observed so far
   list of changed files, so that case runs an `incremental`. Guarded: `freshness.test.ts` (real `git submodule add`:
   one entry, the key, an edit, a new untracked file, the gate's run list, no run when unchanged). **Not covered:** a
   submodule whose git cannot be read is keyed `unreadable` (and capped by F2); a nested submodule beyond depth 3.
+- **F4 — a run killed mid-way left a "fresh" gate over a part-written index. ✅ FIXED 2026-10-27.** A full run that
+  dies after its first batch (a server restart) leaves HEAD = the last ok run's commit and a clean tree, so the gate
+  answered `fresh`; the dead run's marker was swept silently. Now the marker records the run's `mode`
+  (`serialize(repoId, fn, mode)`; the gate's own runs, `index_repository` and the watcher all pass it). Sweeping a
+  marker whose pid is gone writes `repair-<repoId>.json`; while it exists the gate skips its fresh shortcuts, answers
+  `refreshing`/`refreshed` and runs a FULL index; a full run that finishes (any caller) clears it, and
+  `remove_repository` deletes it. A marker of an older build (no `mode`) is swept as before.
+  **Why full, not incremental:** a scoped run skips a file whose stored hash matches, and when every file was
+  re-extracted before the kill (killed in the resolve phase) it finds nothing changed and skips the resolve passes
+  (`unchanged` in `indexRunner.ts`), so it cannot be shown to repair that case. A killed `dirty` run is repaired the
+  same way (the cost is one full run after a restart that interrupted a refresh).
+  **No "stuck running" row exists:** `index_runs` is written when a run ends (`running` is a progress state, never
+  stored), so the dead marker is the only signal.
+  Guarded: `freshness.test.ts` — a real full index killed after its first batch; a gate of another process answers
+  not-fresh, runs `full` once, then `fresh`, and the repaired index has the same symbol / edge / unresolved / file
+  counts as a clean full run; dead marker with / without a mode, live marker.
