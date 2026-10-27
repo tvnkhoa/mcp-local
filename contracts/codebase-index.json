@@ -2304,7 +2304,7 @@
             "type": "boolean"
           },
           "skipMatches": {
-            "description": "With afterPath: skip this many matches of the first file after it. Pass the previous response's nextSkipMatches (set when limit cut a file mid-way), so the resume loses and repeats nothing.",
+            "description": "Skip this many matches of the first in-scope file (the first after afterPath, if given). Pass the previous response's nextSkipMatches (set when limit cut a file mid-way), so the resume loses and repeats nothing.",
             "minimum": 0,
             "type": "integer"
           }

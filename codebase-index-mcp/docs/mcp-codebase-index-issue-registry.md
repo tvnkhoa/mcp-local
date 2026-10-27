@@ -4098,6 +4098,8 @@ this afternoon failed at that harness, which is the highest rate observed so far
     `afterPath` + `skipMatches`. The first file after `afterPath` is re-read and its first n matches skipped, so a
     loop loses nothing, repeats nothing and ends even when one file holds more matches than `limit`. The
     per-file cap counts skipped matches too.
+    `skipMatches` applies to the first in-scope file with or without `afterPath` (a cut in the FIRST file has no path
+    before it, and used to restart at match 0 forever); it is echoed either way.
   - **Cap detection (follow-up).** The per-file cap is reported only when a match beyond it exists (a file with
     exactly 200 is not capped), and its remedy does not say "raise limit": the cap is fixed.
   - **`afterPath` echo (follow-up).** `afterPath` / `skipMatches` are echoed; an `afterPath` that sorts past every

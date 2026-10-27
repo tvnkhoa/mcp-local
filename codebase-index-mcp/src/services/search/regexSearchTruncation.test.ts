@@ -101,6 +101,35 @@ test("a cursor loop over a file with more matches than the limit collects every 
   });
 });
 
+test("a cursor loop whose cut lands in the FIRST file (no path before it) collects every match once, and terminates", () => {
+  withRepo({ "a.ts": "hit\n".repeat(30), "b.ts": "hit\n".repeat(4) }, (store) => {
+    const seen: string[] = [];
+    let after: string | undefined;
+    let skip: number | undefined;
+    let pages = 0;
+    for (; pages < 50; pages++) {
+      const r = searchRegexImpl(store, "r", { pattern: "hit", limit: 7, afterPath: after, skipMatches: skip });
+      seen.push(...r.matches.map((m) => `${m.filePath}:${String(m.line)}`));
+      if (r.truncationReason !== "limit_reached") break;
+      after = r.nextAfterPath ?? undefined;
+      skip = r.nextSkipMatches > 0 ? r.nextSkipMatches : undefined;
+    }
+    const full = searchRegexImpl(store, "r", { pattern: "hit", limit: 500 });
+    assert.deepEqual(seen, full.matches.map((m) => `${m.filePath}:${String(m.line)}`));
+    assert.equal(seen.length, 34);
+    assert.ok(pages < 10, "no endless loop");
+  });
+});
+
+test("handler echoes skipMatches without afterPath", () => {
+  withRepo({ "a.ts": "hit\n".repeat(10) }, (store) => {
+    const r = runHandler(store, { limit: 50, profile: "compact", skipMatches: 4 });
+    assert.equal(r.skipMatches, 4);
+    assert.equal(r.afterPath, undefined);
+    assert.equal(r.count, 6);
+  });
+});
+
 test("a file with exactly the per-file cap of matches is not reported as capped; one more is", () => {
   withRepo({ "a.ts": "hit\n".repeat(200), "b.ts": "hit\n".repeat(201) }, (store) => {
     for (const outputMode of ["files", "matches"] as const) {

@@ -86,7 +86,7 @@ export function buildSearchTools(deps: CodebaseIndexDeps): AnyToolDefinition[] {
         scanAll: { type: "boolean" },
         outputMode: { type: "string", enum: ["matches", "files"], description: "matches (default): one row per match with context and enclosing symbol. files: one row per matching file, limit counts files — the grep -l answer." },
         afterPath: { type: "string", description: "Resume a truncated scan: only files sorting after this repo-relative path are searched. Pass the previous response's nextAfterPath." },
-        skipMatches: { type: "integer", minimum: 0, description: "With afterPath: skip this many matches of the first file after it. Pass the previous response's nextSkipMatches (set when limit cut a file mid-way), so the resume loses and repeats nothing." },
+        skipMatches: { type: "integer", minimum: 0, description: "Skip this many matches of the first in-scope file (the first after afterPath, if given). Pass the previous response's nextSkipMatches (set when limit cut a file mid-way), so the resume loses and repeats nothing." },
         contextLines: { type: "integer", minimum: 0, maximum: 10 },
         limit: { type: "integer", minimum: 1, maximum: limits.maxResultLimit },
         profile: PROFILE_PROP

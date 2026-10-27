@@ -308,7 +308,7 @@ export function handleSearchRegex(
       }
     : {};
   // MCP-ISSUE-100: an afterPath past every in-scope file searched nothing — say so instead of "complete, 0 results".
-  const resumeEcho = args.afterPath ? { afterPath: args.afterPath, ...(args.skipMatches ? { skipMatches: args.skipMatches } : {}) } : {};
+  const resumeEcho = { ...(args.afterPath ? { afterPath: args.afterPath } : {}), ...(args.skipMatches ? { skipMatches: args.skipMatches } : {}) };
   const completeness = {
     complete: !truncated,
     ...resumeEcho,

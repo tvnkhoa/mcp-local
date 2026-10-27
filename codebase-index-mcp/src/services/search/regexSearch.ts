@@ -74,7 +74,7 @@ export type RegexSearchOptions = {
    */
   afterPath?: string;
   /**
-   * With `afterPath`: the first file after it is re-read and its first N matches skipped. A scan cut by
+   * The first in-scope file (the first after `afterPath`, if given) is re-read and its first N matches skipped. A scan cut by
    * `limit` in the MIDDLE of a file resumes there (`nextSkipMatches`), so no match is lost or repeated.
    */
   skipMatches?: number;
@@ -230,7 +230,8 @@ export function searchRegexImpl(
     .filter((f) => (excludeGlobs.length ? !excludeGlobs.some((g) => minimatch(f.path, g, { nocase: true, dot: true })) : true))
     .sort((a, b) => a.path.localeCompare(b.path));
   const afterPath = opts.afterPath ? normalizeRelativePath(opts.afterPath) : null;
-  const skipFirstFile = afterPath !== null ? Math.max(0, Math.floor(opts.skipMatches ?? 0)) : 0;
+  // Applies to the first in-scope file with or without afterPath: a cut in the FIRST file has no path before it.
+  const skipFirstFile = Math.max(0, Math.floor(opts.skipMatches ?? 0));
   const eligibleBeforeAfter = selected.length;
   if (afterPath !== null) {
     const from = selected.findIndex((f) => f.path.localeCompare(afterPath) > 0);
