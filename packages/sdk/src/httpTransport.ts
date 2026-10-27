@@ -95,7 +95,12 @@ interface Session {
   lastSeen: number;
   /** Owner of the client socket at initialize; null while unresolved or when unknown. */
   clientPid: number | null;
+  /** MCP-ISSUE-103: when this session's store record was last refreshed (throttled, see `STORE_TOUCH_EVERY_MS`). */
+  storeTouchedAt?: number;
 }
+
+/** A busy session refreshes its store record at most this often, so a crash (no shutdown) loses at most this much. */
+const STORE_TOUCH_EVERY_MS = 5 * 60 * 1000;
 
 /** Pid of the row `127.0.0.1:<remotePort>` -> `127.0.0.1:<serverPort>` ESTABLISHED in `netstat -ano -p TCP` output. */
 export function parseNetstatClientPid(output: string, remotePort: number, serverPort: number): number | null {
@@ -213,7 +218,9 @@ export async function startHttpTransport(
     if (session === undefined) return;
     sessions.delete(sessionId);
     // A shutdown keeps the record: the restarted process re-adopts the session for the same bearer.
-    if (reason !== "shutdown") store?.delete(sessionId);
+    // On shutdown it is refreshed (`at` = now), so the age limit runs from the session's last activity.
+    if (reason === "shutdown") store?.touch(sessionId);
+    else store?.delete(sessionId);
     logger.info("http_session_closed", { sessionId, reason, sessions: sessions.size });
     await session.server.close().catch(() => undefined);
   };
@@ -227,7 +234,7 @@ export async function startHttpTransport(
     const transport = new StreamableHTTPServerTransport({
       sessionIdGenerator: () => randomUUID(),
       onsessioninitialized: (sessionId) => {
-        sessions.set(sessionId, { transport, server, lastSeen: Date.now(), clientPid: null });
+        sessions.set(sessionId, { transport, server, lastSeen: Date.now(), clientPid: null, storeTouchedAt: Date.now() });
         const bearer = bearerDigestHex(req.headers.authorization);
         if (bearer !== null) store?.set(sessionId, bearer);
         logger.info("http_session_opened", { sessionId, sessions: sessions.size });
@@ -269,7 +276,7 @@ export async function startHttpTransport(
   /**
    * MCP-ISSUE-103: a session id this process does not know (it was opened before a restart), re-adopted only
    * for the bearer recorded when it was initialized. The SDK (1.29.0) has no public resume API: the transport
-   * is marked initialized under the old id through its private fields, which `httpTransport.test.ts` pins to
+   * is marked initialized under the old id through its private fields, which `httpSessionStore.test.ts` pins to
    * the installed SDK version so an upgrade that moves them fails loudly. Anything unexpected → undefined (404).
    */
   const adoptSession = async (sessionId: string, req: http.IncomingMessage): Promise<Session | undefined> => {
@@ -301,6 +308,8 @@ export async function startHttpTransport(
     await server.connect(transport);
     const session: Session = { transport, server, lastSeen: Date.now(), clientPid: null };
     sessions.set(sessionId, session);
+    store?.touch(sessionId);
+    session.storeTouchedAt = Date.now();
     logger.info("http_session_adopted", { sessionId, sessions: sessions.size });
     return session;
   };
@@ -351,6 +360,10 @@ export async function startHttpTransport(
         return;
       }
       session.lastSeen = Date.now();
+      if (store && session.lastSeen - (session.storeTouchedAt ?? 0) >= STORE_TOUCH_EVERY_MS) {
+        session.storeTouchedAt = session.lastSeen;
+        store.touch(sessionId);
+      }
       await session.transport.handleRequest(req, res, body);
       if (req.method === "DELETE") await closeSession(sessionId, "client_delete");
       return;

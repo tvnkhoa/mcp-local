@@ -105,12 +105,13 @@ export function ensureApprovalSecret(file, { user = currentUser(), platform = pr
   if (fs.existsSync(file)) {
     const secret = fs.readFileSync(file, "utf-8").trim();
     if (secret.length >= 32) return secret;
-    throw new Error(`${file} holds no usable secret — delete it and restart to generate a new one`);
+    // Empty: a previous start stopped between creating the file and writing the secret. Start over.
+    if (secret.length > 0) throw new Error(`${file} holds no usable secret — delete it and restart to generate a new one`);
+    fs.rmSync(file, { force: true });
   }
   fs.mkdirSync(path.dirname(file), { recursive: true });
-  const secret = randomBytes(32).toString("hex");
-  fs.writeFileSync(file, `${secret}
-`, { encoding: "utf-8", mode: 0o600, flag: "wx" });
+  // Created EMPTY and restricted first, so the secret is never on disk under the folder's inherited ACL.
+  fs.writeFileSync(file, "", { encoding: "utf-8", mode: 0o600, flag: "wx" });
   if (platform === "win32") {
     try {
       execFileSync("icacls", [file, "/inheritance:r", "/grant:r", `${user}:F`], { stdio: "ignore" });
@@ -119,6 +120,8 @@ export function ensureApprovalSecret(file, { user = currentUser(), platform = pr
       throw new Error(`could not restrict ${file} to ${user}: ${e.message}`, { cause: e });
     }
   }
+  const secret = randomBytes(32).toString("hex");
+  fs.writeFileSync(file, `${secret}\n`, { encoding: "utf-8" });
   return secret;
 }
 

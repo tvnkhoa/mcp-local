@@ -21,9 +21,15 @@ export interface HttpSessionStore {
   /** The hex sha256 of the bearer that initialized `sessionId`, or null. */
   get(sessionId: string): string | null;
   set(sessionId: string, bearerDigestHex: string): void;
+  /**
+   * Record activity: `at` becomes now, so the age limit runs from the session's LAST activity (a shutdown, an
+   * adoption, a request), not from its initialize — a Claude session busy for 9 h is still re-adoptable.
+   */
+  touch(sessionId: string): void;
   delete(sessionId: string): void;
 }
 
+/** `at` = the session's last recorded activity (initialize, a throttled request, adoption, shutdown). */
 type StoreFile = { version: 1; sessions: Record<string, { bearer: string; at: number }> };
 
 export function fileHttpSessionStore(file: string, maxAgeMs: number, now: () => number = Date.now): HttpSessionStore {
@@ -56,6 +62,13 @@ export function fileHttpSessionStore(file: string, maxAgeMs: number, now: () => 
     set(sessionId, bearerDigestHex) {
       const data = read();
       data.sessions[sessionId] = { bearer: bearerDigestHex, at: now() };
+      write(data);
+    },
+    touch(sessionId) {
+      const data = read();
+      const entry = data.sessions[sessionId];
+      if (!entry) return;
+      entry.at = now();
       write(data);
     },
     delete(sessionId) {

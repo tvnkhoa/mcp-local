@@ -4376,6 +4376,14 @@ this afternoon failed at that harness, which is the highest rate observed so far
     - after a restart with a rotated bearer, the old id answers 404, the new session's apply of the old
       session's preview is refused (`PREVIEW_OWNED_BY_ANOTHER_SESSION`), and nothing is written;
     - with re-adoption disabled, the restart section fails on `-32001 Session not found`.
+- **Review follow-up:** the age limit ran from `at`, which only initialize set. A session busy for more than the 8 h
+  idle limit was therefore not re-adopted after a restart. `at` is now the last activity: initialize, a request
+  (refreshed at most every 5 min, so a crash loses at most that much), adoption, and shutdown (`touch`).
+  The supervisor now creates the secret file empty, restricts it, and only then writes the secret. An empty file
+  left by an interrupted start is regenerated.
+  - Guarded: `httpSessionStore.test.ts`. `touch` moves the age limit. A session initialized 9 h ago with a recent
+    shutdown is re-adopted by the restarted server (FAILS without the shutdown refresh). `serveHttp.test.mjs`:
+    the empty-file case.
 - **Limit:** the transport has ONE bearer, shared by every client of the process. "Same bearer" therefore proves
   the caller holds the server's token, not that it is the client that opened the session. That is as strong as
   the bearer check on any request today. Per-client tokens would make it per client. A rotated token revokes

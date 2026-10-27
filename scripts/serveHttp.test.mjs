@@ -182,4 +182,8 @@ test("MCP-ISSUE-104: the approval secret is created once, reused, and readable b
 
   fs.writeFileSync(file, "short\n");
   assert.throws(() => ensureApprovalSecret(file), /no usable secret/);
+
+  // A start that stopped between creating the (empty, restricted) file and writing the secret: start over.
+  fs.writeFileSync(file, "");
+  assert.match(ensureApprovalSecret(file), /^[0-9a-f]{64}$/);
 });
