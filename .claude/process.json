@@ -1,0 +1,487 @@
+{
+  "$schema": "~/.claude/process/process.schema.json",
+  "schema_version": 1,
+  "short_name": "mcp-local",
+  "branches": {
+    "integration": "main",
+    "push_requires_owner": true,
+    "merge": "ff-only-or-no-edit",
+    "push_note": "origin is GitHub; CI (.github/workflows/ci.yml, Windows + Node 22) runs on push."
+  },
+  "tracker": {
+    "kind": "dayfile",
+    "defects": {
+      "path": "codebase-index-mcp/docs/issues/MCP-ISSUE-{n}.md",
+      "index": {
+        "id": "issue-index",
+        "argv": [
+          "node",
+          "scripts/issue-index.mjs"
+        ],
+        "cwd": "codebase-index-mcp"
+      }
+    }
+  },
+  "gates": {
+    "member": [
+      {
+        "id": "build-packages",
+        "argv": [
+          "npm",
+          "run",
+          "build:packages"
+        ],
+        "note": "required in a fresh worktree before guard:all/docs:check (packages/*/dist missing)"
+      },
+      {
+        "id": "guard-all",
+        "argv": [
+          "npm",
+          "run",
+          "guard:all"
+        ]
+      },
+      {
+        "id": "server-typecheck",
+        "argv": [
+          "npm",
+          "run",
+          "typecheck"
+        ],
+        "cwd": "{server}",
+        "for_each": {
+          "var": "server",
+          "values": [
+            "codebase-index-mcp",
+            "postgres-mcp",
+            "sqlserver-mcp",
+            "observe-mcp",
+            "bitbucket-mcp",
+            "board-mcp"
+          ],
+          "only_touched": true
+        }
+      },
+      {
+        "id": "server-unit",
+        "argv": [
+          "npm",
+          "run",
+          "test:unit"
+        ],
+        "cwd": "codebase-index-mcp",
+        "when": {
+          "paths": [
+            "codebase-index-mcp/**"
+          ]
+        }
+      },
+      {
+        "id": "server-test",
+        "argv": [
+          "npm",
+          "test"
+        ],
+        "cwd": "{server}",
+        "for_each": {
+          "var": "server",
+          "values": [
+            "postgres-mcp",
+            "sqlserver-mcp",
+            "observe-mcp",
+            "bitbucket-mcp",
+            "board-mcp"
+          ],
+          "only_touched": true
+        },
+        "note": "Only codebase-index-mcp has test:unit; the other five have test only (checked at 5471cd2)."
+      },
+      {
+        "id": "ci-changed",
+        "argv": [
+          "node",
+          "scripts/run-tests.mjs",
+          "--changed",
+          "{base?}"
+        ],
+        "cwd": "codebase-index-mcp",
+        "when": {
+          "paths": [
+            "codebase-index-mcp/**",
+            "packages/**"
+          ]
+        }
+      },
+      {
+        "id": "contracts",
+        "argv": [
+          "npm",
+          "run",
+          "contracts:check"
+        ],
+        "when": {
+          "change": [
+            "tool-schema"
+          ]
+        }
+      },
+      {
+        "id": "generate",
+        "argv": [
+          "npm",
+          "run",
+          "generate:check"
+        ],
+        "when": {
+          "change": [
+            "manifest",
+            "docs"
+          ],
+          "paths": [
+            "packages/manifest/**",
+            "docs/**",
+            "*/README.md"
+          ]
+        }
+      },
+      {
+        "id": "docs",
+        "argv": [
+          "npm",
+          "run",
+          "docs:check"
+        ]
+      }
+    ],
+    "accept": [],
+    "merge": [
+      {
+        "id": "single-server-typecheck",
+        "argv": [
+          "npm",
+          "run",
+          "typecheck"
+        ],
+        "cwd": "{server}",
+        "for_each": {
+          "var": "server",
+          "values": [
+            "codebase-index-mcp",
+            "postgres-mcp",
+            "sqlserver-mcp",
+            "observe-mcp",
+            "bitbucket-mcp",
+            "board-mcp"
+          ],
+          "only_touched": true
+        },
+        "when": {
+          "change": [
+            "single-server"
+          ]
+        },
+        "note": "Case (a): one server only - that server's narrow targets."
+      },
+      {
+        "id": "single-server-test",
+        "argv": [
+          "npm",
+          "test"
+        ],
+        "cwd": "{server}",
+        "for_each": {
+          "var": "server",
+          "values": [
+            "postgres-mcp",
+            "sqlserver-mcp",
+            "observe-mcp",
+            "bitbucket-mcp",
+            "board-mcp"
+          ],
+          "only_touched": true
+        },
+        "when": {
+          "change": [
+            "single-server"
+          ]
+        }
+      },
+      {
+        "id": "single-server-ci-changed",
+        "argv": [
+          "node",
+          "scripts/run-tests.mjs",
+          "--changed",
+          "{base?}"
+        ],
+        "cwd": "codebase-index-mcp",
+        "when": {
+          "change": [
+            "single-server"
+          ],
+          "paths": [
+            "codebase-index-mcp/**"
+          ]
+        }
+      },
+      {
+        "id": "verify-packages",
+        "argv": [
+          "npm",
+          "run",
+          "verify:packages"
+        ],
+        "when": {
+          "change": [
+            "shared"
+          ],
+          "paths": [
+            "packages/**",
+            "scripts/**",
+            "package.json",
+            "tsconfig*.json"
+          ]
+        },
+        "note": "Case (b) from here on. scripts/heavy-lock.mjs serialises it; add no lock."
+      },
+      {
+        "id": "build-servers",
+        "argv": [
+          "npm",
+          "run",
+          "build:servers"
+        ],
+        "when": {
+          "change": [
+            "shared"
+          ]
+        }
+      },
+      {
+        "id": "typecheck-servers",
+        "argv": [
+          "npm",
+          "run",
+          "typecheck:servers"
+        ],
+        "when": {
+          "change": [
+            "shared"
+          ]
+        }
+      },
+      {
+        "id": "server-tests-but-ci-harness",
+        "argv": [
+          "npm",
+          "test"
+        ],
+        "cwd": "{server}",
+        "for_each": {
+          "var": "server",
+          "values": [
+            "postgres-mcp",
+            "sqlserver-mcp",
+            "observe-mcp",
+            "bitbucket-mcp",
+            "board-mcp"
+          ]
+        },
+        "when": {
+          "change": [
+            "shared"
+          ]
+        },
+        "note": "Every server's tests except codebase-index's harness suite."
+      },
+      {
+        "id": "ci-unit",
+        "argv": [
+          "npm",
+          "run",
+          "test:unit"
+        ],
+        "cwd": "codebase-index-mcp",
+        "when": {
+          "change": [
+            "shared"
+          ]
+        }
+      },
+      {
+        "id": "ci-changed",
+        "argv": [
+          "node",
+          "scripts/run-tests.mjs",
+          "--changed",
+          "{base?}"
+        ],
+        "cwd": "codebase-index-mcp",
+        "when": {
+          "change": [
+            "shared"
+          ]
+        }
+      },
+      {
+        "id": "contracts",
+        "argv": [
+          "npm",
+          "run",
+          "contracts:check"
+        ],
+        "when": {
+          "change": [
+            "shared",
+            "tool-schema"
+          ]
+        }
+      },
+      {
+        "id": "generate",
+        "argv": [
+          "npm",
+          "run",
+          "generate:check"
+        ],
+        "when": {
+          "change": [
+            "shared",
+            "manifest",
+            "docs"
+          ]
+        }
+      },
+      {
+        "id": "docs",
+        "argv": [
+          "npm",
+          "run",
+          "docs:check"
+        ],
+        "when": {
+          "change": [
+            "shared",
+            "manifest",
+            "docs"
+          ]
+        }
+      }
+    ],
+    "release": [
+      {
+        "id": "verify-all",
+        "argv": [
+          "npm",
+          "run",
+          "verify:all"
+        ],
+        "stdout_to": "{scratch}/verify.log",
+        "minutes": 10,
+        "note": "Read the log; never re-run it to read. &&-chained: a pass of docs:check proves every step."
+      },
+      {
+        "id": "verify-live",
+        "argv": [
+          "npm",
+          "run",
+          "verify:live"
+        ],
+        "note": "Real credentials; not in CI."
+      }
+    ]
+  },
+  "worktree": {
+    "required_when": [
+      "package-manager",
+      "generator",
+      "build",
+      "shared-generated-file",
+      "test"
+    ],
+    "path_pattern": "mcp-local-wt-{name}",
+    "branch_pattern": "wt/{name}",
+    "create": {
+      "id": "wt-add",
+      "argv": [
+        "node",
+        "scripts/worktree.mjs",
+        "add",
+        "{name}"
+      ],
+      "optional_args": {
+        "sha": [
+          "--base",
+          "{sha}"
+        ]
+      },
+      "note": "node_modules = real dirs of per-entry junctions; @mcp/* -> the worktree's packages/*."
+    },
+    "remove": {
+      "id": "wt-remove",
+      "argv": [
+        "node",
+        "scripts/worktree.mjs",
+        "remove",
+        "{name}"
+      ],
+      "note": "Unlinks every junction first; refuses uncommitted changes without --force; keeps the branch."
+    },
+    "list": {
+      "argv": [
+        "node",
+        "scripts/worktree.mjs",
+        "list"
+      ]
+    },
+    "tracker_note": "test:scripts' skills test only counts when run from the main tree. Never run a generator in a worktree whose @mcp/* resolves into the main tree."
+  },
+  "scope_companions": [
+    {
+      "when": "packages/manifest/**",
+      "add_paths": [
+        "*/.env.example",
+        "*/README.md",
+        "*/skill/SKILL.md"
+      ]
+    },
+    {
+      "when": "adds:defect",
+      "add_paths": [
+        "codebase-index-mcp/docs/mcp-codebase-index-issue-registry.md"
+      ]
+    },
+    {
+      "when": "adds:tool-schema",
+      "add_paths": [
+        "contracts/*.json"
+      ]
+    }
+  ],
+  "deploy": [
+    {
+      "id": "serve-http-restart",
+      "argv": [
+        "node",
+        "scripts/serve-http.mjs",
+        "--server",
+        "{server}",
+        "--restart"
+      ],
+      "note": "Exactly one --server. Runs from a deploy copy under ~/.claude/mcp/deploy/<key>/; a tree build changes nothing live until this. A running session keeps its loaded tool schema."
+    }
+  ],
+  "constraints": [
+    "Never rm -r a worktree or its node_modules: it deletes through junctions into main.",
+    "Never npm install in a worktree: it writes through the junctions into main.",
+    "Never a bare git worktree remove: use scripts/worktree.mjs remove, which unlinks junctions first.",
+    "verify:all only before a release or when the owner asks; a packages/* change uses the reduced merge gate.",
+    "Fallback from codebase-index to grep files an MCP-ISSUE in the same turn (.claude/rules/mcp-hard-mode.md).",
+    "Rows that add an MCP-ISSUE all regenerate the one registry file: merge them in order; a later row merges main and re-runs issue-index.",
+    "Only the leader restarts the live server (deploy.serve-http-restart); a member never kills or restarts the owner's served process; tests use a scratch port and a scratch deploy root.",
+    "CLAUDE.md §Verification is the prose and this file the machine form of the same gates: change both together."
+  ],
+  "docs": {
+    "claude_md": "CLAUDE.md"
+  }
+}
