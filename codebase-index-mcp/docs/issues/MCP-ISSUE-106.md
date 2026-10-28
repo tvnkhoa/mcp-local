@@ -13,12 +13,15 @@
   while dirty. The base is the newest ok `full`/`incremental` run; every later run must be an ok `dirty` run. The
   dirty paths come from `index_runs.tree_key` (MCP-ISSUE-101), which names each run's dirty files: a file indexed
   dirty and reverted since is in neither the diff nor the dirty set. A scoped incremental run is itself a base —
-  it re-read that whole union — so the induction reaches back to the last full walk. No schema change.
+  it re-read that whole union — so the induction reaches back to the last full walk. Schema: one additive column,
+  `index_runs.exclude_rules` (2026-10-28, below); no `INDEX_VERSION` change.
   The run's `scope` says which way it went: `…; git-scoped from <sha>: N path(s) (D from the diff, K indexed dirty
   since)` or `…; tree walk: <reason>`.
 - **Walks the tree, as before, when:** `respectGitignore: false` (the scan is not git's list); the annotation key
-  changed; `.git/info/exclude` or `core.excludesFile` has an mtime at or after the base run's start
-  (`excludeRulesChangedSince`); any run since the base
+  changed; `.git/info/exclude` or `core.excludesFile` differs in content (or existence, or which file
+  `core.excludesFile` names) from what the base run recorded at its start (`excludeRulesFingerprint`,
+  `excludeRulesDiffer`) — or, for a base from an older build that recorded no fingerprint, has an mtime at or after
+  its start (`excludeRulesChangedSince`); any run since the base
   is not `ok` (a cancelled run wrote an unknown subset) or ran over a dirty tree without a tree key; no base, or one
   without a commit or at another `INDEX_VERSION`; git cannot diff from the base commit (gc'd, shallow, unborn
   HEAD); a `.gitignore`, `.gitattributes`, `.codebase-index/*` or `SCOPE_FORCES_FULL_RUN` path is in the set; more
@@ -27,8 +30,8 @@
   --exclude-standard` lists, then applies its own exclusions. So the indexed set is a subset of git's visible set,
   and every way a visible file can change content or appear shows up in the diff or the dirty set. What git cannot
   report is a change to the visible set itself, which is why an ignore-rule change walks, and why the two ignore files
-  outside the tree are checked by mtime. Known gap: deleting one of those files (nothing left to stat), or writing it
-  and setting its mtime back; run `full` after either.
+  outside the tree are checked by content. (Until 2026-10-28 they were checked by mtime alone, which missed a deleted
+  file and a write with its mtime set back — see *Known gap closed* below.)
 - **Measured** (scratch clone of wec.aria at 6e011462, 2,994 files; refresh-worker limits; each run on a copy of
   one full base DB; before = ee4d38a, after = this change; two runs each, alternating):
 
@@ -63,4 +66,24 @@
      inside a long base run's window sorted below the base and was not carried. Runs that finished after the base
      started are now carried too. If such a run has no key, did not end ok, or is a second complete run, the plan
      walks the tree.
-
+- **Known gap closed (2026-10-28, mcp-local row 6).** A full or incremental run records, before its scan lists files,
+  a fingerprint of the two ignore-rule files outside the tree: each absolute path (forward slashes) mapped to the
+  sha256 of its bytes or `"absent"` (`excludeRulesFingerprint`, `gitHelpers.ts`), stored in the additive column
+  `index_runs.exclude_rules` (`ensureRunColumnText`, `schema.ts`; `markRunExcludeRules`, `runStore.ts`). The plan
+  compares the base's fingerprint with the current one (`excludeRulesDiffer`): any differing entry — content, a file
+  deleted or created, `core.excludesFile` pointed elsewhere — walks the tree; unreadable now walks ("unknown"). Read
+  before the scan, so an edit during the base run makes the next plan walk, never miss. A touched-but-unchanged file
+  no longer walks. A base recorded by an older build (column null) keeps the mtime check, so no repo needs a full
+  re-index; the first run on this build records a fingerprint and the gap closes from that run on.
+  - *Cost:* the same two git calls the mtime check made (`rev-parse --git-path info/exclude`, `config --get
+    core.excludesFile`) plus reading and hashing two small files. An incremental run reads it once and hands it to the
+    plan (no extra spawn over before); a full run adds one read. Measured on this machine under load (20 calls,
+    median, D:/1.SourceCode/mcp-local): fingerprint 684 / 827 ms, the mtime check it replaces 661 / 1,267 ms, one
+    bare git spawn 443 / 378 ms — the cost is the two git spawns, not the hashing.
+  - *Guarded:* `gitScopedIncremental.test.ts` (planner: content changed, deleted, `core.excludesFile` created or
+    re-pointed, unreadable → walk; unchanged → scoped with the mtime not consulted; a base without a fingerprint →
+    mtime path; over a real repo: deleted and rewritten-with-mtime-set-back both differ while the mtime check returns
+    null). `scopedRunConformance.test.ts` "G1: .git/info/exclude …" through the runner: deleted → walks;
+    rewritten with mtime set back (a rule hides an indexed untracked file) → walks and lands as a full run does;
+    touched but unchanged → git-scoped, 0 paths. All three fail with the planner reverted to the mtime check (the
+    rewritten case also leaves `src/hidden.ts` in the index, so its rows differ from a full run).

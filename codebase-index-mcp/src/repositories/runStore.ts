@@ -278,6 +278,14 @@ export function markRunTreeKey(db: Database.Database, runId: string, treeKey: st
 }
 
 /**
+ * MCP-ISSUE-106: the ignore-rule files outside the tree (gitHelpers.ts `excludeRulesFingerprint`) a full or
+ * incremental run saw at its start. Set after the run is recorded, like `tree_key`.
+ */
+export function markRunExcludeRules(db: Database.Database, runId: string, fingerprint: string): void {
+  db.prepare(`update index_runs set exclude_rules = ? where run_id = ?`).run(fingerprint, runId);
+}
+
+/**
  * MCP-ISSUE-101: the tree key of the repo's most recent run, or null. Only the LATEST run counts: a later run that
  * recorded no key (failed, cancelled, an older build) leaves the index in a state no key vouches for.
  */
@@ -327,6 +335,8 @@ export type WorkRunTrace = {
   indexVersion: string | null;
   treeKey: string | null;
   treeDirty: boolean;
+  /** The ignore-rule fingerprint the run recorded at its start; null for a dirty run or one from an older build. */
+  excludeRules: string | null;
 };
 
 /**
@@ -336,7 +346,8 @@ export type WorkRunTrace = {
 export function listRecentWorkRuns(db: Database.Database, repoId: string, limit: number): WorkRunTrace[] {
   const rows = db
     .prepare(
-      `select mode, status, started_at as startedAt, finished_at as finishedAt, commit_sha as commitSha, index_version as indexVersion, tree_key as treeKey, tree_dirty as treeDirty
+      `select mode, status, started_at as startedAt, finished_at as finishedAt, commit_sha as commitSha, index_version as indexVersion, tree_key as treeKey, tree_dirty as treeDirty,
+         exclude_rules as excludeRules
        from index_runs where repo_id = ? and skip_reason is null
        order by finished_at desc, started_at desc, rowid desc limit ?`
     )

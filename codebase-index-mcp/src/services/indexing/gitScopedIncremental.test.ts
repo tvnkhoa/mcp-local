@@ -6,7 +6,7 @@ import path from "node:path";
 import test from "node:test";
 
 import type { WorkRunTrace } from "../../repositories/runStore.js";
-import { diffNameStatusSince, excludeRulesChangedSince, readStatusEntriesAsync, readWorkingTreeState, type NameStatusEntry } from "../git/gitHelpers.js";
+import { diffNameStatusSince, excludeRulesChangedSince, excludeRulesDiffer, excludeRulesFingerprint, readStatusEntriesAsync, readWorkingTreeState, type NameStatusEntry } from "../git/gitHelpers.js";
 import { INDEX_VERSION } from "./indexPipeline.js";
 import { planGitScopedIncremental, type GitScopeInputs } from "./runPolicy.js";
 
@@ -14,6 +14,9 @@ import { planGitScopedIncremental, type GitScopeInputs } from "./runPolicy.js";
  * MCP-ISSUE-106: which files an incremental run re-reads after a HEAD move. A plan that names too few leaves the
  * index stale with nothing to say so; every case here that cannot be vouched for must walk the tree.
  */
+
+/** An ignore-rule fingerprint as `excludeRulesFingerprint` serializes it. */
+const rules = (exclude: string, global = "absent"): string => JSON.stringify({ "/r/.git/info/exclude": exclude, "/home/.config/git/ignore": global });
 
 const run = (over: Partial<WorkRunTrace> = {}): WorkRunTrace => ({
   mode: "incremental",
@@ -24,6 +27,7 @@ const run = (over: Partial<WorkRunTrace> = {}): WorkRunTrace => ({
   indexVersion: INDEX_VERSION,
   treeKey: JSON.stringify({ head: "a".repeat(40), files: {} }),
   treeDirty: false,
+  excludeRules: rules("e1"),
   ...over
 });
 
@@ -37,6 +41,7 @@ function inputs(over: Partial<GitScopeInputs> = {}, diff: NameStatusEntry[] | nu
     dirtyNow: [],
     pending: [],
     gitScan: true,
+    excludeRulesNow: rules("e1"),
     excludeRulesChangedSince: () => null,
     annotationKeyCurrent: true,
     ...over
@@ -110,7 +115,12 @@ test("the base is the newest complete run, and git diffs from its commit", () =>
 
 for (const [name, over, diff] of [
   ["respectGitignore:false", { gitScan: false }, []],
-  [".git/info/exclude written since the base started", { excludeRulesChangedSince: () => ".git/info/exclude" }, []],
+  ["a base without a fingerprint, .git/info/exclude written since it started", { runs: [run({ excludeRules: null })], excludeRulesChangedSince: () => ".git/info/exclude" }, []],
+  [".git/info/exclude content changed since the base", { excludeRulesNow: rules("e2") }, []],
+  [".git/info/exclude deleted since the base", { excludeRulesNow: rules("absent") }, []],
+  ["core.excludesFile created since the base", { excludeRulesNow: rules("e1", "g1") }, []],
+  ["core.excludesFile pointed at another file since the base", { excludeRulesNow: JSON.stringify({ "/r/.git/info/exclude": "e1", "/elsewhere/ignore": "absent" }) }, []],
+  ["the ignore-rule files cannot be read now", { excludeRulesNow: null }, []],
   ["a base with no start time", { runs: [run({ startedAt: null })] }, []],
   ["an unkeyed dirty run inside the base's window", { runs: [run({ startedAt: "2026-10-27T10:00:00.000Z" }), run({ mode: "dirty", treeKey: null, finishedAt: "2026-10-27T10:01:00.000Z" })] }, []],
   ["a cancelled run inside the base's window", { runs: [run({ startedAt: "2026-10-27T10:00:00.000Z" }), run({ mode: "dirty", status: "cancelled", finishedAt: "2026-10-27T10:01:00.000Z" })] }, []],
@@ -200,6 +210,46 @@ test("subdirectory repo: status entries, the dirty set and the diff are repoPath
     assert.deepEqual(entries.map((e) => `${e.code} ${e.path}${e.origPath ? `<-${e.origPath}` : ""}`).sort(), ["1 in.ts", "1 moved.ts"]);
     git("commit", "-q", "-am", "two");
     assert.deepEqual(diffNameStatusSince(sub, first)?.map((e) => `${e.status} ${e.path}`).sort(), ["D moved.ts", "M in.ts"]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("ignore rules: an unchanged fingerprint stays git-scoped, and the mtime is not consulted", () => {
+  // The fast path: a touched-but-unchanged exclude file (mtime after the base) no longer walks once the base has a fingerprint.
+  const plan = planGitScopedIncremental(inputs({ excludeRulesChangedSince: () => ".git/info/exclude" }));
+  assert.equal(plan.kind, "scoped");
+});
+
+test("ignore rules: a changed fingerprint walks, naming the file", () => {
+  const plan = planGitScopedIncremental(inputs({ excludeRulesNow: rules("absent") }));
+  assert.equal(plan.kind === "walk" ? plan.reason : "", "/r/.git/info/exclude changed since the last complete run: it can change which files are indexed");
+});
+
+test("excludeRulesFingerprint over a real repo: deleted, rewritten with the mtime set back, unchanged", () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "g2-excl-fp-"));
+  try {
+    execFileSync("git", ["init", "-q"], { cwd: dir });
+    const exclude = path.join(dir, ".git", "info", "exclude");
+    mkdirSync(path.dirname(exclude), { recursive: true });
+    writeFileSync(exclude, "aaaa/\n");
+    const old = new Date(Date.now() - 3_600_000);
+    utimesSync(exclude, old, old);
+    const base = excludeRulesFingerprint(dir);
+    assert.ok(base);
+    assert.equal(excludeRulesDiffer(base, excludeRulesFingerprint(dir)), null, "unchanged");
+    // Same length, same mtime: only the bytes say it changed.
+    writeFileSync(exclude, "bbbb/\n");
+    utimesSync(exclude, old, old);
+    assert.match(excludeRulesDiffer(base, excludeRulesFingerprint(dir)) ?? "", /\.git\/info\/exclude$/, "rewritten, mtime set back");
+    assert.equal(excludeRulesChangedSince(dir, Date.now() - 60_000), null, "the mtime check misses it");
+    rmSync(exclude);
+    const gone = excludeRulesFingerprint(dir);
+    assert.match(gone ?? "", /"absent"/);
+    assert.match(excludeRulesDiffer(base, gone) ?? "", /\.git\/info\/exclude$/, "deleted");
+    assert.equal(excludeRulesChangedSince(dir, Date.now() - 60_000), null, "the mtime check misses it");
+    assert.equal(excludeRulesDiffer(base, null), "unknown");
+    assert.equal(excludeRulesDiffer("not json", gone), "unknown");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

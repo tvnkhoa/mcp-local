@@ -531,6 +531,8 @@ export function runGraphMigrations(db: Database.Database, vectorEnabled: boolean
     ensureRunColumn("tree_dirty");
     // MCP-ISSUE-101: the working tree a run covered (HEAD + content hash of each dirty file), shared by every process.
     ensureRunColumnText("tree_key");
+    // MCP-ISSUE-106: the ignore-rule files outside the tree as a full / incremental run found them at its start.
+    ensureRunColumnText("exclude_rules");
 
     // Add commit_sha for staleness detection.
     if (!runCols.some((c) => c.name === "commit_sha")) {

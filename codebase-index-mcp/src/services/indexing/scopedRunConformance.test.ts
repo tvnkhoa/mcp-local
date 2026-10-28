@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -542,6 +542,65 @@ test("G1: a .gitignore change walks the tree, and lands as a full run does", asy
     commitAll(root, "ignore doomed");
   });
   assert.match(scope, /tree walk: \.gitignore changed/, scope);
+});
+
+// The ignore-rule files outside the tree are compared by content with what the base recorded at its start. In each
+// case `before` writes the exclude file and runs a second full run, which records the fingerprint the plan compares.
+const HIDDEN = { "src/hidden.ts": 'import { helper } from "./util";\n\nexport function hidden(): number {\n  return helper();\n}\n' };
+const excludeOf = (root: string): string => path.join(root, ".git", "info", "exclude");
+
+test("G1: .git/info/exclude deleted since the base walks the tree, and lands as a full run does", async () => {
+  const scope = await assertIncrementalAfterMoveEqualsFull(
+    "exclude-deleted",
+    (root) => {
+      rmSync(excludeOf(root));
+      git(root, "commit", "-q", "--allow-empty", "-m", "noop");
+    },
+    async (root, dbPath) => {
+      writeTree(root, HIDDEN);
+      writeFileSync(excludeOf(root), "src/hidden.ts\n");
+      await index(dbPath, "r", root, "full");
+    }
+  );
+  assert.match(scope, /tree walk: .*\.git\/info\/exclude changed since the last complete run/, scope);
+});
+
+test("G1: .git/info/exclude rewritten with its mtime set back walks the tree, and lands as a full run does", async () => {
+  // The dangerous direction: a rule hides an untracked file the index holds. It leaves the dirty set, so only the
+  // fingerprint can say the visible set shrank; the mtime is set to before the base started.
+  const scope = await assertIncrementalAfterMoveEqualsFull(
+    "exclude-rewritten",
+    (root) => {
+      writeFileSync(excludeOf(root), "src/hidden.ts\n");
+      const old = new Date(Date.now() - 3_600_000);
+      utimesSync(excludeOf(root), old, old);
+      git(root, "commit", "-q", "--allow-empty", "-m", "noop");
+    },
+    async (root, dbPath) => {
+      writeTree(root, HIDDEN);
+      writeFileSync(excludeOf(root), "# none\n");
+      await index(dbPath, "r", root, "full");
+      markLatestTreeKey(dbPath, ["src/hidden.ts"]); // indexed while untracked, as the server's wrapper records it
+    }
+  );
+  assert.match(scope, /tree walk: .*\.git\/info\/exclude changed since the last complete run/, scope);
+});
+
+test("G1: .git/info/exclude touched but unchanged since the base stays git-scoped", async () => {
+  const scope = await assertIncrementalAfterMoveEqualsFull(
+    "exclude-unchanged",
+    (root) => {
+      const now = new Date();
+      utimesSync(excludeOf(root), now, now);
+      git(root, "commit", "-q", "--allow-empty", "-m", "noop");
+    },
+    async (root, dbPath) => {
+      writeTree(root, HIDDEN);
+      writeFileSync(excludeOf(root), "src/hidden.ts\n");
+      await index(dbPath, "r", root, "full");
+    }
+  );
+  assert.match(scope, /git-scoped from [0-9a-f]{12}: 0 path\(s\)/, scope);
 });
 
 test("G1: an untracked new file after a commit is git-scoped and lands as a full run does", async () => {
