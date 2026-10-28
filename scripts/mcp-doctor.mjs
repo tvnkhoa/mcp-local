@@ -365,7 +365,7 @@ async function checkServer(server, agents) {
     if (status !== "pass") fix.push(`node scripts/serve-http.mjs --server ${server.key}   # or: schtasks /Run /TN "mcp-local\\${server.key}-http"`);
   }
 
-  // V-A: which deploy copy the served process runs (HEAD, dirty flag, content hash — recomputed, a
+  // V-A: which deploy copy the served process runs (HEAD, dirty flag, copy integrity hash — recomputed, a
   // mismatch fails), and whether a newer one waits for --restart.
   if (instances.some(isHttp)) {
     const [status, msg] = deployCheck(currentDeploy(server), runningDeploy(server));

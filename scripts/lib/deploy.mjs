@@ -1,5 +1,5 @@
 // Helpers for the V-A deploy copy (`serve-http.mjs`): what must be copied rather than junctioned, which
-// supervisor files go with it, and the content hash that proves what a deploy holds.
+// supervisor files go with it, the copy integrity hash, and removing a deploy without breaking a live one.
 //
 // Builtins only, and no import from the manifest: the copied supervisor loads this file from the deploy.
 
@@ -10,7 +10,8 @@ import path from "node:path";
 /** A file the OS maps into the process (LoadLibrary/dlopen) and so keeps locked while it runs. */
 const NATIVE_FILE = /\.(node|dll|so|dylib)$/i;
 
-function hasNativeFile(dir, depth) {
+/** True when the package at `dir` holds a native file, itself or in any package of its nested node_modules. */
+function hasNativeFile(dir, depth, maxDepth = depth) {
   let entries;
   try {
     entries = fs.readdirSync(dir, { withFileTypes: true });
@@ -19,7 +20,12 @@ function hasNativeFile(dir, depth) {
   }
   for (const e of entries) {
     if (e.isFile() && NATIVE_FILE.test(e.name)) return true;
-    if (e.isDirectory() && e.name !== "node_modules" && depth > 0 && hasNativeFile(path.join(dir, e.name), depth - 1)) return true;
+    if (!e.isDirectory()) continue;
+    const sub = path.join(dir, e.name);
+    // A nested node_modules restarts the depth: each package in it is scanned like a top-level one.
+    if (e.name === "node_modules") {
+      if (Object.values(packagesIn(sub)).some((p) => hasNativeFile(p, maxDepth))) return true;
+    } else if (depth > 0 && hasNativeFile(sub, depth - 1, maxDepth)) return true;
   }
   return false;
 }
@@ -50,8 +56,8 @@ function dependencyNames(dir) {
 }
 
 /**
- * The packages of one node_modules that a deploy must COPY: each one holding a native binary, plus each
- * package that depends on one of those (a junctioned loader resolves from its real path, so it would
+ * The packages of one node_modules that a deploy must COPY: each one holding a native binary (itself or in
+ * a nested node_modules, which `copyPackage` then builds the same way), plus each package that depends on one of those (a junctioned loader resolves from its real path, so it would
  * load the tree's binary — sqlite-vec -> sqlite-vec-windows-x64). Sorted.
  */
 export function nativePackages(nodeModules, { depth = 4 } = {}) {
@@ -69,11 +75,15 @@ export function nativePackages(nodeModules, { depth = 4 } = {}) {
   return [...copied].sort();
 }
 
-/** Copy one package's own files (through a junction, if it is one); its nested node_modules is linked. */
+/**
+ * Copy one package's own files (through a junction, if it is one). Its nested node_modules is built like
+ * a top-level one: a native package in it (and each that depends on one) copied, the rest junctions.
+ */
 export function copyPackage(src, dest, { linkEntries }) {
   const real = fs.realpathSync(src);
   fs.cpSync(real, dest, { recursive: true, filter: (p) => p === real || path.basename(p) !== "node_modules" });
-  if (fs.existsSync(path.join(real, "node_modules"))) linkEntries(path.join(real, "node_modules"), path.join(dest, "node_modules"));
+  const nested = path.join(real, "node_modules");
+  if (fs.existsSync(nested)) linkEntries(nested, path.join(dest, "node_modules"), { override: copyOverrides(nativePackages(nested), { linkEntries }) });
 }
 
 /**
@@ -124,7 +134,7 @@ function walkFiles(dir, rel, out, skip) {
 export const DEPLOY_RECORD = "deploy.json";
 
 /**
- * sha256 over every copied file of a deploy — its path and its bytes, in path order — leaving out each
+ * The copy integrity hash: sha256 over every copied file of a deploy (dist, scripts, root markers) — its path and its bytes, in path order — leaving out each
  * node_modules (junctions and native copies, which `npm install` changes, not a build) and the record.
  */
 export function deployHash(dir) {
@@ -152,4 +162,9 @@ export function staleBuilds(root, dirs) {
     const dist = newestMtime(path.join(root, d, "dist"));
     return src !== null && dist !== null && src > dist;
   });
+}
+
+/** Every native file of a deploy reachable without crossing a junction (the copied packages' binaries). */
+export function nativeFiles(dir) {
+  return walkFiles(dir, "", [], () => false).filter((r) => NATIVE_FILE.test(r));
 }

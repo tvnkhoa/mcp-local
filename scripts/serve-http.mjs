@@ -42,7 +42,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { WORKSPACE_ROOT, serverEntryPath } from "./lib/manifest.mjs";
 import { parseArgs, resolveServers } from "./lib/cli.mjs";
-import { DEPLOY_RECORD, copyOverrides, deployHash, importClosure, nativePackages, staleBuilds } from "./lib/deploy.mjs";
+import { DEPLOY_RECORD, copyOverrides, deployHash, importClosure, nativeFiles, nativePackages, staleBuilds } from "./lib/deploy.mjs";
 import { linkDir, linkEntries, removeTree } from "./lib/junctions.mjs";
 import { err, info, ok } from "./lib/log.mjs";
 
@@ -262,9 +262,48 @@ function psNumber(exec, script) {
   return Number.isFinite(n) && n > 0 ? n : null;
 }
 
-function isServeHttp(exec, pid) {
-  const cmd = exec("powershell", ["-NoProfile", "-NonInteractive", "-Command", `(Get-CimInstance Win32_Process -Filter "ProcessId=${pid}").CommandLine`]);
-  return /serve-http\.mjs/i.test(cmd);
+/** `{ pid, parent, cmd, created }` (created in epoch ms) for one process, or null when it is gone. */
+function processInfo(exec, pid) {
+  const script = `Get-CimInstance Win32_Process -Filter "ProcessId=${pid}" | ForEach-Object { [pscustomobject]@{ parent = $_.ParentProcessId; cmd = $_.CommandLine; created = [DateTimeOffset]::new($_.CreationDate).ToUnixTimeMilliseconds() } } | ConvertTo-Json -Compress`;
+  const out = exec("powershell", ["-NoProfile", "-NonInteractive", "-Command", script]).trim();
+  if (!out) return null;
+  try {
+    const p = JSON.parse(out);
+    return { pid, parent: Number(p.parent) || null, cmd: typeof p.cmd === "string" ? p.cmd : "", created: Number(p.created) || null };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * A node process running serve-http.mjs for exactly this server: node is the program, serve-http.mjs its
+ * script and `--server <key>` follows. The task's `conhost --headless node ...` names the same words, so
+ * the program must be node — conhost is not the hand-off.
+ */
+export function isServeHttpFor(cmd, server) {
+  const words = ((cmd ?? "").match(/"[^"]*"|\S+/g) ?? []).map((w) => w.replace(/^"|"$/g, ""));
+  const i = words.indexOf("--server");
+  return /(^|[\\/])node(\.exe)?$/i.test(words[0] ?? "") && /(^|[\\/])serve-http\.mjs$/i.test(words[1] ?? "") && i >= 0 && words[i + 1] === server.key;
+}
+
+/**
+ * The pid `--restart` kills with `taskkill /T`: the listener's parent when it is this server's serve-http
+ * supervisor, or that one's parent in turn when it is this server's hand-off serve-http and older than
+ * it. Throws when the parent is not this server's serve-http, so an unrelated app holding the port is
+ * never killed.
+ */
+export function restartTarget(server, port, oldPid, { exec = defaultExec } = {}) {
+  const listener = processInfo(exec, oldPid);
+  const parent = listener?.parent ? processInfo(exec, listener.parent) : null;
+  if (!parent || parent.pid === process.pid || !isServeHttpFor(parent.cmd, server)) {
+    throw new Error(
+      `${server.key}: port ${port} is held by pid ${oldPid}, whose parent (${parent ? `pid ${parent.pid}: ${parent.cmd || "no command line"}` : "none"}) is not serve-http.mjs --server ${server.key} — not killing it. Stop it yourself, or free the port.`
+    );
+  }
+  const grand = parent.parent ? processInfo(exec, parent.parent) : null;
+  // A pid is reused: a grandparent created after the supervisor is not the process that started it.
+  const older = grand?.created != null && parent.created != null && grand.created <= parent.created;
+  return older && grand.pid !== process.pid && isServeHttpFor(grand.cmd, server) ? grand.pid : parent.pid;
 }
 
 function listenerOn(exec, port) {
@@ -273,8 +312,7 @@ function listenerOn(exec, port) {
 
 /**
  * `--restart`: `schtasks /End` does not stop the supervisor, so stop the tree that owns the port instead:
- * the listener's parent (the serve-http supervisor; the listener itself when it has none) — or its parent
- * in turn when that is the tree's hand-off serve-http — with `taskkill /T`,
+ * `restartTarget` (this server's serve-http supervisor, or the hand-off above it; anything else refuses) with `taskkill /T`,
  * then `schtasks /Run` and wait for a NEW listener, one with another pid whose start time is after the
  * restart began. Every command goes through `exec(cmd, argsArray)`, so the test stubs the machine.
  * Resolves `{ oldPid, newPid }`.
@@ -282,13 +320,9 @@ function listenerOn(exec, port) {
 export async function restartServer(server, port, { exec = defaultExec, sleep = defaultSleep, now = Date.now, timeoutMs = 60000 } = {}) {
   const oldPid = listenerOn(exec, port);
   if (oldPid !== null) {
-    const parentOf = (pid) => psNumber(exec, `(Get-CimInstance Win32_Process -Filter "ProcessId=${pid}").ParentProcessId`);
-    const parent = parentOf(oldPid);
-    let target = parent !== null && parent !== process.pid ? parent : oldPid;
-    // The deploy's supervisor runs under the tree's hand-off copy: kill from there, so the task instance
-    // has ended before /Run (MultipleInstancesPolicy IgnoreNew drops a /Run while it lives).
-    const grand = target === parent ? parentOf(parent) : null;
-    if (grand !== null && grand !== process.pid && isServeHttp(exec, grand)) target = grand;
+    // From the hand-off serve-http when there is one, so the task instance has ended before /Run
+    // (MultipleInstancesPolicy IgnoreNew drops a /Run while it lives).
+    const target = restartTarget(server, port, oldPid, { exec });
     exec("taskkill", ["/T", "/F", "/PID", String(target)]);
     for (let i = 0; i < 50 && listenerOn(exec, port) !== null; i++) await sleep(200);
   }
@@ -432,7 +466,7 @@ export function runningDeploy(server, { deployRoot = defaultDeployRoot() } = {})
  * source path), `stale` (dirs whose src/ is newer than their dist/) and `hash` (`deployHash`, which
  * doctor recomputes). Marks the deploy current, then prunes. Returns the record.
  */
-export function deployServer(server, { workspaceRoot = WORKSPACE_ROOT, deployRoot = defaultDeployRoot(), head = gitHead(workspaceRoot), sha = head?.slice(0, 12) ?? "nogit", scriptsDir = path.dirname(SCRIPT), now = () => new Date() } = {}) {
+export function deployServer(server, { workspaceRoot = WORKSPACE_ROOT, deployRoot = defaultDeployRoot(), head = gitHead(workspaceRoot), sha = head?.slice(0, 12) ?? "nogit", scriptsDir = path.dirname(SCRIPT), now = () => new Date(), inUse = deployInUse } = {}) {
   const srcServer = path.join(workspaceRoot, server.dir);
   const pkgJson = JSON.parse(fs.readFileSync(path.join(srcServer, "package.json"), "utf-8"));
   const packages = workspacePackages(workspaceRoot);
@@ -506,22 +540,50 @@ export function deployServer(server, { workspaceRoot = WORKSPACE_ROOT, deployRoo
   };
   writeJsonAtomic(path.join(dir, DEPLOY_RECORD), record);
   writeJsonAtomic(path.join(keyDir, "current.json"), record);
-  return { ...record, pruned: pruneDeploys(server, { deployRoot }) };
+  return { ...record, pruned: pruneDeploys(server, { deployRoot, inUse }) };
 }
 
 /**
- * Keep the newest `keep` deploys; delete the rest with `removeTree`, which unlinks every junction and
- * never walks into it. The current deploy and the running one are never removed, and a deploy still
- * locked by a live process (Windows) is left for the next prune. Returns the dirs removed.
+ * True when a live process names `dir` on its command line — the deploy's server and supervisor both do.
+ * Windows only; elsewhere nothing maps a deploy's binaries in a way that breaks on delete.
  */
-export function pruneDeploys(server, { deployRoot = defaultDeployRoot(), keep = DEPLOYS_KEPT } = {}) {
+export function deployInUse(dir, { exec = defaultExec, platform = process.platform } = {}) {
+  if (platform !== "win32") return false;
+  // With the separator, so <sha>-1 never matches <sha>-10; PowerShell's own command line holds the needle too.
+  const needle = `${path.resolve(dir)}${path.sep}`.toLowerCase().replace(/'/g, "''");
+  const script = `@(Get-CimInstance Win32_Process | Where-Object { $_.ProcessId -ne $PID -and $_.CommandLine -and $_.CommandLine.ToLower().Contains('${needle}') }).Count`;
+  return Number(exec("powershell", ["-NoProfile", "-NonInteractive", "-Command", script]).trim()) > 0;
+}
+
+/**
+ * Delete one deploy without breaking a process that still runs it. Its native files go first: a mapped
+ * .node/.dll refuses deletion (EPERM) and throws here, before any JS is touched — renaming the dir is no
+ * guard, Windows allows it while a file in it is mapped (measured). Then `removeTree`, link by link.
+ */
+export function removeDeploy(dir) {
+  for (const rel of nativeFiles(dir)) fs.rmSync(path.join(dir, ...rel.split("/")));
+  removeTree(dir);
+}
+
+/**
+ * Keep the newest `keep` deploys; delete the rest with `removeDeploy`, which unlinks every junction and
+ * never walks into it. The current deploy and the running one are never removed; nor is one a live
+ * process names on its command line (`running.json` is overwritten by any supervisor start, so it can
+ * name the wrong one), nor one whose native file is still mapped — each is left for the next prune.
+ * Returns the dirs removed.
+ */
+export function pruneDeploys(server, { deployRoot = defaultDeployRoot(), keep = DEPLOYS_KEPT, inUse = deployInUse } = {}) {
   const keyDir = path.join(deployRoot, server.key);
   const spared = new Set([runningDeploy(server, { deployRoot })?.dir, currentDeploy(server, { deployRoot })?.dir]);
   const removed = [];
   for (const d of listDeploys(keyDir).slice(keep)) {
     if (spared.has(d.dir)) continue;
     try {
-      removeTree(d.dir);
+      if (inUse(d.dir)) {
+        info(`${server.key}: old deploy ${d.dir} is still in use; the next deploy retries`);
+        continue;
+      }
+      removeDeploy(d.dir);
       removed.push(d.dir);
     } catch (e) {
       err(`${server.key}: could not remove old deploy ${d.dir} (${e.code ?? e.message}); the next deploy retries`);
@@ -575,7 +637,7 @@ export function deployCheck(current, running, { verify = verifyDeploy } = {}) {
   const what = `${ran} runs ${running.sha} (${head}, ${dirty}, ${hash}) from ${running.dir}`;
   if (v?.recorded && !v.ok) return ["fail", `${what}; the copy now hashes ${v.actual.slice(0, 12)} — it changed after the deploy`];
   const warns = [];
-  if (!v?.recorded) warns.push("the deploy records no content hash (made before deploy isolation)");
+  if (!v?.recorded) warns.push("the deploy records no copy integrity hash (made before deploy isolation)");
   if (rec.dirty === true) warns.push("deployed with uncommitted changes, so HEAD does not say what it runs");
   if (rec.stale?.length) warns.push(`deployed from a stale build of ${rec.stale.join(", ")} (src newer than dist)`);
   if (!running.supervisor) warns.push("the supervisor runs from the working tree");
@@ -595,12 +657,20 @@ function handOff(deploy) {
   child.on("exit", (code) => process.exit(code ?? 1));
 }
 
+/**
+ * The deploy a tree-run supervisor hands off to: the current one, when it carries a supervisor copy that
+ * exists. Null when this already runs from a deploy, or there is none to hand to (it then serves itself).
+ */
+export function handOffTarget(server, { deployRoot = defaultDeployRoot(), own = ownDeploy() } = {}) {
+  if (own) return null;
+  const current = currentDeploy(server, { deployRoot });
+  return current?.supervisor && fs.existsSync(current.supervisor) ? current : null;
+}
+
 function serve(server, envFile, logFile, deployRoot) {
   const own = ownDeploy();
-  if (!own) {
-    const current = currentDeploy(server, { deployRoot });
-    if (current?.supervisor && fs.existsSync(current.supervisor)) return handOff(current);
-  }
+  const target = handOffTarget(server, { deployRoot, own });
+  if (target) return handOff(target);
   const names = httpEnvNames(server);
   const env = readEnvFile(envFile);
   if (env === null) {

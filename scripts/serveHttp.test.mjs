@@ -9,7 +9,7 @@
  */
 
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -19,7 +19,7 @@ import { fileURLToPath } from "node:url";
 import { getServer } from "./lib/manifest.mjs";
 import { deployHash, importClosure, nativePackages } from "./lib/deploy.mjs";
 import { isLink, removeTree } from "./lib/junctions.mjs";
-import { approvalSecretEnvName, approvalSecretFile, deployCheck, deployServer, ensureApprovalSecret, httpClientEntry, httpEnvNames, listDeploys, ownDeploy, parseListenerPid, readEnvFile, resolveServeEntry, restartServer, taskCreateArgs, taskDeniedHint, taskXml, verifyDeploy, writeEnvFile } from "./serve-http.mjs";
+import { approvalSecretEnvName, approvalSecretFile, deployCheck, deployServer, ensureApprovalSecret, handOffTarget, httpClientEntry, httpEnvNames, isServeHttpFor, listDeploys, ownDeploy, parseListenerPid, pruneDeploys, readEnvFile, resolveServeEntry, restartServer, taskCreateArgs, taskDeniedHint, taskXml, verifyDeploy, writeEnvFile } from "./serve-http.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), "serve-http-test-"));
@@ -198,39 +198,103 @@ test("parseListenerPid picks the LISTENING pid for exactly that port", () => {
   assert.equal(parseListenerPid(NETSTAT(111), 734), null);
 });
 
+const SUP = (key) => `"C:\\Program Files\\nodejs\\node.exe" D:\\ws\\scripts\\serve-http.mjs --server ${key} --config C:\\e.json`;
+
+/**
+ * A stubbed machine for `restartServer`: `procs` maps pid -> { parent, cmd, created }; the listener moves
+ * from `listener` to `next` once taskkill and then schtasks run. Every call is recorded in `calls`.
+ */
+function fakeMachine(procs, { listener = 111, next = 222, start = 5000 } = {}) {
+  const state = { listener, calls: [] };
+  state.exec = (cmd, args) => {
+    state.calls.push([cmd, ...args]);
+    const a = args.join(" ");
+    if (cmd === "netstat") return NETSTAT(state.listener ?? 0).replace(/LISTENING\s+0/, "TIME_WAIT      0");
+    if (cmd === "taskkill") { state.listener = null; return ""; }
+    if (cmd === "schtasks") { state.listener = next; return ""; }
+    if (a.includes("ConvertTo-Json")) {
+      const p = procs[a.match(/ProcessId=(\d+)/)[1]];
+      return p ? JSON.stringify(p) : "";
+    }
+    return `${start}\r\n`; // a start time
+  };
+  return state;
+}
+
 test("--restart kills the supervisor tree, runs the task and returns old -> new pid", async () => {
   const server = getServer("codebase-index");
-  const calls = [];
-  let listener = 111;
+  const m = fakeMachine({ 111: { parent: 50, cmd: "node index.js", created: 3 }, 50: { parent: 7, cmd: SUP("codebase-index"), created: 2 }, 7: { parent: 1, cmd: "explorer.exe", created: 1 } });
   let clock = 1000;
-  const exec = (cmd, args) => {
-    calls.push([cmd, ...args]);
-    if (cmd === "netstat") return NETSTAT(listener ?? 0).replace(/LISTENING\s+0/, "TIME_WAIT      0");
-    if (cmd === "taskkill") { listener = null; return ""; }
-    if (cmd === "schtasks") { listener = 222; return ""; }
-    if (args.join(" ").includes("ParentProcessId")) return "50\r\n";
-    return "5000\r\n"; // start time, after `startedAt`
-  };
-  const out = await restartServer(server, 7341, { exec, sleep: async () => { clock += 10; }, now: () => clock });
+  const out = await restartServer(server, 7341, { exec: m.exec, sleep: async () => { clock += 10; }, now: () => clock });
   assert.deepEqual(out, { oldPid: 111, newPid: 222 });
-  assert.deepEqual(calls.find((c) => c[0] === "taskkill"), ["taskkill", "/T", "/F", "/PID", "50"]);
-  const run = calls.find((c) => c[0] === "schtasks");
-  assert.deepEqual(run, ["schtasks", "/Run", "/TN", "mcp-local\\codebase-index-http"]);
-  assert.ok(calls.findIndex((c) => c[0] === "taskkill") < calls.findIndex((c) => c[0] === "schtasks"));
+  assert.deepEqual(m.calls.find((c) => c[0] === "taskkill"), ["taskkill", "/T", "/F", "/PID", "50"]);
+  assert.deepEqual(m.calls.find((c) => c[0] === "schtasks"), ["schtasks", "/Run", "/TN", "mcp-local\\codebase-index-http"]);
+  assert.ok(m.calls.findIndex((c) => c[0] === "taskkill") < m.calls.findIndex((c) => c[0] === "schtasks"));
 });
 
 test("--restart does not accept the old pid or a stale start time as the new listener", async () => {
   const server = getServer("codebase-index");
+  const m = fakeMachine({ 333: { parent: 50, cmd: "node index.js", created: 3 }, 50: { parent: 0, cmd: SUP("codebase-index"), created: 2 } }, { listener: 333, next: 333, start: 10 });
+  m.exec = ((inner) => (cmd, args) => (cmd === "taskkill" ? "" : inner(cmd, args)))(m.exec); // the port never frees
   let clock = 1000;
-  const exec = (cmd, args) => {
-    if (cmd === "netstat") return NETSTAT(333);
-    if (cmd === "powershell") return args.join(" ").includes("ParentProcessId") ? "0" : "10"; // started before the restart
-    return "";
-  };
   await assert.rejects(
-    restartServer(server, 7341, { exec, sleep: async () => { clock += 100; }, now: () => clock, timeoutMs: 1000 }),
+    restartServer(server, 7341, { exec: m.exec, sleep: async () => { clock += 100; }, now: () => clock, timeoutMs: 1000 }),
     /no new listener on port 7341/
   );
+});
+
+test("--restart kills from the hand-off serve-http when the supervisor runs under one", async () => {
+  const server = getServer("codebase-index");
+  const m = fakeMachine({
+    111: { parent: 50, cmd: "node index.js", created: 30 },
+    50: { parent: 40, cmd: SUP("codebase-index").replace("D:\\ws\\scripts", "C:\\deploy\\codebase-index\\abc-1\\scripts"), created: 20 },
+    40: { parent: 30, cmd: SUP("codebase-index"), created: 10 },
+    30: { parent: 1, cmd: "conhost.exe --headless", created: 5 }
+  });
+  let clock = 1000;
+  const out = await restartServer(server, 7341, { exec: m.exec, sleep: async () => { clock += 10; }, now: () => clock });
+  assert.deepEqual(out, { oldPid: 111, newPid: 222 });
+  assert.deepEqual(m.calls.find((c) => c[0] === "taskkill"), ["taskkill", "/T", "/F", "/PID", "40"]);
+});
+
+test("--restart refuses, and kills nothing, unless the listener's parent is this server's serve-http", async () => {
+  const server = getServer("codebase-index");
+  const listener = { parent: 50, cmd: "app.exe", created: 30 };
+  const cases = [
+    ["an unrelated parent", { 111: listener, 50: { parent: 1, cmd: "C:\\Program Files\\App\\launcher.exe", created: 20 } }],
+    ["serve-http for another server", { 111: listener, 50: { parent: 1, cmd: SUP("observe-mcp"), created: 20 } }],
+    ["a key that only starts the same", { 111: listener, 50: { parent: 1, cmd: SUP("codebase-index-old"), created: 20 } }],
+    ["no parent at all", { 111: { ...listener, parent: 0 } }]
+  ];
+  for (const [what, procs] of cases) {
+    const m = fakeMachine(procs);
+    await assert.rejects(restartServer(server, 7341, { exec: m.exec, sleep: async () => {} }), /not serve-http\.mjs --server codebase-index — not killing it/, what);
+    assert.ok(!m.calls.some((c) => c[0] === "taskkill" || c[0] === "schtasks"), `${what}: nothing killed, nothing run`);
+  }
+});
+
+test("--restart stops at the supervisor when the hand-off above it is another server's, or younger (a reused pid)", async () => {
+  const server = getServer("codebase-index");
+  const base = { 111: { parent: 50, cmd: "node index.js", created: 30 }, 50: { parent: 40, cmd: SUP("codebase-index"), created: 20 } };
+  for (const grand of [{ parent: 1, cmd: SUP("observe-mcp"), created: 10 }, { parent: 1, cmd: SUP("codebase-index"), created: 25 }, { parent: 1, cmd: "cmd.exe", created: 10 }]) {
+    const m = fakeMachine({ ...base, 40: grand });
+    let clock = 1000;
+    await restartServer(server, 7341, { exec: m.exec, sleep: async () => { clock += 10; }, now: () => clock });
+    assert.deepEqual(m.calls.find((c) => c[0] === "taskkill"), ["taskkill", "/T", "/F", "/PID", "50"], grand.cmd);
+  }
+});
+
+test("isServeHttpFor needs node running serve-http.mjs and exactly this --server key", () => {
+  const server = { key: "codebase-index" };
+  assert.ok(isServeHttpFor(SUP("codebase-index"), server));
+  // The task's conhost names the same words; measured on the live tree, it sits above the supervisor.
+  assert.ok(!isServeHttpFor(`"conhost.exe" --headless ${SUP("codebase-index")}`, server));
+  assert.ok(!isServeHttpFor(`node other.mjs D:\\ws\\scripts\\serve-http.mjs --server codebase-index`, server));
+  assert.ok(isServeHttpFor('node "C:\\a b\\scripts\\serve-http.mjs" --server "codebase-index"', server));
+  assert.ok(!isServeHttpFor(SUP("codebase-index-x"), server));
+  assert.ok(!isServeHttpFor("node not-serve-http.mjs.bak --server codebase-index", server));
+  assert.ok(!isServeHttpFor("node serve-http.mjs", server));
+  assert.ok(!isServeHttpFor(null, server));
 });
 
 /**
@@ -326,30 +390,9 @@ test("V-A: doctor's [deploy] verdict names the running copy and a deploy waiting
   assert.deepEqual(deployCheck(cur, running, { verify }), ["pass", "pid 9 runs b (HEAD bbbbbbbbbbbb, clean, hash ffffffffffff) from D/b-2"]);
   assert.match(deployCheck(cur, { ...running, dir: "D/a-1", sha: "a" }, { verify })[1], /deploy b-2 is waiting for --restart/);
   assert.match(deployCheck(cur, { ...running, supervisor: null }, { verify })[1], /supervisor runs from the working tree/);
-  assert.match(deployCheck(cur, running, { verify: () => null })[1], /records no content hash/);
+  assert.match(deployCheck(cur, running, { verify: () => null })[1], /records no copy integrity hash/);
   assert.match(deployCheck(null, { dir: null, pid: 9 })[1], /working tree's dist/);
   assert.equal(deployCheck(cur, null)[0], "warn");
-});
-
-test("--restart kills from the hand-off serve-http when the supervisor runs under one", async () => {
-  const server = getServer("codebase-index");
-  const calls = [];
-  let listener = 111;
-  let clock = 1000;
-  const parents = { 111: "50", 50: "40", 40: "30" };
-  const exec = (cmd, args) => {
-    calls.push([cmd, ...args]);
-    const a = args.join(" ");
-    if (cmd === "netstat") return NETSTAT(listener ?? 0).replace(/LISTENING\s+0/, "TIME_WAIT      0");
-    if (cmd === "taskkill") { listener = null; return ""; }
-    if (cmd === "schtasks") { listener = 222; return ""; }
-    if (a.includes("ParentProcessId")) return `${parents[a.match(/ProcessId=(\d+)/)[1]] ?? "0"}\r\n`;
-    if (a.includes("CommandLine")) return a.includes("ProcessId=40") ? '"node.exe" D:\\ws\\scripts\\serve-http.mjs --server codebase-index\r\n' : "";
-    return "5000\r\n";
-  };
-  const out = await restartServer(server, 7341, { exec, sleep: async () => { clock += 10; }, now: () => clock });
-  assert.deepEqual(out, { oldPid: 111, newPid: 222 });
-  assert.deepEqual(calls.find((c) => c[0] === "taskkill"), ["taskkill", "/T", "/F", "/PID", "40"]);
 });
 
 test("isolation: a native package and each one that loads it are copied; the rest stay junctions", () => {
@@ -462,4 +505,86 @@ test("isolation: the record proves the copy — HEAD, dirty, stale, and a hash d
   assert.match(m2, /dirty/);
   assert.match(m2, /uncommitted changes/);
   assert.match(m2, /stale build of srv/);
+});
+
+test("isolation: a nested native package is copied, and so is the package holding it; prune keeps the tree intact", () => {
+  const { root, server, deployRoot } = fakeWorkspace();
+  const write = (rel, text) => {
+    fs.mkdirSync(path.dirname(path.join(root, rel)), { recursive: true });
+    fs.writeFileSync(path.join(root, rel), text);
+  };
+  // tree-sitter-typescript/node_modules/tree-sitter-javascript ships its own win32 .node.
+  write("srv/node_modules/outer/package.json", JSON.stringify({ name: "outer" }));
+  write("srv/node_modules/outer/node_modules/innernat/package.json", JSON.stringify({ name: "innernat" }));
+  write("srv/node_modules/outer/node_modules/innernat/prebuilds/win32-x64/innernat.node", "MZ");
+  write("srv/node_modules/outer/node_modules/innerjs/index.js", "");
+  assert.deepEqual(nativePackages(path.join(root, "srv/node_modules")), ["outer"]);
+
+  const first = deployServer(server, { workspaceRoot: root, deployRoot, sha: "q1" });
+  const outer = path.join(first.dir, "srv", "node_modules", "outer");
+  assert.ok(!isLink(outer), "the package holding a native one is copied");
+  assert.ok(!isLink(path.join(outer, "node_modules")) && !isLink(path.join(outer, "node_modules", "innernat")), "the nested native package is copied");
+  assert.ok(fs.existsSync(path.join(outer, "node_modules", "innernat", "prebuilds", "win32-x64", "innernat.node")));
+  assert.ok(isLink(path.join(outer, "node_modules", "innerjs")), "a nested plain package stays a junction");
+
+  deployServer(server, { workspaceRoot: root, deployRoot, sha: "q2" });
+  const third = deployServer(server, { workspaceRoot: root, deployRoot, sha: "q3", inUse: () => false });
+  assert.deepEqual(third.pruned, [first.dir]);
+  for (const rel of ["srv/node_modules/outer/node_modules/innerjs/index.js", "srv/node_modules/outer/node_modules/innernat/prebuilds/win32-x64/innernat.node", "srv/node_modules/localdep/index.js"]) {
+    assert.ok(fs.existsSync(path.join(root, rel)), `${rel} survived the prune`);
+  }
+});
+
+test("prune skips a deploy a live process still names, and leaves it whole", () => {
+  const { root, server, deployRoot } = fakeWorkspace();
+  const first = deployServer(server, { workspaceRoot: root, deployRoot, sha: "u1" });
+  deployServer(server, { workspaceRoot: root, deployRoot, sha: "u2" });
+  const asked = [];
+  const third = deployServer(server, { workspaceRoot: root, deployRoot, sha: "u3", inUse: (dir) => (asked.push(dir), dir === first.dir) });
+  assert.deepEqual(asked, [first.dir]);
+  assert.deepEqual(third.pruned, []);
+  assert.ok(fs.existsSync(path.join(first.dir, "srv", "dist", "index.js")), "the in-use deploy keeps its JS");
+  assert.equal(pruneDeploys(server, { deployRoot, inUse: () => false }).length, 1, "the next prune removes it once free");
+});
+
+// A real mapped binary: Windows refuses to delete it (EPERM), so the deploy must lose nothing.
+const REAL_NATIVE = path.join(ROOT, "codebase-index-mcp", "node_modules", "better-sqlite3", "build", "Release", "better_sqlite3.node");
+test("prune of a deploy whose native file is mapped leaves the deploy intact", { skip: process.platform !== "win32" || !fs.existsSync(REAL_NATIVE) }, async () => {
+  const { root, server, deployRoot } = fakeWorkspace();
+  fs.mkdirSync(path.join(root, "srv/node_modules/nat/build/Release"), { recursive: true });
+  fs.writeFileSync(path.join(root, "srv/node_modules/nat/package.json"), JSON.stringify({ name: "nat" }));
+  fs.copyFileSync(REAL_NATIVE, path.join(root, "srv/node_modules/nat/build/Release/nat.node"));
+  const first = deployServer(server, { workspaceRoot: root, deployRoot, sha: "m1" });
+  const mapped = path.join(first.dir, "srv", "node_modules", "nat", "build", "Release", "nat.node");
+  const child = spawn(process.execPath, ["-e", `process.dlopen({ exports: {} }, ${JSON.stringify(mapped)}); console.log("loaded"); setInterval(() => {}, 1000)`], { stdio: ["ignore", "pipe", "inherit"] });
+  try {
+    await new Promise((resolve, reject) => {
+      child.stdout.once("data", resolve);
+      child.once("exit", (code) => reject(new Error(`the loader exited ${code}`)));
+    });
+    deployServer(server, { workspaceRoot: root, deployRoot, sha: "m2" });
+    // inUse says free (running.json lied): the mapped binary itself must stop the delete.
+    const third = deployServer(server, { workspaceRoot: root, deployRoot, sha: "m3", inUse: () => false });
+    assert.deepEqual(third.pruned, []);
+    for (const rel of ["srv/dist/index.js", "srv/package.json", "packages/core/dist/index.js", "srv/node_modules/nat/build/Release/nat.node", "deploy.json"]) {
+      assert.ok(fs.existsSync(path.join(first.dir, rel)), `${rel} is still in the deploy`);
+    }
+  } finally {
+    child.kill();
+    await new Promise((resolve) => (child.exitCode !== null ? resolve() : child.once("exit", resolve)));
+  }
+  assert.equal(pruneDeploys(server, { deployRoot, inUse: () => false }).length, 1, "removed once unmapped");
+});
+
+test("hand-off: only to a current deploy whose supervisor copy exists, and never from a deploy", () => {
+  const { root, server, deployRoot } = fakeWorkspace();
+  assert.equal(handOffTarget(server, { deployRoot, own: null }), null, "no deploy yet: serve from here");
+  const d = deployServer(server, { workspaceRoot: root, deployRoot, sha: "h1" });
+  assert.equal(handOffTarget(server, { deployRoot, own: null })?.dir, d.dir);
+  assert.equal(handOffTarget(server, { deployRoot, own: d }), null, "a deploy's own supervisor serves");
+  fs.rmSync(d.supervisor);
+  assert.equal(handOffTarget(server, { deployRoot, own: null }), null, "a missing supervisor copy: serve from here");
+  const cur = path.join(deployRoot, "srv", "current.json");
+  fs.writeFileSync(cur, JSON.stringify({ ...JSON.parse(fs.readFileSync(cur, "utf-8")), supervisor: null }));
+  assert.equal(handOffTarget(server, { deployRoot, own: null }), null, "a deploy made before the supervisor copy: serve from here");
 });
