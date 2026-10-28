@@ -352,6 +352,44 @@ node scripts/install-mcp.mjs --server codebase-index --transport stdio  # back t
   link by link (a junction is unlinked, never walked). `mcp:doctor`'s `[deploy]` check names the running
   copy and its sha, and warns when a newer deploy waits for `--restart` or the process serves the tree;
   `[running]` still reports a process started from the tree's `dist/` that is older than it.
+- **Nothing in the served process tree holds a file under the working tree open**, so `npm install` /
+  `npm rebuild` in the tree no longer fail `EBUSY` while it runs. Four parts make that true:
+  - *Native code is copied.* The OS locks a loaded `.node` / `.dll`, and a junctioned one is loaded from
+    the tree's real path. A package holding one (better-sqlite3, the tree-sitter grammars,
+    sqlite-vec-windows-x64), and each package that depends on one (sqlite-vec resolves its binary from
+    its own real path), is copied into the deploy's `node_modules`; the rest stay junctions. The same
+    holds inside a copied package's nested `node_modules`, and a package whose nested `node_modules` holds a
+    native one (tree-sitter-typescript ships its own tree-sitter-javascript) is copied for that.
+  - *The supervisor is copied.* The deploy carries `scripts/serve-http.mjs` with its import closure, the
+    `@mcp/manifest` closure and the root `package.json` / `tsconfig.base.json` (the manifest's root markers,
+    so its `WORKSPACE_ROOT` is the deploy). The logon task still starts the tree's `serve-http.mjs`; it only
+    hands off — `chdir`s into the current deploy, runs that deploy's supervisor with the same arguments and
+    waits. `--restart` kills from the hand-off process down, so the task instance has ended before `/Run`;
+    it kills only a listener whose parent is `serve-http.mjs --server <this key>` (the hand-off above it
+    only when that is the same and older), and refuses with an error for anything else on the port.
+    Two limits follow from the hand-off:
+    - **No fallback when the deploy's supervisor dies.** The hand-off exits with its code; it does not
+      serve from the tree instead. The server stays down until the next logon, 08:00 or `--restart`.
+    - **A cleaned tree stops the logon start.** The tree's copy is still *read* at each start, through
+      `@mcp/manifest`: after `clean:packages` (or with `scripts/` broken) the logon task fails before it
+      reaches the hand-off, though the deploy is intact. Rebuild (`npm run build:packages`) before the next
+      logon or 08:00.
+  - *Pruning never breaks a live deploy.* An old deploy is skipped while a process names it on its command
+    line (`running.json` is overwritten by any supervisor start, so it can be wrong), and its native files
+    are deleted first, so a still-mapped binary (EPERM) stops the delete before any JS goes. Renaming the
+    dir is no guard: Windows allows it while a file in it is mapped (measured).
+  - *Every process's working directory is the deploy*, not the shell's.
+- **The deploy record proves what it holds.** `deploy.json` (and `current.json`) carry `head` (full HEAD),
+  `dirty` (uncommitted changes under any copied source path, scripts included), `stale` (dirs whose `src/`
+  is newer than their `dist/` — edited since the last build) and `hash`, the copy integrity hash (sha256
+  over dist, scripts and root markers; `node_modules` excluded). The hash proves the copy has not changed
+  since the deploy, not that its dist matches the source: the staleness signal is the src/dist mtime
+  warning. `[deploy]` prints HEAD, clean/dirty and the hash, recomputes the hash of the running copy and
+  **fails** when it no longer matches; a dirty or stale deploy, a deploy with no hash (made before this) or
+  a supervisor running from the tree warns.
+- **A trial run never touches the live one:** `--deploy-root <dir>` with a `--config` naming another port
+  deploys and serves from a scratch root (`--deploy-only`, then start without `--restart`, which would
+  `/Run` the live task).
 
 #### After the served process restarts
 
