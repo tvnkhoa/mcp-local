@@ -246,6 +246,9 @@ export async function acquireHeavyLock({
     const holder = parseHolder(raw);
     const stale = await staleReason(holder, { readStart, pidStarts });
     if (stale !== null) {
+      // Judging may have awaited a start-time read; a lock taken meanwhile must be re-judged, not moved
+      // aside — breakStale can put a moved live lock back only while no third waiter has taken the path.
+      if (readRaw(file) !== raw) continue;
       log(`heavy-check lock: breaking ${describeHolder(holder)} — ${stale}`);
       breakStale(file, raw, log);
       continue;

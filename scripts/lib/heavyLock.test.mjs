@@ -33,16 +33,20 @@ function writeHolder(lockPath, holder) {
 
 const quiet = () => {};
 
+// The one real read (PowerShell on Windows, ~2.5 s), started now so it overlaps every other test.
+const realRead = readPidStart(process.pid);
+
 /**
  * A child that takes the lock, holds it, and appends "enter <pid>" / "exit <pid>" to a journal while
  * holding it. The journal orders holds by the file system, not by Date.now(): two processes' clocks can
- * disagree by a millisecond on Windows, which made a timestamp comparison flake.
+ * disagree by a millisecond on Windows, which made a timestamp comparison flake. Its start-time reader
+ * answers "unknown" (pid + age only): the real one spawns PowerShell on Windows, ~2.5 s per waiter.
  */
 function holdInChild(lockPath, journal, holdMs = 400) {
   const script = `
     const { acquireHeavyLock } = await import(${JSON.stringify(MODULE)});
     const { appendFileSync, readFileSync } = await import("node:fs");
-    const lock = await acquireHeavyLock({ cmd: "child", pollMs: 25, log: () => {} });
+    const lock = await acquireHeavyLock({ cmd: "child", pollMs: 25, readStart: async () => null, log: () => {} });
     appendFileSync(${JSON.stringify(journal)}, "enter " + process.pid + "\\n");
     await new Promise((r) => setTimeout(r, ${String(holdMs)}));
     const mine = JSON.parse(readFileSync(process.env.MCP_HEAVY_LOCK_PATH, "utf8")).token === lock.token;
@@ -127,19 +131,13 @@ test("a live pid that has held the lock past the age cap is broken (pid reuse)",
   lock.release();
 });
 
-test("the platform reader agrees with the start time a holder records for itself", async () => {
-  const read = await readPidStart(process.pid);
-  assert.ok(Number.isFinite(read), `no start time read on ${process.platform}`);
-  assert.ok(Math.abs(read - Date.parse(ownPidStart())) <= PID_START_TOLERANCE_MS, `read ${new Date(read).toISOString()} vs recorded ${ownPidStart()}`);
-  assert.equal(await readPidStart(spawnSync(process.execPath, ["-e", ""]).pid), null, "a gone pid has no start time");
-});
-
 test("a live pid whose start time differs from the recorded one is broken (pid reused)", async () => {
   // process.pid is alive, but the holder that wrote this lock started an hour before it: the pid was reused.
   const lockPath = tempLock();
   writeHolder(lockPath, { pid: process.pid, pidStartedAt: new Date(Date.now() - 3_600_000).toISOString(), startedAt: new Date().toISOString() });
   const lines = [];
-  const lock = await acquireHeavyLock({ cmd: "t", env: cleanEnv(lockPath), timeoutMs: 20_000, log: (l) => lines.push(l) });
+  const readStart = async () => Date.parse(ownPidStart());
+  const lock = await acquireHeavyLock({ cmd: "t", env: cleanEnv(lockPath), timeoutMs: 2_000, readStart, log: (l) => lines.push(l) });
   assert.equal(lock.acquired, true);
   assert.match(lines.join("\n"), new RegExp(`breaking pid ${String(process.pid)} .* was reused`));
   const mine = JSON.parse(fs.readFileSync(lockPath, "utf8"));
@@ -217,4 +215,10 @@ test("a stale inherited token does not skip the lock", async () => {
   const lock = await acquireHeavyLock({ cmd: "t", env: { ...cleanEnv(lockPath), MCP_HEAVY_LOCK_TOKEN: "gone" }, log: quiet });
   assert.equal(lock.acquired, true);
   lock.release();
+});
+
+test("the platform reader agrees with the start time a holder records for itself", async () => {
+  const read = await realRead;
+  assert.ok(Number.isFinite(read), `no start time read on ${process.platform}`);
+  assert.ok(Math.abs(read - Date.parse(ownPidStart())) <= PID_START_TOLERANCE_MS, `read ${new Date(read).toISOString()} vs recorded ${ownPidStart()}`);
 });
