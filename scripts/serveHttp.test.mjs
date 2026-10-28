@@ -17,8 +17,9 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { getServer } from "./lib/manifest.mjs";
+import { deployHash, importClosure, nativePackages } from "./lib/deploy.mjs";
 import { isLink, removeTree } from "./lib/junctions.mjs";
-import { approvalSecretEnvName, approvalSecretFile, deployCheck, deployServer, ensureApprovalSecret, httpClientEntry, httpEnvNames, listDeploys, parseListenerPid, readEnvFile, resolveServeEntry, restartServer, taskCreateArgs, taskDeniedHint, taskXml, writeEnvFile } from "./serve-http.mjs";
+import { approvalSecretEnvName, approvalSecretFile, deployCheck, deployServer, ensureApprovalSecret, httpClientEntry, httpEnvNames, listDeploys, ownDeploy, parseListenerPid, readEnvFile, resolveServeEntry, restartServer, taskCreateArgs, taskDeniedHint, taskXml, verifyDeploy, writeEnvFile } from "./serve-http.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), "serve-http-test-"));
@@ -320,8 +321,145 @@ test("V-A: an unbuilt server is refused and leaves no deploy behind; no deploy y
 
 test("V-A: doctor's [deploy] verdict names the running copy and a deploy waiting for --restart", () => {
   const cur = { dir: "D/b-2", sha: "b", n: 2 };
-  assert.deepEqual(deployCheck(cur, { dir: "D/b-2", sha: "b", pid: 9 }), ["pass", "pid 9 runs b from D/b-2"]);
-  assert.match(deployCheck(cur, { dir: "D/a-1", sha: "a", pid: 9 })[1], /deploy b-2 is waiting for --restart/);
+  const verify = () => ({ record: { head: "b".repeat(40), dirty: false, stale: [] }, recorded: "f".repeat(64), actual: "f".repeat(64), ok: true });
+  const running = { dir: "D/b-2", sha: "b", pid: 9, supervisor: "D/b-2/scripts/serve-http.mjs" };
+  assert.deepEqual(deployCheck(cur, running, { verify }), ["pass", "pid 9 runs b (HEAD bbbbbbbbbbbb, clean, hash ffffffffffff) from D/b-2"]);
+  assert.match(deployCheck(cur, { ...running, dir: "D/a-1", sha: "a" }, { verify })[1], /deploy b-2 is waiting for --restart/);
+  assert.match(deployCheck(cur, { ...running, supervisor: null }, { verify })[1], /supervisor runs from the working tree/);
+  assert.match(deployCheck(cur, running, { verify: () => null })[1], /records no content hash/);
   assert.match(deployCheck(null, { dir: null, pid: 9 })[1], /working tree's dist/);
   assert.equal(deployCheck(cur, null)[0], "warn");
+});
+
+test("--restart kills from the hand-off serve-http when the supervisor runs under one", async () => {
+  const server = getServer("codebase-index");
+  const calls = [];
+  let listener = 111;
+  let clock = 1000;
+  const parents = { 111: "50", 50: "40", 40: "30" };
+  const exec = (cmd, args) => {
+    calls.push([cmd, ...args]);
+    const a = args.join(" ");
+    if (cmd === "netstat") return NETSTAT(listener ?? 0).replace(/LISTENING\s+0/, "TIME_WAIT      0");
+    if (cmd === "taskkill") { listener = null; return ""; }
+    if (cmd === "schtasks") { listener = 222; return ""; }
+    if (a.includes("ParentProcessId")) return `${parents[a.match(/ProcessId=(\d+)/)[1]] ?? "0"}\r\n`;
+    if (a.includes("CommandLine")) return a.includes("ProcessId=40") ? '"node.exe" D:\\ws\\scripts\\serve-http.mjs --server codebase-index\r\n' : "";
+    return "5000\r\n";
+  };
+  const out = await restartServer(server, 7341, { exec, sleep: async () => { clock += 10; }, now: () => clock });
+  assert.deepEqual(out, { oldPid: 111, newPid: 222 });
+  assert.deepEqual(calls.find((c) => c[0] === "taskkill"), ["taskkill", "/T", "/F", "/PID", "40"]);
+});
+
+test("isolation: a native package and each one that loads it are copied; the rest stay junctions", () => {
+  const { root, server, deployRoot } = fakeWorkspace();
+  const write = (rel, text) => {
+    fs.mkdirSync(path.dirname(path.join(root, rel)), { recursive: true });
+    fs.writeFileSync(path.join(root, rel), text);
+  };
+  write("srv/node_modules/nat/package.json", JSON.stringify({ name: "nat" }));
+  write("srv/node_modules/nat/build/Release/nat.node", "MZ");
+  write("srv/node_modules/loader/package.json", JSON.stringify({ name: "loader", optionalDependencies: { "@sc/bin": "1" } }));
+  write("srv/node_modules/@sc/bin/package.json", JSON.stringify({ name: "@sc/bin" }));
+  write("srv/node_modules/@sc/bin/vec0.dll", "MZ");
+  write("srv/node_modules/@sc/plain/package.json", JSON.stringify({ name: "@sc/plain" }));
+  write("srv/node_modules/wrap/package.json", JSON.stringify({ name: "wrap", dependencies: { nat: "1" } }));
+  write("srv/node_modules/wrap/node_modules/inner/index.js", "");
+  assert.deepEqual(nativePackages(path.join(root, "srv/node_modules")), ["@sc/bin", "loader", "nat", "wrap"]);
+
+  const d = deployServer(server, { workspaceRoot: root, deployRoot, sha: "n1" });
+  const nm = path.join(d.dir, "srv", "node_modules");
+  for (const name of ["nat", "loader", "@sc/bin", "wrap"]) assert.ok(!isLink(path.join(nm, name)) && fs.existsSync(path.join(nm, name, "package.json")), `${name} is copied`);
+  assert.ok(fs.existsSync(path.join(nm, "nat", "build", "Release", "nat.node")));
+  for (const name of ["localdep", "@sc/plain", "wrap/node_modules/inner"]) assert.ok(isLink(path.join(nm, name)), `${name} stays a junction`);
+  assert.ok(!isLink(path.join(nm, "@sc")), "a scope with a copied package is a real dir");
+  assert.deepEqual(d.native, { srv: ["@sc/bin", "loader", "nat", "wrap"], ".": [] });
+  assert.equal(runEntry(d.entry).stdout.trim(), "srv-v1 core-v1 rootdep local");
+});
+
+test("isolation: the supervisor's import closure is what serve-http.mjs imports", () => {
+  const closure = importClosure(path.join(ROOT, "scripts", "serve-http.mjs"));
+  assert.deepEqual(closure, ["lib/cli.mjs", "lib/deploy.mjs", "lib/junctions.mjs", "lib/log.mjs", "lib/manifest.mjs", "serve-http.mjs"]);
+});
+
+/** A minimal @mcp/manifest for the fake workspace: one server `srv` that declares the http vars. */
+function addFakeManifest(root) {
+  const dir = path.join(root, "packages", "manifest");
+  fs.mkdirSync(path.join(dir, "dist"), { recursive: true });
+  fs.writeFileSync(path.join(dir, "package.json"), JSON.stringify({ name: "@mcp/manifest", type: "module", main: "dist/index.js", dependencies: { "@mcp/core": "*" } }));
+  fs.writeFileSync(
+    path.join(dir, "dist", "index.js"),
+    'import path from "node:path";\nexport const WORKSPACE_ROOT = process.cwd();\n' +
+      'export const SERVERS = [{ key: "srv", dir: "srv", entry: "dist/index.js", env: [{ name: "SRV_HTTP_PORT" }, { name: "SRV_HTTP_TOKEN" }] }];\n' +
+      "export const getServer = (k) => SERVERS.find((s) => s.key === k);\nexport const serverKeys = () => SERVERS.map((s) => s.key);\n" +
+      "export const serverEntryPath = (s) => path.join(WORKSPACE_ROOT, s.dir, s.entry);\n"
+  );
+  fs.symlinkSync(dir, path.join(root, "node_modules/@mcp/manifest"), "junction");
+}
+
+test("isolation: the supervisor is copied with its closure and runs with the working tree gone", () => {
+  const { root, server, deployRoot } = fakeWorkspace();
+  addFakeManifest(root);
+  const d = deployServer(server, { workspaceRoot: root, deployRoot, sha: "sup1" });
+  assert.equal(d.supervisor, path.join(d.dir, "scripts", "serve-http.mjs"));
+  assert.deepEqual(d.supervisorPackages, ["@mcp/core", "@mcp/manifest"]);
+  assert.deepEqual(d.packages, ["@mcp/core", "@mcp/sdk"], "the server's own closure is recorded apart");
+  assert.equal(ownDeploy(d.supervisor)?.dir, d.dir);
+  assert.equal(ownDeploy(path.join(ROOT, "scripts", "serve-http.mjs")), null, "the tree's copy is not a deploy");
+
+  // Move the tree away: the copied supervisor resolves everything it loads inside the deploy.
+  const moved = `${root}-moved`;
+  fs.renameSync(root, moved);
+  try {
+    const r = spawnSync(process.execPath, [d.supervisor, "--server", "srv", "--task", "print"], { cwd: d.dir, encoding: "utf-8" });
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stdout + r.stderr, /<Task version="1\.2"/);
+  } finally {
+    fs.renameSync(moved, root);
+  }
+});
+
+const git = (root, ...args) => spawnSync("git", ["-C", root, ...args], { encoding: "utf-8" });
+
+test("isolation: the record proves the copy — HEAD, dirty, stale, and a hash doctor recomputes", () => {
+  const { root, server, deployRoot } = fakeWorkspace();
+  fs.mkdirSync(path.join(root, "srv", "src"));
+  fs.writeFileSync(path.join(root, "srv", "src", "index.ts"), "// v1\n");
+  const old = new Date(Date.now() - 60_000);
+  fs.utimesSync(path.join(root, "srv", "src", "index.ts"), old, old);
+  fs.writeFileSync(path.join(root, ".gitignore"), "node_modules/\ndist/\n");
+  for (const args of [["init", "-q"], ["add", ".gitignore", "srv/package.json", "srv/src/index.ts", "packages/core/package.json", "packages/sdk/package.json", "packages/unused/package.json"], ["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "init"]]) {
+    assert.equal(git(root, ...args).status, 0);
+  }
+  const head = git(root, "rev-parse", "HEAD").stdout.trim();
+
+  const clean = deployServer(server, { workspaceRoot: root, deployRoot });
+  assert.equal(clean.head, head);
+  assert.equal(clean.sha, head.slice(0, 12));
+  assert.equal(clean.dirty, false);
+  assert.deepEqual(clean.stale, []);
+  assert.match(clean.hash, /^[0-9a-f]{64}$/);
+  assert.equal(deployHash(clean.dir), clean.hash);
+  const running = { dir: clean.dir, sha: clean.sha, pid: 9, supervisor: clean.supervisor };
+  assert.equal(deployCheck(clean, running)[0], "pass", deployCheck(clean, running)[1]);
+
+  // A file of the copy changed after the deploy: the hash no longer matches, and doctor fails it.
+  fs.appendFileSync(path.join(clean.dir, "srv", "dist", "index.js"), "// patched\n");
+  const [status, msg] = deployCheck(clean, running);
+  assert.equal(status, "fail");
+  assert.match(msg, /changed after the deploy/);
+  assert.equal(verifyDeploy(clean.dir).ok, false);
+
+  // An uncommitted edit and a src newer than dist: both recorded, both warned.
+  fs.writeFileSync(path.join(root, "srv", "src", "index.ts"), "// v2, not built\n");
+  const dirty = deployServer(server, { workspaceRoot: root, deployRoot });
+  assert.equal(dirty.dirty, true);
+  assert.deepEqual(dirty.stale, ["srv"]);
+  assert.equal(dirty.hash, clean.hash, "same dist copied: same hash, whatever the label");
+  const [s2, m2] = deployCheck(dirty, { ...running, dir: dirty.dir });
+  assert.equal(s2, "warn");
+  assert.match(m2, /dirty/);
+  assert.match(m2, /uncommitted changes/);
+  assert.match(m2, /stale build of srv/);
 });

@@ -12,7 +12,8 @@
  *   node scripts/serve-http.mjs --server codebase-index --restart       # deploy, kill the tree on its port, /Run the task, wait for the new listener
  *   node scripts/serve-http.mjs --server codebase-index --deploy-only   # deploy only; the running process is untouched
  *
- * Flags: --config <path> (default ~/.claude/mcp/http/<key>.env.json), --log <path>.
+ * Flags: --config <path> (default ~/.claude/mcp/http/<key>.env.json), --log <path>,
+ * --deploy-root <path> (default ~/.claude/mcp/deploy; a scratch root for a trial run).
  *
  * The served process never runs from the working tree's dist (V-A): it runs from a deploy copy under
  * ~/.claude/mcp/deploy/<key>/<sha>-<n>/ that `--restart` / `--deploy-only` make, so a build in the tree
@@ -41,6 +42,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { WORKSPACE_ROOT, serverEntryPath } from "./lib/manifest.mjs";
 import { parseArgs, resolveServers } from "./lib/cli.mjs";
+import { DEPLOY_RECORD, copyOverrides, deployHash, importClosure, nativePackages, staleBuilds } from "./lib/deploy.mjs";
 import { linkDir, linkEntries, removeTree } from "./lib/junctions.mjs";
 import { err, info, ok } from "./lib/log.mjs";
 
@@ -260,13 +262,19 @@ function psNumber(exec, script) {
   return Number.isFinite(n) && n > 0 ? n : null;
 }
 
+function isServeHttp(exec, pid) {
+  const cmd = exec("powershell", ["-NoProfile", "-NonInteractive", "-Command", `(Get-CimInstance Win32_Process -Filter "ProcessId=${pid}").CommandLine`]);
+  return /serve-http\.mjs/i.test(cmd);
+}
+
 function listenerOn(exec, port) {
   return parseListenerPid(exec("netstat", ["-ano", "-p", "TCP"]), port);
 }
 
 /**
  * `--restart`: `schtasks /End` does not stop the supervisor, so stop the tree that owns the port instead:
- * the listener's parent (the serve-http supervisor; the listener itself when it has none) with `taskkill /T`,
+ * the listener's parent (the serve-http supervisor; the listener itself when it has none) — or its parent
+ * in turn when that is the tree's hand-off serve-http — with `taskkill /T`,
  * then `schtasks /Run` and wait for a NEW listener, one with another pid whose start time is after the
  * restart began. Every command goes through `exec(cmd, argsArray)`, so the test stubs the machine.
  * Resolves `{ oldPid, newPid }`.
@@ -274,8 +282,13 @@ function listenerOn(exec, port) {
 export async function restartServer(server, port, { exec = defaultExec, sleep = defaultSleep, now = Date.now, timeoutMs = 60000 } = {}) {
   const oldPid = listenerOn(exec, port);
   if (oldPid !== null) {
-    const parent = psNumber(exec, `(Get-CimInstance Win32_Process -Filter "ProcessId=${oldPid}").ParentProcessId`);
-    const target = parent !== null && parent !== process.pid ? parent : oldPid;
+    const parentOf = (pid) => psNumber(exec, `(Get-CimInstance Win32_Process -Filter "ProcessId=${pid}").ParentProcessId`);
+    const parent = parentOf(oldPid);
+    let target = parent !== null && parent !== process.pid ? parent : oldPid;
+    // The deploy's supervisor runs under the tree's hand-off copy: kill from there, so the task instance
+    // has ended before /Run (MultipleInstancesPolicy IgnoreNew drops a /Run while it lives).
+    const grand = target === parent ? parentOf(parent) : null;
+    if (grand !== null && grand !== process.pid && isServeHttp(exec, grand)) target = grand;
     exec("taskkill", ["/T", "/F", "/PID", String(target)]);
     for (let i = 0; i < 50 && listenerOn(exec, port) !== null; i++) await sleep(200);
   }
@@ -339,12 +352,16 @@ function mcpScope(names, deployDir) {
   };
 }
 
-function gitSha(root) {
+function gitHead(root) {
   try {
-    return execFileSync("git", ["-C", root, "rev-parse", "--short=12", "HEAD"], { encoding: "utf-8" }).trim();
+    return execFileSync("git", ["-C", root, "rev-parse", "HEAD"], { encoding: "utf-8" }).trim();
   } catch {
-    return "nogit";
+    return null;
   }
+}
+
+function gitSha(root) {
+  return gitHead(root)?.slice(0, 12) ?? "nogit";
 }
 
 function gitDirty(root, paths) {
@@ -392,36 +409,50 @@ export function runningDeploy(server, { deployRoot = defaultDeployRoot() } = {})
 }
 
 /**
- * Copy the server's runtime closure out of the working tree:
+ * Copy the server's runtime closure out of the working tree, so the served process tree holds nothing
+ * under it open (V-A):
  *
  *   <deployRoot>/<key>/<sha>-<n>/
  *     <server dir>/dist, package.json (+ RUNTIME_EXTRAS)   copied
  *     <server dir>/node_modules/                          real dir: each entry a junction to the tree's,
- *                                                         except @mcp/* -> this deploy's packages/*
- *     packages/<pkg>/dist, package.json                   copied, every workspace package it reaches
- *     node_modules/                                       the root's entries the same way (the copied
- *                                                         packages resolve their deps through it)
+ *                                                         except @mcp/* -> this deploy's packages/*, and
+ *                                                         every package with a native binary (and each
+ *                                                         that depends on one) COPIED — the OS locks a
+ *                                                         loaded .node/.dll, so a junctioned one made
+ *                                                         `npm install` in the tree fail EBUSY
+ *     packages/<pkg>/dist, package.json                   copied: the server's workspace packages and
+ *                                                         @mcp/manifest's, which the supervisor needs
+ *     scripts/serve-http.mjs + its imports                copied: the supervisor the logon task hands off to
+ *     package.json, tsconfig.base.json                    copied: @mcp/manifest's root markers, so its
+ *                                                         WORKSPACE_ROOT is the deploy
+ *     node_modules/                                       the root's entries the same way
  *     deploy.json
  *
- * Third-party code stays junctioned (only `npm install` changes it); everything `npm run build` writes
- * is copied. Marks the deploy current, then prunes. Returns the deploy record.
+ * The record proves what was copied: `head` (full HEAD), `dirty` (uncommitted changes under any copied
+ * source path), `stale` (dirs whose src/ is newer than their dist/) and `hash` (`deployHash`, which
+ * doctor recomputes). Marks the deploy current, then prunes. Returns the record.
  */
-export function deployServer(server, { workspaceRoot = WORKSPACE_ROOT, deployRoot = defaultDeployRoot(), sha = gitSha(workspaceRoot), now = () => new Date() } = {}) {
+export function deployServer(server, { workspaceRoot = WORKSPACE_ROOT, deployRoot = defaultDeployRoot(), head = gitHead(workspaceRoot), sha = head?.slice(0, 12) ?? "nogit", scriptsDir = path.dirname(SCRIPT), now = () => new Date() } = {}) {
   const srcServer = path.join(workspaceRoot, server.dir);
   const pkgJson = JSON.parse(fs.readFileSync(path.join(srcServer, "package.json"), "utf-8"));
   const packages = workspacePackages(workspaceRoot);
   const closure = packageClosure(pkgJson, packages);
-  const required = [path.join(srcServer, "dist", "index.js"), ...closure.map((name) => path.join(packages[name], "dist"))];
+  const manifest = packages["@mcp/manifest"];
+  const supervisorPackages = manifest ? [...new Set(["@mcp/manifest", ...packageClosure(JSON.parse(fs.readFileSync(path.join(manifest, "package.json"), "utf-8")), packages)])].sort() : [];
+  const copied = [...new Set([...closure, ...supervisorPackages])].sort();
+  const required = [path.join(srcServer, "dist", "index.js"), ...copied.map((name) => path.join(packages[name], "dist"))];
   const missing = required.filter((p) => !fs.existsSync(p));
   if (missing.length) {
     throw new Error(`${server.key}: not built — missing ${missing.join(", ")}. Run npm run build:packages, then npm run build in ${server.dir}`);
   }
+  const supervisorFiles = importClosure(path.join(scriptsDir, path.basename(SCRIPT)));
 
   const keyDir = path.join(deployRoot, server.key);
   fs.mkdirSync(keyDir, { recursive: true });
   const n = (listDeploys(keyDir)[0]?.n ?? 0) + 1;
   const dir = path.join(keyDir, `${sha}-${n}`);
   fs.mkdirSync(dir);
+  const native = {};
   try {
     const destServer = path.join(dir, server.dir);
     fs.mkdirSync(destServer);
@@ -432,31 +463,48 @@ export function deployServer(server, { workspaceRoot = WORKSPACE_ROOT, deployRoo
       fs.mkdirSync(path.dirname(path.join(destServer, rel)), { recursive: true });
       fs.copyFileSync(path.join(srcServer, rel), path.join(destServer, rel));
     }
-    for (const name of closure) {
+    for (const name of copied) {
       const dest = path.join(dir, "packages", name.slice("@mcp/".length));
       fs.mkdirSync(dest, { recursive: true });
       fs.cpSync(path.join(packages[name], "dist"), path.join(dest, "dist"), { recursive: true });
       fs.copyFileSync(path.join(packages[name], "package.json"), path.join(dest, "package.json"));
     }
-    const override = { "@mcp": mcpScope(closure, dir) };
-    linkEntries(path.join(srcServer, "node_modules"), path.join(destServer, "node_modules"), { override });
-    linkEntries(path.join(workspaceRoot, "node_modules"), path.join(dir, "node_modules"), { override });
+    for (const rel of supervisorFiles) {
+      const dest = path.join(dir, "scripts", ...rel.split("/"));
+      fs.mkdirSync(path.dirname(dest), { recursive: true });
+      fs.copyFileSync(path.join(scriptsDir, ...rel.split("/")), dest);
+    }
+    for (const marker of ["package.json", "tsconfig.base.json"]) {
+      if (fs.existsSync(path.join(workspaceRoot, marker))) fs.copyFileSync(path.join(workspaceRoot, marker), path.join(dir, marker));
+    }
+    const base = { "@mcp": mcpScope(copied, dir) };
+    for (const [rel, src, dest] of [[server.dir, srcServer, destServer], [".", workspaceRoot, dir]]) {
+      native[rel] = nativePackages(path.join(src, "node_modules"));
+      linkEntries(path.join(src, "node_modules"), path.join(dest, "node_modules"), { override: copyOverrides(native[rel], { linkEntries, base }) });
+    }
   } catch (e) {
     removeTree(dir);
     throw e;
   }
+  const builtDirs = [server.dir, ...copied.map((name) => path.relative(workspaceRoot, packages[name]).split(path.sep).join("/"))];
   const record = {
     key: server.key,
     sha,
     n,
     dir,
     entry: path.join(dir, server.dir, "dist", "index.js"),
+    supervisor: supervisorFiles.length ? path.join(dir, "scripts", path.basename(SCRIPT)) : null,
     source: workspaceRoot,
-    dirty: gitDirty(workspaceRoot, [server.dir, ...closure.map((name) => path.relative(workspaceRoot, packages[name]))]),
+    head,
+    dirty: gitDirty(workspaceRoot, [...builtDirs, ...supervisorFiles.map((rel) => path.relative(workspaceRoot, path.join(scriptsDir, rel)))].filter((p) => !p.startsWith("..") && !path.isAbsolute(p))),
+    stale: staleBuilds(workspaceRoot, builtDirs),
+    hash: deployHash(dir),
     packages: closure,
+    supervisorPackages,
+    native,
     createdAt: now().toISOString()
   };
-  writeJsonAtomic(path.join(dir, "deploy.json"), record);
+  writeJsonAtomic(path.join(dir, DEPLOY_RECORD), record);
   writeJsonAtomic(path.join(keyDir, "current.json"), record);
   return { ...record, pruned: pruneDeploys(server, { deployRoot }) };
 }
@@ -483,25 +531,76 @@ export function pruneDeploys(server, { deployRoot = defaultDeployRoot(), keep = 
 }
 
 /**
- * The entry the supervisor spawns: the current deploy's or, when there is none yet, the working tree's
- * (the caller warns), so a first start before any deploy still serves.
+ * The entry the supervisor spawns: its own deploy's when it runs from one, else the current deploy's or,
+ * when there is none yet, the working tree's (the caller warns), so a first start before any deploy still serves.
  */
-export function resolveServeEntry(server, { deployRoot = defaultDeployRoot() } = {}) {
-  const deploy = currentDeploy(server, { deployRoot });
+export function resolveServeEntry(server, { deployRoot = defaultDeployRoot(), own = ownDeploy() } = {}) {
+  const deploy = own ?? currentDeploy(server, { deployRoot });
   return deploy ? { entry: deploy.entry, deploy } : { entry: serverEntryPath(server), deploy: null };
 }
 
-/** mcp:doctor's `[deploy]` verdict from `currentDeploy` and `runningDeploy`: `[status, message]`. */
-export function deployCheck(current, running) {
+const samePath = (a, b) => typeof a === "string" && typeof b === "string" && path.resolve(a).toLowerCase() === path.resolve(b).toLowerCase();
+
+/** The deploy record this script was copied into (`<deploy>/scripts/serve-http.mjs`), or null when it runs from the tree. */
+export function ownDeploy(script = SCRIPT) {
+  const record = readJson(path.join(path.dirname(script), "..", DEPLOY_RECORD));
+  return record && samePath(record.supervisor, script) ? record : null;
+}
+
+/**
+ * Recompute a deploy's hash and compare it with its record: `{ record, recorded, actual, ok }`, or null
+ * when the dir or its record is gone. A mismatch means the copy changed after the deploy.
+ */
+export function verifyDeploy(dir) {
+  const record = dir ? readJson(path.join(dir, DEPLOY_RECORD)) : null;
+  if (!record) return null;
+  const actual = deployHash(dir);
+  return { record, recorded: record.hash ?? null, actual, ok: record.hash === actual };
+}
+
+/**
+ * mcp:doctor's `[deploy]` verdict from `currentDeploy`, `runningDeploy` and `verifyDeploy` of the running
+ * copy: `[status, message]`. It names HEAD, the dirty flag and the hash; a hash mismatch fails; a dirty or
+ * stale build, a deploy waiting for --restart or a supervisor still running from the tree warns.
+ */
+export function deployCheck(current, running, { verify = verifyDeploy } = {}) {
   if (!running) return ["warn", "the supervisor has not recorded a start since deploys began — --restart serves a deploy copy"];
   const ran = `pid ${running.pid}`;
   if (!running.dir) return ["warn", `${ran} serves the working tree's dist, so a build there changes it live`];
-  const what = `${ran} runs ${running.sha} from ${running.dir}`;
-  if (current && current.dir !== running.dir) return ["warn", `${what}; deploy ${current.sha}-${current.n} is waiting for --restart`];
-  return ["pass", what];
+  const v = verify(running.dir);
+  const rec = v?.record ?? {};
+  const head = rec.head ? `HEAD ${rec.head.slice(0, 12)}` : "HEAD unknown";
+  const dirty = rec.dirty === true ? "dirty" : rec.dirty === false ? "clean" : "dirty unknown";
+  const hash = v?.recorded ? `hash ${v.recorded.slice(0, 12)}` : "no hash";
+  const what = `${ran} runs ${running.sha} (${head}, ${dirty}, ${hash}) from ${running.dir}`;
+  if (v?.recorded && !v.ok) return ["fail", `${what}; the copy now hashes ${v.actual.slice(0, 12)} — it changed after the deploy`];
+  const warns = [];
+  if (!v?.recorded) warns.push("the deploy records no content hash (made before deploy isolation)");
+  if (rec.dirty === true) warns.push("deployed with uncommitted changes, so HEAD does not say what it runs");
+  if (rec.stale?.length) warns.push(`deployed from a stale build of ${rec.stale.join(", ")} (src newer than dist)`);
+  if (!running.supervisor) warns.push("the supervisor runs from the working tree");
+  if (current && current.dir !== running.dir) warns.push(`deploy ${current.sha}-${current.n} is waiting for --restart`);
+  return warns.length ? ["warn", `${what}; ${warns.join("; ")}`] : ["pass", what];
 }
 
-function serve(server, envFile, logFile) {
+/**
+ * The logon task starts the tree's serve-http.mjs. When the current deploy carries a supervisor copy, the
+ * tree's copy only hands off: it leaves the tree (chdir), runs the deploy's supervisor with the same
+ * arguments and waits, so nothing in the served process tree keeps a file or directory under the tree open.
+ */
+function handOff(deploy) {
+  process.chdir(deploy.dir);
+  const child = spawn(process.execPath, [deploy.supervisor, ...process.argv.slice(2)], { cwd: deploy.dir, stdio: "inherit" });
+  for (const signal of ["SIGINT", "SIGTERM"]) process.on(signal, () => child.kill(signal));
+  child.on("exit", (code) => process.exit(code ?? 1));
+}
+
+function serve(server, envFile, logFile, deployRoot) {
+  const own = ownDeploy();
+  if (!own) {
+    const current = currentDeploy(server, { deployRoot });
+    if (current?.supervisor && fs.existsSync(current.supervisor)) return handOff(current);
+  }
   const names = httpEnvNames(server);
   const env = readEnvFile(envFile);
   if (env === null) {
@@ -514,19 +613,22 @@ function serve(server, envFile, logFile) {
   const secretName = approvalSecretEnvName(server);
   const secretEnv = secretName && !env[secretName] ? { [secretName]: ensureApprovalSecret(approvalSecretFile(server)) } : {};
   const stderr = logFile ? fs.openSync(logFile, "a") : "inherit";
-  const { entry, deploy } = resolveServeEntry(server);
+  const { entry, deploy } = resolveServeEntry(server, { deployRoot, own });
   if (!deploy) err(`${server.key}: no deploy yet — serving from the working tree; --deploy-only or --restart makes one`);
+  if (own) process.chdir(own.dir);
   // Inherit PATH and the like; every server setting comes from the env file and wins.
   const child = spawn(process.execPath, [entry, "--transport", "http"], {
+    cwd: deploy?.dir,
     env: { ...process.env, ...env, ...secretEnv },
     stdio: ["ignore", "ignore", stderr]
   });
-  const keyDir = path.join(defaultDeployRoot(), server.key);
+  const keyDir = path.join(deployRoot, server.key);
   fs.mkdirSync(keyDir, { recursive: true });
   writeJsonAtomic(path.join(keyDir, "running.json"), {
     dir: deploy?.dir ?? null,
     sha: deploy?.sha ?? null,
     entry,
+    supervisor: own ? SCRIPT : null,
     pid: child.pid,
     startedAt: new Date().toISOString()
   });
@@ -539,7 +641,7 @@ function serve(server, envFile, logFile) {
 }
 
 async function main() {
-  const args = parseArgs(process.argv.slice(2), { restart: ["--restart"], deployOnly: ["--deploy-only"] }, { config: ["--config"], log: ["--log"], task: ["--task"] });
+  const args = parseArgs(process.argv.slice(2), { restart: ["--restart"], deployOnly: ["--deploy-only"] }, { config: ["--config"], log: ["--log"], task: ["--task"], deployRoot: ["--deploy-root"] });
   if (args.servers.length !== 1) throw new Error("pass exactly one --server <key>");
   const [server] = resolveServers(args.servers);
   if (httpEnvNames(server) === null) {
@@ -547,12 +649,14 @@ async function main() {
   }
   const envFile = path.resolve(args.config ?? defaultEnvFile(server));
   const logFile = args.log ? path.resolve(args.log) : null;
+  const deployRoot = args.deployRoot ? path.resolve(args.deployRoot) : defaultDeployRoot();
   if (args.restart || args.deployOnly) {
     const port = readEnvFile(envFile)?.[httpEnvNames(server).port];
     if (args.restart && !port) throw new Error(`${envFile} must set ${httpEnvNames(server).port}`);
-    const d = deployServer(server);
+    const d = deployServer(server, { deployRoot });
     const pruned = d.pruned.length ? `; removed ${d.pruned.length} older` : "";
-    ok(`${server.key}: deployed ${d.sha}${d.dirty ? " (uncommitted changes)" : ""} to ${d.dir}${pruned}`);
+    const flags = [d.dirty ? "uncommitted changes" : null, d.stale.length ? `stale build: ${d.stale.join(", ")}` : null].filter(Boolean);
+    ok(`${server.key}: deployed ${d.sha}${flags.length ? ` (${flags.join("; ")})` : ""}, hash ${d.hash.slice(0, 12)}, to ${d.dir}${pruned}`);
     if (args.deployOnly) return;
     const { oldPid, newPid } = await restartServer(server, port);
     ok(`${server.key}: restarted, pid ${oldPid ?? "none"} -> ${newPid}`);
@@ -562,7 +666,7 @@ async function main() {
     runTask(server, args.task, envFile, logFile ?? defaultLogFile(server));
     return;
   }
-  serve(server, envFile, logFile);
+  serve(server, envFile, logFile, deployRoot);
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {
