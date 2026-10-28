@@ -7,11 +7,19 @@
  * < 250 ms") — and each flake cost a re-run of a ~10 minute suite. The checks are not wrong; they
  * were never meant to share the CPU with another copy of themselves.
  *
- * The lock is a file, `~/.claude/locks/heavy-check.lock`, holding `{pid, startedAt, token, cmd, cwd}`.
- * A second caller waits (prints the holder once, then polls) up to a timeout and fails with exit 75.
- * A holder whose pid is gone, or which has held the lock longer than any real run takes, is broken:
- * Node cannot read another process's start time portably, so the age cap is the guard against a
- * reused pid.
+ * The lock is a file, `~/.claude/locks/heavy-check.lock`, holding
+ * `{pid, pidStartedAt, startedAt, token, cmd, cwd}`. A second caller waits (prints the holder once,
+ * then polls) up to a timeout and fails with exit 75. A holder is broken when its pid is gone, when the
+ * process now owning that pid started at another time than `pidStartedAt` (Windows reuses pids fast),
+ * or when it has held the lock longer than any real run takes — the last guard for a lock file written
+ * before `pidStartedAt` existed, or when the pid's start time cannot be read.
+ *
+ * Reading another pid's start time. Node has no API for it. Linux reads `/proc` (free); Windows has
+ * no reader cheaper than PowerShell `Get-Process` (~2–3 s of process start-up, measured 2026-10-28;
+ * `tasklist` is ~0.5 s but has no start time and `wmic` is gone), elsewhere `ps -o lstart=`. So a
+ * waiter reads it once per holder and again only every `PID_RECHECK_MS`, never per poll. The holder
+ * records its own start as `now - process.uptime()`, which is free and trails the OS creation time by
+ * Node's start-up (~150 ms measured), hence `PID_START_TOLERANCE_MS`.
  *
  * Nesting. `verify:all` → `test:servers` → codebase-index `run-tests.mjs` each take the lock. The
  * holder exports its token as `MCP_HEAVY_LOCK_TOKEN`; a child whose inherited token matches the file
@@ -20,11 +28,13 @@
  * CI never takes it: `CI=true` (set by GitHub Actions) or `--no-lock` skips the lock entirely.
  */
 
+import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import process from "node:process";
+import { promisify } from "node:util";
 
 /** EX_TEMPFAIL: the check did not run, try again later — not a test failure. */
 export const LOCK_TIMEOUT_EXIT = 75;
@@ -32,6 +42,10 @@ export const DEFAULT_TIMEOUT_MS = 30 * 60_000;
 /** Longer than any real run (`verify:all` is ~10 min); a holder older than this is a reused pid. */
 export const STALE_AFTER_MS = 3 * 60 * 60_000;
 const POLL_MS = 2_000;
+/** Recorded and OS-read start times of the same process differ by Node's start-up and the reader's precision (1 s for `ps`). */
+export const PID_START_TOLERANCE_MS = 3_000;
+/** How often a waiter re-reads a live holder's start time; a pid reused between reads waits at most this long. */
+export const PID_RECHECK_MS = 5 * 60_000;
 
 export class HeavyLockTimeoutError extends Error {
   constructor(message) {
@@ -73,10 +87,63 @@ export function isPidAlive(pid) {
   }
 }
 
-/** Why the holder may be broken, or `null` while it is a live, plausible run. */
-export function staleReason(holder, now = Date.now()) {
+const execFileAsync = promisify(execFile);
+
+/** This process's start time: free, and within `PID_START_TOLERANCE_MS` of what `readPidStart` reads for it. */
+export function ownPidStart() {
+  return new Date(Date.now() - process.uptime() * 1000).toISOString();
+}
+
+/** Linux: field 22 of `/proc/<pid>/stat` is the start in clock ticks after boot (USER_HZ, 100 on every mainstream kernel). */
+function readProcStart(pid) {
+  const stat = fs.readFileSync(`/proc/${String(pid)}/stat`, "utf8");
+  const ticks = Number(stat.slice(stat.lastIndexOf(")") + 2).split(" ")[19]);
+  const btime = Number(/^btime (\d+)$/m.exec(fs.readFileSync("/proc/stat", "utf8"))?.[1]);
+  return btime * 1000 + ticks * 10;
+}
+
+/**
+ * When the process that now has `pid` started, in epoch ms, or `null` when it cannot be read (no such
+ * pid, access denied, no reader on this platform). Async because Windows spawns PowerShell for it.
+ */
+export async function readPidStart(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return null;
+  try {
+    if (process.platform === "linux") return readProcStart(pid);
+    if (process.platform === "win32") {
+      const { stdout } = await execFileAsync(
+        "powershell.exe",
+        ["-NoProfile", "-NonInteractive", "-Command", `(Get-Process -Id ${String(pid)} -ErrorAction Stop).StartTime.ToUniversalTime().ToString('o')`],
+        { timeout: 15_000, windowsHide: true }
+      );
+      return Date.parse(stdout.trim());
+    }
+    const { stdout } = await execFileAsync("ps", ["-o", "lstart=", "-p", String(pid)], { timeout: 5_000 });
+    return Date.parse(stdout.trim());
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Why the holder may be broken, or `null` while it is a live, plausible run. `pidStarts` caches the
+ * holder's OS-read start time per token as `{ at, start }`, so a waiter spawns a reader once per holder
+ * and then every `PID_RECHECK_MS`, not every poll.
+ */
+export async function staleReason(holder, { now = Date.now(), readStart = readPidStart, pidStarts = new Map() } = {}) {
   if (holder === null) return "the lock file is unreadable";
   if (!isPidAlive(holder.pid)) return `pid ${String(holder.pid)} is gone`;
+  const recorded = Date.parse(holder.pidStartedAt);
+  if (Number.isFinite(recorded)) {
+    let seen = pidStarts.get(holder.token);
+    if (seen === undefined || now - seen.at >= PID_RECHECK_MS) {
+      seen = { at: now, start: await readStart(holder.pid) };
+      pidStarts.set(holder.token, seen);
+    }
+    if (Number.isFinite(seen.start) && Math.abs(seen.start - recorded) > PID_START_TOLERANCE_MS) {
+      return `pid ${String(holder.pid)} was reused (started ${new Date(seen.start).toISOString()}, not ${String(holder.pidStartedAt)})`;
+    }
+  }
   const started = Date.parse(holder.startedAt);
   if (!Number.isFinite(started)) return "the lock file has no start time";
   if (now - started > STALE_AFTER_MS) return `held for more than ${String(STALE_AFTER_MS / 3_600_000)} h (pid reused?)`;
@@ -143,6 +210,7 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
  * Resolves `{ acquired: true, release }` or `{ acquired: false, reason }` when the lock is skipped
  * (CI, `--no-lock`, already held by a parent). Rejects with `HeavyLockTimeoutError` after
  * `timeoutMs`. `env` receives `MCP_HEAVY_LOCK_TOKEN` so children spawned with it inherit the hold.
+ * `readStart` replaces `readPidStart` (tests).
  */
 export async function acquireHeavyLock({
   cmd,
@@ -151,6 +219,7 @@ export async function acquireHeavyLock({
   noLock = false,
   timeoutMs,
   pollMs = POLL_MS,
+  readStart = readPidStart,
   log = (line) => console.error(line)
 } = {}) {
   if (noLock) return { acquired: false, reason: "--no-lock" };
@@ -166,15 +235,16 @@ export async function acquireHeavyLock({
   const limit = timeoutMs ?? (Number(env.MCP_HEAVY_LOCK_TIMEOUT_MS) || DEFAULT_TIMEOUT_MS);
   fs.mkdirSync(path.dirname(file), { recursive: true });
   const token = randomUUID();
-  const content = JSON.stringify({ pid: process.pid, startedAt: new Date().toISOString(), token, cmd, cwd });
+  const content = JSON.stringify({ pid: process.pid, pidStartedAt: ownPidStart(), startedAt: new Date().toISOString(), token, cmd, cwd });
   const deadline = Date.now() + limit;
   let announced = null;
+  const pidStarts = new Map();
 
   while (!tryCreate(file, content)) {
     const raw = readRaw(file);
     if (raw === null) continue;
     const holder = parseHolder(raw);
-    const stale = staleReason(holder);
+    const stale = await staleReason(holder, { readStart, pidStarts });
     if (stale !== null) {
       log(`heavy-check lock: breaking ${describeHolder(holder)} — ${stale}`);
       breakStale(file, raw, log);

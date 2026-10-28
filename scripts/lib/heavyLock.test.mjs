@@ -6,7 +6,7 @@ import path from "node:path";
 import test from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
-import { acquireHeavyLock, breakStale, STALE_AFTER_MS } from "./heavyLock.mjs";
+import { acquireHeavyLock, breakStale, ownPidStart, PID_START_TOLERANCE_MS, readPidStart, STALE_AFTER_MS } from "./heavyLock.mjs";
 
 /**
  * The machine-wide heavy-check lock (row V-C). Every case uses its own lock file through
@@ -125,6 +125,56 @@ test("a live pid that has held the lock past the age cap is broken (pid reuse)",
   const lock = await acquireHeavyLock({ cmd: "t", env: cleanEnv(lockPath), timeoutMs: 2_000, log: quiet });
   assert.equal(lock.acquired, true);
   lock.release();
+});
+
+test("the platform reader agrees with the start time a holder records for itself", async () => {
+  const read = await readPidStart(process.pid);
+  assert.ok(Number.isFinite(read), `no start time read on ${process.platform}`);
+  assert.ok(Math.abs(read - Date.parse(ownPidStart())) <= PID_START_TOLERANCE_MS, `read ${new Date(read).toISOString()} vs recorded ${ownPidStart()}`);
+  assert.equal(await readPidStart(spawnSync(process.execPath, ["-e", ""]).pid), null, "a gone pid has no start time");
+});
+
+test("a live pid whose start time differs from the recorded one is broken (pid reused)", async () => {
+  // process.pid is alive, but the holder that wrote this lock started an hour before it: the pid was reused.
+  const lockPath = tempLock();
+  writeHolder(lockPath, { pid: process.pid, pidStartedAt: new Date(Date.now() - 3_600_000).toISOString(), startedAt: new Date().toISOString() });
+  const lines = [];
+  const lock = await acquireHeavyLock({ cmd: "t", env: cleanEnv(lockPath), timeoutMs: 20_000, log: (l) => lines.push(l) });
+  assert.equal(lock.acquired, true);
+  assert.match(lines.join("\n"), new RegExp(`breaking pid ${String(process.pid)} .* was reused`));
+  const mine = JSON.parse(fs.readFileSync(lockPath, "utf8"));
+  assert.equal(mine.token, lock.token);
+  assert.ok(Number.isFinite(Date.parse(mine.pidStartedAt)), "the new holder records its own start time");
+  lock.release();
+});
+
+test("a live holder with a matching start time is held, and its start time is read once, not per poll", async () => {
+  const lockPath = tempLock();
+  const pidStartedAt = ownPidStart();
+  writeHolder(lockPath, { pid: process.pid, pidStartedAt, startedAt: new Date().toISOString() });
+  let reads = 0;
+  const readStart = async () => (reads++, Date.parse(pidStartedAt) + 150);
+  await assert.rejects(
+    acquireHeavyLock({ cmd: "t", env: cleanEnv(lockPath), timeoutMs: 200, pollMs: 20, readStart, log: quiet }),
+    (error) => error.code === "HEAVY_LOCK_TIMEOUT"
+  );
+  assert.equal(reads, 1);
+  assert.equal(JSON.parse(fs.readFileSync(lockPath, "utf8")).token, "other");
+});
+
+test("an unreadable start time, or an old lock file without one, falls back to pid and age", async () => {
+  for (const holder of [{ pidStartedAt: new Date(0).toISOString() }, {}]) {
+    const lockPath = tempLock();
+    writeHolder(lockPath, { pid: process.pid, startedAt: new Date().toISOString(), ...holder });
+    let reads = 0;
+    const readStart = async () => (reads++, null);
+    await assert.rejects(
+      acquireHeavyLock({ cmd: "t", env: cleanEnv(lockPath), timeoutMs: 100, pollMs: 20, readStart, log: quiet }),
+      (error) => error.code === "HEAVY_LOCK_TIMEOUT"
+    );
+    assert.equal(reads, "pidStartedAt" in holder ? 1 : 0, "an old-format lock spawns no reader");
+    assert.equal(JSON.parse(fs.readFileSync(lockPath, "utf8")).token, "other");
+  }
 });
 
 test("a live holder makes the caller wait, then fail clearly, leaving the holder's lock alone", async () => {
