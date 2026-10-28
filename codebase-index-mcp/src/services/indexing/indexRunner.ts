@@ -16,7 +16,7 @@
 
 import { createIndexProgress, indexLog, indexWarn, type ProgressNotifier } from "./indexProgress.js";
 import { resolvePostPhasePolicy } from "../../config/performanceConfig.js";
-import { collectDirtyFiles, resolveCurrentBranch, resolveHeadCommitSha } from "../git/gitHelpers.js";
+import { collectDirtyFiles, excludeRulesFingerprint, resolveCurrentBranch, resolveHeadCommitSha } from "../git/gitHelpers.js";
 import type { GraphStore } from "../../repositories/graphStore.js";
 import type { ExtractionWorkerPool } from "../extractors/extractionWorkerPool.js";
 import { runIndexPipeline, INDEX_VERSION, SCOPE_FORCES_FULL_RUN, type PerformanceProfile } from "./indexPipeline.js";
@@ -181,6 +181,11 @@ export function createIndexRunner(options: IndexRunnerOptions): RunIndexAndResol
   let gitScope: string | undefined;
   /** MCP-ISSUE-106: the HEAD the git-scoped plan diffed to; the run records it. */
   let plannedHead: string | undefined;
+  /**
+   * MCP-ISSUE-106: the ignore-rule files outside the tree as this full / incremental run found them, read before the
+   * scan lists files (a later edit then makes the next plan walk, never miss), and recorded with the run.
+   */
+  let excludeRulesAtStart: string | null = null;
   if (mode === "dirty") {
     dirtyFileSet = extras.knownDirtyPaths ? new Set(extras.knownDirtyPaths) : collectDirtyFiles(repoPath);
     // MCP-ISSUE-042: union in files the refactor engine wrote. After a rollback the tree is clean
@@ -229,7 +234,11 @@ export function createIndexRunner(options: IndexRunnerOptions): RunIndexAndResol
     // MCP-ISSUE-106: after a HEAD move the run read and hashed every file to find the few that changed (13.6 s
     // for none on wec.aria). Git names them: the run is scoped like a dirty run — deletes pruned, dependents
     // re-extracted — unless the plan cannot vouch for the result, and then it walks the tree as before.
-    const plan = planGitScopedIncrementalFor(store, repoId, repoPath, { ...(limits.respectGitignore !== undefined && { respectGitignore: limits.respectGitignore }) });
+    excludeRulesAtStart = excludeRulesFingerprint(repoPath);
+    const plan = planGitScopedIncrementalFor(store, repoId, repoPath, {
+      ...(limits.respectGitignore !== undefined && { respectGitignore: limits.respectGitignore }),
+      excludeRules: excludeRulesAtStart
+    });
     if (plan.kind === "scoped") {
       dirtyFileSet = plan.paths;
       plannedHead = plan.headSha;
@@ -243,6 +252,7 @@ export function createIndexRunner(options: IndexRunnerOptions): RunIndexAndResol
   // Release L (MCP-ISSUE-095): a full / incremental run over a dirty tree indexes working-tree content; recorded so
   // the next incremental run does not fast-skip once the tree is clean again. A dirty run is that by definition.
   const treeDirtyAtStart = mode !== "dirty" && collectDirtyFiles(repoPath).size > 0;
+  if (mode === "full") excludeRulesAtStart = excludeRulesFingerprint(repoPath);
 
   const profileDecision = resolvePerformanceProfileDecision(
     store,
@@ -699,6 +709,7 @@ export function createIndexRunner(options: IndexRunnerOptions): RunIndexAndResol
   }
   store.recordRun(fullSummary);
   if (treeDirtyAtStart) store.markRunTreeDirty(fullSummary.runId);
+  if (excludeRulesAtStart) store.markRunExcludeRules(fullSummary.runId, excludeRulesAtStart);
   // Whatever the refactor engine wrote has now been through the graph (MCP-ISSUE-042).
   store.clearPendingReindexFiles(repoId);
   const recordElapsed = Date.now() - recordStart;

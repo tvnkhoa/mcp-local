@@ -1,4 +1,5 @@
 import { execFile, execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 
@@ -804,19 +805,16 @@ export function diffNameStatusSince(repoPath: string, fromSha: string, toSha = "
 }
 
 /**
- * MCP-ISSUE-106: the first ignore-rule file outside the tree — `.git/info/exclude` (per worktree, via `--git-path`)
- * or the user's `core.excludesFile` (default `$XDG_CONFIG_HOME/git/ignore`, else `~/.config/git/ignore`) — whose mtime
- * is at or after `sinceMs`, or null. A diff never shows these, yet they change which untracked files git lists.
- * "unknown" when git cannot be asked. A file deleted since is not seen (no mtime to compare): a known gap.
+ * MCP-ISSUE-106: the ignore-rule files outside the tree — `.git/info/exclude` (per worktree, via `--git-path`) and the
+ * user's `core.excludesFile` (default `$XDG_CONFIG_HOME/git/ignore`, else `~/.config/git/ignore`) — as absolute paths,
+ * whether they exist or not. Null when git cannot be asked.
  */
-export function excludeRulesChangedSince(repoPath: string, sinceMs: number): string | null {
-  if (!Number.isFinite(sinceMs)) return "unknown";
-  const candidates: string[] = [];
+function excludeRuleFiles(repoPath: string): string[] | null {
+  const files: string[] = [];
   try {
-    const infoExclude = runGit(repoPath, ["rev-parse", "--git-path", "info/exclude"]);
-    candidates.push(path.resolve(repoPath, infoExclude));
+    files.push(path.resolve(repoPath, runGit(repoPath, ["rev-parse", "--git-path", "info/exclude"])));
   } catch {
-    return "unknown";
+    return null;
   }
   let global: string | null = null;
   try {
@@ -825,13 +823,70 @@ export function excludeRulesChangedSince(repoPath: string, sinceMs: number): str
     global = null; // unset: git uses the XDG default
   }
   global ??= defaultGitExcludesFile();
-  if (global) candidates.push(path.resolve(repoPath, global));
+  if (global) files.push(path.resolve(repoPath, global));
+  return files;
+}
+
+/**
+ * MCP-ISSUE-106: the first ignore-rule file outside the tree ({@link excludeRuleFiles}) whose mtime is at or after
+ * `sinceMs`, or null. A diff never shows these, yet they change which untracked files git lists. "unknown" when git
+ * cannot be asked. Only for a base run that recorded no {@link excludeRulesFingerprint}: a file deleted since, or
+ * written with its mtime set back, is not seen.
+ */
+export function excludeRulesChangedSince(repoPath: string, sinceMs: number): string | null {
+  if (!Number.isFinite(sinceMs)) return "unknown";
+  const candidates = excludeRuleFiles(repoPath);
+  if (!candidates) return "unknown";
   for (const file of candidates) {
     try {
       if (fs.statSync(file).mtimeMs >= sinceMs) return file.split(path.sep).join("/");
     } catch {
       // absent: nothing to compare
     }
+  }
+  return null;
+}
+
+/**
+ * MCP-ISSUE-106: what the ignore-rule files outside the tree ({@link excludeRuleFiles}) hold — each path (forward
+ * slashes) mapped to the sha256 of its bytes, or "absent" — serialized; null when git cannot be asked. A full or
+ * incremental run records it as it starts (`index_runs.exclude_rules`), and the next git-scoped plan compares it with
+ * the current one, so a deleted file, a content change behind a reset mtime, or a `core.excludesFile` pointed
+ * elsewhere all walk the tree.
+ */
+export function excludeRulesFingerprint(repoPath: string): string | null {
+  const files = excludeRuleFiles(repoPath);
+  if (!files) return null;
+  const out: Record<string, string> = {};
+  for (const file of files) {
+    let digest = "absent";
+    try {
+      digest = createHash("sha256").update(fs.readFileSync(file)).digest("hex");
+    } catch {
+      // absent or unreadable: either way git applies no rules from it
+    }
+    out[file.split(path.sep).join("/")] = digest;
+  }
+  return JSON.stringify(out);
+}
+
+/**
+ * MCP-ISSUE-106: the first ignore-rule file whose {@link excludeRulesFingerprint} entry differs between `before` and
+ * `now` (either side missing counts), or null when both name the same files with the same bytes. "unknown" when
+ * `now` is null or either side does not parse.
+ */
+export function excludeRulesDiffer(before: string, now: string | null): string | null {
+  if (now === null) return "unknown";
+  let a: Record<string, string>;
+  let b: Record<string, string>;
+  try {
+    a = JSON.parse(before) as Record<string, string>;
+    b = JSON.parse(now) as Record<string, string>;
+  } catch {
+    return "unknown";
+  }
+  for (const file of new Set([...Object.keys(a), ...Object.keys(b)])) {
+    if (a[file] !== b[file]) return file;
   }
   return null;
 }
