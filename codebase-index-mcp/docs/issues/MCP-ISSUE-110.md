@@ -49,3 +49,6 @@
   ownership-tool call from that request's socket instead of keeping `null`; and log `http_identity_unresolved` with the
   failing step, so the next occurrence names its cause.
 - **Workaround:** re-run the harness; a client that hits it in use re-creates its preview.
+
+**Follow-up (2026-10-28, CI red on a5a3702):** this file broke `test:profile-responses`, not the gate change: it pushed the first
+code file out of the harness's 100-file sample. The harness now indexes `src/` whole. Also: `maxFiles` counts docs before the docs filter.

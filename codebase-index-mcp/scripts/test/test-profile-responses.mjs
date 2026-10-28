@@ -5,6 +5,7 @@
  * Usage: node scripts/test/test-profile-responses.mjs
  * Requires: npm run build first, and an indexed repo (uses the smoke-test-repo from the current working dir)
  */
+import path from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { makeTempDbPath } from "./_fixtures.mjs";
@@ -37,8 +38,10 @@ function assert(condition, label, details = "") {
 }
 
 async function main() {
-  const repoPath = process.cwd();
-  const repoId = "profile-test-repo";
+  // src/, whole. A sample of the package's first 100 files drifted into docs/ alone when one issue file was added
+  // (MCP-ISSUE-110's), leaving no code symbols and no CALLS edges; src/ holds only code, so a new doc cannot shift it.
+  const repoPath = path.join(process.cwd(), "src");
+  const repoId = "profile-test-src";
 
   const transport = new StdioClientTransport({
     command: "node",
@@ -63,11 +66,10 @@ async function main() {
   // branch, so the default timeout is honest again. If this script ever needs a raised
   // timeout, treat it as a query-plan regression, not a slow machine.
 
-  // Index current directory (bounded sample)
-  console.log("\n[setup] Indexing current repo...");
+  console.log("\n[setup] Indexing src/...");
   const indexResult = await client.callTool({
     name: "index_repository",
-    arguments: { repoId, repoPath, mode: "full", maxFiles: 100 }
+    arguments: { repoId, repoPath, mode: "full" }
   }, undefined, { timeout: 60_000 });
   const indexJson = readJson(indexResult).json;
   if (!indexJson?.runId) throw new Error("Indexing failed — no runId returned");
@@ -92,8 +94,8 @@ async function main() {
 
   // ── get_file_summary ──────────────────────────────────────────────────────
   console.log("\n[get_file_summary] profile tests");
-  const summaryNano = await client.callTool({ name: "get_file_summary", arguments: { repoId, filePath: "src/index.ts", profile: "nano" } });
-  const summaryCompact = await client.callTool({ name: "get_file_summary", arguments: { repoId, filePath: "src/index.ts", profile: "compact" } });
+  const summaryNano = await client.callTool({ name: "get_file_summary", arguments: { repoId, filePath: "index.ts", profile: "nano" } });
+  const summaryCompact = await client.callTool({ name: "get_file_summary", arguments: { repoId, filePath: "index.ts", profile: "compact" } });
   const summaryNanoJson = readJson(summaryNano).json;
   const nanoBytes = bytesOf(readTextContent(summaryNano));
   const compactBytes = bytesOf(readTextContent(summaryCompact));
@@ -107,8 +109,8 @@ async function main() {
 
   // ── get_dependency_graph ──────────────────────────────────────────────────
   console.log("\n[get_dependency_graph] profile tests");
-  const depNano = await client.callTool({ name: "get_dependency_graph", arguments: { repoId, filePath: "src/index.ts", profile: "nano" } });
-  const depCompact = await client.callTool({ name: "get_dependency_graph", arguments: { repoId, filePath: "src/index.ts", profile: "compact" } });
+  const depNano = await client.callTool({ name: "get_dependency_graph", arguments: { repoId, filePath: "index.ts", profile: "nano" } });
+  const depCompact = await client.callTool({ name: "get_dependency_graph", arguments: { repoId, filePath: "index.ts", profile: "compact" } });
   const depNanoJson = readJson(depNano).json;
   const depNanoBytes = bytesOf(readTextContent(depNano));
   const depCompactBytes = bytesOf(readTextContent(depCompact));
@@ -123,8 +125,8 @@ async function main() {
 
   // ── find_impact_files ─────────────────────────────────────────────────────
   console.log("\n[find_impact_files] profile tests");
-  const impactNano = await client.callTool({ name: "find_impact_files", arguments: { repoId, filePath: "src/graphStore.ts", profile: "nano" } });
-  const impactCompact = await client.callTool({ name: "find_impact_files", arguments: { repoId, filePath: "src/graphStore.ts", profile: "compact" } });
+  const impactNano = await client.callTool({ name: "find_impact_files", arguments: { repoId, filePath: "repositories/graphStore.ts", profile: "nano" } });
+  const impactCompact = await client.callTool({ name: "find_impact_files", arguments: { repoId, filePath: "repositories/graphStore.ts", profile: "compact" } });
   const impactNanoJson = readJson(impactNano).json;
   const impactNanoBytes = bytesOf(readTextContent(impactNano));
   const impactCompactBytes = bytesOf(readTextContent(impactCompact));
@@ -145,16 +147,19 @@ async function main() {
   // resolve null and skip every assertion below. Only standard/verbose return full records.
   const searchResult = await client.callTool({ name: "search_symbols", arguments: { repoId, query: "getImpactFilesImpl", strategy: "name", profile: "standard", limit: 1 } });
   const searchJson = readJson(searchResult).json;
-  // The 100-file sample need not contain this name. Any callable id will do here, and since release
-  // B.1 a vector near-neighbour comes back in `nearby`, no longer padded into `symbols`.
-  const symbolId = searchJson?.symbols?.[0]?.symbolId ?? searchJson?.nearby?.[0]?.symbolId ?? searchJson?.candidates?.[0]?.symbolId ?? null;
+  // All of src/ is indexed, so the exact name must resolve: a miss means the index lost code, not that a sample drifted.
+  const hit = searchJson?.symbols?.[0];
+  const symbolId = hit?.name === "getImpactFilesImpl" ? hit.symbolId : null;
 
   // Assert rather than skip. A silent skip here hid a broken lookup indefinitely.
-  assert(typeof symbolId === "string", "resolved a callable symbolId for get_call_chain");
+  assert(
+    typeof symbolId === "string",
+    "resolved a callable symbolId for get_call_chain",
+    `getImpactFilesImpl not found in src/ (${String(indexJson.filesIndexed)} files indexed); top hit ${JSON.stringify(hit ?? null)}`
+  );
 
   // The identity assertions below need a symbol that actually HAS callers, which the name above
-  // does not guarantee: this harness indexes only a 100-file sample, so a chosen symbol's callers
-  // may simply not be in it. Asking the graph for a CALLS edge with both endpoints resolved makes
+  // does not guarantee. Asking the graph for a CALLS edge with both endpoints resolved makes
   // the choice data-driven — and stops the assertions from silently skipping, which is exactly how
   // the identity gap in MCP-ISSUE-049 survived this suite in the first place.
   const edgePick = await client.callTool({
