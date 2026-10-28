@@ -1,12 +1,13 @@
 #!/usr/bin/env node
 /**
- * The documentation gate. Five checks, each closing a failure mode that produced a real defect:
+ * The documentation gate. Six checks, each closing a failure mode that produced a real defect:
  *
  *   links      every relative markdown link and `#anchor` resolves
  *   tool-args  every documented `tool_name({ prop: … })` matches the tool's inputSchema
  *   tool-names every tool-shaped name cited in a doc exists in a contract
  *   claims     prose lists that claim a capability ("tools with profile support") match the contract
  *   env-names  a deprecated env alias is never used as the operative name
+ *   encoding   every tracked text file is strict UTF-8 with no BOM
  *
  * Why each exists — all four were found by hand, none by a gate:
  *   - a skill template shipped `find_impact_files(changedFiles:)`, which `.strict()` rejects
@@ -30,6 +31,7 @@ import { execSync } from "node:child_process";
 
 import { SERVERS, WORKSPACE_ROOT } from "./lib/manifest.mjs";
 import { C, err, log, ok, warn } from "./lib/log.mjs";
+import { findEncodingViolations } from "./lib/textEncoding.mjs";
 
 const QUIET = process.argv.includes("--quiet");
 const R = WORKSPACE_ROOT;
@@ -213,7 +215,11 @@ for (const file of files) {
   }
 }
 
-const CHECKS = ["links", "tool-args", "tool-names", "claims", "env-names"];
+// 6. every tracked text file is strict UTF-8 without a BOM: an editor that re-saves in an ANSI code
+// page corrupts prose silently, and none of the checks above would notice.
+for (const v of findEncodingViolations(R)) add("encoding", v.file, 0, `${v.reason} (first bad byte offset ${v.offset})`);
+
+const CHECKS = ["links", "tool-args", "tool-names", "claims", "env-names", "encoding"];
 const counts = Object.fromEntries(CHECKS.map((c) => [c, findings.filter((f) => f.check === c).length]));
 
 if (!QUIET) {
@@ -232,4 +238,4 @@ if (findings.length > 0) {
   err(`docs:check — ${findings.length} finding(s) across ${files.length} markdown files`);
   process.exit(1);
 }
-ok(`docs:check — ${files.length} markdown files, all five checks clean`);
+ok(`docs:check — ${files.length} markdown files, all six checks clean`);
