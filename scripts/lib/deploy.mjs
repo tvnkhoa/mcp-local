@@ -148,18 +148,44 @@ export function deployHash(dir) {
   return h.digest("hex");
 }
 
-function newestMtime(dir) {
+function newestMtime(dir, skip = () => false) {
   if (!fs.existsSync(dir)) return null;
   let newest = 0;
-  for (const r of walkFiles(dir, "", [], () => false)) newest = Math.max(newest, fs.statSync(path.join(dir, ...r.split("/"))).mtimeMs);
+  for (const r of walkFiles(dir, "", [], skip)) newest = Math.max(newest, fs.statSync(path.join(dir, ...r.split("/"))).mtimeMs);
   return newest;
 }
 
-/** The dirs (relative to `root`) whose src/ has a file newer than anything in their dist/: edited since the last build. */
+/** A source file the build never emits: tests, specs, __tests__, declaration files. */
+const UNEMITTED = /(^|\/)__tests__\/|\.(test|spec)\.[cm]?tsx?$|\.d\.[cm]?ts$/;
+
+/** The `exclude` globs of `<pkg>/tsconfig.json` (JSONC), or [] when it is absent or unparsable. */
+function tsconfigExcludes(pkgDir) {
+  try {
+    const text = fs.readFileSync(path.join(pkgDir, "tsconfig.json"), "utf8");
+    // Strip comments outside strings, then trailing commas.
+    const json = text.replace(/"(?:[^"\\]|\\.)*"|\/\/[^\n]*|\/\*[\s\S]*?\*\//g, (m) => (m[0] === '"' ? m : "")).replace(/,(\s*[}\]])/g, "$1");
+    const ex = JSON.parse(json).exclude;
+    return Array.isArray(ex) ? ex.filter((g) => typeof g === "string") : [];
+  } catch {
+    return [];
+  }
+}
+
+/** A tsconfig exclude entry (`**`, `*`, `?`; a bare path also covers everything below it) as a regexp over a package-relative path. */
+function excludeRegExp(glob) {
+  const g = glob.replace(/^\.\//, "").replace(/\/+$/, "");
+  const body = g.replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*\*\/|\*\*|\*|\?/g, (t) => (t === "**/" ? "(?:.*/)?" : t === "**" ? ".*" : t === "*" ? "[^/]*" : "[^/]"));
+  return new RegExp(`^${body}(?:/.*)?$`);
+}
+
+/** The dirs (relative to `root`) whose src/ has a file the build emits that is newer than anything in their dist/: edited since the last build. */
 export function staleBuilds(root, dirs) {
   return dirs.filter((d) => {
-    const src = newestMtime(path.join(root, d, "src"));
-    const dist = newestMtime(path.join(root, d, "dist"));
+    const pkg = path.join(root, d);
+    const excluded = tsconfigExcludes(pkg).map(excludeRegExp);
+    const skip = (r, e) => !e.isDirectory() && (UNEMITTED.test(r) || excluded.some((x) => x.test(`src/${r}`)));
+    const src = newestMtime(path.join(pkg, "src"), skip);
+    const dist = newestMtime(path.join(pkg, "dist"));
     return src !== null && dist !== null && src > dist;
   });
 }

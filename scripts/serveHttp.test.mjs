@@ -17,7 +17,7 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { getServer } from "./lib/manifest.mjs";
-import { deployHash, importClosure, nativePackages } from "./lib/deploy.mjs";
+import { deployHash, importClosure, nativePackages, staleBuilds } from "./lib/deploy.mjs";
 import { isLink, removeTree } from "./lib/junctions.mjs";
 import { approvalSecretEnvName, approvalSecretFile, deployCheck, deployInUse, deployServer, ensureApprovalSecret, handOffTarget, httpClientEntry, httpEnvNames, isServeHttpFor, listDeploys, ownDeploy, parseListenerPid, pruneDeploys, readEnvFile, resolveServeEntry, restartServer, taskCreateArgs, taskDeniedHint, taskXml, verifyDeploy, writeEnvFile } from "./serve-http.mjs";
 
@@ -608,4 +608,32 @@ test("prune keeps a deploy when the in-use query answers nothing usable", () => 
     assert.deepEqual(pruneDeploys(server, { deployRoot, keep: 1, inUse }), [], JSON.stringify(out));
     assert.ok(fs.existsSync(path.join(first.dir, "srv", "dist", "index.js")), "the deploy is whole");
   }
+});
+
+test("staleBuilds: only a file the build emits can make a package stale", () => {
+  const root = fs.mkdtempSync(path.join(TMP, "stale-"));
+  const put = (rel, secs) => {
+    const f = path.join(root, rel);
+    fs.mkdirSync(path.dirname(f), { recursive: true });
+    fs.writeFileSync(f, "");
+    fs.utimesSync(f, secs, secs);
+  };
+  const tsconfig = '{\n  // JSONC\n  "exclude": ["node_modules", "dist", "src/**/*.test.ts", "src/fixtures",],\n}\n';
+  put("pkg/tsconfig.json", 1000);
+  fs.writeFileSync(path.join(root, "pkg/tsconfig.json"), tsconfig);
+  put("pkg/src/index.ts", 1000);
+  put("pkg/dist/index.js", 2000);
+  assert.deepEqual(staleBuilds(root, ["pkg"]), []);
+  put("pkg/src/a.test.ts", 3000);
+  put("pkg/src/b.spec.ts", 3000);
+  put("pkg/src/__tests__/c.ts", 3000);
+  put("pkg/src/types.d.ts", 3000);
+  put("pkg/src/fixtures/data.ts", 3000);
+  assert.deepEqual(staleBuilds(root, ["pkg"]), [], "tests, declarations and tsconfig-excluded files are not emitted");
+  put("pkg/src/real.ts", 3000);
+  assert.deepEqual(staleBuilds(root, ["pkg"]), ["pkg"]);
+  // An unparsable tsconfig falls back to the test-file rule alone.
+  fs.writeFileSync(path.join(root, "pkg/tsconfig.json"), "{ not json");
+  fs.rmSync(path.join(root, "pkg/src/real.ts"));
+  assert.deepEqual(staleBuilds(root, ["pkg"]), ["pkg"], "fixtures/data.ts is no longer excluded");
 });
