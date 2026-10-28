@@ -255,6 +255,65 @@ test("release I1b: an async tree read; two calls racing through it start one run
   }
 });
 
+test("MCP-ISSUE-110: a tree check that outlives the budget answers refreshing, runs once for every caller, and its run serves a later query", async () => {
+  const lockDir = mkdtempSync(path.join(tmpdir(), "cim-fresh-"));
+  const runs: IndexMode[] = [];
+  let reads = 0;
+  let indexed = "aaa111";
+  try {
+    const gate = createFreshnessGate({
+      enabled: true,
+      budgetMs: 30,
+      lockDir,
+      getRepoPath: () => lockDir,
+      getIndexedCommit: () => indexed,
+      // The first git read is on a loaded machine: far slower than the budget. Later reads are quick.
+      readTree: () => {
+        reads += 1;
+        return new Promise<RepoTreeState>((resolve) => setTimeout(() => resolve({ head: "bbb222", dirty: [] }), reads === 1 ? 200 : 1));
+      },
+      run: async (_repoId, _repoPath, mode) => {
+        runs.push(mode);
+        indexed = "bbb222";
+        return { runId: "run-1" } as IndexRunResult;
+      }
+    });
+    const t0 = Date.now();
+    const first = await gate.ensureFresh("r");
+    assert.ok(Date.now() - t0 < 150, `the answer keeps to the budget, not the check (${String(Date.now() - t0)} ms)`);
+    assert.equal(first.state, "refreshing");
+    assert.match(first.reason ?? "", /checking the working tree/);
+    const second = await gate.ensureFresh("r");
+    assert.equal(second.state, "refreshing", "a caller arriving mid-check joins it, already past the budget");
+    assert.equal(reads, 1, "one tree check for both callers");
+
+    await new Promise((r) => setTimeout(r, 300));
+    assert.deepEqual(runs, ["incremental"], "the background check started the refresh it found was needed");
+    assert.deepEqual(await gate.ensureFresh("r"), { state: "fresh" }, "and that run serves the next query");
+    assert.equal(runs.length, 1);
+  } finally {
+    rmSync(lockDir, { recursive: true, force: true });
+  }
+});
+
+test("MCP-ISSUE-110: a zero budget still waits for the tree check, and a failing check reaches its caller", async () => {
+  const lockDir = mkdtempSync(path.join(tmpdir(), "cim-fresh-"));
+  try {
+    const gate = createFreshnessGate({
+      enabled: true,
+      budgetMs: 0,
+      lockDir,
+      getRepoPath: () => lockDir,
+      getIndexedCommit: () => "aaa111",
+      readTree: () => new Promise<RepoTreeState>((resolve) => setTimeout(() => resolve({ head: "aaa111", dirty: [] }), 20)),
+      run: async () => { throw new Error("unused"); }
+    });
+    assert.deepEqual(await gate.ensureFresh("r"), { state: "fresh" });
+  } finally {
+    rmSync(lockDir, { recursive: true, force: true });
+  }
+});
+
 test("release I1b: a refresh run that fails (the worker crashed) answers stale and releases the lock", async () => {
   const lockDir = mkdtempSync(path.join(tmpdir(), "cim-fresh-"));
   let fail = true;
