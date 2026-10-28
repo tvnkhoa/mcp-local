@@ -546,13 +546,24 @@ export function deployServer(server, { workspaceRoot = WORKSPACE_ROOT, deployRoo
 /**
  * True when a live process names `dir` on its command line — the deploy's server and supervisor both do.
  * Windows only; elsewhere nothing maps a deploy's binaries in a way that breaks on delete.
+ *
+ * Fails CLOSED: only a bare count of 0 means free. Empty output, a warning, anything not all digits — or
+ * a query that throws — counts as in use, so the deploy is kept. Deleting natives first only backstops a
+ * binary already mapped; a lazily loaded one (a grammar, sqlite-vec) would go from a live deploy.
  */
 export function deployInUse(dir, { exec = defaultExec, platform = process.platform } = {}) {
   if (platform !== "win32") return false;
   // With the separator, so <sha>-1 never matches <sha>-10; PowerShell's own command line holds the needle too.
   const needle = `${path.resolve(dir)}${path.sep}`.toLowerCase().replace(/'/g, "''");
-  const script = `@(Get-CimInstance Win32_Process | Where-Object { $_.ProcessId -ne $PID -and $_.CommandLine -and $_.CommandLine.ToLower().Contains('${needle}') }).Count`;
-  return Number(exec("powershell", ["-NoProfile", "-NonInteractive", "-Command", script]).trim()) > 0;
+  // -ErrorAction Stop: a non-terminating WMI error would otherwise still print a count.
+  const script = `$ErrorActionPreference = 'Stop'; @(Get-CimInstance Win32_Process -ErrorAction Stop | Where-Object { $_.ProcessId -ne $PID -and $_.CommandLine -and $_.CommandLine.ToLower().Contains('${needle}') }).Count`;
+  let out;
+  try {
+    out = String(exec("powershell", ["-NoProfile", "-NonInteractive", "-Command", script])).trim();
+  } catch {
+    return true;
+  }
+  return !/^\d+$/.test(out) || Number(out) > 0;
 }
 
 /**

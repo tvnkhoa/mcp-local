@@ -19,7 +19,7 @@ import { fileURLToPath } from "node:url";
 import { getServer } from "./lib/manifest.mjs";
 import { deployHash, importClosure, nativePackages } from "./lib/deploy.mjs";
 import { isLink, removeTree } from "./lib/junctions.mjs";
-import { approvalSecretEnvName, approvalSecretFile, deployCheck, deployServer, ensureApprovalSecret, handOffTarget, httpClientEntry, httpEnvNames, isServeHttpFor, listDeploys, ownDeploy, parseListenerPid, pruneDeploys, readEnvFile, resolveServeEntry, restartServer, taskCreateArgs, taskDeniedHint, taskXml, verifyDeploy, writeEnvFile } from "./serve-http.mjs";
+import { approvalSecretEnvName, approvalSecretFile, deployCheck, deployInUse, deployServer, ensureApprovalSecret, handOffTarget, httpClientEntry, httpEnvNames, isServeHttpFor, listDeploys, ownDeploy, parseListenerPid, pruneDeploys, readEnvFile, resolveServeEntry, restartServer, taskCreateArgs, taskDeniedHint, taskXml, verifyDeploy, writeEnvFile } from "./serve-http.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), "serve-http-test-"));
@@ -587,4 +587,25 @@ test("hand-off: only to a current deploy whose supervisor copy exists, and never
   const cur = path.join(deployRoot, "srv", "current.json");
   fs.writeFileSync(cur, JSON.stringify({ ...JSON.parse(fs.readFileSync(cur, "utf-8")), supervisor: null }));
   assert.equal(handOffTarget(server, { deployRoot, own: null }), null, "a deploy made before the supervisor copy: serve from here");
+});
+
+test("deployInUse fails closed: only a bare 0 is free; empty, non-numeric or a throwing query keep the deploy", () => {
+  const ask = (out) => deployInUse("C:/d/x-1", { platform: "win32", exec: () => { if (out instanceof Error) throw out; return out; } });
+  assert.equal(ask("0\r\n"), false);
+  assert.equal(ask("2\r\n"), true);
+  for (const out of ["", "  \r\n", "WARNING: something\r\n0", "0 WARNING", "-1", "NaN", new Error("powershell failed")]) {
+    assert.equal(ask(out), true, JSON.stringify(String(out)));
+  }
+  assert.equal(deployInUse("C:/d/x-1", { platform: "linux", exec: () => { throw new Error("not called"); } }), false);
+});
+
+test("prune keeps a deploy when the in-use query answers nothing usable", () => {
+  const { root, server, deployRoot } = fakeWorkspace();
+  const first = deployServer(server, { workspaceRoot: root, deployRoot, sha: "f1" });
+  deployServer(server, { workspaceRoot: root, deployRoot, sha: "f2" });
+  for (const out of ["", "Get-CimInstance : Access denied"]) {
+    const inUse = (dir) => deployInUse(dir, { platform: "win32", exec: () => out });
+    assert.deepEqual(pruneDeploys(server, { deployRoot, keep: 1, inUse }), [], JSON.stringify(out));
+    assert.ok(fs.existsSync(path.join(first.dir, "srv", "dist", "index.js")), "the deploy is whole");
+  }
 });
