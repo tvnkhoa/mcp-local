@@ -20,7 +20,7 @@ import {
 import type { RefactorApplyHunkRecord, RefactorRollbackRecord } from "../../types/index.js";
 import { resolveResponseProfile } from "../../middleware/responseFormatter.js";
 import type { HandlerContext } from "./handlerContext.js";
-import { applyPreviewExclusively, assertApplyOwner, assertPreviewOwner, previewOwnerOf } from "./refactorApplyGate.js";
+import { NOOP_APPLY_NOTE, applyPreviewExclusively, assertApplyOwner, assertPreviewOwner, previewOwnerOf } from "./refactorApplyGate.js";
 
 export async function handleRefactorReplaceApply(
   args: {
@@ -57,7 +57,7 @@ export async function handleRefactorReplaceApply(
   const expectedApplyFiles = collectExpectedApplyFiles(preview.hunks, args.includeLowConfidence, constants.REFACTOR_LOW_CONFIDENCE_THRESHOLD);
   // Run the read-modify-write AND its persistence under one mutex so a following apply both sees the
   // committed change and detects it (FILE_CHANGED_BY_CONCURRENT_APPLY) instead of interleaving.
-  const { applyId, rollbackId, applyOutcome, applyRecord, beforeChangedFiles, afterChangedFiles } = await applyPreviewExclusively(
+  const { applyId, rollbackId, noop, applyOutcome, applyRecord, beforeChangedFiles, afterChangedFiles } = await applyPreviewExclusively(
     store, repo.repoPath, preview.preview.repoId, preview.preview.previewId, preview.hunks, expectedApplyFiles,
     { maxFilesPerBatch: args.maxFilesPerBatch, stopOnFirstConflict: args.stopOnFirstConflict, includeLowConfidence: args.includeLowConfidence, lowConfidenceThreshold: constants.REFACTOR_LOW_CONFIDENCE_THRESHOLD, clientSession: previewOwnerOf(ctx) }
   );
@@ -71,19 +71,26 @@ export async function handleRefactorReplaceApply(
   const conflicted = changes.filter((x) => x.status === "conflict");
   const totalReplacements = appliedFiles.reduce((sum, item) => sum + item.replacementCount, 0);
   const applyStatus = applyRecord.status;
+  // MCP-ISSUE-109: a no-op apply has no ids to return; say so instead of leaving the caller to infer it.
+  const ids = noop
+    ? { changed: 0, noop: true, note: NOOP_APPLY_NOTE }
+    : { applyId, rollbackId };
 
-  const diagnostics = { code: scopeDriftDetected ? "SCOPE_DRIFT_DETECTED" : applyStatus !== "applied" ? "APPLY_PARTIAL_OR_CONFLICT" : "APPLY_OK", machineReadable: true };
+  const diagnostics = {
+    code: scopeDriftDetected ? "SCOPE_DRIFT_DETECTED" : noop ? "APPLY_NOOP" : applyStatus !== "applied" ? "APPLY_PARTIAL_OR_CONFLICT" : "APPLY_OK",
+    machineReadable: true
+  };
   const executionPolicy = noLlmAudit(constants.REFACTOR_STRICT_APPROVAL);
 
   // nano: just the outcome summary — fastest confirmation that apply worked
   if (profile === "nano") {
-    return ctx.asText({ applyId, rollbackId, filesChanged: appliedFiles.length, totalHunksApplied: totalReplacements, success: applyStatus === "applied", diagnostics }, profile);
+    return ctx.asText({ ...ids, filesChanged: appliedFiles.length, totalHunksApplied: totalReplacements, success: noop || applyStatus === "applied", diagnostics }, profile);
   }
 
   // compact: no scopeCheck.expectedFiles (can be hundreds of entries)
   if (profile === "compact") {
     return ctx.asText({
-      applyId, rollbackId,
+      ...ids,
       appliedFiles: appliedFiles.map((x) => x.filePath),
       appliedReplacementsCount: totalReplacements,
       skippedReplacements: changes.filter((x) => x.status !== "applied").map((x) => ({ filePath: x.filePath, status: x.status, reason: x.reason })),
@@ -94,7 +101,7 @@ export async function handleRefactorReplaceApply(
   }
 
   return ctx.asText({
-    applyId, rollbackId,
+    ...ids,
     appliedFiles: appliedFiles.map((x) => x.filePath),
     appliedReplacementsCount: totalReplacements,
     skippedReplacements: changes.filter((x) => x.status !== "applied").map((x) => ({ filePath: x.filePath, status: x.status, reason: x.reason })),

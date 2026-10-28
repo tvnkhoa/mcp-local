@@ -306,6 +306,7 @@ Gate: 4/4 servers build + typecheck, 36/36 harnesses (63 assertions in the 049 h
 - [MCP-ISSUE-106 — an incremental run after a HEAD move read and hashed every file](issues/MCP-ISSUE-106.md)
 - [MCP-ISSUE-107 — a repo registered at a subdirectory of its git root answered "fresh" on stale content](issues/MCP-ISSUE-107.md)
 - [MCP-ISSUE-108 — a new session of the same client lost its pre-restart previews](issues/MCP-ISSUE-108.md)
+- [MCP-ISSUE-109 — a 0-line apply minted an applyId / rollbackId and stored a rollback row](issues/MCP-ISSUE-109.md)
 - [Confirmed fixed — 2026-08-05 re-verification of the 042–051 wave](issues/confirmed-fixed-2026-08-05-re-verification-of-the-042-051-wave.md)
 - [MCP-ISSUE-101 follow-ups (row 5: F2–F4)](issues/mcp-issue-101-follow-ups-row-5-f2-f4.md)
 

@@ -75,9 +75,13 @@ function runExclusiveApply<T>(fn: () => T): Promise<T> {
   return run;
 }
 
+export const NOOP_APPLY_NOTE = "apply changed 0 lines: no applyId/rollbackId was issued and nothing is stored to roll back; the preview is consumed.";
+
 type ExclusiveApplyResult = {
-  applyId: string;
-  rollbackId: string;
+  /** Null on a no-op apply (MCP-ISSUE-109): nothing was written, so there is nothing to roll back. */
+  applyId: string | null;
+  rollbackId: string | null;
+  noop: boolean;
   applyOutcome: ReturnType<typeof executeRefactorApplyPlan>;
   applyRecord: RefactorApplyRecord;
   beforeChangedFiles: Set<string>;
@@ -120,13 +124,16 @@ export function applyPreviewExclusively(
       totalFiles: appliedFiles.length, totalReplacements: appliedFiles.reduce((sum, item) => sum + item.replacementCount, 0), conflictCount,
       clientSession: opts.clientSession
     };
-    store.recordRefactorApply(applyRecord, applyOutcome.changes, applyOutcome.appliedHunks);
+    // MCP-ISSUE-109: an apply that wrote nothing and hit no conflict mints no credential and stores no
+    // rollback row — a rollbackId that restores zero files is noise. The preview is still consumed.
+    const noop = appliedFiles.length === 0 && conflictCount === 0;
+    if (!noop) store.recordRefactorApply(applyRecord, applyOutcome.changes, applyOutcome.appliedHunks);
     store.markRefactorPreviewStatus(previewId, mapPreviewStatusFromApplyStatus(applyRecord.status));
     // MCP-ISSUE-042: apply does not re-index either. Here the working tree at least goes dirty, so
     // git-based staleness still reports something — but recording the files keeps the two halves of
     // the refactor lifecycle symmetric and survives a later `git stash`/commit that cleans the tree.
     store.recordPendingReindexFiles(repoId, appliedFiles.map((x) => x.filePath), "written by refactor apply");
-    return { applyId, rollbackId, applyOutcome, applyRecord, beforeChangedFiles, afterChangedFiles };
+    return { applyId: noop ? null : applyId, rollbackId: noop ? null : rollbackId, noop, applyOutcome, applyRecord, beforeChangedFiles, afterChangedFiles };
   });
 }
 

@@ -1,9 +1,14 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
 
-import type { RefactorApplyRecord, RefactorPreviewRecord } from "../../types/index.js";
+import { sha256 } from "../../services/refactor/refactorUtils.js";
+
+import type { RefactorApplyRecord, RefactorPreviewHunkRecord, RefactorPreviewRecord } from "../../types/index.js";
 import type { HandlerContext } from "./handlerContext.js";
-import { OWNERSHIP_TOOLS, assertApplyOwner, assertPreviewOwner, previewOwnerOf } from "./refactorApplyGate.js";
+import { OWNERSHIP_TOOLS, applyPreviewExclusively, assertApplyOwner, assertPreviewOwner, previewOwnerOf } from "./refactorApplyGate.js";
 
 /**
  * MCP-ISSUE-108: a preview belongs to the client process (pid + start time), not to the protocol session —
@@ -81,4 +86,68 @@ test("only the preview / apply / rollback tools wait for the client identity; a 
     "refactor_symbol_migration", "rename_assist"
   ]);
   for (const read of ["search_symbols", "search_regex", "query_docs", "health_check", "index_repository"]) assert.equal(OWNERSHIP_TOOLS.has(read), false);
+});
+
+// MCP-ISSUE-109: an apply that changes 0 lines mints no ids and stores no rollback row.
+
+function fakeStore() {
+  const recorded: RefactorApplyRecord[] = [];
+  const previewStatus: string[] = [];
+  const store = {
+    getRecentAppliedFileHashes: () => new Map<string, string>(),
+    recordRefactorApply: (record: RefactorApplyRecord) => { recorded.push(record); },
+    markRefactorPreviewStatus: (_id: string, status: string) => { previewStatus.push(status); },
+    recordPendingReindexFiles: () => undefined
+  } as unknown as HandlerContext["store"];
+  return { store, recorded, previewStatus };
+}
+
+function hunk(content: string, riskFlags: string[]): RefactorPreviewHunkRecord {
+  return {
+    previewId: "p1", hunkId: "p1_000001", filePath: "a.txt", line: 1, startOffset: 0, endOffset: 3,
+    beforeText: "foo", afterText: "bar", replacementText: "bar", ownerType: null, symbolKind: null,
+    confidence: 1, riskFlags, fileHashBefore: sha256(content)
+  } as unknown as RefactorPreviewHunkRecord;
+}
+
+async function runApply(hunks: (content: string) => RefactorPreviewHunkRecord[]) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "noop-apply-"));
+  try {
+    const content = "foo baz";
+    fs.writeFileSync(path.join(dir, "a.txt"), content, "utf8");
+    const h = hunks(content);
+    const { store, recorded, previewStatus } = fakeStore();
+    const result = await applyPreviewExclusively(
+      store, dir, "repo", "p1", h, new Set(["a.txt"]),
+      { maxFilesPerBatch: 50, stopOnFirstConflict: true, includeLowConfidence: false, lowConfidenceThreshold: 0.7, clientSession: null }
+    );
+    return { result, recorded, previewStatus, after: fs.readFileSync(path.join(dir, "a.txt"), "utf8") };
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+test("a 0-line apply issues no applyId or rollbackId, stores no rollback row, and still consumes the preview", async () => {
+  const none = await runApply(() => []);
+  assert.equal(none.result.noop, true);
+  assert.equal(none.result.applyId, null);
+  assert.equal(none.result.rollbackId, null);
+  assert.equal(none.recorded.length, 0);
+  assert.equal(none.previewStatus.length, 1);
+
+  const skipped = await runApply((c) => [hunk(c, ["ambiguous_target"])]);
+  assert.equal(skipped.result.noop, true);
+  assert.equal(skipped.result.rollbackId, null);
+  assert.equal(skipped.recorded.length, 0);
+  assert.equal(skipped.after, "foo baz");
+});
+
+test("a normal apply still issues ids and stores the apply record", async () => {
+  const applied = await runApply((c) => [hunk(c, [])]);
+  assert.equal(applied.result.noop, false);
+  assert.match(applied.result.applyId ?? "", /^apply_/);
+  assert.match(applied.result.rollbackId ?? "", /^rollback_/);
+  assert.equal(applied.recorded.length, 1);
+  assert.equal(applied.recorded[0].rollbackId, applied.result.rollbackId);
+  assert.equal(applied.after, "bar baz");
 });
