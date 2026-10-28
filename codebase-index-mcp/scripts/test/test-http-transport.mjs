@@ -70,8 +70,12 @@ async function connect(port) {
   return { client, transport };
 }
 
+// MCP-ISSUE-110: start-up is module resolution on disk (611 modules) — measured 7.5 s idle and 48.7 s with
+// 6 CPU burners + 8 processes spawning PowerShell/git, so 30 s failed every run under that load.
+const SERVER_START_MS = 120_000;
+
 async function waitForServer(port, child) {
-  const deadline = Date.now() + 30_000;
+  const deadline = Date.now() + SERVER_START_MS;
   while (Date.now() < deadline) {
     if (child.exitCode !== null) throw new Error(`server exited early (${child.exitCode})`);
     try {
@@ -79,7 +83,7 @@ async function waitForServer(port, child) {
     } catch { /* not listening yet */ }
     await new Promise((r) => setTimeout(r, 200));
   }
-  throw new Error("server did not start listening within 30 s");
+  throw new Error(`server did not start listening within ${String(SERVER_START_MS / 1000)} s`);
 }
 
 const payload = (result) => JSON.parse(result.content[0].text);

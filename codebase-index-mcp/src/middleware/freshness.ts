@@ -720,6 +720,9 @@ export function createFreshnessGate(opts: FreshnessGateOptions): FreshnessGate {
   const lastCheck = new Map<string, { at: number; note: FreshnessNote }>();
   type Flight = { mode: "full" | "incremental" | "dirty"; startedAt: number; promise: Promise<IndexRunResult | null>; cleanup?: number };
   const inflight = new Map<string, Flight>();
+  /** MCP-ISSUE-110: a tree check in flight per repo; its promise never rejects (an error is carried, and rethrown to each waiter). */
+  type Check = { startedAt: number; promise: Promise<{ note: FreshnessNote } | { error: unknown }> };
+  const checking = new Map<string, Check>();
   const runChain = new Map<string, Promise<unknown>>();
 
   const serialize = <T>(repoId: string, fn: () => Promise<T>, mode?: IndexMode): Promise<T> => {
@@ -842,6 +845,53 @@ export function createFreshnessGate(opts: FreshnessGateOptions): FreshnessGate {
     const repoPath = opts.getRepoPath(repoId);
     if (!repoPath) return { state: "fresh" };
 
+    // MCP-ISSUE-110: the budget bounds the tree check too. A caller arriving while one is in flight joins it,
+    // so a slow check runs once however many callers wait on it.
+    let check = checking.get(repoId);
+    if (!check) {
+      const pending: Check = {
+        startedAt: started,
+        promise: checkTree(repoId, repoPath, repair, started).then(
+          (note) => ({ note }),
+          (error: unknown) => ({ error })
+        )
+      };
+      void pending.promise.finally(() => {
+        if (checking.get(repoId) === pending) checking.delete(repoId);
+      });
+      checking.set(repoId, pending);
+      check = pending;
+    }
+    return waitCheck(check);
+  };
+
+  /**
+   * MCP-ISSUE-110: the check's answer, or "refreshing" once the budget (from the check's start) is spent. Measured
+   * under load, the git read plus hashing 300 dirty files took 0.7–2.6 s against a 300 ms budget. A zero budget
+   * still waits for the check: it bounds only the wait for a run.
+   */
+  const waitCheck = async (check: Check): Promise<FreshnessNote> => {
+    const remaining = opts.budgetMs - (now() - check.startedAt);
+    let timer: NodeJS.Timeout | undefined;
+    const timeout = new Promise<"timeout">((resolve) => {
+      if (opts.budgetMs > 0) timer = setTimeout(() => resolve("timeout"), Math.max(0, remaining));
+    });
+    const outcome = await Promise.race([check.promise, timeout]);
+    if (timer) clearTimeout(timer);
+    if (outcome === "timeout") {
+      return {
+        state: "refreshing",
+        elapsedMs: now() - check.startedAt,
+        reason:
+          `checking the working tree against the index is still running after the ${String(opts.budgetMs)} ms query budget; ` +
+          "it continues in the background (and starts a refresh if one is needed) and a later query will use it. This answer comes from the previous index."
+      };
+    }
+    if ("error" in outcome) throw outcome.error;
+    return outcome.note;
+  };
+
+  const checkTree = async (repoId: string, repoPath: string, repair: RepairNeeded | null, started: number): Promise<FreshnessNote> => {
     let tree: RepoTreeState;
     try {
       tree = await opts.readTree(repoPath);
