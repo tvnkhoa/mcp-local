@@ -1,4 +1,4 @@
-﻿/**
+/**
  * `GraphStore` — the single entry point every caller uses to reach the graph.
  *
  * The SQL lives in the modules under `repositories/` and in the lane modules (`impactAnalyzer`,
