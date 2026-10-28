@@ -75,12 +75,16 @@ function runExclusiveApply<T>(fn: () => T): Promise<T> {
   return run;
 }
 
-export const NOOP_APPLY_NOTE = "apply changed 0 lines: no applyId/rollbackId was issued and nothing is stored to roll back; the preview is consumed.";
+export const NOOP_APPLY_NOTE = "apply changed 0 lines because there was nothing to change: no applyId/rollbackId was issued and nothing is stored to roll back; the preview is consumed.";
+export const BLOCKED_APPLY_NOTE = "apply changed 0 lines because every change was refused (risk flag, low confidence or conflict), NOT because there was nothing to do: no applyId/rollbackId was issued; see skippedReplacements / the preview's risk flags.";
 
 type ExclusiveApplyResult = {
   /** Null on a no-op apply (MCP-ISSUE-109): nothing was written, so there is nothing to roll back. */
   applyId: string | null;
   rollbackId: string | null;
+  /** True when at least one file was written; only then are there ids and a rollback row. */
+  written: boolean;
+  /** Benign no-op: nothing written and nothing refused (no hunks, or every skip is NO_EFFECTIVE_CHANGES). */
   noop: boolean;
   applyOutcome: ReturnType<typeof executeRefactorApplyPlan>;
   applyRecord: RefactorApplyRecord;
@@ -126,14 +130,16 @@ export function applyPreviewExclusively(
     };
     // MCP-ISSUE-109: an apply that wrote nothing and hit no conflict mints no credential and stores no
     // rollback row — a rollbackId that restores zero files is noise. The preview is still consumed.
-    const noop = appliedFiles.length === 0 && conflictCount === 0;
-    if (!noop) store.recordRefactorApply(applyRecord, applyOutcome.changes, applyOutcome.appliedHunks);
+    const written = appliedFiles.length > 0;
+    // Benign only when nothing was refused: a RISK_FLAG_BLOCKED / low-confidence skip or a conflict is a refusal, not a no-op.
+    const noop = !written && applyOutcome.changes.every((x) => x.status === "skipped" && x.reason === "NO_EFFECTIVE_CHANGES");
+    if (written) store.recordRefactorApply(applyRecord, applyOutcome.changes, applyOutcome.appliedHunks);
     store.markRefactorPreviewStatus(previewId, mapPreviewStatusFromApplyStatus(applyRecord.status));
     // MCP-ISSUE-042: apply does not re-index either. Here the working tree at least goes dirty, so
     // git-based staleness still reports something — but recording the files keeps the two halves of
     // the refactor lifecycle symmetric and survives a later `git stash`/commit that cleans the tree.
     store.recordPendingReindexFiles(repoId, appliedFiles.map((x) => x.filePath), "written by refactor apply");
-    return { applyId: noop ? null : applyId, rollbackId: noop ? null : rollbackId, noop, applyOutcome, applyRecord, beforeChangedFiles, afterChangedFiles };
+    return { applyId: written ? applyId : null, rollbackId: written ? rollbackId : null, written, noop, applyOutcome, applyRecord, beforeChangedFiles, afterChangedFiles };
   });
 }
 

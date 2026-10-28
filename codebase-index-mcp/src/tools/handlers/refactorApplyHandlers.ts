@@ -20,7 +20,7 @@ import {
 import type { RefactorApplyHunkRecord, RefactorRollbackRecord } from "../../types/index.js";
 import { resolveResponseProfile } from "../../middleware/responseFormatter.js";
 import type { HandlerContext } from "./handlerContext.js";
-import { NOOP_APPLY_NOTE, applyPreviewExclusively, assertApplyOwner, assertPreviewOwner, previewOwnerOf } from "./refactorApplyGate.js";
+import { BLOCKED_APPLY_NOTE, NOOP_APPLY_NOTE, applyPreviewExclusively, assertApplyOwner, assertPreviewOwner, previewOwnerOf } from "./refactorApplyGate.js";
 
 export async function handleRefactorReplaceApply(
   args: {
@@ -57,7 +57,7 @@ export async function handleRefactorReplaceApply(
   const expectedApplyFiles = collectExpectedApplyFiles(preview.hunks, args.includeLowConfidence, constants.REFACTOR_LOW_CONFIDENCE_THRESHOLD);
   // Run the read-modify-write AND its persistence under one mutex so a following apply both sees the
   // committed change and detects it (FILE_CHANGED_BY_CONCURRENT_APPLY) instead of interleaving.
-  const { applyId, rollbackId, noop, applyOutcome, applyRecord, beforeChangedFiles, afterChangedFiles } = await applyPreviewExclusively(
+  const { applyId, rollbackId, written, noop, applyOutcome, applyRecord, beforeChangedFiles, afterChangedFiles } = await applyPreviewExclusively(
     store, repo.repoPath, preview.preview.repoId, preview.preview.previewId, preview.hunks, expectedApplyFiles,
     { maxFilesPerBatch: args.maxFilesPerBatch, stopOnFirstConflict: args.stopOnFirstConflict, includeLowConfidence: args.includeLowConfidence, lowConfidenceThreshold: constants.REFACTOR_LOW_CONFIDENCE_THRESHOLD, clientSession: previewOwnerOf(ctx) }
   );
@@ -72,12 +72,14 @@ export async function handleRefactorReplaceApply(
   const totalReplacements = appliedFiles.reduce((sum, item) => sum + item.replacementCount, 0);
   const applyStatus = applyRecord.status;
   // MCP-ISSUE-109: a no-op apply has no ids to return; say so instead of leaving the caller to infer it.
-  const ids = noop
-    ? { changed: 0, noop: true, note: NOOP_APPLY_NOTE }
-    : { applyId, rollbackId };
+  const ids = written
+    ? { applyId, rollbackId }
+    : noop
+      ? { changed: 0, noop: true, note: NOOP_APPLY_NOTE }
+      : { changed: 0, blocked: true, note: BLOCKED_APPLY_NOTE };
 
   const diagnostics = {
-    code: scopeDriftDetected ? "SCOPE_DRIFT_DETECTED" : noop ? "APPLY_NOOP" : applyStatus !== "applied" ? "APPLY_PARTIAL_OR_CONFLICT" : "APPLY_OK",
+    code: scopeDriftDetected ? "SCOPE_DRIFT_DETECTED" : noop ? "APPLY_NOOP" : !written && conflicted.length === 0 ? "APPLY_BLOCKED" : applyStatus !== "applied" ? "APPLY_PARTIAL_OR_CONFLICT" : "APPLY_OK",
     machineReadable: true
   };
   const executionPolicy = noLlmAudit(constants.REFACTOR_STRICT_APPROVAL);

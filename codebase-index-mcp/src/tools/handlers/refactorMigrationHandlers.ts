@@ -25,7 +25,7 @@ import type { RefactorSymbolMigrationInput } from "../../services/refactor/refac
 import type { RefactorPreviewRecord, RefactorPreviewHunkRecord } from "../../types/index.js";
 import { resolveResponseProfile } from "../../middleware/responseFormatter.js";
 import type { HandlerContext } from "./handlerContext.js";
-import { NOOP_APPLY_NOTE, applyPreviewExclusively, assertPreviewOwner, previewOwnerOf } from "./refactorApplyGate.js";
+import { BLOCKED_APPLY_NOTE, NOOP_APPLY_NOTE, applyPreviewExclusively, assertPreviewOwner, previewOwnerOf } from "./refactorApplyGate.js";
 
 /**
  * The approval gate these two tools were missing. MCP-ISSUE-060, open since 2026-08-25.
@@ -114,7 +114,7 @@ export async function handleRefactorSymbolMigration(
     rejectedSiteCount?: number;
     rejectedSites?: { filePath: string; line: number; rule: string; detail: string }[];
     ambiguousReasons?: { filePath: string; line: number; rule: string; detail: string }[];
-    applyId?: string; rollbackId?: string; noop?: boolean; note?: string;
+    applyId?: string; rollbackId?: string; noop?: boolean; blocked?: boolean; changed?: number; applyStatus?: string; note?: string;
   }> = [];
   const suggestedFollowUpFiles = new Set<string>();
 
@@ -175,12 +175,14 @@ export async function handleRefactorSymbolMigration(
         store, repo.repoPath, args.repoId, previewId, hunkRecords, expectedApplyFiles,
         { maxFilesPerBatch: 50, stopOnFirstConflict: true, includeLowConfidence, lowConfidenceThreshold: constants.REFACTOR_LOW_CONFIDENCE_THRESHOLD, clientSession: previewOwnerOf(ctx) }
       );
-      if (applied.noop) {
-        resultRow.noop = true;
-        resultRow.note = NOOP_APPLY_NOTE;
-      } else {
+      resultRow.applyStatus = applied.applyRecord.status;
+      if (applied.written) {
         resultRow.applyId = applied.applyId ?? undefined;
         resultRow.rollbackId = applied.rollbackId ?? undefined;
+      } else {
+        resultRow.changed = 0;
+        if (applied.noop) resultRow.noop = true; else resultRow.blocked = true;
+        resultRow.note = applied.noop ? NOOP_APPLY_NOTE : BLOCKED_APPLY_NOTE;
       }
     }
     migrationResults.push(resultRow);
@@ -266,7 +268,7 @@ export async function handleChangeValueRepresentation(
     ambiguousReasons?: { filePath: string; line: number; rule: string; detail: string }[];
     rejectedSites?: { filePath: string; line: number; rule: string; detail: string }[];
     applyBlockedNote?: string;
-    applyId?: string; rollbackId?: string; applyStatus?: string; noop?: boolean; note?: string;
+    applyId?: string; rollbackId?: string; applyStatus?: string; noop?: boolean; blocked?: boolean; changed?: number; note?: string;
     executionPolicy: ReturnType<typeof noLlmAudit>;
   } = {
     repoId: args.repoId, dryRun: args.dryRun, property: args.property, requiredOwnerType: args.requiredOwnerType,
@@ -299,12 +301,13 @@ export async function handleChangeValueRepresentation(
       store, repo.repoPath, args.repoId, previewId, hunkRecords, expectedApplyFiles,
       { maxFilesPerBatch: 50, stopOnFirstConflict: true, includeLowConfidence, lowConfidenceThreshold: constants.REFACTOR_LOW_CONFIDENCE_THRESHOLD, clientSession: previewOwnerOf(ctx) }
     );
-    if (applied.noop) {
-      result.noop = true;
-      result.note = NOOP_APPLY_NOTE;
-    } else {
+    if (applied.written) {
       result.applyId = applied.applyId ?? undefined;
       result.rollbackId = applied.rollbackId ?? undefined;
+    } else {
+      result.changed = 0;
+      if (applied.noop) result.noop = true; else result.blocked = true;
+      result.note = applied.noop ? NOOP_APPLY_NOTE : BLOCKED_APPLY_NOTE;
     }
     result.applyStatus = applied.applyRecord.status;
   }

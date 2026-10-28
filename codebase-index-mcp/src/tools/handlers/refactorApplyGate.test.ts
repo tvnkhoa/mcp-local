@@ -129,21 +129,32 @@ async function runApply(hunks: (content: string) => RefactorPreviewHunkRecord[])
 
 test("a 0-line apply issues no applyId or rollbackId, stores no rollback row, and still consumes the preview", async () => {
   const none = await runApply(() => []);
+  assert.equal(none.result.written, false);
   assert.equal(none.result.noop, true);
   assert.equal(none.result.applyId, null);
   assert.equal(none.result.rollbackId, null);
   assert.equal(none.recorded.length, 0);
   assert.equal(none.previewStatus.length, 1);
 
+  // A refusal writes nothing and mints no ids too, but it is NOT a benign no-op: the handlers report it as not-success.
   const skipped = await runApply((c) => [hunk(c, ["ambiguous_target"])]);
-  assert.equal(skipped.result.noop, true);
+  assert.equal(skipped.result.written, false);
+  assert.equal(skipped.result.noop, false);
   assert.equal(skipped.result.rollbackId, null);
   assert.equal(skipped.recorded.length, 0);
   assert.equal(skipped.after, "foo baz");
+
+  const conflict = await runApply((c) => [{ ...hunk(c, []), fileHashBefore: sha256("something else") }]);
+  assert.equal(conflict.result.written, false);
+  assert.equal(conflict.result.noop, false);
+  assert.equal(conflict.result.applyId, null);
+  assert.equal(conflict.recorded.length, 0);
+  assert.equal(conflict.after, "foo baz");
 });
 
 test("a normal apply still issues ids and stores the apply record", async () => {
   const applied = await runApply((c) => [hunk(c, [])]);
+  assert.equal(applied.result.written, true);
   assert.equal(applied.result.noop, false);
   assert.match(applied.result.applyId ?? "", /^apply_/);
   assert.match(applied.result.rollbackId ?? "", /^rollback_/);
