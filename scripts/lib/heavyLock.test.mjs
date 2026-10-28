@@ -6,7 +6,7 @@ import path from "node:path";
 import test from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
-import { acquireHeavyLock, breakStale, STALE_AFTER_MS } from "./heavyLock.mjs";
+import { acquireHeavyLock, breakStale, PID_START_TOLERANCE_MS, readPidStart, STALE_AFTER_MS } from "./heavyLock.mjs";
 
 /**
  * The machine-wide heavy-check lock (row V-C). Every case uses its own lock file through
@@ -33,16 +33,21 @@ function writeHolder(lockPath, holder) {
 
 const quiet = () => {};
 
+// The one real read (PowerShell on Windows, ~2.5 s), started now so it overlaps every other test.
+const loadedAt = Date.now();
+const realRead = readPidStart(process.pid);
+
 /**
  * A child that takes the lock, holds it, and appends "enter <pid>" / "exit <pid>" to a journal while
  * holding it. The journal orders holds by the file system, not by Date.now(): two processes' clocks can
- * disagree by a millisecond on Windows, which made a timestamp comparison flake.
+ * disagree by a millisecond on Windows, which made a timestamp comparison flake. Its start-time reader
+ * answers "unknown" (pid + age only): the real one spawns PowerShell on Windows, ~2.5 s per waiter.
  */
 function holdInChild(lockPath, journal, holdMs = 400) {
   const script = `
     const { acquireHeavyLock } = await import(${JSON.stringify(MODULE)});
     const { appendFileSync, readFileSync } = await import("node:fs");
-    const lock = await acquireHeavyLock({ cmd: "child", pollMs: 25, log: () => {} });
+    const lock = await acquireHeavyLock({ cmd: "child", pollMs: 25, readStart: async () => null, log: () => {} });
     appendFileSync(${JSON.stringify(journal)}, "enter " + process.pid + "\\n");
     await new Promise((r) => setTimeout(r, ${String(holdMs)}));
     const mine = JSON.parse(readFileSync(process.env.MCP_HEAVY_LOCK_PATH, "utf8")).token === lock.token;
@@ -119,11 +124,50 @@ test("a holder whose pid is gone is broken", async () => {
   lock.release();
 });
 
-test("a live pid that has held the lock past the age cap is broken (pid reuse)", async () => {
+test("a live pid whose process started after the lock was taken is broken (pid reused)", async () => {
+  // process.pid is alive, but the process owning it started a minute after the holder wrote the lock.
   const lockPath = tempLock();
-  writeHolder(lockPath, { pid: process.pid, startedAt: new Date(Date.now() - STALE_AFTER_MS - 60_000).toISOString() });
-  const lock = await acquireHeavyLock({ cmd: "t", env: cleanEnv(lockPath), timeoutMs: 2_000, log: quiet });
+  const startedAt = Date.now() - 120_000;
+  writeHolder(lockPath, { pid: process.pid, startedAt: new Date(startedAt).toISOString() });
+  const lines = [];
+  const readStart = async () => startedAt + 60_000;
+  const lock = await acquireHeavyLock({ cmd: "t", env: cleanEnv(lockPath), timeoutMs: 2_000, readStart, log: (l) => lines.push(l) });
   assert.equal(lock.acquired, true);
+  assert.match(lines.join("\n"), new RegExp(`breaking pid ${String(process.pid)} .* was reused`));
+  assert.equal(JSON.parse(fs.readFileSync(lockPath, "utf8")).token, lock.token);
+  lock.release();
+});
+
+test("a live holder that started long before it took the lock (a long sleep) is held; its start is read once, not per poll", async () => {
+  const lockPath = tempLock();
+  const startedAt = Date.now();
+  writeHolder(lockPath, { pid: process.pid, startedAt: new Date(startedAt).toISOString() });
+  let reads = 0;
+  const readStart = async () => (reads++, startedAt - 8 * 3_600_000);
+  await assert.rejects(
+    acquireHeavyLock({ cmd: "t", env: cleanEnv(lockPath), timeoutMs: 200, pollMs: 20, readStart, log: quiet }),
+    (error) => error.code === "HEAVY_LOCK_TIMEOUT"
+  );
+  assert.equal(reads, 1);
+  assert.equal(JSON.parse(fs.readFileSync(lockPath, "utf8")).token, "other");
+});
+
+test("an unreadable start time falls back to the age cap", async () => {
+  const readStart = async () => null;
+  const fresh = tempLock();
+  writeHolder(fresh, { pid: process.pid, startedAt: new Date().toISOString() });
+  await assert.rejects(
+    acquireHeavyLock({ cmd: "t", env: cleanEnv(fresh), timeoutMs: 100, pollMs: 20, readStart, log: quiet }),
+    (error) => error.code === "HEAVY_LOCK_TIMEOUT"
+  );
+  assert.equal(JSON.parse(fs.readFileSync(fresh, "utf8")).token, "other", "held while younger than the cap");
+
+  const old = tempLock();
+  writeHolder(old, { pid: process.pid, startedAt: new Date(Date.now() - STALE_AFTER_MS - 60_000).toISOString() });
+  const lines = [];
+  const lock = await acquireHeavyLock({ cmd: "t", env: cleanEnv(old), timeoutMs: 2_000, readStart, log: (l) => lines.push(l) });
+  assert.equal(lock.acquired, true);
+  assert.match(lines.join("\n"), /held for more than 3 h/);
   lock.release();
 });
 
@@ -131,8 +175,9 @@ test("a live holder makes the caller wait, then fail clearly, leaving the holder
   const lockPath = tempLock();
   writeHolder(lockPath, { pid: process.pid, startedAt: new Date().toISOString() });
   const lines = [];
+  const readStart = async () => Date.now() - 60_000;
   await assert.rejects(
-    acquireHeavyLock({ cmd: "t", env: cleanEnv(lockPath), timeoutMs: 150, pollMs: 20, log: (l) => lines.push(l) }),
+    acquireHeavyLock({ cmd: "t", env: cleanEnv(lockPath), timeoutMs: 150, pollMs: 20, readStart, log: (l) => lines.push(l) }),
     (error) => error.code === "HEAVY_LOCK_TIMEOUT" && /npm test/.test(error.message)
   );
   assert.equal(lines.length, 1, "the holder is announced once, not every poll");
@@ -167,4 +212,11 @@ test("a stale inherited token does not skip the lock", async () => {
   const lock = await acquireHeavyLock({ cmd: "t", env: { ...cleanEnv(lockPath), MCP_HEAVY_LOCK_TOKEN: "gone" }, log: quiet });
   assert.equal(lock.acquired, true);
   lock.release();
+});
+
+test("the platform reader reads this process's start time: before this file loaded, and recent", async () => {
+  const read = await realRead;
+  assert.ok(Number.isFinite(read), `no start time read on ${process.platform}`);
+  assert.ok(read <= loadedAt + PID_START_TOLERANCE_MS, `read ${new Date(read).toISOString()} is after load ${new Date(loadedAt).toISOString()}`);
+  assert.ok(loadedAt - read < 60_000, `read ${new Date(read).toISOString()} is not this test process`);
 });
