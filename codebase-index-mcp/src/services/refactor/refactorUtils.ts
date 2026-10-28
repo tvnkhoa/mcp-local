@@ -556,11 +556,11 @@ export function deriveApplyStatus(changes: Array<{ status: string }>): "applied"
   return "applied";
 }
 
-export function noLlmAudit(strictApproval: boolean): { decisionSource: "rule_engine"; llmInvolved: false; approvalMode: "strict" | "local-fallback" } {
+export function noLlmAudit(strictApproval: boolean): { decisionSource: "rule_engine"; llmInvolved: false; approvalMode: "strict" | "generated-secret" } {
   return {
     decisionSource: "rule_engine",
     llmInvolved: false,
-    approvalMode: strictApproval ? "strict" : "local-fallback"
+    approvalMode: strictApproval ? "strict" : "generated-secret"
   };
 }
 

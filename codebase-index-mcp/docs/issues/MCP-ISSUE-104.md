@@ -29,3 +29,4 @@
   inherited entries (or no group/other mode bits off Windows); a short file is refused.
 - **Not covered:** an existing env file that sets the secret keeps it, at whatever ACL that file has.
 
+- **Label (28 Oct):** `executionPolicy.approvalMode` non-strict value renamed from the old fallback label to `"generated-secret"` (it means the secret was generated at startup or persisted per user, not a fallback); the strict default is unchanged.
