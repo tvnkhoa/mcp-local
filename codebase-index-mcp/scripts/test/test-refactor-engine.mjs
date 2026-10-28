@@ -252,8 +252,8 @@ public sealed class FixtureNoRewrite
   assert(indexJson?.runId != null || indexJson?.indexedFiles >= 0 || indexJson?.status != null,
     "index_repository succeeded", readTextContent(indexResult).slice(0, 300));
 
-  // ── 3.2  Preview with no-match pattern → apply → diagnostics APPLY_PARTIAL_OR_CONFLICT ──
-  console.log("\n  [3.2] Preview (no-match) → apply → expect APPLY_PARTIAL_OR_CONFLICT...");
+  // ── 3.2  Preview with no-match pattern → apply → diagnostics APPLY_BLOCKED or APPLY_NOOP (MCP-ISSUE-109) ──
+  console.log("\n  [3.2] Preview (no-match) → apply → expect no ids, success false unless benign...");
   const previewNoMatch = await client.callTool({
     name: "refactor_replace_preview",
     arguments: {
@@ -279,9 +279,14 @@ public sealed class FixtureNoRewrite
     });
     const applyNoMatchJson = readJson(applyNoMatch);
     assert(
-      applyNoMatchJson?.diagnostics?.code === "APPLY_PARTIAL_OR_CONFLICT",
-      "no-match apply → APPLY_PARTIAL_OR_CONFLICT",
+      applyNoMatchJson?.diagnostics?.code === "APPLY_NOOP",
+      "no-match apply (no hunks) → APPLY_NOOP, benign",
       `got: ${applyNoMatchJson?.diagnostics?.code}`
+    );
+    assert(
+      applyNoMatchJson?.noop === true && applyNoMatchJson?.changed === 0 && applyNoMatchJson?.applyId == null && applyNoMatchJson?.rollbackId == null,
+      "no-match apply → no applyId/rollbackId, changed 0 (MCP-ISSUE-109)",
+      JSON.stringify(applyNoMatchJson).slice(0, 300)
     );
     assert(
       Array.isArray(applyNoMatchJson?.appliedFiles) && applyNoMatchJson.appliedFiles.length === 0,
@@ -489,8 +494,10 @@ public sealed class FixtureNoRewrite
   });
   const blockedApplyJson = readJson(blockedApply);
   assert(
-    blockedApplyJson?.migrationMap?.[0]?.applyId != null,
-    "blocked migration still records apply attempt",
+    blockedApplyJson?.migrationMap?.[0]?.applyId == null && blockedApplyJson?.migrationMap?.[0]?.rollbackId == null
+      && blockedApplyJson?.migrationMap?.[0]?.blocked === true && blockedApplyJson?.migrationMap?.[0]?.noop !== true
+      && blockedApplyJson?.migrationMap?.[0]?.applyStatus !== "applied",
+    "blocked migration writes nothing, issues no ids and is reported blocked, not a no-op (MCP-ISSUE-109)",
     JSON.stringify(blockedApplyJson?.migrationMap?.[0] ?? null).slice(0, 300)
   );
   const fileDAfter = await import("fs").then(({ readFileSync }) => readFileSync(fileDPath, "utf8"));
