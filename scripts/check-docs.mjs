@@ -217,7 +217,7 @@ for (const file of files) {
 
 // 6. every tracked text file is strict UTF-8 without a BOM: an editor that re-saves in an ANSI code
 // page corrupts prose silently, and none of the checks above would notice.
-for (const v of findEncodingViolations(R)) add("encoding", v.file, 0, `${v.reason} (first bad byte offset ${v.offset})`);
+for (const v of await findEncodingViolations(R)) add("encoding", v.file, 0, `${v.reason} (first bad byte offset ${v.offset})`);
 
 const CHECKS = ["links", "tool-args", "tool-names", "claims", "env-names", "encoding"];
 const counts = Object.fromEntries(CHECKS.map((c) => [c, findings.filter((f) => f.check === c).length]));
