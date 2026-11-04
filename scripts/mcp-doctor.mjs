@@ -41,7 +41,7 @@ import { findMissingEnvPaths } from "./lib/envPaths.mjs";
 import { parseArgs, resolveServers } from "./lib/cli.mjs";
 import { findStaleRunningServers } from "./lib/runningServers.mjs";
 import { C, log, section, banner, ok, warn, err, info } from "./lib/log.mjs";
-import { currentDeploy, defaultEnvFile, deployCheck, httpEnvNames, readEnvFile, runningDeploy, taskName } from "./serve-http.mjs";
+import { currentDeploy, defaultEnvFile, deployCheck, httpEnvNames, readEnvFile, readRestartRecords, restartLogFile, restartsCheck, runningDeploy, taskName } from "./serve-http.mjs";
 import { checkTaskWritable } from "./lib/taskAcl.mjs";
 
 const ARGS = parseArgs(process.argv.slice(2), { skipStart: ["--skip-start"] }, { repo: ["--repo"] });
@@ -371,6 +371,10 @@ async function checkServer(server, agents) {
     const [status, msg] = deployCheck(currentDeploy(server), runningDeploy(server));
     checks.push(["deploy", status, msg]);
     if (status !== "pass") fix.push(`node scripts/serve-http.mjs --server ${server.key} --restart`);
+    // MCP-ISSUE-115: the supervisor's respawns (time, pid, exit code/signal), last five.
+    const [rStatus, rMsg] = restartsCheck(readRestartRecords(restartLogFile(server), { last: 50 }));
+    checks.push(["restarts", rStatus, rMsg]);
+    if (rStatus === "fail") fix.push(`node scripts/serve-http.mjs --server ${server.key} --restart   # after reading ${restartLogFile(server)} and the server log`);
   }
 
   // The logon task's ACL: one created elevated cannot be replaced or deleted from a normal prompt.

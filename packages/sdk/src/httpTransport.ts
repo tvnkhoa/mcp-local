@@ -49,6 +49,20 @@ const DEFAULT_SESSION_IDLE_MS = 8 * 60 * 60 * 1000;
 /** A full server evicts its least recently used session only if it has been quiet this long. */
 const DEFAULT_EVICT_MIN_IDLE_MS = 5 * 60 * 1000;
 const DEFAULT_MAX_BODY_BYTES = 4 * 1024 * 1024;
+/**
+ * MCP-ISSUE-115: how long an idle keep-alive socket stays open. Node's default is 5 s, inside the window in which
+ * a client reuses a pooled socket, so a request written as the server closes it fails with ECONNRESET (measured:
+ * a keep-alive client reusing after 6 s idle). Above every client's reuse window; loopback, so an idle socket is cheap.
+ */
+export const DEFAULT_KEEP_ALIVE_TIMEOUT_MS = 65_000;
+/** Time to receive a request's headers; Node requires it above `keepAliveTimeout`, or a reused socket can be cut. */
+const HEADERS_TIMEOUT_MARGIN_MS = 5_000;
+/**
+ * Time to RECEIVE a whole request (headers + body), not to answer it: a tool call that runs for minutes is not cut
+ * by it. Bodies are capped at 4 MiB over loopback, so one minute is generous; it is set rather than left to the
+ * Node default so the bound is visible here.
+ */
+export const DEFAULT_REQUEST_TIMEOUT_MS = 60_000;
 
 export interface HttpTransportOptions {
   /** TCP port on 127.0.0.1. 0 picks a free one (tests); read it back from `port()`. */
@@ -84,6 +98,10 @@ export interface HttpTransportOptions {
    */
   readonly resolveProcessStartTime?: (pid: number) => Promise<string | null>;
   readonly maxBodyBytes?: number;
+  /** MCP-ISSUE-115: idle keep-alive socket lifetime. Default {@link DEFAULT_KEEP_ALIVE_TIMEOUT_MS}. */
+  readonly keepAliveTimeoutMs?: number;
+  /** MCP-ISSUE-115: time to receive a whole request (not to answer it). Default {@link DEFAULT_REQUEST_TIMEOUT_MS}. */
+  readonly requestTimeoutMs?: number;
   /**
    * MCP-ISSUE-103: where to keep `session id → sha256(bearer)` across restarts (see `httpSessionStore.ts`). Set, a
    * request whose session id this process does not know is re-adopted iff its bearer hashes to the one
@@ -472,6 +490,12 @@ export async function startHttpTransport(
       sendJsonRpcError(res, 500, -32603, "Internal error");
     });
   });
+  // MCP-ISSUE-115: set explicitly, never Node's defaults (keep-alive 5 s). `timeout` 0: an SSE stream may sit quiet.
+  const keepAliveTimeoutMs = options.keepAliveTimeoutMs ?? DEFAULT_KEEP_ALIVE_TIMEOUT_MS;
+  httpServer.keepAliveTimeout = keepAliveTimeoutMs;
+  httpServer.headersTimeout = keepAliveTimeoutMs + HEADERS_TIMEOUT_MARGIN_MS;
+  httpServer.requestTimeout = Math.max(options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS, httpServer.headersTimeout);
+  httpServer.timeout = 0;
 
   await new Promise<void>((resolve, reject) => {
     httpServer.once("error", reject);
