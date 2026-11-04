@@ -90,10 +90,11 @@ every server's build + typecheck, every server's tests except codebase-index's h
 touched `test:*`, `contracts:check`, `generate:check`, `docs:check`. `verify:all` only before a release or
 when the owner asks; when several rows land the same day, gate once after the last merge, before the push.
 
-**In a git worktree**, use `node scripts/worktree.mjs add <name> [--base <sha>]` (creates
+**In a git worktree**, use `node scripts/worktree.mjs add <name> [--base <sha>] [--no-build]` (creates
 `../mcp-local-wt-<name>` on branch `wt/<name>`), `list`, and `remove <name> [--force]`. `add` makes each
 `node_modules` a real dir of per-entry junctions to the main tree's, with `@mcp/*` pointing at the
-**worktree's** `packages/*` (a whole-dir junction would build and test main's packages). `remove` unlinks
+**worktree's** `packages/*` (a whole-dir junction would build and test main's packages), then runs
+`npm run build:packages` there (`--no-build` skips it). `remove` unlinks
 every junction as a link before `git worktree remove`, refuses uncommitted changes without `--force`, and
 keeps the branch. Never `rm -r` a worktree or a node_modules in one (it follows junctions into main), and
 never `npm install` in one (it writes through the junctions).
