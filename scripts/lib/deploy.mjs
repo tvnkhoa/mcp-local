@@ -10,8 +10,18 @@ import path from "node:path";
 /** A file the OS maps into the process (LoadLibrary/dlopen) and so keeps locked while it runs. */
 const NATIVE_FILE = /\.(node|dll|so|dylib)$/i;
 
-/** True when the package at `dir` holds a native file, itself or in any package of its nested node_modules. */
-function hasNativeFile(dir, depth, maxDepth = depth) {
+/**
+ * True when the package at `dir` holds a native file, itself or in any package of its nested node_modules.
+ * `seen` holds the real path of every dir already walked, so a junction or symlink cycle ends the walk.
+ */
+function hasNativeFile(dir, depth, maxDepth = depth, seen = new Set()) {
+  try {
+    const real = fs.realpathSync(dir);
+    if (seen.has(real)) return false;
+    seen.add(real);
+  } catch {
+    return false;
+  }
   let entries;
   try {
     entries = fs.readdirSync(dir, { withFileTypes: true });
@@ -24,8 +34,8 @@ function hasNativeFile(dir, depth, maxDepth = depth) {
     const sub = path.join(dir, e.name);
     // A nested node_modules restarts the depth: each package in it is scanned like a top-level one.
     if (e.name === "node_modules") {
-      if (Object.values(packagesIn(sub)).some((p) => hasNativeFile(p, maxDepth))) return true;
-    } else if (depth > 0 && hasNativeFile(sub, depth - 1, maxDepth)) return true;
+      if (Object.values(packagesIn(sub)).some((p) => hasNativeFile(p, maxDepth, maxDepth, seen))) return true;
+    } else if (depth > 0 && hasNativeFile(sub, depth - 1, maxDepth, seen)) return true;
   }
   return false;
 }

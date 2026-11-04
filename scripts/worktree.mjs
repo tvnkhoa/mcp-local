@@ -3,7 +3,7 @@
 /**
  * A git worktree of this workspace that can build and test at once (V-B).
  *
- *   node scripts/worktree.mjs add <name> [--base <sha>]   # ../<repo>-wt-<name> on branch wt/<name>, node_modules linked
+ *   node scripts/worktree.mjs add <name> [--base <sha>] [--no-build]   # ../<repo>-wt-<name> on branch wt/<name>, node_modules linked, packages built
  *   node scripts/worktree.mjs remove <name> [--force]     # unlink node_modules, then git worktree remove
  *   node scripts/worktree.mjs list
  *
@@ -13,6 +13,10 @@
  * `@mcp/*`, which point at the WORKTREE's packages/*, or every build and test there would run main's
  * packages. Junctioning a whole node_modules would carry main's `@mcp` links with it.
  *
+ * After linking, `add` runs `npm run build:packages` in the new worktree (servers and every scripts/ entry
+ * point need packages/*\/dist, which a fresh checkout lacks); `--no-build` skips it. A failed build is
+ * reported, not fatal: the worktree stays, and the build can be re-run by hand.
+ *
  * `remove` unlinks those junctions one by one (scripts/lib/junctions.mjs `removeTree`, which never walks
  * a link) before `git worktree remove`, so nothing in the main tree is reachable while anything deletes.
  * Git deletes THROUGH a junction it meets, so any link left anywhere in the worktree (an lstat walk) makes
@@ -21,14 +25,14 @@
  * hold commits not merged yet.
  */
 
-import { execFileSync } from "node:child_process";
+import { execFileSync, execSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import process from "node:process";
 import { pathToFileURL } from "node:url";
 
 import { isLink, linkDir, linkEntries, removeTree } from "./lib/junctions.mjs";
-import { err, info, ok } from "./lib/log.mjs";
+import { err, info, ok, warn } from "./lib/log.mjs";
 
 const git = (cwd, args) => execFileSync("git", ["-C", cwd, ...args], { encoding: "utf-8" }).trim();
 
@@ -115,18 +119,38 @@ export function unlinkNodeModules(wt, dirs) {
   return removed;
 }
 
-export function addWorktree(name, { cwd = process.cwd(), base = "HEAD", dirs } = {}) {
+/** The real build: `npm run build:packages` in the worktree (shell: npm is a .cmd on Windows). */
+export function buildPackages(wt) {
+  execSync("npm run build:packages", { cwd: wt, stdio: "inherit" });
+}
+
+/**
+ * `build` is a function `(wt) => void` run after linking, or false/absent for none; the CLI passes
+ * `buildPackages` unless `--no-build`. A build that throws is returned as `buildError`, never rethrown.
+ */
+export function addWorktree(name, { cwd = process.cwd(), base = "HEAD", dirs, build = false } = {}) {
   if (!validName(name)) throw new Error(`bad worktree name ${JSON.stringify(name)}: letters, digits, . _ - only`);
   const main = mainRoot(cwd);
   const wt = worktreePath(main, name);
   if (fs.existsSync(wt)) throw new Error(`${wt} already exists`);
   git(main, ["worktree", "add", "-b", `wt/${name}`, wt, base]);
+  let linked;
   try {
-    return { path: wt, branch: `wt/${name}`, linked: linkNodeModules(main, wt, dirs ?? nodeModulesDirs(main)) };
+    linked = linkNodeModules(main, wt, dirs ?? nodeModulesDirs(main));
   } catch (e) {
     unlinkNodeModules(wt, dirs ?? nodeModulesDirs(main));
     throw e;
   }
+  const result = { path: wt, branch: `wt/${name}`, linked, built: false, buildError: null };
+  if (typeof build === "function") {
+    try {
+      build(wt);
+      result.built = true;
+    } catch (e) {
+      result.buildError = e.message;
+    }
+  }
+  return result;
 }
 
 /**
@@ -191,15 +215,16 @@ function main() {
   const flag = (f) => rest.includes(f);
   const value = (f) => (rest.includes(f) ? rest[rest.indexOf(f) + 1] : undefined);
   if (cmd === "add") {
-    const r = addWorktree(name, { base: value("--base") ?? "HEAD" });
-    ok(`${r.path} on ${r.branch}; node_modules linked in ${r.linked.length} dirs (${r.linked.reduce((n, d) => n + d.entries, 0)} entries)`);
+    const r = addWorktree(name, { base: value("--base") ?? "HEAD", build: flag("--no-build") ? false : buildPackages });
+    ok(`${r.path} on ${r.branch}; node_modules linked in ${r.linked.length} dirs (${r.linked.reduce((n, d) => n + d.entries, 0)} entries)${r.built ? "; packages built" : ""}`);
+    if (r.buildError) warn(`build:packages failed (${r.buildError}) — the worktree is kept; run \`npm run build:packages\` in it`);
   } else if (cmd === "remove") {
     const r = removeWorktree(name, { force: flag("--force") });
     ok(`removed ${r.path} (node_modules unlinked in ${r.unlinked.length} dirs; branch kept)`);
   } else if (cmd === "list") {
     for (const w of listWorktrees()) info(`${w.path}  ${w.head}  ${w.branch}${w.linked ? "" : "  (no node_modules)"}`);
   } else {
-    throw new Error("usage: worktree.mjs add <name> [--base <sha>] | remove <name> [--force] | list");
+    throw new Error("usage: worktree.mjs add <name> [--base <sha>] [--no-build] | remove <name> [--force] | list");
   }
 }
 

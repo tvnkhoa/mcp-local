@@ -281,14 +281,20 @@ function processInfo(exec, pid) {
 }
 
 /**
- * A node process running serve-http.mjs for exactly this server: node is the program, serve-http.mjs its
- * script and `--server <key>` follows. The task's `conhost --headless node ...` names the same words, so
- * the program must be node — conhost is not the hand-off.
+ * A node process running serve-http.mjs for exactly this server: node is the program, serve-http.mjs the
+ * script (node's own `--flags` may sit between them) and `--server <key>` or `--server=<key>` follows. The
+ * task's `conhost --headless node ...` names the same words, so the program must be node — conhost is not
+ * the hand-off.
  */
 export function isServeHttpFor(cmd, server) {
-  const words = ((cmd ?? "").match(/"[^"]*"|\S+/g) ?? []).map((w) => w.replace(/^"|"$/g, ""));
-  const i = words.indexOf("--server");
-  return /(^|[\\/])node(\.exe)?$/i.test(words[0] ?? "") && /(^|[\\/])serve-http\.mjs$/i.test(words[1] ?? "") && i >= 0 && words[i + 1] === server.key;
+  const words = ((cmd ?? "").match(/"[^"]*"|\S+/g) ?? []).map((w) => w.replace(/"/g, ""));
+  if (!/(^|[\\/])node(\.exe)?$/i.test(words[0] ?? "")) return false;
+  let script = 1;
+  while (script < words.length && words[script].startsWith("-")) script++;
+  if (!/(^|[\\/])serve-http\.mjs$/i.test(words[script] ?? "")) return false;
+  const args = words.slice(script + 1);
+  const i = args.indexOf("--server");
+  return (i >= 0 && args[i + 1] === server.key) || args.includes(`--server=${server.key}`);
 }
 
 /**

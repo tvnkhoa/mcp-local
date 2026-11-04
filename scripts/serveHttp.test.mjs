@@ -325,6 +325,35 @@ test("isServeHttpFor needs node running serve-http.mjs and exactly this --server
   assert.ok(!isServeHttpFor(null, server));
 });
 
+test("isServeHttpFor accepts node's own flags before the script and the --server=<key> form (S-2)", () => {
+  const server = { key: "codebase-index" };
+  const node = '"C:\\Program Files\\nodejs\\node.exe"';
+  const script = "D:\\ws\\scripts\\serve-http.mjs";
+  assert.ok(isServeHttpFor(`${node} --max-old-space-size=4096 ${script} --server codebase-index`, server));
+  assert.ok(isServeHttpFor(`${node} --no-warnings --enable-source-maps ${script} --server codebase-index`, server));
+  assert.ok(isServeHttpFor(`${node} ${script} --server=codebase-index --config C:\\e.json`, server));
+  assert.ok(isServeHttpFor(`${node} ${script} --server="codebase-index"`, server));
+  assert.ok(!isServeHttpFor(`${node} ${script} --server=codebase-index-x`, server), "another key is refused in the = form too");
+  assert.ok(!isServeHttpFor(`${node} --flag ${script} --server other`, server));
+  assert.ok(!isServeHttpFor(`${node} --flag other.mjs ${script} --server codebase-index`, server), "the script is the first non-flag word");
+  assert.ok(!isServeHttpFor(`${node} --flag`, server));
+  // A --server key placed before the script does not count: it belongs to node or to something else.
+  assert.ok(!isServeHttpFor(`${node} --server=codebase-index ${script}`, server));
+});
+
+test("nativePackages ends on a junction cycle and still finds a native file (S-2)", () => {
+  const dir = fs.mkdtempSync(path.join(TMP, "cycle-"));
+  const nm = path.join(dir, "node_modules");
+  fs.mkdirSync(path.join(nm, "loopy", "node_modules"), { recursive: true });
+  fs.writeFileSync(path.join(nm, "loopy", "package.json"), "{}");
+  // loopy/node_modules/self -> loopy: each pass through a nested node_modules would restart the depth.
+  fs.symlinkSync(path.join(nm, "loopy"), path.join(nm, "loopy", "node_modules", "self"), "junction");
+  assert.deepEqual(nativePackages(nm), [], "no native file: the walk ends");
+  fs.mkdirSync(path.join(nm, "loopy", "lib"), { recursive: true });
+  fs.writeFileSync(path.join(nm, "loopy", "lib", "x.node"), "MZ");
+  assert.deepEqual(nativePackages(nm), ["loopy"], "a native file is still found");
+});
+
 /**
  * V-A: a temp workspace with one server `srv` -> @mcp/sdk -> @mcp/core (and an @mcp/unused it never
  * reaches), third-party deps in the server's and the root's node_modules, @mcp/* linked as npm links them.
