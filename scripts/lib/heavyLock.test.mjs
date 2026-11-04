@@ -9,7 +9,11 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import {
   acquireHeavyLock,
   breakStale,
+  formatHeavyLockStatus,
   heavyLockPipeName,
+  heavyLockStatus,
+  heavyLockWaitersDir,
+  lineageOf,
   isPidAlive,
   LOCK_TIMEOUT_EXIT,
   PID_START_TOLERANCE_MS,
@@ -22,6 +26,8 @@ import {
  * lock file through MCP_HEAVY_LOCK_PATH — which also names its own pipe — and a clean env, so a run
  * inside a real `verify:*` hold (which exports MCP_HEAVY_LOCK_TOKEN) or under CI=true tests the lock
  * rather than skipping it. The file-scheme cases pass `scheme: "file"`; it is the lock on macOS only.
+ * The clean env switches the lineage read off (MCP_HEAVY_LOCK_LINEAGE=off: ~3 s of PowerShell per hold
+ * on Windows); the lineage cases stub it, and the end-to-end case reads the real process table.
  */
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -35,7 +41,7 @@ function tempLock() {
 }
 
 function cleanEnv(lockPath) {
-  const env = { ...process.env, MCP_HEAVY_LOCK_PATH: lockPath };
+  const env = { ...process.env, MCP_HEAVY_LOCK_PATH: lockPath, MCP_HEAVY_LOCK_LINEAGE: "off" };
   delete env.CI;
   delete env.MCP_HEAVY_LOCK_TOKEN;
   return env;
@@ -145,7 +151,9 @@ test("six processes contend for the name: exactly one holds at any instant", { s
   const holds = await Promise.all([1, 2, 3, 4, 5, 6].map(() => holdInChild(lockPath, journal, 100)));
   for (const h of holds) assert.equal(h.mine, true, "no holder's file was replaced under it");
   assertSerial(journal, 6);
-  assert.deepEqual(fs.readdirSync(path.dirname(lockPath)), ["heavy-check.lock.journal"], "the last holder removes the file");
+  const left = fs.readdirSync(path.dirname(lockPath)).filter((name) => name !== "heavy-check.lock.waiters");
+  assert.deepEqual(left, ["heavy-check.lock.journal"], "the last holder removes the file");
+  assert.deepEqual(fs.readdirSync(heavyLockWaitersDir(lockPath)), [], "every waiter unregistered");
 });
 
 test("a holder killed with taskkill /F (SIGKILL) frees the name at once, though its grandchild lives on", { skip: noPipe }, async (t) => {
@@ -372,3 +380,174 @@ test(
     assert.ok(loadedAt - read < 60_000, `read ${new Date(read).toISOString()} is not this test process`);
   }
 );
+
+// ---- visible and orphan-safe (row H-1): waiters, lineage, status ----
+
+test("lineageOf walks up to the Claude session process and stops at a reused parent pid", () => {
+  const table = [
+    { pid: 10, ppid: 9, name: "node.exe", start: 5_000 },
+    { pid: 9, ppid: 8, name: "bash.exe", start: 4_000 },
+    { pid: 8, ppid: 7, name: "claude.exe", start: 3_000 },
+    { pid: 7, ppid: 6, name: "WindowsTerminal.exe", start: 1_000 },
+    { pid: 20, ppid: 21, name: "node.exe", start: 5_000 },
+    { pid: 21, ppid: 1, name: "cmd.exe", start: 60_000 }
+  ];
+  assert.deepEqual(lineageOf(10, table).map((a) => a.pid), [9, 8], "stops after claude.exe");
+  assert.deepEqual(lineageOf(20, table), [], "pid 21 started after its 'child': the real parent is gone");
+  assert.deepEqual(lineageOf(99, table), []);
+});
+
+test("a waiter registers while it waits and unregisters when it stops; status lists it", async () => {
+  const lockPath = tempLock();
+  const held = await acquireHeavyLock({ cmd: "holder", env: cleanEnv(lockPath), log: quiet });
+  const dir = heavyLockWaitersDir(lockPath);
+  let seen;
+  const waiting = acquireHeavyLock({
+    cmd: "queued run",
+    cwd: "/queued",
+    env: cleanEnv(lockPath),
+    timeoutMs: 1_500,
+    pollMs: 20,
+    readLineage: async () => [],
+    log: () => (seen ??= heavyLockStatus({ env: cleanEnv(lockPath), readTable: async () => null }))
+  });
+  await assert.rejects(waiting, (error) => error.code === "HEAVY_LOCK_TIMEOUT");
+  const status = await seen;
+  assert.equal(status.waiters.length, 1);
+  assert.equal(status.waiters[0].pid, process.pid);
+  assert.equal(status.waiters[0].cmd, "queued run");
+  assert.equal(status.waiters[0].cwd, "/queued");
+  assert.ok(Number.isFinite(Date.parse(status.waiters[0].since)));
+  assert.equal(status.holder.cmd, "holder");
+  assert.deepEqual(fs.readdirSync(dir), [], "the entry is gone once the wait ended");
+  held.release();
+});
+
+test("a waiter entry of a dead pid is ignored and removed by status", async () => {
+  const lockPath = tempLock();
+  const dir = heavyLockWaitersDir(lockPath);
+  fs.mkdirSync(dir);
+  const dead = deadPid();
+  fs.writeFileSync(path.join(dir, `${String(dead)}-x.json`), JSON.stringify({ pid: dead, cmd: "gone", since: new Date().toISOString() }));
+  fs.writeFileSync(path.join(dir, "junk.json"), "{not json");
+  const status = await heavyLockStatus({ env: cleanEnv(lockPath), readTable: async () => null });
+  assert.deepEqual(status.waiters, []);
+  assert.equal(status.cleaned, 2);
+  assert.deepEqual(fs.readdirSync(dir), []);
+});
+
+test("status shape: holder with a recorded lineage, one ancestor reused → orphan; no lineage → parent from the table", async () => {
+  const lockPath = tempLock();
+  const now = Date.now();
+  writeHolder(lockPath, {
+    pid: process.pid,
+    ppid: 501,
+    startedAt: new Date(now).toISOString(),
+    lineage: [
+      { pid: 501, name: "node.exe", start: now - 10_000 },
+      { pid: 502, name: "bash.exe", start: now - 20_000 },
+      { pid: 503, name: "claude.exe", start: now - 30_000 }
+    ]
+  });
+  const table = [
+    { pid: process.pid, ppid: 501, name: "node.exe", start: now - 5_000 },
+    { pid: 501, ppid: 502, name: "node.exe", start: now - 10_000 },
+    { pid: 502, ppid: 503, name: "notepad.exe", start: now - 1_000 }, // pid reused after bash died
+    { pid: 503, ppid: 1, name: "claude.exe", start: now - 30_000 }
+  ];
+  const status = await heavyLockStatus({ env: cleanEnv(lockPath), readTable: async () => table });
+  assert.deepEqual(Object.keys(status).sort(), ["cleaned", "holder", "nameHeld", "path", "pipe", "processTable", "waiters"]);
+  assert.equal(status.path, lockPath);
+  assert.equal(status.processTable, true);
+  if (PIPE) assert.equal(status.nameHeld, false, "a left-over file with the name free");
+  const h = status.holder;
+  assert.deepEqual(Object.keys(h).sort(), ["alive", "ancestors", "cmd", "cwd", "goneAncestors", "orphan", "parentAlive", "pid", "ppid", "since"]);
+  assert.equal(h.alive, true);
+  assert.equal(h.parentAlive, true);
+  assert.equal(h.orphan, true);
+  assert.deepEqual(h.goneAncestors, [502]);
+  assert.deepEqual(h.ancestors.map((a) => a.alive), [true, false, true]);
+  const text = formatHeavyLockStatus(status);
+  assert.match(text, new RegExp(`holder: pid ${String(process.pid)} \\[alive, ORPHAN\\]`));
+  assert.match(text, /502 bash\.exe \(gone\)/);
+  assert.match(text, /waiters: none/);
+
+  // An older writer's holder: no ppid, no lineage — the live table answers for the parent.
+  writeHolder(lockPath, { pid: process.pid, startedAt: new Date(now).toISOString() });
+  const old = await heavyLockStatus({ env: cleanEnv(lockPath), readTable: async () => table });
+  assert.equal(old.holder.ppid, 501);
+  assert.equal(old.holder.orphan, false);
+  const reparented = table.map((row) => (row.pid === 501 ? { ...row, start: now } : row));
+  assert.equal((await heavyLockStatus({ env: cleanEnv(lockPath), readTable: async () => reparented })).holder.orphan, true, "parent pid reused");
+});
+
+test("a waiter whose launching process dies stops waiting instead of taking the lock later", async (t) => {
+  const lockPath = tempLock();
+  const held = await acquireHeavyLock({ cmd: "holder", env: cleanEnv(lockPath), log: quiet });
+  const launcher = spawn(process.execPath, ["-e", "setTimeout(() => {}, 30000)"], { stdio: "ignore" });
+  t.after(() => isPidAlive(launcher.pid) && hardKill(launcher.pid));
+  let announce;
+  const announced = new Promise((resolve) => (announce = resolve));
+  const waiting = acquireHeavyLock({
+    cmd: "orphan-to-be",
+    env: cleanEnv(lockPath),
+    timeoutMs: 20_000,
+    pollMs: 50,
+    readLineage: async () => [{ pid: launcher.pid, name: "bash.exe", start: null }],
+    log: () => announce()
+  });
+  await announced;
+  assert.equal(fs.readdirSync(heavyLockWaitersDir(lockPath)).length, 1);
+  hardKill(launcher.pid);
+  await assert.rejects(waiting, (error) => error.code === "HEAVY_LOCK_ORPHANED" && error.message.includes(String(launcher.pid)));
+  assert.deepEqual(fs.readdirSync(heavyLockWaitersDir(lockPath)), []);
+  assert.equal(JSON.parse(fs.readFileSync(lockPath, "utf8")).token, held.token, "the holder was not disturbed");
+  held.release();
+});
+
+test("end to end: a holder whose launching parent is killed shows as an orphan; nothing is killed", async (t) => {
+  // Real process table (one PowerShell read per lineage/status on Windows). The holder is detached so
+  // it outlives its parent (on Windows libuv puts other children in a kill-on-close job).
+  const lockPath = tempLock();
+  const out = `${lockPath}.holder`;
+  const env = { ...cleanEnv(lockPath), MCP_HEAVY_LOCK_LINEAGE: "on" };
+  const holderScript = `
+    const { acquireHeavyLock } = await import(${JSON.stringify(MODULE)});
+    const { writeFileSync } = await import("node:fs");
+    await acquireHeavyLock({ cmd: "orphan-holder", log: () => {} });
+    writeFileSync(${JSON.stringify(out)}, String(process.pid));
+    setInterval(() => {}, 60000);
+  `;
+  const parentScript = `
+    const { spawn } = require("node:child_process");
+    spawn(process.execPath, ["--input-type=module", "-e", ${JSON.stringify(holderScript)}], { stdio: "ignore", detached: true }).unref();
+    setInterval(() => {}, 60000);
+  `;
+  const parent = spawn(process.execPath, ["-e", parentScript], { env, stdio: "ignore" });
+  let holderPid = null;
+  t.after(() => {
+    if (isPidAlive(parent.pid)) hardKill(parent.pid);
+    if (holderPid !== null && isPidAlive(holderPid)) hardKill(holderPid);
+  });
+  const deadline = Date.now() + 30_000;
+  while (!fs.existsSync(out)) {
+    assert.ok(Date.now() < deadline, "the holder never took the lock");
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  holderPid = Number(fs.readFileSync(out, "utf8"));
+  const before = await heavyLockStatus({ env });
+  assert.equal(before.holder.pid, holderPid);
+  assert.equal(before.holder.ancestors[0].pid, parent.pid, "the parent is the first recorded ancestor");
+  assert.equal(before.holder.orphan, false);
+  if (PIPE) assert.equal(before.nameHeld, true);
+
+  hardKill(parent.pid);
+  await new Promise((resolve) => (parent.exitCode !== null ? resolve() : parent.once("exit", resolve)));
+  const after = await heavyLockStatus({ env });
+  assert.equal(after.holder.pid, holderPid);
+  assert.equal(after.holder.alive, true, "status kills nothing");
+  assert.equal(after.holder.orphan, true);
+  assert.equal(after.holder.parentAlive, false);
+  assert.ok(after.holder.goneAncestors.includes(parent.pid));
+  assert.equal(isPidAlive(holderPid), true);
+});

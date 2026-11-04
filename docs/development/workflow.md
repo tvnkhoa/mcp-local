@@ -190,7 +190,12 @@ and codebase-index's `run-tests.mjs` take a machine-wide lock, `~/.claude/locks/
 (`test:freshness-worker` 277 ms against 250). A second caller prints the holder and waits, up to 30 min
 (`MCP_HEAVY_LOCK_TIMEOUT_MS`), then exits 75; a holder whose pid is gone or that is older than 3 h is
 broken. Nested entry points inherit the hold through `MCP_HEAVY_LOCK_TOKEN`. `CI=true` or `--no-lock`
-skips it, so CI is never held.
+skips it, so CI is never held. `node scripts/heavy-lock.mjs status [--json]` shows the holder and every
+waiter (pid, command, cwd, since when, alive) with its recorded ancestors up to the Claude session
+process, and marks one whose ancestor is gone `ORPHAN` — a run whose session was stopped while its
+child lived on. Waiters register in `heavy-check.lock.waiters/` beside the lock; status drops entries
+of dead pids and kills nothing. A waiter whose ancestor dies stops waiting (exit 75) instead of taking
+the lock later for nobody.
 
 **Only the harnesses a change needs.** `node scripts/run-tests.mjs --changed [<base>]` in
 `codebase-index-mcp/` (base: the merge-base with `origin/main`; add `--list` to preview) selects harnesses
