@@ -993,7 +993,10 @@ test("MCP-ISSUE-101 F3: a change inside a dirty submodule moves the key and reac
     assert.deepEqual(h.runs.at(-1)?.dirtyPaths, ["sub/a.ts"]);
     await h.gate.ensureFresh("r");
     assert.equal(h.runs.length, 2, "nothing changed: no run");
-  } finally { rmSync(root, { recursive: true, force: true }); }
+  } finally {
+    // A git child that just exited can still hold .git/modules/sub/index.lock on Windows (EBUSY seen in 3 runs on 4 Nov).
+    rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
+  }
 });
 
 test("MCP-ISSUE-101 F4: a repair that keeps failing is tried twice, then the gate answers stale and says what to run", async () => {
