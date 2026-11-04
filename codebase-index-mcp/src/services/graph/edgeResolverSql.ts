@@ -83,6 +83,7 @@ import {
 } from "../extractors/sqlExtractor.js";
 import { EMPTY_ALIASES, loadIndexedFilePaths, loadRepoPath, readTsconfigAliases, resolveModuleSpecifier, type PathAliases } from "./moduleResolution.js";
 import { DEFINING_KINDS, pickCurrentSqlDefinition, siteLabel, sqlNameKey, sqlNameStates, sqlQualifiedName } from "./sqlDefinitions.js";
+import { immediateTransaction } from "../../repositories/sqliteTx.js";
 
 export { sqlNameKey } from "./sqlDefinitions.js";
 
@@ -259,7 +260,7 @@ export function resolveSqlEdges(db: Database.Database, repoId: string): SqlResol
   const deleteResolved = db.prepare(`delete from edges where repo_id = ? and from_id = ? and type = ? and reason like 'name_resolved%'`);
   const insertEdge = db.prepare(`insert into edges (repo_id, from_id, to_id, type, confidence, reason) values (?, ?, ?, ?, ?, ?)`);
 
-  const tx = db.transaction(() => {
+  const tx = immediateTransaction(db, () => {
     // Every edge derived from an anchor goes, wherever its caller is; the anchors rebuild them.
     db.prepare(
       `delete from edges where repo_id = ? and type = 'SQL_QUERY' and to_id not like '${SQL_CONST_TOKEN_PREFIX}%'
@@ -495,7 +496,7 @@ function writeMigrationOrder(db: Database.Database, repoId: string): number {
 
   const insert = db.prepare(`insert into edges (repo_id, from_id, to_id, type, confidence, reason) values (?, ?, ?, 'SQL_MIGRATION_ORDER', ?, ?)`);
   let written = 0;
-  db.transaction(() => {
+  immediateTransaction(db, () => {
     db.prepare(`delete from edges where repo_id = ? and type = 'SQL_MIGRATION_ORDER'`).run(repoId);
     for (const e of edges) {
       const from = moduleIds.get(e.from) ?? null;

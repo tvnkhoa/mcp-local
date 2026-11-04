@@ -66,16 +66,24 @@ async function main() {
 
   // --- index ---
   console.log("\n[index_repository] starting full index — this may take a minute...\n");
-  const indexResult = readJson(
+  let indexResult = readJson(
     await client.callTool(
       {
         name: "index_repository",
-        arguments: { repoId, repoPath, mode: "full", maxFiles: 2000, batchSize: 100 }
+        arguments: { wait: true, repoId, repoPath, mode: "full", maxFiles: 2000, batchSize: 100 }
       },
       undefined,
       { timeout: 300_000 }
     )
   );
+  // MCP-ISSUE-112: wait:true answers after at most 100 s; a longer run is polled to its end — 30 min at most (a job
+  // can sit queued under CODEBASE_INDEX_MIN_FREE_RAM_MB: this is a real run, so the RAM floor stays on).
+  const pollEnd = Date.now() + 30 * 60_000;
+  while (indexResult.json && (indexResult.json.state === "queued" || indexResult.json.state === "running")) {
+    if (Date.now() > pollEnd) throw new Error(`index job ${indexResult.json.runId} still ${indexResult.json.state} after 30 min${indexResult.json.waitingFor ? ` (${indexResult.json.waitingFor})` : ""}`);
+    await new Promise((r) => setTimeout(r, 2000));
+    indexResult = readJson(await client.callTool({ name: "index_status", arguments: { runId: indexResult.json.runId } }));
+  }
 
   console.log("\n[index_repository] result:");
   if (indexResult.json) {

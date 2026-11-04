@@ -4,6 +4,7 @@ import path from "node:path";
 import type Database from "better-sqlite3";
 
 import { EF_ENTITY_TOKEN_PREFIX, EF_PROPERTY_TOKEN_PREFIX, EF_TOKEN_CONFIDENCE, EF_UNRESOLVED_REASON_PREFIX } from "../extractors/csharpEfSnapshot.js";
+import { immediateTransaction } from "../../repositories/sqliteTx.js";
 
 /**
  * Release L3 (MCP-ISSUE-092): bind the EF snapshot lane's `EF_MAPS` tokens — `efentity:<Ns.Type>` from a
@@ -96,7 +97,7 @@ export function resolveEfMapEdges(db: Database.Database, repoId: string, repoPat
   };
 
   const update = db.prepare(`update edges set to_id = ?, confidence = ?, reason = ? where rowid = ?`);
-  const tx = db.transaction(() => {
+  const tx = immediateTransaction(db, () => {
     for (const row of rows) {
       const token = tokenOf(row.toId, row.reason);
       if (!token) continue;

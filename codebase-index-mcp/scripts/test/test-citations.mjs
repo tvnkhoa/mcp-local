@@ -14,6 +14,7 @@ import { mkdirSync, writeFileSync } from "fs";
 import { join } from "path";
 import { makeTempDir } from "./_fixtures.mjs";
 import { attachServerStderr } from "./_serverStderr.mjs";
+import "./_indexWait.mjs";
 
 let passed = 0, failed = 0;
 function assert(cond, label, detail = "") {
@@ -71,7 +72,7 @@ attachServerStderr(transport, "test-citations");
 const docs = async (args) => js(await client.callTool({ name: "query_docs", arguments: { repoId, profile: "standard", ...args } }));
 
 try {
-  await client.callTool({ name: "index_repository", arguments: { repoId, repoPath: repo, mode: "full" } });
+  await client.callTool({ name: "index_repository", arguments: { wait: true, repoId, repoPath: repo, mode: "full" } });
 
   const row = await docs({ mode: "cites", target: "15 #2" });
   const r0 = row?.resolved?.[0];
@@ -135,11 +136,11 @@ try {
   writeFileSync(join(repo, "NOTES.md"), "# Notes\n\nNothing cites anything here. TODO-42\n");
   git(repo, "add", ".");
   git(repo, "commit", "-q", "-m", "notes");
-  await client.callTool({ name: "index_repository", arguments: { repoId, repoPath: repo, mode: "incremental" } });
+  await client.callTool({ name: "index_repository", arguments: { wait: true, repoId, repoPath: repo, mode: "incremental" } });
   writeFileSync(join(repo, ".codebase-index", "citations.json"), config([{ id: "todo", pattern: "\\bTODO-(\\d+)\\b", target: "NOTES.md", anchor: { kind: "file" } }]));
   git(repo, "add", ".");
   git(repo, "commit", "-q", "-m", "config");
-  await client.callTool({ name: "index_repository", arguments: { repoId, repoPath: repo, mode: "incremental" } });
+  await client.callTool({ name: "index_repository", arguments: { wait: true, repoId, repoPath: repo, mode: "incremental" } });
   const todo = await docs({ mode: "cites", target: "TODO-42" });
   assert((todo?.citedBy ?? []).some((c) => posix(c.filePath) === "NOTES.md"), "an edited citations.json re-scans unchanged files", JSON.stringify(todo)?.slice(0, 300));
 
@@ -147,7 +148,7 @@ try {
   writeFileSync(join(repo, ".codebase-index", "citations.json"), config([], {}));
   git(repo, "add", ".");
   git(repo, "commit", "-q", "-m", "no codeStrings");
-  await client.callTool({ name: "index_repository", arguments: { repoId, repoPath: repo, mode: "incremental" } });
+  await client.callTool({ name: "index_repository", arguments: { wait: true, repoId, repoPath: repo, mode: "incremental" } });
   const off = await docs({ mode: "cites", target: "15 #2" });
   const offCiters = (off?.citedBy ?? []).map((c) => posix(c.filePath)).sort();
   assert(JSON.stringify(offCiters) === JSON.stringify(["docs/adr/0021-boundaries.md", "src/turn.ts"]), "without codeStrings, string literals are not scanned (steps.mjs is no citer)", JSON.stringify(off?.citedBy));

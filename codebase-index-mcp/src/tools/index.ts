@@ -74,9 +74,10 @@ function withFreshnessGate(deps: CodebaseIndexDeps, tools: readonly AnyToolDefin
  *
  * `index_repository` is the tool that REGISTERS a repo, so its repoId cannot exist beforehand.
  * `health_check` is designed to answer for an unregistered repo — that is how an agent learns it
- * needs to index. `watch_repo` may start before the first run finishes.
+ * needs to index. `watch_repo` may start before the first run finishes. `register_worktree` (MCP-ISSUE-114)
+ * registers its repoId too. Keep in step with the same set in middleware/inputGuards.ts.
  */
-const REPO_ID_MAY_BE_UNKNOWN = new Set(["index_repository", "health_check", "watch_repo"]);
+const REPO_ID_MAY_BE_UNKNOWN = new Set(["index_repository", "health_check", "watch_repo", "register_worktree"]);
 
 /**
  * MCP-ISSUE-060 — an unknown `repoId` is answered once, here, instead of by twenty handlers.

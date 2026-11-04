@@ -9,6 +9,7 @@ import { writeFileSync, mkdirSync } from "fs";
 import { join } from "path";
 import { makeTempDir } from "./_fixtures.mjs";
 import { attachServerStderr } from "./_serverStderr.mjs";
+import "./_indexWait.mjs";
 
 let passed = 0, failed = 0;
 function assert(cond, label, detail = "") {
@@ -54,8 +55,8 @@ await client.connect(transport);
 attachServerStderr(transport, "test-value-contract-impact");
 
 try {
-  await client.callTool({ name: "index_repository", arguments: { repoId: "service-a", repoPath: repoAPath, mode: "full" } });
-  await client.callTool({ name: "index_repository", arguments: { repoId: "service-b", repoPath: repoBPath, mode: "full" } });
+  await client.callTool({ name: "index_repository", arguments: { wait: true, repoId: "service-a", repoPath: repoAPath, mode: "full" } });
+  await client.callTool({ name: "index_repository", arguments: { wait: true, repoId: "service-b", repoPath: repoBPath, mode: "full" } });
 
   const res = js(await client.callTool({
     name: "get_value_contract_impact",

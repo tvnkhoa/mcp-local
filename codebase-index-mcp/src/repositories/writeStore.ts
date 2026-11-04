@@ -22,6 +22,7 @@ import type Database from "better-sqlite3";
 import type { EdgeRecord, FileRecord, RouteRecord, SymbolRecord } from "../types/index.js";
 import { getEdgeDefaults } from "../services/impact/impactAnalyzer.js";
 import { deleteAnnotationsForFileImpl } from "./annotationsStore.js";
+import { immediateTransaction } from "./sqliteTx.js";
 
 /** Prepared statements for the hot per-file write path, prepared once per connection. */
 export interface WriteStatements {
@@ -115,9 +116,30 @@ export function beginIndexSession(db: Database.Database): void {
 export function endIndexSession(db: Database.Database, truncate = true, autoCheckpointPages = 8000): void {
   try {
     db.pragma(`wal_autocheckpoint = ${String(autoCheckpointPages)}`); // Restore this connection's threshold
-    db.pragma(truncate ? "wal_checkpoint(TRUNCATE)" : "wal_checkpoint(PASSIVE)"); // TRUNCATE shrinks the WAL file
+    if (truncate) truncateCheckpointNoWait(db);
+    else db.pragma("wal_checkpoint(PASSIVE)");
   } catch {
     // Non-fatal
+  }
+}
+
+/**
+ * MCP-ISSUE-111: a TRUNCATE checkpoint that never waits. TRUNCATE (like RESTART) waits in the busy handler for
+ * every reader to leave the WAL, and while it waits it blocks every new writer: with `busy_timeout` 30 s, one
+ * long read froze the next write — the server thread's, at worst — for up to 30 s. Run with no busy handler, it
+ * checkpoints what it can and returns at once when a reader is still in the WAL; the WAL is then shrunk by a
+ * later checkpoint (`journal_size_limit` bounds it meanwhile). Returns whether the WAL was reset.
+ */
+export function truncateCheckpointNoWait(db: Database.Database): boolean {
+  const previous = Number(db.pragma("busy_timeout", { simple: true }));
+  try {
+    db.pragma("busy_timeout = 0");
+    const row = (db.pragma("wal_checkpoint(TRUNCATE)") as { busy: number }[])[0];
+    return row !== undefined && row.busy === 0;
+  } catch {
+    return false;
+  } finally {
+    db.pragma(`busy_timeout = ${String(Number.isFinite(previous) ? previous : 30000)}`);
   }
 }
 
@@ -330,7 +352,7 @@ export function replaceSymbolsForFile(
     return;
   }
 
-  ctx.db.transaction((rows: SymbolRecord[]) => {
+  immediateTransaction(ctx.db, (rows: SymbolRecord[]) => {
     writeRows(rows);
   })(symbols);
 }
@@ -354,7 +376,7 @@ export function pruneFiles(db: Database.Database, repoId: string, relativePaths:
   }
 
   const uniquePaths = [...new Set(relativePaths)];
-  const deleteTx = db.transaction((paths: string[]) => {
+  const deleteTx = immediateTransaction(db, (paths: string[]) => {
     for (const filePath of paths) {
       db.prepare(
         `
@@ -478,7 +500,7 @@ export function replaceEdgesForFile(ctx: WriteContext, repoId: string, filePath:
     return;
   }
 
-  ctx.db.transaction((rows: EdgeRecord[]) => {
+  immediateTransaction(ctx.db, (rows: EdgeRecord[]) => {
     writeRows(rows);
   })(edges);
 }
@@ -503,7 +525,7 @@ export function replaceRoutesForFile(ctx: WriteContext, repoId: string, filePath
     return;
   }
 
-  ctx.db.transaction((rows: RouteRecord[]) => {
+  immediateTransaction(ctx.db, (rows: RouteRecord[]) => {
     writeRows(rows);
   })(routes);
 }

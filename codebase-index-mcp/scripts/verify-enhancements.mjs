@@ -9,6 +9,7 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 import { makeTempDbPath } from "./test/_fixtures.mjs";
 import process from "node:process";
 import { attachServerStderr } from "./test/_serverStderr.mjs";
+import { indexStatusVia, waitForIndexJob } from "./test/_indexWait.mjs";
 
 function text(res) {
   const t = res?.content?.find((c) => c.type === "text")?.text ?? "{}";
@@ -55,7 +56,8 @@ async function main() {
   }
   console.log("TOOLS_REGISTERED_OK", { newTools: ["orient", "get_feature_bundle", "change_impact"] });
 
-  await client.callTool({ name: "index_repository", arguments: { repoId, repoPath, mode: "full", maxFiles: 500 } }, undefined, { timeout: 180_000 });
+  const full = await waitForIndexJob(indexStatusVia(client), text(await client.callTool({ name: "index_repository", arguments: { wait: true, repoId, repoPath, mode: "full", maxFiles: 500 } }, undefined, { timeout: 180_000 })));
+  if (full.state !== "ok") throw new Error(`index_repository did not end ok: ${JSON.stringify(full).slice(0, 300)}`);
 
   // 1. orient — deterministic router.
   const orient = text(await client.callTool({ name: "orient", arguments: { repoId, intent: "what breaks if I change GraphStore", seed: "GraphStore" } }));
@@ -90,7 +92,7 @@ async function main() {
   // This is the "Connection closed" item still open in
   // `docs/mcp-codebase-index-issue-registry.md` — mechanism not established. Do not let a single
   // green run be read as a diagnosis; that is how the wrong cause got written down the first time.
-  const dirty = text(await client.callTool({ name: "index_repository", arguments: { repoId, repoPath, mode: "dirty" } }, undefined, { timeout: 180_000 }));
+  const dirty = await waitForIndexJob(indexStatusVia(client), text(await client.callTool({ name: "index_repository", arguments: { wait: true, repoId, repoPath, mode: "dirty" } }, undefined, { timeout: 180_000 })));
   console.log("DIRTY_MODE_OK", { mode: dirty.mode, filesIndexed: dirty.filesIndexed, skipReason: dirty.skipReason ?? null });
 
   // 6. find_implementations coverage block present.

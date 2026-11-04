@@ -9,6 +9,7 @@ import { mkdirSync, writeFileSync } from "fs";
 import { join } from "path";
 import { makeTempDir } from "./_fixtures.mjs";
 import { attachServerStderr } from "./_serverStderr.mjs";
+import "./_indexWait.mjs";
 
 let passed = 0, failed = 0;
 function assert(cond, label, detail = "") {
@@ -57,7 +58,7 @@ attachServerStderr(transport, "test-docs-term");
 const docs = async (args) => js(await client.callTool({ name: "query_docs", arguments: { repoId, mode: "term", profile: "standard", ...args } }));
 
 try {
-  await client.callTool({ name: "index_repository", arguments: { repoId, repoPath: repo, mode: "full" } });
+  await client.callTool({ name: "index_repository", arguments: { wait: true, repoId, repoPath: repo, mode: "full" } });
 
   const t = await docs({ query: "kb_version_ids" });
   assert(t?.registryDoc === "docs/10-model.md" && t?.definedIn?.length === 1 && t.definedIn[0].line === 13 && t.definedIn[0].section === "3.13 Audit event", "the defining row and its section", JSON.stringify(t?.definedIn));

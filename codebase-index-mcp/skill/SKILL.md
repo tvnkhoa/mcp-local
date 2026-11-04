@@ -21,6 +21,11 @@ orient(repoId, intent: "<what you are trying to do>", seed?: "<identifier>")
 - No need to re-index before asking: read tools refresh to HEAD + working tree first. A response with
   `freshness.state: "refreshing"` came from the previous index — ask again shortly. `mode: "full"` is
   only needed after a parser upgrade.
+- `index_repository` is a job: it answers at once with `{ runId, state }`; poll `index_status(runId)` until
+  `state` is `ok` or `failed` (`wait: true` blocks up to 100 s). A job stays `queued` while another run is
+  in progress or free RAM is low (`waitingFor` says which); closing the session does not cancel it.
+- A new git worktree of an indexed repo: `register_worktree(parentRepoId, repoPath, repoId)` registers it, queues
+  its index job and starts its watcher in one call (poll `index_status` with the runId it answers).
 
 ## Pick the tool
 

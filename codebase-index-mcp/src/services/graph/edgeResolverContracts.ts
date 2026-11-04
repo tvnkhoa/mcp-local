@@ -17,6 +17,7 @@ import {
   vectorSearchSymbols,
   isVectorEnabled,
 } from "../../repositories/vectorStore.js";
+import { immediateTransaction } from "../../repositories/sqliteTx.js";
 
 /**
  * Fan out a call on an `abstract`/`virtual` base member to the overrides in its subclasses
@@ -139,7 +140,7 @@ export function resolveBaseClassDispatch(db: Database.Database, repoId: string):
   );
 
   let count = 0;
-  const tx = db.transaction(() => {
+  const tx = immediateTransaction(db, () => {
     for (const call of virtualCalls) {
       const files = (subclassFilesByBaseId.get(call.baseTypeId) ?? []).slice(0, MAX_SUBCLASS_DISPATCH_FANOUT);
       for (const filePath of files) {
@@ -210,7 +211,7 @@ export function resolveExtendsEdges(db: Database.Database, repoId: string): numb
   );
 
   let count = 0;
-  const tx = db.transaction(() => {
+  const tx = immediateTransaction(db, () => {
     for (const row of unresolved) {
       const match = baseByName.get(row.toId.slice("base:".length));
       if (match && match !== row.fromId) {
@@ -282,7 +283,7 @@ export function resolveImplementsEdges(db: Database.Database, repoId: string): n
   }
 
   let count = 0;
-  const tx = db.transaction(() => {
+  const tx = immediateTransaction(db, () => {
     for (const row of unresolved) {
       const ifaceName = row.toId.slice(6); // strip "iface:"
       const matchId = interfaceByName.get(ifaceName);
@@ -359,7 +360,7 @@ export function resolvePublishesConsumesEdges(db: Database.Database, repoId: str
   const tagExternalCon = db.prepare(`update edges set confidence = 0.1, reason = 'external boundary' where repo_id = ? and from_id = ? and to_id = ? and type = 'CONSUMES'`);
 
   let count = 0;
-  const tx = db.transaction(() => {
+  const tx = immediateTransaction(db, () => {
     // CONSUMES → contract type symbol (or external)
     for (const r of consumesRows) {
       const contract = r.toId.slice("contract:".length);

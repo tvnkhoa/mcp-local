@@ -19,6 +19,7 @@ import os from "node:os";
 import path from "node:path";
 import process from "node:process";
 import { attachServerStderr } from "./_serverStderr.mjs";
+import "./_indexWait.mjs";
 
 function text(res) {
   const t = res?.content?.find((c) => c.type === "text")?.text ?? "{}";
@@ -131,7 +132,7 @@ async function main() {
 
   try {
     await client.callTool(
-      { name: "index_repository", arguments: { repoId, repoPath: root, mode: "full", maxFiles: 200 } },
+      { name: "index_repository", arguments: { wait: true, repoId, repoPath: root, mode: "full", maxFiles: 200 } },
       undefined,
       { timeout: 120_000 }
     );

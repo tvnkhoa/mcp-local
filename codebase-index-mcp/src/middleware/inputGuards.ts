@@ -73,9 +73,10 @@ export function fileIndexedNote(
  *
  * `index_repository` is the one that REGISTERS a repo, so its repoId cannot exist yet.
  * `health_check` is explicitly designed to answer for an unregistered repo — that is how an agent
- * discovers it needs to index. `watch_repo` may start before the first run completes.
+ * discovers it needs to index. `watch_repo` may start before the first run completes. `register_worktree`
+ * (MCP-ISSUE-114) registers its repoId too; it checks `parentRepoId` itself.
  */
-const REPO_ID_MAY_BE_UNKNOWN = new Set(["index_repository", "health_check", "watch_repo"]);
+const REPO_ID_MAY_BE_UNKNOWN = new Set(["index_repository", "health_check", "watch_repo", "register_worktree"]);
 
 /**
  * MCP-ISSUE-060: one repoId check, at the seam every tool call passes through.

@@ -24,6 +24,7 @@ import { performanceProfileOverrideFromEnv } from "../../config/envConfig.js";
 import { GraphStore } from "../../repositories/graphStore.js";
 import { ExtractionWorkerPool } from "../extractors/extractionWorkerPool.js";
 import type { IndexMode, IndexRunResult } from "../../types/index.js";
+import type { RunBookkeeping } from "../../middleware/freshness.js";
 import { createIndexRunner, type IndexRunnerLimits, type RunIndexAndResolve } from "./indexRunner.js";
 
 /**
@@ -41,7 +42,8 @@ const REFRESH_PARSE_POOL_IDLE_MS = 10 * 60_000;
 
 export type RefreshWorkerRequest = {
   /** `warm`: open the connection and load the runner now, answer nothing (posted at server start). */
-  kind: "run" | "warm";
+  /** `purge` (review 3-rest): `remove_repository`'s delete, on this worker's connection — the writer's. */
+  kind: "run" | "warm" | "purge";
   id: number;
   dbPath: string;
   limits: IndexRunnerLimits;
@@ -53,10 +55,18 @@ export type RefreshWorkerRequest = {
   batchSize: number;
   /** Release K3 (P1): the freshness gate's dirty set for a dirty run (see `RunExtras.knownDirtyPaths`). */
   dirtyPaths?: string[];
+  /** MCP-ISSUE-111: the gate's bookkeeping, written on this worker's connection (see `RunExtras.bookkeeping`). */
+  bookkeeping?: RunBookkeeping;
+  /** MCP-ISSUE-112: the run id an index job handed out. */
+  runId?: string;
+  /** MCP-ISSUE-112: post `progress` messages for this run (an index job reports its phase). */
+  reportProgress?: boolean;
 };
 
 export type RefreshWorkerMessage =
   | { type: "result"; id: number; result: IndexRunResult }
+  | { type: "progress"; id: number; progress: number; total: number | undefined; message: string }
+  | { type: "purged"; id: number; counts: Record<string, number> }
   | { type: "error"; id: number; error: string };
 
 /** `endIndexSession`, best-effort: a checkpoint that cannot run now runs on a later one. */
@@ -120,12 +130,27 @@ if (parentPort) {
       }
       return;
     }
+    if (request.kind === "purge") {
+      try {
+        const counts = runnerFor(request).store.purgeRepository(request.repoId);
+        port.postMessage({ type: "purged", id: request.id, counts } satisfies RefreshWorkerMessage);
+      } catch (error) {
+        port.postMessage({ type: "error", id: request.id, error: error instanceof Error ? error.message : String(error) } satisfies RefreshWorkerMessage);
+      }
+      return;
+    }
     void (async () => {
       let active: { run: RunIndexAndResolve; store: GraphStore } | null = null;
       try {
         active = runnerFor(request);
         const result = await active.run(request.repoId, request.repoPath, request.mode, request.docsEnabled, request.maxFiles, request.batchSize, {
-          ...(request.dirtyPaths && { knownDirtyPaths: request.dirtyPaths })
+          ...(request.dirtyPaths && { knownDirtyPaths: request.dirtyPaths }),
+          ...(request.bookkeeping && { bookkeeping: request.bookkeeping }),
+          ...(request.runId && { runId: request.runId }),
+          ...(request.reportProgress && {
+            onProgress: (progress: number, total: number | undefined, message: string) =>
+              port.postMessage({ type: "progress", id: request.id, progress, total, message } satisfies RefreshWorkerMessage)
+          })
         });
         port.postMessage({ type: "result", id: request.id, result } satisfies RefreshWorkerMessage);
         // Release K3 (P2): the run is committed and the answer is on its way; NOW the end-of-session

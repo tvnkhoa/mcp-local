@@ -18,7 +18,7 @@ import type { AnyToolDefinition } from "@mcp/sdk";
 import { defineTool } from "@mcp/sdk";
 
 import { handleGetFeatureBundle } from "./handlers/bundleHandler.js";
-import { handleIndexRepository, handleRemoveRepository, handleWatchRepo } from "./handlers/indexHandler.js";
+import { handleIndexRepository, handleIndexStatus, handleRegisterWorktree, handleRemoveRepository, handleWatchRepo } from "./handlers/indexHandler.js";
 import { handleGetPersistenceMapping } from "./handlers/persistenceHandler.js";
 import * as schemas from "../types/schemas/toolSchemas.js";
 
@@ -37,7 +37,7 @@ export function buildIndexingWatchTools(deps: CodebaseIndexDeps): AnyToolDefinit
 
   const indexRepository = defineTool({
     name: "index_repository",
-    description: "Index repository files into internal graph storage (incremental by default). mode='dirty' re-indexes ONLY git working-tree-changed files (unstaged+staged+untracked) — a fast refresh of just-edited files (extraction is scoped to the changed set; edge resolution still runs repo-wide). Pruning is suppressed (subset scan). docsMode controls docs lane isolation: auto uses server default, on forces docs indexing, off disables docs indexing for this run.",
+    description: "Index repository files into internal graph storage (incremental by default). Runs as a server-side job: by default (wait=false) it answers AT ONCE with { runId, state: queued|running }; poll index_status(runId) until state is ok or failed. wait=true blocks until the run ends or 100 s pass, then answers the run summary (state ok) or the job as it stands. Jobs run one at a time per server, never start while free RAM is below CODEBASE_INDEX_MIN_FREE_RAM_MB (the job stays queued; waitingFor says why), and a client that disconnects does not cancel its job. mode='dirty' re-indexes ONLY git working-tree-changed files (unstaged+staged+untracked) — a fast refresh of just-edited files (extraction is scoped to the changed set; edge resolution still runs repo-wide). Pruning is suppressed (subset scan). docsMode controls docs lane isolation: auto uses server default, on forces docs indexing, off disables docs indexing for this run.",
     input: schemas.indexRepositorySchema(limits.maxFilesPerRun),
     inputSchema: {
       type: "object",
@@ -49,12 +49,49 @@ export function buildIndexingWatchTools(deps: CodebaseIndexDeps): AnyToolDefinit
         mode: { type: "string", enum: ["full", "incremental", "dirty"] },
         docsMode: { type: "string", enum: ["auto", "on", "off"] },
         maxFiles: { type: "integer", minimum: 1, maximum: limits.maxFilesPerRun },
-        batchSize: { type: "integer", minimum: 1, maximum: 2000 }
+        batchSize: { type: "integer", minimum: 1, maximum: 2000 },
+        wait: { type: "boolean", description: "Block until the run ends or 100 s pass. Default false: answer at once with the runId." }
       }
     },
     annotations: rebuildsIndex,
     rawResult: true,
     handler: async (input) => ok(raw(await handleIndexRepository(input, buildContext())))
+  });
+
+  const indexStatus = defineTool({
+    name: "index_status",
+    description: "State of an index_repository job by runId: queued (waitingFor says why: another run ahead, or free RAM below CODEBASE_INDEX_MIN_FREE_RAM_MB) | running (phase, progress/total) | ok (the run summary) | failed (error). A run this server process no longer holds as a job is answered from the recorded runs (source: index_runs). An unknown runId is an error.",
+    input: schemas.indexStatusSchema,
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      required: ["runId"],
+      properties: {
+        runId: { type: "string", description: "The runId index_repository answered." }
+      }
+    },
+    annotations: readsGraph,
+    rawResult: true,
+    handler: (input) => ok(raw(handleIndexStatus(input, buildContext())))
+  });
+
+  const registerWorktree = defineTool({
+    name: "register_worktree",
+    description: "Register a git worktree of an already-indexed repo in one call: checks repoPath is under CODEBASE_INDEX_ALLOWED_ROOTS and shares parentRepoId's git common dir, registers repoId, queues its index job (a new repoId is indexed in full once) and starts its watcher (with CODEBASE_INDEX_WATCH_ACTIVE_ONLY the previously active watcher stops). Answers AT ONCE with the runId; poll index_status(runId) until state is ok or failed. Calling it again for the same repoId and path queues another run. Refuses an unknown parentRepoId, a path that is not that repo's worktree, and a repoId registered at another path.",
+    input: schemas.registerWorktreeSchema,
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      required: ["parentRepoId", "repoPath", "repoId"],
+      properties: {
+        parentRepoId: { type: "string", description: "The registered repo the worktree belongs to (list_repositories)." },
+        repoPath: { type: "string", description: "Absolute path of the worktree." },
+        repoId: { type: "string", description: "repoId to register the worktree under." }
+      }
+    },
+    annotations: rebuildsIndex,
+    rawResult: true,
+    handler: async (input) => ok(raw(await handleRegisterWorktree(input, buildContext())))
   });
 
   const removeRepository = defineTool({
@@ -72,7 +109,7 @@ export function buildIndexingWatchTools(deps: CodebaseIndexDeps): AnyToolDefinit
     },
     annotations: removesRepository,
     rawResult: true,
-    handler: (input) => ok(raw(handleRemoveRepository(input, buildContext())))
+    handler: async (input) => ok(raw(await handleRemoveRepository(input, buildContext())))
   });
 
   const watchRepo = defineTool({
@@ -140,5 +177,5 @@ export function buildIndexingWatchTools(deps: CodebaseIndexDeps): AnyToolDefinit
     handler: (input) => ok(raw(handleGetPersistenceMapping(input, buildContext())))
   });
 
-  return [indexRepository, removeRepository, watchRepo, getFeatureBundle, getPersistenceMapping];
+  return [indexRepository, indexStatus, registerWorktree, removeRepository, watchRepo, getFeatureBundle, getPersistenceMapping];
 }

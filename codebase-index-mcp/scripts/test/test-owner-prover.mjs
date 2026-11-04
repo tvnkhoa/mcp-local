@@ -20,6 +20,7 @@ import { writeFileSync, mkdirSync } from "fs";
 import { join } from "path";
 import { bufferOverflowPad, makeTempDir } from "./_fixtures.mjs";
 import { attachServerStderr } from "./_serverStderr.mjs";
+import "./_indexWait.mjs";
 
 let passed = 0, failed = 0;
 function assert(cond, label, detail = "") {
@@ -96,7 +97,7 @@ await client.connect(transport);
 attachServerStderr(transport, "test-owner-prover");
 
 try {
-  await client.callTool({ name: "index_repository", arguments: { repoId, repoPath: tmpDir, mode: "full" } });
+  await client.callTool({ name: "index_repository", arguments: { wait: true, repoId, repoPath: tmpDir, mode: "full" } });
 
   // ── 1. The regression: guarded must reach every site the unguarded preview reaches ──────────
   const unguarded = js(await client.callTool({

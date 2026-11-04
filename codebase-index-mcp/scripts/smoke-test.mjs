@@ -2,6 +2,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { makeTempDbPath } from "./test/_fixtures.mjs";
 import { attachServerStderr } from "./test/_serverStderr.mjs";
+import { indexStatusVia, waitForIndexJob } from "./test/_indexWait.mjs";
 
 function readTextContent(result) {
   return Array.isArray(result?.content)
@@ -105,15 +106,21 @@ async function main() {
 
   const indexResult = await client.callTool({
     name: "index_repository",
-    arguments: {
+    arguments: { wait: true,
       repoId,
       repoPath,
       mode: "incremental",
-      maxFiles: 200
+      // Whole server: a 200-file cap made the probes depend on how many docs sort before src/ (MCP-ISSUE-110 follow-up).
+      maxFiles: 2000
     }
   }, undefined, { timeout: 180_000 });
 
   const indexPayload = readJsonTextContent(indexResult);
+  // wait:true answers after at most 100 s; a longer run (or one queued) is polled to its end, with a deadline.
+  if (indexPayload.json && (indexPayload.json.state === "queued" || indexPayload.json.state === "running")) {
+    indexPayload.json = await waitForIndexJob(indexStatusVia(client), indexPayload.json);
+    indexPayload.text = JSON.stringify(indexPayload.json);
+  }
   console.log("INDEX_REPOSITORY_RESULT:");
   console.log(indexPayload.text);
   if (!indexPayload.json?.runId) {

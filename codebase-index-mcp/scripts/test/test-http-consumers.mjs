@@ -197,6 +197,7 @@ export const get_my_appointments_route: SourcedRoute = {
 import { find_customer_route } from './customers.js'
 import { get_my_appointments_route } from './appointments.js'
 import { get_my_vehicles_route } from './vehicles.js'
+import "./_indexWait.mjs";
 
 export const ROUTES: Readonly<Record<string, SourcedRoute>> = {
   get_my_vehicles: get_my_vehicles_route,
@@ -237,9 +238,9 @@ const EXPECT = [
 
 try {
   // Provider first: links are written by the consumer's run.
-  const be = await call("index_repository", { repoId: beId, repoPath: beDir, mode: "full" });
+  const be = await call("index_repository", { wait: true, repoId: beId, repoPath: beDir, mode: "full" });
   assert(be && !be.error && (be.parseFailures ?? 0) === 0, "index be (C#) — no parse failures", JSON.stringify(be)?.slice(0, 300));
-  const aria = await call("index_repository", { repoId: ariaId, repoPath: ariaDir, mode: "full" });
+  const aria = await call("index_repository", { wait: true, repoId: ariaId, repoPath: ariaDir, mode: "full" });
   dump("aria index", aria);
   assert(aria && !aria.error && (aria.parseFailures ?? 0) === 0, "index aria (TS) — no parse failures", JSON.stringify(aria)?.slice(0, 300));
 
@@ -314,7 +315,7 @@ try {
   assert(run && run.res === 4 && run.nc >= 1 && run.a >= 5, "index_runs counts 4 resolved and the unmatched one as no_candidate", JSON.stringify(run));
 
   // Re-running the consumer does not duplicate or lose links.
-  const again = await call("index_repository", { repoId: ariaId, repoPath: ariaDir, mode: "full" });
+  const again = await call("index_repository", { wait: true, repoId: ariaId, repoPath: ariaDir, mode: "full" });
   assert(again && !again.error, "re-index aria (full)");
   const links2 = direct("select count(*) as n from cross_repo_deps where from_repo_id = :r", { r: ariaId })[0]?.n;
   assert(links2 === 4, "a second full run lands on the same four links", String(links2));

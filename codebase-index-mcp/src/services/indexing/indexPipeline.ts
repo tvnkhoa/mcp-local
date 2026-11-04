@@ -62,6 +62,8 @@ import type { IndexMode, IndexProgressSnapshot, IndexRunStatus, IndexRunSummary 
 export type PerformanceProfile = "standard" | "large" | "very-large";
 
 export type RunIndexInput = {
+  /** MCP-ISSUE-112: the run's id, when the caller already handed it out (an index job); otherwise a new UUID. */
+  runId?: string;
   repoId: string;
   repoPath: string;
   mode: IndexMode;
@@ -170,7 +172,7 @@ export const SCOPE_MAX_DEPENDENT_FILES = 600;
 
 export async function runIndexPipeline(store: GraphStore, input: RunIndexInput): Promise<IndexRunSummary> {
   const identity: RunIdentity = {
-    runId: randomUUID(),
+    runId: input.runId ?? randomUUID(),
     repoId: input.repoId,
     commitSha: input.commitSha ?? resolveHeadCommitSha(input.repoPath),
     branch: resolveCurrentBranch(input.repoPath),
@@ -656,7 +658,8 @@ export async function runIndexPipeline(store: GraphStore, input: RunIndexInput):
         if (scoped) captureBefore(chunk.map((item) => item.file.path));
         store.runInTransaction(() => {
           for (const item of chunk) {
-            if (scoped) store.ftsForgetFile(input.repoId, item.file.path);
+            // MCP-ISSUE-111: FTS rows follow their file in every mode (a full run no longer rebuilds every repo's).
+            store.ftsForgetFile(input.repoId, item.file.path);
             store.upsertFile(item.file);
             store.replaceSymbolsForFile(input.repoId, item.file.path, item.extracted.symbols);
             store.replaceEdgesForFile(input.repoId, item.file.path, item.extracted.edges);
@@ -678,8 +681,8 @@ export async function runIndexPipeline(store: GraphStore, input: RunIndexInput):
                 item.extracted.mentions ?? []
               );
             }
+            store.ftsIndexFile(input.repoId, item.file.path);
             if (scoped) {
-              store.ftsIndexFile(input.repoId, item.file.path);
               rowsAfter.set(item.file.path, new Map(item.extracted.symbols.map((s) => [symbolRowKey(s), s.name])));
               // Re-pointed in the same transaction as the write: a crash between the two would leave other
               // files' edges into ids that no longer exist, behind a content hash that is already current.
@@ -696,9 +699,9 @@ export async function runIndexPipeline(store: GraphStore, input: RunIndexInput):
       if (annotationOnly.length > 0) {
         store.runInTransaction(() => {
           for (const item of annotationOnly) {
-            if (scoped) store.ftsForgetFile(input.repoId, item.path);
+            store.ftsForgetFile(input.repoId, item.path);
             store.replaceAnnotationsForFile(input.repoId, item.path, item.annotations);
-            if (scoped) store.ftsIndexFile(input.repoId, item.path);
+            store.ftsIndexFile(input.repoId, item.path);
           }
         });
         annotationOnly.length = 0;

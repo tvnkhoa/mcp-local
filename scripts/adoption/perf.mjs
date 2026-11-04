@@ -143,7 +143,14 @@ async function buildIndex(dbPath, repoId, repoPath) {
   fs.rmSync(path.join(path.dirname(dbPath), '.codebase-index-state'), { recursive: true, force: true });
   const s = await startServer(dbPath, repoPath);
   const t0 = now();
-  const r = await callStdio(s.client, 'index_repository', { repoId, repoPath, mode: 'full', docsMode: 'on' }, INDEX_TIMEOUT_MS);
+  let r = await callStdio(s.client, 'index_repository', { wait: true, repoId, repoPath, mode: 'full', docsMode: 'on' }, INDEX_TIMEOUT_MS);
+  // MCP-ISSUE-112: wait:true answers after at most 100 s; a longer run is polled to its end before the server closes.
+  const pollEnd = Date.now() + INDEX_TIMEOUT_MS;
+  for (let st = JSON.parse(r.isError ? '{}' : r.text); st.state === 'queued' || st.state === 'running'; st = JSON.parse(r.isError ? '{}' : r.text)) {
+    if (Date.now() > pollEnd) throw new Error(`index job ${st.runId} still ${st.state} after ${INDEX_TIMEOUT_MS} ms${st.waitingFor ? ` (${st.waitingFor})` : ''}`);
+    await new Promise((res) => setTimeout(res, 2000));
+    r = await callStdio(s.client, 'index_status', { runId: st.runId }, INDEX_TIMEOUT_MS);
+  }
   await s.close();
   if (r.isError) throw new Error(`index_repository failed: ${r.error ?? r.text.slice(0, 300)}`);
   const run = JSON.parse(r.text);

@@ -29,6 +29,7 @@ import { dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { makeTempDir } from "./_fixtures.mjs";
 import { attachServerStderr } from "./_serverStderr.mjs";
+import "./_indexWait.mjs";
 
 const GENERATED_FILES = Number(process.env.FRESHNESS_WORKER_FIXTURE_FILES ?? 1500);
 const DIRTY_FILES = Number(process.env.FRESHNESS_WORKER_DIRTY_FILES ?? 300);
@@ -125,7 +126,7 @@ async function call(name, args) {
 
 try {
   for (const [repoId, repoPath] of [[bigRepo, bigDir], [smallRepo, smallDir]]) {
-    const r = await call("index_repository", { repoId, repoPath, mode: "full" });
+    const r = await call("index_repository", { wait: true, repoId, repoPath, mode: "full" });
     assert(r.body && !r.body.error && (r.body.filesIndexed ?? r.body.summary?.filesIndexed ?? 1) > 0, `index_repository ${repoId}`, r.text.slice(0, 200));
   }
   // Settle both: clean trees at the indexed HEAD, so neither query below starts a run of its own.

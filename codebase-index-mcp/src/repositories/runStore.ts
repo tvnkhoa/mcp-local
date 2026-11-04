@@ -145,6 +145,15 @@ function pruneRuns(db: Database.Database, repoId: string): void {
 }
 
 export function getLatestRun(db: Database.Database, repoId: string): IndexRunSummary | null {
+  return readRun(db, "repo_id = ?", repoId);
+}
+
+/** MCP-ISSUE-112: one run by its id (`index_status` of a run this process no longer holds as a job). */
+export function getRunById(db: Database.Database, runId: string): IndexRunSummary | null {
+  return readRun(db, "run_id = ?", runId);
+}
+
+function readRun(db: Database.Database, where: "repo_id = ?" | "run_id = ?", arg: string): IndexRunSummary | null {
   const row = db
     .prepare(
       `
@@ -210,12 +219,12 @@ export function getLatestRun(db: Database.Database, repoId: string): IndexRunSum
         triggered_by as triggeredBy,
         scope
       from index_runs
-      where repo_id = ?
+      where ${where}
       order by finished_at desc, started_at desc, rowid desc
       limit 1
       `
     )
-    .get(repoId) as IndexRunSummary | undefined;
+    .get(arg) as IndexRunSummary | undefined;
 
   if (!row) return null;
 
@@ -308,6 +317,19 @@ export function getLatestFullRunVersion(db: Database.Database, repoId: string): 
     )
     .get(repoId) as { v: string } | undefined;
   return row?.v ?? null;
+}
+
+/** MCP-ISSUE-111: set once every FTS table is in step with its content; from then on runs keep it per file. */
+export const FTS_PER_FILE_META_KEY = "fts_per_file";
+
+/** MCP-ISSUE-111: a DB-wide fact from `index_meta`, or null. */
+export function getIndexMeta(db: Database.Database, key: string): string | null {
+  const row = db.prepare(`select value from index_meta where key = ?`).get(key) as { value: string } | undefined;
+  return row?.value ?? null;
+}
+
+export function setIndexMeta(db: Database.Database, key: string, value: string): void {
+  db.prepare(`insert into index_meta (key, value) values (?, ?) on conflict(key) do update set value = excluded.value`).run(key, value);
 }
 
 export function markRunTrigger(db: Database.Database, runId: string, trigger: string): void {

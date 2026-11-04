@@ -20,6 +20,7 @@ import { appendFileSync, mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { makeTempDir } from "./_fixtures.mjs";
 import { attachServerStderr } from "./_serverStderr.mjs";
+import "./_indexWait.mjs";
 
 let passed = 0, failed = 0;
 function assert(cond, label, detail = "") {
@@ -86,7 +87,7 @@ attachServerStderr(transport, "test-css-symbols");
 const call = async (name, args) => js(await client.callTool({ name, arguments: { repoId, ...args } }));
 
 try {
-  const indexed = await call("index_repository", { repoPath: tmpDir, mode: "full" });
+  const indexed = await call("index_repository", { wait: true, repoPath: tmpDir, mode: "full" });
   dump("index", indexed);
   assert(indexed && !indexed.error, "index_repository (full)", JSON.stringify(indexed)?.slice(0, 300));
   assert((indexed?.parseFailures ?? 0) === 0, "no parse failures", JSON.stringify(indexed)?.slice(0, 300));
@@ -154,7 +155,7 @@ try {
 
   // ── incremental: a third definition appended must reach the existing users ──────────────
   appendFileSync(join(tmpDir, "src/styles/tokens.css"), `\n.brand {\n  --text-tertiary: #777;\n}\n`, "utf8");
-  const inc = await call("index_repository", { repoPath: tmpDir, mode: "incremental" });
+  const inc = await call("index_repository", { wait: true, repoPath: tmpDir, mode: "incremental" });
   assert(inc && !inc.error, "index_repository (incremental)", JSON.stringify(inc)?.slice(0, 300));
   const after = await call("query_graph", {
     sql: "select count(*) as n from edges e where e.repo_id = :repoId and e.type = 'USES_CSS_VAR' and e.reason like '%3 definitions%'",
@@ -169,7 +170,7 @@ try {
     limit: 500
   }))?.rows ?? [];
   const incrementalGraph = JSON.stringify(await snapshot());
-  const full = await call("index_repository", { repoPath: tmpDir, mode: "full" });
+  const full = await call("index_repository", { wait: true, repoPath: tmpDir, mode: "full" });
   assert(full && !full.error, "index_repository (full, again)");
   const fullGraph = JSON.stringify(await snapshot());
   assert(incrementalGraph === fullGraph, "incremental and full runs produce the same CSS edge set", `${incrementalGraph.slice(0, 300)} vs ${fullGraph.slice(0, 300)}`);

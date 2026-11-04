@@ -22,6 +22,7 @@ import {
 } from "../../repositories/vectorStore.js";
 import { buildNamedCandidateMap, pickBestNamedCandidate } from "./edgeResolverShared.js";
 import { buildImportedFilesByFile, normalizeFilePath } from "./moduleResolution.js";
+import { immediateTransaction } from "../../repositories/sqliteTx.js";
 
 /**
  * The two `reason` labels that mean "this target came from the callee's NAME alone, across files".
@@ -457,7 +458,7 @@ export function resolveCallEdgesBatch(
 
   // Single transaction: fill temp table + UPDATE JOIN
   // Avoids multiple transaction open/close overhead on large batches
-  const batchTx = db.transaction(() => {
+  const batchTx = immediateTransaction(db, () => {
     for (const u of updates) {
       insertBatch.run(u.fromId, u.oldToId, u.newToId, u.confidence, u.reason);
     }
@@ -539,7 +540,7 @@ export function rebuildInterfaceDispatchEdges(db: Database.Database, repoId: str
      where not exists (select 1 from edges where repo_id = ? and from_id = ? and to_id = ? and type = 'CALLS')`
   );
   let count = 0;
-  const tx = db.transaction(() => {
+  const tx = immediateTransaction(db, () => {
     for (const call of calls) {
       for (const filePath of (implementorFiles.get(call.ifaceId) ?? []).slice(0, MAX_INTERFACE_DISPATCH_FANOUT)) {
         const impl = (candidateMap.get(call.name) ?? []).find((c) => c.filePath === filePath && c.kind === "method");

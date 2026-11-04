@@ -82,10 +82,12 @@ export function buildSkippedRunSummary(opts: {
   branch: string | null;
   indexVersion: string;
   skipReason: string;
+  /** MCP-ISSUE-112: the id an index job already handed out. */
+  runId?: string;
 }): IndexRunResult {
   const now = new Date().toISOString();
   return {
-    runId: randomUUID(),
+    runId: opts.runId ?? randomUUID(),
     repoId: opts.repoId,
     commitSha: opts.commitSha,
     branch: opts.branch,

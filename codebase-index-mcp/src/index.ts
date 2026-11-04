@@ -16,13 +16,15 @@ import path from "node:path";
 import os from "node:os";
 import { fileURLToPath } from "node:url";
 
-import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
+import { ErrorCode, McpError, type CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { runServer } from "@mcp/sdk";
 
 import { GraphStore } from "./repositories/graphStore.js";
 import { assertPathAllowed, clamp } from "./middleware/indexGuardrails.js";
 import { WatchManager } from "./services/watch/watchManager.js";
-import { createIndexRunner, type IndexRunnerLimits } from "./services/indexing/indexRunner.js";
+import type { IndexRunnerLimits, RunExtras, RunIndexAndResolve } from "./services/indexing/indexRunner.js";
+import type { IndexMode, IndexRunResult } from "./types/index.js";
+import { DEFAULT_MIN_FREE_RAM_MB, DEFAULT_RUN_TIMEOUT_MS, IndexJobQueue, MAX_WAIT_MS, queuedWithin } from "./services/indexing/indexJobs.js";
 import { RefreshWorkerClient } from "./services/indexing/refreshWorkerClient.js";
 import { newerBuildRefusal } from "./services/indexing/runPolicy.js";
 import { INDEX_VERSION } from "./services/indexing/indexPipeline.js";
@@ -32,7 +34,6 @@ import {
   autoWatchReposFromEnv,
   booleanFromEnv,
   numberFromEnv,
-  performanceProfileOverrideFromEnv,
   ratioFromEnvName,
   stringFromEnv,
   transportFromEnv,
@@ -52,7 +53,7 @@ import { createCodebaseIndexServer } from "./server.js";
 import { buildTools } from "./tools/index.js";
 import { DEFAULT_MAX_MARKDOWN_BYTES } from "./services/indexing/fileFilter.js";
 import { applyFreshness, computeTreeKey, createFreshnessGate, freshnessStateDir, parseTreeKey, recordDirtyLedger, serializeTreeKey, watcherRunPlan, type TreeKey } from "./middleware/freshness.js";
-import { readWorkingTreeState, readWorkingTreeStateAsync } from "./services/git/gitHelpers.js";
+import { readWorkingTreeStateAsync } from "./services/git/gitHelpers.js";
 
 const dbPath = stringFromEnv("CODEBASE_INDEX_DB_PATH", "./codebase-index.db");
 const allowedRoots = allowedRootsFromEnv();
@@ -94,6 +95,10 @@ const REFACTOR_LOW_CONFIDENCE_THRESHOLD = 0.8;
 const QUERY_REFRESH_ENABLED = booleanFromEnv("CODEBASE_INDEX_QUERY_REFRESH_ENABLED", true);
 /** Index only what git shows (tracked + untracked-not-ignored). false = the plain directory walk. */
 const RESPECT_GITIGNORE = booleanFromEnv("CODEBASE_INDEX_RESPECT_GITIGNORE", true);
+/** MCP-ISSUE-112: an index job does not START while free RAM is below this many MB (0 disables the floor). */
+const MIN_FREE_RAM_MB = Math.max(0, numberFromEnv("CODEBASE_INDEX_MIN_FREE_RAM_MB", DEFAULT_MIN_FREE_RAM_MB));
+/** MCP-ISSUE-112 follow-up: an index job's run still going after this many ms is stopped and fails (0 = no limit). */
+const RUN_TIMEOUT_MS = Math.max(0, numberFromEnv("CODEBASE_INDEX_RUN_TIMEOUT_MS", DEFAULT_RUN_TIMEOUT_MS));
 const QUERY_REFRESH_BUDGET_MS = clamp(numberFromEnv("CODEBASE_INDEX_QUERY_REFRESH_BUDGET_MS", 5_000), 1, 120_000);
 /**
  * R3 exact: the TypeScript LanguageService lane of find_field_accesses (lazy; TS/JS fields only).
@@ -120,12 +125,8 @@ const REFACTOR_APPROVAL_SECRET = refactorApprovalSecret(REFACTOR_APPROVAL_SECRET
 const store = new GraphStore(dbPath);
 
 /**
- * The index run orchestrator (S-26: extracted to `indexing/indexRunner.ts`).
- *
- * Built once here because it needs `store` and the env-derived tuning limits, both
- * of which only the entry point owns. The two callbacks stay lazy on purpose: the
- * progress sink is per-request, and the profile override was read from the env on
- * every run before the extraction. Resolving either eagerly would change behaviour.
+ * The index run's tuning limits. The run itself (`indexing/indexRunner.ts`) executes in the refresh worker
+ * (MCP-ISSUE-112): this thread never runs one.
  */
 const RUNNER_LIMITS: IndexRunnerLimits = {
   subtxSize: SUBTX_SIZE,
@@ -137,12 +138,6 @@ const RUNNER_LIMITS: IndexRunnerLimits = {
   parseWorkers: PARSE_WORKERS,
   parseJobTimeoutMs: PARSE_JOB_TIMEOUT_MS
 };
-const runIndexUnserialized = createIndexRunner({
-  store,
-  limits: RUNNER_LIMITS,
-  resolveProgressNotifier: () => toolContextStorage.getStore()?.progressNotifier,
-  resolvePerformanceProfileOverride: () => performanceProfileOverrideFromEnv()
-});
 
 /**
  * R1 freshness gate. It owns the per-repo run queue, so every index run in this process —
@@ -160,13 +155,14 @@ const FRESHNESS_LOCK_DIR = freshnessStateDir(dbPath);
 /**
  * Release I1b: the gate's refresh runs execute in a worker thread on their own connection to the same
  * DB, so a 25 s dirty run never holds this thread's event loop (see refreshWorkerClient.ts). The run
- * is the same `createIndexRunner` run, newer-build guard included. index_repository and the watcher
- * stay on this thread (they stream progress through the request).
+ * is the same `createIndexRunner` run, newer-build guard included. MCP-ISSUE-112: index_repository (as a job) and the
+ * watcher run there too, so every write of this process is the worker's and this thread only reads.
  */
 const refreshWorker = new RefreshWorkerClient({
   dbPath,
   limits: RUNNER_LIMITS,
-  onRunLanded: () => store.invalidateProcessCaches()
+  onRunLanded: () => store.invalidateProcessCaches(),
+  onPurged: () => store.invalidateProcessCaches()
 });
 // Release J: with the refresh worker writing the index, this thread's small commits must never run a
 // WAL checkpoint the worker's PASSIVE checkpoint left behind (a measured 473 ms stall at landing).
@@ -178,13 +174,16 @@ const freshnessGate = createFreshnessGate({
   getRepoPath: (repoId) => store.getRepository(repoId)?.repoPath ?? null,
   getIndexedCommit: (repoId) => store.getLatestRun(repoId)?.commitSha ?? null,
   readTree: (repoPath) => readWorkingTreeStateAsync(repoPath),
-  run: (repoId, repoPath, mode, dirtyPaths) => refreshWorker.run(repoId, repoPath, mode, DOCS_INDEXING_ENABLED, MAX_FILES_PER_RUN, 200, dirtyPaths ? { knownDirtyPaths: dirtyPaths } : undefined),
+  // MCP-ISSUE-111: the worker (the writer) makes the gate's bookkeeping writes; this thread makes none on a read.
+  run: (repoId, repoPath, mode, dirtyPaths, bookkeeping) =>
+    refreshWorker.run(repoId, repoPath, mode, DOCS_INDEXING_ENABLED, MAX_FILES_PER_RUN, 200, {
+      ...(dirtyPaths && { knownDirtyPaths: dirtyPaths }),
+      ...(bookkeeping && { bookkeeping })
+    }),
+  runBookkeeping: true,
   refuseRefresh: (repoId) => newerBuildRefusal(store.getLatestRun(repoId)?.indexVersion),
   getCoveredKey: (repoId) => store.getLatestRunTreeKey(repoId),
-  recordCoveredKey: (_repoId, runId, key) => store.markRunTreeKey(runId, key),
   hashMaxBytes: MAX_FILE_SIZE_BYTES,
-  markTriggered: (runId) => store.markRunTrigger(runId, "query"),
-  markPendingReindex: (repoId, paths) => store.recordPendingReindexFiles(repoId, paths, "freshness: indexed while dirty, since deleted or reverted"),
   // MCP-ISSUE-101 part 5: an index fully built by another INDEX_VERSION is not current.
   getFullRunVersion: (repoId) => store.getLatestFullRunVersion(repoId),
   buildVersion: INDEX_VERSION
@@ -200,27 +199,98 @@ async function treeKeyNow(repoPath: string): Promise<TreeKey | null> {
   }
 }
 
-const runIndexAndResolve: typeof runIndexUnserialized = (repoId, repoPath, mode, ...rest) =>
-  freshnessGate.serialize(repoId, async () => {
+/**
+ * index_repository's and the watcher's run: in the DB-wide queue (MCP-ISSUE-111), executed by the refresh worker
+ * (MCP-ISSUE-112), which also records the covered tree key on the run (the writer's connection, never this thread's).
+ */
+const runInWorker = async (
+  repoId: string,
+  repoPath: string,
+  mode: IndexMode,
+  docsEnabled: boolean,
+  maxFiles: number,
+  batchSize: number,
+  extras: RunExtras = {},
+  /** Review F3: called right before the run is posted to the worker (after the tree key is read); may throw to skip it. */
+  beforeRun?: () => void
+): Promise<IndexRunResult> => {
     const key = await treeKeyNow(repoPath);
-    const result = await runIndexUnserialized(repoId, repoPath, mode, ...rest);
+    beforeRun?.();
     // MCP-ISSUE-101: index_repository and the watcher leave the index covering the whole tree, as a gate run does.
-    if (key && result.status !== "failed" && result.status !== "cancelled") {
-      try {
-        store.markRunTreeKey(result.runId, serializeTreeKey(key));
-      } catch {
-        // Best-effort: without it the next query re-runs, it never answers stale.
-      }
-    }
+    const result = await refreshWorker.run(repoId, repoPath, mode, docsEnabled, maxFiles, batchSize, {
+      ...extras,
+      ...(key && { bookkeeping: { ...extras.bookkeeping, coveredKey: serializeTreeKey(key) } })
+    });
     // index_repository and the watcher keep the dirty-run ledger current too (see freshness.ts).
     try {
       // MCP-ISSUE-101: a dirty run handed its paths re-read them, so a reverted one leaves the ledger now.
-      recordDirtyLedger(FRESHNESS_LOCK_DIR, repoId, mode, readWorkingTreeState(repoPath), rest[3]?.knownDirtyPaths ?? false);
+      recordDirtyLedger(FRESHNESS_LOCK_DIR, repoId, mode, await readWorkingTreeStateAsync(repoPath), extras.knownDirtyPaths ?? false);
     } catch {
       // not a git repo
     }
     return result;
-  }, mode);
+  };
+const runIndexAndResolve: RunIndexAndResolve = (repoId, repoPath, mode, docsEnabled, maxFiles, batchSize, extras = {}) =>
+  freshnessGate.serialize(repoId, () => runInWorker(repoId, repoPath, mode, docsEnabled, maxFiles, batchSize, extras), mode);
+
+/**
+ * MCP-ISSUE-112: index_repository's runs as server-side jobs — answered at once, one at a time, never started under
+ * the free-RAM floor, and owned by the server, so a client that disconnects cancels nothing.
+ */
+const indexJobs = new IndexJobQueue({
+  minFreeRamMb: MIN_FREE_RAM_MB,
+  runTimeoutMs: RUN_TIMEOUT_MS,
+  // Only this job's run is stopped (review follow-up C); terminating the worker rejects it, releasing the DB-wide queue.
+  onRunTimeout: (job) => void refreshWorker.abortRun(job.runId, `index run ${job.runId} of ${job.repoId} stopped: CODEBASE_INDEX_RUN_TIMEOUT_MS=${String(RUN_TIMEOUT_MS)} ms`),
+  // The clock starts when the run leaves the DB-wide queue for the worker, and a job failed meanwhile never runs.
+  execute: (job, request, onProgress, control) =>
+    freshnessGate.serialize(
+      request.repoId,
+      async () =>
+        runInWorker(
+          request.repoId,
+          request.repoPath,
+          request.mode,
+          request.docsEnabled,
+          request.maxFiles,
+          request.batchSize,
+          {
+            runId: job.runId,
+            onProgress: (progress: number, total: number | undefined, message: string) =>
+              onProgress({ phase: message.replace(/^[^:]*: /, ""), progress, ...(total !== undefined && { total }) })
+          },
+          // Review F3: the clock starts once nothing but the worker run is left; a job failed by then never runs.
+          () => {
+            if (control.cancelled()) throw new Error(`index job ${job.runId} had already failed; its run was not started`);
+            control.started();
+          }
+        ),
+      request.mode
+    )
+});
+
+/**
+ * Review F1: remove_repository's delete through the writer, but never a long wait. With an index job running it is
+ * refused at once (naming the run); otherwise it waits for its turn in the DB-wide queue at most MAX_WAIT_MS (a gate
+ * refresh can be ahead of it), then refuses — retryable — instead of holding the call past the client's ceiling.
+ */
+async function purgeThroughWriter(repoId: string): Promise<Record<string, number>> {
+  const busy = (): McpError => {
+    const running = indexJobs.pending().filter((j) => j.state === "running");
+    const which = running.map((j) => `${j.runId} (${j.repoId})`).join(", ");
+    return new McpError(
+      ErrorCode.InvalidRequest,
+      `remove_repository: an index run is in progress${which ? `: ${which}` : ""}; retry when it ends (index_status shows it).`
+    );
+  };
+  if (indexJobs.pending().some((j) => j.state === "running")) throw busy();
+  return queuedWithin<Record<string, number>>(
+    (fn) => freshnessGate.serialize(repoId, fn),
+    () => refreshWorker.purge(repoId),
+    MAX_WAIT_MS,
+    busy
+  );
+}
 
 async function ensureFresh(repoId: string): Promise<void> {
   const note = await freshnessGate.ensureFresh(repoId);
@@ -236,12 +306,18 @@ const watchManager = new WatchManager(
     // a whole-repo incremental re-hash — unless HEAD moved or the batch dropped events (see watcherRunPlan).
     const plan = watcherRunPlan(batch, await treeKeyNow(repoPath), parseTreeKey(store.getLatestRunTreeKey(repoId)), store.getLatestRun(repoId)?.commitSha ?? null);
     if (plan.mode === "incremental") {
+      // Follow-up 3: an overflowed batch's deletions are pruned by a dirty run over them — in the worker, in the DB-wide
+      // queue — not by a write on this thread.
+      if (batch.overflowed && batch.deleted.length > 0) {
+        await runIndexAndResolve(repoId, repoPath, "dirty", DOCS_INDEXING_ENABLED, config.maxFilesPerRun, config.batchSize, { knownDirtyPaths: batch.deleted });
+      }
       await runIndexAndResolve(repoId, repoPath, "incremental", DOCS_INDEXING_ENABLED, config.maxFilesPerRun, config.batchSize);
       return;
     }
     await runIndexAndResolve(repoId, repoPath, "dirty", DOCS_INDEXING_ENABLED, config.maxFilesPerRun, config.batchSize, { knownDirtyPaths: plan.paths });
   },
-  (repoId, deletedRelativePaths) => store.pruneFiles(repoId, deletedRelativePaths),
+  // Follow-up 3: no prune on this thread (it waited on the worker's write lock); the runner above prunes in the worker.
+  () => 0,
   ({ repoId }) => {
     if (WATCH_ACTIVE_ONLY && activeWatchRef.current === repoId) {
       armWatchInactivityTimer(repoId, buildHandlerContext());
@@ -266,7 +342,9 @@ function asText(payload: unknown, profile: ResponseProfile = "standard"): CallTo
 function buildHandlerContext(): HandlerContext {
   const clientSessionId = toolContextStorage.getStore()?.clientSessionId;
   const clientIdentity = toolContextStorage.getStore()?.clientIdentity;
+  const progressNotifier = toolContextStorage.getStore()?.progressNotifier;
   return {
+    ...(progressNotifier === undefined ? {} : { progressNotifier }),
     ...(clientSessionId === undefined ? {} : { clientSessionId }),
     ...(clientIdentity === undefined ? {} : { clientIdentity }),
     store,
@@ -274,6 +352,9 @@ function buildHandlerContext(): HandlerContext {
     activeWatchRef,
     watchInactivityTimers,
     runIndexAndResolve,
+    indexJobs,
+    // Review 3-rest: remove_repository deletes through the writer, in the DB-wide queue.
+    purgeRepository: purgeThroughWriter,
     asText,
     constants: {
       MAX_FILES_PER_RUN,
@@ -325,6 +406,12 @@ handle.lifecycle.onShutdown({
   name: "store",
   run: () => {
     store.close();
+  }
+});
+handle.lifecycle.onShutdown({
+  name: "index-jobs",
+  run: () => {
+    indexJobs.dispose();
   }
 });
 handle.lifecycle.onShutdown({

@@ -18,6 +18,7 @@ import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import { makeTempDir } from "./_fixtures.mjs";
 import { attachServerStderr } from "./_serverStderr.mjs";
+import "./_indexWait.mjs";
 
 let passed = 0, failed = 0;
 function assert(cond, label, detail = "") {
@@ -113,7 +114,7 @@ async function withServer(extraEnv, label, fn) {
   await client.connect(transport);
   attachServerStderr(transport, `test-field-access-exact:${label}`);
   try {
-    const indexed = js(await client.callTool({ name: "index_repository", arguments: { repoId, repoPath: tmpDir, mode: "full" } }));
+    const indexed = js(await client.callTool({ name: "index_repository", arguments: { wait: true, repoId, repoPath: tmpDir, mode: "full" } }));
     assert(indexed && !indexed.error, `[${label}] index_repository`, JSON.stringify(indexed)?.slice(0, 300));
     await fn(client);
   } finally {
@@ -122,9 +123,21 @@ async function withServer(extraEnv, label, fn) {
 }
 
 const at = (rows) => (rows ?? []).map((r) => `${r.file}:${r.line}`);
+// MCP-ISSUE-118: a cold call waits only what is left of the 5 s query budget, then answers "still
+// building" with no list (the I1 contract, test-field-access-worker's to check). On a loaded machine
+// this fixture's cold program misses that window, so the first answer is polled as a caller would.
+const building = (r) => r?.coverage?.confidence === "gap" && /type program still building/.test(r?.coverage?.knownGaps?.[0] ?? "");
+async function settled(call) {
+  let r = js(await call());
+  for (let i = 0; i < 60 && building(r); i++) {
+    await new Promise((done) => setTimeout(done, 1000));
+    r = js(await call());
+  }
+  return r;
+}
 
 await withServer({}, "exact", async (client) => {
-  const res = js(await client.callTool({ name: "find_field_accesses", arguments: { repoId, name: "kb_version_ids", profile: "compact" } }));
+  const res = await settled(() => client.callTool({ name: "find_field_accesses", arguments: { repoId, name: "kb_version_ids", profile: "compact" } }));
   assert(res?.engine === "typescript-language-service", "answered by the TypeScript LanguageService", JSON.stringify(res)?.slice(0, 400));
   assert(res?.coverage?.confidence === "exact", "coverage is exact", JSON.stringify(res?.coverage));
   assert(res?.declaration?.file === "packages/contracts/src/entities/audit-event.ts" && res?.declaration?.line === 5, "declaration is the field-bag key", JSON.stringify(res?.declaration));
@@ -156,7 +169,7 @@ await withServer({}, "exact", async (client) => {
 });
 
 await withServer({ CODEBASE_INDEX_TS_LS_COLD_START_MS: "1" }, "cap", async (client) => {
-  const res = js(await client.callTool({ name: "find_field_accesses", arguments: { repoId, name: "kb_version_ids", profile: "compact" } }));
+  const res = await settled(() => client.callTool({ name: "find_field_accesses", arguments: { repoId, name: "kb_version_ids", profile: "compact" } }));
   assert(res?.coverage?.confidence === "gap", "a cap breach is coverage 'gap'", JSON.stringify(res)?.slice(0, 400));
   assert(res?.accessesWithheld === true && res?.reads === undefined && res?.writes === undefined && res?.readCount == null, "and returns no partial list", JSON.stringify(res)?.slice(0, 400));
   assert(typeof res?.coverage?.knownGaps?.[0] === "string" && res.coverage.knownGaps[0].includes("CODEBASE_INDEX_TS_LS_COLD_START_MS"), "the breach names the cap", JSON.stringify(res?.coverage));

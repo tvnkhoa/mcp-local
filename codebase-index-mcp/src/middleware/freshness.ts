@@ -50,6 +50,20 @@ export type RepoTreeState = {
   dirty: readonly string[];
 };
 
+/**
+ * MCP-ISSUE-111: the writes a query-triggered refresh owes the index, handed to the run so the writer makes them
+ * (see `FreshnessGateOptions.runBookkeeping`). `pendingReindex` is written before the run; `coveredKey` and
+ * `trigger` on the run's record after it, only when it ended neither failed nor cancelled.
+ */
+export type RunBookkeeping = {
+  pendingReindex?: { paths: string[]; reason: string };
+  coveredKey?: string;
+  trigger?: "query";
+};
+
+/** Release J: the reason a vanished dirty path is recorded with in `pending_reindex_files`. */
+export const PENDING_REINDEX_REASON = "freshness: indexed while dirty, since deleted or reverted";
+
 export type FreshnessGateOptions = {
   enabled: boolean;
   budgetMs: number;
@@ -65,7 +79,14 @@ export type FreshnessGateOptions = {
    * git again. The same porcelain-v2 read the run would make, so the run indexes exactly what the gate
    * keys freshness and the dirty ledger on.
    */
-  run: (repoId: string, repoPath: string, mode: IndexMode, dirtyPaths?: readonly string[]) => Promise<IndexRunResult>;
+  run: (repoId: string, repoPath: string, mode: IndexMode, dirtyPaths?: readonly string[], bookkeeping?: RunBookkeeping) => Promise<IndexRunResult>;
+  /**
+   * MCP-ISSUE-111: the run applies the gate's bookkeeping itself ({@link RunBookkeeping}), on the writer's connection,
+   * and the gate never calls `markPendingReindex` / `recordCoveredKey` / `markTriggered`. Those were the only writes a
+   * read tool made, on the server thread: behind another run's write lock, better-sqlite3 waited out `busy_timeout`
+   * synchronously, freezing every call, then failed "database is locked".
+   */
+  runBookkeeping?: boolean;
   /**
    * Why this process must not refresh the repo at all, or null. Release F: a server still running an
    * older build refreshed over a newer build's index (several processes share one DB).
@@ -677,7 +698,10 @@ export function watcherRunPlan(
 
 export type FreshnessGate = {
   ensureFresh: (repoId: string) => Promise<FreshnessNote>;
-  /** Wraps any index run so runs for one repo in this process never overlap. */
+  /**
+   * Wraps any index run so no two runs in this process overlap, whatever their repos (MCP-ISSUE-111): every repo
+   * shares the one SQLite file, so a second repo's run was a second writer waiting on the first's lock.
+   */
   serialize: <T>(repoId: string, fn: () => Promise<T>, mode?: IndexMode) => Promise<T>;
 };
 
@@ -723,10 +747,11 @@ export function createFreshnessGate(opts: FreshnessGateOptions): FreshnessGate {
   /** MCP-ISSUE-110: a tree check in flight per repo; its promise never rejects (an error is carried, and rethrown to each waiter). */
   type Check = { startedAt: number; promise: Promise<{ note: FreshnessNote } | { error: unknown }> };
   const checking = new Map<string, Check>();
-  const runChain = new Map<string, Promise<unknown>>();
+  /** MCP-ISSUE-111: one queue per DB, not per repo. */
+  let runChain: Promise<unknown> = Promise.resolve();
 
   const serialize = <T>(repoId: string, fn: () => Promise<T>, mode?: IndexMode): Promise<T> => {
-    const prev = runChain.get(repoId) ?? Promise.resolve();
+    const prev = runChain;
     // MCP-ISSUE-101 part 5: every run says it is running, for the gates of every process on this DB.
     const marked = async (): Promise<T> => {
       const marker = writeRunMarker(opts.lockDir, repoId, now(), mode);
@@ -743,7 +768,7 @@ export function createFreshnessGate(opts: FreshnessGateOptions): FreshnessGate {
       }
     };
     const next = prev.then(marked, marked);
-    runChain.set(repoId, next.catch(() => undefined));
+    runChain = next.catch(() => undefined);
     return next;
   };
 
@@ -922,7 +947,8 @@ export function createFreshnessGate(opts: FreshnessGateOptions): FreshnessGate {
     // A deleted or reverted file that was indexed while dirty is not dirty any more, so git alone would
     // never show it to a dirty run again. It is handed over as a pending re-index; with no way to do
     // that, an incremental run (re-hash everything, prune the gone) clears it.
-    const cleanupByDirty = vanished.length > 0 && opts.markPendingReindex !== undefined;
+    const bookkeepInRun = opts.runBookkeeping === true;
+    const cleanupByDirty = vanished.length > 0 && (bookkeepInRun || opts.markPendingReindex !== undefined);
     // F3: a submodule that moved to another commit changed files nobody listed; only a full re-hash finds them.
     const submoduleMoved = (changed ?? []).some((p) => (key.files[p] ?? "").startsWith("submodule:"));
     const scopedMode: "incremental" | "dirty" = headMoved || submoduleMoved || (vanished.length > 0 && !cleanupByDirty) ? "incremental" : "dirty";
@@ -948,25 +974,37 @@ export function createFreshnessGate(opts: FreshnessGateOptions): FreshnessGate {
     // MCP-ISSUE-101: only the files whose content the covered key does not vouch for (all dirty files without one).
     const runPaths = mode === "dirty" ? (changed?.filter((p) => !isSubmoduleEntry(p)) ?? dirtyNow) : undefined;
     if (repair) bumpRepairAttempts(opts.lockDir, repoId);
+    const serializedKey = serializeTreeKey(key);
     const promise = serialize(repoId, () => {
+      if (bookkeepInRun) {
+        const bookkeeping: RunBookkeeping = {
+          ...(cleanupByDirty && { pendingReindex: { paths: vanished, reason: PENDING_REINDEX_REASON } }),
+          coveredKey: serializedKey,
+          trigger: "query"
+        };
+        return opts.run(repoId, repoPath, mode, runPaths, bookkeeping);
+      }
       if (cleanupByDirty) opts.markPendingReindex?.(repoId, vanished);
       return opts.run(repoId, repoPath, mode, runPaths);
     }, mode)
       .then((result) => {
         if (result.status === "failed" || result.status === "cancelled") return result;
         if (repair) clearRepairNeeded(opts.lockDir, repoId, repair.flags);
-        const serialized = serializeTreeKey(key);
-        coveredKey.set(repoId, serialized);
-        try {
-          opts.recordCoveredKey?.(repoId, result.runId, serialized);
-        } catch {
-          // Best-effort: the next check runs again, it never answers stale.
+        coveredKey.set(repoId, serializedKey);
+        if (!bookkeepInRun) {
+          try {
+            opts.recordCoveredKey?.(repoId, result.runId, serializedKey);
+          } catch {
+            // Best-effort: the next check runs again, it never answers stale.
+          }
         }
         recordDirtyLedger(opts.lockDir, repoId, mode, treeNow, cleanupByDirty);
-        try {
-          opts.markTriggered?.(result.runId);
-        } catch {
-          // Best-effort tag; the run itself stands.
+        if (!bookkeepInRun) {
+          try {
+            opts.markTriggered?.(result.runId);
+          } catch {
+            // Best-effort tag; the run itself stands.
+          }
         }
         return result;
       })

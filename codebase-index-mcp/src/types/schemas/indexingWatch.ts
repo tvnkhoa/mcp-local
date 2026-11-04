@@ -18,7 +18,25 @@ export const indexRepositorySchema = (MAX_FILES_PER_RUN: number) => z
     mode: z.enum(["full", "incremental", "dirty"]).default("incremental"),
     docsMode: z.enum(["auto", "on", "off"]).default("auto"),
     maxFiles: z.number().int().min(1).max(MAX_FILES_PER_RUN).default(MAX_FILES_PER_RUN),
-    batchSize: z.number().int().min(1).max(2_000).default(200)
+    batchSize: z.number().int().min(1).max(2_000).default(200),
+    // MCP-ISSUE-112: false answers at once with the job; true blocks until the run ends or 100 s pass.
+    wait: z.boolean().default(false)
+  })
+  .strict();
+
+// Index status (MCP-ISSUE-112)
+export const indexStatusSchema = z
+  .object({
+    runId: z.string().min(1).max(100)
+  })
+  .strict();
+
+// Register worktree (MCP-ISSUE-114)
+export const registerWorktreeSchema = z
+  .object({
+    parentRepoId: z.string().min(1).max(200),
+    repoPath: z.string().min(1),
+    repoId: z.string().min(1).max(200)
   })
   .strict();
 

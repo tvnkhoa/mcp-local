@@ -3,6 +3,7 @@ import type { GraphStore } from "../../repositories/graphStore.js";
 import type { WatchManager } from "../../services/watch/watchManager.js";
 import type { ResponseProfile } from "../../middleware/responseFormatter.js";
 import type { IndexMode, IndexRunResult } from "../../types/index.js";
+import type { IndexJobQueue } from "../../services/indexing/indexJobs.js";
 
 export interface HandlerConstants {
   MAX_FILES_PER_RUN: number;
@@ -55,6 +56,12 @@ export interface HandlerContext {
     maxFiles: number,
     batchSize: number
   ) => Promise<IndexRunResult>;
+  /** MCP-ISSUE-112: index_repository's server-side jobs. Absent in handler unit tests that never index. */
+  indexJobs?: IndexJobQueue;
+  /** Review 3-rest: remove_repository's delete through the writer (the refresh worker). Absent: the store deletes here. */
+  purgeRepository?: (repoId: string) => Promise<Record<string, number>>;
+  /** The call's `notifications/progress` sink, when the client supplied a progress token. */
+  progressNotifier?: (progress: number, total: number | undefined, message: string) => void;
   asText: (payload: unknown, profile?: ResponseProfile) => CallToolResult;
   constants: HandlerConstants;
   /**

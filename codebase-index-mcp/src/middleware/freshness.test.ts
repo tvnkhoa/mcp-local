@@ -189,6 +189,58 @@ test("serialize never lets two runs for one repo overlap", async () => {
   } finally { h.cleanup(); }
 });
 
+test("MCP-ISSUE-111: serialize never lets runs of two DIFFERENT repos overlap (one writer per DB)", async () => {
+  const h = harness({ budgetMs: 1000, autoFinish: true });
+  try {
+    const order: string[] = [];
+    const a = h.gate.serialize("repo-a", async () => { order.push("a:start"); await new Promise((r) => setTimeout(r, 30)); order.push("a:end"); });
+    const b = h.gate.serialize("repo-b", async () => { order.push("b:start"); order.push("b:end"); });
+    const c = h.gate.serialize("repo-a", async () => { throw new Error("boom"); });
+    const d = h.gate.serialize("repo-c", async () => { order.push("d"); });
+    await Promise.all([a, b, c.catch(() => undefined), d]);
+    assert.deepEqual(order, ["a:start", "a:end", "b:start", "b:end", "d"], "a failed run does not stall the queue either");
+  } finally { h.cleanup(); }
+});
+
+test("MCP-ISSUE-111: with runBookkeeping the gate hands its writes to the run and makes none itself", async () => {
+  const lockDir = mkdtempSync(path.join(tmpdir(), "cim-fresh-bk-"));
+  try {
+    fs.writeFileSync(path.join(lockDir, "edited.ts"), "export const a = 1;\n");
+    let tree: RepoTreeState = { head: "aaa111", dirty: ["edited.ts"] };
+    const calls: string[] = [];
+    const handed: unknown[] = [];
+    const gate = createFreshnessGate({
+      enabled: true,
+      budgetMs: 1000,
+      lockDir,
+      checkTtlMs: 0,
+      getRepoPath: () => lockDir,
+      getIndexedCommit: () => "aaa111",
+      readTree: () => tree,
+      runBookkeeping: true,
+      markTriggered: () => calls.push("markTriggered"),
+      recordCoveredKey: () => calls.push("recordCoveredKey"),
+      markPendingReindex: () => calls.push("markPendingReindex"),
+      run: async (_repoId, _repoPath, _mode, _dirty, bookkeeping) => {
+        handed.push(bookkeeping);
+        return { runId: `run-${String(handed.length)}` } as IndexRunResult;
+      }
+    });
+    assert.equal((await gate.ensureFresh("r")).state, "refreshed");
+    const first = handed[0] as { coveredKey?: string; trigger?: string; pendingReindex?: unknown };
+    assert.equal(first.trigger, "query");
+    assert.ok(first.coveredKey && JSON.parse(first.coveredKey).head === "aaa111", "the covered key goes to the run");
+    assert.equal(first.pendingReindex, undefined, "nothing vanished yet");
+    // The dirty file is reverted: it vanishes from the tree, so the next refresh owes a pending re-index.
+    fs.rmSync(path.join(lockDir, "edited.ts"));
+    tree = { head: "aaa111", dirty: [] };
+    assert.equal((await gate.ensureFresh("r")).state, "refreshed");
+    const second = handed[1] as { pendingReindex?: { paths: string[]; reason: string } };
+    assert.deepEqual(second.pendingReindex?.paths, ["edited.ts"]);
+    assert.deepEqual(calls, [], "no bookkeeping callback ran on the gate's (server) thread");
+  } finally { rmSync(lockDir, { recursive: true, force: true }); }
+});
+
 test("applyFreshness: a not-current answer never keeps coverage high, and says why", () => {
   const note = { state: "refreshing" as const, mode: "incremental" as const, reason: "still running" };
   const obj = applyFreshness({ coverage: { confidence: "high", knownGaps: [] } }, note) as { coverage: { confidence: string; knownGaps: string[] }; freshness: unknown };
@@ -941,7 +993,10 @@ test("MCP-ISSUE-101 F3: a change inside a dirty submodule moves the key and reac
     assert.deepEqual(h.runs.at(-1)?.dirtyPaths, ["sub/a.ts"]);
     await h.gate.ensureFresh("r");
     assert.equal(h.runs.length, 2, "nothing changed: no run");
-  } finally { rmSync(root, { recursive: true, force: true }); }
+  } finally {
+    // A git child that just exited can still hold .git/modules/sub/index.lock on Windows (EBUSY seen in 3 runs on 4 Nov).
+    rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
+  }
 });
 
 test("MCP-ISSUE-101 F4: a repair that keeps failing is tried twice, then the gate answers stale and says what to run", async () => {

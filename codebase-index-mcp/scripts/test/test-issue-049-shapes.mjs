@@ -20,6 +20,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { makeTempDbPath } from "./_fixtures.mjs";
 import { attachServerStderr } from "./_serverStderr.mjs";
+import "./_indexWait.mjs";
 
 let passed = 0;
 let failed = 0;
@@ -85,7 +86,7 @@ async function main() {
     client.callTool({ name, arguments: args }, undefined, { timeout });
 
   console.log("\n[setup] indexing this repo (docs lane on)...");
-  const indexed = readJson(await call("index_repository", { repoId, repoPath, mode: "full", docsMode: "on" }));
+  const indexed = readJson(await call("index_repository", { wait: true, repoId, repoPath, mode: "full", docsMode: "on" }));
   if (!indexed?.runId) throw new Error("indexing failed — no runId");
   console.log(`  ${indexed.filesIndexed} files, ${indexed.symbolsUpserted} symbols`);
 

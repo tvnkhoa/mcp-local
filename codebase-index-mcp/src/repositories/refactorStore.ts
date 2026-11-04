@@ -8,6 +8,7 @@ import type {
   RefactorRiskFlag,
   RefactorRollbackRecord
 } from "../types/index.js";
+import { immediateTransaction } from "./sqliteTx.js";
 
 // ── parseRiskFlags ─────────────────────────────────────────────────────
 
@@ -37,7 +38,7 @@ export function saveRefactorPreviewImpl(
   preview: RefactorPreviewRecord,
   hunks: RefactorPreviewHunkRecord[]
 ): void {
-  const tx = db.transaction((previewRow: RefactorPreviewRecord, hunkRows: RefactorPreviewHunkRecord[]) => {
+  const tx = immediateTransaction(db, (previewRow: RefactorPreviewRecord, hunkRows: RefactorPreviewHunkRecord[]) => {
     db.prepare(
       `
       insert into refactor_previews (
@@ -211,7 +212,7 @@ export function recordRefactorApplyImpl(
   changes: RefactorApplyChangeRecord[],
   hunks: RefactorApplyHunkRecord[]
 ): void {
-  const tx = db.transaction((applyRow: RefactorApplyRecord, changeRows: RefactorApplyChangeRecord[], hunkRows: RefactorApplyHunkRecord[]) => {
+  const tx = immediateTransaction(db, (applyRow: RefactorApplyRecord, changeRows: RefactorApplyChangeRecord[], hunkRows: RefactorApplyHunkRecord[]) => {
     db.prepare(
       `
       insert into refactor_applies (
@@ -450,7 +451,7 @@ export function recordPendingReindexFilesImpl(
     `
   );
   const recordedAt = new Date().toISOString();
-  const tx = db.transaction(() => {
+  const tx = immediateTransaction(db, () => {
     for (const filePath of filePaths) {
       stmt.run(repoId, filePath, reason, recordedAt);
     }

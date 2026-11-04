@@ -137,3 +137,78 @@ test("a spawn failure rejects the run instead of throwing at the caller", async 
   });
   await assert.rejects(client.run("repo-a", "/repo/a", "dirty", true, 20_000, 200), /cannot spawn/);
 });
+
+test("review follow-up C: abortRun stops only the named run; a run not in the worker is left alone", async () => {
+  const { client, workers } = harness();
+  assert.equal(await client.abortRun("nobody", "x"), false, "nothing in flight: no-op");
+  const job = client.run("repo-a", "/repo/a", "full", true, 100, 50, { runId: "job-1" });
+  assert.equal(await client.abortRun("job-2", "x"), false, "another runId: the worker is not touched");
+  assert.equal(workers[0].terminated, false);
+  const aborted = client.abortRun("job-1", "stopped: timeout");
+  await assert.rejects(job, /stopped: timeout/);
+  assert.equal(await aborted, true);
+  assert.equal(workers[0].terminated, true);
+  // The next run spawns a fresh worker and works.
+  const next = client.run("repo-b", "/repo/b", "dirty", true, 100, 50);
+  assert.equal(workers.length, 2);
+  workers[1].send({ type: "result", id: workers[1].requests[0].id, result: result("r-b") });
+  assert.equal((await next).runId, "r-b");
+});
+
+test("review F2: abortRun rejects the run only after the old worker has terminated", async () => {
+  let finishTerminate!: () => void;
+  class SlowWorker extends FakeWorker {
+    override async terminate(): Promise<number> {
+      await new Promise<void>((r) => (finishTerminate = r));
+      this.terminated = true;
+      return 0;
+    }
+  }
+  const workers: FakeWorker[] = [];
+  const client = new RefreshWorkerClient({
+    dbPath: "/tmp/index.db",
+    limits: LIMITS,
+    spawn: () => {
+      const w = new SlowWorker();
+      workers.push(w);
+      return w;
+    }
+  });
+  const run = client.run("repo-a", "/repo/a", "full", true, 100, 50, { runId: "job-1" });
+  let rejectedAt: "before" | "after" | null = null;
+  const watched = run.catch(() => {
+    rejectedAt = workers[0].terminated ? "after" : "before";
+  });
+  const aborted = client.abortRun("job-1", "timeout");
+  await new Promise((r) => setTimeout(r, 20));
+  assert.equal(rejectedAt, null, "the run is not released while the old worker may still write");
+  finishTerminate();
+  assert.equal(await aborted, true);
+  await watched;
+  assert.equal(rejectedAt, "after");
+});
+
+test("review 3-rest: purge is posted to the worker and answered by its purged message; caches are dropped", async () => {
+  const purged: string[] = [];
+  const workers: FakeWorker[] = [];
+  const client = new RefreshWorkerClient({
+    dbPath: "/tmp/index.db",
+    limits: LIMITS,
+    spawn: () => {
+      const w = new FakeWorker();
+      workers.push(w);
+      return w;
+    },
+    onPurged: (repoId) => purged.push(repoId)
+  });
+  const p = client.purge("repo-x");
+  const req = workers[0].requests[0];
+  assert.equal(req.kind, "purge");
+  assert.equal(req.repoId, "repo-x");
+  workers[0].send({ type: "purged", id: req.id, counts: { symbols: 3 } });
+  assert.deepEqual(await p, { symbols: 3 });
+  assert.deepEqual(purged, ["repo-x"]);
+  const failing = client.purge("repo-y");
+  workers[0].send({ type: "error", id: workers[0].requests[1].id, error: "SQLITE_BUSY" });
+  await assert.rejects(failing, /SQLITE_BUSY/);
+});

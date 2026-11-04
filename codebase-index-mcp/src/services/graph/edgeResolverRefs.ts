@@ -17,6 +17,7 @@ import {
   stripGenerics,
 } from "../../repositories/vectorStore.js";
 import { buildNamedCandidateMap, pickBestNamedCandidate } from "./edgeResolverShared.js";
+import { immediateTransaction } from "../../repositories/sqliteTx.js";
 
 /**
  * @param skipExpensiveFallbacks skip the cross-repo provider search, keeping only the in-memory name match.
@@ -122,7 +123,7 @@ export function resolveTypeRefEdges(db: Database.Database, repoId: string, maxUn
   }
 
   let count = 0;
-  const tx = db.transaction(() => {
+  const tx = immediateTransaction(db, () => {
     for (const row of unresolved) {
       const rawTypeName = row.toId.slice(5);
       const typeName = rawTypeName.split(".").pop() ?? rawTypeName;
@@ -226,7 +227,7 @@ export function resolvePropertyEdges(db: Database.Database, repoId: string, maxU
   }
 
   let count = 0;
-  const tx = db.transaction(() => {
+  const tx = immediateTransaction(db, () => {
     for (const row of unresolved) {
       const token = row.toId.slice("property:".length);
       const memberName = token.split(".").pop() ?? "";

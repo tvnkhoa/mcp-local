@@ -229,7 +229,9 @@ test("tool lists match the committed contract snapshots exactly", () => {
   // 138 -> 142: board-mcp lead, assign, report, accept — task units for the leader/member day (BM-b).
   // 143 -> 144: codebase-index remove_repository (MCP-ISSUE-105).
   // 142 -> 143: board-mcp rescope — the leader widens an assigned task unit's scope at T1 (RS).
-  assert.equal(total, 144, "the workspace advertises 144 tools; update this number deliberately");
+  // 144 -> 145: codebase-index index_status (MCP-ISSUE-112).
+  // 145 -> 146: codebase-index register_worktree (MCP-ISSUE-114).
+  assert.equal(total, 146, "the workspace advertises 146 tools; update this number deliberately");
 });
 
 // --- a server registered before its contract exists -----------------------------
@@ -269,9 +271,9 @@ test("missingToolsMessage names the two commands that fix it", () => {
   assert.match(message, /npm run generate:all/);
 });
 
-test("codebase-index advertises all 44 of its tools", () => {
+test("codebase-index advertises all 46 of its tools", () => {
   // The specific drift S-36 existed to fix — pinned so it cannot silently return.
-  assert.equal(byKey("codebase-index").tools.length, 44);
+  assert.equal(byKey("codebase-index").tools.length, 46);
 });
 
 // --- env field hygiene (S-35) -------------------------------------------------
@@ -352,10 +354,12 @@ test("the env contract covers every server, and grew as S-35 intended", () => {
   // 45 -> 48 with CODEBASE_INDEX_TS_LS_ENABLED / _COLD_START_MS / _MAX_RSS_MB (R3 exact): find_field_accesses
   // answers TS/JS fields from a TypeScript LanguageService, within a time and memory cap.
   // 48 -> 50 with CODEBASE_INDEX_HTTP_PORT / _HTTP_TOKEN (R4): one served process over streamable HTTP.
+  // 50 -> 51 with CODEBASE_INDEX_MIN_FREE_RAM_MB (MCP-ISSUE-112): an index job does not start under that free RAM.
+  // 51 -> 52 with CODEBASE_INDEX_RUN_TIMEOUT_MS (MCP-ISSUE-112 follow-up): a hung index job is stopped and fails.
   // board-mcp arrived with 3: BOARD_REPO_ROOT, BOARD_WRITE_ENABLED, BOARD_CALL_TIMEOUT_MS.
   const counts = Object.fromEntries(SERVERS.map((s) => [s.key, s.env.length]));
   assert.deepEqual(counts, {
-    "codebase-index": 50,
+    "codebase-index": 52,
     "postgres-mcp": 35,
     "observe-mcp": 31,
     "bitbucket-mcp": 16,
