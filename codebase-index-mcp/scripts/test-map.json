@@ -1,5 +1,5 @@
 {
-  "$comment": "Which codebase-index harnesses a change needs: run-tests.mjs --changed. Paths are relative to the workspace root. A changed file that no glob here covers runs the WHOLE suite; skip lists only other servers and pure docs; none lists, one explicit path each, root files no harness loads. test:test-select fails when a suite script has no entry. Rules: scripts/lib/testSelect.mjs.",
+  "$comment": "Which codebase-index harnesses a change needs: run-tests.mjs --changed. Paths are relative to the workspace root. A changed file that no glob here covers runs the WHOLE suite; skip lists only other servers and pure docs; none lists, one explicit path each, root files no harness loads. test:test-select fails when a suite script has no entry. Rules: scripts/lib/testSelect.mjs. impactHandler.ts, searchHandler.ts and docSection.ts are left out of @dist on purpose (the dist group lists every other src path one by one, so a NEW src file still falls to the whole suite): each is named only by the harnesses that call a tool it serves — grep the tool names in scripts/test/*.mjs before adding a harness.",
   "always": [
     "test:unit",
     "guard:no-llm-runtime"
@@ -32,7 +32,57 @@
   ],
   "groups": {
     "dist": [
-      "codebase-index-mcp/src/**",
+      "codebase-index-mcp/src/*.ts",
+      "codebase-index-mcp/src/config/**",
+      "codebase-index-mcp/src/middleware/**",
+      "codebase-index-mcp/src/repositories/**",
+      "codebase-index-mcp/src/resources/**",
+      "codebase-index-mcp/src/types/**",
+      "codebase-index-mcp/src/services/docs/**",
+      "codebase-index-mcp/src/services/extractors/**",
+      "codebase-index-mcp/src/services/git/**",
+      "codebase-index-mcp/src/services/graph/**",
+      "codebase-index-mcp/src/services/impact/**",
+      "codebase-index-mcp/src/services/indexing/**",
+      "codebase-index-mcp/src/services/refactor/**",
+      "codebase-index-mcp/src/services/search/**",
+      "codebase-index-mcp/src/services/typeResolution/**",
+      "codebase-index-mcp/src/services/watch/**",
+      "codebase-index-mcp/src/services/analysis/callableHint.ts",
+      "codebase-index-mcp/src/services/analysis/conventions.ts",
+      "codebase-index-mcp/src/services/analysis/docFreshness.ts",
+      "codebase-index-mcp/src/services/analysis/efPersistence.ts",
+      "codebase-index-mcp/src/services/analysis/orient.ts",
+      "codebase-index-mcp/src/services/analysis/policyResolver.ts",
+      "codebase-index-mcp/src/services/analysis/staticAnalyzer.ts",
+      "codebase-index-mcp/src/services/analysis/staticAnalyzerCycles.ts",
+      "codebase-index-mcp/src/services/analysis/staticAnalyzerDeadCode.ts",
+      "codebase-index-mcp/src/services/analysis/staticAnalyzerDeadCodeCSharp.ts",
+      "codebase-index-mcp/src/services/analysis/staticAnalyzerDiscovery.ts",
+      "codebase-index-mcp/src/services/analysis/staticAnalyzerNameAffinity.ts",
+      "codebase-index-mcp/src/services/analysis/testDiffGraph.ts",
+      "codebase-index-mcp/src/services/analysis/testRunPlan.ts",
+      "codebase-index-mcp/src/services/analysis/testsForDiff.ts",
+      "codebase-index-mcp/src/services/analysis/valueContract.ts",
+      "codebase-index-mcp/src/services/analysis/valueRepresentation.ts",
+      "codebase-index-mcp/src/services/analysis/vitestConfig.ts",
+      "codebase-index-mcp/src/tools/*.ts",
+      "codebase-index-mcp/src/tools/handlers/analysisHandler.ts",
+      "codebase-index-mcp/src/tools/handlers/bundleHandler.ts",
+      "codebase-index-mcp/src/tools/handlers/crossRepoEndpoints.ts",
+      "codebase-index-mcp/src/tools/handlers/crossRepoHandler.ts",
+      "codebase-index-mcp/src/tools/handlers/fieldAccessExact.ts",
+      "codebase-index-mcp/src/tools/handlers/handlerContext.ts",
+      "codebase-index-mcp/src/tools/handlers/indexHandler.ts",
+      "codebase-index-mcp/src/tools/handlers/orientHandler.ts",
+      "codebase-index-mcp/src/tools/handlers/persistenceHandler.ts",
+      "codebase-index-mcp/src/tools/handlers/refactorApplyGate.ts",
+      "codebase-index-mcp/src/tools/handlers/refactorApplyHandlers.ts",
+      "codebase-index-mcp/src/tools/handlers/refactorHandler.ts",
+      "codebase-index-mcp/src/tools/handlers/refactorMigrationHandlers.ts",
+      "codebase-index-mcp/src/tools/handlers/refactorPreviewHandlers.ts",
+      "codebase-index-mcp/src/tools/handlers/testFilter.ts",
+      "codebase-index-mcp/src/tools/handlers/traceHandler.ts",
       "codebase-index-mcp/package.json",
       "codebase-index-mcp/package-lock.json",
       "codebase-index-mcp/tsconfig*.json",
@@ -62,15 +112,18 @@
     "test:benchmark-fixture": [
       "codebase-index-mcp/scripts/test/test-benchmark-fixture.mjs",
       "codebase-index-mcp/scripts/benchmark-plan-mode.mjs",
-      "codebase-index-mcp/src/repositories/graphStore.ts"
+      "codebase-index-mcp/src/repositories/graphStore.ts",
+      "codebase-index-mcp/src/tools/handlers/impactHandler.ts"
     ],
     "test:bus-edges": [
       "codebase-index-mcp/scripts/test/test-bus-edges.mjs",
-      "@dist"
+      "@dist",
+      "codebase-index-mcp/src/tools/handlers/impactHandler.ts"
     ],
     "test:call-chain-interface": [
       "codebase-index-mcp/scripts/test/test-call-chain-interface.mjs",
-      "@dist"
+      "@dist",
+      "codebase-index-mcp/src/tools/handlers/impactHandler.ts"
     ],
     "test:change-value-representation": [
       "codebase-index-mcp/scripts/test/test-change-value-representation.mjs",
@@ -78,7 +131,9 @@
     ],
     "test:citations": [
       "codebase-index-mcp/scripts/test/test-citations.mjs",
-      "@dist"
+      "@dist",
+      "codebase-index-mcp/src/tools/handlers/impactHandler.ts",
+      "codebase-index-mcp/src/services/analysis/docSection.ts"
     ],
     "test:csharp-inheritance-bridge": [
       "codebase-index-mcp/scripts/test/test-csharp-inheritance-bridge.mjs",
@@ -94,7 +149,9 @@
     ],
     "test:css-symbols": [
       "codebase-index-mcp/scripts/test/test-css-symbols.mjs",
-      "@dist"
+      "@dist",
+      "codebase-index-mcp/src/tools/handlers/impactHandler.ts",
+      "codebase-index-mcp/src/tools/handlers/searchHandler.ts"
     ],
     "test:detect-changes-rename": [
       "codebase-index-mcp/scripts/test/test-detect-changes-rename.mjs",
@@ -102,7 +159,9 @@
     ],
     "test:docs-term": [
       "codebase-index-mcp/scripts/test/test-docs-term.mjs",
-      "@dist"
+      "@dist",
+      "codebase-index-mcp/src/tools/handlers/impactHandler.ts",
+      "codebase-index-mcp/src/services/analysis/docSection.ts"
     ],
     "test:endpoint-bridge": [
       "codebase-index-mcp/scripts/test/test-endpoint-bridge.mjs",
@@ -118,23 +177,30 @@
     ],
     "test:field-access-exact": [
       "codebase-index-mcp/scripts/test/test-field-access-exact.mjs",
-      "@dist"
+      "@dist",
+      "codebase-index-mcp/src/tools/handlers/impactHandler.ts"
     ],
     "test:field-access-rhs": [
       "codebase-index-mcp/scripts/test/test-field-access-rhs.mjs",
-      "@dist"
+      "@dist",
+      "codebase-index-mcp/src/tools/handlers/impactHandler.ts"
     ],
     "test:field-access-vue": [
       "codebase-index-mcp/scripts/test/test-field-access-vue.mjs",
-      "@dist"
+      "@dist",
+      "codebase-index-mcp/src/tools/handlers/impactHandler.ts"
     ],
     "test:field-access-worker": [
       "codebase-index-mcp/scripts/test/test-field-access-worker.mjs",
-      "@dist"
+      "@dist",
+      "codebase-index-mcp/src/tools/handlers/impactHandler.ts",
+      "codebase-index-mcp/src/tools/handlers/searchHandler.ts"
     ],
     "test:freshness-worker": [
       "codebase-index-mcp/scripts/test/test-freshness-worker.mjs",
-      "@dist"
+      "@dist",
+      "codebase-index-mcp/src/tools/handlers/impactHandler.ts",
+      "codebase-index-mcp/src/tools/handlers/searchHandler.ts"
     ],
     "test:harness-db-isolation": [
       "codebase-index-mcp/scripts/test/test-harness-db-isolation.mjs",
@@ -142,7 +208,8 @@
     ],
     "test:html-svg": [
       "codebase-index-mcp/scripts/test/test-html-svg.mjs",
-      "@dist"
+      "@dist",
+      "codebase-index-mcp/src/tools/handlers/impactHandler.ts"
     ],
     "test:http-consumers": [
       "codebase-index-mcp/scripts/test/test-http-consumers.mjs",
@@ -150,11 +217,15 @@
     ],
     "test:http-transport": [
       "codebase-index-mcp/scripts/test/test-http-transport.mjs",
-      "@dist"
+      "@dist",
+      "codebase-index-mcp/src/tools/handlers/impactHandler.ts",
+      "codebase-index-mcp/src/tools/handlers/searchHandler.ts",
+      "codebase-index-mcp/src/services/analysis/docSection.ts"
     ],
     "test:impact-join-parity": [
       "codebase-index-mcp/scripts/test/test-impact-join-parity.mjs",
-      "@dist"
+      "@dist",
+      "codebase-index-mcp/src/tools/handlers/impactHandler.ts"
     ],
     "test:interface-dispatch": [
       "codebase-index-mcp/scripts/test/test-interface-dispatch.mjs",
@@ -163,7 +234,10 @@
     "test:issue-049-shapes": [
       "codebase-index-mcp/scripts/test/test-issue-049-shapes.mjs",
       "@dist",
-      "@self"
+      "@self",
+      "codebase-index-mcp/src/tools/handlers/impactHandler.ts",
+      "codebase-index-mcp/src/tools/handlers/searchHandler.ts",
+      "codebase-index-mcp/src/services/analysis/docSection.ts"
     ],
     "test:issue-052-qualified-call": [
       "codebase-index-mcp/scripts/test/test-issue-052-qualified-call.mjs",
@@ -210,15 +284,20 @@
     "test:profile-responses": [
       "codebase-index-mcp/scripts/test/test-profile-responses.mjs",
       "@dist",
-      "@self"
+      "@self",
+      "codebase-index-mcp/src/tools/handlers/impactHandler.ts",
+      "codebase-index-mcp/src/tools/handlers/searchHandler.ts"
     ],
     "test:query-refresh": [
       "codebase-index-mcp/scripts/test/test-query-refresh.mjs",
-      "@dist"
+      "@dist",
+      "codebase-index-mcp/src/tools/handlers/searchHandler.ts"
     ],
     "test:refactor-engine": [
       "codebase-index-mcp/scripts/test/test-refactor-engine.mjs",
-      "@dist"
+      "@dist",
+      "codebase-index-mcp/src/tools/handlers/impactHandler.ts",
+      "codebase-index-mcp/src/tools/handlers/searchHandler.ts"
     ],
     "test:refactor-profiles": [
       "codebase-index-mcp/scripts/test/test-refactor-preview-profiles.mjs",
@@ -236,11 +315,13 @@
     "test:search-regex": [
       "codebase-index-mcp/scripts/test/test-search-regex.mjs",
       "@dist",
-      "@self"
+      "@self",
+      "codebase-index-mcp/src/tools/handlers/searchHandler.ts"
     ],
     "test:server-envelopes": [
       "codebase-index-mcp/scripts/test/test-server-envelopes.mjs",
-      "@dist"
+      "@dist",
+      "codebase-index-mcp/src/tools/handlers/impactHandler.ts"
     ],
     "test:setup-config": [
       "codebase-index-mcp/scripts/test/test-setup-config.mjs",
@@ -250,7 +331,9 @@
     ],
     "test:sql-lane": [
       "codebase-index-mcp/scripts/test/test-sql-lane.mjs",
-      "@dist"
+      "@dist",
+      "codebase-index-mcp/src/tools/handlers/impactHandler.ts",
+      "codebase-index-mcp/src/tools/handlers/searchHandler.ts"
     ],
     "test:sqlite-guardrails": [
       "codebase-index-mcp/scripts/test/test-sqlite-guardrails.mjs",
@@ -274,7 +357,9 @@
     ],
     "test:text-json-lane": [
       "codebase-index-mcp/scripts/test/test-text-json-lane.mjs",
-      "@dist"
+      "@dist",
+      "codebase-index-mcp/src/tools/handlers/impactHandler.ts",
+      "codebase-index-mcp/src/tools/handlers/searchHandler.ts"
     ],
     "test:typescript-edges": [
       "codebase-index-mcp/scripts/test/test-typescript-edges.mjs",
@@ -286,7 +371,9 @@
     ],
     "test:unknown-input-honesty": [
       "codebase-index-mcp/scripts/test/test-unknown-input-honesty.mjs",
-      "@dist"
+      "@dist",
+      "codebase-index-mcp/src/tools/handlers/impactHandler.ts",
+      "codebase-index-mcp/src/tools/handlers/searchHandler.ts"
     ],
     "test:value-contract-impact": [
       "codebase-index-mcp/scripts/test/test-value-contract-impact.mjs",
@@ -294,7 +381,9 @@
     ],
     "test:vue-components": [
       "codebase-index-mcp/scripts/test/test-vue-components.mjs",
-      "@dist"
+      "@dist",
+      "codebase-index-mcp/src/tools/handlers/impactHandler.ts",
+      "codebase-index-mcp/src/tools/handlers/searchHandler.ts"
     ],
     "test:wiring-note": [
       "codebase-index-mcp/scripts/test/test-wiring-note.mjs",
