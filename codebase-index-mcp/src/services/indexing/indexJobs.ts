@@ -21,6 +21,9 @@
 
 import { randomUUID } from "node:crypto";
 import os from "node:os";
+import path from "node:path";
+
+import { samePath } from "../git/gitHelpers.js";
 
 import type { IndexMode, IndexRunResult } from "../../types/index.js";
 
@@ -110,11 +113,50 @@ export const MAX_WAIT_MS = 100_000;
 export function coversRequest(existing: IndexJobRequest, next: IndexJobRequest): boolean {
   return (
     existing.repoId === next.repoId &&
-    existing.repoPath === next.repoPath &&
+    sameRepoPath(existing.repoPath, next.repoPath) &&
     existing.docsEnabled === next.docsEnabled &&
     existing.maxFiles === next.maxFiles &&
     (existing.mode === next.mode || existing.mode === "full")
   );
+}
+
+/** Two spellings of one folder: resolved, forward slashes, no trailing slash, case-insensitive on Windows. */
+export function sameRepoPath(a: string, b: string): boolean {
+  const norm = (p: string): string => path.resolve(p).replace(/\\/g, "/").replace(/\/+$/, "");
+  return samePath(norm(a), norm(b));
+}
+
+/**
+ * Review F1: run `fn` through a queue (`enqueue`, the DB-wide one) but wait for its turn at most `waitMs`. If the
+ * turn has not come by then, the call rejects with `onGiveUp()` and `fn` is skipped when its turn comes; once `fn`
+ * has started it is waited for (it is short: a purge). Keeps a tool call under the client's call ceiling instead of
+ * waiting behind a run for up to CODEBASE_INDEX_RUN_TIMEOUT_MS.
+ */
+export async function queuedWithin<T>(
+  enqueue: (fn: () => Promise<T | undefined>) => Promise<T | undefined>,
+  fn: () => Promise<T>,
+  waitMs: number,
+  onGiveUp: () => Error
+): Promise<T> {
+  let state: "waiting" | "started" | "abandoned" = "waiting";
+  let timer: NodeJS.Timeout | undefined;
+  const queued = enqueue(async () => {
+    if (state === "abandoned") return undefined;
+    state = "started";
+    return fn();
+  });
+  const gaveUp = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => {
+      if (state !== "waiting") return;
+      state = "abandoned";
+      reject(onGiveUp());
+    }, waitMs);
+  });
+  try {
+    return (await Promise.race([queued, gaveUp])) as T;
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 
 export class IndexJobQueue {

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { IndexJobQueue, type IndexJobRequest } from "./indexJobs.js";
+import { IndexJobQueue, queuedWithin, sameRepoPath, type IndexJobRequest } from "./indexJobs.js";
 import type { IndexRunResult } from "../../types/index.js";
 
 /**
@@ -196,6 +196,37 @@ test("review follow-up C: the run timeout counts from started(), and a job faile
   await new Promise((r) => setTimeout(r, 100));
   assert.deepEqual(seen, [false, true], "after the timeout the executor sees cancelled() and must not start anything");
   waiting.resolve();
+});
+
+test("review F1: queuedWithin gives up after waitMs behind a busy queue, and the skipped fn never runs", async () => {
+  // A one-slot queue held by a long run.
+  let chain: Promise<unknown> = Promise.resolve();
+  const enqueue = <T>(fn: () => Promise<T>): Promise<T> => {
+    const next = chain.then(fn, fn);
+    chain = next.catch(() => undefined);
+    return next;
+  };
+  const hold = deferred();
+  void enqueue(() => hold.promise);
+  let purged = 0;
+  const t0 = Date.now();
+  await assert.rejects(
+    queuedWithin(enqueue, async () => ++purged, 50, () => new Error("busy: retry")),
+    /busy: retry/
+  );
+  assert.ok(Date.now() - t0 < 1_000, "answers after the bound, not when the queue frees");
+  hold.resolve();
+  await chain;
+  assert.equal(purged, 0, "the abandoned call does not run when its turn comes");
+  // A free queue: the call runs and answers.
+  assert.equal(await queuedWithin(enqueue, async () => ++purged, 50, () => new Error("busy")), 1);
+});
+
+test("review A-low: coalescing compares repo paths in any spelling", () => {
+  assert.equal(sameRepoPath("C:/a/b", "C:\\a\\b\\"), true);
+  const queue = new IndexJobQueue({ minFreeRamMb: 0, execute: () => new Promise<IndexRunResult>(() => undefined) });
+  const a = queue.enqueue({ ...request("a"), repoPath: "/r/a" });
+  assert.equal(queue.enqueue({ ...request("a"), repoPath: "/r/a/" }).runId, a.runId);
 });
 
 test("IX-2: wait returns the job as it stands when the bound passes; a failed or throwing run is failed with its error", async () => {

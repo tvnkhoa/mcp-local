@@ -16,14 +16,15 @@ import path from "node:path";
 import os from "node:os";
 import { fileURLToPath } from "node:url";
 
-import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
+import { ErrorCode, McpError, type CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { runServer } from "@mcp/sdk";
 
 import { GraphStore } from "./repositories/graphStore.js";
 import { assertPathAllowed, clamp } from "./middleware/indexGuardrails.js";
 import { WatchManager } from "./services/watch/watchManager.js";
-import type { IndexRunnerLimits, RunIndexAndResolve } from "./services/indexing/indexRunner.js";
-import { DEFAULT_MIN_FREE_RAM_MB, DEFAULT_RUN_TIMEOUT_MS, IndexJobQueue } from "./services/indexing/indexJobs.js";
+import type { IndexRunnerLimits, RunExtras, RunIndexAndResolve } from "./services/indexing/indexRunner.js";
+import type { IndexMode, IndexRunResult } from "./types/index.js";
+import { DEFAULT_MIN_FREE_RAM_MB, DEFAULT_RUN_TIMEOUT_MS, IndexJobQueue, MAX_WAIT_MS, queuedWithin } from "./services/indexing/indexJobs.js";
 import { RefreshWorkerClient } from "./services/indexing/refreshWorkerClient.js";
 import { newerBuildRefusal } from "./services/indexing/runPolicy.js";
 import { INDEX_VERSION } from "./services/indexing/indexPipeline.js";
@@ -202,8 +203,19 @@ async function treeKeyNow(repoPath: string): Promise<TreeKey | null> {
  * index_repository's and the watcher's run: in the DB-wide queue (MCP-ISSUE-111), executed by the refresh worker
  * (MCP-ISSUE-112), which also records the covered tree key on the run (the writer's connection, never this thread's).
  */
-const runInWorker: RunIndexAndResolve = async (repoId, repoPath, mode, docsEnabled, maxFiles, batchSize, extras = {}) => {
+const runInWorker = async (
+  repoId: string,
+  repoPath: string,
+  mode: IndexMode,
+  docsEnabled: boolean,
+  maxFiles: number,
+  batchSize: number,
+  extras: RunExtras = {},
+  /** Review F3: called right before the run is posted to the worker (after the tree key is read); may throw to skip it. */
+  beforeRun?: () => void
+): Promise<IndexRunResult> => {
     const key = await treeKeyNow(repoPath);
+    beforeRun?.();
     // MCP-ISSUE-101: index_repository and the watcher leave the index covering the whole tree, as a gate run does.
     const result = await refreshWorker.run(repoId, repoPath, mode, docsEnabled, maxFiles, batchSize, {
       ...extras,
@@ -234,18 +246,51 @@ const indexJobs = new IndexJobQueue({
   execute: (job, request, onProgress, control) =>
     freshnessGate.serialize(
       request.repoId,
-      async () => {
-        if (control.cancelled()) throw new Error(`index job ${job.runId} had already failed; its run was not started`);
-        control.started();
-        return runInWorker(request.repoId, request.repoPath, request.mode, request.docsEnabled, request.maxFiles, request.batchSize, {
-          runId: job.runId,
-          onProgress: (progress, total, message) =>
-            onProgress({ phase: message.replace(/^[^:]*: /, ""), progress, ...(total !== undefined && { total }) })
-        });
-      },
+      async () =>
+        runInWorker(
+          request.repoId,
+          request.repoPath,
+          request.mode,
+          request.docsEnabled,
+          request.maxFiles,
+          request.batchSize,
+          {
+            runId: job.runId,
+            onProgress: (progress: number, total: number | undefined, message: string) =>
+              onProgress({ phase: message.replace(/^[^:]*: /, ""), progress, ...(total !== undefined && { total }) })
+          },
+          // Review F3: the clock starts once nothing but the worker run is left; a job failed by then never runs.
+          () => {
+            if (control.cancelled()) throw new Error(`index job ${job.runId} had already failed; its run was not started`);
+            control.started();
+          }
+        ),
       request.mode
     )
 });
+
+/**
+ * Review F1: remove_repository's delete through the writer, but never a long wait. With an index job running it is
+ * refused at once (naming the run); otherwise it waits for its turn in the DB-wide queue at most MAX_WAIT_MS (a gate
+ * refresh can be ahead of it), then refuses — retryable — instead of holding the call past the client's ceiling.
+ */
+async function purgeThroughWriter(repoId: string): Promise<Record<string, number>> {
+  const busy = (): McpError => {
+    const running = indexJobs.pending().filter((j) => j.state === "running");
+    const which = running.map((j) => `${j.runId} (${j.repoId})`).join(", ");
+    return new McpError(
+      ErrorCode.InvalidRequest,
+      `remove_repository: an index run is in progress${which ? `: ${which}` : ""}; retry when it ends (index_status shows it).`
+    );
+  };
+  if (indexJobs.pending().some((j) => j.state === "running")) throw busy();
+  return queuedWithin<Record<string, number>>(
+    (fn) => freshnessGate.serialize(repoId, fn),
+    () => refreshWorker.purge(repoId),
+    MAX_WAIT_MS,
+    busy
+  );
+}
 
 async function ensureFresh(repoId: string): Promise<void> {
   const note = await freshnessGate.ensureFresh(repoId);
@@ -309,7 +354,7 @@ function buildHandlerContext(): HandlerContext {
     runIndexAndResolve,
     indexJobs,
     // Review 3-rest: remove_repository deletes through the writer, in the DB-wide queue.
-    purgeRepository: (repoId: string) => freshnessGate.serialize(repoId, () => refreshWorker.purge(repoId)),
+    purgeRepository: purgeThroughWriter,
     asText,
     constants: {
       MAX_FILES_PER_RUN,

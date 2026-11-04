@@ -70,3 +70,8 @@
   write lock with the OS until the process thread is torn down, and a run stopped between dropping and re-creating the
   edge indexes (`shouldDropEdgeIndexesForResolve`) leaves them missing until the next schema init (server restart) or
   full run. Neither is handled; a timed-out run should be followed by a server restart until it is.
+- **Focused review (F1–F3):** `remove_repository` never waits long for the writer — refused at once while an index job
+  runs (naming its runId), otherwise it waits for its queue turn at most 100 s (`queuedWithin`) and refuses, retryable;
+  an abandoned purge never runs later. A timed-out run is released only after its worker has terminated (no second
+  writer). The run timeout starts after the tree key is read, right before the run is posted to the worker. Coalescing
+  compares paths with `sameRepoPath`.

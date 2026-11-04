@@ -7,8 +7,7 @@ import { DEFAULT_STALE_RUN_MS, freshnessStateDir, liveRunMarkers, lockFileFor, r
 import { readStatusEntriesAsync, stillDirty, summarizeWorkingTree, type StatusEntry } from "../../services/git/gitHelpers.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { McpError, ErrorCode } from "@modelcontextprotocol/sdk/types.js";
-import { findWorktreeOwner, getRepoStaleness, samePath } from "../../services/git/gitHelpers.js";
-import path from "node:path";
+import { findWorktreeOwner, getRepoStaleness } from "../../services/git/gitHelpers.js";
 import { assertPathAllowed, clamp } from "../../middleware/indexGuardrails.js";
 import { resolveResponseProfile } from "../../middleware/responseFormatter.js";
 import { resolveDetectChangesPolicy } from "../../services/analysis/policyResolver.js";
@@ -18,7 +17,7 @@ import { buildIndexMeta } from "./impactHandler.js";
 import type { IndexMode } from "../../types/index.js";
 import { activateWatchForRepo, clearWatchInactivityTimer } from "../../services/watch/watchLifecycle.js";
 import type { HandlerContext } from "./handlerContext.js";
-import { MAX_WAIT_MS, type IndexJob } from "../../services/indexing/indexJobs.js";
+import { MAX_WAIT_MS, sameRepoPath, type IndexJob } from "../../services/indexing/indexJobs.js";
 
 /**
  * Changed files that cannot have a linked test, by nature (MCP-ISSUE-058(e)).
@@ -495,11 +494,8 @@ export async function handleRegisterWorktree(
   });
 }
 
-/** Two spellings of one folder: resolved, forward slashes, no trailing slash, case-insensitive on Windows. */
-export function sameRepoPath(a: string, b: string): boolean {
-  const norm = (p: string): string => path.resolve(p).replace(/\\/g, "/").replace(/\/+$/, "");
-  return samePath(norm(a), norm(b));
-}
+/** Moved to indexJobs.ts (the job queue compares paths too); re-exported for this module's callers and tests. */
+export { sameRepoPath };
 
 // ── index_status ──────────────────────────────────────────────────────────────
 
