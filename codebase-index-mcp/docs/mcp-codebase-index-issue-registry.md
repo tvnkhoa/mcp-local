@@ -309,6 +309,8 @@ Gate: 4/4 servers build + typecheck, 36/36 harnesses (63 assertions in the 049 h
 - [MCP-ISSUE-109 — a 0-line apply minted an applyId / rollbackId and stored a rollback row](issues/MCP-ISSUE-109.md)
 - [MCP-ISSUE-110 — two harnesses failed under machine load: freshness budget did not bound the tree check; HTTP start-up outran the harness; an unresolved client identity is suspected](issues/MCP-ISSUE-110.md)
 - [MCP-ISSUE-116 — `query_docs` mode `section` could only be addressed by heading prefix](issues/MCP-ISSUE-116.md)
+- [MCP-ISSUE-117 — `search_regex` gave no match total and no `truncated` flag on a complete response](issues/MCP-ISSUE-117.md)
+- [MCP-ISSUE-118 — `test:field-access-exact` red when solo: the cold type-program build outlives the harness budget](issues/MCP-ISSUE-118.md)
 - [Confirmed fixed — 2026-08-05 re-verification of the 042–051 wave](issues/confirmed-fixed-2026-08-05-re-verification-of-the-042-051-wave.md)
 - [MCP-ISSUE-101 follow-ups (row 5: F2–F4)](issues/mcp-issue-101-follow-ups-row-5-f2-f4.md)
 
