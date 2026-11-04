@@ -197,6 +197,7 @@ export const get_my_appointments_route: SourcedRoute = {
 import { find_customer_route } from './customers.js'
 import { get_my_appointments_route } from './appointments.js'
 import { get_my_vehicles_route } from './vehicles.js'
+import "./_indexWait.mjs";
 
 export const ROUTES: Readonly<Record<string, SourcedRoute>> = {
   get_my_vehicles: get_my_vehicles_route,

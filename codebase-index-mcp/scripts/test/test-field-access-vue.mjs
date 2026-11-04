@@ -80,6 +80,7 @@ export type DocumentListEntry = z.infer<typeof document_list_entry_schema>;
   "packages/portal/tsconfig.json": JSON.stringify({ extends: "../../tsconfig.base.json", compilerOptions: { noEmit: true, module: "preserve", moduleResolution: "bundler", lib: ["es2023", "dom"], jsx: "preserve", types: [] }, include: ["src"] }),
   "packages/portal/src/TagRowMarks.vue": `<script setup lang="ts">
 import type { DocumentListEntry } from "@fx/contracts";
+import "./_indexWait.mjs";
 
 const props = defineProps<{ entry: DocumentListEntry }>();
 

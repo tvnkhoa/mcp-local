@@ -30,6 +30,7 @@ import { join } from "node:path";
 import { makeTempDir } from "./_fixtures.mjs";
 import { buildRepoResources } from "../../dist/resources/resourceHandler.js";
 import { attachServerStderr } from "./_serverStderr.mjs";
+import "./_indexWait.mjs";
 
 let passed = 0, failed = 0;
 function assert(cond, label, detail = "") {

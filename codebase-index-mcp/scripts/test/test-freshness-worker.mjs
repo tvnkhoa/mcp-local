@@ -29,6 +29,7 @@ import { dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { makeTempDir } from "./_fixtures.mjs";
 import { attachServerStderr } from "./_serverStderr.mjs";
+import "./_indexWait.mjs";
 
 const GENERATED_FILES = Number(process.env.FRESHNESS_WORKER_FIXTURE_FILES ?? 1500);
 const DIRTY_FILES = Number(process.env.FRESHNESS_WORKER_DIRTY_FILES ?? 300);

@@ -56,6 +56,7 @@ const files = {
   "public/favicon.svg": svg(`<circle cx="12" cy="12" r="10"/>`),
   "src/main.ts": `import iconUrl from "./assets/icon.svg";
 import iconRaw from "./assets/icon.svg?raw";
+import "./_indexWait.mjs";
 export function mount(): string {
   return iconUrl + iconRaw.length;
 }

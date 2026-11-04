@@ -22,6 +22,7 @@ import { dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { makeTempDir } from "./_fixtures.mjs";
 import { attachServerStderr } from "./_serverStderr.mjs";
+import "./_indexWait.mjs";
 
 const GENERATED_FILES = Number(process.env.LOCK_FIXTURE_FILES ?? 1200);
 const READS = Number(process.env.LOCK_READS ?? 24);

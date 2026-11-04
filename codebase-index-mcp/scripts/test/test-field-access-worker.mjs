@@ -24,6 +24,7 @@ import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import { makeTempDir } from "./_fixtures.mjs";
 import { attachServerStderr } from "./_serverStderr.mjs";
+import "./_indexWait.mjs";
 
 const GENERATED_FILES = Number(process.env.FIELD_WORKER_FIXTURE_FILES ?? 600);
 const WAIT_MS = 300;

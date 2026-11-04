@@ -23,6 +23,8 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 
 import { makeTempDir } from "./_fixtures.mjs";
+import { indexStatusVia, waitForIndexJob } from "./_indexWait.mjs";
+import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const TOKEN = "ix2-jobs-token-".padEnd(48, "x");
@@ -203,6 +205,35 @@ try {
 } finally {
   child.kill();
   await sleep(500);
+}
+
+// (e) Follow-up 1: under its free-RAM floor a job stays queued, says why, and a bounded wait gives up instead of looping.
+{
+  const floored = new StdioClientTransport({
+    command: "node",
+    args: [path.join(ROOT, "dist", "index.js")],
+    env: { ...process.env, CODEBASE_INDEX_ALLOWED_ROOTS: tmp, CODEBASE_INDEX_DB_PATH: path.join(tmp, "floor.db"), CODEBASE_INDEX_MIN_FREE_RAM_MB: "999999999" },
+    stderr: "pipe"
+  });
+  const c = new Client({ name: "jobs-floor", version: "0" });
+  try {
+    await c.connect(floored);
+    const r = await c.callTool({ name: "index_repository", arguments: { repoId: `floor-${stamp}`, repoPath: small.dir, mode: "full" } });
+    const first = js(r);
+    assert(first?.state === "queued" && /below CODEBASE_INDEX_MIN_FREE_RAM_MB=999999999/.test(first?.waitingFor ?? ""), "(e) under the RAM floor the job stays queued and says why", txt(r).slice(0, 300));
+    let threw = "";
+    const t0 = Date.now();
+    try {
+      await waitForIndexJob(indexStatusVia(c), first, { deadlineMs: 1500, intervalMs: 250 });
+    } catch (e) {
+      threw = e instanceof Error ? e.message : String(e);
+    }
+    assert(/still queued after 1500 ms [(]free RAM/.test(threw) && Date.now() - t0 < 5000, "(e) the bounded wait gives up with the reason, it never loops forever", threw);
+  } catch (error) {
+    assert(false, "(e) ran", error instanceof Error ? error.message : String(error));
+  } finally {
+    await Promise.race([c.close().catch(() => {}), sleep(5000)]);
+  }
 }
 
 console.log(`\nResults: ${passed} passed, ${failed} failed`);

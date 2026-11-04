@@ -19,6 +19,7 @@ import os from "node:os";
 import path from "node:path";
 import process from "node:process";
 import { attachServerStderr } from "./_serverStderr.mjs";
+import "./_indexWait.mjs";
 
 function text(res) {
   const t = res?.content?.find((c) => c.type === "text")?.text ?? "{}";

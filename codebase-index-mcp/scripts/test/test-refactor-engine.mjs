@@ -15,6 +15,7 @@ import { mkdtempSync, writeFileSync, readFileSync, rmSync, mkdirSync } from "fs"
 import { tmpdir } from "os";
 import { join, resolve } from "path";
 import { attachServerStderr } from "./_serverStderr.mjs";
+import "./_indexWait.mjs";
 
 // ---------------------------------------------------------------------------
 // Helpers

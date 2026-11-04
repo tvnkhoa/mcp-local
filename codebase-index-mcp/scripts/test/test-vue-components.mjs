@@ -40,6 +40,7 @@ import ReadFailure from './components/ReadFailure.vue'
 import OnlyInTemplate from './components/OnlyInTemplate.vue'
 import DynamicPanel from './components/DynamicPanel.vue'
 import { formatTitle } from './lib/format'
+import "./_indexWait.mjs";
 
 const show = ref(true)
 const view = ref('card')

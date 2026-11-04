@@ -53,3 +53,9 @@
   `running` and every later run behind it forever. Guarded: `indexJobs.test.ts` "a run past runTimeoutMs fails its job".
 - **Coalescing:** a request for a repo that already has a job queued or running in the same mode, or a full one, answers
   that job (`coalesced: true`) instead of queueing a duplicate. Guarded: `indexJobs.test.ts` "a second request … joins it".
+- **Test environment:** `scripts/test/_indexWait.mjs` sets `CODEBASE_INDEX_MIN_FREE_RAM_MB=0` for every harness that
+  indexes (and for smoke, verify-enhancements and benchmark-plan-mode), so a loaded machine or CI runner never leaves a
+  harness's job queued; `waitForIndexJob` polls a job to its end with a deadline (`INDEX_WAIT_DEADLINE_MS`, 10 min).
+  smoke-test and verify-enhancements poll past `wait: true`'s 100 s bound; index-self (30 min) and adoption/perf
+  (`INDEX_TIMEOUT_MS`) poll with deadlines and keep the RAM floor, being real runs. Guarded: `test:index-jobs` (e) — a
+  server under its floor answers `queued` with the reason, and the bounded wait gives up.

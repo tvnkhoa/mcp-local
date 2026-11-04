@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { makeTempDbPath } from "./test/_fixtures.mjs";
+import { indexStatusVia, waitForIndexJob } from "./test/_indexWait.mjs";
 
 function readTextContent(result) {
   return Array.isArray(result?.content)
@@ -80,11 +81,8 @@ async function main() {
       maxFiles: 500
     }
   }, undefined, { timeout: 180_000 })));
-  // MCP-ISSUE-112: wait:true answers after at most 100 s; a longer run is polled to its end.
-  while (indexed.state === "queued" || indexed.state === "running") {
-    await new Promise((r) => setTimeout(r, 2000));
-    indexed = JSON.parse(readTextContent(await client.callTool({ name: "index_status", arguments: { runId: indexed.runId } })));
-  }
+  // MCP-ISSUE-112: wait:true answers after at most 100 s; a longer run is polled to its end, with a deadline.
+  indexed = await waitForIndexJob(indexStatusVia(client), indexed);
   if (indexed.state !== "ok") throw new Error(`index_repository did not end ok: ${JSON.stringify(indexed).slice(0, 300)}`);
 
   const probe = await client.callTool({

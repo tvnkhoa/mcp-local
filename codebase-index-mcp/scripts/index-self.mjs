@@ -76,8 +76,11 @@ async function main() {
       { timeout: 300_000 }
     )
   );
-  // MCP-ISSUE-112: wait:true answers after at most 100 s; a longer run is polled to its end.
+  // MCP-ISSUE-112: wait:true answers after at most 100 s; a longer run is polled to its end — 30 min at most (a job
+  // can sit queued under CODEBASE_INDEX_MIN_FREE_RAM_MB: this is a real run, so the RAM floor stays on).
+  const pollEnd = Date.now() + 30 * 60_000;
   while (indexResult.json && (indexResult.json.state === "queued" || indexResult.json.state === "running")) {
+    if (Date.now() > pollEnd) throw new Error(`index job ${indexResult.json.runId} still ${indexResult.json.state} after 30 min${indexResult.json.waitingFor ? ` (${indexResult.json.waitingFor})` : ""}`);
     await new Promise((r) => setTimeout(r, 2000));
     indexResult = readJson(await client.callTool({ name: "index_status", arguments: { runId: indexResult.json.runId } }));
   }
