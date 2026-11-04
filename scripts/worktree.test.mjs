@@ -82,6 +82,27 @@ test("add links every node_modules per entry, with @mcp/* -> the worktree's pack
   assert.throws(() => addWorktree("a", { cwd: root }), /already exists/);
 });
 
+test("add runs the build in the new worktree after linking; a failing build is reported, not fatal; no build by default", () => {
+  const root = fakeRepo("repo-build");
+  const calls = [];
+  const r = addWorktree("g", {
+    cwd: root,
+    build: (wt) => calls.push({ wt, linked: isLink(path.join(wt, "node_modules", "rootdep")) }),
+  });
+  const wt = worktreePath(root, "g");
+  assert.deepEqual(calls, [{ wt, linked: true }], "built once, in the worktree, after node_modules was linked");
+  assert.equal(r.built, true);
+  assert.equal(r.buildError, null);
+
+  const failed = addWorktree("h", { cwd: root, build: () => { throw new Error("boom"); } });
+  assert.equal(failed.built, false);
+  assert.equal(failed.buildError, "boom");
+  assert.ok(fs.existsSync(failed.path), "the worktree survives a failed build");
+
+  const none = addWorktree("i", { cwd: root });
+  assert.equal(none.built, false, "--no-build / no build function: nothing runs");
+});
+
 test("remove refuses a dirty worktree, then removes a clean one without touching main", () => {
   const root = fakeRepo("repo-remove");
   const wt = addWorktree("b", { cwd: root }).path;
