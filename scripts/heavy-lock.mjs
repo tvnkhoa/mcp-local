@@ -3,24 +3,36 @@
  * Run one command inside the machine-wide heavy-check lock (`scripts/lib/heavyLock.mjs`).
  *
  * The root `verify:*` scripts wrap their step chains with this, so `npm run verify:all` waits for
- * another session's gate instead of racing it. Exit code is the command's; 75 when the lock times out.
+ * another session's gate instead of racing it. Exit code is the command's; 75 when the lock times out; 76 when
+ * the run stopped waiting because an ancestor that was alive when it began waiting died (its session is
+ * gone — e.g. TaskStop killed the shell but not this child). Neither code means the check failed.
  *
  * Usage:
  *   node scripts/heavy-lock.mjs [--no-lock] -- <command> [args...]
+ *   node scripts/heavy-lock.mjs status [--json]
+ *
+ * `status` is read-only (it only removes registry entries of dead waiters): the holder and every
+ * waiter, each with its pid, command, cwd, since when, whether it is alive and whether its launching
+ * session is gone (`ORPHAN`). It kills nothing.
  */
 
 import { spawnSync } from "node:child_process";
 import process from "node:process";
 
-import { holdHeavyLockOrExit } from "./lib/heavyLock.mjs";
+import { formatHeavyLockStatus, heavyLockStatus, holdHeavyLockOrExit } from "./lib/heavyLock.mjs";
 
 const argv = process.argv.slice(2);
+if (argv[0] === "status") {
+  const status = await heavyLockStatus();
+  console.log(argv.includes("--json") ? JSON.stringify(status, null, 2) : formatHeavyLockStatus(status));
+  process.exit(0);
+}
 const sep = argv.indexOf("--");
 const own = sep === -1 ? [] : argv.slice(0, sep);
 const command = sep === -1 ? argv : argv.slice(sep + 1);
 
 if (command.length === 0) {
-  console.error("usage: node scripts/heavy-lock.mjs [--no-lock] -- <command> [args...]");
+  console.error("usage: node scripts/heavy-lock.mjs [--no-lock] -- <command> [args...]\n       node scripts/heavy-lock.mjs status [--json]");
   process.exit(2);
 }
 
