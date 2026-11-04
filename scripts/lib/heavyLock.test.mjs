@@ -15,6 +15,7 @@ import {
   heavyLockWaitersDir,
   lineageOf,
   isPidAlive,
+  LOCK_ORPHANED_EXIT,
   LOCK_TIMEOUT_EXIT,
   PID_START_TOLERANCE_MS,
   readPidStart,
@@ -550,4 +551,68 @@ test("end to end: a holder whose launching parent is killed shows as an orphan; 
   assert.equal(after.holder.parentAlive, false);
   assert.ok(after.holder.goneAncestors.includes(parent.pid));
   assert.equal(isPidAlive(holderPid), true);
+});
+
+test("an ancestor already gone when the wait begins (a spawn-and-exit wrapper) does not end the wait", async () => {
+  const lockPath = tempLock();
+  const held = await acquireHeavyLock({ cmd: "holder", env: cleanEnv(lockPath), log: quiet });
+  await assert.rejects(
+    acquireHeavyLock({
+      cmd: "launched by a wrapper",
+      env: cleanEnv(lockPath),
+      timeoutMs: 400,
+      pollMs: 20,
+      readLineage: async () => [{ pid: deadPid(), name: "cmd.exe", start: null }],
+      log: quiet
+    }),
+    (error) => error.code === "HEAVY_LOCK_TIMEOUT"
+  );
+  held.release();
+});
+
+test("a CLI waiter whose ancestor dies while it waits exits 76, not the timeout's 75", async (t) => {
+  const lockPath = tempLock();
+  const held = await acquireHeavyLock({ cmd: "holder", env: cleanEnv(lockPath), log: quiet });
+  const launcher = spawn(process.execPath, ["-e", "setTimeout(() => {}, 30000)"], { stdio: "ignore" });
+  t.after(() => isPidAlive(launcher.pid) && hardKill(launcher.pid));
+  const script = `
+    const { holdHeavyLockOrExit } = await import(${JSON.stringify(MODULE)});
+    await holdHeavyLockOrExit({ cmd: "cli waiter", pollMs: 50, timeoutMs: 20000, readLineage: async () => [{ pid: ${String(launcher.pid)}, name: "bash.exe", start: null }] });
+    process.exit(0);
+  `;
+  const child = spawn(process.execPath, ["--input-type=module", "-e", script], { env: cleanEnv(lockPath), stdio: ["ignore", "ignore", "pipe"] });
+  let err = "";
+  child.stderr.on("data", (chunk) => (err += chunk));
+  const exited = new Promise((resolve) => child.on("exit", resolve));
+  const dir = heavyLockWaitersDir(lockPath);
+  const deadline = Date.now() + 15_000;
+  while (!(fs.existsSync(dir) && fs.readdirSync(dir).some((n) => n.endsWith(".json")))) {
+    assert.ok(Date.now() < deadline, "the CLI waiter never registered");
+    await new Promise((r) => setTimeout(r, 25));
+  }
+  hardKill(launcher.pid);
+  assert.equal(await exited, LOCK_ORPHANED_EXIT, err);
+  assert.notEqual(LOCK_ORPHANED_EXIT, LOCK_TIMEOUT_EXIT);
+  assert.ok(err.includes(`ancestor pid ${String(launcher.pid)} (bash.exe)`), err);
+  held.release();
+});
+
+test("a waiter entry is written aside then renamed: no temp file is left, and status ignores one in flight", async () => {
+  const lockPath = tempLock();
+  const held = await acquireHeavyLock({ cmd: "holder", env: cleanEnv(lockPath), log: quiet });
+  const dir = heavyLockWaitersDir(lockPath);
+  let listed;
+  await assert.rejects(
+    acquireHeavyLock({ cmd: "w", env: cleanEnv(lockPath), timeoutMs: 300, pollMs: 20, readLineage: async () => [], log: () => (listed ??= fs.readdirSync(dir)) }),
+    (error) => error.code === "HEAVY_LOCK_TIMEOUT"
+  );
+  assert.equal(listed.length, 1);
+  assert.match(listed[0], new RegExp(`^${String(process.pid)}-[0-9a-f-]+\\.json$`));
+  const inFlight = path.join(dir, `${String(process.pid)}-y.json.z.tmp`);
+  fs.writeFileSync(inFlight, '{"pid":');
+  const status = await heavyLockStatus({ env: cleanEnv(lockPath), readTable: async () => null });
+  assert.equal(status.cleaned, 0);
+  assert.deepEqual(status.waiters, []);
+  assert.equal(fs.existsSync(inFlight), true, "a half-written entry is never read nor deleted");
+  held.release();
 });

@@ -40,12 +40,14 @@
  * up to and including the Claude session process (`claude`/`claude.exe`) or `LINEAGE_DEPTH` levels —
  * and a waiter registers itself as `<lock>.waiters/<pid>-<token>.json` while it waits, removing it when
  * it stops waiting (an entry of a dead pid is ignored and removed by `status`). A waiter whose lineage
- * has a dead pid gives up (`HeavyLockOrphanError`, exit 75) instead of taking the lock later for a
- * session that is gone. `heavyLockStatus` (CLI: `heavy-lock.mjs status`) shows the holder and every
+ * has a pid that dies while it waits gives up (`HeavyLockOrphanError`, exit 76) instead of taking the
+ * lock later for a session that is gone; an ancestor already gone when the wait began (a spawn-and-exit
+ * wrapper) does not count. `heavyLockStatus` (CLI: `heavy-lock.mjs status`) shows the holder and every
  * waiter, with `orphan: true` when a recorded ancestor is gone. Nothing is ever killed. The holder's
  * file keeps its fields; `ppid` and `lineage` are added (other repos' wrappers read it).
  * `MCP_HEAVY_LOCK_LINEAGE=off` skips the lineage read (one process-table read: ~2–3 s of PowerShell
- * on Windows, paid once per hold or wait, never by a nested caller).
+ * on Windows, read before the lock is taken so the holder file is written at once; a nested caller inside
+ * a live hold skips it).
  */
 
 import { execFile } from "node:child_process";
@@ -59,6 +61,8 @@ import { promisify } from "node:util";
 
 /** EX_TEMPFAIL: the check did not run, try again later — not a test failure. */
 export const LOCK_TIMEOUT_EXIT = 75;
+/** A waiter stopped because an ancestor alive when it began waiting died: its session is gone. */
+export const LOCK_ORPHANED_EXIT = 76;
 export const DEFAULT_TIMEOUT_MS = 30 * 60_000;
 /** File scheme: longer than any real run (`verify:all` is ~10 min); a holder older than this is a reused pid. */
 export const STALE_AFTER_MS = 3 * 60 * 60_000;
@@ -171,6 +175,19 @@ export async function readOwnLineage(env = process.env) {
   if (env.MCP_HEAVY_LOCK_LINEAGE === "off") return [];
   const table = await readProcessTable();
   return table === null ? [] : lineageOf(process.pid, table);
+}
+
+/** `readLineage()` as an array, or `[]` when it fails or takes longer than `ms`. */
+function boundedLineage(readLineage, ms) {
+  let timer;
+  const read = Promise.resolve()
+    .then(readLineage)
+    .then((l) => (Array.isArray(l) ? l : []), () => []);
+  const late = new Promise((resolve) => {
+    timer = setTimeout(() => resolve([]), Math.max(0, ms));
+    timer.unref();
+  });
+  return Promise.race([read, late]).finally(() => clearTimeout(timer));
 }
 
 /**
@@ -388,10 +405,6 @@ export async function acquireHeavyLock({
 } = {}) {
   if (noLock) return { acquired: false, reason: "--no-lock" };
   if (env.CI === "true") return { acquired: false, reason: "CI=true" };
-  // Read once, and only when this call holds or waits: a nested caller skips before it.
-  let lineagePromise = null;
-  const lineage = () => (lineagePromise ??= Promise.resolve(readLineage()).then((l) => (Array.isArray(l) ? l : []), () => []));
-
   const file = heavyLockPath(env);
   const pipe = scheme === "file" ? null : heavyLockPipeName(file, { env });
   const inherited = env.MCP_HEAVY_LOCK_TOKEN;
@@ -407,9 +420,17 @@ export async function acquireHeavyLock({
   const limit = timeoutMs ?? (Number(env.MCP_HEAVY_LOCK_TIMEOUT_MS) || DEFAULT_TIMEOUT_MS);
   fs.mkdirSync(path.dirname(file), { recursive: true });
   const token = randomUUID();
-  const holderContent = async () =>
-    JSON.stringify({ pid: process.pid, startedAt: new Date().toISOString(), token, cmd, cwd, ppid: process.ppid, lineage: await lineage() });
   const deadline = Date.now() + limit;
+  // A nested caller inside a live hold skips before it pays for the lineage read: the OS says the name
+  // is held (probed by connecting, never by listening) and the file names the inherited token.
+  if (pipe !== null && inherited) {
+    const written = parseHolder(readRaw(file) ?? "");
+    if (written?.token === inherited && isPidAlive(written.pid) && (await probeName(pipe)) === true) return insideParent(written);
+  }
+  // Read before acquiring, so the holder file is written the moment the name is taken; bounded so the
+  // read never runs past the caller's deadline.
+  const lineage = await boundedLineage(readLineage, Math.min(LINEAGE_READ_TIMEOUT_MS, limit));
+  const holderContent = () => JSON.stringify({ pid: process.pid, startedAt: new Date().toISOString(), token, cmd, cwd, ppid: process.ppid, lineage });
   let announced = null;
   const pidStarts = new Map();
   let waiter = null;
@@ -421,9 +442,11 @@ export async function acquireHeavyLock({
 
   async function waitOrTimeout(holder) {
     if (waiter === null) {
-      waiter = registerWaiter(file, { token, cmd, cwd, lineage: await lineage() });
+      waiter = registerWaiter(file, { token, cmd, cwd, lineage });
     } else {
-      const gone = waiter.lineage.find((entry) => !isPidAlive(entry.pid));
+      // Only an ancestor alive when the wait began counts: one already gone then was a spawn-and-exit
+      // wrapper (Start-Process, cmd /c start, nohup, a scheduler stub), not a session that stopped.
+      const gone = waiter.watched.find((entry) => !isPidAlive(entry.pid));
       if (gone !== undefined) {
         throw new HeavyLockOrphanError(
           `heavy-check lock: stopped waiting — ancestor pid ${String(gone.pid)} (${String(gone.name)}) of this run is gone, ` +
@@ -459,10 +482,9 @@ export async function acquireHeavyLock({
         if (skip !== null) return skip;
         await waitOrTimeout(holder);
       }
-      // The name is the lock; the file (written once the lineage is read) only describes the holder.
-      writeHolderFile(file, await holderContent());
+      writeHolderFile(file, holderContent());
     } else {
-      const content = await holderContent();
+      const content = holderContent();
       while (!tryCreate(file, content)) {
         const raw = readRaw(file);
         if (raw === null) continue;
@@ -504,7 +526,7 @@ export async function acquireHeavyLock({
   }
 }
 
-/** For a CLI entry point: take the lock, or print why not and exit 75 on timeout or an orphaned wait. */
+/** For a CLI entry point: take the lock, or print why not; exit 75 on timeout, 76 on an orphaned wait. */
 export async function holdHeavyLockOrExit(options) {
   try {
     const lock = await acquireHeavyLock(options);
@@ -512,9 +534,15 @@ export async function holdHeavyLockOrExit(options) {
     if (!lock.acquired && !lock.reason.startsWith("held by parent")) console.error(`heavy-check lock skipped: ${lock.reason}`);
     return lock;
   } catch (error) {
-    if (!(error instanceof HeavyLockTimeoutError) && !(error instanceof HeavyLockOrphanError)) throw error;
-    console.error(error.message);
-    process.exit(LOCK_TIMEOUT_EXIT);
+    if (error instanceof HeavyLockTimeoutError) {
+      console.error(error.message);
+      process.exit(LOCK_TIMEOUT_EXIT);
+    }
+    if (error instanceof HeavyLockOrphanError) {
+      console.error(error.message);
+      process.exit(LOCK_ORPHANED_EXIT);
+    }
+    throw error;
   }
 }
 
@@ -531,7 +559,10 @@ export function registerWaiter(file, { token, cmd, cwd, lineage = [] }) {
   const record = { pid: process.pid, ppid: process.ppid, token, cmd, cwd, since: new Date().toISOString(), lineage };
   try {
     fs.mkdirSync(dir, { recursive: true });
-    fs.writeFileSync(entry, JSON.stringify(record));
+    // Written aside, then renamed: status never reads a half-written entry (and so never deletes one).
+    const tmp = `${entry}.${randomUUID()}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify(record));
+    fs.renameSync(tmp, entry);
   } catch {
     // registration is information only: a wait never fails because it could not be shown
   }
@@ -540,7 +571,7 @@ export function registerWaiter(file, { token, cmd, cwd, lineage = [] }) {
     fs.rmSync(entry, { force: true });
   };
   process.on("exit", unregister);
-  return { entry, lineage, unregister };
+  return { entry, watched: lineage.filter((ancestor) => isPidAlive(ancestor.pid)), unregister };
 }
 
 /** Is the OS-owned name held? Probed by connecting (never by listening: that would take the lock). */

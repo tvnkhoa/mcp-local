@@ -194,8 +194,9 @@ skips it, so CI is never held. `node scripts/heavy-lock.mjs status [--json]` sho
 waiter (pid, command, cwd, since when, alive) with its recorded ancestors up to the Claude session
 process, and marks one whose ancestor is gone `ORPHAN` — a run whose session was stopped while its
 child lived on. Waiters register in `heavy-check.lock.waiters/` beside the lock; status drops entries
-of dead pids and kills nothing. A waiter whose ancestor dies stops waiting (exit 75) instead of taking
-the lock later for nobody.
+of dead pids and kills nothing. A waiter whose ancestor dies while it waits stops (exit 76) instead of
+taking the lock later for nobody; an ancestor already gone when the wait began (a spawn-and-exit
+wrapper) does not count.
 
 **Only the harnesses a change needs.** `node scripts/run-tests.mjs --changed [<base>]` in
 `codebase-index-mcp/` (base: the merge-base with `origin/main`; add `--list` to preview) selects harnesses

@@ -3,7 +3,9 @@
  * Run one command inside the machine-wide heavy-check lock (`scripts/lib/heavyLock.mjs`).
  *
  * The root `verify:*` scripts wrap their step chains with this, so `npm run verify:all` waits for
- * another session's gate instead of racing it. Exit code is the command's; 75 when the lock times out.
+ * another session's gate instead of racing it. Exit code is the command's; 75 when the lock times out; 76 when
+ * the run stopped waiting because an ancestor that was alive when it began waiting died (its session is
+ * gone — e.g. TaskStop killed the shell but not this child). Neither code means the check failed.
  *
  * Usage:
  *   node scripts/heavy-lock.mjs [--no-lock] -- <command> [args...]
