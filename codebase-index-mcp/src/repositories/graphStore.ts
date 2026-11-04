@@ -227,6 +227,7 @@ import {
   isVectorEnabled,
   invalidateVectorSearchCache,
 } from "./vectorStore.js";
+import { seedFromParentDb, type SeedRequest, type SeedResult } from "./seedStore.js";
 import {
   resetMentionsForScope as resetMentionsForScopeImpl,
   laneRowsForFiles as laneRowsForFilesImpl,
@@ -382,6 +383,11 @@ export class GraphStore {
 
   setIdNamespace(repoId: string, namespace: string | null): boolean {
     return setIdNamespaceImpl(this.db, repoId, namespace);
+  }
+
+  /** IX-9 U2: copy the parent's rows under the child's repoId (seedStore.ts). Call on the single writer only. */
+  seedFromParent(req: SeedRequest): SeedResult {
+    return seedFromParentDb(this.db, req);
   }
 
   getFileHash(repoId: string, filePath: string): string | null {

@@ -1,6 +1,6 @@
 ## MCP-ISSUE-119 — a new worktree re-indexes from scratch (~104 s on wec.aria) instead of seeding from its parent
 
-- **Status:** IN PROGRESS (IX-9). U1 id namespace landed 2026-11-04; U2 seed store, U3 job wiring, U4 conformance open.
+- **Status:** IN PROGRESS (IX-9). U1 id namespace and U2 seed store landed 2026-11-04; U3 job wiring, U4 conformance open.
 - **Scenario:** `register_worktree` on a worktree of an already-indexed repo (wec.aria-wt-ops: 3298 files, 17668
   symbols, 55793 edges).
 - **Tool/query:** `register_worktree` → index job `mode:"incremental"` on an empty repoId, i.e. a full extraction.
@@ -34,3 +34,24 @@
   mentions, comments; repo_id and timestamps excluded) with no row written under the parent's repoId.
 - Limits (design note §0): two repos sharing a namespace hold identical ids by design; a worktree registered before
   U1 keeps its own ids until it is re-registered.
+
+### U2 — seed store (2026-11-04)
+
+- `src/repositories/seedStore.ts`: `seedFromParent(store, {parentRepoId, childRepoId, childRepoPath})` →
+  `{parentIndexedSha, tablesCopied, durationMs}`, throwing `SeedError` `PARENT_NOT_INDEXED` (no ok
+  full/incremental/dirty/seed run with a commit), `SCHEMA_UNHANDLED` or `COPY_FAILED`. One IMMEDIATE transaction:
+  register the child (parent's `annotation_key` and namespace), clear any earlier seed of the child (FTS forgotten
+  first), `INSERT … SELECT` per copied table with `repo_id` replaced, FTS rows inserted for the child's rowids only
+  (no `'rebuild'`), one `index_runs` row `mode:"seed"` copied from the parent's newest ok run (all columns:
+  commit, index version, tree key, exclude rules). Vectors are recomputed for the child after the commit
+  (`rebuildVectorIndexForRepo`). cross_repo_deps, refactor tables and DB-wide tables are not copied.
+- `SEED_TABLES` classifies every table (copy / recompute / special / skip, with a reason); `unhandledSeedTables`
+  lists any table it does not name (FTS5 and vec0 shadow tables excluded), and the seed refuses with
+  `SCHEMA_UNHANDLED` before writing. `seedStore.test.ts` fails on a fresh schema with an unnamed table.
+- Proof (`seedStore.test.ts`): a seeded child equals both the parent and a full index of the same tree under the same
+  namespace, row set by row set for files, symbols, edges, routes, literals, docs, mentions, citations, comments,
+  pending paths; FTS integrity check passes and MATCH answers per FTS table are equal; vector rows equal; a re-seed
+  is idempotent; the parent is untouched.
+- Open for U3 (runPolicy, owned by member C): the planner must accept mode `seed` as a base, and the carried-dirty
+  semantics of a parent whose newest ok run is `dirty` are inherited through the copied tree key. Not measured yet:
+  copy time on a wec.aria-sized DB.
