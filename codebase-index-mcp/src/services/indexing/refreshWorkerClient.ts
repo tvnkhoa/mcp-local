@@ -51,10 +51,14 @@ export type RefreshWorkerClientOptions = {
   spawn?: SpawnRefreshWorker;
   /** Server-thread follow-up after a run landed (cache invalidation). Errors are swallowed. */
   onRunLanded?: (repoId: string, result: IndexRunResult) => void;
+  /** Server-thread follow-up after a purge (cache invalidation). Errors are swallowed. */
+  onPurged?: (repoId: string) => void;
 };
 
 type Pending = {
   repoId: string;
+  /** Set for a `purge` request: answered by a `purged` message instead of a run result. */
+  onPurged?: (counts: Record<string, number>) => void;
   /** The index job's runId, when the run is one (review follow-up C: `abortRun` targets it). */
   runId?: string;
   resolve: (result: IndexRunResult) => void;
@@ -90,6 +94,26 @@ export class RefreshWorkerClient {
     } catch {
       // The first run spawns it, or reports why it cannot.
     }
+  }
+
+  /**
+   * Review follow-up 3-rest: `remove_repository`'s delete, executed by the worker on its connection — the one every
+   * index write of this process goes through — so the server thread never waits on the write lock. The caller queues it
+   * in the DB-wide queue like a run.
+   */
+  purge(repoId: string): Promise<Record<string, number>> {
+    return new Promise<Record<string, number>>((resolve, reject) => {
+      let worker: RefreshWorkerLike;
+      try {
+        worker = this.ensureWorker();
+      } catch (error) {
+        reject(error instanceof Error ? error : new Error(String(error)));
+        return;
+      }
+      const id = this.nextId++;
+      this.pending.set(id, { repoId, resolve: () => resolve({}), reject, onPurged: resolve });
+      worker.postMessage({ kind: "purge", id, dbPath: this.options.dbPath, limits: this.options.limits, repoId, repoPath: "", mode: "full", docsEnabled: false, maxFiles: 0, batchSize: 0 });
+    });
   }
 
   get outstanding(): number {
@@ -195,6 +219,15 @@ export class RefreshWorkerClient {
       return;
     }
     this.pending.delete(message.id);
+    if (message.type === "purged") {
+      try {
+        this.options.onPurged?.(entry.repoId);
+      } catch {
+        // Best-effort cache drop; the rows are gone.
+      }
+      entry.onPurged?.(message.counts);
+      return;
+    }
     if (message.type === "error") {
       entry.reject(new Error(message.error));
       return;

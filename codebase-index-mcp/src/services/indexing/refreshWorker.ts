@@ -42,7 +42,8 @@ const REFRESH_PARSE_POOL_IDLE_MS = 10 * 60_000;
 
 export type RefreshWorkerRequest = {
   /** `warm`: open the connection and load the runner now, answer nothing (posted at server start). */
-  kind: "run" | "warm";
+  /** `purge` (review 3-rest): `remove_repository`'s delete, on this worker's connection — the writer's. */
+  kind: "run" | "warm" | "purge";
   id: number;
   dbPath: string;
   limits: IndexRunnerLimits;
@@ -65,6 +66,7 @@ export type RefreshWorkerRequest = {
 export type RefreshWorkerMessage =
   | { type: "result"; id: number; result: IndexRunResult }
   | { type: "progress"; id: number; progress: number; total: number | undefined; message: string }
+  | { type: "purged"; id: number; counts: Record<string, number> }
   | { type: "error"; id: number; error: string };
 
 /** `endIndexSession`, best-effort: a checkpoint that cannot run now runs on a later one. */
@@ -125,6 +127,15 @@ if (parentPort) {
         }
       } catch {
         // The first run reports whatever failed here.
+      }
+      return;
+    }
+    if (request.kind === "purge") {
+      try {
+        const counts = runnerFor(request).store.purgeRepository(request.repoId);
+        port.postMessage({ type: "purged", id: request.id, counts } satisfies RefreshWorkerMessage);
+      } catch (error) {
+        port.postMessage({ type: "error", id: request.id, error: error instanceof Error ? error.message : String(error) } satisfies RefreshWorkerMessage);
       }
       return;
     }

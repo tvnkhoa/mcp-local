@@ -128,6 +128,19 @@ try {
   const again = await call("register_worktree", { parentRepoId: parentId, repoPath: wtDir, repoId: wtId });
   assert(!again.isError && again.body?.registered === "already" && again.body?.runId !== reg.body.runId, "(d) calling again for the same repoId and path queues another run", again.text.slice(0, 200));
   await call("watch_repo", { action: "stop", repoId: wtId });
+
+  // (e) Review 3-rest: remove_repository deletes through the worker; afterwards the worktree is gone from the index.
+  const againDone = await call("index_status", { runId: again.body.runId });
+  for (let i = 0; i < 300 && !["ok", "failed"].includes(againDone.body?.state); i++) {
+    await sleep(200);
+    Object.assign(againDone, await call("index_status", { runId: again.body.runId }));
+  }
+  const removed = await call("remove_repository", { repoId: wtId, force: true });
+  assert(!removed.isError && removed.body?.removed === true && (removed.body?.rowsRemoved?.symbols ?? 0) > 0, "(e) remove_repository deletes the worktree's rows", removed.text.slice(0, 300));
+  const after = await call("list_repositories", {});
+  assert(!after.text.includes(wtId), "(e) ... and list_repositories no longer shows it", after.text.slice(0, 300));
+  const parentStill = await call("search_symbols", { repoId: parentId, query: "parentAlpha", strategy: "name", limit: 5 });
+  assert(parentStill.text.includes("parentAlpha"), "(e) ... and the parent's index is intact", parentStill.text.slice(0, 200));
 } catch (error) {
   assert(false, "harness ran to the end", error instanceof Error ? error.stack ?? error.message : String(error));
 } finally {

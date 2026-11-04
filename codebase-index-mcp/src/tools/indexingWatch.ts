@@ -109,7 +109,7 @@ export function buildIndexingWatchTools(deps: CodebaseIndexDeps): AnyToolDefinit
     },
     annotations: removesRepository,
     rawResult: true,
-    handler: (input) => ok(raw(handleRemoveRepository(input, buildContext())))
+    handler: async (input) => ok(raw(await handleRemoveRepository(input, buildContext())))
   });
 
   const watchRepo = defineTool({

@@ -154,3 +154,28 @@ test("review follow-up C: abortRun stops only the named run; a run not in the wo
   workers[1].send({ type: "result", id: workers[1].requests[0].id, result: result("r-b") });
   assert.equal((await next).runId, "r-b");
 });
+
+test("review 3-rest: purge is posted to the worker and answered by its purged message; caches are dropped", async () => {
+  const purged: string[] = [];
+  const workers: FakeWorker[] = [];
+  const client = new RefreshWorkerClient({
+    dbPath: "/tmp/index.db",
+    limits: LIMITS,
+    spawn: () => {
+      const w = new FakeWorker();
+      workers.push(w);
+      return w;
+    },
+    onPurged: (repoId) => purged.push(repoId)
+  });
+  const p = client.purge("repo-x");
+  const req = workers[0].requests[0];
+  assert.equal(req.kind, "purge");
+  assert.equal(req.repoId, "repo-x");
+  workers[0].send({ type: "purged", id: req.id, counts: { symbols: 3 } });
+  assert.deepEqual(await p, { symbols: 3 });
+  assert.deepEqual(purged, ["repo-x"]);
+  const failing = client.purge("repo-y");
+  workers[0].send({ type: "error", id: workers[0].requests[1].id, error: "SQLITE_BUSY" });
+  await assert.rejects(failing, /SQLITE_BUSY/);
+});

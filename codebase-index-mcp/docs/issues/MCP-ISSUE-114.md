@@ -34,3 +34,7 @@
   on the worker's connection, so `list_repositories` shows it once the run starts. A watcher batch that overflowed
   prunes its deletions with a dirty run in the worker, not with a server-thread write. Guarded:
   `indexHandler.jobs.test.ts` (a store that throws on any write).
+- Re-review: `register_worktree` also refuses a path or repoId held by a queued or running job (the run registers the
+  repo, so two calls in a row both passed the registry check). `remove_repository` now deletes through the writer too:
+  the refresh worker runs the purge (`RefreshWorkerClient.purge`, request kind `purge`) in the DB-wide queue. Guarded:
+  `indexHandler.jobs.test.ts`, `refreshWorkerClient.test.ts`, `test:register-worktree` (e).

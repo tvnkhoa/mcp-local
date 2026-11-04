@@ -160,7 +160,8 @@ const FRESHNESS_LOCK_DIR = freshnessStateDir(dbPath);
 const refreshWorker = new RefreshWorkerClient({
   dbPath,
   limits: RUNNER_LIMITS,
-  onRunLanded: () => store.invalidateProcessCaches()
+  onRunLanded: () => store.invalidateProcessCaches(),
+  onPurged: () => store.invalidateProcessCaches()
 });
 // Release J: with the refresh worker writing the index, this thread's small commits must never run a
 // WAL checkpoint the worker's PASSIVE checkpoint left behind (a measured 473 ms stall at landing).
@@ -307,6 +308,8 @@ function buildHandlerContext(): HandlerContext {
     watchInactivityTimers,
     runIndexAndResolve,
     indexJobs,
+    // Review 3-rest: remove_repository deletes through the writer, in the DB-wide queue.
+    purgeRepository: (repoId: string) => freshnessGate.serialize(repoId, () => refreshWorker.purge(repoId)),
     asText,
     constants: {
       MAX_FILES_PER_RUN,

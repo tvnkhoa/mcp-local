@@ -292,7 +292,7 @@ const REMOVE_LOCK_STALE_MS = 15 * 60_000;
  * it starts in the instant between the check and the purge.) A watcher of ANOTHER process leaves no signal at all
  * until it runs, so it is not refused here — see the tool description.
  */
-export function handleRemoveRepository(args: { repoId: string; force: boolean }, ctx: HandlerContext): CallToolResult {
+export function handleRemoveRepository(args: { repoId: string; force: boolean }, ctx: HandlerContext): CallToolResult | Promise<CallToolResult> {
   const { store, activeWatchRef, constants } = ctx;
   const repo = store.getRepository(args.repoId);
   if (!repo) throw new McpError(ErrorCode.InvalidParams, `remove_repository: unknown repoId '${args.repoId}'; list_repositories names the registered ones.`);
@@ -307,16 +307,24 @@ export function handleRemoveRepository(args: { repoId: string; force: boolean },
   if (!tryAcquireLock(lockFile, REMOVE_LOCK_STALE_MS, Date.now())) {
     throw new McpError(ErrorCode.InvalidRequest, `remove_repository: a refresh of '${args.repoId}' holds its lock (this or another server process); retry when it ends.`);
   }
+  let async = false;
   try {
     const runs = liveRunMarkers(stateDir, args.repoId, DEFAULT_STALE_RUN_MS, Date.now());
     if (runs.length > 0) {
       throw new McpError(ErrorCode.InvalidRequest, `remove_repository: an index run of '${args.repoId}' is in progress (pid ${runs.map((r) => String(r.pid)).join(", ")}); retry when it ends.`);
     }
-    const rowsRemoved = store.purgeRepository(args.repoId);
-    const stateFilesRemoved = removeRepoStateFiles(stateDir, args.repoId);
-    return ctx.asText({ repoId: args.repoId, repoPath: repo.repoPath, removed: true, rowsRemoved, stateFilesRemoved }, "compact");
+    const done = (rowsRemoved: Record<string, number>): CallToolResult => {
+      const stateFilesRemoved = removeRepoStateFiles(stateDir, args.repoId);
+      return ctx.asText({ repoId: args.repoId, repoPath: repo.repoPath, removed: true, rowsRemoved, stateFilesRemoved }, "compact");
+    };
+    // Review 3-rest: in the server the delete goes to the writer (the refresh worker, in the DB-wide queue).
+    if (ctx.purgeRepository) {
+      async = true;
+      return ctx.purgeRepository(args.repoId).then(done).finally(() => releaseLock(lockFile));
+    }
+    return done(store.purgeRepository(args.repoId));
   } finally {
-    releaseLock(lockFile);
+    if (!async) releaseLock(lockFile);
   }
 }
 
