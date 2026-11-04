@@ -134,9 +134,14 @@ export class RefreshWorkerClient {
     const others = [...this.pending.entries()].filter(([id]) => id !== target[0]);
     this.worker = null;
     this.pending.clear();
-    target[1].reject(new Error(reason));
-    for (const [, p] of others) p.reject(new Error(`the refresh worker was restarted to stop timed-out run ${runId}`));
-    await worker.terminate();
+    // Review F2: the rejection releases the DB-wide queue, so it waits until the old worker is gone — rejecting first
+    // let the next run start a new worker while the old one could still be writing: two writers.
+    try {
+      await worker.terminate();
+    } finally {
+      target[1].reject(new Error(reason));
+      for (const [, p] of others) p.reject(new Error(`the refresh worker was restarted to stop timed-out run ${runId}`));
+    }
     return true;
   }
 

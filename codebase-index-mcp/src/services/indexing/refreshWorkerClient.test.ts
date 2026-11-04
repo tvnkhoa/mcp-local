@@ -155,6 +155,39 @@ test("review follow-up C: abortRun stops only the named run; a run not in the wo
   assert.equal((await next).runId, "r-b");
 });
 
+test("review F2: abortRun rejects the run only after the old worker has terminated", async () => {
+  let finishTerminate!: () => void;
+  class SlowWorker extends FakeWorker {
+    override async terminate(): Promise<number> {
+      await new Promise<void>((r) => (finishTerminate = r));
+      this.terminated = true;
+      return 0;
+    }
+  }
+  const workers: FakeWorker[] = [];
+  const client = new RefreshWorkerClient({
+    dbPath: "/tmp/index.db",
+    limits: LIMITS,
+    spawn: () => {
+      const w = new SlowWorker();
+      workers.push(w);
+      return w;
+    }
+  });
+  const run = client.run("repo-a", "/repo/a", "full", true, 100, 50, { runId: "job-1" });
+  let rejectedAt: "before" | "after" | null = null;
+  const watched = run.catch(() => {
+    rejectedAt = workers[0].terminated ? "after" : "before";
+  });
+  const aborted = client.abortRun("job-1", "timeout");
+  await new Promise((r) => setTimeout(r, 20));
+  assert.equal(rejectedAt, null, "the run is not released while the old worker may still write");
+  finishTerminate();
+  assert.equal(await aborted, true);
+  await watched;
+  assert.equal(rejectedAt, "after");
+});
+
 test("review 3-rest: purge is posted to the worker and answered by its purged message; caches are dropped", async () => {
   const purged: string[] = [];
   const workers: FakeWorker[] = [];
