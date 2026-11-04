@@ -230,7 +230,8 @@ test("tool lists match the committed contract snapshots exactly", () => {
   // 143 -> 144: codebase-index remove_repository (MCP-ISSUE-105).
   // 142 -> 143: board-mcp rescope — the leader widens an assigned task unit's scope at T1 (RS).
   // 144 -> 145: codebase-index index_status (MCP-ISSUE-112).
-  assert.equal(total, 145, "the workspace advertises 145 tools; update this number deliberately");
+  // 145 -> 146: codebase-index register_worktree (MCP-ISSUE-114).
+  assert.equal(total, 146, "the workspace advertises 146 tools; update this number deliberately");
 });
 
 // --- a server registered before its contract exists -----------------------------
@@ -270,9 +271,9 @@ test("missingToolsMessage names the two commands that fix it", () => {
   assert.match(message, /npm run generate:all/);
 });
 
-test("codebase-index advertises all 45 of its tools", () => {
+test("codebase-index advertises all 46 of its tools", () => {
   // The specific drift S-36 existed to fix — pinned so it cannot silently return.
-  assert.equal(byKey("codebase-index").tools.length, 45);
+  assert.equal(byKey("codebase-index").tools.length, 46);
 });
 
 // --- env field hygiene (S-35) -------------------------------------------------

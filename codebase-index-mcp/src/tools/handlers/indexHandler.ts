@@ -402,6 +402,68 @@ export async function handleIndexRepository(
   }
 }
 
+// ── register_worktree ─────────────────────────────────────────────────────────
+
+/**
+ * MCP-ISSUE-114 (IX-4): one call for a new git worktree of an indexed repo — validate it, register it, queue its index
+ * job (a new repoId runs full once, MCP-ISSUE-113) and start its watcher; answer the runId at once. Calling it again
+ * for the same repoId and path re-queues a run and keeps the watcher.
+ */
+export async function handleRegisterWorktree(
+  args: { parentRepoId: string; repoPath: string; repoId: string },
+  ctx: HandlerContext
+): Promise<CallToolResult> {
+  const { store, constants } = ctx;
+  const jobs = requireJobs(ctx);
+  assertPathAllowed(args.repoPath, constants.allowedRoots);
+  if (args.repoId === args.parentRepoId) {
+    throw new McpError(ErrorCode.InvalidParams, `register_worktree: repoId must differ from parentRepoId ('${args.repoId}').`);
+  }
+  const parent = store.getRepository(args.parentRepoId);
+  if (!parent) {
+    throw new McpError(ErrorCode.InvalidParams, `register_worktree: unknown parentRepoId '${args.parentRepoId}'. Run list_repositories to see the indexed repos.`);
+  }
+  if (!existsSync(args.repoPath)) {
+    throw new McpError(ErrorCode.InvalidParams, `register_worktree: repoPath does not exist: ${args.repoPath}`);
+  }
+  // A worktree of the parent shares its git common dir; anything else is the wrong parent (or not a worktree).
+  if (findWorktreeOwner({ repoId: args.repoId, repoPath: args.repoPath }, [parent]) !== parent.repoId) {
+    throw new McpError(
+      ErrorCode.InvalidParams,
+      `register_worktree: ${args.repoPath} is not a git worktree of '${parent.repoId}' (${parent.repoPath}): their git common dirs differ. Use index_repository for a repo that is not a worktree.`
+    );
+  }
+  const existing = store.getRepository(args.repoId);
+  if (existing && existing.repoPath !== args.repoPath) {
+    throw new McpError(
+      ErrorCode.InvalidParams,
+      `register_worktree: repoId '${args.repoId}' is already registered at ${existing.repoPath}. Pick another repoId, or remove_repository it first.`
+    );
+  }
+  store.ensureRepository(args.repoId, args.repoPath);
+  const job = jobs.enqueue({
+    repoId: args.repoId,
+    repoPath: args.repoPath,
+    mode: "incremental",
+    docsEnabled: constants.DOCS_INDEXING_ENABLED,
+    maxFiles: constants.MAX_FILES_PER_RUN,
+    batchSize: 200,
+    source: "register_worktree"
+  });
+  const watch = await activateWatchForRepo(args.repoId, args.repoPath, "register_worktree", ctx);
+  return ctx.asText({
+    repoId: args.repoId,
+    parentRepoId: parent.repoId,
+    repoPath: args.repoPath,
+    registered: existing ? "already" : "new",
+    runId: job.runId,
+    state: job.state,
+    ...(job.waitingFor && { waitingFor: job.waitingFor }),
+    watch: { ...watch, activeOnly: constants.WATCH_ACTIVE_ONLY },
+    next: `poll index_status({ runId: "${job.runId}" }) until state is ok or failed`
+  });
+}
+
 // ── index_status ──────────────────────────────────────────────────────────────
 
 /**

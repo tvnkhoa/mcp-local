@@ -84,7 +84,7 @@ try {
 
   // ── tools/list ───────────────────────────────────────────────────────────────
   const listed = (await client.listTools()).tools;
-  assert(listed.length === 45, "publishes 45 tools", `got ${listed.length}`);
+  assert(listed.length === 46, "publishes 46 tools", `got ${listed.length}`);
 
   // Every tool now carries annotations: S-32 finished, so all 43 are registry-served and
   // `defineTool` requires them. The legacy descriptors had none, which made their arrival the
@@ -98,6 +98,8 @@ try {
     // Replaces symbols/edges and prunes on mode='full' — a replace, not an additive write — but
     // only of derived state it can rebuild from source.
     index_repository: { readOnlyHint: false, idempotentHint: true, destructiveHint: true, openWorldHint: false },
+    // MCP-ISSUE-114: registers a repo, queues its index run (a replace of derived state) and starts its watcher.
+    register_worktree: { readOnlyHint: false, idempotentHint: true, destructiveHint: true, openWorldHint: false },
     // MCP-ISSUE-105: deletes a repo's rows and state files for good; the second call names an unknown repoId.
     remove_repository: { readOnlyHint: false, idempotentHint: false, destructiveHint: true, openWorldHint: false },
     // Starts/stops a watcher: server state, but removes nothing.
@@ -120,7 +122,7 @@ try {
   };
 
   const unannotated = listed.filter((t) => t.annotations === undefined).map((t) => t.name);
-  assert(unannotated.length === 0, "all 45 tools carry annotations", unannotated.join(","));
+  assert(unannotated.length === 0, "all 46 tools carry annotations", unannotated.join(","));
 
   for (const [name, expected] of Object.entries(NON_DEFAULT)) {
     const actual = listed.find((t) => t.name === name)?.annotations;
@@ -134,8 +136,8 @@ try {
 
   const defaults = listed.filter((t) => !(t.name in NON_DEFAULT));
   assert(
-    defaults.length === 45 - Object.keys(NON_DEFAULT).length,
-    `${45 - Object.keys(NON_DEFAULT).length} tools use the plain read-only annotation`,
+    defaults.length === 46 - Object.keys(NON_DEFAULT).length,
+    `${46 - Object.keys(NON_DEFAULT).length} tools use the plain read-only annotation`,
     `got ${defaults.length}`
   );
   assert(

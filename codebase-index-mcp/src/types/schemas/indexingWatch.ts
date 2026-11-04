@@ -31,6 +31,15 @@ export const indexStatusSchema = z
   })
   .strict();
 
+// Register worktree (MCP-ISSUE-114)
+export const registerWorktreeSchema = z
+  .object({
+    parentRepoId: z.string().min(1).max(200),
+    repoPath: z.string().min(1),
+    repoId: z.string().min(1).max(200)
+  })
+  .strict();
+
 // Feature bundle (ENH-B): gather a vertical-slice feature (entity → config → commands/queries → endpoints) from one seed
 export const getFeatureBundleSchema = z
   .object({
