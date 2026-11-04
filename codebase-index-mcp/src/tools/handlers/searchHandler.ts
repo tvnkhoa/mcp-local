@@ -298,7 +298,6 @@ export function handleSearchRegex(
   // says so — complete / warning / nextAfterPath survive nano, which drops most other fields.
   const truncation = truncated
     ? {
-        truncated,
         truncationReason,
         filesEligible,
         filesUnscanned: unscanned,
@@ -309,8 +308,13 @@ export function handleSearchRegex(
     : {};
   // MCP-ISSUE-100: an afterPath past every in-scope file searched nothing — say so instead of "complete, 0 results".
   const resumeEcho = { ...(args.afterPath ? { afterPath: args.afterPath } : {}), ...(args.skipMatches ? { skipMatches: args.skipMatches } : {}) };
+  // MCP-ISSUE-117: `truncated` is on EVERY response (it was only present when true), and so is the count: `total` exact
+  // when the scan finished, `totalLowerBound` when a cap cut it. A resumed complete call's total covers the pages before it.
   const completeness = {
     complete: !truncated,
+    truncated,
+    ...(result.total !== undefined && { total: result.total }),
+    ...(result.totalLowerBound !== undefined && { totalLowerBound: result.totalLowerBound }),
     ...resumeEcho,
     ...(truncated
       ? { warning: buildRegexTruncationWarning(result, args.outputMode === "files") }

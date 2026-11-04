@@ -28,6 +28,10 @@
  * packages/sdk/src/httpTransport.ts. A second copy on the same port fails with EADDRINUSE, which is
  * what keeps it to one process.
  *
+ * The supervisor respawns a server that exits on its own, with bounded backoff (`RESPAWN_POLICY`), and gives up past
+ * the cap; each start, respawn and give-up is one line in <deployRoot>/<key>/restarts.jsonl, which mcp:doctor's
+ * `[restarts]` check reads (MCP-ISSUE-115).
+ *
  * `--task register` runs `schtasks /Create /XML` for a per-user task at logon and daily 08:00 (no
  * elevation, replaced if present). It is the only thing here that changes the machine, and only when asked by name.
  */
@@ -35,6 +39,7 @@
 import { execFileSync, spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import fs from "node:fs";
+import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import process from "node:process";
@@ -300,6 +305,25 @@ export function restartTarget(server, port, oldPid, { exec = defaultExec } = {})
       `${server.key}: port ${port} is held by pid ${oldPid}, whose parent (${parent ? `pid ${parent.pid}: ${parent.cmd || "no command line"}` : "none"}) is not serve-http.mjs --server ${server.key} — not killing it. Stop it yourself, or free the port.`
     );
   }
+  return supervisorTreeRoot(server, parent, exec);
+}
+
+/**
+ * MCP-ISSUE-115 review: the pid to kill when the port is FREE but a supervisor still lives — it is waiting out a respawn
+ * backoff, and would otherwise respawn the old deploy right after `/Run` was dropped (IgnoreNew) and pass for the new
+ * listener. The supervisor pid comes from running.json; it is killed only when it still is this server's serve-http.
+ * Null when there is none to kill.
+ */
+export function idleSupervisorTarget(server, running, { exec = defaultExec } = {}) {
+  const pid = Number(running?.supervisorPid);
+  if (!Number.isInteger(pid) || pid <= 0 || pid === process.pid) return null;
+  const sup = processInfo(exec, pid);
+  if (!sup || !isServeHttpFor(sup.cmd, server)) return null;
+  return supervisorTreeRoot(server, sup, exec);
+}
+
+/** The supervisor itself, or the older hand-off serve-http above it, so the task instance ends with it. */
+function supervisorTreeRoot(server, parent, exec) {
   const grand = parent.parent ? processInfo(exec, parent.parent) : null;
   // A pid is reused: a grandparent created after the supervisor is not the process that started it.
   const older = grand?.created != null && parent.created != null && grand.created <= parent.created;
@@ -314,15 +338,16 @@ function listenerOn(exec, port) {
  * `--restart`: `schtasks /End` does not stop the supervisor, so stop the tree that owns the port instead:
  * `restartTarget` (this server's serve-http supervisor, or the hand-off above it; anything else refuses) with `taskkill /T`,
  * then `schtasks /Run` and wait for a NEW listener, one with another pid whose start time is after the
- * restart began. Every command goes through `exec(cmd, argsArray)`, so the test stubs the machine.
- * Resolves `{ oldPid, newPid }`.
+ * restart began. A free port with a supervisor still alive (between respawns, MCP-ISSUE-115) has that supervisor's
+ * tree killed first (`idleSupervisorTarget`), or /Run would be dropped and its respawn taken for the new listener.
+ * Every command goes through `exec(cmd, argsArray)`, so the test stubs the machine. Resolves `{ oldPid, newPid }`.
  */
-export async function restartServer(server, port, { exec = defaultExec, sleep = defaultSleep, now = Date.now, timeoutMs = 60000 } = {}) {
+export async function restartServer(server, port, { exec = defaultExec, sleep = defaultSleep, now = Date.now, timeoutMs = 60000, running = () => runningDeploy(server) } = {}) {
   const oldPid = listenerOn(exec, port);
-  if (oldPid !== null) {
-    // From the hand-off serve-http when there is one, so the task instance has ended before /Run
-    // (MultipleInstancesPolicy IgnoreNew drops a /Run while it lives).
-    const target = restartTarget(server, port, oldPid, { exec });
+  // From the hand-off serve-http when there is one, so the task instance has ended before /Run
+  // (MultipleInstancesPolicy IgnoreNew drops a /Run while it lives).
+  const target = oldPid !== null ? restartTarget(server, port, oldPid, { exec }) : idleSupervisorTarget(server, running(), { exec });
+  if (target !== null) {
     exec("taskkill", ["/T", "/F", "/PID", String(target)]);
     for (let i = 0; i < 50 && listenerOn(exec, port) !== null; i++) await sleep(200);
   }
@@ -678,7 +703,182 @@ export function handOffTarget(server, { deployRoot = defaultDeployRoot(), own = 
   return current?.supervisor && fs.existsSync(current.supervisor) ? current : null;
 }
 
-function serve(server, envFile, logFile, deployRoot) {
+/**
+ * MCP-ISSUE-115: how the supervisor respawns a server that exits on its own. Before it, any exit ended the supervisor
+ * too, so the port stayed dark until the next logon or 08:00 trigger and every client hit CONNECT_TIMEOUT. A restart
+ * waits `baseDelayMs * 2^k` (k = restarts already in the window), capped at `maxDelayMs`; the `maxRestarts + 1`-th exit
+ * inside `windowMs` gives up — a server that dies on start (bad env, port taken) must not spin.
+ */
+export const RESPAWN_POLICY = Object.freeze({ maxRestarts: 5, windowMs: 10 * 60_000, baseDelayMs: 1_000, maxDelayMs: 30_000 });
+
+/** `{ delayMs }` for the next respawn, or `{ giveUp: true }`, from the epoch-ms times of the restarts so far. */
+export function nextRespawn(restartTimes, now, policy = RESPAWN_POLICY) {
+  const recent = restartTimes.filter((t) => t > now - policy.windowMs).length;
+  if (recent >= policy.maxRestarts) return { giveUp: true, recent };
+  return { delayMs: Math.min(policy.maxDelayMs, policy.baseDelayMs * 2 ** recent), recent };
+}
+
+/** One line per supervisor event (`started` / `respawn` / `gave_up`), kept beside `running.json`. */
+export function restartLogFile(server, { deployRoot = defaultDeployRoot() } = {}) {
+  return path.join(deployRoot, server.key, "restarts.jsonl");
+}
+
+const RESTART_LOG_MAX_BYTES = 64 * 1024;
+
+/**
+ * Append one JSON line. Past 64 KiB the file is first cut to its newest lines that fit in half of that, so it stays
+ * under 64 KiB plus one record and is rewritten only once per ~32 KiB of records.
+ */
+export function appendRestartRecord(file, record) {
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  try {
+    if (fs.statSync(file).size > RESTART_LOG_MAX_BYTES) {
+      const lines = fs.readFileSync(file, "utf-8").split("\n").filter(Boolean);
+      const kept = [];
+      let bytes = 0;
+      for (let i = lines.length - 1; i >= 0; i--) {
+        bytes += Buffer.byteLength(lines[i]) + 1;
+        if (bytes > RESTART_LOG_MAX_BYTES / 2) break;
+        kept.unshift(lines[i]);
+      }
+      fs.writeFileSync(file, kept.length ? `${kept.join("\n")}\n` : "", "utf-8");
+    }
+  } catch {
+    // absent: the append creates it
+  }
+  fs.appendFileSync(file, `${JSON.stringify(record)}\n`, "utf-8");
+}
+
+/** The last `last` records, oldest first; a line that does not parse is skipped. */
+export function readRestartRecords(file, { last = 5 } = {}) {
+  let text;
+  try {
+    text = fs.readFileSync(file, "utf-8");
+  } catch {
+    return [];
+  }
+  const out = [];
+  for (const line of text.split("\n")) {
+    if (!line.trim()) continue;
+    try {
+      out.push(JSON.parse(line));
+    } catch {
+      // a torn line from a crash mid-write
+    }
+  }
+  return out.slice(-last);
+}
+
+/**
+ * mcp:doctor's `[restarts]` verdict from the restart log: `[status, message]`. Pass when the server never respawned;
+ * warn on any respawn in the last 24 h (with the last few, one per line); fail when the supervisor gave up last.
+ */
+export function restartsCheck(records, { now = Date.now(), show = 5 } = {}) {
+  const events = records.filter((r) => r.event === "respawn" || r.event === "gave_up");
+  if (!events.length) return ["pass", "no respawn recorded"];
+  const line = (r) => `${r.ts} ${r.event} pid ${r.pid} ${r.signal ?? `code ${r.code}`}${r.delayMs != null ? ` (next in ${r.delayMs} ms)` : ""}`;
+  const shown = events.slice(-show).map(line).join("; ");
+  const lastEvent = records.at(-1);
+  if (lastEvent?.event === "gave_up") return ["fail", `the supervisor gave up after repeated exits — ${shown}`];
+  const recent = events.filter((r) => Date.parse(r.ts) > now - 24 * 60 * 60_000).length;
+  return recent ? ["warn", `${recent} respawn(s) in the last 24 h — ${shown}`] : ["pass", `last respawn ${events.at(-1).ts}`];
+}
+
+/**
+ * Run `spawnChild()` and respawn it per `policy` whenever it exits without `stop()` having been called. Each event goes
+ * to `record` (`{ ts, event, pid, code, signal, reason, delayMs?, recent? }`). `onStarted(child)` runs on every start
+ * (the caller rewrites running.json); `onGiveUp(code)` once the cap is hit. Clock and timer are injectable for tests.
+ *
+ * Exit code 0 is not a crash: the server exits 0 only after a signal-driven graceful shutdown (`installSignalHandlers`
+ * in packages/sdk/src/lifecycle.ts), so it is recorded as `stopped` and `onStopped()` runs instead of a respawn.
+ * A child that fails to spawn (`error` without `exit`) counts as an exit. A `record` or `onStarted` that throws (disk
+ * full, a locked file) is reported to `onError` and never takes the supervisor down — a dead supervisor would orphan a
+ * child holding the port.
+ */
+export function supervise({ spawnChild, record, onStarted = () => {}, onGiveUp = () => {}, onStopped = () => {}, onError = () => {}, policy = RESPAWN_POLICY, now = Date.now, setTimer = setTimeout }) {
+  const restartTimes = [];
+  let child = null;
+  let stopping = false;
+  let pending = null;
+  const safe = (fn, ...args) => {
+    try {
+      fn(...args);
+    } catch (e) {
+      try {
+        onError(e);
+      } catch {
+        // nothing left to report to
+      }
+    }
+  };
+  const start = () => {
+    pending = null;
+    if (stopping) return;
+    let ended = false;
+    const onEnd = (pid, code, signal, reason) => {
+      if (ended || stopping) return;
+      ended = true;
+      const at = now();
+      if (code === 0 && reason === "exited") {
+        safe(record, { ts: new Date(at).toISOString(), event: "stopped", pid, code, signal, reason: "clean_exit" });
+        safe(onStopped);
+        return;
+      }
+      const next = nextRespawn(restartTimes, at, policy);
+      const base = { ts: new Date(at).toISOString(), pid, code, signal, reason, recent: next.recent };
+      if (next.giveUp) {
+        safe(record, { ...base, event: "gave_up" });
+        safe(onGiveUp, code);
+        return;
+      }
+      restartTimes.push(at);
+      safe(record, { ...base, event: "respawn", delayMs: next.delayMs });
+      pending = setTimer(start, next.delayMs);
+    };
+    try {
+      child = spawnChild();
+    } catch (e) {
+      safe(onError, e);
+      child = null;
+      onEnd(null, null, null, "spawn_failed");
+      return;
+    }
+    const current = child;
+    const pid = current.pid ?? null;
+    current.on("error", (e) => {
+      safe(onError, e);
+      // A process that never started emits no exit; one that did will emit exit too, and `ended` keeps it to one.
+      if (current.pid === undefined) onEnd(null, null, null, "spawn_failed");
+    });
+    current.on("exit", (code, signal) => onEnd(pid, code, signal, "exited"));
+    safe(record, { ts: new Date(now()).toISOString(), event: "started", pid, reason: restartTimes.length ? "respawn" : "start" });
+    if (pid !== null) safe(onStarted, current);
+  };
+  start();
+  return {
+    child: () => child,
+    stop(signal = "SIGTERM") {
+      stopping = true;
+      if (pending) clearTimeout(pending);
+      child?.kill(signal);
+    }
+  };
+}
+
+/**
+ * MCP-ISSUE-115 review: true when something already listens on 127.0.0.1:`port`. A second supervisor started while
+ * one serves must leave before it writes running.json or the restart log; its child would only fail EADDRINUSE five
+ * times and turn a healthy server's `[restarts]` red.
+ */
+export function portInUse(port) {
+  return new Promise((resolve) => {
+    const probe = net.createServer();
+    probe.once("error", (e) => resolve(e.code === "EADDRINUSE" || e.code === "EACCES"));
+    probe.listen(Number(port), "127.0.0.1", () => probe.close(() => resolve(false)));
+  });
+}
+
+async function serve(server, envFile, logFile, deployRoot) {
   const own = ownDeploy();
   const target = handOffTarget(server, { deployRoot, own });
   if (target) return handOff(target);
@@ -693,32 +893,60 @@ function serve(server, envFile, logFile, deployRoot) {
   // MCP-ISSUE-104: a secret the env file sets wins; otherwise the persisted one (the server refuses HTTP without).
   const secretName = approvalSecretEnvName(server);
   const secretEnv = secretName && !env[secretName] ? { [secretName]: ensureApprovalSecret(approvalSecretFile(server)) } : {};
+  if (await portInUse(env[names.port])) {
+    throw new Error(`${server.key}: port ${env[names.port]} is already in use — another supervisor serves it; nothing started, nothing recorded`);
+  }
   const stderr = logFile ? fs.openSync(logFile, "a") : "inherit";
   const { entry, deploy } = resolveServeEntry(server, { deployRoot, own });
   if (!deploy) err(`${server.key}: no deploy yet — serving from the working tree; --deploy-only or --restart makes one`);
   if (own) process.chdir(own.dir);
-  // Inherit PATH and the like; every server setting comes from the env file and wins.
-  const child = spawn(process.execPath, [entry, "--transport", "http"], {
-    cwd: deploy?.dir,
-    env: { ...process.env, ...env, ...secretEnv },
-    stdio: ["ignore", "ignore", stderr]
-  });
   const keyDir = path.join(deployRoot, server.key);
   fs.mkdirSync(keyDir, { recursive: true });
-  writeJsonAtomic(path.join(keyDir, "running.json"), {
-    dir: deploy?.dir ?? null,
-    sha: deploy?.sha ?? null,
-    entry,
-    supervisor: own ? SCRIPT : null,
-    pid: child.pid,
-    startedAt: new Date().toISOString()
+  const restartLog = restartLogFile(server, { deployRoot });
+  // The event also lands in the server's own log, so its reader sees why a server_starting follows. No env, no args.
+  const record = (r) => {
+    appendRestartRecord(restartLog, r);
+    if (typeof stderr === "number") fs.writeSync(stderr, `${JSON.stringify({ ts: r.ts, level: r.event === "started" ? "info" : "warn", name: "serve-http", msg: `supervisor_${r.event}`, fields: { ...r, ts: undefined } })}\n`);
+  };
+  const supervisor = supervise({
+    // Inherit PATH and the like; every server setting comes from the env file and wins.
+    spawnChild: () =>
+      spawn(process.execPath, [entry, "--transport", "http"], {
+        cwd: deploy?.dir,
+        env: { ...process.env, ...env, ...secretEnv },
+        stdio: ["ignore", "ignore", stderr]
+      }),
+    record,
+    onStarted: (child) => {
+      writeJsonAtomic(path.join(keyDir, "running.json"), {
+        dir: deploy?.dir ?? null,
+        sha: deploy?.sha ?? null,
+        entry,
+        supervisor: own ? SCRIPT : null,
+        supervisorPid: process.pid,
+        pid: child.pid,
+        startedAt: new Date().toISOString()
+      });
+      info(`${server.key}: serving on http://127.0.0.1:${env[names.port]}/mcp (pid ${child.pid}) from ${deploy ? deploy.dir : "the working tree"}`);
+      child.on("exit", (code, signal) => {
+        if (code !== 0) err(`${server.key}: pid ${child.pid} exited ${signal ?? code}${logFile ? ` — see ${logFile}` : ""}`);
+      });
+    },
+    onGiveUp: (code) => {
+      err(`${server.key}: exited ${RESPAWN_POLICY.maxRestarts + 1} times within ${RESPAWN_POLICY.windowMs / 60_000} min — not respawning; see ${restartLog}`);
+      process.exit(code || 1);
+    },
+    onStopped: () => process.exit(0),
+    onError: (e) => err(`${server.key}: supervisor: ${e.message}`)
   });
-  info(`${server.key}: serving on http://127.0.0.1:${env[names.port]}/mcp (pid ${child.pid}) from ${deploy ? deploy.dir : "the working tree"}`);
-  for (const signal of ["SIGINT", "SIGTERM"]) process.on(signal, () => child.kill(signal));
-  child.on("exit", (code, signal) => {
-    if (code !== 0) err(`${server.key}: exited ${signal ?? code}${logFile ? ` — see ${logFile}` : ""}`);
-    process.exit(code ?? 1);
-  });
+  for (const signal of ["SIGINT", "SIGTERM"]) {
+    process.on(signal, () => {
+      const child = supervisor.child();
+      supervisor.stop(signal);
+      if (!child || child.exitCode !== null || child.signalCode !== null) process.exit(0);
+      child.once("exit", (code) => process.exit(code ?? 0));
+    });
+  }
 }
 
 async function main() {
@@ -739,7 +967,7 @@ async function main() {
     const flags = [d.dirty ? "uncommitted changes" : null, d.stale.length ? `stale build: ${d.stale.join(", ")}` : null].filter(Boolean);
     ok(`${server.key}: deployed ${d.sha}${flags.length ? ` (${flags.join("; ")})` : ""}, hash ${d.hash.slice(0, 12)}, to ${d.dir}${pruned}`);
     if (args.deployOnly) return;
-    const { oldPid, newPid } = await restartServer(server, port);
+    const { oldPid, newPid } = await restartServer(server, port, { running: () => runningDeploy(server, { deployRoot }) });
     ok(`${server.key}: restarted, pid ${oldPid ?? "none"} -> ${newPid}`);
     return;
   }
@@ -747,7 +975,7 @@ async function main() {
     runTask(server, args.task, envFile, logFile ?? defaultLogFile(server));
     return;
   }
-  serve(server, envFile, logFile, deployRoot);
+  await serve(server, envFile, logFile, deployRoot);
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {

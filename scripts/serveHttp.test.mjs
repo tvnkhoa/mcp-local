@@ -10,7 +10,10 @@
 
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
+import { EventEmitter } from "node:events";
 import fs from "node:fs";
+import http from "node:http";
+import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -19,7 +22,7 @@ import { fileURLToPath } from "node:url";
 import { getServer } from "./lib/manifest.mjs";
 import { deployHash, importClosure, nativePackages, staleBuilds } from "./lib/deploy.mjs";
 import { isLink, removeTree } from "./lib/junctions.mjs";
-import { approvalSecretEnvName, approvalSecretFile, deployCheck, deployInUse, deployServer, ensureApprovalSecret, handOffTarget, httpClientEntry, httpEnvNames, isServeHttpFor, listDeploys, ownDeploy, parseListenerPid, pruneDeploys, readEnvFile, resolveServeEntry, restartServer, taskCreateArgs, taskDeniedHint, taskXml, verifyDeploy, writeEnvFile } from "./serve-http.mjs";
+import { approvalSecretEnvName, approvalSecretFile, appendRestartRecord, deployCheck, deployInUse, deployServer, ensureApprovalSecret, handOffTarget, httpClientEntry, httpEnvNames, isServeHttpFor, listDeploys, nextRespawn, ownDeploy, parseListenerPid, pruneDeploys, readEnvFile, readRestartRecords, resolveServeEntry, RESPAWN_POLICY, restartLogFile, restartServer, restartsCheck, runningDeploy, supervise, taskCreateArgs, taskDeniedHint, taskXml, verifyDeploy, writeEnvFile } from "./serve-http.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), "serve-http-test-"));
@@ -281,6 +284,31 @@ test("--restart stops at the supervisor when the hand-off above it is another se
     let clock = 1000;
     await restartServer(server, 7341, { exec: m.exec, sleep: async () => { clock += 10; }, now: () => clock });
     assert.deepEqual(m.calls.find((c) => c[0] === "taskkill"), ["taskkill", "/T", "/F", "/PID", "50"], grand.cmd);
+  }
+});
+
+test("MCP-ISSUE-115 review: --restart in a respawn gap (port free) kills the waiting supervisor before /Run", async () => {
+  // Before: no listener → nothing killed → /Run dropped (IgnoreNew) → the old supervisor's respawn passed for the new one.
+  const server = getServer("codebase-index");
+  const m = fakeMachine({ 50: { parent: 40, cmd: SUP("codebase-index"), created: 20 }, 40: { parent: 30, cmd: SUP("codebase-index"), created: 10 } }, { listener: null });
+  let clock = 1000;
+  const out = await restartServer(server, 7341, { exec: m.exec, sleep: async () => { clock += 10; }, now: () => clock, running: () => ({ pid: 111, supervisorPid: 50 }) });
+  assert.deepEqual(out, { oldPid: null, newPid: 222 });
+  assert.deepEqual(m.calls.find((c) => c[0] === "taskkill"), ["taskkill", "/T", "/F", "/PID", "40"], "from the hand-off down");
+  assert.ok(m.calls.findIndex((c) => c[0] === "taskkill") < m.calls.findIndex((c) => c[0] === "schtasks"));
+
+  // running.json naming a pid that is gone, or is not this server's serve-http, kills nothing.
+  for (const [what, procs, running] of [
+    ["gone", {}, { supervisorPid: 50 }],
+    ["another program", { 50: { parent: 1, cmd: "notepad.exe", created: 1 } }, { supervisorPid: 50 }],
+    ["another server's supervisor", { 50: { parent: 1, cmd: SUP("observe-mcp"), created: 1 } }, { supervisorPid: 50 }],
+    ["no supervisorPid (an older running.json)", {}, { pid: 111 }],
+    ["no running.json", {}, null]
+  ]) {
+    const m2 = fakeMachine(procs, { listener: null });
+    let c2 = 1000;
+    await restartServer(server, 7341, { exec: m2.exec, sleep: async () => { c2 += 10; }, now: () => c2, running: () => running });
+    assert.ok(!m2.calls.some((c) => c[0] === "taskkill"), `${what}: nothing killed`);
   }
 });
 
@@ -636,4 +664,227 @@ test("staleBuilds: only a file the build emits can make a package stale", () => 
   fs.writeFileSync(path.join(root, "pkg/tsconfig.json"), "{ not json");
   fs.rmSync(path.join(root, "pkg/src/real.ts"));
   assert.deepEqual(staleBuilds(root, ["pkg"]), ["pkg"], "fixtures/data.ts is no longer excluded");
+});
+
+test("MCP-ISSUE-115: respawn backoff doubles, caps, and gives up past the cap inside the window", () => {
+  const policy = { maxRestarts: 3, windowMs: 60_000, baseDelayMs: 1_000, maxDelayMs: 3_000 };
+  assert.deepEqual(nextRespawn([], 100_000, policy), { delayMs: 1_000, recent: 0 });
+  assert.deepEqual(nextRespawn([99_000], 100_000, policy), { delayMs: 2_000, recent: 1 });
+  assert.deepEqual(nextRespawn([98_000, 99_000], 100_000, policy), { delayMs: 3_000, recent: 2 }, "capped at maxDelayMs");
+  assert.deepEqual(nextRespawn([97_000, 98_000, 99_000], 100_000, policy), { giveUp: true, recent: 3 });
+  assert.deepEqual(nextRespawn([1_000, 2_000, 3_000], 100_000, policy), { delayMs: 1_000, recent: 0 }, "restarts outside the window are forgiven");
+  assert.ok(RESPAWN_POLICY.baseDelayMs * 2 ** 0 < 30_000, "the first respawn comes well inside 30 s");
+});
+
+test("MCP-ISSUE-115: supervise respawns an exited child, records each event, and stops at the cap", () => {
+  const children = [];
+  const spawnChild = () => {
+    const c = new EventEmitter();
+    c.pid = 1000 + children.length;
+    c.kill = () => c.emit("exit", null, "SIGTERM");
+    children.push(c);
+    return c;
+  };
+  const timers = [];
+  const records = [];
+  let clock = 0;
+  let gaveUp = null;
+  const sup = supervise({
+    spawnChild,
+    record: (r) => records.push(r),
+    onGiveUp: (code) => (gaveUp = { code }),
+    policy: { maxRestarts: 2, windowMs: 60_000, baseDelayMs: 1_000, maxDelayMs: 30_000 },
+    now: () => clock,
+    setTimer: (fn, ms) => timers.push({ fn, ms })
+  });
+  assert.equal(children.length, 1);
+  for (const [i, delay] of [[0, 1_000], [1, 2_000]]) {
+    clock += 500;
+    children[i].emit("exit", 1, null);
+    assert.equal(timers.at(-1).ms, delay);
+    timers.at(-1).fn();
+    assert.equal(children.length, i + 2, "respawned");
+  }
+  clock += 500;
+  children[2].emit("exit", null, "SIGKILL");
+  assert.deepEqual(gaveUp, { code: null }, "gave up once; a signal exit has no code");
+  assert.equal(children.length, 3, "no fourth start");
+  assert.deepEqual(records.map((r) => r.event), ["started", "respawn", "started", "respawn", "started", "gave_up"]);
+  assert.deepEqual(records.map((r) => r.pid), [1000, 1000, 1001, 1001, 1002, 1002]);
+  assert.equal(records[5].signal, "SIGKILL");
+  for (const r of records) assert.ok(!("env" in r) && !("args" in r), "no env, no args in a record");
+  sup.stop();
+});
+
+test("MCP-ISSUE-115: a child stopped by the supervisor is not respawned", () => {
+  const children = [];
+  const sup = supervise({
+    spawnChild: () => {
+      const c = new EventEmitter();
+      c.pid = 7;
+      c.kill = () => c.emit("exit", null, "SIGTERM");
+      children.push(c);
+      return c;
+    },
+    record: () => {},
+    setTimer: () => assert.fail("no respawn timer after stop()")
+  });
+  sup.stop();
+  assert.equal(children.length, 1);
+});
+
+test("MCP-ISSUE-115 review: exit code 0 is a clean stop, not a crash — recorded, never respawned", () => {
+  const events = [];
+  let stopped = 0;
+  const c = new EventEmitter();
+  c.pid = 9;
+  supervise({ spawnChild: () => c, record: (r) => events.push(r.event), onStopped: () => stopped++, setTimer: () => assert.fail("no respawn after exit 0") });
+  c.emit("exit", 0, null);
+  assert.deepEqual(events, ["started", "stopped"]);
+  assert.equal(stopped, 1);
+});
+
+test("MCP-ISSUE-115 review: a throwing record or onStarted, or a spawn error, never takes the supervisor down", () => {
+  const errors = [];
+  const timers = [];
+  const children = [];
+  let n = 0;
+  supervise({
+    spawnChild: () => {
+      n++;
+      if (n === 1) throw new Error("spawn threw");
+      const c = new EventEmitter();
+      if (n === 2) {
+        c.pid = undefined; // never started: error, no exit
+        queueMicrotask(() => c.emit("error", Object.assign(new Error("spawn ENOENT"), { code: "ENOENT" })));
+      } else c.pid = 100 + n;
+      children.push(c);
+      return c;
+    },
+    record: () => {
+      throw new Error("ENOSPC: disk full");
+    },
+    onStarted: () => {
+      throw new Error("running.json locked");
+    },
+    onError: (e) => errors.push(e.message),
+    setTimer: (fn, ms) => timers.push({ fn, ms })
+  });
+  assert.equal(timers.length, 1, "a spawn that throws is respawned");
+  timers[0].fn();
+  return new Promise((resolve) => setImmediate(resolve)).then(() => {
+    assert.equal(timers.length, 2, "an error without exit is respawned");
+    timers[1].fn();
+    assert.equal(children.length, 2, "the third start runs");
+    children[1].emit("error", new Error("late error"));
+    children[1].emit("exit", 1, null);
+    assert.equal(timers.length, 3, "error + exit of a started child respawn once");
+    for (const want of ["spawn threw", "spawn ENOENT", "ENOSPC: disk full", "running.json locked", "late error"]) {
+      assert.ok(errors.includes(want), `onError saw ${want}: ${errors.join(" | ")}`);
+    }
+  });
+});
+
+test("MCP-ISSUE-115: the restart log stays bounded and doctor reads its tail", () => {
+  const file = path.join(fs.mkdtempSync(path.join(TMP, "restarts-")), "restarts.jsonl");
+  assert.deepEqual(readRestartRecords(file), []);
+  assert.deepEqual(restartsCheck([]), ["pass", "no respawn recorded"]);
+  for (let i = 0; i < 300; i++) appendRestartRecord(file, { ts: new Date(i * 1000).toISOString(), event: "started", pid: i, reason: "x".repeat(300) });
+  assert.ok(fs.statSync(file).size <= 64 * 1024 + 400, `bounded, got ${fs.statSync(file).size}`);
+  assert.ok(readRestartRecords(file, { last: 1_000 }).length < 300, "trimmed");
+  fs.appendFileSync(file, "{torn\n");
+  assert.equal(readRestartRecords(file, { last: 3 }).at(-1).pid, 299, "a torn line is skipped");
+
+  const now = Date.parse("2026-11-04T10:00:00Z");
+  const respawn = { ts: "2026-11-04T09:00:00.000Z", event: "respawn", pid: 5, code: 1, signal: null, delayMs: 1000 };
+  const [s1, m1] = restartsCheck([{ event: "started", pid: 5 }, respawn, { event: "started", pid: 6 }], { now });
+  assert.equal(s1, "warn");
+  assert.match(m1, /1 respawn\(s\) in the last 24 h — 2026-11-04T09:00:00.000Z respawn pid 5 code 1 \(next in 1000 ms\)/);
+  assert.equal(restartsCheck([respawn, { ...respawn, event: "gave_up", signal: "SIGKILL", delayMs: undefined }], { now })[0], "fail");
+  assert.equal(restartsCheck([{ ...respawn, ts: "2026-11-01T00:00:00.000Z" }, { event: "started" }], { now })[0], "pass");
+});
+
+test("MCP-ISSUE-115: a server killed under a scratch supervisor is back within 30 s and the restart is logged", { timeout: 90_000 }, async () => {
+  // A real serve-http.mjs supervisor on a scratch port and a scratch deploy root, serving a stand-in entry. Nothing
+  // under ~/.claude is read or written: --config, --log and --deploy-root are all scratch, and the env sets the secret.
+  const server = getServer("codebase-index");
+  const names = httpEnvNames(server);
+  const dir = fs.mkdtempSync(path.join(TMP, "respawn-"));
+  const deployRoot = path.join(dir, "deploy");
+  const entry = path.join(dir, "fake-server.mjs");
+  fs.writeFileSync(
+    entry,
+    `import http from "node:http";\nhttp.createServer((q, s) => s.end(String(process.pid))).listen(Number(process.env.${names.port}), "127.0.0.1");\n`
+  );
+  fs.mkdirSync(path.join(deployRoot, server.key), { recursive: true });
+  fs.writeFileSync(path.join(deployRoot, server.key, "current.json"), JSON.stringify({ dir, sha: "scratch", n: 1, entry, supervisor: null }));
+  const port = await new Promise((resolve) => {
+    const s = net.createServer().listen(0, "127.0.0.1", () => {
+      const p = s.address().port;
+      s.close(() => resolve(p));
+    });
+  });
+  const envFile = path.join(dir, "env.json");
+  writeEnvFile(envFile, { [names.port]: String(port), [names.token]: "t".repeat(40), [approvalSecretEnvName(server)]: "s".repeat(64) });
+  const logFile = path.join(dir, "server.log");
+  const sup = spawn(process.execPath, [path.join(ROOT, "scripts", "serve-http.mjs"), "--server", server.key, "--config", envFile, "--log", logFile, "--deploy-root", deployRoot], { stdio: "ignore" });
+  const get = () =>
+    new Promise((resolve) => {
+      http.get({ host: "127.0.0.1", port, path: "/", agent: false }, (res) => {
+        let d = "";
+        res.on("data", (c) => (d += c));
+        res.on("end", () => resolve(Number(d)));
+      }).on("error", () => resolve(null));
+    });
+  const waitFor = async (pred, ms) => {
+    const until = Date.now() + ms;
+    while (Date.now() < until) {
+      const v = await pred();
+      if (v) return v;
+      await new Promise((r) => setTimeout(r, 200));
+    }
+    return null;
+  };
+  try {
+    const first = await waitFor(get, 15_000);
+    assert.ok(first, "the first server answers");
+    assert.equal(runningDeploy(server, { deployRoot }).supervisorPid, sup.pid, "running.json names the supervisor");
+
+    // Review item 2: a second supervisor on the same port leaves at once and records nothing.
+    const before = fs.readFileSync(restartLogFile(server, { deployRoot }), "utf-8");
+    const second = spawn(process.execPath, [path.join(ROOT, "scripts", "serve-http.mjs"), "--server", server.key, "--config", envFile, "--log", logFile, "--deploy-root", deployRoot], { stdio: "ignore" });
+    const secondCode = await new Promise((resolve) => second.once("exit", resolve));
+    assert.notEqual(secondCode, 0, "the second supervisor refuses");
+    assert.equal(runningDeploy(server, { deployRoot }).pid, first, "running.json still names the live server");
+    assert.equal(fs.readFileSync(restartLogFile(server, { deployRoot }), "utf-8"), before, "the restart log is untouched");
+    assert.equal(await get(), first, "the live server still answers");
+
+    const killedAt = Date.now();
+    process.kill(first);
+    const respawned = await waitFor(async () => {
+      const pid = await get();
+      return pid && pid !== first ? pid : null;
+    }, 30_000);
+    assert.ok(respawned, "a new server answers within 30 s");
+    assert.ok(Date.now() - killedAt < 30_000);
+    assert.equal(runningDeploy(server, { deployRoot }).pid, respawned, "running.json names the respawned pid");
+    const records = readRestartRecords(restartLogFile(server, { deployRoot }), { last: 10 });
+    assert.deepEqual(records.map((r) => r.event), ["started", "respawn", "started"]);
+    assert.equal(records[1].pid, first);
+    assert.equal(records[2].pid, respawned);
+    assert.match(fs.readFileSync(logFile, "utf-8"), /"msg":"supervisor_respawn"/, "the server log names the respawn");
+    assert.equal(restartsCheck(records)[0], "warn");
+  } finally {
+    sup.kill();
+    await waitFor(async () => !(await get()), 10_000);
+    // The supervisor's SIGTERM path stops the child; on Windows kill() is TerminateProcess, which leaves it — end it here.
+    const last = runningDeploy(server, { deployRoot })?.pid;
+    if (last) {
+      try {
+        process.kill(last);
+      } catch {
+        // already gone
+      }
+    }
+  }
 });

@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import http from "node:http";
+import type { Socket } from "node:net";
 import { test } from "node:test";
 
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -468,6 +469,77 @@ test("http: a call that does not ask for the client identity never waits for a s
     await client.close();
   } finally {
     release("1000");
+    await handle.stop();
+  }
+});
+
+/** One POST initialize on `agent`: its status, whether the pooled socket was reused, and that socket. */
+function keepAlivePost(port: number, agent: http.Agent): Promise<{ status: number; reused: boolean; socket: Socket }> {
+  const body = JSON.stringify({
+    jsonrpc: "2.0",
+    id: 1,
+    method: "initialize",
+    params: { protocolVersion: "2025-03-26", capabilities: {}, clientInfo: { name: "ka", version: "0" } }
+  });
+  return new Promise((resolve, reject) => {
+    const req = http.request(
+      {
+        host: "127.0.0.1",
+        port,
+        path: "/mcp",
+        method: "POST",
+        agent,
+        headers: {
+          "content-type": "application/json",
+          accept: "application/json, text/event-stream",
+          authorization: `Bearer ${TOKEN}`
+        }
+      },
+      (res) => {
+        res.resume();
+        res.on("end", () => resolve({ status: res.statusCode ?? 0, reused: req.reusedSocket, socket: req.socket! }));
+      }
+    );
+    req.on("error", reject);
+    req.end(body);
+  });
+}
+
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+test("http: MCP-ISSUE-115 a keep-alive socket reused after 6 s idle gets no ECONNRESET", async () => {
+  // With Node's default keepAliveTimeout (5 s) this sequence failed `read ECONNRESET` on the second request.
+  const handle = await startServer();
+  const agent = new http.Agent({ keepAlive: true, maxSockets: 1 });
+  try {
+    const port = handle.httpPort()!;
+    const first = await keepAlivePost(port, agent);
+    assert.equal(first.status, 200);
+    let closedByServer = false;
+    first.socket.once("close", () => (closedByServer = true));
+    await sleep(6_000);
+    assert.equal(closedByServer, false, "the idle socket is still open after 6 s");
+    const second = await keepAlivePost(port, agent);
+    assert.equal(second.status, 200);
+    assert.equal(second.reused, true, "the second request went over the pooled socket");
+  } finally {
+    agent.destroy();
+    await handle.stop();
+  }
+});
+
+test("http: MCP-ISSUE-115 the keep-alive timeout is explicit and overridable", async () => {
+  const handle = await startServer({ keepAliveTimeoutMs: 500 });
+  const agent = new http.Agent({ keepAlive: true, maxSockets: 1 });
+  try {
+    const first = await keepAlivePost(handle.httpPort()!, agent);
+    const closed = new Promise<boolean>((resolve) => {
+      first.socket.once("close", () => resolve(true));
+      setTimeout(() => resolve(false), 4_000).unref();
+    });
+    assert.equal(await closed, true, "a 500 ms keep-alive closes the idle socket well before 4 s");
+  } finally {
+    agent.destroy();
     await handle.stop();
   }
 });

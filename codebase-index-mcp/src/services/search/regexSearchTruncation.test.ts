@@ -226,3 +226,115 @@ test("handler: per-file cap makes the answer incomplete and names the file", () 
     assert.equal(r.nextAfterPath, undefined);
   });
 });
+
+// MCP-ISSUE-117 (IX-7): `total` when complete, `totalLowerBound` when capped, `truncated` on every response.
+
+type Page = { total?: number; totalLowerBound?: number; truncated: boolean; keys: string[] };
+
+/** Page a scan to completion via nextAfterPath + skipMatches; returns every match key and every page's count fields. */
+function pageAll(store: RegexSearchStore, limit: number, outputMode: "matches" | "files" = "matches"): { seen: string[]; pages: Page[] } {
+  const seen: string[] = [];
+  const pages: Page[] = [];
+  let after: string | undefined;
+  let skip: number | undefined;
+  for (let n = 0; n < 100; n++) {
+    const r = searchRegexImpl(store, "r", { pattern: "hit", limit, outputMode, afterPath: after, skipMatches: skip });
+    const keys = outputMode === "files" ? (r.files ?? []).map((f) => f.filePath) : r.matches.map((m) => `${m.filePath}:${String(m.line)}`);
+    seen.push(...keys);
+    pages.push({ total: r.total, totalLowerBound: r.totalLowerBound, truncated: r.truncated, keys });
+    if (!r.truncated) break;
+    after = r.nextAfterPath ?? undefined;
+    skip = r.nextSkipMatches > 0 ? r.nextSkipMatches : undefined;
+  }
+  return { seen, pages };
+}
+
+test("an uncapped scan carries total === the match count and no lower bound", () => {
+  withRepo({ "a.ts": "hit\nhit\n", "b.ts": "x\n", "c.ts": "hit\n" }, (store) => {
+    const r = searchRegexImpl(store, "r", { pattern: "hit", limit: 50 });
+    assert.equal(r.truncated, false);
+    assert.equal(r.total, 3);
+    assert.equal(r.totalLowerBound, undefined);
+    const files = searchRegexImpl(store, "r", { pattern: "hit", limit: 50, outputMode: "files" });
+    assert.equal(files.total, 2, "files mode counts files");
+  });
+});
+
+test("a capped scan has totalLowerBound and NO total", () => {
+  withRepo(ONE_HIT_PER_FILE, (store) => {
+    const r = searchRegexImpl(store, "r", { pattern: "hit", limit: 2 });
+    assert.equal(r.truncated, true);
+    assert.equal(r.total, undefined);
+    assert.equal(r.totalLowerBound, 2);
+    const cut = searchRegexImpl(store, "r", { pattern: "hit", limit: 500 });
+    assert.equal(cut.total, 5);
+  });
+  withRepo({ "a.ts": "hit\n".repeat(300), "b.ts": "hit\n" }, (store) => {
+    const r = searchRegexImpl(store, "r", { pattern: "hit", limit: 1000 });
+    assert.equal(r.truncationReason, "per_file_cap");
+    assert.equal(r.total, undefined, "a per-file cap hides matches: no exact total");
+    assert.ok((r.totalLowerBound ?? 0) >= 201);
+  });
+});
+
+test("paging to completion: every match once, and the FINAL page's total is the uncapped count", () => {
+  // The edges: the very first match is the cut point (limit 1) and the very last match ends the scan.
+  const files = { "a.ts": "hit\n".repeat(5), "b.ts": "x\n", "c.ts": "hit\n".repeat(3), "d.ts": "hit\n" };
+  withRepo(files, (store) => {
+    const full = searchRegexImpl(store, "r", { pattern: "hit", limit: 500 });
+    assert.equal(full.total, 9);
+    for (const limit of [1, 2, 4, 5, 9, 10]) {
+      const { seen, pages } = pageAll(store, limit);
+      assert.deepEqual(seen, full.matches.map((m) => `${m.filePath}:${String(m.line)}`), `limit ${String(limit)}: every match once, in order`);
+      const last = pages[pages.length - 1]!;
+      assert.equal(last.truncated, false, `limit ${String(limit)}: ends complete`);
+      assert.equal(last.total, 9, `limit ${String(limit)}: the final page reports the whole-scope total`);
+      for (const page of pages.slice(0, -1)) {
+        assert.equal(page.total, undefined, "a capped page has no total");
+        assert.ok(page.totalLowerBound !== undefined && page.totalLowerBound <= 9);
+      }
+    }
+  });
+});
+
+test("files mode pages to completion with the same total on the last page", () => {
+  withRepo({ "a.ts": "hit\n", "b.ts": "x\n", "c.ts": "hit\n", "d.ts": "hit\n", "e.ts": "hit\n" }, (store) => {
+    const { seen, pages } = pageAll(store, 2, "files");
+    assert.deepEqual(seen, ["a.ts", "c.ts", "d.ts", "e.ts"]);
+    assert.equal(pages[pages.length - 1]!.total, 4);
+  });
+});
+
+test("a resume past the last file is complete and still reports the whole total", () => {
+  withRepo(ONE_HIT_PER_FILE, (store) => {
+    const r = searchRegexImpl(store, "r", { pattern: "hit", limit: 5, afterPath: "e.ts" });
+    assert.equal(r.matches.length, 0);
+    assert.equal(r.truncated, false);
+    assert.equal(r.total, 5);
+  });
+});
+
+test("a cut inside the first file, resumed, still totals the whole scope", () => {
+  withRepo({ "a.ts": "hit\n".repeat(30), "b.ts": "hit\n".repeat(4) }, (store) => {
+    const { pages } = pageAll(store, 7);
+    assert.equal(pages[pages.length - 1]!.total, 34);
+  });
+});
+
+test("handler: truncated is a boolean on EVERY profile and mode; total/totalLowerBound follow it", () => {
+  withRepo(ONE_HIT_PER_FILE, (store) => {
+    for (const profile of ["nano", "compact", "standard", "verbose"]) {
+      const whole = runHandler(store, { limit: 50, profile });
+      assert.equal(whole.truncated, false, profile);
+      assert.equal(whole.total, 5, profile);
+      assert.equal(whole.totalLowerBound, undefined, profile);
+      const cut = runHandler(store, { limit: 2, profile });
+      assert.equal(cut.truncated, true, profile);
+      assert.equal(cut.total, undefined, profile);
+      assert.equal(cut.totalLowerBound, 2, profile);
+    }
+    const files = runHandler(store, { limit: 50, profile: "compact", outputMode: "files" });
+    assert.equal(files.truncated, false);
+    assert.equal(files.total, 5);
+  });
+});

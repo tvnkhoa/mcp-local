@@ -312,6 +312,10 @@ Gate: 4/4 servers build + typecheck, 36/36 harnesses (63 assertions in the 049 h
 - [MCP-ISSUE-112 — index_repository ran inside the tool call on the server thread: past 120 s the call was dropped and its run reported to nobody](issues/MCP-ISSUE-112.md)
 - [MCP-ISSUE-113 — a repoId with no index was indexed twice: the default incremental run escalated to full](issues/MCP-ISSUE-113.md)
 - [MCP-ISSUE-114 — no one-call way to register a worktree's index: a 120 s index_repository call plus a separate watch](issues/MCP-ISSUE-114.md)
+- [MCP-ISSUE-115 — the served HTTP process dropped clients: Node's 5 s keep-alive reset reused sockets, and a crashed server was never respawned](issues/MCP-ISSUE-115.md)
+- [MCP-ISSUE-116 — `query_docs` mode `section` could only be addressed by heading prefix](issues/MCP-ISSUE-116.md)
+- [MCP-ISSUE-117 — `search_regex` gave no match total and no `truncated` flag on a complete response](issues/MCP-ISSUE-117.md)
+- [MCP-ISSUE-118 — `test:field-access-exact` red when solo: the cold type-program build outlives the harness budget](issues/MCP-ISSUE-118.md)
 - [Confirmed fixed — 2026-08-05 re-verification of the 042–051 wave](issues/confirmed-fixed-2026-08-05-re-verification-of-the-042-051-wave.md)
 - [MCP-ISSUE-101 follow-ups (row 5: F2–F4)](issues/mcp-issue-101-follow-ups-row-5-f2-f4.md)
 

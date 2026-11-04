@@ -329,11 +329,27 @@ node scripts/install-mcp.mjs --server codebase-index --transport stdio  # back t
   not stopped or refused on battery, no execution limit. The flag form refuses to start on battery, kills the
   server when the laptop leaves AC (the 26 Oct outage), caps a run at 72 h and cuts `/TR` at 261
   characters (the `--log` path). It does not run all day by design: a shutdown ends the server, the next
-  logon or morning starts it. No repetition, restart loop or service. A task first registered from an
+  logon or morning starts it. The task has no repetition or restart-on-failure and is not a service; restarting
+  a crashed server is the supervisor's job (next bullet). A task first registered from an
   elevated prompt has an ACL that gives its user read only, so a normal prompt gets "Access is denied" on
   `/F` (and on `/Delete`): delete it once from an elevated prompt, then `--task register` replaces it freely.
+- **The supervisor respawns a server that exits on its own** (MCP-ISSUE-115). Before, any exit ended the
+  supervisor too and the port stayed dark until the next logon or 08:00 (clients: `CONNECT_TIMEOUT`). Now it
+  waits 1 s, doubling per restart to at most 30 s, and gives up after 5 restarts inside 10 min (a server that
+  dies on start must not spin); `--restart`, which kills the whole tree, is not a crash, and neither is exit
+  code 0 (the server exits 0 only after a signal-driven shutdown: recorded as `stopped`, not respawned). A
+  `--restart` that finds the port free between respawns kills the waiting supervisor named in `running.json`
+  (`supervisorPid`) before `/Run`. A second supervisor started while the port is held exits at once and
+  records nothing. Every start, respawn
+  and give-up is one JSON line (time, pid, exit code or signal, reason; no env, no args) in
+  `<deployRoot>/<key>/restarts.jsonl`, trimmed past 64 KiB, and a `supervisor_*` line in the server log.
+  `mcp:doctor`'s `[restarts]` check shows the last five: warn on a respawn in the last 24 h, fail when the
+  supervisor gave up. Sessions are re-adopted after a respawn as after any restart (below).
 - The server listens only when started with `--transport http`; an HTTP port in a stdio entry's env is
-  ignored. It binds 127.0.0.1, refuses a foreign `Host`/`Origin` (403) and a missing token (401).
+  ignored. It binds 127.0.0.1, refuses a foreign `Host`/`Origin` (403) and a missing token (401). Its socket
+  timeouts are set, not Node's defaults (MCP-ISSUE-115): an idle keep-alive socket stays open 65 s (Node's
+  5 s let a client reuse a socket the server was closing — `ECONNRESET`), headers must arrive within 70 s, a
+  whole request within 70 s; answering is not bounded, so a long tool call is never cut.
 - Shared across clients: the store, the watchers and the refresh worker. Per client: the protocol
   session and refactor previews — a preview made by one client process is refused to another
   (`PREVIEW_OWNED_BY_ANOTHER_SESSION`; MCP-ISSUE-108, below). A client leaving does not stop a watcher or the

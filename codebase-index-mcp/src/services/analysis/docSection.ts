@@ -75,6 +75,30 @@ export function matchHeadings(headings: readonly DocHeading[], prefix: string): 
   return exact.length > 0 ? [...exact, ...matches.filter((h) => !exact.includes(h))] : matches;
 }
 
+/**
+ * Headings whose text CONTAINS the fragment (same normalisation as the prefix match), document order,
+ * an exact heading first. Substring only — no fuzzy or semantic match (no-LLM policy).
+ */
+export function matchHeadingsContaining(headings: readonly DocHeading[], fragment: string): DocHeading[] {
+  const p = normalizeHeading(fragment);
+  const matches = headings.filter((h) => normalizeHeading(h.text).includes(p));
+  const exact = matches.filter((h) => normalizeHeading(h.text) === p);
+  return exact.length > 0 ? [...exact, ...matches.filter((h) => !exact.includes(h))] : matches;
+}
+
+/**
+ * The innermost section whose range holds 1-based line N: the last heading at or before N. Undefined
+ * when N precedes the first heading (the preamble belongs to no section).
+ */
+export function headingAtLine(headings: readonly DocHeading[], line: number): DocHeading | undefined {
+  let found: DocHeading | undefined;
+  for (const h of headings) {
+    if (h.line > line) break;
+    found = h;
+  }
+  return found;
+}
+
 function bigrams(s: string): Map<string, number> {
   const out = new Map<string, number>();
   for (let i = 0; i < s.length - 1; i++) {
