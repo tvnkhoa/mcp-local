@@ -114,7 +114,42 @@ export type RegexSearchResult = {
   afterPathRemovedAll: boolean;
   /** Files (first ${PER_FILE_CAP_REPORT_MAX}) where the per-file match cap hid further matches. */
   perFileCapFiles: string[];
+  /**
+   * MCP-ISSUE-117: EXACT number of matches (files in `outputMode: "files"`) in the whole scope, present only when this
+   * response is complete (`truncated: false`). On a resumed call (`afterPath`) it includes the files before the resume
+   * point, so the last page of a paged scan reports the same total as one uncapped call.
+   */
+  total?: number;
+  /** MCP-ISSUE-117: when capped, how many were counted so far in THIS call (a lower bound; `total` is then absent). */
+  totalLowerBound?: number;
 };
+
+/** Read a candidate for scanning, or null when it is skipped (escapes the root, vanished, over the cap, empty, binary, minified). */
+function readScannable(repoPath: string, filePath: string, sizeCap: number): string | null {
+  let absolute: string;
+  try {
+    absolute = assertSafeRepoFilePath(repoPath, filePath);
+  } catch {
+    return null; // path escaped the repo root — skip defensively
+  }
+  // Size guard before reading so a huge file is never pulled into memory.
+  let size: number;
+  try {
+    size = fs.statSync(absolute).size;
+  } catch {
+    return null; // vanished between glob and read
+  }
+  if (size > sizeCap) return null;
+  let buf: Buffer;
+  try {
+    buf = fs.readFileSync(absolute);
+  } catch {
+    return null;
+  }
+  if (buf.length === 0) return null;
+  if (isBinary(buf) || (!isMinifiedCheckExempt(filePath) && isLikelyMinified(buf))) return null;
+  return buf.toString("utf8");
+}
 
 export class RegexSearchError extends Error {
   readonly code: string;
@@ -233,9 +268,11 @@ export function searchRegexImpl(
   // Applies to the first in-scope file with or without afterPath: a cut in the FIRST file has no path before it.
   const skipFirstFile = Math.max(0, Math.floor(opts.skipMatches ?? 0));
   const eligibleBeforeAfter = selected.length;
+  let skippedPrefix: { path: string; language: string | null }[] = [];
   if (afterPath !== null) {
     const from = selected.findIndex((f) => f.path.localeCompare(afterPath) > 0);
-    selected.splice(0, from < 0 ? selected.length : from);
+    // Kept (not discarded): a complete resumed call counts the matches in these files for `total` (MCP-ISSUE-117).
+    skippedPrefix = selected.splice(0, from < 0 ? selected.length : from);
   }
 
   const matches: RegexSearchMatch[] = [];
@@ -246,6 +283,8 @@ export function searchRegexImpl(
   let filesUnscanned = 0;
   let nextAfterPath: string | null = null;
   let nextSkipMatches = 0;
+  // Matches consumed in this call's range, skipped ones included (MCP-ISSUE-117 `total`); files mode counts files.
+  let rangeMatches = 0;
   const perFileCapFiles: string[] = [];
   const notePerFileCap = (p: string): void => {
     if (perFileCapFiles.length < 20) perFileCapFiles.push(p);
@@ -262,35 +301,11 @@ export function searchRegexImpl(
       break;
     }
 
-    let absolute: string;
-    try {
-      absolute = assertSafeRepoFilePath(repoPath, file.path);
-    } catch {
-      continue; // path escaped the repo root — skip defensively
-    }
-
-    // Size guard before reading so a huge file is never pulled into memory.
-    let size: number;
-    try {
-      size = fs.statSync(absolute).size;
-    } catch {
-      continue; // vanished between glob and read
-    }
     // A caller-supplied cap applies to every file; otherwise markdown has its own, as in the indexer.
     const cap = opts.maxFileSizeBytes ?? (MARKDOWN_FILE.test(file.path) ? MAX_MARKDOWN_BYTES : maxFileSize);
-    if (size > cap) continue;
-
-    let buf: Buffer;
-    try {
-      buf = fs.readFileSync(absolute);
-    } catch {
-      continue;
-    }
-    if (buf.length === 0) continue;
-    if (isBinary(buf) || (!isMinifiedCheckExempt(file.path) && isLikelyMinified(buf))) continue;
+    const content = readScannable(repoPath, file.path, cap);
+    if (content === null) continue;
     filesScanned++;
-
-    const content = buf.toString("utf8");
     if (filesMode) {
       regex.lastIndex = 0;
       let count = 0;
@@ -324,6 +339,7 @@ export function searchRegexImpl(
     while ((m = regex.exec(content)) !== null) {
       if (seen < skip) {
         seen++;
+        rangeMatches++;
         if (m.index === regex.lastIndex) regex.lastIndex++;
         continue;
       }
@@ -364,11 +380,43 @@ export function searchRegexImpl(
         language: file.language
       });
       seen++;
+      rangeMatches++;
 
       // Guard against zero-width matches looping forever (e.g. pattern `a*` or `^` with m flag).
       if (m.index === regex.lastIndex) regex.lastIndex++;
     }
     if (nextSkipMatches > 0) break;
+  }
+
+  // MCP-ISSUE-117: an exact total only when nothing was capped. A resumed complete call also counts the files
+  // before the resume point (a bare count, no context built), so the last page agrees with one uncapped call.
+  const truncated = truncationReason !== null;
+  const counted = filesMode ? files.length : rangeMatches;
+  let total: number | undefined;
+  let totalLowerBound: number | undefined;
+  if (truncated) {
+    totalLowerBound = counted;
+  } else {
+    let prefixCount = 0;
+    let prefixCapped = false;
+    for (const f of skippedPrefix) {
+      const text = readScannable(repoPath, f.path, opts.maxFileSizeBytes ?? (MARKDOWN_FILE.test(f.path) ? MAX_MARKDOWN_BYTES : maxFileSize));
+      if (text === null) continue;
+      regex.lastIndex = 0;
+      let n = 0;
+      let pm: RegExpExecArray | null;
+      while (n <= PER_FILE_MATCH_CAP && (pm = regex.exec(text)) !== null) {
+        n++;
+        if (pm.index === regex.lastIndex) regex.lastIndex++;
+      }
+      if (n > PER_FILE_MATCH_CAP) {
+        prefixCapped = true;
+        n = PER_FILE_MATCH_CAP;
+      }
+      prefixCount += filesMode ? (n > 0 ? 1 : 0) : n;
+    }
+    if (prefixCapped) totalLowerBound = prefixCount + counted;
+    else total = prefixCount + counted;
   }
 
   return {
@@ -379,12 +427,14 @@ export function searchRegexImpl(
     // at". `count: 0, filesScanned: 5000` on a 7528-file repo was read as "the symbol does not exist
     // in that repo" — it meant 2528 files were never opened.
     filesEligible: selected.length,
-    truncated: truncationReason !== null,
+    truncated,
     truncationReason,
     filesUnscanned,
     nextAfterPath,
     nextSkipMatches,
     afterPathRemovedAll: afterPath !== null && eligibleBeforeAfter > 0 && selected.length === 0,
-    perFileCapFiles
+    perFileCapFiles,
+    ...(total !== undefined && { total }),
+    ...(totalLowerBound !== undefined && { totalLowerBound })
   };
 }

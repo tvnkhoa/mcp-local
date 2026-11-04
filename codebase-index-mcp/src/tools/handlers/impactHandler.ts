@@ -1,7 +1,7 @@
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { McpError, ErrorCode } from "@modelcontextprotocol/sdk/types.js";
 import { applyResultBudget, resolveResponseProfile, DEFAULT_RESULT_BUDGET_TOKENS } from "../../middleware/responseFormatter.js";
-import { listHeadings, matchHeadings, nearestHeadings, extractSection } from "../../services/analysis/docSection.js";
+import { listHeadings, matchHeadings, matchHeadingsContaining, headingAtLine, nearestHeadings, extractSection } from "../../services/analysis/docSection.js";
 import { assertSafeRepoFilePath } from "../../services/refactor/refactorUtils.js";
 import { CITATIONS_CONFIG_PATH, loadCitationConfig } from "../../services/docs/citationConfig.js";
 import { findCitations } from "../../services/docs/annotationScanner.js";
@@ -348,7 +348,13 @@ function noPropertySymbolResult(
  * query_docs{ mode:"section" }. The file is read from disk, so the section is current even when the
  * index is not; the index is only consulted for the repo's root.
  */
-function readDocSection(store: GraphStore, repoId: string, filePath: string, headingPrefix: string, maxTokens: number): unknown {
+function readDocSection(
+  store: GraphStore,
+  repoId: string,
+  filePath: string,
+  address: { headingPrefix?: string; headingContains?: string; line?: number },
+  maxTokens: number
+): unknown {
   const repo = store.getRepository(repoId);
   if (!repo) throw notFound(`unknown repoId '${repoId}'.`, { repoId });
   const relative = filePath.replace(/\\/g, "/");
@@ -362,18 +368,39 @@ function readDocSection(store: GraphStore, repoId: string, filePath: string, hea
 
   const lines = fs.readFileSync(absolute, "utf8").split(/\r?\n/);
   const headings = listHeadings(lines);
-  const matches = matchHeadings(headings, headingPrefix);
+  const describe = (h: { level: number; text: string; line: number }): string => `${"#".repeat(h.level)} ${h.text} (line ${String(h.line)})`;
+
+  if (address.line !== undefined) {
+    const { line } = address;
+    if (line > lines.length) {
+      throw notFound(`'${relative}' has ${String(lines.length)} lines; line ${String(line)} is past the end.`, { repoId, filePath: relative, line });
+    }
+    const at = headingAtLine(headings, line);
+    if (!at) {
+      throw notFound(
+        `line ${String(line)} of '${relative}' precedes the first heading, so it is in no section.` +
+          (headings[0] ? ` First heading: ${describe(headings[0])}` : " The file has no headings."),
+        { repoId, filePath: relative, line }
+      );
+    }
+    const section = extractSection(lines, headings, at, maxTokens, []);
+    return { repoId, mode: "section", filePath: relative, line, ...section };
+  }
+
+  const fragment = address.headingContains ?? address.headingPrefix ?? "";
+  const byContains = address.headingContains !== undefined;
+  const matches = byContains ? matchHeadingsContaining(headings, fragment) : matchHeadings(headings, fragment);
   if (matches.length === 0) {
-    const nearest = nearestHeadings(headings, headingPrefix).map((h) => `${"#".repeat(h.level)} ${h.text} (line ${String(h.line)})`);
+    const nearest = nearestHeadings(headings, fragment).map(describe);
     throw notFound(
-      `no heading in '${relative}' starts with '${headingPrefix}'. ` +
+      `no heading in '${relative}' ${byContains ? "contains" : "starts with"} '${fragment}'. ` +
         (nearest.length > 0 ? `Closest headings: ${nearest.join("; ")}` : "The file has no headings."),
-      { repoId, filePath: relative, headingPrefix }
+      { repoId, filePath: relative, ...(byContains ? { headingContains: fragment } : { headingPrefix: fragment }) }
     );
   }
   const [target, ...others] = matches;
   const section = extractSection(lines, headings, target!, maxTokens, others.slice(0, 10));
-  return { repoId, mode: "section", filePath: relative, headingPrefix, ...section };
+  return { repoId, mode: "section", filePath: relative, ...(byContains ? { headingContains: fragment } : { headingPrefix: fragment }), ...section };
 }
 
 /**
@@ -990,7 +1017,7 @@ export function handleQueryGraph(
  * `search` already had, which is also the convention every other read tool here follows.
  */
 export async function handleQueryDocs(
-  args: { repoId: string; mode: "search" | "stale" | "coverage" | "drift" | "links" | "behind" | "language" | "section" | "cites" | "term"; query?: string; headingPrefix?: string; target?: string; includeCodeComments?: boolean; symbolIds?: string[]; filePath?: string; limit: number; maxTokens?: number; minSimilarity?: number; minDaysBehind?: number; minRatioPercent?: number; includeSymbols: boolean; includeCodeMentions: boolean; expandAmbiguous?: boolean; includeArchived?: boolean; matchMode?: "auto" | "strict" | "phrase"; maxPerFile?: number; contentTypes?: string[]; profile: string },
+  args: { repoId: string; mode: "search" | "stale" | "coverage" | "drift" | "links" | "behind" | "language" | "section" | "cites" | "term"; query?: string; headingPrefix?: string; headingContains?: string; line?: number; target?: string; includeCodeComments?: boolean; symbolIds?: string[]; filePath?: string; limit: number; maxTokens?: number; minSimilarity?: number; minDaysBehind?: number; minRatioPercent?: number; includeSymbols: boolean; includeCodeMentions: boolean; expandAmbiguous?: boolean; includeArchived?: boolean; matchMode?: "auto" | "strict" | "phrase"; maxPerFile?: number; contentTypes?: string[]; profile: string },
   ctx: HandlerContext
 ): Promise<CallToolResult> {
   if (!ctx.constants.DOCS_TOOLS_ENABLED) {
@@ -1035,7 +1062,7 @@ export async function handleQueryDocs(
   }
 
   if (args.mode === "section") {
-    return ctx.asText(readDocSection(store, args.repoId, args.filePath!, args.headingPrefix!, args.maxTokens ?? DEFAULT_RESULT_BUDGET_TOKENS), profile);
+    return ctx.asText(readDocSection(store, args.repoId, args.filePath!, { headingPrefix: args.headingPrefix, headingContains: args.headingContains, line: args.line }, args.maxTokens ?? DEFAULT_RESULT_BUDGET_TOKENS), profile);
   }
 
   if (args.mode === "language") {
