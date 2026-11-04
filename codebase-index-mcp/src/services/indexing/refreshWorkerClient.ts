@@ -17,8 +17,9 @@
  * - `onRunLanded` runs on the server thread after each successful run, for the in-process caches that
  *   a run in another connection cannot clear (the vector search memo).
  *
- * Explicit `index_repository` and the watcher still run on the server thread: they report progress
- * through the request, and the acceptance this exists for is about query-triggered refreshes.
+ * MCP-ISSUE-112: `index_repository` (a job, see indexJobs.ts) and the watcher run here too, so every index write of
+ * the process is this worker's. A run handed `onProgress` gets the worker's `progress` messages; a run handed
+ * `runId` is recorded under it.
  */
 
 import { Worker } from "node:worker_threads";
@@ -52,7 +53,12 @@ export type RefreshWorkerClientOptions = {
   onRunLanded?: (repoId: string, result: IndexRunResult) => void;
 };
 
-type Pending = { repoId: string; resolve: (result: IndexRunResult) => void; reject: (error: Error) => void };
+type Pending = {
+  repoId: string;
+  resolve: (result: IndexRunResult) => void;
+  reject: (error: Error) => void;
+  onProgress?: (progress: number, total: number | undefined, message: string) => void;
+};
 
 export class RefreshWorkerClient {
   private worker: RefreshWorkerLike | null = null;
@@ -68,7 +74,7 @@ export class RefreshWorkerClient {
 
   /** Same signature as the in-process runner, so the gate cannot tell the difference. */
   readonly run: RunIndexAndResolve = (repoId, repoPath, mode, docsEnabled, maxFiles, batchSize, extras) =>
-    this.request(repoId, repoPath, mode, docsEnabled, maxFiles, batchSize, extras?.knownDirtyPaths, extras?.bookkeeping);
+    this.request(repoId, repoPath, mode, docsEnabled, maxFiles, batchSize, extras?.knownDirtyPaths, extras?.bookkeeping, extras?.runId, extras?.onProgress);
 
   /**
    * Spawn the worker and have it open its connection and load the indexer now, so the first refresh
@@ -104,7 +110,9 @@ export class RefreshWorkerClient {
     batchSize: number,
     /** Release K3 (P1): the gate's dirty set, so the worker's dirty run does not read git again. */
     dirtyPaths?: readonly string[],
-    bookkeeping?: RunBookkeeping
+    bookkeeping?: RunBookkeeping,
+    runId?: string,
+    onProgress?: (progress: number, total: number | undefined, message: string) => void
   ): Promise<IndexRunResult> {
     return new Promise<IndexRunResult>((resolve, reject) => {
       let worker: RefreshWorkerLike;
@@ -115,7 +123,7 @@ export class RefreshWorkerClient {
         return;
       }
       const id = this.nextId++;
-      this.pending.set(id, { repoId, resolve, reject });
+      this.pending.set(id, { repoId, resolve, reject, ...(onProgress && { onProgress }) });
       worker.postMessage({
         kind: "run",
         id,
@@ -128,7 +136,9 @@ export class RefreshWorkerClient {
         maxFiles,
         batchSize,
         ...(dirtyPaths && { dirtyPaths: [...dirtyPaths] }),
-        ...(bookkeeping && { bookkeeping })
+        ...(bookkeeping && { bookkeeping }),
+        ...(runId && { runId }),
+        ...(onProgress && { reportProgress: true })
       });
     });
   }
@@ -154,6 +164,14 @@ export class RefreshWorkerClient {
     if (worker !== this.worker) return;
     const entry = this.pending.get(message.id);
     if (!entry) return;
+    if (message.type === "progress") {
+      try {
+        entry.onProgress?.(message.progress, message.total, message.message);
+      } catch {
+        // A progress sink never fails the run.
+      }
+      return;
+    }
     this.pending.delete(message.id);
     if (message.type === "error") {
       entry.reject(new Error(message.error));

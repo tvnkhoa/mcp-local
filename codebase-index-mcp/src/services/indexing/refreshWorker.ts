@@ -56,10 +56,15 @@ export type RefreshWorkerRequest = {
   dirtyPaths?: string[];
   /** MCP-ISSUE-111: the gate's bookkeeping, written on this worker's connection (see `RunExtras.bookkeeping`). */
   bookkeeping?: RunBookkeeping;
+  /** MCP-ISSUE-112: the run id an index job handed out. */
+  runId?: string;
+  /** MCP-ISSUE-112: post `progress` messages for this run (an index job reports its phase). */
+  reportProgress?: boolean;
 };
 
 export type RefreshWorkerMessage =
   | { type: "result"; id: number; result: IndexRunResult }
+  | { type: "progress"; id: number; progress: number; total: number | undefined; message: string }
   | { type: "error"; id: number; error: string };
 
 /** `endIndexSession`, best-effort: a checkpoint that cannot run now runs on a later one. */
@@ -129,7 +134,12 @@ if (parentPort) {
         active = runnerFor(request);
         const result = await active.run(request.repoId, request.repoPath, request.mode, request.docsEnabled, request.maxFiles, request.batchSize, {
           ...(request.dirtyPaths && { knownDirtyPaths: request.dirtyPaths }),
-          ...(request.bookkeeping && { bookkeeping: request.bookkeeping })
+          ...(request.bookkeeping && { bookkeeping: request.bookkeeping }),
+          ...(request.runId && { runId: request.runId }),
+          ...(request.reportProgress && {
+            onProgress: (progress: number, total: number | undefined, message: string) =>
+              port.postMessage({ type: "progress", id: request.id, progress, total, message } satisfies RefreshWorkerMessage)
+          })
         });
         port.postMessage({ type: "result", id: request.id, result } satisfies RefreshWorkerMessage);
         // Release K3 (P2): the run is committed and the answer is on its way; NOW the end-of-session

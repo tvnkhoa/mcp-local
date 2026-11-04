@@ -104,6 +104,10 @@ export type RunExtras = {
    * the server thread, where they waited on another run's write lock. See `RunBookkeeping`.
    */
   bookkeeping?: RunBookkeeping;
+  /** MCP-ISSUE-112: the run id an index job handed out; the run is recorded under it. */
+  runId?: string;
+  /** MCP-ISSUE-112: this run's progress sink, ahead of `resolveProgressNotifier` (the refresh worker posts it back). */
+  onProgress?: ProgressNotifier;
 };
 
 /**
@@ -157,7 +161,7 @@ export function createIndexRunner(options: IndexRunnerOptions): RunIndexAndResol
     batchSize: number,
     extras: RunExtras = {}
   ): Promise<IndexRunResult> {
-  const { escalatedBecause } = extras;
+  const { escalatedBecause, runId: givenRunId } = extras;
   // Never write over an index a newer build wrote (several server processes share one DB).
   const refusal = newerBuildRefusal(store.getLatestRun(repoId)?.indexVersion);
   if (refusal) throw new Error(`index_repository refused: ${refusal}`);
@@ -169,7 +173,11 @@ export function createIndexRunner(options: IndexRunnerOptions): RunIndexAndResol
   /** Release J: redo a scoped run as a full one, and say why on the full run's record. */
   const escalateToFull = (reason: string): Promise<IndexRunResult> => {
     indexLog(`[index-scope] repoId=${repoId} ${mode} run escalated to full: ${reason}`);
-    return runIndexAndResolve(repoId, repoPath, "full", docsEnabled, maxFiles, batchSize, { escalatedBecause: `full (escalated from ${mode}: ${reason})` });
+    return runIndexAndResolve(repoId, repoPath, "full", docsEnabled, maxFiles, batchSize, {
+      escalatedBecause: `full (escalated from ${mode}: ${reason})`,
+      ...(givenRunId && { runId: givenRunId }),
+      ...(extras.onProgress && { onProgress: extras.onProgress })
+    });
   };
 
   /**
@@ -242,7 +250,8 @@ export function createIndexRunner(options: IndexRunnerOptions): RunIndexAndResol
         commitSha: resolveHeadCommitSha(repoPath),
         branch: resolveCurrentBranch(repoPath),
         indexVersion: INDEX_VERSION,
-        skipReason: "no dirty files"
+        skipReason: "no dirty files",
+        ...(givenRunId && { runId: givenRunId })
       });
       store.recordRun(noOp);
       indexLog(`[index-dirty] repoId=${repoId} no working-tree changes — nothing to re-index`);
@@ -263,7 +272,8 @@ export function createIndexRunner(options: IndexRunnerOptions): RunIndexAndResol
         commitSha: skipDecision.headCommitSha,
         branch: resolveCurrentBranch(repoPath),
         indexVersion: skipDecision.indexVersion,
-        skipReason: skipDecision.reason
+        skipReason: skipDecision.reason,
+        ...(givenRunId && { runId: givenRunId })
       });
       store.recordRun(skippedSummary);
       indexLog(`[index-skip] repoId=${repoId} reason=${skipDecision.reason}`);
@@ -313,7 +323,7 @@ export function createIndexRunner(options: IndexRunnerOptions): RunIndexAndResol
   // scan → index, then we keep it going across the edge-resolution post-phase below
   // and stop() it with a summary. When the host supplied a progressToken, its
   // update()s stream `notifications/progress` so Claude Code shows live % + phase.
-  const progress = createIndexProgress(repoId, resolveProgressNotifier?.());
+  const progress = createIndexProgress(repoId, extras.onProgress ?? resolveProgressNotifier?.());
   const runStartedMs = Date.now();
 
   // Disable WAL auto-checkpoint during indexing to prevent lock contention
@@ -322,6 +332,7 @@ export function createIndexRunner(options: IndexRunnerOptions): RunIndexAndResol
 
   // On throw the pipeline stops the reporter itself (failure line) before rethrowing.
   const summary = await runIndexPipeline(store, {
+    ...(givenRunId && { runId: givenRunId }),
     repoId,
     repoPath,
     mode,

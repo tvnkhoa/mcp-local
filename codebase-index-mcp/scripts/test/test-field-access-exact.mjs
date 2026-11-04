@@ -113,7 +113,7 @@ async function withServer(extraEnv, label, fn) {
   await client.connect(transport);
   attachServerStderr(transport, `test-field-access-exact:${label}`);
   try {
-    const indexed = js(await client.callTool({ name: "index_repository", arguments: { repoId, repoPath: tmpDir, mode: "full" } }));
+    const indexed = js(await client.callTool({ name: "index_repository", arguments: { wait: true, repoId, repoPath: tmpDir, mode: "full" } }));
     assert(indexed && !indexed.error, `[${label}] index_repository`, JSON.stringify(indexed)?.slice(0, 300));
     await fn(client);
   } finally {

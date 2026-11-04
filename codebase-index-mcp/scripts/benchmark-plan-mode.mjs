@@ -71,15 +71,21 @@ async function main() {
 
   await client.connect(transport);
 
-  await client.callTool({
+  let indexed = JSON.parse(readTextContent(await client.callTool({
     name: "index_repository",
-    arguments: {
+    arguments: { wait: true,
       repoId,
       repoPath,
       mode: "full",
       maxFiles: 500
     }
-  }, undefined, { timeout: 180_000 });
+  }, undefined, { timeout: 180_000 })));
+  // MCP-ISSUE-112: wait:true answers after at most 100 s; a longer run is polled to its end.
+  while (indexed.state === "queued" || indexed.state === "running") {
+    await new Promise((r) => setTimeout(r, 2000));
+    indexed = JSON.parse(readTextContent(await client.callTool({ name: "index_status", arguments: { runId: indexed.runId } })));
+  }
+  if (indexed.state !== "ok") throw new Error(`index_repository did not end ok: ${JSON.stringify(indexed).slice(0, 300)}`);
 
   const probe = await client.callTool({
     name: "search_symbols",

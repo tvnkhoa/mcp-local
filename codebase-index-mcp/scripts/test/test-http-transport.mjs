@@ -141,7 +141,7 @@ try {
   check("two distinct sessions", a.transport.sessionId !== b.transport.sessionId);
 
   const indexed = payload(await a.client.callTool({
-    name: "index_repository", arguments: { repoId: "r4", repoPath: repo, mode: "full", docsMode: "on" }
+    name: "index_repository", arguments: { wait: true, repoId: "r4", repoPath: repo, mode: "full", docsMode: "on" }
   }));
   check("A indexed the scratch repo", (indexed.filesIndexed ?? indexed.run?.filesIndexed ?? 0) > 0, JSON.stringify(indexed).slice(0, 300));
 
@@ -223,7 +223,7 @@ try {
     await waitForServer(port2, srv);
     const c = await connect(port2);
     const sid = c.transport.sessionId;
-    payload(await c.client.callTool({ name: "index_repository", arguments: { repoId: "r4b", repoPath: repo, mode: "full", docsMode: "on" } }));
+    payload(await c.client.callTool({ name: "index_repository", arguments: { wait: true, repoId: "r4b", repoPath: repo, mode: "full", docsMode: "on" } }));
     const before = payload(await c.client.callTool({
       name: "refactor_replace_preview", arguments: { repoId: "r4b", find: "greetUser", replaceExpression: "helloUser", mode: "text" }
     }));

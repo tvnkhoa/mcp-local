@@ -175,7 +175,7 @@ writeFileSync(join(repoA, "packages/portal/src/BadgeOnly.vue"), `<script setup l
 
 await withServer({}, "vue", async (client) => {
   for (const [id, path] of [[idA, repoA], [idB, repoB]]) {
-    const indexed = js(await client.callTool({ name: "index_repository", arguments: { repoId: id, repoPath: path, mode: "full" } }));
+    const indexed = js(await client.callTool({ name: "index_repository", arguments: { wait: true, repoId: id, repoPath: path, mode: "full" } }));
     assert(indexed && !indexed.error, `index_repository ${id}`, JSON.stringify(indexed)?.slice(0, 300));
   }
 
@@ -218,7 +218,7 @@ await withServer({}, "vue", async (client) => {
 
 // Release D acceptance note (1): freshness is scoped, "exact" and "previous index" never meet.
 await withServer({ CODEBASE_INDEX_QUERY_REFRESH_BUDGET_MS: "1" }, "fresh", async (client) => {
-  await client.callTool({ name: "index_repository", arguments: { repoId: idA, repoPath: repoA, mode: "full" } });
+  await client.callTool({ name: "index_repository", arguments: { wait: true, repoId: idA, repoPath: repoA, mode: "full" } });
   writeFileSync(join(repoA, "packages/portal/src/format.ts"), `export function label(text: string): string {\n  return text.trim().toUpperCase();\n}\n`, "utf8");
   const res = await ask(client, idA);
   assert(res?.freshness && res.freshness.state !== "fresh" && res.freshness.state !== "refreshed", "the index is behind the tree (precondition)", JSON.stringify(res?.freshness));

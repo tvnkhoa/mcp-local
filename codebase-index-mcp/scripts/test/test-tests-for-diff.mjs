@@ -147,7 +147,7 @@ const testOf = (r, f) => (r?.tests ?? []).find((t) => t.testFile === f);
 const reset = () => { git(tmpDir, "checkout", "--", "."); git(tmpDir, "clean", "-fdq", "-e", ".index"); };
 
 try {
-  await client.callTool({ name: "index_repository", arguments: { repoId, repoPath: tmpDir, mode: "full" } });
+  await client.callTool({ name: "index_repository", arguments: { wait: true, repoId, repoPath: tmpDir, mode: "full" } });
 
   // ── clean tree ──
   const clean = await call({});

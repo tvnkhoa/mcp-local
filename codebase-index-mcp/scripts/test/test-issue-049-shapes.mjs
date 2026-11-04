@@ -85,7 +85,7 @@ async function main() {
     client.callTool({ name, arguments: args }, undefined, { timeout });
 
   console.log("\n[setup] indexing this repo (docs lane on)...");
-  const indexed = readJson(await call("index_repository", { repoId, repoPath, mode: "full", docsMode: "on" }));
+  const indexed = readJson(await call("index_repository", { wait: true, repoId, repoPath, mode: "full", docsMode: "on" }));
   if (!indexed?.runId) throw new Error("indexing failed — no runId");
   console.log(`  ${indexed.filesIndexed} files, ${indexed.symbolsUpserted} symbols`);
 

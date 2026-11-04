@@ -102,7 +102,7 @@ const dbVeryLarge = join(tmpDir, "index-very-large.db");
 
 try {
   // ── A: full under `large` ───────────────────────────────────────────────────────────────
-  const a = await withServer(dbMain, "large", (call) => call("index_repository", { repoPath: repoDir, mode: "full" }));
+  const a = await withServer(dbMain, "large", (call) => call("index_repository", { wait: true, repoPath: repoDir, mode: "full" }));
   assert(a && !a.error && a.status === "ok", "A: full run under large", JSON.stringify(a)?.slice(0, 300));
   assert(a?.performanceProfile === "large", "A: the run recorded profile large", String(a?.performanceProfile));
   const lA = literalRows(dbMain);
@@ -124,10 +124,10 @@ try {
     };
     for (const f of BIG) writeFileSync(join(repoDir, f), edited[f], "utf8");
     git("commit", "-q", "-am", "edit");
-    const edit = await call("index_repository", { repoPath: repoDir, mode: "incremental" });
+    const edit = await call("index_repository", { wait: true, repoPath: repoDir, mode: "incremental" });
     for (const f of BIG) writeFileSync(join(repoDir, f), files[f], "utf8");
     git("commit", "-q", "-am", "revert");
-    const revert = await call("index_repository", { repoPath: repoDir, mode: "incremental" });
+    const revert = await call("index_repository", { wait: true, repoPath: repoDir, mode: "incremental" });
     return { edit, revert };
   });
   assert(b.edit && !b.edit.error && (b.edit.filesIndexed ?? 0) >= BIG.length, "B: incremental over the edit re-extracts the four files", JSON.stringify(b.edit)?.slice(0, 300));
@@ -137,13 +137,13 @@ try {
   assert(JSON.stringify(lA) === JSON.stringify(lB), "full under large = incremental under standard (every literal row)", firstDiff(lA, lB));
 
   // ── C: full under `very-large`, fresh DB ────────────────────────────────────────────────
-  const c = await withServer(dbVeryLarge, "very-large", (call) => call("index_repository", { repoPath: repoDir, mode: "full" }));
+  const c = await withServer(dbVeryLarge, "very-large", (call) => call("index_repository", { wait: true, repoPath: repoDir, mode: "full" }));
   assert(c?.performanceProfile === "very-large", "C: the run recorded profile very-large", String(c?.performanceProfile));
   const lC = literalRows(dbVeryLarge);
   assert(JSON.stringify(lA) === JSON.stringify(lC), "full under large = full under very-large (was a 50 cap)", firstDiff(lA, lC));
 
   // ── D: full under `standard` over the first DB ──────────────────────────────────────────
-  const d = await withServer(dbMain, "standard", (call) => call("index_repository", { repoPath: repoDir, mode: "full" }));
+  const d = await withServer(dbMain, "standard", (call) => call("index_repository", { wait: true, repoPath: repoDir, mode: "full" }));
   assert(d && !d.error && d.performanceProfile === "standard", "D: full run under standard", JSON.stringify(d)?.slice(0, 200));
   const lD = literalRows(dbMain);
   assert(JSON.stringify(lA) === JSON.stringify(lD), "full under large = full under standard", firstDiff(lA, lD));

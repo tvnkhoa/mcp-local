@@ -48,7 +48,7 @@ await client.connect(transport);
 attachServerStderr(transport, "test-field-access-rhs");
 
 try {
-  await client.callTool({ name: "index_repository", arguments: { repoId, repoPath: tmpDir, mode: "full" } });
+  await client.callTool({ name: "index_repository", arguments: { wait: true, repoId, repoPath: tmpDir, mode: "full" } });
 
   const res = js(await client.callTool({
     name: "find_field_accesses",

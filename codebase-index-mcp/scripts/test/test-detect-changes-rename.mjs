@@ -68,7 +68,7 @@ const base = git(tmpDir, "rev-parse", "HEAD").trim();
 async function reset(client) {
   git(tmpDir, "reset", "-q", "--hard", base);
   git(tmpDir, "clean", "-qfd", "-e", ".index");
-  await client.callTool({ name: "index_repository", arguments: { repoId, repoPath: tmpDir, mode: "full", docsMode: "off" } }, undefined, { timeout: 120_000 });
+  await client.callTool({ name: "index_repository", arguments: { wait: true, repoId, repoPath: tmpDir, mode: "full", docsMode: "off" } }, undefined, { timeout: 120_000 });
 }
 const ALL = { policy: "custom", minRiskScore: 0, riskLevels: ["high", "medium", "low"], maxResults: 50, profile: "standard" };
 async function detect(client, extra = {}) {

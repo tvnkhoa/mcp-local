@@ -10,7 +10,8 @@
  * Asserts:
  *   (a) 0 responses mention "locked" / SQLITE_BUSY, and both index runs end ok;
  *   (b) every read answers within the query budget + 2 s, and the server thread's longest block is bounded
- *       (LOCK_MAX_BLOCK_MS, default 5000: the run itself is still on that thread until IX-2 moves it);
+ *       (LOCK_MAX_BLOCK_MS, default 1000: the runs execute in the worker since IX-2; reads on the repo being
+ *       rewritten keep ~470 ms of their own work);
  *   (c) after the runs, the dirty edit on `small` is in the index (the queued refresh ran, behind `big`'s run).
  */
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -25,9 +26,10 @@ import { attachServerStderr } from "./_serverStderr.mjs";
 const GENERATED_FILES = Number(process.env.LOCK_FIXTURE_FILES ?? 1200);
 const READS = Number(process.env.LOCK_READS ?? 24);
 const BUDGET_MS = 300;
-// IX-1: index_repository still runs on the server thread (measured max 2834 ms on this fixture); IX-2 moves it to the
-// worker and tightens this. The bound here is that no read waits out busy_timeout (30 s) behind a writer.
-const MAX_BLOCK_MS = Number(process.env.LOCK_MAX_BLOCK_MS ?? 5000);
+// IX-1 measured max 2834 ms with index_repository on the server thread. Since IX-2 (MCP-ISSUE-112) every run is the
+// worker's and the server thread only reads; what is left is the reads' own synchronous work — a search on `big` while
+// its full run rewrites it measured ~470 ms. test:index-jobs bounds the runs alone at 250 ms.
+const MAX_BLOCK_MS = Number(process.env.LOCK_MAX_BLOCK_MS ?? 1000);
 const LOCKED = /database is locked|SQLITE_BUSY/i;
 
 let passed = 0, failed = 0;
@@ -140,7 +142,7 @@ async function call(c, name, args) {
 try {
   // Baseline: small and a first version of big, so big's second full run rewrites an existing repo.
   for (const r of [repos.small, repos.big]) {
-    const res = await call(A.client, "index_repository", { repoId: r.id, repoPath: r.dir, mode: "full" });
+    const res = await call(A.client, "index_repository", { wait: true, repoId: r.id, repoPath: r.dir, mode: "full" });
     assert(!res.isError && !LOCKED.test(res.text), `baseline index_repository ${r.id}`, res.text.slice(0, 200));
   }
   await call(A.client, "search_symbols", { repoId: repos.small.id, query: "smallAlpha", strategy: "name", limit: 5 });
@@ -150,8 +152,8 @@ try {
 
   const t0 = Date.now();
   const lagFloor = lags.length;
-  const bigRun = call(A.client, "index_repository", { repoId: repos.big.id, repoPath: repos.big.dir, mode: "full" });
-  const peerRun = call(B.client, "index_repository", { repoId: repos.peer.id, repoPath: repos.peer.dir, mode: "full" });
+  const bigRun = call(A.client, "index_repository", { wait: true, repoId: repos.big.id, repoPath: repos.big.dir, mode: "full" });
+  const peerRun = call(B.client, "index_repository", { wait: true, repoId: repos.peer.id, repoPath: repos.peer.dir, mode: "full" });
   await sleep(300);
 
   const reads = [];

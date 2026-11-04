@@ -62,6 +62,8 @@ import type { IndexMode, IndexProgressSnapshot, IndexRunStatus, IndexRunSummary 
 export type PerformanceProfile = "standard" | "large" | "very-large";
 
 export type RunIndexInput = {
+  /** MCP-ISSUE-112: the run's id, when the caller already handed it out (an index job); otherwise a new UUID. */
+  runId?: string;
   repoId: string;
   repoPath: string;
   mode: IndexMode;
@@ -170,7 +172,7 @@ export const SCOPE_MAX_DEPENDENT_FILES = 600;
 
 export async function runIndexPipeline(store: GraphStore, input: RunIndexInput): Promise<IndexRunSummary> {
   const identity: RunIdentity = {
-    runId: randomUUID(),
+    runId: input.runId ?? randomUUID(),
     repoId: input.repoId,
     commitSha: input.commitSha ?? resolveHeadCommitSha(input.repoPath),
     branch: resolveCurrentBranch(input.repoPath),

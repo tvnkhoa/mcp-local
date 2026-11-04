@@ -184,7 +184,7 @@ function firstDiff(x, y) {
 }
 
 try {
-  const indexed = await call("index_repository", { repoPath: repoDir, mode: "full" });
+  const indexed = await call("index_repository", { wait: true, repoPath: repoDir, mode: "full" });
   dump("index", indexed);
   assert(indexed && !indexed.error, "index_repository (full)", JSON.stringify(indexed)?.slice(0, 300));
   assert((indexed?.parseFailures ?? 0) === 0, "no parse failures", JSON.stringify(indexed)?.slice(0, 300));
@@ -269,7 +269,7 @@ try {
   assert(tsEdges.some((r) => r.fromFile === "packages/app/tsconfig.json" && r.toId === "import:@vue/tsconfig/tsconfig.dom.json" && r.reason === "npm_package"), "a package extends is labelled npm_package");
 
   // ── no-op incremental on a clean tree ───────────────────────────────────────────────────
-  const noop = await call("index_repository", { repoPath: repoDir, mode: "incremental" });
+  const noop = await call("index_repository", { wait: true, repoPath: repoDir, mode: "incremental" });
   dump("noop", noop);
   assert(noop && !noop.error, "index_repository (incremental, clean tree)");
   const lastRun = await rows("select mode, skip_reason as skipReason from index_runs where repo_id = :repoId order by finished_at desc", 1);
@@ -287,19 +287,19 @@ try {
     writeFileSync(join(repoDir, "scripts/deploy.sh"), `#!/bin/sh\necho "deploying gd-021-probe"\n`, "utf8");
   };
   edit();
-  const inc = await call("index_repository", { repoPath: repoDir, mode: "incremental" });
+  const inc = await call("index_repository", { wait: true, repoPath: repoDir, mode: "incremental" });
   assert(inc && !inc.error, "index_repository (incremental, edited)", JSON.stringify(inc)?.slice(0, 300));
   await invariants("incremental B");
   const b = await snapshot();
   const wsAfter = await rows(`select e.reason from edges e join symbols t on t.repo_id = e.repo_id and t.symbol_id = e.to_id where e.repo_id = :repoId and e.type = 'DEPENDS_ON' and t.file_path = 'packages/core/package.json'`);
   assert(wsAfter.length === 1 && wsAfter[0].reason === "workspace package @fx/core (^1.1.0)", "a plain range on a local package is still a workspace edge, recomputed", JSON.stringify(wsAfter));
 
-  const dirty = await call("index_repository", { repoPath: repoDir, mode: "dirty" });
+  const dirty = await call("index_repository", { wait: true, repoPath: repoDir, mode: "dirty" });
   assert(dirty && !dirty.error, "index_repository (dirty, edited)", JSON.stringify(dirty)?.slice(0, 300));
   await invariants("dirty B′");
   const bPrime = await snapshot();
 
-  const full = await call("index_repository", { repoPath: repoDir, mode: "full" });
+  const full = await call("index_repository", { wait: true, repoPath: repoDir, mode: "full" });
   assert(full && !full.error, "index_repository (full C, edited)");
   await invariants("full C");
   const c = await snapshot();
@@ -322,7 +322,7 @@ try {
   }
   const seeded = direct("select count(*) as n from files where repo_id = :repoId and instr(path, char(92)) > 0")[0]?.n;
   assert(seeded === 1, "seeded one backslash file row (as an older build on Windows wrote it)", String(seeded));
-  const migrate = await call("index_repository", { repoPath: repoDir, mode: "incremental" });
+  const migrate = await call("index_repository", { wait: true, repoPath: repoDir, mode: "incremental" });
   dump("migrate", migrate);
   assert(migrate && !migrate.error, "index_repository (incremental over a backslash row)");
   await invariants("after backslash migration");
@@ -331,7 +331,7 @@ try {
 
   // ── an untracked secret file reaches the filter itself → secret_file ────────────────────
   writeFileSync(join(repoDir, "deploy.key"), "-----BEGIN PRIVATE KEY-----\nabc\n", "utf8");
-  const full2 = await call("index_repository", { repoPath: repoDir, mode: "full" });
+  const full2 = await call("index_repository", { wait: true, repoPath: repoDir, mode: "full" });
   assert(full2 && !full2.error, "index_repository (full, with an untracked .key)");
   const health2 = await call("health_check", {});
   const skips2 = health2?.latestRun?.skippedByReason ?? [];

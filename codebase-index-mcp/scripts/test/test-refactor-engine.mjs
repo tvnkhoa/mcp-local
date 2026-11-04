@@ -246,7 +246,7 @@ public sealed class FixtureNoRewrite
   console.log("\n  [3.1] Indexing temp repo...");
   const indexResult = await client.callTool({
     name: "index_repository",
-    arguments: { repoId: testRepoId, repoPath, mode: "full" }
+    arguments: { wait: true, repoId: testRepoId, repoPath, mode: "full" }
   });
   const indexJson = readJson(indexResult);
   assert(indexJson?.runId != null || indexJson?.indexedFiles >= 0 || indexJson?.status != null,

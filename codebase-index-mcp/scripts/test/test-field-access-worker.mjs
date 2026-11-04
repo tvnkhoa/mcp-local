@@ -98,7 +98,7 @@ async function withServer(tmpDir, repoId, extraEnv, label, fn) {
   await client.connect(transport);
   attachServerStderr(transport, `test-field-access-worker:${label}`);
   try {
-    const indexed = js(await client.callTool({ name: "index_repository", arguments: { repoId, repoPath: tmpDir, mode: "full" } }, undefined, { timeout: 600_000 }));
+    const indexed = js(await client.callTool({ name: "index_repository", arguments: { wait: true, repoId, repoPath: tmpDir, mode: "full" } }, undefined, { timeout: 600_000 }));
     assert(indexed && !indexed.error, `[${label}] index_repository`, JSON.stringify(indexed)?.slice(0, 300));
     await fn(client);
   } finally {

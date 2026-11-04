@@ -176,7 +176,7 @@ import {
   type CitationRow,
   type CommentHit
 } from "./annotationsStore.js";
-import { getIndexMeta as getIndexMetaImpl, setIndexMeta as setIndexMetaImpl, recordRun as recordRunImpl, getLatestRun as getLatestRunImpl, markRunTrigger as markRunTriggerImpl, getLatestWorkRunMode as getLatestWorkRunModeImpl, markRunTreeDirty as markRunTreeDirtyImpl, getLatestWorkRunTreeDirty as getLatestWorkRunTreeDirtyImpl, markRunTreeKey as markRunTreeKeyImpl, markRunExcludeRules as markRunExcludeRulesImpl, getLatestRunTreeKey as getLatestRunTreeKeyImpl, getLatestFullRunVersion as getLatestFullRunVersionImpl, listRecentWorkRuns as listRecentWorkRunsImpl, type WorkRunTrace } from "./runStore.js";
+import { getIndexMeta as getIndexMetaImpl, setIndexMeta as setIndexMetaImpl, recordRun as recordRunImpl, getLatestRun as getLatestRunImpl, getRunById as getRunByIdImpl, markRunTrigger as markRunTriggerImpl, getLatestWorkRunMode as getLatestWorkRunModeImpl, markRunTreeDirty as markRunTreeDirtyImpl, getLatestWorkRunTreeDirty as getLatestWorkRunTreeDirtyImpl, markRunTreeKey as markRunTreeKeyImpl, markRunExcludeRules as markRunExcludeRulesImpl, getLatestRunTreeKey as getLatestRunTreeKeyImpl, getLatestFullRunVersion as getLatestFullRunVersionImpl, listRecentWorkRuns as listRecentWorkRunsImpl, type WorkRunTrace } from "./runStore.js";
 import {
   type WriteContext,
   prepareWriteStatements,
@@ -520,6 +520,10 @@ export class GraphStore {
 
   getLatestRun(repoId: string): IndexRunSummary | null {
     return getLatestRunImpl(this.db, repoId);
+  }
+
+  getRunById(runId: string): IndexRunSummary | null {
+    return getRunByIdImpl(this.db, runId);
   }
 
   /** @see store/graphQueries.ts */

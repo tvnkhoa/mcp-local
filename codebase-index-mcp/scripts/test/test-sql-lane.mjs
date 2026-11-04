@@ -190,7 +190,7 @@ const sqlGraph = async () => JSON.stringify(await q(
 ));
 
 try {
-  const indexed = await call("index_repository", { repoPath: tmpDir, mode: "full" });
+  const indexed = await call("index_repository", { wait: true, repoPath: tmpDir, mode: "full" });
   dump("index", indexed);
   assert(indexed && !indexed.error, "index_repository (full)", JSON.stringify(indexed)?.slice(0, 300));
   assert((indexed?.parseFailures ?? 0) === 0, "no parse failures", JSON.stringify(indexed)?.slice(0, 300));
@@ -351,14 +351,14 @@ try {
   // I3: and the baseline, so the current definition's id moves under unchanged referrers.
   const pathBase = join(tmpDir, "db/migrations/000-baseline.sql");
   writeFileSync(pathBase, "-- shifted\n" + readFileSync(pathBase, "utf8"), "utf8");
-  const inc = await call("index_repository", { repoPath: tmpDir, mode: "incremental" });
+  const inc = await call("index_repository", { wait: true, repoPath: tmpDir, mode: "incremental" });
   assert(inc && !inc.error, "index_repository (incremental) after the edit", JSON.stringify(inc)?.slice(0, 300));
   ints = await integrity();
   assert(ints.i1 === 0 && ints.i2 === 0, "I1 = I2 = 0 after the incremental run", JSON.stringify(ints));
   const incGraph = await sqlGraph();
   const moved = await q("select count(*) as n from edges where repo_id = :repoId and type = 'SQL_QUERY' and reason like '%via INSERT_AUDIT_LOG (src/audit-sql.ts:3)%'");
   assert(moved[0]?.n >= 1, "after the incremental run the unchanged caller's edge names the const's NEW line", JSON.stringify(moved));
-  const full = await call("index_repository", { repoPath: tmpDir, mode: "full" });
+  const full = await call("index_repository", { wait: true, repoPath: tmpDir, mode: "full" });
   assert(full && !full.error, "index_repository (full) on the same tree");
   ints = await integrity();
   assert(ints.i1 === 0 && ints.i2 === 0, "I1 = I2 = 0 after the reference full run", JSON.stringify(ints));

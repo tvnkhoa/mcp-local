@@ -96,7 +96,7 @@ await client.connect(transport);
 attachServerStderr(transport, "test-owner-prover");
 
 try {
-  await client.callTool({ name: "index_repository", arguments: { repoId, repoPath: tmpDir, mode: "full" } });
+  await client.callTool({ name: "index_repository", arguments: { wait: true, repoId, repoPath: tmpDir, mode: "full" } });
 
   // ── 1. The regression: guarded must reach every site the unguarded preview reaches ──────────
   const unguarded = js(await client.callTool({

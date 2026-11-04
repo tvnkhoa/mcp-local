@@ -69,7 +69,7 @@ async function main() {
   console.log("\n[setup] Indexing src/...");
   const indexResult = await client.callTool({
     name: "index_repository",
-    arguments: { repoId, repoPath, mode: "full" }
+    arguments: { wait: true, repoId, repoPath, mode: "full" }
   }, undefined, { timeout: 60_000 });
   const indexJson = readJson(indexResult).json;
   if (!indexJson?.runId) throw new Error("Indexing failed — no runId returned");

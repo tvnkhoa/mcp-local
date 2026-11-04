@@ -66,16 +66,21 @@ async function main() {
 
   // --- index ---
   console.log("\n[index_repository] starting full index — this may take a minute...\n");
-  const indexResult = readJson(
+  let indexResult = readJson(
     await client.callTool(
       {
         name: "index_repository",
-        arguments: { repoId, repoPath, mode: "full", maxFiles: 2000, batchSize: 100 }
+        arguments: { wait: true, repoId, repoPath, mode: "full", maxFiles: 2000, batchSize: 100 }
       },
       undefined,
       { timeout: 300_000 }
     )
   );
+  // MCP-ISSUE-112: wait:true answers after at most 100 s; a longer run is polled to its end.
+  while (indexResult.json && (indexResult.json.state === "queued" || indexResult.json.state === "running")) {
+    await new Promise((r) => setTimeout(r, 2000));
+    indexResult = readJson(await client.callTool({ name: "index_status", arguments: { runId: indexResult.json.runId } }));
+  }
 
   console.log("\n[index_repository] result:");
   if (indexResult.json) {

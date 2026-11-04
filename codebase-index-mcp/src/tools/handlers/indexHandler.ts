@@ -17,6 +17,7 @@ import { buildIndexMeta } from "./impactHandler.js";
 import type { IndexMode } from "../../types/index.js";
 import { activateWatchForRepo, clearWatchInactivityTimer } from "../../services/watch/watchLifecycle.js";
 import type { HandlerContext } from "./handlerContext.js";
+import { MAX_WAIT_MS, type IndexJob } from "../../services/indexing/indexJobs.js";
 
 /**
  * Changed files that cannot have a linked test, by nature (MCP-ISSUE-058(e)).
@@ -320,6 +321,44 @@ export function handleRemoveRepository(args: { repoId: string; force: boolean },
 
 // ── index_repository ──────────────────────────────────────────────────────────
 
+/**
+ * MCP-ISSUE-112: what index_repository and index_status answer about a job. A job that ended ok answers its run
+ * summary (the shape index_repository always returned) plus `runId` and `state`; any other answers the job's state
+ * and what to do next.
+ */
+export function jobView(job: IndexJob, pending: IndexJob[] = []): Record<string, unknown> {
+  if (job.state === "ok" && job.result) return { ...job.result, runId: job.runId, state: job.state, source: job.source };
+  const ahead =
+    job.state === "queued"
+      ? pending.filter((j) => j.runId !== job.runId && j.queuedAt <= job.queuedAt).map((j) => ({ runId: j.runId, repoId: j.repoId, state: j.state }))
+      : [];
+  return {
+    runId: job.runId,
+    state: job.state,
+    repoId: job.repoId,
+    mode: job.mode,
+    source: job.source,
+    queuedAt: job.queuedAt,
+    ...(job.startedAt && { startedAt: job.startedAt }),
+    ...(job.finishedAt && { finishedAt: job.finishedAt }),
+    ...(job.waitingFor && { waitingFor: job.waitingFor }),
+    ...(ahead.length > 0 && { ahead }),
+    ...(job.phase && { phase: job.phase }),
+    ...(job.progress !== undefined && { progress: job.progress }),
+    ...(job.total !== undefined && { total: job.total }),
+    ...(job.error && { error: job.error }),
+    ...(job.result && { result: job.result }),
+    ...(job.state === "queued" || job.state === "running"
+      ? { next: `poll index_status({ runId: "${job.runId}" }) until state is ok or failed` }
+      : {})
+  };
+}
+
+function requireJobs(ctx: HandlerContext): NonNullable<HandlerContext["indexJobs"]> {
+  if (!ctx.indexJobs) throw new McpError(ErrorCode.InternalError, "index jobs are not available in this server context");
+  return ctx.indexJobs;
+}
+
 export async function handleIndexRepository(
   args: {
     repoId: string;
@@ -328,22 +367,60 @@ export async function handleIndexRepository(
     docsMode: "auto" | "on" | "off";
     maxFiles: number;
     batchSize: number;
+    wait?: boolean;
   },
   ctx: HandlerContext
 ): Promise<CallToolResult> {
   const { store, constants } = ctx;
+  const jobs = requireJobs(ctx);
   assertPathAllowed(args.repoPath, constants.allowedRoots);
   const docsEnabled = resolveDocsMode(args.docsMode, constants.DOCS_INDEXING_ENABLED);
   store.ensureRepository(args.repoId, args.repoPath);
-  const summary = await ctx.runIndexAndResolve(
-    args.repoId,
-    args.repoPath,
-    args.mode,
+  const job = jobs.enqueue({
+    repoId: args.repoId,
+    repoPath: args.repoPath,
+    mode: args.mode,
     docsEnabled,
-    clamp(args.maxFiles, 1, constants.MAX_FILES_PER_RUN),
-    clamp(args.batchSize, 1, 2_000)
+    maxFiles: clamp(args.maxFiles, 1, constants.MAX_FILES_PER_RUN),
+    batchSize: clamp(args.batchSize, 1, 2_000),
+    source: "index_repository"
+  });
+  if (args.wait !== true) return ctx.asText(jobView(job, jobs.pending()));
+  // A waiting caller with a progress token gets the run's notifications/progress, as before jobs.
+  const notify = ctx.progressNotifier;
+  let tick = 0;
+  const unsubscribe = notify
+    ? jobs.subscribe(job.runId, (p) => {
+        tick = Math.max(tick + 1, p.progress ?? 0);
+        notify(tick, p.total, `${args.repoId}: ${p.phase}`);
+      })
+    : undefined;
+  try {
+    return ctx.asText(jobView((await jobs.wait(job.runId, MAX_WAIT_MS)) ?? job, jobs.pending()));
+  } finally {
+    unsubscribe?.();
+  }
+}
+
+// ── index_status ──────────────────────────────────────────────────────────────
+
+/**
+ * MCP-ISSUE-112: a job this process holds, else the run as `index_runs` recorded it (a job from before a server
+ * restart, or one trimmed from memory). A job whose server died before the run was recorded is unknown.
+ */
+export function handleIndexStatus(args: { runId: string }, ctx: HandlerContext): CallToolResult {
+  const jobs = requireJobs(ctx);
+  const job = jobs.get(args.runId);
+  if (job) return ctx.asText(jobView(job, jobs.pending()));
+  const run = ctx.store.getRunById(args.runId);
+  if (run) {
+    const state = run.status === "failed" || run.status === "cancelled" ? "failed" : "ok";
+    return ctx.asText({ ...run, state, source: "index_runs" });
+  }
+  throw new McpError(
+    ErrorCode.InvalidParams,
+    `index_status: unknown runId '${args.runId}'. It is neither a job of this server process nor a recorded run; a job queued before a server restart that had not finished is lost: call index_repository again.`
   );
-  return ctx.asText(summary);
 }
 
 // ── watch_repo ────────────────────────────────────────────────────────────────

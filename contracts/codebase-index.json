@@ -1,6 +1,6 @@
 {
   "server": "codebase-index",
-  "toolCount": 44,
+  "toolCount": 45,
   "tools": [
     {
       "annotations": {
@@ -1321,7 +1321,7 @@
         "openWorldHint": false,
         "readOnlyHint": false
       },
-      "description": "Index repository files into internal graph storage (incremental by default). mode='dirty' re-indexes ONLY git working-tree-changed files (unstaged+staged+untracked) — a fast refresh of just-edited files (extraction is scoped to the changed set; edge resolution still runs repo-wide). Pruning is suppressed (subset scan). docsMode controls docs lane isolation: auto uses server default, on forces docs indexing, off disables docs indexing for this run.",
+      "description": "Index repository files into internal graph storage (incremental by default). Runs as a server-side job: by default (wait=false) it answers AT ONCE with { runId, state: queued|running }; poll index_status(runId) until state is ok or failed. wait=true blocks until the run ends or 100 s pass, then answers the run summary (state ok) or the job as it stands. Jobs run one at a time per server, never start while free RAM is below CODEBASE_INDEX_MIN_FREE_RAM_MB (the job stays queued; waitingFor says why), and a client that disconnects does not cancel its job. mode='dirty' re-indexes ONLY git working-tree-changed files (unstaged+staged+untracked) — a fast refresh of just-edited files (extraction is scoped to the changed set; edge resolution still runs repo-wide). Pruning is suppressed (subset scan). docsMode controls docs lane isolation: auto uses server default, on forces docs indexing, off disables docs indexing for this run.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -1356,6 +1356,10 @@
           },
           "repoPath": {
             "type": "string"
+          },
+          "wait": {
+            "description": "Block until the run ends or 100 s pass. Default false: answer at once with the runId.",
+            "type": "boolean"
           }
         },
         "required": [
@@ -1365,6 +1369,29 @@
         "type": "object"
       },
       "name": "index_repository"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "description": "State of an index_repository job by runId: queued (waitingFor says why: another run ahead, or free RAM below CODEBASE_INDEX_MIN_FREE_RAM_MB) | running (phase, progress/total) | ok (the run summary) | failed (error). A run this server process no longer holds as a job is answered from the recorded runs (source: index_runs). An unknown runId is an error.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "runId": {
+            "description": "The runId index_repository answered.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "runId"
+        ],
+        "type": "object"
+      },
+      "name": "index_status"
     },
     {
       "annotations": {

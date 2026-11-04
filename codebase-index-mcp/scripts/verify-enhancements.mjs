@@ -55,7 +55,7 @@ async function main() {
   }
   console.log("TOOLS_REGISTERED_OK", { newTools: ["orient", "get_feature_bundle", "change_impact"] });
 
-  await client.callTool({ name: "index_repository", arguments: { repoId, repoPath, mode: "full", maxFiles: 500 } }, undefined, { timeout: 180_000 });
+  await client.callTool({ name: "index_repository", arguments: { wait: true, repoId, repoPath, mode: "full", maxFiles: 500 } }, undefined, { timeout: 180_000 });
 
   // 1. orient — deterministic router.
   const orient = text(await client.callTool({ name: "orient", arguments: { repoId, intent: "what breaks if I change GraphStore", seed: "GraphStore" } }));
@@ -90,7 +90,7 @@ async function main() {
   // This is the "Connection closed" item still open in
   // `docs/mcp-codebase-index-issue-registry.md` — mechanism not established. Do not let a single
   // green run be read as a diagnosis; that is how the wrong cause got written down the first time.
-  const dirty = text(await client.callTool({ name: "index_repository", arguments: { repoId, repoPath, mode: "dirty" } }, undefined, { timeout: 180_000 }));
+  const dirty = text(await client.callTool({ name: "index_repository", arguments: { wait: true, repoId, repoPath, mode: "dirty" } }, undefined, { timeout: 180_000 }));
   console.log("DIRTY_MODE_OK", { mode: dirty.mode, filesIndexed: dirty.filesIndexed, skipReason: dirty.skipReason ?? null });
 
   // 6. find_implementations coverage block present.

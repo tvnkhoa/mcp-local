@@ -105,7 +105,7 @@ async function main() {
 
   const indexResult = await client.callTool({
     name: "index_repository",
-    arguments: {
+    arguments: { wait: true,
       repoId,
       repoPath,
       mode: "incremental",

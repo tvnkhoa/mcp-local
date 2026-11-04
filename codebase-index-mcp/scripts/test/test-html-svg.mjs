@@ -124,7 +124,7 @@ const snapshot = () => JSON.stringify(direct(`select e.type, s1.file_path as f, 
   where e.repo_id = :repoId order by 1, 2, 3, 4, 5, 6`));
 
 try {
-  const indexed = await call("index_repository", { repoPath: repoDir, mode: "full" });
+  const indexed = await call("index_repository", { wait: true, repoPath: repoDir, mode: "full" });
   dump("index", indexed);
   assert(indexed && !indexed.error, "index_repository (full)", JSON.stringify(indexed)?.slice(0, 300));
   assert((indexed?.parseFailures ?? 0) === 0, "no parse failures");
@@ -176,11 +176,11 @@ try {
   const mainPath = join(repoDir, "src/main.ts");
   writeFileSync(mainPath, "\n\n\n" + readFileSync(mainPath, "utf8"), "utf8");
   writeFileSync(join(repoDir, "src/assets/icon.svg"), svg(`<path d="M2 2h20v20H2z"/>`), "utf8");
-  const inc = await call("index_repository", { repoPath: repoDir, mode: "incremental" });
+  const inc = await call("index_repository", { wait: true, repoPath: repoDir, mode: "incremental" });
   assert(inc && !inc.error, "index_repository (incremental, edited)");
   invariants("incremental");
   const b = snapshot();
-  const full = await call("index_repository", { repoPath: repoDir, mode: "full" });
+  const full = await call("index_repository", { wait: true, repoPath: repoDir, mode: "full" });
   assert(full && !full.error, "index_repository (full, edited)");
   invariants("full again");
   assert(b === snapshot(), "incremental and full runs produce the same edge set");

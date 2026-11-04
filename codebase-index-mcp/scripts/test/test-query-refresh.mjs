@@ -58,7 +58,7 @@ const names = (r) => (r?.results ?? r?.symbols ?? r?.matches ?? []).map((s) => s
 
 let client = await connect(tmpDir, 30_000, "test-query-refresh");
 try {
-  await client.callTool({ name: "index_repository", arguments: { repoId, repoPath: tmpDir, mode: "full" } });
+  await client.callTool({ name: "index_repository", arguments: { wait: true, repoId, repoPath: tmpDir, mode: "full" } });
 
   // 1. A commit, then a plain read query.
   writeFileSync(join(tmpDir, "b.ts"), "export function betaTwo(): number {\n  return 2;\n}\n");

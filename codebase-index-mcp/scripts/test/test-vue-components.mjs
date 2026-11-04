@@ -173,7 +173,7 @@ const call = async (name, args) => js(await client.callTool({ name, arguments: {
 const sql = async (query) => (await call("query_graph", { sql: query, limit: 500, profile: "standard" }))?.rows ?? [];
 
 try {
-  const run = await call("index_repository", { repoPath: repo, mode: "full" });
+  const run = await call("index_repository", { wait: true, repoPath: repo, mode: "full" });
   assert((run?.parseFailures ?? run?.summary?.parseFailures ?? 0) === 0, "full index: no parse failures", short(run));
 
   // ── Stage 1: language, component symbol, interface, real lines ───────────────────────────
@@ -305,7 +305,7 @@ try {
 
   // Incremental parity: a whole-file rewrite that shifts every line of AppCard.vue keeps App's edges resolved.
   writeFileSync(join(repo, "src/components/AppCard.vue"), "\n\n" + FIXTURE["src/components/AppCard.vue"]);
-  await call("index_repository", { repoPath: repo, mode: "incremental" });
+  await call("index_repository", { wait: true, repoPath: repo, mode: "incremental" });
   const after = await sql(`select t.name as member, t.line from edges e join symbols t on t.symbol_id = e.to_id and t.repo_id = e.repo_id
     join symbols f on f.symbol_id = e.from_id and f.repo_id = e.repo_id
     where e.repo_id = :repoId and e.type = 'PROPERTY_WRITE' and f.name = 'App' and t.name = 'title'`);

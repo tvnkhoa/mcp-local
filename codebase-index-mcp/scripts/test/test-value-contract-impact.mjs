@@ -54,8 +54,8 @@ await client.connect(transport);
 attachServerStderr(transport, "test-value-contract-impact");
 
 try {
-  await client.callTool({ name: "index_repository", arguments: { repoId: "service-a", repoPath: repoAPath, mode: "full" } });
-  await client.callTool({ name: "index_repository", arguments: { repoId: "service-b", repoPath: repoBPath, mode: "full" } });
+  await client.callTool({ name: "index_repository", arguments: { wait: true, repoId: "service-a", repoPath: repoAPath, mode: "full" } });
+  await client.callTool({ name: "index_repository", arguments: { wait: true, repoId: "service-b", repoPath: repoBPath, mode: "full" } });
 
   const res = js(await client.callTool({
     name: "get_value_contract_impact",

@@ -44,7 +44,7 @@ async function main() {
   }
 
   const indexResult = await client.callTool(
-    { name: "index_repository", arguments: { repoId, repoPath, mode: "incremental", maxFiles: 1000 } },
+    { name: "index_repository", arguments: { wait: true, repoId, repoPath, mode: "incremental", maxFiles: 1000 } },
     undefined,
     { timeout: 180_000 }
   );

@@ -145,6 +145,15 @@ function pruneRuns(db: Database.Database, repoId: string): void {
 }
 
 export function getLatestRun(db: Database.Database, repoId: string): IndexRunSummary | null {
+  return readRun(db, "repo_id = ?", repoId);
+}
+
+/** MCP-ISSUE-112: one run by its id (`index_status` of a run this process no longer holds as a job). */
+export function getRunById(db: Database.Database, runId: string): IndexRunSummary | null {
+  return readRun(db, "run_id = ?", runId);
+}
+
+function readRun(db: Database.Database, where: "repo_id = ?" | "run_id = ?", arg: string): IndexRunSummary | null {
   const row = db
     .prepare(
       `
@@ -210,12 +219,12 @@ export function getLatestRun(db: Database.Database, repoId: string): IndexRunSum
         triggered_by as triggeredBy,
         scope
       from index_runs
-      where repo_id = ?
+      where ${where}
       order by finished_at desc, started_at desc, rowid desc
       limit 1
       `
     )
-    .get(repoId) as IndexRunSummary | undefined;
+    .get(arg) as IndexRunSummary | undefined;
 
   if (!row) return null;
 
