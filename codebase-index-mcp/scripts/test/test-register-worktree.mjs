@@ -92,7 +92,12 @@ try {
   assert(reg.body?.watch?.started === true, "(a) ... and the watcher started", JSON.stringify(reg.body?.watch));
 
   // (b)
-  const list = await call("list_repositories", {});
+  // The run registers the repo, in the worker (follow-up 3): give it a moment to start.
+  let list = await call("list_repositories", {});
+  for (let i = 0; i < 50 && !list.text.includes(wtId); i++) {
+    await sleep(200);
+    list = await call("list_repositories", {});
+  }
   assert(list.text.includes(wtId), "(b) list_repositories shows the worktree", list.text.slice(0, 300));
   const watch = await call("watch_repo", { action: "status", repoId: wtId });
   assert(watch.body?.activeWatchRepoId === wtId && JSON.stringify(watch.body?.watchers ?? []).includes(wtId), "(b) watch_repo status shows its watcher", watch.text.slice(0, 300));
@@ -115,8 +120,10 @@ try {
   assert(notWt.isError && /not a git worktree of/.test(notWt.text), "(d) a repo that is not the parent's worktree is refused", notWt.text.slice(0, 200));
   const taken = await call("register_worktree", { parentRepoId: parentId, repoPath: wtDir, repoId: parentId });
   assert(taken.isError && /must differ from parentRepoId/.test(taken.text), "(d) the parent's own repoId is refused", taken.text.slice(0, 200));
-  const elsewhere = await call("register_worktree", { parentRepoId: parentId, repoPath: parentDir, repoId: wtId });
-  assert(elsewhere.isError, "(d) a repoId registered at another path is refused", elsewhere.text.slice(0, 200));
+  const parentPath = await call("register_worktree", { parentRepoId: parentId, repoPath: parentDir, repoId: `rw-p2-${stamp}` });
+  assert(parentPath.isError && /parent's own checkout/.test(parentPath.text), "(d) the parent's own checkout is refused", parentPath.text.slice(0, 200));
+  const twice = await call("register_worktree", { parentRepoId: parentId, repoPath: wtDir.split("\\").join("/") + "/", repoId: `rw-dup-${stamp}` });
+  assert(twice.isError && /already registered as/.test(twice.text), "(d) a path registered under another repoId is refused, in another spelling", twice.text.slice(0, 200));
   const again = await call("register_worktree", { parentRepoId: parentId, repoPath: wtDir, repoId: wtId });
   assert(!again.isError && again.body?.registered === "already" && again.body?.runId !== reg.body.runId, "(d) calling again for the same repoId and path queues another run", again.text.slice(0, 200));
   await call("watch_repo", { action: "stop", repoId: wtId });

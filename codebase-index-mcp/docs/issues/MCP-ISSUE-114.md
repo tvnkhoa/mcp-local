@@ -24,3 +24,13 @@
   (`mcp-local-wt-index-core`) was not indexed — indexing it would have reproduced the defects being fixed, and no
   one-call registration existed (this issue). Enhancement: with `register_worktree`, a member worktree is indexed
   without blocking its session.
+
+### Follow-up (2026-11-04, leader review)
+
+- `register_worktree` also refuses the parent's own checkout and a path already registered under another repoId,
+  comparing paths resolved, slash-normalised, without a trailing slash and (on Windows) case-insensitively
+  (`sameRepoPath`). Guarded: `indexHandler.jobs.test.ts`, `test:register-worktree` (d).
+- Neither `index_repository` nor `register_worktree` writes on the server thread any more: the run registers the repo
+  on the worker's connection, so `list_repositories` shows it once the run starts. A watcher batch that overflowed
+  prunes its deletions with a dirty run in the worker, not with a server-thread write. Guarded:
+  `indexHandler.jobs.test.ts` (a store that throws on any write).

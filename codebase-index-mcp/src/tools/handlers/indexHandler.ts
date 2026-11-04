@@ -7,7 +7,8 @@ import { DEFAULT_STALE_RUN_MS, freshnessStateDir, liveRunMarkers, lockFileFor, r
 import { readStatusEntriesAsync, stillDirty, summarizeWorkingTree, type StatusEntry } from "../../services/git/gitHelpers.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { McpError, ErrorCode } from "@modelcontextprotocol/sdk/types.js";
-import { findWorktreeOwner, getRepoStaleness } from "../../services/git/gitHelpers.js";
+import { findWorktreeOwner, getRepoStaleness, samePath } from "../../services/git/gitHelpers.js";
+import path from "node:path";
 import { assertPathAllowed, clamp } from "../../middleware/indexGuardrails.js";
 import { resolveResponseProfile } from "../../middleware/responseFormatter.js";
 import { resolveDetectChangesPolicy } from "../../services/analysis/policyResolver.js";
@@ -371,11 +372,12 @@ export async function handleIndexRepository(
   },
   ctx: HandlerContext
 ): Promise<CallToolResult> {
-  const { store, constants } = ctx;
+  const { constants } = ctx;
   const jobs = requireJobs(ctx);
   assertPathAllowed(args.repoPath, constants.allowedRoots);
   const docsEnabled = resolveDocsMode(args.docsMode, constants.DOCS_INDEXING_ENABLED);
-  store.ensureRepository(args.repoId, args.repoPath);
+  // Follow-up 3: no write on the server thread — the run registers the repo, on the worker's connection
+  // (runIndexPipeline → ensureRepository). An IMMEDIATE write here waited out busy_timeout behind the worker.
   const job = jobs.enqueue({
     repoId: args.repoId,
     repoPath: args.repoPath,
@@ -433,14 +435,24 @@ export async function handleRegisterWorktree(
       `register_worktree: ${args.repoPath} is not a git worktree of '${parent.repoId}' (${parent.repoPath}): their git common dirs differ. Use index_repository for a repo that is not a worktree.`
     );
   }
+  if (sameRepoPath(args.repoPath, parent.repoPath)) {
+    throw new McpError(ErrorCode.InvalidParams, `register_worktree: repoPath is the parent's own checkout (${parent.repoPath}), not a worktree of it.`);
+  }
   const existing = store.getRepository(args.repoId);
-  if (existing && existing.repoPath !== args.repoPath) {
+  if (existing && !sameRepoPath(existing.repoPath, args.repoPath)) {
     throw new McpError(
       ErrorCode.InvalidParams,
       `register_worktree: repoId '${args.repoId}' is already registered at ${existing.repoPath}. Pick another repoId, or remove_repository it first.`
     );
   }
-  store.ensureRepository(args.repoId, args.repoPath);
+  const other = store.listRepositories().find((r) => r.repoId !== args.repoId && sameRepoPath(r.repoPath, args.repoPath));
+  if (other) {
+    throw new McpError(
+      ErrorCode.InvalidParams,
+      `register_worktree: ${args.repoPath} is already registered as '${other.repoId}'. Use that repoId, or remove_repository it first.`
+    );
+  }
+  // Follow-up 3: the run registers the repo on the worker's connection; this thread does not write.
   const job = jobs.enqueue({
     repoId: args.repoId,
     repoPath: args.repoPath,
@@ -462,6 +474,12 @@ export async function handleRegisterWorktree(
     watch: { ...watch, activeOnly: constants.WATCH_ACTIVE_ONLY },
     next: `poll index_status({ runId: "${job.runId}" }) until state is ok or failed`
   });
+}
+
+/** Two spellings of one folder: resolved, forward slashes, no trailing slash, case-insensitive on Windows. */
+export function sameRepoPath(a: string, b: string): boolean {
+  const norm = (p: string): string => path.resolve(p).replace(/\\/g, "/").replace(/\/+$/, "");
+  return samePath(norm(a), norm(b));
 }
 
 // ── index_status ──────────────────────────────────────────────────────────────

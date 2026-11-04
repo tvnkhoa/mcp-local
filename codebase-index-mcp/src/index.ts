@@ -250,20 +250,18 @@ const watchManager = new WatchManager(
     // a whole-repo incremental re-hash — unless HEAD moved or the batch dropped events (see watcherRunPlan).
     const plan = watcherRunPlan(batch, await treeKeyNow(repoPath), parseTreeKey(store.getLatestRunTreeKey(repoId)), store.getLatestRun(repoId)?.commitSha ?? null);
     if (plan.mode === "incremental") {
+      // Follow-up 3: an overflowed batch's deletions are pruned by a dirty run over them — in the worker, in the DB-wide
+      // queue — not by a write on this thread.
+      if (batch.overflowed && batch.deleted.length > 0) {
+        await runIndexAndResolve(repoId, repoPath, "dirty", DOCS_INDEXING_ENABLED, config.maxFilesPerRun, config.batchSize, { knownDirtyPaths: batch.deleted });
+      }
       await runIndexAndResolve(repoId, repoPath, "incremental", DOCS_INDEXING_ENABLED, config.maxFilesPerRun, config.batchSize);
       return;
     }
     await runIndexAndResolve(repoId, repoPath, "dirty", DOCS_INDEXING_ENABLED, config.maxFilesPerRun, config.batchSize, { knownDirtyPaths: plan.paths });
   },
-  // MCP-ISSUE-111: forget the files' FTS rows first — no full run rebuilds every FTS table any more to repair it.
-  (repoId, deletedRelativePaths) => {
-    let pruned = 0;
-    store.runInTransaction(() => {
-      for (const p of deletedRelativePaths) store.ftsForgetFile(repoId, p);
-      pruned = store.pruneFiles(repoId, deletedRelativePaths);
-    });
-    return pruned;
-  },
+  // Follow-up 3: no prune on this thread (it waited on the worker's write lock); the runner above prunes in the worker.
+  () => 0,
   ({ repoId }) => {
     if (WATCH_ACTIVE_ONLY && activeWatchRef.current === repoId) {
       armWatchInactivityTimer(repoId, buildHandlerContext());
