@@ -5,7 +5,8 @@
  * environment, which is how the overrides reach board.mjs; they are restored after.
  *
  * The four refusals the brief names — assign by a non-leader, claim of a unit assigned to another,
- * report by a non-assignee, self-accept — and one walk from lead to accepted. Skips when the board
+ * report by a non-assignee, self-accept — and one walk from lead to accepted. Every unit scopes its own
+ * path: the board refuses a new unit on a path another claim holds (wec.aria rescope.mjs, 4 Nov). Skips when the board
  * under test has no task.mjs.
  */
 
@@ -42,6 +43,7 @@ test("task tools on a scratch board: four refusals, then lead → assign → cla
   for (const f of readdirSync(from)) if (f.endsWith(".mjs") || f === "board.json") cpSync(path.join(from, f), path.join(root, "checks", "board", f));
   mkdirSync(path.join(root, "src"), { recursive: true });
   writeFileSync(path.join(root, "src", "a.txt"), "a\n");
+  writeFileSync(path.join(root, "src", "wide.txt"), "w\n"); // a horizontal unit scopes files that exist
   const git = (...args: string[]) => execFileSync("git", ["-c", "user.email=board-mcp@test.invalid", "-c", "user.name=board-mcp test", ...args], { cwd: root, encoding: "utf8" }).trim();
   git("init", "-q");
   git("config", "core.autocrlf", "false");
@@ -86,10 +88,10 @@ test("task tools on a scratch board: four refusals, then lead → assign → cla
   // assign reassign (wec.aria 6e9f4564): a T1 unit moves to another session; four refusals.
   const reassign = (unit: string, to: string) => ({ unit, to, reassign: true, why: "member gone", session: LEADER });
   await refusal("assign", reassign("task--demo", OTHER), /holds task--demo's claim since/u);
-  await okCall("new_unit", { kind: "task", name: "idle", paths: ["src/a.txt"], session: LEADER });
+  await okCall("new_unit", { kind: "task", name: "idle", paths: ["src/idle.txt"], session: LEADER });
   await refusal("assign", reassign("task--idle", OTHER), /never assigned — assign it, without --reassign/u);
-  await okCall("new_unit", { kind: "task", name: "moved", paths: ["src/a.txt"], session: LEADER });
-  await okCall("assign", { ...brief, unit: "task--moved", session: LEADER });
+  await okCall("new_unit", { kind: "task", name: "moved", paths: ["src/moved.txt"], session: LEADER });
+  await okCall("assign", { ...brief, unit: "task--moved", scope: ["src/moved.txt"], session: LEADER });
   await refusal("assign", reassign("task--moved", MEMBER), /is already assigned to/u);
   const moved = await okCall("assign", reassign("task--moved", OTHER));
   assert.match(moved.text, /task--moved reassigned by aaaaaaaa.* to cccccccc/u);
@@ -97,7 +99,7 @@ test("task tools on a scratch board: four refusals, then lead → assign → cla
   // rescope: the leader's, task units only, add-only, between assign and report.
   await refusal("rescope", { unit: "task--demo", add: ["src/b.txt"], why: "needs b", session: OTHER }, /rescope is the leader's/u);
   await refusal("rescope", { unit: "task--idle", add: ["src/b.txt"], why: "needs b", session: LEADER }, /assign first/u);
-  const horizontal = await okCall("new_unit", { kind: "horizontal", name: "wide", paths: ["src/a.txt"], weight: "standard", yes: [], session: LEADER });
+  const horizontal = await okCall("new_unit", { kind: "horizontal", name: "wide", paths: ["src/wide.txt"], weight: "standard", yes: [], session: LEADER });
   const horizontalId = /(horizontal--[a-z0-9-]+)/u.exec(String(horizontal.text))?.[1] ?? "horizontal--wide";
   await refusal("rescope", { unit: horizontalId, add: ["src/b.txt"], why: "needs b", session: LEADER }, /rescope widens task units only/u);
   const rescoped = await okCall("rescope", { unit: "task--demo", add: ["src/b.txt"], why: "a derived file", session: LEADER });
