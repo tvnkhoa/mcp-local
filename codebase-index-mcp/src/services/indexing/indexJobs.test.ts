@@ -134,6 +134,26 @@ test("follow-up 8: a second request for a repo with a job queued or running join
   await queue.wait(later.runId, 2_000);
 });
 
+test("review follow-up A: a request differing in path, docs or file cap is not joined to a job", async () => {
+  const gate = deferred();
+  const queue = new IndexJobQueue({
+    minFreeRamMb: 0,
+    execute: async (job) => {
+      await gate.promise;
+      return { runId: job.runId, status: "ok" } as IndexRunResult;
+    }
+  });
+  const a = queue.enqueue(request("a"));
+  assert.equal(queue.enqueue(request("a")).runId, a.runId);
+  for (const diff of [{ repoPath: "/elsewhere" }, { docsEnabled: false }, { maxFiles: 5 }]) {
+    const other = queue.enqueue({ ...request("a"), ...diff });
+    assert.notEqual(other.runId, a.runId, JSON.stringify(diff));
+    assert.equal(other.coalesced, undefined);
+  }
+  gate.resolve();
+  for (const j of queue.pending()) await queue.wait(j.runId, 2_000);
+});
+
 test("IX-2: wait returns the job as it stands when the bound passes; a failed or throwing run is failed with its error", async () => {
   const gate = deferred();
   const queue = new IndexJobQueue({

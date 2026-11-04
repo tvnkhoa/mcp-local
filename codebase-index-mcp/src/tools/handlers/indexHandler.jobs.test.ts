@@ -24,12 +24,13 @@ const git = (cwd: string, ...args: string[]): void => {
 
 type Repo = { repoId: string; repoPath: string };
 
-function context(root: string, repos: Repo[]): { ctx: HandlerContext; enqueued: string[]; dispose: () => void } {
+function context(root: string, repos: Repo[], hold?: Promise<void>): { ctx: HandlerContext; enqueued: string[]; dispose: () => void } {
   const enqueued: string[] = [];
   const jobs = new IndexJobQueue({
     minFreeRamMb: 0,
     execute: async (job, req) => {
       enqueued.push(req.repoId);
+      if (hold) await hold;
       return { runId: job.runId, status: "ok" } as IndexRunResult;
     }
   });
@@ -122,4 +123,23 @@ test("follow-up 6: sameRepoPath ignores slash style and a trailing slash (and ca
   assert.equal(sameRepoPath("C:/a/b", "C:\\a\\b\\"), true);
   assert.equal(sameRepoPath("/x/y", "/x/z"), false);
   if (process.platform === "win32") assert.equal(sameRepoPath("D:/Repo", "d:\\repo"), true);
+});
+
+test("review follow-up B: a second register_worktree for the same path, before the first job ran, is refused", async () => {
+  const { root, parent, wt } = fixture();
+  let release!: () => void;
+  const hold = new Promise<void>((r) => (release = r));
+  const h = context(root, [{ repoId: "p", repoPath: parent.split("\\").join("/") }], hold);
+  try {
+    const first = body(await handleRegisterWorktree({ parentRepoId: "p", repoPath: wt, repoId: "w1" }, h.ctx));
+    assert.equal(first.registered, "new");
+    await assert.rejects(handleRegisterWorktree({ parentRepoId: "p", repoPath: wt, repoId: "w2" }, h.ctx), /already registered as 'w1'/);
+    await assert.rejects(handleRegisterWorktree({ parentRepoId: "p", repoPath: path.join(root, "elsewhere"), repoId: "w1" }, h.ctx), /does not exist|index job queued/);
+    const again = body(await handleRegisterWorktree({ parentRepoId: "p", repoPath: wt, repoId: "w1" }, h.ctx));
+    assert.equal(again.runId, first.runId, "the same registration again joins the job");
+  } finally {
+    release();
+    h.dispose();
+    rmSync(root, { recursive: true, force: true });
+  }
 });

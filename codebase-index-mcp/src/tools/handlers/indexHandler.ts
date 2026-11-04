@@ -445,7 +445,18 @@ export async function handleRegisterWorktree(
       `register_worktree: repoId '${args.repoId}' is already registered at ${existing.repoPath}. Pick another repoId, or remove_repository it first.`
     );
   }
-  const other = store.listRepositories().find((r) => r.repoId !== args.repoId && sameRepoPath(r.repoPath, args.repoPath));
+  // Review follow-up B: the run registers the repo, so a job not yet run is a registration too.
+  const pendingJobs = jobs.pending();
+  const pendingSameId = pendingJobs.find((j) => j.repoId === args.repoId && !sameRepoPath(j.repoPath, args.repoPath));
+  if (pendingSameId) {
+    throw new McpError(
+      ErrorCode.InvalidParams,
+      `register_worktree: repoId '${args.repoId}' has an index job queued for ${pendingSameId.repoPath} (runId ${pendingSameId.runId}). Pick another repoId.`
+    );
+  }
+  const other =
+    store.listRepositories().find((r) => r.repoId !== args.repoId && sameRepoPath(r.repoPath, args.repoPath)) ??
+    pendingJobs.find((j) => j.repoId !== args.repoId && sameRepoPath(j.repoPath, args.repoPath));
   if (other) {
     throw new McpError(
       ErrorCode.InvalidParams,

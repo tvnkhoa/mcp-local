@@ -91,6 +91,20 @@ export const DEFAULT_RUN_TIMEOUT_MS = 30 * 60_000;
 /** `wait: true` blocks at most this long, then answers with the job as it stands (IX-2: under the 120 s client ceiling). */
 export const MAX_WAIT_MS = 100_000;
 
+/**
+ * Review follow-up A: a queued or running job answers a new request only when it runs the same thing — same repo and
+ * path, same docs setting and file cap, and the same mode or a full one. Any other difference queues a job of its own.
+ */
+export function coversRequest(existing: IndexJobRequest, next: IndexJobRequest): boolean {
+  return (
+    existing.repoId === next.repoId &&
+    existing.repoPath === next.repoPath &&
+    existing.docsEnabled === next.docsEnabled &&
+    existing.maxFiles === next.maxFiles &&
+    (existing.mode === next.mode || existing.mode === "full")
+  );
+}
+
 export class IndexJobQueue {
   private readonly jobs = new Map<string, IndexJob>();
   private readonly requests = new Map<string, IndexJobRequest>();
@@ -113,10 +127,12 @@ export class IndexJobQueue {
    * `coalesced`, and no second run is queued.
    */
   enqueue(request: IndexJobRequest): IndexJob {
-    const same = this.order
-      .map((id) => this.jobs.get(id))
-      .find((j) => j !== undefined && j.repoId === request.repoId && (j.state === "queued" || j.state === "running") && (j.mode === request.mode || j.mode === "full"));
-    if (same) return { ...this.snapshot(same), coalesced: true };
+    const same = this.order.find((id) => {
+      const j = this.jobs.get(id);
+      const r = this.requests.get(id);
+      return j !== undefined && r !== undefined && (j.state === "queued" || j.state === "running") && coversRequest(r, request);
+    });
+    if (same) return { ...this.snapshot(this.jobs.get(same)!), coalesced: true };
     const runId = randomUUID();
     const job: IndexJob = {
       runId,
