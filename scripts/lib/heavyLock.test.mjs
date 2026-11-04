@@ -476,7 +476,7 @@ test("status shape: holder with a recorded lineage, one ancestor reused → ance
   assert.deepEqual(h.goneAncestors, [502]);
   assert.deepEqual(h.ancestors.map((a) => a.alive), [true, false, true]);
   const text = formatHeavyLockStatus(status);
-  assert.match(text, new RegExp(`holder: pid ${String(process.pid)} \\[alive, ancestor gone\\]`));
+  assert.match(text, new RegExp(`holder: pid ${String(process.pid)} \\[alive, launcher gone \\(session alive\\)\\]`));
   assert.match(text, /502 bash\.exe \(gone\)/);
   assert.match(text, /waiters: none/);
 
@@ -556,7 +556,8 @@ test("end to end: a holder whose launching parent is killed shows ancestor gone,
   assert.equal(after.holder.alive, true, "status kills nothing");
   assert.equal(after.holder.ancestorGone, true);
   assert.equal(after.holder.orphan, false, "the test runner and the session above it live");
-  assert.equal(after.holder.killHint, null);
+  assert.ok(after.holder.orphanSince, "launcher gone (session alive) is flagged too (H-3)");
+  assert.equal(after.holder.killHint, null, "default N = 10 min: no hint yet");
   assert.equal(after.holder.parentAlive, false);
   assert.ok(after.holder.goneAncestors.includes(parent.pid));
   assert.equal(isPidAlive(holderPid), true);
@@ -658,25 +659,35 @@ test("status: a live holder whose whole recorded chain is gone is ORPHAN; orphan
   const me = { pid: process.pid, ppid: 601, name: "node.exe", start: t0 - 5_000 };
   const allGone = async () => [me];
   const sessionLives = async () => [me, { pid: 602, ppid: 1, name: "claude.exe", start: t0 - 20_000 }];
+  const allAlive = async () => [me, { pid: 601, ppid: 602, name: "bash.exe", start: t0 - 10_000 }, { pid: 602, ppid: 1, name: "claude.exe", start: t0 - 20_000 }];
 
-  // One link gone, the session alive: not an orphan, nothing recorded.
-  const partial = await heavyLockStatus({ env, readTable: sessionLives, now: t0 });
-  assert.equal(partial.holder.ancestorGone, true);
-  assert.equal(partial.holder.orphan, false);
-  assert.equal(partial.holder.orphanSince, null);
+  // All alive: nothing recorded.
+  const fine = await heavyLockStatus({ env, readTable: allAlive, now: t0 - 1_000 });
+  assert.equal(fine.holder.ancestorGone, false);
+  assert.equal(fine.holder.orphanSince, null);
   assert.equal(fs.existsSync(heavyLockOrphanFile(lockPath)), false);
 
-  // Whole chain gone: orphan, first sighting recorded beside the lock, no hint yet.
-  const first = await heavyLockStatus({ env, readTable: allGone, now: t0 });
-  assert.equal(first.nameHeld, true);
+  // The shell gone, the session alive (both 4 Nov incidents): flagged "launcher gone", sighting recorded.
+  const partial = await heavyLockStatus({ env, readTable: sessionLives, now: t0 });
+  assert.equal(partial.nameHeld, true);
+  assert.equal(partial.holder.ancestorGone, true);
+  assert.equal(partial.holder.orphan, false);
+  assert.equal(partial.holder.orphanSince, new Date(t0).toISOString());
+  assert.equal(partial.holder.killHint, null);
+  assert.deepEqual(JSON.parse(fs.readFileSync(heavyLockOrphanFile(lockPath), "utf8")), { token, pid: process.pid, since: new Date(t0).toISOString() });
+  const partialText = formatHeavyLockStatus(partial);
+  assert.match(partialText, /\[alive, launcher gone \(session alive\)\]/);
+  assert.match(partialText, /flagged launcher gone \(session alive\) since 2026-11-04T10:00:00\.000Z/);
+  assert.doesNotMatch(partialText, /taskkill/);
+
+  // Then the whole chain goes: ORPHAN, and the first sighting is kept.
+  const first = await heavyLockStatus({ env, readTable: allGone, now: t0 + 1_000 });
   assert.equal(first.holder.orphan, true);
   assert.equal(first.holder.orphanSince, new Date(t0).toISOString());
   assert.equal(first.holder.killHint, null);
-  assert.deepEqual(JSON.parse(fs.readFileSync(heavyLockOrphanFile(lockPath), "utf8")), { token, pid: process.pid, since: new Date(t0).toISOString() });
   const firstText = formatHeavyLockStatus(first);
   assert.match(firstText, /\[alive, ORPHAN\]/);
-  assert.match(firstText, /orphaned since 2026-11-04T10:00:00\.000Z/);
-  assert.doesNotMatch(firstText, /taskkill/);
+  assert.match(firstText, /flagged ORPHAN \(whole session chain gone\) since 2026-11-04T10:00:00\.000Z/);
 
   // 29 s later (N = 0.5 min): still no hint, and the first sighting is kept.
   const early = await heavyLockStatus({ env, readTable: allGone, now: t0 + 29_000 });
@@ -701,8 +712,8 @@ test("status: a live holder whose whole recorded chain is gone is ORPHAN; orphan
   assert.equal(changed.holder.killHint, null);
   assert.equal(JSON.parse(fs.readFileSync(heavyLockOrphanFile(lockPath), "utf8")).token, "next-holder");
 
-  // A holder not (or no longer) orphaned clears it; so do its release and a free lock.
-  await heavyLockStatus({ env, readTable: sessionLives, now: t0 + 50_000 });
+  // A holder no longer flagged clears it; so do its release and a free lock.
+  await heavyLockStatus({ env, readTable: allAlive, now: t0 + 50_000 });
   assert.equal(fs.existsSync(heavyLockOrphanFile(lockPath)), false);
   fs.writeFileSync(lockPath, JSON.stringify({ ...JSON.parse(fs.readFileSync(lockPath, "utf8")), token }));
   await heavyLockStatus({ env, readTable: allGone, now: t0 + 60_000 });
@@ -753,9 +764,12 @@ test("a waiter seeing an orphaned holder records the sighting and, after N minut
   held.release();
 });
 
-test("end to end: a holder whose whole recorded chain is killed is ORPHAN with the taskkill line; the holder lives on", async (t) => {
-  // Real process table. The holder records only its two nearest ancestors (parent, grandparent) —
-  // the chain the test can kill; the real one would end at this session's claude.exe.
+/**
+ * Real process table. A grandparent (stands for the session) spawns a parent (stands for the shell),
+ * which spawns a detached holder; the holder records only those two ancestors — the chain the test
+ * can kill (the real one would end at this session's claude.exe). `kill` names which to hard-kill.
+ */
+async function realChain(t, kill) {
   const lockPath = tempLock();
   const out = `${lockPath}.holder`;
   const env = { ...cleanEnv(lockPath), MCP_HEAVY_LOCK_LINEAGE: "on", MCP_HEAVY_LOCK_ORPHAN_MINUTES: "0" };
@@ -777,40 +791,60 @@ test("end to end: a holder whose whole recorded chain is killed is ORPHAN with t
     setInterval(() => {}, 60000);
   `;
   const grand = spawn(process.execPath, ["-e", grandScript], { env, stdio: "ignore" });
-  let holderPid = null;
-  let parentPid = null;
+  const ids = { holder: null, parent: null, grand: grand.pid };
   t.after(() => {
-    for (const pid of [grand.pid, parentPid, holderPid]) if (pid !== null && isPidAlive(pid)) hardKill(pid);
+    for (const pid of [ids.grand, ids.parent, ids.holder]) if (pid !== null && isPidAlive(pid)) hardKill(pid);
   });
   const deadline = Date.now() + 30_000;
   while (!fs.existsSync(out)) {
     assert.ok(Date.now() < deadline, "the holder never took the lock");
     await new Promise((r) => setTimeout(r, 100));
   }
-  holderPid = Number(fs.readFileSync(out, "utf8"));
+  ids.holder = Number(fs.readFileSync(out, "utf8"));
   const before = await heavyLockStatus({ env });
-  assert.equal(before.holder.pid, holderPid);
+  assert.equal(before.holder.pid, ids.holder);
   assert.equal(before.holder.ancestors.length, 2);
   assert.equal(before.holder.ancestors[1].pid, grand.pid, "parent, then grandparent");
-  parentPid = before.holder.ancestors[0].pid;
-  assert.equal(before.holder.orphan, false);
+  ids.parent = before.holder.ancestors[0].pid;
+  assert.equal(before.holder.ancestorGone, false);
+  assert.equal(before.holder.orphanSince, null);
   assert.equal(before.holder.killHint, null);
 
-  hardKill(parentPid);
-  hardKill(grand.pid);
-  await new Promise((resolve) => (grand.exitCode !== null ? resolve() : grand.once("exit", resolve)));
+  for (const which of kill) hardKill(ids[which]);
   const until = Date.now() + 10_000;
-  while (isPidAlive(parentPid)) {
-    assert.ok(Date.now() < until, "the parent did not die");
+  while (kill.some((which) => isPidAlive(ids[which]))) {
+    assert.ok(Date.now() < until, `${kill.join("+")} did not die`);
     await new Promise((r) => setTimeout(r, 50));
   }
-  const after = await heavyLockStatus({ env });
-  assert.equal(after.holder.pid, holderPid);
+  return { env, ids, after: await heavyLockStatus({ env }) };
+}
+
+test("end to end: the shell killed, the session alive (both 4 Nov incidents) → launcher gone, flagged, taskkill line; nothing is killed", async (t) => {
+  const { ids, after } = await realChain(t, ["parent"]);
+  assert.equal(after.holder.pid, ids.holder);
+  assert.equal(after.holder.alive, true);
+  assert.equal(after.holder.ancestorGone, true);
+  assert.equal(after.holder.orphan, false, "the session (grandparent) lives");
+  assert.deepEqual(after.holder.goneAncestors, [ids.parent]);
+  assert.ok(after.holder.orphanSince);
+  assert.equal(after.holder.killHint, killCommand(ids.holder));
+  const text = formatHeavyLockStatus(after);
+  assert.match(text, /\[alive, launcher gone \(session alive\)\]/);
+  assert.ok(text.split("\n").includes(killCommand(ids.holder)), text);
+  if (PIPE) assert.equal(after.nameHeld, true, "the lock is still held: nothing reclaimed");
+  assert.equal(isPidAlive(ids.holder), true, "status kills nothing");
+  assert.equal(isPidAlive(ids.grand), true, "nor the session");
+});
+
+test("end to end: a holder whose whole recorded chain is killed is ORPHAN with the taskkill line; the holder lives on", async (t) => {
+  const { ids, after } = await realChain(t, ["parent", "grand"]);
+  assert.equal(after.holder.pid, ids.holder);
   assert.equal(after.holder.alive, true);
   assert.equal(after.holder.orphan, true);
   assert.ok(after.holder.orphanSince);
-  assert.equal(after.holder.killHint, killCommand(holderPid));
+  assert.equal(after.holder.killHint, killCommand(ids.holder));
   if (PIPE) assert.equal(after.nameHeld, true, "the lock is still held: nothing reclaimed");
-  assert.ok(formatHeavyLockStatus(after).split("\n").includes(killCommand(holderPid)));
-  assert.equal(isPidAlive(holderPid), true, "status kills nothing");
+  assert.match(formatHeavyLockStatus(after), /\[alive, ORPHAN\]/);
+  assert.ok(formatHeavyLockStatus(after).split("\n").includes(killCommand(ids.holder)));
+  assert.equal(isPidAlive(ids.holder), true, "status kills nothing");
 });

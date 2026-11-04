@@ -51,9 +51,10 @@
  *
  * Orphaned holder (row H-3, 2026-11-04). A holder is `orphan` only when its WHOLE recorded lineage is
  * gone — every ancestor up to the Claude session process (or the top one recorded); with no lineage,
- * when its parent is gone. One ancestor gone while the session lives is `ancestorGone`, not an orphan.
- * The first time `status` or a waiter sees the holder orphaned is kept in `<lock>.orphan.json`
- * (`{token, pid, since}`), cleared when the holder changes or frees. After
+ * when its parent is gone. Some ancestor gone while the session lives is `ancestorGone` ("launcher gone
+ * (session alive)") — the shape of both 4 Nov incidents: TaskStop killed the shell, claude.exe lived on.
+ * Either way the holder is flagged: the first time `status` or a waiter sees it flagged is kept in
+ * `<lock>.orphan.json` (`{token, pid, since}`), cleared when the holder changes or frees. After
  * `MCP_HEAVY_LOCK_ORPHAN_MINUTES` (default 10, fractions allowed) status and every waiter print
  * `taskkill /PID <pid> /T /F`, which a leader runs only on the owner's yes. The tool itself kills
  * nothing and never frees a lock whose holder lives.
@@ -131,7 +132,8 @@ export function killCommand(pid, platform = process.platform) {
 export const KILL_RULE = "a leader runs it only on the owner's yes; this tool kills nothing";
 
 /**
- * Record or clear the orphan sighting for the holder whose file token is `token`. `orphan` true: keep
+ * Record or clear the sighting of a flagged holder (orphan, or launcher gone) whose file token is
+ * `token`. `orphan` here means flagged — true: keep
  * the first sighting of this holder (write one if none or another holder's); false, or no holder: clear
  * it; null (unknown): leave it. Returns `{ since, due }` (`since` an ISO string or null).
  */
@@ -160,13 +162,23 @@ export function noteOrphan(file, { token, pid, orphan }, { now = Date.now(), env
 }
 
 /**
- * Waiter side, no process table: is the holder's whole recorded lineage gone (pids only, so a reused
- * pid passes for alive — the conservative side)? Without a lineage, its parent; `null` when unknown.
+ * Waiter side, no process table: `{ flagged, whole }` — is any recorded ancestor gone, and is the whole
+ * lineage gone (pids only, so a reused pid passes for alive — the conservative side)? Without a
+ * lineage, its parent decides both; `null` when unknown.
  */
 function holderOrphanByPids(holder) {
   const lineage = Array.isArray(holder.lineage) ? holder.lineage : [];
-  if (lineage.length > 0) return lineage.every((a) => !isPidAlive(a.pid));
-  return Number.isInteger(holder.ppid) ? !isPidAlive(holder.ppid) : null;
+  if (lineage.length > 0) {
+    const gone = lineage.filter((a) => !isPidAlive(a.pid)).length;
+    return { flagged: gone > 0, whole: gone === lineage.length };
+  }
+  const parentGone = Number.isInteger(holder.ppid) ? !isPidAlive(holder.ppid) : null;
+  return { flagged: parentGone, whole: parentGone === true };
+}
+
+/** How a flagged holder is labelled: its whole chain gone, or only its launcher. */
+function flagLabel(whole) {
+  return whole ? "ORPHAN (whole session chain gone)" : "launcher gone (session alive)";
 }
 
 // ---- process table and lineage ----
@@ -529,16 +541,17 @@ export async function acquireHeavyLock({
           `(${file}). Wait for it, or set MCP_HEAVY_LOCK_TIMEOUT_MS; --no-lock skips the lock.`
       );
     }
-    // An orphaned holder (its whole recorded lineage gone) is noted beside the lock; once it has been
-    // orphaned MCP_HEAVY_LOCK_ORPHAN_MINUTES, the waiting line names the kill command (never run here).
-    const orphaned = holder === null ? { since: null, due: false } : noteOrphan(file, { token: holder.token, pid: holder.pid, orphan: holderOrphanByPids(holder) }, { env });
+    // A flagged holder (launcher or whole chain gone) is noted beside the lock; once flagged
+    // MCP_HEAVY_LOCK_ORPHAN_MINUTES, the waiting line names the kill command (never run here).
+    const flag = holder === null ? null : holderOrphanByPids(holder);
+    const orphaned = holder === null ? { since: null, due: false } : noteOrphan(file, { token: holder.token, pid: holder.pid, orphan: flag.flagged }, { env });
     const key = holder === null ? null : `${String(holder.token)}|${String(orphaned.due)}`;
     if (holder !== null && announced !== key) {
       log(
         `heavy-check lock held by ${describeHolder(holder)}; waiting up to ` +
           `${limit >= 60_000 ? `${String(Math.round(limit / 60_000))} min` : `${String(Math.round(limit / 1000))} s`} (MCP_HEAVY_LOCK_TIMEOUT_MS) …` +
           (orphaned.due
-            ? `\n  the holder is ORPHANED since ${String(orphaned.since)} (its whole session chain is gone): ${killCommand(holder.pid)}\n  ${KILL_RULE}`
+            ? `\n  the holder is flagged ${flagLabel(flag.whole)} since ${String(orphaned.since)}: ${killCommand(holder.pid)}\n  ${KILL_RULE}`
             : "")
       );
       announced = key;
@@ -689,9 +702,10 @@ function describeProcess(record, byPid) {
 /**
  * The lock as it stands, read-only: `{ path, pipe, nameHeld, holder, waiters, cleaned }`. `holder` is
  * the file's holder (`null` when there is none) with `since`, `alive`, its parent and recorded
- * ancestors, `ancestorGone` (some recorded ancestor is gone), `orphan` (every recorded ancestor is gone;
- * without a lineage, the parent is gone), `orphanSince` (first sighting, kept in `<lock>.orphan.json`)
- * and `killHint` (the command to end it, once orphaned `MCP_HEAVY_LOCK_ORPHAN_MINUTES`; never run).
+ * ancestors, `ancestorGone` (some recorded ancestor is gone: launcher gone), `orphan` (every recorded
+ * ancestor is gone; without a lineage, the parent is gone), `orphanSince` (first sighting of either,
+ * kept in `<lock>.orphan.json`) and `killHint` (the command to end it, once flagged
+ * `MCP_HEAVY_LOCK_ORPHAN_MINUTES`; never run).
  * `waiters` are the live registered waiters, oldest first; entries of dead pids are removed and
  * counted in `cleaned`. The only writes: that cleanup and the orphan sighting file. `readTable` and
  * `now` are test hooks.
@@ -708,7 +722,9 @@ export async function heavyLockStatus({ env = process.env, readTable = readProce
     holder = { ...describeProcess(written, byPid), since: written.startedAt ?? null };
     // Only a live holder of a held name can be an orphan worth ending; a left-over file is nobody's.
     const live = holder.alive && nameHeld !== false;
-    const seen = noteOrphan(file, { token: written.token, pid: written.pid, orphan: live ? holder.orphan : false }, { now, env });
+    // Flagged: launcher gone (session alive) or whole chain gone; both get the sighting and the hint.
+    const flagged = holder.orphan === true || holder.ancestorGone === true ? true : holder.ancestorGone === false ? false : null;
+    const seen = noteOrphan(file, { token: written.token, pid: written.pid, orphan: live ? flagged : false }, { now, env });
     holder.orphanSince = seen.since;
     holder.killHint = seen.due ? killCommand(written.pid, platform) : null;
   } else {
@@ -742,7 +758,7 @@ export async function heavyLockStatus({ env = process.env, readTable = readProce
 export function formatHeavyLockStatus(status) {
   const who = (p) => {
     const lineageFlag =
-      p.orphan === true ? "ORPHAN" : p.ancestorGone === true ? "ancestor gone" : p.orphan === false ? "parent alive" : "parent unknown";
+      p.orphan === true ? "ORPHAN" : p.ancestorGone === true ? "launcher gone (session alive)" : p.orphan === false ? "parent alive" : "parent unknown";
     const flags = [p.alive ? "alive" : "DEAD", lineageFlag];
     const chain = p.ancestors.length ? ` <- ${p.ancestors.map((a) => `${String(a.pid)} ${String(a.name)}${a.alive ? "" : " (gone)"}`).join(" <- ")}` : ` <- ppid ${String(p.ppid)}`;
     return `pid ${String(p.pid)} [${flags.join(", ")}] since ${String(p.since)}\n    cmd: ${String(p.cmd)}\n    cwd: ${String(p.cwd)}\n    lineage:${chain}`;
@@ -753,7 +769,8 @@ export function formatHeavyLockStatus(status) {
   lines.push(status.holder === null ? "holder: none" : `holder: ${who(status.holder)}`);
   if (status.holder !== null && status.nameHeld === false) lines.push("    (the file is left over: the name is free, so nobody holds the lock)");
   if (status.holder?.orphanSince) {
-    lines.push(`    orphaned since ${status.holder.orphanSince} (its whole session chain is gone; kill hint after ${String(status.orphanMinutes)} min, MCP_HEAVY_LOCK_ORPHAN_MINUTES)`);
+    const label = flagLabel(status.holder.orphan === true);
+    lines.push(`    flagged ${label} since ${status.holder.orphanSince} (kill hint after ${String(status.orphanMinutes)} min, MCP_HEAVY_LOCK_ORPHAN_MINUTES)`);
   }
   if (status.holder?.killHint) {
     lines.push(status.holder.killHint);

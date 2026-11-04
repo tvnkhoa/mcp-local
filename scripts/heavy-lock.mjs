@@ -13,8 +13,9 @@
  *
  * `status` is read-only (it only removes registry entries of dead waiters): the holder and every
  * waiter, each with its pid, command, cwd, since when, whether it is alive, whether a recorded ancestor
- * is gone (`ancestor gone`) and whether its whole recorded chain up to the session is gone (`ORPHAN`).
- * For an orphaned holder it keeps the first sighting in `<lock>.orphan.json` (`orphanSince`) and, after
+ * is gone (`launcher gone (session alive)`) and whether its whole recorded chain up to the session is
+ * gone (`ORPHAN`). For a holder flagged either way it keeps the first sighting in `<lock>.orphan.json`
+ * (`orphanSince`) and, after
  * `MCP_HEAVY_LOCK_ORPHAN_MINUTES` (default 10), prints `taskkill /PID <pid> /T /F` — a command a leader
  * runs only on the owner's yes. It kills nothing and never frees a lock whose holder lives.
  */

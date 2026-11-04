@@ -192,12 +192,13 @@ and codebase-index's `run-tests.mjs` take a machine-wide lock, `~/.claude/locks/
 broken. Nested entry points inherit the hold through `MCP_HEAVY_LOCK_TOKEN`. `CI=true` or `--no-lock`
 skips it, so CI is never held. `node scripts/heavy-lock.mjs status [--json]` shows the holder and every
 waiter (pid, command, cwd, since when, alive) with its recorded ancestors up to the Claude session
-process, marks one with a recorded ancestor gone `ancestor gone`, and one whose whole recorded chain
-up to the session is gone `ORPHAN` — a run whose session was stopped while its child lived on. Waiters
+process, marks one with a recorded ancestor gone `launcher gone (session alive)` — a shell stopped
+while its child lived on, as in both 4 Nov incidents — and one whose whole recorded chain up to the
+session is gone `ORPHAN`. Waiters
 register in `heavy-check.lock.waiters/` beside the lock; status drops entries of dead pids and kills
 nothing. A waiter whose ancestor dies while it waits stops (exit 76) instead of taking the lock later
 for nobody; an ancestor already gone when the wait began (a spawn-and-exit wrapper) does not count.
-The first time status or a waiter sees the holder orphaned is kept in `heavy-check.lock.orphan.json`
+The first time status or a waiter sees the holder flagged either way is kept in `heavy-check.lock.orphan.json`
 (`orphanSince`, cleared when the holder changes or frees); after `MCP_HEAVY_LOCK_ORPHAN_MINUTES`
 (default 10) status and each waiter's "held by" line print `taskkill /PID <pid> /T /F`. A leader runs
 it only on the owner's yes; the tool kills nothing and never frees a lock whose holder lives.
