@@ -63,6 +63,10 @@ export const queryDocsSchema = (MAX_RESULT_LIMIT: number) => z
     query: z.string().min(1).max(200).optional(),
     /** mode="section": the heading to read, matched as a case-insensitive prefix, markup ignored. */
     headingPrefix: z.string().min(1).max(300).optional(),
+    /** mode="section" (MCP-ISSUE-116): alternative to headingPrefix — case-insensitive substring of the heading. */
+    headingContains: z.string().min(1).max(300).optional(),
+    /** mode="section" (MCP-ISSUE-116): alternative to headingPrefix — the section containing this 1-based line of filePath. */
+    line: z.number().int().min(1).optional(),
     symbolIds: z.array(z.string().min(1).max(200)).min(1).max(100).optional(),
     filePath: z.string().min(1).optional(),
     limit: z.number().int().min(1).max(MAX_RESULT_LIMIT).default(20),
@@ -146,7 +150,10 @@ export const queryDocsSchema = (MAX_RESULT_LIMIT: number) => z
       if (v.mode === "search") return Boolean(v.query);
       if (v.mode === "stale") return Boolean(v.symbolIds);
       if (v.mode === "coverage") return Boolean(v.filePath);
-      if (v.mode === "section") return Boolean(v.filePath) && Boolean(v.headingPrefix);
+      if (v.mode === "section") {
+        const addresses = [v.headingPrefix, v.headingContains, v.line].filter((a) => a !== undefined).length;
+        return Boolean(v.filePath) && addresses === 1;
+      }
       if (v.mode === "cites") return Boolean(v.target) || Boolean(v.filePath);
       return true;
     },
@@ -154,7 +161,7 @@ export const queryDocsSchema = (MAX_RESULT_LIMIT: number) => z
       message:
         v.mode === "search" ? "query is required for mode=search"
         : v.mode === "stale" ? "symbolIds is required for mode=stale"
-        : v.mode === "section" ? "filePath and headingPrefix are required for mode=section"
+        : v.mode === "section" ? "filePath and exactly one of headingPrefix, headingContains, line are required for mode=section"
         : v.mode === "cites" ? "target (what is cited) or filePath (whose citations) is required for mode=cites"
         : "filePath is required for mode=coverage",
       path: [v.mode === "section" ? "headingPrefix" : "query"]

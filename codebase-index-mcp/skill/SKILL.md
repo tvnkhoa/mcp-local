@@ -30,7 +30,7 @@ orient(repoId, intent: "<what you are trying to do>", seed?: "<identifier>")
 | Show its code | `get_symbol_source(repoId, symbolId \| name)` — not `read_file` |
 | Grep a pattern | `search_regex(repoId, pattern, filePathPrefix?)` — with the enclosing symbol |
 | Which files mention X | `search_regex(repoId, pattern, outputMode: "files")` |
-| One doc section | `query_docs(repoId, mode: "section", filePath, headingPrefix)` — by heading, not line range |
+| One doc section | `query_docs(repoId, mode: "section", filePath, headingPrefix)` — by heading start; or `headingContains` (a word of the title) or `line` (the section holding line N); give exactly one |
 | Who calls / what it calls | `get_call_chain(repoId, symbolId, direction: "callers" \| "callees", depth)` |
 | What breaks if I change a file | `find_impact_files(repoId, filePath, view: "files" \| "surface")` |
 | Tests to run after my edit | `change_impact(repoId)` |

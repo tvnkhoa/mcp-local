@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { extractSection, listHeadings, matchHeadings, nearestHeadings } from "./docSection.js";
+import { extractSection, headingAtLine, listHeadings, matchHeadings, matchHeadingsContaining, nearestHeadings } from "./docSection.js";
+import { queryDocsSchema } from "../../types/schemas/readMetadata.js";
 
 /**
  * `query_docs{ mode:"section" }` — a section addressed by heading, never by line number. wec.aria's
@@ -117,4 +118,79 @@ test("a single block larger than the whole budget still falls back to a line cut
   const s = extractSection(doc, headings, headings[0]!, 200, []);
   assert.equal(s.truncated, true);
   assert.ok(s.text.split("\n").length > 1, "more than the heading is returned");
+});
+
+// MCP-ISSUE-116 (IX-6): two more ways to address a section.
+
+const BOARD_README = [
+  "# Board", //                       1
+  "",
+  "Intro.",
+  "",
+  "## Commands", //                   5
+  "",
+  "board next",
+  "",
+  "## Discoveries", //                9
+  "",
+  "A discovery is filed with `discover`.",
+  "",
+  "### Format", //                   13
+  "",
+  "One line each.",
+  "",
+  "## Notes" //                      17
+];
+
+test("headingContains finds 'Discoveries' from 'discover' (wec.aria's case)", () => {
+  const m = matchHeadingsContaining(listHeadings(BOARD_README), "discover");
+  assert.equal(m.length, 1);
+  assert.equal(m[0]?.text, "Discoveries");
+  assert.equal(m[0]?.line, 9);
+});
+
+test("headingContains is case-insensitive, markup-blind, and puts an exact heading first", () => {
+  const headings = listHeadings(DOC);
+  assert.equal(matchHeadingsContaining(headings, "TENANT")[0]?.line, 5);
+  const m = matchHeadingsContaining(headings, "sub");
+  assert.equal(m[0]?.line, 13);
+  const withExact = matchHeadingsContaining(listHeadings(["## A thing", "", "## Thing"]), "thing");
+  assert.equal(withExact[0]?.line, 3, "exact beats an earlier longer heading");
+  assert.equal(withExact.length, 2, "ambiguity is returned, not hidden");
+  assert.deepEqual(matchHeadingsContaining(headings, "zzz"), []);
+});
+
+test("headingAtLine returns the innermost section holding the line", () => {
+  const headings = listHeadings(BOARD_README);
+  assert.equal(headingAtLine(headings, 11)?.text, "Discoveries");
+  assert.equal(headingAtLine(headings, 14)?.text, "Format", "inside a subsection: the subsection");
+  assert.equal(headingAtLine(headings, 9)?.text, "Discoveries", "the heading line itself");
+  assert.equal(headingAtLine(headings, 17)?.text, "Notes", "the last line is covered");
+  assert.equal(headingAtLine(headings, 1)?.text, "Board", "the first line is covered");
+});
+
+test("headingAtLine: a line before the first heading is in no section", () => {
+  assert.equal(headingAtLine(listHeadings(["preamble", "", "## First"]), 1), undefined);
+});
+
+test("a section found by line extracts the same text as by heading", () => {
+  const headings = listHeadings(BOARD_README);
+  const s = extractSection(BOARD_README, headings, headingAtLine(headings, 11)!, 10_000, []);
+  assert.equal(s.startLine, 9);
+  assert.equal(s.sectionEndLine, 16);
+  assert.ok(s.text.includes("One line each."));
+});
+
+test("mode=section requires filePath and exactly one of headingPrefix, headingContains, line", () => {
+  const schema = queryDocsSchema(100);
+  const ok = (extra: Record<string, unknown>): boolean =>
+    schema.safeParse({ repoId: "r", mode: "section", filePath: "a.md", ...extra }).success;
+  assert.equal(ok({ headingPrefix: "3.7" }), true);
+  assert.equal(ok({ headingContains: "discover" }), true);
+  assert.equal(ok({ line: 12 }), true);
+  assert.equal(ok({}), false, "none");
+  assert.equal(ok({ headingPrefix: "a", line: 3 }), false, "two");
+  assert.equal(ok({ headingContains: "a", line: 3 }), false, "two");
+  assert.equal(ok({ line: 0 }), false, "lines are 1-based");
+  assert.equal(schema.safeParse({ repoId: "r", mode: "section", headingContains: "x" }).success, false, "filePath required");
 });
