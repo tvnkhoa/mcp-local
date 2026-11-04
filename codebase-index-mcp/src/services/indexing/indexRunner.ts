@@ -111,6 +111,14 @@ export type RunExtras = {
 };
 
 /**
+ * MCP-ISSUE-113: the repoId has no run recorded and no file indexed — a new worktree, a new repo, or one removed and
+ * registered again. The run check comes first: it is one indexed row, and any repo with a run is indexed.
+ */
+export function isUnindexed(store: Pick<GraphStore, "getLatestRun" | "listIndexedFiles">, repoId: string): boolean {
+  return store.getLatestRun(repoId) === null && store.listIndexedFiles(repoId).length === 0;
+}
+
+/**
  * MCP-ISSUE-111: run with the gate's bookkeeping applied around it — the pending re-index set before (a dirty run
  * reads it), the covered tree key and the trigger tag after a run that neither failed nor was cancelled. The two
  * after-writes are best-effort, as they were on the server thread: without them the next query re-checks.
@@ -169,6 +177,18 @@ export function createIndexRunner(options: IndexRunnerOptions): RunIndexAndResol
   const yieldToEventLoop = async (): Promise<void> => {
     await new Promise<void>((resolve) => setImmediate(resolve));
   };
+
+  // MCP-ISSUE-113: a repoId with no index yet goes straight to full. A scoped run of it extracts every file as new,
+  // finds a config file among them (tsconfig, package.json, citations.json) and escalates — indexing the repo twice
+  // (98 s for a wec.aria worktree, of which the first pass was thrown away).
+  if (mode !== "full" && !escalatedBecause && isUnindexed(store, repoId)) {
+    indexLog(`[index-scope] repoId=${repoId} has no index yet: running full instead of ${mode}`);
+    return runIndexAndResolve(repoId, repoPath, "full", docsEnabled, maxFiles, batchSize, {
+      escalatedBecause: `full (no index yet for this repoId; ${mode} requested)`,
+      ...(givenRunId && { runId: givenRunId }),
+      ...(extras.onProgress && { onProgress: extras.onProgress })
+    });
+  }
 
   /** Release J: redo a scoped run as a full one, and say why on the full run's record. */
   const escalateToFull = (reason: string): Promise<IndexRunResult> => {
