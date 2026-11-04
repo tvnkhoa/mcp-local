@@ -170,6 +170,22 @@ export const SCOPE_FORCES_FULL_RUN = /(^|\/)(tsconfig[^/]*\.json|jsconfig[^/]*\.
  */
 export const SCOPE_MAX_DEPENDENT_FILES = 600;
 
+/**
+ * IX-9 U1 (MCP-ISSUE-119): extracted records carry the repoId their extractor was given — the id
+ * namespace. The store writes each record's own `repoId`, so every record is re-bound to the run's
+ * repoId here, in the single funnel all three extraction lanes pass through. No record type carries a
+ * second repo id (cross_repo_deps is built after the run, never extracted), so nothing is exempt.
+ */
+export function bindRunRepoId(
+  extracted: { symbols: { repoId: string }[]; edges: { repoId: string }[]; routes?: { repoId: string }[]; docs?: { repoId: string }[]; mentions?: { repoId: string }[]; literals?: { repoId: string }[] },
+  repoId: string
+): void {
+  for (const list of [extracted.symbols, extracted.edges, extracted.routes, extracted.docs, extracted.mentions, extracted.literals]) {
+    if (!list) continue;
+    for (const record of list) if (record.repoId !== repoId) record.repoId = repoId;
+  }
+}
+
 export async function runIndexPipeline(store: GraphStore, input: RunIndexInput): Promise<IndexRunSummary> {
   const identity: RunIdentity = {
     runId: input.runId ?? randomUUID(),
@@ -184,6 +200,10 @@ export async function runIndexPipeline(store: GraphStore, input: RunIndexInput):
   const started = Date.now();
 
   store.ensureRepository(input.repoId, input.repoPath);
+  // IX-9 U1 (MCP-ISSUE-119): extraction mints stable ids under the repository's id namespace (its own
+  // repoId unless one is set, so an unset namespace changes nothing). Rows are still written under the
+  // run's repoId: `bindRunRepoId` re-binds every extracted record before it is queued for writing.
+  const idNamespace = store.getIdNamespace(input.repoId);
 
   const {
     maxFiles, includeDocs, batchSize, subtxSize, checkpointEveryNBatches,
@@ -407,6 +427,7 @@ export async function runIndexPipeline(store: GraphStore, input: RunIndexInput):
           c.edgesDroppedByCallCap += drops.droppedByCallCap;
           c.edgesDroppedByTypeRefCap += drops.droppedByTypeRefCap;
         }
+        bindRunRepoId(extracted, input.repoId);
         writtenPaths.add(relativePath);
         pendingWrites.push({
           file: {
@@ -555,7 +576,7 @@ export async function runIndexPipeline(store: GraphStore, input: RunIndexInput):
           const isDotnetProject = decision.language === "csproj" || decision.language === "sln";
           if (isDotnetProject) {
             const extracted = extractDotnetProjectData({
-              repoId: input.repoId,
+              repoId: idNamespace,
               filePath: relativePath,
               language: language as "csproj" | "sln",
               source: safeContent
@@ -572,7 +593,7 @@ export async function runIndexPipeline(store: GraphStore, input: RunIndexInput):
           if (shouldUseWorkerLane) {
             largeExtractionJobs.push(
               batchPool.extract({
-                repoId: input.repoId,
+                repoId: idNamespace,
                 filePath: relativePath,
                 language,
                 source: safeContent,
@@ -589,7 +610,7 @@ export async function runIndexPipeline(store: GraphStore, input: RunIndexInput):
           }
 
           const extracted = extractGraphData({
-            repoId: input.repoId,
+            repoId: idNamespace,
             filePath: relativePath,
             language,
             source: safeContent,
