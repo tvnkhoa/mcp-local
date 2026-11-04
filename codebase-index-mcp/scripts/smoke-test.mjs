@@ -109,7 +109,8 @@ async function main() {
       repoId,
       repoPath,
       mode: "incremental",
-      maxFiles: 200
+      // Whole server: a 200-file cap made the probes depend on how many docs sort before src/ (MCP-ISSUE-110 follow-up).
+      maxFiles: 2000
     }
   }, undefined, { timeout: 180_000 });
 
