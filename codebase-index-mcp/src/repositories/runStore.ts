@@ -319,6 +319,9 @@ export function getLatestFullRunVersion(db: Database.Database, repoId: string): 
   return row?.v ?? null;
 }
 
+/** MCP-ISSUE-111: set once every FTS table is in step with its content; from then on runs keep it per file. */
+export const FTS_PER_FILE_META_KEY = "fts_per_file";
+
 /** MCP-ISSUE-111: a DB-wide fact from `index_meta`, or null. */
 export function getIndexMeta(db: Database.Database, key: string): string | null {
   const row = db.prepare(`select value from index_meta where key = ?`).get(key) as { value: string } | undefined;

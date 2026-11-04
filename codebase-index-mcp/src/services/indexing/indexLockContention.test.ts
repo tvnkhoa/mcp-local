@@ -217,6 +217,25 @@ test("MCP-ISSUE-111: a full run keeps FTS per file — deleted files leave it, a
     } finally {
       db.close();
     }
+
+    // Follow-up: remove_repository on a per-file DB forgets only that repo's FTS rows — no all-repo rebuild.
+    const store = new GraphStore(dbPath);
+    try {
+      store.purgeRepository("b");
+    } finally {
+      store.close();
+    }
+    db = new Database(dbPath);
+    try {
+      integrity(db);
+      for (const [table, v] of Object.entries(ftsVsContent(db, "a"))) assert.deepEqual(v.fts, v.content, `${table}: repo a untouched by purging b`);
+      for (const t of ["symbols_fts", "literals_fts", "docs_fts"]) {
+        const total = (db.prepare(`select count(*) as n from ${t}_docsize`).get() as { n: number }).n;
+        assert.equal(total, ftsVsContent(db, "a")[t]!.content.length, `${t}: no row of b left`);
+      }
+    } finally {
+      db.close();
+    }
   } finally {
     rmSync(repoA, { recursive: true, force: true });
     rmSync(repoB, { recursive: true, force: true });

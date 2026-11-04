@@ -6,6 +6,8 @@ import { rebuildLiteralsFtsImpl } from "./literalsStore.js";
 import { rebuildFtsImpl } from "../services/search/symbolSearchFts.js";
 import { deleteVectorsByRepo } from "./vectorStore.js";
 import { immediateTransaction } from "./sqliteTx.js";
+import { ftsForgetRepo } from "./scopedRunStore.js";
+import { FTS_PER_FILE_META_KEY, getIndexMeta } from "./runStore.js";
 
 /**
  * MCP-ISSUE-105: drop one registered repo from the index.
@@ -40,12 +42,12 @@ export const PURGED_BY_CROSS_REPO_COLUMNS = { cross_repo_deps: ["from_repo_id", 
 
 /**
  * Columns named `repo_id` that are deliberately not deleted from, with the reason. FTS5 tables are
- * external-content views over a table above; they are rebuilt after the delete, not edited row by row.
+ * external-content views over a table above; the repo's rows are forgotten before the delete (MCP-ISSUE-111).
  */
 export const PURGE_EXEMPT: Record<string, string> = {
-  "symbols_fts.repo_id": "external-content FTS over symbols, rebuilt after the delete",
-  "docs_fts.repo_id": "external-content FTS over docs, rebuilt after the delete",
-  "literals_fts.repo_id": "external-content FTS over string_literals, rebuilt after the delete",
+  "symbols_fts.repo_id": "external-content FTS over symbols, the repo's rows forgotten before the delete",
+  "docs_fts.repo_id": "external-content FTS over docs, the repo's rows forgotten before the delete",
+  "literals_fts.repo_id": "external-content FTS over string_literals, the repo's rows forgotten before the delete",
   "vec_symbols.repo_id": "sqlite-vec partition key, deleted by deleteVectorsByRepo"
 };
 
@@ -66,7 +68,12 @@ export type PurgeCounts = Record<string, number>;
  */
 export function purgeRepositoryImpl(db: Database.Database, repoId: string): PurgeCounts {
   const counts: PurgeCounts = {};
+  // MCP-ISSUE-111 follow-up: on a DB whose FTS is kept per file (index_meta.fts_per_file), forget only this repo's FTS
+  // rows, in the delete's transaction. The all-repo rebuild held the write lock for seconds on the shared DB; it stays
+  // only for a DB an older build may have left inconsistent.
+  const perFile = getIndexMeta(db, FTS_PER_FILE_META_KEY) !== null;
   immediateTransaction(db, () => {
+    if (perFile) ftsForgetRepo(db, repoId);
     // Children first: they are found through rows the parent delete removes.
     for (const c of CHILD_TABLES) {
       counts[c.table] = db
@@ -84,10 +91,12 @@ export function purgeRepositoryImpl(db: Database.Database, repoId: string): Purg
   const mapped = db.prepare(`select count(*) as n from vec_symbol_map where repo_id = ?`).get(repoId) as { n: number };
   deleteVectorsByRepo(db, repoId); // also clears vec_symbol_map
   counts.vec_symbol_map = mapped.n;
-  rebuildFtsImpl(db);
-  rebuildDocsFtsImpl(db);
-  rebuildLiteralsFtsImpl(db);
-  rebuildCommentsFtsImpl(db);
+  if (!perFile) {
+    rebuildFtsImpl(db);
+    rebuildDocsFtsImpl(db);
+    rebuildLiteralsFtsImpl(db);
+    rebuildCommentsFtsImpl(db);
+  }
   counts.repositories = db.prepare(`delete from repositories where repo_id = ?`).run(repoId).changes;
   return counts;
 }

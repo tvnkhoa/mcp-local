@@ -23,6 +23,7 @@ import { runIndexPipeline, INDEX_VERSION, SCOPE_FORCES_FULL_RUN, type Performanc
 import { mentionNameForms, pathKeysFor, tokenParts } from "../../repositories/scopedRunStore.js";
 import type { IndexMode, IndexRunResult } from "../../types/index.js";
 import type { RunBookkeeping } from "../../middleware/freshness.js";
+import { FTS_PER_FILE_META_KEY } from "../../repositories/runStore.js";
 import {
   buildSkippedRunSummary,
   evaluateIncrementalSkip,
@@ -33,8 +34,8 @@ import {
   shouldDropEdgeIndexesForResolve
 } from "./runPolicy.js";
 
-/** MCP-ISSUE-111: set once every FTS table is in step with its content; from then on runs keep it per file. */
-export const FTS_PER_FILE_META_KEY = "fts_per_file";
+/** MCP-ISSUE-111: re-exported for the runner's tests; the key lives with `index_meta` in runStore.ts. */
+export { FTS_PER_FILE_META_KEY };
 
 /** Tuning knobs the pipeline needs, all sourced from env at start-up. */
 export interface IndexRunnerLimits {

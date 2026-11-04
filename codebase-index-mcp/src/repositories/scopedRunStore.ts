@@ -417,6 +417,16 @@ export function ftsIndexFile(db: Database.Database, repoId: string, filePath: st
   }
 }
 
+/**
+ * MCP-ISSUE-111 follow-up: forget every FTS row of one repo (remove_repository), while its content rows still hold the
+ * indexed values — the per-repo counterpart of {@link ftsForgetFile}, so no other repo's FTS is re-read.
+ */
+export function ftsForgetRepo(db: Database.Database, repoId: string): void {
+  for (const t of FTS_BY_FILE) {
+    db.prepare(`insert into ${t.fts}(${t.fts}, rowid, ${t.cols}) select 'delete', rowid, ${t.cols} from ${t.table} where repo_id = ?`).run(repoId);
+  }
+}
+
 /** FTS5's own consistency check of every external-content table against its content; throws on a mismatch. */
 export function ftsIntegrityCheck(db: Database.Database): void {
   for (const t of FTS_BY_FILE) db.prepare(`insert into ${t.fts}(${t.fts}) values('integrity-check')`).run();

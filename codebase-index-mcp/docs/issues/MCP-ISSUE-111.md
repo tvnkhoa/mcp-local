@@ -1,7 +1,27 @@
 ## MCP-ISSUE-111 — "database is locked" on index runs and reads while another repo indexes (one writer per DB, bookkeeping off the read path)
 
-- **Status:** ✅ FIXED 2026-11-04 (IX-1, wec.aria request D1/D2). Server log evidence pending: the 4 Nov 02:27Z lines in
-  `~/.claude/mcp/http/codebase-index.log` are behind a deny rule for members; the cause below is reproduced on a scratch DB.
+- **Status:** ✅ FIXED 2026-11-04 (IX-1, wec.aria request D1/D2). Cause read from the server log (below) and reproduced
+  on a scratch DB.
+
+### Server log (`~/.claude/mcp/http/codebase-index.log`, 4 Nov, UTC, served build a5a3702)
+
+```
+1485  ↻ index wec.be-wt-ar-xmcp-6-9 · incremental run escalated to full · 3257 dependent files > 600      (02:24, a gate refresh)
+1487  ↻ index wec.aria-wt-ops · incremental run escalated to full · .codebase-index/citations.json changed
+1489  ✓ index wec.aria-wt-ops · 3283 files · 17411 symbols · 15502 calls · 101.4s
+1490  index_repository elapsedMs 148680 (02:27:27)
+1493  ✗ index wec.aria-wt-pages · failed · database is locked
+1494  02:28:11.730Z tool_threw index_repository code internal_error detail "SqliteError: database is locked"
+1495  index_repository elapsedMs 40108, isError, INTERNAL_ERROR
+1497  02:29:12 remove_repository: a refresh of 'wec.be-wt-ar-xmcp-6-9' holds its lock
+```
+
+The error is better-sqlite3's `SqliteError` "database is locked" (SQLITE_BUSY); the server logs no stack. The failing
+`index_repository` of wt-pages ran 40.1 s — past `busy_timeout` (30 s) — while a full run of another repo
+(wec.be-wt-ar-xmcp-6-9, a query-triggered refresh escalated to full, still holding its lock at 02:29) was writing: two
+writers in one process, which the per-repo queue allowed (cause 1), the later one failing after waiting out the busy
+timeout. wt-ops's own run (148.7 s) shows the double pass of MCP-ISSUE-113. The run was on the server thread
+(MCP-ISSUE-112), so the 40 s wait also blocked every other call.
 - **Scenario:** wec.aria, 4 Nov. `index_repository` of a new worktree failed "database is locked" while another worktree
   was indexing; 1 of 12 read errors in two days was the same message. Every repo shares one SQLite file
   (WAL, `busy_timeout` 30 s) and one HTTP server process serves every session.
@@ -66,3 +86,7 @@
   still running an older build writes full runs without that upkeep and rebuilds every FTS table at its end; if such a
   run dies between its writes and that rebuild, FTS stays stale until the marker is deleted (a newer build's next full
   run then rebuilds once).
+- `remove_repository` no longer rebuilds every FTS table: on a per-file DB (`index_meta.fts_per_file`) it forgets only the
+  removed repo's FTS rows, inside the delete's transaction (`ftsForgetRepo`, `repoPurgeStore.ts`); the all-repo rebuild
+  stays only for a DB without the marker. Guarded: `indexLockContention.test.ts` (purging repo b leaves repo a's FTS
+  rows exact and none of b's).
