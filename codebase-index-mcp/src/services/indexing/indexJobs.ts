@@ -49,6 +49,8 @@ export type IndexJob = {
   queuedAt: string;
   startedAt?: string;
   finishedAt?: string;
+  /** Set on the answer to a request that joined a job already queued or running for its repo (it ran no new one). */
+  coalesced?: boolean;
   /** While queued: why it has not started (another run ahead, or free RAM below the floor). */
   waitingFor?: string;
   phase?: string;
@@ -74,9 +76,18 @@ export type IndexJobQueueOptions = {
   ramRecheckMs?: number;
   keepFinished?: number;
   now?: () => number;
+  /**
+   * A run still going after this many ms fails its job (`CODEBASE_INDEX_RUN_TIMEOUT_MS`); 0 = no limit. Without it a
+   * hung run held the job `running` and — through the DB-wide queue — every later run, forever.
+   */
+  runTimeoutMs?: number;
+  /** Called once when a run timed out, to stop it (the server terminates the worker, which rejects the run). */
+  onRunTimeout?: (job: Readonly<IndexJob>) => void;
 };
 
 export const DEFAULT_MIN_FREE_RAM_MB = 8192;
+/** Generous on purpose: the largest measured full run (wec.aria, ~3300 files) took ~100 s. */
+export const DEFAULT_RUN_TIMEOUT_MS = 30 * 60_000;
 /** `wait: true` blocks at most this long, then answers with the job as it stands (IX-2: under the 120 s client ceiling). */
 export const MAX_WAIT_MS = 100_000;
 
@@ -96,8 +107,16 @@ export class IndexJobQueue {
     this.now = options.now ?? Date.now;
   }
 
-  /** Queue a run; it starts when the queue is free and RAM allows. Returns a snapshot of the job. */
+  /**
+   * Queue a run; it starts when the queue is free and RAM allows. Returns a snapshot of the job. A request for a repo
+   * that already has a job queued or running in the same mode (or a full one) joins it: the answer is that job, marked
+   * `coalesced`, and no second run is queued.
+   */
   enqueue(request: IndexJobRequest): IndexJob {
+    const same = this.order
+      .map((id) => this.jobs.get(id))
+      .find((j) => j !== undefined && j.repoId === request.repoId && (j.state === "queued" || j.state === "running") && (j.mode === request.mode || j.mode === "full"));
+    if (same) return { ...this.snapshot(same), coalesced: true };
     const runId = randomUUID();
     const job: IndexJob = {
       runId,
@@ -193,8 +212,41 @@ export class IndexJobQueue {
     delete job.waitingFor;
     job.phase = "starting";
     this.markWaiting(`another index run is in progress (${nextId})`);
+    let settled = false;
+    const finish = (apply: () => void): void => {
+      if (settled) return;
+      settled = true;
+      if (timeout) clearTimeout(timeout);
+      apply();
+      job.finishedAt = new Date(this.now()).toISOString();
+      delete job.phase;
+      this.running = null;
+      this.requests.delete(nextId);
+      for (const done of this.waiters.get(nextId) ?? []) done();
+      this.waiters.delete(nextId);
+      this.listeners.delete(nextId);
+      this.trim();
+      this.pump();
+    };
+    const limit = this.options.runTimeoutMs ?? 0;
+    const timeout =
+      limit > 0
+        ? setTimeout(() => {
+            finish(() => {
+              job.state = "failed";
+              job.error = `the run was still going after CODEBASE_INDEX_RUN_TIMEOUT_MS=${String(limit)} ms; it was stopped`;
+            });
+            try {
+              this.options.onRunTimeout?.(job);
+            } catch {
+              // Stopping is best-effort; the job is already failed and the queue moves on.
+            }
+          }, limit)
+        : undefined;
+    timeout?.unref();
     void this.options
       .execute(job, request, (p) => {
+        if (settled) return;
         job.phase = p.phase;
         if (p.progress !== undefined) job.progress = p.progress;
         if (p.total !== undefined) job.total = p.total;
@@ -207,27 +259,18 @@ export class IndexJobQueue {
         }
       })
       .then(
-        (result) => {
-          job.result = result;
-          job.state = result.status === "failed" || result.status === "cancelled" ? "failed" : "ok";
-          if (job.state === "failed") job.error = `the run ended ${String(result.status)}`;
-        },
-        (error: unknown) => {
-          job.state = "failed";
-          job.error = error instanceof Error ? error.message : String(error);
-        }
-      )
-      .finally(() => {
-        job.finishedAt = new Date(this.now()).toISOString();
-        delete job.phase;
-        this.running = null;
-        this.requests.delete(nextId);
-        for (const done of this.waiters.get(nextId) ?? []) done();
-        this.waiters.delete(nextId);
-        this.listeners.delete(nextId);
-        this.trim();
-        this.pump();
-      });
+        (result) =>
+          finish(() => {
+            job.result = result;
+            job.state = result.status === "failed" || result.status === "cancelled" ? "failed" : "ok";
+            if (job.state === "failed") job.error = `the run ended ${String(result.status)}`;
+          }),
+        (error: unknown) =>
+          finish(() => {
+            job.state = "failed";
+            job.error = error instanceof Error ? error.message : String(error);
+          })
+      );
   }
 
   private markWaiting(reason: string): void {

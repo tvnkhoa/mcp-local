@@ -80,6 +80,60 @@ test("IX-2: a job does not START while free RAM is under the floor — it stays 
   }
 });
 
+test("follow-up 5: a run past runTimeoutMs fails its job, is stopped once, and the next job starts", async () => {
+  const stopped: string[] = [];
+  let ran = 0;
+  const queue = new IndexJobQueue({
+    minFreeRamMb: 0,
+    runTimeoutMs: 30,
+    onRunTimeout: (job) => stopped.push(job.repoId),
+    execute: async (job, req) => {
+      ran++;
+      if (req.repoId === "hung") return new Promise<IndexRunResult>(() => undefined);
+      return { runId: job.runId, status: "ok" } as IndexRunResult;
+    }
+  });
+  const hung = queue.enqueue(request("hung"));
+  const next = queue.enqueue(request("next"));
+  const failed = await queue.wait(hung.runId, 2_000);
+  assert.equal(failed?.state, "failed");
+  assert.match(failed?.error ?? "", /CODEBASE_INDEX_RUN_TIMEOUT_MS=30 ms/);
+  assert.deepEqual(stopped, ["hung"]);
+  assert.equal((await queue.wait(next.runId, 2_000))?.state, "ok", "the queue is not held by the hung run");
+  assert.equal(ran, 2);
+});
+
+test("follow-up 8: a second request for a repo with a job queued or running joins it; another mode or repo does not", async () => {
+  const gate = deferred();
+  let ran = 0;
+  const queue = new IndexJobQueue({
+    minFreeRamMb: 0,
+    execute: async (job) => {
+      ran++;
+      await gate.promise;
+      return { runId: job.runId, status: "ok" } as IndexRunResult;
+    }
+  });
+  const a = queue.enqueue(request("a"));
+  const again = queue.enqueue(request("a"));
+  assert.equal(again.runId, a.runId);
+  assert.equal(again.coalesced, true);
+  const b = queue.enqueue(request("b"));
+  const bAgain = queue.enqueue(request("b"));
+  assert.equal(bAgain.runId, b.runId, "a queued job is joined too");
+  const bDirty = queue.enqueue({ ...request("b"), mode: "dirty" });
+  assert.equal(bDirty.runId, b.runId, "a full job covers a scoped request");
+  const cInc = queue.enqueue({ ...request("c"), mode: "incremental" });
+  const cFull = queue.enqueue(request("c"));
+  assert.notEqual(cFull.runId, cInc.runId, "a full request is not covered by a queued incremental job");
+  gate.resolve();
+  await queue.wait(cFull.runId, 2_000);
+  assert.equal(ran, 4, "a, b, c incremental, c full — no duplicate runs");
+  const later = queue.enqueue(request("a"));
+  assert.notEqual(later.runId, a.runId, "a finished job is not joined");
+  await queue.wait(later.runId, 2_000);
+});
+
 test("IX-2: wait returns the job as it stands when the bound passes; a failed or throwing run is failed with its error", async () => {
   const gate = deferred();
   const queue = new IndexJobQueue({

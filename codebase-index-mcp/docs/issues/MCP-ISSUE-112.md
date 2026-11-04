@@ -44,3 +44,12 @@
   answers unknown unless the run was recorded). Re-run `index_repository`.
 - Free RAM is `os.freemem()` — on Windows the available physical memory.
 
+
+### Follow-up (2026-11-04, leader review)
+
+- **Run timeout:** a job whose run is still going after `CODEBASE_INDEX_RUN_TIMEOUT_MS` (default 1 800 000 = 30 min,
+  0 = none) fails with the reason, and the server terminates the refresh worker (`RefreshWorkerClient.abort`), which
+  rejects the run and releases the DB-wide queue; the next run spawns a fresh worker. Before, a hung run held its job
+  `running` and every later run behind it forever. Guarded: `indexJobs.test.ts` "a run past runTimeoutMs fails its job".
+- **Coalescing:** a request for a repo that already has a job queued or running in the same mode, or a full one, answers
+  that job (`coalesced: true`) instead of queueing a duplicate. Guarded: `indexJobs.test.ts` "a second request … joins it".

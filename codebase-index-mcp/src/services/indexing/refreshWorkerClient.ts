@@ -94,6 +94,16 @@ export class RefreshWorkerClient {
     return this.pending.size;
   }
 
+  /**
+   * MCP-ISSUE-112 follow-up: stop a hung run — terminate the worker and reject every outstanding run with `reason`. The
+   * next run spawns a fresh worker. Used by the index-job run timeout.
+   */
+  async abort(reason: string): Promise<void> {
+    const worker = this.worker;
+    this.fail(new Error(reason));
+    if (worker) await worker.terminate();
+  }
+
   /** Terminate the worker (server shutdown, tests). Outstanding runs are rejected. */
   async dispose(): Promise<void> {
     const worker = this.worker;

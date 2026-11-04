@@ -23,7 +23,7 @@ import { GraphStore } from "./repositories/graphStore.js";
 import { assertPathAllowed, clamp } from "./middleware/indexGuardrails.js";
 import { WatchManager } from "./services/watch/watchManager.js";
 import type { IndexRunnerLimits, RunIndexAndResolve } from "./services/indexing/indexRunner.js";
-import { DEFAULT_MIN_FREE_RAM_MB, IndexJobQueue } from "./services/indexing/indexJobs.js";
+import { DEFAULT_MIN_FREE_RAM_MB, DEFAULT_RUN_TIMEOUT_MS, IndexJobQueue } from "./services/indexing/indexJobs.js";
 import { RefreshWorkerClient } from "./services/indexing/refreshWorkerClient.js";
 import { newerBuildRefusal } from "./services/indexing/runPolicy.js";
 import { INDEX_VERSION } from "./services/indexing/indexPipeline.js";
@@ -96,6 +96,8 @@ const QUERY_REFRESH_ENABLED = booleanFromEnv("CODEBASE_INDEX_QUERY_REFRESH_ENABL
 const RESPECT_GITIGNORE = booleanFromEnv("CODEBASE_INDEX_RESPECT_GITIGNORE", true);
 /** MCP-ISSUE-112: an index job does not START while free RAM is below this many MB (0 disables the floor). */
 const MIN_FREE_RAM_MB = Math.max(0, numberFromEnv("CODEBASE_INDEX_MIN_FREE_RAM_MB", DEFAULT_MIN_FREE_RAM_MB));
+/** MCP-ISSUE-112 follow-up: an index job's run still going after this many ms is stopped and fails (0 = no limit). */
+const RUN_TIMEOUT_MS = Math.max(0, numberFromEnv("CODEBASE_INDEX_RUN_TIMEOUT_MS", DEFAULT_RUN_TIMEOUT_MS));
 const QUERY_REFRESH_BUDGET_MS = clamp(numberFromEnv("CODEBASE_INDEX_QUERY_REFRESH_BUDGET_MS", 5_000), 1, 120_000);
 /**
  * R3 exact: the TypeScript LanguageService lane of find_field_accesses (lazy; TS/JS fields only).
@@ -223,6 +225,9 @@ const runIndexAndResolve: RunIndexAndResolve = (repoId, repoPath, mode, docsEnab
  */
 const indexJobs = new IndexJobQueue({
   minFreeRamMb: MIN_FREE_RAM_MB,
+  runTimeoutMs: RUN_TIMEOUT_MS,
+  // The worker is the only thing that can stop a run; terminating it rejects the run, which releases the DB-wide queue.
+  onRunTimeout: (job) => void refreshWorker.abort(`index run ${job.runId} of ${job.repoId} stopped: CODEBASE_INDEX_RUN_TIMEOUT_MS=${String(RUN_TIMEOUT_MS)} ms`),
   execute: (job, request, onProgress) =>
     runIndexAndResolve(request.repoId, request.repoPath, request.mode, request.docsEnabled, request.maxFiles, request.batchSize, {
       runId: job.runId,

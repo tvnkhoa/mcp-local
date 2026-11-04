@@ -355,10 +355,11 @@ test("the env contract covers every server, and grew as S-35 intended", () => {
   // answers TS/JS fields from a TypeScript LanguageService, within a time and memory cap.
   // 48 -> 50 with CODEBASE_INDEX_HTTP_PORT / _HTTP_TOKEN (R4): one served process over streamable HTTP.
   // 50 -> 51 with CODEBASE_INDEX_MIN_FREE_RAM_MB (MCP-ISSUE-112): an index job does not start under that free RAM.
+  // 51 -> 52 with CODEBASE_INDEX_RUN_TIMEOUT_MS (MCP-ISSUE-112 follow-up): a hung index job is stopped and fails.
   // board-mcp arrived with 3: BOARD_REPO_ROOT, BOARD_WRITE_ENABLED, BOARD_CALL_TIMEOUT_MS.
   const counts = Object.fromEntries(SERVERS.map((s) => [s.key, s.env.length]));
   assert.deepEqual(counts, {
-    "codebase-index": 51,
+    "codebase-index": 52,
     "postgres-mcp": 35,
     "observe-mcp": 31,
     "bitbucket-mcp": 16,
