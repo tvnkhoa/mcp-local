@@ -20,6 +20,7 @@ import { appendFileSync, mkdirSync, writeFileSync } from "fs";
 import { dirname, join } from "path";
 import { makeTempDir } from "./_fixtures.mjs";
 import { attachServerStderr } from "./_serverStderr.mjs";
+import "./_indexWait.mjs";
 
 let passed = 0, failed = 0;
 function assert(cond, label, detail = "") {
@@ -111,7 +112,6 @@ export const t = Panel;
   "tools/package.json": JSON.stringify({ name: "fx-tools", type: "module" }, null, 2),
   "tools/ledger-check.test.mjs": `import test from 'node:test';
 import { appendEntry } from '../packages/core/src/ledger.ts';
-import "./_indexWait.mjs";
 test('ledger', () => appendEntry([], 'x'));
 `
 };

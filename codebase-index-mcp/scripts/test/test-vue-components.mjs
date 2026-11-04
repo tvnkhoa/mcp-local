@@ -19,6 +19,7 @@ import { mkdirSync, writeFileSync } from "fs";
 import { dirname, join } from "path";
 import { makeTempDir } from "./_fixtures.mjs";
 import { attachServerStderr } from "./_serverStderr.mjs";
+import "./_indexWait.mjs";
 
 let passed = 0, failed = 0;
 function assert(cond, label, detail = "") {
@@ -40,7 +41,6 @@ import ReadFailure from './components/ReadFailure.vue'
 import OnlyInTemplate from './components/OnlyInTemplate.vue'
 import DynamicPanel from './components/DynamicPanel.vue'
 import { formatTitle } from './lib/format'
-import "./_indexWait.mjs";
 
 const show = ref(true)
 const view = ref('card')
