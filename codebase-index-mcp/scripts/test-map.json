@@ -227,6 +227,15 @@
       "@dist",
       "codebase-index-mcp/src/tools/handlers/impactHandler.ts"
     ],
+    "test:index-jobs": [
+      "codebase-index-mcp/scripts/test/test-index-jobs.mjs",
+      "@dist"
+    ],
+    "test:index-lock-contention": [
+      "codebase-index-mcp/scripts/test/test-index-lock-contention.mjs",
+      "@dist",
+      "codebase-index-mcp/src/tools/handlers/searchHandler.ts"
+    ],
     "test:interface-dispatch": [
       "codebase-index-mcp/scripts/test/test-interface-dispatch.mjs",
       "@dist"
@@ -303,6 +312,11 @@
       "codebase-index-mcp/scripts/test/test-refactor-preview-profiles.mjs",
       "@dist",
       "@self"
+    ],
+    "test:register-worktree": [
+      "codebase-index-mcp/scripts/test/test-register-worktree.mjs",
+      "@dist",
+      "codebase-index-mcp/src/tools/handlers/searchHandler.ts"
     ],
     "test:route-map-roundtrip": [
       "codebase-index-mcp/scripts/test/test-route-map-roundtrip.mjs",
