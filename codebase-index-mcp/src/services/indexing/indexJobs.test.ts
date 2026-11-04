@@ -87,7 +87,8 @@ test("follow-up 5: a run past runTimeoutMs fails its job, is stopped once, and t
     minFreeRamMb: 0,
     runTimeoutMs: 30,
     onRunTimeout: (job) => stopped.push(job.repoId),
-    execute: async (job, req) => {
+    execute: async (job, req, _p, control) => {
+      control.started();
       ran++;
       if (req.repoId === "hung") return new Promise<IndexRunResult>(() => undefined);
       return { runId: job.runId, status: "ok" } as IndexRunResult;
@@ -152,6 +153,49 @@ test("review follow-up A: a request differing in path, docs or file cap is not j
   }
   gate.resolve();
   for (const j of queue.pending()) await queue.wait(j.runId, 2_000);
+});
+
+test("review follow-up C: the run timeout counts from started(), and a job failed before its run starts never runs", async () => {
+  const waiting = deferred();
+  let started = 0;
+  const seen: boolean[] = [];
+  const queue = new IndexJobQueue({
+    minFreeRamMb: 0,
+    runTimeoutMs: 40,
+    execute: async (job, req, _p, control) => {
+      if (req.repoId === "slow-queue") {
+        await new Promise((r) => setTimeout(r, 120)); // waits in the DB-wide queue: no clock yet
+        seen.push(control.cancelled());
+        control.started();
+        started++;
+        return { runId: job.runId, status: "ok" } as IndexRunResult;
+      }
+      await waiting.promise;
+      seen.push(control.cancelled());
+      return { runId: job.runId, status: "ok" } as IndexRunResult;
+    }
+  });
+  const slow = queue.enqueue(request("slow-queue"));
+  assert.equal((await queue.wait(slow.runId, 2_000))?.state, "ok", "120 ms in the queue is not run time");
+  assert.deepEqual(seen, [false]);
+  assert.equal(started, 1);
+
+  // A job that times out after started() is cancelled for the executor too.
+  const q2 = new IndexJobQueue({
+    minFreeRamMb: 0,
+    runTimeoutMs: 20,
+    execute: async (_job, _req, _p, control) => {
+      control.started();
+      await new Promise((r) => setTimeout(r, 80));
+      seen.push(control.cancelled());
+      return new Promise<IndexRunResult>(() => undefined);
+    }
+  });
+  const timed = q2.enqueue(request("t"));
+  assert.equal((await q2.wait(timed.runId, 2_000))?.state, "failed");
+  await new Promise((r) => setTimeout(r, 100));
+  assert.deepEqual(seen, [false, true], "after the timeout the executor sees cancelled() and must not start anything");
+  waiting.resolve();
 });
 
 test("IX-2: wait returns the job as it stands when the bound passes; a failed or throwing run is failed with its error", async () => {

@@ -55,6 +55,8 @@ export type RefreshWorkerClientOptions = {
 
 type Pending = {
   repoId: string;
+  /** The index job's runId, when the run is one (review follow-up C: `abortRun` targets it). */
+  runId?: string;
   resolve: (result: IndexRunResult) => void;
   reject: (error: Error) => void;
   onProgress?: (progress: number, total: number | undefined, message: string) => void;
@@ -95,13 +97,23 @@ export class RefreshWorkerClient {
   }
 
   /**
-   * MCP-ISSUE-112 follow-up: stop a hung run — terminate the worker and reject every outstanding run with `reason`. The
-   * next run spawns a fresh worker. Used by the index-job run timeout.
+   * Review follow-up C: stop ONE hung run, the one recorded under `runId`. Answers false — and touches nothing — when
+   * that run is not in the worker (not started yet, or already over). Otherwise the worker is terminated (the only way
+   * to stop a synchronous SQLite stretch), the run is rejected with `reason`, and the next run spawns a fresh worker.
+   * Runs reach the worker one at a time (the DB-wide queue), so no other run is in flight; one that were would be
+   * rejected as "worker restarted", never left hanging.
    */
-  async abort(reason: string): Promise<void> {
+  async abortRun(runId: string, reason: string): Promise<boolean> {
+    const target = [...this.pending.entries()].find(([, p]) => p.runId === runId);
+    if (!target || !this.worker) return false;
     const worker = this.worker;
-    this.fail(new Error(reason));
-    if (worker) await worker.terminate();
+    const others = [...this.pending.entries()].filter(([id]) => id !== target[0]);
+    this.worker = null;
+    this.pending.clear();
+    target[1].reject(new Error(reason));
+    for (const [, p] of others) p.reject(new Error(`the refresh worker was restarted to stop timed-out run ${runId}`));
+    await worker.terminate();
+    return true;
   }
 
   /** Terminate the worker (server shutdown, tests). Outstanding runs are rejected. */
@@ -133,7 +145,7 @@ export class RefreshWorkerClient {
         return;
       }
       const id = this.nextId++;
-      this.pending.set(id, { repoId, resolve, reject, ...(onProgress && { onProgress }) });
+      this.pending.set(id, { repoId, resolve, reject, ...(runId && { runId }), ...(onProgress && { onProgress }) });
       worker.postMessage({
         kind: "run",
         id,

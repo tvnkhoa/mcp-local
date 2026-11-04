@@ -59,3 +59,14 @@
   smoke-test and verify-enhancements poll past `wait: true`'s 100 s bound; index-self (30 min) and adoption/perf
   (`INDEX_TIMEOUT_MS`) poll with deadlines and keep the RAM floor, being real runs. Guarded: `test:index-jobs` (e) — a
   server under its floor answers `queued` with the reason, and the bounded wait gives up.
+- **Run timeout, corrected (re-review C):** the clock starts when the job's run leaves the DB-wide queue for the worker
+  (`IndexJobControl.started`), not when the job is dequeued; a timeout stops only that run (`RefreshWorkerClient.abortRun`
+  terminates the worker only when that runId is the run in it), and a job already failed never starts its run
+  (`control.cancelled()` is checked inside the queue slot). Guarded: `indexJobs.test.ts` "the run timeout counts from
+  started()", `refreshWorkerClient.test.ts` "abortRun stops only the named run".
+- **Coalescing, narrowed (re-review A):** a job answers a new request only when repoId, repoPath, docs setting, file
+  cap and mode (or a full job) all match (`coversRequest`).
+- **Open (re-review D, not fixed):** terminating the worker in the middle of a synchronous SQLite statement may leave the
+  write lock with the OS until the process thread is torn down, and a run stopped between dropping and re-creating the
+  edge indexes (`shouldDropEdgeIndexesForResolve`) leaves them missing until the next schema init (server restart) or
+  full run. Neither is handled; a timed-out run should be followed by a server restart until it is.

@@ -55,7 +55,8 @@ function ftsVsContent(db: Database.Database, repoId: string): Record<string, { f
   const tables = [
     { fts: "symbols_fts", table: "symbols", cols: "name, signature, symbol_id" },
     { fts: "literals_fts", table: "string_literals", cols: "value, literal_id" },
-    { fts: "docs_fts", table: "docs", cols: "text, doc_id" }
+    { fts: "docs_fts", table: "docs", cols: "text, doc_id" },
+    { fts: "comments_fts", table: "code_comments", cols: "text" }
   ];
   const out: Record<string, { fts: string[]; content: string[] }> = {};
   for (const t of tables) {
@@ -179,11 +180,11 @@ test("MCP-ISSUE-111: a full run keeps FTS per file — deleted files leave it, a
   const work = mkdtempSync(path.join(tmpdir(), "cim-ftsfull-"));
   const dbPath = path.join(work, "index.db");
   const repoA = makeRepo({
-    "src/a.ts": "export function alphaOne(): number {\n  return 1;\n}\nexport const label = 'alpha literal value';\n",
+    "src/a.ts": "// alpha comment that the comments lane indexes\nexport function alphaOne(): number {\n  return 1;\n}\nexport const label = 'alpha literal value';\n",
     "src/b.ts": "import { alphaOne } from './a';\nexport function betaTwo(): number {\n  return alphaOne() + 1;\n}\n",
     "docs/readme.md": "# Alpha\n\nalphaOne is documented here.\n"
   });
-  const repoB = makeRepo({ "src/other.ts": "export function otherThing(): string {\n  return 'other literal value';\n}\n" });
+  const repoB = makeRepo({ "src/other.ts": "// other comment that the comments lane indexes\nexport function otherThing(): string {\n  return 'other literal value';\n}\n" });
   try {
     await index(dbPath, "a", repoA, "full");
     await index(dbPath, "b", repoB, "full");
@@ -193,6 +194,7 @@ test("MCP-ISSUE-111: a full run keeps FTS per file — deleted files leave it, a
     const bRowsBefore = db.prepare("select rowid, * from symbols where repo_id = 'b' order by rowid").all();
     db.close();
     assert.ok(metaAfterFirst, "the first full run of the DB rebuilt once and recorded it");
+    assert.ok(bBefore.comments_fts!.content.length > 0, "the fixture has comment rows, so comments_fts is checked for real");
 
     // Delete one file and rename a function in another, then a second full run of repo a.
     unlinkSync(path.join(repoA, "src/b.ts"));
@@ -229,7 +231,7 @@ test("MCP-ISSUE-111: a full run keeps FTS per file — deleted files leave it, a
     try {
       integrity(db);
       for (const [table, v] of Object.entries(ftsVsContent(db, "a"))) assert.deepEqual(v.fts, v.content, `${table}: repo a untouched by purging b`);
-      for (const t of ["symbols_fts", "literals_fts", "docs_fts"]) {
+      for (const t of ["symbols_fts", "literals_fts", "docs_fts", "comments_fts"]) {
         const total = (db.prepare(`select count(*) as n from ${t}_docsize`).get() as { n: number }).n;
         assert.equal(total, ftsVsContent(db, "a")[t]!.content.length, `${t}: no row of b left`);
       }

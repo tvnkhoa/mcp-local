@@ -137,3 +137,20 @@ test("a spawn failure rejects the run instead of throwing at the caller", async 
   });
   await assert.rejects(client.run("repo-a", "/repo/a", "dirty", true, 20_000, 200), /cannot spawn/);
 });
+
+test("review follow-up C: abortRun stops only the named run; a run not in the worker is left alone", async () => {
+  const { client, workers } = harness();
+  assert.equal(await client.abortRun("nobody", "x"), false, "nothing in flight: no-op");
+  const job = client.run("repo-a", "/repo/a", "full", true, 100, 50, { runId: "job-1" });
+  assert.equal(await client.abortRun("job-2", "x"), false, "another runId: the worker is not touched");
+  assert.equal(workers[0].terminated, false);
+  const aborted = client.abortRun("job-1", "stopped: timeout");
+  await assert.rejects(job, /stopped: timeout/);
+  assert.equal(await aborted, true);
+  assert.equal(workers[0].terminated, true);
+  // The next run spawns a fresh worker and works.
+  const next = client.run("repo-b", "/repo/b", "dirty", true, 100, 50);
+  assert.equal(workers.length, 2);
+  workers[1].send({ type: "result", id: workers[1].requests[0].id, result: result("r-b") });
+  assert.equal((await next).runId, "r-b");
+});

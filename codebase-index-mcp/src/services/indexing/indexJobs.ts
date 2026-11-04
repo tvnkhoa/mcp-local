@@ -61,10 +61,22 @@ export type IndexJob = {
   error?: string;
 };
 
+/**
+ * Review follow-up C: the executor says when the run actually starts (it may first wait in the DB-wide queue behind a
+ * gate refresh) — the run timeout counts from there — and must not start a run for a job already failed.
+ */
+export type IndexJobControl = {
+  /** Call once, right before the run starts in the worker: the run timeout starts now. */
+  started: () => void;
+  /** True once the job has failed (timed out): the executor must not start its run. */
+  cancelled: () => boolean;
+};
+
 export type IndexJobExecutor = (
   job: Readonly<IndexJob>,
   request: IndexJobRequest,
-  onProgress: (progress: IndexJobProgress) => void
+  onProgress: (progress: IndexJobProgress) => void,
+  control: IndexJobControl
 ) => Promise<IndexRunResult>;
 
 export type IndexJobQueueOptions = {
@@ -229,6 +241,7 @@ export class IndexJobQueue {
     job.phase = "starting";
     this.markWaiting(`another index run is in progress (${nextId})`);
     let settled = false;
+    let timeout: NodeJS.Timeout | undefined;
     const finish = (apply: () => void): void => {
       if (settled) return;
       settled = true;
@@ -245,21 +258,24 @@ export class IndexJobQueue {
       this.pump();
     };
     const limit = this.options.runTimeoutMs ?? 0;
-    const timeout =
-      limit > 0
-        ? setTimeout(() => {
-            finish(() => {
-              job.state = "failed";
-              job.error = `the run was still going after CODEBASE_INDEX_RUN_TIMEOUT_MS=${String(limit)} ms; it was stopped`;
-            });
-            try {
-              this.options.onRunTimeout?.(job);
-            } catch {
-              // Stopping is best-effort; the job is already failed and the queue moves on.
-            }
-          }, limit)
-        : undefined;
-    timeout?.unref();
+    const control: IndexJobControl = {
+      cancelled: () => settled,
+      started: () => {
+        if (settled || timeout || limit <= 0) return;
+        timeout = setTimeout(() => {
+          finish(() => {
+            job.state = "failed";
+            job.error = `the run was still going after CODEBASE_INDEX_RUN_TIMEOUT_MS=${String(limit)} ms; it was stopped`;
+          });
+          try {
+            this.options.onRunTimeout?.(job);
+          } catch {
+            // Stopping is best-effort; the job is already failed and the queue moves on.
+          }
+        }, limit);
+        timeout.unref();
+      }
+    };
     void this.options
       .execute(job, request, (p) => {
         if (settled) return;
@@ -273,7 +289,7 @@ export class IndexJobQueue {
             this.listeners.get(nextId)?.delete(listener);
           }
         }
-      })
+      }, control)
       .then(
         (result) =>
           finish(() => {

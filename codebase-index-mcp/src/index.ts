@@ -201,8 +201,7 @@ async function treeKeyNow(repoPath: string): Promise<TreeKey | null> {
  * index_repository's and the watcher's run: in the DB-wide queue (MCP-ISSUE-111), executed by the refresh worker
  * (MCP-ISSUE-112), which also records the covered tree key on the run (the writer's connection, never this thread's).
  */
-const runIndexAndResolve: RunIndexAndResolve = (repoId, repoPath, mode, docsEnabled, maxFiles, batchSize, extras = {}) =>
-  freshnessGate.serialize(repoId, async () => {
+const runInWorker: RunIndexAndResolve = async (repoId, repoPath, mode, docsEnabled, maxFiles, batchSize, extras = {}) => {
     const key = await treeKeyNow(repoPath);
     // MCP-ISSUE-101: index_repository and the watcher leave the index covering the whole tree, as a gate run does.
     const result = await refreshWorker.run(repoId, repoPath, mode, docsEnabled, maxFiles, batchSize, {
@@ -217,7 +216,9 @@ const runIndexAndResolve: RunIndexAndResolve = (repoId, repoPath, mode, docsEnab
       // not a git repo
     }
     return result;
-  }, mode);
+  };
+const runIndexAndResolve: RunIndexAndResolve = (repoId, repoPath, mode, docsEnabled, maxFiles, batchSize, extras = {}) =>
+  freshnessGate.serialize(repoId, () => runInWorker(repoId, repoPath, mode, docsEnabled, maxFiles, batchSize, extras), mode);
 
 /**
  * MCP-ISSUE-112: index_repository's runs as server-side jobs — answered at once, one at a time, never started under
@@ -226,14 +227,23 @@ const runIndexAndResolve: RunIndexAndResolve = (repoId, repoPath, mode, docsEnab
 const indexJobs = new IndexJobQueue({
   minFreeRamMb: MIN_FREE_RAM_MB,
   runTimeoutMs: RUN_TIMEOUT_MS,
-  // The worker is the only thing that can stop a run; terminating it rejects the run, which releases the DB-wide queue.
-  onRunTimeout: (job) => void refreshWorker.abort(`index run ${job.runId} of ${job.repoId} stopped: CODEBASE_INDEX_RUN_TIMEOUT_MS=${String(RUN_TIMEOUT_MS)} ms`),
-  execute: (job, request, onProgress) =>
-    runIndexAndResolve(request.repoId, request.repoPath, request.mode, request.docsEnabled, request.maxFiles, request.batchSize, {
-      runId: job.runId,
-      onProgress: (progress, total, message) =>
-        onProgress({ phase: message.replace(/^[^:]*: /, ""), progress, ...(total !== undefined && { total }) })
-    })
+  // Only this job's run is stopped (review follow-up C); terminating the worker rejects it, releasing the DB-wide queue.
+  onRunTimeout: (job) => void refreshWorker.abortRun(job.runId, `index run ${job.runId} of ${job.repoId} stopped: CODEBASE_INDEX_RUN_TIMEOUT_MS=${String(RUN_TIMEOUT_MS)} ms`),
+  // The clock starts when the run leaves the DB-wide queue for the worker, and a job failed meanwhile never runs.
+  execute: (job, request, onProgress, control) =>
+    freshnessGate.serialize(
+      request.repoId,
+      async () => {
+        if (control.cancelled()) throw new Error(`index job ${job.runId} had already failed; its run was not started`);
+        control.started();
+        return runInWorker(request.repoId, request.repoPath, request.mode, request.docsEnabled, request.maxFiles, request.batchSize, {
+          runId: job.runId,
+          onProgress: (progress, total, message) =>
+            onProgress({ phase: message.replace(/^[^:]*: /, ""), progress, ...(total !== undefined && { total }) })
+        });
+      },
+      request.mode
+    )
 });
 
 async function ensureFresh(repoId: string): Promise<void> {
