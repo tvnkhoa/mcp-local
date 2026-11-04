@@ -336,7 +336,11 @@ node scripts/install-mcp.mjs --server codebase-index --transport stdio  # back t
 - **The supervisor respawns a server that exits on its own** (MCP-ISSUE-115). Before, any exit ended the
   supervisor too and the port stayed dark until the next logon or 08:00 (clients: `CONNECT_TIMEOUT`). Now it
   waits 1 s, doubling per restart to at most 30 s, and gives up after 5 restarts inside 10 min (a server that
-  dies on start must not spin); `--restart`, which kills the whole tree, is not a crash. Every start, respawn
+  dies on start must not spin); `--restart`, which kills the whole tree, is not a crash, and neither is exit
+  code 0 (the server exits 0 only after a signal-driven shutdown: recorded as `stopped`, not respawned). A
+  `--restart` that finds the port free between respawns kills the waiting supervisor named in `running.json`
+  (`supervisorPid`) before `/Run`. A second supervisor started while the port is held exits at once and
+  records nothing. Every start, respawn
   and give-up is one JSON line (time, pid, exit code or signal, reason; no env, no args) in
   `<deployRoot>/<key>/restarts.jsonl`, trimmed past 64 KiB, and a `supervisor_*` line in the server log.
   `mcp:doctor`'s `[restarts]` check shows the last five: warn on a respawn in the last 24 h, fail when the

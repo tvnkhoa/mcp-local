@@ -100,7 +100,10 @@ export interface HttpTransportOptions {
   readonly maxBodyBytes?: number;
   /** MCP-ISSUE-115: idle keep-alive socket lifetime. Default {@link DEFAULT_KEEP_ALIVE_TIMEOUT_MS}. */
   readonly keepAliveTimeoutMs?: number;
-  /** MCP-ISSUE-115: time to receive a whole request (not to answer it). Default {@link DEFAULT_REQUEST_TIMEOUT_MS}. */
+  /**
+   * MCP-ISSUE-115: time to receive a whole request (not to answer it). Default {@link DEFAULT_REQUEST_TIMEOUT_MS}; 0
+   * disables it; a value below the headers timeout (keep-alive + 5 s) is raised to it.
+   */
   readonly requestTimeoutMs?: number;
   /**
    * MCP-ISSUE-103: where to keep `session id → sha256(bearer)` across restarts (see `httpSessionStore.ts`). Set, a
@@ -494,7 +497,9 @@ export async function startHttpTransport(
   const keepAliveTimeoutMs = options.keepAliveTimeoutMs ?? DEFAULT_KEEP_ALIVE_TIMEOUT_MS;
   httpServer.keepAliveTimeout = keepAliveTimeoutMs;
   httpServer.headersTimeout = keepAliveTimeoutMs + HEADERS_TIMEOUT_MARGIN_MS;
-  httpServer.requestTimeout = Math.max(options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS, httpServer.headersTimeout);
+  // 0 disables it (Node's meaning); any other value is raised to headersTimeout, which Node requires it not to undercut.
+  const requestTimeoutMs = options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
+  httpServer.requestTimeout = requestTimeoutMs === 0 ? 0 : Math.max(requestTimeoutMs, httpServer.headersTimeout);
   httpServer.timeout = 0;
 
   await new Promise<void>((resolve, reject) => {

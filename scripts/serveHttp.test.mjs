@@ -287,6 +287,31 @@ test("--restart stops at the supervisor when the hand-off above it is another se
   }
 });
 
+test("MCP-ISSUE-115 review: --restart in a respawn gap (port free) kills the waiting supervisor before /Run", async () => {
+  // Before: no listener → nothing killed → /Run dropped (IgnoreNew) → the old supervisor's respawn passed for the new one.
+  const server = getServer("codebase-index");
+  const m = fakeMachine({ 50: { parent: 40, cmd: SUP("codebase-index"), created: 20 }, 40: { parent: 30, cmd: SUP("codebase-index"), created: 10 } }, { listener: null });
+  let clock = 1000;
+  const out = await restartServer(server, 7341, { exec: m.exec, sleep: async () => { clock += 10; }, now: () => clock, running: () => ({ pid: 111, supervisorPid: 50 }) });
+  assert.deepEqual(out, { oldPid: null, newPid: 222 });
+  assert.deepEqual(m.calls.find((c) => c[0] === "taskkill"), ["taskkill", "/T", "/F", "/PID", "40"], "from the hand-off down");
+  assert.ok(m.calls.findIndex((c) => c[0] === "taskkill") < m.calls.findIndex((c) => c[0] === "schtasks"));
+
+  // running.json naming a pid that is gone, or is not this server's serve-http, kills nothing.
+  for (const [what, procs, running] of [
+    ["gone", {}, { supervisorPid: 50 }],
+    ["another program", { 50: { parent: 1, cmd: "notepad.exe", created: 1 } }, { supervisorPid: 50 }],
+    ["another server's supervisor", { 50: { parent: 1, cmd: SUP("observe-mcp"), created: 1 } }, { supervisorPid: 50 }],
+    ["no supervisorPid (an older running.json)", {}, { pid: 111 }],
+    ["no running.json", {}, null]
+  ]) {
+    const m2 = fakeMachine(procs, { listener: null });
+    let c2 = 1000;
+    await restartServer(server, 7341, { exec: m2.exec, sleep: async () => { c2 += 10; }, now: () => c2, running: () => running });
+    assert.ok(!m2.calls.some((c) => c[0] === "taskkill"), `${what}: nothing killed`);
+  }
+});
+
 test("isServeHttpFor needs node running serve-http.mjs and exactly this --server key", () => {
   const server = { key: "codebase-index" };
   assert.ok(isServeHttpFor(SUP("codebase-index"), server));
@@ -708,6 +733,58 @@ test("MCP-ISSUE-115: a child stopped by the supervisor is not respawned", () => 
   assert.equal(children.length, 1);
 });
 
+test("MCP-ISSUE-115 review: exit code 0 is a clean stop, not a crash — recorded, never respawned", () => {
+  const events = [];
+  let stopped = 0;
+  const c = new EventEmitter();
+  c.pid = 9;
+  supervise({ spawnChild: () => c, record: (r) => events.push(r.event), onStopped: () => stopped++, setTimer: () => assert.fail("no respawn after exit 0") });
+  c.emit("exit", 0, null);
+  assert.deepEqual(events, ["started", "stopped"]);
+  assert.equal(stopped, 1);
+});
+
+test("MCP-ISSUE-115 review: a throwing record or onStarted, or a spawn error, never takes the supervisor down", () => {
+  const errors = [];
+  const timers = [];
+  const children = [];
+  let n = 0;
+  supervise({
+    spawnChild: () => {
+      n++;
+      if (n === 1) throw new Error("spawn threw");
+      const c = new EventEmitter();
+      if (n === 2) {
+        c.pid = undefined; // never started: error, no exit
+        queueMicrotask(() => c.emit("error", Object.assign(new Error("spawn ENOENT"), { code: "ENOENT" })));
+      } else c.pid = 100 + n;
+      children.push(c);
+      return c;
+    },
+    record: () => {
+      throw new Error("ENOSPC: disk full");
+    },
+    onStarted: () => {
+      throw new Error("running.json locked");
+    },
+    onError: (e) => errors.push(e.message),
+    setTimer: (fn, ms) => timers.push({ fn, ms })
+  });
+  assert.equal(timers.length, 1, "a spawn that throws is respawned");
+  timers[0].fn();
+  return new Promise((resolve) => setImmediate(resolve)).then(() => {
+    assert.equal(timers.length, 2, "an error without exit is respawned");
+    timers[1].fn();
+    assert.equal(children.length, 2, "the third start runs");
+    children[1].emit("error", new Error("late error"));
+    children[1].emit("exit", 1, null);
+    assert.equal(timers.length, 3, "error + exit of a started child respawn once");
+    for (const want of ["spawn threw", "spawn ENOENT", "ENOSPC: disk full", "running.json locked", "late error"]) {
+      assert.ok(errors.includes(want), `onError saw ${want}: ${errors.join(" | ")}`);
+    }
+  });
+});
+
 test("MCP-ISSUE-115: the restart log stays bounded and doctor reads its tail", () => {
   const file = path.join(fs.mkdtempSync(path.join(TMP, "restarts-")), "restarts.jsonl");
   assert.deepEqual(readRestartRecords(file), []);
@@ -771,19 +848,30 @@ test("MCP-ISSUE-115: a server killed under a scratch supervisor is back within 3
   try {
     const first = await waitFor(get, 15_000);
     assert.ok(first, "the first server answers");
+    assert.equal(runningDeploy(server, { deployRoot }).supervisorPid, sup.pid, "running.json names the supervisor");
+
+    // Review item 2: a second supervisor on the same port leaves at once and records nothing.
+    const before = fs.readFileSync(restartLogFile(server, { deployRoot }), "utf-8");
+    const second = spawn(process.execPath, [path.join(ROOT, "scripts", "serve-http.mjs"), "--server", server.key, "--config", envFile, "--log", logFile, "--deploy-root", deployRoot], { stdio: "ignore" });
+    const secondCode = await new Promise((resolve) => second.once("exit", resolve));
+    assert.notEqual(secondCode, 0, "the second supervisor refuses");
+    assert.equal(runningDeploy(server, { deployRoot }).pid, first, "running.json still names the live server");
+    assert.equal(fs.readFileSync(restartLogFile(server, { deployRoot }), "utf-8"), before, "the restart log is untouched");
+    assert.equal(await get(), first, "the live server still answers");
+
     const killedAt = Date.now();
     process.kill(first);
-    const second = await waitFor(async () => {
+    const respawned = await waitFor(async () => {
       const pid = await get();
       return pid && pid !== first ? pid : null;
     }, 30_000);
-    assert.ok(second, "a new server answers within 30 s");
+    assert.ok(respawned, "a new server answers within 30 s");
     assert.ok(Date.now() - killedAt < 30_000);
-    assert.equal(runningDeploy(server, { deployRoot }).pid, second, "running.json names the respawned pid");
+    assert.equal(runningDeploy(server, { deployRoot }).pid, respawned, "running.json names the respawned pid");
     const records = readRestartRecords(restartLogFile(server, { deployRoot }), { last: 10 });
     assert.deepEqual(records.map((r) => r.event), ["started", "respawn", "started"]);
     assert.equal(records[1].pid, first);
-    assert.equal(records[2].pid, second);
+    assert.equal(records[2].pid, respawned);
     assert.match(fs.readFileSync(logFile, "utf-8"), /"msg":"supervisor_respawn"/, "the server log names the respawn");
     assert.equal(restartsCheck(records)[0], "warn");
   } finally {

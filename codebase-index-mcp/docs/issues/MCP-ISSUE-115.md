@@ -46,6 +46,17 @@
   backoff doubles, caps, and gives up"; "a child stopped by the supervisor is not respawned"; "the restart log stays
   bounded and doctor reads its tail".
 
+- **Review follow-ups (same day):** (a) `--restart` in a respawn gap found no listener, killed nothing, had `/Run`
+  dropped by `IgnoreNew` and took the old supervisor's respawn for the new server — it now kills the supervisor named
+  by `running.json`'s new `supervisorPid` (only when that pid is still this server's serve-http) before `/Run`.
+  (b) A second supervisor started while one serves exits before writing `running.json` or the restart log (a probe
+  bind on the port), instead of five EADDRINUSE respawns that turned `[restarts]` red. (c) A `record` / `onStarted`
+  that throws, or a spawn `error`, is reported and never kills the supervisor (which would orphan the child on the
+  port). (d) `requestTimeoutMs: 0` disables the request timeout. (e) Exit code 0 is a clean stop — the server exits
+  0 only after a signal-driven shutdown (`packages/sdk/src/lifecycle.ts`) — recorded as `stopped`, not respawned.
+  Guarded by the `MCP-ISSUE-115 review:` tests in `scripts/serveHttp.test.mjs` and the second-supervisor step of the
+  end-to-end respawn test.
+
 ### (3) CONNECT_TIMEOUT from a live server — a main-thread block, not this fix (open, IX-1 / IX-2)
 
 - **Observed:** 4 Nov ~11:4x–12:xx local, two sessions (the leader's and another member's) got `CONNECT_TIMEOUT` /
