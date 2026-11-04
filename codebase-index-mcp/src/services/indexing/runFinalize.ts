@@ -61,20 +61,16 @@ export function pruneAndResolve(
     // Forward slashes, as the pipeline writes them (MCP-ISSUE-079). A row stored with backslashes by an
     // older build is therefore "not in this scan" and pruned — never kept alongside its new twin.
     const currentPaths = selectedFiles.map((f) => path.relative(input.repoPath, f).replace(/\\/g, "/"));
-    let pruned: number;
-    if (input.mode === "full") {
-      pruned = store.pruneStaleFiles(input.repoId, currentPaths);
-    } else {
-      // Release J: a scoped run keeps the FTS tables in step per file (a full run rebuilds them), and
-      // FTS5 can only forget a row while its content row still holds the indexed values.
-      const current = new Set(currentPaths);
-      const stale = store.listIndexedFiles(input.repoId).map((f) => f.path).filter((p) => !current.has(p));
-      store.runInTransaction(() => {
-        for (const p of stale) store.ftsForgetFile(input.repoId, p);
-        store.pruneFiles(input.repoId, stale);
-      });
-      pruned = stale.length;
-    }
+    // Release J / MCP-ISSUE-111: every run keeps the FTS tables in step per file — a full run too, since it no
+    // longer rebuilds them for every repo in the DB — and FTS5 can only forget a row while its content row still
+    // holds the indexed values.
+    const current = new Set(currentPaths);
+    const stale = store.listIndexedFiles(input.repoId).map((f) => f.path).filter((p) => !current.has(p));
+    store.runInTransaction(() => {
+      for (const p of stale) store.ftsForgetFile(input.repoId, p);
+      store.pruneFiles(input.repoId, stale);
+    });
+    const pruned = stale.length;
     filesPruned = pruned;
     if (pruned > 0) {
       indexLog(`[index-prune] removed ${String(pruned)} stale file(s) from index`);

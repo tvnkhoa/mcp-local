@@ -22,6 +22,7 @@ import type { ExtractionWorkerPool } from "../extractors/extractionWorkerPool.js
 import { runIndexPipeline, INDEX_VERSION, SCOPE_FORCES_FULL_RUN, type PerformanceProfile } from "./indexPipeline.js";
 import { mentionNameForms, pathKeysFor, tokenParts } from "../../repositories/scopedRunStore.js";
 import type { IndexMode, IndexRunResult } from "../../types/index.js";
+import type { RunBookkeeping } from "../../middleware/freshness.js";
 import {
   buildSkippedRunSummary,
   evaluateIncrementalSkip,
@@ -31,6 +32,9 @@ import {
   safeCrossRepoResolve,
   shouldDropEdgeIndexesForResolve
 } from "./runPolicy.js";
+
+/** MCP-ISSUE-111: set once every FTS table is in step with its content; from then on runs keep it per file. */
+export const FTS_PER_FILE_META_KEY = "fts_per_file";
 
 /** Tuning knobs the pipeline needs, all sourced from env at start-up. */
 export interface IndexRunnerLimits {
@@ -95,7 +99,41 @@ export type RunExtras = {
    * same porcelain-v2 read as `collectDirtyFiles`), so a dirty run does not run `git status` again.
    */
   knownDirtyPaths?: readonly string[];
+  /**
+   * MCP-ISSUE-111: the freshness gate's writes, made here on the run's own connection (the writer's) instead of on
+   * the server thread, where they waited on another run's write lock. See `RunBookkeeping`.
+   */
+  bookkeeping?: RunBookkeeping;
 };
+
+/**
+ * MCP-ISSUE-111: run with the gate's bookkeeping applied around it — the pending re-index set before (a dirty run
+ * reads it), the covered tree key and the trigger tag after a run that neither failed nor was cancelled. The two
+ * after-writes are best-effort, as they were on the server thread: without them the next query re-checks.
+ */
+export async function runWithBookkeeping(
+  store: Pick<GraphStore, "recordPendingReindexFiles" | "markRunTreeKey" | "markRunTrigger">,
+  repoId: string,
+  bookkeeping: RunBookkeeping | undefined,
+  run: () => Promise<IndexRunResult>
+): Promise<IndexRunResult> {
+  if (bookkeeping?.pendingReindex && bookkeeping.pendingReindex.paths.length > 0) {
+    store.recordPendingReindexFiles(repoId, bookkeeping.pendingReindex.paths, bookkeeping.pendingReindex.reason);
+  }
+  const result = await run();
+  if (!bookkeeping || result.status === "failed" || result.status === "cancelled") return result;
+  try {
+    if (bookkeeping.coveredKey) store.markRunTreeKey(result.runId, bookkeeping.coveredKey);
+  } catch {
+    // Best-effort: the next check runs again, it never answers stale.
+  }
+  try {
+    if (bookkeeping.trigger) store.markRunTrigger(result.runId, bookkeeping.trigger);
+  } catch {
+    // Best-effort tag; the run itself stands.
+  }
+  return result;
+}
 
 export type RunIndexAndResolve = (
   repoId: string,
@@ -110,7 +148,7 @@ export type RunIndexAndResolve = (
 export function createIndexRunner(options: IndexRunnerOptions): RunIndexAndResolve {
   const { store, limits, resolveProgressNotifier, resolvePerformanceProfileOverride, sharedParsePool, deferSessionEnd } = options;
 
-  return async function runIndexAndResolve(
+  const runCore = async function runIndexAndResolve(
     repoId: string,
     repoPath: string,
     mode: IndexMode,
@@ -330,9 +368,11 @@ export function createIndexRunner(options: IndexRunnerOptions): RunIndexAndResol
   let implementsResolveMs = 0;
 
   progress.phase("finalizing");
-  // Release J: a scoped run kept the FTS tables in step per file as it wrote (scopedRunStore.ts); the
-  // rebuild re-reads every repo in the shared DB, so only a full run pays for it.
-  if (mode === "full") {
+  // Release J: a scoped run kept the FTS tables in step per file as it wrote (scopedRunStore.ts). MCP-ISSUE-111: a
+  // full run does too now, so the rebuild — which re-reads EVERY repo in the shared DB in one write, holding the
+  // write lock for seconds on the central DB — runs once per DB, on the first full run of this build, to repair
+  // whatever an older build left (a full run that died between its writes and its rebuild).
+  if (mode === "full" && store.getIndexMeta(FTS_PER_FILE_META_KEY) === null) {
     indexLog(`[index-post] repoId=${repoId} rebuilding FTS indexes...`);
     const ftsStart = Date.now();
     try { store.rebuildFts(); } catch { /* non-fatal */ }
@@ -341,12 +381,12 @@ export function createIndexRunner(options: IndexRunnerOptions): RunIndexAndResol
     await yieldToEventLoop();
     try { store.rebuildCommentsFts(); } catch { /* non-fatal */ }
     await yieldToEventLoop();
-    if (docsEnabled) {
-      indexLog(`[index-post] repoId=${repoId} rebuilding docs FTS...`);
-      try { store.rebuildDocsFts(); } catch { /* non-fatal */ }
-      await yieldToEventLoop();
-    }
+    // Every repo's docs rows, whether or not this run indexes docs: the marker below vouches for all four tables.
+    indexLog(`[index-post] repoId=${repoId} rebuilding docs FTS...`);
+    try { store.rebuildDocsFts(); } catch { /* non-fatal */ }
+    await yieldToEventLoop();
     ftsRebuildMs = Date.now() - ftsStart;
+    try { store.setIndexMeta(FTS_PER_FILE_META_KEY, `${INDEX_VERSION} ${new Date().toISOString()}`); } catch { /* the next full run rebuilds again */ }
   }
 
   progress.phase("resolving calls");
@@ -729,4 +769,7 @@ export function createIndexRunner(options: IndexRunnerOptions): RunIndexAndResol
 
   return fullSummary;
   };
+
+  return (repoId, repoPath, mode, docsEnabled, maxFiles, batchSize, extras = {}) =>
+    runWithBookkeeping(store, repoId, extras.bookkeeping, () => runCore(repoId, repoPath, mode, docsEnabled, maxFiles, batchSize, extras));
 }

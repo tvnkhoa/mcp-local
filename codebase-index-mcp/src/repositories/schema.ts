@@ -150,6 +150,13 @@ export function initGraphSchema(db: Database.Database): void {
         primary key (repo_id, file_path)
       );
 
+      -- MCP-ISSUE-111: DB-wide facts that belong to no repo (e.g. 'fts_per_file': every FTS table is in step with
+      -- its content table, kept per file by every run since, so no run rebuilds them for every repo again).
+      create table if not exists index_meta (
+        key text primary key,
+        value text not null
+      );
+
       create virtual table if not exists symbols_fts using fts5(
         name,
         signature,

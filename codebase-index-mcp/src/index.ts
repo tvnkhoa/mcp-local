@@ -178,13 +178,16 @@ const freshnessGate = createFreshnessGate({
   getRepoPath: (repoId) => store.getRepository(repoId)?.repoPath ?? null,
   getIndexedCommit: (repoId) => store.getLatestRun(repoId)?.commitSha ?? null,
   readTree: (repoPath) => readWorkingTreeStateAsync(repoPath),
-  run: (repoId, repoPath, mode, dirtyPaths) => refreshWorker.run(repoId, repoPath, mode, DOCS_INDEXING_ENABLED, MAX_FILES_PER_RUN, 200, dirtyPaths ? { knownDirtyPaths: dirtyPaths } : undefined),
+  // MCP-ISSUE-111: the worker (the writer) makes the gate's bookkeeping writes; this thread makes none on a read.
+  run: (repoId, repoPath, mode, dirtyPaths, bookkeeping) =>
+    refreshWorker.run(repoId, repoPath, mode, DOCS_INDEXING_ENABLED, MAX_FILES_PER_RUN, 200, {
+      ...(dirtyPaths && { knownDirtyPaths: dirtyPaths }),
+      ...(bookkeeping && { bookkeeping })
+    }),
+  runBookkeeping: true,
   refuseRefresh: (repoId) => newerBuildRefusal(store.getLatestRun(repoId)?.indexVersion),
   getCoveredKey: (repoId) => store.getLatestRunTreeKey(repoId),
-  recordCoveredKey: (_repoId, runId, key) => store.markRunTreeKey(runId, key),
   hashMaxBytes: MAX_FILE_SIZE_BYTES,
-  markTriggered: (runId) => store.markRunTrigger(runId, "query"),
-  markPendingReindex: (repoId, paths) => store.recordPendingReindexFiles(repoId, paths, "freshness: indexed while dirty, since deleted or reverted"),
   // MCP-ISSUE-101 part 5: an index fully built by another INDEX_VERSION is not current.
   getFullRunVersion: (repoId) => store.getLatestFullRunVersion(repoId),
   buildVersion: INDEX_VERSION
@@ -241,7 +244,15 @@ const watchManager = new WatchManager(
     }
     await runIndexAndResolve(repoId, repoPath, "dirty", DOCS_INDEXING_ENABLED, config.maxFilesPerRun, config.batchSize, { knownDirtyPaths: plan.paths });
   },
-  (repoId, deletedRelativePaths) => store.pruneFiles(repoId, deletedRelativePaths),
+  // MCP-ISSUE-111: forget the files' FTS rows first — no full run rebuilds every FTS table any more to repair it.
+  (repoId, deletedRelativePaths) => {
+    let pruned = 0;
+    store.runInTransaction(() => {
+      for (const p of deletedRelativePaths) store.ftsForgetFile(repoId, p);
+      pruned = store.pruneFiles(repoId, deletedRelativePaths);
+    });
+    return pruned;
+  },
   ({ repoId }) => {
     if (WATCH_ACTIVE_ONLY && activeWatchRef.current === repoId) {
       armWatchInactivityTimer(repoId, buildHandlerContext());

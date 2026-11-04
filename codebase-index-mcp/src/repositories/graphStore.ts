@@ -176,7 +176,7 @@ import {
   type CitationRow,
   type CommentHit
 } from "./annotationsStore.js";
-import { recordRun as recordRunImpl, getLatestRun as getLatestRunImpl, markRunTrigger as markRunTriggerImpl, getLatestWorkRunMode as getLatestWorkRunModeImpl, markRunTreeDirty as markRunTreeDirtyImpl, getLatestWorkRunTreeDirty as getLatestWorkRunTreeDirtyImpl, markRunTreeKey as markRunTreeKeyImpl, markRunExcludeRules as markRunExcludeRulesImpl, getLatestRunTreeKey as getLatestRunTreeKeyImpl, getLatestFullRunVersion as getLatestFullRunVersionImpl, listRecentWorkRuns as listRecentWorkRunsImpl, type WorkRunTrace } from "./runStore.js";
+import { getIndexMeta as getIndexMetaImpl, setIndexMeta as setIndexMetaImpl, recordRun as recordRunImpl, getLatestRun as getLatestRunImpl, markRunTrigger as markRunTriggerImpl, getLatestWorkRunMode as getLatestWorkRunModeImpl, markRunTreeDirty as markRunTreeDirtyImpl, getLatestWorkRunTreeDirty as getLatestWorkRunTreeDirtyImpl, markRunTreeKey as markRunTreeKeyImpl, markRunExcludeRules as markRunExcludeRulesImpl, getLatestRunTreeKey as getLatestRunTreeKeyImpl, getLatestFullRunVersion as getLatestFullRunVersionImpl, listRecentWorkRuns as listRecentWorkRunsImpl, type WorkRunTrace } from "./runStore.js";
 import {
   type WriteContext,
   prepareWriteStatements,
@@ -279,7 +279,12 @@ export class GraphStore {
     this.db.pragma(`journal_size_limit = ${String(WAL_SIZE_LIMIT_BYTES)}`);
     // Increase mmap size to reduce I/O contention during large batch writes
     this.db.pragma("mmap_size = 268435456"); // 256MB mmap
-    this.runInTransactionInternal = this.db.transaction((fn: () => void) => fn());
+    // MCP-ISSUE-111: BEGIN IMMEDIATE. A deferred transaction that reads before its first write upgrades to a write
+    // lock mid-way; when another connection committed meanwhile, SQLite answers SQLITE_BUSY at once (its busy
+    // handler cannot help a stale read snapshot), "database is locked" without waiting busy_timeout. Immediate takes
+    // the write lock at BEGIN, where the busy handler does wait. Nested calls stay savepoints.
+    const writeTx = this.db.transaction((fn: () => void) => fn());
+    this.runInTransactionInternal = (fn: () => void) => writeTx.immediate(fn);
 
     // Load sqlite-vec synchronously via createRequire
     try {
@@ -456,6 +461,15 @@ export class GraphStore {
 
   getLatestWorkRunMode(repoId: string): string | null {
     return getLatestWorkRunModeImpl(this.db, repoId);
+  }
+
+  /** MCP-ISSUE-111: see `index_meta` in schema.ts. */
+  getIndexMeta(key: string): string | null {
+    return getIndexMetaImpl(this.db, key);
+  }
+
+  setIndexMeta(key: string, value: string): void {
+    setIndexMetaImpl(this.db, key, value);
   }
 
   markRunTrigger(runId: string, trigger: string): void {

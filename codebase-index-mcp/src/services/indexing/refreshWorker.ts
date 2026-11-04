@@ -24,6 +24,7 @@ import { performanceProfileOverrideFromEnv } from "../../config/envConfig.js";
 import { GraphStore } from "../../repositories/graphStore.js";
 import { ExtractionWorkerPool } from "../extractors/extractionWorkerPool.js";
 import type { IndexMode, IndexRunResult } from "../../types/index.js";
+import type { RunBookkeeping } from "../../middleware/freshness.js";
 import { createIndexRunner, type IndexRunnerLimits, type RunIndexAndResolve } from "./indexRunner.js";
 
 /**
@@ -53,6 +54,8 @@ export type RefreshWorkerRequest = {
   batchSize: number;
   /** Release K3 (P1): the freshness gate's dirty set for a dirty run (see `RunExtras.knownDirtyPaths`). */
   dirtyPaths?: string[];
+  /** MCP-ISSUE-111: the gate's bookkeeping, written on this worker's connection (see `RunExtras.bookkeeping`). */
+  bookkeeping?: RunBookkeeping;
 };
 
 export type RefreshWorkerMessage =
@@ -125,7 +128,8 @@ if (parentPort) {
       try {
         active = runnerFor(request);
         const result = await active.run(request.repoId, request.repoPath, request.mode, request.docsEnabled, request.maxFiles, request.batchSize, {
-          ...(request.dirtyPaths && { knownDirtyPaths: request.dirtyPaths })
+          ...(request.dirtyPaths && { knownDirtyPaths: request.dirtyPaths }),
+          ...(request.bookkeeping && { bookkeeping: request.bookkeeping })
         });
         port.postMessage({ type: "result", id: request.id, result } satisfies RefreshWorkerMessage);
         // Release K3 (P2): the run is committed and the answer is on its way; NOW the end-of-session

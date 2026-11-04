@@ -310,6 +310,16 @@ export function getLatestFullRunVersion(db: Database.Database, repoId: string): 
   return row?.v ?? null;
 }
 
+/** MCP-ISSUE-111: a DB-wide fact from `index_meta`, or null. */
+export function getIndexMeta(db: Database.Database, key: string): string | null {
+  const row = db.prepare(`select value from index_meta where key = ?`).get(key) as { value: string } | undefined;
+  return row?.value ?? null;
+}
+
+export function setIndexMeta(db: Database.Database, key: string, value: string): void {
+  db.prepare(`insert into index_meta (key, value) values (?, ?) on conflict(key) do update set value = excluded.value`).run(key, value);
+}
+
 export function markRunTrigger(db: Database.Database, runId: string, trigger: string): void {
   db.prepare(`update index_runs set triggered_by = ? where run_id = ?`).run(trigger, runId);
 }

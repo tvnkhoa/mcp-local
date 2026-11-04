@@ -24,6 +24,7 @@
 import { Worker } from "node:worker_threads";
 
 import type { IndexMode, IndexRunResult } from "../../types/index.js";
+import type { RunBookkeeping } from "../../middleware/freshness.js";
 import type { IndexRunnerLimits, RunIndexAndResolve } from "./indexRunner.js";
 import type { RefreshWorkerMessage, RefreshWorkerRequest } from "./refreshWorker.js";
 
@@ -67,7 +68,7 @@ export class RefreshWorkerClient {
 
   /** Same signature as the in-process runner, so the gate cannot tell the difference. */
   readonly run: RunIndexAndResolve = (repoId, repoPath, mode, docsEnabled, maxFiles, batchSize, extras) =>
-    this.request(repoId, repoPath, mode, docsEnabled, maxFiles, batchSize, extras?.knownDirtyPaths);
+    this.request(repoId, repoPath, mode, docsEnabled, maxFiles, batchSize, extras?.knownDirtyPaths, extras?.bookkeeping);
 
   /**
    * Spawn the worker and have it open its connection and load the indexer now, so the first refresh
@@ -102,7 +103,8 @@ export class RefreshWorkerClient {
     maxFiles: number,
     batchSize: number,
     /** Release K3 (P1): the gate's dirty set, so the worker's dirty run does not read git again. */
-    dirtyPaths?: readonly string[]
+    dirtyPaths?: readonly string[],
+    bookkeeping?: RunBookkeeping
   ): Promise<IndexRunResult> {
     return new Promise<IndexRunResult>((resolve, reject) => {
       let worker: RefreshWorkerLike;
@@ -125,7 +127,8 @@ export class RefreshWorkerClient {
         docsEnabled,
         maxFiles,
         batchSize,
-        ...(dirtyPaths && { dirtyPaths: [...dirtyPaths] })
+        ...(dirtyPaths && { dirtyPaths: [...dirtyPaths] }),
+        ...(bookkeeping && { bookkeeping })
       });
     });
   }

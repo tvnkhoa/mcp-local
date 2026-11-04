@@ -308,6 +308,7 @@ Gate: 4/4 servers build + typecheck, 36/36 harnesses (63 assertions in the 049 h
 - [MCP-ISSUE-108 — a new session of the same client lost its pre-restart previews](issues/MCP-ISSUE-108.md)
 - [MCP-ISSUE-109 — a 0-line apply minted an applyId / rollbackId and stored a rollback row](issues/MCP-ISSUE-109.md)
 - [MCP-ISSUE-110 — two harnesses failed under machine load: freshness budget did not bound the tree check; HTTP start-up outran the harness; an unresolved client identity is suspected](issues/MCP-ISSUE-110.md)
+- [MCP-ISSUE-111 — "database is locked" on index runs and reads while another repo indexes (one writer per DB, bookkeeping off the read path)](issues/MCP-ISSUE-111.md)
 - [Confirmed fixed — 2026-08-05 re-verification of the 042–051 wave](issues/confirmed-fixed-2026-08-05-re-verification-of-the-042-051-wave.md)
 - [MCP-ISSUE-101 follow-ups (row 5: F2–F4)](issues/mcp-issue-101-follow-ups-row-5-f2-f4.md)
 
