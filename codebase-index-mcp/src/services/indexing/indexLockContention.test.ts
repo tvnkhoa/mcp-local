@@ -223,3 +223,33 @@ test("MCP-ISSUE-111: a full run keeps FTS per file — deleted files leave it, a
     rmSync(work, { recursive: true, force: true });
   }
 });
+
+test("MCP-ISSUE-111 follow-up 4: immediateTransaction takes the write lock at BEGIN, and nests as a savepoint", async () => {
+  const { immediateTransaction } = await import("../../repositories/sqliteTx.js");
+  const dir = mkdtempSync(path.join(tmpdir(), "cim-imm2-"));
+  const dbPath = path.join(dir, "t.db");
+  const a = new Database(dbPath);
+  const b = new Database(dbPath);
+  try {
+    a.pragma("journal_mode = WAL");
+    a.exec("create table t (v integer)");
+    b.pragma("busy_timeout = 0");
+    let otherError = "";
+    const inner = immediateTransaction(a, (v: number) => a.prepare("insert into t (v) values (?)").run(v));
+    immediateTransaction(a, () => {
+      a.prepare("select count(*) from t").get();
+      try {
+        b.prepare("insert into t (v) values (99)").run();
+      } catch (e) {
+        otherError = (e as { code?: string }).code ?? String(e);
+      }
+      inner(1);
+    })();
+    assert.match(otherError, /^SQLITE_BUSY/, "the other writer is held off from BEGIN");
+    assert.deepEqual(a.prepare("select v from t").all(), [{ v: 1 }]);
+  } finally {
+    b.close();
+    a.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

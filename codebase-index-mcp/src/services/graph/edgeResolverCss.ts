@@ -19,6 +19,7 @@
  */
 
 import type Database from "better-sqlite3";
+import { immediateTransaction } from "../../repositories/sqliteTx.js";
 
 type CssEdgeSpec = { type: "USES_CSS_VAR" | "USES_CSS_CLASS"; prefix: string; kind: string; label: string };
 
@@ -79,7 +80,7 @@ export function resolveCssEdges(db: Database.Database, repoId: string): CssResol
     const pairs = new Map<string, { fromId: string; name: string }>();
     for (const row of resolvedPairs) pairs.set(`${row.fromId}\u0000${row.name}`, row);
 
-    const tx = db.transaction(() => {
+    const tx = immediateTransaction(db, () => {
       for (const token of tokens) {
         const name = token.toId.slice(spec.prefix.length);
         if (!defsByName.has(name)) {

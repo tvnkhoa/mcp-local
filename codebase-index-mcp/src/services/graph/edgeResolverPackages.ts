@@ -15,6 +15,7 @@
  */
 
 import type Database from "better-sqlite3";
+import { immediateTransaction } from "../../repositories/sqliteTx.js";
 
 export const WORKSPACE_EDGE_REASON_PREFIX = "workspace package";
 
@@ -47,7 +48,7 @@ export function resolveWorkspacePackageEdges(db: Database.Database, repoId: stri
   );
 
   let written = 0;
-  db.transaction(() => {
+  immediateTransaction(db, () => {
     remove.run(repoId, `${WORKSPACE_EDGE_REASON_PREFIX}%`);
     for (const token of tokens) {
       const target = moduleByName.get(token.toId.slice("npm:".length));

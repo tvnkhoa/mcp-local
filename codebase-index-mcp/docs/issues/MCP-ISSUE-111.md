@@ -53,3 +53,16 @@
   (MCP-ISSUE-112) moves them to the worker.
 - An older build sharing the DB still writes full runs without per-file FTS upkeep, and rebuilds every table at its end;
   a crash of such a run between its writes and that rebuild leaves FTS stale until `index_meta.fts_per_file` is deleted.
+
+### Follow-up (2026-11-04, leader review)
+
+- IMMEDIATE now covers every index write transaction, not only `GraphStore.runInTransaction`: the edge resolvers
+  (`services/graph/edgeResolver*.ts`) and the write stores (`repositories/{writeStore,scopedRunStore,docsStore,
+  literalsStore,annotationsStore,vectorStore,repoPurgeStore,refactorStore,pathSeparatorMigration}.ts`) begin through
+  `immediateTransaction` (`repositories/sqliteTx.ts`). The read-path temp-table transaction in
+  `services/impact/impactShared.ts` stays deferred: IMMEDIATE would make a read take the write lock. Guarded:
+  `indexLockContention.test.ts` "immediateTransaction takes the write lock at BEGIN".
+- Open (follow-up 7, not fixed): the `index_meta.fts_per_file` marker assumes every writer keeps FTS per file. A process
+  still running an older build writes full runs without that upkeep and rebuilds every FTS table at its end; if such a
+  run dies between its writes and that rebuild, FTS stays stale until the marker is deleted (a newer build's next full
+  run then rebuilds once).

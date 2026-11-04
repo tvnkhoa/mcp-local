@@ -6,6 +6,7 @@ import type { DocRecord, DocMentionRecord } from "../types/index.js";
 import { indexLog, indexWarn } from "../services/indexing/indexProgress.js";
 import { isTestPath } from "../services/indexing/fileFilter.js";
 import { pickCurrentSqlDefinition, sqlGroupKey, sqlTokenKindOfSymbol, supersededSqlDefinitions, type SqlDefinitionSite } from "../services/graph/sqlDefinitions.js";
+import { immediateTransaction } from "./sqliteTx.js";
 
 /**
  * MCP-ISSUE-061(c): `findStaleDocsImpl` and `findDocCoverageImpl` each hardcoded `limit 200` while
@@ -87,7 +88,7 @@ export function upsertDocsImpl(db: Database.Database, docs: DocRecord[]): void {
     return;
   }
 
-  db.transaction((rows: DocRecord[]) => {
+  immediateTransaction(db, (rows: DocRecord[]) => {
     writeRows(rows);
   })(docs);
 }
@@ -130,7 +131,7 @@ export function replaceDocsForFileImpl(
     run();
     return;
   }
-  db.transaction(run)();
+  immediateTransaction(db, run)();
 }
 
 export function upsertDocMentionsImpl(db: Database.Database, mentions: DocMentionRecord[]): void {
@@ -164,7 +165,7 @@ export function upsertDocMentionsImpl(db: Database.Database, mentions: DocMentio
     return;
   }
 
-  db.transaction((rows: DocMentionRecord[]) => {
+  immediateTransaction(db, (rows: DocMentionRecord[]) => {
     writeRows(rows);
   })(mentions);
 }
@@ -471,7 +472,7 @@ export function resolveMentionsImpl(db: Database.Database, repoId: string, scope
   );
 
   let count = 0;
-  const tx = db.transaction(() => {
+  const tx = immediateTransaction(db, () => {
     for (const mention of unresolved) {
       let outcome: ReturnType<typeof decide> = null;
       if (mention.mention_type === "backtick" || mention.mention_type === "code_call") {

@@ -5,6 +5,7 @@ import { rebuildDocsFtsImpl } from "./docsStore.js";
 import { rebuildLiteralsFtsImpl } from "./literalsStore.js";
 import { rebuildFtsImpl } from "../services/search/symbolSearchFts.js";
 import { deleteVectorsByRepo } from "./vectorStore.js";
+import { immediateTransaction } from "./sqliteTx.js";
 
 /**
  * MCP-ISSUE-105: drop one registered repo from the index.
@@ -65,7 +66,7 @@ export type PurgeCounts = Record<string, number>;
  */
 export function purgeRepositoryImpl(db: Database.Database, repoId: string): PurgeCounts {
   const counts: PurgeCounts = {};
-  db.transaction(() => {
+  immediateTransaction(db, () => {
     // Children first: they are found through rows the parent delete removes.
     for (const c of CHILD_TABLES) {
       counts[c.table] = db

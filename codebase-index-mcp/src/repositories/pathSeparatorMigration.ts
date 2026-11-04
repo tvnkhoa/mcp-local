@@ -24,6 +24,7 @@
  */
 
 import type Database from "better-sqlite3";
+import { immediateTransaction } from "./sqliteTx.js";
 
 export const PATH_SEPARATOR_MIGRATION_KEY = "mcp-issue-079-posix-paths";
 
@@ -48,7 +49,7 @@ export function migratePathSeparators(db: Database.Database): number {
   if (db.prepare(`select 1 from schema_migrations where key = ?`).get(PATH_SEPARATOR_MIGRATION_KEY)) return 0;
 
   let rewritten = 0;
-  db.transaction(() => {
+  immediateTransaction(db, () => {
     const tables = PATH_COLUMNS.filter(([table]) => tableExists(db, table));
 
     // 1. Duplicates: the backslash spelling of a file the forward-slash spelling already holds.

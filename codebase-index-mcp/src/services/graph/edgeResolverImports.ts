@@ -26,6 +26,7 @@ import {
   readTsconfigAliases,
   resolveModuleSpecifier
 } from "./moduleResolution.js";
+import { immediateTransaction } from "../../repositories/sqliteTx.js";
 
 export function resolveImportEdges(db: Database.Database, repoId: string, maxUnresolvedRows = 0): number {
   // Phase 0: Bulk-tag all external namespace imports BEFORE row-limited resolution.
@@ -125,7 +126,7 @@ export function resolveImportEdges(db: Database.Database, repoId: string, maxUnr
   const namespaceResolveCache = new Map<string, { id: string; confidence: number; reason: string } | null>();
 
   let count = 0;
-  const tx = db.transaction(() => {
+  const tx = immediateTransaction(db, () => {
     for (const row of unresolved) {
       let importPath = row.toId.slice(7); // strip "import:"
       // Strip "static " prefix from "using static" directives before namespace resolution
@@ -324,7 +325,7 @@ export function resolveImportsCrossRepo(db: Database.Database, repoId: string, m
   }
 
   let resolved = 0;
-  const tx = db.transaction(() => {
+  const tx = immediateTransaction(db, () => {
     for (const row of crossRepoRows) {
       let importPath = row.toId.slice(7);
       if (importPath.startsWith("static ")) importPath = importPath.slice(7);

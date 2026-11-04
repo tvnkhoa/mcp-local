@@ -11,6 +11,7 @@
 import type Database from "better-sqlite3";
 import { indexLog, indexWarn } from "../services/indexing/indexProgress.js";
 import { booleanFromEnv, optionalStringFromEnv } from "../config/envConfig.js";
+import { immediateTransaction } from "./sqliteTx.js";
 
 // ── Constants ──────────────────────────────────────────────────────────────────
 
@@ -447,7 +448,7 @@ export function batchUpsertSymbolVectors(
 
   for (let offset = 0; offset < eligible.length; offset += BATCH) {
     const chunk = eligible.slice(offset, offset + BATCH);
-    const tx = db.transaction(() => {
+    const tx = immediateTransaction(db, () => {
       for (const sym of chunk) {
         const text = normalizeSymbolText(sym.name, sym.signature);
         const vec = trigramVector(text);
@@ -689,7 +690,7 @@ export function syncVectorsForFiles(db: Database.Database, repoId: string, fileP
   if (stale.length > 0) {
     const deleteVec = _vectorEnabled ? db.prepare(`DELETE FROM vec_symbols WHERE rowid = ?`) : null;
     const deleteMap = db.prepare(`DELETE FROM vec_symbol_map WHERE repo_id = ? AND symbol_id = ?`);
-    db.transaction(() => {
+    immediateTransaction(db, () => {
       for (const s of stale) {
         if (deleteVec && s.vecRowid != null) deleteVec.run(s.vecRowid);
         deleteMap.run(repoId, s.symbolId);
@@ -730,7 +731,7 @@ export function deleteVectorsByRepo(db: Database.Database, repoId: string): void
           SELECT vec_rowid FROM vec_symbol_map WHERE repo_id = ? AND vec_rowid IS NOT NULL
         `).all(repoId) as { vec_rowid: number }[];
         const deleteVec = db.prepare(`DELETE FROM vec_symbols WHERE rowid = ?`);
-        const tx = db.transaction(() => {
+        const tx = immediateTransaction(db, () => {
           for (const r of vecRowids) {
             deleteVec.run(r.vec_rowid);
           }

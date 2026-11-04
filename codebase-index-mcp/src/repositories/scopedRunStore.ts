@@ -20,6 +20,7 @@
  */
 
 import type Database from "better-sqlite3";
+import { immediateTransaction } from "./sqliteTx.js";
 
 /** `path → (row key → name)` for the indexed symbols of each file. */
 export type SymbolRowsByFile = Map<string, Map<string, string>>;
@@ -537,7 +538,7 @@ export function resetMentionsForScope(
     `update or replace doc_mentions set symbol_id = null where repo_id = ? and doc_id = ? and mention_type = ? and mention_text = ? and symbol_id = ?`
   );
   const reset = new Set<string>();
-  const tx = db.transaction(() => {
+  const tx = immediateTransaction(db, () => {
     for (const m of bound) {
       const hit =
         oldIds.has(m.symbolId) ||

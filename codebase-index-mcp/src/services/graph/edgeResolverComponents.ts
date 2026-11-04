@@ -34,6 +34,7 @@ import {
   readTsconfigAliases,
   resolveModuleSpecifier
 } from "./moduleResolution.js";
+import { immediateTransaction } from "../../repositories/sqliteTx.js";
 
 export const UNRESOLVED_COMPONENT_REASON = "unresolved component token";
 export const COMPONENT_FALLTHROUGH_REASON = "vue binding not declared by child (fallthrough attribute)";
@@ -82,7 +83,7 @@ export function resolveComponentEdges(db: Database.Database, repoId: string): nu
   const resolveCache = new Map<string, string | null>();
   let resolved = 0;
 
-  db.transaction(() => {
+  immediateTransaction(db, () => {
     for (const row of rows) {
       const token = row.toId.slice("component:".length);
       const hash = token.indexOf("#");

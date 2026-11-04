@@ -22,6 +22,7 @@ import type Database from "better-sqlite3";
 import type { EdgeRecord, FileRecord, RouteRecord, SymbolRecord } from "../types/index.js";
 import { getEdgeDefaults } from "../services/impact/impactAnalyzer.js";
 import { deleteAnnotationsForFileImpl } from "./annotationsStore.js";
+import { immediateTransaction } from "./sqliteTx.js";
 
 /** Prepared statements for the hot per-file write path, prepared once per connection. */
 export interface WriteStatements {
@@ -351,7 +352,7 @@ export function replaceSymbolsForFile(
     return;
   }
 
-  ctx.db.transaction((rows: SymbolRecord[]) => {
+  immediateTransaction(ctx.db, (rows: SymbolRecord[]) => {
     writeRows(rows);
   })(symbols);
 }
@@ -375,7 +376,7 @@ export function pruneFiles(db: Database.Database, repoId: string, relativePaths:
   }
 
   const uniquePaths = [...new Set(relativePaths)];
-  const deleteTx = db.transaction((paths: string[]) => {
+  const deleteTx = immediateTransaction(db, (paths: string[]) => {
     for (const filePath of paths) {
       db.prepare(
         `
@@ -499,7 +500,7 @@ export function replaceEdgesForFile(ctx: WriteContext, repoId: string, filePath:
     return;
   }
 
-  ctx.db.transaction((rows: EdgeRecord[]) => {
+  immediateTransaction(ctx.db, (rows: EdgeRecord[]) => {
     writeRows(rows);
   })(edges);
 }
@@ -524,7 +525,7 @@ export function replaceRoutesForFile(ctx: WriteContext, repoId: string, filePath
     return;
   }
 
-  ctx.db.transaction((rows: RouteRecord[]) => {
+  immediateTransaction(ctx.db, (rows: RouteRecord[]) => {
     writeRows(rows);
   })(routes);
 }

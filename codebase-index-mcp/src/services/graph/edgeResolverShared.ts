@@ -19,6 +19,7 @@ import {
 } from "../../repositories/vectorStore.js";
 import { normalizeFilePath } from "./moduleResolution.js";
 import { HTTP_CONSUMER_REASON_PREFIX, pickEndpointProviders } from "./endpointMatch.js";
+import { immediateTransaction } from "../../repositories/sqliteTx.js";
 
 /**
  * Bulk-tag all import edges whose namespace belongs to a known external namespace (System, Microsoft, etc.)
@@ -60,7 +61,7 @@ export function tagExternalNamespaceImports(db: Database.Database, repoId: strin
   );
 
   let count = 0;
-  const tx = db.transaction(() => {
+  const tx = immediateTransaction(db, () => {
     for (const row of rows) {
       let importPath = row.toId.slice(7); // strip "import:"
       // Strip "static " prefix from "using static" directives (e.g. "static System.Net.WebRequestMethods")
@@ -311,7 +312,7 @@ export function resolveUnlinkedEdges(db: Database.Database, repoId: string): Res
     return repoSymbolCounts;
   };
 
-  const tx = db.transaction(() => {
+  const tx = immediateTransaction(db, () => {
     for (const row of unlinked) {
       stats.attempts += 1;
       const endpointMatch = endpointCandidatesByRow.get(endpointRowKey(row));

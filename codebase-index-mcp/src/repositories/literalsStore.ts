@@ -1,6 +1,7 @@
 import type Database from "better-sqlite3";
 import type { StringLiteralRecord } from "../types/index.js";
 import { indexLog, indexWarn } from "../services/indexing/indexProgress.js";
+import { immediateTransaction } from "./sqliteTx.js";
 
 // ISSUE-023 — string-literal lane storage. Bảng riêng + FTS5 external-content
 // (mirror docs_fts): KHÔNG nhét vào symbols để không phá ranking search_symbols
@@ -27,7 +28,7 @@ export function replaceLiteralsForFileImpl(
     write();
     return;
   }
-  db.transaction(write)();
+  immediateTransaction(db, write)();
 }
 
 export function rebuildLiteralsFtsImpl(db: Database.Database): void {

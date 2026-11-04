@@ -3,6 +3,7 @@ import { minimatch } from "minimatch";
 
 import type { CitationHit, CommentChunk } from "../services/docs/annotationScanner.js";
 import { indexLog } from "../services/indexing/indexProgress.js";
+import { immediateTransaction } from "./sqliteTx.js";
 
 /**
  * Release C storage: `citations` (a repo's shorthand references, from markdown prose and code
@@ -30,7 +31,7 @@ export function replaceAnnotationsForFileImpl(db: Database.Database, repoId: str
     for (const k of a.comments) insK.run(repoId, filePath, k.startLine, k.endLine, k.text, a.language);
   };
   if (db.inTransaction) write();
-  else db.transaction(write)();
+  else immediateTransaction(db, write)();
 }
 
 export function deleteAnnotationsForFileImpl(db: Database.Database, repoId: string, filePath: string): void {
