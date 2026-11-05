@@ -45,6 +45,7 @@
       "codebase-index-mcp/src/services/impact/**",
       "codebase-index-mcp/src/services/indexing/**",
       "codebase-index-mcp/src/services/refactor/**",
+      "codebase-index-mcp/src/services/runtime/**",
       "codebase-index-mcp/src/services/search/**",
       "codebase-index-mcp/src/services/typeResolution/**",
       "codebase-index-mcp/src/services/watch/**",

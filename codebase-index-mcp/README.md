@@ -212,6 +212,8 @@ Refactor tools: `refactor_replace_preview` and `refactor_replace_apply` support 
 | `CODEBASE_INDEX_DOCS_TOOLS_ENABLED` | no | `true` *(code)* | false makes query_docs refuse with INVALID_PARAMS. On by default since MCP-ISSUE-061. |
 | `CODEBASE_INDEX_TELEMETRY_ENABLED` | no | `false` | — |
 | `CODEBASE_INDEX_TELEMETRY_SAMPLE_RATE` | no | `1` *(code)* | Ratio 0–1. Only meaningful when telemetry is enabled. |
+| `CODEBASE_INDEX_LOOP_WATCHDOG_ENABLED` | no | `true` *(code)* | MCP-ISSUE-121: a worker thread logs `event_loop_stall` (with the calls in flight) when the server thread stops running. |
+| `CODEBASE_INDEX_LOOP_WATCHDOG_THRESHOLD_MS` | no | `10000` *(code)* | How long the server thread may be blocked before the watchdog logs it. Clamped to 1s–10min. |
 | `CODEBASE_INDEX_WATCH_AUTO_START_ENABLED` | no | `false` | renamed — still accepts `CODEBASE_INDEX_WATCH_AUTO_START` · Watchless by default, per the workspace's MCP hard-mode policy. |
 | `CODEBASE_INDEX_WATCH_ACTIVE_ONLY` | no | `true` *(code)* | Defaults to TRUE — only the active repo is watched. The one boolean here whose default is not false. |
 | `CODEBASE_INDEX_WATCH_ACTIVE_TTL_MS` | no | `900000` *(code)* | Idle watcher stop timeout. Clamped to 5s–24h. |
@@ -259,7 +261,7 @@ Refactor tools: `refactor_replace_preview` and `refactor_replace_apply` support 
 | `CODEBASE_INDEX_LOG_MODE` | no | — | renamed — still accepts `CODEBASE_INDEX_INDEX_LOG` · Enables verbose index-progress logging on stderr. |
 | `CODEBASE_INDEX_LLM_ENABLED` | no | `false` *(code)* | Runtime LLM invocation is prohibited by design. Setting this to true ABORTS STARTUP, and `guard:no-llm-runtime` statically verifies no LLM client is importable. Declared here so the constraint is documented, not so it can be turned on. |
 
-52 variables. Defaults marked *(code)* are the server's own fallback and are **not** written into your agent config — set them only to override.
+54 variables. Defaults marked *(code)* are the server's own fallback and are **not** written into your agent config — set them only to override.
 
 <!-- END GENERATED: env-table -->
 

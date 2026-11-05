@@ -24,6 +24,7 @@ import { assertPathAllowed, clamp } from "./middleware/indexGuardrails.js";
 import { WatchManager } from "./services/watch/watchManager.js";
 import type { IndexRunnerLimits, RunExtras, RunIndexAndResolve } from "./services/indexing/indexRunner.js";
 import type { IndexMode, IndexRunResult } from "./types/index.js";
+import { callLabel, startLoopWatchdog } from "./services/runtime/loopWatchdog.js";
 import { DEFAULT_MIN_FREE_RAM_MB, DEFAULT_RUN_TIMEOUT_MS, IndexJobQueue, MAX_WAIT_MS, queuedWithin } from "./services/indexing/indexJobs.js";
 import { RefreshWorkerClient } from "./services/indexing/refreshWorkerClient.js";
 import { newerBuildRefusal } from "./services/indexing/runPolicy.js";
@@ -82,6 +83,9 @@ const WATCH_ACTIVE_TTL_MS = clamp(numberFromEnv("CODEBASE_INDEX_WATCH_ACTIVE_TTL
 const AUTO_WATCH_REPOS = autoWatchReposFromEnv();
 const watchConfig = watchConfigFromEnv();
 const TELEMETRY_ENABLED = booleanFromEnv("CODEBASE_INDEX_TELEMETRY_ENABLED", false);
+// MCP-ISSUE-121: name a stalled server thread. On by default; the threshold is clamped to 1 s–10 min.
+const LOOP_WATCHDOG_ENABLED = booleanFromEnv("CODEBASE_INDEX_LOOP_WATCHDOG_ENABLED", true);
+const LOOP_WATCHDOG_THRESHOLD_MS = clamp(numberFromEnv("CODEBASE_INDEX_LOOP_WATCHDOG_THRESHOLD_MS", 10_000), 1_000, 600_000);
 const TELEMETRY_SAMPLE_RATE = ratioFromEnvName("CODEBASE_INDEX_TELEMETRY_SAMPLE_RATE", 1);
 // MCP-ISSUE-061(i): both defaulted false, so a fresh clone had no docs lane and `query_docs` refused.
 const DOCS_INDEXING_ENABLED = booleanFromEnv("CODEBASE_INDEX_DOCS_INDEXING_ENABLED", true);
@@ -382,6 +386,8 @@ function buildHandlerContext(): HandlerContext {
 /** Advertised bounds. Env-derived, so two differently-configured deployments publish different schemas. */
 const limits = { maxResultLimit: MAX_RESULT_LIMIT, maxDepth: MAX_DEPTH, maxFilesPerRun: MAX_FILES_PER_RUN };
 
+const loopWatchdog = startLoopWatchdog({ thresholdMs: LOOP_WATCHDOG_ENABLED ? LOOP_WATCHDOG_THRESHOLD_MS : 0 });
+
 const handle = createCodebaseIndexServer({
   // Not SERVER_VERSION: the version on the wire has been "0.1.0" since before the package
   // reached 0.3.0, and health_check reports the package one. Changing either is visible to
@@ -396,12 +402,17 @@ const handle = createCodebaseIndexServer({
   telemetry: { enabled: TELEMETRY_ENABLED, sampleRate: TELEMETRY_SAMPLE_RATE },
   // R4: one process, many clients — the store, watchers and refresh worker below are shared by all.
   // MCP-ISSUE-103: over HTTP, sessions survive a restart for the bearer that opened them (the store sits beside the DB).
+  onCallStart: (toolName, args) => loopWatchdog.begin(callLabel(toolName, args)),
   transport: ((t) => (t.kind === "http" ? { ...t, sessionStoreFile: path.join(FRESHNESS_LOCK_DIR, "http-sessions.json") } : t))(transportFromEnv())
 });
 
 // Registered before start(), and store-before-watchers on purpose: hooks run in reverse, so
 // the order at shutdown is transport, then watchers, then the database. A watcher that fires
 // after the store is closed would throw on a closed handle.
+handle.lifecycle.onShutdown({
+  name: "loop-watchdog",
+  run: () => loopWatchdog.stop()
+});
 handle.lifecycle.onShutdown({
   name: "store",
   run: () => {
