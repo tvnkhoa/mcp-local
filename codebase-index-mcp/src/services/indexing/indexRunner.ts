@@ -722,11 +722,17 @@ export function createIndexRunner(options: IndexRunnerOptions): RunIndexAndResol
   })();
 
   const { scopeInputs: _scopeInputs, ...summaryToRecord } = summary;
+  const recordedAtMs = Date.now();
   const fullSummary = {
     ...summaryToRecord,
+    // MCP-ISSUE-122 (F-b): the pipeline stamped `finishedAt` when its extract phase ended, so finished − started
+    // was `extractPhaseMs`, not the run. Stamp it here, at the same instant as `elapsedMs`: the planner and the seed
+    // order runs by `finished_at` and treat a run that finished after a base started as overlapping it, and a run's
+    // writes last until this point, not until extraction ended.
+    finishedAt: new Date(recordedAtMs).toISOString(),
     // Spans the whole run, including the post-phase below. The pipeline's own figure is preserved as
     // `extractPhaseMs`, so nothing is lost and no contained phase can exceed the total.
-    elapsedMs: Date.now() - runStartedMs,
+    elapsedMs: recordedAtMs - runStartedMs,
     ...graphSnapshot,
     edgesDeduplicated: dedupCount,
     crossRepoLinked: crossStats.resolved,
