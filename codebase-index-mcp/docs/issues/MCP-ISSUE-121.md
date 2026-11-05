@@ -34,3 +34,13 @@
   (1) win32 watchers use one recursive `fs.watch`; a watcher whose root is deleted stops itself.
 - Evidence: `~/.claude/handover/briefs/2026-11-05-mcp-local-hang-diag-evidence.md`,
   `~/.claude/handover/briefs/2026-11-05-mcp-local-hang-fix-evidence.md`.
+- Review follow-ups (leader review of wt/hang-diag, 2026-11-05). Fixed before merge: a nameless native event with
+  the root still present (ReadDirectoryChangesW buffer overflow) marks the batch overflowed; the watch_repo
+  description names `registeredBy`. Left open:
+  1. A moved directory is not reported as its files; recovery relies on git status (watcherRunPlan's unvouched
+     paths), so untracked-and-ignored files inside it are missed until the next full or incremental run.
+  2. .gitignore is not applied to watcher event paths; an index DB or log inside a watched tree could set off its
+     own runs.
+  3. search_regex read-ahead (16 per scan) has no cap across concurrent requests.
+  4. A search_regex scan is not cancelled when its request ends (client timeout or disconnect).
+  5. A case-only rename on NTFS reports both spellings as changed (no delete of the old spelling).
