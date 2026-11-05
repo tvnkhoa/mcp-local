@@ -273,17 +273,22 @@ test("H1: a failed parent run after the base (batches may have landed) refuses t
   }
 }));
 
-test("H1: a dirty parent run since the base is carried — the child's first scoped run re-reads it; child = full index", withTmp(async (dir) => {
+test("H1: every dirty parent run since the base is carried — the child's first scoped run re-reads them; child = full index", withTmp(async (dir) => {
   const repo = makeRepo();
   try {
     const dbPath = path.join(dir, "g.db");
     await fullIndex(dbPath, "parent", repo);
-    // The parent indexes a working-tree edit (a dirty run, keyed), then the edit is reverted on disk.
+    // The parent indexes two working-tree edits in two dirty runs (each keyed with its own path), then both are reverted
+    // on disk. The seed must carry BOTH paths: the newest run's key names only src/b.ts.
     const original = FILES["src/a.ts"]!;
-    writeFileSync(path.join(repo, "src/a.ts"), original.replace("beta()", "beta() + dirtyOnly()") + "export function dirtyOnly(): string { return \"d\"; }\n");
+    const originalB = FILES["src/b.ts"]!;
     const head = execFileSync("git", ["-C", repo, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+    writeFileSync(path.join(repo, "src/a.ts"), original.replace("beta()", "beta() + dirtyOnly()") + "export function dirtyOnly(): string { return \"d\"; }\n");
     await indexRun(dbPath, "parent", repo, "dirty", { knownDirtyPaths: ["src/a.ts"], bookkeeping: { coveredKey: JSON.stringify({ head, files: { "src/a.ts": "dirty-hash" } }) } });
+    writeFileSync(path.join(repo, "src/b.ts"), originalB + "export function dirtyOnlyB(): number { return 2; }\n");
+    await indexRun(dbPath, "parent", repo, "dirty", { knownDirtyPaths: ["src/b.ts"], bookkeeping: { coveredKey: JSON.stringify({ head, files: { "src/b.ts": "dirty-hash-b" } }) } });
     writeFileSync(path.join(repo, "src/a.ts"), original);
+    writeFileSync(path.join(repo, "src/b.ts"), originalB);
     await fullIndex(dbPath, "fullchild", repo, "parent");
 
     const store = new GraphStore(dbPath);
@@ -295,7 +300,7 @@ test("H1: a dirty parent run since the base is carried — the child's first sco
     }
     const seedRow = rawDb(dbPath, (db) => db.prepare(`select mode, tree_key as k, tree_dirty as d, skip_reason as s from index_runs where repo_id = 'seeded'`).get()) as { mode: string; k: string; d: number; s: unknown };
     assert.equal(seedRow.mode, "seed");
-    assert.deepEqual(Object.keys(JSON.parse(seedRow.k).files), ["src/a.ts"], "the parent's dirty path is carried in the seed row's tree key");
+    assert.deepEqual(Object.keys(JSON.parse(seedRow.k).files).sort(), ["src/a.ts", "src/b.ts"], "both dirty runs' paths are carried in the seed row's tree key");
     assert.equal(seedRow.d, 1);
     assert.ok(rows(dbPath, "seeded").symbols!.some((r) => r.includes("dirtyOnly")), "the copy holds the parent's dirty content");
 
@@ -347,6 +352,32 @@ test("L1: clear keeps other repos' cross_repo_deps into the child and drops the 
     }
     const left = rawDb(dbPath, (db) => db.prepare(`select from_repo_id as f from cross_repo_deps order by f`).all()) as { f: string }[];
     assert.deepEqual(left.map((r) => r.f), ["other"]);
+  } finally {
+    rmSync(repo, { recursive: true, force: true });
+  }
+}));
+
+test("follow-up (b): the caller's guard runs inside the copy transaction — a refusal there is PARENT_BUSY, nothing written", withTmp(async (dir) => {
+  const repo = makeRepo();
+  const lockDir = path.join(dir, "state");
+  mkdirSync(lockDir);
+  try {
+    const dbPath = path.join(dir, "g.db");
+    await fullIndex(dbPath, "parent", repo);
+    // The worker's guard: the parent's run markers, read under the write lock. A run of the parent starts in another
+    // process after the server's pre-check (its marker is written before its first batch).
+    writeFileSync(path.join(lockDir, `running-parent-${String(process.pid)}-7.json`), JSON.stringify({ pid: process.pid, at: Date.now(), repoId: "parent", mode: "incremental" }));
+    const { parentRunRefusal } = await import("../services/indexing/indexJobs.js");
+    const store = new GraphStore(dbPath);
+    try {
+      assert.throws(
+        () => store.seedFromParent({ parentRepoId: "parent", childRepoId: "seeded", childRepoPath: slash(repo) }, () => parentRunRefusal(lockDir, "parent")),
+        (e: unknown) => e instanceof SeedError && e.code === "PARENT_BUSY" && /parent_run_in_progress/.test(e.message)
+      );
+    } finally {
+      store.close();
+    }
+    for (const [table, list] of Object.entries(rows(dbPath, "seeded"))) assert.equal(list.length, 0, `${table}: nothing seeded`);
   } finally {
     rmSync(repo, { recursive: true, force: true });
   }

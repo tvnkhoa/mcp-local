@@ -386,8 +386,8 @@ export class GraphStore {
   }
 
   /** IX-9 U2: copy the parent's rows under the child's repoId (seedStore.ts). Call on the single writer only. */
-  seedFromParent(req: SeedRequest): SeedResult {
-    return seedFromParentDb(this.db, req);
+  seedFromParent(req: SeedRequest, guard?: () => string | null): SeedResult {
+    return seedFromParentDb(this.db, req, guard);
   }
 
   /** IX-9: the commit a seed from `repoId` would copy (its newest ok run with a commit), or null. A read. */

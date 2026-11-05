@@ -111,7 +111,23 @@
 - **L5** — `control.started()` is idempotent (the clock is set once); a test pins that the run after the seed does not
   restart the run timeout.
 
+- **Re-review (a)** a repair flag on the parent (a run that died mid-way leaves no index_runs row; `liveRunMarkers`
+  turns its dead marker into the flag) refuses the seed: `parent_needs_repair`. **(b)** the worker re-checks the
+  parent's live run markers and repair flag INSIDE the copy's IMMEDIATE transaction (SeedError `PARENT_BUSY`), closing
+  the cross-process window after the server's pre-check (a run writes its marker before its first batch).
+  **(c)** tests drive the real `parentRunRefusal` / `seedParentRefusal` over a real state dir (live marker, dead marker
+  → flag, unvouched history) and the guard inside the copy; the dirty-carry test has two dirty runs, which the pre-H1
+  code (it carried only the newest run's key) fails. **(d)** the run-timeout clock is pinned by identity
+  (`runStartedAt`, set once by the first `control.started()`), not by a timing margin.
+
 ### Follow-ups (not fixed)
+
+- A run stopped by `abortRun` (run timeout) leaves no index_runs row and no repair flag — pre-existing, the planner
+  shares it.
+- Small synchronous work stays on the server thread before a seed: `liveRunMarkers` (fs), and `seedBaseOf` up to three
+  times (refusal, ancestry SHA, `childHasIndex`) — bounded reads of ≤ 200 index_runs rows.
+- `childHasIndex` reads `seedBaseOf`: a child whose newest work run failed counts as not indexed, so a re-registration
+  re-seeds it (the seed clears the child first) — intended, documented here.
 
 - **L2** the vector step runs after the copy's transaction: a failure there leaves the copy committed (the job clears
   the child and runs full).

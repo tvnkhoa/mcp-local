@@ -135,21 +135,53 @@ test("IX-9 review M2: an async ancestry check is awaited", async () => {
   assert.deepEqual(h.runs, ["full"]);
 });
 
-test("IX-9 review L5: a second control.started() (seed, then the run) does not restart the run-timeout clock", async () => {
+test("IX-9 review L5: a second control.started() (seed, then the run) does not move the run-timeout clock", async () => {
   const { IndexJobQueue } = await import("./indexJobs.js");
+  let clock = 1_000;
+  let release!: () => void;
+  const gate = new Promise<void>((r) => (release = r));
   const queue = new IndexJobQueue({
     minFreeRamMb: 0,
-    runTimeoutMs: 150,
+    runTimeoutMs: 60_000,
+    now: () => clock,
     execute: async (job, _req, _p, control) => {
-      control.started(); // the seed step
-      await new Promise((r) => setTimeout(r, 120));
-      control.started(); // the run after it: must not reset the 150 ms clock
-      return new Promise<IndexRunResult>(() => undefined);
+      control.started(); // the seed step, at t = 1000
+      clock = 5_000;
+      control.started(); // the run after it, at t = 5000: must not move the clock
+      await gate;
+      return { runId: job.runId, status: "ok" } as IndexRunResult;
     }
   });
-  const t0 = Date.now();
   const job = queue.enqueue(request());
-  const failed = await queue.wait(job.runId, 2_000);
-  assert.equal(failed?.state, "failed");
-  assert.ok(Date.now() - t0 < 255, `timed out at ${String(Date.now() - t0)} ms — the clock was restarted (≥ 270 ms)`);
+  await new Promise((r) => setImmediate(r));
+  assert.equal(queue.get(job.runId)?.runStartedAt, new Date(1_000).toISOString(), "the clock started at the first call");
+  release();
+  assert.equal((await queue.wait(job.runId, 2_000))?.runStartedAt, new Date(1_000).toISOString(), "and the second call did not move it");
+});
+
+test("IX-9 follow-up (a)/(c): the REAL refusal wiring — live marker, dead marker → repair flag, unvouched history", async () => {
+  const fsm = await import("node:fs");
+  const osm = await import("node:os");
+  const pathm = await import("node:path");
+  const { parentRunRefusal, seedParentRefusal } = await import("./indexJobs.js");
+  const lockDir = fsm.mkdtempSync(pathm.join(osm.tmpdir(), "cim-seed-lock-"));
+  const marker = (pid: number, seq: number) =>
+    fsm.writeFileSync(pathm.join(lockDir, `running-parent-${String(pid)}-${String(seq)}.json`), JSON.stringify({ pid, at: Date.now(), repoId: "parent", mode: "incremental" }));
+  const unvouched = { seedRefusal: () => "a incremental run since the last complete one ended failed" };
+  const clean = { seedRefusal: () => null };
+  try {
+    assert.equal(seedParentRefusal(lockDir, clean, "parent"), null, "no marker, no flag, vouched history: seed");
+    assert.equal(seedParentRefusal(lockDir, unvouched, "parent"), "parent_runs_unvouched: a incremental run since the last complete one ended failed");
+
+    marker(process.pid, 1); // a run of the parent in progress (this pid is alive)
+    assert.equal(seedParentRefusal(lockDir, clean, "parent"), `parent_run_in_progress: pid ${String(process.pid)}`);
+    fsm.rmSync(pathm.join(lockDir, `running-parent-${String(process.pid)}-1.json`));
+
+    marker(2_147_480_001, 2); // a run that died mid-way: no index_runs row, only its marker
+    assert.equal(parentRunRefusal(lockDir, "parent"), "parent_needs_repair", "the dead marker became a repair flag");
+    assert.equal(parentRunRefusal(lockDir, "parent"), "parent_needs_repair", "and the flag keeps refusing");
+    assert.equal(parentRunRefusal(lockDir, "other"), null, "another repo's state does not refuse");
+  } finally {
+    fsm.rmSync(lockDir, { recursive: true, force: true });
+  }
 });

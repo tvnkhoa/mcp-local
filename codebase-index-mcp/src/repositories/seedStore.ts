@@ -22,7 +22,7 @@ import { rebuildVectorIndexForRepo } from "./vectorStore.js";
 export interface SeedRequest { parentRepoId: string; childRepoId: string; childRepoPath: string }
 export interface SeedResult { parentIndexedSha: string; tablesCopied: Record<string, number>; durationMs: number }
 
-export type SeedErrorCode = "PARENT_NOT_INDEXED" | "PARENT_UNVOUCHED" | "SCHEMA_UNHANDLED" | "COPY_FAILED";
+export type SeedErrorCode = "PARENT_NOT_INDEXED" | "PARENT_UNVOUCHED" | "PARENT_BUSY" | "SCHEMA_UNHANDLED" | "COPY_FAILED";
 
 export class SeedError extends Error {
   readonly code: SeedErrorCode;
@@ -189,7 +189,12 @@ function seedTreeKey(base: Record<string, unknown>, carried: Record<string, stri
   return { key: JSON.stringify({ ...(key ?? { head: base.commit_sha }), files: carried }), dirty: dirty ? 1 : 0 };
 }
 
-export function seedFromParentDb(db: Database.Database, req: SeedRequest): SeedResult {
+/**
+ * `guard` (review (b)) runs first inside the IMMEDIATE transaction: a reason to refuse that only the caller can see
+ * (the parent's run markers / repair flag, shared by every process on the DB). Checked under the write lock, no batch of
+ * another process's parent run can commit between it and the copy.
+ */
+export function seedFromParentDb(db: Database.Database, req: SeedRequest, guard?: () => string | null): SeedResult {
   const started = Date.now();
   const { parentRepoId, childRepoId, childRepoPath } = req;
   if (parentRepoId === childRepoId) throw new SeedError("COPY_FAILED", `cannot seed ${childRepoId} from itself`);
@@ -208,6 +213,8 @@ export function seedFromParentDb(db: Database.Database, req: SeedRequest): SeedR
   const tablesCopied: Record<string, number> = {};
   try {
     immediateTransaction(db, () => {
+      const busy = guard?.() ?? null;
+      if (busy) throw new SeedError("PARENT_BUSY", `parent ${parentRepoId} cannot be seeded from now: ${busy}`);
       // Review H1: vouched inside the write transaction, so no run of this DB can land between the check and the copy.
       const vouched = seedBaseOf(db, parentRepoId);
       if (!vouched.ok) throw new SeedError("PARENT_UNVOUCHED", `parent ${parentRepoId} cannot be vouched for: ${vouched.reason}`);

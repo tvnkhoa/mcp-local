@@ -24,7 +24,7 @@ import { assertPathAllowed, clamp } from "./middleware/indexGuardrails.js";
 import { WatchManager } from "./services/watch/watchManager.js";
 import type { IndexRunnerLimits, RunExtras, RunIndexAndResolve } from "./services/indexing/indexRunner.js";
 import type { IndexMode, IndexRunResult } from "./types/index.js";
-import { DEFAULT_MIN_FREE_RAM_MB, DEFAULT_RUN_TIMEOUT_MS, IndexJobQueue, MAX_WAIT_MS, queuedWithin, runWithSeed } from "./services/indexing/indexJobs.js";
+import { DEFAULT_MIN_FREE_RAM_MB, DEFAULT_RUN_TIMEOUT_MS, IndexJobQueue, MAX_WAIT_MS, queuedWithin, runWithSeed, seedParentRefusal } from "./services/indexing/indexJobs.js";
 import { RefreshWorkerClient } from "./services/indexing/refreshWorkerClient.js";
 import { newerBuildRefusal } from "./services/indexing/runPolicy.js";
 import { INDEX_VERSION } from "./services/indexing/indexPipeline.js";
@@ -52,7 +52,7 @@ import type { HandlerContext } from "./tools/handlers/handlerContext.js";
 import { createCodebaseIndexServer } from "./server.js";
 import { buildTools } from "./tools/index.js";
 import { DEFAULT_MAX_MARKDOWN_BYTES } from "./services/indexing/fileFilter.js";
-import { applyFreshness, computeTreeKey, createFreshnessGate, DEFAULT_STALE_RUN_MS, freshnessStateDir, liveRunMarkers, parseTreeKey, recordDirtyLedger, serializeTreeKey, watcherRunPlan, type TreeKey } from "./middleware/freshness.js";
+import { applyFreshness, computeTreeKey, createFreshnessGate, freshnessStateDir, parseTreeKey, recordDirtyLedger, serializeTreeKey, watcherRunPlan, type TreeKey } from "./middleware/freshness.js";
 import { checkSeedAncestry, readWorkingTreeStateAsync } from "./services/git/gitHelpers.js";
 
 const dbPath = stringFromEnv("CODEBASE_INDEX_DB_PATH", "./codebase-index.db");
@@ -277,15 +277,12 @@ const indexJobs = new IndexJobQueue({
             // Review M2: async git — never four execFileSync calls on this thread.
             ancestry: (childRepoPath, parentSha) => checkSeedAncestry(childRepoPath, parentSha),
             // Review M3: another process's run of the parent may sit between batch commits; H1: unvouched parent runs.
-            parentRefusal: (parentRepoId) => {
-              const live = liveRunMarkers(FRESHNESS_LOCK_DIR, parentRepoId, DEFAULT_STALE_RUN_MS, Date.now());
-              if (live.length > 0) return `parent_run_in_progress: pid ${live.map((m) => String(m.pid)).join(", ")}`;
-              const reason = store.seedRefusal(parentRepoId);
-              return reason ? `parent_runs_unvouched: ${reason}` : null;
-            },
+            // A crashed parent run leaves only a repair flag (no index_runs row): parent_needs_repair.
+            parentRefusal: (parentRepoId) => seedParentRefusal(FRESHNESS_LOCK_DIR, store, parentRepoId),
             seed: async (req) => {
               begin();
-              const seeded = await refreshWorker.seed(req, job.runId);
+              // Review (b): the worker re-checks the parent's run markers under the write lock.
+              const seeded = await refreshWorker.seed(req, job.runId, FRESHNESS_LOCK_DIR);
               store.invalidateProcessCaches();
               return seeded;
             },

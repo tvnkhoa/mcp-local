@@ -121,7 +121,7 @@ export class RefreshWorkerClient {
    * failure rejects with an Error carrying the SeedError `code`. Queue it like a run. `runId` (the index job's) lets
    * `abortRun` stop a hung seed as it stops a hung run.
    */
-  seed(req: SeedRequest, runId?: string): Promise<SeedResult> {
+  seed(req: SeedRequest, runId?: string, lockDir?: string): Promise<SeedResult> {
     return new Promise<SeedResult>((resolve, reject) => {
       const worker = this.workerOr(reject);
       if (!worker) return;
@@ -129,7 +129,7 @@ export class RefreshWorkerClient {
       this.pending.set(id, { repoId: req.childRepoId, resolve: () => reject(new Error("seed answered by a run result")), reject, onSeeded: resolve, ...(runId && { runId }) });
       worker.postMessage({
         kind: "seed", id, dbPath: this.options.dbPath, limits: this.options.limits, repoId: req.childRepoId, repoPath: req.childRepoPath,
-        mode: "full", docsEnabled: false, maxFiles: 0, batchSize: 0, seedFrom: req.parentRepoId
+        mode: "full", docsEnabled: false, maxFiles: 0, batchSize: 0, seedFrom: req.parentRepoId, ...(lockDir && { lockDir })
       });
     });
   }

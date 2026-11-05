@@ -24,6 +24,7 @@ import os from "node:os";
 import path from "node:path";
 
 import { samePath } from "../git/gitHelpers.js";
+import { DEFAULT_STALE_RUN_MS, liveRunMarkers, readRepairNeeded } from "../../middleware/freshness.js";
 
 import type { SeedRequest, SeedResult } from "../../repositories/seedStore.js";
 import type { IndexMode, IndexRunResult } from "../../types/index.js";
@@ -65,6 +66,8 @@ export type IndexJob = {
   /** The run's summary once it ended ok (or the run's own `failed` status). */
   result?: IndexRunResult;
   error?: string;
+  /** When the run-timeout clock started (the first `control.started()`; a later call never moves it). */
+  runStartedAt?: string;
   /** IX-9: why a job asked to seed ran a full index instead (never a silent wrong seed). */
   fallbackReason?: string;
 };
@@ -308,7 +311,9 @@ export class IndexJobQueue {
     const control: IndexJobControl = {
       cancelled: () => settled,
       started: () => {
-        if (settled || timeout || limit <= 0) return;
+        if (settled) return;
+        job.runStartedAt ??= new Date(this.now()).toISOString();
+        if (timeout || limit <= 0) return;
         timeout = setTimeout(() => {
           finish(() => {
             job.state = "failed";
@@ -459,4 +464,25 @@ export async function runWithSeed(request: IndexJobRequest, deps: SeedStepDeps):
   }
   if (runFailed(result)) return { ...(await fallback("incremental_after_seed_failed", true)), seed };
   return { result, seeded: true, seed };
+}
+
+/**
+ * IX-9 review M3 / follow-up (a): why the parent's rows may be half-written right now, from the run state every server
+ * process on the DB shares (`lockDir`): a live run marker (a run between batch commits) or a repair flag (a run that
+ * died mid-way — it leaves no index_runs row; `liveRunMarkers` turns its dead marker into the flag). Null when neither.
+ * The worker checks it again inside the copy's IMMEDIATE transaction.
+ */
+export function parentRunRefusal(lockDir: string, parentRepoId: string, now: number = Date.now()): string | null {
+  const live = liveRunMarkers(lockDir, parentRepoId, DEFAULT_STALE_RUN_MS, now);
+  if (live.length > 0) return `parent_run_in_progress: pid ${live.map((m) => String(m.pid)).join(", ")}`;
+  if (readRepairNeeded(lockDir, parentRepoId)) return "parent_needs_repair";
+  return null;
+}
+
+/** The executor's `parentRefusal`: the run state above, then the parent's run history (review H1). */
+export function seedParentRefusal(lockDir: string, store: { seedRefusal(repoId: string): string | null }, parentRepoId: string): string | null {
+  const busy = parentRunRefusal(lockDir, parentRepoId);
+  if (busy) return busy;
+  const reason = store.seedRefusal(parentRepoId);
+  return reason ? `parent_runs_unvouched: ${reason}` : null;
 }

@@ -28,6 +28,7 @@ import { ExtractionWorkerPool } from "../extractors/extractionWorkerPool.js";
 import type { IndexMode, IndexRunResult } from "../../types/index.js";
 import type { RunBookkeeping } from "../../middleware/freshness.js";
 import { createIndexRunner, type IndexRunnerLimits, type RunIndexAndResolve } from "./indexRunner.js";
+import { parentRunRefusal } from "./indexJobs.js";
 
 /**
  * Release J: a refresh of at most this many files parses on this thread; a larger one (its dependents
@@ -67,6 +68,8 @@ export type RefreshWorkerRequest = {
   reportProgress?: boolean;
   /** IX-9: the parent repoId of a `seed` request. */
   seedFrom?: string;
+  /** IX-9 review (b): the run-state dir; the seed re-checks the parent's run markers inside its write transaction. */
+  lockDir?: string;
 };
 
 export type RefreshWorkerMessage =
@@ -140,7 +143,12 @@ if (parentPort) {
     if (request.kind === "seed") {
       try {
         if (!request.seedFrom) throw new SeedError("COPY_FAILED", "seed request without seedFrom");
-        const seed = runnerFor(request).store.seedFromParent({ parentRepoId: request.seedFrom, childRepoId: request.repoId, childRepoPath: request.repoPath });
+        const lockDir = request.lockDir;
+        const parentRepoId = request.seedFrom;
+        const seed = runnerFor(request).store.seedFromParent(
+          { parentRepoId, childRepoId: request.repoId, childRepoPath: request.repoPath },
+          lockDir ? () => parentRunRefusal(lockDir, parentRepoId) : undefined
+        );
         port.postMessage({ type: "seeded", id: request.id, seed } satisfies RefreshWorkerMessage);
       } catch (error) {
         port.postMessage({
