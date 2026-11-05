@@ -15,17 +15,20 @@
  * `refreshWorkerClient.ts` spawns this file with `new URL("./refreshWorker.js", import.meta.url)`, so
  * the two must stay in the same folder (as `fieldWorker.ts` / `fieldWorkerClient.ts` do).
  *
- * Protocol: a `run` request gets exactly one `result` or `error`; a `warm` request gets nothing.
+ * Protocol: a `run` request gets exactly one `result` or `error`; `purge`/`clear` one `purged` or `error`; `seed` one
+ * `seeded` or `error` (with the SeedError `code`); a `warm` request gets nothing.
  */
 
 import { parentPort } from "node:worker_threads";
 
 import { performanceProfileOverrideFromEnv } from "../../config/envConfig.js";
 import { GraphStore } from "../../repositories/graphStore.js";
+import { SeedError, type SeedResult } from "../../repositories/seedStore.js";
 import { ExtractionWorkerPool } from "../extractors/extractionWorkerPool.js";
 import type { IndexMode, IndexRunResult } from "../../types/index.js";
 import type { RunBookkeeping } from "../../middleware/freshness.js";
 import { createIndexRunner, type IndexRunnerLimits, type RunIndexAndResolve } from "./indexRunner.js";
+import { parentRunRefusal } from "./indexJobs.js";
 
 /**
  * Release J: a refresh of at most this many files parses on this thread; a larger one (its dependents
@@ -43,7 +46,9 @@ const REFRESH_PARSE_POOL_IDLE_MS = 10 * 60_000;
 export type RefreshWorkerRequest = {
   /** `warm`: open the connection and load the runner now, answer nothing (posted at server start). */
   /** `purge` (review 3-rest): `remove_repository`'s delete, on this worker's connection — the writer's. */
-  kind: "run" | "warm" | "purge";
+  /** `seed` / `clear` (IX-9, MCP-ISSUE-119): a worktree's seed from `seedFrom`, and the per-repo index clear before
+   *  a seed's fallback full run — both on this connection, the single writer's. */
+  kind: "run" | "warm" | "purge" | "seed" | "clear";
   id: number;
   dbPath: string;
   limits: IndexRunnerLimits;
@@ -61,13 +66,18 @@ export type RefreshWorkerRequest = {
   runId?: string;
   /** MCP-ISSUE-112: post `progress` messages for this run (an index job reports its phase). */
   reportProgress?: boolean;
+  /** IX-9: the parent repoId of a `seed` request. */
+  seedFrom?: string;
+  /** IX-9 review (b): the run-state dir; the seed re-checks the parent's run markers inside its write transaction. */
+  lockDir?: string;
 };
 
 export type RefreshWorkerMessage =
   | { type: "result"; id: number; result: IndexRunResult }
   | { type: "progress"; id: number; progress: number; total: number | undefined; message: string }
   | { type: "purged"; id: number; counts: Record<string, number> }
-  | { type: "error"; id: number; error: string };
+  | { type: "seeded"; id: number; seed: SeedResult }
+  | { type: "error"; id: number; error: string; code?: string };
 
 /** `endIndexSession`, best-effort: a checkpoint that cannot run now runs on a later one. */
 function endSession(store: GraphStore, truncate: boolean): void {
@@ -130,9 +140,30 @@ if (parentPort) {
       }
       return;
     }
-    if (request.kind === "purge") {
+    if (request.kind === "seed") {
       try {
-        const counts = runnerFor(request).store.purgeRepository(request.repoId);
+        if (!request.seedFrom) throw new SeedError("COPY_FAILED", "seed request without seedFrom");
+        const lockDir = request.lockDir;
+        const parentRepoId = request.seedFrom;
+        const seed = runnerFor(request).store.seedFromParent(
+          { parentRepoId, childRepoId: request.repoId, childRepoPath: request.repoPath },
+          lockDir ? () => parentRunRefusal(lockDir, parentRepoId) : undefined
+        );
+        port.postMessage({ type: "seeded", id: request.id, seed } satisfies RefreshWorkerMessage);
+      } catch (error) {
+        port.postMessage({
+          type: "error",
+          id: request.id,
+          error: error instanceof Error ? error.message : String(error),
+          ...(error instanceof SeedError && { code: error.code })
+        } satisfies RefreshWorkerMessage);
+      }
+      return;
+    }
+    if (request.kind === "purge" || request.kind === "clear") {
+      try {
+        const store = runnerFor(request).store;
+        const counts = request.kind === "clear" ? store.clearRepositoryIndex(request.repoId) : store.purgeRepository(request.repoId);
         port.postMessage({ type: "purged", id: request.id, counts } satisfies RefreshWorkerMessage);
       } catch (error) {
         port.postMessage({ type: "error", id: request.id, error: error instanceof Error ? error.message : String(error) } satisfies RefreshWorkerMessage);

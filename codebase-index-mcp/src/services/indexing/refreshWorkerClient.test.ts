@@ -212,3 +212,51 @@ test("review 3-rest: purge is posted to the worker and answered by its purged me
   workers[0].send({ type: "error", id: workers[0].requests[1].id, error: "SQLITE_BUSY" });
   await assert.rejects(failing, /SQLITE_BUSY/);
 });
+
+test("IX-9: seed and clear are posted to the worker (the single writer) and answered by its messages", async () => {
+  const dropped: string[] = [];
+  const workers: FakeWorker[] = [];
+  const client = new RefreshWorkerClient({
+    dbPath: "/tmp/index.db",
+    limits: LIMITS,
+    spawn: () => {
+      const w = new FakeWorker();
+      workers.push(w);
+      return w;
+    },
+    onPurged: (repoId) => dropped.push(repoId)
+  });
+  const seeded = client.seed({ parentRepoId: "parent", childRepoId: "child", childRepoPath: "/r/child" }, "run-1");
+  const req = workers[0].requests[0];
+  assert.deepEqual({ kind: req.kind, repoId: req.repoId, repoPath: req.repoPath, seedFrom: req.seedFrom }, { kind: "seed", repoId: "child", repoPath: "/r/child", seedFrom: "parent" });
+  const answer = { parentIndexedSha: "p".repeat(40), tablesCopied: { symbols: 3 }, durationMs: 5 };
+  workers[0].send({ type: "seeded", id: req.id, seed: answer });
+  assert.deepEqual(await seeded, answer);
+  assert.deepEqual(dropped, ["child"], "the child's rows changed under the server thread: caches dropped");
+
+  const failing = client.seed({ parentRepoId: "parent", childRepoId: "child", childRepoPath: "/r/child" });
+  workers[0].send({ type: "error", id: workers[0].requests[1].id, error: "no ok run", code: "PARENT_NOT_INDEXED" });
+  await assert.rejects(failing, (e: Error & { code?: string }) => e.code === "PARENT_NOT_INDEXED");
+
+  const cleared = client.clear("child");
+  const clearReq = workers[0].requests[2];
+  assert.equal(clearReq.kind, "clear");
+  workers[0].send({ type: "purged", id: clearReq.id, counts: { symbols: 3 } });
+  assert.deepEqual(await cleared, { symbols: 3 });
+});
+
+test("IX-9: a hung seed is stopped by abortRun like a run (it carries the job's runId)", async () => {
+  const { client, workers } = harness();
+  const seeded = client.seed({ parentRepoId: "parent", childRepoId: "child", childRepoPath: "/r/child" }, "run-9");
+  assert.equal(await client.abortRun("run-9", "timed out"), true);
+  await assert.rejects(seeded, /timed out/);
+  assert.equal(workers[0].terminated, true);
+});
+
+test("IX-9: the server thread never seeds or clears on its own connection (MCP-ISSUE-112 single writer)", async () => {
+  const { readFileSync } = await import("node:fs");
+  const src = readFileSync(new URL("../../index.ts", import.meta.url), "utf8");
+  assert.doesNotMatch(src, /\bstore\.(seedFromParent|clearRepositoryIndex|purgeRepository)\(/);
+  assert.match(src, /refreshWorker\.seed\(/);
+  assert.match(src, /refreshWorker\.clear\(/);
+});

@@ -24,7 +24,9 @@ import os from "node:os";
 import path from "node:path";
 
 import { samePath } from "../git/gitHelpers.js";
+import { DEFAULT_STALE_RUN_MS, liveRunMarkers, readRepairNeeded } from "../../middleware/freshness.js";
 
+import type { SeedRequest, SeedResult } from "../../repositories/seedStore.js";
 import type { IndexMode, IndexRunResult } from "../../types/index.js";
 
 export type IndexJobState = "queued" | "running" | "ok" | "failed";
@@ -38,9 +40,11 @@ export type IndexJobRequest = {
   batchSize: number;
   /** Who asked, for the status line ("index_repository", "register_worktree"). */
   source: string;
+  /** IX-9: register_worktree's parent repoId — seed this repo from the parent's index when the preconditions hold. */
+  seedFrom?: string;
 };
 
-export type IndexJobProgress = { phase: string; progress?: number; total?: number };
+export type IndexJobProgress = { phase: string; progress?: number; total?: number; fallbackReason?: string };
 
 export type IndexJob = {
   runId: string;
@@ -62,6 +66,10 @@ export type IndexJob = {
   /** The run's summary once it ended ok (or the run's own `failed` status). */
   result?: IndexRunResult;
   error?: string;
+  /** When the run-timeout clock started (the first `control.started()`; a later call never moves it). */
+  runStartedAt?: string;
+  /** IX-9: why a job asked to seed ran a full index instead (never a silent wrong seed). */
+  fallbackReason?: string;
 };
 
 /**
@@ -303,7 +311,9 @@ export class IndexJobQueue {
     const control: IndexJobControl = {
       cancelled: () => settled,
       started: () => {
-        if (settled || timeout || limit <= 0) return;
+        if (settled) return;
+        job.runStartedAt ??= new Date(this.now()).toISOString();
+        if (timeout || limit <= 0) return;
         timeout = setTimeout(() => {
           finish(() => {
             job.state = "failed";
@@ -322,6 +332,7 @@ export class IndexJobQueue {
       .execute(job, request, (p) => {
         if (settled) return;
         job.phase = p.phase;
+        if (p.fallbackReason !== undefined) job.fallbackReason = p.fallbackReason;
         if (p.progress !== undefined) job.progress = p.progress;
         if (p.total !== undefined) job.total = p.total;
         for (const listener of this.listeners.get(nextId) ?? []) {
@@ -369,4 +380,109 @@ export class IndexJobQueue {
   private snapshot(job: IndexJob): IndexJob {
     return { ...job };
   }
+}
+
+// ── IX-9: seed a worktree from its parent's index ─────────────────────────────
+
+export type SeedRequestLike = SeedRequest;
+export type SeedResultLike = SeedResult;
+
+export type SeedAncestryLike =
+  | { ok: true; parentSha: string; childSha: string }
+  | { ok: false; fallbackReason: string; parentSha: string | null; childSha: string | null };
+
+export type SeedStepDeps = {
+  /** The parent's indexed commit (its base run's `commit_sha`), or null when it has none. */
+  parentIndexedSha: (parentRepoId: string) => string | null;
+  /** True when the child already holds an index: a re-registration runs its normal incremental, no seed. */
+  childHasIndex: (childRepoId: string) => boolean;
+  /** `checkSeedAncestry` from gitHelpers in the server; injected for tests. */
+  ancestry: (childRepoPath: string, parentIndexedSha: string | null) => SeedAncestryLike | Promise<SeedAncestryLike>;
+  /**
+   * Review H1/M3: why the parent cannot be seeded from right now, or null — a run of the parent in progress in any
+   * process on this DB (its batches may be half-committed), or parent runs the seed cannot vouch for. Checked first.
+   */
+  parentRefusal?: (parentRepoId: string) => string | null;
+  /** `seedFromParent` on the writer's connection (the refresh worker in the server); throws or rejects with SeedError{code}, rolled back. */
+  seed: (req: SeedRequestLike) => SeedResultLike | Promise<SeedResultLike>;
+  /** Runs the index in the given mode (the executor's normal run). */
+  run: (mode: IndexMode) => Promise<IndexRunResult>;
+  /** Drops the child's rows (per-repo, no global FTS rebuild) before a full run after a failed seeded run. */
+  purgeChild?: (childRepoId: string) => void | Promise<void>;
+  onProgress: (progress: IndexJobProgress) => void;
+};
+
+export type SeedStepOutcome = {
+  result: IndexRunResult;
+  seeded: boolean;
+  seed?: SeedResultLike;
+  fallbackReason?: string;
+};
+
+function seedErrorReason(error: unknown): string {
+  const code = (error as { code?: unknown } | null)?.code;
+  return typeof code === "string" && code ? `seed_${code.toLowerCase()}` : "seed_failed";
+}
+
+function runFailed(result: IndexRunResult): boolean {
+  return result.status === "failed" || result.status === "cancelled";
+}
+
+/**
+ * IX-9 executor step. Without `seedFrom` (or when the child is already indexed) it is the plain run. Otherwise:
+ * ancestry check → seed (phase "seed") → scoped incremental. Every refusal or failure runs full in the same job and
+ * reports `fallbackReason` through progress (→ index_status): ancestry refusal, a seed error (child cleared first:
+ * the store rolls the copy back, not a failed vector step after it), or an incremental that failed on top of the seed (child purged first when `purgeChild` is given).
+ */
+export async function runWithSeed(request: IndexJobRequest, deps: SeedStepDeps): Promise<SeedStepOutcome> {
+  if (!request.seedFrom || deps.childHasIndex(request.repoId)) {
+    return { result: await deps.run(request.mode), seeded: false };
+  }
+  const fallback = async (fallbackReason: string, purge: boolean): Promise<SeedStepOutcome> => {
+    deps.onProgress({ phase: "full (seed fallback)", fallbackReason });
+    if (purge) await deps.purgeChild?.(request.repoId);
+    return { result: await deps.run("full"), seeded: false, fallbackReason };
+  };
+  const refusal = deps.parentRefusal?.(request.seedFrom) ?? null;
+  if (refusal) return fallback(refusal, false);
+  const ancestry = await deps.ancestry(request.repoPath, deps.parentIndexedSha(request.seedFrom));
+  if (!ancestry.ok) return fallback(ancestry.fallbackReason, false);
+  deps.onProgress({ phase: "seed" });
+  let seed: SeedResultLike;
+  try {
+    seed = await deps.seed({ parentRepoId: request.seedFrom, childRepoId: request.repoId, childRepoPath: request.repoPath });
+  } catch (error) {
+    // The copy is rolled back, but its vector step runs after the copy commits (seedStore): clear whatever is left.
+    return fallback(seedErrorReason(error), true);
+  }
+  deps.onProgress({ phase: "incremental (after seed)" });
+  let result: IndexRunResult;
+  try {
+    result = await deps.run("incremental");
+  } catch {
+    return { ...(await fallback("incremental_after_seed_failed", true)), seed };
+  }
+  if (runFailed(result)) return { ...(await fallback("incremental_after_seed_failed", true)), seed };
+  return { result, seeded: true, seed };
+}
+
+/**
+ * IX-9 review M3 / follow-up (a): why the parent's rows may be half-written right now, from the run state every server
+ * process on the DB shares (`lockDir`): a live run marker (a run between batch commits) or a repair flag (a run that
+ * died mid-way — it leaves no index_runs row; `liveRunMarkers` turns its dead marker into the flag). Null when neither.
+ * The worker checks it again inside the copy's IMMEDIATE transaction.
+ */
+export function parentRunRefusal(lockDir: string, parentRepoId: string, now: number = Date.now()): string | null {
+  const live = liveRunMarkers(lockDir, parentRepoId, DEFAULT_STALE_RUN_MS, now);
+  if (live.length > 0) return `parent_run_in_progress: pid ${live.map((m) => String(m.pid)).join(", ")}`;
+  if (readRepairNeeded(lockDir, parentRepoId)) return "parent_needs_repair";
+  return null;
+}
+
+/** The executor's `parentRefusal`: the run state above, then the parent's run history (review H1). */
+export function seedParentRefusal(lockDir: string, store: { seedRefusal(repoId: string): string | null }, parentRepoId: string): string | null {
+  const busy = parentRunRefusal(lockDir, parentRepoId);
+  if (busy) return busy;
+  const reason = store.seedRefusal(parentRepoId);
+  return reason ? `parent_runs_unvouched: ${reason}` : null;
 }

@@ -161,7 +161,7 @@ import {
   listRepositoriesImpl
 } from "../services/impact/impactAnalyzer.js";
 import { initGraphSchema, runGraphMigrations } from "./schema.js";
-import { purgeRepositoryImpl, type PurgeCounts } from "./repoPurgeStore.js";
+import { clearRepositoryIndexImpl, purgeRepositoryImpl, type PurgeCounts } from "./repoPurgeStore.js";
 import {
   replaceAnnotationsForFileImpl,
   rebuildCommentsFtsImpl,
@@ -189,6 +189,8 @@ import {
   rebuildEdgeIndexes as rebuildEdgeIndexesImpl,
   upsertFile as upsertFileImpl,
   ensureRepository as ensureRepositoryImpl,
+  getIdNamespace as getIdNamespaceImpl,
+  setIdNamespace as setIdNamespaceImpl,
   getFileHash as getFileHashImpl,
   replaceSymbolsForFile as replaceSymbolsForFileImpl,
   pruneStaleFiles as pruneStaleFilesImpl,
@@ -225,6 +227,7 @@ import {
   isVectorEnabled,
   invalidateVectorSearchCache,
 } from "./vectorStore.js";
+import { seedBaseOf, seedBaseRunSha, seedFromParentDb, type SeedRequest, type SeedResult } from "./seedStore.js";
 import {
   resetMentionsForScope as resetMentionsForScopeImpl,
   laneRowsForFiles as laneRowsForFilesImpl,
@@ -371,6 +374,31 @@ export class GraphStore {
 
   ensureRepository(repoId: string, repoPath: string): void {
     ensureRepositoryImpl(this.db, repoId, repoPath);
+  }
+
+  /** IX-9 U1: the namespace this repo's stable ids are minted under (its own repoId unless set). */
+  getIdNamespace(repoId: string): string {
+    return getIdNamespaceImpl(this.db, repoId);
+  }
+
+  setIdNamespace(repoId: string, namespace: string | null): boolean {
+    return setIdNamespaceImpl(this.db, repoId, namespace);
+  }
+
+  /** IX-9 U2: copy the parent's rows under the child's repoId (seedStore.ts). Call on the single writer only. */
+  seedFromParent(req: SeedRequest, guard?: () => string | null): SeedResult {
+    return seedFromParentDb(this.db, req, guard);
+  }
+
+  /** IX-9: the commit a seed from `repoId` would copy (its newest ok run with a commit), or null. A read. */
+  seedBaseSha(repoId: string): string | null {
+    return seedBaseRunSha(this.db, repoId);
+  }
+
+  /** IX-9 review H1: why a seed from `repoId` cannot be vouched for (its run history), or null. A read. */
+  seedRefusal(repoId: string): string | null {
+    const base = seedBaseOf(this.db, repoId);
+    return base.ok ? null : base.reason;
   }
 
   getFileHash(repoId: string, filePath: string): string | null {
@@ -791,6 +819,11 @@ export class GraphStore {
   /** MCP-ISSUE-105: delete every row of one repo in every table; returns rows removed per table. */
   purgeRepository(repoId: string): PurgeCounts {
     return purgeRepositoryImpl(this.db, repoId);
+  }
+
+  /** IX-9: drop one repo's index rows but keep its registration; per repo, no all-repo FTS rebuild. */
+  clearRepositoryIndex(repoId: string): PurgeCounts {
+    return clearRepositoryIndexImpl(this.db, repoId);
   }
 
   rebuildFts(): void {

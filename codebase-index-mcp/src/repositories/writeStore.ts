@@ -256,6 +256,21 @@ export function ensureRepository(db: Database.Database, repoId: string, repoPath
   ).run(repoId, repoPath, new Date().toISOString());
 }
 
+/**
+ * IX-9 U1 (MCP-ISSUE-119): the namespace stable ids are minted under — the stored `id_namespace`, or the
+ * repoId itself when none is set (or the repository is not registered yet).
+ */
+export function getIdNamespace(db: Database.Database, repoId: string): string {
+  const row = db.prepare(`select id_namespace as ns from repositories where repo_id = ?`).get(repoId) as { ns: string | null } | undefined;
+  return row?.ns ?? repoId;
+}
+
+/** Sets (or, with null, clears) a registered repository's id namespace. Returns false when the repo is unknown. */
+export function setIdNamespace(db: Database.Database, repoId: string, namespace: string | null): boolean {
+  const ns = namespace === repoId ? null : namespace;
+  return db.prepare(`update repositories set id_namespace = ? where repo_id = ?`).run(ns, repoId).changes > 0;
+}
+
 export function getFileHash(db: Database.Database, repoId: string, filePath: string): string | null {
   const row = db
     .prepare(
