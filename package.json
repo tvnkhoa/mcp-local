@@ -42,6 +42,7 @@
     "new:server": "node scripts/new-server.mjs",
     "verify:all": "node scripts/heavy-lock.mjs -- npm run verify:all:steps",
     "verify:all:steps": "npm run verify:packages && npm run verify:servers && npm run contracts:check && npm run generate:check && npm run docs:check",
-    "verify:live": "npm run smoke:servers"
+    "verify:live": "npm run smoke:servers",
+    "heavy-lock:deploy": "node scripts/heavy-lock.mjs deploy"
   }
 }

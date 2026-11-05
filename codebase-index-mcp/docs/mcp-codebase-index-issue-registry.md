@@ -317,6 +317,7 @@ Gate: 4/4 servers build + typecheck, 36/36 harnesses (63 assertions in the 049 h
 - [MCP-ISSUE-117 — `search_regex` gave no match total and no `truncated` flag on a complete response](issues/MCP-ISSUE-117.md)
 - [MCP-ISSUE-118 — `test:field-access-exact` red when solo: the cold type-program build outlives the harness budget](issues/MCP-ISSUE-118.md)
 - [MCP-ISSUE-119 — a new worktree re-indexes from scratch (~104 s on wec.aria) instead of seeding from its parent](issues/MCP-ISSUE-119.md)
+- [MCP-ISSUE-120 — search_regex times out while an incremental re-index of mcp-local runs](issues/MCP-ISSUE-120.md)
 - [Confirmed fixed — 2026-08-05 re-verification of the 042–051 wave](issues/confirmed-fixed-2026-08-05-re-verification-of-the-042-051-wave.md)
 - [MCP-ISSUE-101 follow-ups (row 5: F2–F4)](issues/mcp-issue-101-follow-ups-row-5-f2-f4.md)
 

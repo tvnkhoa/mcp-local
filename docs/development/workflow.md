@@ -194,9 +194,32 @@ skips it, so CI is never held. `node scripts/heavy-lock.mjs status [--json]` sho
 waiter (pid, command, cwd, since when, alive) with its recorded ancestors up to the Claude session
 process, marks one with a recorded ancestor gone `launcher gone (session alive)` — a shell stopped
 while its child lived on, as in both 4 Nov incidents — and one whose whole recorded chain up to the
-session is gone `ORPHAN`. Waiters
-register in `heavy-check.lock.waiters/` beside the lock; status drops entries of dead pids and kills
-nothing. A waiter whose ancestor dies while it waits stops (exit 76) instead of taking the lock later
+session is gone `ORPHAN`. The lock is first come, first served: a caller takes a numbered ticket in
+`heavy-check.lock.waiters/` beside the lock the moment it arrives, and only the oldest live ticket may
+take the lock, however fast the others poll; a ticket whose pid is gone, whose waiter lost an ancestor,
+or that has not been touched for 60 s is skipped and removed. Status lists waiters in ticket order with
+their position, names each one's repo (its cwd's git common dir) and Claude session id (the
+`claude` process heading its lineage, matched in `~/.claude/handover/.sessions.jsonl`; `unknown`
+otherwise) so a waiter's leader knows whose leader to ask, drops dead and silent tickets, and kills
+nothing. Other repos (wec.be's
+`dotnet-build-safe.ps1`) run a deploy copy, not the tree: `npm run heavy-lock:deploy` copies
+`heavy-lock.mjs` and its imports (builtins only) to `~/.claude/mcp/deploy/heavy-lock/<sha>-<n>/` and
+writes the stable entry `~/.claude/mcp/deploy/heavy-lock/heavy-lock.mjs`, so a merge changes their lock
+only when a leader deploys it. It refuses uncommitted copied files (or a tree git cannot read) unless
+`--allow-dirty`, and any import it did not copy. The stable entry exits **78** when the deploy is broken
+(no or bad `current.json`, its copy pruned, a module missing) — never 0/1, the lock's 75/76 or 130 — so a
+wrapper can tell "re-deploy" from a build result. Each run that holds the lock is measured (H-6a): repo,
+session, class (`--class <name>`, else repo + command), declared cost (`--cost small|large`, `--ram-mb N`
+— recorded only, not yet admitted by), duration, exit and the peak working set of its whole process
+tree, detached build servers (VBCSCompiler, csc) included, sampled every 1 s
+(`MCP_HEAVY_LOCK_SAMPLE_MS`; `MCP_HEAVY_LOCK_SAMPLE=off`) by a PowerShell helper costing ~25 ms a
+sample (~2.5 CPU-s a minute, ~150 MB), into `heavy-check.lock.history.jsonl` (2 MiB, then rotated to
+`.history.1.jsonl`). `node scripts/heavy-lock.mjs history [--class x] [--repo r] [--json]` prints peak
+MB and duration p50/p95/max per class. Windows only; the first sample lands ~2 s in, so a shorter run
+records no peak. The helper DLL is compiled once into the temp dir with a sha256 beside it
+(`MCP_HEAVY_LOCK_SAMPLER_CACHE` moves it); one that fails its sum is rebuilt and one that will not load is
+compiled in memory for that run (`sampling.helper`: cached / built / memory). The lock is released before
+the record is written. A waiter whose ancestor dies while it waits stops (exit 76) instead of taking the lock later
 for nobody; an ancestor already gone when the wait began (a spawn-and-exit wrapper) does not count.
 The first time status or a waiter sees the holder flagged either way is kept in `heavy-check.lock.orphan.json`
 (`orphanSince`, cleared when the holder changes or frees); after `MCP_HEAVY_LOCK_ORPHAN_MINUTES`
