@@ -174,3 +174,31 @@ test("a seeded child holds the parent's rows under its own repoId, equal to a fu
     rmSync(repo, { recursive: true, force: true });
   }
 }));
+
+test("IX-9: clearRepositoryIndex drops the seeded child's index, keeps its registration and the parent, FTS consistent", withTmp(async (dir) => {
+  const repo = makeRepo();
+  try {
+    const dbPath = path.join(dir, "g.db");
+    await fullIndex(dbPath, "parent", repo);
+    const parentBefore = rows(dbPath, "parent");
+    const store = new GraphStore(dbPath);
+    try {
+      assert.equal(store.seedBaseSha("seeded"), null);
+      const seeded = seedFromParent(store, { parentRepoId: "parent", childRepoId: "seeded", childRepoPath: slash(repo) });
+      assert.equal(store.seedBaseSha("parent"), seeded.parentIndexedSha, "the ancestry check reads the row the seed copies");
+      assert.equal(store.seedBaseSha("seeded"), seeded.parentIndexedSha);
+      const counts = store.clearRepositoryIndex("seeded");
+      assert.ok((counts.symbols ?? 0) > 0);
+      assert.equal(store.seedBaseSha("seeded"), null, "no run left: the next registration seeds again");
+      assert.equal(store.getIdNamespace("seeded"), "parent", "registration (namespace) kept");
+      ftsIntegrityCheck((store as unknown as { db: Database.Database }).db);
+    } finally {
+      store.close();
+    }
+    const after = rows(dbPath, "seeded");
+    for (const [table, list] of Object.entries(after)) assert.equal(list.length, 0, `${table} cleared`);
+    assert.deepEqual(rows(dbPath, "parent"), parentBefore, "parent untouched");
+  } finally {
+    rmSync(repo, { recursive: true, force: true });
+  }
+}));

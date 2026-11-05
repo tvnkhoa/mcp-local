@@ -332,6 +332,11 @@
       "@self",
       "codebase-index-mcp/src/tools/handlers/searchHandler.ts"
     ],
+    "test:seed-conformance": [
+      "codebase-index-mcp/scripts/test/test-seed-conformance.mjs",
+      "@dist",
+      "codebase-index-mcp/src/tools/handlers/searchHandler.ts"
+    ],
     "test:server-envelopes": [
       "codebase-index-mcp/scripts/test/test-server-envelopes.mjs",
       "@dist",

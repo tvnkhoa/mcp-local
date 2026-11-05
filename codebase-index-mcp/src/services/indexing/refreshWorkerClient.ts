@@ -28,6 +28,7 @@ import type { IndexMode, IndexRunResult } from "../../types/index.js";
 import type { RunBookkeeping } from "../../middleware/freshness.js";
 import type { IndexRunnerLimits, RunIndexAndResolve } from "./indexRunner.js";
 import type { RefreshWorkerMessage, RefreshWorkerRequest } from "./refreshWorker.js";
+import type { SeedRequest, SeedResult } from "../../repositories/seedStore.js";
 
 /** The part of `Worker` the client uses — a seam for unit tests. */
 export interface RefreshWorkerLike {
@@ -57,8 +58,10 @@ export type RefreshWorkerClientOptions = {
 
 type Pending = {
   repoId: string;
-  /** Set for a `purge` request: answered by a `purged` message instead of a run result. */
+  /** Set for a `purge` / `clear` request: answered by a `purged` message instead of a run result. */
   onPurged?: (counts: Record<string, number>) => void;
+  /** Set for a `seed` request: answered by a `seeded` message. */
+  onSeeded?: (seed: SeedResult) => void;
   /** The index job's runId, when the run is one (review follow-up C: `abortRun` targets it). */
   runId?: string;
   resolve: (result: IndexRunResult) => void;
@@ -102,18 +105,52 @@ export class RefreshWorkerClient {
    * in the DB-wide queue like a run.
    */
   purge(repoId: string): Promise<Record<string, number>> {
+    return this.deleteRows("purge", repoId);
+  }
+
+  /**
+   * IX-9 (MCP-ISSUE-119): drop one repo's index rows but keep its registration, on the worker's connection, per repo
+   * (no all-repo FTS rebuild) — the seeded child before its fallback full run. Queue it like a run.
+   */
+  clear(repoId: string): Promise<Record<string, number>> {
+    return this.deleteRows("clear", repoId);
+  }
+
+  /**
+   * IX-9 (MCP-ISSUE-119): `seedFromParent` on the worker's connection — the single writer — never this thread's. A
+   * failure rejects with an Error carrying the SeedError `code`. Queue it like a run. `runId` (the index job's) lets
+   * `abortRun` stop a hung seed as it stops a hung run.
+   */
+  seed(req: SeedRequest, runId?: string): Promise<SeedResult> {
+    return new Promise<SeedResult>((resolve, reject) => {
+      const worker = this.workerOr(reject);
+      if (!worker) return;
+      const id = this.nextId++;
+      this.pending.set(id, { repoId: req.childRepoId, resolve: () => reject(new Error("seed answered by a run result")), reject, onSeeded: resolve, ...(runId && { runId }) });
+      worker.postMessage({
+        kind: "seed", id, dbPath: this.options.dbPath, limits: this.options.limits, repoId: req.childRepoId, repoPath: req.childRepoPath,
+        mode: "full", docsEnabled: false, maxFiles: 0, batchSize: 0, seedFrom: req.parentRepoId
+      });
+    });
+  }
+
+  private deleteRows(kind: "purge" | "clear", repoId: string): Promise<Record<string, number>> {
     return new Promise<Record<string, number>>((resolve, reject) => {
-      let worker: RefreshWorkerLike;
-      try {
-        worker = this.ensureWorker();
-      } catch (error) {
-        reject(error instanceof Error ? error : new Error(String(error)));
-        return;
-      }
+      const worker = this.workerOr(reject);
+      if (!worker) return;
       const id = this.nextId++;
       this.pending.set(id, { repoId, resolve: () => resolve({}), reject, onPurged: resolve });
-      worker.postMessage({ kind: "purge", id, dbPath: this.options.dbPath, limits: this.options.limits, repoId, repoPath: "", mode: "full", docsEnabled: false, maxFiles: 0, batchSize: 0 });
+      worker.postMessage({ kind, id, dbPath: this.options.dbPath, limits: this.options.limits, repoId, repoPath: "", mode: "full", docsEnabled: false, maxFiles: 0, batchSize: 0 });
     });
+  }
+
+  private workerOr(reject: (error: Error) => void): RefreshWorkerLike | null {
+    try {
+      return this.ensureWorker();
+    } catch (error) {
+      reject(error instanceof Error ? error : new Error(String(error)));
+      return null;
+    }
   }
 
   get outstanding(): number {
@@ -233,8 +270,17 @@ export class RefreshWorkerClient {
       entry.onPurged?.(message.counts);
       return;
     }
+    if (message.type === "seeded") {
+      try {
+        this.options.onPurged?.(entry.repoId); // the same cache drop: the child's rows changed under this thread
+      } catch {
+        // Best-effort cache drop.
+      }
+      entry.onSeeded?.(message.seed);
+      return;
+    }
     if (message.type === "error") {
-      entry.reject(new Error(message.error));
+      entry.reject(Object.assign(new Error(message.error), message.code ? { code: message.code } : {}));
       return;
     }
     try {

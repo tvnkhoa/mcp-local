@@ -161,7 +161,7 @@ import {
   listRepositoriesImpl
 } from "../services/impact/impactAnalyzer.js";
 import { initGraphSchema, runGraphMigrations } from "./schema.js";
-import { purgeRepositoryImpl, type PurgeCounts } from "./repoPurgeStore.js";
+import { clearRepositoryIndexImpl, purgeRepositoryImpl, type PurgeCounts } from "./repoPurgeStore.js";
 import {
   replaceAnnotationsForFileImpl,
   rebuildCommentsFtsImpl,
@@ -227,7 +227,7 @@ import {
   isVectorEnabled,
   invalidateVectorSearchCache,
 } from "./vectorStore.js";
-import { seedFromParentDb, type SeedRequest, type SeedResult } from "./seedStore.js";
+import { seedBaseRunSha, seedFromParentDb, type SeedRequest, type SeedResult } from "./seedStore.js";
 import {
   resetMentionsForScope as resetMentionsForScopeImpl,
   laneRowsForFiles as laneRowsForFilesImpl,
@@ -388,6 +388,11 @@ export class GraphStore {
   /** IX-9 U2: copy the parent's rows under the child's repoId (seedStore.ts). Call on the single writer only. */
   seedFromParent(req: SeedRequest): SeedResult {
     return seedFromParentDb(this.db, req);
+  }
+
+  /** IX-9: the commit a seed from `repoId` would copy (its newest ok run with a commit), or null. A read. */
+  seedBaseSha(repoId: string): string | null {
+    return seedBaseRunSha(this.db, repoId);
   }
 
   getFileHash(repoId: string, filePath: string): string | null {
@@ -808,6 +813,11 @@ export class GraphStore {
   /** MCP-ISSUE-105: delete every row of one repo in every table; returns rows removed per table. */
   purgeRepository(repoId: string): PurgeCounts {
     return purgeRepositoryImpl(this.db, repoId);
+  }
+
+  /** IX-9: drop one repo's index rows but keep its registration; per repo, no all-repo FTS rebuild. */
+  clearRepositoryIndex(repoId: string): PurgeCounts {
+    return clearRepositoryIndexImpl(this.db, repoId);
   }
 
   rebuildFts(): void {

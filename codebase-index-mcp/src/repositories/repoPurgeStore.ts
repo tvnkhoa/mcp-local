@@ -100,3 +100,32 @@ export function purgeRepositoryImpl(db: Database.Database, repoId: string): Purg
   counts.repositories = db.prepare(`delete from repositories where repo_id = ?`).run(repoId).changes;
   return counts;
 }
+
+/**
+ * IX-9 (MCP-ISSUE-119): drop a repo's INDEX but keep its registration — the seeded child's rows before the full run
+ * that replaces a failed seed. Unlike {@link purgeRepositoryImpl} it never rebuilds an FTS table across every repo
+ * (the IX-1 lock cause): the child's FTS rows were inserted per row by the seed or the run, so forgetting them per repo
+ * is always consistent. The `repositories` row (path, parent link, id namespace, annotation key) stays.
+ */
+export function clearRepositoryIndexImpl(db: Database.Database, repoId: string): PurgeCounts {
+  const counts: PurgeCounts = {};
+  immediateTransaction(db, () => {
+    ftsForgetRepo(db, repoId);
+    for (const c of CHILD_TABLES) {
+      counts[c.table] = db
+        .prepare(`delete from ${c.table} where ${c.key} in (select ${c.parentKey} from ${c.parent} where repo_id = ?)`)
+        .run(repoId).changes;
+    }
+    for (const table of PURGED_BY_REPO_ID) {
+      if (table === "vec_symbol_map" || table === "repositories") continue;
+      counts[table] = db.prepare(`delete from ${table} where repo_id = ?`).run(repoId).changes;
+    }
+    for (const [table, cols] of Object.entries(PURGED_BY_CROSS_REPO_COLUMNS)) {
+      counts[table] = db.prepare(`delete from ${table} where ${cols.map((c) => `${c} = ?`).join(" or ")}`).run(...cols.map(() => repoId)).changes;
+    }
+  })();
+  const mapped = db.prepare(`select count(*) as n from vec_symbol_map where repo_id = ?`).get(repoId) as { n: number };
+  deleteVectorsByRepo(db, repoId);
+  counts.vec_symbol_map = mapped.n;
+  return counts;
+}

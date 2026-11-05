@@ -105,6 +105,22 @@ function clearChild(db: Database.Database, childRepoId: string): void {
   db.prepare(`delete from index_runs where repo_id = ?`).run(childRepoId);
 }
 
+/** The parent run a seed copies: its newest ok run with a commit. The ancestry check reads the same row. */
+function seedBaseRun(db: Database.Database, parentRepoId: string): Record<string, unknown> | undefined {
+  return db
+    .prepare(
+      `select * from index_runs where repo_id = ? and status = 'ok' and mode in ('full', 'incremental', 'dirty', 'seed') and commit_sha is not null
+       order by started_at desc limit 1`
+    )
+    .get(parentRepoId) as Record<string, unknown> | undefined;
+}
+
+/** The commit `seedFromParentDb` would seed from (the job's ancestry check), or null when the parent has no such run. */
+export function seedBaseRunSha(db: Database.Database, parentRepoId: string): string | null {
+  const run = seedBaseRun(db, parentRepoId);
+  return run ? String(run.commit_sha) : null;
+}
+
 export function seedFromParentDb(db: Database.Database, req: SeedRequest): SeedResult {
   const started = Date.now();
   const { parentRepoId, childRepoId, childRepoPath } = req;
@@ -116,14 +132,7 @@ export function seedFromParentDb(db: Database.Database, req: SeedRequest): SeedR
   const parent = db
     .prepare(`select annotation_key as annotationKey, coalesce(id_namespace, repo_id) as ns from repositories where repo_id = ?`)
     .get(parentRepoId) as { annotationKey: string | null; ns: string } | undefined;
-  const baseRun = parent
-    ? (db
-        .prepare(
-          `select * from index_runs where repo_id = ? and status = 'ok' and mode in ('full', 'incremental', 'dirty', 'seed') and commit_sha is not null
-           order by started_at desc limit 1`
-        )
-        .get(parentRepoId) as Record<string, unknown> | undefined)
-    : undefined;
+  const baseRun = parent ? seedBaseRun(db, parentRepoId) : undefined;
   if (!parent || !baseRun) throw new SeedError("PARENT_NOT_INDEXED", `parent ${parentRepoId} has no ok index run with a commit`);
   const parentIndexedSha = String(baseRun.commit_sha);
 

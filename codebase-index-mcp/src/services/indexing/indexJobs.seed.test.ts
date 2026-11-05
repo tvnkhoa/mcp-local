@@ -2,12 +2,13 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { runWithSeed, type IndexJobProgress, type IndexJobRequest, type SeedStepDeps } from "./indexJobs.js";
+import { SeedError } from "../../repositories/seedStore.js";
 import type { IndexMode, IndexRunResult } from "../../types/index.js";
 
 /**
  * IX-9 (U3): register_worktree's job seeds from the parent's index only when the parent's indexed commit is an
  * ancestor of the worktree's HEAD; every refusal or failure runs full in the same job with a named fallbackReason.
- * `seed` is a stub with the seedStore contract's signature (A's seedFromParent lands separately).
+ * `seed` is a stub with the seedStore contract's signature; SeedError is the store's own.
  */
 
 const request = (seedFrom?: string): IndexJobRequest => ({
@@ -15,9 +16,6 @@ const request = (seedFrom?: string): IndexJobRequest => ({
   ...(seedFrom && { seedFrom })
 });
 
-class SeedError extends Error {
-  constructor(readonly code: "PARENT_NOT_INDEXED" | "SCHEMA_UNHANDLED" | "COPY_FAILED") { super(code); }
-}
 
 function harness(over: Partial<SeedStepDeps> & { runStatus?: (mode: IndexMode, n: number) => string } = {}) {
   const runs: IndexMode[] = [];
@@ -33,7 +31,7 @@ function harness(over: Partial<SeedStepDeps> & { runStatus?: (mode: IndexMode, n
       runs.push(mode);
       return { status: over.runStatus?.(mode, runs.length) ?? "ok", mode } as unknown as IndexRunResult;
     },
-    purgeChild: (id) => purged.push(id),
+    purgeChild: (id) => { purged.push(id); },
     onProgress: (p) => progress.push(p),
     ...over
   };
@@ -89,11 +87,11 @@ test("IX-9: the parent's indexed sha reaches the ancestry check", async () => {
 
 test("IX-9: SeedError{code} → full with seed_<code>", async () => {
   for (const code of ["PARENT_NOT_INDEXED", "SCHEMA_UNHANDLED", "COPY_FAILED"] as const) {
-    const h = harness({ seed: () => { throw new SeedError(code); } });
+    const h = harness({ seed: () => { throw new SeedError(code, code); } });
     const out = await runWithSeed(request("parent"), h.deps);
     assert.deepEqual(h.runs, ["full"]);
     assert.equal(out.fallbackReason, `seed_${code.toLowerCase()}`);
-    assert.deepEqual(h.purged, [], "a seed error is rolled back by the store: nothing to purge");
+    assert.deepEqual(h.purged, ["wt"], "a seed error clears the child: the vector step runs after the copy commits");
   }
   const h = harness({ seed: () => { throw new Error("boom"); } });
   assert.equal((await runWithSeed(request("parent"), h.deps)).fallbackReason, "seed_failed");

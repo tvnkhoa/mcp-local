@@ -367,7 +367,7 @@ export type GitScopePlan =
 /**
  * MCP-ISSUE-106: the files an incremental run must re-read, from git instead of hashing every file.
  *
- * The base is the newest ok `full`/`incremental` run. After it the index holds its commit's content for every file
+ * The base is the newest ok `full`/`incremental`/`seed` run. After it the index holds its commit's content for every file
  * but the ones it found dirty (its tree key), which it read from the working tree. Every later run must be an ok
  * `dirty` run, which wrote only the paths in its own tree key. So the files whose indexed content can differ from
  * disk are: what changed between the base commit and HEAD, what is dirty now, and every path any of those runs
@@ -399,7 +399,9 @@ export function planGitScopedIncremental(i: GitScopeInputs): GitScopePlan {
     const run = i.runs[at]!;
     const refused = carry(run);
     if (refused) return { kind: "walk", reason: refused };
-    if (run.mode === "full" || run.mode === "incremental") {
+    // IX-9 (MCP-ISSUE-119): a seed row is a base too — the copied parent rows hold that commit's content, its tree key
+    // carries the parent's dirty paths.
+    if (run.mode === "full" || run.mode === "incremental" || run.mode === "seed") {
       base = run;
       break;
     }

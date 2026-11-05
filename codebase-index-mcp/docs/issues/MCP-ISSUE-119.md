@@ -1,6 +1,6 @@
 ## MCP-ISSUE-119 — a new worktree re-indexes from scratch (~104 s on wec.aria) instead of seeding from its parent
 
-- **Status:** IN PROGRESS (IX-9). U1 id namespace and U2 seed store landed 2026-11-04; U3 job wiring, U4 conformance open.
+- **Status:** IN PROGRESS (IX-9). U1 id namespace and U2 seed store landed 2026-11-04; U3 job wiring and U4 harness merged and wired 2026-11-05; live acceptance on a wec.aria copy open.
 - **Scenario:** `register_worktree` on a worktree of an already-indexed repo (wec.aria-wt-ops: 3298 files, 17668
   symbols, 55793 edges).
 - **Tool/query:** `register_worktree` → index job `mode:"incremental"` on an empty repoId, i.e. a full extraction.
@@ -55,3 +55,24 @@
 - Open for U3 (runPolicy, owned by member C): the planner must accept mode `seed` as a base, and the carried-dirty
   semantics of a parent whose newest ok run is `dirty` are inherited through the copied tree key. Not measured yet:
   copy time on a wec.aria-sized DB.
+
+### U3 — job wiring (2026-11-04 / 2026-11-05)
+
+- `checkSeedAncestry` (gitHelpers): the parent's seed base commit must be an ancestor of the worktree's HEAD (strict,
+  per acceptance), else `fallbackReason` `parent_not_indexed` / `parent_sha_missing` / `child_head_unresolved` /
+  `unrelated_history` / `parent_not_ancestor` / `git_error`.
+- `runWithSeed(request, deps)` (indexJobs.ts) is the job executor's step (src/index.ts): no `seedFrom`, or a child that
+  already has an ok run → the plain run. Otherwise ancestry → phase `seed` → scoped incremental. Every refusal or
+  failure runs full in the same job and reports `fallbackReason` in index_status: ancestry refusal, `seed_<code>`
+  (child cleared first — the vector step runs after the copy commits), `incremental_after_seed_failed` (child cleared).
+- Seed and clear run in the refresh worker, the single writer (MCP-ISSUE-112): request kinds `seed` and `clear`.
+  `clear` (`clearRepositoryIndexImpl`) drops the repo's index rows, keeps its `repositories` row (namespace,
+  annotation key) and forgets FTS rows per repo — never the all-repo FTS rebuild. The ancestry check reads
+  `GraphStore.seedBaseSha`, the same row the seed copies. `planGitScopedIncremental` accepts a `seed` row as a base.
+- `register_worktree` enqueues `seedFrom: <parent repoId>`; `index_repository` has no seed path.
+
+### U4 — conformance harness (2026-11-04)
+
+- `scripts/test/test-seed-conformance.mjs` (+ `_seedCompare.mjs`): self-test full-vs-full EQUAL; compare mode
+  `--db --roots --a --b --probes` compares every repo_id table as a multiset (symbol ids normalised) and the answers of
+  search_symbols / query_docs / search_regex per probe; exit 1 on any difference.

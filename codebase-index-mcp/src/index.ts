@@ -24,7 +24,7 @@ import { assertPathAllowed, clamp } from "./middleware/indexGuardrails.js";
 import { WatchManager } from "./services/watch/watchManager.js";
 import type { IndexRunnerLimits, RunExtras, RunIndexAndResolve } from "./services/indexing/indexRunner.js";
 import type { IndexMode, IndexRunResult } from "./types/index.js";
-import { DEFAULT_MIN_FREE_RAM_MB, DEFAULT_RUN_TIMEOUT_MS, IndexJobQueue, MAX_WAIT_MS, queuedWithin } from "./services/indexing/indexJobs.js";
+import { DEFAULT_MIN_FREE_RAM_MB, DEFAULT_RUN_TIMEOUT_MS, IndexJobQueue, MAX_WAIT_MS, queuedWithin, runWithSeed } from "./services/indexing/indexJobs.js";
 import { RefreshWorkerClient } from "./services/indexing/refreshWorkerClient.js";
 import { newerBuildRefusal } from "./services/indexing/runPolicy.js";
 import { INDEX_VERSION } from "./services/indexing/indexPipeline.js";
@@ -53,7 +53,7 @@ import { createCodebaseIndexServer } from "./server.js";
 import { buildTools } from "./tools/index.js";
 import { DEFAULT_MAX_MARKDOWN_BYTES } from "./services/indexing/fileFilter.js";
 import { applyFreshness, computeTreeKey, createFreshnessGate, freshnessStateDir, parseTreeKey, recordDirtyLedger, serializeTreeKey, watcherRunPlan, type TreeKey } from "./middleware/freshness.js";
-import { readWorkingTreeStateAsync } from "./services/git/gitHelpers.js";
+import { checkSeedAncestry, readWorkingTreeStateAsync } from "./services/git/gitHelpers.js";
 
 const dbPath = stringFromEnv("CODEBASE_INDEX_DB_PATH", "./codebase-index.db");
 const allowedRoots = allowedRootsFromEnv();
@@ -243,30 +243,54 @@ const indexJobs = new IndexJobQueue({
   // Only this job's run is stopped (review follow-up C); terminating the worker rejects it, releasing the DB-wide queue.
   onRunTimeout: (job) => void refreshWorker.abortRun(job.runId, `index run ${job.runId} of ${job.repoId} stopped: CODEBASE_INDEX_RUN_TIMEOUT_MS=${String(RUN_TIMEOUT_MS)} ms`),
   // The clock starts when the run leaves the DB-wide queue for the worker, and a job failed meanwhile never runs.
-  execute: (job, request, onProgress, control) =>
-    freshnessGate.serialize(
+  execute: (job, request, onProgress, control) => {
+    // Review F3: the clock starts once nothing but worker work is left; a job failed by then never starts any.
+    const begin = (): void => {
+      if (control.cancelled()) throw new Error(`index job ${job.runId} had already failed; its run was not started`);
+      control.started();
+    };
+    const run = (mode: IndexMode): Promise<IndexRunResult> =>
+      runInWorker(
+        request.repoId,
+        request.repoPath,
+        mode,
+        request.docsEnabled,
+        request.maxFiles,
+        request.batchSize,
+        {
+          runId: job.runId,
+          onProgress: (progress: number, total: number | undefined, message: string) =>
+            onProgress({ phase: message.replace(/^[^:]*: /, ""), progress, ...(total !== undefined && { total }) })
+        },
+        begin
+      );
+    // IX-9 (MCP-ISSUE-119): register_worktree's job seeds from the parent when its indexed commit is an ancestor of
+    // the worktree's HEAD, else runs full and says why (fallbackReason). Seed and clear run in the refresh worker —
+    // the single writer — inside this job's turn of the DB-wide queue; this thread only reads.
+    return freshnessGate.serialize(
       request.repoId,
       async () =>
-        runInWorker(
-          request.repoId,
-          request.repoPath,
-          request.mode,
-          request.docsEnabled,
-          request.maxFiles,
-          request.batchSize,
-          {
-            runId: job.runId,
-            onProgress: (progress: number, total: number | undefined, message: string) =>
-              onProgress({ phase: message.replace(/^[^:]*: /, ""), progress, ...(total !== undefined && { total }) })
-          },
-          // Review F3: the clock starts once nothing but the worker run is left; a job failed by then never runs.
-          () => {
-            if (control.cancelled()) throw new Error(`index job ${job.runId} had already failed; its run was not started`);
-            control.started();
-          }
-        ),
+        (
+          await runWithSeed(request, {
+            parentIndexedSha: (parentRepoId) => store.seedBaseSha(parentRepoId),
+            childHasIndex: (childRepoId) => store.seedBaseSha(childRepoId) !== null,
+            ancestry: (childRepoPath, parentSha) => checkSeedAncestry(childRepoPath, parentSha),
+            seed: async (req) => {
+              begin();
+              const seeded = await refreshWorker.seed(req, job.runId);
+              store.invalidateProcessCaches();
+              return seeded;
+            },
+            purgeChild: async (childRepoId) => {
+              await refreshWorker.clear(childRepoId);
+            },
+            run,
+            onProgress
+          })
+        ).result,
       request.mode
-    )
+    );
+  }
 });
 
 /**

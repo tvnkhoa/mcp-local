@@ -25,6 +25,7 @@ import path from "node:path";
 
 import { samePath } from "../git/gitHelpers.js";
 
+import type { SeedRequest, SeedResult } from "../../repositories/seedStore.js";
 import type { IndexMode, IndexRunResult } from "../../types/index.js";
 
 export type IndexJobState = "queued" | "running" | "ok" | "failed";
@@ -378,9 +379,8 @@ export class IndexJobQueue {
 
 // ── IX-9: seed a worktree from its parent's index ─────────────────────────────
 
-/** Mirrors the seedStore contract (owned by repositories/seedStore.ts); structural so this module does not import it. */
-export type SeedRequestLike = { parentRepoId: string; childRepoId: string; childRepoPath: string };
-export type SeedResultLike = { parentIndexedSha: string; tablesCopied: Record<string, number>; durationMs: number };
+export type SeedRequestLike = SeedRequest;
+export type SeedResultLike = SeedResult;
 
 export type SeedAncestryLike =
   | { ok: true; parentSha: string; childSha: string }
@@ -393,12 +393,12 @@ export type SeedStepDeps = {
   childHasIndex: (childRepoId: string) => boolean;
   /** `checkSeedAncestry` from gitHelpers in the server; injected for tests. */
   ancestry: (childRepoPath: string, parentIndexedSha: string | null) => SeedAncestryLike;
-  /** `seedFromParent` bound to the writer's store; throws (SeedError{code}) on any failure, rolled back. */
-  seed: (req: SeedRequestLike) => SeedResultLike;
+  /** `seedFromParent` on the writer's connection (the refresh worker in the server); throws or rejects with SeedError{code}, rolled back. */
+  seed: (req: SeedRequestLike) => SeedResultLike | Promise<SeedResultLike>;
   /** Runs the index in the given mode (the executor's normal run). */
   run: (mode: IndexMode) => Promise<IndexRunResult>;
   /** Drops the child's rows (per-repo, no global FTS rebuild) before a full run after a failed seeded run. */
-  purgeChild?: (childRepoId: string) => void;
+  purgeChild?: (childRepoId: string) => void | Promise<void>;
   onProgress: (progress: IndexJobProgress) => void;
 };
 
@@ -421,8 +421,8 @@ function runFailed(result: IndexRunResult): boolean {
 /**
  * IX-9 executor step. Without `seedFrom` (or when the child is already indexed) it is the plain run. Otherwise:
  * ancestry check → seed (phase "seed") → scoped incremental. Every refusal or failure runs full in the same job and
- * reports `fallbackReason` through progress (→ index_status): ancestry refusal, a seed error (rolled back by the
- * store), or an incremental that failed on top of the seed (child purged first when `purgeChild` is given).
+ * reports `fallbackReason` through progress (→ index_status): ancestry refusal, a seed error (child cleared first:
+ * the store rolls the copy back, not a failed vector step after it), or an incremental that failed on top of the seed (child purged first when `purgeChild` is given).
  */
 export async function runWithSeed(request: IndexJobRequest, deps: SeedStepDeps): Promise<SeedStepOutcome> {
   if (!request.seedFrom || deps.childHasIndex(request.repoId)) {
@@ -430,7 +430,7 @@ export async function runWithSeed(request: IndexJobRequest, deps: SeedStepDeps):
   }
   const fallback = async (fallbackReason: string, purge: boolean): Promise<SeedStepOutcome> => {
     deps.onProgress({ phase: "full (seed fallback)", fallbackReason });
-    if (purge) deps.purgeChild?.(request.repoId);
+    if (purge) await deps.purgeChild?.(request.repoId);
     return { result: await deps.run("full"), seeded: false, fallbackReason };
   };
   const ancestry = deps.ancestry(request.repoPath, deps.parentIndexedSha(request.seedFrom));
@@ -438,9 +438,10 @@ export async function runWithSeed(request: IndexJobRequest, deps: SeedStepDeps):
   deps.onProgress({ phase: "seed" });
   let seed: SeedResultLike;
   try {
-    seed = deps.seed({ parentRepoId: request.seedFrom, childRepoId: request.repoId, childRepoPath: request.repoPath });
+    seed = await deps.seed({ parentRepoId: request.seedFrom, childRepoId: request.repoId, childRepoPath: request.repoPath });
   } catch (error) {
-    return fallback(seedErrorReason(error), false);
+    // The copy is rolled back, but its vector step runs after the copy commits (seedStore): clear whatever is left.
+    return fallback(seedErrorReason(error), true);
   }
   deps.onProgress({ phase: "incremental (after seed)" });
   let result: IndexRunResult;
