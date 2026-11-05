@@ -92,3 +92,31 @@
 - Fallback: parent indexed at C~20, worktree at C~25 (not a descendant) → one full run, `fallbackReason:
   "parent_not_ancestor"` in index_status (62.7 s).
 - Limit found: `register_worktree` refuses a parent that is itself a linked worktree (common-dir check, MCP-ISSUE-114).
+
+### Review fixes (2026-11-05)
+
+- **H1/M1 — the seed vouches for the parent like the planner.** `seedBaseOf` walks the parent's work runs
+  (`skip_reason is null`, the planner's order) to its newest full / incremental / seed run; every run since must be
+  ok and a dirty one keyed, and a run overlapping the base's window must be a keyed ok dirty run. Otherwise the job
+  falls back: `parent_runs_unvouched: <reason>` (checked on the server thread) or `seed_parent_unvouched` (re-checked
+  inside the copy's IMMEDIATE transaction, SeedError `PARENT_UNVOUCHED`). A fast-skip row is never the base. The dirty
+  paths since the base are carried into the seed row's tree key (`tree_dirty` 1), so the child's first scoped run
+  re-reads them. Tests: a failed run after the base refuses the seed; a reverted dirty edit is carried and the child
+  equals a full index after its first run (fails without the carry); a skip row is not the base.
+- **M2** — `checkSeedAncestry` is async (`execFile`): up to four git calls no longer hold the server's event loop.
+- **M3** — a live run marker of the parent (any process on the DB, `liveRunMarkers`) refuses the seed:
+  `parent_run_in_progress: pid …`.
+- **L1** — `clear` removes only the child's own index rows: its refactor previews / applies and other repos'
+  `cross_repo_deps` into it stay; its links out go.
+- **L5** — `control.started()` is idempotent (the clock is set once); a test pins that the run after the seed does not
+  restart the run timeout.
+
+### Follow-ups (not fixed)
+
+- **L2** the vector step runs after the copy's transaction: a failure there leaves the copy committed (the job clears
+  the child and runs full).
+- **L3** `cross_repo_deps` of a seeded child are empty until its first full run.
+- **L4** `register_worktree` starts the watcher before the job: a watcher batch queued ahead of the seed loses the
+  speed-up (it runs as a plain incremental on an empty repo).
+- A seeded child's `getLatestFullRunVersion` is null until its first full run, so the "built by another version"
+  warning is not inherited from the parent.

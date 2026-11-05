@@ -227,7 +227,7 @@ import {
   isVectorEnabled,
   invalidateVectorSearchCache,
 } from "./vectorStore.js";
-import { seedBaseRunSha, seedFromParentDb, type SeedRequest, type SeedResult } from "./seedStore.js";
+import { seedBaseOf, seedBaseRunSha, seedFromParentDb, type SeedRequest, type SeedResult } from "./seedStore.js";
 import {
   resetMentionsForScope as resetMentionsForScopeImpl,
   laneRowsForFiles as laneRowsForFilesImpl,
@@ -393,6 +393,12 @@ export class GraphStore {
   /** IX-9: the commit a seed from `repoId` would copy (its newest ok run with a commit), or null. A read. */
   seedBaseSha(repoId: string): string | null {
     return seedBaseRunSha(this.db, repoId);
+  }
+
+  /** IX-9 review H1: why a seed from `repoId` cannot be vouched for (its run history), or null. A read. */
+  seedRefusal(repoId: string): string | null {
+    const base = seedBaseOf(this.db, repoId);
+    return base.ok ? null : base.reason;
   }
 
   getFileHash(repoId: string, filePath: string): string | null {

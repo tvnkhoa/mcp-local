@@ -645,48 +645,46 @@ export type SeedAncestry =
   | { ok: true; parentSha: string; childSha: string }
   | { ok: false; fallbackReason: SeedFallbackReason; parentSha: string | null; childSha: string | null };
 
-function gitExitStatus(repoPath: string, args: string[]): number {
-  try {
-    runGit(repoPath, args);
-    return 0;
-  } catch (err) {
-    const status = (err as { status?: unknown }).status;
-    return typeof status === "number" ? status : -1;
-  }
+/** IX-9 review M2: git's exit code and stdout, asynchronously — the ancestry check runs on the server thread. */
+function gitAsync(repoPath: string, args: string[]): Promise<{ status: number; stdout: string }> {
+  return new Promise((resolve) => {
+    execFile("git", args, { cwd: repoPath, encoding: "utf8", timeout: GIT_TIMEOUT_MS, windowsHide: true }, (error, stdout) => {
+      if (!error) return resolve({ status: 0, stdout: String(stdout).trim() });
+      const code = (error as { code?: unknown }).code;
+      resolve({ status: typeof code === "number" ? code : -1, stdout: "" });
+    });
+  });
 }
 
 /**
  * IX-9 precondition: the parent's indexed commit must be an ancestor of (or equal to) the worktree's
  * base commit (`childSha`, default HEAD of `childRepoPath`). Each refusal names its reason; only an
- * ok answer allows `seedFromParent`.
+ * ok answer allows `seedFromParent`. Async (review M2): up to four git calls must not hold the server's event loop.
  */
-export function checkSeedAncestry(
+export async function checkSeedAncestry(
   childRepoPath: string,
   parentIndexedSha: string | null,
   childSha?: string | null
-): SeedAncestry {
+): Promise<SeedAncestry> {
   const parentSha = parentIndexedSha && parentIndexedSha.trim() ? parentIndexedSha.trim() : null;
   if (!parentSha) {
     return { ok: false, fallbackReason: "parent_not_indexed", parentSha: null, childSha: childSha ?? null };
   }
   let child = childSha ?? null;
   if (!child) {
-    try {
-      child = runGit(childRepoPath, ["rev-parse", "--verify", "--quiet", "HEAD^{commit}"]) || null;
-    } catch {
-      child = null;
-    }
+    const head = await gitAsync(childRepoPath, ["rev-parse", "--verify", "--quiet", "HEAD^{commit}"]);
+    child = head.status === 0 && head.stdout ? head.stdout : null;
   }
   if (!child) {
     return { ok: false, fallbackReason: "child_head_unresolved", parentSha, childSha: null };
   }
-  if (gitExitStatus(childRepoPath, ["cat-file", "-e", `${parentSha}^{commit}`]) !== 0) {
+  if ((await gitAsync(childRepoPath, ["cat-file", "-e", `${parentSha}^{commit}`])).status !== 0) {
     return { ok: false, fallbackReason: "parent_sha_missing", parentSha, childSha: child };
   }
-  const isAncestor = gitExitStatus(childRepoPath, ["merge-base", "--is-ancestor", parentSha, child]);
+  const isAncestor = (await gitAsync(childRepoPath, ["merge-base", "--is-ancestor", parentSha, child])).status;
   if (isAncestor === 0) return { ok: true, parentSha, childSha: child };
   if (isAncestor !== 1) return { ok: false, fallbackReason: "git_error", parentSha, childSha: child };
-  const mergeBase = gitExitStatus(childRepoPath, ["merge-base", parentSha, child]);
+  const mergeBase = (await gitAsync(childRepoPath, ["merge-base", parentSha, child])).status;
   if (mergeBase === 1) return { ok: false, fallbackReason: "unrelated_history", parentSha, childSha: child };
   if (mergeBase !== 0) return { ok: false, fallbackReason: "git_error", parentSha, childSha: child };
   return { ok: false, fallbackReason: "parent_not_ancestor", parentSha, childSha: child };

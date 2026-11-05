@@ -22,7 +22,7 @@ import { rebuildVectorIndexForRepo } from "./vectorStore.js";
 export interface SeedRequest { parentRepoId: string; childRepoId: string; childRepoPath: string }
 export interface SeedResult { parentIndexedSha: string; tablesCopied: Record<string, number>; durationMs: number }
 
-export type SeedErrorCode = "PARENT_NOT_INDEXED" | "SCHEMA_UNHANDLED" | "COPY_FAILED";
+export type SeedErrorCode = "PARENT_NOT_INDEXED" | "PARENT_UNVOUCHED" | "SCHEMA_UNHANDLED" | "COPY_FAILED";
 
 export class SeedError extends Error {
   readonly code: SeedErrorCode;
@@ -105,20 +105,88 @@ function clearChild(db: Database.Database, childRepoId: string): void {
   db.prepare(`delete from index_runs where repo_id = ?`).run(childRepoId);
 }
 
-/** The parent run a seed copies: its newest ok run with a commit. The ancestry check reads the same row. */
-function seedBaseRun(db: Database.Database, parentRepoId: string): Record<string, unknown> | undefined {
-  return db
-    .prepare(
-      `select * from index_runs where repo_id = ? and status = 'ok' and mode in ('full', 'incremental', 'dirty', 'seed') and commit_sha is not null
-       order by started_at desc limit 1`
-    )
-    .get(parentRepoId) as Record<string, unknown> | undefined;
+/**
+ * IX-9 review H1/M1: what the parent's index holds, vouched for the way `planGitScopedIncremental` vouches for a scoped
+ * run. Walk the parent's WORK runs (fast-skips left out), newest first in the planner's order, to the newest complete
+ * one (full / incremental / seed) — the base. Every run on the way must have ended ok, and a dirty one must name its
+ * paths (tree key): a failed or cancelled run may have committed batches of newer content, which a seed labelled with
+ * the base's commit would carry into the child where the child's git-scoped run never re-reads them. The paths those
+ * dirty runs wrote (working-tree content, not the base commit's) are carried into the seed row's tree key, so the
+ * child's first scoped run re-reads them. A run that overlapped the base's window must be a keyed ok dirty run too.
+ */
+export type SeedBase =
+  | { ok: true; run: Record<string, unknown>; commitSha: string; carried: Record<string, string> }
+  | { ok: false; reason: string };
+
+const WORK_RUN_LIMIT = 200;
+
+function treeKeyFiles(raw: unknown): Record<string, string> | null {
+  if (typeof raw !== "string" || !raw) return null;
+  try {
+    const key = JSON.parse(raw) as { files?: Record<string, string> };
+    return key && typeof key === "object" ? (key.files ?? {}) : null;
+  } catch {
+    return null;
+  }
 }
 
-/** The commit `seedFromParentDb` would seed from (the job's ancestry check), or null when the parent has no such run. */
+export function seedBaseOf(db: Database.Database, parentRepoId: string): SeedBase {
+  const runs = db
+    .prepare(
+      `select * from index_runs where repo_id = ? and skip_reason is null
+       order by finished_at desc, started_at desc, rowid desc limit ?`
+    )
+    .all(parentRepoId, WORK_RUN_LIMIT) as Array<Record<string, unknown>>;
+  const carried: Record<string, string> = {};
+  const carry = (run: Record<string, unknown>): string | null => {
+    if (run.status !== "ok") return `a ${String(run.mode)} run since the last complete one ended ${String(run.status)}`;
+    const files = treeKeyFiles(run.tree_key);
+    if (!files && (run.mode === "dirty" || run.tree_dirty === 1)) return `a ${String(run.mode)} run over a dirty tree recorded no tree key`;
+    Object.assign(carried, files ?? {});
+    return null;
+  };
+  let at = 0;
+  let base: Record<string, unknown> | null = null;
+  for (; at < runs.length; at++) {
+    const run = runs[at]!;
+    const refused = carry(run);
+    if (refused) return { ok: false, reason: refused };
+    if (run.mode === "full" || run.mode === "incremental" || run.mode === "seed") {
+      base = run;
+      break;
+    }
+  }
+  if (!base) return { ok: false, reason: "no complete run on record" };
+  if (!base.started_at) return { ok: false, reason: "the last complete run recorded no start time" };
+  for (const run of runs.slice(at + 1)) {
+    if (!run.finished_at || String(run.finished_at) <= String(base.started_at)) break;
+    if (run.mode !== "dirty") return { ok: false, reason: `a ${String(run.mode)} run overlapped the last complete one` };
+    const refused = carry(run);
+    if (refused) return { ok: false, reason: refused };
+  }
+  if (!base.commit_sha) return { ok: false, reason: "the last complete run recorded no commit" };
+  return { ok: true, run: base, commitSha: String(base.commit_sha), carried };
+}
+
+/** The commit `seedFromParentDb` would seed from (the job's ancestry check), or null when the parent cannot be vouched for. */
 export function seedBaseRunSha(db: Database.Database, parentRepoId: string): string | null {
-  const run = seedBaseRun(db, parentRepoId);
-  return run ? String(run.commit_sha) : null;
+  const base = seedBaseOf(db, parentRepoId);
+  return base.ok ? base.commitSha : null;
+}
+
+/** The seed row's tree key: the base's own key with the carried dirty paths as its files (null when neither exists). */
+function seedTreeKey(base: Record<string, unknown>, carried: Record<string, string>): { key: string | null; dirty: number } {
+  let key: Record<string, unknown> | null = null;
+  if (typeof base.tree_key === "string" && base.tree_key) {
+    try {
+      key = JSON.parse(base.tree_key) as Record<string, unknown>;
+    } catch {
+      key = null;
+    }
+  }
+  const dirty = Object.keys(carried).length > 0;
+  if (!key && !dirty) return { key: null, dirty: Number(base.tree_dirty ?? 0) };
+  return { key: JSON.stringify({ ...(key ?? { head: base.commit_sha }), files: carried }), dirty: dirty ? 1 : 0 };
 }
 
 export function seedFromParentDb(db: Database.Database, req: SeedRequest): SeedResult {
@@ -132,13 +200,20 @@ export function seedFromParentDb(db: Database.Database, req: SeedRequest): SeedR
   const parent = db
     .prepare(`select annotation_key as annotationKey, coalesce(id_namespace, repo_id) as ns from repositories where repo_id = ?`)
     .get(parentRepoId) as { annotationKey: string | null; ns: string } | undefined;
-  const baseRun = parent ? seedBaseRun(db, parentRepoId) : undefined;
-  if (!parent || !baseRun) throw new SeedError("PARENT_NOT_INDEXED", `parent ${parentRepoId} has no ok index run with a commit`);
-  const parentIndexedSha = String(baseRun.commit_sha);
+  if (!parent || !db.prepare(`select 1 from index_runs where repo_id = ? limit 1`).get(parentRepoId)) {
+    throw new SeedError("PARENT_NOT_INDEXED", `parent ${parentRepoId} has no index run`);
+  }
+  let parentIndexedSha = "";
 
   const tablesCopied: Record<string, number> = {};
   try {
     immediateTransaction(db, () => {
+      // Review H1: vouched inside the write transaction, so no run of this DB can land between the check and the copy.
+      const vouched = seedBaseOf(db, parentRepoId);
+      if (!vouched.ok) throw new SeedError("PARENT_UNVOUCHED", `parent ${parentRepoId} cannot be vouched for: ${vouched.reason}`);
+      const baseRun = vouched.run;
+      parentIndexedSha = vouched.commitSha;
+      const treeKey = seedTreeKey(baseRun, vouched.carried);
       db.prepare(
         `insert into repositories (repo_id, repo_path, updated_at, annotation_key, id_namespace) values (?, ?, ?, ?, ?)
          on conflict(repo_id) do update set repo_path = excluded.repo_path, updated_at = excluded.updated_at,
@@ -162,11 +237,14 @@ export function seedFromParentDb(db: Database.Database, req: SeedRequest): SeedR
       }
 
       const runCols = columnsOf(db, "index_runs");
-      const values = runCols.map((c) => (c === "run_id" ? randomUUID() : c === "repo_id" ? childRepoId : c === "mode" ? "seed" : baseRun[c]));
+      const values = runCols.map((c) =>
+        c === "run_id" ? randomUUID() : c === "repo_id" ? childRepoId : c === "mode" ? "seed" : c === "tree_key" ? treeKey.key : c === "tree_dirty" ? treeKey.dirty : baseRun[c]
+      );
       db.prepare(`insert into index_runs (${runCols.map((c) => `"${c}"`).join(", ")}) values (${runCols.map(() => "?").join(", ")})`).run(...(values as unknown[]));
       tablesCopied.index_runs = 1;
     })();
   } catch (err) {
+    if (err instanceof SeedError) throw err;
     throw new SeedError("COPY_FAILED", `seed copy ${parentRepoId} -> ${childRepoId} rolled back: ${err instanceof Error ? err.message : String(err)}`, { cause: err });
   }
 

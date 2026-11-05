@@ -106,23 +106,25 @@ export function purgeRepositoryImpl(db: Database.Database, repoId: string): Purg
  * that replaces a failed seed. Unlike {@link purgeRepositoryImpl} it never rebuilds an FTS table across every repo
  * (the IX-1 lock cause): the child's FTS rows were inserted per row by the seed or the run, so forgetting them per repo
  * is always consistent. The `repositories` row (path, parent link, id namespace, annotation key) stays.
+ *
+ * Review L1: only the repo's OWN index rows. Its refactor previews / applies (session artifacts with rollbacks) stay,
+ * and so do other repos' cross_repo_deps INTO it (their index, rebuilt by their own full run); its links out go.
  */
+export const CLEARED_KEPT: Record<string, string> = {
+  repositories: "the registration: path, parent link, id namespace, annotation key",
+  refactor_previews: "a session artifact, not index content",
+  refactor_applies: "a session artifact with its rollback, not index content"
+};
+
 export function clearRepositoryIndexImpl(db: Database.Database, repoId: string): PurgeCounts {
   const counts: PurgeCounts = {};
   immediateTransaction(db, () => {
     ftsForgetRepo(db, repoId);
-    for (const c of CHILD_TABLES) {
-      counts[c.table] = db
-        .prepare(`delete from ${c.table} where ${c.key} in (select ${c.parentKey} from ${c.parent} where repo_id = ?)`)
-        .run(repoId).changes;
-    }
     for (const table of PURGED_BY_REPO_ID) {
-      if (table === "vec_symbol_map" || table === "repositories") continue;
+      if (table === "vec_symbol_map" || table in CLEARED_KEPT) continue;
       counts[table] = db.prepare(`delete from ${table} where repo_id = ?`).run(repoId).changes;
     }
-    for (const [table, cols] of Object.entries(PURGED_BY_CROSS_REPO_COLUMNS)) {
-      counts[table] = db.prepare(`delete from ${table} where ${cols.map((c) => `${c} = ?`).join(" or ")}`).run(...cols.map(() => repoId)).changes;
-    }
+    counts.cross_repo_deps = db.prepare(`delete from cross_repo_deps where from_repo_id = ?`).run(repoId).changes;
   })();
   const mapped = db.prepare(`select count(*) as n from vec_symbol_map where repo_id = ?`).get(repoId) as { n: number };
   deleteVectorsByRepo(db, repoId);

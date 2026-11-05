@@ -114,3 +114,42 @@ test("IX-9: incremental after the seed fails (status or throw) → purge the chi
   assert.deepEqual(runs, ["incremental", "full"]);
   assert.equal(out2.fallbackReason, "incremental_after_seed_failed");
 });
+
+test("IX-9 review H1/M3: a parent refusal (run in progress, unvouched runs) → full with that reason; no ancestry, no seed", async () => {
+  let asked = 0;
+  const h = harness({
+    parentRefusal: () => "parent_run_in_progress: pid 42",
+    ancestry: (_path, sha) => { asked++; return { ok: true, parentSha: sha ?? "", childSha: "c".repeat(40) }; }
+  });
+  const out = await runWithSeed(request("parent"), h.deps);
+  assert.equal(out.fallbackReason, "parent_run_in_progress: pid 42");
+  assert.deepEqual(h.runs, ["full"]);
+  assert.equal(asked, 0);
+  assert.deepEqual(h.seeds, []);
+});
+
+test("IX-9 review M2: an async ancestry check is awaited", async () => {
+  const h = harness({ ancestry: async () => ({ ok: false, fallbackReason: "parent_not_ancestor", parentSha: "p", childSha: "c" }) });
+  const out = await runWithSeed(request("parent"), h.deps);
+  assert.equal(out.fallbackReason, "parent_not_ancestor");
+  assert.deepEqual(h.runs, ["full"]);
+});
+
+test("IX-9 review L5: a second control.started() (seed, then the run) does not restart the run-timeout clock", async () => {
+  const { IndexJobQueue } = await import("./indexJobs.js");
+  const queue = new IndexJobQueue({
+    minFreeRamMb: 0,
+    runTimeoutMs: 150,
+    execute: async (job, _req, _p, control) => {
+      control.started(); // the seed step
+      await new Promise((r) => setTimeout(r, 120));
+      control.started(); // the run after it: must not reset the 150 ms clock
+      return new Promise<IndexRunResult>(() => undefined);
+    }
+  });
+  const t0 = Date.now();
+  const job = queue.enqueue(request());
+  const failed = await queue.wait(job.runId, 2_000);
+  assert.equal(failed?.state, "failed");
+  assert.ok(Date.now() - t0 < 255, `timed out at ${String(Date.now() - t0)} ms — the clock was restarted (≥ 270 ms)`);
+});

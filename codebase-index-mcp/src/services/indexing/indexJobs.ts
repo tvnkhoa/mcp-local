@@ -392,7 +392,12 @@ export type SeedStepDeps = {
   /** True when the child already holds an index: a re-registration runs its normal incremental, no seed. */
   childHasIndex: (childRepoId: string) => boolean;
   /** `checkSeedAncestry` from gitHelpers in the server; injected for tests. */
-  ancestry: (childRepoPath: string, parentIndexedSha: string | null) => SeedAncestryLike;
+  ancestry: (childRepoPath: string, parentIndexedSha: string | null) => SeedAncestryLike | Promise<SeedAncestryLike>;
+  /**
+   * Review H1/M3: why the parent cannot be seeded from right now, or null — a run of the parent in progress in any
+   * process on this DB (its batches may be half-committed), or parent runs the seed cannot vouch for. Checked first.
+   */
+  parentRefusal?: (parentRepoId: string) => string | null;
   /** `seedFromParent` on the writer's connection (the refresh worker in the server); throws or rejects with SeedError{code}, rolled back. */
   seed: (req: SeedRequestLike) => SeedResultLike | Promise<SeedResultLike>;
   /** Runs the index in the given mode (the executor's normal run). */
@@ -433,7 +438,9 @@ export async function runWithSeed(request: IndexJobRequest, deps: SeedStepDeps):
     if (purge) await deps.purgeChild?.(request.repoId);
     return { result: await deps.run("full"), seeded: false, fallbackReason };
   };
-  const ancestry = deps.ancestry(request.repoPath, deps.parentIndexedSha(request.seedFrom));
+  const refusal = deps.parentRefusal?.(request.seedFrom) ?? null;
+  if (refusal) return fallback(refusal, false);
+  const ancestry = await deps.ancestry(request.repoPath, deps.parentIndexedSha(request.seedFrom));
   if (!ancestry.ok) return fallback(ancestry.fallbackReason, false);
   deps.onProgress({ phase: "seed" });
   let seed: SeedResultLike;
