@@ -5,6 +5,7 @@
 
 import { createHash } from "node:crypto";
 import fs from "node:fs";
+import { isBuiltin } from "node:module";
 import path from "node:path";
 
 /** A file the OS maps into the process (LoadLibrary/dlopen) and so keeps locked while it runs. */
@@ -128,6 +129,36 @@ export function importClosure(entry, dir = path.dirname(entry)) {
   };
   visit(entry);
   return [...seen].sort();
+}
+
+const ANY_STATIC = /^\s*(?:import|export)\s(?:[^;]*?\sfrom\s)?\s*(["'])([^"']+)\1/gm;
+const ANY_DYNAMIC = /\bimport\s*\(\s*([^)]*?)\s*\)/g;
+
+/**
+ * Imports in `files` (paths relative to `dir`) that a copy of just those files could not resolve:
+ * `[{file, specifier}]` for every specifier, either quote, static or dynamic, that is neither a Node
+ * builtin nor a relative path to one of `files`; a dynamic import of a non-literal is reported as is.
+ * `importClosure` follows double-quoted static relative imports only, so this is what proves a copy
+ * self-contained. Text matching: an import-shaped comment can only make it refuse, never pass.
+ */
+export function foreignImports(dir, files) {
+  const inCopy = new Set(files);
+  const out = [];
+  for (const rel of files) {
+    const file = path.join(dir, ...rel.split("/"));
+    const text = fs.readFileSync(file, "utf-8");
+    const specifiers = [...text.matchAll(ANY_STATIC)].map((m) => m[2]);
+    for (const m of text.matchAll(ANY_DYNAMIC)) {
+      const literal = /^(["'`])([^"'`$]+)\1$/.exec(m[1]);
+      specifiers.push(literal ? literal[2] : m[1]);
+    }
+    for (const spec of specifiers) {
+      if (isBuiltin(spec)) continue;
+      if (/^\.{1,2}\//.test(spec) && inCopy.has(path.relative(dir, path.resolve(path.dirname(file), spec)).split(path.sep).join("/"))) continue;
+      out.push({ file: rel, specifier: spec });
+    }
+  }
+  return out;
 }
 
 function walkFiles(dir, rel, out, skip) {

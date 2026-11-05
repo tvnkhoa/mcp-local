@@ -773,7 +773,16 @@ export function registerWaiter(
   const ahead = () => {
     if (ticket === null) return 0;
     // Removed under us (judged silent after a stall): queue again, at the back, rather than race for a poll.
-    if (!fs.existsSync(entry)) take();
+    // existsSync is also false on a transient EPERM, so the old entry is removed first if it is still
+    // there; one that survives even that carries this token and is skipped below, never waited for.
+    if (!fs.existsSync(entry)) {
+      try {
+        fs.rmSync(entry, { force: true });
+      } catch {
+        // skipped below by its token
+      }
+      take();
+    }
     if (ticket === null) return 0;
     let count = 0;
     const now = Date.now();
@@ -782,7 +791,17 @@ export function registerWaiter(
       try {
         const raw = readRaw(t.full);
         if (raw === null) continue; // being removed
-        if (ticketDeadReason(parseHolder(raw), touchedAt(t.full), now) !== null) {
+        const record = parseHolder(raw);
+        if (record?.token === token) {
+          // An older ticket of this same wait: never wait for oneself, removed or not.
+          try {
+            remove(t.full);
+          } catch {
+            // left for the next poll or status; it does not count
+          }
+          continue;
+        }
+        if (ticketDeadReason(record, touchedAt(t.full), now) !== null) {
           remove(t.full);
           continue;
         }

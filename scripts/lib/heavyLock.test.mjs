@@ -870,7 +870,7 @@ function queueInChild(lockPath, journal, name, pollMs, scheme) {
   const script = `
     const { acquireHeavyLock } = await import(${JSON.stringify(MODULE)});
     const { appendFileSync } = await import("node:fs");
-    const lock = await acquireHeavyLock({ cmd: ${JSON.stringify(name)}, pollMs: ${String(pollMs)}, timeoutMs: 30000, scheme: ${JSON.stringify(scheme)}, readStart: async () => null, log: () => {} });
+    const lock = await acquireHeavyLock({ cmd: ${JSON.stringify(name)}, pollMs: ${String(pollMs)}, timeoutMs: 120000, scheme: ${JSON.stringify(scheme)}, readStart: async () => null, log: () => {} });
     appendFileSync(${JSON.stringify(journal)}, "enter ${name}\\n");
     await new Promise((r) => setTimeout(r, 50));
     lock.release();
@@ -878,19 +878,27 @@ function queueInChild(lockPath, journal, name, pollMs, scheme) {
   const child = spawn(process.execPath, ["--input-type=module", "-e", script], { env: cleanEnv(lockPath), stdio: ["ignore", "ignore", "pipe"] });
   let err = "";
   child.stderr.on("data", (chunk) => (err += chunk));
-  return new Promise((resolve, reject) => child.on("exit", (code) => (code === 0 ? resolve() : reject(new Error(`${name} exit ${String(code)}: ${err}`)))));
+  const done = new Promise((resolve, reject) => child.on("exit", (code) => (code === 0 ? resolve() : reject(new Error(`${name} exit ${String(code)}: ${err}`)))));
+  return Object.assign(done, { child });
 }
 
 for (const scheme of [undefined, "file"]) {
-  test(`FIFO${scheme ? " (file scheme)" : ""}: A, B, C arrive in that order and acquire in that order though C polls 60x faster; status lists them by ticket`, { skip: scheme === undefined ? noPipe : false }, async () => {
+  test(`FIFO${scheme ? " (file scheme)" : ""}: A, B, C arrive in that order and acquire in that order though C polls 60x faster; status lists them by ticket`, { skip: scheme === undefined ? noPipe : false }, async (t) => {
+    // Its own lock path (so its own pipe name and waiters dir); every child and the hold end with the
+    // test, pass or fail, so nothing it started can hold or queue on any later test's lock.
     const lockPath = tempLock();
     const journal = `${lockPath}.journal`;
     const held = await acquireHeavyLock({ cmd: "holder", env: cleanEnv(lockPath), scheme, log: quiet });
     const runs = [];
+    t.after(() => {
+      held.release();
+      for (const run of runs) if (run.child.exitCode === null && isPidAlive(run.child.pid)) hardKill(run.child.pid);
+    });
     for (const [name, pollMs] of [["A", 300], ["B", 300], ["C", 5]]) {
       const before = tickets(lockPath).length;
       runs.push(queueInChild(lockPath, journal, name, pollMs, scheme));
-      await until(() => tickets(lockPath).length === before + 1, `${name}'s ticket`);
+      // Generous under machine load: a child's node start-up is all that is measured here.
+      await until(() => tickets(lockPath).length === before + 1, `${name}'s ticket`, 60_000);
     }
     const status = await heavyLockStatus({ env: cleanEnv(lockPath), readTable: async () => null });
     assert.deepEqual(status.waiters.map((w) => [w.position, w.cmd]), [[1, "A"], [2, "B"], [3, "C"]]);
@@ -1003,15 +1011,19 @@ test("status drops a ticket whose heartbeat stopped, and shows an orphaned waite
 
 test("deploy: a self-contained copy under a scratch deploy root runs status and a command from a foreign cwd, importing nothing outside it", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "heavy-lock-deploy-"));
-  const deploy = (args = []) => spawnSync(process.execPath, [CLI, "deploy", "--deploy-root", root, "--json", ...args], { encoding: "utf8" });
+  // --allow-dirty: this runs from the working tree, which may hold uncommitted edits while developing;
+  // the dirty refusal itself is tested on a scratch repo below.
+  const deploy = (args = []) => spawnSync(process.execPath, [CLI, "deploy", "--deploy-root", root, "--json", "--allow-dirty", ...args], { encoding: "utf8" });
   const first = deploy();
   assert.equal(first.status, 0, first.stderr);
   const record = JSON.parse(first.stdout);
   assert.equal(record.key, "heavy-lock");
   assert.equal(record.n, 1);
   assert.deepEqual(record.files, ["heavy-lock.mjs", "lib/deploy.mjs", "lib/heavyLock.mjs"]);
+  assert.deepEqual(record.pruneSkipped, []);
   const keyDir = path.join(root, "heavy-lock");
   assert.equal(record.stable, path.join(keyDir, "heavy-lock.mjs"));
+  assert.equal(fs.readFileSync(record.stable, "utf8"), fs.readFileSync(path.join(HERE, "heavyLockEntry.mjs"), "utf8"), "the stable entry is lib/heavyLockEntry.mjs, verbatim");
   assert.equal(JSON.parse(fs.readFileSync(path.join(keyDir, "current.json"), "utf8")).entry, record.entry);
   assert.match(record.hash, /^[0-9a-f]{64}$/);
 
@@ -1197,4 +1209,110 @@ test("status names each holder's and waiter's repo (git common dir) and Claude s
   const bare = await heavyLockStatus({ env: cleanEnv(lockPath), readTable: async () => null, sessionsFile: path.join(other, "missing.jsonl") });
   assert.equal(bare.holder.session, "unknown");
   assert.equal(bare.holder.repo, "unknown");
+});
+
+// ---- deploy review follow-ups (M, L1, L3, L4) ----
+
+test("stable entry: a broken deploy exits 78 with one line — no current.json, bad JSON, its copy pruned, a module missing", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "heavy-lock-broken-"));
+  const made = spawnSync(process.execPath, [CLI, "deploy", "--deploy-root", root, "--json", "--allow-dirty"], { encoding: "utf8" });
+  assert.equal(made.status, 0, made.stderr);
+  const record = JSON.parse(made.stdout);
+  const keyDir = path.join(root, "heavy-lock");
+  const current = path.join(keyDir, "current.json");
+  const good = fs.readFileSync(current, "utf8");
+  const run = () => spawnSync(process.execPath, [record.stable, "status"], { env: cleanEnv(tempLock()), encoding: "utf8" });
+  assert.equal(run().status, 0);
+  const cases = [
+    ["no current.json", () => fs.rmSync(current), /no current\.json/],
+    ["bad JSON", () => fs.writeFileSync(current, "{half"), /current\.json is not JSON/],
+    ["no entry", () => fs.writeFileSync(current, "{}"), /names no entry/],
+    ["copy pruned", () => fs.writeFileSync(current, JSON.stringify({ ...JSON.parse(good), entry: "gone-9/scripts/heavy-lock.mjs" })), /gone-9\/scripts\/heavy-lock\.mjs is missing/],
+    ["module missing", () => (fs.writeFileSync(current, good), fs.rmSync(path.join(record.dir, "scripts", "lib", "heavyLock.mjs"))), /Cannot find module/]
+  ];
+  for (const [what, breakIt, message] of cases) {
+    breakIt();
+    const r = run();
+    assert.equal(r.status, 78, `${what}: ${r.stderr}`);
+    assert.match(r.stderr, /^heavy-lock deploy broken: /, what);
+    assert.match(r.stderr, message, what);
+    assert.equal(r.stderr.trim().split("\n").length, 1, `${what}: one line, no stack`);
+  }
+});
+
+test("deploy: --deploy-root without a value is a usage error (exit 2); nothing is written", () => {
+  for (const args of [["--deploy-root"], ["--deploy-root", "--json"]]) {
+    const r = spawnSync(process.execPath, [CLI, "deploy", ...args], { encoding: "utf8" });
+    assert.equal(r.status, 2, r.stderr);
+    assert.match(r.stderr, /--deploy-root needs a directory/);
+  }
+});
+
+/** A scratch git repo holding a committed copy of the three deployable scripts and the entry. */
+function scratchSource({ git = true } = {}) {
+  const repo = fs.mkdtempSync(path.join(os.tmpdir(), "heavy-lock-src-"));
+  for (const rel of ["heavy-lock.mjs", "lib/deploy.mjs", "lib/heavyLock.mjs", "lib/heavyLockEntry.mjs"]) {
+    const dest = path.join(repo, "scripts", ...rel.split("/"));
+    fs.mkdirSync(path.dirname(dest), { recursive: true });
+    fs.copyFileSync(path.join(HERE, "..", ...rel.split("/")), dest);
+  }
+  if (git) {
+    const g = (...args) => assert.equal(spawnSync("git", ["-c", "user.email=t@t", "-c", "user.name=t", ...args], { cwd: repo, encoding: "utf8" }).status, 0, args.join(" "));
+    g("init", "-q");
+    g("add", "scripts");
+    g("commit", "-q", "-m", "scratch");
+  }
+  return { repo, cli: path.join(repo, "scripts", "heavy-lock.mjs") };
+}
+
+test("deploy: refuses uncommitted copied files and a tree git cannot read, unless --allow-dirty", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "heavy-lock-dirty-"));
+  const deployFrom = (cli, ...extra) => spawnSync(process.execPath, [cli, "deploy", "--deploy-root", root, "--json", ...extra], { encoding: "utf8" });
+  const { repo, cli } = scratchSource();
+  const clean = deployFrom(cli);
+  assert.equal(clean.status, 0, clean.stderr);
+  assert.equal(JSON.parse(clean.stdout).dirty, false);
+  fs.appendFileSync(path.join(repo, "scripts", "lib", "heavyLock.mjs"), "\n// edit\n");
+  const dirty = deployFrom(cli);
+  assert.equal(dirty.status, 1);
+  assert.match(dirty.stderr, /uncommitted changes in the copied files/);
+  assert.match(dirty.stderr, /lib\/heavyLock\.mjs/);
+  const allowed = deployFrom(cli, "--allow-dirty");
+  assert.equal(allowed.status, 0, allowed.stderr);
+  assert.equal(JSON.parse(allowed.stdout).dirty, true);
+
+  const nogit = scratchSource({ git: false });
+  const unknown = deployFrom(nogit.cli);
+  assert.equal(unknown.status, 1);
+  assert.match(unknown.stderr, /git cannot tell whether the copied files are committed/);
+});
+
+test("deploy: refuses a copy that would import anything it did not copy (bare, single-quoted, dynamic)", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "heavy-lock-foreign-"));
+  // A static import of a missing module would crash the CLI before it could refuse, so those two sit
+  // in a template literal (the scanner reads text; node never loads them) and the dynamic ones in a
+  // function nobody calls.
+  for (const [line, shown] of [
+    ['const probe1 = `\nimport leftPad from "left-pad";\n`;', "left-pad"],
+    ["const probe2 = `\nimport { x } from '../outside.mjs';\n`;", "../outside.mjs"],
+    ['function probe3() { return import("@mcp/manifest"); }', "@mcp/manifest"],
+    ["function probe4(name) { return import(name); }", "name"]
+  ]) {
+    const { cli } = scratchSource({ git: false });
+    fs.appendFileSync(path.join(path.dirname(cli), "lib", "deploy.mjs"), `\n${line}\n`);
+    const r = spawnSync(process.execPath, [cli, "deploy", "--deploy-root", root, "--allow-dirty"], { encoding: "utf8" });
+    assert.equal(r.status, 1, line);
+    assert.ok(r.stderr.includes(`not be self-contained: lib/deploy.mjs imports ${shown}`), `${line}: ${r.stderr}`);
+  }
+  assert.equal(fs.existsSync(path.join(root, "heavy-lock")), false, "a refused copy writes nothing");
+});
+
+test("ahead(): an older ticket carrying this wait's own token is removed and never waited for", () => {
+  const lockPath = tempLock();
+  const planted = plantTicket(lockPath, { pid: process.pid, token: "me" });
+  const w = registerWaiter(lockPath, { token: "me", cmd: "w", cwd: "/" });
+  assert.equal(w.ticket, 2);
+  assert.equal(w.ahead(), 0);
+  assert.equal(fs.existsSync(planted), false);
+  w.unregister();
 });

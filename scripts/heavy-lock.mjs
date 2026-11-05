@@ -10,7 +10,7 @@
  * Usage:
  *   node scripts/heavy-lock.mjs [--no-lock] -- <command> [args...]
  *   node scripts/heavy-lock.mjs status [--json]
- *   node scripts/heavy-lock.mjs deploy [--deploy-root <dir>] [--json]
+ *   node scripts/heavy-lock.mjs deploy [--deploy-root <dir>] [--allow-dirty] [--json]
  *
  * `deploy` (H-5) writes the self-contained copy other repos run: `~/.claude/mcp/deploy/heavy-lock/heavy-lock.mjs`
  * (see `deployHeavyLock`). A leader runs it; tests pass a scratch `--deploy-root`.
@@ -35,7 +35,7 @@ import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
 
-import { DEPLOY_RECORD, deployHash, importClosure } from "./lib/deploy.mjs";
+import { DEPLOY_RECORD, deployHash, foreignImports, importClosure } from "./lib/deploy.mjs";
 import { formatHeavyLockStatus, heavyLockStatus, holdHeavyLockOrExit } from "./lib/heavyLock.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -44,14 +44,18 @@ const DEPLOYS_KEPT = 3;
 /**
  * The deploy copy (row H-5, 2026-11-05). Other repos' wrappers (wec.be's `dotnet-build-safe.ps1`) ran this
  * script straight from the main tree, so every merge changed their lock at once. `deploy` copies this
- * script and every module it imports (`importClosure`: builtins only, no node_modules) to
+ * script and every module it imports (`importClosure`, then `foreignImports` proves no other import —
+ * bare, single-quoted or dynamic — is left: builtins only, no node_modules) to
  * `<deployRoot>/heavy-lock/<sha>-<n>/scripts/`, records it in `deploy.json` (`head`, `dirty`, `hash`),
- * points `current.json` at it and writes the stable entry `<deployRoot>/heavy-lock/heavy-lock.mjs`, which
- * runs the current copy. Each write is temp + rename, so a caller starting mid-deploy runs the old copy or
- * the new one, whole. The lock itself is the same either way: its name comes from the lock path, not
- * from where the script lives. Only an explicit `deploy` changes what other repos run.
+ * points `current.json` at it and copies the stable entry (`lib/heavyLockEntry.mjs`) to
+ * `<deployRoot>/heavy-lock/heavy-lock.mjs`, which runs the current copy and exits 78 when the deploy is
+ * broken. Each write is temp + rename, so a caller starting mid-deploy runs the old copy or the new one,
+ * whole. The lock itself is the same either way: its name comes from the lock path, not from where the
+ * script lives. Only an explicit `deploy` changes what other repos run. It refuses uncommitted copied
+ * files, or a tree whose git cannot say, unless `allowDirty`; a version it cannot prune is reported in
+ * `pruneSkipped`, never a failed deploy (current.json has already moved by then).
  */
-function deployHeavyLock(deployRoot) {
+function deployHeavyLock(deployRoot, { allowDirty = false } = {}) {
   if (fs.existsSync(path.join(HERE, "..", DEPLOY_RECORD))) throw new Error("this is a deployed copy: run deploy from the source tree");
   const git = (args) => {
     try {
@@ -61,9 +65,14 @@ function deployHeavyLock(deployRoot) {
     }
   };
   const files = importClosure(path.join(HERE, "heavy-lock.mjs"));
+  const foreign = foreignImports(HERE, files);
+  if (foreign.length > 0) throw new Error(`the copy would not be self-contained: ${foreign.map((f) => `${f.file} imports ${f.specifier}`).join("; ")}`);
+  const entrySource = path.join(HERE, "lib", "heavyLockEntry.mjs");
   const head = git(["rev-parse", "HEAD"]);
+  const changed = git(["status", "--porcelain", "--", ...files, "lib/heavyLockEntry.mjs"]);
+  if (!allowDirty && (head === null || changed === null)) throw new Error("git cannot tell whether the copied files are committed; --allow-dirty deploys anyway");
+  if (!allowDirty && changed !== "") throw new Error(`uncommitted changes in the copied files:\n${changed}\n--allow-dirty deploys anyway`);
   const sha = head?.slice(0, 12) ?? "nogit";
-  const changed = git(["status", "--porcelain", "--", ...files]);
   const keyDir = path.join(deployRoot, "heavy-lock");
   fs.mkdirSync(keyDir, { recursive: true });
   const deploys = () =>
@@ -100,38 +109,46 @@ function deployHeavyLock(deployRoot) {
     fs.renameSync(tmp, file);
   };
   writeAtomic(path.join(dir, DEPLOY_RECORD), JSON.stringify(record, null, 2));
-  writeAtomic(path.join(keyDir, "current.json"), JSON.stringify(record, null, 2));
+  // The entry first: a new entry reads the old current.json fine; the old entry never meets a new layout.
   const stable = path.join(keyDir, "heavy-lock.mjs");
-  writeAtomic(
-    stable,
-    [
-      "#!/usr/bin/env node",
-      "// The deployed heavy lock's stable entry, written by `node scripts/heavy-lock.mjs deploy` (mcp-local, H-5).",
-      "// It runs the copy current.json names; only an explicit deploy changes it. Do not edit.",
-      'import fs from "node:fs";',
-      'const current = JSON.parse(fs.readFileSync(new URL("./current.json", import.meta.url), "utf8"));',
-      "await import(new URL(current.entry, import.meta.url).href);",
-      ""
-    ].join("\n")
-  );
-  // Keep the newest few; a copy is never held open (node reads its modules at start), so removing an old one is safe.
-  const pruned = deploys()
-    .slice(DEPLOYS_KEPT)
-    .filter((d) => d.name !== name)
-    .map((d) => (fs.rmSync(path.join(keyDir, d.name), { recursive: true, force: true }), d.name));
-  return { ...record, stable, pruned };
+  writeAtomic(stable, fs.readFileSync(entrySource));
+  writeAtomic(path.join(keyDir, "current.json"), JSON.stringify(record, null, 2));
+  // Keep the newest few; a copy is never held open (node reads its modules at start), so removing an old
+  // one is safe — but Windows can refuse (EBUSY, a scanner): report it and leave it for the next deploy.
+  const pruned = [];
+  const pruneSkipped = [];
+  for (const d of deploys().slice(DEPLOYS_KEPT)) {
+    if (d.name === name) continue;
+    try {
+      fs.rmSync(path.join(keyDir, d.name), { recursive: true, force: true });
+      pruned.push(d.name);
+    } catch (error) {
+      pruneSkipped.push({ name: d.name, error: String(error.code ?? error.message) });
+    }
+  }
+  return { ...record, stable, pruned, pruneSkipped };
 }
 
 const argv = process.argv.slice(2);
 if (argv[0] === "deploy") {
   const at = argv.indexOf("--deploy-root");
-  const deployRoot = at === -1 ? path.join(os.homedir(), ".claude", "mcp", "deploy") : path.resolve(argv[at + 1] ?? "");
+  const value = at === -1 ? null : argv[at + 1];
+  if (at !== -1 && (value === undefined || value === "" || value.startsWith("--"))) {
+    console.error("usage: node scripts/heavy-lock.mjs deploy [--deploy-root <dir>] [--allow-dirty] [--json] — --deploy-root needs a directory");
+    process.exit(2);
+  }
+  const deployRoot = value === null ? path.join(os.homedir(), ".claude", "mcp", "deploy") : path.resolve(value);
   try {
-    const d = deployHeavyLock(deployRoot);
-    console.log(argv.includes("--json") ? JSON.stringify(d, null, 2) : `deployed heavy-lock ${d.sha}-${String(d.n)}${d.dirty ? " (DIRTY: uncommitted changes in the copied files)" : ""}\n  run: node ${d.stable}\n  copy: ${d.dir}`);
+    const d = deployHeavyLock(deployRoot, { allowDirty: argv.includes("--allow-dirty") });
+    console.log(
+      argv.includes("--json")
+        ? JSON.stringify(d, null, 2)
+        : `deployed heavy-lock ${d.sha}-${String(d.n)}${d.dirty !== false ? " (DIRTY or unknown: --allow-dirty)" : ""}\n  run: node ${d.stable}\n  copy: ${d.dir}` +
+            (d.pruneSkipped.length ? `\n  could not prune: ${d.pruneSkipped.map((p) => `${p.name} (${p.error})`).join(", ")}` : "")
+    );
     process.exit(0);
   } catch (error) {
-    console.error(`heavy-lock deploy failed: ${error.message}`);
+    console.error(`heavy-lock deploy refused: ${error.message}`);
     process.exit(1);
   }
 }
@@ -146,7 +163,7 @@ const command = sep === -1 ? argv : argv.slice(sep + 1);
 
 if (command.length === 0) {
   console.error(
-    "usage: node scripts/heavy-lock.mjs [--no-lock] -- <command> [args...]\n       node scripts/heavy-lock.mjs status [--json]\n       node scripts/heavy-lock.mjs deploy [--deploy-root <dir>] [--json]"
+    "usage: node scripts/heavy-lock.mjs [--no-lock] -- <command> [args...]\n       node scripts/heavy-lock.mjs status [--json]\n       node scripts/heavy-lock.mjs deploy [--deploy-root <dir>] [--allow-dirty] [--json]"
   );
   process.exit(2);
 }
