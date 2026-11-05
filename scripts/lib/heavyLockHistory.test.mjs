@@ -1,13 +1,32 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import test from "node:test";
+import test, { after } from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { acquireHeavyLock, isPidAlive } from "./heavyLock.mjs";
-import { defaultClass, formatHistory, historyPath, readHistory, recordRun, samplingOff, summarizeHistory } from "./heavyLockHistory.mjs";
+import { cleanStaleSamples, defaultClass, formatHistory, historyPath, readHistory, recordRun, sampleTables, samplingOff, summarizeHistory } from "./heavyLockHistory.mjs";
+
+/** A scratch dir under the temp dir, removed after this file's tests (pass or fail). */
+const scratchDirs = [];
+function scratchDir(prefix) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+  scratchDirs.push(dir);
+  return dir;
+}
+after(() => {
+  for (const dir of scratchDirs) {
+    try {
+      fs.rmSync(dir, { recursive: true, force: true, maxRetries: 3 });
+    } catch {
+      // a child still holding it open: left behind, named heavy-lock-*
+    }
+  }
+});
+
 
 /**
  * Run history (row H-6a). Every case uses its own lock path (MCP_HEAVY_LOCK_PATH), so its own history
@@ -19,7 +38,7 @@ const CLI = path.join(HERE, "..", "heavy-lock.mjs");
 const REPO_ROOT = path.join(HERE, "..", "..");
 
 function tempLock() {
-  return path.join(fs.mkdtempSync(path.join(os.tmpdir(), "heavy-lock-history-")), "heavy-check.lock");
+  return path.join(scratchDir("heavy-lock-history-"), "heavy-check.lock");
 }
 
 function cleanEnv(lockPath, extra = {}) {
@@ -153,4 +172,74 @@ test("CLI end to end: the whole tree's peak working set is sampled, including a 
   assert.equal(summary[0].peakMb.max, row.peakMb);
   const text = spawnSync(process.execPath, [CLI, "history"], { env, encoding: "utf8" }).stdout;
   assert.match(text, new RegExp(`probe\\n {4}${String(row.peakMb)}/${String(row.peakMb)}/${String(row.peakMb)} MB`));
+});
+
+// ---- H-6a review follow-ups ----
+
+const C = 134000000000000000n; // a FILETIME in 2025, after the scripted run start
+const table = (rows) => rows.map((r) => r.join(" ")).join("\n");
+
+test("tree membership: a seen process stays in the tree when its gone parent's pid is reused by a stranger; a reused member pid leaves; a process older than the run never joins", { skip: noSampler }, () => {
+  const cache = scratchDir("heavy-lock-cache-");
+  const { samples } = sampleTables(
+    [
+      // root 100 → dotnet 200 → VBCSCompiler 300; 400 a stranger; 500 under the root but older than the run
+      table([[100, 1, C, 10, "node.exe"], [200, 100, C + 1n, 1000, "dotnet.exe"], [300, 200, C + 2n, 5000, "VBCSCompiler.exe"], [400, 1, C, 7, "stranger.exe"], [500, 100, 100000000000000000n, 9, "old.exe"]]),
+      // dotnet exits: VBCSCompiler's parent is gone
+      table([[100, 1, C, 10, "node.exe"], [300, 200, C + 2n, 6000, "VBCSCompiler.exe"]]),
+      // a stranger gets pid 200: VBCSCompiler (creation unchanged) stays, the stranger does not join
+      table([[100, 1, C, 10, "node.exe"], [200, 4, C + 9n, 999, "stranger.exe"], [300, 200, C + 2n, 7000, "VBCSCompiler.exe"]]),
+      // VBCSCompiler exits and its pid is reused by an unrelated process: it leaves
+      table([[100, 1, C, 10, "node.exe"], [300, 4, C + 10n, 8000, "reused.exe"]])
+    ],
+    { root: 100, runStartMs: 1_700_000_000_000, env: { ...process.env, MCP_HEAVY_LOCK_SAMPLER_CACHE: cache } }
+  );
+  assert.deepEqual(
+    samples.map((s) => [s.members, s.sumBytes]),
+    [
+      [[200, 300], 6000],
+      [[300], 6000],
+      [[300], 7000],
+      [[], 0]
+    ]
+  );
+});
+
+test("helper self-heal: built once, then cached; a corrupt cached DLL is rebuilt; one that matches its sum but will not load is compiled in memory", { skip: noSampler }, () => {
+  const cache = scratchDir("heavy-lock-cache-");
+  const env = { ...process.env, MCP_HEAVY_LOCK_SAMPLER_CACHE: cache };
+  const one = [table([[100, 1, C, 10, "node.exe"], [200, 100, C + 1n, 4096, "child.exe"]])];
+  const run = () => sampleTables(one, { root: 100, runStartMs: 1_700_000_000_000, env });
+  assert.equal(run().helper, "built");
+  const second = run();
+  assert.equal(second.helper, "cached");
+  assert.deepEqual(second.samples[0].members, [200]);
+  const dll = fs.readdirSync(cache).find((n) => n.endsWith(".dll") && !n.includes(".tmp"));
+  assert.ok(dll, fs.readdirSync(cache).join(", "));
+  fs.writeFileSync(path.join(cache, dll), "not a dll");
+  const healed = run();
+  assert.equal(healed.helper, "built", "a DLL that does not match its sum is rebuilt");
+  assert.deepEqual(healed.samples[0].members, [200]);
+  assert.equal(run().helper, "cached");
+  // Both the DLL and its sum corrupted consistently: the load fails, so this run compiles in memory.
+  const garbage = Buffer.from("MZ garbage");
+  fs.writeFileSync(path.join(cache, dll), garbage);
+  fs.writeFileSync(path.join(cache, `${dll}.sha256`), createHash("sha256").update(garbage).digest("hex").toUpperCase());
+  const memory = run();
+  assert.equal(memory.helper, "memory");
+  assert.deepEqual(memory.samples[0].members, [200]);
+});
+
+test("cleanStaleSamples removes summary files and temps of dead pids only", () => {
+  const dir = scratchDir("heavy-lock-clean-");
+  const dead = spawnSync(process.execPath, ["-e", "0"]).pid;
+  const names = [
+    `heavy-lock-sample-${String(dead)}-0b0e7a3c-1111-4222-8333-944455556666.json`,
+    `heavy-lock-sample-${String(dead)}-0b0e7a3c-1111-4222-8333-944455556666.json.5f0c2a1e-1111-4222-8333-944455556666.tmp`,
+    `heavy-lock-sample-${String(process.pid)}-0b0e7a3c-1111-4222-8333-944455556666.json`,
+    "heavy-lock-unrelated.json"
+  ];
+  for (const n of names) fs.writeFileSync(path.join(dir, n), "{}");
+  assert.equal(cleanStaleSamples(dir), 2);
+  assert.deepEqual(fs.readdirSync(dir).sort(), [names[2], names[3]].sort());
 });

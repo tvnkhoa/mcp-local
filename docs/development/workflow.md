@@ -216,7 +216,10 @@ tree, detached build servers (VBCSCompiler, csc) included, sampled every 1 s
 sample (~2.5 CPU-s a minute, ~150 MB), into `heavy-check.lock.history.jsonl` (2 MiB, then rotated to
 `.history.1.jsonl`). `node scripts/heavy-lock.mjs history [--class x] [--repo r] [--json]` prints peak
 MB and duration p50/p95/max per class. Windows only; the first sample lands ~2 s in, so a shorter run
-records no peak. A waiter whose ancestor dies while it waits stops (exit 76) instead of taking the lock later
+records no peak. The helper DLL is compiled once into the temp dir with a sha256 beside it
+(`MCP_HEAVY_LOCK_SAMPLER_CACHE` moves it); one that fails its sum is rebuilt and one that will not load is
+compiled in memory for that run (`sampling.helper`: cached / built / memory). The lock is released before
+the record is written. A waiter whose ancestor dies while it waits stops (exit 76) instead of taking the lock later
 for nobody; an ancestor already gone when the wait began (a spawn-and-exit wrapper) does not count.
 The first time status or a waiter sees the holder flagged either way is kept in `heavy-check.lock.orphan.json`
 (`orphanSince`, cleared when the holder changes or frees); after `MCP_HEAVY_LOCK_ORPHAN_MINUTES`

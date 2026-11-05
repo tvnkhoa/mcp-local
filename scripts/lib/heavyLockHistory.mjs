@@ -28,7 +28,7 @@
  * run. Measured only when the call holds the lock itself (not nested, not `--no-lock`, not CI).
  */
 
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
@@ -202,6 +202,7 @@ public static class HeavyLockSampler {
     CloseHandle(h);
     return true;
   }
+  public delegate bool Reader(int pid, out long created, out long ws);
   public static string Sample() {
     var parent = new Dictionary<int, int>();
     var name = new Dictionary<int, string>();
@@ -209,11 +210,34 @@ public static class HeavyLockSampler {
     var pe = new PE(); pe.dwSize = (uint)Marshal.SizeOf(typeof(PE));
     if (Process32FirstW(snap, ref pe)) { do { parent[(int)pe.th32ProcessID] = (int)pe.th32ParentProcessID; name[(int)pe.th32ProcessID] = pe.szExeFile; } while (Process32NextW(snap, ref pe)); }
     CloseHandle(snap);
-    // A seen pid that is now another process (creation time changed) leaves the tree first.
+    return Run(parent, name, Read);
+  }
+  // Test hook: one sample over a scripted process table, one "pid ppid created ws name" per line.
+  public static string SampleTable(string table) {
+    var parent = new Dictionary<int, int>();
+    var name = new Dictionary<int, string>();
+    var info = new Dictionary<int, long[]>();
+    foreach (var line in table.Split('\n')) {
+      var f = line.Trim().Split(new[] { ' ' }, 5);
+      if (f.Length < 5) continue;
+      int pid = int.Parse(f[0]);
+      parent[pid] = int.Parse(f[1]); name[pid] = f[4];
+      info[pid] = new[] { long.Parse(f[2]), long.Parse(f[3]) };
+    }
+    return Run(parent, name, delegate(int pid, out long created, out long ws) {
+      long[] v; created = 0; ws = 0;
+      if (!info.TryGetValue(pid, out v)) return false;
+      created = v[0]; ws = v[1]; return true;
+    });
+  }
+  static string Run(Dictionary<int, int> parent, Dictionary<int, string> name, Reader read) {
+    // A seen pid that is now another process (creation time changed) leaves the tree first; one whose
+    // creation time is unchanged stays a member whatever its parent chain now says (its parent's pid
+    // may have been reused by a stranger after the parent exited).
     foreach (var pid in new List<int>(seen.Keys)) {
       if (!parent.ContainsKey(pid)) continue;
       long c, w;
-      if (Read(pid, out c, out w) && c != 0 && seen[pid] != 0 && c != seen[pid]) seen.Remove(pid);
+      if (read(pid, out c, out w) && c != 0 && seen[pid] != 0 && c != seen[pid]) seen.Remove(pid);
     }
     var memo = new Dictionary<int, int>();
     var sb = new StringBuilder();
@@ -221,7 +245,7 @@ public static class HeavyLockSampler {
     foreach (var pid in parent.Keys) {
       if (Member(pid, parent, memo, 0) != 1) continue;
       long created, ws;
-      if (!Read(pid, out created, out ws)) continue;
+      if (!read(pid, out created, out ws)) continue;
       long known;
       if (!seen.TryGetValue(pid, out known)) {
         if (created != 0 && created < runStartFt) continue; // existed before the run: not its child
@@ -238,6 +262,7 @@ public static class HeavyLockSampler {
     if (memo.TryGetValue(pid, out r)) return r;
     if (pid == exclude) r = -1;
     else if (pid == root || depth > 64) r = 0;
+    else if (seen.ContainsKey(pid)) r = 1; // already in the tree, verified unchanged above
     else {
       int pp;
       if (!parent.TryGetValue(pid, out pp) || pp == pid) r = 0;
@@ -258,15 +283,31 @@ const PS_LOOP = [
   "$nl = [char]10",
   "$src = [IO.File]::ReadAllText($env:HL_CS)",
   "$dll = $env:HL_DLL",
-  // Compiled once per machine (one csc); a racing compiler loses the rename and loads the winner's DLL.
-  "if (-not (Test-Path $dll)) {",
+  "$sum = \"$dll.sha256\"",
+  // Compiled once per machine (one csc) beside a sha256 of the DLL. A racing compiler loses the move and
+  // loads the winner's DLL; a DLL that does not match its sum (corrupt, half-written) is rebuilt once,
+  // and one that still will not load is compiled in memory for this run: sampling never stays broken.
+  "function Build {",
   "  $tmp = \"$dll.$PID.tmp.dll\"",
   "  Add-Type -TypeDefinition $src -OutputAssembly $tmp -OutputType Library",
-  "  try { Move-Item -LiteralPath $tmp -Destination $dll -ErrorAction Stop } catch { Remove-Item -LiteralPath $tmp -ErrorAction SilentlyContinue }",
+  "  $h = (Get-FileHash -LiteralPath $tmp -Algorithm SHA256).Hash",
+  "  Remove-Item -LiteralPath $dll, $sum -ErrorAction SilentlyContinue",
+  "  try { Move-Item -LiteralPath $tmp -Destination $dll -ErrorAction Stop; [IO.File]::WriteAllText($sum, $h) } catch { Remove-Item -LiteralPath $tmp -ErrorAction SilentlyContinue }",
   "}",
-  "if (Test-Path $dll) { Add-Type -Path $dll } else { Add-Type -TypeDefinition $src }",
-  "[HeavyLockSampler]::Init([int]$env:HL_ROOT, [int]$env:HL_EXCLUDE, [long]$env:HL_START)",
+  "$how = 'cached'",
+  "$good = $false",
+  "try { $good = (Test-Path -LiteralPath $sum) -and ((Get-FileHash -LiteralPath $dll -Algorithm SHA256).Hash -eq [IO.File]::ReadAllText($sum).Trim()) } catch { $good = $false }",
+  "if (-not $good) { $how = 'built'; try { Build } catch { } }",
+  "try { Add-Type -Path $dll } catch { $how = 'memory'; Add-Type -TypeDefinition $src }",
   "$out = [Console]::Out",
+  "$out.Write('L ' + $how + $nl)",
+  "[HeavyLockSampler]::Init([int]$env:HL_ROOT, [int]$env:HL_EXCLUDE, [long]$env:HL_START)",
+  // Test mode: scripted process tables, one sample each, then exit.
+  "if ($env:HL_TABLES) {",
+  "  foreach ($t in ([IO.File]::ReadAllText($env:HL_TABLES) -split '(?m)^---\\s*$')) { $out.Write('T 0' + $nl + [HeavyLockSampler]::SampleTable($t) + 'E' + $nl) }",
+  "  $out.Flush()",
+  "  exit 0",
+  "}",
   "while ($true) {",
   "  $sw = [Diagnostics.Stopwatch]::StartNew()",
   "  $s = [HeavyLockSampler]::Sample()",
@@ -276,10 +317,15 @@ const PS_LOOP = [
   "}"
 ].join("\n");
 
-/** The cached helper DLL and the C# source beside it, named by the source's hash (so an edit recompiles). */
-function helperFiles() {
+/**
+ * The cached helper DLL and the C# source beside it, named by the source's hash (so an edit recompiles),
+ * in `MCP_HEAVY_LOCK_SAMPLER_CACHE` (a test's scratch dir) or the temp dir.
+ */
+function helperFiles(env = process.env) {
   const hash = createHash("sha256").update(HELPER_CS).digest("hex").slice(0, 12);
-  const base = path.join(os.tmpdir(), `heavy-lock-sampler-${hash}`);
+  const dir = env.MCP_HEAVY_LOCK_SAMPLER_CACHE || os.tmpdir();
+  fs.mkdirSync(dir, { recursive: true });
+  const base = path.join(dir, `heavy-lock-sampler-${hash}`);
   const cs = `${base}.cs`;
   if (!fs.existsSync(cs)) {
     const tmp = `${cs}.${String(process.pid)}.${randomUUID()}.tmp`;
@@ -308,6 +354,7 @@ export function startSampler({ rootPid = process.pid, runStart = Date.now(), env
   const intervalMs = sampleIntervalMs(env);
   const off = samplingOff(env);
   if (off !== null) return { stop: () => ({ peakMb: null, peakAt: null, peakTop: [], sampling: { intervalMs, samples: 0, off } }) };
+  cleanStaleSamples();
   const out = path.join(os.tmpdir(), `heavy-lock-sample-${String(process.pid)}-${randomUUID()}.json`);
   let child = null;
   try {
@@ -318,10 +365,13 @@ export function startSampler({ rootPid = process.pid, runStart = Date.now(), env
     child = null;
   }
   return {
+    /** Never throws: the run's own exit code is what the caller reports. */
     stop() {
       if (child?.pid !== undefined && isPidAlive(child.pid)) {
+        // The whole tree: the node sampler, its PowerShell helper and that one's conhost.
         try {
-          process.kill(child.pid);
+          if (process.platform === "win32") spawnSync("taskkill", ["/PID", String(child.pid), "/T", "/F"], { stdio: "ignore", windowsHide: true, timeout: 10_000 });
+          else process.kill(child.pid);
         } catch {
           // already gone
         }
@@ -332,10 +382,69 @@ export function startSampler({ rootPid = process.pid, runStart = Date.now(), env
       } catch {
         // no sample written yet (a run shorter than the sampler's start-up)
       }
-      fs.rmSync(out, { force: true });
+      try {
+        fs.rmSync(out, { force: true });
+      } catch {
+        // left for cleanStaleSamples
+      }
       return summary ?? { peakMb: null, peakAt: null, peakTop: [], sampling: { intervalMs, samples: 0 } };
     }
   };
+}
+
+const SAMPLE_FILE = /^heavy-lock-sample-(\d+)-[0-9a-f-]+\.json(\.[0-9a-f-]+\.tmp)?$/;
+
+/** Remove summary files (and their temps) that a sampler of a process now gone left in the temp dir. */
+export function cleanStaleSamples(dir = os.tmpdir()) {
+  let removed = 0;
+  try {
+    for (const name of fs.readdirSync(dir)) {
+      const m = SAMPLE_FILE.exec(name);
+      if (m === null || isPidAlive(Number(m[1]))) continue;
+      try {
+        fs.rmSync(path.join(dir, name), { force: true });
+        removed++;
+      } catch {
+        // next time
+      }
+    }
+  } catch {
+    // no temp dir listing: nothing to clean
+  }
+  return removed;
+}
+
+/**
+ * Test hook: run the helper over scripted process tables (`pid ppid created ws name` lines, created in
+ * FILETIME units), one sample each, its seen-set kept across them. Returns `{ helper, samples: [{count,
+ * sumBytes, members}] }`. Windows only.
+ */
+export function sampleTables(tables, { root, exclude = 0, runStartMs = 0, env = process.env } = {}) {
+  const { cs, dll } = helperFiles(env);
+  const file = path.join(os.tmpdir(), `heavy-lock-tables-${String(process.pid)}-${randomUUID()}.txt`);
+  fs.writeFileSync(file, tables.join("\n---\n"));
+  try {
+    const r = spawnSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-EncodedCommand", Buffer.from(PS_LOOP, "utf16le").toString("base64")], {
+      env: { ...env, HL_CS: cs, HL_DLL: dll, HL_ROOT: String(root), HL_EXCLUDE: String(exclude), HL_START: String(runStartMs), HL_INTERVAL: "100", HL_TABLES: file },
+      encoding: "utf8",
+      windowsHide: true,
+      timeout: 60_000
+    });
+    if (r.status !== 0) throw new Error(`helper exit ${String(r.status)}: ${String(r.stderr)}`);
+    const text = r.stdout.replace(/\r/g, "");
+    return {
+      helper: /^L (\w+)/m.exec(text)?.[1] ?? null,
+      samples: text
+        .split("E\n")
+        .filter((b) => /^S /m.test(b))
+        .map((b) => {
+          const head = /^S (\d+) (\d+)/m.exec(b);
+          return { count: Number(head[1]), sumBytes: Number(head[2]), members: [...b.matchAll(/^M (\d+) /gm)].map((m) => Number(m[1])).sort((x, y) => x - y) };
+        })
+    };
+  } finally {
+    fs.rmSync(file, { force: true });
+  }
 }
 
 /** The sampler process: drive the PowerShell helper, keep the peak, rewrite the summary file after each sample. */
@@ -363,6 +472,8 @@ async function runSampler([rootPid, runStart, out, intervalMs]) {
     while ((end = buffer.indexOf("E\n")) !== -1) {
       const block = buffer.slice(0, end).replace(/\r/g, "").split("\n");
       buffer = buffer.slice(end + 2);
+      // The helper says once how it loaded: cached DLL, rebuilt, or compiled in memory.
+      if (/^L \w+/.test(block[0] ?? "")) summary.sampling.helper = block.shift().slice(2);
       const took = Number(/^T (\d+)/.exec(block[0] ?? "")?.[1]);
       const head = /^S (\d+) (\d+)/.exec(block[1] ?? "");
       if (!head) continue;

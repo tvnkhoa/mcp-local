@@ -217,14 +217,22 @@ const args = process.platform === "win32" ? command.slice(1).map((a) => (/[\s"]/
 const result = spawnSync(command[0], args, { stdio: "inherit", shell: process.platform === "win32" });
 if (lock.acquired) {
   const endedAt = Date.now();
-  const measured = sampler.stop();
+  let measured = { peakMb: null, peakAt: null, peakTop: [], sampling: { samples: 0, error: "sampler stop failed" } };
   try {
-    let holder = null;
-    try {
-      holder = JSON.parse(fs.readFileSync(lock.path, "utf8"));
-    } catch {
-      // the lineage is information only
-    }
+    measured = sampler.stop();
+  } catch {
+    // the record says so; the command's exit is what this reports
+  }
+  // The lineage comes from our holder file, read while it is still ours; then the lock goes before
+  // the record's slower parts (a git spawn for the repo, the sessions registry), so nobody waits on them.
+  let holder = null;
+  try {
+    holder = JSON.parse(fs.readFileSync(lock.path, "utf8"));
+  } catch {
+    // the lineage is information only
+  }
+  lock.release();
+  try {
     const repo = await repoOf(process.cwd());
     recordRun({
       at: new Date(endedAt).toISOString(),
@@ -246,7 +254,6 @@ if (lock.acquired) {
   } catch {
     // a run never fails for its record
   }
-  lock.release();
 }
 
 if (result.error !== undefined) {

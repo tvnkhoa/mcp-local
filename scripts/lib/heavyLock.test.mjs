@@ -3,7 +3,7 @@ import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import test from "node:test";
+import test, { after } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 import {
@@ -28,6 +28,24 @@ import {
   TICKET_STALE_MS
 } from "./heavyLock.mjs";
 
+/** A scratch dir under the temp dir, removed after this file's tests (pass or fail). */
+const scratchDirs = [];
+function scratchDir(prefix) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+  scratchDirs.push(dir);
+  return dir;
+}
+after(() => {
+  for (const dir of scratchDirs) {
+    try {
+      fs.rmSync(dir, { recursive: true, force: true, maxRetries: 3 });
+    } catch {
+      // a child still holding it open: left behind, named heavy-lock-*
+    }
+  }
+});
+
+
 /**
  * The machine-wide heavy-check lock (row V-C; an OS-owned name since row 9). Every case uses its own
  * lock file through MCP_HEAVY_LOCK_PATH — which also names its own pipe — and a clean env, so a run
@@ -44,7 +62,7 @@ const PIPE = heavyLockPipeName("x") !== null;
 const noPipe = PIPE ? false : `no OS-owned lock name on ${process.platform}`;
 
 function tempLock() {
-  return path.join(fs.mkdtempSync(path.join(os.tmpdir(), "heavy-lock-")), "heavy-check.lock");
+  return path.join(scratchDir("heavy-lock-"), "heavy-check.lock");
 }
 
 function cleanEnv(lockPath) {
@@ -1010,7 +1028,7 @@ test("status drops a ticket whose heartbeat stopped, and shows an orphaned waite
 // ---- the deploy copy (row H-5): what other repos run ----
 
 test("deploy: a self-contained copy under a scratch deploy root runs status and a command from a foreign cwd, importing nothing outside it", async () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "heavy-lock-deploy-"));
+  const root = scratchDir("heavy-lock-deploy-");
   // --allow-dirty: this runs from the working tree, which may hold uncommitted edits while developing;
   // the dirty refusal itself is tested on a scratch repo below.
   const deploy = (args = []) => spawnSync(process.execPath, [CLI, "deploy", "--deploy-root", root, "--json", "--allow-dirty", ...args], { encoding: "utf8" });
@@ -1029,8 +1047,8 @@ test("deploy: a self-contained copy under a scratch deploy root runs status and 
 
   // Every module the copy loads is a builtin or a file inside the deploy root: traced by a resolve hook
   // that lives outside both, run from a cwd outside both.
-  const elsewhere = fs.mkdtempSync(path.join(os.tmpdir(), "heavy-lock-cwd-"));
-  const hook = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "heavy-lock-hook-")), "trace.mjs");
+  const elsewhere = scratchDir("heavy-lock-cwd-");
+  const hook = path.join(scratchDir("heavy-lock-hook-"), "trace.mjs");
   const trace = path.join(elsewhere, "trace.txt");
   fs.writeFileSync(
     hook,
@@ -1187,7 +1205,7 @@ test("status names each holder's and waiter's repo (git common dir) and Claude s
   fs.writeFileSync(`${sessionsFile}.4242.trimming`, row("s-waiter", 950, t0 + 3_000) + "\n");
   const dir = heavyLockWaitersDir(lockPath);
   fs.mkdirSync(dir, { recursive: true });
-  const other = fs.mkdtempSync(path.join(os.tmpdir(), "heavy-lock-nogit-"));
+  const other = scratchDir("heavy-lock-nogit-");
   fs.writeFileSync(
     path.join(dir, "t000000000001.json"),
     JSON.stringify({ pid: process.pid, token: "w1", cmd: "w1", cwd: repoDir, since: new Date().toISOString(), ticket: 1, pollMs: 2_000, lineage: [{ pid: 950, name: "claude", start: t0 }] })
@@ -1214,7 +1232,7 @@ test("status names each holder's and waiter's repo (git common dir) and Claude s
 // ---- deploy review follow-ups (M, L1, L3, L4) ----
 
 test("stable entry: a broken deploy exits 78 with one line — no current.json, bad JSON, its copy pruned, a module missing", () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "heavy-lock-broken-"));
+  const root = scratchDir("heavy-lock-broken-");
   const made = spawnSync(process.execPath, [CLI, "deploy", "--deploy-root", root, "--json", "--allow-dirty"], { encoding: "utf8" });
   assert.equal(made.status, 0, made.stderr);
   const record = JSON.parse(made.stdout);
@@ -1250,7 +1268,7 @@ test("deploy: --deploy-root without a value is a usage error (exit 2); nothing i
 
 /** A scratch git repo holding a committed copy of the three deployable scripts and the entry. */
 function scratchSource({ git = true } = {}) {
-  const repo = fs.mkdtempSync(path.join(os.tmpdir(), "heavy-lock-src-"));
+  const repo = scratchDir("heavy-lock-src-");
   for (const rel of ["heavy-lock.mjs", "lib/deploy.mjs", "lib/heavyLock.mjs", "lib/heavyLockHistory.mjs", "lib/heavyLockEntry.mjs"]) {
     const dest = path.join(repo, "scripts", ...rel.split("/"));
     fs.mkdirSync(path.dirname(dest), { recursive: true });
@@ -1266,7 +1284,7 @@ function scratchSource({ git = true } = {}) {
 }
 
 test("deploy: refuses uncommitted copied files and a tree git cannot read, unless --allow-dirty", () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "heavy-lock-dirty-"));
+  const root = scratchDir("heavy-lock-dirty-");
   const deployFrom = (cli, ...extra) => spawnSync(process.execPath, [cli, "deploy", "--deploy-root", root, "--json", ...extra], { encoding: "utf8" });
   const { repo, cli } = scratchSource();
   const clean = deployFrom(cli);
@@ -1288,7 +1306,7 @@ test("deploy: refuses uncommitted copied files and a tree git cannot read, unles
 });
 
 test("deploy: refuses a copy that would import anything it did not copy (bare, single-quoted, dynamic)", () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "heavy-lock-foreign-"));
+  const root = scratchDir("heavy-lock-foreign-");
   // A static import of a missing module would crash the CLI before it could refuse, so those two sit
   // in a template literal (the scanner reads text; node never loads them) and the dynamic ones in a
   // function nobody calls.
