@@ -559,7 +559,7 @@ test("end to end: a holder whose launching parent is killed shows ancestor gone,
     if (holderPid !== null && isPidAlive(holderPid)) hardKill(holderPid);
   });
   const deadline = Date.now() + 30_000;
-  while (!fs.existsSync(out)) {
+  while (!(Number((fs.existsSync(out) && fs.readFileSync(out, "utf8")) || 0) > 0)) {
     assert.ok(Date.now() < deadline, "the holder never took the lock");
     await new Promise((r) => setTimeout(r, 100));
   }
@@ -817,7 +817,7 @@ async function realChain(t, kill) {
     for (const pid of [ids.grand, ids.parent, ids.holder]) if (pid !== null && isPidAlive(pid)) hardKill(pid);
   });
   const deadline = Date.now() + 30_000;
-  while (!fs.existsSync(out)) {
+  while (!(Number((fs.existsSync(out) && fs.readFileSync(out, "utf8")) || 0) > 0)) {
     assert.ok(Date.now() < deadline, "the holder never took the lock");
     await new Promise((r) => setTimeout(r, 100));
   }
