@@ -28,7 +28,7 @@
  * runs only on the owner's yes. It kills nothing and never frees a lock whose holder lives.
  */
 
-import { execFileSync, spawnSync } from "node:child_process";
+import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -38,6 +38,7 @@ import { fileURLToPath } from "node:url";
 import { DEPLOY_RECORD, deployHash, foreignImports, importClosure } from "./lib/deploy.mjs";
 import { formatHeavyLockStatus, heavyLockStatus, holdHeavyLockOrExit, readSessionRows, repoOf, sessionOf, sessionsRegistryPath } from "./lib/heavyLock.mjs";
 import { defaultClass, formatHistory, historyPath, readHistory, recordRun, startSampler, summarizeHistory } from "./lib/heavyLockHistory.mjs";
+import { runCommand } from "./lib/heavyLockSpawn.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const DEPLOYS_KEPT = 3;
@@ -211,10 +212,9 @@ const lock = await holdHeavyLockOrExit({ cmd, noLock: own.includes("--no-lock") 
 // Measured only when this call holds the lock itself: a nested run is inside its parent's record.
 const startedAt = Date.now();
 const sampler = lock.acquired ? startSampler({ runStart: startedAt }) : null;
-// `npm` is `npm.cmd` on Windows, which needs a shell; a shell joins arguments with bare spaces, so
-// quote the ones that contain any.
-const args = process.platform === "win32" ? command.slice(1).map((a) => (/[\s"]/.test(a) ? `"${a.replace(/"/g, '\\"')}"` : a)) : command.slice(1);
-const result = spawnSync(command[0], args, { stdio: "inherit", shell: process.platform === "win32" });
+// Every argument reaches the command literally: an .exe runs without a shell; a .cmd/.bat (npm) or a
+// builtin goes through cmd.exe fully escaped (lib/heavyLockSpawn.mjs).
+const result = runCommand(command);
 if (lock.acquired) {
   const endedAt = Date.now();
   let measured = { peakMb: null, peakAt: null, peakTop: [], sampling: { samples: 0, error: "sampler stop failed" } };

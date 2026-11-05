@@ -219,7 +219,10 @@ MB and duration p50/p95/max per class. Windows only; the first sample lands ~2 s
 records no peak. The helper DLL is compiled once into the temp dir with a sha256 beside it
 (`MCP_HEAVY_LOCK_SAMPLER_CACHE` moves it); one that fails its sum is rebuilt and one that will not load is
 compiled in memory for that run (`sampling.helper`: cached / built / memory). The lock is released before
-the record is written. A waiter whose ancestor dies while it waits stops (exit 76) instead of taking the lock later
+the record is written. The wrapped command gets every argument literally: on Windows an `.exe` it
+resolves (PATH + PATHEXT) runs with no shell, and a `.cmd`/`.bat` (npm) or a builtin goes through
+`cmd.exe` with each argument quoted and every metacharacter (`> & | ( ) ^ % !` …) caret-escaped, so
+`-- "a && b"` is one argument, never two commands. A waiter whose ancestor dies while it waits stops (exit 76) instead of taking the lock later
 for nobody; an ancestor already gone when the wait began (a spawn-and-exit wrapper) does not count.
 The first time status or a waiter sees the holder flagged either way is kept in `heavy-check.lock.orphan.json`
 (`orphanSince`, cleared when the holder changes or frees); after `MCP_HEAVY_LOCK_ORPHAN_MINUTES`

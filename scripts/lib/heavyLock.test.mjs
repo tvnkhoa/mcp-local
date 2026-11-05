@@ -1037,7 +1037,7 @@ test("deploy: a self-contained copy under a scratch deploy root runs status and 
   const record = JSON.parse(first.stdout);
   assert.equal(record.key, "heavy-lock");
   assert.equal(record.n, 1);
-  assert.deepEqual(record.files, ["heavy-lock.mjs", "lib/deploy.mjs", "lib/heavyLock.mjs", "lib/heavyLockHistory.mjs"]);
+  assert.deepEqual(record.files, ["heavy-lock.mjs", "lib/deploy.mjs", "lib/heavyLock.mjs", "lib/heavyLockHistory.mjs", "lib/heavyLockSpawn.mjs"]);
   assert.deepEqual(record.pruneSkipped, []);
   const keyDir = path.join(root, "heavy-lock");
   assert.equal(record.stable, path.join(keyDir, "heavy-lock.mjs"));
@@ -1061,8 +1061,8 @@ test("deploy: a self-contained copy under a scratch deploy root runs status and 
   const status = run(["status", "--json"]);
   assert.equal(status.status, 0, status.stderr);
   assert.equal(JSON.parse(status.stdout).path, lockPath);
-  // "node" from PATH: on Windows the CLI runs the command through a shell, which splits an unquoted path with spaces.
-  const command = run(["--", "node", "-e", "process.exit(3)"]);
+  // node by its full path (spaces on most Windows machines) and a script holding cmd metacharacters (H-7).
+  const command = run(["--", process.execPath, "-e", "(() => process.exit(3))()"]);
   assert.equal(command.status, 3, command.stderr);
   const urls = fs.readFileSync(trace, "utf8").trim().split("\n");
   const inside = pathToFileURL(root).href.toLowerCase();
@@ -1269,7 +1269,7 @@ test("deploy: --deploy-root without a value is a usage error (exit 2); nothing i
 /** A scratch git repo holding a committed copy of the three deployable scripts and the entry. */
 function scratchSource({ git = true } = {}) {
   const repo = scratchDir("heavy-lock-src-");
-  for (const rel of ["heavy-lock.mjs", "lib/deploy.mjs", "lib/heavyLock.mjs", "lib/heavyLockHistory.mjs", "lib/heavyLockEntry.mjs"]) {
+  for (const rel of ["heavy-lock.mjs", "lib/deploy.mjs", "lib/heavyLock.mjs", "lib/heavyLockHistory.mjs", "lib/heavyLockSpawn.mjs", "lib/heavyLockEntry.mjs"]) {
     const dest = path.join(repo, "scripts", ...rel.split("/"));
     fs.mkdirSync(path.dirname(dest), { recursive: true });
     fs.copyFileSync(path.join(HERE, "..", ...rel.split("/")), dest);
