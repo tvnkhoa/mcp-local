@@ -526,15 +526,17 @@ export async function acquireHeavyLock({
     const written = parseHolder(readRaw(file) ?? "");
     if (written?.token === inherited && isPidAlive(written.pid) && (await probeName(pipe)) === true) return insideParent(written);
   }
-  // Read before acquiring, so the holder file is written the moment the name is taken; bounded so the
-  // read never runs past the caller's deadline.
-  const lineage = await boundedLineage(readLineage, Math.min(LINEAGE_READ_TIMEOUT_MS, limit));
-  const holderContent = () => JSON.stringify({ pid: process.pid, startedAt: new Date().toISOString(), token, cmd, cwd, ppid: process.ppid, lineage });
+  // The ticket is taken on arrival (H-2), before the lineage read: its number is this caller's place.
+  const waiter = registerWaiter(file, { token, cmd, cwd, pollMs });
   let announced = null;
   const pidStarts = new Map();
-  // The ticket is taken on arrival (H-2): its number is this caller's place in the queue.
-  const waiter = registerWaiter(file, { token, cmd, cwd, lineage, pollMs });
+  let lineage = [];
+  const holderContent = () => JSON.stringify({ pid: process.pid, startedAt: new Date().toISOString(), token, cmd, cwd, ppid: process.ppid, lineage });
   try {
+    // Read before acquiring, so the holder file is written the moment the name is taken; bounded so the
+    // read never runs past the caller's deadline.
+    lineage = await boundedLineage(readLineage, Math.min(LINEAGE_READ_TIMEOUT_MS, limit));
+    waiter.setLineage(lineage);
     return await take();
   } finally {
     waiter.unregister();
@@ -713,14 +715,21 @@ function touchedAt(full) {
 /**
  * Take a ticket in `<lock>.waiters/` on arrival (H-2): `t<seq>.json` holding `{pid, ppid, token, cmd,
  * cwd, since, lineage, watched, pollMs, ticket}`, `seq` one above the highest ticket present, created by
- * hard link so no two callers share a number. `ahead()` counts the live tickets before this one,
- * removing dead ones; `heartbeat()` touches it (and takes a new ticket at the back if it was removed);
- * `unregister()` removes it, as does process exit. A hard-killed waiter leaves it: the next waiter
- * behind it and `heavyLockStatus` drop it. If no ticket can be written the caller waits without one.
+ * hard link so no two callers share a number. It is taken before the lineage is read (up to 15 s of
+ * PowerShell), so the order is arrival, not who finished that read first; `setLineage()` then writes the
+ * lineage and `watched` into it. `ahead()` counts the live tickets before this one, removing dead ones
+ * (a removal that fails counts that ticket as ahead for this poll), and takes a new ticket at the back
+ * when this one was removed (judged silent after a stall); `heartbeat()` touches it, re-queueing only
+ * when it is gone (ENOENT) — any other error keeps it. `unregister()` removes it, as do process exit,
+ * SIGINT and SIGTERM. A hard-killed waiter leaves it: the next waiter behind it and `heavyLockStatus`
+ * drop it. If no ticket can be written the caller waits without one. `touch` and `remove` are test hooks.
  */
-export function registerWaiter(file, { token, cmd, cwd, lineage = [], pollMs = POLL_MS }) {
+export function registerWaiter(
+  file,
+  { token, cmd, cwd, lineage = [], pollMs = POLL_MS, touch = (p, at) => fs.utimesSync(p, at, at), remove = (p) => fs.rmSync(p, { force: true }) }
+) {
   const dir = heavyLockWaitersDir(file);
-  const watched = lineage.filter((ancestor) => isPidAlive(ancestor.pid));
+  let watched = lineage.filter((ancestor) => isPidAlive(ancestor.pid));
   const record = { pid: process.pid, ppid: process.ppid, token, cmd, cwd, since: new Date().toISOString(), lineage, watched, pollMs };
   let entry = null;
   let ticket = null;
@@ -744,17 +753,41 @@ export function registerWaiter(file, { token, cmd, cwd, lineage = [], pollMs = P
     ticket = null;
   };
   take();
+  const setLineage = (next) => {
+    record.lineage = next;
+    record.watched = watched = next.filter((ancestor) => isPidAlive(ancestor.pid));
+    if (entry === null || !fs.existsSync(entry)) return;
+    try {
+      // Replaced whole (temp + rename): a reader sees the old ticket or the new one, never half of one.
+      const tmp = `${entry}.${randomUUID()}.tmp`;
+      fs.writeFileSync(tmp, JSON.stringify({ ...record, ticket }));
+      try {
+        fs.renameSync(tmp, entry);
+      } finally {
+        fs.rmSync(tmp, { force: true });
+      }
+    } catch {
+      // information only: the ticket keeps its place; others just cannot see this waiter's ancestors
+    }
+  };
   const ahead = () => {
+    if (ticket === null) return 0;
+    // Removed under us (judged silent after a stall): queue again, at the back, rather than race for a poll.
+    if (!fs.existsSync(entry)) take();
     if (ticket === null) return 0;
     let count = 0;
     const now = Date.now();
     for (const t of listTickets(dir)) {
       if (t.seq >= ticket) break;
-      const raw = readRaw(t.full);
-      if (raw === null) continue; // being removed
-      if (ticketDeadReason(parseHolder(raw), touchedAt(t.full), now) !== null) {
-        fs.rmSync(t.full, { force: true });
-        continue;
+      try {
+        const raw = readRaw(t.full);
+        if (raw === null) continue; // being removed
+        if (ticketDeadReason(parseHolder(raw), touchedAt(t.full), now) !== null) {
+          remove(t.full);
+          continue;
+        }
+      } catch {
+        // could not read or remove it (EPERM/EBUSY): it stays ahead for this poll
       }
       count++;
     }
@@ -763,18 +796,29 @@ export function registerWaiter(file, { token, cmd, cwd, lineage = [], pollMs = P
   const heartbeat = () => {
     if (entry === null) return;
     try {
-      const at = new Date();
-      fs.utimesSync(entry, at, at);
-    } catch {
-      // removed under us (judged dead by another waiter after a stall): queue again, at the back
-      take();
+      touch(entry, new Date());
+    } catch (error) {
+      // Gone: queue again, at the back. Any other error (EPERM, EBUSY) keeps the ticket we have.
+      if (error?.code === "ENOENT") take();
     }
   };
-  const unregister = () => {
-    process.off("exit", unregister);
-    if (entry !== null) fs.rmSync(entry, { force: true });
+  const onSignal = () => {
+    unregister();
+    process.exit(130);
   };
+  function unregister() {
+    process.off("exit", unregister);
+    process.off("SIGINT", onSignal);
+    process.off("SIGTERM", onSignal);
+    try {
+      if (entry !== null) fs.rmSync(entry, { force: true });
+    } catch {
+      // left behind: silent within TICKET_STALE_MS, and dead once this process is gone
+    }
+  }
   process.on("exit", unregister);
+  process.on("SIGINT", onSignal);
+  process.on("SIGTERM", onSignal);
   return {
     get entry() {
       return entry;
@@ -782,9 +826,12 @@ export function registerWaiter(file, { token, cmd, cwd, lineage = [], pollMs = P
     get ticket() {
       return ticket;
     },
-    watched,
+    get watched() {
+      return watched;
+    },
     ahead,
     heartbeat,
+    setLineage,
     unregister
   };
 }

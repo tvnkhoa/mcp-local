@@ -1052,3 +1052,97 @@ test("deploy: a self-contained copy under a scratch deploy root runs status and 
   assert.deepEqual(kept, [2, 3, 4]);
   assert.equal(run(["status"]).status, 0, "the stable entry follows current.json");
 });
+
+// ---- H-2 review follow-ups ----
+
+test("heartbeat: only ENOENT re-queues; an EPERM keeps the one ticket it has", () => {
+  const lockPath = tempLock();
+  let fail = null;
+  const w = registerWaiter(lockPath, { token: "hb", cmd: "w", cwd: "/", touch: (p, at) => (fail ? (() => { throw fail; })() : fs.utimesSync(p, at, at)) });
+  assert.equal(w.ticket, 1);
+  fail = Object.assign(new Error("busy"), { code: "EPERM" });
+  w.heartbeat();
+  assert.equal(w.ticket, 1);
+  assert.deepEqual(tickets(lockPath), ["t000000000001.json"], "no second ticket queued behind itself");
+  const other = registerWaiter(lockPath, { token: "o", cmd: "w", cwd: "/" });
+  fs.rmSync(w.entry);
+  fail = Object.assign(new Error("gone"), { code: "ENOENT" });
+  w.heartbeat();
+  assert.equal(w.ticket, 3, "gone: queued again at the back");
+  assert.deepEqual(tickets(lockPath), ["t000000000002.json", "t000000000003.json"]);
+  w.unregister();
+  other.unregister();
+});
+
+test("ahead(): a dead ticket that cannot be removed (EPERM) counts as ahead for that poll, and nothing throws", () => {
+  const lockPath = tempLock();
+  const planted = plantTicket(lockPath, { pid: deadPid() });
+  let blocked = true;
+  const w = registerWaiter(lockPath, {
+    token: "rm",
+    cmd: "w",
+    cwd: "/",
+    remove: (p) => {
+      if (blocked) throw Object.assign(new Error("busy"), { code: "EPERM" });
+      fs.rmSync(p, { force: true });
+    }
+  });
+  assert.equal(w.ahead(), 1);
+  assert.equal(fs.existsSync(planted), true);
+  blocked = false;
+  assert.equal(w.ahead(), 0);
+  assert.equal(fs.existsSync(planted), false);
+  w.unregister();
+});
+
+test("ahead(): a waiter whose own ticket was removed (judged silent) takes a new one at the back", () => {
+  const lockPath = tempLock();
+  const w1 = registerWaiter(lockPath, { token: "1", cmd: "w", cwd: "/" });
+  const w2 = registerWaiter(lockPath, { token: "2", cmd: "w", cwd: "/" });
+  fs.rmSync(w1.entry);
+  assert.equal(w1.ahead(), 1, "behind w2 now");
+  assert.equal(w1.ticket, 3);
+  assert.equal(w2.ahead(), 0);
+  w1.unregister();
+  w2.unregister();
+});
+
+test("the ticket is taken before the lineage read: a slow read keeps its place, and the lineage is written into the ticket", async () => {
+  const lockPath = tempLock();
+  const held = await acquireHeavyLock({ cmd: "holder", env: cleanEnv(lockPath), log: quiet });
+  const ancestor = spawn(process.execPath, ["-e", "setTimeout(() => {}, 30000)"], { stdio: "ignore" });
+  try {
+    let finishRead;
+    const slowRead = new Promise((resolve) => (finishRead = resolve));
+    const order = [];
+    const slow = acquireHeavyLock({ cmd: "slow-lineage", env: cleanEnv(lockPath), timeoutMs: 10_000, pollMs: 20, readLineage: () => slowRead, log: quiet }).then((l) => (order.push("slow"), l.release()));
+    await until(() => tickets(lockPath).length === 1, "the slow caller's ticket, before its lineage read ends");
+    const fast = acquireHeavyLock({ cmd: "fast-lineage", env: cleanEnv(lockPath), timeoutMs: 10_000, pollMs: 5, readLineage: async () => [], log: quiet }).then((l) => (order.push("fast"), l.release()));
+    await until(() => tickets(lockPath).length === 2, "the fast caller's ticket");
+    finishRead([{ pid: ancestor.pid, name: "bash.exe", start: null }]);
+    await until(() => JSON.parse(fs.readFileSync(path.join(heavyLockWaitersDir(lockPath), "t000000000001.json"), "utf8")).watched?.length === 1, "the lineage written into the ticket");
+    const first = JSON.parse(fs.readFileSync(path.join(heavyLockWaitersDir(lockPath), "t000000000001.json"), "utf8"));
+    assert.equal(first.cmd, "slow-lineage");
+    assert.deepEqual(first.lineage.map((a) => a.pid), [ancestor.pid]);
+    held.release();
+    await Promise.all([slow, fast]);
+    assert.deepEqual(order, ["slow", "fast"]);
+  } finally {
+    hardKill(ancestor.pid);
+  }
+});
+
+test("SIGINT or SIGTERM while waiting removes the ticket and exits 130", async () => {
+  const lockPath = tempLock();
+  const script = `
+    const { registerWaiter } = await import(${JSON.stringify(MODULE)});
+    registerWaiter(process.env.MCP_HEAVY_LOCK_PATH, { token: "sig", cmd: "w", cwd: "/" });
+    process.emit(process.argv[1]);
+    setTimeout(() => process.exit(0), 5000);
+  `;
+  for (const signal of ["SIGINT", "SIGTERM"]) {
+    const run = spawnSync(process.execPath, ["--input-type=module", "-e", script, signal], { env: cleanEnv(lockPath), encoding: "utf8" });
+    assert.equal(run.status, 130, run.stderr);
+    assert.deepEqual(tickets(lockPath), [], `${signal}: no ticket left`);
+  }
+});
