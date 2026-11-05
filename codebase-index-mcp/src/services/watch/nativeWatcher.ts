@@ -29,6 +29,8 @@ export interface RepoWatcherHandlers {
   onDelete(absolutePath: string): void;
   onError(error: unknown): void;
   onRootGone(): void;
+  /** Events were lost (ReadDirectoryChangesW's buffer overflowed): the caller must not trust its path lists. */
+  onOverflow(): void;
 }
 
 export interface RepoWatcher {
@@ -40,7 +42,18 @@ export function isIgnoredWatchPath(relativePath: string): boolean {
   return relativePath.split(/[\\/]/).some((segment) => WATCH_IGNORED_SEGMENTS.has(segment));
 }
 
-export function startNativeRecursiveWatcher(repoPath: string, handlers: RepoWatcherHandlers): RepoWatcher {
+/** The `fs.watch` shape this module uses; a test passes a fake to deliver events Windows rarely produces on demand. */
+export type WatchFn = (
+  root: string,
+  options: { recursive: true; persistent: true },
+  listener: (event: string, filename: string | Buffer | null) => void
+) => fs.FSWatcher;
+
+export function startNativeRecursiveWatcher(
+  repoPath: string,
+  handlers: RepoWatcherHandlers,
+  watchFn: WatchFn = fs.watch as unknown as WatchFn
+): RepoWatcher {
   let closed = false;
   // One classification in flight per path; an event arriving meanwhile asks for one more after it.
   const inFlight = new Map<string, boolean>();
@@ -87,12 +100,14 @@ export function startNativeRecursiveWatcher(repoPath: string, handlers: RepoWatc
     inFlight.delete(absolute);
   };
 
-  const watcher = fs.watch(repoPath, { recursive: true, persistent: true }, (_event, filename) => {
+  const watcher = watchFn(repoPath, { recursive: true, persistent: true }, (_event, filename) => {
     if (closed) return;
     if (filename === null || filename === undefined) {
-      // No name: Windows says this for the watched directory itself — check whether the root is still there.
+      // No name: either the watched directory itself went away, or libuv's ReadDirectoryChangesW buffer overflowed
+      // (an `npm i` or a build can do that) and events were dropped. A root still there means the latter.
       void rootGone().then((gone) => {
         if (gone) goneOnce();
+        else if (!closed) handlers.onOverflow();
       });
       return;
     }

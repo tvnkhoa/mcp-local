@@ -113,7 +113,9 @@ export class WatchManager {
         onChange: (filePath) => this.onEvent(repoId, repoPath, filePath, "changed"),
         onDelete: (filePath) => this.onEvent(repoId, repoPath, filePath, "deleted"),
         onError,
-        onRootGone
+        onRootGone,
+        // Events were dropped: the batch must fall back to an incremental run, as a queue overflow does.
+        onOverflow: () => this.markOverflow(repoId, repoPath)
       });
     }
     const watcher = chokidar.watch(repoPath, {
@@ -210,6 +212,15 @@ export class WatchManager {
     state.status.queuedChanged = state.changed.size;
     state.status.queuedDeleted = state.deleted.size;
     this.onActivity?.({ repoId, repoPath, relativePath, mode });
+    this.scheduleFlush(repoId, repoPath);
+  }
+
+  /** MCP-ISSUE-121: the native watcher lost events; the next batch runs as an overflowed (incremental) one. */
+  private markOverflow(repoId: string, repoPath: string): void {
+    const state = this.states.get(repoId);
+    if (!state) return;
+    state.overflowed = true;
+    state.status.lastError = "watch events were lost (change buffer overflow); the next run re-checks the whole repo";
     this.scheduleFlush(repoId, repoPath);
   }
 

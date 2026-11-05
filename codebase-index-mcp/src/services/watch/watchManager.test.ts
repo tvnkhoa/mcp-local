@@ -119,3 +119,18 @@ test("MCP-ISSUE-121: a watcher whose root is deleted stops itself (a removed wor
     }
   }
 });
+
+test("MCP-ISSUE-121 review M: lost native events make the next batch an overflowed one, even with no path queued", async () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "cim-watch-ovf-"));
+  const batches: WatchBatch[] = [];
+  const m = new WatchManager(config, async (_r, _p, _c, batch) => { batches.push(batch); }, () => 0, undefined, "native-recursive");
+  try {
+    m.start("r", dir);
+    (m as unknown as { markOverflow: (repoId: string, repoPath: string) => void }).markOverflow("r", dir);
+    await settle();
+    assert.deepEqual(batches, [{ changed: [], deleted: [], overflowed: true }]);
+  } finally {
+    await m.stopAll();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
