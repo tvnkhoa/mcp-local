@@ -19,7 +19,8 @@
  * live ticket may take the lock, however often the others poll.
  *
  * `status` is read-only (it only removes registry entries of dead waiters and silent tickets): the
- * holder and every waiter in ticket order with its position, each with its pid, command, cwd, since when, whether it is alive, whether a recorded ancestor
+ * holder and every waiter in ticket order with its position, each with its repo and Claude session id
+ * (`unknown` when they cannot be told), its pid, command, cwd, since when, whether it is alive, whether a recorded ancestor
  * is gone (`launcher gone (session alive)`) and whether its whole recorded chain up to the session is
  * gone (`ORPHAN`). For a holder flagged either way it keeps the first sighting in `<lock>.orphan.json`
  * (`orphanSince`) and, after

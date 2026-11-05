@@ -48,7 +48,8 @@ function tempLock() {
 }
 
 function cleanEnv(lockPath) {
-  const env = { ...process.env, MCP_HEAVY_LOCK_PATH: lockPath, MCP_HEAVY_LOCK_LINEAGE: "off" };
+  // No real sessions registry: a test names its own (MCP_HEAVY_LOCK_SESSIONS_FILE / sessionsFile).
+  const env = { ...process.env, MCP_HEAVY_LOCK_PATH: lockPath, MCP_HEAVY_LOCK_LINEAGE: "off", MCP_HEAVY_LOCK_SESSIONS_FILE: `${lockPath}.no-sessions.jsonl` };
   delete env.CI;
   delete env.MCP_HEAVY_LOCK_TOKEN;
   return env;
@@ -468,7 +469,7 @@ test("status shape: holder with a recorded lineage, one ancestor reused → ance
   assert.equal(status.processTable, true);
   if (PIPE) assert.equal(status.nameHeld, false, "a left-over file with the name free");
   const h = status.holder;
-  assert.deepEqual(Object.keys(h).sort(), ["alive", "ancestorGone", "ancestors", "cmd", "cwd", "goneAncestors", "killHint", "orphan", "orphanSince", "parentAlive", "pid", "ppid", "since"]);
+  assert.deepEqual(Object.keys(h).sort(), ["alive", "ancestorGone", "ancestors", "cmd", "cwd", "goneAncestors", "killHint", "orphan", "orphanSince", "parentAlive", "pid", "ppid", "repo", "session", "since"]);
   assert.equal(h.alive, true);
   assert.equal(h.parentAlive, true);
   assert.equal(h.ancestorGone, true);
@@ -1145,4 +1146,55 @@ test("SIGINT or SIGTERM while waiting removes the ticket and exits 130", async (
     assert.equal(run.status, 130, run.stderr);
     assert.deepEqual(tickets(lockPath), [], `${signal}: no ticket left`);
   }
+});
+
+// ---- whose lock is it: repo and Claude session per holder and waiter (owner, 5 Nov) ----
+
+test("status names each holder's and waiter's repo (git common dir) and Claude session (registry row of the claude pid); unknown otherwise", async () => {
+  const lockPath = tempLock();
+  const repoDir = path.join(HERE, "..", "..");
+  const common = spawnSync("git", ["rev-parse", "--path-format=absolute", "--git-common-dir"], { cwd: repoDir, encoding: "utf8" }).stdout.trim();
+  const expectedRepo = path.basename(common) === ".git" ? path.basename(path.dirname(common)) : path.basename(common);
+  const t0 = Date.now() - 600_000;
+  writeHolder(lockPath, {
+    pid: process.pid,
+    cwd: repoDir,
+    startedAt: new Date(t0 + 60_000).toISOString(),
+    lineage: [
+      { pid: 801, name: "bash.exe", start: t0 + 1_000 },
+      { pid: 800, name: "claude.exe", start: t0 }
+    ]
+  });
+  const sessionsFile = `${lockPath}.sessions.jsonl`;
+  const row = (session, pid, at) => JSON.stringify({ session, repo: "x", pid, at: new Date(at).toISOString() });
+  fs.writeFileSync(
+    sessionsFile,
+    [row("reused-pid-earlier-owner", 800, t0 - 3_600_000), row("s-older", 800, t0 + 500), row("s-holder", 800, t0 + 2_000), "{broken", row("other", 900, t0 + 2_000)].join("\n") + "\n"
+  );
+  // A trim moved part of the registry aside: its rows count too.
+  fs.writeFileSync(`${sessionsFile}.4242.trimming`, row("s-waiter", 950, t0 + 3_000) + "\n");
+  const dir = heavyLockWaitersDir(lockPath);
+  fs.mkdirSync(dir, { recursive: true });
+  const other = fs.mkdtempSync(path.join(os.tmpdir(), "heavy-lock-nogit-"));
+  fs.writeFileSync(
+    path.join(dir, "t000000000001.json"),
+    JSON.stringify({ pid: process.pid, token: "w1", cmd: "w1", cwd: repoDir, since: new Date().toISOString(), ticket: 1, pollMs: 2_000, lineage: [{ pid: 950, name: "claude", start: t0 }] })
+  );
+  fs.writeFileSync(
+    path.join(dir, "t000000000002.json"),
+    JSON.stringify({ pid: process.pid, token: "w2", cmd: "w2", cwd: other, since: new Date().toISOString(), ticket: 2, pollMs: 2_000, lineage: [{ pid: 951, name: "bash.exe", start: t0 }] })
+  );
+  const status = await heavyLockStatus({ env: cleanEnv(lockPath), readTable: async () => null, sessionsFile });
+  assert.equal(status.holder.repo, expectedRepo);
+  assert.equal(status.holder.session, "s-holder", "newest row of the claude pid written after it started");
+  assert.deepEqual(status.waiters.map((w) => [w.cmd, w.repo, w.session]), [["w1", expectedRepo, "s-waiter"], ["w2", "unknown", "unknown"]]);
+  const text = formatHeavyLockStatus(status);
+  assert.ok(text.includes(`repo: ${expectedRepo} · session: s-holder`), text);
+  assert.ok(text.includes("repo: unknown · session: unknown"), text);
+
+  // No registry at all, and a holder without a recorded claude ancestor: unknown, nothing thrown.
+  writeHolder(lockPath, { pid: process.pid, cwd: other, startedAt: new Date().toISOString(), lineage: [] });
+  const bare = await heavyLockStatus({ env: cleanEnv(lockPath), readTable: async () => null, sessionsFile: path.join(other, "missing.jsonl") });
+  assert.equal(bare.holder.session, "unknown");
+  assert.equal(bare.holder.repo, "unknown");
 });

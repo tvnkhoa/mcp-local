@@ -198,7 +198,10 @@ session is gone `ORPHAN`. The lock is first come, first served: a caller takes a
 `heavy-check.lock.waiters/` beside the lock the moment it arrives, and only the oldest live ticket may
 take the lock, however fast the others poll; a ticket whose pid is gone, whose waiter lost an ancestor,
 or that has not been touched for 60 s is skipped and removed. Status lists waiters in ticket order with
-their position, drops dead and silent tickets, and kills nothing. Other repos (wec.be's
+their position, names each one's repo (its cwd's git common dir) and Claude session id (the
+`claude` process heading its lineage, matched in `~/.claude/handover/.sessions.jsonl`; `unknown`
+otherwise) so a waiter's leader knows whose leader to ask, drops dead and silent tickets, and kills
+nothing. Other repos (wec.be's
 `dotnet-build-safe.ps1`) run a deploy copy, not the tree: `npm run heavy-lock:deploy` copies
 `heavy-lock.mjs` and its imports (builtins only) to `~/.claude/mcp/deploy/heavy-lock/<sha>-<n>/` and
 writes the stable entry `~/.claude/mcp/deploy/heavy-lock/heavy-lock.mjs`, so a merge changes their lock

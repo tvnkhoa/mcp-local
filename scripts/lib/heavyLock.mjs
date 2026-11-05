@@ -869,6 +869,70 @@ function describeProcess(record, byPid) {
   return { pid: record.pid, cmd: record.cmd ?? null, cwd: record.cwd ?? null, alive, ppid, parentAlive, ancestors, orphan, ancestorGone, goneAncestors: gone };
 }
 
+/** The Claude sessions registry the SessionStart hook appends to: one JSON row per session start, `{session, repo, at, pid}` (`pid` = the `claude` process). */
+export function sessionsRegistryPath(env = process.env) {
+  return env.MCP_HEAVY_LOCK_SESSIONS_FILE || path.join(os.homedir(), ".claude", "handover", ".sessions.jsonl");
+}
+
+/** Every parseable row of the registry, plus any `<registry>.<pid>.trimming` a trim has moved aside; `[]` when unreadable. */
+function readSessionRows(file) {
+  const rows = [];
+  let files = [file];
+  try {
+    const base = path.basename(file);
+    files = files.concat(
+      fs
+        .readdirSync(path.dirname(file))
+        .filter((n) => n.startsWith(`${base}.`) && n.endsWith(".trimming"))
+        .map((n) => path.join(path.dirname(file), n))
+    );
+  } catch {
+    return rows;
+  }
+  for (const f of files) {
+    for (const line of (readRaw(f) ?? "").split("\n")) {
+      const row = parseHolder(line);
+      if (row !== null && typeof row.session === "string" && Number.isInteger(row.pid)) rows.push(row);
+    }
+  }
+  return rows;
+}
+
+/**
+ * The Claude session id of the `claude` process heading `record`'s lineage (recorded, else read from the
+ * live table): the newest registry row with that pid written after that process started (a row from an
+ * earlier owner of a reused pid does not count). `"unknown"` when there is none.
+ */
+function sessionOf(record, table, rows) {
+  let lineage = Array.isArray(record.lineage) ? record.lineage : [];
+  if (!lineage.some((a) => isSessionProcess(String(a.name))) && table !== null && Number.isInteger(record.pid)) lineage = lineageOf(record.pid, table);
+  const claude = lineage.find((a) => isSessionProcess(String(a.name)));
+  if (claude === undefined) return "unknown";
+  const started = Number.isFinite(claude.start) ? claude.start - PID_START_TOLERANCE_MS : -Infinity;
+  const match = rows
+    .filter((r) => r.pid === claude.pid && (Date.parse(r.at) || 0) >= started)
+    .sort((a, b) => String(b.at).localeCompare(String(a.at)))[0];
+  return match?.session ?? "unknown";
+}
+
+/** The repo `cwd` belongs to: the basename of its git common dir (a linked worktree names its main repo), `"unknown"` outside git. Cached per cwd. */
+async function repoOf(cwd, cache) {
+  if (typeof cwd !== "string" || cwd === "") return "unknown";
+  if (!cache.has(cwd)) {
+    cache.set(
+      cwd,
+      execFileAsync("git", ["rev-parse", "--path-format=absolute", "--git-common-dir"], { cwd, timeout: 5_000, windowsHide: true }).then(
+        ({ stdout }) => {
+          const dir = path.resolve(stdout.trim());
+          return path.basename(dir) === ".git" ? path.basename(path.dirname(dir)) : path.basename(dir).replace(/\.git$/, "");
+        },
+        () => "unknown"
+      )
+    );
+  }
+  return cache.get(cwd);
+}
+
 /**
  * The lock as it stands, read-only: `{ path, pipe, nameHeld, holder, waiters, cleaned }`. `holder` is
  * the file's holder (`null` when there is none) with `since`, `alive`, its parent and recorded
@@ -877,19 +941,26 @@ function describeProcess(record, byPid) {
  * kept in `<lock>.orphan.json`) and `killHint` (the command to end it, once flagged
  * `MCP_HEAVY_LOCK_ORPHAN_MINUTES`; never run).
  * `waiters` are the live registered waiters in ticket order, each with `ticket` and `position` (1 = next);
- * entries of dead pids and tickets whose heartbeat stopped are removed and counted in `cleaned`. The only writes: that cleanup and the orphan sighting file. `readTable` and
- * `now` are test hooks.
+ * entries of dead pids and tickets whose heartbeat stopped are removed and counted in `cleaned`.
+ * Holder and waiters also carry `repo` (the basename of their cwd's git common dir) and `session` (the
+ * Claude session id whose `claude` process heads their lineage, from the sessions registry), each
+ * `"unknown"` when it cannot be told — so a waiter's leader knows whose leader to ask (owner, 5 Nov).
+ * The only writes: that cleanup and the orphan sighting file. `readTable`, `now` and `sessionsFile`
+ * (default `MCP_HEAVY_LOCK_SESSIONS_FILE`, else `~/.claude/handover/.sessions.jsonl`) are test hooks.
  */
-export async function heavyLockStatus({ env = process.env, readTable = readProcessTable, platform = process.platform, now = Date.now() } = {}) {
+export async function heavyLockStatus({ env = process.env, readTable = readProcessTable, platform = process.platform, now = Date.now(), sessionsFile = sessionsRegistryPath(env) } = {}) {
   const file = heavyLockPath(env);
   const pipe = heavyLockPipeName(file, { platform, env });
   const [table, nameHeld] = await Promise.all([readTable(), pipe === null ? Promise.resolve(null) : probeName(pipe)]);
   const byPid = table === null ? null : new Map(table.map((row) => [row.pid, row]));
+  const sessions = readSessionRows(sessionsFile);
+  const repos = new Map();
+  const whose = async (record) => ({ repo: await repoOf(record.cwd, repos), session: sessionOf(record, table, sessions) });
 
   const written = parseHolder(readRaw(file) ?? "");
   let holder = null;
   if (written !== null) {
-    holder = { ...describeProcess(written, byPid), since: written.startedAt ?? null };
+    holder = { ...describeProcess(written, byPid), since: written.startedAt ?? null, ...(await whose(written)) };
     // Only a live holder of a held name can be an orphan worth ending; a left-over file is nobody's.
     const live = holder.alive && nameHeld !== false;
     // Flagged: launcher gone (session alive) or whole chain gone; both get the sighting and the hint.
@@ -921,7 +992,7 @@ export async function heavyLockStatus({ env = process.env, readTable = readProce
       cleaned++;
       continue;
     }
-    waiters.push({ ...describeProcess(record, byPid), since: record.since ?? null, ticket });
+    waiters.push({ ...describeProcess(record, byPid), since: record.since ?? null, ticket, ...(await whose(record)) });
   }
   // Ticket order (first come, first served); entries without a ticket (older writers) after, by arrival.
   waiters.sort((a, b) => (a.ticket ?? Infinity) - (b.ticket ?? Infinity) || String(a.since).localeCompare(String(b.since)));
@@ -936,7 +1007,7 @@ export function formatHeavyLockStatus(status) {
       p.orphan === true ? "ORPHAN" : p.ancestorGone === true ? "launcher gone (session alive)" : p.orphan === false ? "parent alive" : "parent unknown";
     const flags = [p.alive ? "alive" : "DEAD", lineageFlag];
     const chain = p.ancestors.length ? ` <- ${p.ancestors.map((a) => `${String(a.pid)} ${String(a.name)}${a.alive ? "" : " (gone)"}`).join(" <- ")}` : ` <- ppid ${String(p.ppid)}`;
-    return `pid ${String(p.pid)} [${flags.join(", ")}] since ${String(p.since)}\n    cmd: ${String(p.cmd)}\n    cwd: ${String(p.cwd)}\n    lineage:${chain}`;
+    return `pid ${String(p.pid)} [${flags.join(", ")}] since ${String(p.since)}\n    repo: ${String(p.repo)} · session: ${String(p.session)}\n    cmd: ${String(p.cmd)}\n    cwd: ${String(p.cwd)}\n    lineage:${chain}`;
   };
   const lines = [`lock: ${status.path}`];
   if (status.pipe !== null) lines.push(`name: ${status.pipe} — ${status.nameHeld === true ? "held" : status.nameHeld === false ? "free" : "unknown"}`);
