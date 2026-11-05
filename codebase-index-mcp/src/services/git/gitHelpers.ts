@@ -629,6 +629,69 @@ export function countCommitsBehind(repoPath: string, indexedSha: string | null):
   }
 }
 
+/**
+ * IX-9: why a worktree cannot be seeded from its parent's index; the job falls back to a full run
+ * and reports this in `index_status.fallbackReason` — never a silent wrong seed.
+ */
+export type SeedFallbackReason =
+  | "parent_not_indexed"      // the parent has no indexed commit
+  | "parent_sha_missing"      // the parent's indexed commit is not in the worktree's object store
+  | "child_head_unresolved"   // the worktree has no resolvable base commit
+  | "unrelated_history"       // no merge base at all
+  | "parent_not_ancestor"     // parent indexed commit is ahead of or diverged from the worktree base
+  | "git_error";              // git failed in a way that says nothing about ancestry
+
+export type SeedAncestry =
+  | { ok: true; parentSha: string; childSha: string }
+  | { ok: false; fallbackReason: SeedFallbackReason; parentSha: string | null; childSha: string | null };
+
+function gitExitStatus(repoPath: string, args: string[]): number {
+  try {
+    runGit(repoPath, args);
+    return 0;
+  } catch (err) {
+    const status = (err as { status?: unknown }).status;
+    return typeof status === "number" ? status : -1;
+  }
+}
+
+/**
+ * IX-9 precondition: the parent's indexed commit must be an ancestor of (or equal to) the worktree's
+ * base commit (`childSha`, default HEAD of `childRepoPath`). Each refusal names its reason; only an
+ * ok answer allows `seedFromParent`.
+ */
+export function checkSeedAncestry(
+  childRepoPath: string,
+  parentIndexedSha: string | null,
+  childSha?: string | null
+): SeedAncestry {
+  const parentSha = parentIndexedSha && parentIndexedSha.trim() ? parentIndexedSha.trim() : null;
+  if (!parentSha) {
+    return { ok: false, fallbackReason: "parent_not_indexed", parentSha: null, childSha: childSha ?? null };
+  }
+  let child = childSha ?? null;
+  if (!child) {
+    try {
+      child = runGit(childRepoPath, ["rev-parse", "--verify", "--quiet", "HEAD^{commit}"]) || null;
+    } catch {
+      child = null;
+    }
+  }
+  if (!child) {
+    return { ok: false, fallbackReason: "child_head_unresolved", parentSha, childSha: null };
+  }
+  if (gitExitStatus(childRepoPath, ["cat-file", "-e", `${parentSha}^{commit}`]) !== 0) {
+    return { ok: false, fallbackReason: "parent_sha_missing", parentSha, childSha: child };
+  }
+  const isAncestor = gitExitStatus(childRepoPath, ["merge-base", "--is-ancestor", parentSha, child]);
+  if (isAncestor === 0) return { ok: true, parentSha, childSha: child };
+  if (isAncestor !== 1) return { ok: false, fallbackReason: "git_error", parentSha, childSha: child };
+  const mergeBase = gitExitStatus(childRepoPath, ["merge-base", parentSha, child]);
+  if (mergeBase === 1) return { ok: false, fallbackReason: "unrelated_history", parentSha, childSha: child };
+  if (mergeBase !== 0) return { ok: false, fallbackReason: "git_error", parentSha, childSha: child };
+  return { ok: false, fallbackReason: "parent_not_ancestor", parentSha, childSha: child };
+}
+
 export function getRepoStaleness(
   repoId: string,
   store: GraphStore,

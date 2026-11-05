@@ -335,7 +335,9 @@ export function handleRemoveRepository(args: { repoId: string; force: boolean },
  * and what to do next.
  */
 export function jobView(job: IndexJob, pending: IndexJob[] = []): Record<string, unknown> {
-  if (job.state === "ok" && job.result) return { ...job.result, runId: job.runId, state: job.state, source: job.source };
+  if (job.state === "ok" && job.result) {
+    return { ...job.result, runId: job.runId, state: job.state, source: job.source, ...(job.fallbackReason && { fallbackReason: job.fallbackReason }) };
+  }
   const ahead =
     job.state === "queued"
       ? pending.filter((j) => j.runId !== job.runId && j.queuedAt <= job.queuedAt).map((j) => ({ runId: j.runId, repoId: j.repoId, state: j.state }))
@@ -355,6 +357,7 @@ export function jobView(job: IndexJob, pending: IndexJob[] = []): Record<string,
     ...(job.progress !== undefined && { progress: job.progress }),
     ...(job.total !== undefined && { total: job.total }),
     ...(job.error && { error: job.error }),
+    ...(job.fallbackReason && { fallbackReason: job.fallbackReason }),
     ...(job.result && { result: job.result }),
     ...(job.state === "queued" || job.state === "running"
       ? { next: `poll index_status({ runId: "${job.runId}" }) until state is ok or failed` }
@@ -478,7 +481,10 @@ export async function handleRegisterWorktree(
     docsEnabled: constants.DOCS_INDEXING_ENABLED,
     maxFiles: constants.MAX_FILES_PER_RUN,
     batchSize: 200,
-    source: "register_worktree"
+    source: "register_worktree",
+    // IX-9: the executor seeds from the parent's index when the parent's indexed commit is an ancestor of this
+    // worktree's HEAD; otherwise it runs full and reports fallbackReason in index_status.
+    seedFrom: parent.repoId
   });
   const watch = await activateWatchForRepo(args.repoId, args.repoPath, "register_worktree", ctx);
   return ctx.asText({

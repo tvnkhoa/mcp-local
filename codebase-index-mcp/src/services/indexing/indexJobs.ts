@@ -38,9 +38,11 @@ export type IndexJobRequest = {
   batchSize: number;
   /** Who asked, for the status line ("index_repository", "register_worktree"). */
   source: string;
+  /** IX-9: register_worktree's parent repoId — seed this repo from the parent's index when the preconditions hold. */
+  seedFrom?: string;
 };
 
-export type IndexJobProgress = { phase: string; progress?: number; total?: number };
+export type IndexJobProgress = { phase: string; progress?: number; total?: number; fallbackReason?: string };
 
 export type IndexJob = {
   runId: string;
@@ -62,6 +64,8 @@ export type IndexJob = {
   /** The run's summary once it ended ok (or the run's own `failed` status). */
   result?: IndexRunResult;
   error?: string;
+  /** IX-9: why a job asked to seed ran a full index instead (never a silent wrong seed). */
+  fallbackReason?: string;
 };
 
 /**
@@ -322,6 +326,7 @@ export class IndexJobQueue {
       .execute(job, request, (p) => {
         if (settled) return;
         job.phase = p.phase;
+        if (p.fallbackReason !== undefined) job.fallbackReason = p.fallbackReason;
         if (p.progress !== undefined) job.progress = p.progress;
         if (p.total !== undefined) job.total = p.total;
         for (const listener of this.listeners.get(nextId) ?? []) {
@@ -369,4 +374,81 @@ export class IndexJobQueue {
   private snapshot(job: IndexJob): IndexJob {
     return { ...job };
   }
+}
+
+// ── IX-9: seed a worktree from its parent's index ─────────────────────────────
+
+/** Mirrors the seedStore contract (owned by repositories/seedStore.ts); structural so this module does not import it. */
+export type SeedRequestLike = { parentRepoId: string; childRepoId: string; childRepoPath: string };
+export type SeedResultLike = { parentIndexedSha: string; tablesCopied: Record<string, number>; durationMs: number };
+
+export type SeedAncestryLike =
+  | { ok: true; parentSha: string; childSha: string }
+  | { ok: false; fallbackReason: string; parentSha: string | null; childSha: string | null };
+
+export type SeedStepDeps = {
+  /** The parent's indexed commit (its base run's `commit_sha`), or null when it has none. */
+  parentIndexedSha: (parentRepoId: string) => string | null;
+  /** True when the child already holds an index: a re-registration runs its normal incremental, no seed. */
+  childHasIndex: (childRepoId: string) => boolean;
+  /** `checkSeedAncestry` from gitHelpers in the server; injected for tests. */
+  ancestry: (childRepoPath: string, parentIndexedSha: string | null) => SeedAncestryLike;
+  /** `seedFromParent` bound to the writer's store; throws (SeedError{code}) on any failure, rolled back. */
+  seed: (req: SeedRequestLike) => SeedResultLike;
+  /** Runs the index in the given mode (the executor's normal run). */
+  run: (mode: IndexMode) => Promise<IndexRunResult>;
+  /** Drops the child's rows (per-repo, no global FTS rebuild) before a full run after a failed seeded run. */
+  purgeChild?: (childRepoId: string) => void;
+  onProgress: (progress: IndexJobProgress) => void;
+};
+
+export type SeedStepOutcome = {
+  result: IndexRunResult;
+  seeded: boolean;
+  seed?: SeedResultLike;
+  fallbackReason?: string;
+};
+
+function seedErrorReason(error: unknown): string {
+  const code = (error as { code?: unknown } | null)?.code;
+  return typeof code === "string" && code ? `seed_${code.toLowerCase()}` : "seed_failed";
+}
+
+function runFailed(result: IndexRunResult): boolean {
+  return result.status === "failed" || result.status === "cancelled";
+}
+
+/**
+ * IX-9 executor step. Without `seedFrom` (or when the child is already indexed) it is the plain run. Otherwise:
+ * ancestry check → seed (phase "seed") → scoped incremental. Every refusal or failure runs full in the same job and
+ * reports `fallbackReason` through progress (→ index_status): ancestry refusal, a seed error (rolled back by the
+ * store), or an incremental that failed on top of the seed (child purged first when `purgeChild` is given).
+ */
+export async function runWithSeed(request: IndexJobRequest, deps: SeedStepDeps): Promise<SeedStepOutcome> {
+  if (!request.seedFrom || deps.childHasIndex(request.repoId)) {
+    return { result: await deps.run(request.mode), seeded: false };
+  }
+  const fallback = async (fallbackReason: string, purge: boolean): Promise<SeedStepOutcome> => {
+    deps.onProgress({ phase: "full (seed fallback)", fallbackReason });
+    if (purge) deps.purgeChild?.(request.repoId);
+    return { result: await deps.run("full"), seeded: false, fallbackReason };
+  };
+  const ancestry = deps.ancestry(request.repoPath, deps.parentIndexedSha(request.seedFrom));
+  if (!ancestry.ok) return fallback(ancestry.fallbackReason, false);
+  deps.onProgress({ phase: "seed" });
+  let seed: SeedResultLike;
+  try {
+    seed = deps.seed({ parentRepoId: request.seedFrom, childRepoId: request.repoId, childRepoPath: request.repoPath });
+  } catch (error) {
+    return fallback(seedErrorReason(error), false);
+  }
+  deps.onProgress({ phase: "incremental (after seed)" });
+  let result: IndexRunResult;
+  try {
+    result = await deps.run("incremental");
+  } catch {
+    return { ...(await fallback("incremental_after_seed_failed", true)), seed };
+  }
+  if (runFailed(result)) return { ...(await fallback("incremental_after_seed_failed", true)), seed };
+  return { result, seeded: true, seed };
 }
