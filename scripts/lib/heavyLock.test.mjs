@@ -997,3 +997,58 @@ test("status drops a ticket whose heartbeat stopped, and shows an orphaned waite
   assert.equal(status.cleaned, 1);
   assert.deepEqual(status.waiters.map((w) => [w.position, w.ticket, w.cmd, w.orphan]), [[1, 2, "orphaned", true]]);
 });
+
+// ---- the deploy copy (row H-5): what other repos run ----
+
+test("deploy: a self-contained copy under a scratch deploy root runs status and a command from a foreign cwd, importing nothing outside it", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "heavy-lock-deploy-"));
+  const deploy = (args = []) => spawnSync(process.execPath, [CLI, "deploy", "--deploy-root", root, "--json", ...args], { encoding: "utf8" });
+  const first = deploy();
+  assert.equal(first.status, 0, first.stderr);
+  const record = JSON.parse(first.stdout);
+  assert.equal(record.key, "heavy-lock");
+  assert.equal(record.n, 1);
+  assert.deepEqual(record.files, ["heavy-lock.mjs", "lib/deploy.mjs", "lib/heavyLock.mjs"]);
+  const keyDir = path.join(root, "heavy-lock");
+  assert.equal(record.stable, path.join(keyDir, "heavy-lock.mjs"));
+  assert.equal(JSON.parse(fs.readFileSync(path.join(keyDir, "current.json"), "utf8")).entry, record.entry);
+  assert.match(record.hash, /^[0-9a-f]{64}$/);
+
+  // Every module the copy loads is a builtin or a file inside the deploy root: traced by a resolve hook
+  // that lives outside both, run from a cwd outside both.
+  const elsewhere = fs.mkdtempSync(path.join(os.tmpdir(), "heavy-lock-cwd-"));
+  const hook = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "heavy-lock-hook-")), "trace.mjs");
+  const trace = path.join(elsewhere, "trace.txt");
+  fs.writeFileSync(
+    hook,
+    'import { registerHooks } from "node:module";\nimport { appendFileSync } from "node:fs";\n' +
+      "registerHooks({ resolve(specifier, context, next) { const r = next(specifier, context); appendFileSync(process.env.HL_TRACE, r.url + '\\n'); return r; } });\n"
+  );
+  const lockPath = tempLock();
+  const run = (args) =>
+    spawnSync(process.execPath, ["--import", pathToFileURL(hook).href, record.stable, ...args], { cwd: elsewhere, env: { ...cleanEnv(lockPath), HL_TRACE: trace }, encoding: "utf8" });
+  const status = run(["status", "--json"]);
+  assert.equal(status.status, 0, status.stderr);
+  assert.equal(JSON.parse(status.stdout).path, lockPath);
+  // "node" from PATH: on Windows the CLI runs the command through a shell, which splits an unquoted path with spaces.
+  const command = run(["--", "node", "-e", "process.exit(3)"]);
+  assert.equal(command.status, 3, command.stderr);
+  const urls = fs.readFileSync(trace, "utf8").trim().split("\n");
+  const inside = pathToFileURL(root).href.toLowerCase();
+  const strays = urls.filter((u) => !u.startsWith("node:") && !u.toLowerCase().startsWith(inside));
+  assert.deepEqual(strays, [], "imports resolved outside the deploy root");
+  assert.ok(urls.some((u) => u.endsWith(`/${record.entry}`)), "the stable entry ran the current copy");
+  assert.ok(urls.some((u) => u.endsWith("/scripts/lib/heavyLock.mjs")));
+
+  // A deployed copy refuses to deploy itself; three more deploys keep the newest three.
+  const self = spawnSync(process.execPath, [path.join(record.dir, "scripts", "heavy-lock.mjs"), "deploy", "--deploy-root", root], { encoding: "utf8" });
+  assert.equal(self.status, 1);
+  assert.match(self.stderr, /deployed copy/);
+  let last;
+  for (let i = 0; i < 3; i++) last = JSON.parse(deploy().stdout);
+  assert.equal(last.n, 4);
+  assert.equal(JSON.parse(fs.readFileSync(path.join(keyDir, "current.json"), "utf8")).n, 4);
+  const kept = fs.readdirSync(keyDir).filter((n) => /-\d+$/.test(n)).map((n) => Number(/-(\d+)$/.exec(n)[1])).sort();
+  assert.deepEqual(kept, [2, 3, 4]);
+  assert.equal(run(["status"]).status, 0, "the stable entry follows current.json");
+});

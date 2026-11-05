@@ -198,7 +198,11 @@ session is gone `ORPHAN`. The lock is first come, first served: a caller takes a
 `heavy-check.lock.waiters/` beside the lock the moment it arrives, and only the oldest live ticket may
 take the lock, however fast the others poll; a ticket whose pid is gone, whose waiter lost an ancestor,
 or that has not been touched for 60 s is skipped and removed. Status lists waiters in ticket order with
-their position, drops dead and silent tickets, and kills nothing. A waiter whose ancestor dies while it waits stops (exit 76) instead of taking the lock later
+their position, drops dead and silent tickets, and kills nothing. Other repos (wec.be's
+`dotnet-build-safe.ps1`) run a deploy copy, not the tree: `npm run heavy-lock:deploy` copies
+`heavy-lock.mjs` and its imports (builtins only) to `~/.claude/mcp/deploy/heavy-lock/<sha>-<n>/` and
+writes the stable entry `~/.claude/mcp/deploy/heavy-lock/heavy-lock.mjs`, so a merge changes their lock
+only when a leader deploys it. A waiter whose ancestor dies while it waits stops (exit 76) instead of taking the lock later
 for nobody; an ancestor already gone when the wait began (a spawn-and-exit wrapper) does not count.
 The first time status or a waiter sees the holder flagged either way is kept in `heavy-check.lock.orphan.json`
 (`orphanSince`, cleared when the holder changes or frees); after `MCP_HEAVY_LOCK_ORPHAN_MINUTES`
