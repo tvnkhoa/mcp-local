@@ -1,6 +1,12 @@
 ## MCP-ISSUE-121 — the HTTP server's thread stalls: watcher activation, search_regex and a main-thread write block it
 
-- **Status:** OPEN 2026-11-05. Diagnosis by member hang-diag (the 5-minute stall was not reproduced). The fixes land in this row's commits.
+- **Status:** FIXED on wt/hang-diag 2026-11-05 (bfea731, 13535d0, 2acd200, e83ad7c); not yet deployed.
+- **Root cause (measured):** chokidar 4 dropped glob support, so the watcher's `**/node_modules/**` ignore list
+  matched nothing, and chokidar follows symlinks by default. A wec.aria worktree's `node_modules` is a junction
+  to the main checkout's (171k+ entries), so register_worktree / watch_repo start set up one synchronous fs.watch
+  per entry on the server thread. Read-only, on wec.aria-wt-spec098: the event loop was blocked for 67 s of a
+  60 s window (worst single stall 12.8 s), and the walk was still running when the window closed. The native
+  recursive watcher on the same tree blocked it for 0 ms.
 - Scenario: the live server at 935f4dd (pid 12768) stopped answering HTTP from ~03:02Z for 5+ minutes. The process
   was alive, listening, and using ~0.2 s CPU per 5 s. The last log line was a watcher run on wec.aria-wt-evalfix
   (49 files, 13.3 s). Earlier the same day, reads took 9–42 s during index runs.
