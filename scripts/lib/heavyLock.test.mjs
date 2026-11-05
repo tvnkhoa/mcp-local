@@ -16,6 +16,7 @@ import {
   orphanMinutes,
   heavyLockPipeName,
   heavyLockStatus,
+  heavyLockHoldersDir,
   heavyLockWaitersDir,
   lineageOf,
   isPidAlive,
@@ -67,7 +68,9 @@ function tempLock() {
 
 function cleanEnv(lockPath) {
   // No real sessions registry: a test names its own (MCP_HEAVY_LOCK_SESSIONS_FILE / sessionsFile).
-  const env = { ...process.env, MCP_HEAVY_LOCK_PATH: lockPath, MCP_HEAVY_LOCK_LINEAGE: "off", MCP_HEAVY_LOCK_SAMPLE: "off", MCP_HEAVY_LOCK_SESSIONS_FILE: `${lockPath}.no-sessions.jsonl` };
+  // Free RAM is pinned so the budget (H-6b) fits exactly one run of the default 1500 MB: the cases
+  // written for one-at-a-time keep testing one-at-a-time; the budget cases set their own.
+  const env = { ...process.env, MCP_HEAVY_LOCK_PATH: lockPath, MCP_HEAVY_LOCK_LINEAGE: "off", MCP_HEAVY_LOCK_SAMPLE: "off", MCP_HEAVY_LOCK_SESSIONS_FILE: `${lockPath}.no-sessions.jsonl`, MCP_HEAVY_LOCK_TEST_FREE_MB: "9692" };
   delete env.CI;
   delete env.MCP_HEAVY_LOCK_TOKEN;
   return env;
@@ -177,8 +180,9 @@ test("six processes contend for the name: exactly one holds at any instant", { s
   const holds = await Promise.all([1, 2, 3, 4, 5, 6].map(() => holdInChild(lockPath, journal, 100)));
   for (const h of holds) assert.equal(h.mine, true, "no holder's file was replaced under it");
   assertSerial(journal, 6);
-  const left = fs.readdirSync(path.dirname(lockPath)).filter((name) => name !== "heavy-check.lock.waiters");
+  const left = fs.readdirSync(path.dirname(lockPath)).filter((name) => name !== "heavy-check.lock.waiters" && name !== "heavy-check.lock.holders");
   assert.deepEqual(left, ["heavy-check.lock.journal"], "the last holder removes the file");
+  assert.deepEqual(fs.readdirSync(heavyLockHoldersDir(lockPath)), [], "every holder removed its slot");
   assert.deepEqual(fs.readdirSync(heavyLockWaitersDir(lockPath)), [], "every waiter unregistered");
 });
 
@@ -482,7 +486,7 @@ test("status shape: holder with a recorded lineage, one ancestor reused → ance
     { pid: 503, ppid: 1, name: "claude.exe", start: now - 30_000 }
   ];
   const status = await heavyLockStatus({ env: cleanEnv(lockPath), readTable: async () => table });
-  assert.deepEqual(Object.keys(status).sort(), ["cleaned", "holder", "nameHeld", "orphanMinutes", "path", "pipe", "processTable", "waiters"]);
+  assert.deepEqual(Object.keys(status).sort(), ["budget", "cleaned", "holder", "holders", "nameHeld", "orphanMinutes", "path", "pipe", "processTable", "waiters"]);
   assert.equal(status.path, lockPath);
   assert.equal(status.processTable, true);
   if (PIPE) assert.equal(status.nameHeld, false, "a left-over file with the name free");
@@ -1037,7 +1041,7 @@ test("deploy: a self-contained copy under a scratch deploy root runs status and 
   const record = JSON.parse(first.stdout);
   assert.equal(record.key, "heavy-lock");
   assert.equal(record.n, 1);
-  assert.deepEqual(record.files, ["heavy-lock.mjs", "lib/deploy.mjs", "lib/heavyLock.mjs", "lib/heavyLockHistory.mjs", "lib/heavyLockSpawn.mjs"]);
+  assert.deepEqual(record.files, ["heavy-lock.mjs", "lib/deploy.mjs", "lib/heavyLock.mjs", "lib/heavyLockBudget.mjs", "lib/heavyLockHistory.mjs", "lib/heavyLockSpawn.mjs"]);
   assert.deepEqual(record.pruneSkipped, []);
   const keyDir = path.join(root, "heavy-lock");
   assert.equal(record.stable, path.join(keyDir, "heavy-lock.mjs"));
@@ -1269,7 +1273,7 @@ test("deploy: --deploy-root without a value is a usage error (exit 2); nothing i
 /** A scratch git repo holding a committed copy of the three deployable scripts and the entry. */
 function scratchSource({ git = true } = {}) {
   const repo = scratchDir("heavy-lock-src-");
-  for (const rel of ["heavy-lock.mjs", "lib/deploy.mjs", "lib/heavyLock.mjs", "lib/heavyLockHistory.mjs", "lib/heavyLockSpawn.mjs", "lib/heavyLockEntry.mjs"]) {
+  for (const rel of ["heavy-lock.mjs", "lib/deploy.mjs", "lib/heavyLock.mjs", "lib/heavyLockBudget.mjs", "lib/heavyLockHistory.mjs", "lib/heavyLockSpawn.mjs", "lib/heavyLockEntry.mjs"]) {
     const dest = path.join(repo, "scripts", ...rel.split("/"));
     fs.mkdirSync(path.dirname(dest), { recursive: true });
     fs.copyFileSync(path.join(HERE, "..", ...rel.split("/")), dest);
