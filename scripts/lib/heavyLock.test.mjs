@@ -49,7 +49,7 @@ function tempLock() {
 
 function cleanEnv(lockPath) {
   // No real sessions registry: a test names its own (MCP_HEAVY_LOCK_SESSIONS_FILE / sessionsFile).
-  const env = { ...process.env, MCP_HEAVY_LOCK_PATH: lockPath, MCP_HEAVY_LOCK_LINEAGE: "off", MCP_HEAVY_LOCK_SESSIONS_FILE: `${lockPath}.no-sessions.jsonl` };
+  const env = { ...process.env, MCP_HEAVY_LOCK_PATH: lockPath, MCP_HEAVY_LOCK_LINEAGE: "off", MCP_HEAVY_LOCK_SAMPLE: "off", MCP_HEAVY_LOCK_SESSIONS_FILE: `${lockPath}.no-sessions.jsonl` };
   delete env.CI;
   delete env.MCP_HEAVY_LOCK_TOKEN;
   return env;
@@ -1019,7 +1019,7 @@ test("deploy: a self-contained copy under a scratch deploy root runs status and 
   const record = JSON.parse(first.stdout);
   assert.equal(record.key, "heavy-lock");
   assert.equal(record.n, 1);
-  assert.deepEqual(record.files, ["heavy-lock.mjs", "lib/deploy.mjs", "lib/heavyLock.mjs"]);
+  assert.deepEqual(record.files, ["heavy-lock.mjs", "lib/deploy.mjs", "lib/heavyLock.mjs", "lib/heavyLockHistory.mjs"]);
   assert.deepEqual(record.pruneSkipped, []);
   const keyDir = path.join(root, "heavy-lock");
   assert.equal(record.stable, path.join(keyDir, "heavy-lock.mjs"));
@@ -1251,7 +1251,7 @@ test("deploy: --deploy-root without a value is a usage error (exit 2); nothing i
 /** A scratch git repo holding a committed copy of the three deployable scripts and the entry. */
 function scratchSource({ git = true } = {}) {
   const repo = fs.mkdtempSync(path.join(os.tmpdir(), "heavy-lock-src-"));
-  for (const rel of ["heavy-lock.mjs", "lib/deploy.mjs", "lib/heavyLock.mjs", "lib/heavyLockEntry.mjs"]) {
+  for (const rel of ["heavy-lock.mjs", "lib/deploy.mjs", "lib/heavyLock.mjs", "lib/heavyLockHistory.mjs", "lib/heavyLockEntry.mjs"]) {
     const dest = path.join(repo, "scripts", ...rel.split("/"));
     fs.mkdirSync(path.dirname(dest), { recursive: true });
     fs.copyFileSync(path.join(HERE, "..", ...rel.split("/")), dest);

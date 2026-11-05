@@ -36,7 +36,8 @@ import process from "node:process";
 import { fileURLToPath } from "node:url";
 
 import { DEPLOY_RECORD, deployHash, foreignImports, importClosure } from "./lib/deploy.mjs";
-import { formatHeavyLockStatus, heavyLockStatus, holdHeavyLockOrExit } from "./lib/heavyLock.mjs";
+import { formatHeavyLockStatus, heavyLockStatus, holdHeavyLockOrExit, readSessionRows, repoOf, sessionOf, sessionsRegistryPath } from "./lib/heavyLock.mjs";
+import { defaultClass, formatHistory, historyPath, readHistory, recordRun, startSampler, summarizeHistory } from "./lib/heavyLockHistory.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const DEPLOYS_KEPT = 3;
@@ -157,23 +158,96 @@ if (argv[0] === "status") {
   console.log(argv.includes("--json") ? JSON.stringify(status, null, 2) : formatHeavyLockStatus(status));
   process.exit(0);
 }
+const USAGE =
+  "usage: node scripts/heavy-lock.mjs [--no-lock] [--class <name>] [--cost small|large] [--ram-mb <N>] -- <command> [args...]\n" +
+  "       node scripts/heavy-lock.mjs status [--json]\n" +
+  "       node scripts/heavy-lock.mjs history [--class <name>] [--repo <repo>] [--json]\n" +
+  "       node scripts/heavy-lock.mjs deploy [--deploy-root <dir>] [--allow-dirty] [--json]";
+
+/** `--name value` from `list`: `undefined` when absent; exits 2 when the value is missing. */
+function option(list, name) {
+  const at = list.indexOf(name);
+  if (at === -1) return undefined;
+  const value = list[at + 1];
+  if (value === undefined || value === "" || value.startsWith("--")) {
+    console.error(`${name} needs a value\n${USAGE}`);
+    process.exit(2);
+  }
+  return value;
+}
+
+if (argv[0] === "history") {
+  const rows = readHistory();
+  const summary = summarizeHistory(rows, { klass: option(argv, "--class"), repo: option(argv, "--repo") });
+  console.log(argv.includes("--json") ? JSON.stringify({ file: historyPath(), summary }, null, 2) : formatHistory(summary, { file: historyPath() }));
+  process.exit(0);
+}
+
 const sep = argv.indexOf("--");
 const own = sep === -1 ? [] : argv.slice(0, sep);
 const command = sep === -1 ? argv : argv.slice(sep + 1);
 
 if (command.length === 0) {
-  console.error(
-    "usage: node scripts/heavy-lock.mjs [--no-lock] -- <command> [args...]\n       node scripts/heavy-lock.mjs status [--json]\n       node scripts/heavy-lock.mjs deploy [--deploy-root <dir>] [--allow-dirty] [--json]"
-  );
+  console.error(USAGE);
+  process.exit(2);
+}
+// H-6a: what the caller says the run is and costs. Recorded in the history only; H-6b will admit by it.
+const klass = option(own, "--class");
+const cost = option(own, "--cost");
+const ramText = option(own, "--ram-mb");
+if (cost !== undefined && cost !== "small" && cost !== "large") {
+  console.error(`--cost is small or large, not ${cost}\n${USAGE}`);
+  process.exit(2);
+}
+const ramMb = ramText === undefined ? null : Number(ramText);
+if (ramMb !== null && !(Number.isInteger(ramMb) && ramMb > 0)) {
+  console.error(`--ram-mb is a whole number of MB, not ${ramText}\n${USAGE}`);
   process.exit(2);
 }
 
-const lock = await holdHeavyLockOrExit({ cmd: command.join(" "), noLock: own.includes("--no-lock") });
+const cmd = command.join(" ");
+const askedAt = Date.now();
+const lock = await holdHeavyLockOrExit({ cmd, noLock: own.includes("--no-lock") });
+// Measured only when this call holds the lock itself: a nested run is inside its parent's record.
+const startedAt = Date.now();
+const sampler = lock.acquired ? startSampler({ runStart: startedAt }) : null;
 // `npm` is `npm.cmd` on Windows, which needs a shell; a shell joins arguments with bare spaces, so
 // quote the ones that contain any.
 const args = process.platform === "win32" ? command.slice(1).map((a) => (/[\s"]/.test(a) ? `"${a.replace(/"/g, '\\"')}"` : a)) : command.slice(1);
 const result = spawnSync(command[0], args, { stdio: "inherit", shell: process.platform === "win32" });
-if (lock.acquired) lock.release();
+if (lock.acquired) {
+  const endedAt = Date.now();
+  const measured = sampler.stop();
+  try {
+    let holder = null;
+    try {
+      holder = JSON.parse(fs.readFileSync(lock.path, "utf8"));
+    } catch {
+      // the lineage is information only
+    }
+    const repo = await repoOf(process.cwd());
+    recordRun({
+      at: new Date(endedAt).toISOString(),
+      startedAt: new Date(startedAt).toISOString(),
+      repo,
+      session: holder === null ? "unknown" : sessionOf(holder, null, readSessionRows(sessionsRegistryPath())),
+      class: klass ?? defaultClass(cmd, repo),
+      cost: cost ?? null,
+      ramMb,
+      cmd,
+      cwd: process.cwd(),
+      pid: process.pid,
+      waitedMs: startedAt - askedAt,
+      durationMs: endedAt - startedAt,
+      exit: result.error !== undefined ? null : (result.status ?? null),
+      signal: result.signal ?? null,
+      ...measured
+    });
+  } catch {
+    // a run never fails for its record
+  }
+  lock.release();
+}
 
 if (result.error !== undefined) {
   console.error(`could not start ${command[0]}: ${result.error.message}`);
