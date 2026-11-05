@@ -140,24 +140,29 @@ test("CLI: a run with sampling off is still recorded — class, declared cost, d
 
 test("CLI end to end: the whole tree's peak working set is sampled, including a detached grandchild that allocates after its parent exited; history prints it", { skip: noSampler }, async () => {
   const lockPath = tempLock();
-  // A (the command) spawns B and waits 9 s. B spawns C detached and exits after 2.5 s (after the first
-  // sample, so it is seen). C allocates 300 MB only at 4 s — after B is gone — and holds it 3 s.
-  const c = "setTimeout(() => { globalThis.b = Buffer.alloc(300 * 1024 * 1024, 1); setTimeout(() => {}, 3000); }, 4000);";
-  const b = `require("node:child_process").spawn(process.execPath, ["-e", ${JSON.stringify(c)}], { detached: true, stdio: "ignore" }).unref(); setTimeout(() => {}, 2500);`;
-  const a = `require("node:child_process").spawn(process.execPath, ["-e", ${JSON.stringify(b)}], { stdio: "ignore" }); setTimeout(() => process.exit(7), 9000);`;
+  // A (the command) spawns B and waits 12 s. B spawns C detached and exits after 5 s: it must be seen by
+  // a sample before it exits, so the helper is pre-built in a scratch cache (no compile in the run's
+  // start-up) and the test checks that precondition. C allocates 300 MB only at 7 s — after B is gone —
+  // and holds it 3 s.
+  const cache = scratchDir("heavy-lock-cache-");
+  const env = cleanEnv(lockPath, { MCP_HEAVY_LOCK_SAMPLE: "on", MCP_HEAVY_LOCK_SAMPLE_MS: "250", MCP_HEAVY_LOCK_SAMPLER_CACHE: cache });
+  sampleTables([""], { root: 1, env });
+  const c = "setTimeout(() => { globalThis.b = Buffer.alloc(300 * 1024 * 1024, 1); setTimeout(() => {}, 3000); }, 7000);";
+  const b = `require("node:child_process").spawn(process.execPath, ["-e", ${JSON.stringify(c)}], { detached: true, stdio: "ignore" }).unref(); setTimeout(() => {}, 5000);`;
+  const a = `require("node:child_process").spawn(process.execPath, ["-e", ${JSON.stringify(b)}], { stdio: "ignore" }); setTimeout(() => process.exit(7), 12000);`;
   const scriptFile = path.join(path.dirname(lockPath), "a.js");
   fs.writeFileSync(scriptFile, a);
-  const env = cleanEnv(lockPath, { MCP_HEAVY_LOCK_SAMPLE: "on", MCP_HEAVY_LOCK_SAMPLE_MS: "250" });
-  const r = spawnSync(process.execPath, [CLI, "--class", "probe", "--ram-mb", "500", "--", "node", scriptFile], { cwd: REPO_ROOT, env, encoding: "utf8", timeout: 60_000 });
+  const r = spawnSync(process.execPath, [CLI, "--class", "probe", "--ram-mb", "500", "--", "node", scriptFile], { cwd: REPO_ROOT, env, encoding: "utf8", timeout: 90_000 });
   assert.equal(r.status, 7, r.stderr);
   const [row] = readHistory({ env });
   assert.equal(row.class, "probe");
   assert.equal(row.ramMb, 500);
   assert.equal(row.exit, 7);
-  assert.ok(row.durationMs >= 8_000, String(row.durationMs));
+  assert.ok(row.durationMs >= 11_000, String(row.durationMs));
   assert.equal(row.sampling.intervalMs, 250);
+  assert.equal(row.sampling.helper, "cached");
   assert.ok(row.sampling.samples >= 10, `samples ${String(row.sampling.samples)}`);
-  assert.ok(row.sampling.firstSampleAfterMs < 6_000, `first sample after ${String(row.sampling.firstSampleAfterMs)} ms`);
+  assert.ok(row.sampling.firstSampleAfterMs < 4_500, `precondition: first sample after ${String(row.sampling.firstSampleAfterMs)} ms, B (5 s) may not have been seen`);
   assert.ok(row.peakMb >= 300, `peak ${String(row.peakMb)} MB: the detached grandchild was not counted after its parent exited`);
   assert.ok(row.peakTop.some((p) => /^node/i.test(p.name) && p.mb >= 290), JSON.stringify(row.peakTop));
   // The sampler ends with the run: its PowerShell helper is gone too.
