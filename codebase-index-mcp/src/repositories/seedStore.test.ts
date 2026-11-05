@@ -149,6 +149,16 @@ test("a seeded child holds the parent's rows under its own repoId, equal to a fu
       assert.equal(result.tablesCopied[table], seeded[table]!.length, `${table}: tablesCopied`);
     }
     assert.deepEqual(rows(dbPath, "parent"), parentBefore, "parent untouched");
+    // Rowid order is the tie-break of equal-ranked answers: the copy keeps the parent's (a full run's) order.
+    const order = (repoId: string): string[] => {
+      const db = new Database(dbPath, { readonly: true });
+      try {
+        return (db.prepare("select file_path || '|' || name as k from symbols where repo_id = ? order by rowid").all(repoId) as { k: string }[]).map((r) => r.k);
+      } finally {
+        db.close();
+      }
+    };
+    assert.deepEqual(order("seeded"), order("parent"), "symbols keep the parent's rowid order");
 
     const db = new Database(dbPath);
     try {

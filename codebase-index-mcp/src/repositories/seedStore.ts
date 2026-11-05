@@ -152,7 +152,9 @@ export function seedFromParentDb(db: Database.Database, req: SeedRequest): SeedR
         const cols = columnsOf(db, table);
         const list = cols.map((c) => `"${c}"`).join(", ");
         const select = cols.map((c) => (c === "repo_id" ? "?" : `"${c}"`)).join(", ");
-        tablesCopied[table] = db.prepare(`insert into "${table}" (${list}) select ${select} from "${table}" where repo_id = ?`).run(childRepoId, parentRepoId).changes;
+        // In the parent's rowid order: rowid is the tie-break of equal-ranked answers, and a scan by the repo_id index
+        // would hand the rows over in index order (measured: a probe's 5th hit differed from a full run).
+        tablesCopied[table] = db.prepare(`insert into "${table}" (${list}) select ${select} from "${table}" where repo_id = ? order by rowid`).run(childRepoId, parentRepoId).changes;
       }
 
       for (const t of FTS_FILL) {

@@ -1,6 +1,6 @@
 ## MCP-ISSUE-119 — a new worktree re-indexes from scratch (~104 s on wec.aria) instead of seeding from its parent
 
-- **Status:** IN PROGRESS (IX-9). U1 id namespace and U2 seed store landed 2026-11-04; U3 job wiring and U4 harness merged and wired 2026-11-05; live acceptance on a wec.aria copy open.
+- **Status:** IN PROGRESS (IX-9). U1 id namespace and U2 seed store landed 2026-11-04; U3 job wiring and U4 harness merged and wired 2026-11-05; live acceptance on a scratch copy of wec.aria passed 2026-11-05 (EQUAL).
 - **Scenario:** `register_worktree` on a worktree of an already-indexed repo (wec.aria-wt-ops: 3298 files, 17668
   symbols, 55793 edges).
 - **Tool/query:** `register_worktree` → index job `mode:"incremental"` on an empty repoId, i.e. a full extraction.
@@ -76,3 +76,19 @@
 - `scripts/test/test-seed-conformance.mjs` (+ `_seedCompare.mjs`): self-test full-vs-full EQUAL; compare mode
   `--db --roots --a --b --probes` compares every repo_id table as a multiset (symbol ids normalised) and the answers of
   search_symbols / query_docs / search_regex per probe; exit 1 on any difference.
+
+### Acceptance (2026-11-05, scratch clone of wec.aria @32d3cf87, scratch DB, own stdio server)
+
+- Parent `aria-parent` full at C~20 (3341 files, 42 s). Worktree at C (35-file diff, 15 code files): seeded via
+  register_worktree 18.8 s / 23.1 s wall (phases seed → incremental after seed → scoped 35 files) vs a full index of
+  the same tree 51–61 s. A 1 s `list_repositories` ping during the seeded job: max 532 / 859 ms, none failed.
+- Conformance (`test-seed-conformance.mjs` compare mode): seeded vs full **under the same namespace** → EQUAL, 15
+  tables (17896 symbols, 56577 edges, 12026 docs, 32605 mentions …) and 5 probes (search_symbols ×2, query_docs
+  search + section, search_regex). Against a full run under its own namespace the ids differ by design (U1 limits):
+  doc_mentions.candidate_ids, ambiguous-callee picks and repositories.id_namespace.
+- Defect found and fixed: the copy's `INSERT … SELECT` read rows in repo_id-index order, so the child's rowids (the
+  tie-break of equal-ranked answers) differed from a full run; a search_symbols probe's 5th hit changed. The copy now
+  runs `order by rowid`; `seedStore.test.ts` asserts the parent's rowid order and fails without it.
+- Fallback: parent indexed at C~20, worktree at C~25 (not a descendant) → one full run, `fallbackReason:
+  "parent_not_ancestor"` in index_status (62.7 s).
+- Limit found: `register_worktree` refuses a parent that is itself a linked worktree (common-dir check, MCP-ISSUE-114).
