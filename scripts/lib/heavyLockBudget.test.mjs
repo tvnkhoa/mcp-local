@@ -7,7 +7,7 @@ import test, { after } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { acquireHeavyLock, formatHeavyLockStatus, heavyLockHoldersDir, heavyLockPipeName, heavyLockStatus, heavyLockWaitersDir, isPidAlive, LOCK_TIMEOUT_EXIT } from "./heavyLock.mjs";
-import { admit, BYPASS_MS, buildRequest, capKey, declaredMb, exclusiveReason, FALLBACK_MB, FLOOR_MB, isDotnet, isHarness, RESERVE_MB } from "./heavyLockBudget.mjs";
+import { admit, BYPASS_MS, buildRequest, capKey, declaredMb, exclusiveReason, FALLBACK_MB, FLOOR_MB, isDotnet, isHarness, LONE_HEAD_MARGIN_MB, RESERVE_MB } from "./heavyLockBudget.mjs";
 
 /**
  * H-6b: the RAM-budget semaphore. The rules (heavyLockBudget.mjs) are tested as pure functions; the lock
@@ -150,6 +150,19 @@ test("admit (P1): Σ declared + own ≤ free + measured (each at most its declar
   assert.equal(admit(req(0), [], { freeMb: RESERVE_MB - 1 }).ok, false, "below the reserve nothing runs");
 });
 
+test("P1 amendment: the FIFO head alone is admitted at free ≥ declared + 2048, below the reserve; never beside a holder or when not the head", () => {
+  const req = (mb, extra = {}) => ({ declaredMb: mb, exclusive: false, exclusiveWhy: null, harness: false, capKey: null, ...extra });
+  assert.equal(LONE_HEAD_MARGIN_MB, 2048);
+  assert.equal(admit(req(1500), [], { freeMb: 3548, head: true }).ok, true);
+  assert.equal(admit(req(1500), [], { freeMb: 3547, head: true }).ok, false);
+  assert.match(admit(req(1500), [], { freeMb: 3547, head: true }).reason, /alone: needs 3548 MB \(1500 declared \+ 2048\), free 3547 MB/);
+  assert.equal(admit(req(1500, { exclusive: true, exclusiveWhy: "x" }), [], { freeMb: 3548, head: true }).ok, true, "a lone exclusive head too");
+  assert.equal(admit(req(1500), [], { freeMb: 3548 }).ok, false, "a bypassing (non-head) run still needs the reserve");
+  assert.equal(admit(req(100), [req(1500)], { freeMb: 100_000 - 1, head: true }).ok, true, "beside a holder: the reserve rule");
+  assert.equal(admit(req(100), [req(1500)], { freeMb: RESERVE_MB + 1599, head: true }).ok, false, "beside a holder the reserve applies");
+  assert.equal(admit(req(1500), [], { freeMb: 100_000, head: true, legacyOccupied: true }).ok, false, "an older holder of the name still blocks");
+});
+
 // ---- the lock (scratch) ----
 
 test("two small holders are admitted together within the budget; a third that does not fit waits; status shows Σ / BUDGET", async () => {
@@ -179,6 +192,23 @@ test("two small holders are admitted together within the budget; a third that do
   b.release();
   c.release();
   assert.deepEqual(fs.readdirSync(heavyLockHoldersDir(lockPath)), [], "every slot removed on release");
+});
+
+test("lone head (amendment): admitted with free = declared + 2048 though below the reserve, refused at + 2047; a second run still needs the reserve", async () => {
+  const lockPath = tempLock();
+  const at = (freeMb) => ({ ...envFor(lockPath, 0), MCP_HEAVY_LOCK_TEST_FREE_MB: String(freeMb) });
+  const lone = (freeMb, extra = {}) => acquireHeavyLock({ cmd: "t", klass: "test/lone", ramMb: 1500, env: at(freeMb), pollMs: 20, readLineage: async () => [], log: quiet, ...extra });
+  const lines = [];
+  await timesOut(lone(3547, { timeoutMs: 300, log: (l) => lines.push(l) }));
+  assert.match(lines.join("\n"), /alone: needs 3548 MB \(1500 declared \+ 2048\), free 3547 MB/);
+  const one = await lone(3548, { timeoutMs: 2_000 });
+  assert.equal(one.acquired, true);
+  await timesOut(lone(3548, { ramMb: 100, timeoutMs: 300 }));
+  await timesOut(lone(RESERVE_MB + 1599, { ramMb: 100, timeoutMs: 300 }));
+  const two = await lone(RESERVE_MB + 1600, { ramMb: 100, timeoutMs: 2_000 });
+  assert.equal(two.acquired, true, "beside a holder: Σ 1600 ≤ free − 8192");
+  one.release();
+  two.release();
 });
 
 test("a holder's measured working set is added back to free RAM (at most its declaration)", async () => {
@@ -422,4 +452,95 @@ test("CLI: a run that does not fit exits 75 (the timeout code, unchanged); --ram
   assert.equal(ok.status, 3, "the command's own exit code");
   const row = JSON.parse(fs.readFileSync(`${lockPath}.history.jsonl`, "utf8").trim().split("\n").at(-1));
   assert.deepEqual([row.class, row.declaredMb, row.declaredFrom, row.exclusive, row.admittedSumMb, row.admittedBudgetMb], ["test/cli", 1500, "--ram-mb", false, 1500, 1500]);
+});
+
+// ---- review follow-ups (H1, M1, M3) ----
+
+test("H1: a head that cannot fit even alone times out saying what it needs and what is free; status shows its reason", async () => {
+  const lockPath = tempLock();
+  const env = { ...envFor(lockPath, 0), MCP_HEAVY_LOCK_TEST_FREE_MB: "3000" };
+  let error = null;
+  const waiting = acquireHeavyLock({ cmd: "big", klass: "test/big", ramMb: 1500, env, pollMs: 20, timeoutMs: 1_500, readLineage: async () => [], log: quiet }).catch((e) => (error = e));
+  await until(() => tickets(lockPath).some((t) => typeof t.waiting === "string"));
+  const status = await heavyLockStatus({ env, readTable: async () => null });
+  assert.match(status.waiters[0].waiting, /alone: needs 3548 MB \(1500 declared \+ 2048\), free 3000 MB/);
+  assert.match(formatHeavyLockStatus(status), /waiting: alone: needs 3548 MB/);
+  await waiting;
+  assert.equal(error?.code, "HEAVY_LOCK_TIMEOUT");
+  assert.match(error.message, /^heavy-check lock: no room after 2 s — alone: needs 3548 MB \(1500 declared \+ 2048\), free 3000 MB/);
+  assert.doesNotMatch(error.message, /unreadable holder/);
+});
+
+test("M3: the wec.be cap also covers a dotnet run in the wec.be repo without the wecbe- prefix", async () => {
+  assert.equal(capKey("custom/x", { repo: "wec.be", cmd: "pwsh dotnet-build-safe.ps1 test X.csproj" }), "wec.be");
+  assert.equal(capKey("wec.be/dotnet test X.csproj", { repo: "wec.be" }), "wec.be");
+  assert.equal(capKey("custom/x", { repo: "wec.be", cmd: "node tool.mjs" }), null, "a non-dotnet run in wec.be is not capped");
+  assert.equal(capKey("custom/x", { repo: "ai-coding-hub", cmd: "dotnet build" }), null);
+  // End to end: the repo comes from the caller's cwd (git common dir), as status names it.
+  const repo = path.join(scratchDir("heavy-lock-repo-"), "wec.be");
+  fs.mkdirSync(repo);
+  execFileSync("git", ["init", "-q"], { cwd: repo });
+  const lockPath = tempLock();
+  const one = await take(lockPath, 100_000, { klass: undefined, cmd: "dotnet build A.csproj", cwd: repo });
+  assert.equal(one.request.capKey, "wec.be");
+  const lines = [];
+  await timesOut(take(lockPath, 100_000, { klass: undefined, cmd: "dotnet test B.csproj", cwd: repo, timeoutMs: 300, log: (l) => lines.push(l) }));
+  assert.match(lines.join("\n"), /one wec\.be build\/test at a time/);
+  one.release();
+});
+
+test("M1: the lock name passes on between shared holders — an older client waits while any new shared holder remains", { skip: noPipe }, async (t) => {
+  const lockPath = tempLock();
+  const oldDir = scratchDir("heavy-lock-old-");
+  fs.writeFileSync(path.join(oldDir, "heavyLock.mjs"), execFileSync("git", ["show", "2f4badb:scripts/lib/heavyLock.mjs"], { cwd: path.resolve(HERE, "..", ".."), encoding: "utf8" }));
+  const OLD = pathToFileURL(path.join(oldDir, "heavyLock.mjs")).href;
+  const oldClient = (timeoutMs) =>
+    new Promise((resolve) => {
+      const script = `
+        const { acquireHeavyLock } = await import(${JSON.stringify(OLD)});
+        try {
+          const lock = await acquireHeavyLock({ cmd: "old client", timeoutMs: ${String(timeoutMs)}, pollMs: 25, log: () => {} });
+          lock.release();
+          console.log("held");
+        } catch (error) {
+          console.log(error.code);
+        }
+      `;
+      const child = spawn(process.execPath, ["--input-type=module", "-e", script], { env: envFor(lockPath, 100_000), stdio: ["ignore", "pipe", "inherit"] });
+      let out = "";
+      child.stdout.on("data", (c) => (out += c));
+      child.on("exit", () => resolve(out.trim()));
+    });
+  const a = await take(lockPath, 100_000, { ramMb: 500, cmd: "a" });
+  const b = await take(lockPath, 100_000, { ramMb: 500, cmd: "b" });
+  t.after(() => (a.release(), b.release()));
+  assert.equal(JSON.parse(fs.readFileSync(lockPath, "utf8")).token, a.token, "a took the name at admission");
+  a.release();
+  // b's keeper re-takes the name within one poll (50 ms here) and writes b's slot as the lock file.
+  await until(() => {
+    try {
+      return JSON.parse(fs.readFileSync(lockPath, "utf8")).token === b.token;
+    } catch {
+      return false;
+    }
+  }, 3_000);
+  assert.equal(await oldClient(1_000), "HEAVY_LOCK_TIMEOUT", "the older client waits while b runs");
+  const status = await heavyLockStatus({ env: envFor(lockPath, 100_000), readTable: async () => null });
+  assert.equal(status.holders.length, 1);
+  assert.equal(status.holders[0].nameGuard, true, "b's keeper holds the name for b");
+  b.release();
+  assert.equal(fs.existsSync(lockPath), false, "release removes the keeper's lock file");
+  assert.equal(await oldClient(3_000), "held", "free once no new holder remains");
+});
+
+test("M1: a shared holder's keeper stops when its holder is killed (no name kept for a dead run)", { skip: noPipe }, async (t) => {
+  const lockPath = tempLock();
+  const holder = childHolder(lockPath, 100_000, { ramMb: 500 });
+  const { pid } = await holder.held;
+  t.after(() => isPidAlive(pid) && hardKill(pid));
+  hardKill(pid);
+  await holder.exited;
+  const lock = await take(lockPath, 100_000, { cost: "large", timeoutMs: 5_000 });
+  assert.equal(lock.acquired, true, "an exclusive run gets the name once the dead holder's keeper let it go");
+  lock.release();
 });

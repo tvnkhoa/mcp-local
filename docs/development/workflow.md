@@ -189,17 +189,24 @@ and codebase-index's `run-tests.mjs` take a machine-wide lock, `~/.claude/locks/
 (`scripts/lib/heavyLock.mjs`): two sessions' gates side by side made the latency bounds flake
 (`test:freshness-worker` 277 ms against 250). Since H-6b (`scripts/lib/heavyLockBudget.mjs`) several runs
 hold it at once while Σ of their declared MB plus the newcomer's ≤ free RAM + the holders' measured working
-set (each at most its declaration) − 8192 MB, recomputed every poll. Declared MB: `--ram-mb N`, else the
+set (each at most its declaration) − 8192 MB, recomputed every poll; the first waiter alone (no holder at
+all) needs only free RAM ≥ its declared MB + 2048, below the reserve too (owner, 5 Nov). Declared MB: `--ram-mb N`, else the
 class's p95 × 1.5 after 3 measured runs (floor 512; 4000 for a dotnet class — `wecbe-build:` / `wecbe-test:`
 or `dotnet` in class or command), else 8000 dotnet / 1500 other. Exclusive (waits for all, blocks all):
 `--cost large`, a `.sln` build, a Release publish, a Docker build, `verify:all`, a codebase-index run of
-wec.be. At most 2 harness suites (run-tests, run-servers test, verify-*) and one `wecbe-build:` /
-`wecbe-test:` at a time, whatever the budget. Each holder keeps a slot, `heavy-check.lock.holders/<token>.json`,
+wec.be. At most 2 harness suites (run-tests, run-servers test, verify-*) and one wec.be .NET run (class
+`wecbe-build:` / `wecbe-test:`, or `dotnet` in class or command from a wec.be cwd) at a time, whatever the
+budget. Each holder keeps a slot, `heavy-check.lock.holders/<token>.json`,
 and its own OS-owned name (alive exactly while the holder lives, asked by listening — a connect probe
 reads a holder blocked in spawnSync as dead once its pipe instances are used); admission is decided only
 under a short admission name, so two callers never count the same RAM. An exclusive holder takes the
-lock's single name, which every older-version caller needs: neither runs beside the other. A caller that
-does not fit prints why (`Σ … MB > budget … MB`, `exclusive …`, a cap) and waits, up to 30 min
+lock's single name, which every older-version caller needs: neither runs beside the other. While shared
+holders run, each has a small keeper process that re-takes that name within one poll (2 s) of the holder
+holding it leaving, so an older caller gets in beside shared holders only in that ≤ 1-poll window. Known
+transitional limit: a nested child running an older version under a new shared parent that does not hold
+the name may wait for its own parent (older code looks for the parent only in the name's holder file); it
+ends once every wrapper runs the new deploy. A caller that does not fit prints why (`Σ … MB > budget … MB`,
+`exclusive …`, a cap, or `alone: needs N MB …, free M MB`, also shown by status) and waits, up to 30 min
 (`MCP_HEAVY_LOCK_TIMEOUT_MS`), then exits 75; a holder whose pid is gone or that is older than 3 h is
 broken. Nested entry points inherit the hold through `MCP_HEAVY_LOCK_TOKEN`. `CI=true` or `--no-lock`
 skips it, so CI is never held. `node scripts/heavy-lock.mjs status [--json]` shows Σ declared / BUDGET, every holder

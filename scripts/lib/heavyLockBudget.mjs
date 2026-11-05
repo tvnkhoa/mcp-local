@@ -8,14 +8,16 @@
  * P1 budget  = free RAM now + Σ holders' measured working set − 8192 MB, recomputed on every poll; a
  *            holder's working set counts at most its declared MB (a holder over its declaration has
  *            already taken that RAM out of "free"; adding it back would admit against RAM in use).
- *            Admit while Σ declared MB of the holders + own ≤ budget.
+ *            Admit while Σ declared MB of the holders + own ≤ budget. Amendment (owner, 5 Nov): the FIFO
+ *            head with no other holder is admitted when free ≥ its declared MB + 2048, reserve or not.
  * P2 declared MB = `--ram-mb` | class p95 × 1.5 after ≥ 3 measured runs (floor 512, 4000 for a dotnet
  *            class) | fallback 8000 dotnet, 1500 other. Dotnet = class `wecbe-build:` / `wecbe-test:`,
  *            or class / command containing `dotnet`.
  * P3 exclusive (waits for all, blocks all): `--cost large`, a .sln build, a Release publish, a Docker
  *            build, verify:all, a codebase-index run of wec.be.
  * P4 at most 2 harness suites at once (mcp-local run-tests / run-servers test / verify-*); per-repo cap 1
- *            for `wecbe-build:` / `wecbe-test:` whatever the budget.
+ *            for `wecbe-build:` / `wecbe-test:`, and for a dotnet run whose repo is wec.be (review M3),
+ *            whatever the budget.
  */
 
 import fs from "node:fs";
@@ -23,6 +25,8 @@ import os from "node:os";
 import process from "node:process";
 
 export const RESERVE_MB = 8192;
+/** P1 amendment (owner, 5 Nov): the FIFO head alone, with no other holder, needs only its declared MB + this free. */
+export const LONE_HEAD_MARGIN_MB = 2048;
 /** A later waiter may pass the FIFO head only while the head has waited less than this (P1). */
 export const BYPASS_MS = 10 * 60_000;
 export const HARNESS_CAP = 2;
@@ -79,9 +83,14 @@ export function isDotnet(klass, cmd) {
   return WECBE_CAPPED.test(String(klass ?? "")) || /dotnet/i.test(String(klass ?? "")) || /dotnet/i.test(String(cmd ?? ""));
 }
 
-/** The per-repo cap key (P4): `wec.be` for its build/test classes, else `null` (no cap). */
-export function capKey(klass) {
-  return WECBE_CAPPED.test(String(klass ?? "")) ? "wec.be" : null;
+/**
+ * The per-repo cap key (P4): `wec.be` for its build/test classes, and for any run in the wec.be repo whose
+ * class or command names dotnet (dotnet-build-safe.ps1 without the prefix); else `null` (no cap).
+ */
+export function capKey(klass, { repo = null, cmd = "" } = {}) {
+  if (WECBE_CAPPED.test(String(klass ?? ""))) return "wec.be";
+  if (/^wec[._-]?be$/i.test(String(repo ?? "")) && (/dotnet/i.test(String(klass ?? "")) || /dotnet/i.test(String(cmd ?? "")))) return "wec.be";
+  return null;
 }
 
 /** Why a run is exclusive (P3), or `null`. */
@@ -121,7 +130,7 @@ export function declaredMb({ ramMb = null, klass, cmd, rows = [] }) {
 }
 
 /** Everything admission needs to know about one run. */
-export function buildRequest({ cmd, klass, cost = null, ramMb = null, rows = [] }) {
+export function buildRequest({ cmd, klass, cost = null, ramMb = null, rows = [], repo = null }) {
   const declared = declaredMb({ ramMb, klass, cmd, rows });
   const exclusiveWhy = exclusiveReason({ cost, klass, cmd });
   return {
@@ -132,7 +141,7 @@ export function buildRequest({ cmd, klass, cost = null, ramMb = null, rows = [] 
     exclusive: exclusiveWhy !== null,
     exclusiveWhy,
     harness: exclusiveWhy === null && isHarness(klass, cmd),
-    capKey: capKey(klass)
+    capKey: capKey(klass, { repo, cmd })
   };
 }
 
@@ -154,9 +163,11 @@ export function budgetOf(holders, { freeMb, reserveMb = RESERVE_MB }) {
 /**
  * Does `request` fit beside `holders` now? `{ ok, reason, sumMb, budgetMb }`; `sumMb` includes the
  * request. `legacyOccupied`: the lock's single name is held by an exclusive holder or by a caller of an
- * older version (which knows no budget, so it counts as exclusive).
+ * older version (which knows no budget, so it counts as exclusive). `head`: the request is the FIFO head —
+ * alone (no holder at all) it is admitted when free RAM ≥ its declared MB + 2048, even below the 8192
+ * reserve (P1 amendment, owner 5 Nov); beside any holder the reserve applies as before.
  */
-export function admit(request, holders, { freeMb, legacyOccupied = false, reserveMb = RESERVE_MB }) {
+export function admit(request, holders, { freeMb, legacyOccupied = false, reserveMb = RESERVE_MB, head = false }) {
   const { sumMb: held, budgetMb } = budgetOf(holders, { freeMb, reserveMb });
   const sumMb = held + request.declaredMb;
   const no = (reason) => ({ ok: false, reason, sumMb, budgetMb });
@@ -168,6 +179,11 @@ export function admit(request, holders, { freeMb, legacyOccupied = false, reserv
   } else {
     if (request.harness && holders.filter((h) => h.harness).length >= HARNESS_CAP) return no(`${String(HARNESS_CAP)} harness suites already run`);
     if (request.capKey !== null && holders.some((h) => h.capKey === request.capKey)) return no(`one ${request.capKey} build/test at a time`);
+  }
+  if (head && holders.length === 0) {
+    const need = request.declaredMb + LONE_HEAD_MARGIN_MB;
+    if (freeMb >= need) return { ok: true, reason: null, sumMb, budgetMb, lone: true };
+    return no(`alone: needs ${String(need)} MB (${String(request.declaredMb)} declared + ${String(LONE_HEAD_MARGIN_MB)}), free ${String(freeMb)} MB`);
   }
   if (sumMb > budgetMb) return no(`Σ ${String(sumMb)} MB > budget ${String(budgetMb)} MB`);
   return { ok: true, reason: null, sumMb, budgetMb };
