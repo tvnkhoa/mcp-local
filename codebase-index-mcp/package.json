@@ -42,6 +42,7 @@
     "test:benchmark-fixture": "node scripts/test/test-benchmark-fixture.mjs",
     "test:string-literals": "node scripts/test/test-string-literals.mjs",
     "test:search-regex": "node scripts/test/test-search-regex.mjs",
+    "test:seed-conformance": "node scripts/test/test-seed-conformance.mjs",
     "test:issue-refinements": "node scripts/test/test-issue-refinements.mjs",
     "verify:enhancements": "node scripts/verify-enhancements.mjs",
     "test:profile-responses": "node scripts/test/test-profile-responses.mjs",
