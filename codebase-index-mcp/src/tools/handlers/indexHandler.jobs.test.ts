@@ -8,7 +8,7 @@ import test from "node:test";
 import { IndexJobQueue } from "../../services/indexing/indexJobs.js";
 import type { IndexRunResult } from "../../types/index.js";
 import type { HandlerContext } from "./handlerContext.js";
-import { handleIndexRepository, handleRegisterWorktree, sameRepoPath } from "./indexHandler.js";
+import { handleIndexRepository, handleRegisterWorktree, handleWatchRepo, sameRepoPath } from "./indexHandler.js";
 
 /**
  * MCP-ISSUE-112/114 review follow-ups:
@@ -139,6 +139,26 @@ test("review follow-up B: a second register_worktree for the same path, before t
     assert.equal(again.runId, first.runId, "the same registration again joins the job");
   } finally {
     release();
+    h.dispose();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("MCP-ISSUE-121: watch_repo start writes nothing on the server thread; an unregistered repo is registered by a job", async () => {
+  const { root, parent } = fixture();
+  const repos: Repo[] = [{ repoId: "p", repoPath: parent.replace(/\\/g, "/") }];
+  const h = context(root, repos);
+  try {
+    // Registered at this path: no write, no job.
+    const known = body(await handleWatchRepo({ action: "start", repoId: "p", repoPath: parent }, h.ctx));
+    assert.equal(known.started, true);
+    assert.equal(known.registeredBy, undefined);
+    // Not registered: the store throws on any write, so reaching an answer proves none was made here.
+    const fresh = body(await handleWatchRepo({ action: "start", repoId: "q", repoPath: parent }, h.ctx));
+    const by = fresh.registeredBy as { runId?: unknown; state?: unknown } | undefined;
+    assert.equal(typeof by?.runId, "string");
+    assert.ok(["queued", "running"].includes(String(by?.state)));
+  } finally {
     h.dispose();
     rmSync(root, { recursive: true, force: true });
   }

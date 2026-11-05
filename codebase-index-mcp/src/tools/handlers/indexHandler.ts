@@ -530,9 +530,25 @@ export async function handleWatchRepo(
     if (!args.repoId) throw new McpError(ErrorCode.InvalidParams, "watch_repo: repoId is required for action=start");
     if (!args.repoPath) throw new McpError(ErrorCode.InvalidParams, "watch_repo: repoPath is required for action=start");
     assertPathAllowed(args.repoPath, constants.allowedRoots);
-    store.ensureRepository(args.repoId, args.repoPath);
+    // MCP-ISSUE-121: no write on the server thread. `ensureRepository` here was an INSERT on this thread's connection,
+    // which waits out busy_timeout (30 s) behind the worker's write lock. A repo already registered at this path
+    // needs no write; otherwise an index job registers it (or re-points it) on the worker's connection, as
+    // index_repository and register_worktree do.
+    const existing = store.getRepository(args.repoId);
+    const job =
+      existing && sameRepoPath(existing.repoPath, args.repoPath)
+        ? undefined
+        : requireJobs(ctx).enqueue({
+            repoId: args.repoId,
+            repoPath: args.repoPath,
+            mode: "incremental",
+            docsEnabled: constants.DOCS_INDEXING_ENABLED,
+            maxFiles: constants.MAX_FILES_PER_RUN,
+            batchSize: 200,
+            source: "watch_repo"
+          });
     const startResult = await activateWatchForRepo(args.repoId, args.repoPath, "watch_repo:start", ctx);
-    return ctx.asText(startResult);
+    return ctx.asText(job ? { ...startResult, registeredBy: { runId: job.runId, state: job.state } } : startResult);
   }
 
   if (args.action === "stop") {
