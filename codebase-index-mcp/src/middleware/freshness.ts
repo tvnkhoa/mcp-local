@@ -32,7 +32,16 @@ export type FreshnessNote = {
   state: FreshnessState;
   /** What the gate ran, or found running. */
   mode?: "full" | "incremental" | "dirty";
+  /**
+   * Age of the shared work this answer is about — the in-flight run or tree check, or the oldest live run marker —
+   * timed from ITS start, which every caller that joined it shares. Not how long this call waited: see `waitedMs`.
+   */
   elapsedMs?: number;
+  /**
+   * MCP-ISSUE-122 (F-a): how long THIS call waited on the gate, set wherever `elapsedMs` is. A call that joins a run
+   * already past the budget answers at once (`waitedMs` ~0) while `elapsedMs` reads the run's age.
+   */
+  waitedMs?: number;
   runId?: string;
   /** Why the answer may not reflect the current tree. Absent when `state` is fresh/refreshed. */
   reason?: string;
@@ -811,6 +820,13 @@ export function createFreshnessGate(opts: FreshnessGateOptions): FreshnessGate {
     return { state: "refreshed", mode: flight.mode, elapsedMs: now() - started, runId: outcome.runId };
   };
 
+  /** MCP-ISSUE-122 (F-a): this call's own wait, placed beside `elapsedMs` (the shared work's age) wherever that is set. */
+  const withWait = (note: FreshnessNote, callStarted: number): FreshnessNote => {
+    if (note.elapsedMs === undefined) return note;
+    const { state, mode, elapsedMs, ...rest } = note;
+    return { state, ...(mode ? { mode } : {}), elapsedMs, waitedMs: Math.max(0, now() - callStarted), ...rest };
+  };
+
   /** MCP-ISSUE-101 part 5: an index built before this build's resolution rules is not current, whatever the tree says. */
   const versionWarning = (repoId: string): string | null => {
     if (!opts.getFullRunVersion || !opts.buildVersion) return null;
@@ -826,7 +842,8 @@ export function createFreshnessGate(opts: FreshnessGateOptions): FreshnessGate {
 
   const ensureFresh = async (repoId: string): Promise<FreshnessNote> => {
     if (!opts.enabled) return { state: "fresh" };
-    const checked = await ensureFreshTree(repoId);
+    const callStarted = now();
+    const checked = withWait(await ensureFreshTree(repoId), callStarted);
     const capped = cappedPaths.get(repoId) ?? [];
     const note: FreshnessNote = capped.length > 0 ? { ...checked, unreadable: capped } : checked;
     const warning = versionWarning(repoId);

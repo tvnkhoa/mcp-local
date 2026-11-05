@@ -1210,3 +1210,26 @@ test("remove_repository's state sweep also removes orphan .tmp flag files of tha
     assert.deepEqual(fs.readdirSync(dir), ["repair-r-b-1-2-3.json.77.tmp"]);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
+
+test("MCP-ISSUE-122: a caller joining an overdue run reports its own wait (waitedMs) beside the run's age (elapsedMs)", async () => {
+  const h = harness({ budgetMs: 20 });
+  try {
+    h.setTree({ head: "ddd444", dirty: [] });
+    const first = await h.gate.ensureFresh("r");
+    assert.equal(first.state, "refreshing");
+    assert.ok(first.waitedMs !== undefined && first.elapsedMs !== undefined, "both figures are set when elapsedMs is");
+    assert.ok(first.waitedMs >= 15, `the first caller waited out the budget (${String(first.waitedMs)} ms)`);
+
+    await new Promise((r) => setTimeout(r, 60));
+    const second = await h.gate.ensureFresh("r");
+    assert.equal(second.state, "refreshing");
+    assert.ok((second.elapsedMs ?? 0) >= 60, `elapsedMs is the run's age (${String(second.elapsedMs)} ms)`);
+    assert.ok((second.waitedMs ?? 99) < 15, `waitedMs is this call's wait, ~0 when joining an overdue run (${String(second.waitedMs)} ms)`);
+    assert.deepEqual(Object.keys(second).slice(0, 4), ["state", "mode", "elapsedMs", "waitedMs"], "waitedMs sits beside elapsedMs");
+
+    h.finishRun();
+    await new Promise((r) => setTimeout(r, 5));
+    const fresh = await h.gate.ensureFresh("r");
+    assert.deepEqual(fresh, { state: "fresh" }, "no wait figure on a note that has no elapsedMs");
+  } finally { h.cleanup(); }
+});

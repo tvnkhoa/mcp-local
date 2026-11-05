@@ -1,6 +1,6 @@
-## MCP-ISSUE-122 — index-run timing: a +29% full-index regression that did not reproduce, and `finished_at` stamped at the end of extraction
+## MCP-ISSUE-122 — index-run timing: a +29% full-index regression that did not reproduce, and `finished_at` stamped at the end of extraction, the freshness note without its own wait
 
-- **Status:** F-b FIXED 2026-11-05. F-c NOT REPRODUCED (no code change), 2026-11-05.
+- **Status:** F-b and F-a FIXED 2026-11-05. F-c NOT REPRODUCED (no code change), 2026-11-05.
 - **Scenario:** full index of one wec.aria tree (3333 files, 17889 symbols, 52770 edges) on a fresh scratch DB,
   `index_repository {mode:"full", docsMode:"on"}` over stdio; and reading run durations back from `index_runs`.
 - **Tool/query:** `index_repository` → `index_status`; `index_runs.started_at` / `finished_at` / `elapsed_ms`.
@@ -45,3 +45,13 @@
   a run that finished after a base started as overlapping it; runs are serialized per process, so the order is
   unchanged, and a run's writes last until it is recorded, so the later stamp is the honest one for the overlap test.
 - **Test:** `src/services/indexing/indexRunnerFinishedAt.test.ts` (fails before the fix: finished − started = extract).
+
+### F-a — the freshness note's `elapsedMs` read as this call's wait (fixed)
+
+- **Expected vs actual:** a read during an index answered `freshness: {state:"refreshing", elapsedMs: 9180, reason:
+  "... after the 5000 ms query budget ..."}` — `elapsedMs` is the AGE of the shared in-flight run or tree check (timed
+  from its start, which every joining caller shares), so a call that waited ~0 ms looked as if it had waited 9 s.
+- **Fix:** the note carries `waitedMs` — this call's own wait — beside `elapsedMs` wherever `elapsedMs` is set;
+  `elapsedMs` keeps its meaning, now documented on `FreshnessNote`. No tool schema changed (the note is free-form
+  response data), so the contracts snapshot is unchanged.
+- **Test:** `src/middleware/freshness.test.ts` "MCP-ISSUE-122: a caller joining an overdue run …" (fails before the fix).
