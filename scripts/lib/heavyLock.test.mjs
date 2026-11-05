@@ -23,7 +23,9 @@ import {
   LOCK_TIMEOUT_EXIT,
   PID_START_TOLERANCE_MS,
   readPidStart,
-  STALE_AFTER_MS
+  registerWaiter,
+  STALE_AFTER_MS,
+  TICKET_STALE_MS
 } from "./heavyLock.mjs";
 
 /**
@@ -617,7 +619,7 @@ test("a waiter entry is written aside then renamed: no temp file is left, and st
     (error) => error.code === "HEAVY_LOCK_TIMEOUT"
   );
   assert.equal(listed.length, 1);
-  assert.match(listed[0], new RegExp(`^${String(process.pid)}-[0-9a-f-]+\\.json$`));
+  assert.match(listed[0], /^t\d{12}\.json$/);
   const inFlight = path.join(dir, `${String(process.pid)}-y.json.z.tmp`);
   fs.writeFileSync(inFlight, '{"pid":');
   const status = await heavyLockStatus({ env: cleanEnv(lockPath), readTable: async () => null });
@@ -847,4 +849,151 @@ test("end to end: a holder whose whole recorded chain is killed is ORPHAN with t
   assert.match(formatHeavyLockStatus(after), /\[alive, ORPHAN\]/);
   assert.ok(formatHeavyLockStatus(after).split("\n").includes(killCommand(ids.holder)));
   assert.equal(isPidAlive(ids.holder), true, "status kills nothing");
+});
+
+// ---- first come, first served (row H-2): tickets ----
+
+const isTicket = (name) => /^t\d{12}\.json$/.test(name);
+const tickets = (lockPath) => (fs.existsSync(heavyLockWaitersDir(lockPath)) ? fs.readdirSync(heavyLockWaitersDir(lockPath)).filter(isTicket).sort() : []);
+
+async function until(predicate, what, ms = 20_000) {
+  const deadline = Date.now() + ms;
+  while (!predicate()) {
+    assert.ok(Date.now() < deadline, `timed out waiting for ${what}`);
+    await new Promise((r) => setTimeout(r, 20));
+  }
+}
+
+/** A child that waits for the lock polling every `pollMs`, appends "enter <name>" once it holds it, and releases. */
+function queueInChild(lockPath, journal, name, pollMs, scheme) {
+  const script = `
+    const { acquireHeavyLock } = await import(${JSON.stringify(MODULE)});
+    const { appendFileSync } = await import("node:fs");
+    const lock = await acquireHeavyLock({ cmd: ${JSON.stringify(name)}, pollMs: ${String(pollMs)}, timeoutMs: 30000, scheme: ${JSON.stringify(scheme)}, readStart: async () => null, log: () => {} });
+    appendFileSync(${JSON.stringify(journal)}, "enter ${name}\\n");
+    await new Promise((r) => setTimeout(r, 50));
+    lock.release();
+  `;
+  const child = spawn(process.execPath, ["--input-type=module", "-e", script], { env: cleanEnv(lockPath), stdio: ["ignore", "ignore", "pipe"] });
+  let err = "";
+  child.stderr.on("data", (chunk) => (err += chunk));
+  return new Promise((resolve, reject) => child.on("exit", (code) => (code === 0 ? resolve() : reject(new Error(`${name} exit ${String(code)}: ${err}`)))));
+}
+
+for (const scheme of [undefined, "file"]) {
+  test(`FIFO${scheme ? " (file scheme)" : ""}: A, B, C arrive in that order and acquire in that order though C polls 60x faster; status lists them by ticket`, { skip: scheme === undefined ? noPipe : false }, async () => {
+    const lockPath = tempLock();
+    const journal = `${lockPath}.journal`;
+    const held = await acquireHeavyLock({ cmd: "holder", env: cleanEnv(lockPath), scheme, log: quiet });
+    const runs = [];
+    for (const [name, pollMs] of [["A", 300], ["B", 300], ["C", 5]]) {
+      const before = tickets(lockPath).length;
+      runs.push(queueInChild(lockPath, journal, name, pollMs, scheme));
+      await until(() => tickets(lockPath).length === before + 1, `${name}'s ticket`);
+    }
+    const status = await heavyLockStatus({ env: cleanEnv(lockPath), readTable: async () => null });
+    assert.deepEqual(status.waiters.map((w) => [w.position, w.cmd]), [[1, "A"], [2, "B"], [3, "C"]]);
+    assert.deepEqual(status.waiters.map((w) => w.ticket), [...status.waiters.map((w) => w.ticket)].sort((a, b) => a - b));
+    const text = formatHeavyLockStatus(status);
+    assert.match(text, /waiters \(3, in ticket order — first come, first served\):/);
+    assert.match(text, /#1 ticket \d+: pid \d+/);
+    // Let C poll a while against the held lock before freeing it.
+    await new Promise((r) => setTimeout(r, 200));
+    held.release();
+    await Promise.all(runs);
+    assert.deepEqual(fs.readFileSync(journal, "utf8").trim().split("\n"), ["enter A", "enter B", "enter C"]);
+    assert.deepEqual(tickets(lockPath), [], "every ticket removed once its caller held the lock");
+  });
+}
+
+test("tickets: arrivals get distinct, increasing numbers; a new arrival goes above the highest present", () => {
+  const lockPath = tempLock();
+  const ws = Array.from({ length: 12 }, (_, i) => registerWaiter(lockPath, { token: `t${String(i)}`, cmd: "w", cwd: "/" }));
+  assert.deepEqual(ws.map((w) => w.ticket), Array.from({ length: 12 }, (_, i) => i + 1));
+  assert.equal(ws[11].ahead(), 11);
+  ws[0].unregister();
+  ws[5].unregister();
+  assert.equal(ws[11].ahead(), 9);
+  const late = registerWaiter(lockPath, { token: "late", cmd: "w", cwd: "/" });
+  assert.equal(late.ticket, 13, "above the highest present");
+  for (const w of [...ws, late]) w.unregister();
+  assert.deepEqual(tickets(lockPath), []);
+});
+
+/** Plant a ticket ahead of every real one: number 1, from `record`, touched `ageMs` ago. */
+function plantTicket(lockPath, record, ageMs = 0) {
+  const dir = heavyLockWaitersDir(lockPath);
+  fs.mkdirSync(dir, { recursive: true });
+  const full = path.join(dir, "t000000000001.json");
+  fs.writeFileSync(full, JSON.stringify({ token: "planted", cmd: "planted", cwd: "/", since: new Date().toISOString(), pollMs: 2_000, ticket: 1, ...record }));
+  if (ageMs > 0) {
+    const at = new Date(Date.now() - ageMs);
+    fs.utimesSync(full, at, at);
+  }
+  return full;
+}
+
+test("a ticket ahead whose pid is dead is skipped and removed", async () => {
+  const lockPath = tempLock();
+  const planted = plantTicket(lockPath, { pid: deadPid() });
+  const lock = await acquireHeavyLock({ cmd: "t", env: cleanEnv(lockPath), timeoutMs: 2_000, pollMs: 20, log: quiet });
+  assert.equal(lock.acquired, true);
+  assert.equal(fs.existsSync(planted), false);
+  lock.release();
+});
+
+test("a ticket ahead whose waiter is orphaned (an ancestor alive at arrival is gone) is skipped and removed", async () => {
+  const lockPath = tempLock();
+  const planted = plantTicket(lockPath, { pid: process.pid, watched: [{ pid: deadPid(), name: "bash.exe", start: null }] });
+  const lock = await acquireHeavyLock({ cmd: "t", env: cleanEnv(lockPath), timeoutMs: 2_000, pollMs: 20, log: quiet });
+  assert.equal(lock.acquired, true);
+  assert.equal(fs.existsSync(planted), false);
+  lock.release();
+});
+
+test("a ticket ahead of a live pid that stopped touching it (hung, or pid reused) is skipped; a fresh one holds the caller back", async () => {
+  const lockPath = tempLock();
+  const silent = plantTicket(lockPath, { pid: process.pid }, TICKET_STALE_MS + 5_000);
+  const lock = await acquireHeavyLock({ cmd: "t", env: cleanEnv(lockPath), timeoutMs: 2_000, pollMs: 20, log: quiet });
+  assert.equal(lock.acquired, true);
+  assert.equal(fs.existsSync(silent), false);
+  lock.release();
+
+  const fresh = plantTicket(lockPath, { pid: process.pid });
+  await assert.rejects(
+    acquireHeavyLock({ cmd: "t", env: cleanEnv(lockPath), timeoutMs: 300, pollMs: 20, log: quiet }),
+    (error) => error.code === "HEAVY_LOCK_TIMEOUT"
+  );
+  assert.equal(fs.existsSync(lockPath), false, "the lock was free all along: the waiter held back for the ticket ahead");
+  assert.deepEqual(tickets(lockPath), ["t000000000001.json"], "only the planted ticket is left");
+  fs.rmSync(fresh);
+});
+
+test("a waiter that times out removes its ticket and the one behind it moves up and proceeds", async () => {
+  const lockPath = tempLock();
+  const held = await acquireHeavyLock({ cmd: "holder", env: cleanEnv(lockPath), log: quiet });
+  const first = acquireHeavyLock({ cmd: "first", env: cleanEnv(lockPath), timeoutMs: 400, pollMs: 20, log: quiet });
+  await until(() => tickets(lockPath).length === 1, "first's ticket");
+  const second = acquireHeavyLock({ cmd: "second", env: cleanEnv(lockPath), timeoutMs: 10_000, pollMs: 20, log: quiet });
+  await until(() => tickets(lockPath).length === 2, "second's ticket");
+  await assert.rejects(first, (error) => error.code === "HEAVY_LOCK_TIMEOUT");
+  const status = await heavyLockStatus({ env: cleanEnv(lockPath), readTable: async () => null });
+  assert.deepEqual(status.waiters.map((w) => [w.position, w.cmd]), [[1, "second"]]);
+  held.release();
+  const lock = await second;
+  assert.equal(lock.acquired, true);
+  assert.deepEqual(tickets(lockPath), []);
+  lock.release();
+});
+
+test("status drops a ticket whose heartbeat stopped, and shows an orphaned waiter's ticket (that waiter stops itself, exit 76)", async () => {
+  const lockPath = tempLock();
+  plantTicket(lockPath, { pid: process.pid }, TICKET_STALE_MS + 5_000);
+  fs.writeFileSync(
+    path.join(heavyLockWaitersDir(lockPath), "t000000000002.json"),
+    JSON.stringify({ pid: process.pid, token: "o", cmd: "orphaned", since: new Date().toISOString(), ticket: 2, lineage: [{ pid: deadPid(), name: "bash.exe", start: null }], watched: [] })
+  );
+  const status = await heavyLockStatus({ env: cleanEnv(lockPath), readTable: async () => null });
+  assert.equal(status.cleaned, 1);
+  assert.deepEqual(status.waiters.map((w) => [w.position, w.ticket, w.cmd, w.orphan]), [[1, 2, "orphaned", true]]);
 });

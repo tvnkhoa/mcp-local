@@ -58,6 +58,21 @@
  * `MCP_HEAVY_LOCK_ORPHAN_MINUTES` (default 10, fractions allowed) status and every waiter print
  * `taskkill /PID <pid> /T /F`, which a leader runs only on the owner's yes. The tool itself kills
  * nothing and never frees a lock whose holder lives.
+ *
+ * First come, first served (row H-2, 2026-11-05). Before H-2 the lock went to whichever waiter polled
+ * first, so a fast poller arriving last could jump a cross-repo order agreed between leaders. Now a
+ * caller takes a ticket the moment it arrives: `<lock>.waiters/t<seq>.json`, `seq` one above the
+ * highest ticket present, created by hard-linking a complete temp file (`link` fails on EEXIST, so two
+ * arrivals never share a number; the loser takes the next one). Only the caller whose ticket is the
+ * oldest LIVE one may try the name (or the file). A ticket ahead is skipped and removed when its pid is
+ * gone, when an ancestor that was alive when it arrived is gone (the H-3 rule that also makes that
+ * waiter exit 76), or when it has not been touched for `TICKET_STALE_MS` (each waiter touches its ticket
+ * every poll, so a reused pid cannot keep a dead ticket alive). A waiter that times out or gives up
+ * removes its ticket; one whose ticket was removed under it takes a new one at the back. The ticket is
+ * removed once its caller holds the lock. Holder file, exit codes 75/76 and the lock path are unchanged;
+ * `status` lists waiters in ticket order with their position. A caller that cannot write a ticket waits
+ * without one (fail-open: registration never stops a run). Callers older than H-2 take no ticket and
+ * still race; they go when every caller runs this version.
  */
 
 import { execFile } from "node:child_process";
@@ -81,6 +96,9 @@ const POLL_MS = 2_000;
 export const PID_START_TOLERANCE_MS = 3_000;
 /** File scheme: how often a waiter re-reads a live holder's start time; a pid reused between reads waits at most this long. */
 export const PID_RECHECK_MS = 5 * 60_000;
+
+/** A waiter's ticket not touched for this long (or ten of its polls, if longer) is dead: hung, or its pid reused. */
+export const TICKET_STALE_MS = 60_000;
 
 /** Ancestors recorded at most, when no Claude session process is met first. */
 export const LINEAGE_DEPTH = 8;
@@ -514,27 +532,25 @@ export async function acquireHeavyLock({
   const holderContent = () => JSON.stringify({ pid: process.pid, startedAt: new Date().toISOString(), token, cmd, cwd, ppid: process.ppid, lineage });
   let announced = null;
   const pidStarts = new Map();
-  let waiter = null;
+  // The ticket is taken on arrival (H-2): its number is this caller's place in the queue.
+  const waiter = registerWaiter(file, { token, cmd, cwd, lineage, pollMs });
   try {
     return await take();
   } finally {
-    waiter?.unregister();
+    waiter.unregister();
   }
 
-  async function waitOrTimeout(holder) {
-    if (waiter === null) {
-      waiter = registerWaiter(file, { token, cmd, cwd, lineage });
-    } else {
-      // Only an ancestor alive when the wait began counts: one already gone then was a spawn-and-exit
-      // wrapper (Start-Process, cmd /c start, nohup, a scheduler stub), not a session that stopped.
-      const gone = waiter.watched.find((entry) => !isPidAlive(entry.pid));
-      if (gone !== undefined) {
-        throw new HeavyLockOrphanError(
-          `heavy-check lock: stopped waiting — ancestor pid ${String(gone.pid)} (${String(gone.name)}) of this run is gone, ` +
-            `so the session that started it no longer waits for it (${file}).`
-        );
-      }
+  async function waitOrTimeout(holder, ahead = 0) {
+    // Only an ancestor alive when the wait began counts: one already gone then was a spawn-and-exit
+    // wrapper (Start-Process, cmd /c start, nohup, a scheduler stub), not a session that stopped.
+    const gone = waiter.watched.find((entry) => !isPidAlive(entry.pid));
+    if (gone !== undefined) {
+      throw new HeavyLockOrphanError(
+        `heavy-check lock: stopped waiting — ancestor pid ${String(gone.pid)} (${String(gone.name)}) of this run is gone, ` +
+          `so the session that started it no longer waits for it (${file}).`
+      );
     }
+    waiter.heartbeat();
     if (Date.now() >= deadline) {
       throw new HeavyLockTimeoutError(
         `heavy-check lock still held after ${String(Math.round(limit / 1000))} s by ${describeHolder(holder)} ` +
@@ -545,11 +561,12 @@ export async function acquireHeavyLock({
     // MCP_HEAVY_LOCK_ORPHAN_MINUTES, the waiting line names the kill command (never run here).
     const flag = holder === null ? null : holderOrphanByPids(holder);
     const orphaned = holder === null ? { since: null, due: false } : noteOrphan(file, { token: holder.token, pid: holder.pid, orphan: flag.flagged }, { env });
-    const key = holder === null ? null : `${String(holder.token)}|${String(orphaned.due)}`;
+    const key = holder === null ? null : `${String(holder.token)}|${String(orphaned.due)}|${String(ahead)}`;
     if (holder !== null && announced !== key) {
       log(
         `heavy-check lock held by ${describeHolder(holder)}; waiting up to ` +
           `${limit >= 60_000 ? `${String(Math.round(limit / 60_000))} min` : `${String(Math.round(limit / 1000))} s`} (MCP_HEAVY_LOCK_TIMEOUT_MS) …` +
+          (ahead > 0 ? ` ${String(ahead)} waiter${ahead === 1 ? "" : "s"} ahead (first come, first served)` : "") +
           (orphaned.due
             ? `\n  the holder is flagged ${flagLabel(flag.whole)} since ${String(orphaned.since)}: ${killCommand(holder.pid)}\n  ${KILL_RULE}`
             : "")
@@ -562,23 +579,32 @@ export async function acquireHeavyLock({
   async function take() {
     let server = null;
     if (pipe !== null) {
-      while ((server = await tryListen(pipe)) === null) {
+      for (;;) {
+        // Only the oldest live ticket may try the name; the rest wait their turn however fast they poll.
+        const ahead = waiter.ahead();
+        if (ahead === 0 && (server = await tryListen(pipe)) !== null) break;
         // A holder writes the file just after it takes the name, so for a moment the file may still name
         // a killed holder before it; trust only a live pid, and read the file again next poll.
         const written = parseHolder(readRaw(file) ?? "");
         const holder = written !== null && isPidAlive(written.pid) ? written : null;
         const skip = insideParent(holder);
         if (skip !== null) return skip;
-        await waitOrTimeout(holder);
+        await waitOrTimeout(holder, ahead);
       }
       writeHolderFile(file, holderContent());
     } else {
       const content = holderContent();
-      while (!tryCreate(file, content)) {
+      for (;;) {
+        const ahead = waiter.ahead();
+        if (ahead === 0 && tryCreate(file, content)) break;
         const raw = readRaw(file);
-        if (raw === null) continue;
+        if (raw === null) {
+          if (ahead > 0) await waitOrTimeout(null, ahead);
+          continue;
+        }
         const holder = parseHolder(raw);
-        const stale = await staleReason(holder, { readStart, pidStarts });
+        // A stale holder is broken by the waiter whose turn it is, not by one further back.
+        const stale = ahead === 0 ? await staleReason(holder, { readStart, pidStarts }) : null;
         if (stale !== null) {
           // Judging may have awaited a start-time read; a lock taken meanwhile must be re-judged, not moved
           // aside — breakStale can put a moved live lock back only while no third waiter has taken the path.
@@ -587,7 +613,7 @@ export async function acquireHeavyLock({
           breakStale(file, raw, log);
           continue;
         }
-        await waitOrTimeout(holder);
+        await waitOrTimeout(holder, ahead);
       }
     }
 
@@ -640,30 +666,127 @@ export async function holdHeavyLockOrExit(options) {
 
 // ---- waiters and status ----
 
-/**
- * Register a waiting call in `<lock>.waiters/`: `{pid, ppid, token, cmd, cwd, since, lineage}`. The
- * entry goes when the wait ends (`unregister`) or the process exits; a hard-killed waiter leaves it,
- * and `heavyLockStatus` drops entries of dead pids.
- */
-export function registerWaiter(file, { token, cmd, cwd, lineage = [] }) {
-  const dir = heavyLockWaitersDir(file);
-  const entry = path.join(dir, `${String(process.pid)}-${token}.json`);
-  const record = { pid: process.pid, ppid: process.ppid, token, cmd, cwd, since: new Date().toISOString(), lineage };
+const TICKET_NAME = /^t(\d{12})\.json$/;
+
+/** The tickets in `dir`, oldest (lowest number) first: `[{seq, full}]`. Temp files and older entries are not tickets. */
+function listTickets(dir) {
+  let names;
   try {
-    fs.mkdirSync(dir, { recursive: true });
-    // Written aside, then renamed: status never reads a half-written entry (and so never deletes one).
-    const tmp = `${entry}.${randomUUID()}.tmp`;
-    fs.writeFileSync(tmp, JSON.stringify(record));
-    fs.renameSync(tmp, entry);
+    names = fs.readdirSync(dir);
   } catch {
-    // registration is information only: a wait never fails because it could not be shown
+    return [];
   }
+  return names
+    .map((name) => TICKET_NAME.exec(name))
+    .filter(Boolean)
+    .map((m) => ({ seq: Number(m[1]), full: path.join(dir, m[0]) }))
+    .sort((a, b) => a.seq - b.seq);
+}
+
+/**
+ * Why a waiter's ticket no longer holds its place, or `null` while it does: its pid is gone, an
+ * ancestor alive when it arrived (`watched`) is gone (H-3: that waiter exits 76), or it has not been
+ * touched for `TICKET_STALE_MS` (or ten of its polls).
+ */
+export function ticketDeadReason(record, touchedAt, now = Date.now()) {
+  if (record === null) return "unreadable";
+  if (!isPidAlive(record.pid)) return `pid ${String(record.pid)} is gone`;
+  const gone = (Array.isArray(record.watched) ? record.watched : []).find((a) => !isPidAlive(a.pid));
+  if (gone !== undefined) return `ancestor pid ${String(gone.pid)} (${String(gone.name)}) is gone`;
+  if (ticketSilent(record, touchedAt, now)) return `not touched for ${String(Math.round((now - touchedAt) / 1000))} s`;
+  return null;
+}
+
+/** Its waiter stopped touching it: hung, or killed and its pid reused. */
+function ticketSilent(record, touchedAt, now) {
+  return Number.isFinite(touchedAt) && now - touchedAt > Math.max(TICKET_STALE_MS, 10 * (Number(record.pollMs) || POLL_MS));
+}
+
+function touchedAt(full) {
+  try {
+    return fs.statSync(full).mtimeMs;
+  } catch {
+    return NaN;
+  }
+}
+
+/**
+ * Take a ticket in `<lock>.waiters/` on arrival (H-2): `t<seq>.json` holding `{pid, ppid, token, cmd,
+ * cwd, since, lineage, watched, pollMs, ticket}`, `seq` one above the highest ticket present, created by
+ * hard link so no two callers share a number. `ahead()` counts the live tickets before this one,
+ * removing dead ones; `heartbeat()` touches it (and takes a new ticket at the back if it was removed);
+ * `unregister()` removes it, as does process exit. A hard-killed waiter leaves it: the next waiter
+ * behind it and `heavyLockStatus` drop it. If no ticket can be written the caller waits without one.
+ */
+export function registerWaiter(file, { token, cmd, cwd, lineage = [], pollMs = POLL_MS }) {
+  const dir = heavyLockWaitersDir(file);
+  const watched = lineage.filter((ancestor) => isPidAlive(ancestor.pid));
+  const record = { pid: process.pid, ppid: process.ppid, token, cmd, cwd, since: new Date().toISOString(), lineage, watched, pollMs };
+  let entry = null;
+  let ticket = null;
+  const take = () => {
+    try {
+      fs.mkdirSync(dir, { recursive: true });
+      for (let attempt = 0; attempt < 100; attempt++) {
+        const seq = (listTickets(dir).at(-1)?.seq ?? 0) + 1;
+        const full = path.join(dir, `t${String(seq).padStart(12, "0")}.json`);
+        // Complete before it is visible: status never reads a half-written ticket (and so never deletes one).
+        if (tryCreate(full, JSON.stringify({ ...record, ticket: seq }))) {
+          entry = full;
+          ticket = seq;
+          return;
+        }
+      }
+    } catch {
+      // fail-open: a wait never fails because its ticket could not be written
+    }
+    entry = null;
+    ticket = null;
+  };
+  take();
+  const ahead = () => {
+    if (ticket === null) return 0;
+    let count = 0;
+    const now = Date.now();
+    for (const t of listTickets(dir)) {
+      if (t.seq >= ticket) break;
+      const raw = readRaw(t.full);
+      if (raw === null) continue; // being removed
+      if (ticketDeadReason(parseHolder(raw), touchedAt(t.full), now) !== null) {
+        fs.rmSync(t.full, { force: true });
+        continue;
+      }
+      count++;
+    }
+    return count;
+  };
+  const heartbeat = () => {
+    if (entry === null) return;
+    try {
+      const at = new Date();
+      fs.utimesSync(entry, at, at);
+    } catch {
+      // removed under us (judged dead by another waiter after a stall): queue again, at the back
+      take();
+    }
+  };
   const unregister = () => {
     process.off("exit", unregister);
-    fs.rmSync(entry, { force: true });
+    if (entry !== null) fs.rmSync(entry, { force: true });
   };
   process.on("exit", unregister);
-  return { entry, watched: lineage.filter((ancestor) => isPidAlive(ancestor.pid)), unregister };
+  return {
+    get entry() {
+      return entry;
+    },
+    get ticket() {
+      return ticket;
+    },
+    watched,
+    ahead,
+    heartbeat,
+    unregister
+  };
 }
 
 /** Is the OS-owned name held? Probed by connecting (never by listening: that would take the lock). */
@@ -706,8 +829,8 @@ function describeProcess(record, byPid) {
  * ancestor is gone; without a lineage, the parent is gone), `orphanSince` (first sighting of either,
  * kept in `<lock>.orphan.json`) and `killHint` (the command to end it, once flagged
  * `MCP_HEAVY_LOCK_ORPHAN_MINUTES`; never run).
- * `waiters` are the live registered waiters, oldest first; entries of dead pids are removed and
- * counted in `cleaned`. The only writes: that cleanup and the orphan sighting file. `readTable` and
+ * `waiters` are the live registered waiters in ticket order, each with `ticket` and `position` (1 = next);
+ * entries of dead pids and tickets whose heartbeat stopped are removed and counted in `cleaned`. The only writes: that cleanup and the orphan sighting file. `readTable` and
  * `now` are test hooks.
  */
 export async function heavyLockStatus({ env = process.env, readTable = readProcessTable, platform = process.platform, now = Date.now() } = {}) {
@@ -743,14 +866,19 @@ export async function heavyLockStatus({ env = process.env, readTable = readProce
   for (const name of names) {
     const full = path.join(dir, name);
     const record = parseHolder(readRaw(full) ?? "");
-    if (record === null || !isPidAlive(record.pid)) {
+    // A ticket (H-2) is also dropped when its heartbeat stopped; an older writer's entry has none.
+    const ticket = Number.isInteger(record?.ticket) ? record.ticket : null;
+    // A waiter whose ancestor is gone is shown (orphan), not removed: it stops itself with exit 76.
+    if (record === null || !isPidAlive(record.pid) || (ticket !== null && ticketSilent(record, touchedAt(full), now))) {
       fs.rmSync(full, { force: true });
       cleaned++;
       continue;
     }
-    waiters.push({ ...describeProcess(record, byPid), since: record.since ?? null });
+    waiters.push({ ...describeProcess(record, byPid), since: record.since ?? null, ticket });
   }
-  waiters.sort((a, b) => String(a.since).localeCompare(String(b.since)));
+  // Ticket order (first come, first served); entries without a ticket (older writers) after, by arrival.
+  waiters.sort((a, b) => (a.ticket ?? Infinity) - (b.ticket ?? Infinity) || String(a.since).localeCompare(String(b.since)));
+  waiters.forEach((w, i) => (w.position = i + 1));
   return { path: file, pipe, nameHeld, processTable: table !== null, orphanMinutes: orphanMinutes(env), holder, waiters, cleaned };
 }
 
@@ -776,8 +904,8 @@ export function formatHeavyLockStatus(status) {
     lines.push(status.holder.killHint);
     lines.push(`    ${KILL_RULE}`);
   }
-  lines.push(status.waiters.length === 0 ? "waiters: none" : `waiters (${String(status.waiters.length)}, oldest first):`);
-  for (const w of status.waiters) lines.push(`  ${who(w)}`);
+  lines.push(status.waiters.length === 0 ? "waiters: none" : `waiters (${String(status.waiters.length)}, in ticket order — first come, first served):`);
+  for (const w of status.waiters) lines.push(`  #${String(w.position)} ${w.ticket === null ? "(no ticket)" : `ticket ${String(w.ticket)}`}: ${who(w)}`);
   if (status.cleaned > 0) lines.push(`removed ${String(status.cleaned)} entr${status.cleaned === 1 ? "y" : "ies"} of dead waiters`);
   return lines.join("\n");
 }

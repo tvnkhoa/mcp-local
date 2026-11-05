@@ -194,9 +194,11 @@ skips it, so CI is never held. `node scripts/heavy-lock.mjs status [--json]` sho
 waiter (pid, command, cwd, since when, alive) with its recorded ancestors up to the Claude session
 process, marks one with a recorded ancestor gone `launcher gone (session alive)` — a shell stopped
 while its child lived on, as in both 4 Nov incidents — and one whose whole recorded chain up to the
-session is gone `ORPHAN`. Waiters
-register in `heavy-check.lock.waiters/` beside the lock; status drops entries of dead pids and kills
-nothing. A waiter whose ancestor dies while it waits stops (exit 76) instead of taking the lock later
+session is gone `ORPHAN`. The lock is first come, first served: a caller takes a numbered ticket in
+`heavy-check.lock.waiters/` beside the lock the moment it arrives, and only the oldest live ticket may
+take the lock, however fast the others poll; a ticket whose pid is gone, whose waiter lost an ancestor,
+or that has not been touched for 60 s is skipped and removed. Status lists waiters in ticket order with
+their position, drops dead and silent tickets, and kills nothing. A waiter whose ancestor dies while it waits stops (exit 76) instead of taking the lock later
 for nobody; an ancestor already gone when the wait began (a spawn-and-exit wrapper) does not count.
 The first time status or a waiter sees the holder flagged either way is kept in `heavy-check.lock.orphan.json`
 (`orphanSince`, cleared when the holder changes or frees); after `MCP_HEAVY_LOCK_ORPHAN_MINUTES`

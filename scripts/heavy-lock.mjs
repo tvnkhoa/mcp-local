@@ -11,8 +11,11 @@
  *   node scripts/heavy-lock.mjs [--no-lock] -- <command> [args...]
  *   node scripts/heavy-lock.mjs status [--json]
  *
- * `status` is read-only (it only removes registry entries of dead waiters): the holder and every
- * waiter, each with its pid, command, cwd, since when, whether it is alive, whether a recorded ancestor
+ * The lock is first come, first served (H-2): a caller takes a ticket on arrival and only the oldest
+ * live ticket may take the lock, however often the others poll.
+ *
+ * `status` is read-only (it only removes registry entries of dead waiters and silent tickets): the
+ * holder and every waiter in ticket order with its position, each with its pid, command, cwd, since when, whether it is alive, whether a recorded ancestor
  * is gone (`launcher gone (session alive)`) and whether its whole recorded chain up to the session is
  * gone (`ORPHAN`). For a holder flagged either way it keeps the first sighting in `<lock>.orphan.json`
  * (`orphanSince`) and, after
