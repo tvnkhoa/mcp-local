@@ -894,7 +894,7 @@ export function sessionsRegistryPath(env = process.env) {
 }
 
 /** Every parseable row of the registry, plus any `<registry>.<pid>.trimming` a trim has moved aside; `[]` when unreadable. */
-function readSessionRows(file) {
+export function readSessionRows(file) {
   const rows = [];
   let files = [file];
   try {
@@ -922,7 +922,7 @@ function readSessionRows(file) {
  * live table): the newest registry row with that pid written after that process started (a row from an
  * earlier owner of a reused pid does not count). `"unknown"` when there is none.
  */
-function sessionOf(record, table, rows) {
+export function sessionOf(record, table, rows) {
   let lineage = Array.isArray(record.lineage) ? record.lineage : [];
   if (!lineage.some((a) => isSessionProcess(String(a.name))) && table !== null && Number.isInteger(record.pid)) lineage = lineageOf(record.pid, table);
   const claude = lineage.find((a) => isSessionProcess(String(a.name)));
@@ -935,7 +935,7 @@ function sessionOf(record, table, rows) {
 }
 
 /** The repo `cwd` belongs to: the basename of its git common dir (a linked worktree names its main repo), `"unknown"` outside git. Cached per cwd. */
-async function repoOf(cwd, cache) {
+export async function repoOf(cwd, cache = new Map()) {
   if (typeof cwd !== "string" || cwd === "") return "unknown";
   if (!cache.has(cwd)) {
     cache.set(

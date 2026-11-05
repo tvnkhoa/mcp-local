@@ -5,7 +5,10 @@
  * Fixture: a parent git repo (indexed) and `git worktree add` of it; a second, unrelated git repo.
  *   (a) one call answers in < 2 s with a runId, registered "new", watch started;
  *   (b) list_repositories shows the worktree; watch_repo status shows its watcher;
- *   (c) index_status reaches ok: one full run (a new repoId), the worktree's own symbol is indexed;
+ *   (c) index_status reaches ok: seeded from the parent (IX-9, MCP-ISSUE-119 — the parent's indexed commit is an ancestor
+ *       of the worktree's HEAD), then a scoped incremental; no fallbackReason; the worktree's own symbol is indexed;
+ *   (c2) a parent indexed at a commit that is NOT an ancestor of the worktree's HEAD → one full run, fallbackReason
+ *       parent_not_ancestor in index_status (never a silent wrong seed);
  *   (d) refusals: an unknown parentRepoId, a path that is not the parent's worktree, a repoId registered elsewhere.
  */
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -51,6 +54,9 @@ writeFileSync(join(wtDir, "src/b.ts"), "export function worktreeOnlyBeta(): numb
 git(wtDir, "add", ".");
 git(wtDir, "commit", "-q", "-m", "worktree change");
 writeRepo(otherDir, { "src/o.ts": "export const other = 1;\n" });
+// (c2) a worktree held at the fixture commit; later the parent moves one commit past it and is re-indexed there.
+const oldDir = join(root, "parent-wt-old");
+git(parentDir, "worktree", "add", "-q", "--detach", oldDir, "HEAD");
 const parentId = `rw-parent-${stamp}`;
 const wtId = `rw-wt-${stamp}`;
 
@@ -110,9 +116,32 @@ try {
     if (s.body?.state === "ok" || s.body?.state === "failed") done = s;
     else await sleep(200);
   }
-  assert(done?.body?.state === "ok" && done.body.mode === "full" && /^full \(no index yet/.test(done.body.scope ?? ""), "(c) the job ends ok, one full run of the new repoId", done?.text.slice(0, 300));
+  assert(done?.body?.state === "ok" && done.body.mode === "incremental" && !/^full/.test(done.body.scope ?? "") && done.body.fallbackReason === undefined,
+    "(c) the job ends ok: seeded, then a scoped incremental, no fallbackReason", done?.text.slice(0, 400));
+  const copied = await call("search_symbols", { repoId: wtId, query: "parentAlpha", strategy: "name", limit: 5 });
+  assert(copied.text.includes("parentAlpha"), "(c) ... the parent's symbol is in the seeded worktree", copied.text.slice(0, 200));
   const sym = await call("search_symbols", { repoId: wtId, query: "worktreeOnlyBeta", strategy: "name", limit: 5 });
   assert(sym.text.includes("worktreeOnlyBeta"), "(c) the worktree's own symbol is indexed", sym.text.slice(0, 200));
+
+  // (c2)
+  const oldId = `rw-old-${stamp}`;
+  writeFileSync(join(parentDir, "src/side.ts"), "export function sideOnlyGamma(): number {\n  return 3;\n}\n");
+  git(parentDir, "add", ".");
+  git(parentDir, "commit", "-q", "-m", "parent moves past the worktree");
+  const moved = await call("index_repository", { repoId: parentId, repoPath: parentDir, mode: "full", wait: true });
+  assert(moved.body?.state === "ok", "(c2) the parent is re-indexed one commit past the worktree's HEAD", moved.text.slice(0, 200));
+  const regOld = await call("register_worktree", { parentRepoId: parentId, repoPath: oldDir, repoId: oldId });
+  let oldDone = null;
+  for (let i = 0; i < 600 && !oldDone; i++) {
+    const s = await call("index_status", { runId: regOld.body?.runId });
+    if (s.body?.state === "ok" || s.body?.state === "failed") oldDone = s;
+    else await sleep(200);
+  }
+  assert(oldDone?.body?.state === "ok" && oldDone.body.mode === "full" && oldDone.body.fallbackReason === "parent_not_ancestor",
+    "(c2) a non-ancestor parent: one full run, fallbackReason parent_not_ancestor", (oldDone?.text ?? regOld.text).slice(0, 400));
+  const notCopied = await call("search_symbols", { repoId: oldId, query: "sideOnlyGamma", strategy: "name", limit: 5 });
+  assert(notCopied.body?.count === 0,"(c2) ... and nothing of the parent's newer commit leaked into it", notCopied.text.slice(0, 200));
+  await call("watch_repo", { action: "stop", repoId: oldId });
 
   // (d)
   const noParent = await call("register_worktree", { parentRepoId: "no-such-parent", repoPath: wtDir, repoId: `${wtId}-x` });

@@ -2,13 +2,17 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import type { GraphStore } from "../../repositories/graphStore.js";
+import type { WorkRunTrace } from "../../repositories/runStore.js";
+import type { NameStatusEntry } from "../git/gitHelpers.js";
 import {
   BULK_RESOLVE_INDEX_DROP_MIN_ROWS,
   evaluateIncrementalSkip,
   indexGeneration,
   newerBuildRefusal,
+  planGitScopedIncremental,
   resolvePerformanceProfileDecision,
-  shouldDropEdgeIndexesForResolve
+  shouldDropEdgeIndexesForResolve,
+  type GitScopeInputs
 } from "./runPolicy.js";
 import { currentAnnotationKey, INDEX_VERSION } from "./indexPipeline.js";
 
@@ -166,4 +170,45 @@ test("release I1b: only a full run or a bulk resolve drops the DB-wide edge inde
   assert.equal(shouldDropEdgeIndexesForResolve("dirty", 6_000), false);
   assert.equal(shouldDropEdgeIndexesForResolve("incremental", BULK_RESOLVE_INDEX_DROP_MIN_ROWS - 1), false);
   assert.equal(shouldDropEdgeIndexesForResolve("incremental", BULK_RESOLVE_INDEX_DROP_MIN_ROWS), true);
+});
+
+// ── IX-9 (MCP-ISSUE-119): a seed row is a base for the git-scoped incremental ──
+
+const seedRun = (over: Partial<WorkRunTrace> = {}): WorkRunTrace => ({
+  mode: "seed",
+  status: "ok",
+  startedAt: "2026-11-05T00:00:00.000Z",
+  finishedAt: "2026-11-05T00:00:00.000Z",
+  commitSha: "a".repeat(40),
+  indexVersion: INDEX_VERSION,
+  treeKey: JSON.stringify({ head: "a".repeat(40), files: {} }),
+  treeDirty: false,
+  excludeRules: "{}",
+  ...over
+});
+
+const seedInputs = (runs: WorkRunTrace[], diff: NameStatusEntry[] = []): GitScopeInputs => ({
+  runs,
+  headSha: "f".repeat(40),
+  diffSince: () => diff,
+  dirtyNow: [],
+  pending: [],
+  gitScan: true,
+  excludeRulesNow: "{}",
+  excludeRulesChangedSince: () => null,
+  annotationKeyCurrent: true
+});
+
+test("IX-9: a seed run is the base — scoped over parent-commit..HEAD plus the parent's carried dirty paths", () => {
+  const carried = JSON.stringify({ head: "a".repeat(40), files: { "src/parentDirty.ts": "h" } });
+  const plan = planGitScopedIncremental(seedInputs([seedRun({ treeKey: carried, treeDirty: true })], [{ status: "M", path: "src/a.ts" }]));
+  assert.equal(plan.kind, "scoped");
+  if (plan.kind !== "scoped") return;
+  assert.equal(plan.baseSha, "a".repeat(40));
+  assert.deepEqual([...plan.paths].sort(), ["src/a.ts", "src/parentDirty.ts"]);
+});
+
+test("IX-9: a seed row at another INDEX_VERSION still walks", () => {
+  const plan = planGitScopedIncremental(seedInputs([seedRun({ indexVersion: "v0-old" })]));
+  assert.equal(plan.kind, "walk");
 });

@@ -400,6 +400,12 @@ export function runGraphMigrations(db: Database.Database, vectorEnabled: boolean
     if (repoCols.length > 0 && !repoCols.some((c) => c.name === "annotation_key")) {
       db.exec("alter table repositories add column annotation_key text");
     }
+    // IX-9 U1 (MCP-ISSUE-119): the namespace extraction mints stable ids under. Null means the repo's own
+    // repoId, so every repo indexed before this column existed keeps byte-identical ids. A worktree shares
+    // its parent's namespace, which lets its index be seeded by copying the parent's rows without a re-mint.
+    if (repoCols.length > 0 && !repoCols.some((c) => c.name === "id_namespace")) {
+      db.exec("alter table repositories add column id_namespace text");
+    }
     // Add signature column to symbols if missing (backward-compatible with existing DBs)
     const symbolsCols = db.prepare("pragma table_info(symbols)").all() as { name: string }[];
     if (!symbolsCols.some((c) => c.name === "signature")) {
