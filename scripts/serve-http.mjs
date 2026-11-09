@@ -891,7 +891,40 @@ export function portInUse(port) {
   });
 }
 
+/**
+ * MCP-ISSUE-123: raise `pid` to Normal priority when it runs lower; never lower it. The scheduled task starts the
+ * supervisor at Task Scheduler's default priority 7 = BELOW_NORMAL, which the server, its worker threads and its git
+ * children inherit. On 9 Nov, 16 Normal-priority CPU burners starved it: 10–40 s event-loop stalls, git calls killed at
+ * their 5 s timeout, a full run 30x slower. Owner, 9 Nov: "Nâng lên Normal (Recommended)". Best-effort: a failure is
+ * returned, never thrown.
+ */
+export function ensureNormalPriority(pid, { getPriority = os.getPriority, setPriority = os.setPriority } = {}) {
+  const NORMAL = os.constants.priority.PRIORITY_NORMAL;
+  let before;
+  try {
+    before = getPriority(pid);
+  } catch (e) {
+    return { pid, changed: false, error: e.message };
+  }
+  // Higher numbers are lower priority (nice values; Windows priority classes map onto them).
+  if (before <= NORMAL) return { pid, before, after: before, changed: false };
+  try {
+    setPriority(pid, NORMAL);
+  } catch (e) {
+    return { pid, before, after: before, changed: false, error: e.message };
+  }
+  let after = NORMAL;
+  try {
+    after = getPriority(pid);
+  } catch {
+    // Set, but cannot be read back: report what was asked.
+  }
+  return { pid, before, after, changed: after !== before };
+}
+
 async function serve(server, envFile, logFile, deployRoot) {
+  // MCP-ISSUE-123: first, so a hand-off child and every server spawned below start at Normal too.
+  const selfPriority = ensureNormalPriority(process.pid);
   const own = ownDeploy();
   const target = handOffTarget(server, { deployRoot, own });
   if (target) return handOff(target);
@@ -921,6 +954,16 @@ async function serve(server, envFile, logFile, deployRoot) {
     appendRestartRecord(restartLog, r);
     if (typeof stderr === "number") fs.writeSync(stderr, `${JSON.stringify({ ts: r.ts, level: r.event === "started" ? "info" : "warn", name: "serve-http", msg: `supervisor_${r.event}`, fields: { ...r, ts: undefined } })}\n`);
   };
+  // MCP-ISSUE-123: the priority change (or why it failed) lands in the server's log, for the supervisor and each child.
+  const logPriority = (role, p) => {
+    if (typeof stderr !== "number") return;
+    try {
+      fs.writeSync(stderr, `${JSON.stringify({ ts: new Date().toISOString(), level: p.error ? "warn" : "info", name: "serve-http", msg: "supervisor_priority", fields: { role, ...p } })}\n`);
+    } catch {
+      // A log write never stops the supervisor.
+    }
+  };
+  logPriority("supervisor", selfPriority);
   const supervisor = supervise({
     // Inherit PATH and the like; every server setting comes from the env file and wins.
     spawnChild: () =>
@@ -931,6 +974,8 @@ async function serve(server, envFile, logFile, deployRoot) {
       }),
     record,
     onStarted: (child) => {
+      // MCP-ISSUE-123: on every start and respawn, whatever the child inherited.
+      logPriority("server", ensureNormalPriority(child.pid));
       writeJsonAtomic(path.join(keyDir, "running.json"), {
         dir: deploy?.dir ?? null,
         sha: deploy?.sha ?? null,

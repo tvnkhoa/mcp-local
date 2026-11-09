@@ -22,7 +22,7 @@ import { fileURLToPath } from "node:url";
 import { getServer } from "./lib/manifest.mjs";
 import { deployHash, importClosure, nativePackages, staleBuilds } from "./lib/deploy.mjs";
 import { isLink, removeTree } from "./lib/junctions.mjs";
-import { approvalSecretEnvName, approvalSecretFile, appendRestartRecord, deployCheck, deployInUse, deployServer, ensureApprovalSecret, handOffTarget, httpClientEntry, httpEnvNames, isServeHttpFor, listDeploys, nextRespawn, ownDeploy, parseListenerPid, pruneDeploys, readEnvFile, readRestartRecords, resolveServeEntry, RESPAWN_POLICY, restartLogFile, restartServer, restartsCheck, runningDeploy, supervise, taskCreateArgs, taskDeniedHint, taskXml, verifyDeploy, writeEnvFile } from "./serve-http.mjs";
+import { approvalSecretEnvName, approvalSecretFile, appendRestartRecord, deployCheck, deployInUse, deployServer, ensureApprovalSecret, ensureNormalPriority, handOffTarget, httpClientEntry, httpEnvNames, isServeHttpFor, listDeploys, nextRespawn, ownDeploy, parseListenerPid, pruneDeploys, readEnvFile, readRestartRecords, resolveServeEntry, RESPAWN_POLICY, restartLogFile, restartServer, restartsCheck, runningDeploy, supervise, taskCreateArgs, taskDeniedHint, taskXml, verifyDeploy, writeEnvFile } from "./serve-http.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), "serve-http-test-"));
@@ -929,6 +929,107 @@ test("MCP-ISSUE-115: a server killed under a scratch supervisor is back within 3
     sup.kill();
     await waitFor(async () => !(await get()), 10_000);
     // The supervisor's SIGTERM path stops the child; on Windows kill() is TerminateProcess, which leaves it — end it here.
+    const last = runningDeploy(server, { deployRoot })?.pid;
+    if (last) {
+      try {
+        process.kill(last);
+      } catch {
+        // already gone
+      }
+    }
+  }
+});
+
+test("MCP-ISSUE-123: ensureNormalPriority raises a lower priority to Normal and never lowers a higher one", () => {
+  const { PRIORITY_NORMAL, PRIORITY_BELOW_NORMAL, PRIORITY_HIGH } = os.constants.priority;
+  const fake = (start) => {
+    let p = start;
+    const calls = [];
+    return { calls, getPriority: () => p, setPriority: (_pid, v) => { calls.push(v); p = v; } };
+  };
+  const below = fake(PRIORITY_BELOW_NORMAL);
+  assert.deepEqual(ensureNormalPriority(42, below), { pid: 42, before: PRIORITY_BELOW_NORMAL, after: PRIORITY_NORMAL, changed: true });
+  assert.deepEqual(below.calls, [PRIORITY_NORMAL]);
+  for (const start of [PRIORITY_NORMAL, PRIORITY_HIGH]) {
+    const f = fake(start);
+    assert.deepEqual(ensureNormalPriority(42, f), { pid: 42, before: start, after: start, changed: false });
+    assert.deepEqual(f.calls, [], "a Normal or higher priority is left alone");
+  }
+  const denied = ensureNormalPriority(42, { getPriority: () => PRIORITY_BELOW_NORMAL, setPriority: () => { throw new Error("EACCES"); } });
+  assert.equal(denied.changed, false);
+  assert.equal(denied.error, "EACCES", "a failure is returned, never thrown");
+  assert.equal(ensureNormalPriority(42, { getPriority: () => { throw new Error("ESRCH"); } }).error, "ESRCH");
+});
+
+test("MCP-ISSUE-123: a supervisor started at BelowNormal runs itself and every server it spawns at Normal, and logs it", { timeout: 90_000, skip: process.platform !== "win32" && "Windows priority classes (the scheduled task's BELOW_NORMAL)" }, async () => {
+  const { PRIORITY_NORMAL, PRIORITY_BELOW_NORMAL } = os.constants.priority;
+  const server = getServer("codebase-index");
+  const names = httpEnvNames(server);
+  const dir = fs.mkdtempSync(path.join(TMP, "priority-"));
+  const deployRoot = path.join(dir, "deploy");
+  const entry = path.join(dir, "fake-server.mjs");
+  fs.writeFileSync(
+    entry,
+    `import http from "node:http";\nhttp.createServer((q, s) => s.end(String(process.pid))).listen(Number(process.env.${names.port}), "127.0.0.1");\n`
+  );
+  fs.mkdirSync(path.join(deployRoot, server.key), { recursive: true });
+  fs.writeFileSync(path.join(deployRoot, server.key, "current.json"), JSON.stringify({ dir, sha: "scratch", n: 1, entry, supervisor: null }));
+  const port = await new Promise((resolve) => {
+    const s = net.createServer().listen(0, "127.0.0.1", () => {
+      const p = s.address().port;
+      s.close(() => resolve(p));
+    });
+  });
+  const envFile = path.join(dir, "env.json");
+  writeEnvFile(envFile, { [names.port]: String(port), [names.token]: "t".repeat(40), [approvalSecretEnvName(server)]: "s".repeat(64) });
+  const logFile = path.join(dir, "server.log");
+  // What the scheduled task does: start the supervisor at BELOW_NORMAL. A Windows child inherits a BELOW_NORMAL
+  // parent's class, so lower this test process for the spawn only, then put it back.
+  const mine = os.getPriority();
+  os.setPriority(PRIORITY_BELOW_NORMAL);
+  let sup;
+  try {
+    sup = spawn(process.execPath, [path.join(ROOT, "scripts", "serve-http.mjs"), "--server", server.key, "--config", envFile, "--log", logFile, "--deploy-root", deployRoot], { stdio: "ignore" });
+  } finally {
+    os.setPriority(mine);
+  }
+  const get = () =>
+    new Promise((resolve) => {
+      http.get({ host: "127.0.0.1", port, path: "/", agent: false }, (res) => {
+        let d = "";
+        res.on("data", (c) => (d += c));
+        res.on("end", () => resolve(Number(d)));
+      }).on("error", () => resolve(null));
+    });
+  const waitFor = async (pred, ms) => {
+    const until = Date.now() + ms;
+    while (Date.now() < until) {
+      const v = await pred();
+      if (v) return v;
+      await new Promise((r) => setTimeout(r, 200));
+    }
+    return null;
+  };
+  try {
+    const first = await waitFor(get, 15_000);
+    assert.ok(first, "the server answers");
+    assert.equal(os.getPriority(sup.pid), PRIORITY_NORMAL, "the supervisor raised itself to Normal");
+    assert.equal(os.getPriority(first), PRIORITY_NORMAL, "the server runs at Normal");
+    process.kill(first);
+    const respawned = await waitFor(async () => {
+      const pid = await get();
+      return pid && pid !== first ? pid : null;
+    }, 30_000);
+    assert.ok(respawned, "a respawned server answers");
+    assert.equal(os.getPriority(respawned), PRIORITY_NORMAL, "the respawned server runs at Normal");
+    const lines = fs.readFileSync(logFile, "utf-8").split("\n").filter((l) => l.includes('"msg":"supervisor_priority"')).map((l) => JSON.parse(l).fields);
+    assert.equal(lines.length, 3, "one line for the supervisor, one per server start");
+    assert.deepEqual(lines.map((p) => p.role), ["supervisor", "server", "server"]);
+    assert.equal(lines[0].before, PRIORITY_BELOW_NORMAL, "the supervisor started at BelowNormal");
+    assert.ok(lines.every((p) => p.after === PRIORITY_NORMAL && !p.error), JSON.stringify(lines));
+  } finally {
+    sup.kill();
+    await waitFor(async () => !(await get()), 10_000);
     const last = runningDeploy(server, { deployRoot })?.pid;
     if (last) {
       try {
