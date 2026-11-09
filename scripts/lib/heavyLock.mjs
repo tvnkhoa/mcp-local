@@ -880,7 +880,7 @@ export async function acquireHeavyLock({
     // A shared holder keeps the lock's name taken while it runs, even after the holder that took it
     // leaves: a keeper process re-takes it within one poll (an older caller never slips in beside shared
     // holders for longer). This process cannot: it sits in spawnSync for the whole run.
-    const keeper = pipe !== null && !request.exclusive && nameKeeper ? startNameKeeper({ file, pipe, slotFile, pollMs }) : null;
+    const keeper = pipe !== null && !request.exclusive && nameKeeper ? startNameKeeper({ file, pipe, slotFile, slotPipe, pollMs }) : null;
     let released = false;
     const onSignal = () => {
       release();
@@ -894,8 +894,9 @@ export async function acquireHeavyLock({
       process.off("SIGTERM", onSignal);
       // The keeper first (TerminateProcess / SIGKILL: it writes nothing after), then the files, while the
       // names are still held: no next holder can have written them yet.
+      // Only a keeper not known to have exited: a pid that exited may already be another process's.
       try {
-        if (keeper?.pid !== undefined) process.kill(keeper.pid, "SIGKILL");
+        if (keeper?.pid !== undefined && keeper.exitCode === null && keeper.signalCode === null) process.kill(keeper.pid, "SIGKILL");
       } catch {
         // already gone
       }
@@ -920,13 +921,17 @@ const KEEP_FLAG = "--keep-lock-name";
  * Start the name keeper of a shared holder (review M1): a small detached node process that, every poll,
  * re-takes the lock's single name when it is free and writes the holder's slot as the lock file, so an
  * older caller (which knows only that name) cannot take it while any shared holder runs. It holds the
- * name for the holder (an older caller's view: one holder, this one). It stops — letting the name go —
- * when the holder's pid is gone or its slot file is removed; the holder also kills it on release.
+ * name for the holder (an older caller's view: one holder, this one). While it holds the name it puts the
+ * lock file back whenever it is missing or names another token (a releasing holder's check-then-remove can
+ * delete it just after this keeper wrote it; a held name without its file reads as an older caller to every
+ * client). It stops — letting the name go — when the holder's pid is gone, its slot name is no longer held
+ * (the pid was reused after a `taskkill /F`), or its slot file is removed (ENOENT only: a read refused with
+ * EPERM/EBUSY is not proof of anything); the holder also kills it on release.
  * `null` when it cannot start (then the window is the one before H-6b review: until the next admission).
  */
-function startNameKeeper({ file, pipe, slotFile, pollMs }) {
+function startNameKeeper({ file, pipe, slotFile, slotPipe, pollMs }) {
   try {
-    const child = spawn(process.execPath, [SELF, KEEP_FLAG, String(process.pid), file, pipe, slotFile, String(Math.max(50, pollMs))], {
+    const child = spawn(process.execPath, [SELF, KEEP_FLAG, String(process.pid), file, pipe, slotFile, String(Math.max(50, pollMs)), slotPipe], {
       stdio: "ignore",
       windowsHide: true,
       detached: false
@@ -939,34 +944,46 @@ function startNameKeeper({ file, pipe, slotFile, pollMs }) {
   }
 }
 
-/** The keeper's loop (see startNameKeeper). */
-async function keepLockName([parentPid, file, pipe, slotFile, pollMs]) {
+/** The keeper's read of the slot file: its text, `null` when it is gone (ENOENT), `undefined` when unreadable now. */
+function readKeptSlot(slotFile) {
+  try {
+    return fs.readFileSync(slotFile, "utf8");
+  } catch (error) {
+    return error.code === "ENOENT" ? null : undefined;
+  }
+}
+
+/** The keeper's loop (see startNameKeeper). `slotPipe` is last: a keeper started by an older holder has none. */
+async function keepLockName([parentPid, file, pipe, slotFile, pollMs, slotPipe]) {
   const parent = Number(parentPid);
   let server = null;
   let token = null;
+  let slot = null;
   const stop = () => {
     if (server !== null && token !== null && parseHolder(readRaw(file) ?? "")?.token === token) fs.rmSync(file, { force: true });
     server?.close();
     process.exit(0);
   };
   for (;;) {
-    const raw = readRaw(slotFile);
+    const raw = readKeptSlot(slotFile);
     if (raw === null || !isPidAlive(parent)) stop();
+    if (typeof raw === "string") slot = raw;
+    // The holder's own name, asked by listening: free means the holder is gone whatever its pid now names.
+    if (typeof slotPipe === "string" && slotPipe !== "" && (await isNameHeld(slotPipe)) === false) stop();
     if (server === null) {
       try {
         server = await tryListen(pipe);
       } catch {
         server = null;
       }
-      if (server !== null) {
-        const slot = readRaw(slotFile);
-        if (slot === null) stop();
-        token = parseHolder(slot)?.token ?? null;
-        try {
-          writeHolderFile(file, slot);
-        } catch {
-          // the name is what counts; the file is information
-        }
+    }
+    if (server !== null && token === null) token = parseHolder(slot ?? "")?.token ?? null;
+    // Holding the name: the lock file must name this holder (missing or another token → write it back).
+    if (server !== null && slot !== null && token !== null && parseHolder(readRaw(file) ?? "")?.token !== token) {
+      try {
+        writeHolderFile(file, slot);
+      } catch {
+        // the name is what counts; the file is information (tried again next poll)
       }
     }
     await sleep(Number(pollMs) || POLL_MS);

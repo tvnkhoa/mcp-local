@@ -202,7 +202,9 @@ reads a holder blocked in spawnSync as dead once its pipe instances are used); a
 under a short admission name, so two callers never count the same RAM. An exclusive holder takes the
 lock's single name, which every older-version caller needs: neither runs beside the other. While shared
 holders run, each has a small keeper process that re-takes that name within one poll (2 s) of the holder
-holding it leaving, so an older caller gets in beside shared holders only in that ≤ 1-poll window. Known
+holding it leaving, so an older caller gets in beside shared holders only in that ≤ 1-poll window. While it
+holds the name it puts the lock file back if a releasing holder removed it, and it stops once its holder's
+own name is free (a `taskkill /F`ed holder whose pid was reused). Known
 transitional limit: a nested child running an older version under a new shared parent that does not hold
 the name may wait for its own parent (older code looks for the parent only in the name's holder file); it
 ends once every wrapper runs the new deploy. A caller that does not fit prints why (`Σ … MB > budget … MB`,

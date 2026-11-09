@@ -544,3 +544,50 @@ test("M1: a shared holder's keeper stops when its holder is killed (no name kept
   assert.equal(lock.acquired, true, "an exclusive run gets the name once the dead holder's keeper let it go");
   lock.release();
 });
+
+test("keeper review 1: a keeper whose holder's slot name is free stops though the holder's pid is alive (pid reused after taskkill /F)", { skip: noPipe }, async (t) => {
+  // The holder was hard-killed and its pid now names another live process (here: this test process).
+  // The keeper is a real process started as a holder starts it; the slot file is left as taskkill leaves it.
+  const lockPath = tempLock();
+  const pipe = heavyLockPipeName(lockPath);
+  const token = "reused-pid-holder";
+  const slotFile = path.join(heavyLockHoldersDir(lockPath), `${token}.json`);
+  fs.mkdirSync(path.dirname(slotFile), { recursive: true });
+  const content = JSON.stringify({ v: 2, pid: process.pid, token, cmd: "dead holder", exclusive: false, slotPipe: `${pipe}-h-${token}` });
+  fs.writeFileSync(slotFile, content);
+  const keeper = spawn(process.execPath, [path.join(HERE, "heavyLock.mjs"), "--keep-lock-name", String(process.pid), lockPath, pipe, slotFile, "50", `${pipe}-h-${token}`], { stdio: "ignore", windowsHide: true });
+  const exited = new Promise((resolve) => keeper.on("exit", () => resolve(true)));
+  t.after(() => keeper.exitCode === null && keeper.signalCode === null && keeper.kill("SIGKILL"));
+  const stopped = await Promise.race([exited, sleep(3_000).then(() => false)]);
+  assert.equal(stopped, true, "the keeper stops within a few polls: its holder's slot name is free");
+  const lock = await take(lockPath, 100_000, { cost: "large", timeoutMs: 2_000 });
+  assert.equal(lock.acquired, true, "the lock's name is free again: an exclusive run gets it");
+  lock.release();
+});
+
+test("keeper review 2: a keeper holding the name puts the lock file back when it is removed or names another token (release race)", { skip: noPipe }, async (t) => {
+  const lockPath = tempLock();
+  const a = await take(lockPath, 100_000, { ramMb: 500, cmd: "a" });
+  const b = await take(lockPath, 100_000, { ramMb: 500, cmd: "b" });
+  t.after(() => (a.release(), b.release()));
+  a.release();
+  const fileToken = () => {
+    try {
+      return JSON.parse(fs.readFileSync(lockPath, "utf8")).token;
+    } catch {
+      return null;
+    }
+  };
+  await until(() => fileToken() === b.token, 3_000);
+  // a's check-then-remove ran after b's keeper wrote: the file is gone while the keeper holds the name.
+  fs.rmSync(lockPath, { force: true });
+  await until(() => fileToken() === b.token, 3_000);
+  // A torn race the other way: the file names a token nobody holds.
+  fs.writeFileSync(lockPath, JSON.stringify({ v: 2, token: "someone-else", pid: process.pid, exclusive: false }));
+  await until(() => fileToken() === b.token, 3_000);
+  // Every new client sees b as the name's guard, not an older caller: a small shared run is admitted.
+  const c = await take(lockPath, 100_000, { ramMb: 500, cmd: "c", timeoutMs: 2_000 });
+  assert.equal(c.acquired, true, "a new shared run is admitted beside b");
+  c.release();
+  b.release();
+});
