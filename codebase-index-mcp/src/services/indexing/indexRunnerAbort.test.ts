@@ -5,6 +5,8 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 
+import Database from "better-sqlite3";
+
 import { GraphStore } from "../../repositories/graphStore.js";
 import { createIndexRunner, type RunExtras } from "./indexRunner.js";
 import type { IndexMode, IndexRunSummary } from "../../types/index.js";
@@ -93,5 +95,115 @@ test("MCP-ISSUE-123: a run aborted mid-extraction stops, is recorded cancelled w
     assert.equal(next.commitSha, head, "the next complete run records the commit");
     assert.ok(!/skip/i.test(String((next as { skipReason?: string }).skipReason ?? "")), "the next run was not fast-skipped on the aborted run");
     assert.ok(store.listIndexedFiles("r").length === 40, "and indexed every file");
+  });
+});
+
+/** The graph as rows a clean full run must reproduce: symbol ids, and edges as from|to|type, sorted. */
+function graphOf(dbPath: string): { symbols: string[]; edges: string[]; edgeTypes: Record<string, number> } {
+  const db = new Database(dbPath, { readonly: true });
+  try {
+    const symbols = (db.prepare("select symbol_id as id from symbols where repo_id = 'r' order by symbol_id").all() as { id: string }[]).map((r) => r.id);
+    const edgeRows = db.prepare("select from_id as f, to_id as t, type from edges where repo_id = 'r'").all() as { f: string; t: string; type: string }[];
+    const edges = edgeRows.map((e) => `${e.f}|${e.t}|${e.type}`).sort();
+    const edgeTypes: Record<string, number> = {};
+    for (const e of edgeRows) edgeTypes[e.type] = (edgeTypes[e.type] ?? 0) + 1;
+    return { symbols, edges, edgeTypes };
+  } finally {
+    db.close();
+  }
+}
+
+/** A clean full run of `repo` at its current HEAD, on a fresh DB. */
+async function cleanFullGraph(repo: string): Promise<ReturnType<typeof graphOf>> {
+  const work = mkdtempSync(path.join(tmpdir(), "cim-abort-clean-"));
+  const dbPath = path.join(work, "g.db");
+  const store = new GraphStore(dbPath);
+  try {
+    assert.equal((await run(store, repo, "full")).status, "ok");
+  } finally {
+    store.close();
+  }
+  try {
+    return graphOf(dbPath);
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+  }
+}
+
+/**
+ * Abort `mode` right after its files were written and before the resolve passes (the `pruning` tick): the partial
+ * state a terminate-free exit leaves — written rows, unresolved edges, dependents not queued.
+ */
+async function abortedRun(store: GraphStore, dbPath: string, repo: string, mode: IndexMode): Promise<IndexRunSummary> {
+  const controller = new AbortController();
+  const result = await run(store, repo, mode, {
+    abortSignal: controller.signal,
+    onProgress: (_p, _t, message) => {
+      if (/pruning/i.test(message) && !controller.signal.aborted) controller.abort();
+    }
+  });
+  assert.equal(controller.signal.aborted, true, "the fixture reached the post-phase");
+  assert.equal(result.status, "cancelled");
+  assert.ok(graphOf(dbPath).symbols.length > 0, "the aborted run left written rows behind");
+  return result;
+}
+
+async function withRepoDb(fn: (store: GraphStore, dbPath: string, repo: string) => Promise<void>): Promise<void> {
+  const { root } = makeRepo();
+  const work = mkdtempSync(path.join(tmpdir(), "cim-abort-db-"));
+  const dbPath = path.join(work, "g.db");
+  const store = new GraphStore(dbPath);
+  try {
+    await fn(store, dbPath, root.replace(/\\/g, "/"));
+  } finally {
+    store.close();
+    rmSync(work, { recursive: true, force: true });
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
+test("MCP-ISSUE-123 re-review A: after an aborted FIRST full run, the next incremental leaves the graph a clean full run builds", async () => {
+  await withRepoDb(async (store, dbPath, repo) => {
+    await abortedRun(store, dbPath, repo, "full");
+    const next = await run(store, repo, "incremental");
+    assert.equal(next.status, "ok");
+    const got = graphOf(dbPath);
+    const want = await cleanFullGraph(repo);
+    assert.deepEqual(got.edgeTypes, want.edgeTypes, "edges per type");
+    assert.deepEqual(got.symbols, want.symbols, "symbols");
+    assert.deepEqual(got.edges, want.edges, "edges");
+  });
+});
+
+test("MCP-ISSUE-123 re-review A: after an aborted incremental over a new commit, the next incremental leaves the graph a clean full run builds", async () => {
+  await withRepoDb(async (store, dbPath, repo) => {
+    assert.equal((await run(store, repo, "full")).status, "ok");
+    // A new commit that changes every file: each now also calls the next one, so resolution depends on files the
+    // aborted run never reached.
+    for (let i = 0; i < 40; i++) {
+      const rel = `src/m${String(i)}.ts`;
+      const next = (i + 1) % 40;
+      writeFileSync(
+        path.join(repo, rel),
+        `import { g${String(next)} } from './m${String(next)}';
+export function g${String(i)}(): number {
+  return ${String(i)};
+}
+export function h${String(i)}(): number {
+  return g${String(next)}();
+}
+`
+      );
+    }
+    git(repo, "add", "--", "src");
+    git(repo, "commit", "-q", "-m", "rename and cross-call");
+    await abortedRun(store, dbPath, repo, "incremental");
+    const next = await run(store, repo, "incremental");
+    assert.equal(next.status, "ok");
+    const got = graphOf(dbPath);
+    const want = await cleanFullGraph(repo);
+    assert.deepEqual(got.edgeTypes, want.edgeTypes, "edges per type");
+    assert.deepEqual(got.symbols, want.symbols, "symbols");
+    assert.deepEqual(got.edges, want.edges, "edges");
   });
 });

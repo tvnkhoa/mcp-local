@@ -215,6 +215,21 @@ export function createIndexRunner(options: IndexRunnerOptions): RunIndexAndResol
     });
   }
 
+  // MCP-ISSUE-123 re-review A: after an aborted run (cancelled, no commit — `recordAborted`) the graph holds that run's
+  // partial batches: files written but never resolved, dependents never queued. A scoped run would see their hashes
+  // match and resolve only what it re-extracts, leaving unresolved edges until some full run. The old terminate left a
+  // run marker and so a repair; this is its equivalent. Checked before any skip or no-op record can shadow the run.
+  const latestRun = store.getLatestRun(repoId);
+  if (mode !== "full" && !escalatedBecause && latestRun?.status === "cancelled" && latestRun.commitSha === null) {
+    indexLog(`[index-scope] repoId=${repoId} the last run was aborted: running full instead of ${mode}`);
+    return runIndexAndResolve(repoId, repoPath, "full", docsEnabled, maxFiles, batchSize, {
+      escalatedBecause: `full (the last run ${latestRun.runId} was aborted; ${mode} requested)`,
+      ...(givenRunId && { runId: givenRunId }),
+      ...(extras.onProgress && { onProgress: extras.onProgress }),
+      ...(extras.abortSignal && { abortSignal: extras.abortSignal })
+    });
+  }
+
   /** Release J: redo a scoped run as a full one, and say why on the full run's record. */
   const escalateToFull = (reason: string): Promise<IndexRunResult> => {
     indexLog(`[index-scope] repoId=${repoId} ${mode} run escalated to full: ${reason}`);
