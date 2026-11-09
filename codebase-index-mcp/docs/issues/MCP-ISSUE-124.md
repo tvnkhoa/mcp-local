@@ -1,7 +1,6 @@
 ## MCP-ISSUE-124 — start-up under CPU load took 28 s: Node resolving 613 modules one by one
 
 - **Status:** FIXED 2026-11-09 (row 7 phase 2): the server is served from an esbuild bundle, `dist/bundle/index.js`.
-  Loaded after-runs pending a leader-scheduled slot.
 - **Scenario:** follow-up #3 of MCP-ISSUE-123. A served or stdio server restarted while the machine is busy (other
   sessions' builds, test suites, indexers) takes tens of seconds to answer `tools/list`, and the session sees the
   server as down.
@@ -25,9 +24,14 @@
     (`runningEntryPath`) and the package.json lookup behind the server version (`nearestPackageJson`).
   - The manifest's codebase-index entry is `dist/bundle/index.js`, and `serve-http.mjs`' deploy serves the manifest
     entry. The unbundled `dist/` stays, because the harnesses import it by path.
-- **Before/after (solo, median of 3, probe preload on, `-bundle-raw/`):** unbundled 2614 ms (613 modules); bundled
-  600 ms (57 modules). `tools/list` hash e309fd5f4fd1125e is identical (46 tools). Phase 1 prototype under load:
-  28.2 s → 2.1 s.
+- **Before/after (spawn → `tools/list`, median of 3, no probe, f021bac, `-bundle-raw/ab-run.log`):**
+  | Condition | Unbundled | Bundled |
+  |---|---|---|
+  | Solo | 2130 ms (613 modules) | 512 ms (57 modules) |
+  | Load: 8 burners + 4 git loopers | 4814 ms | 1084 ms |
+
+  The `tools/list` hash e309fd5f4fd1125e (46 tools) is identical in every run. The phase 1 prototype, under 16 burners
+  + 8 loopers, went from 28.2 s to 2.1 s.
 - **Evidence:** `~/.claude/handover/briefs/2026-11-09-mcp-local-startup-load-evidence.md` (diagnosis);
   `~/.claude/handover/briefs/2026-11-09-mcp-local-bundle-evidence.md` (fix).
 - **Enhancement proposal:** if the loaded after-runs still show seconds, lazy-import the indexing and extractor chain
