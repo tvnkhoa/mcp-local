@@ -10,7 +10,7 @@
  *            already taken that RAM out of "free"; adding it back would admit against RAM in use).
  *            Admit while Σ declared MB of the holders + own ≤ budget. Amendment (owner, 5 Nov): the FIFO
  *            head with no other holder is admitted when free ≥ its declared MB + 2048, reserve or not.
- * P2 declared MB = `--ram-mb` | class p95 × 1.5 after ≥ 3 measured runs (floor 512, 4000 for a dotnet
+ * P2 declared MB = `--ram-mb` | class p95 × 1.5 after ≥ 3 measured runs (floor 512, 2000 for a dotnet
  *            class) | fallback 8000 dotnet, 1500 other. Dotnet = class `wecbe-build:` / `wecbe-test:`,
  *            or class / command containing `dotnet`.
  * P3 exclusive (waits for all, blocks all): `--cost large`, a .sln build, a Release publish, a Docker
@@ -32,7 +32,7 @@ export const BYPASS_MS = 10 * 60_000;
 export const HARNESS_CAP = 2;
 export const P95_FACTOR = 1.5;
 export const MIN_MEASURED_RUNS = 3;
-export const FLOOR_MB = Object.freeze({ dotnet: 4000, other: 512 });
+export const FLOOR_MB = Object.freeze({ dotnet: 2000, other: 512 });
 export const FALLBACK_MB = Object.freeze({ dotnet: 8000, other: 1500 });
 
 /**

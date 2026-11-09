@@ -83,7 +83,7 @@ const tickets = (lockPath) => {
 
 // ---- the rules (P2-P4) ----
 
-test("declared MB: --ram-mb wins; fallback 8000 dotnet / 1500 other under 3 measured runs; then p95 x 1.5 with floors 4000 / 512", () => {
+test("declared MB: --ram-mb wins; fallback 8000 dotnet / 1500 other under 3 measured runs; then p95 x 1.5 with floors 2000 / 512", () => {
   const rows = (klass, peaks) => peaks.map((peakMb) => ({ class: klass, peakMb }));
   assert.deepEqual(declaredMb({ ramMb: 700, klass: "wecbe-build:X", rows: rows("wecbe-build:X", [100, 100, 100]) }).mb, 700);
   assert.equal(declaredMb({ klass: "mcp-local/x", rows: rows("mcp-local/x", [800, 900]) }).mb, FALLBACK_MB.other);
@@ -91,11 +91,21 @@ test("declared MB: --ram-mb wins; fallback 8000 dotnet / 1500 other under 3 meas
   assert.equal(declaredMb({ klass: "ai/x", cmd: "dotnet build a.csproj", rows: [] }).mb, 8000, "a dotnet command is a dotnet class");
   // Unmeasured rows (peakMb null) and other classes do not count toward the 3.
   assert.equal(declaredMb({ klass: "k", rows: [...rows("k", [1000, 1000]), { class: "k", peakMb: null }, ...rows("other", [5, 5, 5])] }).from, "fallback");
-  // Measured: wec.be's real CRM.Customer.Mcp.Test build peaks (1358 MB) → p95 x 1.5 = 2037, under the dotnet floor.
+  // Measured: wec.be's real CRM.Customer.Mcp.Test build peaks (1358 MB) → p95 x 1.5 = 2037, just over the 2000 dotnet floor.
   assert.deepEqual(
     { ...declaredMb({ klass: "wecbe-build:CRM.Customer.Mcp.Test", rows: rows("wecbe-build:CRM.Customer.Mcp.Test", [1300, 1358, 1340]) }) },
-    { mb: FLOOR_MB.dotnet, from: "p95", runs: 3, p95: 1358 }
+    { mb: 2037, from: "p95", runs: 3, p95: 1358 }
   );
+  // H-6b P2 floor 2000 (owner 9 Nov, agreed with wec.be): below it declares exactly 2000, above it p95 x 1.5.
+  assert.equal(FLOOR_MB.dotnet, 2000);
+  assert.deepEqual(
+    { ...declaredMb({ klass: "wecbe-build:Small", rows: rows("wecbe-build:Small", [900, 1000, 1100]) }) },
+    { mb: 2000, from: "p95", runs: 3, p95: 1100 },
+    "1650 is under the floor"
+  );
+  assert.equal(declaredMb({ klass: "wecbe-test:Big", rows: rows("wecbe-test:Big", [1500, 1600, 1700]) }).mb, 2550, "1700 x 1.5 is above the floor");
+  assert.equal(declaredMb({ klass: "wecbe-test:Two", rows: rows("wecbe-test:Two", [100, 100]) }).mb, 8000, "under 3 measured runs: the 8000 fallback, not the floor");
+  assert.equal(declaredMb({ klass: "ai/x", cmd: "dotnet build a.csproj", rows: rows("ai/x", [100, 100, 100]) }).mb, 2000, "a dotnet command class floors at 2000");
   assert.equal(declaredMb({ klass: "k", rows: rows("k", [100, 200, 300]) }).mb, FLOOR_MB.other, "450 is under the 512 floor");
   assert.equal(declaredMb({ klass: "k", rows: rows("k", [421, 600, 859, 700]) }).mb, Math.ceil(859 * 1.5), "nearest-rank p95 of four is the max");
   assert.equal(declaredMb({ klass: "wecbe-test:T", rows: rows("wecbe-test:T", [5000, 6000, 7000]) }).mb, 10500);
@@ -294,7 +304,7 @@ test("the declared MB comes from the class history next to the lock (p95 x 1.5 a
   const rows = [1300, 1358, 1340].map((peakMb) => JSON.stringify({ class: "wecbe-build:CRM.Customer.Mcp.Test", peakMb }));
   fs.writeFileSync(`${lockPath}.history.jsonl`, `${rows.join("\n")}\n`);
   const l = await take(lockPath, 100_000, { klass: "wecbe-build:CRM.Customer.Mcp.Test" });
-  assert.deepEqual([l.request.declaredMb, l.request.declaredFrom], [4000, "p95"]);
+  assert.deepEqual([l.request.declaredMb, l.request.declaredFrom], [2037, "p95"]);
   l.release();
 });
 

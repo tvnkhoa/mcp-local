@@ -191,7 +191,7 @@ and codebase-index's `run-tests.mjs` take a machine-wide lock, `~/.claude/locks/
 hold it at once while Σ of their declared MB plus the newcomer's ≤ free RAM + the holders' measured working
 set (each at most its declaration) − 8192 MB, recomputed every poll; the first waiter alone (no holder at
 all) needs only free RAM ≥ its declared MB + 2048, below the reserve too (owner, 5 Nov). Declared MB: `--ram-mb N`, else the
-class's p95 × 1.5 after 3 measured runs (floor 512; 4000 for a dotnet class — `wecbe-build:` / `wecbe-test:`
+class's p95 × 1.5 after 3 measured runs (floor 512; 2000 for a dotnet class — `wecbe-build:` / `wecbe-test:`
 or `dotnet` in class or command), else 8000 dotnet / 1500 other. Exclusive (waits for all, blocks all):
 `--cost large`, a `.sln` build, a Release publish, a Docker build, `verify:all`, a codebase-index run of
 wec.be. At most 2 harness suites (run-tests, run-servers test, verify-*) and one wec.be .NET run (class
