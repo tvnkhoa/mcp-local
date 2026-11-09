@@ -122,7 +122,7 @@ test("serverEntryPath and serverDirPath are absolute and nested correctly", () =
   const server = byKey("codebase-index");
   assert.ok(path.isAbsolute(serverEntryPath(server)));
   assert.equal(serverDirPath(server), path.join(WORKSPACE_ROOT, "codebase-index-mcp"));
-  assert.equal(serverEntryPath(server), path.join(WORKSPACE_ROOT, "codebase-index-mcp", "dist", "index.js"));
+  assert.equal(serverEntryPath(server), path.join(WORKSPACE_ROOT, "codebase-index-mcp", "dist", "bundle", "index.js"), "MCP-ISSUE-124: served from the esbuild bundle");
 });
 
 // --- evaluateEnv -------------------------------------------------------------
