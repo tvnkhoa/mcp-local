@@ -89,15 +89,40 @@ function endSession(store: GraphStore, truncate: boolean): void {
   }
 }
 
-if (parentPort) {
-  const port = parentPort;
+/** The part of `MessagePort` the worker uses — a seam for unit tests. */
+export interface RefreshWorkerPort {
+  on(event: "message", listener: (request: RefreshWorkerRequest) => void): unknown;
+  postMessage(message: RefreshWorkerMessage): void;
+}
+
+/** MCP-ISSUE-123: what `attachRefreshWorker` builds, injectable so a test can drive `exit` without a thread or a DB. */
+export type RefreshWorkerDeps = {
+  openStore?: (dbPath: string) => GraphStore;
+  createRunner?: typeof createIndexRunner;
+  createPool?: (size: number, timeoutMs: number) => ExtractionWorkerPool;
+  exit?: (code: number) => void;
+};
+
+/** The worker's message loop on `port` (this module attaches it to `parentPort` when it runs as a worker). */
+export function attachRefreshWorker(port: RefreshWorkerPort, deps: RefreshWorkerDeps = {}): void {
+  const openStore = deps.openStore ?? ((dbPath: string) => new GraphStore(dbPath));
+  const makeRunner = deps.createRunner ?? createIndexRunner;
+  const makePool = deps.createPool ?? ((size: number, timeoutMs: number) => new ExtractionWorkerPool(size, timeoutMs));
+  const exit = deps.exit ?? ((code: number) => process.exit(code));
   /** One connection and one runner for the worker's life; the DB path and limits never change in a process. */
   let runner: { dbPath: string; run: RunIndexAndResolve; store: GraphStore } | null = null;
   let parsePool: ExtractionWorkerPool | null = null;
   let parsePoolIdle: NodeJS.Timeout | undefined;
+  /** MCP-ISSUE-123 (review #1, #3): set by `exit`; no pool, run or write starts after it. */
+  let exiting = false;
+  /** The run in flight, if any: its abort switch and its settlement. */
+  let current: { abort: AbortController; settled: Promise<void> } | null = null;
   const warmParsePool = (limits: IndexRunnerLimits): ExtractionWorkerPool => {
+    // Review #3: a run that reaches its pool after `exit` must not build a new one — nothing would dispose it, and
+    // process.exit would end its workers mid-parse.
+    if (exiting) throw new Error("the refresh worker is exiting: no new parse pool");
     if (parsePoolIdle) clearTimeout(parsePoolIdle);
-    parsePool ??= new ExtractionWorkerPool(Math.max(1, Math.min(REFRESH_PARSE_WORKERS, limits.parseWorkers)), limits.parseJobTimeoutMs);
+    parsePool ??= makePool(Math.max(1, Math.min(REFRESH_PARSE_WORKERS, limits.parseWorkers)), limits.parseJobTimeoutMs);
     return parsePool;
   };
   const releaseParsePoolWhenIdle = (): void => {
@@ -111,13 +136,13 @@ if (parentPort) {
   };
   const runnerFor = (request: RefreshWorkerRequest): { run: RunIndexAndResolve; store: GraphStore } => {
     if (runner && runner.dbPath === request.dbPath) return runner;
-    const store = new GraphStore(request.dbPath);
+    const store = openStore(request.dbPath);
     runner = {
       dbPath: request.dbPath,
       store,
       // Release J: off the server thread, a small refresh parses inline; the grammars stay loaded in
       // this long-lived worker, so only its first refresh pays for them.
-      run: createIndexRunner({
+      run: makeRunner({
         store,
         limits: { ...request.limits, inlineParseMaxFiles: REFRESH_INLINE_PARSE_MAX_FILES },
         resolvePerformanceProfileOverride: () => performanceProfileOverrideFromEnv(),
@@ -135,10 +160,20 @@ if (parentPort) {
       // two turns of JavaScript, so this thread is in no native call now; the pool's dispose waits for each parse worker
       // to leave its parse and exit. A run still awaiting the pool gets job-timeouts; it is abandoned by the exit, as it
       // was by terminate.
+      // Review #1: the run in flight is ABORTED first. Without it, every parse after the pool's dispose answers
+      // job-timeout and the run commits those batches and can be recorded ok at HEAD; aborted, it stops at its next
+      // batch boundary and records itself cancelled with no commit (indexRunner `recordAborted`). Exit waits for both.
+      exiting = true;
+      current?.abort.abort();
       if (parsePoolIdle) clearTimeout(parsePoolIdle);
       const pool = parsePool;
       parsePool = null;
-      void (pool ? pool.dispose() : Promise.resolve()).finally(() => process.exit(0));
+      void Promise.allSettled([pool ? pool.dispose() : Promise.resolve(), current?.settled ?? Promise.resolve()]).finally(() => exit(0));
+      return;
+    }
+    if (exiting) {
+      // Review #3: nothing new after exit; the client has already rejected whatever it still had outstanding.
+      port.postMessage({ type: "error", id: request.id, error: "the refresh worker is exiting" } satisfies RefreshWorkerMessage);
       return;
     }
     if (request.kind === "warm") {
@@ -183,11 +218,13 @@ if (parentPort) {
       }
       return;
     }
-    void (async () => {
+    const abort = new AbortController();
+    const settled = (async () => {
       let active: { run: RunIndexAndResolve; store: GraphStore } | null = null;
       try {
         active = runnerFor(request);
         const result = await active.run(request.repoId, request.repoPath, request.mode, request.docsEnabled, request.maxFiles, request.batchSize, {
+          abortSignal: abort.signal,
           ...(request.dirtyPaths && { knownDirtyPaths: request.dirtyPaths }),
           ...(request.bookkeeping && { bookkeeping: request.bookkeeping }),
           ...(request.runId && { runId: request.runId }),
@@ -207,8 +244,12 @@ if (parentPort) {
         // A failed run still began a session: restore the connection's checkpoint threshold.
         if (active) endSession(active.store, false);
       } finally {
-        if (parsePool) releaseParsePoolWhenIdle();
+        if (parsePool && !exiting) releaseParsePoolWhenIdle();
+        if (current?.abort === abort) current = null;
       }
     })();
+    current = { abort, settled };
   });
 }
+
+if (parentPort) attachRefreshWorker(parentPort);

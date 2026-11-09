@@ -21,7 +21,7 @@ import type { GraphStore } from "../../repositories/graphStore.js";
 import type { ExtractionWorkerPool } from "../extractors/extractionWorkerPool.js";
 import { runIndexPipeline, INDEX_VERSION, SCOPE_FORCES_FULL_RUN, type PerformanceProfile } from "./indexPipeline.js";
 import { mentionNameForms, pathKeysFor, tokenParts } from "../../repositories/scopedRunStore.js";
-import type { IndexMode, IndexRunResult } from "../../types/index.js";
+import type { IndexMode, IndexRunResult, IndexRunSummary } from "../../types/index.js";
 import type { RunBookkeeping } from "../../middleware/freshness.js";
 import { FTS_PER_FILE_META_KEY } from "../../repositories/runStore.js";
 import {
@@ -126,6 +126,12 @@ export type RunExtras = {
   runId?: string;
   /** MCP-ISSUE-112: this run's progress sink, ahead of `resolveProgressNotifier` (the refresh worker posts it back). */
   onProgress?: ProgressNotifier;
+  /**
+   * MCP-ISSUE-123: stop this run (the refresh worker's `exit`). The pipeline stops at its next batch boundary; the run is
+   * recorded `cancelled` with NO commit, before the resolve passes and again before the final record, so it never reads
+   * as ok and never becomes a base for the fast skip, the freshness gate or a git-scoped plan.
+   */
+  abortSignal?: AbortSignal;
 };
 
 /**
@@ -204,7 +210,8 @@ export function createIndexRunner(options: IndexRunnerOptions): RunIndexAndResol
     return runIndexAndResolve(repoId, repoPath, "full", docsEnabled, maxFiles, batchSize, {
       escalatedBecause: `full (no index yet for this repoId; ${mode} requested)`,
       ...(givenRunId && { runId: givenRunId }),
-      ...(extras.onProgress && { onProgress: extras.onProgress })
+      ...(extras.onProgress && { onProgress: extras.onProgress }),
+      ...(extras.abortSignal && { abortSignal: extras.abortSignal })
     });
   }
 
@@ -214,7 +221,8 @@ export function createIndexRunner(options: IndexRunnerOptions): RunIndexAndResol
     return runIndexAndResolve(repoId, repoPath, "full", docsEnabled, maxFiles, batchSize, {
       escalatedBecause: `full (escalated from ${mode}: ${reason})`,
       ...(givenRunId && { runId: givenRunId }),
-      ...(extras.onProgress && { onProgress: extras.onProgress })
+      ...(extras.onProgress && { onProgress: extras.onProgress }),
+      ...(extras.abortSignal && { abortSignal: extras.abortSignal })
     });
   };
 
@@ -364,6 +372,25 @@ export function createIndexRunner(options: IndexRunnerOptions): RunIndexAndResol
   const progress = createIndexProgress(repoId, extras.onProgress ?? resolveProgressNotifier?.());
   const runStartedMs = Date.now();
 
+  /**
+   * MCP-ISSUE-123: record a run stopped by `extras.abortSignal` as `cancelled` with no commit (the G1 rule below: a
+   * run that is no base records none), keep the pending re-index set, and end the session as a finished run would.
+   */
+  const recordAborted = (partial: IndexRunSummary): IndexRunSummary => {
+    const aborted: IndexRunSummary = {
+      ...partial,
+      status: "cancelled",
+      commitSha: null,
+      finishedAt: new Date().toISOString(),
+      elapsedMs: Date.now() - runStartedMs,
+      scope: `${partial.scope ? `${partial.scope}; ` : ""}aborted: no commit recorded`
+    };
+    store.recordRun(aborted);
+    if (!deferSessionEnd) store.endIndexSession(false);
+    progress.stop(`⚠ index ${repoId} · aborted · ${String(aborted.filesIndexed)} files · no commit recorded`);
+    return aborted;
+  };
+
   // Disable WAL auto-checkpoint during indexing to prevent lock contention
   // with concurrent readers. Will be re-enabled in endIndexSession().
   store.beginIndexSession();
@@ -390,8 +417,11 @@ export function createIndexRunner(options: IndexRunnerOptions): RunIndexAndResol
     ...(sharedParsePool && { sharedWorkerPool: sharedParsePool() }),
     onlyRelativePaths: dirtyFileSet,
     ...(plannedHead && { commitSha: plannedHead }),
+    ...(extras.abortSignal && { abortSignal: extras.abortSignal }),
     progress
   });
+  // MCP-ISSUE-123: an aborted run stops here — no escalation, no resolve passes — and is recorded without a commit.
+  if (extras.abortSignal?.aborted) return recordAborted(summary);
   // Release J: the pipeline found a scoped run cannot be exact (a config file, or too many dependents)
   // after writing the changed files; a full run over the same tree is.
   if (summary.scopeEscalation) {
@@ -801,6 +831,8 @@ export function createIndexRunner(options: IndexRunnerOptions): RunIndexAndResol
     performanceProfile,
     ...(escalatedBecause ? { scope: escalatedBecause } : {})
   };
+  // MCP-ISSUE-123: aborted during the resolve passes: the graph is part-resolved, so the run must not count as a base.
+  if (extras.abortSignal?.aborted) return recordAborted(fullSummary);
   // G1 review 2: an incremental run read its files from whatever HEAD was checked out at the time. If HEAD is not the
   // commit the run started at, some reads came from another tree: record no commit, so neither the fast skip nor
   // the next git-scoped plan trusts this run as a base (both then read every file).
