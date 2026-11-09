@@ -1,6 +1,6 @@
 ## MCP-ISSUE-123 — the served server crashed 0xC0000409 (worker terminated mid-parse), reported `git_error` for a git timeout, and ran at BelowNormal priority
 
-- **Status:** FIXED 2026-11-09 (f64ef10 crash, ac86067 seed reasons, b9d45ab priority). Live re-soak of IX-5 / IX-9 open (wec.aria).
+- **Status:** FIXED 2026-11-09 (f64ef10 crash, ac86067 seed reasons, b9d45ab priority; review follow-ups #1–#4, #7 the same day). Live re-soak of IX-5 / IX-9 open (wec.aria).
 - **Scenario:** wec.aria's acceptance of deploy 67e6ce37f7d7 on 9 Nov 10:15–10:32 (UTC+7) — a watcher on
   `wec.aria-wt-spec098`, reads, then `register_worktree(D:/1.SourceCode/crm/wec.aria-wt-s098eval, parent wec.aria)` — while
   another member ran 16 `node -e "for(;;){}"` burners + 8 git loopers at Normal priority on 16 logical cores (10:23:25–10:32:32).
@@ -53,7 +53,28 @@
 - **Tests:** `serveHttp.test.mjs` — fakes for raise / never-lower / error, and a scratch supervisor started at BelowNormal
   (red on 67e6ce3: supervisor priority 10).
 
+### Review follow-ups (fixed before merge, 2026-11-09)
+
+- **#1 an `exit` no longer stopped the run in flight.** With the pool disposed every parse answered job-timeout, and the run
+  went on committing batches and could be recorded `ok` at HEAD — the fast skip and the freshness gate then trusted a
+  mostly-missing index. Now `RunExtras.abortSignal`: the refresh worker's `exit` aborts the run, the pipeline stops at its
+  next batch boundary, and `indexRunner` records the run `cancelled` with **no commit** (before the resolve passes, and again
+  before the final record); `exit` waits for that run to settle. Tests: `indexRunnerAbort.test.ts` (abort before start and
+  mid-extraction; the next incremental indexes every file and records the commit), `refreshWorker.test.ts`.
+- **#2 the client's fallback terminate came before the pool's retire grace** (10 s / 60 s against 5 min), tearing nested
+  parse workers down mid-parse. Both graces are now `DEFAULT_RETIRE_GRACE_MS` + 30 s.
+- **#3 a run reaching its shared pool after `exit` built a new one** that nothing disposed. After `exit` no pool is built and
+  no request starts (`attachRefreshWorker`, now an exported seam with injectable store / runner / pool / exit).
+- **#4 no cap on retired workers.** At most `size` retired workers at once; at the cap a timed-out slot keeps its worker and
+  waits for the job's late answer instead of spawning another thread.
+- **#7** the hand-off process logs its own `supervisor_priority` line.
+
 ### Left open
+
+- (review #5, pre-existing) a parse worker that exits on its own (`onWorkerFailure`) is not replaced; its slot stays dead
+  for the rest of the pool's life.
+- (review #6) `gitAsync` reads any kill without an exit code as `git_timeout` — a `maxBuffer` overflow or an external kill
+  is reported the same way.
 
 - `buildStaleWarning` still runs two synchronous git calls (`rev-list --count`, `status --porcelain=v2`, 5 s timeout each)
   on the server thread for a STALE repo (gitHelpers.ts). Not the cause here (spec098 was fresh); worth moving async.

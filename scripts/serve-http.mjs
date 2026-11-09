@@ -927,6 +927,8 @@ async function serve(server, envFile, logFile, deployRoot) {
   const selfPriority = ensureNormalPriority(process.pid);
   const own = ownDeploy();
   const target = handOffTarget(server, { deployRoot, own });
+  // MCP-ISSUE-123 review #7: the hand-off process logs its own priority change too (its child logs only its own).
+  if (target && logFile) fs.appendFileSync(logFile, `${JSON.stringify({ ts: new Date().toISOString(), level: selfPriority.error ? "warn" : "info", name: "serve-http", msg: "supervisor_priority", fields: { role: "hand-off", ...selfPriority } })}\n`);
   if (target) return handOff(target);
   const names = httpEnvNames(server);
   const env = readEnvFile(envFile);
