@@ -8,7 +8,7 @@
  *   (c) index_status reaches ok: seeded from the parent (IX-9, MCP-ISSUE-119 — the parent's indexed commit is an ancestor
  *       of the worktree's HEAD), then a scoped incremental; no fallbackReason; the worktree's own symbol is indexed;
  *   (c2) a parent indexed at a commit that is NOT an ancestor of the worktree's HEAD → one full run, fallbackReason
- *       parent_not_ancestor in index_status (never a silent wrong seed);
+ *       child_behind_parent in index_status (the parent moved past the worktree; never a silent wrong seed — MCP-ISSUE-123);
  *   (d) refusals: an unknown parentRepoId, a path that is not the parent's worktree, a repoId registered elsewhere.
  */
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -137,8 +137,8 @@ try {
     if (s.body?.state === "ok" || s.body?.state === "failed") oldDone = s;
     else await sleep(200);
   }
-  assert(oldDone?.body?.state === "ok" && oldDone.body.mode === "full" && oldDone.body.fallbackReason === "parent_not_ancestor",
-    "(c2) a non-ancestor parent: one full run, fallbackReason parent_not_ancestor", (oldDone?.text ?? regOld.text).slice(0, 400));
+  assert(oldDone?.body?.state === "ok" && oldDone.body.mode === "full" && oldDone.body.fallbackReason === "child_behind_parent",
+    "(c2) a non-ancestor parent: one full run, fallbackReason child_behind_parent", (oldDone?.text ?? regOld.text).slice(0, 400));
   const notCopied = await call("search_symbols", { repoId: oldId, query: "sideOnlyGamma", strategy: "name", limit: 5 });
   assert(notCopied.body?.count === 0,"(c2) ... and nothing of the parent's newer commit leaked into it", notCopied.text.slice(0, 200));
   await call("watch_repo", { action: "stop", repoId: oldId });

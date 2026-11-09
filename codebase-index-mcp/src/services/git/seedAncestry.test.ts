@@ -40,14 +40,16 @@ test("checkSeedAncestry: each refusal names its reason, an ancestor passes", asy
     assert.deepEqual(await checkSeedAncestry(f.wt, f.c2, f.c2), { ok: true, parentSha: f.c2, childSha: f.c2 });
     assert.deepEqual(await checkSeedAncestry(f.wt, f.c1), { ok: true, parentSha: f.c1, childSha: f.w1 });
 
-    // parent indexed on a commit that diverged from the worktree base
+    // parent indexed on a commit that diverged from the worktree base (MCP-ISSUE-123: named, not parent_not_ancestor)
     const div = await checkSeedAncestry(f.wt, f.p3);
     assert.equal(div.ok, false);
-    assert.equal(!div.ok && div.fallbackReason, "parent_not_ancestor");
+    assert.equal(!div.ok && div.fallbackReason, "diverged");
 
-    // parent ahead of the worktree base
+    // parent indexed ahead of the worktree base: the worktree is behind (the 9 Nov acceptance case)
     const ahead = await checkSeedAncestry(f.wt, f.w1, f.c2);
-    assert.equal(!ahead.ok && ahead.fallbackReason, "parent_not_ancestor");
+    assert.equal(!ahead.ok && ahead.fallbackReason, "child_behind_parent");
+    const moved = await checkSeedAncestry(f.wt, f.p3, f.c2); // the parent moved on from the worktree's base
+    assert.equal(!moved.ok && moved.fallbackReason, "child_behind_parent");
 
     assert.equal((await checkSeedAncestry(f.wt, null) as { fallbackReason: string }).fallbackReason, "parent_not_indexed");
     assert.equal((await checkSeedAncestry(f.wt, "  ") as { fallbackReason: string }).fallbackReason, "parent_not_indexed");
@@ -68,5 +70,17 @@ test("checkSeedAncestry: each refusal names its reason, an ancestor passes", asy
     fs.mkdirSync(plain);
     const noHead = await checkSeedAncestry(plain, f.c1);
     assert.equal(noHead.ok, false);
+  } finally { f.cleanup(); }
+});
+
+test("MCP-ISSUE-123: a git call killed by its timeout is git_timeout, not git_error", async () => {
+  const f = fixture();
+  try {
+    // 1 ms: execFile kills git before it can exit — what a starved server saw at 5 s on 9 Nov.
+    const r = await checkSeedAncestry(f.wt, f.c1, undefined, 1);
+    assert.equal(r.ok, false);
+    assert.equal(!r.ok && r.fallbackReason, "git_timeout");
+    // The same call with the normal timeout answers on ancestry.
+    assert.equal((await checkSeedAncestry(f.wt, f.c1)).ok, true);
   } finally { f.cleanup(); }
 });

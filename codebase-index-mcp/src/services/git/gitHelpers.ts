@@ -638,20 +638,27 @@ export type SeedFallbackReason =
   | "parent_sha_missing"      // the parent's indexed commit is not in the worktree's object store
   | "child_head_unresolved"   // the worktree has no resolvable base commit
   | "unrelated_history"       // no merge base at all
-  | "parent_not_ancestor"     // parent indexed commit is ahead of or diverged from the worktree base
+  | "child_behind_parent"     // the worktree base is an ancestor of the parent's indexed commit (the parent moved on)
+  | "diverged"                // both have commits the other lacks (merge base is neither)
+  | "git_timeout"             // a git call ran past GIT_TIMEOUT_MS and was killed — says nothing about ancestry (MCP-ISSUE-123)
   | "git_error";              // git failed in a way that says nothing about ancestry
 
 export type SeedAncestry =
   | { ok: true; parentSha: string; childSha: string }
   | { ok: false; fallbackReason: SeedFallbackReason; parentSha: string | null; childSha: string | null };
 
-/** IX-9 review M2: git's exit code and stdout, asynchronously — the ancestry check runs on the server thread. */
-function gitAsync(repoPath: string, args: string[]): Promise<{ status: number; stdout: string }> {
+/**
+ * IX-9 review M2: git's exit code and stdout, asynchronously — the ancestry check runs on the server thread.
+ * MCP-ISSUE-123: `timedOut` when execFile killed git at `timeoutMs` (`killed` / a signal, no exit code). Under CPU
+ * starvation that read as `git_error`, as if git had failed on the repo.
+ */
+function gitAsync(repoPath: string, args: string[], timeoutMs = GIT_TIMEOUT_MS): Promise<{ status: number; stdout: string; timedOut: boolean }> {
   return new Promise((resolve) => {
-    execFile("git", args, { cwd: repoPath, encoding: "utf8", timeout: GIT_TIMEOUT_MS, windowsHide: true }, (error, stdout) => {
-      if (!error) return resolve({ status: 0, stdout: String(stdout).trim() });
-      const code = (error as { code?: unknown }).code;
-      resolve({ status: typeof code === "number" ? code : -1, stdout: "" });
+    execFile("git", args, { cwd: repoPath, encoding: "utf8", timeout: timeoutMs, windowsHide: true }, (error, stdout) => {
+      if (!error) return resolve({ status: 0, stdout: String(stdout).trim(), timedOut: false });
+      const e = error as { code?: unknown; killed?: boolean; signal?: unknown };
+      const timedOut = typeof e.code !== "number" && (e.killed === true || (typeof e.signal === "string" && e.signal.length > 0));
+      resolve({ status: typeof e.code === "number" ? e.code : -1, stdout: "", timedOut });
     });
   });
 }
@@ -664,30 +671,41 @@ function gitAsync(repoPath: string, args: string[]): Promise<{ status: number; s
 export async function checkSeedAncestry(
   childRepoPath: string,
   parentIndexedSha: string | null,
-  childSha?: string | null
+  childSha?: string | null,
+  /** The per-call git timeout; tests shorten it. */
+  timeoutMs = GIT_TIMEOUT_MS
 ): Promise<SeedAncestry> {
   const parentSha = parentIndexedSha && parentIndexedSha.trim() ? parentIndexedSha.trim() : null;
+  const git = (args: string[]) => gitAsync(childRepoPath, args, timeoutMs);
   if (!parentSha) {
     return { ok: false, fallbackReason: "parent_not_indexed", parentSha: null, childSha: childSha ?? null };
   }
   let child = childSha ?? null;
   if (!child) {
-    const head = await gitAsync(childRepoPath, ["rev-parse", "--verify", "--quiet", "HEAD^{commit}"]);
+    const head = await git(["rev-parse", "--verify", "--quiet", "HEAD^{commit}"]);
+    if (head.timedOut) return { ok: false, fallbackReason: "git_timeout", parentSha, childSha: null };
     child = head.status === 0 && head.stdout ? head.stdout : null;
   }
   if (!child) {
     return { ok: false, fallbackReason: "child_head_unresolved", parentSha, childSha: null };
   }
-  if ((await gitAsync(childRepoPath, ["cat-file", "-e", `${parentSha}^{commit}`])).status !== 0) {
+  const exists = await git(["cat-file", "-e", `${parentSha}^{commit}`]);
+  if (exists.timedOut) return { ok: false, fallbackReason: "git_timeout", parentSha, childSha: child };
+  if (exists.status !== 0) {
     return { ok: false, fallbackReason: "parent_sha_missing", parentSha, childSha: child };
   }
-  const isAncestor = (await gitAsync(childRepoPath, ["merge-base", "--is-ancestor", parentSha, child])).status;
-  if (isAncestor === 0) return { ok: true, parentSha, childSha: child };
-  if (isAncestor !== 1) return { ok: false, fallbackReason: "git_error", parentSha, childSha: child };
-  const mergeBase = (await gitAsync(childRepoPath, ["merge-base", parentSha, child])).status;
-  if (mergeBase === 1) return { ok: false, fallbackReason: "unrelated_history", parentSha, childSha: child };
-  if (mergeBase !== 0) return { ok: false, fallbackReason: "git_error", parentSha, childSha: child };
-  return { ok: false, fallbackReason: "parent_not_ancestor", parentSha, childSha: child };
+  const isAncestor = await git(["merge-base", "--is-ancestor", parentSha, child]);
+  if (isAncestor.status === 0) return { ok: true, parentSha, childSha: child };
+  if (isAncestor.timedOut) return { ok: false, fallbackReason: "git_timeout", parentSha, childSha: child };
+  if (isAncestor.status !== 1) return { ok: false, fallbackReason: "git_error", parentSha, childSha: child };
+  const mergeBase = await git(["merge-base", parentSha, child]);
+  if (mergeBase.timedOut) return { ok: false, fallbackReason: "git_timeout", parentSha, childSha: child };
+  if (mergeBase.status === 1) return { ok: false, fallbackReason: "unrelated_history", parentSha, childSha: child };
+  if (mergeBase.status !== 0) return { ok: false, fallbackReason: "git_error", parentSha, childSha: child };
+  // MCP-ISSUE-123: say which way the histories part. A worktree behind its parent's index (the 9 Nov acceptance case,
+  // 37 commits) can never seed by this design; a diverged one can't either, for a different reason.
+  const fallbackReason = mergeBase.stdout === child ? "child_behind_parent" : "diverged";
+  return { ok: false, fallbackReason, parentSha, childSha: child };
 }
 
 export function getRepoStaleness(

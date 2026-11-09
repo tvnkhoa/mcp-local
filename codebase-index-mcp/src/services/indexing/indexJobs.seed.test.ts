@@ -66,11 +66,11 @@ test("IX-9: ancestor ok → phase seed, seedFromParent with the contract's reque
 });
 
 test("IX-9: ancestry refused → full, fallbackReason reported, no seed attempted", async () => {
-  const h = harness({ ancestry: () => ({ ok: false, fallbackReason: "parent_not_ancestor", parentSha: "p", childSha: "c" }) });
+  const h = harness({ ancestry: () => ({ ok: false, fallbackReason: "child_behind_parent", parentSha: "p", childSha: "c" }) });
   const out = await runWithSeed(request("parent"), h.deps);
   assert.deepEqual(h.runs, ["full"]);
-  assert.equal(out.fallbackReason, "parent_not_ancestor");
-  assert.equal(h.progress[0]?.fallbackReason, "parent_not_ancestor");
+  assert.equal(out.fallbackReason, "child_behind_parent");
+  assert.equal(h.progress[0]?.fallbackReason, "child_behind_parent");
   assert.equal(h.seeds.length, 0);
 });
 
@@ -129,9 +129,9 @@ test("IX-9 review H1/M3: a parent refusal (run in progress, unvouched runs) → 
 });
 
 test("IX-9 review M2: an async ancestry check is awaited", async () => {
-  const h = harness({ ancestry: async () => ({ ok: false, fallbackReason: "parent_not_ancestor", parentSha: "p", childSha: "c" }) });
+  const h = harness({ ancestry: async () => ({ ok: false, fallbackReason: "child_behind_parent", parentSha: "p", childSha: "c" }) });
   const out = await runWithSeed(request("parent"), h.deps);
-  assert.equal(out.fallbackReason, "parent_not_ancestor");
+  assert.equal(out.fallbackReason, "child_behind_parent");
   assert.deepEqual(h.runs, ["full"]);
 });
 
