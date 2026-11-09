@@ -75,6 +75,8 @@ export interface CodebaseIndexServerOptions {
   readonly telemetry: TelemetryConfig;
   /** R4: stdio by default; http serves every client from this one process. */
   readonly transport?: McpServerOptions["transport"];
+  /** MCP-ISSUE-121: marks a call in flight for the loop watchdog; returns the function that ends it. */
+  readonly onCallStart?: (toolName: string, args: Record<string, unknown>) => () => void;
 }
 
 /**
@@ -170,18 +172,23 @@ export function createCodebaseIndexServer(options: CodebaseIndexServerOptions): 
       ...(context.clientSessionId === undefined ? {} : { clientSessionId: context.clientSessionId })
     };
 
+    const endCall = options.onCallStart?.(context.toolName, args);
     return toolContextStorage.run(requestContext, async () => {
-      // MCP-ISSUE-108: only a tool that owns or checks a preview waits for the client identity.
-      if (OWNERSHIP_TOOLS.has(context.toolName)) {
-        const clientIdentity = await context.resolveClientIdentity?.();
-        if (clientIdentity !== undefined) requestContext.clientIdentity = clientIdentity;
-      }
       try {
-        await maybeAutoActivateWatchFromArgs(context.toolName, args, options.buildHandlerContext());
-      } catch (error) {
-        return asWireResult(renderToolError(error));
+        // MCP-ISSUE-108: only a tool that owns or checks a preview waits for the client identity.
+        if (OWNERSHIP_TOOLS.has(context.toolName)) {
+          const clientIdentity = await context.resolveClientIdentity?.();
+          if (clientIdentity !== undefined) requestContext.clientIdentity = clientIdentity;
+        }
+        try {
+          await maybeAutoActivateWatchFromArgs(context.toolName, args, options.buildHandlerContext());
+        } catch (error) {
+          return asWireResult(renderToolError(error));
+        }
+        return await next();
+      } finally {
+        endCall?.();
       }
-      return next();
     });
   };
 

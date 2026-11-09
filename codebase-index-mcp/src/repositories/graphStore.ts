@@ -537,7 +537,8 @@ export class GraphStore {
     return getLatestWorkRunTreeDirtyImpl(this.db, repoId);
   }
 
-  searchRegex(repoId: string, opts: RegexSearchOptions): RegexSearchResult {
+  /** MCP-ISSUE-121: async — the scan reads files without blocking the server thread. */
+  searchRegex(repoId: string, opts: RegexSearchOptions): Promise<RegexSearchResult> {
     return searchRegexImpl(this, repoId, opts);
   }
 

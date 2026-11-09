@@ -230,7 +230,7 @@ function buildRegexTruncationWarning(
   return parts.join(" ");
 }
 
-export function handleSearchRegex(
+export async function handleSearchRegex(
   args: {
     repoId: string;
     pattern: string;
@@ -248,13 +248,13 @@ export function handleSearchRegex(
     profile: string;
   },
   ctx: HandlerContext
-): CallToolResult {
+): Promise<CallToolResult> {
   const { store } = ctx;
   const profile = resolveResponseProfile(args.profile as Parameters<typeof resolveResponseProfile>[0]);
 
   let result;
   try {
-    result = store.searchRegex(args.repoId, {
+    result = await store.searchRegex(args.repoId, {
       pattern: args.pattern,
       regexFlags: args.regexFlags,
       filePathPrefix: args.filePathPrefix,

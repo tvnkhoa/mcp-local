@@ -125,7 +125,7 @@ export type RegexSearchResult = {
 };
 
 /** Read a candidate for scanning, or null when it is skipped (escapes the root, vanished, over the cap, empty, binary, minified). */
-function readScannable(repoPath: string, filePath: string, sizeCap: number): string | null {
+async function readScannable(repoPath: string, filePath: string, sizeCap: number): Promise<string | null> {
   let absolute: string;
   try {
     absolute = assertSafeRepoFilePath(repoPath, filePath);
@@ -135,20 +135,57 @@ function readScannable(repoPath: string, filePath: string, sizeCap: number): str
   // Size guard before reading so a huge file is never pulled into memory.
   let size: number;
   try {
-    size = fs.statSync(absolute).size;
+    size = (await fs.promises.stat(absolute)).size;
   } catch {
     return null; // vanished between glob and read
   }
   if (size > sizeCap) return null;
   let buf: Buffer;
   try {
-    buf = fs.readFileSync(absolute);
+    buf = await fs.promises.readFile(absolute);
   } catch {
     return null;
   }
   if (buf.length === 0) return null;
   if (isBinary(buf) || (!isMinifiedCheckExempt(filePath) && isLikelyMinified(buf))) return null;
   return buf.toString("utf8");
+}
+
+/**
+ * MCP-ISSUE-121: reads run ahead of the scan, at most READ_AHEAD in flight, so the scan is not one read's latency per
+ * file — and none of them is a synchronous read on the server thread. A few files past where the scan stops may be
+ * read for nothing; that is the price of not reading one at a time.
+ */
+const READ_AHEAD = 16;
+/** MCP-ISSUE-121: the scan gives the event loop a turn at least this often, even when every read is already done. */
+const YIELD_EVERY_MS = 15;
+
+function readAhead(
+  repoPath: string,
+  list: readonly { path: string }[],
+  capFor: (filePath: string) => number
+): (i: number) => Promise<string | null> {
+  const pending = new Map<number, Promise<string | null>>();
+  let next = 0;
+  return (i: number) => {
+    if (next < i) next = i;
+    while (next < list.length && next < i + READ_AHEAD) {
+      const p = (list[next] as { path: string }).path;
+      pending.set(next, readScannable(repoPath, p, capFor(p)));
+      next++;
+    }
+    const read = pending.get(i) ?? readScannable(repoPath, (list[i] as { path: string }).path, capFor((list[i] as { path: string }).path));
+    pending.delete(i);
+    return read;
+  };
+}
+
+/** A turn of the event loop (I/O included) when the scan has held it for YIELD_EVERY_MS; returns the new mark. */
+async function yieldIfDue(lastYield: number): Promise<number> {
+  const now = performance.now();
+  if (now - lastYield < YIELD_EVERY_MS) return lastYield;
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  return performance.now();
 }
 
 export class RegexSearchError extends Error {
@@ -201,11 +238,11 @@ function lineIndexForOffset(lineStarts: number[], offset: number): number {
  * Matching runs against whole-file content (not line-by-line) so the `s` (dotall) and
  * multi-line patterns behave as written — a pattern spanning a newline matches.
  */
-export function searchRegexImpl(
+export async function searchRegexImpl(
   store: RegexSearchStore,
   repoId: string,
   opts: RegexSearchOptions
-): RegexSearchResult {
+): Promise<RegexSearchResult> {
   const repo = store.getRepository(repoId);
   if (!repo) {
     throw new RegexSearchError("UNKNOWN_REPO", `unknown repoId '${repoId}'. Run index_repository first.`);
@@ -237,7 +274,8 @@ export function searchRegexImpl(
     // nothing, with no signal that a class of directory had been excluded. The exclusion side of this
     // same function already passed `dot: true` (see the `pathExclude` minimatch below), so the tool
     // could exclude dotfiles it could never include. `.git/**` stays out via INDEX_IGNORE_GLOBS.
-    const globbed = glob.sync("**/*", {
+    // MCP-ISSUE-121: the async walk — glob.sync held the server thread for the whole tree.
+    const globbed = await glob("**/*", {
       cwd: repoPath,
       nodir: true,
       dot: true,
@@ -291,6 +329,11 @@ export function searchRegexImpl(
     truncationReason ??= "per_file_cap";
   };
 
+  // A caller-supplied cap applies to every file; otherwise markdown has its own, as in the indexer.
+  const capFor = (p: string): number => opts.maxFileSizeBytes ?? (MARKDOWN_FILE.test(p) ? MAX_MARKDOWN_BYTES : maxFileSize);
+  const readSelected = readAhead(repoPath, selected, capFor);
+  let lastYield = performance.now();
+
   for (let i = 0; i < selected.length; i++) {
     const file = selected[i];
     const stopReason = (filesMode ? files.length : matches.length) >= opts.limit ? "limit_reached" : filesScanned >= MAX_FILES_SCANNED ? "files_cap_reached" : null;
@@ -301,9 +344,8 @@ export function searchRegexImpl(
       break;
     }
 
-    // A caller-supplied cap applies to every file; otherwise markdown has its own, as in the indexer.
-    const cap = opts.maxFileSizeBytes ?? (MARKDOWN_FILE.test(file.path) ? MAX_MARKDOWN_BYTES : maxFileSize);
-    const content = readScannable(repoPath, file.path, cap);
+    const content = await readSelected(i);
+    lastYield = await yieldIfDue(lastYield);
     if (content === null) continue;
     filesScanned++;
     if (filesMode) {
@@ -399,8 +441,10 @@ export function searchRegexImpl(
   } else {
     let prefixCount = 0;
     let prefixCapped = false;
-    for (const f of skippedPrefix) {
-      const text = readScannable(repoPath, f.path, opts.maxFileSizeBytes ?? (MARKDOWN_FILE.test(f.path) ? MAX_MARKDOWN_BYTES : maxFileSize));
+    const readPrefix = readAhead(repoPath, skippedPrefix, capFor);
+    for (let j = 0; j < skippedPrefix.length; j++) {
+      const text = await readPrefix(j);
+      lastYield = await yieldIfDue(lastYield);
       if (text === null) continue;
       regex.lastIndex = 0;
       let n = 0;

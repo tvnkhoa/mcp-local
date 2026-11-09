@@ -37,6 +37,9 @@ import process from "node:process";
 import { fileURLToPath } from "node:url";
 
 import { heavyLockPath, isPidAlive } from "./heavyLock.mjs";
+import { defaultClass, percentile, readCurrentMb, readHistoryRows } from "./heavyLockBudget.mjs";
+
+export { defaultClass, readCurrentMb };
 
 export const DEFAULT_SAMPLE_MS = 1_000;
 export const DEFAULT_HISTORY_MAX_BYTES = 2 * 1024 * 1024;
@@ -54,19 +57,6 @@ export function sampleIntervalMs(env = process.env) {
 function historyMaxBytes(env) {
   const value = Number(env.MCP_HEAVY_LOCK_HISTORY_MAX_BYTES);
   return Number.isFinite(value) && value > 0 ? value : DEFAULT_HISTORY_MAX_BYTES;
-}
-
-/**
- * The class a run is filed under when the caller names none: its repo and its command, each path-like
- * token cut to its basename (a scratch csproj path becomes `aliasprobe.csproj`), at most 160 chars.
- */
-export function defaultClass(cmd, repo) {
-  const words = String(cmd ?? "")
-    .split(/\s+/)
-    .filter(Boolean)
-    .map((w) => w.replace(/^["']|["']$/g, ""))
-    .map((w) => (/[\\/]/.test(w) ? w.split(/[\\/]/).filter(Boolean).at(-1) ?? w : w));
-  return `${repo ?? "unknown"}/${words.join(" ")}`.slice(0, 160);
 }
 
 /** Append one run to the history, rotating at the cap. Never throws: a run never fails for its record. */
@@ -96,32 +86,7 @@ export function recordRun(row, { env = process.env } = {}) {
 
 /** Every parseable row of the history (the rotated file first), oldest first. */
 export function readHistory({ env = process.env } = {}) {
-  const file = historyPath(env);
-  const rows = [];
-  for (const f of [file.replace(/\.jsonl$/, ".1.jsonl"), file]) {
-    let text = "";
-    try {
-      text = fs.readFileSync(f, "utf8");
-    } catch {
-      continue;
-    }
-    for (const line of text.split("\n")) {
-      if (line.trim() === "") continue;
-      try {
-        const row = JSON.parse(line);
-        if (row !== null && typeof row === "object") rows.push(row);
-      } catch {
-        // a torn line: skipped
-      }
-    }
-  }
-  return rows;
-}
-
-/** Nearest-rank percentile of sorted numbers, `null` for none. */
-function percentile(sorted, p) {
-  if (sorted.length === 0) return null;
-  return sorted[Math.min(sorted.length - 1, Math.max(0, Math.ceil((p / 100) * sorted.length) - 1))];
+  return readHistoryRows(historyPath(env));
 }
 
 /** Per class: `{class, runs, measured, peakMb: {p50, p95, max}, durationS: {p50, p95, max}, failed, last}`, the heaviest p95 first. */
@@ -350,12 +315,11 @@ export function samplingOff(env = process.env, platform = process.platform) {
  * Start sampling the tree under `rootPid` (default: this process) in a sampler process. Returns
  * `{ stop() }`; `stop()` ends it and returns the summary (`peakMb`, `peakAt`, `peakTop`, `sampling`).
  */
-export function startSampler({ rootPid = process.pid, runStart = Date.now(), env = process.env } = {}) {
+export function startSampler({ rootPid = process.pid, runStart = Date.now(), env = process.env, out = newSampleFile() } = {}) {
   const intervalMs = sampleIntervalMs(env);
   const off = samplingOff(env);
   if (off !== null) return { stop: () => ({ peakMb: null, peakAt: null, peakTop: [], sampling: { intervalMs, samples: 0, off } }) };
   cleanStaleSamples();
-  const out = path.join(os.tmpdir(), `heavy-lock-sample-${String(process.pid)}-${randomUUID()}.json`);
   let child = null;
   try {
     child = spawn(process.execPath, [SELF, "--sample", String(rootPid), String(runStart), out, String(intervalMs)], { stdio: "ignore", windowsHide: true });
@@ -390,6 +354,14 @@ export function startSampler({ rootPid = process.pid, runStart = Date.now(), env
       return summary ?? { peakMb: null, peakAt: null, peakTop: [], sampling: { intervalMs, samples: 0 } };
     }
   };
+}
+
+/**
+ * Where this process's sampler writes its summary. Chosen before the lock is taken (H-6b) so the holder's
+ * slot can name it: admission reads `currentMb` (the latest sample) from it as the holder's working set.
+ */
+export function newSampleFile() {
+  return path.join(os.tmpdir(), `heavy-lock-sample-${String(process.pid)}-${randomUUID()}.json`);
 }
 
 const SAMPLE_FILE = /^heavy-lock-sample-(\d+)-[0-9a-f-]+\.json(\.[0-9a-f-]+\.tmp)?$/;
@@ -450,7 +422,7 @@ export function sampleTables(tables, { root, exclude = 0, runStartMs = 0, env = 
 /** The sampler process: drive the PowerShell helper, keep the peak, rewrite the summary file after each sample. */
 async function runSampler([rootPid, runStart, out, intervalMs]) {
   const { cs, dll } = helperFiles();
-  const summary = { peakMb: null, peakAt: null, peakTop: [], sampling: { intervalMs: Number(intervalMs), samples: 0, sampleMsAvg: null, sampleMsMax: null, firstSampleAfterMs: null } };
+  const summary = { peakMb: null, peakAt: null, currentMb: null, currentAt: null, peakTop: [], sampling: { intervalMs: Number(intervalMs), samples: 0, sampleMsAvg: null, sampleMsMax: null, firstSampleAfterMs: null } };
   const write = () => {
     const tmp = `${out}.${randomUUID()}.tmp`;
     fs.writeFileSync(tmp, JSON.stringify(summary));
@@ -487,6 +459,9 @@ async function runSampler([rootPid, runStart, out, intervalMs]) {
       sampling.firstSampleAfterMs ??= Date.now() - Number(runStart);
       sampling.treeMax = Math.max(sampling.treeMax ?? 0, Number(head[1]));
       const mb = Math.round(Number(head[2]) / 1048576);
+      // The latest sample: what the run holds now (H-6b admission adds it back to free RAM).
+      summary.currentMb = mb;
+      summary.currentAt = new Date().toISOString();
       if (summary.peakMb === null || mb > summary.peakMb) {
         summary.peakMb = mb;
         summary.peakAt = new Date().toISOString();

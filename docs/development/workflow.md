@@ -184,19 +184,42 @@ Two properties worth knowing:
 - **`contracts:check` is also the boot check.** It starts all six servers over a real stdio
   handshake with placeholder env, which is what catches a module that compiles but cannot load.
 
-**One heavy run per machine.** `verify:all`, `verify:packages`, `verify:servers`, `run-servers.mjs test`
+**Heavy runs share a RAM budget.** `verify:all`, `verify:packages`, `verify:servers`, `run-servers.mjs test`
 and codebase-index's `run-tests.mjs` take a machine-wide lock, `~/.claude/locks/heavy-check.lock`
 (`scripts/lib/heavyLock.mjs`): two sessions' gates side by side made the latency bounds flake
-(`test:freshness-worker` 277 ms against 250). A second caller prints the holder and waits, up to 30 min
+(`test:freshness-worker` 277 ms against 250). Since H-6b (`scripts/lib/heavyLockBudget.mjs`) several runs
+hold it at once while Σ of their declared MB plus the newcomer's ≤ free RAM + the holders' measured working
+set (each at most its declaration) − 8192 MB, recomputed every poll; the first waiter alone (no holder at
+all) needs only free RAM ≥ its declared MB + 2048, below the reserve too (owner, 5 Nov). Declared MB: `--ram-mb N`, else the
+class's p95 × 1.5 after 3 measured runs (floor 512; 4000 for a dotnet class — `wecbe-build:` / `wecbe-test:`
+or `dotnet` in class or command), else 8000 dotnet / 1500 other. Exclusive (waits for all, blocks all):
+`--cost large`, a `.sln` build, a Release publish, a Docker build, `verify:all`, a codebase-index run of
+wec.be. At most 2 harness suites (run-tests, run-servers test, verify-*) and one wec.be .NET run (class
+`wecbe-build:` / `wecbe-test:`, or `dotnet` in class or command from a wec.be cwd) at a time, whatever the
+budget. Each holder keeps a slot, `heavy-check.lock.holders/<token>.json`,
+and its own OS-owned name (alive exactly while the holder lives, asked by listening — a connect probe
+reads a holder blocked in spawnSync as dead once its pipe instances are used); admission is decided only
+under a short admission name, so two callers never count the same RAM. An exclusive holder takes the
+lock's single name, which every older-version caller needs: neither runs beside the other. While shared
+holders run, each has a small keeper process that re-takes that name within one poll (2 s) of the holder
+holding it leaving, so an older caller gets in beside shared holders only in that ≤ 1-poll window. While it
+holds the name it puts the lock file back if a releasing holder removed it, and it stops once its holder's
+own name is free (a `taskkill /F`ed holder whose pid was reused). Known
+transitional limit: a nested child running an older version under a new shared parent that does not hold
+the name may wait for its own parent (older code looks for the parent only in the name's holder file); it
+ends once every wrapper runs the new deploy. A caller that does not fit prints why (`Σ … MB > budget … MB`,
+`exclusive …`, a cap, or `alone: needs N MB …, free M MB`, also shown by status) and waits, up to 30 min
 (`MCP_HEAVY_LOCK_TIMEOUT_MS`), then exits 75; a holder whose pid is gone or that is older than 3 h is
 broken. Nested entry points inherit the hold through `MCP_HEAVY_LOCK_TOKEN`. `CI=true` or `--no-lock`
-skips it, so CI is never held. `node scripts/heavy-lock.mjs status [--json]` shows the holder and every
+skips it, so CI is never held. `node scripts/heavy-lock.mjs status [--json]` shows Σ declared / BUDGET, every holder
+with its declared and measured MB, and every
 waiter (pid, command, cwd, since when, alive) with its recorded ancestors up to the Claude session
 process, marks one with a recorded ancestor gone `launcher gone (session alive)` — a shell stopped
 while its child lived on, as in both 4 Nov incidents — and one whose whole recorded chain up to the
 session is gone `ORPHAN`. The lock is first come, first served: a caller takes a numbered ticket in
 `heavy-check.lock.waiters/` beside the lock the moment it arrives, and only the oldest live ticket may
-take the lock, however fast the others poll; a ticket whose pid is gone, whose waiter lost an ancestor,
+take the lock, however fast the others poll — except that a later run may pass a first waiter that does
+not fit, while that one has waited under 10 min; a ticket whose pid is gone, whose waiter lost an ancestor,
 or that has not been touched for 60 s is skipped and removed. Status lists waiters in ticket order with
 their position, names each one's repo (its cwd's git common dir) and Claude session id (the
 `claude` process heading its lineage, matched in `~/.claude/handover/.sessions.jsonl`; `unknown`
@@ -209,8 +232,8 @@ only when a leader deploys it. It refuses uncommitted copied files (or a tree gi
 `--allow-dirty`, and any import it did not copy. The stable entry exits **78** when the deploy is broken
 (no or bad `current.json`, its copy pruned, a module missing) — never 0/1, the lock's 75/76 or 130 — so a
 wrapper can tell "re-deploy" from a build result. Each run that holds the lock is measured (H-6a): repo,
-session, class (`--class <name>`, else repo + command), declared cost (`--cost small|large`, `--ram-mb N`
-— recorded only, not yet admitted by), duration, exit and the peak working set of its whole process
+session, class (`--class <name>`, else repo + command), declared cost (`--cost small|large`, `--ram-mb N`, and
+the MB admitted by), duration, exit and the peak working set of its whole process
 tree, detached build servers (VBCSCompiler, csc) included, sampled every 1 s
 (`MCP_HEAVY_LOCK_SAMPLE_MS`; `MCP_HEAVY_LOCK_SAMPLE=off`) by a PowerShell helper costing ~25 ms a
 sample (~2.5 CPU-s a minute, ~150 MB), into `heavy-check.lock.history.jsonl` (2 MiB, then rotated to
@@ -439,7 +462,9 @@ node scripts/install-mcp.mjs --server codebase-index --transport stdio  # back t
   since the deploy, not that its dist matches the source: the staleness signal is the src/dist mtime
   warning. `[deploy]` prints HEAD, clean/dirty and the hash, recomputes the hash of the running copy and
   **fails** when it no longer matches; a dirty or stale deploy, a deploy with no hash (made before this) or
-  a supervisor running from the tree warns.
+  a supervisor running from the tree warns. `--restart` **refuses** a stale build (exit 1, nothing
+  copied; the message names the dirs and the build command); `--allow-stale` overrides it, and
+  `--deploy-only` only warns.
 - **A trial run never touches the live one:** `--deploy-root <dir>` with a `--config` naming another port
   deploys and serves from a scratch root (`--deploy-only`, then start without `--restart`, which would
   `/Run` the live task).

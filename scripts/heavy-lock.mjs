@@ -8,7 +8,7 @@
  * gone — e.g. TaskStop killed the shell but not this child). Neither code means the check failed.
  *
  * Usage:
- *   node scripts/heavy-lock.mjs [--no-lock] -- <command> [args...]
+ *   node scripts/heavy-lock.mjs [--no-lock] [--class <name>] [--cost small|large] [--ram-mb <N>] -- <command> [args...]
  *   node scripts/heavy-lock.mjs status [--json]
  *   node scripts/heavy-lock.mjs deploy [--deploy-root <dir>] [--allow-dirty] [--json]
  *
@@ -16,7 +16,10 @@
  * (see `deployHeavyLock`). A leader runs it; tests pass a scratch `--deploy-root`.
  *
  * The lock is first come, first served (H-2): a caller takes a ticket on arrival and only the oldest
- * live ticket may take the lock, however often the others poll.
+ * live ticket may take the lock, however often the others poll — or a later one while the oldest has waited
+ * < 10 min. Several runs hold it at once while they fit the RAM budget (H-6b, lib/heavyLockBudget.mjs):
+ * `--ram-mb N` declares the run's MB (else its class's p95 × 1.5, else 8000 dotnet / 1500 other),
+ * `--cost large` makes it exclusive, `--class` names its class (else repo + command).
  *
  * `status` is read-only (it only removes registry entries of dead waiters and silent tickets): the
  * holder and every waiter in ticket order with its position, each with its repo and Claude session id
@@ -37,7 +40,7 @@ import { fileURLToPath } from "node:url";
 
 import { DEPLOY_RECORD, deployHash, foreignImports, importClosure } from "./lib/deploy.mjs";
 import { formatHeavyLockStatus, heavyLockStatus, holdHeavyLockOrExit, readSessionRows, repoOf, sessionOf, sessionsRegistryPath } from "./lib/heavyLock.mjs";
-import { defaultClass, formatHistory, historyPath, readHistory, recordRun, startSampler, summarizeHistory } from "./lib/heavyLockHistory.mjs";
+import { defaultClass, formatHistory, historyPath, newSampleFile, readHistory, recordRun, startSampler, summarizeHistory } from "./lib/heavyLockHistory.mjs";
 import { runCommand } from "./lib/heavyLockSpawn.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -192,7 +195,7 @@ if (command.length === 0) {
   console.error(USAGE);
   process.exit(2);
 }
-// H-6a: what the caller says the run is and costs. Recorded in the history only; H-6b will admit by it.
+// What the caller says the run is and costs: admitted by it (H-6b, lib/heavyLockBudget.mjs) and recorded (H-6a).
 const klass = option(own, "--class");
 const cost = option(own, "--cost");
 const ramText = option(own, "--ram-mb");
@@ -208,10 +211,13 @@ if (ramMb !== null && !(Number.isInteger(ramMb) && ramMb > 0)) {
 
 const cmd = command.join(" ");
 const askedAt = Date.now();
-const lock = await holdHeavyLockOrExit({ cmd, noLock: own.includes("--no-lock") });
+// The sampler's summary file is named before the lock is taken: the slot names it, so later admissions
+// read this run's working set from it.
+const sampleFile = newSampleFile();
+const lock = await holdHeavyLockOrExit({ cmd, noLock: own.includes("--no-lock"), klass, cost: cost ?? null, ramMb, sampleFile });
 // Measured only when this call holds the lock itself: a nested run is inside its parent's record.
 const startedAt = Date.now();
-const sampler = lock.acquired ? startSampler({ runStart: startedAt }) : null;
+const sampler = lock.acquired ? startSampler({ runStart: startedAt, out: sampleFile }) : null;
 // Every argument reaches the command literally: an .exe runs without a shell; a .cmd/.bat (npm) or a
 // builtin goes through cmd.exe fully escaped (lib/heavyLockSpawn.mjs).
 const result = runCommand(command);
@@ -239,9 +245,14 @@ if (lock.acquired) {
       startedAt: new Date(startedAt).toISOString(),
       repo,
       session: holder === null ? "unknown" : sessionOf(holder, null, readSessionRows(sessionsRegistryPath())),
-      class: klass ?? defaultClass(cmd, repo),
+      class: lock.request?.class ?? klass ?? defaultClass(cmd, repo),
       cost: cost ?? null,
       ramMb,
+      declaredMb: lock.request?.declaredMb ?? null,
+      declaredFrom: lock.request?.declaredFrom ?? null,
+      exclusive: lock.request?.exclusive ?? null,
+      admittedSumMb: lock.admission?.sumMb ?? null,
+      admittedBudgetMb: lock.admission?.budgetMb ?? null,
       cmd,
       cwd: process.cwd(),
       pid: process.pid,

@@ -94,7 +94,7 @@ export function buildSearchTools(deps: CodebaseIndexDeps): AnyToolDefinition[] {
     },
     annotations: readsGraph,
     rawResult: true,
-    handler: (input) => ok(raw(handleSearchRegex(input, buildContext())))
+    handler: async (input) => ok(raw(await handleSearchRegex(input, buildContext())))
   });
 
   const searchLiterals = defineTool({

@@ -75,6 +75,22 @@ export function codebaseIndexEnv(root: string): readonly EnvField[] {
       note: "Ratio 0–1. Only meaningful when telemetry is enabled."
     },
 
+    // --- Diagnostics --------------------------------------------------------------
+    {
+      name: "CODEBASE_INDEX_LOOP_WATCHDOG_ENABLED",
+      required: false,
+      codeDefault: "true",
+      section: "Diagnostics",
+      note: "MCP-ISSUE-121: a worker thread logs `event_loop_stall` (with the calls in flight) when the server thread stops running."
+    },
+    {
+      name: "CODEBASE_INDEX_LOOP_WATCHDOG_THRESHOLD_MS",
+      required: false,
+      codeDefault: "10000",
+      section: "Diagnostics",
+      note: "How long the server thread may be blocked before the watchdog logs it. Clamped to 1s–10min."
+    },
+
     // --- Watch --------------------------------------------------------------------
     {
       name: "CODEBASE_INDEX_WATCH_AUTO_START_ENABLED", deprecatedAliases: ["CODEBASE_INDEX_WATCH_AUTO_START"],

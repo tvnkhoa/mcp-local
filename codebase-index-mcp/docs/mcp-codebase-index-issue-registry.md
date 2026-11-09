@@ -318,6 +318,7 @@ Gate: 4/4 servers build + typecheck, 36/36 harnesses (63 assertions in the 049 h
 - [MCP-ISSUE-118 — `test:field-access-exact` red when solo: the cold type-program build outlives the harness budget](issues/MCP-ISSUE-118.md)
 - [MCP-ISSUE-119 — a new worktree re-indexes from scratch (~104 s on wec.aria) instead of seeding from its parent](issues/MCP-ISSUE-119.md)
 - [MCP-ISSUE-120 — search_regex times out while an incremental re-index of mcp-local runs](issues/MCP-ISSUE-120.md)
+- [MCP-ISSUE-121 — the HTTP server's thread stalls: watcher activation, search_regex and a main-thread write block it](issues/MCP-ISSUE-121.md)
 - [MCP-ISSUE-122 — index-run timing: a +29% full-index regression that did not reproduce, and `finished_at` stamped at the end of extraction, the freshness note without its own wait](issues/MCP-ISSUE-122.md)
 - [Confirmed fixed — 2026-08-05 re-verification of the 042–051 wave](issues/confirmed-fixed-2026-08-05-re-verification-of-the-042-051-wave.md)
 - [MCP-ISSUE-101 follow-ups (row 5: F2–F4)](issues/mcp-issue-101-follow-ups-row-5-f2-f4.md)

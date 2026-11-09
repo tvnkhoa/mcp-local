@@ -12,6 +12,9 @@
  *   node scripts/serve-http.mjs --server codebase-index --restart       # deploy, kill the tree on its port, /Run the task, wait for the new listener
  *   node scripts/serve-http.mjs --server codebase-index --deploy-only   # deploy only; the running process is untouched
  *
+ * `--restart` REFUSES (exit 1, nothing copied) when a server's or package's src is newer than its dist;
+ * `--allow-stale` deploys it anyway, with the stale warning. `--deploy-only` only warns.
+ *
  * Flags: --config <path> (default ~/.claude/mcp/http/<key>.env.json), --log <path>,
  * --deploy-root <path> (default ~/.claude/mcp/deploy; a scratch root for a trial run).
  *
@@ -497,7 +500,7 @@ export function runningDeploy(server, { deployRoot = defaultDeployRoot() } = {})
  * source path), `stale` (dirs whose src/ is newer than their dist/) and `hash` (`deployHash`, which
  * doctor recomputes). Marks the deploy current, then prunes. Returns the record.
  */
-export function deployServer(server, { workspaceRoot = WORKSPACE_ROOT, deployRoot = defaultDeployRoot(), head = gitHead(workspaceRoot), sha = head?.slice(0, 12) ?? "nogit", scriptsDir = path.dirname(SCRIPT), now = () => new Date(), inUse = deployInUse } = {}) {
+export function deployServer(server, { workspaceRoot = WORKSPACE_ROOT, deployRoot = defaultDeployRoot(), head = gitHead(workspaceRoot), sha = head?.slice(0, 12) ?? "nogit", scriptsDir = path.dirname(SCRIPT), now = () => new Date(), inUse = deployInUse, refuseStale = false } = {}) {
   const srcServer = path.join(workspaceRoot, server.dir);
   const pkgJson = JSON.parse(fs.readFileSync(path.join(srcServer, "package.json"), "utf-8"));
   const packages = workspacePackages(workspaceRoot);
@@ -511,6 +514,11 @@ export function deployServer(server, { workspaceRoot = WORKSPACE_ROOT, deployRoo
     throw new Error(`${server.key}: not built — missing ${missing.join(", ")}. Run npm run build:packages, then npm run build in ${server.dir}`);
   }
   const supervisorFiles = importClosure(path.join(scriptsDir, path.basename(SCRIPT)));
+  const builtDirs = [server.dir, ...copied.map((name) => path.relative(workspaceRoot, packages[name]).split(path.sep).join("/"))];
+  const stale = staleBuilds(workspaceRoot, builtDirs);
+  if (refuseStale && stale.length) {
+    throw new Error(`${server.key}: refusing to deploy a stale build — src is newer than dist in ${stale.join(", ")}. Run npm run build:packages, then npm run build in ${server.dir}; or pass --allow-stale to deploy it anyway`);
+  }
 
   const keyDir = path.join(deployRoot, server.key);
   fs.mkdirSync(keyDir, { recursive: true });
@@ -551,7 +559,6 @@ export function deployServer(server, { workspaceRoot = WORKSPACE_ROOT, deployRoo
     removeTree(dir);
     throw e;
   }
-  const builtDirs = [server.dir, ...copied.map((name) => path.relative(workspaceRoot, packages[name]).split(path.sep).join("/"))];
   const record = {
     key: server.key,
     sha,
@@ -562,7 +569,7 @@ export function deployServer(server, { workspaceRoot = WORKSPACE_ROOT, deployRoo
     source: workspaceRoot,
     head,
     dirty: gitDirty(workspaceRoot, [...builtDirs, ...supervisorFiles.map((rel) => path.relative(workspaceRoot, path.join(scriptsDir, rel)))].filter((p) => !p.startsWith("..") && !path.isAbsolute(p))),
-    stale: staleBuilds(workspaceRoot, builtDirs),
+    stale,
     hash: deployHash(dir),
     packages: closure,
     supervisorPackages,
@@ -956,7 +963,7 @@ async function serve(server, envFile, logFile, deployRoot) {
 }
 
 async function main() {
-  const args = parseArgs(process.argv.slice(2), { restart: ["--restart"], deployOnly: ["--deploy-only"] }, { config: ["--config"], log: ["--log"], task: ["--task"], deployRoot: ["--deploy-root"] });
+  const args = parseArgs(process.argv.slice(2), { restart: ["--restart"], deployOnly: ["--deploy-only"], allowStale: ["--allow-stale"] }, { config: ["--config"], log: ["--log"], task: ["--task"], deployRoot: ["--deploy-root"] });
   if (args.servers.length !== 1) throw new Error("pass exactly one --server <key>");
   const [server] = resolveServers(args.servers);
   if (httpEnvNames(server) === null) {
@@ -968,7 +975,7 @@ async function main() {
   if (args.restart || args.deployOnly) {
     const port = readEnvFile(envFile)?.[httpEnvNames(server).port];
     if (args.restart && !port) throw new Error(`${envFile} must set ${httpEnvNames(server).port}`);
-    const d = deployServer(server, { deployRoot });
+    const d = deployServer(server, { deployRoot, refuseStale: args.restart && !args.allowStale });
     const pruned = d.pruned.length ? `; removed ${d.pruned.length} older` : "";
     const flags = [d.dirty ? "uncommitted changes" : null, d.stale.length ? `stale build: ${d.stale.join(", ")}` : null].filter(Boolean);
     ok(`${server.key}: deployed ${d.sha}${flags.length ? ` (${flags.join("; ")})` : ""}, hash ${d.hash.slice(0, 12)}, to ${d.dir}${pruned}`);

@@ -73,16 +73,38 @@
  * `status` lists waiters in ticket order with their position. A caller that cannot write a ticket waits
  * without one (fail-open: registration never stops a run). Callers older than H-2 take no ticket and
  * still race; they go when every caller runs this version.
+ *
+ * A RAM budget, not one at a time (row H-6b, 2026-11-05; "H-6b FROZEN" with wec.be, owner-approved).
+ * Several runs may hold the lock at once while they fit (`heavyLockBudget.mjs`: Σ declared MB of the
+ * holders + own ≤ free RAM + holders' measured working set − 8192 MB; exclusive runs; ≤ 2 harness suites;
+ * one wec.be build/test). Each holder has a slot: `<lock>.holders/<token>.json` plus its own OS-owned
+ * name `<lock name>-h-<token>`, listened on for the whole run. A slot is alive while that name is held
+ * (the OS frees it the moment the holder dies, `taskkill /F` included; a probe that cannot tell counts as
+ * alive), so a crashed holder's slot is reclaimed at the next admission, never by judgement; the file
+ * scheme (macOS) judges it by pid + start time + age, as it judges the holder file. Admission is atomic:
+ * a caller decides only while it holds the admission name `<lock name>-admit` (file scheme:
+ * `<lock>.admit`, created by hard link), and it writes its slot before letting go, so two callers never
+ * both count the same free RAM. Only the FIFO head may try, or a later waiter while the head has waited
+ * less than 10 min (bounded bypass). Mixed versions: the lock's single name (the one every older caller
+ * takes) is taken by every exclusive holder — an older caller then waits, and if an older caller has it
+ * first the exclusive admission fails at that atomic listen and waits — and, when free, by a shared holder
+ * as a guard. A held name whose holder file does not name a live shared slot counts as an exclusive
+ * holder (an older caller knows no budget). Each shared holder also runs a small keeper process that
+ * re-takes the name within one poll when the holder guarding it leaves (`startNameKeeper`), so an older
+ * caller gets in beside shared holders only in that ≤ 1-poll window; it never runs beside an exclusive one.
  */
 
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import process from "node:process";
+import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
+
+import { admit, BYPASS_MS, budgetOf, buildRequest, defaultClass, readCurrentMb, readFreeMb, readHistoryRows, RESERVE_MB } from "./heavyLockBudget.mjs";
 
 /** EX_TEMPFAIL: the check did not run, try again later — not a test failure. */
 export const LOCK_TIMEOUT_EXIT = 75;
@@ -126,6 +148,16 @@ export function heavyLockPath(env = process.env) {
 /** Where waiters register: one file per waiting call, beside the lock. */
 export function heavyLockWaitersDir(file = heavyLockPath()) {
   return `${file}.waiters`;
+}
+
+/** Where holders keep their slots (H-6b): `<token>.json` per run holding the lock. */
+export function heavyLockHoldersDir(file = heavyLockPath()) {
+  return `${file}.holders`;
+}
+
+/** File scheme: the admission mutex file. */
+function admitFile(file) {
+  return `${file}.admit`;
 }
 
 /** Where the first sighting of an orphaned holder is kept: `{token, pid, since}`. */
@@ -482,13 +514,111 @@ export function breakStale(file, judged, log) {
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
+/** A slot record as written, or `null`. */
+function readSlot(full) {
+  return parseHolder(readRaw(full) ?? "");
+}
+
+/** Every slot file in the holders dir: `[{full, record}]` (temp files are not slots). */
+function listSlots(file) {
+  const dir = heavyLockHoldersDir(file);
+  let names = [];
+  try {
+    names = fs.readdirSync(dir).filter((name) => name.endsWith(".json"));
+  } catch {
+    return [];
+  }
+  return names.map((name) => ({ full: path.join(dir, name), record: readSlot(path.join(dir, name)) }));
+}
+
 /**
- * Take the machine-wide heavy-check lock, waiting while a live holder has it.
+ * Is the run in this slot still holding? Its pid lives and — pipe scheme — its own name is held (a probe
+ * that cannot tell counts as held); file scheme: `staleReason` finds nothing.
+ */
+async function slotAlive(record, { readStart = readPidStart, pidStarts = new Map() } = {}) {
+  if (record === null || !isPidAlive(record.pid)) return false;
+  if (typeof record.slotPipe === "string" && record.slotPipe !== "") return (await isNameHeld(record.slotPipe)) !== false;
+  return (await staleReason(record, { readStart, pidStarts })) === null;
+}
+
+/** The live holders, oldest first, each with `wsMb` (measured, or null); a dead slot's file is removed (`cleaned`). */
+async function liveHolders(file, { readStart, pidStarts, readWorkingSetMb } = {}) {
+  const measure = readWorkingSetMb ?? ((slot) => readCurrentMb(slot.sampleFile));
+  const live = [];
+  let cleaned = 0;
+  for (const { full, record } of listSlots(file)) {
+    if (await slotAlive(record, { readStart, pidStarts })) {
+      let wsMb = null;
+      try {
+        wsMb = measure(record);
+      } catch {
+        // unmeasured: counts 0
+      }
+      live.push({ ...record, wsMb: Number.isFinite(wsMb) ? wsMb : null });
+      continue;
+    }
+    // A slot is complete before it is visible (temp + rename), so an unreadable one is torn or being
+    // removed; it is left a moment before it counts as dead.
+    if (record === null && Date.now() - touchedAt(full) < 5_000) continue;
+    try {
+      fs.rmSync(full, { force: true });
+      cleaned++;
+    } catch {
+      // next time
+    }
+  }
+  live.sort((a, b) => String(a.startedAt).localeCompare(String(b.startedAt)));
+  return { live, cleaned };
+}
+
+/** Write `content` to `full` whole: a reader sees nothing or all of it. */
+function writeWhole(full, content) {
+  fs.mkdirSync(path.dirname(full), { recursive: true });
+  const tmp = `${full}.${String(process.pid)}.${randomUUID()}.tmp`;
+  fs.writeFileSync(tmp, content);
+  try {
+    fs.renameSync(tmp, full);
+  } finally {
+    fs.rmSync(tmp, { force: true });
+  }
+}
+
+/** File scheme: an admission mutex older than this, or of a dead pid, is broken. */
+const ADMIT_STALE_MS = 30_000;
+
+/**
+ * Take the admission mutex: a release function, or `null` while another caller is deciding. Pipe
+ * scheme: listen on `<lock name>-admit` (the OS frees it if the decider dies); file scheme:
+ * `<lock>.admit` created by hard link, broken when its pid is gone or it is older than `ADMIT_STALE_MS`.
+ */
+async function takeAdmission(file, pipe, log) {
+  if (pipe !== null) {
+    const server = await tryListen(`${pipe}-admit`);
+    return server === null ? null : () => server.close();
+  }
+  const at = admitFile(file);
+  const content = JSON.stringify({ pid: process.pid, at: Date.now(), token: randomUUID() });
+  if (tryCreate(at, content)) {
+    return () => {
+      if (readRaw(at) === content) fs.rmSync(at, { force: true });
+    };
+  }
+  const raw = readRaw(at);
+  const held = parseHolder(raw ?? "");
+  if (raw !== null && (held === null || !isPidAlive(held.pid) || Date.now() - Number(held.at) > ADMIT_STALE_MS)) breakStale(at, raw, log);
+  return null;
+}
+
+/**
+ * Take the machine-wide heavy-check lock, waiting until this run fits the RAM budget (H-6b).
  *
- * Resolves `{ acquired: true, release }` or `{ acquired: false, reason }` when the lock is skipped
- * (CI, `--no-lock`, already held by a parent). Rejects with `HeavyLockTimeoutError` after
+ * Resolves `{ acquired: true, release, request, admission }` or `{ acquired: false, reason }` when the
+ * lock is skipped (CI, `--no-lock`, already held by a parent). Rejects with `HeavyLockTimeoutError` after
  * `timeoutMs`. `env` receives `MCP_HEAVY_LOCK_TOKEN` so children spawned with it inherit the hold.
- * Tests only: `readStart` replaces `readPidStart`, and `scheme: "file"` forces the file scheme.
+ * `klass`, `cost`, `ramMb` describe the run (heavyLockBudget.mjs); `sampleFile` is where its sampler
+ * writes, read by later admissions as its working set. Tests only: `readStart` replaces `readPidStart`,
+ * `scheme: "file"` forces the file scheme, `request` replaces the built request, `readFree` the free-RAM
+ * reading, `readWorkingSetMb` a holder's measured MB, `clock` the time the bypass rule reads.
  */
 export async function acquireHeavyLock({
   cmd,
@@ -500,6 +630,16 @@ export async function acquireHeavyLock({
   readStart = readPidStart,
   readLineage = () => readOwnLineage(env),
   scheme,
+  klass,
+  cost = null,
+  ramMb = null,
+  sampleFile = null,
+  request: givenRequest,
+  readFree = () => readFreeMb(env),
+  readWorkingSetMb,
+  clock = Date.now,
+  bypassMs = BYPASS_MS,
+  nameKeeper = true,
   log = (line) => console.error(line)
 } = {}) {
   if (noLock) return { acquired: false, reason: "--no-lock" };
@@ -509,11 +649,16 @@ export async function acquireHeavyLock({
   const inherited = env.MCP_HEAVY_LOCK_TOKEN;
   const insideParent = (holder) =>
     inherited && holder?.token === inherited ? { acquired: false, reason: `held by parent pid ${String(holder.pid)}` } : null;
-  // The file scheme trusts the file. The pipe scheme asks the OS first (below), so a token left in a
+  // The file scheme trusts the files. The pipe scheme asks the OS first (below), so a token left in a
   // killed holder's file never skips the lock.
-  if (pipe === null) {
+  if (pipe === null && inherited) {
     const skip = insideParent(parseHolder(readRaw(file) ?? ""));
     if (skip !== null) return skip;
+    const slot = readSlot(path.join(heavyLockHoldersDir(file), `${inherited}.json`));
+    if (slot !== null && isPidAlive(slot.pid)) {
+      const inSlot = insideParent(slot);
+      if (inSlot !== null) return inSlot;
+    }
   }
 
   const limit = timeoutMs ?? (Number(env.MCP_HEAVY_LOCK_TIMEOUT_MS) || DEFAULT_TIMEOUT_MS);
@@ -521,28 +666,59 @@ export async function acquireHeavyLock({
   const token = randomUUID();
   const deadline = Date.now() + limit;
   // A nested caller inside a live hold skips before it pays for the lineage read: the OS says the name
-  // is held (probed by connecting, never by listening) and the file names the inherited token.
+  // is held (probed by connecting, never by listening) and the file names the inherited token — or the
+  // inherited token's slot is live (a shared holder that is not the name's guard).
   if (pipe !== null && inherited) {
     const written = parseHolder(readRaw(file) ?? "");
-    if (written?.token === inherited && isPidAlive(written.pid) && (await probeName(pipe)) === true) return insideParent(written);
+    if (written?.token === inherited && isPidAlive(written.pid) && (await isNameHeld(pipe)) === true) return insideParent(written);
+    const slot = readSlot(path.join(heavyLockHoldersDir(file), `${inherited}.json`));
+    if (slot?.token === inherited && (await slotAlive(slot))) return insideParent(slot);
   }
   // The ticket is taken on arrival (H-2), before the lineage read: its number is this caller's place.
   const waiter = registerWaiter(file, { token, cmd, cwd, pollMs });
   let announced = null;
   const pidStarts = new Map();
   let lineage = [];
-  const holderContent = () => JSON.stringify({ pid: process.pid, startedAt: new Date().toISOString(), token, cmd, cwd, ppid: process.ppid, lineage });
+  let request = null;
+  const slotPipe = pipe === null ? null : `${pipe}-h-${token}`;
+  const slotFile = path.join(heavyLockHoldersDir(file), `${token}.json`);
+  const record = (startedAt) => ({
+    v: 2,
+    pid: process.pid,
+    startedAt,
+    token,
+    cmd,
+    cwd,
+    ppid: process.ppid,
+    lineage,
+    class: request.class,
+    declaredMb: request.declaredMb,
+    declaredFrom: request.declaredFrom,
+    exclusive: request.exclusive,
+    exclusiveWhy: request.exclusiveWhy,
+    harness: request.harness,
+    capKey: request.capKey,
+    slotPipe,
+    sampleFile
+  });
   try {
     // Read before acquiring, so the holder file is written the moment the name is taken; bounded so the
-    // read never runs past the caller's deadline.
-    lineage = await boundedLineage(readLineage, Math.min(LINEAGE_READ_TIMEOUT_MS, limit));
-    waiter.setLineage(lineage);
+    // read never runs past the caller's deadline. The request (class, declared MB) is built meanwhile.
+    // The repo also decides the wec.be cap for a dotnet run without the wecbe- prefix.
+    const building =
+      givenRequest !== undefined
+        ? Promise.resolve(givenRequest)
+        : repoOf(cwd).then((repo) =>
+            buildRequest({ cmd, klass: klass ?? defaultClass(cmd, repo), cost, ramMb, repo, rows: readHistoryRows(`${file}.history.jsonl`) })
+          );
+    [lineage, request] = await Promise.all([boundedLineage(readLineage, Math.min(LINEAGE_READ_TIMEOUT_MS, limit)), building]);
+    waiter.update({ lineage, ...request });
     return await take();
   } finally {
     waiter.unregister();
   }
 
-  async function waitOrTimeout(holder, ahead = 0) {
+  async function waitOrTimeout(holder, ahead = 0, why = null) {
     // Only an ancestor alive when the wait began counts: one already gone then was a spawn-and-exit
     // wrapper (Start-Process, cmd /c start, nohup, a scheduler stub), not a session that stopped.
     const gone = waiter.watched.find((entry) => !isPidAlive(entry.pid));
@@ -553,20 +729,15 @@ export async function acquireHeavyLock({
       );
     }
     waiter.heartbeat();
-    if (Date.now() >= deadline) {
-      throw new HeavyLockTimeoutError(
-        `heavy-check lock still held after ${String(Math.round(limit / 1000))} s by ${describeHolder(holder)} ` +
-          `(${file}). Wait for it, or set MCP_HEAVY_LOCK_TIMEOUT_MS; --no-lock skips the lock.`
-      );
-    }
     // A flagged holder (launcher or whole chain gone) is noted beside the lock; once flagged
     // MCP_HEAVY_LOCK_ORPHAN_MINUTES, the waiting line names the kill command (never run here).
     const flag = holder === null ? null : holderOrphanByPids(holder);
     const orphaned = holder === null ? { since: null, due: false } : noteOrphan(file, { token: holder.token, pid: holder.pid, orphan: flag.flagged }, { env });
-    const key = holder === null ? null : `${String(holder.token)}|${String(orphaned.due)}|${String(ahead)}`;
-    if (holder !== null && announced !== key) {
+    const key = `${String(holder?.token)}|${String(orphaned.due)}|${String(ahead)}|${String(why)}`;
+    if ((holder !== null || why !== null) && announced !== key) {
       log(
-        `heavy-check lock held by ${describeHolder(holder)}; waiting up to ` +
+        `${holder === null ? "heavy-check lock: waiting" : `heavy-check lock held by ${describeHolder(holder)}`}; ` +
+          `${why === null ? "" : `${why}; `}${String(request.declaredMb)} MB declared (${request.declaredFrom}${request.exclusive ? `, exclusive: ${String(request.exclusiveWhy)}` : ""}); waiting up to ` +
           `${limit >= 60_000 ? `${String(Math.round(limit / 60_000))} min` : `${String(Math.round(limit / 1000))} s`} (MCP_HEAVY_LOCK_TIMEOUT_MS) …` +
           (ahead > 0 ? ` ${String(ahead)} waiter${ahead === 1 ? "" : "s"} ahead (first come, first served)` : "") +
           (orphaned.due
@@ -575,53 +746,141 @@ export async function acquireHeavyLock({
       );
       announced = key;
     }
+    // After the announcement, so even a wait shorter than one poll says what it waited for.
+    if (Date.now() >= deadline) {
+      // No holder in the way (a lone run that does not fit the free RAM): say what it needs, not who holds.
+      throw new HeavyLockTimeoutError(
+        (holder === null
+          ? `heavy-check lock: no room after ${String(Math.round(limit / 1000))} s`
+          : `heavy-check lock still held after ${String(Math.round(limit / 1000))} s by ${describeHolder(holder)}`) +
+          `${why === null ? "" : ` — ${why}`} (${file}). Wait for it, or set MCP_HEAVY_LOCK_TIMEOUT_MS; --no-lock skips the lock.`
+      );
+    }
     await sleep(Math.max(1, Math.min(pollMs, deadline - Date.now())));
   }
 
-  async function take() {
-    let server = null;
-    if (pipe !== null) {
-      for (;;) {
-        // Only the oldest live ticket may try the name; the rest wait their turn however fast they poll.
-        const ahead = waiter.ahead();
-        if (ahead === 0 && (server = await tryListen(pipe)) !== null) break;
-        // A holder writes the file just after it takes the name, so for a moment the file may still name
-        // a killed holder before it; trust only a live pid, and read the file again next poll.
-        const written = parseHolder(readRaw(file) ?? "");
-        const holder = written !== null && isPidAlive(written.pid) ? written : null;
-        const skip = insideParent(holder);
-        if (skip !== null) return skip;
-        await waitOrTimeout(holder, ahead);
-      }
-      writeHolderFile(file, holderContent());
-    } else {
-      const content = holderContent();
-      for (;;) {
-        const ahead = waiter.ahead();
-        if (ahead === 0 && tryCreate(file, content)) break;
-        const raw = readRaw(file);
-        if (raw === null) {
-          if (ahead > 0) await waitOrTimeout(null, ahead);
-          continue;
-        }
-        const holder = parseHolder(raw);
-        // A stale holder is broken by the waiter whose turn it is, not by one further back.
-        const stale = ahead === 0 ? await staleReason(holder, { readStart, pidStarts }) : null;
-        if (stale !== null) {
-          // Judging may have awaited a start-time read; a lock taken meanwhile must be re-judged, not moved
-          // aside — breakStale can put a moved live lock back only while no third waiter has taken the path.
-          if (readRaw(file) !== raw) continue;
-          log(`heavy-check lock: breaking ${describeHolder(holder)} — ${stale}`);
+  /**
+   * One admission attempt under the mutex: `{ admitted: true, ... }` or `{ admitted: false, why, holder }`
+   * where `holder` is the run in the way (the name's holder when it occupies the lock, else the oldest slot).
+   */
+  async function tryAdmit(head) {
+    const unlock = await takeAdmission(file, pipe, log);
+    if (unlock === null) return { admitted: false, why: "another caller is being admitted", holder: null };
+    let slotServer = null;
+    let nameServer = null;
+    let admitted = false;
+    try {
+      const { live } = await liveHolders(file, { readStart, pidStarts, readWorkingSetMb });
+      const raw = readRaw(file);
+      let written = parseHolder(raw ?? "");
+      const isGuard = (w) => w !== null && w.v === 2 && !w.exclusive && live.some((h) => h.token === w.token);
+      let nameFree;
+      let occupied;
+      if (pipe !== null) {
+        // Asked by listening, never by connecting: a holder sitting in spawnSync accepts no connection, so
+        // once its few pipe instances are used a connect answers ENOENT though it lives. Listening gets
+        // EADDRINUSE while any instance exists. A name found free is kept until the decision: given up on a
+        // refusal, kept as the exclusive holder's name or a shared holder's guard on admission.
+        nameServer = await tryListen(pipe);
+        nameFree = nameServer !== null;
+        occupied = !nameFree && !isGuard(written);
+      } else if (raw === null) {
+        nameFree = true;
+        occupied = false;
+      } else if (isGuard(written)) {
+        nameFree = false;
+        occupied = false;
+      } else {
+        const stale = await staleReason(written, { readStart, pidStarts });
+        if (stale !== null && readRaw(file) === raw) {
+          log(`heavy-check lock: breaking ${describeHolder(written)} — ${stale}`);
           breakStale(file, raw, log);
-          continue;
+          written = null;
         }
-        await waitOrTimeout(holder, ahead);
+        nameFree = readRaw(file) === null;
+        occupied = !nameFree;
       }
+      const freeMb = readFree();
+      const alive = written !== null && isPidAlive(written.pid) ? written : null;
+      // The run in the way, as the lock file says when it is the name's guard (its lineage, for the orphan flag).
+      const first = live[0] === undefined ? null : alive?.token === live[0].token ? { ...live[0], ...alive } : live[0];
+      const blocker = occupied && alive !== null ? alive : (first ?? alive);
+      // Bypass only past a head that does not fit now: a head that fits is next, however slowly it polls.
+      // A head that declared nothing (an older version, or still reading its lineage) counts as exclusive.
+      if (head !== null) {
+        const theirs = Number.isFinite(head.declaredMb)
+          ? { declaredMb: head.declaredMb, exclusive: head.exclusive === true, exclusiveWhy: head.exclusiveWhy ?? null, harness: head.harness === true, capKey: head.capKey ?? null }
+          : { declaredMb: 0, exclusive: true, exclusiveWhy: "declares nothing", harness: false, capKey: null };
+        if (admit(theirs, live, { freeMb, legacyOccupied: occupied, head: true }).ok) return { admitted: false, why: "the first waiter fits: its turn", holder: blocker };
+      }
+      const decision = admit(request, live, { freeMb, legacyOccupied: occupied, head: head === null });
+      if (!decision.ok) return { admitted: false, why: decision.reason, holder: blocker, decision };
+      const holderContent = JSON.stringify(record(new Date().toISOString()));
+      if (pipe !== null) {
+        slotServer = await tryListen(slotPipe);
+        if (slotServer === null) return { admitted: false, why: "this run's own slot name is taken", holder: blocker, decision };
+        // Exclusive: needs the name (taken above, atomically: an older caller that has it wins, this one
+        // waits). Shared: keeps it as a guard when it was free.
+        if (request.exclusive && nameServer === null) return { admitted: false, why: "the lock's name is held", holder: blocker, decision };
+        writeWhole(slotFile, holderContent);
+        if (nameServer !== null) writeHolderFile(file, holderContent);
+      } else {
+        let named = false;
+        if (request.exclusive || nameFree) named = tryCreate(file, holderContent);
+        if (request.exclusive && !named) return { admitted: false, why: "a caller of an older version took the lock file", holder: blocker, decision };
+        writeWhole(slotFile, holderContent);
+      }
+      admitted = true;
+      return { admitted: true, slotServer, nameServer, decision };
+    } finally {
+      if (!admitted) {
+        slotServer?.close();
+        nameServer?.close();
+      }
+      unlock();
+    }
+  }
+
+  async function take() {
+    let got;
+    let lastWhy = null;
+    for (;;) {
+      // The FIFO head may always try; a later waiter only while the head has waited less than
+      // `bypassMs` (bounded bypass: a run that does not fit is never starved for longer).
+      const ahead = waiter.ahead();
+      const head = ahead === 0 ? null : waiter.head;
+      const headWaited = head === null ? 0 : clock() - Date.parse(String(head.since));
+      let why = null;
+      let holder = null;
+      if (ahead === 0 || headWaited < bypassMs) {
+        got = await tryAdmit(head);
+        if (got.admitted) break;
+        why = got.why;
+        holder = got.holder;
+      } else {
+        why = `the first waiter has waited ${String(Math.round(headWaited / 60_000))} min: no bypass`;
+      }
+      if (holder === null) {
+        const written = parseHolder(readRaw(file) ?? "");
+        holder = written !== null && isPidAlive(written.pid) ? written : null;
+      }
+      const skip = insideParent(holder);
+      if (skip !== null) return skip;
+      // Why this run waits, in its ticket: status shows it (a head that cannot fit even alone says so).
+      if (why !== lastWhy && why !== "another caller is being admitted") {
+        waiter.update({ waiting: why });
+        lastWhy = why;
+      }
+      await waitOrTimeout(holder, ahead, why);
     }
 
-    // A new holder: a previous holder's orphan sighting no longer applies.
-    fs.rmSync(heavyLockOrphanFile(file), { force: true });
+    // A new holder of the name: a previous holder's orphan sighting no longer applies.
+    if (got.nameServer !== null || (pipe === null && parseHolder(readRaw(file) ?? "")?.token === token)) fs.rmSync(heavyLockOrphanFile(file), { force: true });
     env.MCP_HEAVY_LOCK_TOKEN = token;
+    // A shared holder keeps the lock's name taken while it runs, even after the holder that took it
+    // leaves: a keeper process re-takes it within one poll (an older caller never slips in beside shared
+    // holders for longer). This process cannot: it sits in spawnSync for the whole run.
+    const keeper = pipe !== null && !request.exclusive && nameKeeper ? startNameKeeper({ file, pipe, slotFile, slotPipe, pollMs }) : null;
     let released = false;
     const onSignal = () => {
       release();
@@ -633,16 +892,101 @@ export async function acquireHeavyLock({
       process.off("exit", release);
       process.off("SIGINT", onSignal);
       process.off("SIGTERM", onSignal);
-      // The file goes first, while the name is still held: no next holder can have written it yet.
+      // The keeper first (TerminateProcess / SIGKILL: it writes nothing after), then the files, while the
+      // names are still held: no next holder can have written them yet.
+      // Only a keeper not known to have exited: a pid that exited may already be another process's.
+      try {
+        if (keeper?.pid !== undefined && keeper.exitCode === null && keeper.signalCode === null) process.kill(keeper.pid, "SIGKILL");
+      } catch {
+        // already gone
+      }
+      fs.rmSync(slotFile, { force: true });
       if (parseHolder(readRaw(file) ?? "")?.token === token) fs.rmSync(file, { force: true });
       if (parseHolder(readRaw(heavyLockOrphanFile(file)) ?? "")?.token === token) fs.rmSync(heavyLockOrphanFile(file), { force: true });
-      server?.close();
+      got.nameServer?.close();
+      got.slotServer?.close();
       if (env.MCP_HEAVY_LOCK_TOKEN === token) delete env.MCP_HEAVY_LOCK_TOKEN;
     }
     process.on("exit", release);
     process.on("SIGINT", onSignal);
     process.on("SIGTERM", onSignal);
-    return { acquired: true, path: file, pipe, token, release };
+    return { acquired: true, path: file, pipe, token, release, request, admission: { sumMb: got.decision.sumMb, budgetMb: got.decision.budgetMb } };
+  }
+}
+
+const SELF = fileURLToPath(import.meta.url);
+const KEEP_FLAG = "--keep-lock-name";
+
+/**
+ * Start the name keeper of a shared holder (review M1): a small detached node process that, every poll,
+ * re-takes the lock's single name when it is free and writes the holder's slot as the lock file, so an
+ * older caller (which knows only that name) cannot take it while any shared holder runs. It holds the
+ * name for the holder (an older caller's view: one holder, this one). While it holds the name it puts the
+ * lock file back whenever it is missing or names another token (a releasing holder's check-then-remove can
+ * delete it just after this keeper wrote it; a held name without its file reads as an older caller to every
+ * client). It stops — letting the name go — when the holder's pid is gone, its slot name is no longer held
+ * (the pid was reused after a `taskkill /F`), or its slot file is removed (ENOENT only: a read refused with
+ * EPERM/EBUSY is not proof of anything); the holder also kills it on release.
+ * `null` when it cannot start (then the window is the one before H-6b review: until the next admission).
+ */
+function startNameKeeper({ file, pipe, slotFile, slotPipe, pollMs }) {
+  try {
+    const child = spawn(process.execPath, [SELF, KEEP_FLAG, String(process.pid), file, pipe, slotFile, String(Math.max(50, pollMs)), slotPipe], {
+      stdio: "ignore",
+      windowsHide: true,
+      detached: false
+    });
+    child.on("error", () => {});
+    child.unref();
+    return child;
+  } catch {
+    return null;
+  }
+}
+
+/** The keeper's read of the slot file: its text, `null` when it is gone (ENOENT), `undefined` when unreadable now. */
+function readKeptSlot(slotFile) {
+  try {
+    return fs.readFileSync(slotFile, "utf8");
+  } catch (error) {
+    return error.code === "ENOENT" ? null : undefined;
+  }
+}
+
+/** The keeper's loop (see startNameKeeper). `slotPipe` is last: a keeper started by an older holder has none. */
+async function keepLockName([parentPid, file, pipe, slotFile, pollMs, slotPipe]) {
+  const parent = Number(parentPid);
+  let server = null;
+  let token = null;
+  let slot = null;
+  const stop = () => {
+    if (server !== null && token !== null && parseHolder(readRaw(file) ?? "")?.token === token) fs.rmSync(file, { force: true });
+    server?.close();
+    process.exit(0);
+  };
+  for (;;) {
+    const raw = readKeptSlot(slotFile);
+    if (raw === null || !isPidAlive(parent)) stop();
+    if (typeof raw === "string") slot = raw;
+    // The holder's own name, asked by listening: free means the holder is gone whatever its pid now names.
+    if (typeof slotPipe === "string" && slotPipe !== "" && (await isNameHeld(slotPipe)) === false) stop();
+    if (server === null) {
+      try {
+        server = await tryListen(pipe);
+      } catch {
+        server = null;
+      }
+    }
+    if (server !== null && token === null) token = parseHolder(slot ?? "")?.token ?? null;
+    // Holding the name: the lock file must name this holder (missing or another token → write it back).
+    if (server !== null && slot !== null && token !== null && parseHolder(readRaw(file) ?? "")?.token !== token) {
+      try {
+        writeHolderFile(file, slot);
+      } catch {
+        // the name is what counts; the file is information (tried again next poll)
+      }
+    }
+    await sleep(Number(pollMs) || POLL_MS);
   }
 }
 
@@ -753,9 +1097,10 @@ export function registerWaiter(
     ticket = null;
   };
   take();
-  const setLineage = (next) => {
-    record.lineage = next;
-    record.watched = watched = next.filter((ancestor) => isPidAlive(ancestor.pid));
+  /** Merge `fields` into the ticket (H-6b: class, declared MB); `lineage` also sets `watched`. */
+  const update = (fields) => {
+    Object.assign(record, fields);
+    if (Array.isArray(fields.lineage)) record.watched = watched = fields.lineage.filter((ancestor) => isPidAlive(ancestor.pid));
     if (entry === null || !fs.existsSync(entry)) return;
     try {
       // Replaced whole (temp + rename): a reader sees the old ticket or the new one, never half of one.
@@ -770,6 +1115,10 @@ export function registerWaiter(
       // information only: the ticket keeps its place; others just cannot see this waiter's ancestors
     }
   };
+  const setLineage = (next) => update({ lineage: next });
+  // The first live ticket ahead (`null` when none), as of the last ahead(): the bypass rule reads its
+  // `since` and what it declared.
+  let head = null;
   const ahead = () => {
     if (ticket === null) return 0;
     // Removed under us (judged silent after a stall): queue again, at the back, rather than race for a poll.
@@ -783,6 +1132,7 @@ export function registerWaiter(
       }
       take();
     }
+    head = null;
     if (ticket === null) return 0;
     let count = 0;
     const now = Date.now();
@@ -805,8 +1155,10 @@ export function registerWaiter(
           remove(t.full);
           continue;
         }
+        if (count === 0) head = record ?? {};
       } catch {
         // could not read or remove it (EPERM/EBUSY): it stays ahead for this poll
+        if (count === 0) head = {};
       }
       count++;
     }
@@ -848,26 +1200,33 @@ export function registerWaiter(
     get watched() {
       return watched;
     },
+    get head() {
+      return head;
+    },
     ahead,
     heartbeat,
     setLineage,
+    update,
     unregister
   };
 }
 
-/** Is the OS-owned name held? Probed by connecting (never by listening: that would take the lock). */
-function probeName(name) {
-  return new Promise((resolve) => {
-    const socket = net.connect(name);
-    const done = (held) => {
-      clearTimeout(timer);
-      socket.destroy();
-      resolve(held);
-    };
-    const timer = setTimeout(() => done(null), 2_000);
-    socket.once("connect", () => done(true));
-    socket.once("error", (error) => done(error.code === "ENOENT" || error.code === "ECONNREFUSED" ? false : null));
-  });
+/**
+ * Is the OS-owned name held? Asked by listening: EADDRINUSE while any instance of it exists, which is
+ * as long as its holder lives (H-6b). Not by connecting: a holder blocked in spawnSync never accepts, and
+ * once its few pending pipe instances are taken a connect answers ENOENT for a live holder. A name found
+ * free is held for that instant only and let go at once (a caller trying it then waits one poll).
+ * `null` when the OS gives another error.
+ */
+async function isNameHeld(name) {
+  try {
+    const server = await tryListen(name);
+    if (server === null) return true;
+    await new Promise((resolve) => server.close(() => resolve()));
+    return false;
+  } catch {
+    return null;
+  }
 }
 
 function describeProcess(record, byPid) {
@@ -967,10 +1326,18 @@ export async function repoOf(cwd, cache = new Map()) {
  * The only writes: that cleanup and the orphan sighting file. `readTable`, `now` and `sessionsFile`
  * (default `MCP_HEAVY_LOCK_SESSIONS_FILE`, else `~/.claude/handover/.sessions.jsonl`) are test hooks.
  */
-export async function heavyLockStatus({ env = process.env, readTable = readProcessTable, platform = process.platform, now = Date.now(), sessionsFile = sessionsRegistryPath(env) } = {}) {
+export async function heavyLockStatus({
+  env = process.env,
+  readTable = readProcessTable,
+  platform = process.platform,
+  now = Date.now(),
+  sessionsFile = sessionsRegistryPath(env),
+  readFree = () => readFreeMb(env),
+  readWorkingSetMb
+} = {}) {
   const file = heavyLockPath(env);
   const pipe = heavyLockPipeName(file, { platform, env });
-  const [table, nameHeld] = await Promise.all([readTable(), pipe === null ? Promise.resolve(null) : probeName(pipe)]);
+  const [table, nameHeld] = await Promise.all([readTable(), pipe === null ? Promise.resolve(null) : isNameHeld(pipe)]);
   const byPid = table === null ? null : new Map(table.map((row) => [row.pid, row]));
   const sessions = readSessionRows(sessionsFile);
   const repos = new Map();
@@ -991,6 +1358,31 @@ export async function heavyLockStatus({ env = process.env, readTable = readProce
     noteOrphan(file, { token: null }, { now, env });
   }
 
+  // H-6b: every run holding the lock, with what it declared and what it measures now, and the budget.
+  const slots = await liveHolders(file, { readWorkingSetMb });
+  const holders = [];
+  for (const h of slots.live) {
+    // The name's guard is shown as its holder file says (other repos' wrappers read that file).
+    const view = written?.token === h.token ? { ...h, ...written } : h;
+    holders.push({
+      ...describeProcess(view, byPid),
+      since: h.startedAt ?? null,
+      token: h.token,
+      class: h.class ?? null,
+      declaredMb: h.declaredMb ?? null,
+      declaredFrom: h.declaredFrom ?? null,
+      exclusive: h.exclusive === true,
+      exclusiveWhy: h.exclusiveWhy ?? null,
+      harness: h.harness === true,
+      capKey: h.capKey ?? null,
+      wsMb: h.wsMb,
+      nameGuard: written?.token === h.token,
+      ...(await whose(h))
+    });
+  }
+  const freeMb = readFree();
+  const budget = { freeMb, reserveMb: RESERVE_MB, measuredMb: holders.reduce((n, h) => n + Math.min(h.wsMb ?? 0, h.declaredMb ?? 0), 0), ...budgetOf(slots.live, { freeMb }) };
+
   const dir = heavyLockWaitersDir(file);
   let names = [];
   try {
@@ -999,7 +1391,7 @@ export async function heavyLockStatus({ env = process.env, readTable = readProce
     // no waiter ever registered
   }
   const waiters = [];
-  let cleaned = 0;
+  let cleaned = slots.cleaned;
   for (const name of names) {
     const full = path.join(dir, name);
     const record = parseHolder(readRaw(full) ?? "");
@@ -1011,12 +1403,12 @@ export async function heavyLockStatus({ env = process.env, readTable = readProce
       cleaned++;
       continue;
     }
-    waiters.push({ ...describeProcess(record, byPid), since: record.since ?? null, ticket, ...(await whose(record)) });
+    waiters.push({ ...describeProcess(record, byPid), since: record.since ?? null, ticket, class: record.class ?? null, declaredMb: record.declaredMb ?? null, exclusive: record.exclusive === true, waiting: record.waiting ?? null, ...(await whose(record)) });
   }
   // Ticket order (first come, first served); entries without a ticket (older writers) after, by arrival.
   waiters.sort((a, b) => (a.ticket ?? Infinity) - (b.ticket ?? Infinity) || String(a.since).localeCompare(String(b.since)));
   waiters.forEach((w, i) => (w.position = i + 1));
-  return { path: file, pipe, nameHeld, processTable: table !== null, orphanMinutes: orphanMinutes(env), holder, waiters, cleaned };
+  return { path: file, pipe, nameHeld, processTable: table !== null, orphanMinutes: orphanMinutes(env), holder, holders, budget, waiters, cleaned };
 }
 
 /** `heavyLockStatus` as lines for a terminal. */
@@ -1031,7 +1423,28 @@ export function formatHeavyLockStatus(status) {
   const lines = [`lock: ${status.path}`];
   if (status.pipe !== null) lines.push(`name: ${status.pipe} — ${status.nameHeld === true ? "held" : status.nameHeld === false ? "free" : "unknown"}`);
   if (!status.processTable) lines.push("process table unreadable: liveness from pids only, start times unchecked");
+  const b = status.budget;
+  if (b !== undefined) {
+    lines.push(
+      `budget: Σ ${String(b.sumMb)} MB declared / BUDGET ${String(b.budgetMb)} MB (free ${String(b.freeMb)} + measured ${String(b.measuredMb)} − reserve ${String(b.reserveMb)})`
+    );
+  }
+  const holders = status.holders ?? [];
+  lines.push(holders.length === 0 ? "holders: none" : `holders (${String(holders.length)}):`);
+  for (const h of holders) {
+    const tags = [`${String(h.declaredMb)} MB declared (${String(h.declaredFrom)})`, `now ${h.wsMb === null ? "unmeasured" : `${String(h.wsMb)} MB`}`];
+    if (h.exclusive) tags.push(`EXCLUSIVE: ${String(h.exclusiveWhy)}`);
+    if (h.harness) tags.push("harness suite");
+    if (h.capKey) tags.push(`cap 1 per ${h.capKey}`);
+    if (h.nameGuard) tags.push("holds the lock name");
+    lines.push(`  ${String(h.class)} · ${tags.join(" · ")}
+    ${who(h)}`);
+  }
+  // The lock file: the name's holder (an exclusive run, a shared run guarding the name, or an older version).
   lines.push(status.holder === null ? "holder: none" : `holder: ${who(status.holder)}`);
+  if (status.holder !== null && status.nameHeld !== false && !holders.some((h) => h.nameGuard)) {
+    lines.push("    (no slot: an older version of the lock, or a left-over file — counts as exclusive while it lives)");
+  }
   if (status.holder !== null && status.nameHeld === false) lines.push("    (the file is left over: the name is free, so nobody holds the lock)");
   if (status.holder?.orphanSince) {
     const label = flagLabel(status.holder.orphan === true);
@@ -1042,7 +1455,14 @@ export function formatHeavyLockStatus(status) {
     lines.push(`    ${KILL_RULE}`);
   }
   lines.push(status.waiters.length === 0 ? "waiters: none" : `waiters (${String(status.waiters.length)}, in ticket order — first come, first served):`);
-  for (const w of status.waiters) lines.push(`  #${String(w.position)} ${w.ticket === null ? "(no ticket)" : `ticket ${String(w.ticket)}`}: ${who(w)}`);
+  for (const w of status.waiters) {
+    lines.push(`  #${String(w.position)} ${w.ticket === null ? "(no ticket)" : `ticket ${String(w.ticket)}`}: ${who(w)}`);
+    if (Number.isFinite(w.declaredMb)) lines.push(`    declares ${String(w.declaredMb)} MB · ${String(w.class)}${w.exclusive ? " · EXCLUSIVE" : ""}`);
+    if (typeof w.waiting === "string") lines.push(`    waiting: ${w.waiting}`);
+  }
   if (status.cleaned > 0) lines.push(`removed ${String(status.cleaned)} entr${status.cleaned === 1 ? "y" : "ies"} of dead waiters`);
   return lines.join("\n");
 }
+
+const sameFile = (a, b) => (process.platform === "win32" ? a.toLowerCase() === b.toLowerCase() : a === b);
+if (process.argv[2] === KEEP_FLAG && sameFile(path.resolve(process.argv[1] ?? ""), SELF)) await keepLockName(process.argv.slice(3));

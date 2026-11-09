@@ -1,8 +1,9 @@
 import path from "node:path";
 
-import chokidar, { type FSWatcher } from "chokidar";
+import chokidar from "chokidar";
 
 import type { RepoWatchStatus, WatchConfig } from "../../types/index.js";
+import { isIgnoredWatchPath, startNativeRecursiveWatcher, type RepoWatcher } from "./nativeWatcher.js";
 
 /**
  * MCP-ISSUE-101: what one debounced batch saw. `overflowed`: events were dropped at `maxQueuedEvents`, so the lists
@@ -19,9 +20,11 @@ type WatchActivity = {
   mode: WatchActivityMode;
 };
 type OnWatchActivity = (activity: WatchActivity) => void;
+/** MCP-ISSUE-121: which watcher backs a repo — one recursive fs.watch (win32), or chokidar (elsewhere). */
+export type WatchBackend = "native-recursive" | "chokidar";
 
 type RepoWatchState = {
-  watcher: FSWatcher;
+  watcher: RepoWatcher;
   status: RepoWatchStatus;
   changed: Set<string>;
   deleted: Set<string>;
@@ -37,12 +40,20 @@ export class WatchManager {
   private readonly pruneDeleted: PruneDeleted;
   private readonly onActivity?: OnWatchActivity;
   private readonly states = new Map<string, RepoWatchState>();
+  private readonly backend: WatchBackend;
 
-  constructor(config: WatchConfig, runIndexer: RunIndexer, pruneDeleted: PruneDeleted, onActivity?: OnWatchActivity) {
+  constructor(
+    config: WatchConfig,
+    runIndexer: RunIndexer,
+    pruneDeleted: PruneDeleted,
+    onActivity?: OnWatchActivity,
+    backend: WatchBackend = process.platform === "win32" ? "native-recursive" : "chokidar"
+  ) {
     this.config = config;
     this.runIndexer = runIndexer;
     this.pruneDeleted = pruneDeleted;
     this.onActivity = onActivity;
+    this.backend = backend;
   }
 
   start(repoId: string, repoPath: string): { started: boolean; message: string } {
@@ -67,21 +78,7 @@ export class WatchManager {
     };
 
     const state: RepoWatchState = {
-      watcher: chokidar.watch(repoPath, {
-        persistent: true,
-        ignoreInitial: true,
-        awaitWriteFinish: {
-          stabilityThreshold: 250,
-          pollInterval: 100
-        },
-        ignored: [
-          "**/node_modules/**",
-          "**/dist/**",
-          "**/build/**",
-          "**/.git/**",
-          "**/coverage/**"
-        ]
-      }),
+      watcher: this.openWatcher(repoId, repoPath),
       status,
       changed: new Set<string>(),
       deleted: new Set<string>(),
@@ -91,18 +88,58 @@ export class WatchManager {
       overflowed: false
     };
 
-    state.watcher
+    this.states.set(repoId, state);
+    return { started: true, message: `watch started for repoId '${repoId}'` };
+  }
+
+  /**
+   * MCP-ISSUE-121: on win32 one recursive fs.watch (opens in ~2 ms, no per-file handles); elsewhere chokidar, which
+   * opened one fs.watch per file and directory on the server thread (6.7–7.0 s for a 3.9k-entry tree on Windows).
+   * Either way a watcher whose root is deleted (a removed worktree) stops itself.
+   */
+  private openWatcher(repoId: string, repoPath: string): RepoWatcher {
+    const onError = (error: unknown): void => {
+      const current = this.states.get(repoId);
+      if (!current) return;
+      current.status.lastError = error instanceof Error ? error.message : String(error);
+    };
+    const onRootGone = (): void => {
+      if (!this.states.has(repoId)) return;
+      process.stderr.write(`[watch-root-gone] repoId=${repoId} path=${repoPath}: the watched directory is gone; watcher stopped\n`);
+      void this.stop(repoId);
+    };
+    if (this.backend === "native-recursive") {
+      return startNativeRecursiveWatcher(repoPath, {
+        onChange: (filePath) => this.onEvent(repoId, repoPath, filePath, "changed"),
+        onDelete: (filePath) => this.onEvent(repoId, repoPath, filePath, "deleted"),
+        onError,
+        onRootGone,
+        // Events were dropped: the batch must fall back to an incremental run, as a queue overflow does.
+        onOverflow: () => this.markOverflow(repoId, repoPath)
+      });
+    }
+    const watcher = chokidar.watch(repoPath, {
+      persistent: true,
+      ignoreInitial: true,
+      awaitWriteFinish: {
+        stabilityThreshold: 250,
+        pollInterval: 100
+      },
+      // MCP-ISSUE-121: chokidar 4 dropped glob support, so the `**/node_modules/**` strings this list used to hold
+      // matched nothing — and with symlinks followed, a worktree whose node_modules is a junction to the main
+      // checkout's had 171k+ entries walked and watched. A function, and no symlink is followed.
+      ignored: (p: string) => isIgnoredWatchPath(path.relative(repoPath, p)),
+      followSymlinks: false
+    });
+    watcher
       .on("add", (filePath) => this.onEvent(repoId, repoPath, filePath, "changed"))
       .on("change", (filePath) => this.onEvent(repoId, repoPath, filePath, "changed"))
       .on("unlink", (filePath) => this.onEvent(repoId, repoPath, filePath, "deleted"))
-      .on("error", (error) => {
-        const current = this.states.get(repoId);
-        if (!current) return;
-        current.status.lastError = error instanceof Error ? error.message : String(error);
-      });
-
-    this.states.set(repoId, state);
-    return { started: true, message: `watch started for repoId '${repoId}'` };
+      .on("unlinkDir", (dirPath) => {
+        if (path.resolve(dirPath) === path.resolve(repoPath)) onRootGone();
+      })
+      .on("error", onError);
+    return { close: () => watcher.close() };
   }
 
   async stop(repoId: string): Promise<{ stopped: boolean; message: string }> {
@@ -175,6 +212,15 @@ export class WatchManager {
     state.status.queuedChanged = state.changed.size;
     state.status.queuedDeleted = state.deleted.size;
     this.onActivity?.({ repoId, repoPath, relativePath, mode });
+    this.scheduleFlush(repoId, repoPath);
+  }
+
+  /** MCP-ISSUE-121: the native watcher lost events; the next batch runs as an overflowed (incremental) one. */
+  private markOverflow(repoId: string, repoPath: string): void {
+    const state = this.states.get(repoId);
+    if (!state) return;
+    state.overflowed = true;
+    state.status.lastError = "watch events were lost (change buffer overflow); the next run re-checks the whole repo";
     this.scheduleFlush(repoId, repoPath);
   }
 

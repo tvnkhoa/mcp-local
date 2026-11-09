@@ -114,7 +114,7 @@ export function buildIndexingWatchTools(deps: CodebaseIndexDeps): AnyToolDefinit
 
   const watchRepo = defineTool({
     name: "watch_repo",
-    description: "Manage real-time file watching for a repository. action=start begins debounced incremental re-index on file changes; action=stop halts watching; action=status returns current watch state and counters.",
+    description: "Manage real-time file watching for a repository. action=start begins debounced incremental re-index on file changes; for a repoId not yet registered at repoPath (new, or re-pointed to another path) it also queues an index job that registers it, and returns that job as registeredBy {runId, state} (poll index_status). action=stop halts watching; action=status returns current watch state and counters.",
     input: schemas.watchRepoSchema,
     inputSchema: {
       type: "object",
