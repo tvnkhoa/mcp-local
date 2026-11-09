@@ -90,3 +90,10 @@ timeout. wt-ops's own run (148.7 s) shows the double pass of MCP-ISSUE-113. The 
   removed repo's FTS rows, inside the delete's transaction (`ftsForgetRepo`, `repoPurgeStore.ts`); the all-repo rebuild
   stays only for a DB without the marker. Guarded: `indexLockContention.test.ts` (purging repo b leaves repo a's FTS
   rows exact and none of b's).
+- 2026-11-09 (row 12): CI run 42577407542 (windows-latest, Node 22, ae22bf0), the first to include
+  `test:index-lock-contention`, failed it with all three runs ok and no lock error; the failing assertion was not in the
+  log (fixed: `scripts/lib/failureExcerpt.mjs` now keeps harness `FAIL`/`✗`/`info` lines ahead of the tail). Local solo
+  ×3 under the heavy lock: big run 11.0–12.8 s, slowest read ≤ 440 ms (bound 2300), longest server-thread block
+  ≤ 435 ms (bound 1000); CI's big run took 22.8 s (~1.9× slower), putting the block at ~830 ms. Read as runner timing,
+  not a lock defect: on CI (`CI` set) both timing bounds × 2.5 (`CI_FACTOR` in the harness); local bounds unchanged.
+  Unproven until the next CI run names the assertion.

@@ -11,7 +11,7 @@
  *   (a) 0 responses mention "locked" / SQLITE_BUSY, and both index runs end ok;
  *   (b) every read answers within the query budget + 2 s, and the server thread's longest block is bounded
  *       (LOCK_MAX_BLOCK_MS, default 1000: the runs execute in the worker since IX-2; reads on the repo being
- *       rewritten keep ~470 ms of their own work);
+ *       rewritten keep ~470 ms of their own work); both × 2.5 on CI (see CI_FACTOR);
  *   (c) after the runs, the dirty edit on `small` is in the index (the queued refresh ran, behind `big`'s run).
  */
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -30,7 +30,16 @@ const BUDGET_MS = 300;
 // IX-1 measured max 2834 ms with index_repository on the server thread. Since IX-2 (MCP-ISSUE-112) every run is the
 // worker's and the server thread only reads; what is left is the reads' own synchronous work — a search on `big` while
 // its full run rewrites it measured ~470 ms. test:index-jobs bounds the runs alone at 250 ms.
-const MAX_BLOCK_MS = Number(process.env.LOCK_MAX_BLOCK_MS ?? 1000);
+//
+// CI slack (row 12, 2026-11-09). CI run 42577407542 (GitHub windows-latest, Node 22, ae22bf0) failed this harness with
+// every run ok and no lock error; the assertion scrolled out of the log (failureExcerpt now keeps it). Local solo ×3
+// at ae22bf0 under the heavy lock: big run 12.8 / 11.4 / 11.0 s, slowest read 410 / 440 / 383 ms, longest server-thread
+// block 405 / 435 / 380 ms. The CI runner took 22.8 s for the same big run (~1.9× slower), which puts the block at
+// ~830 ms against the 1000 ms bound. So on CI (GitHub sets CI=true) both timing bounds scale by CI_FACTOR; the
+// local bounds are unchanged, and LOCK_MAX_BLOCK_MS still overrides either.
+const CI_FACTOR = process.env.CI ? 2.5 : 1;
+const MAX_BLOCK_MS = Number(process.env.LOCK_MAX_BLOCK_MS ?? 1000 * CI_FACTOR);
+const READ_SLACK_MS = 2000 * CI_FACTOR;
 const LOCKED = /database is locked|SQLITE_BUSY/i;
 
 let passed = 0, failed = 0;
@@ -180,8 +189,8 @@ try {
   assert(!peer.isError && !LOCKED.test(peer.text), "(a) the other process's full run (server B) ended ok", peer.text.slice(0, 200));
   assert(lockedLines.length === 0, "(a) neither server logged a lock error", lockedLines.slice(0, 5).join(" | "));
 
-  const slow = reads.filter((r) => r.ms > BUDGET_MS + 2000);
-  assert(slow.length === 0, `(b) every read answered within the budget + 2 s`, JSON.stringify(slow.map((r) => `${r.repo}:${r.ms}`)));
+  const slow = reads.filter((r) => r.ms > BUDGET_MS + READ_SLACK_MS);
+  assert(slow.length === 0, `(b) every read answered within the budget + ${READ_SLACK_MS / 1000} s`, JSON.stringify(slow.map((r) => `${r.repo}:${r.ms}`)));
   const inWindow = lags.slice(lagFloor).filter((l) => l.at >= t0 && l.at <= t1);
   const blocks = inWindow.filter((l) => !l.heartbeat);
   const maxLag = Math.max(0, ...blocks.map((l) => l.blockedMs));
