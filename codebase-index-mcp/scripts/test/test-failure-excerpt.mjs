@@ -47,6 +47,39 @@ const longBlock = ["not ok 1 - long", "  ---", ...Array.from({ length: 100 }, (_
 const cut = failureExcerpt(longBlock, { maxBlockLines: 10 });
 assert.ok(cut.includes("  … (block truncated)"));
 
+// A .mjs harness (CI run 42577407542, test:index-lock-contention): no TAP; its `info` lines (stdout) and
+// `FAIL`/`✗` lines (stderr) come before a long server-stderr dump. Both are kept, ahead of the tail, and in order.
+const harnessOut = [
+  "  PASS  baseline index_repository lk-small-1",
+  "  info  window 31234 ms; reads 24: small:120/fresh big:2410",
+  "  info  server A main-thread ticks late > 100 ms: 3, max 1450 ms",
+  "",
+  "Results: 9 passed, 1 failed",
+  "  FAIL  (b) no server-thread block > 1000 ms — [{\"blockedMs\":1450}]",
+  "  ✗ FAIL: another harness's style",
+  "--- test-index-lock-contention:A stderr (last 65536 bytes before exit 1) ---",
+  ...Array.from({ length: 200 }, (_, i) => `[lag-sampler] {"at":${String(i)},"heartbeat":true,"maxMs":12}`),
+  "✓ index lk-big-1 · 1200 files · 22.8s",
+  "--- end test-index-lock-contention:A stderr ---",
+].join("\n");
+assert.equal(harnessOut.split("\n").slice(-25).some((line) => line.includes("FAIL")), false, "the tail alone loses the FAIL line");
+const hx = failureExcerpt(harnessOut);
+assert.deepEqual(hx.slice(0, 5), [
+  "harness FAIL/info line(s):",
+  "  info  window 31234 ms; reads 24: small:120/fresh big:2410",
+  "  info  server A main-thread ticks late > 100 ms: 3, max 1450 ms",
+  "  FAIL  (b) no server-thread block > 1000 ms — [{\"blockedMs\":1450}]",
+  "  ✗ FAIL: another harness's style",
+]);
+assert.ok(hx.includes("last 25 line(s):"));
+assert.deepEqual(hx.slice(-25), harnessOut.split("\n").slice(-25), "the tail is still printed");
+assert.equal(hx.filter((line) => line.includes("PASS")).length, 0, "PASS lines are not harness lines");
+// A harness line already in the tail is not repeated; long lines and many lines are capped.
+assert.deepEqual(failureExcerpt("x\n  FAIL  near the end", { tail: 5 }), ["x", "  FAIL  near the end"]);
+const capH = failureExcerpt([...Array.from({ length: 50 }, (_, i) => `  info  ${"v".repeat(3000)} ${String(i)}`), ...Array(30).fill("z")].join("\n"));
+assert.equal(capH[0], "harness FAIL/info line(s), first 40 of 50:");
+assert.ok(capH[1].endsWith(" … (line truncated)") && capH[1].length < 2100);
+
 // No failure markers: just the tail, as before. No output at all: said so.
 assert.deepEqual(failureExcerpt("a\nb\nc", { tail: 2 }), ["b", "c"]);
 assert.deepEqual(failureExcerpt(""), ["(no output)"]);
