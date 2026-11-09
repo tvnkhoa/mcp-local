@@ -14,6 +14,8 @@ type WorkerState = {
   busy: boolean;
   currentTaskId?: string;
   timeoutHandle?: NodeJS.Timeout;
+  /** Re-review D: a timed-out job held its worker at the retire cap; the slot frees on its late answer or on the next retired exit. */
+  held?: boolean;
 };
 
 type WorkerExtractMessage =
@@ -162,6 +164,8 @@ export class ExtractionWorkerPool {
       if (grace) clearTimeout(grace);
       this.retiring.delete(gone);
       release();
+      // Re-review D: a retired worker left, so the cap has room — retire the slots held at the cap and serve the queue.
+      this.releaseHeld();
     };
     worker.once("exit", done);
     // A late 'error' from a retired worker must not become an unhandled 'error' event.
@@ -219,8 +223,24 @@ export class ExtractionWorkerPool {
     this.schedule();
   }
 
+  /**
+   * MCP-ISSUE-123 re-review D: a slot held at the retire cap keeps a worker whose job may never answer. When the cap
+   * has room again, retire that worker like any timed-out one and give the slot a fresh worker; then schedule.
+   */
+  private releaseHeld(): void {
+    if (this.disposed) return;
+    for (const state of this.workers) {
+      if (!state.held || this.retiring.size >= this.size) continue;
+      this.clearWorkerState(state);
+      this.retire(state.worker);
+      this.spawnInto(state);
+    }
+    this.schedule();
+  }
+
   private clearWorkerState(state: WorkerState): void {
     state.busy = false;
+    state.held = false;
     state.currentTaskId = undefined;
     if (state.timeoutHandle) {
       clearTimeout(state.timeoutHandle);
@@ -264,6 +284,7 @@ export class ExtractionWorkerPool {
             clearTimeout(state.timeoutHandle);
             state.timeoutHandle = undefined;
           }
+          state.held = true;
         }
         this.schedule();
       }, this.timeoutMs);

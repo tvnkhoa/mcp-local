@@ -114,3 +114,39 @@ parentPort.on("message", (m) => {
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("MCP-ISSUE-123 re-review D: a never-answering job held at the retire cap frees its slot when a retired worker exits", { timeout: 60_000 }, async () => {
+  // Plain-JS fixture: SLOW is busy 600 ms then answers, HANG never answers (its event loop stays free, so it can close).
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pool-held-"));
+  const fixture = path.join(dir, "fixture-worker.cjs");
+  fs.writeFileSync(
+    fixture,
+    `const { parentPort } = require("node:worker_threads");
+parentPort.on("message", (m) => {
+  if (m.type === "close") { parentPort.close(); return; }
+  if (m.input.source === "HANG") return;
+  if (m.input.source === "SLOW") { const until = Date.now() + 600; while (Date.now() < until) {} }
+  parentPort.postMessage({ id: m.id, status: "ok", output: { symbols: [], edges: [] }, parseMs: 0 });
+});
+`
+  );
+  const { ExtractionWorkerPool } = await import(poolModule);
+  const pool = new ExtractionWorkerPool(1, 100, { workerUrl: pathToFileURL(fixture) });
+  const job = (source: string) => pool.extract({ repoId: "t", filePath: "a.ts", language: "typescript", source });
+  try {
+    await new Promise((r) => setTimeout(r, 300)); // the worker loads
+    const slow = job("SLOW"); // times out: retired (busy 600 ms more), a second worker takes the slot
+    const hang = job("HANG"); // times out at the cap (one retired already): held, and never answers
+    const after = job("export const a = 1;\n");
+    assert.equal((await slow).status, "timeout");
+    assert.equal((await hang).status, "timeout");
+    const served = await Promise.race([after, new Promise((r) => setTimeout(() => r("stuck"), 5000))]);
+    assert.notEqual(served, "stuck", "the queued job is served once the retired worker left (it waited until dispose before)");
+    // It may itself time out on the fresh worker's cold start (100 ms); once the workers settle the pool answers again.
+    await new Promise((r) => setTimeout(r, 1500));
+    assert.equal((await job("export const b = 2;\n")).status, "ok", "the pool answers again");
+  } finally {
+    await pool.dispose();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
