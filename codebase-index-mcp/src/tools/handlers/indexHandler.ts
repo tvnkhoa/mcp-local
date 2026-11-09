@@ -1,6 +1,6 @@
 import { existsSync, statSync } from "node:fs";
-import { fileURLToPath } from "node:url";
 import { transportFromEnv } from "../../config/envConfig.js";
+import { runningEntryPath } from "../../config/serverVersion.js";
 import { loadCitationConfig } from "../../services/docs/citationConfig.js";
 import { isTestPath } from "../../services/indexing/fileFilter.js";
 import { DEFAULT_STALE_RUN_MS, freshnessStateDir, liveRunMarkers, lockFileFor, readDirtyLedger, releaseLock, removeRepoStateFiles, tryAcquireLock, vanishedDirtyPaths } from "../../middleware/freshness.js";
@@ -59,10 +59,13 @@ function asInvalidParamsOnBadRef<T>(run: () => T): T {
 // still talking to an old stdio child after a `/mcp` transport switch or an upgrade.
 const PROCESS_STARTED_AT = new Date().toISOString();
 
-/** ISO mtime of the running entry (`dist/index.js`, two levels up from this file); null if unreadable. */
+/**
+ * ISO mtime of the running entry — `dist/index.js` two levels up from this file, or `dist/bundle/index.js`
+ * itself when bundled (MCP-ISSUE-124); null if unreadable.
+ */
 function entryBuildAt(): string | null {
   try {
-    return statSync(fileURLToPath(new URL("../../index.js", import.meta.url))).mtime.toISOString();
+    return statSync(runningEntryPath(import.meta.url, "indexHandler", "../../index.js")).mtime.toISOString();
   } catch {
     return null;
   }
