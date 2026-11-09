@@ -82,7 +82,7 @@ export const SERVERS: readonly ServerDescriptor[] = [
     key: "codebase-index",
     displayName: "Codebase Index MCP",
     dir: "codebase-index-mcp",
-    entry: "dist/index.js",
+    entry: "dist/bundle/index.js",
     tagline: "Code graph indexing: symbols, call chains, impact analysis, safe refactors.",
     build: { install: true, guards: ["guard:no-llm-runtime"] },
     smokeTest: "node scripts/smoke-test.mjs",

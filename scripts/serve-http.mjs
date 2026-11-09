@@ -508,7 +508,9 @@ export function deployServer(server, { workspaceRoot = WORKSPACE_ROOT, deployRoo
   const manifest = packages["@mcp/manifest"];
   const supervisorPackages = manifest ? [...new Set(["@mcp/manifest", ...packageClosure(JSON.parse(fs.readFileSync(path.join(manifest, "package.json"), "utf-8")), packages)])].sort() : [];
   const copied = [...new Set([...closure, ...supervisorPackages])].sort();
-  const required = [path.join(srcServer, "dist", "index.js"), ...copied.map((name) => path.join(packages[name], "dist"))];
+  // The manifest's entry (codebase-index: dist/bundle/index.js, MCP-ISSUE-124); the whole dist/ is copied, so it ships.
+  const entryRel = (server.entry ?? "dist/index.js").split("/");
+  const required = [path.join(srcServer, ...entryRel), ...copied.map((name) => path.join(packages[name], "dist"))];
   const missing = required.filter((p) => !fs.existsSync(p));
   if (missing.length) {
     throw new Error(`${server.key}: not built — missing ${missing.join(", ")}. Run npm run build:packages, then npm run build in ${server.dir}`);
@@ -564,7 +566,7 @@ export function deployServer(server, { workspaceRoot = WORKSPACE_ROOT, deployRoo
     sha,
     n,
     dir,
-    entry: path.join(dir, server.dir, "dist", "index.js"),
+    entry: path.join(dir, server.dir, ...entryRel),
     supervisor: supervisorFiles.length ? path.join(dir, "scripts", path.basename(SCRIPT)) : null,
     source: workspaceRoot,
     head,

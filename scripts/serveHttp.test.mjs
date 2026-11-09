@@ -414,6 +414,18 @@ test("V-A: the deploy copies built output, junctions third-party deps, and runs 
   assert.equal(resolveServeEntry(server, { deployRoot }).entry, d2.entry);
 });
 
+test("MCP-ISSUE-124: the deploy serves the manifest's entry (a bundle under dist/), and refuses when it is not built", () => {
+  const { root, server, deployRoot } = fakeWorkspace();
+  const bundled = { ...server, entry: "dist/bundle/index.js" };
+  assert.throws(() => deployServer(bundled, { workspaceRoot: root, deployRoot, sha: "b0" }), /not built — missing .*bundle/);
+  fs.mkdirSync(path.join(root, "srv/dist/bundle"), { recursive: true });
+  fs.writeFileSync(path.join(root, "srv/dist/bundle/index.js"), 'import { local } from "localdep";\nconsole.log(["bundle", local].join(" "));\n');
+  const d = deployServer(bundled, { workspaceRoot: root, deployRoot, sha: "b1" });
+  assert.equal(d.entry, path.join(d.dir, "srv", "dist", "bundle", "index.js"));
+  assert.equal(runEntry(d.entry).stdout.trim(), "bundle local", "the bundle runs from the copy and resolves the server's node_modules");
+  assert.equal(resolveServeEntry(bundled, { deployRoot }).entry, d.entry);
+});
+
 test("V-A: only the newest 2 deploys stay, the running one is spared, and pruning never deletes through a junction", () => {
   const { root, server, deployRoot } = fakeWorkspace();
   const first = deployServer(server, { workspaceRoot: root, deployRoot, sha: "s1" });
