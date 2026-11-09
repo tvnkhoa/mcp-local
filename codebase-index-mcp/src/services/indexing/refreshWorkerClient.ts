@@ -24,6 +24,8 @@
 
 import { Worker } from "node:worker_threads";
 
+import { DEFAULT_RETIRE_GRACE_MS } from "../extractors/extractionWorkerPool.js";
+
 import type { IndexMode, IndexRunResult } from "../../types/index.js";
 import type { RunBookkeeping } from "../../middleware/freshness.js";
 import type { IndexRunnerLimits, RunIndexAndResolve } from "./indexRunner.js";
@@ -60,9 +62,15 @@ export type RefreshWorkerClientOptions = {
   disposeGraceMs?: number;
 };
 
-/** MCP-ISSUE-123: a worker answers `exit` between two turns of JavaScript; one that has not after this is in a long synchronous stretch. */
-export const DEFAULT_ABORT_GRACE_MS = 60_000;
-export const DEFAULT_DISPOSE_GRACE_MS = 10_000;
+/**
+ * MCP-ISSUE-123 (review #2): how long the client waits for the worker's exit before terminating it. Its `exit` waits for
+ * the parse pool's retired workers, which may take up to the pool's own retire grace; terminating the refresh worker
+ * sooner tears its nested parse workers down mid-parse — the 0xC0000409 this whole path exists to avoid. So the
+ * fallback comes only after that bound, plus a margin for the run's last batch to record itself cancelled.
+ */
+export const EXIT_MARGIN_MS = 30_000;
+export const DEFAULT_ABORT_GRACE_MS = DEFAULT_RETIRE_GRACE_MS + EXIT_MARGIN_MS;
+export const DEFAULT_DISPOSE_GRACE_MS = DEFAULT_RETIRE_GRACE_MS + EXIT_MARGIN_MS;
 
 type Pending = {
   repoId: string;

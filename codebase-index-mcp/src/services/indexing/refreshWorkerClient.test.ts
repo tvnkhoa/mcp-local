@@ -4,7 +4,8 @@ import test from "node:test";
 
 import type { IndexRunResult } from "../../types/index.js";
 import type { RefreshWorkerMessage, RefreshWorkerRequest } from "./refreshWorker.js";
-import { RefreshWorkerClient, type RefreshWorkerLike } from "./refreshWorkerClient.js";
+import { DEFAULT_RETIRE_GRACE_MS } from "../extractors/extractionWorkerPool.js";
+import { DEFAULT_ABORT_GRACE_MS, DEFAULT_DISPOSE_GRACE_MS, RefreshWorkerClient, type RefreshWorkerLike } from "./refreshWorkerClient.js";
 
 /**
  * Release I1b — the R1 refresh runs in a worker thread. These pin the server-thread side over a fake
@@ -318,4 +319,11 @@ test("MCP-ISSUE-123: a worker that does not answer exit within the grace is term
   await assert.rejects(job, /timeout/);
   assert.deepEqual(workers[0].requests.map((r) => r.kind), ["run", "exit"]);
   assert.equal(workers[0].terminated, true);
+});
+
+test("MCP-ISSUE-123 review #2: the client never terminates the worker before the pool's retired parse workers may have left", () => {
+  // Terminating the refresh worker tears down its nested parse workers wherever they are: inside a parse that is the
+  // 0xC0000409. Its exit waits up to the pool's retire grace for them, so the client's fallback must come after that.
+  assert.ok(DEFAULT_ABORT_GRACE_MS > DEFAULT_RETIRE_GRACE_MS, `abort grace ${String(DEFAULT_ABORT_GRACE_MS)} > retire grace ${String(DEFAULT_RETIRE_GRACE_MS)}`);
+  assert.ok(DEFAULT_DISPOSE_GRACE_MS > DEFAULT_RETIRE_GRACE_MS, `dispose grace ${String(DEFAULT_DISPOSE_GRACE_MS)} > retire grace ${String(DEFAULT_RETIRE_GRACE_MS)}`);
 });
