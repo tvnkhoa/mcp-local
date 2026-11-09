@@ -564,6 +564,28 @@ test("isolation: the record proves the copy — HEAD, dirty, stale, and a hash d
   assert.match(m2, /stale build of srv/);
 });
 
+test("--restart refuses a stale build (nothing copied), proceeds when fresh, and warns under the override", () => {
+  const { root, server, deployRoot } = fakeWorkspace();
+  fs.mkdirSync(path.join(root, "srv", "src"));
+  fs.writeFileSync(path.join(root, "srv", "src", "index.ts"), "// v1\n");
+  const old = new Date(Date.now() - 60_000);
+  fs.utimesSync(path.join(root, "srv", "src", "index.ts"), old, old);
+
+  const fresh = deployServer(server, { workspaceRoot: root, deployRoot, refuseStale: true });
+  assert.deepEqual(fresh.stale, [], "a fresh build deploys under refuseStale");
+
+  fs.writeFileSync(path.join(root, "srv", "src", "index.ts"), "// v2, not built\n");
+  const before = fs.readdirSync(path.join(deployRoot, "srv")).sort();
+  assert.throws(
+    () => deployServer(server, { workspaceRoot: root, deployRoot, refuseStale: true }),
+    (e) => /stale build/.test(e.message) && /srv/.test(e.message) && /npm run build/.test(e.message) && /--allow-stale/.test(e.message)
+  );
+  assert.deepEqual(fs.readdirSync(path.join(deployRoot, "srv")).sort(), before, "a refused deploy copies nothing");
+
+  const forced = deployServer(server, { workspaceRoot: root, deployRoot, refuseStale: false });
+  assert.deepEqual(forced.stale, ["srv"], "the override deploys and still records the stale dir");
+});
+
 test("isolation: a nested native package is copied, and so is the package holding it; prune keeps the tree intact", () => {
   const { root, server, deployRoot } = fakeWorkspace();
   const write = (rel, text) => {

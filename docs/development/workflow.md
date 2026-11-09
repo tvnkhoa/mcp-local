@@ -439,7 +439,9 @@ node scripts/install-mcp.mjs --server codebase-index --transport stdio  # back t
   since the deploy, not that its dist matches the source: the staleness signal is the src/dist mtime
   warning. `[deploy]` prints HEAD, clean/dirty and the hash, recomputes the hash of the running copy and
   **fails** when it no longer matches; a dirty or stale deploy, a deploy with no hash (made before this) or
-  a supervisor running from the tree warns.
+  a supervisor running from the tree warns. `--restart` **refuses** a stale build (exit 1, nothing
+  copied; the message names the dirs and the build command); `--allow-stale` overrides it, and
+  `--deploy-only` only warns.
 - **A trial run never touches the live one:** `--deploy-root <dir>` with a `--config` naming another port
   deploys and serves from a scratch root (`--deploy-only`, then start without `--restart`, which would
   `/Run` the live task).
