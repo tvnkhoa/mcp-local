@@ -54,7 +54,15 @@ export type RefreshWorkerClientOptions = {
   onRunLanded?: (repoId: string, result: IndexRunResult) => void;
   /** Server-thread follow-up after a purge (cache invalidation). Errors are swallowed. */
   onPurged?: (repoId: string) => void;
+  /** MCP-ISSUE-123: how long `abortRun` waits for the worker to exit on request before terminating it. */
+  abortGraceMs?: number;
+  /** MCP-ISSUE-123: the same for `dispose` (server shutdown). */
+  disposeGraceMs?: number;
 };
+
+/** MCP-ISSUE-123: a worker answers `exit` between two turns of JavaScript; one that has not after this is in a long synchronous stretch. */
+export const DEFAULT_ABORT_GRACE_MS = 60_000;
+export const DEFAULT_DISPOSE_GRACE_MS = 10_000;
 
 type Pending = {
   repoId: string;
@@ -74,6 +82,8 @@ export class RefreshWorkerClient {
   private nextId = 1;
   private readonly pending = new Map<number, Pending>();
   private readonly spawn: SpawnRefreshWorker;
+  /** Workers whose 'exit' already fired (MCP-ISSUE-123: stopping one must not wait for it again). */
+  private readonly exitedWorkers = new WeakSet<RefreshWorkerLike>();
   /** Times the worker has been spawned — exposed for tests. */
   spawned = 0;
 
@@ -159,8 +169,9 @@ export class RefreshWorkerClient {
 
   /**
    * Review follow-up C: stop ONE hung run, the one recorded under `runId`. Answers false — and touches nothing — when
-   * that run is not in the worker (not started yet, or already over). Otherwise the worker is terminated (the only way
-   * to stop a synchronous SQLite stretch), the run is rejected with `reason`, and the next run spawns a fresh worker.
+   * that run is not in the worker (not started yet, or already over). Otherwise the worker is stopped (`stopWorker`:
+   * asked to exit, terminated only if it has not within `abortGraceMs` — a synchronous SQLite stretch cannot read the
+   * request), the run is rejected with `reason`, and the next run spawns a fresh worker.
    * Runs reach the worker one at a time (the DB-wide queue), so no other run is in flight; one that were would be
    * rejected as "worker restarted", never left hanging.
    */
@@ -174,7 +185,7 @@ export class RefreshWorkerClient {
     // Review F2: the rejection releases the DB-wide queue, so it waits until the old worker is gone — rejecting first
     // let the next run start a new worker while the old one could still be writing: two writers.
     try {
-      await worker.terminate();
+      await this.stopWorker(worker, this.options.abortGraceMs ?? DEFAULT_ABORT_GRACE_MS);
     } finally {
       target[1].reject(new Error(reason));
       for (const [, p] of others) p.reject(new Error(`the refresh worker was restarted to stop timed-out run ${runId}`));
@@ -182,11 +193,42 @@ export class RefreshWorkerClient {
     return true;
   }
 
-  /** Terminate the worker (server shutdown, tests). Outstanding runs are rejected. */
+  /** Stop the worker (server shutdown, tests), as `abortRun` does but with `disposeGraceMs`. Outstanding runs are rejected. */
   async dispose(): Promise<void> {
     const worker = this.worker;
     this.fail(new Error("the refresh worker was shut down"));
-    if (worker) await worker.terminate();
+    if (worker) await this.stopWorker(worker, this.options.disposeGraceMs ?? DEFAULT_DISPOSE_GRACE_MS);
+  }
+
+  /**
+   * MCP-ISSUE-123: ask the worker to exit (`exit` request: it retires its parse pool, then exits between two turns of
+   * JavaScript) and resolve when it has. `terminate()` lands wherever the thread — or one of its parse workers — is, and
+   * inside a tree-sitter parse that takes the whole process down (0xC0000409). It is the fallback only after `graceMs`.
+   */
+  private stopWorker(worker: RefreshWorkerLike, graceMs: number): Promise<void> {
+    return new Promise<void>((resolve) => {
+      let settled = false;
+      let grace: NodeJS.Timeout | undefined;
+      const done = (): void => {
+        if (settled) return;
+        settled = true;
+        if (grace) clearTimeout(grace);
+        resolve();
+      };
+      if (this.exitedWorkers.has(worker)) {
+        done();
+        return;
+      }
+      worker.on("exit", done);
+      try {
+        worker.postMessage({ kind: "exit", id: 0, dbPath: this.options.dbPath, limits: this.options.limits, repoId: "", repoPath: "", mode: "dirty", docsEnabled: false, maxFiles: 0, batchSize: 0 });
+      } catch {
+        // The port is closed: the worker is already going; 'exit' or the grace timer settles it.
+      }
+      grace = setTimeout(() => {
+        void worker.terminate().then(done, done);
+      }, graceMs);
+    });
   }
 
   private request(
@@ -242,6 +284,7 @@ export class RefreshWorkerClient {
       void worker.terminate();
     });
     worker.on("exit", (code) => {
+      this.exitedWorkers.add(worker);
       if (worker === this.worker) this.fail(new Error(`the refresh worker exited with code ${String(code)}`));
     });
     this.worker = worker;

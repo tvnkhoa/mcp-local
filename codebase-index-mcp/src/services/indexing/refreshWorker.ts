@@ -16,7 +16,7 @@
  * the two must stay in the same folder (as `fieldWorker.ts` / `fieldWorkerClient.ts` do).
  *
  * Protocol: a `run` request gets exactly one `result` or `error`; `purge`/`clear` one `purged` or `error`; `seed` one
- * `seeded` or `error` (with the SeedError `code`); a `warm` request gets nothing.
+ * `seeded` or `error` (with the SeedError `code`); a `warm` request gets nothing; `exit` gets nothing — the thread exits.
  */
 
 import { parentPort } from "node:worker_threads";
@@ -48,7 +48,8 @@ export type RefreshWorkerRequest = {
   /** `purge` (review 3-rest): `remove_repository`'s delete, on this worker's connection — the writer's. */
   /** `seed` / `clear` (IX-9, MCP-ISSUE-119): a worktree's seed from `seedFrom`, and the per-repo index clear before
    *  a seed's fallback full run — both on this connection, the single writer's. */
-  kind: "run" | "warm" | "purge" | "seed" | "clear";
+  /** `exit` (MCP-ISSUE-123): retire the parse pool (each parse worker exits after its job), then exit this thread. */
+  kind: "run" | "warm" | "purge" | "seed" | "clear" | "exit";
   id: number;
   dbPath: string;
   limits: IndexRunnerLimits;
@@ -128,6 +129,18 @@ if (parentPort) {
     return runner;
   };
   port.on("message", (request: RefreshWorkerRequest) => {
+    if (request.kind === "exit") {
+      // MCP-ISSUE-123: the client asks instead of terminating, because a terminate lands wherever this thread or a parse
+      // worker is — inside a tree-sitter parse it takes the whole process down (0xC0000409). This handler runs between
+      // two turns of JavaScript, so this thread is in no native call now; the pool's dispose waits for each parse worker
+      // to leave its parse and exit. A run still awaiting the pool gets job-timeouts; it is abandoned by the exit, as it
+      // was by terminate.
+      if (parsePoolIdle) clearTimeout(parsePoolIdle);
+      const pool = parsePool;
+      parsePool = null;
+      void (pool ? pool.dispose() : Promise.resolve()).finally(() => process.exit(0));
+      return;
+    }
     if (request.kind === "warm") {
       try {
         runnerFor(request);

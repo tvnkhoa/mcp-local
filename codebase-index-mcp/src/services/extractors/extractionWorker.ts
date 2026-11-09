@@ -21,7 +21,13 @@ if (!parentPort) {
   throw new Error("extractionWorker must run in worker_threads");
 }
 
-parentPort.on("message", (message: WorkerExtractRequest) => {
+parentPort.on("message", (message: WorkerExtractRequest | { type: "close" }) => {
+  // MCP-ISSUE-123: the pool retires a worker instead of terminating it mid-parse. Messages are handled one at a time,
+  // so this runs only after the job in hand returned; closing the port lets the thread exit with nothing native running.
+  if ("type" in message) {
+    if (message.type === "close") parentPort!.close();
+    return;
+  }
   try {
     const parseStart = Date.now();
     const output = extractGraphData(message.input);

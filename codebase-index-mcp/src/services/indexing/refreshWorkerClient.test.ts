@@ -28,6 +28,9 @@ class FakeWorker extends EventEmitter implements RefreshWorkerLike {
   }
 }
 
+/** MCP-ISSUE-123: these fakes ignore the `exit` request, so the client terminates them after this grace. */
+const GRACE = { abortGraceMs: 20, disposeGraceMs: 20 };
+
 const LIMITS = { subtxSize: 20, checkpointEveryNBatches: 1, largeFileThresholdBytes: 0, maxFileSizeBytes: 500_000, parseWorkers: 1, parseJobTimeoutMs: 20_000 };
 
 function harness(): { client: RefreshWorkerClient; workers: FakeWorker[]; landed: string[] } {
@@ -36,6 +39,7 @@ function harness(): { client: RefreshWorkerClient; workers: FakeWorker[]; landed
   const client = new RefreshWorkerClient({
     dbPath: "/tmp/index.db",
     limits: LIMITS,
+    ...GRACE,
     spawn: () => {
       const w = new FakeWorker();
       workers.push(w);
@@ -108,8 +112,9 @@ test("an unexpected exit rejects outstanding runs; dispose terminates and reject
   await assert.rejects(a, /exited with code 1/);
 
   const b = client.run("repo-a", "/repo/a", "dirty", true, 20_000, 200);
+  const rejected = assert.rejects(b, /shut down/); // dispose now waits for the worker to stop (MCP-ISSUE-123)
   await client.dispose();
-  await assert.rejects(b, /shut down/);
+  await rejected;
   assert.equal(workers[1].terminated, true);
 });
 
@@ -168,6 +173,7 @@ test("review F2: abortRun rejects the run only after the old worker has terminat
   const client = new RefreshWorkerClient({
     dbPath: "/tmp/index.db",
     limits: LIMITS,
+    ...GRACE,
     spawn: () => {
       const w = new SlowWorker();
       workers.push(w);
@@ -259,4 +265,57 @@ test("IX-9: the server thread never seeds or clears on its own connection (MCP-I
   assert.doesNotMatch(src, /\bstore\.(seedFromParent|clearRepositoryIndex|purgeRepository)\(/);
   assert.match(src, /refreshWorker\.seed\(/);
   assert.match(src, /refreshWorker\.clear\(/);
+});
+
+/** MCP-ISSUE-123: a worker that honours `exit` the way refreshWorker.ts does — it exits by itself, soon after. */
+class ExitingWorker extends FakeWorker {
+  override postMessage(value: RefreshWorkerRequest): void {
+    super.postMessage(value);
+    if (value.kind === "exit") setTimeout(() => this.emit("exit", 0), 5);
+  }
+}
+
+function exitingHarness(): { client: RefreshWorkerClient; workers: ExitingWorker[] } {
+  const workers: ExitingWorker[] = [];
+  const client = new RefreshWorkerClient({
+    dbPath: "/tmp/index.db",
+    limits: LIMITS,
+    abortGraceMs: 60_000,
+    disposeGraceMs: 60_000,
+    spawn: () => {
+      const w = new ExitingWorker();
+      workers.push(w);
+      return w;
+    }
+  });
+  return { client, workers };
+}
+
+test("MCP-ISSUE-123: abortRun asks the worker to exit and never terminates one that does (terminate mid-parse kills the process)", async () => {
+  const { client, workers } = exitingHarness();
+  const job = client.run("repo-a", "/repo/a", "full", true, 100, 50, { runId: "job-1" });
+  const aborted = client.abortRun("job-1", "stopped: timeout");
+  await assert.rejects(job, /stopped: timeout/);
+  assert.equal(await aborted, true);
+  assert.equal(workers[0].requests.at(-1)?.kind, "exit", "the worker was asked to exit");
+  assert.equal(workers[0].terminated, false, "and was not terminated");
+});
+
+test("MCP-ISSUE-123: dispose asks the worker to exit and never terminates one that does", async () => {
+  const { client, workers } = exitingHarness();
+  const run = client.run("repo-a", "/repo/a", "dirty", true, 100, 50);
+  const rejected = assert.rejects(run, /shut down/);
+  await client.dispose();
+  await rejected;
+  assert.equal(workers[0].requests.at(-1)?.kind, "exit");
+  assert.equal(workers[0].terminated, false);
+});
+
+test("MCP-ISSUE-123: a worker that does not answer exit within the grace is terminated after the request", async () => {
+  const { client, workers } = harness();
+  const job = client.run("repo-a", "/repo/a", "full", true, 100, 50, { runId: "job-1" });
+  assert.equal(await client.abortRun("job-1", "timeout"), true);
+  await assert.rejects(job, /timeout/);
+  assert.deepEqual(workers[0].requests.map((r) => r.kind), ["run", "exit"]);
+  assert.equal(workers[0].terminated, true);
 });
