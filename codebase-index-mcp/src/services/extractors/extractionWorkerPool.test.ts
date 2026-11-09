@@ -78,3 +78,39 @@ test("a job timed out mid-parse retires its worker and the process survives (MCP
   assert.match(r.stdout, /^second ok$/m, detail);
   assert.match(r.stdout, /^SURVIVED retiring=0$/m, detail);
 });
+
+test("MCP-ISSUE-123 review #4: repeated job timeouts never leave more retired workers than the pool size", { timeout: 60_000 }, async () => {
+  // A plain-JS fixture (no tree-sitter: nothing here can crash the test process) that is busy 600 ms per job.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pool-cap-"));
+  const fixture = path.join(dir, "slow-worker.cjs");
+  fs.writeFileSync(
+    fixture,
+    `const { parentPort } = require("node:worker_threads");
+parentPort.on("message", (m) => {
+  if (m.type === "close") { parentPort.close(); return; }
+  const until = Date.now() + 600;
+  while (Date.now() < until) {}
+  parentPort.postMessage({ id: m.id, status: "ok", output: { symbols: [], edges: [] }, parseMs: 600 });
+});
+`
+  );
+  const { ExtractionWorkerPool } = await import(poolModule);
+  const pool = new ExtractionWorkerPool(1, 100, { workerUrl: pathToFileURL(fixture) });
+  let maxRetiring = 0;
+  const sampler = setInterval(() => {
+    maxRetiring = Math.max(maxRetiring, pool.retiringCount);
+  }, 5);
+  try {
+    await new Promise((r) => setTimeout(r, 300)); // the worker loads
+    const input = { repoId: "t", filePath: "a.ts", language: "typescript", source: "export const a = 1;\n" };
+    const results = await Promise.all([0, 1, 2, 3].map(() => pool.extract(input)));
+    assert.deepEqual(results.map((r: { status: string }) => r.status), ["timeout", "timeout", "timeout", "timeout"]);
+    const after = await pool.extract(input).catch(() => null);
+    assert.ok(after, "the pool still answers");
+    assert.ok(maxRetiring <= 1, `at most pool-size (1) retired workers at once, saw ${String(maxRetiring)}`);
+  } finally {
+    clearInterval(sampler);
+    await pool.dispose();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});

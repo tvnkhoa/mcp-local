@@ -250,11 +250,21 @@ export class ExtractionWorkerPool {
         }
 
         this.pendingTasks.delete(task.id);
-        this.clearWorkerState(state);
         timedOutTask.resolve({ status: "timeout", reason: "job-timeout" });
-        // MCP-ISSUE-123: retire, never terminate — the job may be inside a native parse.
-        this.retire(state.worker);
-        this.spawnInto(state);
+        if (this.retiring.size < this.size) {
+          // MCP-ISSUE-123: retire, never terminate — the job may be inside a native parse.
+          this.clearWorkerState(state);
+          this.retire(state.worker);
+          this.spawnInto(state);
+        } else {
+          // MCP-ISSUE-123 review #4: at most `size` retired workers at once, or repeated timeouts under starvation add a
+          // thread each (each living up to the retire grace). At the cap the slot keeps its worker and stays busy; the
+          // job's late answer finds no task and frees the slot (`onWorkerMessage`), so the queue waits instead.
+          if (state.timeoutHandle) {
+            clearTimeout(state.timeoutHandle);
+            state.timeoutHandle = undefined;
+          }
+        }
         this.schedule();
       }, this.timeoutMs);
 
