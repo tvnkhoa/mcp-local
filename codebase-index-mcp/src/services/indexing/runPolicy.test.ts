@@ -5,6 +5,7 @@ import type { GraphStore } from "../../repositories/graphStore.js";
 import type { WorkRunTrace } from "../../repositories/runStore.js";
 import type { NameStatusEntry } from "../git/gitHelpers.js";
 import {
+  BULK_RESOLVE_INDEX_DROP_MIN_EDGE_SHARE,
   BULK_RESOLVE_INDEX_DROP_MIN_ROWS,
   evaluateIncrementalSkip,
   indexGeneration,
@@ -15,6 +16,7 @@ import {
   type GitScopeInputs
 } from "./runPolicy.js";
 import { currentAnnotationKey, INDEX_VERSION } from "./indexPipeline.js";
+import { repoEdgeShare } from "./indexRunner.js";
 
 /**
  * The decisions a run makes before doing any work.
@@ -170,6 +172,36 @@ test("release I1b: only a full run or a bulk resolve drops the DB-wide edge inde
   assert.equal(shouldDropEdgeIndexesForResolve("dirty", 6_000), false);
   assert.equal(shouldDropEdgeIndexesForResolve("incremental", BULK_RESOLVE_INDEX_DROP_MIN_ROWS - 1), false);
   assert.equal(shouldDropEdgeIndexesForResolve("incremental", BULK_RESOLVE_INDEX_DROP_MIN_ROWS), true);
+});
+
+test("MCP-ISSUE-122 (F-d): the edge indexes are dropped only when this repo holds most of the DB's edges", () => {
+  const share = BULK_RESOLVE_INDEX_DROP_MIN_EDGE_SHARE;
+  assert.equal(share, 0.5);
+  // At the threshold: dropped as before (a fresh or single-repo DB is share 1).
+  assert.equal(shouldDropEdgeIndexesForResolve("full", 0, share), true);
+  assert.equal(shouldDropEdgeIndexesForResolve("full", 0, 1), true, "a single-repo DB keeps the bulk-write optimisation");
+  assert.equal(shouldDropEdgeIndexesForResolve("incremental", BULK_RESOLVE_INDEX_DROP_MIN_ROWS, share), true);
+  // Just below: kept, whatever the mode or row count — wec.aria on the live DB is 6%.
+  assert.equal(shouldDropEdgeIndexesForResolve("full", 0, share - 0.001), false);
+  assert.equal(shouldDropEdgeIndexesForResolve("full", 0, 0.064), false, "wec.aria on the 14-repo live DB");
+  assert.equal(shouldDropEdgeIndexesForResolve("incremental", BULK_RESOLVE_INDEX_DROP_MIN_ROWS, share - 0.001), false);
+  // The share never turns a drop ON that the mode and row count did not call for.
+  assert.equal(shouldDropEdgeIndexesForResolve("dirty", 6_000, 1), false);
+});
+
+test("MCP-ISSUE-122 (F-d): repoEdgeShare counts every repo's edges, answers 1 alone or on a failed read", () => {
+  const edges: Record<string, number> = { a: 60, b: 30, c: 10 };
+  const store = (ids: string[]) => ({
+    listRepositories: () => ids.map((repoId) => ({ repoId })) as ReturnType<GraphStore["listRepositories"]>,
+    getRepoSchemaSnapshot: (repoId: string) => ({ edgeCount: edges[repoId] ?? 0 }) as ReturnType<GraphStore["getRepoSchemaSnapshot"]>
+  });
+  assert.equal(repoEdgeShare(store(["a", "b", "c"]), "a"), 0.6);
+  assert.equal(repoEdgeShare(store(["a", "b", "c"]), "c"), 0.1);
+  assert.equal(repoEdgeShare(store(["b", "c"]), "a"), 0.6, "a repo not yet listed still counts its own edges");
+  assert.equal(repoEdgeShare(store(["a"]), "a"), 1, "alone in the DB");
+  assert.equal(repoEdgeShare(store([]), "a"), 1, "first run on a fresh DB");
+  const failing = { listRepositories: () => { throw new Error("SQLITE_BUSY"); }, getRepoSchemaSnapshot: () => { throw new Error("x"); } };
+  assert.equal(repoEdgeShare(failing, "a"), 1, "a failed read keeps the old behaviour");
 });
 
 // ── IX-9 (MCP-ISSUE-119): a seed row is a base for the git-scoped incremental ──

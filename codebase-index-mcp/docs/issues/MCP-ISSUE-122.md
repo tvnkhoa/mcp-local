@@ -1,6 +1,6 @@
 ## MCP-ISSUE-122 — index-run timing: a +29% full-index regression that did not reproduce, and `finished_at` stamped at the end of extraction, the freshness note without its own wait
 
-- **Status:** F-b and F-a FIXED 2026-11-05. F-c NOT REPRODUCED (no code change), 2026-11-05.
+- **Status:** F-b and F-a FIXED 2026-11-05. F-c NOT REPRODUCED (no code change), 2026-11-05. F-d FIXED 2026-11-09.
 - **Scenario:** full index of one wec.aria tree (3333 files, 17889 symbols, 52770 edges) on a fresh scratch DB,
   `index_repository {mode:"full", docsMode:"on"}` over stdio; and reading run durations back from `index_runs`.
 - **Tool/query:** `index_repository` → `index_status`; `index_runs.started_at` / `finished_at` / `elapsed_ms`.
@@ -55,3 +55,37 @@
   `elapsedMs` keeps its meaning, now documented on `FreshnessNote`. No tool schema changed (the note is free-form
   response data), so the contracts snapshot is unchanged.
 - **Test:** `src/middleware/freshness.test.ts` "MCP-ISSUE-122: a caller joining an overdue run …" (fails before the fix).
+
+### F-d — the resolve phase is 3× slower on the shared live DB than on a fresh one (fixed)
+
+- **Expected vs actual:** the same wec.aria tree resolved in 6–7 s on a fresh DB but 14–47 s on the live DB. SQL
+  profile (2026-11-05): almost the whole gap was `rebuildEdgeIndexes` — 4× `CREATE INDEX` on `edges`, 14.3 s against
+  0.5 s on the fresh DB. A full run (or a bulk resolve) drops the four secondary `edges` indexes before the call
+  resolve and rebuilds them after it, and those indexes are DB-wide: the rebuild re-reads every repo's edges (889k
+  rows, 14 repos then) to save UPDATE costs on one repo's 6%. While they are dropped, every other repo's reads
+  full-scan `edges` too, in every server process (the slow-read story of MCP-ISSUE-121). No missing `repo_id` index
+  was found.
+- **Fix:** `shouldDropEdgeIndexesForResolve(mode, unresolvedRows, repoEdgeShare)` keeps the indexes when this repo
+  holds less than `BULK_RESOLVE_INDEX_DROP_MIN_EDGE_SHARE` (0.5) of the DB's edges. `repoEdgeShare` (indexRunner)
+  sums `getRepoSchemaSnapshot().edgeCount` over the listed repos; it is read only when the drop is otherwise due, and
+  answers 1 alone in the DB, on a fresh DB, or on a failed read, so a single-repo DB keeps the bulk-write
+  optimisation. The share never turns on a drop that the mode and row count did not call for.
+- **Measured** (2026-11-09; wec.aria @cc678ec4 full run, `docsMode:"on"`, scratch process over stdio, each run in the
+  heavy lock; base = 2f4badb compiled in the same worktree; live = a `backup()` copy of the live DB, 834172 edges in
+  13 repos, so wec.aria is 5.9%; fresh copy per run). Resolve / call-resolve ms:
+
+  | DB | base 2f4badb | fix |
+  |---|---|---|
+  | fresh (single repo) | 6146 / 996 · 7066 / 1304 · 6536 / 1009 — mean 6583 | 6239 / 1115 · 7401 / 1133 · 6304 / 804 — mean 6648 |
+  | live copy | 20792 / 13352 · 20695 / 14541 · 14012 / 9204 — mean 18500 | 5883 / 1577 · 7055 / 1368 · 7458 / 1386 — mean 6799 |
+
+  The live copy now resolves within ~0.2 s of the fresh DB (it was 2.8× slower); the single-repo DB is unchanged (+1%,
+  inside run-to-run noise; whole runs 37.9–46.1 s fix vs 43.8–60.9 s base). With `CODEBASE_INDEX_LOG_MODE=verbose` the
+  fresh run logs `dropping edge indexes for bulk resolve...` and the live copy `keeping edge indexes: this repo holds
+  5.9% of the DB's edges`. All 14 runs wrote identical graphs: 17889 symbols; edges by type CALLS 20968, IMPORTS 8068,
+  TYPE_REF 7795, USES_CSS_VAR 5579, USES_CSS_CLASS 2878, SQL_QUERY 2703, PROPERTY_REF 2381, PROPERTY_WRITE 2355,
+  SQL_USES 1653, SQL_GRANT 966, USES_COMPONENT 751, SQL_MIGRATION_ORDER 144, DEPENDS_ON 121, SQL_REFERENCES 107,
+  EXTENDS 44, IMPLEMENTS 21; 15979 call + 5167 import edges resolved.
+- **Test:** `src/services/indexing/runPolicy.test.ts` "MCP-ISSUE-122 (F-d): …" — the threshold on both sides (0.5 drops,
+  0.499 and 0.064 keep, share 1 drops, a dirty run below the row floor stays undropped) and `repoEdgeShare` (shares,
+  a repo not yet listed, alone, fresh DB, failed read → 1).
