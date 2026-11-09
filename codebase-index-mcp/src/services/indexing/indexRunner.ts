@@ -34,6 +34,23 @@ import {
   shouldDropEdgeIndexesForResolve
 } from "./runPolicy.js";
 
+/**
+ * MCP-ISSUE-122 (F-d): this repo's share of the `edges` rows of every repo in the DB, 1 for a DB that holds only this
+ * repo. A failed read answers 1, which keeps the old behaviour (drop on a full or bulk run).
+ */
+export function repoEdgeShare(store: Pick<GraphStore, "listRepositories" | "getRepoSchemaSnapshot">, repoId: string): number {
+  try {
+    const others = store.listRepositories().filter((r) => r.repoId !== repoId);
+    if (others.length === 0) return 1;
+    const ours = store.getRepoSchemaSnapshot(repoId).edgeCount;
+    let total = ours;
+    for (const r of others) total += store.getRepoSchemaSnapshot(r.repoId).edgeCount;
+    return total > 0 ? ours / total : 1;
+  } catch {
+    return 1;
+  }
+}
+
 /** MCP-ISSUE-111: re-exported for the runner's tests; the key lives with `index_meta` in runStore.ts. */
 export { FTS_PER_FILE_META_KEY };
 
@@ -452,9 +469,16 @@ export function createIndexRunner(options: IndexRunnerOptions): RunIndexAndResol
       // process), so dropping them for a dirty run's few thousand rows made every concurrent reader
       // full-scan `edges` — a get_file_summary on the server thread took 104 s during a wec.aria
       // dirty refresh — and rebuilding them over the whole table cost more than the UPDATEs saved.
+      // MCP-ISSUE-122 (F-d): the share is read only when the drop is otherwise due (one count per repo, ~0.3 s on
+      // the 14-repo live DB, against a 14 s rebuild it can save).
       if (shouldDropEdgeIndexesForResolve(mode, ctx.unresolvedRows.length)) {
-        indexLog(`[index-post] repoId=${repoId} dropping edge indexes for bulk resolve...`);
-        store.dropEdgeIndexesForBulkWrite();
+        const share = repoEdgeShare(store, repoId);
+        if (shouldDropEdgeIndexesForResolve(mode, ctx.unresolvedRows.length, share)) {
+          indexLog(`[index-post] repoId=${repoId} dropping edge indexes for bulk resolve...`);
+          store.dropEdgeIndexesForBulkWrite();
+        } else {
+          indexLog(`[index-post] repoId=${repoId} keeping edge indexes: this repo holds ${(share * 100).toFixed(1)}% of the DB's edges`);
+        }
       }
 
       const BATCH_SIZE = 5_000;
@@ -722,11 +746,17 @@ export function createIndexRunner(options: IndexRunnerOptions): RunIndexAndResol
   })();
 
   const { scopeInputs: _scopeInputs, ...summaryToRecord } = summary;
+  const recordedAtMs = Date.now();
   const fullSummary = {
     ...summaryToRecord,
+    // MCP-ISSUE-122 (F-b): the pipeline stamped `finishedAt` when its extract phase ended, so finished − started
+    // was `extractPhaseMs`, not the run. Stamp it here, at the same instant as `elapsedMs`: the planner and the seed
+    // order runs by `finished_at` and treat a run that finished after a base started as overlapping it, and a run's
+    // writes last until this point, not until extraction ended.
+    finishedAt: new Date(recordedAtMs).toISOString(),
     // Spans the whole run, including the post-phase below. The pipeline's own figure is preserved as
     // `extractPhaseMs`, so nothing is lost and no contained phase can exceed the total.
-    elapsedMs: Date.now() - runStartedMs,
+    elapsedMs: recordedAtMs - runStartedMs,
     ...graphSnapshot,
     edgesDeduplicated: dedupCount,
     crossRepoLinked: crossStats.resolved,

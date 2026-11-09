@@ -62,13 +62,24 @@ export const BULK_RESOLVE_INDEX_DROP_MIN_ROWS = 50_000;
 
 /**
  * Whether the call-resolve pass drops the four secondary `edges` indexes first (release I1b).
- * A full run does, as before; a dirty or incremental run only when it resolves a bulk population.
+ * A full run does, as before; a dirty or incremental run only when it resolves a bulk population — and either
+ * only when the repo holds at least {@link BULK_RESOLVE_INDEX_DROP_MIN_EDGE_SHARE} of the DB's edges.
  * The indexes are DB-wide, so a drop slows every concurrent reader in every server process, and
  * rebuilding them over the whole table outweighs maintaining them through a few thousand UPDATEs.
  */
-export function shouldDropEdgeIndexesForResolve(mode: IndexMode, unresolvedRows: number): boolean {
+export function shouldDropEdgeIndexesForResolve(mode: IndexMode, unresolvedRows: number, repoEdgeShare = 1): boolean {
+  // MCP-ISSUE-122 (F-d): the rebuild re-reads EVERY repo's edges. On the shared live DB (889k edges, 14 repos) a
+  // wec.aria full run (6% of them) spent 14 s rebuilding against ~0.5 s for its own UPDATEs with the indexes kept,
+  // and meanwhile every other repo's readers full-scanned `edges`. Drop only when this repo owns most of the table.
+  if (repoEdgeShare < BULK_RESOLVE_INDEX_DROP_MIN_EDGE_SHARE) return false;
   return mode === "full" || unresolvedRows >= BULK_RESOLVE_INDEX_DROP_MIN_ROWS;
 }
+
+/**
+ * MCP-ISSUE-122 (F-d): this repo's share of the DB's `edges` rows below which the call-resolve pass keeps the DB-wide
+ * edge indexes. A single-repo (or fresh) DB is share 1 and keeps the drop.
+ */
+export const BULK_RESOLVE_INDEX_DROP_MIN_EDGE_SHARE = 0.5;
 
 /**
  * Zero-metric IndexRunSummary for a run that did no work (dirty mode with a clean tree,
