@@ -366,6 +366,83 @@ test("MCP-ISSUE-110: a zero budget still waits for the tree check, and a failing
   }
 });
 
+/** MCP-ISSUE-125: one read's freshness wait is capped at the budget; slack covers only timer lateness under load. */
+const CAP_BUDGET_MS = 200;
+const CAP_SLACK_MS = 300;
+
+test("MCP-ISSUE-125: a read's freshness wait ends by the budget — a check that never ends, and a run that never ends", async () => {
+  const lockDir = mkdtempSync(path.join(tmpdir(), "cim-fresh-"));
+  try {
+    const hung = createFreshnessGate({
+      enabled: true,
+      budgetMs: CAP_BUDGET_MS,
+      lockDir,
+      getRepoPath: () => lockDir,
+      getIndexedCommit: () => "aaa111",
+      readTree: () => new Promise<RepoTreeState>(() => undefined),
+      run: async () => { throw new Error("unused"); }
+    });
+    let t0 = Date.now();
+    const checkNote = await hung.ensureFresh("r");
+    const checkWall = Date.now() - t0;
+    assert.equal(checkNote.state, "refreshing");
+    assert.ok(checkWall <= CAP_BUDGET_MS + CAP_SLACK_MS, `tree check: wall ${String(checkWall)} ms > budget ${String(CAP_BUDGET_MS)} + ${String(CAP_SLACK_MS)}`);
+    assert.ok((checkNote.waitedMs ?? Infinity) <= CAP_BUDGET_MS + CAP_SLACK_MS, `tree check: waitedMs ${String(checkNote.waitedMs)}`);
+
+    const h = harness({ budgetMs: CAP_BUDGET_MS });
+    try {
+      h.setTree({ head: "bbb222", dirty: [] });
+      t0 = Date.now();
+      const runNote = await h.gate.ensureFresh("r");
+      const runWall = Date.now() - t0;
+      assert.equal(runNote.state, "refreshing");
+      assert.equal(h.runs.length, 1, "the run started and is still going");
+      assert.ok(runWall <= CAP_BUDGET_MS + CAP_SLACK_MS, `run wait: wall ${String(runWall)} ms > budget ${String(CAP_BUDGET_MS)} + ${String(CAP_SLACK_MS)}`);
+      h.finishRun();
+    } finally { h.cleanup(); }
+  } finally {
+    rmSync(lockDir, { recursive: true, force: true });
+  }
+});
+
+test("MCP-ISSUE-125: parallel reads share one deadline and are answered one after another — read k waits the budget plus the handlers before it", async () => {
+  // IX-1 (10 Nov, live): four parallel reads waited 4976 / 5088 / 5110 / 5148 ms against a 5000 ms budget. Node runs
+  // each due timer's continuation — the gate's answer, then the tool handler's synchronous work — before the next
+  // timer, so the k-th read's wait includes the handlers of the reads answered before it. The gate cannot run them
+  // in parallel on one thread; this pins the mechanism so a regression in the cap itself is told apart from it.
+  const lockDir = mkdtempSync(path.join(tmpdir(), "cim-fresh-"));
+  const HANDLER_MS = 40;
+  try {
+    const gate = createFreshnessGate({
+      enabled: true,
+      budgetMs: CAP_BUDGET_MS,
+      lockDir,
+      getRepoPath: () => lockDir,
+      getIndexedCommit: () => "aaa111",
+      readTree: () => new Promise<RepoTreeState>(() => undefined),
+      run: async () => { throw new Error("unused"); }
+    });
+    const busy = (ms: number): void => {
+      const end = Date.now() + ms;
+      while (Date.now() < end) { /* a tool handler's synchronous work */ }
+    };
+    const waits = await Promise.all(
+      [0, 1, 2, 3].map(async () => {
+        const note = await gate.ensureFresh("r");
+        busy(HANDLER_MS);
+        return note.waitedMs ?? -1;
+      })
+    );
+    waits.sort((a, b) => a - b);
+    assert.ok(waits[0] !== undefined && waits[0] >= 0 && waits[0] <= CAP_BUDGET_MS + CAP_SLACK_MS, `the first answered read keeps to the cap: ${JSON.stringify(waits)}`);
+    for (let k = 1; k < waits.length; k++) {
+      assert.ok((waits[k] ?? 0) - (waits[0] ?? 0) >= k * HANDLER_MS - 5, `read ${String(k)} waited behind ${String(k)} handler(s): ${JSON.stringify(waits)}`);
+    }
+  } finally {
+    rmSync(lockDir, { recursive: true, force: true });
+  }
+});
+
 test("release I1b: a refresh run that fails (the worker crashed) answers stale and releases the lock", async () => {
   const lockDir = mkdtempSync(path.join(tmpdir(), "cim-fresh-"));
   let fail = true;
@@ -982,8 +1059,10 @@ test("MCP-ISSUE-101 F3: a change inside a dirty submodule moves the key and reac
     writeFileSync(path.join(parent, "sub", "b.ts"), "export const b = 1;\n");
     assert.deepEqual(pathsChangedSince(k2, await computeTreeKey(parent, tree())), ["sub/b.ts"], "a new untracked file inside is seen");
 
-    // through the gate: the run gets the files inside, never the directory entry
-    const h = harness({ budgetMs: 1000, autoFinish: true, repoDir: parent });
+    // through the gate: the run gets the files inside, never the directory entry. The budget is not under test here:
+    // every check spawns real git for the submodule, which outran a 1000 ms budget under load (5 Nov ×3, 1 !== 2 at the
+    // second run: the check answered "refreshing" and started its run after the assertion). MCP-ISSUE-125.
+    const h = harness({ budgetMs: 120_000, autoFinish: true, repoDir: parent });
     h.setTree({ head: "aaa111", dirty: ["sub"] });
     await h.gate.ensureFresh("r");
     assert.deepEqual(h.runs.at(-1)?.dirtyPaths, ["sub/a.ts", "sub/b.ts"]);
