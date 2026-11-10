@@ -305,3 +305,57 @@ test("MCP-ISSUE-123 re-review B follow-up: a throw in the post-phase records the
     assert.equal(next.commitSha, head);
   });
 });
+
+test("MCP-ISSUE-123 review: the index session ends on every failing path — a pipeline throw, and a post-phase throw whose failed record throws too", async () => {
+  await withRepo(async (store, repo) => {
+    const sessions = spy(store, ["beginIndexSession", "endIndexSession"]);
+    const target = store as unknown as Record<string, (...a: unknown[]) => unknown>;
+
+    // 1. The pipeline throws (after its first batch).
+    const checkpoint = target.checkpoint!;
+    target.checkpoint = () => {
+      throw new Error("disk I/O error (test)");
+    };
+    await assert.rejects(run(store, repo, "full"), /disk I\/O error/);
+    target.checkpoint = checkpoint;
+    assert.deepEqual(sessions, { beginIndexSession: 1, endIndexSession: 1 }, "the pipeline's throw ends the session");
+
+    // 2. The post-phase throws, and so does every record of the run.
+    const getIndexMeta = target.getIndexMeta!;
+    const recordRun = target.recordRun!;
+    target.getIndexMeta = () => {
+      throw new Error("database is locked (test)");
+    };
+    target.recordRun = () => {
+      throw new Error("database is locked (record)");
+    };
+    await assert.rejects(run(store, repo, "full"), /database is locked \(test\)/, "the original error surfaces");
+    target.getIndexMeta = getIndexMeta;
+    target.recordRun = recordRun;
+    assert.deepEqual(sessions, { beginIndexSession: 2, endIndexSession: 2 }, "and so does a post-phase throw whose record fails");
+  });
+});
+
+test("MCP-ISSUE-123 review: an abort at a batch boundary inside the call pass ends the pass there", async () => {
+  await withRepoDb(async (store, _dbPath, repo) => {
+    const controller = new AbortController();
+    const calls = spy(store, ["resolveCallEdgesBatch", "resolveImportEdges", "resolveMentions"]);
+    // Abort inside the first batch of the call pass: the pass must not ask for a second batch.
+    const target = store as unknown as Record<string, (...a: unknown[]) => unknown>;
+    const batch = target.resolveCallEdgesBatch!;
+    let firstResolved = 0;
+    target.resolveCallEdgesBatch = (...a: unknown[]) => {
+      const resolved = batch(...a);
+      if (!controller.signal.aborted) firstResolved = resolved as number;
+      controller.abort();
+      return resolved;
+    };
+    const result = await run(store, repo, "full", { abortSignal: controller.signal });
+    assert.ok(firstResolved > 0, "the first batch resolved rows, so only the abort ends the loop");
+    assert.equal(calls.resolveCallEdgesBatch, 1, "one batch, then the pass stopped at its boundary");
+    assert.equal(calls.resolveImportEdges, 0);
+    assert.equal(calls.resolveMentions, 0);
+    assert.equal(result.status, "cancelled");
+    assert.equal(result.commitSha, null);
+  });
+});

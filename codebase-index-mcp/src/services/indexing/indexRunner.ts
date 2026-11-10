@@ -398,6 +398,16 @@ export function createIndexRunner(options: IndexRunnerOptions): RunIndexAndResol
    */
   /** Whether this run is on record yet; the post-phase guard below records it failed when it is not. */
   let runRecorded = false;
+  /**
+   * MCP-ISSUE-123 review: the session `beginIndexSession` opened (WAL auto-checkpoint off) is ended exactly once on every
+   * path — a finished, aborted or failed run, and a throw from the pipeline or from a record — unless the caller ends it.
+   */
+  let sessionEnded = false;
+  const endSession = (fullCheckpoint: boolean): void => {
+    if (sessionEnded || deferSessionEnd) return;
+    sessionEnded = true;
+    store.endIndexSession(fullCheckpoint);
+  };
   const recordAborted = (partial: IndexRunSummary): IndexRunSummary => {
     const aborted: IndexRunSummary = {
       ...partial,
@@ -407,9 +417,12 @@ export function createIndexRunner(options: IndexRunnerOptions): RunIndexAndResol
       elapsedMs: Date.now() - runStartedMs,
       scope: `${partial.scope ? `${partial.scope}; ` : ""}aborted: no commit recorded`
     };
-    store.recordRun(aborted);
-    runRecorded = true;
-    if (!deferSessionEnd) store.endIndexSession(false);
+    try {
+      store.recordRun(aborted);
+      runRecorded = true;
+    } finally {
+      endSession(false);
+    }
     progress.stop(`⚠ index ${repoId} · aborted · ${String(aborted.filesIndexed)} files · no commit recorded`);
     return aborted;
   };
@@ -442,6 +455,14 @@ export function createIndexRunner(options: IndexRunnerOptions): RunIndexAndResol
     ...(plannedHead && { commitSha: plannedHead }),
     ...(extras.abortSignal && { abortSignal: extras.abortSignal }),
     progress
+  }).catch((error: unknown) => {
+    // The pipeline recorded the run failed; the session it ran in still ends.
+    try {
+      endSession(false);
+    } catch {
+      // The pipeline's error is the one to surface.
+    }
+    throw error;
   });
   // MCP-ISSUE-123: an aborted run stops here — no escalation, no resolve passes — and is recorded without a commit.
   if (extras.abortSignal?.aborted) return recordAborted(summary);
@@ -897,7 +918,7 @@ export function createIndexRunner(options: IndexRunnerOptions): RunIndexAndResol
   indexLog(`[index-post] repoId=${repoId} recorded run metadata in ${recordElapsed}ms`);
 
   // Re-enable WAL auto-checkpoint and force a full checkpoint to shrink WAL file
-  if (!deferSessionEnd) store.endIndexSession(mode === "full");
+  endSession(mode === "full");
 
   indexLog(`[index-post-done] repoId=${repoId} crossRepo=${String(crossStats.resolved)} calls=${String(callEdgesResolved)} imports=${String(importEdgesResolved)} mentions=${String(mentionsResolved)}`);
 
@@ -922,11 +943,15 @@ export function createIndexRunner(options: IndexRunnerOptions): RunIndexAndResol
           elapsedMs: Date.now() - runStartedMs,
           scope: `${partial.scope ? `${partial.scope}; ` : ""}failed in the post-phase: ${message}`
         });
-        if (!deferSessionEnd) store.endIndexSession(false);
       } catch {
         // Recording is best-effort here; the original error is the one to surface.
       }
       progress.stop(`✗ index ${repoId} · failed · ${message}`);
+    }
+    try {
+      endSession(false);
+    } catch {
+      // As above.
     }
     throw error;
   }
