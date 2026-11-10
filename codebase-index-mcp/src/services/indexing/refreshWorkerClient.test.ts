@@ -4,8 +4,14 @@ import test from "node:test";
 
 import type { IndexRunResult } from "../../types/index.js";
 import type { RefreshWorkerMessage, RefreshWorkerRequest } from "./refreshWorker.js";
-import { DEFAULT_RETIRE_GRACE_MS } from "../extractors/extractionWorkerPool.js";
-import { DEFAULT_ABORT_GRACE_MS, DEFAULT_DISPOSE_GRACE_MS, RefreshWorkerClient, type RefreshWorkerLike } from "./refreshWorkerClient.js";
+import { DEFAULT_RETIRE_GRACE_MS, SHUTDOWN_RETIRE_GRACE_MS } from "../extractors/extractionWorkerPool.js";
+import {
+  DEFAULT_ABORT_GRACE_MS,
+  DEFAULT_DISPOSE_GRACE_MS,
+  RefreshWorkerClient,
+  SHUTDOWN_WORKER_EXIT_MS,
+  type RefreshWorkerLike
+} from "./refreshWorkerClient.js";
 
 /**
  * Release I1b — the R1 refresh runs in a worker thread. These pin the server-thread side over a fake
@@ -325,5 +331,58 @@ test("MCP-ISSUE-123 review #2: the client never terminates the worker before the
   // Terminating the refresh worker tears down its nested parse workers wherever they are: inside a parse that is the
   // 0xC0000409. Its exit waits up to the pool's retire grace for them, so the client's fallback must come after that.
   assert.ok(DEFAULT_ABORT_GRACE_MS > DEFAULT_RETIRE_GRACE_MS, `abort grace ${String(DEFAULT_ABORT_GRACE_MS)} > retire grace ${String(DEFAULT_RETIRE_GRACE_MS)}`);
-  assert.ok(DEFAULT_DISPOSE_GRACE_MS > DEFAULT_RETIRE_GRACE_MS, `dispose grace ${String(DEFAULT_DISPOSE_GRACE_MS)} > retire grace ${String(DEFAULT_RETIRE_GRACE_MS)}`);
+});
+
+test("MCP-ISSUE-123 re-review E: shutdown is bounded at 35 s, and its terminate comes after the worker's own bounded exit", () => {
+  assert.ok(DEFAULT_DISPOSE_GRACE_MS <= 35_000, `dispose grace ${String(DEFAULT_DISPOSE_GRACE_MS)} <= 35 s (was the 5.5 min abort grace)`);
+  // The worker's pool terminates a stuck parse worker at SHUTDOWN_RETIRE_GRACE_MS, the worker exits by
+  // SHUTDOWN_WORKER_EXIT_MS; the client's terminate is the fallback after both.
+  assert.ok(SHUTDOWN_RETIRE_GRACE_MS < SHUTDOWN_WORKER_EXIT_MS && SHUTDOWN_WORKER_EXIT_MS < DEFAULT_DISPOSE_GRACE_MS);
+  // tree-sitter's own parse timeout is 5 s: a parse worker is terminated at shutdown only well past it.
+  assert.ok(SHUTDOWN_RETIRE_GRACE_MS >= 4 * 5_000);
+});
+
+test("MCP-ISSUE-123 re-review E: dispose marks its exit request shutdown; abortRun (a normal run) does not", async () => {
+  const a = exitingHarness();
+  const job = a.client.run("repo-a", "/repo/a", "full", true, 100, 50, { runId: "job-1" });
+  assert.equal(await a.client.abortRun("job-1", "stopped"), true);
+  await assert.rejects(job, /stopped/);
+  const abortExit = a.workers[0].requests.at(-1);
+  assert.equal(abortExit?.kind, "exit");
+  assert.equal(abortExit?.shutdown, undefined, "abortRun keeps the full retire grace (no terminate during a parse)");
+
+  const b = exitingHarness();
+  b.client.warm();
+  await b.client.dispose();
+  const disposeExit = b.workers[0].requests.at(-1);
+  assert.equal(disposeExit?.kind, "exit");
+  assert.equal(disposeExit?.shutdown, true);
+});
+
+test("MCP-ISSUE-123 re-review E: a worker that never leaves its job is terminated by dispose at DEFAULT_DISPOSE_GRACE_MS, by abortRun only at the abort grace", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const { client, workers } = new (class {
+    workers: FakeWorker[] = [];
+    client = new RefreshWorkerClient({ dbPath: "/tmp/index.db", limits: LIMITS, spawn: () => { const w = new FakeWorker(); this.workers.push(w); return w; } });
+  })();
+  client.warm();
+  let disposed = false;
+  void client.dispose().then(() => (disposed = true));
+  t.mock.timers.tick(DEFAULT_DISPOSE_GRACE_MS - 1);
+  await Promise.resolve();
+  assert.equal(workers[0].terminated, false, "not before the grace");
+  t.mock.timers.tick(1);
+  for (let i = 0; i < 5; i++) await Promise.resolve();
+  assert.equal(workers[0].terminated, true, "terminated at the 35 s bound");
+  assert.equal(disposed, true);
+
+  const job = client.run("repo-a", "/repo/a", "full", true, 100, 50, { runId: "job-2" });
+  const rejected = assert.rejects(job, /stopped/);
+  void client.abortRun("job-2", "stopped");
+  t.mock.timers.tick(DEFAULT_DISPOSE_GRACE_MS * 2);
+  await Promise.resolve();
+  assert.equal(workers[1].terminated, false, "abortRun waits the full abort grace");
+  t.mock.timers.tick(DEFAULT_ABORT_GRACE_MS);
+  await rejected;
+  assert.equal(workers[1].terminated, true);
 });

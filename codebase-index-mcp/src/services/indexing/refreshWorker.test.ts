@@ -3,10 +3,11 @@ import { EventEmitter } from "node:events";
 import test from "node:test";
 
 import type { GraphStore } from "../../repositories/graphStore.js";
-import type { ExtractionWorkerPool } from "../extractors/extractionWorkerPool.js";
+import { SHUTDOWN_RETIRE_GRACE_MS, type ExtractionWorkerPool, type ExtractionWorkerPoolDisposeOptions } from "../extractors/extractionWorkerPool.js";
 import type { IndexRunResult } from "../../types/index.js";
 import type { createIndexRunner, RunExtras } from "./indexRunner.js";
 import { attachRefreshWorker, type RefreshWorkerMessage, type RefreshWorkerRequest } from "./refreshWorker.js";
+import { SHUTDOWN_WORKER_EXIT_MS } from "./refreshWorkerClient.js";
 
 /**
  * MCP-ISSUE-123 review: the refresh worker's `exit`.
@@ -41,7 +42,7 @@ const tick = (): Promise<void> => new Promise((r) => setTimeout(r, 10));
  */
 function harness(body: (extras: RunExtras, sharedParsePool: (() => ExtractionWorkerPool) | undefined) => Promise<IndexRunResult>) {
   const port = new FakePort();
-  const counts = { poolsBuilt: 0, poolsDisposed: 0, exits: [] as number[], runs: 0 };
+  const counts = { poolsBuilt: 0, poolsDisposed: 0, exits: [] as number[], runs: 0, disposeOptions: [] as (ExtractionWorkerPoolDisposeOptions | undefined)[] };
   const poolDisposed = deferred();
   const createRunner = ((options: Parameters<typeof createIndexRunner>[0]) =>
     (_repoId: string, _repoPath: string, _mode: string, _docs: boolean, _max: number, _batch: number, extras: RunExtras = {}) => {
@@ -54,8 +55,9 @@ function harness(body: (extras: RunExtras, sharedParsePool: (() => ExtractionWor
     createPool: () => {
       counts.poolsBuilt++;
       return {
-        dispose: async () => {
+        dispose: async (options?: ExtractionWorkerPoolDisposeOptions) => {
           counts.poolsDisposed++;
+          counts.disposeOptions.push(options);
           await poolDisposed.promise;
         }
       } as unknown as ExtractionWorkerPool;
@@ -123,4 +125,41 @@ test("MCP-ISSUE-123 #3: a run that reaches its pool after exit builds none, and 
   assert.equal(counts.poolsBuilt, 0, "no warm-up builds a pool after exit");
   const refused = port.sent.find((m) => m.type === "error" && m.id === 2);
   assert.match(refused?.type === "error" ? refused.error : "", /exiting/);
+});
+
+test("MCP-ISSUE-123 re-review E: a shutdown exit bounds both waits — the pool's grace and the run that never settles", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const never = deferred(); // the run never reaches a batch boundary; the pool never sees its workers leave
+  const { port, counts } = harness(async (_extras, sharedParsePool) => {
+    sharedParsePool?.();
+    await never.promise;
+    return { runId: "x", status: "cancelled" } as IndexRunResult;
+  });
+  port.send({ kind: "run", id: 1 });
+  for (let i = 0; i < 5; i++) await Promise.resolve();
+  port.send({ kind: "exit", id: 0, shutdown: true });
+  assert.deepEqual(counts.disposeOptions, [{ graceMs: SHUTDOWN_RETIRE_GRACE_MS }], "the pool terminates a stuck parse worker after the shutdown grace");
+  t.mock.timers.tick(SHUTDOWN_WORKER_EXIT_MS - 1);
+  assert.deepEqual(counts.exits, []);
+  t.mock.timers.tick(1);
+  assert.deepEqual(counts.exits, [0], "the thread exits at SHUTDOWN_WORKER_EXIT_MS");
+  port.send({ kind: "exit", id: 0, shutdown: true });
+  t.mock.timers.tick(SHUTDOWN_WORKER_EXIT_MS);
+  assert.deepEqual(counts.exits, [0], "once");
+});
+
+test("MCP-ISSUE-123 re-review E: a normal exit (abortRun) keeps the pool's full grace and waits for the run", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const never = deferred();
+  const { port, counts } = harness(async (_extras, sharedParsePool) => {
+    sharedParsePool?.();
+    await never.promise;
+    return { runId: "x", status: "cancelled" } as IndexRunResult;
+  });
+  port.send({ kind: "run", id: 1 });
+  for (let i = 0; i < 5; i++) await Promise.resolve();
+  port.send({ kind: "exit", id: 0 });
+  assert.deepEqual(counts.disposeOptions, [{}], "no shortened grace: no terminate during a parse outside shutdown");
+  t.mock.timers.tick(60 * 60_000);
+  assert.deepEqual(counts.exits, [], "the exit still waits for the run and the pool");
 });

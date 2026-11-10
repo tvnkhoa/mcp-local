@@ -150,3 +150,99 @@ parentPort.on("message", (m) => {
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+/** Writes a plain-JS fixture worker (no tree-sitter: nothing here can crash the test process). */
+function fixtureWorker(prefix: string, body: string): { url: URL; cleanup: () => void } {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+  const file = path.join(dir, "fixture-worker.cjs");
+  fs.writeFileSync(file, `const { parentPort } = require("node:worker_threads");\n${body}\n`);
+  return { url: pathToFileURL(file), cleanup: () => fs.rmSync(dir, { recursive: true, force: true }) };
+}
+
+const ANSWER = `parentPort.on("message", (m) => {
+  if (m.type === "close") { parentPort.close(); return; }
+  if (m.input.source === "DIE") process.exit(3);
+  if (m.input.source === "SPIN") { for (;;) {} }
+  parentPort.postMessage({ id: m.id, status: "ok", output: { symbols: [], edges: [] }, parseMs: 0 });
+});`;
+
+const within = <T,>(p: Promise<T>, ms: number): Promise<T | "stuck"> =>
+  Promise.race([p, new Promise<"stuck">((r) => setTimeout(() => r("stuck"), ms).unref())]);
+
+const job = (source: string) => ({ repoId: "t", filePath: "a.ts", language: "typescript", source });
+
+test("MCP-ISSUE-123 review #5: a worker that exits on its own is replaced; the slot keeps serving", { timeout: 60_000 }, async () => {
+  const fx = fixtureWorker("pool-respawn-", ANSWER);
+  const { ExtractionWorkerPool } = await import(poolModule);
+  const pool = new ExtractionWorkerPool(1, 30_000, { workerUrl: fx.url });
+  try {
+    const died = await within(pool.extract(job("DIE")), 10_000);
+    assert.notEqual(died, "stuck");
+    assert.equal((died as { status: string }).status, "error", "the dead worker's job is answered error");
+    const next = await within(pool.extract(job("export const a = 1;\n")), 10_000);
+    assert.notEqual(next, "stuck", "the slot was respawned (it stayed dead for the pool's life before)");
+    assert.equal((next as { status: string }).status, "ok");
+  } finally {
+    await pool.dispose();
+    fx.cleanup();
+  }
+});
+
+test("MCP-ISSUE-123 review #5: a worker that dies at start is respawned at most MAX_RESPAWNS_PER_WINDOW times, then the pool degrades and says so", { timeout: 60_000 }, async () => {
+  const fx = fixtureWorker("pool-storm-", `throw new Error("boom at start");`);
+  const mod = await import(poolModule);
+  const reported: { slot: number; respawns: number; deadSlots: number; size: number }[] = [];
+  let spawnsSeen = 0;
+  const pool = new mod.ExtractionWorkerPool(1, 30_000, { workerUrl: fx.url, onSlotDead: (e: (typeof reported)[number]) => reported.push(e) });
+  try {
+    const first = await within(pool.extract(job("export const a = 1;\n")), 15_000);
+    assert.notEqual(first, "stuck", "the job is answered, not left waiting on a dead slot");
+    assert.equal((first as { status: string }).status, "error");
+    const deadline = Date.now() + 15_000;
+    while (!pool.degraded && Date.now() < deadline) await new Promise((r) => setTimeout(r, 50));
+    assert.equal(pool.degraded, true, "every slot dead: the pool says it is degraded");
+    assert.equal(pool.deadSlots, 1);
+    assert.deepEqual(reported.map((e) => [e.slot, e.respawns, e.deadSlots, e.size]), [[0, mod.MAX_RESPAWNS_PER_WINDOW, 1, 1]], "reported once, after the cap");
+    const t0 = Date.now();
+    const later = (await pool.extract(job("export const b = 2;\n"))) as { status: string; error?: string };
+    assert.equal(later.status, "error");
+    assert.match(later.error ?? "", /parse pool degraded/);
+    assert.ok(Date.now() - t0 < 1000, "answered at once, no thread spawned per job");
+    spawnsSeen = reported.length;
+    await new Promise((r) => setTimeout(r, 300));
+    assert.equal(reported.length, spawnsSeen, "no further respawn");
+  } finally {
+    await pool.dispose();
+    fx.cleanup();
+  }
+});
+
+test("MCP-ISSUE-123 re-review E: dispose({ graceMs }) terminates a worker that never leaves its job; plain dispose keeps the retire grace", { timeout: 60_000 }, async () => {
+  const fx = fixtureWorker("pool-shutdown-", ANSWER);
+  const { ExtractionWorkerPool } = await import(poolModule);
+  try {
+    // Normal path: a job that never returns (JS spin) is retired, and a plain dispose waits for it — the retire grace
+    // (60 s here) — instead of terminating it: ISSUE-123 A's guarantee for every run.
+    const normal = new ExtractionWorkerPool(1, 200, { workerUrl: fx.url, retireGraceMs: 60_000 });
+    await new Promise((r) => setTimeout(r, 300)); // the worker loads
+    assert.equal((await normal.extract(job("SPIN"))).status, "timeout");
+    const plain = normal.dispose();
+    assert.equal(await within(plain, 1500), "stuck", "a plain dispose still waits for the retired worker");
+    // A later shutdown dispose shortens the grace already running.
+    assert.notEqual(await within(normal.dispose({ graceMs: 0 }), 5000), "stuck");
+    await plain;
+
+    // Shutdown path: the slot's own worker spins in its job; dispose({ graceMs: 500 }) ends within the bound.
+    const pool = new ExtractionWorkerPool(1, 30_000, { workerUrl: fx.url, retireGraceMs: 60_000 });
+    await new Promise((r) => setTimeout(r, 300));
+    const spinning = pool.extract(job("SPIN"));
+    await new Promise((r) => setTimeout(r, 200));
+    const t0 = Date.now();
+    assert.notEqual(await within(pool.dispose({ graceMs: 500 }), 5000), "stuck", "shutdown dispose is bounded by graceMs");
+    assert.ok(Date.now() - t0 >= 400, "not before the grace");
+    assert.equal((await spinning).status, "timeout");
+    assert.equal(pool.retiringCount, 0);
+  } finally {
+    fx.cleanup();
+  }
+});
