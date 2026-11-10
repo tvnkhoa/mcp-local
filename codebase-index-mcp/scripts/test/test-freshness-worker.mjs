@@ -138,6 +138,12 @@ try {
     appendFileSync(join(bigDir, `src/m${Math.floor(i / 100)}/file${i}.ts`), `\nexport function dirtyEdit_${i}(): number {\n  return fn_${(i + 1) % GENERATED_FILES}_0(${i});\n}\n`);
   }
   const lagFloor = lags.length;
+  // MCP-ISSUE-125: the window ends when THIS refresh lands (its own "✓ index" line), not at the first answer that is
+  // not "refreshing". A tree check slower than BUDGET_MS (two git spawns: 180-370 ms on a busy Windows machine) answers
+  // "refreshing … checking the working tree" on an index that is already current, so that signal stretched a 5 s
+  // refresh to a 118 s window (10 Nov) — 15x the exposure of (b) to an unrelated stall. The setup's own full run
+  // printed a line too: forget it here.
+  landedLine = null;
   const t0 = Date.now();
   const probes = [];
   let stop = false;
@@ -153,7 +159,7 @@ try {
     await sleep(50);
     while (!stop) {
       const s = await call("search_symbols", { repoId: smallRepo, query: "smallBeta", strategy: "name", limit: 5 });
-      smallTimes.push({ ms: s.ms, ok: s.text.includes("smallBeta") });
+      smallTimes.push({ ms: s.ms, ok: s.text.includes("smallBeta"), state: s.body?.freshness?.state ?? "fresh", reason: (s.body?.freshness?.reason ?? "").slice(0, 40) });
       await sleep(150);
     }
   })();
@@ -171,10 +177,18 @@ try {
   }
 
   let landed = refreshing ? null : first;
+  const polls = [];
   for (let i = 0; i < 600 && !landed; i++) {
     await sleep(250);
     const r = await call("search_symbols", lightBig);
-    if (r.body?.freshness?.state !== "refreshing") landed = r;
+    polls.push({ at: Date.now() - t0, ms: r.ms, state: r.body?.freshness?.state ?? "fresh", reason: (r.body?.freshness?.reason ?? "").slice(0, 40), landedSeen: landedLine !== null });
+    if (r.body?.freshness?.state !== "refreshing" || landedLine !== null) landed = r;
+  }
+  if (process.env.FRESHNESS_WORKER_DIAG) {
+    console.log(`  diag  polls ${JSON.stringify(polls.slice(0, 40))}`);
+    const counts = {};
+    for (const s of smallTimes) counts[`${s.state}:${s.reason}`] = (counts[`${s.state}:${s.reason}`] ?? 0) + 1;
+    console.log(`  diag  small states ${JSON.stringify(counts)}`);
   }
   const t1 = Date.now();
   stop = true;
