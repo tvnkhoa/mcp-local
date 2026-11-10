@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { checkSeedAncestry } from "./gitHelpers.js";
+import { checkSeedAncestry, classifyGitKill, gitAsync } from "./gitHelpers.js";
 
 /** IX-9: a worktree is seeded from its parent's index only when the parent's indexed commit is an ancestor of its base. */
 
@@ -83,4 +83,28 @@ test("MCP-ISSUE-123: a git call killed by its timeout is git_timeout, not git_er
     // The same call with the normal timeout answers on ancestry.
     assert.equal((await checkSeedAncestry(f.wt, f.c1)).ok, true);
   } finally { f.cleanup(); }
+});
+
+test("MCP-ISSUE-123 #6: a maxBuffer overflow and an outside kill are named, not read as a timeout", async () => {
+  const f = fixture();
+  try {
+    // Real execFile errors: 4 bytes cannot hold a sha; 1 ms cannot hold a spawn.
+    const overflow = await gitAsync(f.wt, ["rev-parse", "HEAD"], 5_000, 4);
+    assert.deepEqual(overflow, { status: -1, stdout: "", kill: "max_buffer" });
+    const slow = await gitAsync(f.wt, ["rev-parse", "HEAD"], 1);
+    assert.equal(slow.kill, "timeout");
+    const fine = await gitAsync(f.wt, ["rev-parse", "HEAD"]);
+    assert.deepEqual(fine, { status: 0, stdout: f.w1, kill: null });
+    const failed = await gitAsync(f.wt, ["cat-file", "-e", "0123456789abcdef0123456789abcdef01234567^{commit}"]);
+    assert.equal(failed.kill, null);
+    assert.notEqual(failed.status, 0);
+  } finally { f.cleanup(); }
+
+  // The error shapes execFile produces (node lib/child_process.js): killed is set only when execFile itself killed git.
+  assert.equal(classifyGitKill({ code: null, killed: true, signal: "SIGTERM" }), "timeout");
+  assert.equal(classifyGitKill({ code: "ERR_CHILD_PROCESS_STDIO_MAXBUFFER", killed: true, signal: "SIGTERM" }), "max_buffer");
+  assert.equal(classifyGitKill({ code: null, killed: false, signal: "SIGKILL" }), "killed");
+  assert.equal(classifyGitKill({ code: 128, killed: false, signal: null }), null);
+  assert.equal(classifyGitKill({ code: "ENOENT", killed: false, signal: null }), null);
+  assert.equal(classifyGitKill(null), null);
 });

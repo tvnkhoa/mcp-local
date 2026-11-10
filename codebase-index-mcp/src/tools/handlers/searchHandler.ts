@@ -158,16 +158,16 @@ const NEARBY_MAX = 5;
 // so user-facing-text audits (notification titles, error messages, log templates,
 // i18n sweeps) are one MCP call instead of grep + full-file reads.
 
-export function handleSearchLiterals(
+export async function handleSearchLiterals(
   args: { repoId: string; query: string; filePath?: string; limit: number; excludeTests: boolean; profile: string },
   ctx: HandlerContext
-): CallToolResult {
+): Promise<CallToolResult> {
   const { store } = ctx;
   const profile = resolveResponseProfile(args.profile as Parameters<typeof resolveResponseProfile>[0]);
   const resultsRaw = store.searchLiterals(args.repoId, args.query, args.limit, args.filePath ?? null);
   // MCP-ISSUE-049: post-filter, matching how search_symbols/search_regex apply the same flag.
   const results = args.excludeTests ? resultsRaw.filter((r) => !isTestPath(r.filePath)) : resultsRaw;
-  const staleWarning = buildStaleWarning(args.repoId, store, "literal lines may be off vs current HEAD — re-index for exact positions.");
+  const staleWarning = await buildStaleWarning(args.repoId, store, "literal lines may be off vs current HEAD — re-index for exact positions.");
   const coverage = buildCoverageBlock({ resultCount: results.length, kind: "search", query: args.query });
 
   if (profile === "nano") {
@@ -277,7 +277,7 @@ export async function handleSearchRegex(
   }
 
   const { matches, filesScanned, filesEligible, truncated, truncationReason, filesUnscanned, nextAfterPath, nextSkipMatches } = result;
-  const staleWarning = buildStaleWarning(args.repoId, store, "match lines/text are read live from disk and are current; only enclosingSymbol is resolved from the index and may be off — re-index for accurate enclosing symbols.");
+  const staleWarning = await buildStaleWarning(args.repoId, store, "match lines/text are read live from disk and are current; only enclosingSymbol is resolved from the index and may be off — re-index for accurate enclosing symbols.");
   const coverage = buildCoverageBlock({ resultCount: result.files ? result.files.length : matches.length, kind: "search", query: args.pattern, truncated });
   // MCP-ISSUE-058(a): a capped scan that found nothing is NOT "absent" — say so, in words, naming the
   // number of files never opened. The generic 0-results gap ("wrong strategy, too-narrow filter, or a
@@ -522,10 +522,10 @@ export function handleGetSymbolBlame(
 
 // ── get_symbol_source ───────────────────────────────────────────────────────────
 
-export function handleGetSymbolSource(
+export async function handleGetSymbolSource(
   args: { repoId: string; symbolId?: string; name?: string; contextLines: number; maxLines: number; profile: string },
   ctx: HandlerContext
-): CallToolResult {
+): Promise<CallToolResult> {
   const { store } = ctx;
   const profile = resolveResponseProfile(args.profile as Parameters<typeof resolveResponseProfile>[0]);
 
@@ -552,7 +552,7 @@ export function handleGetSymbolSource(
   });
   if (!span) throw new McpError(ErrorCode.InvalidRequest, `get_symbol_source: unable to read ${symbol.filePath} (file missing or empty on disk).`);
 
-  const staleWarning = buildStaleWarning(args.repoId, store, "line numbers may be off vs current HEAD — re-index for an exact span.");
+  const staleWarning = await buildStaleWarning(args.repoId, store, "line numbers may be off vs current HEAD — re-index for an exact span.");
 
   return ctx.asText(
     {

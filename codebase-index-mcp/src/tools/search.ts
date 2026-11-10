@@ -116,7 +116,7 @@ export function buildSearchTools(deps: CodebaseIndexDeps): AnyToolDefinition[] {
     },
     annotations: readsGraph,
     rawResult: true,
-    handler: (input) => ok(raw(handleSearchLiterals(input, buildContext())))
+    handler: async (input) => ok(raw(await handleSearchLiterals(input, buildContext())))
   });
 
   const getSymbolSource = defineTool({
@@ -138,7 +138,7 @@ export function buildSearchTools(deps: CodebaseIndexDeps): AnyToolDefinition[] {
     },
     annotations: readsGraph,
     rawResult: true,
-    handler: (input) => ok(raw(handleGetSymbolSource(input, buildContext())))
+    handler: async (input) => ok(raw(await handleGetSymbolSource(input, buildContext())))
   });
 
   const getSymbolDetail = defineTool({

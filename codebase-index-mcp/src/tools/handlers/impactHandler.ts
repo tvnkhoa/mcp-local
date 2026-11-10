@@ -29,7 +29,7 @@ import { isNameOnlyEdgeReason } from "../../types/index.js";
 // route_map, ...) returns data with a staleness note. Impact tools follow suit:
 // return the warning so callers degrade gracefully instead of getting nothing.
 
-function staleWarningFor(repoId: string, store: GraphStore): StaleWarning | null {
+function staleWarningFor(repoId: string, store: GraphStore): Promise<StaleWarning | null> {
   return buildStaleWarning(
     repoId,
     store,
@@ -226,7 +226,7 @@ export async function handleFindFieldAccesses(
   const profile = resolveResponseProfile(args.profile as Parameters<typeof resolveResponseProfile>[0]);
 
   // R3 exact: a TS/JS field is answered by the TypeScript LanguageService when the lane is on.
-  const exact = await tryExactFieldAccesses(args, ctx, profile, staleWarningFor(args.repoId, store));
+  const exact = await tryExactFieldAccesses(args, ctx, profile, await staleWarningFor(args.repoId, store));
   if (exact) return exact;
 
   let symbolId = args.symbolId;
@@ -238,7 +238,7 @@ export async function handleFindFieldAccesses(
     const candidates = store.getSymbolCandidates(args.repoId, name, 25);
     const properties = candidates.filter((c) => c.kind === "property");
     symbolId = (properties.find((c) => c.name === name) ?? properties[0])?.symbolId;
-    if (!symbolId) return noPropertySymbolResult(args.repoId, name, candidates, store, ctx, profile);
+    if (!symbolId) return await noPropertySymbolResult(args.repoId, name, candidates, store, ctx, profile);
   }
   if (!symbolId) throw new McpError(ErrorCode.InvalidParams, "find_field_accesses: provide symbolId or a resolvable name.");
 
@@ -251,7 +251,7 @@ export async function handleFindFieldAccesses(
 
   const reads = result.accesses.filter((a) => a.mode === "read");
   const writes = result.accesses.filter((a) => a.mode === "write");
-  const staleWarning = staleWarningFor(args.repoId, store);
+  const staleWarning = await staleWarningFor(args.repoId, store);
   const coverage = buildCoverageBlock({
     resultCount: result.accesses.length,
     expectedNonZero: true,
@@ -304,15 +304,15 @@ function propertyEdgeGaps(filePath: string): string[] {
  * No property symbol carries this name. Answered as an honest empty result rather than an error, so
  * the caller sees why the graph cannot count it and which same-named symbols exist to pin instead.
  */
-function noPropertySymbolResult(
+async function noPropertySymbolResult(
   repoId: string,
   name: string,
   candidates: ReturnType<GraphStore["getSymbolCandidates"]>,
   store: GraphStore,
   ctx: HandlerContext,
   profile: ReturnType<typeof resolveResponseProfile>
-): CallToolResult {
-  const staleWarning = staleWarningFor(repoId, store);
+): Promise<CallToolResult> {
+  const staleWarning = await staleWarningFor(repoId, store);
   const coverage = buildCoverageBlock({
     resultCount: 0,
     expectedNonZero: true,
@@ -663,15 +663,15 @@ async function termUsages(ctx: HandlerContext, repoId: string, term: string, key
 
 // ── find_impact_files ─────────────────────────────────────────────────────────
 
-export function handleFindImpactFiles(
+export async function handleFindImpactFiles(
   args: { repoId: string; filePath: string; limit: number; view: "files" | "surface"; groupBy: "file" | "module"; excludeTests: boolean; profile: string },
   ctx: HandlerContext
-): CallToolResult {
+): Promise<CallToolResult> {
   const { store } = ctx;
   const profile = resolveResponseProfile(args.profile as Parameters<typeof resolveResponseProfile>[0]);
 
   // Stale index → warn (embedded in payload), don't block.
-  const staleWarning = staleWarningFor(args.repoId, store);
+  const staleWarning = await staleWarningFor(args.repoId, store);
   // MCP-ISSUE-060: "this path is not in the index" and "this path has no dependents" are different
   // answers, and both used to render as `totalImpactedCount: 0` with `graph data complete` beside it.
   // A 29-file server added to this workspace after the last index run was in exactly that state, and
@@ -727,14 +727,14 @@ export function handleFindImpactFiles(
 
 // ── get_change_context ────────────────────────────────────────────────────────
 
-export function handleGetChangeContext(
+export async function handleGetChangeContext(
   args: { repoId: string; symbolId?: string; name?: string; callerDepth: number; calleeDepth: number; limit: number; excludeTests: boolean; profile: string },
   ctx: HandlerContext
-): CallToolResult {
+): Promise<CallToolResult> {
   const { store } = ctx;
 
   // Stale index → warn (embedded in payload), don't block.
-  const staleWarning = staleWarningFor(args.repoId, store);
+  const staleWarning = await staleWarningFor(args.repoId, store);
   const warn = staleWarning ? { staleWarning } : {};
 
   const profile = resolveResponseProfile(args.profile as Parameters<typeof resolveResponseProfile>[0]);
