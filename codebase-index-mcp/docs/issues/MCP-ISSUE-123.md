@@ -1,6 +1,6 @@
 ## MCP-ISSUE-123 — the served server crashed 0xC0000409 (worker terminated mid-parse), reported `git_error` for a git timeout, and ran at BelowNormal priority
 
-- **Status:** FIXED 2026-11-09 (f64ef10 crash, ac86067 seed reasons, b9d45ab priority; review follow-ups #1–#4, #7 and re-review A, D the same day; review #5, re-review E, #6, the async stale warning, re-review B and C, the failure backoff 2026-11-10: 5b1eb4d, 0242d50, cf78e3b, 206ed15, af1e7eb, fbe8151, ce61e93, e060e07). Live re-soak of IX-5 / IX-9 open (wec.aria).
+- **Status:** FIXED 2026-11-09 (f64ef10 crash, ac86067 seed reasons, b9d45ab priority; review follow-ups #1–#4, #7 and re-review A, D the same day; review #5, re-review E, #6, the async stale warning, re-review B and C, the failure backoff, the failed-run stale warning 2026-11-10: 5b1eb4d, 0242d50, cf78e3b, 206ed15, af1e7eb, fbe8151, ce61e93, e060e07, 63ccbef; #6 on Windows: platform limit). Live re-soak of IX-5 / IX-9 open (wec.aria).
 - **Scenario:** wec.aria's acceptance of deploy 67e6ce37f7d7 on 9 Nov 10:15–10:32 (UTC+7) — a watcher on
   `wec.aria-wt-spec098`, reads, then `register_worktree(D:/1.SourceCode/crm/wec.aria-wt-s098eval, parent wec.aria)` — while
   another member ran 16 `node -e "for(;;){}"` burners + 8 git loopers at Normal priority on 16 logical cores (10:23:25–10:32:32).
@@ -162,14 +162,31 @@
     waited the budget; answers come at least one handler apart; a read joining 450 ms late waits less than its own 600 ms
     budget); it stays red against a per-read-deadline mutant.
 
+- **The stale warning after a failed run (fixed 2026-11-10, 63ccbef; found by row 6).** With re-review B a failed or
+  cancelled latest run has no commit, so `buildStaleWarning` read "indexed commit unavailable" (`isStale` null) and returned
+  NO warning: a read over a partial graph looked clean. It now returns the warning for such a run (in a git repo) with
+  `lastIndexedCommit` and `commitsBehind` null and three optional fields: `latestRun` {`runId`, `status`, `mode`,
+  `triggeredBy`?, `finishedAt`, `summary` — the run's scope and error, cut to 300 chars}, `graphMayBePartial: true` and
+  `action` (run `index_repository`; after a failed automatic refresh the gate backs off). The backoff's wait is not repeated
+  here: it is per process, inside the freshness gate, and the same response's `freshness.reason` already says how long.
+  Every other case keeps its shape; the tool contracts are unchanged (descriptions only name `staleWarning`). Test:
+  `staleWarning.test.ts` (failed, cancelled, a 2 000-char error cut) — red on 69ae7e7 (no warning).
+- **#6 Windows residual: an outside kill cannot be told from git's own exit 1 (platform limit, measured 2026-11-10).** Probe
+  (git 2.50.1.windows.1, node 22, Windows 11): `execFile("git", ["cat-file", "--batch"])` killed from outside after 1.5 s,
+  against git's own exits. `taskkill /F`, `taskkill /F /T` and `process.kill(pid)` from another node process all end as
+  `code 1, signal null, killed false`, empty stderr — and `exit` and `close` both report `(1, null)` — exactly what
+  `merge-base --is-ancestor` answers for "not an ancestor". No field differs, so `classifyGitKill` cannot name them:
+  each reads as that call's own exit 1 — `child_head_unresolved` (rev-parse), `parent_sha_missing` (cat-file -e),
+  "not an ancestor" then the merge-base split (is-ancestor), `unrelated_history` (merge-base). `Stop-Process -Force` (.NET
+  `Process.Kill`) ends as `code 4294967295` (TerminateProcess with -1) and only reaches `git_error`; it is the one
+  distinguishable killer, and classifying it would rest on git never exiting 0xFFFFFFFF itself — not done. A kill by the
+  server (timeout, maxBuffer) is still named on Windows, as before. Probe and output:
+  `~/.claude/handover/briefs/2026-11-10-mcp-local-stale-failed-probe.mjs`, `…-winkill-probe.log`.
+
 ### Left open
 
-- (#6 residual) on Windows an outside kill (TerminateProcess) arrives as exit code 1 with no signal, so `git_killed` is
-  only observable on POSIX; on Windows it reads as git's own exit 1 (for `merge-base --is-ancestor`, "not an ancestor").
-- (found by row 6) after a failed run the stale warning in `gitHelpers.ts` (~:757, `getRepoStaleness`) reads "indexed commit
-  unavailable": a failed run now records no commit and `getLatestRun` returns it, so the warning should name the failed run
-  instead. Not edited (row 8 held the file).
-- One 12.8 s stall at 10:34:30, after the respawn and outside the reported load window, is unexplained.
+- One 12.8 s stall at 10:34:30, after the respawn and outside the reported load window, is unexplained — watch only (owner,
+  10 Nov: "tạm thời theo dõi thôi").
 
 ### Enhancement proposal
 
