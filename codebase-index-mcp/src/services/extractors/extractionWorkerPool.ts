@@ -16,6 +16,12 @@ type WorkerState = {
   timeoutHandle?: NodeJS.Timeout;
   /** Re-review D: a timed-out job held its worker at the retire cap; the slot frees on its late answer or on the next retired exit. */
   held?: boolean;
+  /** Review #5: the worker failed ('error') and is about to exit; no job is sent to it. Cleared by the respawn. */
+  failed?: boolean;
+  /** Review #5: the slot's worker kept exiting on its own; it is not respawned again and takes no job. */
+  dead?: boolean;
+  /** Review #5: when this slot's worker was respawned after exiting on its own (pruned to `RESPAWN_WINDOW_MS`). */
+  respawnTimes: number[];
 };
 
 type WorkerExtractMessage =
@@ -38,10 +44,39 @@ export const CLOSE_WORKER_MESSAGE = { type: "close" } as const;
  */
 export const DEFAULT_RETIRE_GRACE_MS = 5 * 60_000;
 
+/**
+ * MCP-ISSUE-123 review #5: a slot whose worker exits on its own is respawned, at most `MAX_RESPAWNS_PER_WINDOW` times in
+ * any `RESPAWN_WINDOW_MS`. One more exit inside the window (a worker that dies at start, every time) marks the slot dead
+ * instead of spawning a thread per job: the pool runs on its other slots, and with every slot dead it answers each job
+ * `error` at once ("parse pool degraded") rather than leaving the run waiting. Each dead slot is reported once
+ * (`onSlotDead`, default one JSON line on stderr).
+ */
+export const MAX_RESPAWNS_PER_WINDOW = 3;
+export const RESPAWN_WINDOW_MS = 60_000;
+
+/**
+ * MCP-ISSUE-123 re-review E: the retire grace at server shutdown (`dispose({ graceMs })`, from the refresh worker's
+ * `exit` request with `shutdown`). Four times tree-sitter's own parse timeout (5 s): a worker still in its job after it
+ * is starved or hung, and the process is ending anyway, so the shutdown stays bounded. Every other dispose and retire
+ * keeps `DEFAULT_RETIRE_GRACE_MS` — no terminate during a parse outside shutdown.
+ */
+export const SHUTDOWN_RETIRE_GRACE_MS = 20_000;
+
+export type SlotDeadEvent = { slot: number; respawns: number; windowMs: number; reason: string; deadSlots: number; size: number };
+
 export type ExtractionWorkerPoolOptions = {
   /** The worker script (a test's fixture). Default: `extractionWorker.js` beside this module. */
   workerUrl?: URL;
   retireGraceMs?: number;
+  /** Review #5: the respawn window (default `RESPAWN_WINDOW_MS`) — a test seam. */
+  respawnWindowMs?: number;
+  /** Review #5: where a dead slot is reported. Default: one JSON line on stderr. */
+  onSlotDead?: (event: SlotDeadEvent) => void;
+};
+
+export type ExtractionWorkerPoolDisposeOptions = {
+  /** Re-review E: terminate a retired worker still alive this long after its retirement (server shutdown only). */
+  graceMs?: number;
 };
 
 const defaultWorkerUrl = (): URL => new URL("./extractionWorker.js", import.meta.url);
@@ -67,6 +102,10 @@ export class ExtractionWorkerPool {
   private readonly exited = new WeakSet<Worker>();
   private readonly workerUrl: URL;
   private readonly retireGraceMs: number;
+  private readonly onSlotDead: (event: SlotDeadEvent) => void;
+  private readonly respawnWindowMs: number;
+  /** Running retire grace timers by worker, so a shutdown dispose can shorten the ones already started. */
+  private readonly graceTimers = new Map<Worker, { started: number; timer: NodeJS.Timeout; fire: () => void }>();
   private disposed = false;
 
   constructor(
@@ -76,8 +115,14 @@ export class ExtractionWorkerPool {
   ) {
     this.workerUrl = options.workerUrl ?? defaultWorkerUrl();
     this.retireGraceMs = options.retireGraceMs ?? DEFAULT_RETIRE_GRACE_MS;
+    this.respawnWindowMs = options.respawnWindowMs ?? RESPAWN_WINDOW_MS;
+    this.onSlotDead =
+      options.onSlotDead ??
+      ((event) => {
+        process.stderr.write(`${JSON.stringify({ event: "parse_pool_slot_dead", ...event })}\n`);
+      });
     for (let i = 0; i < size; i += 1) {
-      const state = { busy: false } as WorkerState;
+      const state = { busy: false, respawnTimes: [] } as unknown as WorkerState;
       this.spawnInto(state);
       this.workers.push(state);
     }
@@ -88,10 +133,24 @@ export class ExtractionWorkerPool {
     return this.retiring.size;
   }
 
+  /** Review #5: slots whose worker kept exiting on its own and is no longer respawned. */
+  get deadSlots(): number {
+    return this.workers.filter((state) => state.dead).length;
+  }
+
+  /** Review #5: every slot is dead — each job is answered `error` at once. */
+  get degraded(): boolean {
+    return this.workers.length > 0 && this.workers.every((state) => state.dead);
+  }
+
   extract(input: ExtractInput): Promise<WorkerExtractResult> {
     return new Promise<WorkerExtractResult>((resolve) => {
       if (this.disposed) {
         resolve({ status: "timeout", reason: "job-timeout" });
+        return;
+      }
+      if (this.degraded) {
+        resolve({ status: "error", error: this.degradedMessage() });
         return;
       }
       const task: PoolTask = {
@@ -108,9 +167,13 @@ export class ExtractionWorkerPool {
    * Answer every queued and running job `job-timeout`, then retire every worker: an idle one exits at once, a busy one
    * when its job returns (MCP-ISSUE-123: never terminated mid-parse). Resolves when all of them, and every worker
    * retired earlier, have exited.
+   *
+   * Re-review E: `graceMs` (server shutdown: `SHUTDOWN_RETIRE_GRACE_MS`) bounds that wait — a retired worker, one
+   * retired earlier included, is terminated once it has been retiring that long. Without it, `retireGraceMs`.
    */
-  async dispose(): Promise<void> {
+  async dispose(options: ExtractionWorkerPoolDisposeOptions = {}): Promise<void> {
     this.disposed = true;
+    if (options.graceMs !== undefined) this.shortenGrace(options.graceMs);
     const queued = this.taskQueue.splice(0);
     for (const task of queued) {
       task.resolve({ status: "timeout", reason: "job-timeout" });
@@ -124,9 +187,19 @@ export class ExtractionWorkerPool {
 
     for (const state of this.workers) {
       this.clearWorkerState(state);
-      this.retire(state.worker);
+      this.retire(state.worker, options.graceMs);
     }
     await Promise.all([...this.retiring]);
+  }
+
+  /** Re-review E: bring every running retire grace down to `graceMs` from its start (fires now if already past). */
+  private shortenGrace(graceMs: number): void {
+    const now = Date.now();
+    for (const entry of this.graceTimers.values()) {
+      clearTimeout(entry.timer);
+      entry.timer = setTimeout(entry.fire, Math.max(0, entry.started + graceMs - now));
+      entry.timer.unref();
+    }
   }
 
   private spawnInto(state: WorkerState): void {
@@ -137,31 +210,74 @@ export class ExtractionWorkerPool {
       if (state.worker === worker) this.onWorkerMessage(state, message);
     });
     worker.on("error", (error) => {
-      if (state.worker === worker) this.onWorkerFailure(state, error instanceof Error ? error.message : String(error));
+      if (state.worker !== worker) return;
+      // Review #5: 'exit' follows; until then the slot takes no job (it would go to a dying worker).
+      state.failed = true;
+      this.onWorkerFailure(state, error instanceof Error ? error.message : String(error));
     });
     worker.on("exit", (code) => {
-      if (state.worker === worker && code !== 0) {
-        this.onWorkerFailure(state, `worker exited with code ${String(code)}`);
-      }
+      // Review #5: a slot's own worker never exits unasked (retire detaches it first), so any exit here — code 0 too —
+      // leaves the slot without a worker: answer its job, then respawn it (bounded) or mark it dead.
+      if (state.worker !== worker) return;
+      const reason = `worker exited with code ${String(code)}`;
+      this.onWorkerFailure(state, reason);
+      this.respawnOrBury(state, reason);
     });
+  }
+
+  /** Review #5: give the slot a fresh worker, unless it had `MAX_RESPAWNS_PER_WINDOW` already in the window. */
+  private respawnOrBury(state: WorkerState, reason: string): void {
+    state.failed = false;
+    if (this.disposed) return;
+    const now = Date.now();
+    state.respawnTimes = state.respawnTimes.filter((t) => now - t < this.respawnWindowMs);
+    if (state.respawnTimes.length < MAX_RESPAWNS_PER_WINDOW) {
+      state.respawnTimes.push(now);
+      this.spawnInto(state);
+      this.schedule();
+      return;
+    }
+    state.dead = true;
+    this.clearWorkerState(state);
+    try {
+      this.onSlotDead({
+        slot: this.workers.indexOf(state),
+        respawns: state.respawnTimes.length,
+        windowMs: this.respawnWindowMs,
+        reason,
+        deadSlots: this.deadSlots,
+        size: this.size
+      });
+    } catch {
+      // Reporting never breaks the pool.
+    }
+    if (this.degraded) {
+      for (const task of this.taskQueue.splice(0)) task.resolve({ status: "error", error: this.degradedMessage() });
+    }
+  }
+
+  private degradedMessage(): string {
+    return `parse pool degraded: every parse worker kept exiting on its own (more than ${String(MAX_RESPAWNS_PER_WINDOW)} respawns in ${String(this.respawnWindowMs / 1000)} s per slot)`;
   }
 
   /**
    * MCP-ISSUE-123: detach `worker` from the pool and ask it to exit after the job it is running. Its late answer is
    * ignored (the `state.worker === worker` guards above). Terminated only if still alive after `retireGraceMs`.
    */
-  private retire(worker: Worker): void {
-    if (this.exited.has(worker)) return;
+  private retire(worker: Worker, graceMs: number = this.retireGraceMs): void {
+    // Already gone, or already retiring (a second dispose): its grace timer is running (and was shortened, if asked).
+    if (this.exited.has(worker) || this.graceTimers.has(worker)) return;
     let exited = false;
     let release!: () => void;
     const gone = new Promise<void>((resolve) => {
       release = resolve;
     });
-    let grace: NodeJS.Timeout | undefined;
     const done = (): void => {
       if (exited) return;
       exited = true;
-      if (grace) clearTimeout(grace);
+      const entry = this.graceTimers.get(worker);
+      if (entry) clearTimeout(entry.timer);
+      this.graceTimers.delete(worker);
       this.retiring.delete(gone);
       release();
       // Re-review D: a retired worker left, so the cap has room — retire the slots held at the cap and serve the queue.
@@ -176,10 +292,12 @@ export class ExtractionWorkerPool {
     } catch {
       // Port already closed: the worker is exiting or gone; 'exit' (or the grace timer) settles it.
     }
-    grace = setTimeout(() => {
+    const fire = (): void => {
       void worker.terminate().finally(done);
-    }, this.retireGraceMs);
-    grace.unref();
+    };
+    const timer = setTimeout(fire, graceMs);
+    timer.unref();
+    this.graceTimers.set(worker, { started: Date.now(), timer, fire });
   }
 
   private onWorkerMessage(state: WorkerState, message: WorkerExtractMessage): void {
@@ -230,7 +348,7 @@ export class ExtractionWorkerPool {
   private releaseHeld(): void {
     if (this.disposed) return;
     for (const state of this.workers) {
-      if (!state.held || this.retiring.size >= this.size) continue;
+      if (!state.held || state.dead || this.retiring.size >= this.size) continue;
       this.clearWorkerState(state);
       this.retire(state.worker);
       this.spawnInto(state);
@@ -251,7 +369,7 @@ export class ExtractionWorkerPool {
   private schedule(): void {
     if (this.disposed) return;
     for (const state of this.workers) {
-      if (state.busy) {
+      if (state.busy || state.failed || state.dead) {
         continue;
       }
 

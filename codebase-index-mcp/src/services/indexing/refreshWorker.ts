@@ -24,11 +24,12 @@ import { parentPort } from "node:worker_threads";
 import { performanceProfileOverrideFromEnv } from "../../config/envConfig.js";
 import { GraphStore } from "../../repositories/graphStore.js";
 import { SeedError, type SeedResult } from "../../repositories/seedStore.js";
-import { ExtractionWorkerPool } from "../extractors/extractionWorkerPool.js";
+import { ExtractionWorkerPool, SHUTDOWN_RETIRE_GRACE_MS } from "../extractors/extractionWorkerPool.js";
 import type { IndexMode, IndexRunResult } from "../../types/index.js";
 import type { RunBookkeeping } from "../../middleware/freshness.js";
 import { createIndexRunner, type IndexRunnerLimits, type RunIndexAndResolve } from "./indexRunner.js";
 import { parentRunRefusal } from "./indexJobs.js";
+import { SHUTDOWN_WORKER_EXIT_MS } from "./refreshWorkerClient.js";
 
 /**
  * Release J: a refresh of at most this many files parses on this thread; a larger one (its dependents
@@ -71,6 +72,12 @@ export type RefreshWorkerRequest = {
   seedFrom?: string;
   /** IX-9 review (b): the run-state dir; the seed re-checks the parent's run markers inside its write transaction. */
   lockDir?: string;
+  /**
+   * MCP-ISSUE-123 re-review E: an `exit` for server shutdown. The parse pool terminates a worker still in its job after
+   * `SHUTDOWN_RETIRE_GRACE_MS` (not the 5 min retire grace), and the thread exits by `SHUTDOWN_WORKER_EXIT_MS` even if
+   * the aborted run has not reached its batch boundary. Without it (`abortRun`), exit waits as before.
+   */
+  shutdown?: boolean;
 };
 
 export type RefreshWorkerMessage =
@@ -115,6 +122,8 @@ export function attachRefreshWorker(port: RefreshWorkerPort, deps: RefreshWorker
   let parsePoolIdle: NodeJS.Timeout | undefined;
   /** MCP-ISSUE-123 (review #1, #3): set by `exit`; no pool, run or write starts after it. */
   let exiting = false;
+  /** Re-review E: set by the first `exit` — the pool it disposed and the once-only exit. */
+  let exitState: { pool: ExtractionWorkerPool | null; exitOnce: () => void; shutdown: boolean } | null = null;
   /** The run in flight, if any: its abort switch and its settlement. */
   let current: { abort: AbortController; settled: Promise<void> } | null = null;
   const warmParsePool = (limits: IndexRunnerLimits): ExtractionWorkerPool => {
@@ -163,12 +172,35 @@ export function attachRefreshWorker(port: RefreshWorkerPort, deps: RefreshWorker
       // Review #1: the run in flight is ABORTED first. Without it, every parse after the pool's dispose answers
       // job-timeout and the run commits those batches and can be recorded ok at HEAD; aborted, it stops at its next
       // batch boundary and records itself cancelled with no commit (indexRunner `recordAborted`). Exit waits for both.
+      // Re-review E: at shutdown both waits are bounded — the pool's by its shutdown grace, the run's by a timer. The timer
+      // fires between two turns of JavaScript, so this thread is in no native call (an inline parse) when it exits.
+      // Leader review (1): a shutdown `exit` that arrives while an abort's `exit` is still waiting UPGRADES it — the pool's
+      // running graces are shortened (a second dispose) and the exit timer starts — instead of being dropped.
+      if (exitState) {
+        if (request.shutdown && !exitState.shutdown) {
+          exitState.shutdown = true;
+          setTimeout(exitState.exitOnce, SHUTDOWN_WORKER_EXIT_MS).unref();
+          void exitState.pool?.dispose({ graceMs: SHUTDOWN_RETIRE_GRACE_MS });
+        }
+        return;
+      }
       exiting = true;
       current?.abort.abort();
       if (parsePoolIdle) clearTimeout(parsePoolIdle);
       const pool = parsePool;
       parsePool = null;
-      void Promise.allSettled([pool ? pool.dispose() : Promise.resolve(), current?.settled ?? Promise.resolve()]).finally(() => exit(0));
+      let exited = false;
+      const exitOnce = (): void => {
+        if (exited) return;
+        exited = true;
+        exit(0);
+      };
+      exitState = { pool, exitOnce, shutdown: request.shutdown === true };
+      if (request.shutdown) setTimeout(exitOnce, SHUTDOWN_WORKER_EXIT_MS).unref();
+      void Promise.allSettled([
+        pool ? pool.dispose(request.shutdown ? { graceMs: SHUTDOWN_RETIRE_GRACE_MS } : {}) : Promise.resolve(),
+        current?.settled ?? Promise.resolve()
+      ]).finally(exitOnce);
       return;
     }
     if (exiting) {

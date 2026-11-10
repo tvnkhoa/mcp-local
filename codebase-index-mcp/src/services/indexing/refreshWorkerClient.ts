@@ -24,7 +24,7 @@
 
 import { Worker } from "node:worker_threads";
 
-import { DEFAULT_RETIRE_GRACE_MS } from "../extractors/extractionWorkerPool.js";
+import { DEFAULT_RETIRE_GRACE_MS, SHUTDOWN_RETIRE_GRACE_MS } from "../extractors/extractionWorkerPool.js";
 
 import type { IndexMode, IndexRunResult } from "../../types/index.js";
 import type { RunBookkeeping } from "../../middleware/freshness.js";
@@ -58,7 +58,7 @@ export type RefreshWorkerClientOptions = {
   onPurged?: (repoId: string) => void;
   /** MCP-ISSUE-123: how long `abortRun` waits for the worker to exit on request before terminating it. */
   abortGraceMs?: number;
-  /** MCP-ISSUE-123: the same for `dispose` (server shutdown). */
+  /** MCP-ISSUE-123 re-review E: the same for `dispose` (server shutdown); default `DEFAULT_DISPOSE_GRACE_MS` (35 s). */
   disposeGraceMs?: number;
 };
 
@@ -70,7 +70,14 @@ export type RefreshWorkerClientOptions = {
  */
 export const EXIT_MARGIN_MS = 30_000;
 export const DEFAULT_ABORT_GRACE_MS = DEFAULT_RETIRE_GRACE_MS + EXIT_MARGIN_MS;
-export const DEFAULT_DISPOSE_GRACE_MS = DEFAULT_RETIRE_GRACE_MS + EXIT_MARGIN_MS;
+/**
+ * MCP-ISSUE-123 re-review E: server shutdown is bounded. `dispose` sends `exit` with `shutdown`: the worker's parse pool
+ * terminates a parse worker still in its job after `SHUTDOWN_RETIRE_GRACE_MS` (20 s), and the worker exits by
+ * `SHUTDOWN_WORKER_EXIT_MS` (25 s) even if its aborted run has not settled; this client terminates it only after
+ * `DEFAULT_DISPOSE_GRACE_MS` (35 s). It was the 5.5 min abort grace. `abortRun` (a normal run) keeps that.
+ */
+export const SHUTDOWN_WORKER_EXIT_MS = SHUTDOWN_RETIRE_GRACE_MS + 5_000;
+export const DEFAULT_DISPOSE_GRACE_MS = SHUTDOWN_WORKER_EXIT_MS + 10_000;
 
 type Pending = {
   repoId: string;
@@ -92,6 +99,8 @@ export class RefreshWorkerClient {
   private readonly spawn: SpawnRefreshWorker;
   /** Workers whose 'exit' already fired (MCP-ISSUE-123: stopping one must not wait for it again). */
   private readonly exitedWorkers = new WeakSet<RefreshWorkerLike>();
+  /** Workers asked to exit and not gone yet (an `abortRun`'s): `dispose` must bound them too (leader review (1)). */
+  private readonly stopping = new Set<RefreshWorkerLike>();
   /** Times the worker has been spawned — exposed for tests. */
   spawned = 0;
 
@@ -201,11 +210,19 @@ export class RefreshWorkerClient {
     return true;
   }
 
-  /** Stop the worker (server shutdown, tests), as `abortRun` does but with `disposeGraceMs`. Outstanding runs are rejected. */
+  /**
+   * Stop the worker (server shutdown, tests), as `abortRun` does but with `disposeGraceMs` and an `exit` marked
+   * `shutdown` (re-review E: bounded, see `DEFAULT_DISPOSE_GRACE_MS`). Outstanding runs are rejected.
+   */
   async dispose(): Promise<void> {
     const worker = this.worker;
     this.fail(new Error("the refresh worker was shut down"));
-    if (worker) await this.stopWorker(worker, this.options.disposeGraceMs ?? DEFAULT_DISPOSE_GRACE_MS);
+    // Leader review (1): a worker still being stopped by `abortRun` (already detached from `this.worker`) gets the
+    // shutdown `exit` too — the worker upgrades its pending exit — and this call's 35 s fallback, not the abort's 5.5 min.
+    const targets = new Set<RefreshWorkerLike>(this.stopping);
+    if (worker) targets.add(worker);
+    const graceMs = this.options.disposeGraceMs ?? DEFAULT_DISPOSE_GRACE_MS;
+    await Promise.all([...targets].map((target) => this.stopWorker(target, graceMs, true)));
   }
 
   /**
@@ -213,7 +230,7 @@ export class RefreshWorkerClient {
    * JavaScript) and resolve when it has. `terminate()` lands wherever the thread — or one of its parse workers — is, and
    * inside a tree-sitter parse that takes the whole process down (0xC0000409). It is the fallback only after `graceMs`.
    */
-  private stopWorker(worker: RefreshWorkerLike, graceMs: number): Promise<void> {
+  private stopWorker(worker: RefreshWorkerLike, graceMs: number, shutdown = false): Promise<void> {
     return new Promise<void>((resolve) => {
       let settled = false;
       let grace: NodeJS.Timeout | undefined;
@@ -221,21 +238,25 @@ export class RefreshWorkerClient {
         if (settled) return;
         settled = true;
         if (grace) clearTimeout(grace);
+        this.stopping.delete(worker);
         resolve();
       };
       if (this.exitedWorkers.has(worker)) {
         done();
         return;
       }
+      this.stopping.add(worker);
       worker.on("exit", done);
       try {
-        worker.postMessage({ kind: "exit", id: 0, dbPath: this.options.dbPath, limits: this.options.limits, repoId: "", repoPath: "", mode: "dirty", docsEnabled: false, maxFiles: 0, batchSize: 0 });
+        worker.postMessage({ kind: "exit", id: 0, dbPath: this.options.dbPath, limits: this.options.limits, repoId: "", repoPath: "", mode: "dirty", docsEnabled: false, maxFiles: 0, batchSize: 0, ...(shutdown && { shutdown: true }) });
       } catch {
         // The port is closed: the worker is already going; 'exit' or the grace timer settles it.
       }
       grace = setTimeout(() => {
         void worker.terminate().then(done, done);
       }, graceMs);
+      // The fallback timer alone never keeps the process alive (the worker itself is unref'd).
+      grace.unref?.();
     });
   }
 
