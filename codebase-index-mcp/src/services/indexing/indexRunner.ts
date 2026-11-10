@@ -219,11 +219,15 @@ export function createIndexRunner(options: IndexRunnerOptions): RunIndexAndResol
   // partial batches: files written but never resolved, dependents never queued. A scoped run would see their hashes
   // match and resolve only what it re-extracts, leaving unresolved edges until some full run. The old terminate left a
   // run marker and so a repair; this is its equivalent. Checked before any skip or no-op record can shadow the run.
+  // Re-review B: a FAILED run leaves the same partial batches (the pipeline commits per batch before it throws), so
+  // it is repaired the same way — whatever commit an older build recorded for it.
   const latestRun = store.getLatestRun(repoId);
-  if (mode !== "full" && !escalatedBecause && latestRun?.status === "cancelled" && latestRun.commitSha === null) {
-    indexLog(`[index-scope] repoId=${repoId} the last run was aborted: running full instead of ${mode}`);
+  const unfinished =
+    latestRun?.status === "failed" ? "failed" : latestRun?.status === "cancelled" && latestRun.commitSha === null ? "was aborted" : null;
+  if (mode !== "full" && !escalatedBecause && latestRun && unfinished) {
+    indexLog(`[index-scope] repoId=${repoId} the last run ${unfinished}: running full instead of ${mode}`);
     return runIndexAndResolve(repoId, repoPath, "full", docsEnabled, maxFiles, batchSize, {
-      escalatedBecause: `full (the last run ${latestRun.runId} was aborted; ${mode} requested)`,
+      escalatedBecause: `full (the last run ${latestRun.runId} ${unfinished}; ${mode} requested)`,
       ...(givenRunId && { runId: givenRunId }),
       ...(extras.onProgress && { onProgress: extras.onProgress }),
       ...(extras.abortSignal && { abortSignal: extras.abortSignal })
@@ -269,7 +273,8 @@ export function createIndexRunner(options: IndexRunnerOptions): RunIndexAndResol
       );
 
       // If nothing resolved in this batch, we're done
-      if (resolved === 0) break;
+      // MCP-ISSUE-123 re-review C: an abort ends the pass at its batch boundary.
+      if (resolved === 0 || extras.abortSignal?.aborted) break;
 
       if (maxRows > 0) {
         remaining -= batchLimit;
@@ -391,6 +396,18 @@ export function createIndexRunner(options: IndexRunnerOptions): RunIndexAndResol
    * MCP-ISSUE-123: record a run stopped by `extras.abortSignal` as `cancelled` with no commit (the G1 rule below: a
    * run that is no base records none), keep the pending re-index set, and end the session as a finished run would.
    */
+  /** Whether this run is on record yet; the post-phase guard below records it failed when it is not. */
+  let runRecorded = false;
+  /**
+   * MCP-ISSUE-123 review: the session `beginIndexSession` opened (WAL auto-checkpoint off) is ended exactly once on every
+   * path — a finished, aborted or failed run, and a throw from the pipeline or from a record — unless the caller ends it.
+   */
+  let sessionEnded = false;
+  const endSession = (fullCheckpoint: boolean): void => {
+    if (sessionEnded || deferSessionEnd) return;
+    sessionEnded = true;
+    store.endIndexSession(fullCheckpoint);
+  };
   const recordAborted = (partial: IndexRunSummary): IndexRunSummary => {
     const aborted: IndexRunSummary = {
       ...partial,
@@ -400,8 +417,12 @@ export function createIndexRunner(options: IndexRunnerOptions): RunIndexAndResol
       elapsedMs: Date.now() - runStartedMs,
       scope: `${partial.scope ? `${partial.scope}; ` : ""}aborted: no commit recorded`
     };
-    store.recordRun(aborted);
-    if (!deferSessionEnd) store.endIndexSession(false);
+    try {
+      store.recordRun(aborted);
+      runRecorded = true;
+    } finally {
+      endSession(false);
+    }
     progress.stop(`⚠ index ${repoId} · aborted · ${String(aborted.filesIndexed)} files · no commit recorded`);
     return aborted;
   };
@@ -434,6 +455,14 @@ export function createIndexRunner(options: IndexRunnerOptions): RunIndexAndResol
     ...(plannedHead && { commitSha: plannedHead }),
     ...(extras.abortSignal && { abortSignal: extras.abortSignal }),
     progress
+  }).catch((error: unknown) => {
+    // The pipeline recorded the run failed; the session it ran in still ends.
+    try {
+      endSession(false);
+    } catch {
+      // The pipeline's error is the one to surface.
+    }
+    throw error;
   });
   // MCP-ISSUE-123: an aborted run stops here — no escalation, no resolve passes — and is recorded without a commit.
   if (extras.abortSignal?.aborted) return recordAborted(summary);
@@ -444,6 +473,11 @@ export function createIndexRunner(options: IndexRunnerOptions): RunIndexAndResol
     return escalateToFull(summary.scopeEscalation);
   }
   if (gitScope) summary.scope = summary.scope ? `${summary.scope}; ${gitScope}` : gitScope;
+  // MCP-ISSUE-123 re-review B follow-up: the pipeline wrote this run's files and recorded nothing; a throw from here to
+  // the record below (a call outside the per-pass try/catch) used to record no run at all, so the previous ok run at
+  // HEAD stayed the base over a part-resolved graph. It is recorded failed, with no commit (the next run is full).
+  // The post-phase body is deliberately not re-indented under this try, to keep its history readable.
+  try {
   // Release K3: present on a scoped (non-escalated) run; absent means "run every pass repo-wide".
   const scopeInputs = mode !== "full" ? summary.scopeInputs : undefined;
   // Release K3: a scoped run that wrote and removed nothing left the graph as the last run left it, and
@@ -451,6 +485,12 @@ export function createIndexRunner(options: IndexRunnerOptions): RunIndexAndResol
   // function of it — re-running them reproduces what is stored. The refresh after a server restart, or
   // after a peer touched a file without changing it, is such a run.
   const unchanged = scopeInputs !== undefined && scopeInputs.reextracted.length === 0 && scopeInputs.removed.length === 0;
+  /**
+   * MCP-ISSUE-123 re-review C: an abort during the post-phase runs no further resolve pass. Checked before each pass
+   * (and at each batch boundary of the batched ones); the run is recorded cancelled with no commit, and the next run
+   * repairs the part-resolved graph as a full run.
+   */
+  const stopped = (): boolean => extras.abortSignal?.aborted === true;
   const resolvePhaseStart = Date.now();
   let ftsRebuildMs = 0;
   let buildContextMs = 0;
@@ -484,6 +524,7 @@ export function createIndexRunner(options: IndexRunnerOptions): RunIndexAndResol
   }
 
   progress.phase("resolving calls");
+  if (stopped()) return recordAborted(summary);
   indexLog(`[index-post] repoId=${repoId} resolving call edges...`);
   // Populations that are not resolutions of the attempted set — see resolveCallEdgesBatch.
   const callResolveStats = { rowsUpdated: 0, dispatchInserted: 0 };
@@ -540,7 +581,7 @@ export function createIndexRunner(options: IndexRunnerOptions): RunIndexAndResol
         indexLog(
           `[index-post-batch] repoId=${repoId} type=call batch=${String(iteration)} resolved=${String(resolved)} total=${String(total)}`
         );
-        if (resolved === 0) break;
+        if (resolved === 0 || stopped()) break;
         await yieldToEventLoop();
       }
       return total;
@@ -555,6 +596,7 @@ export function createIndexRunner(options: IndexRunnerOptions): RunIndexAndResol
   await yieldToEventLoop();
 
   progress.phase("resolving imports");
+  if (stopped()) return recordAborted(summary);
   indexLog(`[index-post] repoId=${repoId} resolving import edges...`);
   const importStart = Date.now();
   const importEdgesResolved = unchanged ? 0 : await resolveInBatches(
@@ -571,6 +613,8 @@ export function createIndexRunner(options: IndexRunnerOptions): RunIndexAndResol
   }
   importResolveMs = Date.now() - importStart;
   await yieldToEventLoop();
+
+  if (stopped()) return recordAborted(summary);
 
   // MCP-ISSUE-075: CSS variable/class tokens. Unconditional and unbudgeted — CSS edges are few, the
   // pass is one indexed scan per edge type, and it also re-fans earlier resolutions so an incremental
@@ -617,6 +661,7 @@ export function createIndexRunner(options: IndexRunnerOptions): RunIndexAndResol
     } catch { /* non-fatal */ }
   })();
 
+  if (stopped()) return recordAborted(summary);
   if (postPolicy.resolveTypeRefs && !unchanged) {
     progress.phase("resolving types");
     indexLog(`[index-post] repoId=${repoId} resolving type references...`);
@@ -631,6 +676,7 @@ export function createIndexRunner(options: IndexRunnerOptions): RunIndexAndResol
   }
   await yieldToEventLoop();
 
+  if (stopped()) return recordAborted(summary);
   if (postPolicy.resolvePropertyRefs && !unchanged) {
     indexLog(`[index-post] repoId=${repoId} resolving property references...`);
     const propertyStart = Date.now();
@@ -640,6 +686,7 @@ export function createIndexRunner(options: IndexRunnerOptions): RunIndexAndResol
     indexLog(`[index-post-skip] repoId=${repoId} skipping property reference resolution by policy`);
   }
 
+  if (stopped()) return recordAborted(summary);
   // MCP-ISSUE-055: bind routes whose handler lives in another part of the same partial class. Runs
   // unconditionally — it is one UPDATE over the (small) routes table, and it is not governed by the
   // unresolved-row budget the edge resolvers share. Non-fatal: a failure here costs handler
@@ -654,6 +701,7 @@ export function createIndexRunner(options: IndexRunnerOptions): RunIndexAndResol
 
   await yieldToEventLoop();
 
+  if (stopped()) return recordAborted(summary);
   const shouldResolveImplementsInPost = effectiveResolveImplementsInPost && !unchanged;
   if (shouldResolveImplementsInPost) {
     indexLog(`[index-post] repoId=${repoId} resolving interface implementations...`);
@@ -676,6 +724,7 @@ export function createIndexRunner(options: IndexRunnerOptions): RunIndexAndResol
   }
   await yieldToEventLoop();
 
+  if (stopped()) return recordAborted(summary);
   // Release L3 (MCP-ISSUE-092): EF snapshot tables / columns → their CLR class / property. It runs AFTER
   // inheritance resolution: a column's property may live on a base class, reached through resolved EXTENDS
   // edges. Every edge is re-decided from its token each run (one row per mapped column), so a scoped run
@@ -688,6 +737,7 @@ export function createIndexRunner(options: IndexRunnerOptions): RunIndexAndResol
     } catch { /* non-fatal */ }
   })();
 
+  if (stopped()) return recordAborted(summary);
   // MCP-ISSUE-048: cross-repo resolution runs LAST, not first.
   //
   // It used to run before the call/type/implements resolvers, so it saw a graph full of unresolved
@@ -716,6 +766,7 @@ export function createIndexRunner(options: IndexRunnerOptions): RunIndexAndResol
   const crossStats = safeCrossRepoResolve(store, repoId);
   await yieldToEventLoop();
 
+  if (stopped()) return recordAborted(summary);
   // Post-resolve dedup: remove duplicate resolved edges that arise when both simple and
   // qualified edges resolve to the same symbolId (e.g. callee:Save + callee:IRepo.Save → same target).
   indexLog(`[index-post] repoId=${repoId} deduplicating resolved edges...`);
@@ -733,6 +784,7 @@ export function createIndexRunner(options: IndexRunnerOptions): RunIndexAndResol
   indexLog(`[index-post] repoId=${repoId} removed ${dedupCount} duplicate resolved edges`);
   await yieldToEventLoop();
 
+  if (stopped()) return recordAborted(summary);
   const mentionsStart = Date.now();
   indexLog(`[index-post] repoId=${repoId} resolving mentions...`);
   // Release J: a resolved mention keeps its symbol_id and resolveMentions revisits only null rows, by
@@ -857,6 +909,7 @@ export function createIndexRunner(options: IndexRunnerOptions): RunIndexAndResol
     fullSummary.scope = `${fullSummary.scope ? `${fullSummary.scope}; ` : ""}HEAD moved during the run: no commit recorded`;
   }
   store.recordRun(fullSummary);
+  runRecorded = true;
   if (treeDirtyAtStart) store.markRunTreeDirty(fullSummary.runId);
   if (excludeRulesAtStart) store.markRunExcludeRules(fullSummary.runId, excludeRulesAtStart);
   // Whatever the refactor engine wrote has now been through the graph (MCP-ISSUE-042).
@@ -865,7 +918,7 @@ export function createIndexRunner(options: IndexRunnerOptions): RunIndexAndResol
   indexLog(`[index-post] repoId=${repoId} recorded run metadata in ${recordElapsed}ms`);
 
   // Re-enable WAL auto-checkpoint and force a full checkpoint to shrink WAL file
-  if (!deferSessionEnd) store.endIndexSession(mode === "full");
+  endSession(mode === "full");
 
   indexLog(`[index-post-done] repoId=${repoId} crossRepo=${String(crossStats.resolved)} calls=${String(callEdgesResolved)} imports=${String(importEdgesResolved)} mentions=${String(mentionsResolved)}`);
 
@@ -877,6 +930,31 @@ export function createIndexRunner(options: IndexRunnerOptions): RunIndexAndResol
   );
 
   return fullSummary;
+  } catch (error) {
+    if (!runRecorded) {
+      const message = error instanceof Error ? error.message : String(error);
+      try {
+        const { scopeInputs: _unused, ...partial } = summary;
+        store.recordRun({
+          ...partial,
+          status: "failed",
+          commitSha: null,
+          finishedAt: new Date().toISOString(),
+          elapsedMs: Date.now() - runStartedMs,
+          scope: `${partial.scope ? `${partial.scope}; ` : ""}failed in the post-phase: ${message}`
+        });
+      } catch {
+        // Recording is best-effort here; the original error is the one to surface.
+      }
+      progress.stop(`✗ index ${repoId} · failed · ${message}`);
+    }
+    try {
+      endSession(false);
+    } catch {
+      // As above.
+    }
+    throw error;
+  }
   };
 
   return (repoId, repoPath, mode, docsEnabled, maxFiles, batchSize, extras = {}) =>

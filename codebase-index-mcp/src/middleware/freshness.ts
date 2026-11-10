@@ -278,6 +278,22 @@ export type RepairNeeded = {
 /** After this many repairs that failed or were killed, the gate stops starting runs and answers stale. */
 export const MAX_REPAIR_ATTEMPTS = 2;
 
+/**
+ * MCP-ISSUE-123 re-review B: a failed run records no commit, so the gate reads "HEAD moved" after it and starts another
+ * run — which, failing the same way every time, would re-run (full: the runner escalates after a failed run) on every
+ * query. After a gate-started run fails (status `failed`, or the run threw), this process starts no further run for that
+ * repo until the backoff has passed: {@link FAILED_REFRESH_BACKOFF_MS}, doubled per consecutive failure, capped at
+ * {@link FAILED_REFRESH_BACKOFF_MAX_MS}. A run that finishes (any caller, through `serialize`) clears it; a cancelled run
+ * neither counts nor clears; `index_repository` is never held back. Per process, like the gate's other memory.
+ */
+export const FAILED_REFRESH_BACKOFF_MS = 30_000;
+export const FAILED_REFRESH_BACKOFF_MAX_MS = 15 * 60_000;
+
+/** The wait after `count` consecutive failed refreshes. */
+export function failedRefreshBackoffMs(count: number): number {
+  return Math.min(FAILED_REFRESH_BACKOFF_MAX_MS, FAILED_REFRESH_BACKOFF_MS * 2 ** Math.max(0, Math.min(count, 20) - 1));
+}
+
 const MODE_RANK: Record<string, number> = { full: 3, incremental: 2, dirty: 1 };
 
 let repairSeq = 0;
@@ -756,6 +772,11 @@ export function createFreshnessGate(opts: FreshnessGateOptions): FreshnessGate {
   /** MCP-ISSUE-110: a tree check in flight per repo; its promise never rejects (an error is carried, and rethrown to each waiter). */
   type Check = { startedAt: number; promise: Promise<{ note: FreshnessNote } | { error: unknown }> };
   const checking = new Map<string, Check>();
+  /** MCP-ISSUE-123 re-review B: consecutive failed gate-started runs per repo, and when the last one ended. */
+  const failedRefreshes = new Map<string, { count: number; at: number }>();
+  const noteFailedRefresh = (repoId: string): void => {
+    failedRefreshes.set(repoId, { count: (failedRefreshes.get(repoId)?.count ?? 0) + 1, at: now() });
+  };
   /** MCP-ISSUE-111: one queue per DB, not per repo. */
   let runChain: Promise<unknown> = Promise.resolve();
 
@@ -771,6 +792,8 @@ export function createFreshnessGate(opts: FreshnessGateOptions): FreshnessGate {
         // F4: a full run that finished owes the index nothing any more.
         const status = (result as { status?: unknown } | null | undefined)?.status;
         if (mode === "full" && status !== "failed" && status !== "cancelled") clearRepairNeeded(opts.lockDir, repoId, flagsAtStart);
+        // MCP-ISSUE-123 re-review B: a run that finished, whoever started it, ends the failed-refresh backoff.
+        if (status !== "failed" && status !== "cancelled") failedRefreshes.delete(repoId);
         return result;
       } finally {
         removeRunMarker(marker);
@@ -971,6 +994,22 @@ export function createFreshnessGate(opts: FreshnessGateOptions): FreshnessGate {
     const scopedMode: "incremental" | "dirty" = headMoved || submoduleMoved || (vanished.length > 0 && !cleanupByDirty) ? "incremental" : "dirty";
     // A run that died mid-way, whatever its mode, is repaired by a full one (see RepairNeeded).
     const mode: "full" | "incremental" | "dirty" = repair ? "full" : scopedMode;
+    // MCP-ISSUE-123 re-review B: back off after failed refreshes (a repair has its own cap, MAX_REPAIR_ATTEMPTS).
+    const failures = repair ? undefined : failedRefreshes.get(repoId);
+    if (failures) {
+      const waitMs = failedRefreshBackoffMs(failures.count) - (started - failures.at);
+      if (waitMs > 0) {
+        const note: FreshnessNote = {
+          state: "stale",
+          mode,
+          reason:
+            `the last ${String(failures.count)} refresh run(s) of this repo failed; the next automatic one waits ${String(Math.ceil(waitMs / 1000))} s. ` +
+            "Run index_repository to retry now. This answer comes from the previous index."
+        };
+        lastCheck.set(repoId, { at: started, note });
+        return note;
+      }
+    }
     const refusal = opts.refuseRefresh?.(repoId) ?? null;
     if (refusal) {
       const note: FreshnessNote = { state: "stale", mode, reason: `${refusal} This answer comes from the index as that build wrote it.` };
@@ -1004,7 +1043,13 @@ export function createFreshnessGate(opts: FreshnessGateOptions): FreshnessGate {
       if (cleanupByDirty) opts.markPendingReindex?.(repoId, vanished);
       return opts.run(repoId, repoPath, mode, runPaths);
     }, mode)
+      // A run that threw failed too; a throw from the bookkeeping below does not count (the run itself finished).
+      .catch((error: unknown) => {
+        noteFailedRefresh(repoId);
+        throw error;
+      })
       .then((result) => {
+        if (result.status === "failed") noteFailedRefresh(repoId);
         if (result.status === "failed" || result.status === "cancelled") return result;
         if (repair) clearRepairNeeded(opts.lockDir, repoId, repair.flags);
         coveredKey.set(repoId, serializedKey);

@@ -207,3 +207,155 @@ export function h${String(i)}(): number {
     assert.deepEqual(got.edges, want.edges, "edges");
   });
 });
+
+/** Count calls to `names` on `store`, letting each call through. */
+function spy(store: GraphStore, names: string[]): Record<string, number> {
+  const calls: Record<string, number> = {};
+  const target = store as unknown as Record<string, (...a: unknown[]) => unknown>;
+  for (const name of names) {
+    calls[name] = 0;
+    const original = target[name]!.bind(store);
+    target[name] = (...a: unknown[]) => {
+      calls[name]! += 1;
+      return original(...a);
+    };
+  }
+  return calls;
+}
+
+test("MCP-ISSUE-123 re-review B: a failed run records no commit, and the next incremental at the same HEAD neither skips nor scopes — it runs full", async () => {
+  await withRepo(async (store, repo, head) => {
+    assert.equal((await run(store, repo, "full")).status, "ok");
+    // The second full run dies after its first batch was committed: a partial graph at HEAD.
+    const target = store as unknown as { checkpoint: () => void };
+    const checkpoint = target.checkpoint.bind(store);
+    target.checkpoint = () => {
+      throw new Error("disk I/O error (test)");
+    };
+    await assert.rejects(run(store, repo, "full"), /disk I\/O error/);
+    target.checkpoint = checkpoint;
+    const failed = store.getLatestRun("r");
+    assert.equal(failed?.status, "failed");
+    assert.equal(failed?.commitSha, null, "a failed run never becomes the indexed commit");
+
+    const next = await run(store, repo, "incremental");
+    const skipReason = (next as { skipReason?: string }).skipReason;
+    assert.equal(skipReason, undefined, `not fast-skipped on the failed run (skipReason=${String(skipReason)})`);
+    assert.equal(next.mode, "full", "escalated to full, as after an aborted run");
+    assert.match(String(next.scope), /failed/);
+    assert.equal(next.status, "ok");
+    assert.equal(next.commitSha, head);
+  });
+});
+
+test("MCP-ISSUE-123 re-review C: an abort after the files were written skips the vector index rebuild", async () => {
+  await withRepoDb(async (store, dbPath, repo) => {
+    Object.defineProperty(store, "isVectorEnabled", { get: () => true });
+    const calls = spy(store, ["rebuildVectorIndex", "syncVectorsForFiles"]);
+    const result = await abortedRun(store, dbPath, repo, "full");
+    assert.equal(result.commitSha, null);
+    assert.deepEqual(calls, { rebuildVectorIndex: 0, syncVectorsForFiles: 0 });
+  });
+});
+
+test("MCP-ISSUE-123 re-review C: an abort during the resolve passes runs no further pass and records cancelled with no commit", async () => {
+  await withRepoDb(async (store, _dbPath, repo) => {
+    const calls = spy(store, ["resolveCallEdgesBatch", "resolveImportEdges", "resolveTypeRefEdges", "resolveImplementsEdges", "resolveMentions", "deduplicateResolvedEdges"]);
+    const controller = new AbortController();
+    let atAbort: Record<string, number> = {};
+    const result = await run(store, repo, "full", {
+      abortSignal: controller.signal,
+      onProgress: (_p, _t, message) => {
+        if (/resolving imports/i.test(message) && !controller.signal.aborted) {
+          atAbort = { ...calls };
+          controller.abort();
+        }
+      }
+    });
+    assert.equal(controller.signal.aborted, true, "the fixture reached the import pass");
+    assert.ok(atAbort.resolveCallEdgesBatch! > 0, "the call pass ran before the abort");
+    assert.deepEqual(calls, atAbort, "no resolve call after the abort");
+    assert.equal(result.status, "cancelled");
+    assert.equal(result.commitSha, null);
+    assert.equal(store.getLatestRun("r")?.status, "cancelled");
+  });
+});
+
+test("MCP-ISSUE-123 re-review B follow-up: a throw in the post-phase records the run failed with no commit, and the next incremental runs full", async () => {
+  await withRepo(async (store, repo, head) => {
+    assert.equal((await run(store, repo, "full")).status, "ok");
+    // A post-phase call outside the per-pass try/catch: the full run's FTS marker read, after its files were written.
+    const target = store as unknown as { getIndexMeta: (key: string) => string | null };
+    const getIndexMeta = target.getIndexMeta.bind(store);
+    target.getIndexMeta = () => {
+      throw new Error("database is locked (test)");
+    };
+    await assert.rejects(run(store, repo, "full"), /database is locked/);
+    target.getIndexMeta = getIndexMeta;
+    const failed = store.getLatestRun("r");
+    assert.equal(failed?.status, "failed", "the run is on record, not missing");
+    assert.equal(failed?.commitSha, null);
+    assert.match(String(failed?.scope), /post-phase/);
+
+    const next = await run(store, repo, "incremental");
+    const skipReason = (next as { skipReason?: string }).skipReason;
+    assert.equal(skipReason, undefined, `not fast-skipped (skipReason=${String(skipReason)})`);
+    assert.equal(next.mode, "full");
+    assert.equal(next.status, "ok");
+    assert.equal(next.commitSha, head);
+  });
+});
+
+test("MCP-ISSUE-123 review: the index session ends on every failing path — a pipeline throw, and a post-phase throw whose failed record throws too", async () => {
+  await withRepo(async (store, repo) => {
+    const sessions = spy(store, ["beginIndexSession", "endIndexSession"]);
+    const target = store as unknown as Record<string, (...a: unknown[]) => unknown>;
+
+    // 1. The pipeline throws (after its first batch).
+    const checkpoint = target.checkpoint!;
+    target.checkpoint = () => {
+      throw new Error("disk I/O error (test)");
+    };
+    await assert.rejects(run(store, repo, "full"), /disk I\/O error/);
+    target.checkpoint = checkpoint;
+    assert.deepEqual(sessions, { beginIndexSession: 1, endIndexSession: 1 }, "the pipeline's throw ends the session");
+
+    // 2. The post-phase throws, and so does every record of the run.
+    const getIndexMeta = target.getIndexMeta!;
+    const recordRun = target.recordRun!;
+    target.getIndexMeta = () => {
+      throw new Error("database is locked (test)");
+    };
+    target.recordRun = () => {
+      throw new Error("database is locked (record)");
+    };
+    await assert.rejects(run(store, repo, "full"), /database is locked \(test\)/, "the original error surfaces");
+    target.getIndexMeta = getIndexMeta;
+    target.recordRun = recordRun;
+    assert.deepEqual(sessions, { beginIndexSession: 2, endIndexSession: 2 }, "and so does a post-phase throw whose record fails");
+  });
+});
+
+test("MCP-ISSUE-123 review: an abort at a batch boundary inside the call pass ends the pass there", async () => {
+  await withRepoDb(async (store, _dbPath, repo) => {
+    const controller = new AbortController();
+    const calls = spy(store, ["resolveCallEdgesBatch", "resolveImportEdges", "resolveMentions"]);
+    // Abort inside the first batch of the call pass: the pass must not ask for a second batch.
+    const target = store as unknown as Record<string, (...a: unknown[]) => unknown>;
+    const batch = target.resolveCallEdgesBatch!;
+    let firstResolved = 0;
+    target.resolveCallEdgesBatch = (...a: unknown[]) => {
+      const resolved = batch(...a);
+      if (!controller.signal.aborted) firstResolved = resolved as number;
+      controller.abort();
+      return resolved;
+    };
+    const result = await run(store, repo, "full", { abortSignal: controller.signal });
+    assert.ok(firstResolved > 0, "the first batch resolved rows, so only the abort ends the loop");
+    assert.equal(calls.resolveCallEdgesBatch, 1, "one batch, then the pass stopped at its boundary");
+    assert.equal(calls.resolveImportEdges, 0);
+    assert.equal(calls.resolveMentions, 0);
+    assert.equal(result.status, "cancelled");
+    assert.equal(result.commitSha, null);
+  });
+});

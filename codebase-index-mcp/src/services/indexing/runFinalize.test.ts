@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { assessRunHealth, PARSE_FAILURE_DEGRADED_RATIO } from "./runFinalize.js";
-import type { RunCounters } from "./runFinalize.js";
+import { assessRunHealth, buildRunSummary, PARSE_FAILURE_DEGRADED_RATIO } from "./runFinalize.js";
+import type { RunCounters, RunIdentity } from "./runFinalize.js";
 
 /**
  * The check that decides whether a completed run produced a graph worth trusting.
@@ -92,4 +92,17 @@ test("an empty run reports nothing rather than dividing by zero", () => {
   const empty = assessRunHealth(counters(), "full");
   assert.equal(empty.degraded, false);
   assert.deepEqual(empty.reasons, []);
+});
+
+/**
+ * MCP-ISSUE-123 re-review B: a run that failed or was cancelled wrote an unknown subset of batches, so the commit it
+ * started at is no base for the fast skip, the freshness gate or a git-scoped plan. It records no commit.
+ */
+test("MCP-ISSUE-123 B: a failed or cancelled run summary carries no commit; a finished one keeps it", () => {
+  const identity: RunIdentity = { runId: "x", repoId: "r", commitSha: "abc123", branch: "main", indexVersion: "v", mode: "full", startedAt: "2026-11-10T00:00:00.000Z" };
+  const at = "2026-11-10T00:00:01.000Z";
+  assert.equal(buildRunSummary(identity, counters(), "failed", at, 1).commitSha, null, "failed");
+  assert.equal(buildRunSummary(identity, counters(), "cancelled", at, 1).commitSha, null, "cancelled");
+  assert.equal(buildRunSummary(identity, counters(), "ok", at, 1).commitSha, "abc123", "ok");
+  assert.equal(buildRunSummary(identity, counters(), "degraded", at, 1).commitSha, "abc123", "degraded");
 });

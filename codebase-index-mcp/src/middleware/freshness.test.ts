@@ -405,17 +405,22 @@ test("MCP-ISSUE-125: a read's freshness wait ends by the budget — a check that
   }
 });
 
-test("MCP-ISSUE-125: parallel reads share one deadline and are answered one after another — read k waits the budget plus the handlers before it", async () => {
+test("MCP-ISSUE-125: parallel reads share one deadline and are answered one after another — each waits behind the handlers before it", async () => {
   // IX-1 (10 Nov, live): four parallel reads waited 4976 / 5088 / 5110 / 5148 ms against a 5000 ms budget. Node runs
   // each due timer's continuation — the gate's answer, then the tool handler's synchronous work — before the next
   // timer, so the k-th read's wait includes the handlers of the reads answered before it. The gate cannot run them
   // in parallel on one thread; this pins the mechanism so a regression in the cap itself is told apart from it.
+  // Load-tolerant (row 6, 10 Nov): it asserts the SHAPE, never a tight upper bound in ms — a read that joins the
+  // check late answers by the check's deadline (well under its own budget; a per-read deadline waits the whole budget),
+  // and answers come one handler apart. The margins are hundreds of ms, the lower bounds exact.
   const lockDir = mkdtempSync(path.join(tmpdir(), "cim-fresh-"));
+  const BUDGET_MS = 600;
+  const LATE_MS = 450;
   const HANDLER_MS = 40;
   try {
     const gate = createFreshnessGate({
       enabled: true,
-      budgetMs: CAP_BUDGET_MS,
+      budgetMs: BUDGET_MS,
       lockDir,
       getRepoPath: () => lockDir,
       getIndexedCommit: () => "aaa111",
@@ -426,18 +431,24 @@ test("MCP-ISSUE-125: parallel reads share one deadline and are answered one afte
       const end = Date.now() + ms;
       while (Date.now() < end) { /* a tool handler's synchronous work */ }
     };
-    const waits = await Promise.all(
-      [0, 1, 2, 3].map(async () => {
-        const note = await gate.ensureFresh("r");
-        busy(HANDLER_MS);
-        return note.waitedMs ?? -1;
-      })
-    );
-    waits.sort((a, b) => a - b);
-    assert.ok(waits[0] !== undefined && waits[0] >= 0 && waits[0] <= CAP_BUDGET_MS + CAP_SLACK_MS, `the first answered read keeps to the cap: ${JSON.stringify(waits)}`);
-    for (let k = 1; k < waits.length; k++) {
-      assert.ok((waits[k] ?? 0) - (waits[0] ?? 0) >= k * HANDLER_MS - 5, `read ${String(k)} waited behind ${String(k)} handler(s): ${JSON.stringify(waits)}`);
+    const answeredAt: number[] = [];
+    const t0 = Date.now();
+    const read = async (delayMs: number) => {
+      if (delayMs > 0) await new Promise((resolve) => setTimeout(resolve, delayMs));
+      const note = await gate.ensureFresh("r");
+      answeredAt.push(Date.now());
+      busy(HANDLER_MS);
+      return note;
+    };
+    const notes = await Promise.all([read(0), read(0), read(0), read(LATE_MS)]);
+    for (const note of notes) assert.equal(note.state, "refreshing");
+    assert.ok((answeredAt[0] ?? 0) - t0 >= BUDGET_MS - 5, `the first read waited the budget: ${String((answeredAt[0] ?? 0) - t0)} ms`);
+    for (let k = 1; k < answeredAt.length; k++) {
+      const gap = (answeredAt[k] ?? 0) - (answeredAt[k - 1] ?? 0);
+      assert.ok(gap >= HANDLER_MS - 2, `read ${String(k)} was answered after the handler before it (gap ${String(gap)} ms)`);
     }
+    const late = notes[3]?.waitedMs ?? Infinity;
+    assert.ok(late < BUDGET_MS, `the late read joined the shared deadline: waited ${String(late)} ms, not its own ${String(BUDGET_MS)} ms budget`);
   } finally {
     rmSync(lockDir, { recursive: true, force: true });
   }
@@ -1311,4 +1322,59 @@ test("MCP-ISSUE-122: a caller joining an overdue run reports its own wait (waite
     const fresh = await h.gate.ensureFresh("r");
     assert.deepEqual(fresh, { state: "fresh" }, "no wait figure on a note that has no elapsedMs");
   } finally { h.cleanup(); }
+});
+
+test("MCP-ISSUE-123 re-review B: a refresh that fails every time is not re-run on every query — the gate backs off, and a finished run ends it", async () => {
+  const lockDir = mkdtempSync(path.join(tmpdir(), "cim-fresh-"));
+  let clock = 1_000_000;
+  let status: IndexRunResult["status"] = "failed";
+  let indexed: string | null = null; // a failed run records no commit (re-review B)
+  const runs: IndexMode[] = [];
+  let shape: "status" | "throw" = "status";
+  try {
+    const gate = createFreshnessGate({
+      enabled: true,
+      budgetMs: 1000,
+      lockDir,
+      checkTtlMs: 0,
+      now: () => clock,
+      getRepoPath: () => lockDir,
+      getIndexedCommit: () => indexed,
+      readTree: () => ({ head: "aaa111", dirty: [] }),
+      run: async (_repoId, _repoPath, mode) => {
+        runs.push(mode);
+        if (shape === "throw") throw new Error("the refresh worker crashed (test)");
+        if (status !== "failed") indexed = "aaa111";
+        return { runId: `run-${String(runs.length)}`, status } as IndexRunResult;
+      }
+    });
+    // 20 queries 2 s apart (past the 1 s cache of a stale answer): 40 s of reads against a failure that repeats.
+    for (let i = 0; i < 20; i++) {
+      const note = await gate.ensureFresh("r");
+      assert.equal(note.state, "stale");
+      clock += 2_000;
+    }
+    assert.ok(runs.length <= 2, `bounded: ${String(runs.length)} runs for 20 queries over 40 s`);
+    const held = await gate.ensureFresh("r");
+    assert.match(held.reason ?? "", /refresh run\(s\) of this repo failed; the next automatic one waits \d+ s\. Run index_repository/);
+
+    // A run that throws counts too, and the wait grows: after it, an hour of queries a minute apart starts few runs.
+    shape = "throw";
+    const before = runs.length;
+    for (let i = 0; i < 60; i++) {
+      await gate.ensureFresh("r");
+      clock += 60_000;
+    }
+    assert.ok(runs.length - before <= 6, `the backoff grows (${String(runs.length - before)} runs in an hour)`);
+    assert.ok(runs.length - before >= 2, "but the gate never stops retrying for good");
+
+    // A run that finishes — here an index_repository through serialize — ends the backoff at once.
+    shape = "status";
+    status = "ok";
+    await gate.serialize("r", async () => ({ runId: "manual", status: "ok" }) as IndexRunResult, "incremental");
+    clock += 2_000;
+    assert.equal((await gate.ensureFresh("r")).state, "refreshed", "the next query runs again at once");
+  } finally {
+    rmSync(lockDir, { recursive: true, force: true });
+  }
 });
