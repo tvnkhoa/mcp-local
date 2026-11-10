@@ -213,7 +213,11 @@ try {
   assert(maxLag <= BLOCK_MS, `(b) no server main-thread block > ${BLOCK_MS} ms during the refresh`, JSON.stringify(windowLags.slice(0, 10)));
   assert(probes.length >= 5 && maxProbe < BLOCK_MS, `(b) a trivial tool answers in < ${BLOCK_MS} ms throughout`, `n=${probes.length} max=${maxProbe}`);
 } finally {
-  await Promise.race([client.close().catch(() => {}), sleep(5000)]);
+  // Row 15: the race's timer is cleared once close settles. Left running, it held the event loop 5 s into (c) and hid
+  // that (c) holds nothing of its own — the CI exit 13 (69ae7e7, run 42772428018).
+  let closeBound;
+  await Promise.race([client.close().catch(() => {}), new Promise((r) => { closeBound = setTimeout(r, 5000); })]);
+  clearTimeout(closeBound);
 }
 
 // (c) The F guard inside the worker, through the real worker (dist), after the server is gone.
@@ -235,6 +239,10 @@ try {
     limits: { subtxSize: 20, checkpointEveryNBatches: 1, largeFileThresholdBytes: 0, maxFileSizeBytes: 500_000, parseWorkers: 1, parseJobTimeoutMs: 20_000 },
     onRunLanded: () => landedHook++
   });
+  // Row 15: the client unrefs its worker and (since 0242d50) dispose's terminate fallback, as a server wants — its
+  // stdin holds the loop. This script has no such handle, so it holds the loop itself until the worker is gone;
+  // without it the loop empties while `dispose` awaits the worker's exit: Node exit 13 (CI, 69ae7e7).
+  const holdLoop = setInterval(() => {}, 1_000);
   let error = null;
   try {
     await worker.run(bigRepo, bigDir, "dirty", true, 20_000, 200);
@@ -242,6 +250,7 @@ try {
     error = e;
   } finally {
     await worker.dispose();
+    clearInterval(holdLoop);
   }
   assert(error && /refused: .*newer codebase-index build \(v99-from-the-future\)/.test(error.message), "(c) the worker refuses to write over a newer build's index", error?.message ?? "the run succeeded");
   assert(landedHook === 0, "(c) ... and nothing is reported as landed");
