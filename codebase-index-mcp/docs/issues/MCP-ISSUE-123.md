@@ -1,6 +1,6 @@
 ## MCP-ISSUE-123 — the served server crashed 0xC0000409 (worker terminated mid-parse), reported `git_error` for a git timeout, and ran at BelowNormal priority
 
-- **Status:** FIXED 2026-11-09 (f64ef10 crash, ac86067 seed reasons, b9d45ab priority; review follow-ups #1–#4, #7 and re-review A, D the same day; review #5, re-review E and #6 plus the async stale warning 2026-11-10: 5b1eb4d, 0242d50, cf78e3b, 206ed15, af1e7eb). Live re-soak of IX-5 / IX-9 open (wec.aria).
+- **Status:** FIXED 2026-11-09 (f64ef10 crash, ac86067 seed reasons, b9d45ab priority; review follow-ups #1–#4, #7 and re-review A, D the same day; review #5, re-review E, #6, the async stale warning, re-review B and C, the failure backoff 2026-11-10: 5b1eb4d, 0242d50, cf78e3b, 206ed15, af1e7eb, fbe8151, ce61e93, e060e07). Live re-soak of IX-5 / IX-9 open (wec.aria).
 - **Scenario:** wec.aria's acceptance of deploy 67e6ce37f7d7 on 9 Nov 10:15–10:32 (UTC+7) — a watcher on
   `wec.aria-wt-spec098`, reads, then `register_worktree(D:/1.SourceCode/crm/wec.aria-wt-s098eval, parent wec.aria)` — while
   another member ran 16 `node -e "for(;;){}"` burners + 8 git loopers at Normal priority on 16 logical cores (10:23:25–10:32:32).
@@ -117,15 +117,58 @@
   `staleWarning.test.ts` (event-loop turns during the build; exact output for stale / up to date / unknown repo / no run /
   non-git / missing indexed commit); red on a755851 (the build returned a value, not a Promise).
 
+- **Re-review B — a failed run was trusted as a base (fixed 2026-11-10, fbe8151).** A failed run used to record the HEAD it
+  started at; `getLatestRun` then made that commit the indexed commit, so a failed run at HEAD could feed the fast skip and
+  make the freshness gate read "fresh" — although the pipeline commits each batch before it throws, so a failed run leaves a
+  partial graph. Now `buildRunSummary` (runFinalize.ts) records `commitSha = null` for `failed` and `cancelled`, and the
+  runner's re-review A rule also covers a failed latest run: the next `incremental` or `dirty` run is escalated to `full`
+  (also for a failed row from an older build that did record a commit). Readers still read the LATEST run, not the latest
+  successful one, deliberately: after a failed or cancelled run the graph holds that run's partial writes, so an earlier ok
+  run's commit does not describe it. With a null commit on the latest run `evaluateIncrementalSkip` answers "no previous
+  indexed commit", the freshness gate treats it as HEAD moved and refreshes, and `planGitScopedIncremental` already walks on
+  any non-ok run. Tests: `runFinalize.test.ts` (a failed or cancelled run summary carries no commit);
+  `indexRunnerAbort.test.ts` (a failed run records no commit and the next incremental at the same HEAD runs full) — red on
+  a755851.
+- **Re-review C — work after an abort (fixed 2026-11-10, fbe8151).** After an abort the pipeline no longer calls
+  `rebuildVectorIndex` (the full run that follows rebuilds the vectors). The runner checks the abort signal before each
+  post-phase pass — calls, imports, CSS/SQL/workspace, types, properties, routes, implements, EF, cross-repo, dedup,
+  mentions — and at each batch boundary of the batched call and import passes (ce61e93, e060e07 test it); on abort it records
+  the run `cancelled` with no commit (`recordAborted`). Tests: `indexRunnerAbort.test.ts` (an abort after the files were
+  written skips the vector rebuild; an abort during the resolve passes runs no further pass; an abort at a batch boundary
+  inside the call pass ends the pass there; the last is red against a loop without the check).
+- **Re-review B follow-up — a post-phase throw recorded no run (fixed 2026-11-10, ce61e93).** `getIndexMeta`, `recordRun`,
+  `markRunTreeDirty`, `markRunExcludeRules` and `clearPendingReindexFiles` in `indexRunner.ts` sit outside the per-pass
+  try/catch; a throw before the run was recorded left no run, so the previous ok run at HEAD stayed the base over a
+  part-resolved graph. runCore's post-phase is now guarded: a run not yet on record is recorded `failed` with no commit
+  (scope "failed in the post-phase: <message>"), the session is ended and the error rethrown; the next `incremental` or
+  `dirty` run escalates to `full`. A throw after the run is recorded leaves the record as it is (the graph was complete
+  when written). Test: `indexRunnerAbort.test.ts` (a throw in the post-phase records the run failed with no commit, and the
+  next incremental runs full) — red against fbe8151.
+- **Review of fbe8151 / ce61e93 (fixed 2026-11-10, e060e07).**
+  - *Failure backoff.* A failed run records no commit, so the freshness gate saw "HEAD moved" on the next query and started
+    another full run; a repeating failure would have re-indexed on every query more than 1 s apart. After a gate-started run
+    fails (status `failed`, or the run threw) `freshness.ts` starts no further run for that repo until a backoff passes: it
+    answers `stale`, says how long it waits and points to `index_repository`. The backoff is `FAILED_REFRESH_BACKOFF_MS`
+    (30 s), doubled per consecutive failure, capped at `FAILED_REFRESH_BACKOFF_MAX_MS` (15 min). A finished run from any
+    caller clears it; a cancelled run neither counts nor clears; a repair keeps its own `MAX_REPAIR_ATTEMPTS` cap and is not
+    subject to it; a throw from the gate's own bookkeeping after a finished run is not a failure. The backoff is per process,
+    like the gate's other memory. Test: `freshness.test.ts` (a refresh that fails every time: 20 queries 2 s apart start ≤ 2
+    runs; an hour of queries a minute apart starts 2–6; after a manual ok run the next query runs at once) — red against
+    ce61e93.
+  - *Session end.* `indexRunner.ts` ends the index session exactly once on every path through `endSession` (finished,
+    aborted, failed, a throw from `recordRun`, a throw from the pipeline). The pipeline case was a pre-existing leak:
+    `beginIndexSession` was never matched. Test: the index session ends on every failing path — red against ce61e93.
+  - *MCP-ISSUE-125 test.* "parallel reads share one deadline" asserts the shape, not tight milliseconds (the first answer
+    waited the budget; answers come at least one handler apart; a read joining 450 ms late waits less than its own 600 ms
+    budget); it stays red against a per-read-deadline mutant.
+
 ### Left open
 
 - (#6 residual) on Windows an outside kill (TerminateProcess) arrives as exit code 1 with no signal, so `git_killed` is
   only observable on POSIX; on Windows it reads as git's own exit 1 (for `merge-base --is-ancestor`, "not an ancestor").
-- (re-review B, pre-existing) a FAILED run is recorded with HEAD's commit (indexPipeline.ts catch path), and `getLatestRun`,
-  `evaluateIncrementalSkip` (runPolicy.ts) and the freshness gate's indexed commit ignore the run's status — a failed run
-  at HEAD can be trusted as a base. Only `cancelled` runs carry no commit (this issue).
-- (re-review C) after an abort the pipeline still runs `rebuildVectorIndex` and, for an abort during the post-phase, the
-  resolve passes that already started; the run is still recorded cancelled with no commit and the next run goes full.
+- (found by row 6) after a failed run the stale warning in `gitHelpers.ts` (~:757, `getRepoStaleness`) reads "indexed commit
+  unavailable": a failed run now records no commit and `getLatestRun` returns it, so the warning should name the failed run
+  instead. Not edited (row 8 held the file).
 - One 12.8 s stall at 10:34:30, after the respawn and outside the reported load window, is unexplained.
 
 ### Enhancement proposal
