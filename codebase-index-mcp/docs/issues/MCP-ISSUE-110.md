@@ -1,6 +1,6 @@
 ## MCP-ISSUE-110 — two harnesses failed under machine load: freshness budget did not bound the tree check; HTTP start-up outran the harness; an unresolved client identity is suspected
 
-- **Status:** ✅ FIXED 2026-10-28 for (1) and (2) (row 11). (3) OPEN — not reproduced, fix deferred by the owner.
+- **Status:** ✅ FIXED 2026-10-28 for (1) and (2) (row 11). (3) FIXED 2026-11-10 (row 4): a null identity is re-resolved; the 28 Oct run itself was not reproduced.
 - **Scenario:** on 28 Oct, three member runs of `run-tests.mjs --changed` on a loaded machine (parallel harnesses from
   several worktrees) failed `test:freshness-worker` and `test:http-transport`; each passed when re-run alone.
 
@@ -32,7 +32,7 @@
   dist 209, zod 159, ajv 63). Not a worktree/junction effect: the main tree starts as slowly.
 - **Fix:** `scripts/test/test-http-transport.mjs` waits `SERVER_START_MS` = 120 s (≈ 2.5× the measured worst case).
 
-### (3) Pre-restart preview refused to a new session of the same client process — OPEN, not reproduced
+### (3) Pre-restart preview refused to a new session of the same client process — FIXED 2026-11-10 (cause confirmed by unit test; the run not reproduced)
 
 - **Signature (28 Oct, member run under load):** the three checks "restart: a new session of the same process applies the
   pre-restart preview" / "that apply wrote the file" / "... and rolls it back" fail with
@@ -49,6 +49,25 @@
   ownership-tool call from that request's socket instead of keeping `null`; and log `http_identity_unresolved` with the
   failing step, so the next occurrence names its cause.
 - **Workaround:** re-run the harness; a client that hits it in use re-creates its preview.
+- **Confirmed (2026-11-10, deterministic, no load):** `httpClientIdentity.test.ts` "MCP-ISSUE-110 (3) …" with a pid lookup
+  that rejects once (a netstat timeout) or a start time that is null once: the session's identity stayed null on every
+  later ownership call, and the lookup ran exactly once per session (3/3 red before the fix). So any one failed step at
+  initialize fixes the owner at the session id for the session's life — the 28 Oct signature. Which step failed on
+  28 Oct is not recoverable (nothing was logged).
+- **Fix (2026-11-10, row 4, `packages/sdk/src/httpTransport.ts` + `httpClientIdentity.ts`, split out first as a pure move for the 600-line cap):** each request records its socket's client port on
+  the session; `clientIdentity()` (awaited only by `OWNERSHIP_TOOLS`) re-resolves a null identity from the port of the
+  latest request — the ownership call in flight, so its socket is still open. The first re-resolution runs at once,
+  later ones at most once per `identityRetryMs` (default 30 s) per session; concurrent callers share one in-flight
+  lookup; a call that does not ask never triggers one. Every failed step logs `http_identity_unresolved`
+  (warn) with `{sessionId, attempt: initialize|adopt|retry, step: remote_port|client_pid|start_time, reason}`; the
+  reason is coarse (`timeout`, `exec_failed`, `not_found`, `threw`) — no command line, no token. The default netstat
+  resolver now rejects with `timeout` / `exec_failed` instead of a silent null. The ownership rule is unchanged.
+- **Guarded:** `httpClientIdentity.test.ts` (the 108 identity tests moved there too) — re-resolution after a failed pid lookup (one lookup more, then none), after a
+  null start time, and the throttle (5 concurrent + 1 sequential calls in one window: 2 lookups, logged
+  `initialize`, `retry`; `quick` triggers none).
+- **Limits:** a client that stays unresolvable keeps the session-id owner, as before (fail closed); a preview made
+  while the identity was null stays owned by that session id and does not move to the identity once resolved — the
+  check accepts either, so the same session still applies it, but a restart loses it.
 
 **Follow-up (2026-10-28, CI red on a5a3702):** this file broke `test:profile-responses`, not the gate change: it pushed the first
 code file out of the harness's 100-file sample. The harness now indexes `src/` whole. Also: `maxFiles` counts docs before the docs filter.

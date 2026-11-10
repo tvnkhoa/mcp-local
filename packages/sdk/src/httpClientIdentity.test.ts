@@ -227,3 +227,104 @@ test("http: a call that does not ask for the client identity never waits for a s
     await handle.stop();
   }
 });
+
+// ── MCP-ISSUE-110 (3): an identity that resolved null is not null for the session's life ─────────────────
+
+function warnCapture(events: { message: string; fields: unknown }[]): Logger {
+  const capture: Logger = {
+    level: "debug",
+    debug: () => undefined,
+    info: () => undefined,
+    warn: (message, fields) => { events.push({ message, fields }); },
+    error: () => undefined,
+    child: () => capture
+  };
+  return capture;
+}
+
+test("http: MCP-ISSUE-110 (3) a pid lookup that failed at initialize is retried from the next ownership call's socket", async () => {
+  // The first lookup fails as netstat did under load (timeout); every later one finds the client.
+  const ports: number[] = [];
+  const events: { message: string; fields: unknown }[] = [];
+  const handle = await startServer(
+    {
+      identityRetryMs: 0,
+      resolveClientPid: (remotePort) => {
+        ports.push(remotePort);
+        return ports.length === 1 ? Promise.reject(new Error("timeout")) : Promise.resolve(process.pid);
+      },
+      resolveProcessStartTime: () => Promise.resolve("1000")
+    },
+    warnCapture(events)
+  );
+  try {
+    const client = await connect(handle.httpPort()!);
+    const first = await client.callTool({ name: "whoami", arguments: {} });
+    const second = await client.callTool({ name: "whoami", arguments: {} });
+    assert.equal(sessionOf(first), sessionOf(second));
+    assert.match(identityOf(first) ?? "", new RegExp(`^pid:${String(process.pid)}@1000/[0-9a-f]{16}$`), "the null identity is re-resolved");
+    assert.equal(identityOf(second), identityOf(first));
+    assert.equal(ports.length, 2, "once resolved, the identity is not looked up again");
+    const unresolved = events.filter((e) => e.message === "http_identity_unresolved").map((e) => e.fields as Record<string, unknown>);
+    assert.equal(unresolved.length, 1);
+    assert.equal(unresolved[0]!["step"], "client_pid");
+    assert.equal(unresolved[0]!["attempt"], "initialize");
+    // At initialize the lookup may fail before the session id is assigned: then it is logged as null.
+    assert.ok([null, sessionOf(first)].includes(unresolved[0]!["sessionId"] as string | null));
+    assert.equal(unresolved[0]!["reason"], "timeout");
+    await client.close();
+  } finally {
+    await handle.stop();
+  }
+});
+
+test("http: MCP-ISSUE-110 (3) a start time that failed is retried too, and names its step", async () => {
+  let starts = 0;
+  const events: { message: string; fields: unknown }[] = [];
+  const handle = await startServer(
+    {
+      identityRetryMs: 0,
+      resolveClientPid: () => Promise.resolve(process.pid),
+      resolveProcessStartTime: () => (++starts === 1 ? Promise.resolve(null) : Promise.resolve("1000"))
+    },
+    warnCapture(events)
+  );
+  try {
+    const [, identity] = await whoamiOnce(handle.httpPort()!);
+    assert.match(identity ?? "", /^pid:\d+@1000\//);
+    const steps = events.filter((e) => e.message === "http_identity_unresolved").map((e) => (e.fields as { step: string }).step);
+    assert.deepEqual(steps, ["start_time"]);
+  } finally {
+    await handle.stop();
+  }
+});
+
+test("http: MCP-ISSUE-110 (3) re-resolution is throttled per session — no lookup storm", async () => {
+  let lookups = 0;
+  const events: { message: string; fields: unknown }[] = [];
+  const handle = await startServer(
+    {
+      identityRetryMs: 60_000,
+      resolveClientPid: () => ((lookups += 1), Promise.resolve(null)),
+      resolveProcessStartTime: () => Promise.resolve("1000")
+    },
+    warnCapture(events)
+  );
+  try {
+    const client = await connect(handle.httpPort()!);
+    // Concurrent and sequential ownership calls inside one retry window: one initialize lookup + one retry, no more.
+    const results = await Promise.all(Array.from({ length: 5 }, () => client.callTool({ name: "whoami", arguments: {} })));
+    results.push(await client.callTool({ name: "whoami", arguments: {} }));
+    for (const result of results) assert.equal(identityOf(result), null, "still fail closed");
+    assert.equal(lookups, 2);
+    const attempts = events.filter((e) => e.message === "http_identity_unresolved").map((e) => (e.fields as { attempt: string }).attempt);
+    assert.deepEqual(attempts, ["initialize", "retry"]);
+    // A call that does not ask for the identity never triggers a lookup.
+    await client.callTool({ name: "quick", arguments: {} });
+    assert.equal(lookups, 2);
+    await client.close();
+  } finally {
+    await handle.stop();
+  }
+});
+

@@ -16,7 +16,7 @@
  *     shared; the protocol state (initialize handshake, pending requests, notifications) is not.
  *
  * A session ends one of five ways: the client DELETEs it; it sits idle past the timeout; the
- * client process exits (its pid, resolved once from the loopback socket, is no longer alive — a
+ * client process exits (its pid, resolved from the loopback socket, is no longer alive — a
  * killed client never sends DELETE); it is the least recently used when the cap is hit and has been
  * idle a few minutes; or the server shuts down. Ending one never touches the process's shutdown
  * hooks: a client going away is not the server going away.
@@ -32,7 +32,7 @@ import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 
 import type { Logger } from "@mcp/core";
 
-import { HTTP_LOOPBACK_HOST, clientIdentityOf, resolveClientPidViaNetstat, resolveProcessStartTime } from "./httpClientIdentity.js";
+import { HTTP_LOOPBACK_HOST, createIdentityLookup, resolveClientPidViaNetstat, resolveProcessStartTime } from "./httpClientIdentity.js";
 import { fileHttpSessionStore } from "./httpSessionStore.js";
 
 export { HTTP_LOOPBACK_HOST, clientIdentityOf, parseNetstatClientPid, resolveProcessStartTime } from "./httpClientIdentity.js";
@@ -94,6 +94,12 @@ export interface HttpTransportOptions {
    * Default: {@link resolveProcessStartTime}.
    */
   readonly resolveProcessStartTime?: (pid: number) => Promise<string | null>;
+  /**
+   * MCP-ISSUE-110 (3): a session whose identity resolved null re-resolves it from the socket of its next request
+   * that asks for it (an ownership tool call) — at once the first time, then at most once per this many ms, so a
+   * client that cannot be resolved does not spawn netstat/PowerShell on every call. Default 30 s.
+   */
+  readonly identityRetryMs?: number;
   readonly maxBodyBytes?: number;
   /** MCP-ISSUE-115: idle keep-alive socket lifetime. Default {@link DEFAULT_KEEP_ALIVE_TIMEOUT_MS}. */
   readonly keepAliveTimeoutMs?: number;
@@ -125,10 +131,16 @@ interface Session {
   readonly transport: StreamableHTTPServerTransport;
   readonly server: Server;
   lastSeen: number;
-  /** Owner of the client socket at initialize; null while unresolved or when unknown. */
+  /** Owner of the client socket at initialize (or at the last re-resolution); null while unresolved or when unknown. */
   clientPid: number | null;
-  /** MCP-ISSUE-108: see {@link HttpTransportHandle.clientIdentity}; null when unresolvable. */
-  readonly identity: Promise<string | null>;
+  /** MCP-ISSUE-108: see {@link HttpTransportHandle.clientIdentity}; null when unresolvable. Replaced by a re-resolution. */
+  identity: Promise<string | null>;
+  /** The presented bearer's sha256 (hex), part of the identity. */
+  readonly bearer: string | null;
+  /** MCP-ISSUE-110 (3): the client port of this session's latest request — the socket a re-resolution looks up. */
+  lastRemotePort: number | undefined;
+  /** MCP-ISSUE-110 (3): no re-resolution before this time (0: the first one may run at once). */
+  nextIdentityRetryAt: number;
   /** MCP-ISSUE-103: when this session's store record was last refreshed (throttled, see `STORE_TOUCH_EVERY_MS`). */
   storeTouchedAt?: number;
 }
@@ -205,6 +217,7 @@ export async function startHttpTransport(
   const evictMinIdleMs = options.evictMinIdleMs ?? DEFAULT_EVICT_MIN_IDLE_MS;
   const resolveClientPid = options.resolveClientPid ?? resolveClientPidViaNetstat;
   const startTimeOf = options.resolveProcessStartTime ?? resolveProcessStartTime;
+  const identityRetryMs = options.identityRetryMs ?? 30_000;
   const tokenDigest = digest(options.token);
   const sessions = new Map<string, Session>();
   let boundPort = options.port;
@@ -225,6 +238,8 @@ export async function startHttpTransport(
     return match === null ? null : digest(match[1]!.trim()).toString("hex");
   };
 
+  const lookupIdentity = createIdentityLookup(resolveClientPid, startTimeOf, () => boundPort, logger);
+
   const closeSession = async (sessionId: string, reason: string): Promise<void> => {
     const session = sessions.get(sessionId);
     if (session === undefined) return;
@@ -241,14 +256,17 @@ export async function startHttpTransport(
     const server = buildServer();
     // Started before the handshake while the socket is surely open; never awaited by the response path.
     const remotePort = req.socket.remotePort;
-    const pidLookup: Promise<number | null> =
-      remotePort === undefined ? Promise.resolve(null) : resolveClientPid(remotePort, boundPort).catch(() => null);
-    const identity = pidLookup.then((pid) => clientIdentityOf(pid, bearerDigestHex(req.headers.authorization), startTimeOf));
+    const bearer = bearerDigestHex(req.headers.authorization);
+    let assignedId: string | undefined;
+    const { pid: pidLookup, identity } = lookupIdentity(remotePort, bearer, () => assignedId, "initialize");
     const transport = new StreamableHTTPServerTransport({
       sessionIdGenerator: () => randomUUID(),
       onsessioninitialized: (sessionId) => {
-        sessions.set(sessionId, { transport, server, lastSeen: Date.now(), clientPid: null, identity, storeTouchedAt: Date.now() });
-        const bearer = bearerDigestHex(req.headers.authorization);
+        assignedId = sessionId;
+        sessions.set(sessionId, {
+          transport, server, lastSeen: Date.now(), clientPid: null, identity, bearer,
+          lastRemotePort: remotePort, nextIdentityRetryAt: 0, storeTouchedAt: Date.now()
+        });
         if (bearer !== null) store?.set(sessionId, bearer);
         logger.info("http_session_opened", { sessionId, sessions: sessions.size });
       }
@@ -321,10 +339,11 @@ export async function startHttpTransport(
     await server.connect(transport);
     // MCP-ISSUE-108: the adopting request's socket names the client process, as an initialize's does.
     const remotePort = req.socket.remotePort;
-    const pidLookup: Promise<number | null> =
-      remotePort === undefined ? Promise.resolve(null) : resolveClientPid(remotePort, boundPort).catch(() => null);
-    const identity = pidLookup.then((pid) => clientIdentityOf(pid, presented, startTimeOf));
-    const session: Session = { transport, server, lastSeen: Date.now(), clientPid: null, identity };
+    const { pid: pidLookup, identity } = lookupIdentity(remotePort, presented, () => sessionId, "adopt");
+    const session: Session = {
+      transport, server, lastSeen: Date.now(), clientPid: null, identity, bearer: presented,
+      lastRemotePort: remotePort, nextIdentityRetryAt: 0
+    };
     void pidLookup.then((pid) => {
       if (sessions.get(sessionId) === session) session.clientPid = pid;
     });
@@ -381,6 +400,8 @@ export async function startHttpTransport(
         return;
       }
       session.lastSeen = Date.now();
+      // MCP-ISSUE-110 (3): the socket a re-resolution looks up — this request's, open while it is being answered.
+      if (req.socket.remotePort !== undefined) session.lastRemotePort = req.socket.remotePort;
       if (store && session.lastSeen - (session.storeTouchedAt ?? 0) >= STORE_TOUCH_EVERY_MS) {
         session.storeTouchedAt = session.lastSeen;
         store.touch(sessionId);
@@ -451,7 +472,23 @@ export async function startHttpTransport(
     async clientIdentity(sessionId) {
       const session = sessions.get(sessionId);
       if (session === undefined) return undefined;
-      const identity = await session.identity.catch(() => null);
+      const current = session.identity;
+      let identity = await current.catch(() => null);
+      if (identity === null && sessions.get(sessionId) === session) {
+        if (session.identity !== current) {
+          // A re-resolution started while this caller waited: share it rather than start another.
+          identity = await session.identity.catch(() => null);
+        } else if (Date.now() >= session.nextIdentityRetryAt) {
+          // MCP-ISSUE-110 (3): null is not for life — look again from the socket of the request asking now.
+          session.nextIdentityRetryAt = Date.now() + identityRetryMs;
+          const retry = lookupIdentity(session.lastRemotePort, session.bearer, () => sessionId, "retry");
+          session.identity = retry.identity;
+          void retry.pid.then((pid) => {
+            if (pid !== null && sessions.get(sessionId) === session) session.clientPid = pid;
+          });
+          identity = await retry.identity.catch(() => null);
+        }
+      }
       // A client that has exited no longer owns anything; its pid may be about to be reused.
       if (identity === null || (session.clientPid !== null && !pidAlive(session.clientPid))) return undefined;
       return identity;

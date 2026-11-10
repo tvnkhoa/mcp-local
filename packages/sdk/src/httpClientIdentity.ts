@@ -7,6 +7,7 @@ import { execFile } from "node:child_process";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 
+import type { Logger } from "@mcp/core";
 import { defaultEnvSource } from "@mcp/core";
 
 /** The only address this transport binds. Not configurable, by design. */
@@ -33,9 +34,11 @@ function windowsSystemExe(...relativeToSystem32: string[]): string {
 
 export function resolveClientPidViaNetstat(remotePort: number, serverPort: number): Promise<number | null> {
   if (process.platform !== "win32") return Promise.resolve(null);
-  return new Promise((resolve) => {
+  return new Promise((resolve, reject) => {
     execFile(windowsSystemExe("NETSTAT.EXE"), ["-ano", "-p", "TCP"], { windowsHide: true, timeout: 10_000, maxBuffer: 16 * 1024 * 1024 }, (error, stdout) => {
-      resolve(error === null ? parseNetstatClientPid(stdout, remotePort, serverPort) : null);
+      // MCP-ISSUE-110 (3): a failed run rejects with a coarse reason (never the command line), logged by the caller.
+      if (error !== null) reject(new Error(error.killed ? "timeout" : "exec_failed"));
+      else resolve(parseNetstatClientPid(stdout, remotePort, serverPort));
     });
   });
 }
@@ -82,4 +85,52 @@ export async function clientIdentityOf(
   const started = await startTimeOf(pid).catch(() => null);
   if (started === null || started === "") return null;
   return `pid:${String(pid)}@${started}${bearerDigestHex === null ? "" : `/${bearerDigestHex.slice(0, 16)}`}`;
+}
+
+/** Which lookup an `http_identity_unresolved` event names. */
+export type IdentityAttempt = "initialize" | "adopt" | "retry";
+
+/** A started lookup: the client pid, and the identity built from it; neither rejects. */
+export interface IdentityLookup {
+  readonly pid: Promise<number | null>;
+  readonly identity: Promise<string | null>;
+}
+
+/**
+ * MCP-ISSUE-108 / 110 (3): a lookup of the client process behind a loopback port — its pid, then the pid's start
+ * time. A step that fails logs `http_identity_unresolved` with the step and a coarse reason (no command line, no
+ * token), so the next occurrence names its cause.
+ */
+export function createIdentityLookup(
+  resolveClientPid: (remotePort: number, serverPort: number) => Promise<number | null>,
+  startTimeOf: (pid: number) => Promise<string | null>,
+  serverPort: () => number,
+  logger: Logger
+): (remotePort: number | undefined, bearer: string | null, sessionIdOf: () => string | undefined, attempt: IdentityAttempt) => IdentityLookup {
+  const reasonOf = (cause: unknown): string => (cause instanceof Error && /^[a-z_]{1,32}$/.test(cause.message) ? cause.message : "threw");
+  return (remotePort, bearer, sessionIdOf, attempt) => {
+    const unresolved = (step: "remote_port" | "client_pid" | "start_time", reason: string): null => {
+      logger.warn("http_identity_unresolved", { sessionId: sessionIdOf() ?? null, attempt, step, reason });
+      return null;
+    };
+    const pid: Promise<number | null> =
+      remotePort === undefined
+        ? Promise.resolve(unresolved("remote_port", "none"))
+        : resolveClientPid(remotePort, serverPort()).then(
+            (found) => found ?? unresolved("client_pid", "not_found"),
+            (cause: unknown) => unresolved("client_pid", reasonOf(cause))
+          );
+    const identity = pid.then(async (found) => {
+      if (found === null) return null;
+      let started: string | null;
+      try {
+        started = await startTimeOf(found);
+      } catch (cause) {
+        return unresolved("start_time", reasonOf(cause));
+      }
+      if (started === null || started === "") return unresolved("start_time", "not_found");
+      return clientIdentityOf(found, bearer, () => Promise.resolve(started));
+    });
+    return { pid, identity };
+  };
 }
