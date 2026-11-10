@@ -1,6 +1,6 @@
 ## MCP-ISSUE-123 — the served server crashed 0xC0000409 (worker terminated mid-parse), reported `git_error` for a git timeout, and ran at BelowNormal priority
 
-- **Status:** FIXED 2026-11-09 (f64ef10 crash, ac86067 seed reasons, b9d45ab priority; review follow-ups #1–#4, #7 and re-review A, D the same day). Live re-soak of IX-5 / IX-9 open (wec.aria).
+- **Status:** FIXED 2026-11-09 (f64ef10 crash, ac86067 seed reasons, b9d45ab priority; review follow-ups #1–#4, #7 and re-review A, D the same day; review #5, re-review E and #6 plus the async stale warning 2026-11-10: 5b1eb4d, 0242d50, cf78e3b, 206ed15, af1e7eb). Live re-soak of IX-5 / IX-9 open (wec.aria).
 - **Scenario:** wec.aria's acceptance of deploy 67e6ce37f7d7 on 9 Nov 10:15–10:32 (UTC+7) — a watcher on
   `wec.aria-wt-spec098`, reads, then `register_worktree(D:/1.SourceCode/crm/wec.aria-wt-s098eval, parent wec.aria)` — while
   another member ran 16 `node -e "for(;;){}"` burners + 8 git loopers at Normal priority on 16 logical cores (10:23:25–10:32:32).
@@ -78,22 +78,54 @@
   nothing rescheduled. Now each retired worker's exit retires the held slots the cap has room for, gives them a fresh
   worker and schedules the queue.
 
+### Fixed 2026-11-10
+
+- **#5 a parse worker that exits on its own was never replaced (fixed 2026-11-10, 5b1eb4d).** Any exit of a slot's own worker
+  (code 0 too) answers its job `error`, then the slot is respawned — at most `MAX_RESPAWNS_PER_WINDOW` (3) times in any
+  `RESPAWN_WINDOW_MS` (60 s) per slot. One more exit inside the window marks the slot dead and reports it once (stderr
+  `parse_pool_slot_dead`, or `onSlotDead`); the pool runs on its other slots, and with every slot dead it is `degraded` and
+  answers each job `error` ("parse pool degraded") at once instead of spawning a thread per job. A worker that emitted
+  `error` gets no job before its `exit`. Tests: `extractionWorkerPool.test.ts` (respawn; dies-at-start storm) — red on a755851.
+  Review nits 0242d50, cf78e3b: the window expiry (`respawnWindowMs` seam), a degraded pool answering queued jobs, and a
+  worker exiting 0 mid-job are tested; the re-review D test's probes back off (0.5–8 s, 40 s cap) because each timed-out
+  100 ms probe swapped in another cold worker, which made the test load-sensitive.
+- **Re-review E — shutdown could wait 5.5 min (fixed 2026-11-10, 5b1eb4d).** `RefreshWorkerClient.dispose` sends `exit` with
+  `shutdown: true`; the refresh worker disposes its parse pool with `SHUTDOWN_RETIRE_GRACE_MS` (20 s, 4× tree-sitter's 5 s
+  parse timeout; graces already running are shortened) and exits by `SHUTDOWN_WORKER_EXIT_MS` (25 s) from a timer even if the
+  aborted run has not settled (a timer fires between JS turns, so never inside an inline parse); the client terminates only
+  after `DEFAULT_DISPOSE_GRACE_MS` (35 s). Shutdown is bounded at 35 s. A parse worker still in its job at 20 s may be
+  terminated mid-parse at shutdown only — the process is ending. `abortRun` and every non-shutdown dispose keep the 5 min
+  retire grace (A's guarantee). A shutdown that arrives while `abortRun` is still stopping the worker sends it the shutdown
+  `exit` too; the worker upgrades its pending exit (shortens the pool's running graces, starts the 25 s timer), so that case
+  is bounded at 35 s as well (0242d50). **Accepted at shutdown, by design:** (a) the 25 s `process.exit` can come before the
+  aborted run reaches `recordAborted`, so its `index_runs` row stays `running` until the next server start cleans it up;
+  (b) the 20 s terminate of a parse worker still in its job can hit the 0xC0000409 path (A) — the process is ending anyway,
+  and this happens only at shutdown, never on a normal run. Tests: `extractionWorkerPool.test.ts` (dispose graceMs vs plain
+  dispose; red on a755851), `refreshWorker.test.ts`, `refreshWorkerClient.test.ts`.
+- **#6 `gitAsync` read any kill as `git_timeout` (fixed 2026-11-10, 206ed15, af1e7eb).** `gitAsync` (gitHelpers.ts) names how
+  git ended with no exit code — `classifyGitKill`: execFile's `ERR_CHILD_PROCESS_STDIO_MAXBUFFER` → `max_buffer`; `killed`
+  true (execFile killed it at `timeout`) → `timeout`; a signal with `killed` false → `killed` (from outside the server).
+  `checkSeedAncestry` reports `git_timeout`, `git_max_buffer` or `git_killed` (new `SeedFallbackReason` members); the reason
+  reaches `index_status.fallbackReason` unchanged. Its 4th parameter is an optional git runner. Tests: `seedAncestry.test.ts`
+  — a stub git runner ends each call as timeout / max_buffer / killed (no timing); a real overflow at maxBuffer 4 and a real
+  timeout (`hash-object --stdin`, 300 ms); node error shapes. Red on a755851 (no `classifyGitKill` export).
+- **`buildStaleWarning` is async (fixed 2026-11-10, 206ed15).** HEAD from the git dir's files (`readHeadShaFromFiles`) else
+  async `rev-parse`; `rev-list --count` and `status --porcelain=v2` run concurrently through execFile
+  (`countCommitsBehindAsync`, `readWorkingTreeStateAsync`). A stale-repo read no longer holds the server thread up to
+  2 × 5 s. Output unchanged. The 7 tools that build it await it: find_impact_files, get_change_context, find_field_accesses
+  (builds it once; its no-property answer stays synchronous), search_literals, search_regex, get_symbol_source. Test:
+  `staleWarning.test.ts` (event-loop turns during the build; exact output for stale / up to date / unknown repo / no run /
+  non-git / missing indexed commit); red on a755851 (the build returned a value, not a Promise).
+
 ### Left open
 
-- (review #5, pre-existing) a parse worker that exits on its own (`onWorkerFailure`) is not replaced; its slot stays dead
-  for the rest of the pool's life.
-- (review #6) `gitAsync` reads any kill without an exit code as `git_timeout` — a `maxBuffer` overflow or an external kill
-  is reported the same way.
+- (#6 residual) on Windows an outside kill (TerminateProcess) arrives as exit code 1 with no signal, so `git_killed` is
+  only observable on POSIX; on Windows it reads as git's own exit 1 (for `merge-base --is-ancestor`, "not an ancestor").
 - (re-review B, pre-existing) a FAILED run is recorded with HEAD's commit (indexPipeline.ts catch path), and `getLatestRun`,
   `evaluateIncrementalSkip` (runPolicy.ts) and the freshness gate's indexed commit ignore the run's status — a failed run
   at HEAD can be trusted as a base. Only `cancelled` runs carry no commit (this issue).
 - (re-review C) after an abort the pipeline still runs `rebuildVectorIndex` and, for an abort during the post-phase, the
   resolve passes that already started; the run is still recorded cancelled with no commit and the next run goes full.
-- (re-review E) server shutdown can now wait up to `DEFAULT_DISPOSE_GRACE_MS` (retire grace 5 min + 30 s) for the refresh
-  worker when a parse worker never leaves its job; normally the worker exits within one batch.
-
-- `buildStaleWarning` still runs two synchronous git calls (`rev-list --count`, `status --porcelain=v2`, 5 s timeout each)
-  on the server thread for a STALE repo (gitHelpers.ts). Not the cause here (spec098 was fresh); worth moving async.
 - One 12.8 s stall at 10:34:30, after the respawn and outside the reported load window, is unexplained.
 
 ### Enhancement proposal
