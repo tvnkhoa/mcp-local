@@ -210,7 +210,7 @@ export function codebaseIndexEnv(root: string): readonly EnvField[] {
       required: false,
       kind: "number",
       section: "HTTP transport",
-      note: "Port on 127.0.0.1 for `node dist/index.js --transport http` (what `scripts/serve-http.mjs` runs): one process serves every Claude session. Read only with --transport http; a stdio server ignores it. Never binds any other address."
+      note: "Port on 127.0.0.1 for `node dist/bundle/index.js --transport http` (what `scripts/serve-http.mjs` runs): one process serves every Claude session. Read only with --transport http; a stdio server ignores it. Never binds any other address."
     },
     {
       name: "CODEBASE_INDEX_HTTP_TOKEN",
