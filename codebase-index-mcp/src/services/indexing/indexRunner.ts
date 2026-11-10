@@ -219,11 +219,15 @@ export function createIndexRunner(options: IndexRunnerOptions): RunIndexAndResol
   // partial batches: files written but never resolved, dependents never queued. A scoped run would see their hashes
   // match and resolve only what it re-extracts, leaving unresolved edges until some full run. The old terminate left a
   // run marker and so a repair; this is its equivalent. Checked before any skip or no-op record can shadow the run.
+  // Re-review B: a FAILED run leaves the same partial batches (the pipeline commits per batch before it throws), so
+  // it is repaired the same way — whatever commit an older build recorded for it.
   const latestRun = store.getLatestRun(repoId);
-  if (mode !== "full" && !escalatedBecause && latestRun?.status === "cancelled" && latestRun.commitSha === null) {
-    indexLog(`[index-scope] repoId=${repoId} the last run was aborted: running full instead of ${mode}`);
+  const unfinished =
+    latestRun?.status === "failed" ? "failed" : latestRun?.status === "cancelled" && latestRun.commitSha === null ? "was aborted" : null;
+  if (mode !== "full" && !escalatedBecause && latestRun && unfinished) {
+    indexLog(`[index-scope] repoId=${repoId} the last run ${unfinished}: running full instead of ${mode}`);
     return runIndexAndResolve(repoId, repoPath, "full", docsEnabled, maxFiles, batchSize, {
-      escalatedBecause: `full (the last run ${latestRun.runId} was aborted; ${mode} requested)`,
+      escalatedBecause: `full (the last run ${latestRun.runId} ${unfinished}; ${mode} requested)`,
       ...(givenRunId && { runId: givenRunId }),
       ...(extras.onProgress && { onProgress: extras.onProgress }),
       ...(extras.abortSignal && { abortSignal: extras.abortSignal })
@@ -269,7 +273,8 @@ export function createIndexRunner(options: IndexRunnerOptions): RunIndexAndResol
       );
 
       // If nothing resolved in this batch, we're done
-      if (resolved === 0) break;
+      // MCP-ISSUE-123 re-review C: an abort ends the pass at its batch boundary.
+      if (resolved === 0 || extras.abortSignal?.aborted) break;
 
       if (maxRows > 0) {
         remaining -= batchLimit;
@@ -451,6 +456,12 @@ export function createIndexRunner(options: IndexRunnerOptions): RunIndexAndResol
   // function of it — re-running them reproduces what is stored. The refresh after a server restart, or
   // after a peer touched a file without changing it, is such a run.
   const unchanged = scopeInputs !== undefined && scopeInputs.reextracted.length === 0 && scopeInputs.removed.length === 0;
+  /**
+   * MCP-ISSUE-123 re-review C: an abort during the post-phase runs no further resolve pass. Checked before each pass
+   * (and at each batch boundary of the batched ones); the run is recorded cancelled with no commit, and the next run
+   * repairs the part-resolved graph as a full run.
+   */
+  const stopped = (): boolean => extras.abortSignal?.aborted === true;
   const resolvePhaseStart = Date.now();
   let ftsRebuildMs = 0;
   let buildContextMs = 0;
@@ -484,6 +495,7 @@ export function createIndexRunner(options: IndexRunnerOptions): RunIndexAndResol
   }
 
   progress.phase("resolving calls");
+  if (stopped()) return recordAborted(summary);
   indexLog(`[index-post] repoId=${repoId} resolving call edges...`);
   // Populations that are not resolutions of the attempted set — see resolveCallEdgesBatch.
   const callResolveStats = { rowsUpdated: 0, dispatchInserted: 0 };
@@ -540,7 +552,7 @@ export function createIndexRunner(options: IndexRunnerOptions): RunIndexAndResol
         indexLog(
           `[index-post-batch] repoId=${repoId} type=call batch=${String(iteration)} resolved=${String(resolved)} total=${String(total)}`
         );
-        if (resolved === 0) break;
+        if (resolved === 0 || stopped()) break;
         await yieldToEventLoop();
       }
       return total;
@@ -555,6 +567,7 @@ export function createIndexRunner(options: IndexRunnerOptions): RunIndexAndResol
   await yieldToEventLoop();
 
   progress.phase("resolving imports");
+  if (stopped()) return recordAborted(summary);
   indexLog(`[index-post] repoId=${repoId} resolving import edges...`);
   const importStart = Date.now();
   const importEdgesResolved = unchanged ? 0 : await resolveInBatches(
@@ -571,6 +584,8 @@ export function createIndexRunner(options: IndexRunnerOptions): RunIndexAndResol
   }
   importResolveMs = Date.now() - importStart;
   await yieldToEventLoop();
+
+  if (stopped()) return recordAborted(summary);
 
   // MCP-ISSUE-075: CSS variable/class tokens. Unconditional and unbudgeted — CSS edges are few, the
   // pass is one indexed scan per edge type, and it also re-fans earlier resolutions so an incremental
@@ -617,6 +632,7 @@ export function createIndexRunner(options: IndexRunnerOptions): RunIndexAndResol
     } catch { /* non-fatal */ }
   })();
 
+  if (stopped()) return recordAborted(summary);
   if (postPolicy.resolveTypeRefs && !unchanged) {
     progress.phase("resolving types");
     indexLog(`[index-post] repoId=${repoId} resolving type references...`);
@@ -631,6 +647,7 @@ export function createIndexRunner(options: IndexRunnerOptions): RunIndexAndResol
   }
   await yieldToEventLoop();
 
+  if (stopped()) return recordAborted(summary);
   if (postPolicy.resolvePropertyRefs && !unchanged) {
     indexLog(`[index-post] repoId=${repoId} resolving property references...`);
     const propertyStart = Date.now();
@@ -640,6 +657,7 @@ export function createIndexRunner(options: IndexRunnerOptions): RunIndexAndResol
     indexLog(`[index-post-skip] repoId=${repoId} skipping property reference resolution by policy`);
   }
 
+  if (stopped()) return recordAborted(summary);
   // MCP-ISSUE-055: bind routes whose handler lives in another part of the same partial class. Runs
   // unconditionally — it is one UPDATE over the (small) routes table, and it is not governed by the
   // unresolved-row budget the edge resolvers share. Non-fatal: a failure here costs handler
@@ -654,6 +672,7 @@ export function createIndexRunner(options: IndexRunnerOptions): RunIndexAndResol
 
   await yieldToEventLoop();
 
+  if (stopped()) return recordAborted(summary);
   const shouldResolveImplementsInPost = effectiveResolveImplementsInPost && !unchanged;
   if (shouldResolveImplementsInPost) {
     indexLog(`[index-post] repoId=${repoId} resolving interface implementations...`);
@@ -676,6 +695,7 @@ export function createIndexRunner(options: IndexRunnerOptions): RunIndexAndResol
   }
   await yieldToEventLoop();
 
+  if (stopped()) return recordAborted(summary);
   // Release L3 (MCP-ISSUE-092): EF snapshot tables / columns → their CLR class / property. It runs AFTER
   // inheritance resolution: a column's property may live on a base class, reached through resolved EXTENDS
   // edges. Every edge is re-decided from its token each run (one row per mapped column), so a scoped run
@@ -688,6 +708,7 @@ export function createIndexRunner(options: IndexRunnerOptions): RunIndexAndResol
     } catch { /* non-fatal */ }
   })();
 
+  if (stopped()) return recordAborted(summary);
   // MCP-ISSUE-048: cross-repo resolution runs LAST, not first.
   //
   // It used to run before the call/type/implements resolvers, so it saw a graph full of unresolved
@@ -716,6 +737,7 @@ export function createIndexRunner(options: IndexRunnerOptions): RunIndexAndResol
   const crossStats = safeCrossRepoResolve(store, repoId);
   await yieldToEventLoop();
 
+  if (stopped()) return recordAborted(summary);
   // Post-resolve dedup: remove duplicate resolved edges that arise when both simple and
   // qualified edges resolve to the same symbolId (e.g. callee:Save + callee:IRepo.Save → same target).
   indexLog(`[index-post] repoId=${repoId} deduplicating resolved edges...`);
@@ -733,6 +755,7 @@ export function createIndexRunner(options: IndexRunnerOptions): RunIndexAndResol
   indexLog(`[index-post] repoId=${repoId} removed ${dedupCount} duplicate resolved edges`);
   await yieldToEventLoop();
 
+  if (stopped()) return recordAborted(summary);
   const mentionsStart = Date.now();
   indexLog(`[index-post] repoId=${repoId} resolving mentions...`);
   // Release J: a resolved mention keeps its symbol_id and resolveMentions revisits only null rows, by

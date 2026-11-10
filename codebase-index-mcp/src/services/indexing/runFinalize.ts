@@ -267,7 +267,9 @@ export function buildRunSummary(
   return {
     runId: identity.runId,
     repoId: identity.repoId,
-    commitSha: identity.commitSha,
+    // MCP-ISSUE-123 re-review B: a failed or cancelled run wrote an unknown subset of its batches, so the commit it
+    // started at is no base for the fast skip, the freshness gate or a git-scoped plan. It records none.
+    commitSha: status === "failed" || status === "cancelled" ? null : identity.commitSha,
     branch: identity.branch,
     indexVersion: identity.indexVersion,
     mode: identity.mode,

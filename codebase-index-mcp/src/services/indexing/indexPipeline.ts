@@ -765,7 +765,10 @@ export async function runIndexPipeline(store: GraphStore, input: RunIndexInput):
 
     const pruneCounts = pruneAndResolve(store, input, progress, files, selectedFiles, maxFiles);
     // A deleted file's vectors go with the stale sweep inside the sync, so the written paths suffice.
-    const vectorSymbolsIndexed = rebuildVectorIndex(store, input.repoId, progress, scoped ? [...writtenPaths] : undefined);
+    // MCP-ISSUE-123 re-review C: an aborted run stops here; its vectors are rebuilt by the full run that follows it.
+    const vectorSymbolsIndexed = input.abortSignal?.aborted
+      ? undefined
+      : rebuildVectorIndex(store, input.repoId, progress, scoped ? [...writtenPaths] : undefined);
 
     const finishedAt = new Date().toISOString();
     const elapsedMs = Date.now() - started;
