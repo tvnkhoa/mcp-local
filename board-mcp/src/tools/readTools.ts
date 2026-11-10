@@ -6,6 +6,8 @@
  * day wec.aria makes those commands honour `--json`, stdout parses and lands in `json` with no
  * change here. No probe, no flag: the output decides.
  *
+ * Profile `nano`: when stdout parses, `text` (the same JSON again) is dropped — the payload goes once.
+ *
  * Annotated read-only. `status` and `check` do write board.mjs's own history cache under
  * `<git common dir>/aria-board/cache/` (a sha's file list, which never changes) — derived state
  * the board keeps for itself, not a board record.
@@ -23,6 +25,9 @@ import type { BoardRunner } from "../types/index.js";
 import { asFlag, callBoard, flag, positional, SESSION_DESCRIPTION, sessionField, unitId, yesFlag, yesIds } from "./shared.js";
 
 const JSON_FLAG = ["--json"];
+
+/** At profile nano, `json` alone: `text` would repeat it. Every other profile keeps both. */
+const nanoJson = (profile: string | undefined): { omitTextWithJson?: true } => (profile === "nano" ? { omitTextWithJson: true } : {});
 const SINCE = /^\d{4}-\d{2}-\d{2}([T ][0-9:.]+(Z|[+-]\d{2}:?\d{2})?)?$/u;
 
 export function buildReadTools(config: BoardConfig, run: BoardRunner): readonly AnyToolDefinition[] {
@@ -53,10 +58,10 @@ export function buildReadTools(config: BoardConfig, run: BoardRunner): readonly 
         .refine((a) => a.by === undefined || a.today === true, { path: ["by"], message: "by needs today: true" }),
       guards,
       handler: async (args) => {
-        if (args.today === true) return callBoard(run, "status", ["--today", ...flag("by", args.by), ...JSON_FLAG], { parseJson: true });
+        if (args.today === true) return callBoard(run, "status", ["--today", ...flag("by", args.by), ...JSON_FLAG], { parseJson: true, ...nanoJson(args.profile) });
         // nano with no unit and no today: the CLI's own summary (→ --summary); every other call is the full board.
         const summary = args.profile === "nano" && args.unit === undefined ? ["--summary"] : [];
-        const result = await callBoard(run, "status", [...(args.unit === undefined ? [] : [args.unit]), ...summary, ...JSON_FLAG], { parseJson: true });
+        const result = await callBoard(run, "status", [...(args.unit === undefined ? [] : [args.unit]), ...summary, ...JSON_FLAG], { parseJson: true, ...nanoJson(args.profile) });
         if (!result.ok || args.unit === undefined || result.value.ok !== true) return result;
         const unitFile = await readUnitFile(config, args.unit);
         return ok(unitFile === undefined ? result.value : { ...result.value, unitFile });
@@ -71,7 +76,7 @@ export function buildReadTools(config: BoardConfig, run: BoardRunner): readonly 
       inputSchema: schema.object({ profile: schema.profile() }),
       input: z.object({ profile: responseProfileSchema.optional() }).strict(),
       guards,
-      handler: async () => callBoard(run, "next", JSON_FLAG, { parseJson: true })
+      handler: async (args) => callBoard(run, "next", JSON_FLAG, { parseJson: true, ...nanoJson(args.profile) })
     }),
 
     defineTool({
@@ -82,7 +87,7 @@ export function buildReadTools(config: BoardConfig, run: BoardRunner): readonly 
       inputSchema: schema.object({ profile: schema.profile() }),
       input: z.object({ profile: responseProfileSchema.optional() }).strict(),
       guards,
-      handler: async () => callBoard(run, "left", JSON_FLAG, { parseJson: true })
+      handler: async (args) => callBoard(run, "left", JSON_FLAG, { parseJson: true, ...nanoJson(args.profile) })
     }),
 
     defineTool({
@@ -94,7 +99,7 @@ export function buildReadTools(config: BoardConfig, run: BoardRunner): readonly 
       inputSchema: schema.object({ profile: schema.profile() }),
       input: z.object({ profile: responseProfileSchema.optional() }).strict(),
       guards,
-      handler: async () => callBoard(run, "check", JSON_FLAG, { parseJson: true, findingsExit: true })
+      handler: async (args) => callBoard(run, "check", JSON_FLAG, { parseJson: true, findingsExit: true, ...nanoJson(args.profile) })
     }),
 
     defineTool({
@@ -125,7 +130,7 @@ export function buildReadTools(config: BoardConfig, run: BoardRunner): readonly 
       inputSchema: schema.object({ unit: schema.string("A unit id."), profile: schema.profile() }, { required: ["unit"] }),
       input: z.object({ unit: unitId(), profile: responseProfileSchema.optional() }).strict(),
       guards,
-      handler: async (args) => callBoard(run, "gate", [args.unit, ...JSON_FLAG], { parseJson: true, findingsExit: true })
+      handler: async (args) => callBoard(run, "gate", [args.unit, ...JSON_FLAG], { parseJson: true, findingsExit: true, ...nanoJson(args.profile) })
     }),
 
     defineTool({

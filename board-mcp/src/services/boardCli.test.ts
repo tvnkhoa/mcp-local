@@ -18,6 +18,16 @@ test("exit 0 is ok with the text; JSON stdout is parsed only when asked", () => 
   assert.equal(parseJsonOutput(" 1. horizontal--w01  LANDED"), undefined);
 });
 
+test("omitTextWithJson drops `text` only when stdout parsed as JSON", () => {
+  const run = { exitCode: 0, stdout: "{\"a\":1}\n", stderr: "", timedOut: false };
+  assert.deepEqual(interpretRun(run, { command: "next", parseJson: true, omitTextWithJson: true }), { ok: true, value: { ok: true, json: { a: 1 } } });
+  const plain = { exitCode: 0, stdout: " 1. horizontal--w01  LANDED\n", stderr: "", timedOut: false };
+  assert.deepEqual(interpretRun(plain, { command: "next", parseJson: true, omitTextWithJson: true }), { ok: true, value: { ok: true, text: " 1. horizontal--w01  LANDED" } });
+  const findings = interpretRun({ exitCode: 1, stdout: "{\"f\":1}\n", stderr: "", timedOut: false }, { command: "check", parseJson: true, findingsExit: true, omitTextWithJson: true });
+  assert.ok(findings.ok);
+  assert.equal(findings.value.text, "{\"f\":1}");
+});
+
 test("a non-zero exit whose stderr starts `board: ` is a refusal carrying the CLI's why", () => {
   const r = interpretRun({ exitCode: 1, stdout: "", stderr: "board: screen--x is at P2 Design run; P4 cannot be done before it — no phase is skipped\n", timedOut: false }, { command: "advance" });
   assert.ok(r.ok);
@@ -53,7 +63,7 @@ test("check/gate exit 1 with no refusal line is a findings report, not an error"
   assert.ok(r.ok);
   assert.equal(r.value.ok, false);
   assert.equal(r.value.refused, undefined);
-  assert.match(r.value.text, /1 finding/);
+  assert.match(r.value.text ?? "", /1 finding/);
 });
 
 test("a killed run is a timeout error", () => {

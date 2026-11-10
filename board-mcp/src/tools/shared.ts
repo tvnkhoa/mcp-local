@@ -113,6 +113,8 @@ export const asFlag = (session: string): string[] => [`--as=${session}`];
 export interface CallOptions {
   readonly findingsExit?: boolean;
   readonly parseJson?: boolean;
+  /** Profile nano: omit `text` when `json` was parsed from it. */
+  readonly omitTextWithJson?: boolean;
   /** Replaces the generic refusal hint, e.g. for a tool that passes the owner's words. */
   readonly refusalHint?: string;
 }
@@ -127,7 +129,7 @@ export async function callBoard(
   // The runner never rejects for a CLI failure — it resolves with the exit. A throw here is a
   // defect, and dispatch turns it into internal_error.
   const outcome = await run([command, ...args]);
-  const result = interpretRun(outcome, { command, findingsExit: options.findingsExit, parseJson: options.parseJson });
+  const result = interpretRun(outcome, { command, findingsExit: options.findingsExit, parseJson: options.parseJson, omitTextWithJson: options.omitTextWithJson });
   // The owner-words hint only for a refusal about the words (wec.aria acceptance): a "not on disk"
   // refusal of the same tool keeps the generic hint, which tells the caller to read `why`.
   if (result.ok && result.value.refused === true && options.refusalHint !== undefined && /--gate|words|owner/i.test(result.value.why ?? "")) {

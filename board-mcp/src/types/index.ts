@@ -28,7 +28,8 @@ export type BoardRunner = (args: readonly string[]) => Promise<BoardRun>;
 export interface BoardResult {
   readonly ok: boolean;
   readonly json?: unknown;
-  readonly text: string;
+  /** Absent only at profile nano when `json` carries the parsed stdout. */
+  readonly text?: string;
   readonly refused?: boolean;
   readonly why?: string;
   readonly hint?: string;

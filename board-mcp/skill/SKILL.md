@@ -7,7 +7,7 @@ description: "wec.aria's pipeline board (checks/board/board.mjs) via the Board M
 
 {{TAGLINE}} Tools are exposed as `{{TOOL_NAMESPACE}}`.
 
-A thin wrapper: each tool runs one `board.mjs` subcommand and returns `{ ok, json?, text, refused?, why?, hint? }`.
+A thin wrapper: each tool runs one `board.mjs` subcommand and returns `{ ok, json?, text, refused?, why?, hint? }` — at `profile: "nano"` a parsed `json` comes without `text` (it is the same output).
 The board's rules are board.mjs's — when it refuses, `refused: true` and `why` is its own sentence.
 
 ## Step 0 — Orient

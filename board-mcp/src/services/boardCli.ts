@@ -105,11 +105,13 @@ export interface InterpretOptions {
   readonly findingsExit?: boolean;
   /** Try to parse stdout as JSON (the read commands that are passed `--json`). */
   readonly parseJson?: boolean;
+  /** Profile nano: when stdout parsed as JSON, drop `text` — it is the same JSON, sent twice. */
+  readonly omitTextWithJson?: boolean;
 }
 
 /**
  * Classify one run:
- *   exit 0                                  → { ok: true, text, json? }
+ *   exit 0                                  → { ok: true, text, json? } (`text` dropped when omitTextWithJson and json parsed)
  *   exit 1, a stderr line starting `board: ` → { ok: false, refused: true, why: the last such line }
  *   exit 1, no stderr, findings command     → { ok: false, text } (the findings)
  *   killed by the timeout                   → `timeout` error
@@ -122,7 +124,8 @@ export function interpretRun(run: BoardRun, options: InterpretOptions): Result<B
   }
   if (run.exitCode === 0) {
     const json = options.parseJson === true ? parseJsonOutput(run.stdout) : undefined;
-    return ok(json === undefined ? { ok: true, text } : { ok: true, json, text });
+    if (json === undefined) return ok({ ok: true, text });
+    return ok(options.omitTextWithJson === true ? { ok: true, json } : { ok: true, json, text });
   }
   const stderr = run.stderr.replace(/^﻿/u, "");
   // board.mjs refuses with `console.error(\`board: ${msg}\`)` then exit(1). Git or Node may print

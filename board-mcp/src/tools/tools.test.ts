@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { buildTools } from "./index.js";
+import { createNullLogger } from "@mcp/core";
+import { asErrorPayload, createToolRegistry, dispatchToolCall } from "@mcp/sdk";
+
+import { buildTools, toWireError } from "./index.js";
 import { GATE_PASSING_TOOLS, MAPPED } from "./commandMap.js";
 import { argvOf, call, configFor, SESSION, stubRepo } from "./testSupport.test.js";
 
@@ -201,6 +204,44 @@ test("output that parses as JSON lands in `json` (the day the CLI honours --json
   const { payload } = await call(config, "next", {});
   assert.equal(payload.ok, true);
   assert.deepEqual(payload.json, { queue: [{ id: "horizontal--w01", state: "LANDED" }] });
+});
+
+/** The text block exactly as it crosses the wire — byte comparison, not a parsed payload. */
+async function wire(name: string, args: Record<string, unknown>): Promise<string> {
+  const registry = createToolRegistry(buildTools(config));
+  const result = await dispatchToolCall(registry, name, args, {
+    logger: createNullLogger("test"),
+    formatError: (error) => asErrorPayload(toWireError(error), "verbose")
+  });
+  assert.equal(result.content.length, 1);
+  return String(result.content[0]?.text);
+}
+
+test("profile nano sends parsed JSON once: `json` only, no `text` repeating it", async () => {
+  const { payload } = await call(config, "next", { profile: "nano" });
+  assert.deepEqual(payload, { ok: true, json: { queue: [{ id: "horizontal--w01", state: "LANDED" }] } });
+  assert.equal(await wire("next", { profile: "nano" }), '{"ok":true,"json":{"queue":[{"id":"horizontal--w01","state":"LANDED"}]}}');
+});
+
+test("every other profile is byte-identical to before: `json` AND `text`", async () => {
+  const both = { ok: true, json: { queue: [{ id: "horizontal--w01", state: "LANDED" }] }, text: '{"queue":[{"id":"horizontal--w01","state":"LANDED"}]}' };
+  assert.equal(await wire("next", {}), JSON.stringify(both));
+  assert.equal(await wire("next", { profile: "compact" }), JSON.stringify(both));
+  assert.equal(await wire("next", { profile: "standard" }), JSON.stringify(both));
+  assert.equal(await wire("next", { profile: "verbose" }), JSON.stringify(both, null, 2));
+});
+
+test("profile nano keeps `text` when nothing parsed: plain output, findings, refusals", async () => {
+  // status nano → --summary; the stub prints its ARGV line, which is not JSON.
+  const plain = await call(config, "status", { profile: "nano" });
+  assert.deepEqual(argvOf(plain.payload.text), ["status", "--summary", "--json"]);
+  assert.equal(plain.payload.json, undefined);
+  const findings = await call(config, "check", { profile: "nano" });
+  assert.equal(findings.payload.ok, false);
+  assert.match(findings.payload.text, /1 finding\(s\)/u);
+  const refused = await call(config, "gate", { unit: "screen--refuse", profile: "nano" });
+  assert.equal(refused.payload.refused, true);
+  assert.equal(typeof refused.payload.text, "string");
 });
 
 // --- input hygiene -----------------------------------------------------------
