@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { EventEmitter } from "node:events";
 import test from "node:test";
 
@@ -423,4 +424,44 @@ test("MCP-ISSUE-123 re-review E (leader review 1): shutdown 10 s into an abortRu
   for (let i = 0; i < 10; i++) await Promise.resolve();
   assert.equal(aborted, true);
   await rejected;
+});
+
+/**
+ * Row 15 (CI 69ae7e7, test:freshness-worker exit 13): run in a child, because this file's `keepAlive` would hold the loop.
+ * The fake worker holds no handle — like the real one, which is unref'd — ignores `exit` and emits 'exit' only when
+ * terminated. `await dispose()` must still resolve: its bounded fallback timer holds the loop. A pending `abortRun`
+ * must not: the child exits long before the abort's 60 s grace.
+ */
+test("row 15: await dispose() resolves with nothing else holding the event loop; a pending abortRun does not hold it", () => {
+  const moduleUrl = JSON.stringify(new URL("./refreshWorkerClient.ts", import.meta.url).href);
+  const prelude = `
+    import { EventEmitter } from "node:events";
+    import { RefreshWorkerClient } from ${moduleUrl};
+    class W extends EventEmitter {
+      postMessage() {}
+      async terminate() { queueMicrotask(() => this.emit("exit", 1)); return 1; }
+    }
+    const limits = ${JSON.stringify(LIMITS)};
+  `;
+  const dispose = `${prelude}
+    const client = new RefreshWorkerClient({ dbPath: "/tmp/x.db", limits, disposeGraceMs: 200, spawn: () => new W() });
+    client.warm();
+    await client.dispose();
+    console.log("disposed");
+  `;
+  const d = spawnSync(process.execPath, [...process.execArgv, "--input-type=module", "-e", dispose], { encoding: "utf8", timeout: 20_000 });
+  assert.equal(d.status, 0, `dispose: exit ${String(d.status)} ${d.stderr}`);
+  assert.match(d.stdout, /disposed/);
+
+  const abort = `${prelude}
+    const client = new RefreshWorkerClient({ dbPath: "/tmp/x.db", limits, abortGraceMs: 60_000, spawn: () => new W() });
+    const run = client.run("r", "/tmp/r", "dirty", false, 0, 0, { runId: "job-1" });
+    run.catch(() => undefined);
+    void client.abortRun("job-1", "timed out");
+    console.log("left");
+  `;
+  const t0 = Date.now();
+  const a = spawnSync(process.execPath, [...process.execArgv, "--input-type=module", "-e", abort], { encoding: "utf8", timeout: 20_000 });
+  assert.equal(a.status, 0, `abortRun: exit ${String(a.status)} ${a.stderr}`);
+  assert.ok(Date.now() - t0 < 15_000, `a pending abortRun held the process ${String(Date.now() - t0)} ms`);
 });

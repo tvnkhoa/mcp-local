@@ -212,7 +212,8 @@ export class RefreshWorkerClient {
 
   /**
    * Stop the worker (server shutdown, tests), as `abortRun` does but with `disposeGraceMs` and an `exit` marked
-   * `shutdown` (re-review E: bounded, see `DEFAULT_DISPOSE_GRACE_MS`). Outstanding runs are rejected.
+   * `shutdown` (re-review E: bounded, see `DEFAULT_DISPOSE_GRACE_MS`). Outstanding runs are rejected. Its await holds
+   * the event loop until the worker is gone (row 15), so a caller needs no handle of its own.
    */
   async dispose(): Promise<void> {
     const worker = this.worker;
@@ -255,8 +256,11 @@ export class RefreshWorkerClient {
       grace = setTimeout(() => {
         void worker.terminate().then(done, done);
       }, graceMs);
-      // The fallback timer alone never keeps the process alive (the worker itself is unref'd).
-      grace.unref?.();
+      // Row 15: shutdown (`dispose`) keeps this timer REF'd, so the process stays up until the worker has exited or the
+      // bounded fallback (≤ 35 s) has terminated it — unref'd, an awaited `dispose` held nothing (the worker is unref'd)
+      // and the loop could empty first (exit 13 in test:freshness-worker, CI 69ae7e7). `abortRun` keeps it unref'd: a
+      // non-shutdown abort must not hold the process for its 5.5 min grace (row 7 review).
+      if (!shutdown) grace.unref?.();
     });
   }
 

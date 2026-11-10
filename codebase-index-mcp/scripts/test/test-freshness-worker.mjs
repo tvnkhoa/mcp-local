@@ -239,9 +239,10 @@ try {
     limits: { subtxSize: 20, checkpointEveryNBatches: 1, largeFileThresholdBytes: 0, maxFileSizeBytes: 500_000, parseWorkers: 1, parseJobTimeoutMs: 20_000 },
     onRunLanded: () => landedHook++
   });
-  // Row 15: the client unrefs its worker and (since 0242d50) dispose's terminate fallback, as a server wants — its
-  // stdin holds the loop. This script has no such handle, so it holds the loop itself until the worker is gone;
-  // without it the loop empties while `dispose` awaits the worker's exit: Node exit 13 (CI, 69ae7e7).
+  // Row 15: the client unrefs its worker, as a server wants — its stdin holds the loop. `dispose` now holds the loop
+  // itself (its fallback timer is ref'd), but an awaited `run` still does not: this script has no handle of its own,
+  // so it holds the loop until the worker is gone. Without it the loop emptied while `dispose` awaited the worker's
+  // exit: Node exit 13 (CI, 69ae7e7).
   const holdLoop = setInterval(() => {}, 1_000);
   let error = null;
   try {
