@@ -629,6 +629,23 @@ export function countCommitsBehind(repoPath: string, indexedSha: string | null):
   }
 }
 
+/** {@link countCommitsBehind} without blocking the event loop (MCP-ISSUE-123). */
+export async function countCommitsBehindAsync(repoPath: string, indexedSha: string | null): Promise<number | null> {
+  if (!indexedSha) return null;
+  const r = await gitAsync(repoPath, ["rev-list", "--count", `${indexedSha}..HEAD`]);
+  if (r.status !== 0) return null;
+  const n = Number(r.stdout);
+  return Number.isFinite(n) ? n : null;
+}
+
+/** {@link resolveHeadCommitSha} without blocking the event loop (MCP-ISSUE-123): the files first, then `git rev-parse`. */
+export async function resolveHeadCommitShaAsync(repoPath: string): Promise<string | null> {
+  const fromFiles = readHeadShaFromFiles(repoPath);
+  if (fromFiles) return fromFiles;
+  const r = await gitAsync(repoPath, ["rev-parse", "HEAD"]);
+  return r.status === 0 ? r.stdout : null;
+}
+
 /**
  * IX-9: why a worktree cannot be seeded from its parent's index; the job falls back to a full run
  * and reports this in `index_status.fallbackReason` — never a silent wrong seed.
@@ -641,6 +658,8 @@ export type SeedFallbackReason =
   | "child_behind_parent"     // the worktree base is an ancestor of the parent's indexed commit (the parent moved on)
   | "diverged"                // both have commits the other lacks (merge base is neither)
   | "git_timeout"             // a git call ran past GIT_TIMEOUT_MS and was killed — says nothing about ancestry (MCP-ISSUE-123)
+  | "git_max_buffer"          // git's output overflowed maxBuffer and execFile killed it (MCP-ISSUE-123 #6)
+  | "git_killed"              // git was killed by a signal from outside the server (MCP-ISSUE-123 #6)
   | "git_error";              // git failed in a way that says nothing about ancestry
 
 export type SeedAncestry =
@@ -648,17 +667,47 @@ export type SeedAncestry =
   | { ok: false; fallbackReason: SeedFallbackReason; parentSha: string | null; childSha: string | null };
 
 /**
- * IX-9 review M2: git's exit code and stdout, asynchronously — the ancestry check runs on the server thread.
- * MCP-ISSUE-123: `timedOut` when execFile killed git at `timeoutMs` (`killed` / a signal, no exit code). Under CPU
- * starvation that read as `git_error`, as if git had failed on the repo.
+ * MCP-ISSUE-123 #6: why git ended without an exit code. execFile sets `killed` only when it killed the child itself
+ * — at `timeout`, or with code `ERR_CHILD_PROCESS_STDIO_MAXBUFFER` when stdout/stderr overflowed `maxBuffer`; a
+ * signal with `killed` false came from outside the server. `null`: git exited with a code, or never started.
  */
-function gitAsync(repoPath: string, args: string[], timeoutMs = GIT_TIMEOUT_MS): Promise<{ status: number; stdout: string; timedOut: boolean }> {
+export type GitKill = "timeout" | "max_buffer" | "killed";
+
+export function classifyGitKill(error: unknown): GitKill | null {
+  if (!error || typeof error !== "object") return null;
+  const e = error as { code?: unknown; killed?: unknown; signal?: unknown };
+  if (e.code === "ERR_CHILD_PROCESS_STDIO_MAXBUFFER") return "max_buffer";
+  if (typeof e.code === "number") return null;
+  if (e.killed === true) return "timeout";
+  if (typeof e.signal === "string" && e.signal.length > 0) return "killed";
+  return null;
+}
+
+const SEED_REASON_BY_KILL: Record<GitKill, SeedFallbackReason> = {
+  timeout: "git_timeout",
+  max_buffer: "git_max_buffer",
+  killed: "git_killed"
+};
+
+export type GitAsyncResult = { status: number; stdout: string; kill: GitKill | null };
+
+/**
+ * IX-9 review M2: git's exit code and stdout, asynchronously — the ancestry check runs on the server thread.
+ * MCP-ISSUE-123: `kill` names how git was stopped when it has no exit code (see {@link classifyGitKill}). Under CPU
+ * starvation a timeout read as `git_error`, as if git had failed on the repo; #6: an overflow or an outside kill
+ * read as a timeout.
+ */
+export function gitAsync(
+  repoPath: string,
+  args: string[],
+  timeoutMs = GIT_TIMEOUT_MS,
+  maxBuffer = GIT_MAX_BUFFER_BYTES
+): Promise<GitAsyncResult> {
   return new Promise((resolve) => {
-    execFile("git", args, { cwd: repoPath, encoding: "utf8", timeout: timeoutMs, windowsHide: true }, (error, stdout) => {
-      if (!error) return resolve({ status: 0, stdout: String(stdout).trim(), timedOut: false });
-      const e = error as { code?: unknown; killed?: boolean; signal?: unknown };
-      const timedOut = typeof e.code !== "number" && (e.killed === true || (typeof e.signal === "string" && e.signal.length > 0));
-      resolve({ status: typeof e.code === "number" ? e.code : -1, stdout: "", timedOut });
+    execFile("git", args, { cwd: repoPath, encoding: "utf8", timeout: timeoutMs, maxBuffer, windowsHide: true }, (error, stdout) => {
+      if (!error) return resolve({ status: 0, stdout: String(stdout).trim(), kill: null });
+      const code = (error as { code?: unknown }).code;
+      resolve({ status: typeof code === "number" ? code : -1, stdout: "", kill: classifyGitKill(error) });
     });
   });
 }
@@ -672,34 +721,33 @@ export async function checkSeedAncestry(
   childRepoPath: string,
   parentIndexedSha: string | null,
   childSha?: string | null,
-  /** The per-call git timeout; tests shorten it. */
-  timeoutMs = GIT_TIMEOUT_MS
+  /** Runs one git call in the worktree; tests pass a stub to end a call as a timeout, overflow or kill. */
+  git: (args: string[]) => Promise<GitAsyncResult> = (args) => gitAsync(childRepoPath, args)
 ): Promise<SeedAncestry> {
   const parentSha = parentIndexedSha && parentIndexedSha.trim() ? parentIndexedSha.trim() : null;
-  const git = (args: string[]) => gitAsync(childRepoPath, args, timeoutMs);
   if (!parentSha) {
     return { ok: false, fallbackReason: "parent_not_indexed", parentSha: null, childSha: childSha ?? null };
   }
   let child = childSha ?? null;
   if (!child) {
     const head = await git(["rev-parse", "--verify", "--quiet", "HEAD^{commit}"]);
-    if (head.timedOut) return { ok: false, fallbackReason: "git_timeout", parentSha, childSha: null };
+    if (head.kill) return { ok: false, fallbackReason: SEED_REASON_BY_KILL[head.kill], parentSha, childSha: null };
     child = head.status === 0 && head.stdout ? head.stdout : null;
   }
   if (!child) {
     return { ok: false, fallbackReason: "child_head_unresolved", parentSha, childSha: null };
   }
   const exists = await git(["cat-file", "-e", `${parentSha}^{commit}`]);
-  if (exists.timedOut) return { ok: false, fallbackReason: "git_timeout", parentSha, childSha: child };
+  if (exists.kill) return { ok: false, fallbackReason: SEED_REASON_BY_KILL[exists.kill], parentSha, childSha: child };
   if (exists.status !== 0) {
     return { ok: false, fallbackReason: "parent_sha_missing", parentSha, childSha: child };
   }
   const isAncestor = await git(["merge-base", "--is-ancestor", parentSha, child]);
   if (isAncestor.status === 0) return { ok: true, parentSha, childSha: child };
-  if (isAncestor.timedOut) return { ok: false, fallbackReason: "git_timeout", parentSha, childSha: child };
+  if (isAncestor.kill) return { ok: false, fallbackReason: SEED_REASON_BY_KILL[isAncestor.kill], parentSha, childSha: child };
   if (isAncestor.status !== 1) return { ok: false, fallbackReason: "git_error", parentSha, childSha: child };
   const mergeBase = await git(["merge-base", parentSha, child]);
-  if (mergeBase.timedOut) return { ok: false, fallbackReason: "git_timeout", parentSha, childSha: child };
+  if (mergeBase.kill) return { ok: false, fallbackReason: SEED_REASON_BY_KILL[mergeBase.kill], parentSha, childSha: child };
   if (mergeBase.status === 1) return { ok: false, fallbackReason: "unrelated_history", parentSha, childSha: child };
   if (mergeBase.status !== 0) return { ok: false, fallbackReason: "git_error", parentSha, childSha: child };
   // MCP-ISSUE-123: say which way the histories part. A worktree behind its parent's index (the 9 Nov acceptance case,
@@ -798,28 +846,29 @@ function shortSha(sha: string | null): string | null {
  * when staleness can't be determined). `hint` is caller-specific guidance on what the
  * staleness affects. The extra git lookups (commits-behind, dirty count) run at most once
  * per response (only on the stale path), never per match.
+ *
+ * MCP-ISSUE-123: async. The two lookups were `execFileSync` (5 s timeout each) on the server thread, so a read of a
+ * stale repo could hold every other call for up to 10 s. HEAD comes from the git dir's files when it can (as
+ * {@link resolveHeadCommitSha}), else from an async `rev-parse`; the two lookups run concurrently. Same output.
  */
-export function buildStaleWarning(
+export async function buildStaleWarning(
   repoId: string,
   store: GraphStore,
   hint: string
-): StaleWarning | null {
+): Promise<StaleWarning | null> {
   try {
-    const staleness = getRepoStaleness(repoId, store);
+    const repo = store.getRepository(repoId);
+    // No repo or no run: staleness is unknown (isStale null), so there is no warning and no git to ask.
+    if (!repo || !store.getLatestRun(repoId)) return null;
+    const staleness = getRepoStaleness(repoId, store, await resolveHeadCommitShaAsync(repo.repoPath));
     if (!staleness.isStale) {
       return null;
     }
-    const repo = store.getRepository(repoId);
-    let commitsBehind: number | null = null;
-    let dirtyCount = 0;
-    if (repo) {
-      commitsBehind = countCommitsBehind(repo.repoPath, staleness.indexedCommitSha);
-      try {
-        dirtyCount = collectDirtyFiles(repo.repoPath).size;
-      } catch {
-        // non-git repo / git error — leave dirtyCount at 0
-      }
-    }
+    const [commitsBehind, dirtyCount] = await Promise.all([
+      countCommitsBehindAsync(repo.repoPath, staleness.indexedCommitSha),
+      // non-git repo / git error — dirtyCount stays 0
+      readWorkingTreeStateAsync(repo.repoPath).then((t) => new Set(t.dirty).size, () => 0)
+    ]);
     return {
       note: `index is stale: ${staleness.note}`,
       hint,

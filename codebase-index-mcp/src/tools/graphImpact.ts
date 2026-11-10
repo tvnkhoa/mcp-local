@@ -101,7 +101,7 @@ export function buildGraphImpactTools(deps: CodebaseIndexDeps): AnyToolDefinitio
     },
     annotations: readsGraph,
     rawResult: true,
-    handler: (input) => ok(raw(handleFindImpactFiles(input, buildContext())))
+    handler: async (input) => ok(raw(await handleFindImpactFiles(input, buildContext())))
   });
 
   const getChangeContext = defineTool({
@@ -125,7 +125,7 @@ export function buildGraphImpactTools(deps: CodebaseIndexDeps): AnyToolDefinitio
     },
     annotations: readsGraph,
     rawResult: true,
-    handler: (input) => ok(raw(handleGetChangeContext(input, buildContext())))
+    handler: async (input) => ok(raw(await handleGetChangeContext(input, buildContext())))
   });
 
   const getSymbolContextPack = defineTool({
