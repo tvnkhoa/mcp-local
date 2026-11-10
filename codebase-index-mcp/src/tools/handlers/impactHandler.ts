@@ -225,8 +225,10 @@ export async function handleFindFieldAccesses(
   const { store } = ctx;
   const profile = resolveResponseProfile(args.profile as Parameters<typeof resolveResponseProfile>[0]);
 
+  // Built once per call: every answer below carries the same warning.
+  const staleWarning = await staleWarningFor(args.repoId, store);
   // R3 exact: a TS/JS field is answered by the TypeScript LanguageService when the lane is on.
-  const exact = await tryExactFieldAccesses(args, ctx, profile, await staleWarningFor(args.repoId, store));
+  const exact = await tryExactFieldAccesses(args, ctx, profile, staleWarning);
   if (exact) return exact;
 
   let symbolId = args.symbolId;
@@ -238,7 +240,7 @@ export async function handleFindFieldAccesses(
     const candidates = store.getSymbolCandidates(args.repoId, name, 25);
     const properties = candidates.filter((c) => c.kind === "property");
     symbolId = (properties.find((c) => c.name === name) ?? properties[0])?.symbolId;
-    if (!symbolId) return await noPropertySymbolResult(args.repoId, name, candidates, store, ctx, profile);
+    if (!symbolId) return noPropertySymbolResult(name, candidates, staleWarning, ctx, profile);
   }
   if (!symbolId) throw new McpError(ErrorCode.InvalidParams, "find_field_accesses: provide symbolId or a resolvable name.");
 
@@ -251,7 +253,6 @@ export async function handleFindFieldAccesses(
 
   const reads = result.accesses.filter((a) => a.mode === "read");
   const writes = result.accesses.filter((a) => a.mode === "write");
-  const staleWarning = await staleWarningFor(args.repoId, store);
   const coverage = buildCoverageBlock({
     resultCount: result.accesses.length,
     expectedNonZero: true,
@@ -304,15 +305,13 @@ function propertyEdgeGaps(filePath: string): string[] {
  * No property symbol carries this name. Answered as an honest empty result rather than an error, so
  * the caller sees why the graph cannot count it and which same-named symbols exist to pin instead.
  */
-async function noPropertySymbolResult(
-  repoId: string,
+function noPropertySymbolResult(
   name: string,
   candidates: ReturnType<GraphStore["getSymbolCandidates"]>,
-  store: GraphStore,
+  staleWarning: StaleWarning | null,
   ctx: HandlerContext,
   profile: ReturnType<typeof resolveResponseProfile>
-): Promise<CallToolResult> {
-  const staleWarning = await staleWarningFor(repoId, store);
+): CallToolResult {
   const coverage = buildCoverageBlock({
     resultCount: 0,
     expectedNonZero: true,

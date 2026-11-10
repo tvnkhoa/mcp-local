@@ -721,11 +721,10 @@ export async function checkSeedAncestry(
   childRepoPath: string,
   parentIndexedSha: string | null,
   childSha?: string | null,
-  /** The per-call git timeout; tests shorten it. */
-  timeoutMs = GIT_TIMEOUT_MS
+  /** Runs one git call in the worktree; tests pass a stub to end a call as a timeout, overflow or kill. */
+  git: (args: string[]) => Promise<GitAsyncResult> = (args) => gitAsync(childRepoPath, args)
 ): Promise<SeedAncestry> {
   const parentSha = parentIndexedSha && parentIndexedSha.trim() ? parentIndexedSha.trim() : null;
-  const git = (args: string[]) => gitAsync(childRepoPath, args, timeoutMs);
   if (!parentSha) {
     return { ok: false, fallbackReason: "parent_not_indexed", parentSha: null, childSha: childSha ?? null };
   }
