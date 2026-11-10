@@ -84,3 +84,61 @@ test("MCP-ISSUE-123: buildStaleWarning yields the event loop and keeps its outpu
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
+
+/** A latest run that failed (or was cancelled) as the runner records it: status set, no commit, the error in `scope`. */
+function brokenRunStore(repoPath: string, status: "failed" | "cancelled", scope: string): GraphStore {
+  return {
+    getRepository: () => ({ repoId: "r", repoPath }),
+    getLatestRun: () => ({
+      runId: "run-9",
+      commitSha: null,
+      status,
+      mode: "incremental",
+      triggeredBy: "query",
+      startedAt: "2026-11-10T01:00:00.000Z",
+      finishedAt: "2026-11-10T01:02:03.000Z",
+      scope
+    })
+  } as unknown as GraphStore;
+}
+
+test("MCP-ISSUE-123: after a failed run the warning says the run failed, not that the commit is unavailable", async () => {
+  const root = fs.mkdtempSync(path.join(tmpdir(), "cim-stale-failed-"));
+  try {
+    const repo = path.join(root, "repo");
+    git(root, "init", "-q", "-b", "main", repo);
+    const head = commit(repo, "a.txt", "one\n");
+    fs.writeFileSync(path.join(repo, "new.txt"), "untracked\n");
+
+    const warning = await buildStaleWarning("r", brokenRunStore(repo, "failed", "git-scoped; failed in the post-phase: SQLITE_BUSY"), HINT);
+    assert.ok(warning, "a failed latest run is a stale index, so a warning is returned");
+    assert.match(warning.note, /latest index run failed/);
+    assert.doesNotMatch(warning.note, /indexed commit unavailable/);
+    assert.equal(warning.hint, HINT);
+    assert.equal(warning.lastIndexedCommit, null);
+    assert.equal(warning.headCommit, head.slice(0, 12));
+    assert.equal(warning.commitsBehind, null);
+    assert.equal(warning.dirtyCount, 1);
+    assert.deepEqual(warning.latestRun, {
+      runId: "run-9",
+      status: "failed",
+      mode: "incremental",
+      triggeredBy: "query",
+      finishedAt: "2026-11-10T01:02:03.000Z",
+      summary: "git-scoped; failed in the post-phase: SQLITE_BUSY"
+    });
+    assert.equal(warning.graphMayBePartial, true);
+    assert.match(warning.action ?? "", /index_repository/);
+    assert.match(warning.action ?? "", /backs off/);
+
+    const cancelled = await buildStaleWarning("r", brokenRunStore(repo, "cancelled", "aborted: no commit recorded"), HINT);
+    assert.match(cancelled?.note ?? "", /latest index run was cancelled/);
+    assert.equal(cancelled?.latestRun?.status, "cancelled");
+
+    // A long error is cut, so one failure cannot flood every read's payload.
+    const long = await buildStaleWarning("r", brokenRunStore(repo, "failed", "x".repeat(2000)), HINT);
+    assert.ok((long?.latestRun?.summary.length ?? 0) <= 301, "summary is bounded");
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});

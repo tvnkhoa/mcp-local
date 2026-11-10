@@ -834,7 +834,64 @@ export type StaleWarning = {
   commitsBehind: number | null;
   /** Working-tree files changed since the indexed commit (staged + unstaged + untracked). */
   dirtyCount: number;
+  /**
+   * MCP-ISSUE-123: present only when the latest run failed or was cancelled. Such a run records no commit, so the
+   * fields above cannot size the drift; these say what happened instead.
+   */
+  latestRun?: FailedRunInfo;
+  /** With `latestRun`: the run stopped part-way, so the graph may hold some of its writes and miss the rest. */
+  graphMayBePartial?: true;
+  /** With `latestRun`: what to do about it. */
+  action?: string;
 };
+
+/** The latest run, when it ended without a commit (MCP-ISSUE-123). `summary` is the run's scope + error, cut to 300 chars. */
+export type FailedRunInfo = {
+  runId: string;
+  status: "failed" | "cancelled";
+  mode: string;
+  /** "query" when the freshness gate started it; absent for index_repository / watcher runs. */
+  triggeredBy?: string;
+  finishedAt: string;
+  summary: string;
+};
+
+const FAILED_RUN_SUMMARY_MAX = 300;
+
+/**
+ * MCP-ISSUE-123: the warning for a latest run that failed or was cancelled. The gate's back-off is per process and not
+ * readable here; the same response's `freshness.reason` names the wait when the gate is holding back.
+ */
+function failedRunWarning(
+  run: { runId: string; status: "failed" | "cancelled"; mode: string; triggeredBy?: string; finishedAt: string; scope?: string },
+  headCommitSha: string | null,
+  dirtyCount: number,
+  hint: string
+): StaleWarning {
+  const scope = run.scope ?? "";
+  const summary = scope.length > FAILED_RUN_SUMMARY_MAX ? `${scope.slice(0, FAILED_RUN_SUMMARY_MAX)}…` : scope;
+  const verb = run.status === "failed" ? "failed" : "was cancelled";
+  return {
+    note: `index is stale: the latest index run ${verb} (${run.mode}, finished ${run.finishedAt}) and recorded no commit`,
+    hint,
+    lastIndexedCommit: null,
+    headCommit: shortSha(headCommitSha),
+    commitsBehind: null,
+    dirtyCount,
+    latestRun: {
+      runId: run.runId,
+      status: run.status,
+      mode: run.mode,
+      ...(run.triggeredBy ? { triggeredBy: run.triggeredBy } : {}),
+      finishedAt: run.finishedAt,
+      summary
+    },
+    graphMayBePartial: true,
+    action:
+      "Run index_repository to rebuild the index. After a failed automatic refresh the freshness gate backs off before " +
+      "trying again; when it is holding back, this response's freshness.reason says how long."
+  };
+}
 
 function shortSha(sha: string | null): string | null {
   return sha ? sha.slice(0, 12) : null;
@@ -859,8 +916,16 @@ export async function buildStaleWarning(
   try {
     const repo = store.getRepository(repoId);
     // No repo or no run: staleness is unknown (isStale null), so there is no warning and no git to ask.
-    if (!repo || !store.getLatestRun(repoId)) return null;
-    const staleness = getRepoStaleness(repoId, store, await resolveHeadCommitShaAsync(repo.repoPath));
+    const latestRun = repo ? store.getLatestRun(repoId) : null;
+    if (!repo || !latestRun) return null;
+    const head = await resolveHeadCommitShaAsync(repo.repoPath);
+    // MCP-ISSUE-123: a failed or cancelled run records no commit, which read as "indexed commit unavailable" and no
+    // warning. Say the run failed instead (only in a git repo — elsewhere staleness stays unknown, as before).
+    if (head && !latestRun.commitSha && (latestRun.status === "failed" || latestRun.status === "cancelled")) {
+      const dirtyCount = await readWorkingTreeStateAsync(repo.repoPath).then((t) => new Set(t.dirty).size, () => 0);
+      return failedRunWarning({ ...latestRun, status: latestRun.status }, head, dirtyCount, hint);
+    }
+    const staleness = getRepoStaleness(repoId, store, head);
     if (!staleness.isStale) {
       return null;
     }
