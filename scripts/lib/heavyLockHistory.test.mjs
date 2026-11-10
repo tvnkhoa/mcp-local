@@ -8,7 +8,7 @@ import test, { after } from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { acquireHeavyLock, isPidAlive } from "./heavyLock.mjs";
-import { cleanStaleSamples, defaultClass, emptySummary, foldSample, formatHistory, historyPath, readHistory, recordRun, sampleTables, samplingOff, summarizeHistory } from "./heavyLockHistory.mjs";
+import { cleanStaleSamples, defaultClass, emptySummary, foldSample, formatHistory, historyPath, otherHolders, readHistory, recordRun, sampleTables, samplingOff, settlePeak, snapshotCheck, summarizeHistory } from "./heavyLockHistory.mjs";
 
 /** A scratch dir under the temp dir, removed after this file's tests (pass or fail). */
 const scratchDirs = [];
@@ -229,7 +229,7 @@ test("helper VM line: each sample reports the WSL2 VM working set beside the tre
 const MiB = 1048576;
 const block = (treeMb, vmMb, members = []) => [`S ${String(members.length)} ${String(treeMb * MiB)}`, `V ${String(vmMb < 0 ? -1 : vmMb * MiB)}`, ...members.map(([pid, mb, name]) => `M ${String(pid)} ${String(mb * MiB)} ${name}`)];
 
-test("foldSample: the VM's growth over the first sample is the container share — counted in peakMb, kept apart in containerMb, never in currentMb", () => {
+test("foldSample + settlePeak, sole holder: the VM's growth over the first sample is folded into peakMb, kept apart in containerMb, never in currentMb", () => {
   const s = emptySummary(1000);
   assert.equal(foldSample(s, ["T 3"]), false, "a block without S is not a sample");
   // run start: tree 500, VM 2000 (an earlier container's memory: not this run's)
@@ -237,25 +237,68 @@ test("foldSample: the VM's growth over the first sample is the container share �
   assert.deepEqual([s.peakMb, s.treePeakMb, s.containerMb, s.containerBaseMb, s.currentMb], [500, 500, 0, 2000, 500]);
   // Testcontainers starts: VM +3000, tree 800 → this sample is 3800
   foldSample(s, block(800, 5000, [[7, 700, "dotnet.exe"], [8, 100, "testhost.exe"]]), new Date("2026-11-10T00:01:00Z"));
-  assert.deepEqual([s.peakMb, s.treePeakMb, s.containerMb, s.currentMb], [3800, 800, 3000, 800]);
-  assert.equal(s.peakAt, "2026-11-10T00:01:00.000Z");
-  assert.deepEqual(s.peakTop.map((p) => p.name), ["dotnet.exe", "testhost.exe"]);
-  // tree peaks later while the VM shrinks below its base: growth 0, peak stays the combined one
-  foldSample(s, block(1200, 1500), new Date("2026-11-10T00:02:00Z"));
-  assert.deepEqual([s.peakMb, s.treePeakMb, s.containerMb, s.currentMb], [3800, 1200, 3000, 1200]);
+  // tree peaks later while the VM shrinks below its base: growth 0
+  foldSample(s, block(1200, 1500, [[7, 1200, "dotnet.exe"]]), new Date("2026-11-10T00:02:00Z"));
+  assert.deepEqual([s.peakMb, s.treePeakMb, s.containerMb, s.currentMb, s.containerShared], [1200, 1200, 3000, 1200, false], "while running: the tree's peak");
+  const r = settlePeak(s);
+  assert.deepEqual([r.peakMb, r.peakFrom, r.treePeakMb, r.containerMb, r.containerShared], [3800, "tree+container", 1200, 3000, false]);
+  assert.equal(r.peakAt, "2026-11-10T00:01:00.000Z");
+  // a peak that is mostly VM growth says so in peakTop
+  assert.deepEqual(r.peakTop, [
+    { pid: null, name: "vmmemWSL growth", mb: 3000 },
+    { pid: 7, name: "dotnet.exe", mb: 700 },
+    { pid: 8, name: "testhost.exe", mb: 100 }
+  ]);
+  assert.equal("soloPeak" in r, false, "the working field is not recorded");
   assert.equal(s.sampling.samples, 3);
 });
 
-test("foldSample: no VM at run start counts from 0; an unreadable VM counts 0 and is counted in sampling.vmUnreadable", () => {
+test("settlePeak, overlap (owner 10 Nov: only when running alone): another holder at any sample keeps peakMb = the tree's; the growth is still recorded", () => {
+  const s = emptySummary(1000);
+  foldSample(s, block(500, 2000, [[7, 450, "dotnet.exe"]]), new Date("2026-11-10T00:00:00Z"));
+  foldSample(s, block(800, 5000, [[7, 700, "dotnet.exe"]]), new Date("2026-11-10T00:01:00Z"), { others: 1 });
+  foldSample(s, block(600, 5000, [[7, 600, "dotnet.exe"]]), new Date("2026-11-10T00:02:00Z"));
+  const r = settlePeak(s);
+  assert.deepEqual([r.peakMb, r.peakFrom, r.treePeakMb, r.containerMb, r.containerShared], [800, "tree", 800, 3000, true]);
+  assert.equal(r.peakAt, "2026-11-10T00:01:00.000Z");
+  assert.deepEqual(r.peakTop, [{ pid: 7, name: "dotnet.exe", mb: 700 }]);
+  // the class p95 reads peakMb: a shared run's container growth does not reach the declaration
+  assert.equal(summarizeHistory(Array.from({ length: 5 }, () => ({ class: "it", ...r })))[0].peakMb.p95, 800);
+});
+
+test("foldSample: no VM at run start counts from 0; an unreadable VM counts 0 and is counted in sampling.vmUnreadable; no growth leaves the tree's peak", () => {
   const s = emptySummary(1000);
   foldSample(s, block(100, -1));
   assert.deepEqual([s.containerMb, s.containerBaseMb, s.sampling.vmUnreadable], [null, null, 1]);
   foldSample(s, block(100, 0)); // WSL not running: base 0
   foldSample(s, block(100, 2500)); // Docker Desktop started by the run
-  assert.deepEqual([s.peakMb, s.containerMb, s.containerBaseMb, s.currentMb], [2600, 2500, 0, 100]);
-  // the class p95 reads peakMb, so the container share reaches the declaration
-  const rows = Array.from({ length: 5 }, () => ({ class: "it", peakMb: s.peakMb }));
-  assert.equal(summarizeHistory(rows)[0].peakMb.p95, 2600);
+  const r = settlePeak(s);
+  assert.deepEqual([r.peakMb, r.containerMb, r.containerBaseMb, r.currentMb], [2600, 2500, 0, 100]);
+  const flat = emptySummary(1000);
+  foldSample(flat, block(300, 900, [[5, 300, "node.exe"]]));
+  assert.deepEqual([settlePeak(flat).peakMb, settlePeak(flat).peakFrom, settlePeak(flat).peakTop.length], [300, "tree", 1]);
+  assert.equal(settlePeak(emptySummary(1000)).peakMb, null, "no sample: null, as before");
+});
+
+test("otherHolders: live slots of other pids count; this run's own slot, a dead pid's slot and a torn file do not", () => {
+  const dir = scratchDir("heavy-lock-holders-");
+  const dead = spawnSync(process.execPath, ["-e", "process.stdout.write(String(process.pid))"], { encoding: "utf8" });
+  fs.writeFileSync(path.join(dir, "own.json"), JSON.stringify({ pid: 4242424 }));
+  fs.writeFileSync(path.join(dir, "other.json"), JSON.stringify({ pid: process.pid }));
+  fs.writeFileSync(path.join(dir, "gone.json"), JSON.stringify({ pid: Number(dead.stdout) }));
+  fs.writeFileSync(path.join(dir, "torn.json"), "{\"pid\":");
+  fs.writeFileSync(path.join(dir, "note.txt"), JSON.stringify({ pid: process.pid }));
+  assert.equal(otherHolders(dir, 4242424), 1);
+  assert.equal(otherHolders(dir, process.pid), 0);
+  assert.equal(otherHolders(path.join(dir, "missing"), 1), 0);
+});
+
+test("live snapshot: the helper's SystemProcessInformation walk gives the same parents and names as toolhelp, and reads the VM", { skip: noSampler }, () => {
+  const r = snapshotCheck({ env: { ...process.env, MCP_HEAVY_LOCK_SAMPLER_CACHE: scratchDir("heavy-lock-cache-") } });
+  assert.ok(r.common > 20, JSON.stringify(r));
+  assert.deepEqual([r.parentDiff, r.nameDiff], [0, 0], JSON.stringify(r.diffs));
+  assert.ok(r.snapOnly + r.toolOnly <= Math.max(5, r.common * 0.05), `processes came and went between the two snapshots: ${JSON.stringify(r)}`);
+  assert.ok(r.vmBytes >= 0, "the VM line is a reading (0 when WSL is not running), not -2/-1");
 });
 
 test("helper self-heal: built once, then cached; a corrupt cached DLL is rebuilt; one that matches its sum but will not load is compiled in memory", { skip: noSampler }, () => {

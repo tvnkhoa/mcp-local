@@ -3,7 +3,7 @@
  * budget over one-at-a-time ("Khoá theo ngân sách RAM"); a budget needs numbers. So each run that takes
  * the lock through `heavy-lock.mjs` is measured and appended to `<lock>.history.jsonl`:
  * `{at, startedAt, repo, session, class, cost, ramMb, cmd, cwd, pid, durationMs, exit, peakMb, peakAt,
- * treePeakMb, containerMb, containerBaseMb, peakTop, sampling}`. `heavy-lock.mjs history [--class x] [--repo r] [--json]` prints p50/p95/max per class.
+ * peakFrom, treePeakMb, containerMb, containerBaseMb, containerShared, peakTop, sampling}`. `heavy-lock.mjs history [--class x] [--repo r] [--json]` prints p50/p95/max per class.
  *
  * Tree peak = the largest sum of working sets of the run's WHOLE process tree seen in one sample (the
  * container share below is added on top for `peakMb`). The tree is
@@ -18,15 +18,18 @@
  * Containers (row 10, 2026-11-10): Docker Desktop / Testcontainers on WSL2 run inside the VM process
  * vmmemWSL, outside every tree, so a .NET integration suite's tree undercounts it. Each sample also
  * reads vmmemWSL's working set; `containerMb` is its largest growth over the run's first sample
- * (`containerBaseMb`; a VM not running then counts from 0, shrinkage as 0), `treePeakMb` the tree
- * alone, and `peakMb` — what the class p50/p95/max and the p95 declaration read — the largest tree +
- * growth in one sample. Attribution rule for concurrent runs: each run is charged ALL VM growth inside
- * its own window, whoever caused it, so overlapping runs (or a container started outside the lock) may
- * each be charged the same growth — an over-count, never an under-count, which is the safe side for a
- * declaration; the VM growth is never split. Two limits: a VM that kept memory from an earlier run
- * (WSL returns freed guest memory slowly) can reuse it without growing, so growth can under-read a
- * container's use; and admission's measured `currentMb` stays the tree alone, so H-6b's budget is
- * unchanged. A VM the sampler cannot read counts 0 (`sampling.vmUnreadable` samples).
+ * (`containerBaseMb`; a VM not running then counts from 0, shrinkage as 0) and is recorded for every
+ * run. Attribution (owner, 10 Nov: "Chỉ tính khi chạy một mình (Recommended)"): the growth is folded
+ * into `peakMb` — what the class p50/p95/max and the p95 declaration read — as the largest tree + growth
+ * in one sample ONLY when no other holder was seen at any sample (`containerShared: false`); a run that
+ * overlapped another holder keeps `peakMb` = its tree peak (`containerShared: true`), since the growth
+ * cannot be told apart. `peakFrom` says which (`tree` / `tree+container`), `treePeakMb` is the tree
+ * alone, and a folded `peakTop` lists a `vmmemWSL growth` entry. Limits: a VM that kept memory from an
+ * earlier run (WSL returns freed guest memory slowly) can reuse it without growing, so growth can
+ * under-read; a container started outside the lock during a solo run is charged to it; a holder that
+ * came and went between two samples, or one of a heavy-lock version without slots, is not seen.
+ * Admission's measured `currentMb` stays the tree alone, so H-6b's budget is unchanged. A VM the
+ * sampler cannot read counts 0 (`sampling.vmUnreadable` samples).
  *
  * Sampling runs in a separate process (the CLI sits in spawnSync): a node sampler drives one
  * PowerShell that loads a small C# helper (one SystemProcessInformation snapshot for parents, names and
@@ -51,7 +54,7 @@ import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
 
-import { heavyLockPath, isPidAlive } from "./heavyLock.mjs";
+import { heavyLockHoldersDir, heavyLockPath, isPidAlive } from "./heavyLock.mjs";
 import { defaultClass, percentile, readCurrentMb, readHistoryRows } from "./heavyLockBudget.mjs";
 
 export { defaultClass, readCurrentMb };
@@ -197,6 +200,27 @@ public static class HeavyLockSampler {
     }
     return Run(parent, name, Read, vm);
   }
+  // Test hook: the snapshot against toolhelp on the live machine, as "C vm common snapOnly toolOnly
+  // parentDiff nameDiff". The two are taken a moment apart, so a process may be in one only; a pid in
+  // both must have the same parent and name (pid 0's name differs by design and is skipped).
+  public static string SnapshotCheck() {
+    var p1 = new Dictionary<int, int>(); var n1 = new Dictionary<int, string>();
+    long vm = Snapshot(p1, n1);
+    var p2 = new Dictionary<int, int>(); var n2 = new Dictionary<int, string>();
+    IntPtr snap = CreateToolhelp32Snapshot(2, 0);
+    var pe = new PE(); pe.dwSize = (uint)Marshal.SizeOf(typeof(PE));
+    if (Process32FirstW(snap, ref pe)) { do { p2[(int)pe.th32ProcessID] = (int)pe.th32ParentProcessID; n2[(int)pe.th32ProcessID] = pe.szExeFile; } while (Process32NextW(snap, ref pe)); }
+    CloseHandle(snap);
+    int common = 0, snapOnly = 0, parentDiff = 0, nameDiff = 0;
+    var sb = new StringBuilder();
+    foreach (var pid in p1.Keys) {
+      if (!p2.ContainsKey(pid)) { snapOnly++; continue; }
+      common++;
+      if (p1[pid] != p2[pid]) { parentDiff++; sb.Append("P ").Append(pid).Append('\n'); }
+      if (pid != 0 && !string.Equals(n1[pid], n2[pid], StringComparison.OrdinalIgnoreCase)) { nameDiff++; sb.Append("N ").Append(pid).Append(' ').Append(n1[pid]).Append('|').Append(n2[pid]).Append('\n'); }
+    }
+    return "C " + vm + " " + common + " " + snapOnly + " " + (p2.Count - common) + " " + parentDiff + " " + nameDiff + "\n" + sb.ToString();
+  }
   [DllImport("ntdll.dll")] static extern int NtQuerySystemInformation(int cls, IntPtr buf, int len, out int need);
   static IntPtr spi = IntPtr.Zero;
   static int spiLen = 0;
@@ -211,10 +235,14 @@ public static class HeavyLockSampler {
       if (IntPtr.Size != 8) return -2;
       int need, st;
       while (true) {
-        if (spiLen == 0) { spiLen = 1 << 20; spi = Marshal.AllocHGlobal(spiLen); }
+        if (spiLen == 0) { spi = Marshal.AllocHGlobal(1 << 20); spiLen = 1 << 20; }
         st = NtQuerySystemInformation(5, spi, spiLen, out need);
         if (st != unchecked((int)0xC0000004)) break; // STATUS_INFO_LENGTH_MISMATCH: grow and retry
-        Marshal.FreeHGlobal(spi); spiLen = Math.Max(need + (1 << 16), spiLen * 2); spi = Marshal.AllocHGlobal(spiLen);
+        int grow = Math.Max(need + (1 << 16), spiLen * 2);
+        // Forget the old buffer before allocating: a throw in AllocHGlobal leaves spiLen 0 (the next
+        // sample allocates afresh), never a freed pointer.
+        Marshal.FreeHGlobal(spi); spi = IntPtr.Zero; spiLen = 0;
+        spi = Marshal.AllocHGlobal(grow); spiLen = grow;
       }
       if (st != 0) return -2;
       long vm = 0; int off = 0;
@@ -329,6 +357,7 @@ const PS_LOOP = [
   "$out.Write('L ' + $how + $nl)",
   "[HeavyLockSampler]::Init([int]$env:HL_ROOT, [int]$env:HL_EXCLUDE, [long]$env:HL_START)",
   // Test mode: scripted process tables, one sample each, then exit.
+  "if ($env:HL_CHECK) { $out.Write([HeavyLockSampler]::SnapshotCheck()); $out.Flush(); exit 0 }",
   "if ($env:HL_TABLES) {",
   "  foreach ($t in ([IO.File]::ReadAllText($env:HL_TABLES) -split '(?m)^---\\s*$')) { $out.Write('T 0' + $nl + [HeavyLockSampler]::SampleTable($t) + 'E' + $nl) }",
   "  $out.Flush()",
@@ -379,7 +408,7 @@ export function samplingOff(env = process.env, platform = process.platform) {
 export function startSampler({ rootPid = process.pid, runStart = Date.now(), env = process.env, out = newSampleFile() } = {}) {
   const intervalMs = sampleIntervalMs(env);
   const off = samplingOff(env);
-  if (off !== null) return { stop: () => ({ ...emptySummary(intervalMs), sampling: { intervalMs, samples: 0, off } }) };
+  if (off !== null) return { stop: () => settlePeak({ ...emptySummary(intervalMs), sampling: { intervalMs, samples: 0, off } }) };
   cleanStaleSamples();
   let child = null;
   try {
@@ -412,7 +441,7 @@ export function startSampler({ rootPid = process.pid, runStart = Date.now(), env
       } catch {
         // left for cleanStaleSamples
       }
-      return summary ?? { ...emptySummary(intervalMs), sampling: { intervalMs, samples: 0 } };
+      return settlePeak(summary ?? { ...emptySummary(intervalMs), sampling: { intervalMs, samples: 0 } });
     }
   };
 }
@@ -481,34 +510,66 @@ export function sampleTables(tables, { root, exclude = 0, runStartMs = 0, env = 
   }
 }
 
+/**
+ * Test hook: the helper's process snapshot against toolhelp on this machine. Returns `{ vmBytes, common,
+ * snapOnly, toolOnly, parentDiff, nameDiff, diffs }`. Windows only.
+ */
+export function snapshotCheck({ env = process.env } = {}) {
+  const { cs, dll } = helperFiles(env);
+  const r = spawnSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-EncodedCommand", Buffer.from(PS_LOOP, "utf16le").toString("base64")], {
+    env: { ...env, HL_CS: cs, HL_DLL: dll, HL_ROOT: "0", HL_EXCLUDE: "0", HL_START: "0", HL_INTERVAL: "100", HL_CHECK: "1" },
+    encoding: "utf8",
+    windowsHide: true,
+    timeout: 60_000
+  });
+  if (r.status !== 0) throw new Error(`helper exit ${String(r.status)}: ${String(r.stderr)}`);
+  const text = r.stdout.replace(/\r/g, "");
+  const c = /^C (-?\d+) (\d+) (\d+) (\d+) (\d+) (\d+)$/m.exec(text);
+  if (c === null) throw new Error(`no check line: ${text.slice(0, 200)}`);
+  const [vmBytes, common, snapOnly, toolOnly, parentDiff, nameDiff] = c.slice(1).map(Number);
+  return { vmBytes, common, snapOnly, toolOnly, parentDiff, nameDiff, diffs: text.split("\n").filter((l) => /^[PN] /.test(l)) };
+}
+
 /** A sampler summary before its first sample. */
 export function emptySummary(intervalMs) {
   return {
     peakMb: null,
     peakAt: null,
+    peakTop: [],
+    peakFrom: null,
     treePeakMb: null,
     containerMb: null,
     containerBaseMb: null,
+    containerShared: false,
+    soloPeak: null,
     currentMb: null,
     currentAt: null,
-    peakTop: [],
     sampling: { intervalMs: Number(intervalMs), samples: 0, sampleMsAvg: null, sampleMsMax: null, firstSampleAfterMs: null }
   };
 }
 
 const MB = 1048576;
 
+const topOf = (lines) =>
+  lines
+    .map((line) => /^M (\d+) (\d+) (.*)$/.exec(line))
+    .filter(Boolean)
+    .map((m) => ({ pid: Number(m[1]), name: m[3], mb: Math.round(Number(m[2]) / MB) }))
+    .sort((x, y) => y.mb - x.mb)
+    .slice(0, 3);
+
 /**
  * Fold one helper sample (its "S count bytes", "V bytes" and "M pid ws name" lines) into `summary`.
- * Tree = the run's process tree. Container = the growth of the WSL2 VM's working set (vmmemWSL) since
- * the run's first readable sample: Docker / Testcontainers memory lives there, outside the tree. A VM
- * that was not running then counts from 0; shrinkage counts as 0. `peakMb` is the largest tree + growth
- * in one sample (what the class p95 reads); `treePeakMb` and `containerMb` (largest growth) are its
- * parts, each at its own peak. `currentMb` stays the tree alone: the growth is not this run's alone
- * (see the header), and H-6b admission adds `currentMb` back to free RAM, so counting it there could
- * count one growth twice. Returns false when the block holds no sample.
+ * Tree = the run's process tree: `peakMb` / `peakAt` / `peakTop` (= `treePeakMb`) while the run lasts.
+ * Container = the growth of the WSL2 VM's working set (vmmemWSL) since the run's first readable sample:
+ * Docker / Testcontainers memory lives there, outside the tree. A VM that was not running then counts
+ * from 0; shrinkage counts as 0. `containerMb` is the largest growth; `soloPeak` the largest tree +
+ * growth in one sample, which `settlePeak` makes the run's peak only if no other holder was seen
+ * (`others`, holders besides this run at this sample, sets `containerShared`). `currentMb` stays the tree
+ * alone: H-6b admission adds it back to free RAM, and the growth is not provably this run's. Returns
+ * false when the block holds no sample.
  */
-export function foldSample(summary, lines, at = new Date()) {
+export function foldSample(summary, lines, at = new Date(), { others = 0 } = {}) {
   const head = lines.map((l) => /^S (\d+) (\d+)$/.exec(l)).find(Boolean);
   if (!head) return false;
   const vmLine = lines.map((l) => /^V (-?\d+)$/.exec(l)).find(Boolean);
@@ -516,7 +577,7 @@ export function foldSample(summary, lines, at = new Date()) {
   const sampling = summary.sampling;
   sampling.samples++;
   sampling.treeMax = Math.max(sampling.treeMax ?? 0, Number(head[1]));
-  const treeBytes = Number(head[2]);
+  if (others > 0) summary.containerShared = true;
   let growth = 0;
   if (vm >= 0) {
     summary.containerBaseMb ??= Math.round(vm / MB);
@@ -525,30 +586,63 @@ export function foldSample(summary, lines, at = new Date()) {
   } else {
     sampling.vmUnreadable = (sampling.vmUnreadable ?? 0) + 1;
   }
-  const tree = Math.round(treeBytes / MB);
-  const mb = tree + growth;
+  const tree = Math.round(Number(head[2]) / MB);
   const iso = at.toISOString();
   // The latest sample: what the run's tree holds now (H-6b admission adds it back to free RAM).
   summary.currentMb = tree;
   summary.currentAt = iso;
-  summary.treePeakMb = Math.max(summary.treePeakMb ?? 0, tree);
-  if (summary.peakMb === null || mb > summary.peakMb) {
-    summary.peakMb = mb;
+  if (summary.peakMb === null || tree > summary.peakMb) {
+    summary.peakMb = tree;
+    summary.treePeakMb = tree;
     summary.peakAt = iso;
-    summary.peakTop = lines
-      .map((line) => /^M (\d+) (\d+) (.*)$/.exec(line))
-      .filter(Boolean)
-      .map((m) => ({ pid: Number(m[1]), name: m[3], mb: Math.round(Number(m[2]) / MB) }))
-      .sort((x, y) => y.mb - x.mb)
-      .slice(0, 3);
+    summary.peakTop = topOf(lines);
+    summary.peakFrom = "tree";
   }
+  if (summary.soloPeak === null || tree + growth > summary.soloPeak.mb) summary.soloPeak = { mb: tree + growth, at: iso, growthMb: growth, top: topOf(lines) };
   return true;
+}
+
+/**
+ * The run's record from its sampler summary (owner, 10 Nov: "Chỉ tính khi chạy một mình"): the VM growth
+ * is folded into `peakMb` only when this run was the sole holder at every sample; with any other holder
+ * seen, `peakMb` stays the tree's and the growth is only recorded (`containerMb`, `containerShared:
+ * true`). When folded, `peakTop` carries a `{pid: null, name: "vmmemWSL growth", mb}` entry beside the
+ * tree's top three, so a peak that is mostly VM growth says so. `peakFrom` names which peak it is.
+ */
+export function settlePeak(summary) {
+  const { soloPeak, ...rest } = summary;
+  if (soloPeak === null || soloPeak === undefined || rest.containerShared === true || !(soloPeak.mb > (rest.peakMb ?? -1))) return rest;
+  const vmEntry = { pid: null, name: "vmmemWSL growth", mb: soloPeak.growthMb };
+  return { ...rest, peakMb: soloPeak.mb, peakAt: soloPeak.at, peakTop: [...soloPeak.top, vmEntry].sort((x, y) => y.mb - x.mb), peakFrom: "tree+container" };
+}
+
+/**
+ * How many runs besides `rootPid` hold the lock now: slots (`<lock>.holders/*.json`) whose pid lives. A
+ * holder of a version without slots is not seen; a slot left by a dead pid is not counted.
+ */
+export function otherHolders(holdersDir, rootPid) {
+  let n = 0;
+  try {
+    for (const name of fs.readdirSync(holdersDir)) {
+      if (!name.endsWith(".json")) continue;
+      try {
+        const pid = Number(JSON.parse(fs.readFileSync(path.join(holdersDir, name), "utf8")).pid);
+        if (pid !== Number(rootPid) && isPidAlive(pid)) n++;
+      } catch {
+        // torn or being removed
+      }
+    }
+  } catch {
+    // no holders dir: nobody else
+  }
+  return n;
 }
 
 /** The sampler process: drive the PowerShell helper, keep the peak, rewrite the summary file after each sample. */
 async function runSampler([rootPid, runStart, out, intervalMs]) {
   const { cs, dll } = helperFiles();
   const summary = emptySummary(intervalMs);
+  const holdersDir = heavyLockHoldersDir(heavyLockPath(process.env));
   const write = () => {
     const tmp = `${out}.${randomUUID()}.tmp`;
     fs.writeFileSync(tmp, JSON.stringify(summary));
@@ -573,7 +667,7 @@ async function runSampler([rootPid, runStart, out, intervalMs]) {
       // The helper says once how it loaded: cached DLL, rebuilt, or compiled in memory.
       if (/^L \w+/.test(block[0] ?? "")) summary.sampling.helper = block.shift().slice(2);
       const took = Number(/^T (\d+)/.exec(block[0] ?? "")?.[1]);
-      if (!foldSample(summary, block.slice(1))) continue;
+      if (!foldSample(summary, block.slice(1), new Date(), { others: otherHolders(holdersDir, rootPid) })) continue;
       const sampling = summary.sampling;
       if (Number.isFinite(took)) {
         totalMs += took;
