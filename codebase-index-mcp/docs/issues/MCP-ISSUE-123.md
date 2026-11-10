@@ -182,6 +182,11 @@
   distinguishable killer, and classifying it would rest on git never exiting 0xFFFFFFFF itself — not done. A kill by the
   server (timeout, maxBuffer) is still named on Windows, as before. Probe and output:
   `~/.claude/handover/briefs/2026-11-10-mcp-local-stale-failed-probe.mjs`, `…-winkill-probe.log`.
+- **An awaited `dispose` held no handle (fixed 2026-11-10, a7a7e98; harness 1f820f1; found by CI 69ae7e7).** Row 7's unref of
+  the `stopWorker` fallback timer (0242d50) left `await dispose()` holding nothing, since the worker itself is unref'd. A
+  caller without its own ref'd handle exited 13 (test:freshness-worker (c) on CI). The timer is now ref'd for `dispose`
+  (bounded by `DEFAULT_DISPOSE_GRACE_MS`) and stays unref'd for `abortRun`. Test: `refreshWorkerClient.test.ts` "row 15"
+  (a child process), red on 1f820f1.
 
 ### Left open
 
