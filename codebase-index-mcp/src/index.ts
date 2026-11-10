@@ -418,10 +418,9 @@ const limits = { maxResultLimit: MAX_RESULT_LIMIT, maxDepth: MAX_DEPTH, maxFiles
 const loopWatchdog = startLoopWatchdog({ thresholdMs: LOOP_WATCHDOG_ENABLED ? LOOP_WATCHDOG_THRESHOLD_MS : 0 });
 
 const handle = createCodebaseIndexServer({
-  // Not SERVER_VERSION: the version on the wire has been "0.1.0" since before the package
-  // reached 0.3.0, and health_check reports the package one. Changing either is visible to
-  // clients, so they stay as they are.
-  version: "0.1.0",
+  // The package version, the same one health_check reports as serverVersion (owner, 10 Nov:
+  // "Doi thanh 0.3.0"). It was "0.1.0" on the wire before; smoke-test asserts the two agree.
+  version: SERVER_VERSION,
   limits,
   store,
   tools: buildTools({ limits, buildContext: buildHandlerContext, ensureFresh }),

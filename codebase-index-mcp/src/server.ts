@@ -59,9 +59,8 @@ export interface TelemetryConfig {
 
 export interface CodebaseIndexServerOptions {
   /**
-   * The version advertised over `initialize` — deliberately NOT the package version
-   * reported by `health_check`. The two have been different since before the migration
-   * and unifying them is a client-visible change, so it stays a separate decision.
+   * The version advertised over `initialize`: the package version, the same one
+   * `health_check` reports as `serverVersion`.
    */
   readonly version: string;
   readonly limits: DescriptorLimits;

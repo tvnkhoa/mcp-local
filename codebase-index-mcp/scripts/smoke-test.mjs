@@ -101,6 +101,13 @@ async function main() {
 
   const healthText = readTextContent(health);
 
+  // MCP-ISSUE-110: the version on the wire (initialize serverInfo) must equal the one health_check reports.
+  const wireVersion = client.getServerVersion()?.version;
+  const healthVersion = JSON.parse(healthText).serverVersion;
+  if (!wireVersion || wireVersion !== healthVersion) {
+    throw new Error(`initialize serverInfo.version (${wireVersion}) != health_check serverVersion (${healthVersion})`);
+  }
+
   console.log("HEALTH_CHECK_RESULT:");
   console.log(healthText);
 
