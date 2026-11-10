@@ -115,7 +115,7 @@ parentPort.on("message", (m) => {
   }
 });
 
-test("MCP-ISSUE-123 re-review D: a never-answering job held at the retire cap frees its slot when a retired worker exits", { timeout: 60_000 }, async () => {
+test("MCP-ISSUE-123 re-review D: a never-answering job held at the retire cap frees its slot when a retired worker exits", { timeout: 90_000 }, async () => {
   // Plain-JS fixture: SLOW is busy 600 ms then answers, HANG never answers (its event loop stays free, so it can close).
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pool-held-"));
   const fixture = path.join(dir, "fixture-worker.cjs");
@@ -144,11 +144,13 @@ parentPort.on("message", (m) => {
     const served = await Promise.race([after, new Promise((r) => setTimeout(() => r("stuck"), 20_000).unref())]);
     assert.notEqual(served, "stuck", "the queued job is served once the retired worker left (it waited until dispose before)");
     // It may itself time out on the fresh worker's cold start (100 ms); once the workers settle the pool answers again.
-    // Leader review: a fixed 1.5 s wait was load-sensitive (a fresh worker's start under load outlived it); poll instead.
+    // Leader review: a fixed 1.5 s wait was load-sensitive. Under load a fresh worker starts slower than the 100 ms job
+    // timeout, and each timed-out probe swaps in ANOTHER cold worker — so probes back off (0.5, 1, 2, 4 s …) to give the
+    // newest worker time to load before the next probe's clock starts.
     let again = "";
-    for (const deadline = Date.now() + 30_000; again !== "ok" && Date.now() < deadline; ) {
+    for (let wait = 500, deadline = Date.now() + 40_000; again !== "ok" && Date.now() < deadline; wait = Math.min(wait * 2, 8000)) {
       again = (await job("export const b = 2;\n")).status;
-      if (again !== "ok") await new Promise((r) => setTimeout(r, 250));
+      if (again !== "ok") await new Promise((r) => setTimeout(r, wait));
     }
     assert.equal(again, "ok", "the pool answers again");
   } finally {
