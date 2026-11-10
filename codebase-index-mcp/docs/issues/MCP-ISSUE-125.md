@@ -1,7 +1,7 @@
 ## MCP-ISSUE-125 — freshness load flakes: two test bounds, and parallel reads served one after another past the budget
 
-- **Status:** ✅ FIXED 2026-11-10 for (1) and (2) (test bounds, row 3). (3) explained, not a gate defect; a config
-  option is with the owner.
+- **Status:** ✅ FIXED 2026-11-10 for (1) and (2) (test bounds, row 3). (3) explained, not a gate defect; the owner
+  kept the 5000 ms budget (10 Nov, option A).
 - **Scenario:** on 5 Nov a loaded `run-tests --changed` failed `freshness.test.ts` "MCP-ISSUE-101 F3 …" (×3) and
   `test:freshness-worker`; both passed alone. On 10 Nov (IX-1, wec.aria) four parallel reads on a stale `mcp-local`
   index reported `freshness.waitedMs` 4976 / 5088 / 5110 / 5148 against the 5000 ms budget.
@@ -45,7 +45,8 @@
   `bitbucket-mcp/src` is the heavy one).
 - **Why not capped:** a single server thread cannot answer n reads at one instant. Answering joiners early would only
   move the overrun into the handler.
-- **Option (needs owner, config only):** set `CODEBASE_INDEX_QUERY_REFRESH_BUDGET_MS` to 4500 on the served process,
-  if wec.aria's ≤ 5 s target must hold for 4 parallel reads on a stale index. Recommended: keep 5000 and accept the
-  ≤ 150 ms overrun as the handlers' own time.
+- **Decision (owner, 10 Nov, "Giữ 5000 ms (Recommended)"):** keep `CODEBASE_INDEX_QUERY_REFRESH_BUDGET_MS` at 5000
+  and accept an overrun of up to about 150 ms on parallel reads, which is the handlers' own time. The rejected option was
+  4500 on the served process, which would hold wec.aria's ≤ 5 s target for 4 parallel reads on a stale index. No config
+  change.
 - **Workaround used:** none. No baseline fallback; the diagnosis used codebase-index tools and the harness logs.
