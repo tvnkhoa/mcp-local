@@ -25,7 +25,7 @@
  */
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
-import { writeFileSync, mkdirSync } from "node:fs";
+import { writeFileSync, mkdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { makeTempDir } from "./_fixtures.mjs";
 import { buildRepoResources } from "../../dist/resources/resourceHandler.js";
@@ -81,7 +81,8 @@ try {
 
   const version = client.getServerVersion();
   assert(version?.name === "codebase-index-mcp", "server name unchanged", JSON.stringify(version));
-  assert(version?.version === "0.1.0", "advertised protocol-level version unchanged", JSON.stringify(version));
+  const packageVersion = JSON.parse(readFileSync(new URL("../../package.json", import.meta.url), "utf8")).version;
+  assert(version?.version === packageVersion, "advertised protocol-level version equals package.json version", `${JSON.stringify(version)} vs package ${packageVersion}`);
 
   // ── tools/list ───────────────────────────────────────────────────────────────
   const listed = (await client.listTools()).tools;
