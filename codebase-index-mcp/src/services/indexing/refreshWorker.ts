@@ -122,6 +122,8 @@ export function attachRefreshWorker(port: RefreshWorkerPort, deps: RefreshWorker
   let parsePoolIdle: NodeJS.Timeout | undefined;
   /** MCP-ISSUE-123 (review #1, #3): set by `exit`; no pool, run or write starts after it. */
   let exiting = false;
+  /** Re-review E: set by the first `exit` — the pool it disposed and the once-only exit. */
+  let exitState: { pool: ExtractionWorkerPool | null; exitOnce: () => void; shutdown: boolean } | null = null;
   /** The run in flight, if any: its abort switch and its settlement. */
   let current: { abort: AbortController; settled: Promise<void> } | null = null;
   const warmParsePool = (limits: IndexRunnerLimits): ExtractionWorkerPool => {
@@ -172,7 +174,16 @@ export function attachRefreshWorker(port: RefreshWorkerPort, deps: RefreshWorker
       // batch boundary and records itself cancelled with no commit (indexRunner `recordAborted`). Exit waits for both.
       // Re-review E: at shutdown both waits are bounded — the pool's by its shutdown grace, the run's by a timer. The timer
       // fires between two turns of JavaScript, so this thread is in no native call (an inline parse) when it exits.
-      if (exiting) return;
+      // Leader review (1): a shutdown `exit` that arrives while an abort's `exit` is still waiting UPGRADES it — the pool's
+      // running graces are shortened (a second dispose) and the exit timer starts — instead of being dropped.
+      if (exitState) {
+        if (request.shutdown && !exitState.shutdown) {
+          exitState.shutdown = true;
+          setTimeout(exitState.exitOnce, SHUTDOWN_WORKER_EXIT_MS).unref();
+          void exitState.pool?.dispose({ graceMs: SHUTDOWN_RETIRE_GRACE_MS });
+        }
+        return;
+      }
       exiting = true;
       current?.abort.abort();
       if (parsePoolIdle) clearTimeout(parsePoolIdle);
@@ -184,6 +195,7 @@ export function attachRefreshWorker(port: RefreshWorkerPort, deps: RefreshWorker
         exited = true;
         exit(0);
       };
+      exitState = { pool, exitOnce, shutdown: request.shutdown === true };
       if (request.shutdown) setTimeout(exitOnce, SHUTDOWN_WORKER_EXIT_MS).unref();
       void Promise.allSettled([
         pool ? pool.dispose(request.shutdown ? { graceMs: SHUTDOWN_RETIRE_GRACE_MS } : {}) : Promise.resolve(),

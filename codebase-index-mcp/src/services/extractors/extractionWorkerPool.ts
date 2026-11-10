@@ -68,6 +68,8 @@ export type ExtractionWorkerPoolOptions = {
   /** The worker script (a test's fixture). Default: `extractionWorker.js` beside this module. */
   workerUrl?: URL;
   retireGraceMs?: number;
+  /** Review #5: the respawn window (default `RESPAWN_WINDOW_MS`) — a test seam. */
+  respawnWindowMs?: number;
   /** Review #5: where a dead slot is reported. Default: one JSON line on stderr. */
   onSlotDead?: (event: SlotDeadEvent) => void;
 };
@@ -101,6 +103,7 @@ export class ExtractionWorkerPool {
   private readonly workerUrl: URL;
   private readonly retireGraceMs: number;
   private readonly onSlotDead: (event: SlotDeadEvent) => void;
+  private readonly respawnWindowMs: number;
   /** Running retire grace timers by worker, so a shutdown dispose can shorten the ones already started. */
   private readonly graceTimers = new Map<Worker, { started: number; timer: NodeJS.Timeout; fire: () => void }>();
   private disposed = false;
@@ -112,6 +115,7 @@ export class ExtractionWorkerPool {
   ) {
     this.workerUrl = options.workerUrl ?? defaultWorkerUrl();
     this.retireGraceMs = options.retireGraceMs ?? DEFAULT_RETIRE_GRACE_MS;
+    this.respawnWindowMs = options.respawnWindowMs ?? RESPAWN_WINDOW_MS;
     this.onSlotDead =
       options.onSlotDead ??
       ((event) => {
@@ -226,7 +230,7 @@ export class ExtractionWorkerPool {
     state.failed = false;
     if (this.disposed) return;
     const now = Date.now();
-    state.respawnTimes = state.respawnTimes.filter((t) => now - t < RESPAWN_WINDOW_MS);
+    state.respawnTimes = state.respawnTimes.filter((t) => now - t < this.respawnWindowMs);
     if (state.respawnTimes.length < MAX_RESPAWNS_PER_WINDOW) {
       state.respawnTimes.push(now);
       this.spawnInto(state);
@@ -239,7 +243,7 @@ export class ExtractionWorkerPool {
       this.onSlotDead({
         slot: this.workers.indexOf(state),
         respawns: state.respawnTimes.length,
-        windowMs: RESPAWN_WINDOW_MS,
+        windowMs: this.respawnWindowMs,
         reason,
         deadSlots: this.deadSlots,
         size: this.size
@@ -253,7 +257,7 @@ export class ExtractionWorkerPool {
   }
 
   private degradedMessage(): string {
-    return `parse pool degraded: every parse worker kept exiting on its own (more than ${String(MAX_RESPAWNS_PER_WINDOW)} respawns in ${String(RESPAWN_WINDOW_MS / 1000)} s per slot)`;
+    return `parse pool degraded: every parse worker kept exiting on its own (more than ${String(MAX_RESPAWNS_PER_WINDOW)} respawns in ${String(this.respawnWindowMs / 1000)} s per slot)`;
   }
 
   /**

@@ -163,3 +163,23 @@ test("MCP-ISSUE-123 re-review E: a normal exit (abortRun) keeps the pool's full 
   t.mock.timers.tick(60 * 60_000);
   assert.deepEqual(counts.exits, [], "the exit still waits for the run and the pool");
 });
+
+test("MCP-ISSUE-123 re-review E (leader review 1): a shutdown exit after an abort's exit upgrades it — bounded, not dropped", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const never = deferred();
+  const { port, counts } = harness(async (_extras, sharedParsePool) => {
+    sharedParsePool?.();
+    await never.promise;
+    return { runId: "x", status: "cancelled" } as IndexRunResult;
+  });
+  port.send({ kind: "run", id: 1 });
+  for (let i = 0; i < 5; i++) await Promise.resolve();
+  port.send({ kind: "exit", id: 0 }); // abortRun
+  t.mock.timers.tick(10_000);
+  port.send({ kind: "exit", id: 0, shutdown: true }); // server shutdown 10 s later
+  assert.deepEqual(counts.disposeOptions, [{}, { graceMs: SHUTDOWN_RETIRE_GRACE_MS }], "the pool's running graces are shortened");
+  t.mock.timers.tick(SHUTDOWN_WORKER_EXIT_MS - 1);
+  assert.deepEqual(counts.exits, []);
+  t.mock.timers.tick(1);
+  assert.deepEqual(counts.exits, [0], "the thread exits SHUTDOWN_WORKER_EXIT_MS after the shutdown request");
+});

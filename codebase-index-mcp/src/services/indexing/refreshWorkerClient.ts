@@ -99,6 +99,8 @@ export class RefreshWorkerClient {
   private readonly spawn: SpawnRefreshWorker;
   /** Workers whose 'exit' already fired (MCP-ISSUE-123: stopping one must not wait for it again). */
   private readonly exitedWorkers = new WeakSet<RefreshWorkerLike>();
+  /** Workers asked to exit and not gone yet (an `abortRun`'s): `dispose` must bound them too (leader review (1)). */
+  private readonly stopping = new Set<RefreshWorkerLike>();
   /** Times the worker has been spawned — exposed for tests. */
   spawned = 0;
 
@@ -215,7 +217,12 @@ export class RefreshWorkerClient {
   async dispose(): Promise<void> {
     const worker = this.worker;
     this.fail(new Error("the refresh worker was shut down"));
-    if (worker) await this.stopWorker(worker, this.options.disposeGraceMs ?? DEFAULT_DISPOSE_GRACE_MS, true);
+    // Leader review (1): a worker still being stopped by `abortRun` (already detached from `this.worker`) gets the
+    // shutdown `exit` too — the worker upgrades its pending exit — and this call's 35 s fallback, not the abort's 5.5 min.
+    const targets = new Set<RefreshWorkerLike>(this.stopping);
+    if (worker) targets.add(worker);
+    const graceMs = this.options.disposeGraceMs ?? DEFAULT_DISPOSE_GRACE_MS;
+    await Promise.all([...targets].map((target) => this.stopWorker(target, graceMs, true)));
   }
 
   /**
@@ -231,12 +238,14 @@ export class RefreshWorkerClient {
         if (settled) return;
         settled = true;
         if (grace) clearTimeout(grace);
+        this.stopping.delete(worker);
         resolve();
       };
       if (this.exitedWorkers.has(worker)) {
         done();
         return;
       }
+      this.stopping.add(worker);
       worker.on("exit", done);
       try {
         worker.postMessage({ kind: "exit", id: 0, dbPath: this.options.dbPath, limits: this.options.limits, repoId: "", repoPath: "", mode: "dirty", docsEnabled: false, maxFiles: 0, batchSize: 0, ...(shutdown && { shutdown: true }) });
@@ -246,6 +255,8 @@ export class RefreshWorkerClient {
       grace = setTimeout(() => {
         void worker.terminate().then(done, done);
       }, graceMs);
+      // The fallback timer alone never keeps the process alive (the worker itself is unref'd).
+      grace.unref?.();
     });
   }
 

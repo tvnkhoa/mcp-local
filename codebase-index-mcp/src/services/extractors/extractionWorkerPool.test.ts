@@ -140,11 +140,17 @@ parentPort.on("message", (m) => {
     const after = job("export const a = 1;\n");
     assert.equal((await slow).status, "timeout");
     assert.equal((await hang).status, "timeout");
-    const served = await Promise.race([after, new Promise((r) => setTimeout(() => r("stuck"), 5000))]);
+    // Before the fix it waited until dispose, so any bound shows it; 20 s leaves room for worker start-up under load.
+    const served = await Promise.race([after, new Promise((r) => setTimeout(() => r("stuck"), 20_000).unref())]);
     assert.notEqual(served, "stuck", "the queued job is served once the retired worker left (it waited until dispose before)");
     // It may itself time out on the fresh worker's cold start (100 ms); once the workers settle the pool answers again.
-    await new Promise((r) => setTimeout(r, 1500));
-    assert.equal((await job("export const b = 2;\n")).status, "ok", "the pool answers again");
+    // Leader review: a fixed 1.5 s wait was load-sensitive (a fresh worker's start under load outlived it); poll instead.
+    let again = "";
+    for (const deadline = Date.now() + 30_000; again !== "ok" && Date.now() < deadline; ) {
+      again = (await job("export const b = 2;\n")).status;
+      if (again !== "ok") await new Promise((r) => setTimeout(r, 250));
+    }
+    assert.equal(again, "ok", "the pool answers again");
   } finally {
     await pool.dispose();
     fs.rmSync(dir, { recursive: true, force: true });
@@ -162,6 +168,7 @@ function fixtureWorker(prefix: string, body: string): { url: URL; cleanup: () =>
 const ANSWER = `parentPort.on("message", (m) => {
   if (m.type === "close") { parentPort.close(); return; }
   if (m.input.source === "DIE") process.exit(3);
+  if (m.input.source === "EXIT0") process.exit(0);
   if (m.input.source === "SPIN") { for (;;) {} }
   parentPort.postMessage({ id: m.id, status: "ok", output: { symbols: [], edges: [] }, parseMs: 0 });
 });`;
@@ -244,5 +251,37 @@ test("MCP-ISSUE-123 re-review E: dispose({ graceMs }) terminates a worker that n
     assert.equal(pool.retiringCount, 0);
   } finally {
     fx.cleanup();
+  }
+});
+
+test("MCP-ISSUE-123 review #5 (leader nits): exit code 0 mid-job answers the job and respawns; the window expires; a degraded pool answers queued jobs", { timeout: 90_000 }, async () => {
+  const fx = fixtureWorker("pool-respawn2-", ANSWER);
+  const storm = fixtureWorker("pool-storm2-", `throw new Error("boom at start");`);
+  const { ExtractionWorkerPool, MAX_RESPAWNS_PER_WINDOW } = await import(poolModule);
+  const pool = new ExtractionWorkerPool(1, 30_000, { workerUrl: fx.url, respawnWindowMs: 1500, onSlotDead: () => undefined });
+  const degraded = new ExtractionWorkerPool(1, 30_000, { workerUrl: storm.url, onSlotDead: () => undefined });
+  try {
+    // A worker exiting with code 0 in a job (ignored before: the job hung until its timeout).
+    const zero = await within(pool.extract(job("EXIT0")), 10_000);
+    assert.notEqual(zero, "stuck", "a code-0 exit answers the job");
+    assert.equal((zero as { status: string }).status, "error");
+    // Fill the window (the EXIT0 respawn counts), let it expire, then die again: respawned, not dead.
+    for (let i = 1; i < MAX_RESPAWNS_PER_WINDOW; i++) assert.equal((await pool.extract(job("DIE"))).status, "error");
+    await new Promise((r) => setTimeout(r, 1700));
+    assert.equal((await pool.extract(job("DIE"))).status, "error");
+    assert.equal(pool.deadSlots, 0, "respawns older than the window no longer count");
+    const next = await within(pool.extract(job("export const a = 1;\n")), 10_000);
+    assert.equal((next as { status: string }).status, "ok", "the slot keeps serving after the window expired");
+
+    // Jobs queued while the slot burns through its respawns are all answered once the pool degrades.
+    const queued = await within(Promise.all([0, 1, 2, 3].map((i) => degraded.extract(job(`export const q${String(i)} = 1;\n`)))), 15_000);
+    assert.notEqual(queued, "stuck", "no queued job is left waiting");
+    assert.deepEqual((queued as { status: string }[]).map((r) => r.status), ["error", "error", "error", "error"]);
+    assert.equal(degraded.degraded, true);
+  } finally {
+    await pool.dispose();
+    await degraded.dispose();
+    fx.cleanup();
+    storm.cleanup();
   }
 });

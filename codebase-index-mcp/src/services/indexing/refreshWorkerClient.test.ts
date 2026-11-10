@@ -35,6 +35,13 @@ class FakeWorker extends EventEmitter implements RefreshWorkerLike {
   }
 }
 
+/**
+ * The client's terminate fallback timer is unref'd (leader review 1), and a fake worker is no handle: without this the
+ * loop would empty while a test awaits that fallback. Real setInterval — mock timers here only fake setTimeout.
+ */
+const keepAlive = setInterval(() => undefined, 1000);
+test.after(() => clearInterval(keepAlive));
+
 /** MCP-ISSUE-123: these fakes ignore the `exit` request, so the client terminates them after this grace. */
 const GRACE = { abortGraceMs: 20, disposeGraceMs: 20 };
 
@@ -385,4 +392,35 @@ test("MCP-ISSUE-123 re-review E: a worker that never leaves its job is terminate
   t.mock.timers.tick(DEFAULT_ABORT_GRACE_MS);
   await rejected;
   assert.equal(workers[1].terminated, true);
+});
+
+test("MCP-ISSUE-123 re-review E (leader review 1): shutdown 10 s into an abortRun is bounded by the dispose grace", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const workers: FakeWorker[] = [];
+  const client = new RefreshWorkerClient({
+    dbPath: "/tmp/index.db",
+    limits: LIMITS,
+    spawn: () => {
+      const w = new FakeWorker();
+      workers.push(w);
+      return w;
+    }
+  });
+  const job = client.run("repo-a", "/repo/a", "full", true, 100, 50, { runId: "job-1" });
+  const rejected = assert.rejects(job, /stopped/);
+  let aborted = false;
+  void client.abortRun("job-1", "stopped").then(() => (aborted = true));
+  t.mock.timers.tick(10_000);
+  let disposed = false;
+  void client.dispose().then(() => (disposed = true));
+  const exits = workers[0].requests.filter((r) => r.kind === "exit").map((r) => r.shutdown === true);
+  assert.deepEqual(exits, [false, true], "the worker being aborted is sent the shutdown exit too");
+  t.mock.timers.tick(DEFAULT_DISPOSE_GRACE_MS);
+  for (let i = 0; i < 10; i++) await Promise.resolve();
+  assert.equal(workers[0].terminated, true, "terminated by the 35 s bound, not the 5.5 min abort grace");
+  assert.equal(disposed, true);
+  workers[0].emit("exit", 1); // a real Worker's terminate ends in 'exit', which settles the abort's wait too
+  for (let i = 0; i < 10; i++) await Promise.resolve();
+  assert.equal(aborted, true);
+  await rejected;
 });
