@@ -396,6 +396,8 @@ export function createIndexRunner(options: IndexRunnerOptions): RunIndexAndResol
    * MCP-ISSUE-123: record a run stopped by `extras.abortSignal` as `cancelled` with no commit (the G1 rule below: a
    * run that is no base records none), keep the pending re-index set, and end the session as a finished run would.
    */
+  /** Whether this run is on record yet; the post-phase guard below records it failed when it is not. */
+  let runRecorded = false;
   const recordAborted = (partial: IndexRunSummary): IndexRunSummary => {
     const aborted: IndexRunSummary = {
       ...partial,
@@ -406,6 +408,7 @@ export function createIndexRunner(options: IndexRunnerOptions): RunIndexAndResol
       scope: `${partial.scope ? `${partial.scope}; ` : ""}aborted: no commit recorded`
     };
     store.recordRun(aborted);
+    runRecorded = true;
     if (!deferSessionEnd) store.endIndexSession(false);
     progress.stop(`⚠ index ${repoId} · aborted · ${String(aborted.filesIndexed)} files · no commit recorded`);
     return aborted;
@@ -449,6 +452,11 @@ export function createIndexRunner(options: IndexRunnerOptions): RunIndexAndResol
     return escalateToFull(summary.scopeEscalation);
   }
   if (gitScope) summary.scope = summary.scope ? `${summary.scope}; ${gitScope}` : gitScope;
+  // MCP-ISSUE-123 re-review B follow-up: the pipeline wrote this run's files and recorded nothing; a throw from here to
+  // the record below (a call outside the per-pass try/catch) used to record no run at all, so the previous ok run at
+  // HEAD stayed the base over a part-resolved graph. It is recorded failed, with no commit (the next run is full).
+  // The post-phase body is deliberately not re-indented under this try, to keep its history readable.
+  try {
   // Release K3: present on a scoped (non-escalated) run; absent means "run every pass repo-wide".
   const scopeInputs = mode !== "full" ? summary.scopeInputs : undefined;
   // Release K3: a scoped run that wrote and removed nothing left the graph as the last run left it, and
@@ -880,6 +888,7 @@ export function createIndexRunner(options: IndexRunnerOptions): RunIndexAndResol
     fullSummary.scope = `${fullSummary.scope ? `${fullSummary.scope}; ` : ""}HEAD moved during the run: no commit recorded`;
   }
   store.recordRun(fullSummary);
+  runRecorded = true;
   if (treeDirtyAtStart) store.markRunTreeDirty(fullSummary.runId);
   if (excludeRulesAtStart) store.markRunExcludeRules(fullSummary.runId, excludeRulesAtStart);
   // Whatever the refactor engine wrote has now been through the graph (MCP-ISSUE-042).
@@ -900,6 +909,27 @@ export function createIndexRunner(options: IndexRunnerOptions): RunIndexAndResol
   );
 
   return fullSummary;
+  } catch (error) {
+    if (!runRecorded) {
+      const message = error instanceof Error ? error.message : String(error);
+      try {
+        const { scopeInputs: _unused, ...partial } = summary;
+        store.recordRun({
+          ...partial,
+          status: "failed",
+          commitSha: null,
+          finishedAt: new Date().toISOString(),
+          elapsedMs: Date.now() - runStartedMs,
+          scope: `${partial.scope ? `${partial.scope}; ` : ""}failed in the post-phase: ${message}`
+        });
+        if (!deferSessionEnd) store.endIndexSession(false);
+      } catch {
+        // Recording is best-effort here; the original error is the one to surface.
+      }
+      progress.stop(`✗ index ${repoId} · failed · ${message}`);
+    }
+    throw error;
+  }
   };
 
   return (repoId, repoPath, mode, docsEnabled, maxFiles, batchSize, extras = {}) =>

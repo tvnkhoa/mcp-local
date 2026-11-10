@@ -280,3 +280,28 @@ test("MCP-ISSUE-123 re-review C: an abort during the resolve passes runs no furt
     assert.equal(store.getLatestRun("r")?.status, "cancelled");
   });
 });
+
+test("MCP-ISSUE-123 re-review B follow-up: a throw in the post-phase records the run failed with no commit, and the next incremental runs full", async () => {
+  await withRepo(async (store, repo, head) => {
+    assert.equal((await run(store, repo, "full")).status, "ok");
+    // A post-phase call outside the per-pass try/catch: the full run's FTS marker read, after its files were written.
+    const target = store as unknown as { getIndexMeta: (key: string) => string | null };
+    const getIndexMeta = target.getIndexMeta.bind(store);
+    target.getIndexMeta = () => {
+      throw new Error("database is locked (test)");
+    };
+    await assert.rejects(run(store, repo, "full"), /database is locked/);
+    target.getIndexMeta = getIndexMeta;
+    const failed = store.getLatestRun("r");
+    assert.equal(failed?.status, "failed", "the run is on record, not missing");
+    assert.equal(failed?.commitSha, null);
+    assert.match(String(failed?.scope), /post-phase/);
+
+    const next = await run(store, repo, "incremental");
+    const skipReason = (next as { skipReason?: string }).skipReason;
+    assert.equal(skipReason, undefined, `not fast-skipped (skipReason=${String(skipReason)})`);
+    assert.equal(next.mode, "full");
+    assert.equal(next.status, "ok");
+    assert.equal(next.commitSha, head);
+  });
+});
