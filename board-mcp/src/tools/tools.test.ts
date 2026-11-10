@@ -176,6 +176,22 @@ test("read tools map to the CLI and pass --json where the CLI will honour it", a
   }
 });
 
+test("status passes --summary only for profile nano with no unit and no today", async () => {
+  const cases: [Record<string, unknown>, string[]][] = [
+    [{ profile: "nano" }, ["status", "--summary", "--json"]],
+    [{ profile: "nano", unit: "screen--review-intent" }, ["status", "screen--review-intent", "--json"]],
+    [{ profile: "nano", today: true }, ["status", "--today", "--json"]],
+    [{ profile: "compact" }, ["status", "--json"]],
+    [{ profile: "standard" }, ["status", "--json"]],
+    [{ profile: "verbose" }, ["status", "--json"]]
+  ];
+  for (const [args, expected] of cases) {
+    const { isError, payload } = await call(config, "status", args);
+    assert.equal(isError, false, JSON.stringify(payload));
+    assert.deepEqual(argvOf(payload.text), expected, JSON.stringify(args));
+  }
+});
+
 test("status(unit) returns the RAW unit file beside the CLI text", async () => {
   const { payload } = await call(config, "status", { unit: "screen--review-intent" });
   assert.deepEqual(payload.unitFile, { id: "screen--review-intent", kind: "screen", phases: { P0: { state: "active" } } });

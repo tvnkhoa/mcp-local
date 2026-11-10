@@ -1221,7 +1221,7 @@
         "openWorldHint": false,
         "readOnlyHint": true
       },
-      "description": "Where every unit is and what is next (board.mjs status), or one unit with `unit`. With `unit`, also returns `unitFile`: the RAW checks/board/units/<id>.json — never interpreted; phase, waits and claims are what `text` says. `today: true` (→ --today): one line per unit with a claim, assign, report or accept in today's working day (04:00–04:00 local) — `by` keeps one session's.",
+      "description": "Where every unit is and what is next (board.mjs status), or one unit with `unit`. With `unit`, also returns `unitFile`: the RAW checks/board/units/<id>.json — never interpreted; phase, waits and claims are what `text` says. `profile: \"nano\"` without `unit` or `today` (→ --summary): the CLI's short summary (counts, claims, holds, offBoard, dueDiscoveries) instead of the whole board. `today: true` (→ --today): one line per unit with a claim, assign, report or accept in today's working day (04:00–04:00 local) — `by` keeps one session's.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {

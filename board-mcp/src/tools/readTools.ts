@@ -33,7 +33,7 @@ export function buildReadTools(config: BoardConfig, run: BoardRunner): readonly 
       name: "status",
       title: "Board status",
       description:
-        "Where every unit is and what is next (board.mjs status), or one unit with `unit`. With `unit`, also returns `unitFile`: the RAW checks/board/units/<id>.json — never interpreted; phase, waits and claims are what `text` says. `today: true` (→ --today): one line per unit with a claim, assign, report or accept in today's working day (04:00–04:00 local) — `by` keeps one session's.",
+        "Where every unit is and what is next (board.mjs status), or one unit with `unit`. With `unit`, also returns `unitFile`: the RAW checks/board/units/<id>.json — never interpreted; phase, waits and claims are what `text` says. `profile: \"nano\"` without `unit` or `today` (→ --summary): the CLI's short summary (counts, claims, holds, offBoard, dueDiscoveries) instead of the whole board. `today: true` (→ --today): one line per unit with a claim, assign, report or accept in today's working day (04:00–04:00 local) — `by` keeps one session's.",
       annotations: annotations.read(),
       inputSchema: schema.object({
         unit: schema.string("A unit id, e.g. screen--review-intent. Omit for every unit."),
@@ -54,7 +54,9 @@ export function buildReadTools(config: BoardConfig, run: BoardRunner): readonly 
       guards,
       handler: async (args) => {
         if (args.today === true) return callBoard(run, "status", ["--today", ...flag("by", args.by), ...JSON_FLAG], { parseJson: true });
-        const result = await callBoard(run, "status", [...(args.unit === undefined ? [] : [args.unit]), ...JSON_FLAG], { parseJson: true });
+        // nano with no unit and no today: the CLI's own summary (→ --summary); every other call is the full board.
+        const summary = args.profile === "nano" && args.unit === undefined ? ["--summary"] : [];
+        const result = await callBoard(run, "status", [...(args.unit === undefined ? [] : [args.unit]), ...summary, ...JSON_FLAG], { parseJson: true });
         if (!result.ok || args.unit === undefined || result.value.ok !== true) return result;
         const unitFile = await readUnitFile(config, args.unit);
         return ok(unitFile === undefined ? result.value : { ...result.value, unitFile });
