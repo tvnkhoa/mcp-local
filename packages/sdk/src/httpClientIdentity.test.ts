@@ -4,6 +4,7 @@
  */
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import http from "node:http";
 import { test } from "node:test";
 
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -16,7 +17,7 @@ import { createMcpServer } from "./createServer.js";
 import type { HttpTransportOptions } from "./httpTransport.js";
 import { annotations, defineTool } from "./defineTool.js";
 import { asText } from "./responses.js";
-import { parseNetstatClientPid, resolveProcessStartTime } from "./httpClientIdentity.js";
+import { UNSUPPORTED_PLATFORM, netstatOutcome, parseNetstatClientPid, resolveProcessStartTime } from "./httpClientIdentity.js";
 import { EMPTY_OBJECT_SCHEMA } from "./schema.js";
 
 const TOKEN = "t".repeat(40);
@@ -328,3 +329,169 @@ test("http: MCP-ISSUE-110 (3) re-resolution is throttled per session — no look
   }
 });
 
+
+/** A promise the test settles by hand. */
+function deferred<T>(): { promise: Promise<T>; settle: (value: T) => void } {
+  let settle: (value: T) => void = () => undefined;
+  const promise = new Promise<T>((resolve) => (settle = resolve));
+  return { promise, settle };
+}
+
+test("http: MCP-ISSUE-110 (3) concurrent callers share one in-flight re-resolution (no throttle)", async () => {
+  // identityRetryMs 0: only the sharing keeps this to one retry lookup. The initialize lookup is held until all five
+  // callers wait on it, so they resume together: one starts the retry, the other four must join it.
+  const initial = deferred<number | null>();
+  const retry = deferred<number | null>();
+  let lookups = 0;
+  const handle = await startServer(
+    {
+      identityRetryMs: 0,
+      resolveClientPid: () => (++lookups === 1 ? initial.promise : retry.promise),
+      resolveProcessStartTime: () => Promise.resolve("1000")
+    },
+    warnCapture([])
+  );
+  try {
+    const client = await connect(handle.httpPort()!);
+    const first = Array.from({ length: 5 }, () => client.callTool({ name: "whoami", arguments: {} }));
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    assert.equal(lookups, 1, "all five wait on the pending initialize lookup");
+    initial.settle(null);
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    // A caller arriving while the retry is still pending shares it too.
+    const late = client.callTool({ name: "whoami", arguments: {} });
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    assert.equal(lookups, 2, "initialize + exactly one retry while it is in flight");
+    // The shared retry fails too: no caller that waited on it starts another (retry window 0 notwithstanding).
+    retry.settle(null);
+    for (const result of await Promise.all([...first, late])) assert.equal(identityOf(result), null);
+    assert.equal(lookups, 2);
+    await client.close();
+  } finally {
+    initial.settle(null);
+    retry.settle(null);
+    await handle.stop();
+  }
+});
+
+test("http: MCP-ISSUE-110 (3) once identityRetryMs has elapsed, the next ownership call retries again", async () => {
+  let lookups = 0;
+  const handle = await startServer(
+    { identityRetryMs: 300, resolveClientPid: () => ((lookups += 1), Promise.resolve(null)), resolveProcessStartTime: () => Promise.resolve("1000") },
+    warnCapture([])
+  );
+  try {
+    const client = await connect(handle.httpPort()!);
+    const ask = () => client.callTool({ name: "whoami", arguments: {} });
+    await ask();
+    assert.equal(lookups, 2, "initialize + the first retry, at once");
+    await ask();
+    assert.equal(lookups, 2, "inside the window: none");
+    await new Promise((resolve) => setTimeout(resolve, 400));
+    await ask();
+    assert.equal(lookups, 3, "after the window: one more");
+    await client.close();
+  } finally {
+    await handle.stop();
+  }
+});
+
+/** One raw JSON-RPC POST on a fresh socket: the status, the session id header, the body, and the client-side port. */
+function rawCall(port: number, message: object, sessionId?: string): Promise<{ status: number; sessionId?: string; body: string; localPort: number }> {
+  return new Promise((resolve, reject) => {
+    let localPort = 0;
+    const req = http.request(
+      {
+        host: "127.0.0.1", port, path: "/mcp", method: "POST", agent: false,
+        headers: {
+          "content-type": "application/json",
+          accept: "application/json, text/event-stream",
+          authorization: `Bearer ${TOKEN}`,
+          ...(sessionId === undefined ? {} : { "mcp-session-id": sessionId, "mcp-protocol-version": "2025-03-26" })
+        }
+      },
+      (res) => {
+        let body = "";
+        res.setEncoding("utf8");
+        res.on("data", (chunk: string) => (body += chunk));
+        res.on("end", () => {
+          const id = res.headers["mcp-session-id"];
+          resolve({ status: res.statusCode ?? 0, ...(typeof id === "string" ? { sessionId: id } : {}), body, localPort });
+        });
+      }
+    );
+    req.on("socket", (socket) => socket.once("connect", () => (localPort = socket.localPort ?? 0)));
+    req.on("error", reject);
+    req.end(JSON.stringify(message));
+  });
+}
+
+test("http: MCP-ISSUE-110 (3) the retry looks up the ownership call's own socket, not the session's latest request", async () => {
+  // The initialize lookup stays pending while a whoami waits on it and another request arrives on another socket;
+  // then it resolves null and the whoami retries, from the whoami's socket.
+  const initial = deferred<number | null>();
+  const ports: number[] = [];
+  const handle = await startServer({
+    identityRetryMs: 0,
+    resolveClientPid: (remotePort) => (ports.push(remotePort), ports.length === 1 ? initial.promise : Promise.resolve(null)),
+    resolveProcessStartTime: () => Promise.resolve("1000")
+  });
+  try {
+    const port = handle.httpPort()!;
+    const init = await rawCall(port, {
+      jsonrpc: "2.0", id: 1, method: "initialize",
+      params: { protocolVersion: "2025-03-26", capabilities: {}, clientInfo: { name: "raw", version: "0" } }
+    });
+    assert.equal(init.status, 200);
+    const sid = init.sessionId!;
+    await rawCall(port, { jsonrpc: "2.0", method: "notifications/initialized" }, sid);
+    const asking = rawCall(port, { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "whoami", arguments: {} } }, sid);
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    const other = await rawCall(port, { jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "quick", arguments: {} } }, sid);
+    assert.equal(other.status, 200);
+    initial.settle(null);
+    const whoamiCall = await asking;
+    assert.equal(whoamiCall.status, 200);
+    assert.equal(ports.length, 2, "initialize + one retry");
+    assert.notEqual(whoamiCall.localPort, other.localPort);
+    assert.equal(ports[1], whoamiCall.localPort, "the retry used the ownership call's socket");
+  } finally {
+    initial.settle(null);
+    await handle.stop();
+  }
+});
+
+test("http: MCP-ISSUE-110 (3) netstat: killed at its timeout gives timeout, any other failure exec_failed, else the row", () => {
+  const row = "  TCP    127.0.0.1:54321        127.0.0.1:3100         ESTABLISHED     222";
+  assert.throws(() => netstatOutcome({ killed: true }, "", 54321, 3100), /^Error: timeout$/);
+  assert.throws(() => netstatOutcome({ killed: false }, row, 54321, 3100), /^Error: exec_failed$/);
+  assert.throws(() => netstatOutcome({}, row, 54321, 3100), /^Error: exec_failed$/);
+  assert.equal(netstatOutcome(null, row, 54321, 3100), 222);
+  assert.equal(netstatOutcome(null, row, 1, 3100), null);
+});
+
+test("http: MCP-ISSUE-110 (3) an unsupported platform warns once per process, then logs at debug", async () => {
+  const warned: unknown[] = [];
+  const debugged: unknown[] = [];
+  const capture: Logger = {
+    level: "debug",
+    debug: (message, fields) => { if (message === "http_identity_unresolved") debugged.push(fields); },
+    info: () => undefined,
+    warn: (message, fields) => { if (message === "http_identity_unresolved") warned.push(fields); },
+    error: () => undefined,
+    child: () => capture
+  };
+  const handle = await startServer(
+    { identityRetryMs: 0, resolveClientPid: () => Promise.reject(new Error(UNSUPPORTED_PLATFORM)), resolveProcessStartTime: () => Promise.resolve("1000") },
+    capture
+  );
+  try {
+    for (let i = 0; i < 3; i += 1) assert.equal((await whoamiOnce(handle.httpPort()!))[1], null);
+    assert.equal(warned.length, 1);
+    assert.equal((warned[0] as { reason: string }).reason, UNSUPPORTED_PLATFORM);
+    // 3 sessions, each an initialize lookup and one retry: 6 events, the first at warn.
+    assert.equal(debugged.length, 5);
+  } finally {
+    await handle.stop();
+  }
+});

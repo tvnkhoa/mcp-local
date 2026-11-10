@@ -22,6 +22,7 @@
  * hooks: a client going away is not the server going away.
  */
 
+import { AsyncLocalStorage } from "node:async_hooks";
 import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import http from "node:http";
 import type { AddressInfo } from "node:net";
@@ -137,13 +138,18 @@ interface Session {
   identity: Promise<string | null>;
   /** The presented bearer's sha256 (hex), part of the identity. */
   readonly bearer: string | null;
-  /** MCP-ISSUE-110 (3): the client port of this session's latest request — the socket a re-resolution looks up. */
+  /** MCP-ISSUE-110 (3): the client port of this session's latest request — a re-resolution's fallback outside a request. */
   lastRemotePort: number | undefined;
-  /** MCP-ISSUE-110 (3): no re-resolution before this time (0: the first one may run at once). */
+  /** MCP-ISSUE-110 (3): no re-resolution before this `performance.now()` (0: the first one may run at once). */
   nextIdentityRetryAt: number;
+  /** MCP-ISSUE-110 (3): a re-resolution is in flight; callers arriving now share it. */
+  identityRetrying?: boolean;
   /** MCP-ISSUE-103: when this session's store record was last refreshed (throttled, see `STORE_TOUCH_EVERY_MS`). */
   storeTouchedAt?: number;
 }
+
+/** MCP-ISSUE-110 (3): the client port of the HTTP request whose handling is running (its tool calls inherit it). */
+const requestPort = new AsyncLocalStorage<number | undefined>();
 
 /** A busy session refreshes its store record at most this often, so a crash (no shutdown) loses at most this much. */
 const STORE_TOUCH_EVERY_MS = 5 * 60 * 1000;
@@ -406,7 +412,8 @@ export async function startHttpTransport(
         session.storeTouchedAt = session.lastSeen;
         store.touch(sessionId);
       }
-      await session.transport.handleRequest(req, res, body);
+      // MCP-ISSUE-110 (3): the tool handlers this request starts see its socket's port (clientIdentity re-resolves from it).
+      await requestPort.run(req.socket.remotePort, () => session.transport.handleRequest(req, res, body));
       if (req.method === "DELETE") await closeSession(sessionId, "client_delete");
       return;
     }
@@ -472,21 +479,28 @@ export async function startHttpTransport(
     async clientIdentity(sessionId) {
       const session = sessions.get(sessionId);
       if (session === undefined) return undefined;
+      // The socket of the request asking now (it is open while that request is answered); else the session's latest.
+      const callerPort = requestPort.getStore() ?? session.lastRemotePort;
       const current = session.identity;
+      // A caller arriving while a re-resolution is in flight shares it.
+      const sharing = session.identityRetrying;
       let identity = await current.catch(() => null);
-      if (identity === null && sessions.get(sessionId) === session) {
+      if (identity === null && !sharing && sessions.get(sessionId) === session) {
         if (session.identity !== current) {
           // A re-resolution started while this caller waited: share it rather than start another.
           identity = await session.identity.catch(() => null);
-        } else if (Date.now() >= session.nextIdentityRetryAt) {
-          // MCP-ISSUE-110 (3): null is not for life — look again from the socket of the request asking now.
-          session.nextIdentityRetryAt = Date.now() + identityRetryMs;
-          const retry = lookupIdentity(session.lastRemotePort, session.bearer, () => sessionId, "retry");
+        } else if (performance.now() >= session.nextIdentityRetryAt) {
+          // MCP-ISSUE-110 (3): null is not for life — look again from the socket of the ownership call in flight.
+          // Monotonic clock: a wall-clock step back must not stall the next retry.
+          session.nextIdentityRetryAt = performance.now() + identityRetryMs;
+          const retry = lookupIdentity(callerPort, session.bearer, () => sessionId, "retry");
           session.identity = retry.identity;
+          session.identityRetrying = true;
           void retry.pid.then((pid) => {
             if (pid !== null && sessions.get(sessionId) === session) session.clientPid = pid;
           });
           identity = await retry.identity.catch(() => null);
+          session.identityRetrying = false;
         }
       }
       // A client that has exited no longer owns anything; its pid may be about to be reused.

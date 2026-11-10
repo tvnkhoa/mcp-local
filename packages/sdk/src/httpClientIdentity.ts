@@ -32,16 +32,32 @@ function windowsSystemExe(...relativeToSystem32: string[]): string {
   return path.win32.join(defaultEnvSource()["SystemRoot"] ?? "C:\\Windows", "System32", ...relativeToSystem32);
 }
 
+/**
+ * MCP-ISSUE-110 (3): the outcome of one netstat run — the client pid (null: no such row), or a throw with a coarse
+ * reason, `timeout` (killed at its timeout) or `exec_failed`; never the command line.
+ */
+export function netstatOutcome(error: { killed?: boolean } | null, stdout: string, remotePort: number, serverPort: number): number | null {
+  if (error !== null) throw new Error(error.killed === true ? "timeout" : "exec_failed");
+  return parseNetstatClientPid(stdout, remotePort, serverPort);
+}
+
+/** The pid behind a loopback client port; rejects `unsupported_platform` off win32 (netstat is the only source). */
 export function resolveClientPidViaNetstat(remotePort: number, serverPort: number): Promise<number | null> {
-  if (process.platform !== "win32") return Promise.resolve(null);
+  if (process.platform !== "win32") return Promise.reject(new Error(UNSUPPORTED_PLATFORM));
   return new Promise((resolve, reject) => {
     execFile(windowsSystemExe("NETSTAT.EXE"), ["-ano", "-p", "TCP"], { windowsHide: true, timeout: 10_000, maxBuffer: 16 * 1024 * 1024 }, (error, stdout) => {
-      // MCP-ISSUE-110 (3): a failed run rejects with a coarse reason (never the command line), logged by the caller.
-      if (error !== null) reject(new Error(error.killed ? "timeout" : "exec_failed"));
-      else resolve(parseNetstatClientPid(stdout, remotePort, serverPort));
+      try {
+        resolve(netstatOutcome(error, stdout, remotePort, serverPort));
+      } catch (cause) {
+        reject(cause as Error);
+      }
     });
   });
 }
+
+/** A lookup that cannot work on this platform: logged at warn once per process, at debug after that. */
+export const UNSUPPORTED_PLATFORM = "unsupported_platform";
+let unsupportedPlatformWarned = false;
 
 /**
  * MCP-ISSUE-108: a process's start time, as an opaque string; null when unknown. win32 asks PowerShell for the
@@ -110,7 +126,13 @@ export function createIdentityLookup(
   const reasonOf = (cause: unknown): string => (cause instanceof Error && /^[a-z_]{1,32}$/.test(cause.message) ? cause.message : "threw");
   return (remotePort, bearer, sessionIdOf, attempt) => {
     const unresolved = (step: "remote_port" | "client_pid" | "start_time", reason: string): null => {
-      logger.warn("http_identity_unresolved", { sessionId: sessionIdOf() ?? null, attempt, step, reason });
+      const fields = { sessionId: sessionIdOf() ?? null, attempt, step, reason };
+      // Not an anomaly but the platform: say it once, not for every session every retry window.
+      if (reason === UNSUPPORTED_PLATFORM && unsupportedPlatformWarned) logger.debug("http_identity_unresolved", fields);
+      else {
+        if (reason === UNSUPPORTED_PLATFORM) unsupportedPlatformWarned = true;
+        logger.warn("http_identity_unresolved", fields);
+      }
       return null;
     };
     const pid: Promise<number | null> =

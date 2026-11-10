@@ -54,17 +54,24 @@
   later ownership call, and the lookup ran exactly once per session (3/3 red before the fix). So any one failed step at
   initialize fixes the owner at the session id for the session's life — the 28 Oct signature. Which step failed on
   28 Oct is not recoverable (nothing was logged).
-- **Fix (2026-11-10, row 4, `packages/sdk/src/httpTransport.ts` + `httpClientIdentity.ts`, split out first as a pure move for the 600-line cap):** each request records its socket's client port on
-  the session; `clientIdentity()` (awaited only by `OWNERSHIP_TOOLS`) re-resolves a null identity from the port of the
-  latest request — the ownership call in flight, so its socket is still open. The first re-resolution runs at once,
-  later ones at most once per `identityRetryMs` (default 30 s) per session; concurrent callers share one in-flight
-  lookup; a call that does not ask never triggers one. Every failed step logs `http_identity_unresolved`
-  (warn) with `{sessionId, attempt: initialize|adopt|retry, step: remote_port|client_pid|start_time, reason}`; the
-  reason is coarse (`timeout`, `exec_failed`, `not_found`, `threw`) — no command line, no token. The default netstat
-  resolver now rejects with `timeout` / `exec_failed` instead of a silent null. The ownership rule is unchanged.
-- **Guarded:** `httpClientIdentity.test.ts` (the 108 identity tests moved there too) — re-resolution after a failed pid lookup (one lookup more, then none), after a
-  null start time, and the throttle (5 concurrent + 1 sequential calls in one window: 2 lookups, logged
-  `initialize`, `retry`; `quick` triggers none).
+- **Fix (2026-11-10, row 4, `packages/sdk/src/httpTransport.ts` + `httpClientIdentity.ts`, split out first as a pure
+  move for the 600-line cap):** each HTTP request is handled inside an `AsyncLocalStorage` holding its socket's client
+  port, which the tool calls it starts inherit. `clientIdentity()` (awaited only by `OWNERSHIP_TOOLS`) re-resolves a
+  null identity from the port of the ownership call in flight — its own socket, open while it is answered (the session's
+  latest request port is only the fallback outside a request). The first re-resolution runs at once, later ones at most
+  once per `identityRetryMs` (default 30 s, on the monotonic `performance.now()`) per session; callers that wait while
+  one is in flight share it and do not start another; a call that does not ask never triggers one. Every failed step
+  logs `http_identity_unresolved` (warn) with `{sessionId, attempt: initialize|adopt|retry,
+  step: remote_port|client_pid|start_time, reason}`; the reason is coarse (`timeout`, `exec_failed`, `not_found`,
+  `unsupported_platform`, `threw`) — no command line, no token. The netstat resolver rejects with `timeout` (killed at
+  its timeout) / `exec_failed` instead of a silent null, and with `unsupported_platform` off win32, which is logged at
+  warn once per process and at debug after that. The ownership rule is unchanged.
+- **Guarded:** `httpClientIdentity.test.ts` (the 108 identity tests moved there too): re-resolution after a failed pid
+  lookup and after a null start time; the throttle (2 lookups in one window, a third after it elapses); five callers
+  resuming together plus one arriving mid-retry share one lookup with the window at 0 (red with either sharing branch
+  removed: 6 and 3 lookups); the retry looks up the ownership call's own port while a later request on another socket is
+  the session's latest (red with the pre-review "latest request" port); netstat's timeout / exec_failed mapping; the
+  unsupported platform logged at warn once.
 - **Limits:** a client that stays unresolvable keeps the session-id owner, as before (fail closed); a preview made
   while the identity was null stays owned by that session id and does not move to the identity once resolved — the
   check accepts either, so the same session still applies it, but a restart loses it.
