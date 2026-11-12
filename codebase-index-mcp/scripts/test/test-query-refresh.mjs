@@ -2,7 +2,8 @@
  * R1 (wec.aria adoption plan, release B): the index is never silently stale.
  *
  * Over real stdio, against a real git repo:
- *   1. a commit is visible to the NEXT read query, with no index_repository in between;
+ *   1. a commit is visible to the next read queries, with no index_repository in between. IX-B: the first read
+ *      answers at once, `refreshing` with the run's mode, from the previous index; a later read answers from the run;
  *   2. an uncommitted edit is visible too (dirty-mode refresh);
  *   3. health_check shows the run was started by a query (`triggeredBy: "query"`);
  *   4. with a 0 ms budget the answer says it is not current (`freshness.state: "refreshing"`,
@@ -56,6 +57,21 @@ git(tmpDir, "add", ".");
 git(tmpDir, "commit", "-q", "-m", "one");
 
 const names = (r) => (r?.results ?? r?.symbols ?? r?.matches ?? []).map((s) => s.name);
+/**
+ * IX-B: a read with a previous index does not wait for the refresh it starts. Ask until the answer is current and return
+ * it, with the FIRST answer's freshness (the run that read started or joined, or none) as `firstFreshness`.
+ */
+async function untilCurrent(client, query) {
+  let first;
+  for (let i = 0; i < 240; i++) {
+    const r = js(await client.callTool({ name: "search_symbols", arguments: { repoId, query, strategy: "name", profile: "standard" } }));
+    if (i === 0) first = r?.freshness ?? null;
+    if (r?.freshness?.state !== "refreshing") return { ...r, firstFreshness: first };
+    await sleep(250);
+  }
+  return { firstFreshness: first };
+}
+const startedRun = (f, mode) => (f?.state === "refreshing" || f?.state === "refreshed") && f?.mode === mode;
 
 let client = await connect(tmpDir, 30_000, "test-query-refresh");
 try {
@@ -65,15 +81,15 @@ try {
   writeFileSync(join(tmpDir, "b.ts"), "export function betaTwo(): number {\n  return 2;\n}\n");
   git(tmpDir, "add", ".");
   git(tmpDir, "commit", "-q", "-m", "two");
-  const afterCommit = js(await client.callTool({ name: "search_symbols", arguments: { repoId, query: "betaTwo", strategy: "name", profile: "standard" } }));
-  assert(JSON.stringify(afterCommit).includes("betaTwo"), "a committed symbol is found by the next query, no index_repository", JSON.stringify(afterCommit)?.slice(0, 300));
-  assert(afterCommit?.freshness?.state === "refreshed" && afterCommit?.freshness?.mode === "incremental", "the answer says it refreshed (incremental)", JSON.stringify(afterCommit?.freshness));
+  const afterCommit = await untilCurrent(client, "betaTwo");
+  assert(JSON.stringify(afterCommit).includes("betaTwo"), "a committed symbol is found by the next queries, no index_repository", JSON.stringify(afterCommit)?.slice(0, 300));
+  assert(startedRun(afterCommit.firstFreshness, "incremental"), "the first answer says an incremental refresh started", JSON.stringify(afterCommit.firstFreshness));
 
   // 2. An uncommitted edit.
   writeFileSync(join(tmpDir, "c.ts"), "export function gammaThree(): number {\n  return 3;\n}\n");
-  const afterEdit = js(await client.callTool({ name: "search_symbols", arguments: { repoId, query: "gammaThree", strategy: "name", profile: "standard" } }));
-  assert(JSON.stringify(afterEdit).includes("gammaThree"), "an uncommitted edit is found by the next query", JSON.stringify(afterEdit)?.slice(0, 300));
-  assert(afterEdit?.freshness?.mode === "dirty", "via a dirty-mode refresh", JSON.stringify(afterEdit?.freshness));
+  const afterEdit = await untilCurrent(client, "gammaThree");
+  assert(JSON.stringify(afterEdit).includes("gammaThree"), "an uncommitted edit is found by the next queries", JSON.stringify(afterEdit)?.slice(0, 300));
+  assert(startedRun(afterEdit.firstFreshness, "dirty"), "via a dirty-mode refresh", JSON.stringify(afterEdit.firstFreshness));
 
   // 3. health_check names the trigger.
   const health = js(await client.callTool({ name: "health_check", arguments: { repoId } }));
@@ -119,13 +135,9 @@ try {
 const exact = (r, name) => (r?.symbols ?? r?.results ?? []).some((s) => s.name === name);
 const conf = (r) => (typeof r?.coverage === "string" ? r.coverage : r?.coverage?.confidence);
 async function settle(client, name) {
-  // Ask until the answer is current (no `refreshing`), then return it.
-  for (let i = 0; i < 60; i++) {
-    const r = js(await client.callTool({ name: "search_symbols", arguments: { repoId, query: name, strategy: "name", profile: "standard" } }));
-    if (r?.freshness?.state !== "refreshing") return r;
-    await sleep(250);
-  }
-  return null;
+  // Ask until the answer is current (no `refreshing`), then return it (with the first answer's freshness).
+  const r = await untilCurrent(client, name);
+  return r.firstFreshness === undefined ? null : r;
 }
 client = await connect(tmpDir, 30_000, "test-query-refresh-phantom");
 try {
@@ -140,7 +152,7 @@ try {
   assert(!exact(afterDelete, "probeUntrackedZq7"), "untracked file deleted: its symbol is gone", JSON.stringify(afterDelete)?.slice(0, 300));
   // Release J: the cleanup is a dirty run over the vanished path, not a whole-repo incremental re-hash
   // (3-6 s on wec.aria to remove one file), and its scope counts the removed file as a change.
-  assert(afterDelete?.freshness?.state === "refreshed" && afterDelete?.freshness?.mode === "dirty", "via a dirty cleanup run", JSON.stringify(afterDelete?.freshness));
+  assert(startedRun(afterDelete?.firstFreshness, "dirty"), "via a dirty cleanup run", JSON.stringify(afterDelete?.firstFreshness));
   const cleanupRun = js(await client.callTool({ name: "health_check", arguments: { repoId } }))?.latestRun;
   assert(/^scoped: 1 changed/.test(cleanupRun?.scope ?? ""), "the cleanup run's scope counts the deleted file", JSON.stringify(cleanupRun?.scope));
   const again = js(await client.callTool({ name: "search_symbols", arguments: { repoId, query: "probeUntrackedZq7", strategy: "name", profile: "standard" } }));
@@ -152,7 +164,7 @@ try {
   git(tmpDir, "checkout", "--", "a.ts");
   const afterRevert = await settle(client, "editedTrackedZq8");
   assert(!exact(afterRevert, "editedTrackedZq8"), "tracked edit reverted: its symbol is gone", JSON.stringify(afterRevert)?.slice(0, 300));
-  assert(afterRevert?.freshness?.mode === "dirty", "via a dirty cleanup run", JSON.stringify(afterRevert?.freshness));
+  assert(startedRun(afterRevert?.firstFreshness, "dirty"), "via a dirty cleanup run", JSON.stringify(afterRevert?.firstFreshness));
   assert(exact(await settle(client, "alphaOne"), "alphaOne"), "and the file's committed symbols are intact");
 } finally {
   await Promise.race([client.close().catch(() => {}), new Promise((r) => setTimeout(r, 3000))]);
@@ -195,7 +207,7 @@ try {
   assert(touched?.freshness === undefined && (await latestRunId(client)) === runAfterA, "touched, same bytes: fresh, no run", JSON.stringify(touched?.freshness));
   writeFileSync(join(tmpDir, "keyed.ts"), "export function keyedZq11(): number {\n  return 10;\n}\n");
   const edited = await settle(client, "keyedZq11");
-  assert(exact(edited, "keyedZq11") && edited?.freshness?.mode === "dirty", "a content change: one dirty run", JSON.stringify(edited?.freshness));
+  assert(exact(edited, "keyedZq11") && startedRun(edited?.firstFreshness, "dirty"), "a content change: one dirty run", JSON.stringify(edited?.firstFreshness));
   const runAfterEdit = await latestRunId(client);
   const again = js(await client.callTool({ name: "search_symbols", arguments: { repoId, query: "keyedZq11", strategy: "name", profile: "standard" } }));
   assert(again?.freshness === undefined && (await latestRunId(client)) === runAfterEdit, "and the next query is fresh with no second run", JSON.stringify(again?.freshness));
