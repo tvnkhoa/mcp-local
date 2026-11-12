@@ -125,6 +125,10 @@ try {
   assert(JSON.stringify(await runTargets("AlphaFirst")) === '["Alpha"]', "PY-3 self.run() in class AlphaFirst(Alpha, Zeta) → Alpha.run (base-list order)", await runTargets("AlphaFirst"));
   assert(callsTo("go", MRO, "total", P), "PY-3 Optional[Calculator] parameter → Calculator.total", goCalls("ZetaFirst"));
   assert(!edges.some((e) => e.fromFile === MRO && /^callee:(list|Optional)\./.test(e.toId)), "PY-3 list[...] / Optional[...] never become a receiver class", show((e) => e.fromFile === MRO));
+  // Stacked route decorators, one written twice: two routes, not three (the store has no unique key).
+  const routes = await sql(`select http_method as method, route_template as template, handler_name as handler from routes where repo_id = :repoId and replace(file_path, char(92), '/') = 'src/shop/api.py' order by http_method`);
+  assert(JSON.stringify(routes.map((r) => `${r.method} ${r.template} ${r.handler}`)) === '["GET /items items","POST /items items"]',
+    "PY-1 stacked FastAPI decorators → one route per distinct method, duplicates dropped", routes);
   const orphans = await sql(`select count(*) n from edges where repo_id = :repoId and from_id not like 'callee:%' and from_id not in (select symbol_id from symbols where repo_id = :repoId)`);
   assert(orphans[0]?.n === 0, "PY-1 a def under a syntax error (broken.py) leaves no edge without its source symbol", orphans);
 

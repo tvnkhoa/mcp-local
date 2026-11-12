@@ -191,7 +191,11 @@ export function extractGraphData(input: ExtractInput): ExtractOutput {
       literals = extractStringLiteralsImpl(input, root, LITERAL_POLICY);
     } else if (input.language === "python") {
       // PY-1: tree-sitter-python replaced the regex lane; routes keep the FastAPI decorator shapes.
-      extractPythonImpl(input, root, symbols, edges, routes, moduleSymbolId);
+      // `routes` has no unique key in the store, so the regex lane's dedupe stays: the same decorator twice on
+      // one handler must not become two rows.
+      const pythonRoutes: RouteRecord[] = [];
+      extractPythonImpl(input, root, symbols, edges, pythonRoutes, moduleSymbolId);
+      routes.push(...dedupeRoutes(pythonRoutes));
     } else if (input.language === "csharp") {
       extractCSharpSymbolsImpl(input, root, symbols, edges, moduleSymbolId, input.knownPackageNames);
       routes.push(...extractCSharpRoutesImpl(input, root, symbols));

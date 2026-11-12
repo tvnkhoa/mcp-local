@@ -205,7 +205,7 @@ function buildPythonBases(
   for (const r of rows) {
     const name = r.toId.startsWith("base:") ? r.toId.slice(5) : r.toName;
     if (!name) continue;
-    const classes = (candidateMap.get(name) ?? []).filter((c) => c.kind === "class" && c.symbolId !== r.classId);
+    const classes = pythonLookupFor(candidateMap).classes(name).filter((c) => c.symbolId !== r.classId);
     const base = pickBestNamedCandidate(classes, r.classFile, ["class"], importedFilesByFile.get(normalizeFilePath(r.classFile)));
     if (!base) continue;
     const list = bases.get(r.classId);
@@ -213,6 +213,50 @@ function buildPythonBases(
     else if (!list.includes(base.symbolId)) list.push(base.symbolId);
   }
   return bases;
+}
+
+type NamedCandidate = { symbolId: string; filePath: string; kind: string; parentSymbolId: string | null };
+
+/**
+ * Per-name views of one candidate map, built on first use and kept for as long as the map lives (one
+ * resolution context). Without them every dotted Python call site re-filtered the full candidate list of its
+ * owner and member names — near-quadratic for `__init__` / `get` / `run` on a large repo.
+ */
+const pythonLookups = new WeakMap<
+  CallResolutionContext["candidateMap"],
+  { classes: (name: string) => NamedCandidate[]; methodsByParent: (name: string) => Map<string, NamedCandidate> }
+>();
+
+function pythonLookupFor(candidateMap: CallResolutionContext["candidateMap"]) {
+  let lookup = pythonLookups.get(candidateMap);
+  if (!lookup) {
+    const classesByName = new Map<string, NamedCandidate[]>();
+    const methodsByName = new Map<string, Map<string, NamedCandidate>>();
+    lookup = {
+      classes: (name) => {
+        let list = classesByName.get(name);
+        if (!list) {
+          list = (candidateMap.get(name) ?? []).filter((c) => c.kind === "class");
+          classesByName.set(name, list);
+        }
+        return list;
+      },
+      methodsByParent: (name) => {
+        let byParent = methodsByName.get(name);
+        if (!byParent) {
+          byParent = new Map<string, NamedCandidate>();
+          // First per parent in candidate order — what `find` over the list returned.
+          for (const c of candidateMap.get(name) ?? []) {
+            if (c.kind === "method" && c.parentSymbolId && !byParent.has(c.parentSymbolId)) byParent.set(c.parentSymbolId, c);
+          }
+          methodsByName.set(name, byParent);
+        }
+        return byParent;
+      }
+    };
+    pythonLookups.set(candidateMap, lookup);
+  }
+  return lookup;
 }
 
 /** How many classes a Python member lookup visits up an inheritance chain before giving up. */
@@ -234,18 +278,18 @@ export function resolvePythonQualifiedCall(
   const ownerName = calleeName.slice(0, dot);
   const memberName = calleeName.slice(dot + 1);
   if (!ownerName || !memberName) return undefined;
-  const classes = (ctx.candidateMap.get(ownerName) ?? []).filter((c) => c.kind === "class");
-  const owner = pickBestNamedCandidate(classes, fromFile, ["class"], importedFiles);
+  const lookup = pythonLookupFor(ctx.candidateMap);
+  const owner = pickBestNamedCandidate(lookup.classes(ownerName), fromFile, ["class"], importedFiles);
   if (!owner) return undefined;
-  const members = (ctx.candidateMap.get(memberName) ?? []).filter((c) => c.kind === "method");
-  if (members.length === 0) return undefined;
+  const members = lookup.methodsByParent(memberName);
+  if (members.size === 0) return undefined;
   const queue = [owner.symbolId];
   const seen = new Set<string>();
   while (queue.length > 0 && seen.size < MAX_PYTHON_MRO_CLASSES) {
     const classId = queue.shift()!;
     if (seen.has(classId)) continue;
     seen.add(classId);
-    const hit = members.find((c) => c.parentSymbolId === classId);
+    const hit = members.get(classId);
     if (hit) return hit;
     queue.push(...(ctx.basesByClassId.get(classId) ?? []));
   }
