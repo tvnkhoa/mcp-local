@@ -59,7 +59,7 @@ async function main() {
   const { GraphStore } = await import(distUrl("repositories/graphStore.js"));
   const { RefreshWorkerClient } = await import(distUrl("services/indexing/refreshWorkerClient.js"));
   const { RefreshRuns, IndexJobQueue } = await import(distUrl("services/indexing/indexJobs.js"));
-  const { createFreshnessGate, freshnessStateDir } = await import(distUrl("middleware/freshness.js"));
+  const { createFreshnessGate, freshnessStateDir, markRepairNeeded, readRepairNeeded } = await import(distUrl("middleware/freshness.js"));
   const { handleIndexStatus } = await import(distUrl("tools/handlers/indexHandler.js"));
 
   /** The hung runs' deadline; a normal run gets the registry's (NORMAL_DEADLINE_MS: a cold worker loads grammars). */
@@ -98,14 +98,19 @@ async function main() {
     abortGraceMs: GRACE_MS,
     onRunLanded: () => store.invalidateProcessCaches()
   });
-  const refreshes = new RefreshRuns(NORMAL_DEADLINE_MS);
+  // As the server wires it: a deadline stop also writes the gate's durable repair flag.
+  const refreshes = new RefreshRuns(NORMAL_DEADLINE_MS, NORMAL_DEADLINE_MS, {
+    onDeadlineStop: ({ repoId, mode, at }) => void markRepairNeeded(lockDir, repoId, { mode, pid: process.pid, at })
+  });
   const jobs = new IndexJobQueue({ execute: async () => { throw new Error("no jobs here"); }, minFreeRamMb: 0, refreshes });
   // The DB-wide queue (`serialize`) is the gate's own; nothing else of the gate runs here.
   const gate = createFreshnessGate({ enabled: true, budgetMs: 100, lockDir, getRepoPath: () => repoPath, getIndexedCommit: () => null, readTree: async () => ({ head: null, dirty: [] }), run: async () => { throw new Error("unused"); } });
   const ctx = { store, indexJobs: jobs, asText: (body) => ({ content: [{ type: "text", text: JSON.stringify(body) }] }) };
   const status = (runId) => JSON.parse(handleIndexStatus({ runId }, ctx).content[0].text);
-  const refresh = (mode, source = "freshness_gate", deadlineMs = undefined) =>
-    gate.serialize("r", () =>
+  // As the gate does: a durable repair flag on disk makes the gate ask for a full run (and its full serialize clears it).
+  const refresh = (requested, source = "freshness_gate", deadlineMs = undefined) => {
+    const mode = readRepairNeeded(lockDir, "r") ? "full" : requested;
+    return gate.serialize("r", () =>
       refreshes.run({
         repoId: "r",
         mode,
@@ -115,6 +120,7 @@ async function main() {
         execute: (runId, runMode, onProgress, escalatedBecause) =>
           client.run("r", repoPath, runMode, false, 1000, 50, { runId, onProgress, ...(escalatedBecause && { escalatedBecause }) })
       }), mode);
+  };
   const edit = (i) => writeFileSync(join(repo, "src", "f0.ts"), `export function f0(x: number): number {\n  return x * ${i};\n}\n`);
 
   try {
@@ -158,6 +164,7 @@ async function main() {
     const repair = await refresh("dirty");
     assert(repair.mode === "full" && (repair.status === "ok" || repair.status === "partial"), "the next refresh runs full", `${repair.mode} ${repair.status}`);
     assert(/stopped at the \d+ ms refresh deadline/.test(store.getRunById(repair.runId)?.scope ?? ""), "and its record says why", store.getRunById(repair.runId)?.scope);
+    assert(readRepairNeeded(lockDir, "r") === null, "the full repair cleared the durable repair flag");
 
     console.log("\n(d) a run that ignores the abort: terminated after the grace");
     edit(3);
@@ -166,6 +173,8 @@ async function main() {
     const stubborn = await refresh("dirty", "freshness_gate", DEADLINE_MS).then((r) => ({ ok: r }), (e) => ({ error: e }));
     const stubbornAfter = Date.now() - t2;
     rmSync(join(flagDir, "hang-stubborn"));
+    const flag = readRepairNeeded(lockDir, "r");
+    assert(flag?.mode === "dirty", "a durable repair flag is on disk for other processes (no row was left)", JSON.stringify(flag));
     assert(stubborn.error && /CODEBASE_INDEX_REFRESH_RUN_DEADLINE_MS/.test(stubborn.error.message), "it rejects with the deadline reason", String(stubborn.error?.message));
     assert(stubbornAfter >= DEADLINE_MS + GRACE_MS && stubbornAfter < DEADLINE_MS + GRACE_MS + 5_000, `after the deadline + grace (${stubbornAfter} ms)`);
     const repair2 = await refresh("dirty");

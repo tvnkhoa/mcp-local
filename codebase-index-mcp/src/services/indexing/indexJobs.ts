@@ -510,6 +510,29 @@ export const MAX_REFRESH_RUN_DEADLINE_MS = 6 * 60 * 60_000;
  */
 export const MAX_REFRESH_DEADLINE_STOPS = 2;
 
+/**
+ * IX-A/IX-B: what each run of this process writes into its run marker (`staleAfterMs`, see freshness.ts
+ * `RunMarkerOptions`): its own deadline plus the abort grace a stopped run's worker may take to exit. Another process
+ * judges the marker by that, never by its own limits (leader review (b): a 30 min job is not "dead" at a reader's 10 min).
+ * - `scoped`: a dirty/incremental refresh — the refresh deadline;
+ * - `full`: a full refresh (a repair, a first index) — max(deadline, the job timeout); also the gate's default
+ *   (`runStaleAfterMs`), since a gate run may be full;
+ * - `job`: an index job — its RUN_TIMEOUT_MS; unbounded jobs (0) keep the old 6 h judgement.
+ */
+export function runMarkerBounds(
+  deadlineMs: number,
+  runTimeoutMs: number,
+  abortGraceMs: number
+): { fullDeadlineMs: number; scoped: { staleAfterMs: number }; full: { staleAfterMs: number }; job: { staleAfterMs: number } } {
+  const fullDeadlineMs = Math.max(deadlineMs, runTimeoutMs === 0 ? DEFAULT_RUN_TIMEOUT_MS : runTimeoutMs);
+  return {
+    fullDeadlineMs,
+    scoped: { staleAfterMs: deadlineMs + abortGraceMs },
+    full: { staleAfterMs: fullDeadlineMs + abortGraceMs },
+    job: { staleAfterMs: runTimeoutMs === 0 ? DEFAULT_STALE_RUN_MS : runTimeoutMs + abortGraceMs }
+  };
+}
+
 /** Who started a refresh run. */
 export type RefreshRunSource = "freshness_gate" | "watcher";
 
@@ -567,8 +590,20 @@ export class RefreshRuns {
      * repo's full run every time. The server passes max(deadline, CODEBASE_INDEX_RUN_TIMEOUT_MS).
      */
     private readonly fullDeadlineMs: number = deadlineMs,
-    private readonly now: () => number = Date.now
-  ) {}
+    private readonly hooks: {
+      now?: () => number;
+      /**
+       * Review (3): a run was stopped at its deadline (the worker is gone). The server writes the freshness gate's
+       * durable repair flag here (`markRepairNeeded`), so another process — or this one after a restart — repairs the
+       * part-written index too; this registry's own repair is in memory only.
+       */
+      onDeadlineStop?: (stopped: { repoId: string; mode: IndexMode; at: number }) => void;
+    } = {}
+  ) {
+    this.now = hooks.now ?? Date.now;
+  }
+
+  private readonly now: () => number;
 
   /** In-flight refresh runs, oldest first. */
   list(): RefreshRunView[] {
@@ -583,7 +618,8 @@ export class RefreshRuns {
   /** The mode a run of `repoId` must use, and why it differs (a deadline stop left the index part-written). */
   modeFor(repoId: string, mode: IndexMode): { mode: IndexMode; escalatedBecause?: string } {
     const why = this.repairs.get(repoId);
-    return why && mode !== "full" ? { mode: "full", escalatedBecause: `full (${why}; ${mode} requested)` } : { mode };
+    // A full run asked for anyway (the gate read the durable flag) still records why it is a repair.
+    return why ? { mode: "full", escalatedBecause: `full (${why}; ${mode} requested)` } : { mode };
   }
 
   /** A run of `repoId` landed: one not failed/cancelled ends the stop count; a full one also ends the pending repair. */
@@ -649,6 +685,11 @@ export class RefreshRuns {
       if (stop.promise) {
         if (await stop.promise) {
           this.stops.set(request.repoId, (this.stops.get(request.repoId) ?? 0) + 1);
+          try {
+            this.hooks.onDeadlineStop?.({ repoId: request.repoId, mode: planned.mode, at: startedMs });
+          } catch {
+            // Best-effort: the in-memory repair above still forces this process's next run full.
+          }
           throw new Error(entry.stopReason);
         }
         // Review (5): nothing was stopped — the run failed on its own as the deadline fired; its error stands.

@@ -19,7 +19,6 @@ import { buildSearchTools } from "./search.js";
 import { buildGraphImpactTools } from "./graphImpact.js";
 import { buildIndexingWatchTools } from "./indexingWatch.js";
 import type { CodebaseIndexDeps } from "./common.js";
-import type { FreshnessScope } from "../middleware/freshness.js";
 import { resolveSymbolRepoId } from "./handlers/searchHandler.js";
 
 export type { CodebaseIndexDeps } from "./common.js";
@@ -84,9 +83,8 @@ function withSymbolRepoResolution(deps: CodebaseIndexDeps, tools: readonly AnyTo
  * themselves and are left alone. See `middleware/freshness.ts`.
  */
 function withFreshnessGate(deps: CodebaseIndexDeps, tools: readonly AnyToolDefinition[]): readonly AnyToolDefinition[] {
-  // IX-B: the query's `filePathPrefix` (one or several) narrows the gate's verdict to the paths it reads. A deps
-  // `ensureFresh` that takes only a repoId ignores the second argument and keeps the whole-repo verdict.
-  const ensureFresh = deps.ensureFresh as ((repoId: string, scope?: FreshnessScope) => Promise<void>) | undefined;
+  // IX-B: the query's `filePathPrefix` (one or several) narrows the gate's verdict to the paths it reads.
+  const ensureFresh = deps.ensureFresh;
   if (!ensureFresh) return tools;
   return tools.map((tool) => {
     if (REPO_ID_MAY_BE_UNKNOWN.has(tool.name)) return tool;
@@ -99,7 +97,8 @@ function withFreshnessGate(deps: CodebaseIndexDeps, tools: readonly AnyToolDefin
       handler: async (input: unknown, ctx: unknown) => {
         const { repoId, filePathPrefix } = input as { repoId?: unknown; filePathPrefix?: unknown };
         if (typeof repoId === "string" && repoId.length > 0) {
-          const prefixes = queryPrefixes(filePathPrefix);
+          // Leader review (a): only a tool whose answer reads nothing outside the prefix may take a prefix-scoped verdict.
+          const prefixes = PREFIX_SCOPED_TOOLS.has(tool.name) ? queryPrefixes(filePathPrefix) : undefined;
           await (prefixes ? ensureFresh(repoId, { filePathPrefixes: prefixes }) : ensureFresh(repoId));
         }
         return (inner as (i: unknown, c: unknown) => unknown)(input, ctx);
@@ -126,6 +125,14 @@ export function queryPrefixes(value: unknown): string[] | undefined {
  * needs to index. `watch_repo` may start before the first run finishes. `register_worktree` (MCP-ISSUE-114)
  * registers its repoId too. Keep in step with the same set in middleware/inputGuards.ts.
  */
+/**
+ * IX-B / leader review (a): the read tools whose answer depends ONLY on files under their `filePathPrefix`, so a gate
+ * verdict scoped to that prefix is sound. Every other tool — dead_code_scan, detect_circular_dependencies,
+ * find_entry_points, route_map, impact / call-chain / trace / context-pack — reads the whole graph: a change outside the
+ * prefix (a new caller in src/x.ts) can alter its answer about lib/, so it always gets the whole-repo verdict.
+ */
+export const PREFIX_SCOPED_TOOLS: ReadonlySet<string> = new Set(["search_regex", "search_symbols", "search_literals", "query_docs"]);
+
 const REPO_ID_MAY_BE_UNKNOWN = new Set(["index_repository", "health_check", "watch_repo", "register_worktree"]);
 
 /**

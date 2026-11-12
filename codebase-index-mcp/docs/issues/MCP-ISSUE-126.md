@@ -1,7 +1,7 @@
 ## MCP-ISSUE-126 — a gate-triggered refresh run hung 5 h with no runId, no progress and no deadline, and held the DB-wide queue
 
 - **Status:** FIXED 2026-11-12 (IX-A, branch `wt/refresh-deadline`): the deadline, its abort and repair, and index_status
-  visibility. The durable repair flag and the per-marker bound follow the IX-B merge (see *Residual risk*). The point inside the run where it stopped is NOT known (see *Proximate cause*); the deadline bounds any of them.
+  visibility; with IX-B merged, the durable repair flag and per-run marker bounds. The point inside the run where it stopped is NOT known (see *Proximate cause*); the deadline bounds any of them.
 - **Scenario:** wec.aria, 11 Nov 2026, served build 8e656433ab61. A read tool's freshness gate started a `dirty` refresh
   at ~04:09Z (HEAD 2aee1d39, 13 files dirty: the edit that became 52a04a81). It ran ≥ 18,058 s (5.0 h; the gate's note
   reported `elapsedMs 18058367`) while wec.aria's HEAD moved ~70 commits on. It ended only with the server restart at
@@ -78,15 +78,25 @@ any — none is proven, and the deadline bounds each):
 - **Root cause vs symptom.** The root cause is proven: nothing bounded a refresh that the gate started. The point inside the
   run where it hung is NOT proven; parse-pool lane `Promise.all` starvation is the top candidate.
 
-**Residual risk, open until IX-B (MCP-ISSUE-120) merges:**
-- **The repair lives in memory.** It is held in this process only. A deadline stop whose worker had to be terminated leaves
-  no row, and `serialize` removes its marker, so another process, or this one after a restart, may run dirty over a
-  part-written graph. The fix is to call `markRepairNeeded` (freshness.ts, which IX-B exports) on a deadline stop, writing
-  the durable cross-process flag.
-- **Run markers.** They still count as live for 6 h (`staleRunMs` was left at its default on the leader's ruling). This
-  process's limits cannot judge another process's run: that process may be an older build, or may have another
-  `RUN_TIMEOUT_MS`. IX-B writes each run's own bound into its marker, and readers judge a marker by that bound (falling back
-  to 6 h). IX-A then passes the refresh deadline when the marker is written.
+- **Durable repair (with IX-B, MCP-ISSUE-120).** A deadline stop also writes the gate's cross-process repair flag
+  (`markRepairNeeded`). The in-memory repair alone was lost to another process or a restart, and a terminated run leaves no
+  row while `serialize` removes its marker. The gate reads the flag and runs a full repair, which clears it. The watcher's
+  and the jobs' queue entries keep the REQUESTED mode: a mode predicted at enqueue could clear another process's flag
+  after a run landed in between.
+- **Per-run marker bounds (with IX-B).** Each run writes its own bound into its marker (`staleAfterMs` =
+  `runMarkerBounds` in `indexJobs.ts`), and another process judges the marker by that bound, never by its own limits:
+  - a scoped refresh: the deadline + the abort grace (5.5 min);
+  - a full refresh, and the gate's default (`runStaleAfterMs`, since a gate run may be full): the full-run deadline +
+    the grace;
+  - an index job: `RUN_TIMEOUT_MS` + the grace, or 6 h when jobs are unbounded.
+
+  A marker with no bound (an older build) is judged at 6 h. `staleRunMs` itself stays at its 6 h default (leader ruling).
+- **Scoped freshness (with IX-B).** The server's `ensureFresh` forwards the read's `filePathPrefix` scope. It is forwarded
+  only for tools whose answer reads nothing outside the prefix: search_regex, search_symbols, search_literals and
+  query_docs. Whole-graph tools — dead_code_scan, detect_circular_dependencies, find_entry_points, route_map,
+  impact / trace / call-chain / context-pack — always get the whole-repo verdict, because a new caller outside the prefix
+  changes their answer. The scoped `fresh` is rarely reachable (any run of the repo means `changed: null`); this is
+  accepted as conservative.
 - **index_status.** Every answer carries `refreshRuns` with these fields: runId, repoId, mode, source
   (`freshness_gate` | `watcher`), state (`running` | `stopping`), startedAt, elapsedMs, deadlineMs, deadlineAt,
   phase/progress/total, and stopReason. A refresh run's runId is answered while it runs, then from `index_runs`. The input

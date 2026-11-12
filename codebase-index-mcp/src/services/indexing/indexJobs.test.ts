@@ -1,7 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { IndexJobQueue, MAX_REFRESH_DEADLINE_STOPS, queuedWithin, RefreshRuns, sameRepoPath, type IndexJobRequest } from "./indexJobs.js";
+import { mkdtempSync, rmSync } from "node:fs";
+import os from "node:os";
+import path from "node:path";
+
+import { IndexJobQueue, MAX_REFRESH_DEADLINE_STOPS, queuedWithin, RefreshRuns, runMarkerBounds, sameRepoPath, type IndexJobRequest } from "./indexJobs.js";
+import { createFreshnessGate, DEFAULT_STALE_RUN_MS, liveRunMarkers } from "../../middleware/freshness.js";
 import type { IndexMode } from "../../types/index.js";
 import type { IndexRunResult } from "../../types/index.js";
 
@@ -446,4 +451,67 @@ test("IX-A review (4)(5)(6): a deadline that stopped nothing keeps the earlier r
   });
   await assert.rejects(failing, /the refresh worker crashed: boom/, "its own error, not the deadline reason");
   assert.match(runs.modeFor("r", "dirty").escalatedBecause ?? "", /index run j1 was stopped/, "the earlier repair is restored, not dropped");
+}));
+
+test("IX-A (leader review (b)): run markers carry each run's own bound — a live 30 min job is not judged dead by a 10 min reader", async () => {
+  const GRACE = 330_000;
+  const b = runMarkerBounds(600_000, 1_800_000, GRACE);
+  assert.equal(b.fullDeadlineMs, 1_800_000);
+  assert.deepEqual(b.scoped, { staleAfterMs: 600_000 + GRACE });
+  assert.deepEqual(b.full, { staleAfterMs: 1_800_000 + GRACE }, "a gate run may be full: the gate default covers it");
+  assert.deepEqual(b.job, { staleAfterMs: 1_800_000 + GRACE });
+  assert.deepEqual(runMarkerBounds(600_000, 0, GRACE).job, { staleAfterMs: DEFAULT_STALE_RUN_MS }, "unbounded jobs keep 6 h");
+  assert.equal(runMarkerBounds(600_000, 0, GRACE).fullDeadlineMs, 1_800_000, "an unbounded job timeout: the full refresh keeps 30 min");
+
+  // A job held in the real queue with its marker; another reader judges it at +25 min with a 10 min limit of its own.
+  const lockDir = mkdtempSync(path.join(os.tmpdir(), "ixa-marker-"));
+  try {
+    const gate = createFreshnessGate({
+      enabled: true,
+      budgetMs: 100,
+      lockDir,
+      getRepoPath: () => null,
+      getIndexedCommit: () => null,
+      readTree: async () => ({ head: null, dirty: [] }) as never,
+      run: async () => {
+        throw new Error("unused");
+      },
+      runStaleAfterMs: b.full.staleAfterMs
+    });
+    const release = deferred();
+    const job = gate.serialize("r", () => release.promise, "full", b.job);
+    await tick();
+    const t0 = Date.now();
+    const flags: unknown[] = [];
+    const writeFlag = (_d: string, _r: string, dead: unknown): boolean => (flags.push(dead), true);
+    assert.equal(liveRunMarkers(lockDir, "r", 600_000, t0 + 25 * 60_000, writeFlag).length, 1, "live at 25 min");
+    assert.deepEqual(flags, [], "no repair flag");
+    // Past its own bound (+ the 60 s reader margin) it is a hung run.
+    assert.equal(liveRunMarkers(lockDir, "r", 600_000, t0 + b.job.staleAfterMs + 2 * 60_000, writeFlag).length, 0, "dead past its bound");
+    assert.equal(flags.length, 1, "and flagged for repair");
+    release.resolve();
+    await job;
+  } finally {
+    rmSync(lockDir, { recursive: true, force: true });
+  }
+});
+
+test("IX-A review (3): a deadline stop calls onDeadlineStop (the server writes the durable repair flag); a run that answered first does not", held(async () => {
+  const seen: Array<{ repoId: string; mode: IndexMode }> = [];
+  const runs = new RefreshRuns(15, 15, { onDeadlineStop: ({ repoId, mode }) => void seen.push({ repoId, mode }) });
+  await assert.rejects(hangingRun(runs, "r", "dirty"), /deadline/);
+  assert.deepEqual(seen, [{ repoId: "r", mode: "dirty" }]);
+  // The run answers just after its deadline fired; the abort found nothing to stop (false).
+  const late = await runs.run<Landed>({
+    repoId: "q",
+    mode: "dirty",
+    source: "watcher",
+    abort: async () => false,
+    execute: async (runId, mode) => {
+      await tick(40);
+      return { runId, mode, status: "ok" };
+    }
+  });
+  assert.equal(late.status, "ok");
+  assert.equal(seen.length, 1, "nothing was stopped: no flag");
 }));

@@ -35,10 +35,11 @@ import {
   MIN_REFRESH_RUN_DEADLINE_MS,
   RefreshRuns,
   queuedWithin,
+  runMarkerBounds,
   runWithSeed,
   seedParentRefusal
 } from "./services/indexing/indexJobs.js";
-import { RefreshWorkerClient } from "./services/indexing/refreshWorkerClient.js";
+import { DEFAULT_ABORT_GRACE_MS, RefreshWorkerClient } from "./services/indexing/refreshWorkerClient.js";
 import { newerBuildRefusal } from "./services/indexing/runPolicy.js";
 import { INDEX_VERSION } from "./services/indexing/indexPipeline.js";
 import { armWatchInactivityTimer, startAutoWatchers } from "./services/watch/watchLifecycle.js";
@@ -65,7 +66,13 @@ import type { HandlerContext } from "./tools/handlers/handlerContext.js";
 import { createCodebaseIndexServer } from "./server.js";
 import { buildTools } from "./tools/index.js";
 import { DEFAULT_MAX_MARKDOWN_BYTES } from "./services/indexing/fileFilter.js";
-import { applyFreshness, computeTreeKey, createFreshnessGate, freshnessStateDir, parseTreeKey, recordDirtyLedger, serializeTreeKey, watcherRunPlan, type TreeKey } from "./middleware/freshness.js";
+import {
+  applyFreshness,
+  computeTreeKey,
+  createFreshnessGate,
+  type FreshnessScope,
+  freshnessStateDir,
+  markRepairNeeded, parseTreeKey, recordDirtyLedger, serializeTreeKey, watcherRunPlan, type TreeKey } from "./middleware/freshness.js";
 import { checkSeedAncestry, readWorkingTreeStateAsync } from "./services/git/gitHelpers.js";
 
 const dbPath = stringFromEnv("CODEBASE_INDEX_DB_PATH", "./codebase-index.db");
@@ -124,8 +131,12 @@ const REFRESH_RUN_DEADLINE_MS = clamp(
   MIN_REFRESH_RUN_DEADLINE_MS,
   MAX_REFRESH_RUN_DEADLINE_MS
 );
-/** IX-A review (2): a FULL refresh (a repair, a first index) gets the job bound, never less than the scoped deadline. */
-const REFRESH_FULL_RUN_DEADLINE_MS = Math.max(REFRESH_RUN_DEADLINE_MS, RUN_TIMEOUT_MS === 0 ? DEFAULT_RUN_TIMEOUT_MS : RUN_TIMEOUT_MS);
+/**
+ * IX-A: the full-run deadline (review (2): a repair or first index gets the job bound) and the bound each run writes
+ * into its run marker (IX-B `staleAfterMs`), so every process judges a run by ITS limits — see `runMarkerBounds`.
+ */
+const MARKERS = runMarkerBounds(REFRESH_RUN_DEADLINE_MS, RUN_TIMEOUT_MS, DEFAULT_ABORT_GRACE_MS);
+const REFRESH_FULL_RUN_DEADLINE_MS = MARKERS.fullDeadlineMs;
 const QUERY_REFRESH_BUDGET_MS = clamp(numberFromEnv("CODEBASE_INDEX_QUERY_REFRESH_BUDGET_MS", 5_000), 1, 120_000);
 /**
  * R3 exact: the TypeScript LanguageService lane of find_field_accesses (lazy; TS/JS fields only).
@@ -195,7 +206,10 @@ const refreshWorker = new RefreshWorkerClient({
 // WAL checkpoint the worker's PASSIVE checkpoint left behind (a measured 473 ms stall at landing).
 store.setAutoCheckpointPages(0);
 /** IX-A: the gate's and the watcher's refresh runs — runId, progress, deadline — listed by index_status. */
-const refreshRuns = new RefreshRuns(REFRESH_RUN_DEADLINE_MS, REFRESH_FULL_RUN_DEADLINE_MS);
+const refreshRuns = new RefreshRuns(REFRESH_RUN_DEADLINE_MS, REFRESH_FULL_RUN_DEADLINE_MS, {
+  // Review (3): durable across processes and restarts — a terminated run left no row and its marker is gone.
+  onDeadlineStop: ({ repoId, mode, at }) => void markRepairNeeded(FRESHNESS_LOCK_DIR, repoId, { mode, pid: process.pid, at })
+});
 const abortRefresh = (runId: string, reason: string): Promise<boolean> => refreshWorker.abortRun(runId, reason);
 const freshnessGate = createFreshnessGate({
   enabled: QUERY_REFRESH_ENABLED,
@@ -227,7 +241,8 @@ const freshnessGate = createFreshnessGate({
   hashMaxBytes: MAX_FILE_SIZE_BYTES,
   // MCP-ISSUE-101 part 5: an index fully built by another INDEX_VERSION is not current.
   getFullRunVersion: (repoId) => store.getLatestFullRunVersion(repoId),
-  buildVersion: INDEX_VERSION
+  buildVersion: INDEX_VERSION,
+  runStaleAfterMs: MARKERS.full.staleAfterMs
 });
 
 /** MCP-ISSUE-101: the tree a run is about to index, keyed before it starts (a file edited mid-run then differs). */
@@ -293,8 +308,11 @@ const runInWorker = async (
     }
     return result;
   };
+// The watcher's run, with its marker bound. The queue is told the REQUESTED mode: a forced-full repair decided at run
+// time must not clear a durable repair flag on a mode predicted at enqueue (post-merge review 1 — another run may land
+// between them); the gate's own full repair clears the flag. The marker takes the full bound: the run may be forced full.
 const runIndexAndResolve: RunIndexAndResolve = (repoId, repoPath, mode, docsEnabled, maxFiles, batchSize, extras = {}) =>
-  freshnessGate.serialize(repoId, () => runInWorker(repoId, repoPath, mode, docsEnabled, maxFiles, batchSize, extras), mode);
+  freshnessGate.serialize(repoId, () => runInWorker(repoId, repoPath, mode, docsEnabled, maxFiles, batchSize, extras), mode, MARKERS.full);
 
 /**
  * MCP-ISSUE-112: index_repository's runs as server-side jobs — answered at once, one at a time, never started under
@@ -361,7 +379,9 @@ const indexJobs = new IndexJobQueue({
             onProgress
           })
         ).result,
-      request.mode
+      // Post-merge review 1/2: the requested mode (a seed is not a full rebuild; a forced full is decided at run time).
+      request.mode,
+      MARKERS.job
     );
   }
 });
@@ -389,8 +409,9 @@ async function purgeThroughWriter(repoId: string): Promise<Record<string, number
   );
 }
 
-async function ensureFresh(repoId: string): Promise<void> {
-  const note = await freshnessGate.ensureFresh(repoId);
+/** IX-B: the read's `filePathPrefix`(es), when it has any, scope the gate's verdict (tools/index.ts passes them). */
+async function ensureFresh(repoId: string, scope?: FreshnessScope): Promise<void> {
+  const note = await freshnessGate.ensureFresh(repoId, scope);
   const requestContext = toolContextStorage.getStore();
   if (requestContext) requestContext.freshness = note;
 }

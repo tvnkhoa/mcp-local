@@ -15,6 +15,7 @@ import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 
 import type { HandlerContext } from "./handlers/handlerContext.js";
 import type { DescriptorLimits } from "./limits.js";
+import type { FreshnessScope } from "../middleware/freshness.js";
 
 export interface CodebaseIndexDeps {
   /** The env-derived bounds the JSON Schemas advertise. */
@@ -28,7 +29,7 @@ export interface CodebaseIndexDeps {
    * R1: bring the repo's index up to the current tree (within a budget) before a read tool runs,
    * recording the outcome for `asText`. Absent in tests and tools that build deps by hand.
    */
-  readonly ensureFresh?: (repoId: string) => Promise<void>;
+  readonly ensureFresh?: (repoId: string, scope?: FreshnessScope) => Promise<void>;
 }
 
 /**
