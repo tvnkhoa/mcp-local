@@ -232,6 +232,10 @@
       "codebase-index-mcp/scripts/test/test-index-jobs.mjs",
       "@dist"
     ],
+    "test:refresh-deadline": [
+      "codebase-index-mcp/scripts/test/test-refresh-deadline.mjs",
+      "@dist"
+    ],
     "test:index-lock-contention": [
       "codebase-index-mcp/scripts/test/test-index-lock-contention.mjs",
       "@dist",
