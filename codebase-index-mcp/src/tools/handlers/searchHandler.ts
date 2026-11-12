@@ -59,7 +59,7 @@ export function handleSearchSymbols(
       excludeTests: args.excludeTests
     });
     const coverage = buildCoverageBlock({ resultCount: candidates.length, kind: "search", query: args.query });
-    const rankedCap = candidates.length >= args.limit ? { complete: false, limitHint: buildLimitHint(args.limit, ctx.constants.MAX_RESULT_LIMIT, null) } : {};
+    const rankedCap = candidates.length >= args.limit ? { complete: false, limitHint: buildLimitHint(args.limit, maxResultLimit(ctx), null) } : {};
     const base = { query: args.query, strategy: strategyUsed, autoRouted: autoRouted || undefined, count: candidates.length, ...rankedCap, candidates };
     return ctx.asText(profile === "nano" ? { ...base, coverage: coverage.confidence } : { ...base, coverage }, profile);
   }
@@ -100,7 +100,7 @@ export function handleSearchSymbols(
   // padding up to `limit` does not count — it is appended after every name match.
   const cap =
     resultsRaw.filter((s) => s.matchType !== "fuzzy").length >= args.limit
-      ? { complete: false, limitHint: buildLimitHint(args.limit, ctx.constants.MAX_RESULT_LIMIT, null) }
+      ? { complete: false, limitHint: buildLimitHint(args.limit, maxResultLimit(ctx), null) }
       : {};
   const suggestions = results.length === 0 ? store.getSearchSuggestions(args.query, args.repoId ?? null, 5) : [];
   // When name-search still comes back empty, point the agent at the intent path explicitly.
@@ -161,10 +161,20 @@ export function handleSearchSymbols(
  * IX-C: what a caller whose own `limit` cut the answer should do next — wec.aria fell back to grep 55 times
  * after hitting a limit it had set itself. Present only when the caller's limit was hit.
  */
-export function buildLimitHint(limit: number, maxLimit: number, filesMode: boolean | null): string {
-  const raise = limit < maxLimit ? `raise limit (now ${String(limit)}, max ${String(maxLimit)})` : `limit is at its max (${String(maxLimit)})`;
+export function buildLimitHint(limit: number, maxLimit: number | undefined, filesMode: boolean | null): string {
+  const raise =
+    maxLimit === undefined
+      ? `raise limit (now ${String(limit)})`
+      : limit < maxLimit
+        ? `raise limit (now ${String(limit)}, max ${String(maxLimit)})`
+        : `limit is at its max (${String(maxLimit)})`;
   const alt = filesMode === false ? `, or use outputMode:"files" for one row per file` : "";
   return `the answer reached your limit, so more may exist: ${raise}${alt}, or narrow the scope.`;
+}
+
+/** The server's result-limit ceiling; undefined in a bare handler context (unit tests build one without constants). */
+function maxResultLimit(ctx: HandlerContext): number | undefined {
+  return (ctx.constants as HandlerContext["constants"] | undefined)?.MAX_RESULT_LIMIT;
 }
 
 /** How many vector near-neighbours a name query returns beside (never inside) its matches. */
@@ -219,7 +229,7 @@ export async function handleSearchLiterals(
 function buildRegexTruncationWarning(
   r: { truncationReason: string | null; filesScanned: number; filesUnscanned: number; nextAfterPath: string | null; nextSkipMatches: number; perFileCapFiles: string[] },
   filesMode: boolean,
-  maxLimit: number
+  maxLimit: number | undefined
 ): string {
   const parts: string[] = [];
   if (r.truncationReason === "limit_reached" || r.truncationReason === "files_cap_reached") {
@@ -233,7 +243,7 @@ function buildRegexTruncationWarning(
   const stoppedEarly = r.truncationReason === "limit_reached" || r.truncationReason === "files_cap_reached";
   const remedy: string[] = [];
   if (stoppedEarly) {
-    remedy.push(`raise limit (max ${String(maxLimit)})`, ...(filesMode ? [] : [`outputMode:"files"`]), `narrow scope (filePathPrefix / language / pathExclude)`);
+    remedy.push(maxLimit === undefined ? `raise limit` : `raise limit (max ${String(maxLimit)})`, ...(filesMode ? [] : [`outputMode:"files"`]), `narrow scope (filePathPrefix / language / pathExclude)`);
     if (r.nextAfterPath !== null || r.nextSkipMatches > 0) {
       remedy.push(
         `resume with ${r.nextAfterPath !== null ? `afterPath:"${r.nextAfterPath}"` : "no afterPath"}${r.nextSkipMatches > 0 ? `, skipMatches:${String(r.nextSkipMatches)}` : ""}`
@@ -334,9 +344,9 @@ export async function handleSearchRegex(
     ...(result.total !== undefined && { total: result.total }),
     ...(result.totalLowerBound !== undefined && { totalLowerBound: result.totalLowerBound }),
     ...resumeEcho,
-    ...(truncationReason === "limit_reached" && { limitHint: buildLimitHint(args.limit, ctx.constants.MAX_RESULT_LIMIT, args.outputMode === "files") }),
+    ...(truncationReason === "limit_reached" && { limitHint: buildLimitHint(args.limit, maxResultLimit(ctx), args.outputMode === "files") }),
     ...(truncated
-      ? { warning: buildRegexTruncationWarning(result, args.outputMode === "files", ctx.constants.MAX_RESULT_LIMIT) }
+      ? { warning: buildRegexTruncationWarning(result, args.outputMode === "files", maxResultLimit(ctx)) }
       : result.afterPathRemovedAll
         ? { warning: `afterPath "${args.afterPath ?? ""}" sorts after every in-scope file: nothing was searched. Check it is the nextAfterPath of a truncated response.` }
         : {})
