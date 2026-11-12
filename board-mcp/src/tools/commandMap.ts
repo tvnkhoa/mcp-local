@@ -44,6 +44,8 @@ export const MAPPED: Readonly<Record<string, readonly string[]>> = {
 export const EXCLUDED: Readonly<Record<string, string>> = {
   reassign:
     "A rescope.mjs handler, not a subcommand of its own: the CLI reaches it as `assign --reassign`, which the `assign` tool's `reassign` + `why` params send.",
+  retire:
+    "A leader-only write (task.mjs): marks a dead T0 task `retired` with a why; its file stays and nothing moves it after. Not exposed yet — a new tool is a schema change the owner decides; until then the leader runs it from the CLI.",
   "prune-shots":
     "Deletes evidence/<unit>/shots directories (rmSync recursive) with --write. CLI housekeeping for the owner, not a pipeline step; a model has no reason to run it."
 };

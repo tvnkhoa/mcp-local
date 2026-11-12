@@ -174,6 +174,7 @@ session: any process that knows a session id can name it.
 | board.mjs | Why |
 |---|---|
 | `prune-shots` | Deletes `evidence/<unit>/shots` directories with `--write`. CLI housekeeping for the owner, not a pipeline step. |
+| `retire` | A leader-only write: marks a dead T0 task `retired` with a why (its file stays). No tool yet — a schema change the owner decides; the leader runs it from the CLI. |
 | `precheck.mjs` | A separate script (headless Chrome over a unit's routes), not a board.mjs subcommand. |
 | `shoot.mjs` | A separate script (playwright-core screenshots; may open a window for sign-in), not a subcommand. |
 | `release --force` | Releases another session's claim — "the owner's call" with no proof of the owner. Run it from the CLI. |
