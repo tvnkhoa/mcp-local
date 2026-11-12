@@ -19,6 +19,7 @@ import { buildSearchTools } from "./search.js";
 import { buildGraphImpactTools } from "./graphImpact.js";
 import { buildIndexingWatchTools } from "./indexingWatch.js";
 import type { CodebaseIndexDeps } from "./common.js";
+import { resolveSymbolRepoId } from "./handlers/searchHandler.js";
 
 export type { CodebaseIndexDeps } from "./common.js";
 
@@ -28,7 +29,9 @@ export type { CodebaseIndexDeps } from "./common.js";
  * is the mistake worth catching by construction.
  */
 export function buildTools(deps: CodebaseIndexDeps): readonly AnyToolDefinition[] {
-  return withFreshnessGate(
+  return withSymbolRepoResolution(
+    deps,
+    withFreshnessGate(
     deps,
     withRepoIdGuard(
     deps,
@@ -40,7 +43,37 @@ export function buildTools(deps: CodebaseIndexDeps): readonly AnyToolDefinition[
       buildRefactorTools(deps)
     ])
     )
+    )
   );
+}
+
+/** IX-C: tools whose `repoId` may be omitted when `symbolId` is given (resolved from the id). */
+const REPO_ID_FROM_SYMBOL_ID = new Set(["get_symbol_source"]);
+
+/**
+ * IX-C — `get_symbol_source(symbolId)` without `repoId`. The id is resolved to the one repo holding it
+ * (`resolveSymbolRepoId`: none → not found, several → ambiguity error) in the OUTERMOST handler wrapper,
+ * so the freshness gate below sees the resolved repoId and refreshes that repo as for an explicit one.
+ * The repo guard runs before any handler and leaves an absent repoId alone; the resolved one is
+ * registered by construction (it comes from the repositories table).
+ */
+function withSymbolRepoResolution(deps: CodebaseIndexDeps, tools: readonly AnyToolDefinition[]): readonly AnyToolDefinition[] {
+  return tools.map((tool) => {
+    if (!REPO_ID_FROM_SYMBOL_ID.has(tool.name)) return tool;
+    const inner = tool.handler;
+    return {
+      ...tool,
+      handler: async (input: unknown, ctx: unknown) => {
+        const i = input as { repoId?: unknown; symbolId?: unknown };
+        const missing = typeof i.repoId !== "string" || i.repoId.length === 0;
+        const resolved =
+          missing && typeof i.symbolId === "string" && i.symbolId.length > 0
+            ? { ...i, repoId: resolveSymbolRepoId(deps.buildContext().store, i.symbolId) }
+            : input;
+        return (inner as (i: unknown, c: unknown) => unknown)(resolved, ctx);
+      }
+    } as AnyToolDefinition;
+  });
 }
 
 /**

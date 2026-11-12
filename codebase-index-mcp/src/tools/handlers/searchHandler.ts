@@ -59,7 +59,8 @@ export function handleSearchSymbols(
       excludeTests: args.excludeTests
     });
     const coverage = buildCoverageBlock({ resultCount: candidates.length, kind: "search", query: args.query });
-    const base = { query: args.query, strategy: strategyUsed, autoRouted: autoRouted || undefined, count: candidates.length, candidates };
+    const rankedCap = candidates.length >= args.limit ? { complete: false, limitHint: buildLimitHint(args.limit, ctx.constants.MAX_RESULT_LIMIT, null) } : {};
+    const base = { query: args.query, strategy: strategyUsed, autoRouted: autoRouted || undefined, count: candidates.length, ...rankedCap, candidates };
     return ctx.asText(profile === "nano" ? { ...base, coverage: coverage.confidence } : { ...base, coverage }, profile);
   }
 
@@ -95,6 +96,12 @@ export function handleSearchSymbols(
       return info ? { ...s, sqlDefinition: info } : s;
     });
   const nearbyRaw = filtered.filter((s) => s.matchType === "fuzzy").slice(0, NEARBY_MAX);
+  // IX-C: the store stops at `limit` rows; when name matches alone fill it, more may exist. Near-neighbour
+  // padding up to `limit` does not count — it is appended after every name match.
+  const cap =
+    resultsRaw.filter((s) => s.matchType !== "fuzzy").length >= args.limit
+      ? { complete: false, limitHint: buildLimitHint(args.limit, ctx.constants.MAX_RESULT_LIMIT, null) }
+      : {};
   const suggestions = results.length === 0 ? store.getSearchSuggestions(args.query, args.repoId ?? null, 5) : [];
   // When name-search still comes back empty, point the agent at the intent path explicitly.
   const suggestion =
@@ -136,18 +143,28 @@ export function handleSearchSymbols(
 
   if (profile === "nano") {
     const topSymbols = results.slice(0, 10).map(row);
-    return ctx.asText({ query: args.query, strategy: strategyUsed, autoRouted: autoRouted || undefined, count: results.length, topSymbols, hasMore: results.length > topSymbols.length, ...nearby, suggestions: suggestions.slice(0, 3), suggestion, isStale: staleness?.isStale ?? null, coverage: coverage.knownGaps.length > 0 ? coverage : coverage.confidence }, profile);
+    return ctx.asText({ query: args.query, strategy: strategyUsed, autoRouted: autoRouted || undefined, count: results.length, ...cap, topSymbols, hasMore: results.length > topSymbols.length, ...nearby, suggestions: suggestions.slice(0, 3), suggestion, isStale: staleness?.isStale ?? null, coverage: coverage.knownGaps.length > 0 ? coverage : coverage.confidence }, profile);
   }
 
   if (profile === "compact") {
-    return ctx.asText({ query: args.query, strategy: strategyUsed, autoRouted: autoRouted || undefined, count: results.length, symbols: results.map(row), ...nearby, suggestions, suggestion, staleness, coverage }, profile);
+    return ctx.asText({ query: args.query, strategy: strategyUsed, autoRouted: autoRouted || undefined, count: results.length, ...cap, symbols: results.map(row), ...nearby, suggestions, suggestion, staleness, coverage }, profile);
   }
 
   if (profile === "verbose") {
-    return ctx.asText({ query: args.query, strategy: strategyUsed, autoRouted: autoRouted || undefined, count: results.length, symbols: results, ...(nearbyRaw.length > 0 && { nearby: nearbyRaw }), suggestions, suggestion, staleness, coverage, summary: { repoFilter: args.repoId ?? null, languageFilter: args.language ?? null, kindFilter: args.kind ?? null, filePathFilter: args.filePath ?? null } }, profile);
+    return ctx.asText({ query: args.query, strategy: strategyUsed, autoRouted: autoRouted || undefined, count: results.length, ...cap, symbols: results, ...(nearbyRaw.length > 0 && { nearby: nearbyRaw }), suggestions, suggestion, staleness, coverage, summary: { repoFilter: args.repoId ?? null, languageFilter: args.language ?? null, kindFilter: args.kind ?? null, filePathFilter: args.filePath ?? null } }, profile);
   }
 
-  return ctx.asText({ query: args.query, strategy: strategyUsed, autoRouted: autoRouted || undefined, count: results.length, symbols: results, ...(nearbyRaw.length > 0 && { nearby: nearbyRaw }), suggestions, suggestion, staleness, coverage }, profile);
+  return ctx.asText({ query: args.query, strategy: strategyUsed, autoRouted: autoRouted || undefined, count: results.length, ...cap, symbols: results, ...(nearbyRaw.length > 0 && { nearby: nearbyRaw }), suggestions, suggestion, staleness, coverage }, profile);
+}
+
+/**
+ * IX-C: what a caller whose own `limit` cut the answer should do next — wec.aria fell back to grep 55 times
+ * after hitting a limit it had set itself. Present only when the caller's limit was hit.
+ */
+export function buildLimitHint(limit: number, maxLimit: number, filesMode: boolean | null): string {
+  const raise = limit < maxLimit ? `raise limit (now ${String(limit)}, max ${String(maxLimit)})` : `limit is at its max (${String(maxLimit)})`;
+  const alt = filesMode === false ? `, or use outputMode:"files" for one row per file` : "";
+  return `the answer reached your limit, so more may exist: ${raise}${alt}, or narrow the scope.`;
 }
 
 /** How many vector near-neighbours a name query returns beside (never inside) its matches. */
@@ -201,7 +218,8 @@ export async function handleSearchLiterals(
 /** MCP-ISSUE-100: the one sentence a partial search_regex answer must carry. */
 function buildRegexTruncationWarning(
   r: { truncationReason: string | null; filesScanned: number; filesUnscanned: number; nextAfterPath: string | null; nextSkipMatches: number; perFileCapFiles: string[] },
-  filesMode: boolean
+  filesMode: boolean,
+  maxLimit: number
 ): string {
   const parts: string[] = [];
   if (r.truncationReason === "limit_reached" || r.truncationReason === "files_cap_reached") {
@@ -215,7 +233,7 @@ function buildRegexTruncationWarning(
   const stoppedEarly = r.truncationReason === "limit_reached" || r.truncationReason === "files_cap_reached";
   const remedy: string[] = [];
   if (stoppedEarly) {
-    remedy.push(`raise limit`, ...(filesMode ? [] : [`outputMode:"files"`]), `narrow scope (filePathPrefix / language / pathExclude)`);
+    remedy.push(`raise limit (max ${String(maxLimit)})`, ...(filesMode ? [] : [`outputMode:"files"`]), `narrow scope (filePathPrefix / language / pathExclude)`);
     if (r.nextAfterPath !== null || r.nextSkipMatches > 0) {
       remedy.push(
         `resume with ${r.nextAfterPath !== null ? `afterPath:"${r.nextAfterPath}"` : "no afterPath"}${r.nextSkipMatches > 0 ? `, skipMatches:${String(r.nextSkipMatches)}` : ""}`
@@ -316,8 +334,9 @@ export async function handleSearchRegex(
     ...(result.total !== undefined && { total: result.total }),
     ...(result.totalLowerBound !== undefined && { totalLowerBound: result.totalLowerBound }),
     ...resumeEcho,
+    ...(truncationReason === "limit_reached" && { limitHint: buildLimitHint(args.limit, ctx.constants.MAX_RESULT_LIMIT, args.outputMode === "files") }),
     ...(truncated
-      ? { warning: buildRegexTruncationWarning(result, args.outputMode === "files") }
+      ? { warning: buildRegexTruncationWarning(result, args.outputMode === "files", ctx.constants.MAX_RESULT_LIMIT) }
       : result.afterPathRemovedAll
         ? { warning: `afterPath "${args.afterPath ?? ""}" sorts after every in-scope file: nothing was searched. Check it is the nextAfterPath of a truncated response.` }
         : {})
@@ -522,12 +541,33 @@ export function handleGetSymbolBlame(
 
 // ── get_symbol_source ───────────────────────────────────────────────────────────
 
+/**
+ * IX-C: the repo a bare symbolId lives in. A symbolId is a hash (makeSymbolId) that names no repo, so
+ * get_symbol_source without `repoId` looks it up across the registered repos: one holder answers, none is
+ * the not-found error, several is an ambiguity error naming them (sorted, so the message is deterministic).
+ * `tools/index.ts` calls this before the repoId guard and the freshness gate see the input.
+ */
+export function resolveSymbolRepoId(store: Pick<HandlerContext["store"], "findRepoIdsForSymbol">, symbolId: string): string {
+  const repoIds = store.findRepoIdsForSymbol(symbolId);
+  if (repoIds.length === 1) return repoIds[0];
+  if (repoIds.length === 0) {
+    throw new McpError(ErrorCode.InvalidParams, `get_symbol_source: symbol '${symbolId}' not found in any indexed repo. Pass repoId, or re-find it with search_symbols.`);
+  }
+  throw new McpError(
+    ErrorCode.InvalidParams,
+    `get_symbol_source: symbol '${symbolId}' is in ${String(repoIds.length)} indexed repos (${repoIds.join(", ")}); pass repoId to choose one.`
+  );
+}
+
 export async function handleGetSymbolSource(
-  args: { repoId: string; symbolId?: string; name?: string; contextLines: number; maxLines: number; profile: string },
+  input: { repoId?: string; symbolId?: string; name?: string; contextLines: number; maxLines: number; profile: string },
   ctx: HandlerContext
 ): Promise<CallToolResult> {
   const { store } = ctx;
-  const profile = resolveResponseProfile(args.profile as Parameters<typeof resolveResponseProfile>[0]);
+  const profile = resolveResponseProfile(input.profile as Parameters<typeof resolveResponseProfile>[0]);
+  // The schema guarantees repoId or symbolId; tools/index.ts has normally resolved repoId already.
+  const repoId = input.repoId ?? resolveSymbolRepoId(store, input.symbolId ?? "");
+  const args = { ...input, repoId };
 
   let symbolId = args.symbolId;
   if (!symbolId && args.name) {
