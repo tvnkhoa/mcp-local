@@ -21,7 +21,7 @@ import {
   stripGenerics,
 } from "../../repositories/vectorStore.js";
 import { buildNamedCandidateMap, pickBestNamedCandidate } from "./edgeResolverShared.js";
-import { buildImportedFilesByFile, normalizeFilePath } from "./moduleResolution.js";
+import { buildImportedFilesByFile, isPythonFile, normalizeFilePath } from "./moduleResolution.js";
 import { immediateTransaction } from "../../repositories/sqliteTx.js";
 
 /**
@@ -55,6 +55,8 @@ export interface CallResolutionContext {
    * the implementor map `rebuildInterfaceDispatchEdges` builds. Populated from resolved `EXTENDS` edges.
    */
   subclassFilesByBaseId: Map<string, string[]>;
+  /** PY-3: base classes per Python class symbolId, in base-list order (`buildPythonBases`), for a member lookup up the chain. */
+  basesByClassId: Map<string, string[]>;
   /**
    * symbolIds of methods declared `abstract` or `virtual`.
    *
@@ -138,6 +140,7 @@ export function buildCallResolutionContext(db: Database.Database, repoId: string
   );
 
   const candidateMap = buildNamedCandidateMap(db, repoId, ["function", "method", "constructor", "class"]);
+  const basesByClassId = buildPythonBases(db, repoId, candidateMap, importedFilesByFile);
 
   const updateStmt = db.prepare(
     `update edges set to_id = ?, confidence = ?, reason = ? where repo_id = ? and from_id = ? and to_id = ?`
@@ -167,7 +170,130 @@ export function buildCallResolutionContext(db: Database.Database, repoId: string
     )
     .all({ repoId, supersededReason: SUPERSEDED_REASON }) as { fromId: string; toId: string; fromFile: string }[];
 
-  return { candidateMap, interfaceByName, interfaceIdSet, subclassFilesByBaseId, virtualMethodIds, updateStmt, unresolvedRows, offset: 0, importedFilesByFile };
+  return { candidateMap, interfaceByName, interfaceIdSet, subclassFilesByBaseId, basesByClassId, virtualMethodIds, updateStmt, unresolvedRows, offset: 0, importedFilesByFile };
+}
+
+/**
+ * PY-3: each Python class's bases, in base-list order, as class symbolIds.
+ *
+ * Built from the base NAME, never from the EXTENDS row's resolution state: `resolveExtendsEdges` runs after
+ * call resolution, so a full run sees `base:Name` tokens here while a scoped run sees the rows of unchanged
+ * files already resolved — reading the resolved ids would let the two runs walk different chains. Each name
+ * is bound with the call lane's own picker from the subclass's file (same file, imported, tie-break).
+ * Order: a class's EXTENDS rows are written together in extraction order and a resolve only updates them,
+ * so the first rowid per (class, base) is its position in the list on full and scoped runs alike.
+ */
+function buildPythonBases(
+  db: Database.Database,
+  repoId: string,
+  candidateMap: CallResolutionContext["candidateMap"],
+  importedFilesByFile: Map<string, Set<string>>
+): Map<string, string[]> {
+  const rows = db
+    .prepare(
+      `select e.from_id as classId, s.file_path as classFile, e.to_id as toId, t.name as toName, min(e.rowid) as pos
+       from edges e
+       join symbols s on s.repo_id = e.repo_id and s.symbol_id = e.from_id
+       left join symbols t on t.repo_id = e.repo_id and t.symbol_id = e.to_id
+       where e.repo_id = ? and e.type = 'EXTENDS' and s.kind = 'class'
+         and (s.file_path like '%.py' or s.file_path like '%.pyi')
+       group by e.from_id, e.to_id
+       order by e.from_id, pos`
+    )
+    .all(repoId) as { classId: string; classFile: string; toId: string; toName: string | null; pos: number }[];
+  const bases = new Map<string, string[]>();
+  for (const r of rows) {
+    const name = r.toId.startsWith("base:") ? r.toId.slice(5) : r.toName;
+    if (!name) continue;
+    const classes = pythonLookupFor(candidateMap).classes(name).filter((c) => c.symbolId !== r.classId);
+    const base = pickBestNamedCandidate(classes, r.classFile, ["class"], importedFilesByFile.get(normalizeFilePath(r.classFile)));
+    if (!base) continue;
+    const list = bases.get(r.classId);
+    if (!list) bases.set(r.classId, [base.symbolId]);
+    else if (!list.includes(base.symbolId)) list.push(base.symbolId);
+  }
+  return bases;
+}
+
+type NamedCandidate = { symbolId: string; filePath: string; kind: string; parentSymbolId: string | null };
+
+/**
+ * Per-name views of one candidate map, built on first use and kept for as long as the map lives (one
+ * resolution context). Without them every dotted Python call site re-filtered the full candidate list of its
+ * owner and member names — near-quadratic for `__init__` / `get` / `run` on a large repo.
+ */
+const pythonLookups = new WeakMap<
+  CallResolutionContext["candidateMap"],
+  { classes: (name: string) => NamedCandidate[]; methodsByParent: (name: string) => Map<string, NamedCandidate> }
+>();
+
+function pythonLookupFor(candidateMap: CallResolutionContext["candidateMap"]) {
+  let lookup = pythonLookups.get(candidateMap);
+  if (!lookup) {
+    const classesByName = new Map<string, NamedCandidate[]>();
+    const methodsByName = new Map<string, Map<string, NamedCandidate>>();
+    lookup = {
+      classes: (name) => {
+        let list = classesByName.get(name);
+        if (!list) {
+          list = (candidateMap.get(name) ?? []).filter((c) => c.kind === "class");
+          classesByName.set(name, list);
+        }
+        return list;
+      },
+      methodsByParent: (name) => {
+        let byParent = methodsByName.get(name);
+        if (!byParent) {
+          byParent = new Map<string, NamedCandidate>();
+          // First per parent in candidate order — what `find` over the list returned.
+          for (const c of candidateMap.get(name) ?? []) {
+            if (c.kind === "method" && c.parentSymbolId && !byParent.has(c.parentSymbolId)) byParent.set(c.parentSymbolId, c);
+          }
+          methodsByName.set(name, byParent);
+        }
+        return byParent;
+      }
+    };
+    pythonLookups.set(candidateMap, lookup);
+  }
+  return lookup;
+}
+
+/** How many classes a Python member lookup visits up an inheritance chain before giving up. */
+const MAX_PYTHON_MRO_CLASSES = 16;
+
+/**
+ * PY-3: `Owner.member` for a Python caller. The owner is the class named `Owner` the caller can see
+ * (same file, then an imported file, then the tie-break), and the member the method of that name declared
+ * on it or — breadth-first, in base-list order, like a simple MRO — on one of its resolved bases.
+ * Undefined when the owner is not a repo class or no class on the chain declares the member.
+ */
+export function resolvePythonQualifiedCall(
+  ctx: Pick<CallResolutionContext, "candidateMap" | "basesByClassId">,
+  calleeName: string,
+  fromFile: string,
+  importedFiles: ReadonlySet<string> | undefined
+): { symbolId: string; filePath: string; kind: string; parentSymbolId: string | null } | undefined {
+  const dot = calleeName.lastIndexOf(".");
+  const ownerName = calleeName.slice(0, dot);
+  const memberName = calleeName.slice(dot + 1);
+  if (!ownerName || !memberName) return undefined;
+  const lookup = pythonLookupFor(ctx.candidateMap);
+  const owner = pickBestNamedCandidate(lookup.classes(ownerName), fromFile, ["class"], importedFiles);
+  if (!owner) return undefined;
+  const members = lookup.methodsByParent(memberName);
+  if (members.size === 0) return undefined;
+  const queue = [owner.symbolId];
+  const seen = new Set<string>();
+  while (queue.length > 0 && seen.size < MAX_PYTHON_MRO_CLASSES) {
+    const classId = queue.shift()!;
+    if (seen.has(classId)) continue;
+    seen.add(classId);
+    const hit = members.get(classId);
+    if (hit) return hit;
+    queue.push(...(ctx.basesByClassId.get(classId) ?? []));
+  }
+  return undefined;
 }
 
 export type ResolvedUpdate = { fromId: string; oldToId: string; newToId: string; confidence: number; reason: string };
@@ -320,6 +446,23 @@ export function resolveCallEdgesBatch(
       }
     }
 
+    // PY-3: a Python `callee:Owner.member` token names its owner class only when the extractor PROVED it
+    // (`self.` / `cls.` / `super()`, a typed parameter, `x = Owner(...)`, a class imported or defined in the
+    // file). So the owner is looked up among classes the caller can see, the member on that class and then
+    // up its resolved EXTENDS chain — and when either is missing the call is an external boundary, never a
+    // guess by the member name alone: `super().__init__()` over a pydantic base would otherwise bind to
+    // whichever `__init__` in the repo sorts first.
+    let pythonReceiverProven = false;
+    if (!match && calleeName.includes(".") && isPythonFile(row.fromFile)) {
+      pythonReceiverProven = true;
+      const proven = resolvePythonQualifiedCall(ctx, calleeName, row.fromFile, importedFiles);
+      if (proven) {
+        match = proven;
+        matchVia = "receiver_type";
+        nameAmbiguous = false;
+      }
+    }
+
     // The receiver is a CLASS, not an interface — `CrossChannelReplyHelpers.ResolveSubject(...)`, the
     // ordinary static-helper call. The block above only consults `interfaceByName`, so this fell through
     // to the name-only fallback below, which discards the receiver entirely.
@@ -331,7 +474,7 @@ export function resolveCallEdgesBatch(
     // `dead_code_scan` reports a method with nine call sites as dead. Worse, the extractor emits the
     // qualified token AND the bare one, which resolve to the same symbol and collapse under the unique
     // index, so the count does not even hint that something was lost.
-    if (!match && calleeName.includes(".")) {
+    if (!match && !pythonReceiverProven && calleeName.includes(".")) {
       const parts = calleeName.split(".").filter((x) => x.length > 0);
       const receiverType = parts.slice(0, -1).join(".");
       const memberName = parts[parts.length - 1] ?? "";
@@ -352,7 +495,7 @@ export function resolveCallEdgesBatch(
       }
     }
 
-    if (!match && calleeName.includes(".")) {
+    if (!match && !pythonReceiverProven && calleeName.includes(".")) {
       const baseName = calleeName.split(".").pop() ?? calleeName;
       const baseCandidates = candidateMap.get(baseName) ?? [];
       nameAmbiguous = baseCandidates.length > 1;

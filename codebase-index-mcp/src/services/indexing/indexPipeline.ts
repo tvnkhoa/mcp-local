@@ -154,7 +154,10 @@ export type RunIndexInput = {
 // v15: MCP-ISSUE-101 part 4 — equally scored same-named candidates break the tie on (file_path,
 // symbol_id), not symbol_id alone (`tieBreakBefore`, the first-row lookups by name): resolved CALLS /
 // TYPE_REF / … targets change for unchanged files, so existing indexes must re-resolve on a FULL run.
-export const INDEX_VERSION = "v15-tiebreak-path";
+// v16: PY-1..PY-4 — the Python lane moved from regex to tree-sitter-python (methods with owners, EXTENDS,
+// CALLS, every imported name with its relative level) and Python imports resolve to files: every .py file
+// extracts differently, so existing indexes must re-extract.
+export const INDEX_VERSION = "v16-python-tree-sitter";
 
 /**
  * Release J: files whose change alters how every other file resolves — module resolution (tsconfig paths,

@@ -295,6 +295,13 @@
       "codebase-index-mcp/scripts/test/test-persistence-mapping.mjs",
       "@dist"
     ],
+    "test:python-edges": [
+      "codebase-index-mcp/scripts/test/test-python-edges.mjs",
+      "codebase-index-mcp/scripts/test/fixtures/python-src/**",
+      "codebase-index-mcp/src/tools/handlers/impactHandler.ts",
+      "codebase-index-mcp/src/tools/handlers/searchHandler.ts",
+      "@dist"
+    ],
     "test:profile-responses": [
       "codebase-index-mcp/scripts/test/test-profile-responses.mjs",
       "@dist",

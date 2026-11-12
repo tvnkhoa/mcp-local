@@ -2,12 +2,13 @@ import Parser from "tree-sitter";
 import JavaScript from "tree-sitter-javascript";
 import TypeScript from "tree-sitter-typescript";
 import CSharp from "tree-sitter-c-sharp";
+import Python from "tree-sitter-python";
 
 import type { DocMentionRecord, DocRecord, EdgeRecord, RouteRecord, SymbolRecord } from "../../types/index.js";
 import type { ExtractInput, ExtractOutput } from "./extractorTypes.js";
 
 import { parseMarkdownFile } from "./markdownParser.js";
-import { extractPythonSymbolsAndRoutesImpl } from "./pythonExtractor.js";
+import { extractPythonImpl } from "./pythonExtractor.js";
 import { extractProtoSymbolsImpl } from "./protoExtractor.js";
 import { extractCss } from "./cssExtractor.js";
 import { extractSql } from "./sqlExtractor.js";
@@ -88,17 +89,6 @@ export function extractGraphData(input: ExtractInput): ExtractOutput {
 
   const edges: EdgeRecord[] = [];
   const routes: RouteRecord[] = [];
-
-  if (input.language === "python") {
-    extractPythonSymbolsAndRoutesImpl(input, symbols, edges, routes, moduleSymbolId);
-    const python = applyEdgePolicy(edges, symbols, edgePolicy);
-    return {
-      symbols: dedupeSymbols(symbols),
-      edges: python.edges,
-      edgePolicyDrops: python.drops,
-      routes: dedupeRoutes(routes)
-    };
-  }
 
   if (input.language === "proto") {
     extractProtoSymbolsImpl(input, symbols, edges, moduleSymbolId);
@@ -199,6 +189,13 @@ export function extractGraphData(input: ExtractInput): ExtractOutput {
       extractJavaScriptSymbolsImpl(input, root, symbols, edges, moduleSymbolId);
       routes.push(...extractJavaScriptRoutesImpl(input, symbols, moduleSymbolId));
       literals = extractStringLiteralsImpl(input, root, LITERAL_POLICY);
+    } else if (input.language === "python") {
+      // PY-1: tree-sitter-python replaced the regex lane; routes keep the FastAPI decorator shapes.
+      // `routes` has no unique key in the store, so the regex lane's dedupe stays: the same decorator twice on
+      // one handler must not become two rows.
+      const pythonRoutes: RouteRecord[] = [];
+      extractPythonImpl(input, root, symbols, edges, pythonRoutes, moduleSymbolId);
+      routes.push(...dedupeRoutes(pythonRoutes));
     } else if (input.language === "csharp") {
       extractCSharpSymbolsImpl(input, root, symbols, edges, moduleSymbolId, input.knownPackageNames);
       routes.push(...extractCSharpRoutesImpl(input, root, symbols));
@@ -305,6 +302,8 @@ function getOrCreateParserForLanguage(language: string, filePath?: string): Pars
     parser.setLanguage(useTsxDialect ? TypeScript.tsx : TypeScript.typescript);
   } else if (language === "csharp") {
     parser.setLanguage(CSharp);
+  } else if (language === "python") {
+    parser.setLanguage(Python);
   } else {
     return null;
   }

@@ -20,11 +20,13 @@ import {
 import { tagExternalNamespaceImports } from "./edgeResolverShared.js";
 import {
   EMPTY_ALIASES,
+  isPythonFile,
   loadIndexedFilePaths,
   loadRepoPath,
   looksLikeModulePath,
   readTsconfigAliases,
-  resolveModuleSpecifier
+  resolveModuleSpecifier,
+  resolvePythonModuleSpecifier
 } from "./moduleResolution.js";
 import { immediateTransaction } from "../../repositories/sqliteTx.js";
 
@@ -132,6 +134,26 @@ export function resolveImportEdges(db: Database.Database, repoId: string, maxUnr
       // Strip "static " prefix from "using static" directives before namespace resolution
       if (importPath.startsWith("static ")) importPath = importPath.slice(7);
       const fromDir = row.fromFile.replace(/\\/g, "/").split("/").slice(0, -1).join("/");
+
+      // PY-2: a Python token is a dotted module spec with its relative level as leading dots. It is routed
+      // before the C# namespace branch below, which would otherwise read `shop.pricing` as a namespace.
+      // Not found means the standard library or a third-party package: an external boundary.
+      if (isPythonFile(row.fromFile)) {
+        const cacheKey = `py|${fromDir}|${importPath}`;
+        let moduleId = importResolveCache.get(cacheKey);
+        if (moduleId === undefined) {
+          const targetFile = resolvePythonModuleSpecifier(row.fromFile.replace(/\\/g, "/"), importPath, knownFiles);
+          moduleId = targetFile ? fileToModuleId.get(targetFile) ?? null : null;
+          importResolveCache.set(cacheKey, moduleId);
+        }
+        if (moduleId) {
+          updateStmt.run(moduleId, 0.95, "resolved python import", repoId, row.fromId, row.toId);
+          count += 1;
+        } else {
+          updateStmt.run(row.toId, 0.1, "external boundary", repoId, row.fromId, row.toId);
+        }
+        continue;
+      }
 
       // P2.1: Try C# namespace resolution first for dotted namespace imports
       // e.g. import:CRM.Marketing.Model → find module symbol for that namespace
@@ -396,7 +418,7 @@ export function findImportersOfRemovedPath(
   const seen = new Set<string>();
   for (const row of rows) {
     const specifier = row.toId.slice("import:".length);
-    if (!(specifier.startsWith(".") || looksLikeModulePath(specifier))) continue;
+    if (!(specifier.startsWith(".") || looksLikeModulePath(specifier) || isPythonFile(row.fromFile))) continue;
     const fromFile = row.fromFile.replace(/\\/g, "/");
     if (resolveModuleSpecifier(fromFile, specifier, knownFiles, aliases) !== removedPath) continue;
     const key = `${fromFile}\0${specifier}`;

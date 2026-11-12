@@ -159,10 +159,11 @@ test("release F: an older build refuses to write over a newer build, never the o
   // (no vector fallback, canonical mention and SQL order, MCP-ISSUE-084/085) was 11; release K (ambiguous
   // doc mentions keep no pick, MCP-ISSUE-089) was 12; release L (superseded SQL mention candidates, the EF
   // snapshot lane, MCP-ISSUE-090/092) was 13; release M (sql_drop sites, the EF migration Sql lane, enriched index
-  // signatures) was 14; MCP-ISSUE-101 part 4 (ties break on the file path) is 15.
-  assert.equal(indexGeneration(INDEX_VERSION), 15);
-  assert.equal(newerBuildRefusal("v14-release-m", INDEX_VERSION), null, "v15 upgrades a v14 index");
-  assert.ok((newerBuildRefusal(INDEX_VERSION, "v14-release-m") ?? "").includes(INDEX_VERSION), "a v14 build refuses to write over a v15 index");
+  // signatures) was 14; MCP-ISSUE-101 part 4 (ties break on the file path) was 15; the tree-sitter Python
+  // lane (PY-1..PY-4) is 16.
+  assert.equal(indexGeneration(INDEX_VERSION), 16);
+  assert.equal(newerBuildRefusal("v15-tiebreak-path", INDEX_VERSION), null, "v16 upgrades a v15 index");
+  assert.ok((newerBuildRefusal(INDEX_VERSION, "v15-tiebreak-path") ?? "").includes(INDEX_VERSION), "a v15 build refuses to write over a v16 index");
 });
 
 test("release I1b: only a full run or a bulk resolve drops the DB-wide edge indexes", () => {
