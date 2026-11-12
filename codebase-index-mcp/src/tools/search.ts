@@ -87,7 +87,7 @@ export function buildSearchTools(deps: CodebaseIndexDeps): AnyToolDefinition[] {
         outputMode: { type: "string", enum: ["matches", "files"], description: "matches (default): one row per match with context and enclosing symbol. files: one row per matching file, limit counts files — the grep -l answer." },
         afterPath: { type: "string", description: "Resume a truncated scan: only files sorting after this repo-relative path are searched. Pass the previous response's nextAfterPath." },
         skipMatches: { type: "integer", minimum: 0, description: "Skip this many matches of the first in-scope file (the first after afterPath, if given). Pass the previous response's nextSkipMatches (set when limit cut a file mid-way), so the resume loses and repeats nothing." },
-        contextLines: { type: "integer", minimum: 0, maximum: 10 },
+        contextLines: { type: "integer", minimum: 0, maximum: 20 },
         limit: { type: "integer", minimum: 1, maximum: limits.maxResultLimit },
         profile: PROFILE_PROP
       }
@@ -121,14 +121,13 @@ export function buildSearchTools(deps: CodebaseIndexDeps): AnyToolDefinition[] {
 
   const getSymbolSource = defineTool({
     name: "get_symbol_source",
-    description: "Return the raw source text span of a symbol (by symbolId or name) read from disk — so you can read the exact code without a separate file read. Uses the persisted end-line when available (re-index to populate), else estimates the span from the next symbol. `contextLines` adds surrounding lines; `maxLines` caps output. A stale index is reported as a non-fatal `staleWarning` (line numbers may differ from HEAD).",
+    description: "Return the raw source text span of a symbol (by symbolId or name) read from disk — so you can read the exact code without a separate file read. Uses the persisted end-line when available (re-index to populate), else estimates the span from the next symbol. `contextLines` adds surrounding lines; `maxLines` caps output. A stale index is reported as a non-fatal `staleWarning` (line numbers may differ from HEAD). `repoId` may be omitted with `symbolId`: the id is looked up across the indexed repos (one holding it → that repo; several → an ambiguity error naming them). A lookup by `name` needs `repoId`.",
     input: schemas.getSymbolSourceSchema,
     inputSchema: {
       type: "object",
       additionalProperties: false,
-      required: ["repoId"],
       properties: {
-        repoId: { type: "string" },
+        repoId: { type: "string", description: "Optional with symbolId (resolved from the id); required with name." },
         symbolId: { type: "string" },
         name: { type: "string" },
         contextLines: { type: "integer", minimum: 0, maximum: 50 },

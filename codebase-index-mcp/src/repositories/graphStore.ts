@@ -592,6 +592,21 @@ export class GraphStore {
     return getSymbolsByIdsImpl(this.db, repoId, symbolIds);
   }
 
+  /**
+   * IX-C: the registered repos holding this symbolId, sorted. A symbolId is a hash (makeSymbolId) and
+   * carries no repo, so get_symbol_source resolves an omitted repoId here. One primary-key probe per repo.
+   */
+  findRepoIdsForSymbol(symbolId: string): string[] {
+    const rows = this.db
+      .prepare(
+        `select r.repo_id as repoId from repositories r
+         where exists (select 1 from symbols s where s.repo_id = r.repo_id and s.symbol_id = ?)
+         order by r.repo_id`
+      )
+      .all(symbolId) as { repoId: string }[];
+    return rows.map((r) => r.repoId);
+  }
+
   getRepository(repoId: string): { repoId: string; repoPath: string; updatedAt: string } | null {
     return getRepositoryImpl(this.db, repoId);
   }
