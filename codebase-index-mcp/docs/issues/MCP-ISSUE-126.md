@@ -120,3 +120,18 @@ the next run full.
 
 **Enhancement proposal:** bound the pool lane's `Promise.all` (candidate 1) and the inline walk (candidate 2) inside the run,
 so a hang ends at the batch level instead of at the 10 min deadline.
+
+### Live follow-up (IX-A(2), 12 Nov)
+
+**Live miss:** on the deployed server (e8f36ad, HTTP-served), wec.aria saw index_status list a gate refresh run without
+`phase`, `progress` or `total`, and found refreshRuns reachable only through a valid runId. An earlier report that the run
+was not listed at all was withdrawn: the calls had overlapped, and at 15:19 the run was listed.
+**Cause:** the gate path was wired, worker progress included. But `createIndexProgress` (indexProgress.ts) dropped every
+notification while `totalFiles` was 0. That covers the whole `scanning` phase and every phase of a scoped run with
+nothing to index, which is the typical gate run. A refresh entry also had no phase of its own until the first message.
+Separately, index_status required `runId` and threw on an unknown one.
+**Fix (5c2cbbb):** a phase change with no file total yet is sent as a bare tick: progress +1 and no total. A refresh entry
+starts at phase `starting`. index_status takes an optional `runId`; without one it answers `{ jobs, refreshRuns }`.
+`test:refresh-deadline` (f)/(g) hold the real worker thread, using Atomics.wait, before the run and after the runner's first
+real progress message. They read `starting`, then `scanning`, and check the no-runId listing and the unknown-runId error:
+6 FAIL before the fix, 0 after.
