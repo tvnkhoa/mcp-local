@@ -90,6 +90,23 @@ function sharedTokenCoverage(candidateTokens: Set<string>, targetTokens: Set<str
   return shared / targetTokens.size;
 }
 
+/** `tests/unit/test_s7_fix.py` → `s7_fix`; null for anything that is not a pytest-named module. */
+export function pytestStem(filePath: string): string | null {
+  const base = filePath.replace(/\\/g, "/").split("/").pop() ?? "";
+  const match = /^test_(.+)\.pyi?$/i.exec(base) ?? /^(.+)_test\.pyi?$/i.exec(base);
+  return match?.[1]?.toLowerCase() ?? null;
+}
+
+/** `src/translate/core/stages/fix.py` → `fix`; a package `__init__.py` → its directory name. */
+export function pythonModuleStem(filePath: string): string | null {
+  const parts = filePath.replace(/\\/g, "/").split("/");
+  const base = parts.pop() ?? "";
+  const match = /^(.+)\.pyi?$/i.exec(base);
+  if (!match) return null;
+  const stem = match[1]!.toLowerCase();
+  return stem === "__init__" ? (parts.pop()?.toLowerCase() ?? null) : stem;
+}
+
 export function linkTestsToSource(
   db: Database.Database,
   repoId: string,
@@ -111,7 +128,10 @@ export function linkTestsToSource(
   const normalizeBase = (v: string) => {
     const base = normalizePath(v).split("/").pop() ?? v;
     return base
-      .replace(/\.(tsx?|jsx?|mjs|cjs|py|cs)$/i, "")
+      // PY-4: pytest names a test module `test_<module>.py` — the marker is a PREFIX, so the suffix rule
+      // below never matched it and `test_pricing.py` normalized to `testpricing`, pairing with nothing.
+      .replace(/^test_(?=.+\.pyi?$)/i, "")
+      .replace(/\.(tsx?|jsx?|mjs|cjs|pyi?|cs)$/i, "")
       .replace(/(\.test|\.spec|_test|test_|tests?)$/i, "")
       .replace(/[^a-z0-9]/gi, "")
       .toLowerCase();
@@ -196,9 +216,18 @@ export function linkTestsToSource(
       sourceScoreMap.set(sourceFile, current);
     };
 
+    const pyTestStem = pytestStem(testFile);
     for (const sourceFile of sourceFiles) {
       if (normalizeBase(sourceFile) === testBase && testBase.length > 0) {
         addScore(sourceFile, 0.55, "name_similarity");
+        continue;
+      }
+      // PY-4: `test_s7_fix.py` ↔ `fix.py` — a pytest module named for a qualified unit (`<stage>_<module>`)
+      // ends with the module's own name at a `_` boundary. Below an exact match, above plain affinity;
+      // import and call evidence decide between same-named modules.
+      const pySourceStem = pyTestStem ? pythonModuleStem(sourceFile) : null;
+      if (pyTestStem && pySourceStem && pySourceStem.length >= 3 && pyTestStem.endsWith(`_${pySourceStem}`)) {
+        addScore(sourceFile, 0.45, "pytest_name_suffix");
         continue;
       }
       // ISSUE-017: name-affinity fallback. Link when the source's distinctive tokens are (mostly)
