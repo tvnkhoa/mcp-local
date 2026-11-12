@@ -4,7 +4,13 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { readTsconfigAliases, resolveModuleSpecifier, looksLikeModulePath } from "./moduleResolution.js";
+import {
+  looksLikeModulePath,
+  pythonPackageRoots,
+  readTsconfigAliases,
+  resolveModuleSpecifier,
+  resolvePythonModuleSpecifier
+} from "./moduleResolution.js";
 
 const FILES = new Set([
   "src/index.ts",
@@ -152,4 +158,56 @@ test("a repo with no tsconfig yields empty aliases rather than throwing", () => 
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
+});
+
+// ── PY-2: Python module specs ──
+
+const PY_FILES = new Set([
+  "src/shop/__init__.py",
+  "src/shop/models.py",
+  "src/shop/pricing.py",
+  "src/shop/core/__init__.py",
+  "src/shop/core/registry.py",
+  "src/shop/stubs.pyi",
+  "tools/gen/__init__.py",
+  "tools/gen/emit.py",
+  "scripts/run.py",
+  "tests/unit/test_pricing.py"
+]);
+
+test("PY-2: the parent of each top-level package is a root, then src, then the repo root", () => {
+  assert.deepEqual(pythonPackageRoots(PY_FILES), ["tools", "src", ""]);
+});
+
+test("PY-2: an absolute module resolves through a src-layout root to a module file or a package __init__", () => {
+  assert.equal(resolvePythonModuleSpecifier("tests/unit/test_pricing.py", "shop.pricing", PY_FILES), "src/shop/pricing.py");
+  assert.equal(resolvePythonModuleSpecifier("tests/unit/test_pricing.py", "shop.core", PY_FILES), "src/shop/core/__init__.py");
+  assert.equal(resolvePythonModuleSpecifier("scripts/run.py", "gen.emit", PY_FILES), "tools/gen/emit.py");
+  assert.equal(resolvePythonModuleSpecifier("scripts/run.py", "shop.stubs", PY_FILES), "src/shop/stubs.pyi");
+});
+
+test("PY-2: a from-import token tries the submodule first, then the module that defines the name", () => {
+  assert.equal(resolvePythonModuleSpecifier("scripts/run.py", "shop.core.registry", PY_FILES), "src/shop/core/registry.py");
+  assert.equal(resolvePythonModuleSpecifier("scripts/run.py", "shop.pricing.price_of", PY_FILES), "src/shop/pricing.py");
+  assert.equal(resolvePythonModuleSpecifier("scripts/run.py", "shop.price_of", PY_FILES), "src/shop/__init__.py");
+  // Only ONE part is dropped: a missing middle module does not fall back to the package.
+  assert.equal(resolvePythonModuleSpecifier("scripts/run.py", "shop.missing.thing", PY_FILES), null);
+});
+
+test("PY-2: relative levels count from the importing module's package", () => {
+  const from = "src/shop/core/registry.py";
+  assert.equal(resolvePythonModuleSpecifier(from, "..pricing.price_of", PY_FILES), "src/shop/pricing.py");
+  assert.equal(resolvePythonModuleSpecifier(from, ".", PY_FILES), "src/shop/core/__init__.py");
+  assert.equal(resolvePythonModuleSpecifier("src/shop/__init__.py", ".models.Item", PY_FILES), "src/shop/models.py");
+  assert.equal(resolvePythonModuleSpecifier("src/shop/__init__.py", ".core", PY_FILES), "src/shop/core/__init__.py");
+  assert.equal(resolvePythonModuleSpecifier(from, "......too.far", PY_FILES), null);
+});
+
+test("PY-2: stdlib and third-party modules resolve to nothing", () => {
+  assert.equal(resolvePythonModuleSpecifier("scripts/run.py", "os.path", PY_FILES), null);
+  assert.equal(resolvePythonModuleSpecifier("scripts/run.py", "pydantic.BaseModel", PY_FILES), null);
+});
+
+test("PY-2: resolveModuleSpecifier routes a .py importer to the Python resolver", () => {
+  assert.equal(resolveModuleSpecifier("src/shop/__init__.py", ".pricing", PY_FILES), "src/shop/pricing.py");
 });

@@ -233,6 +233,9 @@ export function resolveModuleSpecifier(
   knownFiles: ReadonlySet<string>,
   aliases: PathAliases = EMPTY_ALIASES
 ): string | null {
+  // PY-2: a Python file's tokens are dotted module paths with the relative level as leading dots, not
+  // file paths — `.models` is a sibling module, not a dot-file.
+  if (isPythonFile(fromFile)) return resolvePythonModuleSpecifier(fromFile, specifier, knownFiles);
   const bases: string[] = [];
   // A bundler query or fragment is not part of the file name: `./icon.svg?raw`, `./sprite.svg#home`
   // (MCP-ISSUE-077 — the svg asset nodes are what these reach).
@@ -261,6 +264,104 @@ export function resolveModuleSpecifier(
   for (const base of bases) {
     for (const candidate of candidatePaths(base)) {
       if (knownFiles.has(candidate)) return candidate;
+    }
+  }
+  return null;
+}
+
+// ── Python (PY-2) ───────────────────────────────────────────────────────────────────────────
+
+/** `.py` / `.pyi` — the files whose import tokens are Python module specs. */
+export function isPythonFile(filePath: string): boolean {
+  return /\.pyi?$/i.test(filePath);
+}
+
+const pythonRootsCache = new WeakMap<ReadonlySet<string>, string[]>();
+
+/**
+ * The directories an absolute Python import is resolved against, most specific first.
+ *
+ * A package is a directory holding `__init__.py`; the parent of a TOP-level package (one whose own
+ * parent is not a package) is a root — that is what puts `src/` on the path in a src layout without
+ * reading pyproject.toml. `src` and the repo root are always roots, for namespace packages (no
+ * `__init__.py`) and plain scripts. Cached per known-file set: one resolver pass asks thousands of times.
+ */
+export function pythonPackageRoots(knownFiles: ReadonlySet<string>): string[] {
+  const cached = pythonRootsCache.get(knownFiles);
+  if (cached) return cached;
+  const packageDirs = new Set<string>();
+  for (const file of knownFiles) {
+    const match = /^(?:(.*)\/)?__init__\.pyi?$/.exec(file);
+    if (match) packageDirs.add(match[1] ?? "");
+  }
+  const roots = new Set<string>();
+  for (const dir of packageDirs) {
+    if (dir === "") continue;
+    let top = dir;
+    for (;;) {
+      const slash = top.lastIndexOf("/");
+      const parent = slash === -1 ? "" : top.slice(0, slash);
+      if (parent === "" || !packageDirs.has(parent)) break;
+      top = parent;
+    }
+    const slash = top.lastIndexOf("/");
+    roots.add(slash === -1 ? "" : top.slice(0, slash));
+  }
+  const ordered = [...roots].filter((r) => r !== "" && r !== "src").sort();
+  ordered.push("src", "");
+  pythonRootsCache.set(knownFiles, ordered);
+  return ordered;
+}
+
+function pythonModuleFile(dir: string, parts: readonly string[], knownFiles: ReadonlySet<string>): string | null {
+  const stem = [dir, ...parts].filter((p) => p.length > 0).join("/");
+  const candidates = stem
+    // A package directory shadows a same-named module file on import, as in CPython's finder.
+    ? [`${stem}/__init__.py`, `${stem}.py`, `${stem}/__init__.pyi`, `${stem}.pyi`]
+    : ["__init__.py", "__init__.pyi"];
+  for (const candidate of candidates) {
+    if (knownFiles.has(candidate)) return candidate;
+  }
+  return null;
+}
+
+/**
+ * The repo file a Python import token names, or null for the standard library, a third-party
+ * package, or anything not indexed.
+ *
+ * Tokens come from `pythonExtractor`: `a.b` (absolute), `..c.r` (relative — one dot is the importing
+ * file's own package). A `from m import n` token is `m.n`: `n` may be a submodule (`from pkg import
+ * mod`) or a name defined in `m`, so the full path is tried first and the module without its last
+ * part second. Only one part is ever dropped — dropping more would bind `import a.missing.x` to `a`.
+ */
+export function resolvePythonModuleSpecifier(
+  fromFile: string,
+  specifier: string,
+  knownFiles: ReadonlySet<string>
+): string | null {
+  const spec = specifier.trim();
+  if (!spec) return null;
+  const level = /^\.*/.exec(spec)?.[0].length ?? 0;
+  const parts = spec.slice(level).split(".").filter((p) => p.length > 0);
+  const variants = parts.length > 0 ? [parts, parts.slice(0, -1)] : [parts];
+
+  if (level > 0) {
+    const dirParts = normalizeFilePath(fromFile).split("/").slice(0, -1);
+    if (level - 1 > dirParts.length) return null;
+    const base = dirParts.slice(0, dirParts.length - (level - 1)).join("/");
+    for (const variant of variants) {
+      // `from . import x` falling back to `.` is the package's own `__init__`.
+      const hit = pythonModuleFile(base, variant, knownFiles);
+      if (hit) return hit;
+    }
+    return null;
+  }
+
+  for (const variant of variants) {
+    if (variant.length === 0) continue;
+    for (const root of pythonPackageRoots(knownFiles)) {
+      const hit = pythonModuleFile(root, variant, knownFiles);
+      if (hit) return hit;
     }
   }
   return null;
@@ -310,7 +411,8 @@ export function buildImportedFilesByFile(
 
   for (const row of rows) {
     const specifier = row.toId.slice("import:".length);
-    if (!isRelativeSpecifier(specifier) && !looksLikeModulePath(specifier)) continue;
+    const python = isPythonFile(row.fromFile);
+    if (!python && !isRelativeSpecifier(specifier) && !looksLikeModulePath(specifier)) continue;
 
     const fromFile = row.fromFile.replace(/\\/g, "/");
     const cacheKey = `${fromFile}\u0000${specifier}`;
@@ -327,6 +429,45 @@ export function buildImportedFilesByFile(
       byFile.set(fromFile, set);
     }
     set.add(target);
+  }
+
+  // PY-2: a Python file a scoped run did not re-extract holds RESOLVED imports, not `import:` tokens. Reading
+  // only the tokens would give it an empty import scope on an incremental run and a full one on a full run,
+  // so anything scoped by that file's imports (a base class picked for the MRO walk, a re-export hop) would
+  // differ between the two. Its resolved module→module IMPORTS are the same set its tokens resolve to.
+  const resolvedPythonImports = db
+    .prepare(
+      `select sf.file_path as fromFile, st.file_path as toFile
+       from edges e
+       join symbols sf on sf.repo_id = e.repo_id and sf.symbol_id = e.from_id
+       join symbols st on st.repo_id = e.repo_id and st.symbol_id = e.to_id
+       where e.repo_id = ? and e.type = 'IMPORTS' and st.kind = 'module'
+         and (sf.file_path like '%.py' or sf.file_path like '%.pyi')`
+    )
+    .all(repoId) as { fromFile: string; toFile: string }[];
+  for (const row of resolvedPythonImports) {
+    const fromFile = normalizeFilePath(row.fromFile);
+    let set = byFile.get(fromFile);
+    if (!set) {
+      set = new Set<string>();
+      byFile.set(fromFile, set);
+    }
+    set.add(normalizeFilePath(row.toFile));
+  }
+
+  // PY-2: `from pkg import f` lands on `pkg/__init__.py`, which re-exports `f` from a sibling module. One
+  // hop through an imported `__init__` puts the re-exporting module's own imports in scope as well, so the
+  // call resolver can prefer the `f` the package actually exports.
+  // Read from a snapshot, so the result is exactly one hop whatever order the rows came in.
+  const direct = new Map([...byFile].map(([file, set]) => [file, new Set(set)] as const));
+  for (const [fromFile, targets] of byFile) {
+    if (!isPythonFile(fromFile)) continue;
+    for (const target of [...targets]) {
+      if (!/(^|\/)__init__\.pyi?$/.test(target)) continue;
+      for (const reExported of direct.get(target) ?? []) {
+        if (reExported !== fromFile) targets.add(reExported);
+      }
+    }
   }
 
   return byFile;
