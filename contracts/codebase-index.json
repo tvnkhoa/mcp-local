@@ -1208,7 +1208,7 @@
         "openWorldHint": false,
         "readOnlyHint": true
       },
-      "description": "Return the raw source text span of a symbol (by symbolId or name) read from disk — so you can read the exact code without a separate file read. Uses the persisted end-line when available (re-index to populate), else estimates the span from the next symbol. `contextLines` adds surrounding lines; `maxLines` caps output. A stale index is reported as a non-fatal `staleWarning` (line numbers may differ from HEAD).",
+      "description": "Return the raw source text span of a symbol (by symbolId or name) read from disk — so you can read the exact code without a separate file read. Uses the persisted end-line when available (re-index to populate), else estimates the span from the next symbol. `contextLines` adds surrounding lines; `maxLines` caps output. A stale index is reported as a non-fatal `staleWarning` (line numbers may differ from HEAD). `repoId` may be omitted with `symbolId`: the id is looked up across the indexed repos (one holding it → that repo; several → an ambiguity error naming them). A lookup by `name` needs `repoId`.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -1235,15 +1235,13 @@
             "type": "string"
           },
           "repoId": {
+            "description": "Optional with symbolId (resolved from the id); required with name.",
             "type": "string"
           },
           "symbolId": {
             "type": "string"
           }
         },
-        "required": [
-          "repoId"
-        ],
         "type": "object"
       },
       "name": "get_symbol_source"
@@ -2323,7 +2321,7 @@
             "type": "string"
           },
           "contextLines": {
-            "maximum": 10,
+            "maximum": 20,
             "minimum": 0,
             "type": "integer"
           },
