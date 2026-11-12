@@ -50,7 +50,7 @@ export const searchRegexSchema = (MAX_RESULT_LIMIT: number) => z
     language: z.string().max(50).optional(),
     excludeTests: z.boolean().default(false),
     scanAll: z.boolean().default(false),
-    contextLines: z.number().int().min(0).max(10).default(2),
+    contextLines: z.number().int().min(0).max(20).default(2),
     limit: z.number().int().min(1).max(MAX_RESULT_LIMIT).default(50),
     outputMode: z.enum(["matches", "files"]).default("matches"),
     afterPath: z.string().min(1).max(500).optional(),
@@ -85,7 +85,8 @@ export const findSymbolAtLineSchema = z
 // Symbol source span
 export const getSymbolSourceSchema = z
   .object({
-    repoId: z.string().min(1).max(200),
+    // IX-C: optional when symbolId is given — the id is resolved to the one repo holding it.
+    repoId: z.string().min(1).max(200).optional(),
     symbolId: z.string().min(1).max(200).optional(),
     name: z.string().min(1).max(200).optional(),
     contextLines: z.number().int().min(0).max(50).default(0),
@@ -96,6 +97,10 @@ export const getSymbolSourceSchema = z
   .refine((v) => Boolean(v.symbolId || v.name), {
     message: "symbolId or name is required",
     path: ["symbolId"]
+  })
+  .refine((v) => Boolean(v.repoId || v.symbolId || !v.name), {
+    message: "repoId is required when looking a symbol up by name",
+    path: ["repoId"]
   });
 
 // Find implementations

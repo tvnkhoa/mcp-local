@@ -4,7 +4,7 @@
  * `git diff --name-only` printed only the NEW side of a rename, so the old path — the one whose
  * importers a move breaks — never appeared, and its dependents were in no impact. Over real stdio,
  * against a real git repo where `b.ts` is imported by `a.ts` and `c.ts`:
- *   1. a staged `git mv` (the freshness gate prunes the old path first): both paths, paired, and the
+ *   1. a staged `git mv` (the freshness gate prunes the old path; IX-B: asked until the answer is current): both paths, paired, and the
  *      old path's importers found through their import tokens;
  *   2. the same with the gate off (the old path still indexed): the graph's own answer;
  *   3. a plain `mv` (unstaged): a deleted path and an untracked one, NO pairing claimed, importers still
@@ -72,8 +72,16 @@ async function reset(client) {
   await client.callTool({ name: "index_repository", arguments: { wait: true, repoId, repoPath: tmpDir, mode: "full", docsMode: "off" } }, undefined, { timeout: 120_000 });
 }
 const ALL = { policy: "custom", minRiskScore: 0, riskLevels: ["high", "medium", "low"], maxResults: 50, profile: "standard" };
+/**
+ * IX-B: a read with a previous index answers at once, `refreshing`, from the old index while the gate's refresh runs;
+ * ask again until the answer is current (the refresh has pruned the old path). With the gate off there is no block.
+ */
 async function detect(client, extra = {}) {
-  return js(await client.callTool({ name: "detect_changes", arguments: { repoId, ...ALL, ...extra } }, undefined, { timeout: 120_000 }));
+  for (let i = 0; ; i++) {
+    const r = js(await client.callTool({ name: "detect_changes", arguments: { repoId, ...ALL, ...extra } }, undefined, { timeout: 120_000 }));
+    if (r?.freshness?.state !== "refreshing" || i >= 240) return r;
+    await new Promise((res) => setTimeout(res, 250));
+  }
 }
 const row = (r, p) => (r?.impacts ?? []).find((x) => x.filePath === p);
 const dependents = (x) => (x?.topImpactedFiles ?? []).map((f) => f.filePath).sort();

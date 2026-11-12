@@ -1,5 +1,6 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import Database from "better-sqlite3";
 import { makeTempDbPath } from "./_fixtures.mjs";
 import { attachServerStderr } from "./_serverStderr.mjs";
 import "./_indexWait.mjs";
@@ -22,6 +23,9 @@ function readJsonTextContent(result) {
 async function main() {
   const repoPath = process.cwd();
   const repoId = "regex-test-repo";
+  // Step 12 writes a fake second repo into the DB: only into the harness's own temp DB, never a caller's.
+  const ownDb = !process.env.CODEBASE_INDEX_DB_PATH;
+  const dbPath = process.env.CODEBASE_INDEX_DB_PATH ?? makeTempDbPath("cbi-regex-");
 
   const transport = new StdioClientTransport({
     command: "node",
@@ -29,7 +33,7 @@ async function main() {
     env: {
       ...process.env,
       CODEBASE_INDEX_ALLOWED_ROOTS: process.env.CODEBASE_INDEX_ALLOWED_ROOTS ?? repoPath,
-      CODEBASE_INDEX_DB_PATH: process.env.CODEBASE_INDEX_DB_PATH ?? makeTempDbPath("cbi-regex-")
+      CODEBASE_INDEX_DB_PATH: dbPath
     },
     stderr: "pipe"
   });
@@ -132,6 +136,13 @@ async function main() {
   if (truncated.complete !== false || typeof truncated.warning !== "string" || typeof truncated.nextAfterPath !== "string") {
   throw new Error("search_regex(limit=3) did not surface complete:false + warning + nextAfterPath");
 }
+  // IX-C: the caller's own limit cut it → a limitHint naming the max and outputMode:"files"; a complete answer has none.
+  if (typeof truncated.limitHint !== "string" || !/max \d+/.test(truncated.limitHint) || !truncated.limitHint.includes('outputMode:"files"')) {
+    throw new Error(`IX-C: search_regex(limit=3) missing limitHint (max + outputMode:"files"): ${truncated.limitHint}`);
+  }
+  if (multiline.complete !== true || "limitHint" in multiline) {
+    throw new Error("IX-C: a complete search_regex answer must not carry limitHint");
+  }
 console.log("TRUNCATION_OK:", { count: truncated.matches.length, reason: truncated.truncationReason });
 
   // 6. ISSUE-027: compact (default) profile returns the contextLines window per match.
@@ -180,6 +191,77 @@ console.log("TRUNCATION_OK:", { count: truncated.matches.length, reason: truncat
     throw new Error("ISSUE-028: pathExclude over-removed — expected src/ hits to remain");
   }
   console.log("PATH_EXCLUDE_OK:", { remaining: excluded.matches.length });
+
+  // 9. IX-C: contextLines max is 20 — 20 accepted and honoured (≤ 20 lines each side, > 10 somewhere), 21 rejected.
+  const ctx20 = readJsonTextContent(
+    await client.callTool({ name: "search_regex", arguments: { repoId, pattern: "searchRegexImpl", contextLines: 20, limit: 10, profile: "standard" } })
+  ).json;
+  if (!ctx20 || !Array.isArray(ctx20.matches) || ctx20.matches.length < 1) throw new Error("IX-C: contextLines:20 returned no matches");
+  if (ctx20.matches.some((m) => m.beforeContext.length > 20 || m.afterContext.length > 20)) {
+    throw new Error("IX-C: contextLines:20 returned more than 20 lines on a side");
+  }
+  if (!ctx20.matches.some((m) => m.beforeContext.length > 10 || m.afterContext.length > 10)) {
+    throw new Error("IX-C: contextLines:20 never returned more than 10 lines on a side — still capped at 10?");
+  }
+  let ctx21Rejected = false;
+  try {
+    ctx21Rejected = Boolean((await client.callTool({ name: "search_regex", arguments: { repoId, pattern: "searchRegexImpl", contextLines: 21 } }))?.isError);
+  } catch {
+    ctx21Rejected = true;
+  }
+  if (!ctx21Rejected) throw new Error("IX-C: contextLines:21 should be rejected");
+  console.log("CONTEXT_LINES_20_OK");
+
+  // 10. IX-C: get_symbol_source by symbolId alone resolves the one repo holding it.
+  const found = readJsonTextContent(
+    await client.callTool({ name: "search_symbols", arguments: { repoId, query: "searchRegexImpl", strategy: "name", limit: 5 } })
+  ).json;
+  const symbolId = found?.symbols?.find((s) => s.name === "searchRegexImpl")?.symbolId;
+  if (typeof symbolId !== "string") throw new Error("IX-C: search_symbols did not find searchRegexImpl");
+  const bare = await client.callTool({ name: "get_symbol_source", arguments: { symbolId } });
+  const bareJson = readJsonTextContent(bare).json;
+  if (bare.isError || bareJson?.symbolId !== symbolId || !String(bareJson?.source).includes("searchRegexImpl")) {
+    throw new Error(`IX-C: get_symbol_source(symbolId only) did not resolve: ${readTextContent(bare)}`);
+  }
+  // 11. not found anywhere; and a name lookup without repoId stays an error.
+  const missing = await client.callTool({ name: "get_symbol_source", arguments: { symbolId: "0".repeat(24) } });
+  if (!missing.isError || !/not found in any indexed repo/.test(readTextContent(missing))) {
+    throw new Error(`IX-C: unknown symbolId without repoId should be not-found: ${readTextContent(missing)}`);
+  }
+  let byNameRejected = false;
+  try {
+    byNameRejected = Boolean((await client.callTool({ name: "get_symbol_source", arguments: { name: "searchRegexImpl" } }))?.isError);
+  } catch {
+    byNameRejected = true;
+  }
+  if (!byNameRejected) throw new Error("IX-C: get_symbol_source(name, no repoId) should be an error");
+  // 12. two registered repos holding the same symbolId → a deterministic ambiguity error naming both.
+  if (!ownDb) {
+    console.log("SYMBOL_SOURCE_AMBIGUITY_SKIPPED: CODEBASE_INDEX_DB_PATH is set; the two-repo fixture only goes into the harness's own temp DB");
+    console.log("SYMBOL_SOURCE_REPO_RESOLUTION_OK");
+    await client.close();
+    console.log("SEARCH_REGEX_TEST_PASSED");
+    return;
+  }
+  const otherRepoId = "regex-test-repo-b";
+  const db = new Database(dbPath);
+  try {
+    db.prepare("insert into repositories (repo_id, repo_path, updated_at) values (?, ?, ?)").run(otherRepoId, repoPath, new Date().toISOString());
+    db.prepare(
+      "insert into symbols (repo_id, symbol_id, file_path, name, kind, line, end_line, signature, parent_symbol_id) " +
+        "select ?, symbol_id, file_path, name, kind, line, end_line, signature, parent_symbol_id from symbols where repo_id = ? and symbol_id = ?"
+    ).run(otherRepoId, repoId, symbolId);
+  } finally {
+    db.close();
+  }
+  const ambiguous = await client.callTool({ name: "get_symbol_source", arguments: { symbolId } });
+  const ambiguousText = readTextContent(ambiguous);
+  if (!ambiguous.isError || !ambiguousText.includes(`in 2 indexed repos (${repoId}, ${otherRepoId})`)) {
+    throw new Error(`IX-C: same symbolId in two repos should be an ambiguity error naming both: ${ambiguousText}`);
+  }
+  const explicit = await client.callTool({ name: "get_symbol_source", arguments: { repoId, symbolId } });
+  if (explicit.isError) throw new Error(`IX-C: an explicit repoId must still answer when the id is ambiguous: ${readTextContent(explicit)}`);
+  console.log("SYMBOL_SOURCE_REPO_RESOLUTION_OK");
 
   await client.close();
   console.log("SEARCH_REGEX_TEST_PASSED");

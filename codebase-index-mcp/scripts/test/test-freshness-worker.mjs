@@ -17,6 +17,8 @@
  *   (c) the F guard inside the worker: with the latest run's index_version forced to a newer
  *       generation, a refresh posted straight to the worker client (dist) is refused — the run rejects
  *       with the newer-build reason and no run row is written;
+ *       IX-B: the repo has a previous index, so no search waits for the run: the first pays at most the
+ *       bounded tree check, and each search that joins the running refresh waits < 200 ms;
  *   (d) the B.1 delete/revert repros (MCP-ISSUE-069) are test:query-refresh, which runs the same gate
  *       and therefore the worker path; not duplicated here.
  */
@@ -129,9 +131,16 @@ try {
     const r = await call("index_repository", { wait: true, repoId, repoPath, mode: "full" });
     assert(r.body && !r.body.error && (r.body.filesIndexed ?? r.body.summary?.filesIndexed ?? 1) > 0, `index_repository ${repoId}`, r.text.slice(0, 200));
   }
-  // Settle both: clean trees at the indexed HEAD, so neither query below starts a run of its own.
-  await call("search_symbols", { repoId: smallRepo, query: "smallAlpha", strategy: "name", limit: 5 });
-  await call("search_symbols", { repoId: bigRepo, query: "fn_1_1", strategy: "name", limit: 5 });
+  // Settle both: clean trees at the indexed HEAD, so neither query below starts a run of its own. IX-B: a read no longer
+  // waits for a run it starts (the repo has a previous index), so poll until each answers fresh — otherwise a settle run
+  // lands inside the window below and its "✓ index" line ends the window early.
+  for (const [repoId, query] of [[smallRepo, "smallAlpha"], [bigRepo, "fn_1_1"]]) {
+    for (let i = 0; i < 240; i++) {
+      const r = await call("search_symbols", { repoId, query, strategy: "name", limit: 5 });
+      if (!r.body?.freshness || r.body.freshness.state === "fresh") break;
+      await sleep(250);
+    }
+  }
 
   // (a) Dirty DIRTY_FILES files of big.
   for (let i = 0; i < DIRTY_FILES; i++) {
@@ -171,6 +180,11 @@ try {
   console.log(`  info  first search on the dirty repo: ${first.ms} ms, freshness ${JSON.stringify(first.body?.freshness?.state ?? "fresh")}`);
   assert(first.ms < BUDGET_MS + 1000, "(a) the first query on the dirty repo answers within budget + 1 s", `${first.ms} ms`);
   const refreshing = first.body?.freshness?.state === "refreshing";
+  // IX-B: the read that starts the refresh pays at most the tree check (bounded by the budget), never the run.
+  const firstWait = first.body?.freshness?.waitedMs;
+  const firstReason = first.body?.freshness?.reason ?? "";
+  assert(refreshing && typeof firstWait === "number" && firstWait < BUDGET_MS + 200 && !firstReason.includes("re-index is still running after"),
+    "(a) IX-B: the read that starts the refresh does not wait for the run (at most the bounded tree check)", `waitedMs ${String(firstWait)}, reason ${String(first.body?.freshness?.reason).slice(0, 80)}`);
   if (refreshing) {
     const conf = typeof first.body?.coverage === "string" ? first.body.coverage : first.body?.coverage?.confidence;
     assert(conf !== "high", "(a) ... and while refreshing its coverage is not high", JSON.stringify(first.body?.coverage));
@@ -181,7 +195,7 @@ try {
   for (let i = 0; i < 600 && !landed; i++) {
     await sleep(250);
     const r = await call("search_symbols", lightBig);
-    polls.push({ at: Date.now() - t0, ms: r.ms, state: r.body?.freshness?.state ?? "fresh", reason: (r.body?.freshness?.reason ?? "").slice(0, 40), landedSeen: landedLine !== null });
+    polls.push({ at: Date.now() - t0, ms: r.ms, state: r.body?.freshness?.state ?? "fresh", waitedMs: r.body?.freshness?.waitedMs, reason: (r.body?.freshness?.reason ?? "").slice(0, 40), landedSeen: landedLine !== null });
     if (r.body?.freshness?.state !== "refreshing" || landedLine !== null) landed = r;
   }
   if (process.env.FRESHNESS_WORKER_DIAG) {
@@ -198,6 +212,10 @@ try {
   console.log(`  info  refresh window ${windowMs} ms (${landedLine ?? "no run line seen"}); small-repo searches: ${smallTimes.map((s) => s.ms).join(", ")} ms`);
   assert(refreshing, "(a) the fixture's dirty refresh outlives the budget (otherwise this harness measures nothing)", `window ${windowMs} ms`);
   assert(windowMs >= 1000, "(a) ... by at least a second", `${windowMs} ms`);
+  // IX-B: every search that joined the running refresh answered without waiting for it.
+  const joined = polls.filter((p) => p.state === "refreshing" && /re-index is running/.test(p.reason));
+  console.log(`  info  searches that joined the refresh: ${joined.length}, waitedMs ${joined.map((p) => p.waitedMs).join(", ")}`);
+  assert(joined.length >= 1 && joined.every((p) => typeof p.waitedMs === "number" && p.waitedMs < 200), "(a) IX-B: each search that joined the running refresh waited < 200 ms", JSON.stringify(joined.slice(0, 10)));
   assert(smallTimes.length >= 3, "(a) the other repo was queried during the refresh", `${smallTimes.length} calls`);
   assert(smallTimes.every((s) => s.ok && s.ms < 1000), "(a) every search on the other repo answered, each in < 1 s", JSON.stringify(smallTimes));
   assert(landed && landed.text.includes("dirtyEdit_7"), "(a) after landing, the dirty edit is found", landed?.text.slice(0, 200));
