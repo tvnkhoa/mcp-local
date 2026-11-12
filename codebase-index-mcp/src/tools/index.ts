@@ -19,6 +19,7 @@ import { buildSearchTools } from "./search.js";
 import { buildGraphImpactTools } from "./graphImpact.js";
 import { buildIndexingWatchTools } from "./indexingWatch.js";
 import type { CodebaseIndexDeps } from "./common.js";
+import type { FreshnessScope } from "../middleware/freshness.js";
 import { resolveSymbolRepoId } from "./handlers/searchHandler.js";
 
 export type { CodebaseIndexDeps } from "./common.js";
@@ -83,7 +84,9 @@ function withSymbolRepoResolution(deps: CodebaseIndexDeps, tools: readonly AnyTo
  * themselves and are left alone. See `middleware/freshness.ts`.
  */
 function withFreshnessGate(deps: CodebaseIndexDeps, tools: readonly AnyToolDefinition[]): readonly AnyToolDefinition[] {
-  const ensureFresh = deps.ensureFresh;
+  // IX-B: the query's `filePathPrefix` (one or several) narrows the gate's verdict to the paths it reads. A deps
+  // `ensureFresh` that takes only a repoId ignores the second argument and keeps the whole-repo verdict.
+  const ensureFresh = deps.ensureFresh as ((repoId: string, scope?: FreshnessScope) => Promise<void>) | undefined;
   if (!ensureFresh) return tools;
   return tools.map((tool) => {
     if (REPO_ID_MAY_BE_UNKNOWN.has(tool.name)) return tool;
@@ -94,12 +97,25 @@ function withFreshnessGate(deps: CodebaseIndexDeps, tools: readonly AnyToolDefin
     return {
       ...tool,
       handler: async (input: unknown, ctx: unknown) => {
-        const repoId = (input as { repoId?: unknown }).repoId;
-        if (typeof repoId === "string" && repoId.length > 0) await ensureFresh(repoId);
+        const { repoId, filePathPrefix } = input as { repoId?: unknown; filePathPrefix?: unknown };
+        if (typeof repoId === "string" && repoId.length > 0) {
+          const prefixes = queryPrefixes(filePathPrefix);
+          await (prefixes ? ensureFresh(repoId, { filePathPrefixes: prefixes }) : ensureFresh(repoId));
+        }
         return (inner as (i: unknown, c: unknown) => unknown)(input, ctx);
       }
     } as AnyToolDefinition;
   });
+}
+
+/**
+ * IX-B: a validated `filePathPrefix` as the gate takes it — a string or an array of strings (search_regex). Absent, empty
+ * or holding an empty prefix (the whole repo): undefined, so the gate answers for the whole repo.
+ */
+export function queryPrefixes(value: unknown): string[] | undefined {
+  const list = typeof value === "string" ? [value] : Array.isArray(value) ? value : [];
+  if (list.length === 0 || !list.every((p): p is string => typeof p === "string" && p.length > 0)) return undefined;
+  return list;
 }
 
 /**

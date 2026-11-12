@@ -1580,3 +1580,33 @@ test("IX-A/IX-B: serialize writes the run's bound into its marker (per call, els
     rmSync(lockDir, { recursive: true, force: true });
   }
 });
+
+test("IX-B: the tools pass the query's filePathPrefix (string or array) to the gate; no prefix or an empty one is the whole repo", async () => {
+  const { buildTools, queryPrefixes } = await import("../tools/index.js");
+  const calls: unknown[][] = [];
+  const tools = buildTools({
+    limits: { maxResultLimit: 500, maxDepth: 5, maxFilesPerRun: 50_000 },
+    buildContext: () => {
+      throw new Error("no context in this test");
+    },
+    ensureFresh: async (...args: unknown[]) => {
+      calls.push(args);
+    }
+  } as unknown as Parameters<typeof buildTools>[0]);
+  const regex = tools.find((t) => t.name === "search_regex");
+  assert.ok(regex);
+  const callHandler = async (input: unknown): Promise<void> => {
+    try {
+      await (regex.handler as (i: unknown, c: unknown) => Promise<unknown>)(input, {});
+    } catch {
+      // the handler itself has no context here; only the gate's call is under test
+    }
+  };
+  await callHandler({ repoId: "r", pattern: "x", filePathPrefix: ["src/", "lib/"] });
+  await callHandler({ repoId: "r", pattern: "x", filePathPrefix: "scripts/" });
+  await callHandler({ repoId: "r", pattern: "x" });
+  assert.deepEqual(calls, [["r", { filePathPrefixes: ["src/", "lib/"] }], ["r", { filePathPrefixes: ["scripts/"] }], ["r"]]);
+  assert.equal(queryPrefixes(""), undefined);
+  assert.equal(queryPrefixes(["src/", ""]), undefined, "an empty prefix is the whole repo");
+  assert.equal(queryPrefixes([]), undefined);
+});
