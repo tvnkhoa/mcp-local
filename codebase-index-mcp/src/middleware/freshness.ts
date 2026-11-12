@@ -50,7 +50,15 @@ export type FreshnessNote = {
    * longer force a run. The index holds an older copy of each (or none); the answer says so.
    */
   unreadable?: string[];
+  /**
+   * IX-B: the verdict covers only the paths under the query's `filePathPrefixes`. `fresh` with this set means no path
+   * under them changed since the index; the rest of the repo may be stale, and its refresh may be running.
+   */
+  scope?: "prefix";
 };
+
+/** IX-B: what a read asks about. Without prefixes the verdict is the whole repo's. */
+export type FreshnessScope = { filePathPrefixes?: readonly string[] };
 
 export type RepoTreeState = {
   /** Full HEAD sha, or null outside git. */
@@ -134,12 +142,30 @@ export type FreshnessGateOptions = {
    */
   staleRunMs?: number;
   /**
+   * IX-A/IX-B: the bound written into the marker of every run through `serialize` that names none itself (see
+   * {@link RunMarkerOptions}) — the refresh run deadline. Absent: markers carry no bound and are judged by `staleRunMs`.
+   */
+  runStaleAfterMs?: number;
+  /**
    * MCP-ISSUE-101 part 5: the `index_version` of the repo's latest successful FULL run, and this build's. Only a
    * full run re-resolves every file, so a scoped run after a version bump does not count. When they differ, a
    * "fresh" or "refreshed" answer is downgraded to "refreshing" with the reason.
    */
   getFullRunVersion?: (repoId: string) => string | null;
   buildVersion?: string;
+  /**
+   * IX-B: whether the repo has a previous index a read can answer from. With one, a read never waits for a refresh run
+   * (only for the bounded tree check): it starts or joins the run and answers `refreshing` at once. Default: the latest
+   * run recorded a commit (`getIndexedCommit` is not null).
+   */
+  hasBase?: (repoId: string) => boolean;
+  /**
+   * IX-B: how long a read with a base waits for a run before answering `refreshing` (default 0: until the run's
+   * already-queued work settles, one macrotask — a real run, in its worker, never finishes inside it).
+   */
+  baseGraceMs?: number;
+  /** IX-B: repo-relative paths that differ between two commits (default: `git diff --name-only --no-renames`). */
+  diffPaths?: (repoPath: string, from: string, to: string) => Promise<string[]>;
   now?: () => number;
 };
 
@@ -227,10 +253,16 @@ function markerNamesOtherRepo(file: string, repoId: string): boolean {
 
 let runMarkerSeq = 0;
 
-function writeRunMarker(lockDir: string, repoId: string, at: number, mode?: IndexMode): string | null {
+/**
+ * IX-A/IX-B: how long past its own `staleAfterMs` a run marker still counts as live — slack for a run stopping at its
+ * deadline (abort, worker termination, the marker's removal). A marker without the field is judged by `staleRunMs`.
+ */
+export const RUN_MARKER_STALE_MARGIN_MS = 60_000;
+
+function writeRunMarker(lockDir: string, repoId: string, at: number, mode?: IndexMode, staleAfterMs?: number): string | null {
   const file = path.join(lockDir, `${runMarkerPrefix(repoId)}${String(process.pid)}-${String(++runMarkerSeq)}.json`);
   try {
-    fs.writeFileSync(file, JSON.stringify({ pid: process.pid, at, repoId, ...(mode && { mode }) }));
+    fs.writeFileSync(file, JSON.stringify({ pid: process.pid, at, repoId, ...(mode && { mode }), ...(staleAfterMs !== undefined && { staleAfterMs }) }));
     return file;
   } catch {
     return null; // unwritable state dir: the gate degrades as it does for locks
@@ -337,8 +369,11 @@ function repairNames(lockDir: string, kind: "repair" | "repairtry", repoId: stri
   }
 }
 
-/** True when the flag is on disk. */
-function markRepairNeeded(lockDir: string, repoId: string, dead: { mode: IndexMode; pid: number; at: number }): boolean {
+/**
+ * True when the flag is on disk. Exported for IX-A: a run stopped at its deadline by terminating its worker left the
+ * index part-written, and the flag makes the repair durable across processes.
+ */
+export function markRepairNeeded(lockDir: string, repoId: string, dead: { mode: IndexMode; pid: number; at: number }): boolean {
   return newRepairFile(lockDir, "repair", repoId, dead);
 }
 
@@ -407,13 +442,15 @@ export function liveRunMarkers(
   for (const name of names) {
     const file = path.join(lockDir, name);
     if (markerNamesOtherRepo(file, repoId)) continue;
-    let m: { pid?: number; at?: number; mode?: IndexMode } = {};
+    let m: { pid?: number; at?: number; mode?: IndexMode; staleAfterMs?: unknown } = {};
     try {
       m = JSON.parse(fs.readFileSync(file, "utf8")) as typeof m;
     } catch {
       continue; // being written, or just removed
     }
-    if (typeof m.pid === "number" && typeof m.at === "number" && pidAlive(m.pid) && now - m.at <= staleMs) {
+    // IX-A/IX-B: a marker that names its own bound (the run's deadline) is judged by it plus a margin; an older one by staleMs.
+    const bound = typeof m.staleAfterMs === "number" && Number.isFinite(m.staleAfterMs) && m.staleAfterMs >= 0 ? m.staleAfterMs + RUN_MARKER_STALE_MARGIN_MS : staleMs;
+    if (typeof m.pid === "number" && typeof m.at === "number" && pidAlive(m.pid) && now - m.at <= bound) {
       live.push({ pid: m.pid, at: m.at });
     } else {
       // F4: a holder that died mid-run left the index part-written; so may one that outlived `staleMs` and dies
@@ -721,13 +758,45 @@ export function watcherRunPlan(
   return { mode: "dirty", paths: [...new Set([...batch.changed, ...batch.deleted, ...unvouched])].sort() };
 }
 
+/** IX-B: a prefix as the search tools take it, compared case-insensitively with forward slashes and no leading `./` or `/`. */
+function normalizePrefix(p: string): string {
+  return p.replace(/\\/g, "/").replace(/^(\.\/)+/, "").replace(/^\/+/, "").toLowerCase();
+}
+
+/**
+ * IX-B: the changed paths that bear on a query scoped to `prefixes`. A path counts when it lies under a prefix, or when
+ * it is a directory entry that contains one (a submodule that moved: its changed files are not listed).
+ */
+export function changedUnderPrefixes(changed: readonly string[], prefixes: readonly string[]): string[] {
+  const norm = prefixes.map(normalizePrefix);
+  if (norm.some((p) => p === "")) return [...changed];
+  return changed.filter((raw) => {
+    const p = raw.replace(/\\/g, "/").toLowerCase();
+    const dir = `${p.replace(/\/+$/, "")}/`;
+    return norm.some((q) => p.startsWith(q) || q.startsWith(dir));
+  });
+}
+
+async function gitDiffPaths(repoPath: string, from: string, to: string): Promise<string[]> {
+  const out = await gitOut(repoPath, ["diff", "--name-only", "--no-renames", "-z", from, to]);
+  return out.split("\0").filter((p) => p.length > 0);
+}
+
+/**
+ * IX-A/IX-B: what a run's marker says about the run. `staleAfterMs` — the run's own bound (its deadline, relative to its
+ * start): another process counts the marker live for this long plus {@link RUN_MARKER_STALE_MARGIN_MS}, instead of
+ * `staleRunMs`.
+ */
+export type RunMarkerOptions = { staleAfterMs?: number };
+
 export type FreshnessGate = {
-  ensureFresh: (repoId: string) => Promise<FreshnessNote>;
+  /** IX-B: `scope.filePathPrefixes` narrows the verdict to the paths a query reads (see {@link FreshnessNote.scope}). */
+  ensureFresh: (repoId: string, scope?: FreshnessScope) => Promise<FreshnessNote>;
   /**
    * Wraps any index run so no two runs in this process overlap, whatever their repos (MCP-ISSUE-111): every repo
    * shares the one SQLite file, so a second repo's run was a second writer waiting on the first's lock.
    */
-  serialize: <T>(repoId: string, fn: () => Promise<T>, mode?: IndexMode) => Promise<T>;
+  serialize: <T>(repoId: string, fn: () => Promise<T>, mode?: IndexMode, marker?: RunMarkerOptions) => Promise<T>;
 };
 
 export function createFreshnessGate(opts: FreshnessGateOptions): FreshnessGate {
@@ -766,11 +835,58 @@ export function createFreshnessGate(opts: FreshnessGateOptions): FreshnessGate {
       return null;
     }
   };
-  const lastCheck = new Map<string, { at: number; note: FreshnessNote }>();
-  type Flight = { mode: "full" | "incremental" | "dirty"; startedAt: number; promise: Promise<IndexRunResult | null>; cleanup?: number };
+  const baseGraceMs = opts.baseGraceMs ?? 0;
+  const diffPaths = opts.diffPaths ?? gitDiffPaths;
+  const hasBase = (repoId: string): boolean => {
+    try {
+      return opts.hasBase ? opts.hasBase(repoId) : opts.getIndexedCommit(repoId) !== null;
+    } catch {
+      return false;
+    }
+  };
+  /**
+   * IX-B: a verdict plus the paths it is about — every path whose indexed content may differ from the tree (head-moved
+   * diff, dirty, vanished ledger paths), or null when that is not known (a part-written index, another process's run, a
+   * check still running): then no prefix can be answered fresh.
+   */
+  type ChangedSet = {
+    paths: readonly string[];
+    /** Past a moved HEAD: the paths between these commits count too. Asked of git only when a scoped query needs them. */
+    diff?: { repoPath: string; from: string; to: string };
+  } | null;
+  type Verdict = { note: FreshnessNote; changed: ChangedSet };
+  /** IX-B: the head-moved diffs scoped queries asked for, per (repo path, from, to); a failed diff is null. */
+  const diffMemo = new Map<string, Promise<string[] | null>>();
+  const headDiff = (d: { repoPath: string; from: string; to: string }): Promise<string[] | null> => {
+    const k = JSON.stringify([d.repoPath, d.from, d.to]);
+    let p = diffMemo.get(k);
+    if (!p) {
+      if (diffMemo.size >= 64) diffMemo.clear();
+      const pending = diffPaths(d.repoPath, d.from, d.to).catch(() => {
+        // A failure may be transient (git's timeout under load, index.lock): the next scoped read asks again.
+        if (diffMemo.get(k) === pending) diffMemo.delete(k);
+        return null;
+      });
+      p = pending;
+      diffMemo.set(k, p);
+    }
+    return p;
+  };
+  const lastCheck = new Map<string, { at: number } & Verdict>();
+  type Flight = {
+    mode: "full" | "incremental" | "dirty";
+    startedAt: number;
+    promise: Promise<IndexRunResult | null>;
+    cleanup?: number;
+    /**
+     * IX-B: the repo had a previous complete index when this run started, so no caller waits for it. A repair run (the
+     * index was left part-written) has none: its callers wait the budget, as every caller did before.
+     */
+    base: boolean;
+  };
   const inflight = new Map<string, Flight>();
   /** MCP-ISSUE-110: a tree check in flight per repo; its promise never rejects (an error is carried, and rethrown to each waiter). */
-  type Check = { startedAt: number; promise: Promise<{ note: FreshnessNote } | { error: unknown }> };
+  type Check = { startedAt: number; promise: Promise<Verdict | { error: unknown }> };
   const checking = new Map<string, Check>();
   /** MCP-ISSUE-123 re-review B: consecutive failed gate-started runs per repo, and when the last one ended. */
   const failedRefreshes = new Map<string, { count: number; at: number }>();
@@ -780,11 +896,11 @@ export function createFreshnessGate(opts: FreshnessGateOptions): FreshnessGate {
   /** MCP-ISSUE-111: one queue per DB, not per repo. */
   let runChain: Promise<unknown> = Promise.resolve();
 
-  const serialize = <T>(repoId: string, fn: () => Promise<T>, mode?: IndexMode): Promise<T> => {
+  const serialize = <T>(repoId: string, fn: () => Promise<T>, mode?: IndexMode, marker?: RunMarkerOptions): Promise<T> => {
     const prev = runChain;
     // MCP-ISSUE-101 part 5: every run says it is running, for the gates of every process on this DB.
     const marked = async (): Promise<T> => {
-      const marker = writeRunMarker(opts.lockDir, repoId, now(), mode);
+      const markerFile = writeRunMarker(opts.lockDir, repoId, now(), mode, marker?.staleAfterMs ?? opts.runStaleAfterMs);
       // F4: only the flags that exist now are this run's to clear; a run that dies while this one works leaves its own.
       const flagsAtStart = mode === "full" ? repairNames(opts.lockDir, "repair", repoId) : [];
       try {
@@ -796,7 +912,7 @@ export function createFreshnessGate(opts: FreshnessGateOptions): FreshnessGate {
         if (status !== "failed" && status !== "cancelled") failedRefreshes.delete(repoId);
         return result;
       } finally {
-        removeRunMarker(marker);
+        removeRunMarker(markerFile);
       }
     };
     const next = prev.then(marked, marked);
@@ -804,30 +920,37 @@ export function createFreshnessGate(opts: FreshnessGateOptions): FreshnessGate {
     return next;
   };
 
-  const waitBudget = async (
-    repoId: string,
-    flight: Flight
-  ): Promise<FreshnessNote> => {
+  /**
+   * The note for a run this call started or joined. Without a base (IX-B: a repo never indexed, or whose latest run
+   * recorded no commit) it waits up to the budget, from the RUN's start. With one it does not wait for the run at all:
+   * the run goes on in the background and the answer comes from the previous index, flagged `refreshing` (wec.aria,
+   * 12 Nov: a third of the answers paid the wait, p90 8.6 s, for an index that changed in a few files).
+   */
+  const waitBudget = async (repoId: string, flight: Flight, base: boolean): Promise<FreshnessNote> => {
     // The budget runs from the RUN's start, not this call's: a call that joins a run already past its
     // budget answers at once. Measured live: every call during a 20 s refresh waited another 5 s.
     const started = flight.startedAt;
     // A spent budget answers at once. Racing a 0 ms timer is not enough: the run starts in a
     // microtask and its first stretch can finish before the timers phase, so a zero budget waited.
-    const remaining = opts.budgetMs - (now() - started);
+    const remaining = base ? baseGraceMs : opts.budgetMs - (now() - started);
     let timer: NodeJS.Timeout | undefined;
+    let immediate: NodeJS.Immediate | undefined;
     const timeout = new Promise<"timeout">((resolve) => {
-      if (remaining <= 0) resolve("timeout");
+      if (base && remaining <= 0) immediate = setImmediate(() => resolve("timeout"));
+      else if (remaining <= 0) resolve("timeout");
       else timer = setTimeout(() => resolve("timeout"), remaining);
     });
-    const outcome = remaining <= 0 ? "timeout" : await Promise.race([flight.promise, timeout]);
+    const outcome = !base && remaining <= 0 ? "timeout" : await Promise.race([flight.promise, timeout]);
     if (timer) clearTimeout(timer);
+    if (immediate) clearImmediate(immediate);
     if (outcome === "timeout") {
+      const what = `${flight.mode === "incremental" ? "an" : "a"} ${flight.mode} re-index`;
       return {
         state: "refreshing",
         mode: flight.mode,
         elapsedMs: now() - started,
         reason:
-          `${flight.mode === "incremental" ? "an" : "a"} ${flight.mode} re-index is still running after the ${String(opts.budgetMs)} ms query budget` +
+          (base ? `${what} is running; a query does not wait for it while a previous index exists` : `${what} is still running after the ${String(opts.budgetMs)} ms query budget`) +
           (flight.cleanup ? ` (${String(flight.cleanup)} file(s) indexed from an earlier working tree were deleted or reverted since)` : "") +
           "; it continues in the background and a later query will use it. This answer comes from the previous index."
       };
@@ -863,10 +986,37 @@ export function createFreshnessGate(opts: FreshnessGateOptions): FreshnessGate {
     return `this repo's index was last fully built by ${indexed}; this server runs ${opts.buildVersion}, which resolves edges differently. Answers can differ from a current index until index_repository runs with mode "full".`;
   };
 
-  const ensureFresh = async (repoId: string): Promise<FreshnessNote> => {
+  /**
+   * IX-B: narrow a whole-repo verdict to the query's prefixes. When every path the verdict is about lies outside them,
+   * the index holds the tree's content for the scope: `fresh`, marked scoped. A verdict with no known path list is kept:
+   * a part-written index, a check past its budget, a failed run's backoff, and any run of this repo in progress — this
+   * process's or another's.
+   * A run rewrites more than the changed paths (an incremental run re-hashes everything; a dirty run re-extracts the
+   * files that depend on them) and commits in batches before it resolves edges, so while it writes, a file under the
+   * prefix can be part-written although nothing under it changed (IX-B review, finding 2).
+   */
+  const scopeVerdict = async (verdict: Verdict, prefixes: readonly string[] | undefined, callStarted: number): Promise<FreshnessNote> => {
+    const { note, changed } = verdict;
+    if (!prefixes || prefixes.length === 0 || note.state === "fresh" || note.state === "refreshed" || changed === null) return note;
+    if (changedUnderPrefixes(changed.paths, prefixes).length > 0) return note;
+    if (changed.diff) {
+      // The diff is one git spawn, shared by every scoped query at the same commits, and bounded by what is left of
+      // this call's budget: past it, the unscoped verdict stands.
+      let timer: NodeJS.Timeout | undefined;
+      const timeout = new Promise<"timeout">((resolve) => {
+        timer = setTimeout(() => resolve("timeout"), Math.max(0, opts.budgetMs - (now() - callStarted)));
+      });
+      const diff = await Promise.race([headDiff(changed.diff), timeout]);
+      if (timer) clearTimeout(timer);
+      if (diff === "timeout" || diff === null || changedUnderPrefixes(diff, prefixes).length > 0) return note;
+    }
+    return { state: "fresh", scope: "prefix" };
+  };
+
+  const ensureFresh = async (repoId: string, scope?: FreshnessScope): Promise<FreshnessNote> => {
     if (!opts.enabled) return { state: "fresh" };
     const callStarted = now();
-    const checked = withWait(await ensureFreshTree(repoId), callStarted);
+    const checked = withWait(await scopeVerdict(await ensureFreshTree(repoId), scope?.filePathPrefixes, callStarted), callStarted);
     const capped = cappedPaths.get(repoId) ?? [];
     const note: FreshnessNote = capped.length > 0 ? { ...checked, unreadable: capped } : checked;
     const warning = versionWarning(repoId);
@@ -875,22 +1025,26 @@ export function createFreshnessGate(opts: FreshnessGateOptions): FreshnessGate {
     return { ...note, reason: `${note.reason ?? ""} Also: ${warning}`.trim() };
   };
 
-  const ensureFreshTree = async (repoId: string): Promise<FreshnessNote> => {
+  const ensureFreshTree = async (repoId: string): Promise<Verdict> => {
     const started = now();
 
     const running = inflight.get(repoId);
-    if (running) return waitBudget(repoId, running);
+    // IX-B: while a run of this repo writes, no prefix is answered fresh — see scopeVerdict.
+    if (running) return { note: await waitBudget(repoId, running, running.base), changed: null };
 
     // MCP-ISSUE-101 part 5: a run of this repo in any process (index_repository, a watcher, another gate).
     const markers = liveRunMarkers(opts.lockDir, repoId, staleRunMs, started);
     if (markers.length > 0) {
       const oldest = Math.min(...markers.map((m) => m.at));
       return {
-        state: "refreshing",
-        elapsedMs: started - oldest,
-        reason:
-          `an index run of this repo is in progress (pid ${markers.map((m) => String(m.pid)).join(", ")}, for ${String(Math.round((started - oldest) / 1000))} s); ` +
-          "until it ends, this answer comes from a partly re-written index — files it has re-extracted lack their resolved edges until its resolve phase."
+        note: {
+          state: "refreshing",
+          elapsedMs: started - oldest,
+          reason:
+            `an index run of this repo is in progress (pid ${markers.map((m) => String(m.pid)).join(", ")}, for ${String(Math.round((started - oldest) / 1000))} s); ` +
+            "until it ends, this answer comes from a partly re-written index — files it has re-extracted lack their resolved edges until its resolve phase."
+        },
+        changed: null
       };
     }
 
@@ -899,16 +1053,19 @@ export function createFreshnessGate(opts: FreshnessGateOptions): FreshnessGate {
     if (repair && (repair.attempts ?? 0) >= MAX_REPAIR_ATTEMPTS) {
       // The repair was started this many times and each was killed or failed: another run would only repeat it.
       return {
-        state: "stale",
-        mode: repair.mode,
-        reason: `the index was left part-written by a ${repair.mode} run that died, and the repair failed ${String(repair.attempts)} times; run index_repository mode full. This answer comes from a part-written index.`
+        note: {
+          state: "stale",
+          mode: repair.mode,
+          reason: `the index was left part-written by a ${repair.mode} run that died, and the repair failed ${String(repair.attempts)} times; run index_repository mode full. This answer comes from a part-written index.`
+        },
+        changed: null
       };
     }
     const cached = lastCheck.get(repoId);
-    if (!repair && cached && started - cached.at < (cached.note.state === "fresh" ? checkTtlMs : Math.max(checkTtlMs, 1_000))) return cached.note;
+    if (!repair && cached && started - cached.at < (cached.note.state === "fresh" ? checkTtlMs : Math.max(checkTtlMs, 1_000))) return { note: cached.note, changed: cached.note.state === "fresh" ? cached.changed : null };
 
     const repoPath = opts.getRepoPath(repoId);
-    if (!repoPath) return { state: "fresh" };
+    if (!repoPath) return { note: { state: "fresh" }, changed: { paths: [] } };
 
     // MCP-ISSUE-110: the budget bounds the tree check too. A caller arriving while one is in flight joins it,
     // so a slow check runs once however many callers wait on it.
@@ -917,7 +1074,7 @@ export function createFreshnessGate(opts: FreshnessGateOptions): FreshnessGate {
       const pending: Check = {
         startedAt: started,
         promise: checkTree(repoId, repoPath, repair, started).then(
-          (note) => ({ note }),
+          (verdict) => verdict,
           (error: unknown) => ({ error })
         )
       };
@@ -935,7 +1092,7 @@ export function createFreshnessGate(opts: FreshnessGateOptions): FreshnessGate {
    * under load, the git read plus hashing 300 dirty files took 0.7–2.6 s against a 300 ms budget. A zero budget
    * still waits for the check: it bounds only the wait for a run.
    */
-  const waitCheck = async (check: Check): Promise<FreshnessNote> => {
+  const waitCheck = async (check: Check): Promise<Verdict> => {
     const remaining = opts.budgetMs - (now() - check.startedAt);
     let timer: NodeJS.Timeout | undefined;
     const timeout = new Promise<"timeout">((resolve) => {
@@ -945,30 +1102,33 @@ export function createFreshnessGate(opts: FreshnessGateOptions): FreshnessGate {
     if (timer) clearTimeout(timer);
     if (outcome === "timeout") {
       return {
-        state: "refreshing",
-        elapsedMs: now() - check.startedAt,
-        reason:
-          `checking the working tree against the index is still running after the ${String(opts.budgetMs)} ms query budget; ` +
-          "it continues in the background (and starts a refresh if one is needed) and a later query will use it. This answer comes from the previous index."
+        note: {
+          state: "refreshing",
+          elapsedMs: now() - check.startedAt,
+          reason:
+            `checking the working tree against the index is still running after the ${String(opts.budgetMs)} ms query budget; ` +
+            "it continues in the background (and starts a refresh if one is needed) and a later query will use it. This answer comes from the previous index."
+        },
+        changed: null
       };
     }
     if ("error" in outcome) throw outcome.error;
-    return outcome.note;
+    return outcome;
   };
 
-  const checkTree = async (repoId: string, repoPath: string, repair: RepairNeeded | null, started: number): Promise<FreshnessNote> => {
+  const checkTree = async (repoId: string, repoPath: string, repair: RepairNeeded | null, started: number): Promise<Verdict> => {
     let tree: RepoTreeState;
     try {
       tree = await opts.readTree(repoPath);
     } catch {
-      return { state: "fresh" }; // not a git repo: nothing to compare against
+      return { note: { state: "fresh" }, changed: { paths: [] } }; // not a git repo: nothing to compare against
     }
-    if (!tree.head) return { state: "fresh" };
+    if (!tree.head) return { note: { state: "fresh" }, changed: { paths: [] } };
     const key = await computeTreeKey(repoPath, tree, hashMaxBytes);
     capUnreadable(repoId, key);
     // The tree read and the hashing may have yielded: a concurrent call for this repo can have started a run meanwhile.
     const startedMeanwhile = inflight.get(repoId);
-    if (startedMeanwhile) return waitBudget(repoId, startedMeanwhile);
+    if (startedMeanwhile) return { note: await waitBudget(repoId, startedMeanwhile, startedMeanwhile.base), changed: null };
 
     // F3: a submodule entry is expanded into its own dirty files (see computeTreeKey); the entry itself is not a file.
     const isSubmoduleEntry = (p: string): boolean => key.files[p] === "dir" || (key.files[p] ?? "").startsWith("submodule:");
@@ -980,9 +1140,25 @@ export function createFreshnessGate(opts: FreshnessGateOptions): FreshnessGate {
     const changed = headMoved ? null : pathsChangedSince(readCovered(repoId), key);
     if (!repair && !headMoved && vanished.length === 0 && (Object.keys(key.files).length === 0 || changed?.length === 0)) {
       const note: FreshnessNote = { state: "fresh" };
-      lastCheck.set(repoId, { at: started, note });
-      return note;
+      lastCheck.set(repoId, { at: started, note, changed: { paths: [] } });
+      return { note, changed: { paths: [] } };
     }
+
+    // IX-B: every path whose indexed content may differ from the tree, for a query scoped to prefixes. Past a moved HEAD
+    // that is the diff from the indexed commit plus every dirty path; a diff git cannot give (the indexed commit is gone)
+    // and a part-written index leave it unknown.
+    const changedPaths: ChangedSet = repair
+      ? null
+      : !headMoved
+        ? { paths: [...new Set([...(changed ?? Object.keys(key.files)), ...vanished])].sort() }
+        : indexed
+          ? {
+              // Besides what is dirty now, what the index holds from an earlier working tree: the dirty-run ledger and the
+              // covered key's files, whatever HEAD they were recorded at (a stash or revert since leaves them in the index).
+              paths: [...new Set([...Object.keys(key.files), ...(readDirtyLedger(opts.lockDir, repoId)?.paths ?? []), ...Object.keys(readCovered(repoId)?.files ?? {})])].sort(),
+              diff: { repoPath, from: indexed, to: tree.head }
+            }
+          : null;
 
     // A deleted or reverted file that was indexed while dirty is not dirty any more, so git alone would
     // never show it to a dirty run again. It is handed over as a pending re-index; with no way to do
@@ -1006,15 +1182,16 @@ export function createFreshnessGate(opts: FreshnessGateOptions): FreshnessGate {
             `the last ${String(failures.count)} refresh run(s) of this repo failed; the next automatic one waits ${String(Math.ceil(waitMs / 1000))} s. ` +
             "Run index_repository to retry now. This answer comes from the previous index."
         };
-        lastCheck.set(repoId, { at: started, note });
-        return note;
+        // IX-B: a failed run can have committed some batches before it failed, anywhere: never narrowed to a prefix.
+        lastCheck.set(repoId, { at: started, note, changed: null });
+        return { note, changed: null };
       }
     }
     const refusal = opts.refuseRefresh?.(repoId) ?? null;
     if (refusal) {
       const note: FreshnessNote = { state: "stale", mode, reason: `${refusal} This answer comes from the index as that build wrote it.` };
-      lastCheck.set(repoId, { at: started, note });
-      return note;
+      lastCheck.set(repoId, { at: started, note, changed: changedPaths });
+      return { note, changed: changedPaths };
     }
     const lockFile = lockFileFor(opts.lockDir, repoId);
     if (!tryAcquireLock(lockFile, staleLockMs, started)) {
@@ -1023,8 +1200,9 @@ export function createFreshnessGate(opts: FreshnessGateOptions): FreshnessGate {
         mode,
         reason: "another server process is refreshing this repo's index; this answer comes from the previous index."
       };
-      lastCheck.set(repoId, { at: started, note });
-      return note;
+      // IX-B: its mode and paths are unknown here (it may be a full run): never narrowed to a prefix.
+      lastCheck.set(repoId, { at: started, note, changed: null });
+      return { note, changed: null };
     }
 
     // MCP-ISSUE-101: only the files whose content the covered key does not vouch for (all dirty files without one).
@@ -1076,9 +1254,9 @@ export function createFreshnessGate(opts: FreshnessGateOptions): FreshnessGate {
         inflight.delete(repoId);
         lastCheck.delete(repoId);
       });
-    const flight: Flight = { mode, startedAt: started, promise, ...(vanished.length > 0 && { cleanup: vanished.length }) };
+    const flight: Flight = { mode, startedAt: started, promise, base: !repair && hasBase(repoId), ...(vanished.length > 0 && { cleanup: vanished.length }) };
     inflight.set(repoId, flight);
-    return waitBudget(repoId, flight);
+    return { note: await waitBudget(repoId, flight, flight.base), changed: null };
   };
 
   return { ensureFresh, serialize };
@@ -1092,7 +1270,8 @@ export function applyFreshness(payload: unknown, note: FreshnessNote | undefined
   if (!note || !payload || typeof payload !== "object" || Array.isArray(payload)) return payload;
   if (note.state === "fresh") {
     // F2: the tree is as current as the gate can make it, but a path it could not read is not in the index.
-    if (!note.unreadable?.length) return payload;
+    // IX-B: a scoped verdict is shown, so a caller can tell "fresh for these paths" from "fresh"; coverage stands.
+    if (!note.unreadable?.length) return note.scope ? { ...(payload as Record<string, unknown>), freshness: note } : payload;
     const out: Record<string, unknown> = { ...(payload as Record<string, unknown>), freshness: note };
     const gap = `${String(note.unreadable.length)} changed file(s) could not be read for indexing (${note.unreadable.slice(0, 3).join(", ")}${note.unreadable.length > 3 ? ", ..." : ""}); the index holds an older copy or none`;
     const coverage = out.coverage;

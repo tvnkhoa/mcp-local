@@ -11,7 +11,7 @@ import { pathToFileURL } from "node:url";
 import Database from "better-sqlite3";
 
 import { parseStatusPorcelainV2 } from "../services/git/gitHelpers.js";
-import { applyFreshness, computeTreeKey, createFreshnessGate, clearRepairNeeded, liveRunMarkers, pathsChangedSince, readDirtyLedger, readRepairNeeded, recordDirtyLedger, removeRepoStateFiles, tryAcquireLock, UNREADABLE, watcherRunPlan, type RepoTreeState, type TreeKey } from "./freshness.js";
+import { applyFreshness, changedUnderPrefixes, computeTreeKey, createFreshnessGate, clearRepairNeeded, DEFAULT_STALE_RUN_MS, liveRunMarkers, markRepairNeeded, RUN_MARKER_STALE_MARGIN_MS, pathsChangedSince, readDirtyLedger, readRepairNeeded, recordDirtyLedger, removeRepoStateFiles, tryAcquireLock, UNREADABLE, watcherRunPlan, type RepoTreeState, type TreeKey } from "./freshness.js";
 import { GraphStore } from "../repositories/graphStore.js";
 import { createIndexRunner } from "../services/indexing/indexRunner.js";
 import { runIndexPipeline } from "../services/indexing/indexPipeline.js";
@@ -1305,6 +1305,7 @@ test("MCP-ISSUE-122: a caller joining an overdue run reports its own wait (waite
   const h = harness({ budgetMs: 20 });
   try {
     h.setTree({ head: "ddd444", dirty: [] });
+    h.setIndexed(null); // IX-B: only a repo with no previous index waits the budget for a run
     const first = await h.gate.ensureFresh("r");
     assert.equal(first.state, "refreshing");
     assert.ok(first.waitedMs !== undefined && first.elapsedMs !== undefined, "both figures are set when elapsedMs is");
@@ -1374,6 +1375,207 @@ test("MCP-ISSUE-123 re-review B: a refresh that fails every time is not re-run o
     await gate.serialize("r", async () => ({ runId: "manual", status: "ok" }) as IndexRunResult, "incremental");
     clock += 2_000;
     assert.equal((await gate.ensureFresh("r")).state, "refreshed", "the next query runs again at once");
+  } finally {
+    rmSync(lockDir, { recursive: true, force: true });
+  }
+});
+
+/**
+ * IX-B (wec.aria, 12 Nov: a third of the answers said "refreshing" after paying the wait, p90 8.6 s). A repo with a
+ * previous index answers from it at once while its refresh runs; only a repo with none waits the budget. A query scoped
+ * to path prefixes is fresh when nothing under them changed, whatever runs for the rest.
+ */
+function ixbGate(o: { indexed: string | null; tree: RepoTreeState; budgetMs?: number; refuse?: string; diff?: (from: string, to: string) => Promise<string[]> }) {
+  const lockDir = mkdtempSync(path.join(tmpdir(), "cim-fresh-"));
+  let indexed = o.indexed;
+  const runs: IndexMode[] = [];
+  let release: (() => void) | null = null;
+  const diffCalls: string[] = [];
+  let offset = 0;
+  const gate = createFreshnessGate({
+    enabled: true,
+    now: () => Date.now() + offset,
+    budgetMs: o.budgetMs ?? 5000,
+    lockDir,
+    checkTtlMs: 0,
+    getRepoPath: () => lockDir,
+    getIndexedCommit: () => indexed,
+    readTree: () => o.tree,
+    ...(o.refuse !== undefined && { refuseRefresh: () => o.refuse ?? null }),
+    ...(o.diff && {
+      diffPaths: (_repoPath: string, from: string, to: string) => {
+        diffCalls.push(`${from}..${to}`);
+        return (o.diff as (f: string, t: string) => Promise<string[]>)(from, to);
+      }
+    }),
+    run: async (_repoId, _repoPath, mode) => {
+      runs.push(mode);
+      await new Promise<void>((resolve) => (release = resolve));
+      indexed = o.tree.head;
+      return { runId: `run-${String(runs.length)}`, status: "ok" } as IndexRunResult;
+    }
+  });
+  return {
+    gate,
+    runs,
+    diffCalls,
+    lockDir,
+    /** Past the 1 s reuse of a non-fresh note (which never feeds a scoped verdict: IX-B review 3). */
+    tick: () => (offset += 2_000),
+    finish: async () => {
+      release?.();
+      await new Promise((r) => setTimeout(r, 5));
+    },
+    cleanup: () => rmSync(lockDir, { recursive: true, force: true })
+  };
+}
+
+test("IX-B: with a previous index, a read never waits for the refresh run — refreshing at once, and so does a caller that joins it", async () => {
+  const g = ixbGate({ indexed: "aaa111", tree: { head: "bbb222", dirty: [] } });
+  try {
+    const first = await g.gate.ensureFresh("r");
+    assert.equal(first.state, "refreshing");
+    assert.equal(first.mode, "incremental");
+    assert.ok((first.waitedMs ?? 9999) < 200, `the first read does not wait for the run (${String(first.waitedMs)} ms, budget 5000)`);
+    assert.match(first.reason ?? "", /does not wait for it while a previous index exists; it continues in the background/);
+    const second = await g.gate.ensureFresh("r");
+    assert.equal(second.state, "refreshing");
+    assert.ok((second.waitedMs ?? 9999) < 200, `a joiner does not wait either (${String(second.waitedMs)} ms)`);
+    assert.deepEqual(g.runs, ["incremental"], "one run, started by the first read");
+    await g.finish();
+    assert.deepEqual(await g.gate.ensureFresh("r"), { state: "fresh" }, "the landed run serves the next read");
+  } finally { g.cleanup(); }
+});
+
+test("IX-B: with no previous index, a read still waits for the run up to the budget", async () => {
+  const g = ixbGate({ indexed: null, tree: { head: "bbb222", dirty: [] }, budgetMs: 300 });
+  try {
+    const first = await g.gate.ensureFresh("r");
+    assert.equal(first.state, "refreshing");
+    assert.match(first.reason ?? "", /still running after the 300 ms query budget/);
+    assert.ok((first.waitedMs ?? 0) >= 250 && (first.waitedMs ?? 0) < 1500, `it waited out the budget, no longer (${String(first.waitedMs)} ms)`);
+    await g.finish();
+  } finally { g.cleanup(); }
+});
+
+test("IX-B: with no run writing, a prefix with no changed path under it is fresh (scoped); a prefix over a changed path keeps the repo's verdict", async () => {
+  // A refused refresh (an index written by a newer build) starts no run: nothing writes while the scoped verdict is given.
+  // The dirty path need not exist: it hashes as `deleted`, still a change the index has not covered.
+  const g = ixbGate({ indexed: "aaa111", tree: { head: "aaa111", dirty: ["src/a.ts"] }, refuse: "written by a newer build (test)." });
+  try {
+    const t0 = Date.now();
+    assert.deepEqual(await g.gate.ensureFresh("r", { filePathPrefixes: ["lib/"] }), { state: "fresh", scope: "prefix" });
+    assert.ok(Date.now() - t0 < 200, `no wait for the scoped read (${String(Date.now() - t0)} ms)`);
+    g.tick();
+    assert.equal((await g.gate.ensureFresh("r", { filePathPrefixes: ["lib/", "src/"] })).state, "stale", "any prefix over a changed path keeps the repo's verdict");
+    g.tick();
+    assert.equal((await g.gate.ensureFresh("r", { filePathPrefixes: [".\\SRC\\"] })).state, "stale", "prefixes compare with forward slashes, case-insensitively");
+    g.tick();
+    assert.equal((await g.gate.ensureFresh("r", { filePathPrefixes: [""] })).state, "stale", "an empty prefix is the whole repo");
+    g.tick();
+    assert.equal((await g.gate.ensureFresh("r")).state, "stale", "an unscoped read is the whole repo's verdict");
+    assert.equal((await g.gate.ensureFresh("r", { filePathPrefixes: ["lib/"] })).state, "stale", "review 3: a reused non-fresh note never turns into a scoped fresh");
+    assert.deepEqual(g.runs, []);
+  } finally { g.cleanup(); }
+});
+
+test("IX-B review 2: while a run of the repo writes, no prefix is fresh — a run rewrites more than the changed paths", async () => {
+  const g = ixbGate({ indexed: "aaa111", tree: { head: "aaa111", dirty: ["src/a.ts"] } });
+  try {
+    const starter = await g.gate.ensureFresh("r", { filePathPrefixes: ["lib/"] });
+    assert.equal(starter.state, "refreshing", "the read that starts the run");
+    assert.ok((starter.waitedMs ?? 9999) < 200, `and it did not wait (${String(starter.waitedMs)} ms)`);
+    assert.equal((await g.gate.ensureFresh("r", { filePathPrefixes: ["lib/"] })).state, "refreshing", "a scoped joiner");
+    assert.deepEqual(g.runs, ["dirty"]);
+    await g.finish();
+    assert.deepEqual(await g.gate.ensureFresh("r", { filePathPrefixes: ["lib/"] }), { state: "fresh" }, "landed: fresh for the whole repo");
+  } finally { g.cleanup(); }
+});
+
+test("IX-B: past a moved HEAD the scoped verdict asks git for the diff once; a failed diff keeps the repo's verdict and is asked again", async () => {
+  let fail = false;
+  const g = ixbGate({
+    indexed: "aaa111",
+    tree: { head: "bbb222", dirty: [] },
+    refuse: "written by a newer build (test).",
+    diff: async () => {
+      if (fail) throw new Error("index.lock (test)");
+      return ["src/b.ts"];
+    }
+  });
+  try {
+    assert.equal((await g.gate.ensureFresh("r")).state, "stale");
+    assert.deepEqual(g.diffCalls, [], "an unscoped read never pays for the diff");
+    fail = true;
+    g.tick();
+    assert.equal((await g.gate.ensureFresh("r", { filePathPrefixes: ["lib/"] })).state, "stale", "unknown diff: never fresh");
+    fail = false;
+    g.tick();
+    assert.deepEqual(await g.gate.ensureFresh("r", { filePathPrefixes: ["lib/"] }), { state: "fresh", scope: "prefix" }, "a failed diff is not remembered");
+    g.tick();
+    assert.equal((await g.gate.ensureFresh("r", { filePathPrefixes: ["src/b"] })).state, "stale");
+    assert.deepEqual(g.diffCalls, ["aaa111..bbb222", "aaa111..bbb222"], "after the failure, one diff for every scoped read at the same commits");
+  } finally { g.cleanup(); }
+});
+
+test("IX-B review 1: past a moved HEAD, a path the index holds from an earlier working tree (dirty ledger) counts as changed", async () => {
+  const g = ixbGate({ indexed: "aaa111", tree: { head: "bbb222", dirty: [] }, refuse: "written by a newer build (test).", diff: async () => ["docs/b.md"] });
+  try {
+    // Indexed while dirty at aaa111, then stashed; an unrelated commit moved HEAD.
+    recordDirtyLedger(g.lockDir, "r", "dirty", { head: "aaa111", dirty: ["src/a/x.ts"] });
+    assert.equal((await g.gate.ensureFresh("r", { filePathPrefixes: ["src/a"] })).state, "stale");
+    g.tick();
+    assert.deepEqual(await g.gate.ensureFresh("r", { filePathPrefixes: ["lib/"] }), { state: "fresh", scope: "prefix" });
+  } finally { g.cleanup(); }
+});
+
+test("IX-B: a changed directory entry that contains the prefix (a moved submodule) counts as under it", () => {
+  assert.deepEqual(changedUnderPrefixes(["vendor/sub"], ["vendor/sub/src/"]), ["vendor/sub"]);
+  assert.deepEqual(changedUnderPrefixes(["vendor/subway.ts"], ["vendor/sub/src/"]), []);
+  assert.deepEqual(changedUnderPrefixes(["Src/A.ts"], ["src/"]), ["Src/A.ts"]);
+});
+
+test("IX-B: applyFreshness shows a scoped fresh verdict and leaves coverage alone", () => {
+  const out = applyFreshness({ results: [], coverage: "high" }, { state: "fresh", scope: "prefix" }) as Record<string, unknown>;
+  assert.deepEqual(out.freshness, { state: "fresh", scope: "prefix" });
+  assert.equal(out.coverage, "high");
+  assert.deepEqual(applyFreshness({ coverage: "high" }, { state: "fresh" }), { coverage: "high" }, "an unscoped fresh adds nothing, as before");
+});
+
+test("IX-A/IX-B: a marker that names its own bound (staleAfterMs) is live only for that bound plus the margin; an old-format marker keeps staleRunMs", () => {
+  const lockDir = mkdtempSync(path.join(tmpdir(), "cim-fresh-"));
+  const SIX_H = DEFAULT_STALE_RUN_MS;
+  try {
+    const bounded = path.join(lockDir, "running-r-1-1.json");
+    fs.writeFileSync(bounded, JSON.stringify({ pid: process.pid, at: 0, repoId: "r", mode: "dirty", staleAfterMs: 600_000 }));
+    assert.equal(liveRunMarkers(lockDir, "r", SIX_H, 600_000 + RUN_MARKER_STALE_MARGIN_MS).length, 1, "live up to its own bound plus the margin");
+    const flags: string[] = [];
+    assert.deepEqual(liveRunMarkers(lockDir, "r", SIX_H, 600_001 + RUN_MARKER_STALE_MARGIN_MS, (_d, _r, dead) => { flags.push(dead.mode); return true; }), [], "past it: not live, though its pid is alive and 6 h have not passed");
+    assert.deepEqual(flags, ["dirty"], "and, like any expired marker, it leaves a repair flag");
+    assert.equal(fs.existsSync(bounded), false);
+
+    fs.writeFileSync(path.join(lockDir, "running-r-1-2.json"), JSON.stringify({ pid: process.pid, at: 0, repoId: "r", mode: "dirty" }));
+    assert.equal(liveRunMarkers(lockDir, "r", SIX_H, 3 * 60 * 60_000).length, 1, "an old-format marker (no bound) is still live at 3 h");
+    assert.deepEqual(liveRunMarkers(lockDir, "r", SIX_H, SIX_H + 1, () => true), [], "and is judged by staleRunMs (6 h)");
+  } finally {
+    rmSync(lockDir, { recursive: true, force: true });
+  }
+});
+
+test("IX-A/IX-B: serialize writes the run's bound into its marker (per call, else the gate's runStaleAfterMs); markRepairNeeded is exported", async () => {
+  const lockDir = mkdtempSync(path.join(tmpdir(), "cim-fresh-"));
+  try {
+    const gate = createFreshnessGate({ enabled: true, budgetMs: 0, lockDir, runStaleAfterMs: 900_000, getRepoPath: () => null, getIndexedCommit: () => null, readTree: () => ({ head: null, dirty: [] }), run: async () => { throw new Error("unused"); } });
+    const seen: unknown[] = [];
+    const markerBody = (): unknown => {
+      const name = fs.readdirSync(lockDir).find((n) => n.startsWith("running-r-"));
+      return name ? (JSON.parse(fs.readFileSync(path.join(lockDir, name), "utf8")) as { staleAfterMs?: unknown }).staleAfterMs : "no marker";
+    };
+    await gate.serialize("r", async () => { seen.push(markerBody()); }, "dirty", { staleAfterMs: 120_000 });
+    await gate.serialize("r", async () => { seen.push(markerBody()); }, "dirty");
+    assert.deepEqual(seen, [120_000, 900_000]);
+    assert.equal(markRepairNeeded(lockDir, "r", { mode: "full", pid: 1, at: 2 }), true);
+    assert.equal(readRepairNeeded(lockDir, "r")?.mode, "full");
   } finally {
     rmSync(lockDir, { recursive: true, force: true });
   }
