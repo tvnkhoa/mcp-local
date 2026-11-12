@@ -415,7 +415,8 @@ export function createIndexRunner(options: IndexRunnerOptions): RunIndexAndResol
       commitSha: null,
       finishedAt: new Date().toISOString(),
       elapsedMs: Date.now() - runStartedMs,
-      scope: `${partial.scope ? `${partial.scope}; ` : ""}aborted: no commit recorded`
+      // IX-A: the abort's reason (a refresh deadline) when the worker's `exit` carried one.
+      scope: `${partial.scope ? `${partial.scope}; ` : ""}aborted${typeof extras.abortSignal?.reason === "string" ? ` (${extras.abortSignal.reason})` : ""}: no commit recorded`
     };
     try {
       store.recordRun(aborted);

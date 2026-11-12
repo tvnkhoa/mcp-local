@@ -54,6 +54,7 @@
     "test:failure-excerpt": "node scripts/test/test-failure-excerpt.mjs",
     "test:freshness-worker": "node scripts/test/test-freshness-worker.mjs",
     "test:index-jobs": "node scripts/test/test-index-jobs.mjs",
+    "test:refresh-deadline": "node scripts/test/test-refresh-deadline.mjs",
     "test:index-lock-contention": "node scripts/test/test-index-lock-contention.mjs",
     "test:register-worktree": "node scripts/test/test-register-worktree.mjs",
     "test:change-value-representation": "node scripts/test/test-change-value-representation.mjs",

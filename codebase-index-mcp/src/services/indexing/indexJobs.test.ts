@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { IndexJobQueue, queuedWithin, sameRepoPath, type IndexJobRequest } from "./indexJobs.js";
+import { IndexJobQueue, MAX_REFRESH_DEADLINE_STOPS, queuedWithin, RefreshRuns, sameRepoPath, type IndexJobRequest } from "./indexJobs.js";
+import type { IndexMode } from "../../types/index.js";
 import type { IndexRunResult } from "../../types/index.js";
 
 /**
@@ -256,3 +257,193 @@ test("IX-2: wait returns the job as it stands when the bound passes; a failed or
   assert.match(thrown?.error ?? "", /newer build/);
   assert.equal(await queue.wait("no-such-run", 10), null);
 });
+
+// ── IX-A (MCP-ISSUE-126): refresh runs — runId, progress, deadline ──
+
+type Landed = { runId: string; mode: IndexMode; status: string };
+
+/** The deadline timer is unref'd (a server holds its loop open); a test holds it for the body. */
+const held = (body: () => Promise<void>) => async (): Promise<void> => {
+  const keep = setInterval(() => undefined, 5);
+  try {
+    await body();
+  } finally {
+    clearInterval(keep);
+  }
+};
+
+test("IX-A: a refresh run under its deadline is listed while it runs, untouched, and gone after", async () => {
+  const runs = new RefreshRuns(1_000);
+  const gate = deferred();
+  let aborts = 0;
+  const p = runs.run<Landed>({
+    repoId: "r",
+    mode: "dirty",
+    source: "watcher",
+    abort: async () => ((aborts += 1), true),
+    execute: async (runId, mode, onProgress) => {
+      onProgress(2, 5, "index r: resolve");
+      await gate.promise;
+      return { runId, mode, status: "ok" };
+    }
+  });
+  await tick();
+  const [view] = runs.list();
+  assert.equal(view?.repoId, "r");
+  assert.equal(view?.mode, "dirty");
+  assert.equal(view?.source, "watcher");
+  assert.equal(view?.state, "running");
+  assert.equal(view?.phase, "resolve");
+  assert.equal(view?.progress, 2);
+  assert.equal(view?.total, 5);
+  assert.equal(view?.deadlineMs, 1_000);
+  assert.ok(view && view.elapsedMs >= 0 && typeof view.deadlineAt === "string");
+  assert.deepEqual(runs.get(view?.runId ?? ""), { ...view, elapsedMs: runs.get(view?.runId ?? "")?.elapsedMs });
+  gate.resolve();
+  const landed = await p;
+  assert.equal(landed.runId, view?.runId, "the run is recorded under the registry's runId");
+  assert.equal(aborts, 0);
+  assert.deepEqual(runs.list(), []);
+  assert.deepEqual(runs.modeFor("r", "dirty"), { mode: "dirty" });
+});
+
+test("IX-A: past the deadline the run is aborted, rejects with the reason only after the abort settled, and the next run is full", held(async () => {
+  const runs = new RefreshRuns(30);
+  const order: string[] = [];
+  let stateWhileStopping: string | undefined;
+  let rejectRun!: (e: Error) => void;
+  const p = runs.run<Landed>({
+    repoId: "r",
+    mode: "dirty",
+    source: "freshness_gate",
+    abort: async (runId, reason) => {
+      order.push(`abort ${reason.includes(runId) ? "names run" : "?"}`);
+      stateWhileStopping = runs.get(runId)?.state;
+      rejectRun(new Error("worker restarted")); // the worker client rejects first...
+      await tick(20);
+      order.push("worker gone");
+      return true;
+    },
+    execute: () => new Promise<Landed>((_, reject) => (rejectRun = reject))
+  });
+  await assert.rejects(p, (e: Error) => /CODEBASE_INDEX_REFRESH_RUN_DEADLINE_MS=30 ms/.test(e.message));
+  order.push("rejected");
+  assert.deepEqual(order, ["abort names run", "worker gone", "rejected"], "...but the run settles only after the abort");
+  assert.equal(stateWhileStopping, "stopping", "listed as stopping while the worker goes");
+  assert.deepEqual(runs.list(), []);
+  const next = runs.modeFor("r", "dirty");
+  assert.equal(next.mode, "full");
+  assert.match(next.escalatedBecause ?? "", /stopped at the 30 ms refresh deadline; dirty requested/);
+  assert.deepEqual(runs.modeFor("other", "dirty"), { mode: "dirty" }, "per repo");
+  // The repair run is handed full + the reason; once it lands ok, the repo is back to dirty.
+  const repair = await runs.run<Landed>({
+    repoId: "r",
+    mode: "dirty",
+    source: "freshness_gate",
+    abort: async () => true,
+    execute: async (runId, mode, _p, why) => {
+      assert.equal(mode, "full");
+      assert.match(why ?? "", /refresh deadline/);
+      return { runId, mode, status: "ok" };
+    }
+  });
+  assert.equal(repair.mode, "full");
+  assert.deepEqual(runs.modeFor("r", "dirty"), { mode: "dirty" });
+}));
+
+test("IX-A: a failed or cancelled full run keeps the repair pending; a deadline that found nothing to stop clears it", held(async () => {
+  const runs = new RefreshRuns(20);
+  let rejectRun!: (e: Error) => void;
+  await assert.rejects(
+    runs.run<Landed>({
+      repoId: "r",
+      mode: "dirty",
+      source: "watcher",
+      abort: async () => (rejectRun(new Error("worker restarted")), true),
+      execute: () => new Promise<Landed>((_, reject) => (rejectRun = reject))
+    }),
+    /deadline/
+  );
+  runs.landed("r", { mode: "full", status: "failed" });
+  assert.equal(runs.modeFor("r", "dirty").mode, "full");
+  runs.landed("r", { mode: "full", status: "cancelled" });
+  assert.equal(runs.modeFor("r", "dirty").mode, "full");
+  // A run that answered just as its deadline fired: abort found nothing (false), the run stands, no repair.
+  const fresh = new RefreshRuns(10);
+  const landed = await fresh.run<Landed>({
+    repoId: "s",
+    mode: "dirty",
+    source: "watcher",
+    abort: async () => false,
+    execute: async (runId, mode) => {
+      await tick(30);
+      return { runId, mode, status: "ok" };
+    }
+  });
+  assert.equal(landed.status, "ok");
+  assert.deepEqual(fresh.modeFor("s", "dirty"), { mode: "dirty" });
+}));
+
+test("IX-A: the queue exposes its refresh registry for index_status", () => {
+  const refreshes = new RefreshRuns(1_000);
+  const q = new IndexJobQueue({ execute: async () => ({}) as IndexRunResult, minFreeRamMb: 0, refreshes });
+  assert.equal(q.refreshes, refreshes);
+  assert.equal(new IndexJobQueue({ execute: async () => ({}) as IndexRunResult, minFreeRamMb: 0 }).refreshes, null);
+});
+
+/** A run that hangs until aborted; the abort rejects it as the worker client does and answers `stopped`. */
+const hangingRun = (runs: RefreshRuns, repoId: string, mode: IndexMode, stopped = true): Promise<Landed> => {
+  let rejectRun!: (e: Error) => void;
+  return runs.run<Landed>({
+    repoId,
+    mode,
+    source: "watcher",
+    abort: async () => {
+      if (stopped) rejectRun(new Error("worker restarted"));
+      return stopped;
+    },
+    execute: () => new Promise<Landed>((_, reject) => (rejectRun = reject))
+  });
+};
+
+test("IX-A review (2): a full run gets the full-run deadline; after MAX stops in a row no refresh starts until a run lands", held(async () => {
+  const runs = new RefreshRuns(20, 60);
+  let seenDeadline = 0;
+  await runs.run<Landed>({
+    repoId: "r",
+    mode: "full",
+    source: "watcher",
+    abort: async () => true,
+    execute: async (runId, mode) => {
+      seenDeadline = runs.get(runId)?.deadlineMs ?? 0;
+      return { runId, mode, status: "ok" };
+    }
+  });
+  assert.equal(seenDeadline, 60, "a full run: the full-run deadline");
+  for (let i = 0; i < MAX_REFRESH_DEADLINE_STOPS; i++) await assert.rejects(hangingRun(runs, "r", "dirty"), /deadline/);
+  await assert.rejects(hangingRun(runs, "r", "dirty"), /no refresh of r starts: its last 2 refresh runs were stopped/);
+  assert.deepEqual(runs.list(), [], "the refused run never started");
+  runs.landed("r", { mode: "full", status: "ok" }); // an index_repository job landed
+  const back = await runs.run<Landed>({ repoId: "r", mode: "dirty", source: "watcher", abort: async () => true, execute: async (runId, mode) => ({ runId, mode, status: "ok" }) });
+  assert.equal(back.mode, "dirty", "the stop count and the repair are lifted");
+}));
+
+test("IX-A review (4)(5)(6): a deadline that stopped nothing keeps the earlier repair and the run's own error; a job timeout asks for repair", held(async () => {
+  const runs = new RefreshRuns(10);
+  runs.needRepair("r", "index run j1 was stopped at CODEBASE_INDEX_RUN_TIMEOUT_MS=5 ms");
+  assert.match(runs.modeFor("r", "dirty").escalatedBecause ?? "", /index run j1 was stopped/);
+  // The forced-full run fails on its own just as the deadline fires; the abort finds nothing (false).
+  let rejectRun!: (e: Error) => void;
+  const failing = runs.run<Landed>({
+    repoId: "r",
+    mode: "dirty",
+    source: "watcher",
+    abort: async () => {
+      rejectRun(new Error("the refresh worker crashed: boom"));
+      return false;
+    },
+    execute: () => new Promise<Landed>((_, reject) => (rejectRun = reject))
+  });
+  await assert.rejects(failing, /the refresh worker crashed: boom/, "its own error, not the deadline reason");
+  assert.match(runs.modeFor("r", "dirty").escalatedBecause ?? "", /index run j1 was stopped/, "the earlier repair is restored, not dropped");
+}));

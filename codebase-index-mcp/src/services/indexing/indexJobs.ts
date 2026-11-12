@@ -106,6 +106,8 @@ export type IndexJobQueueOptions = {
   runTimeoutMs?: number;
   /** Called once when a run timed out, to stop it (the server terminates the worker, which rejects the run). */
   onRunTimeout?: (job: Readonly<IndexJob>) => void;
+  /** IX-A: the gate's and the watcher's refresh runs in flight, for `index_status` (`refreshRuns`). */
+  refreshes?: RefreshRuns;
 };
 
 export const DEFAULT_MIN_FREE_RAM_MB = 8192;
@@ -178,7 +180,11 @@ export class IndexJobQueue {
   private readonly freeRamMb: () => number;
   private readonly now: () => number;
 
+  /** IX-A: the refresh runs (not jobs) this process has in flight; `index_status` lists them. */
+  readonly refreshes: RefreshRuns | null;
+
   constructor(private readonly options: IndexJobQueueOptions) {
+    this.refreshes = options.refreshes ?? null;
     this.freeRamMb = options.freeRamMb ?? (() => Math.floor(os.freemem() / (1024 * 1024)));
     this.now = options.now ?? Date.now;
   }
@@ -485,4 +491,183 @@ export function seedParentRefusal(lockDir: string, store: { seedRefusal(repoId: 
   if (busy) return busy;
   const reason = store.seedRefusal(parentRepoId);
   return reason ? `parent_runs_unvouched: ${reason}` : null;
+}
+
+// ── IX-A (MCP-ISSUE-126): the freshness gate's and the watcher's refresh runs ─────────────────────────────────────────
+
+/**
+ * IX-A: `CODEBASE_INDEX_REFRESH_RUN_DEADLINE_MS` default. On 11 Nov a gate-triggered dirty refresh of wec.aria ran
+ * 5.0 h; it had no runId, no progress and no deadline (only index_repository jobs had `CODEBASE_INDEX_RUN_TIMEOUT_MS`),
+ * and through the DB-wide queue every query waited on it. Agreed with wec.aria: 10 min.
+ */
+export const DEFAULT_REFRESH_RUN_DEADLINE_MS = 10 * 60_000;
+export const MIN_REFRESH_RUN_DEADLINE_MS = 1_000;
+export const MAX_REFRESH_RUN_DEADLINE_MS = 6 * 60 * 60_000;
+/**
+ * Review (2): after this many deadline stops in a row of one repo, no refresh of it starts in this process until a run
+ * lands (an index_repository job, say). A repo whose full run outlasts even the full-run deadline would otherwise run a
+ * doomed full run on every watcher batch, each holding the DB-wide queue for its deadline plus the abort grace.
+ */
+export const MAX_REFRESH_DEADLINE_STOPS = 2;
+
+/** Who started a refresh run. */
+export type RefreshRunSource = "freshness_gate" | "watcher";
+
+/** What `index_status` lists for a refresh run in flight (`refreshRuns`), and answers for its runId. */
+export type RefreshRunView = {
+  runId: string;
+  repoId: string;
+  mode: IndexMode;
+  source: RefreshRunSource;
+  state: "running" | "stopping";
+  startedAt: string;
+  elapsedMs: number;
+  deadlineMs: number;
+  deadlineAt: string;
+  phase?: string;
+  progress?: number;
+  total?: number;
+  /** Set once the deadline passed: the run is being stopped (the queue frees when the worker is gone). */
+  stopReason?: string;
+};
+
+type RefreshEntry = Omit<RefreshRunView, "elapsedMs" | "state"> & { startedMs: number };
+
+export type RefreshRunRequest<T> = {
+  repoId: string;
+  mode: IndexMode;
+  source: RefreshRunSource;
+  /** Run it under `runId` with this progress sink; `mode` may differ from the request (a pending repair: full). */
+  execute: (runId: string, mode: IndexMode, onProgress: (progress: number, total: number | undefined, message: string) => void, escalatedBecause?: string) => Promise<T>;
+  /** This run's deadline instead of the registry's (tests). */
+  deadlineMs?: number;
+  /** Stop the run recorded under `runId` (the refresh worker's `abortRun`); resolves once the worker is gone. */
+  abort: (runId: string, reason: string) => Promise<boolean>;
+};
+
+/**
+ * IX-A: the refresh runs this process has in flight — the gate's and the watcher's, which are not index jobs — each
+ * with a runId (its `index_runs` id), progress and a deadline. Past the deadline the run is stopped through the refresh
+ * worker (MCP-ISSUE-123 plumbing: the run aborts at its next batch boundary and records itself `cancelled` with no
+ * commit and the deadline as its reason; a worker that does not exit in its grace is terminated), its promise rejects
+ * with the reason only once the worker is gone (never two writers), and the repo's next run here is `full` until one
+ * lands — a run terminated mid-batch leaves no row for the runner's own "last run was aborted" escalation to read.
+ */
+export class RefreshRuns {
+  private readonly runs = new Map<string, RefreshEntry>();
+  /** repoId → why its next run must be full (a deadline stop), cleared when a full run lands. */
+  private readonly repairs = new Map<string, string>();
+  /** repoId → deadline stops in a row (review (2)); a run that lands clears it. */
+  private readonly stops = new Map<string, number>();
+
+  constructor(
+    private readonly deadlineMs: number,
+    /**
+     * Review (2): the deadline of a FULL run (a repair, or a repo's first index). The scoped-run deadline would stop a big
+     * repo's full run every time. The server passes max(deadline, CODEBASE_INDEX_RUN_TIMEOUT_MS).
+     */
+    private readonly fullDeadlineMs: number = deadlineMs,
+    private readonly now: () => number = Date.now
+  ) {}
+
+  /** In-flight refresh runs, oldest first. */
+  list(): RefreshRunView[] {
+    return [...this.runs.values()].map((e) => this.view(e));
+  }
+
+  get(runId: string): RefreshRunView | null {
+    const e = this.runs.get(runId);
+    return e ? this.view(e) : null;
+  }
+
+  /** The mode a run of `repoId` must use, and why it differs (a deadline stop left the index part-written). */
+  modeFor(repoId: string, mode: IndexMode): { mode: IndexMode; escalatedBecause?: string } {
+    const why = this.repairs.get(repoId);
+    return why && mode !== "full" ? { mode: "full", escalatedBecause: `full (${why}; ${mode} requested)` } : { mode };
+  }
+
+  /** A run of `repoId` landed: one not failed/cancelled ends the stop count; a full one also ends the pending repair. */
+  landed(repoId: string, result: { mode?: IndexMode; status?: string } | null | undefined): void {
+    if (result?.status === "failed" || result?.status === "cancelled") return;
+    this.stops.delete(repoId);
+    if (result?.mode === "full") this.repairs.delete(repoId);
+  }
+
+  /** Review (6): a run stopped elsewhere (an index job past its timeout) may leave the index part-written: next run full. */
+  needRepair(repoId: string, why: string): void {
+    this.repairs.set(repoId, why);
+  }
+
+  async run<T extends { mode?: IndexMode; status?: string }>(request: RefreshRunRequest<T>): Promise<T> {
+    const stopped = this.stops.get(request.repoId) ?? 0;
+    if (stopped >= MAX_REFRESH_DEADLINE_STOPS) {
+      throw new Error(
+        `no refresh of ${request.repoId} starts: its last ${String(stopped)} refresh runs were stopped at their deadline; run index_repository(mode: "full") — a run that lands lifts this`
+      );
+    }
+    const runId = randomUUID();
+    const planned = this.modeFor(request.repoId, request.mode);
+    const startedMs = this.now();
+    const deadlineMs = request.deadlineMs ?? (planned.mode === "full" ? this.fullDeadlineMs : this.deadlineMs);
+    const entry: RefreshEntry = {
+      runId,
+      repoId: request.repoId,
+      mode: planned.mode,
+      source: request.source,
+      startedAt: new Date(startedMs).toISOString(),
+      startedMs,
+      deadlineMs,
+      deadlineAt: new Date(startedMs + deadlineMs).toISOString()
+    };
+    this.runs.set(runId, entry);
+    const stop: { promise: Promise<boolean> | null; prevRepair?: string } = { promise: null };
+    const timer = setTimeout(() => {
+      const reason = `refresh run ${runId} of ${request.repoId} (${planned.mode}, ${request.source}) stopped at its deadline: CODEBASE_INDEX_REFRESH_RUN_DEADLINE_MS=${String(deadlineMs)} ms`;
+      entry.stopReason = reason;
+      // Set BEFORE the run's rejection frees the queue: the next run of this repo is full.
+      const prev = this.repairs.get(request.repoId);
+      if (prev !== undefined) stop.prevRepair = prev;
+      this.repairs.set(request.repoId, `refresh run ${runId} was stopped at the ${String(deadlineMs)} ms refresh deadline`);
+      stop.promise = request.abort(runId, reason).catch(() => false);
+    }, deadlineMs);
+    timer.unref?.();
+    const onProgress = (progress: number, total: number | undefined, message: string): void => {
+      entry.phase = message.replace(/^[^:]*: /, "");
+      entry.progress = progress;
+      if (total !== undefined) entry.total = total;
+      else delete entry.total;
+    };
+    try {
+      const result = await request.execute(runId, planned.mode, onProgress, planned.escalatedBecause);
+      // The deadline fired as the run ended: the worker answered first and nothing was stopped (review (4): what was
+      // pending before stays pending).
+      if (stop.promise && !(await stop.promise)) this.undoStop(request.repoId, stop.prevRepair);
+      this.landed(request.repoId, result);
+      return result;
+    } catch (error) {
+      // The worker's rejection already waited for its exit; this keeps the reason and makes certain of the order.
+      if (stop.promise) {
+        if (await stop.promise) {
+          this.stops.set(request.repoId, (this.stops.get(request.repoId) ?? 0) + 1);
+          throw new Error(entry.stopReason);
+        }
+        // Review (5): nothing was stopped — the run failed on its own as the deadline fired; its error stands.
+        this.undoStop(request.repoId, stop.prevRepair);
+      }
+      throw error;
+    } finally {
+      clearTimeout(timer);
+      this.runs.delete(runId);
+    }
+  }
+
+  private undoStop(repoId: string, prevRepair: string | undefined): void {
+    if (prevRepair === undefined) this.repairs.delete(repoId);
+    else this.repairs.set(repoId, prevRepair);
+  }
+
+  private view(e: RefreshEntry): RefreshRunView {
+    const { startedMs, ...rest } = e;
+    return { ...rest, state: e.stopReason ? "stopping" : "running", elapsedMs: this.now() - startedMs };
+  }
 }

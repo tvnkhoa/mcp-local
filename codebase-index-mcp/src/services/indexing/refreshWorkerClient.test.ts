@@ -465,3 +465,15 @@ test("row 15: await dispose() resolves with nothing else holding the event loop;
   assert.equal(a.status, 0, `abortRun: exit ${String(a.status)} ${a.stderr}`);
   assert.ok(Date.now() - t0 < 15_000, `a pending abortRun held the process ${String(Date.now() - t0)} ms`);
 });
+
+test("IX-A: abortRun sends its reason with the exit; a run's escalatedBecause goes to the worker", async () => {
+  const { client, workers } = harness();
+  const run = client.run("repo-a", "/repo/a", "full", true, 100, 50, { runId: "r1", escalatedBecause: "full (deadline stop)" });
+  assert.equal(workers[0].requests[0].escalatedBecause, "full (deadline stop)");
+  const aborted = client.abortRun("r1", "stopped at its deadline");
+  await assert.rejects(run, /stopped at its deadline/);
+  assert.equal(await aborted, true);
+  const exit = workers[0].requests.find((r) => r.kind === "exit");
+  assert.equal(exit?.abortReason, "stopped at its deadline");
+  assert.equal(exit?.shutdown, undefined, "an abort is not a shutdown");
+});

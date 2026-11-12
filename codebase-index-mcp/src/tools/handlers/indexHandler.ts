@@ -514,12 +514,18 @@ export { sameRepoPath };
  */
 export function handleIndexStatus(args: { runId: string }, ctx: HandlerContext): CallToolResult {
   const jobs = requireJobs(ctx);
+  // IX-A (MCP-ISSUE-126): every answer lists the gate's and the watcher's refresh runs in flight in this process —
+  // they hold the same DB-wide queue as jobs, and a hung one was invisible for 5 h.
+  const refreshRuns = jobs.refreshes?.list() ?? [];
+  const withRefreshes = (body: Record<string, unknown>): CallToolResult => ctx.asText({ ...body, refreshRuns });
   const job = jobs.get(args.runId);
-  if (job) return ctx.asText(jobView(job, jobs.pending()));
+  if (job) return withRefreshes(jobView(job, jobs.pending()));
+  const refresh = jobs.refreshes?.get(args.runId);
+  if (refresh) return withRefreshes({ ...refresh, next: `poll index_status({ runId: "${refresh.runId}" }) until it answers from index_runs` });
   const run = ctx.store.getRunById(args.runId);
   if (run) {
     const state = run.status === "failed" || run.status === "cancelled" ? "failed" : "ok";
-    return ctx.asText({ ...run, state, source: "index_runs" });
+    return withRefreshes({ ...run, state, source: "index_runs" });
   }
   throw new McpError(
     ErrorCode.InvalidParams,

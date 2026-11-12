@@ -78,6 +78,10 @@ export type RefreshWorkerRequest = {
    * the aborted run has not reached its batch boundary. Without it (`abortRun`), exit waits as before.
    */
   shutdown?: boolean;
+  /** IX-A: an `exit`'s reason (e.g. the refresh deadline); the aborted run records it on its `cancelled` row. */
+  abortReason?: string;
+  /** IX-A: a run forced full by a deadline stop says why; recorded as the run's `scope` (see `RunExtras`). */
+  escalatedBecause?: string;
 };
 
 export type RefreshWorkerMessage =
@@ -185,7 +189,7 @@ export function attachRefreshWorker(port: RefreshWorkerPort, deps: RefreshWorker
         return;
       }
       exiting = true;
-      current?.abort.abort();
+      current?.abort.abort(request.abortReason);
       if (parsePoolIdle) clearTimeout(parsePoolIdle);
       const pool = parsePool;
       parsePool = null;
@@ -260,6 +264,7 @@ export function attachRefreshWorker(port: RefreshWorkerPort, deps: RefreshWorker
           ...(request.dirtyPaths && { knownDirtyPaths: request.dirtyPaths }),
           ...(request.bookkeeping && { bookkeeping: request.bookkeeping }),
           ...(request.runId && { runId: request.runId }),
+          ...(request.escalatedBecause && { escalatedBecause: request.escalatedBecause }),
           ...(request.reportProgress && {
             onProgress: (progress: number, total: number | undefined, message: string) =>
               port.postMessage({ type: "progress", id: request.id, progress, total, message } satisfies RefreshWorkerMessage)

@@ -25,7 +25,19 @@ import { WatchManager } from "./services/watch/watchManager.js";
 import type { IndexRunnerLimits, RunExtras, RunIndexAndResolve } from "./services/indexing/indexRunner.js";
 import type { IndexMode, IndexRunResult } from "./types/index.js";
 import { callLabel, startLoopWatchdog } from "./services/runtime/loopWatchdog.js";
-import { DEFAULT_MIN_FREE_RAM_MB, DEFAULT_RUN_TIMEOUT_MS, IndexJobQueue, MAX_WAIT_MS, queuedWithin, runWithSeed, seedParentRefusal } from "./services/indexing/indexJobs.js";
+import {
+  DEFAULT_MIN_FREE_RAM_MB,
+  DEFAULT_REFRESH_RUN_DEADLINE_MS,
+  DEFAULT_RUN_TIMEOUT_MS,
+  IndexJobQueue,
+  MAX_REFRESH_RUN_DEADLINE_MS,
+  MAX_WAIT_MS,
+  MIN_REFRESH_RUN_DEADLINE_MS,
+  RefreshRuns,
+  queuedWithin,
+  runWithSeed,
+  seedParentRefusal
+} from "./services/indexing/indexJobs.js";
 import { RefreshWorkerClient } from "./services/indexing/refreshWorkerClient.js";
 import { newerBuildRefusal } from "./services/indexing/runPolicy.js";
 import { INDEX_VERSION } from "./services/indexing/indexPipeline.js";
@@ -95,7 +107,7 @@ const REFACTOR_STRICT_APPROVAL = booleanFromEnv("CODEBASE_INDEX_REFACTOR_STRICT_
 const REFACTOR_APPROVAL_SECRET_ENV = stringFromEnv("CODEBASE_INDEX_REFACTOR_APPROVAL_SECRET", "");
 const REFACTOR_PREVIEW_TTL_MS = numberFromEnv("CODEBASE_INDEX_REFACTOR_PREVIEW_TTL_MS", 30 * 60 * 1000);
 const REFACTOR_LOW_CONFIDENCE_THRESHOLD = 0.8;
-/** R1: read tools refresh a stale index before answering, within this budget (the run is never aborted). */
+/** R1: read tools refresh a stale index before answering, within this budget (the budget never aborts the run; REFRESH_RUN_DEADLINE_MS does). */
 const QUERY_REFRESH_ENABLED = booleanFromEnv("CODEBASE_INDEX_QUERY_REFRESH_ENABLED", true);
 /** Index only what git shows (tracked + untracked-not-ignored). false = the plain directory walk. */
 const RESPECT_GITIGNORE = booleanFromEnv("CODEBASE_INDEX_RESPECT_GITIGNORE", true);
@@ -103,6 +115,17 @@ const RESPECT_GITIGNORE = booleanFromEnv("CODEBASE_INDEX_RESPECT_GITIGNORE", tru
 const MIN_FREE_RAM_MB = Math.max(0, numberFromEnv("CODEBASE_INDEX_MIN_FREE_RAM_MB", DEFAULT_MIN_FREE_RAM_MB));
 /** MCP-ISSUE-112 follow-up: an index job's run still going after this many ms is stopped and fails (0 = no limit). */
 const RUN_TIMEOUT_MS = Math.max(0, numberFromEnv("CODEBASE_INDEX_RUN_TIMEOUT_MS", DEFAULT_RUN_TIMEOUT_MS));
+/**
+ * IX-A (MCP-ISSUE-126): a freshness-gate or watcher refresh run still going after this many ms is stopped (aborted
+ * through the refresh worker, recorded cancelled with this reason) and the repo's next run is full. Clamped 1 s–6 h.
+ */
+const REFRESH_RUN_DEADLINE_MS = clamp(
+  numberFromEnv("CODEBASE_INDEX_REFRESH_RUN_DEADLINE_MS", DEFAULT_REFRESH_RUN_DEADLINE_MS),
+  MIN_REFRESH_RUN_DEADLINE_MS,
+  MAX_REFRESH_RUN_DEADLINE_MS
+);
+/** IX-A review (2): a FULL refresh (a repair, a first index) gets the job bound, never less than the scoped deadline. */
+const REFRESH_FULL_RUN_DEADLINE_MS = Math.max(REFRESH_RUN_DEADLINE_MS, RUN_TIMEOUT_MS === 0 ? DEFAULT_RUN_TIMEOUT_MS : RUN_TIMEOUT_MS);
 const QUERY_REFRESH_BUDGET_MS = clamp(numberFromEnv("CODEBASE_INDEX_QUERY_REFRESH_BUDGET_MS", 5_000), 1, 120_000);
 /**
  * R3 exact: the TypeScript LanguageService lane of find_field_accesses (lazy; TS/JS fields only).
@@ -171,6 +194,9 @@ const refreshWorker = new RefreshWorkerClient({
 // Release J: with the refresh worker writing the index, this thread's small commits must never run a
 // WAL checkpoint the worker's PASSIVE checkpoint left behind (a measured 473 ms stall at landing).
 store.setAutoCheckpointPages(0);
+/** IX-A: the gate's and the watcher's refresh runs — runId, progress, deadline — listed by index_status. */
+const refreshRuns = new RefreshRuns(REFRESH_RUN_DEADLINE_MS, REFRESH_FULL_RUN_DEADLINE_MS);
+const abortRefresh = (runId: string, reason: string): Promise<boolean> => refreshWorker.abortRun(runId, reason);
 const freshnessGate = createFreshnessGate({
   enabled: QUERY_REFRESH_ENABLED,
   budgetMs: QUERY_REFRESH_BUDGET_MS,
@@ -179,10 +205,21 @@ const freshnessGate = createFreshnessGate({
   getIndexedCommit: (repoId) => store.getLatestRun(repoId)?.commitSha ?? null,
   readTree: (repoPath) => readWorkingTreeStateAsync(repoPath),
   // MCP-ISSUE-111: the worker (the writer) makes the gate's bookkeeping writes; this thread makes none on a read.
+  // IX-A: under a runId, with progress and the refresh deadline (it had none: a hung dirty run held the queue 5 h).
   run: (repoId, repoPath, mode, dirtyPaths, bookkeeping) =>
-    refreshWorker.run(repoId, repoPath, mode, DOCS_INDEXING_ENABLED, MAX_FILES_PER_RUN, 200, {
-      ...(dirtyPaths && { knownDirtyPaths: dirtyPaths }),
-      ...(bookkeeping && { bookkeeping })
+    refreshRuns.run({
+      repoId,
+      mode,
+      source: "freshness_gate",
+      abort: abortRefresh,
+      execute: (runId, runMode, onProgress, escalatedBecause) =>
+        refreshWorker.run(repoId, repoPath, runMode, DOCS_INDEXING_ENABLED, MAX_FILES_PER_RUN, 200, {
+          runId,
+          onProgress,
+          ...(dirtyPaths && runMode === "dirty" && { knownDirtyPaths: dirtyPaths }),
+          ...(bookkeeping && { bookkeeping }),
+          ...(escalatedBecause && { escalatedBecause })
+        })
     }),
   runBookkeeping: true,
   refuseRefresh: (repoId) => newerBuildRefusal(store.getLatestRun(repoId)?.indexVersion),
@@ -221,10 +258,32 @@ const runInWorker = async (
     const key = await treeKeyNow(repoPath);
     beforeRun?.();
     // MCP-ISSUE-101: index_repository and the watcher leave the index covering the whole tree, as a gate run does.
-    const result = await refreshWorker.run(repoId, repoPath, mode, docsEnabled, maxFiles, batchSize, {
-      ...extras,
-      ...(key && { bookkeeping: { ...extras.bookkeeping, coveredKey: serializeTreeKey(key) } })
-    });
+    const { knownDirtyPaths, ...rest } = extras;
+    const post = (runMode: IndexMode, more: RunExtras): Promise<IndexRunResult> =>
+      refreshWorker.run(repoId, repoPath, runMode, docsEnabled, maxFiles, batchSize, {
+        ...rest,
+        // A dirty set means nothing to a run forced full.
+        ...(knownDirtyPaths && runMode === "dirty" && { knownDirtyPaths }),
+        ...more,
+        ...(key && { bookkeeping: { ...extras.bookkeeping, coveredKey: serializeTreeKey(key) } })
+      });
+    // IX-A: an index job (it has a runId) keeps its own RUN_TIMEOUT_MS, but runs full while a deadline stop is pending
+    // repair; the watcher's run is a refresh run — runId, progress, deadline.
+    const result = extras.runId
+      ? await (async () => {
+          const planned = refreshRuns.modeFor(repoId, mode);
+          const landed = await post(planned.mode, planned.escalatedBecause ? { escalatedBecause: planned.escalatedBecause } : {});
+          refreshRuns.landed(repoId, landed);
+          return landed;
+        })()
+      : await refreshRuns.run({
+          repoId,
+          mode,
+          source: "watcher",
+          abort: abortRefresh,
+          execute: (runId, runMode, onProgress, escalatedBecause) =>
+            post(runMode, { runId, onProgress, ...(escalatedBecause && { escalatedBecause }) })
+        });
     // index_repository and the watcher keep the dirty-run ledger current too (see freshness.ts).
     try {
       // MCP-ISSUE-101: a dirty run handed its paths re-read them, so a reverted one leaves the ledger now.
@@ -244,8 +303,13 @@ const runIndexAndResolve: RunIndexAndResolve = (repoId, repoPath, mode, docsEnab
 const indexJobs = new IndexJobQueue({
   minFreeRamMb: MIN_FREE_RAM_MB,
   runTimeoutMs: RUN_TIMEOUT_MS,
+  refreshes: refreshRuns,
   // Only this job's run is stopped (review follow-up C); terminating the worker rejects it, releasing the DB-wide queue.
-  onRunTimeout: (job) => void refreshWorker.abortRun(job.runId, `index run ${job.runId} of ${job.repoId} stopped: CODEBASE_INDEX_RUN_TIMEOUT_MS=${String(RUN_TIMEOUT_MS)} ms`),
+  onRunTimeout: (job) => {
+    // IX-A review (6): a job stopped mid-run may leave no row (a terminated worker): the repo's next run is full.
+    refreshRuns.needRepair(job.repoId, `index run ${job.runId} was stopped at CODEBASE_INDEX_RUN_TIMEOUT_MS=${String(RUN_TIMEOUT_MS)} ms`);
+    void refreshWorker.abortRun(job.runId, `index run ${job.runId} of ${job.repoId} stopped: CODEBASE_INDEX_RUN_TIMEOUT_MS=${String(RUN_TIMEOUT_MS)} ms`);
+  },
   // The clock starts when the run leaves the DB-wide queue for the worker, and a job failed meanwhile never runs.
   execute: (job, request, onProgress, control) => {
     // Review F3: the clock starts once nothing but worker work is left; a job failed by then never starts any.

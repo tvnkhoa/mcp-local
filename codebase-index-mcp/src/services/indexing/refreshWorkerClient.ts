@@ -110,7 +110,7 @@ export class RefreshWorkerClient {
 
   /** Same signature as the in-process runner, so the gate cannot tell the difference. */
   readonly run: RunIndexAndResolve = (repoId, repoPath, mode, docsEnabled, maxFiles, batchSize, extras) =>
-    this.request(repoId, repoPath, mode, docsEnabled, maxFiles, batchSize, extras?.knownDirtyPaths, extras?.bookkeeping, extras?.runId, extras?.onProgress);
+    this.request(repoId, repoPath, mode, docsEnabled, maxFiles, batchSize, extras?.knownDirtyPaths, extras?.bookkeeping, extras?.runId, extras?.onProgress, extras?.escalatedBecause);
 
   /**
    * Spawn the worker and have it open its connection and load the indexer now, so the first refresh
@@ -202,7 +202,8 @@ export class RefreshWorkerClient {
     // Review F2: the rejection releases the DB-wide queue, so it waits until the old worker is gone — rejecting first
     // let the next run start a new worker while the old one could still be writing: two writers.
     try {
-      await this.stopWorker(worker, this.options.abortGraceMs ?? DEFAULT_ABORT_GRACE_MS);
+      // IX-A: the reason travels with the exit, so the aborted run records it on its cancelled row.
+      await this.stopWorker(worker, this.options.abortGraceMs ?? DEFAULT_ABORT_GRACE_MS, false, reason);
     } finally {
       target[1].reject(new Error(reason));
       for (const [, p] of others) p.reject(new Error(`the refresh worker was restarted to stop timed-out run ${runId}`));
@@ -231,7 +232,7 @@ export class RefreshWorkerClient {
    * JavaScript) and resolve when it has. `terminate()` lands wherever the thread — or one of its parse workers — is, and
    * inside a tree-sitter parse that takes the whole process down (0xC0000409). It is the fallback only after `graceMs`.
    */
-  private stopWorker(worker: RefreshWorkerLike, graceMs: number, shutdown = false): Promise<void> {
+  private stopWorker(worker: RefreshWorkerLike, graceMs: number, shutdown = false, abortReason?: string): Promise<void> {
     return new Promise<void>((resolve) => {
       let settled = false;
       let grace: NodeJS.Timeout | undefined;
@@ -249,7 +250,7 @@ export class RefreshWorkerClient {
       this.stopping.add(worker);
       worker.on("exit", done);
       try {
-        worker.postMessage({ kind: "exit", id: 0, dbPath: this.options.dbPath, limits: this.options.limits, repoId: "", repoPath: "", mode: "dirty", docsEnabled: false, maxFiles: 0, batchSize: 0, ...(shutdown && { shutdown: true }) });
+        worker.postMessage({ kind: "exit", id: 0, dbPath: this.options.dbPath, limits: this.options.limits, repoId: "", repoPath: "", mode: "dirty", docsEnabled: false, maxFiles: 0, batchSize: 0, ...(shutdown && { shutdown: true }), ...(abortReason && { abortReason }) });
       } catch {
         // The port is closed: the worker is already going; 'exit' or the grace timer settles it.
       }
@@ -275,7 +276,9 @@ export class RefreshWorkerClient {
     dirtyPaths?: readonly string[],
     bookkeeping?: RunBookkeeping,
     runId?: string,
-    onProgress?: (progress: number, total: number | undefined, message: string) => void
+    onProgress?: (progress: number, total: number | undefined, message: string) => void,
+    /** IX-A: why a run was forced full (a deadline stop); the worker records it as the run's scope. */
+    escalatedBecause?: string
   ): Promise<IndexRunResult> {
     return new Promise<IndexRunResult>((resolve, reject) => {
       let worker: RefreshWorkerLike;
@@ -301,7 +304,8 @@ export class RefreshWorkerClient {
         ...(dirtyPaths && { dirtyPaths: [...dirtyPaths] }),
         ...(bookkeeping && { bookkeeping }),
         ...(runId && { runId }),
-        ...(onProgress && { reportProgress: true })
+        ...(onProgress && { reportProgress: true }),
+        ...(escalatedBecause && { escalatedBecause })
       });
     });
   }

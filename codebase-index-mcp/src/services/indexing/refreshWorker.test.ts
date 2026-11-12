@@ -183,3 +183,23 @@ test("MCP-ISSUE-123 re-review E (leader review 1): a shutdown exit after an abor
   t.mock.timers.tick(1);
   assert.deepEqual(counts.exits, [0], "the thread exits SHUTDOWN_WORKER_EXIT_MS after the shutdown request");
 });
+
+test("IX-A: an exit's abortReason reaches the run's abort signal; a run's escalatedBecause reaches its extras", async () => {
+  const runEnds = deferred();
+  let seen: RunExtras | undefined;
+  const { port, poolDisposed } = harness(async (extras) => {
+    seen = extras;
+    await runEnds.promise;
+    return { runId: "x", status: "cancelled" } as IndexRunResult;
+  });
+  port.send({ kind: "run", id: 1, escalatedBecause: "full (refresh run r1 was stopped at the 600000 ms refresh deadline; dirty requested)" });
+  await tick();
+  assert.match(seen?.escalatedBecause ?? "", /refresh deadline/);
+  port.send({ kind: "exit", id: 0, abortReason: "stopped at its deadline: CODEBASE_INDEX_REFRESH_RUN_DEADLINE_MS=600000 ms" });
+  await tick();
+  assert.equal(seen?.abortSignal?.aborted, true);
+  assert.equal(seen?.abortSignal?.reason, "stopped at its deadline: CODEBASE_INDEX_REFRESH_RUN_DEADLINE_MS=600000 ms");
+  runEnds.resolve();
+  poolDisposed.resolve();
+  await tick();
+});
