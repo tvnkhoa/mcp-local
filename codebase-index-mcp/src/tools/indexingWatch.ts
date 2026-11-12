@@ -60,14 +60,13 @@ export function buildIndexingWatchTools(deps: CodebaseIndexDeps): AnyToolDefinit
 
   const indexStatus = defineTool({
     name: "index_status",
-    description: "State of an index_repository job by runId: queued (waitingFor says why: another run ahead, or free RAM below CODEBASE_INDEX_MIN_FREE_RAM_MB) | running (phase, progress/total) | ok (the run summary) | failed (error). A run this server process no longer holds as a job is answered from the recorded runs (source: index_runs). An unknown runId is an error. Every answer also lists refreshRuns: the query-triggered and watcher refresh runs in flight (runId, repoId, mode, source, state running|stopping, phase, progress/total, elapsedMs, deadlineMs/deadlineAt; one past CODEBASE_INDEX_REFRESH_RUN_DEADLINE_MS is stopped). Such a runId is answered too.",
+    description: "With no runId: what is in flight in this server process — refreshRuns and jobs (queued/running index_repository jobs). With a runId: the state of an index_repository job: queued (waitingFor says why: another run ahead, or free RAM below CODEBASE_INDEX_MIN_FREE_RAM_MB) | running (phase, progress/total) | ok (the run summary) | failed (error). A run this server process no longer holds as a job is answered from the recorded runs (source: index_runs). An unknown runId is an error. Every answer also lists refreshRuns: the query-triggered and watcher refresh runs in flight (runId, repoId, mode, source, state running|stopping, phase, progress/total, elapsedMs, deadlineMs/deadlineAt; one past CODEBASE_INDEX_REFRESH_RUN_DEADLINE_MS is stopped). Such a runId is answered too.",
     input: schemas.indexStatusSchema,
     inputSchema: {
       type: "object",
       additionalProperties: false,
-      required: ["runId"],
       properties: {
-        runId: { type: "string", description: "The runId index_repository answered." }
+        runId: { type: "string", description: "The runId index_repository answered. Omit it to list the runs in flight." }
       }
     },
     annotations: readsGraph,

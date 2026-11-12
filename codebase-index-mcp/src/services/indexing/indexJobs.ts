@@ -653,7 +653,9 @@ export class RefreshRuns {
       startedAt: new Date(startedMs).toISOString(),
       startedMs,
       deadlineMs,
-      deadlineAt: new Date(startedMs + deadlineMs).toISOString()
+      deadlineAt: new Date(startedMs + deadlineMs).toISOString(),
+      // IX-A(2): listed with a phase from the start, as an index job is ("starting" until the worker's first progress).
+      phase: "starting"
     };
     this.runs.set(runId, entry);
     const stop: { promise: Promise<boolean> | null; prevRepair?: string } = { promise: null };

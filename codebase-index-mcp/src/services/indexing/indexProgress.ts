@@ -80,15 +80,27 @@ export function createIndexProgress(repoId: string, notifier?: ProgressNotifier)
   // underlying metric is flat (e.g. stuck at 100% files during edge resolution).
   let lastProgressValue = 0;
   let postTick = 0;
+  /** Bare phase ticks sent before any file total was known; the file scale starts above them. */
+  let preTicks = 0;
 
   function emit(force: boolean): void {
     if (!notifier) return;
 
     const indexing = state.phase === "indexing" && state.totalFiles > 0;
-    // Before any files are indexed (scanning/starting), there is no meaningful
-    // value to report; skip so pre-index ticks never collide with the file
-    // scale (which would let the post-index counter start above `total`).
-    if (!indexing && state.totalFiles === 0) return;
+    // Before any file total is known (starting/scanning, or a scoped run with
+    // nothing to index) there is no counter to report, so throttled updates are
+    // skipped. A PHASE change is still sent (IX-A(2): a refresh run's
+    // index_status entry showed no phase at all), as a bare tick with no total.
+    // The file scale that may follow is offset by these ticks (`preTicks`), so
+    // it never steps below them, and a tick does not start the throttle window:
+    // the first "0/N" frame right after it is still sent.
+    if (!indexing && state.totalFiles === 0) {
+      if (!force) return;
+      preTicks += 1;
+      lastProgressValue = Math.max(lastProgressValue + 1, preTicks);
+      notifier(lastProgressValue, undefined, `${repoId}: ${state.phase}`);
+      return;
+    }
 
     const now = Date.now();
     if (!force && now - lastSentAt < NOTIFY_THROTTLE_MS) return;
@@ -99,14 +111,14 @@ export function createIndexProgress(repoId: string, notifier?: ProgressNotifier)
     let message: string;
 
     if (indexing) {
-      progress = state.filesScanned;
-      total = state.totalFiles;
+      progress = preTicks + state.filesScanned;
+      total = preTicks + state.totalFiles;
       const pct = Math.min(100, Math.round((state.filesScanned / state.totalFiles) * 100));
       message = `${repoId}: indexing ${pct}% · ${String(state.filesScanned)}/${String(state.totalFiles)} files · ${String(state.symbols)} symbols`;
     } else {
       // Post-index indeterminate phase (resolve / finalize): counter continues
       // above the file total; no denominator so the host shows a busy indicator.
-      progress = state.totalFiles + ++postTick;
+      progress = preTicks + state.totalFiles + ++postTick;
       total = undefined;
       message = `${repoId}: ${state.phase}${state.symbols > 0 ? ` · ${String(state.symbols)} symbols` : ""}`;
     }

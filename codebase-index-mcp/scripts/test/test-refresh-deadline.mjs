@@ -17,7 +17,12 @@
  *       and the deadline in its scope, the queue is free (the next serialized run proceeds), the next refresh is full
  *       and says why;
  *   (d) a run that ignores the abort is terminated after the grace; no row, and the next refresh is still full;
- *   (e) after the repair landed, a dirty refresh runs dirty again.
+ *   (e) after the repair landed, a dirty refresh runs dirty again;
+ *   (f) IX-A(2): a run mid-flight shows a phase from the REAL runner — no fake progress: the hook only holds the worker
+ *       thread (Atomics.wait) before the run, then right after the runner's first real progress message is posted —
+ *       "starting" (the registry's own) before the worker reports anything, then the runner's "scanning" phase with a
+ *       progress tick and no total (none is known yet);
+ *   (g) IX-A(2): index_status with no runId lists the refresh runs and the jobs in flight; an unknown runId still fails.
  */
 import { isMainThread, parentPort, Worker, workerData } from "node:worker_threads";
 import { execFileSync } from "node:child_process";
@@ -33,6 +38,7 @@ if (!isMainThread) {
   const { attachRefreshWorker } = await import(distUrl("services/indexing/refreshWorker.js"));
   const { createIndexRunner } = await import(distUrl("services/indexing/indexRunner.js"));
   const flagDir = workerData.flagDir;
+  const hold = new Int32Array(workerData.holdBuffer); // [0] release before the run, [1] release after its first progress
   // The module attached its own loop to parentPort on import (it does whenever it runs in a worker): only ours answers.
   parentPort.removeAllListeners("message");
   attachRefreshWorker(parentPort, {
@@ -45,6 +51,21 @@ if (!isMainThread) {
           extras.onProgress?.(1, 3, `index ${repoId}: hang-test`);
           if (stubborn) await new Promise(() => {}); // never settles; the port keeps this thread alive
           await new Promise((r) => (extras.abortSignal?.aborted ? r() : extras.abortSignal?.addEventListener("abort", () => r(), { once: true })));
+        }
+        if (existsSync(join(flagDir, "hold-progress"))) {
+          Atomics.wait(hold, 0, 0, 15_000);
+          let first = true;
+          const sink = extras.onProgress;
+          extras = {
+            ...extras,
+            onProgress: (progress, total, message) => {
+              sink?.(progress, total, message);
+              if (first) {
+                first = false;
+                Atomics.wait(hold, 1, 0, 15_000); // the message above is already posted to the server thread
+              }
+            }
+          };
         }
         return real(repoId, repoPath, mode, docsEnabled, maxFiles, batchSize, extras).catch((e) => { console.error("WORKER-RUN-ERROR", e?.stack ?? e); throw e; });
       };
@@ -79,6 +100,9 @@ async function main() {
   const root = makeTempDir("refresh-deadline-");
   const repo = join(root, "repo");
   const flagDir = join(root, "flags");
+  const holdBuffer = new SharedArrayBuffer(8);
+  const hold = new Int32Array(holdBuffer);
+  const release = (slot) => { Atomics.store(hold, slot, 1); Atomics.notify(hold, slot); };
   mkdirSync(flagDir, { recursive: true });
   mkdirSync(join(repo, "src"), { recursive: true });
   for (let i = 0; i < 6; i++) writeFileSync(join(repo, "src", `f${i}.ts`), `export function f${i}(x: number): number {\n  return x + ${i};\n}\n`);
@@ -94,7 +118,7 @@ async function main() {
   const client = new RefreshWorkerClient({
     dbPath,
     limits: { subtxSize: 20, checkpointEveryNBatches: 1, largeFileThresholdBytes: 0, maxFileSizeBytes: 500_000, parseWorkers: 0, parseJobTimeoutMs: 20_000 }, // no parse pool: the hang is before the run takes one, and an exiting worker builds none
-    spawn: () => new Worker(new URL(import.meta.url), { workerData: { flagDir } }),
+    spawn: () => new Worker(new URL(import.meta.url), { workerData: { flagDir, holdBuffer } }),
     abortGraceMs: GRACE_MS,
     onRunLanded: () => store.invalidateProcessCaches()
   });
@@ -184,6 +208,35 @@ async function main() {
     edit(4);
     const after = await refresh("dirty", "watcher");
     assert(after.mode === "dirty" && after.status !== "cancelled", "dirty, untouched", `${after.mode} ${after.status}`);
+
+    console.log("\n(f) a run mid-flight shows the real runner's phase and progress");
+    edit(5);
+    writeFileSync(join(flagDir, "hold-progress"), "");
+    const held = refresh("dirty").then((r) => ({ ok: r }), (e) => ({ error: e }));
+    const until = async (pred, ms = 10_000) => { const end = Date.now() + ms; while (Date.now() < end) { const v = pred(); if (v) return v; await sleep(20); } return null; };
+    const startRun = await until(() => refreshes.list()[0]);
+    const atStart = status(startRun?.runId ?? "none");
+    assert(atStart.phase === "starting" && atStart.state === "running", "before the worker reports anything: phase \"starting\"", JSON.stringify(atStart));
+    const listAll = () => { try { return JSON.parse(handleIndexStatus({}, ctx).content[0].text); } catch (e) { return { error: e.message }; } };
+    const listing = listAll();
+    assert(listing.refreshRuns?.length === 1 && listing.refreshRuns[0].runId === startRun?.runId && Array.isArray(listing.jobs), "(g) index_status with no runId lists the refresh run in flight, and jobs", JSON.stringify(listing));
+    release(0);
+    const moved = await until(() => { const v = refreshes.get(startRun?.runId ?? "none"); return v && v.phase !== "starting" ? v : null; });
+    const mid = status(startRun?.runId ?? "none");
+    assert(moved !== null && mid.phase === "scanning", "the runner's first real progress is its scanning phase", JSON.stringify(mid));
+    assert(typeof mid.progress === "number" && mid.progress >= 1 && !("total" in mid), "with a progress tick and no total (none known yet)", JSON.stringify(mid));
+    assert(mid.refreshRuns?.[0]?.phase === "scanning", "and refreshRuns lists the same phase", JSON.stringify(mid.refreshRuns));
+    release(1);
+    const heldOut = await held;
+    rmSync(join(flagDir, "hold-progress"));
+    assert(heldOut.ok && heldOut.ok.status !== "failed" && heldOut.ok.status !== "cancelled", "the held run then lands", JSON.stringify(heldOut.error?.message ?? heldOut.ok?.status));
+
+    console.log("\n(g) index_status with no runId, and an unknown runId");
+    const idle = listAll();
+    assert(Array.isArray(idle.refreshRuns) && idle.refreshRuns.length === 0 && Array.isArray(idle.jobs) && idle.jobs.length === 0, "nothing in flight: empty refreshRuns and jobs", JSON.stringify(idle));
+    let unknownErr = null;
+    try { handleIndexStatus({ runId: "no-such-run" }, ctx); } catch (e) { unknownErr = e; }
+    assert(unknownErr && /unknown runId 'no-such-run'/.test(unknownErr.message), "an unknown runId still fails as before", String(unknownErr?.message));
   } finally {
     clearInterval(keepAlive);
     await client.dispose();

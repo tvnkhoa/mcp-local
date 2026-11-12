@@ -27,7 +27,8 @@ export const indexRepositorySchema = (MAX_FILES_PER_RUN: number) => z
 // Index status (MCP-ISSUE-112)
 export const indexStatusSchema = z
   .object({
-    runId: z.string().min(1).max(100)
+    // IX-A(2): optional — without it the answer lists the refresh runs and the jobs in flight.
+    runId: z.string().min(1).max(100).optional()
   })
   .strict();
 

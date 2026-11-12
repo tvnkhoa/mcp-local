@@ -515,3 +515,26 @@ test("IX-A review (3): a deadline stop calls onDeadlineStop (the server writes t
   assert.equal(late.status, "ok");
   assert.equal(seen.length, 1, "nothing was stopped: no flag");
 }));
+
+test("IX-A(2): a refresh run is listed with phase \"starting\" before the worker reports any progress", async () => {
+  const runs = new RefreshRuns(1_000);
+  const gate = deferred();
+  const p = runs.run<Landed>({
+    repoId: "r",
+    mode: "incremental",
+    source: "freshness_gate",
+    abort: async () => true,
+    execute: async (runId, mode) => {
+      await gate.promise;
+      return { runId, mode, status: "ok" };
+    }
+  });
+  await tick();
+  const [view] = runs.list();
+  assert.equal(view?.phase, "starting");
+  assert.equal(view?.progress, undefined);
+  assert.equal("total" in (view ?? {}), false, "no total until one is known");
+  gate.resolve();
+  await p;
+  assert.equal(runs.list().length, 0);
+});

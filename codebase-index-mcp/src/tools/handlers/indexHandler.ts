@@ -512,12 +512,17 @@ export { sameRepoPath };
  * MCP-ISSUE-112: a job this process holds, else the run as `index_runs` recorded it (a job from before a server
  * restart, or one trimmed from memory). A job whose server died before the run was recorded is unknown.
  */
-export function handleIndexStatus(args: { runId: string }, ctx: HandlerContext): CallToolResult {
+export function handleIndexStatus(args: { runId?: string | undefined }, ctx: HandlerContext): CallToolResult {
   const jobs = requireJobs(ctx);
   // IX-A (MCP-ISSUE-126): every answer lists the gate's and the watcher's refresh runs in flight in this process —
   // they hold the same DB-wide queue as jobs, and a hung one was invisible for 5 h.
   const refreshRuns = jobs.refreshes?.list() ?? [];
   const withRefreshes = (body: Record<string, unknown>): CallToolResult => ctx.asText({ ...body, refreshRuns });
+  // IX-A(2): no runId — a caller discovers what is in flight (a gate refresh has a runId nobody was handed).
+  if (args.runId === undefined) {
+    const pending = jobs.pending();
+    return withRefreshes({ jobs: pending.map((j) => jobView(j, pending)) });
+  }
   const job = jobs.get(args.runId);
   if (job) return withRefreshes(jobView(job, jobs.pending()));
   const refresh = jobs.refreshes?.get(args.runId);
