@@ -40,7 +40,7 @@ import {
   seedParentRefusal
 } from "./services/indexing/indexJobs.js";
 import { DEFAULT_ABORT_GRACE_MS, RefreshWorkerClient } from "./services/indexing/refreshWorkerClient.js";
-import { newerBuildRefusal } from "./services/indexing/runPolicy.js";
+import { newerBuildRefusal, versionEscalationFor } from "./services/indexing/runPolicy.js";
 import { INDEX_VERSION } from "./services/indexing/indexPipeline.js";
 import { armWatchInactivityTimer, startAutoWatchers } from "./services/watch/watchLifecycle.js";
 import {
@@ -208,7 +208,9 @@ store.setAutoCheckpointPages(0);
 /** IX-A: the gate's and the watcher's refresh runs — runId, progress, deadline — listed by index_status. */
 const refreshRuns = new RefreshRuns(REFRESH_RUN_DEADLINE_MS, REFRESH_FULL_RUN_DEADLINE_MS, {
   // Review (3): durable across processes and restarts — a terminated run left no row and its marker is gone.
-  onDeadlineStop: ({ repoId, mode, at }) => void markRepairNeeded(FRESHNESS_LOCK_DIR, repoId, { mode, pid: process.pid, at })
+  onDeadlineStop: ({ repoId, mode, at }) => void markRepairNeeded(FRESHNESS_LOCK_DIR, repoId, { mode, pid: process.pid, at }),
+  // MCP-ISSUE-130: a run the runner escalates for the INDEX_VERSION is planned full here, so it gets the full-run deadline.
+  mustRunFull: (repoId) => versionEscalationFor(store, repoId)
 });
 const abortRefresh = (runId: string, reason: string): Promise<boolean> => refreshWorker.abortRun(runId, reason);
 const freshnessGate = createFreshnessGate({
@@ -242,6 +244,8 @@ const freshnessGate = createFreshnessGate({
   // MCP-ISSUE-101 part 5: an index fully built by another INDEX_VERSION is not current.
   getFullRunVersion: (repoId) => store.getLatestFullRunVersion(repoId),
   buildVersion: INDEX_VERSION,
+  // MCP-ISSUE-130: the runner's own rule (seed rows count as a full build; runs with no full run escalate once).
+  versionEscalation: (repoId) => versionEscalationFor(store, repoId),
   runStaleAfterMs: MARKERS.full.staleAfterMs
 });
 

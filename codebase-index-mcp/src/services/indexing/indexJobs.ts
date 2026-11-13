@@ -598,6 +598,12 @@ export class RefreshRuns {
        * part-written index too; this registry's own repair is in memory only.
        */
       onDeadlineStop?: (stopped: { repoId: string; mode: IndexMode; at: number }) => void;
+      /**
+       * MCP-ISSUE-130: why the repo's next run must be full regardless of what was asked (its index was last fully built
+       * by another INDEX_VERSION), or null. Asked here, before the deadline is chosen, so a run the runner would escalate
+       * gets the full-run deadline instead of being stopped at the scoped one.
+       */
+      mustRunFull?: (repoId: string) => string | null;
     } = {}
   ) {
     this.now = hooks.now ?? Date.now;
@@ -617,9 +623,18 @@ export class RefreshRuns {
 
   /** The mode a run of `repoId` must use, and why it differs (a deadline stop left the index part-written). */
   modeFor(repoId: string, mode: IndexMode): { mode: IndexMode; escalatedBecause?: string } {
-    const why = this.repairs.get(repoId);
+    const why = this.repairs.get(repoId) ?? (mode === "full" ? null : this.versionReason(repoId));
     // A full run asked for anyway (the gate read the durable flag) still records why it is a repair.
     return why ? { mode: "full", escalatedBecause: `full (${why}; ${mode} requested)` } : { mode };
+  }
+
+  /** MCP-ISSUE-130: the hook's answer; a hook that throws decides nothing (the runner still checks for itself). */
+  private versionReason(repoId: string): string | null {
+    try {
+      return this.hooks.mustRunFull?.(repoId) ?? null;
+    } catch {
+      return null;
+    }
   }
 
   /** A run of `repoId` landed: one not failed/cancelled ends the stop count; a full one also ends the pending repair. */

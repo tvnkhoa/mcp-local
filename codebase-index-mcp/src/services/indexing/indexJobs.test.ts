@@ -538,3 +538,30 @@ test("IX-A(2): a refresh run is listed with phase \"starting\" before the worker
   await p;
   assert.equal(runs.list().length, 0);
 });
+
+test("MCP-ISSUE-130: a run the INDEX_VERSION forces full is planned full here, with the FULL-run deadline and the reason", async () => {
+  let reason: string | null = "the index was last fully built by v15-tiebreak-path; this server runs v16-python-tree-sitter";
+  const runs = new RefreshRuns(1_000, 60_000, { mustRunFull: () => reason });
+  let seen: { mode?: IndexMode; escalatedBecause?: string | undefined; deadlineMs?: number } = {};
+  const landed = await runs.run<Landed>({
+    repoId: "r",
+    mode: "dirty",
+    source: "watcher",
+    abort: async () => true,
+    execute: async (runId, mode, _onProgress, escalatedBecause) => {
+      seen = { mode, escalatedBecause, deadlineMs: runs.get(runId)?.deadlineMs ?? 0 };
+      return { runId, mode, status: "ok" };
+    }
+  });
+  assert.equal(landed.mode, "full");
+  assert.equal(seen.mode, "full");
+  assert.equal(seen.deadlineMs, 60_000, "the full-run deadline, not the 1 s scoped one");
+  assert.match(seen.escalatedBecause ?? "", /^full \(the index was last fully built by v15-tiebreak-path; .*; dirty requested\)$/);
+  // A full request keeps its own record; once the version matches, the requested mode stands.
+  assert.deepEqual(runs.modeFor("r", "full"), { mode: "full" });
+  reason = null;
+  assert.deepEqual(runs.modeFor("r", "dirty"), { mode: "dirty" });
+  // A hook that throws decides nothing.
+  const throwing = new RefreshRuns(1_000, 60_000, { mustRunFull: () => { throw new Error("db closed"); } });
+  assert.deepEqual(throwing.modeFor("r", "incremental"), { mode: "incremental" });
+});

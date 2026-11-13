@@ -155,6 +155,12 @@ export type FreshnessGateOptions = {
   getFullRunVersion?: (repoId: string) => string | null;
   buildVersion?: string;
   /**
+   * MCP-ISSUE-130: the runner's own answer to "must the next run be full for the INDEX_VERSION" (`versionEscalationFor`:
+   * a seed run counts as a full build, and runs with no full run on record escalate once), or null. When given, it
+   * decides the older-index case and `getFullRunVersion` only the newer-build one, so the gate and the runner agree.
+   */
+  versionEscalation?: (repoId: string) => string | null;
+  /**
    * IX-B: whether the repo has a previous index a read can answer from. With one, a read never waits for a refresh run
    * (only for the bounded tree check): it starts or joins the run and answers `refreshing` at once. Default: the latest
    * run recorded a commit (`getIndexedCommit` is not null).
@@ -976,6 +982,15 @@ export function createFreshnessGate(opts: FreshnessGateOptions): FreshnessGate {
 
   /** MCP-ISSUE-101 part 5: an index built before this build's resolution rules is not current, whatever the tree says. */
   const versionWarning = (repoId: string): { text: string; newer: boolean } | null => {
+    if (opts.versionEscalation) {
+      let escalation: string | null = null;
+      try {
+        escalation = opts.versionEscalation(repoId);
+      } catch {
+        escalation = null;
+      }
+      if (escalation) return { newer: false, text: `${escalation}. Answers can differ from a current index until a run with mode "full" (index_repository, or the gate's next refresh).` };
+    }
     if (!opts.getFullRunVersion || !opts.buildVersion) return null;
     let indexed: string | null;
     try {
@@ -993,6 +1008,8 @@ export function createFreshnessGate(opts: FreshnessGateOptions): FreshnessGate {
     const theirs = generation(indexed);
     const ours = generation(opts.buildVersion);
     const newer = theirs !== null && ours !== null && theirs > ours;
+    // With the runner's rule wired, it alone decides the older case (it said no above).
+    if (opts.versionEscalation && !newer) return null;
     return {
       newer,
       text: `this repo's index was last fully built by ${indexed}; this server runs ${opts.buildVersion}, which resolves edges differently. Answers can differ from a current index until index_repository runs with mode "full".`

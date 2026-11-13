@@ -31,19 +31,18 @@
       the index predates this server's version, and the next refresh this gate starts (on any change) runs full."
     - An index fully built by a NEWER build (its generation number is higher): the gate neither asks for full nor
       promises a full run. The reason says to restart the server instead. Review finding 3.
-- **Open, outside row #9's file scope (review findings):**
-  - Watcher deadline (`src/index.ts` refresh runs, `indexJobs.ts` `modeFor`). A watcher refresh asks for `dirty` and
-    gets the scoped-run deadline (10 min). When the runner escalates it to full, a large repo can hit that deadline. The
-    run is then recorded `cancelled`, and only the retry gets the full-run deadline. The isUnindexed / unfinished
-    escalations had the same gap; after a version bump every repo meets it once. Fix: choose the deadline after
-    `versionEscalationFor`.
-  - Seeded worktrees (`seedStore.ts`). The seed row copies `index_version` from the parent's base run, and that base
-    can be an incremental run stamped with the new version over an old full build (the 339b6b3a case). The child then
-    never escalates. Fix: give the seed row the parent's full-base version, or refuse the seed when
-    `versionEscalationFor(parent)` is non-null.
-  - The gate's version check reads `getLatestFullRunVersion` (wired in `src/index.ts`), which ignores seed runs. A child
-    seeded at an old version gets no warning: the runner still goes full, but the gate labels the run with the scoped
-    mode. Fix: wire the gate to `versionEscalationFor`.
+  - Review follow-up (leader, 13 Nov), in `indexJobs.ts` and `src/index.ts`:
+    - Finding 1, watcher deadline: `RefreshRuns` takes a `mustRunFull` hook, wired to `versionEscalationFor`.
+      `modeFor` plans the run full, with the reason, before the deadline is chosen. A watcher or gate run that the
+      version forces full therefore gets the full-run deadline, not the 10-minute scoped one. Index jobs get the
+      same plan and keep their own timeout.
+    - Finding 3, gate wiring: the gate takes `versionEscalation`, wired to `versionEscalationFor`. It decides the
+      older-index case by the runner's own rule: a seed row counts as a full build, and runs with no full run on
+      record escalate once. `getFullRunVersion` now only detects a newer build's index.
+- **Open (review finding 2, outside the file scope):** seeded worktrees (`seedStore.ts`). The seed row copies
+  `index_version` from the parent's base run. That base can be an incremental run stamped with the new version over
+  an old full build (the 339b6b3a case), and then the child never escalates. Fix: give the seed row the parent's
+  full-base version, or refuse the seed when `versionEscalationFor(parent)` is non-null.
 - **Not done (by brief):** no INDEX_VERSION bump. The verdict reuse of MCP-ISSUE-127 is unchanged. The gate does not
   start a full run for the version alone: a query never pays for a whole-repo rebuild it did not cause.
 - **Evidence:**

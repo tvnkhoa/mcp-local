@@ -1013,6 +1013,50 @@ test("MCP-ISSUE-130: an index fully built by a NEWER build is stale with a resta
   }
 });
 
+test("MCP-ISSUE-130: with versionEscalation wired, the gate follows the runner's rule (a seed counts; no full run escalates)", async () => {
+  const lockDir = mkdtempSync(path.join(tmpdir(), "cim-fresh-"));
+  let tree: RepoTreeState = { head: "aaa111", dirty: [] };
+  let indexed = "aaa111";
+  let escalation: string | null = "no full run of this repo is on record; this server runs v16-python-tree-sitter";
+  let fullVersion: string | null = null;
+  const modes: string[] = [];
+  const gate = createFreshnessGate({
+    enabled: true,
+    budgetMs: 1000,
+    lockDir,
+    getRepoPath: () => lockDir,
+    getIndexedCommit: () => indexed,
+    readTree: () => tree,
+    getFullRunVersion: () => fullVersion,
+    buildVersion: "v16-python-tree-sitter",
+    versionEscalation: () => escalation,
+    run: async (_repoId, _repoPath, mode) => {
+      modes.push(mode);
+      indexed = tree.head!;
+      if (mode === "full") escalation = null;
+      return { runId: "run-1" } as IndexRunResult;
+    }
+  });
+  try {
+    // No full run on record (getLatestFullRunVersion null): the runner's rule still flags it.
+    const clean = await gate.ensureFresh("r");
+    assert.equal(clean.state, "stale");
+    assert.match(clean.reason ?? "", /no full run of this repo is on record/);
+    assert.match(clean.reason ?? "", /No index run is in progress/);
+    tree = { head: "bbb222", dirty: [] };
+    await gate.ensureFresh("r");
+    assert.deepEqual(modes, ["full"]);
+    // A seed at this version over an older full run: the runner says current, so does the gate.
+    fullVersion = "v15-tiebreak-path";
+    assert.deepEqual(await gate.ensureFresh("r"), { state: "fresh" });
+    // A newer build's full run still gets the restart hint.
+    fullVersion = "v17-later";
+    assert.match((await gate.ensureFresh("r")).reason ?? "", /a newer build wrote this index/);
+  } finally {
+    rmSync(lockDir, { recursive: true, force: true });
+  }
+});
+
 test("MCP-ISSUE-101 part 5: getLatestFullRunVersion reads the latest ok FULL run, not a later scoped one", () => {
   const dir = mkdtempSync(path.join(tmpdir(), "cim-fresh-db-"));
   const store = new GraphStore(path.join(dir, "x.db"));
