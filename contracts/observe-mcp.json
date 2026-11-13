@@ -9,7 +9,7 @@
         "openWorldHint": true,
         "readOnlyHint": true
       },
-      "description": "Discover the fields of a stream by sampling recent rows (no fixed schema assumptions). Returns each field with its observed JSON types and how many sampled rows had a non-null value.",
+      "description": "What fields does a log or trace stream have? Samples recent rows (no fixed schema assumptions) and returns each field with its observed JSON types and how many sampled rows had a non-null value.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -64,7 +64,7 @@
         "openWorldHint": true,
         "readOnlyHint": true
       },
-      "description": "Discover which services are emitting into an environment: per-service log volume, error/warning counts, first/last seen, how the service was identified (identitySource), and (with include:\"codeLinks\") the application namespaces that identify the owning code. Covers both the logs and traces lanes. Use this instead of assuming a fixed service list.",
+      "description": "Which services are logging in an environment, and how many errors each? Per-service log volume, error/warning counts, first/last seen, how the service was identified (identitySource), and (with include:\"codeLinks\") the application namespaces that identify the owning code. Covers both the logs and traces lanes. Use this instead of assuming a fixed service list.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -149,7 +149,7 @@
         "openWorldHint": true,
         "readOnlyHint": true
       },
-      "description": "Return the distributed-trace spans for a trace id from the traces stream (operation, service, duration, status), ordered by start time.",
+      "description": "Where did a request spend its time? The distributed-trace spans for a trace id from the traces stream (operation, service, duration, status), ordered by start time. Its log lines: trace_logs.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -201,7 +201,7 @@
         "openWorldHint": false,
         "readOnlyHint": true
       },
-      "description": "List the configured OpenObserve environments (org, log/trace stream, and which one answers by default). Call this first when you do not know which environment names exist.",
+      "description": "Which OpenObserve environments can I query (e.g. dev, prod)? Lists each configured environment's org, log/trace stream and which one answers by default. Call it first when you do not know the names.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -226,7 +226,7 @@
         "openWorldHint": true,
         "readOnlyHint": true
       },
-      "description": "List OpenObserve streams (log/trace/metric datasets) for the configured org. Doubles as a connectivity + auth check.",
+      "description": "Which OpenObserve streams (log/trace/metric datasets) exist for the configured org? Doubles as a connectivity + auth check; describe_stream shows one stream's fields.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -263,7 +263,7 @@
         "openWorldHint": true,
         "readOnlyHint": true
       },
-      "description": "Aggregate log counts grouped by level (default), service, or sourceContext over a time window — an error/warning summary. `service` groups by the RESOLVED service identity, so apps whose rows arrive under unknown_service:dotnet are counted under their own name; use `serviceRaw` for the raw service_name column.",
+      "description": "How many errors per service (or per level) in a time window? Aggregate log counts grouped by level (default), service, or sourceContext — an error/warning summary. `service` groups by the RESOLVED service identity, so apps whose rows arrive under unknown_service:dotnet are counted under their own name; use `serviceRaw` for the raw service_name column.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -317,7 +317,7 @@
         "openWorldHint": true,
         "readOnlyHint": true
       },
-      "description": "Escape hatch: run a raw read-only OpenObserve SQL query (SELECT/WITH only) against a stream within a mandatory time window.",
+      "description": "Escape hatch when no other observe tool fits: run a raw read-only OpenObserve SQL query (SELECT/WITH only) against a stream within a mandatory time window. Service names are raw here (no identity resolution).",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -378,7 +378,7 @@
         "openWorldHint": true,
         "readOnlyHint": true
       },
-      "description": "Search recent logs with optional filters (service, level, sourceContext, free-text contains) over a time window. Returns newest-first.",
+      "description": "Find log lines: errors or a message in service X over the last hour (default) or any time window, optionally filtered by service, level, sourceContext and free-text contains. Newest first. Counts per level/service: log_stats; one request: trace_logs; CI build logs: bitbucket-mcp get_pipeline_step_log.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -446,7 +446,7 @@
         "openWorldHint": true,
         "readOnlyHint": true
       },
-      "description": "Convenience: the most recent logs over the last N minutes (default 15), optionally filtered by level/service.",
+      "description": "What is a service logging right now? The most recent logs over the last N minutes (default 15), optionally filtered by level/service. Older windows or a text filter: search_logs.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -491,7 +491,7 @@
         "openWorldHint": true,
         "readOnlyHint": true
       },
-      "description": "Trace a single request: return ALL log records for a trace id (the X-Correlation-ID / OtelTraceId), ordered chronologically.",
+      "description": "All log lines of one request: every log record for a trace id (the X-Correlation-ID / OtelTraceId), ordered chronologically. Its spans and durations: get_trace_spans.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {

@@ -125,7 +125,7 @@ export function buildSourceTools(config: BitbucketConfig, client: BitbucketClien
   const getFileHistoryTool = defineTool({
     name: "get_file_history",
     description:
-      "Commits that changed one file, newest first, following renames — like `git log --follow -- <path>`. Bitbucket Cloud has no blame endpoint; this answers \"who changed this file, and when\". Line-level blame needs a local clone.",
+      "Who changed this file, and when, on Bitbucket: commits that changed one path, newest first, following renames — like `git log --follow -- <path>`. Bitbucket Cloud has no blame endpoint; line-level blame needs a local clone.",
     input: z
       .object({
         repoSlug: repoSlugArg,
@@ -187,7 +187,7 @@ export function buildSourceTools(config: BitbucketConfig, client: BitbucketClien
     name: "search_code",
     description:
       "Search code across the workspace's repositories (Bitbucket code search), or one repo with repoSlug. Searches each repository's DEFAULT BRANCH only, as last indexed — not other branches and not unpushed work. Returns repo, path, the commit it was indexed at, and up to " +
-      `${String(SEARCH_LINES_PER_FILE)} matching lines per file. Does not fall back to BITBUCKET_DEFAULT_REPO: omit repoSlug to search everything. Bitbucket query syntax applies (e.g. ext:ts, path:src, "exact phrase").`,
+      `${String(SEARCH_LINES_PER_FILE)} matching lines per file. Does not fall back to BITBUCKET_DEFAULT_REPO: omit repoSlug to search everything. Bitbucket query syntax applies (e.g. ext:ts, path:src, "exact phrase"). A checked-out repo is better searched locally.`,
     input: z
       .object({ query: z.string().min(1).max(512), repoSlug: repoSlugArg, page: pageArg, pagelen: pagelenArg, profile: profileArg })
       .strict(),

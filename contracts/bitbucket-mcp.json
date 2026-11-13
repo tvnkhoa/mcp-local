@@ -189,7 +189,7 @@
         "openWorldHint": true,
         "readOnlyHint": true
       },
-      "description": "Compare two refs (branch, tag or SHA) like `git diff base...head` plus `git rev-list --left-right --count`: merge base, how many commits head is ahead of / behind base (capped at 500, shown as \"≥500\"), and the files head changed since the merge base. statOnly:false adds the unified diff, cut at maxDiffBytes (default 256 KiB, max 1 MiB; see diffTruncated). `path` (a file or a directory) limits files, totals and the diff to it, like `git diff base...head -- path`; ahead/behind stay branch-wide. A directory is filtered over at most 5000 changed files.",
+      "description": "How far is a branch ahead of / behind another, and what changed between them? Compares two refs (branch, tag or SHA) like `git diff base...head` plus `git rev-list --left-right --count`: merge base, how many commits head is ahead of / behind base (capped at 500, shown as \"≥500\"), and the files head changed since the merge base. statOnly:false adds the unified diff, cut at maxDiffBytes (default 256 KiB, max 1 MiB; see diffTruncated). `path` (a file or a directory) limits files, totals and the diff to it, like `git diff base...head -- path`; ahead/behind stay branch-wide. A directory is filtered over at most 5000 changed files.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -295,7 +295,7 @@
         "openWorldHint": true,
         "readOnlyHint": false
       },
-      "description": "Create a pull request. Disabled unless BITBUCKET_WRITE_ENABLED=true. Pass dryRun:true to preview the request payload without calling the API.",
+      "description": "Open (create) a new pull request from a source branch. Disabled unless BITBUCKET_WRITE_ENABLED=true. Pass dryRun:true to preview the request payload without calling the API. Merging is merge_pull_request.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -403,7 +403,7 @@
         "openWorldHint": true,
         "readOnlyHint": true
       },
-      "description": "One commit: full message, parents, author, date, and its per-file changes against its first parent (path, status, lines added/removed), like `git show --stat`. Files are capped by maxFiles (default 200, max 500); filesTotal and filesTruncated say when that cut.",
+      "description": "What did one commit change? Full message, parents, author, date, and its per-file changes against its first parent (path, status, lines added/removed), like `git show --stat`. Files are capped by maxFiles (default 200, max 500); filesTotal and filesTruncated say when that cut.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -445,7 +445,7 @@
         "openWorldHint": true,
         "readOnlyHint": true
       },
-      "description": "Build statuses reported against one commit by any CI (Bitbucket Pipelines, Azure DevOps, …): key, name, state (SUCCESSFUL/FAILED/INPROGRESS/STOPPED), url. Answers \"is this exact SHA green?\" before a push or merge.",
+      "description": "Is this commit green? Build statuses reported against one commit by any CI (Bitbucket Pipelines, Azure DevOps, …): key, name, state (SUCCESSFUL/FAILED/INPROGRESS/STOPPED), url — for an exact SHA before a push or merge. Why a Pipelines build failed: list_pipeline_steps, then get_pipeline_step_log.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -547,7 +547,7 @@
         "openWorldHint": true,
         "readOnlyHint": true
       },
-      "description": "Commits that changed one file, newest first, following renames — like `git log --follow -- <path>`. Bitbucket Cloud has no blame endpoint; this answers \"who changed this file, and when\". Line-level blame needs a local clone.",
+      "description": "Who changed this file, and when, on Bitbucket: commits that changed one path, newest first, following renames — like `git log --follow -- <path>`. Bitbucket Cloud has no blame endpoint; line-level blame needs a local clone.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -597,7 +597,7 @@
         "openWorldHint": true,
         "readOnlyHint": true
       },
-      "description": "Get one pipeline run by UUID (braces optional) or by build number — state, result, target branch/commit, trigger and duration.",
+      "description": "Status of one CI pipeline run, by UUID (braces optional) or build number — state, result, target branch/commit, trigger and duration. Which step failed: list_pipeline_steps.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -633,7 +633,7 @@
         "openWorldHint": true,
         "readOnlyHint": true
       },
-      "description": "Read the log of one pipeline step. Returns the LAST maxBytes bytes (default 256 KiB, max 1 MiB) because that is where a failure is. A step that has not started yet has no log and answers 404.",
+      "description": "Why did the build fail: the CI log of one failed pipeline step. Returns the LAST maxBytes bytes (default 256 KiB, max 1 MiB) because that is where a failure is. A step that has not started yet has no log and answers 404. The stepUuid comes from list_pipeline_steps; application logs are observe-mcp.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -680,7 +680,7 @@
         "openWorldHint": true,
         "readOnlyHint": true
       },
-      "description": "Get a single pull request by id (title, state, branches, author, reviewers, links, counts).",
+      "description": "One pull request by id: title, state, branches, author, reviewers, links, counts. Its changes: get_pull_request_diff; its comments: list_pull_request_comments.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -717,7 +717,7 @@
         "openWorldHint": true,
         "readOnlyHint": true
       },
-      "description": "Get the raw unified diff for a pull request as text. The full diff is always returned and may be large (see diffLength) — there is no profile-based truncation.",
+      "description": "Review a pull request's changes: its raw unified diff as text. The full diff is always returned and may be large (see diffLength) — there is no profile-based truncation.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -754,7 +754,7 @@
         "openWorldHint": true,
         "readOnlyHint": true
       },
-      "description": "Get metadata for one repository (name, main branch, visibility, language, links).",
+      "description": "Metadata for one Bitbucket repository: name, main branch, visibility, language, links.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -783,7 +783,7 @@
         "openWorldHint": true,
         "readOnlyHint": true
       },
-      "description": "Verify connectivity + auth to Bitbucket and echo the (non-secret) server config. Probes the default repo if set, else lists one repository.",
+      "description": "Is Bitbucket reachable with these credentials? Verifies connectivity + auth and echoes the (non-secret) server config. Probes the default repo if set, else lists one repository.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -808,7 +808,7 @@
         "openWorldHint": true,
         "readOnlyHint": true
       },
-      "description": "List branches of a repository (useful for picking a source/destination branch before creating a PR).",
+      "description": "Branch names of a Bitbucket repository, e.g. to pick a source/destination before creating a PR.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -923,7 +923,7 @@
         "openWorldHint": true,
         "readOnlyHint": true
       },
-      "description": "List the steps of one pipeline run with per-step state, result and duration — this is how you find which step failed, and the stepUuid to read its log.",
+      "description": "Which step of a CI pipeline run failed? Lists the steps of one run with per-step state, result and duration, and the stepUuid that get_pipeline_step_log reads.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -969,7 +969,7 @@
         "openWorldHint": true,
         "readOnlyHint": true
       },
-      "description": "List pipeline runs of a repository, newest first. Filter by branch and/or status (several statuses are ORed). NOTE the filter vocabulary is not the response vocabulary: a run whose result reads SUCCESSFUL is selected by status PASSED. An unsupported status matches nothing rather than erroring, so an empty result can mean a wrong value. Requires the read:pipeline scope.",
+      "description": "Recent CI builds (Bitbucket Pipelines runs) of a repository, newest first. Filter by branch and/or status (several statuses are ORed). NOTE the filter vocabulary is not the response vocabulary: a run whose result reads SUCCESSFUL is selected by status PASSED. An unsupported status matches nothing rather than erroring, so an empty result can mean a wrong value. Requires the read:pipeline scope.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -1036,7 +1036,7 @@
         "openWorldHint": true,
         "readOnlyHint": true
       },
-      "description": "List a pull request's comments, oldest first: author, text, inline position (path + line) when the comment is on the diff, and parentId for replies. Deleted comments are flagged, not hidden.",
+      "description": "Review comments on a pull request, oldest first: author, text, inline position (path + line) when the comment is on the diff, and parentId for replies. Deleted comments are flagged, not hidden.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -1083,7 +1083,7 @@
         "openWorldHint": true,
         "readOnlyHint": true
       },
-      "description": "List pull requests of a repository. Defaults to OPEN; pass state to filter (OPEN/MERGED/DECLINED/SUPERSEDED).",
+      "description": "Pull requests of a repository by state: OPEN (the default), MERGED, DECLINED or SUPERSEDED. One PR by id: get_pull_request.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -1138,7 +1138,7 @@
         "openWorldHint": true,
         "readOnlyHint": true
       },
-      "description": "List repositories in the configured workspace. Optional role filter (owner/admin/contributor/member), free-text `q` (BBQL), and `sort`.",
+      "description": "Which repositories are in the Bitbucket workspace? Optional role filter (owner/admin/contributor/member), free-text `q` (BBQL), and `sort`.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -1243,7 +1243,7 @@
         "openWorldHint": true,
         "readOnlyHint": true
       },
-      "description": "Search code across the workspace's repositories (Bitbucket code search), or one repo with repoSlug. Searches each repository's DEFAULT BRANCH only, as last indexed — not other branches and not unpushed work. Returns repo, path, the commit it was indexed at, and up to 20 matching lines per file. Does not fall back to BITBUCKET_DEFAULT_REPO: omit repoSlug to search everything. Bitbucket query syntax applies (e.g. ext:ts, path:src, \"exact phrase\").",
+      "description": "Search code across the workspace's repositories (Bitbucket code search), or one repo with repoSlug. Searches each repository's DEFAULT BRANCH only, as last indexed — not other branches and not unpushed work. Returns repo, path, the commit it was indexed at, and up to 20 matching lines per file. Does not fall back to BITBUCKET_DEFAULT_REPO: omit repoSlug to search everything. Bitbucket query syntax applies (e.g. ext:ts, path:src, \"exact phrase\"). A checked-out repo is better searched locally.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {

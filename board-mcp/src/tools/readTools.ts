@@ -38,7 +38,7 @@ export function buildReadTools(config: BoardConfig, run: BoardRunner): readonly 
       name: "status",
       title: "Board status",
       description:
-        "Where every unit is and what is next (board.mjs status), or one unit with `unit`. With `unit`, also returns `unitFile`: the RAW checks/board/units/<id>.json — never interpreted; phase, waits and claims are what `text` says. `profile: \"nano\"` without `unit` or `today` (→ --summary): the CLI's short summary (counts, claims, holds, offBoard, dueDiscoveries) instead of the whole board. `today: true` (→ --today): one line per unit with a claim, assign, report or accept in today's working day (04:00–04:00 local) — `by` keeps one session's.",
+        "Where is every unit on the board, and what is next (board.mjs status) — or one unit with `unit`. With `unit`, also returns `unitFile`: the RAW checks/board/units/<id>.json — never interpreted; phase, waits and claims are what `text` says. `profile: \"nano\"` without `unit` or `today` (→ --summary): the CLI's short summary (counts, claims, holds, offBoard, dueDiscoveries) instead of the whole board. `today: true` (→ --today): one line per unit with a claim, assign, report or accept in today's working day (04:00–04:00 local) — `by` keeps one session's.",
       annotations: annotations.read(),
       inputSchema: schema.object({
         unit: schema.string("A unit id, e.g. screen--review-intent. Omit for every unit."),
@@ -71,7 +71,7 @@ export function buildReadTools(config: BoardConfig, run: BoardRunner): readonly 
     defineTool({
       name: "next",
       title: "Board queue",
-      description: "The horizontal queue in order, and the unit to claim next (board.mjs next).",
+      description: "Which unit to pick up next: the horizontal queue in order, and the unit to claim next (board.mjs next).",
       annotations: annotations.read(),
       inputSchema: schema.object({ profile: schema.profile() }),
       input: z.object({ profile: responseProfileSchema.optional() }).strict(),
@@ -137,7 +137,7 @@ export function buildReadTools(config: BoardConfig, run: BoardRunner): readonly 
       name: "find",
       title: "Find the owner's words",
       description:
-        "The newest message the OWNER wrote, in this repo's transcripts, that contains `words` — prints its --session and --uuid (board.mjs find). Use it to check that words will pass a gate before calling a gate tool with them.",
+        "Will these owner words pass a gate? Finds the newest message the OWNER wrote, in this repo's transcripts, that contains `words` — prints its --session and --uuid (board.mjs find). Call it before passing the words to a gate tool.",
       annotations: annotations.read(),
       inputSchema: schema.object(
         { words: schema.string("The owner's words, verbatim. Must not start with '-'.", { maxLength: 2000 }), profile: schema.profile() },

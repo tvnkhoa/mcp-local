@@ -27,7 +27,7 @@ export function buildWriteTools(config: BoardConfig, run: BoardRunner): readonly
     defineTool({
       name: "claim",
       title: "Claim a unit",
-      description: "Take a unit's files for this session, or refresh the claim (board.mjs claim). Refused while another session holds an overlapping file, or the unit waits.",
+      description: "Take a unit's files for this session before editing them, or refresh the claim (board.mjs claim). Refused while another session holds an overlapping file, or the unit waits.",
       annotations: { readOnly: false, idempotent: true, destructive: false, openWorld: false },
       inputSchema: schema.object({ unit: field.unit(), session: field.session(), profile: schema.profile() }, { required: ["unit", "session"] }),
       input: z.object({ unit: unitId(), session: sessionField(), profile: responseProfileSchema.optional() }).strict(),

@@ -90,7 +90,7 @@ export function buildPipelineTools(
   const listPipelinesTool = defineTool({
     name: "list_pipelines",
     description:
-      "List pipeline runs of a repository, newest first. Filter by branch and/or status (several statuses are ORed). NOTE the filter vocabulary is not the response vocabulary: a run whose result reads SUCCESSFUL is selected by status PASSED. An unsupported status matches nothing rather than erroring, so an empty result can mean a wrong value. Requires the read:pipeline scope.",
+      "Recent CI builds (Bitbucket Pipelines runs) of a repository, newest first. Filter by branch and/or status (several statuses are ORed). NOTE the filter vocabulary is not the response vocabulary: a run whose result reads SUCCESSFUL is selected by status PASSED. An unsupported status matches nothing rather than erroring, so an empty result can mean a wrong value. Requires the read:pipeline scope.",
     input: z
       .object({
         repoSlug: repoSlugArg,
@@ -149,7 +149,7 @@ export function buildPipelineTools(
   const getPipelineTool = defineTool({
     name: "get_pipeline",
     description:
-      "Get one pipeline run by UUID (braces optional) or by build number — state, result, target branch/commit, trigger and duration.",
+      "Status of one CI pipeline run, by UUID (braces optional) or build number — state, result, target branch/commit, trigger and duration. Which step failed: list_pipeline_steps.",
     input: z
       .object({
         repoSlug: repoSlugArg,
@@ -173,7 +173,7 @@ export function buildPipelineTools(
   const listPipelineStepsTool = defineTool({
     name: "list_pipeline_steps",
     description:
-      "List the steps of one pipeline run with per-step state, result and duration — this is how you find which step failed, and the stepUuid to read its log.",
+      "Which step of a CI pipeline run failed? Lists the steps of one run with per-step state, result and duration, and the stepUuid that get_pipeline_step_log reads.",
     input: z
       .object({
         repoSlug: repoSlugArg,
@@ -214,7 +214,7 @@ export function buildPipelineTools(
   const getPipelineStepLogTool = defineTool({
     name: "get_pipeline_step_log",
     description:
-      "Read the log of one pipeline step. Returns the LAST maxBytes bytes (default 256 KiB, max 1 MiB) because that is where a failure is. A step that has not started yet has no log and answers 404.",
+      "Why did the build fail: the CI log of one failed pipeline step. Returns the LAST maxBytes bytes (default 256 KiB, max 1 MiB) because that is where a failure is. A step that has not started yet has no log and answers 404. The stepUuid comes from list_pipeline_steps; application logs are observe-mcp.",
     input: z
       .object({
         repoSlug: repoSlugArg,

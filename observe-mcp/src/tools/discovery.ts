@@ -232,7 +232,7 @@ export function buildDiscoveryTools(limits: ObserveLimits, clients: ClientManage
   const discoverServices = defineTool({
     name: "discover_services",
     description:
-      "Discover which services are emitting into an environment: per-service log volume, error/warning counts, first/last seen, how the service was identified (identitySource), and (with include:\"codeLinks\") the application namespaces that identify the owning code. Covers both the logs and traces lanes. Use this instead of assuming a fixed service list.",
+      "Which services are logging in an environment, and how many errors each? Per-service log volume, error/warning counts, first/last seen, how the service was identified (identitySource), and (with include:\"codeLinks\") the application namespaces that identify the owning code. Covers both the logs and traces lanes. Use this instead of assuming a fixed service list.",
     input: z
       .object({
         environment: environmentArg,

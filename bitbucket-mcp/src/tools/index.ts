@@ -50,7 +50,7 @@ export function buildTools(config: BitbucketConfig, client: BitbucketClient): re
   const healthCheckTool = defineTool({
     name: "health_check",
     description:
-      "Verify connectivity + auth to Bitbucket and echo the (non-secret) server config. Probes the default repo if set, else lists one repository.",
+      "Is Bitbucket reachable with these credentials? Verifies connectivity + auth and echoes the (non-secret) server config. Probes the default repo if set, else lists one repository.",
     input: z.object({ profile: profileArg }).strict(),
     inputSchema: schema.object({ profile: profileProp }),
     annotations: annotations.readRemote(),
@@ -75,7 +75,7 @@ export function buildTools(config: BitbucketConfig, client: BitbucketClient): re
   const listRepositoriesTool = defineTool({
     name: "list_repositories",
     description:
-      "List repositories in the configured workspace. Optional role filter (owner/admin/contributor/member), free-text `q` (BBQL), and `sort`.",
+      "Which repositories are in the Bitbucket workspace? Optional role filter (owner/admin/contributor/member), free-text `q` (BBQL), and `sort`.",
     input: z
       .object({
         role: z.enum(["owner", "admin", "contributor", "member"]).optional(),
@@ -107,7 +107,7 @@ export function buildTools(config: BitbucketConfig, client: BitbucketClient): re
 
   const getRepositoryTool = defineTool({
     name: "get_repository",
-    description: "Get metadata for one repository (name, main branch, visibility, language, links).",
+    description: "Metadata for one Bitbucket repository: name, main branch, visibility, language, links.",
     input: z.object({ repoSlug: repoSlugArg, profile: profileArg }).strict(),
     inputSchema: schema.object({ repoSlug: repoSlugProp, profile: profileProp }),
     annotations: annotations.readRemote(),
@@ -121,7 +121,7 @@ export function buildTools(config: BitbucketConfig, client: BitbucketClient): re
   const listBranchesTool = defineTool({
     name: "list_branches",
     description:
-      "List branches of a repository (useful for picking a source/destination branch before creating a PR).",
+      "Branch names of a Bitbucket repository, e.g. to pick a source/destination before creating a PR.",
     input: z
       .object({
         repoSlug: repoSlugArg,
@@ -156,7 +156,7 @@ export function buildTools(config: BitbucketConfig, client: BitbucketClient): re
   const listPullRequestsTool = defineTool({
     name: "list_pull_requests",
     description:
-      "List pull requests of a repository. Defaults to OPEN; pass state to filter (OPEN/MERGED/DECLINED/SUPERSEDED).",
+      "Pull requests of a repository by state: OPEN (the default), MERGED, DECLINED or SUPERSEDED. One PR by id: get_pull_request.",
     input: z
       .object({
         repoSlug: repoSlugArg,
@@ -194,7 +194,7 @@ export function buildTools(config: BitbucketConfig, client: BitbucketClient): re
   const getPullRequestTool = defineTool({
     name: "get_pull_request",
     description:
-      "Get a single pull request by id (title, state, branches, author, reviewers, links, counts).",
+      "One pull request by id: title, state, branches, author, reviewers, links, counts. Its changes: get_pull_request_diff; its comments: list_pull_request_comments.",
     input: z
       .object({ repoSlug: repoSlugArg, id: z.number().int().positive(), profile: profileArg })
       .strict(),
@@ -213,7 +213,7 @@ export function buildTools(config: BitbucketConfig, client: BitbucketClient): re
   const getPullRequestDiffTool = defineTool({
     name: "get_pull_request_diff",
     description:
-      "Get the raw unified diff for a pull request as text. The full diff is always returned and may be large (see diffLength) — there is no profile-based truncation.",
+      "Review a pull request's changes: its raw unified diff as text. The full diff is always returned and may be large (see diffLength) — there is no profile-based truncation.",
     input: z
       .object({ repoSlug: repoSlugArg, id: z.number().int().positive(), profile: profileArg })
       .strict(),
@@ -238,7 +238,7 @@ export function buildTools(config: BitbucketConfig, client: BitbucketClient): re
   const createPullRequestTool = defineTool({
     name: "create_pull_request",
     description:
-      "Create a pull request. Disabled unless BITBUCKET_WRITE_ENABLED=true. Pass dryRun:true to preview the request payload without calling the API.",
+      "Open (create) a new pull request from a source branch. Disabled unless BITBUCKET_WRITE_ENABLED=true. Pass dryRun:true to preview the request payload without calling the API. Merging is merge_pull_request.",
     input: z
       .object({
         repoSlug: repoSlugArg,

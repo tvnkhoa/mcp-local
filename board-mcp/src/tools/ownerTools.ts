@@ -190,7 +190,7 @@ export function buildOwnerWordTools(config: BoardConfig, run: BoardRunner): read
       name: "acknowledge",
       title: "Acknowledge a commit (owner)",
       description:
-        "The owner's word that a commit which moved a landed unit's files needs no phase walked again (board.mjs acknowledge). `unit` + `sha`, or `offBoard: true` for every OFF-BOARD commit on every landed unit (or on `unit`). Always needs `gate`.",
+        "The owner's word that a commit which moved a landed unit's files needs no phase walked again (board.mjs acknowledge). `unit` + `sha`, or `offBoard: true` for all OFF-BOARD commits on all landed units (or on `unit`). Always needs `gate`.",
       annotations: ADDS,
       inputSchema: schema.object(
         {
