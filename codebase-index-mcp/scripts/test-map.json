@@ -25,7 +25,8 @@
     "scripts/heavy-lock.mjs",
     "scripts/mcp-doctor.mjs",
     "scripts/install-mcp.mjs",
-    ".github/**"
+    ".github/**",
+    "contracts/**"
   ],
   "unit": [
     "codebase-index-mcp/src/**/*.test.ts"
