@@ -101,7 +101,7 @@ export function buildTools(limits: ObserveLimits, clients: ClientManager): reado
   const listEnvironments = defineTool({
     name: "list_environments",
     description:
-      "List the configured OpenObserve environments (org, log/trace stream, and which one answers by default). Call this first when you do not know which environment names exist.",
+      "Which OpenObserve environments can I query (e.g. dev, prod)? Lists each configured environment's org, log/trace stream and which one answers by default. Call it first when you do not know the names.",
     input: z.object({ profile: profileArg }).strict(),
     inputSchema: schema.object({ profile: profileProp }),
     // The only tool here that touches no network — it reports resolved config, so
@@ -119,7 +119,7 @@ export function buildTools(limits: ObserveLimits, clients: ClientManager): reado
   const listStreams = defineTool({
     name: "list_streams",
     description:
-      "List OpenObserve streams (log/trace/metric datasets) for the configured org. Doubles as a connectivity + auth check.",
+      "Which OpenObserve streams (log/trace/metric datasets) exist for the configured org? Doubles as a connectivity + auth check; describe_stream shows one stream's fields.",
     input: z.object({ type: streamTypeArg.optional(), environment: environmentArg, profile: profileArg }).strict(),
     inputSchema: schema.object({ type: typeProp, environment: envProp, profile: profileProp }),
     annotations: reads,
@@ -140,7 +140,7 @@ export function buildTools(limits: ObserveLimits, clients: ClientManager): reado
   const searchLogs = defineTool({
     name: "search_logs",
     description:
-      "Search recent logs with optional filters (service, level, sourceContext, free-text contains) over a time window. Returns newest-first.",
+      "Find log lines: errors or a message in service X over the last hour (default) or a chosen time window, optionally filtered by service, level, sourceContext and free-text contains. Newest first. Counts per level/service: log_stats; one request: trace_logs; CI build logs: bitbucket-mcp get_pipeline_step_log.",
     input: z
       .object({
         service: z.string().min(1).max(256).optional(),
@@ -216,7 +216,7 @@ export function buildTools(limits: ObserveLimits, clients: ClientManager): reado
   const traceLogs = defineTool({
     name: "trace_logs",
     description:
-      "Trace a single request: return ALL log records for a trace id (the X-Correlation-ID / OtelTraceId), ordered chronologically.",
+      "All log lines of one request: every log record for a trace id (the X-Correlation-ID / OtelTraceId), ordered chronologically. Its spans and durations: get_trace_spans.",
     input: z
       .object({
         traceId: traceIdArg,
@@ -277,7 +277,7 @@ export function buildTools(limits: ObserveLimits, clients: ClientManager): reado
   const getTraceSpans = defineTool({
     name: "get_trace_spans",
     description:
-      "Return the distributed-trace spans for a trace id from the traces stream (operation, service, duration, status), ordered by start time.",
+      "Where did a request spend its time? The distributed-trace spans for a trace id from the traces stream (operation, service, duration, status), ordered by start time. Its log lines: trace_logs.",
     input: z
       .object({
         traceId: traceIdArg,
@@ -374,7 +374,7 @@ export function buildTools(limits: ObserveLimits, clients: ClientManager): reado
   const tailLogs = defineTool({
     name: "tail_logs",
     description:
-      "Convenience: the most recent logs over the last N minutes (default 15), optionally filtered by level/service.",
+      "What is a service logging right now? The most recent logs over the last N minutes (default 15), optionally filtered by level/service. Older windows or a text filter: search_logs.",
     input: z
       .object({
         service: z.string().min(1).max(256).optional(),
@@ -436,7 +436,7 @@ export function buildTools(limits: ObserveLimits, clients: ClientManager): reado
   const logStats = defineTool({
     name: "log_stats",
     description:
-      "Aggregate log counts grouped by level (default), service, or sourceContext over a time window — an error/warning summary. `service` groups by the RESOLVED service identity, so apps whose rows arrive under unknown_service:dotnet are counted under their own name; use `serviceRaw` for the raw service_name column.",
+      "How many errors per service (or per level) in a time window? Aggregate log counts grouped by level (default), service, or sourceContext — an error/warning summary. `service` groups by the RESOLVED service identity, so apps whose rows arrive under unknown_service:dotnet are counted under their own name; use `serviceRaw` for the raw service_name column.",
     input: z
       .object({
         groupBy: z.enum(["level", "service", "serviceRaw", "sourceContext"]).optional(),
@@ -522,7 +522,7 @@ export function buildTools(limits: ObserveLimits, clients: ClientManager): reado
   const runObserveQuery = defineTool({
     name: "run_observe_query",
     description:
-      "Escape hatch: run a raw read-only OpenObserve SQL query (SELECT/WITH only) against a stream within a mandatory time window.",
+      "Escape hatch when no other observe tool fits: run a raw read-only OpenObserve SQL query (SELECT/WITH only) against a stream within a mandatory time window. Service names are raw here (no identity resolution).",
     input: runQuerySchema,
     inputSchema: schema.object(
       {
@@ -588,7 +588,7 @@ export function buildTools(limits: ObserveLimits, clients: ClientManager): reado
   const describeStream = defineTool({
     name: "describe_stream",
     description:
-      "Discover the fields of a stream by sampling recent rows (no fixed schema assumptions). Returns each field with its observed JSON types and how many sampled rows had a non-null value.",
+      "What fields does a log or trace stream have? Samples recent rows (no fixed schema assumptions) and returns each field with its observed JSON types and how many sampled rows had a non-null value.",
     input: z
       .object({
         stream: streamArg,

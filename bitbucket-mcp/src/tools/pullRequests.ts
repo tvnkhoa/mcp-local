@@ -51,7 +51,7 @@ export function buildPullRequestTools(config: BitbucketConfig, client: Bitbucket
   const listCommentsTool = defineTool({
     name: "list_pull_request_comments",
     description:
-      "List a pull request's comments, oldest first: author, text, inline position (path + line) when the comment is on the diff, and parentId for replies. Deleted comments are flagged, not hidden.",
+      "Review comments on a pull request, oldest first: author, text, inline position (path + line) when the comment is on the diff, and parentId for replies. Deleted comments are flagged, not hidden.",
     input: z.object({ repoSlug: repoSlugArg, id: prIdArg, page: pageArg, pagelen: pagelenArg, profile: profileArg }).strict(),
     inputSchema: schema.object(
       { repoSlug: repoSlugProp, id: prIdProp, page: pageProp, pagelen: pagelenProp, profile: profileProp },

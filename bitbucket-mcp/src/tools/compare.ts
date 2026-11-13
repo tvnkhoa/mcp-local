@@ -34,7 +34,7 @@ export function buildCompareTools(config: BitbucketConfig, client: BitbucketClie
   const compareRefsTool = defineTool({
     name: "compare_refs",
     description:
-      "Compare two refs (branch, tag or SHA) like `git diff base...head` plus `git rev-list --left-right --count`: merge base, how many commits head is ahead of / behind base (capped at " +
+      "How far is a branch ahead of / behind another, and what changed between them? Compares two refs (branch, tag or SHA) like `git diff base...head` plus `git rev-list --left-right --count`: merge base, how many commits head is ahead of / behind base (capped at " +
       `${String(AHEAD_BEHIND_CAP)}, shown as "≥${String(AHEAD_BEHIND_CAP)}"), and the files head changed since the merge base. statOnly:false adds the unified diff, cut at maxDiffBytes (default 256 KiB, max 1 MiB; see diffTruncated). ` +
       `\`path\` (a file or a directory) limits files, totals and the diff to it, like \`git diff base...head -- path\`; ahead/behind stay branch-wide. A directory is filtered over at most ${String(DIFFSTAT_SCAN_MAX)} changed files.`,
     input: z

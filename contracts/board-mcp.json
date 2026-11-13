@@ -68,7 +68,7 @@
         "openWorldHint": false,
         "readOnlyHint": false
       },
-      "description": "The owner's word that a commit which moved a landed unit's files needs no phase walked again (board.mjs acknowledge). `unit` + `sha`, or `offBoard: true` for every OFF-BOARD commit on every landed unit (or on `unit`). Always needs `gate`.",
+      "description": "The owner's word that a commit which moved a landed unit's files needs no phase walked again (board.mjs acknowledge). `unit` + `sha`, or `offBoard: true` for all OFF-BOARD commits on all landed units (or on `unit`). Always needs `gate`.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -385,7 +385,7 @@
         "openWorldHint": false,
         "readOnlyHint": false
       },
-      "description": "Take a unit's files for this session, or refresh the claim (board.mjs claim). Refused while another session holds an overlapping file, or the unit waits.",
+      "description": "Take a unit's files for this session before editing them, or refresh the claim (board.mjs claim). Refused while another session holds an overlapping file, or the unit waits.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -507,7 +507,7 @@
         "openWorldHint": false,
         "readOnlyHint": true
       },
-      "description": "The newest message the OWNER wrote, in this repo's transcripts, that contains `words` — prints its --session and --uuid (board.mjs find). Use it to check that words will pass a gate before calling a gate tool with them.",
+      "description": "Will these owner words pass a gate? Finds the newest message the OWNER wrote, in this repo's transcripts, that contains `words` — prints its --session and --uuid (board.mjs find). Call it before passing the words to a gate tool.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -800,7 +800,7 @@
         "openWorldHint": false,
         "readOnlyHint": true
       },
-      "description": "The horizontal queue in order, and the unit to claim next (board.mjs next).",
+      "description": "Which unit to pick up next: the horizontal queue in order, and the unit to claim next (board.mjs next).",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -1221,7 +1221,7 @@
         "openWorldHint": false,
         "readOnlyHint": true
       },
-      "description": "Where every unit is and what is next (board.mjs status), or one unit with `unit`. With `unit`, also returns `unitFile`: the RAW checks/board/units/<id>.json — never interpreted; phase, waits and claims are what `text` says. `profile: \"nano\"` without `unit` or `today` (→ --summary): the CLI's short summary (counts, claims, holds, offBoard, dueDiscoveries) instead of the whole board. `today: true` (→ --today): one line per unit with a claim, assign, report or accept in today's working day (04:00–04:00 local) — `by` keeps one session's.",
+      "description": "Where is every unit on the board, and what is next (board.mjs status) — or one unit with `unit`. With `unit`, also returns `unitFile`: the RAW checks/board/units/<id>.json — never interpreted; phase, waits and claims are what `text` says. `profile: \"nano\"` without `unit` or `today` (→ --summary): the CLI's short summary (counts, claims, holds, offBoard, dueDiscoveries) instead of the whole board. `today: true` (→ --today): one line per unit with a claim, assign, report or accept in today's working day (04:00–04:00 local) — `by` keeps one session's.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {

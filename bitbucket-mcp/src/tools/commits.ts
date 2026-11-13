@@ -185,7 +185,7 @@ export function buildCommitTools(config: BitbucketConfig, client: BitbucketClien
   const getCommitTool = defineTool({
     name: "get_commit",
     description:
-      "One commit: full message, parents, author, date, and its per-file changes against its first parent (path, status, lines added/removed), like `git show --stat`. Files are capped by maxFiles (default " +
+      "What did one commit change? Full message, parents, author, date, and its per-file changes against its first parent (path, status, lines added/removed), like `git show --stat`. Files are capped by maxFiles (default " +
       `${String(DIFFSTAT_DEFAULT_FILES)}, max ${String(DIFFSTAT_MAX_FILES)}); filesTotal and filesTruncated say when that cut.`,
     input: z
       .object({
@@ -224,7 +224,7 @@ export function buildCommitTools(config: BitbucketConfig, client: BitbucketClien
   const getCommitStatusesTool = defineTool({
     name: "get_commit_statuses",
     description:
-      "Build statuses reported against one commit by any CI (Bitbucket Pipelines, Azure DevOps, …): key, name, state (SUCCESSFUL/FAILED/INPROGRESS/STOPPED), url. Answers \"is this exact SHA green?\" before a push or merge.",
+      "Is this commit green? Build statuses reported against one commit by any CI (Bitbucket Pipelines, Azure DevOps, …): key, name, state (SUCCESSFUL/FAILED/INPROGRESS/STOPPED), url — for an exact SHA before a push or merge. Why a Pipelines build failed: list_pipeline_steps, then get_pipeline_step_log.",
     input: z
       .object({ repoSlug: repoSlugArg, sha: z.string().min(7).max(40), page: pageArg, pagelen: pagelenArg, profile: profileArg })
       .strict(),
