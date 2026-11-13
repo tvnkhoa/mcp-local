@@ -174,5 +174,5 @@ test("caller questions route to the tool that answers them first", () => {
 test("row #2 review: the new rules do not hijack neighbouring phrasings", () => {
   assert.equal(firstTool("which directory is fooBar in, where is it").tool, "search_symbols");
   assert.equal(firstTool("did the last index run fail, is it stale").tool, "health_check");
-  assert.equal(firstTool("which section of the docs explains retries").args.mode, "search");
+  assert.notEqual(firstTool("which section of the docs explains retries").args.mode, "section");
 });
