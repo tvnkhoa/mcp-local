@@ -271,6 +271,9 @@ export function resolveModuleSpecifier(
 
 // ── Python (PY-2) ───────────────────────────────────────────────────────────────────────────
 
+/** PY-8: the reason a resolved `from x import *` IMPORTS row carries, so a scoped run still knows it was a star import. */
+export const PYTHON_STAR_IMPORT_REASON = "resolved python star import";
+
 /** `.py` / `.pyi` — the files whose import tokens are Python module specs. */
 export function isPythonFile(filePath: string): boolean {
   return /\.pyi?$/i.test(filePath);
@@ -408,6 +411,13 @@ export function buildImportedFilesByFile(
 
   const byFile = new Map<string, Set<string>>();
   const cache = new Map<string, string | null>();
+  /** PY-8: per Python file, the modules it star-imports — their re-exports join its scope below. */
+  const starTargets = new Map<string, Set<string>>();
+  const addStar = (fromFile: string, target: string): void => {
+    const set = starTargets.get(fromFile);
+    if (set) set.add(target);
+    else starTargets.set(fromFile, new Set([target]));
+  };
 
   for (const row of rows) {
     const specifier = row.toId.slice("import:".length);
@@ -422,6 +432,7 @@ export function buildImportedFilesByFile(
       cache.set(cacheKey, target);
     }
     if (!target) continue;
+    if (python && specifier.endsWith("*")) addStar(fromFile, target);
 
     let set = byFile.get(fromFile);
     if (!set) {
@@ -437,16 +448,17 @@ export function buildImportedFilesByFile(
   // differ between the two. Its resolved module→module IMPORTS are the same set its tokens resolve to.
   const resolvedPythonImports = db
     .prepare(
-      `select sf.file_path as fromFile, st.file_path as toFile
+      `select sf.file_path as fromFile, st.file_path as toFile, e.reason as reason
        from edges e
        join symbols sf on sf.repo_id = e.repo_id and sf.symbol_id = e.from_id
        join symbols st on st.repo_id = e.repo_id and st.symbol_id = e.to_id
        where e.repo_id = ? and e.type = 'IMPORTS' and st.kind = 'module'
          and (sf.file_path like '%.py' or sf.file_path like '%.pyi')`
     )
-    .all(repoId) as { fromFile: string; toFile: string }[];
+    .all(repoId) as { fromFile: string; toFile: string; reason: string | null }[];
   for (const row of resolvedPythonImports) {
     const fromFile = normalizeFilePath(row.fromFile);
+    if (row.reason === PYTHON_STAR_IMPORT_REASON) addStar(fromFile, normalizeFilePath(row.toFile));
     let set = byFile.get(fromFile);
     if (!set) {
       set = new Set<string>();
@@ -463,7 +475,9 @@ export function buildImportedFilesByFile(
   for (const [fromFile, targets] of byFile) {
     if (!isPythonFile(fromFile)) continue;
     for (const target of [...targets]) {
-      if (!/(^|\/)__init__\.pyi?$/.test(target)) continue;
+      // PY-8: `from x import *` binds what `x` exports (its `__all__`, else its public names), and what `x`
+      // exports may come from its own imports — the same one hop as a package `__init__`.
+      if (!/(^|\/)__init__\.pyi?$/.test(target) && !starTargets.get(fromFile)?.has(target)) continue;
       for (const reExported of direct.get(target) ?? []) {
         if (reExported !== fromFile) targets.add(reExported);
       }

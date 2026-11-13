@@ -12,7 +12,19 @@
  *   (b) every read answers within the query budget + 2 s, and the server thread's longest block is bounded
  *       (LOCK_MAX_BLOCK_MS, default 1000: the runs execute in the worker since IX-2; reads on the repo being
  *       rewritten keep ~470 ms of their own work); both × 2.5 on CI (see CI_FACTOR);
- *   (c) after the runs, the dirty edit on `small` is in the index (the queued refresh ran, behind `big`'s run).
+ *   (c) after the runs, the dirty edit on `small` is in the index (the queued refresh ran, behind `big`'s run) and no
+ *       run is left: a read answers with the edit and is either not `refreshing`, or `refreshing` only because the
+ *       gate's tree check outlived the budget ("checking the working tree …") while index_status lists no job and no
+ *       refresh run. Its trail of freshness states is printed (always on failure; LOCK_DIAG=1 always).
+ *
+ * MCP-ISSUE-127 (CI run 43190005628, 5d30ac1): (c) failed after 120 polls (~50 s) with every run done. On that runner
+ * the gate's tree check (`git status` + hashing) took longer than the 300 ms budget, so every read answered `refreshing`
+ * "checking the working tree", though the index was current and nothing ran: a verdict that nothing changed is not kept
+ * (keeping it 1 s was tried and rejected — it answered `fresh` to a query made right after an edit, test:query-refresh
+ * §6). (c) used to demand "not refreshing", which a slow runner never gives. Reproduce with LOCK_SLOW_GIT_MS=600 (both
+ * servers' `git status` answers 600 ms late):
+ *   LOCK_SLOW_GIT_MS=600 npm run test:index-lock-contention
+ * At 5d30ac1 the old (c) failed in 2 of 5 such runs (50.4 s, 51.6 s) and the others turned fresh only after 3-40 s.
  */
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
@@ -27,6 +39,22 @@ import "./_indexWait.mjs";
 const GENERATED_FILES = Number(process.env.LOCK_FIXTURE_FILES ?? 1200);
 const READS = Number(process.env.LOCK_READS ?? 24);
 const BUDGET_MS = 300;
+// MCP-ISSUE-127: a preload that delays every `git status` the server spawns (execFile callback), emulating a slow runner.
+const SLOW_GIT_MS = Number(process.env.LOCK_SLOW_GIT_MS ?? 0);
+const SLOW_GIT_PRELOAD = `data:text/javascript,${encodeURIComponent(`
+import cp from "node:child_process";
+import { syncBuiltinESMExports } from "node:module";
+const orig = cp.execFile;
+cp.execFile = function (file, args, opts, cb) {
+  const done = typeof opts === "function" ? opts : cb;
+  if (file !== "git" || !Array.isArray(args) || !args.includes("status") || typeof done !== "function") return orig.apply(this, arguments);
+  const late = (...a) => setTimeout(() => done(...a), ${SLOW_GIT_MS});
+  return typeof opts === "function" ? orig.call(this, file, args, late) : orig.call(this, file, args, opts, late);
+};
+// promisify(execFile) must keep resolving { stdout, stderr }: the promisified path is left undelayed.
+cp.execFile[Symbol.for("nodejs.util.promisify.custom")] = orig[Symbol.for("nodejs.util.promisify.custom")];
+syncBuiltinESMExports();
+`)}`;
 // IX-1 measured max 2834 ms with index_repository on the server thread. Since IX-2 (MCP-ISSUE-112) every run is the
 // worker's and the server thread only reads; what is left is the reads' own synchronous work — a search on `big` while
 // its full run rewrites it measured ~470 ms. test:index-jobs bounds the runs alone at 250 ms.
@@ -99,7 +127,7 @@ function server(name, withSampler, onLine) {
   const sampler = pathToFileURL(resolve("scripts/test/_lagSampler.mjs")).href;
   const transport = new StdioClientTransport({
     command: "node",
-    args: [...(withSampler ? ["--import", sampler] : []), "dist/index.js"],
+    args: [...(withSampler ? ["--import", sampler] : []), ...(SLOW_GIT_MS > 0 ? ["--import", SLOW_GIT_PRELOAD] : []), "dist/index.js"],
     env: {
       ...process.env,
       CODEBASE_INDEX_ALLOWED_ROOTS: root,
@@ -199,10 +227,27 @@ try {
   assert(maxLag <= MAX_BLOCK_MS, `(b) no server-thread block > ${MAX_BLOCK_MS} ms`, JSON.stringify(blocks.slice(0, 10)));
 
   let found = null;
+  const cStart = Date.now();
+  const cTrail = [];
   for (let i = 0; i < 120 && !found; i++) {
     const r = await call(A.client, "search_symbols", { repoId: repos.small.id, query: "lockProbeEdit", strategy: "name", limit: 5 });
-    if (r.text.includes("lockProbeEdit") && r.body?.freshness?.state !== "refreshing") found = r;
-    else await sleep(250);
+    const f = r.body?.freshness;
+    const step = `${Date.now() - cStart}:${r.text.includes("lockProbeEdit") ? "hit" : "miss"}/${f?.state ?? "fresh"}${f?.elapsedMs !== undefined ? `(${f.elapsedMs})` : ""}`;
+    const reason = f?.reason?.slice(0, 240);
+    if (cTrail.at(-1)?.step.split(":")[1].split("(")[0] !== step.split(":")[1].split("(")[0] || cTrail.at(-1)?.reason?.slice(0, 40) !== reason?.slice(0, 40)) cTrail.push({ step, reason });
+    if (r.text.includes("lockProbeEdit") && f?.state !== "refreshing") found = r;
+    else if (r.text.includes("lockProbeEdit") && /^checking the working tree/.test(f?.reason ?? "")) {
+      // MCP-ISSUE-127: the only caveat is the tree check past the budget, not a run. Nothing may be in flight.
+      const st = (await call(A.client, "index_status", {})).body;
+      if (st && Array.isArray(st.jobs) && st.jobs.length === 0 && Array.isArray(st.refreshRuns) && st.refreshRuns.length === 0) found = r;
+      else await sleep(250);
+    } else await sleep(250);
+  }
+  console.log(`  info  (c) ${Date.now() - cStart} ms; state changes: ${cTrail.map((s) => s.step).join(" ")}`);
+  if (!found || process.env.LOCK_DIAG) {
+    for (const s of cTrail) console.log(`  info  (c) ${s.step}: ${s.reason ?? ""}`);
+    const st = await call(A.client, "index_status", {});
+    console.log(`  info  (c) index_status: ${st.text.slice(0, 600)}`);
   }
   assert(found !== null, "(c) the dirty edit on the read repo is indexed once the queue drains");
 } finally {

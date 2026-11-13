@@ -26,7 +26,8 @@ import {
   looksLikeModulePath,
   readTsconfigAliases,
   resolveModuleSpecifier,
-  resolvePythonModuleSpecifier
+  resolvePythonModuleSpecifier,
+  PYTHON_STAR_IMPORT_REASON
 } from "./moduleResolution.js";
 import { immediateTransaction } from "../../repositories/sqliteTx.js";
 
@@ -147,7 +148,8 @@ export function resolveImportEdges(db: Database.Database, repoId: string, maxUnr
           importResolveCache.set(cacheKey, moduleId);
         }
         if (moduleId) {
-          updateStmt.run(moduleId, 0.95, "resolved python import", repoId, row.fromId, row.toId);
+          // PY-8: a star import keeps that fact on the resolved row, which moduleResolution reads on a scoped run.
+          updateStmt.run(moduleId, 0.95, importPath.endsWith("*") ? PYTHON_STAR_IMPORT_REASON : "resolved python import", repoId, row.fromId, row.toId);
           count += 1;
         } else {
           updateStmt.run(row.toId, 0.1, "external boundary", repoId, row.fromId, row.toId);

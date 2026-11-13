@@ -302,6 +302,12 @@
       "codebase-index-mcp/src/tools/handlers/searchHandler.ts",
       "@dist"
     ],
+    "test:python-gaps": [
+      "codebase-index-mcp/scripts/test/test-python-gaps.mjs",
+      "codebase-index-mcp/scripts/test/fixtures/python-gaps/**",
+      "codebase-index-mcp/src/tools/handlers/searchHandler.ts",
+      "@dist"
+    ],
     "test:profile-responses": [
       "codebase-index-mcp/scripts/test/test-profile-responses.mjs",
       "@dist",

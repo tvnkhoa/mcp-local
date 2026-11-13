@@ -12,6 +12,19 @@ import type { SymbolRecord } from "../../types/index.js";
 import { vectorSearchSymbols, isVectorEnabled } from "../../repositories/vectorStore.js";
 import { buildFtsQuery, buildIntentFtsQuery, extractIntentTokens } from "./symbolSearchFts.js";
 
+/**
+ * PY-9: `Owner.member` (or `pkg.Owner.member`) → the owner's simple name and the member; null for anything
+ * that is not a dotted identifier path. The owner is the segment right before the member.
+ */
+export function parseQualifiedQuery(query: string): { owner: string; member: string } | null {
+  const q = query.trim();
+  if (!/^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)+$/.test(q)) return null;
+  const parts = q.split(".");
+  const member = parts[parts.length - 1]!;
+  const owner = parts[parts.length - 2]!;
+  return { owner, member };
+}
+
 export function searchSymbolsImpl(
   db: Database.Database,
   query: string,
@@ -40,6 +53,28 @@ export function searchSymbolsImpl(
   if (filePath) {
     conditions.push("s.file_path like ?");
     params.push(`%${filePath}%`);
+  }
+
+  // PY-9: `FixStage.run` names a member by its owner. Neither FTS nor the substring fallback matches a dotted
+  // query against a bare member name, so it answered 0 for a symbol that exists. Matched on the parent link.
+  const qualified = strategy === "name" ? parseQualifiedQuery(query) : null;
+  if (qualified) {
+    const rows = db
+      .prepare(
+        `
+        select s.repo_id as repoId, s.symbol_id as symbolId, s.file_path as filePath, s.name, s.kind, s.line,
+               s.signature, r.repo_path as repoPath
+        from symbols s
+        inner join symbols p on p.repo_id = s.repo_id and p.symbol_id = s.parent_symbol_id
+        ${langJoin}
+        inner join repositories r on r.repo_id = s.repo_id
+        where s.name = ? and p.name = ? ${conditions.length > 0 ? `and ${conditions.join(" and ")}` : ""}
+        order by s.file_path, s.line
+        limit ?
+        `
+      )
+      .all(qualified.member, qualified.owner, ...params, limit) as (SymbolRecord & { repoPath: string | null })[];
+    if (rows.length > 0) return rows;
   }
 
   let useFts = false;

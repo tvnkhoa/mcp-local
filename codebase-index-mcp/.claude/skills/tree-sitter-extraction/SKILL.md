@@ -15,7 +15,8 @@ traps that list does not.
 |---|---|---|
 | JS / TS (+ TSX dialect) | `jsExtractor.ts`, `js*.ts` | tree-sitter (`tree-sitter-javascript`, `tree-sitter-typescript`) |
 | C# | `csharpExtractor.ts`, `csharp*.ts` | tree-sitter (`tree-sitter-c-sharp`) |
-| Python, `.proto` | `pythonExtractor.ts`, `protoExtractor.ts` | **regex**, not tree-sitter |
+| Python | `pythonExtractor.ts`, `pythonNoise.ts` | tree-sitter (`tree-sitter-python`): `class` / `method` / `function` symbols, `EXTENDS` (`base:`), `IMPORTS` (`import:`, relative dots kept), `CALLS` (`callee:`, incl. functions passed as values and bare decorators), pytest fixture-use `CALLS`, FastAPI routes |
+| `.proto` | `protoExtractor.ts` | **regex**, not tree-sitter |
 | `.csproj` / `.sln` / `.slnx` | `dotnetProjectParser.ts` | regex (NuGet + ProjectReference `DEPENDS_ON`) |
 | Markdown | `markdownParser.ts` | docs lane |
 
