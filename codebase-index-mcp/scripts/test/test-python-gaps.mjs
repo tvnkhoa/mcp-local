@@ -214,6 +214,14 @@ try {
     "PY-6b the caller-typed set replaces apply_step's name pick (no leftover name row)");
   assert(!edges.some((e) => e.type === "CALLS" && e.fromName === "unknown" && e.fromFile === ENGINE && e.toName === "run" && e.reason === CALLER_TYPED),
     "PY-6b a receiver no caller types stays a name candidate (unknown(thing): > 8 `run` methods, no set)");
+  // MCP-ISSUE-128 row #12 (a): a traversal over a 0.6 untyped-receiver row is standing on a name guess.
+  const traceUnknown = await call("trace_execution_flow", { repoId, entrySymbolId: sym(ENGINE, "unknown", "function")?.id, maxDepth: 1, profile: "compact" });
+  assert(traceUnknown?.coverage?.confidence && traceUnknown.coverage.confidence !== "high" &&
+    (traceUnknown.coverage.knownGaps ?? []).some((g) => /resolved by callee NAME only/.test(g)),
+    "(a) trace_execution_flow over unknown()'s untyped-receiver row reports coverage below high, naming the name-only hop", traceUnknown?.coverage);
+  const traceApply = await call("trace_execution_flow", { repoId, entrySymbolId: sym(HOPS, "apply_step", "function")?.id, maxDepth: 1, profile: "compact" });
+  assert(!(traceApply?.coverage?.knownGaps ?? []).some((g) => /resolved by callee NAME only/.test(g)),
+    "(a) control: apply_step's caller-typed rows are not counted as name-only", traceApply?.coverage);
   const kwRun = hopCalls("kw_trap", "run");
   assert(kwRun.length === 1 && kwRun[0].toParent === "FixStep" && kwRun[0].reason === CALLER_TYPED,
     "review #6: keyword-only `step` after *rest takes step=FixStep(), not the third positional Worker()", kwRun);
