@@ -120,13 +120,37 @@ try {
   const fromSource = linkRows(await call("link_tests_to_source", { repoId, filePath: "src/flow/stages/fix.py", profile: "verbose" }));
   assert(fromSource.some((l) => (l.testFile ?? "").replace(/\\/g, "/") === "tests/unit/test_smoke.py"), "PY-7 probing fix.py finds the fixture-only test_smoke.py", fromSource);
 
+  // ── PY-8 ──
+  const CONSUMER = "src/flow/consumer.py", IMPL = "src/flow/helpers/impl.py", API = "src/flow/helpers/api.py";
+  const starImport = edges.find((e) => e.type === "IMPORTS" && e.fromFile === CONSUMER && e.toFile === API);
+  assert(starImport?.reason === "resolved python star import", "PY-8 `from .helpers.api import *` → api.py, marked as a star import", show((e) => e.type === "IMPORTS" && e.fromFile === CONSUMER));
+  const useCalls = () => edges.filter((e) => e.type === "CALLS" && e.fromName === "use" && e.fromFile === CONSUMER);
+  assert(useCalls().some((e) => e.toName === "normalize" && e.toFile === IMPL) && !useCalls().some((e) => e.toFile === "src/flow/alt.py"),
+    "PY-8 normalize() via the star import → helpers/impl.py (re-exported by api.py), not the alt.py decoy", useCalls());
+  assert(useCalls().some((e) => e.toName === "check" && e.toParent === "Formatter" && e.toFile === IMPL),
+    "PY-8 Formatter.check() on a star-imported class → impl.py Formatter.check", useCalls());
+  const useKey = (list) => list.filter((e) => e.type === "CALLS" && e.fromName === "use" && e.fromFile === CONSUMER).map((e) => `${e.toName}@${e.toFile}`).sort();
+
   // Scoped re-index: touch one implementer; the rebuilt-whole IMPLEMENTS set must not move.
   const before = implementsKey(edges);
   fs.appendFileSync(path.join(repoDir, "src", "flow", "executors", "mock.py"), "\n# touched\n");
   const inc = await index("incremental");
   assert(inc?.state === "ok" || inc?.status === "ok" || inc?.runId, "incremental re-index finished", inc);
-  const after = implementsKey(await loadEdges());
+  const edgesAfter = await loadEdges();
+  const after = implementsKey(edgesAfter);
   assert(JSON.stringify(after) === JSON.stringify(before), "PY-5 an incremental run lands on the full run's IMPLEMENTS set", { before, after });
+
+  // PY-8 scoped: touch the consumer (its star token is re-read) and, separately, a file it does not import
+  // (its star import is then read from the resolved row's reason).
+  const useBefore = useKey(edges);
+  fs.appendFileSync(path.join(repoDir, "src", "flow", "consumer.py"), "\n# touched\n");
+  await index("incremental");
+  const useAfterConsumer = useKey(await loadEdges());
+  fs.appendFileSync(path.join(repoDir, "src", "flow", "alt.py"), "\n# touched\n");
+  await index("incremental");
+  const useAfterAlt = useKey(await loadEdges());
+  assert(JSON.stringify(useAfterConsumer) === JSON.stringify(useBefore) && JSON.stringify(useAfterAlt) === JSON.stringify(useBefore),
+    "PY-8 incremental runs land on the full run's star-import targets", { useBefore, useAfterConsumer, useAfterAlt });
 } finally {
   await Promise.race([client.close().catch(() => {}), new Promise((r) => setTimeout(r, 3000))]);
 }

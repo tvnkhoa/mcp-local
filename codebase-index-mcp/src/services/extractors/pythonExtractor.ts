@@ -15,7 +15,7 @@
  *     `class B(pkg.Base)` → `Base`, `Generic[T]` → `Generic`); `metaclass=` is not a base.
  *   - `IMPORTS` → `import:<spec>` per imported name. `<spec>` keeps the relative level as leading dots:
  *     `import a.b` → `a.b`; `from x import y, z` → `x.y`, `x.z`; `from . import u` → `.u`;
- *     `from ..c.r import R` → `..c.r.R`; `from x import *` → `x`. A from-import token names the module
+ *     `from ..c.r import R` → `..c.r.R`; `from x import *` → `x.*` (PY-8). A from-import token names the module
  *     plus the imported name; `moduleResolution` binds it to the submodule when there is one, else to
  *     the module. Imports under `if TYPE_CHECKING:` and inside functions are imports too.
  *   - `CALLS` → `callee:<name>` or `callee:<Owner>.<member>` (see `callToken`), and best-effort
@@ -40,6 +40,8 @@ type ImportScope = {
   names: Map<string, ImportedName>;
   /** Receiver texts that name a module: `import a.b` → `a`, `a.b`; `import x as z` → `z`. */
   modules: Map<string, string>;
+  /** PY-8: repo-candidate modules this file star-imports (`from x import *`, stdlib excluded). */
+  starModules: string[];
 };
 
 const ROUTE_METHODS = new Set(["get", "post", "put", "delete", "patch"]);
@@ -331,7 +333,7 @@ function extractImports(
   edges: EdgeRecord[],
   moduleSymbolId: string
 ): ImportScope {
-  const scope: ImportScope = { names: new Map(), modules: new Map() };
+  const scope: ImportScope = { names: new Map(), modules: new Map(), starModules: [] };
   const specs: string[] = [];
 
   for (const node of root.descendantsOfType(["import_statement", "import_from_statement"])) {
@@ -359,7 +361,10 @@ function extractImports(
     if (modulePart === "__future__") continue;
     const wildcard = node.namedChildren.some((c) => c.type === "wildcard_import");
     if (wildcard) {
-      specs.push(modulePart);
+      // PY-8: `x.*` (`.*` for `from . import *`) — the module resolves as `x`, and the `*` tells
+      // moduleResolution to put what `x` re-exports in this file's scope too.
+      specs.push(joinSpec(modulePart, "*"));
+      if (!isStdlibSpec(modulePart)) scope.starModules.push(modulePart);
       continue;
     }
     for (const entry of node.namedChildren) {
@@ -532,6 +537,9 @@ function callToken(
     const typed = localType(site, name, types);
     if (typed) return `${typed}.${member}`;
     if (PYTHON_STDLIB_MODULES.has(name)) return null;
+    // PY-8: a capitalised name nothing here binds, in a file that star-imports a repo module, is a class that
+    // import brought in: `Cls.m`, resolved on the classes the file can see (an external boundary if none).
+    if (scope.starModules.length > 0 && /^[A-Z][A-Za-z0-9_]*[a-z][A-Za-z0-9_]*$/.test(name)) return `${name}.${member}`;
   }
 
   if (receiver.type === "attribute") {
