@@ -10,6 +10,7 @@ import type Parser from "tree-sitter";
 import type { EdgeRecord, SymbolRecord } from "../../types/index.js";
 import type { ExtractInput } from "./extractorTypes.js";
 import { normalizeCSharpTypeName } from "./csharpScope.js";
+import { PYTHON_OBJECT_RECEIVER_MARK } from "./pythonNoise.js";
 
 export function dedupeEdges(edges: EdgeRecord[]): EdgeRecord[] {
   const seen = new Set<string>();
@@ -73,6 +74,14 @@ export function resolveIntraFileEdges(edges: EdgeRecord[], symbols: SymbolRecord
 
   return edges.map((edge) => {
     if (edge.type === "CALLS" && edge.toId.startsWith("callee:")) {
+      // Python only (row #16): `obj.m()` on an unproven receiver is not bound to a same-file `m` here — the call
+      // pass binds it as a flagged untyped receiver, which PY-6b can type. The mark is dropped either way.
+      const pythonObject = edge.assignedExpression?.split(" ").includes(PYTHON_OBJECT_RECEIVER_MARK) === true;
+      if (pythonObject) {
+        const rest = edge.assignedExpression!.split(" ").filter((part) => part !== PYTHON_OBJECT_RECEIVER_MARK).join(" ");
+        const { assignedExpression: _mark, ...unmarked } = edge;
+        return rest ? { ...unmarked, assignedExpression: rest } : unmarked;
+      }
       const calleeName = edge.toId.slice(7);
       const target = callTargetByName.get(calleeName);
       if (target) {

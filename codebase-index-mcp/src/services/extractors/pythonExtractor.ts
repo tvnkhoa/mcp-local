@@ -32,6 +32,7 @@ import type { ExtractInput } from "./extractorTypes.js";
 import { extractFirstStringLiteral, isSameNode, makeSymbolId } from "./extractorUtils.js";
 import {
   PYTHON_ARGS_HINT,
+  PYTHON_OBJECT_RECEIVER_MARK,
   PYTHON_BUILTIN_FUNCTIONS,
   PYTHON_BUILTIN_METHODS,
   PYTHON_DUNDER_ALL_PREFIX,
@@ -526,6 +527,9 @@ function extractCalls(
   };
   // PY-6b: per CALLS edge, the untyped-parameter receivers (bare tokens) and each call site's argument types.
   const hints = new Map<EdgeRecord, { receivers: Set<string>; sites: string[] }>();
+  // Row #16: edges reached only from `obj.m()` sites on an object receiver, and edges reached any other way.
+  const objectOnly = new Set<EdgeRecord>();
+  const otherwise = new Set<EdgeRecord>();
   const hintOf = (edge: EdgeRecord) => {
     let hint = hints.get(edge);
     if (!hint) hints.set(edge, (hint = { receivers: new Set(), sites: [] }));
@@ -541,6 +545,8 @@ function extractCalls(
       const edge = push(fromId, token);
       const site = argumentTypes(call, types, isClassCall(fn, call, scope, localClasses, types));
       if (site && hintOf(edge).sites.length < MAX_HINT_SITES) hintOf(edge).sites.push(site);
+      const objectReceiver = !token.includes(".") && fn.type === "attribute" && isObjectReceiver(fn, scope);
+      (objectReceiver ? objectOnly : otherwise).add(edge);
       if (!token.includes(".") && fn.type === "attribute") {
         const receiver = fn.childForFieldName("object");
         const ref =
@@ -555,7 +561,7 @@ function extractCalls(
     for (const arg of args?.namedChildren ?? []) {
       const value = arg.type === "keyword_argument" ? arg.childForFieldName("value") : arg;
       const ref = value ? referenceToken(value, scope, moduleFunctions) : null;
-      if (ref) push(fromId, ref);
+      if (ref) otherwise.add(push(fromId, ref));
     }
   }
 
@@ -567,7 +573,7 @@ function extractCalls(
         : container.namedChildren;
     for (const value of values) {
       const ref = value ? referenceToken(value, scope, moduleFunctions) : null;
-      if (ref) push(enclosingSymbolId(container, input, registered) ?? moduleSymbolId, ref);
+      if (ref) otherwise.add(push(enclosingSymbolId(container, input, registered) ?? moduleSymbolId, ref));
     }
   }
 
@@ -576,7 +582,7 @@ function extractCalls(
     const expr = decorator.namedChildren[0];
     if (expr?.type !== "identifier" && expr?.type !== "attribute") continue;
     const token = callToken(expr, decorator, scope, moduleFunctions, localClasses, types);
-    if (token) push(enclosingSymbolId(decorator, input, registered) ?? moduleSymbolId, token);
+    if (token) otherwise.add(push(enclosingSymbolId(decorator, input, registered) ?? moduleSymbolId, token));
   }
 
   // PY-6b: the hints ride on the edge's `assignedExpression` (stored, never rewritten by call resolution), so
@@ -589,6 +595,18 @@ function extractCalls(
     if (sites.length > 0) parts.push(`${PYTHON_ARGS_HINT}${sites.join(";")}`);
     if (parts.length > 0) edge.assignedExpression = parts.join(" ");
   }
+  for (const edge of objectOnly) {
+    if (otherwise.has(edge)) continue;
+    edge.assignedExpression = edge.assignedExpression ? `${edge.assignedExpression} ${PYTHON_OBJECT_RECEIVER_MARK}` : PYTHON_OBJECT_RECEIVER_MARK;
+  }
+}
+
+/** Row #16: `obj.m()` whose receiver is not `self` / `cls` (those arrive qualified) and not an imported module. */
+function isObjectReceiver(fn: Parser.SyntaxNode, scope: ImportScope): boolean {
+  const receiver = fn.childForFieldName("object");
+  if (!receiver) return false;
+  if (receiver.type === "identifier" && (receiver.text === "self" || receiver.text === "cls")) return false;
+  return !scope.modules.has(receiver.text.replace(/\s+/g, ""));
 }
 
 /** PY-6b: at most this many call sites' argument types per (caller, callee) edge, and this many characters. */

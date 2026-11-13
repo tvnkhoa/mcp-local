@@ -73,3 +73,11 @@ export const PYTHON_DUNDER_ALL_PREFIX = "__all__:";
  */
 export const PYTHON_RECEIVER_HINT = "pyrecv:";
 export const PYTHON_ARGS_HINT = "pyargs:";
+
+/**
+ * MCP-ISSUE-128 row #16: a part of a Python CALLS edge's `assignedExpression` meaning "a bare token from
+ * `obj.m()` on a receiver that is neither `self` / `cls` nor a module". `resolveIntraFileEdges` does not bind
+ * such a token to a same-file `m` (nothing proves the receiver holds that file's class) and strips the mark, so
+ * it never reaches the store; the call pass binds the token, flagged as an untyped receiver.
+ */
+export const PYTHON_OBJECT_RECEIVER_MARK = "pyobj";

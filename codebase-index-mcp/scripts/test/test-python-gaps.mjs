@@ -229,8 +229,8 @@ try {
   const bothPing = edges.filter((e) => e.type === "CALLS" && e.fromName === "both" && e.fromFile === "src/flow/hops/dup.py" && e.toName === "ping");
   assert(bothPing.length === 1 && bothPing[0].reason === "resolved callee by receiver type",
     "review #3: p.ping() (typed) and q.ping() (untyped) in one caller → one CALLS row to Pinger.ping, the proven one", bothPing);
-  // ── Row #16 (MCP-ISSUE-128 open items): class calls, constructor arguments ──
-  const CC = "src/flow/hops/classcall.py";
+  // ── Row #16 (MCP-ISSUE-128 open items): class calls, constructor arguments, the same-file bind ──
+  const CC = "src/flow/hops/classcall.py", SAME = "src/flow/hops/samefile.py";
   const rowsOf = (file, parent, fromName, toName) => edges.filter((e) => e.type === "CALLS" && e.fromFile === file && (e.fromParent ?? "") === parent && e.fromName === fromName && e.toName === toName);
   const tos = (list) => list.map((e) => `${e.toParent ?? ""}.${e.toName}:${e.reason}:${e.confidence}`).sort();
   const flip = rowsOf(CC, "Switch", "flip", "blink");
@@ -252,6 +252,21 @@ try {
   const bareLater = rowsOf(CC, "Bare", "later", "blink");
   assert(bareLater.length === 1 && bareLater[0].reason === "resolved callee by name (untyped receiver)" && bareLater[0].confidence < 0.7,
     "#16 item 2 negative: a class no caller constructs with a typed argument keeps ONE flagged name pick", tos(bareLater));
+  const sameGo = rowsOf(SAME, "GoS", "go", "ping");
+  assert(JSON.stringify(tos(sameGo)) === JSON.stringify([`PingerS.ping:${CALLER_TYPED}:0.65`]),
+    "#16 item 3: x.ping() beside a same-file PingerS.ping is typed by drive_s's r.go(PingerS()) (PY-6b now sees it), not bound 'same-file' 0.9", tos(sameGo));
+  const sameGoT = rowsOf(SAME, "GoT", "go", "ping");
+  assert(JSON.stringify(tos(sameGoT)) === JSON.stringify(["PingerS.ping:resolved callee by name (untyped receiver):0.6"]),
+    "#16 item 3: y.ping() with no typing caller is a flagged untyped receiver (0.6), not 'resolved callee same-file' 0.9", tos(sameGoT));
+  const driveGo = rowsOf(SAME, "", "drive_s", "go");
+  assert(JSON.stringify(tos(driveGo)) === JSON.stringify(["GoS.go:resolved callee by receiver type:0.9"]),
+    "#16 item 3: r.go(...) keeps its same-file 1-hop type from main_s's drive_s(GoS()) (proven, unchanged)", tos(driveGo));
+  const driveHelper = rowsOf(SAME, "", "drive_s", "helper");
+  assert(driveHelper.length === 1 && driveHelper[0].reason === "resolved callee same-file" && driveHelper[0].confidence === 0.9,
+    "#16 item 3 negative: a bare function call helper() still binds same-file at 0.9", tos(driveHelper));
+  const againGo = rowsOf(SAME, "GoS", "again", "go");
+  assert(againGo.length === 1 && againGo[0].toParent === "GoS" && againGo[0].confidence >= 0.9,
+    "#16 item 3 negative: self.go(...) is proven (qualified token), not flagged", tos(againGo));
   // review #4: C3, not breadth-first.
   const mroM = edges.filter((e) => e.type === "CALLS" && e.fromName === "use_mro" && e.toName === "m");
   assert(mroM.length === 1 && mroM[0].toParent === "A", "review #4: d.m() with class D(B, C), class B(A) → A.m (C3), not C.m (breadth-first)", mroM);
@@ -322,17 +337,18 @@ try {
     "PY-6b incremental runs land on the full run's candidate sets", { hopsBefore, hopsAfterApply, hopsAfterCallers });
 
   // Row #16 scoped: touch the class-call callers' file, then the callees' file; both land on the full run.
-  const row16Key = (list) => list.filter((e) => e.type === "CALLS" && [CC].includes(e.fromFile))
+  const row16Key = (list) => list.filter((e) => e.type === "CALLS" && [CC, SAME].includes(e.fromFile))
     .map((e) => `${e.fromParent ?? ""}.${e.fromName}->${e.toParent ?? ""}.${e.toName ?? e.toId}:${e.reason}:${e.confidence}`).sort();
   const row16Before = row16Key(edges);
   fs.appendFileSync(path.join(repoDir, "src", "flow", "hops", "use_classcall.py"), "\n# touched\n");
   await index("incremental");
   const row16AfterCallers = row16Key(await loadEdges());
   fs.appendFileSync(path.join(repoDir, "src", "flow", "hops", "classcall.py"), "\n# touched\n");
+  fs.appendFileSync(path.join(repoDir, "src", "flow", "hops", "samefile.py"), "\n# touched\n");
   await index("incremental");
   const row16AfterCallees = row16Key(await loadEdges());
   assert(JSON.stringify(row16AfterCallers) === JSON.stringify(row16Before) && JSON.stringify(row16AfterCallees) === JSON.stringify(row16Before),
-    "#16 incremental runs land on the full run's class-call / constructor rows", { row16Before, row16AfterCallers, row16AfterCallees });
+    "#16 incremental runs land on the full run's class-call / constructor / same-file rows", { row16Before, row16AfterCallers, row16AfterCallees });
 
   // review #1: an anchor carrying pyargs (drive2's `r.go(Pinger())`) must not feed callers from the target a
   // previous run moved it to. Switch main2 from GoB to GoA in relay2_main.py only (relay2.py unchanged), then
