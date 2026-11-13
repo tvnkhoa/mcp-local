@@ -149,7 +149,8 @@ export type FreshnessGateOptions = {
   /**
    * MCP-ISSUE-101 part 5: the `index_version` of the repo's latest successful FULL run, and this build's. Only a
    * full run re-resolves every file, so a scoped run after a version bump does not count. When they differ, a
-   * "fresh" or "refreshed" answer is downgraded to "refreshing" with the reason.
+   * "fresh" or "refreshed" answer is downgraded to "stale" with the reason (MCP-ISSUE-130: not "refreshing", which
+   * would claim a run that does not exist), and the next refresh the gate starts runs full.
    */
   getFullRunVersion?: (repoId: string) => string | null;
   buildVersion?: string;
@@ -1021,7 +1022,14 @@ export function createFreshnessGate(opts: FreshnessGateOptions): FreshnessGate {
     const note: FreshnessNote = capped.length > 0 ? { ...checked, unreadable: capped } : checked;
     const warning = versionWarning(repoId);
     if (!warning) return note;
-    if (note.state === "fresh" || note.state === "refreshed") return { ...note, state: "refreshing", reason: warning };
+    // MCP-ISSUE-130: nothing is running for this — "refreshing" would promise a run that does not exist.
+    if (note.state === "fresh" || note.state === "refreshed") {
+      return {
+        ...note,
+        state: "stale",
+        reason: `${warning} No index run is in progress: the index predates this server's version, and the next refresh this gate starts (on any change) runs full.`
+      };
+    }
     return { ...note, reason: `${note.reason ?? ""} Also: ${warning}`.trim() };
   };
 
@@ -1170,8 +1178,10 @@ export function createFreshnessGate(opts: FreshnessGateOptions): FreshnessGate {
     // F3: a submodule that moved to another commit changed files nobody listed; only a full re-hash finds them.
     const submoduleMoved = (changed ?? []).some((p) => (key.files[p] ?? "").startsWith("submodule:"));
     const scopedMode: "incremental" | "dirty" = headMoved || submoduleMoved || (vanished.length > 0 && !cleanupByDirty) ? "incremental" : "dirty";
-    // A run that died mid-way, whatever its mode, is repaired by a full one (see RepairNeeded).
-    const mode: "full" | "incremental" | "dirty" = repair ? "full" : scopedMode;
+    // A run that died mid-way, whatever its mode, is repaired by a full one (see RepairNeeded). MCP-ISSUE-130: so is an
+    // index last fully built by another INDEX_VERSION — a scoped run keeps the older extraction of unchanged files (the
+    // runner escalates it anyway; asking for full here keeps the label true).
+    const mode: "full" | "incremental" | "dirty" = repair || versionWarning(repoId) ? "full" : scopedMode;
     // MCP-ISSUE-123 re-review B: back off after failed refreshes (a repair has its own cap, MAX_REPAIR_ATTEMPTS).
     const failures = repair ? undefined : failedRefreshes.get(repoId);
     if (failures) {

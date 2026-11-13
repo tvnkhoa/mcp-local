@@ -13,6 +13,8 @@ import {
   planGitScopedIncremental,
   resolvePerformanceProfileDecision,
   shouldDropEdgeIndexesForResolve,
+  versionEscalation,
+  versionEscalationFor,
   type GitScopeInputs
 } from "./runPolicy.js";
 import { currentAnnotationKey, INDEX_VERSION } from "./indexPipeline.js";
@@ -244,4 +246,41 @@ test("IX-9: a seed run is the base — scoped over parent-commit..HEAD plus the 
 test("IX-9: a seed row at another INDEX_VERSION still walks", () => {
   const plan = planGitScopedIncremental(seedInputs([seedRun({ indexVersion: "v0-old" })]));
   assert.equal(plan.kind, "walk");
+});
+
+test("MCP-ISSUE-130: versionEscalation — a full/seed base at another INDEX_VERSION, or runs with no full one, go full; same version or a newer build does not", () => {
+  const own = "v16-python-tree-sitter";
+  assert.match(versionEscalation({ mode: "full", version: "v15-tiebreak-path" }, true, own) ?? "", /last fully built by v15-tiebreak-path; this server runs v16-python-tree-sitter/);
+  assert.match(versionEscalation({ mode: "seed", version: "v15-tiebreak-path" }, true, own) ?? "", /v15-tiebreak-path/);
+  assert.match(versionEscalation({ mode: "full", version: null }, true, own) ?? "", /unrecorded INDEX_VERSION/);
+  assert.equal(versionEscalation({ mode: "full", version: own }, true, own), null, "same version: scoped run unchanged");
+  assert.equal(versionEscalation({ mode: "seed", version: own }, true, own), null, "a seed at this version is a base");
+  assert.equal(versionEscalation({ mode: "full", version: "v17-later" }, true, own), null, "a newer build's index is refused elsewhere, not escalated over");
+  assert.match(versionEscalation(null, true, own) ?? "", /no full run of this repo is on record/);
+  assert.equal(versionEscalation(null, false, own), null, "no runs at all: isUnindexed handles it");
+});
+
+test("MCP-ISSUE-130: versionEscalationFor reads the newest ok full/seed run, not the latest run, and escalates once", () => {
+  const run = (mode: string, status: string, indexVersion: string | null): WorkRunTrace => ({
+    mode, status, indexVersion, startedAt: "2026-11-13T00:00:00Z", finishedAt: "2026-11-13T00:00:01Z", commitSha: "a", treeKey: null, treeDirty: false, excludeRules: null
+  });
+  const store = (runs: WorkRunTrace[], fullVersion: string | null = null) =>
+    ({
+      listRecentWorkRuns: () => runs,
+      getLatestFullRunVersion: () => fullVersion,
+      getLatestRun: () => (runs.length > 0 ? ({ runId: "x" } as never) : null)
+    }) as Pick<GraphStore, "listRecentWorkRuns" | "getLatestFullRunVersion" | "getLatestRun">;
+  // wec.aria 339b6b3a: a v16 incremental run on top of a v15 full one still escalates — the latest run's version hides nothing.
+  assert.ok(versionEscalationFor(store([run("incremental", "ok", INDEX_VERSION), run("full", "ok", "v15-tiebreak-path")]), "r"));
+  // A failed full run at this version is no base.
+  assert.ok(versionEscalationFor(store([run("full", "failed", INDEX_VERSION), run("full", "ok", "v15-tiebreak-path")]), "r"));
+  // Once the full run at this version is on record, scoped runs are scoped again.
+  assert.equal(versionEscalationFor(store([run("incremental", "ok", INDEX_VERSION), run("full", "ok", INDEX_VERSION), run("full", "ok", "v15-tiebreak-path")]), "r"), null);
+  assert.equal(versionEscalationFor(store([run("dirty", "ok", INDEX_VERSION), run("seed", "ok", INDEX_VERSION)]), "r"), null);
+  // The full run fell out of the lookback: the store's latest ok full run answers.
+  assert.equal(versionEscalationFor(store([run("incremental", "ok", INDEX_VERSION)], INDEX_VERSION), "r"), null);
+  assert.ok(versionEscalationFor(store([run("incremental", "ok", INDEX_VERSION)], "v15-tiebreak-path"), "r"));
+  // Only scoped runs ever: escalate (once — the full run it becomes is the base after).
+  assert.match(versionEscalationFor(store([run("incremental", "ok", INDEX_VERSION)]), "r") ?? "", /no full run/);
+  assert.equal(versionEscalationFor(store([]), "r"), null);
 });

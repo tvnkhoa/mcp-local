@@ -929,11 +929,12 @@ test("MCP-ISSUE-101 part 5: a run in this process (index_repository through seri
   }
 });
 
-test("MCP-ISSUE-101 part 5: an index last fully built by another INDEX_VERSION answers refreshing with the reason", async () => {
+test("MCP-ISSUE-101 part 5 / MCP-ISSUE-130: an index last fully built by another INDEX_VERSION answers stale (no run), and the gate's next refresh runs full", async () => {
   let version: string | null = "v14-release-m";
   const lockDir = mkdtempSync(path.join(tmpdir(), "cim-fresh-"));
   let tree: RepoTreeState = { head: "aaa111", dirty: [] };
   let indexed = "aaa111";
+  const modes: string[] = [];
   const gate = createFreshnessGate({
     enabled: true,
     budgetMs: 1000,
@@ -943,24 +944,34 @@ test("MCP-ISSUE-101 part 5: an index last fully built by another INDEX_VERSION a
     readTree: () => tree,
     getFullRunVersion: () => version,
     buildVersion: "v15-tiebreak-path",
-    run: async () => {
+    run: async (_repoId, _repoPath, mode) => {
+      modes.push(mode);
       indexed = tree.head!;
-      return { runId: "run-1" } as IndexRunResult;
+      if (mode === "full") version = "v15-tiebreak-path";
+      return { runId: `run-${String(modes.length)}` } as IndexRunResult;
     }
   });
   try {
+    // Nothing changed and nothing runs: never "refreshing" (MCP-ISSUE-130), and the reason says no run exists.
     const clean = await gate.ensureFresh("r");
-    assert.equal(clean.state, "refreshing");
+    assert.equal(clean.state, "stale", JSON.stringify(clean));
+    assert.equal(clean.mode, undefined);
     assert.match(clean.reason ?? "", /last fully built by v14-release-m; this server runs v15-tiebreak-path/);
     assert.match(clean.reason ?? "", /mode "full"/);
-    // A scoped refresh does not make the index current: still flagged after it.
+    assert.match(clean.reason ?? "", /No index run is in progress/);
+    assert.deepEqual(modes, [], "the version alone starts no run");
+    // The next change: the gate's refresh is FULL, not a scoped run that would keep the older extraction.
     tree = { head: "bbb222", dirty: [] };
     const after = await gate.ensureFresh("r");
-    assert.equal(after.state, "refreshing", JSON.stringify(after));
+    assert.deepEqual(modes, ["full"]);
+    assert.equal(after.state, "refreshed", JSON.stringify(after));
+    assert.equal(after.mode, "full");
     assert.equal(after.runId, "run-1");
-    // A full run at this build's version clears it.
-    version = "v15-tiebreak-path";
+    // That full run recorded this build's version: current again, and the next change is scoped.
     assert.deepEqual(await gate.ensureFresh("r"), { state: "fresh" });
+    tree = { head: "ccc333", dirty: [] };
+    assert.equal((await gate.ensureFresh("r")).mode, "incremental");
+    assert.deepEqual(modes, ["full", "incremental"]);
     // No full run on record (a new repo mid first run): nothing to compare.
     version = null;
     assert.deepEqual(await gate.ensureFresh("r"), { state: "fresh" });

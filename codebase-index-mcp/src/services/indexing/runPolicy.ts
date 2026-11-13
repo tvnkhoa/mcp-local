@@ -57,6 +57,42 @@ export function newerBuildRefusal(latestRunVersion: string | null | undefined, o
   return `this repo's index was written by a newer codebase-index build (${String(latestRunVersion)}); this server runs ${own} and will not write over it. Restart this MCP server to load the newer build.`;
 }
 
+/**
+ * MCP-ISSUE-130: the run that says which build's rules the index holds — the newest ok `full` run, or a `seed` (IX-9)
+ * run, whose copied rows are a full index. `hasRuns` is whether the repo has any run on record at all.
+ */
+export type VersionBase = { mode: "full" | "seed"; version: string | null } | null;
+
+/**
+ * MCP-ISSUE-130: why a non-full run must run full instead, or null. An incremental or dirty run re-extracts only files
+ * whose content hash changed, so after an INDEX_VERSION change every unchanged file keeps the older build's extraction
+ * (wec.aria run 339b6b3a: v15 → v16 "said FULL" and ran incremental). Compared against the last full (or seed) run, not
+ * the latest run: a scoped run records the new version without rebuilding, which would hide the mismatch for good.
+ * A repo with runs but no full run on record escalates once; a newer build's index is refused elsewhere
+ * ({@link newerBuildRefusal}), never escalated over.
+ */
+export function versionEscalation(base: VersionBase, hasRuns: boolean, own: string = INDEX_VERSION): string | null {
+  if (!base) return hasRuns ? `no full run of this repo is on record; this server runs ${own}` : null;
+  if (base.version === own) return null;
+  const theirs = indexGeneration(base.version);
+  const ours = indexGeneration(own);
+  if (theirs !== null && ours !== null && theirs > ours) return null;
+  return `the index was last fully built by ${base.version ?? "an unrecorded INDEX_VERSION"}; this server runs ${own}, and files with unchanged content keep the older extraction until a full run`;
+}
+
+/** {@link versionEscalation} over the store: the newest ok full/seed run among the recent ones, else the latest ok full run. */
+export function versionEscalationFor(
+  store: Pick<GraphStore, "listRecentWorkRuns" | "getLatestFullRunVersion" | "getLatestRun">,
+  repoId: string,
+  own: string = INDEX_VERSION
+): string | null {
+  const recent = store.listRecentWorkRuns(repoId, GIT_SCOPE_RUN_LOOKBACK);
+  const newest = recent.find((r) => r.status === "ok" && (r.mode === "full" || r.mode === "seed"));
+  if (newest) return versionEscalation({ mode: newest.mode as "full" | "seed", version: newest.indexVersion }, true, own);
+  const full = store.getLatestFullRunVersion(repoId);
+  return versionEscalation(full === null ? null : { mode: "full", version: full }, recent.length > 0 || store.getLatestRun(repoId) !== null, own);
+}
+
 /** Unresolved call rows from which a non-full run still drops the edge indexes for its resolve. */
 export const BULK_RESOLVE_INDEX_DROP_MIN_ROWS = 50_000;
 

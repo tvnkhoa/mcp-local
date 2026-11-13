@@ -31,7 +31,8 @@ import {
   newerBuildRefusal,
   resolvePerformanceProfileDecision,
   safeCrossRepoResolve,
-  shouldDropEdgeIndexesForResolve
+  shouldDropEdgeIndexesForResolve,
+  versionEscalationFor
 } from "./runPolicy.js";
 
 /**
@@ -232,6 +233,21 @@ export function createIndexRunner(options: IndexRunnerOptions): RunIndexAndResol
       ...(extras.onProgress && { onProgress: extras.onProgress }),
       ...(extras.abortSignal && { abortSignal: extras.abortSignal })
     });
+  }
+
+  // MCP-ISSUE-130: after an INDEX_VERSION change a scoped run skips every file whose hash is unchanged, leaving it with
+  // the older build's extraction. Goes full once; that run's record makes the next one scoped again.
+  if (mode !== "full" && !escalatedBecause) {
+    const versionReason = versionEscalationFor(store, repoId);
+    if (versionReason) {
+      indexLog(`[index-scope] repoId=${repoId} ${versionReason}: running full instead of ${mode}`);
+      return runIndexAndResolve(repoId, repoPath, "full", docsEnabled, maxFiles, batchSize, {
+        escalatedBecause: `full (${versionReason}; ${mode} requested)`,
+        ...(givenRunId && { runId: givenRunId }),
+        ...(extras.onProgress && { onProgress: extras.onProgress }),
+        ...(extras.abortSignal && { abortSignal: extras.abortSignal })
+      });
+    }
   }
 
   /** Release J: redo a scoped run as a full one, and say why on the full run's record. */

@@ -325,6 +325,7 @@ Gate: 4/4 servers build + typecheck, 36/36 harnesses (63 assertions in the 049 h
 - [MCP-ISSUE-125 — freshness load flakes: two test bounds, and parallel reads served one after another past the budget](issues/MCP-ISSUE-125.md)
 - [MCP-ISSUE-126 — a gate-triggered refresh run hung 5 h with no runId, no progress and no deadline, and held the DB-wide queue](issues/MCP-ISSUE-126.md)
 - [MCP-ISSUE-127 — a tree check slower than the query budget makes every read say `refreshing`; test:index-lock-contention (c) waited for an answer a slow runner never gives](issues/MCP-ISSUE-127.md)
+- [MCP-ISSUE-130 — an INDEX_VERSION change ran scoped (incremental/dirty) runs that kept the older extraction; the gate said `refreshing` with no run](issues/MCP-ISSUE-130.md)
 - [Confirmed fixed — 2026-08-05 re-verification of the 042–051 wave](issues/confirmed-fixed-2026-08-05-re-verification-of-the-042-051-wave.md)
 - [MCP-ISSUE-101 follow-ups (row 5: F2–F4)](issues/mcp-issue-101-follow-ups-row-5-f2-f4.md)
 
