@@ -1,4 +1,4 @@
-from .classcall import Holder, Switch
+from .classcall import Gen, Holder, Switch
 from .lights import Lamp, Led
 
 
@@ -17,3 +17,8 @@ def by_class() -> None:
 
 def build() -> Holder:
     return Holder(Led())
+
+
+def by_generic() -> None:
+    Gen.flip_gen(Gen(), None, Lamp())
+

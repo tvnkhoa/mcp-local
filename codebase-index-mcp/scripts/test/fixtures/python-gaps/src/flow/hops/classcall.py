@@ -31,3 +31,10 @@ class Bare:
 
     def later(self):
         self.light.blink()
+
+
+class Gen:
+    def flip_gen[T](self, light: T | None = None, other=None):
+        """Review: a PEP 695 type-parameter list before the parameters; `other` is untyped."""
+        other.blink()
+

@@ -656,9 +656,11 @@ function initFieldRef(receiver: Parser.SyntaxNode, site: Parser.SyntaxNode, type
   if (inner?.type !== "identifier" || inner.text !== "self" || !field) return null;
   const owner = enclosingClass(site);
   if (!owner || classFieldType(owner, field, types) !== null) return null;
-  const init = owner.childForFieldName("body")?.namedChildren
+  // The last `__init__` the body defines wins, as at runtime: `@overload` stubs come before the real one.
+  const init = (owner.childForFieldName("body")?.namedChildren ?? [])
     .map((c) => (c.type === "decorated_definition" ? c.childForFieldName("definition") : c))
-    .find((d) => d?.type === "function_definition" && d.childForFieldName("name")?.text === "__init__");
+    .filter((d) => d?.type === "function_definition" && d.childForFieldName("name")?.text === "__init__")
+    .pop();
   const body = init?.childForFieldName("body");
   if (!body) return null;
   // The first `self.<field> = …` in `__init__`'s own body (not a nested def), as `classFieldType` reads it.
@@ -729,7 +731,8 @@ function isClassCall(fn: Parser.SyntaxNode, site: Parser.SyntaxNode, scope: Impo
   if (name === "cls") return enclosingClass(site) !== null;
   if (name === "self" || scope.modules.has(name)) return false;
   const imported = scope.names.get(name);
-  if (imported) return !isStdlibSpec(imported.fromModule) && /^[A-Z]/.test(imported.original);
+  // Review: an imported ALL-CAPS name (`REGISTRY.register(a, b)`) is a module-level instance, not a class.
+  if (imported) return !isStdlibSpec(imported.fromModule) && /^[A-Z][A-Za-z0-9_]*[a-z]/.test(imported.original);
   if (localClasses.has(name)) return true;
   if (classOf(localType(site, name, types), types) ?? hopType(site, name, types)) return false;
   return scope.starModules.length > 0 && /^[A-Z][A-Za-z0-9_]*[a-z][A-Za-z0-9_]*$/.test(name);

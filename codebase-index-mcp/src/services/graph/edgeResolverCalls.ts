@@ -506,6 +506,11 @@ export function resolveCallEdgesBatch(
   if (batch.length === 0) return 0;
 
   const { candidateMap, interfaceByName, interfaceIdSet } = ctx;
+  const firstSameFileStmt = db.prepare(
+    `select symbol_id as symbolId from symbols
+     where repo_id = ? and file_path = ? and name = ? and kind in ('function', 'method', 'constructor', 'class')
+     order by line, symbol_id limit 1`
+  );
 
   // Phase 1: resolve all rows in memory → collect updates
   const updates: ResolvedUpdate[] = [];
@@ -542,6 +547,16 @@ export function resolveCallEdgesBatch(
       ["function", "method", "constructor", "class"],
       importedFiles
     );
+    // Row #16: a Python bare token the extractor left unbound (`obj.m()`, see PYTHON_OBJECT_RECEIVER_MARK) lands on
+    // the same-file symbol extraction used to bind — the first `m` in the file — so only its flag changes, never
+    // its target. pickBestNamedCandidate would rank kinds and break ties by symbol id instead.
+    if (match && match.filePath === row.fromFile && !calleeName.includes(".") && isPythonFile(row.fromFile)) {
+      const sameFile = directCandidates.filter((c) => c.filePath === row.fromFile);
+      if (sameFile.length > 1) {
+        const first = firstSameFileStmt.get(repoId, row.fromFile, calleeName) as { symbolId: string } | undefined;
+        match = sameFile.find((c) => c.symbolId === first?.symbolId) ?? match;
+      }
+    }
 
     // PY-7 (G3): pytest hands a test (or fixture) its fixture by PARAMETER NAME, from the nearest conftest.py
     // up the test's directory tree. The generic pick has no notion of that tree, so a fixture name defined in
@@ -972,7 +987,8 @@ export function rebuildPythonUntypedReceiverEdges(db: Database.Database, repoId:
       const row = shapeStmt.get(repoId, fnId) as { name: string; kind: string; signature: string | null; parentId: string | null } | undefined;
       const method = row?.kind === "method";
       shape = {
-        selfFirst: method && /^(?:async\s+)?def\s+\w+\s*\(\s*self\s*(?:[,:=)]|$)/.test(row?.signature ?? ""),
+        // Review: a PEP 695 type-parameter list (`def m[T](self, x)`) sits between the name and the `(`.
+        selfFirst: method && /^(?:async\s+)?def\s+\w+\s*(?:\[[^\]]*\]\s*)?\(\s*self\s*(?:[,:=)]|$)/.test(row?.signature ?? ""),
         constructs: method && row?.name === "__init__" ? row.parentId : null
       };
       shapes.set(fnId, shape);
@@ -985,7 +1001,7 @@ export function rebuildPythonUntypedReceiverEdges(db: Database.Database, repoId:
     `select i.symbol_id as id, i.file_path as file from symbols f
      join symbols i on i.repo_id = f.repo_id and i.parent_symbol_id = f.parent_symbol_id and i.kind = 'method' and i.name = '__init__'
      where f.repo_id = ? and f.symbol_id = ? and f.kind = 'method'
-     order by i.line limit 1`
+     order by i.line desc limit 1` // the last `__init__` defined wins, as at runtime (`@overload` stubs come first)
   );
 
   /** The class names callers pass for parameter (pos, name) of fnId, each with the caller's file to bind it from. */
@@ -1000,13 +1016,17 @@ export function rebuildPythonUntypedReceiverEdges(db: Database.Database, repoId:
     // A keyword-only parameter (pos -1) has no positional slot of either kind.
     const classSlot = pos >= 0 ? `$${String(pos + (shape.selfFirst ? 1 : 0))}` : "";
     // `Foo(x)` resolves to the class, not to `Foo.__init__`: an `__init__` parameter is typed by the class's callers too.
-    const callers = [...(callersOf.get(fnId) ?? []), ...(shape.constructs ? (callersOf.get(shape.constructs) ?? []) : [])];
-    for (const caller of callers) {
+    // A construction never passes `self`, even written on a class (`Outer.Inner(x)`, `$` slots): no shift there.
+    const callers = [
+      ...(callersOf.get(fnId) ?? []).map((caller) => ({ caller, slot: classSlot })),
+      ...(shape.constructs ? (callersOf.get(shape.constructs) ?? []) : []).map((caller) => ({ caller, slot: pos >= 0 ? `$${String(pos)}` : "" }))
+    ];
+    for (const { caller, slot } of callers) {
       // A test's own double (`class Ctx` in a test module) says nothing about what production code receives —
       // on translate one test's fake Ctx became the only type of a production stage's `ctx`.
       if (!fnIsTest && isTestPath(caller.callerFile)) continue;
       for (const site of caller.sites) {
-        const value = (pos >= 0 ? site.get(`#${String(pos)}`) : undefined) ?? (classSlot ? site.get(classSlot) : undefined) ?? site.get(name);
+        const value = (pos >= 0 ? site.get(`#${String(pos)}`) : undefined) ?? (slot ? site.get(slot) : undefined) ?? site.get(name);
         if (!value) continue;
         if (!value.startsWith("^")) {
           out.push({ typeName: value, file: caller.callerFile });

@@ -267,7 +267,13 @@ try {
   const againGo = rowsOf(SAME, "GoS", "again", "go");
   assert(againGo.length === 1 && againGo[0].toParent === "GoS" && againGo[0].confidence >= 0.9,
     "#16 item 3 negative: self.go(...) is proven (qualified token), not flagged", tos(againGo));
-  // review #4: C3, not breadth-first.
+  const useTick = rowsOf(SAME, "", "use_tick", "tick");
+  assert(JSON.stringify(tos(useTick)) === JSON.stringify(["Clock.tick:resolved callee by name (untyped receiver):0.6"]),
+    "#16 item 3: c.tick() keeps extraction's same-file target (the first `tick` in the file, Clock.tick) — only the flag changes", tos(useTick));
+  // review fixes
+  const genBlink = rowsOf(CC, "Gen", "flip_gen", "blink");
+  assert(JSON.stringify(tos(genBlink)) === JSON.stringify([`Lamp.blink:${CALLER_TYPED}:0.65`]),
+    "#16 review: def flip_gen[T](self, …) (PEP 695) still shifts a class call past self — Gen.flip_gen(Gen(), None, Lamp()) types `other`", tos(genBlink));  // review #4: C3, not breadth-first.
   const mroM = edges.filter((e) => e.type === "CALLS" && e.fromName === "use_mro" && e.toName === "m");
   assert(mroM.length === 1 && mroM[0].toParent === "A", "review #4: d.m() with class D(B, C), class B(A) → A.m (C3), not C.m (breadth-first)", mroM);
   // review #5: extend / append.

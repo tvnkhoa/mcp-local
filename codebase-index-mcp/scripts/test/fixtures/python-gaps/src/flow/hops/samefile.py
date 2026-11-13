@@ -31,3 +31,16 @@ class GoT:
     def go(self, y) -> None:
         """No caller types `y`: the name pick stays flagged, even though PingerS.ping is in this file."""
         y.ping()
+
+
+class Clock:
+    def tick(self) -> None:
+        pass
+
+
+def tick() -> None:
+    """Same name as Clock.tick, defined after it: c.tick() keeps extraction's first-in-file target (Clock.tick)."""
+
+
+def use_tick(c) -> None:
+    c.tick()
