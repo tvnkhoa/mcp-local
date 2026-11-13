@@ -227,18 +227,32 @@ function buildPythonBases(
        from edges e
        join symbols s on s.repo_id = e.repo_id and s.symbol_id = e.from_id
        left join symbols t on t.repo_id = e.repo_id and t.symbol_id = e.to_id
-       where e.repo_id = ? and e.type = 'EXTENDS' and s.kind = 'class'
+       where e.repo_id = ? and e.type = 'EXTENDS' and s.kind in ('class', 'interface')
          and (s.file_path like '%.py' or s.file_path like '%.pyi')
        group by e.from_id, e.to_id
        order by e.from_id, pos`
     )
     .all(repoId) as { classId: string; classFile: string; toId: string; toName: string | null; pos: number }[];
+  // PY-5 review: a Protocol is kind `interface`, which the candidate map does not hold — without these a
+  // class listing a Protocol base lost the Protocol's default methods from its lookup chain.
+  const protocolsByName = new Map<string, NamedCandidate[]>();
+  for (const p of db
+    .prepare(
+      `select symbol_id as symbolId, name, file_path as filePath, kind, parent_symbol_id as parentSymbolId from symbols
+       where repo_id = ? and kind = 'interface' and (file_path like '%.py' or file_path like '%.pyi')
+       order by name, file_path, symbol_id`
+    )
+    .all(repoId) as (NamedCandidate & { name: string })[]) {
+    const list = protocolsByName.get(p.name);
+    if (list) list.push(p);
+    else protocolsByName.set(p.name, [p]);
+  }
   const bases = new Map<string, string[]>();
   for (const r of rows) {
     const name = r.toId.startsWith("base:") ? r.toId.slice(5) : r.toName;
     if (!name) continue;
-    const classes = pythonLookupFor(candidateMap).classes(name).filter((c) => c.symbolId !== r.classId);
-    const base = pickBestNamedCandidate(classes, r.classFile, ["class"], importedFilesByFile.get(normalizeFilePath(r.classFile)));
+    const classes = [...pythonLookupFor(candidateMap).classes(name), ...(protocolsByName.get(name) ?? [])].filter((c) => c.symbolId !== r.classId);
+    const base = pickBestNamedCandidate(classes, r.classFile, ["class", "interface"], importedFilesByFile.get(normalizeFilePath(r.classFile)));
     if (!base) continue;
     const list = bases.get(r.classId);
     if (!list) bases.set(r.classId, [base.symbolId]);
@@ -481,9 +495,15 @@ export function resolveCallEdgesBatch(
       if (receiverType && memberName) {
         const iface = interfaceByName.get(receiverType);
         if (iface) {
-          const ifaceMethod = (candidateMap.get(memberName) ?? []).find(
-            (c) => c.filePath === iface.filePath && c.kind === "method"
-          );
+          const memberCandidates = candidateMap.get(memberName) ?? [];
+          // PY-5 review: a Python file often holds a Protocol and a class with the same method name
+          // (`Executor.close` beside `Store.close`); the file match alone picked whichever id sorted first.
+          // The owner link decides for Python; C# keeps the file match unchanged.
+          const ifaceMethod =
+            (isPythonFile(iface.filePath)
+              ? memberCandidates.find((c) => c.kind === "method" && c.parentSymbolId === iface.symbolId)
+              : undefined) ??
+            memberCandidates.find((c) => c.filePath === iface.filePath && c.kind === "method");
           if (ifaceMethod) {
             match = ifaceMethod;
             dispatchMethodName = memberName;
@@ -887,6 +907,8 @@ export function rebuildPythonProtocolImplements(db: Database.Database, repoId: s
     }
     required.set(p.symbolId, members);
   }
+  // Built once: the class × Protocol loop below reads each list many times.
+  const requiredList = new Map([...required].map(([id, members]) => [id, [...members]] as const));
 
   const insert = db.prepare(
     `insert into edges (repo_id, from_id, to_id, type, confidence, reason)
@@ -911,7 +933,7 @@ export function rebuildPythonProtocolImplements(db: Database.Database, repoId: s
           reason = PROTOCOL_EXPLICIT_REASON;
           confidence = 0.95;
         } else {
-          const members = [...(required.get(p.symbolId) ?? new Map<string, string | null>())];
+          const members = requiredList.get(p.symbolId) ?? [];
           // PY-6: a name match alone made every class with a `run` a Stage; the signature must fit too.
           if (members.length > 0 && members.every(([n, sig]) => available.has(n) && pythonSignaturesCompatible(sig, available.get(n) ?? null))) {
             reason = PROTOCOL_STRUCTURAL_REASON;
@@ -930,8 +952,11 @@ export function rebuildPythonProtocolImplements(db: Database.Database, repoId: s
 type PyParam = { name: string; annotation: string | null; hasDefault: boolean; star: "" | "*" | "**" };
 
 /** `def run(self, ctx: Ctx) -> Out` → its parameters (self / cls dropped) and return annotation; null when unreadable. */
-export function parsePythonSignature(signature: string | null): { params: PyParam[]; returns: string | null } | null {
-  if (!signature || signature.endsWith("...")) return null;
+export function parsePythonSignature(rawSignature: string | null): { params: PyParam[]; returns: string | null } | null {
+  if (!rawSignature || rawSignature.endsWith("...")) return null;
+  // A string literal (`sep=")"`, a forward reference `"Repo"`) keeps its text but loses the punctuation the
+  // bracket and comma scans below read as structure.
+  const signature = rawSignature.replace(/"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'/g, (lit) => lit.replace(/[()[\]{},=:]/g, " "));
   const open = signature.indexOf("(");
   if (open < 0) return null;
   let depth = 0;
@@ -1003,8 +1028,13 @@ function annotationHead(annotation: string | null): string | null {
   const wrapped = ANNOTATION_WRAPPER.exec(t);
   if (wrapped?.[1]) t = (wrapped[1].split(",")[0] ?? "").trim();
   const head = (t.split("[")[0] ?? "").trim().split(".").pop() ?? "";
-  return !head || head === "Any" || head === "object" ? null : head;
+  // A TypeVar by convention (`T`, `TKey`, `T_co`) binds to anything: a generic Protocol's `x: T` fits `x: int`.
+  if (!head || head === "Any" || head === "object" || TYPEVAR_NAME.test(head)) return null;
+  // `List[X]` and `list[X]` are the same type.
+  return head.toLowerCase();
 }
+
+const TYPEVAR_NAME = /^(?:[A-Z]|T[A-Z0-9_]\w*|\w+_(?:co|contra))$/;
 
 /**
  * PY-6: can an implementer method stand in for a Protocol member? Positional arity must fit (an implementer

@@ -156,6 +156,16 @@ try {
   assert(chainEdges.some((e) => e.toName === "run" && (e.toFilePath ?? "").replace(/\\/g, "/") === FIX), "PY-6 get_call_chain(Engine.go) reaches FixStep.run",
     chainEdges.map((e) => `${e.fromName}->${e.toName}@${e.toFilePath} (${e.reason})`));
 
+  // ── review fixes ──
+  const shutdownCalls = edges.filter((e) => e.type === "CALLS" && e.fromName === "shutdown" && e.fromFile === PIPE && e.toName === "close");
+  assert(shutdownCalls.some((e) => e.toParent === "Executor" && e.toFile === PORTS) && !shutdownCalls.some((e) => e.toParent === "Store"),
+    "review: executor.close() → Executor.close, not Store.close in the same file", shutdownCalls);
+  const GREET = "src/flow/greeting.py";
+  const shout = edges.filter((e) => e.type === "CALLS" && e.fromName === "shout" && e.fromFile === GREET);
+  assert(shout.some((e) => e.toName === "greet" && e.toParent === "Greeter"), "review: self.greet() in class Loud(Greeter) → the Protocol's default Greeter.greet", shout);
+  assert(edges.some((e) => e.type === "IMPLEMENTS" && e.fromName === "IntBox" && e.toName === "Box" && e.reason === "structural protocol"),
+    "review: IntBox.put(item: int) fits Box[T].put(item: T) (TypeVar binds anything)", show((e) => e.type === "IMPLEMENTS" && e.fromFile === GREET));
+
   // ── PY-9 ──
   const q = await call("search_symbols", { repoId, query: "FixStep.run", strategy: "name", profile: "verbose" });
   const qRows = q?.symbols ?? q?.results ?? [];

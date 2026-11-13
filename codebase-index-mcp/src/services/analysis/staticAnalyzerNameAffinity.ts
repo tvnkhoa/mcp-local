@@ -199,7 +199,7 @@ export function linkTestsToSource(
                 inner join edges e on e.repo_id = fx.repo_id and e.to_id = fx.symbol_id and e.type = 'CALLS'
                 inner join symbols sf on sf.repo_id = e.repo_id and sf.symbol_id = e.from_id
                 where st.repo_id = ? and replace(st.file_path, char(92), '/') = ?
-                  and fx.kind = 'function' and replace(fx.file_path, char(92), '/') like '%conftest.py'
+                  and replace(fx.file_path, char(92), '/') like '%conftest.py'
                 limit 500
                 `
               )
@@ -315,7 +315,7 @@ export function linkTestsToSource(
         inner join edges e2 on e2.repo_id = e.repo_id and e2.from_id = fx.symbol_id and e2.type = 'CALLS'
         inner join symbols st on st.repo_id = e2.repo_id and st.symbol_id = e2.to_id
         where e.repo_id = ? and e.type = 'CALLS' and replace(sf.file_path, char(92), '/') = ?
-          and fx.kind = 'function' and replace(fx.file_path, char(92), '/') like '%conftest.py'
+          and replace(fx.file_path, char(92), '/') like '%conftest.py'
         limit 500
         `
       )

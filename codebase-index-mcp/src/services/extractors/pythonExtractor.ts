@@ -844,10 +844,18 @@ function hopType(site: Parser.SyntaxNode, name: string, types: TypeScopes): stri
   const fnName = fn.childForFieldName("name")?.text;
   const params = (fn.childForFieldName("parameters")?.namedChildren ?? []).map(parameterName);
   const method = isMethodDefinition(fn);
-  const positional = method ? params.slice(1) : params;
+  // A @staticmethod has no self / cls to skip.
+  const positional = method && (params[0] === "self" || params[0] === "cls") ? params.slice(1) : params;
   const index = positional.indexOf(name);
   if (!fnName || index < 0) return null;
-  const sites = method ? (types.callSites.get(`.${fnName}`) ?? []) : (types.callSites.get(fnName) ?? []);
+  // `self.m(...)` / `cls.m(...)` reaches this method only from inside its own class.
+  const ownerClass = method ? enclosingClassOfDef(fn) : null;
+  const sites = method
+    ? (types.callSites.get(`.${fnName}`) ?? []).filter((c) => {
+        const cls = enclosingClass(c);
+        return cls !== null && ownerClass !== null && isSameNode(cls, ownerClass);
+      })
+    : (types.callSites.get(fnName) ?? []);
   const found = new Set<string>();
   for (const call of sites) {
     const args = call.childForFieldName("arguments")?.namedChildren ?? [];
