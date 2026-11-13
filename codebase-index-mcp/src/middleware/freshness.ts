@@ -975,7 +975,7 @@ export function createFreshnessGate(opts: FreshnessGateOptions): FreshnessGate {
   };
 
   /** MCP-ISSUE-101 part 5: an index built before this build's resolution rules is not current, whatever the tree says. */
-  const versionWarning = (repoId: string): string | null => {
+  const versionWarning = (repoId: string): { text: string; newer: boolean } | null => {
     if (!opts.getFullRunVersion || !opts.buildVersion) return null;
     let indexed: string | null;
     try {
@@ -984,7 +984,19 @@ export function createFreshnessGate(opts: FreshnessGateOptions): FreshnessGate {
       return null;
     }
     if (!indexed || indexed === opts.buildVersion) return null;
-    return `this repo's index was last fully built by ${indexed}; this server runs ${opts.buildVersion}, which resolves edges differently. Answers can differ from a current index until index_repository runs with mode "full".`;
+    // MCP-ISSUE-130 review: a NEWER build's index is not rebuilt by this server (the runner refuses it), so the gate
+    // neither asks for a full run nor promises one.
+    const generation = (v: string): number | null => {
+      const m = /^v(\d+)\b/.exec(v);
+      return m ? Number(m[1]) : null;
+    };
+    const theirs = generation(indexed);
+    const ours = generation(opts.buildVersion);
+    const newer = theirs !== null && ours !== null && theirs > ours;
+    return {
+      newer,
+      text: `this repo's index was last fully built by ${indexed}; this server runs ${opts.buildVersion}, which resolves edges differently. Answers can differ from a current index until index_repository runs with mode "full".`
+    };
   };
 
   /**
@@ -1024,13 +1036,12 @@ export function createFreshnessGate(opts: FreshnessGateOptions): FreshnessGate {
     if (!warning) return note;
     // MCP-ISSUE-130: nothing is running for this — "refreshing" would promise a run that does not exist.
     if (note.state === "fresh" || note.state === "refreshed") {
-      return {
-        ...note,
-        state: "stale",
-        reason: `${warning} No index run is in progress: the index predates this server's version, and the next refresh this gate starts (on any change) runs full.`
-      };
+      const tail = warning.newer
+        ? " No index run is in progress: a newer build wrote this index, and this server will not write over it; restart it to load that build."
+        : " No index run is in progress: the index predates this server's version, and the next refresh this gate starts (on any change) runs full.";
+      return { ...note, state: "stale", reason: `${warning.text}${tail}` };
     }
-    return { ...note, reason: `${note.reason ?? ""} Also: ${warning}`.trim() };
+    return { ...note, reason: `${note.reason ?? ""} Also: ${warning.text}`.trim() };
   };
 
   const ensureFreshTree = async (repoId: string): Promise<Verdict> => {
@@ -1181,7 +1192,8 @@ export function createFreshnessGate(opts: FreshnessGateOptions): FreshnessGate {
     // A run that died mid-way, whatever its mode, is repaired by a full one (see RepairNeeded). MCP-ISSUE-130: so is an
     // index last fully built by another INDEX_VERSION — a scoped run keeps the older extraction of unchanged files (the
     // runner escalates it anyway; asking for full here keeps the label true).
-    const mode: "full" | "incremental" | "dirty" = repair || versionWarning(repoId) ? "full" : scopedMode;
+    const versionBehind = versionWarning(repoId);
+    const mode: "full" | "incremental" | "dirty" = repair || (versionBehind && !versionBehind.newer) ? "full" : scopedMode;
     // MCP-ISSUE-123 re-review B: back off after failed refreshes (a repair has its own cap, MAX_REPAIR_ATTEMPTS).
     const failures = repair ? undefined : failedRefreshes.get(repoId);
     if (failures) {

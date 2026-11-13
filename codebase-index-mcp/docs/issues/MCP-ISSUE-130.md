@@ -29,6 +29,21 @@
     - The gate asks for mode `full` when the version differs, so a running refresh is labelled truthfully.
     - With no run, a version-only verdict is `stale`, not `refreshing`. The reason ends "No index run is in progress:
       the index predates this server's version, and the next refresh this gate starts (on any change) runs full."
+    - An index fully built by a NEWER build (its generation number is higher): the gate neither asks for full nor
+      promises a full run. The reason says to restart the server instead. Review finding 3.
+- **Open, outside row #9's file scope (review findings):**
+  - Watcher deadline (`src/index.ts` refresh runs, `indexJobs.ts` `modeFor`). A watcher refresh asks for `dirty` and
+    gets the scoped-run deadline (10 min). When the runner escalates it to full, a large repo can hit that deadline. The
+    run is then recorded `cancelled`, and only the retry gets the full-run deadline. The isUnindexed / unfinished
+    escalations had the same gap; after a version bump every repo meets it once. Fix: choose the deadline after
+    `versionEscalationFor`.
+  - Seeded worktrees (`seedStore.ts`). The seed row copies `index_version` from the parent's base run, and that base
+    can be an incremental run stamped with the new version over an old full build (the 339b6b3a case). The child then
+    never escalates. Fix: give the seed row the parent's full-base version, or refuse the seed when
+    `versionEscalationFor(parent)` is non-null.
+  - The gate's version check reads `getLatestFullRunVersion` (wired in `src/index.ts`), which ignores seed runs. A child
+    seeded at an old version gets no warning: the runner still goes full, but the gate labels the run with the scoped
+    mode. Fix: wire the gate to `versionEscalationFor`.
 - **Not done (by brief):** no INDEX_VERSION bump. The verdict reuse of MCP-ISSUE-127 is unchanged. The gate does not
   start a full run for the version alone: a query never pays for a whole-repo rebuild it did not cause.
 - **Evidence:**

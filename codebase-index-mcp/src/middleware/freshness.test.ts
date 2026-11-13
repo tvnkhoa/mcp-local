@@ -980,6 +980,39 @@ test("MCP-ISSUE-101 part 5 / MCP-ISSUE-130: an index last fully built by another
   }
 });
 
+test("MCP-ISSUE-130: an index fully built by a NEWER build is stale with a restart hint; the gate does not ask for full", async () => {
+  const lockDir = mkdtempSync(path.join(tmpdir(), "cim-fresh-"));
+  let tree: RepoTreeState = { head: "aaa111", dirty: [] };
+  let indexed = "aaa111";
+  const modes: string[] = [];
+  const gate = createFreshnessGate({
+    enabled: true,
+    budgetMs: 1000,
+    lockDir,
+    getRepoPath: () => lockDir,
+    getIndexedCommit: () => indexed,
+    readTree: () => tree,
+    getFullRunVersion: () => "v17-later",
+    buildVersion: "v16-python-tree-sitter",
+    run: async (_repoId, _repoPath, mode) => {
+      modes.push(mode);
+      indexed = tree.head!;
+      return { runId: "run-1" } as IndexRunResult;
+    }
+  });
+  try {
+    const clean = await gate.ensureFresh("r");
+    assert.equal(clean.state, "stale");
+    assert.match(clean.reason ?? "", /a newer build wrote this index/);
+    assert.doesNotMatch(clean.reason ?? "", /runs full/);
+    tree = { head: "bbb222", dirty: [] };
+    await gate.ensureFresh("r");
+    assert.deepEqual(modes, ["incremental"], "no full run asked over a newer build's index");
+  } finally {
+    rmSync(lockDir, { recursive: true, force: true });
+  }
+});
+
 test("MCP-ISSUE-101 part 5: getLatestFullRunVersion reads the latest ok FULL run, not a later scoped one", () => {
   const dir = mkdtempSync(path.join(tmpdir(), "cim-fresh-db-"));
   const store = new GraphStore(path.join(dir, "x.db"));
