@@ -10,7 +10,7 @@
  * Asserts:
  *   (a) 0 responses mention "locked" / SQLITE_BUSY, and both index runs end ok;
  *   (b) every read answers within the query budget + 2 s, and the server thread's longest block is bounded
- *       (max(1000 ms, 0.15 × the baseline big run measured in this process — see BLOCK_PER_RUN; LOCK_MAX_BLOCK_MS pins
+ *       (max(1000 ms × CI_FACTOR, 0.15 × the baseline big run measured in this process — see BLOCK_PER_RUN; LOCK_MAX_BLOCK_MS pins
  *       it: the runs execute in the worker since IX-2; reads on the repo being rewritten keep ~470 ms of their own
  *       work); the read slack × 2.5 on CI (see CI_FACTOR);
  *   (c) after the runs, the dirty edit on `small` is in the index (the queued refresh ran, behind `big`'s run) and no
@@ -65,14 +65,15 @@ syncBuiltinESMExports();
 // at ae22bf0 under the heavy lock: big run 12.8 / 11.4 / 11.0 s, slowest read 410 / 440 / 383 ms, longest server-thread
 // block 405 / 435 / 380 ms. The CI runner took 22.8 s for the same big run (~1.9× slower), which puts the block at
 // ~830 ms against the 1000 ms bound. So on CI (GitHub sets CI=true) both timing bounds scaled by CI_FACTOR; since
-// row #19 below only the read slack does.
+// row #19 below they keep it as a floor.
 //
 // Load-aware block bound (row #19, 2026-11-13). CI 6208ca9 run 43440259585 failed (b) at 2855 ms against 2500 with every
 // run ok: big run 35.5 s on the runner (local 10-20 s), and each late tick is the search_symbols on `big` in flight at
 // that moment (big reads 833 / 2864 ms, blocks 828 / 2855 ms). 5d30ac1 saw 2075 ms with a 22 s big run. A fixed CI
 // factor cannot follow a runner that is 1.5x slower one day and 3x the next, so the bound is calibrated on the
 // BASELINE full run of `big` — measured in this process on this machine before the window, so nothing inside the
-// window (a defect, or the negative control) can raise its own bound: max(MIN_BLOCK_MS, BLOCK_PER_RUN × baseline ms).
+// window (a defect, or the negative control) can raise its own bound: max(MIN_BLOCK_MS × CI_FACTOR, BLOCK_PER_RUN ×
+// baseline ms) — never below the old fixed bound (1000 ms locally, 2500 ms on CI).
 // Measured ratios (block / in-window big run): local ~0.035, CI ae22bf0 0.036, CI 5d30ac1 0.094, CI 6208ca9 0.080; the
 // baseline run is alone, so shorter than the in-window one (which shares the machine with the peer process), and
 // BLOCK_PER_RUN 0.15 leaves room for that. IX-1's class of defect (the run's own work on the server thread) blocks for
@@ -81,7 +82,7 @@ syncBuiltinESMExports();
 const CI_FACTOR = process.env.CI ? 2.5 : 1;
 const MIN_BLOCK_MS = 1000;
 const BLOCK_PER_RUN = 0.15;
-const maxBlockFor = (bigRunMs) => Number(process.env.LOCK_MAX_BLOCK_MS || Math.max(MIN_BLOCK_MS, Math.round(BLOCK_PER_RUN * bigRunMs)));
+const maxBlockFor = (bigRunMs) => Number(process.env.LOCK_MAX_BLOCK_MS || Math.max(MIN_BLOCK_MS * CI_FACTOR, Math.round(BLOCK_PER_RUN * bigRunMs)));
 const INJECT_BLOCK_MS = Number(process.env.LOCK_INJECT_BLOCK_MS ?? 0);
 const injectPreload = (sentinel) => `data:text/javascript,${encodeURIComponent(`
 import fs from "node:fs";
@@ -257,7 +258,7 @@ try {
   const blocks = inWindow.filter((l) => !l.heartbeat);
   const maxLag = Math.max(0, ...blocks.map((l) => l.blockedMs));
   const MAX_BLOCK_MS = maxBlockFor(baselineBigMs);
-  console.log(`  info  server A main-thread ticks late > 100 ms: ${blocks.length}, max ${maxLag} ms; bound ${MAX_BLOCK_MS} ms = ${process.env.LOCK_MAX_BLOCK_MS ? "LOCK_MAX_BLOCK_MS" : `max(${MIN_BLOCK_MS}, ${BLOCK_PER_RUN} × baseline big run ${baselineBigMs} ms)`}${INJECT_BLOCK_MS > 0 ? `; NEGATIVE CONTROL injected ${INJECT_BLOCK_MS} ms` : ""}`);
+  console.log(`  info  server A main-thread ticks late > 100 ms: ${blocks.length}, max ${maxLag} ms; bound ${MAX_BLOCK_MS} ms = ${process.env.LOCK_MAX_BLOCK_MS ? "LOCK_MAX_BLOCK_MS" : `max(${MIN_BLOCK_MS * CI_FACTOR}, ${BLOCK_PER_RUN} × baseline big run ${baselineBigMs} ms)`}${INJECT_BLOCK_MS > 0 ? `; NEGATIVE CONTROL injected ${INJECT_BLOCK_MS} ms` : ""}`);
   assert(inWindow.length > blocks.length, "(b) the lag sampler reported from inside the window");
   assert(maxLag <= MAX_BLOCK_MS, `(b) no server-thread block > ${MAX_BLOCK_MS} ms`, JSON.stringify(blocks.slice(0, 10)));
 
