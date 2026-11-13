@@ -58,9 +58,10 @@ const loadSymbols = () => sql(
 );
 const loadEdges = () => sql(
   `select e.type, e.to_id as toId, e.reason, e.confidence, f.name as fromName, replace(f.file_path, char(92), '/') as fromFile,
-          t.name as toName, replace(t.file_path, char(92), '/') as toFile, t.kind as toKind, tp.name as toParent
+          t.name as toName, replace(t.file_path, char(92), '/') as toFile, t.kind as toKind, tp.name as toParent, fp.name as fromParent
    from edges e
    join symbols f on f.repo_id = e.repo_id and f.symbol_id = e.from_id
+   left join symbols fp on fp.repo_id = f.repo_id and fp.symbol_id = f.parent_symbol_id
    left join symbols t on t.repo_id = e.repo_id and t.symbol_id = e.to_id
    left join symbols tp on tp.repo_id = t.repo_id and tp.symbol_id = t.parent_symbol_id
    where e.repo_id = :repoId`
@@ -205,12 +206,28 @@ try {
     "PY-6b … and DraftStep.run, through relay's untyped parameter (cross-file, 2 hops)", applyRun);
   assert(applyRun.length === 2 && applyRun.every((e) => e.reason === CALLER_TYPED && e.confidence < 0.7),
     "PY-6b the set is exactly {FixStep.run, DraftStep.run}, each flagged < 0.7 — not Worker.run, not a name pick", applyRun.map((e) => `${e.toParent}:${e.reason}:${e.confidence}`));
+  assert(!applyRun.some((e) => e.toParent === "FakeStep"), "PY-6b a test's double (tests/test_hops_double.py FakeStep) does not type production apply_step", applyRun);
   const pokeBlink = hopCalls("poke", "blink");
-  assert(pokeBlink.length === 2 && ["Lamp", "Led"].every((c) => pokeBlink.some((e) => e.toParent === c && e.toFile === LIGHTS)) &&
-    pokeBlink.every((e) => e.reason === "resolved callee by name (untyped receiver)" && e.confidence < 0.7),
-    "PY-6b no caller types `widget`: widget.blink() → the set {Lamp.blink, Led.blink}, each flagged < 0.7", pokeBlink);
+  assert(pokeBlink.length === 1 && pokeBlink[0].toFile === LIGHTS && pokeBlink[0].reason === "resolved callee by name (untyped receiver)" && pokeBlink[0].confidence < 0.7,
+    "PY-6b no caller types `widget`: widget.blink() stays ONE flagged name candidate — no set of every same-named method", pokeBlink);
+  assert(!edges.some((e) => e.type === "CALLS" && e.reason === "resolved callee by name (untyped receiver)" && e.fromFile === HOPS && e.fromName === "apply_step"),
+    "PY-6b the caller-typed set replaces apply_step's name pick (no leftover name row)");
   assert(!edges.some((e) => e.type === "CALLS" && e.fromName === "unknown" && e.fromFile === ENGINE && e.toName === "run" && e.reason === CALLER_TYPED),
     "PY-6b a receiver no caller types stays a name candidate (unknown(thing): > 8 `run` methods, no set)");
+  const kwRun = hopCalls("kw_trap", "run");
+  assert(kwRun.length === 1 && kwRun[0].toParent === "FixStep" && kwRun[0].reason === CALLER_TYPED,
+    "review #6: keyword-only `step` after *rest takes step=FixStep(), not the third positional Worker()", kwRun);
+  // review #3: the hinted untyped row duplicating a proven one is demoted, not kept beside it.
+  const bothPing = edges.filter((e) => e.type === "CALLS" && e.fromName === "both" && e.fromFile === "src/flow/hops/dup.py" && e.toName === "ping");
+  assert(bothPing.length === 1 && bothPing[0].reason === "resolved callee by receiver type",
+    "review #3: p.ping() (typed) and q.ping() (untyped) in one caller → one CALLS row to Pinger.ping, the proven one", bothPing);
+  // review #4: C3, not breadth-first.
+  const mroM = edges.filter((e) => e.type === "CALLS" && e.fromName === "use_mro" && e.toName === "m");
+  assert(mroM.length === 1 && mroM[0].toParent === "A", "review #4: d.m() with class D(B, C), class B(A) → A.m (C3), not C.m (breadth-first)", mroM);
+  // review #5: extend / append.
+  const exportedSig = (await sql(`select signature from symbols where repo_id = :repoId and kind = 'module'
+    and replace(file_path, char(92), '/') = 'src/flow/hops/exported.py'`))[0]?.signature;
+  assert(exportedSig === "__all__:one,two,three", "review #5: __all__.extend / .append are read", exportedSig);
   const chain = await call("get_call_chain", { repoId, symbolId: sym(ENGINE, "go", "method")?.id, direction: "callees", depth: 3, profile: "verbose" });
   const chainEdges = chain?.edges ?? [];
   assert(chainEdges.some((e) => e.toName === "run" && (e.toFilePath ?? "").replace(/\\/g, "/") === FIX), "PY-6 get_call_chain(Engine.go) reaches FixStep.run",
@@ -272,6 +289,33 @@ try {
   const hopsAfterCallers = applyKey(await loadEdges());
   assert(JSON.stringify(hopsAfterApply) === JSON.stringify(hopsBefore) && JSON.stringify(hopsAfterCallers) === JSON.stringify(hopsBefore),
     "PY-6b incremental runs land on the full run's candidate sets", { hopsBefore, hopsAfterApply, hopsAfterCallers });
+
+  // review #1: an anchor carrying pyargs (drive2's `r.go(Pinger())`) must not feed callers from the target a
+  // previous run moved it to. Switch main2 from GoB to GoA in relay2_main.py only (relay2.py unchanged), then
+  // compare the scoped run with a full run.
+  const RELAY2 = ["src/flow/hops/relay2.py", "src/flow/hops/relay2_types.py"];
+  const relayKey = (list) => list.filter((e) => e.type === "CALLS" && RELAY2.includes(e.fromFile))
+    .map((e) => `${e.fromParent ?? ""}.${e.fromName}->${e.toParent}.${e.toName}:${e.reason}:${e.confidence}`).sort();
+  fs.writeFileSync(path.join(repoDir, "src", "flow", "hops", "relay2_main.py"),
+    "from .relay2 import drive2\nfrom .relay2_types import GoA\n\n\ndef main2() -> None:\n    drive2(GoA())\n");
+  await index("incremental");
+  const relayScoped = relayKey(await loadEdges());
+  await index("full");
+  const relayFull = relayKey(await loadEdges());
+  assert(JSON.stringify(relayScoped) === JSON.stringify(relayFull) && relayFull.some((k) => k.startsWith(".drive2->GoA.go:resolved callee by caller argument type")) &&
+    ["GoA", "GoB"].every((c) => relayFull.includes(`${c}.go->Pinger.ping:resolved callee by name (untyped receiver):0.6`)),
+    "review #1: scoped run after retyping drive2's caller lands on the full run (anchor pyargs not read)", { relayScoped, relayFull });
+
+  // PY-6b scoped, callers gone: the typing calls are removed from callers.py only (apply.py unchanged, so its
+  // anchor row is the one a previous run moved). It must come back to the name pick a full run gives.
+  fs.writeFileSync(path.join(repoDir, "src", "flow", "hops", "callers.py"), "def nothing():\n    return None\n");
+  await index("incremental");
+  const hopsScoped = applyKey(await loadEdges());
+  await index("full");
+  const hopsFull = applyKey(await loadEdges());
+  const scopedApply = hopsScoped.filter((k) => k.startsWith("apply_step->"));
+  assert(scopedApply.length === 1 && scopedApply[0].includes(":resolved callee by name (untyped receiver):0.6") && JSON.stringify(hopsScoped) === JSON.stringify(hopsFull),
+    "PY-6b callers removed in a scoped run: apply_step's anchor returns to the full run's single name pick", { hopsScoped, hopsFull });
 } finally {
   await Promise.race([client.close().catch(() => {}), new Promise((r) => setTimeout(r, 3000))]);
 }

@@ -24,6 +24,7 @@ import { buildNamedCandidateMap, pickBestNamedCandidate } from "./edgeResolverSh
 import { buildImportedFilesByFile, isPythonFile, normalizeFilePath, pythonImportedFilesForName } from "./moduleResolution.js";
 import { immediateTransaction } from "../../repositories/sqliteTx.js";
 import { PYTHON_ARGS_HINT, PYTHON_RECEIVER_HINT } from "../extractors/pythonNoise.js";
+import { isTestPath } from "../indexing/fileFilter.js";
 
 /**
  * The two `reason` labels that mean "this target came from the callee's NAME alone, across files".
@@ -350,17 +351,60 @@ export function resolvePythonQualifiedCall(
  * resolved in-repo bases (classes and Protocols). `members` is one name's methods keyed by owner id.
  */
 function pythonMemberOnChain<T>(members: ReadonlyMap<string, T>, basesByClassId: ReadonlyMap<string, string[]>, classId: string): T | undefined {
-  const queue = [classId];
-  const seen = new Set<string>();
-  while (queue.length > 0 && seen.size < MAX_PYTHON_MRO_CLASSES) {
-    const next = queue.shift()!;
-    if (seen.has(next)) continue;
-    seen.add(next);
-    const hit = members.get(next);
+  for (const id of pythonMro(basesByClassId, classId)) {
+    const hit = members.get(id);
     if (hit) return hit;
-    queue.push(...(basesByClassId.get(next) ?? []));
   }
   return undefined;
+}
+
+const pythonMroMemo = new WeakMap<ReadonlyMap<string, string[]>, Map<string, string[]>>();
+
+/**
+ * A class and its in-repo bases in Python's method resolution order (C3; review: breadth-first gave `C.m` for
+ * `class D(B, C)`, `class B(A)` where Python runs `A.m`). An inconsistent hierarchy or a cycle — which Python
+ * would reject, or which an unresolved base made look so — falls back to breadth-first in base-list order.
+ * Capped at MAX_PYTHON_MRO_CLASSES; memoized per bases map.
+ */
+function pythonMro(basesByClassId: ReadonlyMap<string, string[]>, classId: string): string[] {
+  let memo = pythonMroMemo.get(basesByClassId);
+  if (!memo) pythonMroMemo.set(basesByClassId, (memo = new Map()));
+  const inProgress = new Set<string>();
+  const c3 = (id: string): string[] | null => {
+    const known = memo!.get(id);
+    if (known) return known;
+    if (inProgress.has(id)) return null;
+    inProgress.add(id);
+    const bases = basesByClassId.get(id) ?? [];
+    const seqs: string[][] = [];
+    for (const base of bases) {
+      const lin = c3(base);
+      if (!lin) return null;
+      seqs.push([...lin]);
+    }
+    seqs.push([...bases]);
+    const out = [id];
+    while (seqs.some((s) => s.length > 0)) {
+      const head = seqs.find((s) => s.length > 0 && !seqs.some((t) => t.indexOf(s[0]!) > 0))?.[0];
+      if (head === undefined) return null;
+      out.push(head);
+      for (const s of seqs) if (s[0] === head) s.shift();
+    }
+    inProgress.delete(id);
+    memo!.set(id, out);
+    return out;
+  };
+  const linear = c3(classId);
+  if (linear) return linear.slice(0, MAX_PYTHON_MRO_CLASSES);
+  const order: string[] = [];
+  const queue = [classId];
+  while (queue.length > 0 && order.length < MAX_PYTHON_MRO_CLASSES) {
+    const next = queue.shift()!;
+    if (order.includes(next)) continue;
+    order.push(next);
+    queue.push(...(basesByClassId.get(next) ?? []));
+  }
+  return order;
 }
 
 export type ResolvedUpdate = { fromId: string; oldToId: string; newToId: string; confidence: number; reason: string };
@@ -762,10 +806,11 @@ const MAX_INTERFACE_DISPATCH_FANOUT = 10;
 export function rebuildInterfaceDispatchEdges(db: Database.Database, repoId: string): number {
   // PY-5: Python Protocol implementers first — the fan-out below reads IMPLEMENTS.
   rebuildPythonProtocolImplements(db, repoId);
-  // PY-6b: untyped Python receivers, typed from their callers' arguments — also a whole-repo rebuild over
-  // resolved CALLS, so it runs here, where every run (full or scoped) rebuilds after call resolution.
-  rebuildPythonUntypedReceiverEdges(db, repoId);
   db.prepare(`delete from edges where repo_id = ? and type = 'CALLS' and reason = 'interface-dispatch'`).run(repoId);
+  // PY-6b: untyped Python receivers, typed from their callers' arguments — also a whole-repo rebuild over
+  // resolved CALLS, so it runs here, where every run (full or scoped) rebuilds after call resolution. After the
+  // dispatch delete (review): its existence checks must not see last run's dispatch rows on a scoped run.
+  rebuildPythonUntypedReceiverEdges(db, repoId);
   const calls = db
     .prepare(
       `select distinct e.from_id as fromId, s.symbol_id as methodId, s.name as name, s.parent_symbol_id as ifaceId
@@ -842,23 +887,20 @@ export const PYTHON_CALLER_TYPED_REASON = "resolved callee by caller argument ty
 const PYTHON_CANDIDATE_MARK = "pyset";
 /** PY-6b: how many caller hops an untyped parameter is followed through (`relay(step)` → `apply(step)`). */
 const MAX_PYTHON_ARG_HOPS = 3;
-/** PY-6b: with no caller typing it, a receiver's name set is listed only up to this many same-named methods. */
-const MAX_PYTHON_NAME_SET = 8;
-
 type ArgSite = Map<string, string>;
 
 /**
- * PY-6b: rebuild the candidate SET of every Python call on an untyped receiver — a pure function of resolved
- * CALLS edges, their extraction hints (`assigned_expression`, see PYTHON_RECEIVER_HINT / PYTHON_ARGS_HINT) and
- * Python symbols, so a scoped run lands where a full run does.
+ * PY-6b: rebuild the candidate SET of every Python call on an untyped-parameter receiver — a pure function of
+ * resolved CALLS edges, their extraction hints (`assigned_expression`, see PYTHON_RECEIVER_HINT /
+ * PYTHON_ARGS_HINT) and Python symbols, so a scoped run lands where a full run does.
  *
- * The anchor is the bare `m` row the call pass bound by name (reason PYTHON_UNTYPED_RECEIVER_REASON, 0.6).
- *   - Its receiver is the caller's untyped parameter (`pyrecv`) and callers — in any file, through up to
- *     MAX_PYTHON_ARG_HOPS untyped hops — pass classes for it: the set is each such class's `m` (own or
- *     inherited), reason PYTHON_CALLER_TYPED_REASON at 0.65. The anchor moves to the first; the rest are added.
- *   - Otherwise the set is every Python method named `m` when there are at most MAX_PYTHON_NAME_SET (else the
- *     name pick alone stays), flagged 0.6, the anchor on the call pass's own pick.
- * Every member stays below 0.7: a set of candidates, never a proof.
+ * The anchor is the hinted (`pyrecv`) bare `m` row the call pass bound by name (PYTHON_UNTYPED_RECEIVER_REASON,
+ * 0.6). When callers — in any file, through up to MAX_PYTHON_ARG_HOPS untyped hops — pass classes for that
+ * parameter, the set is each such class's `m` (own or inherited), reason PYTHON_CALLER_TYPED_REASON at 0.65,
+ * below 0.7: candidates, never a proof. The anchor moves to the first; the rest are added, marked
+ * PYTHON_CANDIDATE_MARK. With no typed caller the anchor stays the call pass's single flagged name pick: a set
+ * of every same-named method was tried and dropped — on translate it gave a test-local fake `Ctx.segments`
+ * seven callers it does not have, and the traversal tools list every CALLS row whatever its confidence.
  */
 export function rebuildPythonUntypedReceiverEdges(db: Database.Database, repoId: string): number {
   db.prepare(`delete from edges where repo_id = ? and type = 'CALLS' and assigned_expression = ?`).run(repoId, PYTHON_CANDIDATE_MARK);
@@ -869,11 +911,11 @@ export function rebuildPythonUntypedReceiverEdges(db: Database.Database, repoId:
        from edges e
        join symbols s on s.repo_id = e.repo_id and s.symbol_id = e.from_id
        left join symbols t on t.repo_id = e.repo_id and t.symbol_id = e.to_id
-       where e.repo_id = ? and e.type = 'CALLS' and e.reason in (?, ?)
+       where e.repo_id = ? and e.type = 'CALLS' and e.reason in (?, ?) and e.assigned_expression like ?
          and (s.file_path like '%.py' or s.file_path like '%.pyi')
-       order by e.from_id, coalesce(e.assigned_expression, ''), t.name, e.to_id`
+       order by e.from_id, e.assigned_expression, e.to_id`
     )
-    .all(repoId, PYTHON_UNTYPED_RECEIVER_REASON, PYTHON_CALLER_TYPED_REASON) as {
+    .all(repoId, PYTHON_UNTYPED_RECEIVER_REASON, PYTHON_CALLER_TYPED_REASON, `%${PYTHON_RECEIVER_HINT}%`) as {
     rowId: number; fromId: string; toId: string; reason: string; hint: string | null; fromFile: string; toName: string | null;
   }[];
   if (anchors.length === 0) return 0;
@@ -885,9 +927,12 @@ export function rebuildPythonUntypedReceiverEdges(db: Database.Database, repoId:
        from edges e
        join symbols s on s.repo_id = e.repo_id and s.symbol_id = e.from_id
        where e.repo_id = ? and e.type = 'CALLS' and e.assigned_expression like ? and e.to_id not like 'callee:%'
+         -- Review: never a row this pass moves (an anchor that also carries pyargs, \`r.go(Thing())\` on an untyped
+         -- \`r\`): its to_id is last run's answer on a scoped run and the call pass's pick on a full one.
+         and coalesce(e.reason, '') not in (?, ?)
        order by e.to_id, e.from_id`
     )
-    .all(repoId, `%${PYTHON_ARGS_HINT}%`) as { callerId: string; calleeId: string; hint: string; callerFile: string }[]) {
+    .all(repoId, `%${PYTHON_ARGS_HINT}%`, PYTHON_UNTYPED_RECEIVER_REASON, PYTHON_CALLER_TYPED_REASON) as { callerId: string; calleeId: string; hint: string; callerFile: string }[]) {
     const part = r.hint.split(" ").find((x) => x.startsWith(PYTHON_ARGS_HINT));
     if (!part) continue;
     const sites = part
@@ -918,12 +963,16 @@ export function rebuildPythonUntypedReceiverEdges(db: Database.Database, repoId:
   }
 
   /** The class names callers pass for parameter (pos, name) of fnId, each with the caller's file to bind it from. */
-  const argTypes = (fnId: string, pos: number, name: string, depth: number, seen: Set<string>): { typeName: string; file: string }[] => {
+  const argTypes = (fnId: string, fnFile: string, pos: number, name: string, depth: number, seen: Set<string>): { typeName: string; file: string }[] => {
     const key = `${fnId}#${String(pos)}`;
     if (seen.has(key)) return [];
     seen.add(key);
     const out: { typeName: string; file: string }[] = [];
+    const fnIsTest = isTestPath(fnFile);
     for (const caller of callersOf.get(fnId) ?? []) {
+      // A test's own double (`class Ctx` in a test module) says nothing about what production code receives —
+      // on translate one test's fake Ctx became the only type of a production stage's `ctx`.
+      if (!fnIsTest && isTestPath(caller.callerFile)) continue;
       for (const site of caller.sites) {
         const value = site.get(`#${String(pos)}`) ?? site.get(name);
         if (!value) continue;
@@ -932,7 +981,7 @@ export function rebuildPythonUntypedReceiverEdges(db: Database.Database, repoId:
           continue;
         }
         const colon = value.indexOf(":");
-        if (depth > 1 && colon > 1) out.push(...argTypes(caller.callerId, Number(value.slice(1, colon)), value.slice(colon + 1), depth - 1, seen));
+        if (depth > 1 && colon > 1) out.push(...argTypes(caller.callerId, caller.callerFile, Number(value.slice(1, colon)), value.slice(colon + 1), depth - 1, seen));
       }
     }
     return out;
@@ -952,61 +1001,78 @@ export function rebuildPythonUntypedReceiverEdges(db: Database.Database, repoId:
      select ?, ?, ?, 'CALLS', ?, ?, ?
      where not exists (select 1 from edges where repo_id = ? and from_id = ? and to_id = ? and type = 'CALLS')`
   );
+  // Back to exactly what extraction stored for a `callee:` token (getEdgeDefaults), so the call pass reads it fresh.
+  const reset = db.prepare(`update edges set to_id = ?, confidence = 0.4, reason = 'unresolved callee token' where rowid = ?`);
+  /** Anchors a previous run moved that no caller types any more: `from_id \0 callee:<m>`, re-resolved below. */
+  const stale = new Set<string>();
   let count = 0;
   const tx = immediateTransaction(db, () => {
     for (const anchor of anchors) {
-      const fromFile = normalizeFilePath(anchor.fromFile);
-      const recv = (anchor.hint ?? "").split(" ").find((x) => x.startsWith(PYTHON_RECEIVER_HINT));
-      const bar = recv ? recv.indexOf("|") : -1;
-      const member = recv && bar > 0 ? recv.slice(PYTHON_RECEIVER_HINT.length, bar) : anchor.toName;
+      const recv = (anchor.hint ?? "").split(" ").find((x) => x.startsWith(PYTHON_RECEIVER_HINT)) ?? "";
+      const bar = recv.indexOf("|");
+      const member = bar > 0 ? recv.slice(PYTHON_RECEIVER_HINT.length, bar) : "";
       if (!member) continue;
       const methods = lookup.methodsByParent(member);
       const typed = new Map<string, NamedCandidate>();
-      for (const ref of recv && bar > 0 ? recv.slice(bar + 1).split(",") : []) {
+      for (const ref of recv.slice(bar + 1).split(",")) {
         const colon = ref.indexOf(":");
         if (colon <= 0) continue;
-        for (const t of argTypes(anchor.fromId, Number(ref.slice(0, colon)), ref.slice(colon + 1), MAX_PYTHON_ARG_HOPS, new Set())) {
+        for (const t of argTypes(anchor.fromId, normalizeFilePath(anchor.fromFile), Number(ref.slice(0, colon)), ref.slice(colon + 1), MAX_PYTHON_ARG_HOPS, new Set())) {
           const cls = bindType(t.typeName, t.file);
           const hit = cls ? pythonMemberOnChain(methods, basesByClassId, cls.symbolId) : undefined;
           if (hit) typed.set(hit.symbolId, hit);
         }
       }
 
-      let targets: string[];
-      let reason: string;
-      let confidence: number;
-      if (typed.size > 0) {
-        targets = [...typed.values()].sort(byPath).map((c) => c.symbolId);
-        reason = PYTHON_CALLER_TYPED_REASON;
-        confidence = 0.65;
-      } else {
-        const named = (candidateMap.get(member) ?? []).filter((c) => c.kind === "method" && isPythonFile(c.filePath));
-        if (named.length === 0) continue;
-        // The call pass's own pick (same file, star-filtered import scope, tie-break), recomputed for a hinted
-        // anchor, so one a previous run moved to a caller-typed target returns to what a full run binds.
-        const pick = recv
-          ? (pickBestNamedCandidate(candidateMap.get(member) ?? [], anchor.fromFile, ["function", "method", "constructor", "class"],
-              pythonImportedFilesForName(importedFilesByFile, fromFile, member))?.symbolId ?? anchor.toId)
-          : anchor.toId;
-        const rest = named.length <= MAX_PYTHON_NAME_SET ? named.filter((c) => c.symbolId !== pick).sort(byPath).map((c) => c.symbolId) : [];
-        targets = [pick, ...rest];
-        reason = PYTHON_UNTYPED_RECEIVER_REASON;
-        confidence = 0.6;
+      if (typed.size === 0) {
+        // Nothing types it now. A row the call pass left is already its answer; one a previous run moved goes
+        // back to its token and through the call pass itself, so it lands exactly where a full run binds it.
+        if (anchor.reason === PYTHON_CALLER_TYPED_REASON) {
+          const token = `callee:${member}`;
+          count += reset.run(token, anchor.rowId).changes;
+          stale.add(`${anchor.fromId}\u0000${token}`);
+        }
+        continue;
       }
-
-      // Only a hinted anchor moves: an unhinted one is the call pass's row, kept as it bound it.
-      let anchorTo = anchor.toId;
-      if (recv) {
-        anchorTo = targets.find((t) => !exists.get(repoId, anchor.fromId, t, anchor.rowId)) ?? targets[0]!;
-        if (anchorTo !== anchor.toId || reason !== anchor.reason) count += retarget.run(anchorTo, confidence, reason, anchor.rowId).changes;
+      const targets = [...typed.values()].sort(byPath).map((c) => c.symbolId);
+      const anchorTo = targets.find((t) => !exists.get(repoId, anchor.fromId, t, anchor.rowId)) ?? targets[0]!;
+      if (anchorTo !== anchor.toId || anchor.reason !== PYTHON_CALLER_TYPED_REASON) {
+        count += retarget.run(anchorTo, 0.65, PYTHON_CALLER_TYPED_REASON, anchor.rowId).changes;
       }
       for (const t of targets) {
         if (t === anchorTo) continue;
-        count += insert.run(repoId, anchor.fromId, t, confidence, reason, PYTHON_CANDIDATE_MARK, repoId, anchor.fromId, t).changes;
+        count += insert.run(repoId, anchor.fromId, t, 0.65, PYTHON_CALLER_TYPED_REASON, PYTHON_CANDIDATE_MARK, repoId, anchor.fromId, t).changes;
       }
     }
   });
   tx();
+  if (stale.size > 0) {
+    const ctx = buildCallResolutionContext(db, repoId);
+    ctx.unresolvedRows = ctx.unresolvedRows.filter((r) => stale.has(`${r.fromId}\u0000${r.toId}`));
+    while (ctx.offset < ctx.unresolvedRows.length) resolveCallEdgesBatch(db, repoId, ctx, 500);
+  }
+
+  // Review #3: a hint makes a row's `assigned_expression` differ, so a name-picked untyped row that lands on a
+  // target the same caller already reaches by another row no longer collapses in the dedupe pass. Demote it the
+  // MCP-ISSUE-052 way — back to its token, superseded, 0.1 — which keeps the hint and keeps it out of every
+  // traversal; both rows come from one file, so any change to either re-extracts both. A caller-typed anchor
+  // whose every target is already reached stays (it must keep reading its callers on later runs).
+  const duplicates = db
+    .prepare(
+      `select a.rowid as rowId, a.assigned_expression as hint from edges a
+       where a.repo_id = ? and a.type = 'CALLS' and a.reason = ? and a.assigned_expression like ?
+         and exists (select 1 from edges b where b.repo_id = a.repo_id and b.from_id = a.from_id and b.to_id = a.to_id
+                     and b.type = 'CALLS' and b.rowid != a.rowid)
+       order by a.rowid`
+    )
+    .all(repoId, PYTHON_UNTYPED_RECEIVER_REASON, `%${PYTHON_RECEIVER_HINT}%`) as { rowId: number; hint: string }[];
+  const demote = db.prepare(`update edges set to_id = ?, confidence = 0.1, reason = ? where rowid = ?`);
+  for (const d of duplicates) {
+    const recv = d.hint.split(" ").find((x) => x.startsWith(PYTHON_RECEIVER_HINT)) ?? "";
+    const bar = recv.indexOf("|");
+    if (bar <= PYTHON_RECEIVER_HINT.length) continue;
+    count += demote.run(`callee:${recv.slice(PYTHON_RECEIVER_HINT.length, bar)}`, SUPERSEDED_REASON, d.rowId).changes;
+  }
   return count;
 }
 

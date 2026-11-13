@@ -351,6 +351,23 @@ function readDunderAll(root: Parser.SyntaxNode): string | null | undefined {
   for (const statement of root.namedChildren) {
     if (statement.type !== "expression_statement") continue;
     const assign = statement.namedChildren[0];
+    // Review: `__all__.extend([...])` / `__all__.append("x")` add names too; any other `__all__.<m>(...)` makes
+    // the list unknown. Before an assignment they are unknown as well (Python would raise).
+    if (assign?.type === "call") {
+      const fn = assign.childForFieldName("function");
+      if (fn?.type !== "attribute" || fn.childForFieldName("object")?.text !== "__all__") continue;
+      const method = fn.childForFieldName("attribute")?.text;
+      const args = (assign.childForFieldName("arguments")?.namedChildren ?? []).filter((a) => a.type !== "comment");
+      const items = method === "append" ? args : method === "extend" && args.length === 1 && (args[0]!.type === "list" || args[0]!.type === "tuple") ? args[0]!.namedChildren : null;
+      if (names === undefined || !items || (method === "append" && args.length !== 1)) return null;
+      for (const item of items) {
+        if (item.type === "comment") continue;
+        const value = item.type === "string" ? stringLiteralValue(item.text) : undefined;
+        if (value === undefined || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(value)) return null;
+        names.push(value);
+      }
+      continue;
+    }
     if (assign?.type !== "assignment" && assign?.type !== "augmented_assignment") continue;
     if (assign.childForFieldName("left")?.text !== "__all__") continue;
     const right = assign.childForFieldName("right");
@@ -586,10 +603,25 @@ function untypedParameterRef(site: Parser.SyntaxNode, name: string, types: TypeS
   if (name === "self" || name === "cls") return null;
   const fn = enclosingFunction(site);
   if (!fn) return null;
-  const params = (fn.childForFieldName("parameters")?.namedChildren ?? []).map(parameterName);
-  const positional = isMethodDefinition(fn) && (params[0] === "self" || params[0] === "cls") ? params.slice(1) : params;
+  // Review: a parameter after `*args` / a bare `*` is keyword-only — no positional index (`-1`), matched by
+  // name only; a `/` marker is not a parameter.
+  const positional: (string | null)[] = [];
+  const keywordOnly: string[] = [];
+  let afterStar = false;
+  for (const p of fn.childForFieldName("parameters")?.namedChildren ?? []) {
+    if (p.type === "positional_separator" || p.type === "comment") continue;
+    if (p.type === "list_splat_pattern" || p.type === "keyword_separator" || p.type === "dictionary_splat_pattern") {
+      afterStar = true;
+      continue;
+    }
+    const pname = parameterName(p);
+    if (afterStar) {
+      if (pname) keywordOnly.push(pname);
+    } else positional.push(pname);
+  }
+  if (isMethodDefinition(fn) && (positional[0] === "self" || positional[0] === "cls")) positional.shift();
   const index = positional.indexOf(name);
-  if (index < 0) return null;
+  if (index < 0 && !keywordOnly.includes(name)) return null;
   if (localType(site, name, types) !== null || hopType(site, name, types) !== null) return null;
   return `${String(index)}:${name}`;
 }

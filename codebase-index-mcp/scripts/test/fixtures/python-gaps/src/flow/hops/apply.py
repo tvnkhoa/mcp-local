@@ -13,3 +13,8 @@ def relay(step, ctx):
 def poke(widget):
     """No caller types `widget`: the candidate set is every method named blink (two of them)."""
     widget.blink()
+
+
+def kw_trap(first, *rest, step):
+    """Review #6: `step` is keyword-only — the third positional argument is in *rest, not `step`."""
+    return step.run(first)
