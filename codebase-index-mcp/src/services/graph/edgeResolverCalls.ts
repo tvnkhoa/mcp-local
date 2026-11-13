@@ -962,6 +962,23 @@ export function rebuildPythonUntypedReceiverEdges(db: Database.Database, repoId:
     else protocolsByName.set(p.name, [p]);
   }
 
+  // The callee's own shape, read once per function: whether a class call (`Foo.m(inst, x)`, `$` slots) passes
+  // `self` explicitly.
+  const shapeStmt = db.prepare(`select kind, signature from symbols where repo_id = ? and symbol_id = ?`);
+  const shapes = new Map<string, { selfFirst: boolean }>();
+  const shapeOf = (fnId: string) => {
+    let shape = shapes.get(fnId);
+    if (!shape) {
+      const row = shapeStmt.get(repoId, fnId) as { kind: string; signature: string | null } | undefined;
+      const method = row?.kind === "method";
+      shape = {
+        selfFirst: method && /^(?:async\s+)?def\s+\w+\s*\(\s*self\s*(?:[,:=)]|$)/.test(row?.signature ?? "")
+      };
+      shapes.set(fnId, shape);
+    }
+    return shape;
+  };
+
   /** The class names callers pass for parameter (pos, name) of fnId, each with the caller's file to bind it from. */
   const argTypes = (fnId: string, fnFile: string, pos: number, name: string, depth: number, seen: Set<string>): { typeName: string; file: string }[] => {
     const key = `${fnId}#${String(pos)}`;
@@ -969,12 +986,17 @@ export function rebuildPythonUntypedReceiverEdges(db: Database.Database, repoId:
     seen.add(key);
     const out: { typeName: string; file: string }[] = [];
     const fnIsTest = isTestPath(fnFile);
+    const shape = shapeOf(fnId);
+    // A class call to an instance method passes `self` as its first argument: parameter pos is argument pos + 1.
+    // A keyword-only parameter (pos -1) has no positional slot of either kind.
+    const classSlot = pos >= 0 ? `$${String(pos + (shape.selfFirst ? 1 : 0))}` : "";
     for (const caller of callersOf.get(fnId) ?? []) {
+
       // A test's own double (`class Ctx` in a test module) says nothing about what production code receives —
       // on translate one test's fake Ctx became the only type of a production stage's `ctx`.
       if (!fnIsTest && isTestPath(caller.callerFile)) continue;
       for (const site of caller.sites) {
-        const value = site.get(`#${String(pos)}`) ?? site.get(name);
+        const value = (pos >= 0 ? site.get(`#${String(pos)}`) : undefined) ?? (classSlot ? site.get(classSlot) : undefined) ?? site.get(name);
         if (!value) continue;
         if (!value.startsWith("^")) {
           out.push({ typeName: value, file: caller.callerFile });

@@ -229,6 +229,20 @@ try {
   const bothPing = edges.filter((e) => e.type === "CALLS" && e.fromName === "both" && e.fromFile === "src/flow/hops/dup.py" && e.toName === "ping");
   assert(bothPing.length === 1 && bothPing[0].reason === "resolved callee by receiver type",
     "review #3: p.ping() (typed) and q.ping() (untyped) in one caller → one CALLS row to Pinger.ping, the proven one", bothPing);
+  // ── Row #16 (MCP-ISSUE-128 open items): class calls ──
+  const CC = "src/flow/hops/classcall.py";
+  const rowsOf = (file, parent, fromName, toName) => edges.filter((e) => e.type === "CALLS" && e.fromFile === file && (e.fromParent ?? "") === parent && e.fromName === fromName && e.toName === toName);
+  const tos = (list) => list.map((e) => `${e.toParent ?? ""}.${e.toName}:${e.reason}:${e.confidence}`).sort();
+  const flip = rowsOf(CC, "Switch", "flip", "blink");
+  assert(JSON.stringify(tos(flip)) === JSON.stringify([`Lamp.blink:${CALLER_TYPED}:0.65`]),
+    "#16 item 1: Switch.flip(BlinkSwitch(), Lamp()) types `light` from the 2nd argument (the 1st is self) → Lamp.blink", tos(flip));
+  assert(!flip.some((e) => e.toParent === "BlinkSwitch"), "#16 item 1 negative: the explicit self (BlinkSwitch, which has blink) does not type `light`", tos(flip));
+  const flipStatic = rowsOf(CC, "Switch", "flip_static", "blink");
+  assert(JSON.stringify(tos(flipStatic)) === JSON.stringify([`Led.blink:${CALLER_TYPED}:0.65`]),
+    "#16 item 1: a @staticmethod class call is not shifted — Switch.flip_static(Led()) → Led.blink", tos(flipStatic));
+  const flipCls = rowsOf(CC, "Switch", "flip_cls", "blink");
+  assert(JSON.stringify(tos(flipCls)) === JSON.stringify([`Lamp.blink:${CALLER_TYPED}:0.65`]),
+    "#16 item 1: a @classmethod class call is not shifted — Switch.flip_cls(Lamp()) → Lamp.blink", tos(flipCls));
   // review #4: C3, not breadth-first.
   const mroM = edges.filter((e) => e.type === "CALLS" && e.fromName === "use_mro" && e.toName === "m");
   assert(mroM.length === 1 && mroM[0].toParent === "A", "review #4: d.m() with class D(B, C), class B(A) → A.m (C3), not C.m (breadth-first)", mroM);
@@ -297,6 +311,19 @@ try {
   const hopsAfterCallers = applyKey(await loadEdges());
   assert(JSON.stringify(hopsAfterApply) === JSON.stringify(hopsBefore) && JSON.stringify(hopsAfterCallers) === JSON.stringify(hopsBefore),
     "PY-6b incremental runs land on the full run's candidate sets", { hopsBefore, hopsAfterApply, hopsAfterCallers });
+
+  // Row #16 scoped: touch the class-call callers' file, then the callees' file; both land on the full run.
+  const row16Key = (list) => list.filter((e) => e.type === "CALLS" && [CC].includes(e.fromFile))
+    .map((e) => `${e.fromParent ?? ""}.${e.fromName}->${e.toParent ?? ""}.${e.toName ?? e.toId}:${e.reason}:${e.confidence}`).sort();
+  const row16Before = row16Key(edges);
+  fs.appendFileSync(path.join(repoDir, "src", "flow", "hops", "use_classcall.py"), "\n# touched\n");
+  await index("incremental");
+  const row16AfterCallers = row16Key(await loadEdges());
+  fs.appendFileSync(path.join(repoDir, "src", "flow", "hops", "classcall.py"), "\n# touched\n");
+  await index("incremental");
+  const row16AfterCallees = row16Key(await loadEdges());
+  assert(JSON.stringify(row16AfterCallers) === JSON.stringify(row16Before) && JSON.stringify(row16AfterCallees) === JSON.stringify(row16Before),
+    "#16 incremental runs land on the full run's class-call rows", { row16Before, row16AfterCallers, row16AfterCallees });
 
   // review #1: an anchor carrying pyargs (drive2's `r.go(Pinger())`) must not feed callers from the target a
   // previous run moved it to. Switch main2 from GoB to GoA in relay2_main.py only (relay2.py unchanged), then

@@ -539,7 +539,7 @@ function extractCalls(
     const token = callToken(fn, call, scope, moduleFunctions, localClasses, types);
     if (token) {
       const edge = push(fromId, token);
-      const site = argumentTypes(call, types);
+      const site = argumentTypes(call, types, isClassCall(fn, call, scope, localClasses, types));
       if (site && hintOf(edge).sites.length < MAX_HINT_SITES) hintOf(edge).sites.push(site);
       if (!token.includes(".") && fn.type === "attribute") {
         const receiver = fn.childForFieldName("object");
@@ -630,8 +630,13 @@ function untypedParameterRef(site: Parser.SyntaxNode, name: string, types: TypeS
  * PY-6b: one call site's argument types — `#<i>=<Class>` positionally, `<kw>=<Class>` by keyword, and
  * `=^<pos>:<name>` for an argument that is the caller's own untyped parameter (the next hop). Positional
  * indexes stop at the first `*args` / `**kw` splat. Null when no argument is typed.
+ *
+ * A call on a class (`Foo.m(inst, arg)`, `cls.m(...)`) writes `$<i>` instead of `#<i>`: whether its first
+ * argument is `self` depends on the method it reaches (an instance method's, not a static / class method's),
+ * which only the resolver knows — it shifts `$` slots by one for a callee whose first parameter is `self`.
  */
-function argumentTypes(call: Parser.SyntaxNode, types: TypeScopes): string | null {
+function argumentTypes(call: Parser.SyntaxNode, types: TypeScopes, classCall = false): string | null {
+  const mark = classCall ? "$" : "#";
   const entries: string[] = [];
   let index = 0;
   let positionalOpen = true;
@@ -643,7 +648,7 @@ function argumentTypes(call: Parser.SyntaxNode, types: TypeScopes): string | nul
     }
     const keyword = arg.type === "keyword_argument" ? arg.childForFieldName("name")?.text : undefined;
     const value = keyword !== undefined ? arg.childForFieldName("value") : arg;
-    const slot = keyword !== undefined ? keyword : positionalOpen ? `#${String(index)}` : null;
+    const slot = keyword !== undefined ? keyword : positionalOpen ? `${mark}${String(index)}` : null;
     if (keyword === undefined) index += 1;
     if (!value || !slot) continue;
     const typed = classOf(value.type === "call" ? (constructedClass(value, types) ?? exprType(value, types, false)) : exprType(value, types, false), types);
@@ -655,6 +660,25 @@ function argumentTypes(call: Parser.SyntaxNode, types: TypeScopes): string | nul
     if (ref) entries.push(`${slot}=^${ref}`);
   }
   return entries.length > 0 ? entries.join(",") : null;
+}
+
+/**
+ * PY-6b: the call's receiver is a class, not an instance — `Foo.m(...)` for a class defined or imported here
+ * (or star-imported, as `callToken` reads a capitalised unbound name), or `cls.m(...)` inside a class. The
+ * same order as `callToken`, so a local that holds an instance (`x = Foo(); x.m()`) is never one.
+ */
+function isClassCall(fn: Parser.SyntaxNode, site: Parser.SyntaxNode, scope: ImportScope, localClasses: Set<string>, types: TypeScopes): boolean {
+  if (fn.type !== "attribute") return false;
+  const receiver = fn.childForFieldName("object");
+  if (receiver?.type !== "identifier") return false;
+  const name = receiver.text;
+  if (name === "cls") return enclosingClass(site) !== null;
+  if (name === "self" || scope.modules.has(name)) return false;
+  const imported = scope.names.get(name);
+  if (imported) return !isStdlibSpec(imported.fromModule) && /^[A-Z]/.test(imported.original);
+  if (localClasses.has(name)) return true;
+  if (classOf(localType(site, name, types), types) ?? hopType(site, name, types)) return false;
+  return scope.starModules.length > 0 && /^[A-Z][A-Za-z0-9_]*[a-z][A-Za-z0-9_]*$/.test(name);
 }
 
 /** A function name used as a value: defined at module level here, or from-imported from a repo module. */
@@ -1022,7 +1046,9 @@ function hopType(site: Parser.SyntaxNode, name: string, types: TypeScopes): stri
   for (const call of sites) {
     const args = call.childForFieldName("arguments")?.namedChildren ?? [];
     const keyword = args.find((a) => a.type === "keyword_argument" && a.childForFieldName("name")?.text === name);
-    const arg = keyword ? keyword.childForFieldName("value") : args.filter((a) => a.type !== "keyword_argument")[index];
+    // `cls.m(inst, x)` on an instance method passes `self` explicitly: its positional arguments sit one further on.
+    const viaCls = call.childForFieldName("function")?.childForFieldName("object")?.text === "cls" && params[0] === "self" ? 1 : 0;
+    const arg = keyword ? keyword.childForFieldName("value") : args.filter((a) => a.type !== "keyword_argument")[index + viaCls];
     if (!arg) continue;
     const t = classOf(arg.type === "call" ? (constructedClass(arg, types) ?? exprType(arg, types, false)) : exprType(arg, types, false), types);
     if (t) found.add(t);
