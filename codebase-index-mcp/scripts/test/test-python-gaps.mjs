@@ -156,6 +156,20 @@ try {
   assert(chainEdges.some((e) => e.toName === "run" && (e.toFilePath ?? "").replace(/\\/g, "/") === FIX), "PY-6 get_call_chain(Engine.go) reaches FixStep.run",
     chainEdges.map((e) => `${e.fromName}->${e.toName}@${e.toFilePath} (${e.reason})`));
 
+  // ── PY-9 ──
+  const q = await call("search_symbols", { repoId, query: "FixStep.run", strategy: "name", profile: "verbose" });
+  const qRows = q?.symbols ?? q?.results ?? [];
+  assert(qRows.length === 1 && qRows[0].name === "run" && (qRows[0].filePath ?? "").replace(/\\/g, "/") === FIX,
+    "PY-9 search_symbols(\"FixStep.run\") → exactly FixStep.run", q);
+  const qPkg = await call("search_symbols", { repoId, query: "steps.fix_step.FixStep.run", strategy: "name", profile: "verbose" });
+  assert((qPkg?.symbols ?? []).some((s) => (s.filePath ?? "").replace(/\\/g, "/") === FIX), "PY-9 a module-qualified path matches on its last two segments", qPkg);
+  const ranked = await call("search_symbols", { repoId, query: "Step.run", strategy: "name", ranked: true, profile: "verbose" });
+  const rankedRows = ranked?.candidates ?? [];
+  assert(rankedRows.length === 1 && rankedRows[0].qualifiedName === "Step.run" && rankedRows[0].matchType === "exact",
+    "PY-9 ranked search_symbols(\"Step.run\") → the Protocol member only, exact", ranked);
+  const noOwner = await call("search_symbols", { repoId, query: "Nope.run", strategy: "name", profile: "verbose" });
+  assert(!(noOwner?.symbols ?? []).some((s) => s.name === "run"), "PY-9 an unknown owner does not fall back to every `run`", noOwner);
+
   // Scoped re-index: touch one implementer; the rebuilt-whole IMPLEMENTS set must not move.
   const before = implementsKey(edges);
   fs.appendFileSync(path.join(repoDir, "src", "flow", "executors", "mock.py"), "\n# touched\n");

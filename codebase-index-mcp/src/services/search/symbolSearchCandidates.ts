@@ -11,6 +11,7 @@ import type Database from "better-sqlite3";
 import type { SymbolRecord } from "../../types/index.js";
 import { isMigrationSymbol, isTestPath } from "../indexing/fileFilter.js";
 import { RANKED_KIND_BONUS, TEST_PATH_PENALTY, extractIntentTokens } from "./symbolSearchFts.js";
+import { parseQualifiedQuery } from "./symbolSearchQuery.js";
 
 /**
  * How far a row is pushed down the intent ranking regardless of how well it matches (MCP-ISSUE-049).
@@ -160,6 +161,45 @@ export function getSymbolCandidatesImpl(
   // strategy === "name" (default) — substring/exact ranking, behavior preserved.
   // excludeTests post-filter có thể loại bớt rows nên over-fetch x2 để vẫn lấp đủ limit.
   const fetchLimit = filters.excludeTests ? limit * 2 : limit;
+
+  // PY-9: `Owner.member` is an exact match on the parent link, as in searchSymbolsImpl.
+  const qualified = parseQualifiedQuery(name);
+  if (qualified) {
+    const qualifiedRows = db
+      .prepare(
+        `
+        select s.repo_id as repoId, s.symbol_id as symbolId, s.file_path as filePath,
+               s.name, s.kind, s.line, s.signature, p.name as parentName
+        from symbols s
+        inner join symbols p on p.repo_id = s.repo_id and p.symbol_id = s.parent_symbol_id
+        ${langJoin}
+        where ${repoWhere} s.name = ? and p.name = ? ${filterWhere}
+        order by s.file_path, s.line
+        limit ?
+        `
+      )
+      .all(...repoParams, qualified.member, qualified.owner, ...filterParams, fetchLimit) as (SymbolRecord & { parentName?: string | null })[];
+    const kept = (filters.excludeTests ? qualifiedRows.filter((r) => !isTestPath(r.filePath)) : qualifiedRows).slice(0, limit);
+    if (kept.length > 0) {
+      return kept.map((row, index) => {
+        const kindBonus = RANKED_KIND_BONUS.includes(row.kind) ? 0.03 : 0;
+        const testPenalty = isTestPath(row.filePath) ? TEST_PATH_PENALTY : 0;
+        const confidence = Math.max(0, Math.min(1, 0.96 + kindBonus - testPenalty - Math.min(index * 0.01, 0.2)));
+        return {
+          symbolId: row.symbolId,
+          name: row.name,
+          kind: row.kind,
+          filePath: row.filePath,
+          line: row.line,
+          signature: row.signature ?? null,
+          qualifiedName: `${row.parentName ?? qualified.owner}.${row.name}`,
+          matchType: "exact" as const,
+          score: Math.round(confidence * 100),
+          confidence
+        };
+      });
+    }
+  }
   const allRows = db
     .prepare(
       `
