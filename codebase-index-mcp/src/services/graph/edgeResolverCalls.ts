@@ -963,21 +963,30 @@ export function rebuildPythonUntypedReceiverEdges(db: Database.Database, repoId:
   }
 
   // The callee's own shape, read once per function: whether a class call (`Foo.m(inst, x)`, `$` slots) passes
-  // `self` explicitly.
-  const shapeStmt = db.prepare(`select kind, signature from symbols where repo_id = ? and symbol_id = ?`);
-  const shapes = new Map<string, { selfFirst: boolean }>();
+  // `self` explicitly, and — for `__init__` — the class whose construction (`Foo(x)`) calls it.
+  const shapeStmt = db.prepare(`select name, kind, signature, parent_symbol_id as parentId from symbols where repo_id = ? and symbol_id = ?`);
+  const shapes = new Map<string, { selfFirst: boolean; constructs: string | null }>();
   const shapeOf = (fnId: string) => {
     let shape = shapes.get(fnId);
     if (!shape) {
-      const row = shapeStmt.get(repoId, fnId) as { kind: string; signature: string | null } | undefined;
+      const row = shapeStmt.get(repoId, fnId) as { name: string; kind: string; signature: string | null; parentId: string | null } | undefined;
       const method = row?.kind === "method";
       shape = {
-        selfFirst: method && /^(?:async\s+)?def\s+\w+\s*\(\s*self\s*(?:[,:=)]|$)/.test(row?.signature ?? "")
+        selfFirst: method && /^(?:async\s+)?def\s+\w+\s*\(\s*self\s*(?:[,:=)]|$)/.test(row?.signature ?? ""),
+        constructs: method && row?.name === "__init__" ? row.parentId : null
       };
       shapes.set(fnId, shape);
     }
     return shape;
   };
+
+  // Row #16: `self.f.m()` hints name a parameter of the caller's class's `__init__` (`@<pos>:<param>`).
+  const initStmt = db.prepare(
+    `select i.symbol_id as id, i.file_path as file from symbols f
+     join symbols i on i.repo_id = f.repo_id and i.parent_symbol_id = f.parent_symbol_id and i.kind = 'method' and i.name = '__init__'
+     where f.repo_id = ? and f.symbol_id = ? and f.kind = 'method'
+     order by i.line limit 1`
+  );
 
   /** The class names callers pass for parameter (pos, name) of fnId, each with the caller's file to bind it from. */
   const argTypes = (fnId: string, fnFile: string, pos: number, name: string, depth: number, seen: Set<string>): { typeName: string; file: string }[] => {
@@ -990,8 +999,9 @@ export function rebuildPythonUntypedReceiverEdges(db: Database.Database, repoId:
     // A class call to an instance method passes `self` as its first argument: parameter pos is argument pos + 1.
     // A keyword-only parameter (pos -1) has no positional slot of either kind.
     const classSlot = pos >= 0 ? `$${String(pos + (shape.selfFirst ? 1 : 0))}` : "";
-    for (const caller of callersOf.get(fnId) ?? []) {
-
+    // `Foo(x)` resolves to the class, not to `Foo.__init__`: an `__init__` parameter is typed by the class's callers too.
+    const callers = [...(callersOf.get(fnId) ?? []), ...(shape.constructs ? (callersOf.get(shape.constructs) ?? []) : [])];
+    for (const caller of callers) {
       // A test's own double (`class Ctx` in a test module) says nothing about what production code receives —
       // on translate one test's fake Ctx became the only type of a production stage's `ctx`.
       if (!fnIsTest && isTestPath(caller.callerFile)) continue;
@@ -1036,10 +1046,16 @@ export function rebuildPythonUntypedReceiverEdges(db: Database.Database, repoId:
       if (!member) continue;
       const methods = lookup.methodsByParent(member);
       const typed = new Map<string, NamedCandidate>();
-      for (const ref of recv.slice(bar + 1).split(",")) {
+      for (const raw of recv.slice(bar + 1).split(",")) {
+        const viaInit = raw.startsWith("@");
+        const ref = viaInit ? raw.slice(1) : raw;
         const colon = ref.indexOf(":");
         if (colon <= 0) continue;
-        for (const t of argTypes(anchor.fromId, normalizeFilePath(anchor.fromFile), Number(ref.slice(0, colon)), ref.slice(colon + 1), MAX_PYTHON_ARG_HOPS, new Set())) {
+        const holder = viaInit
+          ? (initStmt.get(repoId, anchor.fromId) as { id: string; file: string } | undefined)
+          : { id: anchor.fromId, file: anchor.fromFile };
+        if (!holder) continue;
+        for (const t of argTypes(holder.id, normalizeFilePath(holder.file), Number(ref.slice(0, colon)), ref.slice(colon + 1), MAX_PYTHON_ARG_HOPS, new Set())) {
           const cls = bindType(t.typeName, t.file);
           const hit = cls ? pythonMemberOnChain(methods, basesByClassId, cls.symbolId) : undefined;
           if (hit) typed.set(hit.symbolId, hit);

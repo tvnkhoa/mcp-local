@@ -543,7 +543,8 @@ function extractCalls(
       if (site && hintOf(edge).sites.length < MAX_HINT_SITES) hintOf(edge).sites.push(site);
       if (!token.includes(".") && fn.type === "attribute") {
         const receiver = fn.childForFieldName("object");
-        const ref = receiver?.type === "identifier" ? untypedParameterRef(call, receiver.text, types) : null;
+        const ref =
+          receiver?.type === "identifier" ? untypedParameterRef(call, receiver.text, types) : receiver?.type === "attribute" ? initFieldRef(receiver, call, types) : null;
         if (ref) hintOf(edge).receivers.add(ref);
       }
     }
@@ -624,6 +625,41 @@ function untypedParameterRef(site: Parser.SyntaxNode, name: string, types: TypeS
   if (index < 0 && !keywordOnly.includes(name)) return null;
   if (localType(site, name, types) !== null || hopType(site, name, types) !== null) return null;
   return `${String(index)}:${name}`;
+}
+
+/**
+ * Row #16: `self.f.m()` where the class's `__init__` assigns `self.f = p` from its untyped parameter `p` —
+ * `@<pos>:<p>`, a parameter of the caller's class's `__init__`, which `Foo(x)` callers type. Null when the
+ * field is typed (`classFieldType`) or not set from an `__init__` parameter.
+ */
+function initFieldRef(receiver: Parser.SyntaxNode, site: Parser.SyntaxNode, types: TypeScopes): string | null {
+  const inner = receiver.childForFieldName("object");
+  const field = receiver.childForFieldName("attribute")?.text;
+  if (inner?.type !== "identifier" || inner.text !== "self" || !field) return null;
+  const owner = enclosingClass(site);
+  if (!owner || classFieldType(owner, field, types) !== null) return null;
+  const init = owner.childForFieldName("body")?.namedChildren
+    .map((c) => (c.type === "decorated_definition" ? c.childForFieldName("definition") : c))
+    .find((d) => d?.type === "function_definition" && d.childForFieldName("name")?.text === "__init__");
+  const body = init?.childForFieldName("body");
+  if (!body) return null;
+  // The first `self.<field> = …` in `__init__`'s own body (not a nested def), as `classFieldType` reads it.
+  const stack: Parser.SyntaxNode[] = [...body.namedChildren].reverse();
+  while (stack.length > 0) {
+    const node = stack.pop()!;
+    if (node.type === "function_definition" || node.type === "class_definition" || node.type === "lambda") continue;
+    if (node.type === "assignment") {
+      const left = node.childForFieldName("left");
+      if (left?.type === "attribute" && left.childForFieldName("object")?.text === "self" && left.childForFieldName("attribute")?.text === field) {
+        const right = node.childForFieldName("right");
+        const ref = right?.type === "identifier" ? untypedParameterRef(right, right.text, types) : null;
+        return ref ? `@${ref}` : null;
+      }
+    }
+    const kids = node.namedChildren;
+    for (let i = kids.length - 1; i >= 0; i -= 1) stack.push(kids[i]!);
+  }
+  return null;
 }
 
 /**

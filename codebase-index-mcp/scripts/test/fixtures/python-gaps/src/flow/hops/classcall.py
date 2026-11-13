@@ -1,4 +1,4 @@
-"""Row #16 item 1: class calls type untyped parameters (callers in use_classcall.py)."""
+"""Row #16 items 1-2: class calls and constructor arguments type untyped parameters (callers in use_classcall.py)."""
 
 
 class Switch:
@@ -12,3 +12,22 @@ class Switch:
     @classmethod
     def flip_cls(cls, light):
         light.blink()
+
+
+class Holder:
+    def __init__(self, light):
+        light.blink()
+        self.light = light
+
+    def later(self):
+        self.light.blink()
+
+
+class Bare:
+    """Negative control: no caller constructs it with a typed argument."""
+
+    def __init__(self, light):
+        self.light = light
+
+    def later(self):
+        self.light.blink()

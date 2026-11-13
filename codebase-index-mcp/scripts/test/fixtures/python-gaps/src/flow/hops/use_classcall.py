@@ -1,4 +1,4 @@
-from .classcall import Switch
+from .classcall import Holder, Switch
 from .lights import Lamp, Led
 
 
@@ -13,3 +13,7 @@ def by_class() -> None:
     Switch.flip(BlinkSwitch(), Lamp())
     Switch.flip_static(Led())
     Switch.flip_cls(Lamp())
+
+
+def build() -> Holder:
+    return Holder(Led())

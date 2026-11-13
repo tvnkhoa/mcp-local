@@ -229,7 +229,7 @@ try {
   const bothPing = edges.filter((e) => e.type === "CALLS" && e.fromName === "both" && e.fromFile === "src/flow/hops/dup.py" && e.toName === "ping");
   assert(bothPing.length === 1 && bothPing[0].reason === "resolved callee by receiver type",
     "review #3: p.ping() (typed) and q.ping() (untyped) in one caller → one CALLS row to Pinger.ping, the proven one", bothPing);
-  // ── Row #16 (MCP-ISSUE-128 open items): class calls ──
+  // ── Row #16 (MCP-ISSUE-128 open items): class calls, constructor arguments ──
   const CC = "src/flow/hops/classcall.py";
   const rowsOf = (file, parent, fromName, toName) => edges.filter((e) => e.type === "CALLS" && e.fromFile === file && (e.fromParent ?? "") === parent && e.fromName === fromName && e.toName === toName);
   const tos = (list) => list.map((e) => `${e.toParent ?? ""}.${e.toName}:${e.reason}:${e.confidence}`).sort();
@@ -243,6 +243,15 @@ try {
   const flipCls = rowsOf(CC, "Switch", "flip_cls", "blink");
   assert(JSON.stringify(tos(flipCls)) === JSON.stringify([`Lamp.blink:${CALLER_TYPED}:0.65`]),
     "#16 item 1: a @classmethod class call is not shifted — Switch.flip_cls(Lamp()) → Lamp.blink", tos(flipCls));
+  const initBlink = rowsOf(CC, "Holder", "__init__", "blink");
+  assert(JSON.stringify(tos(initBlink)) === JSON.stringify([`Led.blink:${CALLER_TYPED}:0.65`]),
+    "#16 item 2: Holder(Led()) types __init__'s untyped `light` → Led.blink", tos(initBlink));
+  const laterBlink = rowsOf(CC, "Holder", "later", "blink");
+  assert(JSON.stringify(tos(laterBlink)) === JSON.stringify([`Led.blink:${CALLER_TYPED}:0.65`]),
+    "#16 item 2: self.light = light in __init__, then self.light.blink() → Led.blink", tos(laterBlink));
+  const bareLater = rowsOf(CC, "Bare", "later", "blink");
+  assert(bareLater.length === 1 && bareLater[0].reason === "resolved callee by name (untyped receiver)" && bareLater[0].confidence < 0.7,
+    "#16 item 2 negative: a class no caller constructs with a typed argument keeps ONE flagged name pick", tos(bareLater));
   // review #4: C3, not breadth-first.
   const mroM = edges.filter((e) => e.type === "CALLS" && e.fromName === "use_mro" && e.toName === "m");
   assert(mroM.length === 1 && mroM[0].toParent === "A", "review #4: d.m() with class D(B, C), class B(A) → A.m (C3), not C.m (breadth-first)", mroM);
@@ -323,7 +332,7 @@ try {
   await index("incremental");
   const row16AfterCallees = row16Key(await loadEdges());
   assert(JSON.stringify(row16AfterCallers) === JSON.stringify(row16Before) && JSON.stringify(row16AfterCallees) === JSON.stringify(row16Before),
-    "#16 incremental runs land on the full run's class-call rows", { row16Before, row16AfterCallers, row16AfterCallees });
+    "#16 incremental runs land on the full run's class-call / constructor rows", { row16Before, row16AfterCallers, row16AfterCallees });
 
   // review #1: an anchor carrying pyargs (drive2's `r.go(Pinger())`) must not feed callers from the target a
   // previous run moved it to. Switch main2 from GoB to GoA in relay2_main.py only (relay2.py unchanged), then

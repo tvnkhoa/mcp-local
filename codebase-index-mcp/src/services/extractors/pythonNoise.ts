@@ -67,7 +67,8 @@ export const PYTHON_DUNDER_ALL_PREFIX = "__all__:";
 /**
  * PY-6b: hints a Python CALLS edge carries in `assignedExpression` (space-separated parts), read by
  * `rebuildPythonUntypedReceiverEdges`:
- *   - `pyrecv:<member>|<pos>:<param>,…` — a bare `<member>` token whose receiver is the caller's untyped parameter;
+ *   - `pyrecv:<member>|<pos>:<param>,…` — a bare `<member>` token whose receiver is the caller's untyped parameter,
+ *     or (`@<pos>:<param>`, row #16) a `self.<field>` its class's `__init__` sets from that untyped parameter;
  *   - `pyargs:<site>;<site>` — per call site, `#<i>=<Class>` / `<kw>=<Class>` / `…=^<pos>:<param>` argument types.
  */
 export const PYTHON_RECEIVER_HINT = "pyrecv:";
