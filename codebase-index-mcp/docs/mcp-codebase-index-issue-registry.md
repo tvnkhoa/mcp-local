@@ -324,6 +324,7 @@ Gate: 4/4 servers build + typecheck, 36/36 harnesses (63 assertions in the 049 h
 - [MCP-ISSUE-124 — start-up under CPU load took 28 s: Node resolving 613 modules one by one](issues/MCP-ISSUE-124.md)
 - [MCP-ISSUE-125 — freshness load flakes: two test bounds, and parallel reads served one after another past the budget](issues/MCP-ISSUE-125.md)
 - [MCP-ISSUE-126 — a gate-triggered refresh run hung 5 h with no runId, no progress and no deadline, and held the DB-wide queue](issues/MCP-ISSUE-126.md)
+- [MCP-ISSUE-128 — Python lane gaps G1-G4 after the tree-sitter lane (Protocols, conftest fixtures, star imports, untyped receivers, qualified search)](issues/MCP-ISSUE-128.md)
 - [Confirmed fixed — 2026-08-05 re-verification of the 042–051 wave](issues/confirmed-fixed-2026-08-05-re-verification-of-the-042-051-wave.md)
 - [MCP-ISSUE-101 follow-ups (row 5: F2–F4)](issues/mcp-issue-101-follow-ups-row-5-f2-f4.md)
 
