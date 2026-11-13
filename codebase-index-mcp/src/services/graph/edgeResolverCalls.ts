@@ -23,6 +23,7 @@ import {
 import { buildNamedCandidateMap, pickBestNamedCandidate } from "./edgeResolverShared.js";
 import { buildImportedFilesByFile, isPythonFile, normalizeFilePath, pythonImportedFilesForName } from "./moduleResolution.js";
 import { immediateTransaction } from "../../repositories/sqliteTx.js";
+import { PYTHON_ARGS_HINT, PYTHON_RECEIVER_HINT } from "../extractors/pythonNoise.js";
 
 /**
  * The two `reason` labels that mean "this target came from the callee's NAME alone, across files".
@@ -761,6 +762,9 @@ const MAX_INTERFACE_DISPATCH_FANOUT = 10;
 export function rebuildInterfaceDispatchEdges(db: Database.Database, repoId: string): number {
   // PY-5: Python Protocol implementers first — the fan-out below reads IMPLEMENTS.
   rebuildPythonProtocolImplements(db, repoId);
+  // PY-6b: untyped Python receivers, typed from their callers' arguments — also a whole-repo rebuild over
+  // resolved CALLS, so it runs here, where every run (full or scoped) rebuilds after call resolution.
+  rebuildPythonUntypedReceiverEdges(db, repoId);
   db.prepare(`delete from edges where repo_id = ? and type = 'CALLS' and reason = 'interface-dispatch'`).run(repoId);
   const calls = db
     .prepare(
@@ -825,6 +829,180 @@ export function rebuildInterfaceDispatchEdges(db: Database.Database, repoId: str
         const impl = pythonMemberOnChain(byParent, pythonBases, implId);
         if (!impl || impl.symbolId === call.methodId) continue;
         count += insert.run(repoId, call.fromId, impl.symbolId, repoId, call.fromId, impl.symbolId).changes;
+      }
+    }
+  });
+  tx();
+  return count;
+}
+
+/** PY-6b: a method an untyped receiver's callers pass a class for, found by that class's MRO (confidence 0.65). */
+export const PYTHON_CALLER_TYPED_REASON = "resolved callee by caller argument type (untyped receiver)";
+/** PY-6b: the `assigned_expression` of every candidate row the rebuild adds beside the anchor row; it owns them. */
+const PYTHON_CANDIDATE_MARK = "pyset";
+/** PY-6b: how many caller hops an untyped parameter is followed through (`relay(step)` → `apply(step)`). */
+const MAX_PYTHON_ARG_HOPS = 3;
+/** PY-6b: with no caller typing it, a receiver's name set is listed only up to this many same-named methods. */
+const MAX_PYTHON_NAME_SET = 8;
+
+type ArgSite = Map<string, string>;
+
+/**
+ * PY-6b: rebuild the candidate SET of every Python call on an untyped receiver — a pure function of resolved
+ * CALLS edges, their extraction hints (`assigned_expression`, see PYTHON_RECEIVER_HINT / PYTHON_ARGS_HINT) and
+ * Python symbols, so a scoped run lands where a full run does.
+ *
+ * The anchor is the bare `m` row the call pass bound by name (reason PYTHON_UNTYPED_RECEIVER_REASON, 0.6).
+ *   - Its receiver is the caller's untyped parameter (`pyrecv`) and callers — in any file, through up to
+ *     MAX_PYTHON_ARG_HOPS untyped hops — pass classes for it: the set is each such class's `m` (own or
+ *     inherited), reason PYTHON_CALLER_TYPED_REASON at 0.65. The anchor moves to the first; the rest are added.
+ *   - Otherwise the set is every Python method named `m` when there are at most MAX_PYTHON_NAME_SET (else the
+ *     name pick alone stays), flagged 0.6, the anchor on the call pass's own pick.
+ * Every member stays below 0.7: a set of candidates, never a proof.
+ */
+export function rebuildPythonUntypedReceiverEdges(db: Database.Database, repoId: string): number {
+  db.prepare(`delete from edges where repo_id = ? and type = 'CALLS' and assigned_expression = ?`).run(repoId, PYTHON_CANDIDATE_MARK);
+  const anchors = db
+    .prepare(
+      `select e.rowid as rowId, e.from_id as fromId, e.to_id as toId, e.reason as reason, e.assigned_expression as hint,
+              s.file_path as fromFile, t.name as toName
+       from edges e
+       join symbols s on s.repo_id = e.repo_id and s.symbol_id = e.from_id
+       left join symbols t on t.repo_id = e.repo_id and t.symbol_id = e.to_id
+       where e.repo_id = ? and e.type = 'CALLS' and e.reason in (?, ?)
+         and (s.file_path like '%.py' or s.file_path like '%.pyi')
+       order by e.from_id, coalesce(e.assigned_expression, ''), t.name, e.to_id`
+    )
+    .all(repoId, PYTHON_UNTYPED_RECEIVER_REASON, PYTHON_CALLER_TYPED_REASON) as {
+    rowId: number; fromId: string; toId: string; reason: string; hint: string | null; fromFile: string; toName: string | null;
+  }[];
+  if (anchors.length === 0) return 0;
+
+  const callersOf = new Map<string, { callerId: string; callerFile: string; sites: ArgSite[] }[]>();
+  for (const r of db
+    .prepare(
+      `select e.from_id as callerId, e.to_id as calleeId, e.assigned_expression as hint, s.file_path as callerFile
+       from edges e
+       join symbols s on s.repo_id = e.repo_id and s.symbol_id = e.from_id
+       where e.repo_id = ? and e.type = 'CALLS' and e.assigned_expression like ? and e.to_id not like 'callee:%'
+       order by e.to_id, e.from_id`
+    )
+    .all(repoId, `%${PYTHON_ARGS_HINT}%`) as { callerId: string; calleeId: string; hint: string; callerFile: string }[]) {
+    const part = r.hint.split(" ").find((x) => x.startsWith(PYTHON_ARGS_HINT));
+    if (!part) continue;
+    const sites = part
+      .slice(PYTHON_ARGS_HINT.length)
+      .split(";")
+      .map((site): ArgSite => new Map(site.split(",").filter((e) => e.includes("=")).map((e) => [e.slice(0, e.indexOf("=")), e.slice(e.indexOf("=") + 1)] as const)));
+    const entry = { callerId: r.callerId, callerFile: normalizeFilePath(r.callerFile), sites };
+    const list = callersOf.get(r.calleeId);
+    if (list) list.push(entry);
+    else callersOf.set(r.calleeId, [entry]);
+  }
+
+  const candidateMap = buildNamedCandidateMap(db, repoId, ["function", "method", "constructor", "class"]);
+  const importedFilesByFile = buildImportedFilesByFile(db, repoId);
+  const basesByClassId = buildPythonBases(db, repoId, candidateMap, importedFilesByFile);
+  const lookup = pythonLookupFor(candidateMap);
+  const protocolsByName = new Map<string, NamedCandidate[]>();
+  for (const p of db
+    .prepare(
+      `select symbol_id as symbolId, name, file_path as filePath, kind, parent_symbol_id as parentSymbolId from symbols
+       where repo_id = ? and kind = 'interface' and (file_path like '%.py' or file_path like '%.pyi')
+       order by name, file_path, symbol_id`
+    )
+    .all(repoId) as (NamedCandidate & { name: string })[]) {
+    const list = protocolsByName.get(p.name);
+    if (list) list.push(p);
+    else protocolsByName.set(p.name, [p]);
+  }
+
+  /** The class names callers pass for parameter (pos, name) of fnId, each with the caller's file to bind it from. */
+  const argTypes = (fnId: string, pos: number, name: string, depth: number, seen: Set<string>): { typeName: string; file: string }[] => {
+    const key = `${fnId}#${String(pos)}`;
+    if (seen.has(key)) return [];
+    seen.add(key);
+    const out: { typeName: string; file: string }[] = [];
+    for (const caller of callersOf.get(fnId) ?? []) {
+      for (const site of caller.sites) {
+        const value = site.get(`#${String(pos)}`) ?? site.get(name);
+        if (!value) continue;
+        if (!value.startsWith("^")) {
+          out.push({ typeName: value, file: caller.callerFile });
+          continue;
+        }
+        const colon = value.indexOf(":");
+        if (depth > 1 && colon > 1) out.push(...argTypes(caller.callerId, Number(value.slice(1, colon)), value.slice(colon + 1), depth - 1, seen));
+      }
+    }
+    return out;
+  };
+  const bindType = (typeName: string, file: string): NamedCandidate | undefined => {
+    const name = typeName.split(".").pop() ?? typeName;
+    const candidates = [...lookup.classes(name), ...(protocolsByName.get(name) ?? [])];
+    return pickBestNamedCandidate(candidates, file, ["class", "interface"], pythonImportedFilesForName(importedFilesByFile, file, name));
+  };
+  const byPath = (a: NamedCandidate, b: NamedCandidate): number =>
+    a.filePath < b.filePath ? -1 : a.filePath > b.filePath ? 1 : a.symbolId < b.symbolId ? -1 : a.symbolId > b.symbolId ? 1 : 0;
+
+  const retarget = db.prepare(`update edges set to_id = ?, confidence = ?, reason = ? where rowid = ?`);
+  const exists = db.prepare(`select 1 from edges where repo_id = ? and from_id = ? and to_id = ? and type = 'CALLS' and rowid != ? limit 1`);
+  const insert = db.prepare(
+    `insert into edges (repo_id, from_id, to_id, type, confidence, reason, assigned_expression)
+     select ?, ?, ?, 'CALLS', ?, ?, ?
+     where not exists (select 1 from edges where repo_id = ? and from_id = ? and to_id = ? and type = 'CALLS')`
+  );
+  let count = 0;
+  const tx = immediateTransaction(db, () => {
+    for (const anchor of anchors) {
+      const fromFile = normalizeFilePath(anchor.fromFile);
+      const recv = (anchor.hint ?? "").split(" ").find((x) => x.startsWith(PYTHON_RECEIVER_HINT));
+      const bar = recv ? recv.indexOf("|") : -1;
+      const member = recv && bar > 0 ? recv.slice(PYTHON_RECEIVER_HINT.length, bar) : anchor.toName;
+      if (!member) continue;
+      const methods = lookup.methodsByParent(member);
+      const typed = new Map<string, NamedCandidate>();
+      for (const ref of recv && bar > 0 ? recv.slice(bar + 1).split(",") : []) {
+        const colon = ref.indexOf(":");
+        if (colon <= 0) continue;
+        for (const t of argTypes(anchor.fromId, Number(ref.slice(0, colon)), ref.slice(colon + 1), MAX_PYTHON_ARG_HOPS, new Set())) {
+          const cls = bindType(t.typeName, t.file);
+          const hit = cls ? pythonMemberOnChain(methods, basesByClassId, cls.symbolId) : undefined;
+          if (hit) typed.set(hit.symbolId, hit);
+        }
+      }
+
+      let targets: string[];
+      let reason: string;
+      let confidence: number;
+      if (typed.size > 0) {
+        targets = [...typed.values()].sort(byPath).map((c) => c.symbolId);
+        reason = PYTHON_CALLER_TYPED_REASON;
+        confidence = 0.65;
+      } else {
+        const named = (candidateMap.get(member) ?? []).filter((c) => c.kind === "method" && isPythonFile(c.filePath));
+        if (named.length === 0) continue;
+        // The call pass's own pick (same file, star-filtered import scope, tie-break), recomputed for a hinted
+        // anchor, so one a previous run moved to a caller-typed target returns to what a full run binds.
+        const pick = recv
+          ? (pickBestNamedCandidate(candidateMap.get(member) ?? [], anchor.fromFile, ["function", "method", "constructor", "class"],
+              pythonImportedFilesForName(importedFilesByFile, fromFile, member))?.symbolId ?? anchor.toId)
+          : anchor.toId;
+        const rest = named.length <= MAX_PYTHON_NAME_SET ? named.filter((c) => c.symbolId !== pick).sort(byPath).map((c) => c.symbolId) : [];
+        targets = [pick, ...rest];
+        reason = PYTHON_UNTYPED_RECEIVER_REASON;
+        confidence = 0.6;
+      }
+
+      // Only a hinted anchor moves: an unhinted one is the call pass's row, kept as it bound it.
+      let anchorTo = anchor.toId;
+      if (recv) {
+        anchorTo = targets.find((t) => !exists.get(repoId, anchor.fromId, t, anchor.rowId)) ?? targets[0]!;
+        if (anchorTo !== anchor.toId || reason !== anchor.reason) count += retarget.run(anchorTo, confidence, reason, anchor.rowId).changes;
+      }
+      for (const t of targets) {
+        if (t === anchorTo) continue;
+        count += insert.run(repoId, anchor.fromId, t, confidence, reason, PYTHON_CANDIDATE_MARK, repoId, anchor.fromId, t).changes;
       }
     }
   });

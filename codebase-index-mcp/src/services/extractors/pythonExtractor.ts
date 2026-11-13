@@ -30,7 +30,14 @@ import type { EdgeRecord, RouteRecord, SymbolRecord } from "../../types/index.js
 import type { ExtractInput } from "./extractorTypes.js";
 
 import { extractFirstStringLiteral, isSameNode, makeSymbolId } from "./extractorUtils.js";
-import { PYTHON_BUILTIN_FUNCTIONS, PYTHON_BUILTIN_METHODS, PYTHON_DUNDER_ALL_PREFIX, PYTHON_STDLIB_MODULES } from "./pythonNoise.js";
+import {
+  PYTHON_ARGS_HINT,
+  PYTHON_BUILTIN_FUNCTIONS,
+  PYTHON_BUILTIN_METHODS,
+  PYTHON_DUNDER_ALL_PREFIX,
+  PYTHON_RECEIVER_HINT,
+  PYTHON_STDLIB_MODULES
+} from "./pythonNoise.js";
 
 type ImportedName = { original: string; fromModule: string };
 
@@ -490,12 +497,22 @@ function extractCalls(
     localClasses,
     scope
   };
-  const seen = new Set<string>();
-  const push = (fromId: string, token: string): void => {
+  const seen = new Map<string, EdgeRecord>();
+  const push = (fromId: string, token: string): EdgeRecord => {
     const key = `${fromId}\u0000${token}`;
-    if (seen.has(key)) return;
-    seen.add(key);
-    edges.push({ repoId: input.repoId, fromId, toId: `callee:${token}`, type: "CALLS" });
+    const known = seen.get(key);
+    if (known) return known;
+    const edge: EdgeRecord = { repoId: input.repoId, fromId, toId: `callee:${token}`, type: "CALLS" };
+    seen.set(key, edge);
+    edges.push(edge);
+    return edge;
+  };
+  // PY-6b: per CALLS edge, the untyped-parameter receivers (bare tokens) and each call site's argument types.
+  const hints = new Map<EdgeRecord, { receivers: Set<string>; sites: string[] }>();
+  const hintOf = (edge: EdgeRecord) => {
+    let hint = hints.get(edge);
+    if (!hint) hints.set(edge, (hint = { receivers: new Set(), sites: [] }));
+    return hint;
   };
 
   for (const call of root.descendantsOfType("call")) {
@@ -503,7 +520,16 @@ function extractCalls(
     if (!fn) continue;
     const fromId = enclosingSymbolId(call, input, registered) ?? moduleSymbolId;
     const token = callToken(fn, call, scope, moduleFunctions, localClasses, types);
-    if (token) push(fromId, token);
+    if (token) {
+      const edge = push(fromId, token);
+      const site = argumentTypes(call, types);
+      if (site && hintOf(edge).sites.length < MAX_HINT_SITES) hintOf(edge).sites.push(site);
+      if (!token.includes(".") && fn.type === "attribute") {
+        const receiver = fn.childForFieldName("object");
+        const ref = receiver?.type === "identifier" ? untypedParameterRef(call, receiver.text, types) : null;
+        if (ref) hintOf(edge).receivers.add(ref);
+      }
+    }
 
     // Best-effort references: a known function passed as an argument (`partial(f)`, `register(f)`,
     // `Thread(target=f)`) is invoked through that value.
@@ -534,6 +560,69 @@ function extractCalls(
     const token = callToken(expr, decorator, scope, moduleFunctions, localClasses, types);
     if (token) push(enclosingSymbolId(decorator, input, registered) ?? moduleSymbolId, token);
   }
+
+  // PY-6b: the hints ride on the edge's `assignedExpression` (stored, never rewritten by call resolution), so
+  // the resolver can type an untyped parameter from callers in OTHER files, over several hops.
+  for (const [edge, hint] of hints) {
+    const parts: string[] = [];
+    if (hint.receivers.size > 0) parts.push(`${PYTHON_RECEIVER_HINT}${edge.toId.slice("callee:".length)}|${[...hint.receivers].sort().join(",")}`);
+    const sites = [...new Set(hint.sites)];
+    while (sites.length > 0 && sites.join(";").length > MAX_HINT_LENGTH) sites.pop();
+    if (sites.length > 0) parts.push(`${PYTHON_ARGS_HINT}${sites.join(";")}`);
+    if (parts.length > 0) edge.assignedExpression = parts.join(" ");
+  }
+}
+
+/** PY-6b: at most this many call sites' argument types per (caller, callee) edge, and this many characters. */
+const MAX_HINT_SITES = 8;
+const MAX_HINT_LENGTH = 600;
+
+/**
+ * PY-6b: `pos:name` when `name` is a parameter of the function holding `site` that nothing types — no
+ * annotation, default constructor or assignment, and no same-file caller agreeing on one class (`hopType`).
+ * `pos` counts after `self` / `cls`, as a call site's positional arguments do.
+ */
+function untypedParameterRef(site: Parser.SyntaxNode, name: string, types: TypeScopes): string | null {
+  if (name === "self" || name === "cls") return null;
+  const fn = enclosingFunction(site);
+  if (!fn) return null;
+  const params = (fn.childForFieldName("parameters")?.namedChildren ?? []).map(parameterName);
+  const positional = isMethodDefinition(fn) && (params[0] === "self" || params[0] === "cls") ? params.slice(1) : params;
+  const index = positional.indexOf(name);
+  if (index < 0) return null;
+  if (localType(site, name, types) !== null || hopType(site, name, types) !== null) return null;
+  return `${String(index)}:${name}`;
+}
+
+/**
+ * PY-6b: one call site's argument types — `#<i>=<Class>` positionally, `<kw>=<Class>` by keyword, and
+ * `=^<pos>:<name>` for an argument that is the caller's own untyped parameter (the next hop). Positional
+ * indexes stop at the first `*args` / `**kw` splat. Null when no argument is typed.
+ */
+function argumentTypes(call: Parser.SyntaxNode, types: TypeScopes): string | null {
+  const entries: string[] = [];
+  let index = 0;
+  let positionalOpen = true;
+  for (const arg of call.childForFieldName("arguments")?.namedChildren ?? []) {
+    if (arg.type === "comment") continue;
+    if (arg.type === "list_splat" || arg.type === "dictionary_splat") {
+      positionalOpen = false;
+      continue;
+    }
+    const keyword = arg.type === "keyword_argument" ? arg.childForFieldName("name")?.text : undefined;
+    const value = keyword !== undefined ? arg.childForFieldName("value") : arg;
+    const slot = keyword !== undefined ? keyword : positionalOpen ? `#${String(index)}` : null;
+    if (keyword === undefined) index += 1;
+    if (!value || !slot) continue;
+    const typed = classOf(value.type === "call" ? (constructedClass(value, types) ?? exprType(value, types, false)) : exprType(value, types, false), types);
+    if (typed && /^[A-Za-z_][A-Za-z0-9_.]*$/.test(typed)) {
+      entries.push(`${slot}=${typed}`);
+      continue;
+    }
+    const ref = value.type === "identifier" ? untypedParameterRef(value, value.text, types) : null;
+    if (ref) entries.push(`${slot}=^${ref}`);
+  }
+  return entries.length > 0 ? entries.join(",") : null;
 }
 
 /** A function name used as a value: defined at module level here, or from-imported from a repo module. */

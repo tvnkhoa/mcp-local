@@ -63,3 +63,12 @@ export const PYTHON_STDLIB_MODULES = new Set<string>([
  * names comma-joined, or `?` when the assignment is not a literal list (export set unknown, nothing filtered).
  */
 export const PYTHON_DUNDER_ALL_PREFIX = "__all__:";
+
+/**
+ * PY-6b: hints a Python CALLS edge carries in `assignedExpression` (space-separated parts), read by
+ * `rebuildPythonUntypedReceiverEdges`:
+ *   - `pyrecv:<member>|<pos>:<param>,…` — a bare `<member>` token whose receiver is the caller's untyped parameter;
+ *   - `pyargs:<site>;<site>` — per call site, `#<i>=<Class>` / `<kw>=<Class>` / `…=^<pos>:<param>` argument types.
+ */
+export const PYTHON_RECEIVER_HINT = "pyrecv:";
+export const PYTHON_ARGS_HINT = "pyargs:";

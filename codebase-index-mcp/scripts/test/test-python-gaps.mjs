@@ -191,6 +191,26 @@ try {
   const unknown = edges.filter((e) => e.type === "CALLS" && e.fromName === "unknown" && e.fromFile === ENGINE && e.toName === "run");
   assert(unknown.length > 0 && unknown.every((e) => e.reason === "resolved callee by name (untyped receiver)" && e.confidence < 0.7),
     "PY-6 an untyped receiver with no caller is a flagged low-confidence candidate (< 0.7)", unknown);
+
+  // ── PY-6b: cross-file, multi-hop callers; a candidate set ──
+  const HOPS = "src/flow/hops/apply.py", LIGHTS = "src/flow/hops/lights.py";
+  const CALLER_TYPED = "resolved callee by caller argument type (untyped receiver)";
+  const hopCalls = (fromName, toName) => edges.filter((e) => e.type === "CALLS" && e.fromName === fromName && e.fromFile === HOPS && e.toName === toName);
+  const applyRun = hopCalls("apply_step", "run");
+  const applyKey = (list) => list.filter((e) => e.type === "CALLS" && e.fromFile === HOPS && (e.toName === "run" || e.toName === "blink"))
+    .map((e) => `${e.fromName}->${e.toParent}.${e.toName}:${e.reason}:${e.confidence}`).sort();
+  assert(applyRun.some((e) => e.toParent === "FixStep" && e.toFile === FIX && e.reason === CALLER_TYPED),
+    "PY-6b step.run() in apply_step → FixStep.run, from fix_now's argument in callers.py (cross-file, 1 hop)", applyRun);
+  assert(applyRun.some((e) => e.toParent === "DraftStep" && e.toFile === DRAFT && e.reason === CALLER_TYPED),
+    "PY-6b … and DraftStep.run, through relay's untyped parameter (cross-file, 2 hops)", applyRun);
+  assert(applyRun.length === 2 && applyRun.every((e) => e.reason === CALLER_TYPED && e.confidence < 0.7),
+    "PY-6b the set is exactly {FixStep.run, DraftStep.run}, each flagged < 0.7 — not Worker.run, not a name pick", applyRun.map((e) => `${e.toParent}:${e.reason}:${e.confidence}`));
+  const pokeBlink = hopCalls("poke", "blink");
+  assert(pokeBlink.length === 2 && ["Lamp", "Led"].every((c) => pokeBlink.some((e) => e.toParent === c && e.toFile === LIGHTS)) &&
+    pokeBlink.every((e) => e.reason === "resolved callee by name (untyped receiver)" && e.confidence < 0.7),
+    "PY-6b no caller types `widget`: widget.blink() → the set {Lamp.blink, Led.blink}, each flagged < 0.7", pokeBlink);
+  assert(!edges.some((e) => e.type === "CALLS" && e.fromName === "unknown" && e.fromFile === ENGINE && e.toName === "run" && e.reason === CALLER_TYPED),
+    "PY-6b a receiver no caller types stays a name candidate (unknown(thing): > 8 `run` methods, no set)");
   const chain = await call("get_call_chain", { repoId, symbolId: sym(ENGINE, "go", "method")?.id, direction: "callees", depth: 3, profile: "verbose" });
   const chainEdges = chain?.edges ?? [];
   assert(chainEdges.some((e) => e.toName === "run" && (e.toFilePath ?? "").replace(/\\/g, "/") === FIX), "PY-6 get_call_chain(Engine.go) reaches FixStep.run",
@@ -240,6 +260,18 @@ try {
   const useAfterAlt = useKey(await loadEdges());
   assert(JSON.stringify(useAfterConsumer) === JSON.stringify(useBefore) && JSON.stringify(useAfterAlt) === JSON.stringify(useBefore),
     "PY-8 / PY-8b incremental runs land on the full run's star-import targets (__all__ filter included)", { useBefore, useAfterConsumer, useAfterAlt });
+
+  // PY-6b scoped: touch the callee's file (its anchors are re-extracted and re-resolved), then the callers'
+  // file (the anchors are unchanged rows the rebuild re-reads); both land on the full run's set.
+  const hopsBefore = applyKey(edges);
+  fs.appendFileSync(path.join(repoDir, "src", "flow", "hops", "apply.py"), "\n# touched\n");
+  await index("incremental");
+  const hopsAfterApply = applyKey(await loadEdges());
+  fs.appendFileSync(path.join(repoDir, "src", "flow", "hops", "callers.py"), "\n# touched\n");
+  await index("incremental");
+  const hopsAfterCallers = applyKey(await loadEdges());
+  assert(JSON.stringify(hopsAfterApply) === JSON.stringify(hopsBefore) && JSON.stringify(hopsAfterCallers) === JSON.stringify(hopsBefore),
+    "PY-6b incremental runs land on the full run's candidate sets", { hopsBefore, hopsAfterApply, hopsAfterCallers });
 } finally {
   await Promise.race([client.close().catch(() => {}), new Promise((r) => setTimeout(r, 3000))]);
 }
