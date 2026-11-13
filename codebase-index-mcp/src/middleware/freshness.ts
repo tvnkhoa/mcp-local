@@ -318,6 +318,18 @@ export const MAX_REPAIR_ATTEMPTS = 2;
  * {@link FAILED_REFRESH_BACKOFF_MAX_MS}. A run that finishes (any caller, through `serialize`) clears it; a cancelled run
  * neither counts nor clears; `index_repository` is never held back. Per process, like the gate's other memory.
  */
+/**
+ * MCP-ISSUE-127: a tree check that outlived its caller's budget (the caller was answered `refreshing`, "a later query will
+ * use it") leaves its verdict for the callers that arrive within this many ms of the check FINISHING. Without it the
+ * verdict was dropped (`checkTtlMs` defaults to 0), every later query started a check that timed out again, and on a
+ * machine where `git status` + hashing take longer than the budget every read said `refreshing` for good (CI run
+ * 43190005628). Like any verdict it is a snapshot from the check's start. Blind spot (owner, 13 Nov, option A): an edit
+ * made after the check started can be answered `fresh` for at most the check's duration + this window; the first check
+ * started after the window sees it, and an edit made before the check started is never answered fresh. The same 1 s
+ * the gate already keeps a non-fresh verdict.
+ */
+export const LATE_CHECK_REUSE_MS = 1_000;
+
 export const FAILED_REFRESH_BACKOFF_MS = 30_000;
 export const FAILED_REFRESH_BACKOFF_MAX_MS = 15 * 60_000;
 
@@ -872,7 +884,8 @@ export function createFreshnessGate(opts: FreshnessGateOptions): FreshnessGate {
     }
     return p;
   };
-  const lastCheck = new Map<string, { at: number } & Verdict>();
+  /** `lateDoneAt`: MCP-ISSUE-127 — the check outlived its caller's budget and finished then (see LATE_CHECK_REUSE_MS). */
+  const lastCheck = new Map<string, { at: number; lateDoneAt?: number } & Verdict>();
   type Flight = {
     mode: "full" | "incremental" | "dirty";
     startedAt: number;
@@ -886,7 +899,7 @@ export function createFreshnessGate(opts: FreshnessGateOptions): FreshnessGate {
   };
   const inflight = new Map<string, Flight>();
   /** MCP-ISSUE-110: a tree check in flight per repo; its promise never rejects (an error is carried, and rethrown to each waiter). */
-  type Check = { startedAt: number; promise: Promise<Verdict | { error: unknown }> };
+  type Check = { startedAt: number; promise: Promise<Verdict | { error: unknown }>; late?: boolean };
   const checking = new Map<string, Check>();
   /** MCP-ISSUE-123 re-review B: consecutive failed gate-started runs per repo, and when the last one ended. */
   const failedRefreshes = new Map<string, { count: number; at: number }>();
@@ -1062,7 +1075,11 @@ export function createFreshnessGate(opts: FreshnessGateOptions): FreshnessGate {
       };
     }
     const cached = lastCheck.get(repoId);
-    if (!repair && cached && started - cached.at < (cached.note.state === "fresh" ? checkTtlMs : Math.max(checkTtlMs, 1_000))) return { note: cached.note, changed: cached.note.state === "fresh" ? cached.changed : null };
+    const reusable =
+      cached !== undefined &&
+      (started - cached.at < (cached.note.state === "fresh" ? checkTtlMs : Math.max(checkTtlMs, 1_000)) ||
+        (cached.lateDoneAt !== undefined && started - cached.lateDoneAt < LATE_CHECK_REUSE_MS));
+    if (!repair && cached && reusable) return { note: cached.note, changed: cached.note.state === "fresh" ? cached.changed : null };
 
     const repoPath = opts.getRepoPath(repoId);
     if (!repoPath) return { note: { state: "fresh" }, changed: { paths: [] } };
@@ -1074,7 +1091,12 @@ export function createFreshnessGate(opts: FreshnessGateOptions): FreshnessGate {
       const pending: Check = {
         startedAt: started,
         promise: checkTree(repoId, repoPath, repair, started).then(
-          (verdict) => verdict,
+          (verdict) => {
+            // MCP-ISSUE-127: a caller was told "a later query will use it" — keep the verdict this check stored for them.
+            const stored = lastCheck.get(repoId);
+            if (pending.late && stored?.at === started) lastCheck.set(repoId, { ...stored, lateDoneAt: now() });
+            return verdict;
+          },
           (error: unknown) => ({ error })
         )
       };
@@ -1101,6 +1123,7 @@ export function createFreshnessGate(opts: FreshnessGateOptions): FreshnessGate {
     const outcome = await Promise.race([check.promise, timeout]);
     if (timer) clearTimeout(timer);
     if (outcome === "timeout") {
+      check.late = true;
       return {
         note: {
           state: "refreshing",
