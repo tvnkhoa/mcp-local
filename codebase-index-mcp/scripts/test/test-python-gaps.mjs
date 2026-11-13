@@ -131,6 +131,31 @@ try {
     "PY-8 Formatter.check() on a star-imported class → impl.py Formatter.check", useCalls());
   const useKey = (list) => list.filter((e) => e.type === "CALLS" && e.fromName === "use" && e.fromFile === CONSUMER).map((e) => `${e.toName}@${e.toFile}`).sort();
 
+  // ── PY-6 ──
+  const ENGINE = "src/flow/engine.py", STAGING = "src/flow/staging.py", FIX = "src/flow/steps/fix_step.py", DRAFT = "src/flow/steps/draft_step.py";
+  const engineCalls = (fromName) => edges.filter((e) => e.type === "CALLS" && e.fromName === fromName && e.fromFile === ENGINE && e.toName === "run");
+  const stepImpl = (from) => edges.find((e) => e.type === "IMPLEMENTS" && e.fromName === from && e.toName === "Step");
+  assert(stepImpl("FixStep") && stepImpl("DraftStep"), "PY-6 FixStep / DraftStep structurally implement Step (signature fits)", show((e) => e.type === "IMPLEMENTS" && e.toName === "Step"));
+  assert(!stepImpl("Worker"), "PY-6 Worker.run(job: str) -> str is not a Step.run(ctx: Ctx) -> Outcome: no IMPLEMENTS");
+  const go = engineCalls("go");
+  assert(go.some((e) => e.toParent === "Step" && e.toFile === STAGING), "PY-6 self.factory(sid)().run(ctx) → Step.run (return annotation → Callable alias → Step)", go);
+  assert(go.some((e) => e.toParent === "FixStep" && e.toFile === FIX && e.reason === "interface-dispatch") &&
+    go.some((e) => e.toParent === "DraftStep" && e.toFile === DRAFT && e.reason === "interface-dispatch"),
+    "PY-6 the run path reaches FixStep.run and DraftStep.run through the stage Protocol", go.map((e) => `${e.toParent}.${e.toName} (${e.reason})`));
+  assert(!go.some((e) => e.toParent === "Worker"), "PY-6 the dispatch skips Worker.run");
+  assert(engineCalls("built").some((e) => e.toParent === "Step"), "PY-6 step = make_fix() (-> Step); step.run() → Step.run", engineCalls("built"));
+  const drive = engineCalls("drive");
+  assert(drive.some((e) => e.toParent === "FixStep" && e.reason === "resolved callee by receiver type"), "PY-6 untyped param `item` takes FixStep from its one same-file caller (1 hop)", drive);
+  const withDefault = edges.filter((e) => e.type === "CALLS" && e.fromName === "with_default" && e.fromFile === ENGINE && e.toName === "run");
+  assert(withDefault.some((e) => e.toParent === "FixStep"), "PY-6 `step=FixStep()` default types the parameter", withDefault);
+  const unknown = edges.filter((e) => e.type === "CALLS" && e.fromName === "unknown" && e.fromFile === ENGINE && e.toName === "run");
+  assert(unknown.length > 0 && unknown.every((e) => e.reason === "resolved callee by name (untyped receiver)" && e.confidence < 0.7),
+    "PY-6 an untyped receiver with no caller is a flagged low-confidence candidate (< 0.7)", unknown);
+  const chain = await call("get_call_chain", { repoId, symbolId: sym(ENGINE, "go", "method")?.id, direction: "callees", depth: 3, profile: "verbose" });
+  const chainEdges = chain?.edges ?? [];
+  assert(chainEdges.some((e) => e.toName === "run" && (e.toFilePath ?? "").replace(/\\/g, "/") === FIX), "PY-6 get_call_chain(Engine.go) reaches FixStep.run",
+    chainEdges.map((e) => `${e.fromName}->${e.toName}@${e.toFilePath} (${e.reason})`));
+
   // Scoped re-index: touch one implementer; the rebuilt-whole IMPLEMENTS set must not move.
   const before = implementsKey(edges);
   fs.appendFileSync(path.join(repoDir, "src", "flow", "executors", "mock.py"), "\n# touched\n");

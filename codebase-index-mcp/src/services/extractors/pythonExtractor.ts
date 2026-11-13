@@ -401,8 +401,34 @@ function isStdlibSpec(spec: string): boolean {
 
 // ── Calls ───────────────────────────────────────────────────────────────────────────────────
 
-/** Names → class a receiver is known to hold, per function (parameters, constructor assignments). */
-type TypeScopes = { byFunction: Map<number, Map<string, string>>; byClass: Map<number, Map<string, string>> };
+/**
+ * Names → class a receiver is known to hold, per function (parameters, constructor assignments).
+ *
+ * PY-6: a type is a class name (`Foo`) or a callable that returns one (`()=>Foo`, from `Callable[..., Foo]`).
+ * `returns` holds the file's return annotations and type aliases; `callSites` the file's calls by callee
+ * name, for the one hop from an untyped parameter to its same-file callers' argument types.
+ */
+type TypeScopes = {
+  byFunction: Map<number, Map<string, string>>;
+  byClass: Map<number, Map<string, string>>;
+  returns: ReturnTypes;
+  callSites: Map<string, Parser.SyntaxNode[]>;
+  /** `<fn startIndex>:<param>` → the one type its same-file callers pass, or null (none / several). */
+  hop: Map<string, string | null>;
+  localClasses: Set<string>;
+  scope: ImportScope;
+};
+
+type ReturnTypes = {
+  /** Module function name → its return type. */
+  functions: Map<string, string>;
+  /** `Class.method` → its return type. */
+  methods: Map<string, string>;
+  /** Module-level `X = Callable[[...], Foo]` / `X = Foo` / `X: TypeAlias = ...`. */
+  aliases: Map<string, string>;
+};
+
+const CALLABLE_PREFIX = "()=>";
 
 function extractCalls(
   input: ExtractInput,
@@ -414,7 +440,15 @@ function extractCalls(
   localClasses: Set<string>,
   registered: ReadonlySet<string>
 ): void {
-  const types: TypeScopes = { byFunction: new Map(), byClass: new Map() };
+  const types: TypeScopes = {
+    byFunction: new Map(),
+    byClass: new Map(),
+    returns: collectReturnTypes(root),
+    callSites: indexCallSites(root),
+    hop: new Map(),
+    localClasses,
+    scope
+  };
   const seen = new Set<string>();
   const push = (fromId: string, token: string): void => {
     const key = `${fromId}\u0000${token}`;
@@ -534,7 +568,8 @@ function callToken(
       return /^[A-Z]/.test(imported.original) ? `${imported.original}.${member}` : member;
     }
     if (localClasses.has(name)) return `${name}.${member}`;
-    const typed = localType(site, name, types);
+    // PY-6: the local / parameter type first, then (1 hop) the one type every same-file caller passes.
+    const typed = classOf(localType(site, name, types), types) ?? hopType(site, name, types);
     if (typed) return `${typed}.${member}`;
     if (PYTHON_STDLIB_MODULES.has(name)) return null;
     // PY-8: a capitalised name nothing here binds, in a file that star-imports a repo module, is a class that
@@ -547,9 +582,16 @@ function callToken(
     const field = receiver.childForFieldName("attribute")?.text;
     if (inner?.type === "identifier" && inner.text === "self" && field) {
       const owner = enclosingClass(site);
-      const typed = owner ? classFieldType(owner, field, types) : null;
+      const typed = owner ? classOf(classFieldType(owner, field, types), types) : null;
       if (typed) return `${typed}.${member}`;
     }
+  }
+
+  // PY-6: a call as the receiver — `self.make().run()`, `build(x).run()`, `self.factory(id)().run()` — is
+  // typed from the callee's return annotation (a `Callable[..., Foo]` alias called once more yields `Foo`).
+  if (receiver.type === "call") {
+    const typed = classOf(exprType(receiver, types, true), types);
+    if (typed) return `${typed}.${member}`;
   }
 
   return PYTHON_BUILTIN_METHODS.has(member) ? null : member;
@@ -615,19 +657,209 @@ function localType(site: Parser.SyntaxNode, name: string, types: TypeScopes): st
   let map = types.byFunction.get(fn.startIndex);
   if (!map) {
     map = new Map<string, string>();
+    // Cached BEFORE it is filled: an assignment typed from a call (PY-6) may ask this function's map again.
+    types.byFunction.set(fn.startIndex, map);
     const params = fn.childForFieldName("parameters");
     for (const p of params?.namedChildren ?? []) {
-      if (p.type !== "typed_parameter" && p.type !== "typed_default_parameter") continue;
-      const pname = p.type === "typed_parameter" ? p.namedChildren.find((c) => c.type === "identifier")?.text : p.childForFieldName("name")?.text;
-      const ptype = p.childForFieldName("type");
-      const tname = ptype ? typeNameOf(ptype) : null;
-      if (pname && tname) map.set(pname, tname);
+      const pname = parameterName(p);
+      if (!pname) continue;
+      const ptype = p.type === "typed_parameter" || p.type === "typed_default_parameter" ? p.childForFieldName("type") : null;
+      let tname = ptype ? annotationType(ptype) : null;
+      // PY-6: `def f(x=Foo())` — the default's constructor types the parameter when nothing annotates it.
+      const value = p.type === "default_parameter" || p.type === "typed_default_parameter" ? p.childForFieldName("value") : null;
+      if (!tname && value?.type === "call") tname = constructedClass(value, types);
+      if (tname) map.set(pname, tname);
     }
     const body = fn.childForFieldName("body");
-    if (body) collectAssignedTypes(body, map, (left) => (left.type === "identifier" ? left.text : null));
-    types.byFunction.set(fn.startIndex, map);
+    if (body) {
+      collectAssignedTypes(body, map, (left) => (left.type === "identifier" ? left.text : null), undefined, (right) =>
+        right.type === "call" ? exprType(right, types, false) : null
+      );
+    }
   }
   return map.get(name) ?? null;
+}
+
+function parameterName(p: Parser.SyntaxNode): string | null {
+  if (p.type === "identifier") return p.text;
+  if (p.type === "typed_parameter") return p.namedChildren.find((c) => c.type === "identifier")?.text ?? null;
+  if (p.type === "default_parameter" || p.type === "typed_default_parameter") return p.childForFieldName("name")?.text ?? null;
+  return null;
+}
+
+// ── PY-6: return annotations, aliases, call receivers, 1-hop caller arguments ─────────────────────
+
+/** An annotation as a PY-6 type: `Callable[[...], Foo]` → `()=>Foo`, anything else as `typeNameOf` reads it. */
+function annotationType(node: Parser.SyntaxNode): string | null {
+  const inner = node.type === "type" && node.namedChildren[0] ? node.namedChildren[0] : node;
+  if (inner.type === "subscript" || inner.type === "generic_type") {
+    const headNode = inner.type === "subscript" ? inner.childForFieldName("value") : inner.namedChildren[0];
+    const head = headNode?.type === "attribute" ? headNode.childForFieldName("attribute")?.text : headNode?.text;
+    if (head === "Callable") {
+      const args =
+        inner.type === "subscript"
+          ? inner.namedChildren.filter((c) => !headNode || !isSameNode(c, headNode))
+          : (inner.namedChildren.find((c) => c.type === "type_parameter")?.namedChildren ?? []);
+      const ret = args[args.length - 1];
+      const rname = ret ? annotationType(ret) : null;
+      return rname ? `${CALLABLE_PREFIX}${rname}` : null;
+    }
+  }
+  return typeNameOf(node);
+}
+
+/** Module-level aliases and every def's return annotation, keyed for `exprType`. */
+function collectReturnTypes(root: Parser.SyntaxNode): ReturnTypes {
+  const out: ReturnTypes = { functions: new Map(), methods: new Map(), aliases: new Map() };
+  for (const stmt of root.namedChildren) {
+    const assign = stmt.type === "expression_statement" ? stmt.namedChildren[0] : null;
+    if (assign?.type !== "assignment") continue;
+    const left = assign.childForFieldName("left");
+    const right = assign.childForFieldName("right");
+    if (left?.type !== "identifier" || !right || !/^[A-Z]/.test(left.text)) continue;
+    const t = right.type === "subscript" || right.type === "identifier" || right.type === "attribute" ? annotationType(right) : null;
+    if (t && t !== left.text) out.aliases.set(left.text, t);
+  }
+  for (const def of root.descendantsOfType("function_definition")) {
+    const name = def.childForFieldName("name")?.text;
+    const ret = def.childForFieldName("return_type");
+    const t = ret ? annotationType(ret) : null;
+    if (!name || !t) continue;
+    const owner = isMethodDefinition(def) ? enclosingClassOfDef(def)?.childForFieldName("name")?.text : null;
+    if (owner) out.methods.set(`${owner}.${name}`, t);
+    else if (!enclosingFunction(def)) out.functions.set(name, t);
+  }
+  return out;
+}
+
+/** An alias followed to what it names (a few hops, never a cycle). */
+function resolveAlias(t: string | null, types: TypeScopes): string | null {
+  let current = t;
+  for (let i = 0; current && i < 4; i += 1) {
+    const isCallable = current.startsWith(CALLABLE_PREFIX);
+    const bare = isCallable ? current.slice(CALLABLE_PREFIX.length) : current;
+    const next = types.returns.aliases.get(bare);
+    if (!next) return current;
+    current = isCallable ? (next.startsWith(CALLABLE_PREFIX) ? null : `${CALLABLE_PREFIX}${next}`) : next;
+  }
+  return current;
+}
+
+/** A PY-6 type that names a class a member can be looked up on; a callable or nothing → null. */
+function classOf(t: string | null, types: TypeScopes): string | null {
+  const resolved = resolveAlias(t, types);
+  return resolved && !resolved.startsWith(CALLABLE_PREFIX) ? resolved : null;
+}
+
+/** `Foo(...)` for a capitalised callee: the class it constructs. */
+function constructedClass(call: Parser.SyntaxNode, types: TypeScopes): string | null {
+  const callee = call.childForFieldName("function");
+  const cname = callee ? typeNameOf(callee) : null;
+  if (!cname || !/^[A-Z]/.test(cname) || types.returns.aliases.has(cname)) return null;
+  return cname;
+}
+
+/**
+ * The PY-6 type of an expression, from what this file proves: a constructor call, a function's or method's
+ * return annotation (`self.m()` on the enclosing class), a callable type called once more, a typed local or
+ * field. `hop` lets an untyped parameter take its callers' argument type; it is off inside that hop.
+ */
+function exprType(node: Parser.SyntaxNode, types: TypeScopes, hop: boolean): string | null {
+  switch (node.type) {
+    case "parenthesized_expression":
+      return node.namedChildren[0] ? exprType(node.namedChildren[0], types, hop) : null;
+    case "identifier": {
+      if (node.text === "self" || node.text === "cls") return enclosingClass(node)?.childForFieldName("name")?.text ?? null;
+      return resolveAlias(localType(node, node.text, types), types) ?? (hop ? hopType(node, node.text, types) : null);
+    }
+    case "attribute": {
+      const obj = node.childForFieldName("object");
+      const field = node.childForFieldName("attribute")?.text;
+      if (obj?.type === "identifier" && obj.text === "self" && field) {
+        const owner = enclosingClass(node);
+        return owner ? resolveAlias(classFieldType(owner, field, types), types) : null;
+      }
+      return null;
+    }
+    case "call": {
+      const fn = node.childForFieldName("function");
+      if (!fn) return null;
+      if (fn.type === "identifier") {
+        const name = fn.text;
+        const fromFunction = types.returns.functions.get(name);
+        if (fromFunction) return resolveAlias(fromFunction, types);
+        const imported = types.scope.names.get(name);
+        if (types.localClasses.has(name) || (imported && !isStdlibSpec(imported.fromModule) && /^[A-Z]/.test(imported.original))) {
+          return imported?.original ?? name;
+        }
+        const local = resolveAlias(localType(node, name, types), types);
+        return local?.startsWith(CALLABLE_PREFIX) ? local.slice(CALLABLE_PREFIX.length) : null;
+      }
+      if (fn.type === "attribute") {
+        const obj = fn.childForFieldName("object");
+        const member = fn.childForFieldName("attribute")?.text;
+        if (!obj || !member) return null;
+        const owner = classOf(exprType(obj, types, hop), types);
+        const fromMethod = owner ? types.returns.methods.get(`${owner}.${member}`) : undefined;
+        return fromMethod ? resolveAlias(fromMethod, types) : null;
+      }
+      // `f(x)()`: the inner call returns a callable; calling it yields what the callable returns.
+      const inner = resolveAlias(exprType(fn, types, hop), types);
+      return inner?.startsWith(CALLABLE_PREFIX) ? inner.slice(CALLABLE_PREFIX.length) : null;
+    }
+    default:
+      return null;
+  }
+}
+
+/** Calls in the file by the name they call: `f(...)` → `f`, `self.m(...)` / `cls.m(...)` → `.m`. */
+function indexCallSites(root: Parser.SyntaxNode): Map<string, Parser.SyntaxNode[]> {
+  const out = new Map<string, Parser.SyntaxNode[]>();
+  for (const call of root.descendantsOfType("call")) {
+    const fn = call.childForFieldName("function");
+    let key: string | undefined;
+    if (fn?.type === "identifier") key = fn.text;
+    else if (fn?.type === "attribute") {
+      const obj = fn.childForFieldName("object");
+      if (obj?.type === "identifier" && (obj.text === "self" || obj.text === "cls")) key = `.${fn.childForFieldName("attribute")?.text ?? ""}`;
+    }
+    if (!key) continue;
+    const list = out.get(key);
+    if (list) list.push(call);
+    else out.set(key, [call]);
+  }
+  return out;
+}
+
+/**
+ * PY-6, one hop: an untyped parameter of the function holding `site` takes the class its same-file callers
+ * pass in that position (or by keyword) — only when every caller that types the argument agrees.
+ */
+function hopType(site: Parser.SyntaxNode, name: string, types: TypeScopes): string | null {
+  const fn = enclosingFunction(site);
+  if (!fn) return null;
+  const key = `${fn.startIndex}:${name}`;
+  if (types.hop.has(key)) return types.hop.get(key) ?? null;
+  types.hop.set(key, null);
+  const fnName = fn.childForFieldName("name")?.text;
+  const params = (fn.childForFieldName("parameters")?.namedChildren ?? []).map(parameterName);
+  const method = isMethodDefinition(fn);
+  const positional = method ? params.slice(1) : params;
+  const index = positional.indexOf(name);
+  if (!fnName || index < 0) return null;
+  const sites = method ? (types.callSites.get(`.${fnName}`) ?? []) : (types.callSites.get(fnName) ?? []);
+  const found = new Set<string>();
+  for (const call of sites) {
+    const args = call.childForFieldName("arguments")?.namedChildren ?? [];
+    const keyword = args.find((a) => a.type === "keyword_argument" && a.childForFieldName("name")?.text === name);
+    const arg = keyword ? keyword.childForFieldName("value") : args.filter((a) => a.type !== "keyword_argument")[index];
+    if (!arg) continue;
+    const t = classOf(arg.type === "call" ? (constructedClass(arg, types) ?? exprType(arg, types, false)) : exprType(arg, types, false), types);
+    if (t) found.add(t);
+  }
+  const result = found.size === 1 ? [...found][0]! : null;
+  types.hop.set(key, result);
+  return result;
 }
 
 /** The class `self.<field>` holds: a class-level `field: Foo`, or `self.field = Foo(...)` / `self.field = param` in a method. */
@@ -691,7 +923,9 @@ function collectAssignedTypes(
   body: Parser.SyntaxNode,
   map: Map<string, string>,
   targetName: (left: Parser.SyntaxNode) => string | null,
-  params?: ReadonlyMap<string, string>
+  params?: ReadonlyMap<string, string>,
+  /** PY-6: types a right-hand side the rules below do not (a call through a return annotation). */
+  typeOfRight?: (right: Parser.SyntaxNode) => string | null
 ): void {
   // Children are pushed in reverse so nodes pop in source order and "first assignment" means first in the file.
   const stack: Parser.SyntaxNode[] = [...body.namedChildren].reverse();
@@ -711,6 +945,7 @@ function collectAssignedTypes(
           if (cname && /^[A-Z]/.test(cname)) tname = cname;
         }
         if (!tname && right?.type === "identifier" && params) tname = params.get(right.text) ?? null;
+        if (!tname && right && typeOfRight) tname = typeOfRight(right);
         if (tname) map.set(name, tname);
       }
     }
