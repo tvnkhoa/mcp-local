@@ -80,6 +80,12 @@ const SUPERSEDED_REASON = "superseded by qualified call";
 export interface CallResolutionContext {
   candidateMap: Map<string, { symbolId: string; filePath: string; kind: string; parentSymbolId: string | null }[]>;
   interfaceByName: Map<string, { symbolId: string; filePath: string }>;
+  /**
+   * PY-5c: every Python Protocol (kind `interface` in a .py / .pyi file) per name. A Python caller picks its
+   * Protocol here like any other name — same file, then a file it imports, then the tie-break — instead of
+   * taking `interfaceByName`'s first row by path repo-wide.
+   */
+  pythonInterfacesByName: Map<string, NamedCandidate[]>;
   /** ISSUE-022: symbolIds của mọi interface — detect bare-name match trúng interface method để fan-out. */
   interfaceIdSet: Set<string>;
   /**
@@ -127,9 +133,15 @@ export function buildCallResolutionContext(db: Database.Database, repoId: string
     .all(repoId) as { symbolId: string; name: string; filePath: string }[];
   const interfaceByName = new Map<string, { symbolId: string; filePath: string }>();
   const interfaceIdSet = new Set<string>();
+  const pythonInterfacesByName = new Map<string, NamedCandidate[]>();
   for (const r of interfaceRows) {
     if (!interfaceByName.has(r.name)) interfaceByName.set(r.name, { symbolId: r.symbolId, filePath: r.filePath });
     interfaceIdSet.add(r.symbolId);
+    if (!isPythonFile(r.filePath)) continue;
+    const candidate: NamedCandidate = { symbolId: r.symbolId, filePath: r.filePath, kind: "interface", parentSymbolId: null };
+    const list = pythonInterfacesByName.get(r.name);
+    if (list) list.push(candidate);
+    else pythonInterfacesByName.set(r.name, [candidate]);
   }
 
   // MCP-ISSUE-037: the class-inheritance mirror of the two structures above. `EXTENDS` is resolved before
@@ -202,7 +214,7 @@ export function buildCallResolutionContext(db: Database.Database, repoId: string
     )
     .all({ repoId, supersededReason: SUPERSEDED_REASON }) as { fromId: string; toId: string; fromFile: string }[];
 
-  return { candidateMap, interfaceByName, interfaceIdSet, subclassFilesByBaseId, basesByClassId, virtualMethodIds, updateStmt, unresolvedRows, offset: 0, importedFilesByFile };
+  return { candidateMap, interfaceByName, pythonInterfacesByName, interfaceIdSet, subclassFilesByBaseId, basesByClassId, virtualMethodIds, updateStmt, unresolvedRows, offset: 0, importedFilesByFile };
 }
 
 /**
@@ -505,7 +517,10 @@ export function resolveCallEdgesBatch(
       const receiverType = parts.length > 1 ? parts.slice(0, -1).join(".") : "";
       const memberName = parts[parts.length - 1] ?? "";
       if (receiverType && memberName) {
-        const iface = interfaceByName.get(receiverType);
+        // PY-5c: a Python caller's Protocol is the one it can see, not the first of that name by path.
+        const iface = isPythonFile(row.fromFile)
+          ? pickBestNamedCandidate(ctx.pythonInterfacesByName.get(receiverType) ?? [], row.fromFile, ["interface"], importedFiles)
+          : interfaceByName.get(receiverType);
         if (iface) {
           const memberCandidates = candidateMap.get(memberName) ?? [];
           // PY-5 review: a Python file often holds a Protocol and a class with the same method name

@@ -116,6 +116,18 @@ try {
   assert(finish.some((e) => e.toParent === "Fancy" && e.reason === "interface-dispatch"), "PY-5b Fancy's own override is dispatched", finishTo);
   assert(!finish.some((e) => e.toParent === "Stray" || e.toParent === "Page"), "PY-5b no edge to a non-implementer (Stray) or a class without the method (Page)", finishTo);
 
+  // ── PY-5c: a Protocol is bound by the caller's import ──
+  const A_SINK = "src/flow/a_sinks/ports.py", Z_SINK = "src/flow/z_sinks/ports.py";
+  const emitOf = (fromName) => edges.filter((e) => e.type === "CALLS" && e.fromName === fromName && e.toName === "emit")
+    .map((e) => `${e.toParent}@${e.toFile}:${e.reason}`).sort();
+  const sendTo = emitOf("send");
+  assert(sendTo.some((t) => t.startsWith(`Sink@${Z_SINK}`)) && sendTo.some((t) => t === `TextSink@${Z_SINK}:interface-dispatch`),
+    "PY-5c sink.emit() with Sink imported from z_sinks → z_sinks Sink.emit, dispatched to TextSink", sendTo);
+  assert(!sendTo.some((t) => t.includes(A_SINK)), "PY-5c … and nothing in a_sinks (the same-named Protocol sorting first)", sendTo);
+  const sendIntTo = emitOf("send_int");
+  assert(sendIntTo.some((t) => t.startsWith(`Sink@${A_SINK}`)) && sendIntTo.some((t) => t === `IntSink@${A_SINK}:interface-dispatch`) && !sendIntTo.some((t) => t.includes(Z_SINK)),
+    "PY-5c control: the caller importing a_sinks binds a_sinks Sink → IntSink only", sendIntTo);
+
   // ── PY-7 ──
   const fixtureOf = (testName, testFile) => edges.filter((e) => e.type === "CALLS" && e.fromName === testName && e.fromFile === testFile && e.toName === "stage");
   const unitStage = fixtureOf("test_runs", "tests/unit/test_smoke.py");
