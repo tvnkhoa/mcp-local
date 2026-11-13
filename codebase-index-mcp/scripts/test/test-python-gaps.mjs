@@ -103,6 +103,19 @@ try {
   assert(["MockExecutor", "ManualExecutor", "SyncExecutor", "BatchRunner"].every((c) => driveCalls.some((e) => e.toName === "run" && e.toParent === c && e.reason === "interface-dispatch")),
     "PY-5 the call dispatches to each implementer's run", driveCalls.map((e) => `${e.toParent}.${e.toName} (${e.reason})`));
 
+  // ── PY-5b: inherited bodies are dispatch targets ──
+  const shutdownDispatch = edges.filter((e) => e.type === "CALLS" && e.fromName === "shutdown" && e.fromFile === PIPE && e.reason === "interface-dispatch");
+  assert(shutdownDispatch.some((e) => e.toName === "close" && e.toParent === "BaseExec" && e.toFile === "src/flow/executors/base.py"),
+    "PY-5b executor.close() dispatches to BaseExec.close, which SyncExecutor inherits", shutdownDispatch.map((e) => `${e.toParent}.${e.toName}`));
+  const DEFAULTS = "src/flow/defaults.py";
+  const finish = edges.filter((e) => e.type === "CALLS" && e.fromName === "finish" && e.fromFile === DEFAULTS && e.toName === "footer");
+  const finishTo = finish.map((e) => `${e.toParent}:${e.reason}`).sort();
+  assert(finish.some((e) => e.toParent === "Renderer" && e.reason !== "interface-dispatch"), "PY-5b r.footer() → Renderer.footer", finishTo);
+  assert(finish.some((e) => e.toParent === "RendererDefaults" && e.reason === "interface-dispatch"),
+    "PY-5b Page (no override) → the sub-Protocol's default RendererDefaults.footer", finishTo);
+  assert(finish.some((e) => e.toParent === "Fancy" && e.reason === "interface-dispatch"), "PY-5b Fancy's own override is dispatched", finishTo);
+  assert(!finish.some((e) => e.toParent === "Stray" || e.toParent === "Page"), "PY-5b no edge to a non-implementer (Stray) or a class without the method (Page)", finishTo);
+
   // ── PY-7 ──
   const fixtureOf = (testName, testFile) => edges.filter((e) => e.type === "CALLS" && e.fromName === testName && e.fromFile === testFile && e.toName === "stage");
   const unitStage = fixtureOf("test_runs", "tests/unit/test_smoke.py");

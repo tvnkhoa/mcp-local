@@ -329,15 +329,23 @@ export function resolvePythonQualifiedCall(
   if (!owner) return undefined;
   const members = lookup.methodsByParent(memberName);
   if (members.size === 0) return undefined;
-  const queue = [owner.symbolId];
+  return pythonMemberOnChain(members, ctx.basesByClassId, owner.symbolId);
+}
+
+/**
+ * The member declared on `classId` or — breadth-first, in base-list order, like a simple MRO — on one of its
+ * resolved in-repo bases (classes and Protocols). `members` is one name's methods keyed by owner id.
+ */
+function pythonMemberOnChain<T>(members: ReadonlyMap<string, T>, basesByClassId: ReadonlyMap<string, string[]>, classId: string): T | undefined {
+  const queue = [classId];
   const seen = new Set<string>();
   while (queue.length > 0 && seen.size < MAX_PYTHON_MRO_CLASSES) {
-    const classId = queue.shift()!;
-    if (seen.has(classId)) continue;
-    seen.add(classId);
-    const hit = members.get(classId);
+    const next = queue.shift()!;
+    if (seen.has(next)) continue;
+    seen.add(next);
+    const hit = members.get(next);
     if (hit) return hit;
-    queue.push(...(ctx.basesByClassId.get(classId) ?? []));
+    queue.push(...(basesByClassId.get(next) ?? []));
   }
   return undefined;
 }
@@ -776,6 +784,10 @@ export function rebuildInterfaceDispatchEdges(db: Database.Database, repoId: str
     } else implementorFiles.set(r.ifaceId, [r.filePath]);
   }
   const candidateMap = buildNamedCandidateMap(db, repoId, ["function", "method", "constructor", "class"]);
+  // PY-5b: the base chains the Python fan-out walks — only built when a Protocol has implementers.
+  const pythonBases = pythonImplementors.size > 0
+    ? buildPythonBases(db, repoId, candidateMap, buildImportedFilesByFile(db, repoId))
+    : new Map<string, string[]>();
   const insert = db.prepare(
     `insert into edges (repo_id, from_id, to_id, type, confidence, reason)
      select ?, ?, ?, 'CALLS', 0.7, 'interface-dispatch'
@@ -789,11 +801,13 @@ export function rebuildInterfaceDispatchEdges(db: Database.Database, repoId: str
         if (!impl || impl.symbolId === call.methodId) continue;
         count += insert.run(repoId, call.fromId, impl.symbolId, repoId, call.fromId, impl.symbolId).changes;
       }
-      // PY-6: a Python implementer's own method, by owner rather than by file. A pipeline's stage list is
+      // PY-6: a Python implementer's method, by owner rather than by file. A pipeline's stage list is
       // usually longer than the C# cap, so Python Protocols get a larger one.
+      // PY-5b: the method the implementer RUNS — its own, else the first up its MRO: a base class's, or a
+      // (sub-)Protocol's default body. The Protocol member the call already targets is skipped below.
       const byParent = pythonLookupFor(candidateMap).methodsByParent(call.name);
       for (const implId of (pythonImplementors.get(call.ifaceId) ?? []).slice(0, MAX_PYTHON_PROTOCOL_DISPATCH_FANOUT)) {
-        const impl = byParent.get(implId);
+        const impl = pythonMemberOnChain(byParent, pythonBases, implId);
         if (!impl || impl.symbolId === call.methodId) continue;
         count += insert.run(repoId, call.fromId, impl.symbolId, repoId, call.fromId, impl.symbolId).changes;
       }
