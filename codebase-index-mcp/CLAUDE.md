@@ -8,7 +8,10 @@ This is an **MCP (Model Context Protocol) server** that builds a code graph over
 
 **Naming inside `services/extractors/`.** Two prefixes, and the split is by scope, not by taste:
 `<language>Extractor.ts` is a language's entry point (`jsExtractor`, `pythonExtractor`,
-`csharpExtractor`); `csharp*` / `js*` are that language's internals (`csharpSymbols`,
+`csharpExtractor`; JS/TS, C# and Python are all tree-sitter lanes, `pythonExtractor` on
+`tree-sitter-python` since INDEX_VERSION v16 — it emits class/method/function symbols, `EXTENDS`,
+`IMPORTS`, `CALLS` incl. pytest fixture uses, and FastAPI routes; only `.proto` and the .NET project
+files stay regex); `csharp*` / `js*` are that language's internals (`csharpSymbols`,
 `csharpTypeRefs`, `csharpScope`, `jsCalls`); bare `extractor*` is machinery shared across
 languages (`extractorEdges`, `extractorUtils`, `extractorPrimitives`, `extractorTypes`,
 `extractorRoutes`).

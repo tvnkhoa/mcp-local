@@ -335,6 +335,8 @@ test("MCP-ISSUE-110: a tree check that outlives the budget answers refreshing, r
     assert.ok(Date.now() - t0 < 150, `the answer keeps to the budget, not the check (${String(Date.now() - t0)} ms)`);
     assert.equal(first.state, "refreshing");
     assert.match(first.reason ?? "", /checking the working tree/);
+    // MCP-ISSUE-127: the reason promises only what happens — a refresh the check starts, else a new check next query.
+    assert.match(first.reason ?? "", /if nothing changed, the next query checks again/);
     const second = await gate.ensureFresh("r");
     assert.equal(second.state, "refreshing", "a caller arriving mid-check joins it, already past the budget");
     assert.equal(reads, 1, "one tree check for both callers");

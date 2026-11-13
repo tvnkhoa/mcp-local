@@ -1101,13 +1101,15 @@ export function createFreshnessGate(opts: FreshnessGateOptions): FreshnessGate {
     const outcome = await Promise.race([check.promise, timeout]);
     if (timer) clearTimeout(timer);
     if (outcome === "timeout") {
+      // MCP-ISSUE-127: only a refresh the check starts serves a later query. A verdict that nothing changed is not kept
+      // (reusing it answered `fresh` to a query made right after an edit), so the reason must not promise that it is.
       return {
         note: {
           state: "refreshing",
           elapsedMs: now() - check.startedAt,
           reason:
             `checking the working tree against the index is still running after the ${String(opts.budgetMs)} ms query budget; ` +
-            "it continues in the background (and starts a refresh if one is needed) and a later query will use it. This answer comes from the previous index."
+            "it continues in the background and starts a refresh if one is needed, which a later query will use; if nothing changed, the next query checks again. This answer comes from the previous index."
         },
         changed: null
       };
