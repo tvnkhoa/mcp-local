@@ -11,7 +11,7 @@ import { pathToFileURL } from "node:url";
 import Database from "better-sqlite3";
 
 import { parseStatusPorcelainV2 } from "../services/git/gitHelpers.js";
-import { applyFreshness, changedUnderPrefixes, computeTreeKey, createFreshnessGate, clearRepairNeeded, DEFAULT_STALE_RUN_MS, LATE_CHECK_REUSE_MS, liveRunMarkers, markRepairNeeded, RUN_MARKER_STALE_MARGIN_MS, pathsChangedSince, readDirtyLedger, readRepairNeeded, recordDirtyLedger, removeRepoStateFiles, tryAcquireLock, UNREADABLE, watcherRunPlan, type RepoTreeState, type TreeKey } from "./freshness.js";
+import { applyFreshness, changedUnderPrefixes, computeTreeKey, createFreshnessGate, clearRepairNeeded, DEFAULT_STALE_RUN_MS, liveRunMarkers, markRepairNeeded, RUN_MARKER_STALE_MARGIN_MS, pathsChangedSince, readDirtyLedger, readRepairNeeded, recordDirtyLedger, removeRepoStateFiles, tryAcquireLock, UNREADABLE, watcherRunPlan, type RepoTreeState, type TreeKey } from "./freshness.js";
 import { GraphStore } from "../repositories/graphStore.js";
 import { createIndexRunner } from "../services/indexing/indexRunner.js";
 import { runIndexPipeline } from "../services/indexing/indexPipeline.js";
@@ -335,6 +335,8 @@ test("MCP-ISSUE-110: a tree check that outlives the budget answers refreshing, r
     assert.ok(Date.now() - t0 < 150, `the answer keeps to the budget, not the check (${String(Date.now() - t0)} ms)`);
     assert.equal(first.state, "refreshing");
     assert.match(first.reason ?? "", /checking the working tree/);
+    // MCP-ISSUE-127: the reason promises only what happens — a refresh the check starts, else a new check next query.
+    assert.match(first.reason ?? "", /if nothing changed, the next query checks again/);
     const second = await gate.ensureFresh("r");
     assert.equal(second.state, "refreshing", "a caller arriving mid-check joins it, already past the budget");
     assert.equal(reads, 1, "one tree check for both callers");
@@ -343,53 +345,6 @@ test("MCP-ISSUE-110: a tree check that outlives the budget answers refreshing, r
     assert.deepEqual(runs, ["incremental"], "the background check started the refresh it found was needed");
     assert.deepEqual(await gate.ensureFresh("r"), { state: "fresh" }, "and that run serves the next query");
     assert.equal(runs.length, 1);
-  } finally {
-    rmSync(lockDir, { recursive: true, force: true });
-  }
-});
-
-test("MCP-ISSUE-127: a fresh verdict from a check past the budget serves the callers of the next 1 s, and never hides an edit past that", async () => {
-  const lockDir = mkdtempSync(path.join(tmpdir(), "cim-fresh-"));
-  const runs: IndexMode[] = [];
-  let reads = 0;
-  // Every git read is slower than the budget (CI run 43190005628: git status + hashing past 300 ms on a loaded runner).
-  let tree: RepoTreeState = { head: "aaa111", dirty: [] };
-  const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
-  try {
-    const gate = createFreshnessGate({
-      enabled: true,
-      budgetMs: 30,
-      lockDir,
-      checkTtlMs: 0,
-      getRepoPath: () => lockDir,
-      getIndexedCommit: () => "aaa111",
-      readTree: () => {
-        reads += 1;
-        const snapshot = tree;
-        return new Promise<RepoTreeState>((resolve) => setTimeout(() => resolve(snapshot), 150));
-      },
-      run: async (_repoId, _repoPath, mode) => {
-        runs.push(mode);
-        return { runId: `run-${String(runs.length)}` } as IndexRunResult;
-      }
-    });
-    const first = await gate.ensureFresh("r");
-    assert.equal(first.state, "refreshing", "the check is past the budget");
-    assert.match(first.reason ?? "", /checking the working tree.*a later query will use it/);
-
-    await sleep(250); // the check finished (~150 ms) as fresh
-    assert.equal((await gate.ensureFresh("r")).state, "fresh", "the next query uses the late verdict, as the first answer promised");
-    assert.equal(reads, 1, "it did not start another check");
-
-    // Past the window the verdict is not reused: an edit made after it is seen by a new check.
-    tree = { head: "aaa111", dirty: ["src/edited.ts"] };
-    await sleep(LATE_CHECK_REUSE_MS + 100);
-    const afterWindow = await gate.ensureFresh("r");
-    assert.equal(reads, 2, "a new check");
-    assert.equal(afterWindow.state, "refreshing");
-    assert.notEqual(afterWindow.state, "fresh", "the edit is never answered fresh");
-    for (let i = 0; i < 40 && runs.length === 0; i++) await sleep(50);
-    assert.deepEqual(runs, ["dirty"], "the late check found the edit and started its refresh");
   } finally {
     rmSync(lockDir, { recursive: true, force: true });
   }

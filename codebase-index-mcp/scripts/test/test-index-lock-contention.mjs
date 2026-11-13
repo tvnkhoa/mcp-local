@@ -12,17 +12,19 @@
  *   (b) every read answers within the query budget + 2 s, and the server thread's longest block is bounded
  *       (LOCK_MAX_BLOCK_MS, default 1000: the runs execute in the worker since IX-2; reads on the repo being
  *       rewritten keep ~470 ms of their own work); both × 2.5 on CI (see CI_FACTOR);
- *   (c) after the runs, the dirty edit on `small` is in the index (the queued refresh ran, behind `big`'s run) and a
- *       read says so: not `refreshing`. Its trail of freshness states is printed (always on failure; LOCK_DIAG=1 always).
+ *   (c) after the runs, the dirty edit on `small` is in the index (the queued refresh ran, behind `big`'s run) and no
+ *       run is left: a read answers with the edit and is either not `refreshing`, or `refreshing` only because the
+ *       gate's tree check outlived the budget ("checking the working tree …") while index_status lists no job and no
+ *       refresh run. Its trail of freshness states is printed (always on failure; LOCK_DIAG=1 always).
  *
  * MCP-ISSUE-127 (CI run 43190005628, 5d30ac1): (c) failed after 120 polls (~50 s) with every run done. On that runner
- * the gate's tree check (`git status` + hashing) took longer than the 300 ms budget; the check's caller was answered
- * `refreshing` and the finished verdict was dropped, so every later read started a check that timed out again. Reproduce
- * a slow runner with LOCK_SLOW_GIT_MS=600 (both servers' `git status` answers 600 ms late):
+ * the gate's tree check (`git status` + hashing) took longer than the 300 ms budget, so every read answered `refreshing`
+ * "checking the working tree", though the index was current and nothing ran: a verdict that nothing changed is not kept
+ * (keeping it 1 s was tried and rejected — it answered `fresh` to a query made right after an edit, test:query-refresh
+ * §6). (c) used to demand "not refreshing", which a slow runner never gives. Reproduce with LOCK_SLOW_GIT_MS=600 (both
+ * servers' `git status` answers 600 ms late):
  *   LOCK_SLOW_GIT_MS=600 npm run test:index-lock-contention
- * At 5d30ac1 (c) failed in 2 of 5 such runs (50.4 s, 51.6 s: `refreshing` "checking the working tree" to the end) and
- * the others turned fresh only after 3-40 s (delays 400/600 ms); with the fix every run turns fresh < 1 s after the first late check.
- * The gate's own unit test (freshness.test.ts, MCP-ISSUE-127) pins the reuse deterministically.
+ * At 5d30ac1 the old (c) failed in 2 of 5 such runs (50.4 s, 51.6 s) and the others turned fresh only after 3-40 s.
  */
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
@@ -234,7 +236,12 @@ try {
     const reason = f?.reason?.slice(0, 240);
     if (cTrail.at(-1)?.step.split(":")[1].split("(")[0] !== step.split(":")[1].split("(")[0] || cTrail.at(-1)?.reason?.slice(0, 40) !== reason?.slice(0, 40)) cTrail.push({ step, reason });
     if (r.text.includes("lockProbeEdit") && f?.state !== "refreshing") found = r;
-    else await sleep(250);
+    else if (r.text.includes("lockProbeEdit") && /^checking the working tree/.test(f?.reason ?? "")) {
+      // MCP-ISSUE-127: the only caveat is the tree check past the budget, not a run. Nothing may be in flight.
+      const st = (await call(A.client, "index_status", {})).body;
+      if (st && Array.isArray(st.jobs) && st.jobs.length === 0 && Array.isArray(st.refreshRuns) && st.refreshRuns.length === 0) found = r;
+      else await sleep(250);
+    } else await sleep(250);
   }
   console.log(`  info  (c) ${Date.now() - cStart} ms; state changes: ${cTrail.map((s) => s.step).join(" ")}`);
   if (!found || process.env.LOCK_DIAG) {
